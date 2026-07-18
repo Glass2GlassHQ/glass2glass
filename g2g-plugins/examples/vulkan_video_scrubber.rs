@@ -42,7 +42,7 @@ use g2g_core::memory::OwnedWgpuTexture;
 use g2g_core::runtime::block_on;
 use g2g_core::{
     AsyncElement, Caps, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket,
-    PushOutcome, RawVideoFormat, Rate,
+    PushOutcome, Rate, RawVideoFormat,
 };
 use g2g_plugins::gpu::{GpuContext, WgpuTextureKeepAlive};
 use g2g_plugins::vulkanvideo::{open_h264_decode_device, VulkanVideoError, VulkanVideoPlayer};
@@ -181,7 +181,12 @@ impl App {
 
     /// Scrub to the frame under a window-relative x (0..width) fraction.
     fn scrub_to_x(&mut self, x: f64) {
-        let w = self.window.as_ref().map(|w| w.inner_size().width).unwrap_or(self.width).max(1);
+        let w = self
+            .window
+            .as_ref()
+            .map(|w| w.inner_size().width)
+            .unwrap_or(self.width)
+            .max(1);
         let frac = (x / w as f64).clamp(0.0, 1.0);
         let i = (frac * (self.frames as f64 - 1.0)).round() as usize;
         self.seek_to(i);
@@ -235,8 +240,12 @@ impl App {
             FrameTiming::default(),
             cur as u64,
         );
-        block_on(present.sink.process(PipelinePacket::DataFrame(frame), &mut NullSink))
-            .expect("present");
+        block_on(
+            present
+                .sink
+                .process(PipelinePacket::DataFrame(frame), &mut NullSink),
+        )
+        .expect("present");
 
         if self.playing && self.last_advance.elapsed() >= FRAME_INTERVAL {
             self.cur = (self.cur + 1) % self.frames;
@@ -268,7 +277,9 @@ impl App {
         if self.present.is_some() || width == 0 || height == 0 {
             return;
         }
-        let Some(window) = self.window.clone() else { return };
+        let Some(window) = self.window.clone() else {
+            return;
+        };
         let (display_ctx, surface, config) = open_display_gpu(&window, width, height)
             .expect("no GPU on this host can present to the window");
         let decode_gpu = self.decode_ctx.adapter.get_info();
@@ -281,15 +292,27 @@ impl App {
             drop(display_ctx);
             match configured_surface(&self.decode_ctx, &window, width, height) {
                 Some((surface, config)) => {
-                    println!("present: zero-copy on the decode GPU {} (no readback)", decode_gpu.name);
-                    Present { sink: self.make_sink(self.decode_ctx.clone(), surface, config), mode: Mode::ZeroCopy }
+                    println!(
+                        "present: zero-copy on the decode GPU {} (no readback)",
+                        decode_gpu.name
+                    );
+                    Present {
+                        sink: self.make_sink(self.decode_ctx.clone(), surface, config),
+                        mode: Mode::ZeroCopy,
+                    }
                 }
                 None => {
                     let (display_ctx, surface, config) = open_display_gpu(&window, width, height)
                         .expect("no GPU on this host can present to the window");
-                    println!("present: cross-GPU fallback on {} (one readback per frame)", display_ctx.adapter.get_info().name);
+                    println!(
+                        "present: cross-GPU fallback on {} (one readback per frame)",
+                        display_ctx.adapter.get_info().name
+                    );
                     let sink = self.make_sink(display_ctx.clone(), surface, config);
-                    Present { sink, mode: Mode::CrossGpu(display_ctx) }
+                    Present {
+                        sink,
+                        mode: Mode::CrossGpu(display_ctx),
+                    }
                 }
             }
         } else {
@@ -298,7 +321,10 @@ impl App {
                 decode_gpu.name, display_gpu.name
             );
             let sink = self.make_sink(display_ctx.clone(), surface, config);
-            Present { sink, mode: Mode::CrossGpu(display_ctx) }
+            Present {
+                sink,
+                mode: Mode::CrossGpu(display_ctx),
+            }
         };
         self.present = Some(present);
         self.shown = None; // rebuild the shown texture on the sink's device
@@ -345,7 +371,12 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(new) => self.ensure_present(new.width, new.height),
             WindowEvent::KeyboardInput {
-                event: KeyEvent { logical_key, state: ElementState::Pressed, .. },
+                event:
+                    KeyEvent {
+                        logical_key,
+                        state: ElementState::Pressed,
+                        ..
+                    },
                 ..
             } => {
                 let last = self.frames - 1;
@@ -368,7 +399,11 @@ impl ApplicationHandler for App {
                     w.request_redraw();
                 }
             }
-            WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
+            WindowEvent::MouseInput {
+                state,
+                button: MouseButton::Left,
+                ..
+            } => {
                 self.dragging = state == ElementState::Pressed;
                 if let Some(w) = self.window.as_ref() {
                     w.request_redraw();
@@ -422,7 +457,11 @@ fn open_display_gpu(
     window: &Arc<Window>,
     width: u32,
     height: u32,
-) -> Option<(GpuContext, wgpu::Surface<'static>, wgpu::SurfaceConfiguration)> {
+) -> Option<(
+    GpuContext,
+    wgpu::Surface<'static>,
+    wgpu::SurfaceConfiguration,
+)> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::VULKAN,
         flags: wgpu::InstanceFlags::default(),
@@ -471,7 +510,12 @@ fn surface_config(
     if caps.formats.is_empty() {
         return None;
     }
-    let format = caps.formats.iter().copied().find(|f| !f.is_srgb()).unwrap_or(caps.formats[0]);
+    let format = caps
+        .formats
+        .iter()
+        .copied()
+        .find(|f| !f.is_srgb())
+        .unwrap_or(caps.formats[0]);
     Some(wgpu::SurfaceConfiguration {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
         format,
@@ -495,7 +539,9 @@ fn readback_rgba(ctx: &GpuContext, tex: &wgpu::Texture, width: u32, height: u32)
         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
-    let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+    let mut enc = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
     enc.copy_texture_to_buffer(
         wgpu::TexelCopyTextureInfo {
             texture: tex,
@@ -511,7 +557,11 @@ fn readback_rgba(ctx: &GpuContext, tex: &wgpu::Texture, width: u32, height: u32)
                 rows_per_image: Some(height),
             },
         },
-        wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
     );
     ctx.queue.submit([enc.finish()]);
 
@@ -521,7 +571,10 @@ fn readback_rgba(ctx: &GpuContext, tex: &wgpu::Texture, width: u32, height: u32)
         let _ = tx.send(r);
     });
     ctx.device
-        .poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
+        .poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        })
         .expect("poll readback");
     rx.recv().expect("readback channel").expect("map readback");
 
@@ -540,7 +593,11 @@ fn readback_rgba(ctx: &GpuContext, tex: &wgpu::Texture, width: u32, height: u32)
 fn upload_rgba(ctx: &GpuContext, width: u32, height: u32, data: &[u8]) -> wgpu::Texture {
     let tex = ctx.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("display-gpu-frame"),
-        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -561,7 +618,11 @@ fn upload_rgba(ctx: &GpuContext, width: u32, height: u32, data: &[u8]) -> wgpu::
             bytes_per_row: Some(width * 4),
             rows_per_image: Some(height),
         },
-        wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
     );
     tex
 }

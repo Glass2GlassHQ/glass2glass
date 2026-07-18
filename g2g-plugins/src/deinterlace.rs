@@ -81,7 +81,12 @@ impl Deinterlace {
     }
 
     fn accept_input(&self, caps: &Caps) -> Result<(RawVideoFormat, u32, u32, Rate), G2gError> {
-        let Caps::RawVideo { format, width: Dim::Fixed(w), height: Dim::Fixed(h), framerate } = caps
+        let Caps::RawVideo {
+            format,
+            width: Dim::Fixed(w),
+            height: Dim::Fixed(h),
+            framerate,
+        } = caps
         else {
             return Err(G2gError::CapsMismatch);
         };
@@ -115,7 +120,9 @@ impl AsyncElement for Deinterlace {
 
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
-            Caps::RawVideo { format, .. } if FORMATS.contains(format) => CapsSet::one(input.clone()),
+            Caps::RawVideo { format, .. } if FORMATS.contains(format) => {
+                CapsSet::one(input.clone())
+            }
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
     }
@@ -159,7 +166,8 @@ impl AsyncElement for Deinterlace {
                         framerate: rate,
                     };
                     if self.last_caps.as_ref() != Some(&new_caps) {
-                        out.push(PipelinePacket::CapsChanged(new_caps.clone())).await?;
+                        out.push(PipelinePacket::CapsChanged(new_caps.clone()))
+                            .await?;
                         self.last_caps = Some(new_caps);
                     }
                     let out_frame = Frame {
@@ -195,7 +203,12 @@ impl AsyncElement for Deinterlace {
     }
 
     fn metadata(&self) -> ElementMetadata {
-        ElementMetadata::new("Deinterlace", "Filter/Effect/Video/Deinterlace", "Deinterlaces video", "g2g")
+        ElementMetadata::new(
+            "Deinterlace",
+            "Filter/Effect/Video/Deinterlace",
+            "Deinterlaces video",
+            "g2g",
+        )
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
@@ -217,8 +230,11 @@ impl AsyncElement for Deinterlace {
     }
 }
 
-static DEINTERLACE_PROPS: &[PropertySpec] =
-    &[PropertySpec::new("method", PropKind::Str, "deinterlace method: linear | blend")];
+static DEINTERLACE_PROPS: &[PropertySpec] = &[PropertySpec::new(
+    "method",
+    PropKind::Str,
+    "deinterlace method: linear | blend",
+)];
 
 impl PadTemplates for Deinterlace {
     fn pad_templates() -> Vec<PadTemplate> {
@@ -314,10 +330,15 @@ mod tests {
     #[test]
     fn method_property_round_trips() {
         let mut d = Deinterlace::new();
-        d.set_property("method", PropValue::Str("blend".into())).unwrap();
-        assert_eq!(d.get_property("method"), Some(PropValue::Str("blend".into())));
+        d.set_property("method", PropValue::Str("blend".into()))
+            .unwrap();
         assert_eq!(
-            d.set_property("method", PropValue::Str("nope".into())).unwrap_err(),
+            d.get_property("method"),
+            Some(PropValue::Str("blend".into()))
+        );
+        assert_eq!(
+            d.set_property("method", PropValue::Str("nope".into()))
+                .unwrap_err(),
             PropError::Value
         );
     }

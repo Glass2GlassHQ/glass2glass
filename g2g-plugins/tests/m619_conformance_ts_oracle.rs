@@ -16,9 +16,7 @@ use std::process::Command;
 use g2g_core::conformance::{ConformanceDimension, Evidence, MaturityLevel};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
-use g2g_core::{
-    AsyncElement, Caps, Dim, G2gError, OutputSink, PushOutcome, Rate, VideoCodec,
-};
+use g2g_core::{AsyncElement, Caps, Dim, G2gError, OutputSink, PushOutcome, Rate, VideoCodec};
 use g2g_plugins::conformance::persist;
 use g2g_plugins::tsmux::TsMux;
 
@@ -45,7 +43,11 @@ impl OutputSink for CaptureSink {
 fn frame(data: Vec<u8>, pts_ns: u64) -> PipelinePacket {
     PipelinePacket::DataFrame(Frame::new(
         MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-        FrameTiming { pts_ns, dts_ns: pts_ns, ..FrameTiming::default() },
+        FrameTiming {
+            pts_ns,
+            dts_ns: pts_ns,
+            ..FrameTiming::default()
+        },
         0,
     ))
 }
@@ -72,9 +74,21 @@ async fn mux_ts() -> Vec<u8> {
     let mut mux = TsMux::new();
     mux.configure_pipeline(&caps).unwrap();
     let mut sink = CaptureSink::default();
-    mux.process(frame(annexb(&[&sps, &pps, &idr]), 0), &mut sink).await.unwrap();
-    mux.process(frame(annexb(&[&[0x41u8, 0x9a, 0x00]]), 33_000_000), &mut sink).await.unwrap();
-    mux.process(frame(annexb(&[&[0x41u8, 0x9a, 0x01]]), 66_000_000), &mut sink).await.unwrap();
+    mux.process(frame(annexb(&[&sps, &pps, &idr]), 0), &mut sink)
+        .await
+        .unwrap();
+    mux.process(
+        frame(annexb(&[&[0x41u8, 0x9a, 0x00]]), 33_000_000),
+        &mut sink,
+    )
+    .await
+    .unwrap();
+    mux.process(
+        frame(annexb(&[&[0x41u8, 0x9a, 0x01]]), 66_000_000),
+        &mut sink,
+    )
+    .await
+    .unwrap();
     mux.process(PipelinePacket::Eos, &mut sink).await.unwrap();
     sink.bytes
 }
@@ -108,13 +122,26 @@ async fn ffmpeg_validates_the_native_ts_muxer_and_records_interop_evidence() {
     let ts = std::env::temp_dir().join("g2g-conformance-m619.ts");
     std::fs::write(&ts, &bytes).expect("write ts");
     let out = Command::new("ffprobe")
-        .args(["-v", "error", "-show_entries", "stream=codec_name", "-of", "default=nw=1:nk=1"])
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=codec_name",
+            "-of",
+            "default=nw=1:nk=1",
+        ])
         .arg(&ts)
         .output()
         .expect("run ffprobe");
     let codecs = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success(), "ffprobe accepted the native TS: {codecs}");
-    assert!(codecs.contains("h264"), "ffprobe demuxed the H.264 elementary stream: {codecs}");
+    assert!(
+        out.status.success(),
+        "ffprobe accepted the native TS: {codecs}"
+    );
+    assert!(
+        codecs.contains("h264"),
+        "ffprobe demuxed the H.264 elementary stream: {codecs}"
+    );
 
     persist::record_evidence(
         "mpegtsmux",

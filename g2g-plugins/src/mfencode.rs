@@ -38,26 +38,27 @@ use core::pin::Pin;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
+use windows::core::Interface;
 use windows::Win32::Media::MediaFoundation::{
-    eAVEncH264VProfile_Main, IMFActivate, IMFMediaEventGenerator, IMFSample, IMFTransform,
-    MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample, MFShutdown, MFStartup, MFTEnumEx,
-    CLSID_MSH264EncoderMFT, MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS, METransformDrainComplete,
-    METransformHaveOutput, METransformNeedInput, MFMediaType_Video, MFVideoFormat_H264,
-    MFVideoFormat_HEVC, MFVideoFormat_NV12, MFVideoInterlace_Progressive, MFSTARTUP_FULL,
+    eAVEncH264VProfile_Main, CLSID_MSH264EncoderMFT, IMFActivate, IMFMediaEventGenerator,
+    IMFSample, IMFTransform, METransformDrainComplete, METransformHaveOutput, METransformNeedInput,
+    MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Video, MFShutdown,
+    MFStartup, MFTEnumEx, MFVideoFormat_H264, MFVideoFormat_HEVC, MFVideoFormat_NV12,
+    MFVideoInterlace_Progressive, MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS, MFSTARTUP_FULL,
     MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_ASYNCMFT, MFT_ENUM_FLAG_HARDWARE,
     MFT_ENUM_FLAG_SORTANDFILTER, MFT_ENUM_FLAG_SYNCMFT, MFT_MESSAGE_COMMAND_DRAIN,
-    MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_END_OF_STREAM,
-    MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES,
-    MFT_REGISTER_TYPE_INFO, MF_EVENT_FLAG_NO_WAIT, MF_E_NOTACCEPTING, MF_E_NO_EVENTS_AVAILABLE,
-    MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE, MF_LOW_LATENCY, MF_MT_AVG_BITRATE,
-    MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_MPEG2_PROFILE,
-    MF_MT_SUBTYPE, MF_TRANSFORM_ASYNC, MF_TRANSFORM_ASYNC_UNLOCK, MF_VERSION,
+    MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
+    MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_OUTPUT_DATA_BUFFER,
+    MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO, MF_EVENT_FLAG_NO_WAIT,
+    MF_E_NOTACCEPTING, MF_E_NO_EVENTS_AVAILABLE, MF_E_TRANSFORM_NEED_MORE_INPUT,
+    MF_E_TRANSFORM_STREAM_CHANGE, MF_LOW_LATENCY, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE,
+    MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_MPEG2_PROFILE, MF_MT_SUBTYPE,
+    MF_TRANSFORM_ASYNC, MF_TRANSFORM_ASYNC_UNLOCK, MF_VERSION,
 };
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_INPROC_SERVER,
     COINIT_MULTITHREADED,
 };
-use windows::core::Interface;
 
 use alloc::collections::VecDeque;
 
@@ -302,7 +303,12 @@ impl MfEncode {
     /// Drain on end-of-stream (or before a geometry rebuild): send the MFT a
     /// DRAIN command so it flushes buffered pictures, then collect them.
     fn drain_eos(&mut self, encoded: &mut Vec<EncodedChunk>) -> Result<(), G2gError> {
-        if self.state.as_ref().ok_or(G2gError::NotConfigured)?.async_mode {
+        if self
+            .state
+            .as_ref()
+            .ok_or(G2gError::NotConfigured)?
+            .async_mode
+        {
             return self.drain_eos_async(encoded);
         }
         {
@@ -391,9 +397,7 @@ impl MfEncode {
             // SAFETY: event query on the owning thread.
             match unsafe { gen.GetEvent(flags) } {
                 Ok(ev) => ev,
-                Err(e) if e.code() == MF_E_NO_EVENTS_AVAILABLE => {
-                    return Ok(PumpResult::NoEvents)
-                }
+                Err(e) if e.code() == MF_E_NO_EVENTS_AVAILABLE => return Ok(PumpResult::NoEvents),
                 Err(e) => return Err(mf_err(e)),
             }
         };
@@ -493,7 +497,8 @@ impl MfEncode {
 }
 
 impl AsyncElement for MfEncode {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -515,7 +520,9 @@ impl AsyncElement for MfEncode {
     /// the solver rejects incompatible upstream at negotiation time.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         let codec = self.codec;
-        CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| derive_output_caps(codec, input)))
+        CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| {
+            derive_output_caps(codec, input)
+        }))
     }
 
     /// M12: record the downstream consumer's allocation proposal. The encoder
@@ -661,7 +668,8 @@ impl AsyncElement for MfEncode {
                             "mfencode encode-time output {new_caps:?} inconsistent with derive_output_caps({input:?}) = {expected:?}"
                         );
                     }
-                    out.push(PipelinePacket::CapsChanged(new_caps.clone())).await?;
+                    out.push(PipelinePacket::CapsChanged(new_caps.clone()))
+                        .await?;
                     self.last_caps = Some(new_caps);
                 }
                 let frame = Frame {
@@ -748,10 +756,9 @@ fn create_encoder_transform(
     match codec {
         VideoCodec::H264 if !prefer_hardware => {
             // SAFETY: COM object creation on the owning thread.
-            let t = unsafe {
-                CoCreateInstance(&CLSID_MSH264EncoderMFT, None, CLSCTX_INPROC_SERVER)
-            }
-            .map_err(mf_err)?;
+            let t =
+                unsafe { CoCreateInstance(&CLSID_MSH264EncoderMFT, None, CLSCTX_INPROC_SERVER) }
+                    .map_err(mf_err)?;
             Ok((t, false))
         }
         VideoCodec::H264 => enumerate_encoder(MFVideoFormat_H264),
@@ -1208,9 +1215,18 @@ mod tests {
 
     #[test]
     fn encoder_subtype_maps_supported_codecs() {
-        assert_eq!(encoder_subtype(VideoCodec::H264).unwrap(), MFVideoFormat_H264);
-        assert_eq!(encoder_subtype(VideoCodec::H265).unwrap(), MFVideoFormat_HEVC);
-        assert_eq!(encoder_subtype(VideoCodec::Vp9), Err(G2gError::CapsMismatch));
+        assert_eq!(
+            encoder_subtype(VideoCodec::H264).unwrap(),
+            MFVideoFormat_H264
+        );
+        assert_eq!(
+            encoder_subtype(VideoCodec::H265).unwrap(),
+            MFVideoFormat_HEVC
+        );
+        assert_eq!(
+            encoder_subtype(VideoCodec::Vp9),
+            Err(G2gError::CapsMismatch)
+        );
     }
 
     #[test]

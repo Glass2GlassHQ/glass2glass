@@ -92,7 +92,9 @@ pub struct SourceChain<S, T>(pub S, pub T);
 impl<S: StaticSource, T: StaticTransform> StaticSource for SourceChain<S, T> {
     async fn next(&mut self) -> Result<Option<Frame>, G2gError> {
         loop {
-            let Some(frame) = self.0.next().await? else { return Ok(None) };
+            let Some(frame) = self.0.next().await? else {
+                return Ok(None);
+            };
             if let Some(out) = self.1.process(frame).await? {
                 return Ok(Some(out));
             }
@@ -170,8 +172,12 @@ where
     K: StaticSink,
 {
     loop {
-        let Some(a) = src_a.next().await? else { return Ok(()) };
-        let Some(b) = src_b.next().await? else { return Ok(()) };
+        let Some(a) = src_a.next().await? else {
+            return Ok(());
+        };
+        let Some(b) = src_b.next().await? else {
+            return Ok(());
+        };
         if let Some(out) = fanin.process2(a, b).await? {
             sink.consume(out).await?;
         }
@@ -288,8 +294,12 @@ impl<F: StaticFanIn2> StaticFanIn2 for &mut F {
 /// pipeline state machine is KBs; the footprint budgets count on the elision).
 #[inline]
 pub fn drive_ready<F: Future>(fut: F) -> Option<F::Output> {
-    const VTABLE: RawWakerVTable =
-        RawWakerVTable::new(|_| RawWaker::new(core::ptr::null(), &VTABLE), |_| {}, |_| {}, |_| {});
+    const VTABLE: RawWakerVTable = RawWakerVTable::new(
+        |_| RawWaker::new(core::ptr::null(), &VTABLE),
+        |_| {},
+        |_| {},
+        |_| {},
+    );
     // SAFETY: the vtable's clone returns an equivalent no-op waker and wake /
     // drop are no-ops, satisfying the Waker contract.
     let waker = unsafe { Waker::from_raw(RawWaker::new(core::ptr::null(), &VTABLE)) };
@@ -313,8 +323,12 @@ mod tests {
     // or any allocation (the static-chain futures never yield Pending here). Keeps
     // the test itself heap-free, matching the model under test.
     fn noop_waker() -> Waker {
-        const VTABLE: RawWakerVTable =
-            RawWakerVTable::new(|_| RawWaker::new(core::ptr::null(), &VTABLE), |_| {}, |_| {}, |_| {});
+        const VTABLE: RawWakerVTable = RawWakerVTable::new(
+            |_| RawWaker::new(core::ptr::null(), &VTABLE),
+            |_| {},
+            |_| {},
+            |_| {},
+        );
         // SAFETY: the vtable's clone returns an equivalent no-op RawWaker and the
         // wake/drop arms are no-ops, so the waker upholds the Waker contract.
         unsafe { Waker::from_raw(RawWaker::new(core::ptr::null(), &VTABLE)) }
@@ -360,7 +374,10 @@ mod tests {
             };
             Ok(Some(Frame::new(
                 MemoryDomain::System(slice),
-                FrameTiming { pts_ns: i as u64, ..FrameTiming::default() },
+                FrameTiming {
+                    pts_ns: i as u64,
+                    ..FrameTiming::default()
+                },
                 i as u64,
             )))
         }
@@ -402,7 +419,11 @@ mod tests {
         // Move sink in and out via a wrapper that borrows.
         drive(run_source_transform_sink(src, KeepEven, &mut sink)).unwrap();
         // Frames 0 and 2 survive KeepEven (seq 0,2); their bytes are SAMPLES[0], [2].
-        assert_eq!(&sink.seen[..sink.n], &[10, 30], "even-sequence frames reached the sink");
+        assert_eq!(
+            &sink.seen[..sink.n],
+            &[10, 30],
+            "even-sequence frames reached the sink"
+        );
     }
 
     #[test]
@@ -421,28 +442,50 @@ mod tests {
             &mut sink,
         ))
         .unwrap();
-        assert_eq!(&sink.seen[..sink.n], &[10, 30], "chained transforms preserve behavior");
+        assert_eq!(
+            &sink.seen[..sink.n],
+            &[10, 30],
+            "chained transforms preserve behavior"
+        );
     }
 
     #[test]
     fn source_sink_visits_every_frame() {
         let mut sink = CollectSink { seen: [0; 8], n: 0 };
         drive(run_source_sink(ByteSource::over(&SAMPLES), &mut sink)).unwrap();
-        assert_eq!(&sink.seen[..sink.n], &[10, 20, 30, 40], "no transform: every frame arrives");
+        assert_eq!(
+            &sink.seen[..sink.n],
+            &[10, 20, 30, 40],
+            "no transform: every frame arrives"
+        );
     }
 
     #[test]
     fn source_chain_and_sink_chain_fuse_transforms() {
         // The same KeepEven behavior, fused on the source side...
         let mut sink = CollectSink { seen: [0; 8], n: 0 };
-        drive(run_source_sink(SourceChain(ByteSource::over(&SAMPLES), KeepEven), &mut sink))
-            .unwrap();
-        assert_eq!(&sink.seen[..sink.n], &[10, 30], "SourceChain skips dropped frames");
+        drive(run_source_sink(
+            SourceChain(ByteSource::over(&SAMPLES), KeepEven),
+            &mut sink,
+        ))
+        .unwrap();
+        assert_eq!(
+            &sink.seen[..sink.n],
+            &[10, 30],
+            "SourceChain skips dropped frames"
+        );
         // ...and on the sink side, must agree with the plain runner.
         let mut sink = CollectSink { seen: [0; 8], n: 0 };
-        drive(run_source_sink(ByteSource::over(&SAMPLES), SinkChain(KeepEven, &mut sink)))
-            .unwrap();
-        assert_eq!(&sink.seen[..sink.n], &[10, 30], "SinkChain drops before the sink");
+        drive(run_source_sink(
+            ByteSource::over(&SAMPLES),
+            SinkChain(KeepEven, &mut sink),
+        ))
+        .unwrap();
+        assert_eq!(
+            &sink.seen[..sink.n],
+            &[10, 30],
+            "SinkChain drops before the sink"
+        );
     }
 
     /// Emits whichever frame of the pair has the larger first payload byte,
@@ -456,7 +499,11 @@ mod tests {
             fn first_byte(f: &Frame) -> u8 {
                 f.domain.as_system_slice().map_or(0, |s| s[0])
             }
-            Ok(Some(if first_byte(&b) > first_byte(&a) { b } else { a }))
+            Ok(Some(if first_byte(&b) > first_byte(&a) {
+                b
+            } else {
+                a
+            }))
         }
     }
 
@@ -474,7 +521,11 @@ mod tests {
             }
         }
         assert_eq!(steps, 4, "one Advanced per source frame");
-        assert_eq!(&sink.seen[..sink.n], &[10, 20, 30, 40], "every frame delivered, in order");
+        assert_eq!(
+            &sink.seen[..sink.n],
+            &[10, 20, 30, 40],
+            "every frame delivered, in order"
+        );
     }
 
     #[test]
@@ -488,7 +539,11 @@ mod tests {
             let _ = step_source_sink(&mut src, &mut tail).unwrap();
         }
         // Frames 0 and 2 survive KeepEven across the four steps.
-        assert_eq!(&sink.seen[..sink.n], &[10, 30], "fused transform + persistent sink state");
+        assert_eq!(
+            &sink.seen[..sink.n],
+            &[10, 30],
+            "fused transform + persistent sink state"
+        );
     }
 
     #[test]
@@ -503,6 +558,10 @@ mod tests {
         .unwrap();
         // Pairs: (10,15) -> 15 (b wins); (20,5) -> dropped (odd seq);
         // (30,25) -> 30 (a wins); then B ends, so A's 40 is never paired.
-        assert_eq!(&sink.seen[..sink.n], &[15, 30], "lockstep pairing, drop path, EOS at min");
+        assert_eq!(
+            &sink.seen[..sink.n],
+            &[15, 30],
+            "lockstep pairing, drop path, EOS at min"
+        );
     }
 }

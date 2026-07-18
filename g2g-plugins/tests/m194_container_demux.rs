@@ -47,7 +47,11 @@ fn demuxers_route_containers_to_an_elementary_stream() {
         let chain = reg
             .autoplug_names(&container(encoding), &is_compressed_video, 4)
             .unwrap_or_else(|| panic!("{demux} should route {encoding:?} to a compressed stream"));
-        assert_eq!(chain, Vec::from([demux]), "shortest route from {encoding:?}");
+        assert_eq!(
+            chain,
+            Vec::from([demux]),
+            "shortest route from {encoding:?}"
+        );
     }
 }
 
@@ -69,13 +73,17 @@ fn container_without_a_decoder_does_not_reach_raw() {
     // container fails loud rather than silently dropping it.
     let reg = default_registry();
     assert!(
-        reg.autoplug_names(&container(ByteStreamEncoding::MpegTs), &is_raw_video, 6).is_none(),
+        reg.autoplug_names(&container(ByteStreamEncoding::MpegTs), &is_raw_video, 6)
+            .is_none(),
         "MPEG-TS -> raw needs a decoder feature",
     );
     // The decodebin macro surfaces the same as a parse error (filesrc declares
     // MPEG-TS by default).
     let line = "filesrc ! decodebin ! fakesink";
-    assert!(parse_launch(&reg, line).is_err(), "{line:?} must fail without a decoder");
+    assert!(
+        parse_launch(&reg, line).is_err(),
+        "{line:?} must fail without a decoder"
+    );
 }
 
 /// Re-uses the same compressed-video target on a synthetic registry to prove the
@@ -107,7 +115,10 @@ fn demuxer_then_decoder_is_a_two_hop_chain() {
     };
     reg.register(ElementFactory::new(
         "stubdec",
-        Vec::from([PadTemplate::sink(CapsSet::one(h264)), PadTemplate::source(CapsSet::one(raw))]),
+        Vec::from([
+            PadTemplate::sink(CapsSet::one(h264)),
+            PadTemplate::source(CapsSet::one(raw)),
+        ]),
         |_| Box::new(IdentityTransform::new()),
     ));
 

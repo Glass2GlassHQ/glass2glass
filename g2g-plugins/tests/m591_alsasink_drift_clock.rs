@@ -25,8 +25,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::block_on;
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, ClockPriority, FrameTiming, G2gError, MemoryDomain, OutputSink,
-    PipelineClock, PipelinePacket, PushOutcome,
+    AsyncElement, AudioFormat, Caps, ClockPriority, FrameTiming, G2gError, MemoryDomain,
+    OutputSink, PipelineClock, PipelinePacket, PushOutcome,
 };
 use g2g_plugins::alsasink::AlsaSink;
 
@@ -65,7 +65,10 @@ fn tone(frames: usize, phase0: usize) -> Vec<u8> {
 fn pcm_frame(bytes: Vec<u8>, seq: u64) -> Frame {
     Frame {
         domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming { pts_ns: seq, ..Default::default() },
+        timing: FrameTiming {
+            pts_ns: seq,
+            ..Default::default()
+        },
         sequence: seq,
         meta: Default::default(),
     }
@@ -76,11 +79,17 @@ fn alsasink_disciplines_its_clock_from_the_device() {
     let mut sink = AlsaSink::new();
 
     // The offered clock: an AudioProvider so audio becomes the sync master.
-    let cand = sink.provide_clock().expect("alsasink offers a clock by default");
+    let cand = sink
+        .provide_clock()
+        .expect("alsasink offers a clock by default");
     assert_eq!(cand.priority, ClockPriority::AudioProvider);
     let clock = sink.clock();
 
-    let caps = Caps::Audio { format: AudioFormat::PcmS16Le, channels: 2, sample_rate: RATE };
+    let caps = Caps::Audio {
+        format: AudioFormat::PcmS16Le,
+        channels: 2,
+        sample_rate: RATE,
+    };
     match sink.configure_pipeline(&caps) {
         Ok(_) => {}
         Err(G2gError::Hardware(_)) => {
@@ -101,8 +110,11 @@ fn alsasink_disciplines_its_clock_from_the_device() {
     let mut null = NullSink;
     while done < total {
         let n = CHUNK_FRAMES.min(total - done);
-        block_on(sink.process(PipelinePacket::DataFrame(pcm_frame(tone(n, done), seq)), &mut null))
-            .expect("process");
+        block_on(sink.process(
+            PipelinePacket::DataFrame(pcm_frame(tone(n, done), seq)),
+            &mut null,
+        ))
+        .expect("process");
         done += n;
         seq += 1;
     }
@@ -113,7 +125,10 @@ fn alsasink_disciplines_its_clock_from_the_device() {
     // The worker must have fed the clock a real window of observations, not
     // left it at the pass-through fallback.
     let obs = clock.observations();
-    assert!(obs >= 2, "clock got only {obs} observations; discipline did not run");
+    assert!(
+        obs >= 2,
+        "clock got only {obs} observations; discipline did not run"
+    );
 
     // Both the reference (monotonic) and the master (DAC playout) are real time,
     // so the estimated rate must be close to 1.0 (a small ppm drift, not garbage).

@@ -122,9 +122,11 @@ async fn create_interop_device_inner(full: bool) -> Result<InteropDevice, G2gErr
             features,
             &limits,
             &memory_hints,
-            Some(Box::new(|args: wgpu_hal::vulkan::CreateDeviceCallbackArgs| {
-                args.extensions.push(ash::khr::external_memory_fd::NAME);
-            })),
+            Some(Box::new(
+                |args: wgpu_hal::vulkan::CreateDeviceCallbackArgs| {
+                    args.extensions.push(ash::khr::external_memory_fd::NAME);
+                },
+            )),
         )
     }
     .map_err(gpu_err)?;
@@ -143,7 +145,12 @@ async fn create_interop_device_inner(full: bool) -> Result<InteropDevice, G2gErr
     }
     .map_err(gpu_err)?;
 
-    Ok(InteropDevice { device, queue, adapter, instance })
+    Ok(InteropDevice {
+        device,
+        queue,
+        adapter,
+        instance,
+    })
 }
 
 /// The packed-NV12 texture geometry M217 samples: one R8Uint plane holding the
@@ -230,9 +237,11 @@ pub unsafe fn export_nv12_image(
 
         let reqs = raw.get_image_memory_requirements(image);
         let props = instance.get_physical_device_memory_properties(phys);
-        let Some(mem_type) =
-            find_memory_type(&props, reqs.memory_type_bits, vk::MemoryPropertyFlags::DEVICE_LOCAL)
-        else {
+        let Some(mem_type) = find_memory_type(
+            &props,
+            reqs.memory_type_bits,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+        ) else {
             raw.destroy_image(image, None);
             return Err(G2gError::Hardware(HardwareError::Other));
         };
@@ -274,7 +283,14 @@ pub unsafe fn export_nv12_image(
             }
         };
 
-        Ok(SharedNv12Image { image, memory, fd, size: reqs.size, width, height })
+        Ok(SharedNv12Image {
+            image,
+            memory,
+            fd,
+            size: reqs.size,
+            width,
+            height,
+        })
     }
 }
 
@@ -389,8 +405,11 @@ pub unsafe fn cuda_roundtrip_check(shared: &SharedNv12Image) -> Result<bool, G2g
         let mut mipmap: c::CuMipmappedArray = core::ptr::null_mut();
         let mut array: c::CuArray = core::ptr::null_mut();
         let mut ok = false;
-        let mut result =
-            check(c::cuExternalMemoryGetMappedMipmappedArray(&mut mipmap, ext_mem, &mipmap_desc));
+        let mut result = check(c::cuExternalMemoryGetMappedMipmappedArray(
+            &mut mipmap,
+            ext_mem,
+            &mipmap_desc,
+        ));
         if result.is_ok() {
             result = check(c::cuMipmappedArrayGetLevel(&mut array, mipmap, 0));
         }
@@ -515,8 +534,11 @@ pub unsafe fn cuda_fill_xor_pattern(shared: &SharedNv12Image) -> Result<(), G2gE
         };
         let mut mipmap: c::CuMipmappedArray = core::ptr::null_mut();
         let mut array: c::CuArray = core::ptr::null_mut();
-        let mut result =
-            check(c::cuExternalMemoryGetMappedMipmappedArray(&mut mipmap, ext_mem, &mipmap_desc));
+        let mut result = check(c::cuExternalMemoryGetMappedMipmappedArray(
+            &mut mipmap,
+            ext_mem,
+            &mipmap_desc,
+        ));
         if result.is_ok() {
             result = check(c::cuMipmappedArrayGetLevel(&mut array, mipmap, 0));
         }
@@ -653,8 +675,11 @@ pub unsafe fn import_image_into_cuda(
         let mut mipmap: c::CuMipmappedArray = core::ptr::null_mut();
         let mut array: c::CuArray = core::ptr::null_mut();
         if result.is_ok() {
-            result =
-                check(c::cuExternalMemoryGetMappedMipmappedArray(&mut mipmap, ext_mem, &mipmap_desc));
+            result = check(c::cuExternalMemoryGetMappedMipmappedArray(
+                &mut mipmap,
+                ext_mem,
+                &mipmap_desc,
+            ));
         }
         if result.is_ok() {
             result = check(c::cuMipmappedArrayGetLevel(&mut array, mipmap, 0));
@@ -803,7 +828,15 @@ impl PoolEntry {
     ) -> Result<(), G2gError> {
         // SAFETY: forwarded to the documented contract of `cuda_copy_planes_into`.
         unsafe {
-            cuda_copy_planes_into(&self.mapping, luma_ptr, luma_pitch, chroma_ptr, chroma_pitch, width, height)
+            cuda_copy_planes_into(
+                &self.mapping,
+                luma_ptr,
+                luma_pitch,
+                chroma_ptr,
+                chroma_pitch,
+                width,
+                height,
+            )
         }
     }
 }
@@ -870,7 +903,10 @@ impl CudaWgpuPool {
     /// Wrap an in-flight entry in a drop guard that returns it to the free list
     /// when dropped (i.e. when the downstream frame's keep-alive is released).
     pub fn in_flight(&self, entry: PoolEntry) -> PoolReturn {
-        PoolReturn { free: alloc::sync::Arc::clone(&self.free), entry: Some(entry) }
+        PoolReturn {
+            free: alloc::sync::Arc::clone(&self.free),
+            entry: Some(entry),
+        }
     }
 }
 
@@ -973,9 +1009,11 @@ pub unsafe fn export_rgba_image(
 
         let reqs = raw.get_image_memory_requirements(image);
         let props = instance.get_physical_device_memory_properties(phys);
-        let Some(mem_type) =
-            find_memory_type(&props, reqs.memory_type_bits, vk::MemoryPropertyFlags::DEVICE_LOCAL)
-        else {
+        let Some(mem_type) = find_memory_type(
+            &props,
+            reqs.memory_type_bits,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+        ) else {
             raw.destroy_image(image, None);
             return Err(G2gError::Hardware(HardwareError::Other));
         };
@@ -1016,7 +1054,14 @@ pub unsafe fn export_rgba_image(
             }
         };
 
-        Ok(SharedRgbaImage { image, memory, fd, size: reqs.size, width, height })
+        Ok(SharedRgbaImage {
+            image,
+            memory,
+            fd,
+            size: reqs.size,
+            width,
+            height,
+        })
     }
 }
 
@@ -1335,10 +1380,15 @@ impl WgpuToCuda {
             self.context,
             keep_alive,
         );
-        self.frames.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        self.frames
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         Ok(g2g_core::frame::Frame::new(
             g2g_core::MemoryDomain::Cuda(buffer),
-            g2g_core::FrameTiming { pts_ns, dts_ns: pts_ns, ..Default::default() },
+            g2g_core::FrameTiming {
+                pts_ns,
+                dts_ns: pts_ns,
+                ..Default::default()
+            },
             0,
         ))
     }
@@ -1364,7 +1414,9 @@ impl WgpuToCuda {
         let h = src.height().min(self.height);
         let mut encoder = self
             .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("wgpu-to-cuda") });
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("wgpu-to-cuda"),
+            });
         encoder.copy_texture_to_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: src,
@@ -1378,13 +1430,20 @@ impl WgpuToCuda {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
         );
         self.queue.submit([encoder.finish()]);
         // CUDA reads the shared memory directly (no wgpu fence), so the copy must
         // be complete before to_cuda_frame's device->device copy runs.
         self.device
-            .poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
             .map_err(gpu_err)?;
         Ok(())
     }
@@ -1504,7 +1563,11 @@ impl LinearBuf {
             let mut popped: c::CuContext = core::ptr::null_mut();
             let _ = c::cuCtxPopCurrent(&mut popped);
             result?;
-            Ok(LinearBuf { dptr, size, context })
+            Ok(LinearBuf {
+                dptr,
+                size,
+                context,
+            })
         }
     }
 }

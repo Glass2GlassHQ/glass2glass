@@ -202,7 +202,9 @@ impl AsyncElement for GstWrap {
     /// regardless of input; a preserving wrap couples input == output.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         match self.output_caps.as_deref().and_then(parse_caps) {
-            Some(c) => CapsConstraint::DerivedOutput(Box::new(move |_input| CapsSet::one(c.clone()))),
+            Some(c) => {
+                CapsConstraint::DerivedOutput(Box::new(move |_input| CapsSet::one(c.clone())))
+            }
             None => CapsConstraint::IdentityAny,
         }
     }
@@ -294,8 +296,9 @@ impl AsyncElement for GstWrap {
                     let bytes = slice.as_slice();
                     // SAFETY: `p` is valid; `bytes` is valid for `bytes.len()`;
                     // `push` copies the bytes into a GstBuffer.
-                    let r =
-                        unsafe { g2g_gstwrap_push(p.0, bytes.as_ptr(), bytes.len(), frame.timing.pts_ns) };
+                    let r = unsafe {
+                        g2g_gstwrap_push(p.0, bytes.as_ptr(), bytes.len(), frame.timing.pts_ns)
+                    };
                     if r != 0 {
                         return Err(G2gError::Hardware(HardwareError::Other));
                     }
@@ -303,14 +306,16 @@ impl AsyncElement for GstWrap {
                     // `announce_caps` is Some after `configure_pipeline`; cloning
                     // releases the borrow so `emit_packets` can take `&mut self`.
                     let caps = self.announce_caps.clone().ok_or(G2gError::NotConfigured)?;
-                    emit_packets(&mut self.caps_sent, &mut self.emitted, packets, &caps, out).await?;
+                    emit_packets(&mut self.caps_sent, &mut self.emitted, packets, &caps, out)
+                        .await?;
                 }
                 PipelinePacket::Eos => {
                     // SAFETY: `p` is valid; signals EOS on the appsrc feed.
                     unsafe { g2g_gstwrap_eos(p.0) };
                     let packets = drain_to_eos(p).await;
                     let caps = self.announce_caps.clone().ok_or(G2gError::NotConfigured)?;
-                    emit_packets(&mut self.caps_sent, &mut self.emitted, packets, &caps, out).await?;
+                    emit_packets(&mut self.caps_sent, &mut self.emitted, packets, &caps, out)
+                        .await?;
                     // The runner forwards the EOS sentinel after `process(Eos)`.
                 }
                 PipelinePacket::CapsChanged(_) => {}

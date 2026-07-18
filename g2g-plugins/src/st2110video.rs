@@ -126,7 +126,11 @@ impl Layout {
         if width == 0 || height == 0 || width % sampling.pixels_per_group() != 0 {
             return None;
         }
-        Some(Self { sampling, width, height })
+        Some(Self {
+            sampling,
+            width,
+            height,
+        })
     }
 
     /// pgroups per scan line.
@@ -362,7 +366,8 @@ impl St2110VideoPacketizer {
             let c = if i + 1 < srds.len() { 0x8000 } else { 0 };
             pkt.extend_from_slice(&(len as u16).to_be_bytes());
             pkt.extend_from_slice(&((line as u16) & 0x7FFF).to_be_bytes()); // F=0 | Line No
-            pkt.extend_from_slice(&(c | (offset_px as u16 & 0x7FFF)).to_be_bytes()); // C | Offset
+            pkt.extend_from_slice(&(c | (offset_px as u16 & 0x7FFF)).to_be_bytes());
+            // C | Offset
         }
         pkt.extend_from_slice(data);
         pkt
@@ -449,13 +454,17 @@ impl St2110VideoDepacketizer {
             }
             let run = payload.get(di..di + len)?;
             for (gi, g) in run.chunks_exact(opg).enumerate() {
-                self.layout.write_group(&mut self.frame, line, group + gi, g);
+                self.layout
+                    .write_group(&mut self.frame, line, group + gi, g);
             }
             di += len;
         }
 
         if marker {
-            Some(St2110VideoFrame { rtp_timestamp, bytes: self.frame.clone() })
+            Some(St2110VideoFrame {
+                rtp_timestamp,
+                bytes: self.frame.clone(),
+            })
         } else {
             None
         }
@@ -479,15 +488,25 @@ mod tests {
         let frame = ramp(w * 4 * h);
         let tai = 1_700_000_000_000_000_000u64;
 
-        let mut tx = St2110VideoPacketizer::new(96, 0xF00D, Sampling::Rgba8, RTP_HEADER_LEN + 2 + 6 + 20);
+        let mut tx =
+            St2110VideoPacketizer::new(96, 0xF00D, Sampling::Rgba8, RTP_HEADER_LEN + 2 + 6 + 20);
         let packets = tx.packetize(&frame, w, h, tai).expect("packetizes");
         assert!(packets.len() > 1, "small MTU splits the frame");
         // Only the last packet has the marker bit.
         for (i, p) in packets.iter().enumerate() {
-            assert_eq!(p[1] & 0x80 != 0, i + 1 == packets.len(), "marker only on last");
+            assert_eq!(
+                p[1] & 0x80 != 0,
+                i + 1 == packets.len(),
+                "marker only on last"
+            );
             // Every packet shares the frame's 90 kHz timestamp.
             let ts = u32::from_be_bytes([p[4], p[5], p[6], p[7]]);
-            assert_eq!(ts, MediaClock::video().rtp_timestamp(g2g_core::TaiNs(tai)).get());
+            assert_eq!(
+                ts,
+                MediaClock::video()
+                    .rtp_timestamp(g2g_core::TaiNs(tai))
+                    .get()
+            );
         }
 
         let mut rx = St2110VideoDepacketizer::new(RawVideoFormat::Rgba8, w, h).unwrap();
@@ -498,7 +517,12 @@ mod tests {
             }
         }
         let f = done.expect("frame completes on the marker");
-        assert_eq!(f.rtp_timestamp, MediaClock::video().rtp_timestamp(g2g_core::TaiNs(tai)).get());
+        assert_eq!(
+            f.rtp_timestamp,
+            MediaClock::video()
+                .rtp_timestamp(g2g_core::TaiNs(tai))
+                .get()
+        );
         assert_eq!(f.bytes, frame, "RGBA pixels survive the round trip");
     }
 
@@ -526,7 +550,11 @@ mod tests {
                 done = Some(f);
             }
         }
-        assert_eq!(done.unwrap().bytes, frame, "YUYV survives reorder there and back");
+        assert_eq!(
+            done.unwrap().bytes,
+            frame,
+            "YUYV survives reorder there and back"
+        );
     }
 
     #[test]
@@ -550,7 +578,11 @@ mod tests {
                 done = Some(f);
             }
         }
-        assert_eq!(done.unwrap().bytes, frame, "10-bit 4:2:2 survives the round trip");
+        assert_eq!(
+            done.unwrap().bytes,
+            frame,
+            "10-bit 4:2:2 survives the round trip"
+        );
     }
 
     #[test]
@@ -568,14 +600,20 @@ mod tests {
     fn rejects_bad_geometry_and_out_of_bounds_srd() {
         // Odd width is not a whole number of 4:2:2 pgroups.
         let mut tx = St2110VideoPacketizer::new(96, 1, Sampling::YCbCr422_8, 1400);
-        assert!(tx.packetize(&ramp(64), 5, 2, 0).is_none(), "odd width for 4:2:2 rejected");
+        assert!(
+            tx.packetize(&ramp(64), 5, 2, 0).is_none(),
+            "odd width for 4:2:2 rejected"
+        );
         assert!(St2110VideoDepacketizer::new(RawVideoFormat::Yuyv, 5, 2).is_none());
         // Unmapped format has no sampling.
         assert!(St2110VideoDepacketizer::new(RawVideoFormat::Nv12, 4, 2).is_none());
 
         // A too-small buffer for the declared geometry is rejected.
         let mut tx2 = St2110VideoPacketizer::new(96, 1, Sampling::Rgba8, 1400);
-        assert!(tx2.packetize(&ramp(16), 8, 4, 0).is_none(), "buffer too small");
+        assert!(
+            tx2.packetize(&ramp(16), 8, 4, 0).is_none(),
+            "buffer too small"
+        );
 
         // A hand-built packet whose SRD names a line past the height must not write
         // out of bounds; it is dropped.
@@ -584,13 +622,19 @@ mod tests {
         bad.extend_from_slice(&[0, 0]); // ext seq
         bad.extend_from_slice(&[0, 8, 0, 99, 0, 0]); // Length 8, Line 99 (>= height), C=0, Off 0
         bad.extend_from_slice(&[0u8; 8]);
-        assert!(rx.depacketize(&bad).is_none(), "SRD past the height is rejected");
+        assert!(
+            rx.depacketize(&bad).is_none(),
+            "SRD past the height is rejected"
+        );
     }
 
     #[test]
     fn rejects_short_packets() {
         let mut rx = St2110VideoDepacketizer::new(RawVideoFormat::Rgba8, 2, 2).unwrap();
-        assert!(rx.depacketize(&[0u8; 12]).is_none(), "no room for the ext-seq / SRD");
+        assert!(
+            rx.depacketize(&[0u8; 12]).is_none(),
+            "no room for the ext-seq / SRD"
+        );
         assert!(rx.depacketize(&[]).is_none());
     }
 }

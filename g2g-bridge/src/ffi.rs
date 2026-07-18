@@ -243,7 +243,9 @@ pub unsafe extern "C" fn g2g_bridge_push_buf(
     pts_ns: u64,
 ) -> c_int {
     // SAFETY: caller contract.
-    let Some(bridge) = (unsafe { bridge.as_ref() }) else { return 0 };
+    let Some(bridge) = (unsafe { bridge.as_ref() }) else {
+        return 0;
+    };
     // SAFETY: caller guarantees `len` readable bytes at `data`.
     let bytes = unsafe { slice::from_raw_parts(data, len) };
     // The 1-in / 1-out shell pulls after every push, so the bounded feed only
@@ -279,7 +281,9 @@ pub unsafe extern "C" fn g2g_bridge_push_dmabuf(
     pts_ns: u64,
 ) -> c_int {
     // SAFETY: caller contract.
-    let Some(bridge) = (unsafe { bridge.as_ref() }) else { return 0 };
+    let Some(bridge) = (unsafe { bridge.as_ref() }) else {
+        return 0;
+    };
     // Duplicate the fd: GStreamer retains ownership of the buffer's original, and
     // the g2g `OwnedDmaBuf` closes only this dup on drop.
     extern "C" {
@@ -307,8 +311,12 @@ pub unsafe extern "C" fn g2g_bridge_push_dmabuf(
 #[no_mangle]
 pub unsafe extern "C" fn g2g_bridge_pull_buf(bridge: *mut G2gBridge, out: *mut G2gOut) -> c_int {
     // SAFETY: caller contract.
-    let Some(bridge) = (unsafe { bridge.as_ref() }) else { return -1 };
-    let Some(frame) = bridge.0.pull_blocking() else { return -1 };
+    let Some(bridge) = (unsafe { bridge.as_ref() }) else {
+        return -1;
+    };
+    let Some(frame) = bridge.0.pull_blocking() else {
+        return -1;
+    };
     let boxed = Box::new(frame);
     let pts_ns = boxed.timing.pts_ns;
     let cout = match &boxed.domain {
@@ -351,7 +359,9 @@ pub unsafe extern "C" fn g2g_bridge_pull_buf(bridge: *mut G2gBridge, out: *mut G
 #[no_mangle]
 pub unsafe extern "C" fn g2g_bridge_out_release(out: *mut G2gOut) {
     // SAFETY: caller contract.
-    let Some(out) = (unsafe { out.as_mut() }) else { return };
+    let Some(out) = (unsafe { out.as_mut() }) else {
+        return;
+    };
     if out.owner.is_null() {
         return;
     }

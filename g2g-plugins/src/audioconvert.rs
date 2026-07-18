@@ -111,7 +111,8 @@ pub(crate) fn sample_bytes(format: AudioFormat) -> usize {
 pub(crate) const PCM_FORMATS: [AudioFormat; 2] = [AudioFormat::PcmS16Le, AudioFormat::PcmF32Le];
 
 impl AsyncElement for AudioConvert {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -178,7 +179,8 @@ impl AsyncElement for AudioConvert {
                         sample_rate: rate,
                     };
                     if self.last_caps.as_ref() != Some(&new_caps) {
-                        out.push(PipelinePacket::CapsChanged(new_caps.clone())).await?;
+                        out.push(PipelinePacket::CapsChanged(new_caps.clone()))
+                            .await?;
                         self.last_caps = Some(new_caps);
                     }
                     let out_frame = Frame {
@@ -251,7 +253,9 @@ impl AsyncElement for AudioConvert {
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
-            "format" => Some(PropValue::Str(audio_format_to_str(self.target_format).into())),
+            "format" => Some(PropValue::Str(
+                audio_format_to_str(self.target_format).into(),
+            )),
             "channels" => Some(PropValue::Uint(self.target_channels as u64)),
             _ => None,
         }
@@ -260,7 +264,11 @@ impl AsyncElement for AudioConvert {
 
 /// `AudioConvert`'s settable properties (M107).
 static AUDIOCONVERT_PROPS: &[PropertySpec] = &[
-    PropertySpec::new("format", PropKind::Str, "output sample format: S16LE | F32LE"),
+    PropertySpec::new(
+        "format",
+        PropKind::Str,
+        "output sample format: S16LE | F32LE",
+    ),
     PropertySpec::new("channels", PropKind::Uint, "output channel count"),
 ];
 
@@ -387,7 +395,11 @@ pub(crate) fn write_sample(dst: &mut Vec<u8>, v: f32, format: AudioFormat) {
         AudioFormat::PcmS16Le => {
             let scaled = v.clamp(-1.0, 1.0) * 32767.0;
             // round half away from zero without libm.
-            let rounded = if scaled >= 0.0 { scaled + 0.5 } else { scaled - 0.5 };
+            let rounded = if scaled >= 0.0 {
+                scaled + 0.5
+            } else {
+                scaled - 0.5
+            };
             dst.extend_from_slice(&(rounded as i16).to_le_bytes());
         }
         AudioFormat::PcmF32Le => dst.extend_from_slice(&v.to_le_bytes()),
@@ -412,9 +424,17 @@ mod tests {
         let mut conv = AudioConvert::new(AudioFormat::PcmS16Le, 2);
         // AAC/OPUS are not raw-PCM formats; setting them must fail loud rather
         // than silently emit empty frames.
-        assert_eq!(conv.set_property("format", PropValue::Str("aac".into())), Err(PropError::Value));
-        assert_eq!(conv.set_property("format", PropValue::Str("opus".into())), Err(PropError::Value));
-        assert!(conv.set_property("format", PropValue::Str("f32le".into())).is_ok());
+        assert_eq!(
+            conv.set_property("format", PropValue::Str("aac".into())),
+            Err(PropError::Value)
+        );
+        assert_eq!(
+            conv.set_property("format", PropValue::Str("opus".into())),
+            Err(PropError::Value)
+        );
+        assert!(conv
+            .set_property("format", PropValue::Str("f32le".into()))
+            .is_ok());
         assert_eq!(conv.target_format(), AudioFormat::PcmF32Le);
     }
 
@@ -445,12 +465,16 @@ mod tests {
             .iter()
             .flat_map(|v| v.to_le_bytes())
             .collect();
-        let s16 = convert_pcm(&src_f32, AudioFormat::PcmF32Le, 1, AudioFormat::PcmS16Le, 1).unwrap();
+        let s16 =
+            convert_pcm(&src_f32, AudioFormat::PcmF32Le, 1, AudioFormat::PcmS16Le, 1).unwrap();
         let back = convert_pcm(&s16, AudioFormat::PcmS16Le, 1, AudioFormat::PcmF32Le, 1).unwrap();
         for (i, chunk) in back.chunks_exact(4).enumerate() {
             let got = f32::from_le_bytes(chunk.try_into().unwrap());
             let want = [0.0f32, 0.5, -0.5, 1.0, -1.0][i];
-            assert!((got - want).abs() < 1.0 / 32767.0 + 1e-6, "sample {i}: {got} vs {want}");
+            assert!(
+                (got - want).abs() < 1.0 / 32767.0 + 1e-6,
+                "sample {i}: {got} vs {want}"
+            );
         }
     }
 
@@ -467,7 +491,8 @@ mod tests {
     fn mono_fans_out_to_stereo() {
         // one s16 sample (value 1000) -> two identical channels.
         let mono: Vec<u8> = 1000i16.to_le_bytes().to_vec();
-        let stereo = convert_pcm(&mono, AudioFormat::PcmS16Le, 1, AudioFormat::PcmS16Le, 2).unwrap();
+        let stereo =
+            convert_pcm(&mono, AudioFormat::PcmS16Le, 1, AudioFormat::PcmS16Le, 2).unwrap();
         assert_eq!(stereo.len(), 4);
         assert_eq!(i16::from_le_bytes([stereo[0], stereo[1]]), 1000);
         assert_eq!(i16::from_le_bytes([stereo[2], stereo[3]]), 1000);
@@ -479,7 +504,8 @@ mod tests {
         let mut stereo = Vec::new();
         stereo.extend_from_slice(&1000i16.to_le_bytes());
         stereo.extend_from_slice(&2000i16.to_le_bytes());
-        let mono = convert_pcm(&stereo, AudioFormat::PcmS16Le, 2, AudioFormat::PcmS16Le, 1).unwrap();
+        let mono =
+            convert_pcm(&stereo, AudioFormat::PcmS16Le, 2, AudioFormat::PcmS16Le, 1).unwrap();
         assert_eq!(mono.len(), 2);
         let v = i16::from_le_bytes([mono[0], mono[1]]);
         assert!((v - 1500).abs() <= 1, "got {v}");
@@ -489,7 +515,13 @@ mod tests {
     fn ragged_input_fails_loud() {
         // 3 bytes is not a whole s16 stereo frame (4 bytes).
         assert_eq!(
-            convert_pcm(&[0, 0, 0], AudioFormat::PcmS16Le, 2, AudioFormat::PcmS16Le, 2),
+            convert_pcm(
+                &[0, 0, 0],
+                AudioFormat::PcmS16Le,
+                2,
+                AudioFormat::PcmS16Le,
+                2
+            ),
             Err(G2gError::CapsMismatch)
         );
     }
@@ -499,9 +531,15 @@ mod tests {
         let mut conv = AudioConvert::new(AudioFormat::PcmS16Le, 2);
         // 5.1 -> stereo now configures (a real runtime CapsChanged for multichannel
         // content); identity is fine; ANY_CHANNELS (0) is the negotiation placeholder.
-        assert!(conv.configure_pipeline(&audio(AudioFormat::PcmF32Le, 6, 48_000)).is_ok());
-        assert!(conv.configure_pipeline(&audio(AudioFormat::PcmF32Le, 2, 48_000)).is_ok());
-        assert!(conv.configure_pipeline(&audio(AudioFormat::PcmF32Le, 0, 48_000)).is_ok());
+        assert!(conv
+            .configure_pipeline(&audio(AudioFormat::PcmF32Le, 6, 48_000))
+            .is_ok());
+        assert!(conv
+            .configure_pipeline(&audio(AudioFormat::PcmF32Le, 2, 48_000))
+            .is_ok());
+        assert!(conv
+            .configure_pipeline(&audio(AudioFormat::PcmF32Le, 0, 48_000))
+            .is_ok());
         // a non-PCM input still fails loud.
         assert!(matches!(
             conv.configure_pipeline(&audio(AudioFormat::Aac, 2, 48_000)),

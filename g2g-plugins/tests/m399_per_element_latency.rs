@@ -17,7 +17,9 @@ use core::time::Duration;
 
 use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::memory::SystemSlice;
-use g2g_core::runtime::{run_graph, run_simple_pipeline, run_source_transform_sink, GraphNode, SourceLoop};
+use g2g_core::runtime::{
+    run_graph, run_simple_pipeline, run_source_transform_sink, GraphNode, SourceLoop,
+};
 use g2g_core::{
     AsyncElement, Caps, ConfigureOutcome, Dim, G2gError, Graph, MemoryDomain, OutputSink,
     PipelineClock, PipelinePacket, Rate, RawVideoFormat,
@@ -178,7 +180,11 @@ async fn linear_runner_attributes_latency_to_the_slow_transform() {
 
     // The 3 ms sleep dominates: the transform's measured p50 is at/above ~1 ms
     // (log2-bucket resolution) and strictly above the zero-cost sink's.
-    assert!(tx_row.proc.p50_ns >= MS, "slow transform p50 = {} ns", tx_row.proc.p50_ns);
+    assert!(
+        tx_row.proc.p50_ns >= MS,
+        "slow transform p50 = {} ns",
+        tx_row.proc.p50_ns
+    );
     assert!(
         tx_row.proc.p50_ns > sink_row.proc.p50_ns,
         "transform ({}) must out-measure the fast sink ({})",
@@ -188,7 +194,10 @@ async fn linear_runner_attributes_latency_to_the_slow_transform() {
 
     // The report renders the measured table with the dominating element named.
     let report = stats.report();
-    assert!(report.contains("per-element [measured]"), "report:\n{report}");
+    assert!(
+        report.contains("per-element [measured]"),
+        "report:\n{report}"
+    );
     assert!(report.contains("SlowTransform"), "report:\n{report}");
     assert!(report.contains("proc p50"), "report:\n{report}");
 }
@@ -199,12 +208,17 @@ async fn simple_pipeline_records_the_sink_probe() {
     let mut sink = CountingSink;
     let clock = ZeroClock;
 
-    let stats = run_simple_pipeline(&mut src, &mut sink, &clock, 4).await.expect("pipeline runs");
+    let stats = run_simple_pipeline(&mut src, &mut sink, &clock, 4)
+        .await
+        .expect("pipeline runs");
 
     // The source has no `process()`; only the sink is instrumented.
     assert_eq!(stats.per_element.len(), 1);
     assert_eq!(stats.per_element[0].name, "CountingSink");
-    assert_eq!(stats.per_element[0].proc.count, 4, "each frame timed at the sink");
+    assert_eq!(
+        stats.per_element[0].proc.count, 4,
+        "each frame timed at the sink"
+    );
 }
 
 #[tokio::test]
@@ -220,7 +234,11 @@ async fn graph_runner_names_elements_and_measures_each() {
     let stats = run_graph(g, &ZeroClock, 4).await.expect("graph runs");
 
     assert_eq!(stats.frames_consumed, 5);
-    assert_eq!(stats.per_element.len(), 2, "transform + sink (source has no process)");
+    assert_eq!(
+        stats.per_element.len(),
+        2,
+        "transform + sink (source has no process)"
+    );
 
     // The graph runner names instances `<category>N`; the slow transform must be
     // present with timed frames and dominate the sink.
@@ -235,6 +253,10 @@ async fn graph_runner_names_elements_and_measures_each() {
         .find(|e| e.name == "CountingSink0")
         .expect("sink row, named <category>0");
     assert_eq!(tx_row.proc.count, 5);
-    assert!(tx_row.proc.p50_ns >= MS, "slow transform p50 = {} ns", tx_row.proc.p50_ns);
+    assert!(
+        tx_row.proc.p50_ns >= MS,
+        "slow transform p50 = {} ns",
+        tx_row.proc.p50_ns
+    );
     assert!(tx_row.proc.p50_ns > sink_row.proc.p50_ns);
 }

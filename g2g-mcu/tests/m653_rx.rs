@@ -35,7 +35,14 @@ fn frame(seq: u64, payload: &[u8]) -> Frame {
     let slice = unsafe {
         SystemSlice::from_foreign(leaked.as_ptr(), leaked.len(), None, core::ptr::null_mut())
     };
-    Frame::new(MemoryDomain::System(slice), FrameTiming { pts_ns: seq, ..FrameTiming::default() }, seq)
+    Frame::new(
+        MemoryDomain::System(slice),
+        FrameTiming {
+            pts_ns: seq,
+            ..FrameTiming::default()
+        },
+        seq,
+    )
 }
 
 /// Push one packet into the jitter buffer and return the emitted sequence, if any.
@@ -44,7 +51,9 @@ fn push<const N: usize, const B: usize>(
     seq: u64,
     payload: &[u8],
 ) -> Option<u64> {
-    block_on(jb.process(frame(seq, payload))).expect("jitter process").map(|f| f.sequence)
+    block_on(jb.process(frame(seq, payload)))
+        .expect("jitter process")
+        .map(|f| f.sequence)
 }
 
 #[test]
@@ -58,10 +67,18 @@ fn in_order_stream_plays_out_after_a_prime_latency() {
     }
     // Depth 3: the first two pushes buffer (jitter cushion), then playout tracks
     // the input in order. All emitted sequences are contiguous and ascending.
-    assert_eq!(out, vec![0, 1, 2, 3, 4, 5], "in-order playout, two-frame prime latency");
+    assert_eq!(
+        out,
+        vec![0, 1, 2, 3, 4, 5],
+        "in-order playout, two-frame prime latency"
+    );
     assert_eq!(jb.lost(), 0);
     assert_eq!(jb.reordered(), 0);
-    assert_eq!(jb.buffered(), 2, "depth-1 packets remain buffered at the tail");
+    assert_eq!(
+        jb.buffered(),
+        2,
+        "depth-1 packets remain buffered at the tail"
+    );
 }
 
 #[test]
@@ -75,9 +92,16 @@ fn reordered_packets_are_played_back_in_sequence() {
             out.push(s);
         }
     }
-    assert_eq!(out, vec![0, 1, 2, 3, 4, 5, 6, 7], "reordered pairs emitted in order");
+    assert_eq!(
+        out,
+        vec![0, 1, 2, 3, 4, 5, 6, 7],
+        "reordered pairs emitted in order"
+    );
     assert_eq!(jb.lost(), 0, "reorder within the window is not loss");
-    assert!(jb.reordered() >= 2, "the two late arrivals were counted as reordered");
+    assert!(
+        jb.reordered() >= 2,
+        "the two late arrivals were counted as reordered"
+    );
 }
 
 #[test]
@@ -213,7 +237,9 @@ struct JbStats {
 
 fn run_rx(wire: Vec<Vec<u8>>) -> (Vec<u8>, u32, JbStats) {
     let accepted = wire.len() as u32;
-    let q = Rc::new(RefCell::new(wire.into_iter().collect::<std::collections::VecDeque<_>>()));
+    let q = Rc::new(RefCell::new(
+        wire.into_iter().collect::<std::collections::VecDeque<_>>(),
+    ));
     let recv = QueuedReceiver { datagrams: q };
 
     let rtp_ring: &'static StaticLendRing<4, SP> = leaked_ring(); // mu-law payload
@@ -224,9 +250,21 @@ fn run_rx(wire: Vec<Vec<u8>>) -> (Vec<u8>, u32, JbStats) {
     // `&mut jb` keeps the buffer so its reception counters can be read after.
     let mut jb: JitterBuffer<8, SP> = JitterBuffer::new(DEPTH);
     let dec = G711Dec::new(Law::Mulaw, dec_ring);
-    let mut sink = PcmCollector { bytes: Vec::new(), frames: 0 };
-    block_on(run_source_transform_sink(src, Chain(&mut jb, dec), &mut sink)).expect("rx pipeline");
-    let stats = JbStats { lost: jb.lost(), reordered: jb.reordered(), duplicates: jb.duplicates() };
+    let mut sink = PcmCollector {
+        bytes: Vec::new(),
+        frames: 0,
+    };
+    block_on(run_source_transform_sink(
+        src,
+        Chain(&mut jb, dec),
+        &mut sink,
+    ))
+    .expect("rx pipeline");
+    let stats = JbStats {
+        lost: jb.lost(),
+        reordered: jb.reordered(),
+        duplicates: jb.duplicates(),
+    };
     (sink.bytes, sink.frames, stats)
 }
 
@@ -253,10 +291,20 @@ fn rx_flagship_reconstructs_pcm_from_a_reordered_wire() {
 
     let (pcm, frames, stats) = run_rx(wire);
     let delivered = NFRAMES - (DEPTH as u64 - 1);
-    assert_eq!(frames as u64, delivered, "all but the depth-1 buffered tail played out");
+    assert_eq!(
+        frames as u64, delivered,
+        "all but the depth-1 buffered tail played out"
+    );
     assert_eq!(stats.lost, 0, "reorder within the window is not loss");
-    assert!(stats.reordered >= 2, "the two swapped pairs were counted reordered");
-    assert_eq!(pcm, reference_pcm(delivered), "reordered wire decodes to the ordered stream");
+    assert!(
+        stats.reordered >= 2,
+        "the two swapped pairs were counted reordered"
+    );
+    assert_eq!(
+        pcm,
+        reference_pcm(delivered),
+        "reordered wire decodes to the ordered stream"
+    );
 }
 
 #[test]
@@ -266,21 +314,30 @@ fn rx_flagship_dedups_a_duplicated_wire() {
     wire.insert(3, rtp_datagram(2)); // duplicate seq 2 shortly after the original
 
     let (pcm, frames, stats) = run_rx(wire);
-    assert_eq!(stats.duplicates, 1, "the duplicate was dropped exactly once");
+    assert_eq!(
+        stats.duplicates, 1,
+        "the duplicate was dropped exactly once"
+    );
     assert_eq!(stats.lost, 0);
     // Whatever count played out, it is the ordered decode of that many leading
     // frames (the duplicate neither corrupted nor reordered the stream).
-    assert_eq!(pcm, reference_pcm(frames as u64), "dedup leaves the ordered stream intact");
+    assert_eq!(
+        pcm,
+        reference_pcm(frames as u64),
+        "dedup leaves the ordered stream intact"
+    );
 }
 
 #[test]
 fn rx_flagship_survives_packet_loss() {
     // Drop sequence 8 from the wire entirely; the stream must continue and the
     // decoded PCM must match the ordered stream with that one frame missing.
-    let wire: Vec<Vec<u8>> =
-        (0..NFRAMES).filter(|&k| k != 8).map(rtp_datagram).collect();
+    let wire: Vec<Vec<u8>> = (0..NFRAMES).filter(|&k| k != 8).map(rtp_datagram).collect();
     let (pcm, frames, stats) = run_rx(wire);
-    assert_eq!(stats.lost, 1, "exactly the one dropped packet was declared lost");
+    assert_eq!(
+        stats.lost, 1,
+        "exactly the one dropped packet was declared lost"
+    );
     assert!(frames >= 1, "playout continued past the loss");
     // The decoded stream is the ordered decode with frame 8 excised (and the
     // buffered tail withheld). Reconstruct that expectation.
@@ -299,5 +356,8 @@ fn rx_flagship_survives_packet_loss() {
         }
         played += 1;
     }
-    assert_eq!(pcm, expected, "loss leaves a clean gap; surrounding frames intact and in order");
+    assert_eq!(
+        pcm, expected,
+        "loss leaves a clean gap; surrounding frames intact and in order"
+    );
 }

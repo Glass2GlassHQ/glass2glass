@@ -46,7 +46,10 @@ struct Collect {
 }
 
 impl OutputSink for Collect {
-    fn push<'a>(&'a mut self, packet: PipelinePacket) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
+    fn push<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+    ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
         Box::pin(async move {
             self.packets.push(packet);
             Ok(PushOutcome::Accepted)
@@ -55,7 +58,12 @@ impl OutputSink for Collect {
 }
 
 fn h264_caps() -> Caps {
-    Caps::CompressedVideo { codec: VideoCodec::H264, width: Dim::Any, height: Dim::Any, framerate: Rate::Any }
+    Caps::CompressedVideo {
+        codec: VideoCodec::H264,
+        width: Dim::Any,
+        height: Dim::Any,
+        framerate: Rate::Any,
+    }
 }
 
 fn nv12_caps(w: u32, h: u32) -> Caps {
@@ -87,7 +95,12 @@ fn split_access_units(bs: &[u8]) -> Vec<Vec<u8>> {
         if bs[i] == 0 && bs[i + 1] == 0 && bs[i + 2] == 1 {
             codes.push((i, i + 3));
             i += 3;
-        } else if i + 4 <= bs.len() && bs[i] == 0 && bs[i + 1] == 0 && bs[i + 2] == 0 && bs[i + 3] == 1 {
+        } else if i + 4 <= bs.len()
+            && bs[i] == 0
+            && bs[i + 1] == 0
+            && bs[i + 2] == 0
+            && bs[i + 3] == 1
+        {
             codes.push((i, i + 4));
             i += 4;
         } else {
@@ -128,7 +141,10 @@ async fn cudakms_sink_presents_nvdec_cuda_frames() {
     // Decode on the GPU: NV12 stays in CUDA device memory.
     let mut dec = FfmpegVideoDec::new().with_backend(Backend::NvdecCuda);
     let narrowed = dec.intercept_caps(&h264_caps()).expect("H.264 supported");
-    assert!(matches!(dec.configure_pipeline(&narrowed).expect("NVDEC init"), ConfigureOutcome::Accepted));
+    assert!(matches!(
+        dec.configure_pipeline(&narrowed).expect("NVDEC init"),
+        ConfigureOutcome::Accepted
+    ));
 
     let mut decoded = Collect::default();
     for (seq, au) in access_units.into_iter().enumerate() {
@@ -138,9 +154,13 @@ async fn cudakms_sink_presents_nvdec_cuda_frames() {
             sequence: seq as u64,
             meta: Default::default(),
         };
-        dec.process(PipelinePacket::DataFrame(frame), &mut decoded).await.expect("decode");
+        dec.process(PipelinePacket::DataFrame(frame), &mut decoded)
+            .await
+            .expect("decode");
     }
-    dec.process(PipelinePacket::Eos, &mut decoded).await.expect("flush");
+    dec.process(PipelinePacket::Eos, &mut decoded)
+        .await
+        .expect("flush");
 
     let (w, h) = first_nv12_dims(&decoded.packets).expect("NV12 caps from decoder");
     eprintln!("NVDEC decoded NV12 {w}x{h}");
@@ -158,14 +178,25 @@ async fn cudakms_sink_presents_nvdec_cuda_frames() {
     // Present each device-resident frame through CudaKmsSink on the DRM display.
     let device = std::env::var("G2G_DRM_DEVICE").unwrap_or_else(|_| "/dev/dri/card0".into());
     let mut sink = CudaKmsSink::new().with_device(device);
-    sink.configure_pipeline(&nv12_caps(w, h)).expect("CudaKmsSink configure (DRM master?)");
+    sink.configure_pipeline(&nv12_caps(w, h))
+        .expect("CudaKmsSink configure (DRM master?)");
 
     let mut out = Collect::default();
     for frame in cuda_frames {
-        let frame = Frame { timing: FrameTiming { arrival_ns: monotonic_ns(), ..frame.timing }, ..frame };
-        sink.process(PipelinePacket::DataFrame(frame), &mut out).await.expect("present");
+        let frame = Frame {
+            timing: FrameTiming {
+                arrival_ns: monotonic_ns(),
+                ..frame.timing
+            },
+            ..frame
+        };
+        sink.process(PipelinePacket::DataFrame(frame), &mut out)
+            .await
+            .expect("present");
     }
-    sink.process(PipelinePacket::Eos, &mut out).await.expect("eos");
+    sink.process(PipelinePacket::Eos, &mut out)
+        .await
+        .expect("eos");
 
     let presented = sink.frames_presented();
     let lat = sink.latency_snapshot();

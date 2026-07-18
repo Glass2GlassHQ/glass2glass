@@ -78,7 +78,12 @@ async fn fetches_and_streams_the_body_then_eos() {
     let payload: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
     let url = serve_once(payload.clone());
 
-    let mut src = HttpSrc::new(url, Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs });
+    let mut src = HttpSrc::new(
+        url,
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::MpegTs,
+        },
+    );
 
     // Negotiation produces the declared byte-stream caps. Scoped so the
     // borrow held by `CapsConstraint` is released before `run`.
@@ -86,20 +91,28 @@ async fn fetches_and_streams_the_body_then_eos() {
         match src.caps_constraint().await.unwrap() {
             CapsConstraint::Produces(set) => assert_eq!(
                 set,
-                CapsSet::one(Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs })
+                CapsSet::one(Caps::ByteStream {
+                    encoding: ByteStreamEncoding::MpegTs
+                })
             ),
             _ => panic!("HttpSrc should Produce its declared caps"),
         }
     }
 
-    src.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs }).unwrap();
+    src.configure_pipeline(&Caps::ByteStream {
+        encoding: ByteStreamEncoding::MpegTs,
+    })
+    .unwrap();
     let mut sink = CaptureSink::default();
     let count = src.run(&mut sink).await.unwrap();
 
     assert!(sink.eos, "EOS terminates the stream");
     assert!(sink.frames >= 1, "at least one chunk");
     assert_eq!(count, sink.frames as u64, "run returns the DataFrame count");
-    assert_eq!(sink.body, payload, "reassembled body matches the served bytes");
+    assert_eq!(
+        sink.body, payload,
+        "reassembled body matches the served bytes"
+    );
 }
 
 #[tokio::test]
@@ -116,16 +129,23 @@ async fn errors_loud_on_http_404() {
                 break;
             }
         }
-        let _ = stream.write_all(
-            b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-        );
+        let _ = stream
+            .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
     });
 
     let mut src = HttpSrc::new(
         format!("http://127.0.0.1:{port}/missing.ts"),
-        Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs },
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::MpegTs,
+        },
     );
-    src.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs }).unwrap();
+    src.configure_pipeline(&Caps::ByteStream {
+        encoding: ByteStreamEncoding::MpegTs,
+    })
+    .unwrap();
     let mut sink = CaptureSink::default();
-    assert!(src.run(&mut sink).await.is_err(), "a 4xx status fails the run");
+    assert!(
+        src.run(&mut sink).await.is_err(),
+        "a 4xx status fails the run"
+    );
 }

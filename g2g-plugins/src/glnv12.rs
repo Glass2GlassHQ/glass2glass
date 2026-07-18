@@ -146,7 +146,14 @@ impl GlState {
             gl.enable_vertex_attrib_array(pos);
             gl.vertex_attrib_pointer_f32(pos, 2, glow::FLOAT, false, stride, 0);
             gl.enable_vertex_attrib_array(uv);
-            gl.vertex_attrib_pointer_f32(uv, 2, glow::FLOAT, false, stride, 2 * size_of::<f32>() as i32);
+            gl.vertex_attrib_pointer_f32(
+                uv,
+                2,
+                glow::FLOAT,
+                false,
+                stride,
+                2 * size_of::<f32>() as i32,
+            );
 
             gl.draw_arrays(glow::TRIANGLES, 0, 6);
         }
@@ -170,10 +177,26 @@ unsafe fn make_texture(
     unsafe {
         let tex = gl.create_texture().map_err(|e| e.to_string())?;
         gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MIN_FILTER,
+            glow::LINEAR as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MAG_FILTER,
+            glow::LINEAR as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_WRAP_S,
+            glow::CLAMP_TO_EDGE as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_WRAP_T,
+            glow::CLAMP_TO_EDGE as i32,
+        );
         // glow 0.17 `tex_image_2d` takes the pixel source as
         // `PixelUnpackData::Slice(Option<&[u8]>)`; `None` allocates storage
         // without uploading (CUDA writes the pixels).
@@ -204,7 +227,10 @@ unsafe fn link_program(
     // SAFETY: the caller guarantees a current GL context.
     unsafe {
         let program = gl.create_program().map_err(|e| e.to_string())?;
-        let shaders = [(glow::VERTEX_SHADER, vertex_src), (glow::FRAGMENT_SHADER, fragment_src)];
+        let shaders = [
+            (glow::VERTEX_SHADER, vertex_src),
+            (glow::FRAGMENT_SHADER, fragment_src),
+        ];
         let mut compiled = alloc::vec::Vec::new();
         for (kind, src) in shaders {
             let shader = gl.create_shader(kind).map_err(|e| e.to_string())?;

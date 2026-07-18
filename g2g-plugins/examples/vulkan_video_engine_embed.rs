@@ -64,7 +64,10 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 fn main() {
     let mut args = std::env::args().skip(1);
     let clip_path = args.next();
-    let out_dir = PathBuf::from(args.next().unwrap_or_else(|| "engine_embed_out".to_string()));
+    let out_dir = PathBuf::from(
+        args.next()
+            .unwrap_or_else(|| "engine_embed_out".to_string()),
+    );
     let clip: Vec<u8> = match &clip_path {
         Some(p) => std::fs::read(p).unwrap_or_else(|e| panic!("read {p}: {e}")),
         None => BUNDLED_CLIP.to_vec(),
@@ -106,7 +109,10 @@ fn main() {
         let path = out_dir.join(format!("engine_{p:03}.ppm"));
         write_ppm(&path, w, h, &rgba);
     }
-    println!("wrote {n} PPMs to {} (left: decoded, right: app grayscale)", out_dir.display());
+    println!(
+        "wrote {n} PPMs to {} (left: decoded, right: app grayscale)",
+        out_dir.display()
+    );
 }
 
 /// The application's renderer: its own pipeline sampling one texture.
@@ -120,74 +126,92 @@ struct Engine {
 
 impl Engine {
     fn new(ctx: &GpuContext, width: u32, height: u32) -> Self {
-        let module = ctx.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("engine-shader"),
-            source: wgpu::ShaderSource::Wgsl(ENGINE_WGSL.into()),
-        });
-        let layout = ctx.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("engine-bgl"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
+        let module = ctx
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("engine-shader"),
+                source: wgpu::ShaderSource::Wgsl(ENGINE_WGSL.into()),
+            });
+        let layout = ctx
+            .device
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("engine-bgl"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
                     },
-                    count: None,
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+        let pipeline_layout = ctx
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("engine-pl"),
+                bind_group_layouts: &[Some(&layout)],
+                immediate_size: 0,
+            });
+        let pipeline = ctx
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("engine-pipeline"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("vs"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
                 },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
-        let pipeline_layout = ctx.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("engine-pl"),
-            bind_group_layouts: &[Some(&layout)],
-            immediate_size: 0,
-        });
-        let pipeline = ctx.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("engine-pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &module,
-                entry_point: Some("vs"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some("fs"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Rgba8Unorm,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some("fs"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            });
         let sampler = ctx.device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("engine-sampler"),
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
-        Self { pipeline, layout, sampler, width, height }
+        Self {
+            pipeline,
+            layout,
+            sampler,
+            width,
+            height,
+        }
     }
 
     fn render(&self, ctx: &GpuContext, src: &wgpu::Texture) -> wgpu::Texture {
         let target = ctx.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("engine-target"),
-            size: wgpu::Extent3d { width: self.width, height: self.height, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: self.width,
+                height: self.height,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -211,8 +235,9 @@ impl Engine {
                 },
             ],
         });
-        let mut enc =
-            ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        let mut enc = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
         {
             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("engine-pass"),

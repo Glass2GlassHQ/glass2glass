@@ -121,7 +121,8 @@ impl WsWireTransform {
     async fn send_caps_if_new(&mut self) -> Result<(), G2gError> {
         if let Some(caps) = self.configured_caps.clone() {
             if self.last_sent.as_ref() != Some(&caps) {
-                self.send(&PipelinePacket::CapsChanged(caps.clone())).await?;
+                self.send(&PipelinePacket::CapsChanged(caps.clone()))
+                    .await?;
                 self.last_sent = Some(caps);
             }
         }
@@ -130,7 +131,8 @@ impl WsWireTransform {
 }
 
 impl AsyncElement for WsWireTransform {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -223,7 +225,8 @@ impl AsyncElement for WsWireTransform {
                 }
                 PipelinePacket::CapsChanged(caps) => {
                     if self.last_sent.as_ref() != Some(&caps) {
-                        self.send(&PipelinePacket::CapsChanged(caps.clone())).await?;
+                        self.send(&PipelinePacket::CapsChanged(caps.clone()))
+                            .await?;
                         self.last_sent = Some(caps.clone());
                     }
                     out.push(PipelinePacket::CapsChanged(caps)).await?;

@@ -58,7 +58,13 @@ impl Default for TimeOverlay {
 
 impl TimeOverlay {
     pub fn new() -> Self {
-        Self { scale: 2, input: None, configured: false, last_caps: None, emitted: 0 }
+        Self {
+            scale: 2,
+            input: None,
+            configured: false,
+            last_caps: None,
+            emitted: 0,
+        }
     }
 
     pub fn with_scale(mut self, scale: u32) -> Self {
@@ -67,7 +73,12 @@ impl TimeOverlay {
     }
 
     fn accept_input(&self, caps: &Caps) -> Result<(RawVideoFormat, u32, u32, Rate), G2gError> {
-        let Caps::RawVideo { format, width: Dim::Fixed(w), height: Dim::Fixed(h), framerate } = caps
+        let Caps::RawVideo {
+            format,
+            width: Dim::Fixed(w),
+            height: Dim::Fixed(h),
+            framerate,
+        } = caps
         else {
             return Err(G2gError::CapsMismatch);
         };
@@ -101,7 +112,9 @@ impl AsyncElement for TimeOverlay {
 
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
-            Caps::RawVideo { format, .. } if FORMATS.contains(format) => CapsSet::one(input.clone()),
+            Caps::RawVideo { format, .. } if FORMATS.contains(format) => {
+                CapsSet::one(input.clone())
+            }
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
     }
@@ -147,7 +160,8 @@ impl AsyncElement for TimeOverlay {
                         framerate: rate,
                     };
                     if self.last_caps.as_ref() != Some(&new_caps) {
-                        out.push(PipelinePacket::CapsChanged(new_caps.clone())).await?;
+                        out.push(PipelinePacket::CapsChanged(new_caps.clone()))
+                            .await?;
                         self.last_caps = Some(new_caps);
                     }
                     let out_frame = Frame {
@@ -183,7 +197,12 @@ impl AsyncElement for TimeOverlay {
     }
 
     fn metadata(&self) -> ElementMetadata {
-        ElementMetadata::new("Time overlay", "Filter/Editor/Video", "Overlays the buffer time on video", "g2g")
+        ElementMetadata::new(
+            "Time overlay",
+            "Filter/Editor/Video",
+            "Overlays the buffer time on video",
+            "g2g",
+        )
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
@@ -208,8 +227,11 @@ impl AsyncElement for TimeOverlay {
     }
 }
 
-static TIMEOVERLAY_PROPS: &[PropertySpec] =
-    &[PropertySpec::new("scale", PropKind::Uint, "integer font magnification (>= 1)")];
+static TIMEOVERLAY_PROPS: &[PropertySpec] = &[PropertySpec::new(
+    "scale",
+    PropKind::Uint,
+    "integer font magnification (>= 1)",
+)];
 
 impl PadTemplates for TimeOverlay {
     fn pad_templates() -> Vec<PadTemplate> {
@@ -243,7 +265,15 @@ pub(crate) fn draw_text(buf: &mut [u8], w: usize, h: usize, text: &str, scale: u
     }
 }
 
-fn fill_rect(buf: &mut [u8], dims: (usize, usize), x: i32, y: i32, rw: i32, rh: i32, color: [u8; 4]) {
+fn fill_rect(
+    buf: &mut [u8],
+    dims: (usize, usize),
+    x: i32,
+    y: i32,
+    rw: i32,
+    rh: i32,
+    color: [u8; 4],
+) {
     let (wi, hi) = (dims.0 as i32, dims.1 as i32);
     for py in y..y + rh {
         if py < 0 || py >= hi {
@@ -258,14 +288,30 @@ fn fill_rect(buf: &mut [u8], dims: (usize, usize), x: i32, y: i32, rw: i32, rh: 
     }
 }
 
-fn blit_glyph(buf: &mut [u8], dims: (usize, usize), gx: i32, gy: i32, scale: i32, rows: [u8; 8], color: [u8; 4]) {
+fn blit_glyph(
+    buf: &mut [u8],
+    dims: (usize, usize),
+    gx: i32,
+    gy: i32,
+    scale: i32,
+    rows: [u8; 8],
+    color: [u8; 4],
+) {
     for (ry, bits) in rows.iter().enumerate() {
         if *bits == 0 {
             continue;
         }
         for col in 0..8i32 {
             if bits & (0x80 >> col) != 0 {
-                fill_rect(buf, dims, gx + col * scale, gy + ry as i32 * scale, scale, scale, color);
+                fill_rect(
+                    buf,
+                    dims,
+                    gx + col * scale,
+                    gy + ry as i32 * scale,
+                    scale,
+                    scale,
+                    color,
+                );
             }
         }
     }

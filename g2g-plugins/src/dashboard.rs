@@ -32,7 +32,9 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
 use tokio_tungstenite::tungstenite::Message;
 
-use g2g_core::runtime::{LinkInterceptor, NodeRole, Observer, ProbeAction, ProbeSlot, TelemetrySnapshot};
+use g2g_core::runtime::{
+    LinkInterceptor, NodeRole, Observer, ProbeAction, ProbeSlot, TelemetrySnapshot,
+};
 use g2g_core::{BusMessage, Caps, PipelinePacket};
 
 use crate::preview::packet_preview;
@@ -60,7 +62,10 @@ impl LinkInterceptor for PreviewTap {
         let now = g2g_core::metrics::monotonic_ns();
         let last = self.last_ns.load(Ordering::Relaxed);
         if now.saturating_sub(last) >= self.interval_ns
-            && self.last_ns.compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed).is_ok()
+            && self
+                .last_ns
+                .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
         {
             if let Some(v) = packet_preview(packet, &self.caps) {
                 if let Ok(mut slot) = self.latest.lock() {
@@ -114,8 +119,11 @@ pub fn snapshot_json(snap: &TelemetrySnapshot) -> String {
                     "max_ns": l.transit.max_ns,
                 })
             });
-            let (fill_mean, fill_max) =
-                n.latency.as_ref().map(|l| (l.fill_mean_pct, l.fill_max_pct)).unwrap_or((0, 0));
+            let (fill_mean, fill_max) = n
+                .latency
+                .as_ref()
+                .map(|l| (l.fill_mean_pct, l.fill_max_pct))
+                .unwrap_or((0, 0));
             json!({
                 "id": n.id,
                 "name": n.name,
@@ -150,12 +158,19 @@ pub fn event_json(msg: &BusMessage) -> Option<String> {
         BusMessage::Info(s) => json!({"kind": "info", "text": s}),
         BusMessage::Error(e) => json!({"kind": "error", "text": format!("{e:?}")}),
         BusMessage::Warning(e) => json!({"kind": "warning", "text": format!("{e:?}")}),
-        BusMessage::NegotiationFailed(f) => json!({"kind": "negotiation-failed", "text": format!("{f:?}")}),
+        BusMessage::NegotiationFailed(f) => {
+            json!({"kind": "negotiation-failed", "text": format!("{f:?}")})
+        }
         BusMessage::StateChanged { old, new } => {
             json!({"kind": "state-changed", "old": format!("{old:?}"), "new": format!("{new:?}")})
         }
         BusMessage::AsyncDone => json!({"kind": "async-done"}),
-        BusMessage::Qos { running_time_ns, jitter_ns, processed, dropped } => json!({
+        BusMessage::Qos {
+            running_time_ns,
+            jitter_ns,
+            processed,
+            dropped,
+        } => json!({
             "kind": "qos",
             "running_time_ns": running_time_ns,
             "jitter_ns": jitter_ns,
@@ -310,12 +325,10 @@ async fn stream_telemetry(
 
 /// Handle a `{type:"subscribe"|"unsubscribe","edge":N}` control message from the
 /// dashboard, installing or removing an edge preview tap.
-fn handle_client_msg(
-    text: &str,
-    observer: &Observer,
-    subs: &mut EdgeSubs,
-) {
-    let Ok(msg) = serde_json::from_str::<Value>(text) else { return };
+fn handle_client_msg(text: &str, observer: &Observer, subs: &mut EdgeSubs) {
+    let Ok(msg) = serde_json::from_str::<Value>(text) else {
+        return;
+    };
     let edge = match msg.get("edge").and_then(|e| e.as_u64()) {
         Some(e) => e,
         None => return,
@@ -325,9 +338,10 @@ fn handle_client_msg(
             if subs.contains_key(&edge) {
                 return;
             }
-            let (Some(slot), Some(caps)) =
-                (observer.edge_probe(edge as usize), observer.edge_caps(edge as usize))
-            else {
+            let (Some(slot), Some(caps)) = (
+                observer.edge_probe(edge as usize),
+                observer.edge_caps(edge as usize),
+            ) else {
                 return;
             };
             let latest = Arc::new(Mutex::new(None));
@@ -396,7 +410,11 @@ mod tests {
                     }),
                 },
             ],
-            edges: vec![EdgeInfo { from: 0, to: 1, caps: None }],
+            edges: vec![EdgeInfo {
+                from: 0,
+                to: 1,
+                caps: None,
+            }],
         };
         let json = snapshot_json(&snap);
         let v: Value = serde_json::from_str(&json).unwrap();
@@ -439,8 +457,9 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(serve_on(listener, observer, ev_tx.clone()));
 
-        let (mut ws, _) =
-            tokio_tungstenite::connect_async(format!("ws://{addr}/")).await.unwrap();
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/"))
+            .await
+            .unwrap();
 
         // The server pushes a telemetry snapshot on its tick.
         let telemetry = loop {
@@ -488,8 +507,11 @@ mod tests {
 
         let reg = default_registry();
         // A forever source so the run keeps flowing while we tap an edge.
-        let graph = parse_launch(&reg, "videotestsrc ! videoscale width=32 height=24 ! fakesink")
-            .expect("parses");
+        let graph = parse_launch(
+            &reg,
+            "videotestsrc ! videoscale width=32 height=24 ! fakesink",
+        )
+        .expect("parses");
         let observer = Observer::new();
         let (ev_tx, _) = broadcast::channel::<String>(16);
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
@@ -498,11 +520,14 @@ mod tests {
 
         let clock = ZeroClock;
         let client = async {
-            let (mut ws, _) =
-                tokio_tungstenite::connect_async(format!("ws://{addr}/")).await.unwrap();
+            let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/"))
+                .await
+                .unwrap();
             let mut subscribed = false;
             loop {
-                let Some(Ok(Message::Text(t))) = ws.next().await else { continue };
+                let Some(Ok(Message::Text(t))) = ws.next().await else {
+                    continue;
+                };
                 let v: Value = serde_json::from_str(&t).unwrap();
                 // Subscribe to edge 0 (videotestsrc -> videoscale) once the run
                 // has registered the graph's edges.
@@ -510,7 +535,9 @@ mod tests {
                     && v["type"] == "telemetry"
                     && !v["edges"].as_array().unwrap().is_empty()
                 {
-                    ws.send(Message::Text(r#"{"type":"subscribe","edge":0}"#.into())).await.unwrap();
+                    ws.send(Message::Text(r#"{"type":"subscribe","edge":0}"#.into()))
+                        .await
+                        .unwrap();
                     subscribed = true;
                 }
                 if v["type"] == "preview" {

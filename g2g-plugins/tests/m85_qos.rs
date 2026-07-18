@@ -43,7 +43,9 @@ async fn syncsink_drops_late_frames_and_posts_qos() {
     let mut src = VideoTestSrc::new(8, 8, 30, 4);
     // now = 1 s; the 4 frames at 30 fps (PTS 0, 33, 66, 100 ms) are all past
     // their deadline, so with a 0 ns lateness bound every one is dropped.
-    let mut sink = SyncSink::new(FixedClock(1_000_000_000)).with_max_lateness_ns(0).with_bus(handle);
+    let mut sink = SyncSink::new(FixedClock(1_000_000_000))
+        .with_max_lateness_ns(0)
+        .with_bus(handle);
 
     let stats = {
         let mut g: Graph<GraphNodeRef> = Graph::new();
@@ -61,13 +63,23 @@ async fn syncsink_drops_late_frames_and_posts_qos() {
     // monotonically rising dropped count.
     let mut qos = Vec::new();
     while let Some(m) = bus.try_recv() {
-        if let BusMessage::Qos { jitter_ns, processed, dropped, .. } = m {
+        if let BusMessage::Qos {
+            jitter_ns,
+            processed,
+            dropped,
+            ..
+        } = m
+        {
             assert!(jitter_ns > 0, "late frame has positive jitter");
             assert_eq!(processed, 0, "nothing was ever presented");
             qos.push(dropped);
         }
     }
-    assert_eq!(qos, &[1, 2, 3, 4], "cumulative dropped count rises with each report");
+    assert_eq!(
+        qos,
+        &[1, 2, 3, 4],
+        "cumulative dropped count rises with each report"
+    );
 }
 
 #[tokio::test]
@@ -76,14 +88,18 @@ async fn on_time_frames_present_with_no_qos() {
     let mut src = VideoTestSrc::new(8, 8, 30, 4);
     // now = 0: no frame is past its deadline, so none is dropped even with the
     // tightest (0 ns) lateness bound.
-    let mut sink = SyncSink::new(FixedClock(0)).with_max_lateness_ns(0).with_bus(handle);
+    let mut sink = SyncSink::new(FixedClock(0))
+        .with_max_lateness_ns(0)
+        .with_bus(handle);
 
     {
         let mut g: Graph<GraphNodeRef> = Graph::new();
         let s = g.add_source(GraphNodeRef::source_ref(&mut src));
         let k = g.add_sink(GraphNodeRef::element_ref(&mut sink));
         g.link(s, k).unwrap();
-        run_graph(g, &NullClock, 4).await.expect("on-time graph runs");
+        run_graph(g, &NullClock, 4)
+            .await
+            .expect("on-time graph runs");
     }
 
     assert_eq!(sink.received(), 4, "all frames presented");

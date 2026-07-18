@@ -22,7 +22,12 @@ impl PipelineClock for ZeroClock {
 }
 
 fn vcaps(width: Dim) -> Caps {
-    Caps::RawVideo { format: RawVideoFormat::Rgba8, width, height: Dim::Fixed(480), framerate: Rate::Fixed(30 << 16) }
+    Caps::RawVideo {
+        format: RawVideoFormat::Rgba8,
+        width,
+        height: Dim::Fixed(480),
+        framerate: Rate::Fixed(30 << 16),
+    }
 }
 
 fn make_frame(seq: u64) -> Frame {
@@ -49,7 +54,8 @@ impl SourceLoop for CapSrc {
     where
         Self: 'a;
 
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 
@@ -108,7 +114,8 @@ impl AsyncElement for CollectingSink {
         match packet {
             PipelinePacket::DataFrame(f) => self.seqs.push(f.sequence),
             PipelinePacket::Eos => self.eos_count += 1,
-            PipelinePacket::CapsChanged(_) | PipelinePacket::Flush | PipelinePacket::Segment(_) => {}
+            PipelinePacket::CapsChanged(_) | PipelinePacket::Flush | PipelinePacket::Segment(_) => {
+            }
             _ => {}
         }
         Box::pin(async { Ok(()) })
@@ -119,8 +126,24 @@ impl AsyncElement for CollectingSink {
 async fn muxer_negotiates_each_input_independently() {
     // Each input advertises a different width range; per-input fixation must
     // land on each input's own minimum.
-    let mut a = CapSrc { advertise: vcaps(Dim::Range { min: 640, max: 1920 }), start_seq: 0, count: 0, configured: false };
-    let mut b = CapSrc { advertise: vcaps(Dim::Range { min: 1280, max: 3840 }), start_seq: 0, count: 0, configured: false };
+    let mut a = CapSrc {
+        advertise: vcaps(Dim::Range {
+            min: 640,
+            max: 1920,
+        }),
+        start_seq: 0,
+        count: 0,
+        configured: false,
+    };
+    let mut b = CapSrc {
+        advertise: vcaps(Dim::Range {
+            min: 1280,
+            max: 3840,
+        }),
+        start_seq: 0,
+        count: 0,
+        configured: false,
+    };
     let mut mux = InterleaveMux::new(2, vcaps(Dim::Fixed(640)));
     let mut snk = CollectingSink::default();
     let clock = ZeroClock;
@@ -132,15 +155,33 @@ async fn muxer_negotiates_each_input_independently() {
             .expect("muxer pipeline should complete");
     }
 
-    assert_eq!(mux.input_caps(0), Some(&vcaps(Dim::Fixed(640))), "input 0 fixated to its own min");
-    assert_eq!(mux.input_caps(1), Some(&vcaps(Dim::Fixed(1280))), "input 1 fixated to its own min");
+    assert_eq!(
+        mux.input_caps(0),
+        Some(&vcaps(Dim::Fixed(640))),
+        "input 0 fixated to its own min"
+    );
+    assert_eq!(
+        mux.input_caps(1),
+        Some(&vcaps(Dim::Fixed(1280))),
+        "input 1 fixated to its own min"
+    );
 }
 
 #[tokio::test]
 async fn muxer_forwards_all_inputs_and_aggregates_eos() {
     let caps = vcaps(Dim::Fixed(64));
-    let mut a = CapSrc { advertise: caps.clone(), start_seq: 0, count: 3, configured: false };
-    let mut b = CapSrc { advertise: caps.clone(), start_seq: 100, count: 3, configured: false };
+    let mut a = CapSrc {
+        advertise: caps.clone(),
+        start_seq: 0,
+        count: 3,
+        configured: false,
+    };
+    let mut b = CapSrc {
+        advertise: caps.clone(),
+        start_seq: 100,
+        count: 3,
+        configured: false,
+    };
     let mut mux = InterleaveMux::new(2, caps.clone());
     let mut snk = CollectingSink::default();
     let clock = ZeroClock;
@@ -153,10 +194,17 @@ async fn muxer_forwards_all_inputs_and_aggregates_eos() {
     };
 
     assert_eq!(stats.frames_emitted, 6);
-    assert_eq!(stats.frames_consumed, 6, "all inputs forwarded, not just one");
+    assert_eq!(
+        stats.frames_consumed, 6,
+        "all inputs forwarded, not just one"
+    );
 
     let mut got = snk.seqs.clone();
     got.sort_unstable();
-    assert_eq!(got, vec![0, 1, 2, 100, 101, 102], "every input's frames reached the sink");
+    assert_eq!(
+        got,
+        vec![0, 1, 2, 100, 101, 102],
+        "every input's frames reached the sink"
+    );
     assert_eq!(snk.eos_count, 1, "single EOS after both inputs ended");
 }

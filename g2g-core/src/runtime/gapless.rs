@@ -265,9 +265,9 @@ impl Future for GaplessInstantWait<'_> {
 mod tests {
     use super::*;
     use crate::caps::Caps;
+    use crate::element::ConfigureOutcome;
     use crate::element::OutputSink;
     use crate::error::G2gError;
-    use crate::element::ConfigureOutcome;
     use crate::runtime::SourceLoop;
 
     /// A no-op source so the queue has something boxed to hold.
@@ -344,10 +344,16 @@ mod tests {
         assert!(fut.as_mut().poll(&mut cx).is_pending(), "no instant yet");
         // A plain enqueue does NOT resolve wait_instant (that is the gapless path).
         c.enqueue(Box::new(NullSrc));
-        assert!(fut.as_mut().poll(&mut cx).is_pending(), "enqueue is not an instant switch");
+        assert!(
+            fut.as_mut().poll(&mut cx).is_pending(),
+            "enqueue is not an instant switch"
+        );
         // switch_now does.
         c.switch_now(Box::new(NullSrc));
-        assert!(fut.as_mut().poll(&mut cx).is_ready(), "switch_now resolves wait_instant");
+        assert!(
+            fut.as_mut().poll(&mut cx).is_ready(),
+            "switch_now resolves wait_instant"
+        );
     }
 
     #[test]
@@ -365,7 +371,10 @@ mod tests {
         let mut fut = core::pin::pin!(c2.wait_event());
         assert!(fut.as_mut().poll(&mut cx).is_pending(), "no event yet");
         c2.finish();
-        assert!(fut.as_mut().poll(&mut cx).is_ready(), "finish resolves the wait");
+        assert!(
+            fut.as_mut().poll(&mut cx).is_ready(),
+            "finish resolves the wait"
+        );
     }
 
     fn noop_waker() -> Waker {

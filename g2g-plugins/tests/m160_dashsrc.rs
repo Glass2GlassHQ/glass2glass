@@ -58,7 +58,12 @@ impl OutputSink for CaptureSink {
 fn au_frame(bytes: Vec<u8>, pts_ns: u64, seq: u64) -> Frame {
     Frame {
         domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming { pts_ns, dts_ns: pts_ns, duration_ns: 33_333_333, ..FrameTiming::default() },
+        timing: FrameTiming {
+            pts_ns,
+            dts_ns: pts_ns,
+            duration_ns: 33_333_333,
+            ..FrameTiming::default()
+        },
         sequence: seq,
         meta: Default::default(),
     }
@@ -67,8 +72,15 @@ fn au_frame(bytes: Vec<u8>, pts_ns: u64, seq: u64) -> Frame {
 fn access_units() -> Vec<Vec<u8>> {
     let sps = [0x67u8, 0x42, 0xC0, 0x1E, 0x11, 0x22];
     let pps = [0x68u8, 0xCE, 0x3C, 0x80];
-    let idr: Vec<u8> =
-        [&[0, 0, 0, 1][..], &sps, &[0, 0, 0, 1], &pps, &[0, 0, 0, 1], &[0x65, 0xAA, 0xBB]].concat();
+    let idr: Vec<u8> = [
+        &[0, 0, 0, 1][..],
+        &sps,
+        &[0, 0, 0, 1],
+        &pps,
+        &[0, 0, 0, 1],
+        &[0x65, 0xAA, 0xBB],
+    ]
+    .concat();
     let p = |f: u8| [&[0, 0, 0, 1][..], &[0x41, f, f]].concat();
     vec![idr, p(1), p(2)]
 }
@@ -86,9 +98,12 @@ async fn make_fmp4(aus: &[Vec<u8>]) -> Vec<u8> {
     .unwrap();
     let mut out = CaptureSink::default();
     for (i, au) in aus.iter().enumerate() {
-        mux.process(PipelinePacket::DataFrame(au_frame(au.clone(), i as u64 * 33_333_333, i as u64)), &mut out)
-            .await
-            .unwrap();
+        mux.process(
+            PipelinePacket::DataFrame(au_frame(au.clone(), i as u64 * 33_333_333, i as u64)),
+            &mut out,
+        )
+        .await
+        .unwrap();
     }
     mux.process(PipelinePacket::Eos, &mut out).await.unwrap();
     out.body
@@ -163,8 +178,9 @@ fn serve(init: Vec<u8>, segs: Vec<Vec<u8>>) -> String {
             {
                 segs.get(idx).cloned().unwrap_or_default()
             } else {
-                let _ = stream
-                    .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                let _ = stream.write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
                 continue;
             };
             let header = format!(
@@ -225,8 +241,9 @@ fn serve_timeline(init: Vec<u8>, segs: Vec<Vec<u8>>) -> String {
             {
                 segs.get(time / 1000).cloned().unwrap_or_default()
             } else {
-                let _ = stream
-                    .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                let _ = stream.write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
                 continue;
             };
             let header = format!(
@@ -295,8 +312,9 @@ fn serve_live(init: Vec<u8>, segs: Vec<Vec<u8>>) -> String {
             {
                 segs.get(time / 1000).cloned().unwrap_or_default()
             } else {
-                let _ = stream
-                    .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                let _ = stream.write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
                 continue;
             };
             let header = format!(
@@ -321,25 +339,43 @@ async fn dash_live_reloads_dynamic_mpd_and_plays_each_segment_once() {
     let url = serve_live(init.clone(), segs.clone());
 
     let mut src = DashSrc::new(url).with_reload_interval_ms(20);
-    src.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff }).unwrap();
+    src.configure_pipeline(&Caps::ByteStream {
+        encoding: ByteStreamEncoding::IsoBmff,
+    })
+    .unwrap();
     let mut sink = CaptureSink::default();
     let count = src.run(&mut sink).await.unwrap();
 
-    assert_eq!(count, 5, "init + 4 segments, each played once across reloads");
+    assert_eq!(
+        count, 5,
+        "init + 4 segments, each played once across reloads"
+    );
     let mut expected = init.clone();
     for s in &segs {
         expected.extend_from_slice(s);
     }
-    assert_eq!(sink.body, expected, "sliding-window segments delivered once, in order");
+    assert_eq!(
+        sink.body, expected,
+        "sliding-window segments delivered once, in order"
+    );
 
     // End to end through the demuxer.
     let mut dmx = Fmp4Demux::new();
-    dmx.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff }).unwrap();
+    dmx.configure_pipeline(&Caps::ByteStream {
+        encoding: ByteStreamEncoding::IsoBmff,
+    })
+    .unwrap();
     let mut dsink = CaptureSink::default();
-    dmx.process(PipelinePacket::DataFrame(au_frame(sink.body.clone(), 0, 0)), &mut dsink)
-        .await
-        .unwrap();
-    assert_eq!(dsink.aus, aus, "live DASH -> Fmp4Demux recovers all access units once");
+    dmx.process(
+        PipelinePacket::DataFrame(au_frame(sink.body.clone(), 0, 0)),
+        &mut dsink,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        dsink.aus, aus,
+        "live DASH -> Fmp4Demux recovers all access units once"
+    );
 }
 
 #[tokio::test]
@@ -350,7 +386,10 @@ async fn dash_segment_timeline_time_addressing_demuxes() {
     let url = serve_timeline(init.clone(), segs.clone());
 
     let mut src = DashSrc::new(url);
-    src.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff }).unwrap();
+    src.configure_pipeline(&Caps::ByteStream {
+        encoding: ByteStreamEncoding::IsoBmff,
+    })
+    .unwrap();
     let mut sink = CaptureSink::default();
     let count = src.run(&mut sink).await.unwrap();
 
@@ -359,15 +398,27 @@ async fn dash_segment_timeline_time_addressing_demuxes() {
     for s in &segs {
         expected.extend_from_slice(s);
     }
-    assert_eq!(sink.body, expected, "timeline segments delivered in time order");
+    assert_eq!(
+        sink.body, expected,
+        "timeline segments delivered in time order"
+    );
 
     let mut dmx = Fmp4Demux::new();
-    dmx.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff }).unwrap();
+    dmx.configure_pipeline(&Caps::ByteStream {
+        encoding: ByteStreamEncoding::IsoBmff,
+    })
+    .unwrap();
     let mut dsink = CaptureSink::default();
-    dmx.process(PipelinePacket::DataFrame(au_frame(sink.body.clone(), 0, 0)), &mut dsink)
-        .await
-        .unwrap();
-    assert_eq!(dsink.aus, aus, "SegmentTimeline DashSrc -> Fmp4Demux recovers the access units");
+    dmx.process(
+        PipelinePacket::DataFrame(au_frame(sink.body.clone(), 0, 0)),
+        &mut dsink,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        dsink.aus, aus,
+        "SegmentTimeline DashSrc -> Fmp4Demux recovers the access units"
+    );
 }
 
 #[tokio::test]
@@ -385,7 +436,10 @@ async fn dash_time_seek_jumps_to_the_segment_containing_the_target() {
     seek.seek(Seek::flush_to(1_500_000_000));
 
     let mut src = DashSrc::new(url).with_seek(seek);
-    src.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff }).unwrap();
+    src.configure_pipeline(&Caps::ByteStream {
+        encoding: ByteStreamEncoding::IsoBmff,
+    })
+    .unwrap();
     let mut sink = CaptureSink::default();
     src.run(&mut sink).await.unwrap();
 
@@ -400,25 +454,43 @@ async fn dash_time_seek_jumps_to_the_segment_containing_the_target() {
     let mut expected = init.clone();
     expected.extend_from_slice(&segs[1]);
     expected.extend_from_slice(&segs[2]);
-    assert_eq!(sink.body, expected, "init re-emitted, then seg1 onward; seg0 skipped");
+    assert_eq!(
+        sink.body, expected,
+        "init re-emitted, then seg1 onward; seg0 skipped"
+    );
 
     // The re-emitted init + the two fragments still demux to two access units
     // (the post-target tail). The first emitted AU gets the config-record
     // parameter sets prepended (fmp4demux re-arms them after the reset), so check
     // the count and that the last AU is byte-exact rather than equality on all.
     let mut dmx = Fmp4Demux::new();
-    dmx.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff }).unwrap();
+    dmx.configure_pipeline(&Caps::ByteStream {
+        encoding: ByteStreamEncoding::IsoBmff,
+    })
+    .unwrap();
     let mut dsink = CaptureSink::default();
-    dmx.process(PipelinePacket::DataFrame(au_frame(sink.body.clone(), 0, 0)), &mut dsink)
-        .await
-        .unwrap();
-    assert_eq!(dsink.aus.len(), 2, "seek output demuxes to the two post-target access units");
-    assert_eq!(dsink.aus[1], aus[2], "the last demuxed AU is byte-exact (no param-set prepend)");
+    dmx.process(
+        PipelinePacket::DataFrame(au_frame(sink.body.clone(), 0, 0)),
+        &mut dsink,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        dsink.aus.len(),
+        2,
+        "seek output demuxes to the two post-target access units"
+    );
+    assert_eq!(
+        dsink.aus[1], aus[2],
+        "the last demuxed AU is byte-exact (no param-set prepend)"
+    );
 }
 
 /// Parse a `Range: bytes=a-b` request header, returning the inclusive `(a, b)`.
 fn parse_range_header(req: &str) -> Option<(usize, usize)> {
-    let line = req.lines().find(|l| l.to_ascii_lowercase().starts_with("range:"))?;
+    let line = req
+        .lines()
+        .find(|l| l.to_ascii_lowercase().starts_with("range:"))?;
     let spec = line.split_once('=')?.1.trim();
     let (a, b) = spec.split_once('-')?;
     Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
@@ -469,8 +541,9 @@ fn serve_segment_list(resource: Vec<u8>, mpd: String) -> String {
                 let _ = stream.write_all(header.as_bytes());
                 let _ = stream.write_all(&body);
             } else {
-                let _ = stream
-                    .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                let _ = stream.write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
             }
         }
     });
@@ -514,21 +587,36 @@ async fn dash_segment_list_byte_ranges_single_file_cmaf_demuxes() {
     let url = serve_segment_list(resource.clone(), mpd);
 
     let mut src = DashSrc::new(url);
-    src.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff }).unwrap();
+    src.configure_pipeline(&Caps::ByteStream {
+        encoding: ByteStreamEncoding::IsoBmff,
+    })
+    .unwrap();
     let mut sink = CaptureSink::default();
     src.run(&mut sink).await.unwrap();
 
     // The byte-range fetches reassemble the single-file resource exactly.
-    assert_eq!(sink.body, resource, "SegmentList byte ranges reassemble the single-file resource");
+    assert_eq!(
+        sink.body, resource,
+        "SegmentList byte ranges reassemble the single-file resource"
+    );
 
     // End to end: the reassembled fMP4 demuxes back to the original access units.
     let mut dmx = Fmp4Demux::new();
-    dmx.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff }).unwrap();
+    dmx.configure_pipeline(&Caps::ByteStream {
+        encoding: ByteStreamEncoding::IsoBmff,
+    })
+    .unwrap();
     let mut dsink = CaptureSink::default();
-    dmx.process(PipelinePacket::DataFrame(au_frame(sink.body.clone(), 0, 0)), &mut dsink)
-        .await
-        .unwrap();
-    assert_eq!(dsink.aus, aus, "SegmentList CMAF -> Fmp4Demux recovers the access units");
+    dmx.process(
+        PipelinePacket::DataFrame(au_frame(sink.body.clone(), 0, 0)),
+        &mut dsink,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        dsink.aus, aus,
+        "SegmentList CMAF -> Fmp4Demux recovers the access units"
+    );
 }
 
 /// Build a version-0 `sidx` box from `(referenced_size, subsegment_duration)`.
@@ -562,7 +650,13 @@ async fn dash_segment_base_sidx_indexed_single_file_demuxes() {
     // Single-file layout: [init][sidx][frag0][frag1][frag2]. The sidx indexes the
     // three fragments; the source fetches init + each fragment by range (never the
     // sidx), so the demuxer sees init + fragments just like the other profiles.
-    let sidx = build_sidx(1000, &segs.iter().map(|s| (s.len() as u32, 1000)).collect::<Vec<_>>());
+    let sidx = build_sidx(
+        1000,
+        &segs
+            .iter()
+            .map(|s| (s.len() as u32, 1000))
+            .collect::<Vec<_>>(),
+    );
     let mut resource = init.clone();
     resource.extend_from_slice(&sidx);
     for s in &segs {
@@ -586,7 +680,10 @@ async fn dash_segment_base_sidx_indexed_single_file_demuxes() {
     let url = serve_segment_list(resource, mpd);
 
     let mut src = DashSrc::new(url);
-    src.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff }).unwrap();
+    src.configure_pipeline(&Caps::ByteStream {
+        encoding: ByteStreamEncoding::IsoBmff,
+    })
+    .unwrap();
     let mut sink = CaptureSink::default();
     src.run(&mut sink).await.unwrap();
 
@@ -595,15 +692,27 @@ async fn dash_segment_base_sidx_indexed_single_file_demuxes() {
     for s in &segs {
         expected.extend_from_slice(s);
     }
-    assert_eq!(sink.body, expected, "sidx-indexed fetches skip the index, reassemble init+frags");
+    assert_eq!(
+        sink.body, expected,
+        "sidx-indexed fetches skip the index, reassemble init+frags"
+    );
 
     let mut dmx = Fmp4Demux::new();
-    dmx.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff }).unwrap();
+    dmx.configure_pipeline(&Caps::ByteStream {
+        encoding: ByteStreamEncoding::IsoBmff,
+    })
+    .unwrap();
     let mut dsink = CaptureSink::default();
-    dmx.process(PipelinePacket::DataFrame(au_frame(sink.body.clone(), 0, 0)), &mut dsink)
-        .await
-        .unwrap();
-    assert_eq!(dsink.aus, aus, "SegmentBase CMAF -> Fmp4Demux recovers the access units");
+    dmx.process(
+        PipelinePacket::DataFrame(au_frame(sink.body.clone(), 0, 0)),
+        &mut dsink,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        dsink.aus, aus,
+        "SegmentBase CMAF -> Fmp4Demux recovers the access units"
+    );
 }
 
 // --- throughput-driven ABR (M372) -----------------------------------------
@@ -684,14 +793,24 @@ fn serve_abr_dash(
 async fn dash_abr_downswitches_when_measured_bandwidth_is_low() {
     let init_high: Vec<u8> = (0..100u32).map(|i| i as u8).collect();
     let init_low: Vec<u8> = (0..100u32).map(|i| (i as u8) ^ 0xAA).collect();
-    let high: Vec<Vec<u8>> =
-        (0..3u8).map(|s| (0..60_000u32).map(|i| (i as u8) ^ (s + 1)).collect()).collect();
-    let low: Vec<Vec<u8>> =
-        (0..3u8).map(|s| (0..2_000u32).map(|i| (i as u8) ^ (0xF0 + s)).collect()).collect();
-    let url = serve_abr_dash(init_high.clone(), init_low.clone(), high.clone(), low.clone());
+    let high: Vec<Vec<u8>> = (0..3u8)
+        .map(|s| (0..60_000u32).map(|i| (i as u8) ^ (s + 1)).collect())
+        .collect();
+    let low: Vec<Vec<u8>> = (0..3u8)
+        .map(|s| (0..2_000u32).map(|i| (i as u8) ^ (0xF0 + s)).collect())
+        .collect();
+    let url = serve_abr_dash(
+        init_high.clone(),
+        init_low.clone(),
+        high.clone(),
+        low.clone(),
+    );
 
     let mut src = DashSrc::new(url).with_abr();
-    src.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff }).unwrap();
+    src.configure_pipeline(&Caps::ByteStream {
+        encoding: ByteStreamEncoding::IsoBmff,
+    })
+    .unwrap();
     let mut sink = CaptureSink::default();
     src.run(&mut sink).await.unwrap();
 
@@ -718,7 +837,10 @@ async fn dash_streams_init_then_segments_and_demuxes() {
     let url = serve(init.clone(), segs.clone());
 
     let mut src = DashSrc::new(url);
-    src.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff }).unwrap();
+    src.configure_pipeline(&Caps::ByteStream {
+        encoding: ByteStreamEncoding::IsoBmff,
+    })
+    .unwrap();
     let mut sink = CaptureSink::default();
     let count = src.run(&mut sink).await.unwrap();
 
@@ -727,14 +849,26 @@ async fn dash_streams_init_then_segments_and_demuxes() {
     for s in &segs {
         expected.extend_from_slice(s);
     }
-    assert_eq!(sink.body, expected, "init first, then segments in $Number$ order");
+    assert_eq!(
+        sink.body, expected,
+        "init first, then segments in $Number$ order"
+    );
 
     // End to end: the delivered byte stream demuxes back to the access units.
     let mut dmx = Fmp4Demux::new();
-    dmx.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff }).unwrap();
+    dmx.configure_pipeline(&Caps::ByteStream {
+        encoding: ByteStreamEncoding::IsoBmff,
+    })
+    .unwrap();
     let mut dsink = CaptureSink::default();
-    dmx.process(PipelinePacket::DataFrame(au_frame(sink.body.clone(), 0, 0)), &mut dsink)
-        .await
-        .unwrap();
-    assert_eq!(dsink.aus, aus, "DashSrc -> Fmp4Demux recovers the original access units");
+    dmx.process(
+        PipelinePacket::DataFrame(au_frame(sink.body.clone(), 0, 0)),
+        &mut dsink,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        dsink.aus, aus,
+        "DashSrc -> Fmp4Demux recovers the original access units"
+    );
 }

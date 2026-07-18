@@ -13,13 +13,13 @@
 use core::future::Future;
 use core::pin::Pin;
 
+use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
     AudioFormat, Bus, BusMessage, ByteStreamEncoding, Caps, Dim, G2gError, MultiInputElement,
     OutputSink, PushOutcome, Rate, StreamType, VideoCodec,
 };
-use g2g_core::element::AsyncElement;
 use g2g_plugins::mkvdemux::MkvDemux;
 use g2g_plugins::mkvmuxn::MkvMuxN;
 
@@ -33,7 +33,11 @@ fn h264_caps() -> Caps {
 }
 
 fn aac_caps() -> Caps {
-    Caps::Audio { format: AudioFormat::Aac, channels: 2, sample_rate: 48_000 }
+    Caps::Audio {
+        format: AudioFormat::Aac,
+        channels: 2,
+        sample_rate: 48_000,
+    }
 }
 
 #[derive(Default)]
@@ -59,7 +63,11 @@ impl OutputSink for CollectSink {
 fn frame(data: Vec<u8>, pts_ns: u64) -> PipelinePacket {
     PipelinePacket::DataFrame(Frame::new(
         MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-        FrameTiming { pts_ns, dts_ns: pts_ns, ..FrameTiming::default() },
+        FrameTiming {
+            pts_ns,
+            dts_ns: pts_ns,
+            ..FrameTiming::default()
+        },
         0,
     ))
 }
@@ -101,12 +109,28 @@ async fn mux_av() -> Vec<u8> {
     mux.configure_pipeline(0, &h264_caps()).unwrap();
     mux.configure_pipeline(1, &aac_caps()).unwrap();
     let mut sink = CollectSink::default();
-    mux.process(0, frame(annexb(&[&sps, &pps, &idr]), 0), &mut sink).await.unwrap();
-    mux.process(1, frame(adts_au(&[0x01, 0x02, 0x03]), 0), &mut sink).await.unwrap();
-    mux.process(0, frame(annexb(&[&[0x41u8, 0x9a, 0x00]]), 33_000_000), &mut sink).await.unwrap();
-    mux.process(1, frame(adts_au(&[0x04, 0x05]), 21_000_000), &mut sink).await.unwrap();
-    mux.process(0, PipelinePacket::Eos, &mut sink).await.unwrap();
-    mux.process(1, PipelinePacket::Eos, &mut sink).await.unwrap();
+    mux.process(0, frame(annexb(&[&sps, &pps, &idr]), 0), &mut sink)
+        .await
+        .unwrap();
+    mux.process(1, frame(adts_au(&[0x01, 0x02, 0x03]), 0), &mut sink)
+        .await
+        .unwrap();
+    mux.process(
+        0,
+        frame(annexb(&[&[0x41u8, 0x9a, 0x00]]), 33_000_000),
+        &mut sink,
+    )
+    .await
+    .unwrap();
+    mux.process(1, frame(adts_au(&[0x04, 0x05]), 21_000_000), &mut sink)
+        .await
+        .unwrap();
+    mux.process(0, PipelinePacket::Eos, &mut sink)
+        .await
+        .unwrap();
+    mux.process(1, PipelinePacket::Eos, &mut sink)
+        .await
+        .unwrap();
     sink.bytes
 }
 
@@ -117,7 +141,9 @@ async fn mkvdemux_announces_a_stream_collection_for_all_tracks() {
     let (bus, handle) = Bus::new(16);
     let mut demux = MkvDemux::new().with_bus(handle);
     demux
-        .configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::Matroska })
+        .configure_pipeline(&Caps::ByteStream {
+            encoding: ByteStreamEncoding::Matroska,
+        })
         .expect("configure");
 
     // Feed the muxed A/V stream; the demuxer parses Tracks and announces the
@@ -141,7 +167,11 @@ async fn mkvdemux_announces_a_stream_collection_for_all_tracks() {
             collections.push(c);
         }
     }
-    assert_eq!(collections.len(), 1, "exactly one StreamCollection is announced");
+    assert_eq!(
+        collections.len(),
+        1,
+        "exactly one StreamCollection is announced"
+    );
     let c = &collections[0];
     assert_eq!(c.len(), 2, "both the video and audio streams are listed");
 
@@ -149,7 +179,13 @@ async fn mkvdemux_announces_a_stream_collection_for_all_tracks() {
     assert_eq!(video.len(), 1, "one video stream");
     assert_eq!(video[0].id, "matroska-track-1");
     assert!(
-        matches!(video[0].caps, Caps::CompressedVideo { codec: VideoCodec::H264, .. }),
+        matches!(
+            video[0].caps,
+            Caps::CompressedVideo {
+                codec: VideoCodec::H264,
+                ..
+            }
+        ),
         "video stream carries H.264 caps"
     );
 
@@ -157,7 +193,14 @@ async fn mkvdemux_announces_a_stream_collection_for_all_tracks() {
     assert_eq!(audio.len(), 1, "one audio stream");
     assert_eq!(audio[0].id, "matroska-track-2");
     assert!(
-        matches!(audio[0].caps, Caps::Audio { format: AudioFormat::Aac, sample_rate: 48_000, .. }),
+        matches!(
+            audio[0].caps,
+            Caps::Audio {
+                format: AudioFormat::Aac,
+                sample_rate: 48_000,
+                ..
+            }
+        ),
         "audio stream carries AAC caps"
     );
 
@@ -176,5 +219,8 @@ async fn mkvdemux_announces_a_stream_collection_for_all_tracks() {
     let more = core::iter::from_fn(|| bus.try_recv())
         .filter(|m| matches!(m, BusMessage::StreamCollection(_)))
         .count();
-    assert_eq!(more, 0, "the collection is announced once, not on every push");
+    assert_eq!(
+        more, 0,
+        "the collection is announced once, not on every push"
+    );
 }

@@ -40,7 +40,8 @@ struct PacedSink {
 }
 
 impl AsyncElement for PacedSink {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -85,7 +86,10 @@ async fn fan_in_does_not_deadlock_under_backpressure() {
         GraphNode::muxer(Compositor::new(
             32,
             32,
-            Vec::from([CompositorPad::at(0, 0), CompositorPad::at(8, 8).with_zorder(1)]),
+            Vec::from([
+                CompositorPad::at(0, 0),
+                CompositorPad::at(8, 8).with_zorder(1),
+            ]),
         )),
         2,
     );
@@ -103,6 +107,13 @@ async fn fan_in_does_not_deadlock_under_backpressure() {
     // Both sources ran to completion (so each contributed its EOS, the very
     // thing that hung before), and the compositor emitted one composited frame
     // per input-0 frame down to the sink.
-    assert_eq!(stats.frames_emitted, 2 * FRAMES, "both sources emitted every frame");
-    assert_eq!(stats.frames_consumed, FRAMES, "one composited frame per background frame");
+    assert_eq!(
+        stats.frames_emitted,
+        2 * FRAMES,
+        "both sources emitted every frame"
+    );
+    assert_eq!(
+        stats.frames_consumed, FRAMES,
+        "one composited frame per background frame"
+    );
 }

@@ -474,7 +474,10 @@ mod tests {
     fn accumulate_seek_advances_base_by_running_time_reached() {
         // An open-ended normal-rate segment that has played up to position 3_000
         // (running time 3_000, since base=0, start=0, rate=1).
-        let current = Segment { position: 3_000, ..Segment::new() };
+        let current = Segment {
+            position: 3_000,
+            ..Segment::new()
+        };
         assert_eq!(current.to_running_time(current.position), Some(3_000));
 
         // A non-flushing seek to 8_000: running time must NOT reset.
@@ -488,7 +491,10 @@ mod tests {
         };
         let seg = current.accumulate_seek(&seek, None);
         assert_eq!(seg.start, 8_000, "repositioned to the target");
-        assert_eq!(seg.base, 3_000, "base accumulates the running time already played");
+        assert_eq!(
+            seg.base, 3_000,
+            "base accumulates the running time already played"
+        );
         // The first post-seek frame (pts == target) continues at running time
         // 3_000, monotonic with the pre-seek timeline (gapless).
         assert_eq!(seg.to_running_time(8_000), Some(3_000));
@@ -498,8 +504,12 @@ mod tests {
     fn accumulate_seek_none_edge_keeps_current_bounds() {
         // A bounded segment [10_000, 100_000): a seek that only repositions
         // start (stop_type None) must keep the existing stop, not open it.
-        let current =
-            Segment { start: 10_000, stop: Some(100_000), position: 20_000, ..Segment::new() };
+        let current = Segment {
+            start: 10_000,
+            stop: Some(100_000),
+            position: 20_000,
+            ..Segment::new()
+        };
         let move_start = Seek {
             rate: 1.0,
             flags: SeekFlags::NONE,
@@ -510,7 +520,11 @@ mod tests {
         };
         let seg = current.accumulate_seek(&move_start, None);
         assert_eq!(seg.start, 50_000);
-        assert_eq!(seg.stop, Some(100_000), "None stop keeps the current segment's stop");
+        assert_eq!(
+            seg.stop,
+            Some(100_000),
+            "None stop keeps the current segment's stop"
+        );
 
         // Symmetrically, a None start keeps the current start.
         let move_stop = Seek {
@@ -522,7 +536,10 @@ mod tests {
             stop: 80_000,
         };
         let seg2 = current.accumulate_seek(&move_stop, None);
-        assert_eq!(seg2.start, 10_000, "None start keeps the current segment's start");
+        assert_eq!(
+            seg2.start, 10_000,
+            "None start keeps the current segment's start"
+        );
         assert_eq!(seg2.stop, Some(80_000));
     }
 
@@ -547,7 +564,12 @@ mod tests {
     fn accumulate_seek_keeps_running_time_monotonic_across_a_segment() {
         // Play [0, 5_000), reach the end (position 5_000, running time 5_000),
         // then a non-flushing segment seek loops back to 0.
-        let current = Segment { start: 0, stop: Some(5_000), position: 5_000, ..Segment::new() };
+        let current = Segment {
+            start: 0,
+            stop: Some(5_000),
+            position: 5_000,
+            ..Segment::new()
+        };
         let loop_back = Seek {
             rate: 1.0,
             flags: SeekFlags::NONE,
@@ -557,7 +579,10 @@ mod tests {
             stop: 5_000,
         };
         let seg = current.accumulate_seek(&loop_back, None);
-        assert_eq!(seg.base, 5_000, "the second loop iteration starts at running time 5_000");
+        assert_eq!(
+            seg.base, 5_000,
+            "the second loop iteration starts at running time 5_000"
+        );
         // Frame at stream-time 0 in the new iteration maps to running time 5_000,
         // and stream-time 2_500 to 7_500: the running-time line never goes back.
         assert_eq!(seg.to_running_time(0), Some(5_000));

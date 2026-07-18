@@ -46,9 +46,18 @@ pub fn sniff_caps(header: &[u8]) -> Option<Caps> {
 pub fn elementary_video_caps(codec: VideoCodec) -> Caps {
     Caps::CompressedVideo {
         codec,
-        width: Dim::Range { min: 16, max: 65535 },
-        height: Dim::Range { min: 16, max: 65535 },
-        framerate: Rate::Range { min_q16: 1 << 16, max_q16: 240 << 16 },
+        width: Dim::Range {
+            min: 16,
+            max: 65535,
+        },
+        height: Dim::Range {
+            min: 16,
+            max: 65535,
+        },
+        framerate: Rate::Range {
+            min_q16: 1 << 16,
+            max_q16: 240 << 16,
+        },
     }
 }
 
@@ -104,7 +113,10 @@ fn sniff_text(header: &[u8]) -> Option<TextFormat> {
     if head.starts_with("WEBVTT") {
         return Some(TextFormat::WebVtt);
     }
-    if head.starts_with("[Script Info]") || head.starts_with("[V4+ Styles]") || head.starts_with("[V4 Styles]") {
+    if head.starts_with("[Script Info]")
+        || head.starts_with("[V4+ Styles]")
+        || head.starts_with("[V4 Styles]")
+    {
         return Some(TextFormat::Ssa);
     }
     // TTML: an XML doc whose root (possibly namespaced) is `<tt`.
@@ -118,7 +130,9 @@ fn sniff_text(header: &[u8]) -> Option<TextFormat> {
     if let Some(pos) = text.find("-->") {
         // Walk back to a char boundary so a multibyte char before the arrow can't
         // panic the slice (timestamps are ASCII, so this is the identity in practice).
-        let start = (pos.saturating_sub(14)..=pos).find(|&i| text.is_char_boundary(i)).unwrap_or(pos);
+        let start = (pos.saturating_sub(14)..=pos)
+            .find(|&i| text.is_char_boundary(i))
+            .unwrap_or(pos);
         let window = &text[start..pos];
         if window.contains(':') && window.contains(',') {
             return Some(TextFormat::Srt);
@@ -218,7 +232,10 @@ mod tests {
 
     #[test]
     fn detects_flv_by_signature() {
-        assert_eq!(sniff(b"FLV\x01\x05\0\0\0\x09"), Some(ByteStreamEncoding::Flv));
+        assert_eq!(
+            sniff(b"FLV\x01\x05\0\0\0\x09"),
+            Some(ByteStreamEncoding::Flv)
+        );
     }
 
     #[test]
@@ -258,29 +275,51 @@ mod tests {
     #[test]
     fn detects_iso_bmff_mdat_first_and_moov() {
         // Progressive `mdat`-first (moov at end) and moov-first both sniff as MP4.
-        assert_eq!(sniff(b"\x00\x00\x00\x10mdat\0\0\0\0\0\0\0\0"), Some(ByteStreamEncoding::IsoBmff));
-        assert_eq!(sniff(b"\x00\x00\x01\x00moov\0\0\0\0"), Some(ByteStreamEncoding::IsoBmff));
+        assert_eq!(
+            sniff(b"\x00\x00\x00\x10mdat\0\0\0\0\0\0\0\0"),
+            Some(ByteStreamEncoding::IsoBmff)
+        );
+        assert_eq!(
+            sniff(b"\x00\x00\x01\x00moov\0\0\0\0"),
+            Some(ByteStreamEncoding::IsoBmff)
+        );
     }
 
     #[test]
     fn sniff_caps_maps_container_and_text() {
         assert_eq!(
             sniff_caps(b"\x00\x00\x00\x18ftypmp42"),
-            Some(Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff })
+            Some(Caps::ByteStream {
+                encoding: ByteStreamEncoding::IsoBmff
+            })
         );
         assert_eq!(
             sniff_caps(b"WEBVTT\n\n00:00.000 --> 00:02.000\nhi"),
-            Some(Caps::Text { format: TextFormat::WebVtt })
+            Some(Caps::Text {
+                format: TextFormat::WebVtt
+            })
         );
     }
 
     #[test]
     fn detects_subtitle_documents_by_content() {
         assert_eq!(sniff_text(b"WEBVTT\n"), Some(TextFormat::WebVtt));
-        assert_eq!(sniff_text(b"\xEF\xBB\xBFWEBVTT FILE\n"), Some(TextFormat::WebVtt));
-        assert_eq!(sniff_text(b"1\n00:00:20,000 --> 00:00:24,400\nHello\n"), Some(TextFormat::Srt));
-        assert_eq!(sniff_text(b"[Script Info]\nTitle: x\n"), Some(TextFormat::Ssa));
-        assert_eq!(sniff_text(b"<?xml version=\"1.0\"?>\n<tt xmlns=\"...\">"), Some(TextFormat::Ttml));
+        assert_eq!(
+            sniff_text(b"\xEF\xBB\xBFWEBVTT FILE\n"),
+            Some(TextFormat::WebVtt)
+        );
+        assert_eq!(
+            sniff_text(b"1\n00:00:20,000 --> 00:00:24,400\nHello\n"),
+            Some(TextFormat::Srt)
+        );
+        assert_eq!(
+            sniff_text(b"[Script Info]\nTitle: x\n"),
+            Some(TextFormat::Ssa)
+        );
+        assert_eq!(
+            sniff_text(b"<?xml version=\"1.0\"?>\n<tt xmlns=\"...\">"),
+            Some(TextFormat::Ttml)
+        );
         // Prose with a comma but no timestamp, and a dot-decimal (WebVTT-style)
         // arrow, must not be misread as SubRip.
         assert_eq!(sniff_text(b"Hello, world. No cues here."), None);
@@ -292,7 +331,13 @@ mod tests {
         // 4-byte start code, then an SPS NAL (0x67: nal_ref_idc=3, type=7).
         let data = [0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0x00, 0x1e];
         assert_eq!(sniff_annexb_video(&data), Some(VideoCodec::H264));
-        assert!(matches!(sniff_caps(&data), Some(Caps::CompressedVideo { codec: VideoCodec::H264, .. })));
+        assert!(matches!(
+            sniff_caps(&data),
+            Some(Caps::CompressedVideo {
+                codec: VideoCodec::H264,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -307,7 +352,13 @@ mod tests {
         // 4-byte start code, then a VPS NAL (0x40 0x01: type=32, temporal_id_plus1=1).
         let data = [0x00, 0x00, 0x00, 0x01, 0x40, 0x01, 0x0c, 0x01];
         assert_eq!(sniff_annexb_video(&data), Some(VideoCodec::H265));
-        assert!(matches!(sniff_caps(&data), Some(Caps::CompressedVideo { codec: VideoCodec::H265, .. })));
+        assert!(matches!(
+            sniff_caps(&data),
+            Some(Caps::CompressedVideo {
+                codec: VideoCodec::H265,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -324,7 +375,11 @@ mod tests {
     fn ebml_takes_precedence_over_a_leading_0x47() {
         // EBML magic never starts with 0x47, so no ambiguity; sanity check that
         // a Matroska stream is not misread as TS.
-        let data: Vec<u8> = EBML_MAGIC.iter().chain([0x47u8; 200].iter()).copied().collect();
+        let data: Vec<u8> = EBML_MAGIC
+            .iter()
+            .chain([0x47u8; 200].iter())
+            .copied()
+            .collect();
         assert_eq!(sniff(&data), Some(ByteStreamEncoding::Matroska));
     }
 }

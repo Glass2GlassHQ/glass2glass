@@ -15,9 +15,9 @@ use std::sync::Arc;
 use g2g_core::frame::Frame;
 use g2g_core::runtime::{run_graph, GraphNode, SourceLoop};
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, CudaKeepAlive, Dim, FrameTiming, G2gError,
-    Graph, MemoryDomain, OutputSink, OwnedCudaBuffer, PipelineClock, PipelinePacket, Rate,
-    RawVideoFormat,
+    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, CudaKeepAlive, Dim, FrameTiming,
+    G2gError, Graph, MemoryDomain, OutputSink, OwnedCudaBuffer, PipelineClock, PipelinePacket,
+    Rate, RawVideoFormat,
 };
 
 struct NullClock;
@@ -125,7 +125,10 @@ impl AsyncElement for GpuSink {
 async fn gpu_frame_fans_out_through_a_tee_zero_copy() {
     let drops = Arc::new(AtomicUsize::new(0));
     let mut g: Graph<GraphNode> = Graph::new();
-    let src = g.add_source(GraphNode::source(CudaSrc { drops: drops.clone(), sent: false }));
+    let src = g.add_source(GraphNode::source(CudaSrc {
+        drops: drops.clone(),
+        sent: false,
+    }));
     let tee = g.add_tee(2);
     let s0 = g.add_sink(GraphNode::element(GpuSink));
     let s1 = g.add_sink(GraphNode::element(GpuSink));
@@ -133,12 +136,21 @@ async fn gpu_frame_fans_out_through_a_tee_zero_copy() {
     g.link(tee.out(0), s0).unwrap();
     g.link(tee.out(1), s1).unwrap();
 
-    let stats = run_graph(g, &NullClock, 4).await.expect("GPU tee pipeline runs");
+    let stats = run_graph(g, &NullClock, 4)
+        .await
+        .expect("GPU tee pipeline runs");
     // One source frame reached BOTH branches: the tee fanned out a GPU frame
     // (previously UnsupportedDomain). Both branches asserted it stayed on the GPU.
     assert_eq!(stats.frames_emitted, 1);
-    assert_eq!(stats.frames_consumed, 2, "the GPU frame reached both branches");
+    assert_eq!(
+        stats.frames_consumed, 2,
+        "the GPU frame reached both branches"
+    );
     // The backing allocation was shared, not copied: the single mock AVFrame is
     // released exactly once after both branch frames drop.
-    assert_eq!(drops.load(Ordering::SeqCst), 1, "device allocation released once, not per branch");
+    assert_eq!(
+        drops.load(Ordering::SeqCst),
+        1,
+        "device allocation released once, not per branch"
+    );
 }

@@ -40,7 +40,12 @@ const FEC_LEVEL_HEADER: usize = 4;
 /// `stride`-th packet) is protected exactly like a contiguous run. The repair is
 /// itself an RTP packet on `fec_pt` / `fec_ssrc` / `fec_seq`. `None` if `media`
 /// is empty, longer than 16, or spans more than 16 sequence numbers.
-pub fn build_fec_packet(media: &[&[u8]], fec_pt: u8, fec_ssrc: u32, fec_seq: u16) -> Option<Vec<u8>> {
+pub fn build_fec_packet(
+    media: &[&[u8]],
+    fec_pt: u8,
+    fec_ssrc: u32,
+    fec_seq: u16,
+) -> Option<Vec<u8>> {
     if media.is_empty() || media.len() > 16 {
         return None;
     }
@@ -67,7 +72,11 @@ pub fn build_fec_packet(media: &[&[u8]], fec_pt: u8, fec_ssrc: u32, fec_seq: u16
     let mut mpt = 0u8; // M|PT, byte 1
     let mut ts = 0u32;
     let mut len_recovery = 0u16;
-    let protection_len = media.iter().map(|p| p.len() - RTP_HEADER).max().unwrap_or(0);
+    let protection_len = media
+        .iter()
+        .map(|p| p.len() - RTP_HEADER)
+        .max()
+        .unwrap_or(0);
     let mut payload = vec![0u8; protection_len];
     for p in media {
         pxcc ^= p[0] & 0x3F;
@@ -121,14 +130,21 @@ fn protected_seqs(fec: &[u8]) -> Option<Vec<u16>> {
 /// the protected sequences is absent.
 pub fn recover_packet(fec: &[u8], present: &[(u16, &[u8])]) -> Option<Vec<u8>> {
     let seqs = protected_seqs(fec)?;
-    let missing: Vec<u16> = seqs.iter().copied().filter(|s| !present.iter().any(|(p, _)| p == s)).collect();
+    let missing: Vec<u16> = seqs
+        .iter()
+        .copied()
+        .filter(|s| !present.iter().any(|(p, _)| p == s))
+        .collect();
     if missing.len() != 1 {
         return None; // FEC recovers exactly one loss per group
     }
     let missing_seq = missing[0];
     // The survivors that belong to this group.
-    let group: Vec<&[u8]> =
-        present.iter().filter(|(s, _)| seqs.contains(s)).map(|(_, p)| *p).collect();
+    let group: Vec<&[u8]> = present
+        .iter()
+        .filter(|(s, _)| seqs.contains(s))
+        .map(|(_, p)| *p)
+        .collect();
     if group.iter().any(|p| p.len() < RTP_HEADER) {
         return None;
     }
@@ -137,9 +153,11 @@ pub fn recover_packet(fec: &[u8], present: &[(u16, &[u8])]) -> Option<Vec<u8>> {
     let mpt_r = fec[RTP_HEADER + 1];
     let ts_r = u32::from_be_bytes(fec[RTP_HEADER + 4..RTP_HEADER + 8].try_into().ok()?);
     let len_r = u16::from_be_bytes(fec[RTP_HEADER + 8..RTP_HEADER + 10].try_into().ok()?);
-    let prot_len =
-        u16::from_be_bytes(fec[RTP_HEADER + FEC_HEADER..RTP_HEADER + FEC_HEADER + 2].try_into().ok()?)
-            as usize;
+    let prot_len = u16::from_be_bytes(
+        fec[RTP_HEADER + FEC_HEADER..RTP_HEADER + FEC_HEADER + 2]
+            .try_into()
+            .ok()?,
+    ) as usize;
     let fec_payload = &fec[RTP_HEADER + FEC_HEADER + FEC_LEVEL_HEADER..];
     if fec_payload.len() < prot_len {
         return None;
@@ -189,7 +207,13 @@ pub struct FecEncoder {
 
 impl FecEncoder {
     pub fn new(group: usize, fec_pt: u8, fec_ssrc: u32) -> Self {
-        Self { group: group.clamp(1, 16), fec_pt: fec_pt & 0x7F, fec_ssrc, fec_seq: 0, pending: Vec::new() }
+        Self {
+            group: group.clamp(1, 16),
+            fec_pt: fec_pt & 0x7F,
+            fec_ssrc,
+            fec_seq: 0,
+            pending: Vec::new(),
+        }
     }
 
     /// Feed a media RTP packet; returns a repair packet when the group closes.
@@ -227,7 +251,14 @@ impl InterleavedFecEncoder {
         let stride = stride.clamp(1, 16);
         // Keep rows * stride <= 16 so every column spans <= 16 sequence numbers.
         let rows = rows.clamp(1, 16 / stride);
-        Self { rows, stride, fec_pt: fec_pt & 0x7F, fec_ssrc, fec_seq: 0, pending: Vec::new() }
+        Self {
+            rows,
+            stride,
+            fec_pt: fec_pt & 0x7F,
+            fec_ssrc,
+            fec_seq: 0,
+            pending: Vec::new(),
+        }
     }
 
     /// The interleaving block size (`rows * stride`), the number of media packets
@@ -246,8 +277,9 @@ impl InterleavedFecEncoder {
         }
         let mut out = Vec::with_capacity(self.stride);
         for c in 0..self.stride {
-            let column: Vec<&[u8]> =
-                (0..self.rows).map(|r| self.pending[c + r * self.stride].as_slice()).collect();
+            let column: Vec<&[u8]> = (0..self.rows)
+                .map(|r| self.pending[c + r * self.stride].as_slice())
+                .collect();
             if let Some(fec) = build_fec_packet(&column, self.fec_pt, self.fec_ssrc, self.fec_seq) {
                 self.fec_seq = self.fec_seq.wrapping_add(1);
                 out.push(fec);
@@ -275,7 +307,12 @@ impl Default for FecDecoder {
 
 impl FecDecoder {
     pub fn new(capacity: usize) -> Self {
-        Self { media: BTreeMap::new(), fecs: VecDeque::new(), recovered: Vec::new(), capacity: capacity.max(16) }
+        Self {
+            media: BTreeMap::new(),
+            fecs: VecDeque::new(),
+            recovered: Vec::new(),
+            capacity: capacity.max(16),
+        }
     }
 
     /// Record a received media packet and attempt recovery of any open group.
@@ -315,9 +352,13 @@ impl FecDecoder {
             progressed = false;
             let mut spent = None;
             for (idx, fec) in self.fecs.iter().enumerate() {
-                let Some(seqs) = protected_seqs(fec) else { continue };
-                let present: Vec<(u16, &[u8])> =
-                    seqs.iter().filter_map(|s| self.media.get(s).map(|p| (*s, p.as_slice()))).collect();
+                let Some(seqs) = protected_seqs(fec) else {
+                    continue;
+                };
+                let present: Vec<(u16, &[u8])> = seqs
+                    .iter()
+                    .filter_map(|s| self.media.get(s).map(|p| (*s, p.as_slice())))
+                    .collect();
                 let missing = seqs.len().saturating_sub(present.len());
                 if missing == 1 {
                     if let Some(rec) = recover_packet(fec, &present) {
@@ -372,7 +413,10 @@ mod tests {
             .map(|(_, p)| (u16::from_be_bytes([p[2], p[3]]), p.as_slice()))
             .collect();
         let recovered = recover_packet(&fec, &present).expect("recovered");
-        assert_eq!(recovered, media[lost_idx], "FEC reconstructs the lost packet byte-exact");
+        assert_eq!(
+            recovered, media[lost_idx],
+            "FEC reconstructs the lost packet byte-exact"
+        );
     }
 
     #[test]
@@ -381,8 +425,10 @@ mod tests {
         let refs: Vec<&[u8]> = media.iter().map(|v| v.as_slice()).collect();
         let fec = build_fec_packet(&refs, 97, 0, 0).unwrap();
         // Only two survivors -> two missing -> single-FEC cannot recover.
-        let present: Vec<(u16, &[u8])> =
-            media[..2].iter().map(|p| (u16::from_be_bytes([p[2], p[3]]), p.as_slice())).collect();
+        let present: Vec<(u16, &[u8])> = media[..2]
+            .iter()
+            .map(|p| (u16::from_be_bytes([p[2], p[3]]), p.as_slice()))
+            .collect();
         assert!(recover_packet(&fec, &present).is_none());
     }
 

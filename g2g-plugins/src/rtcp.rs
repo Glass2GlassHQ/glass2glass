@@ -52,13 +52,29 @@ pub struct ReportBlock {
 /// A parsed RTCP packet (only the fields this stack consumes are surfaced).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RtcpPacket {
-    SenderReport { ssrc: u32, ntp: u64, rtp_ts: u32, reports: Vec<ReportBlock> },
-    ReceiverReport { ssrc: u32, reports: Vec<ReportBlock> },
+    SenderReport {
+        ssrc: u32,
+        ntp: u64,
+        rtp_ts: u32,
+        reports: Vec<ReportBlock>,
+    },
+    ReceiverReport {
+        ssrc: u32,
+        reports: Vec<ReportBlock>,
+    },
     /// RTPFB Generic NACK: the media sender SSRC plus the lost sequence numbers.
-    Nack { sender_ssrc: u32, media_ssrc: u32, missing: Vec<u16> },
-    Bye { ssrc: Vec<u32> },
+    Nack {
+        sender_ssrc: u32,
+        media_ssrc: u32,
+        missing: Vec<u16>,
+    },
+    Bye {
+        ssrc: Vec<u32>,
+    },
     /// A type we don't decode (e.g. SDES); kept so compound parsing can skip it.
-    Other { pt: u8 },
+    Other {
+        pt: u8,
+    },
 }
 
 fn push_u32(out: &mut Vec<u8>, v: u32) {
@@ -83,7 +99,10 @@ fn patch_length(out: &mut [u8], start: usize) {
 
 fn write_report_block(out: &mut Vec<u8>, b: &ReportBlock) {
     push_u32(out, b.ssrc);
-    push_u32(out, (b.fraction_lost as u32) << 24 | (b.cumulative_lost & 0x00FF_FFFF));
+    push_u32(
+        out,
+        (b.fraction_lost as u32) << 24 | (b.cumulative_lost & 0x00FF_FFFF),
+    );
     push_u32(out, b.highest_seq);
     push_u32(out, b.jitter);
     push_u32(out, b.last_sr);
@@ -198,7 +217,12 @@ pub fn parse_compound(buf: &[u8]) -> Vec<RtcpPacket> {
                     let ntp = u64::from_be_bytes(body[4..12].try_into().unwrap());
                     let rtp_ts = be32(body, 12);
                     let reports = parse_report_blocks(&body[24..], count);
-                    out.push(RtcpPacket::SenderReport { ssrc, ntp, rtp_ts, reports });
+                    out.push(RtcpPacket::SenderReport {
+                        ssrc,
+                        ntp,
+                        rtp_ts,
+                        reports,
+                    });
                 }
             }
             PT_RTPFB if count as u8 == FMT_GENERIC_NACK => {
@@ -218,7 +242,11 @@ pub fn parse_compound(buf: &[u8]) -> Vec<RtcpPacket> {
                         }
                         p += 4;
                     }
-                    out.push(RtcpPacket::Nack { sender_ssrc, media_ssrc, missing });
+                    out.push(RtcpPacket::Nack {
+                        sender_ssrc,
+                        media_ssrc,
+                        missing,
+                    });
                 }
             }
             PT_BYE => {
@@ -367,7 +395,9 @@ impl ReceptionStats {
 
     /// Total packets expected so far (highest - base + 1).
     fn expected(&self) -> u32 {
-        self.extended_highest().wrapping_sub(self.base_seq).wrapping_add(1)
+        self.extended_highest()
+            .wrapping_sub(self.base_seq)
+            .wrapping_add(1)
     }
 
     /// Cumulative packets lost (expected - received), clamped at 0.
@@ -448,7 +478,11 @@ mod tests {
         s.on_rtp(ssrc, 2, 0, 2_000_000_000);
         s.on_rtp(ssrc, 3, u32::MAX, 3_000_000_000);
         let block = s.report_block(4_000_000_000);
-        assert!(block.jitter > 100_000_000, "jitter saturated high, not wrapped: {}", block.jitter);
+        assert!(
+            block.jitter > 100_000_000,
+            "jitter saturated high, not wrapped: {}",
+            block.jitter
+        );
     }
 
     #[test]
@@ -471,11 +505,20 @@ mod tests {
         // 100 and 102 differ by 2: one PID=100 word with bit 1 set in the BLP.
         let bytes = build_nack(1, 2, &[100, 102]);
         let parsed = parse_compound(&bytes);
-        let RtcpPacket::Nack { sender_ssrc, media_ssrc, missing } = &parsed[0] else {
+        let RtcpPacket::Nack {
+            sender_ssrc,
+            media_ssrc,
+            missing,
+        } = &parsed[0]
+        else {
             panic!("expected NACK, got {parsed:?}");
         };
         assert_eq!((*sender_ssrc, *media_ssrc), (1, 2));
-        assert_eq!(missing, &alloc::vec![100, 102], "PID + bitmask recovers both");
+        assert_eq!(
+            missing,
+            &alloc::vec![100, 102],
+            "PID + bitmask recovers both"
+        );
     }
 
     #[test]
@@ -491,7 +534,12 @@ mod tests {
     #[test]
     fn bye_round_trips() {
         let parsed = parse_compound(&build_bye(0x42));
-        assert_eq!(parsed, alloc::vec![RtcpPacket::Bye { ssrc: alloc::vec![0x42] }]);
+        assert_eq!(
+            parsed,
+            alloc::vec![RtcpPacket::Bye {
+                ssrc: alloc::vec![0x42]
+            }]
+        );
     }
 
     #[test]
@@ -521,7 +569,11 @@ mod tests {
             rs.on_rtp(1, i as u16, i * 3000, i as u64 * 33_333_333);
         }
         let b = rs.report_block(0);
-        assert!(b.jitter <= 1, "paced stream has ~zero jitter, got {}", b.jitter);
+        assert!(
+            b.jitter <= 1,
+            "paced stream has ~zero jitter, got {}",
+            b.jitter
+        );
     }
 
     #[test]
@@ -532,6 +584,9 @@ mod tests {
         for (i, &a) in arrivals.iter().enumerate() {
             rs.on_rtp(1, i as u16, i as u32 * 3000, a);
         }
-        assert!(rs.report_block(0).jitter > 0, "irregular arrivals raise jitter");
+        assert!(
+            rs.report_block(0).jitter > 0,
+            "irregular arrivals raise jitter"
+        );
     }
 }

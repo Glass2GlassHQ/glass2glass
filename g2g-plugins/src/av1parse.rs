@@ -82,7 +82,10 @@ impl AsyncElement for Av1Parse {
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         match absolute_caps {
-            Caps::CompressedVideo { codec: VideoCodec::Av1, .. } => {
+            Caps::CompressedVideo {
+                codec: VideoCodec::Av1,
+                ..
+            } => {
                 self.configured = true;
                 Ok(ConfigureOutcome::Accepted)
             }
@@ -110,7 +113,8 @@ impl AsyncElement for Av1Parse {
                                 framerate: Rate::Any,
                             };
                             if self.last_emitted_caps.as_ref() != Some(&new_caps) {
-                                out.push(PipelinePacket::CapsChanged(new_caps.clone())).await?;
+                                out.push(PipelinePacket::CapsChanged(new_caps.clone()))
+                                    .await?;
                                 self.last_emitted_caps = Some(new_caps);
                                 self.headers_emitted += 1;
                             }
@@ -147,7 +151,10 @@ impl PadTemplates for Av1Parse {
             height: Dim::Any,
             framerate: Rate::Any,
         };
-        Vec::from([PadTemplate::sink(CapsSet::one(av1.clone())), PadTemplate::source(CapsSet::one(av1))])
+        Vec::from([
+            PadTemplate::sink(CapsSet::one(av1.clone())),
+            PadTemplate::source(CapsSet::one(av1)),
+        ])
     }
 }
 
@@ -267,7 +274,11 @@ fn parse_sequence_header(payload: &[u8]) -> Option<Av1SeqHeader> {
     let frame_height_bits = br.read_bits(4)? + 1;
     let max_frame_width = br.read_bits(frame_width_bits)? + 1;
     let max_frame_height = br.read_bits(frame_height_bits)? + 1;
-    Some(Av1SeqHeader { width: max_frame_width, height: max_frame_height, profile: seq_profile })
+    Some(Av1SeqHeader {
+        width: max_frame_width,
+        height: max_frame_height,
+        profile: seq_profile,
+    })
 }
 
 /// AV1 unsigned variable-length code (spec `uvlc()`): count leading zeros, then
@@ -369,13 +380,17 @@ mod tests {
     /// A temporal unit: a temporal-delimiter OBU then a sequence-header OBU.
     fn temporal_unit(width: u32, height: u32, profile: u8) -> Vec<u8> {
         let mut tu = obu(2, &[]); // OBU_TEMPORAL_DELIMITER
-        tu.extend_from_slice(&obu(OBU_SEQUENCE_HEADER, &seq_header_payload(width, height, profile)));
+        tu.extend_from_slice(&obu(
+            OBU_SEQUENCE_HEADER,
+            &seq_header_payload(width, height, profile),
+        ));
         tu
     }
 
     #[test]
     fn recovers_1920x1080_after_temporal_delimiter() {
-        let info = extract_seq_header(&temporal_unit(1920, 1080, 0)).expect("seq header must parse");
+        let info =
+            extract_seq_header(&temporal_unit(1920, 1080, 0)).expect("seq header must parse");
         assert_eq!((info.width, info.height), (1920, 1080));
         assert_eq!(info.profile, 0);
     }
@@ -389,7 +404,10 @@ mod tests {
 
     #[test]
     fn parses_reduced_still_picture_header() {
-        let obu = obu(OBU_SEQUENCE_HEADER, &reduced_seq_header_payload(800, 600, 1));
+        let obu = obu(
+            OBU_SEQUENCE_HEADER,
+            &reduced_seq_header_payload(800, 600, 1),
+        );
         let info = extract_seq_header(&obu).expect("reduced seq header must parse");
         assert_eq!((info.width, info.height), (800, 600));
         assert_eq!(info.profile, 1);
@@ -405,7 +423,10 @@ mod tests {
 
     #[test]
     fn rejects_forbidden_bit_and_empty() {
-        assert!(extract_seq_header(&[0x80]).is_none(), "obu_forbidden_bit set");
+        assert!(
+            extract_seq_header(&[0x80]).is_none(),
+            "obu_forbidden_bit set"
+        );
         assert!(extract_seq_header(&[]).is_none());
     }
 
@@ -465,7 +486,10 @@ mod tests {
         let mut sink = RecordingSink::default();
 
         let frame = frame_with_bytes(0, temporal_unit(1920, 1080, 0));
-        parse.process(PipelinePacket::DataFrame(frame), &mut sink).await.unwrap();
+        parse
+            .process(PipelinePacket::DataFrame(frame), &mut sink)
+            .await
+            .unwrap();
 
         assert_eq!(sink.packets.len(), 2, "expected CapsChanged then DataFrame");
         match &sink.packets[0] {
@@ -487,12 +511,21 @@ mod tests {
 
         for seq in 0..3 {
             let frame = frame_with_bytes(seq, temporal_unit(1280, 720, 0));
-            parse.process(PipelinePacket::DataFrame(frame), &mut sink).await.unwrap();
+            parse
+                .process(PipelinePacket::DataFrame(frame), &mut sink)
+                .await
+                .unwrap();
         }
 
-        let caps_count =
-            sink.packets.iter().filter(|p| matches!(p, PipelinePacket::CapsChanged(_))).count();
-        assert_eq!(caps_count, 1, "CapsChanged fires once for identical dimensions");
+        let caps_count = sink
+            .packets
+            .iter()
+            .filter(|p| matches!(p, PipelinePacket::CapsChanged(_)))
+            .count();
+        assert_eq!(
+            caps_count, 1,
+            "CapsChanged fires once for identical dimensions"
+        );
     }
 
     #[tokio::test]
@@ -502,11 +535,17 @@ mod tests {
         let mut sink = RecordingSink::default();
 
         parse
-            .process(PipelinePacket::DataFrame(frame_with_bytes(0, temporal_unit(1280, 720, 0))), &mut sink)
+            .process(
+                PipelinePacket::DataFrame(frame_with_bytes(0, temporal_unit(1280, 720, 0))),
+                &mut sink,
+            )
             .await
             .unwrap();
         parse
-            .process(PipelinePacket::DataFrame(frame_with_bytes(1, temporal_unit(1920, 1080, 0))), &mut sink)
+            .process(
+                PipelinePacket::DataFrame(frame_with_bytes(1, temporal_unit(1920, 1080, 0))),
+                &mut sink,
+            )
             .await
             .unwrap();
 
@@ -514,7 +553,9 @@ mod tests {
             .packets
             .iter()
             .filter_map(|p| match p {
-                PipelinePacket::CapsChanged(Caps::CompressedVideo { width, .. }) => Some(width.clone()),
+                PipelinePacket::CapsChanged(Caps::CompressedVideo { width, .. }) => {
+                    Some(width.clone())
+                }
                 _ => None,
             })
             .collect();

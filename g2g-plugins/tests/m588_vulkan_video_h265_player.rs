@@ -16,7 +16,10 @@
 //! fewer than the whole stream (it tuned in at the last CRA, not the IDR).
 //!
 //! Runs on the RTX 3060; skips with no adapter / no decode support.
-#![cfg(all(any(target_os = "linux", target_os = "windows"), feature = "vulkan-video"))]
+#![cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    feature = "vulkan-video"
+))]
 
 use g2g_core::runtime::block_on;
 use g2g_plugins::vulkanvideo::{
@@ -44,20 +47,32 @@ fn h265_player_scrubs_and_tunes_in_at_cra() {
     let ref_dev = block_on(open_h265_decode_device()).expect("reference device");
     let ps = extract_h265_parameter_sets(CLIP).expect("vps/sps/pps");
     let std = to_std_h265_params(&ps);
-    let (w, h) = (ps.sps.pic_width_in_luma_samples, ps.sps.pic_height_in_luma_samples);
-    let ref_session = ref_dev.create_h265_session(&std, w, h).expect("ref session");
-    let mut ref_dec =
-        match ref_dev.create_h265_dpb_decoder_gpu(&ref_session, &ps) {
-            Ok(d) => d,
-            Err(VulkanVideoError::NoComputeQueue) => {
-                eprintln!("skip m588: no distinct compute queue (GPU-texture player needs one)");
-                return;
-            }
-            Err(e) => panic!("ref decoder: {e:?}"),
-        };
-    let ref_textures = ref_dec.decode_all_to_textures(CLIP).expect("reference decode");
-    let reference: Vec<Vec<u8>> = ref_textures.iter().map(|t| ref_dev.read_rgba_texture(t)).collect();
-    assert!(reference.len() >= 20, "open-GOP fixture decodes its whole timeline");
+    let (w, h) = (
+        ps.sps.pic_width_in_luma_samples,
+        ps.sps.pic_height_in_luma_samples,
+    );
+    let ref_session = ref_dev
+        .create_h265_session(&std, w, h)
+        .expect("ref session");
+    let mut ref_dec = match ref_dev.create_h265_dpb_decoder_gpu(&ref_session, &ps) {
+        Ok(d) => d,
+        Err(VulkanVideoError::NoComputeQueue) => {
+            eprintln!("skip m588: no distinct compute queue (GPU-texture player needs one)");
+            return;
+        }
+        Err(e) => panic!("ref decoder: {e:?}"),
+    };
+    let ref_textures = ref_dec
+        .decode_all_to_textures(CLIP)
+        .expect("reference decode");
+    let reference: Vec<Vec<u8>> = ref_textures
+        .iter()
+        .map(|t| ref_dev.read_rgba_texture(t))
+        .collect();
+    assert!(
+        reference.len() >= 20,
+        "open-GOP fixture decodes its whole timeline"
+    );
 
     // The player under test (codec sniffed as H.265).
     let dev = block_on(open_h265_decode_device()).expect("player device");
@@ -70,7 +85,11 @@ fn h265_player_scrubs_and_tunes_in_at_cra() {
         Err(e) => panic!("build H.265 player: {e:?}"),
     };
     let n = player.frame_count();
-    assert_eq!(n, reference.len(), "player frame count matches the whole-stream decode");
+    assert_eq!(
+        n,
+        reference.len(),
+        "player frame count matches the whole-stream decode"
+    );
     assert_eq!(player.dimensions(), (w, h));
 
     // Meaningfulness (first, cold): seeking the LAST display frame tunes in at the
@@ -78,9 +97,16 @@ fn h265_player_scrubs_and_tunes_in_at_cra() {
     // from the leading IDR. (Open-GOP keyint here is 12; a whole-stream decode of
     // the last frame from the IDR would be ~n pictures.)
     {
-        let tex = player.frame_at_index(n - 1).expect("scrub to last frame").clone();
+        let tex = player
+            .frame_at_index(n - 1)
+            .expect("scrub to last frame")
+            .clone();
         let got = player.read_texture(&tex);
-        assert_eq!(got, reference[n - 1], "last frame not bit-exact after CRA tune-in");
+        assert_eq!(
+            got,
+            reference[n - 1],
+            "last frame not bit-exact after CRA tune-in"
+        );
     }
     let cold = player.pictures_decoded();
     assert!(
@@ -103,7 +129,10 @@ fn h265_player_scrubs_and_tunes_in_at_cra() {
     for p in order {
         let tex = player.frame_at_index(p).expect("scrub").clone();
         let got = player.read_texture(&tex);
-        assert_eq!(got, reference[p], "scrubbed frame {p} not bit-exact to the oracle");
+        assert_eq!(
+            got, reference[p],
+            "scrubbed frame {p} not bit-exact to the oracle"
+        );
     }
 
     eprintln!(

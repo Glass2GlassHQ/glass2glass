@@ -6,7 +6,10 @@
 //! texture, so the frame never leaves the GPU (unlike the system-NV12 path).
 //! Reads each texture back through wgpu and asserts real, per-frame-distinct
 //! content. Runs on the RTX 3060; skips with no adapter / no compute queue.
-#![cfg(all(any(target_os = "linux", target_os = "windows"), feature = "vulkan-video"))]
+#![cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    feature = "vulkan-video"
+))]
 
 use g2g_core::runtime::block_on;
 use g2g_plugins::vulkanvideo::{
@@ -31,7 +34,9 @@ fn decodes_whole_stream_to_wgpu_textures() {
     };
 
     let ps = extract_h264_parameter_sets(CLIP).expect("parse SPS+PPS");
-    let session = device.create_h264_session(&ps, 640, 480).expect("create session");
+    let session = device
+        .create_h264_session(&ps, 640, 480)
+        .expect("create session");
     let mut decoder = match device.create_h264_dpb_decoder_gpu(&session, &ps) {
         Ok(d) => d,
         Err(VulkanVideoError::NoComputeQueue) => {
@@ -41,7 +46,9 @@ fn decodes_whole_stream_to_wgpu_textures() {
         Err(e) => panic!("create GPU DPB decoder: {e:?}"),
     };
 
-    let textures = decoder.decode_all_to_textures(CLIP).expect("decode to textures");
+    let textures = decoder
+        .decode_all_to_textures(CLIP)
+        .expect("decode to textures");
     assert_eq!(textures.len(), 10, "one texture per coded picture");
 
     let mut readbacks = Vec::new();
@@ -55,7 +62,10 @@ fn decodes_whole_stream_to_wgpu_textures() {
         // GPU convert would be uniform / flat.
         let min = *rgba.iter().min().unwrap();
         let max = *rgba.iter().max().unwrap();
-        assert!(min <= 20 && max >= 200, "frame {i} RGBA range {min}..={max} not a real picture");
+        assert!(
+            min <= 20 && max >= 200,
+            "frame {i} RGBA range {min}..={max} not a real picture"
+        );
         readbacks.push(rgba);
     }
 
@@ -64,11 +74,15 @@ fn decodes_whole_stream_to_wgpu_textures() {
     for gop_start in [0usize, 5] {
         for p in 1..5 {
             assert_ne!(
-                readbacks[gop_start + p], readbacks[gop_start],
+                readbacks[gop_start + p],
+                readbacks[gop_start],
                 "texture {} is identical to its IDR; DPB reference decode failed",
                 gop_start + p
             );
         }
     }
-    eprintln!("decoded {} GPU-resident RGBA textures (640x480), all real content", textures.len());
+    eprintln!(
+        "decoded {} GPU-resident RGBA textures (640x480), all real content",
+        textures.len()
+    );
 }

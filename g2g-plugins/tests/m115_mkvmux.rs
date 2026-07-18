@@ -62,7 +62,10 @@ impl SourceLoop for Vp9Source {
                 let payload = vec![0x10 | i, 0x20, 0x30];
                 let frame = Frame::new(
                     MemoryDomain::System(SystemSlice::from_boxed(payload.into_boxed_slice())),
-                    FrameTiming { pts_ns: (i as u64) * 40_000_000, ..FrameTiming::default() },
+                    FrameTiming {
+                        pts_ns: (i as u64) * 40_000_000,
+                        ..FrameTiming::default()
+                    },
                     n,
                 );
                 out.push(PipelinePacket::DataFrame(frame)).await?;
@@ -85,6 +88,11 @@ async fn mkvmux_then_mkvdemux_round_trips_in_runner() {
     graph.link(mux, demux).unwrap();
     graph.link(demux, sink).unwrap();
 
-    let stats = run_graph(graph, &ZeroClock, 4).await.expect("mux -> demux runs");
-    assert_eq!(stats.frames_consumed, 3, "three VP9 frames survive mux + demux to the sink");
+    let stats = run_graph(graph, &ZeroClock, 4)
+        .await
+        .expect("mux -> demux runs");
+    assert_eq!(
+        stats.frames_consumed, 3,
+        "three VP9 frames survive mux + demux to the sink"
+    );
 }

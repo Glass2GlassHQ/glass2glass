@@ -66,7 +66,11 @@ impl GaplessSrc {
     /// `SourceLoop` startup; enqueued successors are negotiated + configured by
     /// `GaplessSrc` itself before each plays.
     pub fn new(first: Box<dyn DynSourceLoop>, ctl: GaplessController) -> Self {
-        Self { current: Some(first), ctl, configured: false }
+        Self {
+            current: Some(first),
+            ctl,
+            configured: false,
+        }
     }
 }
 
@@ -131,7 +135,12 @@ impl SourceLoop for GaplessSrc {
                 // `end` are copied out (the inner's own count is lost when a
                 // preemption drops its run future mid-stream).
                 let (preempted, frames, end) = {
-                    let mut adapter = ShiftSink { out: &mut *out, offset, max_end: offset, frames: 0 };
+                    let mut adapter = ShiftSink {
+                        out: &mut *out,
+                        offset,
+                        max_end: offset,
+                        frames: 0,
+                    };
                     let preempted =
                         match select2(src.run(&mut adapter), self.ctl.wait_instant()).await {
                             Either::Left(res) => {
@@ -270,7 +279,9 @@ pub fn gapless_playbin<Sk: AsyncElement + 'static>(
     target: &dyn Fn(&Caps) -> bool,
     max_depth: usize,
 ) -> Result<(Graph<GraphNode>, GaplessController), GaplessPlaybinError> {
-    let (first, rest) = uris.split_first().ok_or(GaplessPlaybinError::EmptyPlaylist)?;
+    let (first, rest) = uris
+        .split_first()
+        .ok_or(GaplessPlaybinError::EmptyPlaylist)?;
     let (first_src, caps) = reg.build_uri_source(first)?;
     let ctl = GaplessController::new();
     for uri in rest {

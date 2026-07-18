@@ -60,13 +60,18 @@ impl SourceLoop for EmitSrc {
         Ok(ConfigureOutcome::Accepted)
     }
     fn provide_clock(&self) -> Option<ClockCandidate> {
-        Some(ClockCandidate::new(ClockPriority::LiveSource, Arc::new(AdvancingClock(self.clock.clone()))))
+        Some(ClockCandidate::new(
+            ClockPriority::LiveSource,
+            Arc::new(AdvancingClock(self.clock.clone())),
+        ))
     }
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
         Box::pin(async move {
             for seq in 0..self.target {
                 let frame = Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(Box::new([0u8; 8 * 8 * 4]))),
+                    domain: MemoryDomain::System(SystemSlice::from_boxed(Box::new(
+                        [0u8; 8 * 8 * 4],
+                    ))),
                     timing: FrameTiming::default(),
                     sequence: seq,
                     meta: Default::default(),
@@ -122,10 +127,16 @@ async fn base_time_is_stamped_at_the_playing_transition() {
     // Clock starts at 1_000 (the startup / eager base time).
     let clock = Arc::new(AtomicU64::new(1_000));
     let target = 4u64;
-    let mut src = EmitSrc { clock: clock.clone(), target };
+    let mut src = EmitSrc {
+        clock: clock.clone(),
+        target,
+    };
     let sync_cell = Arc::new(Mutex::new(None));
     let seen = Arc::new(AtomicU64::new(0));
-    let mut sink = RecordingSink { sync: sync_cell.clone(), seen: seen.clone() };
+    let mut sink = RecordingSink {
+        sync: sync_cell.clone(),
+        seen: seen.clone(),
+    };
 
     let ctrl = StateController::new(PipelineState::Ready); // non-live, prerolls
 
@@ -145,7 +156,11 @@ async fn base_time_is_stamped_at_the_playing_transition() {
             let guard = sync_for_driver.lock().unwrap();
             let sync = guard.as_ref().expect("sink received a ClockSync");
             assert!(!sync.play_anchored(), "not anchored before Playing");
-            assert_eq!(sync.base_time(), 1_000, "eager startup base time until Playing");
+            assert_eq!(
+                sync.base_time(),
+                1_000,
+                "eager startup base time until Playing"
+            );
         }
 
         // Time advances during the pause; the play edge stamps THIS instant.
@@ -162,7 +177,17 @@ async fn base_time_is_stamped_at_the_playing_transition() {
     // edge (9_000), superseding the startup base time (1_000).
     let guard = sync_cell.lock().unwrap();
     let sync = guard.as_ref().unwrap();
-    assert!(sync.play_anchored(), "anchored once Playing stamped the base time");
-    assert_eq!(sync.base_time(), 9_000, "base time is the play-edge instant, not startup");
-    assert_eq!(sync.base_time_ns, 1_000, "eager field still records the startup instant");
+    assert!(
+        sync.play_anchored(),
+        "anchored once Playing stamped the base time"
+    );
+    assert_eq!(
+        sync.base_time(),
+        9_000,
+        "base time is the play-edge instant, not startup"
+    );
+    assert_eq!(
+        sync.base_time_ns, 1_000,
+        "eager field still records the startup instant"
+    );
 }

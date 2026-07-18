@@ -13,7 +13,7 @@ use std::sync::Arc;
 use g2g_core::runtime::{run_fanin_session, SourceLoop};
 use g2g_core::{
     Caps, CapsConstraint, ConfigureOutcome, Dim, G2gError, MultiInputElement, OutputSink,
-    PipelineClock, PipelinePacket, PushOutcome, RawVideoFormat, Rate, Reconfigure, ReverseChannel,
+    PipelineClock, PipelinePacket, PushOutcome, Rate, RawVideoFormat, Reconfigure, ReverseChannel,
 };
 
 struct ZeroClock;
@@ -55,7 +55,10 @@ impl SourceLoop for CountedSource {
                     g2g_core::MemoryDomain::System(g2g_core::memory::SystemSlice::from_boxed(
                         std::vec![0u8; 4].into_boxed_slice(),
                     )),
-                    g2g_core::FrameTiming { pts_ns: seq, ..Default::default() },
+                    g2g_core::FrameTiming {
+                        pts_ns: seq,
+                        ..Default::default()
+                    },
                     seq,
                 );
                 out.push(PipelinePacket::DataFrame(frame)).await?;
@@ -91,7 +94,10 @@ impl SourceLoop for KeyframeObservingSource {
                     g2g_core::MemoryDomain::System(g2g_core::memory::SystemSlice::from_boxed(
                         std::vec![0u8; 4].into_boxed_slice(),
                     )),
-                    g2g_core::FrameTiming { pts_ns: seq, ..Default::default() },
+                    g2g_core::FrameTiming {
+                        pts_ns: seq,
+                        ..Default::default()
+                    },
                     seq,
                 );
                 if let PushOutcome::Reconfigure(Reconfigure::ForceKeyframe) =
@@ -208,8 +214,14 @@ async fn fanin_session_routes_each_input_and_ends_on_all_eos() {
 async fn fanin_session_routes_reverse_keyframe_to_the_right_input() {
     let forced_0 = Arc::new(AtomicUsize::new(0));
     let forced_1 = Arc::new(AtomicUsize::new(0));
-    let mut video = KeyframeObservingSource { n: 12, forced: forced_0.clone() };
-    let mut audio = KeyframeObservingSource { n: 12, forced: forced_1.clone() };
+    let mut video = KeyframeObservingSource {
+        n: 12,
+        forced: forced_0.clone(),
+    };
+    let mut audio = KeyframeObservingSource {
+        n: 12,
+        forced: forced_1.clone(),
+    };
     let mut session = RecordingSession::new(2);
     session.request_kf_on_input0 = true;
 

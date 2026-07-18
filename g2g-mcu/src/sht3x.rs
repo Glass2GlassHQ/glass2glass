@@ -112,7 +112,14 @@ impl<'r, I2C: I2c, const N: usize, const BYTES: usize> Sht3xSrc<'r, I2C, N, BYTE
         ring: &'r StaticLendRing<N, BYTES>,
         frame_interval_ns: u64,
     ) -> Self {
-        Self { i2c, addr, ring, frame_interval_ns, remaining: None, seq: 0 }
+        Self {
+            i2c,
+            addr,
+            ring,
+            frame_interval_ns,
+            remaining: None,
+            seq: 0,
+        }
     }
 
     /// End the stream after `frames` readings (a sensor is polled endlessly by
@@ -135,11 +142,16 @@ impl<I2C: I2c, const N: usize, const BYTES: usize> StaticSource for Sht3xSrc<'_,
         }
         // Read the 6-byte result: [T_msb, T_lsb, T_crc, RH_msb, RH_lsb, RH_crc].
         let mut buf = [0u8; 6];
-        self.i2c.write_read(self.addr, &CMD_SINGLE_SHOT_HIGH, &mut buf).map_err(|_| peripheral())?;
+        self.i2c
+            .write_read(self.addr, &CMD_SINGLE_SHOT_HIGH, &mut buf)
+            .map_err(|_| peripheral())?;
         // Validate both CRC-8 check bytes before trusting the reading.
-        let (Some(t_word), Some(t_crc), Some(rh_word), Some(rh_crc)) =
-            (buf.get(0..2), buf.get(2).copied(), buf.get(3..5), buf.get(5).copied())
-        else {
+        let (Some(t_word), Some(t_crc), Some(rh_word), Some(rh_crc)) = (
+            buf.get(0..2),
+            buf.get(2).copied(),
+            buf.get(3..5),
+            buf.get(5).copied(),
+        ) else {
             return Err(peripheral());
         };
         if crc8(t_word) != t_crc || crc8(rh_word) != rh_crc {
@@ -156,7 +168,10 @@ impl<I2C: I2c, const N: usize, const BYTES: usize> StaticSource for Sht3xSrc<'_,
         let frame = unsafe {
             lend_slot(
                 self.ring,
-                FrameTiming { pts_ns, ..FrameTiming::default() },
+                FrameTiming {
+                    pts_ns,
+                    ..FrameTiming::default()
+                },
                 self.seq,
                 SHT3X_READING_BYTES,
                 |dst| {

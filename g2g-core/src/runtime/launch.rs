@@ -68,7 +68,11 @@ pub enum ParseError {
     /// The element has no property of that name.
     UnknownProperty { element: String, key: String },
     /// The value did not parse for the property's kind, or was rejected.
-    BadValue { element: String, key: String, value: String },
+    BadValue {
+        element: String,
+        key: String,
+        value: String,
+    },
     /// A `name.` reference names no element declared with that `name=`.
     UnknownReference(String),
     /// Two elements share the same `name=` handle.
@@ -125,20 +129,24 @@ impl core::fmt::Display for ParseError {
             ParseError::UnknownSource(n) => write!(f, "unknown source element: {n}"),
             ParseError::UnknownElement(n) => write!(f, "unknown element: {n}"),
             ParseError::MalformedProperty { element, token } => {
-                write!(f, "{element}: malformed property '{token}' (expected key=value)")
+                write!(
+                    f,
+                    "{element}: malformed property '{token}' (expected key=value)"
+                )
             }
             ParseError::UnknownProperty { element, key } => {
                 write!(f, "{element}: no property named '{key}'")
             }
-            ParseError::BadValue { element, key, value } => {
+            ParseError::BadValue {
+                element,
+                key,
+                value,
+            } => {
                 write!(f, "{element}: invalid value '{value}' for property '{key}'")?;
                 // Inline caps become a `capsfilter` (key `caps`); a gst dev often
                 // reaches for range / list / feature syntax g2g's launch parser
                 // does not accept, and the bare "invalid value" hides why.
-                if element == "capsfilter"
-                    && key == "caps"
-                    && value.contains(['[', '{', '('])
-                {
+                if element == "capsfilter" && key == "caps" && value.contains(['[', '{', '(']) {
                     write!(
                         f,
                         " (a launch caps filter takes fixed fields, ranges [min,max], \
@@ -148,16 +156,27 @@ impl core::fmt::Display for ParseError {
                 }
                 Ok(())
             }
-            ParseError::UnknownReference(n) => write!(f, "reference to undeclared element name: {n}"),
+            ParseError::UnknownReference(n) => {
+                write!(f, "reference to undeclared element name: {n}")
+            }
             ParseError::DuplicateName(n) => write!(f, "duplicate element name: {n}"),
             ParseError::NotAMuxer(n) => {
-                write!(f, "{n}: more than one input links here, but it is not a registered muxer")
+                write!(
+                    f,
+                    "{n}: more than one input links here, but it is not a registered muxer"
+                )
             }
             ParseError::MuxerWithoutOutput(n) => {
-                write!(f, "{n}: muxer has no outgoing link; its output must feed a consumer")
+                write!(
+                    f,
+                    "{n}: muxer has no outgoing link; its output must feed a consumer"
+                )
             }
             ParseError::UnknownInputPad(n) => {
-                write!(f, "{n}: no such input request pad (this element defines no pad by that name)")
+                write!(
+                    f,
+                    "{n}: no such input request pad (this element defines no pad by that name)"
+                )
             }
             ParseError::DuplicateInputPad(n) => {
                 write!(f, "{n}: two inputs resolve to the same request pad index")
@@ -200,7 +219,10 @@ enum Item {
     /// the dot (`""` for a bare `t.`, `"video_0"` for `d.video_0`), used by the
     /// explicit-demux fan-out (M476) to select which stream a branch reads; ignored
     /// for a tee (positional).
-    Ref { name: String, pad: String },
+    Ref {
+        name: String,
+        pad: String,
+    },
     Prebuilt(PrebuiltNode),
 }
 
@@ -279,15 +301,21 @@ fn consume_element<'a, I: Iterator<Item = &'a str>>(
     name: &str,
     tokens: &mut core::iter::Peekable<I>,
 ) -> Result<ElementSpec, ParseError> {
-    let mut spec = ElementSpec { name: name.to_string(), props: Vec::new(), instance: None };
+    let mut spec = ElementSpec {
+        name: name.to_string(),
+        props: Vec::new(),
+        instance: None,
+    };
     while let Some(&tok) = tokens.peek() {
         if tok == "!" || is_caps_token(tok) || as_ref_name(tok).is_some() {
             break;
         }
-        let (key, value) = tok.split_once('=').ok_or_else(|| ParseError::MalformedProperty {
-            element: name.to_string(),
-            token: tok.to_string(),
-        })?;
+        let (key, value) = tok
+            .split_once('=')
+            .ok_or_else(|| ParseError::MalformedProperty {
+                element: name.to_string(),
+                token: tok.to_string(),
+            })?;
         tokens.next();
         // Strip a single layer of surrounding quotes (double or single) from the value.
         let value = strip_quotes(value);
@@ -414,7 +442,10 @@ fn parse_chains(pipeline: &str) -> Result<Vec<Chain>, ParseError> {
                     }));
                     st = St::AfterNode;
                 } else if let Some((name, pad)) = split_pad_ref(tok) {
-                    cur.push(Item::Ref { name: name.to_string(), pad: pad.to_string() });
+                    cur.push(Item::Ref {
+                        name: name.to_string(),
+                        pad: pad.to_string(),
+                    });
                     if after_bang {
                         // Tail ref (`! t.`): links the upstream node into the
                         // named element and ends the chain.
@@ -463,18 +494,22 @@ fn apply_source_props(
             .properties()
             .iter()
             .find(|s| s.name == key)
-            .ok_or_else(|| ParseError::UnknownProperty { element: name.into(), key: key.clone() })?
+            .ok_or_else(|| ParseError::UnknownProperty {
+                element: name.into(),
+                key: key.clone(),
+            })?
             .kind;
         let parsed = PropValue::parse(kind, value).map_err(|_| ParseError::BadValue {
             element: name.into(),
             key: key.clone(),
             value: value.clone(),
         })?;
-        el.set_property(key, parsed).map_err(|_| ParseError::BadValue {
-            element: name.into(),
-            key: key.clone(),
-            value: value.clone(),
-        })?;
+        el.set_property(key, parsed)
+            .map_err(|_| ParseError::BadValue {
+                element: name.into(),
+                key: key.clone(),
+                value: value.clone(),
+            })?;
     }
     Ok(())
 }
@@ -490,18 +525,22 @@ fn apply_element_props(
             .properties()
             .iter()
             .find(|s| s.name == key)
-            .ok_or_else(|| ParseError::UnknownProperty { element: name.into(), key: key.clone() })?
+            .ok_or_else(|| ParseError::UnknownProperty {
+                element: name.into(),
+                key: key.clone(),
+            })?
             .kind;
         let parsed = PropValue::parse(kind, value).map_err(|_| ParseError::BadValue {
             element: name.into(),
             key: key.clone(),
             value: value.clone(),
         })?;
-        el.set_property(key, parsed).map_err(|_| ParseError::BadValue {
-            element: name.into(),
-            key: key.clone(),
-            value: value.clone(),
-        })?;
+        el.set_property(key, parsed)
+            .map_err(|_| ParseError::BadValue {
+                element: name.into(),
+                key: key.clone(),
+                value: value.clone(),
+            })?;
     }
     Ok(())
 }
@@ -520,18 +559,22 @@ fn apply_muxer_props(
             .properties()
             .iter()
             .find(|s| s.name == key)
-            .ok_or_else(|| ParseError::UnknownProperty { element: name.into(), key: key.clone() })?
+            .ok_or_else(|| ParseError::UnknownProperty {
+                element: name.into(),
+                key: key.clone(),
+            })?
             .kind;
         let parsed = PropValue::parse(kind, value).map_err(|_| ParseError::BadValue {
             element: name.into(),
             key: key.clone(),
             value: value.clone(),
         })?;
-        mux.set_property(key, parsed).map_err(|_| ParseError::BadValue {
-            element: name.into(),
-            key: key.clone(),
-            value: value.clone(),
-        })?;
+        mux.set_property(key, parsed)
+            .map_err(|_| ParseError::BadValue {
+                element: name.into(),
+                key: key.clone(),
+                value: value.clone(),
+            })?;
     }
     Ok(())
 }
@@ -546,18 +589,23 @@ fn apply_demux_props(
             .properties()
             .iter()
             .find(|s| s.name == key)
-            .ok_or_else(|| ParseError::UnknownProperty { element: name.into(), key: key.clone() })?
+            .ok_or_else(|| ParseError::UnknownProperty {
+                element: name.into(),
+                key: key.clone(),
+            })?
             .kind;
         let parsed = PropValue::parse(kind, value).map_err(|_| ParseError::BadValue {
             element: name.into(),
             key: key.clone(),
             value: value.clone(),
         })?;
-        demux.set_property(key, parsed).map_err(|_| ParseError::BadValue {
-            element: name.into(),
-            key: key.clone(),
-            value: value.clone(),
-        })?;
+        demux
+            .set_property(key, parsed)
+            .map_err(|_| ParseError::BadValue {
+                element: name.into(),
+                key: key.clone(),
+                value: value.clone(),
+            })?;
     }
     Ok(())
 }
@@ -600,7 +648,11 @@ fn expand_decodebin(registry: &Registry, chains: Vec<Chain>) -> Result<Vec<Chain
     }
     let is_fanout_decodebin = |spec: &ElementSpec| {
         is_decodebin(&spec.name)
-            && spec.instance.as_deref().map(|n| referenced.contains(n)).unwrap_or(false)
+            && spec
+                .instance
+                .as_deref()
+                .map(|n| referenced.contains(n))
+                .unwrap_or(false)
     };
 
     let mut out = Vec::with_capacity(chains.len());
@@ -690,7 +742,9 @@ fn resolve_upstream_caps(
             return Ok(caps);
         }
     }
-    registry.declared_output_caps(name).ok_or(ParseError::DecodebinNoUpstream)
+    registry
+        .declared_output_caps(name)
+        .ok_or(ParseError::DecodebinNoUpstream)
 }
 
 /// `uridecodebin` / `playbin`: a source-providing macro. `uridecodebin uri=X`
@@ -703,7 +757,10 @@ fn is_uri_source(name: &str) -> bool {
 
 /// The value of a spec property by key, if present.
 fn prop<'a>(spec: &'a ElementSpec, key: &str) -> Option<&'a str> {
-    spec.props.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+    spec.props
+        .iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v.as_str())
 }
 
 /// Expand every `uridecodebin` / `playbin` (a source position element) into the
@@ -727,7 +784,8 @@ fn expand_uri_sources(registry: &Registry, chains: Vec<Chain>) -> Result<Vec<Cha
                 return Err(ParseError::UriSourceNotAtHead(spec.name));
             }
             let is_playbin = spec.name.starts_with("playbin");
-            let uri = prop(&spec, "uri").ok_or_else(|| ParseError::MissingUri(spec.name.clone()))?;
+            let uri =
+                prop(&spec, "uri").ok_or_else(|| ParseError::MissingUri(spec.name.clone()))?;
             let (source, caps) = registry
                 .build_uri_source(uri)
                 .map_err(|e: UriError| ParseError::Uri(alloc::format!("{uri}: {e:?}")))?;
@@ -740,8 +798,14 @@ fn expand_uri_sources(registry: &Registry, chains: Vec<Chain>) -> Result<Vec<Cha
                 new_chain.push(Item::Prebuilt(PrebuiltNode::Element(dec)));
             }
             if is_playbin {
-                let sink = prop(&spec, "video-sink").unwrap_or("autovideosink").to_string();
-                new_chain.push(Item::Element(ElementSpec { name: sink, props: Vec::new(), instance: None }));
+                let sink = prop(&spec, "video-sink")
+                    .unwrap_or("autovideosink")
+                    .to_string();
+                new_chain.push(Item::Element(ElementSpec {
+                    name: sink,
+                    props: Vec::new(),
+                    instance: None,
+                }));
             }
         }
         out.push(new_chain);
@@ -795,7 +859,11 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
                         PrebuiltNode::Source(_) => "uridecodebin",
                         PrebuiltNode::Element(_) => "(decoder)",
                     };
-                    specs.push(ElementSpec { name: name.to_string(), props: Vec::new(), instance: None });
+                    specs.push(ElementSpec {
+                        name: name.to_string(),
+                        props: Vec::new(),
+                        instance: None,
+                    });
                     prebuilt.push(Some(node));
                     eps.push(Endpoint::Element(ei));
                 }
@@ -852,7 +920,10 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
             let ordinal = demux_pads[s].len();
             let req = match pads[w] {
                 Some(pad) => parse_pad_request(pad, ordinal),
-                None => PadRequest { kind: PadKind::Any, index: ordinal },
+                None => PadRequest {
+                    kind: PadKind::Any,
+                    index: ordinal,
+                },
             };
             demux_pads[s].push(req);
             // The destination's input-pad request: a named ref (`mux.audio_0`)
@@ -918,7 +989,10 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
             let next = queue_succ[cur].expect("queue validated 1-out above");
             // The named-pad suffix lives on the raw link that enters the terminal
             // consumer, i.e. `(cur -> next)`; find it for the request.
-            src_li = raw_links.iter().position(|&(a, b)| a == cur && b == next).unwrap_or(src_li);
+            src_li = raw_links
+                .iter()
+                .position(|&(a, b)| a == cur && b == next)
+                .unwrap_or(src_li);
             cur = next;
         }
         links.push((s, cur, policy, capacity));
@@ -943,9 +1017,7 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
     // demux (M210): the transpose of a muxer. A registered name with one output
     // falls back to its single-output launch element (e.g. `tsdemux`), the way a
     // one-input muxer name falls back to its single-input element.
-    let is_demux = |ei: usize| {
-        !is_tee(ei) && out_deg[ei] > 1 && registry.is_demux(&specs[ei].name)
-    };
+    let is_demux = |ei: usize| !is_tee(ei) && out_deg[ei] > 1 && registry.is_demux(&specs[ei].name);
     // Explicit-demux fan-out (M476): a non-tee, non-registered-demux element that
     // fans out to several pads and is fed by a file source is built by a registered
     // demux-select hook, which probes the file (`location=`) and returns a
@@ -1070,11 +1142,17 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
             // bare refs fill the remaining slots in link order (the historical
             // positional behavior).
             let n = in_deg[ei];
-            let incoming: Vec<usize> =
-                links.iter().enumerate().filter(|(_, (_, d, _, _))| *d == ei).map(|(k, _)| k).collect();
+            let incoming: Vec<usize> = links
+                .iter()
+                .enumerate()
+                .filter(|(_, (_, d, _, _))| *d == ei)
+                .map(|(k, _)| k)
+                .collect();
             let mut used = alloc::vec![false; n];
             for (ord, &k) in incoming.iter().enumerate() {
-                let Some(req) = &link_dest_req[k] else { continue };
+                let Some(req) = &link_dest_req[k] else {
+                    continue;
+                };
                 let idx = mux
                     .input_pad_index(req, ord)
                     .filter(|&i| i < n)
@@ -1086,23 +1164,34 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
             }
             for &k in &incoming {
                 if link_dest_req[k].is_none() {
-                    let idx = used.iter().position(|u| !u).expect("in_deg matches link count");
+                    let idx = used
+                        .iter()
+                        .position(|u| !u)
+                        .expect("in_deg matches link count");
                     used[idx] = true;
                     mux_pad_of_link[k] = Some(idx as u8);
                 }
             }
-            graph.add_muxer(GraphNodeRef::Muxer(mux), in_deg[ei] as u8).node()
+            graph
+                .add_muxer(GraphNodeRef::Muxer(mux), in_deg[ei] as u8)
+                .node()
         } else if is_select[ei] {
             // M476: a demux-select hook already built the multi-output demuxer
             // (probing the upstream file); splice it in with one port per pad.
-            let demux = demux_select_node[ei].take().expect("select demux built above");
-            graph.add_demux(GraphNodeRef::Demux(demux), out_deg[ei] as u8).node()
+            let demux = demux_select_node[ei]
+                .take()
+                .expect("select demux built above");
+            graph
+                .add_demux(GraphNodeRef::Demux(demux), out_deg[ei] as u8)
+                .node()
         } else if is_demux(ei) {
             let mut demux = registry
                 .make_demux(&spec.name, out_deg[ei])
                 .ok_or_else(|| ParseError::UnknownElement(spec.name.clone()))?;
             apply_demux_props(&mut demux, &spec.name, &spec.props)?;
-            graph.add_demux(GraphNodeRef::Demux(demux), out_deg[ei] as u8).node()
+            graph
+                .add_demux(GraphNodeRef::Demux(demux), out_deg[ei] as u8)
+                .node()
         } else if out_deg[ei] == 0 {
             let mut el = registry
                 .make_element(&spec.name)
@@ -1149,7 +1238,10 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
         } else if is_tee(s) || is_demux(s) || is_select[s] {
             let index = tee_next[s];
             tee_next[s] += 1;
-            PadId { node: node_s, index }
+            PadId {
+                node: node_s,
+                index,
+            }
         } else {
             PadId::from(node_s)
         };
@@ -1157,7 +1249,10 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
             // The input index was resolved at construction (named pads via the
             // muxer's scheme, bare refs sequentially); every muxer link has one.
             let index = mux_pad_of_link[k].expect("muxer link assigned an input pad");
-            PadId { node: node_d, index }
+            PadId {
+                node: node_d,
+                index,
+            }
         } else {
             PadId::from(node_d)
         };
@@ -1167,14 +1262,24 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
         // already, so it links straight through (no codec).
         if let Some(caps) = &decode_fanout_caps[s] {
             let port = src.index as usize;
-            let kind = demux_pads[s].get(port).map(|r| r.kind).unwrap_or(PadKind::Any);
+            let kind = demux_pads[s]
+                .get(port)
+                .map(|r| r.kind)
+                .unwrap_or(PadKind::Any);
             if !matches!(kind, PadKind::Text) {
                 let target: &dyn Fn(&Caps) -> bool = match kind {
                     PadKind::Audio => &is_raw_audio,
                     _ => &is_raw_video,
                 };
                 registry
-                    .decodebin(&mut graph, src, dst, &caps[port], target, DECODEBIN_MAX_DEPTH)
+                    .decodebin(
+                        &mut graph,
+                        src,
+                        dst,
+                        &caps[port],
+                        target,
+                        DECODEBIN_MAX_DEPTH,
+                    )
                     .map_err(|_| ParseError::NoDecodeChain(alloc::format!("{:?}", caps[port])))?;
                 continue;
             }
@@ -1254,7 +1359,9 @@ pub fn parse_launch(registry: &Registry, pipeline: &str) -> Result<Graph<GraphNo
 /// `uri=` is left to the normal builder (the M196 single-stream expansion).
 fn lone_playbin_uri(chains: &[Chain]) -> Option<&str> {
     let [chain] = chains else { return None };
-    let [Item::Element(spec)] = chain.as_slice() else { return None };
+    let [Item::Element(spec)] = chain.as_slice() else {
+        return None;
+    };
     if spec.name != "playbin" {
         return None;
     }
@@ -1283,13 +1390,23 @@ mod tests {
         )
         .unwrap();
         assert_eq!(chains.len(), 1);
-        assert_eq!(item_names(&chains[0]), ["videotestsrc", "videoflip", "fakesink"]);
-        let Item::Element(src) = &chains[0][0] else { panic!("first is an element") };
+        assert_eq!(
+            item_names(&chains[0]),
+            ["videotestsrc", "videoflip", "fakesink"]
+        );
+        let Item::Element(src) = &chains[0][0] else {
+            panic!("first is an element")
+        };
         assert_eq!(
             src.props,
-            [("num-buffers".to_string(), "3".to_string()), ("pattern".into(), "snow".into())]
+            [
+                ("num-buffers".to_string(), "3".to_string()),
+                ("pattern".into(), "snow".into())
+            ]
         );
-        let Item::Element(sink) = &chains[0][2] else { panic!("last is an element") };
+        let Item::Element(sink) = &chains[0][2] else {
+            panic!("last is an element")
+        };
         assert!(sink.props.is_empty());
     }
 
@@ -1297,19 +1414,28 @@ mod tests {
     fn parse_chains_strips_quoted_values() {
         // A double-quoted value has its quotes stripped.
         let chains = parse_chains("filesrc location=\"file.mp4\" ! fakesink").unwrap();
-        let Item::Element(src) = &chains[0][0] else { panic!("element") };
-        assert_eq!(src.props[0], ("location".to_string(), "file.mp4".to_string()));
+        let Item::Element(src) = &chains[0][0] else {
+            panic!("element")
+        };
+        assert_eq!(
+            src.props[0],
+            ("location".to_string(), "file.mp4".to_string())
+        );
     }
 
     #[test]
     fn parse_chains_keeps_spaces_in_quoted_values() {
         // The quote-aware tokenizer keeps spaces inside a value, so a nested
         // element description (the `gstwrap` case) survives as one property.
-        let chains =
-            parse_chains("gstwrap element=\"x264enc bitrate=4000\" ! fakesink").unwrap();
+        let chains = parse_chains("gstwrap element=\"x264enc bitrate=4000\" ! fakesink").unwrap();
         assert_eq!(item_names(&chains[0]), ["gstwrap", "fakesink"]);
-        let Item::Element(w) = &chains[0][0] else { panic!("element") };
-        assert_eq!(w.props[0], ("element".to_string(), "x264enc bitrate=4000".to_string()));
+        let Item::Element(w) = &chains[0][0] else {
+            panic!("element")
+        };
+        assert_eq!(
+            w.props[0],
+            ("element".to_string(), "x264enc bitrate=4000".to_string())
+        );
     }
 
     #[test]
@@ -1318,7 +1444,9 @@ mod tests {
         // element with one property, not two chained nodes.
         let chains = parse_chains("gstwrap element=\"a ! b\" ! fakesink").unwrap();
         assert_eq!(item_names(&chains[0]), ["gstwrap", "fakesink"]);
-        let Item::Element(w) = &chains[0][0] else { panic!("element") };
+        let Item::Element(w) = &chains[0][0] else {
+            panic!("element")
+        };
         assert_eq!(w.props[0], ("element".to_string(), "a ! b".to_string()));
     }
 
@@ -1341,7 +1469,9 @@ mod tests {
     #[test]
     fn single_quoted_value_is_unquoted() {
         let chains = parse_chains("videotestsrc ! identity note='a b c' ! fakesink").unwrap();
-        let Item::Element(id) = &chains[0][1] else { panic!("element") };
+        let Item::Element(id) = &chains[0][1] else {
+            panic!("element")
+        };
         assert_eq!(id.props, [("note".to_string(), "a b c".to_string())]);
     }
 
@@ -1360,7 +1490,12 @@ mod tests {
         // comment only at a token boundary.
         assert_eq!(
             tokenize("uridecodebin uri=file:///v.mp4#closed-captions=cc1 ! sink"),
-            ["uridecodebin", "uri=file:///v.mp4#closed-captions=cc1", "!", "sink"]
+            [
+                "uridecodebin",
+                "uri=file:///v.mp4#closed-captions=cc1",
+                "!",
+                "sink"
+            ]
         );
     }
 
@@ -1387,11 +1522,19 @@ mod tests {
         // A bare `media/type,...` node is the inline caps-filter shorthand.
         let chains =
             parse_chains("videotestsrc ! video/x-raw,format=nv12,width=320 ! fakesink").unwrap();
-        assert_eq!(item_names(&chains[0]), ["videotestsrc", "capsfilter", "fakesink"]);
-        let Item::Element(caps) = &chains[0][1] else { panic!("element") };
+        assert_eq!(
+            item_names(&chains[0]),
+            ["videotestsrc", "capsfilter", "fakesink"]
+        );
+        let Item::Element(caps) = &chains[0][1] else {
+            panic!("element")
+        };
         assert_eq!(
             caps.props,
-            [("caps".to_string(), "video/x-raw,format=nv12,width=320".to_string())]
+            [(
+                "caps".to_string(),
+                "video/x-raw,format=nv12,width=320".to_string()
+            )]
         );
     }
 
@@ -1403,7 +1546,9 @@ mod tests {
         assert_eq!(chains.len(), 2);
         assert_eq!(item_names(&chains[0]), ["videotestsrc", "tee", "fakesink"]);
         assert_eq!(item_names(&chains[1]), ["t", "videoflip", "fakesink"]);
-        let Item::Element(tee) = &chains[0][1] else { panic!("element") };
+        let Item::Element(tee) = &chains[0][1] else {
+            panic!("element")
+        };
         assert_eq!(tee.instance.as_deref(), Some("t"));
         assert!(tee.props.is_empty(), "name= is the handle, not a property");
         assert!(matches!(&chains[1][0], Item::Ref { name, .. } if name == "t"));
@@ -1413,7 +1558,10 @@ mod tests {
     fn empty_and_too_few_stages_error() {
         let reg = Registry::new();
         assert!(matches!(parse_launch(&reg, "   "), Err(ParseError::Empty)));
-        assert!(matches!(parse_launch(&reg, "videotestsrc"), Err(ParseError::TooFewStages)));
+        assert!(matches!(
+            parse_launch(&reg, "videotestsrc"),
+            Err(ParseError::TooFewStages)
+        ));
     }
 
     #[test]
@@ -1429,8 +1577,11 @@ mod tests {
         // The degree / reference checks precede registry construction, so an
         // empty registry still surfaces them.
         let reg = Registry::new();
-        let err =
-            parse_launch(&reg, "videotestsrc ! tee name=t ! fakesink nope. ! fakesink").unwrap_err();
+        let err = parse_launch(
+            &reg,
+            "videotestsrc ! tee name=t ! fakesink nope. ! fakesink",
+        )
+        .unwrap_err();
         assert_eq!(err, ParseError::UnknownReference("nope".to_string()));
     }
 

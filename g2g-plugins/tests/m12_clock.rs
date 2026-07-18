@@ -56,7 +56,8 @@ impl SourceLoop for EmitSrc {
     where
         Self: 'a;
 
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 
@@ -151,7 +152,9 @@ impl AsyncElement for PassTransform {
 
 #[tokio::test]
 async fn live_source_clock_is_elected_over_fallback() {
-    let mut src = EmitSrc { provide: Some((ClockPriority::LiveSource, 5_000)) };
+    let mut src = EmitSrc {
+        provide: Some((ClockPriority::LiveSource, 5_000)),
+    };
     let mut sink = EmitSink { provide: None };
     // Fallback clock reads a different instant; election must ignore it.
     let fallback = FixedClock(999);
@@ -161,7 +164,10 @@ async fn live_source_clock_is_elected_over_fallback() {
         .expect("pipeline should complete");
 
     assert_eq!(stats.clock_priority, ClockPriority::LiveSource);
-    assert_eq!(stats.base_time_ns, 5_000, "base time read from the elected source clock");
+    assert_eq!(
+        stats.base_time_ns, 5_000,
+        "base time read from the elected source clock"
+    );
 }
 
 #[tokio::test]
@@ -175,14 +181,21 @@ async fn fallback_clock_used_when_no_element_provides_one() {
         .expect("pipeline should complete");
 
     assert_eq!(stats.clock_priority, ClockPriority::SystemFallback);
-    assert_eq!(stats.base_time_ns, 777, "base time read from the supplied fallback clock");
+    assert_eq!(
+        stats.base_time_ns, 777,
+        "base time read from the supplied fallback clock"
+    );
 }
 
 #[tokio::test]
 async fn live_source_outranks_a_sink_provider() {
-    let mut src = EmitSrc { provide: Some((ClockPriority::LiveSource, 5_000)) };
+    let mut src = EmitSrc {
+        provide: Some((ClockPriority::LiveSource, 5_000)),
+    };
     let mut tx = PassTransform;
-    let mut sink = EmitSink { provide: Some((ClockPriority::Provider, 8_000)) };
+    let mut sink = EmitSink {
+        provide: Some((ClockPriority::Provider, 8_000)),
+    };
     let fallback = FixedClock(1);
 
     let stats = run_source_transform_sink(&mut src, &mut tx, &mut sink, &fallback, 4)
@@ -190,14 +203,19 @@ async fn live_source_outranks_a_sink_provider() {
         .expect("pipeline should complete");
 
     assert_eq!(stats.clock_priority, ClockPriority::LiveSource);
-    assert_eq!(stats.base_time_ns, 5_000, "the higher-priority live source clock wins");
+    assert_eq!(
+        stats.base_time_ns, 5_000,
+        "the higher-priority live source clock wins"
+    );
 }
 
 #[tokio::test]
 async fn sink_provider_beats_fallback_when_source_has_none() {
     let mut src = EmitSrc { provide: None };
     let mut tx = PassTransform;
-    let mut sink = EmitSink { provide: Some((ClockPriority::Provider, 8_000)) };
+    let mut sink = EmitSink {
+        provide: Some((ClockPriority::Provider, 8_000)),
+    };
     let fallback = FixedClock(1);
 
     let stats = run_source_transform_sink(&mut src, &mut tx, &mut sink, &fallback, 4)

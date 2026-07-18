@@ -210,7 +210,11 @@ impl RtspServerSink {
     /// Use an already-bound listener (so a test can pick an ephemeral port).
     pub fn from_listener(listener: StdTcpListener) -> Result<Self, G2gError> {
         let addr = listener.local_addr().map_err(io_err)?;
-        Ok(Self { listener: Some(listener), configured: true, ..Self::new(addr) })
+        Ok(Self {
+            listener: Some(listener),
+            configured: true,
+            ..Self::new(addr)
+        })
     }
 
     /// Set the RTP payload type and SSRC carried in every packet.
@@ -250,11 +254,14 @@ impl RtspServerSink {
         let std_listener = self.listener.take().ok_or(G2gError::NotConfigured)?;
         std_listener.set_nonblocking(true).map_err(io_err)?;
         let listener = tokio::net::TcpListener::from_std(std_listener).map_err(io_err)?;
-        let rtp_socket = tokio::net::UdpSocket::bind(("0.0.0.0", 0)).await.map_err(io_err)?;
+        let rtp_socket = tokio::net::UdpSocket::bind(("0.0.0.0", 0))
+            .await
+            .map_err(io_err)?;
         let server_rtp_port = rtp_socket.local_addr().map_err(io_err)?.port();
 
         let (mut control, peer) = listener.accept().await.map_err(io_err)?;
-        let mut responder = RtspResponder::new(sdp_h264(self.payload_type), server_rtp_port, self.ssrc);
+        let mut responder =
+            RtspResponder::new(sdp_h264(self.payload_type), server_rtp_port, self.ssrc);
         let mut pending: Vec<u8> = Vec::new();
         let mut buf = [0u8; CTRL_BUF];
         let mut dest = None;
@@ -309,7 +316,9 @@ impl RtspServerSink {
         let (Some(listener), Some(rtp)) = (self.tcp.as_ref(), self.rtp_socket.as_ref()) else {
             return;
         };
-        let Ok(server_rtp_port) = rtp.local_addr().map(|a| a.port()) else { return };
+        let Ok(server_rtp_port) = rtp.local_addr().map(|a| a.port()) else {
+            return;
+        };
         // A zero timeout polls accept once: take a queued connection or stop.
         while let Ok(Ok((control, peer))) =
             tokio::time::timeout(Duration::from_millis(0), listener.accept()).await
@@ -369,7 +378,8 @@ impl RtspServerSink {
 }
 
 impl AsyncElement for RtspServerSink {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -383,7 +393,10 @@ impl AsyncElement for RtspServerSink {
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         match absolute_caps {
-            Caps::CompressedVideo { codec: VideoCodec::H264, .. } => {}
+            Caps::CompressedVideo {
+                codec: VideoCodec::H264,
+                ..
+            } => {}
             _ => return Err(G2gError::CapsMismatch),
         }
         if self.listener.is_none() && self.tcp.is_none() {
@@ -512,6 +525,9 @@ mod tests {
             }
             tokio::task::yield_now().await;
         }
-        assert!(reaped, "a playing client whose control channel closed is reaped");
+        assert!(
+            reaped,
+            "a playing client whose control channel closed is reaped"
+        );
     }
 }

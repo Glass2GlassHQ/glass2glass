@@ -19,7 +19,8 @@ fn av1enc_bitrate_and_speed() {
     let mut e = Av1Enc::new();
     assert!(declares(e.properties(), "bitrate"));
     assert!(declares(e.properties(), "speed"));
-    e.set_property("bitrate", PropValue::Uint(2_000_000)).unwrap();
+    e.set_property("bitrate", PropValue::Uint(2_000_000))
+        .unwrap();
     assert_eq!(e.get_property("bitrate"), Some(PropValue::Uint(2_000_000)));
     e.set_property("speed", PropValue::Uint(6)).unwrap();
     assert_eq!(e.get_property("speed"), Some(PropValue::Uint(6)));
@@ -31,12 +32,17 @@ fn vpxenc_codec_and_bitrate() {
     use g2g_plugins::vpxenc::VpxEnc;
     let mut e = VpxEnc::new();
     assert!(declares(e.properties(), "codec"));
-    e.set_property("codec", PropValue::Str("vp8".into())).unwrap();
+    e.set_property("codec", PropValue::Str("vp8".into()))
+        .unwrap();
     assert_eq!(e.get_property("codec"), Some(PropValue::Str("vp8".into())));
     // bits/second in, folded to libvpx kbps and back: 800 kbps round number.
     e.set_property("bitrate", PropValue::Uint(800_000)).unwrap();
     assert_eq!(e.get_property("bitrate"), Some(PropValue::Uint(800_000)));
-    assert!(e.set_property("codec", PropValue::Str("av1".into())).is_err(), "rejects non-VP8/9");
+    assert!(
+        e.set_property("codec", PropValue::Str("av1".into()))
+            .is_err(),
+        "rejects non-VP8/9"
+    );
 }
 
 #[cfg(feature = "opus")]
@@ -71,9 +77,15 @@ fn mjpegdec_output_format() {
     use g2g_plugins::mjpegdec::MjpegDec;
     let mut e = MjpegDec::new();
     assert!(declares(e.properties(), "output-format"));
-    e.set_property("output-format", PropValue::Str("i420".into())).unwrap();
-    assert_eq!(e.get_property("output-format"), Some(PropValue::Str("i420".into())));
-    assert!(e.set_property("output-format", PropValue::Str("rgb565".into())).is_err());
+    e.set_property("output-format", PropValue::Str("i420".into()))
+        .unwrap();
+    assert_eq!(
+        e.get_property("output-format"),
+        Some(PropValue::Str("i420".into()))
+    );
+    assert!(e
+        .set_property("output-format", PropValue::Str("rgb565".into()))
+        .is_err());
 }
 
 #[cfg(feature = "analytics")]
@@ -95,7 +107,8 @@ fn textoverlay_color_packs_argb() {
     let mut e = TextOverlay::new();
     assert!(declares(e.properties(), "color"));
     // 0xAARRGGBB: opaque red.
-    e.set_property("color", PropValue::Uint(0xFFFF_0000)).unwrap();
+    e.set_property("color", PropValue::Uint(0xFFFF_0000))
+        .unwrap();
     assert_eq!(e.get_property("color"), Some(PropValue::Uint(0xFFFF_0000)));
 }
 
@@ -108,10 +121,17 @@ fn udpsrc_address_and_port() {
     assert!(declares(s.properties(), "port"));
     assert!(declares(s.properties(), "address"));
     s.set_property("port", PropValue::Uint(6000)).unwrap();
-    s.set_property("address", PropValue::Str("127.0.0.1".into())).unwrap();
+    s.set_property("address", PropValue::Str("127.0.0.1".into()))
+        .unwrap();
     assert_eq!(s.get_property("port"), Some(PropValue::Uint(6000)));
-    assert_eq!(s.get_property("address"), Some(PropValue::Str("127.0.0.1".into())));
-    assert!(s.set_property("port", PropValue::Uint(70000)).is_err(), "rejects out-of-range port");
+    assert_eq!(
+        s.get_property("address"),
+        Some(PropValue::Str("127.0.0.1".into()))
+    );
+    assert!(
+        s.set_property("port", PropValue::Uint(70000)).is_err(),
+        "rejects out-of-range port"
+    );
 }
 
 #[cfg(feature = "srt")]
@@ -122,8 +142,12 @@ fn srtsrc_latency_and_passphrase() {
     let mut s = SrtSrc::new("0.0.0.0:9000".parse().unwrap());
     s.set_property("latency", PropValue::Uint(250)).unwrap();
     assert_eq!(s.get_property("latency"), Some(PropValue::Uint(250)));
-    s.set_property("passphrase", PropValue::Str("hunter2hunter2".into())).unwrap();
-    assert_eq!(s.get_property("passphrase"), Some(PropValue::Str("hunter2hunter2".into())));
+    s.set_property("passphrase", PropValue::Str("hunter2hunter2".into()))
+        .unwrap();
+    assert_eq!(
+        s.get_property("passphrase"),
+        Some(PropValue::Str("hunter2hunter2".into()))
+    );
 }
 
 #[cfg(feature = "udp-egress")]
@@ -131,13 +155,21 @@ fn srtsrc_latency_and_passphrase() {
 fn udpsink_host_port_payload() {
     use g2g_plugins::udpsink::UdpSink;
     let mut e = UdpSink::new("127.0.0.1:5004".parse().unwrap());
-    e.set_property("host", PropValue::Str("10.0.0.5".into())).unwrap();
+    e.set_property("host", PropValue::Str("10.0.0.5".into()))
+        .unwrap();
     e.set_property("port", PropValue::Uint(5600)).unwrap();
     e.set_property("payload-type", PropValue::Uint(97)).unwrap();
-    assert_eq!(e.get_property("host"), Some(PropValue::Str("10.0.0.5".into())));
+    assert_eq!(
+        e.get_property("host"),
+        Some(PropValue::Str("10.0.0.5".into()))
+    );
     assert_eq!(e.get_property("port"), Some(PropValue::Uint(5600)));
     assert_eq!(e.get_property("payload-type"), Some(PropValue::Uint(97)));
-    assert!(e.set_property("payload-type", PropValue::Uint(200)).is_err(), "PT must be <= 127");
+    assert!(
+        e.set_property("payload-type", PropValue::Uint(200))
+            .is_err(),
+        "PT must be <= 127"
+    );
 }
 
 #[test]
@@ -145,11 +177,17 @@ fn h264parse_config_interval() {
     use g2g_plugins::h264parse::H264Parse;
     let mut e = H264Parse::reframing();
     assert!(declares(e.properties(), "config-interval"));
-    e.set_property("config-interval", PropValue::Int(-1)).unwrap();
+    e.set_property("config-interval", PropValue::Int(-1))
+        .unwrap();
     assert_eq!(e.get_property("config-interval"), Some(PropValue::Int(-1)));
-    e.set_property("config-interval", PropValue::Int(2)).unwrap();
+    e.set_property("config-interval", PropValue::Int(2))
+        .unwrap();
     assert_eq!(e.get_property("config-interval"), Some(PropValue::Int(2)));
-    assert!(e.set_property("config-interval", PropValue::Int(-2)).is_err(), "rejects < -1");
+    assert!(
+        e.set_property("config-interval", PropValue::Int(-2))
+            .is_err(),
+        "rejects < -1"
+    );
 }
 
 #[test]
@@ -157,7 +195,8 @@ fn h265parse_config_interval() {
     use g2g_plugins::h265parse::H265Parse;
     let mut e = H265Parse::reframing();
     assert!(declares(e.properties(), "config-interval"));
-    e.set_property("config-interval", PropValue::Int(-1)).unwrap();
+    e.set_property("config-interval", PropValue::Int(-1))
+        .unwrap();
     assert_eq!(e.get_property("config-interval"), Some(PropValue::Int(-1)));
 }
 
@@ -167,10 +206,12 @@ fn tsmux_pat_pmt_interval() {
     let mut e = TsMux::new();
     assert!(declares(e.properties(), "pat-interval"));
     assert!(declares(e.properties(), "pmt-interval"));
-    e.set_property("pat-interval", PropValue::Uint(100)).unwrap();
+    e.set_property("pat-interval", PropValue::Uint(100))
+        .unwrap();
     assert_eq!(e.get_property("pat-interval"), Some(PropValue::Uint(100)));
     // pat / pmt share one cadence (the tables are emitted together).
-    e.set_property("pmt-interval", PropValue::Uint(250)).unwrap();
+    e.set_property("pmt-interval", PropValue::Uint(250))
+        .unwrap();
     assert_eq!(e.get_property("pat-interval"), Some(PropValue::Uint(250)));
 }
 
@@ -189,8 +230,12 @@ fn mp4mux_fragment_duration() {
     use g2g_plugins::mp4mux::Mp4Mux;
     let mut e = Mp4Mux::new();
     assert!(declares(e.properties(), "fragment-duration"));
-    e.set_property("fragment-duration", PropValue::Uint(2000)).unwrap();
-    assert_eq!(e.get_property("fragment-duration"), Some(PropValue::Uint(2000)));
+    e.set_property("fragment-duration", PropValue::Uint(2000))
+        .unwrap();
+    assert_eq!(
+        e.get_property("fragment-duration"),
+        Some(PropValue::Uint(2000))
+    );
 }
 
 // parse_launch end to end: the parser looks up the kind in properties() and calls
@@ -203,11 +248,19 @@ fn parse_launch_sets_encoder_property() {
     use g2g_plugins::registry::default_registry;
     let reg = default_registry();
     assert!(
-        parse_launch(&reg, "videotestsrc num-buffers=2 ! mjpegenc quality=50 ! fakesink").is_ok(),
+        parse_launch(
+            &reg,
+            "videotestsrc num-buffers=2 ! mjpegenc quality=50 ! fakesink"
+        )
+        .is_ok(),
         "a launch line setting the new quality property parses"
     );
     assert!(
-        parse_launch(&reg, "videotestsrc num-buffers=2 ! mjpegenc bogus=1 ! fakesink").is_err(),
+        parse_launch(
+            &reg,
+            "videotestsrc num-buffers=2 ! mjpegenc bogus=1 ! fakesink"
+        )
+        .is_err(),
         "an undeclared property is rejected"
     );
 }

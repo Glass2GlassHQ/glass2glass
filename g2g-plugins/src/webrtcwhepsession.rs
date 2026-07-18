@@ -43,7 +43,9 @@ use g2g_core::{
 
 use crate::filesink::io_err;
 use crate::turn::{self, TurnClient};
-use crate::webrtc_util::{add_ice_candidates, feed_datagram, post_sdp, select_host_ip, send_transmit};
+use crate::webrtc_util::{
+    add_ice_candidates, feed_datagram, post_sdp, select_host_ip, send_transmit,
+};
 
 /// Output port for the H.264 video track.
 const VIDEO_PORT: usize = 0;
@@ -65,7 +67,9 @@ pub struct WebRtcWhepSessionSrc {
 
 impl core::fmt::Debug for WebRtcWhepSessionSrc {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("WebRtcWhepSessionSrc").field("whep_url", &self.whep_url).finish()
+        f.debug_struct("WebRtcWhepSessionSrc")
+            .field("whep_url", &self.whep_url)
+            .finish()
     }
 }
 
@@ -124,16 +128,24 @@ fn video_caps() -> Caps {
         codec: VideoCodec::H264,
         width: Dim::Range { min: 2, max: 8192 },
         height: Dim::Range { min: 2, max: 8192 },
-        framerate: Rate::Range { min_q16: 1 << 16, max_q16: 240 << 16 },
+        framerate: Rate::Range {
+            min_q16: 1 << 16,
+            max_q16: 240 << 16,
+        },
     }
 }
 
 fn audio_caps() -> Caps {
-    Caps::Audio { format: AudioFormat::Opus, channels: 2, sample_rate: 48_000 }
+    Caps::Audio {
+        format: AudioFormat::Opus,
+        channels: 2,
+        sample_rate: 48_000,
+    }
 }
 
 impl MultiOutputSource for WebRtcWhepSessionSrc {
-    type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
+    type RunFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -193,11 +205,15 @@ impl MultiOutputSource for WebRtcWhepSessionSrc {
             };
             let answer_sdp = post_sdp(&self.whep_url, self.bearer.as_deref(), offer_sdp).await?;
             let answer = SdpAnswer::from_sdp_string(&answer_sdp).map_err(|_| hw())?;
-            rtc.sdp_api().accept_answer(pending, answer).map_err(|_| hw())?;
+            rtc.sdp_api()
+                .accept_answer(pending, answer)
+                .map_err(|_| hw())?;
 
             // Announce each output's caps before its first frame.
-            out.push_to(VIDEO_PORT, PipelinePacket::CapsChanged(video_caps())).await?;
-            out.push_to(AUDIO_PORT, PipelinePacket::CapsChanged(audio_caps())).await?;
+            out.push_to(VIDEO_PORT, PipelinePacket::CapsChanged(video_caps()))
+                .await?;
+            out.push_to(AUDIO_PORT, PipelinePacket::CapsChanged(audio_caps()))
+                .await?;
 
             let mut buf = alloc::vec![0u8; 2000];
             let mut seq = 0u64;
@@ -238,7 +254,8 @@ impl MultiOutputSource for WebRtcWhepSessionSrc {
                 };
 
                 for (port, pts_ns, data) in frames {
-                    let keyframe = port == VIDEO_PORT && crate::h264util::h264_au_is_keyframe(&data);
+                    let keyframe =
+                        port == VIDEO_PORT && crate::h264util::h264_au_is_keyframe(&data);
                     let frame = Frame {
                         domain: MemoryDomain::System(SystemSlice::from_boxed(
                             data.into_boxed_slice(),
@@ -292,11 +309,17 @@ mod tests {
         assert_eq!(src.output_count(), 2);
         assert!(matches!(
             src.output_caps(VIDEO_PORT),
-            Ok(Caps::CompressedVideo { codec: VideoCodec::H264, .. })
+            Ok(Caps::CompressedVideo {
+                codec: VideoCodec::H264,
+                ..
+            })
         ));
         assert!(matches!(
             src.output_caps(AUDIO_PORT),
-            Ok(Caps::Audio { format: AudioFormat::Opus, .. })
+            Ok(Caps::Audio {
+                format: AudioFormat::Opus,
+                ..
+            })
         ));
         assert!(src.output_caps(2).is_err());
     }

@@ -41,10 +41,10 @@ use std::vec::Vec;
 use g2g_core::log::LogSource;
 use g2g_core::runtime::{GraphNode, Registry};
 use g2g_core::{
-    g2g_error, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
-    ElementMetadata, Frame, G2gError, Graph, HardwareError, MemoryDomain, MultiOutputElement,
-    MultiOutputSink, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, Rate, RawVideoFormat,
+    g2g_error, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata,
+    Frame, G2gError, Graph, HardwareError, MemoryDomain, MultiOutputElement, MultiOutputSink,
+    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec, Rate, RawVideoFormat,
 };
 use rhai::{Blob, Dynamic, Engine, EvalAltResult, Scope, AST};
 
@@ -91,35 +91,41 @@ fn scalar_from_dynamic(v: Dynamic) -> ScalarVal {
 fn register_builder_api(engine: &mut Engine, spec: &Arc<Mutex<GraphSpec>>) {
     // add(element, id): declare a node built from a registered element name.
     let s = spec.clone();
-    engine.register_fn("add", move |element: &str, id: &str| -> Result<(), Box<EvalAltResult>> {
-        let mut g = s.lock().unwrap();
-        if g.nodes.iter().any(|n| n.id == id) {
-            return Err(format!("duplicate node id '{id}'").into());
-        }
-        g.nodes.push(NodeSpec {
-            id: id.to_string(),
-            element: Some(element.to_string()),
-            ..NodeSpec::default()
-        });
-        Ok(())
-    });
+    engine.register_fn(
+        "add",
+        move |element: &str, id: &str| -> Result<(), Box<EvalAltResult>> {
+            let mut g = s.lock().unwrap();
+            if g.nodes.iter().any(|n| n.id == id) {
+                return Err(format!("duplicate node id '{id}'").into());
+            }
+            g.nodes.push(NodeSpec {
+                id: id.to_string(),
+                element: Some(element.to_string()),
+                ..NodeSpec::default()
+            });
+            Ok(())
+        },
+    );
 
     // caps(id, "video/x-raw,..."): declare a capsfilter node (the declarative
     // caps shorthand). Its element is derived; the string is validated when the
     // capsfilter parses it at build time.
     let s = spec.clone();
-    engine.register_fn("caps", move |id: &str, caps: &str| -> Result<(), Box<EvalAltResult>> {
-        let mut g = s.lock().unwrap();
-        if g.nodes.iter().any(|n| n.id == id) {
-            return Err(format!("duplicate node id '{id}'").into());
-        }
-        g.nodes.push(NodeSpec {
-            id: id.to_string(),
-            caps: Some(caps.to_string()),
-            ..NodeSpec::default()
-        });
-        Ok(())
-    });
+    engine.register_fn(
+        "caps",
+        move |id: &str, caps: &str| -> Result<(), Box<EvalAltResult>> {
+            let mut g = s.lock().unwrap();
+            if g.nodes.iter().any(|n| n.id == id) {
+                return Err(format!("duplicate node id '{id}'").into());
+            }
+            g.nodes.push(NodeSpec {
+                id: id.to_string(),
+                caps: Some(caps.to_string()),
+                ..NodeSpec::default()
+            });
+            Ok(())
+        },
+    );
 
     // set(id, key, value): set a property on an already-declared node. The value
     // keeps its Rhai type (int / bool / float / string).
@@ -128,14 +134,15 @@ fn register_builder_api(engine: &mut Engine, spec: &Arc<Mutex<GraphSpec>>) {
         "set",
         move |id: &str, key: &str, value: Dynamic| -> Result<(), Box<EvalAltResult>> {
             let mut g = s.lock().unwrap();
-            let node = g
-                .nodes
-                .iter_mut()
-                .find(|n| n.id == id)
-                .ok_or_else(|| -> Box<EvalAltResult> {
-                    format!("set: no node '{id}' (declare it with add / caps first)").into()
-                })?;
-            node.props.insert(key.to_string(), scalar_from_dynamic(value));
+            let node =
+                g.nodes
+                    .iter_mut()
+                    .find(|n| n.id == id)
+                    .ok_or_else(|| -> Box<EvalAltResult> {
+                        format!("set: no node '{id}' (declare it with add / caps first)").into()
+                    })?;
+            node.props
+                .insert(key.to_string(), scalar_from_dynamic(value));
             Ok(())
         },
     );
@@ -172,7 +179,9 @@ pub fn build_from_script(registry: &Registry, src: &str) -> Result<Graph<GraphNo
     let spec = Arc::new(Mutex::new(GraphSpec::default()));
     let mut engine = Engine::new();
     register_builder_api(&mut engine, &spec);
-    engine.run(src).map_err(|e| ScriptError::Eval(e.to_string()))?;
+    engine
+        .run(src)
+        .map_err(|e| ScriptError::Eval(e.to_string()))?;
     // The engine dropped its closures at scope end, so the Arc is unique here.
     let spec = Arc::try_unwrap(spec)
         .map(|m| m.into_inner().unwrap())
@@ -357,7 +366,10 @@ struct FrameGuard {
 
 impl FrameGuard {
     fn new() -> Self {
-        Self { ptr: AtomicPtr::new(core::ptr::null_mut()), len: AtomicUsize::new(0) }
+        Self {
+            ptr: AtomicPtr::new(core::ptr::null_mut()),
+            len: AtomicUsize::new(0),
+        }
     }
 
     /// Make the buffer live for the handle. Single-threaded with respect to the
@@ -526,7 +538,9 @@ fn register_frame_api(engine: &mut Engine) {
     engine.register_get("pts", |f: &mut FrameBuf| f.pts);
     engine.register_get("sequence", |f: &mut FrameBuf| f.sequence);
     engine.register_get("format", |f: &mut FrameBuf| f.format.clone());
-    engine.register_get("len", |f: &mut FrameBuf| f.guard.len.load(Ordering::Relaxed) as i64);
+    engine.register_get("len", |f: &mut FrameBuf| {
+        f.guard.len.load(Ordering::Relaxed) as i64
+    });
     engine.register_indexer_get(|f: &mut FrameBuf, i: i64| f.get(i));
     engine.register_indexer_set(|f: &mut FrameBuf, i: i64, v: i64| f.set(i, v));
     // Native bulk ops: one call transforms the whole buffer at Rust speed, the
@@ -554,7 +568,8 @@ impl LogSource for ScriptElement {
 }
 
 impl AsyncElement for ScriptElement {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -563,9 +578,11 @@ impl AsyncElement for ScriptElement {
     /// `CapsChanged` through it. Mirrors `pyelement`.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         let accept = self.accept.clone();
-        CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| match input.intersect(&accept) {
-            Ok(_) => CapsSet::one(input.clone()),
-            Err(_) => CapsSet::from_alternatives(std::vec::Vec::new()),
+        CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| {
+            match input.intersect(&accept) {
+                Ok(_) => CapsSet::one(input.clone()),
+                Err(_) => CapsSet::from_alternatives(std::vec::Vec::new()),
+            }
         }))
     }
 
@@ -576,8 +593,12 @@ impl AsyncElement for ScriptElement {
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         absolute_caps.intersect(&self.accept)?;
         self.fixed = Some(absolute_caps.clone());
-        let (engine, ast, scope) =
-            build_engine("scriptelement", &self.script, &self.location, register_frame_api)?;
+        let (engine, ast, scope) = build_engine(
+            "scriptelement",
+            &self.script,
+            &self.location,
+            register_frame_api,
+        )?;
         self.engine = Some(engine);
         self.ast = Some(ast);
         self.scope = scope;
@@ -671,16 +692,27 @@ impl PadTemplates for ScriptElement {
 
 /// `ScriptElement`'s settable properties (the runtime / `gst-launch` face).
 static SCRIPTELEMENT_PROPS: &[PropertySpec] = &[
-    PropertySpec::new("script", PropKind::Str, "inline Rhai source (a `process(frame)` function)"),
-    PropertySpec::new("location", PropKind::Str, "path to a .rhai script file (used if `script` is unset)"),
+    PropertySpec::new(
+        "script",
+        PropKind::Str,
+        "inline Rhai source (a `process(frame)` function)",
+    ),
+    PropertySpec::new(
+        "location",
+        PropKind::Str,
+        "path to a .rhai script file (used if `script` is unset)",
+    ),
 ];
 
 /// The fixed geometry + format of a raw-video caps, mirroring the g2g-python host.
 fn raw_video_dims(caps: &Caps) -> Result<(u32, u32, RawVideoFormat), G2gError> {
     match caps {
-        Caps::RawVideo { width, height, format, .. } => {
-            Ok((dim_fixed(width)?, dim_fixed(height)?, *format))
-        }
+        Caps::RawVideo {
+            width,
+            height,
+            format,
+            ..
+        } => Ok((dim_fixed(width)?, dim_fixed(height)?, *format)),
         _ => Err(G2gError::CapsMismatch),
     }
 }
@@ -736,7 +768,9 @@ fn register_route_api(engine: &mut Engine) {
     engine.register_get("pts", |f: &mut RouteFrame| f.pts);
     engine.register_get("sequence", |f: &mut RouteFrame| f.sequence);
     engine.register_get("keyframe", |f: &mut RouteFrame| f.keyframe);
-    engine.register_get("len", |f: &mut RouteFrame| f.guard.len.load(Ordering::Relaxed) as i64);
+    engine.register_get("len", |f: &mut RouteFrame| {
+        f.guard.len.load(Ordering::Relaxed) as i64
+    });
     engine.register_indexer_get(|f: &mut RouteFrame, i: i64| f.get(i));
 }
 
@@ -814,7 +848,12 @@ impl ScriptRouter {
         if let Some(b) = buf {
             guard.arm(b.as_ptr() as *mut u8, b.len());
         }
-        let view = RouteFrame { guard: guard.clone(), pts, sequence, keyframe };
+        let view = RouteFrame {
+            guard: guard.clone(),
+            pts,
+            sequence,
+            keyframe,
+        };
         let called = {
             let engine = self.engine.as_ref().ok_or(G2gError::NotConfigured)?;
             let ast = self.ast.as_ref().ok_or(G2gError::NotConfigured)?;
@@ -850,7 +889,11 @@ impl ScriptRouter {
             }
             let p = i as usize;
             if p >= self.outputs {
-                g2g_error!(self, "route() returned port {i}, out of range 0..{}", self.outputs);
+                g2g_error!(
+                    self,
+                    "route() returned port {i}, out of range 0..{}",
+                    self.outputs
+                );
                 return Err(G2gError::Hardware(HardwareError::Other));
             }
             if !ports.contains(&p) {
@@ -865,7 +908,10 @@ impl ScriptRouter {
                 match v.as_int() {
                     Ok(i) => push(i)?,
                     Err(actual) => {
-                        g2g_error!(self, "route() array entry must be an integer (got {actual})");
+                        g2g_error!(
+                            self,
+                            "route() array entry must be an integer (got {actual})"
+                        );
                         return Err(G2gError::Hardware(HardwareError::Other));
                     }
                 }
@@ -904,7 +950,8 @@ impl LogSource for ScriptRouter {
 }
 
 impl MultiOutputElement for ScriptRouter {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -919,8 +966,12 @@ impl MultiOutputElement for ScriptRouter {
     }
 
     fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        let (engine, ast, scope) =
-            build_engine("scriptrouter", &self.script, &self.location, register_route_api)?;
+        let (engine, ast, scope) = build_engine(
+            "scriptrouter",
+            &self.script,
+            &self.location,
+            register_route_api,
+        )?;
         self.engine = Some(engine);
         self.ast = Some(ast);
         self.scope = scope;
@@ -948,7 +999,8 @@ impl MultiOutputElement for ScriptRouter {
                     // drop.
                     if let Some((&last, rest)) = ports.split_last() {
                         for &port in rest {
-                            out.push_to(port, PipelinePacket::DataFrame(f.share())).await?;
+                            out.push_to(port, PipelinePacket::DataFrame(f.share()))
+                                .await?;
                         }
                         out.push_to(last, PipelinePacket::DataFrame(f)).await?;
                     }
@@ -956,7 +1008,8 @@ impl MultiOutputElement for ScriptRouter {
                 // Control packets broadcast to every branch, so all stay in step.
                 PipelinePacket::CapsChanged(c) => {
                     for port in 0..ports {
-                        out.push_to(port, PipelinePacket::CapsChanged(c.clone())).await?;
+                        out.push_to(port, PipelinePacket::CapsChanged(c.clone()))
+                            .await?;
                     }
                 }
                 PipelinePacket::Flush => {
@@ -1008,7 +1061,11 @@ impl MultiOutputElement for ScriptRouter {
 
 /// `ScriptRouter`'s settable properties (the runtime / `gst-launch` face).
 static SCRIPTROUTER_PROPS: &[PropertySpec] = &[
-    PropertySpec::new("script", PropKind::Str, "inline Rhai source (a `route(frame) -> port` function)"),
+    PropertySpec::new(
+        "script",
+        PropKind::Str,
+        "inline Rhai source (a `route(frame) -> port` function)",
+    ),
     PropertySpec::new(
         "location",
         PropKind::Str,
@@ -1082,7 +1139,10 @@ mod tests {
         // `set` on an undeclared node raises a script error the builder surfaces.
         let src = r#" set("ghost", "num-buffers", 1); "#;
         let reg = default_registry();
-        assert!(matches!(build_from_script(&reg, src), Err(ScriptError::Eval(_))));
+        assert!(matches!(
+            build_from_script(&reg, src),
+            Err(ScriptError::Eval(_))
+        ));
     }
 
     #[test]
@@ -1092,7 +1152,10 @@ mod tests {
             add("fakesink", "x");
         "#;
         let reg = default_registry();
-        assert!(matches!(build_from_script(&reg, src), Err(ScriptError::Eval(_))));
+        assert!(matches!(
+            build_from_script(&reg, src),
+            Err(ScriptError::Eval(_))
+        ));
     }
 
     // ---- M580: scriptelement runtime transform ----
@@ -1121,7 +1184,8 @@ mod tests {
     fn scriptelement_mutates_pixels_in_place() {
         // A process() that writes 255 into the first byte via the zero-copy index.
         let mut el = ScriptElement::new().with_script("fn process(f) { f[0] = 255; }");
-        el.configure_pipeline(&rgba_caps(2, 2)).expect("configure compiles the script");
+        el.configure_pipeline(&rgba_caps(2, 2))
+            .expect("configure compiles the script");
         let mut frame = rgba_frame(2, 2);
         el.run_script(&mut frame).expect("run");
         match &frame.domain {
@@ -1154,7 +1218,8 @@ mod tests {
         );
         el.configure_pipeline(&rgba_caps(4, 2)).expect("configure");
         let mut frame = rgba_frame(4, 2);
-        el.run_script(&mut frame).expect("run: dims match, unit return is passthrough");
+        el.run_script(&mut frame)
+            .expect("run: dims match, unit return is passthrough");
     }
 
     #[test]
@@ -1177,11 +1242,13 @@ mod tests {
 
     #[test]
     fn scriptelement_apply_lut_rejects_wrong_size() {
-        let mut el = ScriptElement::new()
-            .with_script("fn process(f) { f.apply_lut(blob(4, 0)); }");
+        let mut el = ScriptElement::new().with_script("fn process(f) { f.apply_lut(blob(4, 0)); }");
         el.configure_pipeline(&rgba_caps(2, 2)).expect("configure");
         let mut frame = rgba_frame(2, 2);
-        assert!(el.run_script(&mut frame).is_err(), "a non-256-byte LUT is rejected");
+        assert!(
+            el.run_script(&mut frame).is_err(),
+            "a non-256-byte LUT is rejected"
+        );
     }
 
     #[test]
@@ -1190,7 +1257,10 @@ mod tests {
         let mut el = ScriptElement::new().with_script("fn process(f) { f[999999] = 1; }");
         el.configure_pipeline(&rgba_caps(2, 2)).expect("configure");
         let mut frame = rgba_frame(2, 2);
-        assert!(el.run_script(&mut frame).is_err(), "out-of-range index rejected");
+        assert!(
+            el.run_script(&mut frame).is_err(),
+            "out-of-range index rejected"
+        );
     }
 
     #[test]
@@ -1221,7 +1291,10 @@ mod tests {
     #[test]
     fn scriptelement_compile_error_fails_configure() {
         let mut el = ScriptElement::new().with_script("fn process(f) { this is not rhai }");
-        assert!(el.configure_pipeline(&rgba_caps(2, 2)).is_err(), "bad script fails configure");
+        assert!(
+            el.configure_pipeline(&rgba_caps(2, 2)).is_err(),
+            "bad script fails configure"
+        );
     }
 
     #[test]
@@ -1241,31 +1314,47 @@ mod tests {
 
     fn configured_router(outputs: usize, script: &str) -> ScriptRouter {
         let mut r = ScriptRouter::new(outputs);
-        r.set_property("script", PropValue::Str(script.to_string())).unwrap();
+        r.set_property("script", PropValue::Str(script.to_string()))
+            .unwrap();
         // The router ignores the caps (pass-through), but configure compiles.
-        r.configure_pipeline(&rgba_caps(2, 2)).expect("configure compiles the route script");
+        r.configure_pipeline(&rgba_caps(2, 2))
+            .expect("configure compiles the route script");
         r
     }
 
     #[test]
     fn scriptrouter_routes_by_the_script() {
         let mut r = configured_router(2, "fn route(f) { if f.sequence % 2 == 0 { 0 } else { 1 } }");
-        assert_eq!(r.route(&seq_frame(0)).unwrap(), std::vec![0], "even -> port 0");
-        assert_eq!(r.route(&seq_frame(1)).unwrap(), std::vec![1], "odd -> port 1");
+        assert_eq!(
+            r.route(&seq_frame(0)).unwrap(),
+            std::vec![0],
+            "even -> port 0"
+        );
+        assert_eq!(
+            r.route(&seq_frame(1)).unwrap(),
+            std::vec![1],
+            "odd -> port 1"
+        );
         assert_eq!(r.route(&seq_frame(2)).unwrap(), std::vec![0]);
     }
 
     #[test]
     fn scriptrouter_negative_result_drops() {
         let mut r = configured_router(2, "fn route(f) { if f.sequence < 5 { -1 } else { 0 } }");
-        assert!(r.route(&seq_frame(3)).unwrap().is_empty(), "below threshold is dropped");
+        assert!(
+            r.route(&seq_frame(3)).unwrap().is_empty(),
+            "below threshold is dropped"
+        );
         assert_eq!(r.route(&seq_frame(9)).unwrap(), std::vec![0]);
     }
 
     #[test]
     fn scriptrouter_out_of_range_port_is_an_error() {
         let mut r = configured_router(2, "fn route(f) { 5 }");
-        assert!(r.route(&seq_frame(0)).is_err(), "port 5 with 2 outputs is rejected");
+        assert!(
+            r.route(&seq_frame(0)).is_err(),
+            "port 5 with 2 outputs is rejected"
+        );
     }
 
     #[test]
@@ -1277,40 +1366,68 @@ mod tests {
             s.as_mut_slice()[0] = 200;
         }
         assert_eq!(r.route(&hi).unwrap(), std::vec![1]);
-        assert_eq!(r.route(&rgba_frame(2, 2)).unwrap(), std::vec![0], "zero byte -> port 0");
+        assert_eq!(
+            r.route(&rgba_frame(2, 2)).unwrap(),
+            std::vec![0],
+            "zero byte -> port 0"
+        );
     }
 
     #[test]
     fn scriptrouter_multicasts_to_an_array_of_ports() {
         // An array return fans one frame to several ports; a bare int is still one.
-        let mut r = configured_router(3, "fn route(f) { if f.sequence == 0 { [0, 2] } else { 1 } }");
-        assert_eq!(r.route(&seq_frame(0)).unwrap(), std::vec![0, 2], "array -> both ports");
-        assert_eq!(r.route(&seq_frame(1)).unwrap(), std::vec![1], "int -> one port");
+        let mut r = configured_router(
+            3,
+            "fn route(f) { if f.sequence == 0 { [0, 2] } else { 1 } }",
+        );
+        assert_eq!(
+            r.route(&seq_frame(0)).unwrap(),
+            std::vec![0, 2],
+            "array -> both ports"
+        );
+        assert_eq!(
+            r.route(&seq_frame(1)).unwrap(),
+            std::vec![1],
+            "int -> one port"
+        );
     }
 
     #[test]
     fn scriptrouter_multicast_skips_negatives_and_dedups() {
         // Negative entries drop that route; a repeated port never double-delivers.
         let mut r = configured_router(3, "fn route(f) { [0, -1, 2, 0] }");
-        assert_eq!(r.route(&seq_frame(0)).unwrap(), std::vec![0, 2], "negatives skipped, 0 once");
+        assert_eq!(
+            r.route(&seq_frame(0)).unwrap(),
+            std::vec![0, 2],
+            "negatives skipped, 0 once"
+        );
     }
 
     #[test]
     fn scriptrouter_empty_array_drops() {
         let mut r = configured_router(2, "fn route(f) { [] }");
-        assert!(r.route(&seq_frame(0)).unwrap().is_empty(), "an empty array drops the frame");
+        assert!(
+            r.route(&seq_frame(0)).unwrap().is_empty(),
+            "an empty array drops the frame"
+        );
     }
 
     #[test]
     fn scriptrouter_multicast_out_of_range_is_an_error() {
         let mut r = configured_router(2, "fn route(f) { [0, 5] }");
-        assert!(r.route(&seq_frame(0)).is_err(), "an out-of-range array entry is rejected");
+        assert!(
+            r.route(&seq_frame(0)).is_err(),
+            "an out-of-range array entry is rejected"
+        );
     }
 
     #[test]
     fn scriptrouter_is_registered_as_a_demux() {
         let reg = default_registry();
-        assert!(reg.is_demux("scriptrouter"), "scriptrouter registered as a fan-out demux");
+        assert!(
+            reg.is_demux("scriptrouter"),
+            "scriptrouter registered as a fan-out demux"
+        );
         assert!(reg.make_demux("scriptrouter", 2).is_some());
     }
 }

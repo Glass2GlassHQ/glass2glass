@@ -80,7 +80,10 @@ impl AsyncElement for Vp9Parse {
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         match absolute_caps {
-            Caps::CompressedVideo { codec: VideoCodec::Vp9, .. } => {
+            Caps::CompressedVideo {
+                codec: VideoCodec::Vp9,
+                ..
+            } => {
                 self.configured = true;
                 Ok(ConfigureOutcome::Accepted)
             }
@@ -108,7 +111,8 @@ impl AsyncElement for Vp9Parse {
                                 framerate: Rate::Any,
                             };
                             if self.last_emitted_caps.as_ref() != Some(&new_caps) {
-                                out.push(PipelinePacket::CapsChanged(new_caps.clone())).await?;
+                                out.push(PipelinePacket::CapsChanged(new_caps.clone()))
+                                    .await?;
                                 self.last_emitted_caps = Some(new_caps);
                                 self.keyframes_emitted += 1;
                             }
@@ -145,7 +149,10 @@ impl PadTemplates for Vp9Parse {
             height: Dim::Any,
             framerate: Rate::Any,
         };
-        Vec::from([PadTemplate::sink(CapsSet::one(vp9.clone())), PadTemplate::source(CapsSet::one(vp9))])
+        Vec::from([
+            PadTemplate::sink(CapsSet::one(vp9.clone())),
+            PadTemplate::source(CapsSet::one(vp9)),
+        ])
     }
 }
 
@@ -204,7 +211,11 @@ fn parse_keyframe(packet: &[u8]) -> Option<Vp9KeyFrame> {
     // frame_size: 16-bit minus-1 fields.
     let width = br.read_bits(16)? + 1;
     let height = br.read_bits(16)? + 1;
-    Some(Vp9KeyFrame { width, height, profile })
+    Some(Vp9KeyFrame {
+        width,
+        height,
+        profile,
+    })
 }
 
 #[cfg(test)]
@@ -362,7 +373,10 @@ mod tests {
         let mut sink = RecordingSink::default();
 
         let frame = frame_with_bytes(0, keyframe(1920, 1080, 0));
-        parse.process(PipelinePacket::DataFrame(frame), &mut sink).await.unwrap();
+        parse
+            .process(PipelinePacket::DataFrame(frame), &mut sink)
+            .await
+            .unwrap();
 
         assert_eq!(sink.packets.len(), 2, "expected CapsChanged then DataFrame");
         match &sink.packets[0] {
@@ -384,12 +398,21 @@ mod tests {
 
         for seq in 0..3 {
             let frame = frame_with_bytes(seq, keyframe(1280, 720, 0));
-            parse.process(PipelinePacket::DataFrame(frame), &mut sink).await.unwrap();
+            parse
+                .process(PipelinePacket::DataFrame(frame), &mut sink)
+                .await
+                .unwrap();
         }
 
-        let caps_count =
-            sink.packets.iter().filter(|p| matches!(p, PipelinePacket::CapsChanged(_))).count();
-        assert_eq!(caps_count, 1, "CapsChanged fires once for identical dimensions");
+        let caps_count = sink
+            .packets
+            .iter()
+            .filter(|p| matches!(p, PipelinePacket::CapsChanged(_)))
+            .count();
+        assert_eq!(
+            caps_count, 1,
+            "CapsChanged fires once for identical dimensions"
+        );
         assert_eq!(parse.caps_changes_emitted(), 1);
     }
 
@@ -400,11 +423,17 @@ mod tests {
         let mut sink = RecordingSink::default();
 
         parse
-            .process(PipelinePacket::DataFrame(frame_with_bytes(0, keyframe(1280, 720, 0))), &mut sink)
+            .process(
+                PipelinePacket::DataFrame(frame_with_bytes(0, keyframe(1280, 720, 0))),
+                &mut sink,
+            )
             .await
             .unwrap();
         parse
-            .process(PipelinePacket::DataFrame(frame_with_bytes(1, keyframe(1920, 1080, 0))), &mut sink)
+            .process(
+                PipelinePacket::DataFrame(frame_with_bytes(1, keyframe(1920, 1080, 0))),
+                &mut sink,
+            )
             .await
             .unwrap();
 
@@ -412,7 +441,9 @@ mod tests {
             .packets
             .iter()
             .filter_map(|p| match p {
-                PipelinePacket::CapsChanged(Caps::CompressedVideo { width, .. }) => Some(width.clone()),
+                PipelinePacket::CapsChanged(Caps::CompressedVideo { width, .. }) => {
+                    Some(width.clone())
+                }
                 _ => None,
             })
             .collect();

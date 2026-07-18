@@ -25,7 +25,9 @@ pub struct WasmClock {
 
 impl WasmClock {
     pub fn new() -> Self {
-        Self { epoch_ms: performance_now_ms() }
+        Self {
+            epoch_ms: performance_now_ms(),
+        }
     }
 }
 

@@ -15,7 +15,8 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_simple_pipeline, run_source_transform_sink, SourceLoop};
 use g2g_core::{
     AllocationParams, AsyncElement, BufferPool, Caps, ConfigureOutcome, Dim, DomainSet, G2gError,
-    MemoryDomain, MemoryDomainKind, OutputSink, PipelineClock, PipelinePacket, Rate, RawVideoFormat,
+    MemoryDomain, MemoryDomainKind, OutputSink, PipelineClock, PipelinePacket, Rate,
+    RawVideoFormat,
 };
 
 struct ZeroClock;
@@ -44,11 +45,16 @@ struct PoolSrc {
 
 impl PoolSrc {
     fn new(fallback_size: usize) -> Self {
-        Self { fallback_size, proposed: None }
+        Self {
+            fallback_size,
+            proposed: None,
+        }
     }
 
     fn pool_buffer_size(&self) -> usize {
-        self.proposed.map(|p| p.size_bytes).unwrap_or(self.fallback_size)
+        self.proposed
+            .map(|p| p.size_bytes)
+            .unwrap_or(self.fallback_size)
     }
 }
 
@@ -58,7 +64,8 @@ impl SourceLoop for PoolSrc {
     where
         Self: 'a;
 
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 
@@ -110,7 +117,10 @@ struct ProposingSink {
 
 impl ProposingSink {
     fn new(proposal: Option<AllocationParams>) -> Self {
-        Self { proposal, received_sizes: Vec::new() }
+        Self {
+            proposal,
+            received_sizes: Vec::new(),
+        }
     }
 }
 
@@ -249,7 +259,10 @@ async fn transform_allocation_precedes_configure_pipeline() {
     // configure_pipeline cascade, so a transform (decoder) has its downstream
     // min_buffers in hand when it opens, instead of after.
     let mut src = PoolSrc::new(64);
-    let mut tx = OrderRecordingTransform { alloc_configured: false, alloc_seen_at_open: None };
+    let mut tx = OrderRecordingTransform {
+        alloc_configured: false,
+        alloc_seen_at_open: None,
+    };
     let mut sink = ProposingSink::new(Some(AllocationParams::cuda(4096, 4, 256)));
     let clock = ZeroClock;
 
@@ -280,7 +293,11 @@ async fn source_sink_pool_handoff() {
         Some(AllocationParams::system(1024, 4)),
         "the sink's proposal must be conveyed to the source"
     );
-    assert_eq!(src.pool_buffer_size(), 1024, "source sized its pool from the proposal");
+    assert_eq!(
+        src.pool_buffer_size(),
+        1024,
+        "source sized its pool from the proposal"
+    );
     assert_eq!(
         sink.received_sizes,
         vec![1024],
@@ -293,7 +310,10 @@ async fn three_stage_transform_folds_its_requirement() {
     // Sink wants 2048-byte buffers; transform needs at least 4096. The folded
     // proposal handed to the source takes the larger size, the larger count.
     let mut src = PoolSrc::new(64);
-    let mut tx = FoldingTransform { own_min_size: 4096, seen_downstream: None };
+    let mut tx = FoldingTransform {
+        own_min_size: 4096,
+        seen_downstream: None,
+    };
     let mut sink = ProposingSink::new(Some(AllocationParams::system(2048, 3)));
     let clock = ZeroClock;
 
@@ -331,7 +351,9 @@ async fn cuda_domain_proposal_conveyed_to_source() {
         .await
         .expect("pipeline should complete");
 
-    let alloc = stats.allocation.expect("the sink's CUDA proposal must be conveyed");
+    let alloc = stats
+        .allocation
+        .expect("the sink's CUDA proposal must be conveyed");
     assert_eq!(
         alloc.domain,
         MemoryDomainKind::Cuda,
@@ -351,7 +373,10 @@ async fn cuda_domain_survives_transform_fold() {
     // System requirement: the most-demanding size/align win, but the consumer
     // dictates the domain, so the source is still asked for CUDA memory.
     let mut src = PoolSrc::new(64);
-    let mut tx = FoldingTransform { own_min_size: 8192, seen_downstream: None };
+    let mut tx = FoldingTransform {
+        own_min_size: 8192,
+        seen_downstream: None,
+    };
     let mut sink = ProposingSink::new(Some(AllocationParams::cuda(4096, 2, 256)));
     let clock = ZeroClock;
 

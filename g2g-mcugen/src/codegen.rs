@@ -48,7 +48,10 @@ struct Wired {
 }
 
 fn sanitize(id: &str) -> String {
-    let mut s: String = id.chars().map(|c| if c.is_alphanumeric() { c } else { '_' }).collect();
+    let mut s: String = id
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '_' })
+        .collect();
     if s.chars().next().is_some_and(|c| c.is_ascii_digit()) {
         s.insert(0, 'n');
     }
@@ -75,8 +78,12 @@ pub(crate) fn compile(doc: &GraphDoc) -> Result<Compiled, CompileError> {
     let mut out: Vec<Vec<usize>> = vec![Vec::new(); n];
     let mut inn: Vec<Vec<usize>> = vec![Vec::new(); n];
     for edge in &doc.edges {
-        let from = *id_to_idx.get(&edge.from).ok_or_else(|| CompileError::UnknownNode(edge.from.clone()))?;
-        let to = *id_to_idx.get(&edge.to).ok_or_else(|| CompileError::UnknownNode(edge.to.clone()))?;
+        let from = *id_to_idx
+            .get(&edge.from)
+            .ok_or_else(|| CompileError::UnknownNode(edge.from.clone()))?;
+        let to = *id_to_idx
+            .get(&edge.to)
+            .ok_or_else(|| CompileError::UnknownNode(edge.to.clone()))?;
         out[from].push(to);
         inn[to].push(from);
     }
@@ -87,21 +94,32 @@ pub(crate) fn compile(doc: &GraphDoc) -> Result<Compiled, CompileError> {
     // Sinks and sources.
     let sinks: Vec<usize> = (0..n).filter(|&i| role(i) == Role::Sink).collect();
     if sinks.len() != 1 {
-        return Err(CompileError::Topology(format!("expected exactly one sink, found {}", sinks.len())));
+        return Err(CompileError::Topology(format!(
+            "expected exactly one sink, found {}",
+            sinks.len()
+        )));
     }
     let sink = sinks[0];
     if !out[sink].is_empty() {
-        return Err(CompileError::Topology(format!("sink `{}` has an outgoing edge", id(sink))));
+        return Err(CompileError::Topology(format!(
+            "sink `{}` has an outgoing edge",
+            id(sink)
+        )));
     }
     let sources: Vec<usize> = (0..n).filter(|&i| role(i) == Role::Source).collect();
     for &s in &sources {
         if !inn[s].is_empty() {
-            return Err(CompileError::Topology(format!("source `{}` has an incoming edge", id(s))));
+            return Err(CompileError::Topology(format!(
+                "source `{}` has an incoming edge",
+                id(s)
+            )));
         }
     }
     let fanins: Vec<usize> = (0..n).filter(|&i| role(i) == Role::FanIn).collect();
     if fanins.len() > 1 {
-        return Err(CompileError::Topology("more than one fan-in is not supported".into()));
+        return Err(CompileError::Topology(
+            "more than one fan-in is not supported".into(),
+        ));
     }
 
     // The single successor of `node`, erroring unless there is exactly one.
@@ -141,113 +159,118 @@ pub(crate) fn compile(doc: &GraphDoc) -> Result<Compiled, CompileError> {
     // Assemble the topology into (branch_a, branch_b, fanin, tail-with-sink).
     // A linear graph is the degenerate case: one branch is the whole chain,
     // there is no fan-in, and the "tail" is empty.
-    let (branches, fanin, tail): (Vec<Vec<usize>>, Option<usize>, Vec<usize>) = match fanins.as_slice()
-    {
-        [] => {
-            if sources.len() != 1 {
-                return Err(CompileError::Topology(format!(
-                    "a linear graph needs exactly one source, found {}",
-                    sources.len()
-                )));
-            }
-            // Walk source -> ... -> sink; the sink terminates the tail.
-            let mut chain = vec![sources[0]];
-            let mut cur = sources[0];
-            while cur != sink {
-                let nxt = succ(cur)?;
-                if nxt != sink && role(nxt) != Role::Transform {
+    let (branches, fanin, tail): (Vec<Vec<usize>>, Option<usize>, Vec<usize>) =
+        match fanins.as_slice() {
+            [] => {
+                if sources.len() != 1 {
                     return Err(CompileError::Topology(format!(
-                        "node `{}` in a linear graph is not a transform",
-                        id(nxt)
+                        "a linear graph needs exactly one source, found {}",
+                        sources.len()
                     )));
                 }
-                chain.push(nxt);
-                cur = nxt;
+                // Walk source -> ... -> sink; the sink terminates the tail.
+                let mut chain = vec![sources[0]];
+                let mut cur = sources[0];
+                while cur != sink {
+                    let nxt = succ(cur)?;
+                    if nxt != sink && role(nxt) != Role::Transform {
+                        return Err(CompileError::Topology(format!(
+                            "node `{}` in a linear graph is not a transform",
+                            id(nxt)
+                        )));
+                    }
+                    chain.push(nxt);
+                    cur = nxt;
+                }
+                // Source is the branch; the rest (transforms + sink) is the tail.
+                let source_node = chain.remove(0);
+                (vec![vec![source_node]], None, chain)
             }
-            // Source is the branch; the rest (transforms + sink) is the tail.
-            let source_node = chain.remove(0);
-            (vec![vec![source_node]], None, chain)
-        }
-        [f] => {
-            let f = *f;
-            if inn[f].len() != 2 {
-                return Err(CompileError::Topology(format!(
-                    "fan-in `{}` needs exactly two inputs, has {}",
-                    id(f),
-                    inn[f].len()
-                )));
-            }
-            if sources.len() != 2 {
-                return Err(CompileError::Topology(format!(
-                    "a fan-in graph needs exactly two sources, found {}",
-                    sources.len()
-                )));
-            }
-            // Deterministic branch order: by source id.
-            let mut srcs = sources.clone();
-            srcs.sort_by(|&a, &b| id(a).cmp(id(b)));
-            let branch_a = branch_to(srcs[0], f)?;
-            let branch_b = branch_to(srcs[1], f)?;
-            // Tail: fan-in's successor chain to the sink.
-            let mut tail = Vec::new();
-            let mut cur = succ(f)?;
-            loop {
-                if cur != sink && role(cur) != Role::Transform {
+            [f] => {
+                let f = *f;
+                if inn[f].len() != 2 {
                     return Err(CompileError::Topology(format!(
-                        "node `{}` after the fan-in is not a transform",
-                        id(cur)
+                        "fan-in `{}` needs exactly two inputs, has {}",
+                        id(f),
+                        inn[f].len()
                     )));
                 }
-                tail.push(cur);
-                if cur == sink {
-                    break;
+                if sources.len() != 2 {
+                    return Err(CompileError::Topology(format!(
+                        "a fan-in graph needs exactly two sources, found {}",
+                        sources.len()
+                    )));
                 }
-                cur = succ(cur)?;
+                // Deterministic branch order: by source id.
+                let mut srcs = sources.clone();
+                srcs.sort_by(|&a, &b| id(a).cmp(id(b)));
+                let branch_a = branch_to(srcs[0], f)?;
+                let branch_b = branch_to(srcs[1], f)?;
+                // Tail: fan-in's successor chain to the sink.
+                let mut tail = Vec::new();
+                let mut cur = succ(f)?;
+                loop {
+                    if cur != sink && role(cur) != Role::Transform {
+                        return Err(CompileError::Topology(format!(
+                            "node `{}` after the fan-in is not a transform",
+                            id(cur)
+                        )));
+                    }
+                    tail.push(cur);
+                    if cur == sink {
+                        break;
+                    }
+                    cur = succ(cur)?;
+                }
+                (vec![branch_a, branch_b], Some(f), tail)
             }
-            (vec![branch_a, branch_b], Some(f), tail)
-        }
-        _ => unreachable!("fanins.len() > 1 handled above"),
-    };
+            _ => unreachable!("fanins.len() > 1 handled above"),
+        };
 
     // Geometry pass + ring assignment for every node, in emission order.
     let mut wired: BTreeMap<usize, Wired> = BTreeMap::new();
     let frame_ns = doc.frame_ns;
-    let mut flow = |nodes: &[usize],
-                    mut geom: Option<Geometry>|
-     -> Result<Option<Geometry>, CompileError> {
-        for &node in nodes {
-            let out_geom = kinds[node].output_geometry(id(node), geom)?;
-            let ring_bytes = match (kinds[node].role(), out_geom) {
-                (Role::Sink, _) => 0,
-                (_, Some(g)) => g.ring_bytes(frame_ns)?,
-                (_, None) => 0,
-            };
-            let var = sanitize(id(node));
-            wired.insert(
-                node,
-                Wired {
-
-                    kind: kinds[node].clone(),
-                    out_geom,
-                    ring: format!("ring_{var}"),
-                    var,
-                    ring_bytes,
-                },
-            );
-            geom = out_geom;
-        }
-        Ok(geom)
-    };
+    let mut flow =
+        |nodes: &[usize], mut geom: Option<Geometry>| -> Result<Option<Geometry>, CompileError> {
+            for &node in nodes {
+                let out_geom = kinds[node].output_geometry(id(node), geom)?;
+                let ring_bytes = match (kinds[node].role(), out_geom) {
+                    (Role::Sink, _) => 0,
+                    (_, Some(g)) => g.ring_bytes(frame_ns)?,
+                    (_, None) => 0,
+                };
+                let var = sanitize(id(node));
+                wired.insert(
+                    node,
+                    Wired {
+                        kind: kinds[node].clone(),
+                        out_geom,
+                        ring: format!("ring_{var}"),
+                        var,
+                        ring_bytes,
+                    },
+                );
+                geom = out_geom;
+            }
+            Ok(geom)
+        };
 
     // Branch geometries feed the fan-in; the tail flows from the fan-in out.
-    let branch_geoms: Vec<Option<Geometry>> =
-        branches.iter().map(|b| flow(b, None)).collect::<Result<_, _>>()?;
+    let branch_geoms: Vec<Option<Geometry>> = branches
+        .iter()
+        .map(|b| flow(b, None))
+        .collect::<Result<_, _>>()?;
     let fanin_in_geom = if let Some(f) = fanin {
         let (Some(ga), Some(gb)) = (branch_geoms[0], branch_geoms[1]) else {
-            return Err(CompileError::Topology("a fan-in branch produced no frames".into()));
+            return Err(CompileError::Topology(
+                "a fan-in branch produced no frames".into(),
+            ));
         };
         if ga != gb {
-            return Err(CompileError::MixerInputMismatch { a: format!("{ga:?}"), b: format!("{gb:?}") });
+            return Err(CompileError::MixerInputMismatch {
+                a: format!("{ga:?}"),
+                b: format!("{gb:?}"),
+            });
         }
         flow(&[f], Some(ga))?
     } else {
@@ -256,11 +279,17 @@ pub(crate) fn compile(doc: &GraphDoc) -> Result<Compiled, CompileError> {
     flow(&tail, fanin_in_geom)?;
 
     // Grabber params, one per source, in the branch order emitted.
-    let grabber_params: Vec<String> =
-        branches.iter().filter_map(|b| b.first()).map(|&s| format!("grab_{}", sanitize(id(s)))).collect();
+    let grabber_params: Vec<String> = branches
+        .iter()
+        .filter_map(|b| b.first())
+        .map(|&s| format!("grab_{}", sanitize(id(s))))
+        .collect();
 
-    let sink_params: Vec<String> =
-        sink_plan(&wired[&sink].kind, &wired[&sink].var).seams.iter().map(|s| s.param.clone()).collect();
+    let sink_params: Vec<String> = sink_plan(&wired[&sink].kind, &wired[&sink].var)
+        .seams
+        .iter()
+        .map(|s| s.param.clone())
+        .collect();
 
     let compiled_source = emit(doc, &wired, &branches, fanin, &tail, sink, &grabber_params)?;
 
@@ -383,8 +412,13 @@ fn emit(
     let linear_transforms: usize = if is_fanin { 0 } else { tail_transforms };
 
     // Rings, then elements, in emission order.
-    let emit_order: Vec<usize> =
-        branches.iter().flatten().chain(fanin.iter()).chain(tail.iter()).copied().collect();
+    let emit_order: Vec<usize> = branches
+        .iter()
+        .flatten()
+        .chain(fanin.iter())
+        .chain(tail.iter())
+        .copied()
+        .collect();
 
     for &node in &emit_order {
         let e = w(node);
@@ -397,8 +431,14 @@ fn emit(
         }
     }
     let _ = writeln!(body);
-    let _ = writeln!(body, "    // SAFETY: every ring above outlives the graph; the runner drains the");
-    let _ = writeln!(body, "    // pipeline (each lent frame dropped in its iteration) before this future");
+    let _ = writeln!(
+        body,
+        "    // SAFETY: every ring above outlives the graph; the runner drains the"
+    );
+    let _ = writeln!(
+        body,
+        "    // pipeline (each lent frame dropped in its iteration) before this future"
+    );
     let _ = writeln!(body, "    // completes and drops the rings.");
 
     let mut grab_iter = grabber_params.iter();
@@ -440,12 +480,19 @@ fn emit(
 
     // Wiring expressions.
     let sink_var = &w(sink).var;
-    let tail_transform_vars: Vec<&str> =
-        tail.iter().filter(|&&t| t != sink).map(|&t| w(t).var.as_str()).collect();
+    let tail_transform_vars: Vec<&str> = tail
+        .iter()
+        .filter(|&&t| t != sink)
+        .map(|&t| w(t).var.as_str())
+        .collect();
     let sink_expr = if tail_transform_vars.is_empty() {
         format!("&mut {sink_var}")
     } else {
-        format!("SinkChain({}, &mut {})", chain_expr(&tail_transform_vars), sink_var)
+        format!(
+            "SinkChain({}, &mut {})",
+            chain_expr(&tail_transform_vars),
+            sink_var
+        )
     };
 
     let run_line = if let Some(f) = fanin {
@@ -467,11 +514,20 @@ fn emit(
         )
     } else {
         let src = &w(branches[0][0]).var;
-        let ts: Vec<&str> = tail.iter().filter(|&&t| t != sink).map(|&t| w(t).var.as_str()).collect();
+        let ts: Vec<&str> = tail
+            .iter()
+            .filter(|&&t| t != sink)
+            .map(|&t| w(t).var.as_str())
+            .collect();
         if ts.is_empty() {
             format!("    let _ = run_source_sink({src}, {sink_expr}).await;")
         } else {
-            format!("    let _ = run_source_transform_sink({}, {}, {}).await;", src, chain_expr(&ts), sink_expr)
+            format!(
+                "    let _ = run_source_transform_sink({}, {}, {}).await;",
+                src,
+                chain_expr(&ts),
+                sink_expr
+            )
         }
     };
 
@@ -479,15 +535,29 @@ fn emit(
     // for the proofs, like the hand-written graph). Only audio graphs fan in.
     let mut negotiate = String::new();
     if let Some(f) = fanin {
-        if let Some(Geometry::Audio { sample_rate, channels, .. }) = w(f).out_geom {
-            let _ = writeln!(negotiate, "/// Negotiate the fan-in link's `Caps::Audio` (both sides black-boxed so");
-            let _ = writeln!(negotiate, "/// the audio arm of `Caps::intersect` stays in the archive for the proofs).");
+        if let Some(Geometry::Audio {
+            sample_rate,
+            channels,
+            ..
+        }) = w(f).out_geom
+        {
+            let _ = writeln!(
+                negotiate,
+                "/// Negotiate the fan-in link's `Caps::Audio` (both sides black-boxed so"
+            );
+            let _ = writeln!(
+                negotiate,
+                "/// the audio arm of `Caps::intersect` stays in the archive for the proofs)."
+            );
             let _ = writeln!(negotiate, "fn negotiate_fanin_link() -> Option<Caps> {{");
             let _ = writeln!(
                 negotiate,
                 "    let mk = || Caps::Audio {{ format: AudioFormat::PcmS16Le, channels: {channels}, sample_rate: {sample_rate} }};"
             );
-            let _ = writeln!(negotiate, "    black_box(mk()).intersect(&black_box(mk())).ok()");
+            let _ = writeln!(
+                negotiate,
+                "    black_box(mk()).intersect(&black_box(mk())).ok()"
+            );
             let _ = writeln!(negotiate, "}}\n");
         }
     }
@@ -500,7 +570,16 @@ fn emit(
     let _ = write!(
         src,
         "{}",
-        imports(is_fanin, uses_chain, uses_source_chain, uses_sink_chain, &emit_order, wired, linear_transforms, &plan)
+        imports(
+            is_fanin,
+            uses_chain,
+            uses_source_chain,
+            uses_sink_chain,
+            &emit_order,
+            wired,
+            linear_transforms,
+            &plan
+        )
     );
     let _ = writeln!(src, "pub const FRAME_NS: u64 = {};", doc.frame_ns);
     let _ = writeln!(src, "pub const FRAMES: u32 = {};", doc.frames);
@@ -510,12 +589,25 @@ fn emit(
     if !negotiate.is_empty() {
         let _ = write!(src, "{negotiate}");
     }
-    let _ = writeln!(src, "/// Run the graph. Peripheral seams (the capture grabbers, then the sink's");
-    let _ = writeln!(src, "/// output seam) are taken in the documented order; a board supplies HAL");
+    let _ = writeln!(
+        src,
+        "/// Run the graph. Peripheral seams (the capture grabbers, then the sink's"
+    );
+    let _ = writeln!(
+        src,
+        "/// output seam) are taken in the documented order; a board supplies HAL"
+    );
     let _ = writeln!(src, "/// impls, a proof harness supplies mocks.");
     // Omit the arrow for a unit return (a display sink) so no `-> ()` is emitted.
-    let ret_arrow = if plan.ret_type == "()" { String::new() } else { format!(" -> {}", plan.ret_type) };
-    let _ = writeln!(src, "pub async fn {entry}{type_params}({params}){ret_arrow}{where_clause} {{");
+    let ret_arrow = if plan.ret_type == "()" {
+        String::new()
+    } else {
+        format!(" -> {}", plan.ret_type)
+    };
+    let _ = writeln!(
+        src,
+        "pub async fn {entry}{type_params}({params}){ret_arrow}{where_clause} {{"
+    );
     if fanin.is_some() {
         let _ = writeln!(src, "    if negotiate_fanin_link().is_none() {{");
         let _ = writeln!(src, "        return sender;");
@@ -562,9 +654,19 @@ fn signature(grabber_params: &[String], sink_seams: &[Seam]) -> (String, String,
 
 fn header(doc: &GraphDoc) -> String {
     let mut h = String::new();
-    let _ = writeln!(h, "//! GENERATED by g2g-mcugen from graph `{}`. Do not edit by hand;", doc.name);
-    let _ = writeln!(h, "//! regenerate with `g2g-mcugen <graph>.yaml`. This is the monomorphized");
-    let _ = writeln!(h, "//! static MCU pipeline: heap-free, no `dyn`, ring sizes computed from the");
+    let _ = writeln!(
+        h,
+        "//! GENERATED by g2g-mcugen from graph `{}`. Do not edit by hand;",
+        doc.name
+    );
+    let _ = writeln!(
+        h,
+        "//! regenerate with `g2g-mcugen <graph>.yaml`. This is the monomorphized"
+    );
+    let _ = writeln!(
+        h,
+        "//! static MCU pipeline: heap-free, no `dyn`, ring sizes computed from the"
+    );
     let _ = writeln!(h, "//! graph's frame geometry.");
     h
 }

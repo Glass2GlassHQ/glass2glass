@@ -18,8 +18,8 @@ use g2g_core::{
     AsyncElement, Caps, CapsConstraint, ConfigureOutcome, Dim, G2gError, Graph, MemoryDomain,
     OutputSink, PipelineClock, PipelinePacket, Rate, VideoCodec,
 };
-use g2g_plugins::cea::{extract_cc_data, Cea608};
 use g2g_plugins::ccinsert::CcInsert;
+use g2g_plugins::cea::{extract_cc_data, Cea608};
 use g2g_plugins::subparse::SubParse;
 use g2g_plugins::subtitlesrc::SubtitleSrc;
 
@@ -31,7 +31,12 @@ impl PipelineClock for NullClock {
 }
 
 fn h264() -> Caps {
-    Caps::CompressedVideo { codec: VideoCodec::H264, width: Dim::Fixed(64), height: Dim::Fixed(64), framerate: Rate::Fixed(30 << 16) }
+    Caps::CompressedVideo {
+        codec: VideoCodec::H264,
+        width: Dim::Fixed(64),
+        height: Dim::Fixed(64),
+        framerate: Rate::Fixed(30 << 16),
+    }
 }
 
 /// Emits `count` plain Annex-B IDR access units at 30 fps, then Eos. Each AU is a
@@ -41,8 +46,14 @@ struct H264Src {
     count: u64,
 }
 impl SourceLoop for H264Src {
-    type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>> where Self: 'a;
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>> where Self: 'a;
+    type RunFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
+    where
+        Self: 'a;
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
+    where
+        Self: 'a;
 
     fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
         core::future::ready(Ok(h264()))
@@ -57,7 +68,11 @@ impl SourceLoop for H264Src {
                 let au = [0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84, 0x00];
                 let f = Frame::new(
                     MemoryDomain::System(SystemSlice::from_boxed(au.to_vec().into_boxed_slice())),
-                    FrameTiming { pts_ns: i * frame_dur, keyframe: true, ..Default::default() },
+                    FrameTiming {
+                        pts_ns: i * frame_dur,
+                        keyframe: true,
+                        ..Default::default()
+                    },
                     i,
                 );
                 out.push(PipelinePacket::DataFrame(f)).await?;
@@ -73,7 +88,10 @@ struct RecSink {
     aus: Arc<Mutex<Vec<Vec<u8>>>>,
 }
 impl AsyncElement for RecSink {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>> where Self: 'a;
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
     fn intercept_caps(&self, c: &Caps) -> Result<Caps, G2gError> {
         Ok(c.clone())
     }
@@ -118,9 +136,14 @@ async fn srt_file_authors_embedded_cea608_captions() {
     g.link(subparse, mux.input(1)).unwrap();
     g.link(mux.output(), sink).unwrap();
 
-    let stats = run_graph(g, &NullClock, 4).await.expect("authoring graph runs");
+    let stats = run_graph(g, &NullClock, 4)
+        .await
+        .expect("authoring graph runs");
     std::fs::remove_file(&path).ok();
-    assert_eq!(stats.frames_consumed, 130, "every video access unit reaches the sink");
+    assert_eq!(
+        stats.frames_consumed, 130,
+        "every video access unit reaches the sink"
+    );
 
     // Extract + decode the captioned output: the SRT cue must come back out.
     let aus = aus.lock().unwrap();
@@ -135,6 +158,10 @@ async fn srt_file_authors_embedded_cea608_captions() {
     }
     dec.flush(u64::MAX / 2);
     let cues = dec.take_cues();
-    assert_eq!(cues.len(), 1, "the authored caption is recovered from the bitstream");
+    assert_eq!(
+        cues.len(),
+        1,
+        "the authored caption is recovered from the bitstream"
+    );
     assert_eq!(cues[0].text, "HELLO");
 }

@@ -60,7 +60,9 @@ struct PendingKm {
 }
 
 fn ts_bytestream() -> Caps {
-    Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs }
+    Caps::ByteStream {
+        encoding: ByteStreamEncoding::MpegTs,
+    }
 }
 
 #[derive(Debug)]
@@ -198,12 +200,17 @@ impl SrtSink {
     /// Connect the UDP socket and run the caller handshake to established,
     /// returning the armed sender (its destination is the peer's socket id).
     async fn connect_and_handshake(&mut self) -> Result<(), G2gError> {
-        let socket = tokio::net::UdpSocket::bind(("0.0.0.0", 0)).await.map_err(io_err)?;
+        let socket = tokio::net::UdpSocket::bind(("0.0.0.0", 0))
+            .await
+            .map_err(io_err)?;
         socket.connect(self.dest).await.map_err(io_err)?;
 
         // For an encrypted stream, generate a fresh key + salt, advertise the
         // wrapped key in the handshake KM extension, and arm the sender's cipher.
-        let crypto = self.passphrase.as_ref().map(|_| SrtCrypto::generate(self.key_size));
+        let crypto = self
+            .passphrase
+            .as_ref()
+            .map(|_| SrtCrypto::generate(self.key_size));
         let km = crypto
             .as_ref()
             .zip(self.passphrase.as_ref())
@@ -277,10 +284,15 @@ impl SrtSink {
         // the retry cap, at which point the new key is still active locally).
         if self.pending_km.is_some() {
             let now_us = g2g_core::metrics::monotonic_ns() / 1000;
-            let due = self.pending_km.as_ref().is_some_and(|p| now_us >= p.next_at_us);
+            let due = self
+                .pending_km
+                .as_ref()
+                .is_some_and(|p| now_us >= p.next_at_us);
             if due {
-                let exhausted =
-                    self.pending_km.as_ref().is_some_and(|p| p.retries >= KM_MAX_RETRANSMITS);
+                let exhausted = self
+                    .pending_km
+                    .as_ref()
+                    .is_some_and(|p| p.retries >= KM_MAX_RETRANSMITS);
                 if exhausted {
                     self.pending_km = None;
                 } else {
@@ -302,7 +314,8 @@ impl SrtSink {
 }
 
 impl AsyncElement for SrtSink {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -330,12 +343,24 @@ impl AsyncElement for SrtSink {
 
     fn properties(&self) -> &'static [PropertySpec] {
         const PROPS: &[PropertySpec] = &[
-            PropertySpec::new("host", PropKind::Str, "destination host (IP of the SRT listener)")
-                .with_default("127.0.0.1"),
+            PropertySpec::new(
+                "host",
+                PropKind::Str,
+                "destination host (IP of the SRT listener)",
+            )
+            .with_default("127.0.0.1"),
             PropertySpec::new("port", PropKind::Uint, "destination SRT port")
                 .with_range("0", "65535"),
-            PropertySpec::new("latency", PropKind::Uint, "advertised target latency, milliseconds"),
-            PropertySpec::new("passphrase", PropKind::Str, "AES passphrase (empty = unencrypted)"),
+            PropertySpec::new(
+                "latency",
+                PropKind::Uint,
+                "advertised target latency, milliseconds",
+            ),
+            PropertySpec::new(
+                "passphrase",
+                PropKind::Str,
+                "AES passphrase (empty = unencrypted)",
+            ),
         ];
         PROPS
     }
@@ -412,7 +437,8 @@ impl AsyncElement for SrtSink {
                             let sent_at = g2g_core::metrics::monotonic_ns() / 1000;
                             cc.on_packet(pkt.len(), sent_at);
                             let period = cc.snd_period_us(pkt.len());
-                            self.next_send_us = sent_at.max(self.next_send_us).saturating_add(period);
+                            self.next_send_us =
+                                sent_at.max(self.next_send_us).saturating_add(period);
                         }
                         let socket = self.socket.as_ref().ok_or(G2gError::NotConfigured)?;
                         socket.send(pkt).await.map_err(io_err)?;
@@ -461,7 +487,8 @@ impl AsyncElement for SrtSink {
                     // Signal the listener to close cleanly (RTP-style flows have no
                     // in-band end; SRT has SHUTDOWN).
                     if let Some(socket) = self.socket.as_ref() {
-                        let shutdown = srt::build_control(&srt::Control::Shutdown, 0, CALLER_SOCKET_ID);
+                        let shutdown =
+                            srt::build_control(&srt::Control::Shutdown, 0, CALLER_SOCKET_ID);
                         let _ = socket.send(&shutdown).await;
                     }
                     self.eos_seen = true;

@@ -83,7 +83,11 @@ fn libm_sin(x: f32) -> f32 {
 async fn aaudio_sink_renders_pcm() {
     let (rate, channels) = (48_000u32, 2u8);
     let mut sink = AAudioSink::new();
-    let caps = Caps::Audio { format: AudioFormat::PcmS16Le, channels, sample_rate: rate };
+    let caps = Caps::Audio {
+        format: AudioFormat::PcmS16Le,
+        channels,
+        sample_rate: rate,
+    };
     let narrowed = sink.intercept_caps(&caps).expect("intercept caps");
     assert!(matches!(
         sink.configure_pipeline(&narrowed).expect("configure sink"),
@@ -99,12 +103,22 @@ async fn aaudio_sink_renders_pcm() {
             sequence: seq,
             meta: Default::default(),
         };
-        sink.process(PipelinePacket::DataFrame(frame), &mut nil).await.expect("render buffer");
+        sink.process(PipelinePacket::DataFrame(frame), &mut nil)
+            .await
+            .expect("render buffer");
     }
-    sink.process(PipelinePacket::Eos, &mut nil).await.expect("eos");
+    sink.process(PipelinePacket::Eos, &mut nil)
+        .await
+        .expect("eos");
 
-    eprintln!("=== M307 AAudioSink: {} PCM frames rendered ===", sink.rendered());
-    assert!(sink.rendered() > 0, "AAudioSink wrote no frames to the device");
+    eprintln!(
+        "=== M307 AAudioSink: {} PCM frames rendered ===",
+        sink.rendered()
+    );
+    assert!(
+        sink.rendered() > 0,
+        "AAudioSink wrote no frames to the device"
+    );
     eprintln!(">>> M307 AAudio render validated on device.");
 }
 

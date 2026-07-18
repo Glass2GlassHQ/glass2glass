@@ -17,7 +17,7 @@
 use g2g_core::element::{AsyncElement, BoxFuture, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
-use g2g_core::{ByteStreamEncoding, Caps, Dim, G2gError, RawVideoFormat, Rate, VideoCodec};
+use g2g_core::{ByteStreamEncoding, Caps, Dim, G2gError, Rate, RawVideoFormat, VideoCodec};
 use g2g_plugins::ffmpegdec::{FfmpegVideoDec, OutputFormat};
 use g2g_plugins::mp4demux::Mp4Demux;
 
@@ -65,7 +65,10 @@ impl Collect {
             .collect()
     }
     fn frame_count(&self) -> usize {
-        self.packets.iter().filter(|p| matches!(p, PipelinePacket::DataFrame(_))).count()
+        self.packets
+            .iter()
+            .filter(|p| matches!(p, PipelinePacket::DataFrame(_)))
+            .count()
     }
 }
 
@@ -84,20 +87,29 @@ async fn mpeg4_part2_mp4_demuxes_and_decodes() {
     //    plus the VOL header prepended to the first access unit.
     let mut demux = Mp4Demux::new();
     demux
-        .configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::Mp4 })
+        .configure_pipeline(&Caps::ByteStream {
+            encoding: ByteStreamEncoding::Mp4,
+        })
         .expect("qtdemux accepts an MP4 byte stream");
     let mut demuxed = Collect::default();
     demux
         .process(data_frame(FIXTURE.to_vec()), &mut demuxed)
         .await
         .expect("buffer the file");
-    demux.process(PipelinePacket::Eos, &mut demuxed).await.expect("drain at EOS");
+    demux
+        .process(PipelinePacket::Eos, &mut demuxed)
+        .await
+        .expect("drain at EOS");
 
     let demux_caps = demuxed.caps_changes();
     assert!(
-        demux_caps
-            .iter()
-            .any(|c| matches!(c, Caps::CompressedVideo { codec: VideoCodec::Mpeg4Part2, .. })),
+        demux_caps.iter().any(|c| matches!(
+            c,
+            Caps::CompressedVideo {
+                codec: VideoCodec::Mpeg4Part2,
+                ..
+            }
+        )),
         "demuxer must tag the mp4v track as MPEG-4 Part 2, got {demux_caps:?}"
     );
     let access_units = demuxed.frame_bytes();
@@ -111,17 +123,31 @@ async fn mpeg4_part2_mp4_demuxes_and_decodes() {
         height: Dim::Any,
         framerate: Rate::Any,
     };
-    let narrowed = dec.intercept_caps(&upstream).expect("decoder accepts MPEG-4 Part 2");
-    dec.configure_pipeline(&narrowed).expect("libavcodec mpeg4 initialises");
+    let narrowed = dec
+        .intercept_caps(&upstream)
+        .expect("decoder accepts MPEG-4 Part 2");
+    dec.configure_pipeline(&narrowed)
+        .expect("libavcodec mpeg4 initialises");
 
     let mut decoded = Collect::default();
     for au in access_units {
-        dec.process(data_frame(au), &mut decoded).await.expect("decode AU");
+        dec.process(data_frame(au), &mut decoded)
+            .await
+            .expect("decode AU");
     }
-    dec.process(PipelinePacket::Eos, &mut decoded).await.expect("flush decoder");
+    dec.process(PipelinePacket::Eos, &mut decoded)
+        .await
+        .expect("flush decoder");
 
-    assert!(decoded.frame_count() > 0, "expected at least one decoded frame");
-    match decoded.caps_changes().first().expect("decoder emits raw caps") {
+    assert!(
+        decoded.frame_count() > 0,
+        "expected at least one decoded frame"
+    );
+    match decoded
+        .caps_changes()
+        .first()
+        .expect("decoder emits raw caps")
+    {
         Caps::RawVideo {
             format: RawVideoFormat::I420,
             width: Dim::Fixed(w),

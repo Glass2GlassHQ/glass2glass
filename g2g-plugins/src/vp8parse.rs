@@ -76,7 +76,10 @@ impl AsyncElement for Vp8Parse {
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         match absolute_caps {
-            Caps::CompressedVideo { codec: VideoCodec::Vp8, .. } => {
+            Caps::CompressedVideo {
+                codec: VideoCodec::Vp8,
+                ..
+            } => {
                 self.configured = true;
                 Ok(ConfigureOutcome::Accepted)
             }
@@ -104,7 +107,8 @@ impl AsyncElement for Vp8Parse {
                                 framerate: Rate::Any,
                             };
                             if self.last_emitted_caps.as_ref() != Some(&new_caps) {
-                                out.push(PipelinePacket::CapsChanged(new_caps.clone())).await?;
+                                out.push(PipelinePacket::CapsChanged(new_caps.clone()))
+                                    .await?;
                                 self.last_emitted_caps = Some(new_caps);
                                 self.keyframes_emitted += 1;
                             }
@@ -141,7 +145,10 @@ impl PadTemplates for Vp8Parse {
             height: Dim::Any,
             framerate: Rate::Any,
         };
-        Vec::from([PadTemplate::sink(CapsSet::one(vp8.clone())), PadTemplate::source(CapsSet::one(vp8))])
+        Vec::from([
+            PadTemplate::sink(CapsSet::one(vp8.clone())),
+            PadTemplate::source(CapsSet::one(vp8)),
+        ])
     }
 }
 
@@ -182,7 +189,12 @@ fn parse_keyframe(packet: &[u8]) -> Option<Vp8KeyFrame> {
     if width == 0 || height == 0 {
         return None;
     }
-    Some(Vp8KeyFrame { width, height, version, show_frame })
+    Some(Vp8KeyFrame {
+        width,
+        height,
+        version,
+        show_frame,
+    })
 }
 
 #[cfg(test)]
@@ -236,7 +248,10 @@ mod tests {
 
     #[test]
     fn rejects_interframe() {
-        assert!(parse_keyframe(&interframe()).is_none(), "interframes carry no dimensions");
+        assert!(
+            parse_keyframe(&interframe()).is_none(),
+            "interframes carry no dimensions"
+        );
     }
 
     #[test]
@@ -301,7 +316,10 @@ mod tests {
         let mut sink = RecordingSink::default();
 
         let frame = frame_with_bytes(0, keyframe(1280, 720, 0, true));
-        parse.process(PipelinePacket::DataFrame(frame), &mut sink).await.unwrap();
+        parse
+            .process(PipelinePacket::DataFrame(frame), &mut sink)
+            .await
+            .unwrap();
 
         assert_eq!(sink.packets.len(), 2, "expected CapsChanged then DataFrame");
         match &sink.packets[0] {
@@ -322,20 +340,35 @@ mod tests {
         let mut sink = RecordingSink::default();
 
         parse
-            .process(PipelinePacket::DataFrame(frame_with_bytes(0, keyframe(640, 480, 0, true))), &mut sink)
+            .process(
+                PipelinePacket::DataFrame(frame_with_bytes(0, keyframe(640, 480, 0, true))),
+                &mut sink,
+            )
             .await
             .unwrap();
         parse
-            .process(PipelinePacket::DataFrame(frame_with_bytes(1, interframe())), &mut sink)
+            .process(
+                PipelinePacket::DataFrame(frame_with_bytes(1, interframe())),
+                &mut sink,
+            )
             .await
             .unwrap();
 
-        let caps_count =
-            sink.packets.iter().filter(|p| matches!(p, PipelinePacket::CapsChanged(_))).count();
-        assert_eq!(caps_count, 1, "the interframe carries no dimensions, so no second CapsChanged");
+        let caps_count = sink
+            .packets
+            .iter()
+            .filter(|p| matches!(p, PipelinePacket::CapsChanged(_)))
+            .count();
+        assert_eq!(
+            caps_count, 1,
+            "the interframe carries no dimensions, so no second CapsChanged"
+        );
         // both frames still forwarded
-        let data_count =
-            sink.packets.iter().filter(|p| matches!(p, PipelinePacket::DataFrame(_))).count();
+        let data_count = sink
+            .packets
+            .iter()
+            .filter(|p| matches!(p, PipelinePacket::DataFrame(_)))
+            .count();
         assert_eq!(data_count, 2);
     }
 
@@ -346,11 +379,17 @@ mod tests {
         let mut sink = RecordingSink::default();
 
         parse
-            .process(PipelinePacket::DataFrame(frame_with_bytes(0, keyframe(640, 480, 0, true))), &mut sink)
+            .process(
+                PipelinePacket::DataFrame(frame_with_bytes(0, keyframe(640, 480, 0, true))),
+                &mut sink,
+            )
             .await
             .unwrap();
         parse
-            .process(PipelinePacket::DataFrame(frame_with_bytes(1, keyframe(1280, 720, 0, true))), &mut sink)
+            .process(
+                PipelinePacket::DataFrame(frame_with_bytes(1, keyframe(1280, 720, 0, true))),
+                &mut sink,
+            )
             .await
             .unwrap();
 
@@ -358,7 +397,9 @@ mod tests {
             .packets
             .iter()
             .filter_map(|p| match p {
-                PipelinePacket::CapsChanged(Caps::CompressedVideo { width, .. }) => Some(width.clone()),
+                PipelinePacket::CapsChanged(Caps::CompressedVideo { width, .. }) => {
+                    Some(width.clone())
+                }
                 _ => None,
             })
             .collect();

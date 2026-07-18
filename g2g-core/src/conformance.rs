@@ -114,7 +114,13 @@ pub struct Evidence {
 impl Evidence {
     /// Evidence for `dimension` with no context yet.
     pub fn new(dimension: ConformanceDimension) -> Self {
-        Self { dimension, platform: None, codec: None, peer: None, detail: None }
+        Self {
+            dimension,
+            platform: None,
+            codec: None,
+            peer: None,
+            detail: None,
+        }
     }
 
     /// Tag the platform this ran on.
@@ -187,7 +193,10 @@ impl MaturityRecord {
     ///
     /// [`Unverified`]: MaturityLevel::Unverified
     pub fn new(element: impl Into<String>) -> Self {
-        Self { element: element.into(), evidence: Vec::new() }
+        Self {
+            element: element.into(),
+            evidence: Vec::new(),
+        }
     }
 
     /// Add one piece of evidence (builder style).
@@ -208,12 +217,19 @@ impl MaturityRecord {
 
     /// The distinct dimensions with evidence, in reporting order.
     pub fn dimensions(&self) -> Vec<ConformanceDimension> {
-        ConformanceDimension::ALL.into_iter().filter(|&d| self.has(d)).collect()
+        ConformanceDimension::ALL
+            .into_iter()
+            .filter(|&d| self.has(d))
+            .collect()
     }
 
     /// The distinct external peers this element was validated against.
     pub fn peers(&self) -> Vec<&str> {
-        let mut v: Vec<&str> = self.evidence.iter().filter_map(|e| e.peer.as_deref()).collect();
+        let mut v: Vec<&str> = self
+            .evidence
+            .iter()
+            .filter_map(|e| e.peer.as_deref())
+            .collect();
         v.sort_unstable();
         v.dedup();
         v
@@ -221,8 +237,11 @@ impl MaturityRecord {
 
     /// The distinct platforms this element was validated on.
     pub fn platforms(&self) -> Vec<&str> {
-        let mut v: Vec<&str> =
-            self.evidence.iter().filter_map(|e| e.platform.as_deref()).collect();
+        let mut v: Vec<&str> = self
+            .evidence
+            .iter()
+            .filter_map(|e| e.platform.as_deref())
+            .collect();
         v.sort_unstable();
         v.dedup();
         v
@@ -233,10 +252,14 @@ impl MaturityRecord {
     /// evidence supports.
     pub fn level(&self) -> MaturityLevel {
         use ConformanceDimension as D;
-        let has_hardware =
-            self.evidence.iter().any(|e| e.dimension == D::Hardware && e.platform.is_some());
-        let has_interop =
-            self.evidence.iter().any(|e| e.dimension == D::Oracle && e.peer.is_some());
+        let has_hardware = self
+            .evidence
+            .iter()
+            .any(|e| e.dimension == D::Hardware && e.platform.is_some());
+        let has_interop = self
+            .evidence
+            .iter()
+            .any(|e| e.dimension == D::Oracle && e.peer.is_some());
         let behavioral =
             self.has(D::RoundTrip) || self.has(D::LossResilience) || self.has(D::ZeroCopy);
         let advertised = self.has(D::Instantiate) || self.has(D::Properties);
@@ -300,7 +323,11 @@ impl ConformanceReport {
     /// The lowest maturity level across all records (the weakest link), or
     /// [`Unverified`](MaturityLevel::Unverified) for an empty report.
     pub fn min_level(&self) -> MaturityLevel {
-        self.records.iter().map(MaturityRecord::level).min().unwrap_or(MaturityLevel::Unverified)
+        self.records
+            .iter()
+            .map(MaturityRecord::level)
+            .min()
+            .unwrap_or(MaturityLevel::Unverified)
     }
 
     /// Render the report as an aligned text table: element, derived level, the
@@ -325,7 +352,12 @@ impl ConformanceReport {
                 if !plats.is_empty() {
                     context.push(format!("platforms: {}", plats.join(", ")));
                 }
-                (r.element.clone(), r.level().label().to_string(), dims, context.join("; "))
+                (
+                    r.element.clone(),
+                    r.level().label().to_string(),
+                    dims,
+                    context.join("; "),
+                )
             })
             .collect();
 
@@ -388,7 +420,11 @@ mod tests {
     fn oracle_with_a_peer_reaches_interop() {
         let r = MaturityRecord::new("h264enc")
             .with(Evidence::new(ConformanceDimension::RoundTrip))
-            .with(Evidence::new(ConformanceDimension::Oracle).peer("ffmpeg").codec("h264"));
+            .with(
+                Evidence::new(ConformanceDimension::Oracle)
+                    .peer("ffmpeg")
+                    .codec("h264"),
+            );
         assert_eq!(r.level(), MaturityLevel::InteropTested);
         assert_eq!(r.peers(), alloc::vec!["ffmpeg"]);
     }
@@ -431,12 +467,22 @@ mod tests {
 
         let mut persisted = ConformanceReport::new();
         persisted.push(
-            MaturityRecord::new("mp4mux")
-                .with(Evidence::new(ConformanceDimension::Oracle).peer("ffmpeg").codec("h264")),
+            MaturityRecord::new("mp4mux").with(
+                Evidence::new(ConformanceDimension::Oracle)
+                    .peer("ffmpeg")
+                    .codec("h264"),
+            ),
         );
         base.absorb(persisted);
-        assert_eq!(base.record_mut("mp4mux").level(), MaturityLevel::InteropTested);
-        assert_eq!(base.records.len(), 1, "merged into the existing element, not duplicated");
+        assert_eq!(
+            base.record_mut("mp4mux").level(),
+            MaturityLevel::InteropTested
+        );
+        assert_eq!(
+            base.records.len(),
+            1,
+            "merged into the existing element, not duplicated"
+        );
     }
 
     #[test]
@@ -446,7 +492,11 @@ mod tests {
         let mut b = ConformanceReport::new();
         b.push(MaturityRecord::new("x").with(Evidence::new(ConformanceDimension::RoundTrip)));
         a.absorb(b);
-        assert_eq!(a.record_mut("x").evidence.len(), 1, "identical evidence is not doubled");
+        assert_eq!(
+            a.record_mut("x").evidence.len(),
+            1,
+            "identical evidence is not doubled"
+        );
     }
 
     #[test]
@@ -460,8 +510,15 @@ mod tests {
         report.push(MaturityRecord::new("unchecked"));
         let table = report.to_table();
         assert!(table.contains("st2110video"), "row present:\n{table}");
-        assert!(table.contains("unit-tested"), "derived level shown:\n{table}");
+        assert!(
+            table.contains("unit-tested"),
+            "derived level shown:\n{table}"
+        );
         assert!(table.contains("round-trip"), "dimension shown:\n{table}");
-        assert_eq!(report.min_level(), MaturityLevel::Unverified, "the unchecked element drags the min down");
+        assert_eq!(
+            report.min_level(),
+            MaturityLevel::Unverified,
+            "the unchecked element drags the min down"
+        );
     }
 }

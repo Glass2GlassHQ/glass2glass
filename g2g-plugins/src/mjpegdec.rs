@@ -24,7 +24,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
     MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, RawVideoFormat, Rate, VideoCodec,
+    PropValue, PropertySpec, Rate, RawVideoFormat, VideoCodec,
 };
 
 use zune_jpeg::zune_core::bytestream::ZCursor;
@@ -128,23 +128,34 @@ impl AsyncElement for MjpegDec {
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         let out_format = self.out_format;
         CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| match input {
-            Caps::CompressedVideo { codec: VideoCodec::Mjpeg, width, height, framerate } => {
-                CapsSet::one(Caps::RawVideo {
-                    format: out_format,
-                    width: width.clone(),
-                    height: height.clone(),
-                    framerate: framerate.clone(),
-                })
-            }
+            Caps::CompressedVideo {
+                codec: VideoCodec::Mjpeg,
+                width,
+                height,
+                framerate,
+            } => CapsSet::one(Caps::RawVideo {
+                format: out_format,
+                width: width.clone(),
+                height: height.clone(),
+                framerate: framerate.clone(),
+            }),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        let Caps::CompressedVideo { codec: VideoCodec::Mjpeg, framerate, .. } = absolute_caps else {
+        let Caps::CompressedVideo {
+            codec: VideoCodec::Mjpeg,
+            framerate,
+            ..
+        } = absolute_caps
+        else {
             return Err(G2gError::CapsMismatch);
         };
-        if !matches!(self.out_format, RawVideoFormat::Rgba8 | RawVideoFormat::I420) {
+        if !matches!(
+            self.out_format,
+            RawVideoFormat::Rgba8 | RawVideoFormat::I420
+        ) {
             return Err(G2gError::CapsMismatch);
         }
         self.framerate = framerate.clone();
@@ -214,7 +225,8 @@ impl AsyncElement for MjpegDec {
                     };
                     let (pixels, w, h) = self.decode(slice.as_slice())?;
                     if self.out_dims != Some((w, h)) {
-                        out.push(PipelinePacket::CapsChanged(self.output_caps(w, h))).await?;
+                        out.push(PipelinePacket::CapsChanged(self.output_caps(w, h)))
+                            .await?;
                         self.out_dims = Some((w, h));
                     }
                     let decoded = Frame::new(

@@ -15,8 +15,16 @@ fn flagship_ring_budget_matches_the_hand_written_reference() {
     // The hand-written noalloc-pipeline::audio uses exactly these sizes:
     // A=160, B=1920, conv=960, resample=160, mix=160, enc=80.
     assert_eq!(c.ring_bytes_total, 160 + 1920 + 960 + 160 + 160 + 80);
-    assert_eq!(c.rings.len(), 6, "one ring per lending element (the sink lends none)");
-    let cap_b = c.rings.iter().find(|(n, _)| n == "ring_cap_b").expect("cap_b ring");
+    assert_eq!(
+        c.rings.len(),
+        6,
+        "one ring per lending element (the sink lends none)"
+    );
+    let cap_b = c
+        .rings
+        .iter()
+        .find(|(n, _)| n == "ring_cap_b")
+        .expect("cap_b ring");
     assert_eq!(cap_b.1, 1920, "48 kHz x 10 ms x 4 bytes = 1920");
     assert_eq!(c.entry, "run_flagship_with");
     assert_eq!(c.grabber_params, ["grab_cap_a", "grab_cap_b"]);
@@ -26,12 +34,19 @@ fn flagship_ring_budget_matches_the_hand_written_reference() {
 fn emitted_source_is_deterministic() {
     let a = compile_str(FLAGSHIP).expect("compile");
     let b = compile_str(FLAGSHIP).expect("compile");
-    assert_eq!(a.source, b.source, "codegen must be a pure function of the document");
+    assert_eq!(
+        a.source, b.source,
+        "codegen must be a pure function of the document"
+    );
     // Structural anchors (the full snapshot is the checked-in mcugen-audio/src/graph.rs).
-    assert!(a.source.contains("pub async fn run_flagship_with<G0, G1, S>"));
+    assert!(a
+        .source
+        .contains("pub async fn run_flagship_with<G0, G1, S>"));
     assert!(a.source.contains("run_sources_fanin_sink(cap_a, SourceChain(cap_b, Chain(conv, rs)), mix, SinkChain(enc, &mut rtp))"));
     assert!(a.source.contains("StaticLendRing<1, 1920>"));
-    assert!(a.source.contains("RtpSink::new(sender, MediaClock::audio(8000), 0, 0x67676767, 0)"));
+    assert!(a
+        .source
+        .contains("RtpSink::new(sender, MediaClock::audio(8000), 0, 0x67676767, 0)"));
 }
 
 #[test]
@@ -49,12 +64,23 @@ fn the_display_graph_compiles_to_a_video_sink_pipeline() {
     assert_eq!(c.sink_params, ["spi", "dc", "delay"]);
     // A display sink is a plain linear source->sink (no transform, no fan-in),
     // returns unit (no `-> ()` emitted), and drives its panel over embedded-hal.
-    assert!(c.source.contains("pub async fn run_display_with<G0, SPI, DC, DLY>"));
+    assert!(c
+        .source
+        .contains("pub async fn run_display_with<G0, SPI, DC, DLY>"));
     assert!(c.source.contains("SpiDisplaySink::st7789(spi, dc, 4, 4)"));
-    assert!(c.source.contains("mut delay: DLY"), "the delay seam must bind `mut` (it is borrowed)");
+    assert!(
+        c.source.contains("mut delay: DLY"),
+        "the delay seam must bind `mut` (it is borrowed)"
+    );
     assert!(c.source.contains("run_source_sink(cam, &mut disp)"));
-    assert!(!c.source.contains("run_sources_fanin_sink"), "no fan-in in the display graph");
-    assert!(!c.source.contains("-> ()"), "a unit-returning entry omits the return arrow");
+    assert!(
+        !c.source.contains("run_sources_fanin_sink"),
+        "no fan-in in the display graph"
+    );
+    assert!(
+        !c.source.contains("-> ()"),
+        "a unit-returning entry omits the return arrow"
+    );
 }
 
 #[test]
@@ -71,7 +97,10 @@ nodes:
 edges:
   - { from: cam, to: disp }
 "#;
-    assert!(matches!(compile_str(doc), Err(CompileError::BadGeometry { .. })));
+    assert!(matches!(
+        compile_str(doc),
+        Err(CompileError::BadGeometry { .. })
+    ));
 }
 
 #[test]
@@ -87,7 +116,10 @@ nodes:
 edges:
   - { from: cam, to: disp }
 "#;
-    assert!(matches!(compile_str(doc), Err(CompileError::BadGeometry { .. })));
+    assert!(matches!(
+        compile_str(doc),
+        Err(CompileError::BadGeometry { .. })
+    ));
 }
 
 #[test]
@@ -109,7 +141,10 @@ edges:
 "#;
     let c = compile_str(doc).expect("linear compile");
     assert!(c.source.contains("run_source_transform_sink"));
-    assert!(!c.source.contains("run_sources_fanin_sink"), "no fan-in in a linear graph");
+    assert!(
+        !c.source.contains("run_sources_fanin_sink"),
+        "no fan-in in a linear graph"
+    );
     assert!(c.source.contains("Law::Alaw"));
     // 16 kHz S16 capture = 320 B; resample-to-8k = 160 B; a-law encode = 80 B.
     assert_eq!(c.ring_bytes_total, 320 + 160 + 80);
@@ -132,7 +167,10 @@ edges:
   - { from: b, to: mix }
   - { from: mix, to: rtp }
 "#;
-    assert!(matches!(compile_str(doc), Err(CompileError::MixerInputMismatch { .. })));
+    assert!(matches!(
+        compile_str(doc),
+        Err(CompileError::MixerInputMismatch { .. })
+    ));
 }
 
 #[test]
@@ -150,7 +188,10 @@ edges:
   - { from: cap, to: enc }
   - { from: enc, to: rtp }
 "#;
-    assert!(matches!(compile_str(doc), Err(CompileError::BadGeometry { .. })));
+    assert!(matches!(
+        compile_str(doc),
+        Err(CompileError::BadGeometry { .. })
+    ));
 }
 
 #[test]
@@ -168,7 +209,10 @@ nodes:
 edges:
   - { from: cap, to: rtp }
 "#;
-    assert!(matches!(compile_str(doc), Err(CompileError::FractionalFrame { .. })));
+    assert!(matches!(
+        compile_str(doc),
+        Err(CompileError::FractionalFrame { .. })
+    ));
 }
 
 #[test]
@@ -180,7 +224,10 @@ frames: 1
 nodes: [ { id: a, element: nosuchthing } ]
 edges: []
 "#;
-    assert!(matches!(compile_str(bad_el), Err(CompileError::UnknownElement(_))));
+    assert!(matches!(
+        compile_str(bad_el),
+        Err(CompileError::UnknownElement(_))
+    ));
 
     let bad_name = r#"
 name: "1bad"
@@ -189,5 +236,8 @@ frames: 1
 nodes: [ { id: a, element: grabbersrc, props: { sample-rate: 8000 } } ]
 edges: []
 "#;
-    assert!(matches!(compile_str(bad_name), Err(CompileError::BadName(_))));
+    assert!(matches!(
+        compile_str(bad_name),
+        Err(CompileError::BadName(_))
+    ));
 }

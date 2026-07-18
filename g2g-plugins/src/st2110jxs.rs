@@ -167,7 +167,11 @@ impl St2110JxsDepacketizer {
     /// A frame exceeding it (a missing marker, or a bogus stream) is dropped rather
     /// than accumulated without limit.
     pub fn new(max_frame_bytes: usize) -> Self {
-        Self { buf: Vec::new(), ts: None, max_frame_bytes: max_frame_bytes.max(1) }
+        Self {
+            buf: Vec::new(),
+            ts: None,
+            max_frame_bytes: max_frame_bytes.max(1),
+        }
     }
 
     /// Feed one RTP packet. Appends its JPEG XS payload to the frame under
@@ -213,7 +217,10 @@ impl St2110JxsDepacketizer {
         if marker {
             let codestream = core::mem::take(&mut self.buf);
             self.ts = None;
-            Some(St2110JxsFrame { rtp_timestamp, codestream })
+            Some(St2110JxsFrame {
+                rtp_timestamp,
+                codestream,
+            })
         } else {
             None
         }
@@ -235,14 +242,21 @@ mod tests {
         // A small MTU forces the codestream across several packets.
         let cs = codestream(1000);
         let tai = 1_700_000_000_000_000_000u64;
-        let mut tx = St2110JxsPacketizer::new(96, 0x4A58_5300, RTP_HEADER_LEN + JXS_HEADER_LEN + 300);
+        let mut tx =
+            St2110JxsPacketizer::new(96, 0x4A58_5300, RTP_HEADER_LEN + JXS_HEADER_LEN + 300);
         let packets = tx.packetize(&cs, tai);
         assert!(packets.len() > 1, "small MTU splits the codestream");
 
         // Only the last packet carries the marker; all share the 90 kHz timestamp.
-        let want_ts = MediaClock::video().rtp_timestamp(g2g_core::TaiNs(tai)).get();
+        let want_ts = MediaClock::video()
+            .rtp_timestamp(g2g_core::TaiNs(tai))
+            .get();
         for (i, p) in packets.iter().enumerate() {
-            assert_eq!(p[1] & 0x80 != 0, i + 1 == packets.len(), "marker only on last");
+            assert_eq!(
+                p[1] & 0x80 != 0,
+                i + 1 == packets.len(),
+                "marker only on last"
+            );
             let ts = u32::from_be_bytes([p[4], p[5], p[6], p[7]]);
             assert_eq!(ts, want_ts, "every packet shares the frame timestamp");
             // Codestream mode: K bit clear, T bit set on every packet.
@@ -285,7 +299,10 @@ mod tests {
     #[test]
     fn drops_slice_mode_and_short_packets() {
         let mut rx = St2110JxsDepacketizer::new(1 << 20);
-        assert!(rx.depacketize(&[0u8; 8]).is_none(), "shorter than RTP+JXS header");
+        assert!(
+            rx.depacketize(&[0u8; 8]).is_none(),
+            "shorter than RTP+JXS header"
+        );
         // A well-formed RTP+JXS header but K=1 (slice mode) is dropped.
         let mut slice = vec![0x80, 0x80 | 96, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0];
         slice.extend_from_slice(&jxs_header(true, 0, 0)); // K=0...
@@ -331,6 +348,10 @@ mod tests {
             }
         }
         let f = out.expect("frame B completes");
-        assert_eq!(f.codestream, codestream(30), "only frame B, not A's leftovers");
+        assert_eq!(
+            f.codestream,
+            codestream(30),
+            "only frame B, not A's leftovers"
+        );
     }
 }

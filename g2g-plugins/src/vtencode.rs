@@ -53,13 +53,14 @@ use objc2_core_media::{
 };
 use objc2_core_video::{
     CVImageBuffer, CVPixelBuffer, CVPixelBufferCreate, CVPixelBufferGetBaseAddressOfPlane,
-    CVPixelBufferGetBytesPerRowOfPlane, CVPixelBufferGetHeightOfPlane, CVPixelBufferGetWidthOfPlane,
-    CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
+    CVPixelBufferGetBytesPerRowOfPlane, CVPixelBufferGetHeightOfPlane,
+    CVPixelBufferGetWidthOfPlane, CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags,
+    CVPixelBufferUnlockBaseAddress,
 };
 use objc2_video_toolbox::{
-    VTCompressionSession, VTEncodeInfoFlags, VTSessionSetProperty,
-    kVTCompressionPropertyKey_AverageBitRate, kVTCompressionPropertyKey_AllowFrameReordering,
+    kVTCompressionPropertyKey_AllowFrameReordering, kVTCompressionPropertyKey_AverageBitRate,
     kVTCompressionPropertyKey_MaxKeyFrameInterval, kVTCompressionPropertyKey_RealTime,
+    VTCompressionSession, VTEncodeInfoFlags, VTSessionSetProperty,
 };
 
 use g2g_core::frame::Frame;
@@ -228,7 +229,8 @@ impl VtEncode {
         };
         let new_caps = h264_caps(self.codec, w, h, self.framerate.clone());
         if self.last_caps.as_ref() != Some(&new_caps) {
-            out.push(PipelinePacket::CapsChanged(new_caps.clone())).await?;
+            out.push(PipelinePacket::CapsChanged(new_caps.clone()))
+                .await?;
             self.last_caps = Some(new_caps);
         }
         let frame = Frame {
@@ -263,7 +265,8 @@ impl VtEncode {
 }
 
 impl AsyncElement for VtEncode {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -275,7 +278,9 @@ impl AsyncElement for VtEncode {
     /// Mirrors `MfEncode`.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         let codec = self.codec;
-        CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| derive_output_caps(codec, input)))
+        CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| {
+            derive_output_caps(codec, input)
+        }))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -396,19 +401,27 @@ impl PadTemplates for VtEncode {
 }
 
 fn h264_caps(codec: VideoCodec, w: u32, h: u32, framerate: Rate) -> Caps {
-    Caps::CompressedVideo { codec, width: Dim::Fixed(w), height: Dim::Fixed(h), framerate }
+    Caps::CompressedVideo {
+        codec,
+        width: Dim::Fixed(w),
+        height: Dim::Fixed(h),
+        framerate,
+    }
 }
 
 fn derive_output_caps(codec: VideoCodec, input: &Caps) -> CapsSet {
     match input {
-        Caps::RawVideo { format: RawVideoFormat::Nv12, width, height, framerate } => {
-            CapsSet::one(Caps::CompressedVideo {
-                codec,
-                width: width.clone(),
-                height: height.clone(),
-                framerate: framerate.clone(),
-            })
-        }
+        Caps::RawVideo {
+            format: RawVideoFormat::Nv12,
+            width,
+            height,
+            framerate,
+        } => CapsSet::one(Caps::CompressedVideo {
+            codec,
+            width: width.clone(),
+            height: height.clone(),
+            framerate: framerate.clone(),
+        }),
         _ => CapsSet::from_alternatives(Vec::new()),
     }
 }
@@ -440,9 +453,11 @@ unsafe extern "C-unwind" fn output_callback(
     let sample = unsafe { &*sample_buffer };
     let codec = collector.codec;
     match unsafe { sample_to_annexb(codec, sample) } {
-        Ok((annexb, pts_ns, keyframe)) => {
-            collector.frames.push(EncodedFrame { annexb, pts_ns, keyframe })
-        }
+        Ok((annexb, pts_ns, keyframe)) => collector.frames.push(EncodedFrame {
+            annexb,
+            pts_ns,
+            keyframe,
+        }),
         Err(e) => collector.error = Some(e),
     }
 }
@@ -511,10 +526,20 @@ unsafe fn parameter_sets_annexb(
         unsafe {
             match codec {
                 VideoCodec::H265 => CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
-                    fmt, i, p, sz, count, ptr::null_mut(),
+                    fmt,
+                    i,
+                    p,
+                    sz,
+                    count,
+                    ptr::null_mut(),
                 ),
                 _ => CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
-                    fmt, i, p, sz, count, ptr::null_mut(),
+                    fmt,
+                    i,
+                    p,
+                    sz,
+                    count,
+                    ptr::null_mut(),
                 ),
             }
         }
@@ -557,7 +582,11 @@ unsafe fn build_session(
     keyframe_interval: u32,
 ) -> Result<EncoderState, G2gError> {
     let hw = || G2gError::Hardware(HardwareError::Other);
-    let mut collector = Box::new(Collector { frames: Vec::new(), error: None, codec });
+    let mut collector = Box::new(Collector {
+        frames: Vec::new(),
+        error: None,
+        codec,
+    });
     let refcon = collector.as_mut() as *mut Collector as *mut c_void;
     let codec_type = match codec {
         VideoCodec::H265 => CODEC_H265,
@@ -591,12 +620,25 @@ unsafe fn build_session(
     // CFNumber construction via objc2-core-foundation may need small tweaks.
     unsafe {
         set_bool(&session, kVTCompressionPropertyKey_RealTime, true)?;
-        set_bool(&session, kVTCompressionPropertyKey_AllowFrameReordering, false)?;
+        set_bool(
+            &session,
+            kVTCompressionPropertyKey_AllowFrameReordering,
+            false,
+        )?;
         set_u32(&session, kVTCompressionPropertyKey_AverageBitRate, bitrate)?;
-        set_u32(&session, kVTCompressionPropertyKey_MaxKeyFrameInterval, keyframe_interval)?;
+        set_u32(
+            &session,
+            kVTCompressionPropertyKey_MaxKeyFrameInterval,
+            keyframe_interval,
+        )?;
     }
 
-    Ok(EncoderState { session, collector, width: w, height: h })
+    Ok(EncoderState {
+        session,
+        collector,
+        width: w,
+        height: h,
+    })
 }
 
 /// Encode one NV12 frame: wrap it in a `CVPixelBuffer`, submit, and complete so
@@ -611,7 +653,8 @@ unsafe fn encode_into(state: &EncoderState, nv12: &[u8], pts_ns: u64) -> Result<
     // NOTE (verify on-device): `encode_frame` takes the image buffer, PTS,
     // duration, optional frame-properties dict, source refcon, and an info-flags
     // out-param. A CVPixelBuffer is a CVImageBuffer (typedef).
-    let image: &CVImageBuffer = unsafe { &*(CFRetained::as_ptr(&pixel_buffer).as_ptr() as *const CVImageBuffer) };
+    let image: &CVImageBuffer =
+        unsafe { &*(CFRetained::as_ptr(&pixel_buffer).as_ptr() as *const CVImageBuffer) };
     let st = unsafe {
         state.session.encode_frame(
             image,
@@ -657,7 +700,14 @@ unsafe fn make_pixel_buffer(
     // NOTE (verify on-device): CVPixelBufferCreate(allocator, w, h, fourcc,
     // attrs, out). None attributes lets CoreVideo pick the plane strides.
     let st = unsafe {
-        CVPixelBufferCreate(None, wu, hu, K_CV_PIXEL_FORMAT_420V, None, NonNull::from(&mut pb))
+        CVPixelBufferCreate(
+            None,
+            wu,
+            hu,
+            K_CV_PIXEL_FORMAT_420V,
+            None,
+            NonNull::from(&mut pb),
+        )
     };
     if st != 0 {
         return Err(hw());
@@ -733,12 +783,22 @@ unsafe fn set_u32(
 
 /// A valid `CMTime` for `pts_ns` at nanosecond timescale.
 fn cm_time(pts_ns: u64) -> CMTime {
-    CMTime { value: pts_ns as i64, timescale: 1_000_000_000, flags: CMTimeFlags::Valid, epoch: 0 }
+    CMTime {
+        value: pts_ns as i64,
+        timescale: 1_000_000_000,
+        flags: CMTimeFlags::Valid,
+        epoch: 0,
+    }
 }
 
 /// An invalid `CMTime` (unknown duration).
 fn cm_time_invalid() -> CMTime {
-    CMTime { value: 0, timescale: 0, flags: CMTimeFlags::empty(), epoch: 0 }
+    CMTime {
+        value: 0,
+        timescale: 0,
+        flags: CMTimeFlags::empty(),
+        epoch: 0,
+    }
 }
 
 /// The sample's presentation timestamp.

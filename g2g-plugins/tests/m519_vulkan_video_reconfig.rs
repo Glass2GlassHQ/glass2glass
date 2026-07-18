@@ -10,7 +10,10 @@
 //! would emit garbage or the wrong size for the second segment).
 //!
 //! Runs on the RTX 3060; skips with no Vulkan H.264 decode support.
-#![cfg(all(any(target_os = "linux", target_os = "windows"), feature = "vulkan-video"))]
+#![cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    feature = "vulkan-video"
+))]
 
 use std::future::Future;
 use std::pin::Pin;
@@ -20,7 +23,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::block_on;
 use g2g_core::{
     AsyncElement, Caps, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket,
-    PushOutcome, RawVideoFormat, Rate, VideoCodec,
+    PushOutcome, Rate, RawVideoFormat, VideoCodec,
 };
 use g2g_plugins::vulkanvideo::{open_h264_decode_device, VulkanVideoDec, VulkanVideoError};
 
@@ -93,7 +96,10 @@ fn split_access_units(stream: &[u8]) -> Vec<Vec<u8>> {
 fn au_frame(bytes: Vec<u8>, seq: u64) -> Frame {
     Frame {
         domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming { pts_ns: seq * 33_000_000, ..Default::default() },
+        timing: FrameTiming {
+            pts_ns: seq * 33_000_000,
+            ..Default::default()
+        },
         sequence: seq,
         meta: Default::default(),
     }
@@ -121,7 +127,8 @@ fn element_reconfigures_on_resolution_change() {
         height: Dim::Fixed(480),
         framerate: Rate::Fixed(30 << 16),
     };
-    dec.configure_pipeline(&in_caps).expect("configure opens the decode device");
+    dec.configure_pipeline(&in_caps)
+        .expect("configure opens the decode device");
 
     let aus = split_access_units(CLIP);
     assert_eq!(aus.len(), 12, "6 frames at 640x480 + 6 at 320x240");
@@ -164,7 +171,11 @@ fn element_reconfigures_on_resolution_change() {
             _ => None,
         })
         .collect();
-    assert_eq!(frames.len(), 12, "one NV12 frame per coded picture across both segments");
+    assert_eq!(
+        frames.len(),
+        12,
+        "one NV12 frame per coded picture across both segments"
+    );
 
     let nv12_len = |w: usize, h: usize| w * h * 3 / 2;
     for (i, f) in frames.iter().enumerate() {
@@ -182,7 +193,13 @@ fn element_reconfigures_on_resolution_change() {
         let luma = &bytes[..w * h];
         let min = *luma.iter().min().unwrap();
         let max = *luma.iter().max().unwrap();
-        assert!(max > min, "frame {i} luma is uniform ({min}=={max}); no real content");
+        assert!(
+            max > min,
+            "frame {i} luma is uniform ({min}=={max}); no real content"
+        );
     }
-    eprintln!("VulkanVideoDec reconfigured 640x480 -> 320x240: {} frames", frames.len());
+    eprintln!(
+        "VulkanVideoDec reconfigured 640x480 -> 320x240: {} frames",
+        frames.len()
+    );
 }

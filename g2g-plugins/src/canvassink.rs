@@ -75,7 +75,8 @@ impl CanvasSink {
 }
 
 impl AsyncElement for CanvasSink {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -91,7 +92,9 @@ impl AsyncElement for CanvasSink {
         let err = || G2gError::Hardware(HardwareError::Other);
         let window = web_sys::window().ok_or_else(err)?;
         let document = window.document().ok_or_else(err)?;
-        let element = document.get_element_by_id(&self.canvas_id).ok_or_else(err)?;
+        let element = document
+            .get_element_by_id(&self.canvas_id)
+            .ok_or_else(err)?;
         let canvas: HtmlCanvasElement = element.dyn_into().map_err(|_| err())?;
         let ctx = canvas
             .get_context("2d")

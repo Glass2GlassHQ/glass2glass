@@ -21,8 +21,8 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use windows::Win32::Media::MediaFoundation::{
-    IMFActivate, IMFSample, IMFTransform, MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample,
-    MFShutdown, MFStartup, MFTEnumEx, MFAudioFormat_AAC, MFAudioFormat_PCM, MFMediaType_Audio,
+    IMFActivate, IMFSample, IMFTransform, MFAudioFormat_AAC, MFAudioFormat_PCM, MFCreateMediaType,
+    MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Audio, MFShutdown, MFStartup, MFTEnumEx,
     MFSTARTUP_FULL, MFT_CATEGORY_AUDIO_ENCODER, MFT_ENUM_FLAG_SORTANDFILTER, MFT_ENUM_FLAG_SYNCMFT,
     MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
     MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES,
@@ -123,7 +123,12 @@ impl MfAacEncode {
         self.emitted
     }
 
-    fn feed(&mut self, data: &[u8], pts_ns: u64, encoded: &mut Vec<Vec<u8>>) -> Result<(), G2gError> {
+    fn feed(
+        &mut self,
+        data: &[u8],
+        pts_ns: u64,
+        encoded: &mut Vec<Vec<u8>>,
+    ) -> Result<(), G2gError> {
         let sample = make_input_sample(data, pts_ns)?;
         let mut guard = 0u32;
         while !self.process_input(&sample)? {
@@ -215,7 +220,8 @@ impl MfAacEncode {
 }
 
 impl AsyncElement for MfAacEncode {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -336,7 +342,8 @@ impl AsyncElement for MfAacEncode {
             let ns_per_frame = AAC_FRAME_SAMPLES * 1_000_000_000 / self.sample_rate.max(1) as u64;
             for au in encoded {
                 if self.last_caps.as_ref() != Some(&aac_caps) {
-                    out.push(PipelinePacket::CapsChanged(aac_caps.clone())).await?;
+                    out.push(PipelinePacket::CapsChanged(aac_caps.clone()))
+                        .await?;
                     self.last_caps = Some(aac_caps.clone());
                 }
                 let pts_ns = self.emitted * ns_per_frame;
@@ -407,25 +414,51 @@ fn init_encoder(
     // SAFETY: media-type configuration on the owning thread.
     unsafe {
         let output = MFCreateMediaType().map_err(mf_err)?;
-        output.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio).map_err(mf_err)?;
-        output.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_AAC).map_err(mf_err)?;
-        output.SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, PCM_BITS).map_err(mf_err)?;
-        output.SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, sample_rate).map_err(mf_err)?;
-        output.SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, channels as u32).map_err(mf_err)?;
-        output.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, bytes_per_sec).map_err(mf_err)?;
-        output.SetUINT32(&MF_MT_AAC_PAYLOAD_TYPE, 0).map_err(mf_err)?; // raw AAC
+        output
+            .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)
+            .map_err(mf_err)?;
+        output
+            .SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_AAC)
+            .map_err(mf_err)?;
+        output
+            .SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, PCM_BITS)
+            .map_err(mf_err)?;
+        output
+            .SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, sample_rate)
+            .map_err(mf_err)?;
+        output
+            .SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, channels as u32)
+            .map_err(mf_err)?;
+        output
+            .SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, bytes_per_sec)
+            .map_err(mf_err)?;
+        output
+            .SetUINT32(&MF_MT_AAC_PAYLOAD_TYPE, 0)
+            .map_err(mf_err)?; // raw AAC
         output
             .SetUINT32(&MF_MT_AAC_AUDIO_PROFILE_LEVEL_INDICATION, AAC_PROFILE_LC)
             .map_err(mf_err)?;
         transform.SetOutputType(0, &output, 0).map_err(mf_err)?;
 
         let input = MFCreateMediaType().map_err(mf_err)?;
-        input.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio).map_err(mf_err)?;
-        input.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_PCM).map_err(mf_err)?;
-        input.SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, PCM_BITS).map_err(mf_err)?;
-        input.SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, sample_rate).map_err(mf_err)?;
-        input.SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, channels as u32).map_err(mf_err)?;
-        input.SetUINT32(&MF_MT_AUDIO_BLOCK_ALIGNMENT, block_align).map_err(mf_err)?;
+        input
+            .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)
+            .map_err(mf_err)?;
+        input
+            .SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_PCM)
+            .map_err(mf_err)?;
+        input
+            .SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, PCM_BITS)
+            .map_err(mf_err)?;
+        input
+            .SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, sample_rate)
+            .map_err(mf_err)?;
+        input
+            .SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, channels as u32)
+            .map_err(mf_err)?;
+        input
+            .SetUINT32(&MF_MT_AUDIO_BLOCK_ALIGNMENT, block_align)
+            .map_err(mf_err)?;
         input
             .SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, sample_rate * block_align)
             .map_err(mf_err)?;
@@ -503,7 +536,9 @@ fn read_audio_specific_config(transform: &IMFTransform) -> Result<Vec<u8>, G2gEr
         let out_type = transform.GetOutputCurrentType(0).map_err(mf_err)?;
         let size = out_type.GetBlobSize(&MF_MT_USER_DATA).map_err(mf_err)? as usize;
         let mut buf = alloc::vec![0u8; size];
-        out_type.GetBlob(&MF_MT_USER_DATA, &mut buf, None).map_err(mf_err)?;
+        out_type
+            .GetBlob(&MF_MT_USER_DATA, &mut buf, None)
+            .map_err(mf_err)?;
         if buf.len() > HEAAC_INFO_BYTES {
             Ok(buf[HEAAC_INFO_BYTES..].to_vec())
         } else {
@@ -539,7 +574,9 @@ fn make_input_sample(data: &[u8], pts_ns: u64) -> Result<IMFSample, G2gError> {
         buffer.SetCurrentLength(len).map_err(mf_err)?;
         let sample = MFCreateSample().map_err(mf_err)?;
         sample.AddBuffer(&buffer).map_err(mf_err)?;
-        sample.SetSampleTime((pts_ns / 100) as i64).map_err(mf_err)?;
+        sample
+            .SetSampleTime((pts_ns / 100) as i64)
+            .map_err(mf_err)?;
         Ok(sample)
     }
 }
@@ -550,7 +587,9 @@ fn copy_sample(sample: &IMFSample) -> Result<Vec<u8>, G2gError> {
         let buffer = sample.ConvertToContiguousBuffer().map_err(mf_err)?;
         let mut ptr: *mut u8 = core::ptr::null_mut();
         let mut len: u32 = 0;
-        buffer.Lock(&mut ptr, None, Some(&mut len)).map_err(mf_err)?;
+        buffer
+            .Lock(&mut ptr, None, Some(&mut len))
+            .map_err(mf_err)?;
         let bytes = core::slice::from_raw_parts(ptr, len as usize).to_vec();
         buffer.Unlock().map_err(mf_err)?;
         Ok(bytes)

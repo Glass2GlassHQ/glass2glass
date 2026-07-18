@@ -127,14 +127,20 @@ impl TsDemux {
         if self.collection_posted {
             return;
         }
-        let streams: alloc::vec::Vec<Stream> =
-            self.demux.streams().iter().filter_map(Self::es_to_stream).collect();
+        let streams: alloc::vec::Vec<Stream> = self
+            .demux
+            .streams()
+            .iter()
+            .filter_map(Self::es_to_stream)
+            .collect();
         if streams.is_empty() {
             return;
         }
         self.collection_posted = true;
         if let Some(bus) = &self.bus {
-            bus.try_post(BusMessage::StreamCollection(StreamCollection::new("mpegts-0", streams)));
+            bus.try_post(BusMessage::StreamCollection(StreamCollection::new(
+                "mpegts-0", streams,
+            )));
         }
     }
 
@@ -154,9 +160,14 @@ impl TsDemux {
             STREAM_TYPE_H264 => (StreamType::Video, video(VideoCodec::H264)),
             STREAM_TYPE_H265 => (StreamType::Video, video(VideoCodec::H265)),
             STREAM_TYPE_MPEG4P2 => (StreamType::Video, video(VideoCodec::Mpeg4Part2)),
-            STREAM_TYPE_AAC => {
-                (StreamType::Audio, Caps::Audio { format: AudioFormat::Aac, channels: 0, sample_rate: 0 })
-            }
+            STREAM_TYPE_AAC => (
+                StreamType::Audio,
+                Caps::Audio {
+                    format: AudioFormat::Aac,
+                    channels: 0,
+                    sample_rate: 0,
+                },
+            ),
             _ => return None,
         };
         Some(Stream::new(id, stream_type, caps))
@@ -191,7 +202,9 @@ impl TsDemux {
 
     /// The input this element accepts: an MPEG-TS byte stream.
     fn input_caps() -> Caps {
-        Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs }
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::MpegTs,
+        }
     }
 
     /// The output caps for the selected elementary stream. Video geometry is
@@ -206,16 +219,29 @@ impl TsDemux {
             TsStream::H264 => Self::compressed_video(VideoCodec::H264),
             TsStream::H265 => Self::compressed_video(VideoCodec::H265),
             TsStream::Mpeg4Part2 => Self::compressed_video(VideoCodec::Mpeg4Part2),
-            TsStream::Aac => Caps::Audio { format: AudioFormat::Aac, channels: 0, sample_rate: 0 },
+            TsStream::Aac => Caps::Audio {
+                format: AudioFormat::Aac,
+                channels: 0,
+                sample_rate: 0,
+            },
         }
     }
 
     fn compressed_video(codec: VideoCodec) -> Caps {
         Caps::CompressedVideo {
             codec,
-            width: Dim::Range { min: 16, max: 65_535 },
-            height: Dim::Range { min: 16, max: 65_535 },
-            framerate: Rate::Range { min_q16: 1 << 16, max_q16: 240 << 16 },
+            width: Dim::Range {
+                min: 16,
+                max: 65_535,
+            },
+            height: Dim::Range {
+                min: 16,
+                max: 65_535,
+            },
+            framerate: Rate::Range {
+                min_q16: 1 << 16,
+                max_q16: 240 << 16,
+            },
         }
     }
 
@@ -293,7 +319,11 @@ impl TsDemux {
             }
             let frame = Frame::new(
                 MemoryDomain::System(SystemSlice::from_boxed(u.data.into_boxed_slice())),
-                FrameTiming { pts_ns, dts_ns: pts_ns, ..FrameTiming::default() },
+                FrameTiming {
+                    pts_ns,
+                    dts_ns: pts_ns,
+                    ..FrameTiming::default()
+                },
                 self.emitted,
             );
             self.emitted += 1;
@@ -319,15 +349,20 @@ impl AsyncElement for TsDemux {
         // geometry / audio params from the stream via CapsChanged.
         let stream = self.stream;
         CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| match input {
-            Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs } => {
-                CapsSet::one(Self::output_caps(stream))
-            }
+            Caps::ByteStream {
+                encoding: ByteStreamEncoding::MpegTs,
+            } => CapsSet::one(Self::output_caps(stream)),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        if !matches!(absolute_caps, Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs }) {
+        if !matches!(
+            absolute_caps,
+            Caps::ByteStream {
+                encoding: ByteStreamEncoding::MpegTs
+            }
+        ) {
             return Err(G2gError::CapsMismatch);
         }
         self.configured = true;
@@ -411,8 +446,11 @@ impl AsyncElement for TsDemux {
 }
 
 /// `TsDemux`'s settable properties (M109).
-static TSDEMUX_PROPS: &[PropertySpec] =
-    &[PropertySpec::new("stream", PropKind::Str, "elementary stream to emit: h264 | h265 | aac")];
+static TSDEMUX_PROPS: &[PropertySpec] = &[PropertySpec::new(
+    "stream",
+    PropKind::Str,
+    "elementary stream to emit: h264 | h265 | aac",
+)];
 
 /// Parse a `stream` property string to a [`TsStream`].
 fn ts_stream_from_str(s: &str) -> Option<TsStream> {
@@ -474,7 +512,11 @@ pub fn forwardable_streams(demux: &TsDemuxer) -> Vec<TsStreamInfo> {
         .filter_map(|es| {
             let stream = stream_type_to_ts(es.stream_type)?;
             let video = matches!(stream, TsStream::H264 | TsStream::H265);
-            Some(TsStreamInfo { stream, caps: TsDemux::output_caps(stream), video })
+            Some(TsStreamInfo {
+                stream,
+                caps: TsDemux::output_caps(stream),
+                video,
+            })
         })
         .collect()
 }
@@ -488,7 +530,10 @@ impl PadTemplates for TsDemux {
             Self::output_caps(TsStream::H265),
             Self::output_caps(TsStream::Aac),
         ]));
-        Vec::from([PadTemplate::sink(CapsSet::one(Self::input_caps())), PadTemplate::source(source)])
+        Vec::from([
+            PadTemplate::sink(CapsSet::one(Self::input_caps())),
+            PadTemplate::source(source),
+        ])
     }
 }
 
@@ -571,11 +616,17 @@ impl TsDemuxN {
     /// controller, with no pending selection, or before the PMT is parsed (an id
     /// resolves against the PMT's declared streams).
     fn apply_stream_selection(&mut self) {
-        let Some(ctrl) = &self.stream_select else { return };
-        let Some(ids) = ctrl.take_pending() else { return };
+        let Some(ctrl) = &self.stream_select else {
+            return;
+        };
+        let Some(ids) = ctrl.take_pending() else {
+            return;
+        };
         let mut active = Vec::new();
         for (port, id) in ids.iter().enumerate().take(self.ports.len()) {
-            let Some(stream) = resolve_ts_stream_id(&self.demux, id) else { continue };
+            let Some(stream) = resolve_ts_stream_id(&self.demux, id) else {
+                continue;
+            };
             if self.ports[port] != stream {
                 self.ports[port] = stream;
                 self.announced[port] = false; // re-emit caps for the new stream
@@ -602,7 +653,9 @@ impl TsDemuxN {
     /// The port carrying the elementary stream of PMT `stream_type`, or `None` if
     /// no selected port carries it. The first matching port wins.
     fn port_for_stream_type(&self, stream_type: u8) -> Option<usize> {
-        self.ports.iter().position(|&s| TsDemux::selected_stream_type(s) == stream_type)
+        self.ports
+            .iter()
+            .position(|&s| TsDemux::selected_stream_type(s) == stream_type)
     }
 
     /// Consume whole 188-byte TS packets from `buf`, resyncing to the sync byte,
@@ -638,14 +691,20 @@ impl TsDemuxN {
         if self.collection_posted {
             return;
         }
-        let streams: Vec<Stream> =
-            self.demux.streams().iter().filter_map(TsDemux::es_to_stream).collect();
+        let streams: Vec<Stream> = self
+            .demux
+            .streams()
+            .iter()
+            .filter_map(TsDemux::es_to_stream)
+            .collect();
         if streams.is_empty() {
             return;
         }
         self.collection_posted = true;
         if let Some(bus) = &self.bus {
-            bus.try_post(BusMessage::StreamCollection(StreamCollection::new("mpegts-0", streams)));
+            bus.try_post(BusMessage::StreamCollection(StreamCollection::new(
+                "mpegts-0", streams,
+            )));
         }
     }
 
@@ -657,8 +716,11 @@ impl TsDemuxN {
                 continue; // a stream no selected port carries
             };
             if !self.announced[port] {
-                out.push_to(port, PipelinePacket::CapsChanged(TsDemux::output_caps(self.ports[port])))
-                    .await?;
+                out.push_to(
+                    port,
+                    PipelinePacket::CapsChanged(TsDemux::output_caps(self.ports[port])),
+                )
+                .await?;
                 self.announced[port] = true;
             }
             let pts_ns = u
@@ -667,7 +729,11 @@ impl TsDemuxN {
                 .unwrap_or(0);
             let frame = Frame::new(
                 MemoryDomain::System(SystemSlice::from_boxed(u.data.into_boxed_slice())),
-                FrameTiming { pts_ns, dts_ns: pts_ns, ..FrameTiming::default() },
+                FrameTiming {
+                    pts_ns,
+                    dts_ns: pts_ns,
+                    ..FrameTiming::default()
+                },
                 self.emitted,
             );
             self.emitted += 1;
@@ -706,11 +772,15 @@ impl MultiOutputElement for TsDemuxN {
     /// Declare each port's elementary-stream caps (M380), so the solver negotiates
     /// each branch against its codec at startup. `None` for an out-of-range port.
     fn port_output_caps(&self, port: usize) -> Option<Caps> {
-        self.ports.get(port).map(|&stream| TsDemux::output_caps(stream))
+        self.ports
+            .get(port)
+            .map(|&stream| TsDemux::output_caps(stream))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        absolute_caps.intersect(&TsDemux::input_caps()).map(|_| ConfigureOutcome::Accepted)
+        absolute_caps
+            .intersect(&TsDemux::input_caps())
+            .map(|_| ConfigureOutcome::Accepted)
     }
 
     fn process<'a>(
@@ -775,16 +845,31 @@ mod tests {
     /// stream_type <-> TsStream tables.
     #[test]
     fn stream_type_0x10_is_mpeg4_part2() {
-        let es = crate::mpegts::ElementaryStream { pid: 0x100, stream_type: STREAM_TYPE_MPEG4P2 };
+        let es = crate::mpegts::ElementaryStream {
+            pid: 0x100,
+            stream_type: STREAM_TYPE_MPEG4P2,
+        };
         let stream = TsDemux::es_to_stream(&es).expect("0x10 is forwarded");
         assert_eq!(stream.stream_type, StreamType::Video);
         assert!(
-            matches!(stream.caps, Caps::CompressedVideo { codec: VideoCodec::Mpeg4Part2, .. }),
+            matches!(
+                stream.caps,
+                Caps::CompressedVideo {
+                    codec: VideoCodec::Mpeg4Part2,
+                    ..
+                }
+            ),
             "0x10 -> MPEG-4 Part 2 caps"
         );
 
-        assert_eq!(stream_type_to_ts(STREAM_TYPE_MPEG4P2), Some(TsStream::Mpeg4Part2));
-        assert_eq!(TsDemux::selected_stream_type(TsStream::Mpeg4Part2), STREAM_TYPE_MPEG4P2);
+        assert_eq!(
+            stream_type_to_ts(STREAM_TYPE_MPEG4P2),
+            Some(TsStream::Mpeg4Part2)
+        );
+        assert_eq!(
+            TsDemux::selected_stream_type(TsStream::Mpeg4Part2),
+            STREAM_TYPE_MPEG4P2
+        );
         assert_eq!(ts_stream_from_str("mpeg4part2"), Some(TsStream::Mpeg4Part2));
         assert_eq!(ts_stream_to_str(TsStream::Mpeg4Part2), "mpeg4part2");
     }
@@ -817,7 +902,11 @@ mod tests {
 
     fn psi(pid: u16, table_id: u8, body: &[u8]) -> Vec<u8> {
         let section_length = body.len() + 4;
-        let mut s = alloc::vec![table_id, 0xB0 | ((section_length >> 8) as u8 & 0x0F), (section_length & 0xFF) as u8];
+        let mut s = alloc::vec![
+            table_id,
+            0xB0 | ((section_length >> 8) as u8 & 0x0F),
+            (section_length & 0xFF) as u8
+        ];
         s.extend_from_slice(body);
         s.extend_from_slice(&[0, 0, 0, 0]);
         let mut payload = alloc::vec![0u8];
@@ -826,7 +915,21 @@ mod tests {
     }
 
     fn pat(pmt_pid: u16) -> Vec<u8> {
-        psi(0x0000, 0x00, &[0, 1, 0xC1, 0, 0, 0, 1, 0xE0 | (pmt_pid >> 8) as u8 & 0x1F, pmt_pid as u8])
+        psi(
+            0x0000,
+            0x00,
+            &[
+                0,
+                1,
+                0xC1,
+                0,
+                0,
+                0,
+                1,
+                0xE0 | (pmt_pid >> 8) as u8 & 0x1F,
+                pmt_pid as u8,
+            ],
+        )
     }
 
     fn pmt(es_pid: u16) -> Vec<u8> {
@@ -834,12 +937,20 @@ mod tests {
             0x1000,
             0x02,
             &[
-                0x00, 0x01, 0xC1, 0x00, 0x00,
-                0xE0 | (es_pid >> 8) as u8 & 0x1F, es_pid as u8,
-                0xF0, 0x00,
+                0x00,
+                0x01,
+                0xC1,
+                0x00,
+                0x00,
+                0xE0 | (es_pid >> 8) as u8 & 0x1F,
+                es_pid as u8,
+                0xF0,
+                0x00,
                 STREAM_TYPE_H264,
-                0xE0 | (es_pid >> 8) as u8 & 0x1F, es_pid as u8,
-                0xF0, 0x00,
+                0xE0 | (es_pid >> 8) as u8 & 0x1F,
+                es_pid as u8,
+                0xF0,
+                0x00,
             ],
         )
     }
@@ -866,11 +977,25 @@ mod tests {
             0x1000,
             0x02,
             &[
-                0x00, 0x01, 0xC1, 0x00, 0x00,
-                0xE0 | (v_pid >> 8) as u8 & 0x1F, v_pid as u8, // PCR_PID
-                0xF0, 0x00,
-                v_type, 0xE0 | (v_pid >> 8) as u8 & 0x1F, v_pid as u8, 0xF0, 0x00,
-                a_type, 0xE0 | (a_pid >> 8) as u8 & 0x1F, a_pid as u8, 0xF0, 0x00,
+                0x00,
+                0x01,
+                0xC1,
+                0x00,
+                0x00,
+                0xE0 | (v_pid >> 8) as u8 & 0x1F,
+                v_pid as u8, // PCR_PID
+                0xF0,
+                0x00,
+                v_type,
+                0xE0 | (v_pid >> 8) as u8 & 0x1F,
+                v_pid as u8,
+                0xF0,
+                0x00,
+                a_type,
+                0xE0 | (a_pid >> 8) as u8 & 0x1F,
+                a_pid as u8,
+                0xF0,
+                0x00,
             ],
         )
     }
@@ -938,13 +1063,21 @@ mod tests {
             FrameTiming::default(),
             0,
         );
-        d.process(PipelinePacket::DataFrame(frame), &mut sink).await.unwrap();
+        d.process(PipelinePacket::DataFrame(frame), &mut sink)
+            .await
+            .unwrap();
         d.process(PipelinePacket::Eos, &mut sink).await.unwrap();
 
         assert_eq!(sink.frames.len(), 2, "two H.264 access units demuxed");
-        assert_eq!(sink.frames[0], au0, "first AU bytes intact (PES header stripped)");
+        assert_eq!(
+            sink.frames[0], au0,
+            "first AU bytes intact (PES header stripped)"
+        );
         assert_eq!(sink.frames[1], au1);
-        assert!(!sink.eos, "EOS is forwarded by the runner's arm, not the element");
+        assert!(
+            !sink.eos,
+            "EOS is forwarded by the runner's arm, not the element"
+        );
         assert_eq!(d.emitted(), 2);
     }
 
@@ -955,7 +1088,9 @@ mod tests {
             FrameTiming::default(),
             0,
         );
-        d.process(PipelinePacket::DataFrame(frame), sink).await.unwrap();
+        d.process(PipelinePacket::DataFrame(frame), sink)
+            .await
+            .unwrap();
         d.process(PipelinePacket::Eos, sink).await.unwrap();
     }
 
@@ -983,43 +1118,67 @@ mod tests {
         video.configure_pipeline(&TsDemux::input_caps()).unwrap();
         let mut vsink = CaptureSink::default();
         run_demux(&mut video, &stream, &mut vsink).await;
-        assert_eq!(vsink.frames, alloc::vec![v0.to_vec(), v1.to_vec()], "video only");
+        assert_eq!(
+            vsink.frames,
+            alloc::vec![v0.to_vec(), v1.to_vec()],
+            "video only"
+        );
 
         // stream=aac selects AAC: only the two audio AUs come out (ADTS payload).
         let mut audio = TsDemux::new().with_stream(TsStream::Aac);
         audio.configure_pipeline(&TsDemux::input_caps()).unwrap();
         let mut asink = CaptureSink::default();
         run_demux(&mut audio, &stream, &mut asink).await;
-        assert_eq!(asink.frames, alloc::vec![a0.to_vec(), a1.to_vec()], "audio only");
+        assert_eq!(
+            asink.frames,
+            alloc::vec![a0.to_vec(), a1.to_vec()],
+            "audio only"
+        );
     }
 
     #[test]
     fn output_caps_track_the_selection() {
         assert!(matches!(
             TsDemux::output_caps(TsStream::H264),
-            Caps::CompressedVideo { codec: VideoCodec::H264, .. }
+            Caps::CompressedVideo {
+                codec: VideoCodec::H264,
+                ..
+            }
         ));
         assert!(matches!(
             TsDemux::output_caps(TsStream::H265),
-            Caps::CompressedVideo { codec: VideoCodec::H265, .. }
+            Caps::CompressedVideo {
+                codec: VideoCodec::H265,
+                ..
+            }
         ));
         assert!(matches!(
             TsDemux::output_caps(TsStream::Aac),
-            Caps::Audio { format: AudioFormat::Aac, .. }
+            Caps::Audio {
+                format: AudioFormat::Aac,
+                ..
+            }
         ));
     }
 
     #[test]
     fn stream_property_round_trips_and_drives_output() {
         let mut d = TsDemux::new();
-        assert_eq!(d.get_property("stream"), Some(PropValue::Str("h264".into())));
+        assert_eq!(
+            d.get_property("stream"),
+            Some(PropValue::Str("h264".into()))
+        );
 
-        d.set_property("stream", PropValue::Str("aac".into())).unwrap();
+        d.set_property("stream", PropValue::Str("aac".into()))
+            .unwrap();
         assert_eq!(d.stream(), TsStream::Aac);
         assert_eq!(d.get_property("stream"), Some(PropValue::Str("aac".into())));
 
         // An unsupported codec name is rejected (leaving the selection unchanged).
-        assert_eq!(d.set_property("stream", PropValue::Str("vp9".into())), Err(PropError::Value));
+        assert_eq!(
+            d.set_property("stream", PropValue::Str("vp9".into())),
+            Err(PropError::Value)
+        );
         assert_eq!(d.stream(), TsStream::Aac);
 
         // DerivedOutput now maps the TS byte stream to AAC audio.
@@ -1027,6 +1186,12 @@ mod tests {
             panic!("expected DerivedOutput");
         };
         let out = f(&TsDemux::input_caps());
-        assert!(matches!(out.alternatives(), [Caps::Audio { format: AudioFormat::Aac, .. }]));
+        assert!(matches!(
+            out.alternatives(),
+            [Caps::Audio {
+                format: AudioFormat::Aac,
+                ..
+            }]
+        ));
     }
 }

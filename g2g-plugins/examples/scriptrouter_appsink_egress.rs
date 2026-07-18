@@ -55,11 +55,17 @@ fn main() {
     let r = g.add_demux(GraphNode::demux(router), 2);
     let s0 = g.add_sink(GraphNode::element(AppSink::new().with_channel("even")));
     let s1 = g.add_sink(GraphNode::element(AppSink::new().with_channel("odd")));
-    g.link(src, r.input()).expect("link videotestsrc -> scriptrouter");
-    g.link(r.out(0), s0).expect("link scriptrouter.0 -> appsink even");
-    g.link(r.out(1), s1).expect("link scriptrouter.1 -> appsink odd");
+    g.link(src, r.input())
+        .expect("link videotestsrc -> scriptrouter");
+    g.link(r.out(0), s0)
+        .expect("link scriptrouter.0 -> appsink even");
+    g.link(r.out(1), s1)
+        .expect("link scriptrouter.1 -> appsink odd");
 
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
     rt.block_on(async {
         let t0 = Instant::now();
 
@@ -91,8 +97,15 @@ fn main() {
         );
         let stats = stats.expect("pipeline runs to completion");
 
-        println!("\n{} frames consumed: even={ne} odd={no}", stats.frames_consumed);
-        assert_eq!(ne + no, N as usize, "every frame reached exactly one consumer");
+        println!(
+            "\n{} frames consumed: even={ne} odd={no}",
+            stats.frames_consumed
+        );
+        assert_eq!(
+            ne + no,
+            N as usize,
+            "every frame reached exactly one consumer"
+        );
         assert_eq!(ne, no, "parity split is even for {N} frames");
     });
 }

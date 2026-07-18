@@ -91,7 +91,9 @@ impl App {
     }
 
     fn present_current(&mut self) {
-        let Some(sink) = self.sink.as_mut() else { return };
+        let Some(sink) = self.sink.as_mut() else {
+            return;
+        };
         if self.textures.is_empty() {
             return;
         }
@@ -102,7 +104,10 @@ impl App {
         }
         let n = sink.presented_count();
         if n % 120 == 0 && n > 0 {
-            eprintln!("  presented {n} frames (looping {} textures)", self.textures.len());
+            eprintln!(
+                "  presented {n} frames (looping {} textures)",
+                self.textures.len()
+            );
         }
         if self.last_advance.elapsed() >= FRAME_INTERVAL {
             self.idx = (self.idx + 1) % self.textures.len();
@@ -191,13 +196,22 @@ fn main() {
             return;
         }
     };
-    let textures = dec.decode_all_to_textures(&clip).expect("decode to textures");
+    let textures = dec
+        .decode_all_to_textures(&clip)
+        .expect("decode to textures");
     drop(dec);
     drop(session);
     eprintln!("decoded {} HDR textures; opening window", textures.len());
 
     let event_loop = EventLoop::new().expect("event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = App { device, textures, window: None, sink: None, idx: 0, last_advance: Instant::now() };
+    let mut app = App {
+        device,
+        textures,
+        window: None,
+        sink: None,
+        idx: 0,
+        last_advance: Instant::now(),
+    };
     event_loop.run_app(&mut app).expect("run app");
 }

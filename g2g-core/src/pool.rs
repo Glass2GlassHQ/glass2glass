@@ -126,7 +126,9 @@ impl<'a, T> Future for AcquireFuture<'a, T> {
 
 impl<T> Clone for BufferPool<T> {
     fn clone(&self) -> Self {
-        Self { inner: self.inner.clone() }
+        Self {
+            inner: self.inner.clone(),
+        }
     }
 }
 
@@ -150,13 +152,17 @@ pub struct PooledBuffer<T> {
 impl<T> Deref for PooledBuffer<T> {
     type Target = T;
     fn deref(&self) -> &T {
-        self.value.as_ref().expect("PooledBuffer accessed after drop")
+        self.value
+            .as_ref()
+            .expect("PooledBuffer accessed after drop")
     }
 }
 
 impl<T> DerefMut for PooledBuffer<T> {
     fn deref_mut(&mut self) -> &mut T {
-        self.value.as_mut().expect("PooledBuffer accessed after drop")
+        self.value
+            .as_mut()
+            .expect("PooledBuffer accessed after drop")
     }
 }
 

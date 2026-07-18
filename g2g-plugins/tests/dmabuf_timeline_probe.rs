@@ -38,9 +38,11 @@ async fn sem_device() -> Option<(wgpu::Device, wgpu::Queue)> {
             wgpu::Features::empty(),
             &wgpu::Limits::default(),
             &wgpu::MemoryHints::default(),
-            Some(Box::new(|args: wgpu_hal::vulkan::CreateDeviceCallbackArgs| {
-                args.extensions.push(ash::khr::external_semaphore_fd::NAME);
-            })),
+            Some(Box::new(
+                |args: wgpu_hal::vulkan::CreateDeviceCallbackArgs| {
+                    args.extensions.push(ash::khr::external_semaphore_fd::NAME);
+                },
+            )),
         )
         .ok()?
     };
@@ -49,7 +51,10 @@ async fn sem_device() -> Option<(wgpu::Device, wgpu::Queue)> {
         adapter
             .create_device_from_hal(
                 open,
-                &wgpu::DeviceDescriptor { label: Some("timeline-probe"), ..Default::default() },
+                &wgpu::DeviceDescriptor {
+                    label: Some("timeline-probe"),
+                    ..Default::default()
+                },
             )
             .ok()?
     };
@@ -88,11 +93,15 @@ async fn cross_device_timeline_semaphore_signal_and_host_wait() {
             .semaphore_type(vk::SemaphoreType::TIMELINE)
             .initial_value(0);
         let sem_a = raw_a.create_semaphore(
-            &vk::SemaphoreCreateInfo::default().push_next(&mut type_a).push_next(&mut export),
+            &vk::SemaphoreCreateInfo::default()
+                .push_next(&mut type_a)
+                .push_next(&mut export),
             None,
         );
-        let sem_b =
-            raw_b.create_semaphore(&vk::SemaphoreCreateInfo::default().push_next(&mut type_b), None);
+        let sem_b = raw_b.create_semaphore(
+            &vk::SemaphoreCreateInfo::default().push_next(&mut type_b),
+            None,
+        );
 
         let result = match (sem_a, sem_b) {
             (Ok(sem_a), Ok(sem_b)) => {
@@ -110,7 +119,9 @@ async fn cross_device_timeline_semaphore_signal_and_host_wait() {
                 if let Ok(s) = b {
                     raw_b.destroy_semaphore(s, None);
                 }
-                Err(format!("create timeline semaphore(s) failed: a={a:?} b={b:?}"))
+                Err(format!(
+                    "create timeline semaphore(s) failed: a={a:?} b={b:?}"
+                ))
             }
         };
         result
@@ -182,8 +193,7 @@ unsafe fn run_probe(
     {
         // SAFETY: `queue_a` is a live Vulkan-backend wgpu queue; `sem_a` is a
         // timeline semaphore on its device, signalled on the submit below.
-        let hal_q =
-            unsafe { queue_a.as_hal::<wgpu_hal::api::Vulkan>() }.expect("hal queue a");
+        let hal_q = unsafe { queue_a.as_hal::<wgpu_hal::api::Vulkan>() }.expect("hal queue a");
         hal_q.add_signal_semaphore(sem_a, Some(1));
     }
     let enc = dev_a.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
@@ -192,7 +202,9 @@ unsafe fn run_probe(
     // Host-wait value 1 on B (5 s). SUCCESS proves the cross-device timeline share.
     let sems = [sem_b];
     let vals = [1u64];
-    let wait = vk::SemaphoreWaitInfo::default().semaphores(&sems).values(&vals);
+    let wait = vk::SemaphoreWaitInfo::default()
+        .semaphores(&sems)
+        .values(&vals);
     // SAFETY: `wait` references live locals for the call; `raw_b` is a live device.
     match unsafe { raw_b.wait_semaphores(&wait, 5_000_000_000) } {
         Ok(()) => Ok(()),

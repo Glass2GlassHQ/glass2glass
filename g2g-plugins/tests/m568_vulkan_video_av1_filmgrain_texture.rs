@@ -16,7 +16,10 @@
 //! path's own `nv12_to_rgba` of the (bit-exact) grained NV12, so the SAD is 0.
 //!
 //! Runs on the RTX 3060; skips with no adapter / no AV1 decode / no compute queue.
-#![cfg(all(any(target_os = "linux", target_os = "windows"), feature = "vulkan-video"))]
+#![cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    feature = "vulkan-video"
+))]
 
 use g2g_core::runtime::block_on;
 use g2g_plugins::vulkanvideo::{
@@ -41,7 +44,8 @@ fn ref_pixel_rgb(y: u8, u: u8, v: u8) -> [u8; 3] {
     let cr = v as f32 - 128.0;
     let yc = (y as f32 - 16.0) * (255.0 / 219.0);
     let r = yc + 2.0 * (1.0 - kr) * c_scale * cr;
-    let g = yc - 2.0 * kr * (1.0 - kr) / kg * c_scale * cr - 2.0 * kb * (1.0 - kb) / kg * c_scale * cb;
+    let g =
+        yc - 2.0 * kr * (1.0 - kr) / kg * c_scale * cr - 2.0 * kb * (1.0 - kb) / kg * c_scale * cb;
     let b = yc + 2.0 * (1.0 - kb) * c_scale * cb;
     [
         r.clamp(0.0, 255.0) as u8,
@@ -53,7 +57,10 @@ fn ref_pixel_rgb(y: u8, u: u8, v: u8) -> [u8; 3] {
 #[test]
 fn decodes_filmgrain_av1_to_textures() {
     let seq = extract_av1_sequence_header(CLIP).expect("parse sequence header");
-    assert!(seq.film_grain_params_present, "fixture carries no film grain; feature untested");
+    assert!(
+        seq.film_grain_params_present,
+        "fixture carries no film grain; feature untested"
+    );
 
     let device = match block_on(open_av1_decode_device()) {
         Ok(d) => d,
@@ -67,7 +74,9 @@ fn decodes_filmgrain_av1_to_textures() {
     };
 
     let std = to_std_av1_seq_header(&seq);
-    let session = device.create_av1_session(&std, W as u32, H as u32).expect("create AV1 session");
+    let session = device
+        .create_av1_session(&std, W as u32, H as u32)
+        .expect("create AV1 session");
     let mut dec = match device.create_av1_dpb_decoder_gpu(&session, &seq) {
         Ok(d) => d,
         Err(VulkanVideoError::NoComputeQueue) => {
@@ -77,7 +86,9 @@ fn decodes_filmgrain_av1_to_textures() {
         Err(e) => panic!("build GPU AV1 decoder: {e:?}"),
     };
 
-    let textures = dec.decode_all_to_textures(CLIP).expect("decode film-grain stream to textures");
+    let textures = dec
+        .decode_all_to_textures(CLIP)
+        .expect("decode film-grain stream to textures");
     assert!(!textures.is_empty(), "no textures decoded");
 
     let mut readbacks = Vec::new();
@@ -90,12 +101,20 @@ fn decodes_filmgrain_av1_to_textures() {
         // Real content, not a flat / failed convert.
         let min = *rgba.iter().min().unwrap();
         let max = *rgba.iter().max().unwrap();
-        assert!(min <= 20 && max >= 200, "texture {i} RGBA range {min}..={max} not a real picture");
+        assert!(
+            min <= 20 && max >= 200,
+            "texture {i} RGBA range {min}..={max} not a real picture"
+        );
         readbacks.push(rgba);
     }
     // Animated content + per-frame grain: consecutive textures must differ.
     for i in 1..readbacks.len() {
-        assert_ne!(readbacks[i], readbacks[i - 1], "texture {i} identical to {}", i - 1);
+        assert_ne!(
+            readbacks[i],
+            readbacks[i - 1],
+            "texture {i} identical to {}",
+            i - 1
+        );
     }
 
     // Optional bit-exact check vs an ffmpeg/dav1d yuv420p reference (grain applied).
@@ -104,7 +123,10 @@ fn decodes_filmgrain_av1_to_textures() {
         let cw = W / 2;
         let ch = H / 2;
         let frame_bytes = W * H + 2 * cw * ch;
-        assert!(ref_yuv.len() >= frame_bytes * readbacks.len(), "reference too short");
+        assert!(
+            ref_yuv.len() >= frame_bytes * readbacks.len(),
+            "reference too short"
+        );
         for (i, rgba) in readbacks.iter().enumerate() {
             let base = i * frame_bytes;
             let ref_y = &ref_yuv[base..base + W * H];
@@ -121,9 +143,15 @@ fn decodes_filmgrain_av1_to_textures() {
                     }
                 }
             }
-            eprintln!("texture {i}: RGB SAD/px={:.6}", sad as f64 / (W * H * 3) as f64);
+            eprintln!(
+                "texture {i}: RGB SAD/px={:.6}",
+                sad as f64 / (W * H * 3) as f64
+            );
             assert_eq!(sad, 0, "texture {i} not bit-exact vs grained reference");
         }
-        eprintln!("m568: {} grained AV1 textures bit-exact vs reference", readbacks.len());
+        eprintln!(
+            "m568: {} grained AV1 textures bit-exact vs reference",
+            readbacks.len()
+        );
     }
 }

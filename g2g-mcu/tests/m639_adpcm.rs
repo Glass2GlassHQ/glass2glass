@@ -40,7 +40,10 @@ fn encode_stream(samples: &[i16], block_bytes: usize) -> Vec<u8> {
     let spb = samples_per_block(block_bytes);
     let mut out = vec![0u8; samples.len() / spb * block_bytes];
     let mut index = 0u8;
-    for (s, d) in le_bytes(samples).chunks_exact(spb * 2).zip(out.chunks_exact_mut(block_bytes)) {
+    for (s, d) in le_bytes(samples)
+        .chunks_exact(spb * 2)
+        .zip(out.chunks_exact_mut(block_bytes))
+    {
         index = encode_block(index, s, d).expect("sized exactly");
     }
     out
@@ -49,7 +52,10 @@ fn encode_stream(samples: &[i16], block_bytes: usize) -> Vec<u8> {
 fn decode_stream(bytes: &[u8], block_bytes: usize) -> Vec<u8> {
     let spb = samples_per_block(block_bytes);
     let mut out = vec![0u8; bytes.len() / block_bytes * spb * 2];
-    for (s, d) in bytes.chunks_exact(block_bytes).zip(out.chunks_exact_mut(spb * 2)) {
+    for (s, d) in bytes
+        .chunks_exact(block_bytes)
+        .zip(out.chunks_exact_mut(spb * 2))
+    {
         decode_block(s, d).expect("sized exactly");
     }
     out
@@ -103,14 +109,23 @@ fn sample_arithmetic_anchors() {
     // -> diff 0; the nibble is 0 and the state cools to index 0 (already 0).
     let mut st = ImaState::default();
     assert_eq!(st.encode_sample(0), 0);
-    assert_eq!(st, ImaState { predictor: 0, step_index: 0 });
+    assert_eq!(
+        st,
+        ImaState {
+            predictor: 0,
+            step_index: 0
+        }
+    );
     // A full-scale jump saturates the nibble and heats the step index by 8.
     let mut st = ImaState::default();
     let nib = st.encode_sample(i16::MAX);
     assert_eq!(nib, 7);
     assert_eq!(st.step_index, 8);
     // Decode of a max-magnitude negative nibble walks the predictor down.
-    let mut st = ImaState { predictor: 0, step_index: 88 };
+    let mut st = ImaState {
+        predictor: 0,
+        step_index: 88,
+    };
     let s = st.decode_sample(0xF);
     assert_eq!(s, -32768, "clamped to i16 range");
     assert_eq!(st.step_index, 88, "index stays clamped at the top");
@@ -130,17 +145,26 @@ fn block_round_trip_and_state_carry() {
     // the quantizer's reach (coarse for tiny blocks, exact structure checked
     // bit-for-bit against ffmpeg in the oracle test).
     let dec = decode_stream(&enc, 12);
-    let dec_samples: Vec<i16> =
-        dec.chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect();
+    let dec_samples: Vec<i16> = dec
+        .chunks_exact(2)
+        .map(|c| i16::from_le_bytes([c[0], c[1]]))
+        .collect();
     assert_eq!(dec_samples.len(), sig.len());
-    for (blk_idx, (d, s)) in dec_samples.chunks_exact(spb).zip(sig.chunks_exact(spb)).enumerate() {
+    for (blk_idx, (d, s)) in dec_samples
+        .chunks_exact(spb)
+        .zip(sig.chunks_exact(spb))
+        .enumerate()
+    {
         assert_eq!(d[0], s[0], "block {blk_idx} anchor sample");
     }
     // Undersized / oversized slices are rejected, never panicking.
     let mut small = [0u8; BLOCK_HEADER - 1];
     assert!(encode_block(0, &le_bytes(&sig[..spb]), &mut small).is_none());
     assert!(decode_block(&enc[..BLOCK_HEADER - 1], &mut [0u8; 34]).is_none());
-    assert!(decode_block(&enc[..12], &mut [0u8; 12]).is_none(), "wrong dst size");
+    assert!(
+        decode_block(&enc[..12], &mut [0u8; 12]).is_none(),
+        "wrong dst size"
+    );
 }
 
 #[test]
@@ -162,7 +186,18 @@ fn ffmpeg_oracle_bit_exact_three_ways() {
     //    byte-identical (same quantizer arithmetic, same state carry).
     std::fs::write(f("sig.s16"), le_bytes(&sig)).unwrap();
     let status = Command::new("ffmpeg")
-        .args(["-y", "-loglevel", "error", "-f", "s16le", "-ar", "8000", "-ac", "1", "-i"])
+        .args([
+            "-y",
+            "-loglevel",
+            "error",
+            "-f",
+            "s16le",
+            "-ar",
+            "8000",
+            "-ac",
+            "1",
+            "-i",
+        ])
         .arg(f("sig.s16"))
         .args(["-c:a", "adpcm_ima_wav", "-block_size", &BLOCK.to_string()])
         .arg(f("theirs.wav"))
@@ -203,7 +238,13 @@ fn ffmpeg_oracle_bit_exact_three_ways() {
         "ffmpeg reconstructs our stream differently"
     );
 
-    for name in ["sig.s16", "theirs.wav", "theirs.s16", "ours.wav", "ffdec.s16"] {
+    for name in [
+        "sig.s16",
+        "theirs.wav",
+        "theirs.s16",
+        "ours.wav",
+        "ffdec.s16",
+    ] {
         let _ = std::fs::remove_file(f(name));
     }
 
@@ -236,8 +277,14 @@ fn elements_round_trip_whole_blocks() {
     let mut dec = unsafe { AdpcmDec::with_ring(&out_ring, BB) };
 
     let input = frame_of(&input_ring, &le_bytes(&sig), 42, 7);
-    let mid = block_on(enc.process(input)).expect("encode").expect("frame");
-    assert_eq!(payload(&mid), encode_stream(&sig, BB), "element matches the block fns");
+    let mid = block_on(enc.process(input))
+        .expect("encode")
+        .expect("frame");
+    assert_eq!(
+        payload(&mid),
+        encode_stream(&sig, BB),
+        "element matches the block fns"
+    );
     assert_eq!(mid.timing.pts_ns, 42, "timing inherited");
     assert_eq!(mid.sequence, 7, "sequence inherited");
 
@@ -260,11 +307,19 @@ fn encoder_state_carries_across_frames() {
     // (the step index carries across frames like ffmpeg carries it across
     // blocks).
     let (a, b) = sig.split_at(spb);
-    let fa = block_on(enc.process(frame_of(&ring_a, &le_bytes(a), 0, 0))).unwrap().unwrap();
-    let fb = block_on(enc.process(frame_of(&ring_b, &le_bytes(b), 0, 1))).unwrap().unwrap();
+    let fa = block_on(enc.process(frame_of(&ring_a, &le_bytes(a), 0, 0)))
+        .unwrap()
+        .unwrap();
+    let fb = block_on(enc.process(frame_of(&ring_b, &le_bytes(b), 0, 1)))
+        .unwrap()
+        .unwrap();
     let mut both = payload(&fa).to_vec();
     both.extend_from_slice(payload(&fb));
-    assert_eq!(both, encode_stream(&sig, BB), "state must carry across frames");
+    assert_eq!(
+        both,
+        encode_stream(&sig, BB),
+        "state must carry across frames"
+    );
 }
 
 #[test]
@@ -279,8 +334,14 @@ fn framing_is_validated() {
 
     // Not a whole number of blocks' samples.
     let torn = frame_of(&input_ring, &[0u8; 10], 0, 0);
-    assert_eq!(block_on(enc.process(torn)).unwrap_err(), G2gError::CapsMismatch);
+    assert_eq!(
+        block_on(enc.process(torn)).unwrap_err(),
+        G2gError::CapsMismatch
+    );
     let input_ring2: StaticLendRing<1, 64> = StaticLendRing::new();
     let torn = frame_of(&input_ring2, &[0u8; 10], 0, 0);
-    assert_eq!(block_on(dec.process(torn)).unwrap_err(), G2gError::CapsMismatch);
+    assert_eq!(
+        block_on(dec.process(torn)).unwrap_err(),
+        G2gError::CapsMismatch
+    );
 }

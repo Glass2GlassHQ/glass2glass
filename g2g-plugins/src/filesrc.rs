@@ -29,8 +29,8 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{SeekController, SourceLoop};
 use g2g_core::{
     ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
-    FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec, VideoCodec,
+    FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec, VideoCodec,
 };
 
 use crate::filesink::io_err;
@@ -90,7 +90,9 @@ impl FileSrc {
     pub fn untyped() -> Self {
         Self {
             path: PathBuf::new(),
-            caps: Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs },
+            caps: Caps::ByteStream {
+                encoding: ByteStreamEncoding::MpegTs,
+            },
             auto_detect: false,
             format_explicit: false,
             chunk_size: DEFAULT_CHUNK_SIZE,
@@ -134,8 +136,13 @@ impl FileSrc {
         // A `filesrc` is always a seekable file, so a sniffed ISO-BMFF stream is the
         // whole-file `Mp4` form (demuxed by `mp4demux`), not the streaming `IsoBmff`
         // form (which `fmp4demux` consumes for live HLS / DASH).
-        if let Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff } = caps {
-            caps = Caps::ByteStream { encoding: ByteStreamEncoding::Mp4 };
+        if let Caps::ByteStream {
+            encoding: ByteStreamEncoding::IsoBmff,
+        } = caps
+        {
+            caps = Caps::ByteStream {
+                encoding: ByteStreamEncoding::Mp4,
+            };
         }
         self.caps = caps;
         self.auto_detect = false;
@@ -151,11 +158,13 @@ impl FileSrc {
 }
 
 impl SourceLoop for FileSrc {
-    type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
+    type RunFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
     where
         Self: 'a;
 
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 
@@ -359,12 +368,32 @@ fn caps_from_extension(path: &std::path::Path) -> Option<Caps> {
         "ogg" | "oga" | "opus" => ByteStreamEncoding::Ogg,
         "flv" => ByteStreamEncoding::Flv,
         "mp4" | "m4v" | "m4a" | "mov" | "qt" => ByteStreamEncoding::Mp4,
-        "h264" | "264" | "avc" => return Some(crate::typefind::elementary_video_caps(VideoCodec::H264)),
-        "h265" | "265" | "hevc" => return Some(crate::typefind::elementary_video_caps(VideoCodec::H265)),
-        "vtt" => return Some(Caps::Text { format: g2g_core::TextFormat::WebVtt }),
-        "srt" => return Some(Caps::Text { format: g2g_core::TextFormat::Srt }),
-        "ass" | "ssa" => return Some(Caps::Text { format: g2g_core::TextFormat::Ssa }),
-        "ttml" | "dfxp" => return Some(Caps::Text { format: g2g_core::TextFormat::Ttml }),
+        "h264" | "264" | "avc" => {
+            return Some(crate::typefind::elementary_video_caps(VideoCodec::H264))
+        }
+        "h265" | "265" | "hevc" => {
+            return Some(crate::typefind::elementary_video_caps(VideoCodec::H265))
+        }
+        "vtt" => {
+            return Some(Caps::Text {
+                format: g2g_core::TextFormat::WebVtt,
+            })
+        }
+        "srt" => {
+            return Some(Caps::Text {
+                format: g2g_core::TextFormat::Srt,
+            })
+        }
+        "ass" | "ssa" => {
+            return Some(Caps::Text {
+                format: g2g_core::TextFormat::Ssa,
+            })
+        }
+        "ttml" | "dfxp" => {
+            return Some(Caps::Text {
+                format: g2g_core::TextFormat::Ttml,
+            })
+        }
         _ => return None,
     };
     Some(Caps::ByteStream { encoding })

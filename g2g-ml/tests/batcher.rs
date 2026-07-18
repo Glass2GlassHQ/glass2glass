@@ -104,26 +104,56 @@ async fn gathers_one_frame_per_input_and_stacks_bytes() {
     let mut out = Collect::default();
 
     // input 0 leads; nothing can batch until input 1 contributes.
-    b.process(0, PipelinePacket::DataFrame(tensor_frame(0xA0, 10, 0)), &mut out)
-        .await
-        .unwrap();
+    b.process(
+        0,
+        PipelinePacket::DataFrame(tensor_frame(0xA0, 10, 0)),
+        &mut out,
+    )
+    .await
+    .unwrap();
     assert!(out.frames().is_empty(), "half a round must not emit");
 
-    b.process(1, PipelinePacket::DataFrame(tensor_frame(0xB0, 20, 0)), &mut out)
-        .await
-        .unwrap();
+    b.process(
+        1,
+        PipelinePacket::DataFrame(tensor_frame(0xB0, 20, 0)),
+        &mut out,
+    )
+    .await
+    .unwrap();
     // a second round, arriving input-1-first.
-    b.process(1, PipelinePacket::DataFrame(tensor_frame(0xB1, 40, 1)), &mut out)
-        .await
-        .unwrap();
-    b.process(0, PipelinePacket::DataFrame(tensor_frame(0xA1, 30, 1)), &mut out)
-        .await
-        .unwrap();
+    b.process(
+        1,
+        PipelinePacket::DataFrame(tensor_frame(0xB1, 40, 1)),
+        &mut out,
+    )
+    .await
+    .unwrap();
+    b.process(
+        0,
+        PipelinePacket::DataFrame(tensor_frame(0xA1, 30, 1)),
+        &mut out,
+    )
+    .await
+    .unwrap();
 
     let frames = out.frames();
     assert_eq!(frames.len(), 2);
-    assert_eq!(frame_bytes(frames[0]), &[0xA0; 4].iter().chain(&[0xB0; 4]).copied().collect::<Vec<_>>()[..]);
-    assert_eq!(frame_bytes(frames[1]), &[0xA1; 4].iter().chain(&[0xB1; 4]).copied().collect::<Vec<_>>()[..]);
+    assert_eq!(
+        frame_bytes(frames[0]),
+        &[0xA0; 4]
+            .iter()
+            .chain(&[0xB0; 4])
+            .copied()
+            .collect::<Vec<_>>()[..]
+    );
+    assert_eq!(
+        frame_bytes(frames[1]),
+        &[0xA1; 4]
+            .iter()
+            .chain(&[0xB1; 4])
+            .copied()
+            .collect::<Vec<_>>()[..]
+    );
     // batch pts is the newest constituent.
     assert_eq!(frames[0].timing.pts_ns, 20);
     assert_eq!(frames[1].timing.pts_ns, 40);
@@ -141,18 +171,30 @@ async fn eos_shrinks_the_batch_and_emits_caps_changed() {
     let mut b = TensorBatcher::new(2, slot()).unwrap();
     let mut out = Collect::default();
 
-    b.process(0, PipelinePacket::DataFrame(tensor_frame(1, 0, 0)), &mut out)
-        .await
-        .unwrap();
-    b.process(1, PipelinePacket::DataFrame(tensor_frame(2, 0, 0)), &mut out)
-        .await
-        .unwrap();
+    b.process(
+        0,
+        PipelinePacket::DataFrame(tensor_frame(1, 0, 0)),
+        &mut out,
+    )
+    .await
+    .unwrap();
+    b.process(
+        1,
+        PipelinePacket::DataFrame(tensor_frame(2, 0, 0)),
+        &mut out,
+    )
+    .await
+    .unwrap();
 
     // input 1 ends; input 0 keeps flowing and must not stall.
     b.process(1, PipelinePacket::Eos, &mut out).await.unwrap();
-    b.process(0, PipelinePacket::DataFrame(tensor_frame(3, 0, 1)), &mut out)
-        .await
-        .unwrap();
+    b.process(
+        0,
+        PipelinePacket::DataFrame(tensor_frame(3, 0, 1)),
+        &mut out,
+    )
+    .await
+    .unwrap();
 
     let frames = out.frames();
     assert_eq!(frames.len(), 2);
@@ -171,26 +213,52 @@ async fn queued_frames_of_an_ended_input_still_batch() {
     let mut out = Collect::default();
 
     // input 1 delivers two rounds worth, then ends, all before input 0 moves.
-    b.process(1, PipelinePacket::DataFrame(tensor_frame(0xB0, 0, 0)), &mut out)
-        .await
-        .unwrap();
-    b.process(1, PipelinePacket::DataFrame(tensor_frame(0xB1, 0, 1)), &mut out)
-        .await
-        .unwrap();
+    b.process(
+        1,
+        PipelinePacket::DataFrame(tensor_frame(0xB0, 0, 0)),
+        &mut out,
+    )
+    .await
+    .unwrap();
+    b.process(
+        1,
+        PipelinePacket::DataFrame(tensor_frame(0xB1, 0, 1)),
+        &mut out,
+    )
+    .await
+    .unwrap();
     b.process(1, PipelinePacket::Eos, &mut out).await.unwrap();
 
-    b.process(0, PipelinePacket::DataFrame(tensor_frame(0xA0, 0, 0)), &mut out)
-        .await
-        .unwrap();
-    b.process(0, PipelinePacket::DataFrame(tensor_frame(0xA1, 0, 1)), &mut out)
-        .await
-        .unwrap();
+    b.process(
+        0,
+        PipelinePacket::DataFrame(tensor_frame(0xA0, 0, 0)),
+        &mut out,
+    )
+    .await
+    .unwrap();
+    b.process(
+        0,
+        PipelinePacket::DataFrame(tensor_frame(0xA1, 0, 1)),
+        &mut out,
+    )
+    .await
+    .unwrap();
     b.process(0, PipelinePacket::Eos, &mut out).await.unwrap();
 
     let frames = out.frames();
-    assert_eq!(frames.len(), 2, "ended input's queue drains into full batches");
-    assert_eq!(frame_bytes(frames[1]), &[0xA1, 0xA1, 0xA1, 0xA1, 0xB1, 0xB1, 0xB1, 0xB1]);
-    assert!(out.caps_changes().is_empty(), "every batch stayed full-size");
+    assert_eq!(
+        frames.len(),
+        2,
+        "ended input's queue drains into full batches"
+    );
+    assert_eq!(
+        frame_bytes(frames[1]),
+        &[0xA1, 0xA1, 0xA1, 0xA1, 0xB1, 0xB1, 0xB1, 0xB1]
+    );
+    assert!(
+        out.caps_changes().is_empty(),
+        "every batch stayed full-size"
+    );
 }
 
 /// Source emitting `count` 4-byte U8 tensor frames then EOS.
@@ -206,7 +274,8 @@ impl SourceLoop for TensorSrc {
     where
         Self: 'a;
 
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 
@@ -270,8 +339,16 @@ impl AsyncElement for BatchSink {
 
 #[tokio::test]
 async fn batches_two_streams_through_the_real_muxer_runner() {
-    let mut a = TensorSrc { fill: 0xA0, count: 3, configured: false };
-    let mut b = TensorSrc { fill: 0xB0, count: 3, configured: false };
+    let mut a = TensorSrc {
+        fill: 0xA0,
+        count: 3,
+        configured: false,
+    };
+    let mut b = TensorSrc {
+        fill: 0xB0,
+        count: 3,
+        configured: false,
+    };
     let mut batcher = TensorBatcher::new(2, slot()).unwrap();
     let mut sink = BatchSink::default();
     let clock = ZeroClock;

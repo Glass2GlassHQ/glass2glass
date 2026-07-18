@@ -42,7 +42,12 @@ async fn rgba_source_reaches_nv12_only_sink_through_converter() {
     assert!(
         changes.iter().any(|c| matches!(
             &c.caps,
-            Caps::RawVideo { format: RawVideoFormat::Nv12, width: Dim::Fixed(32), height: Dim::Fixed(16), .. }
+            Caps::RawVideo {
+                format: RawVideoFormat::Nv12,
+                width: Dim::Fixed(32),
+                height: Dim::Fixed(16),
+                ..
+            }
         )),
         "sink saw NV12 caps at the source geometry, got {changes:?}"
     );

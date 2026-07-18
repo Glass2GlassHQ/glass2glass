@@ -120,7 +120,10 @@ async fn rtmp_publish_demuxes_to_access_units() {
     thread::spawn(move || publish_video(addr, au_for_client));
 
     let mut src = RtmpSrc::from_listener(listener).unwrap();
-    src.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::Flv }).unwrap();
+    src.configure_pipeline(&Caps::ByteStream {
+        encoding: ByteStreamEncoding::Flv,
+    })
+    .unwrap();
     let mut sink = CaptureSink::default();
     src.run(&mut sink).await.unwrap();
 
@@ -128,8 +131,15 @@ async fn rtmp_publish_demuxes_to_access_units() {
     let mut demux = FlvDemuxer::new();
     demux.push_data(&sink.flv);
     let units = demux.take_units();
-    assert_eq!(units.len(), 1, "the published video tag demuxes to one access unit");
+    assert_eq!(
+        units.len(),
+        1,
+        "the published video tag demuxes to one access unit"
+    );
     assert_eq!(units[0].track, FlvTrack::Video);
-    assert_eq!(units[0].data, au, "RtmpSrc -> flvdemux recovers the AVCC access unit");
+    assert_eq!(
+        units[0].data, au,
+        "RtmpSrc -> flvdemux recovers the AVCC access unit"
+    );
     assert_eq!(units[0].pts_ms, 40);
 }

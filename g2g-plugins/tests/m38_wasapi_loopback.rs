@@ -11,11 +11,7 @@
 //!
 //! Needs a render endpoint; a headless host fails the probe and the test skips.
 
-#![cfg(all(
-    target_os = "windows",
-    feature = "wasapi-src",
-    feature = "wasapi-sink"
-))]
+#![cfg(all(target_os = "windows", feature = "wasapi-src", feature = "wasapi-sink"))]
 
 use g2g_core::element::{BoxFuture, OutputSink, PushOutcome};
 use g2g_core::frame::PipelinePacket;
@@ -99,7 +95,8 @@ async fn loopback_captures_system_playback_or_skips() {
     assert!(matches!(caps, Caps::Audio { .. }));
 
     let tone = spawn_background_tone();
-    src.configure_pipeline(&caps).expect("configure loopback source");
+    src.configure_pipeline(&caps)
+        .expect("configure loopback source");
 
     let mut out = Collect::default();
     let emitted = src.run(&mut out).await.expect("loopback capture runs");

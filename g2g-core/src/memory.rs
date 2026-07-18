@@ -152,7 +152,9 @@ impl DomainSet {
 
     /// Iterate the member domains in preference order (GPU-resident first).
     pub fn iter(self) -> impl Iterator<Item = MemoryDomainKind> {
-        DOMAIN_PREFERENCE.into_iter().filter(move |&k| self.contains(k))
+        DOMAIN_PREFERENCE
+            .into_iter()
+            .filter(move |&k| self.contains(k))
     }
 
     /// The singleton set holding just `k`. The default capability/acceptance of
@@ -191,7 +193,10 @@ impl DomainSet {
     /// `System`), or `None` if the set is empty. The single concrete domain the
     /// negotiation settles on.
     pub fn preferred(self) -> Option<MemoryDomainKind> {
-        DOMAIN_PREFERENCE.iter().copied().find(|&k| self.contains(k))
+        DOMAIN_PREFERENCE
+            .iter()
+            .copied()
+            .find(|&k| self.contains(k))
     }
 }
 
@@ -294,7 +299,10 @@ enum SystemSliceInner {
     // a pool buffer may be larger than the frame, so the valid payload length
     // is carried explicitly rather than inferred from the buffer capacity.
     #[cfg(feature = "runtime")]
-    Pooled { buffer: PooledBuffer<Box<[u8]>>, len: usize },
+    Pooled {
+        buffer: PooledBuffer<Box<[u8]>>,
+        len: usize,
+    },
     // Foreign-owned CPU bytes lent to the pipeline zero-copy (M234), e.g. an
     // application buffer through the C ABI. Freed via the callback on drop. The
     // only variant in the heap-free build: the `StaticLendRing` lends a static
@@ -309,7 +317,10 @@ enum SystemSliceInner {
     // The pooled analog: a shared pooled buffer, returned to its pool once the
     // last branch drops.
     #[cfg(feature = "runtime")]
-    SharedPooled { buffer: Arc<PooledBuffer<Box<[u8]>>>, len: usize },
+    SharedPooled {
+        buffer: Arc<PooledBuffer<Box<[u8]>>>,
+        len: usize,
+    },
 }
 
 /// An empty owned boxed slice, used as a `mem::replace` placeholder while an
@@ -322,7 +333,9 @@ fn empty_boxed() -> Box<[u8]> {
 impl SystemSlice {
     #[cfg(feature = "alloc")]
     pub fn from_boxed(bytes: Box<[u8]>) -> Self {
-        Self { inner: SystemSliceInner::Owned(bytes) }
+        Self {
+            inner: SystemSliceInner::Owned(bytes),
+        }
     }
 
     /// Wrap foreign-owned CPU bytes zero-copy: no copy is made, the pipeline
@@ -356,8 +369,13 @@ impl SystemSlice {
     /// frame payload). The backing buffer may be larger than `len`.
     #[cfg(feature = "runtime")]
     pub fn from_pool(buffer: PooledBuffer<Box<[u8]>>, len: usize) -> Self {
-        debug_assert!(len <= buffer.as_ref().len(), "valid len exceeds pool buffer");
-        Self { inner: SystemSliceInner::Pooled { buffer, len } }
+        debug_assert!(
+            len <= buffer.as_ref().len(),
+            "valid len exceeds pool buffer"
+        );
+        Self {
+            inner: SystemSliceInner::Pooled { buffer, len },
+        }
     }
 
     pub fn as_slice(&self) -> &[u8] {
@@ -446,9 +464,10 @@ impl SystemSlice {
         self.inner = match taken {
             SystemSliceInner::Owned(b) => SystemSliceInner::Shared(Arc::new(b)),
             #[cfg(feature = "runtime")]
-            SystemSliceInner::Pooled { buffer, len } => {
-                SystemSliceInner::SharedPooled { buffer: Arc::new(buffer), len }
-            }
+            SystemSliceInner::Pooled { buffer, len } => SystemSliceInner::SharedPooled {
+                buffer: Arc::new(buffer),
+                len,
+            },
             SystemSliceInner::Foreign(f) => {
                 SystemSliceInner::Shared(Arc::new(f.as_slice().to_vec().into_boxed_slice()))
             }
@@ -464,9 +483,10 @@ impl SystemSlice {
         let inner = match &self.inner {
             SystemSliceInner::Shared(arc) => SystemSliceInner::Shared(arc.clone()),
             #[cfg(feature = "runtime")]
-            SystemSliceInner::SharedPooled { buffer, len } => {
-                SystemSliceInner::SharedPooled { buffer: buffer.clone(), len: *len }
-            }
+            SystemSliceInner::SharedPooled { buffer, len } => SystemSliceInner::SharedPooled {
+                buffer: buffer.clone(),
+                len: *len,
+            },
             _ => SystemSliceInner::Owned(self.as_slice().to_vec().into_boxed_slice()),
         };
         SystemSlice { inner }
@@ -621,7 +641,12 @@ impl OwnedDmaBuf {
     /// `fd` must be a valid DMABUF descriptor with no other owner; the caller
     /// transfers ownership to this struct.
     pub unsafe fn from_raw(fd: i32, stride: u32, offset: u32) -> Self {
-        Self { fd: Arc::new(DmaBufFd(fd)), stride, offset, sync: None }
+        Self {
+            fd: Arc::new(DmaBufFd(fd)),
+            stride,
+            offset,
+            sync: None,
+        }
     }
 
     pub fn as_raw(&self) -> i32 {
@@ -876,7 +901,11 @@ impl OwnedWebGPUExternalTexture {
     /// Wrap a decoded frame's dimensions with the owner that keeps the
     /// backing `VideoFrame` alive. `Arc`-held so the frame is shareable (M213).
     pub fn new(width: u32, height: u32, keep_alive: Arc<dyn WebGPUKeepAlive>) -> Self {
-        Self { width, height, keep_alive }
+        Self {
+            width,
+            height,
+            keep_alive,
+        }
     }
 
     /// The keep-alive owner, for a consumer to downcast via
@@ -929,7 +958,11 @@ impl OwnedWgpuTexture {
     /// Wrap a rendered texture's dimensions with the owner that keeps the
     /// backing `wgpu::Texture` alive. `Arc`-held so the frame is shareable (M213).
     pub fn new(width: u32, height: u32, keep_alive: Arc<dyn WgpuKeepAlive>) -> Self {
-        Self { width, height, keep_alive }
+        Self {
+            width,
+            height,
+            keep_alive,
+        }
     }
 
     /// The keep-alive owner, for a consumer that links wgpu to downcast via
@@ -1052,7 +1085,10 @@ mod tests {
             0xC0FFEE,
             Arc::new(FlagOnDrop(dropped.clone())),
         );
-        assert!(!dropped.load(Ordering::SeqCst), "owner alive while buffer held");
+        assert!(
+            !dropped.load(Ordering::SeqCst),
+            "owner alive while buffer held"
+        );
         assert_eq!(buf.luma_ptr, 0x1000);
         assert_eq!(buf.chroma_ptr, 0x2000);
         drop(buf);
@@ -1090,7 +1126,10 @@ mod tests {
             0xD3D1CE,
             Arc::new(FlagOnDrop(dropped.clone())),
         );
-        assert!(!dropped.load(Ordering::SeqCst), "owner alive while texture held");
+        assert!(
+            !dropped.load(Ordering::SeqCst),
+            "owner alive while texture held"
+        );
         assert_eq!(tex.texture, 0xDEAD_BEEF);
         assert_eq!(tex.subresource, 2);
         drop(tex);
@@ -1114,7 +1153,10 @@ mod tests {
     fn dropping_webgpu_external_texture_closes_frame() {
         let dropped = Arc::new(AtomicBool::new(false));
         let tex = OwnedWebGPUExternalTexture::new(1280, 720, Arc::new(FlagOnDrop(dropped.clone())));
-        assert!(!dropped.load(Ordering::SeqCst), "owner alive while texture held");
+        assert!(
+            !dropped.load(Ordering::SeqCst),
+            "owner alive while texture held"
+        );
         drop(tex);
         assert!(
             dropped.load(Ordering::SeqCst),
@@ -1129,7 +1171,13 @@ mod tests {
         // only after BOTH shares drop, never twice (which a copy would imply).
         let dropped = Arc::new(AtomicBool::new(false));
         let buf = OwnedCudaBuffer::new(
-            0x1000, 0x2000, 2048, 2048, 1920, 1080, 0xC0FFEE,
+            0x1000,
+            0x2000,
+            2048,
+            2048,
+            1920,
+            1080,
+            0xC0FFEE,
             Arc::new(FlagOnDrop(dropped.clone())),
         );
         let original = MemoryDomain::Cuda(buf);
@@ -1142,19 +1190,29 @@ mod tests {
             }
             _ => panic!("share preserved the domain"),
         }
-        assert!(!dropped.load(Ordering::SeqCst), "keep-alive held by both shares");
+        assert!(
+            !dropped.load(Ordering::SeqCst),
+            "keep-alive held by both shares"
+        );
         drop(branch);
-        assert!(!dropped.load(Ordering::SeqCst), "still held by the original");
+        assert!(
+            !dropped.load(Ordering::SeqCst),
+            "still held by the original"
+        );
         drop(original);
-        assert!(dropped.load(Ordering::SeqCst), "released once the last share drops");
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "released once the last share drops"
+        );
     }
 
     #[test]
     fn sharing_system_bytes_after_make_shareable_is_zero_copy() {
         // M250: once made shareable, a tee hands each branch a handle to the SAME
         // backing bytes (a refcount bump), not a copy: identical data pointers.
-        let mut original =
-            MemoryDomain::System(SystemSlice::from_boxed(alloc::vec![9u8; 64].into_boxed_slice()));
+        let mut original = MemoryDomain::System(SystemSlice::from_boxed(
+            alloc::vec![9u8; 64].into_boxed_slice(),
+        ));
         let orig_ptr = match &original {
             MemoryDomain::System(s) => s.as_slice().as_ptr(),
             _ => unreachable!(),
@@ -1165,9 +1223,17 @@ mod tests {
             (MemoryDomain::System(a), MemoryDomain::System(b)) => (a, b),
             _ => panic!("share preserves the domain"),
         };
-        assert_eq!(a.as_slice().as_ptr(), b.as_slice().as_ptr(), "branches share one buffer");
+        assert_eq!(
+            a.as_slice().as_ptr(),
+            b.as_slice().as_ptr(),
+            "branches share one buffer"
+        );
         // The move into the Arc preserved the original allocation (no copy).
-        assert_eq!(a.as_slice().as_ptr(), orig_ptr, "make_shareable moved, did not copy");
+        assert_eq!(
+            a.as_slice().as_ptr(),
+            orig_ptr,
+            "make_shareable moved, did not copy"
+        );
         assert_eq!(b.as_slice(), &[9u8; 64], "shared bytes intact");
     }
 
@@ -1175,16 +1241,23 @@ mod tests {
     fn mutating_a_shared_branch_copies_on_write() {
         // A branch that mutates must not write the sibling's bytes: as_mut_slice
         // copies out first while the share is still held.
-        let mut original =
-            MemoryDomain::System(SystemSlice::from_boxed(alloc::vec![1u8; 8].into_boxed_slice()));
+        let mut original = MemoryDomain::System(SystemSlice::from_boxed(
+            alloc::vec![1u8; 8].into_boxed_slice(),
+        ));
         original.make_shareable();
         let mut branch = original.share();
-        let MemoryDomain::System(branch_slice) = &mut branch else { unreachable!() };
+        let MemoryDomain::System(branch_slice) = &mut branch else {
+            unreachable!()
+        };
         branch_slice.as_mut_slice()[0] = 42;
         assert_eq!(branch_slice.as_slice()[0], 42, "branch sees its own write");
         match &original {
             MemoryDomain::System(o) => {
-                assert_eq!(o.as_slice()[0], 1, "original untouched by the branch's write");
+                assert_eq!(
+                    o.as_slice()[0],
+                    1,
+                    "original untouched by the branch's write"
+                );
             }
             _ => unreachable!(),
         }
@@ -1196,7 +1269,11 @@ mod tests {
         // owner through as_any to call importExternalTexture.
         let dropped = Arc::new(AtomicBool::new(false));
         let tex = OwnedWebGPUExternalTexture::new(16, 16, Arc::new(FlagOnDrop(dropped)));
-        assert!(tex.keep_alive().as_any().downcast_ref::<FlagOnDrop>().is_some());
+        assert!(tex
+            .keep_alive()
+            .as_any()
+            .downcast_ref::<FlagOnDrop>()
+            .is_some());
     }
 
     /// Increments the `AtomicUsize` at `user`, standing in for an application's
@@ -1214,13 +1291,22 @@ mod tests {
         let frees = AtomicUsize::new(0);
         let user = &frees as *const AtomicUsize as *mut c_void;
         // SAFETY: `buf` outlives the slice; `count_free` is safe to call once.
-        let s = unsafe { SystemSlice::from_foreign(buf.as_ptr(), buf.len(), Some(count_free), user) };
+        let s =
+            unsafe { SystemSlice::from_foreign(buf.as_ptr(), buf.len(), Some(count_free), user) };
         // Zero-copy read: the slice points at the same bytes (same address).
         assert_eq!(s.as_slice(), &[1, 2, 3, 4]);
-        assert_eq!(s.as_slice().as_ptr(), buf.as_ptr(), "read in place, no copy");
+        assert_eq!(
+            s.as_slice().as_ptr(),
+            buf.as_ptr(),
+            "read in place, no copy"
+        );
         assert_eq!(frees.load(Ordering::SeqCst), 0, "not freed while live");
         drop(s);
-        assert_eq!(frees.load(Ordering::SeqCst), 1, "freed exactly once on drop");
+        assert_eq!(
+            frees.load(Ordering::SeqCst),
+            1,
+            "freed exactly once on drop"
+        );
     }
 
     #[test]

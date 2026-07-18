@@ -74,14 +74,23 @@ impl TensorBatcher {
     }
 
     fn batched_caps(&self, batch: u32) -> Caps {
-        let Caps::Tensor { dtype, shape, layout } = &self.slot else {
+        let Caps::Tensor {
+            dtype,
+            shape,
+            layout,
+        } = &self.slot
+        else {
             unreachable!("slot validated at construction");
         };
         let mut shape = *shape;
         if let Some(d) = shape.dims_mut().first_mut() {
             *d = batch;
         }
-        Caps::Tensor { dtype: *dtype, shape, layout: *layout }
+        Caps::Tensor {
+            dtype: *dtype,
+            shape,
+            layout: *layout,
+        }
     }
 
     /// Inputs that still gate or feed a gather round: everything except an
@@ -96,9 +105,7 @@ impl TensorBatcher {
     async fn drain(&mut self, out: &mut dyn OutputSink) -> Result<(), G2gError> {
         loop {
             let contributors = self.contributors();
-            if contributors.is_empty()
-                || contributors.iter().any(|&i| self.queues[i].is_empty())
-            {
+            if contributors.is_empty() || contributors.iter().any(|&i| self.queues[i].is_empty()) {
                 return Ok(());
             }
 
@@ -115,11 +122,13 @@ impl TensorBatcher {
                 None => {
                     let startup = self.batched_caps(self.queues.len() as u32);
                     if new_caps != startup {
-                        out.push(PipelinePacket::CapsChanged(new_caps.clone())).await?;
+                        out.push(PipelinePacket::CapsChanged(new_caps.clone()))
+                            .await?;
                     }
                 }
                 Some(prev) if *prev != new_caps => {
-                    out.push(PipelinePacket::CapsChanged(new_caps.clone())).await?;
+                    out.push(PipelinePacket::CapsChanged(new_caps.clone()))
+                        .await?;
                 }
                 _ => {}
             }
@@ -158,7 +167,8 @@ impl TensorBatcher {
 }
 
 impl MultiInputElement for TensorBatcher {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 

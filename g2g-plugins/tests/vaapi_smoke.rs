@@ -18,7 +18,7 @@ use std::sync::Arc;
 use g2g_core::element::{AsyncElement, BoxFuture, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
-use g2g_core::{Caps, ConfigureOutcome, Dim, G2gError, Rate, VideoCodec, RawVideoFormat};
+use g2g_core::{Caps, ConfigureOutcome, Dim, G2gError, Rate, RawVideoFormat, VideoCodec};
 use g2g_plugins::vaapidec::VaapiH264Dec;
 
 /// `OutputSink` that records every packet it receives. The decoder feeds it
@@ -120,8 +120,14 @@ async fn vaapi_h264_decodes_fixture() {
         data_frames.len(),
         caps_changes.len()
     );
-    assert!(!caps_changes.is_empty(), "expected at least one NV12 CapsChanged");
-    assert!(!data_frames.is_empty(), "expected at least one decoded frame");
+    assert!(
+        !caps_changes.is_empty(),
+        "expected at least one NV12 CapsChanged"
+    );
+    assert!(
+        !data_frames.is_empty(),
+        "expected at least one decoded frame"
+    );
 
     let first = caps_changes.first().unwrap();
     match first {
@@ -139,7 +145,11 @@ async fn vaapi_h264_decodes_fixture() {
             let expected = (*w as usize) * (*h as usize) * 3 / 2;
             match &f.domain {
                 MemoryDomain::System(slice) => {
-                    assert_eq!(slice.as_slice().len(), expected, "NV12 byte length mismatch");
+                    assert_eq!(
+                        slice.as_slice().len(),
+                        expected,
+                        "NV12 byte length mismatch"
+                    );
                 }
                 _ => panic!("decoder must emit System-domain NV12 frames"),
             }

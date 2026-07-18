@@ -56,7 +56,14 @@ impl<E> ValidatedGraph<E> {
         label: impl Fn(NodeId) -> Option<String>,
         ann: &DotAnnotations<'_>,
     ) -> String {
-        render(title, self.node_count(), |n| self.kind(n), self.edges(), label, ann)
+        render(
+            title,
+            self.node_count(),
+            |n| self.kind(n),
+            self.edges(),
+            label,
+            ann,
+        )
     }
 }
 
@@ -105,7 +112,12 @@ fn render(
         let node = NodeId(i as u32);
         let kind = kind_of(node);
         let name = label(node).unwrap_or_else(|| kind_label(kind).to_string());
-        let _ = writeln!(s, "  n{i} [label=\"{}\"{}];", escape(&name), node_style(kind));
+        let _ = writeln!(
+            s,
+            "  n{i} [label=\"{}\"{}];",
+            escape(&name),
+            node_style(kind)
+        );
     }
 
     s.push('\n');
@@ -249,7 +261,10 @@ mod tests {
         let dot = v.to_dot(
             "pipeline",
             |n| v.element(n).map(|e| (*e).to_string()),
-            &DotAnnotations { edge_caps: Some(&caps), edge_memory: None },
+            &DotAnnotations {
+                edge_caps: Some(&caps),
+                edge_memory: None,
+            },
         );
 
         assert!(dot.starts_with("digraph \"pipeline\" {"));
@@ -261,7 +276,10 @@ mod tests {
         // Both edges exist and carry the negotiated caps.
         assert!(dot.contains("n0 -> n1"));
         assert!(dot.contains("n1 -> n2"));
-        assert!(dot.contains("video/x-h264"), "edge caps should be labelled: {dot}");
+        assert!(
+            dot.contains("video/x-h264"),
+            "edge caps should be labelled: {dot}"
+        );
         // Source/sink get distinct fills.
         assert!(dot.contains("fillcolor=\"#cde8cd\"")); // source green
         assert!(dot.contains("fillcolor=\"#f0cdcd\"")); // sink red
@@ -286,11 +304,20 @@ mod tests {
             |n| v.element(n).map(|e| (*e).to_string()),
             &DotAnnotations::default(),
         );
-        assert!(dot.contains("label=\"tee\""), "tee uses kind fallback: {dot}");
+        assert!(
+            dot.contains("label=\"tee\""),
+            "tee uses kind fallback: {dot}"
+        );
         assert!(dot.contains("shape=diamond"));
         // The second tee output pad (index 1) is named, and its leaky policy shows.
-        assert!(dot.contains("taillabel=\"1\""), "tee branch pad index: {dot}");
-        assert!(dot.contains("[DropOldest]"), "non-default policy shown: {dot}");
+        assert!(
+            dot.contains("taillabel=\"1\""),
+            "tee branch pad index: {dot}"
+        );
+        assert!(
+            dot.contains("[DropOldest]"),
+            "non-default policy shown: {dot}"
+        );
     }
 
     #[test]
@@ -305,14 +332,27 @@ mod tests {
         let dot = v.to_dot(
             "gpu",
             |n| v.element(n).map(|e| (*e).to_string()),
-            &DotAnnotations { edge_caps: None, edge_memory: Some(&mem) },
+            &DotAnnotations {
+                edge_caps: None,
+                edge_memory: Some(&mem),
+            },
         );
         assert!(dot.contains("memory:Cuda"), "CUDA domain labelled: {dot}");
         assert!(dot.contains("penwidth=2"), "GPU link drawn bold: {dot}");
         // A System domain would not be annotated.
         let sys = [MemoryDomainKind::System];
-        let dot2 = v.to_dot("sys", |_| None, &DotAnnotations { edge_caps: None, edge_memory: Some(&sys) });
-        assert!(!dot2.contains("memory:"), "System domain is not labelled: {dot2}");
+        let dot2 = v.to_dot(
+            "sys",
+            |_| None,
+            &DotAnnotations {
+                edge_caps: None,
+                edge_memory: Some(&sys),
+            },
+        );
+        assert!(
+            !dot2.contains("memory:"),
+            "System domain is not labelled: {dot2}"
+        );
     }
 
     #[test]
@@ -322,8 +362,18 @@ mod tests {
         let sink = g.add_sink("sink");
         g.link(src, sink).unwrap();
         let v = g.finish().unwrap();
-        let dot = v.to_dot("t\"t", |n| v.element(n).map(|e| (*e).to_string()), &DotAnnotations::default());
-        assert!(dot.contains("digraph \"t\\\"t\""), "title quote escaped: {dot}");
-        assert!(dot.contains("label=\"a\\\"b\""), "name quote escaped: {dot}");
+        let dot = v.to_dot(
+            "t\"t",
+            |n| v.element(n).map(|e| (*e).to_string()),
+            &DotAnnotations::default(),
+        );
+        assert!(
+            dot.contains("digraph \"t\\\"t\""),
+            "title quote escaped: {dot}"
+        );
+        assert!(
+            dot.contains("label=\"a\\\"b\""),
+            "name quote escaped: {dot}"
+        );
     }
 }

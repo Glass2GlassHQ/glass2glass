@@ -73,14 +73,27 @@ impl OutputSink for Collect {
 fn nv12_frame(bytes: Vec<u8>, pts_ns: u64, sequence: u64) -> Frame {
     Frame {
         domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming { pts_ns, dts_ns: pts_ns, ..FrameTiming::default() },
+        timing: FrameTiming {
+            pts_ns,
+            dts_ns: pts_ns,
+            ..FrameTiming::default()
+        },
         sequence,
         meta: Default::default(),
     }
 }
 
 fn nv12_texture_frame(domain: MemoryDomain) -> Frame {
-    Frame { domain, timing: FrameTiming { pts_ns: 99, dts_ns: 99, ..FrameTiming::default() }, sequence: 0, meta: Default::default() }
+    Frame {
+        domain,
+        timing: FrameTiming {
+            pts_ns: 99,
+            dts_ns: 99,
+            ..FrameTiming::default()
+        },
+        sequence: 0,
+        meta: Default::default(),
+    }
 }
 
 fn sample_nv12() -> Vec<u8> {
@@ -105,11 +118,15 @@ fn weights_bias() -> (Vec<f32>, Vec<f32>) {
 /// resulting GPU-resident tensor frame (a `MemoryDomain::WgpuBuffer`).
 async fn preprocess_to_gpu_tensor(nv12: Vec<u8>) -> Frame {
     let mut pre = WgpuPreprocess::new().with_gpu_output();
-    pre.configure_pipeline(&nv12_caps(W, H)).expect("configure NV12");
+    pre.configure_pipeline(&nv12_caps(W, H))
+        .expect("configure NV12");
     let mut out = Collect::default();
-    pre.process(PipelinePacket::DataFrame(nv12_frame(nv12, 4242, 7)), &mut out)
-        .await
-        .expect("gpu-output preprocess");
+    pre.process(
+        PipelinePacket::DataFrame(nv12_frame(nv12, 4242, 7)),
+        &mut out,
+    )
+    .await
+    .expect("gpu-output preprocess");
     out.packets
         .into_iter()
         .find_map(|p| match p {
@@ -121,13 +138,24 @@ async fn preprocess_to_gpu_tensor(nv12: Vec<u8>) -> Frame {
 
 fn logits_from_system(f: &Frame) -> Vec<f32> {
     let MemoryDomain::System(slice) = &f.domain else {
-        panic!("default mode must read logits back to System, got {:?}", f.domain.kind());
+        panic!(
+            "default mode must read logits back to System, got {:?}",
+            f.domain.kind()
+        );
     };
-    slice.as_slice().chunks_exact(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect()
+    slice
+        .as_slice()
+        .chunks_exact(4)
+        .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+        .collect()
 }
 
 fn nchw_caps(shape: &[u32]) -> Caps {
-    Caps::Tensor { dtype: TensorDType::F32, shape: TensorShape::from_slice(shape).unwrap(), layout: TensorLayout::Nchw }
+    Caps::Tensor {
+        dtype: TensorDType::F32,
+        shape: TensorShape::from_slice(shape).unwrap(),
+        layout: TensorLayout::Nchw,
+    }
 }
 
 /// Configure `op` for `in_caps`, run it on `frame`, and return the single output
@@ -136,7 +164,9 @@ fn nchw_caps(shape: &[u32]) -> Caps {
 async fn run_op(mut op: WgpuInference, in_caps: Caps, frame: Frame) -> Frame {
     op.configure_pipeline(&in_caps).expect("configure op");
     let mut out = Collect::default();
-    op.process(PipelinePacket::DataFrame(frame), &mut out).await.expect("op process");
+    op.process(PipelinePacket::DataFrame(frame), &mut out)
+        .await
+        .expect("op process");
     out.packets
         .into_iter()
         .find_map(|p| match p {
@@ -164,7 +194,9 @@ async fn infers_gpu_resident_tensor_and_matches_cpu_reference() {
     );
 
     let mut infer = WgpuInference::linear(W, H, weights.clone(), bias.clone()).unwrap();
-    infer.configure_pipeline(&tensor_in_caps()).expect("configure tensor input");
+    infer
+        .configure_pipeline(&tensor_in_caps())
+        .expect("configure tensor input");
 
     let mut out = Collect::default();
     infer
@@ -208,12 +240,18 @@ async fn infers_gpu_resident_tensor_and_matches_cpu_reference() {
     let got = logits_from_system(frame);
     assert_eq!(got.len(), N, "[1, N] logits");
     for (i, (g, e)) in got.iter().zip(&expected).enumerate() {
-        assert!((g - e).abs() < 1e-2, "logit {i}: gpu {g} vs cpu reference {e}");
+        assert!(
+            (g - e).abs() < 1e-2,
+            "logit {i}: gpu {g} vs cpu reference {e}"
+        );
     }
     // The two columns differ, so column 0 != column 1 unless the ramp happens to
     // sum equal, which it does not for this input: proves the weight matrix was
     // indexed, not collapsed.
-    assert!((got[0] - got[1]).abs() > 1e-3, "the two outputs must differ");
+    assert!(
+        (got[0] - got[1]).abs() > 1e-3,
+        "the two outputs must differ"
+    );
 
     // timing flows through preprocess -> inference unchanged.
     assert_eq!(frame.timing.pts_ns, 4242);
@@ -235,12 +273,18 @@ async fn gpu_output_logits_stay_resident_and_match() {
     let (weights, bias) = weights_bias();
     let tensor_frame = preprocess_to_gpu_tensor(nv12.clone()).await;
 
-    let mut infer =
-        WgpuInference::linear(W, H, weights.clone(), bias.clone()).unwrap().with_gpu_output();
-    infer.configure_pipeline(&tensor_in_caps()).expect("configure");
+    let mut infer = WgpuInference::linear(W, H, weights.clone(), bias.clone())
+        .unwrap()
+        .with_gpu_output();
+    infer
+        .configure_pipeline(&tensor_in_caps())
+        .expect("configure");
 
     let mut out = Collect::default();
-    infer.process(PipelinePacket::DataFrame(tensor_frame), &mut out).await.expect("gpu inference");
+    infer
+        .process(PipelinePacket::DataFrame(tensor_frame), &mut out)
+        .await
+        .expect("gpu inference");
 
     let frame = out
         .packets
@@ -252,7 +296,10 @@ async fn gpu_output_logits_stay_resident_and_match() {
         .expect("a logits frame");
 
     let MemoryDomain::WgpuBuffer(owned) = &frame.domain else {
-        panic!("gpu-output mode must keep logits resident, got {:?}", frame.domain.kind());
+        panic!(
+            "gpu-output mode must keep logits resident, got {:?}",
+            frame.domain.kind()
+        );
     };
     assert_eq!(owned.len, N * 4, "buffer holds the [1, N] f32 logits");
 
@@ -262,14 +309,19 @@ async fn gpu_output_logits_stay_resident_and_match() {
         .downcast_ref::<WgpuBufferOwner>()
         .expect("recover the wgpu buffer owner");
     let bytes = owner.read_back().expect("read logits back");
-    let got: Vec<f32> =
-        bytes.chunks_exact(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect();
+    let got: Vec<f32> = bytes
+        .chunks_exact(4)
+        .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+        .collect();
 
     let cpu_tensor = nv12_to_rgb_tensor(&nv12, W as usize, H as usize);
     let expected = linear_reference(&cpu_tensor, &weights, &bias);
     assert_eq!(got.len(), N);
     for (i, (g, e)) in got.iter().zip(&expected).enumerate() {
-        assert!((g - e).abs() < 1e-2, "logit {i}: gpu-resident {g} vs cpu reference {e}");
+        assert!(
+            (g - e).abs() < 1e-2,
+            "logit {i}: gpu-resident {g} vs cpu reference {e}"
+        );
     }
 }
 
@@ -291,8 +343,9 @@ async fn conv2d_on_gpu_resident_tensor_matches_cpu_reference() {
     const KW: u32 = 3;
     // Deterministic, non-symmetric weights/bias so the full [Cout,Cin,KH,KW] index
     // and the spatial accumulation are exercised, not collapsed.
-    let weights: Vec<f32> =
-        (0..(COUT * CIN * KH * KW)).map(|i| i as f32 * 0.013 - 0.25).collect();
+    let weights: Vec<f32> = (0..(COUT * CIN * KH * KW))
+        .map(|i| i as f32 * 0.013 - 0.25)
+        .collect();
     let bias = vec![0.1f32, -0.2];
 
     let nv12 = sample_nv12();
@@ -304,7 +357,8 @@ async fn conv2d_on_gpu_resident_tensor_matches_cpu_reference() {
 
     let mut conv = WgpuInference::conv2d(CIN, COUT, KH, KW, H, W, weights.clone(), bias.clone())
         .expect("valid conv dims");
-    conv.configure_pipeline(&tensor_in_caps()).expect("configure tensor input");
+    conv.configure_pipeline(&tensor_in_caps())
+        .expect("configure tensor input");
 
     let mut out = Collect::default();
     conv.process(PipelinePacket::DataFrame(tensor_frame), &mut out)
@@ -352,9 +406,16 @@ async fn conv2d_on_gpu_resident_tensor_matches_cpu_reference() {
         &weights,
         &bias,
     );
-    assert_eq!(got.len(), (COUT * H * W) as usize, "[1, Cout, H, W] = 16 values");
+    assert_eq!(
+        got.len(),
+        (COUT * H * W) as usize,
+        "[1, Cout, H, W] = 16 values"
+    );
     for (i, (g, e)) in got.iter().zip(&expected).enumerate() {
-        assert!((g - e).abs() < 1e-2, "conv out {i}: gpu {g} vs cpu reference {e}");
+        assert!(
+            (g - e).abs() < 1e-2,
+            "conv out {i}: gpu {g} vs cpu reference {e}"
+        );
     }
     // The kernel actually mixed inputs: a same-pad conv over a non-constant tensor
     // does not produce a flat map.
@@ -381,20 +442,26 @@ async fn conv2d_imports_safetensors_weights_and_runs_on_gpu() {
     const COUT: u32 = 2;
     const KH: u32 = 3;
     const KW: u32 = 3;
-    let weights: Vec<f32> =
-        (0..(COUT * CIN * KH * KW)).map(|i| (i as f32).sin() * 0.3).collect();
+    let weights: Vec<f32> = (0..(COUT * CIN * KH * KW))
+        .map(|i| (i as f32).sin() * 0.3)
+        .collect();
     let bias = vec![0.05f32, -0.1];
 
     // The trained-weights file, as PyTorch's safetensors.save_file would write it.
     let blob = serialize(&[
-        ("conv.weight", &[COUT as usize, CIN as usize, KH as usize, KW as usize], &weights),
+        (
+            "conv.weight",
+            &[COUT as usize, CIN as usize, KH as usize, KW as usize],
+            &weights,
+        ),
         ("conv.bias", &[COUT as usize], &bias),
     ]);
     let st = SafeTensors::parse(&blob).expect("parse safetensors weights");
 
     let mut conv = WgpuInference::conv2d_from_safetensors(&st, "conv.weight", "conv.bias", H, W)
         .expect("build conv from imported weights");
-    conv.configure_pipeline(&tensor_in_caps()).expect("configure tensor input");
+    conv.configure_pipeline(&tensor_in_caps())
+        .expect("configure tensor input");
 
     let nv12 = sample_nv12();
     let tensor_frame = preprocess_to_gpu_tensor(nv12.clone()).await;
@@ -432,7 +499,10 @@ async fn conv2d_imports_safetensors_weights_and_runs_on_gpu() {
     );
     assert_eq!(got.len(), (COUT * H * W) as usize);
     for (i, (g, e)) in got.iter().zip(&expected).enumerate() {
-        assert!((g - e).abs() < 1e-2, "conv out {i}: gpu {g} vs cpu reference {e}");
+        assert!(
+            (g - e).abs() < 1e-2,
+            "conv out {i}: gpu {g} vs cpu reference {e}"
+        );
     }
 }
 
@@ -442,7 +512,9 @@ async fn conv2d_imports_safetensors_weights_and_runs_on_gpu() {
 async fn rejects_system_memory_input() {
     let (weights, bias) = weights_bias();
     let mut infer = WgpuInference::linear(W, H, weights, bias).unwrap();
-    infer.configure_pipeline(&tensor_in_caps()).expect("configure");
+    infer
+        .configure_pipeline(&tensor_in_caps())
+        .expect("configure");
 
     let mut out = Collect::default();
     let sys = Frame {
@@ -452,7 +524,9 @@ async fn rejects_system_memory_input() {
         meta: Default::default(),
     };
     assert_eq!(
-        infer.process(PipelinePacket::DataFrame(sys), &mut out).await,
+        infer
+            .process(PipelinePacket::DataFrame(sys), &mut out)
+            .await,
         Err(G2gError::UnsupportedDomain),
         "System input is the CPU path's job (BurnInference)"
     );
@@ -474,13 +548,19 @@ async fn surface_to_logits_keeps_everything_on_gpu() {
     let (weights, bias) = weights_bias();
 
     // GPU NV12 surface in (no CPU upload inside the element).
-    let domain = nv12_to_gpu_texture(&nv12, W, H).await.expect("gpu nv12 surface");
-    let mut pre = WgpuPreprocess::new().with_gpu_output();
-    pre.configure_pipeline(&nv12_caps(W, H)).expect("configure preprocess");
-    let mut pout = Collect::default();
-    pre.process(PipelinePacket::DataFrame(nv12_texture_frame(domain)), &mut pout)
+    let domain = nv12_to_gpu_texture(&nv12, W, H)
         .await
-        .expect("surface-import preprocess");
+        .expect("gpu nv12 surface");
+    let mut pre = WgpuPreprocess::new().with_gpu_output();
+    pre.configure_pipeline(&nv12_caps(W, H))
+        .expect("configure preprocess");
+    let mut pout = Collect::default();
+    pre.process(
+        PipelinePacket::DataFrame(nv12_texture_frame(domain)),
+        &mut pout,
+    )
+    .await
+    .expect("surface-import preprocess");
     let tensor_frame = pout
         .packets
         .into_iter()
@@ -496,9 +576,14 @@ async fn surface_to_logits_keeps_everything_on_gpu() {
 
     // Inference binds the resident tensor directly.
     let mut infer = WgpuInference::linear(W, H, weights.clone(), bias.clone()).unwrap();
-    infer.configure_pipeline(&tensor_in_caps()).expect("configure inference");
+    infer
+        .configure_pipeline(&tensor_in_caps())
+        .expect("configure inference");
     let mut iout = Collect::default();
-    infer.process(PipelinePacket::DataFrame(tensor_frame), &mut iout).await.expect("gpu inference");
+    infer
+        .process(PipelinePacket::DataFrame(tensor_frame), &mut iout)
+        .await
+        .expect("gpu inference");
 
     let frame = iout
         .packets
@@ -514,7 +599,10 @@ async fn surface_to_logits_keeps_everything_on_gpu() {
     let expected = linear_reference(&cpu_tensor, &weights, &bias);
     assert_eq!(got.len(), N);
     for (i, (g, e)) in got.iter().zip(&expected).enumerate() {
-        assert!((g - e).abs() < 1e-2, "logit {i}: gpu chain {g} vs cpu reference {e}");
+        assert!(
+            (g - e).abs() < 1e-2,
+            "logit {i}: gpu chain {g} vs cpu reference {e}"
+        );
     }
 }
 
@@ -538,8 +626,9 @@ async fn conv_relu_pool_chain_runs_on_gpu_and_matches_cpu_reference() {
     const PK: u32 = 2; // 2x2 pool, stride 2
 
     // Weights/bias chosen so the conv produces both signs, making the relu bite.
-    let weights: Vec<f32> =
-        (0..(COUT * CIN * KH * KW)).map(|i| i as f32 * 0.05 - 0.6).collect();
+    let weights: Vec<f32> = (0..(COUT * CIN * KH * KW))
+        .map(|i| i as f32 * 0.05 - 0.6)
+        .collect();
     let bias = vec![-0.3f32, 0.2];
 
     let nv12 = sample_nv12();
@@ -555,7 +644,9 @@ async fn conv_relu_pool_chain_runs_on_gpu_and_matches_cpu_reference() {
         "conv output stays GPU-resident for the next layer"
     );
 
-    let relu = WgpuInference::relu(COUT, H, W).expect("valid relu").with_gpu_output();
+    let relu = WgpuInference::relu(COUT, H, W)
+        .expect("valid relu")
+        .with_gpu_output();
     let relu_out = run_op(relu, nchw_caps(&[1, COUT, H, W]), conv_out).await;
     assert!(
         matches!(relu_out.domain, MemoryDomain::WgpuBuffer(_)),
@@ -593,10 +684,17 @@ async fn conv_relu_pool_chain_runs_on_gpu_and_matches_cpu_reference() {
     );
     // 2x2 stride-2 over [COUT, 2, 4] -> [COUT, 1, 2] = 4 values.
     let (oh, ow) = ((H - PK) / PK + 1, (W - PK) / PK + 1);
-    assert_eq!(got.len(), (COUT * oh * ow) as usize, "[1, COUT, OH, OW] pooled map");
+    assert_eq!(
+        got.len(),
+        (COUT * oh * ow) as usize,
+        "[1, COUT, OH, OW] pooled map"
+    );
     assert_eq!(expected.len(), got.len());
     for (i, (g, e)) in got.iter().zip(&expected).enumerate() {
-        assert!((g - e).abs() < 1e-2, "chain out {i}: gpu {g} vs cpu reference {e}");
+        assert!(
+            (g - e).abs() < 1e-2,
+            "chain out {i}: gpu {g} vs cpu reference {e}"
+        );
     }
     // The relu must have zeroed at least one conv output, else it was a no-op for
     // this input and the test would not prove the nonlinearity ran.
@@ -639,7 +737,10 @@ async fn avgpool2d_on_gpu_resident_tensor_matches_cpu_reference() {
     );
     assert_eq!(got.len(), expected.len(), "[1, C, OH, OW] pooled map");
     for (i, (g, e)) in got.iter().zip(&expected).enumerate() {
-        assert!((g - e).abs() < 1e-3, "avgpool {i}: gpu {g} vs cpu reference {e}");
+        assert!(
+            (g - e).abs() < 1e-3,
+            "avgpool {i}: gpu {g} vs cpu reference {e}"
+        );
     }
 }
 
@@ -664,8 +765,14 @@ async fn sigmoid_on_gpu_resident_tensor_matches_cpu_reference() {
     let expected = sigmoid_reference(&cpu_tensor);
     assert_eq!(got.len(), expected.len(), "shape-preserving activation");
     for (i, (g, e)) in got.iter().zip(&expected).enumerate() {
-        assert!((g - e).abs() < 1e-3, "sigmoid {i}: gpu {g} vs cpu reference {e}");
-        assert!(*g > 0.0 && *g < 1.0, "sigmoid output {i} = {g} must lie in (0, 1)");
+        assert!(
+            (g - e).abs() < 1e-3,
+            "sigmoid {i}: gpu {g} vs cpu reference {e}"
+        );
+        assert!(
+            *g > 0.0 && *g < 1.0,
+            "sigmoid output {i} = {g} must lie in (0, 1)"
+        );
     }
 }
 
@@ -688,13 +795,17 @@ async fn full_cnn_from_safetensors_matches_cpu_reference() {
 
     // Deterministic pseudo-weights for a [1,3,2,4] -> 2-logit classifier.
     // conv1 [4,3,3,3], bn1 [4], conv2 [3,4,3,3], bn2 [3], fc [K=3,N=2].
-    let conv1_w: Vec<f32> = (0..(4 * 3 * 3 * 3)).map(|i| (i as f32 * 0.7).sin() * 0.3).collect();
+    let conv1_w: Vec<f32> = (0..(4 * 3 * 3 * 3))
+        .map(|i| (i as f32 * 0.7).sin() * 0.3)
+        .collect();
     let conv1_b = vec![0.05f32, -0.1, 0.02, 0.0];
     let bn1_g = vec![1.1f32, 0.9, 1.0, 1.2];
     let bn1_b = vec![0.0f32, 0.1, -0.05, 0.2];
     let bn1_m = vec![0.1f32, -0.2, 0.0, 0.05];
     let bn1_v = vec![0.8f32, 1.2, 1.0, 0.6];
-    let conv2_w: Vec<f32> = (0..(3 * 4 * 3 * 3)).map(|i| (i as f32 * 0.5).cos() * 0.25).collect();
+    let conv2_w: Vec<f32> = (0..(3 * 4 * 3 * 3))
+        .map(|i| (i as f32 * 0.5).cos() * 0.25)
+        .collect();
     let conv2_b = vec![-0.03f32, 0.07, 0.0];
     let bn2_g = vec![1.0f32, 1.05, 0.95];
     let bn2_b = vec![0.02f32, -0.03, 0.0];
@@ -723,12 +834,27 @@ async fn full_cnn_from_safetensors_matches_cpu_reference() {
     let st = SafeTensors::parse(&blob).expect("parse model weights");
 
     let specs = vec![
-        StackLayer::Conv2d { name: "conv1".into() },
-        StackLayer::BatchNorm { name: "bn1".into(), eps: EPS },
+        StackLayer::Conv2d {
+            name: "conv1".into(),
+        },
+        StackLayer::BatchNorm {
+            name: "bn1".into(),
+            eps: EPS,
+        },
         StackLayer::Relu,
-        StackLayer::MaxPool2d { kh: 2, kw: 2, sh: 2, sw: 2 },
-        StackLayer::Conv2d { name: "conv2".into() },
-        StackLayer::BatchNorm { name: "bn2".into(), eps: EPS },
+        StackLayer::MaxPool2d {
+            kh: 2,
+            kw: 2,
+            sh: 2,
+            sw: 2,
+        },
+        StackLayer::Conv2d {
+            name: "conv2".into(),
+        },
+        StackLayer::BatchNorm {
+            name: "bn2".into(),
+            eps: EPS,
+        },
         StackLayer::Relu,
         StackLayer::GlobalAvgPool,
         StackLayer::Linear { name: "fc".into() },
@@ -772,11 +898,17 @@ async fn full_cnn_from_safetensors_matches_cpu_reference() {
     assert_eq!(got.len(), 2, "two class logits");
     assert_eq!(expected.len(), 2);
     for (i, (g, e)) in got.iter().zip(&expected).enumerate() {
-        assert!((g - e).abs() < 1e-2, "logit {i}: gpu full-model {g} vs cpu reference {e}");
+        assert!(
+            (g - e).abs() < 1e-2,
+            "logit {i}: gpu full-model {g} vs cpu reference {e}"
+        );
     }
     // The two logits must differ (the fc columns and the whole stack actually ran,
     // not collapsed to a constant).
-    assert!((got[0] - got[1]).abs() > 1e-4, "the classifier's two logits must differ");
+    assert!(
+        (got[0] - got[1]).abs() > 1e-4,
+        "the classifier's two logits must differ"
+    );
 }
 
 /// M531: a residual/skip block imported from one safetensors file and run
@@ -798,9 +930,13 @@ async fn residual_block_from_safetensors_matches_cpu_reference() {
     // Two shape-preserving 3x3 convs over the [1,3,2,4] preprocess tensor (cout=3
     // so the residual branch's output matches the 3-channel skip). Deterministic
     // pseudo-weights.
-    let conv1_w: Vec<f32> = (0..(3 * 3 * 3 * 3)).map(|i| (i as f32 * 0.3).sin() * 0.2).collect();
+    let conv1_w: Vec<f32> = (0..(3 * 3 * 3 * 3))
+        .map(|i| (i as f32 * 0.3).sin() * 0.2)
+        .collect();
     let conv1_b = vec![0.01f32, -0.02, 0.0];
-    let conv2_w: Vec<f32> = (0..(3 * 3 * 3 * 3)).map(|i| (i as f32 * 0.4).cos() * 0.15).collect();
+    let conv2_w: Vec<f32> = (0..(3 * 3 * 3 * 3))
+        .map(|i| (i as f32 * 0.4).cos() * 0.15)
+        .collect();
     let conv2_b = vec![0.0f32, 0.03, -0.01];
 
     let blob = serialize(&[
@@ -813,9 +949,13 @@ async fn residual_block_from_safetensors_matches_cpu_reference() {
 
     let specs = vec![
         StackLayer::SaveSkip { slot: "id".into() },
-        StackLayer::Conv2d { name: "conv1".into() },
+        StackLayer::Conv2d {
+            name: "conv1".into(),
+        },
         StackLayer::Relu,
-        StackLayer::Conv2d { name: "conv2".into() },
+        StackLayer::Conv2d {
+            name: "conv2".into(),
+        },
         StackLayer::AddSkip { slot: "id".into() },
     ];
     let mut stack = WgpuInference::residual_stack_from_safetensors(&specs, &st, 3, H, W)
@@ -833,15 +973,28 @@ async fn residual_block_from_safetensors_matches_cpu_reference() {
     let c2 = conv2d_reference(&r1, 3, 3, 3, 3, H as usize, W as usize, &conv2_w, &conv2_b);
     let expected = add_reference(&c2, &x);
 
-    assert_eq!(got.len(), expected.len(), "residual output is the [1,3,H,W] tensor");
+    assert_eq!(
+        got.len(),
+        expected.len(),
+        "residual output is the [1,3,H,W] tensor"
+    );
     for (i, (g, e)) in got.iter().zip(&expected).enumerate() {
-        assert!((g - e).abs() < 1e-3, "residual elem {i}: gpu {g} vs cpu reference {e}");
+        assert!(
+            (g - e).abs() < 1e-3,
+            "residual elem {i}: gpu {g} vs cpu reference {e}"
+        );
     }
     // The skip must actually be added: the residual output must differ from the
     // branch output f(x) alone (else AddSkip was a no-op).
     let branch_only = &c2;
-    let differs = got.iter().zip(branch_only).any(|(g, f)| (g - f).abs() > 1e-4);
-    assert!(differs, "AddSkip must add the saved input, not pass f(x) through");
+    let differs = got
+        .iter()
+        .zip(branch_only)
+        .any(|(g, f)| (g - f).abs() > 1e-4);
+    assert!(
+        differs,
+        "AddSkip must add the saved input, not pass f(x) through"
+    );
 }
 
 /// The residual builder rejects an `AddSkip` against a shape that does not match
@@ -850,11 +1003,19 @@ async fn residual_block_from_safetensors_matches_cpu_reference() {
 fn residual_addskip_shape_mismatch_fails_loud() {
     // Save x [3,2,4], then a 2x2 stride-2 pool shrinks it to [3,1,2]; adding the
     // saved [3,2,4] skip back is a shape mismatch.
-    let blob = serialize(&[("c.weight", &[3, 3, 3, 3], &[0.0f32; 81]), ("c.bias", &[3], &[0.0f32; 3])]);
+    let blob = serialize(&[
+        ("c.weight", &[3, 3, 3, 3], &[0.0f32; 81]),
+        ("c.bias", &[3], &[0.0f32; 3]),
+    ]);
     let st = SafeTensors::parse(&blob).unwrap();
     let specs = vec![
         StackLayer::SaveSkip { slot: "id".into() },
-        StackLayer::MaxPool2d { kh: 2, kw: 2, sh: 2, sw: 2 },
+        StackLayer::MaxPool2d {
+            kh: 2,
+            kw: 2,
+            sh: 2,
+            sw: 2,
+        },
         StackLayer::AddSkip { slot: "id".into() },
     ];
     assert!(
@@ -862,13 +1023,18 @@ fn residual_addskip_shape_mismatch_fails_loud() {
         "an AddSkip whose saved shape != running shape must fail loud"
     );
     // An AddSkip naming an unsaved slot also fails.
-    let specs2 = vec![StackLayer::AddSkip { slot: "missing".into() }];
+    let specs2 = vec![StackLayer::AddSkip {
+        slot: "missing".into(),
+    }];
     assert!(WgpuInference::residual_stack_from_safetensors(&specs2, &st, 3, H, W).is_err());
 }
 
 #[test]
 fn add_reference_is_elementwise() {
-    assert_eq!(add_reference(&[1.0, 2.0, 3.0], &[0.5, -1.0, 10.0]), vec![1.5, 1.0, 13.0]);
+    assert_eq!(
+        add_reference(&[1.0, 2.0, 3.0], &[0.5, -1.0, 10.0]),
+        vec![1.5, 1.0, 13.0]
+    );
 }
 
 #[test]
@@ -892,8 +1058,14 @@ fn pool_validates_window_and_dims() {
         "kh > h must fail loud"
     );
     // Zero stride / channels are rejected.
-    assert_eq!(WgpuInference::avgpool2d(3, 2, 4, 2, 2, 0, 1).err(), Some(G2gError::CapsMismatch));
-    assert_eq!(WgpuInference::relu(0, 2, 4).err(), Some(G2gError::CapsMismatch));
+    assert_eq!(
+        WgpuInference::avgpool2d(3, 2, 4, 2, 2, 0, 1).err(),
+        Some(G2gError::CapsMismatch)
+    );
+    assert_eq!(
+        WgpuInference::relu(0, 2, 4).err(),
+        Some(G2gError::CapsMismatch)
+    );
 }
 
 #[test]
@@ -903,16 +1075,34 @@ fn conv2d_overflowing_dims_fail_loud_not_panic() {
     // (debug) or wrap to a value that admits a short weight buffer / undersized
     // GPU buffers. 65536^4 overflows u64, so the weight-length fold rejects it.
     assert_eq!(
-        WgpuInference::conv2d(0x10000, 0x10000, 0x10000, 0x10000, 0x10000, 0x10000, vec![], vec![])
-            .err(),
+        WgpuInference::conv2d(
+            0x10000,
+            0x10000,
+            0x10000,
+            0x10000,
+            0x10000,
+            0x10000,
+            vec![],
+            vec![]
+        )
+        .err(),
         Some(G2gError::CapsMismatch),
         "overflowing conv2d geometry must fail loud"
     );
     // Valid kernel dims but a spatial size whose in/out element count overflows
     // usize must also fail at the size fold rather than panicking.
     assert_eq!(
-        WgpuInference::conv2d(3, 3, 3, 3, 0xFFFF_FFFF, 0xFFFF_FFFF, vec![0.0; 81], vec![0.0; 3])
-            .err(),
+        WgpuInference::conv2d(
+            3,
+            3,
+            3,
+            3,
+            0xFFFF_FFFF,
+            0xFFFF_FFFF,
+            vec![0.0; 81],
+            vec![0.0; 3]
+        )
+        .err(),
         Some(G2gError::CapsMismatch),
         "overflowing conv2d spatial size must fail loud"
     );

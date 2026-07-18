@@ -219,7 +219,8 @@ impl PipelineClock for CudaGlClock {
 }
 
 impl AsyncElement for CudaGlSink {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -311,9 +312,16 @@ impl AsyncElement for CudaGlSink {
         let join = thread::Builder::new()
             .name(String::from("g2g-cudaglsink"))
             .spawn(move || {
-                if let Err(e) =
-                    worker_main(w, h, title, app_id, rx, presented, latency, ready_for_worker)
-                {
+                if let Err(e) = worker_main(
+                    w,
+                    h,
+                    title,
+                    app_id,
+                    rx,
+                    presented,
+                    latency,
+                    ready_for_worker,
+                ) {
                     std::eprintln!("g2g-cudaglsink worker error: {e:?}");
                 }
             })
@@ -469,7 +477,12 @@ fn worker_main(
     // SAFETY: `wl_egl.ptr()` is a live `wl_egl_window` for this display/config;
     // `wl_egl` is moved into `WorkerState._wl_egl`, so it outlives the surface.
     let egl_surface = unsafe {
-        egl.create_window_surface(egl_display, config, wl_egl.ptr() as *mut core::ffi::c_void, None)
+        egl.create_window_surface(
+            egl_display,
+            config,
+            wl_egl.ptr() as *mut core::ffi::c_void,
+            None,
+        )
     }?;
     egl.make_current(
         egl_display,
@@ -512,7 +525,11 @@ fn worker_main(
     };
 
     loop_handle.insert_source(rx, |event, _, state: &mut WorkerState| match event {
-        ChanEvent::Msg(WorkerCmd::Frame { buf, arrival_ns, ack }) => {
+        ChanEvent::Msg(WorkerCmd::Frame {
+            buf,
+            arrival_ns,
+            ack,
+        }) => {
             if state.configured {
                 state.draw(buf, arrival_ns, ack);
             } else {
@@ -540,7 +557,9 @@ impl Drop for WorkerState {
         // its backing `wl_egl_window`) keeps the required outlives ordering.
         let _ = self.egl.make_current(self.egl_display, None, None, None);
         let _ = self.egl.destroy_surface(self.egl_display, self.egl_surface);
-        let _ = self.egl.destroy_context(self.egl_display, self._egl_context);
+        let _ = self
+            .egl
+            .destroy_context(self.egl_display, self._egl_context);
         let _ = self.egl.terminate(self.egl_display);
     }
 }
@@ -549,7 +568,12 @@ impl WorkerState {
     /// Upload the decoded NV12 planes into the GL textures via CUDA, draw the
     /// fullscreen quad through the NV12->RGB shader, and present. Signals
     /// `ack` after `eglSwapBuffers` returns (compositor-paced backpressure).
-    fn draw(&mut self, buf: OwnedCudaBuffer, arrival_ns: u64, ack: tokio::sync::oneshot::Sender<()>) {
+    fn draw(
+        &mut self,
+        buf: OwnedCudaBuffer,
+        arrival_ns: u64,
+        ack: tokio::sync::oneshot::Sender<()>,
+    ) {
         if let Err(e) = self.draw_inner(&buf) {
             std::eprintln!("g2g-cudaglsink draw error: {e:?}");
             // Release the producer so a transient GPU error doesn't deadlock

@@ -39,7 +39,11 @@ fn main() {
     if std::env::var_os("CARGO_FEATURE_MULTI_THREAD").is_some() {
         feats.push("multi-thread");
     }
-    let feats = if feats.is_empty() { "none".to_string() } else { feats.join(",") };
+    let feats = if feats.is_empty() {
+        "none".to_string()
+    } else {
+        feats.join(",")
+    };
 
     // The tag a plugin embeds and the loader checks. Pipe-separated so each
     // component is legible in the AbiMismatch error a user sees.

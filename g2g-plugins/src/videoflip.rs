@@ -16,17 +16,17 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::pixel::{even_dims_required, frame_byte_size, planar_planes};
+use alloc::string::String;
 use g2g_core::frame::Frame;
+use g2g_core::log::{short_type_name, LogSource};
 use g2g_core::memory::{SystemSlice, SystemView};
 use g2g_core::tensor::TensorView;
-use g2g_core::log::{short_type_name, LogSource};
+use g2g_core::{g2g_info, g2g_trace};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
     MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
     PropValue, PropertySpec, Rate, RawVideoFormat,
 };
-use g2g_core::{g2g_info, g2g_trace};
-use alloc::string::String;
 
 const FORMATS: [RawVideoFormat; 12] = [
     RawVideoFormat::Rgba8,
@@ -134,7 +134,8 @@ impl VideoFlip {
 }
 
 impl AsyncElement for VideoFlip {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -160,7 +161,12 @@ impl AsyncElement for VideoFlip {
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         let swaps = self.method.swaps_dims();
         CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| match input {
-            Caps::RawVideo { format, width, height, framerate } if FORMATS.contains(format) => {
+            Caps::RawVideo {
+                format,
+                width,
+                height,
+                framerate,
+            } if FORMATS.contains(format) => {
                 let (out_w, out_h) = if swaps {
                     (height.clone(), width.clone())
                 } else {
@@ -181,7 +187,14 @@ impl AsyncElement for VideoFlip {
         let (format, w, h, rate) = self.accept_input(absolute_caps)?;
         self.input = Some((format, w, h, rate));
         self.configured = true;
-        g2g_info!(self, "configured {:?} {}x{} {:?}", format, w, h, self.method);
+        g2g_info!(
+            self,
+            "configured {:?} {}x{} {:?}",
+            format,
+            w,
+            h,
+            self.method
+        );
         Ok(ConfigureOutcome::Accepted)
     }
 
@@ -213,7 +226,8 @@ impl AsyncElement for VideoFlip {
                         framerate: rate,
                     };
                     if self.last_caps.as_ref() != Some(&new_caps) {
-                        out.push(PipelinePacket::CapsChanged(new_caps.clone())).await?;
+                        out.push(PipelinePacket::CapsChanged(new_caps.clone()))
+                            .await?;
                         self.last_caps = Some(new_caps);
                     }
 
@@ -224,12 +238,19 @@ impl AsyncElement for VideoFlip {
                     // planes aren't one strided tensor (see tensor.rs), and an
                     // owned `System` buffer has no shared backing to alias, so
                     // both fall through to the copy path below.
-                    let packed =
-                        matches!(format, RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8);
+                    let packed = matches!(format, RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8);
                     let out_frame = match &frame.domain {
                         MemoryDomain::SystemView(sv) if packed => {
                             let out_view = flip_view(*sv.view(), self.method);
-                            g2g_trace!(self, "zero-copy flip frame #{} {}x{} -> {}x{}", self.emitted, in_w, in_h, out_w, out_h);
+                            g2g_trace!(
+                                self,
+                                "zero-copy flip frame #{} {}x{} -> {}x{}",
+                                self.emitted,
+                                in_w,
+                                in_h,
+                                out_w,
+                                out_h
+                            );
                             Frame {
                                 domain: MemoryDomain::SystemView(SystemView::new(
                                     sv.backing().clone(),
@@ -260,7 +281,15 @@ impl AsyncElement for VideoFlip {
                                 }
                                 _ => return Err(G2gError::UnsupportedDomain),
                             };
-                            g2g_trace!(self, "flip frame #{} {}x{} -> {}x{}", self.emitted, in_w, in_h, out_w, out_h);
+                            g2g_trace!(
+                                self,
+                                "flip frame #{} {}x{} -> {}x{}",
+                                self.emitted,
+                                in_w,
+                                in_h,
+                                out_w,
+                                out_h
+                            );
                             Frame {
                                 domain: MemoryDomain::System(SystemSlice::from_boxed(flipped)),
                                 timing: frame.timing,
@@ -395,7 +424,6 @@ impl LogSource for VideoFlip {
     }
 }
 
-
 /// The zero-copy analog of [`flip`] for a packed `[H, W, C]` view: express the
 /// method as stride manipulations over the same bytes (M180). A mirror reverses
 /// one spatial axis; a 90-degree rotation transposes the H/W axes then reverses
@@ -435,7 +463,11 @@ fn transform_plane(
     channels: usize,
     method: FlipMethod,
 ) -> Vec<u8> {
-    let (ow, oh) = if method.swaps_dims() { (ph, pw) } else { (pw, ph) };
+    let (ow, oh) = if method.swaps_dims() {
+        (ph, pw)
+    } else {
+        (pw, ph)
+    };
     let mut dst = vec![0u8; ow * oh * channels];
     for oy in 0..oh {
         for ox in 0..ow {
@@ -450,12 +482,7 @@ fn transform_plane(
 
 /// Flip one frame by `method`, preserving `format`. `src` is validated to hold
 /// the input frame; dims are even when the format is 4:2:0.
-fn flip(
-    src: &[u8],
-    format: RawVideoFormat,
-    dims: (usize, usize),
-    method: FlipMethod,
-) -> Box<[u8]> {
+fn flip(src: &[u8], format: RawVideoFormat, dims: (usize, usize), method: FlipMethod) -> Box<[u8]> {
     let (in_w, in_h) = dims;
     match format {
         RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 => {
@@ -521,11 +548,26 @@ mod tests {
     fn transform_plane_square_methods() {
         // 2x2 single-channel plane: row0 [0,1], row1 [2,3].
         let src = vec![0u8, 1, 2, 3];
-        assert_eq!(transform_plane(&src, 2, 2, 1, FlipMethod::HorizontalMirror), vec![1, 0, 3, 2]);
-        assert_eq!(transform_plane(&src, 2, 2, 1, FlipMethod::VerticalMirror), vec![2, 3, 0, 1]);
-        assert_eq!(transform_plane(&src, 2, 2, 1, FlipMethod::Rotate180), vec![3, 2, 1, 0]);
-        assert_eq!(transform_plane(&src, 2, 2, 1, FlipMethod::Rotate90Cw), vec![2, 0, 3, 1]);
-        assert_eq!(transform_plane(&src, 2, 2, 1, FlipMethod::Rotate90Ccw), vec![1, 3, 0, 2]);
+        assert_eq!(
+            transform_plane(&src, 2, 2, 1, FlipMethod::HorizontalMirror),
+            vec![1, 0, 3, 2]
+        );
+        assert_eq!(
+            transform_plane(&src, 2, 2, 1, FlipMethod::VerticalMirror),
+            vec![2, 3, 0, 1]
+        );
+        assert_eq!(
+            transform_plane(&src, 2, 2, 1, FlipMethod::Rotate180),
+            vec![3, 2, 1, 0]
+        );
+        assert_eq!(
+            transform_plane(&src, 2, 2, 1, FlipMethod::Rotate90Cw),
+            vec![2, 0, 3, 1]
+        );
+        assert_eq!(
+            transform_plane(&src, 2, 2, 1, FlipMethod::Rotate90Ccw),
+            vec![1, 3, 0, 2]
+        );
     }
 
     #[test]
@@ -540,7 +582,12 @@ mod tests {
     fn flip_rgba_mirrors_pixels() {
         // 2x2 RGBA where pixel p = [4p, 4p+1, 4p+2, 4p+3].
         let src: Vec<u8> = (0..(2 * 2 * 4) as u8).collect();
-        let out = flip(&src, RawVideoFormat::Rgba8, (2, 2), FlipMethod::HorizontalMirror);
+        let out = flip(
+            &src,
+            RawVideoFormat::Rgba8,
+            (2, 2),
+            FlipMethod::HorizontalMirror,
+        );
         // row 0 swaps pixel 0 and 1: [4,5,6,7, 0,1,2,3].
         assert_eq!(&out[0..4], &[4, 5, 6, 7]);
         assert_eq!(&out[4..8], &[0, 1, 2, 3]);
@@ -614,7 +661,8 @@ mod tests {
         // odd-width 4:2:0 fails.
         let mut f = VideoFlip::new(FlipMethod::Rotate90Cw);
         assert_eq!(
-            f.configure_pipeline(&nv12_caps(5, 4)).expect_err("odd width for 4:2:0"),
+            f.configure_pipeline(&nv12_caps(5, 4))
+                .expect_err("odd width for 4:2:0"),
             G2gError::CapsMismatch
         );
         // even 4:2:0 is accepted.
@@ -626,19 +674,28 @@ mod tests {
     }
 
     fn planar_caps(format: RawVideoFormat, w: u32, h: u32) -> Caps {
-        Caps::RawVideo { format, width: Dim::Fixed(w), height: Dim::Fixed(h), framerate: Rate::Any }
+        Caps::RawVideo {
+            format,
+            width: Dim::Fixed(w),
+            height: Dim::Fixed(h),
+            framerate: Rate::Any,
+        }
     }
 
     #[test]
     fn flips_high_bit_depth_4_4_4() {
         // 2x2 I444p10: three full-res LE-u16 planes. Horizontal mirror swaps columns.
-        let mk = |base: u16| -> Vec<u8> {
-            (0..4u16).flat_map(|s| (base + s).to_le_bytes()).collect()
-        };
+        let mk =
+            |base: u16| -> Vec<u8> { (0..4u16).flat_map(|s| (base + s).to_le_bytes()).collect() };
         let mut src = mk(0);
         src.extend(mk(100));
         src.extend(mk(200));
-        let out = flip(&src, RawVideoFormat::I444p10, (2, 2), FlipMethod::HorizontalMirror);
+        let out = flip(
+            &src,
+            RawVideoFormat::I444p10,
+            (2, 2),
+            FlipMethod::HorizontalMirror,
+        );
         assert_eq!(out.len(), 3 * 2 * 2 * 2);
         let rd = |o: usize| u16::from_le_bytes([out[o], out[o + 1]]);
         // Y row0 was [0,1] -> mirrored [1,0]; U row0 [100,101] -> [101,100].
@@ -652,13 +709,18 @@ mod tests {
         // (not a representable I422), fine for symmetric 4:4:4 / 4:2:0.
         let mut f = VideoFlip::new(FlipMethod::Rotate90Cw);
         assert_eq!(
-            f.configure_pipeline(&planar_caps(RawVideoFormat::I422, 4, 4)).expect_err("4:2:2 transpose"),
+            f.configure_pipeline(&planar_caps(RawVideoFormat::I422, 4, 4))
+                .expect_err("4:2:2 transpose"),
             G2gError::CapsMismatch
         );
         let mut f = VideoFlip::new(FlipMethod::Rotate90Cw);
-        assert!(f.configure_pipeline(&planar_caps(RawVideoFormat::I444p10, 4, 4)).is_ok());
+        assert!(f
+            .configure_pipeline(&planar_caps(RawVideoFormat::I444p10, 4, 4))
+            .is_ok());
         // A non-swapping method accepts 4:2:2 fine.
         let mut f = VideoFlip::new(FlipMethod::HorizontalMirror);
-        assert!(f.configure_pipeline(&planar_caps(RawVideoFormat::I422, 4, 4)).is_ok());
+        assert!(f
+            .configure_pipeline(&planar_caps(RawVideoFormat::I422, 4, 4))
+            .is_ok());
     }
 }

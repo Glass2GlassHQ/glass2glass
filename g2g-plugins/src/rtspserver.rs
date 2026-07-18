@@ -72,7 +72,9 @@ impl RtspRequest {
         let mut transport = None;
         let mut content_length = 0usize;
         for line in lines {
-            let Some((key, value)) = line.split_once(':') else { continue };
+            let Some((key, value)) = line.split_once(':') else {
+                continue;
+            };
             let value = value.trim();
             // RTSP header names are case-insensitive.
             if key.eq_ignore_ascii_case("CSeq") {
@@ -85,14 +87,24 @@ impl RtspRequest {
         }
 
         let body_start = header_end + 4; // past the "\r\n\r\n"
-        // saturating so a crafted Content-Length can't overflow the offset math
-        // into an out-of-bounds slice (a reachable panic / DoS).
+                                         // saturating so a crafted Content-Length can't overflow the offset math
+                                         // into an out-of-bounds slice (a reachable panic / DoS).
         let body_end = body_start.saturating_add(content_length);
         if buf.len() < body_end {
             return None; // body not fully arrived
         }
         let body = buf[body_start..body_end].to_vec();
-        Some((RtspRequest { method, uri, cseq, transport, content_length, body }, body_end))
+        Some((
+            RtspRequest {
+                method,
+                uri,
+                cseq,
+                transport,
+                content_length,
+                body,
+            },
+            body_end,
+        ))
     }
 }
 
@@ -361,7 +373,10 @@ mod tests {
         assert_eq!(r.method, "SETUP");
         assert_eq!(r.uri, "rtsp://h/s/streamid=0");
         assert_eq!(r.cseq, 3);
-        assert_eq!(r.transport.as_deref(), Some("RTP/AVP;unicast;client_port=5000-5001"));
+        assert_eq!(
+            r.transport.as_deref(),
+            Some("RTP/AVP;unicast;client_port=5000-5001")
+        );
     }
 
     #[test]
@@ -369,7 +384,8 @@ mod tests {
         // Content-Length 10 but no body bytes yet -> incomplete.
         let partial = "ANNOUNCE rtsp://h/s RTSP/1.0\r\nCSeq: 1\r\nContent-Length: 10\r\n\r\n";
         assert!(RtspRequest::parse(partial.as_bytes()).is_none());
-        let full = "ANNOUNCE rtsp://h/s RTSP/1.0\r\nCSeq: 1\r\nContent-Length: 10\r\n\r\n0123456789";
+        let full =
+            "ANNOUNCE rtsp://h/s RTSP/1.0\r\nCSeq: 1\r\nContent-Length: 10\r\n\r\n0123456789";
         let (r, consumed) = RtspRequest::parse(full.as_bytes()).expect("complete");
         assert_eq!(r.body, b"0123456789");
         assert_eq!(consumed, full.len());
@@ -410,7 +426,8 @@ mod tests {
     #[test]
     fn describe_returns_sdp_with_content_length() {
         let mut s = responder();
-        let (resp, _) = s.handle_request(&request("DESCRIBE rtsp://h/s RTSP/1.0\r\nCSeq: 2\r\n\r\n"));
+        let (resp, _) =
+            s.handle_request(&request("DESCRIBE rtsp://h/s RTSP/1.0\r\nCSeq: 2\r\n\r\n"));
         let text = core::str::from_utf8(&resp).unwrap();
         assert!(text.contains("Content-Type: application/sdp\r\n"));
         assert!(text.contains("m=video 0 RTP/AVP 96\r\n"));
@@ -430,16 +447,28 @@ mod tests {
             "SETUP rtsp://h/s/streamid=0 RTSP/1.0\r\nCSeq: 3\r\nTransport: RTP/AVP;unicast;client_port=5000-5001\r\n\r\n",
         ));
         let text = core::str::from_utf8(&setup).unwrap();
-        assert!(text.contains("server_port=6000-6001"), "advertises the server RTP port pair");
+        assert!(
+            text.contains("server_port=6000-6001"),
+            "advertises the server RTP port pair"
+        );
         assert!(text.contains("client_port=5000-5001"));
         assert!(text.contains("Session: 12345678\r\n"));
-        assert_eq!(ev, RtspEvent::Setup { client_rtp_port: 5000 });
+        assert_eq!(
+            ev,
+            RtspEvent::Setup {
+                client_rtp_port: 5000
+            }
+        );
         assert_eq!(s.client_rtp_port(), Some(5000));
 
-        let (_, ev) = s.handle_request(&request("PLAY rtsp://h/s RTSP/1.0\r\nCSeq: 4\r\nSession: 12345678\r\n\r\n"));
+        let (_, ev) = s.handle_request(&request(
+            "PLAY rtsp://h/s RTSP/1.0\r\nCSeq: 4\r\nSession: 12345678\r\n\r\n",
+        ));
         assert_eq!(ev, RtspEvent::Play);
 
-        let (_, ev) = s.handle_request(&request("TEARDOWN rtsp://h/s RTSP/1.0\r\nCSeq: 5\r\nSession: 12345678\r\n\r\n"));
+        let (_, ev) = s.handle_request(&request(
+            "TEARDOWN rtsp://h/s RTSP/1.0\r\nCSeq: 5\r\nSession: 12345678\r\n\r\n",
+        ));
         assert_eq!(ev, RtspEvent::Teardown);
     }
 
@@ -448,14 +477,23 @@ mod tests {
         let mut s = responder();
         let announce = "ANNOUNCE rtsp://h/s RTSP/1.0\r\nCSeq: 1\r\nContent-Type: application/sdp\r\nContent-Length: 10\r\n\r\nv=0\r\no=- 0";
         let (resp, ev) = s.handle_request(&request(announce));
-        assert!(core::str::from_utf8(&resp).unwrap().starts_with("RTSP/1.0 200 OK"));
+        assert!(core::str::from_utf8(&resp)
+            .unwrap()
+            .starts_with("RTSP/1.0 200 OK"));
         assert_eq!(ev, RtspEvent::None);
 
         let (_, ev) = s.handle_request(&request(
             "SETUP rtsp://h/s RTSP/1.0\r\nCSeq: 2\r\nTransport: RTP/AVP;unicast;client_port=7000-7001\r\n\r\n",
         ));
-        assert_eq!(ev, RtspEvent::Setup { client_rtp_port: 7000 });
-        let (_, ev) = s.handle_request(&request("RECORD rtsp://h/s RTSP/1.0\r\nCSeq: 3\r\nSession: 12345678\r\n\r\n"));
+        assert_eq!(
+            ev,
+            RtspEvent::Setup {
+                client_rtp_port: 7000
+            }
+        );
+        let (_, ev) = s.handle_request(&request(
+            "RECORD rtsp://h/s RTSP/1.0\r\nCSeq: 3\r\nSession: 12345678\r\n\r\n",
+        ));
         assert_eq!(ev, RtspEvent::Record);
     }
 
@@ -467,10 +505,23 @@ mod tests {
         ));
         let text = core::str::from_utf8(&resp).unwrap();
         assert!(text.starts_with("RTSP/1.0 200 OK\r\n"));
-        assert!(text.contains("RTP/AVP/TCP;unicast;interleaved=0-1"), "{text}");
-        assert_eq!(ev, RtspEvent::SetupInterleaved { rtp_channel: 0, rtcp_channel: 1 });
+        assert!(
+            text.contains("RTP/AVP/TCP;unicast;interleaved=0-1"),
+            "{text}"
+        );
+        assert_eq!(
+            ev,
+            RtspEvent::SetupInterleaved {
+                rtp_channel: 0,
+                rtcp_channel: 1
+            }
+        );
         assert_eq!(s.interleaved_channels(), Some((0, 1)));
-        assert_eq!(s.client_rtp_port(), None, "no UDP client port for interleaved");
+        assert_eq!(
+            s.client_rtp_port(),
+            None,
+            "no UDP client port for interleaved"
+        );
     }
 
     #[test]
@@ -480,21 +531,35 @@ mod tests {
         let (_, ev) = s.handle_request(&request(
             "SETUP rtsp://h/s RTSP/1.0\r\nCSeq: 3\r\nTransport: RTP/AVP/TCP;unicast;interleaved=2\r\n\r\n",
         ));
-        assert_eq!(ev, RtspEvent::SetupInterleaved { rtp_channel: 2, rtcp_channel: 3 });
+        assert_eq!(
+            ev,
+            RtspEvent::SetupInterleaved {
+                rtp_channel: 2,
+                rtcp_channel: 3
+            }
+        );
     }
 
     #[test]
     fn udp_setup_is_not_misread_as_interleaved() {
         // A UDP Transport (no TCP token) picks the UDP path even if some odd param
         // mentioned interleaving; the profile lower-transport is what decides.
-        assert_eq!(parse_interleaved_channels("RTP/AVP;unicast;client_port=5000-5001"), None);
-        assert_eq!(parse_interleaved_channels("RTP/AVP/TCP;unicast;interleaved=4-5"), Some((4, 5)));
+        assert_eq!(
+            parse_interleaved_channels("RTP/AVP;unicast;client_port=5000-5001"),
+            None
+        );
+        assert_eq!(
+            parse_interleaved_channels("RTP/AVP/TCP;unicast;interleaved=4-5"),
+            Some((4, 5))
+        );
     }
 
     #[test]
     fn unknown_method_is_not_implemented() {
         let mut s = responder();
         let (resp, _) = s.handle_request(&request("FROBNICATE * RTSP/1.0\r\nCSeq: 9\r\n\r\n"));
-        assert!(core::str::from_utf8(&resp).unwrap().starts_with("RTSP/1.0 501 Not Implemented"));
+        assert!(core::str::from_utf8(&resp)
+            .unwrap()
+            .starts_with("RTSP/1.0 501 Not Implemented"));
     }
 }

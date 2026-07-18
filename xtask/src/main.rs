@@ -89,22 +89,57 @@ fn cmd_ci() -> i32 {
     // Each step mirrors a CI job that runs on Linux without proprietary deps.
     // `--locked` matches CI so a stale Cargo.lock fails here too, not only in CI.
     let steps: &[(&str, &[&str])] = &[
-        ("check (no_std default build)", &["check", "--workspace", "--locked"]),
-        ("test (default features)", &["test", "--workspace", "--locked"]),
-        ("clippy", &["clippy", "--workspace", "--all-targets", "--locked"]),
+        (
+            "check (no_std default build)",
+            &["check", "--workspace", "--locked"],
+        ),
+        (
+            "test (default features)",
+            &["test", "--workspace", "--locked"],
+        ),
+        (
+            "clippy",
+            &["clippy", "--workspace", "--all-targets", "--locked"],
+        ),
         (
             "features (linux)",
-            &["check", "-p", "g2g-plugins", "--locked", "--all-targets", "--features", LINUX_FEATURES],
+            &[
+                "check",
+                "-p",
+                "g2g-plugins",
+                "--locked",
+                "--all-targets",
+                "--features",
+                LINUX_FEATURES,
+            ],
         ),
         (
             "features (g2g-ml wgpu+burn)",
-            &["check", "-p", "g2g-ml", "--locked", "--all-targets", "--features", "wgpu,burn"],
+            &[
+                "check",
+                "-p",
+                "g2g-ml",
+                "--locked",
+                "--all-targets",
+                "--features",
+                "wgpu,burn",
+            ],
         ),
         (
             "embassy (no-alloc embedded path)",
             &[
-                "test", "-p", "g2g-plugins", "--locked", "--features", "embassy-link", "--test",
-                "m45_embassy_link", "--test", "m260_dma_ring", "--test", "m264_embassy_multitask",
+                "test",
+                "-p",
+                "g2g-plugins",
+                "--locked",
+                "--features",
+                "embassy-link",
+                "--test",
+                "m45_embassy_link",
+                "--test",
+                "m260_dma_ring",
+                "--test",
+                "m264_embassy_multitask",
             ],
         ),
     ];
@@ -119,7 +154,16 @@ fn cmd_ci() -> i32 {
     let code = run(
         "wasm (g2g-core)",
         "cargo",
-        &["check", "-p", "g2g-core", "--locked", "--target", "wasm32-unknown-unknown", "--features", "runtime"],
+        &[
+            "check",
+            "-p",
+            "g2g-core",
+            "--locked",
+            "--target",
+            "wasm32-unknown-unknown",
+            "--features",
+            "runtime",
+        ],
         &rustup_path_env(),
     );
     if code != 0 {
@@ -191,15 +235,28 @@ fn cmd_test_here(rest: &[String]) -> i32 {
     // Run every applicable group, continue on failure, and report a summary:
     // the point is to learn what works on this box, not to stop at the first gap.
     let mut results: Vec<(String, i32)> = Vec::new();
-    results.push(("default suite".into(), run("default suite", "cargo", &["test", "--workspace"], &[])));
+    results.push((
+        "default suite".into(),
+        run("default suite", "cargo", &["test", "--workspace"], &[]),
+    ));
     results.push((
         "g2g-plugins features".into(),
-        run("g2g-plugins features", "cargo", &["test", "-p", "g2g-plugins", "--features", &feat_csv], &[]),
+        run(
+            "g2g-plugins features",
+            "cargo",
+            &["test", "-p", "g2g-plugins", "--features", &feat_csv],
+            &[],
+        ),
     ));
     if caps.gpu_drm {
         results.push((
             "g2g-ml wgpu+burn".into(),
-            run("g2g-ml wgpu+burn", "cargo", &["test", "-p", "g2g-ml", "--features", "wgpu,burn"], &[]),
+            run(
+                "g2g-ml wgpu+burn",
+                "cargo",
+                &["test", "-p", "g2g-ml", "--features", "wgpu,burn"],
+                &[],
+            ),
         ));
     }
 
@@ -219,8 +276,18 @@ fn cmd_test_here(rest: &[String]) -> i32 {
 /// rest are gated on the matching probe.
 fn host_test_features(c: &Capabilities) -> Vec<&'static str> {
     let mut f = vec![
-        "rtsp", "udp-egress", "udp-ingress", "rtmp", "http-src", "hls", "dash", "mjpeg",
-        "mjpeg-encode", "av1-encode", "analytics", "plugin-loader",
+        "rtsp",
+        "udp-egress",
+        "udp-ingress",
+        "rtmp",
+        "http-src",
+        "hls",
+        "dash",
+        "mjpeg",
+        "mjpeg-encode",
+        "av1-encode",
+        "analytics",
+        "plugin-loader",
     ];
     if c.opus {
         f.push("opus");
@@ -300,7 +367,11 @@ struct LaunchFeature {
 /// exactly what compiles. This is the auto-detect half of the meson analog; the
 /// static `linux-full` cargo feature is the "assume all deps present" bundle.
 fn host_launch_features(c: &Capabilities) -> Vec<LaunchFeature> {
-    let lf = |name, available, note| LaunchFeature { name, available, note };
+    let lf = |name, available, note| LaunchFeature {
+        name,
+        available,
+        note,
+    };
     vec![
         // Pure-Rust std elements: no system library, always build.
         lf("multi-thread", true, ""),
@@ -321,7 +392,11 @@ fn host_launch_features(c: &Capabilities) -> Vec<LaunchFeature> {
         lf("http-src", c.openssl, "needs openssl-devel"),
         lf("hls", c.openssl, "needs openssl-devel"),
         lf("dash", c.openssl, "needs openssl-devel"),
-        lf("webrtc", c.openssl, "needs openssl-devel (str0m uses rust-crypto)"),
+        lf(
+            "webrtc",
+            c.openssl,
+            "needs openssl-devel (str0m uses rust-crypto)",
+        ),
         // System A/V libraries.
         lf("ffmpeg", c.ffmpeg, "needs ffmpeg-free-devel (libavcodec)"),
         lf("vaapi", c.vaapi, "needs libva-devel"),
@@ -335,14 +410,30 @@ fn host_launch_features(c: &Capabilities) -> Vec<LaunchFeature> {
         lf("wayland-sink", c.wayland, "needs wayland-devel"),
         lf("kms-sink", c.gpu_drm, "needs a DRM render node (/dev/dri)"),
         lf("wgpu-sink", c.gpu_drm, "needs a GPU render node (/dev/dri)"),
-        lf("vello-overlay", c.gpu_drm, "needs a GPU render node (/dev/dri)"),
+        lf(
+            "vello-overlay",
+            c.gpu_drm,
+            "needs a GPU render node (/dev/dri)",
+        ),
         // Proprietary NVIDIA Video Codec stack: hardware + driver libraries.
         lf("cuda", c.nvidia, "needs an NVIDIA GPU + libcuda"),
         lf("nvenc", c.nvidia, "needs libnvidia-encode"),
         lf("nvdec", c.nvidia, "needs libnvcuvid"),
-        lf("cuda-wgpu", c.nvidia && c.gpu_drm, "needs NVIDIA + a Vulkan device"),
-        lf("cuda-gl", c.nvidia && c.wayland, "needs NVIDIA + Wayland EGL"),
-        lf("cuda-kms", c.nvidia && c.gpu_drm, "needs NVIDIA + DRM master"),
+        lf(
+            "cuda-wgpu",
+            c.nvidia && c.gpu_drm,
+            "needs NVIDIA + a Vulkan device",
+        ),
+        lf(
+            "cuda-gl",
+            c.nvidia && c.wayland,
+            "needs NVIDIA + Wayland EGL",
+        ),
+        lf(
+            "cuda-kms",
+            c.nvidia && c.gpu_drm,
+            "needs NVIDIA + DRM master",
+        ),
     ]
 }
 
@@ -393,8 +484,11 @@ fn cmd_install_launch(rest: &[String]) -> i32 {
     }
 
     // Auto-detected set, then apply the user's overrides on top.
-    let mut features: Vec<String> =
-        candidates.iter().filter(|lf| lf.available).map(|lf| lf.name.to_string()).collect();
+    let mut features: Vec<String> = candidates
+        .iter()
+        .filter(|lf| lf.available)
+        .map(|lf| lf.name.to_string())
+        .collect();
     for e in &enable {
         if !features.iter().any(|f| f == e) {
             features.push(e.clone());
@@ -422,7 +516,16 @@ fn cmd_install_launch(rest: &[String]) -> i32 {
     run(
         "install g2g-launch",
         "cargo",
-        &["install", "--path", "g2g-plugins", "--bin", &bin, "--force", "--features", &feat_csv],
+        &[
+            "install",
+            "--path",
+            "g2g-plugins",
+            "--bin",
+            &bin,
+            "--force",
+            "--features",
+            &feat_csv,
+        ],
         &[],
     )
 }
@@ -449,7 +552,14 @@ fn cmd_size() -> i32 {
     let code = run(
         "build footprint harness (Cortex-M)",
         "cargo",
-        &["build", "--release", "--manifest-path", SIZE_MANIFEST, "--target", SIZE_TARGET],
+        &[
+            "build",
+            "--release",
+            "--manifest-path",
+            SIZE_MANIFEST,
+            "--target",
+            SIZE_TARGET,
+        ],
         &env,
     );
     if code != 0 {
@@ -464,7 +574,9 @@ fn cmd_size() -> i32 {
     let lld = match find_rust_lld() {
         Some(p) => p,
         None => {
-            eprintln!("xtask size: rust-lld not found in the toolchain sysroot; cannot gc-section link.");
+            eprintln!(
+                "xtask size: rust-lld not found in the toolchain sysroot; cannot gc-section link."
+            );
             return 1;
         }
     };
@@ -473,7 +585,16 @@ fn cmd_size() -> i32 {
     let code = run(
         "gc-section link",
         &lld.to_string_lossy(),
-        &["-flavor", "gnu", "--gc-sections", "-e", SIZE_ENTRY, "-o", &elf_str, &staticlib],
+        &[
+            "-flavor",
+            "gnu",
+            "--gc-sections",
+            "-e",
+            SIZE_ENTRY,
+            "-o",
+            &elf_str,
+            &staticlib,
+        ],
         &[],
     );
     if code != 0 {
@@ -507,7 +628,15 @@ fn cmd_wasm() -> i32 {
     let code = run(
         "wasm check (g2g-core runtime)",
         "cargo",
-        &["check", "-p", "g2g-core", "--target", "wasm32-unknown-unknown", "--features", "runtime"],
+        &[
+            "check",
+            "-p",
+            "g2g-core",
+            "--target",
+            "wasm32-unknown-unknown",
+            "--features",
+            "runtime",
+        ],
         &env,
     );
     if code != 0 {
@@ -518,7 +647,15 @@ fn cmd_wasm() -> i32 {
     let code = run(
         "wasm check (g2g-plugins web)",
         "cargo",
-        &["check", "-p", "g2g-plugins", "--target", "wasm32-unknown-unknown", "--features", "web"],
+        &[
+            "check",
+            "-p",
+            "g2g-plugins",
+            "--target",
+            "wasm32-unknown-unknown",
+            "--features",
+            "web",
+        ],
         &env,
     );
     if code != 0 {
@@ -529,7 +666,15 @@ fn cmd_wasm() -> i32 {
     let code = run(
         "wasm check (g2g-plugins web-codecs)",
         "cargo",
-        &["check", "-p", "g2g-plugins", "--target", "wasm32-unknown-unknown", "--features", "web-codecs"],
+        &[
+            "check",
+            "-p",
+            "g2g-plugins",
+            "--target",
+            "wasm32-unknown-unknown",
+            "--features",
+            "web-codecs",
+        ],
         &env_wc,
     );
     if code != 0 {
@@ -539,7 +684,15 @@ fn cmd_wasm() -> i32 {
     let code = run(
         "wasm check (g2g-plugins web-gpu)",
         "cargo",
-        &["check", "-p", "g2g-plugins", "--target", "wasm32-unknown-unknown", "--features", "web-gpu"],
+        &[
+            "check",
+            "-p",
+            "g2g-plugins",
+            "--target",
+            "wasm32-unknown-unknown",
+            "--features",
+            "web-gpu",
+        ],
         &env_wc,
     );
     if code != 0 {
@@ -633,13 +786,21 @@ fn cmd_ffi_probe(rest: &[String]) -> i32 {
         return 1;
     }
 
-    let mut cc_args: Vec<String> =
-        vec![c_path.to_string_lossy().into(), "-o".into(), bin_path.to_string_lossy().into()];
+    let mut cc_args: Vec<String> = vec![
+        c_path.to_string_lossy().into(),
+        "-o".into(),
+        bin_path.to_string_lossy().into(),
+    ];
     for inc in &includes {
         cc_args.push(format!("-I{inc}"));
     }
     let cc_args_ref: Vec<&str> = cc_args.iter().map(String::as_str).collect();
-    let code = run(&format!("compile probe ({struct_name})"), &cc, &cc_args_ref, &[]);
+    let code = run(
+        &format!("compile probe ({struct_name})"),
+        &cc,
+        &cc_args_ref,
+        &[],
+    );
     if code != 0 {
         eprintln!("xtask ffi-probe: probe failed to compile; check the header path / -I flags.");
         return code;
@@ -731,7 +892,9 @@ fn capture(program: &str, args: &[&str], envs: &[(String, String)]) -> Option<St
         c.env(k, v);
     }
     let out = c.output().ok()?;
-    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 /// Whether a program runs and exits 0 (silenced output), for capability probes.
@@ -755,14 +918,19 @@ fn pkg_exists(lib: &str) -> bool {
 fn dev_entry_exists(dir: &str, prefix: &str) -> bool {
     std::fs::read_dir(dir)
         .map(|entries| {
-            entries.flatten().any(|e| e.file_name().to_string_lossy().starts_with(prefix))
+            entries
+                .flatten()
+                .any(|e| e.file_name().to_string_lossy().starts_with(prefix))
         })
         .unwrap_or(false)
 }
 
 /// First of `candidates` found on `PATH`, via `which`.
 fn which(candidates: &[&str]) -> Option<String> {
-    candidates.iter().find(|c| cmd_ok("which", &[c])).map(|c| c.to_string())
+    candidates
+        .iter()
+        .find(|c| cmd_ok("which", &[c]))
+        .map(|c| c.to_string())
 }
 
 /// A `PATH` that prepends `~/.cargo/bin`, so cargo invokes the rustup toolchain
@@ -804,14 +972,21 @@ fn cmd_new_element(rest: &[String]) -> i32 {
     if name.is_empty() {
         return arg_err("usage: cargo xtask new-element <name> [--kind source|transform|sink]");
     }
-    if !name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_') {
+    if !name
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+    {
         return arg_err("element name must be lowercase [a-z0-9_] (it becomes a module name)");
     }
     let template = match kind.as_str() {
         "source" => SOURCE_TEMPLATE,
         "transform" => TRANSFORM_TEMPLATE,
         "sink" => SINK_TEMPLATE,
-        other => return arg_err(&format!("--kind must be source|transform|sink, got '{other}'")),
+        other => {
+            return arg_err(&format!(
+                "--kind must be source|transform|sink, got '{other}'"
+            ))
+        }
     };
     let type_name = pascal_case(&name);
 
@@ -833,7 +1008,9 @@ fn cmd_new_element(rest: &[String]) -> i32 {
     }
     match wire_lib_mod(&name) {
         Ok(()) => {}
-        Err(e) => eprintln!("xtask new-element: could not auto-wire lib.rs ({e}); add `pub mod {name};` yourself"),
+        Err(e) => eprintln!(
+            "xtask new-element: could not auto-wire lib.rs ({e}); add `pub mod {name};` yourself"
+        ),
     }
 
     let reg_line = if kind == "source" {
@@ -1151,7 +1328,9 @@ mod tests {
         };
         let f = host_test_features(&caps);
         assert!(f.contains(&"nvenc") && f.contains(&"nvdec") && f.contains(&"cuda"));
-        assert!(f.contains(&"wgpu-sink") && f.contains(&"vello-overlay") && f.contains(&"kms-sink"));
+        assert!(
+            f.contains(&"wgpu-sink") && f.contains(&"vello-overlay") && f.contains(&"kms-sink")
+        );
         assert!(f.contains(&"opus"));
         assert!(f.contains(&"v4l2"));
         // VAAPI / ffmpeg / audio not detected => excluded.
@@ -1172,7 +1351,11 @@ mod tests {
         assert!(rtsp.available, "pure-Rust std feature builds anywhere");
 
         // With the deps present, the feature flips to available.
-        let caps = Capabilities { opus: true, nvidia: true, ..Capabilities::default() };
+        let caps = Capabilities {
+            opus: true,
+            nvidia: true,
+            ..Capabilities::default()
+        };
         let avail = host_launch_features(&caps);
         assert!(avail.iter().find(|f| f.name == "opus").unwrap().available);
         assert!(avail.iter().find(|f| f.name == "nvenc").unwrap().available);
@@ -1218,7 +1401,10 @@ mod tests {
     #[test]
     fn ffi_probe_parses_struct_size_from_output() {
         let out = "sizeof(NV_ENC_INITIALIZE_PARAMS) = 1816\noffsetof(NV_ENC_INITIALIZE_PARAMS, encodeWidth) = 24";
-        assert_eq!(parse_struct_size(out, "NV_ENC_INITIALIZE_PARAMS"), Some(1816));
+        assert_eq!(
+            parse_struct_size(out, "NV_ENC_INITIALIZE_PARAMS"),
+            Some(1816)
+        );
         assert_eq!(parse_struct_size(out, "OTHER"), None);
     }
 
@@ -1242,7 +1428,10 @@ mod tests {
     #[test]
     fn insert_mod_decl_idempotent() {
         let src = "pub mod a;\npub mod newelem;\n";
-        assert!(insert_mod_decl(src, "newelem").unwrap().is_none(), "already wired -> no change");
+        assert!(
+            insert_mod_decl(src, "newelem").unwrap().is_none(),
+            "already wired -> no change"
+        );
     }
 
     #[test]
@@ -1254,6 +1443,9 @@ mod tests {
     fn linux_features_csv_is_nonempty_and_comma_separated() {
         assert!(LINUX_FEATURES.contains("rtsp"));
         assert!(LINUX_FEATURES.split(',').count() > 5);
-        assert!(!LINUX_FEATURES.contains(' '), "feature csv must not contain spaces");
+        assert!(
+            !LINUX_FEATURES.contains(' '),
+            "feature csv must not contain spaces"
+        );
     }
 }

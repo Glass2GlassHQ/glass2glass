@@ -87,7 +87,11 @@ impl PyAggregator {
 
     #[cfg(feature = "python")]
     async fn run_batch(&self, frames: Vec<Frame>, caps: &Caps) -> Result<Vec<Frame>, G2gError> {
-        self.worker.as_ref().ok_or(G2gError::NotConfigured)?.run_batch(frames, caps).await
+        self.worker
+            .as_ref()
+            .ok_or(G2gError::NotConfigured)?
+            .run_batch(frames, caps)
+            .await
     }
 
     #[cfg(not(feature = "python"))]
@@ -112,7 +116,8 @@ impl PyAggregator {
 }
 
 impl MultiInputElement for PyAggregator {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -222,8 +227,20 @@ impl MultiInputElement for PyAggregator {
 /// `PyAggregator`'s settable properties (the runtime / `gst-launch` face). The
 /// input count comes from link degree (the muxer factory), not a property.
 static PYAGGREGATOR_PROPS: &[PropertySpec] = &[
-    PropertySpec::new("module", PropKind::Str, "Python module to import (the aggregator element)"),
-    PropertySpec::new("class", PropKind::Str, "class within the module to instantiate"),
-    PropertySpec::new("draw-label", PropKind::Bool, "overlay the inferred label on the anchor frame")
-        .with_default("false"),
+    PropertySpec::new(
+        "module",
+        PropKind::Str,
+        "Python module to import (the aggregator element)",
+    ),
+    PropertySpec::new(
+        "class",
+        PropKind::Str,
+        "class within the module to instantiate",
+    ),
+    PropertySpec::new(
+        "draw-label",
+        PropKind::Bool,
+        "overlay the inferred label on the anchor frame",
+    )
+    .with_default("false"),
 ];

@@ -37,7 +37,11 @@ fn h264_caps() -> Caps {
     }
 }
 fn aac_caps() -> Caps {
-    Caps::Audio { format: AudioFormat::Aac, channels: 2, sample_rate: 48_000 }
+    Caps::Audio {
+        format: AudioFormat::Aac,
+        channels: 2,
+        sample_rate: 48_000,
+    }
 }
 
 #[derive(Default)]
@@ -74,7 +78,10 @@ impl OutputSink for Tap {
     ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
         Box::pin(async move {
             match packet {
-                PipelinePacket::DataFrame(Frame { domain: MemoryDomain::System(s), .. }) => {
+                PipelinePacket::DataFrame(Frame {
+                    domain: MemoryDomain::System(s),
+                    ..
+                }) => {
                     self.frames.push(s.as_slice().to_vec());
                 }
                 PipelinePacket::CapsChanged(c) => self.caps.push(c),
@@ -88,7 +95,11 @@ impl OutputSink for Tap {
 fn frame(data: Vec<u8>, pts_ns: u64) -> PipelinePacket {
     PipelinePacket::DataFrame(Frame::new(
         MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-        FrameTiming { pts_ns, dts_ns: pts_ns, ..FrameTiming::default() },
+        FrameTiming {
+            pts_ns,
+            dts_ns: pts_ns,
+            ..FrameTiming::default()
+        },
         0,
     ))
 }
@@ -135,12 +146,28 @@ async fn mux_av() -> Vec<u8> {
     mux.configure_pipeline(0, &h264_caps()).unwrap();
     mux.configure_pipeline(1, &aac_caps()).unwrap();
     let mut sink = Collect::default();
-    mux.process(0, frame(annexb(&[&sps, &pps, &idr]), 0), &mut sink).await.unwrap();
-    mux.process(1, frame(adts_au(&[0xA1, 0xA2, 0xA3]), 0), &mut sink).await.unwrap();
-    mux.process(0, frame(annexb(&[&[0x41u8, 0x9a, 0x00]]), 33_000_000), &mut sink).await.unwrap();
-    mux.process(1, frame(adts_au(&[0xB4, 0xB5]), 21_000_000), &mut sink).await.unwrap();
-    mux.process(0, PipelinePacket::Eos, &mut sink).await.unwrap();
-    mux.process(1, PipelinePacket::Eos, &mut sink).await.unwrap();
+    mux.process(0, frame(annexb(&[&sps, &pps, &idr]), 0), &mut sink)
+        .await
+        .unwrap();
+    mux.process(1, frame(adts_au(&[0xA1, 0xA2, 0xA3]), 0), &mut sink)
+        .await
+        .unwrap();
+    mux.process(
+        0,
+        frame(annexb(&[&[0x41u8, 0x9a, 0x00]]), 33_000_000),
+        &mut sink,
+    )
+    .await
+    .unwrap();
+    mux.process(1, frame(adts_au(&[0xB4, 0xB5]), 21_000_000), &mut sink)
+        .await
+        .unwrap();
+    mux.process(0, PipelinePacket::Eos, &mut sink)
+        .await
+        .unwrap();
+    mux.process(1, PipelinePacket::Eos, &mut sink)
+        .await
+        .unwrap();
     sink.bytes
 }
 
@@ -158,7 +185,9 @@ async fn mkvdemux_switches_its_output_to_the_selected_stream() {
         .with_bus(handle)
         .with_stream_select(select.clone());
     demux
-        .configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::Matroska })
+        .configure_pipeline(&Caps::ByteStream {
+            encoding: ByteStreamEncoding::Matroska,
+        })
         .expect("configure");
 
     let mut tap = Tap::default();
@@ -167,7 +196,13 @@ async fn mkvdemux_switches_its_output_to_the_selected_stream() {
     // default (video) caps are emitted, but no Cluster has arrived so no frames.
     demux.process(data_frame(header), &mut tap).await.unwrap();
     assert!(
-        tap.caps.iter().any(|c| matches!(c, Caps::CompressedVideo { codec: VideoCodec::H264, .. })),
+        tap.caps.iter().any(|c| matches!(
+            c,
+            Caps::CompressedVideo {
+                codec: VideoCodec::H264,
+                ..
+            }
+        )),
         "default video caps emitted before selection"
     );
     assert!(tap.frames.is_empty(), "no frames before any Cluster");
@@ -176,8 +211,10 @@ async fn mkvdemux_switches_its_output_to_the_selected_stream() {
     let mut audio_id = None;
     while let Some(msg) = bus.try_recv() {
         if let BusMessage::StreamCollection(c) = msg {
-            audio_id =
-                c.streams_of_type(g2g_core::StreamType::Audio).next().map(|s| s.id.clone());
+            audio_id = c
+                .streams_of_type(g2g_core::StreamType::Audio)
+                .next()
+                .map(|s| s.id.clone());
         }
     }
     let audio_id = audio_id.expect("the collection announced an audio stream");
@@ -189,7 +226,16 @@ async fn mkvdemux_switches_its_output_to_the_selected_stream() {
     demux.process(data_frame(clusters), &mut tap).await.unwrap();
 
     assert!(
-        tap.caps.last().map(|c| matches!(c, Caps::Audio { format: AudioFormat::Aac, .. })).unwrap_or(false),
+        tap.caps
+            .last()
+            .map(|c| matches!(
+                c,
+                Caps::Audio {
+                    format: AudioFormat::Aac,
+                    ..
+                }
+            ))
+            .unwrap_or(false),
         "the switch re-negotiated caps to the audio stream"
     );
     assert_eq!(
@@ -205,5 +251,9 @@ async fn mkvdemux_switches_its_output_to_the_selected_stream() {
             _ => None,
         })
         .collect();
-    assert_eq!(selected, vec![vec![audio_id]], "StreamsSelected confirms the active id");
+    assert_eq!(
+        selected,
+        vec![vec![audio_id]],
+        "StreamsSelected confirms the active id"
+    );
 }

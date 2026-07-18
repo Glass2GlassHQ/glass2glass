@@ -21,7 +21,9 @@ fn registry() -> Registry {
     reg.register_source(SourceFactory::new("videotestsrc", rgba_any(), || {
         Box::new(VideoTestSrc::new(64, 48, 30, 0))
     }));
-    reg.register_launch(LaunchFactory::new("fakesink", Vec::new(), || Box::new(FakeSink::new())));
+    reg.register_launch(LaunchFactory::new("fakesink", Vec::new(), || {
+        Box::new(FakeSink::new())
+    }));
     reg
 }
 
@@ -31,7 +33,10 @@ fn queue_max_size_buffers_sets_edge_depth() {
     let g = parse_launch(&reg, "videotestsrc ! queue max-size-buffers=2 ! fakesink").unwrap();
     // The queue contracts out; the src->sink edge carries its depth.
     let caps: Vec<Option<usize>> = g.edges().iter().map(|e| e.capacity).collect();
-    assert!(caps.contains(&Some(2)), "an edge takes the queue depth: {caps:?}");
+    assert!(
+        caps.contains(&Some(2)),
+        "an edge takes the queue depth: {caps:?}"
+    );
 }
 
 #[test]
@@ -39,8 +44,14 @@ fn plain_queue_leaves_edge_depth_default() {
     let reg = registry();
     // No `max-size-buffers` -> capacity stays None (runner uses link_capacity).
     let g = parse_launch(&reg, "videotestsrc ! queue leaky=2 ! fakesink").unwrap();
-    assert!(g.edges().iter().all(|e| e.capacity.is_none()), "no explicit depth");
+    assert!(
+        g.edges().iter().all(|e| e.capacity.is_none()),
+        "no explicit depth"
+    );
     // `max-size-buffers=0` (gst "unbounded") is ignored, not a zero-depth channel.
     let g = parse_launch(&reg, "videotestsrc ! queue max-size-buffers=0 ! fakesink").unwrap();
-    assert!(g.edges().iter().all(|e| e.capacity.is_none()), "unbounded (0) ignored");
+    assert!(
+        g.edges().iter().all(|e| e.capacity.is_none()),
+        "unbounded (0) ignored"
+    );
 }

@@ -32,7 +32,12 @@ impl PipelineClock for NullClock {
 }
 
 fn h264(width: Dim) -> Caps {
-    Caps::CompressedVideo { codec: VideoCodec::H264, width, height: Dim::Any, framerate: Rate::Any }
+    Caps::CompressedVideo {
+        codec: VideoCodec::H264,
+        width,
+        height: Dim::Any,
+        framerate: Rate::Any,
+    }
 }
 
 /// A decoder descriptor: H.264 in, raw NV12 out. The body is an
@@ -48,7 +53,9 @@ fn decoder_factory() -> ElementFactory {
             framerate: Rate::Any,
         })),
     ]);
-    ElementFactory::new("h264dec", templates, |_caps| Box::new(IdentityTransform::new()))
+    ElementFactory::new("h264dec", templates, |_caps| {
+        Box::new(IdentityTransform::new())
+    })
 }
 
 /// A converter factory that derives its target format from the output caps the
@@ -64,8 +71,10 @@ fn videoconvert_factory() -> ElementFactory {
 #[test]
 fn registry_finds_decoder_for_h264_to_raw() {
     let mut reg = Registry::new();
-    reg.register(ElementFactory::of::<H264Parse>("h264parse", |_caps| Box::new(H264Parse::new())))
-        .register(decoder_factory());
+    reg.register(ElementFactory::of::<H264Parse>("h264parse", |_caps| {
+        Box::new(H264Parse::new())
+    }))
+    .register(decoder_factory());
 
     let chain = reg
         .autoplug_names(&h264(Dim::Fixed(1280)), &is_raw_video, 4)
@@ -78,9 +87,12 @@ fn registry_finds_decoder_for_h264_to_raw() {
 #[test]
 fn registry_reports_no_route_when_only_a_parser_is_registered() {
     let mut reg = Registry::new();
-    reg.register(ElementFactory::of::<H264Parse>("h264parse", |_caps| Box::new(H264Parse::new())));
+    reg.register(ElementFactory::of::<H264Parse>("h264parse", |_caps| {
+        Box::new(H264Parse::new())
+    }));
     assert!(
-        reg.autoplug_names(&h264(Dim::Any), &is_raw_video, 8).is_none(),
+        reg.autoplug_names(&h264(Dim::Any), &is_raw_video, 8)
+            .is_none(),
         "H.264 -> H.264 parsing alone never reaches raw video"
     );
 }
@@ -95,7 +107,13 @@ fn rgba_any() -> Caps {
 }
 
 fn is_nv12(c: &Caps) -> bool {
-    matches!(c, Caps::RawVideo { format: RawVideoFormat::Nv12, .. })
+    matches!(
+        c,
+        Caps::RawVideo {
+            format: RawVideoFormat::Nv12,
+            ..
+        }
+    )
 }
 
 #[tokio::test]
@@ -106,7 +124,9 @@ async fn autoplugged_converter_chain_runs_through_run_graph() {
     let mut reg = Registry::new();
     reg.register(videoconvert_factory());
 
-    let chain = reg.autoplug(&rgba_any(), &is_nv12, 4).expect("videoconvert reaches NV12");
+    let chain = reg
+        .autoplug(&rgba_any(), &is_nv12, 4)
+        .expect("videoconvert reaches NV12");
     assert_eq!(chain.len(), 1, "one converter splices RGBA -> NV12");
 
     // Splice the instantiated chain between a real source and sink as a
@@ -122,7 +142,9 @@ async fn autoplugged_converter_chain_runs_through_run_graph() {
     let sink = g.add_sink(GraphNodeRef::element(FakeSink::new()));
     g.link(prev, sink).unwrap();
 
-    let stats: RunStats = run_graph(g, &NullClock, 4).await.expect("autoplugged chain runs");
+    let stats: RunStats = run_graph(g, &NullClock, 4)
+        .await
+        .expect("autoplugged chain runs");
     assert_eq!(stats.frames_emitted, 4);
     assert_eq!(stats.frames_consumed, 4);
 }
@@ -140,9 +162,15 @@ async fn decodebin_splices_chain_between_source_and_sink() {
     let inserted = reg
         .decodebin(&mut g, src, sink, &rgba_any(), &is_nv12, 4)
         .expect("decodebin splices an RGBA -> NV12 converter");
-    assert_eq!(inserted.len(), 1, "one converter node inserted between src and sink");
+    assert_eq!(
+        inserted.len(),
+        1,
+        "one converter node inserted between src and sink"
+    );
 
-    let stats: RunStats = run_graph(g, &NullClock, 4).await.expect("spliced graph runs");
+    let stats: RunStats = run_graph(g, &NullClock, 4)
+        .await
+        .expect("spliced graph runs");
     assert_eq!(stats.frames_emitted, 4);
     assert_eq!(stats.frames_consumed, 4);
 }
@@ -163,7 +191,9 @@ async fn build_playbin_assembles_source_chain_and_sink() {
     let g = reg
         .build_playbin("videotestsrc", FakeSink::new(), &is_nv12, 4)
         .expect("playbin assembles source -> videoconvert -> sink");
-    let stats: RunStats = run_graph(g, &NullClock, 4).await.expect("assembled graph runs");
+    let stats: RunStats = run_graph(g, &NullClock, 4)
+        .await
+        .expect("assembled graph runs");
     assert_eq!(stats.frames_emitted, 4);
     assert_eq!(stats.frames_consumed, 4);
 }
@@ -171,7 +201,9 @@ async fn build_playbin_assembles_source_chain_and_sink() {
 #[test]
 fn build_playbin_rejects_unknown_source() {
     let reg = Registry::new();
-    let err = reg.build_playbin("no-such-source", FakeSink::new(), &is_raw_video, 4).unwrap_err();
+    let err = reg
+        .build_playbin("no-such-source", FakeSink::new(), &is_raw_video, 4)
+        .unwrap_err();
     assert!(matches!(err, PlaybinError::UnknownSource));
 }
 
@@ -200,9 +232,10 @@ fn registry_finds_real_ffmpeg_decoder_for_h264() {
 fn registry_finds_real_vaapi_decoder_for_h264() {
     use g2g_plugins::vaapidec::VaapiH264Dec;
     let mut reg = Registry::new();
-    reg.register(ElementFactory::of::<VaapiH264Dec>("vaapih264dec", |_caps| {
-        Box::new(VaapiH264Dec::new())
-    }));
+    reg.register(ElementFactory::of::<VaapiH264Dec>(
+        "vaapih264dec",
+        |_caps| Box::new(VaapiH264Dec::new()),
+    ));
     let chain = reg
         .autoplug_names(&h264(Dim::Any), &is_raw_video, 4)
         .expect("vaapih264dec bridges H.264 to raw video");

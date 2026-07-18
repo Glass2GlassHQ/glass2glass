@@ -12,36 +12,36 @@ extern crate alloc;
 pub mod aacparse;
 pub mod appsink;
 pub mod appsrc;
-pub mod opusparse;
-pub mod vp8parse;
-pub mod vp9parse;
-pub mod av1parse;
+pub mod audioamplify;
 pub mod audioconvert;
+pub mod audioecho;
+pub mod audiomixer;
+pub mod audiopanorama;
 pub mod audioresample;
 pub mod audiotestsrc;
-pub mod volume;
-pub mod audiopanorama;
-pub mod audioamplify;
-pub mod audioecho;
-pub mod level;
+pub mod av1parse;
+pub mod avoffset;
+pub mod capsfilter;
+pub mod concat;
 pub mod cutter;
 pub mod equalizer;
-pub mod spectrum;
-pub mod audiomixer;
-pub mod capsfilter;
 pub mod fakesink;
 pub mod h264parse;
 pub mod h265parse;
-pub mod nalparse;
 pub mod identity;
-pub mod avoffset;
-pub mod mux;
-pub mod streamdemux;
-pub mod concat;
 pub mod inputselector;
+pub mod level;
+pub mod mux;
+pub mod nalparse;
+pub mod opusparse;
 pub mod outputselector;
 pub mod progressreport;
+pub mod spectrum;
+pub mod streamdemux;
 pub mod tsmuxn;
+pub mod volume;
+pub mod vp8parse;
+pub mod vp9parse;
 // Shared integer source-over blend used by the compositor and CPU overlays.
 mod mathf;
 mod paint;
@@ -82,26 +82,26 @@ pub use wgpu;
 pub mod vellooverlay;
 // GPU presentation sink (M103): presents MemoryDomain::WgpuTexture frames by
 // blitting onto an offscreen target or a caller-provided wgpu::Surface.
-#[cfg(feature = "wgpu-sink")]
-pub mod wgpusink;
-pub mod tensorconvert;
-pub mod videoconvert;
-pub mod videoscale;
-pub mod videorate;
-pub mod videocrop;
-pub mod videoflip;
-pub mod videobalance;
-pub mod videobox;
-pub mod gamma;
-pub mod deinterlace;
-pub mod timeoverlay;
+pub mod alpha;
 #[cfg(feature = "std")]
 pub mod clockoverlay;
-pub mod alpha;
+pub mod deinterlace;
+pub mod gamma;
+pub mod tensorconvert;
+pub mod timeoverlay;
+pub mod videobalance;
+pub mod videobox;
+pub mod videoconvert;
+pub mod videocrop;
+pub mod videoflip;
+pub mod videorate;
+pub mod videoscale;
+#[cfg(feature = "wgpu-sink")]
+pub mod wgpusink;
 // Subtitle cue parsing (SRT / WebVTT) and the embedded bitmap font, both no_std,
 // feeding the `textoverlay` element below.
-pub mod subparse;
 pub mod bitmapfont;
+pub mod subparse;
 pub mod textoverlay;
 // CEA-608/708 closed captions carried in-band in H.264/H.265 SEI (no_std).
 pub mod cea;
@@ -295,36 +295,36 @@ pub mod filesrc;
 // Record / replay: dump the packet stream to a file and play it back, for
 // deterministic repro of bugs that need a live source.
 #[cfg(feature = "std")]
-pub mod record;
-#[cfg(feature = "std")]
 pub mod multifilesink;
 #[cfg(feature = "std")]
 pub mod multifilesrc;
 #[cfg(feature = "std")]
+pub mod record;
+#[cfg(feature = "std")]
 pub mod splitmuxsink;
 // Subtitle/text file source: a .srt/.vtt/.ssa/.ttml file as a Text stream.
 #[cfg(feature = "std")]
-pub mod subtitlesrc;
-#[cfg(feature = "std")]
 mod audio;
 #[cfg(feature = "std")]
-mod mp4box;
-#[cfg(feature = "std")]
-pub mod mp4mux;
-#[cfg(feature = "std")]
-pub mod mp4muxn;
-#[cfg(feature = "std")]
 pub mod fmp4mux;
-#[cfg(feature = "std")]
-pub mod mp4src;
-#[cfg(feature = "std")]
-pub mod mp4demuxn;
 #[cfg(feature = "std")]
 pub mod gaplesssrc;
 #[cfg(feature = "std")]
 pub mod mp4audiosink;
 #[cfg(feature = "std")]
 pub mod mp4audiosrc;
+#[cfg(feature = "std")]
+mod mp4box;
+#[cfg(feature = "std")]
+pub mod mp4demuxn;
+#[cfg(feature = "std")]
+pub mod mp4mux;
+#[cfg(feature = "std")]
+pub mod mp4muxn;
+#[cfg(feature = "std")]
+pub mod mp4src;
+#[cfg(feature = "std")]
+pub mod subtitlesrc;
 #[cfg(feature = "std")]
 pub mod syncsink;
 #[cfg(feature = "std")]
@@ -372,9 +372,9 @@ mod webrtc_util;
 #[cfg(feature = "webrtc")]
 pub mod webrtcduplex;
 #[cfg(feature = "webrtc")]
-pub mod webrtcsink;
-#[cfg(feature = "webrtc")]
 pub mod webrtcsession;
+#[cfg(feature = "webrtc")]
+pub mod webrtcsink;
 #[cfg(feature = "webrtc")]
 pub mod webrtcwhepsession;
 #[cfg(feature = "webrtc")]
@@ -521,9 +521,9 @@ pub mod mfencode;
 // Media Foundation AAC audio encode/decode. Windows-only; MfAacEncode is an
 // enumerated encoder, MfAacDecode wraps CLSID_MSAACDecMFT.
 #[cfg(all(target_os = "windows", feature = "mf-aac"))]
-pub mod mfaacencode;
-#[cfg(all(target_os = "windows", feature = "mf-aac"))]
 pub mod mfaacdecode;
+#[cfg(all(target_os = "windows", feature = "mf-aac"))]
+pub mod mfaacencode;
 
 // Shared frame-emission loop for the packet-producing encoders below (and
 // `gstwrap`, which emits its hosted element's output frames the same way).
@@ -610,9 +610,9 @@ pub mod rtmpsrc;
 
 // DASH MPD parser and the DashSrc segment source.
 #[cfg(feature = "dash")]
-pub mod mpd;
-#[cfg(feature = "dash")]
 pub mod dashsrc;
+#[cfg(feature = "dash")]
+pub mod mpd;
 
 // Fragmented-MP4 / CMAF parsing (shared) and the byte-stream demuxer. In the
 // std MP4 family (shares mp4box with mp4src/fmp4mux).
@@ -638,7 +638,10 @@ mod worker_ready;
 
 // YUV_420_888 -> NV12 packer shared by the Android ndk-image elements
 // (camera2src, mediacodecdec).
-#[cfg(all(target_os = "android", any(feature = "camera2", feature = "mediacodec")))]
+#[cfg(all(
+    target_os = "android",
+    any(feature = "camera2", feature = "mediacodec")
+))]
 mod yuv420;
 
 // D3D11 present sink: displays MemoryDomain::D3D11Texture frames via a DXGI
@@ -738,20 +741,29 @@ pub mod wgpudmabuf;
 // Vendor-neutral GPU-resident hardware video decode via Vulkan Video
 // (VK_KHR_video_queue). Linux + Windows (both expose the extensions on RADV /
 // ANV / the NVIDIA proprietary driver). See DESIGN.md 4.11.6.
-#[cfg(all(any(target_os = "linux", target_os = "windows"), feature = "vulkan-video"))]
+#[cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    feature = "vulkan-video"
+))]
 pub mod vulkanvideo;
 
 // HDR swapchain present (M575): present a decoded HDR texture to an on-screen
 // swapchain with an HDR colour space + mastering metadata. A raw ash swapchain on
 // the decode device (wgpu 29 cannot express a swapchain colour space). See
 // DESIGN.md 4.11.6.
-#[cfg(all(any(target_os = "linux", target_os = "windows"), feature = "hdr-present"))]
+#[cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    feature = "hdr-present"
+))]
 pub mod vulkanhdrsink;
 
 // Fork-ready adapter presenting the Vulkan Video decoders in Rerun's
 // `re_video::decode::AsyncDecoder` CPU-frame (I420) shape (the wgpu-texture
 // wedge). g2g does not depend on re_video; see the module docs.
-#[cfg(all(any(target_os = "linux", target_os = "windows"), feature = "vulkan-video"))]
+#[cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    feature = "vulkan-video"
+))]
 pub mod revideo;
 
 // Reverse GStreamer bridge (`gstwrap`): host an unported GStreamer element
@@ -777,11 +789,11 @@ pub mod pulsesink;
 // Both elements share the `pipewire` feature, the pipewire-rs crate, and the
 // pwaudio SPA-format helper.
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
-mod pwaudio;
-#[cfg(all(target_os = "linux", feature = "pipewire"))]
 pub mod pipewiresink;
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
 pub mod pipewiresrc;
+#[cfg(all(target_os = "linux", feature = "pipewire"))]
+mod pwaudio;
 
 // CUDA device-memory consumers (C3 Phase 3). `CudaDownload` copies a
 // `MemoryDomain::Cuda` NV12 frame back to system memory so a `NvdecCuda`
@@ -873,9 +885,9 @@ pub mod websocketsrc;
 // PatternSrc (M542): synthetic animated RGBA source, the "capture" side of the
 // browser send demo when no camera is present.
 #[cfg(all(target_arch = "wasm32", feature = "web"))]
-pub mod websocketsink;
-#[cfg(all(target_arch = "wasm32", feature = "web"))]
 pub mod patternsrc;
+#[cfg(all(target_arch = "wasm32", feature = "web"))]
+pub mod websocketsink;
 
 // WsWireSink (M554): the browser send half of the distributed-graph primitive.
 // Ships wire-encoded PipelinePackets to a native RemoteWsSrc over a WebSocket,

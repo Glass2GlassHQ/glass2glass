@@ -34,7 +34,14 @@ impl OutputSink for CollectSink {
 fn frame_2x1_rgba() -> Frame {
     Frame {
         domain: MemoryDomain::System(SystemSlice::from_boxed(vec![0u8; 8].into_boxed_slice())),
-        timing: FrameTiming { pts_ns: 0, dts_ns: 0, duration_ns: 0, capture_ns: 0, arrival_ns: 0 , keyframe: false},
+        timing: FrameTiming {
+            pts_ns: 0,
+            dts_ns: 0,
+            duration_ns: 0,
+            capture_ns: 0,
+            arrival_ns: 0,
+            keyframe: false,
+        },
         sequence: 0,
         meta: Default::default(),
     }
@@ -57,7 +64,9 @@ fn detection_from_python_lands_in_frame_metadata() {
     el.configure_pipeline(&caps).unwrap();
 
     let mut sink = CollectSink::default();
-    let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
     rt.block_on(el.process(PipelinePacket::DataFrame(frame_2x1_rgba()), &mut sink))
         .unwrap();
 
@@ -78,7 +87,10 @@ fn detection_from_python_lands_in_frame_metadata() {
     assert!((dets[0].confidence - 0.9).abs() < 1e-6);
 
     // The opaque blob (FrameIO.append_blob mirror) rode along as a BlobMeta.
-    let blobs = frame.meta.get::<BlobMeta>().expect("add_blob should attach a BlobMeta");
+    let blobs = frame
+        .meta
+        .get::<BlobMeta>()
+        .expect("add_blob should attach a BlobMeta");
     assert_eq!(blobs.len(), 1);
     let blob = blobs.iter().next().unwrap();
     assert_eq!(blob.header, "embedding");

@@ -76,7 +76,8 @@ struct ReconfigSrc {
 impl SourceLoop for ReconfigSrc {
     type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>;
 
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 
@@ -98,7 +99,8 @@ impl SourceLoop for ReconfigSrc {
             for i in 0..before {
                 out.push(PipelinePacket::DataFrame(frame(i))).await?;
             }
-            out.push(PipelinePacket::CapsChanged(switch_to.clone())).await?;
+            out.push(PipelinePacket::CapsChanged(switch_to.clone()))
+                .await?;
             for j in 0..after {
                 out.push(PipelinePacket::DataFrame(frame(before + j)))
                     .await?;
@@ -163,11 +165,19 @@ struct DerivedMux {
 
 impl DerivedMux {
     fn new(inputs: usize) -> Self {
-        Self { inputs, configured: vec![None; inputs] }
+        Self {
+            inputs,
+            configured: vec![None; inputs],
+        }
     }
 
     fn derived_output(&self) -> Caps {
-        match self.configured.first().and_then(|c| c.as_ref()).and_then(|c| c.dims()) {
+        match self
+            .configured
+            .first()
+            .and_then(|c| c.as_ref())
+            .and_then(|c| c.dims())
+        {
             Some((width, height, framerate)) => Caps::RawVideo {
                 format: RawVideoFormat::Nv12,
                 width: width.clone(),
@@ -195,7 +205,9 @@ impl MultiInputElement for DerivedMux {
     }
 
     fn caps_constraint_for_output(&self) -> Result<CapsConstraint<'_>, G2gError> {
-        Ok(CapsConstraint::Produces(CapsSet::one(self.derived_output())))
+        Ok(CapsConstraint::Produces(CapsSet::one(
+            self.derived_output(),
+        )))
     }
 
     fn configure_pipeline(
@@ -238,7 +250,9 @@ async fn mx1_per_input_capschanged_reconfigures_pad_and_is_not_leaked() {
         configured: false,
     };
     let mut mux = InterleaveMux::new(1, rgba(640, 480));
-    let mut snk = ProbeSink { log: Arc::clone(&log) };
+    let mut snk = ProbeSink {
+        log: Arc::clone(&log),
+    };
     let clock = ZeroClock;
 
     {
@@ -281,7 +295,9 @@ async fn mx2_input_derived_output_change_emits_one_downstream_capschanged() {
         configured: false,
     };
     let mut mux = DerivedMux::new(1);
-    let mut snk = ProbeSink { log: Arc::clone(&log) };
+    let mut snk = ProbeSink {
+        log: Arc::clone(&log),
+    };
     let clock = ZeroClock;
 
     {

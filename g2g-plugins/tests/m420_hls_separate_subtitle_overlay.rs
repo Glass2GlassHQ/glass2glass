@@ -21,16 +21,34 @@ use g2g_core::{
 use g2g_plugins::hlssrc::HlsStreamInfo;
 
 fn h264_any() -> Caps {
-    Caps::CompressedVideo { codec: VideoCodec::H264, width: Dim::Any, height: Dim::Any, framerate: Rate::Any }
+    Caps::CompressedVideo {
+        codec: VideoCodec::H264,
+        width: Dim::Any,
+        height: Dim::Any,
+        framerate: Rate::Any,
+    }
 }
 fn raw_video() -> Caps {
-    Caps::RawVideo { format: RawVideoFormat::Nv12, width: Dim::Any, height: Dim::Any, framerate: Rate::Any }
+    Caps::RawVideo {
+        format: RawVideoFormat::Nv12,
+        width: Dim::Any,
+        height: Dim::Any,
+        framerate: Rate::Any,
+    }
 }
 fn aac_any() -> Caps {
-    Caps::Audio { format: AudioFormat::Aac, channels: 0, sample_rate: 0 }
+    Caps::Audio {
+        format: AudioFormat::Aac,
+        channels: 0,
+        sample_rate: 0,
+    }
 }
 fn raw_audio() -> Caps {
-    Caps::Audio { format: AudioFormat::PcmS16Le, channels: 0, sample_rate: 0 }
+    Caps::Audio {
+        format: AudioFormat::PcmS16Le,
+        channels: 0,
+        sample_rate: 0,
+    }
 }
 
 #[derive(Default)]
@@ -41,7 +59,10 @@ impl PadTemplates for NullSink {
     }
 }
 impl AsyncElement for NullSink {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>> where Self: 'a;
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
     fn intercept_caps(&self, c: &Caps) -> Result<Caps, G2gError> {
         Ok(c.clone())
     }
@@ -66,16 +87,26 @@ fn registry() -> Registry {
     let mut reg = Registry::new();
     reg.register(ElementFactory::new(
         "h264stub",
-        Vec::from([PadTemplate::sink(CapsSet::one(h264_any())), PadTemplate::source(CapsSet::one(raw_video()))]),
+        Vec::from([
+            PadTemplate::sink(CapsSet::one(h264_any())),
+            PadTemplate::source(CapsSet::one(raw_video())),
+        ]),
         |_| Box::new(g2g_plugins::identity::IdentityTransform::new()),
     ));
     reg.register(ElementFactory::new(
         "aacstub",
-        Vec::from([PadTemplate::sink(CapsSet::one(aac_any())), PadTemplate::source(CapsSet::one(raw_audio()))]),
+        Vec::from([
+            PadTemplate::sink(CapsSet::one(aac_any())),
+            PadTemplate::source(CapsSet::one(raw_audio())),
+        ]),
         |_| Box::new(g2g_plugins::identity::IdentityTransform::new()),
     ));
-    reg.register_launch(LaunchFactory::of::<NullSink>("autovideosink", || Box::new(NullSink)));
-    reg.register_launch(LaunchFactory::of::<NullSink>("autoaudiosink", || Box::new(NullSink)));
+    reg.register_launch(LaunchFactory::of::<NullSink>("autovideosink", || {
+        Box::new(NullSink)
+    }));
+    reg.register_launch(LaunchFactory::of::<NullSink>("autoaudiosink", || {
+        Box::new(NullSink)
+    }));
     reg
 }
 
@@ -115,21 +146,33 @@ fn builds_a_three_source_overlay() {
     // Video chain: HlsSrc, TsDemuxN, h264 stub, videoconvert(RGBA8), TextOverlayN,
     // videoconvert(NV12), autovideosink = 7. Audio chain: HlsSrc, TsDemuxN, aac
     // stub, autoaudiosink = 4. Subtitle chain: HlsSrc(text), SubParse = 2. = 13.
-    assert_eq!(graph.node_count(), 13, "video+overlay+sink, audio chain, subtitle source+subparse");
+    assert_eq!(
+        graph.node_count(),
+        13,
+        "video+overlay+sink, audio chain, subtitle source+subparse"
+    );
 
     // Exactly one fan-in (the overlay), fed by the video convert and the subtitle
     // SubParse, the two arriving from different sources.
     let counts = inbound_counts(&graph);
     let fan_ins: Vec<_> = counts.values().filter(|&&n| n >= 2).collect();
     assert_eq!(fan_ins.len(), 1, "one fan-in node: the subtitle overlay");
-    assert_eq!(*fan_ins[0], 2, "the overlay joins the video and the WebVTT text stream");
+    assert_eq!(
+        *fan_ins[0], 2,
+        "the overlay joins the video and the WebVTT text stream"
+    );
 
     // Three source nodes with no inbound edges: the video master, the separate audio
     // rendition, and the separate subtitle rendition.
     let has_inbound: std::collections::HashSet<u32> =
         graph.edges().iter().map(|e| e.dst.node.0).collect();
-    let sources = (0..graph.node_count() as u32).filter(|n| !has_inbound.contains(n)).count();
-    assert_eq!(sources, 3, "three independent HLS sources (video master + audio + subtitle)");
+    let sources = (0..graph.node_count() as u32)
+        .filter(|n| !has_inbound.contains(n))
+        .count();
+    assert_eq!(
+        sources, 3,
+        "three independent HLS sources (video master + audio + subtitle)"
+    );
 }
 
 #[test]

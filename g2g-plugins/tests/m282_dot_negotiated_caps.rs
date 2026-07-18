@@ -21,27 +21,48 @@ async fn dot_dump_carries_negotiated_caps() {
     assert_eq!(caps.len(), 2);
     // A CPU pipeline: every edge is System memory.
     assert_eq!(memory.len(), 2);
-    assert!(memory.iter().all(|d| *d == g2g_core::MemoryDomainKind::System));
+    assert!(memory
+        .iter()
+        .all(|d| *d == g2g_core::MemoryDomainKind::System));
 
     let dot = vg.to_dot(
         "pipeline",
         |n| vg.element(n).map(|e| e.log_category().to_string()),
-        &DotAnnotations { edge_caps: Some(&caps), edge_memory: Some(&memory) },
+        &DotAnnotations {
+            edge_caps: Some(&caps),
+            edge_memory: Some(&memory),
+        },
     );
 
     // Both edges carry the chosen caps as their label (videotestsrc defaults to
     // RGBA, which passes through videoconvert to the wildcard sink).
-    assert_eq!(dot.matches("label=\"video/x-raw,format=RGBA").count(), 2, "{dot}");
-    assert!(dot.contains("VideoTestSrc") && dot.contains("FakeSink"), "{dot}");
+    assert_eq!(
+        dot.matches("label=\"video/x-raw,format=RGBA").count(),
+        2,
+        "{dot}"
+    );
+    assert!(
+        dot.contains("VideoTestSrc") && dot.contains("FakeSink"),
+        "{dot}"
+    );
     // A CPU pipeline must not be marked as GPU memory anywhere.
-    assert!(!dot.contains("memory:"), "System edges must not be GPU-marked: {dot}");
+    assert!(
+        !dot.contains("memory:"),
+        "System edges must not be GPU-marked: {dot}"
+    );
 }
 
 #[tokio::test]
 async fn negotiation_failure_is_reported_not_panicked() {
     // videotestsrc (video) into a capsfilter pinned to audio: no overlap.
     let reg = default_registry();
-    let graph = parse_launch(&reg, "videotestsrc ! capsfilter caps=audio/x-raw ! fakesink")
-        .expect("pipeline parses");
-    assert!(negotiate_graph(graph).await.is_err(), "video -> audio must fail to negotiate");
+    let graph = parse_launch(
+        &reg,
+        "videotestsrc ! capsfilter caps=audio/x-raw ! fakesink",
+    )
+    .expect("pipeline parses");
+    assert!(
+        negotiate_graph(graph).await.is_err(),
+        "video -> audio must fail to negotiate"
+    );
 }

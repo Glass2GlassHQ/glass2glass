@@ -190,7 +190,10 @@ impl<const N: usize, const BYTES: usize> JitterBuffer<N, BYTES> {
                 };
                 return Some(Frame::new(
                     MemoryDomain::System(slice),
-                    FrameTiming { pts_ns, ..FrameTiming::default() },
+                    FrameTiming {
+                        pts_ns,
+                        ..FrameTiming::default()
+                    },
                     seq,
                 ));
             }

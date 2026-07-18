@@ -41,18 +41,22 @@ use g2g_core::{
     PipelinePacket, PropError, PropKind, PropValue, PropertySpec, VideoCodec,
 };
 
-use crate::matroska::{MatroskaMuxer, MkvCodec, MkvTrackConfig, MkvTrackSpec};
-use crate::mp4muxn::{asc_from_adts, strip_adts};
 use crate::fmp4mux::{
     avcc_record, avcc_sample, hvcc_record, is_keyframe_nal, parameter_sets, split_annexb,
     vp8_keyframe, vp9_keyframe,
 };
+use crate::matroska::{MatroskaMuxer, MkvCodec, MkvTrackConfig, MkvTrackSpec};
+use crate::mp4muxn::{asc_from_adts, strip_adts};
 
 /// What an input pad carries, learned from its negotiated caps at configure.
 #[derive(Debug, Clone, Copy)]
 enum PadKind {
     Video(VideoCodec),
-    Audio { format: AudioFormat, channels: u8, rate: u32 },
+    Audio {
+        format: AudioFormat,
+        channels: u8,
+        rate: u32,
+    },
 }
 
 /// A track's init data, captured from its first access unit. `param_sets` is the
@@ -61,8 +65,18 @@ enum PadKind {
 /// Opus `OpusHead`).
 #[derive(Debug, Clone)]
 enum TrackInit {
-    Video { codec: VideoCodec, width: u32, height: u32, param_sets: Vec<Vec<u8>> },
-    Audio { format: AudioFormat, channels: u8, rate: u32, config: Vec<u8> },
+    Video {
+        codec: VideoCodec,
+        width: u32,
+        height: u32,
+        param_sets: Vec<Vec<u8>>,
+    },
+    Audio {
+        format: AudioFormat,
+        channels: u8,
+        rate: u32,
+        config: Vec<u8>,
+    },
 }
 
 /// Muxes N elementary streams into one Matroska byte stream, PTS-ordered.
@@ -116,7 +130,9 @@ impl MkvMuxN {
     }
 
     fn output_caps_value() -> Caps {
-        Caps::ByteStream { encoding: ByteStreamEncoding::Matroska }
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::Matroska,
+        }
     }
 
     fn pad_kind_for(caps: &Caps) -> Option<PadKind> {
@@ -129,7 +145,11 @@ impl MkvMuxN {
                 format: format @ (AudioFormat::Aac | AudioFormat::Opus),
                 channels,
                 sample_rate,
-            } => Some(PadKind::Audio { format: *format, channels: *channels, rate: *sample_rate }),
+            } => Some(PadKind::Audio {
+                format: *format,
+                channels: *channels,
+                rate: *sample_rate,
+            }),
             _ => None,
         }
     }
@@ -154,25 +174,42 @@ impl MkvMuxN {
                         // Parameter sets only ride the IDR; a leading P-frame has
                         // none, so wait for the keyframe that carries them.
                         if let Ok(param_sets) = parameter_sets(codec, &nalus) {
-                            let owned: Vec<Vec<u8>> = param_sets.iter().map(|s| s.to_vec()).collect();
-                            self.inits[input] =
-                                Some(TrackInit::Video { codec, width: w, height: h, param_sets: owned });
+                            let owned: Vec<Vec<u8>> =
+                                param_sets.iter().map(|s| s.to_vec()).collect();
+                            self.inits[input] = Some(TrackInit::Video {
+                                codec,
+                                width: w,
+                                height: h,
+                                param_sets: owned,
+                            });
                         }
                     }
                     // VP8/VP9 carry no out-of-band parameter sets; the track is
                     // ready at the first frame (its CodecPrivate stays empty).
                     _ => {
-                        self.inits[input] =
-                            Some(TrackInit::Video { codec, width: w, height: h, param_sets: Vec::new() });
+                        self.inits[input] = Some(TrackInit::Video {
+                            codec,
+                            width: w,
+                            height: h,
+                            param_sets: Vec::new(),
+                        });
                     }
                 }
             }
-            Some(PadKind::Audio { format, channels, rate }) => match format {
+            Some(PadKind::Audio {
+                format,
+                channels,
+                rate,
+            }) => match format {
                 // AAC's AudioSpecificConfig is synthesised from the first ADTS header.
                 AudioFormat::Aac => {
                     if let Some(asc) = asc_from_adts(au) {
-                        self.inits[input] =
-                            Some(TrackInit::Audio { format, channels, rate, config: asc.to_vec() });
+                        self.inits[input] = Some(TrackInit::Audio {
+                            format,
+                            channels,
+                            rate,
+                            config: asc.to_vec(),
+                        });
                     }
                 }
                 // Opus carries its config (OpusHead) out of band, built from the caps.
@@ -204,14 +241,22 @@ impl MkvMuxN {
                 VideoCodec::Vp8 => (au.to_vec(), vp8_keyframe(au)),
                 _ => (au.to_vec(), vp9_keyframe(au)),
             },
-            Some(PadKind::Audio { format: AudioFormat::Aac, .. }) => (strip_adts(au).to_vec(), true),
+            Some(PadKind::Audio {
+                format: AudioFormat::Aac,
+                ..
+            }) => (strip_adts(au).to_vec(), true),
             _ => (au.to_vec(), true),
         }
     }
 
     /// Emit one access unit as its track's SimpleBlock (the muxer prepends the
     /// header + Tracks on the first call, and opens Clusters as time advances).
-    async fn emit_au(&mut self, input: usize, frame: Frame, out: &mut dyn OutputSink) -> Result<(), G2gError> {
+    async fn emit_au(
+        &mut self,
+        input: usize,
+        frame: Frame,
+        out: &mut dyn OutputSink,
+    ) -> Result<(), G2gError> {
         let MemoryDomain::System(slice) = &frame.domain else {
             return Err(G2gError::UnsupportedDomain);
         };
@@ -222,7 +267,10 @@ impl MkvMuxN {
 
         let out_frame = Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-            FrameTiming { pts_ns, ..FrameTiming::default() },
+            FrameTiming {
+                pts_ns,
+                ..FrameTiming::default()
+            },
             self.emitted,
         );
         self.emitted += 1;
@@ -236,7 +284,12 @@ impl MkvMuxN {
 /// or the `OpusHead` for Opus.
 fn track_config(init: &TrackInit) -> MkvTrackConfig {
     match init {
-        TrackInit::Video { codec, width, height, param_sets } => {
+        TrackInit::Video {
+            codec,
+            width,
+            height,
+            param_sets,
+        } => {
             let refs: Vec<&[u8]> = param_sets.iter().map(|v| v.as_slice()).collect();
             let (mkv_codec, codec_private) = match codec {
                 VideoCodec::H265 => (MkvCodec::H265, hvcc_record(&refs)),
@@ -255,7 +308,12 @@ fn track_config(init: &TrackInit) -> MkvTrackConfig {
                 codec_private,
             }
         }
-        TrackInit::Audio { format, channels, rate, config } => {
+        TrackInit::Audio {
+            format,
+            channels,
+            rate,
+            config,
+        } => {
             let mkv_codec = match format {
                 AudioFormat::Opus => MkvCodec::Opus,
                 _ => MkvCodec::Aac,
@@ -289,7 +347,6 @@ fn opus_head(channels: u8, sample_rate: u32) -> Vec<u8> {
     h
 }
 
-
 impl MultiInputElement for MkvMuxN {
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
@@ -304,7 +361,11 @@ impl MultiInputElement for MkvMuxN {
     /// `video_%u` / `audio_%u` / `sink_%u` each claim the next positional slot (the
     /// track type is read from the input's caps, not its index), so a launch line
     /// can name the pads (`m.video_0` / `m.audio_0`) in any order.
-    fn input_pad_index(&self, _req: &g2g_core::runtime::PadRequest, ordinal: usize) -> Option<usize> {
+    fn input_pad_index(
+        &self,
+        _req: &g2g_core::runtime::PadRequest,
+        ordinal: usize,
+    ) -> Option<usize> {
         (ordinal < self.inputs).then_some(ordinal)
     }
 
@@ -321,12 +382,23 @@ impl MultiInputElement for MkvMuxN {
     }
 
     fn caps_constraint_for_output(&self) -> Result<CapsConstraint<'_>, G2gError> {
-        Ok(CapsConstraint::Produces(CapsSet::one(Self::output_caps_value())))
+        Ok(CapsConstraint::Produces(CapsSet::one(
+            Self::output_caps_value(),
+        )))
     }
 
-    fn configure_pipeline(&mut self, input: usize, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+    fn configure_pipeline(
+        &mut self,
+        input: usize,
+        absolute_caps: &Caps,
+    ) -> Result<ConfigureOutcome, G2gError> {
         let kind = Self::pad_kind_for(absolute_caps).ok_or(G2gError::CapsMismatch)?;
-        if let Caps::CompressedVideo { width: Dim::Fixed(w), height: Dim::Fixed(h), .. } = absolute_caps {
+        if let Caps::CompressedVideo {
+            width: Dim::Fixed(w),
+            height: Dim::Fixed(h),
+            ..
+        } = absolute_caps
+        {
             self.dims[input] = (*w, *h);
         }
         self.kinds[input] = Some(kind);
@@ -395,8 +467,11 @@ impl MultiInputElement for MkvMuxN {
                 return Ok(());
             }
             if self.mux.is_none() {
-                let configs: Vec<MkvTrackConfig> =
-                    self.inits.iter().map(|i| track_config(i.as_ref().expect("ready"))).collect();
+                let configs: Vec<MkvTrackConfig> = self
+                    .inits
+                    .iter()
+                    .map(|i| track_config(i.as_ref().expect("ready")))
+                    .collect();
                 self.mux = Some(MatroskaMuxer::new_multi(configs));
             }
             // Release AUs now safe to emit, in global PTS order.
@@ -462,13 +537,20 @@ mod tests {
     }
 
     fn audio_caps() -> Caps {
-        Caps::Audio { format: AudioFormat::Aac, channels: 2, sample_rate: 48_000 }
+        Caps::Audio {
+            format: AudioFormat::Aac,
+            channels: 2,
+            sample_rate: 48_000,
+        }
     }
 
     fn frame(data: Vec<u8>, pts_ns: u64) -> PipelinePacket {
         PipelinePacket::DataFrame(Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-            FrameTiming { pts_ns, ..FrameTiming::default() },
+            FrameTiming {
+                pts_ns,
+                ..FrameTiming::default()
+            },
             0,
         ))
     }
@@ -502,12 +584,24 @@ mod tests {
         let mut sink = CaptureSink::default();
         // Interleave a video IDR and an audio frame; the merge needs both inputs
         // to have queued before it releases, so push both then a second each.
-        mux.process(0, frame(h264_idr(), 0), &mut sink).await.unwrap();
-        mux.process(1, frame(aac_adts(), 0), &mut sink).await.unwrap();
-        mux.process(0, frame(h264_idr(), 33_000_000), &mut sink).await.unwrap();
-        mux.process(1, frame(aac_adts(), 21_000_000), &mut sink).await.unwrap();
-        mux.process(0, PipelinePacket::Eos, &mut sink).await.unwrap();
-        mux.process(1, PipelinePacket::Eos, &mut sink).await.unwrap();
+        mux.process(0, frame(h264_idr(), 0), &mut sink)
+            .await
+            .unwrap();
+        mux.process(1, frame(aac_adts(), 0), &mut sink)
+            .await
+            .unwrap();
+        mux.process(0, frame(h264_idr(), 33_000_000), &mut sink)
+            .await
+            .unwrap();
+        mux.process(1, frame(aac_adts(), 21_000_000), &mut sink)
+            .await
+            .unwrap();
+        mux.process(0, PipelinePacket::Eos, &mut sink)
+            .await
+            .unwrap();
+        mux.process(1, PipelinePacket::Eos, &mut sink)
+            .await
+            .unwrap();
 
         // Demux the produced Matroska back: two tracks (H.264 video + AAC audio).
         let mut d = MatroskaDemuxer::new();
@@ -523,13 +617,21 @@ mod tests {
 
         // A Cues index is written at EOS, indexing the video keyframes (track 1),
         // so the muxed A/V stream is seekable (M375).
-        assert!(!d.cues().is_empty(), "Cues index written for the video keyframes");
+        assert!(
+            !d.cues().is_empty(),
+            "Cues index written for the video keyframes"
+        );
 
         // CodecPrivate is present for both tracks (avcC record, AAC ASC): the
         // bytes carry the avcC config-version byte and the A_AAC CodecID.
-        assert!(sink.bytes.windows(5).any(|w| w == b"A_AAC"), "AAC CodecID written");
         assert!(
-            sink.bytes.windows(4).any(|w| w == b"\x63\xA2\x00\x00" || w[0] == 0x63 && w[1] == 0xA2),
+            sink.bytes.windows(5).any(|w| w == b"A_AAC"),
+            "AAC CodecID written"
+        );
+        assert!(
+            sink.bytes
+                .windows(4)
+                .any(|w| w == b"\x63\xA2\x00\x00" || w[0] == 0x63 && w[1] == 0xA2),
             "CodecPrivate element present"
         );
         assert!(mux.emitted() >= 4, "all four access units muxed");
@@ -541,18 +643,31 @@ mod tests {
     #[tokio::test]
     async fn streamable_property_omits_cues_on_the_fan_in_muxer() {
         let mut mux = MkvMuxN::new(2);
-        mux.set_property("streamable", PropValue::Bool(true)).unwrap();
+        mux.set_property("streamable", PropValue::Bool(true))
+            .unwrap();
         assert_eq!(mux.get_property("streamable"), Some(PropValue::Bool(true)));
         mux.configure_pipeline(0, &video_caps()).unwrap();
         mux.configure_pipeline(1, &audio_caps()).unwrap();
 
         let mut sink = CaptureSink::default();
-        mux.process(0, frame(h264_idr(), 0), &mut sink).await.unwrap();
-        mux.process(1, frame(aac_adts(), 0), &mut sink).await.unwrap();
-        mux.process(0, frame(h264_idr(), 33_000_000), &mut sink).await.unwrap();
-        mux.process(1, frame(aac_adts(), 21_000_000), &mut sink).await.unwrap();
-        mux.process(0, PipelinePacket::Eos, &mut sink).await.unwrap();
-        mux.process(1, PipelinePacket::Eos, &mut sink).await.unwrap();
+        mux.process(0, frame(h264_idr(), 0), &mut sink)
+            .await
+            .unwrap();
+        mux.process(1, frame(aac_adts(), 0), &mut sink)
+            .await
+            .unwrap();
+        mux.process(0, frame(h264_idr(), 33_000_000), &mut sink)
+            .await
+            .unwrap();
+        mux.process(1, frame(aac_adts(), 21_000_000), &mut sink)
+            .await
+            .unwrap();
+        mux.process(0, PipelinePacket::Eos, &mut sink)
+            .await
+            .unwrap();
+        mux.process(1, PipelinePacket::Eos, &mut sink)
+            .await
+            .unwrap();
 
         // Cues element id is 0x1C53BB6B; it must not appear in streamable mode.
         assert!(
@@ -565,14 +680,35 @@ mod tests {
         plain.configure_pipeline(0, &video_caps()).unwrap();
         plain.configure_pipeline(1, &audio_caps()).unwrap();
         let mut sink2 = CaptureSink::default();
-        plain.process(0, frame(h264_idr(), 0), &mut sink2).await.unwrap();
-        plain.process(1, frame(aac_adts(), 0), &mut sink2).await.unwrap();
-        plain.process(0, frame(h264_idr(), 33_000_000), &mut sink2).await.unwrap();
-        plain.process(1, frame(aac_adts(), 21_000_000), &mut sink2).await.unwrap();
-        plain.process(0, PipelinePacket::Eos, &mut sink2).await.unwrap();
-        plain.process(1, PipelinePacket::Eos, &mut sink2).await.unwrap();
+        plain
+            .process(0, frame(h264_idr(), 0), &mut sink2)
+            .await
+            .unwrap();
+        plain
+            .process(1, frame(aac_adts(), 0), &mut sink2)
+            .await
+            .unwrap();
+        plain
+            .process(0, frame(h264_idr(), 33_000_000), &mut sink2)
+            .await
+            .unwrap();
+        plain
+            .process(1, frame(aac_adts(), 21_000_000), &mut sink2)
+            .await
+            .unwrap();
+        plain
+            .process(0, PipelinePacket::Eos, &mut sink2)
+            .await
+            .unwrap();
+        plain
+            .process(1, PipelinePacket::Eos, &mut sink2)
+            .await
+            .unwrap();
         assert!(
-            sink2.bytes.windows(4).any(|w| w == [0x1C, 0x53, 0xBB, 0x6B]),
+            sink2
+                .bytes
+                .windows(4)
+                .any(|w| w == [0x1C, 0x53, 0xBB, 0x6B]),
             "default mode writes the Cues index"
         );
     }
@@ -601,7 +737,11 @@ mod tests {
     }
 
     fn opus_caps() -> Caps {
-        Caps::Audio { format: AudioFormat::Opus, channels: 2, sample_rate: 48_000 }
+        Caps::Audio {
+            format: AudioFormat::Opus,
+            channels: 2,
+            sample_rate: 48_000,
+        }
     }
 
     /// A VP9 frame whose uncompressed header byte marks it a key frame (marker
@@ -632,17 +772,35 @@ mod tests {
         let opus1: Vec<u8> = alloc::vec![0xFC, 0xBE, 0xEF];
 
         let mut sink = CaptureSink::default();
-        mux.process(0, frame(vp9_key(), 0), &mut sink).await.unwrap();
-        mux.process(1, frame(opus0.clone(), 0), &mut sink).await.unwrap();
-        mux.process(0, frame(vp9_key(), 20_000_000), &mut sink).await.unwrap();
-        mux.process(1, frame(opus1.clone(), 20_000_000), &mut sink).await.unwrap();
-        mux.process(0, PipelinePacket::Eos, &mut sink).await.unwrap();
-        mux.process(1, PipelinePacket::Eos, &mut sink).await.unwrap();
+        mux.process(0, frame(vp9_key(), 0), &mut sink)
+            .await
+            .unwrap();
+        mux.process(1, frame(opus0.clone(), 0), &mut sink)
+            .await
+            .unwrap();
+        mux.process(0, frame(vp9_key(), 20_000_000), &mut sink)
+            .await
+            .unwrap();
+        mux.process(1, frame(opus1.clone(), 20_000_000), &mut sink)
+            .await
+            .unwrap();
+        mux.process(0, PipelinePacket::Eos, &mut sink)
+            .await
+            .unwrap();
+        mux.process(1, PipelinePacket::Eos, &mut sink)
+            .await
+            .unwrap();
 
         // VP9 + Opus are both WebM-subset codecs, so the DocType is `webm`, and the
         // Opus track carries an `OpusHead` CodecPrivate.
-        assert!(sink.bytes.windows(4).any(|w| w == b"webm"), "WebM DocType for VP9 + Opus");
-        assert!(sink.bytes.windows(8).any(|w| w == b"OpusHead"), "Opus CodecPrivate written");
+        assert!(
+            sink.bytes.windows(4).any(|w| w == b"webm"),
+            "WebM DocType for VP9 + Opus"
+        );
+        assert!(
+            sink.bytes.windows(8).any(|w| w == b"OpusHead"),
+            "Opus CodecPrivate written"
+        );
 
         let mut d = MatroskaDemuxer::new();
         d.push_data(&sink.bytes);
@@ -657,7 +815,11 @@ mod tests {
         let video: Vec<_> = frames.iter().filter(|f| f.track == 1).collect();
         let audio: Vec<_> = frames.iter().filter(|f| f.track == 2).collect();
         assert_eq!(video.len(), 2, "two VP9 frames");
-        assert_eq!(video[0].data, vp9_key(), "VP9 frame stored verbatim (not reframed)");
+        assert_eq!(
+            video[0].data,
+            vp9_key(),
+            "VP9 frame stored verbatim (not reframed)"
+        );
         assert!(video[0].keyframe, "the key frame is flagged");
         assert_eq!(audio.len(), 2, "two Opus packets");
         assert_eq!(audio[0].data, opus0, "Opus packet stored raw");

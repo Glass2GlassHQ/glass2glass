@@ -81,7 +81,8 @@ fn nv12_any() -> CapsSet {
 }
 
 impl AsyncElement for CudaDownload {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -101,10 +102,7 @@ impl AsyncElement for CudaDownload {
         CapsConstraint::Identity(nv12_any())
     }
 
-    fn configure_pipeline(
-        &mut self,
-        absolute_caps: &Caps,
-    ) -> Result<ConfigureOutcome, G2gError> {
+    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         // The solver should only ever hand us NV12; fail loud otherwise (a
         // negotiation bug, not a runtime state).
         if !nv12_any().accepts(absolute_caps) {
@@ -255,7 +253,8 @@ impl CudaUpload {
 }
 
 impl AsyncElement for CudaUpload {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -273,7 +272,12 @@ impl AsyncElement for CudaUpload {
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        let Caps::RawVideo { format: RawVideoFormat::Nv12, width, height, .. } = absolute_caps
+        let Caps::RawVideo {
+            format: RawVideoFormat::Nv12,
+            width,
+            height,
+            ..
+        } = absolute_caps
         else {
             return Err(G2gError::CapsMismatch);
         };
@@ -399,12 +403,26 @@ unsafe fn upload_nv12(
         let mut pitch: usize = 0;
         // Widest row across the two planes (chroma_w == w here) sizes the pitch;
         // element size 16 matches NVENC's preferred alignment.
-        let mut result =
-            check(ffi::cu_mem_alloc_pitch(&mut dptr, &mut pitch, w.max(chroma_w), h + chroma_h, 16));
+        let mut result = check(ffi::cu_mem_alloc_pitch(
+            &mut dptr,
+            &mut pitch,
+            w.max(chroma_w),
+            h + chroma_h,
+            16,
+        ));
         if result.is_ok() {
             let chroma_dst = dptr + (pitch * h) as u64;
-            result = htod_plane(src.as_ptr(), 0, w, w, h, dptr, pitch)
-                .and_then(|()| htod_plane(src.as_ptr(), w * h, chroma_w, w, chroma_h, chroma_dst, pitch));
+            result = htod_plane(src.as_ptr(), 0, w, w, h, dptr, pitch).and_then(|()| {
+                htod_plane(
+                    src.as_ptr(),
+                    w * h,
+                    chroma_w,
+                    w,
+                    chroma_h,
+                    chroma_dst,
+                    pitch,
+                )
+            });
             if result.is_err() {
                 let _ = ffi::cu_mem_free(dptr);
             }
@@ -420,7 +438,10 @@ unsafe fn upload_nv12(
             width,
             height,
             ctx.0,
-            Arc::new(DevAlloc { dptr, ctx: Arc::clone(ctx) }),
+            Arc::new(DevAlloc {
+                dptr,
+                ctx: Arc::clone(ctx),
+            }),
         ))
     }
 }
@@ -469,10 +490,7 @@ unsafe fn htod_plane(
 /// CUDA<->System pair: [`CudaDownload`] (`Cuda -> System`) and [`CudaUpload`]
 /// (`System -> Cuda`). The factory the M354 auto-plug calls; see
 /// [`auto_plug_cuda_converters`].
-pub fn cuda_domain_converter(
-    from: MemoryDomainKind,
-    to: MemoryDomainKind,
-) -> Option<GraphNode> {
+pub fn cuda_domain_converter(from: MemoryDomainKind, to: MemoryDomainKind) -> Option<GraphNode> {
     match (from, to) {
         (MemoryDomainKind::Cuda, MemoryDomainKind::System) => {
             Some(GraphNode::element(CudaDownload::new()))

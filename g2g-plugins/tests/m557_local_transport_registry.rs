@@ -16,15 +16,21 @@ use g2g_plugins::registry::default_registry;
 fn local_cuda_pair_registered_with_location() {
     let reg = default_registry();
 
-    let mut src = reg.make_source("localcudasrc").expect("localcudasrc registered");
-    src.set_property("location", PropValue::Str("/tmp/g2g-test-cuda.sock".into())).unwrap();
+    let mut src = reg
+        .make_source("localcudasrc")
+        .expect("localcudasrc registered");
+    src.set_property("location", PropValue::Str("/tmp/g2g-test-cuda.sock".into()))
+        .unwrap();
     assert_eq!(
         src.get_property("location"),
         Some(PropValue::Str("/tmp/g2g-test-cuda.sock".into()))
     );
 
-    let mut sink = reg.make_element("localcudasink").expect("localcudasink registered");
-    sink.set_property("location", PropValue::Str("/tmp/g2g-test-cuda.sock".into())).unwrap();
+    let mut sink = reg
+        .make_element("localcudasink")
+        .expect("localcudasink registered");
+    sink.set_property("location", PropValue::Str("/tmp/g2g-test-cuda.sock".into()))
+        .unwrap();
     assert_eq!(
         sink.get_property("location"),
         Some(PropValue::Str("/tmp/g2g-test-cuda.sock".into()))
@@ -41,14 +47,18 @@ fn dmabuf_pair_registered_with_location() {
     let reg = default_registry();
 
     let mut src = reg.make_source("dmabufsrc").expect("dmabufsrc registered");
-    src.set_property("location", PropValue::Str("/tmp/g2g-test-dma.sock".into())).unwrap();
+    src.set_property("location", PropValue::Str("/tmp/g2g-test-dma.sock".into()))
+        .unwrap();
     assert_eq!(
         src.get_property("location"),
         Some(PropValue::Str("/tmp/g2g-test-dma.sock".into()))
     );
 
-    let mut sink = reg.make_element("dmabufsink").expect("dmabufsink registered");
-    sink.set_property("location", PropValue::Str("/tmp/g2g-test-dma.sock".into())).unwrap();
+    let mut sink = reg
+        .make_element("dmabufsink")
+        .expect("dmabufsink registered");
+    sink.set_property("location", PropValue::Str("/tmp/g2g-test-dma.sock".into()))
+        .unwrap();
     assert_eq!(
         sink.get_property("location"),
         Some(PropValue::Str("/tmp/g2g-test-dma.sock".into()))

@@ -69,11 +69,11 @@ pub mod aggregator;
 // Conformance vocabulary + derived maturity (M614): a maturity level computed from
 // evidence produced by passing conformance cases, never hand-authored. Pure.
 #[cfg(feature = "alloc")]
+pub mod clock;
+#[cfg(feature = "alloc")]
 pub mod conformance;
 #[cfg(feature = "alloc")]
 pub mod format_element;
-#[cfg(feature = "alloc")]
-pub mod clock;
 // Copy / allocation plan (M613): static memory-domain path analysis over a
 // negotiated graph. Pure (like `dot`); the runner extracts its flat inputs.
 #[cfg(feature = "alloc")]
@@ -119,47 +119,19 @@ pub mod slot;
 #[cfg(feature = "alloc")]
 pub use aggregator::InputAggregator;
 pub use caps::{
-    AudioFormat, ByteStreamEncoding, Caps, Dim, PassthroughFields, Rate, TensorDType, TensorLayout,
-    TensorShape, TextFormat, VideoCodec, RawVideoFormat, ANY_CHANNELS, ANY_SAMPLE_RATE,
+    AudioFormat, ByteStreamEncoding, Caps, Dim, PassthroughFields, Rate, RawVideoFormat,
+    TensorDType, TensorLayout, TensorShape, TextFormat, VideoCodec, ANY_CHANNELS, ANY_SAMPLE_RATE,
 };
 // `CapsSet` (negotiation-time alternatives) needs alloc; `TensorShape` is
 // fixed-rank inline (M636) and part of the no-alloc subset above.
 #[cfg(feature = "alloc")]
 pub use caps::CapsSet;
-#[cfg(feature = "alloc")]
-pub use clock::{
-    elect_clock, AsyncClock, ClockCandidate, ClockPriority, ClockSync, PipelineClock,
-};
-pub use mediaclock::MediaClock;
 #[cfg(feature = "runtime")]
 pub use clock::DriftClock;
 #[cfg(feature = "std")]
 pub use clock::MonotonicClock;
-#[cfg(feature = "runtime")]
-pub use ptp::{
-    ExchangeResult, PtpClock, PtpHeader, PtpMessageType, PtpServo, PtpSlave, PtpState, SlaveAction,
-};
 #[cfg(feature = "alloc")]
-pub use element::{
-    AsyncElement, ConfigureOutcome, ElementBound, OutputSink, PushOutcome, QosMessage, Reconfigure,
-};
-pub use error::{G2gError, HardwareError};
-#[cfg(feature = "alloc")]
-pub use format_element::{
-    legacy_sink_constraint, legacy_transform_constraint, CapsConstraint, CapsPreferences,
-    FormatElement,
-};
-pub use frame::{Frame, FrameTiming, PipelinePacket};
-pub use meta::FrameMetaSet;
-#[cfg(feature = "alloc")]
-pub use property::{
-    ElementMetadata, PropError, PropFlags, PropKind, PropValue, PropertySpec,
-};
-#[cfg(feature = "metadata")]
-pub use meta::{
-    AnalyticsMeta, AnalyticsNode, BBox, Blob, BlobMeta, Classification, FrameMeta, ObjectDetection,
-    Propagation, Relation, RelationKind, Tracking, Transform,
-};
+pub use clock::{elect_clock, AsyncClock, ClockCandidate, ClockPriority, ClockSync, PipelineClock};
 #[cfg(feature = "alloc")]
 pub use conformance::{
     ConformanceDimension, ConformanceReport, Evidence, MaturityLevel, MaturityRecord,
@@ -172,11 +144,35 @@ pub use copyplan::{
 #[cfg(feature = "alloc")]
 pub use dot::DotAnnotations;
 #[cfg(feature = "alloc")]
+pub use element::{
+    AsyncElement, ConfigureOutcome, ElementBound, OutputSink, PushOutcome, QosMessage, Reconfigure,
+};
+pub use error::{G2gError, HardwareError};
+#[cfg(feature = "alloc")]
+pub use format_element::{
+    legacy_sink_constraint, legacy_transform_constraint, CapsConstraint, CapsPreferences,
+    FormatElement,
+};
+pub use frame::{Frame, FrameTiming, PipelinePacket};
+#[cfg(feature = "alloc")]
 pub use graph::{
-    Bin, BinInstance, Demux, Edge, Graph, GraphError, Muxer, NodeId, NodeIdOffset, NodeKind, PadDir,
-    PadId, Tee, ValidatedGraph,
+    Bin, BinInstance, Demux, Edge, Graph, GraphError, Muxer, NodeId, NodeIdOffset, NodeKind,
+    PadDir, PadId, Tee, ValidatedGraph,
 };
 pub use link::LinkPolicy;
+pub use mediaclock::MediaClock;
+pub use meta::FrameMetaSet;
+#[cfg(feature = "metadata")]
+pub use meta::{
+    AnalyticsMeta, AnalyticsNode, BBox, Blob, BlobMeta, Classification, FrameMeta, ObjectDetection,
+    Propagation, Relation, RelationKind, Tracking, Transform,
+};
+#[cfg(feature = "alloc")]
+pub use property::{ElementMetadata, PropError, PropFlags, PropKind, PropValue, PropertySpec};
+#[cfg(feature = "runtime")]
+pub use ptp::{
+    ExchangeResult, PtpClock, PtpHeader, PtpMessageType, PtpServo, PtpSlave, PtpState, SlaveAction,
+};
 // The heap-free memory subset: the domain enum + its discriminant / set, and the
 // `System` slice (whose `Foreign` variant the StaticLendRing lends zero-copy).
 pub use memory::{DomainSet, MemoryDomain, MemoryDomainKind, SystemSlice};
@@ -187,32 +183,32 @@ pub use memory::{
     OwnedVulkanTexture, OwnedWebGPUBuffer, OwnedWebGPUExternalTexture, OwnedWgpuBuffer,
     OwnedWgpuTexture, SyncFd, SystemView, WebGPUKeepAlive, WgpuBufferKeepAlive, WgpuKeepAlive,
 };
-pub use tensor::{TensorView, MAX_TENSOR_RANK};
-pub use time::{RefNs, RtpTs, TaiNs};
-#[cfg(feature = "alloc")]
-pub use wire::{
-    decode_packet, encode_packet, raw_format_from_u8, raw_format_to_u8, WireError, WIRE_VERSION,
-};
 pub use metrics::{LatencyHistogram, LatencySnapshot};
 pub use query::{AllocationParams, LatencyReport};
 pub use rtp::{RtpHeader, RtpParsed, RTP_HEADER_LEN};
 pub use segment::{Seek, SeekFlags, SeekType, Segment};
+pub use spsc::{Overrun, SpscCaptureSrc, SpscFrameRing};
 pub use state::{PipelineState, StateChangeReturn};
 pub use staticelem::{
     drive_ready, run_source_sink, run_source_transform_sink, run_sources_fanin_sink,
     step_source_sink, Chain, SinkChain, SourceChain, StaticFanIn2, StaticSink, StaticSource,
     StaticTransform, Step,
 };
-pub use spsc::{Overrun, SpscCaptureSrc, SpscFrameRing};
+pub use staticpool::{RingSlot, StaticAcquire, StaticBufferPool, StaticLendRing, StaticPooled};
+#[cfg(feature = "alloc")]
+pub use stream::{Stream, StreamCollection, StreamType};
 pub use supervise::{
     run_supervised, step_supervised, FaultPolicy, NoWatchdog, Recover, Recovery, RetryThenReset,
     RunOutcome, SkipBounded, Supervised, SupervisorReport, Watchdog, MAX_ATTEMPTS,
 };
-pub use staticpool::{RingSlot, StaticAcquire, StaticBufferPool, StaticLendRing, StaticPooled};
-#[cfg(feature = "alloc")]
-pub use stream::{Stream, StreamCollection, StreamType};
 #[cfg(feature = "alloc")]
 pub use tag::{Tag, TagList};
+pub use tensor::{TensorView, MAX_TENSOR_RANK};
+pub use time::{RefNs, RtpTs, TaiNs};
+#[cfg(feature = "alloc")]
+pub use wire::{
+    decode_packet, encode_packet, raw_format_from_u8, raw_format_to_u8, WireError, WIRE_VERSION,
+};
 
 #[cfg(feature = "runtime")]
 pub use pool::{BufferPool, PooledBuffer};
@@ -231,8 +227,8 @@ pub use pad_template::{
 #[cfg(feature = "runtime")]
 pub use fanout::{
     DuplexInbound, Gate, GateHandle, Merger, MergerHandle, MultiDuplexSession, MultiInputElement,
-    MultiOutputElement, MultiOutputSink, MultiOutputSource, MultiSenderSink, ReverseChannel, Router,
-    RouterHandle,
+    MultiOutputElement, MultiOutputSink, MultiOutputSource, MultiSenderSink, ReverseChannel,
+    Router, RouterHandle,
 };
 
 #[cfg(feature = "dyn-slot")]

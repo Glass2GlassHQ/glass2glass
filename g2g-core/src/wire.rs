@@ -152,7 +152,9 @@ impl<'a> Reader<'a> {
     }
     fn u64(&mut self) -> Result<u64, WireError> {
         let b = self.take(8)?;
-        Ok(u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]))
+        Ok(u64::from_le_bytes([
+            b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+        ]))
     }
     fn bool(&mut self) -> Result<bool, WireError> {
         Ok(self.u8()? != 0)
@@ -366,7 +368,10 @@ fn put_dim(w: &mut Writer, d: &Dim) {
 fn get_dim(r: &mut Reader) -> Result<Dim, WireError> {
     Ok(match r.u8()? {
         0 => Dim::Any,
-        1 => Dim::Range { min: r.u32()?, max: r.u32()? },
+        1 => Dim::Range {
+            min: r.u32()?,
+            max: r.u32()?,
+        },
         2 => Dim::Fixed(r.u32()?),
         _ => return Err(WireError::BadTag),
     })
@@ -389,7 +394,10 @@ fn put_rate(w: &mut Writer, rt: &Rate) {
 fn get_rate(r: &mut Reader) -> Result<Rate, WireError> {
     Ok(match r.u8()? {
         0 => Rate::Any,
-        1 => Rate::Range { min_q16: r.u32()?, max_q16: r.u32()? },
+        1 => Rate::Range {
+            min_q16: r.u32()?,
+            max_q16: r.u32()?,
+        },
         2 => Rate::Fixed(r.u32()?),
         _ => return Err(WireError::BadTag),
     })
@@ -399,27 +407,45 @@ fn get_rate(r: &mut Reader) -> Result<Rate, WireError> {
 
 fn put_caps(w: &mut Writer, c: &Caps) {
     match c {
-        Caps::CompressedVideo { codec, width, height, framerate } => {
+        Caps::CompressedVideo {
+            codec,
+            width,
+            height,
+            framerate,
+        } => {
             w.u8(0);
             w.u8(video_codec_to_u8(*codec));
             put_dim(w, width);
             put_dim(w, height);
             put_rate(w, framerate);
         }
-        Caps::RawVideo { format, width, height, framerate } => {
+        Caps::RawVideo {
+            format,
+            width,
+            height,
+            framerate,
+        } => {
             w.u8(1);
             w.u8(raw_format_to_u8(*format));
             put_dim(w, width);
             put_dim(w, height);
             put_rate(w, framerate);
         }
-        Caps::Audio { format, channels, sample_rate } => {
+        Caps::Audio {
+            format,
+            channels,
+            sample_rate,
+        } => {
             w.u8(2);
             w.u8(audio_format_to_u8(*format));
             w.u8(*channels);
             w.u32(*sample_rate);
         }
-        Caps::Tensor { dtype, shape, layout } => {
+        Caps::Tensor {
+            dtype,
+            shape,
+            layout,
+        } => {
             w.u8(3);
             w.u8(dtype_to_u8(*dtype));
             w.u32(shape.dims().len() as u32);
@@ -471,10 +497,18 @@ fn get_caps(r: &mut Reader) -> Result<Caps, WireError> {
             }
             let layout = layout_from_u8(r.u8()?)?;
             let shape = TensorShape::from_slice(&dims[..n]).ok_or(WireError::BadTag)?;
-            Caps::Tensor { dtype, shape, layout }
+            Caps::Tensor {
+                dtype,
+                shape,
+                layout,
+            }
         }
-        4 => Caps::ByteStream { encoding: bytestream_from_u8(r.u8()?)? },
-        5 => Caps::Text { format: text_format_from_u8(r.u8()?)? },
+        4 => Caps::ByteStream {
+            encoding: bytestream_from_u8(r.u8()?)?,
+        },
+        5 => Caps::Text {
+            format: text_format_from_u8(r.u8()?)?,
+        },
         _ => return Err(WireError::BadTag),
     })
 }
@@ -527,7 +561,16 @@ fn get_segment(r: &mut Reader) -> Result<Segment, WireError> {
     let time = r.u64()?;
     let position = r.u64()?;
     let key_units_only = r.bool()?;
-    Ok(Segment { rate, applied_rate, base, start, stop, time, position, key_units_only })
+    Ok(Segment {
+        rate,
+        applied_rate,
+        base,
+        start,
+        stop,
+        time,
+        position,
+        key_units_only,
+    })
 }
 
 // ---- MemoryDomain (CPU only) ----
@@ -556,7 +599,9 @@ fn get_domain(r: &mut Reader) -> Result<MemoryDomain, WireError> {
     match r.u8()? {
         DOMAIN_SYSTEM => {
             let bytes = r.bytes()?;
-            Ok(MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())))
+            Ok(MemoryDomain::System(SystemSlice::from_boxed(
+                bytes.into_boxed_slice(),
+            )))
         }
         _ => Err(WireError::BadTag),
     }
@@ -660,7 +705,12 @@ fn get_meta(r: &mut Reader) -> Result<FrameMetaSet, WireError> {
                 for _ in 0..n {
                     let node = match r.u8()? {
                         0 => AnalyticsNode::Detection(ObjectDetection {
-                            bbox: BBox { x: r.f32()?, y: r.f32()?, w: r.f32()?, h: r.f32()? },
+                            bbox: BBox {
+                                x: r.f32()?,
+                                y: r.f32()?,
+                                w: r.f32()?,
+                                h: r.f32()?,
+                            },
                             label: r.u32()?,
                             confidence: r.f32()?,
                         }),
@@ -668,7 +718,9 @@ fn get_meta(r: &mut Reader) -> Result<FrameMetaSet, WireError> {
                             label: r.u32()?,
                             confidence: r.f32()?,
                         }),
-                        2 => AnalyticsNode::Tracking(Tracking { object_id: r.u64()? }),
+                        2 => AnalyticsNode::Tracking(Tracking {
+                            object_id: r.u64()?,
+                        }),
                         _ => return Err(WireError::BadTag),
                     };
                     a.nodes.push(node);
@@ -687,7 +739,10 @@ fn get_meta(r: &mut Reader) -> Result<FrameMetaSet, WireError> {
                 let mut b = BlobMeta::new();
                 let n = r.u32()? as usize;
                 for _ in 0..n {
-                    b.blobs.push(Blob { header: r.str()?, payload: r.bytes()? });
+                    b.blobs.push(Blob {
+                        header: r.str()?,
+                        payload: r.bytes()?,
+                    });
                 }
                 set.attach(b);
             }
@@ -758,7 +813,12 @@ pub fn decode_packet(bytes: &[u8]) -> Result<PipelinePacket, WireError> {
             let sequence = r.u64()?;
             let domain = get_domain(&mut r)?;
             let meta = get_meta(&mut r)?;
-            PipelinePacket::DataFrame(Frame { domain, timing, sequence, meta })
+            PipelinePacket::DataFrame(Frame {
+                domain,
+                timing,
+                sequence,
+                meta,
+            })
         }
         PKT_EOS => PipelinePacket::Eos,
         PKT_FLUSH => PipelinePacket::Flush,
@@ -783,7 +843,10 @@ mod tests {
             Caps::CompressedVideo {
                 codec: VideoCodec::H265,
                 width: Dim::Fixed(1920),
-                height: Dim::Range { min: 480, max: 1080 },
+                height: Dim::Range {
+                    min: 480,
+                    max: 1080,
+                },
                 framerate: Rate::Fixed(30 << 16),
             },
             Caps::RawVideo {
@@ -792,14 +855,22 @@ mod tests {
                 height: Dim::Fixed(480),
                 framerate: Rate::Any,
             },
-            Caps::Audio { format: AudioFormat::Opus, channels: 2, sample_rate: 48_000 },
+            Caps::Audio {
+                format: AudioFormat::Opus,
+                channels: 2,
+                sample_rate: 48_000,
+            },
             Caps::Tensor {
                 dtype: TensorDType::F32,
                 shape: TensorShape::new([1, 3, 224, 224]),
                 layout: TensorLayout::Nchw,
             },
-            Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs },
-            Caps::Text { format: TextFormat::WebVtt },
+            Caps::ByteStream {
+                encoding: ByteStreamEncoding::MpegTs,
+            },
+            Caps::Text {
+                format: TextFormat::WebVtt,
+            },
         ];
         for caps in cases {
             let p = PipelinePacket::CapsChanged(caps.clone());
@@ -856,9 +927,7 @@ mod tests {
             keyframe: true,
         };
         let frame = Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(
-                bytes.clone().into_boxed_slice(),
-            )),
+            domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.clone().into_boxed_slice())),
             timing,
             sequence: 12_345,
             meta: FrameMetaSet::new(),
@@ -878,8 +947,14 @@ mod tests {
 
     #[test]
     fn control_packets_round_trip() {
-        assert!(matches!(roundtrip(&PipelinePacket::Eos), PipelinePacket::Eos));
-        assert!(matches!(roundtrip(&PipelinePacket::Flush), PipelinePacket::Flush));
+        assert!(matches!(
+            roundtrip(&PipelinePacket::Eos),
+            PipelinePacket::Eos
+        ));
+        assert!(matches!(
+            roundtrip(&PipelinePacket::Flush),
+            PipelinePacket::Flush
+        ));
         let seg = Segment {
             rate: 2.0,
             applied_rate: 1.0,
@@ -905,11 +980,7 @@ mod tests {
         // I/O), and the Drop `close(-1)` is a harmless no-op. This exercises the
         // encode refusal of a device domain, not real DMABUF handling.
         let dmabuf = unsafe { crate::memory::OwnedDmaBuf::from_raw(-1, 0, 0) };
-        let frame = Frame::new(
-            MemoryDomain::DmaBuf(dmabuf),
-            FrameTiming::default(),
-            0,
-        );
+        let frame = Frame::new(MemoryDomain::DmaBuf(dmabuf), FrameTiming::default(), 0);
         assert_eq!(
             encode_packet(&PipelinePacket::DataFrame(frame)),
             Err(WireError::UnsupportedDomain)
@@ -920,9 +991,15 @@ mod tests {
     fn truncated_and_bad_version_are_rejected() {
         assert!(matches!(decode_packet(&[]), Err(WireError::Truncated)));
         // Wrong version byte.
-        assert!(matches!(decode_packet(&[WIRE_VERSION + 1, PKT_EOS]), Err(WireError::BadTag)));
+        assert!(matches!(
+            decode_packet(&[WIRE_VERSION + 1, PKT_EOS]),
+            Err(WireError::BadTag)
+        ));
         // Right version, unknown packet tag.
-        assert!(matches!(decode_packet(&[WIRE_VERSION, 250]), Err(WireError::BadTag)));
+        assert!(matches!(
+            decode_packet(&[WIRE_VERSION, 250]),
+            Err(WireError::BadTag)
+        ));
         // A CapsChanged header with the caps body cut off.
         let mut bytes = encode_packet(&PipelinePacket::CapsChanged(Caps::Text {
             format: TextFormat::Utf8,
@@ -963,7 +1040,12 @@ mod tests {
         };
         let mut analytics = AnalyticsMeta::new();
         let d = analytics.add_detection(ObjectDetection {
-            bbox: BBox { x: 0.1, y: 0.2, w: 0.3, h: 0.4 },
+            bbox: BBox {
+                x: 0.1,
+                y: 0.2,
+                w: 0.3,
+                h: 0.4,
+            },
             label: 7,
             confidence: 0.9,
         });

@@ -99,7 +99,12 @@ async fn libcamera_capture_to_fakesink_yields_frames() {
 
     let stats = tokio::time::timeout(
         std::time::Duration::from_secs(30),
-        run_simple_pipeline(&mut src, &mut sink, &clock, LatencyProfile::Live.link_capacity()),
+        run_simple_pipeline(
+            &mut src,
+            &mut sink,
+            &clock,
+            LatencyProfile::Live.link_capacity(),
+        ),
     )
     .await
     .expect("capture should finish within 30s")
@@ -112,9 +117,16 @@ async fn libcamera_capture_to_fakesink_yields_frames() {
         sink.last_sequence(),
         sink.last_view_bytes().map(|b| b.len()),
     );
-    assert_eq!(stats.frames_emitted, target, "source should emit the requested frame count");
+    assert_eq!(
+        stats.frames_emitted, target,
+        "source should emit the requested frame count"
+    );
     assert!(sink.received() > 0, "sink received no frames");
-    assert_eq!(sink.last_sequence(), Some(target - 1), "frames arrive in order");
+    assert_eq!(
+        sink.last_sequence(),
+        Some(target - 1),
+        "frames arrive in order"
+    );
 }
 
 /// Prove `FrameDurationLimits` actually throttles: at a forced 8 fps (below the
@@ -136,8 +148,14 @@ async fn libcamera_fps_limit_is_enforced() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(24);
     let mjpeg = std::env::var("G2G_LIBCAMERA_MJPEG").is_ok();
-    let w: u32 = std::env::var("G2G_LIBCAMERA_W").ok().and_then(|s| s.parse().ok()).unwrap_or(640);
-    let h: u32 = std::env::var("G2G_LIBCAMERA_H").ok().and_then(|s| s.parse().ok()).unwrap_or(480);
+    let w: u32 = std::env::var("G2G_LIBCAMERA_W")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(640);
+    let h: u32 = std::env::var("G2G_LIBCAMERA_H")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(480);
     let mut src = LibCameraSrc::new()
         .with_camera(camera_index())
         .with_size(w, h)
@@ -145,10 +163,16 @@ async fn libcamera_fps_limit_is_enforced() {
         .with_mjpeg(mjpeg)
         .with_frame_limit(target);
     // Optional manual exposure (us) / gain to lift the auto-exposure fps cap.
-    if let Some(e) = std::env::var("G2G_LIBCAMERA_EXPOSURE").ok().and_then(|s| s.parse().ok()) {
+    if let Some(e) = std::env::var("G2G_LIBCAMERA_EXPOSURE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+    {
         src = src.with_exposure(e);
     }
-    if let Some(g) = std::env::var("G2G_LIBCAMERA_GAIN").ok().and_then(|s| s.parse().ok()) {
+    if let Some(g) = std::env::var("G2G_LIBCAMERA_GAIN")
+        .ok()
+        .and_then(|s| s.parse().ok())
+    {
         src = src.with_gain(g);
     }
     let mut sink = FakeSink::new();
@@ -157,7 +181,12 @@ async fn libcamera_fps_limit_is_enforced() {
     let start = std::time::Instant::now();
     let stats = tokio::time::timeout(
         std::time::Duration::from_secs(30),
-        run_simple_pipeline(&mut src, &mut sink, &clock, LatencyProfile::Live.link_capacity()),
+        run_simple_pipeline(
+            &mut src,
+            &mut sink,
+            &clock,
+            LatencyProfile::Live.link_capacity(),
+        ),
     )
     .await
     .expect("capture should finish within 30s")
@@ -246,20 +275,37 @@ async fn libcamera_camera_id_selects() {
     let mut sink = FakeSink::new();
     let stats = tokio::time::timeout(
         std::time::Duration::from_secs(20),
-        run_simple_pipeline(&mut src, &mut sink, &ZeroClock, LatencyProfile::Live.link_capacity()),
+        run_simple_pipeline(
+            &mut src,
+            &mut sink,
+            &ZeroClock,
+            LatencyProfile::Live.link_capacity(),
+        ),
     )
     .await
     .expect("finishes")
     .expect("by-id selection should capture");
-    assert_eq!(stats.frames_emitted, 5, "selected camera by id and captured");
+    assert_eq!(
+        stats.frames_emitted, 5,
+        "selected camera by id and captured"
+    );
 
     // A bogus id matches no camera, so negotiation must fail (not pick #0).
     let mut bad = LibCameraSrc::new()
         .with_camera_id("no-such-camera-zzz")
         .with_frame_limit(1);
     let mut sink2 = FakeSink::new();
-    let r = run_simple_pipeline(&mut bad, &mut sink2, &ZeroClock, LatencyProfile::Live.link_capacity()).await;
-    assert!(r.is_err(), "a non-matching camera id must fail, not fall back to index 0");
+    let r = run_simple_pipeline(
+        &mut bad,
+        &mut sink2,
+        &ZeroClock,
+        LatencyProfile::Live.link_capacity(),
+    )
+    .await;
+    assert!(
+        r.is_err(),
+        "a non-matching camera id must fail, not fall back to index 0"
+    );
 }
 
 /// Prove manual exposure lifts the frame rate that auto-exposure caps in low
@@ -286,7 +332,12 @@ async fn libcamera_manual_exposure_lifts_fps() {
         let start = std::time::Instant::now();
         let stats = tokio::time::timeout(
             std::time::Duration::from_secs(30),
-            run_simple_pipeline(&mut src, &mut sink, &clock, LatencyProfile::Live.link_capacity()),
+            run_simple_pipeline(
+                &mut src,
+                &mut sink,
+                &clock,
+                LatencyProfile::Live.link_capacity(),
+            ),
         )
         .await
         .expect("finishes in 30s")
@@ -331,7 +382,13 @@ async fn libcamera_mjpeg_capture_decodes() {
         .with_mjpeg(true);
     let caps = probe.intercept_caps().await.expect("negotiate mjpeg");
     assert!(
-        matches!(caps, Caps::CompressedVideo { codec: VideoCodec::Mjpeg, .. }),
+        matches!(
+            caps,
+            Caps::CompressedVideo {
+                codec: VideoCodec::Mjpeg,
+                ..
+            }
+        ),
         "expected CompressedVideo(Mjpeg), got {caps:?}"
     );
 
@@ -400,7 +457,10 @@ async fn libcamera_capture_displays_in_a_window() {
         .with_fps(fps)
         .with_frame_limit(target);
     // Optional manual exposure (us) to keep the rate up in low light.
-    if let Some(e) = std::env::var("G2G_LIBCAMERA_EXPOSURE").ok().and_then(|s| s.parse().ok()) {
+    if let Some(e) = std::env::var("G2G_LIBCAMERA_EXPOSURE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+    {
         src = src.with_exposure(e);
     }
     // libcamera gives YUYV on this UVC cam; WaylandSink wants NV12.
@@ -422,6 +482,10 @@ async fn libcamera_capture_displays_in_a_window() {
     .expect("capture should finish within 60s")
     .expect("libcamera -> wayland pipeline should succeed");
 
-    eprintln!("emitted={} presented={}", stats.frames_emitted, sink.frames_presented());
+    eprintln!(
+        "emitted={} presented={}",
+        stats.frames_emitted,
+        sink.frames_presented()
+    );
     assert!(stats.frames_emitted > 0, "no frames captured");
 }

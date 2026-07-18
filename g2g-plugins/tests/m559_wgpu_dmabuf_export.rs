@@ -58,7 +58,9 @@ async fn roundtrip(format: RawVideoFormat, w: u32, h: u32, size: usize) -> Optio
     // Export side: a source buffer with a known pattern on the export device.
     let mut exp = WgpuToDmaBuf::new();
     let (dev, queue) = exp.gpu().await.ok()?;
-    let pattern: Vec<u8> = (0..size).map(|i| (i.wrapping_mul(7).wrapping_add(3)) as u8).collect();
+    let pattern: Vec<u8> = (0..size)
+        .map(|i| (i.wrapping_mul(7).wrapping_add(3)) as u8)
+        .collect();
     let src = dev.create_buffer(&wgpu::BufferDescriptor {
         label: Some("export-src"),
         size: size as u64,
@@ -69,15 +71,23 @@ async fn roundtrip(format: RawVideoFormat, w: u32, h: u32, size: usize) -> Optio
 
     let frame_in = Frame {
         domain: MemoryDomain::WgpuBuffer(WgpuToDmaBuf::wrap_buffer(&dev, src, size)),
-        timing: FrameTiming { pts_ns: 1234, ..FrameTiming::default() },
+        timing: FrameTiming {
+            pts_ns: 1234,
+            ..FrameTiming::default()
+        },
         sequence: 42,
         meta: Default::default(),
     };
     exp.configure_pipeline(&c).expect("export configure");
     let mut cap = CaptureSink::default();
-    exp.process(PipelinePacket::DataFrame(frame_in), &mut cap).await.expect("export process");
+    exp.process(PipelinePacket::DataFrame(frame_in), &mut cap)
+        .await
+        .expect("export process");
     let dmabuf_frame = cap.frame.take().expect("export emitted a frame");
-    assert!(matches!(dmabuf_frame.domain, MemoryDomain::DmaBuf(_)), "export produced a dma-buf");
+    assert!(
+        matches!(dmabuf_frame.domain, MemoryDomain::DmaBuf(_)),
+        "export produced a dma-buf"
+    );
     // Timing / sequence pass through the export.
     assert_eq!(dmabuf_frame.sequence, 42);
     assert_eq!(dmabuf_frame.timing.pts_ns, 1234);
@@ -87,7 +97,10 @@ async fn roundtrip(format: RawVideoFormat, w: u32, h: u32, size: usize) -> Optio
     let mut imp = DmaBufToWgpu::new();
     imp.configure_pipeline(&c).expect("import configure");
     let mut cap2 = CaptureSink::default();
-    match imp.process(PipelinePacket::DataFrame(dmabuf_frame), &mut cap2).await {
+    match imp
+        .process(PipelinePacket::DataFrame(dmabuf_frame), &mut cap2)
+        .await
+    {
         Ok(()) => {}
         Err(G2gError::UnsupportedDomain) => {
             eprintln!("SKIP: dma-buf import unsupported on this driver (export succeeded)");
@@ -99,7 +112,10 @@ async fn roundtrip(format: RawVideoFormat, w: u32, h: u32, size: usize) -> Optio
     let MemoryDomain::WgpuBuffer(owned) = &wgpu_frame.domain else {
         panic!("import produced a wgpu buffer");
     };
-    assert_eq!(owned.len, size, "imported buffer is the full plane-aware size");
+    assert_eq!(
+        owned.len, size,
+        "imported buffer is the full plane-aware size"
+    );
     let buf = owned
         .keep_alive()
         .as_any()
@@ -124,11 +140,18 @@ async fn roundtrip(format: RawVideoFormat, w: u32, h: u32, size: usize) -> Optio
     slice.map_async(wgpu::MapMode::Read, move |r| {
         let _ = tx.send(r);
     });
-    idev.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).expect("poll");
+    idev.poll(wgpu::PollType::Wait {
+        submission_index: None,
+        timeout: None,
+    })
+    .expect("poll");
     rx.recv().expect("readback channel").expect("map readback");
     let got = slice.get_mapped_range().to_vec();
 
-    assert_eq!(got, pattern, "pixels survived GPU -> dma-buf -> GPU across devices");
+    assert_eq!(
+        got, pattern,
+        "pixels survived GPU -> dma-buf -> GPU across devices"
+    );
     Some(got)
 }
 

@@ -37,14 +37,38 @@ impl LatencyHistogram {
         // Spell out the array — 32 entries is annoying but const.
         Self {
             buckets: [
-                AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-                AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-                AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-                AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-                AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-                AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-                AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-                AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
             ],
             overflow: AtomicU64::new(0),
             count: AtomicU64::new(0),
@@ -66,7 +90,10 @@ impl LatencyHistogram {
         let mut cur = self.max_ns.load(Ordering::Relaxed);
         while dur_ns > cur {
             match self.max_ns.compare_exchange_weak(
-                cur, dur_ns, Ordering::Relaxed, Ordering::Relaxed,
+                cur,
+                dur_ns,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
             ) {
                 Ok(_) => break,
                 Err(v) => cur = v,
@@ -93,7 +120,14 @@ impl LatencyHistogram {
         let p95 = percentile_ns(&bucket_counts, overflow, count, 95).min(cap);
         let p99 = percentile_ns(&bucket_counts, overflow, count, 99).min(cap);
 
-        LatencySnapshot { count, mean_ns, max_ns: max, p50_ns: p50, p95_ns: p95, p99_ns: p99 }
+        LatencySnapshot {
+            count,
+            mean_ns,
+            max_ns: max,
+            p50_ns: p50,
+            p95_ns: p95,
+            p99_ns: p99,
+        }
     }
 }
 
@@ -197,7 +231,11 @@ mod tests {
         assert_eq!(s.count, 105);
         assert!(s.max_ns >= 50_000_000);
         // p50 of 100x1ms + 5x50ms should be in the ~1ms bucket.
-        assert!(s.p50_ns >= 1_000_000 && s.p50_ns < 4_000_000, "p50 = {}", s.p50_ns);
+        assert!(
+            s.p50_ns >= 1_000_000 && s.p50_ns < 4_000_000,
+            "p50 = {}",
+            s.p50_ns
+        );
         // p99 should land in the 50ms bucket range.
         assert!(s.p99_ns >= 32_000_000, "p99 = {}", s.p99_ns);
     }

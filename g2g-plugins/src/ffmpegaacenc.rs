@@ -24,14 +24,14 @@ use core::pin::Pin;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use ffmpeg_next as ffmpeg;
 use ffmpeg::codec::encoder::audio::Encoder as AudioEncoder;
-use ffmpeg::format::Sample as SampleFmt;
 use ffmpeg::format::sample::Type as SampleType;
+use ffmpeg::format::Sample as SampleFmt;
 use ffmpeg::frame::Audio as FfAudio;
 use ffmpeg::packet::Packet;
 use ffmpeg::ChannelLayout;
 use ffmpeg::Error as FfError;
+use ffmpeg_next as ffmpeg;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
@@ -46,11 +46,15 @@ const DEFAULT_BITRATE_BPS: usize = 128_000;
 
 /// ADTS / ASC sampling-frequency-index table (ISO/IEC 14496-3). The encoder only
 /// opens at a rate in this table (libavcodec rejects others).
-const SAMPLE_RATES: [u32; 13] =
-    [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350];
+const SAMPLE_RATES: [u32; 13] = [
+    96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350,
+];
 
 fn sample_rate_index(rate: u32) -> Option<u8> {
-    SAMPLE_RATES.iter().position(|&r| r == rate).map(|i| i as u8)
+    SAMPLE_RATES
+        .iter()
+        .position(|&r| r == rate)
+        .map(|i| i as u8)
 }
 
 pub struct FfmpegAacEnc {
@@ -123,17 +127,28 @@ impl FfmpegAacEnc {
     }
 
     fn input_template() -> CapsSet {
-        let pcm = |format| Caps::Audio { format, channels: 0, sample_rate: 0 };
-        CapsSet::from_alternatives(Vec::from([pcm(AudioFormat::PcmS16Le), pcm(AudioFormat::PcmF32Le)]))
+        let pcm = |format| Caps::Audio {
+            format,
+            channels: 0,
+            sample_rate: 0,
+        };
+        CapsSet::from_alternatives(Vec::from([
+            pcm(AudioFormat::PcmS16Le),
+            pcm(AudioFormat::PcmF32Le),
+        ]))
     }
 
     fn output_caps(&self) -> Caps {
-        Caps::Audio { format: AudioFormat::Aac, channels: self.channels, sample_rate: self.sample_rate }
+        Caps::Audio {
+            format: AudioFormat::Aac,
+            channels: self.channels,
+            sample_rate: self.sample_rate,
+        }
     }
 
     fn open_encoder(&mut self) -> Result<(), G2gError> {
-        let codec = ffmpeg::encoder::find_by_name("aac")
-            .ok_or(G2gError::Hardware(HardwareError::Other))?;
+        let codec =
+            ffmpeg::encoder::find_by_name("aac").ok_or(G2gError::Hardware(HardwareError::Other))?;
         // Allocate with the codec so codec-appropriate defaults apply (the M289
         // lesson: a codec-less context trips encoder default-validation).
         let mut audio = ffmpeg::codec::context::Context::new_with_codec(codec)
@@ -165,7 +180,9 @@ impl FfmpegAacEnc {
                     return Err(G2gError::CapsMismatch);
                 }
                 self.pending.extend(
-                    bytes.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0),
+                    bytes
+                        .chunks_exact(2)
+                        .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0),
                 );
             }
             AudioFormat::PcmF32Le => {
@@ -173,7 +190,9 @@ impl FfmpegAacEnc {
                     return Err(G2gError::CapsMismatch);
                 }
                 self.pending.extend(
-                    bytes.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])),
+                    bytes
+                        .chunks_exact(4)
+                        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])),
                 );
             }
             _ => return Err(G2gError::CapsMismatch),
@@ -183,9 +202,17 @@ impl FfmpegAacEnc {
 
     /// Encode one frame from `interleaved` (`n_samples` per channel) and drain the
     /// resulting ADTS access units.
-    fn encode_frame(&mut self, interleaved: &[f32], n_samples: usize) -> Result<Vec<(Vec<u8>, u64)>, G2gError> {
+    fn encode_frame(
+        &mut self,
+        interleaved: &[f32],
+        n_samples: usize,
+    ) -> Result<Vec<(Vec<u8>, u64)>, G2gError> {
         let ch = self.channels as usize;
-        let mut frame = FfAudio::new(SampleFmt::F32(SampleType::Planar), n_samples, ChannelLayout::default(self.channels as i32));
+        let mut frame = FfAudio::new(
+            SampleFmt::F32(SampleType::Planar),
+            n_samples,
+            ChannelLayout::default(self.channels as i32),
+        );
         frame.set_rate(self.sample_rate);
         frame.set_pts(Some(self.samples_in as i64));
         // Deinterleave into the per-channel planar float planes.
@@ -197,7 +224,8 @@ impl FfmpegAacEnc {
         }
         self.samples_in += n_samples as u64;
         let enc = self.encoder.as_mut().ok_or(G2gError::NotConfigured)?;
-        enc.send_frame(&frame).map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+        enc.send_frame(&frame)
+            .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
         self.drain()
     }
 
@@ -211,7 +239,8 @@ impl FfmpegAacEnc {
             out.extend(self.encode_frame(&tail, n)?);
         }
         if let Some(enc) = self.encoder.as_mut() {
-            enc.send_eof().map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+            enc.send_eof()
+                .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
         }
         out.extend(self.drain()?);
         Ok(out)
@@ -241,15 +270,24 @@ impl FfmpegAacEnc {
         Ok(out)
     }
 
-    async fn emit(&mut self, packets: Vec<(Vec<u8>, u64)>, out: &mut dyn OutputSink) -> Result<(), G2gError> {
+    async fn emit(
+        &mut self,
+        packets: Vec<(Vec<u8>, u64)>,
+        out: &mut dyn OutputSink,
+    ) -> Result<(), G2gError> {
         if !packets.is_empty() && !self.caps_sent {
-            out.push(PipelinePacket::CapsChanged(self.output_caps())).await?;
+            out.push(PipelinePacket::CapsChanged(self.output_caps()))
+                .await?;
             self.caps_sent = true;
         }
         for (au, pts_ns) in packets {
             let frame = Frame::new(
                 MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
-                FrameTiming { pts_ns, dts_ns: pts_ns, ..FrameTiming::default() },
+                FrameTiming {
+                    pts_ns,
+                    dts_ns: pts_ns,
+                    ..FrameTiming::default()
+                },
                 self.emitted,
             );
             self.emitted += 1;
@@ -296,15 +334,26 @@ impl AsyncElement for FfmpegAacEnc {
     /// the same rate + channels.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
-            Caps::Audio { format: AudioFormat::PcmS16Le | AudioFormat::PcmF32Le, channels, sample_rate } => {
-                CapsSet::one(Caps::Audio { format: AudioFormat::Aac, channels: *channels, sample_rate: *sample_rate })
-            }
+            Caps::Audio {
+                format: AudioFormat::PcmS16Le | AudioFormat::PcmF32Le,
+                channels,
+                sample_rate,
+            } => CapsSet::one(Caps::Audio {
+                format: AudioFormat::Aac,
+                channels: *channels,
+                sample_rate: *sample_rate,
+            }),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        let Caps::Audio { format, channels, sample_rate } = absolute_caps else {
+        let Caps::Audio {
+            format,
+            channels,
+            sample_rate,
+        } = absolute_caps
+        else {
             return Err(G2gError::CapsMismatch);
         };
         if !matches!(format, AudioFormat::PcmS16Le | AudioFormat::PcmF32Le) {
@@ -353,8 +402,14 @@ impl AsyncElement for FfmpegAacEnc {
                 // A mid-stream PCM caps change would need a re-open; reject the
                 // unsupported case, ignore an identical re-announce.
                 PipelinePacket::CapsChanged(c) => {
-                    if let Caps::Audio { format, channels, sample_rate } = &c {
-                        if *channels != self.channels || *sample_rate != self.sample_rate
+                    if let Caps::Audio {
+                        format,
+                        channels,
+                        sample_rate,
+                    } = &c
+                    {
+                        if *channels != self.channels
+                            || *sample_rate != self.sample_rate
                             || !matches!(format, AudioFormat::PcmS16Le | AudioFormat::PcmF32Le)
                         {
                             return Err(G2gError::CapsMismatch);
@@ -407,12 +462,19 @@ impl AsyncElement for FfmpegAacEnc {
     }
 }
 
-static AAC_ENC_PROPS: &[PropertySpec] =
-    &[PropertySpec::new("bitrate", PropKind::Uint, "target bitrate in bits/second")];
+static AAC_ENC_PROPS: &[PropertySpec] = &[PropertySpec::new(
+    "bitrate",
+    PropKind::Uint,
+    "target bitrate in bits/second",
+)];
 
 impl PadTemplates for FfmpegAacEnc {
     fn pad_templates() -> Vec<PadTemplate> {
-        let aac = Caps::Audio { format: AudioFormat::Aac, channels: 0, sample_rate: 0 };
+        let aac = Caps::Audio {
+            format: AudioFormat::Aac,
+            channels: 0,
+            sample_rate: 0,
+        };
         Vec::from([
             PadTemplate::sink(Self::input_template()),
             PadTemplate::source(CapsSet::one(aac)),

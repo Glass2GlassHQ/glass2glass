@@ -201,7 +201,11 @@ fn parse_sps(rbsp: &[u8]) -> Option<SpsGeometry> {
     // Crop units in luma samples (H.264 7.4.2.1.1). ChromaArrayType 0
     // (monochrome, or 4:4:4 with separate colour planes) crops 1 x (2-fmof);
     // otherwise SubWidthC x SubHeightC*(2-fmof).
-    let chroma_array_type = if separate_colour_plane_flag == 1 { 0 } else { chroma_format_idc };
+    let chroma_array_type = if separate_colour_plane_flag == 1 {
+        0
+    } else {
+        chroma_format_idc
+    };
     let (sub_width_c, sub_height_c) = match chroma_array_type {
         1 => (2u32, 2u32), // 4:2:0
         2 => (2, 1),       // 4:2:2
@@ -210,7 +214,9 @@ fn parse_sps(rbsp: &[u8]) -> Option<SpsGeometry> {
     // Crop and dimension fields come from untrusted exp-Golomb, so fold with
     // saturating arithmetic (the additions and the *16 would otherwise overflow,
     // panicking in debug and wrapping to bogus caps in release).
-    let crop_x = crop_left.saturating_add(crop_right).saturating_mul(sub_width_c);
+    let crop_x = crop_left
+        .saturating_add(crop_right)
+        .saturating_mul(sub_width_c);
     let crop_y = crop_top
         .saturating_add(crop_bottom)
         .saturating_mul(sub_height_c.saturating_mul(2u32.saturating_sub(frame_mbs_only_flag)));
@@ -331,7 +337,10 @@ fn parse_sps_reorder(rbsp: &[u8]) -> Option<u8> {
     let mut br = BitReader::new(&rbsp[3..]);
 
     let _sps_id = br.read_ue()?;
-    if matches!(profile_idc, 100 | 110 | 122 | 244 | 44 | 83 | 86 | 118 | 128 | 138 | 139 | 134 | 135) {
+    if matches!(
+        profile_idc,
+        100 | 110 | 122 | 244 | 44 | 83 | 86 | 118 | 128 | 138 | 139 | 134 | 135
+    ) {
         let chroma_format_idc = br.read_ue()?;
         if chroma_format_idc == 3 {
             br.read_bit()?; // separate_colour_plane_flag
@@ -364,7 +373,8 @@ fn parse_sps_reorder(rbsp: &[u8]) -> Option<u8> {
     let pic_height_in_map_units = br.read_ue()?.saturating_add(1);
     let frame_mbs_only_flag = br.read_bit()?;
 
-    let frame_height_in_mbs = (2u32.saturating_sub(frame_mbs_only_flag)).saturating_mul(pic_height_in_map_units);
+    let frame_height_in_mbs =
+        (2u32.saturating_sub(frame_mbs_only_flag)).saturating_mul(pic_height_in_map_units);
     let pic_size_in_mbs = pic_width_in_mbs.saturating_mul(frame_height_in_mbs).max(1);
     let max_dpb_frames = (max_dpb_mbs(level_idc) / pic_size_in_mbs).min(16);
     Some(max_dpb_frames as u8)
@@ -588,7 +598,10 @@ mod tests {
         let stream = build_test_annexb_sps(1280, 720);
         let info = extract_sps_info(&stream).expect("SPS must parse");
         assert_eq!((info.width, info.height), (1280, 720));
-        assert_eq!(info.framerate, None, "no VUI timing in the baseline fixture");
+        assert_eq!(
+            info.framerate, None,
+            "no VUI timing in the baseline fixture"
+        );
     }
 
     #[test]
@@ -770,7 +783,10 @@ mod tests {
         avcc.extend_from_slice(nal);
 
         parse
-            .process(PipelinePacket::DataFrame(frame_with_bytes(0, avcc)), &mut sink)
+            .process(
+                PipelinePacket::DataFrame(frame_with_bytes(0, avcc)),
+                &mut sink,
+            )
             .await
             .unwrap();
 
@@ -803,7 +819,10 @@ mod tests {
             .iter()
             .filter(|p| matches!(p, PipelinePacket::CapsChanged(_)))
             .count();
-        assert_eq!(caps_count, 1, "CapsChanged must fire once for identical SPS");
+        assert_eq!(
+            caps_count, 1,
+            "CapsChanged must fire once for identical SPS"
+        );
         assert_eq!(parse.caps_changes_emitted(), 1);
     }
 
@@ -829,7 +848,9 @@ mod tests {
             .packets
             .iter()
             .filter_map(|p| match p {
-                PipelinePacket::CapsChanged(Caps::CompressedVideo { width, .. }) => Some(width.clone()),
+                PipelinePacket::CapsChanged(Caps::CompressedVideo { width, .. }) => {
+                    Some(width.clone())
+                }
                 _ => None,
             })
             .collect();
@@ -909,7 +930,11 @@ mod tests {
         let b_off = stream.len();
         stream.extend_from_slice(&annexb_vcl(true, 3)); // new picture
         let starts = h264_au_starts(&stream);
-        assert_eq!(starts, vec![0, b_off], "two access units: A(2 slices) then B");
+        assert_eq!(
+            starts,
+            vec![0, b_off],
+            "two access units: A(2 slices) then B"
+        );
     }
 
     #[tokio::test]
@@ -923,13 +948,23 @@ mod tests {
         let au1 = annexb_vcl(true, 2);
         let mut buf = au0.clone();
         buf.extend_from_slice(&au1);
-        parse.process(PipelinePacket::DataFrame(frame_with_bytes(0, buf)), &mut sink).await.unwrap();
+        parse
+            .process(
+                PipelinePacket::DataFrame(frame_with_bytes(0, buf)),
+                &mut sink,
+            )
+            .await
+            .unwrap();
         // The first AU is emitted once the second AU's start is seen; the second
         // stays buffered until end of stream.
         parse.process(PipelinePacket::Eos, &mut sink).await.unwrap();
 
         let payloads = data_payloads(&sink);
-        assert_eq!(payloads.len(), 2, "two pictures -> two access-unit DataFrames");
+        assert_eq!(
+            payloads.len(),
+            2,
+            "two pictures -> two access-unit DataFrames"
+        );
         assert_eq!(payloads[0], au0, "first AU emitted whole");
         assert_eq!(payloads[1], au1, "second AU emitted whole on EOS");
     }
@@ -947,18 +982,31 @@ mod tests {
         let au = annexb_vcl(true, 7);
         let split = 6; // mid-NAL: after the start code + header + first RBSP byte
         parse
-            .process(PipelinePacket::DataFrame(frame_with_bytes(0, au[..split].to_vec())), &mut sink)
+            .process(
+                PipelinePacket::DataFrame(frame_with_bytes(0, au[..split].to_vec())),
+                &mut sink,
+            )
             .await
             .unwrap();
         parse
-            .process(PipelinePacket::DataFrame(frame_with_bytes(1, au[split..].to_vec())), &mut sink)
+            .process(
+                PipelinePacket::DataFrame(frame_with_bytes(1, au[split..].to_vec())),
+                &mut sink,
+            )
             .await
             .unwrap();
         parse.process(PipelinePacket::Eos, &mut sink).await.unwrap();
 
         let payloads = data_payloads(&sink);
-        assert_eq!(payloads.len(), 1, "the split access unit reassembles into one");
-        assert_eq!(payloads[0], au, "reassembled bytes are bit-for-bit the original AU");
+        assert_eq!(
+            payloads.len(),
+            1,
+            "the split access unit reassembles into one"
+        );
+        assert_eq!(
+            payloads[0], au,
+            "reassembled bytes are bit-for-bit the original AU"
+        );
     }
 
     #[test]
@@ -973,9 +1021,18 @@ mod tests {
         // A later IDR with no parameter sets gets the cached SPS/PPS prepended.
         let au2 = vec![0, 0, 0, 1, 0x65, 0x88];
         let out2 = p.apply_config_interval(au2.clone(), 90_000, true);
-        assert!(nal_units(&out2).any(|n| h264_nal_type(n) == Some(7)), "result carries an SPS");
-        assert!(nal_units(&out2).any(|n| h264_nal_type(n) == Some(8)), "result carries a PPS");
-        assert!(out2.ends_with(&au2), "the original AU is preserved at the tail");
+        assert!(
+            nal_units(&out2).any(|n| h264_nal_type(n) == Some(7)),
+            "result carries an SPS"
+        );
+        assert!(
+            nal_units(&out2).any(|n| h264_nal_type(n) == Some(8)),
+            "result carries a PPS"
+        );
+        assert!(
+            out2.ends_with(&au2),
+            "the original AU is preserved at the tail"
+        );
     }
 
     #[test]
@@ -995,12 +1052,15 @@ mod tests {
         let mut au1 = build_test_annexb_sps(320, 240);
         au1.extend_from_slice(&[0, 0, 0, 1, 0x65, 0x88]);
         let _ = p.apply_config_interval(au1, 0, true); // last insert at pts 0
-        // 1 s later (pts is nanoseconds): under the 2 s interval, not re-inserted.
+                                                       // 1 s later (pts is nanoseconds): under the 2 s interval, not re-inserted.
         let au = vec![0, 0, 0, 1, 0x65, 0x88];
         let early = p.apply_config_interval(au.clone(), 1_000_000_000, true);
         assert_eq!(early, au, "before the interval elapses, no re-insertion");
         // 2 s later: due.
         let late = p.apply_config_interval(au.clone(), 2_000_000_000, true);
-        assert!(nal_units(&late).any(|n| h264_nal_type(n) == Some(7)), "re-inserted after 2 s");
+        assert!(
+            nal_units(&late).any(|n| h264_nal_type(n) == Some(7)),
+            "re-inserted after 2 s"
+        );
     }
 }

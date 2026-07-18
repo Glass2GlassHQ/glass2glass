@@ -17,7 +17,10 @@
 //!    frame does no GPU decode.
 //!
 //! Runs on the RTX 3060; skips with no Vulkan H.264 adapter / no compute queue.
-#![cfg(all(any(target_os = "linux", target_os = "windows"), feature = "vulkan-video"))]
+#![cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    feature = "vulkan-video"
+))]
 
 use std::collections::BTreeSet;
 
@@ -30,12 +33,21 @@ const CLIP: &[u8] = include_bytes!("fixtures/h264_640x480.h264");
 
 /// Mean absolute per-byte difference between two equal-length RGBA buffers.
 fn sad_per_byte(a: &[u8], b: &[u8]) -> f64 {
-    assert_eq!(a.len(), b.len(), "frame sizes differ ({} vs {})", a.len(), b.len());
+    assert_eq!(
+        a.len(),
+        b.len(),
+        "frame sizes differ ({} vs {})",
+        a.len(),
+        b.len()
+    );
     if a.is_empty() {
         return 0.0;
     }
-    let sum: u64 =
-        a.iter().zip(b).map(|(&x, &y)| (x as i32 - y as i32).unsigned_abs() as u64).sum();
+    let sum: u64 = a
+        .iter()
+        .zip(b)
+        .map(|(&x, &y)| (x as i32 - y as i32).unsigned_abs() as u64)
+        .sum();
     sum as f64 / a.len() as f64
 }
 
@@ -60,7 +72,9 @@ fn m498_vulkan_video_scrub() {
     // each frame read back to RGBA bytes. Same decode path the player uses, so a
     // correct random-access decode must match it exactly.
     let reference: Vec<Vec<u8>> = {
-        let session = device.create_h264_session(&ps, width, height).expect("reference session");
+        let session = device
+            .create_h264_session(&ps, width, height)
+            .expect("reference session");
         let mut dec = match device.create_h264_dpb_decoder_gpu(&session, &ps) {
             Ok(d) => d,
             Err(VulkanVideoError::NoComputeQueue) => {
@@ -79,7 +93,11 @@ fn m498_vulkan_video_scrub() {
     // The player takes ownership of the device and builds its keyframe/POC index.
     let mut player = VulkanVideoPlayer::new(device, CLIP.to_vec(), 30).expect("build player");
     assert_eq!(player.frame_count(), n, "player sees the same frame count");
-    assert_eq!(player.dimensions(), (width, height), "player reports the coded size");
+    assert_eq!(
+        player.dimensions(),
+        (width, height),
+        "player reports the coded size"
+    );
 
     // Out-of-order scrub with repeats: jump forward/backward across the GOP
     // boundary and land on mid-GOP P frames cold.
@@ -87,7 +105,9 @@ fn m498_vulkan_video_scrub() {
     let mut distinct = BTreeSet::new();
     for &raw in &scrub {
         let p = raw.min(n - 1);
-        let d = player.decode_index(p).expect("decode index for a valid frame");
+        let d = player
+            .decode_index(p)
+            .expect("decode index for a valid frame");
         distinct.insert(d);
 
         // Clone releases the &mut borrow so we can read it back on &player.
@@ -112,7 +132,13 @@ fn m498_vulkan_video_scrub() {
     // Re-request the whole sequence: a pure cache pass, zero further decodes.
     let before = player.decode_calls();
     for &raw in &scrub {
-        let _ = player.frame_at_index(raw.min(n - 1)).expect("cached frame_at_index");
+        let _ = player
+            .frame_at_index(raw.min(n - 1))
+            .expect("cached frame_at_index");
     }
-    assert_eq!(player.decode_calls(), before, "revisiting cached frames does no decode");
+    assert_eq!(
+        player.decode_calls(),
+        before,
+        "revisiting cached frames does no decode"
+    );
 }

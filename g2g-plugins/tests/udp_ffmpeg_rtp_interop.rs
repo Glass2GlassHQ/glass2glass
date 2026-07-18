@@ -60,7 +60,9 @@ async fn ffmpeg_rtp_h264_streams_into_udpsrc() {
     let sock = StdUdpSocket::bind("127.0.0.1:0").expect("bind udp");
     let port = sock.local_addr().unwrap().port();
     const N: u64 = 20;
-    let mut src = UdpSrc::from_socket(sock).expect("adopt socket").with_frame_limit(N);
+    let mut src = UdpSrc::from_socket(sock)
+        .expect("adopt socket")
+        .with_frame_limit(N);
     src.configure_pipeline(&src_caps()).expect("configure");
 
     // ffmpeg payloads ~3 s of H.264 as RTP to our port (PT 96, its own SSRC).
@@ -68,10 +70,26 @@ async fn ffmpeg_rtp_h264_streams_into_udpsrc() {
     let ffmpeg = tokio::task::spawn_blocking(move || {
         Command::new("ffmpeg")
             .args([
-                "-hide_banner", "-loglevel", "error",
-                "-re", "-an", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=15:duration=3",
-                "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
-                "-payload_type", "96", "-f", "rtp", &url,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-re",
+                "-an",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=320x240:rate=15:duration=3",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-tune",
+                "zerolatency",
+                "-payload_type",
+                "96",
+                "-f",
+                "rtp",
+                &url,
             ])
             .status()
     });
@@ -83,13 +101,19 @@ async fn ffmpeg_rtp_h264_streams_into_udpsrc() {
         .expect("UdpSrc runs");
     let _ = ffmpeg.await;
 
-    assert_eq!(received, N, "depayloaded the requested number of access units");
+    assert_eq!(
+        received, N,
+        "depayloaded the requested number of access units"
+    );
     assert_eq!(sink.aus.len() as u64, N);
     // Every emitted AU must be Annex-B framed (the depayloader re-framed the RTP
     // NALs correctly, including reassembling FU-A fragments).
     for (i, (head, len, _)) in sink.aus.iter().enumerate() {
         assert!(*len > 4, "AU {i} has content");
-        assert!(is_annex_b(head), "AU {i} is Annex-B framed (got {head:02x?})");
+        assert!(
+            is_annex_b(head),
+            "AU {i} is Annex-B framed (got {head:02x?})"
+        );
     }
     // At least one IDR access unit must be recognized as a keyframe (proves an
     // FU-A-fragmented IDR reassembled into a valid access unit).

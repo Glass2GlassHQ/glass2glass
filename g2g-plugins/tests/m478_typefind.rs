@@ -25,7 +25,8 @@ impl PipelineClock for ZeroClock {
 }
 
 fn temp(tag: &str, ext: &str, bytes: &[u8]) -> std::path::PathBuf {
-    let path = std::env::temp_dir().join(format!("g2g-m478-{}-{}.{}", std::process::id(), tag, ext));
+    let path =
+        std::env::temp_dir().join(format!("g2g-m478-{}-{}.{}", std::process::id(), tag, ext));
     std::fs::write(&path, bytes).expect("write temp");
     path
 }
@@ -40,10 +41,15 @@ async fn filesrc_types_vtt_by_extension_into_subparse() {
 
     let reg = default_registry();
     let graph = parse_launch(&reg, &line).unwrap_or_else(|e| panic!("parses `{line}`: {e}"));
-    let consumed =
-        run_graph(graph, &ZeroClock, 4).await.unwrap_or_else(|e| panic!("runs: {e:?}")).frames_consumed;
+    let consumed = run_graph(graph, &ZeroClock, 4)
+        .await
+        .unwrap_or_else(|e| panic!("runs: {e:?}"))
+        .frames_consumed;
     std::fs::remove_file(&path).ok();
-    assert!(consumed >= 2, "both WebVTT cues flowed through subparse to the sink: {consumed}");
+    assert!(
+        consumed >= 2,
+        "both WebVTT cues flowed through subparse to the sink: {consumed}"
+    );
 }
 
 /// A bare `filesrc location=X.mkv` types as `ByteStream{Matroska}` from the
@@ -62,10 +68,18 @@ fn filesrc_types_mkv_by_extension_for_demux_fanout() {
     let reg = default_registry();
     let graph = parse_launch(&reg, &line).unwrap_or_else(|e| panic!("parses `{line}`: {e}"));
     let vg = graph.finish().expect("valid graph");
-    let demuxes: Vec<NodeKind> =
-        vg.topo().iter().map(|&n| vg.kind(n)).filter(|k| matches!(k, NodeKind::Tee(_))).collect();
+    let demuxes: Vec<NodeKind> = vg
+        .topo()
+        .iter()
+        .map(|&n| vg.kind(n))
+        .filter(|k| matches!(k, NodeKind::Tee(_)))
+        .collect();
     std::fs::remove_file(&path).ok();
-    assert_eq!(demuxes, [NodeKind::Tee(2)], "extension typed filesrc as Matroska, demux fanned out");
+    assert_eq!(
+        demuxes,
+        [NodeKind::Tee(2)],
+        "extension typed filesrc as Matroska, demux fanned out"
+    );
 }
 
 /// An explicit `bytestream-format` still pins the type regardless of extension (a
@@ -82,9 +96,15 @@ fn explicit_bytestream_format_overrides_extension() {
     let reg = default_registry();
     let graph = parse_launch(&reg, &line).unwrap_or_else(|e| panic!("parses `{line}`: {e}"));
     let vg = graph.finish().expect("valid graph");
-    let has_demux = vg.topo().iter().any(|&n| matches!(vg.kind(n), NodeKind::Tee(2)));
+    let has_demux = vg
+        .topo()
+        .iter()
+        .any(|&n| matches!(vg.kind(n), NodeKind::Tee(2)));
     std::fs::remove_file(&path).ok();
-    assert!(has_demux, "explicit bytestream-format=matroska typed the .dat file for the demuxer");
+    assert!(
+        has_demux,
+        "explicit bytestream-format=matroska typed the .dat file for the demuxer"
+    );
 }
 
 // --- synthetic Matroska builder (Tracks-only header, mirrors m477 / mkvdemux) ---
@@ -119,16 +139,28 @@ fn uint_body(v: u64) -> Vec<u8> {
     bytes
 }
 fn video_track(num: u64, codec: &[u8], w: u32, h: u32) -> Vec<u8> {
-    let v = [elem(&[0xB0], &uint_body(w as u64)), elem(&[0xBA], &uint_body(h as u64))].concat();
-    let body =
-        [elem(&[0xD7], &uint_body(num)), elem(&[0x83], &uint_body(1)), elem(&[0x86], codec), elem(&[0xE0], &v)]
-            .concat();
+    let v = [
+        elem(&[0xB0], &uint_body(w as u64)),
+        elem(&[0xBA], &uint_body(h as u64)),
+    ]
+    .concat();
+    let body = [
+        elem(&[0xD7], &uint_body(num)),
+        elem(&[0x83], &uint_body(1)),
+        elem(&[0x86], codec),
+        elem(&[0xE0], &v),
+    ]
+    .concat();
     elem(&[0xAE], &body)
 }
 fn audio_track(num: u64, codec: &[u8]) -> Vec<u8> {
     // TrackNumber, TrackType(audio=2), CodecID.
-    let body =
-        [elem(&[0xD7], &uint_body(num)), elem(&[0x83], &uint_body(2)), elem(&[0x86], codec)].concat();
+    let body = [
+        elem(&[0xD7], &uint_body(num)),
+        elem(&[0x83], &uint_body(2)),
+        elem(&[0x86], codec),
+    ]
+    .concat();
     elem(&[0xAE], &body)
 }
 fn mkv_video_plus_audio() -> Vec<u8> {

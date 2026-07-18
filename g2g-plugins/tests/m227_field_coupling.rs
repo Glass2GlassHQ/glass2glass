@@ -34,7 +34,10 @@ async fn run_line_err(line: &str) {
     // Either the parse rejects the line or the solve fails; both are acceptable
     // "loud" outcomes (never a silent mis-fixate).
     if let Ok(graph) = parse_launch(&reg, line) {
-        assert!(run_graph(graph, &ZeroClock, 4).await.is_err(), "{line:?} must fail loud");
+        assert!(
+            run_graph(graph, &ZeroClock, 4).await.is_err(),
+            "{line:?} must fail loud"
+        );
     }
 }
 

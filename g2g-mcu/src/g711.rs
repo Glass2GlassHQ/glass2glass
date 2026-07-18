@@ -216,7 +216,9 @@ impl<const N: usize, const BYTES: usize> StaticTransform for G711Enc<'_, N, BYTE
 
 impl<const N: usize, const BYTES: usize> core::fmt::Debug for G711Enc<'_, N, BYTES> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("G711Enc").field("law", &self.law).finish_non_exhaustive()
+        f.debug_struct("G711Enc")
+            .field("law", &self.law)
+            .finish_non_exhaustive()
     }
 }
 
@@ -279,6 +281,8 @@ impl<const N: usize, const BYTES: usize> StaticTransform for G711Dec<'_, N, BYTE
 
 impl<const N: usize, const BYTES: usize> core::fmt::Debug for G711Dec<'_, N, BYTES> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("G711Dec").field("law", &self.law).finish_non_exhaustive()
+        f.debug_struct("G711Dec")
+            .field("law", &self.law)
+            .finish_non_exhaustive()
     }
 }

@@ -11,7 +11,7 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket,
-    PushOutcome, RawVideoFormat, Rate, VideoCodec,
+    PushOutcome, Rate, RawVideoFormat, VideoCodec,
 };
 use g2g_plugins::mjpegdec::MjpegDec;
 use g2g_plugins::mjpegenc::MjpegEnc;
@@ -71,10 +71,15 @@ async fn encodes_rgba_to_mjpeg_that_roundtrips_through_mjpegdec() {
     let blue = rgba_solid(20, 40, 210);
     let frame = Frame::new(
         MemoryDomain::System(SystemSlice::from_boxed(blue.into_boxed_slice())),
-        FrameTiming { pts_ns: 0, ..FrameTiming::default() },
+        FrameTiming {
+            pts_ns: 0,
+            ..FrameTiming::default()
+        },
         0,
     );
-    enc.process(PipelinePacket::DataFrame(frame), &mut esink).await.unwrap();
+    enc.process(PipelinePacket::DataFrame(frame), &mut esink)
+        .await
+        .unwrap();
 
     assert_eq!(
         esink.caps,
@@ -105,17 +110,36 @@ async fn encodes_rgba_to_mjpeg_that_roundtrips_through_mjpegdec() {
         FrameTiming::default(),
         0,
     );
-    dec.process(PipelinePacket::DataFrame(jframe), &mut dsink).await.unwrap();
+    dec.process(PipelinePacket::DataFrame(jframe), &mut dsink)
+        .await
+        .unwrap();
 
     let geometry = dsink.caps.iter().find_map(|c| match c {
-        Caps::RawVideo { width: Dim::Fixed(w), height: Dim::Fixed(h), .. } => Some((*w, *h)),
+        Caps::RawVideo {
+            width: Dim::Fixed(w),
+            height: Dim::Fixed(h),
+            ..
+        } => Some((*w, *h)),
         _ => None,
     });
-    assert_eq!(geometry, Some((W, H)), "decoded geometry matches the source");
+    assert_eq!(
+        geometry,
+        Some((W, H)),
+        "decoded geometry matches the source"
+    );
     assert_eq!(dsink.frames.len(), 1);
     let px = &dsink.frames[0][0..4];
-    assert!(px[2] > 150, "blue channel dominant after round-trip (got {})", px[2]);
-    assert!(px[0] < 100 && px[1] < 120, "red/green low (got {},{})", px[0], px[1]);
+    assert!(
+        px[2] > 150,
+        "blue channel dominant after round-trip (got {})",
+        px[2]
+    );
+    assert!(
+        px[0] < 100 && px[1] < 120,
+        "red/green low (got {},{})",
+        px[0],
+        px[1]
+    );
 }
 
 /// Solid-colour I420 (BT.601 limited range) for the given Y/U/V.
@@ -147,7 +171,9 @@ async fn encodes_i420_to_mjpeg_that_roundtrips_to_blue() {
         FrameTiming::default(),
         0,
     );
-    enc.process(PipelinePacket::DataFrame(frame), &mut esink).await.unwrap();
+    enc.process(PipelinePacket::DataFrame(frame), &mut esink)
+        .await
+        .unwrap();
     assert_eq!(esink.frames.len(), 1);
     assert_eq!(&esink.frames[0][0..2], &[0xFF, 0xD8], "JPEG SOI marker");
 
@@ -167,9 +193,20 @@ async fn encodes_i420_to_mjpeg_that_roundtrips_to_blue() {
         FrameTiming::default(),
         0,
     );
-    dec.process(PipelinePacket::DataFrame(jframe), &mut dsink).await.unwrap();
+    dec.process(PipelinePacket::DataFrame(jframe), &mut dsink)
+        .await
+        .unwrap();
 
     let px = &dsink.frames[0][0..4];
-    assert!(px[2] > 150, "blue dominant after I420 -> jpeg -> rgba (got {})", px[2]);
-    assert!(px[0] < 110 && px[1] < 130, "red/green low (got {},{})", px[0], px[1]);
+    assert!(
+        px[2] > 150,
+        "blue dominant after I420 -> jpeg -> rgba (got {})",
+        px[2]
+    );
+    assert!(
+        px[0] < 110 && px[1] < 130,
+        "red/green low (got {},{})",
+        px[0],
+        px[1]
+    );
 }

@@ -28,7 +28,11 @@ fn vp9_caps() -> Caps {
 }
 
 fn aac_caps() -> Caps {
-    Caps::Audio { format: AudioFormat::Aac, channels: 2, sample_rate: 48000 }
+    Caps::Audio {
+        format: AudioFormat::Aac,
+        channels: 2,
+        sample_rate: 48000,
+    }
 }
 
 #[derive(Default)]
@@ -54,7 +58,11 @@ impl OutputSink for CaptureSink {
 fn frame(data: Vec<u8>, pts_ns: u64) -> PipelinePacket {
     PipelinePacket::DataFrame(Frame::new(
         MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-        FrameTiming { pts_ns, dts_ns: pts_ns, ..FrameTiming::default() },
+        FrameTiming {
+            pts_ns,
+            dts_ns: pts_ns,
+            ..FrameTiming::default()
+        },
         0,
     ))
 }
@@ -82,7 +90,10 @@ fn adts_au(payload: &[u8]) -> Vec<u8> {
 }
 
 fn count(haystack: &[u8], needle: &[u8]) -> usize {
-    haystack.windows(needle.len()).filter(|w| *w == needle).count()
+    haystack
+        .windows(needle.len())
+        .filter(|w| *w == needle)
+        .count()
 }
 
 #[tokio::test]
@@ -92,12 +103,24 @@ async fn muxes_vp9_and_aac_into_one_mp4() {
     mux.configure_pipeline(1, &aac_caps()).unwrap();
     let mut sink = CaptureSink::default();
 
-    mux.process(0, frame(vp9_key(), 0), &mut sink).await.unwrap();
-    mux.process(1, frame(adts_au(&[0x01, 0x02, 0x03]), 0), &mut sink).await.unwrap();
-    mux.process(0, frame(vp9_key(), 33_000_000), &mut sink).await.unwrap();
-    mux.process(1, frame(adts_au(&[0x04, 0x05]), 21_000_000), &mut sink).await.unwrap();
-    mux.process(0, PipelinePacket::Eos, &mut sink).await.unwrap();
-    mux.process(1, PipelinePacket::Eos, &mut sink).await.unwrap();
+    mux.process(0, frame(vp9_key(), 0), &mut sink)
+        .await
+        .unwrap();
+    mux.process(1, frame(adts_au(&[0x01, 0x02, 0x03]), 0), &mut sink)
+        .await
+        .unwrap();
+    mux.process(0, frame(vp9_key(), 33_000_000), &mut sink)
+        .await
+        .unwrap();
+    mux.process(1, frame(adts_au(&[0x04, 0x05]), 21_000_000), &mut sink)
+        .await
+        .unwrap();
+    mux.process(0, PipelinePacket::Eos, &mut sink)
+        .await
+        .unwrap();
+    mux.process(1, PipelinePacket::Eos, &mut sink)
+        .await
+        .unwrap();
 
     let out = &sink.bytes;
     assert_eq!(&out[4..8], b"ftyp", "ISO-BMFF starts with ftyp");
@@ -105,6 +128,10 @@ async fn muxes_vp9_and_aac_into_one_mp4() {
     assert_eq!(count(out, b"vp09"), 1, "VP9 sample entry");
     assert_eq!(count(out, b"vpcC"), 1, "VPCodecConfigurationBox");
     assert_eq!(count(out, b"avcC"), 0, "no avcC: VP9 is not H.264");
-    assert_eq!(count(out, b"esds"), 1, "the AAC track still carries its esds");
+    assert_eq!(
+        count(out, b"esds"),
+        1,
+        "the AAC track still carries its esds"
+    );
     assert_eq!(mux.emitted(), 4, "all four access units muxed");
 }

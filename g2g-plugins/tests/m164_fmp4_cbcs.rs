@@ -52,7 +52,12 @@ fn avcc(sps: &[u8], pps: &[u8]) -> Vec<u8> {
 
 fn sinf() -> Vec<u8> {
     let frma = mp4_box(b"frma", b"avc1");
-    let schm = full_box(b"schm", 0, 0, &[&b"cbcs"[..], &0x0001_0000u32.to_be_bytes()].concat());
+    let schm = full_box(
+        b"schm",
+        0,
+        0,
+        &[&b"cbcs"[..], &0x0001_0000u32.to_be_bytes()].concat(),
+    );
     let mut tp = vec![0u8]; // tenc[4] reserved
     tp.push((CRYPT << 4) | SKIP); // tenc[5] crypt/skip pattern
     tp.push(1); // default_isProtected
@@ -94,7 +99,10 @@ type Aes128CbcEnc = cbc::Encryptor<aes::Aes128>;
 fn encrypted_block_offsets(len: usize) -> Vec<usize> {
     let block_count = len / 16;
     let span = (CRYPT + SKIP) as usize;
-    (0..block_count).filter(|b| b % span < CRYPT as usize).map(|b| b * 16).collect()
+    (0..block_count)
+        .filter(|b| b % span < CRYPT as usize)
+        .map(|b| b * 16)
+        .collect()
 }
 
 fn cbcs_encrypt_range(range: &mut [u8]) {
@@ -102,8 +110,10 @@ fn cbcs_encrypt_range(range: &mut [u8]) {
     if offsets.is_empty() {
         return;
     }
-    let mut gathered: Vec<u8> =
-        offsets.iter().flat_map(|&o| range[o..o + 16].iter().copied()).collect();
+    let mut gathered: Vec<u8> = offsets
+        .iter()
+        .flat_map(|&o| range[o..o + 16].iter().copied())
+        .collect();
     let n = gathered.len();
     Aes128CbcEnc::new(&KEY.into(), &IV.into())
         .encrypt_padded_mut::<NoPadding>(&mut gathered, n)
@@ -202,13 +212,23 @@ async fn fmp4_cbcs_decrypts_with_key_handle() {
     let fragment = make_fragment(&nals);
 
     let handle = new_key_handle();
-    *handle.lock().unwrap() = Some(SampleAesKey { key: KEY, iv: [0; 16] }); // IV unused (tenc constant IV)
+    *handle.lock().unwrap() = Some(SampleAesKey {
+        key: KEY,
+        iv: [0; 16],
+    }); // IV unused (tenc constant IV)
 
     let mut demux = Fmp4Demux::new().with_cbcs_key_handle(handle);
-    demux.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff }).unwrap();
+    demux
+        .configure_pipeline(&Caps::ByteStream {
+            encoding: ByteStreamEncoding::IsoBmff,
+        })
+        .unwrap();
     let mut sink = CaptureSink::default();
     demux.process(data_frame(moov), &mut sink).await.unwrap();
-    demux.process(data_frame(fragment), &mut sink).await.unwrap();
+    demux
+        .process(data_frame(fragment), &mut sink)
+        .await
+        .unwrap();
 
     assert_eq!(sink.frames.len(), nals.len(), "one access unit per sample");
     for (frame, nal) in sink.frames.iter().zip(&nals) {
@@ -228,7 +248,11 @@ async fn fmp4_cbcs_without_key_fails_loud() {
     let fragment = make_fragment(&idr_nals());
 
     let mut demux = Fmp4Demux::new(); // no key handle
-    demux.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff }).unwrap();
+    demux
+        .configure_pipeline(&Caps::ByteStream {
+            encoding: ByteStreamEncoding::IsoBmff,
+        })
+        .unwrap();
     let mut sink = CaptureSink::default();
     demux.process(data_frame(moov), &mut sink).await.unwrap();
     assert_eq!(

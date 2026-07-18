@@ -137,7 +137,10 @@ impl TsDemuxer {
     }
 
     fn stream_type_of(&self, pid: u16) -> Option<u8> {
-        self.streams.iter().find(|s| s.pid == pid).map(|s| s.stream_type)
+        self.streams
+            .iter()
+            .find(|s| s.pid == pid)
+            .map(|s| s.stream_type)
     }
 
     /// Skip the PSI `pointer_field` and return the section bytes, or `None` if
@@ -171,11 +174,15 @@ impl TsDemuxer {
         if self.pmt_pid.is_some() {
             return; // first PAT wins (single program)
         }
-        let Some(section) = Self::section(payload, pusi) else { return };
+        let Some(section) = Self::section(payload, pusi) else {
+            return;
+        };
         if section.first() != Some(&0x00) {
             return; // table_id 0x00 = PAT
         }
-        let Some(body) = Self::section_body(section) else { return };
+        let Some(body) = Self::section_body(section) else {
+            return;
+        };
         // Program loop starts at section[8] (after the 8-byte PSI header).
         let mut i = 8;
         while i + 4 <= body.len() {
@@ -193,11 +200,15 @@ impl TsDemuxer {
         if !self.streams.is_empty() {
             return; // first PMT wins
         }
-        let Some(section) = Self::section(payload, pusi) else { return };
+        let Some(section) = Self::section(payload, pusi) else {
+            return;
+        };
         if section.first() != Some(&0x02) {
             return; // table_id 0x02 = PMT
         }
-        let Some(body) = Self::section_body(section) else { return };
+        let Some(body) = Self::section_body(section) else {
+            return;
+        };
         if body.len() < 12 {
             return;
         }
@@ -358,7 +369,12 @@ impl TsMuxer {
                     video_n += 1;
                     id
                 };
-                MuxStream { stream_type, pid: MUX_ES_PID + i as u16, stream_id, es_cc: 0 }
+                MuxStream {
+                    stream_type,
+                    pid: MUX_ES_PID + i as u16,
+                    stream_id,
+                    es_cc: 0,
+                }
             })
             .collect();
         Self {
@@ -386,7 +402,12 @@ impl TsMuxer {
     /// Mux one access unit of elementary stream `stream_index` into TS bytes,
     /// preceded by PAT + PMT on the very first call (any stream). `pts_90khz`,
     /// when present, is written into the PES header.
-    pub fn push_au_on(&mut self, stream_index: usize, au: &[u8], pts_90khz: Option<u64>) -> Vec<u8> {
+    pub fn push_au_on(
+        &mut self,
+        stream_index: usize,
+        au: &[u8],
+        pts_90khz: Option<u64>,
+    ) -> Vec<u8> {
         let mut out = Vec::new();
         // Emit the PAT/PMT pair up front, then again on the configured cadence so a
         // mid-stream joiner finds the tables. A `None` PTS can't be time-gated, so
@@ -426,10 +447,15 @@ impl TsMuxer {
 
     fn pat_packet(&mut self, out: &mut Vec<u8>) {
         let body = [
-            0x00, 0x01, // transport_stream_id
-            0xC1, 0x00, 0x00, // version/current, section_number, last_section_number
-            0x00, 0x01, // program_number 1
-            0xE0 | (MUX_PMT_PID >> 8) as u8 & 0x1F, MUX_PMT_PID as u8,
+            0x00,
+            0x01, // transport_stream_id
+            0xC1,
+            0x00,
+            0x00, // version/current, section_number, last_section_number
+            0x00,
+            0x01, // program_number 1
+            0xE0 | (MUX_PMT_PID >> 8) as u8 & 0x1F,
+            MUX_PMT_PID as u8,
         ];
         self.pat_cc = psi_packet(PID_PAT, 0x00, &body, self.pat_cc, out);
     }
@@ -439,10 +465,15 @@ impl TsMuxer {
         let pcr_pid = self.streams[0].pid;
         let mut body = Vec::with_capacity(9 + self.streams.len() * 5);
         body.extend_from_slice(&[
-            0x00, 0x01, // program_number
-            0xC1, 0x00, 0x00, // version, section/last
-            0xE0 | (pcr_pid >> 8) as u8 & 0x1F, pcr_pid as u8, // PCR_PID
-            0xF0, 0x00, // program_info_length = 0
+            0x00,
+            0x01, // program_number
+            0xC1,
+            0x00,
+            0x00, // version, section/last
+            0xE0 | (pcr_pid >> 8) as u8 & 0x1F,
+            pcr_pid as u8, // PCR_PID
+            0xF0,
+            0x00, // program_info_length = 0
         ]);
         // One ES loop entry per stream: stream_type, elementary_PID, ES_info_len.
         for s in &self.streams {
@@ -556,7 +587,11 @@ fn mpeg_crc32(data: &[u8]) -> u32 {
     for &b in data {
         crc ^= (b as u32) << 24;
         for _ in 0..8 {
-            crc = if crc & 0x8000_0000 != 0 { (crc << 1) ^ 0x04C1_1DB7 } else { crc << 1 };
+            crc = if crc & 0x8000_0000 != 0 {
+                (crc << 1) ^ 0x04C1_1DB7
+            } else {
+                crc << 1
+            };
         }
     }
     crc
@@ -613,23 +648,35 @@ mod tests {
     /// PAT body (from section[3]) mapping one program to a PMT PID.
     fn pat_body(program: u16, pmt_pid: u16) -> Vec<u8> {
         alloc::vec![
-            (program >> 8) as u8, program as u8, // transport_stream_id (reuse)
-            0xC1, 0x00, 0x00, // version/current, section_number, last_section_number
-            (program >> 8) as u8, program as u8,
-            0xE0 | ((pmt_pid >> 8) as u8 & 0x1F), pmt_pid as u8,
+            (program >> 8) as u8,
+            program as u8, // transport_stream_id (reuse)
+            0xC1,
+            0x00,
+            0x00, // version/current, section_number, last_section_number
+            (program >> 8) as u8,
+            program as u8,
+            0xE0 | ((pmt_pid >> 8) as u8 & 0x1F),
+            pmt_pid as u8,
         ]
     }
 
     /// PMT body (from section[3]) announcing one elementary stream.
     fn pmt_body(es_pid: u16, stream_type: u8) -> Vec<u8> {
         alloc::vec![
-            0x00, 0x01, // program_number
-            0xC1, 0x00, 0x00, // version, section/last
-            0xE0 | ((es_pid >> 8) as u8 & 0x1F), es_pid as u8, // PCR_PID
-            0xF0, 0x00, // program_info_length = 0
+            0x00,
+            0x01, // program_number
+            0xC1,
+            0x00,
+            0x00, // version, section/last
+            0xE0 | ((es_pid >> 8) as u8 & 0x1F),
+            es_pid as u8, // PCR_PID
+            0xF0,
+            0x00, // program_info_length = 0
             stream_type,
-            0xE0 | ((es_pid >> 8) as u8 & 0x1F), es_pid as u8, // elementary_PID
-            0xF0, 0x00, // ES_info_length = 0
+            0xE0 | ((es_pid >> 8) as u8 & 0x1F),
+            es_pid as u8, // elementary_PID
+            0xF0,
+            0x00, // ES_info_length = 0
         ]
     }
 
@@ -641,7 +688,7 @@ mod tests {
             header.push(0x80); // marker '10'
             header.push(0x80); // PTS_DTS_flags = '10'
             header.push(5); // header_data_length
-            // 5-byte PTS field with '0010' prefix.
+                            // 5-byte PTS field with '0010' prefix.
             header.push(0x21 | (((pts >> 30) & 0x07) as u8) << 1);
             header.push(((pts >> 22) & 0xFF) as u8);
             header.push(0x01 | (((pts >> 15) & 0x7F) as u8) << 1);
@@ -667,16 +714,33 @@ mod tests {
         let mut d = TsDemuxer::new();
         d.push_packet(&psi_packet(PID_PAT, 0x00, &pat_body(1, pmt_pid)));
         assert_eq!(d.video_pid(), None, "no PMT yet");
-        d.push_packet(&psi_packet(pmt_pid, 0x02, &pmt_body(es_pid, STREAM_TYPE_H264)));
-        assert_eq!(d.streams(), &[ElementaryStream { pid: es_pid, stream_type: STREAM_TYPE_H264 }]);
+        d.push_packet(&psi_packet(
+            pmt_pid,
+            0x02,
+            &pmt_body(es_pid, STREAM_TYPE_H264),
+        ));
+        assert_eq!(
+            d.streams(),
+            &[ElementaryStream {
+                pid: es_pid,
+                stream_type: STREAM_TYPE_H264
+            }]
+        );
         assert_eq!(d.video_pid(), Some(es_pid));
 
         // One PES (Annex-B-ish payload) with a PTS, then a second PES start to
         // flush the first.
         let au = [0x00, 0x00, 0x00, 0x01, 0x65, 0xAA, 0xBB];
         d.push_packet(&ts_packet(es_pid, true, &pes(Some(900_000), &au)));
-        assert!(d.take_units().is_empty(), "first PES not flushed until next PES start");
-        d.push_packet(&ts_packet(es_pid, true, &pes(Some(901_000), &[0x00, 0x00, 0x01, 0x41])));
+        assert!(
+            d.take_units().is_empty(),
+            "first PES not flushed until next PES start"
+        );
+        d.push_packet(&ts_packet(
+            es_pid,
+            true,
+            &pes(Some(901_000), &[0x00, 0x00, 0x01, 0x41]),
+        ));
         let units = d.take_units();
         assert_eq!(units.len(), 1, "first PES completed by the second's start");
         assert_eq!(units[0].pid, es_pid);
@@ -690,7 +754,11 @@ mod tests {
         let es_pid = 0x0100;
         let mut d = TsDemuxer::new();
         d.push_packet(&psi_packet(PID_PAT, 0x00, &pat_body(1, pmt_pid)));
-        d.push_packet(&psi_packet(pmt_pid, 0x02, &pmt_body(es_pid, STREAM_TYPE_H264)));
+        d.push_packet(&psi_packet(
+            pmt_pid,
+            0x02,
+            &pmt_body(es_pid, STREAM_TYPE_H264),
+        ));
 
         // A PES whose ES payload spans two TS packets.
         let part1: Vec<u8> = (0..150u8).collect();
@@ -721,7 +789,10 @@ mod tests {
         assert_eq!(d.pending.len(), 1, "the PES is open");
         let huge = alloc::vec![0u8; MAX_PES_BYTES + 1];
         d.accumulate_pes(0x0100, STREAM_TYPE_H264, &huge, false);
-        assert!(d.pending.is_empty(), "the oversized PES is dropped, not buffered");
+        assert!(
+            d.pending.is_empty(),
+            "the oversized PES is dropped, not buffered"
+        );
     }
 
     #[test]
@@ -773,10 +844,21 @@ mod tests {
         let next_cc = super::psi_packet(MUX_PMT_PID, 0x02, &body, 5, &mut out);
         assert_eq!(out.len() % TS_PACKET_LEN, 0, "emits whole packets");
         let packets = out.len() / TS_PACKET_LEN;
-        assert!(packets >= 3, "400-byte body spans 3+ packets, got {packets}");
+        assert!(
+            packets >= 3,
+            "400-byte body spans 3+ packets, got {packets}"
+        );
         assert_eq!(out[1] & 0x40, 0x40, "first packet carries PUSI");
-        assert_eq!(out[TS_PACKET_LEN + 1] & 0x40, 0x00, "continuation clears PUSI");
-        assert_eq!(next_cc, (5 + packets as u8) & 0x0F, "cc advances per packet");
+        assert_eq!(
+            out[TS_PACKET_LEN + 1] & 0x40,
+            0x00,
+            "continuation clears PUSI"
+        );
+        assert_eq!(
+            next_cc,
+            (5 + packets as u8) & 0x0F,
+            "cc advances per packet"
+        );
     }
 
     #[test]
@@ -811,7 +893,9 @@ mod tests {
         let later = m.push_au(&au, Some(90 * 10_000)); // 10 s later
         let pats = later
             .chunks(TS_PACKET_LEN)
-            .filter(|p| p.len() == TS_PACKET_LEN && (((p[1] as u16 & 0x1F) << 8) | p[2] as u16) == PID_PAT)
+            .filter(|p| {
+                p.len() == TS_PACKET_LEN && (((p[1] as u16 & 0x1F) << 8) | p[2] as u16) == PID_PAT
+            })
             .count();
         assert_eq!(pats, 0, "default cadence emits the tables only once");
     }

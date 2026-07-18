@@ -132,9 +132,18 @@ pub struct DecodedVideoFrame {
 /// drop before the device (see [`VulkanStreamDecoder`]). The `_session` is kept
 /// only to outlive the decoder, never read directly.
 enum Inner {
-    H264 { decoder: H264DpbDecoder, _session: H264DecodeSession },
-    H265 { decoder: H265DpbDecoder, _session: H265DecodeSession },
-    Av1 { decoder: Av1DpbDecoder, _session: Av1DecodeSession },
+    H264 {
+        decoder: H264DpbDecoder,
+        _session: H264DecodeSession,
+    },
+    H265 {
+        decoder: H265DpbDecoder,
+        _session: H265DecodeSession,
+    },
+    Av1 {
+        decoder: Av1DpbDecoder,
+        _session: Av1DecodeSession,
+    },
 }
 
 /// A chunk-fed hardware video decoder producing re_video-shaped CPU frames.
@@ -188,7 +197,9 @@ impl core::fmt::Debug for Inner {
             Self::H265 { .. } => "H265",
             Self::Av1 { .. } => "Av1",
         };
-        f.debug_struct("Inner").field("codec", &name).finish_non_exhaustive()
+        f.debug_struct("Inner")
+            .field("codec", &name)
+            .finish_non_exhaustive()
     }
 }
 
@@ -206,14 +217,17 @@ impl VulkanStreamDecoder {
     ) -> Result<Self, VulkanVideoError> {
         match codec {
             VideoCodec::H264 => {
-                let ps = extract_h264_parameter_sets(init)
-                    .ok_or(VulkanVideoError::UnsupportedStream)?;
+                let ps =
+                    extract_h264_parameter_sets(init).ok_or(VulkanVideoError::UnsupportedStream)?;
                 let width = (ps.sps.pic_width_in_mbs_minus1 + 1) * 16;
                 let height = (ps.sps.pic_height_in_map_units_minus1 + 1) * 16;
                 let session = device.create_h264_session(&ps, width, height)?;
                 let decoder = device.create_h264_dpb_decoder(&session, &ps)?;
                 Ok(Self {
-                    inner: Inner::H264 { decoder, _session: session },
+                    inner: Inner::H264 {
+                        decoder,
+                        _session: session,
+                    },
                     width,
                     height,
                     // H.264/H.265 VUI colorimetry is not parsed yet; default to
@@ -228,15 +242,18 @@ impl VulkanStreamDecoder {
                 })
             }
             VideoCodec::H265 => {
-                let ps = extract_h265_parameter_sets(init)
-                    .ok_or(VulkanVideoError::UnsupportedStream)?;
+                let ps =
+                    extract_h265_parameter_sets(init).ok_or(VulkanVideoError::UnsupportedStream)?;
                 let width = ps.sps.pic_width_in_luma_samples;
                 let height = ps.sps.pic_height_in_luma_samples;
                 let std = to_std_h265_params(&ps);
                 let session = device.create_h265_session(&std, width, height)?;
                 let decoder = device.create_h265_dpb_decoder(&session, &ps)?;
                 Ok(Self {
-                    inner: Inner::H265 { decoder, _session: session },
+                    inner: Inner::H265 {
+                        decoder,
+                        _session: session,
+                    },
                     width,
                     height,
                     range: VideoColorRange::Limited,
@@ -247,8 +264,8 @@ impl VulkanStreamDecoder {
                 })
             }
             VideoCodec::Av1 => {
-                let seq = extract_av1_sequence_header(init)
-                    .ok_or(VulkanVideoError::UnsupportedStream)?;
+                let seq =
+                    extract_av1_sequence_header(init).ok_or(VulkanVideoError::UnsupportedStream)?;
                 let width = seq.max_frame_width_minus_1 + 1;
                 let height = seq.max_frame_height_minus_1 + 1;
                 let (range, coefficients) = av1_colorimetry(&seq);
@@ -256,7 +273,10 @@ impl VulkanStreamDecoder {
                 let session = device.create_av1_session(&std, width, height)?;
                 let decoder = device.create_av1_dpb_decoder(&session, &seq)?;
                 Ok(Self {
-                    inner: Inner::Av1 { decoder, _session: session },
+                    inner: Inner::Av1 {
+                        decoder,
+                        _session: session,
+                    },
                     width,
                     height,
                     range,
@@ -282,14 +302,17 @@ impl VulkanStreamDecoder {
     ) -> Result<Self, VulkanVideoError> {
         match codec {
             VideoCodec::H264 => {
-                let ps = extract_h264_parameter_sets(init)
-                    .ok_or(VulkanVideoError::UnsupportedStream)?;
+                let ps =
+                    extract_h264_parameter_sets(init).ok_or(VulkanVideoError::UnsupportedStream)?;
                 let width = (ps.sps.pic_width_in_mbs_minus1 + 1) * 16;
                 let height = (ps.sps.pic_height_in_map_units_minus1 + 1) * 16;
                 let session = device.create_h264_session(&ps, width, height)?;
                 let decoder = device.create_h264_dpb_decoder_gpu(&session, &ps)?;
                 Ok(Self {
-                    inner: Inner::H264 { decoder, _session: session },
+                    inner: Inner::H264 {
+                        decoder,
+                        _session: session,
+                    },
                     width,
                     height,
                     range: VideoColorRange::Limited,
@@ -300,15 +323,18 @@ impl VulkanStreamDecoder {
                 })
             }
             VideoCodec::H265 => {
-                let ps = extract_h265_parameter_sets(init)
-                    .ok_or(VulkanVideoError::UnsupportedStream)?;
+                let ps =
+                    extract_h265_parameter_sets(init).ok_or(VulkanVideoError::UnsupportedStream)?;
                 let width = ps.sps.pic_width_in_luma_samples;
                 let height = ps.sps.pic_height_in_luma_samples;
                 let std = to_std_h265_params(&ps);
                 let session = device.create_h265_session(&std, width, height)?;
                 let decoder = device.create_h265_dpb_decoder_gpu(&session, &ps)?;
                 Ok(Self {
-                    inner: Inner::H265 { decoder, _session: session },
+                    inner: Inner::H265 {
+                        decoder,
+                        _session: session,
+                    },
                     width,
                     height,
                     range: VideoColorRange::Limited,
@@ -319,8 +345,8 @@ impl VulkanStreamDecoder {
                 })
             }
             VideoCodec::Av1 => {
-                let seq = extract_av1_sequence_header(init)
-                    .ok_or(VulkanVideoError::UnsupportedStream)?;
+                let seq =
+                    extract_av1_sequence_header(init).ok_or(VulkanVideoError::UnsupportedStream)?;
                 let width = seq.max_frame_width_minus_1 + 1;
                 let height = seq.max_frame_height_minus_1 + 1;
                 let (range, coefficients) = av1_colorimetry(&seq);
@@ -328,7 +354,10 @@ impl VulkanStreamDecoder {
                 let session = device.create_av1_session(&std, width, height)?;
                 let decoder = device.create_av1_dpb_decoder_gpu(&session, &seq)?;
                 Ok(Self {
-                    inner: Inner::Av1 { decoder, _session: session },
+                    inner: Inner::Av1 {
+                        decoder,
+                        _session: session,
+                    },
                     width,
                     height,
                     range,
@@ -460,8 +489,7 @@ impl VulkanStreamDecoder {
     fn to_i420_frames(&self, nv12: Vec<Nv12Frame>) -> Vec<DecodedVideoFrame> {
         let range = self.range;
         let coefficients = self.coefficients;
-        nv12
-            .into_iter()
+        nv12.into_iter()
             .map(|f| DecodedVideoFrame {
                 width: f.width,
                 height: f.height,
@@ -732,13 +760,19 @@ mod tests {
         sample.extend_from_slice(&2u32.to_be_bytes());
         sample.extend_from_slice(&[0x41, 0x03]);
         let out = reframe_length_prefixed(&sample, 4);
-        assert_eq!(out, vec![0, 0, 0, 1, 0x65, 0x01, 0x02, 0, 0, 0, 1, 0x41, 0x03]);
+        assert_eq!(
+            out,
+            vec![0, 0, 0, 1, 0x65, 0x01, 0x02, 0, 0, 0, 1, 0x41, 0x03]
+        );
 
         // 2-byte length size is honoured.
         let mut s2 = Vec::new();
         s2.extend_from_slice(&2u16.to_be_bytes());
         s2.extend_from_slice(&[0x65, 0x09]);
-        assert_eq!(reframe_length_prefixed(&s2, 2), vec![0, 0, 0, 1, 0x65, 0x09]);
+        assert_eq!(
+            reframe_length_prefixed(&s2, 2),
+            vec![0, 0, 0, 1, 0x65, 0x09]
+        );
     }
 
     #[test]

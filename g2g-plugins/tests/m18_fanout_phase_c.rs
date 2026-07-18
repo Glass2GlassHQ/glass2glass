@@ -21,7 +21,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_source_fanout, SourceLoop};
 use g2g_core::{
     AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError,
-    MemoryDomain, OutputSink, PipelineClock, PipelinePacket, Rate, Router, RawVideoFormat,
+    MemoryDomain, OutputSink, PipelineClock, PipelinePacket, Rate, RawVideoFormat, Router,
 };
 
 struct ZeroClock;
@@ -80,7 +80,8 @@ struct ReconfigSrc {
 impl SourceLoop for ReconfigSrc {
     type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>;
 
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 
@@ -102,7 +103,8 @@ impl SourceLoop for ReconfigSrc {
             for i in 0..before {
                 out.push(PipelinePacket::DataFrame(frame(i))).await?;
             }
-            out.push(PipelinePacket::CapsChanged(switch_to.clone())).await?;
+            out.push(PipelinePacket::CapsChanged(switch_to.clone()))
+                .await?;
             for j in 0..after {
                 out.push(PipelinePacket::DataFrame(frame(before + j)))
                     .await?;
@@ -158,7 +160,11 @@ impl AsyncElement for RecordBranch {
     }
 
     fn configure_allocation(&mut self, params: &AllocationParams) {
-        self.inner.lock().unwrap().configured_sizes.push(params.size_bytes);
+        self.inner
+            .lock()
+            .unwrap()
+            .configured_sizes
+            .push(params.size_bytes);
     }
 
     fn process<'a>(
@@ -195,8 +201,14 @@ async fn fo2_accepted_caps_change_propagates_to_every_branch() {
         configured: false,
     };
     let mut router = Router::new(2);
-    let mut sink_a = RecordBranch { accepts: Some(rgba_any()), inner: Arc::clone(&inner_a) };
-    let mut sink_b = RecordBranch { accepts: Some(rgba_any()), inner: Arc::clone(&inner_b) };
+    let mut sink_a = RecordBranch {
+        accepts: Some(rgba_any()),
+        inner: Arc::clone(&inner_a),
+    };
+    let mut sink_b = RecordBranch {
+        accepts: Some(rgba_any()),
+        inner: Arc::clone(&inner_b),
+    };
     let clock = ZeroClock;
 
     {
@@ -243,8 +255,14 @@ async fn fo1_strict_branch_reject_fails_the_fanout() {
     };
     let mut router = Router::new(2);
     // Branch A accepts anything; branch B only RGBA, so it rejects the NV12 switch.
-    let mut sink_a = RecordBranch { accepts: None, inner: Arc::clone(&inner_a) };
-    let mut sink_b = RecordBranch { accepts: Some(rgba_any()), inner: Arc::clone(&inner_b) };
+    let mut sink_a = RecordBranch {
+        accepts: None,
+        inner: Arc::clone(&inner_a),
+    };
+    let mut sink_b = RecordBranch {
+        accepts: Some(rgba_any()),
+        inner: Arc::clone(&inner_b),
+    };
     let clock = ZeroClock;
 
     let result = {

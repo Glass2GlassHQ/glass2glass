@@ -27,18 +27,25 @@ async fn observed_run_captures_topology_and_per_element() {
     .expect("pipeline parses");
 
     let obs = Observer::new();
-    let stats =
-        run_graph_observed(graph, &ZeroClock, 4, &obs, None).await.expect("observed run");
+    let stats = run_graph_observed(graph, &ZeroClock, 4, &obs, None)
+        .await
+        .expect("observed run");
     assert_eq!(stats.frames_consumed, 8, "all frames reached the sink");
 
     let snap = obs.snapshot();
     assert_eq!(snap.nodes.len(), 3, "src -> scale -> sink");
     assert_eq!(
-        snap.edges.iter().map(|e| (e.from, e.to)).collect::<Vec<_>>(),
+        snap.edges
+            .iter()
+            .map(|e| (e.from, e.to))
+            .collect::<Vec<_>>(),
         vec![(0, 1), (1, 2)],
     );
     // Each edge carries its negotiated caps (raw video after the decode-free chain).
-    assert!(snap.edges.iter().all(|e| e.caps.is_some()), "edges carry negotiated caps");
+    assert!(
+        snap.edges.iter().all(|e| e.caps.is_some()),
+        "edges carry negotiated caps"
+    );
     assert!(snap.edges[0].caps.as_ref().unwrap().contains("video"));
 
     // Source has no `process()` probe; its cost surfaces as downstream fill.
@@ -48,7 +55,11 @@ async fn observed_run_captures_topology_and_per_element() {
     // The interior transform was probed and timed real frames.
     assert_eq!(snap.nodes[1].role, NodeRole::Transform);
     let scale = snap.nodes[1].latency.as_ref().expect("transform probed");
-    assert!(scale.proc.count > 0, "transform process() was timed, count={}", scale.proc.count);
+    assert!(
+        scale.proc.count > 0,
+        "transform process() was timed, count={}",
+        scale.proc.count
+    );
 
     // The sink saw all 8 frames through its probe too.
     assert_eq!(snap.nodes[2].role, NodeRole::Sink);
@@ -85,5 +96,8 @@ async fn observer_is_registered_before_frames_flow() {
     let (stats, saw_topology) =
         tokio::join!(run_graph_observed(graph, &ZeroClock, 2, &obs, None), poller);
     stats.expect("observed run");
-    assert!(saw_topology, "topology became visible while the run was in flight");
+    assert!(
+        saw_topology,
+        "topology became visible while the run was in flight"
+    );
 }

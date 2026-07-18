@@ -33,7 +33,11 @@ fn h264_caps() -> Caps {
     }
 }
 fn aac_caps() -> Caps {
-    Caps::Audio { format: AudioFormat::Aac, channels: 2, sample_rate: 48_000 }
+    Caps::Audio {
+        format: AudioFormat::Aac,
+        channels: 2,
+        sample_rate: 48_000,
+    }
 }
 
 /// A `MultiOutputSink` recording, per port, the forwarded frame payloads and the
@@ -45,7 +49,10 @@ struct PortTap {
 }
 impl PortTap {
     fn new(ports: usize) -> Self {
-        Self { frames: vec![Vec::new(); ports], caps: vec![Vec::new(); ports] }
+        Self {
+            frames: vec![Vec::new(); ports],
+            caps: vec![Vec::new(); ports],
+        }
     }
 }
 impl MultiOutputSink for PortTap {
@@ -56,7 +63,10 @@ impl MultiOutputSink for PortTap {
     ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
         Box::pin(async move {
             match packet {
-                PipelinePacket::DataFrame(Frame { domain: MemoryDomain::System(s), .. }) => {
+                PipelinePacket::DataFrame(Frame {
+                    domain: MemoryDomain::System(s),
+                    ..
+                }) => {
                     self.frames[port].push(s.as_slice().to_vec());
                 }
                 PipelinePacket::CapsChanged(c) => self.caps[port].push(c),
@@ -93,7 +103,11 @@ impl OutputSink for Collect {
 fn frame(data: Vec<u8>, pts_ns: u64) -> PipelinePacket {
     PipelinePacket::DataFrame(Frame::new(
         MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-        FrameTiming { pts_ns, dts_ns: pts_ns, ..FrameTiming::default() },
+        FrameTiming {
+            pts_ns,
+            dts_ns: pts_ns,
+            ..FrameTiming::default()
+        },
         0,
     ))
 }
@@ -127,12 +141,28 @@ async fn mux_av() -> Vec<u8> {
     mux.configure_pipeline(0, &h264_caps()).unwrap();
     mux.configure_pipeline(1, &aac_caps()).unwrap();
     let mut sink = Collect::default();
-    mux.process(0, frame(annexb(&[&sps, &pps, &idr]), 0), &mut sink).await.unwrap();
-    mux.process(1, frame(adts_au(&[0xA1, 0xA2, 0xA3]), 0), &mut sink).await.unwrap();
-    mux.process(0, frame(annexb(&[&[0x41u8, 0x9a, 0x00]]), 33_000_000), &mut sink).await.unwrap();
-    mux.process(1, frame(adts_au(&[0xB4, 0xB5]), 21_000_000), &mut sink).await.unwrap();
-    mux.process(0, PipelinePacket::Eos, &mut sink).await.unwrap();
-    mux.process(1, PipelinePacket::Eos, &mut sink).await.unwrap();
+    mux.process(0, frame(annexb(&[&sps, &pps, &idr]), 0), &mut sink)
+        .await
+        .unwrap();
+    mux.process(1, frame(adts_au(&[0xA1, 0xA2, 0xA3]), 0), &mut sink)
+        .await
+        .unwrap();
+    mux.process(
+        0,
+        frame(annexb(&[&[0x41u8, 0x9a, 0x00]]), 33_000_000),
+        &mut sink,
+    )
+    .await
+    .unwrap();
+    mux.process(1, frame(adts_au(&[0xB4, 0xB5]), 21_000_000), &mut sink)
+        .await
+        .unwrap();
+    mux.process(0, PipelinePacket::Eos, &mut sink)
+        .await
+        .unwrap();
+    mux.process(1, PipelinePacket::Eos, &mut sink)
+        .await
+        .unwrap();
     sink.bytes
 }
 
@@ -153,7 +183,9 @@ async fn mkvdemuxn_splits_av_onto_two_ports() {
     let mut demux = MkvDemuxN::new(vec![MkvStream::H264, MkvStream::Aac]).with_bus(handle);
     assert_eq!(demux.port_count(), 2);
     demux
-        .configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::Matroska })
+        .configure_pipeline(&Caps::ByteStream {
+            encoding: ByteStreamEncoding::Matroska,
+        })
         .expect("configure");
 
     let mut tap = PortTap::new(2);
@@ -162,12 +194,25 @@ async fn mkvdemuxn_splits_av_onto_two_ports() {
     // Each port announced its own elementary-stream caps once, ahead of frames.
     assert_eq!(tap.caps[0].len(), 1, "video port announced caps once");
     assert!(
-        matches!(tap.caps[0][0], Caps::CompressedVideo { codec: VideoCodec::H264, .. }),
+        matches!(
+            tap.caps[0][0],
+            Caps::CompressedVideo {
+                codec: VideoCodec::H264,
+                ..
+            }
+        ),
         "video port retypes to H.264 caps"
     );
     assert_eq!(tap.caps[1].len(), 1, "audio port announced caps once");
     assert!(
-        matches!(tap.caps[1][0], Caps::Audio { format: AudioFormat::Aac, sample_rate: 48_000, .. }),
+        matches!(
+            tap.caps[1][0],
+            Caps::Audio {
+                format: AudioFormat::Aac,
+                sample_rate: 48_000,
+                ..
+            }
+        ),
         "audio port retypes to AAC caps"
     );
 
@@ -178,7 +223,11 @@ async fn mkvdemuxn_splits_av_onto_two_ports() {
         vec![vec![0xA1u8, 0xA2, 0xA3], vec![0xB4, 0xB5]],
         "audio port carries only the AAC track"
     );
-    assert_eq!(tap.frames[0].len(), 2, "video port carries the two H.264 access units");
+    assert_eq!(
+        tap.frames[0].len(),
+        2,
+        "video port carries the two H.264 access units"
+    );
     assert!(
         tap.frames[0].iter().all(|f| !f.is_empty()) && tap.frames[0] != tap.frames[1],
         "video frames are distinct from the audio frames"
@@ -204,13 +253,18 @@ async fn mkvdemuxn_leaves_an_unselected_stream_dark() {
     let file = mux_av().await;
     let mut demux = MkvDemuxN::new(vec![MkvStream::H264, MkvStream::H265]);
     demux
-        .configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::Matroska })
+        .configure_pipeline(&Caps::ByteStream {
+            encoding: ByteStreamEncoding::Matroska,
+        })
         .expect("configure");
 
     let mut tap = PortTap::new(2);
     demux.process(data_frame(&file), &mut tap).await.unwrap();
 
     assert_eq!(tap.frames[0].len(), 2, "H.264 port carries the video");
-    assert!(tap.frames[1].is_empty(), "the H.265 port stays dark (no such track)");
+    assert!(
+        tap.frames[1].is_empty(),
+        "the H.265 port stays dark (no such track)"
+    );
     assert!(tap.caps[1].is_empty(), "a dark port announces no caps");
 }

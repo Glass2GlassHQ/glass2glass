@@ -158,7 +158,11 @@ fn parse_sps(rbsp: &[u8]) -> Option<SpsGeometry> {
 
     let _sps_seq_parameter_set_id = br.read_ue()?;
     let chroma_format_idc = br.read_ue()?;
-    let separate_colour_plane_flag = if chroma_format_idc == 3 { br.read_bit()? } else { 0 };
+    let separate_colour_plane_flag = if chroma_format_idc == 3 {
+        br.read_bit()?
+    } else {
+        0
+    };
     let pic_width = br.read_ue()?;
     let pic_height = br.read_ue()?;
 
@@ -172,7 +176,11 @@ fn parse_sps(rbsp: &[u8]) -> Option<SpsGeometry> {
     // Crop offsets are in chroma sample units, scaled to luma by SubWidthC /
     // SubHeightC (H.265 7.4.3.2.1). ChromaArrayType 0 (monochrome or 4:4:4 with
     // separate colour planes) and 4:4:4 use 1x1.
-    let chroma_array_type = if separate_colour_plane_flag == 1 { 0 } else { chroma_format_idc };
+    let chroma_array_type = if separate_colour_plane_flag == 1 {
+        0
+    } else {
+        chroma_format_idc
+    };
     let (sub_width_c, sub_height_c) = match chroma_array_type {
         1 => (2u32, 2u32), // 4:2:0
         2 => (2, 1),       // 4:2:2
@@ -186,7 +194,11 @@ fn parse_sps(rbsp: &[u8]) -> Option<SpsGeometry> {
     // long-term-ref blocks, and a stream this walk cannot cross still has valid
     // geometry, so a failure downgrades to `None` instead of failing the parse.
     let framerate = parse_vui_framerate(&mut br, sps_max_sub_layers_minus1);
-    Some(SpsGeometry { width, height, framerate })
+    Some(SpsGeometry {
+        width,
+        height,
+        framerate,
+    })
 }
 
 /// Continue the SPS walk past the conformance window down to the VUI
@@ -203,8 +215,11 @@ fn parse_vui_framerate(br: &mut BitReader, sps_max_sub_layers_minus1: u32) -> Op
     }
     // sps_sub_layer_ordering_info_present_flag selects one triple or one per
     // sub-layer.
-    let start =
-        if br.read_bit()? == 1 { 0 } else { sps_max_sub_layers_minus1 };
+    let start = if br.read_bit()? == 1 {
+        0
+    } else {
+        sps_max_sub_layers_minus1
+    };
     for _ in start..=sps_max_sub_layers_minus1 {
         br.read_ue()?; // sps_max_dec_pic_buffering_minus1
         br.read_ue()?; // sps_max_num_reorder_pics
@@ -664,7 +679,11 @@ mod tests {
         let huge = 3_000_000_000u32;
         let stream = build_annexb_sps(1920, 1080, 1, Some((huge, huge, huge, huge)));
         let info = extract_sps_info(&stream).expect("parses without overflow");
-        assert_eq!((info.width, info.height), (0, 0), "offsets clamp dims to zero");
+        assert_eq!(
+            (info.width, info.height),
+            (0, 0),
+            "offsets clamp dims to zero"
+        );
     }
 
     #[test]
@@ -808,7 +827,10 @@ mod tests {
 
         parse
             .process(
-                PipelinePacket::DataFrame(frame_with_bytes(0, build_annexb_sps(1280, 720, 1, None))),
+                PipelinePacket::DataFrame(frame_with_bytes(
+                    0,
+                    build_annexb_sps(1280, 720, 1, None),
+                )),
                 &mut sink,
             )
             .await
@@ -906,7 +928,11 @@ mod tests {
         let b_off = stream.len();
         stream.extend_from_slice(&annexb_vcl_h265(true, 3)); // new picture
         let starts = h265_au_starts(&stream);
-        assert_eq!(starts, vec![0, b_off], "two access units: A(2 slices) then B");
+        assert_eq!(
+            starts,
+            vec![0, b_off],
+            "two access units: A(2 slices) then B"
+        );
     }
 
     #[tokio::test]
@@ -919,11 +945,21 @@ mod tests {
         let au1 = annexb_vcl_h265(true, 2);
         let mut buf = au0.clone();
         buf.extend_from_slice(&au1);
-        parse.process(PipelinePacket::DataFrame(frame_with_bytes(0, buf)), &mut sink).await.unwrap();
+        parse
+            .process(
+                PipelinePacket::DataFrame(frame_with_bytes(0, buf)),
+                &mut sink,
+            )
+            .await
+            .unwrap();
         parse.process(PipelinePacket::Eos, &mut sink).await.unwrap();
 
         let payloads = data_payloads(&sink);
-        assert_eq!(payloads.len(), 2, "two pictures -> two access-unit DataFrames");
+        assert_eq!(
+            payloads.len(),
+            2,
+            "two pictures -> two access-unit DataFrames"
+        );
         assert_eq!(payloads[0], au0, "first AU emitted whole");
         assert_eq!(payloads[1], au1, "second AU emitted whole on EOS");
     }
@@ -940,18 +976,31 @@ mod tests {
         let au = annexb_vcl_h265(true, 7);
         let split = 7; // mid-NAL: past start code + 2-byte header + first RBSP byte
         parse
-            .process(PipelinePacket::DataFrame(frame_with_bytes(0, au[..split].to_vec())), &mut sink)
+            .process(
+                PipelinePacket::DataFrame(frame_with_bytes(0, au[..split].to_vec())),
+                &mut sink,
+            )
             .await
             .unwrap();
         parse
-            .process(PipelinePacket::DataFrame(frame_with_bytes(1, au[split..].to_vec())), &mut sink)
+            .process(
+                PipelinePacket::DataFrame(frame_with_bytes(1, au[split..].to_vec())),
+                &mut sink,
+            )
             .await
             .unwrap();
         parse.process(PipelinePacket::Eos, &mut sink).await.unwrap();
 
         let payloads = data_payloads(&sink);
-        assert_eq!(payloads.len(), 1, "the split access unit reassembles into one");
-        assert_eq!(payloads[0], au, "reassembled bytes are bit-for-bit the original AU");
+        assert_eq!(
+            payloads.len(),
+            1,
+            "the split access unit reassembles into one"
+        );
+        assert_eq!(
+            payloads[0], au,
+            "reassembled bytes are bit-for-bit the original AU"
+        );
     }
 
     #[tokio::test]
@@ -965,7 +1014,13 @@ mod tests {
         let mut idr = vec![0u8, 0, 0, 1, 0x26, 0x01, 0x80, 0xAA];
         let trail = annexb_vcl_h265(true, 2);
         idr.extend_from_slice(&trail);
-        parse.process(PipelinePacket::DataFrame(frame_with_bytes(0, idr)), &mut sink).await.unwrap();
+        parse
+            .process(
+                PipelinePacket::DataFrame(frame_with_bytes(0, idr)),
+                &mut sink,
+            )
+            .await
+            .unwrap();
         parse.process(PipelinePacket::Eos, &mut sink).await.unwrap();
 
         let kf: Vec<bool> = sink
@@ -976,7 +1031,11 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(kf, vec![true, false], "IDR AU is a keyframe, TRAIL_R is not");
+        assert_eq!(
+            kf,
+            vec![true, false],
+            "IDR AU is a keyframe, TRAIL_R is not"
+        );
     }
 
     #[test]
@@ -989,13 +1048,28 @@ mod tests {
         au1.extend_from_slice(&[0, 0, 0, 1, 0x44, 0x01]); // PPS
         au1.extend_from_slice(&[0, 0, 0, 1, 0x26, 0x01]); // IDR_W_RADL (19) slice
         let out1 = p.apply_config_interval(au1.clone(), 0, true);
-        assert_eq!(out1, au1, "an IRAP that already carries parameter sets is untouched");
+        assert_eq!(
+            out1, au1,
+            "an IRAP that already carries parameter sets is untouched"
+        );
         // A later IRAP with no parameter sets gets VPS/SPS/PPS prepended.
         let au2 = vec![0, 0, 0, 1, 0x26, 0x01];
         let out2 = p.apply_config_interval(au2.clone(), 90_000, true);
-        assert!(nal_units(&out2).any(|n| h265_nal_type(n) == Some(VPS_NUT)), "result carries a VPS");
-        assert!(nal_units(&out2).any(|n| h265_nal_type(n) == Some(SPS_NUT)), "result carries an SPS");
-        assert!(nal_units(&out2).any(|n| h265_nal_type(n) == Some(PPS_NUT)), "result carries a PPS");
-        assert!(out2.ends_with(&au2), "the original AU is preserved at the tail");
+        assert!(
+            nal_units(&out2).any(|n| h265_nal_type(n) == Some(VPS_NUT)),
+            "result carries a VPS"
+        );
+        assert!(
+            nal_units(&out2).any(|n| h265_nal_type(n) == Some(SPS_NUT)),
+            "result carries an SPS"
+        );
+        assert!(
+            nal_units(&out2).any(|n| h265_nal_type(n) == Some(PPS_NUT)),
+            "result carries a PPS"
+        );
+        assert!(
+            out2.ends_with(&au2),
+            "the original AU is preserved at the tail"
+        );
     }
 }

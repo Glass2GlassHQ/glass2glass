@@ -57,7 +57,8 @@ struct NvSource {
 
 impl SourceLoop for NvSource {
     type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>;
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 
@@ -80,7 +81,8 @@ impl SourceLoop for NvSource {
                 }))
                 .await?;
                 if i == 0 {
-                    out.push(PipelinePacket::CapsChanged(nv12(1920, 1080))).await?;
+                    out.push(PipelinePacket::CapsChanged(nv12(1920, 1080)))
+                        .await?;
                 }
             }
             out.push(PipelinePacket::Eos).await?;
@@ -182,8 +184,14 @@ async fn mid_stream_change_recascades_through_every_interior_element() {
     // The change is emitted after frame 0; the remaining frames give the
     // reactive cascade ample room to walk sink -> t1 -> t0 before EOS.
     let mut src = NvSource { total_frames: 40 };
-    let mut t0 = RecordingTransform { marker: 300, log: Arc::clone(&t0_log) };
-    let mut t1 = RecordingTransform { marker: 200, log: Arc::clone(&t1_log) };
+    let mut t0 = RecordingTransform {
+        marker: 300,
+        log: Arc::clone(&t0_log),
+    };
+    let mut t1 = RecordingTransform {
+        marker: 200,
+        log: Arc::clone(&t1_log),
+    };
     let mut sink = PoolSink;
     let clock = ZeroClock;
 

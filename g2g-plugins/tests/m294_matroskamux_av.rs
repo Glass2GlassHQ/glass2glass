@@ -29,7 +29,11 @@ fn h264_caps() -> Caps {
 }
 
 fn aac_caps() -> Caps {
-    Caps::Audio { format: AudioFormat::Aac, channels: 2, sample_rate: 48000 }
+    Caps::Audio {
+        format: AudioFormat::Aac,
+        channels: 2,
+        sample_rate: 48000,
+    }
 }
 
 #[derive(Default)]
@@ -57,7 +61,11 @@ impl OutputSink for CaptureSink {
 fn frame(data: Vec<u8>, pts_ns: u64) -> PipelinePacket {
     PipelinePacket::DataFrame(Frame::new(
         MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-        FrameTiming { pts_ns, dts_ns: pts_ns, ..FrameTiming::default() },
+        FrameTiming {
+            pts_ns,
+            dts_ns: pts_ns,
+            ..FrameTiming::default()
+        },
         0,
     ))
 }
@@ -90,7 +98,10 @@ fn adts_au(payload: &[u8]) -> Vec<u8> {
 }
 
 fn count(haystack: &[u8], needle: &[u8]) -> usize {
-    haystack.windows(needle.len()).filter(|w| *w == needle).count()
+    haystack
+        .windows(needle.len())
+        .filter(|w| *w == needle)
+        .count()
 }
 
 #[tokio::test]
@@ -106,21 +117,45 @@ async fn muxes_two_tracks_into_one_matroska_stream() {
 
     // Interleave: video at 0/33ms, audio at 0/21/42ms. The PTS-ordered merge
     // releases nothing until both inputs have queued an AU, then drains in order.
-    mux.process(0, frame(annexb(&[&sps, &pps, &idr]), 0), &mut sink).await.unwrap();
-    mux.process(1, frame(adts_au(&[0x01, 0x02, 0x03]), 0), &mut sink).await.unwrap();
-    mux.process(1, frame(adts_au(&[0x04, 0x05]), 21_000_000), &mut sink).await.unwrap();
-    mux.process(0, frame(annexb(&[&[0x41u8, 0x9a, 0x00]]), 33_000_000), &mut sink).await.unwrap();
-    mux.process(1, frame(adts_au(&[0x06, 0x07]), 42_000_000), &mut sink).await.unwrap();
-    mux.process(0, PipelinePacket::Eos, &mut sink).await.unwrap();
-    mux.process(1, PipelinePacket::Eos, &mut sink).await.unwrap();
+    mux.process(0, frame(annexb(&[&sps, &pps, &idr]), 0), &mut sink)
+        .await
+        .unwrap();
+    mux.process(1, frame(adts_au(&[0x01, 0x02, 0x03]), 0), &mut sink)
+        .await
+        .unwrap();
+    mux.process(1, frame(adts_au(&[0x04, 0x05]), 21_000_000), &mut sink)
+        .await
+        .unwrap();
+    mux.process(
+        0,
+        frame(annexb(&[&[0x41u8, 0x9a, 0x00]]), 33_000_000),
+        &mut sink,
+    )
+    .await
+    .unwrap();
+    mux.process(1, frame(adts_au(&[0x06, 0x07]), 42_000_000), &mut sink)
+        .await
+        .unwrap();
+    mux.process(0, PipelinePacket::Eos, &mut sink)
+        .await
+        .unwrap();
+    mux.process(1, PipelinePacket::Eos, &mut sink)
+        .await
+        .unwrap();
 
     let out = &sink.bytes;
     // A Matroska stream: EBML header + Segment + Tracks, with both CodecIDs and a
     // CodecPrivate per track (0x63A2).
-    assert!(count(out, b"matroska") >= 1, "matroska DocType (H.264 is not WebM)");
+    assert!(
+        count(out, b"matroska") >= 1,
+        "matroska DocType (H.264 is not WebM)"
+    );
     assert!(count(out, b"V_MPEG4/ISO/AVC") == 1, "H.264 CodecID");
     assert!(count(out, b"A_AAC") == 1, "AAC CodecID");
-    assert!(count(out, &[0x63, 0xA2]) >= 2, "a CodecPrivate element per track");
+    assert!(
+        count(out, &[0x63, 0xA2]) >= 2,
+        "a CodecPrivate element per track"
+    );
     assert!(mux.emitted() >= 5, "five access units muxed");
 
     // Demux the produced Matroska back: two tracks recovered with their params.
@@ -145,11 +180,18 @@ async fn muxes_two_tracks_into_one_matroska_stream() {
     assert_eq!(audio.len(), 3, "three audio frames");
     // The first audio payload was [0x01,0x02,0x03] behind a 7-byte ADTS header;
     // the muxer strips ADTS, so the recovered frame is exactly those 3 bytes.
-    assert_eq!(audio[0].data, vec![0x01, 0x02, 0x03], "AAC payload, ADTS stripped");
+    assert_eq!(
+        audio[0].data,
+        vec![0x01, 0x02, 0x03],
+        "AAC payload, ADTS stripped"
+    );
     assert_eq!(audio[1].data, vec![0x04, 0x05]);
     // The IDR video frame is AVCC: each NALU 4-byte length-prefixed, so it is
     // longer than the raw NALU bytes and carries no Annex-B start code.
     assert!(video[0].keyframe, "the IDR is a keyframe");
     assert!(!video[1].keyframe, "the P slice is not");
-    assert!(count(&video[0].data, &[0, 0, 0, 1]) == 0, "no Annex-B start codes (AVCC framing)");
+    assert!(
+        count(&video[0].data, &[0, 0, 0, 1]) == 0,
+        "no Annex-B start codes (AVCC framing)"
+    );
 }

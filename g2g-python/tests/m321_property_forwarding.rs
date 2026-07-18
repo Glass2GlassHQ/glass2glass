@@ -60,8 +60,10 @@ fn element_properties_reach_the_python_instance() {
     let mut el = PyTransform::new("echo_element", "PropEcho");
     // Set declared element properties (the gst-launch face). These are forwarded
     // to the Python instance; the str ones as Python str, the int as Python int.
-    el.set_property("model-name", PropValue::Str("yolo11m.onnx".into())).unwrap();
-    el.set_property("device", PropValue::Str("cuda:0".into())).unwrap();
+    el.set_property("model-name", PropValue::Str("yolo11m.onnx".into()))
+        .unwrap();
+    el.set_property("device", PropValue::Str("cuda:0".into()))
+        .unwrap();
     el.set_property("batch-size", PropValue::Int(4)).unwrap();
 
     let caps = Caps::RawVideo {
@@ -73,7 +75,9 @@ fn element_properties_reach_the_python_instance() {
     el.configure_pipeline(&caps).unwrap();
 
     let mut sink = CollectSink::default();
-    let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
     rt.block_on(el.process(PipelinePacket::DataFrame(frame_2x1_rgba()), &mut sink))
         .unwrap();
 
@@ -89,10 +93,16 @@ fn element_properties_reach_the_python_instance() {
         .expect("PropEcho should attach a detection labelled by batch-size");
     let dets: Vec<_> = analytics.detections().collect();
     assert_eq!(dets.len(), 1);
-    assert_eq!(dets[0].label, 4, "batch-size=4 forwarded as an int and used as the label");
+    assert_eq!(
+        dets[0].label, 4,
+        "batch-size=4 forwarded as an int and used as the label"
+    );
 
     // The string properties reached self.model_name / self.device verbatim.
-    let blobs = frame.meta.get::<BlobMeta>().expect("PropEcho should attach blobs");
+    let blobs = frame
+        .meta
+        .get::<BlobMeta>()
+        .expect("PropEcho should attach blobs");
     let by_header = |h: &str| {
         blobs
             .iter()
@@ -100,6 +110,10 @@ fn element_properties_reach_the_python_instance() {
             .map(|b| b.payload.clone())
             .unwrap_or_default()
     };
-    assert_eq!(by_header("model_name"), b"yolo11m.onnx", "model-name -> self.model_name");
+    assert_eq!(
+        by_header("model_name"),
+        b"yolo11m.onnx",
+        "model-name -> self.model_name"
+    );
     assert_eq!(by_header("device"), b"cuda:0", "device -> self.device");
 }

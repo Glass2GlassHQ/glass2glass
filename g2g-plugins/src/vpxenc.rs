@@ -18,9 +18,9 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata,
-    G2gError, HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, RawVideoFormat, Rate, VideoCodec,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
+    HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
+    PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, VideoCodec,
 };
 
 use vpx_encode::{Config, Encoder, VideoCodecId};
@@ -156,8 +156,9 @@ impl VpxEnc {
         }
         let enc = self.enc.as_mut().ok_or(G2gError::NotConfigured)?;
         let pts = (pts_ns / 1_000_000) as i64;
-        let packets =
-            enc.encode(pts, i420).map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+        let packets = enc
+            .encode(pts, i420)
+            .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
         let mut out = Vec::new();
         for frame in packets {
             out.push((frame.data.to_vec(), (frame.pts as u64) * 1_000_000));
@@ -171,10 +172,13 @@ impl VpxEnc {
         let Some(enc) = self.enc.take() else {
             return Ok(Vec::new());
         };
-        let mut finish = enc.finish().map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+        let mut finish = enc
+            .finish()
+            .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
         let mut out = Vec::new();
-        while let Some(frame) =
-            finish.next().map_err(|_| G2gError::Hardware(HardwareError::Other))?
+        while let Some(frame) = finish
+            .next()
+            .map_err(|_| G2gError::Hardware(HardwareError::Other))?
         {
             out.push((frame.data.to_vec(), (frame.pts as u64) * 1_000_000));
         }
@@ -217,21 +221,28 @@ impl AsyncElement for VpxEnc {
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         let codec = self.codec;
         CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| match input {
-            Caps::RawVideo { format: RawVideoFormat::I420, width, height, framerate } => {
-                CapsSet::one(Caps::CompressedVideo {
-                    codec,
-                    width: width.clone(),
-                    height: height.clone(),
-                    framerate: framerate.clone(),
-                })
-            }
+            Caps::RawVideo {
+                format: RawVideoFormat::I420,
+                width,
+                height,
+                framerate,
+            } => CapsSet::one(Caps::CompressedVideo {
+                codec,
+                width: width.clone(),
+                height: height.clone(),
+                framerate: framerate.clone(),
+            }),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        let Caps::RawVideo { format: RawVideoFormat::I420, width, height, framerate } =
-            absolute_caps
+        let Caps::RawVideo {
+            format: RawVideoFormat::I420,
+            width,
+            height,
+            framerate,
+        } = absolute_caps
         else {
             return Err(G2gError::CapsMismatch);
         };
@@ -258,7 +269,8 @@ impl AsyncElement for VpxEnc {
 
     fn properties(&self) -> &'static [PropertySpec] {
         const PROPS: &[PropertySpec] = &[
-            PropertySpec::new("codec", PropKind::Str, "output codec: vp8 | vp9").with_default("vp9"),
+            PropertySpec::new("codec", PropKind::Str, "output codec: vp8 | vp9")
+                .with_default("vp9"),
             PropertySpec::new("bitrate", PropKind::Uint, "target bitrate, bits/second")
                 .with_default("1024000"),
         ];
@@ -342,7 +354,10 @@ impl PadTemplates for VpxEnc {
         };
         let source =
             CapsSet::from_alternatives(Vec::from([video(VideoCodec::Vp8), video(VideoCodec::Vp9)]));
-        Vec::from([PadTemplate::sink(CapsSet::one(Self::input_template())), PadTemplate::source(source)])
+        Vec::from([
+            PadTemplate::sink(CapsSet::one(Self::input_template())),
+            PadTemplate::source(source),
+        ])
     }
 }
 
@@ -408,22 +423,36 @@ mod tests {
                 MemoryDomain::System(SystemSlice::from_boxed(
                     i420_grey(64, 64).into_boxed_slice(),
                 )),
-                FrameTiming { pts_ns: i * 33_000_000, ..FrameTiming::default() },
+                FrameTiming {
+                    pts_ns: i * 33_000_000,
+                    ..FrameTiming::default()
+                },
                 i,
             );
-            enc.process(PipelinePacket::DataFrame(frame), &mut sink).await.unwrap();
+            enc.process(PipelinePacket::DataFrame(frame), &mut sink)
+                .await
+                .unwrap();
         }
         enc.process(PipelinePacket::Eos, &mut sink).await.unwrap();
 
         assert!(!sink.frames.is_empty(), "the encoder produced VP9 frames");
-        assert!(sink.frames.iter().all(|f| !f.is_empty()), "no empty packets");
+        assert!(
+            sink.frames.iter().all(|f| !f.is_empty()),
+            "no empty packets"
+        );
 
         let mut parse = Vp9Parse::new();
         parse
             .configure_pipeline(&Caps::CompressedVideo {
                 codec: VideoCodec::Vp9,
-                width: Dim::Range { min: 16, max: 65_535 },
-                height: Dim::Range { min: 16, max: 65_535 },
+                width: Dim::Range {
+                    min: 16,
+                    max: 65_535,
+                },
+                height: Dim::Range {
+                    min: 16,
+                    max: 65_535,
+                },
                 framerate: Rate::Any,
             })
             .unwrap();
@@ -434,14 +463,23 @@ mod tests {
                 FrameTiming::default(),
                 0,
             );
-            parse.process(PipelinePacket::DataFrame(f), &mut psink).await.unwrap();
+            parse
+                .process(PipelinePacket::DataFrame(f), &mut psink)
+                .await
+                .unwrap();
         }
         let geometry = psink.caps.iter().find_map(|c| match c {
-            Caps::CompressedVideo { width: Dim::Fixed(w), height: Dim::Fixed(h), .. } => {
-                Some((*w, *h))
-            }
+            Caps::CompressedVideo {
+                width: Dim::Fixed(w),
+                height: Dim::Fixed(h),
+                ..
+            } => Some((*w, *h)),
             _ => None,
         });
-        assert_eq!(geometry, Some((64, 64)), "vp9parse recovers the encoded geometry");
+        assert_eq!(
+            geometry,
+            Some((64, 64)),
+            "vp9parse recovers the encoded geometry"
+        );
     }
 }

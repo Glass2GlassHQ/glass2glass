@@ -62,9 +62,14 @@ async fn appsrc_feeds_appsink_through_the_dsl() {
          ! appsink channel=m233out",
     )
     .expect("appsrc ! appsink parses");
-    let stats = run_graph(graph, &ZeroClock, 4).await.expect("pipeline runs");
+    let stats = run_graph(graph, &ZeroClock, 4)
+        .await
+        .expect("pipeline runs");
 
-    assert_eq!(stats.frames_emitted, 3, "appsrc emitted every pushed buffer");
+    assert_eq!(
+        stats.frames_emitted, 3,
+        "appsrc emitted every pushed buffer"
+    );
     assert_eq!(stats.frames_consumed, 3, "appsink consumed them");
 
     let g = rec.lock().unwrap();

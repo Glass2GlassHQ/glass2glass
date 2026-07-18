@@ -21,9 +21,9 @@
 
 use alloc::boxed::Box;
 
-use g2g_core::runtime::{DynSourceLoop, Uri, UriError, UriSourceFactory};
 #[cfg(feature = "std")]
 use g2g_core::runtime::{DynMultiOutputElement, PadKind, PadRequest};
+use g2g_core::runtime::{DynSourceLoop, Uri, UriError, UriSourceFactory};
 use g2g_core::{Caps, Dim, Rate, VideoCodec};
 
 /// H.264 at any geometry: the media type the H.264 sources declare. Real
@@ -89,7 +89,9 @@ pub fn hls_handler() -> UriSourceFactory {
         let src = crate::hlssrc::HlsSrc::new(url);
         Ok((
             Box::new(src) as Box<dyn DynSourceLoop>,
-            Caps::ByteStream { encoding: g2g_core::ByteStreamEncoding::MpegTs },
+            Caps::ByteStream {
+                encoding: g2g_core::ByteStreamEncoding::MpegTs,
+            },
         ))
     })
 }
@@ -132,10 +134,10 @@ use alloc::vec::Vec;
 use g2g_core::runtime::{
     is_raw_audio, is_raw_video, DecodebinError, GraphNode, GraphNodeRef, ParseError, Registry,
 };
-#[cfg(feature = "std")]
-use g2g_core::{ByteStreamEncoding, Graph};
 #[cfg(feature = "hls")]
 use g2g_core::AudioFormat;
+#[cfg(feature = "std")]
+use g2g_core::{ByteStreamEncoding, Graph};
 
 /// file:// probe: read a bounded prefix of the URI's file for container sniffing.
 /// `None` for a non-`file://` URI or an unreadable file (the hook then declines),
@@ -180,7 +182,6 @@ fn parse_cc_source(v: &str) -> Option<crate::ccextract::CcSource> {
     crate::ccextract::CcSource::parse(v)
 }
 
-
 /// The `playbin uri=X` auto-fan-out hook for Matroska / WebM (M382): probe a
 /// `file://` MKV container, then assemble `FileSrc -> MkvDemuxN -> {decode -> auto
 /// sink}` with one branch per forwardable stream, the multi-stream form of
@@ -196,7 +197,9 @@ fn parse_cc_source(v: &str) -> Option<crate::ccextract::CcSource> {
 #[cfg(feature = "std")]
 pub fn mkv_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>, ParseError> {
     let (uri, cc) = cc_request(uri);
-    let Some((path, prefix)) = open_file_prefix(&uri) else { return Ok(None) };
+    let Some((path, prefix)) = open_file_prefix(&uri) else {
+        return Ok(None);
+    };
     let mut demux = crate::matroska::MatroskaDemuxer::new();
     demux.push_data(&prefix);
     let infos = crate::mkvdemux::forwardable_streams(&demux);
@@ -210,10 +213,21 @@ pub fn mkv_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>
         // (M430); else a subtitle track overlays its cues (the MP4 M412 sibling,
         // M415). Only one text pad, so the explicit caption request wins.
         if let Some(cc) = cc {
-            let source =
-                crate::filesrc::FileSrc::new(&path, Caps::ByteStream { encoding: ByteStreamEncoding::Matroska });
-            return build_cc_overlay(reg, Box::new(source), crate::mkvdemux::MkvDemuxN::new(streams), &av, video_idx, cc)
-                .map(Some);
+            let source = crate::filesrc::FileSrc::new(
+                &path,
+                Caps::ByteStream {
+                    encoding: ByteStreamEncoding::Matroska,
+                },
+            );
+            return build_cc_overlay(
+                reg,
+                Box::new(source),
+                crate::mkvdemux::MkvDemuxN::new(streams),
+                &av,
+                video_idx,
+                cc,
+            )
+            .map(Some);
         }
         if let Some(text) = crate::mkvdemux::subtitle_streams(&demux).first() {
             return build_mkv_subtitle_overlay(reg, &path, &infos, text).map(Some);
@@ -222,8 +236,19 @@ pub fn mkv_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>
     // The file:// URI handler self-demuxes MP4, so build the matching Matroska
     // byte source directly and feed it to the multi-output demuxer. Audio tracks
     // go through the convert/resample branch (not decoder -> sink direct).
-    let source = crate::filesrc::FileSrc::new(&path, Caps::ByteStream { encoding: ByteStreamEncoding::Matroska });
-    build_av_fanout(reg, Box::new(source), crate::mkvdemux::MkvDemuxN::new(streams), &av).map(Some)
+    let source = crate::filesrc::FileSrc::new(
+        &path,
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::Matroska,
+        },
+    );
+    build_av_fanout(
+        reg,
+        Box::new(source),
+        crate::mkvdemux::MkvDemuxN::new(streams),
+        &av,
+    )
+    .map(Some)
 }
 
 /// The `playbin uri=X` auto-fan-out hook for MPEG-TS (M389): probe a `file://`
@@ -234,7 +259,9 @@ pub fn mkv_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>
 #[cfg(feature = "std")]
 pub fn ts_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>, ParseError> {
     let (uri, cc) = cc_request(uri);
-    let Some((path, prefix)) = open_file_prefix(&uri) else { return Ok(None) };
+    let Some((path, prefix)) = open_file_prefix(&uri) else {
+        return Ok(None);
+    };
     // Resync to the TS sync byte and feed whole 188-byte packets to parse the PMT.
     let mut demux = crate::mpegts::TsDemuxer::new();
     let mut off = 0;
@@ -252,14 +279,32 @@ pub fn ts_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>,
     }
     let streams: Vec<_> = infos.iter().map(|i| i.stream).collect();
     let av: Vec<(Caps, bool)> = infos.iter().map(|i| (i.caps.clone(), i.video)).collect();
-    let source = crate::filesrc::FileSrc::new(&path, Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs });
+    let source = crate::filesrc::FileSrc::new(
+        &path,
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::MpegTs,
+        },
+    );
     // An explicit `#closed-captions=` request overlays the in-SEI captions (M430);
     // MPEG-TS broadcast is the most common CEA-608 / 708 carrier.
     if let (Some(cc), Some(video_idx)) = (cc, infos.iter().position(|i| i.video)) {
-        return build_cc_overlay(reg, Box::new(source), crate::tsdemux::TsDemuxN::new(streams), &av, video_idx, cc)
-            .map(Some);
+        return build_cc_overlay(
+            reg,
+            Box::new(source),
+            crate::tsdemux::TsDemuxN::new(streams),
+            &av,
+            video_idx,
+            cc,
+        )
+        .map(Some);
     }
-    build_av_fanout(reg, Box::new(source), crate::tsdemux::TsDemuxN::new(streams), &av).map(Some)
+    build_av_fanout(
+        reg,
+        Box::new(source),
+        crate::tsdemux::TsDemuxN::new(streams),
+        &av,
+    )
+    .map(Some)
 }
 
 /// Map a per-branch decode-chain failure to the text-parser error (the
@@ -330,12 +375,12 @@ fn wire_audio_branch(
         .make_element("autoaudiosink")
         .ok_or_else(|| ParseError::UnknownElement("autoaudiosink".to_string()))?;
     let snk = graph.add_sink(GraphNodeRef::Element(sink));
-    let resample =
-        graph.add_transform(GraphNodeRef::element(crate::audioresample::AudioResample::new(48_000)));
-    let convert = graph.add_transform(GraphNodeRef::element(crate::audioconvert::AudioConvert::new(
-        g2g_core::AudioFormat::PcmS16Le,
-        2,
-    )));
+    let resample = graph.add_transform(GraphNodeRef::element(
+        crate::audioresample::AudioResample::new(48_000),
+    ));
+    let convert = graph.add_transform(GraphNodeRef::element(
+        crate::audioconvert::AudioConvert::new(g2g_core::AudioFormat::PcmS16Le, 2),
+    ));
     graph.link(convert, resample).map_err(ParseError::Graph)?;
     graph.link(resample, snk).map_err(ParseError::Graph)?;
     reg.decodebin(graph, src, convert, caps, &is_raw_audio, PLAYBIN_MAX_DEPTH)
@@ -388,8 +433,15 @@ fn wire_av_fanout(
                 .make_element("autovideosink")
                 .ok_or_else(|| ParseError::UnknownElement("autovideosink".to_string()))?;
             let vsnk = graph.add_sink(GraphNodeRef::Element(sink));
-            reg.decodebin(graph, demux.out(i as u8), vsnk, caps, &is_raw_video, PLAYBIN_MAX_DEPTH)
-                .map_err(|e| map_decode_err(caps, e))?;
+            reg.decodebin(
+                graph,
+                demux.out(i as u8),
+                vsnk,
+                caps,
+                &is_raw_video,
+                PLAYBIN_MAX_DEPTH,
+            )
+            .map_err(|e| map_decode_err(caps, e))?;
         } else {
             wire_audio_branch(reg, graph, demux.out(i as u8), caps)?;
         }
@@ -407,13 +459,22 @@ fn wire_overlay_av(
 ) -> Result<g2g_core::graph::Muxer, ParseError> {
     use g2g_core::RawVideoFormat;
 
-    let overlay = graph.add_muxer(GraphNodeRef::muxer(crate::textoverlay::TextOverlayN::new()), 2);
-    let to_rgba =
-        graph.add_transform(GraphNodeRef::element(crate::videoconvert::VideoConvert::new(RawVideoFormat::Rgba8)));
-    let to_nv12 =
-        graph.add_transform(GraphNodeRef::element(crate::videoconvert::VideoConvert::new(RawVideoFormat::Nv12)));
-    graph.link(to_rgba, overlay.input(0)).map_err(ParseError::Graph)?;
-    graph.link(overlay.output(), to_nv12).map_err(ParseError::Graph)?;
+    let overlay = graph.add_muxer(
+        GraphNodeRef::muxer(crate::textoverlay::TextOverlayN::new()),
+        2,
+    );
+    let to_rgba = graph.add_transform(GraphNodeRef::element(
+        crate::videoconvert::VideoConvert::new(RawVideoFormat::Rgba8),
+    ));
+    let to_nv12 = graph.add_transform(GraphNodeRef::element(
+        crate::videoconvert::VideoConvert::new(RawVideoFormat::Nv12),
+    ));
+    graph
+        .link(to_rgba, overlay.input(0))
+        .map_err(ParseError::Graph)?;
+    graph
+        .link(overlay.output(), to_nv12)
+        .map_err(ParseError::Graph)?;
     let vsink = reg
         .make_element("autovideosink")
         .ok_or_else(|| ParseError::UnknownElement("autovideosink".to_string()))?;
@@ -424,8 +485,15 @@ fn wire_overlay_av(
     // rest fan out to their own auto sinks through the audio decode/convert chain.
     for (i, (caps, _video)) in av.iter().enumerate() {
         if i == video_idx {
-            reg.decodebin(graph, demux.out(i as u8), to_rgba, caps, &is_raw_video, PLAYBIN_MAX_DEPTH)
-                .map_err(|e| map_decode_err(caps, e))?;
+            reg.decodebin(
+                graph,
+                demux.out(i as u8),
+                to_rgba,
+                caps,
+                &is_raw_video,
+                PLAYBIN_MAX_DEPTH,
+            )
+            .map_err(|e| map_decode_err(caps, e))?;
         } else {
             wire_audio_branch(reg, graph, demux.out(i as u8), caps)?;
         }
@@ -478,13 +546,22 @@ fn wire_cc_overlay(
 ) -> Result<(), ParseError> {
     use g2g_core::RawVideoFormat;
 
-    let overlay = graph.add_muxer(GraphNodeRef::muxer(crate::textoverlay::TextOverlayN::new()), 2);
-    let to_rgba =
-        graph.add_transform(GraphNodeRef::element(crate::videoconvert::VideoConvert::new(RawVideoFormat::Rgba8)));
-    let to_nv12 =
-        graph.add_transform(GraphNodeRef::element(crate::videoconvert::VideoConvert::new(RawVideoFormat::Nv12)));
-    graph.link(to_rgba, overlay.input(0)).map_err(ParseError::Graph)?;
-    graph.link(overlay.output(), to_nv12).map_err(ParseError::Graph)?;
+    let overlay = graph.add_muxer(
+        GraphNodeRef::muxer(crate::textoverlay::TextOverlayN::new()),
+        2,
+    );
+    let to_rgba = graph.add_transform(GraphNodeRef::element(
+        crate::videoconvert::VideoConvert::new(RawVideoFormat::Rgba8),
+    ));
+    let to_nv12 = graph.add_transform(GraphNodeRef::element(
+        crate::videoconvert::VideoConvert::new(RawVideoFormat::Nv12),
+    ));
+    graph
+        .link(to_rgba, overlay.input(0))
+        .map_err(ParseError::Graph)?;
+    graph
+        .link(overlay.output(), to_nv12)
+        .map_err(ParseError::Graph)?;
     let vsink = reg
         .make_element("autovideosink")
         .ok_or_else(|| ParseError::UnknownElement("autovideosink".to_string()))?;
@@ -494,23 +571,46 @@ fn wire_cc_overlay(
     let video_caps = &av[video_idx].0;
     // Tee the compressed video: branch 0 decodes for display, branch 1 captions.
     let tee = graph.add_tee(2);
-    graph.link(demux.out(video_idx as u8), tee.input()).map_err(ParseError::Graph)?;
-    reg.decodebin(graph, tee.out(0), to_rgba, video_caps, &is_raw_video, PLAYBIN_MAX_DEPTH)
-        .map_err(|e| map_decode_err(video_caps, e))?;
+    graph
+        .link(demux.out(video_idx as u8), tee.input())
+        .map_err(ParseError::Graph)?;
+    reg.decodebin(
+        graph,
+        tee.out(0),
+        to_rgba,
+        video_caps,
+        &is_raw_video,
+        PLAYBIN_MAX_DEPTH,
+    )
+    .map_err(|e| map_decode_err(video_caps, e))?;
 
     // Caption branch: CcExtract (compressed video in, Text{Utf8} cues out) feeds
     // the overlay text pad, fed in turn by a re-framing parser when the codec has
     // one (the same parser `decodebin` auto-plugs before the decoder).
-    let cc_in = graph.add_transform(GraphNodeRef::element(crate::ccextract::CcExtract::for_source(cc)));
-    graph.link(cc_in, overlay.input(1)).map_err(ParseError::Graph)?;
+    let cc_in = graph.add_transform(GraphNodeRef::element(
+        crate::ccextract::CcExtract::for_source(cc),
+    ));
+    graph
+        .link(cc_in, overlay.input(1))
+        .map_err(ParseError::Graph)?;
     let cc_head = match video_caps {
-        Caps::CompressedVideo { codec: g2g_core::VideoCodec::H264, .. } => {
-            let p = graph.add_transform(GraphNodeRef::element(crate::h264parse::H264Parse::reframing()));
+        Caps::CompressedVideo {
+            codec: g2g_core::VideoCodec::H264,
+            ..
+        } => {
+            let p = graph.add_transform(GraphNodeRef::element(
+                crate::h264parse::H264Parse::reframing(),
+            ));
             graph.link(p, cc_in).map_err(ParseError::Graph)?;
             p
         }
-        Caps::CompressedVideo { codec: g2g_core::VideoCodec::H265, .. } => {
-            let p = graph.add_transform(GraphNodeRef::element(crate::h265parse::H265Parse::reframing()));
+        Caps::CompressedVideo {
+            codec: g2g_core::VideoCodec::H265,
+            ..
+        } => {
+            let p = graph.add_transform(GraphNodeRef::element(
+                crate::h265parse::H265Parse::reframing(),
+            ));
             graph.link(p, cc_in).map_err(ParseError::Graph)?;
             p
         }
@@ -540,10 +640,14 @@ fn link_text_into_overlay(
     text_caps: &Caps,
 ) -> Result<(), ParseError> {
     let text_in: g2g_core::graph::PadId = match text_caps {
-        Caps::Text { format: g2g_core::TextFormat::Utf8 } => overlay.input(1),
+        Caps::Text {
+            format: g2g_core::TextFormat::Utf8,
+        } => overlay.input(1),
         _ => {
             let sub = graph.add_transform(GraphNodeRef::element(crate::subparse::SubParse::new()));
-            graph.link(sub, overlay.input(1)).map_err(ParseError::Graph)?;
+            graph
+                .link(sub, overlay.input(1))
+                .map_err(ParseError::Graph)?;
             sub.into()
         }
     };
@@ -565,26 +669,41 @@ fn build_mp4_subtitle_overlay(
 ) -> Result<Graph<GraphNode>, ParseError> {
     use crate::mp4demuxn::{Mp4DemuxN, Mp4Port};
 
-    let video_idx = av.iter().position(|i| i.video).ok_or_else(|| {
-        ParseError::NoDecodeChain("subtitle overlay needs a video track".into())
-    })?;
+    let video_idx = av
+        .iter()
+        .position(|i| i.video)
+        .ok_or_else(|| ParseError::NoDecodeChain("subtitle overlay needs a video track".into()))?;
 
     // Demux ports: every A/V track (in moov order) then the subtitle track.
-    let mut demux_ports: Vec<Mp4Port> =
-        av.iter().map(|i| Mp4Port { track_id: i.track_id, caps: i.caps.clone() }).collect();
-    demux_ports.push(Mp4Port { track_id: text.track_id, caps: text.caps.clone() });
+    let mut demux_ports: Vec<Mp4Port> = av
+        .iter()
+        .map(|i| Mp4Port {
+            track_id: i.track_id,
+            caps: i.caps.clone(),
+        })
+        .collect();
+    demux_ports.push(Mp4Port {
+        track_id: text.track_id,
+        caps: text.caps.clone(),
+    });
     let text_port = (demux_ports.len() - 1) as u8;
     let outputs = demux_ports.len() as u8;
 
     let mut graph: Graph<GraphNode> = Graph::new();
-    let source =
-        crate::filesrc::FileSrc::new(path, Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff });
+    let source = crate::filesrc::FileSrc::new(
+        path,
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::IsoBmff,
+        },
+    );
     let src = graph.add_source(GraphNodeRef::source(source));
     let demux = graph.add_demux(GraphNodeRef::demux(Mp4DemuxN::new(demux_ports)), outputs);
     graph.link(src, demux.input()).map_err(ParseError::Graph)?;
 
     let av_caps: Vec<(Caps, bool)> = av.iter().map(|i| (i.caps.clone(), i.video)).collect();
-    wire_subtitle_overlay(reg, &mut graph, demux, &av_caps, video_idx, text_port, &text.caps)?;
+    wire_subtitle_overlay(
+        reg, &mut graph, demux, &av_caps, video_idx, text_port, &text.caps,
+    )?;
     Ok(graph)
 }
 
@@ -601,9 +720,10 @@ fn build_mkv_subtitle_overlay(
 ) -> Result<Graph<GraphNode>, ParseError> {
     use crate::mkvdemux::MkvDemuxN;
 
-    let video_idx = av.iter().position(|i| i.video).ok_or_else(|| {
-        ParseError::NoDecodeChain("subtitle overlay needs a video track".into())
-    })?;
+    let video_idx = av
+        .iter()
+        .position(|i| i.video)
+        .ok_or_else(|| ParseError::NoDecodeChain("subtitle overlay needs a video track".into()))?;
 
     // Demux ports (selected streams): every A/V stream (in track order) then the
     // subtitle stream.
@@ -613,14 +733,20 @@ fn build_mkv_subtitle_overlay(
     let outputs = stream_ports.len() as u8;
 
     let mut graph: Graph<GraphNode> = Graph::new();
-    let source =
-        crate::filesrc::FileSrc::new(path, Caps::ByteStream { encoding: ByteStreamEncoding::Matroska });
+    let source = crate::filesrc::FileSrc::new(
+        path,
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::Matroska,
+        },
+    );
     let src = graph.add_source(GraphNodeRef::source(source));
     let demux = graph.add_demux(GraphNodeRef::demux(MkvDemuxN::new(stream_ports)), outputs);
     graph.link(src, demux.input()).map_err(ParseError::Graph)?;
 
     let av_caps: Vec<(Caps, bool)> = av.iter().map(|i| (i.caps.clone(), i.video)).collect();
-    wire_subtitle_overlay(reg, &mut graph, demux, &av_caps, video_idx, text_port, &text.caps)?;
+    wire_subtitle_overlay(
+        reg, &mut graph, demux, &av_caps, video_idx, text_port, &text.caps,
+    )?;
     Ok(graph)
 }
 
@@ -637,7 +763,9 @@ fn build_mkv_subtitle_overlay(
 #[cfg(feature = "std")]
 pub fn mp4_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>, ParseError> {
     let (uri, cc) = cc_request(uri);
-    let Some((path, prefix)) = open_file_prefix(&uri) else { return Ok(None) };
+    let Some((path, prefix)) = open_file_prefix(&uri) else {
+        return Ok(None);
+    };
     let infos = crate::mp4demuxn::forwardable_streams(&prefix);
     if infos.is_empty() {
         return Ok(None); // not MP4 (or moov not in the prefix): decline
@@ -645,23 +773,43 @@ pub fn mp4_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>
     let av: Vec<(Caps, bool)> = infos.iter().map(|i| (i.caps.clone(), i.video)).collect();
     let demux_ports: Vec<_> = infos
         .iter()
-        .map(|i| crate::mp4demuxn::Mp4Port { track_id: i.track_id, caps: i.caps.clone() })
+        .map(|i| crate::mp4demuxn::Mp4Port {
+            track_id: i.track_id,
+            caps: i.caps.clone(),
+        })
         .collect();
-    let source =
-        crate::filesrc::FileSrc::new(&path, Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff });
+    let source = crate::filesrc::FileSrc::new(
+        &path,
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::IsoBmff,
+        },
+    );
     if let Some(video_idx) = infos.iter().position(|i| i.video) {
         // An explicit `#closed-captions=` request overlays the in-SEI captions
         // (M430); else a subtitle track overlays its cues (M412). One text pad, so
         // the explicit caption request wins.
         if let Some(cc) = cc {
-            return build_cc_overlay(reg, Box::new(source), crate::mp4demuxn::Mp4DemuxN::new(demux_ports), &av, video_idx, cc)
-                .map(Some);
+            return build_cc_overlay(
+                reg,
+                Box::new(source),
+                crate::mp4demuxn::Mp4DemuxN::new(demux_ports),
+                &av,
+                video_idx,
+                cc,
+            )
+            .map(Some);
         }
         if let Some(text) = crate::mp4demuxn::subtitle_streams(&prefix).first() {
             return build_mp4_subtitle_overlay(reg, &path, &infos, text).map(Some);
         }
     }
-    build_av_fanout(reg, Box::new(source), crate::mp4demuxn::Mp4DemuxN::new(demux_ports), &av).map(Some)
+    build_av_fanout(
+        reg,
+        Box::new(source),
+        crate::mp4demuxn::Mp4DemuxN::new(demux_ports),
+        &av,
+    )
+    .map(Some)
 }
 
 // ---- Explicit-demux fan-out hooks (M476) --------------------------------
@@ -694,7 +842,12 @@ fn resolve_pads(kinds: &[PadKind], pads: &[PadRequest]) -> Option<Vec<usize>> {
     pads.iter()
         .map(|req| match req.kind {
             PadKind::Any => (req.index < kinds.len()).then_some(req.index),
-            want => kinds.iter().enumerate().filter(|(_, k)| **k == want).nth(req.index).map(|(i, _)| i),
+            want => kinds
+                .iter()
+                .enumerate()
+                .filter(|(_, k)| **k == want)
+                .nth(req.index)
+                .map(|(i, _)| i),
         })
         .collect()
 }
@@ -705,7 +858,10 @@ fn resolve_pads(kinds: &[PadKind], pads: &[PadRequest]) -> Option<Vec<usize>> {
 /// caps) and `decodebin` fan-out (M482, keeps them to auto-plug a decoder per port).
 /// Declines a non-Matroska file or an unsatisfiable request.
 #[cfg(feature = "std")]
-fn mkv_select(location: &str, pads: &[PadRequest]) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)> {
+fn mkv_select(
+    location: &str,
+    pads: &[PadRequest],
+) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)> {
     let prefix = read_prefix(location)?;
     let mut demux = crate::matroska::MatroskaDemuxer::new();
     demux.push_data(&prefix);
@@ -713,8 +869,16 @@ fn mkv_select(location: &str, pads: &[PadRequest]) -> Option<(Box<dyn DynMultiOu
     // `d.text_0` request maps to the container's subtitle track. `MkvDemuxN`
     // de-frames a selected subtitle block to `Text{Utf8}` on its port.
     let mut infos = crate::mkvdemux::forwardable_streams(&demux);
-    let mut kinds: Vec<PadKind> =
-        infos.iter().map(|i| if i.video { PadKind::Video } else { PadKind::Audio }).collect();
+    let mut kinds: Vec<PadKind> = infos
+        .iter()
+        .map(|i| {
+            if i.video {
+                PadKind::Video
+            } else {
+                PadKind::Audio
+            }
+        })
+        .collect();
     for text in crate::mkvdemux::subtitle_streams(&demux) {
         kinds.push(PadKind::Text);
         infos.push(text);
@@ -731,8 +895,14 @@ fn mkv_select(location: &str, pads: &[PadRequest]) -> Option<(Box<dyn DynMultiOu
 /// `matroskademux` explicit fan-out (M476): build the multi-output demuxer,
 /// dropping the per-port caps (each branch names its own decode chain).
 #[cfg(feature = "std")]
-pub fn mkv_demux_select(name: &str, location: &str, pads: &[PadRequest]) -> Option<Box<dyn DynMultiOutputElement>> {
-    (name == "matroskademux").then(|| mkv_select(location, pads).map(|(d, _)| d)).flatten()
+pub fn mkv_demux_select(
+    name: &str,
+    location: &str,
+    pads: &[PadRequest],
+) -> Option<Box<dyn DynMultiOutputElement>> {
+    (name == "matroskademux")
+        .then(|| mkv_select(location, pads).map(|(d, _)| d))
+        .flatten()
 }
 
 /// `decodebin` fan-out over a Matroska file (M482): the demuxer + per-port caps.
@@ -748,7 +918,10 @@ pub fn mkv_decodebin_select(
 /// the requested streams + their caps (M482). Shared by `tsdemux` demux-select and
 /// `decodebin` fan-out. Declines a non-MPEG-TS file.
 #[cfg(feature = "std")]
-fn ts_select(location: &str, pads: &[PadRequest]) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)> {
+fn ts_select(
+    location: &str,
+    pads: &[PadRequest],
+) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)> {
     let prefix = read_prefix(location)?;
     let mut demux = crate::mpegts::TsDemuxer::new();
     let mut off = 0;
@@ -764,8 +937,16 @@ fn ts_select(location: &str, pads: &[PadRequest]) -> Option<(Box<dyn DynMultiOut
     }
     // MPEG-TS carries no subtitle track in the demuxer, so a `d.text_0` request
     // finds no `Text` kind and declines (M477).
-    let kinds: Vec<PadKind> =
-        infos.iter().map(|i| if i.video { PadKind::Video } else { PadKind::Audio }).collect();
+    let kinds: Vec<PadKind> = infos
+        .iter()
+        .map(|i| {
+            if i.video {
+                PadKind::Video
+            } else {
+                PadKind::Audio
+            }
+        })
+        .collect();
     let sel = resolve_pads(&kinds, pads)?;
     let streams: Vec<_> = sel.iter().map(|&i| infos[i].stream).collect();
     let caps: Vec<Caps> = sel.iter().map(|&i| infos[i].caps.clone()).collect();
@@ -774,8 +955,14 @@ fn ts_select(location: &str, pads: &[PadRequest]) -> Option<(Box<dyn DynMultiOut
 
 /// `tsdemux` explicit fan-out (M476).
 #[cfg(feature = "std")]
-pub fn ts_demux_select(name: &str, location: &str, pads: &[PadRequest]) -> Option<Box<dyn DynMultiOutputElement>> {
-    (name == "tsdemux").then(|| ts_select(location, pads).map(|(d, _)| d)).flatten()
+pub fn ts_demux_select(
+    name: &str,
+    location: &str,
+    pads: &[PadRequest],
+) -> Option<Box<dyn DynMultiOutputElement>> {
+    (name == "tsdemux")
+        .then(|| ts_select(location, pads).map(|(d, _)| d))
+        .flatten()
 }
 
 /// `decodebin` fan-out over an MPEG-TS file (M482): the demuxer + per-port caps.
@@ -791,15 +978,26 @@ pub fn ts_decodebin_select(
 /// the requested tracks + their caps (M482). Shared by `qtdemux` demux-select and
 /// `decodebin` fan-out. Declines a non-MP4 file (or a `moov` past the probe window).
 #[cfg(feature = "std")]
-fn mp4_select(location: &str, pads: &[PadRequest]) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)> {
+fn mp4_select(
+    location: &str,
+    pads: &[PadRequest],
+) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)> {
     let prefix = read_prefix(location)?;
     // Selection order: A/V tracks first, then subtitle (`tx3g`/`wvtt`/`stpp`)
     // tracks (M477), so a `d.text_0` request maps to the container's text track.
     // `Mp4DemuxN` forwards a `tx3g`/`wvtt` cue as `Text{Utf8}` (a `stpp` track as
     // `Text{Ttml}`, which a following `subparse` reduces to `Text{Utf8}`).
     let mut infos = crate::mp4demuxn::forwardable_streams(&prefix);
-    let mut kinds: Vec<PadKind> =
-        infos.iter().map(|i| if i.video { PadKind::Video } else { PadKind::Audio }).collect();
+    let mut kinds: Vec<PadKind> = infos
+        .iter()
+        .map(|i| {
+            if i.video {
+                PadKind::Video
+            } else {
+                PadKind::Audio
+            }
+        })
+        .collect();
     for text in crate::mp4demuxn::subtitle_streams(&prefix) {
         kinds.push(PadKind::Text);
         infos.push(text);
@@ -811,15 +1009,24 @@ fn mp4_select(location: &str, pads: &[PadRequest]) -> Option<(Box<dyn DynMultiOu
     let caps: Vec<Caps> = sel.iter().map(|&i| infos[i].caps.clone()).collect();
     let ports: Vec<_> = sel
         .iter()
-        .map(|&i| crate::mp4demuxn::Mp4Port { track_id: infos[i].track_id, caps: infos[i].caps.clone() })
+        .map(|&i| crate::mp4demuxn::Mp4Port {
+            track_id: infos[i].track_id,
+            caps: infos[i].caps.clone(),
+        })
         .collect();
     Some((Box::new(crate::mp4demuxn::Mp4DemuxN::new(ports)), caps))
 }
 
 /// `qtdemux` explicit fan-out (M476).
 #[cfg(feature = "std")]
-pub fn mp4_demux_select(name: &str, location: &str, pads: &[PadRequest]) -> Option<Box<dyn DynMultiOutputElement>> {
-    (name == "qtdemux").then(|| mp4_select(location, pads).map(|(d, _)| d)).flatten()
+pub fn mp4_demux_select(
+    name: &str,
+    location: &str,
+    pads: &[PadRequest],
+) -> Option<Box<dyn DynMultiOutputElement>> {
+    (name == "qtdemux")
+        .then(|| mp4_select(location, pads).map(|(d, _)| d))
+        .flatten()
 }
 
 /// `decodebin` fan-out over an MP4 file (M482): the demuxer + per-port caps.
@@ -837,18 +1044,34 @@ pub fn mp4_decodebin_select(
 /// against a live server, not in CI (like the RTSP / WHIP paths).
 #[cfg(feature = "hls")]
 fn blocking_get_text(url: &str) -> Option<alloc::string::String> {
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().ok()?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()?;
     let client = reqwest::Client::new();
-    rt.block_on(crate::fetch::get_text(&client, url, crate::fetch::MAX_MANIFEST_BYTES)).ok()
+    rt.block_on(crate::fetch::get_text(
+        &client,
+        url,
+        crate::fetch::MAX_MANIFEST_BYTES,
+    ))
+    .ok()
 }
 
 /// Fetch a binary resource synchronously (the fMP4 `#EXT-X-MAP` init segment),
 /// the byte sibling of [`blocking_get_text`]. `None` on any failure.
 #[cfg(feature = "hls")]
 fn blocking_get_bytes(url: &str) -> Option<Vec<u8>> {
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().ok()?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()?;
     let client = reqwest::Client::new();
-    rt.block_on(crate::fetch::get_bytes(&client, url, crate::fetch::MAX_SEGMENT_BYTES)).ok()
+    rt.block_on(crate::fetch::get_bytes(
+        &client,
+        url,
+        crate::fetch::MAX_SEGMENT_BYTES,
+    ))
+    .ok()
 }
 
 /// The MPEG-TS elementary-stream selector for an HLS discovered stream, or `None`
@@ -857,9 +1080,18 @@ fn blocking_get_bytes(url: &str) -> Option<Vec<u8>> {
 fn hls_ts_stream(info: &crate::hlssrc::HlsStreamInfo) -> Option<crate::tsdemux::TsStream> {
     use crate::tsdemux::TsStream;
     match &info.caps {
-        Caps::CompressedVideo { codec: VideoCodec::H264, .. } => Some(TsStream::H264),
-        Caps::CompressedVideo { codec: VideoCodec::H265, .. } => Some(TsStream::H265),
-        Caps::Audio { format: AudioFormat::Aac, .. } => Some(TsStream::Aac),
+        Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            ..
+        } => Some(TsStream::H264),
+        Caps::CompressedVideo {
+            codec: VideoCodec::H265,
+            ..
+        } => Some(TsStream::H265),
+        Caps::Audio {
+            format: AudioFormat::Aac,
+            ..
+        } => Some(TsStream::Aac),
         _ => None,
     }
 }
@@ -889,8 +1121,13 @@ pub fn build_hls_ts_fanout(
         return Ok(None); // not a multi-stream muxed TS variant
     }
     let source = crate::hlssrc::HlsSrc::new(source_url);
-    build_av_fanout(reg, Box::new(source), crate::tsdemux::TsDemuxN::new(ts_streams), &port_infos)
-        .map(Some)
+    build_av_fanout(
+        reg,
+        Box::new(source),
+        crate::tsdemux::TsDemuxN::new(ts_streams),
+        &port_infos,
+    )
+    .map(Some)
 }
 
 /// Assemble the `HlsSrc -> Mp4DemuxN -> {decode -> auto sink}` fan-out for an
@@ -915,11 +1152,19 @@ pub fn build_hls_fmp4_fanout(
     let av: Vec<(Caps, bool)> = infos.iter().map(|i| (i.caps.clone(), i.video)).collect();
     let demux_ports: Vec<_> = infos
         .iter()
-        .map(|i| crate::mp4demuxn::Mp4Port { track_id: i.track_id, caps: i.caps.clone() })
+        .map(|i| crate::mp4demuxn::Mp4Port {
+            track_id: i.track_id,
+            caps: i.caps.clone(),
+        })
         .collect();
     let source = crate::hlssrc::HlsSrc::new(source_url);
-    build_av_fanout(reg, Box::new(source), crate::mp4demuxn::Mp4DemuxN::new(demux_ports), &av)
-        .map(Some)
+    build_av_fanout(
+        reg,
+        Box::new(source),
+        crate::mp4demuxn::Mp4DemuxN::new(demux_ports),
+        &av,
+    )
+    .map(Some)
 }
 
 /// Assemble a *multi-source* HLS fan-out for a variant with a separate audio
@@ -942,7 +1187,9 @@ pub fn build_hls_separate_fanout(
     let Some(video) = streams.iter().find(|s| s.video && s.uri.is_none()) else {
         return Ok(None);
     };
-    let Some(vts) = hls_ts_stream(video) else { return Ok(None) };
+    let Some(vts) = hls_ts_stream(video) else {
+        return Ok(None);
+    };
     let mut graph = build_av_fanout(
         reg,
         Box::new(crate::hlssrc::HlsSrc::new(master_url)),
@@ -951,7 +1198,11 @@ pub fn build_hls_separate_fanout(
     )?;
     // The separate audio rendition playlist, its own source -> demux -> audio
     // branch (decode -> convert -> resample -> sink), merged into the graph.
-    let audio_caps = Caps::Audio { format: AudioFormat::Aac, channels: 0, sample_rate: 0 };
+    let audio_caps = Caps::Audio {
+        format: AudioFormat::Aac,
+        channels: 0,
+        sample_rate: 0,
+    };
     let audio_graph = build_av_fanout(
         reg,
         Box::new(crate::hlssrc::HlsSrc::new(audio_url)),
@@ -1017,13 +1268,16 @@ pub fn build_hls_subtitle_overlay(
 
     // The subtitle rendition is a separate source: its WebVTT text flows through
     // SubParse into the overlay's text pad.
-    let sub_src =
-        graph.add_source(GraphNodeRef::source(crate::hlssrc::HlsSrc::new(subtitle_url).with_text()));
+    let sub_src = graph.add_source(GraphNodeRef::source(
+        crate::hlssrc::HlsSrc::new(subtitle_url).with_text(),
+    ));
     link_text_into_overlay(
         &mut graph,
         overlay,
         sub_src.into(),
-        &Caps::Text { format: g2g_core::TextFormat::WebVtt },
+        &Caps::Text {
+            format: g2g_core::TextFormat::WebVtt,
+        },
     )?;
     Ok(Some(graph))
 }
@@ -1054,7 +1308,9 @@ pub fn build_hls_separate_subtitle_overlay(
     let Some(video) = streams.iter().find(|s| s.video && s.uri.is_none()) else {
         return Ok(None); // no routable muxed video to overlay onto
     };
-    let Some(vts) = hls_ts_stream(video) else { return Ok(None) };
+    let Some(vts) = hls_ts_stream(video) else {
+        return Ok(None);
+    };
 
     let mut graph: Graph<GraphNode> = Graph::new();
     let src = graph.add_source(GraphNodeRef::source(crate::hlssrc::HlsSrc::new(master_url)));
@@ -1067,25 +1323,43 @@ pub fn build_hls_separate_subtitle_overlay(
 
     // The separate audio rendition: its own source -> demux -> decode -> auto sink.
     let audio_src = graph.add_source(GraphNodeRef::source(crate::hlssrc::HlsSrc::new(audio_url)));
-    let audio_demux =
-        graph.add_demux(GraphNodeRef::demux(TsDemuxN::new(Vec::from([TsStream::Aac]))), 1);
-    graph.link(audio_src, audio_demux.input()).map_err(ParseError::Graph)?;
+    let audio_demux = graph.add_demux(
+        GraphNodeRef::demux(TsDemuxN::new(Vec::from([TsStream::Aac]))),
+        1,
+    );
+    graph
+        .link(audio_src, audio_demux.input())
+        .map_err(ParseError::Graph)?;
     let asink = reg
         .make_element("autoaudiosink")
         .ok_or_else(|| ParseError::UnknownElement("autoaudiosink".to_string()))?;
     let asnk = graph.add_sink(GraphNodeRef::Element(asink));
-    let audio_caps = Caps::Audio { format: AudioFormat::Aac, channels: 0, sample_rate: 0 };
-    reg.decodebin(&mut graph, audio_demux.out(0), asnk, &audio_caps, &is_raw_audio, PLAYBIN_MAX_DEPTH)
-        .map_err(|e| map_decode_err(&audio_caps, e))?;
+    let audio_caps = Caps::Audio {
+        format: AudioFormat::Aac,
+        channels: 0,
+        sample_rate: 0,
+    };
+    reg.decodebin(
+        &mut graph,
+        audio_demux.out(0),
+        asnk,
+        &audio_caps,
+        &is_raw_audio,
+        PLAYBIN_MAX_DEPTH,
+    )
+    .map_err(|e| map_decode_err(&audio_caps, e))?;
 
     // The separate subtitle rendition: WebVTT text -> SubParse -> overlay text pad.
-    let sub_src =
-        graph.add_source(GraphNodeRef::source(crate::hlssrc::HlsSrc::new(subtitle_url).with_text()));
+    let sub_src = graph.add_source(GraphNodeRef::source(
+        crate::hlssrc::HlsSrc::new(subtitle_url).with_text(),
+    ));
     link_text_into_overlay(
         &mut graph,
         overlay,
         sub_src.into(),
-        &Caps::Text { format: g2g_core::TextFormat::WebVtt },
+        &Caps::Text {
+            format: g2g_core::TextFormat::WebVtt,
+        },
     )?;
     Ok(Some(graph))
 }
@@ -1116,8 +1390,15 @@ pub fn build_hls_ts_cc_overlay(
         return Ok(None); // no routable muxed video to caption
     };
     let source = crate::hlssrc::HlsSrc::new(source_url);
-    build_cc_overlay(reg, Box::new(source), crate::tsdemux::TsDemuxN::new(ts_streams), &av, video_idx, cc)
-        .map(Some)
+    build_cc_overlay(
+        reg,
+        Box::new(source),
+        crate::tsdemux::TsDemuxN::new(ts_streams),
+        &av,
+        video_idx,
+        cc,
+    )
+    .map(Some)
 }
 
 /// Assemble the fMP4 / CMAF HLS closed-caption overlay (M436): the CEA-608 / 708
@@ -1139,11 +1420,21 @@ pub fn build_hls_fmp4_cc_overlay(
     };
     let demux_ports: Vec<_> = infos
         .iter()
-        .map(|i| crate::mp4demuxn::Mp4Port { track_id: i.track_id, caps: i.caps.clone() })
+        .map(|i| crate::mp4demuxn::Mp4Port {
+            track_id: i.track_id,
+            caps: i.caps.clone(),
+        })
         .collect();
     let source = crate::hlssrc::HlsSrc::new(source_url);
-    build_cc_overlay(reg, Box::new(source), crate::mp4demuxn::Mp4DemuxN::new(demux_ports), &av, video_idx, cc)
-        .map(Some)
+    build_cc_overlay(
+        reg,
+        Box::new(source),
+        crate::mp4demuxn::Mp4DemuxN::new(demux_ports),
+        &av,
+        video_idx,
+        cc,
+    )
+    .map(Some)
 }
 
 /// Assemble the *multi-source* HLS closed-caption overlay (M436) for a variant whose
@@ -1167,7 +1458,9 @@ pub fn build_hls_separate_cc_overlay(
     let Some(video) = streams.iter().find(|s| s.video && s.uri.is_none()) else {
         return Ok(None); // no routable muxed video to caption
     };
-    let Some(vts) = hls_ts_stream(video) else { return Ok(None) };
+    let Some(vts) = hls_ts_stream(video) else {
+        return Ok(None);
+    };
 
     let mut graph: Graph<GraphNode> = Graph::new();
     let src = graph.add_source(GraphNodeRef::source(crate::hlssrc::HlsSrc::new(master_url)));
@@ -1177,7 +1470,11 @@ pub fn build_hls_separate_cc_overlay(
     wire_cc_overlay(reg, &mut graph, demux, &av, 0, cc)?;
 
     // The separate audio rendition: its own source -> demux -> audio branch, merged.
-    let audio_caps = Caps::Audio { format: AudioFormat::Aac, channels: 0, sample_rate: 0 };
+    let audio_caps = Caps::Audio {
+        format: AudioFormat::Aac,
+        channels: 0,
+        sample_rate: 0,
+    };
     let audio_graph = build_av_fanout(
         reg,
         Box::new(crate::hlssrc::HlsSrc::new(audio_url)),
@@ -1241,7 +1538,9 @@ fn hls_lang_hints(rest: &str) -> (&str, HlsHints) {
 
 #[cfg(feature = "hls")]
 pub fn hls_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>, ParseError> {
-    let Some(parsed) = Uri::parse(uri) else { return Ok(None) };
+    let Some(parsed) = Uri::parse(uri) else {
+        return Ok(None);
+    };
     if parsed.scheme != "hls" || parsed.rest.is_empty() {
         return Ok(None);
     }
@@ -1251,23 +1550,31 @@ pub fn hls_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>
     let (url_rest, (audio_lang, subtitle_lang, cc)) = hls_lang_hints(parsed.rest);
     let source_url = alloc::format!("https://{url_rest}");
     // Fetch + parse the master; decline (single-stream fallback) on any failure.
-    let Some(master_text) = blocking_get_text(&source_url) else { return Ok(None) };
+    let Some(master_text) = blocking_get_text(&source_url) else {
+        return Ok(None);
+    };
     let Ok(crate::hls::Playlist::Master(master)) = crate::hls::parse(&master_text) else {
         return Ok(None); // a media playlist or parse error: single-stream handles it
     };
-    let Some(variant) = master.select(None) else { return Ok(None) };
+    let Some(variant) = master.select(None) else {
+        return Ok(None);
+    };
     // The variant's media playlist tells the container: an `#EXT-X-MAP` init
     // segment means fMP4 / CMAF (fan out via Mp4DemuxN, tracks from the init's
     // moov), otherwise muxed MPEG-TS (fan out via TsDemuxN, ports from CODECS).
     let media_url = crate::fetch::resolve_url(&source_url, &variant.uri);
-    let Some(media_text) = blocking_get_text(&media_url) else { return Ok(None) };
+    let Some(media_text) = blocking_get_text(&media_url) else {
+        return Ok(None);
+    };
     let media = match crate::hls::parse(&media_text) {
         Ok(crate::hls::Playlist::Media(m)) => m,
         _ => return Ok(None), // a master pointing at a master, or a parse error
     };
     if let Some(map) = &media.map_uri {
         let init_url = crate::fetch::resolve_url(&media_url, map);
-        let Some(init) = blocking_get_bytes(&init_url) else { return Ok(None) };
+        let Some(init) = blocking_get_bytes(&init_url) else {
+            return Ok(None);
+        };
         // An explicit `#closed-captions=` overlays the in-SEI captions onto the
         // fMP4 video (M436), the HLS analog of the file hooks' caption auto-plug.
         if let Some(cc) = cc {

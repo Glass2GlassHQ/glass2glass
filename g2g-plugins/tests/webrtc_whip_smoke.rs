@@ -44,6 +44,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use g2g_core::element::DynAsyncElement;
+use g2g_core::frame::Frame;
+use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{
     run_duplex_session, run_fanin_session, run_fanout_session, run_simple_pipeline,
     run_source_transform_sink, DynSourceLoop, SourceLoop,
@@ -53,8 +55,6 @@ use g2g_core::{
     FrameTiming, G2gError, MemoryDomain, OutputSink, PipelineClock, PipelinePacket, Rate,
     VideoCodec,
 };
-use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_plugins::fakesink::FakeSink;
 use g2g_plugins::filesrc::FileSrc;
 use g2g_plugins::h264parse::H264Parse;
@@ -128,7 +128,10 @@ impl SourceLoop for PacedH264Src {
                 idx += 1;
                 let frame = Frame::new(
                     MemoryDomain::System(SystemSlice::from_boxed(nal.into_boxed_slice())),
-                    FrameTiming { pts_ns: seq * 5_000_000, ..FrameTiming::default() },
+                    FrameTiming {
+                        pts_ns: seq * 5_000_000,
+                        ..FrameTiming::default()
+                    },
                     seq,
                 );
                 out.push(PipelinePacket::DataFrame(frame)).await?;
@@ -153,7 +156,11 @@ fn paced_caps() -> Caps {
 }
 
 fn opus_caps() -> Caps {
-    Caps::Audio { format: AudioFormat::Opus, channels: 2, sample_rate: 48_000 }
+    Caps::Audio {
+        format: AudioFormat::Opus,
+        channels: 2,
+        sample_rate: 48_000,
+    }
 }
 
 /// Audio analog of `PacedH264Src`: loops a fixture's Opus packets in real time
@@ -187,7 +194,10 @@ impl SourceLoop for PacedOpusSrc {
                     MemoryDomain::System(SystemSlice::from_boxed(pkt.into_boxed_slice())),
                     // Opus is 20 ms per packet; the session maps PTS to a 48 kHz
                     // RTP clock.
-                    FrameTiming { pts_ns: seq * 20_000_000, ..FrameTiming::default() },
+                    FrameTiming {
+                        pts_ns: seq * 20_000_000,
+                        ..FrameTiming::default()
+                    },
                     seq,
                 );
                 out.push(PipelinePacket::DataFrame(frame)).await?;
@@ -259,7 +269,8 @@ impl AsyncElement for CountingSink {
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
             if let PipelinePacket::DataFrame(_) = packet {
-                self.frames.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.frames
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }
             Ok(())
         })
@@ -270,10 +281,17 @@ impl AsyncElement for CountingSink {
 /// real `FileSrc -> OggDemux` path once (so the paced source loops genuine
 /// packets, not synthetic ones).
 async fn extract_opus_packets(ogg_path: &str) -> std::vec::Vec<std::vec::Vec<u8>> {
-    let mut src = FileSrc::new(ogg_path, Caps::ByteStream { encoding: ByteStreamEncoding::Ogg });
+    let mut src = FileSrc::new(
+        ogg_path,
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::Ogg,
+        },
+    );
     let mut demux = OggDemux::new();
     let collected = Arc::new(std::sync::Mutex::new(std::vec::Vec::new()));
-    let mut sink = CapturingSink { out: collected.clone() };
+    let mut sink = CapturingSink {
+        out: collected.clone(),
+    };
     let clock = ZeroClock;
     run_source_transform_sink(&mut src, &mut demux, &mut sink, &clock, 8)
         .await
@@ -369,9 +387,10 @@ fn with_ice_env_src(mut src: WebRtcWhepSrc) -> WebRtcWhepSrc {
 #[tokio::test]
 #[ignore = "needs a WHIP server (G2G_WHIP_URL) + an H.264 fixture (G2G_H264_FIXTURE)"]
 async fn webrtcsink_publishes_h264_to_whip() {
-    let (Ok(whip_url), Ok(fixture)) =
-        (std::env::var("G2G_WHIP_URL"), std::env::var("G2G_H264_FIXTURE"))
-    else {
+    let (Ok(whip_url), Ok(fixture)) = (
+        std::env::var("G2G_WHIP_URL"),
+        std::env::var("G2G_H264_FIXTURE"),
+    ) else {
         eprintln!("skipping: set G2G_WHIP_URL and G2G_H264_FIXTURE to run");
         return;
     };
@@ -390,8 +409,15 @@ async fn webrtcsink_publishes_h264_to_whip() {
     .expect("pipeline should complete within 30s")
     .expect("WHIP publish pipeline should succeed");
 
-    eprintln!("source emitted={} frames published={}", stats.frames_emitted, sink.frames_sent());
-    assert!(sink.frames_sent() > 0, "expected at least one access unit published over WHIP");
+    eprintln!(
+        "source emitted={} frames published={}",
+        stats.frames_emitted,
+        sink.frames_sent()
+    );
+    assert!(
+        sink.frames_sent() > 0,
+        "expected at least one access unit published over WHIP"
+    );
 }
 
 /// g2g -> g2g round trip through a media server: `WebRtcSink` (WHIP publish) and
@@ -436,7 +462,10 @@ async fn webrtc_whip_to_whep_loopback() {
     let bytes = std::fs::read(&fixture).expect("read fixture");
     let nals = Arc::new(split_annexb(&bytes));
     let publisher = async move {
-        let mut src = PacedH264Src { nals, duration: Duration::from_secs(12) };
+        let mut src = PacedH264Src {
+            nals,
+            duration: Duration::from_secs(12),
+        };
         let mut sink = with_ice_env_sink(WebRtcSink::new(whip));
         let clock = ZeroClock;
         let _ = run_simple_pipeline(&mut src, &mut sink, &clock, 8).await;
@@ -455,9 +484,17 @@ async fn webrtc_whip_to_whep_loopback() {
     };
 
     let (_, sub) = tokio::join!(publisher, subscriber);
-    let stats = sub.expect("subscribe should complete within 30s").expect("WHEP subscribe ok");
-    eprintln!("subscriber received {} frames over WHEP", stats.frames_emitted);
-    assert!(stats.frames_emitted >= 1, "expected to receive at least one frame published by the sink");
+    let stats = sub
+        .expect("subscribe should complete within 30s")
+        .expect("WHEP subscribe ok");
+    eprintln!(
+        "subscriber received {} frames over WHEP",
+        stats.frames_emitted
+    );
+    assert!(
+        stats.frames_emitted >= 1,
+        "expected to receive at least one frame published by the sink"
+    );
 }
 
 /// Paced publish: loop a fixture's NALs in real time to a WHIP server for a few
@@ -477,9 +514,10 @@ async fn webrtc_whip_to_whep_loopback() {
 #[tokio::test]
 #[ignore = "needs a WHIP server (G2G_WHIP_URL) + an H.264 fixture (G2G_H264_FIXTURE)"]
 async fn webrtc_publish_paced() {
-    let (Ok(whip), Ok(fixture)) =
-        (std::env::var("G2G_WHIP_URL"), std::env::var("G2G_H264_FIXTURE"))
-    else {
+    let (Ok(whip), Ok(fixture)) = (
+        std::env::var("G2G_WHIP_URL"),
+        std::env::var("G2G_H264_FIXTURE"),
+    ) else {
         eprintln!("skipping: set G2G_WHIP_URL and G2G_H264_FIXTURE to run");
         return;
     };
@@ -488,7 +526,10 @@ async fn webrtc_publish_paced() {
     assert!(!nals.is_empty(), "fixture had no NAL units");
     eprintln!("paced publish: {} NALs looped -> {whip}", nals.len());
 
-    let mut src = PacedH264Src { nals, duration: Duration::from_secs(8) };
+    let mut src = PacedH264Src {
+        nals,
+        duration: Duration::from_secs(8),
+    };
     let mut sink = with_ice_env_sink(WebRtcSink::new(whip));
     let clock = ZeroClock;
     let stats = tokio::time::timeout(
@@ -499,8 +540,16 @@ async fn webrtc_publish_paced() {
     .expect("pipeline completes within 20s")
     .expect("paced WHIP publish succeeds");
 
-    eprintln!("paced publish emitted={} handed-to-session={}", stats.frames_emitted, sink.frames_sent());
-    assert!(sink.frames_sent() > 100, "expected a continuous feed, got {}", sink.frames_sent());
+    eprintln!(
+        "paced publish emitted={} handed-to-session={}",
+        stats.frames_emitted,
+        sink.frames_sent()
+    );
+    assert!(
+        sink.frames_sent() > 100,
+        "expected a continuous feed, got {}",
+        sink.frames_sent()
+    );
 }
 
 /// Multi-track A/V loopback through a media server: publish H.264 video **and**
@@ -545,14 +594,27 @@ async fn webrtc_av_session_loopback() {
     let nals = Arc::new(split_annexb(&h264_bytes));
     assert!(!nals.is_empty(), "h264 fixture had no NAL units");
     let opus_packets = Arc::new(extract_opus_packets(&opus_fixture).await);
-    assert!(!opus_packets.is_empty(), "ogg fixture yielded no Opus packets");
-    eprintln!("fixtures: {} NALs, {} Opus packets", nals.len(), opus_packets.len());
+    assert!(
+        !opus_packets.is_empty(),
+        "ogg fixture yielded no Opus packets"
+    );
+    eprintln!(
+        "fixtures: {} NALs, {} Opus packets",
+        nals.len(),
+        opus_packets.len()
+    );
 
     // Publisher: two paced sources (video + audio) fan into the one session sink,
     // which carries both m-lines over a single WHIP PeerConnection.
     let publisher = async move {
-        let mut vsrc = PacedH264Src { nals, duration: Duration::from_secs(14) };
-        let mut asrc = PacedOpusSrc { packets: opus_packets, duration: Duration::from_secs(14) };
+        let mut vsrc = PacedH264Src {
+            nals,
+            duration: Duration::from_secs(14),
+        };
+        let mut asrc = PacedOpusSrc {
+            packets: opus_packets,
+            duration: Duration::from_secs(14),
+        };
         let mut sink = with_ice_env_session_sink(WebRtcSessionSink::new(whip));
         let clock = ZeroClock;
         let sources: std::vec::Vec<&mut dyn DynSourceLoop> = std::vec![&mut vsrc, &mut asrc];
@@ -581,11 +643,25 @@ async fn webrtc_av_session_loopback() {
     };
 
     let (_, sub) = tokio::join!(publisher, subscriber);
-    let stats = sub.expect("subscribe completes within 30s").expect("WHEP session subscribe ok");
-    let (v, a) = (vframes.load(Ordering::SeqCst), aframes.load(Ordering::SeqCst));
-    eprintln!("read back: {v} video frames, {a} audio frames ({} total)", stats.frames_consumed);
-    assert!(v >= 1, "expected at least one video frame back over the A/V session");
-    assert!(a >= 1, "expected at least one audio frame back over the A/V session");
+    let stats = sub
+        .expect("subscribe completes within 30s")
+        .expect("WHEP session subscribe ok");
+    let (v, a) = (
+        vframes.load(Ordering::SeqCst),
+        aframes.load(Ordering::SeqCst),
+    );
+    eprintln!(
+        "read back: {v} video frames, {a} audio frames ({} total)",
+        stats.frames_consumed
+    );
+    assert!(
+        v >= 1,
+        "expected at least one video frame back over the A/V session"
+    );
+    assert!(
+        a >= 1,
+        "expected at least one audio frame back over the A/V session"
+    );
 }
 
 /// Bidirectional sendrecv P2P loopback (video): two [`WebRtcDuplexSession`] peers
@@ -623,7 +699,10 @@ async fn webrtc_duplex_p2p_loopback() {
     let peer_a = {
         let (nals, af) = (nals.clone(), a_recv.clone());
         async move {
-            let mut src = PacedH264Src { nals, duration: Duration::from_secs(8) };
+            let mut src = PacedH264Src {
+                nals,
+                duration: Duration::from_secs(8),
+            };
             let mut sess = WebRtcDuplexSession::new(SignalRole::Offerer, off_sig, 1);
             let mut sink = CountingSink { frames: af };
             let clock = ZeroClock;
@@ -635,7 +714,10 @@ async fn webrtc_duplex_p2p_loopback() {
     let peer_b = {
         let (nals, bf) = (nals.clone(), b_recv.clone());
         async move {
-            let mut src = PacedH264Src { nals, duration: Duration::from_secs(8) };
+            let mut src = PacedH264Src {
+                nals,
+                duration: Duration::from_secs(8),
+            };
             let mut sess = WebRtcDuplexSession::new(SignalRole::Answerer, ans_sig, 1);
             let mut sink = CountingSink { frames: bf };
             let clock = ZeroClock;
@@ -678,16 +760,20 @@ async fn webrtc_duplex_p2p_loopback() {
 #[ignore = "needs H.264 (G2G_H264_FIXTURE) + Ogg-Opus (G2G_OPUS_FIXTURE) fixtures; runs on localhost"]
 async fn webrtc_duplex_p2p_av_loopback() {
     use std::sync::atomic::{AtomicU64, Ordering};
-    let (Ok(h264_fixture), Ok(opus_fixture)) =
-        (std::env::var("G2G_H264_FIXTURE"), std::env::var("G2G_OPUS_FIXTURE"))
-    else {
+    let (Ok(h264_fixture), Ok(opus_fixture)) = (
+        std::env::var("G2G_H264_FIXTURE"),
+        std::env::var("G2G_OPUS_FIXTURE"),
+    ) else {
         eprintln!("skipping: set G2G_H264_FIXTURE and G2G_OPUS_FIXTURE to run");
         return;
     };
     let h264_bytes = std::fs::read(&h264_fixture).expect("read h264 fixture");
     let nals = Arc::new(split_annexb(&h264_bytes));
     let opus_packets = Arc::new(extract_opus_packets(&opus_fixture).await);
-    assert!(!nals.is_empty() && !opus_packets.is_empty(), "empty fixtures");
+    assert!(
+        !nals.is_empty() && !opus_packets.is_empty(),
+        "empty fixtures"
+    );
     let (off_sig, ans_sig) = SdpChannel::pair();
 
     // Per-peer, per-track received-frame counters.
@@ -702,8 +788,14 @@ async fn webrtc_duplex_p2p_av_loopback() {
                    opus: Arc<std::vec::Vec<std::vec::Vec<u8>>>,
                    vc: Arc<AtomicU64>,
                    ac: Arc<AtomicU64>| async move {
-        let mut vsrc = PacedH264Src { nals, duration: Duration::from_secs(8) };
-        let mut asrc = PacedOpusSrc { packets: opus, duration: Duration::from_secs(8) };
+        let mut vsrc = PacedH264Src {
+            nals,
+            duration: Duration::from_secs(8),
+        };
+        let mut asrc = PacedOpusSrc {
+            packets: opus,
+            duration: Duration::from_secs(8),
+        };
         let mut sess = WebRtcDuplexSession::new(role, sig, 2);
         let mut vsink = CountingSink { frames: vc };
         let mut asink = CountingSink { frames: ac };
@@ -744,7 +836,15 @@ async fn webrtc_duplex_p2p_av_loopback() {
         b_v.load(Ordering::SeqCst),
         b_a.load(Ordering::SeqCst),
     );
-    eprintln!("duplex A/V P2P: peer A got {av} video + {aa} audio; peer B got {bv} video + {ba} audio");
-    assert!(av >= 1 && aa >= 1, "peer A should receive peer B's video and audio");
-    assert!(bv >= 1 && ba >= 1, "peer B should receive peer A's video and audio");
+    eprintln!(
+        "duplex A/V P2P: peer A got {av} video + {aa} audio; peer B got {bv} video + {ba} audio"
+    );
+    assert!(
+        av >= 1 && aa >= 1,
+        "peer A should receive peer B's video and audio"
+    );
+    assert!(
+        bv >= 1 && ba >= 1,
+        "peer B should receive peer A's video and audio"
+    );
 }

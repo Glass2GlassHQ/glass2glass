@@ -57,5 +57,8 @@ fn tee_branch_pads_and_leaky_policy_are_shown() {
     // The second tee output pad is named.
     assert!(dot.contains("taillabel=\"1\""), "{dot}");
     // leaky=2 is drop-oldest; the policy annotates the leaky branch's edge.
-    assert!(dot.contains("[DropOldest]"), "leaky branch policy shown: {dot}");
+    assert!(
+        dot.contains("[DropOldest]"),
+        "leaky branch policy shown: {dot}"
+    );
 }

@@ -47,7 +47,10 @@ const DEFAULT_SCALE: f32 = 0.018658;
 const DEFAULT_ZERO_POINT: i32 = 114;
 
 fn env_or<T: std::str::FromStr>(key: &str, default: T) -> T {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 fn model_path() -> String {
@@ -59,7 +62,10 @@ fn input_path() -> String {
 }
 
 fn quant() -> (f32, i32) {
-    (env_or("G2G_MN_SCALE", DEFAULT_SCALE), env_or("G2G_MN_ZERO_POINT", DEFAULT_ZERO_POINT))
+    (
+        env_or("G2G_MN_SCALE", DEFAULT_SCALE),
+        env_or("G2G_MN_ZERO_POINT", DEFAULT_ZERO_POINT),
+    )
 }
 
 /// Start a binder threadpool so the NNAPI vendor HAL (DarwiNN, over binder/AIDL)
@@ -79,12 +85,18 @@ fn start_binder_threadpool() {
         if lib.is_null() {
             return;
         }
-        let set = dlsym(lib, b"ABinderProcess_setThreadPoolMaxThreadCount\0".as_ptr() as *const c_char);
+        let set = dlsym(
+            lib,
+            b"ABinderProcess_setThreadPoolMaxThreadCount\0".as_ptr() as *const c_char,
+        );
         if !set.is_null() {
             let set: extern "C" fn(u32) -> bool = core::mem::transmute(set);
             set(1);
         }
-        let start = dlsym(lib, b"ABinderProcess_startThreadPool\0".as_ptr() as *const c_char);
+        let start = dlsym(
+            lib,
+            b"ABinderProcess_startThreadPool\0".as_ptr() as *const c_char,
+        );
         if !start.is_null() {
             let start: extern "C" fn() = core::mem::transmute(start);
             start();
@@ -96,7 +108,8 @@ fn start_binder_threadpool() {
 /// (whitespace-tolerant scan, no JSON dep). NNAPI fuses its claimed subgraph into
 /// one node tagged `NnapiExecutionProvider`.
 fn providers_from_profiling(json: &str) -> std::collections::BTreeMap<String, usize> {
-    let mut providers: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut providers: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
     let mut rest = json;
     while let Some(i) = rest.find("\"provider\"") {
         rest = &rest[i + "\"provider\"".len()..];
@@ -119,7 +132,10 @@ struct OneFrame {
 }
 
 impl OutputSink for OneFrame {
-    fn push<'a>(&'a mut self, packet: PipelinePacket) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
+    fn push<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+    ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
         Box::pin(async move {
             if let PipelinePacket::DataFrame(f) = packet {
                 if self.bytes.is_none() {
@@ -143,12 +159,20 @@ fn frame(bytes: Vec<u8>) -> PipelinePacket {
 }
 
 fn tensor_caps(dtype: TensorDType, shape: &[u32]) -> Caps {
-    Caps::Tensor { dtype, shape: TensorShape::from_slice(shape).unwrap(), layout: TensorLayout::Nchw }
+    Caps::Tensor {
+        dtype,
+        shape: TensorShape::from_slice(shape).unwrap(),
+        layout: TensorLayout::Nchw,
+    }
 }
 
 fn read_input_f32_bytes() -> Vec<u8> {
     let bytes = std::fs::read(input_path()).expect("read pushed f32 input (mn_input_f32.bin)");
-    assert_eq!(bytes.len(), 3 * SIZE as usize * SIZE as usize * 4, "f32 NCHW [1,3,224,224]");
+    assert_eq!(
+        bytes.len(),
+        3 * SIZE as usize * SIZE as usize * 4,
+        "f32 NCHW [1,3,224,224]"
+    );
     bytes
 }
 
@@ -163,11 +187,20 @@ async fn classifier_runs_through_g2g_chain() {
 
     // Stage 1: quantize the normalized f32 tensor to the model's uint8 input.
     let mut quantize = TensorConvert::quantize(TensorDType::U8, scale, zp);
-    quantize.configure_pipeline(&tensor_caps(TensorDType::F32, &[1, 3, SIZE, SIZE])).expect("configure quantize");
+    quantize
+        .configure_pipeline(&tensor_caps(TensorDType::F32, &[1, 3, SIZE, SIZE]))
+        .expect("configure quantize");
     let mut q_out = OneFrame::default();
-    quantize.process(frame(input_bytes), &mut q_out).await.expect("quantize runs");
+    quantize
+        .process(frame(input_bytes), &mut q_out)
+        .await
+        .expect("quantize runs");
     let u8_tensor = q_out.bytes.expect("uint8 tensor");
-    assert_eq!(u8_tensor.len(), 3 * SIZE as usize * SIZE as usize, "one byte per element");
+    assert_eq!(
+        u8_tensor.len(),
+        3 * SIZE as usize * SIZE as usize,
+        "one byte per element"
+    );
 
     // Stage 2: the real MobileNetV2 on NNAPI (-> Edge TPU), CPU as the implicit
     // fallback. XNNPACK is intentionally not registered: it rejects the int8 QDQ
@@ -176,17 +209,27 @@ async fn classifier_runs_through_g2g_chain() {
     let mut infer = OrtInference::from_memory_with_nnapi(&model)
         .expect("uint8 model loads")
         .with_tensor_input();
-    infer.configure_pipeline(&tensor_caps(TensorDType::U8, &[1, 3, SIZE, SIZE])).expect("configure inference");
+    infer
+        .configure_pipeline(&tensor_caps(TensorDType::U8, &[1, 3, SIZE, SIZE]))
+        .expect("configure inference");
     let mut logits = OneFrame::default();
-    infer.process(frame(u8_tensor), &mut logits).await.expect("inference runs on-device");
+    infer
+        .process(frame(u8_tensor), &mut logits)
+        .await
+        .expect("inference runs on-device");
     let logit_bytes = logits.bytes.expect("logits tensor");
     assert_eq!(logit_bytes.len(), CLASSES * 4, "1000 f32 logits");
 
     // Stage 3: classification head -> winning [index, value].
     let mut argmax = TensorPostprocess::argmax();
-    argmax.configure_pipeline(&tensor_caps(TensorDType::F32, &[1, CLASSES as u32])).expect("configure argmax");
+    argmax
+        .configure_pipeline(&tensor_caps(TensorDType::F32, &[1, CLASSES as u32]))
+        .expect("configure argmax");
     let mut top = OneFrame::default();
-    argmax.process(frame(logit_bytes), &mut top).await.expect("argmax runs");
+    argmax
+        .process(frame(logit_bytes), &mut top)
+        .await
+        .expect("argmax runs");
     let top_bytes = top.bytes.expect("argmax output");
     let idx = f32::from_le_bytes([top_bytes[0], top_bytes[1], top_bytes[2], top_bytes[3]]) as usize;
 
@@ -206,7 +249,10 @@ async fn nnapi_claims_the_classifier() {
 
     // The uint8 input TensorConvert::quantize would produce.
     let f32_bytes = read_input_f32_bytes();
-    let floats: Vec<f32> = f32_bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+    let floats: Vec<f32> = f32_bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
     let u8_input = quantize_f32(&floats, TensorDType::U8, scale, zp).expect("quantize to u8");
 
     let profile_prefix = "/data/local/tmp/g2g_mobilenet_profile";
@@ -221,8 +267,11 @@ async fn nnapi_claims_the_classifier() {
 
     let input_name = session.inputs()[0].name().to_owned();
     let out_len = {
-        let t = Tensor::from_array((vec![1i64, 3, SIZE as i64, SIZE as i64], u8_input)).expect("u8 tensor");
-        let outputs = session.run(::ort::inputs![input_name.as_str() => t]).expect("run on-device");
+        let t = Tensor::from_array((vec![1i64, 3, SIZE as i64, SIZE as i64], u8_input))
+            .expect("u8 tensor");
+        let outputs = session
+            .run(::ort::inputs![input_name.as_str() => t])
+            .expect("run on-device");
         let (_s, out) = outputs[0].try_extract_tensor::<f32>().expect("f32 output");
         out.len()
     };
@@ -237,8 +286,16 @@ async fn nnapi_claims_the_classifier() {
     for (prov, n) in &providers {
         eprintln!("    {prov}: {n}");
     }
-    let nnapi: usize = providers.iter().filter(|(p, _)| p.contains("Nnapi")).map(|(_, n)| *n).sum();
-    let non_nnapi: usize = providers.iter().filter(|(p, _)| !p.contains("Nnapi")).map(|(_, n)| *n).sum();
+    let nnapi: usize = providers
+        .iter()
+        .filter(|(p, _)| p.contains("Nnapi"))
+        .map(|(_, n)| *n)
+        .sum();
+    let non_nnapi: usize = providers
+        .iter()
+        .filter(|(p, _)| !p.contains("Nnapi"))
+        .map(|(_, n)| *n)
+        .sum();
     eprintln!(">> {nnapi} node(s) on NNAPI (Edge TPU), {non_nnapi} off-accelerator");
     assert!(
         nnapi > 0,

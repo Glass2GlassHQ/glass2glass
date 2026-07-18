@@ -32,7 +32,10 @@ const BUNDLED_CLIP: &[u8] = include_bytes!("../tests/fixtures/h264_640x480.h264"
 fn main() {
     let mut args = std::env::args().skip(1);
     let clip_path = args.next();
-    let out_dir = PathBuf::from(args.next().unwrap_or_else(|| "vulkan_video_frames".to_string()));
+    let out_dir = PathBuf::from(
+        args.next()
+            .unwrap_or_else(|| "vulkan_video_frames".to_string()),
+    );
 
     let clip: Vec<u8> = match &clip_path {
         Some(p) => std::fs::read(p).unwrap_or_else(|e| panic!("read {p}: {e}")),
@@ -61,7 +64,9 @@ fn main() {
     // Size the session to the stream's coded dimensions (macroblock geometry).
     let width = (ps.sps.pic_width_in_mbs_minus1 + 1) * 16;
     let height = (ps.sps.pic_height_in_map_units_minus1 + 1) * 16;
-    let session = device.create_h264_session(&ps, width, height).expect("create decode session");
+    let session = device
+        .create_h264_session(&ps, width, height)
+        .expect("create decode session");
     let mut decoder = device
         .create_h264_dpb_decoder(&session, &ps)
         .expect("create DPB decoder");
@@ -76,7 +81,10 @@ fn main() {
         let min = *f.luma.iter().min().unwrap();
         let max = *f.luma.iter().max().unwrap();
         let mean = f.luma.iter().map(|&b| b as u64).sum::<u64>() / f.luma.len() as u64;
-        println!("  frame {i:>3}: luma {min:>3}..={max:<3} mean {mean:>3}  -> {}", path.display());
+        println!(
+            "  frame {i:>3}: luma {min:>3}..={max:<3} mean {mean:>3}  -> {}",
+            path.display()
+        );
     }
     println!("wrote {} frames to {}/", frames.len(), out_dir.display());
 }

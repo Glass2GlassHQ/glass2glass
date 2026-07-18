@@ -21,7 +21,7 @@
 use g2g_core::element::{AsyncElement, BoxFuture, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
-use g2g_core::{Caps, ConfigureOutcome, Dim, G2gError, Rate, VideoCodec, RawVideoFormat};
+use g2g_core::{Caps, ConfigureOutcome, Dim, G2gError, Rate, RawVideoFormat, VideoCodec};
 use g2g_plugins::ffmpegdec::{Backend, FfmpegVideoDec, OutputFormat};
 
 #[derive(Default)]
@@ -76,7 +76,13 @@ async fn ffmpeg_h264_decodes_fixture_vaapi() {
         .with_output_format(OutputFormat::Nv12)
         .with_backend(Backend::Vaapi)
         .with_vaapi_device(Some(&device));
-    decode_fixture_with(dec, VideoCodec::H264, "G2G_H264_FIXTURE", OutputFormat::Nv12).await;
+    decode_fixture_with(
+        dec,
+        VideoCodec::H264,
+        "G2G_H264_FIXTURE",
+        OutputFormat::Nv12,
+    )
+    .await;
 }
 
 async fn decode_fixture(codec: VideoCodec, env_var: &str, output: OutputFormat) {
@@ -103,7 +109,9 @@ async fn decode_fixture_with(
         height: Dim::Any,
         framerate: Rate::Any,
     };
-    let narrowed = dec.intercept_caps(&upstream).expect("intercept supported codec");
+    let narrowed = dec
+        .intercept_caps(&upstream)
+        .expect("intercept supported codec");
     let outcome = dec
         .configure_pipeline(&narrowed)
         .expect("libavcodec must initialise");
@@ -153,8 +161,14 @@ async fn decode_fixture_with(
         data_frames.len(),
         caps_changes.len()
     );
-    assert!(!caps_changes.is_empty(), "expected at least one CapsChanged");
-    assert!(!data_frames.is_empty(), "expected at least one decoded frame");
+    assert!(
+        !caps_changes.is_empty(),
+        "expected at least one CapsChanged"
+    );
+    assert!(
+        !data_frames.is_empty(),
+        "expected at least one decoded frame"
+    );
 
     // I420 and NV12 have identical byte length (w*h*3/2 for even dims); only
     // the chroma layout differs. The runner checks length + format tag.
@@ -229,10 +243,25 @@ async fn autoplug_builds_nv12_decoder_for_strict_nv12_sink() {
     };
     // A strict-NV12 sink target, mirroring `CudaKmsSink` / `waylandsink`'s
     // `Accepts(NV12)` constraint.
-    let strict_nv12 = |c: &Caps| matches!(c, Caps::RawVideo { format: RawVideoFormat::Nv12, .. });
+    let strict_nv12 = |c: &Caps| {
+        matches!(
+            c,
+            Caps::RawVideo {
+                format: RawVideoFormat::Nv12,
+                ..
+            }
+        )
+    };
 
-    let mut chain = reg.autoplug(&h264, &strict_nv12, 4).expect("a decode chain reaches NV12");
-    assert_eq!(chain.len(), 1, "one decoder hop to NV12, got {}", chain.len());
+    let mut chain = reg
+        .autoplug(&h264, &strict_nv12, 4)
+        .expect("a decode chain reaches NV12");
+    assert_eq!(
+        chain.len(),
+        1,
+        "one decoder hop to NV12, got {}",
+        chain.len()
+    );
     let dec = chain[0].as_mut();
     // Fully qualified: the boxed element satisfies both `AsyncElement` and
     // `DynAsyncElement`, so disambiguate to the dyn methods.
@@ -252,4 +281,3 @@ async fn autoplug_builds_nv12_decoder_for_strict_nv12_sink() {
         .await
         .expect("the auto-plugged decoder must emit NV12 for a strict-NV12 sink");
 }
-

@@ -94,7 +94,7 @@ pub(crate) fn adts_from_asc(asc: &[u8], au: &[u8]) -> Option<Vec<u8>> {
         ((channel_config & 3) << 6) | ((frame_len >> 11) & 3) as u8,
         ((frame_len >> 3) & 0xFF) as u8,
         (((frame_len & 7) << 5) as u8) | 0x1F, // buffer fullness (top bits)
-        0xFC, // buffer fullness (low) | num_raw_data_blocks = 0
+        0xFC,                                  // buffer fullness (low) | num_raw_data_blocks = 0
     ]);
     out.extend_from_slice(au);
     Some(out)
@@ -120,13 +120,17 @@ impl AacParse {
 }
 
 impl AsyncElement for AacParse {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         match upstream_caps {
-            Caps::Audio { format: AudioFormat::Aac, .. } => Ok(upstream_caps.clone()),
+            Caps::Audio {
+                format: AudioFormat::Aac,
+                ..
+            } => Ok(upstream_caps.clone()),
             _ => Err(G2gError::CapsMismatch),
         }
     }
@@ -141,7 +145,10 @@ impl AsyncElement for AacParse {
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         match absolute_caps {
-            Caps::Audio { format: AudioFormat::Aac, .. } => {
+            Caps::Audio {
+                format: AudioFormat::Aac,
+                ..
+            } => {
                 self.configured = true;
                 Ok(ConfigureOutcome::Accepted)
             }
@@ -177,7 +184,8 @@ impl AsyncElement for AacParse {
                                 sample_rate: info.sample_rate,
                             };
                             if self.last_emitted_caps.as_ref() != Some(&new_caps) {
-                                out.push(PipelinePacket::CapsChanged(new_caps.clone())).await?;
+                                out.push(PipelinePacket::CapsChanged(new_caps.clone()))
+                                    .await?;
                                 self.last_emitted_caps = Some(new_caps);
                                 self.headers_emitted += 1;
                             }
@@ -209,7 +217,11 @@ impl AsyncElement for AacParse {
 impl PadTemplates for AacParse {
     fn pad_templates() -> Vec<PadTemplate> {
         // `Caps::Audio` has no open dims; pin the common stereo/48 kHz shape.
-        let aac = Caps::Audio { format: AudioFormat::Aac, channels: 2, sample_rate: 48_000 };
+        let aac = Caps::Audio {
+            format: AudioFormat::Aac,
+            channels: 2,
+            sample_rate: 48_000,
+        };
         Vec::from([
             PadTemplate::sink(CapsSet::one(aac.clone())),
             PadTemplate::source(CapsSet::one(aac)),
@@ -254,7 +266,10 @@ fn parse_adts(au: &[u8]) -> Option<AacInfo> {
             7 => 8,                  // 7.1
             _ => continue,           // 0 = carried in the AOT config, not ADTS
         };
-        return Some(AacInfo { channels, sample_rate });
+        return Some(AacInfo {
+            channels,
+            sample_rate,
+        });
     }
     None
 }
@@ -323,7 +338,7 @@ fn parse_audio_mux_element(data: &[u8]) -> Option<AacInfo> {
     r.read(6)?; // numSubFrames
     r.read(4)?; // numProgram (only program 0 is parsed)
     r.read(3)?; // numLayer of program 0 (only layer 0 is parsed)
-    // program 0, layer 0: useSameConfig is implied 0, so AudioSpecificConfig follows.
+                // program 0, layer 0: useSameConfig is implied 0, so AudioSpecificConfig follows.
     parse_audio_specific_config(&mut r)
 }
 
@@ -348,7 +363,10 @@ fn parse_audio_specific_config(r: &mut BitReader) -> Option<AacInfo> {
         7 => 8,
         _ => return None, // 0 = further config; reserved otherwise
     };
-    Some(AacInfo { channels, sample_rate })
+    Some(AacInfo {
+        channels,
+        sample_rate,
+    })
 }
 
 #[cfg(test)]
@@ -492,8 +510,14 @@ mod tests {
 
     #[test]
     fn parse_aac_accepts_both_framings() {
-        assert_eq!(parse_aac(&adts_frame(2, 4, 16)).map(|i| i.channels), Some(2));
-        assert_eq!(parse_aac(&loas_frame(&latm_mux_element(2, 4, 2))).map(|i| i.channels), Some(2));
+        assert_eq!(
+            parse_aac(&adts_frame(2, 4, 16)).map(|i| i.channels),
+            Some(2)
+        );
+        assert_eq!(
+            parse_aac(&loas_frame(&latm_mux_element(2, 4, 2))).map(|i| i.channels),
+            Some(2)
+        );
     }
 
     // -- Element-level tests (drive AacParse::process directly) -------------
@@ -530,7 +554,11 @@ mod tests {
 
     fn aac_caps() -> Caps {
         // Sentinel pre-parse caps: format pinned, channels/rate unknown.
-        Caps::Audio { format: AudioFormat::Aac, channels: 0, sample_rate: 0 }
+        Caps::Audio {
+            format: AudioFormat::Aac,
+            channels: 0,
+            sample_rate: 0,
+        }
     }
 
     #[tokio::test]
@@ -580,7 +608,10 @@ mod tests {
             .iter()
             .filter(|p| matches!(p, PipelinePacket::CapsChanged(_)))
             .count();
-        assert_eq!(caps_count, 1, "CapsChanged fires once for identical ADTS params");
+        assert_eq!(
+            caps_count, 1,
+            "CapsChanged fires once for identical ADTS params"
+        );
         assert_eq!(parse.caps_changes_emitted(), 1);
     }
 
@@ -610,9 +641,11 @@ mod tests {
             .packets
             .iter()
             .filter_map(|p| match p {
-                PipelinePacket::CapsChanged(Caps::Audio { channels, sample_rate, .. }) => {
-                    Some((*channels, *sample_rate))
-                }
+                PipelinePacket::CapsChanged(Caps::Audio {
+                    channels,
+                    sample_rate,
+                    ..
+                }) => Some((*channels, *sample_rate)),
                 _ => None,
             })
             .collect();
@@ -627,12 +660,23 @@ mod tests {
         let mut sink = RecordingSink::default();
 
         let frame = frame_with_bytes(0, loas_frame(&latm_mux_element(2, 3, 6)));
-        parse.process(PipelinePacket::DataFrame(frame), &mut sink).await.unwrap();
+        parse
+            .process(PipelinePacket::DataFrame(frame), &mut sink)
+            .await
+            .unwrap();
 
-        assert_eq!(sink.packets.len(), 2, "CapsChanged then the forwarded frame");
+        assert_eq!(
+            sink.packets.len(),
+            2,
+            "CapsChanged then the forwarded frame"
+        );
         assert!(matches!(
             sink.packets[0],
-            PipelinePacket::CapsChanged(Caps::Audio { channels: 6, sample_rate: 48_000, .. })
+            PipelinePacket::CapsChanged(Caps::Audio {
+                channels: 6,
+                sample_rate: 48_000,
+                ..
+            })
         ));
         assert!(matches!(sink.packets[1], PipelinePacket::DataFrame(_)));
     }
@@ -640,7 +684,11 @@ mod tests {
     #[tokio::test]
     async fn rejects_non_aac_caps_in_intercept() {
         let parse = AacParse::new();
-        let pcm = Caps::Audio { format: AudioFormat::PcmS16Le, channels: 2, sample_rate: 48_000 };
+        let pcm = Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            channels: 2,
+            sample_rate: 48_000,
+        };
         assert_eq!(parse.intercept_caps(&pcm), Err(G2gError::CapsMismatch));
     }
 

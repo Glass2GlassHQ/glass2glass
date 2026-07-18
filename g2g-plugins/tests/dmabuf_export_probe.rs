@@ -31,10 +31,13 @@ async fn export_device() -> Option<(wgpu::Device, wgpu::Queue, wgpu::Adapter)> {
             wgpu::Features::empty(),
             &wgpu::Limits::default(),
             &wgpu::MemoryHints::default(),
-            Some(Box::new(|args: wgpu_hal::vulkan::CreateDeviceCallbackArgs| {
-                args.extensions.push(ash::khr::external_memory_fd::NAME);
-                args.extensions.push(ash::ext::external_memory_dma_buf::NAME);
-            })),
+            Some(Box::new(
+                |args: wgpu_hal::vulkan::CreateDeviceCallbackArgs| {
+                    args.extensions.push(ash::khr::external_memory_fd::NAME);
+                    args.extensions
+                        .push(ash::ext::external_memory_dma_buf::NAME);
+                },
+            )),
         )
         .ok()?
     };
@@ -43,7 +46,10 @@ async fn export_device() -> Option<(wgpu::Device, wgpu::Queue, wgpu::Adapter)> {
         adapter
             .create_device_from_hal(
                 open,
-                &wgpu::DeviceDescriptor { label: Some("export-probe"), ..Default::default() },
+                &wgpu::DeviceDescriptor {
+                    label: Some("export-probe"),
+                    ..Default::default()
+                },
             )
             .ok()?
     };
@@ -63,7 +69,9 @@ async fn dmabuf_export_supported() {
     // SAFETY: raw Vulkan on the live device; all raw handles created here are freed
     // before return.
     let result = unsafe {
-        let hal = device.as_hal::<wgpu_hal::api::Vulkan>().expect("vulkan device");
+        let hal = device
+            .as_hal::<wgpu_hal::api::Vulkan>()
+            .expect("vulkan device");
         let raw = hal.raw_device();
         let instance = hal.shared_instance().raw_instance();
         let phys = hal.raw_physical_device();

@@ -127,7 +127,13 @@ impl VelloAnalyticsOverlay {
     }
 
     fn accepts(caps: &Caps) -> bool {
-        matches!(caps, Caps::RawVideo { format: RawVideoFormat::Rgba8, .. })
+        matches!(
+            caps,
+            Caps::RawVideo {
+                format: RawVideoFormat::Rgba8,
+                ..
+            }
+        )
     }
 
     /// Build the wgpu device/queue and Vello renderer on the first frame. Maps a
@@ -150,19 +156,31 @@ impl VelloAnalyticsOverlay {
                 use_cpu: false,
                 // Area AA only: we never request MSAA, so do not compile those
                 // pipeline permutations.
-                antialiasing_support: AaSupport { area: true, msaa8: false, msaa16: false },
+                antialiasing_support: AaSupport {
+                    area: true,
+                    msaa8: false,
+                    msaa16: false,
+                },
                 num_init_threads: None,
                 pipeline_cache: None,
             },
         )
         .map_err(gpu_err)?;
-        self.gpu = Some(Gpu { device, queue, renderer });
+        self.gpu = Some(Gpu {
+            device,
+            queue,
+            renderer,
+        });
         Ok(())
     }
 
     /// Render `rgba` (full-frame image, consumed) with `detections` stroked over
     /// it into a fresh `wgpu::Texture`, returned for the output frame to own.
-    fn render(&mut self, rgba: Vec<u8>, detections: &[ObjectDetection]) -> Result<wgpu::Texture, G2gError> {
+    fn render(
+        &mut self,
+        rgba: Vec<u8>,
+        detections: &[ObjectDetection],
+    ) -> Result<wgpu::Texture, G2gError> {
         let (w, h) = (self.width, self.height);
         let thickness = self.thickness;
         let gpu = self.gpu.as_mut().ok_or(G2gError::NotConfigured)?;
@@ -196,7 +214,11 @@ impl VelloAnalyticsOverlay {
 
         let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("vello-overlay-target"),
-            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -353,7 +375,11 @@ mod tests {
     }
 
     fn det(x: f32, y: f32, w: f32, h: f32, label: u32) -> ObjectDetection {
-        ObjectDetection { bbox: BBox { x, y, w, h }, label, confidence: 0.9 }
+        ObjectDetection {
+            bbox: BBox { x, y, w, h },
+            label,
+            confidence: 0.9,
+        }
     }
 
     /// Read an Rgba8 texture back to a tightly-packed CPU buffer (un-padding the
@@ -385,7 +411,11 @@ mod tests {
                     rows_per_image: Some(h),
                 },
             },
-            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
         );
         gpu.queue.submit([enc.finish()]);
 
@@ -395,7 +425,10 @@ mod tests {
             let _ = tx.send(r);
         });
         gpu.device
-            .poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
             .unwrap();
         rx.recv().unwrap().unwrap();
 
@@ -467,7 +500,9 @@ mod tests {
         frame.meta.attach(a);
 
         let mut sink = FrameSink::default();
-        ov.process(PipelinePacket::DataFrame(frame), &mut sink).await.unwrap();
+        ov.process(PipelinePacket::DataFrame(frame), &mut sink)
+            .await
+            .unwrap();
 
         let out = sink.last.expect("frame forwarded");
         let MemoryDomain::WgpuTexture(owned) = &out.domain else {

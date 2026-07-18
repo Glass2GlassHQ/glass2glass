@@ -25,15 +25,15 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::caps::Caps;
-use crate::format_element::CapsConstraint;
 use crate::element::{
     AsyncElement, BoxFuture, ConfigureOutcome, ElementBound, OutputSink, PushOutcome, Reconfigure,
 };
 use crate::error::G2gError;
+use crate::format_element::CapsConstraint;
 use crate::frame::PipelinePacket;
 use crate::property::{ElementMetadata, PropError, PropValue, PropertySpec};
-use crate::runtime::{PadKind, PadRequest};
 use crate::runtime::SenderSink;
+use crate::runtime::{PadKind, PadRequest};
 use portable_atomic::AtomicU64;
 
 /// Sentinel for "no bitrate pending" in a [`ReverseChannel`] (a real target is
@@ -134,7 +134,10 @@ impl MultiOutputSink for MultiSenderSink {
         // Port range is an internal invariant: `Router` clamps its selection
         // and broadcasts only over `0..port_count`, so an out-of-range port
         // is a framework bug, not a runtime error.
-        let sink = self.ports.get_mut(port).expect("push_to: port out of range");
+        let sink = self
+            .ports
+            .get_mut(port)
+            .expect("push_to: port out of range");
         sink.push(packet)
     }
 
@@ -265,10 +268,7 @@ pub trait MultiOutputElement: ElementBound {
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError>;
 
-    fn configure_pipeline(
-        &mut self,
-        absolute_caps: &Caps,
-    ) -> Result<ConfigureOutcome, G2gError>;
+    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError>;
 
     fn process<'a>(
         &'a mut self,
@@ -523,13 +523,17 @@ pub struct Gate {
 
 impl Gate {
     pub fn new(open: bool) -> Self {
-        Self { open: Arc::new(AtomicBool::new(open)) }
+        Self {
+            open: Arc::new(AtomicBool::new(open)),
+        }
     }
 
     /// A cloneable handle that flips this gate from another task while the
     /// runner drives it.
     pub fn handle(&self) -> GateHandle {
-        GateHandle { open: self.open.clone() }
+        GateHandle {
+            open: self.open.clone(),
+        }
     }
 }
 
@@ -607,7 +611,10 @@ pub struct Router {
 impl Router {
     pub fn new(ports: usize) -> Self {
         assert!(ports > 0, "Router needs at least one output port");
-        Self { selected: Arc::new(AtomicUsize::new(0)), ports }
+        Self {
+            selected: Arc::new(AtomicUsize::new(0)),
+            ports,
+        }
     }
 
     /// Number of output ports. The fan-out runner allocates one branch link
@@ -618,7 +625,10 @@ impl Router {
 
     /// A cloneable handle that re-targets this router from another task.
     pub fn handle(&self) -> RouterHandle {
-        RouterHandle { selected: self.selected.clone(), ports: self.ports }
+        RouterHandle {
+            selected: self.selected.clone(),
+            ports: self.ports,
+        }
     }
 }
 
@@ -681,7 +691,8 @@ impl MultiOutputElement for Router {
                 }
                 PipelinePacket::CapsChanged(c) => {
                     for port in 0..ports {
-                        out.push_to(port, PipelinePacket::CapsChanged(c.clone())).await?;
+                        out.push_to(port, PipelinePacket::CapsChanged(c.clone()))
+                            .await?;
                     }
                 }
                 // Flush is broadcast to every branch, like CapsChanged.
@@ -718,7 +729,10 @@ pub struct Merger {
 impl Merger {
     pub fn new(inputs: usize) -> Self {
         assert!(inputs > 0, "Merger needs at least one input");
-        Self { selected: Arc::new(AtomicUsize::new(0)), inputs }
+        Self {
+            selected: Arc::new(AtomicUsize::new(0)),
+            inputs,
+        }
     }
 
     /// Number of input ports. The fan-in runner allocates one branch link
@@ -729,7 +743,10 @@ impl Merger {
 
     /// A cloneable handle that re-selects the active input from another task.
     pub fn handle(&self) -> MergerHandle {
-        MergerHandle { selected: self.selected.clone(), inputs: self.inputs }
+        MergerHandle {
+            selected: self.selected.clone(),
+            inputs: self.inputs,
+        }
     }
 }
 
@@ -790,7 +807,11 @@ mod tests {
 
     impl RecordingMultiSink {
         fn new(ports: usize) -> Self {
-            Self { ports, data_seqs: alloc::vec![Vec::new(); ports], caps_changes: alloc::vec![0; ports] }
+            Self {
+                ports,
+                data_seqs: alloc::vec![Vec::new(); ports],
+                caps_changes: alloc::vec![0; ports],
+            }
         }
     }
 
@@ -908,7 +929,11 @@ mod tests {
         handle.set_open(true);
         block_on(gate.process(data(2), &mut out)).unwrap(); // open -> pass
 
-        assert_eq!(out.data_seqs, alloc::vec![0, 2], "frame 1 dropped while closed");
+        assert_eq!(
+            out.data_seqs,
+            alloc::vec![0, 2],
+            "frame 1 dropped while closed"
+        );
     }
 
     #[test]
@@ -918,7 +943,10 @@ mod tests {
 
         block_on(gate.process(PipelinePacket::CapsChanged(caps()), &mut out)).unwrap();
 
-        assert_eq!(out.caps_changes, 1, "CapsChanged forwarded even while closed");
+        assert_eq!(
+            out.caps_changes, 1,
+            "CapsChanged forwarded even while closed"
+        );
     }
 
     #[test]

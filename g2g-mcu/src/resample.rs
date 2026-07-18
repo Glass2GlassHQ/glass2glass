@@ -115,7 +115,13 @@ impl<'r, const N: usize, const BYTES: usize> Resampler<'r, N, BYTES> {
         to: SampleRate,
         ring: &'r StaticLendRing<N, BYTES>,
     ) -> Self {
-        Self { table: table_for(from, to), hist: [0; MAX_TAPS], consumed: 0, next_u: 0, ring }
+        Self {
+            table: table_for(from, to),
+            hist: [0; MAX_TAPS],
+            consumed: 0,
+            next_u: 0,
+            ring,
+        }
     }
 
     /// Output samples the next `n_in`-sample frame will produce (exact,
@@ -138,10 +144,15 @@ impl<'r, const N: usize, const BYTES: usize> Resampler<'r, N, BYTES> {
         let l = (t.l as u64).max(1);
         let base = u / l;
         let phase = (u % l) as usize;
-        let branch = t.coeffs.get(phase * t.taps..(phase + 1) * t.taps).unwrap_or(&[]);
+        let branch = t
+            .coeffs
+            .get(phase * t.taps..(phase + 1) * t.taps)
+            .unwrap_or(&[]);
         let mut acc: i32 = 1 << (COEFF_SHIFT - 1);
         for (k, &c) in branch.iter().enumerate() {
-            let Some(idx) = base.checked_sub(k as u64) else { break };
+            let Some(idx) = base.checked_sub(k as u64) else {
+                break;
+            };
             let s = if idx >= self.consumed {
                 sample_at(src, (idx - self.consumed) as usize)
             } else {

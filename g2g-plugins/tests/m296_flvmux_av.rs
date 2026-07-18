@@ -29,7 +29,11 @@ fn h264_caps() -> Caps {
 }
 
 fn aac_caps() -> Caps {
-    Caps::Audio { format: AudioFormat::Aac, channels: 2, sample_rate: 48000 }
+    Caps::Audio {
+        format: AudioFormat::Aac,
+        channels: 2,
+        sample_rate: 48000,
+    }
 }
 
 #[derive(Default)]
@@ -57,7 +61,11 @@ impl OutputSink for CaptureSink {
 fn frame(data: Vec<u8>, pts_ns: u64) -> PipelinePacket {
     PipelinePacket::DataFrame(Frame::new(
         MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-        FrameTiming { pts_ns, dts_ns: pts_ns, ..FrameTiming::default() },
+        FrameTiming {
+            pts_ns,
+            dts_ns: pts_ns,
+            ..FrameTiming::default()
+        },
         0,
     ))
 }
@@ -90,7 +98,10 @@ fn adts_au(payload: &[u8]) -> Vec<u8> {
 }
 
 fn count(haystack: &[u8], needle: &[u8]) -> usize {
-    haystack.windows(needle.len()).filter(|w| *w == needle).count()
+    haystack
+        .windows(needle.len())
+        .filter(|w| *w == needle)
+        .count()
 }
 
 #[tokio::test]
@@ -105,13 +116,31 @@ async fn muxes_two_tracks_into_one_flv_stream() {
     let mut sink = CaptureSink::default();
 
     // Interleave: video at 0/33ms (IDR then a P slice), audio at 0/21/42ms.
-    mux.process(0, frame(annexb(&[&sps, &pps, &idr]), 0), &mut sink).await.unwrap();
-    mux.process(1, frame(adts_au(&[0x01, 0x02, 0x03]), 0), &mut sink).await.unwrap();
-    mux.process(1, frame(adts_au(&[0x04, 0x05]), 21_000_000), &mut sink).await.unwrap();
-    mux.process(0, frame(annexb(&[&[0x41u8, 0x9a, 0x00]]), 33_000_000), &mut sink).await.unwrap();
-    mux.process(1, frame(adts_au(&[0x06, 0x07]), 42_000_000), &mut sink).await.unwrap();
-    mux.process(0, PipelinePacket::Eos, &mut sink).await.unwrap();
-    mux.process(1, PipelinePacket::Eos, &mut sink).await.unwrap();
+    mux.process(0, frame(annexb(&[&sps, &pps, &idr]), 0), &mut sink)
+        .await
+        .unwrap();
+    mux.process(1, frame(adts_au(&[0x01, 0x02, 0x03]), 0), &mut sink)
+        .await
+        .unwrap();
+    mux.process(1, frame(adts_au(&[0x04, 0x05]), 21_000_000), &mut sink)
+        .await
+        .unwrap();
+    mux.process(
+        0,
+        frame(annexb(&[&[0x41u8, 0x9a, 0x00]]), 33_000_000),
+        &mut sink,
+    )
+    .await
+    .unwrap();
+    mux.process(1, frame(adts_au(&[0x06, 0x07]), 42_000_000), &mut sink)
+        .await
+        .unwrap();
+    mux.process(0, PipelinePacket::Eos, &mut sink)
+        .await
+        .unwrap();
+    mux.process(1, PipelinePacket::Eos, &mut sink)
+        .await
+        .unwrap();
 
     let out = &sink.bytes;
     // An FLV stream with both tracks present (flags bit0 video | bit2 audio).
@@ -119,7 +148,10 @@ async fn muxes_two_tracks_into_one_flv_stream() {
     assert_eq!(out[4], 0x05, "audio + video present flag");
     // The decoder-config sequence headers are written up front: a video config
     // tag body begins 0x17,0x00 and an audio config tag body 0xAF,0x00.
-    assert!(count(out, &[0x17, 0x00, 0x00, 0x00, 0x00]) >= 1, "AVC sequence header");
+    assert!(
+        count(out, &[0x17, 0x00, 0x00, 0x00, 0x00]) >= 1,
+        "AVC sequence header"
+    );
     assert!(count(out, &[0xAF, 0x00]) >= 1, "AAC sequence header");
     assert_eq!(mux.emitted(), 5, "five media frames muxed");
 
@@ -128,13 +160,26 @@ async fn muxes_two_tracks_into_one_flv_stream() {
     let mut d = FlvDemuxer::new();
     d.push_data(out);
     let units = d.take_units();
-    let video: Vec<_> = units.iter().filter(|u| u.track == FlvTrack::Video).collect();
-    let audio: Vec<_> = units.iter().filter(|u| u.track == FlvTrack::Audio).collect();
+    let video: Vec<_> = units
+        .iter()
+        .filter(|u| u.track == FlvTrack::Video)
+        .collect();
+    let audio: Vec<_> = units
+        .iter()
+        .filter(|u| u.track == FlvTrack::Audio)
+        .collect();
     assert_eq!(video.len(), 2, "two video media frames");
     assert_eq!(audio.len(), 3, "three audio media frames");
-    assert_eq!(audio[0].data, vec![0x01, 0x02, 0x03], "AAC payload, ADTS stripped");
+    assert_eq!(
+        audio[0].data,
+        vec![0x01, 0x02, 0x03],
+        "AAC payload, ADTS stripped"
+    );
     assert_eq!(audio[0].pts_ms, 0);
     assert_eq!(audio[1].pts_ms, 21);
     // The IDR video AU is AVCC length-prefixed, so it carries no Annex-B start code.
-    assert!(count(&video[0].data, &[0, 0, 0, 1]) == 0, "AVCC framing (no start codes)");
+    assert!(
+        count(&video[0].data, &[0, 0, 0, 1]) == 0,
+        "AVCC framing (no start codes)"
+    );
 }

@@ -33,7 +33,10 @@ fn registry_with_h264_stub() -> Registry {
     };
     reg.register(ElementFactory::new(
         "h264stub",
-        Vec::from([PadTemplate::sink(CapsSet::one(h264_any())), PadTemplate::source(CapsSet::one(raw))]),
+        Vec::from([
+            PadTemplate::sink(CapsSet::one(h264_any())),
+            PadTemplate::source(CapsSet::one(raw)),
+        ]),
         |_| Box::new(IdentityTransform::new()),
     ));
     reg
@@ -89,7 +92,10 @@ fn uri_source_not_at_head_fails_loud() {
     // uridecodebin provides the source, so it cannot sit mid-pipeline.
     let line = "videotestsrc num-buffers=1 ! uridecodebin uri=file:///clip.mp4 ! fakesink";
     let err = parse_launch(&reg, line).unwrap_err();
-    assert!(matches!(err, ParseError::UriSourceNotAtHead(_)), "got {err:?}");
+    assert!(
+        matches!(err, ParseError::UriSourceNotAtHead(_)),
+        "got {err:?}"
+    );
 }
 
 #[test]

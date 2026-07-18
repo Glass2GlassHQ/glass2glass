@@ -86,14 +86,13 @@ impl SegmentLoopSrc {
     /// Apply a seek: emit `Flush` (flushing) or accumulate (non-flushing), then
     /// the new `Segment`, repositioning playback. Anchors the running-time
     /// accumulation at the segment `stop` (playback is clipped there).
-    async fn apply_seek(
-        &mut self,
-        out: &mut dyn OutputSink,
-        seek: Seek,
-    ) -> Result<(), G2gError> {
+    async fn apply_seek(&mut self, out: &mut dyn OutputSink, seek: Seek) -> Result<(), G2gError> {
         // The running time reached is measured at the segment end, not the
         // overshot `position`, so the accumulating base is exact.
-        let anchor = self.segment.stop.map_or(self.position, |s| self.position.min(s));
+        let anchor = self
+            .segment
+            .stop
+            .map_or(self.position, |s| self.position.min(s));
         self.segment.position = anchor;
         let seg = if seek.is_flush() {
             out.push(PipelinePacket::Flush).await?;
@@ -160,7 +159,10 @@ impl SourceLoop for SegmentLoopSrc {
                     domain: MemoryDomain::System(SystemSlice::from_boxed(
                         vec![0u8; 4].into_boxed_slice(),
                     )),
-                    timing: FrameTiming { pts_ns: self.position, ..FrameTiming::default() },
+                    timing: FrameTiming {
+                        pts_ns: self.position,
+                        ..FrameTiming::default()
+                    },
                     sequence: self.sequence,
                     meta: Default::default(),
                 };
@@ -179,7 +181,7 @@ async fn segment_seek_loops_gaplessly_then_shuts_down() {
     let stop = 5_000u64;
     let step = 1_000u64;
     let n_loops = 3u64; // segment-dones before shutdown
-    // Frames per segment: pts 0, 1000, .., 5000 (stop inclusive) = 6.
+                        // Frames per segment: pts 0, 1000, .., 5000 (stop inclusive) = 6.
     let frames_per_segment = stop / step + 1;
 
     let seek_ctl = SeekController::new();
@@ -242,8 +244,16 @@ async fn segment_seek_loops_gaplessly_then_shuts_down() {
     // segment span (stop - start), so the last loop segment starts at
     // (n_loops-1) * stop and its first frame (pts 0) continues there.
     let last = sink.last_segment().expect("a loop segment was recorded");
-    assert_eq!(last.base, (n_loops - 1) * stop, "base accumulates one span per loop");
-    assert_eq!(last.to_running_time(0), Some((n_loops - 1) * stop), "gapless across the loop");
+    assert_eq!(
+        last.base,
+        (n_loops - 1) * stop,
+        "base accumulates one span per loop"
+    );
+    assert_eq!(
+        last.to_running_time(0),
+        Some((n_loops - 1) * stop),
+        "gapless across the loop"
+    );
 }
 
 /// A bounded SEGMENT seek with no app loop still terminates cleanly: the source

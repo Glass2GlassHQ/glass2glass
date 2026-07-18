@@ -50,7 +50,9 @@ impl<T> Inbox<T> {
 
     /// A sender handle for the JS callback. Cloning is a cheap `Rc` bump.
     pub(crate) fn sender(&self) -> InboxSender<T> {
-        InboxSender { state: self.state.clone() }
+        InboxSender {
+            state: self.state.clone(),
+        }
     }
 
     /// Await the next item: `Some` while items remain (even after close, so a
@@ -187,8 +189,16 @@ mod tests {
         let tx = inbox.sender();
         tx.push(1);
         tx.close();
-        assert_eq!(poll_once(&mut inbox.next()), Poll::Ready(Some(1)), "queued item drains first");
-        assert_eq!(poll_once(&mut inbox.next()), Poll::Ready(None), "then close yields None");
+        assert_eq!(
+            poll_once(&mut inbox.next()),
+            Poll::Ready(Some(1)),
+            "queued item drains first"
+        );
+        assert_eq!(
+            poll_once(&mut inbox.next()),
+            Poll::Ready(None),
+            "then close yields None"
+        );
     }
 
     #[test]

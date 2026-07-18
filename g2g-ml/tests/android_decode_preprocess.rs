@@ -14,9 +14,9 @@
 use g2g_core::element::{AsyncElement, BoxFuture, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
-use g2g_core::{Caps, ConfigureOutcome, Dim, G2gError, RawVideoFormat, Rate, VideoCodec};
-use g2g_plugins::mediacodecdec::MediaCodecDec;
+use g2g_core::{Caps, ConfigureOutcome, Dim, G2gError, Rate, RawVideoFormat, VideoCodec};
 use g2g_ml::wgpupreprocess::WgpuPreprocess;
+use g2g_plugins::mediacodecdec::MediaCodecDec;
 
 /// Start a binder threadpool so Codec2 can allocate the decoder's output graphic
 /// buffers (it calls back over binder). Same shim as the g2g-plugins tests; a
@@ -35,12 +35,18 @@ fn start_binder_threadpool() {
         if lib.is_null() {
             return;
         }
-        let set = dlsym(lib, b"ABinderProcess_setThreadPoolMaxThreadCount\0".as_ptr() as *const c_char);
+        let set = dlsym(
+            lib,
+            b"ABinderProcess_setThreadPoolMaxThreadCount\0".as_ptr() as *const c_char,
+        );
         if !set.is_null() {
             let set: extern "C" fn(u32) -> bool = core::mem::transmute(set);
             set(1);
         }
-        let start = dlsym(lib, b"ABinderProcess_startThreadPool\0".as_ptr() as *const c_char);
+        let start = dlsym(
+            lib,
+            b"ABinderProcess_startThreadPool\0".as_ptr() as *const c_char,
+        );
         if !start.is_null() {
             let start: extern "C" fn() = core::mem::transmute(start);
             start();
@@ -58,7 +64,10 @@ struct Collect {
 }
 
 impl OutputSink for Collect {
-    fn push<'a>(&'a mut self, packet: PipelinePacket) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
+    fn push<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+    ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
         Box::pin(async move {
             self.packets.push(packet);
             Ok(PushOutcome::Accepted)
@@ -75,14 +84,14 @@ fn access_units(s: &[u8]) -> Vec<&[u8]> {
     let mut nals: Vec<(usize, u8)> = Vec::new();
     let mut i = 0;
     while i + 3 <= s.len() {
-        let sc_len = if i + 4 <= s.len() && s[i] == 0 && s[i + 1] == 0 && s[i + 2] == 0 && s[i + 3] == 1
-        {
-            Some(4)
-        } else if s[i] == 0 && s[i + 1] == 0 && s[i + 2] == 1 {
-            Some(3)
-        } else {
-            None
-        };
+        let sc_len =
+            if i + 4 <= s.len() && s[i] == 0 && s[i + 1] == 0 && s[i + 2] == 0 && s[i + 3] == 1 {
+                Some(4)
+            } else if s[i] == 0 && s[i + 1] == 0 && s[i + 2] == 1 {
+                Some(3)
+            } else {
+                None
+            };
         match sc_len {
             Some(len) => {
                 let hdr = i + len;
@@ -135,7 +144,8 @@ async fn decode_gpu_to_preprocess_tensor() {
     };
     let narrowed = dec.intercept_caps(&upstream).expect("intercept caps");
     assert!(matches!(
-        dec.configure_pipeline(&narrowed).expect("configure decoder"),
+        dec.configure_pipeline(&narrowed)
+            .expect("configure decoder"),
         ConfigureOutcome::Accepted
     ));
 
@@ -144,10 +154,13 @@ async fn decode_gpu_to_preprocess_tensor() {
         g2g_core::CapsConstraint::DerivedOutput(derive) => {
             let derived = derive(&upstream);
             assert!(
-                derived
-                    .alternatives()
-                    .iter()
-                    .any(|c| matches!(c, Caps::RawVideo { format: RawVideoFormat::Rgba8, .. })),
+                derived.alternatives().iter().any(|c| matches!(
+                    c,
+                    Caps::RawVideo {
+                        format: RawVideoFormat::Rgba8,
+                        ..
+                    }
+                )),
                 "GPU-mode decoder must derive RGBA output, got {:?}",
                 derived.alternatives()
             );
@@ -160,14 +173,23 @@ async fn decode_gpu_to_preprocess_tensor() {
     for au in access_units(H264) {
         let frame = Frame {
             domain: MemoryDomain::System(SystemSlice::from_boxed(au.to_vec().into_boxed_slice())),
-            timing: FrameTiming { pts_ns, dts_ns: pts_ns, capture_ns: pts_ns, ..FrameTiming::default() },
+            timing: FrameTiming {
+                pts_ns,
+                dts_ns: pts_ns,
+                capture_ns: pts_ns,
+                ..FrameTiming::default()
+            },
             sequence: 0,
             meta: Default::default(),
         };
-        dec.process(PipelinePacket::DataFrame(frame), &mut dec_sink).await.expect("decode AU");
+        dec.process(PipelinePacket::DataFrame(frame), &mut dec_sink)
+            .await
+            .expect("decode AU");
         pts_ns += 33_366_700;
     }
-    dec.process(PipelinePacket::Eos, &mut dec_sink).await.expect("Eos drains the codec");
+    dec.process(PipelinePacket::Eos, &mut dec_sink)
+        .await
+        .expect("Eos drains the codec");
 
     // Configure WgpuPreprocess for RGBA input and feed it the decoded textures.
     let mut pre = WgpuPreprocess::new();
@@ -179,11 +201,13 @@ async fn decode_gpu_to_preprocess_tensor() {
     };
     // Negotiation (#3): WgpuPreprocess accepts RGBA input.
     assert_eq!(
-        pre.intercept_caps(&rgba_caps).expect("preprocess must negotiate RGBA"),
+        pre.intercept_caps(&rgba_caps)
+            .expect("preprocess must negotiate RGBA"),
         rgba_caps
     );
     assert!(matches!(
-        pre.configure_pipeline(&rgba_caps).expect("configure preprocess for RGBA"),
+        pre.configure_pipeline(&rgba_caps)
+            .expect("configure preprocess for RGBA"),
         ConfigureOutcome::Accepted
     ));
 
@@ -191,16 +215,26 @@ async fn decode_gpu_to_preprocess_tensor() {
         .packets
         .into_iter()
         .filter_map(|p| match p {
-            PipelinePacket::DataFrame(f) if matches!(f.domain, MemoryDomain::WgpuTexture(_)) => Some(f),
+            PipelinePacket::DataFrame(f) if matches!(f.domain, MemoryDomain::WgpuTexture(_)) => {
+                Some(f)
+            }
             _ => None,
         })
         .collect();
-    eprintln!("=== M304 decode->preprocess: {} GPU texture frame(s) ===", texture_frames.len());
-    assert!(!texture_frames.is_empty(), "decoder must emit WgpuTexture frames");
+    eprintln!(
+        "=== M304 decode->preprocess: {} GPU texture frame(s) ===",
+        texture_frames.len()
+    );
+    assert!(
+        !texture_frames.is_empty(),
+        "decoder must emit WgpuTexture frames"
+    );
 
     let mut pre_sink = Collect::default();
     let first = texture_frames.into_iter().next().unwrap();
-    pre.process(PipelinePacket::DataFrame(first), &mut pre_sink).await.expect("preprocess GPU texture");
+    pre.process(PipelinePacket::DataFrame(first), &mut pre_sink)
+        .await
+        .expect("preprocess GPU texture");
 
     // The preprocess output is an NCHW f32 tensor read back to system memory.
     let tensor_bytes = pre_sink.packets.iter().find_map(|p| match p {
@@ -212,7 +246,11 @@ async fn decode_gpu_to_preprocess_tensor() {
     });
     let tensor_bytes = tensor_bytes.expect("preprocess must emit a System tensor frame");
     let expected_floats = 3 * (w as usize) * (h as usize);
-    assert_eq!(tensor_bytes.len(), expected_floats * 4, "tensor byte length (NCHW f32)");
+    assert_eq!(
+        tensor_bytes.len(),
+        expected_floats * 4,
+        "tensor byte length (NCHW f32)"
+    );
 
     let floats: Vec<f32> = tensor_bytes
         .chunks_exact(4)
@@ -220,7 +258,10 @@ async fn decode_gpu_to_preprocess_tensor() {
         .collect();
     let (mut min, mut max, mut sum) = (f32::INFINITY, f32::NEG_INFINITY, 0.0f64);
     for &v in &floats {
-        assert!((0.0..=1.0).contains(&v), "normalized tensor value out of [0,1]: {v}");
+        assert!(
+            (0.0..=1.0).contains(&v),
+            "normalized tensor value out of [0,1]: {v}"
+        );
         min = min.min(v);
         max = max.max(v);
         sum += v as f64;
@@ -230,6 +271,9 @@ async fn decode_gpu_to_preprocess_tensor() {
         floats.len(),
         sum / floats.len() as f64
     );
-    assert!(max > min, "preprocessed tensor must vary (got a flat tensor)");
+    assert!(
+        max > min,
+        "preprocessed tensor must vary (got a flat tensor)"
+    );
     eprintln!(">>> M304 decode -> preprocess (GPU, no CPU frame copy) validated on device.");
 }

@@ -24,8 +24,8 @@ use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{run_graph, GraphNode, SourceLoop};
 use g2g_core::{
-    AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError,
-    Graph, MultiInputElement, OutputSink, PipelineClock, PushOutcome, Rate, VideoCodec,
+    AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
+    G2gError, Graph, MultiInputElement, OutputSink, PipelineClock, PushOutcome, Rate, VideoCodec,
 };
 use g2g_plugins::mkvdemux::{MkvDemuxN, MkvStream};
 use g2g_plugins::mkvmuxn::MkvMuxN;
@@ -52,9 +52,21 @@ impl core::fmt::Debug for PickyDecoder {
 }
 fn picky_accepts(accept_video: bool, c: &Caps) -> bool {
     if accept_video {
-        matches!(c, Caps::CompressedVideo { codec: VideoCodec::H264, .. })
+        matches!(
+            c,
+            Caps::CompressedVideo {
+                codec: VideoCodec::H264,
+                ..
+            }
+        )
     } else {
-        matches!(c, Caps::Audio { format: AudioFormat::Aac, .. })
+        matches!(
+            c,
+            Caps::Audio {
+                format: AudioFormat::Aac,
+                ..
+            }
+        )
     }
 }
 impl AsyncElement for PickyDecoder {
@@ -143,7 +155,9 @@ impl SourceLoop for BytesSrc {
     type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>;
     type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>;
     fn intercept_caps(&mut self) -> Self::CapsFuture<'_> {
-        core::future::ready(Ok(Caps::ByteStream { encoding: ByteStreamEncoding::Matroska }))
+        core::future::ready(Ok(Caps::ByteStream {
+            encoding: ByteStreamEncoding::Matroska,
+        }))
     }
     fn configure_pipeline(&mut self, _c: &Caps) -> Result<ConfigureOutcome, G2gError> {
         Ok(ConfigureOutcome::Accepted)
@@ -185,7 +199,11 @@ impl OutputSink for Collect {
 fn frame(data: Vec<u8>, pts_ns: u64) -> PipelinePacket {
     PipelinePacket::DataFrame(Frame::new(
         MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-        FrameTiming { pts_ns, dts_ns: pts_ns, ..FrameTiming::default() },
+        FrameTiming {
+            pts_ns,
+            dts_ns: pts_ns,
+            ..FrameTiming::default()
+        },
         0,
     ))
 }
@@ -216,15 +234,48 @@ async fn mux_av() -> Vec<u8> {
     let pps = [0x68u8, 0xce, 0x3c, 0x80];
     let idr = [0x65u8, 0x88, 0x84, 0x00];
     let mut mux = MkvMuxN::new(2);
-    mux.configure_pipeline(0, &Caps::CompressedVideo { codec: VideoCodec::H264, width: Dim::Fixed(320), height: Dim::Fixed(240), framerate: Rate::Fixed(30 << 16) }).unwrap();
-    mux.configure_pipeline(1, &Caps::Audio { format: AudioFormat::Aac, channels: 2, sample_rate: 48_000 }).unwrap();
+    mux.configure_pipeline(
+        0,
+        &Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            width: Dim::Fixed(320),
+            height: Dim::Fixed(240),
+            framerate: Rate::Fixed(30 << 16),
+        },
+    )
+    .unwrap();
+    mux.configure_pipeline(
+        1,
+        &Caps::Audio {
+            format: AudioFormat::Aac,
+            channels: 2,
+            sample_rate: 48_000,
+        },
+    )
+    .unwrap();
     let mut sink = Collect::default();
-    mux.process(0, frame(annexb(&[&sps, &pps, &idr]), 0), &mut sink).await.unwrap();
-    mux.process(1, frame(adts_au(&[0xA1, 0xA2, 0xA3]), 0), &mut sink).await.unwrap();
-    mux.process(0, frame(annexb(&[&[0x41u8, 0x9a, 0x00]]), 33_000_000), &mut sink).await.unwrap();
-    mux.process(1, frame(adts_au(&[0xB4, 0xB5]), 21_000_000), &mut sink).await.unwrap();
-    mux.process(0, PipelinePacket::Eos, &mut sink).await.unwrap();
-    mux.process(1, PipelinePacket::Eos, &mut sink).await.unwrap();
+    mux.process(0, frame(annexb(&[&sps, &pps, &idr]), 0), &mut sink)
+        .await
+        .unwrap();
+    mux.process(1, frame(adts_au(&[0xA1, 0xA2, 0xA3]), 0), &mut sink)
+        .await
+        .unwrap();
+    mux.process(
+        0,
+        frame(annexb(&[&[0x41u8, 0x9a, 0x00]]), 33_000_000),
+        &mut sink,
+    )
+    .await
+    .unwrap();
+    mux.process(1, frame(adts_au(&[0xB4, 0xB5]), 21_000_000), &mut sink)
+        .await
+        .unwrap();
+    mux.process(0, PipelinePacket::Eos, &mut sink)
+        .await
+        .unwrap();
+    mux.process(1, PipelinePacket::Eos, &mut sink)
+        .await
+        .unwrap();
     sink.bytes
 }
 
@@ -238,11 +289,24 @@ async fn picky_decoders_negotiate_through_demux_branches() {
 
     let mut g: Graph<GraphNode> = Graph::new();
     let src = g.add_source(GraphNode::source(BytesSrc { bytes: Some(file) }));
-    let demux = g.add_demux(GraphNode::demux(MkvDemuxN::new(vec![MkvStream::H264, MkvStream::Aac])), 2);
-    let dec_v = g.add_transform(GraphNode::element(PickyDecoder { accept_video: true, seen: seen_v.clone() }));
-    let dec_a = g.add_transform(GraphNode::element(PickyDecoder { accept_video: false, seen: seen_a.clone() }));
-    let s0 = g.add_sink(GraphNode::element(CountSink { frames: frames_v.clone() }));
-    let s1 = g.add_sink(GraphNode::element(CountSink { frames: frames_a.clone() }));
+    let demux = g.add_demux(
+        GraphNode::demux(MkvDemuxN::new(vec![MkvStream::H264, MkvStream::Aac])),
+        2,
+    );
+    let dec_v = g.add_transform(GraphNode::element(PickyDecoder {
+        accept_video: true,
+        seen: seen_v.clone(),
+    }));
+    let dec_a = g.add_transform(GraphNode::element(PickyDecoder {
+        accept_video: false,
+        seen: seen_a.clone(),
+    }));
+    let s0 = g.add_sink(GraphNode::element(CountSink {
+        frames: frames_v.clone(),
+    }));
+    let s1 = g.add_sink(GraphNode::element(CountSink {
+        frames: frames_a.clone(),
+    }));
     g.link(src, demux.input()).unwrap();
     g.link(demux.out(0), dec_v).unwrap();
     g.link(dec_v, s0).unwrap();
@@ -252,15 +316,54 @@ async fn picky_decoders_negotiate_through_demux_branches() {
     // The run only succeeds if each picky decoder negotiated against its port's
     // elementary caps (a broadcast tee would have handed it the byte stream, which
     // its intercept rejects -> CapsMismatch).
-    let stats = run_graph(g, &NullClock, 4).await.expect("per-branch decoder negotiation runs");
-    assert_eq!(stats.frames_consumed, 4, "all four access units decoded across the branches");
+    let stats = run_graph(g, &NullClock, 4)
+        .await
+        .expect("per-branch decoder negotiation runs");
+    assert_eq!(
+        stats.frames_consumed, 4,
+        "all four access units decoded across the branches"
+    );
 
     // Each decoder was configured with its elementary stream, not the byte stream.
-    let v = seen_v.lock().unwrap().clone().expect("video decoder configured");
-    assert!(matches!(v, Caps::CompressedVideo { codec: VideoCodec::H264, .. }), "video branch got H.264, got {v:?}");
-    let a = seen_a.lock().unwrap().clone().expect("audio decoder configured");
-    assert!(matches!(a, Caps::Audio { format: AudioFormat::Aac, .. }), "audio branch got AAC, got {a:?}");
+    let v = seen_v
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("video decoder configured");
+    assert!(
+        matches!(
+            v,
+            Caps::CompressedVideo {
+                codec: VideoCodec::H264,
+                ..
+            }
+        ),
+        "video branch got H.264, got {v:?}"
+    );
+    let a = seen_a
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("audio decoder configured");
+    assert!(
+        matches!(
+            a,
+            Caps::Audio {
+                format: AudioFormat::Aac,
+                ..
+            }
+        ),
+        "audio branch got AAC, got {a:?}"
+    );
 
-    assert_eq!(frames_v.load(Ordering::Relaxed), 2, "two decoded video frames");
-    assert_eq!(frames_a.load(Ordering::Relaxed), 2, "two decoded audio frames");
+    assert_eq!(
+        frames_v.load(Ordering::Relaxed),
+        2,
+        "two decoded video frames"
+    );
+    assert_eq!(
+        frames_a.load(Ordering::Relaxed),
+        2,
+        "two decoded audio frames"
+    );
 }

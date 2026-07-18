@@ -20,7 +20,9 @@ pub struct EmbassyClock {
 
 impl EmbassyClock {
     pub fn new() -> Self {
-        Self { epoch: Instant::now() }
+        Self {
+            epoch: Instant::now(),
+        }
     }
 }
 
@@ -34,7 +36,9 @@ impl PipelineClock for EmbassyClock {
     fn now_ns(&self) -> u64 {
         // embassy-time resolves to microseconds; sub-us precision is bounded by
         // the configured tick rate.
-        (Instant::now() - self.epoch).as_micros().saturating_mul(1000)
+        (Instant::now() - self.epoch)
+            .as_micros()
+            .saturating_mul(1000)
     }
 }
 

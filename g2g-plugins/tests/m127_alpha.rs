@@ -22,6 +22,11 @@ async fn alpha_runs_in_a_text_pipeline() {
         "videotestsrc num-buffers=3 pattern=smpte ! alpha method=green ! fakesink",
     )
     .expect("pipeline parses");
-    let stats = run_graph(graph, &ZeroClock, 4).await.expect("alpha pipeline runs");
-    assert_eq!(stats.frames_consumed, 3, "all keyed frames reached the sink");
+    let stats = run_graph(graph, &ZeroClock, 4)
+        .await
+        .expect("alpha pipeline runs");
+    assert_eq!(
+        stats.frames_consumed, 3,
+        "all keyed frames reached the sink"
+    );
 }

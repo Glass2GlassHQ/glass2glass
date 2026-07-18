@@ -23,7 +23,10 @@
 //! Both codecs run in ONE test function, sequentially: parallel Vulkan device
 //! creation SIGSEGVs (see m504 / m535 / m552). Runs on the RTX 3060; skips with no
 //! Vulkan decode support / no distinct compute queue / no 10-bit decode.
-#![cfg(all(any(target_os = "linux", target_os = "windows"), feature = "vulkan-video"))]
+#![cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    feature = "vulkan-video"
+))]
 
 use g2g_core::runtime::block_on;
 use g2g_plugins::vulkanvideo::{
@@ -61,7 +64,9 @@ fn half_to_f32(h: u16) -> f32 {
             ((sign as u32) << 31) | (((e + 127) as u32) << 23) | (m << 13)
         }
         0x1f => ((sign as u32) << 31) | (0xff << 23) | ((mant as u32) << 13),
-        _ => ((sign as u32) << 31) | (((exp as i32 - 15 + 127) as u32) << 23) | ((mant as u32) << 13),
+        _ => {
+            ((sign as u32) << 31) | (((exp as i32 - 15 + 127) as u32) << 23) | ((mant as u32) << 13)
+        }
     };
     f32::from_bits(bits)
 }
@@ -87,8 +92,11 @@ fn nv12_10bit_to_rgb(luma: &[u8], chroma: &[u8], color: VideoColorSpace) -> Vec<
     let (kr, kb) = luma_weights(color.matrix);
     let kg = 1.0 - kr - kb;
     // 10-bit studio: Y in 64..940 (219*4), C centred 512 spanning 896 (224*4).
-    let (y_off, y_span, c_off, c_span) =
-        if color.full_range { (0.0, 1023.0, 512.0, 1023.0) } else { (64.0, 876.0, 512.0, 896.0) };
+    let (y_off, y_span, c_off, c_span) = if color.full_range {
+        (0.0, 1023.0, 512.0, 1023.0)
+    } else {
+        (64.0, 876.0, 512.0, 896.0)
+    };
     let cr_r = 2.0 * (1.0 - kr);
     let cb_b = 2.0 * (1.0 - kb);
     let cr_g = 2.0 * kr * (1.0 - kr) / kg;
@@ -111,7 +119,11 @@ fn nv12_10bit_to_rgb(luma: &[u8], chroma: &[u8], color: VideoColorSpace) -> Vec<
 
 /// Decode an `Rgba16Float` readback (8 bytes/texel, 4 halfs) to per-pixel RGB.
 fn rgba16f_to_rgb(bytes: &[u8]) -> Vec<[f32; 3]> {
-    assert_eq!(bytes.len(), W * H * 8, "Rgba16Float readback is 8 bytes/pixel");
+    assert_eq!(
+        bytes.len(),
+        W * H * 8,
+        "Rgba16Float readback is 8 bytes/pixel"
+    );
     (0..W * H)
         .map(|p| {
             let o = p * 8;
@@ -145,7 +157,10 @@ fn open_or_skip(
 fn ten_bit_gpu_texture_hevc_and_av1() {
     // ---- HEVC Main 10: strict CPU-reference anchor (bit-exact system decode) ----
     let ps = extract_h265_parameter_sets(HEVC).expect("vps/sps/pps");
-    assert_eq!(ps.sps.bit_depth_luma_minus8, 2, "fixture is not 10-bit; feature untested");
+    assert_eq!(
+        ps.sps.bit_depth_luma_minus8, 2,
+        "fixture is not 10-bit; feature untested"
+    );
     // The exact colour space the converter resolves for this stream.
     let color = VideoColorSpace::from_cicp(
         ps.sps.matrix_coefficients,
@@ -159,19 +174,27 @@ fn ten_bit_gpu_texture_hevc_and_av1() {
     let cpu_rgb: Option<Vec<Vec<[f32; 3]>>> =
         open_or_skip(block_on(open_h265_decode_device()), "H.265").map(|device| {
             let std = to_std_h265_params(&ps);
-            let session = device.create_h265_session(&std, W as u32, H as u32).expect("session");
-            let mut cpu = device.create_h265_dpb_decoder(&session, &ps).expect("cpu decoder");
+            let session = device
+                .create_h265_session(&std, W as u32, H as u32)
+                .expect("session");
+            let mut cpu = device
+                .create_h265_dpb_decoder(&session, &ps)
+                .expect("cpu decoder");
             let frames = cpu.decode_all(HEVC).expect("cpu 10-bit decode");
-            frames.iter().map(|f| nv12_10bit_to_rgb(&f.luma, &f.chroma, color)).collect()
+            frames
+                .iter()
+                .map(|f| nv12_10bit_to_rgb(&f.luma, &f.chroma, color))
+                .collect()
         });
     let Some(cpu_rgb) = cpu_rgb else { return };
     assert!(!cpu_rgb.is_empty(), "no CPU reference frames");
 
     // GPU-texture path over a fresh device.
-    if let Some(device) = open_or_skip(block_on(open_h265_decode_device()), "H.265")
-    {
+    if let Some(device) = open_or_skip(block_on(open_h265_decode_device()), "H.265") {
         let std = to_std_h265_params(&ps);
-        let session = device.create_h265_session(&std, W as u32, H as u32).expect("session");
+        let session = device
+            .create_h265_session(&std, W as u32, H as u32)
+            .expect("session");
         let mut dec = match device.create_h265_dpb_decoder_gpu(&session, &ps) {
             Ok(d) => d,
             Err(VulkanVideoError::NoComputeQueue) => {
@@ -184,12 +207,22 @@ fn ten_bit_gpu_texture_hevc_and_av1() {
             }
             Err(e) => panic!("gpu decoder: {e:?}"),
         };
-        let texes = dec.decode_all_to_textures(HEVC).expect("10-bit HEVC -> textures");
-        assert_eq!(texes.len(), cpu_rgb.len(), "one GPU texture per coded picture");
+        let texes = dec
+            .decode_all_to_textures(HEVC)
+            .expect("10-bit HEVC -> textures");
+        assert_eq!(
+            texes.len(),
+            cpu_rgb.len(),
+            "one GPU texture per coded picture"
+        );
 
         let mut readbacks = Vec::new();
         for (i, t) in texes.iter().enumerate() {
-            assert_eq!(t.format(), wgpu::TextureFormat::Rgba16Float, "frame {i} not 10-bit RGBA16F");
+            assert_eq!(
+                t.format(),
+                wgpu::TextureFormat::Rgba16Float,
+                "frame {i} not 10-bit RGBA16F"
+            );
             assert_eq!((t.width(), t.height()), (W as u32, H as u32));
             let rgb = rgba16f_to_rgb(&device.read_rgba_texture(t));
             // Real content: luma spans a range (a failed decode is flat).
@@ -199,7 +232,10 @@ fn ten_bit_gpu_texture_hevc_and_av1() {
                 lo = lo.min(l);
                 hi = hi.max(l);
             }
-            assert!(hi - lo > 0.25, "frame {i} nearly uniform ({lo:.3}..={hi:.3}); decode failed");
+            assert!(
+                hi - lo > 0.25,
+                "frame {i} nearly uniform ({lo:.3}..={hi:.3}); decode failed"
+            );
             readbacks.push(rgb);
         }
 
@@ -227,7 +263,10 @@ fn ten_bit_gpu_texture_hevc_and_av1() {
         // Inter frames differ from their GOP's IRAP (the 10-bit GPU DPB reference
         // decode ran). The fixture is a short closed-GOP clip starting on an IRAP.
         for p in 1..readbacks.len() {
-            assert_ne!(readbacks[p], readbacks[0], "HEVC texture {p} identical to frame 0");
+            assert_ne!(
+                readbacks[p], readbacks[0],
+                "HEVC texture {p} identical to frame 0"
+            );
         }
         eprintln!(
             "m573 HEVC Main 10: {} GPU Rgba16Float textures match CPU reference (worst frame mean {worst_mean:.4})",
@@ -237,10 +276,15 @@ fn ten_bit_gpu_texture_hevc_and_av1() {
 
     // ---- AV1 10-bit: loose anchor (driver AV1 decode is nondeterministic) ----
     let seq = extract_av1_sequence_header(AV1).expect("sequence header");
-    assert_eq!(seq.color.bit_depth, 10, "fixture is not 10-bit; feature untested");
+    assert_eq!(
+        seq.color.bit_depth, 10,
+        "fixture is not 10-bit; feature untested"
+    );
     if let Some(device) = open_or_skip(block_on(open_av1_decode_device()), "AV1") {
         let std = to_std_av1_seq_header(&seq);
-        let session = device.create_av1_session(&std, W as u32, H as u32).expect("session");
+        let session = device
+            .create_av1_session(&std, W as u32, H as u32)
+            .expect("session");
         let mut dec = match device.create_av1_dpb_decoder_gpu(&session, &seq) {
             Ok(d) => d,
             Err(VulkanVideoError::NoComputeQueue) => {
@@ -253,11 +297,17 @@ fn ten_bit_gpu_texture_hevc_and_av1() {
             }
             Err(e) => panic!("gpu AV1 decoder: {e:?}"),
         };
-        let texes = dec.decode_all_to_textures(AV1).expect("10-bit AV1 -> textures");
+        let texes = dec
+            .decode_all_to_textures(AV1)
+            .expect("10-bit AV1 -> textures");
         assert!(!texes.is_empty(), "no AV1 textures");
         let mut readbacks = Vec::new();
         for (i, t) in texes.iter().enumerate() {
-            assert_eq!(t.format(), wgpu::TextureFormat::Rgba16Float, "AV1 frame {i} not RGBA16F");
+            assert_eq!(
+                t.format(),
+                wgpu::TextureFormat::Rgba16Float,
+                "AV1 frame {i} not RGBA16F"
+            );
             assert_eq!((t.width(), t.height()), (W as u32, H as u32));
             let rgb = rgba16f_to_rgb(&device.read_rgba_texture(t));
             let (mut lo, mut hi) = (f32::MAX, f32::MIN);
@@ -266,12 +316,21 @@ fn ten_bit_gpu_texture_hevc_and_av1() {
                 lo = lo.min(l);
                 hi = hi.max(l);
             }
-            assert!(hi - lo > 0.25, "AV1 frame {i} nearly uniform; decode failed");
+            assert!(
+                hi - lo > 0.25,
+                "AV1 frame {i} nearly uniform; decode failed"
+            );
             readbacks.push(rgb);
         }
         for p in 1..readbacks.len() {
-            assert_ne!(readbacks[p], readbacks[0], "AV1 texture {p} identical to the keyframe");
+            assert_ne!(
+                readbacks[p], readbacks[0],
+                "AV1 texture {p} identical to the keyframe"
+            );
         }
-        eprintln!("m573 AV1 10-bit: {} GPU Rgba16Float textures, real content", readbacks.len());
+        eprintln!(
+            "m573 AV1 10-bit: {} GPU Rgba16Float textures, real content",
+            readbacks.len()
+        );
     }
 }

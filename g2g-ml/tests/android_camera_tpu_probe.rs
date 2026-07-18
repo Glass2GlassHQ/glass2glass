@@ -51,12 +51,18 @@ fn start_binder_threadpool() {
         if lib.is_null() {
             return;
         }
-        let set = dlsym(lib, b"ABinderProcess_setThreadPoolMaxThreadCount\0".as_ptr() as *const c_char);
+        let set = dlsym(
+            lib,
+            b"ABinderProcess_setThreadPoolMaxThreadCount\0".as_ptr() as *const c_char,
+        );
         if !set.is_null() {
             let set: extern "C" fn(u32) -> bool = core::mem::transmute(set);
             set(1);
         }
-        let start = dlsym(lib, b"ABinderProcess_startThreadPool\0".as_ptr() as *const c_char);
+        let start = dlsym(
+            lib,
+            b"ABinderProcess_startThreadPool\0".as_ptr() as *const c_char,
+        );
         if !start.is_null() {
             let start: extern "C" fn() = core::mem::transmute(start);
             start();
@@ -71,7 +77,10 @@ struct FrameGrab {
     count: u64,
 }
 impl OutputSink for FrameGrab {
-    fn push<'a>(&'a mut self, packet: PipelinePacket) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
+    fn push<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+    ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
         Box::pin(async move {
             if let PipelinePacket::DataFrame(f) = packet {
                 if let MemoryDomain::System(s) = &f.domain {
@@ -92,7 +101,10 @@ struct OneFrame {
     bytes: Option<Vec<u8>>,
 }
 impl OutputSink for OneFrame {
-    fn push<'a>(&'a mut self, packet: PipelinePacket) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
+    fn push<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+    ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
         Box::pin(async move {
             if let PipelinePacket::DataFrame(f) = packet {
                 if self.bytes.is_none() {
@@ -117,7 +129,11 @@ fn f32_frame(values: &[f32]) -> Frame {
 }
 
 fn tensor_caps(dtype: TensorDType) -> Caps {
-    Caps::Tensor { dtype, shape: TensorShape::new([1, 3, MODEL_HW as u32, MODEL_HW as u32]), layout: TensorLayout::Nchw }
+    Caps::Tensor {
+        dtype,
+        shape: TensorShape::new([1, 3, MODEL_HW as u32, MODEL_HW as u32]),
+        layout: TensorLayout::Nchw,
+    }
 }
 
 /// Downsample an NV12 frame's Y (luminance) plane to a `[1,3,4,4]` f32 tensor in
@@ -175,7 +191,9 @@ async fn live_camera_quantize_to_edge_tpu() {
     let (nv12, live) = match capture_one().await {
         Some(f) if f.len() >= (CAM_W * CAM_H) as usize => (f, true),
         _ => {
-            let synth: Vec<u8> = (0..(CAM_W * CAM_H * 3 / 2)).map(|i| (i % 256) as u8).collect();
+            let synth: Vec<u8> = (0..(CAM_W * CAM_H * 3 / 2))
+                .map(|i| (i % 256) as u8)
+                .collect();
             (synth, false)
         }
     };
@@ -185,20 +203,27 @@ async fn live_camera_quantize_to_edge_tpu() {
 
     // 3. TensorConvert: quantize f32 -> uint8 with the model's input affine.
     let mut quant = TensorConvert::quantize(TensorDType::U8, IN_SCALE, IN_ZERO_POINT);
-    quant.configure_pipeline(&tensor_caps(TensorDType::F32)).expect("quantize configure");
+    quant
+        .configure_pipeline(&tensor_caps(TensorDType::F32))
+        .expect("quantize configure");
     let mut quant_out = OneFrame::default();
     quant
         .process(PipelinePacket::DataFrame(f32_frame(&chw)), &mut quant_out)
         .await
         .expect("quantize runs");
     let u8_tensor = quant_out.bytes.expect("quantized uint8 tensor");
-    assert_eq!(u8_tensor.len(), 3 * MODEL_HW * MODEL_HW, "one byte per element");
+    assert_eq!(
+        u8_tensor.len(),
+        3 * MODEL_HW * MODEL_HW,
+        "one byte per element"
+    );
 
     // 4. OrtInference on the uint8 model (the M442 100%-on-TPU path).
     let mut inf = OrtInference::from_memory_for_android(QCONV_U8IN)
         .expect("uint8 model loads")
         .with_tensor_input();
-    inf.configure_pipeline(&tensor_caps(TensorDType::U8)).expect("inference configure");
+    inf.configure_pipeline(&tensor_caps(TensorDType::U8))
+        .expect("inference configure");
     let mut inf_out = OneFrame::default();
     inf.process(
         PipelinePacket::DataFrame(Frame {
@@ -213,10 +238,20 @@ async fn live_camera_quantize_to_edge_tpu() {
     .expect("inference runs on-device");
 
     let out_bytes = inf_out.bytes.expect("inference output tensor");
-    let out: Vec<f32> = out_bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+    let out: Vec<f32> = out_bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
     assert_eq!(out.len(), 64, "conv output [1,4,4,4]");
-    assert!(out.iter().all(|v| v.is_finite() && *v >= 0.0), "ReLU output finite + non-negative");
+    assert!(
+        out.iter().all(|v| v.is_finite() && *v >= 0.0),
+        "ReLU output finite + non-negative"
+    );
 
-    let src = if live { "LIVE CAMERA" } else { "synthetic (camera denied)" };
+    let src = if live {
+        "LIVE CAMERA"
+    } else {
+        "synthetic (camera denied)"
+    };
     eprintln!(">> {src} frame -> TensorConvert(quantize) -> OrtInference(uint8) -> output [1,4,4,4] on the Edge TPU");
 }

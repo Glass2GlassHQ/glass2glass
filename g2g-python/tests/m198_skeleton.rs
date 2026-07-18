@@ -96,10 +96,17 @@ fn configure_accepts_fixed_caps() {
 fn properties_round_trip() {
     let mut el = PyTransform::new("action", "ActionTransform").with_draw_label(true);
     assert_eq!(el.get_property("draw-label"), Some(PropValue::Bool(true)));
-    assert_eq!(el.get_property("module"), Some(PropValue::Str("action".into())));
+    assert_eq!(
+        el.get_property("module"),
+        Some(PropValue::Str("action".into()))
+    );
 
-    el.set_property("class", PropValue::Str("OtherTransform".into())).unwrap();
-    assert_eq!(el.get_property("class"), Some(PropValue::Str("OtherTransform".into())));
+    el.set_property("class", PropValue::Str("OtherTransform".into()))
+        .unwrap();
+    assert_eq!(
+        el.get_property("class"),
+        Some(PropValue::Str("OtherTransform".into()))
+    );
 
     assert!(el.set_property("nope", PropValue::Bool(true)).is_err());
 }
@@ -108,7 +115,9 @@ fn properties_round_trip() {
 fn process_before_configure_is_rejected() {
     let mut el = PyTransform::new("action", "ActionTransform");
     let mut sink = CollectSink::default();
-    let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
     let res = rt.block_on(el.process(PipelinePacket::Eos, &mut sink));
     assert_eq!(res, Err(G2gError::NotConfigured));
 }
@@ -119,8 +128,11 @@ fn eos_after_configure_drains_to_nothing() {
     let mut el = PyTransform::new("action", "ActionTransform");
     el.configure_pipeline(&rgba(320, 240, 15)).unwrap();
     let mut sink = CollectSink::default();
-    let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
-    rt.block_on(el.process(PipelinePacket::Eos, &mut sink)).unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    rt.block_on(el.process(PipelinePacket::Eos, &mut sink))
+        .unwrap();
     // Stateless host: EOS buffers nothing, so nothing is pushed.
     assert!(sink.packets.is_empty());
 }

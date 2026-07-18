@@ -75,9 +75,14 @@ async fn flattened_bin_runs_source_to_sink() {
     g.link(src, inst.input(0)).unwrap();
     g.link(inst.output(0), sink).unwrap();
 
-    let stats = run_graph(g, &NullClock, 4).await.expect("flattened bin runs");
+    let stats = run_graph(g, &NullClock, 4)
+        .await
+        .expect("flattened bin runs");
     assert_eq!(stats.frames_emitted, 4, "source emitted 4 frames");
-    assert_eq!(stats.frames_consumed, 4, "all 4 flowed through the bin's interior to the sink");
+    assert_eq!(
+        stats.frames_consumed, 4,
+        "all 4 flowed through the bin's interior to the sink"
+    );
 }
 
 #[tokio::test]
@@ -102,7 +107,12 @@ async fn bin_with_ghosted_tee_fans_out_after_flattening() {
     g.link(inst.output(0), a).unwrap();
     g.link(inst.output(1), b).unwrap();
 
-    let stats = run_graph(g, &NullClock, 4).await.expect("ghosted-tee bin runs");
+    let stats = run_graph(g, &NullClock, 4)
+        .await
+        .expect("ghosted-tee bin runs");
     assert_eq!(stats.frames_emitted, 3, "source emitted 3 frames");
-    assert_eq!(stats.frames_consumed, 6, "the ghosted tee broadcast each frame to both sinks");
+    assert_eq!(
+        stats.frames_consumed, 6,
+        "the ghosted tee broadcast each frame to both sinks"
+    );
 }

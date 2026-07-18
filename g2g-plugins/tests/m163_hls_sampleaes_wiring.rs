@@ -107,12 +107,18 @@ async fn publishes_key_and_forwards_sample_aes_segment_undecrypted() {
 
     let handle = new_key_handle();
     let mut src = HlsSrc::new(url).with_sample_aes_key_handle(handle.clone());
-    src.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs }).unwrap();
+    src.configure_pipeline(&Caps::ByteStream {
+        encoding: ByteStreamEncoding::MpegTs,
+    })
+    .unwrap();
     let mut sink = CaptureSink::default();
     src.run(&mut sink).await.unwrap();
 
     assert!(sink.eos);
-    assert_eq!(sink.body, segment, "SAMPLE-AES bytes forwarded undecrypted to the demuxer");
+    assert_eq!(
+        sink.body, segment,
+        "SAMPLE-AES bytes forwarded undecrypted to the demuxer"
+    );
     assert_eq!(
         *handle.lock().unwrap(),
         Some(SampleAesKey { key: KEY, iv: IV }),
@@ -124,7 +130,10 @@ async fn publishes_key_and_forwards_sample_aes_segment_undecrypted() {
 async fn sample_aes_without_a_handle_is_rejected() {
     let url = serve((0..100u32).map(|i| i as u8).collect());
     let mut src = HlsSrc::new(url);
-    src.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs }).unwrap();
+    src.configure_pipeline(&Caps::ByteStream {
+        encoding: ByteStreamEncoding::MpegTs,
+    })
+    .unwrap();
     let mut sink = CaptureSink::default();
     assert_eq!(src.run(&mut sink).await, Err(G2gError::CapsMismatch));
 }

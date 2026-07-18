@@ -29,7 +29,10 @@
 //! the CRA kept the references its RASL followers reference.
 //!
 //! Runs on the RTX 3060; skips with no adapter / no decode support.
-#![cfg(all(any(target_os = "linux", target_os = "windows"), feature = "vulkan-video"))]
+#![cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    feature = "vulkan-video"
+))]
 
 use g2g_core::runtime::block_on;
 use g2g_plugins::vulkanvideo::{
@@ -54,9 +57,9 @@ fn count_nal_types(stream: &[u8]) -> (usize, usize, usize) {
             let hdr = if sc4 { i + 4 } else { i + 3 };
             if hdr < stream.len() {
                 match (stream[hdr] >> 1) & 0x3f {
-                    21 => cra += 1,        // CRA_NUT
-                    8 | 9 => rasl += 1,    // RASL_N / RASL_R
-                    19 | 20 => idr += 1,   // IDR_W_RADL / IDR_N_LP
+                    21 => cra += 1,      // CRA_NUT
+                    8 | 9 => rasl += 1,  // RASL_N / RASL_R
+                    19 | 20 => idr += 1, // IDR_W_RADL / IDR_N_LP
                     _ => {}
                 }
             }
@@ -81,8 +84,12 @@ fn assert_bit_exact(frames: &[Nv12Frame], ref_path: &str) {
         let ry = &ref_yuv[base..base + W * H];
         let ru = &ref_yuv[base + W * H..base + W * H + cw * ch];
         let rv = &ref_yuv[base + W * H + cw * ch..base + fb];
-        let ysad: u64 =
-            f.luma.iter().zip(ry).map(|(&a, &b)| (a as i32 - b as i32).unsigned_abs() as u64).sum();
+        let ysad: u64 = f
+            .luma
+            .iter()
+            .zip(ry)
+            .map(|(&a, &b)| (a as i32 - b as i32).unsigned_abs() as u64)
+            .sum();
         let mut usad = 0u64;
         let mut vsad = 0u64;
         for k in 0..cw * ch {
@@ -95,7 +102,10 @@ fn assert_bit_exact(frames: &[Nv12Frame], ref_path: &str) {
             usad as f64 / (cw * ch) as f64,
             vsad as f64 / (cw * ch) as f64
         );
-        assert_eq!(ysad, 0, "frame {i} luma not bit-exact (open-GOP RASL decode or ordering wrong)");
+        assert_eq!(
+            ysad, 0,
+            "frame {i} luma not bit-exact (open-GOP RASL decode or ordering wrong)"
+        );
         assert_eq!(usad, 0, "frame {i} Cb not bit-exact");
         assert_eq!(vsad, 0, "frame {i} Cr not bit-exact");
     }
@@ -108,7 +118,10 @@ fn h265_opengop_cra_rasl_decodes_correctly() {
     let (idr, cra, rasl) = count_nal_types(CLIP);
     assert_eq!(idr, 1, "fixture should have exactly one leading IDR");
     assert!(cra >= 1, "fixture has no CRA (not open-GOP)");
-    assert!(rasl >= 1, "fixture has no RASL leading pictures (open-GOP retention untested)");
+    assert!(
+        rasl >= 1,
+        "fixture has no RASL leading pictures (open-GOP retention untested)"
+    );
 
     let device = match block_on(open_h265_decode_device()) {
         Ok(d) => d,
@@ -122,14 +135,21 @@ fn h265_opengop_cra_rasl_decodes_correctly() {
     };
     let ps = extract_h265_parameter_sets(CLIP).expect("vps/sps/pps");
     let std = to_std_h265_params(&ps);
-    let session = device.create_h265_session(&std, W as u32, H as u32).expect("session");
-    let mut dec = device.create_h265_dpb_decoder(&session, &ps).expect("decoder");
+    let session = device
+        .create_h265_session(&std, W as u32, H as u32)
+        .expect("session");
+    let mut dec = device
+        .create_h265_dpb_decoder(&session, &ps)
+        .expect("decoder");
 
     // POC is monotonic across the mid-stream CRAs (single coded video sequence),
     // but the RASL leading pictures make it non-monotonic in decode order.
     let metas = dec.index_pictures(CLIP).expect("index");
     let pocs: Vec<i32> = metas.iter().map(|m| m.poc).collect();
-    assert!(pocs.windows(2).any(|w| w[1] < w[0]), "no reorder in fixture (RASL leading pics absent)");
+    assert!(
+        pocs.windows(2).any(|w| w[1] < w[0]),
+        "no reorder in fixture (RASL leading pics absent)"
+    );
 
     let frames = dec.decode_all(CLIP).expect("decode");
     assert_eq!(frames.len(), metas.len(), "one frame per coded picture");
@@ -142,11 +162,17 @@ fn h265_opengop_cra_rasl_decodes_correctly() {
         assert_eq!((f.width, f.height), (W as u32, H as u32));
         let min = *f.luma.iter().min().unwrap();
         let max = *f.luma.iter().max().unwrap();
-        assert!(max > min, "display frame {i} luma uniform ({min}=={max}); decode failed");
+        assert!(
+            max > min,
+            "display frame {i} luma uniform ({min}=={max}); decode failed"
+        );
     }
 
     if let Ok(p) = std::env::var("G2G_H265_OPENGOP_REF") {
         assert_bit_exact(&frames, &p);
-        eprintln!("m577: {} open-GOP frames bit-exact in display order", frames.len());
+        eprintln!(
+            "m577: {} open-GOP frames bit-exact in display order",
+            frames.len()
+        );
     }
 }

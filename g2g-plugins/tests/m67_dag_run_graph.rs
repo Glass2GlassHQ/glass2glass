@@ -47,7 +47,10 @@ async fn tee_fans_out_to_two_sinks() {
 
     let stats = run_graph(g, &NullClock, 4).await.expect("tee diamond runs");
     assert_eq!(stats.frames_emitted, 4, "source emitted 4 frames");
-    assert_eq!(stats.frames_consumed, 8, "each of the 2 sinks consumed all 4");
+    assert_eq!(
+        stats.frames_consumed, 8,
+        "each of the 2 sinks consumed all 4"
+    );
 }
 
 #[tokio::test]
@@ -67,9 +70,14 @@ async fn tee_branches_run_independent_transforms() {
     g.link(flip, s0).unwrap();
     g.link(crop, s1).unwrap();
 
-    let stats = run_graph(g, &NullClock, 4).await.expect("tee + per-branch transforms run");
+    let stats = run_graph(g, &NullClock, 4)
+        .await
+        .expect("tee + per-branch transforms run");
     assert_eq!(stats.frames_emitted, 4);
-    assert_eq!(stats.frames_consumed, 8, "both branches delivered all 4 frames");
+    assert_eq!(
+        stats.frames_consumed, 8,
+        "both branches delivered all 4 frames"
+    );
 }
 
 #[tokio::test]
@@ -90,5 +98,9 @@ async fn incompatible_branch_fails_negotiation() {
     g.link(filter, sink).unwrap();
 
     let result = run_graph(g, &NullClock, 4).await;
-    assert_eq!(result.err(), Some(G2gError::CapsMismatch), "RGBA into NV12 filter must fail");
+    assert_eq!(
+        result.err(),
+        Some(G2gError::CapsMismatch),
+        "RGBA into NV12 filter must fail"
+    );
 }

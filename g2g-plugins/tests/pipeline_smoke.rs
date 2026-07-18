@@ -1,7 +1,7 @@
 use g2g_core::runtime::{run_simple_pipeline, run_source_transform_sink};
 use g2g_core::{
     AsyncElement, Caps, ConfigureOutcome, G2gError, OutputSink, PipelineClock, PipelinePacket,
-    VideoCodec, RawVideoFormat,
+    RawVideoFormat, VideoCodec,
 };
 use g2g_plugins::capsfilter::CapsFilter;
 use g2g_plugins::fakesink::FakeSink;
@@ -144,26 +144,24 @@ async fn h264parse_identity_negotiates_in_mixed_chain() {
     }
     impl SourceLoop for H264EosSource {
         type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>;
-        type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+        type CapsFuture<'a>
+            = core::future::Ready<Result<Caps, G2gError>>
         where
             Self: 'a;
 
         fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
             core::future::ready(Ok(Caps::CompressedVideo {
-    codec: VideoCodec::H264,
-    width: Dim::Fixed(1280),
-    height: Dim::Fixed(720),
-    framerate: Rate::Fixed(30 << 16),
-}))
+                codec: VideoCodec::H264,
+                width: Dim::Fixed(1280),
+                height: Dim::Fixed(720),
+                framerate: Rate::Fixed(30 << 16),
+            }))
         }
         fn configure_pipeline(&mut self, _: &Caps) -> Result<ConfigureOutcome, G2gError> {
             self.configured = true;
             Ok(ConfigureOutcome::Accepted)
         }
-        fn run<'a>(
-            &'a mut self,
-            out: &'a mut dyn OutputSink,
-        ) -> Self::RunFuture<'a> {
+        fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
             Box::pin(async move {
                 out.push(PipelinePacket::Eos).await?;
                 Ok(0)
@@ -232,7 +230,12 @@ async fn format_changing_transform_receives_input_side_caps() {
         fn propose_output_caps(&self, input: &Caps) -> Caps {
             // Swap format: Rgba8 → Nv12, dims preserved.
             match input {
-                Caps::RawVideo { width, height, framerate, .. } => Caps::RawVideo {
+                Caps::RawVideo {
+                    width,
+                    height,
+                    framerate,
+                    ..
+                } => Caps::RawVideo {
                     format: RawVideoFormat::Nv12,
                     width: width.clone(),
                     height: height.clone(),
@@ -248,7 +251,9 @@ async fn format_changing_transform_receives_input_side_caps() {
     }
 
     let mut src = VideoTestSrc::new(32, 32, 30, 5);
-    let mut tx = FormatBoundary { configured_with: Cell::new(None) };
+    let mut tx = FormatBoundary {
+        configured_with: Cell::new(None),
+    };
     let mut snk = FakeSink::new();
     let clock = ZeroClock;
 
@@ -318,5 +323,9 @@ async fn capsfilter_rejects_incompatible_format() {
         result.is_err(),
         "CapsFilter disjoint from the source format must fail negotiation"
     );
-    assert_eq!(filter.forwarded(), 0, "no frames should reach a rejected filter");
+    assert_eq!(
+        filter.forwarded(),
+        0,
+        "no frames should reach a rejected filter"
+    );
 }

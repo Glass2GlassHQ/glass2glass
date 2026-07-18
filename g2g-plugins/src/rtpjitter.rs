@@ -38,7 +38,10 @@ impl JitterConfig {
     /// A modest live default: hold a gap up to `ms` milliseconds, cap at `depth`
     /// buffered packets.
     pub fn new(ms: u64, depth: usize) -> Self {
-        Self { max_hold_ns: ms * 1_000_000, max_depth: depth }
+        Self {
+            max_hold_ns: ms * 1_000_000,
+            max_depth: depth,
+        }
     }
 }
 
@@ -176,7 +179,13 @@ impl RtpJitterBuffer {
             self.stats.reordered += 1;
         }
         self.stats.received += 1;
-        self.packets.insert(ext, Buffered { data: packet.to_vec(), arrival_ns: now_ns });
+        self.packets.insert(
+            ext,
+            Buffered {
+                data: packet.to_vec(),
+                arrival_ns: now_ns,
+            },
+        );
     }
 
     /// Release the next in-order packet if one is ready: either the next
@@ -211,7 +220,9 @@ impl RtpJitterBuffer {
     pub fn missing_seqs(&self) -> Vec<u16> {
         let mut out = Vec::new();
         let Some(next) = self.next else { return out };
-        let Some((&last, _)) = self.packets.iter().next_back() else { return out };
+        let Some((&last, _)) = self.packets.iter().next_back() else {
+            return out;
+        };
         // Bound the scan to a NACK window: a single far-ahead packet must not
         // make us walk (and reflect) a billion-entry gap. We buffer at most
         // max_depth packets, so holes past that window are lost, not NACKed.
@@ -298,7 +309,11 @@ mod tests {
         // waits; after 50 ms it gives up on 1 and releases 2.
         jb.push(&pkt(2, 2), 0);
         assert!(jb.pop(0).is_none(), "holds for the missing predecessor");
-        assert_eq!(jb.pop(60_000_000).map(|p| tag(&p)), Some(2), "skips the gap once overdue");
+        assert_eq!(
+            jb.pop(60_000_000).map(|p| tag(&p)),
+            Some(2),
+            "skips the gap once overdue"
+        );
         assert_eq!(jb.stats().lost, 1, "sequence 1 declared lost");
     }
 
@@ -312,7 +327,11 @@ mod tests {
         jb.push(&pkt(2, 2), 0);
         jb.push(&pkt(3, 3), 0);
         // Buffer is at depth; release proceeds even though max_hold is huge.
-        assert_eq!(jb.pop(0).map(|p| tag(&p)), Some(2), "depth cap forces release");
+        assert_eq!(
+            jb.pop(0).map(|p| tag(&p)),
+            Some(2),
+            "depth cap forces release"
+        );
         assert_eq!(jb.stats().lost, 1);
     }
 
@@ -340,7 +359,11 @@ mod tests {
         while let Some(p) = jb.pop(0) {
             out.push(tag(&p));
         }
-        assert_eq!(out, alloc::vec![10, 11, 12, 13], "monotonic across the u16 wrap");
+        assert_eq!(
+            out,
+            alloc::vec![10, 11, 12, 13],
+            "monotonic across the u16 wrap"
+        );
         assert_eq!(jb.stats().lost, 0);
     }
 
@@ -351,7 +374,11 @@ mod tests {
         for s in [0u16, 2, 4] {
             jb.push(&pkt(s, s as u8), 0);
         }
-        assert_eq!(jb.pop(0).map(|p| tag(&p)), Some(0), "release the contiguous head");
+        assert_eq!(
+            jb.pop(0).map(|p| tag(&p)),
+            Some(0),
+            "release the contiguous head"
+        );
         // Now next=1; holes before the highest buffered (4) are 1 and 3.
         assert_eq!(jb.missing_seqs(), alloc::vec![1, 3]);
     }
@@ -361,8 +388,8 @@ mod tests {
         let mut jb = RtpJitterBuffer::new(JitterConfig::new(50, 64));
         jb.push(&pkt(0, 0), 0);
         assert_eq!(jb.pop(0).map(|p| tag(&p)), Some(0)); // next = 1
-        // A single far-ahead packet must not make the NACK list span the whole
-        // gap; it is bounded by the depth window.
+                                                         // A single far-ahead packet must not make the NACK list span the whole
+                                                         // gap; it is bounded by the depth window.
         jb.push(&pkt(5000, 1), 0);
         let missing = jb.missing_seqs();
         assert_eq!(missing.len(), 64, "bounded to the depth window, not ~5000");
@@ -377,6 +404,10 @@ mod tests {
         jb.push(&pkt(0, 0), 0);
         assert_eq!(jb.pop(0).map(|p| tag(&p)), Some(0));
         jb.push(&pkt(2, 2), 0);
-        assert_eq!(jb.pop(0).map(|p| tag(&p)), Some(2), "no holding without depth");
+        assert_eq!(
+            jb.pop(0).map(|p| tag(&p)),
+            Some(2),
+            "no holding without depth"
+        );
     }
 }

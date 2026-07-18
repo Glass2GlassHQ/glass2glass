@@ -56,7 +56,14 @@ fn caps() -> Caps {
 /// Deterministic per-frame pattern (depends on the sequence so a mis-ordered or
 /// mis-mapped frame is caught).
 fn pattern(seq: u64) -> Vec<u8> {
-    (0..SIZE).map(|i| ((seq as usize).wrapping_mul(37).wrapping_add(i).wrapping_mul(7)) as u8).collect()
+    (0..SIZE)
+        .map(|i| {
+            ((seq as usize)
+                .wrapping_mul(37)
+                .wrapping_add(i)
+                .wrapping_mul(7)) as u8
+        })
+        .collect()
 }
 
 fn main() {
@@ -104,7 +111,11 @@ fn run_parent() {
         .into_owned();
     let _ = std::fs::remove_file(&path);
     let exe = std::env::current_exe().expect("current_exe");
-    let mut child = Command::new(exe).arg("child").arg(&path).spawn().expect("spawn child");
+    let mut child = Command::new(exe)
+        .arg("child")
+        .arg(&path)
+        .spawn()
+        .expect("spawn child");
 
     let mut waited = 0;
     while !std::path::Path::new(&path).exists() {
@@ -113,7 +124,10 @@ fn run_parent() {
         assert!(waited < 200, "child never bound {path}");
     }
 
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
     // `G2G_DMABUF_SEM=1` exercises the zero-stall external-semaphore path (M561):
     // the producer signals a timeline semaphore on each copy submit instead of
     // blocking on `device.poll(Wait)`, ships the semaphore fd once, and the child
@@ -122,7 +136,10 @@ fn run_parent() {
     let use_sem = std::env::var("G2G_DMABUF_SEM").is_ok();
     rt.block_on(async {
         let mut exp = WgpuToDmaBuf::new().with_external_semaphore(use_sem);
-        let (dev, queue) = exp.gpu().await.expect("Vulkan dma-buf export device (need a GPU)");
+        let (dev, queue) = exp
+            .gpu()
+            .await
+            .expect("Vulkan dma-buf export device (need a GPU)");
         exp.configure_pipeline(&caps()).expect("export configure");
         let mut sink = DmaBufSink::new(path);
         sink.configure_pipeline(&caps()).expect("sink configure");
@@ -139,26 +156,36 @@ fn run_parent() {
             queue.write_buffer(&src, 0, &pattern(seq));
             let frame = Frame {
                 domain: MemoryDomain::WgpuBuffer(WgpuToDmaBuf::wrap_buffer(&dev, src, SIZE)),
-                timing: FrameTiming { pts_ns: seq * 1000, ..FrameTiming::default() },
+                timing: FrameTiming {
+                    pts_ns: seq * 1000,
+                    ..FrameTiming::default()
+                },
                 sequence: seq,
                 meta: Default::default(),
             };
             // Export to a dma-buf, then ship the fd to the peer.
             let mut cap = CaptureSink { frame: None };
-            exp.process(PipelinePacket::DataFrame(frame), &mut cap).await.expect("export");
+            exp.process(PipelinePacket::DataFrame(frame), &mut cap)
+                .await
+                .expect("export");
             let dmabuf_frame = cap.frame.take().expect("exported a dma-buf frame");
             sink.process(PipelinePacket::DataFrame(dmabuf_frame), &mut null)
                 .await
                 .expect("send dma-buf");
         }
-        sink.process(PipelinePacket::Eos, &mut null).await.expect("eos");
+        sink.process(PipelinePacket::Eos, &mut null)
+            .await
+            .expect("eos");
     });
 
     let status = child.wait().expect("wait child");
     let _ = std::fs::remove_file(
         std::env::temp_dir().join(format!("g2g-gpudmabuf-{}.sock", std::process::id())),
     );
-    assert!(status.success(), "child failed to receive/verify GPU frames: {status:?}");
+    assert!(
+        status.success(),
+        "child failed to receive/verify GPU frames: {status:?}"
+    );
     let sync = if use_sem {
         "ordered by an exported timeline semaphore (producer never blocked on the copy)"
     } else {
@@ -190,7 +217,10 @@ struct VerifySink {
     bad: bool,
 }
 impl AsyncElement for VerifySink {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>> where Self: 'a;
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
     fn intercept_caps(&self, c: &Caps) -> Result<Caps, G2gError> {
         Ok(c.clone())
     }
@@ -249,13 +279,21 @@ fn read_back(device: &wgpu::Device, queue: &wgpu::Queue, buffer: &wgpu::Buffer) 
     slice.map_async(wgpu::MapMode::Read, move |r| {
         let _ = tx.send(r);
     });
-    device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).expect("poll");
+    device
+        .poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        })
+        .expect("poll");
     rx.recv().expect("readback channel").expect("map readback");
     slice.get_mapped_range().to_vec()
 }
 
 fn run_child(path: &str) -> i32 {
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
     rt.block_on(async {
         let mut src = DmaBufSrc::new(path).with_frame_limit(N);
         let mut sink = VerifySink::default();

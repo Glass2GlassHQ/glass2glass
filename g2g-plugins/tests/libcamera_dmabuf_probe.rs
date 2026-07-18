@@ -35,13 +35,21 @@ fn inspect_buffer_fd() {
     let cam = cameras.get(0).expect("camera present");
     let cam = cam.acquire().expect("acquire");
 
-    let mut cfgs = cam.generate_configuration(&[StreamRole::ViewFinder]).unwrap();
+    let mut cfgs = cam
+        .generate_configuration(&[StreamRole::ViewFinder])
+        .unwrap();
     {
         let mut cfg = cfgs.get_mut(0).unwrap();
         cfg.set_pixel_format(PF_YUYV);
-        cfg.set_size(Size { width: 640, height: 480 });
+        cfg.set_size(Size {
+            width: 640,
+            height: 480,
+        });
     }
-    assert!(!matches!(cfgs.validate(), CameraConfigurationStatus::Invalid));
+    assert!(!matches!(
+        cfgs.validate(),
+        CameraConfigurationStatus::Invalid
+    ));
     let mut cam_mut = cam;
     cam_mut.configure(&mut cfgs).unwrap();
 
@@ -88,13 +96,21 @@ async fn gpu_can_import_camera_dmabuf() {
     let cameras = mgr.cameras();
     let cam = cameras.get(0).expect("camera present");
     let cam = cam.acquire().expect("acquire");
-    let mut cfgs = cam.generate_configuration(&[StreamRole::ViewFinder]).unwrap();
+    let mut cfgs = cam
+        .generate_configuration(&[StreamRole::ViewFinder])
+        .unwrap();
     {
         let mut cfg = cfgs.get_mut(0).unwrap();
         cfg.set_pixel_format(PF_YUYV);
-        cfg.set_size(Size { width: 640, height: 480 });
+        cfg.set_size(Size {
+            width: 640,
+            height: 480,
+        });
     }
-    assert!(!matches!(cfgs.validate(), CameraConfigurationStatus::Invalid));
+    assert!(!matches!(
+        cfgs.validate(),
+        CameraConfigurationStatus::Invalid
+    ));
     let mut cam_mut = cam;
     cam_mut.configure(&mut cfgs).unwrap();
     let cfg = cfgs.get(0).unwrap();

@@ -46,8 +46,8 @@ fn main() {
         if !in_pipeline && arg.starts_with('-') && arg != "-" {
             match arg.as_str() {
                 "-q" | "--quiet" => quiet = true,
-                "-e" | "--eos-on-shutdown" | "-m" | "--messages" | "-f" | "--no-fault"
-                | "-t" | "--tags" | "-v" | "--verbose" => {}
+                "-e" | "--eos-on-shutdown" | "-m" | "--messages" | "-f" | "--no-fault" | "-t"
+                | "--tags" | "-v" | "--verbose" => {}
                 "-h" | "--help" => {
                     println!("{USAGE}");
                     return;
@@ -100,7 +100,12 @@ fn main() {
     let started = Instant::now();
     let mut printed_status = false;
     let result = rt.block_on(async {
-        let mut run = Box::pin(run_graph_with_progress(graph, &clock, LINK_CAPACITY, &progress));
+        let mut run = Box::pin(run_graph_with_progress(
+            graph,
+            &clock,
+            LINK_CAPACITY,
+            &progress,
+        ));
         loop {
             match tokio::time::timeout(Duration::from_secs(1), &mut run).await {
                 Ok(r) => break r,

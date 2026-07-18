@@ -96,12 +96,18 @@ impl SrtCrypto {
     /// Construct an AES-128 cipher from an explicit key + salt (a test injects
     /// fixed values for determinism; the sender uses [`generate`](Self::generate)).
     pub fn new(sek: [u8; 16], salt: [u8; SALT_LEN]) -> Self {
-        Self { sek: Sek::Aes128(sek), salt }
+        Self {
+            sek: Sek::Aes128(sek),
+            salt,
+        }
     }
 
     /// Construct an AES-256 cipher from an explicit 32-byte key + salt.
     pub fn new_aes256(sek: [u8; 32], salt: [u8; SALT_LEN]) -> Self {
-        Self { sek: Sek::Aes256(sek), salt }
+        Self {
+            sek: Sek::Aes256(sek),
+            salt,
+        }
     }
 
     /// Generate a fresh random stream key (of `size`) + salt from the OS RNG (the
@@ -234,8 +240,13 @@ impl SrtCrypto {
 /// KEK length matches the cipher (16 for AES-128, 32 for AES-256).
 fn derive_kek<const N: usize>(passphrase: &str, salt: &[u8; SALT_LEN]) -> [u8; N] {
     let mut kek = [0u8; N];
-    pbkdf2::pbkdf2::<Hmac<Sha1>>(passphrase.as_bytes(), &salt[SALT_LEN - 8..], KEK_ITERS, &mut kek)
-        .expect("PBKDF2 into a fixed buffer never fails on length");
+    pbkdf2::pbkdf2::<Hmac<Sha1>>(
+        passphrase.as_bytes(),
+        &salt[SALT_LEN - 8..],
+        KEK_ITERS,
+        &mut kek,
+    )
+    .expect("PBKDF2 into a fixed buffer never fails on length");
     kek
 }
 
@@ -252,7 +263,10 @@ mod tests {
         c.process(42, &mut buf);
         assert_ne!(buf, plain, "ciphertext differs from plaintext");
         c.process(42, &mut buf);
-        assert_eq!(buf, plain, "decrypt (same op, same seq) recovers the plaintext");
+        assert_eq!(
+            buf, plain,
+            "decrypt (same op, same seq) recovers the plaintext"
+        );
     }
 
     #[test]
@@ -281,7 +295,10 @@ mod tests {
     #[test]
     fn km_rejects_a_wrong_passphrase() {
         let km = SrtCrypto::new([0xABu8; 16], [0xCDu8; 16]).build_km("right", KM_KK_EVEN);
-        assert!(SrtCrypto::from_km(&km, "wrong").is_none(), "AES-KW integrity check fails");
+        assert!(
+            SrtCrypto::from_km(&km, "wrong").is_none(),
+            "AES-KW integrity check fails"
+        );
     }
 
     #[test]
@@ -302,7 +319,11 @@ mod tests {
         let sender = SrtCrypto::new_aes256([0x5Au8; 32], [0xC3u8; 16]);
         let km = sender.build_km("p@ss", KM_KK_ODD);
         assert_eq!(km[15], 32 / 4, "KLen field records the 256-bit key");
-        assert_eq!(SrtCrypto::km_kk(&km), Some(KM_KK_ODD), "parity flag preserved");
+        assert_eq!(
+            SrtCrypto::km_kk(&km),
+            Some(KM_KK_ODD),
+            "parity flag preserved"
+        );
         let recv = SrtCrypto::from_km(&km, "p@ss").expect("unwrap the AES-256 key");
         let mut x = vec![7u8; 24];
         let mut y = x.clone();
@@ -314,6 +335,9 @@ mod tests {
     #[test]
     fn aes256_km_rejects_a_wrong_passphrase() {
         let km = SrtCrypto::new_aes256([0x5Au8; 32], [0xC3u8; 16]).build_km("right", KM_KK_EVEN);
-        assert!(SrtCrypto::from_km(&km, "wrong").is_none(), "AES-256 AES-KW integrity check fails");
+        assert!(
+            SrtCrypto::from_km(&km, "wrong").is_none(),
+            "AES-256 AES-KW integrity check fails"
+        );
     }
 }

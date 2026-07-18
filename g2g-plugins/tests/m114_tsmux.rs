@@ -63,7 +63,10 @@ impl SourceLoop for H264Source {
                 let au = vec![0u8, 0, 0, 1, 0x65, i];
                 let frame = Frame::new(
                     MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
-                    FrameTiming { pts_ns: (i as u64 + 1) * 33_000_000, ..FrameTiming::default() },
+                    FrameTiming {
+                        pts_ns: (i as u64 + 1) * 33_000_000,
+                        ..FrameTiming::default()
+                    },
                     n,
                 );
                 out.push(PipelinePacket::DataFrame(frame)).await?;
@@ -86,6 +89,11 @@ async fn tsmux_then_tsdemux_round_trips_in_runner() {
     graph.link(mux, demux).unwrap();
     graph.link(demux, sink).unwrap();
 
-    let stats = run_graph(graph, &ZeroClock, 4).await.expect("mux -> demux runs");
-    assert_eq!(stats.frames_consumed, 3, "three AUs survive mux + demux to the sink");
+    let stats = run_graph(graph, &ZeroClock, 4)
+        .await
+        .expect("mux -> demux runs");
+    assert_eq!(
+        stats.frames_consumed, 3,
+        "three AUs survive mux + demux to the sink"
+    );
 }

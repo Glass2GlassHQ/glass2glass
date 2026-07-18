@@ -29,7 +29,10 @@ pub struct JoinAll<'a, T> {
 pub fn join_all<T: Unpin>(futs: Vec<BoxFuture<'_, T>>) -> JoinAll<'_, T> {
     let mut outputs = Vec::with_capacity(futs.len());
     outputs.resize_with(futs.len(), || None);
-    JoinAll { arms: futs.into_iter().map(Some).collect(), outputs }
+    JoinAll {
+        arms: futs.into_iter().map(Some).collect(),
+        outputs,
+    }
 }
 
 impl<'a, T: Unpin> Future for JoinAll<'a, T> {
@@ -398,7 +401,11 @@ mod tests {
 
         let mut out = spin(dynamic_join(initial, rx));
         out.sort_unstable();
-        assert_eq!(out, alloc::vec![1, 2], "both the initial and the late arm resolve");
+        assert_eq!(
+            out,
+            alloc::vec![1, 2],
+            "both the initial and the late arm resolve"
+        );
     }
 
     #[cfg(feature = "std")]

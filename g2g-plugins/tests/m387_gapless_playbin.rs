@@ -6,21 +6,27 @@
 
 #![cfg(feature = "std")]
 
-use g2g_core::runtime::{
-    is_raw_video, ElementFactory, Registry, Uri, UriError, UriSourceFactory,
-};
-use g2g_core::{
-    Caps, CapsSet, Dim, PadTemplate, RawVideoFormat, Rate, VideoCodec,
-};
+use g2g_core::runtime::{is_raw_video, ElementFactory, Registry, Uri, UriError, UriSourceFactory};
+use g2g_core::{Caps, CapsSet, Dim, PadTemplate, Rate, RawVideoFormat, VideoCodec};
 
 use g2g_plugins::fakesink::FakeSink;
 use g2g_plugins::gaplesssrc::{gapless_playbin, GaplessPlaybinError};
 
 fn h264_any() -> Caps {
-    Caps::CompressedVideo { codec: VideoCodec::H264, width: Dim::Any, height: Dim::Any, framerate: Rate::Any }
+    Caps::CompressedVideo {
+        codec: VideoCodec::H264,
+        width: Dim::Any,
+        height: Dim::Any,
+        framerate: Rate::Any,
+    }
 }
 fn raw_video() -> Caps {
-    Caps::RawVideo { format: RawVideoFormat::Nv12, width: Dim::Any, height: Dim::Any, framerate: Rate::Any }
+    Caps::RawVideo {
+        format: RawVideoFormat::Nv12,
+        width: Dim::Any,
+        height: Dim::Any,
+        framerate: Rate::Any,
+    }
 }
 
 /// A `mem://` URI source stand-in (its identity is irrelevant to graph assembly,
@@ -29,7 +35,10 @@ fn raw_video() -> Caps {
 fn mem_uri_build(
     _uri: &Uri,
 ) -> Result<(Box<dyn g2g_core::runtime::DynSourceLoop>, Caps), UriError> {
-    Ok((Box::new(g2g_plugins::videotestsrc::VideoTestSrc::new(8, 8, 30, 1)), h264_any()))
+    Ok((
+        Box::new(g2g_plugins::videotestsrc::VideoTestSrc::new(8, 8, 30, 1)),
+        h264_any(),
+    ))
 }
 
 /// A registry with the `mem://` handler and a stub H.264 decoder (so the reused
@@ -75,7 +84,10 @@ fn gapless_playbin_builds_and_preloads_the_playlist() {
 fn empty_playlist_is_rejected() {
     let reg = registry_with_stubs();
     let err = gapless_playbin(&reg, &[], FakeSink::new(), &is_raw_video, 6).unwrap_err();
-    assert!(matches!(err, GaplessPlaybinError::EmptyPlaylist), "got {err:?}");
+    assert!(
+        matches!(err, GaplessPlaybinError::EmptyPlaylist),
+        "got {err:?}"
+    );
 }
 
 #[test]
@@ -93,7 +105,16 @@ fn a_later_playlist_item_with_a_bad_scheme_is_rejected() {
     // The first URI is fine but a later one is not: the eager per-item source
     // build surfaces the error rather than failing mid-playback.
     let reg = registry_with_stubs();
-    let err = gapless_playbin(&reg, &["mem://ok", "bogus://x"], FakeSink::new(), &is_raw_video, 6)
-        .unwrap_err();
-    assert!(matches!(err, GaplessPlaybinError::Uri(UriError::UnknownScheme)), "got {err:?}");
+    let err = gapless_playbin(
+        &reg,
+        &["mem://ok", "bogus://x"],
+        FakeSink::new(),
+        &is_raw_video,
+        6,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, GaplessPlaybinError::Uri(UriError::UnknownScheme)),
+        "got {err:?}"
+    );
 }

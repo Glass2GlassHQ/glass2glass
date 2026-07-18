@@ -39,7 +39,8 @@ impl OutputSink for AuCollect {
         if let PipelinePacket::DataFrame(frame) = &p {
             if let MemoryDomain::System(slice) = &frame.domain {
                 let s = slice.as_slice();
-                self.aus.push((s[..s.len().min(5)].to_vec(), s.len(), frame.timing.keyframe));
+                self.aus
+                    .push((s[..s.len().min(5)].to_vec(), s.len(), frame.timing.keyframe));
             }
         }
         Box::pin(async { Ok(PushOutcome::Accepted) })
@@ -68,10 +69,26 @@ async fn ffmpeg_rtsp_publisher_records_into_rtspserversrc() {
     let ffmpeg = tokio::task::spawn_blocking(move || {
         Command::new("ffmpeg")
             .args([
-                "-hide_banner", "-loglevel", "error",
-                "-re", "-an", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=15:duration=4",
-                "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
-                "-f", "rtsp", "-rtsp_transport", "udp", &url,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-re",
+                "-an",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=320x240:rate=15:duration=4",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-tune",
+                "zerolatency",
+                "-f",
+                "rtsp",
+                "-rtsp_transport",
+                "udp",
+                &url,
             ])
             .status()
     });
@@ -83,10 +100,16 @@ async fn ffmpeg_rtsp_publisher_records_into_rtspserversrc() {
         .expect("RtspServerSrc runs");
     let _ = ffmpeg.await;
 
-    assert_eq!(received, N, "depayloaded the requested number of access units");
+    assert_eq!(
+        received, N,
+        "depayloaded the requested number of access units"
+    );
     for (i, (head, len, _)) in sink.aus.iter().enumerate() {
         assert!(*len > 4, "AU {i} has content");
-        assert!(is_annex_b(head), "AU {i} is Annex-B framed (got {head:02x?})");
+        assert!(
+            is_annex_b(head),
+            "AU {i} is Annex-B framed (got {head:02x?})"
+        );
     }
     assert!(
         sink.aus.iter().any(|(_, _, kf)| *kf),
@@ -114,10 +137,26 @@ async fn ffmpeg_rtsp_publisher_records_interleaved_into_rtspserversrc() {
     let ffmpeg = tokio::task::spawn_blocking(move || {
         Command::new("ffmpeg")
             .args([
-                "-hide_banner", "-loglevel", "error",
-                "-re", "-an", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=15:duration=4",
-                "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
-                "-f", "rtsp", "-rtsp_transport", "tcp", &url,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-re",
+                "-an",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=320x240:rate=15:duration=4",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-tune",
+                "zerolatency",
+                "-f",
+                "rtsp",
+                "-rtsp_transport",
+                "tcp",
+                &url,
             ])
             .status()
     });
@@ -129,10 +168,16 @@ async fn ffmpeg_rtsp_publisher_records_interleaved_into_rtspserversrc() {
         .expect("RtspServerSrc runs");
     let _ = ffmpeg.await;
 
-    assert_eq!(received, N, "depayloaded the requested number of interleaved access units");
+    assert_eq!(
+        received, N,
+        "depayloaded the requested number of interleaved access units"
+    );
     for (i, (head, len, _)) in sink.aus.iter().enumerate() {
         assert!(*len > 4, "AU {i} has content");
-        assert!(is_annex_b(head), "AU {i} is Annex-B framed (got {head:02x?})");
+        assert!(
+            is_annex_b(head),
+            "AU {i} is Annex-B framed (got {head:02x?})"
+        );
     }
     assert!(
         sink.aus.iter().any(|(_, _, kf)| *kf),

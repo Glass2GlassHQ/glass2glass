@@ -82,7 +82,10 @@ fn commands(log: &BusLog) -> Vec<(u8, Vec<u8>)> {
     let mut out: Vec<(u8, Vec<u8>)> = Vec::new();
     for (dc_high, bytes) in &log.writes {
         if *dc_high {
-            out.last_mut().expect("data write before any command").1.extend(bytes);
+            out.last_mut()
+                .expect("data write before any command")
+                .1
+                .extend(bytes);
         } else {
             assert_eq!(bytes.len(), 1, "command writes are single opcodes");
             out.push((bytes[0], Vec::new()));
@@ -139,8 +142,7 @@ fn init_follows_the_st7789_datasheet() {
 #[test]
 fn ili9341_skips_inversion() {
     let log = Rc::new(RefCell::new(BusLog::default()));
-    let mut sink =
-        SpiDisplaySink::ili9341(MockSpi(log.clone()), MockDc(log.clone()), 240, 320);
+    let mut sink = SpiDisplaySink::ili9341(MockSpi(log.clone()), MockDc(log.clone()), 240, 320);
     sink.init(&mut MockDelay::default()).expect("init");
     let opcodes: Vec<u8> = commands(&log.borrow()).iter().map(|(c, _)| *c).collect();
     assert!(opcodes.contains(&0x20), "INVOFF sent");
@@ -192,7 +194,12 @@ fn band<const B: usize>(ring: &StaticLendRing<1, B>, bytes: usize) -> Frame {
 fn raset_rows(cmds: &[(u8, Vec<u8>)]) -> Vec<(u16, u16)> {
     cmds.iter()
         .filter(|(op, _)| *op == 0x2B)
-        .map(|(_, p)| (u16::from_be_bytes([p[0], p[1]]), u16::from_be_bytes([p[2], p[3]])))
+        .map(|(_, p)| {
+            (
+                u16::from_be_bytes([p[0], p[1]]),
+                u16::from_be_bytes([p[2], p[3]]),
+            )
+        })
         .collect()
 }
 
@@ -223,7 +230,10 @@ fn banded_streaming_addresses_successive_vertical_windows() {
         (0x2B, vec![0, 0, 0, 1]), //         rows 0..=1 again
         (0x2C, px),
     ];
-    assert_eq!(cmds, expected, "each band addresses the next vertical window, wrapping");
+    assert_eq!(
+        cmds, expected,
+        "each band addresses the next vertical window, wrapping"
+    );
 }
 
 #[test]
@@ -244,13 +254,23 @@ fn banded_streaming_covers_a_full_240x240_panel_from_a_tiny_ring() {
     let cmds = commands(&log.borrow());
     let rows = raset_rows(&cmds);
     let expected_rows: Vec<(u16, u16)> = (0..240).step_by(16).map(|y| (y, y + 15)).collect();
-    assert_eq!(rows, expected_rows, "15 bands tile rows 0..240 in 16-row steps");
+    assert_eq!(
+        rows, expected_rows,
+        "15 bands tile rows 0..240 in 16-row steps"
+    );
 
     // Every panel pixel was written exactly once: 240*240 pixels * 2 RGB565
     // bytes, streamed through the fixed chunk buffer with no full framebuffer.
-    let pixel_bytes: usize =
-        cmds.iter().filter(|(op, _)| *op == 0x2C).map(|(_, p)| p.len()).sum();
-    assert_eq!(pixel_bytes, 240 * 240 * 2, "one full refresh, exactly one write per pixel");
+    let pixel_bytes: usize = cmds
+        .iter()
+        .filter(|(op, _)| *op == 0x2C)
+        .map(|(_, p)| p.len())
+        .sum();
+    assert_eq!(
+        pixel_bytes,
+        240 * 240 * 2,
+        "one full refresh, exactly one write per pixel"
+    );
 }
 
 #[test]

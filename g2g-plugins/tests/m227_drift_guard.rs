@@ -23,11 +23,20 @@ fn rgba(w: u32, h: u32) -> Caps {
 }
 
 fn raw(format: RawVideoFormat, w: u32, h: u32) -> Caps {
-    Caps::RawVideo { format, width: Dim::Fixed(w), height: Dim::Fixed(h), framerate: Rate::Fixed(30 << 16) }
+    Caps::RawVideo {
+        format,
+        width: Dim::Fixed(w),
+        height: Dim::Fixed(h),
+        framerate: Rate::Fixed(30 << 16),
+    }
 }
 
 fn pcm(rate: u32) -> Caps {
-    Caps::Audio { format: AudioFormat::PcmS16Le, channels: 2, sample_rate: rate }
+    Caps::Audio {
+        format: AudioFormat::PcmS16Le,
+        channels: 2,
+        sample_rate: rate,
+    }
 }
 
 /// Assert every field the mask declares passthrough is identical in `out` and
@@ -35,8 +44,18 @@ fn pcm(rate: u32) -> Caps {
 fn assert_passthrough_preserved(inp: &Caps, out: &Caps, mask: PassthroughFields) {
     match (inp, out) {
         (
-            Caps::RawVideo { format: fi, width: wi, height: hi, framerate: ri },
-            Caps::RawVideo { format: fo, width: wo, height: ho, framerate: ro },
+            Caps::RawVideo {
+                format: fi,
+                width: wi,
+                height: hi,
+                framerate: ri,
+            },
+            Caps::RawVideo {
+                format: fo,
+                width: wo,
+                height: ho,
+                framerate: ro,
+            },
         ) => {
             if mask.format {
                 assert_eq!(fi, fo, "format declared passthrough but changed");
@@ -52,8 +71,16 @@ fn assert_passthrough_preserved(inp: &Caps, out: &Caps, mask: PassthroughFields)
             }
         }
         (
-            Caps::Audio { format: fi, channels: ci, sample_rate: si },
-            Caps::Audio { format: fo, channels: co, sample_rate: so },
+            Caps::Audio {
+                format: fi,
+                channels: ci,
+                sample_rate: si,
+            },
+            Caps::Audio {
+                format: fo,
+                channels: co,
+                sample_rate: so,
+            },
         ) => {
             if mask.format {
                 assert_eq!(fi, fo, "format declared passthrough but changed");
@@ -73,8 +100,10 @@ fn assert_passthrough_preserved(inp: &Caps, out: &Caps, mask: PassthroughFields)
 /// never lies: every produced alternative preserves the declared passthrough
 /// fields. Also asserts each valid input yields at least one alternative.
 fn check<E: AsyncElement>(element: &E, inputs: &[Caps]) {
-    let CapsConstraint::DerivedCoupled { derive, passthrough } =
-        element.caps_constraint_as_transform()
+    let CapsConstraint::DerivedCoupled {
+        derive,
+        passthrough,
+    } = element.caps_constraint_as_transform()
     else {
         panic!("expected a DerivedCoupled constraint");
     };

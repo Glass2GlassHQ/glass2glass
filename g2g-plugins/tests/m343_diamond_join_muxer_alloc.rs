@@ -58,7 +58,8 @@ struct PlainSource {
 
 impl SourceLoop for PlainSource {
     type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>;
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 
@@ -203,11 +204,7 @@ impl MultiInputElement for AllocMux {
         Ok(CapsConstraint::Produces(CapsSet::one(self.output.clone())))
     }
 
-    fn propose_allocation_for_input(
-        &self,
-        input: usize,
-        _caps: &Caps,
-    ) -> Option<AllocationParams> {
+    fn propose_allocation_for_input(&self, input: usize, _caps: &Caps) -> Option<AllocationParams> {
         self.per_pad.get(input).copied().flatten()
     }
 
@@ -289,7 +286,9 @@ async fn diamond_same_domain_joins_most_restrictive() {
     g.link(tee.out(0), a).unwrap();
     g.link(tee.out(1), b).unwrap();
 
-    let stats = run_graph(g, &NullClock, 4).await.expect("matching domains join");
+    let stats = run_graph(g, &NullClock, 4)
+        .await
+        .expect("matching domains join");
     assert_eq!(
         stats.allocation,
         Some(AllocationParams::cuda(200, 2, 8)),
@@ -334,8 +333,12 @@ async fn muxer_per_pad_allocation_crosses_boundary() {
     let mut g: Graph<GraphNode> = Graph::new();
     let s0 = g.add_source(GraphNode::source(PlainSource { count: 2 }));
     let s1 = g.add_source(GraphNode::source(PlainSource { count: 2 }));
-    let t0 = g.add_transform(GraphNode::element(RecordingTransform { log: Arc::clone(&log0) }));
-    let t1 = g.add_transform(GraphNode::element(RecordingTransform { log: Arc::clone(&log1) }));
+    let t0 = g.add_transform(GraphNode::element(RecordingTransform {
+        log: Arc::clone(&log0),
+    }));
+    let t1 = g.add_transform(GraphNode::element(RecordingTransform {
+        log: Arc::clone(&log1),
+    }));
     let mux = g.add_muxer(
         GraphNode::muxer(AllocMux {
             inputs: 2,
@@ -351,7 +354,9 @@ async fn muxer_per_pad_allocation_crosses_boundary() {
     g.link(t1, mux.input(1)).unwrap();
     g.link(mux.output(), sink).unwrap();
 
-    let stats = run_graph(g, &NullClock, 4).await.expect("muxer alloc cascade runs");
+    let stats = run_graph(g, &NullClock, 4)
+        .await
+        .expect("muxer alloc cascade runs");
     assert_eq!(stats.frames_emitted, 4, "2 + 2 source frames");
     assert_eq!(
         *log0.lock().unwrap(),

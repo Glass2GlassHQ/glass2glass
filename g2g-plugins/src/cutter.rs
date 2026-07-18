@@ -32,7 +32,12 @@ struct CutterState {
 
 impl CutterState {
     fn new(threshold: f64, run_length_ns: u64) -> Self {
-        Self { threshold_sq: threshold * threshold, run_length_ns, silent: true, silence_ns: 0 }
+        Self {
+            threshold_sq: threshold * threshold,
+            run_length_ns,
+            silent: true,
+            silence_ns: 0,
+        }
     }
 
     /// Feed one buffer's mean-square level and its duration. Returns `Some(true)`
@@ -114,9 +119,11 @@ impl Cutter {
 
     fn accept_input(&self, caps: &Caps) -> Result<(u32, u32), G2gError> {
         match caps {
-            Caps::Audio { format: AudioFormat::PcmS16Le, channels, sample_rate } if *channels > 0 => {
-                Ok((*channels as u32, *sample_rate))
-            }
+            Caps::Audio {
+                format: AudioFormat::PcmS16Le,
+                channels,
+                sample_rate,
+            } if *channels > 0 => Ok((*channels as u32, *sample_rate)),
             _ => Err(G2gError::CapsMismatch),
         }
     }
@@ -156,7 +163,10 @@ impl AsyncElement for Cutter {
     /// Pure passthrough: the detector never changes the stream.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
-            Caps::Audio { format: AudioFormat::PcmS16Le, .. } => CapsSet::one(input.clone()),
+            Caps::Audio {
+                format: AudioFormat::PcmS16Le,
+                ..
+            } => CapsSet::one(input.clone()),
             _ => CapsSet::from_alternatives(alloc::vec::Vec::new()),
         }))
     }
@@ -203,7 +213,12 @@ impl AsyncElement for Cutter {
     }
 
     fn metadata(&self) -> ElementMetadata {
-        ElementMetadata::new("Cutter", "Filter/Analyzer/Audio", "Detects silence in an audio stream", "g2g")
+        ElementMetadata::new(
+            "Cutter",
+            "Filter/Analyzer/Audio",
+            "Detects silence in an audio stream",
+            "g2g",
+        )
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
@@ -231,13 +246,25 @@ impl AsyncElement for Cutter {
 }
 
 static CUTTER_PROPS: &[PropertySpec] = &[
-    PropertySpec::new("threshold", PropKind::Double, "linear RMS silence threshold, 0..1"),
-    PropertySpec::new("run-length", PropKind::Uint, "continuous silence before 'below', ns"),
+    PropertySpec::new(
+        "threshold",
+        PropKind::Double,
+        "linear RMS silence threshold, 0..1",
+    ),
+    PropertySpec::new(
+        "run-length",
+        PropKind::Uint,
+        "continuous silence before 'below', ns",
+    ),
 ];
 
 impl PadTemplates for Cutter {
     fn pad_templates() -> alloc::vec::Vec<PadTemplate> {
-        let pcm = Caps::Audio { format: AudioFormat::PcmS16Le, channels: 2, sample_rate: 48_000 };
+        let pcm = Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            channels: 2,
+            sample_rate: 48_000,
+        };
         alloc::vec::Vec::from([
             PadTemplate::sink(CapsSet::one(pcm.clone())),
             PadTemplate::source(CapsSet::one(pcm)),
@@ -284,9 +311,20 @@ mod tests {
     #[test]
     fn configure_rejects_non_s16le() {
         let mut c = Cutter::new();
-        let bad = Caps::Audio { format: AudioFormat::PcmF32Le, channels: 2, sample_rate: 48_000 };
-        assert_eq!(c.configure_pipeline(&bad).unwrap_err(), G2gError::CapsMismatch);
-        let ok = Caps::Audio { format: AudioFormat::PcmS16Le, channels: 2, sample_rate: 48_000 };
+        let bad = Caps::Audio {
+            format: AudioFormat::PcmF32Le,
+            channels: 2,
+            sample_rate: 48_000,
+        };
+        assert_eq!(
+            c.configure_pipeline(&bad).unwrap_err(),
+            G2gError::CapsMismatch
+        );
+        let ok = Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            channels: 2,
+            sample_rate: 48_000,
+        };
         assert!(c.configure_pipeline(&ok).is_ok());
     }
 }

@@ -58,17 +58,20 @@ fn yuyv_to_i420(width: usize, height: usize, src: &[u8], dst: &mut [u8]) {
     // YUYV per pair is [Y0, U, Y1, V], so U is byte 1 and V byte 3 of a 4-chunk.
     let row_bytes = width.saturating_mul(2);
     for cby in 0..(height / 2) {
-        let top = src.get(cby.saturating_mul(2).saturating_mul(row_bytes)..).map(|s| {
-            s.get(..row_bytes).unwrap_or(s)
-        });
+        let top = src
+            .get(cby.saturating_mul(2).saturating_mul(row_bytes)..)
+            .map(|s| s.get(..row_bytes).unwrap_or(s));
         let bot = src
             .get((cby.saturating_mul(2).saturating_add(1)).saturating_mul(row_bytes)..)
             .map(|s| s.get(..row_bytes).unwrap_or(s));
-        let (Some(top), Some(bot)) = (top, bot) else { continue };
+        let (Some(top), Some(bot)) = (top, bot) else {
+            continue;
+        };
         let base = cby.saturating_mul(cw);
-        let (Some(u_row), Some(v_row)) =
-            (u_plane.get_mut(base..base + cw), v_plane.get_mut(base..base + cw))
-        else {
+        let (Some(u_row), Some(v_row)) = (
+            u_plane.get_mut(base..base + cw),
+            v_plane.get_mut(base..base + cw),
+        ) else {
             continue;
         };
         for (i, (tq, bq)) in top.chunks_exact(4).zip(bot.chunks_exact(4)).enumerate() {
@@ -136,7 +139,9 @@ impl<const N: usize, const BYTES: usize> StaticTransform for YuyvToI420<'_, N, B
         // SAFETY: the constructor established the ring-outlives-frames contract
         // (`new`: 'static; `with_ring`: caller's contract).
         let out = unsafe {
-            lend_converted(self.ring, &input, self.out_len, |src, dst| yuyv_to_i420(w, h, src, dst))
+            lend_converted(self.ring, &input, self.out_len, |src, dst| {
+                yuyv_to_i420(w, h, src, dst)
+            })
         }?;
         Ok(Some(out))
     }

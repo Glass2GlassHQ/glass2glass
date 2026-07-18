@@ -122,7 +122,9 @@ impl AllocationParams {
     /// intersect to empty and conflict.
     pub fn join(self, other: Self) -> Result<Self, crate::error::G2gError> {
         let accepts = self.accepts.intersect(other.accepts);
-        let domain = accepts.preferred().ok_or(crate::error::G2gError::AllocationConflict)?;
+        let domain = accepts
+            .preferred()
+            .ok_or(crate::error::G2gError::AllocationConflict)?;
         Ok(Self {
             size_bytes: self.size_bytes.max(other.size_bytes),
             min_buffers: self.min_buffers.max(other.min_buffers),
@@ -146,8 +148,14 @@ impl AllocationParams {
     /// conflict.
     pub fn resolve_for_producer(self, can: DomainSet) -> Result<Self, crate::error::G2gError> {
         let accepts = self.accepts.intersect(can);
-        let domain = accepts.preferred().ok_or(crate::error::G2gError::AllocationConflict)?;
-        Ok(Self { domain, accepts, ..self })
+        let domain = accepts
+            .preferred()
+            .ok_or(crate::error::G2gError::AllocationConflict)?;
+        Ok(Self {
+            domain,
+            accepts,
+            ..self
+        })
     }
 }
 
@@ -292,7 +300,11 @@ mod tests {
         assert_eq!(merged.size_bytes, 4096, "larger size wins");
         assert_eq!(merged.min_buffers, 4, "larger buffer count wins");
         assert_eq!(merged.align, 64, "stricter alignment wins");
-        assert_eq!(merged.domain, MemoryDomainKind::DmaBuf, "consumer domain dictates");
+        assert_eq!(
+            merged.domain,
+            MemoryDomainKind::DmaBuf,
+            "consumer domain dictates"
+        );
     }
 
     #[test]
@@ -312,7 +324,10 @@ mod tests {
         // Backward-compat: two differing single domains still fail loud.
         let cuda = AllocationParams::cuda(1024, 2, 256);
         let d3d = AllocationParams::d3d11(1024, 2, 256);
-        assert_eq!(cuda.join(d3d), Err(crate::error::G2gError::AllocationConflict));
+        assert_eq!(
+            cuda.join(d3d),
+            Err(crate::error::G2gError::AllocationConflict)
+        );
     }
 
     #[test]
@@ -324,7 +339,11 @@ mod tests {
         a.accepts = DomainSet::only(MemoryDomainKind::System).with(MemoryDomainKind::Cuda);
         let b = AllocationParams::cuda(1024, 2, 256);
         let j = a.join(b).expect("overlapping accept sets join");
-        assert_eq!(j.domain, MemoryDomainKind::Cuda, "common domain, GPU-preferred");
+        assert_eq!(
+            j.domain,
+            MemoryDomainKind::Cuda,
+            "common domain, GPU-preferred"
+        );
     }
 
     #[test]

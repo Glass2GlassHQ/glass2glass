@@ -41,10 +41,10 @@ use g2g_core::{
     AsyncElement, Caps, ConfigureOutcome, Dim, G2gError, OutputSink, Rate, RawVideoFormat,
     SystemSlice, TensorDType, TensorLayout, TensorShape, VideoCodec,
 };
-use g2g_plugins::cuda::CudaDownload;
-use g2g_plugins::ffmpegdec::{Backend, FfmpegVideoDec};
 use g2g_ml::wgpuinfer::{linear_reference, WgpuInference};
 use g2g_ml::wgpupreprocess::{gpu_available, nv12_to_rgb_tensor, WgpuPreprocess};
+use g2g_plugins::cuda::CudaDownload;
+use g2g_plugins::ffmpegdec::{Backend, FfmpegVideoDec};
 
 /// Cap the GPU work so a long fixture still finishes quickly; 30 frames is the
 /// synthetic testsrc clip, plenty for a composition + baseline signal.
@@ -110,9 +110,16 @@ fn weights_bias(k: usize) -> (Vec<f32>, Vec<f32>) {
 
 fn logits_from_system(f: &Frame) -> Vec<f32> {
     let MemoryDomain::System(slice) = &f.domain else {
-        panic!("inference must read logits back to System, got {:?}", f.domain.kind());
+        panic!(
+            "inference must read logits back to System, got {:?}",
+            f.domain.kind()
+        );
     };
-    slice.as_slice().chunks_exact(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect()
+    slice
+        .as_slice()
+        .chunks_exact(4)
+        .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+        .collect()
 }
 
 fn data_frames(packets: Vec<PipelinePacket>) -> Vec<Frame> {
@@ -156,7 +163,11 @@ fn split_access_units(bs: &[u8]) -> Vec<Vec<u8>> {
         if bs[i] == 0 && bs[i + 1] == 0 && bs[i + 2] == 1 {
             codes.push((i, i + 3));
             i += 3;
-        } else if i + 4 <= bs.len() && bs[i] == 0 && bs[i + 1] == 0 && bs[i + 2] == 0 && bs[i + 3] == 1
+        } else if i + 4 <= bs.len()
+            && bs[i] == 0
+            && bs[i + 1] == 0
+            && bs[i + 2] == 0
+            && bs[i + 3] == 1
         {
             codes.push((i, i + 4));
             i += 4;
@@ -205,7 +216,8 @@ async fn cuda_to_wgpu_scaffold_matches_cpu_reference() {
     let mut dec = FfmpegVideoDec::new().with_backend(Backend::NvdecCuda);
     let narrowed = dec.intercept_caps(&h264_caps()).expect("H.264 supported");
     assert!(matches!(
-        dec.configure_pipeline(&narrowed).expect("NVDEC must initialise"),
+        dec.configure_pipeline(&narrowed)
+            .expect("NVDEC must initialise"),
         ConfigureOutcome::Accepted
     ));
 
@@ -217,9 +229,13 @@ async fn cuda_to_wgpu_scaffold_matches_cpu_reference() {
             sequence: seq as u64,
             meta: Default::default(),
         };
-        dec.process(PipelinePacket::DataFrame(frame), &mut decoded).await.expect("decode");
+        dec.process(PipelinePacket::DataFrame(frame), &mut decoded)
+            .await
+            .expect("decode");
     }
-    dec.process(PipelinePacket::Eos, &mut decoded).await.expect("flush decoder");
+    dec.process(PipelinePacket::Eos, &mut decoded)
+        .await
+        .expect("flush decoder");
 
     let (w, h) = first_nv12_dims(&decoded.packets).expect("NVDEC must emit NV12 caps");
     eprintln!("NVDEC decoded NV12 {w}x{h}");
@@ -238,15 +254,20 @@ async fn cuda_to_wgpu_scaffold_matches_cpu_reference() {
 
     let mut download = CudaDownload::new();
     assert!(matches!(
-        download.configure_pipeline(&nv12_caps(w, h)).expect("configure download"),
+        download
+            .configure_pipeline(&nv12_caps(w, h))
+            .expect("configure download"),
         ConfigureOutcome::Accepted
     ));
 
     let mut pre = WgpuPreprocess::new().with_gpu_output();
-    pre.configure_pipeline(&nv12_caps(w, h)).expect("configure preprocess");
+    pre.configure_pipeline(&nv12_caps(w, h))
+        .expect("configure preprocess");
 
     let mut infer = WgpuInference::linear(w, h, weights.clone(), bias.clone()).expect("linear");
-    infer.configure_pipeline(&tensor_caps(w, h)).expect("configure inference");
+    infer
+        .configure_pipeline(&tensor_caps(w, h))
+        .expect("configure inference");
 
     let mut download_ms = Vec::new();
     let mut gpu_ms = Vec::new();
@@ -256,10 +277,16 @@ async fn cuda_to_wgpu_scaffold_matches_cpu_reference() {
         // Device -> host NV12 (the PCIe cost Stage 1 removes).
         let t0 = Instant::now();
         let mut dl = Collect::default();
-        download.process(PipelinePacket::DataFrame(cuda_frame), &mut dl).await.expect("download");
+        download
+            .process(PipelinePacket::DataFrame(cuda_frame), &mut dl)
+            .await
+            .expect("download");
         download_ms.push(t0.elapsed().as_secs_f64() * 1e3);
 
-        let nv12_frame = data_frames(dl.packets).into_iter().next().expect("downloaded NV12");
+        let nv12_frame = data_frames(dl.packets)
+            .into_iter()
+            .next()
+            .expect("downloaded NV12");
         let MemoryDomain::System(slice) = &nv12_frame.domain else {
             panic!("CudaDownload must produce a System NV12 frame");
         };
@@ -269,19 +296,29 @@ async fn cuda_to_wgpu_scaffold_matches_cpu_reference() {
         // between the two GPU elements.
         let t1 = Instant::now();
         let mut pre_out = Collect::default();
-        pre.process(PipelinePacket::DataFrame(nv12_frame), &mut pre_out).await.expect("preprocess");
-        let tensor_frame = data_frames(pre_out.packets).into_iter().next().expect("GPU tensor");
+        pre.process(PipelinePacket::DataFrame(nv12_frame), &mut pre_out)
+            .await
+            .expect("preprocess");
+        let tensor_frame = data_frames(pre_out.packets)
+            .into_iter()
+            .next()
+            .expect("GPU tensor");
         assert!(
             matches!(tensor_frame.domain, MemoryDomain::WgpuBuffer(_)),
             "preprocess must hand off a GPU-resident tensor"
         );
 
         let mut infer_out = Collect::default();
-        infer.process(PipelinePacket::DataFrame(tensor_frame), &mut infer_out).await.expect("infer");
+        infer
+            .process(PipelinePacket::DataFrame(tensor_frame), &mut infer_out)
+            .await
+            .expect("infer");
         gpu_ms.push(t1.elapsed().as_secs_f64() * 1e3);
 
         let got = logits_from_system(
-            data_frames(infer_out.packets).first().expect("a logits frame"),
+            data_frames(infer_out.packets)
+                .first()
+                .expect("a logits frame"),
         );
         assert_eq!(got.len(), N, "[1, N] logits");
 
@@ -298,7 +335,10 @@ async fn cuda_to_wgpu_scaffold_matches_cpu_reference() {
                 "frame {idx} logit {i}: gpu {g} vs cpu reference {e} (tol {tol})"
             );
         }
-        assert!((got[0] - got[1]).abs() > 1e-3, "the two outputs must differ");
+        assert!(
+            (got[0] - got[1]).abs() > 1e-3,
+            "the two outputs must differ"
+        );
         matched += 1;
     }
 

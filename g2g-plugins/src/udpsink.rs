@@ -27,10 +27,10 @@ use g2g_core::{
 };
 
 use crate::filesink::io_err;
+use crate::flexfec::FlexFecEncoder;
 use crate::rtcp::{self, RtcpPacket};
 use crate::rtppay::RtpH264Packetizer;
 use crate::rtx;
-use crate::flexfec::FlexFecEncoder;
 use crate::ulpfec::{FecEncoder, InterleavedFecEncoder};
 
 /// FEC mode for the sink: off, single-level ULPFEC (one repair per contiguous
@@ -258,7 +258,9 @@ impl UdpSink {
         use std::time::{SystemTime, UNIX_EPOCH};
         // NTP epoch (1900) precedes the Unix epoch (1970) by this many seconds.
         const NTP_UNIX_OFFSET: u64 = 2_208_988_800;
-        let d = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+        let d = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
         let secs = d.as_secs().wrapping_add(NTP_UNIX_OFFSET);
         let frac = ((d.subsec_nanos() as u64) << 32) / 1_000_000_000;
         (secs << 32) | frac
@@ -288,7 +290,8 @@ impl UdpSink {
                     for p in rtcp::parse_compound(&rb[..n]) {
                         if let RtcpPacket::Nack { missing, .. } = p {
                             for seq in missing {
-                                if let Some((_, pkt)) = self.retx_buf.iter().find(|(s, _)| *s == seq)
+                                if let Some((_, pkt)) =
+                                    self.retx_buf.iter().find(|(s, _)| *s == seq)
                                 {
                                     to_resend.push(pkt.clone());
                                 }
@@ -317,7 +320,8 @@ impl UdpSink {
 }
 
 impl AsyncElement for UdpSink {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -337,8 +341,9 @@ impl AsyncElement for UdpSink {
             } => {}
             _ => return Err(G2gError::CapsMismatch),
         }
-        self.packetizer =
-            Some(RtpH264Packetizer::new(self.payload_type, self.ssrc).with_max_payload(self.max_payload));
+        self.packetizer = Some(
+            RtpH264Packetizer::new(self.payload_type, self.ssrc).with_max_payload(self.max_payload),
+        );
         let socket = StdUdpSocket::bind(("0.0.0.0", 0)).map_err(io_err)?;
         socket.set_nonblocking(true).map_err(io_err)?;
         socket.connect(self.dest).map_err(io_err)?;
@@ -361,8 +366,12 @@ impl AsyncElement for UdpSink {
                 .with_default("127.0.0.1"),
             PropertySpec::new("port", PropKind::Uint, "destination UDP port")
                 .with_range("0", "65535"),
-            PropertySpec::new("payload-type", PropKind::Uint, "RTP payload type (96..=127)")
-                .with_range("0", "127"),
+            PropertySpec::new(
+                "payload-type",
+                PropKind::Uint,
+                "RTP payload type (96..=127)",
+            )
+            .with_range("0", "127"),
             PropertySpec::new("ssrc", PropKind::Uint, "RTP synchronization source id"),
         ];
         PROPS
@@ -455,8 +464,9 @@ impl AsyncElement for UdpSink {
                             // SR sender counters: this SSRC's media packets and
                             // their RTP payload octets (past the 12-byte header).
                             self.rtp_packets = self.rtp_packets.wrapping_add(1);
-                            self.rtp_octets =
-                                self.rtp_octets.wrapping_add(pkt.len().saturating_sub(12) as u32);
+                            self.rtp_octets = self
+                                .rtp_octets
+                                .wrapping_add(pkt.len().saturating_sub(12) as u32);
                         }
                         // Repair packets follow the media they protect.
                         for repair in &fec_packets {

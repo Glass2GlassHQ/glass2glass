@@ -47,7 +47,11 @@ impl OutputSink for CaptureSink {
 fn frame(data: Vec<u8>, pts_ns: u64) -> PipelinePacket {
     PipelinePacket::DataFrame(Frame::new(
         MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-        FrameTiming { pts_ns, dts_ns: pts_ns, ..FrameTiming::default() },
+        FrameTiming {
+            pts_ns,
+            dts_ns: pts_ns,
+            ..FrameTiming::default()
+        },
         0,
     ))
 }
@@ -91,20 +95,42 @@ async fn mux_fmp4() -> Vec<u8> {
         height: Dim::Fixed(240),
         framerate: Rate::Fixed(30 << 16),
     };
-    let aac = Caps::Audio { format: AudioFormat::Aac, channels: 2, sample_rate: 48000 };
+    let aac = Caps::Audio {
+        format: AudioFormat::Aac,
+        channels: 2,
+        sample_rate: 48000,
+    };
 
     let mut mux = Mp4MuxN::new(2);
     mux.configure_pipeline(0, &h264).unwrap();
     mux.configure_pipeline(1, &aac).unwrap();
     let mut sink = CaptureSink::default();
 
-    mux.process(0, frame(annexb(&[&sps, &pps, &idr]), 0), &mut sink).await.unwrap();
-    mux.process(1, frame(adts_au(&[0x01, 0x02, 0x03]), 0), &mut sink).await.unwrap();
-    mux.process(1, frame(adts_au(&[0x04, 0x05]), 21_000_000), &mut sink).await.unwrap();
-    mux.process(0, frame(annexb(&[&[0x41u8, 0x9a, 0x00]]), 33_000_000), &mut sink).await.unwrap();
-    mux.process(1, frame(adts_au(&[0x06, 0x07]), 42_000_000), &mut sink).await.unwrap();
-    mux.process(0, PipelinePacket::Eos, &mut sink).await.unwrap();
-    mux.process(1, PipelinePacket::Eos, &mut sink).await.unwrap();
+    mux.process(0, frame(annexb(&[&sps, &pps, &idr]), 0), &mut sink)
+        .await
+        .unwrap();
+    mux.process(1, frame(adts_au(&[0x01, 0x02, 0x03]), 0), &mut sink)
+        .await
+        .unwrap();
+    mux.process(1, frame(adts_au(&[0x04, 0x05]), 21_000_000), &mut sink)
+        .await
+        .unwrap();
+    mux.process(
+        0,
+        frame(annexb(&[&[0x41u8, 0x9a, 0x00]]), 33_000_000),
+        &mut sink,
+    )
+    .await
+    .unwrap();
+    mux.process(1, frame(adts_au(&[0x06, 0x07]), 42_000_000), &mut sink)
+        .await
+        .unwrap();
+    mux.process(0, PipelinePacket::Eos, &mut sink)
+        .await
+        .unwrap();
+    mux.process(1, PipelinePacket::Eos, &mut sink)
+        .await
+        .unwrap();
     sink.bytes
 }
 
@@ -137,8 +163,7 @@ async fn ffmpeg_validates_the_native_mp4_muxer_and_records_interop_evidence() {
     // The in-process structural round-trip is UnitTested-tier evidence.
     persist::record_evidence(
         "mp4mux",
-        &Evidence::new(ConformanceDimension::RoundTrip)
-            .detail("ISO-BMFF ftyp/moov/trak structure"),
+        &Evidence::new(ConformanceDimension::RoundTrip).detail("ISO-BMFF ftyp/moov/trak structure"),
     )
     .expect("record round-trip evidence");
 
@@ -146,14 +171,30 @@ async fn ffmpeg_validates_the_native_mp4_muxer_and_records_interop_evidence() {
     let mp4 = std::env::temp_dir().join("g2g-conformance-m615.mp4");
     std::fs::write(&mp4, &bytes).expect("write mp4");
     let out = Command::new("ffprobe")
-        .args(["-v", "error", "-show_entries", "stream=codec_name", "-of", "default=nw=1:nk=1"])
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=codec_name",
+            "-of",
+            "default=nw=1:nk=1",
+        ])
         .arg(&mp4)
         .output()
         .expect("run ffprobe");
     let codecs = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success(), "ffprobe accepted the native fMP4: {codecs}");
-    assert!(codecs.contains("h264"), "ffprobe demuxed the H.264 track: {codecs}");
-    assert!(codecs.contains("aac"), "ffprobe demuxed the AAC track: {codecs}");
+    assert!(
+        out.status.success(),
+        "ffprobe accepted the native fMP4: {codecs}"
+    );
+    assert!(
+        codecs.contains("h264"),
+        "ffprobe demuxed the H.264 track: {codecs}"
+    );
+    assert!(
+        codecs.contains("aac"),
+        "ffprobe demuxed the AAC track: {codecs}"
+    );
 
     // ffprobe validated it: record the interop Oracle evidence (peer = ffmpeg).
     persist::record_evidence(
@@ -173,7 +214,10 @@ async fn ffmpeg_validates_the_native_mp4_muxer_and_records_interop_evidence() {
         .iter()
         .find(|r| r.element == "mp4mux")
         .expect("mp4mux present after persisting evidence");
-    assert!(mp4mux.has(ConformanceDimension::Oracle), "oracle evidence persisted");
+    assert!(
+        mp4mux.has(ConformanceDimension::Oracle),
+        "oracle evidence persisted"
+    );
     assert_eq!(mp4mux.peers(), vec!["ffmpeg"]);
     assert_eq!(
         mp4mux.level(),

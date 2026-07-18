@@ -41,6 +41,10 @@ mod launch;
 #[cfg(feature = "std")]
 mod observe;
 
+pub use autoplug::{
+    find_chain, find_chain_preferring, find_chain_with, is_raw_audio, is_raw_video, Acceleration,
+    CapabilityDescriptor, ChainLink, ElementDesc, SelectionContext,
+};
 pub use channel::{
     bounded, link, BitrateSlot, LinkInterceptor, LinkReceiver, LinkSender, ProbeAction, ProbeSlot,
     QosSlot, Receiver, ReconfigureSlot, RecvFuture, SendError, SendFuture, Sender, SenderSink,
@@ -48,20 +52,16 @@ pub use channel::{
 pub use coordinator::{coordinator, Coordinator, CoordinatorEvent, CoordinatorHandle};
 pub use instrument::{snapshot_all, ElementLatency, ElementProbe, Probe};
 pub use join::{join_all, select2, Either, Join2, JoinAll, Select2};
+pub use progress::PipelineProgress;
 pub use runner::{
     run_simple_pipeline, run_simple_pipeline_stateful, run_simple_pipeline_with_bus,
     run_source_transform_sink, run_source_transform_sink_with_bus, LatencyProfile, LinkCapacity,
     RunStats, SourceLoop,
 };
-pub use autoplug::{
-    find_chain, find_chain_preferring, find_chain_with, is_raw_audio, is_raw_video, Acceleration,
-    CapabilityDescriptor, ChainLink, ElementDesc, SelectionContext,
-};
-pub use progress::PipelineProgress;
 pub use seek::{SeekController, WaitEvent};
+pub use solver::NegotiationFailure;
 pub use state::{Flow, FlowGate, PrerollGate, StateController};
 pub use stream_select::StreamSelectController;
-pub use solver::NegotiationFailure;
 
 #[cfg(feature = "std")]
 pub use blocking::block_on;
@@ -75,9 +75,9 @@ pub use runner::{
 
 #[cfg(feature = "std")]
 pub use fanin::{
-    run_aggregator_dynamic, run_duplex_session, run_fanin_session, run_fanin_sink,
-    run_muxer_sink, run_muxer_sink_dynamic, run_muxer_sink_with_bus, DynMultiInputElement,
-    DynamicFaninHandle, DynSourceLoop,
+    run_aggregator_dynamic, run_duplex_session, run_fanin_session, run_fanin_sink, run_muxer_sink,
+    run_muxer_sink_dynamic, run_muxer_sink_with_bus, DynMultiInputElement, DynSourceLoop,
+    DynamicFaninHandle,
 };
 
 #[cfg(feature = "std")]
@@ -110,9 +110,9 @@ pub use autoplug::{PadKind, PadRequest};
 #[cfg(feature = "std")]
 pub use autoplug::{
     declared_source_caps, DecodebinError, DecodebinSelectHook, DemuxFactory, DemuxSelectHook,
-    ElementDoc, ElementFactory,
-    LaunchFactory, MuxerFactory, PlaybinGraphError, PlaybinHook, PlaybinPort,
-    PlaybinError, PropertyDoc, Registry, SourceFactory, Uri, UriError, UriSourceFactory,
+    ElementDoc, ElementFactory, LaunchFactory, MuxerFactory, PlaybinError, PlaybinGraphError,
+    PlaybinHook, PlaybinPort, PropertyDoc, Registry, SourceFactory, Uri, UriError,
+    UriSourceFactory,
 };
 
 #[cfg(feature = "std")]

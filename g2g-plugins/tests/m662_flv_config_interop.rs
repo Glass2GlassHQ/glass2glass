@@ -80,27 +80,42 @@ impl OutputSink for CaptureSink {
 /// Encode a short synthetic A/V FLV with ffmpeg (H.264 + AAC 44.1 kHz stereo).
 fn ffmpeg_encode_flv(path: &PathBuf) {
     let out = Command::new("ffmpeg")
-        .args(["-y", "-f", "lavfi", "-i", "testsrc=duration=1:size=320x240:rate=25"])
+        .args([
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=1:size=320x240:rate=25",
+        ])
         .args(["-f", "lavfi", "-i", "sine=frequency=440:duration=1"])
         .args(["-c:v", "libx264", "-preset", "ultrafast", "-g", "12"])
         .args(["-c:a", "aac", "-ar", "44100", "-ac", "2"])
         .arg(path)
         .output()
         .expect("ffmpeg runs");
-    assert!(out.status.success(), "ffmpeg encode failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "ffmpeg encode failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 /// Run the demux element over the whole FLV byte stream.
 async fn demux(flv: &[u8], stream: FlvStream) -> CaptureSink {
     let mut d = FlvDemux::new().with_stream(stream);
-    d.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::Flv }).unwrap();
+    d.configure_pipeline(&Caps::ByteStream {
+        encoding: ByteStreamEncoding::Flv,
+    })
+    .unwrap();
     let mut sink = CaptureSink::default();
     let frame = Frame::new(
         MemoryDomain::System(SystemSlice::from_boxed(flv.to_vec().into_boxed_slice())),
         FrameTiming::default(),
         0,
     );
-    d.process(PipelinePacket::DataFrame(frame), &mut sink).await.unwrap();
+    d.process(PipelinePacket::DataFrame(frame), &mut sink)
+        .await
+        .unwrap();
     d.process(PipelinePacket::Eos, &mut sink).await.unwrap();
     sink
 }
@@ -128,9 +143,17 @@ async fn ffmpeg_flv_demuxes_to_self_describing_elementary_streams() {
 
     // Video: Annex-B out, SPS/PPS in-band at the front (from the avcC).
     let video = demux(&flv, FlvStream::H264).await;
-    assert!(video.frames >= 20, "a second of 25 fps video demuxed, got {}", video.frames);
+    assert!(
+        video.frames >= 20,
+        "a second of 25 fps video demuxed, got {}",
+        video.frames
+    );
     assert_eq!(&video.bytes[..4], &[0, 0, 0, 1], "Annex-B start code leads");
-    assert_eq!(video.bytes[4] & 0x1F, 7, "the first NAL is the prepended SPS");
+    assert_eq!(
+        video.bytes[4] & 0x1F,
+        7,
+        "the first NAL is the prepended SPS"
+    );
     let h264_path = tmp("g2g_m662_video.h264");
     std::fs::write(&h264_path, &video.bytes).unwrap();
     assert!(
@@ -140,16 +163,27 @@ async fn ffmpeg_flv_demuxes_to_self_describing_elementary_streams() {
 
     // Audio: ADTS out (self-describing), concrete caps announced from the ASC.
     let audio = demux(&flv, FlvStream::Aac).await;
-    assert!(audio.frames >= 40, "a second of AAC frames demuxed, got {}", audio.frames);
+    assert!(
+        audio.frames >= 40,
+        "a second of AAC frames demuxed, got {}",
+        audio.frames
+    );
     assert_eq!(&audio.bytes[..2], &[0xFF, 0xF1], "ADTS syncword leads");
     assert_eq!(
         audio.caps,
-        vec![Caps::Audio { format: AudioFormat::Aac, channels: 2, sample_rate: 44_100 }],
+        vec![Caps::Audio {
+            format: AudioFormat::Aac,
+            channels: 2,
+            sample_rate: 44_100
+        }],
         "concrete audio caps from the AudioSpecificConfig"
     );
     let aac_path = tmp("g2g_m662_audio.aac");
     std::fs::write(&aac_path, &audio.bytes).unwrap();
-    assert!(ffmpeg_decodes(&aac_path, "aac"), "ffmpeg decodes the extracted ADTS standalone");
+    assert!(
+        ffmpeg_decodes(&aac_path, "aac"),
+        "ffmpeg decodes the extracted ADTS standalone"
+    );
 
     // ffmpeg (the external peer) validated both extracted streams: record the
     // interop Oracle evidence for the demuxer (the M615 mechanism).
@@ -163,7 +197,10 @@ async fn ffmpeg_flv_demuxes_to_self_describing_elementary_streams() {
     )
     .expect("record oracle evidence");
     assert!(
-        persist::full_report().records.iter().any(|r| r.element == "flvdemux"),
+        persist::full_report()
+            .records
+            .iter()
+            .any(|r| r.element == "flvdemux"),
         "flvdemux row present after persisting evidence"
     );
 
@@ -181,12 +218,31 @@ async fn flvmux_output_probes_as_playable_h264_flv() {
     // A real Annex-B H.264 elementary stream from ffmpeg (SPS/PPS on the IDR).
     let h264_path = tmp("g2g_m662_mux_in.h264");
     let out = Command::new("ffmpeg")
-        .args(["-y", "-f", "lavfi", "-i", "testsrc=duration=1:size=320x240:rate=25"])
-        .args(["-c:v", "libx264", "-preset", "ultrafast", "-g", "12", "-f", "h264"])
+        .args([
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=1:size=320x240:rate=25",
+        ])
+        .args([
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-g",
+            "12",
+            "-f",
+            "h264",
+        ])
         .arg(&h264_path)
         .output()
         .expect("ffmpeg runs");
-    assert!(out.status.success(), "ffmpeg encode failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "ffmpeg encode failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let es = std::fs::read(&h264_path).unwrap();
 
     // The whole elementary stream as one access unit is enough here: the muxer
@@ -206,23 +262,42 @@ async fn flvmux_output_probes_as_playable_h264_flv() {
         FrameTiming::default(),
         0,
     );
-    mux.process(PipelinePacket::DataFrame(frame), &mut sink).await.unwrap();
+    mux.process(PipelinePacket::DataFrame(frame), &mut sink)
+        .await
+        .unwrap();
 
     let flv_path = tmp("g2g_m662_mux_out.flv");
     std::fs::write(&flv_path, &sink.bytes).unwrap();
 
     // ffprobe reads the FLV back: container recognized, h264 stream present.
     let probe = Command::new("ffprobe")
-        .args(["-v", "error", "-show_entries", "stream=codec_name", "-of", "csv=p=0"])
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=codec_name",
+            "-of",
+            "csv=p=0",
+        ])
         .arg(&flv_path)
         .output()
         .expect("ffprobe runs");
-    assert!(probe.status.success(), "ffprobe failed: {}", String::from_utf8_lossy(&probe.stderr));
+    assert!(
+        probe.status.success(),
+        "ffprobe failed: {}",
+        String::from_utf8_lossy(&probe.stderr)
+    );
     let codecs = String::from_utf8_lossy(&probe.stdout);
-    assert!(codecs.contains("h264"), "ffprobe sees the h264 stream, got: {codecs}");
+    assert!(
+        codecs.contains("h264"),
+        "ffprobe sees the h264 stream, got: {codecs}"
+    );
 
     // And ffmpeg can decode the FLV end to end (the sequence header works).
-    assert!(ffmpeg_decodes(&flv_path, "flv"), "ffmpeg decodes the muxed FLV");
+    assert!(
+        ffmpeg_decodes(&flv_path, "flv"),
+        "ffmpeg decodes the muxed FLV"
+    );
 
     // ffprobe + ffmpeg validated the native FLV: record the interop Oracle
     // evidence for the muxer (the M615 mechanism).
@@ -236,7 +311,10 @@ async fn flvmux_output_probes_as_playable_h264_flv() {
     )
     .expect("record oracle evidence");
     assert!(
-        persist::full_report().records.iter().any(|r| r.element == "flvmux"),
+        persist::full_report()
+            .records
+            .iter()
+            .any(|r| r.element == "flvmux"),
         "flvmux row present after persisting evidence"
     );
 

@@ -71,14 +71,20 @@ impl AppSrcFeed {
     /// an owned `System` frame. Returns `false` if the feed is full (retry
     /// later) or the pipeline has gone away.
     pub fn push(&self, data: &[u8], pts_ns: u64) -> bool {
-        self.push_slice(SystemSlice::from_boxed(data.to_vec().into_boxed_slice()), pts_ns)
+        self.push_slice(
+            SystemSlice::from_boxed(data.to_vec().into_boxed_slice()),
+            pts_ns,
+        )
     }
 
     /// Push one buffer and wait for channel capacity. Returns `false` only if
     /// the pipeline has gone away.
     #[cfg(feature = "std")]
     pub fn push_blocking(&self, data: &[u8], pts_ns: u64) -> bool {
-        self.push_slice_blocking(SystemSlice::from_boxed(data.to_vec().into_boxed_slice()), pts_ns)
+        self.push_slice_blocking(
+            SystemSlice::from_boxed(data.to_vec().into_boxed_slice()),
+            pts_ns,
+        )
     }
 
     /// Push a pre-built buffer, for the zero-copy path: pass a
@@ -86,16 +92,22 @@ impl AppSrcFeed {
     /// copy (the free callback fires when the frame is finally dropped).
     /// Returns `false` (releasing `slice`) if the feed is full or closed.
     pub fn push_slice(&self, slice: SystemSlice, pts_ns: u64) -> bool {
-        self.tx.try_send(AppItem::Frame { domain: MemoryDomain::System(slice), pts_ns }).is_ok()
+        self.tx
+            .try_send(AppItem::Frame {
+                domain: MemoryDomain::System(slice),
+                pts_ns,
+            })
+            .is_ok()
     }
 
     /// Push a pre-built buffer and wait for channel capacity. Returns `false`
     /// only if the pipeline has gone away.
     #[cfg(feature = "std")]
     pub fn push_slice_blocking(&self, slice: SystemSlice, pts_ns: u64) -> bool {
-        g2g_core::runtime::block_on(
-            self.tx.send(AppItem::Frame { domain: MemoryDomain::System(slice), pts_ns }),
-        )
+        g2g_core::runtime::block_on(self.tx.send(AppItem::Frame {
+            domain: MemoryDomain::System(slice),
+            pts_ns,
+        }))
         .is_ok()
     }
 
@@ -106,7 +118,12 @@ impl AppSrcFeed {
     /// must accept the `DmaBuf` memory domain; a system-memory consumer needs an
     /// import/download step first.
     pub fn push_dmabuf(&self, dmabuf: OwnedDmaBuf, pts_ns: u64) -> bool {
-        self.tx.try_send(AppItem::Frame { domain: MemoryDomain::DmaBuf(dmabuf), pts_ns }).is_ok()
+        self.tx
+            .try_send(AppItem::Frame {
+                domain: MemoryDomain::DmaBuf(dmabuf),
+                pts_ns,
+            })
+            .is_ok()
     }
 
     /// Signal end-of-stream: the source emits a final `Eos` and `run` returns.
@@ -166,10 +183,12 @@ impl AppSrc {
 }
 
 impl SourceLoop for AppSrc {
-    type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
+    type RunFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
     where
         Self: 'a;
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 
@@ -213,7 +232,11 @@ impl SourceLoop for AppSrc {
             while let Some(AppItem::Frame { domain, pts_ns }) = feed.recv().await {
                 let frame = Frame {
                     domain,
-                    timing: FrameTiming { pts_ns, dts_ns: pts_ns, ..FrameTiming::default() },
+                    timing: FrameTiming {
+                        pts_ns,
+                        dts_ns: pts_ns,
+                        ..FrameTiming::default()
+                    },
                     sequence: self.seq,
                     meta: Default::default(),
                 };
@@ -241,7 +264,11 @@ impl SourceLoop for AppSrc {
                 let set = parse_caps_set(s).ok_or(PropError::Value)?;
                 // appsrc declares a single fixed output; take the first
                 // alternative (a fully-specified caps yields exactly one).
-                let caps = set.alternatives().first().cloned().ok_or(PropError::Value)?;
+                let caps = set
+                    .alternatives()
+                    .first()
+                    .cloned()
+                    .ok_or(PropError::Value)?;
                 self.caps = Some(caps);
                 Ok(())
             }

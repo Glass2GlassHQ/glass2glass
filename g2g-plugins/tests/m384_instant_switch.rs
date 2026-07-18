@@ -43,7 +43,11 @@ struct YieldSrc {
 }
 impl YieldSrc {
     fn new(frames: u64, period_ns: u64) -> Self {
-        Self { frames, period_ns, configured: false }
+        Self {
+            frames,
+            period_ns,
+            configured: false,
+        }
     }
 }
 impl SourceLoop for YieldSrc {
@@ -96,7 +100,10 @@ struct Collect {
 }
 impl Collect {
     fn new() -> Self {
-        Self { events: Arc::new(Mutex::new(Vec::new())), frames: Arc::new(AtomicUsize::new(0)) }
+        Self {
+            events: Arc::new(Mutex::new(Vec::new())),
+            frames: Arc::new(AtomicUsize::new(0)),
+        }
     }
 }
 impl OutputSink for Collect {
@@ -107,7 +114,10 @@ impl OutputSink for Collect {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(f) => {
-                    self.events.lock().unwrap().push(Event::Frame(f.timing.pts_ns));
+                    self.events
+                        .lock()
+                        .unwrap()
+                        .push(Event::Frame(f.timing.pts_ns));
                     self.frames.fetch_add(1, Ordering::SeqCst);
                 }
                 PipelinePacket::Flush => self.events.lock().unwrap().push(Event::Flush),
@@ -148,24 +158,57 @@ async fn switch_now_preempts_the_current_item_with_a_flush() {
     let (total, ()) = tokio::join!(run_fut, app_fut);
 
     let evs = events.lock().unwrap().clone();
-    let flush_at = evs.iter().position(|e| *e == Event::Flush).expect("a flush on the instant switch");
-    assert_eq!(evs.iter().filter(|e| **e == Event::Flush).count(), 1, "exactly one flush");
+    let flush_at = evs
+        .iter()
+        .position(|e| *e == Event::Flush)
+        .expect("a flush on the instant switch");
+    assert_eq!(
+        evs.iter().filter(|e| **e == Event::Flush).count(),
+        1,
+        "exactly one flush"
+    );
 
     // Before the flush: a clip1 prefix, preempted well before its 100 frames.
-    let before: Vec<u64> =
-        evs[..flush_at].iter().filter_map(|e| if let Event::Frame(p) = e { Some(*p) } else { None }).collect();
-    assert!(before.len() >= 2, "clip1 showed the frames the app waited for: {before:?}");
-    assert!(before.len() < 100, "clip1 was preempted, not played to its end: {before:?}");
-    assert!(before.windows(2).all(|w| w[1] > w[0]), "clip1 frames are monotonic: {before:?}");
+    let before: Vec<u64> = evs[..flush_at]
+        .iter()
+        .filter_map(|e| {
+            if let Event::Frame(p) = e {
+                Some(*p)
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert!(
+        before.len() >= 2,
+        "clip1 showed the frames the app waited for: {before:?}"
+    );
+    assert!(
+        before.len() < 100,
+        "clip1 was preempted, not played to its end: {before:?}"
+    );
+    assert!(
+        before.windows(2).all(|w| w[1] > w[0]),
+        "clip1 frames are monotonic: {before:?}"
+    );
 
     // After the flush: clip2 from a reset timeline (offset 0), then one Eos.
     let after: Vec<Event> = evs[flush_at + 1..].to_vec();
     assert_eq!(
         after,
-        vec![Event::Frame(0), Event::Frame(500), Event::Frame(1000), Event::Eos],
+        vec![
+            Event::Frame(0),
+            Event::Frame(500),
+            Event::Frame(1000),
+            Event::Eos
+        ],
         "clip2 plays from 0 after the flush, then a single terminal Eos"
     );
 
     // `total` counts only fully-pushed frames (clip1 prefix + clip2's 3).
-    assert_eq!(total as usize, before.len() + 3, "frame count = clip1 prefix + clip2");
+    assert_eq!(
+        total as usize,
+        before.len() + 3,
+        "frame count = clip1 prefix + clip2"
+    );
 }

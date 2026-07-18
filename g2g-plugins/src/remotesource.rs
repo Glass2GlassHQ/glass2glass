@@ -117,7 +117,10 @@ impl<T: PacketTransport> RemoteSource<T> {
     /// actual port before the sender connects).
     pub fn from_listener(listener: StdTcpListener) -> Result<Self, G2gError> {
         let bind = listener.local_addr().map_err(io_err)?;
-        Ok(Self { std_listener: Some(listener), ..Self::new(bind) })
+        Ok(Self {
+            std_listener: Some(listener),
+            ..Self::new(bind)
+        })
     }
 
     /// Stop after `n` data frames and emit EOS (the bounded / test path).
@@ -128,7 +131,10 @@ impl<T: PacketTransport> RemoteSource<T> {
 
     /// The bound port, once a listener exists.
     pub fn local_port(&self) -> Option<u16> {
-        self.std_listener.as_ref().and_then(|l| l.local_addr().ok()).map(|a| a.port())
+        self.std_listener
+            .as_ref()
+            .and_then(|l| l.local_addr().ok())
+            .map(|a| a.port())
     }
 
     /// Bind / reuse the listener, accept the sender, and read its first packet
@@ -143,7 +149,9 @@ impl<T: PacketTransport> RemoteSource<T> {
                 l.set_nonblocking(true).map_err(io_err)?;
                 tokio::net::TcpListener::from_std(l).map_err(io_err)?
             }
-            None => tokio::net::TcpListener::bind(self.bind).await.map_err(io_err)?,
+            None => tokio::net::TcpListener::bind(self.bind)
+                .await
+                .map_err(io_err)?,
         };
         let (conn, caps) = T::accept(&listener).await?;
         self.conn = Some(conn);
@@ -236,8 +244,7 @@ impl<T: PacketTransport> SourceLoop for RemoteSource<T> {
                             // Wait for a replacement client and continue. It
                             // re-sends its leading caps, which we forward so a
                             // downstream re-negotiates if they changed.
-                            let listener =
-                                self.listener.take().ok_or(G2gError::NotConfigured)?;
+                            let listener = self.listener.take().ok_or(G2gError::NotConfigured)?;
                             let (conn, caps) = T::accept(&listener).await?;
                             self.conn = Some(conn);
                             self.listener = Some(listener);

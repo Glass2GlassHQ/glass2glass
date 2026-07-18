@@ -128,7 +128,10 @@ impl<const N: usize, const BYTES: usize> SpscFrameRing<N, BYTES> {
         if next == self.head.load(Ordering::Acquire) {
             // Full: drop and count (single producer, so a load+store bump on the
             // counter needs no CAS and cannot lose an update).
-            self.overruns.store(self.overruns.load(Ordering::Relaxed).wrapping_add(1), Ordering::Relaxed);
+            self.overruns.store(
+                self.overruns.load(Ordering::Relaxed).wrapping_add(1),
+                Ordering::Relaxed,
+            );
             return Err(Overrun);
         }
         let Some(cell) = self.slots.get(tail) else {
@@ -224,7 +227,14 @@ impl<'r, I: FnMut(), const N: usize, const BYTES: usize> SpscCaptureSrc<'r, I, N
     /// interrupt), a yield or `core::hint::spin_loop` in a host test.
     /// `frame_interval_ns` sets the derived PTS cadence.
     pub fn new(ring: &'r SpscFrameRing<N, BYTES>, idle: I, frame_interval_ns: u64) -> Self {
-        Self { ring, idle, frame_interval_ns, remaining: None, seq: 0, holding: false }
+        Self {
+            ring,
+            idle,
+            frame_interval_ns,
+            remaining: None,
+            seq: 0,
+            holding: false,
+        }
     }
 
     /// End the stream after `frames` captures (a capture is endless by default).
@@ -257,7 +267,10 @@ impl<I: FnMut(), const N: usize, const BYTES: usize> StaticSource
                 let pts_ns = self.seq.saturating_mul(self.frame_interval_ns);
                 let frame = Frame::new(
                     MemoryDomain::System(slice),
-                    FrameTiming { pts_ns, ..FrameTiming::default() },
+                    FrameTiming {
+                        pts_ns,
+                        ..FrameTiming::default()
+                    },
                     self.seq,
                 );
                 self.seq = self.seq.wrapping_add(1);
@@ -357,7 +370,11 @@ mod tests {
         let ring: SpscFrameRing<3, 1> = SpscFrameRing::new();
         for k in 0..20u8 {
             ring.produce(|b| b[0] = k).expect("space (one in flight)");
-            assert_eq!(peek(&ring), Some(k), "each frame consumed in order across wraps");
+            assert_eq!(
+                peek(&ring),
+                Some(k),
+                "each frame consumed in order across wraps"
+            );
             ring.release();
         }
         assert!(ring.is_empty());

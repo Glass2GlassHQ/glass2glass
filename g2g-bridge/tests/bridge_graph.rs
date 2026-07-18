@@ -17,7 +17,10 @@ fn round_trips_buffers_across_the_thread_boundary() {
 
     // Push three distinct 2x2 RGBA buffers from this thread.
     for i in 0u8..3 {
-        assert!(bridge.push(&[i; 16], u64::from(i) * 1_000), "feed accepted buffer {i}");
+        assert!(
+            bridge.push(&[i; 16], u64::from(i) * 1_000),
+            "feed accepted buffer {i}"
+        );
     }
     bridge.end_of_stream();
 
@@ -29,7 +32,11 @@ fn round_trips_buffers_across_the_thread_boundary() {
     }
 
     assert_eq!(out.len(), 3, "every pushed buffer came back");
-    assert_eq!(out[0].0, vec![0u8; 16], "bytes round-tripped through the sub-graph");
+    assert_eq!(
+        out[0].0,
+        vec![0u8; 16],
+        "bytes round-tripped through the sub-graph"
+    );
     assert_eq!(out[1].1, 1_000, "presentation timestamp carried through");
 
     let stats = bridge.finish().expect("clean shutdown");
@@ -70,7 +77,11 @@ fn rescaling_fragment_changes_output_size() {
     while let Some(frame) = bridge.pull_blocking() {
         out_lens.push(frame_bytes(&frame).expect("system memory").len());
     }
-    assert_eq!(out_lens, vec![64], "the downscaled frame is 4x4 RGBA, not the 8x8 input");
+    assert_eq!(
+        out_lens,
+        vec![64],
+        "the downscaled frame is 4x4 RGBA, not the 8x8 input"
+    );
 }
 
 /// An imported DMABUF frame is ingested by the embedded graph and travels
@@ -84,25 +95,36 @@ fn rescaling_fragment_changes_output_size() {
 #[cfg(unix)]
 #[test]
 fn imports_a_dmabuf_frame_zero_copy() {
-    use std::os::fd::IntoRawFd;
     use g2g_core::memory::{MemoryDomain, OwnedDmaBuf};
+    use std::os::fd::IntoRawFd;
 
     let bridge = BridgeGraph::new("identity", CAPS).expect("builds");
 
     // A real, closeable fd stands in for a dma-buf descriptor; `identity` does
     // not read it, so no mapping is needed. `OwnedDmaBuf` closes it on drop.
-    let fd = std::fs::File::open("/dev/null").expect("open /dev/null").into_raw_fd();
+    let fd = std::fs::File::open("/dev/null")
+        .expect("open /dev/null")
+        .into_raw_fd();
     // SAFETY: `fd` is a fresh fd this test solely owns; ownership transfers to
     // the OwnedDmaBuf, which closes it once.
-    let dmabuf = unsafe { OwnedDmaBuf::from_raw(fd, /*stride*/ 8, /*offset*/ 0) };
-    assert!(bridge.push_dmabuf(dmabuf, 0), "feed accepted the dma-buf frame");
+    let dmabuf = unsafe {
+        OwnedDmaBuf::from_raw(fd, /*stride*/ 8, /*offset*/ 0)
+    };
+    assert!(
+        bridge.push_dmabuf(dmabuf, 0),
+        "feed accepted the dma-buf frame"
+    );
     bridge.end_of_stream();
 
     let mut domains = Vec::new();
     while let Some(frame) = bridge.pull_blocking() {
         domains.push(matches!(frame.domain, MemoryDomain::DmaBuf(_)));
     }
-    assert_eq!(domains, vec![true], "the frame stayed in the DmaBuf domain end to end");
+    assert_eq!(
+        domains,
+        vec![true],
+        "the frame stayed in the DmaBuf domain end to end"
+    );
 }
 
 /// A fragment that names an element g2g lacks fails construction with a parse
@@ -111,7 +133,10 @@ fn imports_a_dmabuf_frame_zero_copy() {
 #[test]
 fn unknown_element_fails_to_build() {
     let err = BridgeGraph::new("x264enc", CAPS).expect_err("no SW H.264 encoder in g2g");
-    assert!(matches!(err, BridgeError::Parse(_)), "surfaced as a parse error: {err}");
+    assert!(
+        matches!(err, BridgeError::Parse(_)),
+        "surfaced as a parse error: {err}"
+    );
 }
 
 /// Dropping a `BridgeGraph` without draining must not deadlock: releasing the

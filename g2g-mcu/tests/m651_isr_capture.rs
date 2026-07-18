@@ -76,9 +76,13 @@ fn isr_style_producer_feeds_the_pipeline_lossless_and_in_order() {
         // frame at a time, idling (here a yield; WFI on hardware) while the ring
         // is empty. `step_source_sink` is the same frame-at-a-time runner a C/RTOS
         // superloop uses.
-        let mut src = SpscCaptureSrc::new(&ring, thread::yield_now, FRAME_NS)
-            .with_frame_limit(TARGET);
-        let mut sink = InOrderSink { next_expected: 0, count: 0, ordered: true };
+        let mut src =
+            SpscCaptureSrc::new(&ring, thread::yield_now, FRAME_NS).with_frame_limit(TARGET);
+        let mut sink = InOrderSink {
+            next_expected: 0,
+            count: 0,
+            ordered: true,
+        };
         loop {
             match step_source_sink(&mut src, &mut sink).expect("clean step") {
                 Step::Advanced => {}
@@ -90,7 +94,10 @@ fn isr_style_producer_feeds_the_pipeline_lossless_and_in_order() {
         // arrived, each in capture sequence. (The producer retries on a full ring
         // rather than dropping, so `overruns` here counts transient full-ring
         // retries, not lost frames; the no-loss guarantee is the count below.)
-        assert!(sink.ordered, "every frame reached the pipeline in capture order");
+        assert!(
+            sink.ordered,
+            "every frame reached the pipeline in capture order"
+        );
         assert_eq!(sink.count, TARGET, "no captured frame was lost");
     });
 }
@@ -147,8 +154,18 @@ fn a_fast_producer_drops_and_counts_frames_without_reorder() {
         }
 
         let overruns = ring.overruns();
-        assert!(ordered, "delivered frames are strictly increasing (no reorder/corruption)");
-        assert!(overruns > 0, "a fast producer over a slow consumer must overrun (got {overruns})");
-        assert_eq!(delivered + overruns, ATTEMPTS, "every attempt was either delivered or counted as an overrun");
+        assert!(
+            ordered,
+            "delivered frames are strictly increasing (no reorder/corruption)"
+        );
+        assert!(
+            overruns > 0,
+            "a fast producer over a slow consumer must overrun (got {overruns})"
+        );
+        assert_eq!(
+            delivered + overruns,
+            ATTEMPTS,
+            "every attempt was either delivered or counted as an overrun"
+        );
     });
 }

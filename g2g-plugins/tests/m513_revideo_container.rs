@@ -10,7 +10,10 @@
 //! `submit_chunk`, and compare every I420 frame to the reference decode.
 //!
 //! Runs on the RTX 3060; skips with no Vulkan H.264 decode adapter.
-#![cfg(all(any(target_os = "linux", target_os = "windows"), feature = "vulkan-video"))]
+#![cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    feature = "vulkan-video"
+))]
 
 use g2g_core::runtime::block_on;
 use g2g_plugins::revideo::{CodecConfig, VideoCodec, VulkanStreamDecoder};
@@ -117,7 +120,10 @@ fn from_config_decodes_container_samples_bit_identically() {
 
     let mut got = Vec::new();
     for (i, s) in samples.iter().enumerate() {
-        got.extend(dec.submit_chunk(s, i == 0).expect("container-sample decode"));
+        got.extend(
+            dec.submit_chunk(s, i == 0)
+                .expect("container-sample decode"),
+        );
     }
     assert_eq!(got.len(), ref_frames.len());
 

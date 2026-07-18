@@ -73,7 +73,11 @@ fn synthetic_ogg() -> Vec<u8> {
         0x00,
         serial,
         2,
-        &[&[STEREO_TOC, 0x00], &[STEREO_TOC, 0x01], &[STEREO_TOC, 0x02]],
+        &[
+            &[STEREO_TOC, 0x00],
+            &[STEREO_TOC, 0x01],
+            &[STEREO_TOC, 0x02],
+        ],
     ));
     s
 }
@@ -93,14 +97,25 @@ async fn oggdemux_feeds_opusparse_end_to_end() {
         path.display()
     );
     let graph = parse_launch(&reg, &text).expect("pipeline parses");
-    let stats = run_graph(graph, &ZeroClock, 4).await.expect("pipeline runs");
-    assert_eq!(stats.frames_consumed, 3, "three Opus packets pass through the parser to the sink");
+    let stats = run_graph(graph, &ZeroClock, 4)
+        .await
+        .expect("pipeline runs");
+    assert_eq!(
+        stats.frames_consumed, 3,
+        "three Opus packets pass through the parser to the sink"
+    );
     let _ = fs::remove_file(&path);
 }
 
 #[test]
 fn opusparse_registered_and_constructable() {
     let reg = default_registry();
-    assert!(reg.inspect("opusparse").is_some(), "opusparse joins the default registry");
-    assert!(reg.make_element("opusparse").is_some(), "opusparse builds by name");
+    assert!(
+        reg.inspect("opusparse").is_some(),
+        "opusparse joins the default registry"
+    );
+    assert!(
+        reg.make_element("opusparse").is_some(),
+        "opusparse builds by name"
+    );
 }

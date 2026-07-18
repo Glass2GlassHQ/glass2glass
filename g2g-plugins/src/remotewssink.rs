@@ -50,7 +50,10 @@ impl RemoteWsSink {
     /// Send the packet stream to `url` (the [`RemoteWsSrc`](crate::remotewssrc)
     /// server, e.g. `ws://127.0.0.1:9601`).
     pub fn new(url: impl Into<String>) -> Self {
-        RemoteClient::from_transport(WsClient { url: url.into(), socket: None })
+        RemoteClient::from_transport(WsClient {
+            url: url.into(),
+            socket: None,
+        })
     }
 }
 

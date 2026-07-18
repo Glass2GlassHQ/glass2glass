@@ -31,7 +31,12 @@ fn caps() -> Caps {
 fn frame(pts_ns: u64) -> PipelinePacket {
     PipelinePacket::DataFrame(Frame::new(
         MemoryDomain::System(SystemSlice::from_boxed(Box::new([0u8]) as Box<[u8]>)),
-        FrameTiming { pts_ns, dts_ns: pts_ns, duration_ns: 1000, ..FrameTiming::default() },
+        FrameTiming {
+            pts_ns,
+            dts_ns: pts_ns,
+            duration_ns: 1000,
+            ..FrameTiming::default()
+        },
         0,
     ))
 }
@@ -77,22 +82,36 @@ async fn positive_offset_delays_pts_and_dts() {
 async fn negative_offset_advances_and_clamps_at_zero() {
     let out = run_offset(-500, &[0, 1000]).await;
     // 0 - 500 clamps to 0 (a PTS cannot go negative); 1000 - 500 = 500.
-    assert_eq!(out.pts, vec![0, 500], "negative offset advances, clamped at 0");
+    assert_eq!(
+        out.pts,
+        vec![0, 500],
+        "negative offset advances, clamped at 0"
+    );
 }
 
 #[tokio::test]
 async fn zero_offset_is_passthrough() {
     let out = run_offset(0, &[0, 1000, 2000]).await;
-    assert_eq!(out.pts, vec![0, 1000, 2000], "zero offset leaves the timeline untouched");
+    assert_eq!(
+        out.pts,
+        vec![0, 1000, 2000],
+        "zero offset leaves the timeline untouched"
+    );
 }
 
 #[test]
 fn registered_with_offset_property() {
     let reg = default_registry();
     // Registered under the gst-style name with a settable signed `offset`.
-    let mut el = reg.make_element("avoffset").expect("avoffset is registered");
-    el.set_property("offset", g2g_core::PropValue::Int(40_000_000)).expect("offset is settable");
-    assert_eq!(el.get_property("offset"), Some(g2g_core::PropValue::Int(40_000_000)));
+    let mut el = reg
+        .make_element("avoffset")
+        .expect("avoffset is registered");
+    el.set_property("offset", g2g_core::PropValue::Int(40_000_000))
+        .expect("offset is settable");
+    assert_eq!(
+        el.get_property("offset"),
+        Some(g2g_core::PropValue::Int(40_000_000))
+    );
 
     // And it parses + applies from a text pipeline (the av-offset use: delay audio).
     let graph = parse_launch(

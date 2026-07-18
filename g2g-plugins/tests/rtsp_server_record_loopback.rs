@@ -32,7 +32,8 @@ impl OutputSink for Capture {
         if let PipelinePacket::DataFrame(frame) = &p {
             if let MemoryDomain::System(slice) = &frame.domain {
                 // Annex-B payload [0,0,0,1][NAL][tag ..]; recover the tag byte.
-                self.tags.push(slice.as_slice().get(5).copied().unwrap_or(0));
+                self.tags
+                    .push(slice.as_slice().get(5).copied().unwrap_or(0));
             }
         }
         Box::pin(async { Ok(PushOutcome::Accepted) })
@@ -90,7 +91,9 @@ fn parse_server_port(resp: &str) -> u16 {
 async fn handshake_publisher(
     rtsp_addr: std::net::SocketAddr,
 ) -> (tokio::net::TcpStream, tokio::net::UdpSocket, u16) {
-    let mut ctrl = tokio::net::TcpStream::connect(rtsp_addr).await.expect("connect rtsp");
+    let mut ctrl = tokio::net::TcpStream::connect(rtsp_addr)
+        .await
+        .expect("connect rtsp");
     let url = "rtsp://127.0.0.1/stream";
 
     ctrl.write_all(format!("OPTIONS {url} RTSP/1.0\r\nCSeq: 1\r\n\r\n").as_bytes())
@@ -111,7 +114,9 @@ async fn handshake_publisher(
     assert!(read_response(&mut ctrl).await.contains("200 OK"));
 
     // We send RTP from this socket; client_port is advertised for symmetry.
-    let rtp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.expect("bind publisher rtp");
+    let rtp = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind publisher rtp");
     let client_rtp_port = rtp.local_addr().unwrap().port();
     ctrl.write_all(
         format!(
@@ -132,7 +137,9 @@ async fn handshake_publisher(
     .unwrap();
     assert!(read_response(&mut ctrl).await.contains("200 OK"));
 
-    rtp.connect(("127.0.0.1", server_port)).await.expect("connect rtp dest");
+    rtp.connect(("127.0.0.1", server_port))
+        .await
+        .expect("connect rtp dest");
     (ctrl, rtp, server_port)
 }
 
@@ -143,7 +150,10 @@ where
     F: FnOnce(std::net::SocketAddr) -> Fut,
     Fut: Future<Output = ()>,
 {
-    let rtsp_addr = src.local_port().map(|p| ([127, 0, 0, 1], p).into()).expect("bound");
+    let rtsp_addr = src
+        .local_port()
+        .map(|p| ([127, 0, 0, 1], p).into())
+        .expect("bound");
     let server = async move {
         let mut src = src;
         src.configure_pipeline(&h264_caps()).expect("configure");
@@ -185,7 +195,10 @@ async fn rtsp_publisher_handshakes_then_pushes_rtp() {
     let (n, tags) = run_ingest(src, publisher).await;
     assert_eq!(n, N as u64, "server emitted every access unit then EOS");
     let expected: Vec<u8> = (0..N).collect();
-    assert_eq!(tags, expected, "server received and depayloaded every AU in order");
+    assert_eq!(
+        tags, expected,
+        "server received and depayloaded every AU in order"
+    );
 }
 
 /// The ingest jitter buffer (M520) reorders RTP that arrives out of sequence:
@@ -236,5 +249,8 @@ async fn rtsp_ingest_reorders_out_of_order_rtp() {
     let (n, tags) = run_ingest(src, publisher).await;
     assert_eq!(n, N as u64, "server emitted every access unit then EOS");
     let expected: Vec<u8> = (0..N).collect();
-    assert_eq!(tags, expected, "jitter buffer restored RTP-sequence order despite swapped arrival");
+    assert_eq!(
+        tags, expected,
+        "jitter buffer restored RTP-sequence order despite swapped arrival"
+    );
 }

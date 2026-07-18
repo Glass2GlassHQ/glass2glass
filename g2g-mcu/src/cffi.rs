@@ -160,7 +160,10 @@ impl H264Encoder for CH264Encoder {
             // violation (the same one HwH264Enc rejects); fail loud.
             return Err(G2gError::CapsMismatch);
         }
-        Ok(H264EncodeInfo { len, keyframe: keyframe != 0 })
+        Ok(H264EncodeInfo {
+            len,
+            keyframe: keyframe != 0,
+        })
     }
 }
 
@@ -192,11 +195,21 @@ impl CPacketSender {
 }
 
 impl PacketSender for CPacketSender {
-    async fn send(&mut self, header: &[u8; RTP_HEADER_LEN], payload: &[u8]) -> Result<(), G2gError> {
+    async fn send(
+        &mut self,
+        header: &[u8; RTP_HEADER_LEN],
+        payload: &[u8],
+    ) -> Result<(), G2gError> {
         // SAFETY: the constructor's contract: `send` is a valid function over
         // `ctx`; both slices are valid for their lengths for the call's duration.
         let rc = unsafe {
-            (self.send)(self.ctx, header.as_ptr(), header.len(), payload.as_ptr(), payload.len())
+            (self.send)(
+                self.ctx,
+                header.as_ptr(),
+                header.len(),
+                payload.as_ptr(),
+                payload.len(),
+            )
         };
         if rc < 0 {
             return Err(G2gError::Hardware(HardwareError::Peripheral));

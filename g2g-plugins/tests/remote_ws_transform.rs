@@ -51,8 +51,14 @@ struct CountSrc {
 }
 
 impl SourceLoop for CountSrc {
-    type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>> where Self: 'a;
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>> where Self: 'a;
+    type RunFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
+    where
+        Self: 'a;
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
+    where
+        Self: 'a;
 
     fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
         core::future::ready(Ok(test_caps()))
@@ -75,7 +81,10 @@ impl SourceLoop for CountSrc {
                     domain: MemoryDomain::System(SystemSlice::from_boxed(
                         vec![i; LEN].into_boxed_slice(),
                     )),
-                    timing: FrameTiming { pts_ns: i as u64 * 1000, ..FrameTiming::default() },
+                    timing: FrameTiming {
+                        pts_ns: i as u64 * 1000,
+                        ..FrameTiming::default()
+                    },
                     sequence: i as u64,
                     meta: Default::default(),
                 };
@@ -96,7 +105,10 @@ struct CollectSink {
 }
 
 impl AsyncElement for CollectSink {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>> where Self: 'a;
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
     fn intercept_caps(&self, c: &Caps) -> Result<Caps, G2gError> {
         Ok(c.clone())
     }
@@ -133,7 +145,9 @@ async fn invert_server(listener: StdTcpListener) -> Result<u64, Box<dyn std::err
     let mut ws = tokio_tungstenite::accept_async(tcp).await?;
     let mut processed = 0u64;
     while let Some(msg) = ws.next().await {
-        let Message::Binary(bytes) = msg? else { continue };
+        let Message::Binary(bytes) = msg? else {
+            continue;
+        };
         match decode_packet(&bytes).map_err(|e| format!("decode: {e:?}"))? {
             PipelinePacket::DataFrame(mut frame) => {
                 if let MemoryDomain::System(s) = &mut frame.domain {
@@ -161,7 +175,10 @@ async fn remote_ws_transform_offloads_and_returns_processed_frames() {
     let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind");
     let port = listener.local_addr().unwrap().port();
 
-    let mut src = CountSrc { n: N, configured: false };
+    let mut src = CountSrc {
+        n: N,
+        configured: false,
+    };
     let mut xform = RemoteWsTransform::new(format!("ws://127.0.0.1:{port}"));
     let mut sink = CollectSink::default();
     let clock = ZeroClock;
@@ -182,13 +199,20 @@ async fn remote_ws_transform_offloads_and_returns_processed_frames() {
     let stats = run_res.expect("finishes within 10s").expect("pipeline ok");
 
     // Every frame round-tripped through the remote stage.
-    assert_eq!(stats.frames_emitted, N as u64, "all frames crossed and returned");
+    assert_eq!(
+        stats.frames_emitted, N as u64,
+        "all frames crossed and returned"
+    );
     assert_eq!(xform.emitted(), N as u64, "transform emitted one per frame");
     assert_eq!(sink.frames.len(), N as usize);
     for (i, (seq, byte)) in sink.frames.iter().enumerate() {
         assert_eq!(*seq, i as u64, "order preserved (FIFO reply pairing)");
         // The source sent byte == i; the remote stage inverted it.
-        assert_eq!(*byte, !(i as u8), "the remote stage's processing was applied");
+        assert_eq!(
+            *byte,
+            !(i as u8),
+            "the remote stage's processing was applied"
+        );
     }
     assert!(sink.eos, "stream ended on Eos");
 

@@ -45,7 +45,9 @@ fn pattern(i: usize) -> u8 {
 /// (emit the producer's mapped VRAM directly, no receive-side copy); otherwise
 /// the default device->device copy mode. The child inherits this env.
 fn zero_copy() -> bool {
-    std::env::var("G2G_ZEROCOPY").map(|v| v == "1").unwrap_or(false)
+    std::env::var("G2G_ZEROCOPY")
+        .map(|v| v == "1")
+        .unwrap_or(false)
 }
 
 fn nv12() -> Caps {
@@ -113,8 +115,11 @@ fn run_parent() {
         .into_owned();
     let _ = std::fs::remove_file(&path);
     let exe = std::env::current_exe().expect("current_exe");
-    let mut child =
-        Command::new(exe).arg("child").arg(&path).spawn().expect("spawn child");
+    let mut child = Command::new(exe)
+        .arg("child")
+        .arg(&path)
+        .spawn()
+        .expect("spawn child");
 
     // Wait for the child to bind the socket (it does so during negotiation).
     let mut waited = 0;
@@ -124,7 +129,10 @@ fn run_parent() {
         assert!(waited < 200, "child never bound {path}");
     }
 
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
     rt.block_on(async {
         let ctx = Arc::new(ParentCtx(
             localipc::init_context(0).expect("CUDA context (need an NVIDIA GPU)"),
@@ -145,7 +153,10 @@ fn run_parent() {
             W,
             H,
             ctx.0,
-            Arc::new(ParentAlloc { dptr: base, _ctx: Arc::clone(&ctx) }),
+            Arc::new(ParentAlloc {
+                dptr: base,
+                _ctx: Arc::clone(&ctx),
+            }),
         );
 
         let mut sink = LocalCudaSink::new(path);
@@ -154,7 +165,10 @@ fn run_parent() {
         for seq in 0..N {
             let frame = Frame {
                 domain: MemoryDomain::Cuda(buf.clone()),
-                timing: FrameTiming { pts_ns: seq * 1000, ..FrameTiming::default() },
+                timing: FrameTiming {
+                    pts_ns: seq * 1000,
+                    ..FrameTiming::default()
+                },
                 sequence: seq,
                 meta: Default::default(),
             };
@@ -162,7 +176,9 @@ fn run_parent() {
                 .await
                 .expect("send frame");
         }
-        sink.process(PipelinePacket::Eos, &mut null).await.expect("eos");
+        sink.process(PipelinePacket::Eos, &mut null)
+            .await
+            .expect("eos");
         assert_eq!(sink.sent(), N, "all frames sent + acked");
         // `buf` drops here (last ref) -> ParentAlloc frees the VRAM; the child
         // has already copied every frame (it acked each before we advanced).
@@ -172,8 +188,15 @@ fn run_parent() {
     let _ = std::fs::remove_file(
         std::env::temp_dir().join(format!("g2g-localcuda-{}.sock", std::process::id())),
     );
-    assert!(status.success(), "child failed to receive/verify frames: {status:?}");
-    let mode = if zero_copy() { "zero-copy (direct-mapped)" } else { "device->device copy" };
+    assert!(
+        status.success(),
+        "child failed to receive/verify frames: {status:?}"
+    );
+    let mode = if zero_copy() {
+        "zero-copy (direct-mapped)"
+    } else {
+        "device->device copy"
+    };
     println!(
         "PASS [{mode}]: {N} NV12 frames crossed a process boundary GPU->GPU via \
          CUDA IPC (no PCIe); child verified every pixel"
@@ -197,7 +220,10 @@ struct VerifySink {
     bad: bool,
 }
 impl AsyncElement for VerifySink {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>> where Self: 'a;
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
     fn intercept_caps(&self, c: &Caps) -> Result<Caps, G2gError> {
         Ok(c.clone())
     }
@@ -230,7 +256,10 @@ impl AsyncElement for VerifySink {
 }
 
 fn run_child(path: &str) -> i32 {
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
     rt.block_on(async {
         let mut src = LocalCudaSrc::new(path).with_frame_limit(N);
         if zero_copy() {

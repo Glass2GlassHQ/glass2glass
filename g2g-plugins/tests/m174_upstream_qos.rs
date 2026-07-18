@@ -37,10 +37,18 @@ struct QosSink {
 
 impl QosSink {
     fn behind(jitter_ns: i64) -> Self {
-        Self { received: 0, jitter_ns: Some(jitter_ns), pending: None }
+        Self {
+            received: 0,
+            jitter_ns: Some(jitter_ns),
+            pending: None,
+        }
     }
     fn on_time() -> Self {
-        Self { received: 0, jitter_ns: None, pending: None }
+        Self {
+            received: 0,
+            jitter_ns: None,
+            pending: None,
+        }
     }
 }
 
@@ -68,7 +76,10 @@ impl AsyncElement for QosSink {
             if let PipelinePacket::DataFrame(f) = packet {
                 self.received += 1;
                 if let Some(j) = self.jitter_ns {
-                    self.pending = Some(QosMessage { jitter_ns: j, running_time_ns: f.timing.pts_ns });
+                    self.pending = Some(QosMessage {
+                        jitter_ns: j,
+                        running_time_ns: f.timing.pts_ns,
+                    });
                 }
             }
             Ok(())
@@ -91,7 +102,11 @@ async fn source_skips_frames_under_upstream_qos() {
         .await
         .expect("pipeline runs");
 
-    assert!(src.skipped() > 0, "source skipped frames under QoS (skipped={})", src.skipped());
+    assert!(
+        src.skipped() > 0,
+        "source skipped frames under QoS (skipped={})",
+        src.skipped()
+    );
     assert!(
         stats.frames_emitted < target,
         "source emitted fewer than target due to skips ({} < {target})",
@@ -99,7 +114,10 @@ async fn source_skips_frames_under_upstream_qos() {
     );
     // The sink consumed exactly what the source pushed (this sink signals QoS but
     // drops nothing of its own).
-    assert_eq!(stats.frames_consumed, stats.frames_emitted, "every pushed frame reached the sink");
+    assert_eq!(
+        stats.frames_consumed, stats.frames_emitted,
+        "every pushed frame reached the sink"
+    );
     assert_eq!(sink.received, stats.frames_emitted);
 }
 

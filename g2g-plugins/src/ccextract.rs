@@ -102,9 +102,10 @@ impl CcExtract {
     }
 
     fn output_caps() -> Caps {
-        Caps::Text { format: TextFormat::Utf8 }
+        Caps::Text {
+            format: TextFormat::Utf8,
+        }
     }
-
 }
 
 /// Emit a run of finished caption cues as `Caps::Text{Utf8}` `DataFrame`s, one per
@@ -119,7 +120,10 @@ pub(crate) async fn push_cue_frames(
 ) -> Result<(), G2gError> {
     for cue in cues {
         if !*caps_emitted {
-            out.push(PipelinePacket::CapsChanged(Caps::Text { format: TextFormat::Utf8 })).await?;
+            out.push(PipelinePacket::CapsChanged(Caps::Text {
+                format: TextFormat::Utf8,
+            }))
+            .await?;
             *caps_emitted = true;
         }
         let timing = FrameTiming {
@@ -131,10 +135,15 @@ pub(crate) async fn push_cue_frames(
         // Carry the cue placement (608 row / indent, 708 window anchor) as
         // frame-meta so the overlay can honour it (no-op on the ZST baseline).
         #[cfg_attr(not(feature = "metadata"), allow(unused_mut))]
-        let mut frame =
-            Frame::new(MemoryDomain::System(SystemSlice::from_boxed(payload)), timing, *sequence);
+        let mut frame = Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(payload)),
+            timing,
+            *sequence,
+        );
         #[cfg(feature = "metadata")]
-        frame.meta.attach(TextCueMeta { settings: cue.settings });
+        frame.meta.attach(TextCueMeta {
+            settings: cue.settings,
+        });
         *sequence += 1;
         out.push(PipelinePacket::DataFrame(frame)).await?;
     }
@@ -149,9 +158,10 @@ impl AsyncElement for CcExtract {
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         match upstream_caps {
-            Caps::CompressedVideo { codec: VideoCodec::H264 | VideoCodec::H265, .. } => {
-                Ok(upstream_caps.clone())
-            }
+            Caps::CompressedVideo {
+                codec: VideoCodec::H264 | VideoCodec::H265,
+                ..
+            } => Ok(upstream_caps.clone()),
             _ => Err(G2gError::CapsMismatch),
         }
     }
@@ -161,16 +171,20 @@ impl AsyncElement for CcExtract {
     /// sink pad takes the compressed video.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
-            Caps::CompressedVideo { codec: VideoCodec::H264 | VideoCodec::H265, .. } => {
-                CapsSet::one(Self::output_caps())
-            }
+            Caps::CompressedVideo {
+                codec: VideoCodec::H264 | VideoCodec::H265,
+                ..
+            } => CapsSet::one(Self::output_caps()),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         match absolute_caps {
-            Caps::CompressedVideo { codec: codec @ (VideoCodec::H264 | VideoCodec::H265), .. } => {
+            Caps::CompressedVideo {
+                codec: codec @ (VideoCodec::H264 | VideoCodec::H265),
+                ..
+            } => {
                 self.codec = Some(*codec);
                 Ok(ConfigureOutcome::Accepted)
             }
@@ -199,7 +213,8 @@ impl AsyncElement for CcExtract {
             let cues = match packet {
                 PipelinePacket::DataFrame(frame) => {
                     self.last_pts = frame.timing.pts_ns;
-                    if let (MemoryDomain::System(slice), Some(codec)) = (&frame.domain, self.codec) {
+                    if let (MemoryDomain::System(slice), Some(codec)) = (&frame.domain, self.codec)
+                    {
                         // Drive the decoder from this access unit's bytes; any
                         // newly finished cue is drained and emitted below.
                         let au = slice.as_slice().to_vec();
@@ -277,7 +292,8 @@ mod tests {
             .filter_map(|p| match p {
                 PipelinePacket::DataFrame(f) => {
                     if let MemoryDomain::System(s) = &f.domain {
-                        let text = alloc::string::String::from_utf8_lossy(s.as_slice()).into_owned();
+                        let text =
+                            alloc::string::String::from_utf8_lossy(s.as_slice()).into_owned();
                         Some((f.timing.pts_ns, f.timing.duration_ns, text))
                     } else {
                         None
@@ -295,7 +311,7 @@ mod tests {
         let mut payload = vec![0xB5, 0x00, 0x31]; // itu-t-t35 country + provider (GA94 below)
         payload.extend_from_slice(&[0x47, 0x41, 0x39, 0x34]); // "GA94"
         payload.push(0x03); // user_data_type_code = cc_data
-        // cc_data header: process_cc_data_flag(0x40) | cc_count, then em_data 0xFF.
+                            // cc_data header: process_cc_data_flag(0x40) | cc_count, then em_data 0xFF.
         let cc_count = triples.len() as u8;
         payload.push(0x40 | (cc_count & 0x1F));
         payload.push(0xFF);
@@ -330,7 +346,10 @@ mod tests {
     fn data_frame(au: Vec<u8>, pts: u64) -> PipelinePacket {
         let frame = Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
-            FrameTiming { pts_ns: pts, ..Default::default() },
+            FrameTiming {
+                pts_ns: pts,
+                ..Default::default()
+            },
             0,
         );
         PipelinePacket::DataFrame(frame)
@@ -341,7 +360,9 @@ mod tests {
         let el = CcExtract::new();
         assert_eq!(el.intercept_caps(&h264_caps()).unwrap(), h264_caps());
         assert!(el
-            .intercept_caps(&Caps::Text { format: TextFormat::Utf8 })
+            .intercept_caps(&Caps::Text {
+                format: TextFormat::Utf8
+            })
             .is_err());
         let derived = match el.caps_constraint_as_transform() {
             CapsConstraint::DerivedOutput(f) => f(&h264_caps()),
@@ -360,13 +381,29 @@ mod tests {
 
         // RCL (0x14 0x20) resume caption loading; 'H','I'; EOC (0x14 0x2F) display.
         let au1 = h264_au_with_triples(&[
-            CcTriple { cc_type: 0, b0: 0x14, b1: 0x20 },
-            CcTriple { cc_type: 0, b0: b'H', b1: b'I' },
-            CcTriple { cc_type: 0, b0: 0x14, b1: 0x2F },
+            CcTriple {
+                cc_type: 0,
+                b0: 0x14,
+                b1: 0x20,
+            },
+            CcTriple {
+                cc_type: 0,
+                b0: b'H',
+                b1: b'I',
+            },
+            CcTriple {
+                cc_type: 0,
+                b0: 0x14,
+                b1: 0x2F,
+            },
         ]);
         el.process(data_frame(au1, 1_000), &mut sink).await.unwrap();
         // EDM (0x14 0x2C) erase displayed memory ends the caption.
-        let au2 = h264_au_with_triples(&[CcTriple { cc_type: 0, b0: 0x14, b1: 0x2C }]);
+        let au2 = h264_au_with_triples(&[CcTriple {
+            cc_type: 0,
+            b0: 0x14,
+            b1: 0x2C,
+        }]);
         el.process(data_frame(au2, 5_000), &mut sink).await.unwrap();
 
         let cues = cue_texts(&sink);
@@ -374,10 +411,12 @@ mod tests {
         assert_eq!(cues[0].2, "HI");
         assert_eq!(cues[0].0, 1_000); // started at the EOC access unit
         assert_eq!(cues[0].0 + cues[0].1, 5_000); // ended at the EDM access unit
-        // The output caps are announced before the first cue frame.
+                                                  // The output caps are announced before the first cue frame.
         assert!(matches!(
             sink.packets.first(),
-            Some(PipelinePacket::CapsChanged(Caps::Text { format: TextFormat::Utf8 }))
+            Some(PipelinePacket::CapsChanged(Caps::Text {
+                format: TextFormat::Utf8
+            }))
         ));
     }
 
@@ -389,7 +428,11 @@ mod tests {
         el.configure_pipeline(&h264_caps()).expect("accepts H.264");
         let mut sink = RecordingSink::default();
         // A lone 608 pair (no 708 packet) yields nothing from the 708 decoder.
-        let au = h264_au_with_triples(&[CcTriple { cc_type: 0, b0: b'H', b1: b'I' }]);
+        let au = h264_au_with_triples(&[CcTriple {
+            cc_type: 0,
+            b0: b'H',
+            b1: b'I',
+        }]);
         el.process(data_frame(au, 1_000), &mut sink).await.unwrap();
         el.process(PipelinePacket::Eos, &mut sink).await.unwrap();
         assert!(cue_texts(&sink).is_empty());
@@ -399,7 +442,11 @@ mod tests {
     async fn requires_configure() {
         let mut el = CcExtract::new();
         let mut sink = RecordingSink::default();
-        let au = h264_au_with_triples(&[CcTriple { cc_type: 0, b0: b'H', b1: b'I' }]);
+        let au = h264_au_with_triples(&[CcTriple {
+            cc_type: 0,
+            b0: b'H',
+            b1: b'I',
+        }]);
         // Processing before configure_pipeline is a NotConfigured error.
         assert!(el.process(data_frame(au, 0), &mut sink).await.is_err());
     }

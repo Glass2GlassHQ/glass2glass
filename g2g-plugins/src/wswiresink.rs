@@ -110,7 +110,8 @@ impl WsWireSink {
 }
 
 impl AsyncElement for WsWireSink {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -161,14 +162,16 @@ impl AsyncElement for WsWireSink {
             // mid-stream `CapsChanged` packet) sends the caps exactly once.
             if let Some(caps) = self.configured_caps.clone() {
                 if self.last_sent.as_ref() != Some(&caps) {
-                    self.send(&PipelinePacket::CapsChanged(caps.clone())).await?;
+                    self.send(&PipelinePacket::CapsChanged(caps.clone()))
+                        .await?;
                     self.last_sent = Some(caps);
                 }
             }
             match packet {
                 PipelinePacket::CapsChanged(caps) => {
                     if self.last_sent.as_ref() != Some(&caps) {
-                        self.send(&PipelinePacket::CapsChanged(caps.clone())).await?;
+                        self.send(&PipelinePacket::CapsChanged(caps.clone()))
+                            .await?;
                         self.last_sent = Some(caps);
                     }
                 }

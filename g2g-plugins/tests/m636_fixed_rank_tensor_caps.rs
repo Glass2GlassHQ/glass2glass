@@ -42,7 +42,11 @@ unsafe impl GlobalAlloc for Counting {
 static ALLOCATOR: Counting = Counting;
 
 fn tensor(dtype: TensorDType, shape: TensorShape) -> Caps {
-    Caps::Tensor { dtype, shape, layout: TensorLayout::Nchw }
+    Caps::Tensor {
+        dtype,
+        shape,
+        layout: TensorLayout::Nchw,
+    }
 }
 
 #[test]
@@ -76,9 +80,15 @@ fn fixed_rank_tensor_caps() {
     assert_eq!(a.intersect(&a), Ok(a.clone()));
     assert_eq!(a.fixate(), Ok(a.clone()));
     let b = tensor(TensorDType::F32, TensorShape::new([1, 3, 224]));
-    assert!(a.intersect(&b).is_err(), "shape mismatch must not intersect");
+    assert!(
+        a.intersect(&b).is_err(),
+        "shape mismatch must not intersect"
+    );
     let c = tensor(TensorDType::U8, s);
-    assert!(a.intersect(&c).is_err(), "dtype mismatch must not intersect");
+    assert!(
+        a.intersect(&c).is_err(),
+        "dtype mismatch must not intersect"
+    );
 
     // -- zero-alloc: the negotiation path allocates nothing --
     // (`Caps` has no heap fields; intersect/fixate of tensor caps clones by

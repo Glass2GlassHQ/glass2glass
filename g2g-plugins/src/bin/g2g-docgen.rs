@@ -21,7 +21,10 @@ use g2g_plugins::registry::default_registry;
 
 /// Minimal HTML-text escape for content interpolated into the page.
 fn esc(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 /// A lowercased haystack for the client-side filter: name, long name, klass,
@@ -82,7 +85,11 @@ fn render_property(out: &mut String, p: &g2g_core::runtime::PropertyDoc) {
         facts.push(format!("default: <code>{}</code>", esc(def)));
     }
     if !facts.is_empty() {
-        let _ = write!(out, "<div class=\"pfacts\">{}</div>", facts.join(" &middot; "));
+        let _ = write!(
+            out,
+            "<div class=\"pfacts\">{}</div>",
+            facts.join(" &middot; ")
+        );
     }
     out.push_str("</div>");
 }
@@ -131,7 +138,9 @@ fn render_card(out: &mut String, d: &ElementDoc) {
     if d.properties.is_empty() {
         out.push_str("<div class=\"seg\"><span class=\"seg-l\">Properties</span><span class=\"none\">none</span></div>");
     } else {
-        out.push_str("<div class=\"seg\"><span class=\"seg-l\">Properties</span><div class=\"props\">");
+        out.push_str(
+            "<div class=\"seg\"><span class=\"seg-l\">Properties</span><div class=\"props\">",
+        );
         for p in &d.properties {
             render_property(out, p);
         }
@@ -271,7 +280,9 @@ footer {{ border-top:1px solid var(--border); padding:24px 0; color:var(--t3); f
 }
 
 fn main() {
-    let out_path = std::env::args().nth(1).unwrap_or_else(|| "docs/elements.html".to_string());
+    let out_path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "docs/elements.html".to_string());
     let reg = default_registry();
     let mut docs = reg.describe_all();
     docs.sort_by(|a, b| a.name.cmp(&b.name));

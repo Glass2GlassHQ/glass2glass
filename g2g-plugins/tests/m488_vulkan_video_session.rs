@@ -6,7 +6,10 @@
 //! session parameters makes the driver validate the `Std*` SPS/PPS mapping
 //! (M487), so a green run here proves that mapping is correct end to end on the
 //! GPU, not just self-consistent. Runs on the RTX 3060; skips with no adapter.
-#![cfg(all(any(target_os = "linux", target_os = "windows"), feature = "vulkan-video"))]
+#![cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    feature = "vulkan-video"
+))]
 
 use g2g_core::runtime::block_on;
 use g2g_plugins::vulkanvideo::{
@@ -43,7 +46,11 @@ fn creates_h264_decode_session_from_real_sps_pps() {
     assert!(session.coded_extent.0 >= 640 && session.coded_extent.1 >= 480);
     // Format::UNDEFINED is 0; a concrete decode format is non-zero. (Compared
     // via the inherent `as_raw` so the test needs no direct ash dependency.)
-    assert_ne!(session.picture_format.as_raw(), 0, "decode picture format must be concrete");
+    assert_ne!(
+        session.picture_format.as_raw(),
+        0,
+        "decode picture format must be concrete"
+    );
     eprintln!(
         "Vulkan H.264 session created: picture_format={:?}, coded_extent={:?}",
         session.picture_format, session.coded_extent,

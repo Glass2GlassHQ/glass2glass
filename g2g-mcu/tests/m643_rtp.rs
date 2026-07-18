@@ -23,7 +23,11 @@ struct Collect {
 }
 
 impl PacketSender for Collect {
-    async fn send(&mut self, header: &[u8; RTP_HEADER_LEN], payload: &[u8]) -> Result<(), G2gError> {
+    async fn send(
+        &mut self,
+        header: &[u8; RTP_HEADER_LEN],
+        payload: &[u8],
+    ) -> Result<(), G2gError> {
         let mut pkt = header.to_vec();
         pkt.extend_from_slice(payload);
         self.packets.push(pkt);
@@ -38,7 +42,13 @@ const PTIME_BYTES: usize = 160;
 #[test]
 fn packets_carry_the_contracted_header() {
     let ring: StaticLendRing<1, 256> = StaticLendRing::new();
-    let mut sink = RtpSink::new(Collect::default(), MediaClock::audio(8000), 0, 0xDEAD_BEEF, 100);
+    let mut sink = RtpSink::new(
+        Collect::default(),
+        MediaClock::audio(8000),
+        0,
+        0xDEAD_BEEF,
+        100,
+    );
     for i in 0..3u64 {
         let payload = [i as u8; PTIME_BYTES];
         let frame = frame_of(&ring, &payload, i * PTIME_NS, i);
@@ -50,15 +60,31 @@ fn packets_carry_the_contracted_header() {
         assert_eq!(pkt.len(), RTP_HEADER_LEN + PTIME_BYTES);
         assert_eq!(pkt[0], 0x80, "V=2, no padding/extension/CSRCs");
         let marker = pkt[1] & 0x80 != 0;
-        assert_eq!(marker, i == 0, "marker only on the first packet (talkspurt start)");
+        assert_eq!(
+            marker,
+            i == 0,
+            "marker only on the first packet (talkspurt start)"
+        );
         assert_eq!(pkt[1] & 0x7F, 0, "static PT 0 = PCMU");
         let seq = u16::from_be_bytes([pkt[2], pkt[3]]);
-        assert_eq!(seq, 100 + i as u16, "sequence starts at the seed and increments");
+        assert_eq!(
+            seq,
+            100 + i as u16,
+            "sequence starts at the seed and increments"
+        );
         let ts = u32::from_be_bytes([pkt[4], pkt[5], pkt[6], pkt[7]]);
-        assert_eq!(ts, i as u32 * PTIME_BYTES as u32, "PTS in 8 kHz media ticks: 160 per 20 ms");
+        assert_eq!(
+            ts,
+            i as u32 * PTIME_BYTES as u32,
+            "PTS in 8 kHz media ticks: 160 per 20 ms"
+        );
         let ssrc = u32::from_be_bytes([pkt[8], pkt[9], pkt[10], pkt[11]]);
         assert_eq!(ssrc, 0xDEAD_BEEF);
-        assert_eq!(&pkt[RTP_HEADER_LEN..], &[i as u8; PTIME_BYTES], "payload verbatim");
+        assert_eq!(
+            &pkt[RTP_HEADER_LEN..],
+            &[i as u8; PTIME_BYTES],
+            "payload verbatim"
+        );
     }
 }
 
@@ -110,11 +136,17 @@ struct UdpSender {
 }
 
 impl PacketSender for UdpSender {
-    async fn send(&mut self, header: &[u8; RTP_HEADER_LEN], payload: &[u8]) -> Result<(), G2gError> {
+    async fn send(
+        &mut self,
+        header: &[u8; RTP_HEADER_LEN],
+        payload: &[u8],
+    ) -> Result<(), G2gError> {
         let mut pkt = Vec::with_capacity(RTP_HEADER_LEN + payload.len());
         pkt.extend_from_slice(header);
         pkt.extend_from_slice(payload);
-        self.socket.send_to(&pkt, &self.dest).map_err(|_| G2gError::Hardware(g2g_core::error::HardwareError::Peripheral))?;
+        self.socket
+            .send_to(&pkt, &self.dest)
+            .map_err(|_| G2gError::Hardware(g2g_core::error::HardwareError::Peripheral))?;
         Ok(())
     }
 }
@@ -128,7 +160,11 @@ fn ffmpeg_depacketizes_the_rtp_stream() {
     }
 
     // A free local port: bind, read it back, release it to ffmpeg.
-    let port = UdpSocket::bind("127.0.0.1:0").expect("probe port").local_addr().unwrap().port();
+    let port = UdpSocket::bind("127.0.0.1:0")
+        .expect("probe port")
+        .local_addr()
+        .unwrap()
+        .port();
 
     // ffmpeg is the receiving peer: it reads the session description, binds
     // the port, depacketizes PCMU/RTP, and writes the raw mu-law bytes out.
@@ -155,14 +191,18 @@ fn ffmpeg_depacketizes_the_rtp_stream() {
 
     // The reference chain's tail: S16LE PCM -> G711Enc -> RtpSink, 20 ms
     // frames. 2.5 s of signal so ffmpeg's 2 s window closes with margin.
-    let samples: Vec<i16> =
-        (0..20_000).map(|i| (((i * 331) % 24001) - 12000) as i16).collect();
+    let samples: Vec<i16> = (0..20_000)
+        .map(|i| (((i * 331) % 24001) - 12000) as i16)
+        .collect();
     let pcm_ring: StaticLendRing<1, 512> = StaticLendRing::new();
     let ulaw_ring: StaticLendRing<1, 256> = StaticLendRing::new();
     // SAFETY: the ring outlives every frame in this test.
     let mut enc = unsafe { g2g_mcu::G711Enc::with_ring(g2g_mcu::Law::Mulaw, &ulaw_ring) };
     let socket = UdpSocket::bind("127.0.0.1:0").expect("bind send socket");
-    let sender = UdpSender { socket, dest: format!("127.0.0.1:{port}") };
+    let sender = UdpSender {
+        socket,
+        dest: format!("127.0.0.1:{port}"),
+    };
     let mut sink = RtpSink::new(sender, MediaClock::audio(8000), 0, 0x6767_6767, 0);
 
     let mut expected = Vec::new();
@@ -196,7 +236,11 @@ fn ffmpeg_depacketizes_the_rtp_stream() {
     // ffmpeg's depacketized stream must be our payload bytes, verbatim, from
     // the first packet (2 s = 16000 of the ~20000 sent).
     let theirs = std::fs::read(&out_path).expect("ffmpeg output");
-    assert!(theirs.len() >= 16_000, "ffmpeg captured its 2s window, got {}", theirs.len());
+    assert!(
+        theirs.len() >= 16_000,
+        "ffmpeg captured its 2s window, got {}",
+        theirs.len()
+    );
     assert_eq!(
         &theirs[..],
         &expected[..theirs.len()],

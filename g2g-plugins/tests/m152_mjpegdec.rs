@@ -11,7 +11,7 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket,
-    PushOutcome, RawVideoFormat, Rate, VideoCodec,
+    PushOutcome, Rate, RawVideoFormat, VideoCodec,
 };
 use g2g_plugins::mjpegdec::MjpegDec;
 
@@ -55,7 +55,10 @@ fn mjpeg_caps() -> Caps {
 fn frame(seq: u64) -> Frame {
     Frame::new(
         MemoryDomain::System(SystemSlice::from_boxed(RED16.to_vec().into_boxed_slice())),
-        FrameTiming { pts_ns: seq * 33_000_000, ..FrameTiming::default() },
+        FrameTiming {
+            pts_ns: seq * 33_000_000,
+            ..FrameTiming::default()
+        },
         seq,
     )
 }
@@ -67,7 +70,9 @@ async fn decodes_mjpeg_to_rgba8_with_recovered_geometry() {
     let mut sink = CaptureSink::default();
 
     for i in 0..2u64 {
-        dec.process(PipelinePacket::DataFrame(frame(i)), &mut sink).await.unwrap();
+        dec.process(PipelinePacket::DataFrame(frame(i)), &mut sink)
+            .await
+            .unwrap();
     }
 
     // Geometry recovered from the JPEG headers, emitted once (constant size).
@@ -90,7 +95,12 @@ async fn decodes_mjpeg_to_rgba8_with_recovered_geometry() {
     // The source was solid red; JPEG is lossy but the dominant channel survives.
     let px = &sink.frames[0][0..4];
     assert!(px[0] > 150, "red channel dominant (got {})", px[0]);
-    assert!(px[1] < 100 && px[2] < 100, "green/blue low (got {},{})", px[1], px[2]);
+    assert!(
+        px[1] < 100 && px[2] < 100,
+        "green/blue low (got {},{})",
+        px[1],
+        px[2]
+    );
     assert_eq!(px[3], 255, "opaque alpha");
 }
 
@@ -100,7 +110,9 @@ async fn decodes_mjpeg_to_i420() {
     dec.configure_pipeline(&mjpeg_caps()).unwrap();
     let mut sink = CaptureSink::default();
 
-    dec.process(PipelinePacket::DataFrame(frame(0)), &mut sink).await.unwrap();
+    dec.process(PipelinePacket::DataFrame(frame(0)), &mut sink)
+        .await
+        .unwrap();
 
     assert_eq!(
         sink.caps,
@@ -114,8 +126,15 @@ async fn decodes_mjpeg_to_i420() {
     );
     assert_eq!(sink.frames.len(), 1);
     // I420 is 4:2:0 planar: w*h luma + 2 * (w/2 * h/2) chroma.
-    assert_eq!(sink.frames[0].len(), 16 * 16 * 3 / 2, "planar 4:2:0 byte size");
+    assert_eq!(
+        sink.frames[0].len(),
+        16 * 16 * 3 / 2,
+        "planar 4:2:0 byte size"
+    );
     // Solid red -> low luma, and the V (red-difference) plane sits well above 128.
     let v_plane_start = 16 * 16 + (8 * 8);
-    assert!(sink.frames[0][v_plane_start] > 150, "red pushes the V chroma plane high");
+    assert!(
+        sink.frames[0][v_plane_start] > 150,
+        "red pushes the V chroma plane high"
+    );
 }

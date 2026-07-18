@@ -72,7 +72,11 @@ pub struct RecordSink {
 
 impl RecordSink {
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into(), writer: None, frames: 0 }
+        Self {
+            path: path.into(),
+            writer: None,
+            frames: 0,
+        }
     }
 
     pub fn frames_recorded(&self) -> u64 {
@@ -160,8 +164,11 @@ impl AsyncElement for RecordSink {
     }
 }
 
-static RECORD_PROPS: &[PropertySpec] =
-    &[PropertySpec::new("location", PropKind::Str, "recording file path")];
+static RECORD_PROPS: &[PropertySpec] = &[PropertySpec::new(
+    "location",
+    PropKind::Str,
+    "recording file path",
+)];
 
 impl PadTemplates for RecordSink {
     fn pad_templates() -> Vec<PadTemplate> {
@@ -182,7 +189,11 @@ pub struct ReplaySrc {
 
 impl ReplaySrc {
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into(), sync: false, configured: false }
+        Self {
+            path: path.into(),
+            sync: false,
+            configured: false,
+        }
     }
 
     /// The caps stored as the recording's leading record.
@@ -273,7 +284,11 @@ impl SourceLoop for ReplaySrc {
 
 static REPLAY_PROPS: &[PropertySpec] = &[
     PropertySpec::new("location", PropKind::Str, "recording file path"),
-    PropertySpec::new("sync", PropKind::Bool, "pace playback to recorded PTS (default off)"),
+    PropertySpec::new(
+        "sync",
+        PropKind::Bool,
+        "pace playback to recorded PTS (default off)",
+    ),
 ];
 
 #[cfg(test)]
@@ -292,7 +307,9 @@ mod tests {
     #[test]
     fn records_round_trip() {
         let mut buf = Vec::new();
-        let caps = PipelinePacket::CapsChanged(Caps::ByteStream { encoding: ByteStreamEncoding::Ogg });
+        let caps = PipelinePacket::CapsChanged(Caps::ByteStream {
+            encoding: ByteStreamEncoding::Ogg,
+        });
         write_record(&mut buf, &caps).unwrap();
         write_record(&mut buf, &frame(b"abc", 0)).unwrap();
         write_record(&mut buf, &frame(b"defg", 1)).unwrap();
@@ -303,7 +320,9 @@ mod tests {
         match &records[2] {
             PipelinePacket::DataFrame(f) => {
                 assert_eq!(f.sequence, 1);
-                let MemoryDomain::System(s) = &f.domain else { panic!("system") };
+                let MemoryDomain::System(s) = &f.domain else {
+                    panic!("system")
+                };
                 assert_eq!(s.as_slice(), b"defg");
             }
             _ => panic!("expected DataFrame"),
@@ -320,6 +339,10 @@ mod tests {
         buf.truncate(full_len + 6); // header + a couple bytes of the payload
 
         let records = read_records(&buf).unwrap();
-        assert_eq!(records.len(), 1, "only the intact record survives; no error");
+        assert_eq!(
+            records.len(),
+            1,
+            "only the intact record survives; no error"
+        );
     }
 }

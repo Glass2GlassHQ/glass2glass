@@ -19,7 +19,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_source_tee_dynamic, SourceLoop};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, MemoryDomain,
-    OutputSink, PipelinePacket, RawVideoFormat, Rate,
+    OutputSink, PipelinePacket, Rate, RawVideoFormat,
 };
 
 fn caps() -> Caps {
@@ -135,12 +135,16 @@ async fn tee_broadcasts_every_frame_to_every_branch() {
     let (handle, run) = run_source_tee_dynamic(&mut source, 8);
 
     handle
-        .add_branch(Box::new(RecordSink { frames: f0.clone(), caps_changes: c0.clone() })
-            as Box<dyn DynAsyncElement>)
+        .add_branch(Box::new(RecordSink {
+            frames: f0.clone(),
+            caps_changes: c0.clone(),
+        }) as Box<dyn DynAsyncElement>)
         .expect("add branch 0");
     handle
-        .add_branch(Box::new(RecordSink { frames: f1.clone(), caps_changes: c1.clone() })
-            as Box<dyn DynAsyncElement>)
+        .add_branch(Box::new(RecordSink {
+            frames: f1.clone(),
+            caps_changes: c1.clone(),
+        }) as Box<dyn DynAsyncElement>)
         .expect("add branch 1");
     drop(handle);
 
@@ -148,12 +152,30 @@ async fn tee_broadcasts_every_frame_to_every_branch() {
 
     let (got0, got1) = (f0.load(Ordering::Relaxed), f1.load(Ordering::Relaxed));
     // The defining difference from M310's router: BOTH branches see every frame.
-    assert_eq!(got0, N as usize, "branch 0 received the whole stream (broadcast)");
-    assert_eq!(got1, N as usize, "branch 1 received the whole stream (broadcast)");
+    assert_eq!(
+        got0, N as usize,
+        "branch 0 received the whole stream (broadcast)"
+    );
+    assert_eq!(
+        got1, N as usize,
+        "branch 1 received the whole stream (broadcast)"
+    );
     assert_eq!(stats.frames_emitted, N, "source emitted all frames once");
-    assert_eq!(stats.frames_consumed, 2 * N, "each branch consumed the full stream");
-    assert_eq!(c0.load(Ordering::Relaxed), 1, "branch 0 saw the sticky caps once");
-    assert_eq!(c1.load(Ordering::Relaxed), 1, "branch 1 saw the sticky caps once");
+    assert_eq!(
+        stats.frames_consumed,
+        2 * N,
+        "each branch consumed the full stream"
+    );
+    assert_eq!(
+        c0.load(Ordering::Relaxed),
+        1,
+        "branch 0 saw the sticky caps once"
+    );
+    assert_eq!(
+        c1.load(Ordering::Relaxed),
+        1,
+        "branch 1 saw the sticky caps once"
+    );
 }
 
 #[tokio::test]
@@ -165,13 +187,23 @@ async fn single_tee_branch_still_gets_the_whole_stream() {
 
     let (handle, run) = run_source_tee_dynamic(&mut source, 8);
     handle
-        .add_branch(Box::new(RecordSink { frames: frames.clone(), caps_changes: caps_changes.clone() })
-            as Box<dyn DynAsyncElement>)
+        .add_branch(Box::new(RecordSink {
+            frames: frames.clone(),
+            caps_changes: caps_changes.clone(),
+        }) as Box<dyn DynAsyncElement>)
         .expect("add branch");
     drop(handle);
 
     let stats = run.await.expect("run");
-    assert_eq!(frames.load(Ordering::Relaxed), N as usize, "the single branch gets every frame");
+    assert_eq!(
+        frames.load(Ordering::Relaxed),
+        N as usize,
+        "the single branch gets every frame"
+    );
     assert_eq!(stats.frames_consumed, N);
-    assert_eq!(caps_changes.load(Ordering::Relaxed), 1, "sticky caps delivered once");
+    assert_eq!(
+        caps_changes.load(Ordering::Relaxed),
+        1,
+        "sticky caps delivered once"
+    );
 }

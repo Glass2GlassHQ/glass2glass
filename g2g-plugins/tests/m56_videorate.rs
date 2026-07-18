@@ -28,7 +28,11 @@ async fn downsamples_30_to_10() {
 
     // 9 inputs at 30 fps against a 10 fps grid: three frames emitted in
     // stream plus the held last frame flushed on EOS.
-    assert_eq!(sink.received(), 4, "downsampled ~3:1 plus the EOS-flushed last frame");
+    assert_eq!(
+        sink.received(),
+        4,
+        "downsampled ~3:1 plus the EOS-flushed last frame"
+    );
     assert!(sink.eos_seen());
     let changes = sink.caps_changes();
     assert!(

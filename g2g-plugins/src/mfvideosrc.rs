@@ -37,12 +37,12 @@ use tokio::sync::mpsc;
 
 use windows::core::GUID;
 use windows::Win32::Media::MediaFoundation::{
-    IMFActivate, IMFMediaSource, IMFSourceReader, MFCreateAttributes,
-    MFCreateSourceReaderFromMediaSource, MFCreateMediaType, MFEnumDeviceSources, MFShutdown,
-    MFStartup, MFMediaType_Video, MFVideoFormat_NV12, MFVideoFormat_YUY2,
+    IMFActivate, IMFMediaSource, IMFSourceReader, MFCreateAttributes, MFCreateMediaType,
+    MFCreateSourceReaderFromMediaSource, MFEnumDeviceSources, MFMediaType_Video, MFShutdown,
+    MFStartup, MFVideoFormat_NV12, MFVideoFormat_YUY2, MFSTARTUP_FULL,
     MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
     MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE,
-    MF_SOURCE_READERF_ENDOFSTREAM, MF_SOURCE_READER_FIRST_VIDEO_STREAM, MFSTARTUP_FULL, MF_VERSION,
+    MF_SOURCE_READERF_ENDOFSTREAM, MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_VERSION,
 };
 use windows::Win32::System::Com::{
     CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_MULTITHREADED,
@@ -175,11 +175,13 @@ impl MfVideoSrc {
 }
 
 impl SourceLoop for MfVideoSrc {
-    type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
+    type RunFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
     where
         Self: 'a;
 
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 
@@ -209,7 +211,11 @@ impl SourceLoop for MfVideoSrc {
     /// Live source: one frame period of latency so the sink keeps a frame in hand.
     fn latency(&self) -> LatencyReport {
         let fps = self.config.map(|c| c.fps()).unwrap_or(30);
-        let period_ns = if fps > 0 { 1_000_000_000 / fps as u64 } else { 0 };
+        let period_ns = if fps > 0 {
+            1_000_000_000 / fps as u64
+        } else {
+            0
+        };
         LatencyReport::live(period_ns, None)
     }
 
@@ -244,7 +250,11 @@ impl SourceLoop for MfVideoSrc {
             }
 
             let fps = config.fps();
-            let pts_step_ns = if fps > 0 { 1_000_000_000 / fps as u64 } else { 0 };
+            let pts_step_ns = if fps > 0 {
+                1_000_000_000 / fps as u64
+            } else {
+                0
+            };
             let expected = config.format.frame_bytes(config.width, config.height);
             let mut seq = 0u64;
             let mut downstream_open = true;
@@ -298,10 +308,9 @@ impl PadTemplates for MfVideoSrc {
             height: Dim::Any,
             framerate: Rate::Any,
         };
-        Vec::from([PadTemplate::source(CapsSet::from_alternatives(Vec::from([
-            raw(RawVideoFormat::Nv12),
-            raw(RawVideoFormat::Yuyv),
-        ])))])
+        Vec::from([PadTemplate::source(CapsSet::from_alternatives(Vec::from(
+            [raw(RawVideoFormat::Nv12), raw(RawVideoFormat::Yuyv)],
+        )))])
     }
 }
 

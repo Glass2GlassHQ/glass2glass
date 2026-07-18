@@ -7,11 +7,19 @@
 pub(crate) fn sin_turns(t: f32) -> f32 {
     // reduce to [0, 1): manual floor (core has no f32::floor)
     let trunc = t as i64 as f32;
-    let floor = if t < 0.0 && trunc != t { trunc - 1.0 } else { trunc };
+    let floor = if t < 0.0 && trunc != t {
+        trunc - 1.0
+    } else {
+        trunc
+    };
     let t = t - floor;
 
     // map to a half-turn x in [0, 1) with the sign of the half
-    let (x, sign) = if t < 0.5 { (t * 2.0, 1.0f32) } else { ((t - 0.5) * 2.0, -1.0f32) };
+    let (x, sign) = if t < 0.5 {
+        (t * 2.0, 1.0f32)
+    } else {
+        ((t - 0.5) * 2.0, -1.0f32)
+    };
     const PI: f32 = core::f32::consts::PI;
     let xr = x * PI;
     sign * (16.0 * xr * (PI - xr)) / (5.0 * PI * PI - 4.0 * xr * (PI - xr))
@@ -73,7 +81,11 @@ pub(crate) fn log2(x: f64) -> f64 {
 pub(crate) fn exp2(y: f64) -> f64 {
     let k = {
         let t = y as i64;
-        if y < 0.0 && (t as f64) != y { t - 1 } else { t }
+        if y < 0.0 && (t as f64) != y {
+            t - 1
+        } else {
+            t
+        }
     };
     let f = y - k as f64;
     // 2^f = exp(f*ln2), f in [0,1) so the argument is in [0, ln2).

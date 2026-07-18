@@ -61,7 +61,8 @@ struct ScriptedSource {
 
 impl SourceLoop for ScriptedSource {
     type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>;
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 
@@ -79,7 +80,8 @@ impl SourceLoop for ScriptedSource {
             let total = self.before + self.after;
             for i in 0..total {
                 if i == self.before {
-                    out.push(PipelinePacket::CapsChanged(switch_to.clone())).await?;
+                    out.push(PipelinePacket::CapsChanged(switch_to.clone()))
+                        .await?;
                 }
                 let frame = Frame {
                     domain: MemoryDomain::System(SystemSlice::from_boxed(
@@ -154,7 +156,11 @@ async fn mid_stream_recascade_resizes_the_live_pool() {
 
     // The pool was built at startup (640x480) and rebuilt once on the β
     // re-cascade from the mid-stream 1920x1080 change: two distinct shapes.
-    assert_eq!(stage.reconfigures(), 2, "startup build + one mid-stream β rebuild");
+    assert_eq!(
+        stage.reconfigures(),
+        2,
+        "startup build + one mid-stream β rebuild"
+    );
     assert_eq!(
         stage.pool_shape(),
         Some((1, (w1 * h1) as usize)),

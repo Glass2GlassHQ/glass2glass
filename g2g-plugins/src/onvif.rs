@@ -122,8 +122,14 @@ pub async fn resolve_stream_uri(
     let token = parse_first_profile_token(&profiles_resp).ok_or(G2gError::CapsMismatch)?;
 
     // 3. GetStreamUri(token) -> RTSP URL.
-    let uri_resp =
-        soap_call(&client, &media_url, user, pass, &get_stream_uri_body(&token)).await?;
+    let uri_resp = soap_call(
+        &client,
+        &media_url,
+        user,
+        pass,
+        &get_stream_uri_body(&token),
+    )
+    .await?;
     parse_stream_uri(&uri_resp).ok_or(G2gError::CapsMismatch)
 }
 
@@ -184,11 +190,13 @@ impl OnvifSrc {
 }
 
 impl SourceLoop for OnvifSrc {
-    type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
+    type RunFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
     where
         Self: 'a;
 
-    type CapsFuture<'a> = Pin<Box<dyn Future<Output = Result<Caps, G2gError>> + 'a>>
+    type CapsFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<Caps, G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -607,7 +615,10 @@ mod tests {
             <trt:Profiles token="SubStream"/>
           </trt:GetProfilesResponse></s:Body>
         </s:Envelope>"#;
-        assert_eq!(parse_first_profile_token(xml).as_deref(), Some("MainStream"));
+        assert_eq!(
+            parse_first_profile_token(xml).as_deref(),
+            Some("MainStream")
+        );
     }
 
     #[test]

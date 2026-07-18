@@ -67,7 +67,8 @@ impl FileSink {
 }
 
 impl AsyncElement for FileSink {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -160,8 +161,11 @@ impl AsyncElement for FileSink {
 }
 
 /// `FileSink`'s settable properties (M107): the output file path.
-static FILESINK_PROPS: &[PropertySpec] =
-    &[PropertySpec::new("location", PropKind::Str, "output file path")];
+static FILESINK_PROPS: &[PropertySpec] = &[PropertySpec::new(
+    "location",
+    PropKind::Str,
+    "output file path",
+)];
 
 impl PadTemplates for FileSink {
     /// Wildcard sink, matching the runtime `AcceptsAny` constraint.
@@ -198,7 +202,9 @@ mod tests {
         let path = std::env::temp_dir().join("g2g_filesink_recfg.bin");
         let _ = std::fs::remove_file(&path);
         let mut sink = FileSink::new(&path);
-        let caps = Caps::ByteStream { encoding: ByteStreamEncoding::Ogg };
+        let caps = Caps::ByteStream {
+            encoding: ByteStreamEncoding::Ogg,
+        };
         sink.configure_pipeline(&caps).unwrap();
         let mut out = NullSink;
         sink.process(frame(b"first"), &mut out).await.unwrap();

@@ -25,8 +25,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
-    Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-    PropError, PropKind, PropValue, PropertySpec, Rate, VideoCodec,
+    Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, VideoCodec,
 };
 
 use crate::mpegts::{TsMuxer, STREAM_TYPE_AAC, STREAM_TYPE_H264, STREAM_TYPE_H265};
@@ -35,9 +35,18 @@ use crate::mpegts::{TsMuxer, STREAM_TYPE_AAC, STREAM_TYPE_H264, STREAM_TYPE_H265
 /// the single-input [`TsMux`] and the multi-input `tsmuxn::TsMux`.
 pub(crate) fn stream_type_for(caps: &Caps) -> Option<u8> {
     match caps {
-        Caps::CompressedVideo { codec: VideoCodec::H264, .. } => Some(STREAM_TYPE_H264),
-        Caps::CompressedVideo { codec: VideoCodec::H265, .. } => Some(STREAM_TYPE_H265),
-        Caps::Audio { format: AudioFormat::Aac, .. } => Some(STREAM_TYPE_AAC),
+        Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            ..
+        } => Some(STREAM_TYPE_H264),
+        Caps::CompressedVideo {
+            codec: VideoCodec::H265,
+            ..
+        } => Some(STREAM_TYPE_H265),
+        Caps::Audio {
+            format: AudioFormat::Aac,
+            ..
+        } => Some(STREAM_TYPE_AAC),
         _ => None,
     }
 }
@@ -64,7 +73,12 @@ impl Default for TsMux {
 
 impl TsMux {
     pub fn new() -> Self {
-        Self { mux: None, configured: false, emitted: 0, table_interval_ms: 0 }
+        Self {
+            mux: None,
+            configured: false,
+            emitted: 0,
+            table_interval_ms: 0,
+        }
     }
 
     /// Set the PAT/PMT re-emission interval in milliseconds (`0` = once up front).
@@ -80,7 +94,9 @@ impl TsMux {
 
     /// The output it produces: an MPEG-TS byte stream.
     fn output_caps() -> Caps {
-        Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs }
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::MpegTs,
+        }
     }
 
     /// The elementary streams this muxer accepts on its sink pad.
@@ -94,7 +110,11 @@ impl TsMux {
         Vec::from([
             video(VideoCodec::H264),
             video(VideoCodec::H265),
-            Caps::Audio { format: AudioFormat::Aac, channels: 0, sample_rate: 0 },
+            Caps::Audio {
+                format: AudioFormat::Aac,
+                channels: 0,
+                sample_rate: 0,
+            },
         ])
     }
 }
@@ -136,11 +156,19 @@ impl AsyncElement for TsMux {
 
     fn properties(&self) -> &'static [PropertySpec] {
         const PROPS: &[PropertySpec] = &[
-            PropertySpec::new("pat-interval", PropKind::Uint, "PAT/PMT re-emission interval, milliseconds (0 = once)")
-                .with_default("0"),
+            PropertySpec::new(
+                "pat-interval",
+                PropKind::Uint,
+                "PAT/PMT re-emission interval, milliseconds (0 = once)",
+            )
+            .with_default("0"),
             // The PAT and PMT are emitted as a pair, so this shares the cadence.
-            PropertySpec::new("pmt-interval", PropKind::Uint, "alias of pat-interval (the tables are emitted together)")
-                .with_default("0"),
+            PropertySpec::new(
+                "pmt-interval",
+                PropKind::Uint,
+                "alias of pat-interval (the tables are emitted together)",
+            )
+            .with_default("0"),
         ];
         PROPS
     }
@@ -184,7 +212,10 @@ impl AsyncElement for TsMux {
                     let ts = mux.push_au(slice.as_slice(), Some(pts_90khz));
                     let out_frame = Frame::new(
                         MemoryDomain::System(SystemSlice::from_boxed(ts.into_boxed_slice())),
-                        FrameTiming { pts_ns: frame.timing.pts_ns, ..FrameTiming::default() },
+                        FrameTiming {
+                            pts_ns: frame.timing.pts_ns,
+                            ..FrameTiming::default()
+                        },
                         self.emitted,
                     );
                     self.emitted += 1;
@@ -255,7 +286,10 @@ mod tests {
     fn h264_frame(au: Vec<u8>, pts_ns: u64) -> PipelinePacket {
         PipelinePacket::DataFrame(Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
-            FrameTiming { pts_ns, ..FrameTiming::default() },
+            FrameTiming {
+                pts_ns,
+                ..FrameTiming::default()
+            },
             0,
         ))
     }
@@ -278,7 +312,9 @@ mod tests {
         };
         assert!(matches!(
             f(&h264_caps()).alternatives(),
-            [Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs }]
+            [Caps::ByteStream {
+                encoding: ByteStreamEncoding::MpegTs
+            }]
         ));
     }
 
@@ -290,10 +326,19 @@ mod tests {
         let mut mux = TsMux::new();
         mux.configure_pipeline(&h264_caps()).unwrap();
         let mut ts_sink = CaptureSink::default();
-        mux.process(h264_frame(au0.clone(), 10_000_000), &mut ts_sink).await.unwrap();
-        mux.process(h264_frame(au1.clone(), 20_000_000), &mut ts_sink).await.unwrap();
-        mux.process(PipelinePacket::Eos, &mut ts_sink).await.unwrap();
-        assert!(!ts_sink.eos, "EOS is forwarded by the runner's arm, not the element");
+        mux.process(h264_frame(au0.clone(), 10_000_000), &mut ts_sink)
+            .await
+            .unwrap();
+        mux.process(h264_frame(au1.clone(), 20_000_000), &mut ts_sink)
+            .await
+            .unwrap();
+        mux.process(PipelinePacket::Eos, &mut ts_sink)
+            .await
+            .unwrap();
+        assert!(
+            !ts_sink.eos,
+            "EOS is forwarded by the runner's arm, not the element"
+        );
 
         // Feed the muxed TS bytes back through the demuxer.
         let mut ts = Vec::new();
@@ -301,17 +346,31 @@ mod tests {
             ts.extend_from_slice(f);
         }
         let mut demux = TsDemux::new();
-        demux.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs }).unwrap();
+        demux
+            .configure_pipeline(&Caps::ByteStream {
+                encoding: ByteStreamEncoding::MpegTs,
+            })
+            .unwrap();
         let mut au_sink = CaptureSink::default();
         let ts_frame = Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(ts.into_boxed_slice())),
             FrameTiming::default(),
             0,
         );
-        demux.process(PipelinePacket::DataFrame(ts_frame), &mut au_sink).await.unwrap();
-        demux.process(PipelinePacket::Eos, &mut au_sink).await.unwrap();
+        demux
+            .process(PipelinePacket::DataFrame(ts_frame), &mut au_sink)
+            .await
+            .unwrap();
+        demux
+            .process(PipelinePacket::Eos, &mut au_sink)
+            .await
+            .unwrap();
 
-        assert_eq!(au_sink.frames, alloc::vec![au0, au1], "AUs recovered through mux + demux");
+        assert_eq!(
+            au_sink.frames,
+            alloc::vec![au0, au1],
+            "AUs recovered through mux + demux"
+        );
         assert_eq!(mux.emitted(), 2);
     }
 }

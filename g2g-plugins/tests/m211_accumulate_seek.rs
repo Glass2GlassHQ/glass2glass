@@ -89,7 +89,10 @@ impl SourceLoop for SeekableSrc {
                     domain: MemoryDomain::System(SystemSlice::from_boxed(
                         vec![0u8; 4].into_boxed_slice(),
                     )),
-                    timing: FrameTiming { pts_ns: self.position, ..FrameTiming::default() },
+                    timing: FrameTiming {
+                        pts_ns: self.position,
+                        ..FrameTiming::default()
+                    },
                     sequence: self.sequence,
                     meta: Default::default(),
                 };
@@ -146,17 +149,27 @@ async fn non_flush_seek_accumulates_base_and_does_not_flush() {
     let (res, ()) = tokio::join!(pipeline, driver);
     let stats = res.expect("pipeline runs");
 
-    assert_eq!(stats.frames_consumed, 8, "all frames (pre + post seek) reached the sink");
+    assert_eq!(
+        stats.frames_consumed, 8,
+        "all frames (pre + post seek) reached the sink"
+    );
     assert!(sink.eos_seen());
 
     // The defining contrast with a flushing seek: NO flush downstream.
-    assert_eq!(sink.flushes(), 0, "a non-flushing seek does not flush the pipeline");
+    assert_eq!(
+        sink.flushes(),
+        0,
+        "a non-flushing seek does not flush the pipeline"
+    );
     // Opening segment + the accumulating one.
     assert_eq!(sink.segments(), 2);
 
     let seg = sink.last_segment().expect("post-seek segment recorded");
     assert_eq!(seg.start, seek_target, "repositioned to the target");
-    assert!(seg.base > 0, "non-flushing seek accumulates running time, does not reset it");
+    assert!(
+        seg.base > 0,
+        "non-flushing seek accumulates running time, does not reset it"
+    );
     // The first post-seek frame continues at the accumulated running time, so the
     // running-time line is monotonic across the seek (gapless).
     assert_eq!(seg.to_running_time(seek_target), Some(seg.base));

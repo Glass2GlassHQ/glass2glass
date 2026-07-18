@@ -108,12 +108,22 @@ fn create_udmabuf(size: usize) -> OwnedFd {
     // SAFETY: standard libc sequence; every fd is checked and ownership is
     // transferred into an `OwnedFd` at the end (or the process aborts on failure).
     unsafe {
-        let memfd = memfd_create(b"g2g-udmabuf\0".as_ptr() as *const c_char, MFD_CLOEXEC | MFD_ALLOW_SEALING);
+        let memfd = memfd_create(
+            b"g2g-udmabuf\0".as_ptr() as *const c_char,
+            MFD_CLOEXEC | MFD_ALLOW_SEALING,
+        );
         assert!(memfd >= 0, "memfd_create failed");
         assert_eq!(ftruncate(memfd, size as i64), 0, "ftruncate failed");
-        assert_eq!(fcntl(memfd, F_ADD_SEALS, F_SEAL_SHRINK), 0, "F_SEAL_SHRINK failed");
+        assert_eq!(
+            fcntl(memfd, F_ADD_SEALS, F_SEAL_SHRINK),
+            0,
+            "F_SEAL_SHRINK failed"
+        );
         let dev = open(b"/dev/udmabuf\0".as_ptr() as *const c_char, O_RDWR);
-        assert!(dev >= 0, "open /dev/udmabuf failed (need access; user in the right group?)");
+        assert!(
+            dev >= 0,
+            "open /dev/udmabuf failed (need access; user in the right group?)"
+        );
         let create = UdmabufCreate {
             memfd: memfd as u32,
             flags: UDMABUF_FLAGS_CLOEXEC,
@@ -134,7 +144,11 @@ fn map_and_check(fd: c_int, size: usize, write: bool) -> bool {
     // SAFETY: `fd` is a live CPU-mappable dma-buf of >= `size` bytes; the mapping
     // is unmapped before return.
     unsafe {
-        let prot = if write { PROT_READ | PROT_WRITE } else { PROT_READ };
+        let prot = if write {
+            PROT_READ | PROT_WRITE
+        } else {
+            PROT_READ
+        };
         let ptr = mmap(core::ptr::null_mut(), size, prot, MAP_SHARED, fd, 0);
         assert!(ptr as isize != -1, "mmap dma-buf failed");
         let bytes = core::slice::from_raw_parts_mut(ptr as *mut u8, size);
@@ -179,7 +193,11 @@ fn run_parent() {
         .into_owned();
     let _ = std::fs::remove_file(&path);
     let exe = std::env::current_exe().expect("current_exe");
-    let mut child = Command::new(exe).arg("child").arg(&path).spawn().expect("spawn child");
+    let mut child = Command::new(exe)
+        .arg("child")
+        .arg(&path)
+        .spawn()
+        .expect("spawn child");
 
     let mut waited = 0;
     while !std::path::Path::new(&path).exists() {
@@ -193,7 +211,10 @@ fn run_parent() {
     use std::os::fd::AsRawFd;
     assert!(map_and_check(dmabuf_fd.as_raw_fd(), sz, true), "fill mmap");
 
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
     rt.block_on(async {
         let raw = {
             use std::os::fd::IntoRawFd;
@@ -211,13 +232,20 @@ fn run_parent() {
             let frame = Frame {
                 // Clone shares the fd (Arc refcount); each send dups it to the child.
                 domain: MemoryDomain::DmaBuf(owned.clone()),
-                timing: FrameTiming { pts_ns: seq * 1000, ..FrameTiming::default() },
+                timing: FrameTiming {
+                    pts_ns: seq * 1000,
+                    ..FrameTiming::default()
+                },
                 sequence: seq,
                 meta: Default::default(),
             };
-            sink.process(PipelinePacket::DataFrame(frame), &mut null).await.expect("send frame");
+            sink.process(PipelinePacket::DataFrame(frame), &mut null)
+                .await
+                .expect("send frame");
         }
-        sink.process(PipelinePacket::Eos, &mut null).await.expect("eos");
+        sink.process(PipelinePacket::Eos, &mut null)
+            .await
+            .expect("eos");
         assert_eq!(sink.sent(), N, "all frames sent");
         // `owned` drops here (last local ref) -> closes our fd; the child's dup(s)
         // keep the buffer alive until it is done.
@@ -227,7 +255,10 @@ fn run_parent() {
     let _ = std::fs::remove_file(
         std::env::temp_dir().join(format!("g2g-localdmabuf-{}.sock", std::process::id())),
     );
-    assert!(status.success(), "child failed to receive/verify frames: {status:?}");
+    assert!(
+        status.success(),
+        "child failed to receive/verify frames: {status:?}"
+    );
     println!(
         "PASS: {N} dma-buf frames crossed a process boundary via SCM_RIGHTS fd \
          passing (no copy, vendor-neutral); child mmap-verified every byte"
@@ -249,7 +280,10 @@ struct VerifySink {
     bad: bool,
 }
 impl AsyncElement for VerifySink {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>> where Self: 'a;
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
     fn intercept_caps(&self, c: &Caps) -> Result<Caps, G2gError> {
         Ok(c.clone())
     }
@@ -277,14 +311,21 @@ impl AsyncElement for VerifySink {
 }
 
 fn run_child(path: &str) -> i32 {
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
     rt.block_on(async {
         let mut src = DmaBufSrc::new(path).with_frame_limit(N);
         let mut sink = VerifySink::default();
         let clock = ZeroClock;
-        let res =
-            run_simple_pipeline(&mut src, &mut sink, &clock, LatencyProfile::Live.link_capacity())
-                .await;
+        let res = run_simple_pipeline(
+            &mut src,
+            &mut sink,
+            &clock,
+            LatencyProfile::Live.link_capacity(),
+        )
+        .await;
         match res {
             Ok(_) if sink.verified == N && !sink.bad => {
                 println!("  child: received + mmap-verified all {N} frames");

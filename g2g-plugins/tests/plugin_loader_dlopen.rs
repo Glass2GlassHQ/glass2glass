@@ -26,7 +26,10 @@ fn fixture_dir() -> PathBuf {
 /// This mirrors a real plugin author building against the host's feature config.
 fn host_layout_features() -> Vec<String> {
     let tag = g2g_core::ABI_VERSION;
-    let feats = tag.rsplit_once("feat:").map(|(_, f)| f.trim()).unwrap_or("none");
+    let feats = tag
+        .rsplit_once("feat:")
+        .map(|(_, f)| f.trim())
+        .unwrap_or("none");
     if feats == "none" {
         Vec::new()
     } else {
@@ -41,11 +44,16 @@ fn build_fixture_with(features: &[String], target_subdir: &str) -> PathBuf {
     let dir = fixture_dir();
     let target = dir.join(target_subdir);
     let mut cmd = Command::new(env!("CARGO"));
-    cmd.arg("build").arg("--release").current_dir(&dir).env("CARGO_TARGET_DIR", &target);
+    cmd.arg("build")
+        .arg("--release")
+        .current_dir(&dir)
+        .env("CARGO_TARGET_DIR", &target);
     if !features.is_empty() {
         cmd.arg("--features").arg(features.join(" "));
     }
-    let status = cmd.status().expect("spawn cargo to build the example plugin");
+    let status = cmd
+        .status()
+        .expect("spawn cargo to build the example plugin");
     assert!(status.success(), "example plugin failed to build");
 
     // Platform-correct library name: lib<name>.so / .dylib / <name>.dll.
@@ -86,9 +94,17 @@ fn dlopen_plugin_registers_and_runs() {
     // a fn pointer into the .so, so this also exercises the keep-alive contract.
     let line = "videotestsrc num-buffers=3 ! examplefilter ! fakesink";
     let graph = parse_launch(&reg, line).expect("pipeline using the plugin element parses");
-    let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
-    let stats = rt.block_on(run_graph(graph, &WallClock::new(), 4)).expect("pipeline runs");
-    assert_eq!(stats.frames_consumed, 3, "all frames flowed through the plugin element");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    let stats = rt
+        .block_on(run_graph(graph, &WallClock::new(), 4))
+        .expect("pipeline runs");
+    assert_eq!(
+        stats.frames_consumed, 3,
+        "all frames flowed through the plugin element"
+    );
 }
 
 #[test]
@@ -112,7 +128,10 @@ fn abi_mismatch_is_refused() {
     let host = host_layout_features();
     let mismatched: Vec<String> = if host.iter().any(|f| f == "multi-thread") {
         // Host has multi-thread; build the plugin without it.
-        host.iter().filter(|f| *f != "multi-thread").cloned().collect()
+        host.iter()
+            .filter(|f| *f != "multi-thread")
+            .cloned()
+            .collect()
     } else {
         // Host lacks it; add it to the plugin.
         let mut f = host.clone();

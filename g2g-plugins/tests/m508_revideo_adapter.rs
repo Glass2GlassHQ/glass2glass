@@ -8,11 +8,14 @@
 //!
 //! Runs on the RTX 3060; skips with no AV1 decode adapter. Optional bit-exact
 //! check vs an ffmpeg `yuv420p` (== I420) dump via `G2G_AV1_REF`.
-#![cfg(all(any(target_os = "linux", target_os = "windows"), feature = "vulkan-video"))]
+#![cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    feature = "vulkan-video"
+))]
 
 use g2g_core::runtime::block_on;
 use g2g_plugins::revideo::{
-    VideoColorRange, VideoCodec, VideoMatrixCoefficients, VideoPixelLayout, VulkanStreamDecoder,
+    VideoCodec, VideoColorRange, VideoMatrixCoefficients, VideoPixelLayout, VulkanStreamDecoder,
 };
 use g2g_plugins::vulkanvideo::{open_av1_decode_device, VulkanVideoError};
 
@@ -81,8 +84,8 @@ fn revideo_adapter_streams_i420_frames() {
         Err(e) => panic!("open AV1 decode device: {e:?}"),
     };
 
-    let mut dec = VulkanStreamDecoder::new(device, VideoCodec::Av1, CLIP)
-        .expect("build re_video adapter");
+    let mut dec =
+        VulkanStreamDecoder::new(device, VideoCodec::Av1, CLIP).expect("build re_video adapter");
     assert_eq!(dec.width(), W as u32);
     assert_eq!(dec.height(), H as u32);
 
@@ -118,7 +121,11 @@ fn revideo_adapter_streams_i420_frames() {
 
     // Consecutive frames must differ (animated content decoded against refs).
     for i in 1..frames.len() {
-        assert!(frames[i].data != frames[i - 1].data, "frame {i} == {}", i - 1);
+        assert!(
+            frames[i].data != frames[i - 1].data,
+            "frame {i} == {}",
+            i - 1
+        );
     }
 
     // reset() then re-feed from the keyframe reproduces the first frame, proving
@@ -134,7 +141,9 @@ fn revideo_adapter_streams_i420_frames() {
     // A broken reset would return a stale or garbage frame (most bytes differ, or
     // large deltas), which this still catches.
     dec.reset().expect("reset");
-    let f0_again = dec.submit_chunk(chunks[0], true).expect("re-decode frame 0");
+    let f0_again = dec
+        .submit_chunk(chunks[0], true)
+        .expect("re-decode frame 0");
     assert_eq!(f0_again.len(), 1);
     let (a, b) = (&f0_again[0].data, &frames[0].data);
     assert_eq!(a.len(), b.len());
@@ -159,11 +168,17 @@ fn revideo_adapter_streams_i420_frames() {
     // I420 (Y + U + V), so this also checks the NV12 -> I420 chroma deinterleave.
     if let Ok(path) = std::env::var("G2G_AV1_REF") {
         let ref_yuv = std::fs::read(&path).expect("read G2G_AV1_REF");
-        assert!(ref_yuv.len() >= i420_len * frames.len(), "reference too short");
+        assert!(
+            ref_yuv.len() >= i420_len * frames.len(),
+            "reference too short"
+        );
         for (i, f) in frames.iter().enumerate() {
             let r = &ref_yuv[i * i420_len..(i + 1) * i420_len];
             assert_eq!(&f.data, r, "frame {i} must be bit-exact I420 vs ffmpeg");
         }
-        eprintln!("m508: all {} frames bit-exact I420 vs ffmpeg reference", frames.len());
+        eprintln!(
+            "m508: all {} frames bit-exact I420 vs ffmpeg reference",
+            frames.len()
+        );
     }
 }

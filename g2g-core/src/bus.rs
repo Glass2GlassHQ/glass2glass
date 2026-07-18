@@ -215,7 +215,10 @@ mod tests {
     fn try_post_drops_on_full() {
         let (_bus, handle) = Bus::new(1);
         assert!(handle.try_post(BusMessage::Custom(1)));
-        assert!(!handle.try_post(BusMessage::Custom(2)), "full bus drops the message");
+        assert!(
+            !handle.try_post(BusMessage::Custom(2)),
+            "full bus drops the message"
+        );
     }
 
     #[test]
@@ -229,7 +232,10 @@ mod tests {
         let (bus, handle) = Bus::new(2);
         handle.try_post(BusMessage::Error(G2gError::Shutdown));
         drop(handle);
-        assert_eq!(block_on(bus.recv()), Some(BusMessage::Error(G2gError::Shutdown)));
+        assert_eq!(
+            block_on(bus.recv()),
+            Some(BusMessage::Error(G2gError::Shutdown))
+        );
         assert_eq!(block_on(bus.recv()), None, "closed and drained");
     }
 
@@ -244,7 +250,9 @@ mod tests {
     fn info_and_stream_start_round_trip() {
         let (bus, handle) = Bus::new(4);
         handle.try_post(BusMessage::StreamStart);
-        handle.try_post(BusMessage::Info(alloc::string::String::from("reconnecting")));
+        handle.try_post(BusMessage::Info(alloc::string::String::from(
+            "reconnecting",
+        )));
         assert_eq!(bus.try_recv(), Some(BusMessage::StreamStart));
         match bus.try_recv() {
             Some(BusMessage::Info(s)) => assert_eq!(s, "reconnecting"),

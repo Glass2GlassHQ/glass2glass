@@ -33,7 +33,9 @@ impl MediaClock {
     /// A media clock at `rate_hz` ticks per second (clamped to at least 1 to keep
     /// the arithmetic well-defined).
     pub fn new(rate_hz: u32) -> Self {
-        Self { rate_hz: rate_hz.max(1) }
+        Self {
+            rate_hz: rate_hz.max(1),
+        }
     }
 
     /// The 90 kHz video media clock (ST 2110-20).
@@ -104,7 +106,10 @@ mod tests {
         let ticks = c.ticks(TaiNs(TAI));
         assert_eq!(c.rtp_timestamp(TaiNs(TAI)).get(), ticks as u32);
         // 90 kHz over ~1.7e9 s is far past 2^32, so the wire timestamp has wrapped.
-        assert!(ticks > u64::from(u32::MAX), "the full tick count exceeds 32 bits");
+        assert!(
+            ticks > u64::from(u32::MAX),
+            "the full tick count exceeds 32 bits"
+        );
     }
 
     #[test]
@@ -116,7 +121,11 @@ mod tests {
             let recovered = c.tai_from_rtp(rtp, TaiNs(TAI + 3_000_000)); // reference 3 ms later
             let tick_ns = c.ticks_to_ns(1);
             let diff = TAI.abs_diff(recovered.get());
-            assert!(diff <= tick_ns + 1, "off by {diff} ns (> tick {tick_ns} ns) at {}Hz", c.rate_hz());
+            assert!(
+                diff <= tick_ns + 1,
+                "off by {diff} ns (> tick {tick_ns} ns) at {}Hz",
+                c.rate_hz()
+            );
         }
     }
 
@@ -129,11 +138,18 @@ mod tests {
         let boundary_ticks: u64 = 0x1_0000_0000 + 100;
         let tai = c.ticks_to_ns(boundary_ticks);
         let rtp = c.rtp_timestamp(TaiNs(tai)); // low 32 bits ~ 100 (just past the wrap)
-        assert!(rtp.get() < 1_000, "timestamp sits just past the 2^32 wrap, got {}", rtp.get());
+        assert!(
+            rtp.get() < 1_000,
+            "timestamp sits just past the 2^32 wrap, got {}",
+            rtp.get()
+        );
         // Reference 50 ms earlier, whose ticks are just below the boundary.
         let reference = tai - 50_000_000;
         let recovered = c.tai_from_rtp(rtp, TaiNs(reference)).get();
-        assert!(tai.abs_diff(recovered) <= c.ticks_to_ns(1) + 1, "wrap not resolved: {recovered} vs {tai}");
+        assert!(
+            tai.abs_diff(recovered) <= c.ticks_to_ns(1) + 1,
+            "wrap not resolved: {recovered} vs {tai}"
+        );
     }
 
     #[test]

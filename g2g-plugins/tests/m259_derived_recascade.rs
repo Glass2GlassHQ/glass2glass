@@ -61,7 +61,8 @@ struct FlipSource {
 
 impl SourceLoop for FlipSource {
     type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>;
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 
@@ -72,7 +73,9 @@ impl SourceLoop for FlipSource {
     fn caps_constraint<'a>(
         &'a mut self,
     ) -> impl Future<Output = Result<CapsConstraint<'a>, G2gError>> + 'a {
-        core::future::ready(Ok(CapsConstraint::Produces(CapsSet::one(self.start.clone()))))
+        core::future::ready(Ok(CapsConstraint::Produces(CapsSet::one(
+            self.start.clone(),
+        ))))
     }
 
     fn configure_pipeline(&mut self, _: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -90,7 +93,8 @@ impl SourceLoop for FlipSource {
                 }))
                 .await?;
                 if i == 0 {
-                    out.push(PipelinePacket::CapsChanged(self.change_to.clone())).await?;
+                    out.push(PipelinePacket::CapsChanged(self.change_to.clone()))
+                        .await?;
                 }
             }
             out.push(PipelinePacket::Eos).await?;
@@ -112,7 +116,12 @@ impl AsyncElement for Converter {
 
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
-            Caps::RawVideo { width, height, framerate, .. } => CapsSet::one(Caps::RawVideo {
+            Caps::RawVideo {
+                width,
+                height,
+                framerate,
+                ..
+            } => CapsSet::one(Caps::RawVideo {
                 format: RawVideoFormat::I420,
                 width: width.clone(),
                 height: height.clone(),
@@ -150,14 +159,17 @@ impl AsyncElement for Halver {
 
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
-            Caps::RawVideo { format, width: Dim::Fixed(w), height: Dim::Fixed(h), framerate } => {
-                CapsSet::one(Caps::RawVideo {
-                    format: *format,
-                    width: Dim::Fixed(w / 2),
-                    height: Dim::Fixed(h / 2),
-                    framerate: framerate.clone(),
-                })
-            }
+            Caps::RawVideo {
+                format,
+                width: Dim::Fixed(w),
+                height: Dim::Fixed(h),
+                framerate,
+            } => CapsSet::one(Caps::RawVideo {
+                format: *format,
+                width: Dim::Fixed(w / 2),
+                height: Dim::Fixed(h / 2),
+                framerate: framerate.clone(),
+            }),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
     }
@@ -228,7 +240,9 @@ async fn midstream_change_redrives_through_stacked_derived_outputs() {
     };
     let mut conv = Converter;
     let mut scale = Halver;
-    let mut sink = RecordingSink { caps_log: Arc::clone(&caps_log) };
+    let mut sink = RecordingSink {
+        caps_log: Arc::clone(&caps_log),
+    };
     let clock = ZeroClock;
 
     let transforms: Vec<&mut dyn DynAsyncElement> = std::vec![&mut conv, &mut scale];
@@ -236,7 +250,10 @@ async fn midstream_change_redrives_through_stacked_derived_outputs() {
         .await
         .expect("chain runs");
 
-    assert_eq!(stats.frames_consumed, 8, "every frame crosses both transforms");
+    assert_eq!(
+        stats.frames_consumed, 8,
+        "every frame crosses both transforms"
+    );
     assert_eq!(
         *caps_log.lock().unwrap(),
         std::vec![raw(RawVideoFormat::I420, 640, 360)],

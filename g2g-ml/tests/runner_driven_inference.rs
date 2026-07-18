@@ -25,8 +25,8 @@ use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{run_linear_chain, SourceLoop};
 use g2g_core::{
-    Caps, CapsConstraint, CapsSet, ConfigureOutcome, G2gError, PipelineClock, TensorDType, TensorLayout,
-    TensorShape,
+    Caps, CapsConstraint, CapsSet, ConfigureOutcome, G2gError, PipelineClock, TensorDType,
+    TensorLayout, TensorShape,
 };
 use g2g_ml::ortinfer::OrtInference;
 use g2g_ml::postprocess::TensorPostprocess;
@@ -44,7 +44,11 @@ fn mobilenet_dir() -> PathBuf {
 }
 
 fn tensor_caps(dtype: TensorDType, shape: &[u32]) -> Caps {
-    Caps::Tensor { dtype, shape: TensorShape::from_slice(shape).unwrap(), layout: TensorLayout::Nchw }
+    Caps::Tensor {
+        dtype,
+        shape: TensorShape::from_slice(shape).unwrap(),
+        layout: TensorLayout::Nchw,
+    }
 }
 
 struct NullClock;
@@ -78,7 +82,9 @@ impl SourceLoop for TensorSource {
     }
 
     fn caps_constraint(&mut self) -> impl Future<Output = Result<CapsConstraint<'_>, G2gError>> {
-        core::future::ready(Ok(CapsConstraint::Produces(CapsSet::one(self.caps.clone()))))
+        core::future::ready(Ok(CapsConstraint::Produces(CapsSet::one(
+            self.caps.clone(),
+        ))))
     }
 
     fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -125,7 +131,11 @@ impl AsyncElement for ClassSink {
         Ok(ConfigureOutcome::Accepted)
     }
 
-    fn process<'a>(&'a mut self, packet: PipelinePacket, _out: &'a mut dyn OutputSink) -> Self::ProcessFuture<'a> {
+    fn process<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+        _out: &'a mut dyn OutputSink,
+    ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
             if let PipelinePacket::DataFrame(f) = packet {
                 if let MemoryDomain::System(s) = &f.domain {
@@ -167,9 +177,14 @@ async fn runner_drives_quantize_infer_argmax() {
     // it and pumps the frame through, including the mid-stream `CapsChanged` each
     // tensor transform emits (which the probes bypass by re-building frames). The
     // f32 input is quantized in-graph by `TensorConvert`, an interior node.
-    let mut src = TensorSource { caps: tensor_caps(TensorDType::F32, &[1, 3, SIZE, SIZE]), data: Some(input) };
+    let mut src = TensorSource {
+        caps: tensor_caps(TensorDType::F32, &[1, 3, SIZE, SIZE]),
+        data: Some(input),
+    };
     let mut quant = TensorConvert::quantize(TensorDType::U8, scale, zp);
-    let mut infer = OrtInference::from_memory(&model).expect("model loads").with_tensor_input();
+    let mut infer = OrtInference::from_memory(&model)
+        .expect("model loads")
+        .with_tensor_input();
     let mut argmax = TensorPostprocess::argmax();
     let mut sink = ClassSink::default();
 
@@ -178,6 +193,13 @@ async fn runner_drives_quantize_infer_argmax() {
         .await
         .expect("runner drives the quantize -> infer -> argmax chain");
 
-    eprintln!(">> runner-driven chain: {stats:?}; top-1 class = {:?}", sink.idx);
-    assert_eq!(sink.idx, Some(EXPECTED_IDX), "runner-produced class matches the known top-1 (Samoyed)");
+    eprintln!(
+        ">> runner-driven chain: {stats:?}; top-1 class = {:?}",
+        sink.idx
+    );
+    assert_eq!(
+        sink.idx,
+        Some(EXPECTED_IDX),
+        "runner-produced class matches the known top-1 (Samoyed)"
+    );
 }

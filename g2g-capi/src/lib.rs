@@ -30,7 +30,9 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{block_on, parse_launch, run_graph_with_bus, RunStats};
 use g2g_core::{Bus, BusMessage, G2gError, MemoryDomain, PipelineState};
-use g2g_plugins::appsink::{register_appsink_pull, set_appsink_callback, AppSinkPull, Pull, SampleCallback};
+use g2g_plugins::appsink::{
+    register_appsink_pull, set_appsink_callback, AppSinkPull, Pull, SampleCallback,
+};
 use g2g_plugins::appsrc::{register_appsrc, AppSrcFeed};
 use g2g_plugins::clock::WallClock;
 use g2g_plugins::registry::default_registry;
@@ -149,7 +151,12 @@ pub unsafe extern "C" fn g2g_pipeline_launch(
                 .build()
                 .expect("build tokio runtime");
             let clock = WallClock::new();
-            rt.block_on(run_graph_with_bus(graph, &clock, LINK_CAPACITY, &bus_handle))
+            rt.block_on(run_graph_with_bus(
+                graph,
+                &clock,
+                LINK_CAPACITY,
+                &bus_handle,
+            ))
         });
     // Returning null (not panicking across the FFI boundary) is the documented
     // failure contract.
@@ -161,7 +168,12 @@ pub unsafe extern "C" fn g2g_pipeline_launch(
         }
     };
 
-    let p = Box::new(Pipeline { bus, join: Some(join), result: None, last_text: None });
+    let p = Box::new(Pipeline {
+        bus,
+        join: Some(join),
+        result: None,
+        last_text: None,
+    });
     Box::into_raw(p)
 }
 
@@ -174,11 +186,15 @@ pub unsafe extern "C" fn g2g_pipeline_launch(
 #[no_mangle]
 pub unsafe extern "C" fn g2g_pipeline_bus_poll(p: *mut Pipeline, out: *mut G2gBusMessage) -> c_int {
     // SAFETY: caller contract: `p` is a live handle.
-    let Some(p) = (unsafe { p.as_mut() }) else { return 0 };
+    let Some(p) = (unsafe { p.as_mut() }) else {
+        return 0;
+    };
     if out.is_null() {
         return 0;
     }
-    let Some(msg) = p.bus.try_recv() else { return 0 };
+    let Some(msg) = p.bus.try_recv() else {
+        return 0;
+    };
 
     let (kind, text, a, b) = project(&msg);
     p.last_text = text.and_then(|t| CString::new(t).ok());
@@ -200,7 +216,9 @@ pub unsafe extern "C" fn g2g_pipeline_bus_poll(p: *mut Pipeline, out: *mut G2gBu
 #[no_mangle]
 pub unsafe extern "C" fn g2g_pipeline_is_done(p: *const Pipeline) -> c_int {
     // SAFETY: caller contract: `p` is a live handle.
-    let Some(p) = (unsafe { p.as_ref() }) else { return 0 };
+    let Some(p) = (unsafe { p.as_ref() }) else {
+        return 0;
+    };
     match &p.join {
         Some(j) => c_int::from(j.is_finished()),
         None => 1,
@@ -217,7 +235,9 @@ pub unsafe extern "C" fn g2g_pipeline_is_done(p: *const Pipeline) -> c_int {
 #[no_mangle]
 pub unsafe extern "C" fn g2g_pipeline_wait(p: *mut Pipeline, out: *mut G2gStats) -> c_int {
     // SAFETY: caller contract: `p` is a live handle.
-    let Some(p) = (unsafe { p.as_mut() }) else { return -1 };
+    let Some(p) = (unsafe { p.as_mut() }) else {
+        return -1;
+    };
     if let Some(j) = p.join.take() {
         // A panic in the run thread surfaces as a generic shutdown error.
         p.result = Some(j.join().unwrap_or(Err(G2gError::Shutdown)));
@@ -289,7 +309,9 @@ pub struct AppSrc {
 pub unsafe extern "C" fn g2g_appsrc_new(channel: *const c_char) -> *mut AppSrc {
     // SAFETY: caller contract on `channel`.
     let name = unsafe { opt_cstr(channel) }.unwrap_or("default");
-    Box::into_raw(Box::new(AppSrc { feed: register_appsrc(name) }))
+    Box::into_raw(Box::new(AppSrc {
+        feed: register_appsrc(name),
+    }))
 }
 
 /// Push `len` bytes (copied) with timestamp `pts_ns`. Returns 1 if accepted, 0
@@ -306,12 +328,18 @@ pub unsafe extern "C" fn g2g_appsrc_push(
     pts_ns: u64,
 ) -> c_int {
     // SAFETY: caller contract: `p` is a live handle.
-    let Some(p) = (unsafe { p.as_ref() }) else { return 0 };
+    let Some(p) = (unsafe { p.as_ref() }) else {
+        return 0;
+    };
     if data.is_null() && len != 0 {
         return 0;
     }
     // SAFETY: caller contract: `data` covers `len` bytes (empty when null).
-    let bytes = if len == 0 { &[][..] } else { unsafe { core::slice::from_raw_parts(data, len) } };
+    let bytes = if len == 0 {
+        &[][..]
+    } else {
+        unsafe { core::slice::from_raw_parts(data, len) }
+    };
     c_int::from(p.feed.push(bytes, pts_ns))
 }
 
@@ -340,7 +368,9 @@ pub unsafe extern "C" fn g2g_appsrc_push_lend(
     user: *mut c_void,
 ) -> c_int {
     // SAFETY: caller contract: `p` is a live handle.
-    let Some(p) = (unsafe { p.as_ref() }) else { return 0 };
+    let Some(p) = (unsafe { p.as_ref() }) else {
+        return 0;
+    };
     if data.is_null() && len != 0 {
         return 0;
     }
@@ -357,7 +387,9 @@ pub unsafe extern "C" fn g2g_appsrc_push_lend(
 #[no_mangle]
 pub unsafe extern "C" fn g2g_appsrc_end_of_stream(p: *const AppSrc) -> c_int {
     // SAFETY: caller contract: `p` is a live handle.
-    let Some(p) = (unsafe { p.as_ref() }) else { return 0 };
+    let Some(p) = (unsafe { p.as_ref() }) else {
+        return 0;
+    };
     c_int::from(p.feed.end_of_stream())
 }
 
@@ -437,7 +469,13 @@ fn sample_from_frame(frame: Frame) -> Sample {
         _ => (ptr::null(), 0),
     };
     let pts_ns = frame.timing.pts_ns;
-    Sample { _frame: frame, _materialized: materialized, data, len, pts_ns }
+    Sample {
+        _frame: frame,
+        _materialized: materialized,
+        data,
+        len,
+        pts_ns,
+    }
 }
 
 /// Register `appsink channel=<name>` (null -> "default") in pull mode and return
@@ -449,7 +487,9 @@ fn sample_from_frame(frame: Frame) -> Sample {
 pub unsafe extern "C" fn g2g_appsink_new(channel: *const c_char) -> *mut AppSink {
     // SAFETY: caller contract on `channel`.
     let name = unsafe { opt_cstr(channel) }.unwrap_or("default");
-    Box::into_raw(Box::new(AppSink { pull: register_appsink_pull(name) }))
+    Box::into_raw(Box::new(AppSink {
+        pull: register_appsink_pull(name),
+    }))
 }
 
 /// Block until the next frame, writing an owned sample to `*out`. Returns 1 with
@@ -461,7 +501,9 @@ pub unsafe extern "C" fn g2g_appsink_new(channel: *const c_char) -> *mut AppSink
 #[no_mangle]
 pub unsafe extern "C" fn g2g_appsink_pull(sink: *const AppSink, out: *mut *mut Sample) -> c_int {
     // SAFETY: caller contract: `sink` is a live handle.
-    let Some(s) = (unsafe { sink.as_ref() }) else { return 0 };
+    let Some(s) = (unsafe { sink.as_ref() }) else {
+        return 0;
+    };
     if out.is_null() {
         return 0;
     }
@@ -481,9 +523,14 @@ pub unsafe extern "C" fn g2g_appsink_pull(sink: *const AppSink, out: *mut *mut S
 /// # Safety
 /// `sink` must be a live handle; `out` must point to writable `*mut Sample`.
 #[no_mangle]
-pub unsafe extern "C" fn g2g_appsink_try_pull(sink: *const AppSink, out: *mut *mut Sample) -> c_int {
+pub unsafe extern "C" fn g2g_appsink_try_pull(
+    sink: *const AppSink,
+    out: *mut *mut Sample,
+) -> c_int {
     // SAFETY: caller contract: `sink` is a live handle.
-    let Some(s) = (unsafe { sink.as_ref() }) else { return -1 };
+    let Some(s) = (unsafe { sink.as_ref() }) else {
+        return -1;
+    };
     if out.is_null() {
         return -1;
     }
@@ -578,9 +625,12 @@ fn project(msg: &BusMessage) -> (G2gBusKind, Option<String>, u64, u64) {
         BusMessage::Info(s) => (G2gBusKind::Info, Some(s.clone()), 0, 0),
         BusMessage::Error(e) => (G2gBusKind::Error, Some(format_err(e)), 0, 0),
         BusMessage::Warning(e) => (G2gBusKind::Warning, Some(format_err(e)), 0, 0),
-        BusMessage::StateChanged { old, new } => {
-            (G2gBusKind::StateChanged, None, state_code(*new), state_code(*old))
-        }
+        BusMessage::StateChanged { old, new } => (
+            G2gBusKind::StateChanged,
+            None,
+            state_code(*new),
+            state_code(*old),
+        ),
         BusMessage::Buffering { percent } => (G2gBusKind::Buffering, None, u64::from(*percent), 0),
         BusMessage::DurationChanged { duration_ns } => {
             (G2gBusKind::DurationChanged, None, *duration_ns, 0)

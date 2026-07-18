@@ -58,7 +58,12 @@ impl OutputSink for CaptureSink {
 fn frame(bytes: Vec<u8>, pts_ns: u64, sequence: u64) -> Frame {
     Frame {
         domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming { pts_ns, dts_ns: pts_ns, duration_ns: 33_333_333, ..FrameTiming::default() },
+        timing: FrameTiming {
+            pts_ns,
+            dts_ns: pts_ns,
+            duration_ns: 33_333_333,
+            ..FrameTiming::default()
+        },
         sequence,
         meta: Default::default(),
     }
@@ -69,8 +74,15 @@ fn frame(bytes: Vec<u8>, pts_ns: u64, sequence: u64) -> Frame {
 fn source_access_units() -> Vec<Vec<u8>> {
     let sps = [0x67u8, 0x42, 0xC0, 0x1E, 0x11, 0x22];
     let pps = [0x68u8, 0xCE, 0x3C, 0x80];
-    let idr: Vec<u8> =
-        [&[0, 0, 0, 1][..], &sps, &[0, 0, 0, 1], &pps, &[0, 0, 0, 1], &[0x65, 0xAA, 0xBB]].concat();
+    let idr: Vec<u8> = [
+        &[0, 0, 0, 1][..],
+        &sps,
+        &[0, 0, 0, 1],
+        &pps,
+        &[0, 0, 0, 1],
+        &[0x65, 0xAA, 0xBB],
+    ]
+    .concat();
     let p = |fill: u8| [&[0, 0, 0, 1][..], &[0x41, fill, fill]].concat();
     vec![idr, p(1), p(2), p(3)]
 }
@@ -82,20 +94,35 @@ async fn mux_via_element(aus: &[Vec<u8>]) -> Vec<u8> {
     mux.configure_pipeline(&h264_caps(64, 48)).unwrap();
     let mut sink = CaptureSink::default();
     for (i, au) in aus.iter().enumerate() {
-        mux.process(PipelinePacket::DataFrame(frame(au.clone(), i as u64 * 33_333_333, i as u64)), &mut sink)
-            .await
-            .unwrap();
+        mux.process(
+            PipelinePacket::DataFrame(frame(au.clone(), i as u64 * 33_333_333, i as u64)),
+            &mut sink,
+        )
+        .await
+        .unwrap();
     }
     mux.process(PipelinePacket::Eos, &mut sink).await.unwrap();
-    assert_eq!(mux.emitted(), aus.len() as u64, "one byte-stream frame per AU");
+    assert_eq!(
+        mux.emitted(),
+        aus.len() as u64,
+        "one byte-stream frame per AU"
+    );
     sink.frames.concat()
 }
 
 async fn demux(fmp4: &[u8]) -> CaptureSink {
     let mut dmx = Fmp4Demux::new();
-    dmx.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff }).unwrap();
+    dmx.configure_pipeline(&Caps::ByteStream {
+        encoding: ByteStreamEncoding::IsoBmff,
+    })
+    .unwrap();
     let mut sink = CaptureSink::default();
-    dmx.process(PipelinePacket::DataFrame(frame(fmp4.to_vec(), 0, 0)), &mut sink).await.unwrap();
+    dmx.process(
+        PipelinePacket::DataFrame(frame(fmp4.to_vec(), 0, 0)),
+        &mut sink,
+    )
+    .await
+    .unwrap();
     dmx.process(PipelinePacket::Eos, &mut sink).await.unwrap();
     sink
 }
@@ -114,7 +141,10 @@ async fn mp4mux_roundtrips_through_fmp4demux() {
         vec![h264_caps(64, 48).with_framerate_any()],
         "the moov drives one CapsChanged with the muxed codec + geometry"
     );
-    assert_eq!(sink.frames, aus, "every access unit recovered, in order, byte-exact");
+    assert_eq!(
+        sink.frames, aus,
+        "every access unit recovered, in order, byte-exact"
+    );
 }
 
 #[test]
@@ -127,8 +157,14 @@ fn rejects_non_h26x_caps() {
         height: Dim::Fixed(48),
         framerate: Rate::Fixed(30 << 16),
     };
-    assert!(Mp4Mux::new().configure_pipeline(&raw).is_err(), "raw video is not a muxable codec");
-    assert!(Mp4Mux::new().configure_pipeline(&h264_caps(64, 48)).is_ok(), "H.264 is accepted");
+    assert!(
+        Mp4Mux::new().configure_pipeline(&raw).is_err(),
+        "raw video is not a muxable codec"
+    );
+    assert!(
+        Mp4Mux::new().configure_pipeline(&h264_caps(64, 48)).is_ok(),
+        "H.264 is accepted"
+    );
 }
 
 #[test]
@@ -139,12 +175,19 @@ fn registry_resolves_mp4mux_and_qtmux_alias() {
     let reg = default_registry();
     // Both the canonical name and the qtmux alias parse into a runnable graph.
     for name in ["mp4mux", "qtmux"] {
-        let line = format!("appsrc caps=video/x-raw,format=RGBA,width=2,height=2 ! {name} ! fakesink");
+        let line =
+            format!("appsrc caps=video/x-raw,format=RGBA,width=2,height=2 ! {name} ! fakesink");
         // The structural parse + element lookup must succeed (the appsrc->mux caps
         // link itself is rejected at negotiation, not at element resolution, so we
         // only assert the element name resolves, i.e. not "unknown element").
-        let err = parse_launch(&reg, &line).err().map(|e| format!("{e}")).unwrap_or_default();
-        assert!(!err.contains("unknown element"), "{name} should resolve: {err}");
+        let err = parse_launch(&reg, &line)
+            .err()
+            .map(|e| format!("{e}"))
+            .unwrap_or_default();
+        assert!(
+            !err.contains("unknown element"),
+            "{name} should resolve: {err}"
+        );
     }
 }
 
@@ -156,9 +199,17 @@ trait FramerateAny {
 impl FramerateAny for Caps {
     fn with_framerate_any(self) -> Caps {
         match self {
-            Caps::CompressedVideo { codec, width, height, .. } => {
-                Caps::CompressedVideo { codec, width, height, framerate: Rate::Any }
-            }
+            Caps::CompressedVideo {
+                codec,
+                width,
+                height,
+                ..
+            } => Caps::CompressedVideo {
+                codec,
+                width,
+                height,
+                framerate: Rate::Any,
+            },
             other => other,
         }
     }

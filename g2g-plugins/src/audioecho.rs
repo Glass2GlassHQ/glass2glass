@@ -37,11 +37,23 @@ struct EchoState {
 impl EchoState {
     fn new(channels: usize, max_delay_frames: usize) -> Self {
         let frames = max_delay_frames.max(1);
-        Self { ring: vec![0i16; frames * channels], channels, max_delay_frames: frames, pos: 0 }
+        Self {
+            ring: vec![0i16; frames * channels],
+            channels,
+            max_delay_frames: frames,
+            pos: 0,
+        }
     }
 
     /// Process one interleaved S16LE buffer in place semantics (writes `dst`).
-    fn process(&mut self, src: &[u8], dst: &mut [u8], delay_frames: usize, intensity: f64, feedback: f64) {
+    fn process(
+        &mut self,
+        src: &[u8],
+        dst: &mut [u8],
+        delay_frames: usize,
+        intensity: f64,
+        feedback: f64,
+    ) {
         let delay = delay_frames.clamp(1, self.max_delay_frames);
         let back = delay * self.channels;
         let len = self.ring.len();
@@ -115,9 +127,11 @@ impl AudioEcho {
 
     fn accept_input(&self, caps: &Caps) -> Result<(u32, u32), G2gError> {
         match caps {
-            Caps::Audio { format: AudioFormat::PcmS16Le, channels, sample_rate } if *channels > 0 => {
-                Ok((*channels as u32, *sample_rate))
-            }
+            Caps::Audio {
+                format: AudioFormat::PcmS16Le,
+                channels,
+                sample_rate,
+            } if *channels > 0 => Ok((*channels as u32, *sample_rate)),
             _ => Err(G2gError::CapsMismatch),
         }
     }
@@ -145,7 +159,10 @@ impl AsyncElement for AudioEcho {
     /// Native `DerivedOutput`: the echo preserves format, channels, and rate.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
-            Caps::Audio { format: AudioFormat::PcmS16Le, .. } => CapsSet::one(input.clone()),
+            Caps::Audio {
+                format: AudioFormat::PcmS16Le,
+                ..
+            } => CapsSet::one(input.clone()),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
     }
@@ -215,7 +232,12 @@ impl AsyncElement for AudioEcho {
     }
 
     fn metadata(&self) -> ElementMetadata {
-        ElementMetadata::new("Audio echo", "Filter/Effect/Audio", "Adds an echo / delay to an audio stream", "g2g")
+        ElementMetadata::new(
+            "Audio echo",
+            "Filter/Effect/Audio",
+            "Adds an echo / delay to an audio stream",
+            "g2g",
+        )
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
@@ -251,8 +273,15 @@ static AUDIOECHO_PROPS: &[PropertySpec] = &[
 
 impl PadTemplates for AudioEcho {
     fn pad_templates() -> Vec<PadTemplate> {
-        let pcm = Caps::Audio { format: AudioFormat::PcmS16Le, channels: 2, sample_rate: 48_000 };
-        Vec::from([PadTemplate::sink(CapsSet::one(pcm.clone())), PadTemplate::source(CapsSet::one(pcm))])
+        let pcm = Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            channels: 2,
+            sample_rate: 48_000,
+        };
+        Vec::from([
+            PadTemplate::sink(CapsSet::one(pcm.clone())),
+            PadTemplate::source(CapsSet::one(pcm)),
+        ])
     }
 }
 
@@ -269,7 +298,10 @@ mod tests {
     }
 
     fn unpack(bytes: &[u8]) -> Vec<i16> {
-        bytes.chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect()
+        bytes
+            .chunks_exact(2)
+            .map(|c| i16::from_le_bytes([c[0], c[1]]))
+            .collect()
     }
 
     #[test]
@@ -315,9 +347,20 @@ mod tests {
     #[test]
     fn configure_rejects_non_s16le() {
         let mut e = AudioEcho::new();
-        let bad = Caps::Audio { format: AudioFormat::PcmF32Le, channels: 2, sample_rate: 48_000 };
-        assert_eq!(e.configure_pipeline(&bad).unwrap_err(), G2gError::CapsMismatch);
-        let ok = Caps::Audio { format: AudioFormat::PcmS16Le, channels: 2, sample_rate: 48_000 };
+        let bad = Caps::Audio {
+            format: AudioFormat::PcmF32Le,
+            channels: 2,
+            sample_rate: 48_000,
+        };
+        assert_eq!(
+            e.configure_pipeline(&bad).unwrap_err(),
+            G2gError::CapsMismatch
+        );
+        let ok = Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            channels: 2,
+            sample_rate: 48_000,
+        };
         assert!(e.configure_pipeline(&ok).is_ok());
     }
 }

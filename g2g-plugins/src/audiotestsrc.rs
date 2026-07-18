@@ -53,7 +53,10 @@ pub struct AudioTestSrc {
 
 impl AudioTestSrc {
     pub fn new(sample_rate: u32, channels: u8, tone_hz: u32, target_buffers: u64) -> Self {
-        assert!(sample_rate > 0 && channels > 0, "rate and channels must be non-zero");
+        assert!(
+            sample_rate > 0 && channels > 0,
+            "rate and channels must be non-zero"
+        );
         Self {
             sample_rate,
             channels,
@@ -130,11 +133,13 @@ fn noise_unit(n: u64) -> f32 {
 }
 
 impl SourceLoop for AudioTestSrc {
-    type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
+    type RunFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
     where
         Self: 'a;
 
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 
@@ -178,9 +183,7 @@ impl SourceLoop for AudioTestSrc {
                 #[cfg(not(feature = "std"))]
                 let arrival_ns: u64 = 0;
                 let frame = Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(
-                        bytes.into_boxed_slice(),
-                    )),
+                    domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
                     timing: FrameTiming {
                         pts_ns: pts,
                         dts_ns: pts,
@@ -252,8 +255,12 @@ static AUDIOTESTSRC_PROPS: &[PropertySpec] = &[
     PropertySpec::new("samplerate", PropKind::Uint, "samples per second"),
     PropertySpec::new("channels", PropKind::Uint, "channel count"),
     PropertySpec::new("freq", PropKind::Uint, "test tone frequency in Hz"),
-    PropertySpec::new("num-buffers", PropKind::Int, "buffers to emit then EOS (-1 = forever)")
-        .with_default("-1"),
+    PropertySpec::new(
+        "num-buffers",
+        PropKind::Int,
+        "buffers to emit then EOS (-1 = forever)",
+    )
+    .with_default("-1"),
     PropertySpec::new(
         "wave",
         PropKind::Str,
@@ -330,7 +337,10 @@ mod tests {
         let src = AudioTestSrc::new(48_000, 1, 1_000, 1).with_wave(Wave::Saw);
         assert_eq!(src.sample(0), -(i16::MAX / 2));
         assert_eq!(src.sample(24), 0);
-        assert!(src.sample(36) > src.sample(12), "sawtooth rises across the period");
+        assert!(
+            src.sample(36) > src.sample(12),
+            "sawtooth rises across the period"
+        );
     }
 
     #[test]

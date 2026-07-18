@@ -46,7 +46,9 @@ impl SourceLoop for SrtSrc {
         Self: 'a;
 
     fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
-        core::future::ready(Ok(Caps::Text { format: TextFormat::Srt }))
+        core::future::ready(Ok(Caps::Text {
+            format: TextFormat::Srt,
+        }))
     }
 
     fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -84,14 +86,18 @@ impl AsyncElement for CueSink {
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         match upstream_caps {
-            Caps::Text { format: TextFormat::Utf8 } => Ok(upstream_caps.clone()),
+            Caps::Text {
+                format: TextFormat::Utf8,
+            } => Ok(upstream_caps.clone()),
             _ => Err(G2gError::CapsMismatch),
         }
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         match absolute_caps {
-            Caps::Text { format: TextFormat::Utf8 } => Ok(ConfigureOutcome::Accepted),
+            Caps::Text {
+                format: TextFormat::Utf8,
+            } => Ok(ConfigureOutcome::Accepted),
             _ => Err(G2gError::CapsMismatch),
         }
     }
@@ -105,7 +111,8 @@ impl AsyncElement for CueSink {
             if let PipelinePacket::DataFrame(frame) = packet {
                 if let MemoryDomain::System(slice) = &frame.domain {
                     self.pts.push(frame.timing.pts_ns);
-                    self.texts.push(String::from_utf8_lossy(slice.as_slice()).into_owned());
+                    self.texts
+                        .push(String::from_utf8_lossy(slice.as_slice()).into_owned());
                 }
             }
             Ok(())

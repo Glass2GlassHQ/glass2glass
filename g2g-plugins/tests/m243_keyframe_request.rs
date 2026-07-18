@@ -12,7 +12,7 @@ use core::pin::Pin;
 use g2g_core::runtime::{run_simple_pipeline, SourceLoop};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, ConfigureOutcome, Dim, G2gError, OutputSink, PipelineClock,
-    PipelinePacket, PushOutcome, RawVideoFormat, Rate, Reconfigure,
+    PipelinePacket, PushOutcome, Rate, RawVideoFormat, Reconfigure,
 };
 
 struct ZeroClock;
@@ -57,7 +57,10 @@ impl SourceLoop for CountingSource {
                     g2g_core::MemoryDomain::System(g2g_core::memory::SystemSlice::from_boxed(
                         alloc_vec(frame_len).into_boxed_slice(),
                     )),
-                    g2g_core::FrameTiming { pts_ns: seq * 33_000_000, ..Default::default() },
+                    g2g_core::FrameTiming {
+                        pts_ns: seq * 33_000_000,
+                        ..Default::default()
+                    },
                     seq,
                 );
                 if let PushOutcome::Reconfigure(Reconfigure::ForceKeyframe) =
@@ -117,8 +120,14 @@ impl AsyncElement for KeyframeRequestingSink {
 
 #[tokio::test]
 async fn force_keyframe_reaches_the_source() {
-    let mut src = CountingSource { total: 6, force_keyframes_seen: 0 };
-    let mut sink = KeyframeRequestingSink { received: 0, pending: None };
+    let mut src = CountingSource {
+        total: 6,
+        force_keyframes_seen: 0,
+    };
+    let mut sink = KeyframeRequestingSink {
+        received: 0,
+        pending: None,
+    };
 
     let stats = run_simple_pipeline(&mut src, &mut sink, &ZeroClock, 1)
         .await
@@ -164,8 +173,13 @@ async fn no_request_means_no_force_keyframe() {
         }
     }
 
-    let mut src = CountingSource { total: 5, force_keyframes_seen: 0 };
+    let mut src = CountingSource {
+        total: 5,
+        force_keyframes_seen: 0,
+    };
     let mut sink = QuietSink(0);
-    run_simple_pipeline(&mut src, &mut sink, &ZeroClock, 1).await.expect("runs");
+    run_simple_pipeline(&mut src, &mut sink, &ZeroClock, 1)
+        .await
+        .expect("runs");
     assert_eq!(src.force_keyframes_seen, 0, "no request, no ForceKeyframe");
 }

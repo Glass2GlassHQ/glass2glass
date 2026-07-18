@@ -32,11 +32,11 @@ use g2g_core::{
     OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Seek, Segment,
 };
 
+use crate::abr::BandwidthEstimator;
 use crate::fetch::{
     byte_frame, get_bytes, get_range_bytes, get_text, resolve_url, MAX_MANIFEST_BYTES,
     MAX_SEGMENT_BYTES,
 };
-use crate::abr::BandwidthEstimator;
 use crate::mpd::{parse, parse_sidx, ByteRange, Representation, ResolvedSegment};
 
 /// Resolve a segment / init URL against the base. An empty URL means the piece
@@ -73,12 +73,23 @@ async fn load_rep(
     base: &str,
     rep: &Representation,
     total_secs: f64,
-) -> Result<(Vec<ResolvedSegment>, u64, Option<(String, Option<ByteRange>)>), G2gError> {
+) -> Result<
+    (
+        Vec<ResolvedSegment>,
+        u64,
+        Option<(String, Option<ByteRange>)>,
+    ),
+    G2gError,
+> {
     let init = rep.init();
     if let Some(index_range) = rep.segment_base().map(|sb| sb.index_range) {
         let idx_bytes = fetch_segment(client, &seg_url(base, ""), Some(index_range)).await?;
         let sidx = parse_sidx(&idx_bytes).ok_or(G2gError::CapsMismatch)?;
-        return Ok((sidx.subsegments(index_range.offset), sidx.timescale.max(1), init));
+        return Ok((
+            sidx.subsegments(index_range.offset),
+            sidx.timescale.max(1),
+            init,
+        ));
     }
     Ok((rep.resolved_segments(total_secs), rep.timescale(), init))
 }
@@ -150,7 +161,9 @@ impl DashSrc {
     }
 
     fn output_caps() -> Caps {
-        Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff }
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::IsoBmff,
+        }
     }
 }
 
@@ -193,7 +206,9 @@ impl SourceLoop for DashSrc {
     fn caps_constraint<'a>(
         &'a mut self,
     ) -> impl Future<Output = Result<CapsConstraint<'a>, G2gError>> + 'a {
-        core::future::ready(Ok(CapsConstraint::Produces(CapsSet::one(Self::output_caps()))))
+        core::future::ready(Ok(CapsConstraint::Produces(CapsSet::one(
+            Self::output_caps(),
+        ))))
     }
 
     fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -241,7 +256,9 @@ impl SourceLoop for DashSrc {
                 // an explicit `SegmentList`, or a `sidx`-indexed `SegmentBase` all
                 // resolve to one ordered segment list (see `load_rep`). Pick the
                 // Representation fitting the current estimate (or the user cap).
-                let rep = mpd.select(sel_cap(&estimator)).ok_or(G2gError::CapsMismatch)?;
+                let rep = mpd
+                    .select(sel_cap(&estimator))
+                    .ok_or(G2gError::CapsMismatch)?;
                 let mut cur_rep_id = rep.id.clone();
                 let (mut segs, mut timescale, mut init) =
                     load_rep(&client, &base, rep, mpd.duration_secs).await?;

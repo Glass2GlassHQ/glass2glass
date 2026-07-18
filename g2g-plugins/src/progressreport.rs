@@ -122,7 +122,12 @@ impl AsyncElement for ProgressReport {
     }
 
     fn metadata(&self) -> ElementMetadata {
-        ElementMetadata::new("Progress report", "Generic", "Periodically reports pipeline progress", "g2g")
+        ElementMetadata::new(
+            "Progress report",
+            "Generic",
+            "Periodically reports pipeline progress",
+            "g2g",
+        )
     }
 
     fn set_instance_name(&mut self, name: String) {
@@ -148,8 +153,16 @@ impl AsyncElement for ProgressReport {
 }
 
 static PROGRESSREPORT_PROPS: &[PropertySpec] = &[
-    PropertySpec::new("update-freq", PropKind::Int, "report interval in seconds of stream time"),
-    PropertySpec::new("silent", PropKind::Bool, "suppress the log lines (still counts)"),
+    PropertySpec::new(
+        "update-freq",
+        PropKind::Int,
+        "report interval in seconds of stream time",
+    ),
+    PropertySpec::new(
+        "silent",
+        PropKind::Bool,
+        "suppress the log lines (still counts)",
+    ),
 ];
 
 impl LogSource for ProgressReport {
@@ -178,9 +191,14 @@ mod tests {
     }
 
     fn frame(bytes: usize, pts_ns: u64) -> PipelinePacket {
-        let timing = FrameTiming { pts_ns, ..FrameTiming::default() };
+        let timing = FrameTiming {
+            pts_ns,
+            ..FrameTiming::default()
+        };
         PipelinePacket::DataFrame(Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(alloc::vec![0u8; bytes].into_boxed_slice())),
+            domain: MemoryDomain::System(SystemSlice::from_boxed(
+                alloc::vec![0u8; bytes].into_boxed_slice(),
+            )),
             timing,
             sequence: 0,
             meta: Default::default(),
@@ -193,7 +211,9 @@ mod tests {
         p.set_property("silent", PropValue::Bool(true)).unwrap();
         let mut out = NullSink;
         p.process(frame(100, 0), &mut out).await.unwrap();
-        p.process(frame(200, 1_000_000_000), &mut out).await.unwrap();
+        p.process(frame(200, 1_000_000_000), &mut out)
+            .await
+            .unwrap();
         assert_eq!(p.frames(), 2);
         assert_eq!(p.bytes(), 300);
     }

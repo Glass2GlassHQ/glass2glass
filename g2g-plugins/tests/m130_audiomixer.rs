@@ -27,7 +27,12 @@ async fn audiomixer_sums_two_sources() {
          audiomixer name=m ! fakesink",
     )
     .expect("fan-in pipeline parses");
-    let stats = run_graph(graph, &ZeroClock, 4).await.expect("mixer pipeline runs");
+    let stats = run_graph(graph, &ZeroClock, 4)
+        .await
+        .expect("mixer pipeline runs");
     // Mixed buffers span the longer source: 3 paired + 1 from the longer alone.
-    assert_eq!(stats.frames_consumed, 4, "mixed stream spans the longer input");
+    assert_eq!(
+        stats.frames_consumed, 4,
+        "mixed stream spans the longer input"
+    );
 }

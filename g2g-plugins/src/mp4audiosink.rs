@@ -98,7 +98,8 @@ impl Mp4AudioSink {
 }
 
 impl AsyncElement for Mp4AudioSink {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -152,11 +153,8 @@ impl AsyncElement for Mp4AudioSink {
                     }
 
                     if !self.header_written {
-                        let header = [
-                            ftyp(),
-                            moov(self.channels, self.sample_rate, &self.asc),
-                        ]
-                        .concat();
+                        let header =
+                            [ftyp(), moov(self.channels, self.sample_rate, &self.asc)].concat();
                         let w = self.writer.as_mut().expect("checked above");
                         w.write_all(&header).map_err(io_err)?;
                         self.header_written = true;
@@ -165,8 +163,7 @@ impl AsyncElement for Mp4AudioSink {
                     // duration in media-time ticks: AAC-LC frame, or derived
                     // from the frame's explicit duration if present.
                     let duration = if frame.timing.duration_ns != 0 {
-                        let numer = frame.timing.duration_ns as u128
-                            * self.sample_rate as u128
+                        let numer = frame.timing.duration_ns as u128 * self.sample_rate as u128
                             + self.tick_remainder;
                         self.tick_remainder = numer % 1_000_000_000;
                         (numer / 1_000_000_000) as u32
@@ -216,7 +213,10 @@ use crate::mp4box::{ftyp, full_box, mp4_box, MATRIX};
 /// An MPEG-4 descriptor: tag, expandable size (single byte, payloads here are
 /// small), then payload.
 fn descriptor(tag: u8, payload: &[u8]) -> Vec<u8> {
-    debug_assert!(payload.len() < 128, "descriptor payload exceeds single-byte size");
+    debug_assert!(
+        payload.len() < 128,
+        "descriptor payload exceeds single-byte size"
+    );
     let mut d = Vec::with_capacity(2 + payload.len());
     d.push(tag);
     d.push(payload.len() as u8);

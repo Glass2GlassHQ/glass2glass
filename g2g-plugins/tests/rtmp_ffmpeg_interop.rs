@@ -50,8 +50,15 @@ impl OutputSink for FlvCollect {
 fn ffprobe_video_frame_count(path: &Path) -> u64 {
     let out = Command::new("ffprobe")
         .args([
-            "-v", "error", "-select_streams", "v", "-count_frames",
-            "-show_entries", "stream=nb_read_frames", "-of", "csv=p=0",
+            "-v",
+            "error",
+            "-select_streams",
+            "v",
+            "-count_frames",
+            "-show_entries",
+            "stream=nb_read_frames",
+            "-of",
+            "csv=p=0",
             path.to_str().unwrap(),
         ])
         .output()
@@ -70,18 +77,33 @@ async fn ffmpeg_rtmp_publisher_into_rtmpsrc() {
     let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind rtmp listener");
     let port = listener.local_addr().unwrap().port();
     let mut src = RtmpSrc::from_listener(listener).expect("adopt listener");
-    src.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::Flv })
-        .expect("configure RtmpSrc");
+    src.configure_pipeline(&Caps::ByteStream {
+        encoding: ByteStreamEncoding::Flv,
+    })
+    .expect("configure RtmpSrc");
 
     // ffmpeg publishes ~2 s of synthetic H.264 over RTMP to our listener.
     let url = format!("rtmp://127.0.0.1:{port}/live/stream");
     let ffmpeg = tokio::task::spawn_blocking(move || {
         Command::new("ffmpeg")
             .args([
-                "-hide_banner", "-loglevel", "error",
-                "-re", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=15:duration=2",
-                "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
-                "-f", "flv", &url,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-re",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=320x240:rate=15:duration=2",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-tune",
+                "zerolatency",
+                "-f",
+                "flv",
+                &url,
             ])
             .status()
     });
@@ -95,10 +117,17 @@ async fn ffmpeg_rtmp_publisher_into_rtmpsrc() {
         .expect("RtmpSrc runs");
     let _ = ffmpeg.await;
 
-    assert!(emitted > 0, "RtmpSrc emitted FLV frames from the ffmpeg publisher");
+    assert!(
+        emitted > 0,
+        "RtmpSrc emitted FLV frames from the ffmpeg publisher"
+    );
     assert!(sink.bytes.len() > 3, "collected an FLV byte stream");
     // The demuxed stream is a proper FLV file: the "FLV" signature + version.
-    assert_eq!(&sink.bytes[0..3], b"FLV", "output starts with the FLV signature");
+    assert_eq!(
+        &sink.bytes[0..3],
+        b"FLV",
+        "output starts with the FLV signature"
+    );
 
     // ffprobe confirms the demuxed FLV decodes back to video frames intact.
     let out_flv = std::env::temp_dir().join(format!("g2g_rtmp_{}_{port}.flv", std::process::id()));
@@ -118,7 +147,9 @@ async fn ffmpeg_rtmp_publisher_into_rtmpsrc() {
         &Evidence::new(ConformanceDimension::Oracle)
             .peer("ffmpeg")
             .codec("h264")
-            .detail("ffmpeg RTMP publisher: handshake + chunk-stream demuxed to FLV, ffprobe-decoded"),
+            .detail(
+                "ffmpeg RTMP publisher: handshake + chunk-stream demuxed to FLV, ffprobe-decoded",
+            ),
     )
     .expect("record oracle evidence");
 }

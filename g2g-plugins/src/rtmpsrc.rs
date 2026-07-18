@@ -47,7 +47,11 @@ pub struct RtmpSrc {
 impl RtmpSrc {
     /// Listen for a publisher on `bind` (e.g. `0.0.0.0:1935`, the RTMP port).
     pub fn new(bind: SocketAddr) -> Self {
-        Self { bind, listener: None, configured: false }
+        Self {
+            bind,
+            listener: None,
+            configured: false,
+        }
     }
 
     /// Use an already-bound listener instead of binding `bind`, so a caller (a
@@ -57,11 +61,17 @@ impl RtmpSrc {
         // A pre-bound listener is already all `configure_pipeline` would set up,
         // so mark it configured (matching `RtspServerSrc::from_listener`); a
         // redundant `configure_pipeline` call stays harmless (idempotent).
-        Ok(Self { bind, listener: Some(listener), configured: true })
+        Ok(Self {
+            bind,
+            listener: Some(listener),
+            configured: true,
+        })
     }
 
     fn output_caps() -> Caps {
-        Caps::ByteStream { encoding: ByteStreamEncoding::Flv }
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::Flv,
+        }
     }
 }
 
@@ -95,7 +105,9 @@ impl SourceLoop for RtmpSrc {
     fn caps_constraint<'a>(
         &'a mut self,
     ) -> impl Future<Output = Result<CapsConstraint<'a>, G2gError>> + 'a {
-        core::future::ready(Ok(CapsConstraint::Produces(CapsSet::one(Self::output_caps()))))
+        core::future::ready(Ok(CapsConstraint::Produces(CapsSet::one(
+            Self::output_caps(),
+        ))))
     }
 
     fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -117,11 +129,19 @@ impl SourceLoop for RtmpSrc {
 
     fn properties(&self) -> &'static [PropertySpec] {
         const PROPS: &[PropertySpec] = &[
-            PropertySpec::new("address", PropKind::Str, "local bind address (IP to listen on)")
-                .with_default("0.0.0.0"),
-            PropertySpec::new("port", PropKind::Uint, "local TCP port to accept the publisher on")
-                .with_range("0", "65535")
-                .with_default("1935"),
+            PropertySpec::new(
+                "address",
+                PropKind::Str,
+                "local bind address (IP to listen on)",
+            )
+            .with_default("0.0.0.0"),
+            PropertySpec::new(
+                "port",
+                PropKind::Uint,
+                "local TCP port to accept the publisher on",
+            )
+            .with_range("0", "65535")
+            .with_default("1935"),
         ];
         PROPS
     }
@@ -160,7 +180,8 @@ impl SourceLoop for RtmpSrc {
                 }
                 let flv = session.take_flv();
                 if !flv.is_empty() {
-                    out.push(PipelinePacket::DataFrame(flv_frame(flv, sequence))).await?;
+                    out.push(PipelinePacket::DataFrame(flv_frame(flv, sequence)))
+                        .await?;
                     sequence += 1;
                 }
             }

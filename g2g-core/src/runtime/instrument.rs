@@ -170,7 +170,10 @@ pub type Probe = Option<Arc<ElementProbe>>;
 /// Snapshot a collection of optional probes into report rows, dropping the
 /// un-instrumented (`None`) slots. Order is preserved (topological).
 pub fn snapshot_all(probes: &[Probe]) -> Vec<ElementLatency> {
-    probes.iter().filter_map(|p| p.as_ref().map(|p| p.snapshot())).collect()
+    probes
+        .iter()
+        .filter_map(|p| p.as_ref().map(|p| p.snapshot()))
+        .collect()
 }
 
 #[cfg(test)]

@@ -63,7 +63,11 @@ fn reconstruction_error_bounded() {
         let a = alaw_decode(alaw_encode(s)) as i32 - s as i32;
         // Mu-law tops out at 32124, so the outermost inputs sit further from
         // the last level than half a step; A-law likewise at 32256.
-        let bound = if s.unsigned_abs() >= 31 * 1024 { 660 } else { 520 };
+        let bound = if s.unsigned_abs() >= 31 * 1024 {
+            660
+        } else {
+            520
+        };
         assert!(mu.abs() <= bound, "mulaw err {mu} at {s}");
         assert!(a.abs() <= bound, "alaw err {a} at {s}");
     }
@@ -79,7 +83,18 @@ fn ffmpeg_convert(in_fmt: &str, out_fmt: &str, input: &[u8]) -> Vec<u8> {
     let dst = dir.join(format!("g2g-m638-{stamp}-out.{out_fmt}"));
     std::fs::write(&src, input).expect("write temp input");
     let status = Command::new("ffmpeg")
-        .args(["-y", "-loglevel", "error", "-f", in_fmt, "-ar", "8000", "-ac", "1", "-i"])
+        .args([
+            "-y",
+            "-loglevel",
+            "error",
+            "-f",
+            in_fmt,
+            "-ar",
+            "8000",
+            "-ac",
+            "1",
+            "-i",
+        ])
         .arg(&src)
         .args(["-f", out_fmt])
         .arg(&dst)
@@ -102,7 +117,10 @@ fn ffmpeg_oracle_bit_exact_full_domain() {
 
     // Decode: all 256 codes, both laws, bit-exact against ffmpeg's decoder.
     let codes: Vec<u8> = (0..=255u8).collect();
-    for (fmt, dec) in [("mulaw", mulaw_decode as fn(u8) -> i16), ("alaw", alaw_decode)] {
+    for (fmt, dec) in [
+        ("mulaw", mulaw_decode as fn(u8) -> i16),
+        ("alaw", alaw_decode),
+    ] {
         let theirs = ffmpeg_convert(fmt, "s16le", &codes);
         let ours: Vec<u8> = le_bytes(&codes.iter().map(|&c| dec(c)).collect::<Vec<_>>());
         assert_eq!(ours, theirs, "{fmt} decode differs from ffmpeg");
@@ -112,7 +130,10 @@ fn ffmpeg_oracle_bit_exact_full_domain() {
     // ffmpeg's encoder (same nearest-reconstruction quantization).
     let sweep: Vec<i16> = (i16::MIN..=i16::MAX).collect();
     let sweep_bytes = le_bytes(&sweep);
-    for (fmt, enc) in [("mulaw", mulaw_encode as fn(i16) -> u8), ("alaw", alaw_encode)] {
+    for (fmt, enc) in [
+        ("mulaw", mulaw_encode as fn(i16) -> u8),
+        ("alaw", alaw_encode),
+    ] {
         let theirs = ffmpeg_convert("s16le", fmt, &sweep_bytes);
         let ours: Vec<u8> = sweep.iter().map(|&s| enc(s)).collect();
         assert_eq!(ours, theirs, "{fmt} encode differs from ffmpeg");
@@ -142,7 +163,9 @@ fn encoder_element_converts_and_inherits_timing() {
     let mut enc = unsafe { G711Enc::with_ring(Law::Mulaw, &out_ring) };
 
     let input = frame_of(&input_ring, &le_bytes(&samples), 777, 9);
-    let out = block_on(enc.process(input)).expect("encode").expect("frame");
+    let out = block_on(enc.process(input))
+        .expect("encode")
+        .expect("frame");
     let expect: Vec<u8> = samples.iter().map(|&s| mulaw_encode(s)).collect();
     assert_eq!(payload(&out), expect, "per-sample companding");
     assert_eq!(out.timing.pts_ns, 777, "timing inherited");
@@ -161,11 +184,21 @@ fn decoder_element_round_trips_the_encoder() {
     let mut dec = unsafe { G711Dec::with_ring(Law::Alaw, &out_ring) };
 
     let input = frame_of(&input_ring, &le_bytes(&samples), 5, 1);
-    let mid = block_on(enc.process(input)).expect("encode").expect("frame");
+    let mid = block_on(enc.process(input))
+        .expect("encode")
+        .expect("frame");
     let out = block_on(dec.process(mid)).expect("decode").expect("frame");
-    let expect: Vec<u8> =
-        le_bytes(&samples.iter().map(|&s| alaw_decode(alaw_encode(s))).collect::<Vec<_>>());
-    assert_eq!(payload(&out), expect, "decode(encode(x)) through the elements");
+    let expect: Vec<u8> = le_bytes(
+        &samples
+            .iter()
+            .map(|&s| alaw_decode(alaw_encode(s)))
+            .collect::<Vec<_>>(),
+    );
+    assert_eq!(
+        payload(&out),
+        expect,
+        "decode(encode(x)) through the elements"
+    );
 }
 
 #[test]
@@ -177,11 +210,17 @@ fn framing_and_sizing_are_validated() {
 
     // Torn 16-bit sample: rejected before touching the ring.
     let torn = frame_of(&input_ring, &[1, 2, 3], 0, 0);
-    assert_eq!(block_on(enc.process(torn)).unwrap_err(), G2gError::CapsMismatch);
+    assert_eq!(
+        block_on(enc.process(torn)).unwrap_err(),
+        G2gError::CapsMismatch
+    );
 
     // Output larger than a slot (32 bytes in -> 16 out > 8): a sizing bug.
     let big = frame_of(&input_ring, &[0u8; 32], 0, 0);
-    assert_eq!(block_on(enc.process(big)).unwrap_err(), G2gError::CapsMismatch);
+    assert_eq!(
+        block_on(enc.process(big)).unwrap_err(),
+        G2gError::CapsMismatch
+    );
 }
 
 #[test]
@@ -201,5 +240,7 @@ fn ring_exhaustion_surfaces_as_pool_exhausted() {
     drop(first);
     // Slot returned: encoding proceeds again.
     let input_ring3: StaticLendRing<1, 8> = StaticLendRing::new();
-    block_on(enc.process(frame_of(&input_ring3, &[0, 0], 0, 2))).expect("encode").expect("frame");
+    block_on(enc.process(frame_of(&input_ring3, &[0, 0], 0, 2)))
+        .expect("encode")
+        .expect("frame");
 }

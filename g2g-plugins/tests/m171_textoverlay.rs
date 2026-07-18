@@ -37,7 +37,10 @@ fn webvtt_round_trips_through_the_parser() {
                 start_ns: 3_000_000_000,
                 end_ns: 5_000_000_000,
                 text: "Second".into(),
-                settings: CueSettings { align: TextAlign::Start, ..CueSettings::default() },
+                settings: CueSettings {
+                    align: TextAlign::Start,
+                    ..CueSettings::default()
+                },
             },
         ]
     );
@@ -46,9 +49,15 @@ fn webvtt_round_trips_through_the_parser() {
 #[test]
 fn registry_exposes_textoverlay_with_a_location_property() {
     let reg = default_registry();
-    assert!(reg.element_names().contains(&"textoverlay"), "textoverlay registered");
+    assert!(
+        reg.element_names().contains(&"textoverlay"),
+        "textoverlay registered"
+    );
     let dump = reg.inspect("textoverlay").expect("inspectable");
-    assert!(dump.contains("location"), "location property listed:\n{dump}");
+    assert!(
+        dump.contains("location"),
+        "location property listed:\n{dump}"
+    );
 }
 
 #[tokio::test]
@@ -59,8 +68,13 @@ async fn textoverlay_runs_in_a_parsed_pipeline() {
     let reg = default_registry();
     let graph = parse_launch(&reg, "videotestsrc num-buffers=4 ! textoverlay ! fakesink")
         .expect("pipeline parses");
-    let stats = run_graph(graph, &ZeroClock, 4).await.expect("pipeline runs");
-    assert_eq!(stats.frames_consumed, 4, "all frames reached the sink through the overlay");
+    let stats = run_graph(graph, &ZeroClock, 4)
+        .await
+        .expect("pipeline runs");
+    assert_eq!(
+        stats.frames_consumed, 4,
+        "all frames reached the sink through the overlay"
+    );
 }
 
 #[test]
@@ -77,8 +91,11 @@ fn location_property_loads_an_srt_file() {
     use g2g_core::{AsyncElement, PropValue};
     let mut ov = TextOverlay::new();
     assert_eq!(ov.cue_count(), 0);
-    ov.set_property("location", PropValue::Str(path.to_string_lossy().into_owned()))
-        .expect("location accepted");
+    ov.set_property(
+        "location",
+        PropValue::Str(path.to_string_lossy().into_owned()),
+    )
+    .expect("location accepted");
     assert_eq!(ov.cue_count(), 2, "both cues loaded from the file");
 
     let _ = std::fs::remove_file(&path);

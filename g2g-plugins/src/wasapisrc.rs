@@ -116,11 +116,13 @@ impl WasapiSrc {
 }
 
 impl SourceLoop for WasapiSrc {
-    type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
+    type RunFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
     where
         Self: 'a;
 
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 
@@ -209,10 +211,9 @@ impl PadTemplates for WasapiSrc {
             channels: 2,
             sample_rate: 48_000,
         };
-        Vec::from([PadTemplate::source(CapsSet::from_alternatives(Vec::from([
-            pcm(AudioFormat::PcmF32Le),
-            pcm(AudioFormat::PcmS16Le),
-        ])))])
+        Vec::from([PadTemplate::source(CapsSet::from_alternatives(Vec::from(
+            [pcm(AudioFormat::PcmF32Le), pcm(AudioFormat::PcmS16Le)],
+        )))])
     }
 }
 
@@ -456,7 +457,10 @@ mod tests {
             wBitsPerSample: 24,
             cbSize: 0,
         };
-        assert_eq!(audio_config_from_format(&weird), Err(G2gError::CapsMismatch));
+        assert_eq!(
+            audio_config_from_format(&weird),
+            Err(G2gError::CapsMismatch)
+        );
     }
 
     #[test]

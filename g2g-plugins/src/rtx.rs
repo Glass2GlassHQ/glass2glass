@@ -47,7 +47,12 @@ pub fn rtp_payload_offset(packet: &[u8]) -> Option<usize> {
 /// timestamp, CSRCs intact), swap in the RTX payload type / SSRC / sequence
 /// number, and insert the original sequence number (OSN) at the front of the
 /// payload. `None` if `original` is not a parseable RTP packet.
-pub fn build_rtx_packet(original: &[u8], rtx_pt: u8, rtx_ssrc: u32, rtx_seq: u16) -> Option<Vec<u8>> {
+pub fn build_rtx_packet(
+    original: &[u8],
+    rtx_pt: u8,
+    rtx_ssrc: u32,
+    rtx_seq: u16,
+) -> Option<Vec<u8>> {
     let payload_off = rtp_payload_offset(original)?;
     let original_seq = u16::from_be_bytes([original[2], original[3]]);
     let mut out = Vec::with_capacity(original.len() + 2);
@@ -92,17 +97,28 @@ mod tests {
         // A single small NAL -> one packet with the marker set (last of the AU).
         let packets = pkt.packetize(&[0u8, 0, 0, 1, 0x65, 0xAA, 0xBB], 9000);
         let original = &packets[0];
-        assert_eq!(original[1] & 0x80, 0x80, "fixture packet has the marker set");
+        assert_eq!(
+            original[1] & 0x80,
+            0x80,
+            "fixture packet has the marker set"
+        );
 
         let rtx = build_rtx_packet(original, 97, 0xDEAD_BEEF, 5).expect("built");
         // The RTX packet carries the RTX PT, RTX SSRC, RTX sequence, marker kept.
         assert_eq!(rtx[1] & 0x7F, 97, "rtx payload type");
         assert_eq!(rtx[1] & 0x80, 0x80, "marker preserved on the rtx packet");
         assert_eq!(u16::from_be_bytes([rtx[2], rtx[3]]), 5, "rtx sequence");
-        assert_eq!(u32::from_be_bytes([rtx[8], rtx[9], rtx[10], rtx[11]]), 0xDEAD_BEEF);
+        assert_eq!(
+            u32::from_be_bytes([rtx[8], rtx[9], rtx[10], rtx[11]]),
+            0xDEAD_BEEF
+        );
         // OSN is the original sequence, prepended to the payload.
         let off = rtp_payload_offset(original).unwrap();
-        assert_eq!(u16::from_be_bytes([rtx[off], rtx[off + 1]]), 0, "osn = original seq 0");
+        assert_eq!(
+            u16::from_be_bytes([rtx[off], rtx[off + 1]]),
+            0,
+            "osn = original seq 0"
+        );
         assert_eq!(rtx.len(), original.len() + 2, "exactly the OSN was added");
 
         let restored = parse_rtx_packet(&rtx, 96, 0x1234_5678).expect("parsed");
@@ -128,7 +144,11 @@ mod tests {
     #[test]
     fn rejects_truncated_packets() {
         assert_eq!(rtp_payload_offset(&[0u8; 8]), None);
-        assert_eq!(parse_rtx_packet(&[0u8; 12], 96, 1), None, "no room for the OSN");
+        assert_eq!(
+            parse_rtx_packet(&[0u8; 12], 96, 1),
+            None,
+            "no room for the OSN"
+        );
         assert_eq!(build_rtx_packet(&[0u8; 4], 97, 1, 0), None);
     }
 }

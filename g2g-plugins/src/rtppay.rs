@@ -148,7 +148,11 @@ mod tests {
             0xDEAD_BEEF,
             "ssrc"
         );
-        assert_eq!(payload(pkt), &[0x65, 1, 2, 3], "single NAL carried verbatim");
+        assert_eq!(
+            payload(pkt),
+            &[0x65, 1, 2, 3],
+            "single NAL carried verbatim"
+        );
     }
 
     #[test]
@@ -182,11 +186,18 @@ mod tests {
             assert_eq!(pl[0] & 0xE0, 0x60, "F|NRI preserved from 0x65");
             assert_eq!(pl[1] & 0x1F, 5, "original NAL type in FU header");
             assert_eq!(pl[1] & 0x80 != 0, i == 0, "start bit on first only");
-            assert_eq!(pl[1] & 0x40 != 0, i + 1 == packets.len(), "end bit on last only");
+            assert_eq!(
+                pl[1] & 0x40 != 0,
+                i + 1 == packets.len(),
+                "end bit on last only"
+            );
             reassembled.extend_from_slice(&pl[2..]);
         }
         assert_eq!(reassembled, body, "fragments reassemble the NAL body");
-        assert!(marker(packets.last().unwrap()), "marker on the last fragment");
+        assert!(
+            marker(packets.last().unwrap()),
+            "marker on the last fragment"
+        );
         assert!(!marker(&packets[0]));
     }
 

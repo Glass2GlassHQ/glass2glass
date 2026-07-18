@@ -58,7 +58,8 @@ struct MultiDomainSource {
 
 impl SourceLoop for MultiDomainSource {
     type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>;
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 
@@ -100,7 +101,13 @@ struct MultiDomainSink {
 
 impl MultiDomainSink {
     fn params(&self) -> AllocationParams {
-        AllocationParams { size_bytes: 64, min_buffers: 1, align: 1, domain: self.prefer, accepts: self.accepts }
+        AllocationParams {
+            size_bytes: 64,
+            min_buffers: 1,
+            align: 1,
+            domain: self.prefer,
+            accepts: self.accepts,
+        }
     }
 }
 
@@ -163,7 +170,9 @@ async fn diamond_negotiates_common_gpu_domain() {
     g.link(tee.out(0), a).unwrap();
     g.link(tee.out(1), b).unwrap();
 
-    let stats = run_graph(g, &NullClock, 4).await.expect("overlapping accept sets negotiate");
+    let stats = run_graph(g, &NullClock, 4)
+        .await
+        .expect("overlapping accept sets negotiate");
     assert_eq!(
         stats.allocation.map(|p| p.domain),
         Some(MemoryDomainKind::Cuda),
@@ -228,7 +237,9 @@ async fn producer_capability_bounds_the_domain() {
     g.link(tee.out(0), a).unwrap();
     g.link(tee.out(1), b).unwrap();
 
-    let stats = run_graph(g, &NullClock, 4).await.expect("System is a shared domain");
+    let stats = run_graph(g, &NullClock, 4)
+        .await
+        .expect("System is a shared domain");
     assert_eq!(
         stats.allocation.map(|p| p.domain),
         Some(MemoryDomainKind::System),

@@ -363,16 +363,22 @@ impl OrtInference {
         let outputs = match self.input_dtype {
             TensorDType::U8 => {
                 let t = Tensor::from_array((shape, bytes[..n].to_vec())).map_err(ort_err)?;
-                self.session.run(::ort::inputs![self.input_name.as_str() => t]).map_err(ort_err)?
+                self.session
+                    .run(::ort::inputs![self.input_name.as_str() => t])
+                    .map_err(ort_err)?
             }
             TensorDType::I8 => {
                 let data: Vec<i8> = bytes[..n].iter().map(|&b| b as i8).collect();
                 let t = Tensor::from_array((shape, data)).map_err(ort_err)?;
-                self.session.run(::ort::inputs![self.input_name.as_str() => t]).map_err(ort_err)?
+                self.session
+                    .run(::ort::inputs![self.input_name.as_str() => t])
+                    .map_err(ort_err)?
             }
             _ => return Err(G2gError::CapsMismatch),
         };
-        let value = outputs.get(self.output_name.as_str()).ok_or(G2gError::Hardware(HardwareError::Other))?;
+        let value = outputs
+            .get(self.output_name.as_str())
+            .ok_or(G2gError::Hardware(HardwareError::Other))?;
         let (out_shape, out_data) = value.try_extract_tensor::<f32>().map_err(ort_err)?;
         let dims: Vec<u32> = out_shape.iter().map(|d| (*d).max(0) as u32).collect();
         let mut out_bytes = Vec::with_capacity(out_data.len() * 4);
@@ -384,7 +390,8 @@ impl OrtInference {
 }
 
 impl AsyncElement for OrtInference {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -447,7 +454,8 @@ impl AsyncElement for OrtInference {
                         layout: TensorLayout::Nchw,
                     };
                     if self.last_caps.as_ref() != Some(&new_caps) {
-                        out.push(PipelinePacket::CapsChanged(new_caps.clone())).await?;
+                        out.push(PipelinePacket::CapsChanged(new_caps.clone()))
+                            .await?;
                         self.last_caps = Some(new_caps);
                     }
                     let tensor_frame = Frame {

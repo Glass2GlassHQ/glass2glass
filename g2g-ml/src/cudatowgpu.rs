@@ -82,7 +82,8 @@ impl CudaToWgpu {
 }
 
 impl AsyncElement for CudaToWgpu {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -152,7 +153,10 @@ impl AsyncElement for CudaToWgpu {
                         Some(entry) => {
                             interop
                                 .device
-                                .poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
+                                .poll(wgpu::PollType::Wait {
+                                    submission_index: None,
+                                    timeout: None,
+                                })
                                 .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
                             entry
                         }

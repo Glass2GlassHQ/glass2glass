@@ -71,7 +71,8 @@ struct ScriptedSource {
 
 impl SourceLoop for ScriptedSource {
     type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>;
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 
@@ -172,11 +173,7 @@ impl MultiInputElement for GeomMux {
         Ok(CapsConstraint::Produces(CapsSet::one(self.output.clone())))
     }
 
-    fn propose_allocation_for_input(
-        &self,
-        _input: usize,
-        caps: &Caps,
-    ) -> Option<AllocationParams> {
+    fn propose_allocation_for_input(&self, _input: usize, caps: &Caps) -> Option<AllocationParams> {
         geom_alloc(caps)
     }
 
@@ -262,9 +259,19 @@ async fn muxer_midstream_recascades_only_changed_pad() {
         before: 3,
         after: 0,
     }));
-    let t0 = g.add_transform(GraphNode::element(RecordingTransform { log: Arc::clone(&log0) }));
-    let t1 = g.add_transform(GraphNode::element(RecordingTransform { log: Arc::clone(&log1) }));
-    let mux = g.add_muxer(GraphNode::muxer(GeomMux { inputs: 2, output: nv12(8, 8) }), 2);
+    let t0 = g.add_transform(GraphNode::element(RecordingTransform {
+        log: Arc::clone(&log0),
+    }));
+    let t1 = g.add_transform(GraphNode::element(RecordingTransform {
+        log: Arc::clone(&log1),
+    }));
+    let mux = g.add_muxer(
+        GraphNode::muxer(GeomMux {
+            inputs: 2,
+            output: nv12(8, 8),
+        }),
+        2,
+    );
     let sink = g.add_sink(GraphNode::element(AnySink));
     g.link(s0, t0).unwrap();
     g.link(s1, t1).unwrap();
@@ -272,11 +279,16 @@ async fn muxer_midstream_recascades_only_changed_pad() {
     g.link(t1, mux.input(1)).unwrap();
     g.link(mux.output(), sink).unwrap();
 
-    let stats = run_graph(g, &NullClock, 4).await.expect("muxer mid-stream re-cascade runs");
+    let stats = run_graph(g, &NullClock, 4)
+        .await
+        .expect("muxer mid-stream re-cascade runs");
     assert_eq!(stats.frames_emitted, 7, "4 + 3 source frames");
     assert_eq!(
         *log0.lock().unwrap(),
-        vec![AllocationParams::cuda(64, 2, 64), AllocationParams::cuda(256, 2, 64)],
+        vec![
+            AllocationParams::cuda(64, 2, 64),
+            AllocationParams::cuda(256, 2, 64)
+        ],
         "pad 0's branch absorbed the startup proposal then the mid-stream re-cascade"
     );
     assert_eq!(

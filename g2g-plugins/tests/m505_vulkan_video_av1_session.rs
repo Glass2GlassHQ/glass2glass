@@ -7,7 +7,10 @@
 //! validate the M504 `Std*` mapping (a wrong mapping fails here), so a green run
 //! proves the AV1 parse + mapping is correct end to end on the GPU, not just
 //! self-consistent. Runs on the RTX 3060; skips with no adapter.
-#![cfg(all(any(target_os = "linux", target_os = "windows"), feature = "vulkan-video"))]
+#![cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    feature = "vulkan-video"
+))]
 
 use g2g_core::runtime::block_on;
 use g2g_plugins::vulkanvideo::{
@@ -44,7 +47,11 @@ fn creates_av1_decode_session_from_real_sequence_header() {
 
     assert!(session.coded_extent.0 >= 640 && session.coded_extent.1 >= 480);
     // Format::UNDEFINED is 0; a concrete decode format is non-zero.
-    assert_ne!(session.picture_format.as_raw(), 0, "decode picture format must be concrete");
+    assert_ne!(
+        session.picture_format.as_raw(),
+        0,
+        "decode picture format must be concrete"
+    );
     eprintln!(
         "Vulkan AV1 session created: picture_format={:?}, coded_extent={:?}",
         session.picture_format, session.coded_extent,

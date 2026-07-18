@@ -42,16 +42,22 @@ impl WebSocketSrc {
     /// codec: H264, .. }` for an Annex-B elementary stream). The socket is
     /// opened in `run`, so construction has no side effects.
     pub fn new(url: impl Into<String>, caps: Caps) -> Self {
-        Self { url: url.into(), caps, configured: false }
+        Self {
+            url: url.into(),
+            caps,
+            configured: false,
+        }
     }
 }
 
 impl SourceLoop for WebSocketSrc {
-    type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
+    type RunFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
     where
         Self: 'a;
 
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 
@@ -64,7 +70,9 @@ impl SourceLoop for WebSocketSrc {
     fn caps_constraint<'a>(
         &'a mut self,
     ) -> impl Future<Output = Result<CapsConstraint<'a>, G2gError>> + 'a {
-        core::future::ready(Ok(CapsConstraint::Produces(CapsSet::one(self.caps.clone()))))
+        core::future::ready(Ok(CapsConstraint::Produces(CapsSet::one(
+            self.caps.clone(),
+        ))))
     }
 
     fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {

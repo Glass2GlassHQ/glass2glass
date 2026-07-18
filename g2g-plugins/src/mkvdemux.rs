@@ -76,7 +76,10 @@ enum CuePrefetch {
     Idle,
     /// Byte-seek to the `Cues` element issued; `flushed` flips on the upstream
     /// flush, after which incoming bytes are the `Cues` element to parse.
-    Fetching { target_ns: u64, flushed: bool },
+    Fetching {
+        target_ns: u64,
+        flushed: bool,
+    },
 }
 
 /// Demuxes a Matroska / WebM byte stream into one selected elementary stream.
@@ -169,7 +172,10 @@ impl MkvDemux {
             if let (Some(app), Some(upstream)) = (&self.app, &self.upstream) {
                 if let Some(seek) = app.take_pending() {
                     upstream.seek(Seek::flush_to(cues_off));
-                    self.prefetch = CuePrefetch::Fetching { target_ns: seek.start, flushed: false };
+                    self.prefetch = CuePrefetch::Fetching {
+                        target_ns: seek.start,
+                        flushed: false,
+                    };
                 }
             }
         } else {
@@ -221,7 +227,9 @@ impl MkvDemux {
 
     /// The input this element accepts: a Matroska / WebM byte stream.
     fn input_caps() -> Caps {
-        Caps::ByteStream { encoding: ByteStreamEncoding::Matroska }
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::Matroska,
+        }
     }
 
     /// The placeholder output caps for the selected stream at negotiation. Video
@@ -235,21 +243,40 @@ impl MkvDemux {
             MkvStream::Vp8 => Self::compressed_video(VideoCodec::Vp8),
             MkvStream::Vp9 => Self::compressed_video(VideoCodec::Vp9),
             MkvStream::Av1 => Self::compressed_video(VideoCodec::Av1),
-            MkvStream::Aac => Caps::Audio { format: AudioFormat::Aac, channels: 0, sample_rate: 0 },
-            MkvStream::Opus => Caps::Audio { format: AudioFormat::Opus, channels: 0, sample_rate: 0 },
+            MkvStream::Aac => Caps::Audio {
+                format: AudioFormat::Aac,
+                channels: 0,
+                sample_rate: 0,
+            },
+            MkvStream::Opus => Caps::Audio {
+                format: AudioFormat::Opus,
+                channels: 0,
+                sample_rate: 0,
+            },
             // Every subtitle stream is de-framed to plain UTF-8 cue text at emit
             // (the source syntax, `S_TEXT/UTF8` / `ASS` / `WEBVTT`, only selects the
             // de-framing), so the forwarded caps is always `Text { Utf8 }`.
-            MkvStream::Subtitle(_) => Caps::Text { format: TextFormat::Utf8 },
+            MkvStream::Subtitle(_) => Caps::Text {
+                format: TextFormat::Utf8,
+            },
         }
     }
 
     fn compressed_video(codec: VideoCodec) -> Caps {
         Caps::CompressedVideo {
             codec,
-            width: Dim::Range { min: 16, max: 65_535 },
-            height: Dim::Range { min: 16, max: 65_535 },
-            framerate: Rate::Range { min_q16: 1 << 16, max_q16: 240 << 16 },
+            width: Dim::Range {
+                min: 16,
+                max: 65_535,
+            },
+            height: Dim::Range {
+                min: 16,
+                max: 65_535,
+            },
+            framerate: Rate::Range {
+                min_q16: 1 << 16,
+                max_q16: 240 << 16,
+            },
         }
     }
 
@@ -307,7 +334,10 @@ impl MkvDemux {
         if total <= self.tags_posted {
             return;
         }
-        let fresh: TagList = self.demux.tags().tags()[self.tags_posted..].iter().cloned().collect();
+        let fresh: TagList = self.demux.tags().tags()[self.tags_posted..]
+            .iter()
+            .cloned()
+            .collect();
         self.tags_posted = total;
         if let Some(bus) = &self.bus {
             bus.try_post(BusMessage::Tag(fresh));
@@ -335,7 +365,10 @@ impl MkvDemux {
         }
         self.collection_posted = true;
         if let Some(bus) = &self.bus {
-            bus.try_post(BusMessage::StreamCollection(StreamCollection::new("matroska-0", streams)));
+            bus.try_post(BusMessage::StreamCollection(StreamCollection::new(
+                "matroska-0",
+                streams,
+            )));
         }
     }
 
@@ -346,8 +379,16 @@ impl MkvDemux {
         let id = alloc::format!("matroska-track-{}", track.number);
         let video = |codec| Caps::CompressedVideo {
             codec,
-            width: if track.width > 0 { Dim::Fixed(track.width) } else { Dim::Any },
-            height: if track.height > 0 { Dim::Fixed(track.height) } else { Dim::Any },
+            width: if track.width > 0 {
+                Dim::Fixed(track.width)
+            } else {
+                Dim::Any
+            },
+            height: if track.height > 0 {
+                Dim::Fixed(track.height)
+            } else {
+                Dim::Any
+            },
             framerate: Rate::Any,
         };
         let audio = |format| Caps::Audio {
@@ -364,7 +405,12 @@ impl MkvDemux {
             MkvCodec::Aac => (StreamType::Audio, audio(AudioFormat::Aac)),
             MkvCodec::Opus => (StreamType::Audio, audio(AudioFormat::Opus)),
             // Forwarded as plain UTF-8 text (de-framed at emit), whatever the source.
-            MkvCodec::Subtitle(_) => (StreamType::Text, Caps::Text { format: TextFormat::Utf8 }),
+            MkvCodec::Subtitle(_) => (
+                StreamType::Text,
+                Caps::Text {
+                    format: TextFormat::Utf8,
+                },
+            ),
             MkvCodec::Other => return None,
         };
         Some(Stream::new(id, stream_type, caps))
@@ -376,17 +422,25 @@ impl MkvDemux {
     /// ([`BusMessage::StreamsSelected`]). A no-op without a controller, with no
     /// pending selection, or when no id resolves (the current stream stays).
     fn apply_stream_selection(&mut self) {
-        let Some(ctrl) = &self.stream_select else { return };
-        let Some(ids) = ctrl.take_pending() else { return };
+        let Some(ctrl) = &self.stream_select else {
+            return;
+        };
+        let Some(ids) = ctrl.take_pending() else {
+            return;
+        };
         for id in &ids {
-            let Some(stream) = self.resolve_stream_id(id) else { continue };
+            let Some(stream) = self.resolve_stream_id(id) else {
+                continue;
+            };
             if stream != self.stream {
                 self.stream = stream;
                 // Re-emit caps for the newly selected stream on the next frame.
                 self.last_caps = None;
             }
             if let Some(bus) = &self.bus {
-                bus.try_post(BusMessage::StreamsSelected { ids: alloc::vec![id.clone()] });
+                bus.try_post(BusMessage::StreamsSelected {
+                    ids: alloc::vec![id.clone()],
+                });
             }
             return; // single output: the first resolvable id wins
         }
@@ -431,8 +485,15 @@ impl MkvDemux {
                 Admit::Emit => {}
             }
             let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(deframe_block(f.codec, f.data).into_boxed_slice())),
-                FrameTiming { pts_ns: f.pts_ns, dts_ns: f.pts_ns, duration_ns: f.duration_ns, ..FrameTiming::default() },
+                MemoryDomain::System(SystemSlice::from_boxed(
+                    deframe_block(f.codec, f.data).into_boxed_slice(),
+                )),
+                FrameTiming {
+                    pts_ns: f.pts_ns,
+                    dts_ns: f.pts_ns,
+                    duration_ns: f.duration_ns,
+                    ..FrameTiming::default()
+                },
                 self.emitted,
             );
             self.emitted += 1;
@@ -457,15 +518,20 @@ impl AsyncElement for MkvDemux {
         // demuxer refines geometry / audio params from Tracks via CapsChanged.
         let stream = self.stream;
         CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| match input {
-            Caps::ByteStream { encoding: ByteStreamEncoding::Matroska } => {
-                CapsSet::one(Self::output_caps(stream))
-            }
+            Caps::ByteStream {
+                encoding: ByteStreamEncoding::Matroska,
+            } => CapsSet::one(Self::output_caps(stream)),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        if !matches!(absolute_caps, Caps::ByteStream { encoding: ByteStreamEncoding::Matroska }) {
+        if !matches!(
+            absolute_caps,
+            Caps::ByteStream {
+                encoding: ByteStreamEncoding::Matroska
+            }
+        ) {
             return Err(G2gError::CapsMismatch);
         }
         self.configured = true;
@@ -496,7 +562,10 @@ impl AsyncElement for MkvDemux {
                         CuePrefetch::Fetching { flushed: false, .. } => return Ok(()),
                         // Reading the Cues element: parse it (emit nothing); once
                         // the index is populated, seek to the real target Cluster.
-                        CuePrefetch::Fetching { flushed: true, target_ns } => {
+                        CuePrefetch::Fetching {
+                            flushed: true,
+                            target_ns,
+                        } => {
                             self.demux.push_data(slice.as_slice());
                             if !self.demux.cues().is_empty() {
                                 let off = self.demux.cue_seek_offset(target_ns).unwrap_or(0);
@@ -520,8 +589,15 @@ impl AsyncElement for MkvDemux {
                 // does not re-send (a from-start re-scan fully resets, re-reading
                 // the EBML header), then forwards the flush.
                 PipelinePacket::Flush => {
-                    if let CuePrefetch::Fetching { target_ns, flushed: false } = self.prefetch {
-                        self.prefetch = CuePrefetch::Fetching { target_ns, flushed: true };
+                    if let CuePrefetch::Fetching {
+                        target_ns,
+                        flushed: false,
+                    } = self.prefetch
+                    {
+                        self.prefetch = CuePrefetch::Fetching {
+                            target_ns,
+                            flushed: true,
+                        };
                         self.demux.reset_keeping_tracks();
                         return Ok(());
                     }
@@ -644,7 +720,11 @@ pub fn forwardable_streams(demux: &MatroskaDemuxer) -> Vec<MkvStreamInfo> {
             }
             let video = matches!(
                 stream,
-                MkvStream::H264 | MkvStream::H265 | MkvStream::Vp8 | MkvStream::Vp9 | MkvStream::Av1
+                MkvStream::H264
+                    | MkvStream::H265
+                    | MkvStream::Vp8
+                    | MkvStream::Vp9
+                    | MkvStream::Av1
             );
             // Fill the concrete channel count from the track header for an audio
             // stream: `output_caps` is the generic per-stream placeholder (channels
@@ -655,14 +735,22 @@ pub fn forwardable_streams(demux: &MatroskaDemuxer) -> Vec<MkvStreamInfo> {
             // compressed-audio caps intersect the rate strictly (only PCM has the
             // wildcard), so a concrete rate would not match a `rate: 0` decoder pad.
             let caps = match MkvDemux::output_caps(stream) {
-                Caps::Audio { format, sample_rate, .. } => Caps::Audio {
+                Caps::Audio {
+                    format,
+                    sample_rate,
+                    ..
+                } => Caps::Audio {
                     format,
                     channels: t.channels.max(1),
                     sample_rate,
                 },
                 other => other,
             };
-            Some(MkvStreamInfo { stream, caps, video })
+            Some(MkvStreamInfo {
+                stream,
+                caps,
+                video,
+            })
         })
         .collect()
 }
@@ -682,7 +770,11 @@ pub fn subtitle_streams(demux: &MatroskaDemuxer) -> Vec<MkvStreamInfo> {
             if !matches!(stream, MkvStream::Subtitle(_)) {
                 return None;
             }
-            Some(MkvStreamInfo { stream, caps: MkvDemux::output_caps(stream), video: false })
+            Some(MkvStreamInfo {
+                stream,
+                caps: MkvDemux::output_caps(stream),
+                video: false,
+            })
         })
         .collect()
 }
@@ -736,7 +828,10 @@ impl PadTemplates for MkvDemux {
             Self::output_caps(MkvStream::Opus),
             Self::output_caps(MkvStream::Subtitle(TextFormat::Utf8)),
         ]));
-        Vec::from([PadTemplate::sink(CapsSet::one(Self::input_caps())), PadTemplate::source(source)])
+        Vec::from([
+            PadTemplate::sink(CapsSet::one(Self::input_caps())),
+            PadTemplate::source(source),
+        ])
     }
 }
 
@@ -781,7 +876,10 @@ impl MkvDemuxN {
     /// A demuxer with one output port per entry of `ports` (the selected streams),
     /// in port order. Panics if `ports` is empty (a fan-out needs a port).
     pub fn new(ports: Vec<MkvStream>) -> Self {
-        assert!(!ports.is_empty(), "MkvDemuxN needs at least one output port");
+        assert!(
+            !ports.is_empty(),
+            "MkvDemuxN needs at least one output port"
+        );
         let announced = alloc::vec![false; ports.len()];
         Self {
             demux: MatroskaDemuxer::new(),
@@ -818,11 +916,17 @@ impl MkvDemuxN {
     /// stream changes, and confirm the active ids on the bus. A no-op without a
     /// controller, with no pending selection, or before `Tracks` is parsed.
     fn apply_stream_selection(&mut self) {
-        let Some(ctrl) = &self.stream_select else { return };
-        let Some(ids) = ctrl.take_pending() else { return };
+        let Some(ctrl) = &self.stream_select else {
+            return;
+        };
+        let Some(ids) = ctrl.take_pending() else {
+            return;
+        };
         let mut active = Vec::new();
         for (port, id) in ids.iter().enumerate().take(self.ports.len()) {
-            let Some(stream) = resolve_stream_id(&self.demux, id) else { continue };
+            let Some(stream) = resolve_stream_id(&self.demux, id) else {
+                continue;
+            };
             if self.ports[port] != stream {
                 self.ports[port] = stream;
                 self.announced[port] = false; // re-emit caps for the new stream
@@ -849,7 +953,9 @@ impl MkvDemuxN {
     /// The output port that carries the elementary stream of `codec`, or `None`
     /// when no selected port matches (the track is dropped).
     fn port_for_codec(&self, codec: MkvCodec) -> Option<usize> {
-        self.ports.iter().position(|&s| MkvDemux::selected_codec(s) == codec)
+        self.ports
+            .iter()
+            .position(|&s| MkvDemux::selected_codec(s) == codec)
     }
 
     /// Announce every container track as a [`BusMessage::StreamCollection`] (M376),
@@ -859,14 +965,21 @@ impl MkvDemuxN {
         if self.collection_posted {
             return;
         }
-        let streams: Vec<Stream> =
-            self.demux.tracks().iter().filter_map(MkvDemux::track_to_stream).collect();
+        let streams: Vec<Stream> = self
+            .demux
+            .tracks()
+            .iter()
+            .filter_map(MkvDemux::track_to_stream)
+            .collect();
         if streams.is_empty() {
             return;
         }
         self.collection_posted = true;
         if let Some(bus) = &self.bus {
-            bus.try_post(BusMessage::StreamCollection(StreamCollection::new("matroska-0", streams)));
+            bus.try_post(BusMessage::StreamCollection(StreamCollection::new(
+                "matroska-0",
+                streams,
+            )));
         }
     }
 }
@@ -886,13 +999,17 @@ impl MultiOutputElement for MkvDemuxN {
     /// the port configures against it (geometry is a placeholder `Range`, refined
     /// at runtime by the port's `CapsChanged`). `None` for an out-of-range port.
     fn port_output_caps(&self, port: usize) -> Option<Caps> {
-        self.ports.get(port).map(|&stream| MkvDemux::output_caps(stream))
+        self.ports
+            .get(port)
+            .map(|&stream| MkvDemux::output_caps(stream))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         // Accept the negotiated byte-stream input; per-port output caps are
         // announced from `process` as each stream first routes.
-        absolute_caps.intersect(&MkvDemux::input_caps()).map(|_| ConfigureOutcome::Accepted)
+        absolute_caps
+            .intersect(&MkvDemux::input_caps())
+            .map(|_| ConfigureOutcome::Accepted)
     }
 
     fn process<'a>(
@@ -924,12 +1041,20 @@ impl MultiOutputElement for MkvDemuxN {
                             self.announced[port] = true;
                         }
                         let out_frame = Frame::new(
-                            MemoryDomain::System(SystemSlice::from_boxed(deframe_block(f.codec, f.data).into_boxed_slice())),
-                            FrameTiming { pts_ns: f.pts_ns, dts_ns: f.pts_ns, duration_ns: f.duration_ns, ..FrameTiming::default() },
+                            MemoryDomain::System(SystemSlice::from_boxed(
+                                deframe_block(f.codec, f.data).into_boxed_slice(),
+                            )),
+                            FrameTiming {
+                                pts_ns: f.pts_ns,
+                                dts_ns: f.pts_ns,
+                                duration_ns: f.duration_ns,
+                                ..FrameTiming::default()
+                            },
                             self.emitted,
                         );
                         self.emitted += 1;
-                        out.push_to(port, PipelinePacket::DataFrame(out_frame)).await?;
+                        out.push_to(port, PipelinePacket::DataFrame(out_frame))
+                            .await?;
                     }
                 }
                 // Flush / Segment apply to every branch (the parser resets on a
@@ -1007,22 +1132,40 @@ mod tests {
     }
 
     fn video_track(num: u64, codec: &[u8], w: u32, h: u32) -> Vec<u8> {
-        let v = [elem(&[0xB0], &uint_body(w as u64)), elem(&[0xBA], &uint_body(h as u64))].concat();
-        let body = [elem(&[0xD7], &uint_body(num)), elem(&[0x86], codec), elem(&[0xE0], &v)].concat();
+        let v = [
+            elem(&[0xB0], &uint_body(w as u64)),
+            elem(&[0xBA], &uint_body(h as u64)),
+        ]
+        .concat();
+        let body = [
+            elem(&[0xD7], &uint_body(num)),
+            elem(&[0x86], codec),
+            elem(&[0xE0], &v),
+        ]
+        .concat();
         elem(&[0xAE], &body)
     }
 
     fn audio_track(num: u64, codec: &[u8], ch: u8, sr: u32) -> Vec<u8> {
         let mut a = elem(&[0x9F], &uint_body(ch as u64));
         a.extend_from_slice(&elem(&[0xB5], &(sr as f32).to_be_bytes()));
-        let body = [elem(&[0xD7], &uint_body(num)), elem(&[0x86], codec), elem(&[0xE1], &a)].concat();
+        let body = [
+            elem(&[0xD7], &uint_body(num)),
+            elem(&[0x86], codec),
+            elem(&[0xE1], &a),
+        ]
+        .concat();
         elem(&[0xAE], &body)
     }
 
     fn webm() -> Vec<u8> {
         let tracks = elem(
             &[0x16, 0x54, 0xAE, 0x6B],
-            &[video_track(1, b"V_VP9", 320, 240), audio_track(2, b"A_OPUS", 2, 48_000)].concat(),
+            &[
+                video_track(1, b"V_VP9", 320, 240),
+                audio_track(2, b"A_OPUS", 2, 48_000),
+            ]
+            .concat(),
         );
         let cluster = elem(
             &[0x1F, 0x43, 0xB6, 0x75],
@@ -1073,7 +1216,9 @@ mod tests {
             FrameTiming::default(),
             0,
         );
-        d.process(PipelinePacket::DataFrame(frame), sink).await.unwrap();
+        d.process(PipelinePacket::DataFrame(frame), sink)
+            .await
+            .unwrap();
         d.process(PipelinePacket::Eos, sink).await.unwrap();
     }
 
@@ -1087,11 +1232,23 @@ mod tests {
         let infos = forwardable_streams(&demux);
         let opus = infos
             .iter()
-            .find(|i| matches!(i.caps, Caps::Audio { format: AudioFormat::Opus, .. }))
+            .find(|i| {
+                matches!(
+                    i.caps,
+                    Caps::Audio {
+                        format: AudioFormat::Opus,
+                        ..
+                    }
+                )
+            })
             .expect("WebM has an Opus track");
         assert_eq!(
             opus.caps,
-            Caps::Audio { format: AudioFormat::Opus, channels: 2, sample_rate: 0 },
+            Caps::Audio {
+                format: AudioFormat::Opus,
+                channels: 2,
+                sample_rate: 0
+            },
             "Opus forwardable caps carry the track's concrete channel count (rate stays the \
              unknown-until-parsed placeholder, since compressed rate intersects strictly)"
         );
@@ -1110,7 +1267,9 @@ mod tests {
         };
         assert!(d.intercept_caps(&raw).is_err());
         // A TS byte stream is the wrong container.
-        let ts = Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs };
+        let ts = Caps::ByteStream {
+            encoding: ByteStreamEncoding::MpegTs,
+        };
         assert!(d.intercept_caps(&ts).is_err());
     }
 
@@ -1129,8 +1288,14 @@ mod tests {
                 framerate: Rate::Any,
             }]
         );
-        assert_eq!(sink.frames, alloc::vec![alloc::vec![0x11, 0x22], alloc::vec![0x55, 0x66]]);
-        assert!(!sink.eos, "EOS is forwarded by the runner's arm, not the element");
+        assert_eq!(
+            sink.frames,
+            alloc::vec![alloc::vec![0x11, 0x22], alloc::vec![0x55, 0x66]]
+        );
+        assert!(
+            !sink.eos,
+            "EOS is forwarded by the runner's arm, not the element"
+        );
     }
 
     #[tokio::test]
@@ -1140,7 +1305,11 @@ mod tests {
 
         assert_eq!(
             sink.caps,
-            alloc::vec![Caps::Audio { format: AudioFormat::Opus, channels: 2, sample_rate: 48_000 }]
+            alloc::vec![Caps::Audio {
+                format: AudioFormat::Opus,
+                channels: 2,
+                sample_rate: 48_000
+            }]
         );
         assert_eq!(sink.frames, alloc::vec![alloc::vec![0x33, 0x44]]);
     }
@@ -1149,11 +1318,17 @@ mod tests {
     fn output_caps_track_the_selection() {
         assert!(matches!(
             MkvDemux::output_caps(MkvStream::Vp8),
-            Caps::CompressedVideo { codec: VideoCodec::Vp8, .. }
+            Caps::CompressedVideo {
+                codec: VideoCodec::Vp8,
+                ..
+            }
         ));
         assert!(matches!(
             MkvDemux::output_caps(MkvStream::Opus),
-            Caps::Audio { format: AudioFormat::Opus, .. }
+            Caps::Audio {
+                format: AudioFormat::Opus,
+                ..
+            }
         ));
     }
 
@@ -1161,15 +1336,25 @@ mod tests {
     /// Cluster frame.
     fn webm_with_tags() -> Vec<u8> {
         let info = elem(&[0x15, 0x49, 0xA9, 0x66], &elem(&[0x7B, 0xA9], b"My Clip")); // Info/Title
-        let tracks = elem(&[0x16, 0x54, 0xAE, 0x6B], &video_track(1, b"V_VP9", 320, 240));
+        let tracks = elem(
+            &[0x16, 0x54, 0xAE, 0x6B],
+            &video_track(1, b"V_VP9", 320, 240),
+        );
         let simple = [elem(&[0x45, 0xA3], b"ARTIST"), elem(&[0x44, 0x87], b"Band")].concat();
         let tag = [elem(&[0x63, 0xC0], &[]), elem(&[0x67, 0xC8], &simple)].concat();
         let tags = elem(&[0x12, 0x54, 0xC3, 0x67], &elem(&[0x73, 0x73], &tag));
         let cluster = elem(
             &[0x1F, 0x43, 0xB6, 0x75],
-            &[elem(&[0xE7], &uint_body(0)), elem(&[0xA3], &block(1, 0, &[0x11, 0x22]))].concat(),
+            &[
+                elem(&[0xE7], &uint_body(0)),
+                elem(&[0xA3], &block(1, 0, &[0x11, 0x22])),
+            ]
+            .concat(),
         );
-        let segment = elem(&[0x18, 0x53, 0x80, 0x67], &[info, tracks, tags, cluster].concat());
+        let segment = elem(
+            &[0x18, 0x53, 0x80, 0x67],
+            &[info, tracks, tags, cluster].concat(),
+        );
         [elem(&[0x1A, 0x45, 0xDF, 0xA3], &[]), segment].concat()
     }
 
@@ -1185,7 +1370,9 @@ mod tests {
             FrameTiming::default(),
             0,
         );
-        d.process(PipelinePacket::DataFrame(frame), &mut sink).await.unwrap();
+        d.process(PipelinePacket::DataFrame(frame), &mut sink)
+            .await
+            .unwrap();
 
         let mut posted = TagList::new();
         while let Some(m) = bus.try_recv() {
@@ -1195,7 +1382,10 @@ mod tests {
                 }
             }
         }
-        assert_eq!(posted.tags(), &[Tag::Title("My Clip".into()), Tag::Artist("Band".into())]);
+        assert_eq!(
+            posted.tags(),
+            &[Tag::Title("My Clip".into()), Tag::Artist("Band".into())]
+        );
         // The selected video frame still flows while the tags go out of band.
         assert_eq!(sink.frames, alloc::vec![alloc::vec![0x11, 0x22]]);
     }
@@ -1204,15 +1394,23 @@ mod tests {
     fn stream_property_round_trips() {
         let mut d = MkvDemux::new();
         assert_eq!(d.get_property("stream"), Some(PropValue::Str("vp9".into())));
-        d.set_property("stream", PropValue::Str("opus".into())).unwrap();
+        d.set_property("stream", PropValue::Str("opus".into()))
+            .unwrap();
         assert_eq!(d.stream(), MkvStream::Opus);
-        assert_eq!(d.set_property("stream", PropValue::Str("theora".into())), Err(PropError::Value));
+        assert_eq!(
+            d.set_property("stream", PropValue::Str("theora".into())),
+            Err(PropError::Value)
+        );
     }
 
     fn subtitle_track(num: u64, codec: &[u8]) -> Vec<u8> {
         // TrackNumber, TrackType(subtitle=0x11), CodecID.
-        let body =
-            [elem(&[0xD7], &uint_body(num)), elem(&[0x83], &uint_body(0x11)), elem(&[0x86], codec)].concat();
+        let body = [
+            elem(&[0xD7], &uint_body(num)),
+            elem(&[0x83], &uint_body(0x11)),
+            elem(&[0x86], codec),
+        ]
+        .concat();
         elem(&[0xAE], &body)
     }
 
@@ -1220,7 +1418,11 @@ mod tests {
         let tracks = elem(&[0x16, 0x54, 0xAE, 0x6B], &subtitle_track(1, codec));
         let cluster = elem(
             &[0x1F, 0x43, 0xB6, 0x75],
-            &[elem(&[0xE7], &uint_body(0)), elem(&[0xA3], &block(1, 0, payload))].concat(),
+            &[
+                elem(&[0xE7], &uint_body(0)),
+                elem(&[0xA3], &block(1, 0, payload)),
+            ]
+            .concat(),
         );
         let segment = elem(&[0x18, 0x53, 0x80, 0x67], &[tracks, cluster].concat());
         [elem(&[0x1A, 0x45, 0xDF, 0xA3], &[]), segment].concat()
@@ -1231,10 +1433,18 @@ mod tests {
         // A Matroska ASS block is `ReadOrder,Layer,Style,Name,MarginL,MarginR,
         // MarginV,Effect,Text`; the demuxer extracts the Text field (tags / `\N`
         // resolved) and forwards it as `Text { Utf8 }`.
-        let bytes = mkv_subtitle(b"S_TEXT/ASS", b"0,0,Default,,0,0,0,,{\\i1}Hello{\\i0}\\Nthere");
+        let bytes = mkv_subtitle(
+            b"S_TEXT/ASS",
+            b"0,0,Default,,0,0,0,,{\\i1}Hello{\\i0}\\Nthere",
+        );
         let mut sink = CaptureSink::default();
         run(MkvStream::Subtitle(TextFormat::Ssa), &bytes, &mut sink).await;
-        assert_eq!(sink.caps, alloc::vec![Caps::Text { format: TextFormat::Utf8 }]);
+        assert_eq!(
+            sink.caps,
+            alloc::vec![Caps::Text {
+                format: TextFormat::Utf8
+            }]
+        );
         assert_eq!(sink.frames, alloc::vec![b"Hello\nthere".to_vec()]);
     }
 
@@ -1243,7 +1453,12 @@ mod tests {
         let bytes = mkv_subtitle(b"S_TEXT/WEBVTT", b"<c.yellow>Hi</c> there");
         let mut sink = CaptureSink::default();
         run(MkvStream::Subtitle(TextFormat::WebVtt), &bytes, &mut sink).await;
-        assert_eq!(sink.caps, alloc::vec![Caps::Text { format: TextFormat::Utf8 }]);
+        assert_eq!(
+            sink.caps,
+            alloc::vec![Caps::Text {
+                format: TextFormat::Utf8
+            }]
+        );
         assert_eq!(sink.frames, alloc::vec![b"Hi there".to_vec()]);
     }
 }

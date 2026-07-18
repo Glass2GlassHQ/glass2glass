@@ -87,18 +87,14 @@ pub enum Caps {
     /// network source carrying e.g. an MPEG-TS) and a demuxer that splits it into
     /// elementary streams. `encoding` names the wire format so a demuxer only
     /// accepts a stream it understands.
-    ByteStream {
-        encoding: ByteStreamEncoding,
-    },
+    ByteStream { encoding: ByteStreamEncoding },
     /// A text stream (subtitles, captions, transcription, OCR, overlay strings).
     /// `format` names the syntax ([`TextFormat`]); the payload is UTF-8 bytes in
     /// the frame's system buffer, and "subtitle" is just timed `Text` (cue PTS +
     /// duration on [`FrameTiming`](crate::frame::FrameTiming)). One kind, not a
     /// per-use-case variant, so an overlay, a caption sink, and a text analytics
     /// element all negotiate the same caps.
-    Text {
-        format: TextFormat,
-    },
+    Text { format: TextFormat },
 }
 
 impl Caps {
@@ -131,8 +127,18 @@ impl Caps {
     pub fn intersect(&self, other: &Caps) -> Result<Caps, G2gError> {
         match (self, other) {
             (
-                Caps::CompressedVideo { codec: ca, width: wa, height: ha, framerate: ra },
-                Caps::CompressedVideo { codec: cb, width: wb, height: hb, framerate: rb },
+                Caps::CompressedVideo {
+                    codec: ca,
+                    width: wa,
+                    height: ha,
+                    framerate: ra,
+                },
+                Caps::CompressedVideo {
+                    codec: cb,
+                    width: wb,
+                    height: hb,
+                    framerate: rb,
+                },
             ) if ca == cb => Ok(Caps::CompressedVideo {
                 codec: *ca,
                 width: wa.intersect(wb).ok_or(G2gError::CapsMismatch)?,
@@ -140,8 +146,18 @@ impl Caps {
                 framerate: ra.intersect(rb).ok_or(G2gError::CapsMismatch)?,
             }),
             (
-                Caps::RawVideo { format: fa, width: wa, height: ha, framerate: ra },
-                Caps::RawVideo { format: fb, width: wb, height: hb, framerate: rb },
+                Caps::RawVideo {
+                    format: fa,
+                    width: wa,
+                    height: ha,
+                    framerate: ra,
+                },
+                Caps::RawVideo {
+                    format: fb,
+                    width: wb,
+                    height: hb,
+                    framerate: rb,
+                },
             ) if fa == fb => Ok(Caps::RawVideo {
                 format: *fa,
                 width: wa.intersect(wb).ok_or(G2gError::CapsMismatch)?,
@@ -149,8 +165,16 @@ impl Caps {
                 framerate: ra.intersect(rb).ok_or(G2gError::CapsMismatch)?,
             }),
             (
-                Caps::Audio { format: fa, channels: ca, sample_rate: sa },
-                Caps::Audio { format: fb, channels: cb, sample_rate: sb },
+                Caps::Audio {
+                    format: fa,
+                    channels: ca,
+                    sample_rate: sa,
+                },
+                Caps::Audio {
+                    format: fb,
+                    channels: cb,
+                    sample_rate: sb,
+                },
             ) if fa == fb => {
                 // Channels use the `ANY_CHANNELS` (0) wildcard in *both* the
                 // compressed and PCM cases: a decoder's concrete output channels
@@ -166,15 +190,25 @@ impl Caps {
                     (sa == sb).then_some(*sa)
                 };
                 match (channels, rate) {
-                    (Some(channels), Some(sample_rate)) => {
-                        Ok(Caps::Audio { format: *fa, channels, sample_rate })
-                    }
+                    (Some(channels), Some(sample_rate)) => Ok(Caps::Audio {
+                        format: *fa,
+                        channels,
+                        sample_rate,
+                    }),
                     _ => Err(G2gError::CapsMismatch),
                 }
             }
             (
-                Caps::Tensor { dtype: da, shape: sha, layout: la },
-                Caps::Tensor { dtype: db, shape: shb, layout: lb },
+                Caps::Tensor {
+                    dtype: da,
+                    shape: sha,
+                    layout: la,
+                },
+                Caps::Tensor {
+                    dtype: db,
+                    shape: shb,
+                    layout: lb,
+                },
             ) if da == db && sha == shb && la == lb => Ok(self.clone()),
             (Caps::ByteStream { encoding: ea }, Caps::ByteStream { encoding: eb }) if ea == eb => {
                 Ok(self.clone())
@@ -187,7 +221,12 @@ impl Caps {
     /// True when every ranged field is `Fixed`. Scalar-only variants are
     /// always fixed.
     pub fn is_fixed(&self) -> bool {
-        if let Caps::Audio { format, channels, sample_rate } = self {
+        if let Caps::Audio {
+            format,
+            channels,
+            sample_rate,
+        } = self
+        {
             // Only raw PCM uses the "any rate" / "any channels" wildcards;
             // compressed audio keeps `0` as a fixed (if nominal) value, since the
             // decoder replaces it before anything reads it.
@@ -211,15 +250,23 @@ impl Caps {
     /// `CapsMismatch`.
     pub fn fixate(&self) -> Result<Caps, G2gError> {
         match self {
-            Caps::CompressedVideo { codec, width, height, framerate } => {
-                Ok(Caps::CompressedVideo {
-                    codec: *codec,
-                    width: width.fixate().ok_or(G2gError::CapsMismatch)?,
-                    height: height.fixate().ok_or(G2gError::CapsMismatch)?,
-                    framerate: framerate.fixate().ok_or(G2gError::CapsMismatch)?,
-                })
-            }
-            Caps::RawVideo { format, width, height, framerate } => Ok(Caps::RawVideo {
+            Caps::CompressedVideo {
+                codec,
+                width,
+                height,
+                framerate,
+            } => Ok(Caps::CompressedVideo {
+                codec: *codec,
+                width: width.fixate().ok_or(G2gError::CapsMismatch)?,
+                height: height.fixate().ok_or(G2gError::CapsMismatch)?,
+                framerate: framerate.fixate().ok_or(G2gError::CapsMismatch)?,
+            }),
+            Caps::RawVideo {
+                format,
+                width,
+                height,
+                framerate,
+            } => Ok(Caps::RawVideo {
                 format: *format,
                 width: width.fixate().ok_or(G2gError::CapsMismatch)?,
                 height: height.fixate().ok_or(G2gError::CapsMismatch)?,
@@ -227,23 +274,23 @@ impl Caps {
             }),
             // A raw-PCM "any" sample rate carries no value to fixate against
             // (M187); compressed audio's nominal `0` fixates as-is.
-            Caps::Audio { format, sample_rate, .. }
-                if is_pcm(*format) && *sample_rate == ANY_SAMPLE_RATE =>
-            {
-                Err(G2gError::CapsMismatch)
-            }
+            Caps::Audio {
+                format,
+                sample_rate,
+                ..
+            } if is_pcm(*format) && *sample_rate == ANY_SAMPLE_RATE => Err(G2gError::CapsMismatch),
             // A raw-PCM "any channels" collapses to a concrete stereo placeholder:
             // the negotiation needs a fixed count, the stream's real layout arrives
             // via the decoder's first `CapsChanged` (mirrors video `Dim::Any` -> 16).
-            Caps::Audio { format, channels, sample_rate }
-                if is_pcm(*format) && *channels == ANY_CHANNELS =>
-            {
-                Ok(Caps::Audio {
-                    format: *format,
-                    channels: FIXATE_CHANNELS_PLACEHOLDER,
-                    sample_rate: *sample_rate,
-                })
-            }
+            Caps::Audio {
+                format,
+                channels,
+                sample_rate,
+            } if is_pcm(*format) && *channels == ANY_CHANNELS => Ok(Caps::Audio {
+                format: *format,
+                channels: FIXATE_CHANNELS_PLACEHOLDER,
+                sample_rate: *sample_rate,
+            }),
             Caps::Audio { .. } | Caps::ByteStream { .. } | Caps::Text { .. } => Ok(self.clone()),
             Caps::Tensor { .. } => Ok(self.clone()),
         }
@@ -255,8 +302,18 @@ impl Caps {
     /// without caring whether the link is pre- or post-decode.
     pub fn dims(&self) -> Option<(&Dim, &Dim, &Rate)> {
         match self {
-            Caps::CompressedVideo { width, height, framerate, .. }
-            | Caps::RawVideo { width, height, framerate, .. } => Some((width, height, framerate)),
+            Caps::CompressedVideo {
+                width,
+                height,
+                framerate,
+                ..
+            }
+            | Caps::RawVideo {
+                width,
+                height,
+                framerate,
+                ..
+            } => Some((width, height, framerate)),
             Caps::Audio { .. } | Caps::ByteStream { .. } | Caps::Text { .. } => None,
             Caps::Tensor { .. } => None,
         }
@@ -270,21 +327,35 @@ impl Caps {
     #[cfg(feature = "alloc")]
     pub fn to_gst_string(&self) -> String {
         match self {
-            Caps::RawVideo { format, width, height, framerate } => {
+            Caps::RawVideo {
+                format,
+                width,
+                height,
+                framerate,
+            } => {
                 let mut s = format!("video/x-raw,format={}", raw_format_gst_name(*format));
                 push_dim(&mut s, "width", width);
                 push_dim(&mut s, "height", height);
                 push_rate(&mut s, framerate);
                 s
             }
-            Caps::CompressedVideo { codec, width, height, framerate } => {
+            Caps::CompressedVideo {
+                codec,
+                width,
+                height,
+                framerate,
+            } => {
                 let mut s = String::from(codec_gst_media_type(*codec));
                 push_dim(&mut s, "width", width);
                 push_dim(&mut s, "height", height);
                 push_rate(&mut s, framerate);
                 s
             }
-            Caps::Audio { format, channels, sample_rate } => {
+            Caps::Audio {
+                format,
+                channels,
+                sample_rate,
+            } => {
                 let (media_type, fmt) = audio_gst_media_type(*format);
                 let mut s = String::from(media_type);
                 if let Some(f) = fmt {
@@ -299,7 +370,11 @@ impl Caps {
                 s
             }
             // No GStreamer media type for tensors; a g2g-specific descriptor.
-            Caps::Tensor { dtype, shape, layout } => {
+            Caps::Tensor {
+                dtype,
+                shape,
+                layout,
+            } => {
                 format!("tensor/x-raw,dtype={dtype:?},layout={layout:?},shape={shape:?}")
             }
             Caps::ByteStream { encoding } => String::from(bytestream_gst_media_type(*encoding)),
@@ -466,7 +541,10 @@ impl Dim {
 pub enum Rate {
     Any,
     /// Min/max framerate in Q16 fixed-point fps.
-    Range { min_q16: u32, max_q16: u32 },
+    Range {
+        min_q16: u32,
+        max_q16: u32,
+    },
     /// Framerate in Q16 fixed-point fps.
     Fixed(u32),
 }
@@ -508,7 +586,10 @@ impl Rate {
         match (min, max) {
             (lo, hi) if lo == hi => Rate::Fixed(lo),
             (u32::MIN, u32::MAX) => Rate::Any, // full span is unconstrained
-            (lo, hi) => Rate::Range { min_q16: lo, max_q16: hi },
+            (lo, hi) => Rate::Range {
+                min_q16: lo,
+                max_q16: hi,
+            },
         }
     }
 }
@@ -516,7 +597,10 @@ impl Rate {
 /// Raw (uncompressed) PCM formats, the only ones the "any rate" wildcard (M187)
 /// and the resampler apply to.
 fn is_pcm(f: AudioFormat) -> bool {
-    matches!(f, AudioFormat::PcmS16Le | AudioFormat::PcmF32Le | AudioFormat::PcmS24Le)
+    matches!(
+        f,
+        AudioFormat::PcmS16Le | AudioFormat::PcmF32Le | AudioFormat::PcmS24Le
+    )
 }
 
 /// Intersect two [`Caps::Audio`] sample rates, where [`ANY_SAMPLE_RATE`] (0) is
@@ -632,7 +716,9 @@ impl CapsSet {
     /// Build from a single concrete description (equivalent to today's
     /// `Caps` for static call sites that don't express alternatives).
     pub fn one(caps: Caps) -> Self {
-        Self { alternatives: alloc::vec![caps] }
+        Self {
+            alternatives: alloc::vec![caps],
+        }
     }
 
     /// Build directly from an ordered list of alternatives. The first
@@ -864,9 +950,15 @@ impl RawVideoFormat {
     /// layout.
     pub const fn chroma_shift(self) -> Option<(u32, u32)> {
         match self {
-            RawVideoFormat::I420 | RawVideoFormat::I420p10 | RawVideoFormat::I420p12 => Some((1, 1)),
-            RawVideoFormat::I422 | RawVideoFormat::I422p10 | RawVideoFormat::I422p12 => Some((1, 0)),
-            RawVideoFormat::I444 | RawVideoFormat::I444p10 | RawVideoFormat::I444p12 => Some((0, 0)),
+            RawVideoFormat::I420 | RawVideoFormat::I420p10 | RawVideoFormat::I420p12 => {
+                Some((1, 1))
+            }
+            RawVideoFormat::I422 | RawVideoFormat::I422p10 | RawVideoFormat::I422p12 => {
+                Some((1, 0))
+            }
+            RawVideoFormat::I444 | RawVideoFormat::I444p10 | RawVideoFormat::I444p12 => {
+                Some((0, 0))
+            }
             _ => None,
         }
     }
@@ -945,7 +1037,10 @@ struct RankCheck<const N: usize>;
 
 impl<const N: usize> RankCheck<N> {
     const VALID: usize = {
-        assert!(N >= 1 && N <= MAX_TENSOR_RANK, "tensor rank must be 1..=MAX_TENSOR_RANK");
+        assert!(
+            N >= 1 && N <= MAX_TENSOR_RANK,
+            "tensor rank must be 1..=MAX_TENSOR_RANK"
+        );
         N
     };
 }
@@ -962,7 +1057,10 @@ impl TensorShape {
             d[i] = dims[i];
             i += 1;
         }
-        Self { dims: d, rank: N as u8 }
+        Self {
+            dims: d,
+            rank: N as u8,
+        }
     }
 
     /// Fallible shape from a runtime slice (a model's reported dims, a
@@ -975,7 +1073,10 @@ impl TensorShape {
         }
         let mut d = [0u32; MAX_TENSOR_RANK];
         d[..dims.len()].copy_from_slice(dims);
-        Some(Self { dims: d, rank: dims.len() as u8 })
+        Some(Self {
+            dims: d,
+            rank: dims.len() as u8,
+        })
     }
 
     /// The dimensions as a slice; its length is the rank.
@@ -997,7 +1098,9 @@ impl TensorShape {
     /// Element count (product of the dims), saturating on overflow so a
     /// bogus shape sizes to `usize::MAX` rather than wrapping or panicking.
     pub fn elements(&self) -> usize {
-        self.dims().iter().fold(1usize, |acc, &d| acc.saturating_mul(d as usize))
+        self.dims()
+            .iter()
+            .fold(1usize, |acc, &d| acc.saturating_mul(d as usize))
     }
 }
 
@@ -1020,7 +1123,12 @@ mod tests {
     use super::*;
 
     fn video(width: Dim, height: Dim, framerate: Rate) -> Caps {
-        Caps::RawVideo { format: RawVideoFormat::Rgba8, width, height, framerate }
+        Caps::RawVideo {
+            format: RawVideoFormat::Rgba8,
+            width,
+            height,
+            framerate,
+        }
     }
 
     #[test]
@@ -1032,7 +1140,10 @@ mod tests {
 
     #[test]
     fn dim_intersect_fixed_pairs() {
-        assert_eq!(Dim::Fixed(64).intersect(&Dim::Fixed(64)), Some(Dim::Fixed(64)));
+        assert_eq!(
+            Dim::Fixed(64).intersect(&Dim::Fixed(64)),
+            Some(Dim::Fixed(64))
+        );
         assert_eq!(Dim::Fixed(64).intersect(&Dim::Fixed(65)), None);
     }
 
@@ -1069,7 +1180,10 @@ mod tests {
 
     #[test]
     fn rate_intersect_mirrors_dim() {
-        let a = Rate::Range { min_q16: 15 << 16, max_q16: 60 << 16 };
+        let a = Rate::Range {
+            min_q16: 15 << 16,
+            max_q16: 60 << 16,
+        };
         let b = Rate::Fixed(30 << 16);
         assert_eq!(a.intersect(&b), Some(Rate::Fixed(30 << 16)));
         assert_eq!(Rate::Any.intersect(&b), Some(Rate::Fixed(30 << 16)));
@@ -1079,7 +1193,14 @@ mod tests {
 
     #[test]
     fn dim_fixate_picks_range_minimum() {
-        assert_eq!(Dim::Range { min: 480, max: 1080 }.fixate(), Some(Dim::Fixed(480)));
+        assert_eq!(
+            Dim::Range {
+                min: 480,
+                max: 1080
+            }
+            .fixate(),
+            Some(Dim::Fixed(480))
+        );
         assert_eq!(Dim::Fixed(720).fixate(), Some(Dim::Fixed(720)));
         assert_eq!(Dim::Any.fixate(), None);
     }
@@ -1089,17 +1210,31 @@ mod tests {
         // An inverted range is the empty set: `intersect` reports it empty, so
         // `fixate` must not hand back a value (the min) that is outside it.
         let bad_dim = Dim::Range { min: 200, max: 100 };
-        assert_eq!(bad_dim.intersect(&Dim::Any), None, "inverted range is empty");
+        assert_eq!(
+            bad_dim.intersect(&Dim::Any),
+            None,
+            "inverted range is empty"
+        );
         assert_eq!(bad_dim.fixate(), None, "and so cannot fixate to its min");
 
-        let bad_rate = Rate::Range { min_q16: 60 << 16, max_q16: 30 << 16 };
+        let bad_rate = Rate::Range {
+            min_q16: 60 << 16,
+            max_q16: 30 << 16,
+        };
         assert_eq!(bad_rate.intersect(&Rate::Any), None);
         assert_eq!(bad_rate.fixate(), None);
     }
 
     #[test]
     fn caps_intersect_video_fields() {
-        let a = video(Dim::Range { min: 640, max: 1920 }, Dim::Any, Rate::Any);
+        let a = video(
+            Dim::Range {
+                min: 640,
+                max: 1920,
+            },
+            Dim::Any,
+            Rate::Any,
+        );
         let b = video(Dim::Fixed(1280), Dim::Fixed(720), Rate::Fixed(30 << 16));
         assert_eq!(
             a.intersect(&b).unwrap(),
@@ -1129,15 +1264,27 @@ mod tests {
     #[test]
     fn caps_intersect_rejects_variant_mismatch() {
         let v = video(Dim::Any, Dim::Any, Rate::Any);
-        let a = Caps::Audio { format: AudioFormat::Opus, channels: 2, sample_rate: 48_000 };
+        let a = Caps::Audio {
+            format: AudioFormat::Opus,
+            channels: 2,
+            sample_rate: 48_000,
+        };
         assert_eq!(v.intersect(&a), Err(G2gError::CapsMismatch));
     }
 
     #[test]
     fn caps_intersect_audio_and_tensor_require_scalar_equality() {
-        let a = Caps::Audio { format: AudioFormat::Opus, channels: 2, sample_rate: 48_000 };
+        let a = Caps::Audio {
+            format: AudioFormat::Opus,
+            channels: 2,
+            sample_rate: 48_000,
+        };
         assert_eq!(a.intersect(&a), Ok(a.clone()));
-        let b = Caps::Audio { format: AudioFormat::Opus, channels: 1, sample_rate: 48_000 };
+        let b = Caps::Audio {
+            format: AudioFormat::Opus,
+            channels: 1,
+            sample_rate: 48_000,
+        };
         assert_eq!(a.intersect(&b), Err(G2gError::CapsMismatch));
 
         let t = Caps::Tensor {
@@ -1153,36 +1300,72 @@ mod tests {
         assert!(video(Dim::Fixed(1), Dim::Fixed(1), Rate::Fixed(1)).is_fixed());
         assert!(!video(Dim::Any, Dim::Fixed(1), Rate::Fixed(1)).is_fixed());
         assert!(!video(Dim::Fixed(1), Dim::Range { min: 1, max: 2 }, Rate::Fixed(1)).is_fixed());
-        assert!(Caps::Audio { format: AudioFormat::Aac, channels: 2, sample_rate: 44_100 }.is_fixed());
+        assert!(Caps::Audio {
+            format: AudioFormat::Aac,
+            channels: 2,
+            sample_rate: 44_100
+        }
+        .is_fixed());
     }
 
     #[test]
     fn audio_channels_wildcard_intersect() {
-        let pcm = |ch, rate| Caps::Audio { format: AudioFormat::PcmS16Le, channels: ch, sample_rate: rate };
-        let aac = |ch, rate| Caps::Audio { format: AudioFormat::Aac, channels: ch, sample_rate: rate };
+        let pcm = |ch, rate| Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            channels: ch,
+            sample_rate: rate,
+        };
+        let aac = |ch, rate| Caps::Audio {
+            format: AudioFormat::Aac,
+            channels: ch,
+            sample_rate: rate,
+        };
         // ANY_CHANNELS (0) is a wildcard for both PCM and compressed: the decoder's
         // concrete output channels coupling back onto a demuxer's unknown 0 input
         // must intersect, not empty the link (the M422 back-coupling fix).
-        assert_eq!(aac(ANY_CHANNELS, 48_000).intersect(&aac(6, 48_000)), Ok(aac(6, 48_000)));
-        assert_eq!(pcm(2, 48_000).intersect(&pcm(ANY_CHANNELS, 48_000)), Ok(pcm(2, 48_000)));
-        assert_eq!(pcm(ANY_CHANNELS, 48_000).intersect(&pcm(ANY_CHANNELS, 48_000)), Ok(pcm(ANY_CHANNELS, 48_000)));
+        assert_eq!(
+            aac(ANY_CHANNELS, 48_000).intersect(&aac(6, 48_000)),
+            Ok(aac(6, 48_000))
+        );
+        assert_eq!(
+            pcm(2, 48_000).intersect(&pcm(ANY_CHANNELS, 48_000)),
+            Ok(pcm(2, 48_000))
+        );
+        assert_eq!(
+            pcm(ANY_CHANNELS, 48_000).intersect(&pcm(ANY_CHANNELS, 48_000)),
+            Ok(pcm(ANY_CHANNELS, 48_000))
+        );
         // Two distinct concrete counts are still disjoint.
-        assert_eq!(aac(2, 48_000).intersect(&aac(6, 48_000)), Err(G2gError::CapsMismatch));
+        assert_eq!(
+            aac(2, 48_000).intersect(&aac(6, 48_000)),
+            Err(G2gError::CapsMismatch)
+        );
     }
 
     #[test]
     fn audio_channels_wildcard_is_fixed_and_fixate() {
-        let pcm = |ch, rate| Caps::Audio { format: AudioFormat::PcmS16Le, channels: ch, sample_rate: rate };
+        let pcm = |ch, rate| Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            channels: ch,
+            sample_rate: rate,
+        };
         // A PCM "any channels" is not fixed; it fixates to the stereo placeholder
         // (the real layout arrives via the decoder's CapsChanged).
         assert!(!pcm(ANY_CHANNELS, 48_000).is_fixed());
         assert_eq!(pcm(ANY_CHANNELS, 48_000).fixate(), Ok(pcm(2, 48_000)));
         assert!(pcm(2, 48_000).is_fixed());
         // An unfixable rate still dominates: 0 channels + any-rate cannot fixate.
-        assert_eq!(pcm(ANY_CHANNELS, ANY_SAMPLE_RATE).fixate(), Err(G2gError::CapsMismatch));
+        assert_eq!(
+            pcm(ANY_CHANNELS, ANY_SAMPLE_RATE).fixate(),
+            Err(G2gError::CapsMismatch)
+        );
         // A compressed "any channels" stays nominal/fixed (the decoder replaces it
         // before anything reads it), so it round-trips through fixate unchanged.
-        let aac0 = Caps::Audio { format: AudioFormat::Aac, channels: ANY_CHANNELS, sample_rate: 0 };
+        let aac0 = Caps::Audio {
+            format: AudioFormat::Aac,
+            channels: ANY_CHANNELS,
+            sample_rate: 0,
+        };
         assert!(aac0.is_fixed());
         assert_eq!(aac0.fixate(), Ok(aac0.clone()));
     }
@@ -1197,10 +1380,28 @@ mod tests {
 
     #[test]
     fn capsset_intersect_single_pair() {
-        let a = CapsSet::one(video(Dim::Range { min: 640, max: 1920 }, Dim::Any, Rate::Any));
-        let b = CapsSet::one(video(Dim::Fixed(1280), Dim::Fixed(720), Rate::Fixed(30 << 16)));
+        let a = CapsSet::one(video(
+            Dim::Range {
+                min: 640,
+                max: 1920,
+            },
+            Dim::Any,
+            Rate::Any,
+        ));
+        let b = CapsSet::one(video(
+            Dim::Fixed(1280),
+            Dim::Fixed(720),
+            Rate::Fixed(30 << 16),
+        ));
         let i = a.intersect(&b);
-        assert_eq!(i.alternatives(), &[video(Dim::Fixed(1280), Dim::Fixed(720), Rate::Fixed(30 << 16))]);
+        assert_eq!(
+            i.alternatives(),
+            &[video(
+                Dim::Fixed(1280),
+                Dim::Fixed(720),
+                Rate::Fixed(30 << 16)
+            )]
+        );
     }
 
     #[test]
@@ -1226,10 +1427,14 @@ mod tests {
             framerate: Rate::Any,
         };
         let a = CapsSet::from_alternatives(alloc::vec![rgba(Dim::Any), h264(Dim::Any)]);
-        let b = CapsSet::from_alternatives(alloc::vec![h264(Dim::Fixed(1280)), rgba(Dim::Fixed(640))]);
+        let b =
+            CapsSet::from_alternatives(alloc::vec![h264(Dim::Fixed(1280)), rgba(Dim::Fixed(640))]);
         let i = a.intersect(&b);
         // self's outer order wins: Rgba8 first even though other lists H264 first.
-        assert_eq!(i.alternatives(), &[rgba(Dim::Fixed(640)), h264(Dim::Fixed(1280))]);
+        assert_eq!(
+            i.alternatives(),
+            &[rgba(Dim::Fixed(640)), h264(Dim::Fixed(1280))]
+        );
     }
 
     #[test]
@@ -1258,11 +1463,22 @@ mod tests {
     fn capsset_fixate_picks_first_fixable_alternative() {
         // First alt has framerate Any (not fixable); second is fully fixable.
         let unfixable = video(Dim::Fixed(640), Dim::Fixed(480), Rate::Any);
-        let fixable = video(Dim::Range { min: 800, max: 1920 }, Dim::Fixed(720), Rate::Fixed(30 << 16));
+        let fixable = video(
+            Dim::Range {
+                min: 800,
+                max: 1920,
+            },
+            Dim::Fixed(720),
+            Rate::Fixed(30 << 16),
+        );
         let set = CapsSet::from_alternatives(alloc::vec![unfixable, fixable]);
         assert_eq!(
             set.fixate(),
-            Some(video(Dim::Fixed(800), Dim::Fixed(720), Rate::Fixed(30 << 16)))
+            Some(video(
+                Dim::Fixed(800),
+                Dim::Fixed(720),
+                Rate::Fixed(30 << 16)
+            ))
         );
     }
 
@@ -1275,13 +1491,30 @@ mod tests {
 
     #[test]
     fn caps_fixate_collapses_ranges_and_rejects_any() {
-        let ranged = video(Dim::Range { min: 640, max: 1920 }, Dim::Fixed(480), Rate::Any);
+        let ranged = video(
+            Dim::Range {
+                min: 640,
+                max: 1920,
+            },
+            Dim::Fixed(480),
+            Rate::Any,
+        );
         assert_eq!(ranged.fixate(), Err(G2gError::CapsMismatch)); // framerate Any
 
-        let fixable = video(Dim::Range { min: 640, max: 1920 }, Dim::Fixed(480), Rate::Fixed(30 << 16));
+        let fixable = video(
+            Dim::Range {
+                min: 640,
+                max: 1920,
+            },
+            Dim::Fixed(480),
+            Rate::Fixed(30 << 16),
+        );
         let fixed = fixable.fixate().unwrap();
         assert!(fixed.is_fixed());
-        assert_eq!(fixed, video(Dim::Fixed(640), Dim::Fixed(480), Rate::Fixed(30 << 16)));
+        assert_eq!(
+            fixed,
+            video(Dim::Fixed(640), Dim::Fixed(480), Rate::Fixed(30 << 16))
+        );
     }
 
     #[test]
@@ -1316,8 +1549,8 @@ mod tests {
     fn every_raw_format_has_a_distinct_gst_name() {
         use RawVideoFormat::*;
         let all = [
-            Nv12, I420, Rgba8, Bgra8, Yuyv, I420p10, I420p12, I422, I422p10, I422p12, I444, I444p10,
-            I444p12,
+            Nv12, I420, Rgba8, Bgra8, Yuyv, I420p10, I420p12, I422, I422p10, I422p12, I444,
+            I444p10, I444p12,
         ];
         let mut names: Vec<&str> = all.iter().map(|f| raw_format_gst_name(*f)).collect();
         let n = names.len();

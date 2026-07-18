@@ -24,7 +24,10 @@
 //! M539 block in the vulkan-video track note for the full characterisation.
 //!
 //! Runs on the RTX 3060; skips with no Vulkan H.264 decode adapter.
-#![cfg(all(any(target_os = "linux", target_os = "windows"), feature = "vulkan-video"))]
+#![cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    feature = "vulkan-video"
+))]
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -85,7 +88,11 @@ fn split_access_units(stream: &[u8]) -> Vec<Vec<u8>> {
 fn decode_whole_clip() -> Vec<Vec<u8>> {
     let dev = block_on(open_h264_decode_device()).expect("open device");
     let mut dec = VulkanStreamDecoder::new(dev, VideoCodec::H264, CLIP).expect("new");
-    dec.submit_chunk(CLIP, false).expect("whole-clip decode").into_iter().map(|f| f.data).collect()
+    dec.submit_chunk(CLIP, false)
+        .expect("whole-clip decode")
+        .into_iter()
+        .map(|f| f.data)
+        .collect()
 }
 
 /// Pipelined incremental decode on an existing decoder: push each AU without
@@ -95,7 +102,10 @@ fn decode_incremental(dec: &mut VulkanStreamDecoder, aus: &[Vec<u8>]) -> Vec<Vec
     dec.reset().expect("reset");
     let mut frames = Vec::new();
     for au in aus {
-        for f in dec.submit_chunk_push(au, false).expect("submit_chunk_push au") {
+        for f in dec
+            .submit_chunk_push(au, false)
+            .expect("submit_chunk_push au")
+        {
             frames.push(f.data);
         }
     }
@@ -137,12 +147,19 @@ fn pipelined_decode_bit_exact_solo() {
     let golden = decode_whole_clip();
     let aus = split_access_units(CLIP);
     assert_eq!(golden.len(), aus.len(), "golden vs AU count");
-    assert!(golden.len() >= 2, "fixture must have an IDR + at least one P frame");
+    assert!(
+        golden.len() >= 2,
+        "fixture must have an IDR + at least one P frame"
+    );
 
     let mut dec = new_incremental_decoder();
     for run in 0..8 {
         let inc = decode_incremental(&mut dec, &aus);
-        assert_eq!(diverging_frames(&golden, &inc), 0, "run {run}: pipelined diverged from golden");
+        assert_eq!(
+            diverging_frames(&golden, &inc),
+            0,
+            "run {run}: pipelined diverged from golden"
+        );
     }
 }
 

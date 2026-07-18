@@ -146,7 +146,8 @@ impl<C> AsyncElement for SyncSink<C>
 where
     C: AsyncClock + ElementBound,
 {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -159,10 +160,7 @@ where
         CapsConstraint::AcceptsAny
     }
 
-    fn configure_pipeline(
-        &mut self,
-        _absolute_caps: &Caps,
-    ) -> Result<ConfigureOutcome, G2gError> {
+    fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
     }
@@ -182,7 +180,8 @@ where
                     // Trick-mode KEY_UNIT: under a `key_units_only` segment, present
                     // only keyframes (fast scrub), dropping dependent frames before
                     // the deadline math so they are never scheduled.
-                    if self.segment.as_ref().is_some_and(|s| s.key_units_only) && !f.timing.keyframe {
+                    if self.segment.as_ref().is_some_and(|s| s.key_units_only) && !f.timing.keyframe
+                    {
                         self.trick_dropped += 1;
                         return Ok(());
                     }
@@ -220,14 +219,16 @@ where
                         // M174: signal the same lateness upstream so the source /
                         // decoder sheds load. The runner picks this up via
                         // `take_qos` after `process` and forwards it.
-                        self.pending_qos = Some(QosMessage { jitter_ns: jitter, running_time_ns: deadline });
+                        self.pending_qos = Some(QosMessage {
+                            jitter_ns: jitter,
+                            running_time_ns: deadline,
+                        });
                         return Ok(());
                     }
                     self.clock.sleep_until_ns(deadline).await;
                     let drift = self.clock.now_ns().saturating_sub(deadline);
                     self.max_drift_ns = self.max_drift_ns.max(drift);
-                    self.total_drift_ns =
-                        self.total_drift_ns.saturating_add(u128::from(drift));
+                    self.total_drift_ns = self.total_drift_ns.saturating_add(u128::from(drift));
                     self.last_sequence = Some(f.sequence);
                     self.received += 1;
                 }
@@ -292,7 +293,10 @@ mod tests {
     fn frame(pts_ns: u64, sequence: u64) -> PipelinePacket {
         PipelinePacket::DataFrame(Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(Box::new([0u8]))),
-            FrameTiming { pts_ns, ..FrameTiming::default() },
+            FrameTiming {
+                pts_ns,
+                ..FrameTiming::default()
+            },
             sequence,
         ))
     }
@@ -300,17 +304,26 @@ mod tests {
     #[tokio::test]
     async fn clips_frames_before_the_segment_start() {
         let mut sink = SyncSink::new(InstantClock);
-        sink.configure_pipeline(&Caps::ByteStream { encoding: g2g_core::ByteStreamEncoding::Ogg }).unwrap();
+        sink.configure_pipeline(&Caps::ByteStream {
+            encoding: g2g_core::ByteStreamEncoding::Ogg,
+        })
+        .unwrap();
         let mut out = NullSink;
         // Accurate seek to 70 ms: the source already snapped to the keyframe at
         // 66 ms, the decoder decoded from there, and this segment starts at 70 ms.
         let seg = Segment::for_flush_seek(&Seek::flush_to(70_000_000), None);
-        sink.process(PipelinePacket::Segment(seg), &mut out).await.unwrap();
+        sink.process(PipelinePacket::Segment(seg), &mut out)
+            .await
+            .unwrap();
         sink.process(frame(66_000_000, 0), &mut out).await.unwrap(); // pre-target: clipped
         sink.process(frame(100_000_000, 1), &mut out).await.unwrap(); // presented
 
         assert_eq!(sink.clipped(), 1, "the pre-target keyframe is clipped");
-        assert_eq!(sink.received(), 1, "only the at/after-target frame is presented");
+        assert_eq!(
+            sink.received(),
+            1,
+            "only the at/after-target frame is presented"
+        );
         assert_eq!(sink.last_sequence(), Some(1));
     }
 
@@ -318,7 +331,11 @@ mod tests {
     fn frame_kf(pts_ns: u64, sequence: u64, keyframe: bool) -> PipelinePacket {
         PipelinePacket::DataFrame(Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(Box::new([0u8]))),
-            FrameTiming { pts_ns, keyframe, ..FrameTiming::default() },
+            FrameTiming {
+                pts_ns,
+                keyframe,
+                ..FrameTiming::default()
+            },
             sequence,
         ))
     }
@@ -326,8 +343,10 @@ mod tests {
     #[tokio::test]
     async fn trickmode_segment_presents_only_keyframes() {
         let mut sink = SyncSink::new(InstantClock);
-        sink.configure_pipeline(&Caps::ByteStream { encoding: g2g_core::ByteStreamEncoding::MpegTs })
-            .unwrap();
+        sink.configure_pipeline(&Caps::ByteStream {
+            encoding: g2g_core::ByteStreamEncoding::MpegTs,
+        })
+        .unwrap();
         let mut out = NullSink;
         // A 2x trick-mode seek: the segment asks the sink for key units only.
         let seek = Seek {
@@ -340,12 +359,20 @@ mod tests {
         };
         let seg = Segment::for_flush_seek(&seek, None);
         assert!(seg.key_units_only, "the TRICKMODE flag set key_units_only");
-        sink.process(PipelinePacket::Segment(seg), &mut out).await.unwrap();
+        sink.process(PipelinePacket::Segment(seg), &mut out)
+            .await
+            .unwrap();
 
         sink.process(frame_kf(0, 0, true), &mut out).await.unwrap(); // keyframe: presented
-        sink.process(frame_kf(20_000_000, 1, false), &mut out).await.unwrap(); // dropped
-        sink.process(frame_kf(40_000_000, 2, false), &mut out).await.unwrap(); // dropped
-        sink.process(frame_kf(60_000_000, 3, true), &mut out).await.unwrap(); // keyframe: presented
+        sink.process(frame_kf(20_000_000, 1, false), &mut out)
+            .await
+            .unwrap(); // dropped
+        sink.process(frame_kf(40_000_000, 2, false), &mut out)
+            .await
+            .unwrap(); // dropped
+        sink.process(frame_kf(60_000_000, 3, true), &mut out)
+            .await
+            .unwrap(); // keyframe: presented
 
         assert_eq!(sink.received(), 2, "only the two keyframes are presented");
         assert_eq!(sink.trick_dropped(), 2, "the dependent frames are dropped");
@@ -355,11 +382,18 @@ mod tests {
     #[tokio::test]
     async fn without_segment_presents_every_frame() {
         let mut sink = SyncSink::new(InstantClock);
-        sink.configure_pipeline(&Caps::ByteStream { encoding: g2g_core::ByteStreamEncoding::Ogg }).unwrap();
+        sink.configure_pipeline(&Caps::ByteStream {
+            encoding: g2g_core::ByteStreamEncoding::Ogg,
+        })
+        .unwrap();
         let mut out = NullSink;
         sink.process(frame(0, 0), &mut out).await.unwrap();
         sink.process(frame(50_000_000, 1), &mut out).await.unwrap();
         assert_eq!(sink.clipped(), 0);
-        assert_eq!(sink.received(), 2, "no segment: PTS is the running time, nothing clipped");
+        assert_eq!(
+            sink.received(),
+            2,
+            "no segment: PTS is the running time, nothing clipped"
+        );
     }
 }

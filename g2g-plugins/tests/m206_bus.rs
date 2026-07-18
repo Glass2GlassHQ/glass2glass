@@ -62,9 +62,15 @@ async fn single_source_posts_one_stream_start() {
         let src = g.add_source(GraphNode::source(VideoTestSrc::new(8, 8, 30, 4)));
         let sink = g.add_sink(GraphNode::element(FakeSink::new()));
         g.link(src, sink).unwrap();
-        run_graph_with_bus(g, &NullClock, 4, &handle).await.expect("runs with bus");
+        run_graph_with_bus(g, &NullClock, 4, &handle)
+            .await
+            .expect("runs with bus");
     }
-    assert_eq!(count_stream_starts(&bus), 1, "one StreamStart for the single source");
+    assert_eq!(
+        count_stream_starts(&bus),
+        1,
+        "one StreamStart for the single source"
+    );
 }
 
 #[tokio::test]

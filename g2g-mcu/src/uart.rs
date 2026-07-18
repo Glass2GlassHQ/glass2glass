@@ -125,7 +125,14 @@ impl<'r, R: SerialRx, const N: usize, const BYTES: usize> UartSrc<'r, R, N, BYTE
         frame_len: usize,
         frame_interval_ns: u64,
     ) -> Self {
-        Self { rx, ring, frame_len, frame_interval_ns, remaining: None, seq: 0 }
+        Self {
+            rx,
+            ring,
+            frame_len,
+            frame_interval_ns,
+            remaining: None,
+            seq: 0,
+        }
     }
 
     /// End the stream after `frames` frames.
@@ -170,7 +177,10 @@ impl<R: SerialRx, const N: usize, const BYTES: usize> StaticSource for UartSrc<'
         let slice = unsafe { slot.publish(want) };
         let frame = Frame::new(
             MemoryDomain::System(slice),
-            FrameTiming { pts_ns, ..FrameTiming::default() },
+            FrameTiming {
+                pts_ns,
+                ..FrameTiming::default()
+            },
             self.seq,
         );
         if let Some(remaining) = &mut self.remaining {

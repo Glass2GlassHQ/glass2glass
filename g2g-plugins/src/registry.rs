@@ -20,9 +20,9 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use g2g_core::runtime::{ElementFactory, LaunchFactory, MuxerFactory, Registry, SourceFactory};
 #[cfg(feature = "script-rhai")]
 use g2g_core::runtime::DemuxFactory;
+use g2g_core::runtime::{ElementFactory, LaunchFactory, MuxerFactory, Registry, SourceFactory};
 use g2g_core::{AudioFormat, ByteStreamEncoding, Caps, Dim, Rate, RawVideoFormat};
 
 use crate::aacparse::AacParse;
@@ -32,75 +32,91 @@ use crate::audiomixer::AudioMixer;
 use crate::audiopanorama::AudioPanorama;
 use crate::audioresample::AudioResample;
 use crate::audiotestsrc::AudioTestSrc;
+use crate::av1parse::Av1Parse;
 use crate::capsfilter::CapsFilter;
 use crate::fakesink::FakeSink;
 use crate::filesink::FileSink;
 use crate::filesrc::FileSrc;
-use crate::record::{RecordSink, ReplaySrc};
 use crate::flvdemux::FlvDemux;
 use crate::flvmux::FlvMux;
 use crate::h264parse::H264Parse;
 use crate::h265parse::H265Parse;
 use crate::identity::IdentityTransform;
 use crate::mkvdemux::MkvDemux;
-use crate::mux::InterleaveMux;
 use crate::mkvmux::MkvMux;
 #[cfg(feature = "std")]
 use crate::mp4mux::Mp4Mux;
+use crate::mux::InterleaveMux;
 use crate::oggdemux::OggDemux;
 use crate::opusparse::OpusParse;
-use crate::vp8parse::Vp8Parse;
-use crate::vp9parse::Vp9Parse;
-use crate::av1parse::Av1Parse;
+use crate::record::{RecordSink, ReplaySrc};
+use crate::tensorconvert::TensorConvert;
+use crate::textoverlay::TextOverlay;
+use crate::tsdemux::TsDemux;
+use crate::tsmux::TsMux;
 use crate::videobalance::VideoBalance;
 use crate::videobox::VideoBox;
-use crate::tensorconvert::TensorConvert;
 use crate::videoconvert::VideoConvert;
 use crate::videocrop::VideoCrop;
 use crate::videoflip::{FlipMethod, VideoFlip};
 use crate::videorate::VideoRate;
 use crate::videoscale::VideoScale;
-use crate::textoverlay::TextOverlay;
 use crate::videotestsrc::VideoTestSrc;
 use crate::volume::Volume;
-use crate::tsdemux::TsDemux;
-use crate::tsmux::TsMux;
+use crate::vp8parse::Vp8Parse;
+use crate::vp9parse::Vp9Parse;
 
 // Feature- (and platform-) gated elements, registered when their feature is on so
 // `gst-inspect`, `gst-inspect --all`, and `parse_launch` see them. Each registers
 // exactly as its `#[cfg]` in `lib.rs` gates the module.
-#[cfg(feature = "opus")]
-use crate::{opusdec::OpusDec, opusenc::OpusEnc};
+#[cfg(all(target_os = "android", feature = "aaudio"))]
+use crate::aaudio::{AAudioSink, AAudioSrc};
+#[cfg(all(target_os = "linux", feature = "alsa-sink"))]
+use crate::alsasink::AlsaSink;
 #[cfg(feature = "av1-encode")]
 use crate::av1enc::Av1Enc;
-#[cfg(feature = "vpx")]
-use crate::vpxenc::VpxEnc;
+#[cfg(all(target_os = "android", feature = "camera2"))]
+use crate::camera2src::Camera2Src;
+#[cfg(feature = "dash")]
+use crate::dashsrc::DashSrc;
 #[cfg(feature = "dav1d")]
 use crate::dav1ddec::Dav1dDec;
-#[cfg(feature = "rav1d")]
-use crate::rav1ddec::Rav1dDec;
+#[cfg(all(target_os = "linux", feature = "ffmpeg"))]
+use crate::ffmpegdec::{Backend as FfmpegBackend, FfmpegH264Dec};
+#[cfg(all(target_os = "linux", feature = "ffmpeg"))]
+use crate::ffmpegenc::{Backend as FfmpegEncBackend, FfmpegH264Enc};
+use crate::fmp4demux::Fmp4Demux;
+#[cfg(feature = "hls")]
+use crate::hlssrc::HlsSrc;
+#[cfg(feature = "http-src")]
+use crate::httpsrc::HttpSrc;
+#[cfg(all(target_os = "linux", feature = "kms-sink"))]
+use crate::kmssink::KmsSink;
+#[cfg(all(target_os = "linux", feature = "libcamera"))]
+use crate::libcamerasrc::LibCameraSrc;
+#[cfg(all(target_os = "linux", feature = "local-ipc"))]
+use crate::localcuda::{LocalCudaSink, LocalCudaSrc};
+#[cfg(all(target_os = "linux", feature = "local-dmabuf"))]
+use crate::localdmabuf::{DmaBufSink, DmaBufSrc};
+#[cfg(all(target_os = "android", feature = "mediacodec"))]
+use crate::mediacodecdec::MediaCodecDec;
+#[cfg(all(target_os = "android", feature = "mediacodec"))]
+use crate::mediacodecenc::MediaCodecEnc;
 #[cfg(feature = "mjpeg")]
 use crate::mjpegdec::MjpegDec;
 #[cfg(feature = "mjpeg-encode")]
 use crate::mjpegenc::MjpegEnc;
-use crate::fmp4demux::Fmp4Demux;
 use crate::mp4demux::Mp4Demux;
-#[cfg(feature = "rtsp")]
-use crate::rtspsrc::RtspSrc;
+#[cfg(all(target_os = "linux", feature = "nvdec"))]
+use crate::nvdec::NvDec;
+#[cfg(all(target_os = "linux", feature = "nvenc"))]
+use crate::nvenc::NvEnc;
 #[cfg(feature = "onvif")]
 use crate::onvif::OnvifSrc;
-#[cfg(feature = "udp-ingress")]
-use crate::udpsrc::UdpSrc;
-#[cfg(feature = "udp-egress")]
-use crate::udpsink::UdpSink;
-#[cfg(feature = "rtsp-server")]
-use crate::rtspserversink::RtspServerSink;
-#[cfg(feature = "rtsp-server")]
-use crate::rtspserversrc::RtspServerSrc;
-#[cfg(feature = "srt")]
-use crate::srtsink::SrtSink;
-#[cfg(feature = "srt")]
-use crate::srtsrc::SrtSrc;
+#[cfg(all(target_os = "linux", feature = "pulse-sink"))]
+use crate::pulsesink::PulseSink;
+#[cfg(feature = "rav1d")]
+use crate::rav1ddec::Rav1dDec;
 #[cfg(feature = "remote")]
 use crate::remotesink::RemoteSink;
 #[cfg(feature = "remote")]
@@ -111,56 +127,40 @@ use crate::remotewssink::RemoteWsSink;
 use crate::remotewssrc::RemoteWsSrc;
 #[cfg(feature = "remote-ws")]
 use crate::remotewstransform::RemoteWsTransform;
-#[cfg(all(target_os = "linux", feature = "local-ipc"))]
-use crate::localcuda::{LocalCudaSink, LocalCudaSrc};
-#[cfg(all(target_os = "linux", feature = "local-dmabuf"))]
-use crate::localdmabuf::{DmaBufSink, DmaBufSrc};
-#[cfg(feature = "http-src")]
-use crate::httpsrc::HttpSrc;
-#[cfg(feature = "hls")]
-use crate::hlssrc::HlsSrc;
-#[cfg(feature = "dash")]
-use crate::dashsrc::DashSrc;
 #[cfg(feature = "rtmp")]
 use crate::rtmpsink::RtmpSink;
 #[cfg(feature = "rtmp")]
 use crate::rtmpsrc::RtmpSrc;
+#[cfg(feature = "rtsp-server")]
+use crate::rtspserversink::RtspServerSink;
+#[cfg(feature = "rtsp-server")]
+use crate::rtspserversrc::RtspServerSrc;
+#[cfg(feature = "rtsp")]
+use crate::rtspsrc::RtspSrc;
+#[cfg(feature = "srt")]
+use crate::srtsink::SrtSink;
+#[cfg(feature = "srt")]
+use crate::srtsrc::SrtSrc;
+#[cfg(all(target_os = "linux", feature = "jpegxs"))]
+use crate::svtjpegxs::{SvtJpegXsDec, SvtJpegXsEnc};
+#[cfg(feature = "udp-egress")]
+use crate::udpsink::UdpSink;
+#[cfg(feature = "udp-ingress")]
+use crate::udpsrc::UdpSrc;
+#[cfg(all(target_os = "linux", feature = "v4l2"))]
+use crate::v4l2src::V4l2Src;
+#[cfg(all(target_os = "linux", feature = "vaapi"))]
+use crate::vaapidec::VaapiH264Dec;
+#[cfg(feature = "vpx")]
+use crate::vpxenc::VpxEnc;
 #[cfg(all(target_os = "linux", feature = "wayland-sink"))]
 use crate::waylandsink::WaylandSink;
 #[cfg(feature = "webrtc")]
 use crate::webrtcsink::WebRtcSink;
 #[cfg(feature = "webrtc")]
 use crate::webrtcwhepsrc::WebRtcWhepSrc;
-#[cfg(all(target_os = "linux", feature = "alsa-sink"))]
-use crate::alsasink::AlsaSink;
-#[cfg(all(target_os = "linux", feature = "pulse-sink"))]
-use crate::pulsesink::PulseSink;
-#[cfg(all(target_os = "linux", feature = "v4l2"))]
-use crate::v4l2src::V4l2Src;
-#[cfg(all(target_os = "linux", feature = "libcamera"))]
-use crate::libcamerasrc::LibCameraSrc;
-#[cfg(all(target_os = "linux", feature = "kms-sink"))]
-use crate::kmssink::KmsSink;
-#[cfg(all(target_os = "linux", feature = "ffmpeg"))]
-use crate::ffmpegdec::{Backend as FfmpegBackend, FfmpegH264Dec};
-#[cfg(all(target_os = "linux", feature = "ffmpeg"))]
-use crate::ffmpegenc::{Backend as FfmpegEncBackend, FfmpegH264Enc};
-#[cfg(all(target_os = "linux", feature = "vaapi"))]
-use crate::vaapidec::VaapiH264Dec;
-#[cfg(all(target_os = "linux", feature = "nvdec"))]
-use crate::nvdec::NvDec;
-#[cfg(all(target_os = "linux", feature = "nvenc"))]
-use crate::nvenc::NvEnc;
-#[cfg(all(target_os = "linux", feature = "jpegxs"))]
-use crate::svtjpegxs::{SvtJpegXsDec, SvtJpegXsEnc};
-#[cfg(all(target_os = "android", feature = "mediacodec"))]
-use crate::mediacodecdec::MediaCodecDec;
-#[cfg(all(target_os = "android", feature = "mediacodec"))]
-use crate::mediacodecenc::MediaCodecEnc;
-#[cfg(all(target_os = "android", feature = "aaudio"))]
-use crate::aaudio::{AAudioSink, AAudioSrc};
-#[cfg(all(target_os = "android", feature = "camera2"))]
-use crate::camera2src::Camera2Src;
+#[cfg(feature = "opus")]
+use crate::{opusdec::OpusDec, opusenc::OpusEnc};
 
 /// A [`Registry`] pre-populated with the standard elements, ready for
 /// [`parse_launch`](g2g_core::runtime::parse_launch) and
@@ -180,8 +180,14 @@ use crate::camera2src::Camera2Src;
 /// unit per packet; audio still decodes directly.
 fn video_parser_provider(input: &Caps) -> Option<&'static str> {
     match input {
-        Caps::CompressedVideo { codec: g2g_core::VideoCodec::H264, .. } => Some("h264parse"),
-        Caps::CompressedVideo { codec: g2g_core::VideoCodec::H265, .. } => Some("h265parse"),
+        Caps::CompressedVideo {
+            codec: g2g_core::VideoCodec::H264,
+            ..
+        } => Some("h264parse"),
+        Caps::CompressedVideo {
+            codec: g2g_core::VideoCodec::H265,
+            ..
+        } => Some("h265parse"),
         _ => None,
     }
 }
@@ -209,7 +215,11 @@ pub fn default_registry() -> Registry {
     ));
     reg.register_source(SourceFactory::new(
         "audiotestsrc",
-        Caps::Audio { format: AudioFormat::PcmS16Le, channels: 2, sample_rate: 48_000 },
+        Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            channels: 2,
+            sample_rate: 48_000,
+        },
         // num-buffers defaults to forever (the property's documented `-1`),
         // matching gst audiotestsrc; a launch line bounds it with `num-buffers=N`.
         || Box::new(AudioTestSrc::new(48_000, 2, 440, u64::MAX)),
@@ -219,7 +229,11 @@ pub fn default_registry() -> Registry {
     #[cfg(all(target_os = "android", feature = "aaudio"))]
     reg.register_source(SourceFactory::new(
         "aaudiosrc",
-        Caps::Audio { format: AudioFormat::PcmS16Le, channels: 2, sample_rate: 48_000 },
+        Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            channels: 2,
+            sample_rate: 48_000,
+        },
         || Box::new(AAudioSrc::new(48_000, 2, u64::MAX)),
     ));
     // Android camera capture (M308); 640x480 NV12 default. `camerasrc` /
@@ -240,7 +254,9 @@ pub fn default_registry() -> Registry {
     // property (incl. `auto`) overrides that per instance before negotiation.
     reg.register_source(SourceFactory::new(
         "filesrc",
-        Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs },
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::MpegTs,
+        },
         || Box::new(FileSrc::untyped()),
     ));
     // Subtitle / text file source (M433): a `.srt` / `.vtt` / `.ssa` / `.ttml`
@@ -248,8 +264,15 @@ pub fn default_registry() -> Registry {
     // The `format` is sniffed from the `location` extension unless set explicitly.
     reg.register_source(SourceFactory::new(
         "subtitlesrc",
-        Caps::Text { format: g2g_core::TextFormat::Srt },
-        || Box::new(crate::subtitlesrc::SubtitleSrc::new("", g2g_core::TextFormat::Srt)),
+        Caps::Text {
+            format: g2g_core::TextFormat::Srt,
+        },
+        || {
+            Box::new(crate::subtitlesrc::SubtitleSrc::new(
+                "",
+                g2g_core::TextFormat::Srt,
+            ))
+        },
     ));
     // Image-sequence source (M-gap): reads img%05d.jpg style sequences, Motion-JPEG
     // by default so `multifilesrc location=img%05d.jpg ! mjpegdec ! ...` works.
@@ -295,18 +318,27 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::of::<VideoBalance>("videobalance", || {
         Box::new(VideoBalance::new())
     }));
-    reg.register_launch(LaunchFactory::of::<Alpha>("alpha", || Box::new(Alpha::new())));
-    reg.register_launch(LaunchFactory::of::<VideoBox>("videobox", || Box::new(VideoBox::new())));
-    reg.register_launch(LaunchFactory::of::<crate::gamma::Gamma>("gamma", || Box::new(crate::gamma::Gamma::new())));
-    reg.register_launch(LaunchFactory::of::<crate::deinterlace::Deinterlace>("deinterlace", || {
-        Box::new(crate::deinterlace::Deinterlace::new())
+    reg.register_launch(LaunchFactory::of::<Alpha>("alpha", || {
+        Box::new(Alpha::new())
     }));
-    reg.register_launch(LaunchFactory::of::<crate::timeoverlay::TimeOverlay>("timeoverlay", || {
-        Box::new(crate::timeoverlay::TimeOverlay::new())
+    reg.register_launch(LaunchFactory::of::<VideoBox>("videobox", || {
+        Box::new(VideoBox::new())
     }));
-    reg.register_launch(LaunchFactory::of::<crate::clockoverlay::ClockOverlay>("clockoverlay", || {
-        Box::new(crate::clockoverlay::ClockOverlay::new())
+    reg.register_launch(LaunchFactory::of::<crate::gamma::Gamma>("gamma", || {
+        Box::new(crate::gamma::Gamma::new())
     }));
+    reg.register_launch(LaunchFactory::of::<crate::deinterlace::Deinterlace>(
+        "deinterlace",
+        || Box::new(crate::deinterlace::Deinterlace::new()),
+    ));
+    reg.register_launch(LaunchFactory::of::<crate::timeoverlay::TimeOverlay>(
+        "timeoverlay",
+        || Box::new(crate::timeoverlay::TimeOverlay::new()),
+    ));
+    reg.register_launch(LaunchFactory::of::<crate::clockoverlay::ClockOverlay>(
+        "clockoverlay",
+        || Box::new(crate::clockoverlay::ClockOverlay::new()),
+    ));
     // Subtitle overlay (M171): the `location=` property loads an SRT / WebVTT
     // file (std), so cues render by PTS without hand-built Rust.
     reg.register_launch(LaunchFactory::of::<TextOverlay>("textoverlay", || {
@@ -316,15 +348,17 @@ pub fn default_registry() -> Registry {
     // Ssa/Ttml}`) in, timed plain `Text{Utf8}` cues out, so a launch line can turn
     // a `subtitlesrc` file (or a demuxed `stpp`/TTML text pad) into overlayable
     // cues: `subtitlesrc location=x.srt ! subparse ! textoverlay name=o`.
-    reg.register_launch(LaunchFactory::of::<crate::subparse::SubParse>("subparse", || {
-        Box::new(crate::subparse::SubParse::new())
-    }));
+    reg.register_launch(LaunchFactory::of::<crate::subparse::SubParse>(
+        "subparse",
+        || Box::new(crate::subparse::SubParse::new()),
+    ));
     // Closed-caption extractor (M429): mines CEA-608 / CEA-708 captions from a
     // compressed H.264 / H.265 stream's SEI into timed text cues (default CC1),
     // e.g. `... ! h264parse ! ccextract ! textoverlay ...` on a teed branch.
-    reg.register_launch(LaunchFactory::of::<crate::ccextract::CcExtract>("ccextract", || {
-        Box::new(crate::ccextract::CcExtract::new())
-    }));
+    reg.register_launch(LaunchFactory::of::<crate::ccextract::CcExtract>(
+        "ccextract",
+        || Box::new(crate::ccextract::CcExtract::new()),
+    ));
     // Detection-box overlay (M102): draws the frame's `AnalyticsMeta` bounding
     // boxes onto the RGBA frame, so a detector's output is visible downstream
     // (e.g. `... ! analyticsoverlay ! videoconvert ! autovideosink`). No pad
@@ -351,16 +385,20 @@ pub fn default_registry() -> Registry {
         // rate from a downstream capsfilter, or passes through.
         Box::new(AudioResample::auto())
     }));
-    reg.register_launch(LaunchFactory::of::<Volume>("volume", || Box::new(Volume::new())));
+    reg.register_launch(LaunchFactory::of::<Volume>("volume", || {
+        Box::new(Volume::new())
+    }));
     reg.register_launch(LaunchFactory::of::<AudioPanorama>("audiopanorama", || {
         Box::new(AudioPanorama::new())
     }));
-    reg.register_launch(LaunchFactory::of::<crate::audioamplify::AudioAmplify>("audioamplify", || {
-        Box::new(crate::audioamplify::AudioAmplify::new())
-    }));
-    reg.register_launch(LaunchFactory::of::<crate::audioecho::AudioEcho>("audioecho", || {
-        Box::new(crate::audioecho::AudioEcho::new())
-    }));
+    reg.register_launch(LaunchFactory::of::<crate::audioamplify::AudioAmplify>(
+        "audioamplify",
+        || Box::new(crate::audioamplify::AudioAmplify::new()),
+    ));
+    reg.register_launch(LaunchFactory::of::<crate::audioecho::AudioEcho>(
+        "audioecho",
+        || Box::new(crate::audioecho::AudioEcho::new()),
+    ));
     // Level meter + silence detector (passthrough analyzers): measurements are
     // read via getters, the g2g analog of gst posting them on the bus.
     reg.register_launch(LaunchFactory::of::<crate::level::Level>("level", || {
@@ -369,43 +407,79 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::of::<crate::cutter::Cutter>("cutter", || {
         Box::new(crate::cutter::Cutter::new())
     }));
-    reg.register_launch(LaunchFactory::of::<crate::equalizer::Equalizer3Bands>("equalizer-3bands", || {
-        Box::new(crate::equalizer::Equalizer3Bands::new())
-    }));
-    reg.register_launch(LaunchFactory::of::<crate::spectrum::Spectrum>("spectrum", || {
-        Box::new(crate::spectrum::Spectrum::new())
-    }));
+    reg.register_launch(LaunchFactory::of::<crate::equalizer::Equalizer3Bands>(
+        "equalizer-3bands",
+        || Box::new(crate::equalizer::Equalizer3Bands::new()),
+    ));
+    reg.register_launch(LaunchFactory::of::<crate::spectrum::Spectrum>(
+        "spectrum",
+        || Box::new(crate::spectrum::Spectrum::new()),
+    ));
 
     // Demuxers + parsers + passthrough.
-    reg.register_launch(LaunchFactory::of::<TsDemux>("tsdemux", || Box::new(TsDemux::new())));
-    reg.register_launch(LaunchFactory::of::<MkvDemux>("matroskademux", || Box::new(MkvDemux::new())));
-    reg.register_launch(LaunchFactory::of::<TsMux>("mpegtsmux", || Box::new(TsMux::new())));
-    reg.register_launch(LaunchFactory::of::<MkvMux>("matroskamux", || Box::new(MkvMux::new())));
+    reg.register_launch(LaunchFactory::of::<TsDemux>("tsdemux", || {
+        Box::new(TsDemux::new())
+    }));
+    reg.register_launch(LaunchFactory::of::<MkvDemux>("matroskademux", || {
+        Box::new(MkvDemux::new())
+    }));
+    reg.register_launch(LaunchFactory::of::<TsMux>("mpegtsmux", || {
+        Box::new(TsMux::new())
+    }));
+    reg.register_launch(LaunchFactory::of::<MkvMux>("matroskamux", || {
+        Box::new(MkvMux::new())
+    }));
     // Fragmented-MP4 / ISO-BMFF muxer (M291), the gst `mp4mux`/`qtmux` analog:
     // `... ! x264enc ! mp4mux ! filesink location=out.mp4`. std-gated like its
     // module (it shares the `fmp4mux` box writer).
     #[cfg(feature = "std")]
-    reg.register_launch(LaunchFactory::of::<Mp4Mux>("mp4mux", || Box::new(Mp4Mux::new())));
-    reg.register_launch(LaunchFactory::of::<OggDemux>("oggdemux", || Box::new(OggDemux::new())));
-    reg.register_launch(LaunchFactory::of::<Fmp4Demux>("fmp4demux", || Box::new(Fmp4Demux::new())));
+    reg.register_launch(LaunchFactory::of::<Mp4Mux>("mp4mux", || {
+        Box::new(Mp4Mux::new())
+    }));
+    reg.register_launch(LaunchFactory::of::<OggDemux>("oggdemux", || {
+        Box::new(OggDemux::new())
+    }));
+    reg.register_launch(LaunchFactory::of::<Fmp4Demux>("fmp4demux", || {
+        Box::new(Fmp4Demux::new())
+    }));
     // Progressive MP4 single-output demux (M479): `filesrc location=X.mp4 ! qtdemux
     // ! h264parse ! ...` (the video track). A multi-branch `qtdemux name=d
     // d.video_0 ! ... d.audio_0 ! ...` still fans out via the demux-select hook
     // (Mp4DemuxN); this covers the single-stream / video-only file.
     #[cfg(feature = "std")]
-    reg.register_launch(LaunchFactory::of::<Mp4Demux>("qtdemux", || Box::new(Mp4Demux::new())));
-    reg.register_launch(LaunchFactory::of::<FlvDemux>("flvdemux", || Box::new(FlvDemux::new())));
-    reg.register_launch(LaunchFactory::of::<FlvMux>("flvmux", || Box::new(FlvMux::new())));
+    reg.register_launch(LaunchFactory::of::<Mp4Demux>("qtdemux", || {
+        Box::new(Mp4Demux::new())
+    }));
+    reg.register_launch(LaunchFactory::of::<FlvDemux>("flvdemux", || {
+        Box::new(FlvDemux::new())
+    }));
+    reg.register_launch(LaunchFactory::of::<FlvMux>("flvmux", || {
+        Box::new(FlvMux::new())
+    }));
     // Re-framing mode (M421): a `gst-launch` `h264parse` access-unit-aligns its
     // output (one coded picture per buffer), matching GStreamer's `h264parse`, so
     // `... ! tsdemux ! h264parse ! <decoder> ! ...` feeds the decoder correctly.
-    reg.register_launch(LaunchFactory::of::<H264Parse>("h264parse", || Box::new(H264Parse::reframing())));
-    reg.register_launch(LaunchFactory::of::<H265Parse>("h265parse", || Box::new(H265Parse::reframing())));
-    reg.register_launch(LaunchFactory::of::<AacParse>("aacparse", || Box::new(AacParse::new())));
-    reg.register_launch(LaunchFactory::of::<OpusParse>("opusparse", || Box::new(OpusParse::new())));
-    reg.register_launch(LaunchFactory::of::<Vp8Parse>("vp8parse", || Box::new(Vp8Parse::new())));
-    reg.register_launch(LaunchFactory::of::<Vp9Parse>("vp9parse", || Box::new(Vp9Parse::new())));
-    reg.register_launch(LaunchFactory::of::<Av1Parse>("av1parse", || Box::new(Av1Parse::new())));
+    reg.register_launch(LaunchFactory::of::<H264Parse>("h264parse", || {
+        Box::new(H264Parse::reframing())
+    }));
+    reg.register_launch(LaunchFactory::of::<H265Parse>("h265parse", || {
+        Box::new(H265Parse::reframing())
+    }));
+    reg.register_launch(LaunchFactory::of::<AacParse>("aacparse", || {
+        Box::new(AacParse::new())
+    }));
+    reg.register_launch(LaunchFactory::of::<OpusParse>("opusparse", || {
+        Box::new(OpusParse::new())
+    }));
+    reg.register_launch(LaunchFactory::of::<Vp8Parse>("vp8parse", || {
+        Box::new(Vp8Parse::new())
+    }));
+    reg.register_launch(LaunchFactory::of::<Vp9Parse>("vp9parse", || {
+        Box::new(Vp9Parse::new())
+    }));
+    reg.register_launch(LaunchFactory::of::<Av1Parse>("av1parse", || {
+        Box::new(Av1Parse::new())
+    }));
     reg.register_launch(LaunchFactory::new("identity", Vec::new(), || {
         Box::new(IdentityTransform::new())
     }));
@@ -447,9 +521,10 @@ pub fn default_registry() -> Registry {
         Box::new(crate::inputselector::InputSelector::new(inputs))
     }));
     // Live output switch: 1-in / N-out, built by the demux link degree.
-    reg.register_demux(g2g_core::runtime::DemuxFactory::new("output-selector", |outputs| {
-        Box::new(crate::outputselector::OutputSelector::new(outputs))
-    }));
+    reg.register_demux(g2g_core::runtime::DemuxFactory::new(
+        "output-selector",
+        |outputs| Box::new(crate::outputselector::OutputSelector::new(outputs)),
+    ));
     // Subtitle-overlay fan-in (M477): the launch-line sibling of the single-input
     // `textoverlay` above, the analog of GStreamer's `textoverlay` text_sink
     // request pad. A `TextOverlayN` merges an RGBA8 video pad (input 0) and a timed
@@ -468,7 +543,11 @@ pub fn default_registry() -> Registry {
     reg.register_muxer(MuxerFactory::new("audiomixer", |inputs| {
         Box::new(AudioMixer::new(
             inputs,
-            Caps::Audio { format: AudioFormat::PcmS16Le, channels: 2, sample_rate: 48_000 },
+            Caps::Audio {
+                format: AudioFormat::PcmS16Le,
+                channels: 2,
+                sample_rate: 48_000,
+            },
         ))
     }));
     // Multi-stream MPEG-TS fan-in (M208): the A+V container case. `mpegtsmux` is
@@ -511,28 +590,41 @@ pub fn default_registry() -> Registry {
     }));
 
     // Sinks.
-    reg.register_launch(LaunchFactory::of::<FakeSink>("fakesink", || Box::new(FakeSink::new())));
+    reg.register_launch(LaunchFactory::of::<FakeSink>("fakesink", || {
+        Box::new(FakeSink::new())
+    }));
     // Application pull/callback sink (M233): hands buffers to a callback set via
     // `appsink::set_appsink_callback`.
-    reg.register_launch(LaunchFactory::of::<crate::appsink::AppSink>("appsink", || {
-        Box::new(crate::appsink::AppSink::new())
+    reg.register_launch(LaunchFactory::of::<crate::appsink::AppSink>(
+        "appsink",
+        || Box::new(crate::appsink::AppSink::new()),
+    ));
+    reg.register_launch(LaunchFactory::of::<FileSink>("filesink", || {
+        Box::new(FileSink::new(""))
     }));
-    reg.register_launch(LaunchFactory::of::<FileSink>("filesink", || Box::new(FileSink::new(""))));
     // Record / replay pair: record the packet stream to a file, play it back as a source.
-    reg.register_launch(LaunchFactory::of::<RecordSink>("recordsink", || Box::new(RecordSink::new(""))));
+    reg.register_launch(LaunchFactory::of::<RecordSink>("recordsink", || {
+        Box::new(RecordSink::new(""))
+    }));
     reg.register_source(SourceFactory::new(
         "replaysrc",
-        Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs },
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::MpegTs,
+        },
         || Box::new(ReplaySrc::new("")),
     ));
-    reg.register_launch(LaunchFactory::of::<crate::multifilesink::MultiFileSink>("multifilesink", || {
-        Box::new(crate::multifilesink::MultiFileSink::new(""))
-    }));
-    reg.register_launch(LaunchFactory::of::<crate::splitmuxsink::SplitMuxSink>("splitmuxsink", || {
-        Box::new(crate::splitmuxsink::SplitMuxSink::new(""))
-    }));
+    reg.register_launch(LaunchFactory::of::<crate::multifilesink::MultiFileSink>(
+        "multifilesink",
+        || Box::new(crate::multifilesink::MultiFileSink::new("")),
+    ));
+    reg.register_launch(LaunchFactory::of::<crate::splitmuxsink::SplitMuxSink>(
+        "splitmuxsink",
+        || Box::new(crate::splitmuxsink::SplitMuxSink::new("")),
+    ));
     #[cfg(feature = "rtmp")]
-    reg.register_launch(LaunchFactory::of::<RtmpSink>("rtmpsink", || Box::new(RtmpSink::new(""))));
+    reg.register_launch(LaunchFactory::of::<RtmpSink>("rtmpsink", || {
+        Box::new(RtmpSink::new(""))
+    }));
 
     register_feature_gated(&mut reg);
     register_aliases(&mut reg);
@@ -603,11 +695,20 @@ fn ffmpegdec_output_format(out: &Caps) -> crate::ffmpegdec::OutputFormat {
     // settles on NV12 (the layout KMS / waylandsink want); an I420-only sink drives
     // I420. Anything that is not raw video falls back to I420.
     match out {
-        Caps::RawVideo { format: RawVideoFormat::Nv12, .. } => OutputFormat::Nv12,
+        Caps::RawVideo {
+            format: RawVideoFormat::Nv12,
+            ..
+        } => OutputFormat::Nv12,
         // A downstream that pins 4:2:2 / 4:4:4 gets the source chroma preserved
         // (software backend); otherwise default to I420.
-        Caps::RawVideo { format: RawVideoFormat::I422, .. } => OutputFormat::I422,
-        Caps::RawVideo { format: RawVideoFormat::I444, .. } => OutputFormat::I444,
+        Caps::RawVideo {
+            format: RawVideoFormat::I422,
+            ..
+        } => OutputFormat::I422,
+        Caps::RawVideo {
+            format: RawVideoFormat::I444,
+            ..
+        } => OutputFormat::I444,
         _ => OutputFormat::I420,
     }
 }
@@ -621,22 +722,45 @@ fn ffmpegdec_output_format(out: &Caps) -> crate::ffmpegdec::OutputFormat {
 fn ffmpegdec_sw_output_format(out: &Caps) -> crate::ffmpegdec::OutputFormat {
     use crate::ffmpegdec::OutputFormat;
     match out {
-        Caps::RawVideo { format: RawVideoFormat::Nv12, .. } => OutputFormat::Nv12,
-        Caps::RawVideo { format: RawVideoFormat::I422, .. } => OutputFormat::I422,
-        Caps::RawVideo { format: RawVideoFormat::I444, .. } => OutputFormat::I444,
+        Caps::RawVideo {
+            format: RawVideoFormat::Nv12,
+            ..
+        } => OutputFormat::Nv12,
+        Caps::RawVideo {
+            format: RawVideoFormat::I422,
+            ..
+        } => OutputFormat::I422,
+        Caps::RawVideo {
+            format: RawVideoFormat::I444,
+            ..
+        } => OutputFormat::I444,
         _ => OutputFormat::Auto,
     }
 }
 
 fn register_autoplug_candidates(reg: &mut Registry) {
     // Parsers (baseline): elementary-stream framing, no external deps.
-    reg.register(ElementFactory::of::<H264Parse>("h264parse", |_| Box::new(H264Parse::new())));
-    reg.register(ElementFactory::of::<H265Parse>("h265parse", |_| Box::new(H265Parse::new())));
-    reg.register(ElementFactory::of::<AacParse>("aacparse", |_| Box::new(AacParse::new())));
-    reg.register(ElementFactory::of::<OpusParse>("opusparse", |_| Box::new(OpusParse::new())));
-    reg.register(ElementFactory::of::<Vp8Parse>("vp8parse", |_| Box::new(Vp8Parse::new())));
-    reg.register(ElementFactory::of::<Vp9Parse>("vp9parse", |_| Box::new(Vp9Parse::new())));
-    reg.register(ElementFactory::of::<Av1Parse>("av1parse", |_| Box::new(Av1Parse::new())));
+    reg.register(ElementFactory::of::<H264Parse>("h264parse", |_| {
+        Box::new(H264Parse::new())
+    }));
+    reg.register(ElementFactory::of::<H265Parse>("h265parse", |_| {
+        Box::new(H265Parse::new())
+    }));
+    reg.register(ElementFactory::of::<AacParse>("aacparse", |_| {
+        Box::new(AacParse::new())
+    }));
+    reg.register(ElementFactory::of::<OpusParse>("opusparse", |_| {
+        Box::new(OpusParse::new())
+    }));
+    reg.register(ElementFactory::of::<Vp8Parse>("vp8parse", |_| {
+        Box::new(Vp8Parse::new())
+    }));
+    reg.register(ElementFactory::of::<Vp9Parse>("vp9parse", |_| {
+        Box::new(Vp9Parse::new())
+    }));
+    reg.register(ElementFactory::of::<Av1Parse>("av1parse", |_| {
+        Box::new(Av1Parse::new())
+    }));
 
     // Demuxers (baseline, M194): a container byte stream in, one selected
     // elementary stream out. They are 1-in/1-out (an instance forwards one stream,
@@ -645,31 +769,51 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     // raw. Built parameterless = the default (video) stream, which matches both
     // the search's first-alternative choice and the decodebin macro's by-name
     // build, so the two decode paths stay consistent.
-    reg.register(ElementFactory::of::<TsDemux>("tsdemux", |_| Box::new(TsDemux::new())));
-    reg.register(ElementFactory::of::<MkvDemux>("matroskademux", |_| Box::new(MkvDemux::new())));
-    reg.register(ElementFactory::of::<Fmp4Demux>("fmp4demux", |_| Box::new(Fmp4Demux::new())));
+    reg.register(ElementFactory::of::<TsDemux>("tsdemux", |_| {
+        Box::new(TsDemux::new())
+    }));
+    reg.register(ElementFactory::of::<MkvDemux>("matroskademux", |_| {
+        Box::new(MkvDemux::new())
+    }));
+    reg.register(ElementFactory::of::<Fmp4Demux>("fmp4demux", |_| {
+        Box::new(Fmp4Demux::new())
+    }));
     // Whole-file / progressive MP4 (M479): `ByteStream{Mp4}` -> the video track, so
     // `filesrc location=X.mp4 ! decodebin` auto-plugs a demuxer (the fragmented
     // `fmp4demux` above stays on the streaming `IsoBmff` that HLS / DASH produce).
-    reg.register(ElementFactory::of::<Mp4Demux>("qtdemux", |_| Box::new(Mp4Demux::new())));
-    reg.register(ElementFactory::of::<OggDemux>("oggdemux", |_| Box::new(OggDemux::new())));
-    reg.register(ElementFactory::of::<FlvDemux>("flvdemux", |_| Box::new(FlvDemux::new())));
+    reg.register(ElementFactory::of::<Mp4Demux>("qtdemux", |_| {
+        Box::new(Mp4Demux::new())
+    }));
+    reg.register(ElementFactory::of::<OggDemux>("oggdemux", |_| {
+        Box::new(OggDemux::new())
+    }));
+    reg.register(ElementFactory::of::<FlvDemux>("flvdemux", |_| {
+        Box::new(FlvDemux::new())
+    }));
 
     // Decoders (feature- + platform-gated, same gate as the launch registration).
     #[cfg(feature = "opus")]
-    reg.register(ElementFactory::of::<OpusDec>("opusdec", |_| Box::new(OpusDec::new())));
+    reg.register(ElementFactory::of::<OpusDec>("opusdec", |_| {
+        Box::new(OpusDec::new())
+    }));
     #[cfg(feature = "mjpeg")]
-    reg.register(ElementFactory::of::<MjpegDec>("mjpegdec", |_| Box::new(MjpegDec::new())));
+    reg.register(ElementFactory::of::<MjpegDec>("mjpegdec", |_| {
+        Box::new(MjpegDec::new())
+    }));
     // AV1 decode via libdav1d (software, System memory): an auto-plug candidate
     // for AV1 -> I420, alongside av1parse.
     #[cfg(feature = "dav1d")]
-    reg.register(ElementFactory::of::<Dav1dDec>("dav1ddec", |_| Box::new(Dav1dDec::new())));
+    reg.register(ElementFactory::of::<Dav1dDec>("dav1ddec", |_| {
+        Box::new(Dav1dDec::new())
+    }));
     // Pure-Rust AV1 decode via re_rav1d (software, System memory): same AV1 -> I420
     // candidate. Negative rank so libdav1d (hand-written asm, faster) wins the
     // auto-plug tiebreak when both are built; rav1ddec is the portable fallback and
     // the sole AV1 decoder on pure-Rust targets.
     #[cfg(feature = "rav1d")]
-    reg.register(ElementFactory::of::<Rav1dDec>("rav1ddec", |_| Box::new(Rav1dDec::new())).rank(-10));
+    reg.register(
+        ElementFactory::of::<Rav1dDec>("rav1ddec", |_| Box::new(Rav1dDec::new())).rank(-10),
+    );
     // Honor the output format the auto-plug search chose for this hop
     // (`ChainLink::output`): the source pad template advertises both NV12 and
     // I420, so a strict-NV12 sink (KMS / waylandsink) makes the search settle on
@@ -685,9 +829,10 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     // audio sibling of ffmpegdec, in the auto-plug pool so a decode chain reaches
     // raw audio (e.g. an MPEG-TS / HLS AAC track).
     #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
-    reg.register(ElementFactory::of::<crate::ffmpegaudiodec::FfmpegAudioDec>("ffmpegaudiodec", |_| {
-        Box::new(crate::ffmpegaudiodec::FfmpegAudioDec::new())
-    }));
+    reg.register(ElementFactory::of::<crate::ffmpegaudiodec::FfmpegAudioDec>(
+        "ffmpegaudiodec",
+        |_| Box::new(crate::ffmpegaudiodec::FfmpegAudioDec::new()),
+    ));
     // ffmpeg VAAPI hwaccel backend as a distinct name (M237). Same element type
     // as ffmpegdec, constructed with `Backend::Vaapi`; the libva device defaults
     // to the VA display's choice (a `device=` property is a follow-up).
@@ -704,7 +849,8 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     );
     #[cfg(all(target_os = "linux", feature = "vaapi"))]
     reg.register(
-        ElementFactory::of::<VaapiH264Dec>("vaapidec", |_| Box::new(VaapiH264Dec::new())).hardware(),
+        ElementFactory::of::<VaapiH264Dec>("vaapidec", |_| Box::new(VaapiH264Dec::new()))
+            .hardware(),
     );
     // Native NVDEC (M270), registered last so a default (System-memory) auto-plug
     // still picks a CPU decoder: `NvDec` emits NV12 in CUDA device memory, which
@@ -742,8 +888,10 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     );
     #[cfg(all(target_os = "android", feature = "mediacodec"))]
     reg.register(
-        ElementFactory::of::<MediaCodecDec>("mediacodecdech265", |_| Box::new(MediaCodecDec::h265()))
-            .hardware(),
+        ElementFactory::of::<MediaCodecDec>("mediacodecdech265", |_| {
+            Box::new(MediaCodecDec::h265())
+        })
+        .hardware(),
     );
     // Android hardware video encode via the NDK MediaCodec (M306); launch-only
     // (encoders are not auto-plug candidates), one factory per codec. The gst
@@ -753,9 +901,10 @@ fn register_autoplug_candidates(reg: &mut Registry) {
         Box::new(MediaCodecEnc::h264())
     }));
     #[cfg(all(target_os = "android", feature = "mediacodec"))]
-    reg.register_launch(LaunchFactory::of::<MediaCodecEnc>("mediacodecench265", || {
-        Box::new(MediaCodecEnc::h265())
-    }));
+    reg.register_launch(LaunchFactory::of::<MediaCodecEnc>(
+        "mediacodecench265",
+        || Box::new(MediaCodecEnc::h265()),
+    ));
 }
 
 /// Register gst-canonical-name aliases (M192) so pasted `gst-launch` lines using
@@ -812,9 +961,10 @@ fn register_feature_gated(reg: &mut Registry) {
     // Rhai script transform (M580): `scriptelement script=... ! ...` runs a
     // per-frame `process(frame)` over a raw-video buffer. Pure Rust, no system dep.
     #[cfg(feature = "script-rhai")]
-    reg.register_launch(LaunchFactory::of::<crate::script::ScriptElement>("scriptelement", || {
-        Box::new(crate::script::ScriptElement::new())
-    }));
+    reg.register_launch(LaunchFactory::of::<crate::script::ScriptElement>(
+        "scriptelement",
+        || Box::new(crate::script::ScriptElement::new()),
+    ));
     // Rhai routing demux (M583): `scriptrouter name=r  r.0 ! ...  r.1 ! ...` sends
     // each buffer to the output port a `route(frame)` script picks (e.g. fan to
     // per-consumer `appsink` channels). Output count derived from the pad refs.
@@ -826,21 +976,37 @@ fn register_feature_gated(reg: &mut Registry) {
     // Codecs (cross-platform).
     #[cfg(feature = "opus")]
     {
-        reg.register_launch(LaunchFactory::of::<OpusEnc>("opusenc", || Box::new(OpusEnc::new())));
-        reg.register_launch(LaunchFactory::of::<OpusDec>("opusdec", || Box::new(OpusDec::new())));
+        reg.register_launch(LaunchFactory::of::<OpusEnc>("opusenc", || {
+            Box::new(OpusEnc::new())
+        }));
+        reg.register_launch(LaunchFactory::of::<OpusDec>("opusdec", || {
+            Box::new(OpusDec::new())
+        }));
     }
     #[cfg(feature = "av1-encode")]
-    reg.register_launch(LaunchFactory::of::<Av1Enc>("av1enc", || Box::new(Av1Enc::new())));
+    reg.register_launch(LaunchFactory::of::<Av1Enc>("av1enc", || {
+        Box::new(Av1Enc::new())
+    }));
     #[cfg(feature = "vpx")]
-    reg.register_launch(LaunchFactory::of::<VpxEnc>("vpxenc", || Box::new(VpxEnc::new())));
+    reg.register_launch(LaunchFactory::of::<VpxEnc>("vpxenc", || {
+        Box::new(VpxEnc::new())
+    }));
     #[cfg(feature = "mjpeg")]
-    reg.register_launch(LaunchFactory::of::<MjpegDec>("mjpegdec", || Box::new(MjpegDec::new())));
+    reg.register_launch(LaunchFactory::of::<MjpegDec>("mjpegdec", || {
+        Box::new(MjpegDec::new())
+    }));
     #[cfg(feature = "dav1d")]
-    reg.register_launch(LaunchFactory::of::<Dav1dDec>("dav1ddec", || Box::new(Dav1dDec::new())));
+    reg.register_launch(LaunchFactory::of::<Dav1dDec>("dav1ddec", || {
+        Box::new(Dav1dDec::new())
+    }));
     #[cfg(feature = "rav1d")]
-    reg.register_launch(LaunchFactory::of::<Rav1dDec>("rav1ddec", || Box::new(Rav1dDec::new())));
+    reg.register_launch(LaunchFactory::of::<Rav1dDec>("rav1ddec", || {
+        Box::new(Rav1dDec::new())
+    }));
     #[cfg(feature = "mjpeg-encode")]
-    reg.register_launch(LaunchFactory::of::<MjpegEnc>("mjpegenc", || Box::new(MjpegEnc::new())));
+    reg.register_launch(LaunchFactory::of::<MjpegEnc>("mjpegenc", || {
+        Box::new(MjpegEnc::new())
+    }));
 
     // Network sources / sinks.
     #[cfg(feature = "rtsp")]
@@ -898,9 +1064,10 @@ fn register_feature_gated(reg: &mut Registry) {
         Box::new(UdpSink::new("127.0.0.1:5004".parse().unwrap()))
     }));
     #[cfg(feature = "rtsp-server")]
-    reg.register_launch(LaunchFactory::of::<RtspServerSink>("rtspserversink", || {
-        Box::new(RtspServerSink::new("0.0.0.0:8554".parse().unwrap()))
-    }));
+    reg.register_launch(LaunchFactory::of::<RtspServerSink>(
+        "rtspserversink",
+        || Box::new(RtspServerSink::new("0.0.0.0:8554".parse().unwrap())),
+    ));
     #[cfg(feature = "rtsp-server")]
     reg.register_source(SourceFactory::new(
         "rtspserversrc",
@@ -915,7 +1082,9 @@ fn register_feature_gated(reg: &mut Registry) {
     #[cfg(feature = "srt")]
     reg.register_source(SourceFactory::new(
         "srtsrc",
-        Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs },
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::MpegTs,
+        },
         || Box::new(SrtSrc::new("0.0.0.0:9000".parse().unwrap())),
     ));
     #[cfg(feature = "srt")]
@@ -960,9 +1129,10 @@ fn register_feature_gated(reg: &mut Registry) {
     }));
     // Remote-transform (M555): offload a middle stage over a WebSocket, round-trip.
     #[cfg(feature = "remote-ws")]
-    reg.register_launch(LaunchFactory::of::<RemoteWsTransform>("remotewstransform", || {
-        Box::new(RemoteWsTransform::new("ws://127.0.0.1:9602"))
-    }));
+    reg.register_launch(LaunchFactory::of::<RemoteWsTransform>(
+        "remotewstransform",
+        || Box::new(RemoteWsTransform::new("ws://127.0.0.1:9602")),
+    ));
     // Local zero-copy transports (M556 / M557): same-machine GPU-resident (CUDA
     // IPC) and vendor-neutral (DMABUF over SCM_RIGHTS) sink/src pairs. Like the
     // remote pair, the source discovers its real caps from the peer on connect, so
@@ -1001,25 +1171,40 @@ fn register_feature_gated(reg: &mut Registry) {
     #[cfg(feature = "http-src")]
     reg.register_source(SourceFactory::new(
         "httpsrc",
-        Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs },
-        || Box::new(HttpSrc::new("", Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs })),
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::MpegTs,
+        },
+        || {
+            Box::new(HttpSrc::new(
+                "",
+                Caps::ByteStream {
+                    encoding: ByteStreamEncoding::MpegTs,
+                },
+            ))
+        },
     ));
     #[cfg(feature = "hls")]
     reg.register_source(SourceFactory::new(
         "hlssrc",
-        Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs },
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::MpegTs,
+        },
         || Box::new(HlsSrc::new("")),
     ));
     #[cfg(feature = "dash")]
     reg.register_source(SourceFactory::new(
         "dashsrc",
-        Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff },
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::IsoBmff,
+        },
         || Box::new(DashSrc::new("")),
     ));
     #[cfg(feature = "rtmp")]
     reg.register_source(SourceFactory::new(
         "rtmpsrc",
-        Caps::ByteStream { encoding: ByteStreamEncoding::Flv },
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::Flv,
+        },
         || Box::new(RtmpSrc::new("0.0.0.0:1935".parse().unwrap())),
     ));
 
@@ -1091,9 +1276,10 @@ fn register_feature_gated(reg: &mut Registry) {
     // Linux audio-encode path for the A/V muxers; the `aacenc` alias is added in
     // `register_aliases`.
     #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
-    reg.register_launch(LaunchFactory::of::<crate::ffmpegaacenc::FfmpegAacEnc>("avenc_aac", || {
-        Box::new(crate::ffmpegaacenc::FfmpegAacEnc::new())
-    }));
+    reg.register_launch(LaunchFactory::of::<crate::ffmpegaacenc::FfmpegAacEnc>(
+        "avenc_aac",
+        || Box::new(crate::ffmpegaacenc::FfmpegAacEnc::new()),
+    ));
     #[cfg(all(target_os = "linux", feature = "vaapi"))]
     reg.register_launch(LaunchFactory::of::<VaapiH264Dec>("vaapidec", || {
         Box::new(VaapiH264Dec::new())
@@ -1101,9 +1287,13 @@ fn register_feature_gated(reg: &mut Registry) {
     // Native NVIDIA Video Codec SDK elements (M269 / M270): zero-copy CUDA NV12
     // <-> H.264, the gst-`nvcodec`-style pair. Explicit-select by name.
     #[cfg(all(target_os = "linux", feature = "nvdec"))]
-    reg.register_launch(LaunchFactory::of::<NvDec>("nvdec", || Box::new(NvDec::new())));
+    reg.register_launch(LaunchFactory::of::<NvDec>("nvdec", || {
+        Box::new(NvDec::new())
+    }));
     #[cfg(all(target_os = "linux", feature = "nvenc"))]
-    reg.register_launch(LaunchFactory::of::<NvEnc>("nvenc", || Box::new(NvEnc::new())));
+    reg.register_launch(LaunchFactory::of::<NvEnc>("nvenc", || {
+        Box::new(NvEnc::new())
+    }));
     // JPEG XS codec (M605): the ST 2110-22 compressed essence, via SVT-JPEG-XS.
     #[cfg(all(target_os = "linux", feature = "jpegxs"))]
     reg.register_launch(LaunchFactory::of::<SvtJpegXsEnc>("jpegxsenc", || {
@@ -1114,14 +1304,16 @@ fn register_feature_gated(reg: &mut Registry) {
         Box::new(SvtJpegXsDec::new())
     }));
     #[cfg(all(target_os = "linux", feature = "dmabuf-wgpu"))]
-    reg.register_launch(LaunchFactory::of::<crate::dmabufwgpu::DmaBufToWgpu>("dmabuftowgpu", || {
-        Box::new(crate::dmabufwgpu::DmaBufToWgpu::new())
-    }));
+    reg.register_launch(LaunchFactory::of::<crate::dmabufwgpu::DmaBufToWgpu>(
+        "dmabuftowgpu",
+        || Box::new(crate::dmabufwgpu::DmaBufToWgpu::new()),
+    ));
     // Export mirror (M559): a GPU-resident wgpu buffer out to a dma-buf fd.
     #[cfg(all(target_os = "linux", feature = "dmabuf-wgpu"))]
-    reg.register_launch(LaunchFactory::of::<crate::wgpudmabuf::WgpuToDmaBuf>("wgputodmabuf", || {
-        Box::new(crate::wgpudmabuf::WgpuToDmaBuf::new())
-    }));
+    reg.register_launch(LaunchFactory::of::<crate::wgpudmabuf::WgpuToDmaBuf>(
+        "wgputodmabuf",
+        || Box::new(crate::wgpudmabuf::WgpuToDmaBuf::new()),
+    ));
     // Reverse GStreamer bridge: host an unported GStreamer element in a g2g graph.
     // No pad templates (caps are what the negotiation settles + the `output-caps`
     // property declares), like `identity`.
@@ -1141,14 +1333,22 @@ fn register_feature_gated(reg: &mut Registry) {
         Box::new(WebRtcSink::new(""))
     }));
     #[cfg(all(target_os = "linux", feature = "kms-sink"))]
-    reg.register_launch(LaunchFactory::new("kmssink", Vec::new(), || Box::new(KmsSink::new())));
+    reg.register_launch(LaunchFactory::new("kmssink", Vec::new(), || {
+        Box::new(KmsSink::new())
+    }));
     #[cfg(all(target_os = "linux", feature = "alsa-sink"))]
-    reg.register_launch(LaunchFactory::of::<AlsaSink>("alsasink", || Box::new(AlsaSink::new())));
+    reg.register_launch(LaunchFactory::of::<AlsaSink>("alsasink", || {
+        Box::new(AlsaSink::new())
+    }));
     #[cfg(all(target_os = "linux", feature = "pulse-sink"))]
-    reg.register_launch(LaunchFactory::of::<PulseSink>("pulsesink", || Box::new(PulseSink::new())));
+    reg.register_launch(LaunchFactory::of::<PulseSink>("pulsesink", || {
+        Box::new(PulseSink::new())
+    }));
     // Android AAudio PCM render (M307); the gst analog is `aaudiosink`.
     #[cfg(all(target_os = "android", feature = "aaudio"))]
-    reg.register_launch(LaunchFactory::of::<AAudioSink>("aaudiosink", || Box::new(AAudioSink::new())));
+    reg.register_launch(LaunchFactory::of::<AAudioSink>("aaudiosink", || {
+        Box::new(AAudioSink::new())
+    }));
 }
 
 #[cfg(all(test, target_os = "linux", feature = "nvenc", feature = "nvdec"))]
@@ -1162,11 +1362,17 @@ mod nv_registry_tests {
     fn nvcodec_elements_and_aliases_resolve() {
         let reg = default_registry();
         for name in ["nvenc", "nvdec", "nvh264enc", "nvh264dec", "nvv4l2h264enc"] {
-            assert!(reg.make_element(name).is_some(), "registry resolves `{name}`");
+            assert!(
+                reg.make_element(name).is_some(),
+                "registry resolves `{name}`"
+            );
         }
         // The native decoder is also an auto-plug candidate (registered after the
         // CPU decoders so it does not out-rank them; see register_autoplug_candidates).
-        assert!(reg.element_names().contains(&"nvdec"), "nvdec is an autoplug factory");
+        assert!(
+            reg.element_names().contains(&"nvdec"),
+            "nvdec is an autoplug factory"
+        );
     }
 }
 
@@ -1194,13 +1400,23 @@ mod domain_aware_autoplug_tests {
         let reg = default_registry();
         // Default selection: NvDec (registered last, tagged Cuda) does not hijack
         // the system-memory path; the CPU decoder is chosen.
-        let cpu = reg.autoplug_names(&h264(), &is_raw_video, 4).expect("a decoder reaches raw");
-        assert_eq!(cpu.last(), Some(&"ffmpegdec"), "default decode stays on the CPU: {cpu:?}");
+        let cpu = reg
+            .autoplug_names(&h264(), &is_raw_video, 4)
+            .expect("a decoder reaches raw");
+        assert_eq!(
+            cpu.last(),
+            Some(&"ffmpegdec"),
+            "default decode stays on the CPU: {cpu:?}"
+        );
         // Cuda preference: the domain-aware search prefers the native NVDEC.
         let gpu = reg
             .autoplug_names_preferring(&h264(), &is_raw_video, 4, MemoryDomainKind::Cuda)
             .expect("a decoder reaches raw");
-        assert_eq!(gpu.last(), Some(&"nvdec"), "Cuda preference prefers NvDec: {gpu:?}");
+        assert_eq!(
+            gpu.last(),
+            Some(&"nvdec"),
+            "Cuda preference prefers NvDec: {gpu:?}"
+        );
     }
 }
 
@@ -1215,7 +1431,10 @@ mod ffmpeg_enc_registry_tests {
     fn ffmpeg_encoder_and_alias_resolve() {
         let reg = default_registry();
         for name in ["ffmpegenc", "x264enc", "avenc_h264"] {
-            assert!(reg.make_element(name).is_some(), "registry resolves `{name}`");
+            assert!(
+                reg.make_element(name).is_some(),
+                "registry resolves `{name}`"
+            );
         }
     }
 }
@@ -1229,8 +1448,14 @@ mod muxer_alias_tests {
     #[test]
     fn qtmux_alias_resolves_as_a_fan_in_muxer() {
         let reg = default_registry();
-        assert!(reg.make_muxer("qtmux", 2).is_some(), "qtmux resolves to the mp4mux fan-in");
-        assert!(reg.make_muxer("mp4mux", 2).is_some(), "the alias target still builds directly");
+        assert!(
+            reg.make_muxer("qtmux", 2).is_some(),
+            "qtmux resolves to the mp4mux fan-in"
+        );
+        assert!(
+            reg.make_muxer("mp4mux", 2).is_some(),
+            "the alias target still builds directly"
+        );
     }
 
     #[test]

@@ -59,7 +59,10 @@ fn caps() -> Caps {
 fn frame(pts_ns: u64, sequence: u64) -> PipelinePacket {
     PipelinePacket::DataFrame(Frame::new(
         MemoryDomain::System(SystemSlice::from_boxed(std::boxed::Box::new([0u8]))),
-        FrameTiming { pts_ns, ..FrameTiming::default() },
+        FrameTiming {
+            pts_ns,
+            ..FrameTiming::default()
+        },
         sequence,
     ))
 }
@@ -77,27 +80,43 @@ impl OutputSink for NullSink {
 #[tokio::test]
 async fn syncsink_presents_a_reverse_segment_in_ascending_running_time() {
     let deadlines = Arc::new(Mutex::new(Vec::new()));
-    let mut sink = SyncSink::new(RecordingClock { deadlines: deadlines.clone() });
+    let mut sink = SyncSink::new(RecordingClock {
+        deadlines: deadlines.clone(),
+    });
     sink.configure_pipeline(&caps()).unwrap();
     let mut out = NullSink;
 
     // Reverse over [0, 100ms]: source emits frames newest-PTS-first.
     let seg = Segment::for_flush_seek(&Seek::reverse(0, 100_000_000), None);
-    sink.process(PipelinePacket::Segment(seg), &mut out).await.unwrap();
+    sink.process(PipelinePacket::Segment(seg), &mut out)
+        .await
+        .unwrap();
 
     // Descending PTS (reverse emission order); the last one is outside the
     // segment (above stop) and must be clipped.
-    for (i, pts) in [100_000_000u64, 75_000_000, 50_000_000, 25_000_000, 0].into_iter().enumerate() {
+    for (i, pts) in [100_000_000u64, 75_000_000, 50_000_000, 25_000_000, 0]
+        .into_iter()
+        .enumerate()
+    {
         sink.process(frame(pts, i as u64), &mut out).await.unwrap();
     }
-    sink.process(frame(150_000_000, 99), &mut out).await.unwrap(); // outside: clipped
+    sink.process(frame(150_000_000, 99), &mut out)
+        .await
+        .unwrap(); // outside: clipped
 
-    assert_eq!(sink.received(), 5, "every in-range reverse frame is presented");
+    assert_eq!(
+        sink.received(),
+        5,
+        "every in-range reverse frame is presented"
+    );
     assert_eq!(sink.clipped(), 1, "the above-stop frame is clipped");
     // Reverse maps descending PTS to ASCENDING running-time deadlines: the sink
     // presented them in increasing running-time order, the correct visual order.
     let got = deadlines.lock().unwrap().clone();
-    assert_eq!(got, vec![0, 25_000_000, 50_000_000, 75_000_000, 100_000_000]);
+    assert_eq!(
+        got,
+        vec![0, 25_000_000, 50_000_000, 75_000_000, 100_000_000]
+    );
 }
 
 /// Source that emits `count` frames in descending PTS order over `[0, top]`
@@ -129,8 +148,13 @@ impl SourceLoop for ReverseSrc {
             for i in 0..self.count {
                 let pts = self.top - i * self.step; // descending
                 let f = Frame::new(
-                    MemoryDomain::System(SystemSlice::from_boxed(std::vec![0u8; 4].into_boxed_slice())),
-                    FrameTiming { pts_ns: pts, ..FrameTiming::default() },
+                    MemoryDomain::System(SystemSlice::from_boxed(
+                        std::vec![0u8; 4].into_boxed_slice(),
+                    )),
+                    FrameTiming {
+                        pts_ns: pts,
+                        ..FrameTiming::default()
+                    },
                     i,
                 );
                 out.push(PipelinePacket::DataFrame(f)).await?;
@@ -147,12 +171,26 @@ impl SourceLoop for ReverseSrc {
 async fn reverse_pipeline_runs_end_to_end() {
     let deadlines = Arc::new(Mutex::new(Vec::new()));
     let emitted = Arc::new(AtomicU64::new(0));
-    let mut src = ReverseSrc { top: 40_000_000, step: 10_000_000, count: 5, emitted: emitted.clone() };
-    let mut sink = SyncSink::new(RecordingClock { deadlines: deadlines.clone() });
+    let mut src = ReverseSrc {
+        top: 40_000_000,
+        step: 10_000_000,
+        count: 5,
+        emitted: emitted.clone(),
+    };
+    let mut sink = SyncSink::new(RecordingClock {
+        deadlines: deadlines.clone(),
+    });
 
-    let stats = run_simple_pipeline(&mut src, &mut sink, &RecordingClock { deadlines: deadlines.clone() }, 4)
-        .await
-        .expect("reverse pipeline runs");
+    let stats = run_simple_pipeline(
+        &mut src,
+        &mut sink,
+        &RecordingClock {
+            deadlines: deadlines.clone(),
+        },
+        4,
+    )
+    .await
+    .expect("reverse pipeline runs");
 
     // All 5 frames (pts 40,30,20,10,0 ms) reached the sink, presented in
     // ascending running time (0,10,20,30,40 ms), i.e. correct reverse order.

@@ -39,8 +39,7 @@ async fn gst_videoflip_method_names_port() {
         "vertical-flip",
         "rotate-180",
     ] {
-        let line =
-            format!("videotestsrc num-buffers=2 ! videoflip method={method} ! fakesink");
+        let line = format!("videotestsrc num-buffers=2 ! videoflip method={method} ! fakesink");
         assert_eq!(run_line(&line).await, 2, "{line}");
     }
 }

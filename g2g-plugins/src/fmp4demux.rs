@@ -28,12 +28,12 @@ use g2g_core::{
 };
 
 use crate::demuxseek::{Admit, DemuxSeek};
+#[cfg(feature = "hls")]
+use crate::fmp4::Subsample;
 use crate::fmp4::{
     parse_fragments, parse_header, prepend_param_sets, starts_with_param_set, CencDefaults, Header,
     Sample,
 };
-#[cfg(feature = "hls")]
-use crate::fmp4::Subsample;
 
 #[derive(Debug)]
 pub struct Fmp4Demux {
@@ -130,8 +130,11 @@ impl Fmp4Demux {
             .and_then(|h| *h.lock().expect("key handle poisoned"))
             .map(|k| k.key)
             .ok_or(G2gError::CapsMismatch)?;
-        let iv: [u8; 16] =
-            c.constant_iv.as_slice().try_into().map_err(|_| G2gError::CapsMismatch)?;
+        let iv: [u8; 16] = c
+            .constant_iv
+            .as_slice()
+            .try_into()
+            .map_err(|_| G2gError::CapsMismatch)?;
         let (crypt, skip) = (c.crypt_byte_block, c.skip_byte_block);
         let mut decrypt = move |buf: &mut [u8], subs: &[Subsample]| {
             crate::cenc::cbcs_decrypt_sample(buf, subs, &key, &iv, crypt, skip);
@@ -152,11 +155,18 @@ impl Fmp4Demux {
     }
 
     fn input_caps() -> Caps {
-        Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff }
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::IsoBmff,
+        }
     }
 
     fn output_caps(codec: VideoCodec, width: Dim, height: Dim) -> Caps {
-        Caps::CompressedVideo { codec, width, height, framerate: Rate::Any }
+        Caps::CompressedVideo {
+            codec,
+            width,
+            height,
+            framerate: Rate::Any,
+        }
     }
 
     /// Process every complete top-level box now buffered, emitting access units.
@@ -199,7 +209,8 @@ impl Fmp4Demux {
                     let cenc = header.cenc.clone();
 
                     frag.extend_from_slice(&box_bytes);
-                    let samples = self.parse_fragment_samples(&frag, timescale, codec, cenc.as_ref())?;
+                    let samples =
+                        self.parse_fragment_samples(&frag, timescale, codec, cenc.as_ref())?;
                     for s in samples {
                         // M362 seek: drop samples until the keyframe at/after the
                         // target; the resuming keyframe emits a fresh segment.
@@ -282,15 +293,20 @@ impl AsyncElement for Fmp4Demux {
         // refined from the moov via CapsChanged at runtime (like tsdemux).
         let codec = self.out_codec;
         CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| match input {
-            Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff } => {
-                CapsSet::one(Self::output_caps(codec, Dim::Any, Dim::Any))
-            }
+            Caps::ByteStream {
+                encoding: ByteStreamEncoding::IsoBmff,
+            } => CapsSet::one(Self::output_caps(codec, Dim::Any, Dim::Any)),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        if !matches!(absolute_caps, Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff }) {
+        if !matches!(
+            absolute_caps,
+            Caps::ByteStream {
+                encoding: ByteStreamEncoding::IsoBmff
+            }
+        ) {
             return Err(G2gError::CapsMismatch);
         }
         self.configured = true;
@@ -371,11 +387,23 @@ mod tests {
         // Fewer than 8 bytes: header not yet buffered, keep waiting.
         assert_eq!(next_box_len(&[0, 0, 0, 16, b'm']), Ok(None));
         // size==1 large-size form without the full 64-bit field yet: keep waiting.
-        assert_eq!(next_box_len(&[0, 0, 0, 1, b'm', b'd', b'a', b't', 0, 0, 0, 0]), Ok(None));
+        assert_eq!(
+            next_box_len(&[0, 0, 0, 1, b'm', b'd', b'a', b't', 0, 0, 0, 0]),
+            Ok(None)
+        );
         // A framed box reports its total length.
-        assert_eq!(next_box_len(&[0, 0, 0, 16, b'f', b't', b'y', b'p']), Ok(Some(16)));
+        assert_eq!(
+            next_box_len(&[0, 0, 0, 16, b'f', b't', b'y', b'p']),
+            Ok(Some(16))
+        );
         // size < 8 is malformed: fail loud instead of stalling the demuxer.
-        assert_eq!(next_box_len(&[0, 0, 0, 0, b'm', b'o', b'o', b'v']), Err(G2gError::CapsMismatch));
-        assert_eq!(next_box_len(&[0, 0, 0, 7, b'f', b'r', b'e', b'e']), Err(G2gError::CapsMismatch));
+        assert_eq!(
+            next_box_len(&[0, 0, 0, 0, b'm', b'o', b'o', b'v']),
+            Err(G2gError::CapsMismatch)
+        );
+        assert_eq!(
+            next_box_len(&[0, 0, 0, 7, b'f', b'r', b'e', b'e']),
+            Err(G2gError::CapsMismatch)
+        );
     }
 }

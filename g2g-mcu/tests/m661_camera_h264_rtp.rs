@@ -14,7 +14,9 @@ use g2g_core::rtp::RTP_HEADER_LEN;
 use g2g_core::staticpool::StaticLendRing;
 use g2g_core::{run_source_transform_sink, Chain};
 use g2g_mcu::rtp::PacketSender;
-use g2g_mcu::{FrameGrabber, GrabberSrc, H264EncodeInfo, H264Encoder, HwH264Enc, RtpSink, YuyvToI420};
+use g2g_mcu::{
+    FrameGrabber, GrabberSrc, H264EncodeInfo, H264Encoder, HwH264Enc, RtpSink, YuyvToI420,
+};
 use util::block_on;
 
 const W: u16 = 16;
@@ -29,7 +31,15 @@ const FRAMES: u32 = 4;
 /// is traceable to the pixel the camera stamped.
 fn au(first_luma: u8, n: u8) -> Vec<u8> {
     let kf = n % 4 == 0;
-    vec![0x00, 0x00, 0x00, 0x01, if kf { 0x65 } else { 0x41 }, first_luma, n]
+    vec![
+        0x00,
+        0x00,
+        0x00,
+        0x01,
+        if kf { 0x65 } else { 0x41 },
+        first_luma,
+        n,
+    ]
 }
 
 struct MockEnc {
@@ -45,7 +55,10 @@ impl H264Encoder for &mut MockEnc {
         out[..a.len()].copy_from_slice(&a);
         let kf = self.n % 4 == 0;
         self.n = self.n.wrapping_add(1);
-        Ok(H264EncodeInfo { len: a.len(), keyframe: kf })
+        Ok(H264EncodeInfo {
+            len: a.len(),
+            keyframe: kf,
+        })
     }
 }
 
@@ -75,7 +88,11 @@ struct CollectSender {
 }
 
 impl PacketSender for &mut CollectSender {
-    async fn send(&mut self, header: &[u8; RTP_HEADER_LEN], payload: &[u8]) -> Result<(), G2gError> {
+    async fn send(
+        &mut self,
+        header: &[u8; RTP_HEADER_LEN],
+        payload: &[u8],
+    ) -> Result<(), G2gError> {
         self.packets.push((*header, payload.to_vec()));
         Ok(())
     }
@@ -86,9 +103,8 @@ fn camera_yuyv_convert_h264_rtp_end_to_end() {
     // Source: a YUYV camera into a 512-byte ring slot.
     let cam_ring: StaticLendRing<2, YUYV_BYTES> = StaticLendRing::new();
     // SAFETY: every ring outlives the pipeline (drained before this scope ends).
-    let source =
-        unsafe { GrabberSrc::with_ring(YuyvCamera { n: 0 }, &cam_ring, 33_333_333) }
-            .with_frame_limit(FRAMES);
+    let source = unsafe { GrabberSrc::with_ring(YuyvCamera { n: 0 }, &cam_ring, 33_333_333) }
+        .with_frame_limit(FRAMES);
 
     // Transforms: YUYV->I420 then I420->H.264 AU, fused with `Chain`.
     let cvt_ring: StaticLendRing<2, I420_BYTES> = StaticLendRing::new();
@@ -103,19 +119,38 @@ fn camera_yuyv_convert_h264_rtp_end_to_end() {
     let mut sender = CollectSender::default();
     let rtp = RtpSink::new(&mut sender, MediaClock::video(), 96, 0xDEAD_BEEF, 0);
 
-    block_on(run_source_transform_sink(source, Chain(convert, encode), rtp))
-        .expect("the camera -> convert -> encode -> RTP pipeline runs");
+    block_on(run_source_transform_sink(
+        source,
+        Chain(convert, encode),
+        rtp,
+    ))
+    .expect("the camera -> convert -> encode -> RTP pipeline runs");
 
-    assert_eq!(sender.packets.len(), FRAMES as usize, "one RTP packet per captured frame");
+    assert_eq!(
+        sender.packets.len(),
+        FRAMES as usize,
+        "one RTP packet per captured frame"
+    );
     for (i, (header, payload)) in sender.packets.iter().enumerate() {
         let n = i as u8;
         // The payload is exactly the encoder's access unit for the pixel the
         // camera stamped (0xA0 + n), carried through convert + encode + RTP.
-        assert_eq!(payload.as_slice(), au(0xA0 + n, n), "packet {i}: AU payload end to end");
+        assert_eq!(
+            payload.as_slice(),
+            au(0xA0 + n, n),
+            "packet {i}: AU payload end to end"
+        );
         // RTP header: V=2 / no pad/ext/CC, dynamic PT 96, sequential, our SSRC.
-        assert_eq!(header[0], 0x80, "packet {i}: version 2, no padding/extension/CSRC");
+        assert_eq!(
+            header[0], 0x80,
+            "packet {i}: version 2, no padding/extension/CSRC"
+        );
         assert_eq!(header[1] & 0x7F, 96, "packet {i}: payload type 96");
-        assert_eq!(u16::from_be_bytes([header[2], header[3]]), n as u16, "packet {i}: sequence");
+        assert_eq!(
+            u16::from_be_bytes([header[2], header[3]]),
+            n as u16,
+            "packet {i}: sequence"
+        );
         assert_eq!(
             u32::from_be_bytes([header[8], header[9], header[10], header[11]]),
             0xDEAD_BEEF,

@@ -96,17 +96,22 @@ impl Mp4Src {
             // carries the real timing. Advertise a Range, not `Any`, so the caps
             // survive fixate when nothing downstream pins the rate (same pattern
             // as `RtspSrc`); `Any` aborts negotiation with "cannot fixate".
-            framerate: Rate::Range { min_q16: 1 << 16, max_q16: 240 << 16 },
+            framerate: Rate::Range {
+                min_q16: 1 << 16,
+                max_q16: 240 << 16,
+            },
         })
     }
 }
 
 impl SourceLoop for Mp4Src {
-    type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
+    type RunFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
     where
         Self: 'a;
 
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 
@@ -178,7 +183,13 @@ impl SourceLoop for Mp4Src {
             // No decryptor here: an encrypted (cbcs) file fails loud rather than
             // emitting garbage. Decryption lives in `fmp4demux` (the HLS path).
             let samples = if find_box(&data, b"moof").is_some() {
-                parse_fragments(&data, header.timescale, header.codec, header.cenc.as_ref(), None)?
+                parse_fragments(
+                    &data,
+                    header.timescale,
+                    header.codec,
+                    header.cenc.as_ref(),
+                    None,
+                )?
             } else {
                 parse_progressive(&data, header.timescale)?
             };

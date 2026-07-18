@@ -91,7 +91,10 @@ impl RetryThenReset {
     /// A policy that retries `max_retries` times, then resets `max_resets` times,
     /// then escalates.
     pub const fn new(max_retries: u32, max_resets: u32) -> Self {
-        Self { max_retries, max_resets }
+        Self {
+            max_retries,
+            max_resets,
+        }
     }
 }
 
@@ -482,12 +485,14 @@ mod tests {
     fn one_frame(seq: u64) -> Frame {
         // SAFETY: BYTE is 'static and never mutated; the lent slice covers its one
         // valid byte and needs no reclamation (free = None).
-        let slice = unsafe {
-            SystemSlice::from_foreign(BYTE.as_ptr(), 1, None, core::ptr::null_mut())
-        };
+        let slice =
+            unsafe { SystemSlice::from_foreign(BYTE.as_ptr(), 1, None, core::ptr::null_mut()) };
         Frame::new(
             MemoryDomain::System(slice),
-            FrameTiming { pts_ns: seq, ..FrameTiming::default() },
+            FrameTiming {
+                pts_ns: seq,
+                ..FrameTiming::default()
+            },
             seq,
         )
     }
@@ -579,10 +584,12 @@ mod tests {
         let src = FaultSource::transient(5, 1);
         let mut sink = CountSink { n: 0 };
         let mut wd = CountWatchdog { pets: 0 };
-        let (report, outcome) =
-            run_supervised(src, &mut sink, RetryThenReset::default(), &mut wd);
+        let (report, outcome) = run_supervised(src, &mut sink, RetryThenReset::default(), &mut wd);
         assert_eq!(outcome, RunOutcome::Completed, "recovered to EOS");
-        assert_eq!(sink.n, 5, "all frames delivered despite the transient faults");
+        assert_eq!(
+            sink.n, 5,
+            "all frames delivered despite the transient faults"
+        );
         assert_eq!(report.frames, 5);
         assert_eq!(report.faults, 5, "one fault per frame");
         assert_eq!(report.retries, 5, "each answered by a retry");
@@ -630,8 +637,7 @@ mod tests {
         let src = FaultSource::permanent();
         let mut sink = CountSink { n: 0 };
         let mut wd = CountWatchdog { pets: 0 };
-        let (report, outcome) =
-            run_supervised(src, &mut sink, RetryThenReset::new(2, 1), &mut wd);
+        let (report, outcome) = run_supervised(src, &mut sink, RetryThenReset::new(2, 1), &mut wd);
         match outcome {
             RunOutcome::Escalated(G2gError::Hardware(_)) => {}
             other => panic!("expected escalation on a permanent fault, got {other:?}"),
@@ -689,13 +695,23 @@ mod tests {
             }
         }
         impl Recover for AlternatingFault {}
-        let src = AlternatingFault { emitted: 0, attempts: 0, limit: 6 };
+        let src = AlternatingFault {
+            emitted: 0,
+            attempts: 0,
+            limit: 6,
+        };
         let mut sink = CountSink { n: 0 };
-        let (report, outcome) =
-            run_supervised(src, &mut sink, SkipBounded::new(2), NoWatchdog);
-        assert_eq!(outcome, RunOutcome::Completed, "degraded past the faults to EOS");
+        let (report, outcome) = run_supervised(src, &mut sink, SkipBounded::new(2), NoWatchdog);
+        assert_eq!(
+            outcome,
+            RunOutcome::Completed,
+            "degraded past the faults to EOS"
+        );
         assert_eq!(sink.n, 6, "every good frame delivered");
-        assert!(report.skips > 0, "faulting frames were skipped, not retried");
+        assert!(
+            report.skips > 0,
+            "faulting frames were skipped, not retried"
+        );
         assert_eq!(report.retries, 0);
         assert!(!report.escalated);
     }
@@ -720,7 +736,10 @@ mod tests {
             &mut NoWatchdog,
             &mut report,
         );
-        assert!(matches!(out, Supervised::Escalated(_)), "hard cap forced a stop");
+        assert!(
+            matches!(out, Supervised::Escalated(_)),
+            "hard cap forced a stop"
+        );
         assert!(report.escalated);
         assert_eq!(report.faults, MAX_ATTEMPTS, "stopped exactly at the cap");
     }

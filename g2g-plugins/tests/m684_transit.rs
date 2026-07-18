@@ -153,7 +153,9 @@ fn build() -> Graph<GraphNode> {
 async fn observed_run_measures_input_link_transit() {
     let obs = Observer::new();
     // cap=2 so the source can run a couple of frames ahead of the slow transform.
-    let stats = run_graph_observed(build(), &ZeroClock, 2, &obs, None).await.expect("runs");
+    let stats = run_graph_observed(build(), &ZeroClock, 2, &obs, None)
+        .await
+        .expect("runs");
     assert_eq!(stats.frames_consumed, 8);
 
     let tx = stats
@@ -163,7 +165,11 @@ async fn observed_run_measures_input_link_transit() {
         .expect("transform row");
     // Frames pile up behind the 4 ms processing, so the transform's input-link
     // queue-residency is measured and non-trivial.
-    assert!(tx.transit.count > 0, "transit was sampled, n={}", tx.transit.count);
+    assert!(
+        tx.transit.count > 0,
+        "transit was sampled, n={}",
+        tx.transit.count
+    );
     assert!(
         tx.transit.p50_ns >= MS,
         "queued frames waited ~ms on the input link, p50={} ns",
@@ -178,6 +184,10 @@ async fn unobserved_run_has_no_transit_overhead() {
     let stats = run_graph(build(), &ZeroClock, 2).await.expect("runs");
     assert_eq!(stats.frames_consumed, 8);
     for e in &stats.per_element {
-        assert_eq!(e.transit.count, 0, "{} has no transit when unobserved", e.name);
+        assert_eq!(
+            e.transit.count, 0,
+            "{} has no transit when unobserved",
+            e.name
+        );
     }
 }

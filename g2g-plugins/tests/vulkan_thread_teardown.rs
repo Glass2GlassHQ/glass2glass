@@ -7,13 +7,16 @@
 //! JOINED, looped many times. A crash here means a genuine thread-affinity bug in
 //! the decoder; a clean run means the PoC crash was the wrapper's detached-thread
 //! teardown racing process exit (it does not join), not a decode-path bug.
-#![cfg(all(any(target_os = "linux", target_os = "windows"), feature = "vulkan-video"))]
+#![cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    feature = "vulkan-video"
+))]
 
 use g2g_core::runtime::block_on;
 use g2g_plugins::revideo::{VideoCodec, VulkanStreamDecoder};
 use g2g_plugins::vulkanvideo::{
-    open_av1_decode_device, open_h264_decode_device, open_h265_decode_device, VulkanVideoError,
-    VulkanVideoDevice,
+    open_av1_decode_device, open_h264_decode_device, open_h265_decode_device, VulkanVideoDevice,
+    VulkanVideoError,
 };
 
 const CLIP: &[u8] = include_bytes!("fixtures/av1_640x480.obu");
@@ -39,7 +42,12 @@ fn decode_h26x_frames(
 ) -> Result<Vec<Vec<u8>>, VulkanVideoError> {
     let device = open()?;
     let mut dec = VulkanStreamDecoder::new(device, codec, clip).expect("build decoder");
-    Ok(dec.submit_chunk(clip, true).expect("submit").into_iter().map(|f| f.data).collect())
+    Ok(dec
+        .submit_chunk(clip, true)
+        .expect("submit")
+        .into_iter()
+        .map(|f| f.data)
+        .collect())
 }
 
 /// Cross-thread decode check for a codec: main-thread frames must equal
@@ -70,22 +78,36 @@ fn cross_thread_check(
         };
         for (i, (r, wf)) in reference.iter().zip(w.iter()).enumerate() {
             let ndiff = r.iter().zip(wf).filter(|(a, b)| a != b).count();
-            assert_eq!(ndiff, 0, "{codec:?} iter {iter} frame {i}: {ndiff} px differ across threads");
+            assert_eq!(
+                ndiff, 0,
+                "{codec:?} iter {iter} frame {i}: {ndiff} px differ across threads"
+            );
         }
     }
-    eprintln!("{codec:?}: bit-identical across threads ({} frames)", reference.len());
+    eprintln!(
+        "{codec:?}: bit-identical across threads ({} frames)",
+        reference.len()
+    );
 }
 
 #[test]
 fn h264_decode_matches_across_threads() {
     let _g = gpu_lock();
-    cross_thread_check(|| block_on(open_h264_decode_device()), VideoCodec::H264, H264_CLIP);
+    cross_thread_check(
+        || block_on(open_h264_decode_device()),
+        VideoCodec::H264,
+        H264_CLIP,
+    );
 }
 
 #[test]
 fn h265_decode_matches_across_threads() {
     let _g = gpu_lock();
-    cross_thread_check(|| block_on(open_h265_decode_device()), VideoCodec::H265, H265_CLIP);
+    cross_thread_check(
+        || block_on(open_h265_decode_device()),
+        VideoCodec::H265,
+        H265_CLIP,
+    );
 }
 
 /// Split the low-overhead AV1 OBU stream into one chunk per coded frame, each the
@@ -144,8 +166,7 @@ fn decode_once() -> DecodeOutcome {
 /// Decode the whole fixture, returning each frame's packed-I420 bytes.
 fn decode_frames() -> Result<Vec<Vec<u8>>, VulkanVideoError> {
     let device = block_on(open_av1_decode_device())?;
-    let mut dec =
-        VulkanStreamDecoder::new(device, VideoCodec::Av1, CLIP).expect("build decoder");
+    let mut dec = VulkanStreamDecoder::new(device, VideoCodec::Av1, CLIP).expect("build decoder");
     let mut frames = Vec::new();
     for (i, chunk) in split_obu_frames(CLIP).iter().enumerate() {
         for f in dec.submit_chunk(chunk, i == 0).expect("submit chunk") {
@@ -186,7 +207,9 @@ fn av1_decode_matches_across_threads() {
     assert_eq!(reference.len(), 10);
 
     for iter in 0..6 {
-        let worker = std::thread::spawn(decode_frames).join().expect("worker panicked");
+        let worker = std::thread::spawn(decode_frames)
+            .join()
+            .expect("worker panicked");
         let worker = match worker {
             Ok(f) => f,
             Err(ref e) if no_adapter(e) => continue,
@@ -248,9 +271,14 @@ fn decode_and_drop_on_joined_worker_threads() {
     // open + decode + drop each entirely on its own spawned thread, joined.
     let mut decoded = 0;
     for iter in 0..10 {
-        let out = std::thread::spawn(decode_retrying).join().expect("worker thread panicked");
+        let out = std::thread::spawn(decode_retrying)
+            .join()
+            .expect("worker thread panicked");
         if let Some(n) = out {
-            assert_eq!(n, 10, "iteration {iter} decoded 10 frames on a worker thread");
+            assert_eq!(
+                n, 10,
+                "iteration {iter} decoded 10 frames on a worker thread"
+            );
             decoded += 1;
         }
     }

@@ -35,8 +35,8 @@ use alloc::vec::Vec;
 use g2g_core::metrics::monotonic_ns;
 use g2g_core::ptp::wire;
 use g2g_core::{
-    ClockCandidate, MonotonicClock, PipelineClock, PtpClock, PtpSlave, PtpState, RefNs, SlaveAction,
-    TaiNs,
+    ClockCandidate, MonotonicClock, PipelineClock, PtpClock, PtpSlave, PtpState, RefNs,
+    SlaveAction, TaiNs,
 };
 
 /// The PTP default profile primary multicast address (224.0.1.129).
@@ -79,7 +79,11 @@ impl PtpClient {
     pub fn with_domain(domain: u8) -> io::Result<Self> {
         let reference: Arc<dyn PipelineClock + Send + Sync> = Arc::new(MonotonicClock);
         let clock = Arc::new(PtpClock::new(reference));
-        let slave = Arc::new(Mutex::new(PtpSlave::new(domain, local_clock_id(), OUR_PORT)));
+        let slave = Arc::new(Mutex::new(PtpSlave::new(
+            domain,
+            local_clock_id(),
+            OUR_PORT,
+        )));
         let stop = Arc::new(AtomicBool::new(false));
 
         // Event socket both receives Sync and sends Delay_Req; general socket
@@ -102,7 +106,11 @@ impl PtpClient {
             );
         }
 
-        Ok(Self { clock, stop, workers })
+        Ok(Self {
+            clock,
+            stop,
+            workers,
+        })
     }
 
     /// The disciplined clock, to share via an element's `provide_clock` or read.

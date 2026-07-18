@@ -103,8 +103,16 @@ fn main() {
     let line = "videotestsrc num-buffers=5 ! framecounter ! fakesink";
     let graph = parse_launch(&registry, line).expect("pipeline parses");
 
-    let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
-    let stats = rt.block_on(run_graph(graph, &WallClock::new(), 4)).expect("pipeline runs");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    let stats = rt
+        .block_on(run_graph(graph, &WallClock::new(), 4))
+        .expect("pipeline runs");
     println!("ran `{line}`");
-    println!("frames emitted: {}, consumed: {}", stats.frames_emitted, stats.frames_consumed);
+    println!(
+        "frames emitted: {}, consumed: {}",
+        stats.frames_emitted, stats.frames_consumed
+    );
 }

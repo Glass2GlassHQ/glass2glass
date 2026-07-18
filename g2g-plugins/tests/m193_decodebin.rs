@@ -74,8 +74,15 @@ async fn decodebin_passthrough_on_already_raw_runs() {
     let reg = default_registry();
     let line = "videotestsrc num-buffers=2 ! decodebin ! fakesink";
     let graph = parse_launch(&reg, line).unwrap_or_else(|e| panic!("{line:?} parse: {e}"));
-    assert_eq!(graph.edges().len(), 1, "decodebin drops out, leaving one edge");
-    let consumed = run_graph(graph, &ZeroClock, 4).await.expect("runs").frames_consumed;
+    assert_eq!(
+        graph.edges().len(),
+        1,
+        "decodebin drops out, leaving one edge"
+    );
+    let consumed = run_graph(graph, &ZeroClock, 4)
+        .await
+        .expect("runs")
+        .frames_consumed;
     assert_eq!(consumed, 2, "{line}");
 }
 
@@ -86,7 +93,13 @@ async fn decodebin_passthrough_with_downstream_runs() {
     let graph = parse_launch(&reg, line).unwrap_or_else(|e| panic!("{line:?} parse: {e}"));
     // videotestsrc -> videoconvert -> fakesink (decodebin gone).
     assert_eq!(graph.edges().len(), 2, "{line}");
-    assert_eq!(run_graph(graph, &ZeroClock, 4).await.expect("runs").frames_consumed, 2);
+    assert_eq!(
+        run_graph(graph, &ZeroClock, 4)
+            .await
+            .expect("runs")
+            .frames_consumed,
+        2
+    );
 }
 
 #[tokio::test]
@@ -104,7 +117,9 @@ async fn decodebin_expands_a_decoder_chain() {
         PadTemplate::sink(CapsSet::one(vp9_any())),
         PadTemplate::source(CapsSet::one(nv12_any())),
     ]);
-    reg.register(ElementFactory::new("fakedec", templates, |_| Box::new(IdentityTransform::new())));
+    reg.register(ElementFactory::new("fakedec", templates, |_| {
+        Box::new(IdentityTransform::new())
+    }));
     // Buildable by name, so the parser can instantiate the expanded element.
     reg.register_launch(g2g_core::runtime::LaunchFactory::new(
         "fakedec",
@@ -115,12 +130,18 @@ async fn decodebin_expands_a_decoder_chain() {
     // Sanity: the search routes the compressed stream to raw in a single decoder
     // hop. (We assert the shape, not the decoder name: with a real decoder feature
     // on, its candidate may be chosen over the stub, but it is still one hop.)
-    let chain = reg.autoplug_names(&vp9_any(), &is_raw_video, 4).expect("a decoder reaches raw");
+    let chain = reg
+        .autoplug_names(&vp9_any(), &is_raw_video, 4)
+        .expect("a decoder reaches raw");
     assert_eq!(chain.len(), 1, "one decoder hop to raw, got {chain:?}");
 
     let line = "vp9src ! decodebin ! fakesink";
     let graph = parse_launch(&reg, line).unwrap_or_else(|e| panic!("{line:?} parse: {e}"));
-    assert_eq!(graph.edges().len(), 2, "decodebin expanded to one decoder node");
+    assert_eq!(
+        graph.edges().len(),
+        2,
+        "decodebin expanded to one decoder node"
+    );
 }
 
 #[tokio::test]
@@ -128,7 +149,10 @@ async fn decodebin_without_upstream_fails_loud() {
     let reg = default_registry();
     // decodebin as the first element has no upstream caps to decode.
     let err = parse_launch(&reg, "decodebin ! fakesink").unwrap_err();
-    assert!(matches!(err, ParseError::DecodebinNoUpstream), "got {err:?}");
+    assert!(
+        matches!(err, ParseError::DecodebinNoUpstream),
+        "got {err:?}"
+    );
 }
 
 // Only meaningful without an H.264 decoder compiled in; any of `ffmpegdec`,

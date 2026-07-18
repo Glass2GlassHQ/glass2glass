@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use g2g_core::runtime::{run_muxer_sink_dynamic, DynSourceLoop, SourceLoop};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, ConfigureOutcome, Dim, G2gError, MultiInputElement,
-    OutputSink, PipelinePacket, RawVideoFormat, Rate,
+    OutputSink, PipelinePacket, Rate, RawVideoFormat,
 };
 
 fn caps() -> Caps {
@@ -47,7 +47,10 @@ impl SourceLoop for CountedSource {
                     g2g_core::MemoryDomain::System(g2g_core::memory::SystemSlice::from_boxed(
                         std::vec![0u8; 4].into_boxed_slice(),
                     )),
-                    g2g_core::FrameTiming { pts_ns: seq, ..Default::default() },
+                    g2g_core::FrameTiming {
+                        pts_ns: seq,
+                        ..Default::default()
+                    },
                     seq,
                 );
                 out.push(PipelinePacket::DataFrame(frame)).await?;
@@ -147,8 +150,10 @@ async fn dynamic_inputs_feed_a_trailing_sink_with_coupled_output_caps() {
     let frames = Arc::new(Mutex::new(0u64));
     let configured = Arc::new(Mutex::new(None));
     let mut mux = PassthroughMux { inputs: 3 };
-    let mut sink =
-        RecordingSink { frames: Arc::clone(&frames), configured_with: Arc::clone(&configured) };
+    let mut sink = RecordingSink {
+        frames: Arc::clone(&frames),
+        configured_with: Arc::clone(&configured),
+    };
 
     let (handle, run) = run_muxer_sink_dynamic(&mut mux, &mut sink, 4);
     handle
@@ -161,9 +166,19 @@ async fn dynamic_inputs_feed_a_trailing_sink_with_coupled_output_caps() {
 
     let stats = run.await.expect("dynamic muxer->sink run");
 
-    assert_eq!(*frames.lock().unwrap(), 8, "the sink received every merged frame (5 + 3)");
-    assert_eq!(stats.frames_consumed, 8, "frames_consumed is the sink's merged count");
-    assert_eq!(stats.frames_emitted, 8, "both runtime inputs' frames summed");
+    assert_eq!(
+        *frames.lock().unwrap(),
+        8,
+        "the sink received every merged frame (5 + 3)"
+    );
+    assert_eq!(
+        stats.frames_consumed, 8,
+        "frames_consumed is the sink's merged count"
+    );
+    assert_eq!(
+        stats.frames_emitted, 8,
+        "both runtime inputs' frames summed"
+    );
     assert_eq!(
         *configured.lock().unwrap(),
         Some(caps()),

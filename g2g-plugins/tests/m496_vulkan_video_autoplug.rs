@@ -7,7 +7,10 @@
 //! consumer), while a plain (System) search is unaffected -- a WgpuTexture
 //! producer is a domain mismatch there. GPU-free: this exercises only the
 //! registry's capability scoring, so it needs no adapter.
-#![cfg(all(any(target_os = "linux", target_os = "windows"), feature = "vulkan-video"))]
+#![cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    feature = "vulkan-video"
+))]
 
 use g2g_core::memory::MemoryDomainKind;
 use g2g_core::runtime::SelectionContext;
@@ -38,7 +41,10 @@ fn wgpu_texture_consumer_autoplugs_vulkanvideodec() {
 
     // A WgpuTexture-preferring search picks the Vulkan Video decoder (domain match
     // dominates the score), routing H.264 straight to a GPU-resident texture.
-    let ctx = SelectionContext { preferred_memory: MemoryDomainKind::WgpuTexture, prefer_hardware: false };
+    let ctx = SelectionContext {
+        preferred_memory: MemoryDomainKind::WgpuTexture,
+        prefer_hardware: false,
+    };
     let chain = reg
         .autoplug_names_with(&h264_in(), &is_raw, 4, ctx)
         .expect("a decode chain exists for H.264 -> WgpuTexture");
@@ -55,8 +61,10 @@ fn wgpu_texture_consumer_autoplugs_vulkanvideodec() {
 #[test]
 fn wgpu_texture_consumer_autoplugs_vulkanvideodec_for_h265_and_av1() {
     let reg = default_registry();
-    let ctx =
-        SelectionContext { preferred_memory: MemoryDomainKind::WgpuTexture, prefer_hardware: false };
+    let ctx = SelectionContext {
+        preferred_memory: MemoryDomainKind::WgpuTexture,
+        prefer_hardware: false,
+    };
     for codec in [VideoCodec::H265, VideoCodec::Av1] {
         let chain = reg
             .autoplug_names_with(&compressed_in(codec), &is_raw, 4, ctx)
@@ -78,7 +86,10 @@ fn wgpu_texture_consumer_autoplugs_vulkanvideodec_for_h265_and_av1() {
 #[test]
 fn system_consumer_prefers_the_system_decoder() {
     let reg = default_registry();
-    let ctx = SelectionContext { preferred_memory: MemoryDomainKind::System, prefer_hardware: false };
+    let ctx = SelectionContext {
+        preferred_memory: MemoryDomainKind::System,
+        prefer_hardware: false,
+    };
     let chain = reg
         .autoplug_names_with(&h264_in(), &is_raw, 4, ctx)
         .expect("a decode chain exists for H.264 -> System");

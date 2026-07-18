@@ -30,8 +30,14 @@ pub enum GstEquivalent {
 }
 
 /// Launch keywords the parser handles that are not registry elements.
-static LAUNCH_KEYWORDS: &[&str] =
-    &["decodebin", "uridecodebin", "playbin", "queue", "queue2", "tee"];
+static LAUNCH_KEYWORDS: &[&str] = &[
+    "decodebin",
+    "uridecodebin",
+    "playbin",
+    "queue",
+    "queue2",
+    "tee",
+];
 
 /// gst element name -> guidance, for names NOT registered under the same name.
 /// Registered names (incl. aliases like `avdec_h264` -> `ffmpegdec`) resolve to
@@ -119,7 +125,9 @@ pub struct LintReport {
 fn element_names(line: &str) -> Vec<&str> {
     let mut names = Vec::new();
     for segment in line.split('!') {
-        let Some(first) = segment.split_whitespace().next() else { continue };
+        let Some(first) = segment.split_whitespace().next() else {
+            continue;
+        };
         // Inline caps filter (media/type,fields) or a branch reference (`t.`) or
         // a bare property token, none of which is an element to look up.
         if first.contains('/') || first.ends_with('.') || first.contains('=') {
@@ -151,13 +159,22 @@ pub fn lint_launch(registry: &Registry, line: &str) -> LintReport {
         }
     }
     if !findings.is_empty() {
-        return LintReport { ok: false, findings };
+        return LintReport {
+            ok: false,
+            findings,
+        };
     }
     // Elements all resolve: let the parser catch caps / property / topology
     // issues (one authoritative error).
     match parse_launch(registry, line) {
-        Ok(_) => LintReport { ok: true, findings: Vec::new() },
-        Err(e) => LintReport { ok: false, findings: Vec::from([explain(registry, &e)]) },
+        Ok(_) => LintReport {
+            ok: true,
+            findings: Vec::new(),
+        },
+        Err(e) => LintReport {
+            ok: false,
+            findings: Vec::from([explain(registry, &e)]),
+        },
     }
 }
 
@@ -272,22 +289,28 @@ pub fn scan_source(registry: &Registry, source: &str) -> SourceScanReport {
 /// Turn a [`ParseError`] into porting-oriented guidance.
 fn explain(registry: &Registry, e: &ParseError) -> String {
     match e {
-        ParseError::UnknownElement(n) | ParseError::UnknownSource(n) => match gst_equivalent(registry, n) {
-            GstEquivalent::Renamed(g) => {
-                format!("`{n}` is not a g2g element name; g2g calls it `{g}` (see `g2g-inspect {g}`)")
+        ParseError::UnknownElement(n) | ParseError::UnknownSource(n) => {
+            match gst_equivalent(registry, n) {
+                GstEquivalent::Renamed(g) => {
+                    format!("`{n}` is not a g2g element name; g2g calls it `{g}` (see `g2g-inspect {g}`)")
+                }
+                GstEquivalent::Unsupported(hint) => format!("`{n}` has no g2g element: {hint}"),
+                GstEquivalent::Available => {
+                    format!("`{n}` is available; re-check spelling or whether its feature is compiled in")
+                }
+                GstEquivalent::Unknown => {
+                    format!("`{n}` is unknown to g2g with no known equivalent; list elements with `g2g-inspect`")
+                }
             }
-            GstEquivalent::Unsupported(hint) => format!("`{n}` has no g2g element: {hint}"),
-            GstEquivalent::Available => {
-                format!("`{n}` is available; re-check spelling or whether its feature is compiled in")
-            }
-            GstEquivalent::Unknown => {
-                format!("`{n}` is unknown to g2g with no known equivalent; list elements with `g2g-inspect`")
-            }
-        },
+        }
         ParseError::UnknownProperty { element, key } => {
             format!("`{element}` has no property `{key}`; run `g2g-inspect {element}` for its properties")
         }
-        ParseError::BadValue { element, key, value } => {
+        ParseError::BadValue {
+            element,
+            key,
+            value,
+        } => {
             format!("`{element}` property `{key}` rejects `{value}`; check its type with `g2g-inspect {element}`")
         }
         ParseError::NotAMuxer(n) => {
@@ -331,13 +354,19 @@ mod tests {
         let r = lint_launch(&reg, "videotestsrc ! x264enc ! fakesink");
         assert!(!r.ok);
         let msg = &r.findings[0];
-        assert!(msg.contains("x264enc") && (msg.contains("mfencode") || msg.contains("av1enc")), "{msg}");
+        assert!(
+            msg.contains("x264enc") && (msg.contains("mfencode") || msg.contains("av1enc")),
+            "{msg}"
+        );
     }
 
     #[test]
     fn renamed_element_maps_to_g2g_name() {
         let reg = default_registry();
-        assert_eq!(gst_equivalent(&reg, "jpegdec"), GstEquivalent::Renamed("mjpegdec"));
+        assert_eq!(
+            gst_equivalent(&reg, "jpegdec"),
+            GstEquivalent::Renamed("mjpegdec")
+        );
     }
 
     #[test]
@@ -348,8 +377,16 @@ mod tests {
         let r = lint_launch(&reg, "videotestsrc ! theoraenc ! x265enc ! fakesink");
         assert!(!r.ok);
         assert_eq!(r.findings.len(), 2, "both flagged: {:?}", r.findings);
-        assert!(r.findings.iter().any(|m| m.contains("theoraenc")), "{:?}", r.findings);
-        assert!(r.findings.iter().any(|m| m.contains("x265enc")), "{:?}", r.findings);
+        assert!(
+            r.findings.iter().any(|m| m.contains("theoraenc")),
+            "{:?}",
+            r.findings
+        );
+        assert!(
+            r.findings.iter().any(|m| m.contains("x265enc")),
+            "{:?}",
+            r.findings
+        );
     }
 
     #[test]
@@ -382,8 +419,14 @@ mod tests {
     fn keyword_and_unknown_classify() {
         let reg = default_registry();
         assert_eq!(gst_equivalent(&reg, "tee"), GstEquivalent::Available);
-        assert_eq!(gst_equivalent(&reg, "videoconvert"), GstEquivalent::Available);
-        assert_eq!(gst_equivalent(&reg, "totally-made-up"), GstEquivalent::Unknown);
+        assert_eq!(
+            gst_equivalent(&reg, "videoconvert"),
+            GstEquivalent::Available
+        );
+        assert_eq!(
+            gst_equivalent(&reg, "totally-made-up"),
+            GstEquivalent::Unknown
+        );
     }
 
     #[test]
@@ -406,10 +449,28 @@ mod tests {
         "#;
         let r = scan_source(&reg, src);
         // videoconvert is available (no finding); jpegdec renamed; theoraenc unsupported.
-        assert!(r.findings.iter().any(|m| m.contains("jpegdec") && m.contains("mjpegdec")), "{:?}", r.findings);
-        assert!(r.findings.iter().any(|m| m.contains("theoraenc")), "{:?}", r.findings);
-        assert!(!r.findings.iter().any(|m| m.contains("videoconvert")), "available element flagged: {:?}", r.findings);
-        assert!(r.notes.iter().any(|n| n.contains("pad-added")), "notes: {:?}", r.notes);
+        assert!(
+            r.findings
+                .iter()
+                .any(|m| m.contains("jpegdec") && m.contains("mjpegdec")),
+            "{:?}",
+            r.findings
+        );
+        assert!(
+            r.findings.iter().any(|m| m.contains("theoraenc")),
+            "{:?}",
+            r.findings
+        );
+        assert!(
+            !r.findings.iter().any(|m| m.contains("videoconvert")),
+            "available element flagged: {:?}",
+            r.findings
+        );
+        assert!(
+            r.notes.iter().any(|n| n.contains("pad-added")),
+            "notes: {:?}",
+            r.notes
+        );
     }
 
     #[test]
@@ -423,8 +484,16 @@ mod tests {
         let r = scan_source(&reg, src);
         // appsink resolves (registered); videoconvert too; the variable
         // parse_launch yields no phantom element findings.
-        assert!(r.findings.is_empty(), "unexpected findings: {:?}", r.findings);
+        assert!(
+            r.findings.is_empty(),
+            "unexpected findings: {:?}",
+            r.findings
+        );
         // appsink triggers the dynamic-API note.
-        assert!(r.notes.iter().any(|n| n.contains("appsink")), "notes: {:?}", r.notes);
+        assert!(
+            r.notes.iter().any(|n| n.contains("appsink")),
+            "notes: {:?}",
+            r.notes
+        );
     }
 }

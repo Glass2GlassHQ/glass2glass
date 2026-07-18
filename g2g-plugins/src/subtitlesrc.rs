@@ -42,7 +42,11 @@ pub struct SubtitleSrc {
 impl SubtitleSrc {
     /// A source emitting the file at `path` as `Caps::Text { format }`.
     pub fn new(path: impl Into<PathBuf>, format: TextFormat) -> Self {
-        Self { path: path.into(), format, configured: false }
+        Self {
+            path: path.into(),
+            format,
+            configured: false,
+        }
     }
 
     /// A source whose text format is sniffed from the `path` extension
@@ -51,18 +55,29 @@ impl SubtitleSrc {
     pub fn from_location(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
         let format = format_from_path(&path);
-        Self { path, format, configured: false }
+        Self {
+            path,
+            format,
+            configured: false,
+        }
     }
 
     fn output_caps(&self) -> Caps {
-        Caps::Text { format: self.format }
+        Caps::Text {
+            format: self.format,
+        }
     }
 }
 
 /// Sniff a subtitle [`TextFormat`] from a file extension (case-insensitive),
 /// defaulting to SubRip.
 fn format_from_path(path: &std::path::Path) -> TextFormat {
-    match path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref() {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .as_deref()
+    {
         Some("vtt") => TextFormat::WebVtt,
         Some("ssa" | "ass") => TextFormat::Ssa,
         Some("ttml" | "xml" | "dfxp") => TextFormat::Ttml,
@@ -113,7 +128,9 @@ impl SourceLoop for SubtitleSrc {
     fn caps_constraint<'a>(
         &'a mut self,
     ) -> impl Future<Output = Result<CapsConstraint<'a>, G2gError>> + 'a {
-        core::future::ready(Ok(CapsConstraint::Produces(CapsSet::one(self.output_caps()))))
+        core::future::ready(Ok(CapsConstraint::Produces(CapsSet::one(
+            self.output_caps(),
+        ))))
     }
 
     fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -187,7 +204,11 @@ impl SourceLoop for SubtitleSrc {
 /// format override (otherwise sniffed from the extension).
 static SUBTITLESRC_PROPS: &[PropertySpec] = &[
     PropertySpec::new("location", PropKind::Str, "input subtitle file path"),
-    PropertySpec::new("format", PropKind::Str, "text format: srt | vtt | ssa | ttml (else sniffed from the extension)"),
+    PropertySpec::new(
+        "format",
+        PropKind::Str,
+        "text format: srt | vtt | ssa | ttml (else sniffed from the extension)",
+    ),
 ];
 
 #[cfg(test)]
@@ -217,11 +238,26 @@ mod tests {
 
     #[test]
     fn sniffs_format_from_extension() {
-        assert_eq!(SubtitleSrc::from_location("/x/subs.vtt").format, TextFormat::WebVtt);
-        assert_eq!(SubtitleSrc::from_location("/x/subs.ass").format, TextFormat::Ssa);
-        assert_eq!(SubtitleSrc::from_location("/x/subs.ttml").format, TextFormat::Ttml);
-        assert_eq!(SubtitleSrc::from_location("/x/subs.srt").format, TextFormat::Srt);
-        assert_eq!(SubtitleSrc::from_location("/x/unknown").format, TextFormat::Srt);
+        assert_eq!(
+            SubtitleSrc::from_location("/x/subs.vtt").format,
+            TextFormat::WebVtt
+        );
+        assert_eq!(
+            SubtitleSrc::from_location("/x/subs.ass").format,
+            TextFormat::Ssa
+        );
+        assert_eq!(
+            SubtitleSrc::from_location("/x/subs.ttml").format,
+            TextFormat::Ttml
+        );
+        assert_eq!(
+            SubtitleSrc::from_location("/x/subs.srt").format,
+            TextFormat::Srt
+        );
+        assert_eq!(
+            SubtitleSrc::from_location("/x/unknown").format,
+            TextFormat::Srt
+        );
     }
 
     #[tokio::test]
@@ -234,7 +270,12 @@ mod tests {
         let mut src = SubtitleSrc::from_location(&path);
         // Negotiation: the source advertises the sniffed text format.
         let caps = src.intercept_caps().await.unwrap();
-        assert_eq!(caps, Caps::Text { format: TextFormat::Srt });
+        assert_eq!(
+            caps,
+            Caps::Text {
+                format: TextFormat::Srt
+            }
+        );
         src.configure_pipeline(&caps).unwrap();
 
         let mut sink = Collect::default();
@@ -242,11 +283,20 @@ mod tests {
         std::fs::remove_file(&path).ok();
 
         assert_eq!(pushed, 1, "one document frame emitted");
-        assert!(matches!(sink.packets.last(), Some(PipelinePacket::Eos)), "ends with Eos");
+        assert!(
+            matches!(sink.packets.last(), Some(PipelinePacket::Eos)),
+            "ends with Eos"
+        );
         match &sink.packets[0] {
             PipelinePacket::DataFrame(f) => {
-                let MemoryDomain::System(s) = &f.domain else { panic!("system buffer") };
-                assert_eq!(s.as_slice(), doc.as_bytes(), "the file bytes are emitted verbatim");
+                let MemoryDomain::System(s) = &f.domain else {
+                    panic!("system buffer")
+                };
+                assert_eq!(
+                    s.as_slice(),
+                    doc.as_bytes(),
+                    "the file bytes are emitted verbatim"
+                );
             }
             _ => panic!("first packet is the document frame"),
         }

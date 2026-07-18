@@ -68,7 +68,11 @@ fn long_frames_stream_through_the_fixed_chunk() {
     assert_eq!(writer.blocks.len(), 2, "chunked writes");
     assert_eq!(writer.blocks[0].len(), 64);
     assert_eq!(writer.blocks[1].len(), 36);
-    assert_eq!(writer.blocks.concat(), samples, "order preserved across chunks");
+    assert_eq!(
+        writer.blocks.concat(),
+        samples,
+        "order preserved across chunks"
+    );
 }
 
 #[test]
@@ -84,7 +88,10 @@ fn torn_sample_frames_are_caps_mismatch_before_any_write() {
 
 #[test]
 fn writer_failure_propagates() {
-    let mut writer = MockWriter { fail: true, ..Default::default() };
+    let mut writer = MockWriter {
+        fail: true,
+        ..Default::default()
+    };
     let mut sink = PcmSink::new(&mut writer, 1);
     let ring: StaticLendRing<1, 4> = StaticLendRing::new();
     let err = block_on(sink.consume(frame_of(&ring, &[0, 0, 1, 0])));

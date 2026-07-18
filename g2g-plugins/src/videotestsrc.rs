@@ -168,11 +168,13 @@ impl VideoTestSrc {
 }
 
 impl SourceLoop for VideoTestSrc {
-    type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
+    type RunFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
     where
         Self: 'a;
 
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 
@@ -192,27 +194,19 @@ impl SourceLoop for VideoTestSrc {
         core::future::ready(Ok(CapsConstraint::Produces(CapsSet::one(self.caps()))))
     }
 
-    fn configure_pipeline(
-        &mut self,
-        _absolute_caps: &Caps,
-    ) -> Result<ConfigureOutcome, G2gError> {
+    fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
     }
 
-    fn run<'a>(
-        &'a mut self,
-        out: &'a mut dyn OutputSink,
-    ) -> Self::RunFuture<'a> {
+    fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
         Box::pin(async move {
             if !self.configured {
                 return Err(G2gError::NotConfigured);
             }
 
             let fps_q16 = u64::from(self.framerate_q16);
-            let pts_step_ns: u64 = (1_000_000_000u64 << 16)
-                .checked_div(fps_q16)
-                .unwrap_or(0);
+            let pts_step_ns: u64 = (1_000_000_000u64 << 16).checked_div(fps_q16).unwrap_or(0);
 
             let bytes_per_frame = (self.width as usize)
                 .checked_mul(self.height as usize)
@@ -227,7 +221,12 @@ impl SourceLoop for VideoTestSrc {
                     if buf.len() < bytes_per_frame {
                         return Err(G2gError::CapsMismatch);
                     }
-                    fill_pattern(self.pattern, &mut buf.as_mut()[..bytes_per_frame], self.width, seq);
+                    fill_pattern(
+                        self.pattern,
+                        &mut buf.as_mut()[..bytes_per_frame],
+                        self.width,
+                        seq,
+                    );
                     MemoryDomain::System(SystemSlice::from_pool(buf, bytes_per_frame))
                 } else if self.shared {
                     // M180: hand the frame out as Arc-shared bytes with a
@@ -239,10 +238,8 @@ impl SourceLoop for VideoTestSrc {
                     self.emitted_frames.push(buf.to_vec());
                     let backing: Arc<[u8]> = Arc::from(buf);
                     self.emitted_ptrs.push(backing.as_ptr() as usize);
-                    let view = TensorView::contiguous(
-                        TensorDType::U8,
-                        &[self.height, self.width, 4],
-                    );
+                    let view =
+                        TensorView::contiguous(TensorDType::U8, &[self.height, self.width, 4]);
                     MemoryDomain::SystemView(SystemView::new(backing, view))
                 } else {
                     let mut buf = vec![0u8; bytes_per_frame].into_boxed_slice();
@@ -367,13 +364,21 @@ static VIDEOTESTSRC_PROPS: &[PropertySpec] = &[
     PropertySpec::new("pattern", PropKind::Str, "drawn pattern")
         .with_enum_values("gradient | snow | bar | smpte | checkers-8 | ball | zone-plate")
         .with_default("smpte"),
-    PropertySpec::new("num-buffers", PropKind::Int, "frames to emit then EOS (-1 = forever)")
-        .with_range("-1", "9223372036854775807")
-        .with_default("-1"),
+    PropertySpec::new(
+        "num-buffers",
+        PropKind::Int,
+        "frames to emit then EOS (-1 = forever)",
+    )
+    .with_range("-1", "9223372036854775807")
+    .with_default("-1"),
     PropertySpec::new("width", PropKind::Uint, "frame width in pixels").with_default("320"),
     PropertySpec::new("height", PropKind::Uint, "frame height in pixels").with_default("240"),
-    PropertySpec::new("framerate", PropKind::Fraction, "frames per second (e.g. 30/1)")
-        .with_default("30/1"),
+    PropertySpec::new(
+        "framerate",
+        PropKind::Fraction,
+        "frames per second (e.g. 30/1)",
+    )
+    .with_default("30/1"),
 ];
 
 /// Parse a `pattern` property string to a [`Pattern`]. Canonical names match
@@ -421,7 +426,8 @@ fn fill_pattern(pattern: Pattern, buf: &mut [u8], width: u32, seq: u64) {
         Pattern::Snow => {
             for (p, px) in buf.chunks_exact_mut(4).enumerate() {
                 // Cheap integer hash, reseeded per frame via `seq`.
-                let mut h = (p as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ seq.wrapping_mul(0x2545_F491_4F6C_DD1D);
+                let mut h = (p as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                    ^ seq.wrapping_mul(0x2545_F491_4F6C_DD1D);
                 h ^= h >> 29;
                 h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
                 h ^= h >> 32;
@@ -478,7 +484,11 @@ fn fill_pattern(pattern: Pattern, buf: &mut [u8], width: u32, seq: u64) {
             let square = (w / 8).max(1);
             for (p, px) in buf.chunks_exact_mut(4).enumerate() {
                 let (x, y) = (p % w, p / w);
-                let v = if ((x / square) + (y / square)) & 1 == 0 { 255 } else { 0 };
+                let v = if ((x / square) + (y / square)) & 1 == 0 {
+                    255
+                } else {
+                    0
+                };
                 px[0] = v;
                 px[1] = v;
                 px[2] = v;
@@ -579,7 +589,10 @@ mod tests {
             fill_pattern(pattern, &mut b, W, 1);
             assert_ne!(a, b, "{pattern:?} must animate between consecutive frames");
             // Alpha stays opaque so the content survives a compositor blend.
-            assert!(a.chunks_exact(4).all(|px| px[3] == 255), "{pattern:?} opaque");
+            assert!(
+                a.chunks_exact(4).all(|px| px[3] == 255),
+                "{pattern:?} opaque"
+            );
         }
     }
 
@@ -604,7 +617,10 @@ mod tests {
             fill_pattern(pattern, &mut a, W, 0);
             fill_pattern(pattern, &mut b, W, 1);
             assert_ne!(a, b, "{pattern:?} must animate between consecutive frames");
-            assert!(a.chunks_exact(4).all(|px| px[3] == 255), "{pattern:?} opaque");
+            assert!(
+                a.chunks_exact(4).all(|px| px[3] == 255),
+                "{pattern:?} opaque"
+            );
         }
     }
 
@@ -617,8 +633,15 @@ mod tests {
         let mut buf = vec![0u8; (N * N * 4) as usize];
         fill_pattern(Pattern::ZonePlate, &mut buf, N, 0);
         let levels: std::collections::HashSet<u8> = buf.chunks_exact(4).map(|px| px[0]).collect();
-        assert!(levels.len() > 16, "sinusoid should span many grey levels, got {}", levels.len());
-        assert!(levels.iter().any(|&v| (40..=215).contains(&v)), "has mid-tones, not just 0/255");
+        assert!(
+            levels.len() > 16,
+            "sinusoid should span many grey levels, got {}",
+            levels.len()
+        );
+        assert!(
+            levels.iter().any(|&v| (40..=215).contains(&v)),
+            "has mid-tones, not just 0/255"
+        );
         // centre pixel: d2 = 0 -> sin(0) = 0 -> mid-grey.
         let c = ((N / 2) * N + N / 2) as usize * 4;
         assert_eq!(buf[c], 128, "centre is mid-grey");

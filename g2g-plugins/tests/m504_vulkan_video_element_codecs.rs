@@ -8,7 +8,10 @@
 //! in, `RawVideo{Nv12}` system frames out -- and asserts one NV12 frame per
 //! coded picture with real content plus the leading output `CapsChanged`. Runs
 //! on the RTX 3060; skips per codec if the GPU lacks that decode profile.
-#![cfg(all(any(target_os = "linux", target_os = "windows"), feature = "vulkan-video"))]
+#![cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    feature = "vulkan-video"
+))]
 
 use std::future::Future;
 use std::pin::Pin;
@@ -18,7 +21,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::block_on;
 use g2g_core::{
     AsyncElement, Caps, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket,
-    PushOutcome, RawVideoFormat, Rate, VideoCodec,
+    PushOutcome, Rate, RawVideoFormat, VideoCodec,
 };
 use g2g_plugins::vulkanvideo::{
     open_av1_decode_device, open_h265_decode_device, VulkanVideoDec, VulkanVideoError,
@@ -47,7 +50,10 @@ impl OutputSink for RecordingSink {
 fn au_frame(bytes: &[u8]) -> Frame {
     Frame {
         domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.to_vec().into_boxed_slice())),
-        timing: FrameTiming { pts_ns: 0, ..Default::default() },
+        timing: FrameTiming {
+            pts_ns: 0,
+            ..Default::default()
+        },
         sequence: 0,
         meta: Default::default(),
     }
@@ -64,7 +70,8 @@ fn drive_codec(codec: VideoCodec, clip: &[u8]) {
         height: Dim::Fixed(480),
         framerate: Rate::Fixed(30 << 16),
     };
-    dec.configure_pipeline(&in_caps).expect("configure opens the decode device");
+    dec.configure_pipeline(&in_caps)
+        .expect("configure opens the decode device");
 
     let mut sink = RecordingSink::default();
     block_on(dec.process(PipelinePacket::DataFrame(au_frame(clip)), &mut sink))
@@ -100,7 +107,11 @@ fn drive_codec(codec: VideoCodec, clip: &[u8]) {
             _ => None,
         })
         .collect();
-    assert_eq!(frames.len(), 10, "{codec:?}: one NV12 frame per coded picture");
+    assert_eq!(
+        frames.len(),
+        10,
+        "{codec:?}: one NV12 frame per coded picture"
+    );
 
     let nv12_len = 640 * 480 * 3 / 2;
     for (i, f) in frames.iter().enumerate() {
@@ -108,13 +119,23 @@ fn drive_codec(codec: VideoCodec, clip: &[u8]) {
             panic!("{codec:?} frame {i} is not system memory");
         };
         let bytes = slice.as_slice();
-        assert_eq!(bytes.len(), nv12_len, "{codec:?} frame {i} is a full NV12 buffer");
+        assert_eq!(
+            bytes.len(),
+            nv12_len,
+            "{codec:?} frame {i} is a full NV12 buffer"
+        );
         let luma = &bytes[..640 * 480];
         let min = *luma.iter().min().unwrap();
         let max = *luma.iter().max().unwrap();
-        assert!(max > min, "{codec:?} frame {i} luma is uniform ({min}=={max}); no real content");
+        assert!(
+            max > min,
+            "{codec:?} frame {i} luma is uniform ({min}=={max}); no real content"
+        );
     }
-    eprintln!("VulkanVideoDec ({codec:?}) emitted {} NV12 frames (640x480)", frames.len());
+    eprintln!(
+        "VulkanVideoDec ({codec:?}) emitted {} NV12 frames (640x480)",
+        frames.len()
+    );
 }
 
 /// One test drives both codecs sequentially: creating Vulkan devices in parallel

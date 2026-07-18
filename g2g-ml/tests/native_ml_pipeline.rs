@@ -58,7 +58,11 @@ async fn native_ml_pipeline_negotiates_and_runs_on_gpu() {
         .await
         .expect("RGBA -> NV12 -> scale -> GPU preprocess -> tensor inference negotiates and flows");
 
-    assert_eq!(sink.received(), 3, "every frame reaches the inference output");
+    assert_eq!(
+        sink.received(),
+        3,
+        "every frame reaches the inference output"
+    );
     assert!(sink.eos_seen());
     let changes = sink.caps_changes();
     assert!(

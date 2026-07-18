@@ -55,17 +55,26 @@ pub struct PadTemplate {
 impl PadTemplate {
     /// A sink pad accepting the given concrete caps set.
     pub fn sink(caps: CapsSet) -> Self {
-        Self { direction: PadDirection::Sink, caps: PadCaps::Fixed(caps) }
+        Self {
+            direction: PadDirection::Sink,
+            caps: PadCaps::Fixed(caps),
+        }
     }
 
     /// A source pad producing the given concrete caps set.
     pub fn source(caps: CapsSet) -> Self {
-        Self { direction: PadDirection::Source, caps: PadCaps::Fixed(caps) }
+        Self {
+            direction: PadDirection::Source,
+            caps: PadCaps::Fixed(caps),
+        }
     }
 
     /// A sink pad accepting any caps (wildcard).
     pub fn sink_any() -> Self {
-        Self { direction: PadDirection::Sink, caps: PadCaps::Any }
+        Self {
+            direction: PadDirection::Sink,
+            caps: PadCaps::Any,
+        }
     }
 
     /// The solver constraint this pad contributes at its end of a link: a
@@ -92,7 +101,9 @@ pub trait PadTemplates {
 
     /// The first pad template in the given direction, if any.
     fn pad_template(direction: PadDirection) -> Option<PadTemplate> {
-        Self::pad_templates().into_iter().find(|t| t.direction == direction)
+        Self::pad_templates()
+            .into_iter()
+            .find(|t| t.direction == direction)
     }
 }
 
@@ -129,7 +140,10 @@ where
     A: PadTemplates,
     B: PadTemplates,
 {
-    match (A::pad_template(PadDirection::Source), B::pad_template(PadDirection::Sink)) {
+    match (
+        A::pad_template(PadDirection::Source),
+        B::pad_template(PadDirection::Sink),
+    ) {
         (Some(producer), Some(consumer)) => matches!(
             pad_link(&producer, &consumer),
             Ok(_) | Err(NegotiationFailure::Unfixable { .. })
@@ -155,14 +169,21 @@ mod tests {
 
     /// A format at any geometry / framerate (a broad static template).
     fn any_geom(format: RawVideoFormat) -> Caps {
-        Caps::RawVideo { format, width: Dim::Any, height: Dim::Any, framerate: Rate::Any }
+        Caps::RawVideo {
+            format,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        }
     }
 
     /// Produces RGBA at any geometry (static superset, like `VideoTestSrc`).
     struct RgbaSource;
     impl PadTemplates for RgbaSource {
         fn pad_templates() -> Vec<PadTemplate> {
-            alloc::vec![PadTemplate::source(CapsSet::one(any_geom(RawVideoFormat::Rgba8)))]
+            alloc::vec![PadTemplate::source(CapsSet::one(any_geom(
+                RawVideoFormat::Rgba8
+            )))]
         }
     }
 
@@ -170,7 +191,9 @@ mod tests {
     struct Nv12Sink;
     impl PadTemplates for Nv12Sink {
         fn pad_templates() -> Vec<PadTemplate> {
-            alloc::vec![PadTemplate::sink(CapsSet::one(any_geom(RawVideoFormat::Nv12)))]
+            alloc::vec![PadTemplate::sink(CapsSet::one(any_geom(
+                RawVideoFormat::Nv12
+            )))]
         }
     }
 
@@ -196,7 +219,10 @@ mod tests {
         let producer = PadTemplate::source(CapsSet::one(any_geom(RawVideoFormat::Rgba8)));
         let consumer = PadTemplate::sink(CapsSet::one(any_geom(RawVideoFormat::Nv12)));
         assert!(
-            matches!(pad_link(&producer, &consumer), Err(NegotiationFailure::EmptyLink { .. })),
+            matches!(
+                pad_link(&producer, &consumer),
+                Err(NegotiationFailure::EmptyLink { .. })
+            ),
             "RGBA producer cannot feed an NV12-only sink"
         );
     }
@@ -210,9 +236,18 @@ mod tests {
 
     #[test]
     fn types_can_link_uses_each_type_template() {
-        assert!(types_can_link::<RgbaSource, AnySink>(), "RGBA source -> any sink");
-        assert!(!types_can_link::<RgbaSource, Nv12Sink>(), "RGBA source -/-> NV12 sink");
+        assert!(
+            types_can_link::<RgbaSource, AnySink>(),
+            "RGBA source -> any sink"
+        );
+        assert!(
+            !types_can_link::<RgbaSource, Nv12Sink>(),
+            "RGBA source -/-> NV12 sink"
+        );
         // A source has no sink pad, so nothing can feed into it.
-        assert!(!types_can_link::<RgbaSource, RgbaSource>(), "source has no sink pad");
+        assert!(
+            !types_can_link::<RgbaSource, RgbaSource>(),
+            "source has no sink pad"
+        );
     }
 }

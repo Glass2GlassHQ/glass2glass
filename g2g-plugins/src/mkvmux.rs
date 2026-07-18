@@ -27,8 +27,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
-    Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-    PropError, PropKind, PropValue, PropertySpec, Rate, TagList, VideoCodec,
+    Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, TagList, VideoCodec,
 };
 
 use crate::matroska::{MatroskaMuxer, MkvCodec, MkvTrackSpec};
@@ -87,20 +87,31 @@ impl MkvMux {
     }
 
     fn output_caps() -> Caps {
-        Caps::ByteStream { encoding: ByteStreamEncoding::Matroska }
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::Matroska,
+        }
     }
 
     /// The Matroska track for an input caps, or `None` if the codec is unmappable.
     fn track_spec(caps: &Caps) -> Option<MkvTrackSpec> {
         match caps {
-            Caps::CompressedVideo { codec, width, height, .. } => Some(MkvTrackSpec {
+            Caps::CompressedVideo {
+                codec,
+                width,
+                height,
+                ..
+            } => Some(MkvTrackSpec {
                 codec: video_to_mkv(*codec)?,
                 width: dim_u32(width),
                 height: dim_u32(height),
                 channels: 0,
                 sample_rate: 0,
             }),
-            Caps::Audio { format, channels, sample_rate } => Some(MkvTrackSpec {
+            Caps::Audio {
+                format,
+                channels,
+                sample_rate,
+            } => Some(MkvTrackSpec {
                 codec: audio_to_mkv(*format)?,
                 width: 0,
                 height: 0,
@@ -119,7 +130,11 @@ impl MkvMux {
             height: Dim::Any,
             framerate: Rate::Any,
         };
-        let audio = |format| Caps::Audio { format, channels: 0, sample_rate: 0 };
+        let audio = |format| Caps::Audio {
+            format,
+            channels: 0,
+            sample_rate: 0,
+        };
         Vec::from([
             video(VideoCodec::H264),
             video(VideoCodec::H265),
@@ -214,7 +229,10 @@ impl AsyncElement for MkvMux {
                     let bytes = mux.push_frame(slice.as_slice(), frame.timing.pts_ns, true);
                     let out_frame = Frame::new(
                         MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-                        FrameTiming { pts_ns: frame.timing.pts_ns, ..FrameTiming::default() },
+                        FrameTiming {
+                            pts_ns: frame.timing.pts_ns,
+                            ..FrameTiming::default()
+                        },
                         self.emitted,
                     );
                     self.emitted += 1;
@@ -233,7 +251,9 @@ impl AsyncElement for MkvMux {
                         let cues = mux.finish();
                         if !cues.is_empty() {
                             let out_frame = Frame::new(
-                                MemoryDomain::System(SystemSlice::from_boxed(cues.into_boxed_slice())),
+                                MemoryDomain::System(SystemSlice::from_boxed(
+                                    cues.into_boxed_slice(),
+                                )),
                                 FrameTiming::default(),
                                 self.emitted,
                             );
@@ -334,7 +354,10 @@ mod tests {
     fn frame(data: Vec<u8>, pts_ns: u64) -> PipelinePacket {
         PipelinePacket::DataFrame(Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-            FrameTiming { pts_ns, ..FrameTiming::default() },
+            FrameTiming {
+                pts_ns,
+                ..FrameTiming::default()
+            },
             0,
         ))
     }
@@ -356,7 +379,9 @@ mod tests {
         };
         assert!(matches!(
             f(&vp9_caps()).alternatives(),
-            [Caps::ByteStream { encoding: ByteStreamEncoding::Matroska }]
+            [Caps::ByteStream {
+                encoding: ByteStreamEncoding::Matroska
+            }]
         ));
     }
 
@@ -364,12 +389,15 @@ mod tests {
     async fn element_round_trips_tags_through_mkvdemux() {
         use g2g_core::{Bus, BusMessage, Tag, TagList};
 
-        let tags: TagList =
-            [Tag::Title("My Clip".into()), Tag::Encoder("g2g".into())].into_iter().collect();
+        let tags: TagList = [Tag::Title("My Clip".into()), Tag::Encoder("g2g".into())]
+            .into_iter()
+            .collect();
         let mut mux = MkvMux::new().with_tags(tags.clone());
         mux.configure_pipeline(&vp9_caps()).unwrap();
         let mut mkv_sink = CaptureSink::default();
-        mux.process(frame(alloc::vec![0x11, 0x22], 0), &mut mkv_sink).await.unwrap();
+        mux.process(frame(alloc::vec![0x11, 0x22], 0), &mut mkv_sink)
+            .await
+            .unwrap();
 
         let mut mkv = Vec::new();
         for f in &mkv_sink.frames {
@@ -377,14 +405,21 @@ mod tests {
         }
         let (bus, handle) = Bus::new(8);
         let mut demux = MkvDemux::new().with_stream(MkvStream::Vp9).with_bus(handle);
-        demux.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::Matroska }).unwrap();
+        demux
+            .configure_pipeline(&Caps::ByteStream {
+                encoding: ByteStreamEncoding::Matroska,
+            })
+            .unwrap();
         let mut frame_sink = CaptureSink::default();
         let mkv_frame = Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(mkv.into_boxed_slice())),
             FrameTiming::default(),
             0,
         );
-        demux.process(PipelinePacket::DataFrame(mkv_frame), &mut frame_sink).await.unwrap();
+        demux
+            .process(PipelinePacket::DataFrame(mkv_frame), &mut frame_sink)
+            .await
+            .unwrap();
 
         let mut posted = None;
         while let Some(m) = bus.try_recv() {
@@ -404,27 +439,50 @@ mod tests {
         let mut mux = MkvMux::new();
         mux.configure_pipeline(&vp9_caps()).unwrap();
         let mut mkv_sink = CaptureSink::default();
-        mux.process(frame(f0.clone(), 0), &mut mkv_sink).await.unwrap();
-        mux.process(frame(f1.clone(), 40_000_000), &mut mkv_sink).await.unwrap();
-        mux.process(PipelinePacket::Eos, &mut mkv_sink).await.unwrap();
-        assert!(!mkv_sink.eos, "EOS is forwarded by the runner's arm, not the element");
+        mux.process(frame(f0.clone(), 0), &mut mkv_sink)
+            .await
+            .unwrap();
+        mux.process(frame(f1.clone(), 40_000_000), &mut mkv_sink)
+            .await
+            .unwrap();
+        mux.process(PipelinePacket::Eos, &mut mkv_sink)
+            .await
+            .unwrap();
+        assert!(
+            !mkv_sink.eos,
+            "EOS is forwarded by the runner's arm, not the element"
+        );
 
         let mut mkv = Vec::new();
         for f in &mkv_sink.frames {
             mkv.extend_from_slice(f);
         }
         let mut demux = MkvDemux::new().with_stream(MkvStream::Vp9);
-        demux.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::Matroska }).unwrap();
+        demux
+            .configure_pipeline(&Caps::ByteStream {
+                encoding: ByteStreamEncoding::Matroska,
+            })
+            .unwrap();
         let mut frame_sink = CaptureSink::default();
         let mkv_frame = Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(mkv.into_boxed_slice())),
             FrameTiming::default(),
             0,
         );
-        demux.process(PipelinePacket::DataFrame(mkv_frame), &mut frame_sink).await.unwrap();
-        demux.process(PipelinePacket::Eos, &mut frame_sink).await.unwrap();
+        demux
+            .process(PipelinePacket::DataFrame(mkv_frame), &mut frame_sink)
+            .await
+            .unwrap();
+        demux
+            .process(PipelinePacket::Eos, &mut frame_sink)
+            .await
+            .unwrap();
 
-        assert_eq!(frame_sink.frames, alloc::vec![f0, f1], "frames recovered through mux + demux");
+        assert_eq!(
+            frame_sink.frames,
+            alloc::vec![f0, f1],
+            "frames recovered through mux + demux"
+        );
         // Two frames plus the EOS Cues index (both frames share one Cluster, so the
         // dedup-per-Cluster index holds a single CuePoint, emitted as one frame).
         assert_eq!(mux.emitted(), 3);
@@ -436,11 +494,19 @@ mod tests {
         mux.configure_pipeline(&vp9_caps()).unwrap();
         assert_eq!(mux.get_property("streamable"), Some(PropValue::Bool(true)));
         let mut sink = CaptureSink::default();
-        mux.process(frame(alloc::vec![1, 2, 3], 0), &mut sink).await.unwrap();
-        mux.process(frame(alloc::vec![4, 5, 6], 33_000_000), &mut sink).await.unwrap();
+        mux.process(frame(alloc::vec![1, 2, 3], 0), &mut sink)
+            .await
+            .unwrap();
+        mux.process(frame(alloc::vec![4, 5, 6], 33_000_000), &mut sink)
+            .await
+            .unwrap();
         mux.process(PipelinePacket::Eos, &mut sink).await.unwrap();
         // Two header+cluster frames, and no trailing Cues frame (the live mode).
-        assert_eq!(mux.emitted(), 2, "streamable mode emits no Cues index at EOS");
+        assert_eq!(
+            mux.emitted(),
+            2,
+            "streamable mode emits no Cues index at EOS"
+        );
         let all: Vec<u8> = sink.frames.concat();
         // Cues element id is 0x1C53BB6B; it must not appear in the output.
         assert!(

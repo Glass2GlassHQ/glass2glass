@@ -73,6 +73,9 @@ async fn incompatible_stacked_pin_fails_loud() {
     // Either the parse rejects the video->audio capsfilter link, or the solve
     // fails; both are acceptable "loud" outcomes.
     if let Ok(graph) = parsed {
-        assert!(run_graph(graph, &ZeroClock, 4).await.is_err(), "video->audio pin must fail");
+        assert!(
+            run_graph(graph, &ZeroClock, 4).await.is_err(),
+            "video->audio pin must fail"
+        );
     }
 }

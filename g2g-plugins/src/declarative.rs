@@ -40,9 +40,7 @@ use std::string::{String, ToString};
 use std::vec::Vec;
 
 use g2g_core::runtime::{parse_launch, GraphNode, GraphNodeRef, ParseError, Registry};
-use g2g_core::{
-    Graph, GraphError, LinkPolicy, NodeId, PadId, PropError, PropValue, PropertySpec,
-};
+use g2g_core::{Graph, GraphError, LinkPolicy, NodeId, PadId, PropError, PropValue, PropertySpec};
 use serde::{Deserialize, Serialize};
 
 /// A format-agnostic scalar property value. Deserializes the same from JSON and
@@ -153,7 +151,11 @@ pub enum SpecError {
     /// The element has no property of that name.
     UnknownProperty { node: String, key: String },
     /// A value did not parse for the property's kind, or was rejected.
-    BadValue { node: String, key: String, value: String },
+    BadValue {
+        node: String,
+        key: String,
+        value: String,
+    },
     /// An edge `policy` was not one of the [`LinkPolicy`] names.
     BadPolicy(String),
     /// Linking the nodes into the graph failed.
@@ -194,7 +196,10 @@ impl core::fmt::Display for SpecError {
                 write!(f, "node '{node}': bad value '{value}' for '{key}'")
             }
             SpecError::BadPolicy(p) => {
-                write!(f, "bad edge policy '{p}' (want block / drop-oldest / drop-newest)")
+                write!(
+                    f,
+                    "bad edge policy '{p}' (want block / drop-oldest / drop-newest)"
+                )
             }
             SpecError::Graph(e) => write!(f, "graph error: {e:?}"),
             SpecError::Deserialize(m) => write!(f, "deserialize error: {m}"),
@@ -222,8 +227,11 @@ fn resolved_name(node: &NodeSpec) -> Result<String, SpecError> {
 /// shorthand folded in as a `caps` property (last, so it wins over an explicit
 /// `props.caps`).
 fn effective_props(node: &NodeSpec) -> Vec<(String, ScalarVal)> {
-    let mut kv: Vec<(String, ScalarVal)> =
-        node.props.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    let mut kv: Vec<(String, ScalarVal)> = node
+        .props
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
     if let Some(caps) = &node.caps {
         kv.retain(|(k, _)| k != "caps");
         kv.push(("caps".to_string(), ScalarVal::Str(caps.clone())));
@@ -245,7 +253,10 @@ fn apply_props(
         let kind = specs
             .iter()
             .find(|s| s.name == key)
-            .ok_or_else(|| SpecError::UnknownProperty { node: node_id.into(), key: key.clone() })?
+            .ok_or_else(|| SpecError::UnknownProperty {
+                node: node_id.into(),
+                key: key.clone(),
+            })?
             .kind;
         let text = val.to_prop_text();
         let parsed = PropValue::parse(kind, &text).map_err(|_| SpecError::BadValue {
@@ -337,14 +348,18 @@ pub fn build_spec(registry: &Registry, spec: &GraphSpec) -> Result<Graph<GraphNo
                 .ok_or_else(|| SpecError::NotAMuxer(name.clone()))?;
             let specs = mux.properties();
             apply_props(specs, &node.id, &kv, |k, v| mux.set_property(k, v))?;
-            graph.add_muxer(GraphNodeRef::Muxer(mux), in_deg[i] as u8).node()
+            graph
+                .add_muxer(GraphNodeRef::Muxer(mux), in_deg[i] as u8)
+                .node()
         } else if registry.is_demux(&name) {
             let mut demux = registry
                 .make_demux(&name, out_deg[i])
                 .ok_or_else(|| SpecError::UnknownElement(name.clone()))?;
             let specs = demux.properties();
             apply_props(specs, &node.id, &kv, |k, v| demux.set_property(k, v))?;
-            graph.add_demux(GraphNodeRef::Demux(demux), out_deg[i] as u8).node()
+            graph
+                .add_demux(GraphNodeRef::Demux(demux), out_deg[i] as u8)
+                .node()
         } else if out_deg[i] == 0 {
             let mut el = registry
                 .make_element(&name)
@@ -385,15 +400,27 @@ pub fn build_spec(registry: &Registry, spec: &GraphSpec) -> Result<Graph<GraphNo
             PadId { node: tee, index }
         } else if names[s] == "tee" || registry.is_demux(&names[s]) {
             let index = edge.from_pad.unwrap_or_else(|| next(&mut tee_next[s]));
-            PadId { node: node_of[s], index }
+            PadId {
+                node: node_of[s],
+                index,
+            }
         } else {
-            PadId { node: node_of[s], index: edge.from_pad.unwrap_or(0) }
+            PadId {
+                node: node_of[s],
+                index: edge.from_pad.unwrap_or(0),
+            }
         };
         let dst = if in_deg[d] > 1 {
             let index = edge.to_pad.unwrap_or_else(|| next(&mut mux_next[d]));
-            PadId { node: node_of[d], index }
+            PadId {
+                node: node_of[d],
+                index,
+            }
         } else {
-            PadId { node: node_of[d], index: edge.to_pad.unwrap_or(0) }
+            PadId {
+                node: node_of[d],
+                index: edge.to_pad.unwrap_or(0),
+            }
         };
         graph.link_full(src, dst, parse_policy(&edge.policy)?, edge.capacity)?;
     }
@@ -519,7 +546,10 @@ mod tests {
             "edges": [ { "from": "src", "to": "sink" } ]
         }"#;
         let reg = default_registry();
-        assert!(matches!(from_json(&reg, json), Err(SpecError::UnknownSource(_))));
+        assert!(matches!(
+            from_json(&reg, json),
+            Err(SpecError::UnknownSource(_))
+        ));
     }
 
     #[test]
@@ -532,6 +562,9 @@ mod tests {
             "edges": [ { "from": "src", "to": "sink" } ]
         }"#;
         let reg = default_registry();
-        assert!(matches!(from_json(&reg, json), Err(SpecError::BadValue { .. })));
+        assert!(matches!(
+            from_json(&reg, json),
+            Err(SpecError::BadValue { .. })
+        ));
     }
 }

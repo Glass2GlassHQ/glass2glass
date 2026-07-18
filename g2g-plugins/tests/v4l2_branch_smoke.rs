@@ -28,10 +28,10 @@ use g2g_core::{
     PipelineClock, PipelinePacket, RawVideoFormat,
 };
 use g2g_plugins::compositor::{Compositor, CompositorPad};
+use g2g_plugins::v4l2src::V4l2Src;
 use g2g_plugins::videoconvert::VideoConvert;
 use g2g_plugins::videoscale::VideoScale;
 use g2g_plugins::videotestsrc::{Pattern, VideoTestSrc};
-use g2g_plugins::v4l2src::V4l2Src;
 
 struct ZeroClock;
 impl PipelineClock for ZeroClock {
@@ -48,7 +48,8 @@ struct Recorder {
 }
 
 impl AsyncElement for Recorder {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -109,7 +110,9 @@ async fn webcam_branch_delivers_distinct_frames() {
     eprintln!("webcam branch: {device}, {frames} frames");
 
     let means = Arc::new(Mutex::new(Vec::new()));
-    let recorder = Recorder { means: means.clone() };
+    let recorder = Recorder {
+        means: means.clone(),
+    };
 
     // G2G_STAGES: "raw" (v4l2 only), "convert" (+RGBA), or "full" (+scale).
     let stages = std::env::var("G2G_STAGES").unwrap_or_else(|_| "full".to_string());
@@ -117,7 +120,10 @@ async fn webcam_branch_delivers_distinct_frames() {
 
     let mut g: Graph<GraphNode> = Graph::new();
     let cam = g.add_source(GraphNode::source(
-        V4l2Src::new(device).with_size(640, 480).with_fps(30).with_frame_limit(frames),
+        V4l2Src::new(device)
+            .with_size(640, 480)
+            .with_fps(30)
+            .with_frame_limit(frames),
     ));
     let sink = g.add_sink(GraphNode::element(recorder));
     match stages.as_str() {
@@ -125,12 +131,14 @@ async fn webcam_branch_delivers_distinct_frames() {
             g.link(cam, sink).unwrap();
         }
         "convert" => {
-            let rgba = g.add_transform(GraphNode::element(VideoConvert::new(RawVideoFormat::Rgba8)));
+            let rgba =
+                g.add_transform(GraphNode::element(VideoConvert::new(RawVideoFormat::Rgba8)));
             g.link(cam, rgba).unwrap();
             g.link(rgba, sink).unwrap();
         }
         _ => {
-            let rgba = g.add_transform(GraphNode::element(VideoConvert::new(RawVideoFormat::Rgba8)));
+            let rgba =
+                g.add_transform(GraphNode::element(VideoConvert::new(RawVideoFormat::Rgba8)));
             let small = g.add_transform(GraphNode::element(VideoScale::new(320, 240)));
             g.link(cam, rgba).unwrap();
             g.link(rgba, small).unwrap();
@@ -148,13 +156,31 @@ async fn webcam_branch_delivers_distinct_frames() {
 
     let means = means.lock().unwrap();
     let only_means: Vec<u32> = means.iter().map(|&(m, _)| m).take(20).collect();
-    let distinct_hashes = means.iter().map(|&(_, h)| h).collect::<std::collections::HashSet<_>>().len();
+    let distinct_hashes = means
+        .iter()
+        .map(|&(_, h)| h)
+        .collect::<std::collections::HashSet<_>>()
+        .len();
     eprintln!("delivered {} frames; means: {only_means:?}", means.len());
-    eprintln!("distinct frame contents: {distinct_hashes} of {}", means.len());
-    eprintln!("stats: emitted={} consumed={}", stats.frames_emitted, stats.frames_consumed);
+    eprintln!(
+        "distinct frame contents: {distinct_hashes} of {}",
+        means.len()
+    );
+    eprintln!(
+        "stats: emitted={} consumed={}",
+        stats.frames_emitted, stats.frames_consumed
+    );
 
-    assert!(means.len() as u64 >= frames / 2, "branch stalled: only {} of {frames} frames", means.len());
-    assert!(distinct_hashes > 1, "every frame byte-identical across {} frames (repeated buffer)", means.len());
+    assert!(
+        means.len() as u64 >= frames / 2,
+        "branch stalled: only {} of {frames} frames",
+        means.len()
+    );
+    assert!(
+        distinct_hashes > 1,
+        "every frame byte-identical across {} frames (repeated buffer)",
+        means.len()
+    );
 }
 
 /// Hashes a rectangular sub-region (the PiP inset) of each RGBA output frame, so
@@ -171,7 +197,8 @@ struct InsetRecorder {
 }
 
 impl AsyncElement for InsetRecorder {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -255,7 +282,10 @@ async fn compositor_inset_animates_with_live_webcam() {
         VideoTestSrc::new(CW, CH, 30, frames).with_pattern(Pattern::MovingBar),
     ));
     let cam = g.add_source(GraphNode::source(
-        V4l2Src::new(device).with_size(640, 480).with_fps(30).with_frame_limit(frames),
+        V4l2Src::new(device)
+            .with_size(640, 480)
+            .with_fps(30)
+            .with_frame_limit(frames),
     ));
     let rgba = g.add_transform(GraphNode::element(VideoConvert::new(RawVideoFormat::Rgba8)));
     let small = g.add_transform(GraphNode::element(VideoScale::new(IW, IH)));
@@ -263,7 +293,10 @@ async fn compositor_inset_animates_with_live_webcam() {
         GraphNode::muxer(Compositor::new(
             CW,
             CH,
-            vec![CompositorPad::at(0, 0), CompositorPad::at(ix, iy).with_zorder(1)],
+            vec![
+                CompositorPad::at(0, 0),
+                CompositorPad::at(ix, iy).with_zorder(1),
+            ],
         )),
         2,
     );
@@ -283,12 +316,19 @@ async fn compositor_inset_animates_with_live_webcam() {
     .expect("compositor PiP DAG should run");
 
     let hashes = hashes.lock().unwrap();
-    let distinct = hashes.iter().collect::<std::collections::HashSet<_>>().len();
+    let distinct = hashes
+        .iter()
+        .collect::<std::collections::HashSet<_>>()
+        .len();
     eprintln!(
         "composited {} frames; distinct inset contents: {distinct}; emitted={} consumed={}",
         hashes.len(),
         stats.frames_emitted,
         stats.frames_consumed,
     );
-    assert!(distinct > 1, "inset frozen: {distinct} distinct over {} frames", hashes.len());
+    assert!(
+        distinct > 1,
+        "inset frozen: {distinct} distinct over {} frames",
+        hashes.len()
+    );
 }

@@ -21,7 +21,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_source_router_dynamic, SourceLoop};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, MemoryDomain,
-    OutputSink, PipelinePacket, RawVideoFormat, Rate,
+    OutputSink, PipelinePacket, Rate, RawVideoFormat,
 };
 
 fn caps() -> Caps {
@@ -131,7 +131,10 @@ impl AsyncElement for RecordSink {
 #[tokio::test]
 async fn runtime_branches_split_the_stream_and_get_sticky_caps() {
     const N: u64 = 8;
-    let mut source = CountingSource { n: N, configured: false };
+    let mut source = CountingSource {
+        n: N,
+        configured: false,
+    };
 
     let f0 = Arc::new(AtomicUsize::new(0));
     let c0 = Arc::new(AtomicUsize::new(0));
@@ -143,12 +146,16 @@ async fn runtime_branches_split_the_stream_and_get_sticky_caps() {
     // Request two output pads at runtime, before the run is driven: they are
     // queued on the control channel and folded in on the first router poll.
     handle
-        .add_branch(Box::new(RecordSink { frames: f0.clone(), caps_changes: c0.clone() })
-            as Box<dyn DynAsyncElement>)
+        .add_branch(Box::new(RecordSink {
+            frames: f0.clone(),
+            caps_changes: c0.clone(),
+        }) as Box<dyn DynAsyncElement>)
         .expect("add branch 0");
     handle
-        .add_branch(Box::new(RecordSink { frames: f1.clone(), caps_changes: c1.clone() })
-            as Box<dyn DynAsyncElement>)
+        .add_branch(Box::new(RecordSink {
+            frames: f1.clone(),
+            caps_changes: c1.clone(),
+        }) as Box<dyn DynAsyncElement>)
         .expect("add branch 1");
     // Dropping the handle closes the control channel so the router stops
     // watching for new branches; the two already queued still attach.
@@ -157,35 +164,69 @@ async fn runtime_branches_split_the_stream_and_get_sticky_caps() {
     let stats = run.await.expect("dynamic fan-out run");
 
     let (got0, got1) = (f0.load(Ordering::Relaxed), f1.load(Ordering::Relaxed));
-    eprintln!("M310: branch0={got0} frames, branch1={got1} frames; emitted={}", stats.frames_emitted);
+    eprintln!(
+        "M310: branch0={got0} frames, branch1={got1} frames; emitted={}",
+        stats.frames_emitted
+    );
 
     // The source emitted N; every frame reached exactly one branch (routed).
     assert_eq!(stats.frames_emitted, N, "source emitted all frames");
-    assert_eq!(got0 + got1, N as usize, "every frame routed to exactly one branch");
-    assert_eq!(stats.frames_consumed, N, "run stats account for all consumed frames");
+    assert_eq!(
+        got0 + got1,
+        N as usize,
+        "every frame routed to exactly one branch"
+    );
+    assert_eq!(
+        stats.frames_consumed, N,
+        "run stats account for all consumed frames"
+    );
     // Both runtime-attached branches actually participated and were configured
     // by the replayed sticky caps.
-    assert!(got0 > 0 && got1 > 0, "both runtime branches received frames ({got0}, {got1})");
-    assert_eq!(c0.load(Ordering::Relaxed), 1, "branch 0 saw the sticky caps once");
-    assert_eq!(c1.load(Ordering::Relaxed), 1, "branch 1 saw the sticky caps once");
+    assert!(
+        got0 > 0 && got1 > 0,
+        "both runtime branches received frames ({got0}, {got1})"
+    );
+    assert_eq!(
+        c0.load(Ordering::Relaxed),
+        1,
+        "branch 0 saw the sticky caps once"
+    );
+    assert_eq!(
+        c1.load(Ordering::Relaxed),
+        1,
+        "branch 1 saw the sticky caps once"
+    );
 }
 
 #[tokio::test]
 async fn single_runtime_branch_receives_the_whole_stream() {
     const N: u64 = 5;
-    let mut source = CountingSource { n: N, configured: false };
+    let mut source = CountingSource {
+        n: N,
+        configured: false,
+    };
     let frames = Arc::new(AtomicUsize::new(0));
     let caps_changes = Arc::new(AtomicUsize::new(0));
 
     let (handle, run) = run_source_router_dynamic(&mut source, 8);
     handle
-        .add_branch(Box::new(RecordSink { frames: frames.clone(), caps_changes: caps_changes.clone() })
-            as Box<dyn DynAsyncElement>)
+        .add_branch(Box::new(RecordSink {
+            frames: frames.clone(),
+            caps_changes: caps_changes.clone(),
+        }) as Box<dyn DynAsyncElement>)
         .expect("add branch");
     drop(handle);
 
     let stats = run.await.expect("run");
-    assert_eq!(frames.load(Ordering::Relaxed), N as usize, "single branch gets every frame");
+    assert_eq!(
+        frames.load(Ordering::Relaxed),
+        N as usize,
+        "single branch gets every frame"
+    );
     assert_eq!(stats.frames_consumed, N);
-    assert_eq!(caps_changes.load(Ordering::Relaxed), 1, "sticky caps delivered once");
+    assert_eq!(
+        caps_changes.load(Ordering::Relaxed),
+        1,
+        "sticky caps delivered once"
+    );
 }

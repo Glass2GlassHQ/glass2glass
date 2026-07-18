@@ -73,8 +73,9 @@ async fn timeline_sync_roundtrip_multi_frame() {
     for n in 0..FRAMES {
         // Distinct pattern per frame so a missed wait (reading a stale / torn
         // buffer) would surface as a mismatch.
-        let pattern: Vec<u8> =
-            (0..SIZE).map(|i| (i.wrapping_mul(7).wrapping_add(n as usize * 101)) as u8).collect();
+        let pattern: Vec<u8> = (0..SIZE)
+            .map(|i| (i.wrapping_mul(7).wrapping_add(n as usize * 101)) as u8)
+            .collect();
         let src = dev.create_buffer(&wgpu::BufferDescriptor {
             label: Some("export-src"),
             size: SIZE as u64,
@@ -90,7 +91,9 @@ async fn timeline_sync_roundtrip_multi_frame() {
             meta: Default::default(),
         };
         let mut cap = CaptureSink::default();
-        exp.process(PipelinePacket::DataFrame(frame_in), &mut cap).await.expect("export process");
+        exp.process(PipelinePacket::DataFrame(frame_in), &mut cap)
+            .await
+            .expect("export process");
         let dmabuf_frame = cap.frame.take().expect("export emitted a frame");
 
         // The emitted dma-buf carries the timeline semaphore fd + a monotonic value.
@@ -98,11 +101,18 @@ async fn timeline_sync_roundtrip_multi_frame() {
             panic!("export produced a dma-buf");
         };
         assert!(db.sync_fd().is_some(), "frame {n} carries a sync fd");
-        assert_eq!(db.sync_value(), Some(n + 1), "monotonic timeline value (1-based)");
+        assert_eq!(
+            db.sync_value(),
+            Some(n + 1),
+            "monotonic timeline value (1-based)"
+        );
 
         // Consumer imports + host-waits the value before handing the buffer on.
         let mut cap2 = CaptureSink::default();
-        match imp.process(PipelinePacket::DataFrame(dmabuf_frame), &mut cap2).await {
+        match imp
+            .process(PipelinePacket::DataFrame(dmabuf_frame), &mut cap2)
+            .await
+        {
             Ok(()) => {}
             Err(G2gError::UnsupportedDomain) => {
                 eprintln!("SKIP: dma-buf import unsupported on this driver (export + sync worked)");
@@ -139,13 +149,24 @@ async fn timeline_sync_roundtrip_multi_frame() {
         slice.map_async(wgpu::MapMode::Read, move |r| {
             let _ = tx.send(r);
         });
-        idev.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).expect("poll");
+        idev.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        })
+        .expect("poll");
         rx.recv().expect("readback channel").expect("map readback");
         let got = slice.get_mapped_range().to_vec();
-        assert_eq!(got, pattern, "frame {n}: pixels exact through timeline-synced dma-buf handoff");
+        assert_eq!(
+            got, pattern,
+            "frame {n}: pixels exact through timeline-synced dma-buf handoff"
+        );
     }
 
-    assert_eq!(exp.exported(), FRAMES, "all frames exported without a producer stall");
+    assert_eq!(
+        exp.exported(),
+        FRAMES,
+        "all frames exported without a producer stall"
+    );
     eprintln!(
         "PASS: {FRAMES} frames GPU->dma-buf->GPU across devices, ordered by an exported timeline \
          semaphore (producer never called poll(Wait)); every frame byte-exact"

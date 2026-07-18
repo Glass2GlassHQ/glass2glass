@@ -16,12 +16,12 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::caps::{Caps, CapsSet, PassthroughFields};
-use crate::runtime::passthrough::{couple_passthrough_derived, discover_passthrough};
-#[cfg(feature = "std")]
-use crate::runtime::passthrough::{project_passthrough, project_passthrough_derived};
 use crate::format_element::CapsConstraint;
 use crate::graph::{NodeId, NodeKind, ValidatedGraph};
 use crate::log::{self, LogLevel, Target, CAPS_CATEGORY};
+use crate::runtime::passthrough::{couple_passthrough_derived, discover_passthrough};
+#[cfg(feature = "std")]
+use crate::runtime::passthrough::{project_passthrough, project_passthrough_derived};
 
 /// Per-link assignment produced by the solver: one fixated `Caps` per
 /// link between adjacent elements. For an `N`-element pipeline this is
@@ -35,24 +35,16 @@ pub type LinkSolution = Vec<Caps>;
 pub enum NegotiationFailure {
     /// Adjacent elements have no overlap on the link between them, or a
     /// constraint update emptied that link.
-    EmptyLink {
-        upstream: usize,
-        downstream: usize,
-    },
+    EmptyLink { upstream: usize, downstream: usize },
     /// The constraint list has fewer than two elements; nothing to
     /// negotiate.
     Degenerate,
     /// First element does not produce (or last does not accept), so the
     /// chain has no source or no sink.
-    EndpointShapeMismatch {
-        index: usize,
-    },
+    EndpointShapeMismatch { index: usize },
     /// A link's candidate set survived narrowing but cannot be reduced
     /// to a single `Caps` (every alternative still has `Any` fields).
-    Unfixable {
-        upstream: usize,
-        downstream: usize,
-    },
+    Unfixable { upstream: usize, downstream: usize },
     /// Reserved for the non-linear solver. The linear solver never
     /// returns this variant.
     Cyclic,
@@ -158,7 +150,10 @@ pub fn solve_linear<'a>(
             downstream: li + 1,
         })?;
         if set.is_empty() {
-            return Err(NegotiationFailure::EmptyLink { upstream: li, downstream: li + 1 });
+            return Err(NegotiationFailure::EmptyLink {
+                upstream: li,
+                downstream: li + 1,
+            });
         }
         let fixed = set.fixate().ok_or(NegotiationFailure::Unfixable {
             upstream: li,
@@ -212,9 +207,17 @@ fn solve_legacy_cascade(
     // the legacy cascade leaves that out so chains containing
     // workaround #2 sinks (waylandsink/kmssink with their
     // pass-through-then-defer pattern) keep working unchanged.
-    for (i, c) in constraints.iter().enumerate().skip(1).take(n.saturating_sub(2)) {
+    for (i, c) in constraints
+        .iter()
+        .enumerate()
+        .skip(1)
+        .take(n.saturating_sub(2))
+    {
         match c {
-            CapsConstraint::LegacyTransform { intercept, propose_output: _ } => {
+            CapsConstraint::LegacyTransform {
+                intercept,
+                propose_output: _,
+            } => {
                 current = intercept(&current).map_err(|_| NegotiationFailure::EmptyLink {
                     upstream: i - 1,
                     downstream: i,
@@ -331,7 +334,10 @@ fn solve_mixed_cascade(
         _ => unreachable!("checked above"),
     };
     if narrowed.is_empty() {
-        return Err(NegotiationFailure::EmptyLink { upstream: n - 2, downstream: n - 1 });
+        return Err(NegotiationFailure::EmptyLink {
+            upstream: n - 2,
+            downstream: n - 1,
+        });
     }
     link_sets[final_idx] = narrowed;
 
@@ -356,7 +362,10 @@ fn forward_propagate(
         CapsConstraint::Identity(s) => {
             let r = upstream.intersect(s);
             if r.is_empty() {
-                return Err(NegotiationFailure::EmptyLink { upstream: i - 1, downstream: i });
+                return Err(NegotiationFailure::EmptyLink {
+                    upstream: i - 1,
+                    downstream: i,
+                });
             }
             Ok(r)
         }
@@ -371,7 +380,10 @@ fn forward_propagate(
             if out.is_empty() {
                 // No input alternative matched any mapping row: the input link
                 // (between elements i-1 and i) is the conflict, same as Identity.
-                return Err(NegotiationFailure::EmptyLink { upstream: i - 1, downstream: i });
+                return Err(NegotiationFailure::EmptyLink {
+                    upstream: i - 1,
+                    downstream: i,
+                });
             }
             Ok(out)
         }
@@ -393,11 +405,17 @@ fn forward_propagate(
             }
             let r = f(&fixed);
             if r.is_empty() {
-                return Err(NegotiationFailure::EmptyLink { upstream: i, downstream: i + 1 });
+                return Err(NegotiationFailure::EmptyLink {
+                    upstream: i,
+                    downstream: i + 1,
+                });
             }
             Ok(r)
         }
-        CapsConstraint::LegacyTransform { intercept, propose_output } => {
+        CapsConstraint::LegacyTransform {
+            intercept,
+            propose_output,
+        } => {
             let fixed = upstream.fixate().ok_or(NegotiationFailure::Unfixable {
                 upstream: i - 1,
                 downstream: i,
@@ -717,7 +735,10 @@ fn apply_constraint(
                 }
             }
         }
-        CapsConstraint::DerivedCoupled { derive, passthrough } => {
+        CapsConstraint::DerivedCoupled {
+            derive,
+            passthrough,
+        } => {
             let (Some(ii), Some(oi)) = (in_idx, out_idx) else {
                 return Err(NegotiationFailure::EndpointShapeMismatch { index: i });
             };
@@ -726,7 +747,10 @@ fn apply_constraint(
             if let Some(input_set) = &links[ii] {
                 let derived = forward_derived_union(derive.as_ref(), input_set);
                 if derived.is_empty() {
-                    return Err(NegotiationFailure::EmptyLink { upstream: i, downstream: i + 1 });
+                    return Err(NegotiationFailure::EmptyLink {
+                        upstream: i,
+                        downstream: i + 1,
+                    });
                 }
                 narrow(links, oi, &derived, i, i + 1)?;
             }
@@ -799,7 +823,10 @@ fn narrow(
         None => contrib.clone(),
     };
     if next.is_empty() {
-        return Err(NegotiationFailure::EmptyLink { upstream, downstream });
+        return Err(NegotiationFailure::EmptyLink {
+            upstream,
+            downstream,
+        });
     }
     links[idx] = Some(next);
     Ok(())
@@ -838,7 +865,10 @@ pub enum NodeConstraint<'a> {
     /// against its codec at startup. Built from a demux element that declares
     /// per-port caps (`MultiOutputElement::port_output_caps`); a broadcast fan-out
     /// (declaring none) stays a plain tee.
-    Demux { input: CapsConstraint<'a>, ports: Vec<CapsConstraint<'a>> },
+    Demux {
+        input: CapsConstraint<'a>,
+        ports: Vec<CapsConstraint<'a>>,
+    },
 }
 
 /// Solve caps for an arbitrary DAG (DESIGN_TODO "DAG runner" D2). Generalizes
@@ -893,26 +923,35 @@ pub fn solve_graph_labeled<E>(
     // `CapsMismatch` reads as "these two can't agree, here's what each wanted".
     // Emitted at error level (visible in any run with a sink, not just a trace),
     // but only formatted on the rare failure path.
-    let report = |f: &NegotiationFailure, edges: &[Option<CapsSet>]| {
-        match f {
-            NegotiationFailure::EmptyLink { upstream, downstream } => {
-                let (up, down) = (NodeId(*upstream as u32), NodeId(*downstream as u32));
-                crate::g2g_error!(t, "no caps overlap between {} and {}", label(up), label(down));
-                for (id, slot) in edges.iter().enumerate() {
-                    let e = graph.edge(id);
-                    if [e.src.node, e.dst.node].iter().any(|&x| x == up || x == down) {
-                        crate::g2g_error!(
-                            t,
-                            "  {} -> {}: {}",
-                            label(e.src.node),
-                            label(e.dst.node),
-                            fmt_set_opt(slot)
-                        );
-                    }
+    let report = |f: &NegotiationFailure, edges: &[Option<CapsSet>]| match f {
+        NegotiationFailure::EmptyLink {
+            upstream,
+            downstream,
+        } => {
+            let (up, down) = (NodeId(*upstream as u32), NodeId(*downstream as u32));
+            crate::g2g_error!(
+                t,
+                "no caps overlap between {} and {}",
+                label(up),
+                label(down)
+            );
+            for (id, slot) in edges.iter().enumerate() {
+                let e = graph.edge(id);
+                if [e.src.node, e.dst.node]
+                    .iter()
+                    .any(|&x| x == up || x == down)
+                {
+                    crate::g2g_error!(
+                        t,
+                        "  {} -> {}: {}",
+                        label(e.src.node),
+                        label(e.dst.node),
+                        fmt_set_opt(slot)
+                    );
                 }
             }
-            other => crate::g2g_error!(t, "negotiation failed: {other:?}"),
         }
+        other => crate::g2g_error!(t, "negotiation failed: {other:?}"),
     };
 
     // Same convergence bound as the linear solver, generalized to edges.
@@ -954,7 +993,10 @@ pub fn solve_graph_labeled<E>(
         let set = match slot.as_ref() {
             Some(s) if !s.is_empty() => s,
             _ => {
-                let f = NegotiationFailure::EmptyLink { upstream: up, downstream: down };
+                let f = NegotiationFailure::EmptyLink {
+                    upstream: up,
+                    downstream: down,
+                };
                 report(&f, &edges);
                 return Err(f);
             }
@@ -975,7 +1017,10 @@ pub fn solve_graph_labeled<E>(
                 label(graph.edge(id).dst.node),
                 fmt_set(set)
             );
-            return Err(NegotiationFailure::Unfixable { upstream: up, downstream: down });
+            return Err(NegotiationFailure::Unfixable {
+                upstream: up,
+                downstream: down,
+            });
         }
         domains.push(doms);
     }
@@ -986,7 +1031,10 @@ pub fn solve_graph_labeled<E>(
         report(&f, &edges);
         return Err(f);
     }
-    let out: Vec<Caps> = assign.into_iter().map(|a| a.expect("every edge assigned")).collect();
+    let out: Vec<Caps> = assign
+        .into_iter()
+        .map(|a| a.expect("every edge assigned"))
+        .collect();
     if trace {
         for (id, c) in out.iter().enumerate() {
             let e = graph.edge(id);
@@ -1050,7 +1098,11 @@ fn node_consistent<E>(
 ) -> bool {
     let in_e = graph.in_edges(node);
     let out_e = graph.out_edges(node);
-    if in_e.iter().chain(out_e.iter()).any(|&e| assign[e].is_none()) {
+    if in_e
+        .iter()
+        .chain(out_e.iter())
+        .any(|&e| assign[e].is_none())
+    {
         return true;
     }
     let get = |e: usize| assign[e].as_ref().expect("checked all assigned");
@@ -1138,9 +1190,17 @@ fn fmt_set_opt(slot: &Option<CapsSet>) -> String {
 fn fmt_constraint(nc: &NodeConstraint<'_>) -> String {
     match nc {
         NodeConstraint::Element(c) => fmt_caps_constraint(c),
-        NodeConstraint::Muxer { inputs, output, follows } => match follows {
+        NodeConstraint::Muxer {
+            inputs,
+            output,
+            follows,
+        } => match follows {
             Some(pad) => alloc::format!("mux {} inputs -> follows input {pad}", inputs.len()),
-            None => alloc::format!("mux {} inputs -> {}", inputs.len(), fmt_caps_constraint(output)),
+            None => alloc::format!(
+                "mux {} inputs -> {}",
+                inputs.len(),
+                fmt_caps_constraint(output)
+            ),
         },
         NodeConstraint::Demux { ports, .. } => alloc::format!("demux -> {} ports", ports.len()),
     }
@@ -1300,9 +1360,11 @@ fn apply_node<E>(
             _ => apply_tee_node(graph, in_e[0], out_e, edges),
         },
         NodeKind::Muxer(_) => match nc {
-            NodeConstraint::Muxer { inputs, output, follows } => {
-                apply_muxer_node(graph, node, inputs, output, *follows, edges)
-            }
+            NodeConstraint::Muxer {
+                inputs,
+                output,
+                follows,
+            } => apply_muxer_node(graph, node, inputs, output, *follows, edges),
             _ => Err(shape_err),
         },
     }
@@ -1320,7 +1382,10 @@ fn narrow_edge<E>(
     };
     if next.is_empty() {
         let (up, down) = edge_endpoints(graph, edge_id);
-        return Err(NegotiationFailure::EmptyLink { upstream: up, downstream: down });
+        return Err(NegotiationFailure::EmptyLink {
+            upstream: up,
+            downstream: down,
+        });
     }
     edges[edge_id] = Some(next);
     Ok(())
@@ -1340,7 +1405,10 @@ fn couple_edges<E>(
             if coupled.is_empty() {
                 let up = edge_endpoints(graph, a).0;
                 let down = edge_endpoints(graph, b).1;
-                return Err(NegotiationFailure::EmptyLink { upstream: up, downstream: down });
+                return Err(NegotiationFailure::EmptyLink {
+                    upstream: up,
+                    downstream: down,
+                });
             }
             edges[a] = Some(coupled.clone());
             edges[b] = Some(coupled);
@@ -1389,7 +1457,10 @@ fn apply_transform_node<E>(
             if new_in.is_empty() || new_out.is_empty() {
                 let up = edge_endpoints(graph, in_e).0;
                 let down = edge_endpoints(graph, out_e).1;
-                return Err(NegotiationFailure::EmptyLink { upstream: up, downstream: down });
+                return Err(NegotiationFailure::EmptyLink {
+                    upstream: up,
+                    downstream: down,
+                });
             }
             edges[in_e] = Some(new_in);
             edges[out_e] = Some(new_out);
@@ -1405,7 +1476,10 @@ fn apply_transform_node<E>(
                 let derived = forward_derived_union(f.as_ref(), &in_set);
                 if derived.is_empty() {
                     let (up, down) = edge_endpoints(graph, out_e);
-                    return Err(NegotiationFailure::EmptyLink { upstream: up, downstream: down });
+                    return Err(NegotiationFailure::EmptyLink {
+                        upstream: up,
+                        downstream: down,
+                    });
                 }
                 narrow_edge(graph, edges, out_e, &derived)?;
             }
@@ -1417,20 +1491,29 @@ fn apply_transform_node<E>(
                     Ok(None) => {}
                     Err(()) => {
                         let (up, down) = edge_endpoints(graph, in_e);
-                        return Err(NegotiationFailure::EmptyLink { upstream: up, downstream: down });
+                        return Err(NegotiationFailure::EmptyLink {
+                            upstream: up,
+                            downstream: down,
+                        });
                     }
                 }
             }
             Ok(())
         }
-        CapsConstraint::DerivedCoupled { derive, passthrough } => {
+        CapsConstraint::DerivedCoupled {
+            derive,
+            passthrough,
+        } => {
             // Mirror of the linear `apply_constraint` arm on graph edges:
             // forward via the closure, backward via field-level coupling.
             if let Some(in_set) = edges[in_e].clone() {
                 let derived = forward_derived_union(derive.as_ref(), &in_set);
                 if derived.is_empty() {
                     let (up, down) = edge_endpoints(graph, out_e);
-                    return Err(NegotiationFailure::EmptyLink { upstream: up, downstream: down });
+                    return Err(NegotiationFailure::EmptyLink {
+                        upstream: up,
+                        downstream: down,
+                    });
                 }
                 narrow_edge(graph, edges, out_e, &derived)?;
             }
@@ -1440,7 +1523,10 @@ fn apply_transform_node<E>(
                     Ok(None) => {}
                     Err(()) => {
                         let (up, down) = edge_endpoints(graph, in_e);
-                        return Err(NegotiationFailure::EmptyLink { upstream: up, downstream: down });
+                        return Err(NegotiationFailure::EmptyLink {
+                            upstream: up,
+                            downstream: down,
+                        });
                     }
                 }
             }
@@ -1453,13 +1539,18 @@ fn apply_transform_node<E>(
             if let Some(fixed_input) = edges[in_e].as_ref().and_then(fixed_single) {
                 let out = intercept(&fixed_input).map_err(|_| {
                     let (up, down) = edge_endpoints(graph, out_e);
-                    NegotiationFailure::EmptyLink { upstream: up, downstream: down }
+                    NegotiationFailure::EmptyLink {
+                        upstream: up,
+                        downstream: down,
+                    }
                 })?;
                 return narrow_edge(graph, edges, out_e, &CapsSet::one(out));
             }
             Ok(())
         }
-        _ => Err(NegotiationFailure::EndpointShapeMismatch { index: node.0 as usize }),
+        _ => Err(NegotiationFailure::EndpointShapeMismatch {
+            index: node.0 as usize,
+        }),
     }
 }
 
@@ -1480,7 +1571,9 @@ fn forward_derived_union(f: &dyn Fn(&Caps) -> CapsSet, in_set: &CapsSet) -> Caps
     in_set
         .alternatives()
         .iter()
-        .fold(CapsSet::from_alternatives(Vec::new()), |acc, a| acc.union(&f(a)))
+        .fold(CapsSet::from_alternatives(Vec::new()), |acc, a| {
+            acc.union(&f(a))
+        })
 }
 
 /// M188 backward narrowing for a `DerivedOutput` transform: given the (already
@@ -1621,7 +1714,10 @@ fn apply_tee_node<E>(
     if let Some(coupled) = acc {
         if coupled.is_empty() {
             let (up, down) = edge_endpoints(graph, in_e);
-            return Err(NegotiationFailure::EmptyLink { upstream: up, downstream: down });
+            return Err(NegotiationFailure::EmptyLink {
+                upstream: up,
+                downstream: down,
+            });
         }
         edges[in_e] = Some(coupled.clone());
         for &oe in out_e {
@@ -1711,13 +1807,18 @@ fn apply_muxer_node<E>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::caps::{Dim, Rate, RawVideoFormat, VideoCodec};
     use crate::runtime::passthrough::couple_passthrough;
-    use crate::caps::{Dim, Rate, VideoCodec, RawVideoFormat};
     use alloc::boxed::Box;
     use alloc::vec;
 
     fn video(fmt: RawVideoFormat, w: Dim, h: Dim, r: Rate) -> Caps {
-        Caps::RawVideo { format: fmt, width: w, height: h, framerate: r }
+        Caps::RawVideo {
+            format: fmt,
+            width: w,
+            height: h,
+            framerate: r,
+        }
     }
 
     // A multi-hop tensor chain `Produces(f32) -> quantize(f32->u8) ->
@@ -1739,22 +1840,34 @@ mod tests {
         let src = CapsConstraint::Produces(CapsSet::one(f32_in.clone()));
         // quantize: f32 -> u8, shape/layout passthrough (the TensorConvert shape).
         let quant = CapsConstraint::DerivedOutput(Box::new(|inp: &Caps| match inp {
-            Caps::Tensor { dtype: TensorDType::F32, shape, layout } => {
-                CapsSet::one(Caps::Tensor { dtype: TensorDType::U8, shape: *shape, layout: *layout })
-            }
+            Caps::Tensor {
+                dtype: TensorDType::F32,
+                shape,
+                layout,
+            } => CapsSet::one(Caps::Tensor {
+                dtype: TensorDType::U8,
+                shape: *shape,
+                layout: *layout,
+            }),
             _ => CapsSet::from_alternatives(Vec::new()),
         }));
         // infer: u8 [1,3,4,4] -> f32 [1,10] (the OrtInference shape).
         let logits_c = logits.clone();
         let infer = CapsConstraint::DerivedOutput(Box::new(move |inp: &Caps| match inp {
-            Caps::Tensor { dtype: TensorDType::U8, .. } => CapsSet::one(logits_c.clone()),
+            Caps::Tensor {
+                dtype: TensorDType::U8,
+                ..
+            } => CapsSet::one(logits_c.clone()),
             _ => CapsSet::from_alternatives(Vec::new()),
         }));
         let sink = CapsConstraint::AcceptsAny;
 
         let links = solve_linear(&[&src, &quant, &infer, &sink]).expect("tensor chain negotiates");
         assert_eq!(links[0], f32_in, "source link f32");
-        assert_eq!(links[1], u8_mid, "quantize output is u8, not the source f32");
+        assert_eq!(
+            links[1], u8_mid,
+            "quantize output is u8, not the source f32"
+        );
         assert_eq!(links[2], logits, "inference output [1,10]");
     }
 
@@ -1775,16 +1888,29 @@ mod tests {
         let logits_c = logits.clone();
         let cs: Vec<NodeConstraint> = vec![
             NodeConstraint::Element(CapsConstraint::Produces(CapsSet::one(f32_in.clone()))),
-            NodeConstraint::Element(CapsConstraint::DerivedOutput(Box::new(|inp: &Caps| match inp {
-                Caps::Tensor { dtype: TensorDType::F32, shape, layout } => {
-                    CapsSet::one(Caps::Tensor { dtype: TensorDType::U8, shape: *shape, layout: *layout })
-                }
-                _ => CapsSet::from_alternatives(Vec::new()),
-            }))),
-            NodeConstraint::Element(CapsConstraint::DerivedOutput(Box::new(move |inp: &Caps| match inp {
-                Caps::Tensor { dtype: TensorDType::U8, .. } => CapsSet::one(logits_c.clone()),
-                _ => CapsSet::from_alternatives(Vec::new()),
-            }))),
+            NodeConstraint::Element(CapsConstraint::DerivedOutput(Box::new(
+                |inp: &Caps| match inp {
+                    Caps::Tensor {
+                        dtype: TensorDType::F32,
+                        shape,
+                        layout,
+                    } => CapsSet::one(Caps::Tensor {
+                        dtype: TensorDType::U8,
+                        shape: *shape,
+                        layout: *layout,
+                    }),
+                    _ => CapsSet::from_alternatives(Vec::new()),
+                },
+            ))),
+            NodeConstraint::Element(CapsConstraint::DerivedOutput(Box::new(
+                move |inp: &Caps| match inp {
+                    Caps::Tensor {
+                        dtype: TensorDType::U8,
+                        ..
+                    } => CapsSet::one(logits_c.clone()),
+                    _ => CapsSet::from_alternatives(Vec::new()),
+                },
+            ))),
             NodeConstraint::Element(CapsConstraint::AcceptsAny),
         ];
         let mut g: Graph<()> = Graph::new();
@@ -1805,7 +1931,12 @@ mod tests {
     }
 
     fn compressed(codec: VideoCodec, w: Dim, h: Dim, r: Rate) -> Caps {
-        Caps::CompressedVideo { codec, width: w, height: h, framerate: r }
+        Caps::CompressedVideo {
+            codec,
+            width: w,
+            height: h,
+            framerate: r,
+        }
     }
 
     fn fixed_compressed(codec: VideoCodec, w: u32, h: u32, fps: u32) -> Caps {
@@ -1814,29 +1945,52 @@ mod tests {
 
     #[test]
     fn solves_source_sink_minimal_chain() {
-        let src = CapsConstraint::Produces(CapsSet::one(fixed_video(RawVideoFormat::Nv12, 1280, 720, 30)));
+        let src = CapsConstraint::Produces(CapsSet::one(fixed_video(
+            RawVideoFormat::Nv12,
+            1280,
+            720,
+            30,
+        )));
         let sink = CapsConstraint::Accepts(CapsSet::one(video(
-            RawVideoFormat::Nv12, Dim::Any, Dim::Any, Rate::Any,
+            RawVideoFormat::Nv12,
+            Dim::Any,
+            Dim::Any,
+            Rate::Any,
         )));
         let links = solve_linear(&[&src, &sink]).unwrap();
-        assert_eq!(links, vec![fixed_video(RawVideoFormat::Nv12, 1280, 720, 30)]);
+        assert_eq!(
+            links,
+            vec![fixed_video(RawVideoFormat::Nv12, 1280, 720, 30)]
+        );
     }
 
     #[test]
     fn empty_link_when_formats_disjoint() {
-        let src = CapsConstraint::Produces(CapsSet::one(fixed_compressed(VideoCodec::H264, 1280, 720, 30)));
+        let src = CapsConstraint::Produces(CapsSet::one(fixed_compressed(
+            VideoCodec::H264,
+            1280,
+            720,
+            30,
+        )));
         let sink = CapsConstraint::Accepts(CapsSet::one(video(
-            RawVideoFormat::Nv12, Dim::Any, Dim::Any, Rate::Any,
+            RawVideoFormat::Nv12,
+            Dim::Any,
+            Dim::Any,
+            Rate::Any,
         )));
         assert_eq!(
             solve_linear(&[&src, &sink]),
-            Err(NegotiationFailure::EmptyLink { upstream: 0, downstream: 1 })
+            Err(NegotiationFailure::EmptyLink {
+                upstream: 0,
+                downstream: 1
+            })
         );
     }
 
     #[test]
     fn degenerate_when_fewer_than_two_elements() {
-        let src = CapsConstraint::Produces(CapsSet::one(fixed_video(RawVideoFormat::Nv12, 1, 1, 1)));
+        let src =
+            CapsConstraint::Produces(CapsSet::one(fixed_video(RawVideoFormat::Nv12, 1, 1, 1)));
         assert_eq!(solve_linear(&[&src]), Err(NegotiationFailure::Degenerate));
         assert_eq!(solve_linear(&[]), Err(NegotiationFailure::Degenerate));
     }
@@ -1844,7 +1998,8 @@ mod tests {
     #[test]
     fn endpoint_shape_mismatch_rejected() {
         let id = CapsConstraint::Identity(CapsSet::one(fixed_video(RawVideoFormat::Nv12, 1, 1, 1)));
-        let sink = CapsConstraint::Accepts(CapsSet::one(fixed_video(RawVideoFormat::Nv12, 1, 1, 1)));
+        let sink =
+            CapsConstraint::Accepts(CapsSet::one(fixed_video(RawVideoFormat::Nv12, 1, 1, 1)));
         assert_eq!(
             solve_linear(&[&id, &sink]),
             Err(NegotiationFailure::EndpointShapeMismatch { index: 0 })
@@ -1857,8 +2012,10 @@ mod tests {
         // dims); sink accepts both with reversed preference.
         let rgba = fixed_video(RawVideoFormat::Rgba8, 640, 480, 30);
         let h264 = fixed_compressed(VideoCodec::H264, 640, 480, 30);
-        let src = CapsConstraint::Produces(CapsSet::from_alternatives(vec![rgba.clone(), h264.clone()]));
-        let sink = CapsConstraint::Accepts(CapsSet::from_alternatives(vec![h264.clone(), rgba.clone()]));
+        let src =
+            CapsConstraint::Produces(CapsSet::from_alternatives(vec![rgba.clone(), h264.clone()]));
+        let sink =
+            CapsConstraint::Accepts(CapsSet::from_alternatives(vec![h264.clone(), rgba.clone()]));
         let links = solve_linear(&[&src, &sink]).unwrap();
         // Source's outer preference wins because Produces is applied
         // first and CapsSet::intersect preserves self's order.
@@ -1867,28 +2024,53 @@ mod tests {
 
     #[test]
     fn identity_couples_input_and_output() {
-        let src = CapsConstraint::Produces(CapsSet::one(fixed_video(RawVideoFormat::Nv12, 1280, 720, 30)));
+        let src = CapsConstraint::Produces(CapsSet::one(fixed_video(
+            RawVideoFormat::Nv12,
+            1280,
+            720,
+            30,
+        )));
         let id = CapsConstraint::Identity(CapsSet::one(video(
-            RawVideoFormat::Nv12, Dim::Any, Dim::Any, Rate::Any,
+            RawVideoFormat::Nv12,
+            Dim::Any,
+            Dim::Any,
+            Rate::Any,
         )));
         let sink = CapsConstraint::Accepts(CapsSet::one(video(
-            RawVideoFormat::Nv12, Dim::Any, Dim::Any, Rate::Any,
+            RawVideoFormat::Nv12,
+            Dim::Any,
+            Dim::Any,
+            Rate::Any,
         )));
         let links = solve_linear(&[&src, &id, &sink]).unwrap();
-        assert_eq!(links, vec![
-            fixed_video(RawVideoFormat::Nv12, 1280, 720, 30),
-            fixed_video(RawVideoFormat::Nv12, 1280, 720, 30),
-        ]);
+        assert_eq!(
+            links,
+            vec![
+                fixed_video(RawVideoFormat::Nv12, 1280, 720, 30),
+                fixed_video(RawVideoFormat::Nv12, 1280, 720, 30),
+            ]
+        );
     }
 
     #[test]
     fn identity_format_mismatch_returns_empty_link() {
-        let src = CapsConstraint::Produces(CapsSet::one(fixed_compressed(VideoCodec::H264, 1280, 720, 30)));
+        let src = CapsConstraint::Produces(CapsSet::one(fixed_compressed(
+            VideoCodec::H264,
+            1280,
+            720,
+            30,
+        )));
         let id = CapsConstraint::Identity(CapsSet::one(video(
-            RawVideoFormat::Nv12, Dim::Any, Dim::Any, Rate::Any,
+            RawVideoFormat::Nv12,
+            Dim::Any,
+            Dim::Any,
+            Rate::Any,
         )));
         let sink = CapsConstraint::Accepts(CapsSet::one(video(
-            RawVideoFormat::Nv12, Dim::Any, Dim::Any, Rate::Any,
+            RawVideoFormat::Nv12,
+            Dim::Any,
+            Dim::Any,
+            Rate::Any,
         )));
         assert!(matches!(
             solve_linear(&[&src, &id, &sink]),
@@ -1899,9 +2081,19 @@ mod tests {
     #[test]
     fn derived_output_evaluated_after_input_fixates() {
         // Decoder: H264 input → Nv12 output at the same dims.
-        let src = CapsConstraint::Produces(CapsSet::one(fixed_compressed(VideoCodec::H264, 1920, 1080, 60)));
+        let src = CapsConstraint::Produces(CapsSet::one(fixed_compressed(
+            VideoCodec::H264,
+            1920,
+            1080,
+            60,
+        )));
         let dec = CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
-            Caps::CompressedVideo { width, height, framerate, .. } => CapsSet::one(Caps::RawVideo {
+            Caps::CompressedVideo {
+                width,
+                height,
+                framerate,
+                ..
+            } => CapsSet::one(Caps::RawVideo {
                 format: RawVideoFormat::Nv12,
                 width: width.clone(),
                 height: height.clone(),
@@ -1910,13 +2102,19 @@ mod tests {
             _ => CapsSet::from_alternatives(Vec::new()),
         }));
         let sink = CapsConstraint::Accepts(CapsSet::one(video(
-            RawVideoFormat::Nv12, Dim::Any, Dim::Any, Rate::Any,
+            RawVideoFormat::Nv12,
+            Dim::Any,
+            Dim::Any,
+            Rate::Any,
         )));
         let links = solve_linear(&[&src, &dec, &sink]).unwrap();
-        assert_eq!(links, vec![
-            fixed_compressed(VideoCodec::H264, 1920, 1080, 60),
-            fixed_video(RawVideoFormat::Nv12, 1920, 1080, 60),
-        ]);
+        assert_eq!(
+            links,
+            vec![
+                fixed_compressed(VideoCodec::H264, 1920, 1080, 60),
+                fixed_video(RawVideoFormat::Nv12, 1920, 1080, 60),
+            ]
+        );
     }
 
     #[test]
@@ -1934,7 +2132,12 @@ mod tests {
             Rate::Fixed(30 << 16),
         )));
         let dec = CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
-            Caps::CompressedVideo { width, height, framerate, .. } => CapsSet::one(Caps::RawVideo {
+            Caps::CompressedVideo {
+                width,
+                height,
+                framerate,
+                ..
+            } => CapsSet::one(Caps::RawVideo {
                 format: RawVideoFormat::Nv12,
                 width: width.clone(),
                 height: height.clone(),
@@ -1942,12 +2145,20 @@ mod tests {
             }),
             _ => CapsSet::from_alternatives(Vec::new()),
         }));
-        let sink = CapsConstraint::Accepts(CapsSet::one(fixed_video(RawVideoFormat::Nv12, 1280, 720, 30)));
+        let sink = CapsConstraint::Accepts(CapsSet::one(fixed_video(
+            RawVideoFormat::Nv12,
+            1280,
+            720,
+            30,
+        )));
         let links = solve_linear(&[&src, &dec, &sink]).unwrap();
-        assert_eq!(links, vec![
-            fixed_compressed(VideoCodec::H264, 1280, 720, 30),
-            fixed_video(RawVideoFormat::Nv12, 1280, 720, 30),
-        ]);
+        assert_eq!(
+            links,
+            vec![
+                fixed_compressed(VideoCodec::H264, 1280, 720, 30),
+                fixed_video(RawVideoFormat::Nv12, 1280, 720, 30),
+            ]
+        );
     }
 
     #[test]
@@ -1955,9 +2166,16 @@ mod tests {
         // A decoder whose output is fixed regardless of input (no passthrough
         // field) must not gain spurious backward coupling: discovery finds NONE,
         // so the input keeps its produced caps. The source pins its own geometry.
-        let src = CapsConstraint::Produces(CapsSet::one(fixed_compressed(VideoCodec::H264, 1920, 1080, 30)));
+        let src = CapsConstraint::Produces(CapsSet::one(fixed_compressed(
+            VideoCodec::H264,
+            1920,
+            1080,
+            30,
+        )));
         let dec = CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
-            Caps::CompressedVideo { .. } => CapsSet::one(fixed_video(RawVideoFormat::Nv12, 640, 480, 30)),
+            Caps::CompressedVideo { .. } => {
+                CapsSet::one(fixed_video(RawVideoFormat::Nv12, 640, 480, 30))
+            }
             _ => CapsSet::from_alternatives(Vec::new()),
         }));
         let sink = CapsConstraint::Accepts(CapsSet::one(video(
@@ -1967,10 +2185,13 @@ mod tests {
             Rate::Any,
         )));
         let links = solve_linear(&[&src, &dec, &sink]).unwrap();
-        assert_eq!(links, vec![
-            fixed_compressed(VideoCodec::H264, 1920, 1080, 30),
-            fixed_video(RawVideoFormat::Nv12, 640, 480, 30),
-        ]);
+        assert_eq!(
+            links,
+            vec![
+                fixed_compressed(VideoCodec::H264, 1920, 1080, 30),
+                fixed_video(RawVideoFormat::Nv12, 640, 480, 30),
+            ]
+        );
     }
 
     #[test]
@@ -1980,7 +2201,12 @@ mod tests {
         // Output dims come from the matching pair (mapping doesn't
         // propagate dims between paired sides — that's `DerivedOutput`'s
         // job).
-        let src = CapsConstraint::Produces(CapsSet::one(fixed_compressed(VideoCodec::H265, 1280, 720, 30)));
+        let src = CapsConstraint::Produces(CapsSet::one(fixed_compressed(
+            VideoCodec::H265,
+            1280,
+            720,
+            30,
+        )));
         let map = CapsConstraint::Mapping(vec![
             (
                 CapsSet::one(compressed(VideoCodec::H264, Dim::Any, Dim::Any, Rate::Any)),
@@ -1992,7 +2218,10 @@ mod tests {
             ),
         ]);
         let sink = CapsConstraint::Accepts(CapsSet::one(video(
-            RawVideoFormat::Nv12, Dim::Any, Dim::Any, Rate::Any,
+            RawVideoFormat::Nv12,
+            Dim::Any,
+            Dim::Any,
+            Rate::Any,
         )));
         let links = solve_linear(&[&src, &map, &sink]).unwrap();
         assert_eq!(links[0], fixed_compressed(VideoCodec::H265, 1280, 720, 30));
@@ -2031,7 +2260,12 @@ mod tests {
         let dec = CapsConstraint::LegacyTransform {
             intercept: Box::new(|c: &Caps| Ok(c.clone())),
             propose_output: Box::new(|c: &Caps| match c {
-                Caps::CompressedVideo { width, height, framerate, .. } => Caps::RawVideo {
+                Caps::CompressedVideo {
+                    width,
+                    height,
+                    framerate,
+                    ..
+                } => Caps::RawVideo {
                     format: RawVideoFormat::Nv12,
                     width: width.clone(),
                     height: height.clone(),
@@ -2058,10 +2292,15 @@ mod tests {
     #[test]
     fn legacy_cascade_intercept_failure_returns_empty_link() {
         let src = CapsConstraint::LegacySource(fixed_compressed(VideoCodec::H264, 1280, 720, 30));
-        let sink = CapsConstraint::LegacySink(Box::new(|_: &Caps| Err(crate::error::G2gError::CapsMismatch)));
+        let sink = CapsConstraint::LegacySink(Box::new(|_: &Caps| {
+            Err(crate::error::G2gError::CapsMismatch)
+        }));
         assert!(matches!(
             solve_linear(&[&src, &sink]),
-            Err(NegotiationFailure::EmptyLink { upstream: 0, downstream: 1 })
+            Err(NegotiationFailure::EmptyLink {
+                upstream: 0,
+                downstream: 1
+            })
         ));
     }
 
@@ -2073,7 +2312,10 @@ mod tests {
         let caps = fixed_video(RawVideoFormat::Nv12, 1280, 720, 30);
         let src = CapsConstraint::LegacySource(caps.clone());
         let sink = CapsConstraint::Accepts(CapsSet::one(video(
-            RawVideoFormat::Nv12, Dim::Any, Dim::Any, Rate::Any,
+            RawVideoFormat::Nv12,
+            Dim::Any,
+            Dim::Any,
+            Rate::Any,
         )));
         let links = solve_linear(&[&src, &sink]).unwrap();
         assert_eq!(links, vec![caps]);
@@ -2100,7 +2342,12 @@ mod tests {
         let dec = CapsConstraint::LegacyTransform {
             intercept: Box::new(|c: &Caps| Ok(c.clone())),
             propose_output: Box::new(|c: &Caps| match c {
-                Caps::CompressedVideo { width, height, framerate, .. } => Caps::RawVideo {
+                Caps::CompressedVideo {
+                    width,
+                    height,
+                    framerate,
+                    ..
+                } => Caps::RawVideo {
                     format: RawVideoFormat::Nv12,
                     width: width.clone(),
                     height: height.clone(),
@@ -2110,20 +2357,26 @@ mod tests {
             }),
         };
         let sink = CapsConstraint::Accepts(CapsSet::one(video(
-            RawVideoFormat::Nv12, Dim::Any, Dim::Any, Rate::Any,
+            RawVideoFormat::Nv12,
+            Dim::Any,
+            Dim::Any,
+            Rate::Any,
         )));
         let links = solve_linear(&[&src, &dec, &sink]).unwrap();
-        assert_eq!(links, vec![
-            fixed_compressed(VideoCodec::H264, 1920, 1080, 60),
-            nv12,
-        ]);
+        assert_eq!(
+            links,
+            vec![fixed_compressed(VideoCodec::H264, 1920, 1080, 60), nv12,]
+        );
     }
 
     #[test]
     fn mixed_chain_empty_link_when_sink_rejects() {
         let src = CapsConstraint::LegacySource(fixed_compressed(VideoCodec::H264, 1280, 720, 30));
         let sink = CapsConstraint::Accepts(CapsSet::one(video(
-            RawVideoFormat::Nv12, Dim::Any, Dim::Any, Rate::Any,
+            RawVideoFormat::Nv12,
+            Dim::Any,
+            Dim::Any,
+            Rate::Any,
         )));
         assert!(matches!(
             solve_linear(&[&src, &sink]),
@@ -2218,13 +2471,21 @@ mod tests {
 
     #[test]
     fn mapping_no_surviving_pair_returns_empty_link() {
-        let src = CapsConstraint::Produces(CapsSet::one(fixed_compressed(VideoCodec::Av1, 1280, 720, 30)));
+        let src = CapsConstraint::Produces(CapsSet::one(fixed_compressed(
+            VideoCodec::Av1,
+            1280,
+            720,
+            30,
+        )));
         let map = CapsConstraint::Mapping(vec![(
             CapsSet::one(compressed(VideoCodec::H264, Dim::Any, Dim::Any, Rate::Any)),
             CapsSet::one(video(RawVideoFormat::Nv12, Dim::Any, Dim::Any, Rate::Any)),
         )]);
         let sink = CapsConstraint::Accepts(CapsSet::one(video(
-            RawVideoFormat::Nv12, Dim::Any, Dim::Any, Rate::Any,
+            RawVideoFormat::Nv12,
+            Dim::Any,
+            Dim::Any,
+            Rate::Any,
         )));
         assert!(matches!(
             solve_linear(&[&src, &map, &sink]),
@@ -2239,23 +2500,36 @@ mod tests {
     #[cfg(feature = "std")]
     #[test]
     fn downstream_feasibility_is_source_independent() {
-        let src = CapsConstraint::Produces(CapsSet::one(fixed_video(RawVideoFormat::Rgba8, 64, 64, 30)));
+        let src =
+            CapsConstraint::Produces(CapsSet::one(fixed_video(RawVideoFormat::Rgba8, 64, 64, 30)));
         let id = CapsConstraint::IdentityAny;
         let sink = CapsConstraint::Accepts(CapsSet::one(video(
-            RawVideoFormat::Nv12, Dim::Any, Dim::Any, Rate::Any,
+            RawVideoFormat::Nv12,
+            Dim::Any,
+            Dim::Any,
+            Rate::Any,
         )));
         let feas = downstream_feasibility(&[&src, &id, &sink]);
         // Two links. Both carry the sink's NV12 set (IdentityAny couples them);
         // neither is narrowed to the source's RGBA.
         assert_eq!(feas.len(), 2);
         assert!(feas[1].as_ref().unwrap().accepts(&video(
-            RawVideoFormat::Nv12, Dim::Any, Dim::Any, Rate::Any,
+            RawVideoFormat::Nv12,
+            Dim::Any,
+            Dim::Any,
+            Rate::Any,
         )));
         assert!(feas[0].as_ref().unwrap().accepts(&video(
-            RawVideoFormat::Nv12, Dim::Any, Dim::Any, Rate::Any,
+            RawVideoFormat::Nv12,
+            Dim::Any,
+            Dim::Any,
+            Rate::Any,
         )));
         assert!(!feas[0].as_ref().unwrap().accepts(&video(
-            RawVideoFormat::Rgba8, Dim::Any, Dim::Any, Rate::Any,
+            RawVideoFormat::Rgba8,
+            Dim::Any,
+            Dim::Any,
+            Rate::Any,
         )));
     }
 
@@ -2269,12 +2543,23 @@ mod tests {
     fn resolve_forward_output_steers_defers_and_rejects() {
         // Converter: any raw input -> {same format, NV12} at the input's dims.
         let conv = CapsConstraint::DerivedOutput(Box::new(|input: &Caps| {
-            let Caps::RawVideo { format, width, height, framerate } = input else {
+            let Caps::RawVideo {
+                format,
+                width,
+                height,
+                framerate,
+            } = input
+            else {
                 return CapsSet::from_alternatives(vec![]);
             };
             CapsSet::from_alternatives(vec![
                 video(*format, width.clone(), height.clone(), framerate.clone()),
-                video(RawVideoFormat::Nv12, width.clone(), height.clone(), framerate.clone()),
+                video(
+                    RawVideoFormat::Nv12,
+                    width.clone(),
+                    height.clone(),
+                    framerate.clone(),
+                ),
             ])
         }));
         let i420 = fixed_video(RawVideoFormat::I420, 64, 64, 30);
@@ -2283,14 +2568,25 @@ mod tests {
         // Steered: downstream accepts only NV12, so the runner picks NV12.
         match resolve_forward_output(&conv, &i420, Some(&nv12_set)) {
             ForwardResolve::Fixed(c) => {
-                assert_eq!(c, video(RawVideoFormat::Nv12, Dim::Fixed(64), Dim::Fixed(64), Rate::Fixed(30 << 16)));
+                assert_eq!(
+                    c,
+                    video(
+                        RawVideoFormat::Nv12,
+                        Dim::Fixed(64),
+                        Dim::Fixed(64),
+                        Rate::Fixed(30 << 16)
+                    )
+                );
             }
             other => panic!("expected Fixed(NV12), got {other:?}"),
         }
 
         // No concrete downstream set, but the output is ambiguous ({same, NV12}):
         // defer to the element's own process.
-        assert_eq!(resolve_forward_output(&conv, &i420, None), ForwardResolve::Defer);
+        assert_eq!(
+            resolve_forward_output(&conv, &i420, None),
+            ForwardResolve::Defer
+        );
 
         // No downstream snapshot but an UNAMBIGUOUS output: a property-driven
         // converter forwards its single output (RGBA8) rather than leaking the
@@ -2298,7 +2594,12 @@ mod tests {
         // after `mp4src ! avdec ! videoconvert`) see the converted caps on a
         // mid-stream change instead of the decoder's NV12.
         let to_rgba = CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
-            Caps::RawVideo { width, height, framerate, .. } => CapsSet::one(video(
+            Caps::RawVideo {
+                width,
+                height,
+                framerate,
+                ..
+            } => CapsSet::one(video(
                 RawVideoFormat::Rgba8,
                 width.clone(),
                 height.clone(),
@@ -2310,7 +2611,12 @@ mod tests {
         match resolve_forward_output(&to_rgba, &nv12_in, None) {
             ForwardResolve::Fixed(c) => assert_eq!(
                 c,
-                video(RawVideoFormat::Rgba8, Dim::Fixed(64), Dim::Fixed(64), Rate::Fixed(30 << 16))
+                video(
+                    RawVideoFormat::Rgba8,
+                    Dim::Fixed(64),
+                    Dim::Fixed(64),
+                    Rate::Fixed(30 << 16)
+                )
             ),
             other => panic!("expected Fixed(RGBA8), got {other:?}"),
         }
@@ -2359,7 +2665,10 @@ mod tests {
         let v = g.finish().unwrap();
         let dag = solve_graph(&v, &dag_cs).expect("same chain as a graph solves");
 
-        assert_eq!(dag, linear, "DAG solver matches the linear solver byte-for-byte");
+        assert_eq!(
+            dag, linear,
+            "DAG solver matches the linear solver byte-for-byte"
+        );
         assert_eq!(dag, vec![rgba, nv12]);
     }
 
@@ -2386,7 +2695,10 @@ mod tests {
 
         let sol = solve_graph(&v, &cs).expect("tee fan-out solves");
         assert_eq!(sol.len(), 3, "three edges");
-        assert!(sol.iter().all(|c| *c == nv12_fixed), "every branch carries the source caps");
+        assert!(
+            sol.iter().all(|c| *c == nv12_fixed),
+            "every branch carries the source caps"
+        );
     }
 
     #[test]
@@ -2412,7 +2724,10 @@ mod tests {
         let v = g.finish().unwrap();
 
         assert!(
-            matches!(solve_graph(&v, &cs), Err(NegotiationFailure::EmptyLink { .. })),
+            matches!(
+                solve_graph(&v, &cs),
+                Err(NegotiationFailure::EmptyLink { .. })
+            ),
             "an incompatible branch fails the whole solve"
         );
     }
@@ -2495,11 +2810,26 @@ mod tests {
     fn solve_graph_muxer_fan_in_narrows_each_input() {
         // two video sources combine at a muxer: input pad 0 accepts H264,
         // pad 1 accepts H265, the output produces a (token) muxed stream.
-        let h264 = compressed(VideoCodec::H264, Dim::Fixed(64), Dim::Fixed(48), Rate::Fixed(30 << 16));
-        let h265 = compressed(VideoCodec::H265, Dim::Fixed(64), Dim::Fixed(48), Rate::Fixed(30 << 16));
+        let h264 = compressed(
+            VideoCodec::H264,
+            Dim::Fixed(64),
+            Dim::Fixed(48),
+            Rate::Fixed(30 << 16),
+        );
+        let h265 = compressed(
+            VideoCodec::H265,
+            Dim::Fixed(64),
+            Dim::Fixed(48),
+            Rate::Fixed(30 << 16),
+        );
         let h264_any = compressed(VideoCodec::H264, Dim::Any, Dim::Any, Rate::Any);
         let h265_any = compressed(VideoCodec::H265, Dim::Any, Dim::Any, Rate::Any);
-        let muxed = compressed(VideoCodec::H264, Dim::Fixed(64), Dim::Fixed(48), Rate::Fixed(30 << 16));
+        let muxed = compressed(
+            VideoCodec::H264,
+            Dim::Fixed(64),
+            Dim::Fixed(48),
+            Rate::Fixed(30 << 16),
+        );
 
         let cs: Vec<NodeConstraint> = vec![
             NodeConstraint::Element(CapsConstraint::Produces(CapsSet::one(h264.clone()))),
@@ -2526,7 +2856,11 @@ mod tests {
 
         let sol = solve_graph(&v, &cs).expect("muxer fan-in solves");
         // edges in id order: s0->in0, s1->in1, mux.out->sink.
-        assert_eq!(sol, vec![h264, h265, muxed], "each input narrowed by its pad, output by produce");
+        assert_eq!(
+            sol,
+            vec![h264, h265, muxed],
+            "each input narrowed by its pad, output by produce"
+        );
     }
 
     #[test]
@@ -2536,7 +2870,9 @@ mod tests {
         // even though no output caps were declared (`output` is a placeholder).
         let rgba = fixed_video(RawVideoFormat::Rgba8, 320, 240, 30);
         let rgba_any = video(RawVideoFormat::Rgba8, Dim::Any, Dim::Any, Rate::Any);
-        let text = Caps::Text { format: crate::caps::TextFormat::Utf8 };
+        let text = Caps::Text {
+            format: crate::caps::TextFormat::Utf8,
+        };
 
         let cs: Vec<NodeConstraint> = vec![
             NodeConstraint::Element(CapsConstraint::Produces(CapsSet::one(rgba.clone()))),
@@ -2564,7 +2900,10 @@ mod tests {
 
         let sol = solve_graph(&v, &cs).expect("follows-input muxer solves");
         // edges: 0 video->in0, 1 text->in1, 2 mux.out->sink.
-        assert_eq!(sol[2], rgba, "output edge follows the video pad's negotiated caps");
+        assert_eq!(
+            sol[2], rgba,
+            "output edge follows the video pad's negotiated caps"
+        );
         assert_eq!(sol[0], rgba, "video pad edge unchanged");
         assert_eq!(sol[1], text, "text pad edge unchanged");
     }
@@ -2575,9 +2914,23 @@ mod tests {
         // carry their own caps), the output `Produces` a fixed merged caps. The
         // wildcard inputs impose no narrowing, so each input edge keeps its
         // source's caps and the output edge takes the produced caps.
-        let h264 = compressed(VideoCodec::H264, Dim::Fixed(64), Dim::Fixed(48), Rate::Fixed(30 << 16));
-        let aac = Caps::Audio { format: crate::caps::AudioFormat::Aac, channels: 2, sample_rate: 48_000 };
-        let merged = compressed(VideoCodec::H264, Dim::Fixed(64), Dim::Fixed(48), Rate::Fixed(30 << 16));
+        let h264 = compressed(
+            VideoCodec::H264,
+            Dim::Fixed(64),
+            Dim::Fixed(48),
+            Rate::Fixed(30 << 16),
+        );
+        let aac = Caps::Audio {
+            format: crate::caps::AudioFormat::Aac,
+            channels: 2,
+            sample_rate: 48_000,
+        };
+        let merged = compressed(
+            VideoCodec::H264,
+            Dim::Fixed(64),
+            Dim::Fixed(48),
+            Rate::Fixed(30 << 16),
+        );
 
         let cs: Vec<NodeConstraint> = vec![
             NodeConstraint::Element(CapsConstraint::Produces(CapsSet::one(h264.clone()))),
@@ -2619,7 +2972,9 @@ mod tests {
                 output: CapsConstraint::Produces(CapsSet::one(h264.clone())),
                 follows: None,
             },
-            NodeConstraint::Element(CapsConstraint::LegacySink(Box::new(|c: &Caps| Ok(c.clone())))),
+            NodeConstraint::Element(CapsConstraint::LegacySink(Box::new(|c: &Caps| {
+                Ok(c.clone())
+            }))),
         ];
         let mut g: Graph<()> = Graph::new();
         let s0 = g.add_source(());
@@ -2690,10 +3045,16 @@ mod tests {
         let feas = graph_downstream_feasibility(&v, &cs, &sol);
         // edge 0 = src->tee, edge 1 = tee.out0->a, edge 2 = tee.out1->b.
         let tee_in = feas[0].as_ref().expect("tee input has feasibility");
-        assert!(tee_in.intersect(&CapsSet::one(nv12_fixed.clone())).fixate().is_some());
+        assert!(tee_in
+            .intersect(&CapsSet::one(nv12_fixed.clone()))
+            .fixate()
+            .is_some());
         // the tee input cannot carry an off-geometry frame both branches reject.
         let off = fixed_video(RawVideoFormat::Nv12, 99, 99, 30);
-        assert!(tee_in.intersect(&CapsSet::one(off)).is_empty(), "branch B pins 64x48");
+        assert!(
+            tee_in.intersect(&CapsSet::one(off)).is_empty(),
+            "branch B pins 64x48"
+        );
     }
 
     #[cfg(feature = "std")]
@@ -2705,19 +3066,28 @@ mod tests {
         let h264_any = compressed(VideoCodec::H264, Dim::Any, Dim::Any, Rate::Any);
         let h265_any = compressed(VideoCodec::H265, Dim::Any, Dim::Any, Rate::Any);
         let cs: Vec<NodeConstraint> = vec![
-            NodeConstraint::Element(CapsConstraint::Produces(CapsSet::one(
-                fixed_compressed(VideoCodec::H264, 64, 48, 30),
-            ))),
-            NodeConstraint::Element(CapsConstraint::Produces(CapsSet::one(
-                fixed_compressed(VideoCodec::H265, 64, 48, 30),
-            ))),
+            NodeConstraint::Element(CapsConstraint::Produces(CapsSet::one(fixed_compressed(
+                VideoCodec::H264,
+                64,
+                48,
+                30,
+            )))),
+            NodeConstraint::Element(CapsConstraint::Produces(CapsSet::one(fixed_compressed(
+                VideoCodec::H265,
+                64,
+                48,
+                30,
+            )))),
             NodeConstraint::Muxer {
                 inputs: vec![
                     CapsConstraint::Accepts(CapsSet::one(h264_any.clone())),
                     CapsConstraint::Accepts(CapsSet::one(h265_any.clone())),
                 ],
                 output: CapsConstraint::Produces(CapsSet::one(fixed_compressed(
-                    VideoCodec::H264, 64, 48, 30,
+                    VideoCodec::H264,
+                    64,
+                    48,
+                    30,
                 ))),
                 follows: None,
             },
@@ -2736,9 +3106,20 @@ mod tests {
         let sol = solve_graph(&v, &cs).expect("muxer graph solves");
         let feas = graph_downstream_feasibility(&v, &cs, &sol);
         // edges: 0 = s0->in0, 1 = s1->in1, 2 = mux.out->sink.
-        assert_eq!(feas[0], Some(CapsSet::one(h264_any)), "pad 0 feasibility = its accept set");
-        assert_eq!(feas[1], Some(CapsSet::one(h265_any)), "pad 1 feasibility = its accept set");
-        assert_eq!(feas[2], None, "wildcard sink leaves the muxer output unconstrained");
+        assert_eq!(
+            feas[0],
+            Some(CapsSet::one(h264_any)),
+            "pad 0 feasibility = its accept set"
+        );
+        assert_eq!(
+            feas[1],
+            Some(CapsSet::one(h265_any)),
+            "pad 1 feasibility = its accept set"
+        );
+        assert_eq!(
+            feas[2], None,
+            "wildcard sink leaves the muxer output unconstrained"
+        );
     }
 
     #[cfg(feature = "std")]
@@ -2751,7 +3132,12 @@ mod tests {
         // the pinned geometry. With the startup-fixated input threaded in, the
         // discovered passthrough fields couple the pin onto the H264 input edge.
         let dec_closure = |input: &Caps| match input {
-            Caps::CompressedVideo { width, height, framerate, .. } => CapsSet::one(Caps::RawVideo {
+            Caps::CompressedVideo {
+                width,
+                height,
+                framerate,
+                ..
+            } => CapsSet::one(Caps::RawVideo {
                 format: RawVideoFormat::Nv12,
                 width: width.clone(),
                 height: height.clone(),
@@ -2761,11 +3147,17 @@ mod tests {
         };
         let cs: Vec<NodeConstraint> = vec![
             NodeConstraint::Element(CapsConstraint::Produces(CapsSet::one(compressed(
-                VideoCodec::H264, Dim::Any, Dim::Any, Rate::Fixed(30 << 16),
+                VideoCodec::H264,
+                Dim::Any,
+                Dim::Any,
+                Rate::Fixed(30 << 16),
             )))),
             NodeConstraint::Element(CapsConstraint::DerivedOutput(Box::new(dec_closure))),
             NodeConstraint::Element(CapsConstraint::Accepts(CapsSet::one(fixed_video(
-                RawVideoFormat::Nv12, 1280, 720, 30,
+                RawVideoFormat::Nv12,
+                1280,
+                720,
+                30,
             )))),
         ];
         let mut g: Graph<()> = Graph::new();
@@ -2779,13 +3171,26 @@ mod tests {
         let sol = solve_graph(&v, &cs).expect("decoder graph solves");
         let feas = graph_downstream_feasibility(&v, &cs, &sol);
         // edge 0 = src->dec (the decoder input), edge 1 = dec->sink.
-        let dec_in = feas[0].as_ref().expect("decoder input edge is now constrained");
+        let dec_in = feas[0]
+            .as_ref()
+            .expect("decoder input edge is now constrained");
         assert!(
-            dec_in.intersect(&CapsSet::one(fixed_compressed(VideoCodec::H264, 1280, 720, 30))).fixate().is_some(),
+            dec_in
+                .intersect(&CapsSet::one(fixed_compressed(
+                    VideoCodec::H264,
+                    1280,
+                    720,
+                    30
+                )))
+                .fixate()
+                .is_some(),
             "pinned 1280x720 couples back onto the H264 input edge",
         );
         let off = fixed_compressed(VideoCodec::H264, 640, 480, 30);
-        assert!(dec_in.intersect(&CapsSet::one(off)).is_empty(), "off-geometry input is rejected by the snapshot");
+        assert!(
+            dec_in.intersect(&CapsSet::one(off)).is_empty(),
+            "off-geometry input is rejected by the snapshot"
+        );
     }
 
     // --- M227 field-level bidirectional caps coupling ---
@@ -2795,17 +3200,20 @@ mod tests {
     fn scale_like<'a>() -> CapsConstraint<'a> {
         CapsConstraint::DerivedCoupled {
             derive: Box::new(|input: &Caps| match input {
-                Caps::RawVideo { format, width, height, framerate } => {
-                    CapsSet::from_alternatives(vec![
-                        video(*format, width.clone(), height.clone(), framerate.clone()),
-                        video(
-                            *format,
-                            Dim::Range { min: 1, max: 32768 },
-                            Dim::Range { min: 1, max: 32768 },
-                            framerate.clone(),
-                        ),
-                    ])
-                }
+                Caps::RawVideo {
+                    format,
+                    width,
+                    height,
+                    framerate,
+                } => CapsSet::from_alternatives(vec![
+                    video(*format, width.clone(), height.clone(), framerate.clone()),
+                    video(
+                        *format,
+                        Dim::Range { min: 1, max: 32768 },
+                        Dim::Range { min: 1, max: 32768 },
+                        framerate.clone(),
+                    ),
+                ]),
                 _ => CapsSet::from_alternatives(vec![]),
             }),
             passthrough: PassthroughFields::NONE.with_format().with_framerate(),
@@ -2817,15 +3225,31 @@ mod tests {
     fn convert_like<'a>() -> CapsConstraint<'a> {
         CapsConstraint::DerivedCoupled {
             derive: Box::new(|input: &Caps| match input {
-                Caps::RawVideo { width, height, framerate, .. } => {
-                    CapsSet::from_alternatives(vec![
-                        video(RawVideoFormat::Rgba8, width.clone(), height.clone(), framerate.clone()),
-                        video(RawVideoFormat::Nv12, width.clone(), height.clone(), framerate.clone()),
-                    ])
-                }
+                Caps::RawVideo {
+                    width,
+                    height,
+                    framerate,
+                    ..
+                } => CapsSet::from_alternatives(vec![
+                    video(
+                        RawVideoFormat::Rgba8,
+                        width.clone(),
+                        height.clone(),
+                        framerate.clone(),
+                    ),
+                    video(
+                        RawVideoFormat::Nv12,
+                        width.clone(),
+                        height.clone(),
+                        framerate.clone(),
+                    ),
+                ]),
                 _ => CapsSet::from_alternatives(vec![]),
             }),
-            passthrough: PassthroughFields::NONE.with_width().with_height().with_framerate(),
+            passthrough: PassthroughFields::NONE
+                .with_width()
+                .with_height()
+                .with_framerate(),
         }
     }
 
@@ -2833,7 +3257,10 @@ mod tests {
     fn couple_passthrough_narrows_a_range_field_within_an_alternative() {
         // The primitive the alternative-drop walk can't express: a Range width
         // meeting a Fixed pin collapses to Fixed, format (retargeted) untouched.
-        let mask = PassthroughFields::NONE.with_width().with_height().with_framerate();
+        let mask = PassthroughFields::NONE
+            .with_width()
+            .with_height()
+            .with_framerate();
         let input = video(
             RawVideoFormat::Rgba8,
             Dim::Range { min: 1, max: 32768 },
@@ -2863,12 +3290,20 @@ mod tests {
         // The M188 KNOWN-LIMIT, now resolved: a 160x120 geometry pin sits behind
         // the geometry-passthrough convert; coupling intersects it into the
         // scaler's output field instead of dropping whole alternatives.
-        let src =
-            CapsConstraint::Produces(CapsSet::one(fixed_video(RawVideoFormat::Rgba8, 320, 240, 30)));
+        let src = CapsConstraint::Produces(CapsSet::one(fixed_video(
+            RawVideoFormat::Rgba8,
+            320,
+            240,
+            30,
+        )));
         let scale = scale_like();
         let convert = convert_like();
-        let sink =
-            CapsConstraint::Accepts(CapsSet::one(fixed_video(RawVideoFormat::Nv12, 160, 120, 30)));
+        let sink = CapsConstraint::Accepts(CapsSet::one(fixed_video(
+            RawVideoFormat::Nv12,
+            160,
+            120,
+            30,
+        )));
         let links = solve_linear(&[&src, &scale, &convert, &sink]).unwrap();
         assert_eq!(
             links,
@@ -2885,8 +3320,12 @@ mod tests {
     fn field_coupling_no_pin_stays_passthrough() {
         // No downstream pin (AcceptsAny): both transforms prefer their first
         // (passthrough) alternative, and the solve converges (no oscillation).
-        let src =
-            CapsConstraint::Produces(CapsSet::one(fixed_video(RawVideoFormat::Rgba8, 320, 240, 30)));
+        let src = CapsConstraint::Produces(CapsSet::one(fixed_video(
+            RawVideoFormat::Rgba8,
+            320,
+            240,
+            30,
+        )));
         let scale = scale_like();
         let convert = convert_like();
         let sink = CapsConstraint::AcceptsAny;
@@ -2906,12 +3345,23 @@ mod tests {
     fn field_coupling_unsatisfiable_geometry_fails_loud() {
         // No scaler upstream: convert passes geometry through, so a 160x120 pin
         // against a fixed 320x240 source has no solution. Loud, never silent.
-        let src =
-            CapsConstraint::Produces(CapsSet::one(fixed_video(RawVideoFormat::Rgba8, 320, 240, 30)));
+        let src = CapsConstraint::Produces(CapsSet::one(fixed_video(
+            RawVideoFormat::Rgba8,
+            320,
+            240,
+            30,
+        )));
         let convert = convert_like();
-        let sink =
-            CapsConstraint::Accepts(CapsSet::one(fixed_video(RawVideoFormat::Nv12, 160, 120, 30)));
-        assert!(solve_linear(&[&src, &convert, &sink]).is_err(), "geometry pin must fail loud");
+        let sink = CapsConstraint::Accepts(CapsSet::one(fixed_video(
+            RawVideoFormat::Nv12,
+            160,
+            120,
+            30,
+        )));
+        assert!(
+            solve_linear(&[&src, &convert, &sink]).is_err(),
+            "geometry pin must fail loud"
+        );
     }
 
     // --- caps-negotiation explainer (M280) -------------------------------
@@ -2930,14 +3380,21 @@ mod tests {
 
         // Wide sets elide past four alternatives so the line stays readable.
         let wide = CapsSet::from_alternatives(
-            (1..=6).map(|w| fixed_video(RawVideoFormat::Rgba8, w * 16, 48, 30)).collect(),
+            (1..=6)
+                .map(|w| fixed_video(RawVideoFormat::Rgba8, w * 16, 48, 30))
+                .collect(),
         );
         assert!(fmt_set(&wide).contains("(+2 more)"), "{}", fmt_set(&wide));
 
         // Constraint summaries name the shape.
-        assert!(fmt_caps_constraint(&CapsConstraint::Produces(CapsSet::one(rgba.clone())))
-            .starts_with("produces "));
-        assert_eq!(fmt_caps_constraint(&CapsConstraint::AcceptsAny), "accepts ANY");
+        assert!(
+            fmt_caps_constraint(&CapsConstraint::Produces(CapsSet::one(rgba.clone())))
+                .starts_with("produces ")
+        );
+        assert_eq!(
+            fmt_caps_constraint(&CapsConstraint::AcceptsAny),
+            "accepts ANY"
+        );
         assert_eq!(
             fmt_caps_constraint(&CapsConstraint::DerivedOutput(Box::new(move |_: &Caps| {
                 CapsSet::one(nv12.clone())

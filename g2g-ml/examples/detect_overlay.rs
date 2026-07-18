@@ -49,16 +49,86 @@ fn detect_dir() -> PathBuf {
 /// COCO-80 class names, indexed by the label the YOLO model emits, so the demo
 /// prints "dog 0.90" rather than "class 16 0.90".
 const COCO: [&str; 80] = [
-    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat",
-    "traffic light", "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog",
-    "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella",
-    "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard", "sports ball", "kite",
-    "baseball bat", "baseball glove", "skateboard", "surfboard", "tennis racket", "bottle",
-    "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple", "sandwich", "orange",
-    "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch", "potted plant",
-    "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote", "keyboard", "cell phone",
-    "microwave", "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase", "scissors",
-    "teddy bear", "hair drier", "toothbrush",
+    "person",
+    "bicycle",
+    "car",
+    "motorcycle",
+    "airplane",
+    "bus",
+    "train",
+    "truck",
+    "boat",
+    "traffic light",
+    "fire hydrant",
+    "stop sign",
+    "parking meter",
+    "bench",
+    "bird",
+    "cat",
+    "dog",
+    "horse",
+    "sheep",
+    "cow",
+    "elephant",
+    "bear",
+    "zebra",
+    "giraffe",
+    "backpack",
+    "umbrella",
+    "handbag",
+    "tie",
+    "suitcase",
+    "frisbee",
+    "skis",
+    "snowboard",
+    "sports ball",
+    "kite",
+    "baseball bat",
+    "baseball glove",
+    "skateboard",
+    "surfboard",
+    "tennis racket",
+    "bottle",
+    "wine glass",
+    "cup",
+    "fork",
+    "knife",
+    "spoon",
+    "bowl",
+    "banana",
+    "apple",
+    "sandwich",
+    "orange",
+    "broccoli",
+    "carrot",
+    "hot dog",
+    "pizza",
+    "donut",
+    "cake",
+    "chair",
+    "couch",
+    "potted plant",
+    "bed",
+    "dining table",
+    "toilet",
+    "tv",
+    "laptop",
+    "mouse",
+    "remote",
+    "keyboard",
+    "cell phone",
+    "microwave",
+    "oven",
+    "toaster",
+    "sink",
+    "refrigerator",
+    "book",
+    "clock",
+    "vase",
+    "scissors",
+    "teddy bear",
+    "hair drier",
+    "toothbrush",
 ];
 
 fn label_name(label: u32) -> &'static str {
@@ -73,7 +143,11 @@ impl PipelineClock for NullClock {
 }
 
 fn tensor_caps(dtype: TensorDType, shape: &[u32]) -> Caps {
-    Caps::Tensor { dtype, shape: TensorShape::from_slice(shape).unwrap(), layout: TensorLayout::Nchw }
+    Caps::Tensor {
+        dtype,
+        shape: TensorShape::from_slice(shape).unwrap(),
+        layout: TensorLayout::Nchw,
+    }
 }
 
 fn rgba_caps(w: u32, h: u32, fps: u32) -> Caps {
@@ -109,7 +183,9 @@ impl SourceLoop for TensorSource {
     }
 
     fn caps_constraint(&mut self) -> impl Future<Output = Result<CapsConstraint<'_>, G2gError>> {
-        core::future::ready(Ok(CapsConstraint::Produces(CapsSet::one(self.caps.clone()))))
+        core::future::ready(Ok(CapsConstraint::Produces(CapsSet::one(
+            self.caps.clone(),
+        ))))
     }
 
     fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -175,9 +251,13 @@ impl AsyncElement for MetaSink {
 /// Run the real `TensorSource -> OrtInference -> DetectionPostprocess` chain on
 /// the preprocessed model input and return the structured detections it produces.
 async fn run_detection(model: &[u8], input: Vec<u8>) -> AnalyticsMeta {
-    let mut src =
-        TensorSource { caps: tensor_caps(TensorDType::F32, &[1, 3, SIZE, SIZE]), data: Some(input) };
-    let mut infer = OrtInference::from_memory(model).expect("model loads").with_tensor_input();
+    let mut src = TensorSource {
+        caps: tensor_caps(TensorDType::F32, &[1, 3, SIZE, SIZE]),
+        data: Some(input),
+    };
+    let mut infer = OrtInference::from_memory(model)
+        .expect("model loads")
+        .with_tensor_input();
     let mut decode = DetectionPostprocess::new(0.25, 0.45).with_input_size(SIZE, SIZE);
     let mut sink = MetaSink::default();
 
@@ -304,7 +384,12 @@ impl AsyncElement for CaptureSink {
     }
 
     fn configure_pipeline(&mut self, caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        if let Caps::RawVideo { width: Dim::Fixed(w), height: Dim::Fixed(h), .. } = caps {
+        if let Caps::RawVideo {
+            width: Dim::Fixed(w),
+            height: Dim::Fixed(h),
+            ..
+        } = caps
+        {
             self.width = *w;
             self.height = *h;
         }
@@ -339,18 +424,33 @@ fn write_ppm(path: &str, rgba: &[u8], w: u32, h: u32) -> std::io::Result<()> {
 
 /// Still path: `ImageSource -> AnalyticsOverlay -> CaptureSink`, one frame, write PPM.
 fn render_still(rgba: Vec<u8>, meta: AnalyticsMeta, path: &str) {
-    let mut src = ImageSource { rgba, meta, width: SIZE, height: SIZE, fps: 30, frames: 1 };
+    let mut src = ImageSource {
+        rgba,
+        meta,
+        width: SIZE,
+        height: SIZE,
+        fps: 30,
+        frames: 1,
+    };
     let mut overlay = AnalyticsOverlay::new().with_thickness(3);
     let mut sink = CaptureSink::default();
 
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("rt");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("rt");
     let transforms: Vec<&mut dyn DynAsyncElement> = vec![&mut overlay];
-    rt.block_on(run_linear_chain(&mut src, transforms, &mut sink, &NullClock, 4))
-        .expect("overlay pipeline runs");
+    rt.block_on(run_linear_chain(
+        &mut src, transforms, &mut sink, &NullClock, 4,
+    ))
+    .expect("overlay pipeline runs");
 
     let frame = sink.last.expect("a frame reached the sink");
     write_ppm(path, &frame, sink.width, sink.height).expect("write ppm");
-    println!("wrote annotated frame -> {path} ({}x{})", sink.width, sink.height);
+    println!(
+        "wrote annotated frame -> {path} ({}x{})",
+        sink.width, sink.height
+    );
 }
 
 /// Live path: `ImageSource -> AnalyticsOverlay -> VideoConvert(NV12) -> WaylandSink`.
@@ -371,9 +471,13 @@ fn render_live(rgba: Vec<u8>, meta: AnalyticsMeta, frames: u64) {
         fps: 30,
         frames,
     }));
-    let overlay = g.add_transform(GraphNodeRef::element(AnalyticsOverlay::new().with_thickness(3)));
+    let overlay = g.add_transform(GraphNodeRef::element(
+        AnalyticsOverlay::new().with_thickness(3),
+    ));
     // WaylandSink consumes NV12, so convert sits between the RGBA8 overlay and it.
-    let convert = g.add_transform(GraphNodeRef::element(VideoConvert::new(RawVideoFormat::Nv12)));
+    let convert = g.add_transform(GraphNodeRef::element(VideoConvert::new(
+        RawVideoFormat::Nv12,
+    )));
     let sink = g.add_sink(GraphNodeRef::element(
         WaylandSink::new().with_title("g2g detect overlay demo"),
     ));
@@ -382,7 +486,10 @@ fn render_live(rgba: Vec<u8>, meta: AnalyticsMeta, frames: u64) {
     g.link(convert, sink).expect("link convert->sink");
 
     let clock = WallClock::new();
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("rt");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("rt");
     println!("presenting {frames} frames of {SIZE}x{SIZE} with detections...");
     match rt.block_on(run_graph(g, &clock, 4)) {
         Ok(stats) => println!("done: {} frames presented", stats.frames_consumed),
@@ -404,7 +511,10 @@ fn main() {
     let model = std::fs::read(&model_path).expect("read model");
     let input = std::fs::read(&input_path).expect("read input");
 
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("rt");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("rt");
     let meta = rt.block_on(run_detection(&model, input.clone()));
 
     println!("detector found {} object(s):", meta.detections().count());
@@ -425,10 +535,18 @@ fn main() {
             render_live(rgba, meta, frames);
             return;
         }
-        render_still(rgba, meta, arg.as_deref().unwrap_or("/tmp/detect_overlay.ppm"));
+        render_still(
+            rgba,
+            meta,
+            arg.as_deref().unwrap_or("/tmp/detect_overlay.ppm"),
+        );
     }
     #[cfg(not(feature = "detect-overlay-live"))]
     {
-        render_still(rgba, meta, arg.as_deref().unwrap_or("/tmp/detect_overlay.ppm"));
+        render_still(
+            rgba,
+            meta,
+            arg.as_deref().unwrap_or("/tmp/detect_overlay.ppm"),
+        );
     }
 }

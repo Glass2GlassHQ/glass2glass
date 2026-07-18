@@ -28,13 +28,17 @@ pub struct PacketChannel<M: RawMutex, const N: usize> {
 
 impl<M: RawMutex, const N: usize> PacketChannel<M, N> {
     pub const fn new() -> Self {
-        Self { inner: Channel::new() }
+        Self {
+            inner: Channel::new(),
+        }
     }
 
     /// An [`OutputSink`] that pushes packets into this channel; hand it to a
     /// producing source or transform.
     pub fn sink(&self) -> EmbassySink<'_, M, N> {
-        EmbassySink { sender: self.inner.sender() }
+        EmbassySink {
+            sender: self.inner.sender(),
+        }
     }
 
     /// The receiving end for the consumer task.

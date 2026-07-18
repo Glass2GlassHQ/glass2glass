@@ -38,35 +38,35 @@ use core::pin::Pin;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use windows::Win32::Media::MediaFoundation::{
-    IMFDXGIBuffer, IMFDXGIDeviceManager, IMFSample, IMFTransform, MFCreateDXGIDeviceManager,
-    MFCreateMediaType,
-    MFCreateMemoryBuffer, MFCreateSample, MFShutdown, MFStartup, CLSID_MSH264DecoderMFT,
-    CLSID_MSH265DecoderMFT, MFMediaType_Video, MFSTARTUP_FULL, MFT_MESSAGE_COMMAND_DRAIN,
-    MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
-    MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES,
-    MFVideoFormat_H264, MFVideoFormat_HEVC, MFVideoFormat_NV12, MF_E_NOTACCEPTING,
-    MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE, MF_MT_DEFAULT_STRIDE,
-    MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_VERSION,
-};
+use windows::core::Interface;
 use windows::Win32::Foundation::HMODULE;
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
-use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_NV12;
 use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Multithread, ID3D11Texture2D,
     D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_SDK_VERSION,
 };
+use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_NV12;
+use windows::Win32::Media::MediaFoundation::{
+    CLSID_MSH264DecoderMFT, CLSID_MSH265DecoderMFT, IMFDXGIBuffer, IMFDXGIDeviceManager, IMFSample,
+    IMFTransform, MFCreateDXGIDeviceManager, MFCreateMediaType, MFCreateMemoryBuffer,
+    MFCreateSample, MFMediaType_Video, MFShutdown, MFStartup, MFVideoFormat_H264,
+    MFVideoFormat_HEVC, MFVideoFormat_NV12, MFSTARTUP_FULL, MFT_MESSAGE_COMMAND_DRAIN,
+    MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
+    MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER,
+    MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MF_E_NOTACCEPTING, MF_E_TRANSFORM_NEED_MORE_INPUT,
+    MF_E_TRANSFORM_STREAM_CHANGE, MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE,
+    MF_MT_SUBTYPE, MF_VERSION,
+};
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
 };
-use windows::core::Interface;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, D3D11KeepAlive,
-    Dim, FrameTiming, G2gError, HardwareError, MemoryDomain, OutputSink, OwnedD3D11Texture,
-    PadTemplate, PadTemplates, PipelinePacket, Rate, VideoCodec, RawVideoFormat,
+    AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
+    D3D11KeepAlive, Dim, FrameTiming, G2gError, HardwareError, MemoryDomain, OutputSink,
+    OwnedD3D11Texture, PadTemplate, PadTemplates, PipelinePacket, Rate, RawVideoFormat, VideoCodec,
 };
 
 /// Live MFT plus the negotiated output geometry. Recreated nowhere — the
@@ -381,7 +381,8 @@ impl MfDecode {
 }
 
 impl AsyncElement for MfDecode {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -407,7 +408,9 @@ impl AsyncElement for MfDecode {
     /// NV12, so there is no output-format choice.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         let codec = self.codec;
-        CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| derive_output_caps(codec, input)))
+        CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| {
+            derive_output_caps(codec, input)
+        }))
     }
 
     /// M12 / W1: record the downstream consumer's allocation proposal. A
@@ -517,7 +520,8 @@ impl AsyncElement for MfDecode {
                             "mfdecode decode-time output {new_caps:?} inconsistent with derive_output_caps({input:?}) = {expected:?}"
                         );
                     }
-                    out.push(PipelinePacket::CapsChanged(new_caps.clone())).await?;
+                    out.push(PipelinePacket::CapsChanged(new_caps.clone()))
+                        .await?;
                     self.last_caps = Some(new_caps.clone());
                 }
                 let domain = match d.payload {
@@ -640,9 +644,7 @@ fn init_decoder(
         input
             .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
             .map_err(mf_err)?;
-        input
-            .SetGUID(&MF_MT_SUBTYPE, &subtype)
-            .map_err(mf_err)?;
+        input.SetGUID(&MF_MT_SUBTYPE, &subtype).map_err(mf_err)?;
         if width != 0 && height != 0 {
             input
                 .SetUINT64(&MF_MT_FRAME_SIZE, pack_size(width, height))
@@ -683,8 +685,8 @@ fn init_decoder(
 /// Foundation DXGI device manager. Returns the device, the manager, and the
 /// manager's reset token. The device is created with multithread protection
 /// on, which Media Foundation requires for a shared decode device.
-fn create_d3d11_device_and_manager(
-) -> Result<(ID3D11Device, IMFDXGIDeviceManager, u32), G2gError> {
+fn create_d3d11_device_and_manager() -> Result<(ID3D11Device, IMFDXGIDeviceManager, u32), G2gError>
+{
     // SAFETY: D3D11/MF object creation on the owning thread; out-params are
     // initialised by the calls before we read them.
     unsafe {
@@ -821,7 +823,12 @@ fn copy_sample(
 /// `stride`-byte source pitch. When `stride == width` this is a single
 /// contiguous copy. Rows beyond what the source actually holds are skipped
 /// (left zero) rather than panicking, so a short buffer fails safe.
-fn pack_nv12(src: &[u8], width: usize, height: usize, stride: usize) -> Result<Box<[u8]>, G2gError> {
+fn pack_nv12(
+    src: &[u8],
+    width: usize,
+    height: usize,
+    stride: usize,
+) -> Result<Box<[u8]>, G2gError> {
     if width == 0 || height == 0 || stride < width {
         return Err(G2gError::Hardware(HardwareError::Other));
     }
@@ -857,7 +864,8 @@ fn extract_texture(
         let buffer = sample.GetBufferByIndex(0).map_err(mf_err)?;
         let dxgi: IMFDXGIBuffer = buffer.cast().map_err(mf_err)?;
         let mut raw: *mut core::ffi::c_void = core::ptr::null_mut();
-        dxgi.GetResource(&ID3D11Texture2D::IID, &mut raw).map_err(mf_err)?;
+        dxgi.GetResource(&ID3D11Texture2D::IID, &mut raw)
+            .map_err(mf_err)?;
         if raw.is_null() {
             return Err(G2gError::Hardware(HardwareError::Other));
         }

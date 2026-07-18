@@ -23,12 +23,12 @@ use core::pin::Pin;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use ffmpeg_next as ffmpeg;
 use ffmpeg::codec::{self, Id};
 use ffmpeg::format::sample::{Sample, Type};
 use ffmpeg::frame::Audio as FfAudio;
 use ffmpeg::packet::Packet;
 use ffmpeg::Error as FfError;
+use ffmpeg_next as ffmpeg;
 
 use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
@@ -76,7 +76,12 @@ impl Default for FfmpegAudioDec {
 
 impl FfmpegAudioDec {
     pub fn new() -> Self {
-        Self { decoder: None, configured: false, emitted: 0, last_out: None }
+        Self {
+            decoder: None,
+            configured: false,
+            emitted: 0,
+            last_out: None,
+        }
     }
 
     /// Count of decoded `DataFrame`s pushed downstream. Useful in tests.
@@ -102,13 +107,17 @@ impl FfmpegAudioDec {
 }
 
 impl AsyncElement for FfmpegAudioDec {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         match upstream_caps {
-            Caps::Audio { format: AudioFormat::Aac, .. } => Ok(upstream_caps.clone()),
+            Caps::Audio {
+                format: AudioFormat::Aac,
+                ..
+            } => Ok(upstream_caps.clone()),
             _ => Err(G2gError::CapsMismatch),
         }
     }
@@ -126,7 +135,10 @@ impl AsyncElement for FfmpegAudioDec {
     /// the downstream `audioconvert` retargets (mono fan-out, multichannel downmix).
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
-            Caps::Audio { format: AudioFormat::Aac, .. } => CapsSet::one(Caps::Audio {
+            Caps::Audio {
+                format: AudioFormat::Aac,
+                ..
+            } => CapsSet::one(Caps::Audio {
                 format: AudioFormat::PcmS16Le,
                 channels: ANY_CHANNELS,
                 // A concrete default rate (a raw-PCM `ANY_SAMPLE_RATE` is
@@ -140,11 +152,16 @@ impl AsyncElement for FfmpegAudioDec {
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        let Caps::Audio { format: AudioFormat::Aac, .. } = absolute_caps else {
+        let Caps::Audio {
+            format: AudioFormat::Aac,
+            ..
+        } = absolute_caps
+        else {
             return Err(G2gError::CapsMismatch);
         };
         ffmpeg::init().map_err(|_| G2gError::Hardware(HardwareError::Other))?;
-        let codec = codec::decoder::find(Id::AAC).ok_or(G2gError::Hardware(HardwareError::Other))?;
+        let codec =
+            codec::decoder::find(Id::AAC).ok_or(G2gError::Hardware(HardwareError::Other))?;
         let decoder = codec::decoder::new()
             .open_as(codec)
             .map_err(|_| G2gError::Hardware(HardwareError::Other))?
@@ -199,8 +216,14 @@ impl AsyncElement for FfmpegAudioDec {
                     // re-derives its output from decoded frames); the runner's
                     // pre-fixed forward output PcmS16Le caps are passed on.
                     match &c {
-                        Caps::Audio { format: AudioFormat::Aac, .. } => {}
-                        Caps::Audio { format: AudioFormat::PcmS16Le, .. } => {
+                        Caps::Audio {
+                            format: AudioFormat::Aac,
+                            ..
+                        } => {}
+                        Caps::Audio {
+                            format: AudioFormat::PcmS16Le,
+                            ..
+                        } => {
                             out.push(PipelinePacket::CapsChanged(c.clone())).await?;
                             self.last_out = Some(c);
                         }
@@ -218,7 +241,8 @@ impl AsyncElement for FfmpegAudioDec {
                 }
                 PipelinePacket::Eos => {
                     if let Some(d) = self.decoder.as_mut() {
-                        d.send_eof().map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+                        d.send_eof()
+                            .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
                     }
                     self.drain(&mut decoded)?;
                 }
@@ -239,7 +263,8 @@ impl AsyncElement for FfmpegAudioDec {
                     sample_rate: d.rate,
                 };
                 if self.last_out.as_ref() != Some(&new_caps) {
-                    out.push(PipelinePacket::CapsChanged(new_caps.clone())).await?;
+                    out.push(PipelinePacket::CapsChanged(new_caps.clone()))
+                        .await?;
                     self.last_out = Some(new_caps);
                 }
                 let out_frame = Frame {
@@ -258,9 +283,20 @@ impl AsyncElement for FfmpegAudioDec {
 
 impl PadTemplates for FfmpegAudioDec {
     fn pad_templates() -> Vec<PadTemplate> {
-        let aac = Caps::Audio { format: AudioFormat::Aac, channels: ANY_CHANNELS, sample_rate: 0 };
-        let pcm = Caps::Audio { format: AudioFormat::PcmS16Le, channels: ANY_CHANNELS, sample_rate: ANY_SAMPLE_RATE };
-        Vec::from([PadTemplate::sink(CapsSet::one(aac)), PadTemplate::source(CapsSet::one(pcm))])
+        let aac = Caps::Audio {
+            format: AudioFormat::Aac,
+            channels: ANY_CHANNELS,
+            sample_rate: 0,
+        };
+        let pcm = Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            channels: ANY_CHANNELS,
+            sample_rate: ANY_SAMPLE_RATE,
+        };
+        Vec::from([
+            PadTemplate::sink(CapsSet::one(aac)),
+            PadTemplate::source(CapsSet::one(pcm)),
+        ])
     }
 }
 
@@ -337,7 +373,11 @@ fn to_s16_interleaved(frame: &FfAudio) -> Result<DecodedAudio, G2gError> {
     for s in out {
         pcm.extend_from_slice(&s.to_le_bytes());
     }
-    Ok(DecodedAudio { pcm, channels: channels as u8, rate: frame.rate() })
+    Ok(DecodedAudio {
+        pcm,
+        channels: channels as u8,
+        rate: frame.rate(),
+    })
 }
 
 #[cfg(test)]
@@ -373,7 +413,11 @@ mod tests {
         let mut buf = adts(20);
         buf.extend_from_slice(&adts(30)[..10]); // a second frame claiming 30 bytes, only 10 present
         let frames = adts_frames(&buf);
-        assert_eq!(frames.len(), 1, "the complete frame is kept, the truncated tail dropped");
+        assert_eq!(
+            frames.len(),
+            1,
+            "the complete frame is kept, the truncated tail dropped"
+        );
         assert_eq!(frames[0].len(), 20);
     }
 

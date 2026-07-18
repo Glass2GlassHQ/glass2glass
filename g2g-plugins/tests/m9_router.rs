@@ -19,7 +19,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_source_fanout, SourceLoop};
 use g2g_core::{
     AsyncElement, Caps, ConfigureOutcome, Dim, G2gError, MemoryDomain, OutputSink, PipelineClock,
-    PipelinePacket, Rate, Router, RawVideoFormat,
+    PipelinePacket, Rate, RawVideoFormat, Router,
 };
 
 struct ZeroClock;
@@ -60,7 +60,8 @@ impl SourceLoop for BarrierSrc {
     where
         Self: 'a;
 
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 
@@ -97,7 +98,12 @@ struct SignalSink {
 
 impl SignalSink {
     fn new(first_tx: Option<oneshot::Sender<()>>) -> Self {
-        Self { received: 0, last_seq: None, eos: false, first_tx }
+        Self {
+            received: 0,
+            last_seq: None,
+            eos: false,
+            first_tx,
+        }
     }
 }
 
@@ -129,7 +135,8 @@ impl AsyncElement for SignalSink {
                 }
             }
             PipelinePacket::Eos => self.eos = true,
-            PipelinePacket::CapsChanged(_) | PipelinePacket::Flush | PipelinePacket::Segment(_) => {}
+            PipelinePacket::CapsChanged(_) | PipelinePacket::Flush | PipelinePacket::Segment(_) => {
+            }
             _ => {}
         }
         Box::pin(async { Ok(()) })
@@ -143,7 +150,10 @@ async fn router_switched_mid_stream_splits_across_branches() {
     let release = Arc::new(Notify::new());
     let (first_tx, first_rx) = oneshot::channel();
 
-    let mut src = BarrierSrc { release: release.clone(), configured: false };
+    let mut src = BarrierSrc {
+        release: release.clone(),
+        configured: false,
+    };
     let mut sink_a = SignalSink::new(Some(first_tx));
     let mut sink_b = SignalSink::new(None);
     let clock = ZeroClock;
@@ -163,13 +173,19 @@ async fn router_switched_mid_stream_splits_across_branches() {
     let stats = res.expect("fan-out pipeline should complete");
 
     assert_eq!(stats.frames_emitted, 4);
-    assert_eq!(stats.frames_consumed, 4, "every frame reaches exactly one branch");
+    assert_eq!(
+        stats.frames_consumed, 4,
+        "every frame reaches exactly one branch"
+    );
 
     assert_eq!(sink_a.received, 1, "branch A got frame 0 before the switch");
     assert_eq!(sink_a.last_seq, Some(0));
     assert!(sink_a.eos, "EOS broadcast to branch A");
 
-    assert_eq!(sink_b.received, 3, "branch B got frames 1,2,3 after the switch");
+    assert_eq!(
+        sink_b.received, 3,
+        "branch B got frames 1,2,3 after the switch"
+    );
     assert_eq!(sink_b.last_seq, Some(3));
     assert!(sink_b.eos, "EOS broadcast to branch B");
 }

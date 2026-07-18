@@ -14,7 +14,7 @@ use core::pin::Pin;
 use g2g_core::runtime::{run_aggregator_dynamic, DynSourceLoop, SourceLoop};
 use g2g_core::{
     Caps, CapsConstraint, ConfigureOutcome, Dim, G2gError, MultiInputElement, OutputSink,
-    PipelinePacket, RawVideoFormat, Rate,
+    PipelinePacket, Rate, RawVideoFormat,
 };
 
 fn caps() -> Caps {
@@ -48,7 +48,10 @@ impl SourceLoop for CountedSource {
                     g2g_core::MemoryDomain::System(g2g_core::memory::SystemSlice::from_boxed(
                         std::vec![0u8; 4].into_boxed_slice(),
                     )),
-                    g2g_core::FrameTiming { pts_ns: seq, ..Default::default() },
+                    g2g_core::FrameTiming {
+                        pts_ns: seq,
+                        ..Default::default()
+                    },
                     seq,
                 );
                 out.push(PipelinePacket::DataFrame(frame)).await?;
@@ -69,7 +72,11 @@ struct RecordingAggregator {
 
 impl RecordingAggregator {
     fn new(inputs: usize) -> Self {
-        Self { inputs, frames: std::vec![0; inputs], eos: std::vec![0; inputs] }
+        Self {
+            inputs,
+            frames: std::vec![0; inputs],
+            eos: std::vec![0; inputs],
+        }
     }
 }
 
@@ -130,10 +137,24 @@ async fn runtime_inputs_attach_to_distinct_pads_and_end_on_all_eos() {
     let stats = run.await.expect("dynamic fan-in run");
 
     // Each input's frames landed on its own pad, in add order; pad 2 stayed dark.
-    assert_eq!(agg.frames, std::vec![5, 3, 0], "per-pad frame routing for runtime inputs");
-    assert_eq!(agg.eos, std::vec![1, 1, 0], "per-input EOS delivered to its pad");
-    assert_eq!(stats.frames_consumed, 8, "aggregator consumed the union of inputs");
-    assert_eq!(stats.frames_emitted, 8, "both runtime inputs' frames summed");
+    assert_eq!(
+        agg.frames,
+        std::vec![5, 3, 0],
+        "per-pad frame routing for runtime inputs"
+    );
+    assert_eq!(
+        agg.eos,
+        std::vec![1, 1, 0],
+        "per-input EOS delivered to its pad"
+    );
+    assert_eq!(
+        stats.frames_consumed, 8,
+        "aggregator consumed the union of inputs"
+    );
+    assert_eq!(
+        stats.frames_emitted, 8,
+        "both runtime inputs' frames summed"
+    );
 }
 
 #[tokio::test]
@@ -145,12 +166,20 @@ async fn add_input_past_pad_capacity_is_rejected() {
     handle
         .add_input(Box::new(CountedSource { n: 4 }) as Box<dyn DynSourceLoop>)
         .expect("first input fits the single pad");
-    let rejected =
-        handle.add_input(Box::new(CountedSource { n: 9 }) as Box<dyn DynSourceLoop>);
-    assert!(rejected.is_err(), "no free pad: the second add must be rejected");
+    let rejected = handle.add_input(Box::new(CountedSource { n: 9 }) as Box<dyn DynSourceLoop>);
+    assert!(
+        rejected.is_err(),
+        "no free pad: the second add must be rejected"
+    );
     drop(handle);
 
-    let stats = run.await.expect("run completes with the one attached input");
-    assert_eq!(agg.frames, std::vec![4], "only the accepted input's frames were aggregated");
+    let stats = run
+        .await
+        .expect("run completes with the one attached input");
+    assert_eq!(
+        agg.frames,
+        std::vec![4],
+        "only the accepted input's frames were aggregated"
+    );
     assert_eq!(stats.frames_consumed, 4);
 }

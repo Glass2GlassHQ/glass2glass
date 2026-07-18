@@ -54,7 +54,11 @@ fn ts_packet(pid: u16, pusi: bool, payload: &[u8]) -> Vec<u8> {
 }
 fn psi(pid: u16, table_id: u8, body: &[u8]) -> Vec<u8> {
     let section_length = body.len() + 4;
-    let mut s = vec![table_id, 0xB0 | ((section_length >> 8) as u8 & 0x0F), (section_length & 0xFF) as u8];
+    let mut s = vec![
+        table_id,
+        0xB0 | ((section_length >> 8) as u8 & 0x0F),
+        (section_length & 0xFF) as u8,
+    ];
     s.extend_from_slice(body);
     s.extend_from_slice(&[0, 0, 0, 0]);
     let mut payload = vec![0u8];
@@ -62,18 +66,46 @@ fn psi(pid: u16, table_id: u8, body: &[u8]) -> Vec<u8> {
     ts_packet(pid, true, &payload)
 }
 fn pat(pmt_pid: u16) -> Vec<u8> {
-    psi(0x0000, 0x00, &[0, 1, 0xC1, 0, 0, 0, 1, 0xE0 | (pmt_pid >> 8) as u8 & 0x1F, pmt_pid as u8])
+    psi(
+        0x0000,
+        0x00,
+        &[
+            0,
+            1,
+            0xC1,
+            0,
+            0,
+            0,
+            1,
+            0xE0 | (pmt_pid >> 8) as u8 & 0x1F,
+            pmt_pid as u8,
+        ],
+    )
 }
 fn pmt2(v_pid: u16, v_type: u8, a_pid: u16, a_type: u8) -> Vec<u8> {
     psi(
         0x1000,
         0x02,
         &[
-            0x00, 0x01, 0xC1, 0x00, 0x00,
-            0xE0 | (v_pid >> 8) as u8 & 0x1F, v_pid as u8,
-            0xF0, 0x00,
-            v_type, 0xE0 | (v_pid >> 8) as u8 & 0x1F, v_pid as u8, 0xF0, 0x00,
-            a_type, 0xE0 | (a_pid >> 8) as u8 & 0x1F, a_pid as u8, 0xF0, 0x00,
+            0x00,
+            0x01,
+            0xC1,
+            0x00,
+            0x00,
+            0xE0 | (v_pid >> 8) as u8 & 0x1F,
+            v_pid as u8,
+            0xF0,
+            0x00,
+            v_type,
+            0xE0 | (v_pid >> 8) as u8 & 0x1F,
+            v_pid as u8,
+            0xF0,
+            0x00,
+            a_type,
+            0xE0 | (a_pid >> 8) as u8 & 0x1F,
+            a_pid as u8,
+            0xF0,
+            0x00,
         ],
     )
 }
@@ -96,7 +128,10 @@ struct PortTap {
 }
 impl PortTap {
     fn new(ports: usize) -> Self {
-        Self { frames: vec![Vec::new(); ports], caps: vec![Vec::new(); ports] }
+        Self {
+            frames: vec![Vec::new(); ports],
+            caps: vec![Vec::new(); ports],
+        }
     }
 }
 impl MultiOutputSink for PortTap {
@@ -107,7 +142,10 @@ impl MultiOutputSink for PortTap {
     ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
         Box::pin(async move {
             match packet {
-                PipelinePacket::DataFrame(Frame { domain: MemoryDomain::System(s), .. }) => {
+                PipelinePacket::DataFrame(Frame {
+                    domain: MemoryDomain::System(s),
+                    ..
+                }) => {
                     self.frames[port].push(s.as_slice().to_vec());
                 }
                 PipelinePacket::CapsChanged(c) => self.caps[port].push(c),
@@ -160,7 +198,9 @@ async fn tsdemuxn_splits_av_onto_two_ports() {
     let (bus, handle) = Bus::new(16);
     let mut demux = TsDemuxN::new(vec![TsStream::H264, TsStream::Aac]).with_bus(handle);
     demux
-        .configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs })
+        .configure_pipeline(&Caps::ByteStream {
+            encoding: ByteStreamEncoding::MpegTs,
+        })
         .expect("configure");
 
     let mut tap = PortTap::new(2);
@@ -169,14 +209,34 @@ async fn tsdemuxn_splits_av_onto_two_ports() {
     demux.process(PipelinePacket::Eos, &mut tap).await.unwrap();
 
     // Port 0 carries the two H.264 access units; port 1 the two AAC ones.
-    assert_eq!(tap.frames[0], vec![v0.to_vec(), v1.to_vec()], "video AUs on port 0");
-    assert_eq!(tap.frames[1], vec![a0.to_vec(), a1.to_vec()], "audio AUs on port 1");
+    assert_eq!(
+        tap.frames[0],
+        vec![v0.to_vec(), v1.to_vec()],
+        "video AUs on port 0"
+    );
+    assert_eq!(
+        tap.frames[1],
+        vec![a0.to_vec(), a1.to_vec()],
+        "audio AUs on port 1"
+    );
 
     // Each port announced its elementary caps once, before its frames.
     assert_eq!(tap.caps[0].len(), 1, "one CapsChanged on the video port");
-    assert!(matches!(tap.caps[0][0], Caps::CompressedVideo { codec: VideoCodec::H264, .. }));
+    assert!(matches!(
+        tap.caps[0][0],
+        Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            ..
+        }
+    ));
     assert_eq!(tap.caps[1].len(), 1, "one CapsChanged on the audio port");
-    assert!(matches!(tap.caps[1][0], Caps::Audio { format: AudioFormat::Aac, .. }));
+    assert!(matches!(
+        tap.caps[1][0],
+        Caps::Audio {
+            format: AudioFormat::Aac,
+            ..
+        }
+    ));
 
     // The same StreamCollection (M386) is announced for discovery.
     let collections = core::iter::from_fn(|| bus.try_recv())
@@ -194,13 +254,18 @@ async fn tsdemuxn_leaves_an_absent_streams_port_dark() {
 
     let mut demux = TsDemuxN::new(vec![TsStream::H264, TsStream::Aac]);
     demux
-        .configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs })
+        .configure_pipeline(&Caps::ByteStream {
+            encoding: ByteStreamEncoding::MpegTs,
+        })
         .unwrap();
     let mut tap = PortTap::new(2);
     demux.process(data_frame(ts), &mut tap).await.unwrap();
     demux.process(PipelinePacket::Eos, &mut tap).await.unwrap();
 
     assert_eq!(tap.frames[0].len(), 2, "video port carries its AUs");
-    assert!(tap.frames[1].is_empty(), "audio port stays dark (no audio in the multiplex)");
+    assert!(
+        tap.frames[1].is_empty(),
+        "audio port stays dark (no audio in the multiplex)"
+    );
     assert!(tap.caps[1].is_empty(), "a dark port announces nothing");
 }

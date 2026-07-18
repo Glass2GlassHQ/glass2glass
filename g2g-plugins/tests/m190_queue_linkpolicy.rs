@@ -32,7 +32,12 @@ fn sole_edge_policy(line: &str) -> LinkPolicy {
     let reg = default_registry();
     let graph = parse_launch(&reg, line).unwrap_or_else(|e| panic!("{line:?} should parse: {e:?}"));
     let edges = graph.edges();
-    assert_eq!(edges.len(), 1, "{line:?} should contract to one edge, got {}", edges.len());
+    assert_eq!(
+        edges.len(),
+        1,
+        "{line:?} should contract to one edge, got {}",
+        edges.len()
+    );
     edges[0].policy
 }
 
@@ -94,7 +99,10 @@ async fn queue_on_a_tee_branch_runs() {
     let graph = parse_launch(&reg, line).unwrap_or_else(|e| panic!("{line:?} should parse: {e:?}"));
     // tee has one input edge + two output edges = three edges, all queues gone.
     assert_eq!(graph.edges().len(), 3, "{line}");
-    let consumed = run_graph(graph, &ZeroClock, 4).await.expect("tee+queue runs").frames_consumed;
+    let consumed = run_graph(graph, &ZeroClock, 4)
+        .await
+        .expect("tee+queue runs")
+        .frames_consumed;
     assert_eq!(consumed, 4, "both branches consume 2 frames each");
 }
 

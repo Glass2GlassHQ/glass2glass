@@ -41,12 +41,12 @@ use web_sys::{
     GpuBindGroupDescriptor, GpuBindGroupEntry, GpuBindGroupLayout, GpuBindGroupLayoutDescriptor,
     GpuBindGroupLayoutEntry, GpuCanvasAlphaMode, GpuCanvasConfiguration, GpuCanvasContext,
     GpuColorTargetState, GpuDevice, GpuExternalTextureBindingLayout, GpuExternalTextureDescriptor,
-    GpuFragmentState, GpuLoadOp, GpuPipelineLayoutDescriptor, GpuPrimitiveState,
-    GpuPowerPreference, GpuPrimitiveTopology, GpuQueue,
-    GpuRenderPassColorAttachment, GpuRenderPassDescriptor, GpuRenderPipeline,
-    GpuRenderPipelineDescriptor, GpuRequestAdapterOptions, GpuSampler, GpuSamplerBindingLayout,
-    GpuSamplerBindingType, GpuShaderModuleDescriptor, GpuStoreOp, GpuTextureFormat,
-    GpuUncapturedErrorEvent, GpuVertexState, HtmlCanvasElement,
+    GpuFragmentState, GpuLoadOp, GpuPipelineLayoutDescriptor, GpuPowerPreference,
+    GpuPrimitiveState, GpuPrimitiveTopology, GpuQueue, GpuRenderPassColorAttachment,
+    GpuRenderPassDescriptor, GpuRenderPipeline, GpuRenderPipelineDescriptor,
+    GpuRequestAdapterOptions, GpuSampler, GpuSamplerBindingLayout, GpuSamplerBindingType,
+    GpuShaderModuleDescriptor, GpuStoreOp, GpuTextureFormat, GpuUncapturedErrorEvent,
+    GpuVertexState, HtmlCanvasElement,
 };
 
 use crate::webcodecsdecode::VideoFrameOwner;
@@ -259,7 +259,8 @@ impl WebGpuCanvasSink {
         // integrated (which on some drivers can fail the canvas swap-chain alloc).
         let opts = GpuRequestAdapterOptions::new();
         opts.set_power_preference(GpuPowerPreference::HighPerformance);
-        let adapter_promise: js_sys::Promise = gpu.request_adapter_with_options(&opts).unchecked_into();
+        let adapter_promise: js_sys::Promise =
+            gpu.request_adapter_with_options(&opts).unchecked_into();
         let adapter = JsFuture::from(adapter_promise)
             .await
             .map_err(|_| err())?
@@ -279,13 +280,14 @@ impl WebGpuCanvasSink {
         // without this a swap-chain / allocation failure is a silent black canvas
         // (as seen with a mis-selected Vulkan ICD). Log them like the pipeline's
         // terminal-error `report` on the ingest side.
-        let on_error =
-            Closure::<dyn FnMut(GpuUncapturedErrorEvent)>::new(move |e: GpuUncapturedErrorEvent| {
+        let on_error = Closure::<dyn FnMut(GpuUncapturedErrorEvent)>::new(
+            move |e: GpuUncapturedErrorEvent| {
                 web_sys::console::error_1(&JsValue::from_str(&alloc::format!(
                     "WebGpuCanvasSink: uncaptured WebGPU error: {}",
                     e.error().message()
                 )));
-            });
+            },
+        );
         device.set_onuncapturederror(Some(on_error.as_ref().unchecked_ref()));
         self._on_error = Some(on_error);
 
@@ -305,7 +307,14 @@ impl WebGpuCanvasSink {
         let pipeline = build_pipeline(&device, format, &bind_group_layout, self.head)?;
         let sampler = device.create_sampler();
 
-        self.gpu = Some(GpuState { device, queue, context, pipeline, sampler, bind_group_layout });
+        self.gpu = Some(GpuState {
+            device,
+            queue,
+            context,
+            pipeline,
+            sampler,
+            bind_group_layout,
+        });
         Ok(())
     }
 
@@ -329,13 +338,18 @@ impl WebGpuCanvasSink {
         // Import + bind the external texture. Both are per-frame: an imported
         // external texture is valid only for the current frame.
         let import = GpuExternalTextureDescriptor::new_with_video_frame(video_frame);
-        let external = gpu.device.import_external_texture(&import).map_err(|_| err())?;
+        let external = gpu
+            .device
+            .import_external_texture(&import)
+            .map_err(|_| err())?;
         let entries = [
             GpuBindGroupEntry::new(0, &gpu.sampler),
             GpuBindGroupEntry::new_with_gpu_external_texture(1, &external),
         ];
-        let bind_group =
-            gpu.device.create_bind_group(&GpuBindGroupDescriptor::new(&entries, &gpu.bind_group_layout));
+        let bind_group = gpu.device.create_bind_group(&GpuBindGroupDescriptor::new(
+            &entries,
+            &gpu.bind_group_layout,
+        ));
 
         // Render pass targeting the canvas' current swap-chain texture view.
         let view = gpu
@@ -366,7 +380,8 @@ impl WebGpuCanvasSink {
 }
 
 impl AsyncElement for WebGpuCanvasSink {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -382,7 +397,9 @@ impl AsyncElement for WebGpuCanvasSink {
         let err = || G2gError::Hardware(HardwareError::Other);
         let window = web_sys::window().ok_or_else(err)?;
         let document = window.document().ok_or_else(err)?;
-        let element = document.get_element_by_id(&self.canvas_id).ok_or_else(err)?;
+        let element = document
+            .get_element_by_id(&self.canvas_id)
+            .ok_or_else(err)?;
         let canvas: HtmlCanvasElement = element.dyn_into().map_err(|_| err())?;
         self.canvas = Some(canvas);
         self.configured = true;
@@ -466,7 +483,8 @@ fn build_pipeline(
     let module = device.create_shader_module(&GpuShaderModuleDescriptor::new(SHADER));
 
     let layouts = [JsOption::wrap(bgl.clone())];
-    let pipeline_layout = device.create_pipeline_layout(&GpuPipelineLayoutDescriptor::new(&layouts));
+    let pipeline_layout =
+        device.create_pipeline_layout(&GpuPipelineLayoutDescriptor::new(&layouts));
 
     let vertex = GpuVertexState::new(&module);
     vertex.set_entry_point("vs");

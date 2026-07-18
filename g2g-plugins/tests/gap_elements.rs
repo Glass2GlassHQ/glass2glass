@@ -58,7 +58,9 @@ impl AsyncElement for AnySink {
 
 fn registry_with_anysink() -> Registry {
     let mut reg = default_registry();
-    reg.register_launch(LaunchFactory::new("anysink", Vec::new(), || Box::new(AnySink)));
+    reg.register_launch(LaunchFactory::new("anysink", Vec::new(), || {
+        Box::new(AnySink)
+    }));
     reg
 }
 
@@ -71,7 +73,9 @@ async fn audio_dsp_chain_runs() {
          ! level ! audioecho delay=100000000 intensity=0.4 ! cutter threshold=0.01 ! fakesink",
     )
     .expect("audio DSP pipeline parses");
-    let stats = run_graph(graph, &ZeroClock, 4).await.expect("audio DSP pipeline runs");
+    let stats = run_graph(graph, &ZeroClock, 4)
+        .await
+        .expect("audio DSP pipeline runs");
     assert_eq!(stats.frames_consumed, 5, "all buffers reached the sink");
 }
 
@@ -83,16 +87,23 @@ async fn equalizer_and_spectrum_chain_runs() {
         "audiotestsrc num-buffers=5 ! equalizer-3bands band0=6.0 band2=-6.0 ! spectrum bands=64 ! fakesink",
     )
     .expect("equalizer + spectrum pipeline parses");
-    let stats = run_graph(graph, &ZeroClock, 4).await.expect("equalizer + spectrum pipeline runs");
+    let stats = run_graph(graph, &ZeroClock, 4)
+        .await
+        .expect("equalizer + spectrum pipeline runs");
     assert_eq!(stats.frames_consumed, 5, "all buffers reached the sink");
 }
 
 #[tokio::test]
 async fn clockoverlay_chain_runs() {
     let reg = default_registry();
-    let graph = parse_launch(&reg, "videotestsrc num-buffers=3 ! clockoverlay scale=1 ! fakesink")
-        .expect("clockoverlay pipeline parses");
-    let stats = run_graph(graph, &ZeroClock, 4).await.expect("clockoverlay pipeline runs");
+    let graph = parse_launch(
+        &reg,
+        "videotestsrc num-buffers=3 ! clockoverlay scale=1 ! fakesink",
+    )
+    .expect("clockoverlay pipeline parses");
+    let stats = run_graph(graph, &ZeroClock, 4)
+        .await
+        .expect("clockoverlay pipeline runs");
     assert_eq!(stats.frames_consumed, 3, "all frames reached the sink");
 }
 
@@ -105,7 +116,9 @@ async fn video_utility_chain_runs() {
          ! timeoverlay scale=2 ! progressreport silent=true ! fakesink",
     )
     .expect("video utility pipeline parses");
-    let stats = run_graph(graph, &ZeroClock, 4).await.expect("video utility pipeline runs");
+    let stats = run_graph(graph, &ZeroClock, 4)
+        .await
+        .expect("video utility pipeline runs");
     assert_eq!(stats.frames_consumed, 4, "all frames reached the sink");
 }
 
@@ -117,7 +130,9 @@ async fn concat_plays_two_sources_end_to_end() {
         "videotestsrc num-buffers=4 ! c.   videotestsrc num-buffers=3 ! c.   concat name=c ! anysink",
     )
     .expect("concat pipeline parses");
-    let stats = run_graph(graph, &ZeroClock, 4).await.expect("concat pipeline runs");
+    let stats = run_graph(graph, &ZeroClock, 4)
+        .await
+        .expect("concat pipeline runs");
     assert_eq!(stats.frames_consumed, 7, "4 + 3 frames played in sequence");
 }
 
@@ -131,14 +146,22 @@ async fn input_selector_forwards_only_the_active_pad() {
         "videotestsrc num-buffers=4 ! s.   videotestsrc num-buffers=3 ! s.   input-selector name=s ! anysink",
     )
     .expect("input-selector pipeline parses");
-    let stats = run_graph(graph, &ZeroClock, 4).await.expect("input-selector pipeline runs");
-    assert_eq!(stats.frames_consumed, 4, "only the active input reached the sink");
+    let stats = run_graph(graph, &ZeroClock, 4)
+        .await
+        .expect("input-selector pipeline runs");
+    assert_eq!(
+        stats.frames_consumed, 4,
+        "only the active input reached the sink"
+    );
 }
 
 #[tokio::test]
 async fn multifilesink_then_multifilesrc_round_trips() {
     let dir = std::env::temp_dir();
-    let pat = dir.join("g2g_gap_seq_%03d.raw").to_string_lossy().into_owned();
+    let pat = dir
+        .join("g2g_gap_seq_%03d.raw")
+        .to_string_lossy()
+        .into_owned();
     for i in 0..3 {
         let _ = std::fs::remove_file(pat.replace("%03d", &format!("{i:03}")));
     }
@@ -150,7 +173,9 @@ async fn multifilesink_then_multifilesrc_round_trips() {
         &format!("videotestsrc num-buffers=3 ! multifilesink location={pat}"),
     )
     .expect("write pipeline parses");
-    let stats = run_graph(write, &ZeroClock, 4).await.expect("write pipeline runs");
+    let stats = run_graph(write, &ZeroClock, 4)
+        .await
+        .expect("write pipeline runs");
     assert_eq!(stats.frames_consumed, 3, "three buffers written");
     for i in 0..3 {
         assert!(
@@ -165,7 +190,9 @@ async fn multifilesink_then_multifilesrc_round_trips() {
         &format!("multifilesrc location={pat} stop-index=2 ! fakesink"),
     )
     .expect("read pipeline parses");
-    let stats = run_graph(read, &ZeroClock, 4).await.expect("read pipeline runs");
+    let stats = run_graph(read, &ZeroClock, 4)
+        .await
+        .expect("read pipeline runs");
     assert_eq!(stats.frames_consumed, 3, "three files read back");
 
     for i in 0..3 {

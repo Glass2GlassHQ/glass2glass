@@ -48,7 +48,13 @@ impl Pacer {
     /// spreading rule. The active-portion span for [`PacingProfile::Gapped`] uses the
     /// HD default ratio; see [`Self::with_active_ratio`] to override.
     pub fn new(profile: PacingProfile, packet_count: usize, frame_period_ns: u64) -> Self {
-        Self::with_active_ratio(profile, packet_count, frame_period_ns, GAPPED_ACTIVE_NUM, GAPPED_ACTIVE_DEN)
+        Self::with_active_ratio(
+            profile,
+            packet_count,
+            frame_period_ns,
+            GAPPED_ACTIVE_NUM,
+            GAPPED_ACTIVE_DEN,
+        )
     }
 
     /// As [`Self::new`], but with an explicit gapped active ratio `num/den` (ignored
@@ -72,7 +78,10 @@ impl Pacer {
                 frame_period_ns.saturating_mul(active_num.min(den)) / den
             }
         };
-        Self { interval_ns: span / gaps, packet_count }
+        Self {
+            interval_ns: span / gaps,
+            packet_count,
+        }
     }
 
     /// Spacing between consecutive packets in nanoseconds.
@@ -157,7 +166,11 @@ impl VrxValidator {
     /// A validator draining one packet every `drain_interval_ns` after a `tr_offset_ns`
     /// head start, allowing a peak occupancy of `cmax` packets.
     pub fn new(drain_interval_ns: u64, tr_offset_ns: u64, cmax: u64) -> Self {
-        Self { drain_interval_ns, tr_offset_ns, cmax }
+        Self {
+            drain_interval_ns,
+            tr_offset_ns,
+            cmax,
+        }
     }
 
     /// A validator whose drain schedule matches `pacer` (so a sender emitting exactly on
@@ -206,7 +219,13 @@ impl VrxValidator {
             }
         }
         let conforms = peak <= self.cmax && !underflowed;
-        VrxReport { peak_occupancy: peak, cmax: self.cmax, underflowed, conforms, first_violation }
+        VrxReport {
+            peak_occupancy: peak,
+            cmax: self.cmax,
+            underflowed,
+            conforms,
+            first_violation,
+        }
     }
 }
 
@@ -275,7 +294,10 @@ mod tests {
         let period = frame_period_ns(50);
         let lin = Pacer::new(PacingProfile::Linear, 100, period);
         let gap = Pacer::new(PacingProfile::Gapped, 100, period);
-        assert!(gap.interval_ns() < lin.interval_ns(), "gapped is denser than linear");
+        assert!(
+            gap.interval_ns() < lin.interval_ns(),
+            "gapped is denser than linear"
+        );
         // Active span = 20 ms * 1080/1125 = 19.2 ms over 99 gaps.
         assert_eq!(gap.interval_ns(), (period * 1080 / 1125) / 99);
     }
@@ -310,7 +332,10 @@ mod tests {
         let offsets: alloc::vec::Vec<u64> = (0..100).map(|i| pacer.offset_ns(i)).collect();
         let vrx = VrxValidator::for_pacer(&pacer, 1);
         let report = vrx.evaluate(&offsets);
-        assert_eq!(report.peak_occupancy, 1, "the schedule holds one packet of head start");
+        assert_eq!(
+            report.peak_occupancy, 1,
+            "the schedule holds one packet of head start"
+        );
         assert!(!report.underflowed, "no packet is late");
         assert!(report.conforms, "the pacer's own schedule passes its VRX");
         assert_eq!(report.first_violation, None);
@@ -325,10 +350,20 @@ mod tests {
         let burst = alloc::vec![0u64; 100];
         let vrx = VrxValidator::for_pacer(&pacer, 8);
         let report = vrx.evaluate(&burst);
-        assert_eq!(report.peak_occupancy, 100, "the whole frame piles into the buffer");
+        assert_eq!(
+            report.peak_occupancy, 100,
+            "the whole frame piles into the buffer"
+        );
         assert!(!report.underflowed, "early is not late");
-        assert!(!report.conforms, "a burst overruns the narrow 8-packet buffer");
-        assert_eq!(report.first_violation, Some(8), "occupancy passes Cmax at the 9th packet");
+        assert!(
+            !report.conforms,
+            "a burst overruns the narrow 8-packet buffer"
+        );
+        assert_eq!(
+            report.first_violation,
+            Some(8),
+            "occupancy passes Cmax at the 9th packet"
+        );
     }
 
     #[test]

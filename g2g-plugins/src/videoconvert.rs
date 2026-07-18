@@ -155,7 +155,8 @@ impl VideoConvert {
 }
 
 impl AsyncElement for VideoConvert {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -183,12 +184,17 @@ impl AsyncElement for VideoConvert {
         // Passthrough geometry + framerate (retarget format only), so a downstream
         // geometry pin couples back through this format-only converter (M188's
         // scale_then_convert case).
-        let passthrough =
-            PassthroughFields::NONE.with_width().with_height().with_framerate();
+        let passthrough = PassthroughFields::NONE
+            .with_width()
+            .with_height()
+            .with_framerate();
         let derive = Box::new(move |input: &Caps| match input {
-            Caps::RawVideo { format, width, height, framerate }
-                if INPUT_FORMATS.contains(format) =>
-            {
+            Caps::RawVideo {
+                format,
+                width,
+                height,
+                framerate,
+            } if INPUT_FORMATS.contains(format) => {
                 let mk = |f: RawVideoFormat| Caps::RawVideo {
                     format: f,
                     width: width.clone(),
@@ -219,7 +225,10 @@ impl AsyncElement for VideoConvert {
             }
             _ => CapsSet::from_alternatives(Vec::new()),
         });
-        CapsConstraint::DerivedCoupled { derive, passthrough }
+        CapsConstraint::DerivedCoupled {
+            derive,
+            passthrough,
+        }
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -285,7 +294,8 @@ impl AsyncElement for VideoConvert {
                         framerate,
                     };
                     if self.last_caps.as_ref() != Some(&new_caps) {
-                        out.push(PipelinePacket::CapsChanged(new_caps.clone())).await?;
+                        out.push(PipelinePacket::CapsChanged(new_caps.clone()))
+                            .await?;
                         self.last_caps = Some(new_caps);
                     }
                     let out_frame = Frame {
@@ -348,8 +358,10 @@ impl AsyncElement for VideoConvert {
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
         match name {
             "format" => {
-                self.target = Some(raw_format_from_str(value.as_str().ok_or(PropError::Type)?)
-                    .ok_or(PropError::Value)?);
+                self.target = Some(
+                    raw_format_from_str(value.as_str().ok_or(PropError::Type)?)
+                        .ok_or(PropError::Value)?,
+                );
                 Ok(())
             }
             _ => Err(PropError::Unknown),
@@ -360,7 +372,9 @@ impl AsyncElement for VideoConvert {
         match name {
             // The effective output format: the property, or the caps-resolved
             // one once negotiated. `None` for an unconfigured auto instance.
-            "format" => self.out_format().map(|f| PropValue::Str(raw_format_to_str(f).into())),
+            "format" => self
+                .out_format()
+                .map(|f| PropValue::Str(raw_format_to_str(f).into())),
             _ => None,
         }
     }
@@ -469,7 +483,13 @@ pub fn convert(
 /// upsampled by replication and downsampled by box-averaging; bit depth is scaled
 /// by the full-range ratio; the YUV <-> RGB color step (BT.601 limited range) runs
 /// at 8-bit, the precision an `Rgba8` endpoint carries anyway.
-fn convert_via_hub(src: &[u8], from: RawVideoFormat, to: RawVideoFormat, w: usize, h: usize) -> Box<[u8]> {
+fn convert_via_hub(
+    src: &[u8],
+    from: RawVideoFormat,
+    to: RawVideoFormat,
+    w: usize,
+    h: usize,
+) -> Box<[u8]> {
     let (y, u, v, wd) = to_hub(src, from, w, h);
     from_hub(&y, &u, &v, wd, to, w, h)
 }
@@ -504,7 +524,12 @@ fn yuv_to_rgb(y: i32, u: i32, v: i32) -> (i32, i32, i32) {
 /// Unpack any format to full-resolution (4:4:4) planar Y, U, V plus the working
 /// bit depth: RGB is color-converted to 8-bit YUV; YUYV / NV12 / the planar family
 /// are read at their own depth with chroma replicated up to full resolution.
-fn to_hub(src: &[u8], from: RawVideoFormat, w: usize, h: usize) -> (Vec<i32>, Vec<i32>, Vec<i32>, u8) {
+fn to_hub(
+    src: &[u8],
+    from: RawVideoFormat,
+    w: usize,
+    h: usize,
+) -> (Vec<i32>, Vec<i32>, Vec<i32>, u8) {
     let n = w * h;
     let mut y = vec![0i32; n];
     let mut u = vec![0i32; n];
@@ -514,8 +539,11 @@ fn to_hub(src: &[u8], from: RawVideoFormat, w: usize, h: usize) -> (Vec<i32>, Ve
             let (r_off, b_off) = crate::pixel::rgba_rb_offsets(from);
             for i in 0..n {
                 let p = i * 4;
-                let (yy, uu, vv) =
-                    rgb_to_yuv(src[p + r_off] as i32, src[p + 1] as i32, src[p + b_off] as i32);
+                let (yy, uu, vv) = rgb_to_yuv(
+                    src[p + r_off] as i32,
+                    src[p + 1] as i32,
+                    src[p + b_off] as i32,
+                );
                 (y[i], u[i], v[i]) = (yy, uu, vv);
             }
             (y, u, v, 8)
@@ -526,8 +554,12 @@ fn to_hub(src: &[u8], from: RawVideoFormat, w: usize, h: usize) -> (Vec<i32>, Ve
             for row in 0..h {
                 for col2 in 0..w / 2 {
                     let s = (row * (w / 2) + col2) * 4;
-                    let (y0, cu, y1, cv) =
-                        (src[s] as i32, src[s + 1] as i32, src[s + 2] as i32, src[s + 3] as i32);
+                    let (y0, cu, y1, cv) = (
+                        src[s] as i32,
+                        src[s + 1] as i32,
+                        src[s + 2] as i32,
+                        src[s + 3] as i32,
+                    );
                     let i = row * w + col2 * 2;
                     (y[i], u[i], v[i]) = (y0, cu, cv);
                     (y[i + 1], u[i + 1], v[i + 1]) = (y1, cu, cv);
@@ -595,8 +627,11 @@ fn from_hub(
             let (r_off, b_off) = crate::pixel::rgba_rb_offsets(to);
             let mut dst = vec![0u8; n * 4];
             for i in 0..n {
-                let (yy, uu, vv) =
-                    (scale_depth(y[i], wd, 8), scale_depth(u[i], wd, 8), scale_depth(v[i], wd, 8));
+                let (yy, uu, vv) = (
+                    scale_depth(y[i], wd, 8),
+                    scale_depth(u[i], wd, 8),
+                    scale_depth(v[i], wd, 8),
+                );
                 let (r, g, b) = yuv_to_rgb(yy, uu, vv);
                 let p = i * 4;
                 dst[p + r_off] = r as u8;
@@ -661,7 +696,15 @@ fn from_hub(
 /// Average the `2^hs x 2^vs` block of full-resolution chroma at chroma cell
 /// `(cx, cy)` (the box filter for chroma downsampling). For 4:4:4 (`hs = vs = 0`)
 /// this is the single co-located sample.
-fn avg_chroma(u: &[i32], v: &[i32], w: usize, cx: usize, cy: usize, hs: u32, vs: u32) -> (i32, i32) {
+fn avg_chroma(
+    u: &[i32],
+    v: &[i32],
+    w: usize,
+    cx: usize,
+    cy: usize,
+    hs: u32,
+    vs: u32,
+) -> (i32, i32) {
     let (bw, bh) = (1usize << hs, 1usize << vs);
     let (mut su, mut sv) = (0i32, 0i32);
     for dy in 0..bh {
@@ -850,10 +893,7 @@ fn yuv420_to_rgb(
             let (u, v) = if interleaved {
                 (src[luma + 2 * ci] as i32, src[luma + 2 * ci + 1] as i32)
             } else {
-                (
-                    src[luma + ci] as i32,
-                    src[luma + luma / 4 + ci] as i32,
-                )
+                (src[luma + ci] as i32, src[luma + luma / 4 + ci] as i32)
             };
             let c = src[y * w + x] as i32 - 16;
             let d = u - 128;
@@ -884,14 +924,19 @@ mod tests {
     #[test]
     fn derived_output_maps_any_supported_raw_to_target() {
         let conv = VideoConvert::new(RawVideoFormat::Nv12);
-        let CapsConstraint::DerivedCoupled { derive: f, passthrough } =
-            conv.caps_constraint_as_transform()
+        let CapsConstraint::DerivedCoupled {
+            derive: f,
+            passthrough,
+        } = conv.caps_constraint_as_transform()
         else {
             panic!("expected DerivedCoupled");
         };
         assert_eq!(
             passthrough,
-            PassthroughFields::NONE.with_width().with_height().with_framerate()
+            PassthroughFields::NONE
+                .with_width()
+                .with_height()
+                .with_framerate()
         );
         let out = f(&rgba_caps(64, 48));
         assert_eq!(
@@ -1053,6 +1098,10 @@ mod tests {
         let i420 = convert(&src, RawVideoFormat::I444, RawVideoFormat::I420, 4, 4);
         let back = convert(&i420, RawVideoFormat::I420, RawVideoFormat::I444, 4, 4);
         assert_eq!(back.len(), 3 * n);
-        assert_eq!((back[0], back[n], back[2 * n]), (100, 120, 140), "flat Y / U / V preserved");
+        assert_eq!(
+            (back[0], back[n], back[2 * n]),
+            (100, 120, 140),
+            "flat Y / U / V preserved"
+        );
     }
 }

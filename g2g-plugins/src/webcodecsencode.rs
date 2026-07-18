@@ -85,8 +85,12 @@ impl WebCodecsEncode {
         let data = js_sys::Uint8Array::new_with_length(bytes.len() as u32);
         data.copy_from(bytes);
         // WebCodecs timestamps are microseconds.
-        let init =
-            VideoFrameBufferInit::new(self.height, self.width, VideoPixelFormat::Rgba, (pts_ns / 1000) as i32);
+        let init = VideoFrameBufferInit::new(
+            self.height,
+            self.width,
+            VideoPixelFormat::Rgba,
+            (pts_ns / 1000) as i32,
+        );
         let frame = VideoFrame::new_with_u8_array_and_video_frame_buffer_init(&data, &init)
             .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
         let r = encoder.encode(&frame);
@@ -122,7 +126,8 @@ impl WebCodecsEncode {
 }
 
 impl AsyncElement for WebCodecsEncode {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -138,9 +143,16 @@ impl AsyncElement for WebCodecsEncode {
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         let (w, h, fps) = match absolute_caps {
-            Caps::RawVideo { format: RawVideoFormat::Rgba8, width, height, framerate } => {
-                (fixed_or_zero(width), fixed_or_zero(height), rate_fps(framerate))
-            }
+            Caps::RawVideo {
+                format: RawVideoFormat::Rgba8,
+                width,
+                height,
+                framerate,
+            } => (
+                fixed_or_zero(width),
+                fixed_or_zero(height),
+                rate_fps(framerate),
+            ),
             _ => return Err(G2gError::CapsMismatch),
         };
         if w == 0 || h == 0 {
@@ -181,7 +193,11 @@ impl AsyncElement for WebCodecsEncode {
         config.set_bitrate(2_000_000);
         config.set_framerate(fps as f64);
         let avc = js_sys::Object::new();
-        let _ = js_sys::Reflect::set(&avc, &JsValue::from_str("format"), &JsValue::from_str("annexb"));
+        let _ = js_sys::Reflect::set(
+            &avc,
+            &JsValue::from_str("format"),
+            &JsValue::from_str("annexb"),
+        );
         let _ = js_sys::Reflect::set(config.as_ref(), &JsValue::from_str("avc"), &avc);
         encoder
             .configure(&config)
@@ -268,14 +284,17 @@ impl core::fmt::Debug for WebCodecsEncode {
 
 fn derive_output_caps(input: &Caps) -> CapsSet {
     match input {
-        Caps::RawVideo { format: RawVideoFormat::Rgba8, width, height, framerate } => {
-            CapsSet::one(Caps::CompressedVideo {
-                codec: VideoCodec::H264,
-                width: width.clone(),
-                height: height.clone(),
-                framerate: framerate.clone(),
-            })
-        }
+        Caps::RawVideo {
+            format: RawVideoFormat::Rgba8,
+            width,
+            height,
+            framerate,
+        } => CapsSet::one(Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            width: width.clone(),
+            height: height.clone(),
+            framerate: framerate.clone(),
+        }),
         _ => CapsSet::from_alternatives(Vec::new()),
     }
 }

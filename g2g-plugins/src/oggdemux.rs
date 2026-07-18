@@ -137,13 +137,19 @@ impl OggDemux {
     }
 
     fn input_caps() -> Caps {
-        Caps::ByteStream { encoding: ByteStreamEncoding::Ogg }
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::Ogg,
+        }
     }
 
     /// The placeholder output: Opus with a sentinel channels/rate, refined from
     /// `OpusHead` via `CapsChanged` once the stream is parsed.
     fn output_caps() -> Caps {
-        Caps::Audio { format: AudioFormat::Opus, channels: 0, sample_rate: 0 }
+        Caps::Audio {
+            format: AudioFormat::Opus,
+            channels: 0,
+            sample_rate: 0,
+        }
     }
 
     /// The concrete Opus caps once `OpusHead` is parsed, or `None` until then /
@@ -188,9 +194,9 @@ impl OggDemux {
                 continue;
             }
             let pts_ns = self.pts_ns;
-            self.pts_ns = self.pts_ns.saturating_add(opus_samples_to_ns(
-                opus_packet_samples(&packet) as u64,
-            ));
+            self.pts_ns = self
+                .pts_ns
+                .saturating_add(opus_samples_to_ns(opus_packet_samples(&packet) as u64));
             // M362 seek: every audio packet is a resync point, so drop until the
             // first packet at/after the target, which emits a fresh segment.
             match self.seek.admit(pts_ns, true) {
@@ -203,7 +209,11 @@ impl OggDemux {
             }
             let frame = Frame::new(
                 MemoryDomain::System(SystemSlice::from_boxed(packet.into_boxed_slice())),
-                FrameTiming { pts_ns, dts_ns: pts_ns, ..FrameTiming::default() },
+                FrameTiming {
+                    pts_ns,
+                    dts_ns: pts_ns,
+                    ..FrameTiming::default()
+                },
                 self.emitted,
             );
             self.emitted += 1;
@@ -225,15 +235,20 @@ impl AsyncElement for OggDemux {
 
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
-            Caps::ByteStream { encoding: ByteStreamEncoding::Ogg } => {
-                CapsSet::one(Self::output_caps())
-            }
+            Caps::ByteStream {
+                encoding: ByteStreamEncoding::Ogg,
+            } => CapsSet::one(Self::output_caps()),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        if !matches!(absolute_caps, Caps::ByteStream { encoding: ByteStreamEncoding::Ogg }) {
+        if !matches!(
+            absolute_caps,
+            Caps::ByteStream {
+                encoding: ByteStreamEncoding::Ogg
+            }
+        ) {
             return Err(G2gError::CapsMismatch);
         }
         self.configured = true;
@@ -314,16 +329,26 @@ fn parse_vorbis_comment(packet: &[u8]) -> TagList {
 
     let mut list = TagList::new();
     let mut pos = 0usize;
-    let Some(vendor_len) = read_u32_le(body, &mut pos) else { return list };
+    let Some(vendor_len) = read_u32_le(body, &mut pos) else {
+        return list;
+    };
     pos = match pos.checked_add(vendor_len as usize) {
         Some(p) if p <= body.len() => p, // skip the vendor string
         _ => return list,
     };
-    let Some(count) = read_u32_le(body, &mut pos) else { return list };
+    let Some(count) = read_u32_le(body, &mut pos) else {
+        return list;
+    };
     for _ in 0..count {
-        let Some(len) = read_u32_le(body, &mut pos) else { break };
-        let Some(end) = pos.checked_add(len as usize) else { break };
-        let Some(field) = body.get(pos..end) else { break };
+        let Some(len) = read_u32_le(body, &mut pos) else {
+            break;
+        };
+        let Some(end) = pos.checked_add(len as usize) else {
+            break;
+        };
+        let Some(field) = body.get(pos..end) else {
+            break;
+        };
         pos = end;
         if let Ok(s) = core::str::from_utf8(field) {
             if let Some((key, value)) = s.split_once('=') {
@@ -337,7 +362,7 @@ fn parse_vorbis_comment(packet: &[u8]) -> TagList {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use g2g_core::{PushOutcome, RawVideoFormat, Dim, Rate};
+    use g2g_core::{Dim, PushOutcome, Rate, RawVideoFormat};
 
     /// Build one Ogg page carrying `packets` for `serial` (mirrors the parser
     /// test helper).
@@ -433,7 +458,9 @@ mod tests {
         };
         assert!(d.intercept_caps(&raw).is_err());
         // The Matroska byte stream is the wrong container.
-        let mkv = Caps::ByteStream { encoding: ByteStreamEncoding::Matroska };
+        let mkv = Caps::ByteStream {
+            encoding: ByteStreamEncoding::Matroska,
+        };
         assert!(d.intercept_caps(&mkv).is_err());
     }
 
@@ -453,15 +480,27 @@ mod tests {
             FrameTiming::default(),
             0,
         );
-        d.process(PipelinePacket::DataFrame(frame), &mut sink).await.unwrap();
+        d.process(PipelinePacket::DataFrame(frame), &mut sink)
+            .await
+            .unwrap();
         d.process(PipelinePacket::Eos, &mut sink).await.unwrap();
 
         assert_eq!(
             sink.caps,
-            alloc::vec![Caps::Audio { format: AudioFormat::Opus, channels: 2, sample_rate: 48_000 }]
+            alloc::vec![Caps::Audio {
+                format: AudioFormat::Opus,
+                channels: 2,
+                sample_rate: 48_000
+            }]
         );
-        assert_eq!(sink.frames, alloc::vec![alloc::vec![0x11, 0x22], alloc::vec![0x33]]);
-        assert!(!sink.eos, "EOS is forwarded by the runner's arm, not the element");
+        assert_eq!(
+            sink.frames,
+            alloc::vec![alloc::vec![0x11, 0x22], alloc::vec![0x33]]
+        );
+        assert!(
+            !sink.eos,
+            "EOS is forwarded by the runner's arm, not the element"
+        );
         assert_eq!(d.emitted(), 2);
     }
 
@@ -499,7 +538,9 @@ mod tests {
             FrameTiming::default(),
             0,
         );
-        d.process(PipelinePacket::DataFrame(frame), &mut sink).await.unwrap();
+        d.process(PipelinePacket::DataFrame(frame), &mut sink)
+            .await
+            .unwrap();
 
         let mut posted = None;
         while let Some(m) = bus.try_recv() {
@@ -508,6 +549,9 @@ mod tests {
             }
         }
         let tags = posted.expect("a Tag message was posted");
-        assert_eq!(tags.tags(), &[Tag::Title("Song".into()), Tag::Artist("Band".into())]);
+        assert_eq!(
+            tags.tags(),
+            &[Tag::Title("Song".into()), Tag::Artist("Band".into())]
+        );
     }
 }

@@ -62,7 +62,10 @@ use alloc::string::String;
 use drm::buffer::{Buffer, DrmFourcc, Handle as BufferHandle};
 use drm::control::{connector, framebuffer, Device as ControlDevice, Event, Mode, PageFlipFlags};
 use drm::Device;
-use gbm::{AsRaw, BufferObject, BufferObjectFlags, Device as GbmDevice, Format as GbmFormat, Surface as GbmSurface};
+use gbm::{
+    AsRaw, BufferObject, BufferObjectFlags, Device as GbmDevice, Format as GbmFormat,
+    Surface as GbmSurface,
+};
 use khronos_egl as egl;
 
 use g2g_core::memory::OwnedCudaBuffer;
@@ -163,7 +166,10 @@ impl core::fmt::Debug for CudaKmsSink {
             .field("device_path", &self.device_path)
             .field("width", &self.width)
             .field("height", &self.height)
-            .field("frames_presented", &self.frames_presented.load(Ordering::Relaxed))
+            .field(
+                "frames_presented",
+                &self.frames_presented.load(Ordering::Relaxed),
+            )
             .finish()
     }
 }
@@ -230,12 +236,16 @@ impl PipelineClock for CudaKmsClock {
 }
 
 impl AsyncElement for CudaKmsSink {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
     fn provide_clock(&self) -> Option<ClockCandidate> {
-        Some(ClockCandidate::new(ClockPriority::Provider, alloc::sync::Arc::new(CudaKmsClock)))
+        Some(ClockCandidate::new(
+            ClockPriority::Provider,
+            alloc::sync::Arc::new(CudaKmsClock),
+        ))
     }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
@@ -268,7 +278,11 @@ impl AsyncElement for CudaKmsSink {
         let (&Dim::Fixed(w), &Dim::Fixed(h)) = (w, h) else {
             return None;
         };
-        Some(AllocationParams::cuda(nv12_byte_size(w, h), CUDA_POOL_HEADROOM, CUDA_ALIGN))
+        Some(AllocationParams::cuda(
+            nv12_byte_size(w, h),
+            CUDA_POOL_HEADROOM,
+            CUDA_ALIGN,
+        ))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -341,15 +355,21 @@ impl AsyncElement for CudaKmsSink {
                     };
                     let tx = self.cmd_tx.as_ref().ok_or(G2gError::NotConfigured)?;
                     let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
-                    tx.send(WorkerCmd::Frame { buf, arrival_ns: timing.arrival_ns, ack: ack_tx })
-                        .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+                    tx.send(WorkerCmd::Frame {
+                        buf,
+                        arrival_ns: timing.arrival_ns,
+                        ack: ack_tx,
+                    })
+                    .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
                     // Block until the worker presents this frame (page-flip paced).
-                    ack_rx.await.map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+                    ack_rx
+                        .await
+                        .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
                     Ok(())
                 }
-                PipelinePacket::CapsChanged(_) | PipelinePacket::Flush | PipelinePacket::Segment(_) => {
-                    Ok(())
-                }
+                PipelinePacket::CapsChanged(_)
+                | PipelinePacket::Flush
+                | PipelinePacket::Segment(_) => Ok(()),
                 PipelinePacket::Eos => {
                     self.shutdown();
                     Ok(())
@@ -420,7 +440,11 @@ fn worker_main(
         // Block for the next frame; a long idle is not an error (live sources
         // pace themselves), so just keep waiting.
         match rx.recv_timeout(Duration::from_secs(3600)) {
-            Ok(WorkerCmd::Frame { buf, arrival_ns, ack }) => {
+            Ok(WorkerCmd::Frame {
+                buf,
+                arrival_ns,
+                ack,
+            }) => {
                 if let Err(e) = state.draw(&buf) {
                     std::eprintln!("g2g-cudakmssink draw error: {e:?}");
                     // Release the producer so a transient error doesn't deadlock.
@@ -445,7 +469,11 @@ fn worker_main(
 }
 
 impl WorkerState {
-    fn setup(device_path: &Path, width: u32, height: u32) -> Result<Self, Box<dyn std::error::Error>> {
+    fn setup(
+        device_path: &Path,
+        width: u32,
+        height: u32,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let card = Card::open(device_path).map_err(|_| "open DRM card")?;
 
         // Discover the first connected connector, its first mode, the first CRTC
@@ -499,7 +527,9 @@ impl WorkerState {
             8,
             egl::NONE,
         ];
-        let config = egl.choose_first_config(egl_display, &config_attribs)?.ok_or("no EGL config")?;
+        let config = egl
+            .choose_first_config(egl_display, &config_attribs)?
+            .ok_or("no EGL config")?;
         let context_attribs = [egl::CONTEXT_MAJOR_VERSION, 3, egl::NONE];
         let egl_context = egl.create_context(egl_display, config, None, &context_attribs)?;
 
@@ -509,7 +539,12 @@ impl WorkerState {
         // SAFETY: `surf_ptr` is the live gbm_surface for this display/config.
         let egl_surface =
             unsafe { egl.create_window_surface(egl_display, config, surf_ptr, None) }?;
-        egl.make_current(egl_display, Some(egl_surface), Some(egl_surface), Some(egl_context))?;
+        egl.make_current(
+            egl_display,
+            Some(egl_surface),
+            Some(egl_surface),
+            Some(egl_context),
+        )?;
 
         // glow loads GL ES entry points through eglGetProcAddress.
         // SAFETY: the loader resolves GL ES symbols against the current context.
@@ -570,7 +605,13 @@ impl WorkerState {
 
         if !self.crtc_set {
             self.card
-                .set_crtc(self.crtc, Some(fb), (0, 0), &[self.connector], Some(self.mode))
+                .set_crtc(
+                    self.crtc,
+                    Some(fb),
+                    (0, 0),
+                    &[self.connector],
+                    Some(self.mode),
+                )
                 .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
             self.crtc_set = true;
         } else {
@@ -592,16 +633,25 @@ impl WorkerState {
         // VERIFY: `gbm_bo_handle` is a union; the gem handle is its `u32_` arm.
         // SAFETY: NVIDIA / Mesa GBM bos use the 32-bit gem handle arm.
         let gem = unsafe {
-            bo.handle().map_err(|_| G2gError::Hardware(HardwareError::Other))?.u32_
+            bo.handle()
+                .map_err(|_| G2gError::Hardware(HardwareError::Other))?
+                .u32_
         };
         if let Some(&fb) = self.fbs.get(&gem) {
             return Ok(fb);
         }
-        let pitch = bo.stride().map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+        let pitch = bo
+            .stride()
+            .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
         let handle = BufferHandle::from(
             NonZeroU32::new(gem).ok_or(G2gError::Hardware(HardwareError::Other))?,
         );
-        let view = GbmFb { handle, width: self.width, height: self.height, pitch };
+        let view = GbmFb {
+            handle,
+            width: self.width,
+            height: self.height,
+            pitch,
+        };
         let fb = self
             .card
             .add_framebuffer(&view, 24, 32)
@@ -660,7 +710,12 @@ mod tests {
     use g2g_core::VideoCodec;
 
     fn nv12(w: u32, h: u32) -> Caps {
-        Caps::RawVideo { format: RawVideoFormat::Nv12, width: Dim::Fixed(w), height: Dim::Fixed(h), framerate: Rate::Any }
+        Caps::RawVideo {
+            format: RawVideoFormat::Nv12,
+            width: Dim::Fixed(w),
+            height: Dim::Fixed(h),
+            framerate: Rate::Any,
+        }
     }
 
     #[test]
@@ -684,7 +739,10 @@ mod tests {
             height: Dim::Fixed(480),
             framerate: Rate::Any,
         };
-        assert_eq!(sink.configure_pipeline(&i420).err(), Some(G2gError::CapsMismatch));
+        assert_eq!(
+            sink.configure_pipeline(&i420).err(),
+            Some(G2gError::CapsMismatch)
+        );
         assert!(sink.worker.is_none());
     }
 
@@ -701,7 +759,9 @@ mod tests {
     fn proposes_cuda_device_memory() {
         use g2g_core::MemoryDomainKind;
         let sink = CudaKmsSink::new();
-        let p = sink.propose_allocation(&nv12(1920, 1080)).expect("fixed-geometry NV12 yields a proposal");
+        let p = sink
+            .propose_allocation(&nv12(1920, 1080))
+            .expect("fixed-geometry NV12 yields a proposal");
         assert_eq!(p.domain, MemoryDomainKind::Cuda);
         assert_eq!(p.size_bytes, 1920 * 1080 * 3 / 2);
         assert_eq!(p.align, CUDA_ALIGN);

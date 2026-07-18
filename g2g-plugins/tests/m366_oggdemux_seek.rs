@@ -91,7 +91,10 @@ impl OutputSink for Capture {
     ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
         Box::pin(async move {
             match packet {
-                PipelinePacket::DataFrame(Frame { domain: MemoryDomain::System(s), .. }) => {
+                PipelinePacket::DataFrame(Frame {
+                    domain: MemoryDomain::System(s),
+                    ..
+                }) => {
                     self.frames.push(s.as_slice().to_vec());
                 }
                 PipelinePacket::Flush => self.flushes += 1,
@@ -129,9 +132,14 @@ async fn oggdemux_seeks_to_the_target_packet_over_filesrc() {
     // Seek to 50 ms: resume from the first packet at/after it, the 60 ms one.
     time.seek(Seek::flush_to(50_000_000));
 
-    let mut src = FileSrc::new(&path, Caps::ByteStream { encoding: ByteStreamEncoding::Ogg })
-        .with_chunk_size(16)
-        .with_seek(byte.clone());
+    let mut src = FileSrc::new(
+        &path,
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::Ogg,
+        },
+    )
+    .with_chunk_size(16)
+    .with_seek(byte.clone());
     let mut demux = OggDemux::new().with_seek(time.clone(), byte.clone());
 
     let caps = {
@@ -140,16 +148,24 @@ async fn oggdemux_seeks_to_the_target_packet_over_filesrc() {
     };
     src.configure_pipeline(&caps).expect("configure src");
     demux
-        .configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::Ogg })
+        .configure_pipeline(&Caps::ByteStream {
+            encoding: ByteStreamEncoding::Ogg,
+        })
         .expect("configure demux");
 
     let mut capture = Capture::default();
     {
-        let mut chain = Chain { demux: &mut demux, capture: &mut capture };
+        let mut chain = Chain {
+            demux: &mut demux,
+            capture: &mut capture,
+        };
         src.run(&mut chain).await.expect("filesrc runs");
     }
 
-    assert!(capture.flushes >= 1, "the upstream byte-seek flushed downstream");
+    assert!(
+        capture.flushes >= 1,
+        "the upstream byte-seek flushed downstream"
+    );
     assert!(capture.segments >= 1, "a resume segment was emitted");
     // Packets at 0,20,40 ms dropped; resume from 60 ms (0xA3) and 80 ms (0xA4).
     assert_eq!(

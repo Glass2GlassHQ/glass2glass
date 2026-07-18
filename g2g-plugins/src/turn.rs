@@ -204,7 +204,10 @@ impl TurnClient {
         let bytes = msg.finish_with_integrity(&self.key);
         // Mark the peer permitted only after the request is actually sent, so a
         // transient send failure leaves it unset and ICE's retransmit retries.
-        socket.send_to(&bytes, self.server).await.map_err(|_| hw())?;
+        socket
+            .send_to(&bytes, self.server)
+            .await
+            .map_err(|_| hw())?;
         self.permitted.insert(peer.ip());
         Ok(())
     }
@@ -249,7 +252,10 @@ impl TurnClient {
         msg.push_str_attr(ATTR_REALM, &self.realm);
         msg.push_str_attr(ATTR_NONCE, &self.nonce);
         let bytes = msg.finish_with_integrity(&self.key);
-        socket.send_to(&bytes, self.server).await.map_err(|_| hw())?;
+        socket
+            .send_to(&bytes, self.server)
+            .await
+            .map_err(|_| hw())?;
         self.permitted.clear();
         Ok(())
     }
@@ -273,7 +279,9 @@ pub(crate) async fn setup(
     password: &str,
 ) -> Option<TurnClient> {
     let server_addr = tokio::net::lookup_host(server).await.ok()?.next()?;
-    let client = TurnClient::allocate(socket, server_addr, username, password).await.ok()?;
+    let client = TurnClient::allocate(socket, server_addr, username, password)
+        .await
+        .ok()?;
     let local = socket.local_addr().ok()?;
     if let Ok(c) = Candidate::relayed(client.relay_addr(), local, "udp") {
         rtc.add_local_candidate(c);
@@ -348,7 +356,8 @@ impl MessageBuilder {
     /// Append one attribute, padding the value to a 4-byte boundary.
     fn push_attr(&mut self, atype: u16, value: &[u8]) {
         self.buf.extend_from_slice(&atype.to_be_bytes());
-        self.buf.extend_from_slice(&(value.len() as u16).to_be_bytes());
+        self.buf
+            .extend_from_slice(&(value.len() as u16).to_be_bytes());
         self.buf.extend_from_slice(value);
         let pad = (4 - (value.len() % 4)) % 4;
         self.buf.extend(core::iter::repeat(0u8).take(pad));

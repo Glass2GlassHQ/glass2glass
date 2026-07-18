@@ -21,7 +21,7 @@
 use g2g_core::element::{AsyncElement, BoxFuture, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
-use g2g_core::{Caps, ConfigureOutcome, Dim, G2gError, RawVideoFormat, Rate, VideoCodec};
+use g2g_core::{Caps, ConfigureOutcome, Dim, G2gError, Rate, RawVideoFormat, VideoCodec};
 use g2g_plugins::mediacodec_wgpu::{
     ahb_format_info, ahb_to_rgba_readback, create_android_interop_device, readback_rgba_texture,
     WgpuRgbaTexture,
@@ -49,12 +49,18 @@ fn start_binder_threadpool() {
         if lib.is_null() {
             return;
         }
-        let set = dlsym(lib, b"ABinderProcess_setThreadPoolMaxThreadCount\0".as_ptr() as *const c_char);
+        let set = dlsym(
+            lib,
+            b"ABinderProcess_setThreadPoolMaxThreadCount\0".as_ptr() as *const c_char,
+        );
         if !set.is_null() {
             let set: extern "C" fn(u32) -> bool = core::mem::transmute(set);
             set(1);
         }
-        let start = dlsym(lib, b"ABinderProcess_startThreadPool\0".as_ptr() as *const c_char);
+        let start = dlsym(
+            lib,
+            b"ABinderProcess_startThreadPool\0".as_ptr() as *const c_char,
+        );
         if !start.is_null() {
             let start: extern "C" fn() = core::mem::transmute(start);
             start();
@@ -72,7 +78,10 @@ const H264: &[u8] = include_bytes!("fixtures/h264_640x480.h264");
 struct Discard;
 
 impl OutputSink for Discard {
-    fn push<'a>(&'a mut self, _packet: PipelinePacket) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
+    fn push<'a>(
+        &'a mut self,
+        _packet: PipelinePacket,
+    ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
         Box::pin(async move { Ok(PushOutcome::Accepted) })
     }
 }
@@ -84,7 +93,10 @@ struct Collect {
 }
 
 impl OutputSink for Collect {
-    fn push<'a>(&'a mut self, packet: PipelinePacket) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
+    fn push<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+    ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
         Box::pin(async move {
             self.packets.push(packet);
             Ok(PushOutcome::Accepted)
@@ -101,14 +113,14 @@ fn access_units(s: &[u8]) -> Vec<&[u8]> {
     let mut nals: Vec<(usize, u8)> = Vec::new();
     let mut i = 0;
     while i + 3 <= s.len() {
-        let sc_len = if i + 4 <= s.len() && s[i] == 0 && s[i + 1] == 0 && s[i + 2] == 0 && s[i + 3] == 1
-        {
-            Some(4)
-        } else if s[i] == 0 && s[i + 1] == 0 && s[i + 2] == 1 {
-            Some(3)
-        } else {
-            None
-        };
+        let sc_len =
+            if i + 4 <= s.len() && s[i] == 0 && s[i + 1] == 0 && s[i + 2] == 0 && s[i + 3] == 1 {
+                Some(4)
+            } else if s[i] == 0 && s[i + 1] == 0 && s[i + 2] == 1 {
+                Some(3)
+            } else {
+                None
+            };
         match sc_len {
             Some(len) => {
                 let hdr = i + len;
@@ -159,7 +171,8 @@ async fn probe_ahb_vulkan_format() {
     };
     let narrowed = dec.intercept_caps(&upstream).expect("intercept caps");
     assert!(matches!(
-        dec.configure_pipeline(&narrowed).expect("configure decoder"),
+        dec.configure_pipeline(&narrowed)
+            .expect("configure decoder"),
         ConfigureOutcome::Accepted
     ));
 
@@ -168,14 +181,23 @@ async fn probe_ahb_vulkan_format() {
     for au in access_units(H264) {
         let frame = Frame {
             domain: MemoryDomain::System(SystemSlice::from_boxed(au.to_vec().into_boxed_slice())),
-            timing: FrameTiming { pts_ns, dts_ns: pts_ns, capture_ns: pts_ns, ..FrameTiming::default() },
+            timing: FrameTiming {
+                pts_ns,
+                dts_ns: pts_ns,
+                capture_ns: pts_ns,
+                ..FrameTiming::default()
+            },
             sequence: 0,
             meta: Default::default(),
         };
-        dec.process(PipelinePacket::DataFrame(frame), &mut sink).await.expect("process access unit");
+        dec.process(PipelinePacket::DataFrame(frame), &mut sink)
+            .await
+            .expect("process access unit");
         pts_ns += 33_366_700;
     }
-    dec.process(PipelinePacket::Eos, &mut sink).await.expect("Eos drains the codec");
+    dec.process(PipelinePacket::Eos, &mut sink)
+        .await
+        .expect("Eos drains the codec");
 
     let ahb = dec
         .captured_hardware_buffer()
@@ -183,7 +205,9 @@ async fn probe_ahb_vulkan_format() {
 
     // Open a Vulkan-backed wgpu device with the AHB external-memory extension and
     // ask it about the captured buffer.
-    let dev = create_android_interop_device().await.expect("create android interop device");
+    let dev = create_android_interop_device()
+        .await
+        .expect("create android interop device");
     // SAFETY: `ahb` is an owned (acquired) reference held alive by `dec` for the
     // whole call; `dev` is a Vulkan interop device.
     let info = unsafe {
@@ -215,8 +239,14 @@ async fn probe_ahb_vulkan_format() {
     // The probe is informational, but a useful invariant holds either way: the
     // import allocation is nonzero, and exactly one of {concrete format, opaque
     // external format} is reported.
-    assert!(info.allocation_size > 0, "import allocation size must be nonzero");
-    assert_ne!(info.memory_type_bits, 0, "import must report at least one memory type");
+    assert!(
+        info.allocation_size > 0,
+        "import allocation size must be nonzero"
+    );
+    assert_ne!(
+        info.memory_type_bits, 0,
+        "import must report at least one memory type"
+    );
     assert!(
         (info.vk_format != vk::Format::UNDEFINED) ^ (info.external_format != 0),
         "buffer must be either a concrete VkFormat or opaque, not both/neither (format={:?}, external={:#x})",
@@ -232,8 +262,14 @@ async fn probe_ahb_vulkan_format() {
     // SAFETY: `ahb` is alive (held by `dec`); `info` is its format info; `dev` is
     // the interop device. `info` is opaque on this device, the path under test.
     let rgba = unsafe {
-        ahb_to_rgba_readback(&dev, ahb.as_ptr() as *const vk::AHardwareBuffer, &info, w, h)
-            .expect("ycbcr -> rgba conversion + readback")
+        ahb_to_rgba_readback(
+            &dev,
+            ahb.as_ptr() as *const vk::AHardwareBuffer,
+            &info,
+            w,
+            h,
+        )
+        .expect("ycbcr -> rgba conversion + readback")
     };
     assert_eq!(rgba.len(), (w * h * 4) as usize, "RGBA byte length");
 
@@ -261,7 +297,10 @@ async fn probe_ahb_vulkan_format() {
         sum[2] / n, min[2], max[2],
     );
     let has_variance = (0..3).any(|c| max[c] > min[c]);
-    assert!(has_variance, "converted RGBA must vary (got a flat image: min={min:?} max={max:?})");
+    assert!(
+        has_variance,
+        "converted RGBA must vary (got a flat image: min={min:?} max={max:?})"
+    );
     eprintln!(">>> ycbcr -> rgba conversion validated on device.");
 }
 
@@ -282,7 +321,8 @@ async fn mediacodec_gpu_output_emits_wgpu_texture() {
     };
     let narrowed = dec.intercept_caps(&upstream).expect("intercept caps");
     assert!(matches!(
-        dec.configure_pipeline(&narrowed).expect("configure decoder"),
+        dec.configure_pipeline(&narrowed)
+            .expect("configure decoder"),
         ConfigureOutcome::Accepted
     ));
 
@@ -291,14 +331,23 @@ async fn mediacodec_gpu_output_emits_wgpu_texture() {
     for au in access_units(H264) {
         let frame = Frame {
             domain: MemoryDomain::System(SystemSlice::from_boxed(au.to_vec().into_boxed_slice())),
-            timing: FrameTiming { pts_ns, dts_ns: pts_ns, capture_ns: pts_ns, ..FrameTiming::default() },
+            timing: FrameTiming {
+                pts_ns,
+                dts_ns: pts_ns,
+                capture_ns: pts_ns,
+                ..FrameTiming::default()
+            },
             sequence: 0,
             meta: Default::default(),
         };
-        dec.process(PipelinePacket::DataFrame(frame), &mut sink).await.expect("process access unit");
+        dec.process(PipelinePacket::DataFrame(frame), &mut sink)
+            .await
+            .expect("process access unit");
         pts_ns += 33_366_700;
     }
-    dec.process(PipelinePacket::Eos, &mut sink).await.expect("Eos drains the codec");
+    dec.process(PipelinePacket::Eos, &mut sink)
+        .await
+        .expect("Eos drains the codec");
 
     // The first CapsChanged advertises RGBA (the converter's output), not NV12.
     let first_caps = sink.packets.iter().find_map(|p| match p {
@@ -306,7 +355,12 @@ async fn mediacodec_gpu_output_emits_wgpu_texture() {
         _ => None,
     });
     match first_caps {
-        Some(Caps::RawVideo { format: RawVideoFormat::Rgba8, width: Dim::Fixed(cw), height: Dim::Fixed(ch), .. }) => {
+        Some(Caps::RawVideo {
+            format: RawVideoFormat::Rgba8,
+            width: Dim::Fixed(cw),
+            height: Dim::Fixed(ch),
+            ..
+        }) => {
             assert_eq!((cw, ch), (w, h), "RGBA caps geometry");
         }
         other => panic!("expected RGBA caps in GPU-output mode, got {other:?}"),
@@ -324,8 +378,14 @@ async fn mediacodec_gpu_output_emits_wgpu_texture() {
             _ => None,
         })
         .collect();
-    eprintln!("=== M304 GPU output: {} WgpuTexture frame(s) ===", textures.len());
-    assert!(!textures.is_empty(), "expected at least one WgpuTexture frame");
+    eprintln!(
+        "=== M304 GPU output: {} WgpuTexture frame(s) ===",
+        textures.len()
+    );
+    assert!(
+        !textures.is_empty(),
+        "expected at least one WgpuTexture frame"
+    );
 
     // Recover the texture via the keep-alive downcast (the consumer's path) and
     // read it back through wgpu: proves wgpu consumes the externally-written
@@ -355,11 +415,20 @@ async fn mediacodec_gpu_output_emits_wgpu_texture() {
     let n = (w * h) as u64;
     eprintln!(
         "R mean={} [{}..{}]  G mean={} [{}..{}]  B mean={} [{}..{}]",
-        sum[0] / n, min[0], max[0],
-        sum[1] / n, min[1], max[1],
-        sum[2] / n, min[2], max[2],
+        sum[0] / n,
+        min[0],
+        max[0],
+        sum[1] / n,
+        min[1],
+        max[1],
+        sum[2] / n,
+        min[2],
+        max[2],
     );
     let has_variance = (0..3).any(|c| max[c] > min[c]);
-    assert!(has_variance, "converted texture must vary (min={min:?} max={max:?})");
+    assert!(
+        has_variance,
+        "converted texture must vary (min={min:?} max={max:?})"
+    );
     eprintln!(">>> MediaCodecDec GPU-output (WgpuTexture) validated on device.");
 }

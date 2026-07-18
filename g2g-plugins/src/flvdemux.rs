@@ -27,16 +27,16 @@ use core::pin::Pin;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
+use alloc::string::String;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
-use alloc::string::String;
 
 use g2g_core::runtime::SeekController;
 use g2g_core::{
     AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps, CapsConstraint,
     CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate,
-    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, Seek, Segment,
-    Tag, TagList, VideoCodec,
+    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, Seek,
+    Segment, Tag, TagList, VideoCodec,
 };
 
 use crate::aacparse::{adts_from_asc, SAMPLE_RATES};
@@ -146,8 +146,10 @@ impl FlvDemux {
                 if let Ok((sps, pps)) = parse_avcc(avcc) {
                     // lengthSizeMinusOne lives in byte 4's low two bits.
                     let length_size = avcc.get(4).map_or(4, |b| ((b & 0x03) + 1) as usize);
-                    self.video_init =
-                        Some(VideoInit { param_sets: Vec::from([sps, pps]), length_size });
+                    self.video_init = Some(VideoInit {
+                        param_sets: Vec::from([sps, pps]),
+                        length_size,
+                    });
                 }
             }
         }
@@ -192,7 +194,9 @@ impl FlvDemux {
 
     /// The input this element accepts: an FLV byte stream.
     fn input_caps() -> Caps {
-        Caps::ByteStream { encoding: ByteStreamEncoding::Flv }
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::Flv,
+        }
     }
 
     /// The output caps for the selected elementary stream. Video geometry is
@@ -205,11 +209,24 @@ impl FlvDemux {
         match stream {
             FlvStream::H264 => Caps::CompressedVideo {
                 codec: VideoCodec::H264,
-                width: Dim::Range { min: 16, max: 65_535 },
-                height: Dim::Range { min: 16, max: 65_535 },
-                framerate: Rate::Range { min_q16: 1 << 16, max_q16: 240 << 16 },
+                width: Dim::Range {
+                    min: 16,
+                    max: 65_535,
+                },
+                height: Dim::Range {
+                    min: 16,
+                    max: 65_535,
+                },
+                framerate: Rate::Range {
+                    min_q16: 1 << 16,
+                    max_q16: 240 << 16,
+                },
             },
-            FlvStream::Aac => Caps::Audio { format: AudioFormat::Aac, channels: 0, sample_rate: 0 },
+            FlvStream::Aac => Caps::Audio {
+                format: AudioFormat::Aac,
+                channels: 0,
+                sample_rate: 0,
+            },
         }
     }
 
@@ -303,7 +320,11 @@ impl FlvDemux {
                     }
                     // ADTS-frame each raw AAC access unit so the elementary
                     // stream is self-describing; forwarded raw without an ASC.
-                    match self.audio_asc.as_deref().and_then(|asc| adts_from_asc(asc, &u.data)) {
+                    match self
+                        .audio_asc
+                        .as_deref()
+                        .and_then(|asc| adts_from_asc(asc, &u.data))
+                    {
                         Some(framed) => framed,
                         None => u.data,
                     }
@@ -311,7 +332,12 @@ impl FlvDemux {
             };
             let frame = Frame::new(
                 MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-                FrameTiming { pts_ns, dts_ns, keyframe: u.keyframe, ..FrameTiming::default() },
+                FrameTiming {
+                    pts_ns,
+                    dts_ns,
+                    keyframe: u.keyframe,
+                    ..FrameTiming::default()
+                },
                 self.emitted,
             );
             self.emitted += 1;
@@ -334,15 +360,20 @@ impl AsyncElement for FlvDemux {
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         let stream = self.stream;
         CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| match input {
-            Caps::ByteStream { encoding: ByteStreamEncoding::Flv } => {
-                CapsSet::one(Self::output_caps(stream))
-            }
+            Caps::ByteStream {
+                encoding: ByteStreamEncoding::Flv,
+            } => CapsSet::one(Self::output_caps(stream)),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        if !matches!(absolute_caps, Caps::ByteStream { encoding: ByteStreamEncoding::Flv }) {
+        if !matches!(
+            absolute_caps,
+            Caps::ByteStream {
+                encoding: ByteStreamEncoding::Flv
+            }
+        ) {
             return Err(G2gError::CapsMismatch);
         }
         self.configured = true;
@@ -425,8 +456,11 @@ impl AsyncElement for FlvDemux {
 }
 
 /// `FlvDemux`'s settable properties.
-static FLVDEMUX_PROPS: &[PropertySpec] =
-    &[PropertySpec::new("stream", PropKind::Str, "elementary stream to emit: h264 | aac")];
+static FLVDEMUX_PROPS: &[PropertySpec] = &[PropertySpec::new(
+    "stream",
+    PropKind::Str,
+    "elementary stream to emit: h264 | aac",
+)];
 
 /// Parse a `stream` property string to an [`FlvStream`].
 fn flv_stream_from_str(s: &str) -> Option<FlvStream> {
@@ -464,7 +498,10 @@ impl PadTemplates for FlvDemux {
             Self::output_caps(FlvStream::H264),
             Self::output_caps(FlvStream::Aac),
         ]));
-        Vec::from([PadTemplate::sink(CapsSet::one(Self::input_caps())), PadTemplate::source(source)])
+        Vec::from([
+            PadTemplate::sink(CapsSet::one(Self::input_caps())),
+            PadTemplate::source(source),
+        ])
     }
 }
 
@@ -496,7 +533,9 @@ fn parse_on_metadata(body: &[u8]) -> TagList {
         return list;
     }
     // The second value holds the properties: an ECMA array or an anonymous object.
-    let Some(marker) = body.get(pos).copied() else { return list };
+    let Some(marker) = body.get(pos).copied() else {
+        return list;
+    };
     pos += 1;
     let _ = match marker {
         amf0::ECMA_ARRAY => {
@@ -691,7 +730,9 @@ mod tests {
             FrameTiming::default(),
             0,
         );
-        d.process(PipelinePacket::DataFrame(frame), sink).await.unwrap();
+        d.process(PipelinePacket::DataFrame(frame), sink)
+            .await
+            .unwrap();
         d.process(PipelinePacket::Eos, sink).await.unwrap();
     }
 
@@ -707,7 +748,9 @@ mod tests {
         };
         assert!(d.intercept_caps(&raw).is_err());
         // The Matroska byte stream is the wrong container.
-        let mkv = Caps::ByteStream { encoding: ByteStreamEncoding::Matroska };
+        let mkv = Caps::ByteStream {
+            encoding: ByteStreamEncoding::Matroska,
+        };
         assert!(d.intercept_caps(&mkv).is_err());
     }
 
@@ -733,7 +776,11 @@ mod tests {
         run_demux(&mut video, &stream, &mut vsink).await;
         let v0_annexb = alloc::vec![0u8, 0, 0, 1, 0x65, 0x11];
         let v1_annexb = alloc::vec![0u8, 0, 0, 1, 0x41, 0x22];
-        assert_eq!(vsink.frames, alloc::vec![v0_annexb, v1_annexb], "video only, Annex-B framed");
+        assert_eq!(
+            vsink.frames,
+            alloc::vec![v0_annexb, v1_annexb],
+            "video only, Annex-B framed"
+        );
         assert_eq!(vsink.pts, alloc::vec![0, 40_000_000], "ms timestamps to ns");
         assert_eq!(video.emitted(), 2);
 
@@ -743,7 +790,11 @@ mod tests {
         audio.configure_pipeline(&FlvDemux::input_caps()).unwrap();
         let mut asink = CaptureSink::default();
         run_demux(&mut audio, &stream, &mut asink).await;
-        assert_eq!(asink.frames, alloc::vec![a0.to_vec(), a1.to_vec()], "audio only");
+        assert_eq!(
+            asink.frames,
+            alloc::vec![a0.to_vec(), a1.to_vec()],
+            "audio only"
+        );
     }
 
     #[tokio::test]
@@ -778,8 +829,15 @@ mod tests {
             first.extend_from_slice(&[0, 0, 0, 1]);
             first.extend_from_slice(nal);
         }
-        assert_eq!(vsink.frames[0], first, "SPS/PPS from the avcC lead the first AU");
-        assert_eq!(vsink.frames[1], alloc::vec![0, 0, 0, 1, 0x41, 0x22], "later AUs unprefixed");
+        assert_eq!(
+            vsink.frames[0], first,
+            "SPS/PPS from the avcC lead the first AU"
+        );
+        assert_eq!(
+            vsink.frames[1],
+            alloc::vec![0, 0, 0, 1, 0x41, 0x22],
+            "later AUs unprefixed"
+        );
 
         let mut audio = FlvDemux::new().with_stream(FlvStream::Aac);
         audio.configure_pipeline(&FlvDemux::input_caps()).unwrap();
@@ -788,10 +846,18 @@ mod tests {
         // 7-byte ADTS header (48 kHz stereo LC) then the raw frame.
         assert_eq!(asink.frames[0].len(), 9, "ADTS framed");
         assert_eq!(&asink.frames[0][..2], &[0xFF, 0xF1], "ADTS syncword");
-        assert_eq!(&asink.frames[0][7..], &[0xAB, 0xCD], "payload after the header");
+        assert_eq!(
+            &asink.frames[0][7..],
+            &[0xAB, 0xCD],
+            "payload after the header"
+        );
         assert_eq!(
             asink.caps,
-            alloc::vec![Caps::Audio { format: AudioFormat::Aac, channels: 2, sample_rate: 48_000 }],
+            alloc::vec![Caps::Audio {
+                format: AudioFormat::Aac,
+                channels: 2,
+                sample_rate: 48_000
+            }],
             "concrete audio caps announced from the ASC"
         );
     }
@@ -836,7 +902,10 @@ mod tests {
         // The number is walked past; the two string fields become typed tags.
         assert_eq!(
             tags.tags(),
-            &[Tag::Encoder("Lavf58.76.100".into()), Tag::Title("Clip".into())]
+            &[
+                Tag::Encoder("Lavf58.76.100".into()),
+                Tag::Title("Clip".into())
+            ]
         );
         // A body that is not onMetaData yields nothing.
         assert!(parse_on_metadata(&amf0_string("onCuePoint")).is_empty());
@@ -848,7 +917,7 @@ mod tests {
         // bails at the depth cap and returns gracefully.
         let mut body = amf0_string("onMetaData");
         body.push(0x03); // OBJECT
-        // Many levels of `{"a": {` opened and never closed.
+                         // Many levels of `{"a": {` opened and never closed.
         for _ in 0..10_000 {
             body.extend_from_slice(&(1u16).to_be_bytes());
             body.push(b'a');
@@ -861,8 +930,14 @@ mod tests {
     async fn posts_on_metadata_tags_on_the_bus() {
         use g2g_core::Bus;
         let (bus, handle) = Bus::new(8);
-        let meta = on_metadata(&[("width", amf0_number(640.0)), ("encoder", amf0_string("g2g"))]);
-        let stream = flv_stream(&[tag(18, 0, &meta), tag(9, 0, &avc_nalu(&[0, 0, 0, 2, 0x65, 0xAA]))]);
+        let meta = on_metadata(&[
+            ("width", amf0_number(640.0)),
+            ("encoder", amf0_string("g2g")),
+        ]);
+        let stream = flv_stream(&[
+            tag(18, 0, &meta),
+            tag(9, 0, &avc_nalu(&[0, 0, 0, 2, 0x65, 0xAA])),
+        ]);
 
         let mut d = FlvDemux::new().with_bus(handle);
         d.configure_pipeline(&FlvDemux::input_caps()).unwrap();
@@ -880,37 +955,59 @@ mod tests {
                 posted = Some(t);
             }
         }
-        assert_eq!(posted.expect("a Tag message was posted").tags(), &[Tag::Encoder("g2g".into())]);
+        assert_eq!(
+            posted.expect("a Tag message was posted").tags(),
+            &[Tag::Encoder("g2g".into())]
+        );
     }
 
     #[test]
     fn output_caps_track_the_selection() {
         assert!(matches!(
             FlvDemux::output_caps(FlvStream::H264),
-            Caps::CompressedVideo { codec: VideoCodec::H264, .. }
+            Caps::CompressedVideo {
+                codec: VideoCodec::H264,
+                ..
+            }
         ));
         assert!(matches!(
             FlvDemux::output_caps(FlvStream::Aac),
-            Caps::Audio { format: AudioFormat::Aac, .. }
+            Caps::Audio {
+                format: AudioFormat::Aac,
+                ..
+            }
         ));
     }
 
     #[test]
     fn stream_property_round_trips_and_drives_output() {
         let mut d = FlvDemux::new();
-        assert_eq!(d.get_property("stream"), Some(PropValue::Str("h264".into())));
+        assert_eq!(
+            d.get_property("stream"),
+            Some(PropValue::Str("h264".into()))
+        );
 
-        d.set_property("stream", PropValue::Str("aac".into())).unwrap();
+        d.set_property("stream", PropValue::Str("aac".into()))
+            .unwrap();
         assert_eq!(d.stream(), FlvStream::Aac);
 
         // An unsupported codec name is rejected, leaving the selection unchanged.
-        assert_eq!(d.set_property("stream", PropValue::Str("vp9".into())), Err(PropError::Value));
+        assert_eq!(
+            d.set_property("stream", PropValue::Str("vp9".into())),
+            Err(PropError::Value)
+        );
         assert_eq!(d.stream(), FlvStream::Aac);
 
         let CapsConstraint::DerivedOutput(f) = d.caps_constraint_as_transform() else {
             panic!("expected DerivedOutput");
         };
         let out = f(&FlvDemux::input_caps());
-        assert!(matches!(out.alternatives(), [Caps::Audio { format: AudioFormat::Aac, .. }]));
+        assert!(matches!(
+            out.alternatives(),
+            [Caps::Audio {
+                format: AudioFormat::Aac,
+                ..
+            }]
+        ));
     }
 }

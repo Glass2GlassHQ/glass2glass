@@ -99,7 +99,11 @@ mod tests {
         let t = TaiNs::from(1_000);
         assert_eq!(t.get(), 1_000);
         assert_eq!(t.saturating_add_ns(500).get(), 1_500);
-        assert_eq!(TaiNs::from(u64::MAX).saturating_add_ns(1), TaiNs(u64::MAX), "saturates");
+        assert_eq!(
+            TaiNs::from(u64::MAX).saturating_add_ns(1),
+            TaiNs(u64::MAX),
+            "saturates"
+        );
     }
 
     #[test]
@@ -108,7 +112,10 @@ mod tests {
         assert_eq!(r.get(), 1_000_000_000);
         assert_eq!(RefNs::default(), RefNs(0));
         // A reference and a TAI time are distinct types: they cannot be mixed up.
-        assert_ne!(core::any::type_name::<RefNs>(), core::any::type_name::<TaiNs>());
+        assert_ne!(
+            core::any::type_name::<RefNs>(),
+            core::any::type_name::<TaiNs>()
+        );
     }
 
     #[test]

@@ -54,7 +54,10 @@ fn registry() -> g2g_core::runtime::Registry {
     }));
     reg.register(ElementFactory::new(
         "vp9dec",
-        Vec::from([PadTemplate::sink(CapsSet::one(vp9())), PadTemplate::source(CapsSet::one(nv12()))]),
+        Vec::from([
+            PadTemplate::sink(CapsSet::one(vp9())),
+            PadTemplate::source(CapsSet::one(nv12())),
+        ]),
         |_| Box::new(IdentityTransform::new()),
     ));
     reg.register_launch(g2g_core::runtime::LaunchFactory::new(
@@ -74,9 +77,14 @@ async fn decode_then_tee_display_and_store() {
                 ! queue ! videoconvert ! fakesink \
                 t. ! queue ! fakesink";
     let graph = parse_launch(&reg, line).unwrap_or_else(|e| panic!("{line:?} parse: {e}"));
-    let stats = run_graph(graph, &ZeroClock, 4).await.expect("branching decode runs");
+    let stats = run_graph(graph, &ZeroClock, 4)
+        .await
+        .expect("branching decode runs");
     assert_eq!(stats.frames_emitted, 4, "source emitted 4 frames");
-    assert_eq!(stats.frames_consumed, 8, "both branches consumed all 4 frames");
+    assert_eq!(
+        stats.frames_consumed, 8,
+        "both branches consumed all 4 frames"
+    );
 }
 
 #[tokio::test]
@@ -88,8 +96,13 @@ async fn tee_branches_target_different_formats() {
                 ! queue ! videoconvert ! video/x-raw,format=NV12 ! fakesink \
                 t. ! queue ! videoconvert ! video/x-raw,format=I420 ! fakesink";
     let graph = parse_launch(&reg, line).unwrap_or_else(|e| panic!("{line:?} parse: {e}"));
-    let stats = run_graph(graph, &ZeroClock, 4).await.expect("differing-format branches run");
-    assert_eq!(stats.frames_consumed, 8, "both format branches consumed all frames");
+    let stats = run_graph(graph, &ZeroClock, 4)
+        .await
+        .expect("differing-format branches run");
+    assert_eq!(
+        stats.frames_consumed, 8,
+        "both format branches consumed all frames"
+    );
 }
 
 #[tokio::test]
@@ -100,6 +113,8 @@ async fn tee_branches_scale_independently() {
                 ! queue ! videoscale ! video/x-raw,width=8,height=8 ! fakesink \
                 t. ! queue ! fakesink";
     let graph = parse_launch(&reg, line).unwrap_or_else(|e| panic!("{line:?} parse: {e}"));
-    let stats = run_graph(graph, &ZeroClock, 4).await.expect("differing-scale branches run");
+    let stats = run_graph(graph, &ZeroClock, 4)
+        .await
+        .expect("differing-scale branches run");
     assert_eq!(stats.frames_consumed, 8);
 }

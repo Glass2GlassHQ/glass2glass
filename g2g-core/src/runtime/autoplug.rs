@@ -78,7 +78,11 @@ pub struct CapabilityDescriptor {
 
 impl Default for CapabilityDescriptor {
     fn default() -> Self {
-        Self { output_memory: MemoryDomainKind::System, acceleration: Acceleration::Software, rank: 0 }
+        Self {
+            output_memory: MemoryDomainKind::System,
+            acceleration: Acceleration::Software,
+            rank: 0,
+        }
     }
 }
 
@@ -131,7 +135,11 @@ impl ElementDesc {
     /// default (software, `System` memory, rank 0); tag a GPU / hardware producer
     /// with the builders below.
     pub fn new(name: &'static str, templates: Vec<PadTemplate>) -> Self {
-        Self { name, templates, capabilities: CapabilityDescriptor::default() }
+        Self {
+            name,
+            templates,
+            capabilities: CapabilityDescriptor::default(),
+        }
     }
 
     /// Tag the memory feature this element's source pad produces. Builder form.
@@ -159,12 +167,16 @@ impl ElementDesc {
 
     /// First sink (input) pad template, if any.
     fn sink(&self) -> Option<&PadTemplate> {
-        self.templates.iter().find(|t| t.direction == PadDirection::Sink)
+        self.templates
+            .iter()
+            .find(|t| t.direction == PadDirection::Sink)
     }
 
     /// First source (output) pad template, if any.
     fn source(&self) -> Option<&PadTemplate> {
-        self.templates.iter().find(|t| t.direction == PadDirection::Source)
+        self.templates
+            .iter()
+            .find(|t| t.direction == PadDirection::Source)
     }
 
     /// If this element accepts caps shaped like `input` on its sink pad, the
@@ -202,7 +214,13 @@ pub fn is_raw_video(caps: &Caps) -> bool {
 /// it also carries compressed AAC / Opus (the demuxer / parser output), so this
 /// matches only the PCM formats, not a compressed stream still labelled `Audio`.
 pub fn is_raw_audio(caps: &Caps) -> bool {
-    matches!(caps, Caps::Audio { format: AudioFormat::PcmS16Le | AudioFormat::PcmF32Le, .. })
+    matches!(
+        caps,
+        Caps::Audio {
+            format: AudioFormat::PcmS16Le | AudioFormat::PcmF32Le,
+            ..
+        }
+    )
 }
 
 /// One element on an auto-plugged chain: which registered [`ElementDesc`] it is
@@ -253,7 +271,10 @@ pub fn find_chain_preferring(
         input,
         target,
         max_depth,
-        SelectionContext { preferred_memory: preferred, prefer_hardware: false },
+        SelectionContext {
+            preferred_memory: preferred,
+            prefer_hardware: false,
+        },
     )
 }
 
@@ -294,10 +315,15 @@ pub fn find_chain_with(
                     continue;
                 }
                 let desc = &descs[i];
-                let Some(out_set) = desc.step(caps) else { continue };
+                let Some(out_set) = desc.step(caps) else {
+                    continue;
+                };
                 for out in out_set.alternatives() {
                     let mut new_path = path.clone();
-                    new_path.push(ChainLink { index: i, output: out.clone() });
+                    new_path.push(ChainLink {
+                        index: i,
+                        output: out.clone(),
+                    });
                     if target(out) {
                         return Some(new_path);
                     }
@@ -348,10 +374,10 @@ mod factory {
     use alloc::string::{String, ToString};
 
     use crate::element::{AsyncElement, DynAsyncElement};
+    use crate::fanout::MultiOutputElement;
     use crate::graph::{Graph, GraphError, NodeId, PadId};
     use crate::pad_template::{PadCaps, PadDirection, PadTemplate, PadTemplates};
     use crate::property::format_specs;
-    use crate::fanout::MultiOutputElement;
     use crate::runtime::launch::ParseError;
     use crate::runtime::{
         DynMultiInputElement, DynMultiOutputElement, DynSourceLoop, GraphNode, GraphNodeRef,
@@ -460,7 +486,10 @@ mod factory {
             templates: Vec<PadTemplate>,
             build: fn(&Caps) -> Box<dyn DynAsyncElement>,
         ) -> Self {
-            Self { desc: ElementDesc::new(name, templates), build }
+            Self {
+                desc: ElementDesc::new(name, templates),
+                build,
+            }
         }
 
         /// Build from a [`PadTemplates`] type, pulling its templates from the
@@ -527,7 +556,11 @@ mod factory {
             templates: Vec<PadTemplate>,
             build: fn() -> Box<dyn DynAsyncElement>,
         ) -> Self {
-            Self { name, templates, build }
+            Self {
+                name,
+                templates,
+                build,
+            }
         }
 
         /// Build from a [`PadTemplates`] type, pulling its templates from the
@@ -547,7 +580,9 @@ mod factory {
 
     impl core::fmt::Debug for LaunchFactory {
         fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-            f.debug_struct("LaunchFactory").field("name", &self.name).finish_non_exhaustive()
+            f.debug_struct("LaunchFactory")
+                .field("name", &self.name)
+                .finish_non_exhaustive()
         }
     }
 
@@ -577,7 +612,9 @@ mod factory {
 
     impl core::fmt::Debug for MuxerFactory {
         fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-            f.debug_struct("MuxerFactory").field("name", &self.name).finish_non_exhaustive()
+            f.debug_struct("MuxerFactory")
+                .field("name", &self.name)
+                .finish_non_exhaustive()
         }
     }
 
@@ -606,7 +643,9 @@ mod factory {
 
     impl core::fmt::Debug for DemuxFactory {
         fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-            f.debug_struct("DemuxFactory").field("name", &self.name).finish_non_exhaustive()
+            f.debug_struct("DemuxFactory")
+                .field("name", &self.name)
+                .finish_non_exhaustive()
         }
     }
 
@@ -673,8 +712,16 @@ mod factory {
 
     impl SourceFactory {
         /// Register a source by name, its declared output caps, and constructor.
-        pub fn new(name: &'static str, output: Caps, build: fn() -> Box<dyn DynSourceLoop>) -> Self {
-            Self { name, output, build }
+        pub fn new(
+            name: &'static str,
+            output: Caps,
+            build: fn() -> Box<dyn DynSourceLoop>,
+        ) -> Self {
+            Self {
+                name,
+                output,
+                build,
+            }
         }
     }
 
@@ -758,7 +805,9 @@ mod factory {
 
     impl core::fmt::Debug for UriSourceFactory {
         fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-            f.debug_struct("UriSourceFactory").field("scheme", &self.scheme).finish_non_exhaustive()
+            f.debug_struct("UriSourceFactory")
+                .field("scheme", &self.scheme)
+                .finish_non_exhaustive()
         }
     }
 
@@ -797,7 +846,9 @@ mod factory {
 
     impl core::fmt::Debug for PlaybinPort {
         fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-            f.debug_struct("PlaybinPort").field("input_caps", &self.input_caps).finish_non_exhaustive()
+            f.debug_struct("PlaybinPort")
+                .field("input_caps", &self.input_caps)
+                .finish_non_exhaustive()
         }
     }
 
@@ -841,9 +892,7 @@ mod factory {
     /// that owns the container parsing registers it via
     /// [`Registry::register_playbin`]. Cross-crate by design: the text DSL lives
     /// in core, the Matroska parsing in `g2g-plugins`.
-    pub type PlaybinHook =
-        fn(&Registry, &str) -> Result<Option<Graph<GraphNode>>, ParseError>;
-
+    pub type PlaybinHook = fn(&Registry, &str) -> Result<Option<Graph<GraphNode>>, ParseError>;
 
     /// An explicit-demux fan-out hook (M476), the sibling of [`PlaybinHook`] for a
     /// named demux element inside a user-authored line
@@ -855,8 +904,11 @@ mod factory {
     /// or an unsatisfiable request). Cross-crate by design: the DSL lives in core,
     /// the container probing in `g2g-plugins`. Registered via
     /// [`Registry::register_demux_select`].
-    pub type DemuxSelectHook =
-        fn(name: &str, location: &str, pads: &[PadRequest]) -> Option<Box<dyn DynMultiOutputElement>>;
+    pub type DemuxSelectHook = fn(
+        name: &str,
+        location: &str,
+        pads: &[PadRequest],
+    ) -> Option<Box<dyn DynMultiOutputElement>>;
 
     /// A `decodebin` fan-out hook (M482): the decode-per-port sibling of
     /// [`DemuxSelectHook`], for `filesrc location=x.mkv ! decodebin name=d
@@ -868,12 +920,16 @@ mod factory {
     /// onto every port (the demuxer emits elementary streams; `decodebin` decodes
     /// them to raw). `None` declines (a different container, an unreadable file, or
     /// an unsatisfiable request). Registered via [`Registry::register_decodebin_select`].
-    pub type DecodebinSelectHook =
-        fn(location: &str, pads: &[PadRequest]) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)>;
+    pub type DecodebinSelectHook = fn(
+        location: &str,
+        pads: &[PadRequest],
+    ) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)>;
 
     impl core::fmt::Debug for ElementFactory {
         fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-            f.debug_struct("ElementFactory").field("name", &self.desc.name).finish_non_exhaustive()
+            f.debug_struct("ElementFactory")
+                .field("name", &self.desc.name)
+                .finish_non_exhaustive()
         }
     }
 
@@ -1050,7 +1106,10 @@ mod factory {
             if elements.is_empty() {
                 return;
             }
-            if let Some(parser) = self.parser_name(input).and_then(|name| self.make_element(name)) {
+            if let Some(parser) = self
+                .parser_name(input)
+                .and_then(|name| self.make_element(name))
+            {
                 elements.insert(0, parser);
             }
         }
@@ -1099,7 +1158,10 @@ mod factory {
         /// `None` if no source is registered under `name` (after alias resolution).
         pub fn make_source(&self, name: &str) -> Option<Box<dyn DynSourceLoop>> {
             let name = self.resolve_alias(name);
-            self.sources.iter().find(|s| s.name == name).map(|s| (s.build)())
+            self.sources
+                .iter()
+                .find(|s| s.name == name)
+                .map(|s| (s.build)())
         }
 
         /// Construct a registered transform / sink by name (a parser interior or
@@ -1107,7 +1169,10 @@ mod factory {
         /// via [`register_launch`](Self::register_launch) (after alias resolution).
         pub fn make_element(&self, name: &str) -> Option<Box<dyn DynAsyncElement>> {
             let name = self.resolve_alias(name);
-            self.launch.iter().find(|f| f.name == name).map(|f| (f.build)())
+            self.launch
+                .iter()
+                .find(|f| f.name == name)
+                .map(|f| (f.build)())
         }
 
         /// The caps a registered element is known to produce on its source pad,
@@ -1124,7 +1189,10 @@ mod factory {
                 return Some(s.output.clone());
             }
             let f = self.launch.iter().find(|f| f.name == name)?;
-            let t = f.templates.iter().find(|t| t.direction == PadDirection::Source)?;
+            let t = f
+                .templates
+                .iter()
+                .find(|t| t.direction == PadDirection::Source)?;
             match &t.caps {
                 PadCaps::Fixed(set) => set.alternatives().first().cloned(),
                 PadCaps::Any => None,
@@ -1135,9 +1203,16 @@ mod factory {
         /// (the parser derives the count from link degree, so it matches the
         /// muxer node's input-pad count). `None` if `name` is not registered via
         /// [`register_muxer`](Self::register_muxer).
-        pub fn make_muxer(&self, name: &str, inputs: usize) -> Option<Box<dyn DynMultiInputElement>> {
+        pub fn make_muxer(
+            &self,
+            name: &str,
+            inputs: usize,
+        ) -> Option<Box<dyn DynMultiInputElement>> {
             let name = self.resolve_alias(name);
-            self.muxers.iter().find(|m| m.name == name).map(|m| (m.build)(inputs))
+            self.muxers
+                .iter()
+                .find(|m| m.name == name)
+                .map(|m| (m.build)(inputs))
         }
 
         /// Construct a registered fan-out demuxer by name with `outputs` output
@@ -1150,7 +1225,10 @@ mod factory {
             outputs: usize,
         ) -> Option<Box<dyn DynMultiOutputElement>> {
             let name = self.resolve_alias(name);
-            self.demuxes.iter().find(|d| d.name == name).map(|d| (d.build)(outputs))
+            self.demuxes
+                .iter()
+                .find(|d| d.name == name)
+                .map(|d| (d.build)(outputs))
         }
 
         /// Whether `name` is registered as a fan-out demuxer (the parser uses this
@@ -1219,22 +1297,30 @@ mod factory {
         /// method), so building must be side-effect-free, as the in-tree
         /// constructors are.
         pub fn inspect(&self, name: &str) -> Option<String> {
-            use core::fmt::Write;
             use crate::property::format_metadata;
+            use core::fmt::Write;
             let mut out = String::new();
             if let Some(s) = self.sources.iter().find(|s| s.name == name) {
                 let src = (s.build)();
                 out.push_str(&format_metadata(name, &src.metadata()));
                 let _ = writeln!(out, "  Role        source");
                 let _ = writeln!(out, "\nOutput caps:\n  {:?}", s.output);
-                let _ = write!(out, "\nElement Properties:\n{}", format_specs(src.properties()));
+                let _ = write!(
+                    out,
+                    "\nElement Properties:\n{}",
+                    format_specs(src.properties())
+                );
                 Some(out)
             } else if let Some(f) = self.launch.iter().find(|f| f.name == name) {
                 let el = (f.build)();
                 out.push_str(&format_metadata(name, &el.metadata()));
                 let _ = writeln!(out, "  Role        element");
                 let _ = write!(out, "\nPad Templates:\n{}", format_templates(&f.templates));
-                let _ = write!(out, "\nElement Properties:\n{}", format_specs(el.properties()));
+                let _ = write!(
+                    out,
+                    "\nElement Properties:\n{}",
+                    format_specs(el.properties())
+                );
                 Some(out)
             } else if let Some(m) = self.muxers.iter().find(|m| m.name == name) {
                 // Build a one-input instance to read its metadata / properties (the
@@ -1248,7 +1334,11 @@ mod factory {
                     let _ = writeln!(out, "\nOutput caps:\n  {caps:?}");
                 }
                 let _ = writeln!(out, "\nInputs: derived from link degree");
-                let _ = write!(out, "\nElement Properties:\n{}", format_specs(mux.properties()));
+                let _ = write!(
+                    out,
+                    "\nElement Properties:\n{}",
+                    format_specs(mux.properties())
+                );
                 Some(out)
             } else {
                 None
@@ -1313,7 +1403,10 @@ mod factory {
         /// [`element_names`](Self::element_names) (sources, transforms / sinks,
         /// then muxer-only names). The structured catalog behind `g2g-docgen`.
         pub fn describe_all(&self) -> Vec<ElementDoc> {
-            self.element_names().into_iter().filter_map(|n| self.describe(n)).collect()
+            self.element_names()
+                .into_iter()
+                .filter_map(|n| self.describe(n))
+                .collect()
         }
 
         /// The descriptors of every registered factory, in registration order,
@@ -1334,7 +1427,12 @@ mod factory {
         ) -> Option<Vec<&'static str>> {
             let descs = self.descs();
             let chain = find_chain(&descs, input, target, max_depth)?;
-            Some(chain.into_iter().map(|link| self.factories[link.index].desc.name).collect())
+            Some(
+                chain
+                    .into_iter()
+                    .map(|link| self.factories[link.index].desc.name)
+                    .collect(),
+            )
         }
 
         /// Find the shortest chain converting `input` into caps satisfying
@@ -1379,7 +1477,9 @@ mod factory {
             target: &dyn Fn(&Caps) -> bool,
             max_depth: usize,
         ) -> Result<Vec<NodeId>, DecodebinError> {
-            let mut elements = self.autoplug(input, target, max_depth).ok_or(DecodebinError::NoChain)?;
+            let mut elements = self
+                .autoplug(input, target, max_depth)
+                .ok_or(DecodebinError::NoChain)?;
             self.maybe_prepend_parser(input, &mut elements);
             Self::splice_chain(graph, from, to, elements)
         }
@@ -1420,7 +1520,12 @@ mod factory {
         ) -> Option<Vec<&'static str>> {
             let descs = self.descs();
             let chain = find_chain_preferring(&descs, input, target, max_depth, preferred)?;
-            Some(chain.into_iter().map(|link| self.factories[link.index].desc.name).collect())
+            Some(
+                chain
+                    .into_iter()
+                    .map(|link| self.factories[link.index].desc.name)
+                    .collect(),
+            )
         }
 
         /// Domain-aware [`autoplug`](Self::autoplug): instantiate the chain the
@@ -1435,7 +1540,12 @@ mod factory {
         ) -> Option<Vec<Box<dyn DynAsyncElement>>> {
             let descs = self.descs();
             let chain = find_chain_preferring(&descs, input, target, max_depth, preferred)?;
-            Some(chain.into_iter().map(|link| self.factories[link.index].build(&link.output)).collect())
+            Some(
+                chain
+                    .into_iter()
+                    .map(|link| self.factories[link.index].build(&link.output))
+                    .collect(),
+            )
         }
 
         /// Capability-aware [`autoplug_names`](Self::autoplug_names): score
@@ -1453,7 +1563,12 @@ mod factory {
         ) -> Option<Vec<&'static str>> {
             let descs = self.descs();
             let chain = find_chain_with(&descs, input, target, max_depth, ctx)?;
-            Some(chain.into_iter().map(|link| self.factories[link.index].desc.name).collect())
+            Some(
+                chain
+                    .into_iter()
+                    .map(|link| self.factories[link.index].desc.name)
+                    .collect(),
+            )
         }
 
         /// Capability-aware [`autoplug`](Self::autoplug): instantiate the chain the
@@ -1468,7 +1583,12 @@ mod factory {
         ) -> Option<Vec<Box<dyn DynAsyncElement>>> {
             let descs = self.descs();
             let chain = find_chain_with(&descs, input, target, max_depth, ctx)?;
-            Some(chain.into_iter().map(|link| self.factories[link.index].build(&link.output)).collect())
+            Some(
+                chain
+                    .into_iter()
+                    .map(|link| self.factories[link.index].build(&link.output))
+                    .collect(),
+            )
         }
 
         /// Domain-aware [`decodebin`](Self::decodebin): splice in the chain the
@@ -1637,7 +1757,14 @@ mod factory {
             graph.link(src, demux.input())?;
             for (i, port) in ports.into_iter().enumerate() {
                 let snk = graph.add_sink(GraphNodeRef::Element(port.sink));
-                self.decodebin(&mut graph, demux.out(i as u8), snk, &port.input_caps, &*port.target, max_depth)?;
+                self.decodebin(
+                    &mut graph,
+                    demux.out(i as u8),
+                    snk,
+                    &port.input_caps,
+                    &*port.target,
+                    max_depth,
+                )?;
             }
             Ok(graph)
         }
@@ -1647,8 +1774,8 @@ mod factory {
 #[cfg(feature = "std")]
 pub use factory::{
     declared_source_caps, DecodebinError, DecodebinSelectHook, DemuxFactory, DemuxSelectHook,
-    ElementDoc, ElementFactory, LaunchFactory, MuxerFactory, PlaybinGraphError, PlaybinHook,
-    PlaybinPort, PlaybinError, PropertyDoc, Registry, SourceFactory, Uri, UriError,
+    ElementDoc, ElementFactory, LaunchFactory, MuxerFactory, PlaybinError, PlaybinGraphError,
+    PlaybinHook, PlaybinPort, PropertyDoc, Registry, SourceFactory, Uri, UriError,
     UriSourceFactory,
 };
 
@@ -1667,7 +1794,12 @@ mod tests {
     }
 
     fn raw(format: RawVideoFormat) -> Caps {
-        Caps::RawVideo { format, width: Dim::Any, height: Dim::Any, framerate: Rate::Any }
+        Caps::RawVideo {
+            format,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        }
     }
 
     /// H.264 in, H.264 out (a parser: refines but never changes media type).
@@ -1725,19 +1857,41 @@ mod tests {
     #[test]
     fn capability_score_ranks_domain_then_hardware_then_rank() {
         let sys = CapabilityDescriptor::default();
-        let cuda = CapabilityDescriptor { output_memory: MemoryDomainKind::Cuda, ..Default::default() };
-        let ctx_cuda =
-            SelectionContext { preferred_memory: MemoryDomainKind::Cuda, prefer_hardware: false };
-        assert!(cuda.score(&ctx_cuda) > sys.score(&ctx_cuda), "a memory-domain match dominates");
+        let cuda = CapabilityDescriptor {
+            output_memory: MemoryDomainKind::Cuda,
+            ..Default::default()
+        };
+        let ctx_cuda = SelectionContext {
+            preferred_memory: MemoryDomainKind::Cuda,
+            prefer_hardware: false,
+        };
+        assert!(
+            cuda.score(&ctx_cuda) > sys.score(&ctx_cuda),
+            "a memory-domain match dominates"
+        );
 
-        let hw = CapabilityDescriptor { acceleration: Acceleration::Hardware, ..Default::default() };
-        let ctx_hw =
-            SelectionContext { preferred_memory: MemoryDomainKind::System, prefer_hardware: true };
-        assert!(hw.score(&ctx_hw) > sys.score(&ctx_hw), "a hardware preference favors hardware");
+        let hw = CapabilityDescriptor {
+            acceleration: Acceleration::Hardware,
+            ..Default::default()
+        };
+        let ctx_hw = SelectionContext {
+            preferred_memory: MemoryDomainKind::System,
+            prefer_hardware: true,
+        };
+        assert!(
+            hw.score(&ctx_hw) > sys.score(&ctx_hw),
+            "a hardware preference favors hardware"
+        );
 
-        let ranked = CapabilityDescriptor { rank: 5, ..Default::default() };
+        let ranked = CapabilityDescriptor {
+            rank: 5,
+            ..Default::default()
+        };
         let plain = SelectionContext::default();
-        assert!(ranked.score(&plain) > sys.score(&plain), "rank breaks an otherwise-equal tie");
+        assert!(
+            ranked.score(&plain) > sys.score(&plain),
+            "rank breaks an otherwise-equal tie"
+        );
     }
 
     #[test]
@@ -1745,10 +1899,19 @@ mod tests {
         // CPU decoder first, GPU second: a plain search picks the CPU decoder, so
         // a default pipeline's selection is unchanged by the capability machinery.
         let descs = [decoder(), gpu_decoder()];
-        let chain =
-            find_chain_with(&descs, &h264(Dim::Any), &is_raw_video, 4, SelectionContext::default())
-                .expect("a decoder reaches raw");
-        assert_eq!(indices(&chain), Vec::from([0usize]), "default = registration order (CPU first)");
+        let chain = find_chain_with(
+            &descs,
+            &h264(Dim::Any),
+            &is_raw_video,
+            4,
+            SelectionContext::default(),
+        )
+        .expect("a decoder reaches raw");
+        assert_eq!(
+            indices(&chain),
+            Vec::from([0usize]),
+            "default = registration order (CPU first)"
+        );
     }
 
     #[test]
@@ -1756,10 +1919,17 @@ mod tests {
         // The same two decoders; a Cuda preference flips the choice to the GPU
         // decoder even though it is registered second (avoids a download).
         let descs = [decoder(), gpu_decoder()];
-        let ctx = SelectionContext { preferred_memory: MemoryDomainKind::Cuda, prefer_hardware: false };
+        let ctx = SelectionContext {
+            preferred_memory: MemoryDomainKind::Cuda,
+            prefer_hardware: false,
+        };
         let chain =
             find_chain_with(&descs, &h264(Dim::Any), &is_raw_video, 4, ctx).expect("reaches raw");
-        assert_eq!(indices(&chain), Vec::from([1usize]), "Cuda preference picks the GPU decoder");
+        assert_eq!(
+            indices(&chain),
+            Vec::from([1usize]),
+            "Cuda preference picks the GPU decoder"
+        );
     }
 
     #[test]
@@ -1767,10 +1937,19 @@ mod tests {
         // Two equivalent CPU decoders; the higher-ranked one wins regardless of
         // registration order (the explicit-override tiebreaker).
         let descs = [decoder(), decoder().with_rank(10)];
-        let chain =
-            find_chain_with(&descs, &h264(Dim::Any), &is_raw_video, 4, SelectionContext::default())
-                .expect("reaches raw");
-        assert_eq!(indices(&chain), Vec::from([1usize]), "higher rank wins the tie");
+        let chain = find_chain_with(
+            &descs,
+            &h264(Dim::Any),
+            &is_raw_video,
+            4,
+            SelectionContext::default(),
+        )
+        .expect("reaches raw");
+        assert_eq!(
+            indices(&chain),
+            Vec::from([1usize]),
+            "higher rank wins the tie"
+        );
     }
 
     #[test]
@@ -1787,19 +1966,34 @@ mod tests {
     #[test]
     fn empty_chain_when_input_already_satisfies_target() {
         let descs = [decoder()];
-        let chain = find_chain(&descs, &raw(RawVideoFormat::Nv12), &is_raw_video, 4)
-            .expect("already raw");
-        assert!(chain.is_empty(), "no elements needed when input is already raw");
+        let chain =
+            find_chain(&descs, &raw(RawVideoFormat::Nv12), &is_raw_video, 4).expect("already raw");
+        assert!(
+            chain.is_empty(),
+            "no elements needed when input is already raw"
+        );
     }
 
     #[test]
     fn finds_multi_element_chain_to_a_specific_format() {
         // Target a format only the converter produces, forcing decoder -> convert.
         let descs = [parser(), decoder(), convert()];
-        let target = |c: &Caps| matches!(c, Caps::RawVideo { format: RawVideoFormat::Rgba8, .. });
+        let target = |c: &Caps| {
+            matches!(
+                c,
+                Caps::RawVideo {
+                    format: RawVideoFormat::Rgba8,
+                    ..
+                }
+            )
+        };
         let chain = find_chain(&descs, &h264(Dim::Any), &target, 4)
             .expect("decode then convert reaches RGBA");
-        assert_eq!(indices(&chain), Vec::from([1usize, 2usize]), "decoder then converter");
+        assert_eq!(
+            indices(&chain),
+            Vec::from([1usize, 2usize]),
+            "decoder then converter"
+        );
         // The converter hop carries the chosen output the builder needs: RGBA.
         assert_eq!(chain.last().unwrap().output, raw(RawVideoFormat::Rgba8));
     }
@@ -1819,9 +2013,23 @@ mod tests {
         // The decoder -> convert chain is length 2; a depth bound of 1 can't
         // reach the RGBA-only target.
         let descs = [decoder(), convert()];
-        let target = |c: &Caps| matches!(c, Caps::RawVideo { format: RawVideoFormat::Rgba8, .. });
-        assert!(find_chain(&descs, &h264(Dim::Any), &target, 1).is_none(), "1 hop is too shallow");
-        assert!(find_chain(&descs, &h264(Dim::Any), &target, 2).is_some(), "2 hops suffice");
+        let target = |c: &Caps| {
+            matches!(
+                c,
+                Caps::RawVideo {
+                    format: RawVideoFormat::Rgba8,
+                    ..
+                }
+            )
+        };
+        assert!(
+            find_chain(&descs, &h264(Dim::Any), &target, 1).is_none(),
+            "1 hop is too shallow"
+        );
+        assert!(
+            find_chain(&descs, &h264(Dim::Any), &target, 2).is_some(),
+            "2 hops suffice"
+        );
     }
 
     #[cfg(feature = "std")]
@@ -1834,7 +2042,10 @@ mod tests {
 
         let f = Uri::parse("file:///home/a/clip.mp4").expect("valid file uri");
         assert_eq!(f.scheme, "file");
-        assert_eq!(f.rest, "/home/a/clip.mp4", "file:// leaves an absolute path");
+        assert_eq!(
+            f.rest, "/home/a/clip.mp4",
+            "file:// leaves an absolute path"
+        );
 
         let udp = Uri::parse("udp://0.0.0.0:5004").expect("valid udp uri");
         assert_eq!((udp.scheme, udp.rest), ("udp", "0.0.0.0:5004"));
@@ -1916,7 +2127,10 @@ mod tests {
                     || alloc::boxed::Box::new(Dummy),
                 ));
                 reg.set_parser_provider(|caps| match caps {
-                    Caps::CompressedVideo { codec: VideoCodec::H264, .. } => Some("auparse"),
+                    Caps::CompressedVideo {
+                        codec: VideoCodec::H264,
+                        ..
+                    } => Some("auparse"),
                     _ => None,
                 });
             }
@@ -1927,7 +2141,15 @@ mod tests {
                 .expect("h264 -> raw chain")
                 .len()
         };
-        assert_eq!(build(false), 1, "no provider: the decode chain is just the decoder");
-        assert_eq!(build(true), 2, "provider: a parser is spliced in ahead of the decoder");
+        assert_eq!(
+            build(false),
+            1,
+            "no provider: the decode chain is just the decoder"
+        );
+        assert_eq!(
+            build(true),
+            2,
+            "provider: a parser is spliced in ahead of the decoder"
+        );
     }
 }

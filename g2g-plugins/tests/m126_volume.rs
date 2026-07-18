@@ -21,6 +21,11 @@ async fn volume_runs_in_a_text_pipeline() {
         "audiotestsrc num-buffers=3 wave=saw ! volume volume=0.5 ! fakesink",
     )
     .expect("pipeline parses");
-    let stats = run_graph(graph, &ZeroClock, 4).await.expect("volume pipeline runs");
-    assert_eq!(stats.frames_consumed, 3, "all gain-adjusted buffers reached the sink");
+    let stats = run_graph(graph, &ZeroClock, 4)
+        .await
+        .expect("volume pipeline runs");
+    assert_eq!(
+        stats.frames_consumed, 3,
+        "all gain-adjusted buffers reached the sink"
+    );
 }

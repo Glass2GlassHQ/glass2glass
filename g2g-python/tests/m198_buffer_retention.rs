@@ -47,7 +47,10 @@ fn frame_2x1_rgba() -> Frame {
 
 #[test]
 fn retained_buffer_view_is_rejected_not_use_after_free() {
-    std::env::set_var("PYTHONPATH", concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures"));
+    std::env::set_var(
+        "PYTHONPATH",
+        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures"),
+    );
 
     let mut el = PyTransform::new("echo_element", "RetainingTransform");
     let caps = Caps::RawVideo {
@@ -59,11 +62,19 @@ fn retained_buffer_view_is_rejected_not_use_after_free() {
     el.configure_pipeline(&caps).unwrap();
 
     let mut sink = CollectSink::default();
-    let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
     let result = rt.block_on(el.process(PipelinePacket::DataFrame(frame_2x1_rgba()), &mut sink));
 
     // The element retained the buffer past the call; the host must fail the
     // frame rather than forward it (which would later dangle).
-    assert!(result.is_err(), "retained buffer view must fail the frame, got {result:?}");
-    assert!(sink.packets.is_empty(), "no frame should be forwarded after a retention violation");
+    assert!(
+        result.is_err(),
+        "retained buffer view must fail the frame, got {result:?}"
+    );
+    assert!(
+        sink.packets.is_empty(),
+        "no frame should be forwarded after a retention violation"
+    );
 }

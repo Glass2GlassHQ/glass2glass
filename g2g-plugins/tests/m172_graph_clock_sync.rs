@@ -56,13 +56,16 @@ impl SourceLoop for EmitSrc {
         Ok(ConfigureOutcome::Accepted)
     }
     fn provide_clock(&self) -> Option<ClockCandidate> {
-        self.provide.map(|(p, now)| ClockCandidate::new(p, Arc::new(FixedClock(now))))
+        self.provide
+            .map(|(p, now)| ClockCandidate::new(p, Arc::new(FixedClock(now))))
     }
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
         Box::pin(async move {
             for seq in 0..2u64 {
                 let frame = Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(Box::new([0u8; 8 * 8 * 4]))),
+                    domain: MemoryDomain::System(SystemSlice::from_boxed(Box::new(
+                        [0u8; 8 * 8 * 4],
+                    ))),
                     timing: FrameTiming::default(),
                     sequence: seq,
                     meta: Default::default(),
@@ -114,12 +117,18 @@ async fn run_graph_delivers_clock_sync_to_the_sink() {
     let src = g.add_source(GraphNodeRef::source(EmitSrc {
         provide: Some((ClockPriority::LiveSource, 7_000)),
     }));
-    let sink = g.add_sink(GraphNodeRef::element(RecordingSink { got_base: got.clone() }));
+    let sink = g.add_sink(GraphNodeRef::element(RecordingSink {
+        got_base: got.clone(),
+    }));
     g.link(src, sink).unwrap();
 
     let stats = run_graph(g, &FixedClock(0), 4).await.expect("graph runs");
 
-    assert_eq!(stats.clock_priority, ClockPriority::LiveSource, "live-source clock elected");
+    assert_eq!(
+        stats.clock_priority,
+        ClockPriority::LiveSource,
+        "live-source clock elected"
+    );
     assert_eq!(
         *got.lock().unwrap(),
         Some(7_000),
@@ -134,11 +143,17 @@ async fn run_graph_skips_clock_sync_without_an_elected_clock() {
     let got = Arc::new(Mutex::new(None));
     let mut g: Graph<GraphNodeRef<'static>> = Graph::new();
     let src = g.add_source(GraphNodeRef::source(EmitSrc { provide: None }));
-    let sink = g.add_sink(GraphNodeRef::element(RecordingSink { got_base: got.clone() }));
+    let sink = g.add_sink(GraphNodeRef::element(RecordingSink {
+        got_base: got.clone(),
+    }));
     g.link(src, sink).unwrap();
 
     let stats = run_graph(g, &FixedClock(0), 4).await.expect("graph runs");
 
     assert_eq!(stats.clock_priority, ClockPriority::SystemFallback);
-    assert_eq!(*got.lock().unwrap(), None, "no ClockSync delivered without an elected clock");
+    assert_eq!(
+        *got.lock().unwrap(),
+        None,
+        "no ClockSync delivered without an elected clock"
+    );
 }

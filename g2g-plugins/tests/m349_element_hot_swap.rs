@@ -19,7 +19,8 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_graph, GraphNode, SourceLoop};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, ConfigureOutcome, Dim, ElementSlot, FrameTiming, G2gError,
-    Graph, MemoryDomain, OutputSink, PipelineClock, PipelinePacket, Rate, RawVideoFormat, SwapHandle,
+    Graph, MemoryDomain, OutputSink, PipelineClock, PipelinePacket, Rate, RawVideoFormat,
+    SwapHandle,
 };
 
 /// The (handle, replacement element) a slotted element holds to swap itself out
@@ -48,7 +49,8 @@ struct CountedSource {
 
 impl SourceLoop for CountedSource {
     type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>;
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 
@@ -188,11 +190,17 @@ async fn element_hot_swaps_mid_stream_inside_a_running_graph() {
     let swap_cell: SwapCell = Arc::new(Mutex::new(None));
 
     // A is built into the slot; it swaps to B after 3 frames.
-    let a = ElementA { count: Arc::clone(&a_count), threshold: 3, swap: Arc::clone(&swap_cell) };
+    let a = ElementA {
+        count: Arc::clone(&a_count),
+        threshold: 3,
+        swap: Arc::clone(&swap_cell),
+    };
     let slot = ElementSlot::new(Box::new(a));
     // B is configured against the same caps before being installed (the slot
     // contract: a swapped-in element is not re-negotiated).
-    let mut b = ElementB { count: Arc::clone(&b_count) };
+    let mut b = ElementB {
+        count: Arc::clone(&b_count),
+    };
     b.configure_pipeline(&nv12()).unwrap();
     *swap_cell.lock().unwrap() = Some((slot.handle(), Box::new(b)));
 
@@ -229,16 +237,32 @@ async fn element_hot_swaps_mid_stream_inside_a_running_graph() {
     let mut g: Graph<GraphNode> = Graph::new();
     let src = g.add_source(GraphNode::source(CountedSource { n: 5 }));
     let slot_node = g.add_transform(GraphNode::element(slot));
-    let sink = g.add_sink(GraphNode::element(CountingSink { count: Arc::clone(&sink_count) }));
+    let sink = g.add_sink(GraphNode::element(CountingSink {
+        count: Arc::clone(&sink_count),
+    }));
     g.link(src, slot_node).unwrap();
     g.link(slot_node, sink).unwrap();
 
     // link_capacity 1 keeps the slot processing in lock-step with the source, so
     // the swap on A's 3rd frame lands before frame 4 reaches the slot.
-    let stats = run_graph(g, &NullClock, 1).await.expect("hot-swap graph runs to EOS");
+    let stats = run_graph(g, &NullClock, 1)
+        .await
+        .expect("hot-swap graph runs to EOS");
 
-    assert_eq!(a_count.load(Ordering::SeqCst), 3, "A handled the first 3 frames");
-    assert_eq!(b_count.load(Ordering::SeqCst), 2, "B handled the remaining 2 after the swap");
-    assert_eq!(*sink_count.lock().unwrap(), 5, "every frame reached the sink across the swap");
+    assert_eq!(
+        a_count.load(Ordering::SeqCst),
+        3,
+        "A handled the first 3 frames"
+    );
+    assert_eq!(
+        b_count.load(Ordering::SeqCst),
+        2,
+        "B handled the remaining 2 after the swap"
+    );
+    assert_eq!(
+        *sink_count.lock().unwrap(),
+        5,
+        "every frame reached the sink across the swap"
+    );
     assert_eq!(stats.frames_consumed, 5);
 }

@@ -22,7 +22,12 @@ pub fn bounded<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
         senders: 1,
         receivers: 1,
     }));
-    (Sender { inner: inner.clone() }, Receiver { inner })
+    (
+        Sender {
+            inner: inner.clone(),
+        },
+        Receiver { inner },
+    )
 }
 
 #[derive(Debug)]
@@ -48,7 +53,9 @@ pub struct Receiver<T> {
 impl<T> Clone for Sender<T> {
     fn clone(&self) -> Self {
         self.inner.lock().senders += 1;
-        Self { inner: self.inner.clone() }
+        Self {
+            inner: self.inner.clone(),
+        }
     }
 }
 
@@ -103,7 +110,10 @@ impl<T> Sender<T> {
     }
 
     pub fn send(&self, value: T) -> SendFuture<'_, T> {
-        SendFuture { sender: self, value: Some(value) }
+        SendFuture {
+            sender: self,
+            value: Some(value),
+        }
     }
 
     /// Remove and return the front-most queued value matching `pred`, or
@@ -134,7 +144,10 @@ impl<'a, T: Unpin> Future for SendFuture<'a, T> {
             return Poll::Ready(Err(SendError::Closed));
         }
         if g.queue.len() < g.capacity {
-            let v = this.value.take().expect("SendFuture polled after completion");
+            let v = this
+                .value
+                .take()
+                .expect("SendFuture polled after completion");
             g.queue.push_back(v);
             if let Some(w) = g.recv_waker.take() {
                 w.wake();
@@ -439,7 +452,13 @@ fn build_link(capacity: usize, transit: Option<TransitRing>) -> (LinkSender, Lin
             probe: ProbeSlot::default(),
             transit: transit.clone(),
         },
-        LinkReceiver { data: data_rx, reconfigure: slot, qos, bitrate, transit },
+        LinkReceiver {
+            data: data_rx,
+            reconfigure: slot,
+            qos,
+            bitrate,
+            transit,
+        },
     )
 }
 
@@ -532,7 +551,11 @@ impl SenderSink {
         // interceptor on the edge (via the runner/observer) sees this adapter's
         // packets. A bare link has an empty slot: pass-through, no cost.
         let probe = link.probe.clone();
-        Self { link, probe, upstream_qos: None }
+        Self {
+            link,
+            probe,
+            upstream_qos: None,
+        }
     }
 
     /// A handle to this link's probe slot, for installing/removing a
@@ -614,17 +637,13 @@ impl OutputSink for SenderSink {
                             if self
                                 .link
                                 .data
-                                .evict_front_matching(|p| {
-                                    matches!(p, PipelinePacket::DataFrame(_))
-                                })
+                                .evict_front_matching(|p| matches!(p, PipelinePacket::DataFrame(_)))
                                 .is_some()
                             {
                                 self.link.record_drop();
                                 match self.link.data.try_send(returned) {
                                     Ok(()) => {}
-                                    Err((_v, SendError::Closed)) => {
-                                        return Err(G2gError::Shutdown)
-                                    }
+                                    Err((_v, SendError::Closed)) => return Err(G2gError::Shutdown),
                                     Err((_v, SendError::Full)) => {
                                         unreachable!("a slot was just freed by eviction")
                                     }
@@ -756,7 +775,10 @@ mod link_tests {
         }
 
         // Channel is empty — the rejected-caps packet was held back.
-        assert!(rx.try_recv().is_none(), "packet must not enqueue when reconfigure pending");
+        assert!(
+            rx.try_recv().is_none(),
+            "packet must not enqueue when reconfigure pending"
+        );
     }
 
     #[test]
@@ -779,7 +801,10 @@ mod link_tests {
 
         // Downstream reports it is behind; QoS is advisory, so the packet still
         // crosses and the producer sees Qos on the same push.
-        rx.request_qos(QosMessage { jitter_ns: 5_000_000, running_time_ns: 100 });
+        rx.request_qos(QosMessage {
+            jitter_ns: 5_000_000,
+            running_time_ns: 100,
+        });
         let outcome = run_to_ready(sink.push(dummy_frame())).expect("push ok");
         match outcome {
             PushOutcome::Qos(q) => {
@@ -789,7 +814,10 @@ mod link_tests {
             other => panic!("expected Qos, got {other:?}"),
         }
         // Unlike reconfigure, the packet was enqueued (QoS does not hold it back).
-        assert!(rx.try_recv().is_some(), "QoS is advisory; the frame still flowed");
+        assert!(
+            rx.try_recv().is_some(),
+            "QoS is advisory; the frame still flowed"
+        );
     }
 
     #[test]
@@ -798,13 +826,22 @@ mod link_tests {
         let mut sink = SenderSink::new(tx);
 
         // Both pending: negotiation correctness wins, QoS waits for the next push.
-        rx.request_qos(QosMessage { jitter_ns: 1_000, running_time_ns: 0 });
+        rx.request_qos(QosMessage {
+            jitter_ns: 1_000,
+            running_time_ns: 0,
+        });
         rx.request_reconfigure(Reconfigure::Renegotiate);
         let first = run_to_ready(sink.push(dummy_frame())).unwrap();
-        assert!(matches!(first, PushOutcome::Reconfigure(_)), "reconfigure first");
+        assert!(
+            matches!(first, PushOutcome::Reconfigure(_)),
+            "reconfigure first"
+        );
 
         let second = run_to_ready(sink.push(dummy_frame())).unwrap();
-        assert!(matches!(second, PushOutcome::Qos(_)), "QoS surfaces once reconfigure drained");
+        assert!(
+            matches!(second, PushOutcome::Qos(_)),
+            "QoS surfaces once reconfigure drained"
+        );
     }
 
     #[test]
@@ -920,11 +957,21 @@ mod link_tests {
         // Fill capacity, then overflow: the incoming frame is dropped, the
         // queued ones survive.
         for seq in 0..2 {
-            assert_eq!(run_to_ready(sink.push(frame_seq(seq))).unwrap(), PushOutcome::Accepted);
+            assert_eq!(
+                run_to_ready(sink.push(frame_seq(seq))).unwrap(),
+                PushOutcome::Accepted
+            );
         }
-        assert_eq!(run_to_ready(sink.push(frame_seq(2))).unwrap(), PushOutcome::Accepted);
+        assert_eq!(
+            run_to_ready(sink.push(frame_seq(2))).unwrap(),
+            PushOutcome::Accepted
+        );
 
-        assert_eq!(drained_sequences(&rx), [0, 1], "drop-newest keeps the oldest");
+        assert_eq!(
+            drained_sequences(&rx),
+            [0, 1],
+            "drop-newest keeps the oldest"
+        );
         assert_eq!(*counter.lock(), 1);
     }
 
@@ -941,9 +988,16 @@ mod link_tests {
             run_to_ready(sink.push(frame_seq(seq))).unwrap();
         }
         // Overflow evicts the oldest (seq 0) and enqueues the newcomer (seq 2).
-        assert_eq!(run_to_ready(sink.push(frame_seq(2))).unwrap(), PushOutcome::Accepted);
+        assert_eq!(
+            run_to_ready(sink.push(frame_seq(2))).unwrap(),
+            PushOutcome::Accepted
+        );
 
-        assert_eq!(drained_sequences(&rx), [1, 2], "drop-oldest keeps the newest");
+        assert_eq!(
+            drained_sequences(&rx),
+            [1, 2],
+            "drop-oldest keeps the newest"
+        );
         assert_eq!(*counter.lock(), 1);
     }
 

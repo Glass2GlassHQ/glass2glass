@@ -41,14 +41,25 @@ pub fn packet_preview(packet: &PipelinePacket, caps: &Caps) -> Option<Value> {
     };
     let bytes = slice.as_slice();
     Some(match caps {
-        Caps::RawVideo { format, width, height, .. } => match (dim(width), dim(height)) {
+        Caps::RawVideo {
+            format,
+            width,
+            height,
+            ..
+        } => match (dim(width), dim(height)) {
             (Some(w), Some(h)) => raw_video_thumb(bytes, *format, w as usize, h as usize),
             _ => hexdump(bytes),
         },
-        Caps::Audio { format: AudioFormat::PcmS16Le, .. } => audio_peaks(bytes),
-        Caps::CompressedVideo { codec, width, height, .. } => {
-            compressed_preview(bytes, *codec, dim(width), dim(height))
-        }
+        Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            ..
+        } => audio_peaks(bytes),
+        Caps::CompressedVideo {
+            codec,
+            width,
+            height,
+            ..
+        } => compressed_preview(bytes, *codec, dim(width), dim(height)),
         _ => hexdump(bytes),
     })
 }
@@ -78,12 +89,7 @@ fn raw_video_thumb(bytes: &[u8], format: RawVideoFormat, w: usize, h: usize) -> 
 /// other codec (and a failed MJPEG decode) yields a labelled card carrying the
 /// codec name and resolution.
 #[cfg_attr(not(feature = "mjpeg"), allow(unused_variables))]
-fn compressed_preview(
-    bytes: &[u8],
-    codec: VideoCodec,
-    w: Option<u32>,
-    h: Option<u32>,
-) -> Value {
+fn compressed_preview(bytes: &[u8], codec: VideoCodec, w: Option<u32>, h: Option<u32>) -> Value {
     #[cfg(feature = "mjpeg")]
     if codec == VideoCodec::Mjpeg {
         if let Ok((rgba, dw, dh)) = crate::mjpegdec::MjpegDec::new().decode(bytes) {
@@ -127,7 +133,9 @@ fn frame_kind(codec: VideoCodec, bytes: &[u8]) -> Option<&'static str> {
             }
         }),
         // VP8 frame tag: bit 0 of the first byte is the frame type (0 = key).
-        VideoCodec::Vp8 => bytes.first().map(|b| if b & 1 == 0 { "key" } else { "delta" }),
+        VideoCodec::Vp8 => bytes
+            .first()
+            .map(|b| if b & 1 == 0 { "key" } else { "delta" }),
         _ => None,
     }
 }
@@ -296,7 +304,11 @@ mod tests {
 
     #[test]
     fn audio_pcm_becomes_peaks() {
-        let caps = Caps::Audio { format: AudioFormat::PcmS16Le, channels: 1, sample_rate: 48_000 };
+        let caps = Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            channels: 1,
+            sample_rate: 48_000,
+        };
         // Full-scale +/- samples.
         let mut buf = Vec::new();
         for _ in 0..128 {
@@ -397,7 +409,9 @@ mod tests {
 
     #[test]
     fn bytestream_still_falls_back_to_hex() {
-        let caps = Caps::ByteStream { encoding: g2g_core::ByteStreamEncoding::MpegTs };
+        let caps = Caps::ByteStream {
+            encoding: g2g_core::ByteStreamEncoding::MpegTs,
+        };
         let v = packet_preview(&frame(vec![0xde, 0xad, 0xbe, 0xef]), &caps).unwrap();
         assert_eq!(v["kind"], "hex");
         assert_eq!(v["len"], 4);
@@ -437,7 +451,9 @@ mod tests {
 
     #[test]
     fn control_packet_has_no_preview() {
-        let caps = Caps::ByteStream { encoding: g2g_core::ByteStreamEncoding::MpegTs };
+        let caps = Caps::ByteStream {
+            encoding: g2g_core::ByteStreamEncoding::MpegTs,
+        };
         assert!(packet_preview(&PipelinePacket::Eos, &caps).is_none());
     }
 }

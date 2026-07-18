@@ -167,7 +167,11 @@ struct ChunkReader {
 
 impl ChunkReader {
     fn new() -> Self {
-        Self { inbound: Vec::new(), chunk_size: DEFAULT_CHUNK_SIZE, streams: BTreeMap::new() }
+        Self {
+            inbound: Vec::new(),
+            chunk_size: DEFAULT_CHUNK_SIZE,
+            streams: BTreeMap::new(),
+        }
     }
 
     fn push(&mut self, data: &[u8]) {
@@ -217,7 +221,10 @@ impl ChunkReader {
                 if len < 3 {
                     return ChunkStep::Need;
                 }
-                (self.inbound[2] as u32 * 256 + self.inbound[1] as u32 + 64, 3)
+                (
+                    self.inbound[2] as u32 * 256 + self.inbound[1] as u32 + 64,
+                    3,
+                )
             }
             _ => (marker as u32, 1),
         };
@@ -237,7 +244,14 @@ impl ChunkReader {
         self.ensure_stream(csid);
         let prev = {
             let s = &self.streams[&csid];
-            (s.timestamp, s.msg_length, s.msg_type, s.msg_stream_id, s.ext_timestamp, s.payload.len())
+            (
+                s.timestamp,
+                s.msg_length,
+                s.msg_type,
+                s.msg_stream_id,
+                s.ext_timestamp,
+                s.payload.len(),
+            )
         };
         let (prev_ts, prev_len, prev_type, prev_msid, prev_ext, prev_payload) = prev;
 
@@ -252,7 +266,11 @@ impl ChunkReader {
 
         // Extended timestamp follows the message header when the 24-bit field is
         // saturated (fmt 0/1/2), or when continuing a stream that used one (fmt 3).
-        let needs_ext = if fmt == 3 { prev_ext } else { ts_field == 0xFF_FFFF };
+        let needs_ext = if fmt == 3 {
+            prev_ext
+        } else {
+            ts_field == 0xFF_FFFF
+        };
         let ext_len = if needs_ext { 4 } else { 0 };
         if len < basic_len + mh_len + ext_len {
             return ChunkStep::Need;
@@ -297,7 +315,11 @@ impl ChunkReader {
         }
         stream.payload.extend_from_slice(&payload_bytes);
         if stream.payload.len() >= stream.msg_length {
-            ChunkStep::Message(stream.msg_type, stream.timestamp, core::mem::take(&mut stream.payload))
+            ChunkStep::Message(
+                stream.msg_type,
+                stream.timestamp,
+                core::mem::take(&mut stream.payload),
+            )
         } else {
             ChunkStep::Progress
         }
@@ -464,7 +486,9 @@ impl RtmpSession {
     /// `publish`. Only the command name + transaction id are needed to respond.
     fn handle_command(&mut self, payload: &[u8]) {
         let mut at = 0;
-        let Some(name) = amf0_read_string(payload, &mut at) else { return };
+        let Some(name) = amf0_read_string(payload, &mut at) else {
+            return;
+        };
         let txn = amf0_read_number(payload, &mut at).unwrap_or(0.0);
         match name.as_str() {
             "connect" => {
@@ -472,11 +496,20 @@ impl RtmpSession {
                 let mut bw = self.window_ack_size.to_be_bytes().to_vec();
                 bw.push(2); // dynamic limit
                 self.send_control(MSG_SET_PEER_BW, &bw);
-                self.send_control(MSG_SET_CHUNK_SIZE, &(DEFAULT_CHUNK_SIZE as u32).to_be_bytes());
+                self.send_control(
+                    MSG_SET_CHUNK_SIZE,
+                    &(DEFAULT_CHUNK_SIZE as u32).to_be_bytes(),
+                );
                 let mut body = Vec::new();
                 amf0_string(&mut body, "_result");
                 amf0_number(&mut body, txn);
-                amf0_object(&mut body, &[("fmsVer", AmfVal::Str("FMS/3,0,1,123")), ("capabilities", AmfVal::Num(31.0))]);
+                amf0_object(
+                    &mut body,
+                    &[
+                        ("fmsVer", AmfVal::Str("FMS/3,0,1,123")),
+                        ("capabilities", AmfVal::Num(31.0)),
+                    ],
+                );
                 amf0_object(
                     &mut body,
                     &[
@@ -518,13 +551,29 @@ impl RtmpSession {
 
     /// Send a protocol control message (chunk stream id 2, message stream id 0).
     fn send_control(&mut self, msg_type: u8, payload: &[u8]) {
-        write_message(&mut self.outbound, 2, msg_type, 0, 0, payload, DEFAULT_CHUNK_SIZE);
+        write_message(
+            &mut self.outbound,
+            2,
+            msg_type,
+            0,
+            0,
+            payload,
+            DEFAULT_CHUNK_SIZE,
+        );
     }
 
     /// Send an AMF0 command reply (chunk stream id 3) on `msg_stream_id`. Larger
     /// replies (the `connect` result) fragment at the advertised chunk size.
     fn send_command(&mut self, msg_stream_id: u32, payload: &[u8]) {
-        write_message(&mut self.outbound, 3, MSG_AMF0_COMMAND, msg_stream_id, 0, payload, DEFAULT_CHUNK_SIZE);
+        write_message(
+            &mut self.outbound,
+            3,
+            MSG_AMF0_COMMAND,
+            msg_stream_id,
+            0,
+            payload,
+            DEFAULT_CHUNK_SIZE,
+        );
     }
 
     /// Append one FLV tag (the RTMP message payload is the tag body) to the FLV
@@ -537,7 +586,8 @@ impl RtmpSession {
             self.flv.extend_from_slice(&9u32.to_be_bytes()); // data offset
             self.flv_header_written = true;
         }
-        self.flv.extend_from_slice(&self.flv_prev_tag_size.to_be_bytes());
+        self.flv
+            .extend_from_slice(&self.flv_prev_tag_size.to_be_bytes());
         let start = self.flv.len();
         self.flv.push(tag_type);
         write_u24(&mut self.flv, body.len() as u32);
@@ -610,7 +660,11 @@ pub struct RtmpPublisher {
 impl RtmpPublisher {
     /// `app` is the RTMP application (first URL path segment), `stream_key` the
     /// rest, and `tc_url` the `rtmp://host[:port]/app` the server echoes back.
-    pub fn new(app: impl Into<String>, tc_url: impl Into<String>, stream_key: impl Into<String>) -> Self {
+    pub fn new(
+        app: impl Into<String>,
+        tc_url: impl Into<String>,
+        stream_key: impl Into<String>,
+    ) -> Self {
         let mut me = Self {
             app: app.into(),
             tc_url: tc_url.into(),
@@ -691,7 +745,8 @@ impl RtmpPublisher {
             // handshake), or an echo of S1 (simple / fallback). S2 is not
             // validated. Server bytes are S0 at [0], S1 at [1 .. 1+1536].
             let s1 = self.s_inbound[1..1 + HANDSHAKE_SIZE].to_vec();
-            self.outbound.extend_from_slice(&client_c2(self.complex, &s1));
+            self.outbound
+                .extend_from_slice(&client_c2(self.complex, &s1));
             let leftover = self.s_inbound.split_off(1 + 2 * HANDSHAKE_SIZE);
             self.s_inbound.clear();
             // Raise the chunk size, then open the publish ladder.
@@ -746,7 +801,9 @@ impl RtmpPublisher {
             _ => return, // set-peer-bw / user-control: ignored
         }
         let mut at = 0;
-        let Some(name) = amf0_read_string(payload, &mut at) else { return };
+        let Some(name) = amf0_read_string(payload, &mut at) else {
+            return;
+        };
         match self.phase {
             PubPhase::WaitConnect if name == "_result" || name == "_error" => {
                 self.send_create_stream();
@@ -811,12 +868,28 @@ impl RtmpPublisher {
 
     /// Send a protocol control message (chunk stream id 2, message stream id 0).
     fn send_control(&mut self, msg_type: u8, payload: &[u8]) {
-        write_message(&mut self.outbound, 2, msg_type, 0, 0, payload, PUB_CHUNK_SIZE);
+        write_message(
+            &mut self.outbound,
+            2,
+            msg_type,
+            0,
+            0,
+            payload,
+            PUB_CHUNK_SIZE,
+        );
     }
 
     /// Send an AMF0 command (chunk stream id 3) on `msg_stream_id`.
     fn send_command(&mut self, msg_stream_id: u32, payload: &[u8]) {
-        write_message(&mut self.outbound, 3, MSG_AMF0_COMMAND, msg_stream_id, 0, payload, PUB_CHUNK_SIZE);
+        write_message(
+            &mut self.outbound,
+            3,
+            MSG_AMF0_COMMAND,
+            msg_stream_id,
+            0,
+            payload,
+            PUB_CHUNK_SIZE,
+        );
     }
 
     /// Reframe one FLV tag as an RTMP message (the tag body is the message
@@ -861,7 +934,8 @@ impl FlvTagReader {
                 return None;
             }
             // The header's data-offset field gives the first tag's start.
-            let data_offset = u32::from_be_bytes(self.buf[5..9].try_into().expect("4 bytes")) as usize;
+            let data_offset =
+                u32::from_be_bytes(self.buf[5..9].try_into().expect("4 bytes")) as usize;
             let data_offset = data_offset.max(9);
             if self.buf.len() < data_offset {
                 return None;
@@ -1069,7 +1143,11 @@ mod tests {
         assert_eq!(out.len(), 1 + 2 * HANDSHAKE_SIZE, "S0 + S1 + S2");
         assert_eq!(out[0], RTMP_VERSION);
         let s2 = &out[1 + HANDSHAKE_SIZE..];
-        assert_eq!(&s2[8..], &c0c1[1 + 8..1 + HANDSHAKE_SIZE], "S2 echoes C1's random bytes");
+        assert_eq!(
+            &s2[8..],
+            &c0c1[1 + 8..1 + HANDSHAKE_SIZE],
+            "S2 echoes C1's random bytes"
+        );
     }
 
     #[test]
@@ -1090,7 +1168,9 @@ mod tests {
         // connect reply carries the success code.
         let reply = s.take_outbound();
         assert!(
-            reply.windows("NetConnection.Connect.Success".len()).any(|w| w == b"NetConnection.Connect.Success"),
+            reply
+                .windows("NetConnection.Connect.Success".len())
+                .any(|w| w == b"NetConnection.Connect.Success"),
             "connect _result advertises success",
         );
 
@@ -1107,7 +1187,9 @@ mod tests {
         s.push(&chunk(3, MSG_AMF0_COMMAND, 1, 0, &publish));
         let reply = s.take_outbound();
         assert!(
-            reply.windows("NetStream.Publish.Start".len()).any(|w| w == b"NetStream.Publish.Start"),
+            reply
+                .windows("NetStream.Publish.Start".len())
+                .any(|w| w == b"NetStream.Publish.Start"),
             "publish onStatus starts the stream",
         );
         assert!(s.is_publishing());
@@ -1169,7 +1251,10 @@ mod tests {
         // flvdemux forwards the AVCC body after the 5-byte AVC header.
         let mut expected = (nal.len() as u32).to_be_bytes().to_vec();
         expected.extend_from_slice(&nal);
-        assert_eq!(units[0].data, expected, "the split message reassembled byte-exact");
+        assert_eq!(
+            units[0].data, expected,
+            "the split message reassembled byte-exact"
+        );
     }
 
     /// The publisher (RtmpSink's transport) and the session (RtmpSrc's
@@ -1211,7 +1296,11 @@ mod tests {
         let mut demux = FlvDemuxer::new();
         demux.push_data(&server.take_flv());
         let units = demux.take_units();
-        assert_eq!(units.len(), 1, "one access unit survived the RTMP round trip");
+        assert_eq!(
+            units.len(),
+            1,
+            "one access unit survived the RTMP round trip"
+        );
         assert_eq!(units[0], FlvUnitView(FlvTrack::Video, au.to_vec(), 40));
     }
 
@@ -1294,7 +1383,10 @@ mod tests {
         demux.push_data(&server.take_flv());
         let units = demux.take_units();
         assert_eq!(units.len(), 1);
-        assert_eq!(units[0].data, au, "the fragmented access unit reassembled byte-exact");
+        assert_eq!(
+            units[0].data, au,
+            "the fragmented access unit reassembled byte-exact"
+        );
     }
 
     /// Drive a coupled publisher + server through the publish ladder, returning
@@ -1330,7 +1422,11 @@ mod tests {
         let mut server = RtmpSession::new().with_window_ack_size(4096);
         let mut publisher = coupled_to_publishing(&mut server);
         // The publisher learned the server's advertised window at connect.
-        assert_eq!(publisher.peer_window(), 4096, "publisher learned the ack window");
+        assert_eq!(
+            publisher.peer_window(),
+            4096,
+            "publisher learned the ack window"
+        );
         assert!(!publisher.throttled(), "not throttled before sending media");
 
         // Push media well past the window without delivering the bytes to the
@@ -1342,21 +1438,40 @@ mod tests {
         let flv = mux.push_au(&au, 10);
         publisher.push_flv(&flv);
         let media = publisher.take_outbound();
-        assert!(media.len() as u32 >= 4096, "queued more than one window of media");
-        assert!(publisher.throttled(), "unacked media past the window throttles the publisher");
+        assert!(
+            media.len() as u32 >= 4096,
+            "queued more than one window of media"
+        );
+        assert!(
+            publisher.throttled(),
+            "unacked media past the window throttles the publisher"
+        );
 
         // Deliver it to the server; it acknowledges after a window of bytes.
         server.push(&media);
         let ack = server.take_outbound();
-        assert!(!ack.is_empty(), "server sent an Acknowledgement after a window of bytes");
+        assert!(
+            !ack.is_empty(),
+            "server sent an Acknowledgement after a window of bytes"
+        );
         // The control message is type 3 (Acknowledgement) on chunk stream 2.
-        assert_eq!(ack[0] & 0x3F, 2, "ack rides the protocol-control chunk stream");
+        assert_eq!(
+            ack[0] & 0x3F,
+            2,
+            "ack rides the protocol-control chunk stream"
+        );
         assert_eq!(ack[7], MSG_ACK, "message type is Acknowledgement (3)");
 
         // Feeding the ack back to the publisher advances its window and clears it.
         publisher.push(&ack);
-        assert!(!publisher.throttled(), "the server's acknowledgement released the window");
-        assert!(publisher.unacked_bytes() < 4096, "unacked backlog dropped below the window");
+        assert!(
+            !publisher.throttled(),
+            "the server's acknowledgement released the window"
+        );
+        assert!(
+            publisher.unacked_bytes() < 4096,
+            "unacked backlog dropped below the window"
+        );
     }
 
     /// Compact comparator for `FlvUnit` in assertions.

@@ -91,10 +91,14 @@ async fn run_converts(num_converts: usize) -> Vec<Vec<u8>> {
     let mut src = VideoTestSrc::new(64, 48, 30, 3);
     let mut convs: Vec<VideoConvert> = (0..num_converts).map(|_| VideoConvert::auto()).collect();
     let frames = Arc::new(Mutex::new(Vec::new()));
-    let mut sink = CapturingSink { frames: Arc::clone(&frames) };
+    let mut sink = CapturingSink {
+        frames: Arc::clone(&frames),
+    };
 
-    let transforms: Vec<&mut dyn DynAsyncElement> =
-        convs.iter_mut().map(|c| c as &mut dyn DynAsyncElement).collect();
+    let transforms: Vec<&mut dyn DynAsyncElement> = convs
+        .iter_mut()
+        .map(|c| c as &mut dyn DynAsyncElement)
+        .collect();
     run_linear_chain(&mut src, transforms, &mut sink, &ZeroClock, 4)
         .await
         .expect("chain runs");

@@ -49,7 +49,10 @@ impl Default for SeamlessDedup {
 impl SeamlessDedup {
     /// A fresh de-duplicator (no packets seen yet).
     pub fn new() -> Self {
-        Self { high: None, seen: [0; WORDS] }
+        Self {
+            high: None,
+            seen: [0; WORDS],
+        }
     }
 
     /// Extend a 16-bit RTP sequence number against the highest seen, choosing the
@@ -163,7 +166,13 @@ mod net {
             for s in sockets {
                 s.set_read_timeout(Some(poll))?;
             }
-            Ok(Self { sockets, dedup: SeamlessDedup::new(), poll, idle_limit, next: 0 })
+            Ok(Self {
+                sockets,
+                dedup: SeamlessDedup::new(),
+                poll,
+                idle_limit,
+                next: 0,
+            })
         }
 
         /// Receive the next novel RTP packet into `buf`, returning its length, or
@@ -257,7 +266,10 @@ mod tests {
             }
         }
         let expected: Vec<u16> = (0..200).collect();
-        assert_eq!(forwarded, expected, "every sequence delivered exactly once, in order");
+        assert_eq!(
+            forwarded, expected,
+            "every sequence delivered exactly once, in order"
+        );
     }
 
     #[test]
@@ -270,7 +282,10 @@ mod tests {
         for &s in &seqs {
             let first = d.accept(&pkt(s, 1));
             let second = d.accept(&pkt(s, 1));
-            assert!(first && !second, "seq {s}: first forwarded, dup dropped across the wrap");
+            assert!(
+                first && !second,
+                "seq {s}: first forwarded, dup dropped across the wrap"
+            );
             count += 1;
         }
         assert_eq!(count, 10);
@@ -279,14 +294,15 @@ mod tests {
     #[test]
     fn rejects_short_packets() {
         let mut d = SeamlessDedup::new();
-        assert!(!d.accept(&[0u8; 8]), "shorter than an RTP header is dropped");
+        assert!(
+            !d.accept(&[0u8; 8]),
+            "shorter than an RTP header is dropped"
+        );
     }
 
     #[test]
     fn reconstructs_a_frame_through_the_real_20_depacketizer() {
-        use crate::st2110video::{
-            Sampling, St2110VideoDepacketizer, St2110VideoPacketizer,
-        };
+        use crate::st2110video::{Sampling, St2110VideoDepacketizer, St2110VideoPacketizer};
         use g2g_core::RawVideoFormat;
 
         // Packetize an 8x4 RGBA frame into many small packets, then split them across
@@ -295,7 +311,9 @@ mod tests {
         let (w, h) = (8usize, 4usize);
         let frame: Vec<u8> = (0..w * 4 * h).map(|i| (i * 13 + 1) as u8).collect();
         let mut tx = St2110VideoPacketizer::new(96, 0xABCD, Sampling::Rgba8, 12 + 2 + 6 + 8);
-        let packets = tx.packetize(&frame, w, h, 1_000_000_000).expect("packetizes");
+        let packets = tx
+            .packetize(&frame, w, h, 1_000_000_000)
+            .expect("packetizes");
         assert!(packets.len() > 4, "frame split into several packets");
 
         let mut dedup = SeamlessDedup::new();
@@ -316,6 +334,9 @@ mod tests {
             }
         }
         let f = done.expect("frame completes despite each path dropping half the packets");
-        assert_eq!(f.bytes, frame, "the RGBA frame is reconstructed byte-exact via -7 merge");
+        assert_eq!(
+            f.bytes, frame,
+            "the RGBA frame is reconstructed byte-exact via -7 merge"
+        );
     }
 }

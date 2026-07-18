@@ -82,10 +82,7 @@ async fn encodes_pcm_to_aac_access_units() {
         .expect("AAC encoder MFT initialises");
 
     // AudioSpecificConfig is available right after negotiation.
-    let asc = enc
-        .audio_specific_config()
-        .expect("ASC present")
-        .to_vec();
+    let asc = enc.audio_specific_config().expect("ASC present").to_vec();
     assert!(!asc.is_empty(), "AudioSpecificConfig is non-empty");
 
     let mut sink = Collect::default();

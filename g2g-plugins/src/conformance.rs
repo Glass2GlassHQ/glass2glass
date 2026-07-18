@@ -16,7 +16,9 @@
 
 use alloc::vec::Vec;
 
-use g2g_core::conformance::{ConformanceDimension as D, ConformanceReport, Evidence, MaturityRecord};
+use g2g_core::conformance::{
+    ConformanceDimension as D, ConformanceReport, Evidence, MaturityRecord,
+};
 use g2g_core::RawVideoFormat;
 
 use crate::st2110dup::SeamlessDedup;
@@ -64,7 +66,8 @@ pub fn st2110_video() -> MaturityRecord {
     // merged by the -7 SeamlessDedup. This is the M610 receive path without sockets.
     if reconstructs_through_redundant_loss(&frame, w, h) {
         rec.add(
-            Evidence::new(D::LossResilience).detail("ST 2110-7 seamless merge through per-path drops"),
+            Evidence::new(D::LossResilience)
+                .detail("ST 2110-7 seamless merge through per-path drops"),
         );
     }
 
@@ -125,7 +128,11 @@ pub fn st2110_audio() -> MaturityRecord {
         }
     }
     if got == samples {
-        rec.add(Evidence::new(D::RoundTrip).codec("l16").detail("packetize/depacketize loopback"));
+        rec.add(
+            Evidence::new(D::RoundTrip)
+                .codec("l16")
+                .detail("packetize/depacketize loopback"),
+        );
     }
 
     rec
@@ -269,7 +276,10 @@ mod tests {
         let table = report.to_table();
         assert!(table.contains("st2110video"), "video row:\n{table}");
         assert!(table.contains("st2110audio"), "audio row:\n{table}");
-        assert!(table.contains("unit-tested"), "derived levels shown:\n{table}");
+        assert!(
+            table.contains("unit-tested"),
+            "derived levels shown:\n{table}"
+        );
         // Every element is at least unit-tested (nothing regressed to instantiated).
         assert_eq!(report.min_level(), MaturityLevel::UnitTested);
     }
@@ -295,15 +305,29 @@ mod tests {
         .unwrap();
 
         let loaded = persist::load_persisted();
-        let rec = loaded.records.iter().find(|r| r.element == "x264enc").expect("persisted");
+        let rec = loaded
+            .records
+            .iter()
+            .find(|r| r.element == "x264enc")
+            .expect("persisted");
         assert_eq!(rec.level(), MaturityLevel::InteropTested);
         assert_eq!(rec.peers(), alloc::vec!["ffmpeg"]);
-        assert_eq!(rec.evidence[0].detail.as_deref(), Some("decoded by ffmpeg"), "detail survives");
+        assert_eq!(
+            rec.evidence[0].detail.as_deref(),
+            Some("decoded by ffmpeg"),
+            "detail survives"
+        );
 
         // full_report carries both the in-process batteries and the persisted row.
         let full = persist::full_report();
-        assert!(full.records.iter().any(|r| r.element == "st2110video"), "battery present");
-        assert!(full.records.iter().any(|r| r.element == "x264enc"), "persisted present");
+        assert!(
+            full.records.iter().any(|r| r.element == "st2110video"),
+            "battery present"
+        );
+        assert!(
+            full.records.iter().any(|r| r.element == "x264enc"),
+            "persisted present"
+        );
 
         let _ = std::fs::remove_file(&log);
     }

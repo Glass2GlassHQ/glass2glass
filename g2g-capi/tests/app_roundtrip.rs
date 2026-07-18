@@ -66,7 +66,11 @@ fn appsrc_to_appsink_roundtrip() {
     // SAFETY: `src` live.
     unsafe { g2g_appsrc_end_of_stream(src) };
 
-    let mut stats = G2gStats { frames_emitted: 0, frames_consumed: 0, frames_dropped: 0 };
+    let mut stats = G2gStats {
+        frames_emitted: 0,
+        frames_consumed: 0,
+        frames_dropped: 0,
+    };
     // SAFETY: `p` live, `stats` writable. Blocks until EOS, joining the run thread.
     let rc = unsafe { g2g_pipeline_wait(p, &mut stats) };
     assert_eq!(rc, 0, "clean run");

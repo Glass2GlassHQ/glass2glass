@@ -74,7 +74,13 @@ pub struct CompositorPad {
 impl CompositorPad {
     /// An opaque pad at `(xpos, ypos)`, z-order 0, drawn at native size.
     pub fn at(xpos: i32, ypos: i32) -> Self {
-        Self { xpos, ypos, zorder: 0, alpha: 255, size: None }
+        Self {
+            xpos,
+            ypos,
+            zorder: 0,
+            alpha: 255,
+            size: None,
+        }
     }
 
     /// Set the paint order (lower is painted first / further back).
@@ -173,7 +179,10 @@ impl Compositor {
         let ok = matches!(format, RawVideoFormat::Rgba8)
             || (format.bytes_per_sample() == 1
                 && (matches!(format, RawVideoFormat::Nv12) || format.is_planar_yuv()));
-        assert!(ok, "Compositor supports RGBA8 and 8-bit NV12/I420/I422/I444, got {format:?}");
+        assert!(
+            ok,
+            "Compositor supports RGBA8 and 8-bit NV12/I420/I422/I444, got {format:?}"
+        );
         self.format = format;
         self
     }
@@ -231,7 +240,9 @@ impl Compositor {
         let mut order: Vec<usize> = (0..self.pads.len()).collect();
         order.sort_by_key(|&i| (self.pads[i].zorder, i));
         for i in order {
-            let Some((w, h)) = self.inputs[i] else { continue };
+            let Some((w, h)) = self.inputs[i] else {
+                continue;
+            };
             let src: &[u8] = if i == 0 {
                 base0
             } else {
@@ -247,10 +258,30 @@ impl Compositor {
                 .map(|(dw, dh)| (dw as usize, dh as usize))
                 .unwrap_or((sw, sh));
             if (dw, dh) == (sw, sh) {
-                blend_over(&mut canvas, cw, ch, src, sw, sh, pad.xpos, pad.ypos, pad.alpha);
+                blend_over(
+                    &mut canvas,
+                    cw,
+                    ch,
+                    src,
+                    sw,
+                    sh,
+                    pad.xpos,
+                    pad.ypos,
+                    pad.alpha,
+                );
             } else {
                 blend_over_scaled(
-                    &mut canvas, cw, ch, src, sw, sh, pad.xpos, pad.ypos, dw, dh, pad.alpha,
+                    &mut canvas,
+                    cw,
+                    ch,
+                    src,
+                    sw,
+                    sh,
+                    pad.xpos,
+                    pad.ypos,
+                    dw,
+                    dh,
+                    pad.alpha,
                 );
             }
         }
@@ -275,7 +306,9 @@ impl Compositor {
         let mut order: Vec<usize> = (0..self.pads.len()).collect();
         order.sort_by_key(|&i| (self.pads[i].zorder, i));
         for i in order {
-            let Some((sw, sh)) = self.inputs[i] else { continue };
+            let Some((sw, sh)) = self.inputs[i] else {
+                continue;
+            };
             let src: &[u8] = if i == 0 {
                 base0
             } else {
@@ -289,7 +322,9 @@ impl Compositor {
             // even-align so a subsampled plane's placement stays on a chroma
             // sample (harmless for the full-res luma plane).
             let (x0, y0) = (pad.xpos & !1, pad.ypos & !1);
-            let scaled = pad.size.map(|(dw, dh)| ((dw & !1) as usize, (dh & !1) as usize));
+            let scaled = pad
+                .size
+                .map(|(dw, dh)| ((dw & !1) as usize, (dh & !1) as usize));
             for (dc, sc) in dst_chans.iter().zip(src_chans.iter()) {
                 let (cx, cy) = (x0 >> dc.hs, y0 >> dc.vs);
                 match scaled {
@@ -450,18 +485,66 @@ fn channels(format: RawVideoFormat, w: usize, h: usize) -> [Chan; 3] {
         RawVideoFormat::Nv12 => {
             let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
             [
-                Chan { base: 0, w, h, stride: 1, off: 0, hs: 0, vs: 0 },
-                Chan { base: w * h, w: cw, h: ch, stride: 2, off: 0, hs: 1, vs: 1 },
-                Chan { base: w * h, w: cw, h: ch, stride: 2, off: 1, hs: 1, vs: 1 },
+                Chan {
+                    base: 0,
+                    w,
+                    h,
+                    stride: 1,
+                    off: 0,
+                    hs: 0,
+                    vs: 0,
+                },
+                Chan {
+                    base: w * h,
+                    w: cw,
+                    h: ch,
+                    stride: 2,
+                    off: 0,
+                    hs: 1,
+                    vs: 1,
+                },
+                Chan {
+                    base: w * h,
+                    w: cw,
+                    h: ch,
+                    stride: 2,
+                    off: 1,
+                    hs: 1,
+                    vs: 1,
+                },
             ]
         }
         _ => {
             let p = planar_planes(format, w, h);
             let (hs, vs) = format.chroma_shift().expect("planar YUV");
             [
-                Chan { base: p[0].0, w: p[0].1, h: p[0].2, stride: 1, off: 0, hs: 0, vs: 0 },
-                Chan { base: p[1].0, w: p[1].1, h: p[1].2, stride: 1, off: 0, hs, vs },
-                Chan { base: p[2].0, w: p[2].1, h: p[2].2, stride: 1, off: 0, hs, vs },
+                Chan {
+                    base: p[0].0,
+                    w: p[0].1,
+                    h: p[0].2,
+                    stride: 1,
+                    off: 0,
+                    hs: 0,
+                    vs: 0,
+                },
+                Chan {
+                    base: p[1].0,
+                    w: p[1].1,
+                    h: p[1].2,
+                    stride: 1,
+                    off: 0,
+                    hs,
+                    vs,
+                },
+                Chan {
+                    base: p[2].0,
+                    w: p[2].1,
+                    h: p[2].2,
+                    stride: 1,
+                    off: 0,
+                    hs,
+                    vs,
+                },
             ]
         }
     }
@@ -594,8 +677,12 @@ impl MultiInputElement for Compositor {
         input: usize,
         absolute_caps: &Caps,
     ) -> Result<ConfigureOutcome, G2gError> {
-        let Caps::RawVideo { format, width: Dim::Fixed(w), height: Dim::Fixed(h), .. } =
-            absolute_caps
+        let Caps::RawVideo {
+            format,
+            width: Dim::Fixed(w),
+            height: Dim::Fixed(h),
+            ..
+        } = absolute_caps
         else {
             return Err(G2gError::CapsMismatch);
         };
@@ -732,10 +819,22 @@ mod tests {
         let mut canvas = solid(4, 4, [255, 0, 0, 255]);
         let blue = solid(2, 2, [0, 0, 255, 255]);
         blend_over(&mut canvas, 4, 4, &blue, 2, 2, 1, 1, 255);
-        assert_eq!(px(&canvas, 4, 0, 0), [255, 0, 0, 255], "outside the square stays red");
-        assert_eq!(px(&canvas, 4, 1, 1), [0, 0, 255, 255], "square is fully blue");
+        assert_eq!(
+            px(&canvas, 4, 0, 0),
+            [255, 0, 0, 255],
+            "outside the square stays red"
+        );
+        assert_eq!(
+            px(&canvas, 4, 1, 1),
+            [0, 0, 255, 255],
+            "square is fully blue"
+        );
         assert_eq!(px(&canvas, 4, 2, 2), [0, 0, 255, 255], "square corner blue");
-        assert_eq!(px(&canvas, 4, 3, 3), [255, 0, 0, 255], "beyond the square stays red");
+        assert_eq!(
+            px(&canvas, 4, 3, 3),
+            [255, 0, 0, 255],
+            "beyond the square stays red"
+        );
     }
 
     #[test]
@@ -758,8 +857,16 @@ mod tests {
         let green = solid(4, 4, [0, 255, 0, 255]);
         blend_over(&mut canvas, 4, 4, &green, 4, 4, -2, -2, 255);
         assert_eq!(px(&canvas, 4, 0, 0), [0, 255, 0, 255], "top-left now green");
-        assert_eq!(px(&canvas, 4, 1, 1), [0, 255, 0, 255], "still in the clipped region");
-        assert_eq!(px(&canvas, 4, 2, 2), [0, 0, 0, 255], "beyond the source stays black");
+        assert_eq!(
+            px(&canvas, 4, 1, 1),
+            [0, 255, 0, 255],
+            "still in the clipped region"
+        );
+        assert_eq!(
+            px(&canvas, 4, 2, 2),
+            [0, 0, 0, 255],
+            "beyond the source stays black"
+        );
     }
 
     #[test]
@@ -771,9 +878,21 @@ mod tests {
         let blue = solid(2, 2, [0, 0, 255, 255]);
         blend_over_scaled(&mut canvas, 6, 6, &blue, 2, 2, 1, 1, 4, 4, 255);
         assert_eq!(px(&canvas, 6, 0, 0), [255, 0, 0, 255], "border stays red");
-        assert_eq!(px(&canvas, 6, 1, 1), [0, 0, 255, 255], "region top-left blue");
-        assert_eq!(px(&canvas, 6, 4, 4), [0, 0, 255, 255], "region bottom-right blue");
-        assert_eq!(px(&canvas, 6, 5, 5), [255, 0, 0, 255], "beyond the region red");
+        assert_eq!(
+            px(&canvas, 6, 1, 1),
+            [0, 0, 255, 255],
+            "region top-left blue"
+        );
+        assert_eq!(
+            px(&canvas, 6, 4, 4),
+            [0, 0, 255, 255],
+            "region bottom-right blue"
+        );
+        assert_eq!(
+            px(&canvas, 6, 5, 5),
+            [255, 0, 0, 255],
+            "beyond the region red"
+        );
     }
 
     #[test]
@@ -795,8 +914,16 @@ mod tests {
         let out = comp.compose(&red);
         assert_eq!(px(&out, 8, 0, 0), [255, 0, 0, 255], "background red");
         assert_eq!(px(&out, 8, 2, 2), [0, 255, 0, 255], "inset top-left green");
-        assert_eq!(px(&out, 8, 3, 3), [0, 255, 0, 255], "inset bottom-right green");
-        assert_eq!(px(&out, 8, 4, 4), [255, 0, 0, 255], "beyond the 2x2 inset red");
+        assert_eq!(
+            px(&out, 8, 3, 3),
+            [0, 255, 0, 255],
+            "inset bottom-right green"
+        );
+        assert_eq!(
+            px(&out, 8, 4, 4),
+            [255, 0, 0, 255],
+            "beyond the 2x2 inset red"
+        );
     }
 
     #[test]
@@ -807,13 +934,25 @@ mod tests {
             .with_background([0, 0, 255, 255]);
         comp.inputs[0] = Some((2, 2));
         let out = comp.compose(&solid(2, 2, [0, 255, 0, 255]));
-        assert_eq!(px(&out, 4, 0, 0), [0, 255, 0, 255], "input 0 paints its 2x2");
-        assert_eq!(px(&out, 4, 3, 3), [0, 0, 255, 255], "uncovered area is the background");
+        assert_eq!(
+            px(&out, 4, 0, 0),
+            [0, 255, 0, 255],
+            "input 0 paints its 2x2"
+        );
+        assert_eq!(
+            px(&out, 4, 3, 3),
+            [0, 0, 255, 255],
+            "uncovered area is the background"
+        );
         // The default background stays opaque black.
         let mut def = Compositor::new(4, 4, Vec::from([CompositorPad::at(0, 0)]));
         def.inputs[0] = Some((2, 2));
         let out = def.compose(&solid(2, 2, [0, 255, 0, 255]));
-        assert_eq!(px(&out, 4, 3, 3), [0, 0, 0, 255], "default background opaque black");
+        assert_eq!(
+            px(&out, 4, 3, 3),
+            [0, 0, 0, 255],
+            "default background opaque black"
+        );
     }
 
     #[test]
@@ -833,7 +972,11 @@ mod tests {
         comp.latest[1] = Some(solid(2, 2, [0, 0, 255, 255]).into());
         // input 0 (red) is passed as the base; input 1 (blue) has higher z-order.
         let out = comp.compose(&red);
-        assert_eq!(px(&out, 2, 0, 0), [0, 0, 255, 255], "z=5 (blue) painted over z=1 (red)");
+        assert_eq!(
+            px(&out, 2, 0, 0),
+            [0, 0, 255, 255],
+            "z=5 (blue) painted over z=1 (red)"
+        );
     }
 
     /// A solid YUV frame of the given format at `w x h`, every plane filled flat.
@@ -847,7 +990,15 @@ mod tests {
     }
 
     /// Read the Y (c=0), U (c=1), or V (c=2) sample under luma pixel `(x, y)`.
-    fn yuv_at(buf: &[u8], format: RawVideoFormat, w: usize, h: usize, c: usize, x: usize, y: usize) -> u8 {
+    fn yuv_at(
+        buf: &[u8],
+        format: RawVideoFormat,
+        w: usize,
+        h: usize,
+        c: usize,
+        x: usize,
+        y: usize,
+    ) -> u8 {
         let ch = channels(format, w, h)[c];
         let (cx, cy) = (x >> ch.hs, y >> ch.vs);
         buf[ch.base + (cy * ch.w + cx) * ch.stride + ch.off]
@@ -860,7 +1011,10 @@ mod tests {
         let mut comp = Compositor::new(
             8,
             8,
-            Vec::from([CompositorPad::at(0, 0), CompositorPad::at(2, 2).with_zorder(1)]),
+            Vec::from([
+                CompositorPad::at(0, 0),
+                CompositorPad::at(2, 2).with_zorder(1),
+            ]),
         )
         .with_format(RawVideoFormat::Nv12);
         comp.inputs[0] = Some((8, 8));
@@ -869,7 +1023,11 @@ mod tests {
         let out = comp.compose(&solid_yuv(RawVideoFormat::Nv12, 8, 8, [50, 60, 70]));
 
         let f = RawVideoFormat::Nv12;
-        assert_eq!(yuv_at(&out, f, 8, 8, 0, 0, 0), 50, "base luma outside overlay");
+        assert_eq!(
+            yuv_at(&out, f, 8, 8, 0, 0, 0),
+            50,
+            "base luma outside overlay"
+        );
         assert_eq!(yuv_at(&out, f, 8, 8, 0, 2, 2), 200, "overlay luma inside");
         assert_eq!(yuv_at(&out, f, 8, 8, 1, 2, 2), 100, "overlay U inside");
         assert_eq!(yuv_at(&out, f, 8, 8, 2, 2, 2), 150, "overlay V inside");
@@ -883,7 +1041,10 @@ mod tests {
         let mut comp = Compositor::new(
             8,
             8,
-            Vec::from([CompositorPad::at(0, 0), CompositorPad::at(2, 2).with_zorder(1)]),
+            Vec::from([
+                CompositorPad::at(0, 0),
+                CompositorPad::at(2, 2).with_zorder(1),
+            ]),
         )
         .with_format(RawVideoFormat::I420);
         comp.inputs[0] = Some((8, 8));
@@ -905,7 +1066,10 @@ mod tests {
         let mut comp = Compositor::new(
             4,
             4,
-            Vec::from([CompositorPad::at(0, 0), CompositorPad::at(0, 0).with_zorder(1).with_alpha(128)]),
+            Vec::from([
+                CompositorPad::at(0, 0),
+                CompositorPad::at(0, 0).with_zorder(1).with_alpha(128),
+            ]),
         )
         .with_format(RawVideoFormat::Nv12);
         comp.inputs[0] = Some((4, 4));
@@ -913,7 +1077,10 @@ mod tests {
         comp.latest[1] = Some(solid_yuv(RawVideoFormat::Nv12, 4, 4, [200, 128, 128]).into());
         let out = comp.compose(&solid_yuv(RawVideoFormat::Nv12, 4, 4, [50, 128, 128]));
         let y = yuv_at(&out, RawVideoFormat::Nv12, 4, 4, 0, 0, 0);
-        assert!((y as i32 - 125).abs() <= 2, "half-blended luma ~125, got {y}");
+        assert!(
+            (y as i32 - 125).abs() <= 2,
+            "half-blended luma ~125, got {y}"
+        );
     }
 
     #[test]
@@ -949,9 +1116,21 @@ mod tests {
         comp.latest[1] = Some(solid_yuv(RawVideoFormat::Nv12, 4, 4, [200, 100, 150]).into());
         let out = comp.compose(&solid_yuv(RawVideoFormat::Nv12, 8, 8, [50, 60, 70]));
         let f = RawVideoFormat::Nv12;
-        assert_eq!(yuv_at(&out, f, 8, 8, 0, 2, 2), 200, "inset luma is the overlay");
-        assert_eq!(yuv_at(&out, f, 8, 8, 1, 2, 2), 100, "inset U is the overlay");
-        assert_eq!(yuv_at(&out, f, 8, 8, 0, 5, 5), 50, "beyond the 2x2 inset is base");
+        assert_eq!(
+            yuv_at(&out, f, 8, 8, 0, 2, 2),
+            200,
+            "inset luma is the overlay"
+        );
+        assert_eq!(
+            yuv_at(&out, f, 8, 8, 1, 2, 2),
+            100,
+            "inset U is the overlay"
+        );
+        assert_eq!(
+            yuv_at(&out, f, 8, 8, 0, 5, 5),
+            50,
+            "beyond the 2x2 inset is base"
+        );
     }
 
     #[test]
@@ -964,9 +1143,18 @@ mod tests {
             height: Dim::Fixed(480),
             framerate: Rate::Fixed(30 << 16),
         };
-        assert!(comp.configure_pipeline(0, &nv12).is_ok(), "matching NV12 input accepted");
+        assert!(
+            comp.configure_pipeline(0, &nv12).is_ok(),
+            "matching NV12 input accepted"
+        );
         // The output caps carry the chosen format.
-        assert!(matches!(comp.output(), Caps::RawVideo { format: RawVideoFormat::Nv12, .. }));
+        assert!(matches!(
+            comp.output(),
+            Caps::RawVideo {
+                format: RawVideoFormat::Nv12,
+                ..
+            }
+        ));
         // A mismatched (RGBA) input is rejected.
         let rgba = Caps::RawVideo {
             format: RawVideoFormat::Rgba8,
@@ -974,12 +1162,16 @@ mod tests {
             height: Dim::Fixed(480),
             framerate: Rate::Fixed(30 << 16),
         };
-        assert!(matches!(comp.configure_pipeline(0, &rgba), Err(G2gError::CapsMismatch)));
+        assert!(matches!(
+            comp.configure_pipeline(0, &rgba),
+            Err(G2gError::CapsMismatch)
+        ));
     }
 
     #[test]
     fn negotiation_narrows_to_rgba_and_fixes_output() {
-        let comp = Compositor::new(1920, 1080, Vec::from([CompositorPad::at(0, 0)])).with_framerate(60);
+        let comp =
+            Compositor::new(1920, 1080, Vec::from([CompositorPad::at(0, 0)])).with_framerate(60);
         assert_eq!(comp.input_count(), 1);
         // Output is the fixed canvas at the construction framerate.
         let CapsConstraint::Produces(set) = comp.caps_constraint_for_output().unwrap() else {
@@ -1002,6 +1194,9 @@ mod tests {
             framerate: Rate::Fixed(30 << 16),
         };
         let mut comp = comp;
-        assert!(matches!(comp.configure_pipeline(0, &nv12), Err(G2gError::CapsMismatch)));
+        assert!(matches!(
+            comp.configure_pipeline(0, &nv12),
+            Err(G2gError::CapsMismatch)
+        ));
     }
 }

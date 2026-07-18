@@ -12,7 +12,10 @@
 //! frames are not byte-identical to their IDR (they carry inter-predicted
 //! motion, i.e. references were actually applied). Runs on the RTX 3060; skips
 //! cleanly with no adapter / no Vulkan H.264 decode support.
-#![cfg(all(any(target_os = "linux", target_os = "windows"), feature = "vulkan-video"))]
+#![cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    feature = "vulkan-video"
+))]
 
 use g2g_core::runtime::block_on;
 use g2g_plugins::vulkanvideo::{
@@ -37,7 +40,9 @@ fn decodes_whole_stream_with_references() {
     };
 
     let ps = extract_h264_parameter_sets(CLIP).expect("parse SPS+PPS");
-    let session = device.create_h264_session(&ps, 640, 480).expect("create session");
+    let session = device
+        .create_h264_session(&ps, 640, 480)
+        .expect("create session");
     let mut decoder = device
         .create_h264_dpb_decoder(&session, &ps)
         .expect("create DPB decoder");
@@ -55,11 +60,17 @@ fn decodes_whole_stream_with_references() {
         // be uniform. This is the per-frame proof pixels came out.
         let min = *f.luma.iter().min().unwrap();
         let max = *f.luma.iter().max().unwrap();
-        assert!(max > min, "frame {i} luma is uniform ({min}=={max}); no real content");
+        assert!(
+            max > min,
+            "frame {i} luma is uniform ({min}=={max}); no real content"
+        );
     }
 
     let sad = |a: &[u8], b: &[u8]| -> u64 {
-        a.iter().zip(b).map(|(&x, &y)| (x as i32 - y as i32).unsigned_abs() as u64).sum()
+        a.iter()
+            .zip(b)
+            .map(|(&x, &y)| (x as i32 - y as i32).unsigned_abs() as u64)
+            .sum()
     };
 
     // The P frames must differ from their GOP's IDR: if references were ignored

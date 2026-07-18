@@ -43,18 +43,30 @@ impl FrameGrabber for PatternGrabber {
 #[test]
 fn captures_flow_with_sequence_and_pts() {
     let ring: &'static StaticLendRing<2, 8> = leaked_ring();
-    let mut src =
-        GrabberSrc::new(PatternGrabber::default(), ring, 33_000_000).with_frame_limit(3);
+    let mut src = GrabberSrc::new(PatternGrabber::default(), ring, 33_000_000).with_frame_limit(3);
 
     for expect in 0u64..3 {
         let frame = block_on(src.next()).expect("capture").expect("frame");
         assert_eq!(frame.sequence, expect);
-        assert_eq!(frame.timing.pts_ns, expect * 33_000_000, "interval-derived PTS");
-        let MemoryDomain::System(s) = &frame.domain else { panic!("system frame") };
-        assert_eq!(s.as_slice().first().copied(), Some(expect as u8), "pattern payload");
+        assert_eq!(
+            frame.timing.pts_ns,
+            expect * 33_000_000,
+            "interval-derived PTS"
+        );
+        let MemoryDomain::System(s) = &frame.domain else {
+            panic!("system frame")
+        };
+        assert_eq!(
+            s.as_slice().first().copied(),
+            Some(expect as u8),
+            "pattern payload"
+        );
         assert_eq!(s.as_slice().len(), 8, "full-slot capture");
     }
-    assert!(block_on(src.next()).expect("eos poll").is_none(), "frame limit ends the stream");
+    assert!(
+        block_on(src.next()).expect("eos poll").is_none(),
+        "frame limit ends the stream"
+    );
 }
 
 #[test]
@@ -62,9 +74,14 @@ fn lends_ring_memory_zero_copy() {
     let ring: &'static StaticLendRing<2, 8> = leaked_ring();
     let mut src = GrabberSrc::new(PatternGrabber::default(), ring, 0).with_frame_limit(1);
     let frame = block_on(src.next()).expect("capture").expect("frame");
-    let MemoryDomain::System(s) = &frame.domain else { panic!("system frame") };
+    let MemoryDomain::System(s) = &frame.domain else {
+        panic!("system frame")
+    };
     let ptr = s.as_slice().as_ptr();
-    assert!(ring.contains(ptr), "payload aliases the ring slot: no copy was made");
+    assert!(
+        ring.contains(ptr),
+        "payload aliases the ring slot: no copy was made"
+    );
 }
 
 #[test]
@@ -74,7 +91,10 @@ fn exhausted_ring_is_a_sizing_error() {
     // Hold both lent frames so no slot can be reclaimed.
     let _a = block_on(src.next()).expect("capture").expect("frame");
     let _b = block_on(src.next()).expect("capture").expect("frame");
-    assert_eq!(block_on(src.next()).expect_err("ring is full"), G2gError::PoolExhausted);
+    assert_eq!(
+        block_on(src.next()).expect_err("ring is full"),
+        G2gError::PoolExhausted
+    );
 }
 
 /// A grabber that violates its contract by claiming more bytes than the slot.
@@ -90,7 +110,10 @@ impl FrameGrabber for LyingGrabber {
 fn oversized_capture_claim_is_rejected() {
     let ring: &'static StaticLendRing<2, 8> = leaked_ring();
     let mut src = GrabberSrc::new(LyingGrabber, ring, 0);
-    assert_eq!(block_on(src.next()).expect_err("oversized claim"), G2gError::CapsMismatch);
+    assert_eq!(
+        block_on(src.next()).expect_err("oversized claim"),
+        G2gError::CapsMismatch
+    );
 }
 
 /// A grabber whose peripheral fails.
@@ -191,5 +214,8 @@ fn camera_to_display_pipeline_runs_end_to_end() {
         }
     }
     let expected: Vec<(u8, u8)> = (0u8..9).map(|k| (k & 0xF8, 0)).collect();
-    assert_eq!(ramwr_first_px, expected, "each captured frame reached the panel as RGB565");
+    assert_eq!(
+        ramwr_first_px, expected,
+        "each captured frame reached the panel as RGB565"
+    );
 }

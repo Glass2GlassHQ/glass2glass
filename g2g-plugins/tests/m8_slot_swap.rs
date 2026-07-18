@@ -113,7 +113,8 @@ impl SourceLoop for GatedSrc {
     where
         Self: 'a;
 
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 
@@ -152,11 +153,19 @@ async fn slot_swap_mid_stream_through_runner() {
     let (first_tx, first_rx) = oneshot::channel();
     let gate = Arc::new(Notify::new());
 
-    let transform_a = Tap { counter: counter_a.clone(), first_tx: Some(first_tx) };
+    let transform_a = Tap {
+        counter: counter_a.clone(),
+        first_tx: Some(first_tx),
+    };
     let mut slot = ElementSlot::new(Box::new(transform_a));
     let handle = slot.handle();
 
-    let mut src = GatedSrc { caps: caps.clone(), total, gate: gate.clone(), configured: false };
+    let mut src = GatedSrc {
+        caps: caps.clone(),
+        total,
+        gate: gate.clone(),
+        configured: false,
+    };
     let mut snk = FakeSink::new();
     let clock = ZeroClock;
 
@@ -167,12 +176,18 @@ async fn slot_swap_mid_stream_through_runner() {
     let counter_b_driver = counter_b.clone();
     let caps_for_b = caps.clone();
     let driver = async move {
-        first_rx.await.expect("transform A must signal on its first frame");
+        first_rx
+            .await
+            .expect("transform A must signal on its first frame");
         // Configure B against the live caps before installing it: the slot
         // does not re-run negotiation on swap (DESIGN.md §4.8.2).
-        let mut transform_b: Box<dyn DynAsyncElement + Send> =
-            Box::new(Tap { counter: counter_b_driver, first_tx: None });
-        transform_b.configure_pipeline(&caps_for_b).expect("configure B");
+        let mut transform_b: Box<dyn DynAsyncElement + Send> = Box::new(Tap {
+            counter: counter_b_driver,
+            first_tx: None,
+        });
+        transform_b
+            .configure_pipeline(&caps_for_b)
+            .expect("configure B");
         handle.swap(transform_b);
         gate.notify_one();
     };
@@ -181,9 +196,20 @@ async fn slot_swap_mid_stream_through_runner() {
     let stats = res.expect("pipeline must complete across the swap");
 
     assert_eq!(stats.frames_emitted, total);
-    assert_eq!(stats.frames_consumed, total, "every frame must reach the sink");
-    assert_eq!(counter_a.load(Ordering::SeqCst), 1, "A handles only frame 0");
-    assert_eq!(counter_b.load(Ordering::SeqCst), total - 1, "B handles frames 1..");
+    assert_eq!(
+        stats.frames_consumed, total,
+        "every frame must reach the sink"
+    );
+    assert_eq!(
+        counter_a.load(Ordering::SeqCst),
+        1,
+        "A handles only frame 0"
+    );
+    assert_eq!(
+        counter_b.load(Ordering::SeqCst),
+        total - 1,
+        "B handles frames 1.."
+    );
     assert_eq!(snk.received(), total);
     assert_eq!(snk.last_sequence(), Some(total - 1));
     assert!(snk.eos_seen(), "sink must observe EOS");

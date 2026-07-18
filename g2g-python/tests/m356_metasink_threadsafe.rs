@@ -54,7 +54,10 @@ fn frame_2x1_rgba() -> Frame {
 
 #[test]
 fn metasink_accepts_cross_thread_staging() {
-    std::env::set_var("PYTHONPATH", concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures"));
+    std::env::set_var(
+        "PYTHONPATH",
+        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures"),
+    );
 
     let mut el = PyTransform::new("echo_element", "ThreadedTransform");
     let caps = Caps::RawVideo {
@@ -66,7 +69,9 @@ fn metasink_accepts_cross_thread_staging() {
     el.configure_pipeline(&caps).unwrap();
 
     let mut sink = CollectSink::default();
-    let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
     // An unsendable sink makes the fixture's off-thread add_object raise, which
     // the host surfaces as a failed frame; a Sync sink lets process() succeed.
     rt.block_on(el.process(PipelinePacket::DataFrame(frame_2x1_rgba()), &mut sink))
@@ -80,6 +85,10 @@ fn metasink_accepts_cross_thread_staging() {
         .get::<AnalyticsMeta>()
         .expect("the off-thread add_object should have attached an AnalyticsMeta");
     let dets: Vec<_> = analytics.detections().collect();
-    assert_eq!(dets.len(), 1, "exactly one detection staged from the worker thread");
+    assert_eq!(
+        dets.len(),
+        1,
+        "exactly one detection staged from the worker thread"
+    );
     assert_eq!(dets[0].label, 11);
 }

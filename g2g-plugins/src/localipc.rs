@@ -71,7 +71,9 @@ impl CudaIpcDescriptor {
         let mut handle = [0u8; CUDA_IPC_HANDLE_SIZE];
         handle.copy_from_slice(&bytes[..CUDA_IPC_HANDLE_SIZE]);
         let size = u64::from_le_bytes(
-            bytes[CUDA_IPC_HANDLE_SIZE..Self::WIRE_LEN].try_into().ok()?,
+            bytes[CUDA_IPC_HANDLE_SIZE..Self::WIRE_LEN]
+                .try_into()
+                .ok()?,
         );
         Some(Self { handle, size })
     }
@@ -138,7 +140,13 @@ pub unsafe fn free(dptr: u64) -> Result<(), G2gError> {
 pub unsafe fn htod(dst: u64, src: &[u8]) -> Result<(), G2gError> {
     // SAFETY: `src` is a valid slice of `src.len()` bytes; `dst` has room per the
     // caller's contract.
-    unsafe { check(ffi::cu_memcpy_htod(dst, src.as_ptr() as *const core::ffi::c_void, src.len())) }
+    unsafe {
+        check(ffi::cu_memcpy_htod(
+            dst,
+            src.as_ptr() as *const core::ffi::c_void,
+            src.len(),
+        ))
+    }
 }
 
 /// Copy `src` device allocation into `dst` host bytes (device->host).
@@ -150,7 +158,11 @@ pub unsafe fn dtoh(dst: &mut [u8], src: u64) -> Result<(), G2gError> {
     // SAFETY: `dst` is a valid mutable slice of `dst.len()` bytes; `src` has that
     // many bytes per the caller's contract.
     unsafe {
-        check(ffi::cu_memcpy_dtoh(dst.as_mut_ptr() as *mut core::ffi::c_void, src, dst.len()))
+        check(ffi::cu_memcpy_dtoh(
+            dst.as_mut_ptr() as *mut core::ffi::c_void,
+            src,
+            dst.len(),
+        ))
     }
 }
 
@@ -192,7 +204,9 @@ pub unsafe fn address_range(dptr: u64) -> Result<(u64, u64), G2gError> {
 /// `dptr` must be the base of a live `cuMemAlloc` allocation in the current
 /// context (CUDA IPC exports whole allocations, not sub-ranges).
 pub unsafe fn ipc_export(dptr: u64) -> Result<CudaIpcHandle, G2gError> {
-    let mut handle = ffi::CuIpcMemHandle { reserved: [0u8; CUDA_IPC_HANDLE_SIZE] };
+    let mut handle = ffi::CuIpcMemHandle {
+        reserved: [0u8; CUDA_IPC_HANDLE_SIZE],
+    };
     // SAFETY: `handle` is a valid out-struct; `dptr` is an allocation base per the
     // caller's contract.
     unsafe { check(ffi::cu_ipc_get_mem_handle(&mut handle, dptr))? };
@@ -211,7 +225,11 @@ pub unsafe fn ipc_open(handle: &CudaIpcHandle) -> Result<u64, G2gError> {
     // SAFETY: `dptr` is a valid out-pointer; `h` is a 64-byte handle passed by
     // value per the C ABI; LAZY_ENABLE_PEER_ACCESS is the documented default flag.
     unsafe {
-        check(ffi::cu_ipc_open_mem_handle(&mut dptr, h, ffi::CU_IPC_MEM_LAZY_ENABLE_PEER_ACCESS))?
+        check(ffi::cu_ipc_open_mem_handle(
+            &mut dptr,
+            h,
+            ffi::CU_IPC_MEM_LAZY_ENABLE_PEER_ACCESS,
+        ))?
     };
     Ok(dptr)
 }
@@ -303,7 +321,10 @@ mod tests {
         for (i, b) in handle.iter_mut().enumerate() {
             *b = (i as u8).wrapping_mul(3).wrapping_add(1);
         }
-        let desc = CudaIpcDescriptor { handle, size: 1920 * 1080 * 3 / 2 };
+        let desc = CudaIpcDescriptor {
+            handle,
+            size: 1920 * 1080 * 3 / 2,
+        };
         let bytes = desc.to_bytes();
         assert_eq!(bytes.len(), CudaIpcDescriptor::WIRE_LEN);
         assert_eq!(CudaIpcDescriptor::from_bytes(&bytes), Some(desc));
@@ -318,7 +339,10 @@ mod tests {
 
     #[test]
     fn trailing_bytes_are_ignored() {
-        let desc = CudaIpcDescriptor { handle: [7u8; CUDA_IPC_HANDLE_SIZE], size: 42 };
+        let desc = CudaIpcDescriptor {
+            handle: [7u8; CUDA_IPC_HANDLE_SIZE],
+            size: 42,
+        };
         let mut bytes = desc.to_bytes();
         bytes.extend_from_slice(&[0xFF; 8]); // transport may frame with padding
         assert_eq!(CudaIpcDescriptor::from_bytes(&bytes), Some(desc));

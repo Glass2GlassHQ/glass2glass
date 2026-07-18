@@ -41,7 +41,11 @@ struct QosSink {
 
 impl QosSink {
     fn behind(jitter_ns: i64) -> Self {
-        Self { received: 0, jitter_ns, pending: None }
+        Self {
+            received: 0,
+            jitter_ns,
+            pending: None,
+        }
     }
 }
 
@@ -68,8 +72,10 @@ impl AsyncElement for QosSink {
         Box::pin(async move {
             if let PipelinePacket::DataFrame(f) = packet {
                 self.received += 1;
-                self.pending =
-                    Some(QosMessage { jitter_ns: self.jitter_ns, running_time_ns: f.timing.pts_ns });
+                self.pending = Some(QosMessage {
+                    jitter_ns: self.jitter_ns,
+                    running_time_ns: f.timing.pts_ns,
+                });
             }
             Ok(())
         })
@@ -102,7 +108,10 @@ async fn source_skips_through_transform_bespoke_runner() {
         "source emitted fewer than target due to relayed skips ({} < {target})",
         stats.frames_emitted
     );
-    assert_eq!(sink.received, stats.frames_consumed, "every consumed frame reached the sink");
+    assert_eq!(
+        sink.received, stats.frames_consumed,
+        "every consumed frame reached the sink"
+    );
 }
 
 #[tokio::test]

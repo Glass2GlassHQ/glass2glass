@@ -12,7 +12,7 @@ use core::pin::Pin;
 use g2g_core::runtime::{run_simple_pipeline, SourceLoop};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, ConfigureOutcome, Dim, G2gError, OutputSink, PipelineClock,
-    PipelinePacket, PushOutcome, RawVideoFormat, Rate,
+    PipelinePacket, PushOutcome, Rate, RawVideoFormat,
 };
 
 struct ZeroClock;
@@ -57,7 +57,10 @@ impl SourceLoop for BitrateObservingSource {
                     g2g_core::MemoryDomain::System(g2g_core::memory::SystemSlice::from_boxed(
                         std::vec![0u8; frame_len].into_boxed_slice(),
                     )),
-                    g2g_core::FrameTiming { pts_ns: seq * 33_000_000, ..Default::default() },
+                    g2g_core::FrameTiming {
+                        pts_ns: seq * 33_000_000,
+                        ..Default::default()
+                    },
                     seq,
                 );
                 if let PushOutcome::Bitrate(bps) =
@@ -113,8 +116,14 @@ impl AsyncElement for BweSink {
 
 #[tokio::test]
 async fn bitrate_target_reaches_the_source() {
-    let mut src = BitrateObservingSource { total: 6, targets: std::vec::Vec::new() };
-    let mut sink = BweSink { received: 0, pending: None };
+    let mut src = BitrateObservingSource {
+        total: 6,
+        targets: std::vec::Vec::new(),
+    };
+    let mut sink = BweSink {
+        received: 0,
+        pending: None,
+    };
 
     let stats = run_simple_pipeline(&mut src, &mut sink, &ZeroClock, 1)
         .await
@@ -122,5 +131,9 @@ async fn bitrate_target_reaches_the_source() {
 
     assert_eq!(stats.frames_emitted, 6);
     assert_eq!(sink.received, 6);
-    assert_eq!(src.targets, std::vec![750_000], "the source observed the BWE target once");
+    assert_eq!(
+        src.targets,
+        std::vec![750_000],
+        "the source observed the BWE target once"
+    );
 }

@@ -59,7 +59,9 @@ impl SourceLoop for DmaRingSource<'_> {
     fn caps_constraint<'a>(
         &'a mut self,
     ) -> impl Future<Output = Result<g2g_core::CapsConstraint<'a>, G2gError>> + 'a {
-        core::future::ready(Ok(g2g_core::CapsConstraint::Produces(g2g_core::CapsSet::one(caps()))))
+        core::future::ready(Ok(g2g_core::CapsConstraint::Produces(
+            g2g_core::CapsSet::one(caps()),
+        )))
     }
 
     fn configure_pipeline(&mut self, _: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -114,7 +116,11 @@ fn dma_ring_streams_zero_copy_through_embassy_channel_no_alloc() {
     let channel: SinglePacketChannel<1> = SinglePacketChannel::new();
     let total = 10u64;
 
-    let mut src = DmaRingSource { ring: &ring, total, fill: stamp };
+    let mut src = DmaRingSource {
+        ring: &ring,
+        total,
+        fill: stamp,
+    };
     let mut sink = channel.sink();
     let rx = channel.receiver();
 
@@ -158,10 +164,17 @@ fn dma_ring_streams_zero_copy_through_embassy_channel_no_alloc() {
     // read back through the *same* memory (the consumer never sees a copy).
     for (seq, value, _base, in_ring) in log.iter() {
         assert!(*in_ring, "frame {seq} bytes live in the ring (zero copy)");
-        assert_eq!(*value, *seq as u8, "frame {seq} carries its stamp through the lent slot");
+        assert_eq!(
+            *value, *seq as u8,
+            "frame {seq} carries its stamp through the lent slot"
+        );
     }
     // No per-frame allocation: 10 frames reuse at most SLOTS physical buffers.
     let distinct: BTreeSet<usize> = log.iter().map(|(_, _, base, _)| *base).collect();
-    assert!(distinct.len() <= SLOTS, "buffers recycle: {} distinct for {total} frames", distinct.len());
+    assert!(
+        distinct.len() <= SLOTS,
+        "buffers recycle: {} distinct for {total} frames",
+        distinct.len()
+    );
     assert_eq!(ring.leased_count(), 0, "all slots reclaimed after drain");
 }

@@ -100,11 +100,16 @@ fn main() {
     let dec = g.add_transform(GraphNodeRef::element(
         FfmpegH264Dec::new().with_output_format(OutputFormat::Nv12),
     ));
-    let to_rgba = g.add_transform(GraphNodeRef::element(VideoConvert::new(RawVideoFormat::Rgba8)));
+    let to_rgba = g.add_transform(GraphNodeRef::element(VideoConvert::new(
+        RawVideoFormat::Rgba8,
+    )));
     let ov = g.add_transform(GraphNodeRef::element(overlay));
-    let to_nv12 = g.add_transform(GraphNodeRef::element(VideoConvert::new(RawVideoFormat::Nv12)));
-    let sink =
-        g.add_sink(GraphNodeRef::element(WaylandSink::new().with_title("g2g subtitle player")));
+    let to_nv12 = g.add_transform(GraphNodeRef::element(VideoConvert::new(
+        RawVideoFormat::Nv12,
+    )));
+    let sink = g.add_sink(GraphNodeRef::element(
+        WaylandSink::new().with_title("g2g subtitle player"),
+    ));
     g.link(src, dec).expect("link mp4src->dec");
     // Insert the scaler on the NV12 path when a target size is given.
     match scale_to {

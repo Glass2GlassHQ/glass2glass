@@ -72,7 +72,11 @@ async fn libcamera_preprocess_to_gpu_tensor() {
         stats.frames_emitted,
         sink.received()
     );
-    assert_eq!(sink.received(), target, "every camera frame became a tensor");
+    assert_eq!(
+        sink.received(),
+        target,
+        "every camera frame became a tensor"
+    );
     assert!(sink.eos_seen());
 
     // The sink must have seen the [1, 3, H, W] f32 NCHW tensor caps the GPU

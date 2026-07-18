@@ -33,7 +33,8 @@ impl PipelineClock for ZeroClock {
 /// Write a two-cue SubRip file to a uniquely-named temp path.
 fn write_srt(tag: &str) -> std::path::PathBuf {
     let path = std::env::temp_dir().join(format!("g2g-m477-{}-{}.srt", std::process::id(), tag));
-    let srt = "1\n00:00:00,000 --> 00:00:02,000\nHello\n\n2\n00:00:02,000 --> 00:00:04,000\nWorld\n";
+    let srt =
+        "1\n00:00:00,000 --> 00:00:02,000\nHello\n\n2\n00:00:02,000 --> 00:00:04,000\nWorld\n";
     std::fs::write(&path, srt).expect("write srt");
     path
 }
@@ -41,7 +42,10 @@ fn write_srt(tag: &str) -> std::path::PathBuf {
 async fn run_line(line: &str) -> u64 {
     let reg = default_registry();
     let graph = parse_launch(&reg, line).unwrap_or_else(|e| panic!("parses `{line}`: {e}"));
-    run_graph(graph, &ZeroClock, 4).await.unwrap_or_else(|e| panic!("runs `{line}`: {e:?}")).frames_consumed
+    run_graph(graph, &ZeroClock, 4)
+        .await
+        .unwrap_or_else(|e| panic!("runs `{line}`: {e:?}"))
+        .frames_consumed
 }
 
 /// The `subparse` launch element turns a `subtitlesrc` SubRip file into timed
@@ -50,10 +54,16 @@ async fn run_line(line: &str) -> u64 {
 #[tokio::test]
 async fn subparse_launch_element_streams_cues() {
     let srt = write_srt("subparse");
-    let line = format!("subtitlesrc location={} ! subparse ! fakesink", srt.display());
+    let line = format!(
+        "subtitlesrc location={} ! subparse ! fakesink",
+        srt.display()
+    );
     let consumed = run_line(&line).await;
     std::fs::remove_file(&srt).ok();
-    assert!(consumed >= 2, "both SubRip cues flowed through subparse to the sink: {consumed}");
+    assert!(
+        consumed >= 2,
+        "both SubRip cues flowed through subparse to the sink: {consumed}"
+    );
 }
 
 /// The `textoverlay` fan-in muxer joins a video pad and a text-stream pad: an RGBA
@@ -71,7 +81,10 @@ async fn textoverlay_fan_in_joins_video_and_text() {
     );
     let consumed = run_line(&line).await;
     std::fs::remove_file(&srt).ok();
-    assert!(consumed >= 3, "all three video frames reached the sink through the overlay: {consumed}");
+    assert!(
+        consumed >= 3,
+        "all three video frames reached the sink through the overlay: {consumed}"
+    );
 }
 
 /// `d.text_0` selects a container's embedded subtitle track in an explicit demux
@@ -93,10 +106,18 @@ fn matroskademux_text_pad_selects_subtitle_stream() {
     );
     let graph = parse_launch(&reg, &line).unwrap_or_else(|e| panic!("parses `{line}`: {e}"));
     let vg = graph.finish().expect("valid graph");
-    let demuxes: Vec<NodeKind> =
-        vg.topo().iter().map(|&n| vg.kind(n)).filter(|k| matches!(k, NodeKind::Tee(_))).collect();
+    let demuxes: Vec<NodeKind> = vg
+        .topo()
+        .iter()
+        .map(|&n| vg.kind(n))
+        .filter(|k| matches!(k, NodeKind::Tee(_)))
+        .collect();
     std::fs::remove_file(&path).ok();
-    assert_eq!(demuxes, [NodeKind::Tee(2)], "demux fans out a video port and a text port");
+    assert_eq!(
+        demuxes,
+        [NodeKind::Tee(2)],
+        "demux fans out a video port and a text port"
+    );
 }
 
 // --- synthetic Matroska builder (mirrors the mkvdemux / m415 unit fixtures) ---
@@ -131,15 +152,27 @@ fn uint_body(v: u64) -> Vec<u8> {
     bytes
 }
 fn video_track(num: u64, codec: &[u8], w: u32, h: u32) -> Vec<u8> {
-    let v = [elem(&[0xB0], &uint_body(w as u64)), elem(&[0xBA], &uint_body(h as u64))].concat();
-    let body =
-        [elem(&[0xD7], &uint_body(num)), elem(&[0x83], &uint_body(1)), elem(&[0x86], codec), elem(&[0xE0], &v)]
-            .concat();
+    let v = [
+        elem(&[0xB0], &uint_body(w as u64)),
+        elem(&[0xBA], &uint_body(h as u64)),
+    ]
+    .concat();
+    let body = [
+        elem(&[0xD7], &uint_body(num)),
+        elem(&[0x83], &uint_body(1)),
+        elem(&[0x86], codec),
+        elem(&[0xE0], &v),
+    ]
+    .concat();
     elem(&[0xAE], &body)
 }
 fn subtitle_track(num: u64, codec: &[u8]) -> Vec<u8> {
-    let body =
-        [elem(&[0xD7], &uint_body(num)), elem(&[0x83], &uint_body(0x11)), elem(&[0x86], codec)].concat();
+    let body = [
+        elem(&[0xD7], &uint_body(num)),
+        elem(&[0x83], &uint_body(0x11)),
+        elem(&[0x86], codec),
+    ]
+    .concat();
     elem(&[0xAE], &body)
 }
 

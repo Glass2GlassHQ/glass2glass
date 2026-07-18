@@ -39,7 +39,7 @@ use g2g_core::memory::OwnedWgpuTexture;
 use g2g_core::runtime::block_on;
 use g2g_core::{
     AsyncElement, Caps, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket,
-    PushOutcome, RawVideoFormat, Rate,
+    PushOutcome, Rate, RawVideoFormat,
 };
 use g2g_plugins::gpu::{GpuContext, WgpuTextureKeepAlive};
 use g2g_plugins::vulkanvideo::{
@@ -94,7 +94,9 @@ fn main() {
     let ps = extract_h264_parameter_sets(&clip).expect("parse SPS+PPS from the stream");
     let width = (ps.sps.pic_width_in_mbs_minus1 + 1) * 16;
     let height = (ps.sps.pic_height_in_map_units_minus1 + 1) * 16;
-    let session = device.create_h264_session(&ps, width, height).expect("create decode session");
+    let session = device
+        .create_h264_session(&ps, width, height)
+        .expect("create decode session");
 
     // GPU-resident decode: each picture converts in place to an RGBA texture on
     // the decode device (no NV12 readback). Needs a distinct compute queue.
@@ -112,9 +114,14 @@ fn main() {
     };
 
     let decode_ctx = device.gpu_context();
-    let textures = decoder.decode_all_to_textures(&clip).expect("decode the stream to textures");
+    let textures = decoder
+        .decode_all_to_textures(&clip)
+        .expect("decode the stream to textures");
     let decode_gpu = decode_ctx.adapter.get_info().name;
-    println!("decoded {} frames at {width}x{height} on {decode_gpu}", textures.len());
+    println!(
+        "decoded {} frames at {width}x{height} on {decode_gpu}",
+        textures.len()
+    );
     if textures.is_empty() {
         eprintln!("stream produced no frames; nothing to show.");
         return;
@@ -137,7 +144,11 @@ fn main() {
         // not a decode failure; report it without aborting.
         eprintln!("event loop ended: {e}");
     }
-    let shown = app.present.as_ref().map(|p| p.sink.presented_count()).unwrap_or(0);
+    let shown = app
+        .present
+        .as_ref()
+        .map(|p| p.sink.presented_count())
+        .unwrap_or(0);
     println!("presented {shown} frames; bye.");
 }
 
@@ -184,9 +195,13 @@ impl App {
             // required for the decoded textures to be bindable (true zero copy).
             drop(surface);
             drop(display_ctx);
-            if let Some((surface, config)) = configured_surface(&self.decode_ctx, window, width, height)
+            if let Some((surface, config)) =
+                configured_surface(&self.decode_ctx, window, width, height)
             {
-                println!("present: zero-copy on the decode GPU {} (no readback)", decode_gpu.name);
+                println!(
+                    "present: zero-copy on the decode GPU {} (no readback)",
+                    decode_gpu.name
+                );
                 let sink = self.make_sink(self.decode_ctx.clone(), surface, config);
                 let textures = self.decode_textures.to_vec();
                 return Present { sink, textures };
@@ -247,7 +262,9 @@ impl App {
         if self.present.is_some() || width == 0 || height == 0 {
             return;
         }
-        let Some(window) = self.window.clone() else { return };
+        let Some(window) = self.window.clone() else {
+            return;
+        };
         self.present = Some(self.build_present(&window, width, height));
         self.last_advance = Instant::now();
         window.request_redraw();
@@ -256,7 +273,9 @@ impl App {
     /// Present the current texture, advancing the source frame once
     /// `FRAME_INTERVAL` has elapsed so playback runs at a watchable rate and loops.
     fn present_current(&mut self) {
-        let Some(present) = self.present.as_mut() else { return };
+        let Some(present) = self.present.as_mut() else {
+            return;
+        };
         let tex = &present.textures[self.idx];
         let frame = Frame::new(
             MemoryDomain::WgpuTexture(OwnedWgpuTexture::new(
@@ -267,13 +286,20 @@ impl App {
             FrameTiming::default(),
             self.idx as u64,
         );
-        block_on(present.sink.process(PipelinePacket::DataFrame(frame), &mut NullSink))
-            .expect("present");
+        block_on(
+            present
+                .sink
+                .process(PipelinePacket::DataFrame(frame), &mut NullSink),
+        )
+        .expect("present");
 
         // A periodic heartbeat so the live present is visible in the terminal too.
         let n = present.sink.presented_count();
         if n % 120 == 0 {
-            eprintln!("  presented {n} frames (looping the {}-frame clip)", present.textures.len());
+            eprintln!(
+                "  presented {n} frames (looping the {}-frame clip)",
+                present.textures.len()
+            );
         }
 
         if self.last_advance.elapsed() >= FRAME_INTERVAL {
@@ -370,7 +396,11 @@ fn open_display_gpu(
     window: &Arc<Window>,
     width: u32,
     height: u32,
-) -> Option<(GpuContext, wgpu::Surface<'static>, wgpu::SurfaceConfiguration)> {
+) -> Option<(
+    GpuContext,
+    wgpu::Surface<'static>,
+    wgpu::SurfaceConfiguration,
+)> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::VULKAN,
         flags: wgpu::InstanceFlags::default(),
@@ -420,7 +450,12 @@ fn surface_config(
     if caps.formats.is_empty() {
         return None;
     }
-    let format = caps.formats.iter().copied().find(|f| !f.is_srgb()).unwrap_or(caps.formats[0]);
+    let format = caps
+        .formats
+        .iter()
+        .copied()
+        .find(|f| !f.is_srgb())
+        .unwrap_or(caps.formats[0]);
     Some(wgpu::SurfaceConfiguration {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
         format,
@@ -444,7 +479,9 @@ fn readback_rgba(ctx: &GpuContext, tex: &wgpu::Texture, width: u32, height: u32)
         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
-    let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+    let mut enc = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
     enc.copy_texture_to_buffer(
         wgpu::TexelCopyTextureInfo {
             texture: tex,
@@ -460,7 +497,11 @@ fn readback_rgba(ctx: &GpuContext, tex: &wgpu::Texture, width: u32, height: u32)
                 rows_per_image: Some(height),
             },
         },
-        wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
     );
     ctx.queue.submit([enc.finish()]);
 
@@ -470,7 +511,10 @@ fn readback_rgba(ctx: &GpuContext, tex: &wgpu::Texture, width: u32, height: u32)
         let _ = tx.send(r);
     });
     ctx.device
-        .poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
+        .poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        })
         .expect("poll readback");
     rx.recv().expect("readback channel").expect("map readback");
 
@@ -489,7 +533,11 @@ fn readback_rgba(ctx: &GpuContext, tex: &wgpu::Texture, width: u32, height: u32)
 fn upload_rgba(ctx: &GpuContext, width: u32, height: u32, data: &[u8]) -> wgpu::Texture {
     let tex = ctx.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("display-gpu-frame"),
-        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -510,7 +558,11 @@ fn upload_rgba(ctx: &GpuContext, width: u32, height: u32, data: &[u8]) -> wgpu::
             bytes_per_row: Some(width * 4),
             rows_per_image: Some(height),
         },
-        wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
     );
     tex
 }

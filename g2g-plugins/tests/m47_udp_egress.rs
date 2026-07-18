@@ -120,13 +120,19 @@ async fn sink_sends_rtp_matching_packetizer_with_pts_derived_timestamp() {
     assert_eq!(expected_count, 5, "2 single-NAL + 3 FU-A fragments");
 
     let mut out = NullOut;
-    sink.process(PipelinePacket::DataFrame(au_frame(au1.clone(), 0, 0)), &mut out)
-        .await
-        .expect("send AU1");
+    sink.process(
+        PipelinePacket::DataFrame(au_frame(au1.clone(), 0, 0)),
+        &mut out,
+    )
+    .await
+    .expect("send AU1");
     let first = recv_n(&receiver, 2).await;
-    sink.process(PipelinePacket::DataFrame(au_frame(au2.clone(), pts2, 1)), &mut out)
-        .await
-        .expect("send AU2");
+    sink.process(
+        PipelinePacket::DataFrame(au_frame(au2.clone(), pts2, 1)),
+        &mut out,
+    )
+    .await
+    .expect("send AU2");
     let second = recv_n(&receiver, 3).await;
     sink.process(PipelinePacket::Eos, &mut out)
         .await
@@ -175,12 +181,22 @@ async fn sink_sends_rtp_matching_packetizer_with_pts_derived_timestamp() {
         nal_type = payload[1] & 0x1F;
         reassembled.extend_from_slice(&payload[2..]);
     }
-    assert_eq!(reassembled, idr_body, "FU-A body reassembles the IDR payload");
-    assert_eq!((f_nri | nal_type), 0x65, "reconstructed NAL header is the IDR header");
+    assert_eq!(
+        reassembled, idr_body,
+        "FU-A body reassembles the IDR payload"
+    );
+    assert_eq!(
+        (f_nri | nal_type),
+        0x65,
+        "reconstructed NAL header is the IDR header"
+    );
 
     assert_eq!(sink.frames_sent(), 2);
     assert_eq!(sink.packets_sent(), 5);
-    assert_eq!(sink.bytes_sent() as usize, expected.iter().map(|p| p.len()).sum::<usize>());
+    assert_eq!(
+        sink.bytes_sent() as usize,
+        expected.iter().map(|p| p.len()).sum::<usize>()
+    );
     assert!(sink.eos_seen(), "EOS reaches the sink");
 }
 
@@ -220,11 +236,20 @@ async fn sink_emits_rtcp_sender_report_when_enabled() {
     let dgrams = recv_n(&receiver, 3).await;
     let sr = dgrams
         .iter()
-        .find(|d| matches!(rtcp::parse_compound(d).first(), Some(RtcpPacket::SenderReport { .. })))
+        .find(|d| {
+            matches!(
+                rtcp::parse_compound(d).first(),
+                Some(RtcpPacket::SenderReport { .. })
+            )
+        })
         .expect("an RTCP sender report arrived on the muxed socket");
 
-    let Some(RtcpPacket::SenderReport { ssrc: sr_ssrc, ntp, rtp_ts, .. }) =
-        rtcp::parse_compound(sr).into_iter().next()
+    let Some(RtcpPacket::SenderReport {
+        ssrc: sr_ssrc,
+        ntp,
+        rtp_ts,
+        ..
+    }) = rtcp::parse_compound(sr).into_iter().next()
     else {
         panic!("first compound packet is a sender report");
     };

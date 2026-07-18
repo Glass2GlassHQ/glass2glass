@@ -12,7 +12,10 @@
 //! GOP's keyframe (inter prediction ran) and that consecutive frames differ
 //! (motion decoded). Runs on the RTX 3060; skips with no adapter / no Vulkan
 //! H.265 decode support.
-#![cfg(all(any(target_os = "linux", target_os = "windows"), feature = "vulkan-video"))]
+#![cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    feature = "vulkan-video"
+))]
 
 use g2g_core::runtime::block_on;
 use g2g_plugins::vulkanvideo::{
@@ -38,7 +41,9 @@ fn decodes_whole_h265_stream_with_references() {
 
     let ps = extract_h265_parameter_sets(CLIP).expect("parse VPS+SPS+PPS");
     let std = to_std_h265_params(&ps);
-    let session = device.create_h265_session(&std, 640, 480).expect("create session");
+    let session = device
+        .create_h265_session(&std, 640, 480)
+        .expect("create session");
     let mut decoder = device
         .create_h265_dpb_decoder(&session, &ps)
         .expect("create H.265 DPB decoder");
@@ -57,11 +62,17 @@ fn decodes_whole_h265_stream_with_references() {
         // bit-exact against the ffmpeg software decoder, verified out of band.)
         let min = *f.luma.iter().min().unwrap();
         let max = *f.luma.iter().max().unwrap();
-        assert!(max > min, "frame {i} luma is uniform ({min}=={max}); no real content");
+        assert!(
+            max > min,
+            "frame {i} luma is uniform ({min}=={max}); no real content"
+        );
     }
 
     let sad = |a: &[u8], b: &[u8]| -> u64 {
-        a.iter().zip(b).map(|(&x, &y)| (x as i32 - y as i32).unsigned_abs() as u64).sum()
+        a.iter()
+            .zip(b)
+            .map(|(&x, &y)| (x as i32 - y as i32).unsigned_abs() as u64)
+            .sum()
     };
 
     // The P frames must differ from their GOP's keyframe: if references were
@@ -102,7 +113,10 @@ fn decodes_whole_h265_stream_with_references() {
                 let rgba = device.read_rgba_texture(t);
                 let min = *rgba.iter().min().unwrap();
                 let max = *rgba.iter().max().unwrap();
-                assert!(min <= 20 && max >= 200, "GPU frame {i} RGBA range {min}..={max} not real");
+                assert!(
+                    min <= 20 && max >= 200,
+                    "GPU frame {i} RGBA range {min}..={max} not real"
+                );
             }
         }
         Err(VulkanVideoError::NoComputeQueue) => {

@@ -36,7 +36,10 @@ impl GraphSpawner for TokioThreadSpawner {
         // handle) collapses to `Shutdown`, matching how a closed link surfaces.
         let (tx, rx) = tokio::sync::oneshot::channel::<Result<u64, G2gError>>();
         thread::spawn(move || {
-            let result = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            let result = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
                 // `build()` is invoked inside `block_on` so the arm's future is
                 // constructed with this runtime as its ambient context.
                 Ok(rt) => rt.block_on(async move { build().await }),

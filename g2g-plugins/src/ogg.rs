@@ -16,9 +16,9 @@ use alloc::vec::Vec;
 
 const CAPTURE_PATTERN: [u8; 4] = *b"OggS";
 const HEADER_LEN: usize = 27; // fixed header before the segment table
-// Cap cross-page packet reassembly. No real codec packet approaches this; the
-// bound just stops a never-terminating run of continued pages from growing the
-// partial packet without limit.
+                              // Cap cross-page packet reassembly. No real codec packet approaches this; the
+                              // bound just stops a never-terminating run of continued pages from growing the
+                              // partial packet without limit.
 const MAX_PACKET_BYTES: usize = 8 * 1024 * 1024;
 
 /// The codec of an Ogg logical bitstream, sniffed from its first packet.
@@ -95,8 +95,10 @@ impl OggDemuxer {
             if self.buf.len() < table_end {
                 return;
             }
-            let body_len: usize =
-                self.buf[HEADER_LEN..table_end].iter().map(|&s| s as usize).sum();
+            let body_len: usize = self.buf[HEADER_LEN..table_end]
+                .iter()
+                .map(|&s| s as usize)
+                .sum();
             let total = table_end + body_len;
             if self.buf.len() < total {
                 return;
@@ -190,11 +192,23 @@ fn detect(packet: &[u8]) -> OggStreamInfo {
     if packet.starts_with(b"OpusHead") && packet.len() >= 10 {
         // OpusHead: magic(8), version(1), channel_count(1) at offset 9. Opus
         // always decodes at 48 kHz regardless of the original input rate.
-        OggStreamInfo { codec: OggCodec::Opus, channels: packet[9], sample_rate: 48_000 }
+        OggStreamInfo {
+            codec: OggCodec::Opus,
+            channels: packet[9],
+            sample_rate: 48_000,
+        }
     } else if packet.starts_with(b"\x01vorbis") {
-        OggStreamInfo { codec: OggCodec::Vorbis, channels: 0, sample_rate: 0 }
+        OggStreamInfo {
+            codec: OggCodec::Vorbis,
+            channels: 0,
+            sample_rate: 0,
+        }
     } else {
-        OggStreamInfo { codec: OggCodec::Other, channels: 0, sample_rate: 0 }
+        OggStreamInfo {
+            codec: OggCodec::Other,
+            channels: 0,
+            sample_rate: 0,
+        }
     }
 }
 
@@ -251,11 +265,27 @@ mod tests {
         let mut d = OggDemuxer::new();
         d.push_data(&page(0x02, serial, 0, &[&opus_head(2)])); // BOS: OpusHead
         d.push_data(&page(0x00, serial, 1, &[b"OpusTags...."])); // setup header
-        d.push_data(&page(0x00, serial, 2, &[&[0xAA, 0xBB], &[0xCC, 0xDD, 0xEE]]));
+        d.push_data(&page(
+            0x00,
+            serial,
+            2,
+            &[&[0xAA, 0xBB], &[0xCC, 0xDD, 0xEE]],
+        ));
 
-        assert_eq!(d.info(), Some(OggStreamInfo { codec: OggCodec::Opus, channels: 2, sample_rate: 48_000 }));
+        assert_eq!(
+            d.info(),
+            Some(OggStreamInfo {
+                codec: OggCodec::Opus,
+                channels: 2,
+                sample_rate: 48_000
+            })
+        );
         let packets = d.take_packets();
-        assert_eq!(packets, vec![vec![0xAA, 0xBB], vec![0xCC, 0xDD, 0xEE]], "audio packets only");
+        assert_eq!(
+            packets,
+            vec![vec![0xAA, 0xBB], vec![0xCC, 0xDD, 0xEE]],
+            "audio packets only"
+        );
     }
 
     #[test]
@@ -294,7 +324,11 @@ mod tests {
 
         d.push_data(&page1);
         d.push_data(&page2);
-        assert_eq!(d.take_packets(), vec![big], "packet reassembled across the page boundary");
+        assert_eq!(
+            d.take_packets(),
+            vec![big],
+            "packet reassembled across the page boundary"
+        );
     }
 
     /// A page filled with 255-byte segments (no terminator), so its whole body
@@ -336,6 +370,10 @@ mod tests {
         d.push_data(&page(0x00, 1, 1, &[b"OpusTags"]));
         d.push_data(&page(0x00, 2, 0, &[b"other-stream-packet"])); // different serial
         d.push_data(&page(0x00, 1, 2, &[&[0x01, 0x02]]));
-        assert_eq!(d.take_packets(), vec![vec![0x01, 0x02]], "only the first serial");
+        assert_eq!(
+            d.take_packets(),
+            vec![vec![0x01, 0x02]],
+            "only the first serial"
+        );
     }
 }

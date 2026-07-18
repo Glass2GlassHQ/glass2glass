@@ -61,13 +61,18 @@ fn main() {
     let sp = g.add_transform(GraphNode::element(SubParse::new()));
 
     g.link(vsrc, parse).expect("link mp4src -> h264parse");
-    g.link(parse, cc.input(0)).expect("link h264parse -> ccinsert.video");
+    g.link(parse, cc.input(0))
+        .expect("link h264parse -> ccinsert.video");
     g.link(ssrc, sp).expect("link subtitlesrc -> subparse");
-    g.link(sp, cc.input(1)).expect("link subparse -> ccinsert.cue");
+    g.link(sp, cc.input(1))
+        .expect("link subparse -> ccinsert.cue");
     g.link(cc.output(), tsmux).expect("link ccinsert -> tsmux");
     g.link(tsmux, sink).expect("link tsmux -> filesink");
 
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
     match rt.block_on(run_graph(g, &Immediate, 4)) {
         Ok(stats) => {
             println!("authored {} frames -> {out}", stats.frames_consumed);

@@ -132,11 +132,13 @@ impl V4l2Src {
 }
 
 impl SourceLoop for V4l2Src {
-    type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
+    type RunFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
     where
         Self: 'a;
 
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 
@@ -152,7 +154,8 @@ impl SourceLoop for V4l2Src {
         &'a mut self,
     ) -> impl Future<Output = Result<CapsConstraint<'a>, G2gError>> + 'a {
         core::future::ready(
-            self.negotiate().map(|caps| CapsConstraint::Produces(CapsSet::one(caps))),
+            self.negotiate()
+                .map(|caps| CapsConstraint::Produces(CapsSet::one(caps))),
         )
     }
 
@@ -175,11 +178,27 @@ impl SourceLoop for V4l2Src {
 
     fn properties(&self) -> &'static [PropertySpec] {
         const PROPS: &[PropertySpec] = &[
-            PropertySpec::new("device", PropKind::Str, "V4L2 device node (e.g. /dev/video0)")
-                .with_default("/dev/video0"),
-            PropertySpec::new("width", PropKind::Uint, "requested capture width (driver may snap)"),
-            PropertySpec::new("height", PropKind::Uint, "requested capture height (driver may snap)"),
-            PropertySpec::new("framerate", PropKind::Uint, "requested capture rate, fps (best effort)"),
+            PropertySpec::new(
+                "device",
+                PropKind::Str,
+                "V4L2 device node (e.g. /dev/video0)",
+            )
+            .with_default("/dev/video0"),
+            PropertySpec::new(
+                "width",
+                PropKind::Uint,
+                "requested capture width (driver may snap)",
+            ),
+            PropertySpec::new(
+                "height",
+                PropKind::Uint,
+                "requested capture height (driver may snap)",
+            ),
+            PropertySpec::new(
+                "framerate",
+                PropKind::Uint,
+                "requested capture rate, fps (best effort)",
+            ),
         ];
         PROPS
     }
@@ -220,7 +239,11 @@ impl SourceLoop for V4l2Src {
     /// frame in hand and never runs dry waiting on capture.
     fn latency(&self) -> LatencyReport {
         let fps = self.negotiated.map(|(_, _, f)| f).unwrap_or(self.req_fps);
-        let period_ns = if fps > 0 { 1_000_000_000 / fps as u64 } else { 0 };
+        let period_ns = if fps > 0 {
+            1_000_000_000 / fps as u64
+        } else {
+            0
+        };
         LatencyReport::live(period_ns, None)
     }
 
@@ -264,7 +287,11 @@ impl SourceLoop for V4l2Src {
                 Ok(())
             });
 
-            let pts_step_ns = if fps > 0 { 1_000_000_000 / fps as u64 } else { 0 };
+            let pts_step_ns = if fps > 0 {
+                1_000_000_000 / fps as u64
+            } else {
+                0
+            };
             let mut seq = 0u64;
             while let Some(bytes) = rx.recv().await {
                 // A short frame (driver hiccup) can't be unpacked safely; skip
@@ -312,12 +339,14 @@ impl PadTemplates for V4l2Src {
     /// Always produces packed YUYV; a constructed instance fixes the geometry
     /// and rate during `intercept_caps`.
     fn pad_templates() -> Vec<PadTemplate> {
-        Vec::from([PadTemplate::source(g2g_core::CapsSet::one(Caps::RawVideo {
-            format: RawVideoFormat::Yuyv,
-            width: Dim::Any,
-            height: Dim::Any,
-            framerate: Rate::Any,
-        }))])
+        Vec::from([PadTemplate::source(g2g_core::CapsSet::one(
+            Caps::RawVideo {
+                format: RawVideoFormat::Yuyv,
+                width: Dim::Any,
+                height: Dim::Any,
+                framerate: Rate::Any,
+            },
+        ))])
     }
 }
 
@@ -332,7 +361,10 @@ mod tests {
             .with_fps(60)
             .with_frame_limit(10);
         assert_eq!(src.device, "/dev/video0");
-        assert_eq!((src.req_width, src.req_height, src.req_fps), (1280, 720, 60));
+        assert_eq!(
+            (src.req_width, src.req_height, src.req_fps),
+            (1280, 720, 60)
+        );
         assert_eq!(src.frame_limit, 10);
     }
 

@@ -46,7 +46,12 @@ fn h264_caps() -> Caps {
 fn au_frame(bytes: Vec<u8>, pts_ns: u64, seq: u64) -> Frame {
     Frame {
         domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming { pts_ns, dts_ns: pts_ns, duration_ns: 33_333_333, ..FrameTiming::default() },
+        timing: FrameTiming {
+            pts_ns,
+            dts_ns: pts_ns,
+            duration_ns: 33_333_333,
+            ..FrameTiming::default()
+        },
         sequence: seq,
         meta: Default::default(),
     }
@@ -63,7 +68,11 @@ impl OutputSink for Bytes {
         packet: PipelinePacket,
     ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
         Box::pin(async move {
-            if let PipelinePacket::DataFrame(Frame { domain: MemoryDomain::System(s), .. }) = packet {
+            if let PipelinePacket::DataFrame(Frame {
+                domain: MemoryDomain::System(s),
+                ..
+            }) = packet
+            {
                 self.out.extend_from_slice(s.as_slice());
             }
             Ok(PushOutcome::Accepted)
@@ -86,7 +95,10 @@ impl OutputSink for Capture {
     ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
         Box::pin(async move {
             match packet {
-                PipelinePacket::DataFrame(Frame { domain: MemoryDomain::System(s), .. }) => {
+                PipelinePacket::DataFrame(Frame {
+                    domain: MemoryDomain::System(s),
+                    ..
+                }) => {
                     self.frames.push(s.as_slice().to_vec());
                 }
                 PipelinePacket::Flush => self.flushes += 1,
@@ -124,9 +136,12 @@ async fn make_fmp4(aus: &[Vec<u8>]) -> Vec<u8> {
     mux.configure_pipeline(&h264_caps()).unwrap();
     let mut bytes = Bytes::default();
     for (i, au) in aus.iter().enumerate() {
-        mux.process(PipelinePacket::DataFrame(au_frame(au.clone(), i as u64 * 33_333_333, i as u64)), &mut bytes)
-            .await
-            .unwrap();
+        mux.process(
+            PipelinePacket::DataFrame(au_frame(au.clone(), i as u64 * 33_333_333, i as u64)),
+            &mut bytes,
+        )
+        .await
+        .unwrap();
     }
     mux.process(PipelinePacket::Eos, &mut bytes).await.unwrap();
     bytes.out
@@ -140,11 +155,16 @@ async fn run_chain(src: &mut FileSrc, demux: &mut Fmp4Demux) -> Capture {
     };
     src.configure_pipeline(&caps).expect("configure src");
     demux
-        .configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff })
+        .configure_pipeline(&Caps::ByteStream {
+            encoding: ByteStreamEncoding::IsoBmff,
+        })
         .expect("configure demux");
     let mut capture = Capture::default();
     {
-        let mut chain = Chain { demux, capture: &mut capture };
+        let mut chain = Chain {
+            demux,
+            capture: &mut capture,
+        };
         src.run(&mut chain).await.expect("filesrc runs");
     }
     capture
@@ -180,18 +200,36 @@ async fn fmp4demux_seeks_to_the_target_keyframe_over_filesrc() {
     let cap = run_chain(&mut src, &mut demux).await;
 
     // Re-synced from AU 4: exactly the tail idr4, p5, p6, p7.
-    assert_eq!(cap.frames.len(), 4, "resumed from the target keyframe (AU 4) to the end");
-    assert!(cap.flushes >= 1, "the upstream byte-seek flushed downstream");
+    assert_eq!(
+        cap.frames.len(),
+        4,
+        "resumed from the target keyframe (AU 4) to the end"
+    );
+    assert!(
+        cap.flushes >= 1,
+        "the upstream byte-seek flushed downstream"
+    );
     assert!(cap.segments >= 1, "a resume segment was emitted");
-    assert_eq!(cap.caps, 1, "caps announced exactly once despite the re-scan");
+    assert_eq!(
+        cap.caps, 1,
+        "caps announced exactly once despite the re-scan"
+    );
 
     // The first resumed frame is the IDR with parameter sets re-prepended.
     let first = &cap.frames[0];
-    assert!(first.windows(2).any(|w| w == [0x65, 0xA4]), "resumed at AU 4's IDR");
-    assert!(first.windows(2).any(|w| w == [0x67, 0x42]), "parameter sets re-prepended for resume");
+    assert!(
+        first.windows(2).any(|w| w == [0x65, 0xA4]),
+        "resumed at AU 4's IDR"
+    );
+    assert!(
+        first.windows(2).any(|w| w == [0x67, 0x42]),
+        "parameter sets re-prepended for resume"
+    );
     // No pre-target frames leaked through.
     assert!(
-        !cap.frames.iter().any(|f| f.windows(2).any(|w| w == [0x65, 0xA0])),
+        !cap.frames
+            .iter()
+            .any(|f| f.windows(2).any(|w| w == [0x65, 0xA0])),
         "the pre-target keyframe (AU 0) was discarded"
     );
 
@@ -210,8 +248,13 @@ async fn no_seek_demuxes_the_whole_clip_over_filesrc() {
     let path = temp_path("noseek");
     std::fs::write(&path, &fmp4).unwrap();
 
-    let mut src = FileSrc::new(&path, Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff })
-        .with_chunk_size(64);
+    let mut src = FileSrc::new(
+        &path,
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::IsoBmff,
+        },
+    )
+    .with_chunk_size(64);
     let mut demux = Fmp4Demux::new();
     let cap = run_chain(&mut src, &mut demux).await;
 

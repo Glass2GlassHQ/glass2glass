@@ -196,7 +196,11 @@ async fn hevc_encode_decode_round_trip_or_skip() {
     );
 
     let frames = decoded.data_frames();
-    assert_eq!(frames.len(), FRAMES, "every encoded picture must decode back");
+    assert_eq!(
+        frames.len(),
+        FRAMES,
+        "every encoded picture must decode back"
+    );
     let expected_len = (WIDTH * HEIGHT * 3 / 2) as usize;
     for f in frames {
         let MemoryDomain::System(slice) = &f.domain else {

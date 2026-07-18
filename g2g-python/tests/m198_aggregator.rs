@@ -65,15 +65,25 @@ fn incomplete_round_emits_nothing() {
 
     let frame = Frame {
         domain: MemoryDomain::System(SystemSlice::from_boxed(vec![1u8; 8].into_boxed_slice())),
-        timing: FrameTiming { pts_ns: 0, dts_ns: 0, duration_ns: 0, capture_ns: 0, arrival_ns: 0 , keyframe: false},
+        timing: FrameTiming {
+            pts_ns: 0,
+            dts_ns: 0,
+            duration_ns: 0,
+            capture_ns: 0,
+            arrival_ns: 0,
+            keyframe: false,
+        },
         sequence: 0,
         meta: Default::default(),
     };
     let mut sink = CollectSink::default();
-    let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
     // Only input 0 has a frame: the round is incomplete, so nothing is emitted
     // and the (interpreter-less) batch call is never reached.
-    rt.block_on(agg.process(0, PipelinePacket::DataFrame(frame), &mut sink)).unwrap();
+    rt.block_on(agg.process(0, PipelinePacket::DataFrame(frame), &mut sink))
+        .unwrap();
     assert!(sink.packets.is_empty());
     assert_eq!(agg.emitted_count(), 0);
 }
@@ -99,29 +109,45 @@ fn batches_two_inputs_into_one_frame_with_metadata() {
             b[0] = first;
             b.into_boxed_slice()
         })),
-        timing: FrameTiming { pts_ns: 0, dts_ns: 0, duration_ns: 0, capture_ns: 0, arrival_ns: 0 , keyframe: false},
+        timing: FrameTiming {
+            pts_ns: 0,
+            dts_ns: 0,
+            duration_ns: 0,
+            capture_ns: 0,
+            arrival_ns: 0,
+            keyframe: false,
+        },
         sequence: 0,
         meta: Default::default(),
     };
 
     let mut sink = CollectSink::default();
-    let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
     // First input: no complete round yet.
-    rt.block_on(agg.process(0, PipelinePacket::DataFrame(frame(10)), &mut sink)).unwrap();
+    rt.block_on(agg.process(0, PipelinePacket::DataFrame(frame(10)), &mut sink))
+        .unwrap();
     assert!(sink.packets.is_empty());
     // Second input completes the round -> one Python batch call -> one anchor.
-    rt.block_on(agg.process(1, PipelinePacket::DataFrame(frame(20)), &mut sink)).unwrap();
+    rt.block_on(agg.process(1, PipelinePacket::DataFrame(frame(20)), &mut sink))
+        .unwrap();
 
     assert_eq!(sink.packets.len(), 1);
     assert_eq!(agg.emitted_count(), 1);
     let PipelinePacket::DataFrame(out) = &sink.packets[0] else {
         panic!("expected a DataFrame");
     };
-    let MemoryDomain::System(slice) = &out.domain else { panic!("expected System memory") };
+    let MemoryDomain::System(slice) = &out.domain else {
+        panic!("expected System memory")
+    };
     // Anchor byte 0 = sum of the batch's first bytes (10 + 20).
     assert_eq!(slice.as_slice()[0], 30);
     // The batch attached one detection whose label is the batch size (2).
-    let analytics = out.meta.get::<AnalyticsMeta>().expect("aggregate metadata attached");
+    let analytics = out
+        .meta
+        .get::<AnalyticsMeta>()
+        .expect("aggregate metadata attached");
     let dets: Vec<_> = analytics.detections().collect();
     assert_eq!(dets.len(), 1);
     assert_eq!(dets[0].label, 2);

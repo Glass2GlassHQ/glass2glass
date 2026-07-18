@@ -15,7 +15,10 @@
 //!    revisit does no decode and is bit-identical to a reference.
 //!
 //! Runs on the RTX 3060; skips with no Vulkan H.264 adapter / no compute queue.
-#![cfg(all(any(target_os = "linux", target_os = "windows"), feature = "vulkan-video"))]
+#![cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    feature = "vulkan-video"
+))]
 
 use g2g_core::runtime::block_on;
 use g2g_plugins::vulkanvideo::{
@@ -25,12 +28,21 @@ use g2g_plugins::vulkanvideo::{
 const CLIP: &[u8] = include_bytes!("fixtures/h264_640x480.h264");
 
 fn sad_per_byte(a: &[u8], b: &[u8]) -> f64 {
-    assert_eq!(a.len(), b.len(), "frame sizes differ ({} vs {})", a.len(), b.len());
+    assert_eq!(
+        a.len(),
+        b.len(),
+        "frame sizes differ ({} vs {})",
+        a.len(),
+        b.len()
+    );
     if a.is_empty() {
         return 0.0;
     }
-    let sum: u64 =
-        a.iter().zip(b).map(|(&x, &y)| (x as i32 - y as i32).unsigned_abs() as u64).sum();
+    let sum: u64 = a
+        .iter()
+        .zip(b)
+        .map(|(&x, &y)| (x as i32 - y as i32).unsigned_abs() as u64)
+        .sum();
     sum as f64 / a.len() as f64
 }
 
@@ -54,7 +66,9 @@ fn m507_vulkan_video_player_budget() {
 
     // Linear-decode ground truth (decoding order), read back to RGBA bytes.
     let reference: Vec<Vec<u8>> = {
-        let session = device.create_h264_session(&ps, width, height).expect("reference session");
+        let session = device
+            .create_h264_session(&ps, width, height)
+            .expect("reference session");
         let mut dec = match device.create_h264_dpb_decoder_gpu(&session, &ps) {
             Ok(d) => d,
             Err(VulkanVideoError::NoComputeQueue) => {
@@ -75,19 +89,32 @@ fn m507_vulkan_video_player_budget() {
     player.set_cache_byte_budget(3 * bytes_per_frame);
     for p in 0..n {
         let _ = player.frame_at_index(p).expect("linear frame");
-        assert!(player.cache_len() <= 3, "resident frames stay within the byte budget");
-        assert!(player.cache_bytes() <= player.cache_byte_budget(), "cache stays under budget");
+        assert!(
+            player.cache_len() <= 3,
+            "resident frames stay within the byte budget"
+        );
+        assert!(
+            player.cache_bytes() <= player.cache_byte_budget(),
+            "cache stays under budget"
+        );
     }
     assert_eq!(player.cache_len(), 3, "the last three frames are resident");
 
     // Frame 0 was evicted long ago: requesting it re-decodes (a miss).
     let before = player.decode_calls();
     let tex0 = player.frame_at_index(0).expect("frame 0").clone();
-    assert_eq!(player.decode_calls(), before + 1, "an evicted frame re-decodes");
+    assert_eq!(
+        player.decode_calls(),
+        before + 1,
+        "an evicted frame re-decodes"
+    );
     // ...and is still correct after the eviction churn.
     let got0 = player.read_texture(&tex0);
     let d0 = player.decode_index(0).expect("decode index 0");
-    assert!(sad_per_byte(&got0, &reference[d0]) == 0.0, "re-decoded frame 0 matches reference");
+    assert!(
+        sad_per_byte(&got0, &reference[d0]) == 0.0,
+        "re-decoded frame 0 matches reference"
+    );
 
     // ----- 2. cache-traversed makes a backward scrub within a GOP free -----
     // A second decode device (the first player consumed the one passed to `new`).
@@ -100,7 +127,10 @@ fn m507_vulkan_video_player_budget() {
     let mid = 4usize.min(n - 1);
     let _ = player.frame_at_index(mid).expect("mid frame");
     let after_mid = player.decode_calls();
-    assert!(player.cache_len() > mid, "the traversed GOP prefix is cached");
+    assert!(
+        player.cache_len() > mid,
+        "the traversed GOP prefix is cached"
+    );
 
     // Scrub backward to an earlier frame in the same GOP: a cache hit, no decode.
     let back = mid / 2;

@@ -36,11 +36,10 @@ use crate::lend::lend_converted;
 /// The IMA ADPCM step table (89 quantizer step sizes).
 const STEP_TABLE: [u16; 89] = [
     7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 25, 28, 31, 34, 37, 41, 45, 50, 55, 60, 66,
-    73, 80, 88, 97, 107, 118, 130, 143, 157, 173, 190, 209, 230, 253, 279, 307, 337, 371, 408,
-    449, 494, 544, 598, 658, 724, 796, 876, 963, 1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066,
-    2272, 2499, 2749, 3024, 3327, 3660, 4026, 4428, 4871, 5358, 5894, 6484, 7132, 7845, 8630,
-    9493, 10442, 11487, 12635, 13899, 15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794,
-    32767,
+    73, 80, 88, 97, 107, 118, 130, 143, 157, 173, 190, 209, 230, 253, 279, 307, 337, 371, 408, 449,
+    494, 544, 598, 658, 724, 796, 876, 963, 1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066, 2272,
+    2499, 2749, 3024, 3327, 3660, 4026, 4428, 4871, 5358, 5894, 6484, 7132, 7845, 8630, 9493,
+    10442, 11487, 12635, 13899, 15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767,
 ];
 
 /// Step-index adaptation per 3-bit magnitude (small deltas cool down, large
@@ -76,8 +75,8 @@ impl ImaState {
     pub fn encode_sample(&mut self, sample: i16) -> u8 {
         let step = self.step();
         let delta = sample as i32 - self.predictor as i32;
-        let nibble =
-            ((delta.unsigned_abs() as i32 * 4 / step.max(1)).min(7) + 8 * ((delta < 0) as i32)) as u8;
+        let nibble = ((delta.unsigned_abs() as i32 * 4 / step.max(1)).min(7)
+            + 8 * ((delta < 0) as i32)) as u8;
         let mag = step * (2 * (nibble & 7) as i32 + 1) / 8;
         let p = self.predictor as i32 + if nibble & 8 != 0 { -mag } else { mag };
         self.predictor = p.clamp(-32768, 32767) as i16;
@@ -103,7 +102,10 @@ pub const BLOCK_HEADER: usize = 4;
 /// Samples one `block_bytes`-sized mono block carries: the header predictor
 /// plus two per data byte. Saturating so a bogus size cannot wrap.
 pub const fn samples_per_block(block_bytes: usize) -> usize {
-    block_bytes.saturating_sub(BLOCK_HEADER).saturating_mul(2).saturating_add(1)
+    block_bytes
+        .saturating_sub(BLOCK_HEADER)
+        .saturating_mul(2)
+        .saturating_add(1)
 }
 
 /// Encode one mono block: `src` is exactly `samples_per_block * 2` bytes of
@@ -123,9 +125,13 @@ pub fn encode_block(step_index: u8, src: &[u8], dst: &mut [u8]) -> Option<u8> {
     }
     let (first, rest) = src.split_at(2);
     let &[lo, hi] = first else { return None };
-    let mut st =
-        ImaState { predictor: i16::from_le_bytes([lo, hi]), step_index: step_index.min(88) };
-    let [h0, h1, h2, h3] = header else { return None };
+    let mut st = ImaState {
+        predictor: i16::from_le_bytes([lo, hi]),
+        step_index: step_index.min(88),
+    };
+    let [h0, h1, h2, h3] = header else {
+        return None;
+    };
     [*h0, *h1] = st.predictor.to_le_bytes();
     *h2 = st.step_index;
     *h3 = 0;
@@ -150,8 +156,13 @@ pub fn decode_block(src: &[u8], dst: &mut [u8]) -> Option<()> {
         return None;
     }
     let (header, data) = src.split_at(BLOCK_HEADER);
-    let &[p0, p1, idx, _reserved] = header else { return None };
-    let mut st = ImaState { predictor: i16::from_le_bytes([p0, p1]), step_index: idx.min(88) };
+    let &[p0, p1, idx, _reserved] = header else {
+        return None;
+    };
+    let mut st = ImaState {
+        predictor: i16::from_le_bytes([p0, p1]),
+        step_index: idx.min(88),
+    };
     let (first, rest) = dst.split_at_mut(2);
     let [f0, f1] = first else { return None };
     [*f0, *f1] = st.predictor.to_le_bytes();
@@ -190,7 +201,11 @@ impl<'r, const N: usize, const BYTES: usize> AdpcmEnc<'r, N, BYTES> {
     /// The ring must outlive every frame this element publishes: the
     /// pipeline must drain before the ring is dropped.
     pub unsafe fn with_ring(ring: &'r StaticLendRing<N, BYTES>, block_bytes: usize) -> Self {
-        Self { ring, block_bytes: block_bytes.max(BLOCK_HEADER + 1), step_index: 0 }
+        Self {
+            ring,
+            block_bytes: block_bytes.max(BLOCK_HEADER + 1),
+            step_index: 0,
+        }
     }
 }
 
@@ -215,7 +230,10 @@ impl<const N: usize, const BYTES: usize> StaticTransform for AdpcmEnc<'_, N, BYT
             // SAFETY: the constructor established the ring-outlives-frames
             // contract (`new`: 'static; `with_ring`: caller's contract).
             lend_converted(self.ring, &input, out_len, |src, dst| {
-                for (s, d) in src.chunks_exact(src_block).zip(dst.chunks_exact_mut(block_bytes)) {
+                for (s, d) in src
+                    .chunks_exact(src_block)
+                    .zip(dst.chunks_exact_mut(block_bytes))
+                {
                     // Sizes are exact by construction; `encode_block` cannot
                     // return None here.
                     if let Some(next) = encode_block(index, s, d) {
@@ -264,7 +282,10 @@ impl<'r, const N: usize, const BYTES: usize> AdpcmDec<'r, N, BYTES> {
     /// The ring must outlive every frame this element publishes: the
     /// pipeline must drain before the ring is dropped.
     pub unsafe fn with_ring(ring: &'r StaticLendRing<N, BYTES>, block_bytes: usize) -> Self {
-        Self { ring, block_bytes: block_bytes.max(BLOCK_HEADER + 1) }
+        Self {
+            ring,
+            block_bytes: block_bytes.max(BLOCK_HEADER + 1),
+        }
     }
 }
 
@@ -287,7 +308,10 @@ impl<const N: usize, const BYTES: usize> StaticTransform for AdpcmDec<'_, N, BYT
             // SAFETY: the constructor established the ring-outlives-frames
             // contract (`new`: 'static; `with_ring`: caller's contract).
             lend_converted(self.ring, &input, out_len, |src, dst| {
-                for (s, d) in src.chunks_exact(block_bytes).zip(dst.chunks_exact_mut(dst_block)) {
+                for (s, d) in src
+                    .chunks_exact(block_bytes)
+                    .zip(dst.chunks_exact_mut(dst_block))
+                {
                     let _ = decode_block(s, d);
                 }
             })?
@@ -298,6 +322,8 @@ impl<const N: usize, const BYTES: usize> StaticTransform for AdpcmDec<'_, N, BYT
 
 impl<const N: usize, const BYTES: usize> core::fmt::Debug for AdpcmDec<'_, N, BYTES> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("AdpcmDec").field("block_bytes", &self.block_bytes).finish_non_exhaustive()
+        f.debug_struct("AdpcmDec")
+            .field("block_bytes", &self.block_bytes)
+            .finish_non_exhaustive()
     }
 }

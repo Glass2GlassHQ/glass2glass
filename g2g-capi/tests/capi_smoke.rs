@@ -20,18 +20,33 @@ fn launch(desc: &str, err: &mut *mut c_char) -> *mut g2g_capi::Pipeline {
 #[test]
 fn launch_runs_to_eos_and_reports_stats() {
     let mut err: *mut c_char = ptr::null_mut();
-    let p = launch("videotestsrc num-buffers=3 ! videoconvert ! fakesink", &mut err);
+    let p = launch(
+        "videotestsrc num-buffers=3 ! videoconvert ! fakesink",
+        &mut err,
+    );
     assert!(!p.is_null(), "launch returned null for a valid pipeline");
     assert!(err.is_null(), "err set on success");
 
-    let mut stats = G2gStats { frames_emitted: 0, frames_consumed: 0, frames_dropped: 0 };
+    let mut stats = G2gStats {
+        frames_emitted: 0,
+        frames_consumed: 0,
+        frames_dropped: 0,
+    };
     // SAFETY: `p` is a live handle, `stats` is writable.
     let rc = unsafe { g2g_pipeline_wait(p, &mut stats) };
     assert_eq!(rc, 0, "clean run");
-    assert_eq!(stats.frames_consumed, 3, "fakesink consumed every test frame");
+    assert_eq!(
+        stats.frames_consumed, 3,
+        "fakesink consumed every test frame"
+    );
 
     // The bus drains without crashing and terminates (poll returns 0 when empty).
-    let mut msg = G2gBusMessage { kind: 0, text: ptr::null(), a: 0, b: 0 };
+    let mut msg = G2gBusMessage {
+        kind: 0,
+        text: ptr::null(),
+        a: 0,
+        b: 0,
+    };
     let mut drained = 0;
     // SAFETY: `p` live, `msg` writable.
     while unsafe { g2g_pipeline_bus_poll(p, &mut msg) } == 1 {

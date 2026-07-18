@@ -104,7 +104,12 @@ impl VideoCrop {
     /// `top + bottom < in_h`) and be even on each axis the format subsamples (so
     /// the derived crop origin and size stay on chroma-sample boundaries): both
     /// axes for 4:2:0, horizontal only for 4:2:2, neither for 4:4:4 / RGBA.
-    fn validate_insets(&self, format: RawVideoFormat, in_w: u32, in_h: u32) -> Result<(), G2gError> {
+    fn validate_insets(
+        &self,
+        format: RawVideoFormat,
+        in_w: u32,
+        in_h: u32,
+    ) -> Result<(), G2gError> {
         if self.left + self.right >= in_w || self.top + self.bottom >= in_h {
             return Err(G2gError::CapsMismatch);
         }
@@ -134,7 +139,8 @@ impl VideoCrop {
 }
 
 impl AsyncElement for VideoCrop {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -161,9 +167,12 @@ impl AsyncElement for VideoCrop {
         let (lr, tb) = (self.left + self.right, self.top + self.bottom);
         let even_insets_ok = |format| self.even_insets_ok(format);
         CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| match input {
-            Caps::RawVideo { format, width, height, framerate }
-                if FORMATS.contains(format) && even_insets_ok(*format) =>
-            {
+            Caps::RawVideo {
+                format,
+                width,
+                height,
+                framerate,
+            } if FORMATS.contains(format) && even_insets_ok(*format) => {
                 match (shrink(width, lr), shrink(height, tb)) {
                     (Some(w), Some(h)) => CapsSet::one(Caps::RawVideo {
                         format: *format,
@@ -223,7 +232,8 @@ impl AsyncElement for VideoCrop {
                         framerate: rate,
                     };
                     if self.last_caps.as_ref() != Some(&new_caps) {
-                        out.push(PipelinePacket::CapsChanged(new_caps.clone())).await?;
+                        out.push(PipelinePacket::CapsChanged(new_caps.clone()))
+                            .await?;
                         self.last_caps = Some(new_caps);
                     }
                     let out_frame = Frame {
@@ -544,8 +554,14 @@ mod tests {
         let CapsConstraint::DerivedOutput(f) = crop.caps_constraint_as_transform() else {
             panic!("expected DerivedOutput");
         };
-        assert!(f(&nv12_caps(8, 8)).is_empty(), "odd inset is invalid for 4:2:0");
-        assert!(!f(&rgba_caps(8, 8)).is_empty(), "packed formats allow odd insets");
+        assert!(
+            f(&nv12_caps(8, 8)).is_empty(),
+            "odd inset is invalid for 4:2:0"
+        );
+        assert!(
+            !f(&rgba_caps(8, 8)).is_empty(),
+            "packed formats allow odd insets"
+        );
     }
 
     #[test]
@@ -555,7 +571,10 @@ mod tests {
         let CapsConstraint::DerivedOutput(f) = crop.caps_constraint_as_transform() else {
             panic!("expected DerivedOutput");
         };
-        assert!(f(&rgba_caps(8, 8)).is_empty(), "insets consume the whole width");
+        assert!(
+            f(&rgba_caps(8, 8)).is_empty(),
+            "insets consume the whole width"
+        );
     }
 
     #[test]
@@ -563,13 +582,15 @@ mod tests {
         // insets wider than the frame fail.
         let mut c = VideoCrop::new(0, 0, 6, 4);
         assert_eq!(
-            c.configure_pipeline(&rgba_caps(8, 8)).expect_err("insets overrun width"),
+            c.configure_pipeline(&rgba_caps(8, 8))
+                .expect_err("insets overrun width"),
             G2gError::CapsMismatch
         );
         // odd inset into a 4:2:0 stream fails.
         let mut c = VideoCrop::new(0, 0, 1, 0);
         assert_eq!(
-            c.configure_pipeline(&nv12_caps(8, 8)).expect_err("odd left for 4:2:0"),
+            c.configure_pipeline(&nv12_caps(8, 8))
+                .expect_err("odd left for 4:2:0"),
             G2gError::CapsMismatch
         );
         // valid even insets are accepted.

@@ -47,7 +47,9 @@ struct MockEnc {
 impl H264Encoder for &mut MockEnc {
     async fn encode(&mut self, raw: &[u8], out: &mut [u8]) -> Result<H264EncodeInfo, G2gError> {
         if self.fail {
-            return Err(G2gError::Hardware(g2g_core::error::HardwareError::Peripheral));
+            return Err(G2gError::Hardware(
+                g2g_core::error::HardwareError::Peripheral,
+            ));
         }
         let keyframe = self.n % 4 == 0;
         let au = expected_au(raw.first().copied().unwrap_or(0), self.n, keyframe);
@@ -57,7 +59,10 @@ impl H264Encoder for &mut MockEnc {
         }
         out[..au.len()].copy_from_slice(&au);
         self.n = self.n.wrapping_add(1);
-        Ok(H264EncodeInfo { len: au.len(), keyframe })
+        Ok(H264EncodeInfo {
+            len: au.len(),
+            keyframe,
+        })
     }
 }
 
@@ -83,7 +88,8 @@ fn encodes_each_frame_to_its_access_unit_with_keyframe_cadence() {
     let mut enc = MockEnc { n: 0, fail: false };
     let ring: StaticLendRing<1, OUT_BYTES> = StaticLendRing::new();
     // SAFETY: the rings outlive every frame within this test.
-    let mut hw = unsafe { HwH264Enc::with_ring(&mut enc, W, H, &ring) }.expect("valid 4:2:0 geometry");
+    let mut hw =
+        unsafe { HwH264Enc::with_ring(&mut enc, W, H, &ring) }.expect("valid 4:2:0 geometry");
     let src: StaticLendRing<1, RAW> = StaticLendRing::new();
 
     for n in 0..6u8 {
@@ -96,7 +102,10 @@ fn encodes_each_frame_to_its_access_unit_with_keyframe_cadence() {
             expected_au(0xA0 + n, n, keyframe),
             "frame {n}: the access unit is delivered verbatim"
         );
-        assert_eq!(out.sequence, n as u64, "sequence carried from the raw frame");
+        assert_eq!(
+            out.sequence, n as u64,
+            "sequence carried from the raw frame"
+        );
         assert_eq!(
             hw.info(),
             Some(H264EncodeInfo { len: 7, keyframe }),
@@ -240,9 +249,13 @@ fn camera_to_encode_pipeline_runs_end_to_end() {
 
     block_on(run_source_transform_sink(source, hw, &mut sink)).expect("pipeline runs");
 
-    let expected: Vec<Vec<u8>> =
-        (0..4u8).map(|n| expected_au(0xA0 + n, n, n % 4 == 0)).collect();
-    assert_eq!(sink.aus, expected, "camera -> HW H.264 encode delivers the AU stream");
+    let expected: Vec<Vec<u8>> = (0..4u8)
+        .map(|n| expected_au(0xA0 + n, n, n % 4 == 0))
+        .collect();
+    assert_eq!(
+        sink.aus, expected,
+        "camera -> HW H.264 encode delivers the AU stream"
+    );
     // The first frame is an IDR keyframe (random-access point).
     assert!(sink.aus[0].contains(&0x65), "frame 0 is an IDR");
 }

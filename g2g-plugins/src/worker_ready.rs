@@ -15,7 +15,10 @@ pub(crate) struct Handshake {
 
 impl Handshake {
     pub(crate) fn new() -> Self {
-        Self { flag: Mutex::new(false), cv: Condvar::new() }
+        Self {
+            flag: Mutex::new(false),
+            cv: Condvar::new(),
+        }
     }
 
     pub(crate) fn notify(&self) {
@@ -26,8 +29,10 @@ impl Handshake {
     /// Returns true if notified within `timeout`, false on timeout.
     pub(crate) fn wait(&self, timeout: Duration) -> bool {
         let guard = self.flag.lock().unwrap();
-        let (guard, _) =
-            self.cv.wait_timeout_while(guard, timeout, |notified| !*notified).unwrap();
+        let (guard, _) = self
+            .cv
+            .wait_timeout_while(guard, timeout, |notified| !*notified)
+            .unwrap();
         *guard
     }
 }

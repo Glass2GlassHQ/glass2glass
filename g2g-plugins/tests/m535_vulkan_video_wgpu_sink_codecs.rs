@@ -24,14 +24,14 @@
 use std::future::Future;
 use std::pin::Pin;
 
+use g2g_core::frame::Frame;
+use g2g_core::memory::SystemSlice;
 use g2g_core::memory::{DomainSet, MemoryDomainKind};
 use g2g_core::runtime::block_on;
 use g2g_core::{
     AllocationParams, AsyncElement, Caps, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink,
-    PipelinePacket, PushOutcome, RawVideoFormat, Rate, VideoCodec,
+    PipelinePacket, PushOutcome, Rate, RawVideoFormat, VideoCodec,
 };
-use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_plugins::vulkanvideo::{
     open_av1_decode_device, open_h264_decode_device, open_h265_decode_device, VulkanVideoDec,
     VulkanVideoError,
@@ -74,7 +74,10 @@ impl OutputSink for NullSink {
 fn au_frame(bytes: &[u8]) -> Frame {
     Frame {
         domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.to_vec().into_boxed_slice())),
-        timing: FrameTiming { pts_ns: 0, ..Default::default() },
+        timing: FrameTiming {
+            pts_ns: 0,
+            ..Default::default()
+        },
         sequence: 0,
         meta: Default::default(),
     }
@@ -98,7 +101,8 @@ fn drive_wedge(codec: VideoCodec, clip: &[u8]) {
         height: Dim::Fixed(H),
         framerate: Rate::Fixed(30 << 16),
     };
-    dec.configure_pipeline(&in_caps).expect("configure opens the decode device");
+    dec.configure_pipeline(&in_caps)
+        .expect("configure opens the decode device");
 
     // A WgpuSink sharing the decoder's Vulkan device: the WgpuTexture handoff is
     // copy-free (same device, no import).
@@ -132,11 +136,17 @@ fn drive_wedge(codec: VideoCodec, clip: &[u8]) {
             let rgba = sink.read_target().expect("read offscreen target");
             let min = *rgba.iter().min().unwrap();
             let max = *rgba.iter().max().unwrap();
-            assert!(min <= 20 && max >= 200, "{codec:?} frame {presented} target {min}..={max} not real");
+            assert!(
+                min <= 20 && max >= 200,
+                "{codec:?} frame {presented} target {min}..={max} not real"
+            );
             presented += 1;
         }
     }
-    assert_eq!(presented, 10, "{codec:?}: all 10 decoded textures presented by WgpuSink");
+    assert_eq!(
+        presented, 10,
+        "{codec:?}: all 10 decoded textures presented by WgpuSink"
+    );
     eprintln!("VulkanVideoDec ({codec:?}) -> WgpuSink: presented {presented} GPU-resident frames (no readback)");
 }
 

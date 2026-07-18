@@ -25,12 +25,12 @@ use alloc::vec::Vec;
 use std::sync::{Arc, Mutex};
 
 use aes::cipher::{block_padding::NoPadding, BlockDecryptMut, KeyIvInit};
+use g2g_core::frame::Frame;
+use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, ConfigureOutcome, G2gError, MemoryDomain, OutputSink,
     PipelinePacket, VideoCodec,
 };
-use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 
 use crate::annexb::{add_emulation_prevention, next_start_code, strip_emulation_prevention};
 
@@ -112,7 +112,12 @@ impl SampleAesDecrypt {
     /// runtime. A frame that arrives before the handle is filled passes through
     /// unchanged (in the HLS chain `HlsSrc` fills it before pushing any bytes).
     pub fn from_key_handle(handle: SampleAesKeyHandle) -> Self {
-        Self { key: None, key_handle: Some(handle), codec: None, configured: false }
+        Self {
+            key: None,
+            key_handle: Some(handle),
+            codec: None,
+            configured: false,
+        }
     }
 
     /// The key in effect: the shared handle if wired, else the direct key.
@@ -132,16 +137,28 @@ impl AsyncElement for SampleAesDecrypt {
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         match upstream_caps {
-            Caps::CompressedVideo { codec: VideoCodec::H264, .. }
-            | Caps::Audio { format: AudioFormat::Aac, .. } => Ok(upstream_caps.clone()),
+            Caps::CompressedVideo {
+                codec: VideoCodec::H264,
+                ..
+            }
+            | Caps::Audio {
+                format: AudioFormat::Aac,
+                ..
+            } => Ok(upstream_caps.clone()),
             _ => Err(G2gError::CapsMismatch),
         }
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         self.codec = match absolute_caps {
-            Caps::CompressedVideo { codec: VideoCodec::H264, .. } => Some(Codec::H264),
-            Caps::Audio { format: AudioFormat::Aac, .. } => Some(Codec::Aac),
+            Caps::CompressedVideo {
+                codec: VideoCodec::H264,
+                ..
+            } => Some(Codec::H264),
+            Caps::Audio {
+                format: AudioFormat::Aac,
+                ..
+            } => Some(Codec::Aac),
             _ => return Err(G2gError::CapsMismatch),
         };
         self.configured = true;
@@ -172,7 +189,9 @@ impl AsyncElement for SampleAesDecrypt {
                     };
                     let frame = match decrypted {
                         Some(bytes) => Frame {
-                            domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
+                            domain: MemoryDomain::System(SystemSlice::from_boxed(
+                                bytes.into_boxed_slice(),
+                            )),
                             ..frame
                         },
                         None => frame,
@@ -270,7 +289,12 @@ fn decrypt_aac(buf: &[u8], key: &[u8; 16], iv: &[u8; 16]) -> Vec<u8> {
         if frame_len < header_len || pos + frame_len > buf.len() {
             break;
         }
-        out.extend_from_slice(&decrypt_aac_frame(&buf[pos..pos + frame_len], header_len, key, iv));
+        out.extend_from_slice(&decrypt_aac_frame(
+            &buf[pos..pos + frame_len],
+            header_len,
+            key,
+            iv,
+        ));
         pos += frame_len;
     }
     out.extend_from_slice(&buf[pos..]);
@@ -379,7 +403,10 @@ mod tests {
         let ciphertext = encrypt_avc(&cleartext, &KEY, &IV);
         assert_ne!(ciphertext, cleartext, "encryption must change the bytes");
         let recovered = decrypt_avc(&ciphertext, &KEY, &IV);
-        assert_eq!(recovered, cleartext, "SAMPLE-AES AVC decrypt recovers the cleartext AU");
+        assert_eq!(
+            recovered, cleartext,
+            "SAMPLE-AES AVC decrypt recovers the cleartext AU"
+        );
     }
 
     #[test]
@@ -392,7 +419,9 @@ mod tests {
         // round-trip cleanly, so the round-trip test alone cannot catch it; this
         // checks the actual encrypted positions against the hand-derived spec.
         let n = 452usize;
-        let clear: Vec<u8> = (0..n).map(|i| (i as u8).wrapping_mul(31).wrapping_add(7)).collect();
+        let clear: Vec<u8> = (0..n)
+            .map(|i| (i as u8).wrapping_mul(31).wrapping_add(7))
+            .collect();
         let mut buf = clear.clone();
         encrypt_avc_pattern(&mut buf, &KEY, &IV);
 
@@ -400,11 +429,18 @@ mod tests {
         for off in 0..n {
             let in_block = ENCRYPTED.iter().any(|&b| off >= b && off < b + 16);
             if !in_block {
-                assert_eq!(buf[off], clear[off], "byte {off} outside the pattern must stay clear");
+                assert_eq!(
+                    buf[off], clear[off],
+                    "byte {off} outside the pattern must stay clear"
+                );
             }
         }
         for &b in &ENCRYPTED {
-            assert_ne!(buf[b..b + 16], clear[b..b + 16], "the spec block at {b} must be encrypted");
+            assert_ne!(
+                buf[b..b + 16],
+                clear[b..b + 16],
+                "the spec block at {b} must be encrypted"
+            );
         }
     }
 
@@ -418,7 +454,11 @@ mod tests {
         let au = annexb(&[sps.clone(), aud.clone()]);
         let unchanged = encrypt_avc(&au, &KEY, &IV);
         assert_eq!(unchanged, au, "non-slice NALs are never encrypted");
-        assert_eq!(decrypt_avc(&short_slice, &KEY, &IV), short_slice, "<=48-byte slice is clear");
+        assert_eq!(
+            decrypt_avc(&short_slice, &KEY, &IV),
+            short_slice,
+            "<=48-byte slice is clear"
+        );
     }
 
     fn adts_frame(payload: &[u8]) -> Vec<u8> {
@@ -436,7 +476,12 @@ mod tests {
         frame
     }
 
-    fn encrypt_aac_frame(frame: &[u8], header_len: usize, key: &[u8; 16], iv: &[u8; 16]) -> Vec<u8> {
+    fn encrypt_aac_frame(
+        frame: &[u8],
+        header_len: usize,
+        key: &[u8; 16],
+        iv: &[u8; 16],
+    ) -> Vec<u8> {
         let enc_start = header_len + 16;
         let blocks = frame.len().saturating_sub(enc_start) / 16;
         if blocks == 0 {
@@ -463,7 +508,10 @@ mod tests {
         assert_ne!(cipher, cleartext, "encryption must change the bytes");
 
         let recovered = decrypt_aac(&cipher, &KEY, &IV);
-        assert_eq!(recovered, cleartext, "both ADTS frames decrypt back, IV reset per frame");
+        assert_eq!(
+            recovered, cleartext,
+            "both ADTS frames decrypt back, IV reset per frame"
+        );
     }
 
     #[test]
@@ -520,8 +568,14 @@ mod tests {
             meta: Default::default(),
         };
         let mut sink = RecordingSink::default();
-        elem.process(PipelinePacket::DataFrame(frame), &mut sink).await.unwrap();
-        assert_eq!(sink.frames, vec![cleartext], "element emits the decrypted access unit");
+        elem.process(PipelinePacket::DataFrame(frame), &mut sink)
+            .await
+            .unwrap();
+        assert_eq!(
+            sink.frames,
+            vec![cleartext],
+            "element emits the decrypted access unit"
+        );
     }
 
     #[tokio::test]
@@ -549,8 +603,14 @@ mod tests {
             meta: Default::default(),
         };
         let mut sink = RecordingSink::default();
-        elem.process(PipelinePacket::DataFrame(frame), &mut sink).await.unwrap();
-        assert_eq!(sink.frames, vec![cleartext], "key from the shared handle decrypts the AU");
+        elem.process(PipelinePacket::DataFrame(frame), &mut sink)
+            .await
+            .unwrap();
+        assert_eq!(
+            sink.frames,
+            vec![cleartext],
+            "key from the shared handle decrypts the AU"
+        );
     }
 
     #[tokio::test]
@@ -571,8 +631,14 @@ mod tests {
             meta: Default::default(),
         };
         let mut sink = RecordingSink::default();
-        elem.process(PipelinePacket::DataFrame(frame), &mut sink).await.unwrap();
-        assert_eq!(sink.frames, vec![bytes], "no key in the handle: pass through untouched");
+        elem.process(PipelinePacket::DataFrame(frame), &mut sink)
+            .await
+            .unwrap();
+        assert_eq!(
+            sink.frames,
+            vec![bytes],
+            "no key in the handle: pass through untouched"
+        );
     }
 
     #[test]
@@ -584,6 +650,9 @@ mod tests {
             height: Dim::Any,
             framerate: Rate::Any,
         };
-        assert!(matches!(elem.configure_pipeline(&vp9), Err(G2gError::CapsMismatch)));
+        assert!(matches!(
+            elem.configure_pipeline(&vp9),
+            Err(G2gError::CapsMismatch)
+        ));
     }
 }

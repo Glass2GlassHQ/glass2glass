@@ -76,7 +76,12 @@ impl SourceLoop for DetectionSrc {
             );
             let mut a = AnalyticsMeta::new();
             a.add_detection(ObjectDetection {
-                bbox: BBox { x: 0.25, y: 0.25, w: 0.5, h: 0.5 },
+                bbox: BBox {
+                    x: 0.25,
+                    y: 0.25,
+                    w: 0.5,
+                    h: 0.5,
+                },
                 label: 0,
                 confidence: 0.9,
             });
@@ -102,7 +107,9 @@ async fn overlay_fans_out_to_two_wgpu_sinks_zero_copy() {
     // Overlay and both sinks share ONE wgpu device, so the overlay's texture is
     // presentable by either sink with no copy. The tee broadcasts the SAME
     // texture handle (M213 share = Arc bump) to both.
-    let overlay = VelloAnalyticsOverlay::new().with_context(ctx.clone()).with_thickness(4.0);
+    let overlay = VelloAnalyticsOverlay::new()
+        .with_context(ctx.clone())
+        .with_thickness(4.0);
     let sink_a = WgpuSink::offscreen(ctx.clone(), W, H);
     let sink_b = WgpuSink::offscreen(ctx.clone(), W, H);
 
@@ -117,11 +124,16 @@ async fn overlay_fans_out_to_two_wgpu_sinks_zero_copy() {
     g.link(tee.out(0), a).unwrap();
     g.link(tee.out(1), b).unwrap();
 
-    let stats = run_graph(g, &NullClock, 4).await.expect("GPU overlay->tee->sinks runs");
+    let stats = run_graph(g, &NullClock, 4)
+        .await
+        .expect("GPU overlay->tee->sinks runs");
 
     // One overlay-rendered GPU texture reached BOTH sinks, each of which blitted
     // it on the shared device. frames_consumed == 2 proves the tee fanned out a
     // real wgpu texture (previously UnsupportedDomain) and both blits succeeded.
     assert_eq!(stats.frames_emitted, 1, "source emitted one frame");
-    assert_eq!(stats.frames_consumed, 2, "the GPU texture fanned out to both sinks zero-copy");
+    assert_eq!(
+        stats.frames_consumed, 2,
+        "the GPU texture fanned out to both sinks zero-copy"
+    );
 }

@@ -168,9 +168,7 @@ impl Coordinator {
                     // further upstream. Index 0's reply terminates the cascade.
                     // Non-blocking like the kick-off above.
                     if index > 0 {
-                        if let (Some(ctrl), Some(p)) =
-                            (self.arm_ctrl.get(index - 1), proposal)
-                        {
+                        if let (Some(ctrl), Some(p)) = (self.arm_ctrl.get(index - 1), proposal) {
                             let _ = ctrl.try_send(ArmDirective::Recascade(p));
                         }
                     }
@@ -188,7 +186,10 @@ impl Coordinator {
 pub fn coordinator(capacity: usize) -> (Coordinator, CoordinatorHandle) {
     let (tx, rx) = bounded(capacity);
     (
-        Coordinator { rx, arm_ctrl: Vec::new() },
+        Coordinator {
+            rx,
+            arm_ctrl: Vec::new(),
+        },
         CoordinatorHandle { tx },
     )
 }
@@ -202,7 +203,10 @@ pub(crate) fn coordinator_with_recascade(
     let (tx, rx) = bounded(capacity);
     let (ctrl_tx, ctrl_rx) = bounded(capacity);
     (
-        Coordinator { rx, arm_ctrl: alloc::vec![ctrl_tx] },
+        Coordinator {
+            rx,
+            arm_ctrl: alloc::vec![ctrl_tx],
+        },
         CoordinatorHandle { tx },
         ctrl_rx,
     )
@@ -229,7 +233,11 @@ pub(crate) fn coordinator_with_recascade_n(
         arm_ctrl.push(ctrl_tx);
         arm_rx.push(ctrl_rx);
     }
-    (Coordinator { rx, arm_ctrl }, CoordinatorHandle { tx }, arm_rx)
+    (
+        Coordinator { rx, arm_ctrl },
+        CoordinatorHandle { tx },
+        arm_rx,
+    )
 }
 
 /// Per-link fixated caps from the linear startup negotiation the
@@ -361,7 +369,11 @@ where
             }
         }
     };
-    Ok(LinearNegotiation { source_link, sink_link, allocation })
+    Ok(LinearNegotiation {
+        source_link,
+        sink_link,
+        allocation,
+    })
 }
 
 /// M18 α — element-local re-allocation on a mid-stream caps change.
@@ -545,12 +557,19 @@ mod tests {
             caps: nv12(640, 480),
             proposal: Some(AllocationParams::system(10, 1)),
         }));
-        block_on(handle.report(CoordinatorEvent::ArmProposal { index: 2, proposal: None }));
+        block_on(handle.report(CoordinatorEvent::ArmProposal {
+            index: 2,
+            proposal: None,
+        }));
         drop(handle);
 
         assert_eq!(block_on(coord.run()), 2);
         assert_eq!(taken_size(&arm_rx[2]), Some(10));
-        assert_eq!(taken_size(&arm_rx[1]), None, "None proposal stops the cascade");
+        assert_eq!(
+            taken_size(&arm_rx[1]),
+            None,
+            "None proposal stops the cascade"
+        );
         assert_eq!(taken_size(&arm_rx[0]), None);
     }
 }

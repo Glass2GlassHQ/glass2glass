@@ -46,7 +46,10 @@ fn system_nv12_frame(seq: u64) -> Frame {
     }
     Frame {
         domain: MemoryDomain::System(SystemSlice::from_boxed(buf.into_boxed_slice())),
-        timing: FrameTiming { pts_ns: seq * 33_000_000, ..FrameTiming::default() },
+        timing: FrameTiming {
+            pts_ns: seq * 33_000_000,
+            ..FrameTiming::default()
+        },
         sequence: seq,
         meta: Default::default(),
     }
@@ -58,7 +61,10 @@ struct Collect {
 }
 
 impl OutputSink for Collect {
-    fn push<'a>(&'a mut self, packet: PipelinePacket) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
+    fn push<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+    ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
         Box::pin(async move {
             self.packets.push(packet);
             Ok(PushOutcome::Accepted)
@@ -96,7 +102,11 @@ async fn cuda_upload_promotes_system_nv12_to_cuda() {
         _ => None,
     });
     let frame = frame.expect("upload emitted a frame");
-    assert_eq!(frame.domain.kind(), MemoryDomainKind::Cuda, "frame promoted to CUDA");
+    assert_eq!(
+        frame.domain.kind(),
+        MemoryDomainKind::Cuda,
+        "frame promoted to CUDA"
+    );
     if let MemoryDomain::Cuda(buf) = &frame.domain {
         assert_eq!((buf.width, buf.height), (W, H), "geometry preserved");
     }
@@ -116,7 +126,9 @@ async fn cuda_upload_passes_through_gpu_frames() {
         Err(e) => panic!("unexpected configure error: {e:?}"),
     }
     let mut mid = Collect::default();
-    up.process(PipelinePacket::DataFrame(system_nv12_frame(0)), &mut mid).await.expect("upload");
+    up.process(PipelinePacket::DataFrame(system_nv12_frame(0)), &mut mid)
+        .await
+        .expect("upload");
     let cuda_frame = mid
         .packets
         .into_iter()
@@ -127,9 +139,12 @@ async fn cuda_upload_passes_through_gpu_frames() {
         .expect("uploaded frame");
 
     let mut pass = CudaUpload::new();
-    pass.configure_pipeline(&nv12_caps()).expect("second upload configures (GPU already up)");
+    pass.configure_pipeline(&nv12_caps())
+        .expect("second upload configures (GPU already up)");
     let mut out = Collect::default();
-    pass.process(PipelinePacket::DataFrame(cuda_frame), &mut out).await.expect("pass through");
+    pass.process(PipelinePacket::DataFrame(cuda_frame), &mut out)
+        .await
+        .expect("pass through");
     assert_eq!(pass.uploaded(), 0, "no upload for an already-CUDA frame");
     assert_eq!(pass.forwarded(), 1, "GPU frame forwarded untouched");
 }
@@ -165,7 +180,11 @@ async fn system_nv12_feeds_nvenc_via_cuda_upload() {
             .expect("upload frame");
         for p in mid.packets {
             if let PipelinePacket::DataFrame(f) = &p {
-                assert_eq!(f.domain.kind(), MemoryDomainKind::Cuda, "NvEnc requires CUDA input");
+                assert_eq!(
+                    f.domain.kind(),
+                    MemoryDomainKind::Cuda,
+                    "NvEnc requires CUDA input"
+                );
             }
             let mut enc_out = CollectAus { aus: &mut aus };
             enc.process(p, &mut enc_out).await.expect("encode frame");
@@ -173,7 +192,9 @@ async fn system_nv12_feeds_nvenc_via_cuda_upload() {
     }
     // Flush.
     let mut enc_out = CollectAus { aus: &mut aus };
-    enc.process(PipelinePacket::Eos, &mut enc_out).await.expect("flush encoder");
+    enc.process(PipelinePacket::Eos, &mut enc_out)
+        .await
+        .expect("flush encoder");
 
     assert!(!aus.is_empty(), "encoder produced H.264 access units");
     assert!(

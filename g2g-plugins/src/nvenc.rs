@@ -60,7 +60,7 @@ use g2g_core::memory::{CudaKeepAlive, DomainSet, MemoryDomainKind, OwnedCudaBuff
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
     HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec, RawVideoFormat, Rate, VideoCodec,
+    PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, VideoCodec,
 };
 
 /// Default constant target bitrate (bits/second). 4 Mbps, a 1080p30 default that
@@ -394,7 +394,10 @@ impl NvEnc {
         let session = self.session.as_ref().ok_or(G2gError::NotConfigured)?;
         let enc = session.encoder;
         let reconf_fn = session.funcs.nv_enc_reconfigure_encoder.ok_or(hw())?;
-        let preset_fn = session.funcs.nv_enc_get_encode_preset_config_ex.ok_or(hw())?;
+        let preset_fn = session
+            .funcs
+            .nv_enc_get_encode_preset_config_ex
+            .ok_or(hw())?;
         let _ctx = ContextGuard::push(session.context)?;
 
         // Re-derive the preset config, then overlay the (new) rate control, exactly
@@ -432,7 +435,11 @@ impl NvEnc {
 
     /// Encode one CUDA NV12 surface, returning any ready `(annex_b, pts_ns)`
     /// access units. Opens the session lazily on `buf.context`.
-    fn encode(&mut self, buf: &OwnedCudaBuffer, pts_ns: u64) -> Result<Vec<(Vec<u8>, u64)>, G2gError> {
+    fn encode(
+        &mut self,
+        buf: &OwnedCudaBuffer,
+        pts_ns: u64,
+    ) -> Result<Vec<(Vec<u8>, u64)>, G2gError> {
         if self.session.is_none() {
             self.open_session(buf)?;
         }
@@ -535,7 +542,8 @@ impl NvEnc {
         if force_keyframe {
             // Force an IDR and write SPS/PPS in-band so each keyframe is a valid
             // Annex-B entry point.
-            pic.encode_pic_flags = ffi::NV_ENC_PIC_FLAG_FORCEIDR | ffi::NV_ENC_PIC_FLAG_OUTPUT_SPSPPS;
+            pic.encode_pic_flags =
+                ffi::NV_ENC_PIC_FLAG_FORCEIDR | ffi::NV_ENC_PIC_FLAG_OUTPUT_SPSPPS;
         }
         self.frame_no = self.frame_no.wrapping_add(1);
 
@@ -763,7 +771,13 @@ impl AsyncElement for NvEnc {
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        let Caps::RawVideo { format, width, height, framerate } = absolute_caps else {
+        let Caps::RawVideo {
+            format,
+            width,
+            height,
+            framerate,
+        } = absolute_caps
+        else {
             return Err(G2gError::CapsMismatch);
         };
         if !matches!(
@@ -879,14 +893,21 @@ impl PadTemplates for NvEnc {
                 })
                 .collect(),
         );
-        Vec::from([PadTemplate::sink(Self::input_caps_set()), PadTemplate::source(out)])
+        Vec::from([
+            PadTemplate::sink(Self::input_caps_set()),
+            PadTemplate::source(out),
+        ])
     }
 }
 
 /// Settable properties: the target bitrate and the output codec (`h264` |
 /// `hevc`), so a `gst-launch` line can pick them without the builder.
 static NVENC_PROPS: &[PropertySpec] = &[
-    PropertySpec::new("bitrate", PropKind::Uint, "constant target bitrate, bits/second"),
+    PropertySpec::new(
+        "bitrate",
+        PropKind::Uint,
+        "constant target bitrate, bits/second",
+    ),
     PropertySpec::new("codec", PropKind::Str, "output codec: h264 | hevc"),
 ];
 
@@ -964,7 +985,12 @@ mod ffi {
     const _: () = assert!(core::mem::size_of::<Guid>() == 16);
 
     const fn guid(data1: u32, data2: u16, data3: u16, data4: [u8; 8]) -> Guid {
-        Guid { data1, data2, data3, data4 }
+        Guid {
+            data1,
+            data2,
+            data3,
+            data4,
+        }
     }
 
     pub const NV_ENC_CODEC_H264_GUID: Guid = guid(
@@ -1237,18 +1263,11 @@ mod ffi {
 
     // Function-pointer types. The common shape is `(encoder, *mut Struct) ->
     // status`; the open / preset / destroy calls differ and are typed explicitly.
-    pub type FnOpenSessionEx = unsafe extern "C" fn(
-        *mut OpenEncodeSessionExParams,
-        *mut *mut c_void,
-    ) -> NvEncStatus;
+    pub type FnOpenSessionEx =
+        unsafe extern "C" fn(*mut OpenEncodeSessionExParams, *mut *mut c_void) -> NvEncStatus;
     pub type FnInitialize = unsafe extern "C" fn(*mut c_void, *mut InitializeParams) -> NvEncStatus;
-    pub type FnPresetEx = unsafe extern "C" fn(
-        *mut c_void,
-        Guid,
-        Guid,
-        u32,
-        *mut PresetConfig,
-    ) -> NvEncStatus;
+    pub type FnPresetEx =
+        unsafe extern "C" fn(*mut c_void, Guid, Guid, u32, *mut PresetConfig) -> NvEncStatus;
     pub type FnCreateBitstream =
         unsafe extern "C" fn(*mut c_void, *mut CreateBitstreamBuffer) -> NvEncStatus;
     pub type FnRegister = unsafe extern "C" fn(*mut c_void, *mut RegisterResource) -> NvEncStatus;
@@ -1439,18 +1458,21 @@ mod tests {
             height: Dim::Fixed(720),
             framerate: Rate::Any,
         };
-        assert_eq!(bad.configure_pipeline(&i420).err(), Some(G2gError::CapsMismatch));
+        assert_eq!(
+            bad.configure_pipeline(&i420).err(),
+            Some(G2gError::CapsMismatch)
+        );
     }
 
     #[tokio::test]
     async fn system_memory_frame_is_rejected() {
         // NvEnc is the device-resident encoder: a System frame is the wrong
         // domain (FfmpegH264Enc handles that path). No GPU needed for this.
+        use core::future::Future;
+        use core::pin::Pin;
         use g2g_core::frame::Frame;
         use g2g_core::memory::SystemSlice;
         use g2g_core::{FrameTiming, PushOutcome};
-        use core::future::Future;
-        use core::pin::Pin;
 
         struct NullSink;
         impl OutputSink for NullSink {
@@ -1465,11 +1487,15 @@ mod tests {
         let mut enc = NvEnc::new();
         enc.configure_pipeline(&nv12(320, 240)).unwrap();
         let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(alloc::vec![0u8; 320 * 240 * 3 / 2].into_boxed_slice())),
+            MemoryDomain::System(SystemSlice::from_boxed(
+                alloc::vec![0u8; 320 * 240 * 3 / 2].into_boxed_slice(),
+            )),
             FrameTiming::default(),
             0,
         );
-        let err = enc.process(PipelinePacket::DataFrame(frame), &mut NullSink).await;
+        let err = enc
+            .process(PipelinePacket::DataFrame(frame), &mut NullSink)
+            .await;
         assert_eq!(err.err(), Some(G2gError::UnsupportedDomain));
     }
 
@@ -1593,7 +1619,8 @@ mod tests {
                 let _ = ffi::cu_ctx_push_current(ctx as *mut core::ffi::c_void);
                 let mut dptr = 0u64;
                 let ok = cu::cu_mem_alloc(&mut dptr, size) == 0
-                    && cu::cu_memcpy_htod(dptr, host.as_ptr() as *const core::ffi::c_void, size) == 0;
+                    && cu::cu_memcpy_htod(dptr, host.as_ptr() as *const core::ffi::c_void, size)
+                        == 0;
                 let mut popped = core::ptr::null_mut();
                 let _ = ffi::cu_ctx_pop_current(&mut popped);
                 if !ok {
@@ -1610,7 +1637,10 @@ mod tests {
                         ctx,
                         Arc::new(DevAlloc { dptr, ctx }),
                     )),
-                    FrameTiming { pts_ns: seq * 33_000_000, ..FrameTiming::default() },
+                    FrameTiming {
+                        pts_ns: seq * 33_000_000,
+                        ..FrameTiming::default()
+                    },
                     seq,
                 ))
             }
@@ -1650,14 +1680,19 @@ mod tests {
             // the live session. The stream is decoded back below, proving the
             // post-retarget bitstream is still valid.
             if i == 5 {
-                enc.set_property("bitrate", PropValue::Uint(RETARGET_BPS as u64)).unwrap();
+                enc.set_property("bitrate", PropValue::Uint(RETARGET_BPS as u64))
+                    .unwrap();
             }
             let Some(frame) = make_frame(i) else {
                 std::eprintln!("skipping: CUDA alloc/upload failed");
                 return;
             };
             // First frame opens the session; if NVENC is unavailable, skip.
-            if enc.process(PipelinePacket::DataFrame(frame), &mut sink).await.is_err() {
+            if enc
+                .process(PipelinePacket::DataFrame(frame), &mut sink)
+                .await
+                .is_err()
+            {
                 std::eprintln!("skipping: NVENC unavailable on this host");
                 return;
             }
@@ -1683,7 +1718,11 @@ mod tests {
         );
         let first = &sink.frames[0];
         let annex_b = first.starts_with(&[0, 0, 0, 1]) || first.starts_with(&[0, 0, 1]);
-        assert!(annex_b, "NVENC output is Annex-B framed, got {:?}", &first[..4.min(first.len())]);
+        assert!(
+            annex_b,
+            "NVENC output is Annex-B framed, got {:?}",
+            &first[..4.min(first.len())]
+        );
 
         // Decode the stream back to prove it is a real, decodable H.264 bitstream.
         let mut dec = crate::ffmpegdec::FfmpegVideoDec::new();
@@ -1701,15 +1740,30 @@ mod tests {
                 FrameTiming::default(),
                 0,
             );
-            dec.process(PipelinePacket::DataFrame(f), &mut dsink).await.expect("decode AU");
+            dec.process(PipelinePacket::DataFrame(f), &mut dsink)
+                .await
+                .expect("decode AU");
         }
-        dec.process(PipelinePacket::Eos, &mut dsink).await.expect("drain decoder");
+        dec.process(PipelinePacket::Eos, &mut dsink)
+            .await
+            .expect("drain decoder");
 
         let geometry = dsink.caps.iter().find_map(|c| match c {
-            Caps::RawVideo { width: Dim::Fixed(w), height: Dim::Fixed(h), .. } => Some((*w, *h)),
+            Caps::RawVideo {
+                width: Dim::Fixed(w),
+                height: Dim::Fixed(h),
+                ..
+            } => Some((*w, *h)),
             _ => None,
         });
-        assert_eq!(geometry, Some((W, H)), "NVENC stream decodes back to {W}x{H}");
-        assert!(!dsink.frames.is_empty(), "NVENC stream decoded to raw frames");
+        assert_eq!(
+            geometry,
+            Some((W, H)),
+            "NVENC stream decodes back to {W}x{H}"
+        );
+        assert!(
+            !dsink.frames.is_empty(),
+            "NVENC stream decoded to raw frames"
+        );
     }
 }

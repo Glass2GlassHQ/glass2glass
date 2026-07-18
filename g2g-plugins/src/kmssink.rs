@@ -54,8 +54,7 @@ use alloc::vec::Vec;
 
 use drm::buffer::{Buffer, DrmFourcc, DrmModifier, Handle as BufferHandle, PlanarBuffer};
 use drm::control::{
-    connector, crtc, framebuffer, Device as ControlDevice, FbCmd2Flags, Event, Mode,
-    PageFlipFlags,
+    connector, crtc, framebuffer, Device as ControlDevice, Event, FbCmd2Flags, Mode, PageFlipFlags,
 };
 use drm::Device;
 
@@ -443,7 +442,8 @@ impl PipelineClock for KmsClock {
 }
 
 impl AsyncElement for KmsSink {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -550,7 +550,9 @@ impl AsyncElement for KmsSink {
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
-            "device" => Some(PropValue::Str(self.device_path.to_string_lossy().into_owned())),
+            "device" => Some(PropValue::Str(
+                self.device_path.to_string_lossy().into_owned(),
+            )),
             _ => None,
         }
     }
@@ -601,7 +603,13 @@ impl AsyncElement for KmsSink {
 /// the given `pitch`. The destination layout is the kernel's NV12 dumb
 /// buffer: Y plane first at offset 0, UV plane at offset `pitch * height`,
 /// both at `pitch` bytes per row.
-fn copy_nv12(src: &[u8], width: u32, height: u32, pitch: u32, dst: &mut [u8]) -> Result<(), G2gError> {
+fn copy_nv12(
+    src: &[u8],
+    width: u32,
+    height: u32,
+    pitch: u32,
+    dst: &mut [u8],
+) -> Result<(), G2gError> {
     let w = width as usize;
     let h = height as usize;
     let stride = pitch as usize;
@@ -697,9 +705,15 @@ mod tests {
         };
         // A native decoder lands NV12 on this link; non-NV12 is a real
         // error (e.g. an undecoded display chain), not a deferred no-op.
-        assert_eq!(sink.configure_pipeline(&h264).err(), Some(G2gError::CapsMismatch));
+        assert_eq!(
+            sink.configure_pipeline(&h264).err(),
+            Some(G2gError::CapsMismatch)
+        );
         assert!(sink.card.is_none(), "no DRM device opened on rejected caps");
-        assert!(sink.slots.is_empty(), "no buffers allocated on rejected caps");
+        assert!(
+            sink.slots.is_empty(),
+            "no buffers allocated on rejected caps"
+        );
     }
 
     #[test]

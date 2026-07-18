@@ -18,20 +18,20 @@ use alloc::vec::Vec;
 use core::future::Future;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+use super::autoplug::PadRequest;
 use crate::bus::BusHandle;
 use crate::caps::Caps;
 use crate::clock::PipelineClock;
+use crate::clock::{ClockCandidate, ClockPriority};
 use crate::element::{
     AsyncElement, BoxFuture, ConfigureOutcome, DynAsyncElement, ElementBound, OutputSink,
     PushOutcome, Reconfigure,
 };
-use crate::clock::{ClockCandidate, ClockPriority};
-use crate::format_element::CapsConstraint;
 use crate::error::G2gError;
-use super::autoplug::PadRequest;
 use crate::fanout::{
     DuplexInbound, Merger, MultiDuplexSession, MultiInputElement, MultiSenderSink,
 };
+use crate::format_element::CapsConstraint;
 use crate::frame::PipelinePacket;
 use crate::graph::Graph;
 use crate::memory::{DomainSet, MemoryDomainKind};
@@ -47,19 +47,11 @@ use crate::runtime::runner::{LinkCapacity, NullSink, RunStats, SourceLoop};
 /// Boxes `run`'s future so a `Vec<&mut dyn DynSourceLoop>` can hold sources
 /// of different concrete types.
 pub trait DynSourceLoop: ElementBound {
-    fn intercept_caps<'a>(
-        &'a mut self,
-    ) -> BoxFuture<'a, Result<Caps, G2gError>>;
+    fn intercept_caps<'a>(&'a mut self) -> BoxFuture<'a, Result<Caps, G2gError>>;
 
-    fn configure_pipeline(
-        &mut self,
-        absolute_caps: &Caps,
-    ) -> Result<ConfigureOutcome, G2gError>;
+    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError>;
 
-    fn run<'a>(
-        &'a mut self,
-        out: &'a mut dyn OutputSink,
-    ) -> BoxFuture<'a, Result<u64, G2gError>>;
+    fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> BoxFuture<'a, Result<u64, G2gError>>;
 
     fn reconfigure(&mut self, request: Reconfigure) -> Result<Caps, G2gError>;
 
@@ -144,23 +136,15 @@ pub trait DynSourceLoop: ElementBound {
 /// disambiguated to `SourceLoop::` because the two traits share method
 /// names.
 impl<T: SourceLoop> DynSourceLoop for T {
-    fn intercept_caps<'a>(
-        &'a mut self,
-    ) -> BoxFuture<'a, Result<Caps, G2gError>> {
+    fn intercept_caps<'a>(&'a mut self) -> BoxFuture<'a, Result<Caps, G2gError>> {
         Box::pin(SourceLoop::intercept_caps(self))
     }
 
-    fn configure_pipeline(
-        &mut self,
-        absolute_caps: &Caps,
-    ) -> Result<ConfigureOutcome, G2gError> {
+    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         SourceLoop::configure_pipeline(self, absolute_caps)
     }
 
-    fn run<'a>(
-        &'a mut self,
-        out: &'a mut dyn OutputSink,
-    ) -> BoxFuture<'a, Result<u64, G2gError>> {
+    fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> BoxFuture<'a, Result<u64, G2gError>> {
         Box::pin(SourceLoop::run(self, out))
     }
 
@@ -234,10 +218,7 @@ impl<'b> DynSourceLoop for &'b mut (dyn DynSourceLoop + 'b) {
         (**self).intercept_caps()
     }
 
-    fn configure_pipeline(
-        &mut self,
-        absolute_caps: &Caps,
-    ) -> Result<ConfigureOutcome, G2gError> {
+    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         (**self).configure_pipeline(absolute_caps)
     }
 
@@ -719,8 +700,9 @@ where
 
     // Per-input reverse-signal handles (WebRTC PLI / BWE), cloned before the
     // session moves into its arm so a signal for track i reaches source i.
-    let reverse: Vec<Option<crate::fanout::ReverseChannel>> =
-        (0..input_count).map(|i| session.reverse_channel(i)).collect();
+    let reverse: Vec<Option<crate::fanout::ReverseChannel>> = (0..input_count)
+        .map(|i| session.reverse_channel(i))
+        .collect();
 
     let mut source_arms: Vec<BoxFuture<'_, Result<u64, G2gError>>> =
         Vec::with_capacity(input_count);
@@ -728,7 +710,11 @@ where
         let tx_i = tx.clone();
         let reverse_i = reverse[i].clone();
         source_arms.push(Box::pin(async move {
-            let mut adapter = TaggingSink { idx: i, tx: tx_i, reverse: reverse_i };
+            let mut adapter = TaggingSink {
+                idx: i,
+                tx: tx_i,
+                reverse: reverse_i,
+            };
             source.run(&mut adapter).await
         }));
     }
@@ -835,8 +821,14 @@ where
     let link_capacity: usize = link_capacity.into().get();
     let input_count = sources.len();
     let output_count = sinks.len();
-    assert!(input_count > 0, "duplex session needs at least one send source");
-    assert!(output_count > 0, "duplex session needs at least one recv sink");
+    assert!(
+        input_count > 0,
+        "duplex session needs at least one send source"
+    );
+    assert!(
+        output_count > 0,
+        "duplex session needs at least one recv sink"
+    );
     assert!(
         session.input_count() == input_count,
         "session input count must match the number of send sources"
@@ -878,8 +870,9 @@ where
     // session moves into its arm so a signal for track i (a remote PLI on that
     // m-line, or a BWE estimate) reaches send source i, the duplex analog of the
     // fan-in session's per-input routing.
-    let reverse: Vec<Option<crate::fanout::ReverseChannel>> =
-        (0..input_count).map(|i| session.reverse_channel(i)).collect();
+    let reverse: Vec<Option<crate::fanout::ReverseChannel>> = (0..input_count)
+        .map(|i| session.reverse_channel(i))
+        .collect();
 
     let mut source_arms: Vec<BoxFuture<'_, Result<u64, G2gError>>> =
         Vec::with_capacity(input_count);
@@ -887,7 +880,11 @@ where
         let tx_i = in_tx.clone();
         let reverse_i = reverse[i].clone();
         source_arms.push(Box::pin(async move {
-            let mut adapter = TaggingSink { idx: i, tx: tx_i, reverse: reverse_i };
+            let mut adapter = TaggingSink {
+                idx: i,
+                tx: tx_i,
+                reverse: reverse_i,
+            };
             source.run(&mut adapter).await
         }));
     }
@@ -901,8 +898,7 @@ where
         session.run(&mut inbound, &mut multi).await
     });
 
-    let mut sink_arms: Vec<BoxFuture<'_, Result<u64, G2gError>>> =
-        Vec::with_capacity(output_count);
+    let mut sink_arms: Vec<BoxFuture<'_, Result<u64, G2gError>>> = Vec::with_capacity(output_count);
     for (sink, rx) in sinks.into_iter().zip(branch_receivers) {
         sink_arms.push(Box::pin(async move {
             let mut null = NullSink;
@@ -1034,9 +1030,11 @@ where
     let snk = g.add_sink(GraphNodeRef::element_ref(sink));
     for (i, source) in sources.into_iter().enumerate() {
         let s = g.add_source(GraphNodeRef::source_ref(source));
-        g.link(s, mux_node.input(i as u8)).map_err(|_| G2gError::CapsMismatch)?;
+        g.link(s, mux_node.input(i as u8))
+            .map_err(|_| G2gError::CapsMismatch)?;
     }
-    g.link(mux_node.output(), snk).map_err(|_| G2gError::CapsMismatch)?;
+    g.link(mux_node.output(), snk)
+        .map_err(|_| G2gError::CapsMismatch)?;
 
     run_graph_inner(g, clock, link_capacity, bus, None, None, None, None).await
 }
@@ -1089,10 +1087,7 @@ impl<'a> DynamicFaninHandle<'a> {
     /// already in use or the aggregator has already finished, and
     /// [`G2gError::PoolExhausted`] if the add channel is transiently full (the
     /// aggregator has not drained pending adds yet); retry the latter.
-    pub fn add_input(
-        &self,
-        source: Box<dyn DynSourceLoop + 'a>,
-    ) -> Result<(), G2gError> {
+    pub fn add_input(&self, source: Box<dyn DynSourceLoop + 'a>) -> Result<(), G2gError> {
         // Reserve a pad. fetch_add can overshoot past capacity under contention,
         // but that only makes later calls also see `>= max_inputs` and fail, which
         // is the intended "no free pad" outcome.
@@ -1145,7 +1140,10 @@ impl<'a> DynamicFaninHandle<'a> {
 pub fn run_aggregator_dynamic<'a, Agg>(
     aggregator: &'a mut Agg,
     link_capacity: impl Into<LinkCapacity>,
-) -> (DynamicFaninHandle<'a>, impl Future<Output = Result<RunStats, G2gError>> + 'a)
+) -> (
+    DynamicFaninHandle<'a>,
+    impl Future<Output = Result<RunStats, G2gError>> + 'a,
+)
 where
     Agg: MultiInputElement + 'a,
 {
@@ -1195,7 +1193,9 @@ where
                         Either::Left(Some((pad, PipelinePacket::Eos))) => {
                             // Per-input end: let the aggregator flush that pad. It
                             // must not forward Eos; the run owns the end.
-                            aggregator.process(pad, PipelinePacket::Eos, &mut null).await?;
+                            aggregator
+                                .process(pad, PipelinePacket::Eos, &mut null)
+                                .await?;
                         }
                         Either::Left(Some((pad, packet))) => {
                             if matches!(packet, PipelinePacket::DataFrame(_)) {
@@ -1221,7 +1221,9 @@ where
                 } else {
                     match tagged_rx.recv().await {
                         Some((pad, PipelinePacket::Eos)) => {
-                            aggregator.process(pad, PipelinePacket::Eos, &mut null).await?;
+                            aggregator
+                                .process(pad, PipelinePacket::Eos, &mut null)
+                                .await?;
                         }
                         Some((pad, packet)) => {
                             if matches!(packet, PipelinePacket::DataFrame(_)) {
@@ -1286,7 +1288,10 @@ pub fn run_muxer_sink_dynamic<'a, Mux, Snk>(
     mux: &'a mut Mux,
     sink: &'a mut Snk,
     link_capacity: impl Into<LinkCapacity>,
-) -> (DynamicFaninHandle<'a>, impl Future<Output = Result<RunStats, G2gError>> + 'a)
+) -> (
+    DynamicFaninHandle<'a>,
+    impl Future<Output = Result<RunStats, G2gError>> + 'a,
+)
 where
     Mux: MultiInputElement + 'a,
     Snk: AsyncElement + 'a,
@@ -1320,7 +1325,8 @@ where
                 match pkt {
                     PipelinePacket::CapsChanged(caps) => {
                         sink.configure_pipeline(&caps)?.reject_refixate()?;
-                        sink.process(PipelinePacket::CapsChanged(caps), &mut null).await?;
+                        sink.process(PipelinePacket::CapsChanged(caps), &mut null)
+                            .await?;
                     }
                     PipelinePacket::Eos => break,
                     other => {
@@ -1444,10 +1450,16 @@ async fn attach_input<'a>(
     let proposal = source.intercept_caps().await?;
     let fixated = proposal.fixate()?;
     source.configure_pipeline(&fixated)?.reject_refixate()?;
-    aggregator.configure_pipeline(pad, &fixated)?.reject_refixate()?;
+    aggregator
+        .configure_pipeline(pad, &fixated)?
+        .reject_refixate()?;
     let tx = tagged_tx.clone();
     let arm: BoxFuture<'a, Result<FaninArmOut, G2gError>> = Box::pin(async move {
-        let mut sink = TaggingSink { idx: pad, tx, reverse: None };
+        let mut sink = TaggingSink {
+            idx: pad,
+            tx,
+            reverse: None,
+        };
         let mut source = source;
         source.run(&mut sink).await.map(FaninArmOut::Source)
     });

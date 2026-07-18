@@ -16,7 +16,10 @@
 //! of the same clip, verified out of band: every plane SAD/px 0.
 //!
 //! Runs on the RTX 3060; skips with no adapter / no AV1 decode / no compute queue.
-#![cfg(all(any(target_os = "linux", target_os = "windows"), feature = "vulkan-video"))]
+#![cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    feature = "vulkan-video"
+))]
 
 use g2g_core::runtime::block_on;
 use g2g_plugins::vulkanvideo::{
@@ -49,10 +52,16 @@ fn decodes_looprestore_av1_stream() {
 
     let seq = extract_av1_sequence_header(CLIP).expect("parse sequence header");
     let std = to_std_av1_seq_header(&seq);
-    let session = device.create_av1_session(&std, W as u32, H as u32).expect("create AV1 session");
-    let mut dec = device.create_av1_dpb_decoder(&session, &seq).expect("build AV1 decoder");
+    let session = device
+        .create_av1_session(&std, W as u32, H as u32)
+        .expect("create AV1 session");
+    let mut dec = device
+        .create_av1_dpb_decoder(&session, &seq)
+        .expect("build AV1 decoder");
 
-    let frames = dec.decode_all(CLIP).expect("decode loop-restoration stream");
+    let frames = dec
+        .decode_all(CLIP)
+        .expect("decode loop-restoration stream");
     assert!(!frames.is_empty(), "no frames decoded");
 
     for (i, f) in frames.iter().enumerate() {
@@ -60,7 +69,10 @@ fn decodes_looprestore_av1_stream() {
         assert_eq!(f.height, H as u32);
         let min = *f.luma.iter().min().unwrap();
         let max = *f.luma.iter().max().unwrap();
-        assert!(max > min, "frame {i} luma is uniform ({min}=={max}); no real content");
+        assert!(
+            max > min,
+            "frame {i} luma is uniform ({min}=={max}); no real content"
+        );
     }
 
     if let Ok(path) = std::env::var("G2G_AV1_REF") {
@@ -68,7 +80,10 @@ fn decodes_looprestore_av1_stream() {
         let cw = W / 2;
         let ch = H / 2;
         let frame_bytes = W * H + 2 * cw * ch;
-        assert!(ref_yuv.len() >= frame_bytes * frames.len(), "reference too short");
+        assert!(
+            ref_yuv.len() >= frame_bytes * frames.len(),
+            "reference too short"
+        );
         for (i, f) in frames.iter().enumerate() {
             let base = i * frame_bytes;
             let ref_y = &ref_yuv[base..base + W * H];

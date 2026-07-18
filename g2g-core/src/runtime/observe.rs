@@ -239,7 +239,11 @@ mod tests {
             alloc::vec![String::from("src0"), String::from("decode0")],
             alloc::vec![NodeRole::Source, NodeRole::Transform],
             alloc::vec![None, Some(probe.clone())],
-            alloc::vec![EdgeInfo { from: 0, to: 1, caps: None }],
+            alloc::vec![EdgeInfo {
+                from: 0,
+                to: 1,
+                caps: None
+            }],
         );
 
         // A read taken before any work: the transform's probe exists but is empty.
@@ -256,7 +260,14 @@ mod tests {
         let lat = after.nodes[1].latency.as_ref().unwrap();
         assert_eq!(lat.fill_max_pct, 100);
         assert!(lat.fill_mean_pct > 0);
-        assert_eq!(after.edges, alloc::vec![EdgeInfo { from: 0, to: 1, caps: None }]);
+        assert_eq!(
+            after.edges,
+            alloc::vec![EdgeInfo {
+                from: 0,
+                to: 1,
+                caps: None
+            }]
+        );
     }
 
     #[test]

@@ -74,7 +74,10 @@ fn tone(format: AudioFormat, channels: u8, frames: usize, phase0: usize) -> Vec<
 fn pcm_frame(bytes: Vec<u8>, seq: u64) -> Frame {
     Frame {
         domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming { pts_ns: seq, ..Default::default() },
+        timing: FrameTiming {
+            pts_ns: seq,
+            ..Default::default()
+        },
         sequence: seq,
         meta: Default::default(),
     }
@@ -88,7 +91,11 @@ fn drive_tone<E: AsyncElement>(
     format: AudioFormat,
     channels: u8,
 ) -> Result<bool, G2gError> {
-    let caps = Caps::Audio { format, channels, sample_rate: RATE };
+    let caps = Caps::Audio {
+        format,
+        channels,
+        sample_rate: RATE,
+    };
     match sink.configure_pipeline(&caps) {
         Ok(_) => {}
         Err(G2gError::Hardware(_)) => return Ok(false),
@@ -118,8 +125,14 @@ fn alsasink_plays_a_tone() {
         let mut sink = AlsaSink::new();
         match drive_tone(&mut sink, fmt, ch) {
             Ok(true) => {
-                assert!(sink.frames_rendered() > 0, "alsasink rendered no {fmt:?} x{ch} frames");
-                eprintln!("m589 alsasink {fmt:?} x{ch}: rendered {} frames", sink.frames_rendered());
+                assert!(
+                    sink.frames_rendered() > 0,
+                    "alsasink rendered no {fmt:?} x{ch} frames"
+                );
+                eprintln!(
+                    "m589 alsasink {fmt:?} x{ch}: rendered {} frames",
+                    sink.frames_rendered()
+                );
                 ran += 1;
             }
             Ok(false) => eprintln!("skip m589 alsasink {fmt:?} x{ch}: no reachable ALSA device"),
@@ -140,8 +153,14 @@ fn pulsesink_plays_a_tone() {
         let mut sink = PulseSink::new();
         match drive_tone(&mut sink, fmt, ch) {
             Ok(true) => {
-                assert!(sink.bytes_written() > 0, "pulsesink wrote no {fmt:?} x{ch} bytes");
-                eprintln!("m589 pulsesink {fmt:?} x{ch}: wrote {} bytes", sink.bytes_written());
+                assert!(
+                    sink.bytes_written() > 0,
+                    "pulsesink wrote no {fmt:?} x{ch} bytes"
+                );
+                eprintln!(
+                    "m589 pulsesink {fmt:?} x{ch}: wrote {} bytes",
+                    sink.bytes_written()
+                );
                 ran += 1;
             }
             Ok(false) => eprintln!("skip m589 pulsesink {fmt:?} x{ch}: no reachable server"),
@@ -162,8 +181,14 @@ fn pipewiresink_plays_a_tone() {
         let mut sink = PipeWireSink::new();
         match drive_tone(&mut sink, fmt, ch) {
             Ok(true) => {
-                assert!(sink.bytes_queued() > 0, "pipewiresink queued no {fmt:?} x{ch} bytes");
-                eprintln!("m589 pipewiresink {fmt:?} x{ch}: queued {} bytes", sink.bytes_queued());
+                assert!(
+                    sink.bytes_queued() > 0,
+                    "pipewiresink queued no {fmt:?} x{ch} bytes"
+                );
+                eprintln!(
+                    "m589 pipewiresink {fmt:?} x{ch}: queued {} bytes",
+                    sink.bytes_queued()
+                );
                 ran += 1;
             }
             Ok(false) => eprintln!("skip m589 pipewiresink {fmt:?} x{ch}: no reachable server"),

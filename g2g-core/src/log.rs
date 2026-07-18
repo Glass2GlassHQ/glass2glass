@@ -152,12 +152,18 @@ pub struct Target<'a> {
 impl<'a> Target<'a> {
     /// A target with a category and an instance name.
     pub fn named(category: &'static str, instance: &'a str) -> Self {
-        Self { category, instance: Some(instance) }
+        Self {
+            category,
+            instance: Some(instance),
+        }
     }
 
     /// A target with only a category (no instance name).
     pub fn category(category: &'static str) -> Self {
-        Self { category, instance: None }
+        Self {
+            category,
+            instance: None,
+        }
     }
 }
 
@@ -226,7 +232,10 @@ impl LogConfig {
     /// A config defaulting every category to `Error` (errors always surface; the
     /// host raises the level to see more).
     pub const fn new() -> Self {
-        Self { default: LogLevel::Error, overrides: Vec::new() }
+        Self {
+            default: LogLevel::Error,
+            overrides: Vec::new(),
+        }
     }
 
     /// The effective threshold for `category`: its override, else the default.
@@ -320,9 +329,19 @@ pub fn enabled(category: &str, level: LogLevel) -> bool {
 
 /// Emit a record to the installed sink (no-op if none). Called by the macros
 /// after the [`enabled`] check; a direct caller should gate on [`enabled`] too.
-pub fn emit(category: &str, instance: Option<&str>, level: LogLevel, message: core::fmt::Arguments<'_>) {
+pub fn emit(
+    category: &str,
+    instance: Option<&str>,
+    level: LogLevel,
+    message: core::fmt::Arguments<'_>,
+) {
     if let Some(sink) = SINK.lock().as_deref() {
-        sink.emit(&LogRecord { level, category, instance, message });
+        sink.emit(&LogRecord {
+            level,
+            category,
+            instance,
+            message,
+        });
     }
 }
 
@@ -413,7 +432,13 @@ impl LogSink for StderrSink {
     fn emit(&self, r: &LogRecord<'_>) {
         match r.instance {
             Some(i) => {
-                std::eprintln!("{:<5} {:<16} <{}> {}", r.level.as_str(), r.category, i, r.message)
+                std::eprintln!(
+                    "{:<5} {:<16} <{}> {}",
+                    r.level.as_str(),
+                    r.category,
+                    i,
+                    r.message
+                )
             }
             None => std::eprintln!("{:<5} {:<16} {}", r.level.as_str(), r.category, r.message),
         }
@@ -575,14 +600,20 @@ mod tests {
     fn config_filters_by_category_and_default() {
         let mut cfg = LogConfig::new(); // default Error
         assert!(cfg.enabled("opusenc", LogLevel::Error));
-        assert!(!cfg.enabled("opusenc", LogLevel::Debug), "default Error hides Debug");
+        assert!(
+            !cfg.enabled("opusenc", LogLevel::Debug),
+            "default Error hides Debug"
+        );
 
         cfg.set_default(LogLevel::Warn);
         cfg.set_category("opusenc", LogLevel::Trace);
         // The override lets opusenc through at Trace; others stay at Warn.
         assert!(cfg.enabled("opusenc", LogLevel::Trace));
         assert!(cfg.enabled("opusenc", LogLevel::Debug));
-        assert!(!cfg.enabled("videoscale", LogLevel::Info), "non-overridden uses default Warn");
+        assert!(
+            !cfg.enabled("videoscale", LogLevel::Info),
+            "non-overridden uses default Warn"
+        );
         assert!(cfg.enabled("videoscale", LogLevel::Warn));
         // Off is never enabled.
         cfg.set_category("muted", LogLevel::Off);

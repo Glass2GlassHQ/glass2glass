@@ -65,8 +65,11 @@ impl OpusParse {
     /// The caps to emit for `channels`, or `None` if unchanged from the last.
     /// Records the new caps and bumps the emit counter when it does change.
     fn caps_update(&mut self, channels: u8) -> Option<Caps> {
-        let new_caps =
-            Caps::Audio { format: AudioFormat::Opus, channels, sample_rate: OPUS_RATE_HZ };
+        let new_caps = Caps::Audio {
+            format: AudioFormat::Opus,
+            channels,
+            sample_rate: OPUS_RATE_HZ,
+        };
         if self.last_emitted_caps.as_ref() == Some(&new_caps) {
             return None;
         }
@@ -84,7 +87,10 @@ impl AsyncElement for OpusParse {
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         match upstream_caps {
-            Caps::Audio { format: AudioFormat::Opus, .. } => Ok(upstream_caps.clone()),
+            Caps::Audio {
+                format: AudioFormat::Opus,
+                ..
+            } => Ok(upstream_caps.clone()),
             _ => Err(G2gError::CapsMismatch),
         }
     }
@@ -99,7 +105,10 @@ impl AsyncElement for OpusParse {
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         match absolute_caps {
-            Caps::Audio { format: AudioFormat::Opus, .. } => {
+            Caps::Audio {
+                format: AudioFormat::Opus,
+                ..
+            } => {
                 self.configured = true;
                 Ok(ConfigureOutcome::Accepted)
             }
@@ -141,8 +150,9 @@ impl AsyncElement for OpusParse {
                         }
                         // Prefer the OpusHead count when known; else the TOC's
                         // mono/stereo bit (mapping family 0).
-                        let channels =
-                            self.header_channels.or_else(|| parse_toc(bytes).map(|t| t.channels));
+                        let channels = self
+                            .header_channels
+                            .or_else(|| parse_toc(bytes).map(|t| t.channels));
                         if let Some(ch) = channels {
                             if let Some(caps) = self.caps_update(ch) {
                                 out.push(PipelinePacket::CapsChanged(caps)).await?;
@@ -175,7 +185,11 @@ impl AsyncElement for OpusParse {
 impl PadTemplates for OpusParse {
     fn pad_templates() -> Vec<PadTemplate> {
         // `Caps::Audio` has no open dims; pin the common stereo/48 kHz shape.
-        let opus = Caps::Audio { format: AudioFormat::Opus, channels: 2, sample_rate: OPUS_RATE_HZ };
+        let opus = Caps::Audio {
+            format: AudioFormat::Opus,
+            channels: 2,
+            sample_rate: OPUS_RATE_HZ,
+        };
         Vec::from([
             PadTemplate::sink(CapsSet::one(opus.clone())),
             PadTemplate::source(CapsSet::one(opus)),
@@ -234,7 +248,12 @@ fn parse_toc(packet: &[u8]) -> Option<OpusToc> {
     let stereo = (toc >> 2) & 0x01 == 1; // 1 bit
     let channels = if stereo { 2 } else { 1 };
     let (mode, bandwidth, frame_duration_us) = decode_config(config);
-    Some(OpusToc { channels, mode, bandwidth, frame_duration_us })
+    Some(OpusToc {
+        channels,
+        mode,
+        bandwidth,
+        frame_duration_us,
+    })
 }
 
 /// Map a 5-bit TOC `config` (0..=31) to its coder, bandwidth, and frame
@@ -354,7 +373,11 @@ mod tests {
 
     fn opus_caps() -> Caps {
         // Sentinel pre-parse caps: format pinned, channels/rate unknown.
-        Caps::Audio { format: AudioFormat::Opus, channels: 0, sample_rate: 0 }
+        Caps::Audio {
+            format: AudioFormat::Opus,
+            channels: 0,
+            sample_rate: 0,
+        }
     }
 
     #[tokio::test]
@@ -364,7 +387,10 @@ mod tests {
         let mut sink = RecordingSink::default();
 
         let frame = frame_with_bytes(0, opus_packet(31, true, 12));
-        parse.process(PipelinePacket::DataFrame(frame), &mut sink).await.unwrap();
+        parse
+            .process(PipelinePacket::DataFrame(frame), &mut sink)
+            .await
+            .unwrap();
 
         assert_eq!(sink.packets.len(), 2, "expected CapsChanged then DataFrame");
         match &sink.packets[0] {
@@ -390,12 +416,21 @@ mod tests {
 
         for seq in 0..3 {
             let frame = frame_with_bytes(seq, opus_packet(9, false, 40));
-            parse.process(PipelinePacket::DataFrame(frame), &mut sink).await.unwrap();
+            parse
+                .process(PipelinePacket::DataFrame(frame), &mut sink)
+                .await
+                .unwrap();
         }
 
-        let caps_count =
-            sink.packets.iter().filter(|p| matches!(p, PipelinePacket::CapsChanged(_))).count();
-        assert_eq!(caps_count, 1, "CapsChanged fires once for an unchanged channel count");
+        let caps_count = sink
+            .packets
+            .iter()
+            .filter(|p| matches!(p, PipelinePacket::CapsChanged(_)))
+            .count();
+        assert_eq!(
+            caps_count, 1,
+            "CapsChanged fires once for an unchanged channel count"
+        );
         assert_eq!(parse.caps_changes_emitted(), 1);
     }
 
@@ -407,11 +442,17 @@ mod tests {
 
         // mono then stereo.
         parse
-            .process(PipelinePacket::DataFrame(frame_with_bytes(0, opus_packet(9, false, 40))), &mut sink)
+            .process(
+                PipelinePacket::DataFrame(frame_with_bytes(0, opus_packet(9, false, 40))),
+                &mut sink,
+            )
             .await
             .unwrap();
         parse
-            .process(PipelinePacket::DataFrame(frame_with_bytes(1, opus_packet(9, true, 40))), &mut sink)
+            .process(
+                PipelinePacket::DataFrame(frame_with_bytes(1, opus_packet(9, true, 40))),
+                &mut sink,
+            )
             .await
             .unwrap();
 
@@ -456,10 +497,17 @@ mod tests {
         // A 6-channel family-1 OpusHead: caps report 6 channels, and the header
         // is consumed (codec config, never forwarded as an audio frame).
         parse
-            .process(PipelinePacket::DataFrame(frame_with_bytes(0, opus_head(6, 1))), &mut sink)
+            .process(
+                PipelinePacket::DataFrame(frame_with_bytes(0, opus_head(6, 1))),
+                &mut sink,
+            )
             .await
             .unwrap();
-        assert_eq!(sink.packets.len(), 1, "OpusHead emits caps only, no DataFrame");
+        assert_eq!(
+            sink.packets.len(),
+            1,
+            "OpusHead emits caps only, no DataFrame"
+        );
         match &sink.packets[0] {
             PipelinePacket::CapsChanged(Caps::Audio { channels, .. }) => assert_eq!(*channels, 6),
             other => panic!("expected 6-channel CapsChanged, got {other:?}"),
@@ -468,11 +516,21 @@ mod tests {
         // A following stereo-TOC audio packet must not downgrade to 2 channels:
         // the header count wins. The frame is forwarded, no new CapsChanged.
         parse
-            .process(PipelinePacket::DataFrame(frame_with_bytes(1, opus_packet(31, true, 12))), &mut sink)
+            .process(
+                PipelinePacket::DataFrame(frame_with_bytes(1, opus_packet(31, true, 12))),
+                &mut sink,
+            )
             .await
             .unwrap();
-        assert_eq!(parse.caps_changes_emitted(), 1, "TOC did not override the header count");
-        assert!(matches!(sink.packets.last().unwrap(), PipelinePacket::DataFrame(_)));
+        assert_eq!(
+            parse.caps_changes_emitted(),
+            1,
+            "TOC did not override the header count"
+        );
+        assert!(matches!(
+            sink.packets.last().unwrap(),
+            PipelinePacket::DataFrame(_)
+        ));
     }
 
     #[tokio::test]
@@ -481,7 +539,10 @@ mod tests {
         parse.configure_pipeline(&opus_caps()).unwrap();
         let mut sink = RecordingSink::default();
         parse
-            .process(PipelinePacket::DataFrame(frame_with_bytes(0, opus_head(2, 0))), &mut sink)
+            .process(
+                PipelinePacket::DataFrame(frame_with_bytes(0, opus_head(2, 0))),
+                &mut sink,
+            )
             .await
             .unwrap();
         assert_eq!(sink.packets.len(), 1, "header consumed");
@@ -495,19 +556,30 @@ mod tests {
     fn parse_opus_head_needs_magic_and_length() {
         assert_eq!(parse_opus_head(&opus_head(8, 1)), Some(8));
         assert_eq!(parse_opus_head(b"OpusHeadtooshort"), None, "under 19 bytes");
-        assert_eq!(parse_opus_head(&opus_packet(31, true, 12)), None, "a TOC packet is not a header");
+        assert_eq!(
+            parse_opus_head(&opus_packet(31, true, 12)),
+            None,
+            "a TOC packet is not a header"
+        );
     }
 
     #[tokio::test]
     async fn rejects_non_opus_caps_in_intercept() {
         let parse = OpusParse::new();
-        let aac = Caps::Audio { format: AudioFormat::Aac, channels: 2, sample_rate: 48_000 };
+        let aac = Caps::Audio {
+            format: AudioFormat::Aac,
+            channels: 2,
+            sample_rate: 48_000,
+        };
         assert_eq!(parse.intercept_caps(&aac), Err(G2gError::CapsMismatch));
     }
 
     #[test]
     fn caps_constraint_is_identity_any() {
         let parse = OpusParse::new();
-        assert!(matches!(parse.caps_constraint_as_transform(), CapsConstraint::IdentityAny));
+        assert!(matches!(
+            parse.caps_constraint_as_transform(),
+            CapsConstraint::IdentityAny
+        ));
     }
 }

@@ -62,16 +62,14 @@ fn hmac(key: &[u8], parts: &[&[u8]]) -> [u8; DIGEST_LEN] {
 /// Digest offset scheme 0: four little counter bytes at [8..12] pick a slot in
 /// the first data block.
 fn digest_offset_scheme0(buf: &[u8]) -> usize {
-    let sum =
-        buf[8] as usize + buf[9] as usize + buf[10] as usize + buf[11] as usize;
+    let sum = buf[8] as usize + buf[9] as usize + buf[10] as usize + buf[11] as usize;
     (sum % 728) + 12
 }
 
 /// Digest offset scheme 1: four counter bytes at [772..776] pick a slot in the
 /// second data block.
 fn digest_offset_scheme1(buf: &[u8]) -> usize {
-    let sum =
-        buf[772] as usize + buf[773] as usize + buf[774] as usize + buf[775] as usize;
+    let sum = buf[772] as usize + buf[773] as usize + buf[774] as usize + buf[775] as usize;
     (sum % 728) + 776
 }
 
@@ -237,7 +235,10 @@ mod tests {
         assert!(c1_has_digest(&c1), "C1 carries a valid FP digest");
         let (off, embedded) = find_digest(&c1, &fp[..30]).expect("valid digest present");
         let recomputed = digest_excluding(&c1, off, &fp[..30]);
-        assert_eq!(embedded, recomputed, "embedded digest matches recomputation");
+        assert_eq!(
+            embedded, recomputed,
+            "embedded digest matches recomputation"
+        );
     }
 
     #[test]
@@ -248,7 +249,10 @@ mod tests {
         for (i, b) in simple.iter_mut().enumerate().skip(8) {
             *b = (i & 0xFF) as u8;
         }
-        assert!(build_c2(&simple).is_none(), "no FMS digest => C2 falls back to echo");
+        assert!(
+            build_c2(&simple).is_none(),
+            "no FMS digest => C2 falls back to echo"
+        );
         assert!(!c1_has_digest(&simple), "no FP digest in a simple block");
     }
 

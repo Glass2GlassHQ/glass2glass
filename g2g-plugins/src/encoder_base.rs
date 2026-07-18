@@ -49,7 +49,11 @@ pub(crate) async fn emit_packets(
     for (data, pts_ns) in packets {
         let frame = Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-            FrameTiming { pts_ns, dts_ns: pts_ns, ..FrameTiming::default() },
+            FrameTiming {
+                pts_ns,
+                dts_ns: pts_ns,
+                ..FrameTiming::default()
+            },
             *emitted,
         );
         *emitted += 1;
@@ -82,7 +86,11 @@ mod tests {
     }
 
     fn caps() -> Caps {
-        Caps::Audio { format: g2g_core::AudioFormat::Opus, channels: 2, sample_rate: 48_000 }
+        Caps::Audio {
+            format: g2g_core::AudioFormat::Opus,
+            channels: 2,
+            sample_rate: 48_000,
+        }
     }
 
     #[tokio::test]
@@ -138,8 +146,9 @@ mod tests {
         let mut sent = false;
         let mut emitted = 0;
         let mut sink = OutcomeSink(PushOutcome::Accepted);
-        let fb =
-            emit_packets(&mut sent, &mut emitted, Vec::new(), &caps(), &mut sink).await.unwrap();
+        let fb = emit_packets(&mut sent, &mut emitted, Vec::new(), &caps(), &mut sink)
+            .await
+            .unwrap();
         assert!(!fb.force_keyframe);
         assert_eq!(fb.bitrate_bps, None);
         assert!(!sent, "caps stay unannounced until real data arrives");

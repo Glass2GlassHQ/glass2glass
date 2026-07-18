@@ -161,8 +161,12 @@ pub(crate) fn find_descriptor(data: &[u8], tag: u8) -> Option<&[u8]> {
 /// 4cc mapped to a common key or kept verbatim in [`Tag::Other`].
 pub(crate) fn parse_ilst_tags(moov: &[u8]) -> TagList {
     let mut list = TagList::new();
-    let Some(udta) = find_box(moov, b"udta") else { return list };
-    let Some(meta) = find_box(udta, b"meta") else { return list };
+    let Some(udta) = find_box(moov, b"udta") else {
+        return list;
+    };
+    let Some(meta) = find_box(udta, b"meta") else {
+        return list;
+    };
     let after_fullbox = meta.get(4..).unwrap_or(meta);
     let Some(ilst) = find_box(after_fullbox, b"ilst").or_else(|| find_box(meta, b"ilst")) else {
         return list;
@@ -198,8 +202,15 @@ fn itunes_tag(kind: &[u8; 4], value: &str) -> Tag {
         b"\xA9cmt" => "comment",
         _ => {
             // strip the non-ASCII © so a stray atom keeps a printable key.
-            let key: String = kind.iter().filter(|&&b| b.is_ascii()).map(|&b| b as char).collect();
-            return Tag::Other { key, value: value.into() };
+            let key: String = kind
+                .iter()
+                .filter(|&&b| b.is_ascii())
+                .map(|&b| b as char)
+                .collect();
+            return Tag::Other {
+                key,
+                value: value.into(),
+            };
         }
     };
     Tag::from_key_value(name, value)
@@ -365,7 +376,13 @@ mod tests {
         let covr = mp4_box(b"covr", &mp4_box(b"data", &cover));
         let moov = moov_with_tags(&[covr, text_item(b"keyw", "rust")]);
         let tags = parse_ilst_tags(find_box(&moov, b"moov").unwrap());
-        assert_eq!(tags.tags(), &[Tag::Other { key: "keyw".into(), value: "rust".into() }]);
+        assert_eq!(
+            tags.tags(),
+            &[Tag::Other {
+                key: "keyw".into(),
+                value: "rust".into()
+            }]
+        );
     }
 
     #[test]
@@ -380,7 +397,10 @@ mod tests {
             Tag::Title("My Song".into()),
             Tag::Encoder("g2g".into()),
             Tag::Language("eng".into()), // dropped (no atom)
-            Tag::Other { key: "x".into(), value: "y".into() }, // dropped (freeform)
+            Tag::Other {
+                key: "x".into(),
+                value: "y".into(),
+            }, // dropped (freeform)
         ]
         .into_iter()
         .collect();
@@ -388,12 +408,20 @@ mod tests {
         // The reader recovers only the atom-mapped tags, in order.
         let moov = mp4_box(b"moov", &udta);
         let read = parse_ilst_tags(find_box(&moov, b"moov").unwrap());
-        assert_eq!(read.tags(), &[Tag::Title("My Song".into()), Tag::Encoder("g2g".into())]);
+        assert_eq!(
+            read.tags(),
+            &[Tag::Title("My Song".into()), Tag::Encoder("g2g".into())]
+        );
     }
 
     #[test]
     fn udta_writer_none_without_mappable_tags() {
-        let tags: TagList = [Tag::Other { key: "x".into(), value: "y".into() }].into_iter().collect();
+        let tags: TagList = [Tag::Other {
+            key: "x".into(),
+            value: "y".into(),
+        }]
+        .into_iter()
+        .collect();
         assert!(udta_with_tags(&tags).is_none());
     }
 }

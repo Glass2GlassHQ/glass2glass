@@ -20,10 +20,10 @@
 
 use g2g_core::runtime::{run_source_transform_sink, LatencyProfile};
 use g2g_core::PipelineClock;
+use g2g_core::RawVideoFormat;
 use g2g_plugins::fakesink::FakeSink;
 use g2g_plugins::v4l2src::V4l2Src;
 use g2g_plugins::videoconvert::VideoConvert;
-use g2g_core::RawVideoFormat;
 
 struct ZeroClock;
 impl PipelineClock for ZeroClock {
@@ -43,7 +43,10 @@ async fn v4l2_capture_to_fakesink_yields_frames() {
     eprintln!("capturing from {dev}");
 
     let target: u64 = 30;
-    let mut src = V4l2Src::new(dev).with_size(640, 480).with_fps(30).with_frame_limit(target);
+    let mut src = V4l2Src::new(dev)
+        .with_size(640, 480)
+        .with_fps(30)
+        .with_frame_limit(target);
     let mut conv = VideoConvert::new(RawVideoFormat::Nv12);
     let mut sink = FakeSink::new();
     let clock = ZeroClock;
@@ -68,11 +71,18 @@ async fn v4l2_capture_to_fakesink_yields_frames() {
         sink.received(),
         sink.last_sequence()
     );
-    assert_eq!(stats.frames_emitted, target, "source should emit the requested frame count");
+    assert_eq!(
+        stats.frames_emitted, target,
+        "source should emit the requested frame count"
+    );
     assert!(sink.received() > 0, "sink received no converted frames");
     // The convert step turns YUYV (w*h*2) into NV12 (w*h*3/2); reaching the
     // sink at all proves the YUYV unpack negotiated and ran on real data.
-    assert_eq!(sink.last_sequence(), Some(target - 1), "frames arrive in order");
+    assert_eq!(
+        sink.last_sequence(),
+        Some(target - 1),
+        "frames arrive in order"
+    );
 }
 
 #[cfg(feature = "wayland-sink")]
@@ -87,7 +97,10 @@ async fn v4l2_capture_displays_in_a_window() {
     }
     let dev = device();
     let target: u64 = 120;
-    let mut src = V4l2Src::new(dev).with_size(640, 480).with_fps(30).with_frame_limit(target);
+    let mut src = V4l2Src::new(dev)
+        .with_size(640, 480)
+        .with_fps(30)
+        .with_frame_limit(target);
     let mut conv = VideoConvert::new(RawVideoFormat::Nv12);
     let mut sink = WaylandSink::new().with_title("glass2glass v4l2 capture");
     let clock = ZeroClock;
@@ -106,6 +119,10 @@ async fn v4l2_capture_displays_in_a_window() {
     .expect("capture should finish within 30s")
     .expect("v4l2 -> wayland pipeline should succeed");
 
-    eprintln!("emitted={} presented={}", stats.frames_emitted, sink.frames_presented());
+    eprintln!(
+        "emitted={} presented={}",
+        stats.frames_emitted,
+        sink.frames_presented()
+    );
     assert!(stats.frames_emitted > 0, "no frames captured");
 }

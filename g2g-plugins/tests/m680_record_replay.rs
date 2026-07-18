@@ -21,7 +21,9 @@ impl PipelineClock for ZeroClock {
 async fn run(line: &str) -> g2g_core::runtime::RunStats {
     let reg = default_registry();
     let graph = parse_launch(&reg, line).expect("pipeline parses");
-    run_graph(graph, &ZeroClock, 4).await.expect("pipeline runs")
+    run_graph(graph, &ZeroClock, 4)
+        .await
+        .expect("pipeline runs")
 }
 
 #[tokio::test]
@@ -48,7 +50,10 @@ async fn replay_reproduces_recorded_frames_byte_for_byte() {
     ))
     .await;
     assert_eq!(rec_stats.frames_consumed, 6, "recorder saw every frame");
-    assert!(std::fs::metadata(&recording).unwrap().len() > 0, "recording is non-empty");
+    assert!(
+        std::fs::metadata(&recording).unwrap().len() > 0,
+        "recording is non-empty"
+    );
 
     let replay_stats = run(&format!(
         "replaysrc location={} ! filesink location={}",
@@ -56,7 +61,10 @@ async fn replay_reproduces_recorded_frames_byte_for_byte() {
         replayed.display()
     ))
     .await;
-    assert_eq!(replay_stats.frames_consumed, 6, "replay emitted every recorded frame");
+    assert_eq!(
+        replay_stats.frames_consumed, 6,
+        "replay emitted every recorded frame"
+    );
 
     let a = std::fs::read(&direct).unwrap();
     let b = std::fs::read(&replayed).unwrap();
@@ -71,8 +79,8 @@ async fn replay_reproduces_recorded_frames_byte_for_byte() {
 #[tokio::test]
 async fn replay_missing_file_fails_cleanly() {
     let reg = default_registry();
-    let graph = parse_launch(&reg, "replaysrc location=/no/such/g2g/recording ! fakesink")
-        .expect("parses");
+    let graph =
+        parse_launch(&reg, "replaysrc location=/no/such/g2g/recording ! fakesink").expect("parses");
     // A missing recording fails negotiation (no leading caps), not a panic.
     assert!(run_graph(graph, &ZeroClock, 4).await.is_err());
 }

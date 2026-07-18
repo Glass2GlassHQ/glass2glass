@@ -45,11 +45,11 @@ use g2g_core::{
     PropertySpec, Rate, Seek, Segment, StreamType, TextFormat, VideoCodec,
 };
 
+use crate::abr::BandwidthEstimator;
 use crate::fetch::{
     byte_frame, get_bytes, get_range_bytes, get_text, resolve_url, MAX_MANIFEST_BYTES,
     MAX_SEGMENT_BYTES,
 };
-use crate::abr::BandwidthEstimator;
 use crate::hls::{parse, KeyMethod, MasterPlaylist, MediaPlaylist, MediaType, Playlist, Variant};
 use crate::sampleaesdecrypt::{SampleAesKey, SampleAesKeyHandle};
 
@@ -78,11 +78,26 @@ fn codec_to_stream(codec: &str) -> Option<(StreamType, Caps, bool)> {
     let video = |c| {
         (
             StreamType::Video,
-            Caps::CompressedVideo { codec: c, width: Dim::Any, height: Dim::Any, framerate: Rate::Any },
+            Caps::CompressedVideo {
+                codec: c,
+                width: Dim::Any,
+                height: Dim::Any,
+                framerate: Rate::Any,
+            },
             true,
         )
     };
-    let audio = |f| (StreamType::Audio, Caps::Audio { format: f, channels: 0, sample_rate: 0 }, false);
+    let audio = |f| {
+        (
+            StreamType::Audio,
+            Caps::Audio {
+                format: f,
+                channels: 0,
+                sample_rate: 0,
+            },
+            false,
+        )
+    };
     Some(match codec {
         c if c.starts_with("avc1") || c.starts_with("avc3") => video(VideoCodec::H264),
         c if c.starts_with("hvc1") || c.starts_with("hev1") || c.starts_with("dvh") => {
@@ -116,7 +131,10 @@ pub fn variant_streams(master: &MasterPlaylist, variant: &Variant) -> Vec<HlsStr
     // media is present in the variant stream" marker).
     let audio_is_muxed = match &variant.audio_group {
         None => true,
-        Some(group) => master.renditions_in(MediaType::Audio, group).iter().any(|r| r.uri.is_none()),
+        Some(group) => master
+            .renditions_in(MediaType::Audio, group)
+            .iter()
+            .any(|r| r.uri.is_none()),
     };
     for codec in variant.codec_list() {
         if let Some((stream_type, caps, video)) = codec_to_stream(codec) {
@@ -142,7 +160,11 @@ pub fn variant_streams(master: &MasterPlaylist, variant: &Variant) -> Vec<HlsStr
             let Some(uri) = &r.uri else { continue }; // a URI-less rendition is muxed
             out.push(HlsStreamInfo {
                 stream_type: StreamType::Audio,
-                caps: Caps::Audio { format: AudioFormat::Aac, channels: 0, sample_rate: 0 },
+                caps: Caps::Audio {
+                    format: AudioFormat::Aac,
+                    channels: 0,
+                    sample_rate: 0,
+                },
                 video: false,
                 uri: Some(uri.clone()),
                 name: r.name.clone(),
@@ -159,7 +181,9 @@ pub fn variant_streams(master: &MasterPlaylist, variant: &Variant) -> Vec<HlsStr
             let Some(uri) = &r.uri else { continue };
             out.push(HlsStreamInfo {
                 stream_type: StreamType::Text,
-                caps: Caps::Text { format: TextFormat::WebVtt },
+                caps: Caps::Text {
+                    format: TextFormat::WebVtt,
+                },
                 video: false,
                 uri: Some(uri.clone()),
                 name: r.name.clone(),
@@ -372,7 +396,10 @@ async fn fetch_key(
         return Ok(*key);
     }
     let bytes = get_bytes(client, url, MAX_MANIFEST_BYTES).await?;
-    let key: [u8; 16] = bytes.as_slice().try_into().map_err(|_| G2gError::CapsMismatch)?;
+    let key: [u8; 16] = bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| G2gError::CapsMismatch)?;
     cache.push((String::from(url), key));
     Ok(key)
 }
@@ -386,7 +413,11 @@ fn iv_from_sequence(seq: u64) -> [u8; 16] {
 }
 
 /// AES-128-CBC decrypt with PKCS7 padding, in place; returns the plaintext.
-fn decrypt_aes128_cbc(key: &[u8; 16], iv: &[u8; 16], mut data: Vec<u8>) -> Result<Vec<u8>, G2gError> {
+fn decrypt_aes128_cbc(
+    key: &[u8; 16],
+    iv: &[u8; 16],
+    mut data: Vec<u8>,
+) -> Result<Vec<u8>, G2gError> {
     use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
     type Aes128CbcDec = cbc::Decryptor<aes::Aes128>;
     let plaintext_len = {
@@ -464,7 +495,9 @@ impl SourceLoop for HlsSrc {
             // subtitle rendition advertises `Text { WebVtt }`, not its container.
             let encoding = self.probe().await?;
             if self.text {
-                Ok(Caps::Text { format: TextFormat::WebVtt })
+                Ok(Caps::Text {
+                    format: TextFormat::WebVtt,
+                })
             } else {
                 Ok(Caps::ByteStream { encoding })
             }
@@ -528,7 +561,11 @@ impl SourceLoop for HlsSrc {
             // edge (skipping the stale front of the window) instead of its start, so
             // playback follows what is being published; VOD starts at the front. The
             // `full_replay` opt-in starts a live playlist from the window front too.
-            let edge = if self.full_replay { 0 } else { live_edge_start(&media) };
+            let edge = if self.full_replay {
+                0
+            } else {
+                live_edge_start(&media)
+            };
             let mut next_seq = media.media_sequence + edge as u64;
             // fMP4: the EXT-X-MAP init segment (ftyp+moov) is emitted once, before
             // any media fragment, so a downstream fmp4demux sees the moov first.
@@ -544,8 +581,7 @@ impl SourceLoop for HlsSrc {
                     // demuxer reset on the flush needs its moov again).
                     if let Some(seek) = self.seek.as_ref().and_then(|c| c.take_pending()) {
                         if seek.is_flush() {
-                            let (target_idx, seg_start_ns) =
-                                segment_for_time(&media, seek.start);
+                            let (target_idx, seg_start_ns) = segment_for_time(&media, seek.start);
                             out.push(PipelinePacket::Flush).await?;
                             idx = target_idx;
                             next_seq = media.media_sequence + target_idx as u64;
@@ -566,8 +602,14 @@ impl SourceLoop for HlsSrc {
                             let init_url = resolve_url(&media_url, map);
                             let bytes = match media.map_byte_range {
                                 Some(r) => {
-                                    get_range_bytes(&client, &init_url, r.offset, r.length, MAX_SEGMENT_BYTES)
-                                        .await?
+                                    get_range_bytes(
+                                        &client,
+                                        &init_url,
+                                        r.offset,
+                                        r.length,
+                                        MAX_SEGMENT_BYTES,
+                                    )
+                                    .await?
                                 }
                                 None => get_bytes(&client, &init_url, MAX_SEGMENT_BYTES).await?,
                             };
@@ -593,14 +635,22 @@ impl SourceLoop for HlsSrc {
                         let t0 = g2g_core::metrics::monotonic_ns();
                         let bytes = match segment.byte_range {
                             Some(r) => {
-                                get_range_bytes(&client, &seg_url, r.offset, r.length, MAX_SEGMENT_BYTES)
-                                    .await?
+                                get_range_bytes(
+                                    &client,
+                                    &seg_url,
+                                    r.offset,
+                                    r.length,
+                                    MAX_SEGMENT_BYTES,
+                                )
+                                .await?
                             }
                             None => get_bytes(&client, &seg_url, MAX_SEGMENT_BYTES).await?,
                         };
                         // Measure the downloaded (pre-decrypt) size against wall time.
-                        measured =
-                            Some((bytes.len(), g2g_core::metrics::monotonic_ns().saturating_sub(t0)));
+                        measured = Some((
+                            bytes.len(),
+                            g2g_core::metrics::monotonic_ns().saturating_sub(t0),
+                        ));
                         let bytes = match &segment.key {
                             None => bytes,
                             Some(key) => {
@@ -609,7 +659,9 @@ impl SourceLoop for HlsSrc {
                                 let iv = key.iv.unwrap_or_else(|| iv_from_sequence(seg_seq));
                                 match key.method {
                                     // Whole-segment: decrypt before the demuxer.
-                                    KeyMethod::Aes128 => decrypt_aes128_cbc(&key_bytes, &iv, bytes)?,
+                                    KeyMethod::Aes128 => {
+                                        decrypt_aes128_cbc(&key_bytes, &iv, bytes)?
+                                    }
                                     // Per-sample: publish the key for a downstream
                                     // SampleAesDecrypt and forward the bytes as-is.
                                     KeyMethod::SampleAes => {
@@ -632,7 +684,8 @@ impl SourceLoop for HlsSrc {
                             } else {
                                 bytes
                             };
-                            out.push(PipelinePacket::DataFrame(byte_frame(bytes, sequence))).await?;
+                            out.push(PipelinePacket::DataFrame(byte_frame(bytes, sequence)))
+                                .await?;
                             sequence += 1;
                         }
                         next_seq = seg_seq + 1;
@@ -647,7 +700,8 @@ impl SourceLoop for HlsSrc {
                         (measured, master.as_ref())
                     {
                         estimator.sample(len, elapsed);
-                        if let Some(best) = mst.select(estimator.effective_cap(self.max_bandwidth)) {
+                        if let Some(best) = mst.select(estimator.effective_cap(self.max_bandwidth))
+                        {
                             if current_variant.as_deref() != Some(best.uri.as_str()) {
                                 let new_uri = best.uri.clone();
                                 let new_url = resolve_url(master_url, &new_uri);
@@ -785,8 +839,26 @@ mod tests {
         );
         let streams = variant_streams(&m, &m.variants[0]);
         assert_eq!(streams.len(), 2);
-        assert!(streams[0].video && matches!(streams[0].caps, Caps::CompressedVideo { codec: VideoCodec::H264, .. }));
-        assert!(!streams[1].video && matches!(streams[1].caps, Caps::Audio { format: AudioFormat::Aac, .. }));
+        assert!(
+            streams[0].video
+                && matches!(
+                    streams[0].caps,
+                    Caps::CompressedVideo {
+                        codec: VideoCodec::H264,
+                        ..
+                    }
+                )
+        );
+        assert!(
+            !streams[1].video
+                && matches!(
+                    streams[1].caps,
+                    Caps::Audio {
+                        format: AudioFormat::Aac,
+                        ..
+                    }
+                )
+        );
         // Muxed streams ride the variant segments: no separate rendition URI.
         assert!(streams.iter().all(|s| s.uri.is_none()));
     }
@@ -803,7 +875,11 @@ mod tests {
              v.m3u8\n",
         );
         let streams = variant_streams(&m, &m.variants[0]);
-        assert_eq!(streams.len(), 3, "one muxed video + two separate audio renditions");
+        assert_eq!(
+            streams.len(),
+            3,
+            "one muxed video + two separate audio renditions"
+        );
         assert!(streams[0].video && streams[0].uri.is_none());
         assert_eq!(streams[1].uri.as_deref(), Some("a/en.m3u8"));
         assert_eq!(streams[1].language.as_deref(), Some("en"));
@@ -824,10 +900,18 @@ mod tests {
         );
         let streams = variant_streams(&m, &m.variants[0]);
         // muxed video + muxed audio (no AUDIO group) + two subtitle renditions.
-        let subs: Vec<_> = streams.iter().filter(|s| matches!(s.caps, Caps::Text { .. })).collect();
+        let subs: Vec<_> = streams
+            .iter()
+            .filter(|s| matches!(s.caps, Caps::Text { .. }))
+            .collect();
         assert_eq!(subs.len(), 2, "two subtitle renditions discovered");
         assert_eq!(subs[0].stream_type, StreamType::Text);
-        assert_eq!(subs[0].caps, Caps::Text { format: TextFormat::WebVtt });
+        assert_eq!(
+            subs[0].caps,
+            Caps::Text {
+                format: TextFormat::WebVtt
+            }
+        );
         assert_eq!(subs[0].uri.as_deref(), Some("s/en.m3u8"));
         assert_eq!(subs[0].language.as_deref(), Some("en"));
         assert_eq!(subs[1].uri.as_deref(), Some("s/fr.m3u8"));

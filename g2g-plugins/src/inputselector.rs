@@ -28,7 +28,11 @@ pub struct InputSelector {
 impl InputSelector {
     pub fn new(inputs: usize) -> Self {
         assert!(inputs > 0, "InputSelector needs at least one input");
-        Self { inputs, active: 0, configured: vec![None; inputs] }
+        Self {
+            inputs,
+            active: 0,
+            configured: vec![None; inputs],
+        }
     }
 
     pub fn with_active(mut self, active: usize) -> Self {
@@ -59,7 +63,11 @@ impl MultiInputElement for InputSelector {
         Some(0)
     }
 
-    fn configure_pipeline(&mut self, input: usize, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+    fn configure_pipeline(
+        &mut self,
+        input: usize,
+        absolute_caps: &Caps,
+    ) -> Result<ConfigureOutcome, G2gError> {
         self.configured[input] = Some(absolute_caps.clone());
         Ok(ConfigureOutcome::Accepted)
     }
@@ -69,7 +77,12 @@ impl MultiInputElement for InputSelector {
     }
 
     fn metadata(&self) -> ElementMetadata {
-        ElementMetadata::new("Input selector", "Generic", "Forwards one of N inputs", "g2g")
+        ElementMetadata::new(
+            "Input selector",
+            "Generic",
+            "Forwards one of N inputs",
+            "g2g",
+        )
     }
 
     fn properties(&self) -> &'static [PropertySpec] {
@@ -117,8 +130,11 @@ impl MultiInputElement for InputSelector {
     }
 }
 
-static INPUTSELECTOR_PROPS: &[PropertySpec] =
-    &[PropertySpec::new("active-pad", PropKind::Uint, "index of the input to forward")];
+static INPUTSELECTOR_PROPS: &[PropertySpec] = &[PropertySpec::new(
+    "active-pad",
+    PropKind::Uint,
+    "index of the input to forward",
+)];
 
 #[cfg(test)]
 mod tests {
@@ -165,6 +181,10 @@ mod tests {
     #[test]
     fn active_pad_out_of_range_rejected() {
         let mut s = InputSelector::new(2);
-        assert_eq!(s.set_property("active-pad", PropValue::Uint(5)).unwrap_err(), PropError::Value);
+        assert_eq!(
+            s.set_property("active-pad", PropValue::Uint(5))
+                .unwrap_err(),
+            PropError::Value
+        );
     }
 }

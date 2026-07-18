@@ -97,13 +97,13 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use ffmpeg_next as ffmpeg;
 use ffmpeg::codec::{self, Flags, Id};
 use ffmpeg::format::Pixel;
 use ffmpeg::frame::Video as FfVideo;
 use ffmpeg::packet::Packet;
 use ffmpeg::Dictionary;
 use ffmpeg::Error as FfError;
+use ffmpeg_next as ffmpeg;
 
 use crate::yuv::downsample_chroma_420;
 use g2g_core::frame::Frame;
@@ -112,7 +112,7 @@ use g2g_core::{
     AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, CudaKeepAlive,
     Dim, ElementMetadata, FrameTiming, G2gError, HardwareError, MemoryDomain, OutputSink,
     PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate,
-    VideoCodec, RawVideoFormat,
+    RawVideoFormat, VideoCodec,
 };
 
 /// Cap on pending input-pts -> arrival entries, so frames the decoder drops
@@ -611,7 +611,10 @@ impl FfmpegH264Dec {
                         (DecodedPayload::System(copy_yuv(&sw, resolved)?), resolved)
                     } else {
                         let resolved = resolve_output_format(format, frame.format())?;
-                        (DecodedPayload::System(copy_yuv(&frame, resolved)?), resolved)
+                        (
+                            DecodedPayload::System(copy_yuv(&frame, resolved)?),
+                            resolved,
+                        )
                     };
                     let arrival_ns = self.pts_to_arrival.remove(&pts_ns).unwrap_or(0);
                     decoded.push(DecodedPicture {
@@ -873,7 +876,8 @@ impl PadTemplates for FfmpegH264Dec {
 }
 
 impl AsyncElement for FfmpegH264Dec {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -964,7 +968,11 @@ impl AsyncElement for FfmpegH264Dec {
                 // VAAPI render node (only consulted by Backend::Vaapi). An empty
                 // value clears the pin so libva picks its default device.
                 let path = value.as_str().ok_or(PropError::Type)?;
-                self.vaapi_device = if path.is_empty() { None } else { Some(path.into()) };
+                self.vaapi_device = if path.is_empty() {
+                    None
+                } else {
+                    Some(path.into())
+                };
                 Ok(())
             }
             "output-format" => {
@@ -986,9 +994,9 @@ impl AsyncElement for FfmpegH264Dec {
         match name {
             // Empty string when unpinned (= libva default), like other
             // always-present string properties (see filesrc `location`).
-            "device" => {
-                Some(PropValue::Str(self.vaapi_device.clone().unwrap_or_default()))
-            }
+            "device" => Some(PropValue::Str(
+                self.vaapi_device.clone().unwrap_or_default(),
+            )),
             "output-format" => Some(PropValue::Str(
                 match self.output_format {
                     OutputFormat::I420 => "i420",
@@ -1060,16 +1068,16 @@ impl AsyncElement for FfmpegH264Dec {
                     //      decoded frame; suppress re-emission from the
                     //      decode loop by recording `last_caps`.
                     match &c {
-                        Caps::CompressedVideo { codec, .. }
-                            if SUPPORTED_CODECS.contains(codec) =>
-                        {
+                        Caps::CompressedVideo { codec, .. } if SUPPORTED_CODECS.contains(codec) => {
                             self.input_caps = Some(c);
                         }
                         // A pre-fixed output CapsChanged from the runner: accept
                         // any format this decoder can emit. Under `Auto` that is
                         // any of the three chromas it advertised; otherwise the
                         // one configured format.
-                        Caps::RawVideo { format, .. } if accepts_output(self.output_format, *format) => {
+                        Caps::RawVideo { format, .. }
+                            if accepts_output(self.output_format, *format) =>
+                        {
                             out.push(PipelinePacket::CapsChanged(c.clone())).await?;
                             self.last_caps = Some(c);
                         }
@@ -1107,7 +1115,10 @@ impl AsyncElement for FfmpegH264Dec {
             // (per-frame PTS carries the real timing); default to 30/1 when the
             // container did not declare one.
             let out_framerate = match &self.input_caps {
-                Some(Caps::CompressedVideo { framerate: Rate::Fixed(q), .. }) => Rate::Fixed(*q),
+                Some(Caps::CompressedVideo {
+                    framerate: Rate::Fixed(q),
+                    ..
+                }) => Rate::Fixed(*q),
                 _ => Rate::Fixed(30 << 16),
             };
             for d in decoded {
@@ -1134,7 +1145,8 @@ impl AsyncElement for FfmpegH264Dec {
                             "ffmpegdec decode-time output {new_caps:?} inconsistent with derive_output_caps({input:?}) = {expected:?}"
                         );
                     }
-                    out.push(PipelinePacket::CapsChanged(new_caps.clone())).await?;
+                    out.push(PipelinePacket::CapsChanged(new_caps.clone()))
+                        .await?;
                     self.last_caps = Some(new_caps.clone());
                 }
                 let domain = match d.payload {
@@ -1191,7 +1203,11 @@ static FFMPEGDEC_PROPS: &[PropertySpec] = &[
         PropKind::Str,
         "VAAPI render node, e.g. /dev/dri/renderD128 (Backend::Vaapi only; empty = libva default)",
     ),
-    PropertySpec::new("output-format", PropKind::Str, "decoded pixel layout: i420 | nv12"),
+    PropertySpec::new(
+        "output-format",
+        PropKind::Str,
+        "decoded pixel layout: i420 | nv12",
+    ),
 ];
 
 /// The libavcodec `AVCodecID` for a g2g codec (generic + CUDA-hwaccel path).
@@ -1242,9 +1258,12 @@ fn cuvid_name(codec: VideoCodec) -> &'static str {
 
 fn derive_output_caps(input: &Caps, out: OutputFormat) -> CapsSet {
     match input {
-        Caps::CompressedVideo { codec, width, height, framerate }
-            if SUPPORTED_CODECS.contains(codec) =>
-        {
+        Caps::CompressedVideo {
+            codec,
+            width,
+            height,
+            framerate,
+        } if SUPPORTED_CODECS.contains(codec) => {
             let mk = |f: RawVideoFormat| Caps::RawVideo {
                 format: f,
                 width: width.clone(),
@@ -1382,7 +1401,11 @@ fn copy_yuv(frame: &FfVideo, format: OutputFormat) -> Result<Box<[u8]>, G2gError
         Pixel::YUV444P | Pixel::YUVJ444P => SourceLayout::Planar444,
         _ => return Err(G2gError::CapsMismatch),
     };
-    let required_planes = if matches!(src, SourceLayout::SemiPlanar420) { 2 } else { 3 };
+    let required_planes = if matches!(src, SourceLayout::SemiPlanar420) {
+        2
+    } else {
+        3
+    };
     if frame.planes() < required_planes {
         return Err(G2gError::Hardware(HardwareError::Other));
     }
@@ -1738,7 +1761,11 @@ mod tests {
             for x in 0..w {
                 assert_eq!(out[y * w + x], val(0, x, y), "Y");
                 assert_eq!(out[ysz + y * w + x], val(1, x, y), "U preserved full-res");
-                assert_eq!(out[2 * ysz + y * w + x], val(2, x, y), "V preserved full-res");
+                assert_eq!(
+                    out[2 * ysz + y * w + x],
+                    val(2, x, y),
+                    "V preserved full-res"
+                );
             }
         }
     }
@@ -1757,8 +1784,16 @@ mod tests {
         assert_eq!(out.len(), ysz + 2 * csz);
         for y in 0..ch {
             for x in 0..cw {
-                assert_eq!(out[ysz + y * cw + x], val(1, x, y), "U half-width full-height");
-                assert_eq!(out[ysz + csz + y * cw + x], val(2, x, y), "V half-width full-height");
+                assert_eq!(
+                    out[ysz + y * cw + x],
+                    val(1, x, y),
+                    "U half-width full-height"
+                );
+                assert_eq!(
+                    out[ysz + csz + y * cw + x],
+                    val(2, x, y),
+                    "V half-width full-height"
+                );
             }
         }
     }
@@ -1771,7 +1806,10 @@ mod tests {
         assert_eq!(resolve_output_format(Auto, Pixel::NV12).unwrap(), I420);
         assert_eq!(resolve_output_format(Auto, Pixel::YUV422P).unwrap(), I422);
         assert_eq!(resolve_output_format(Auto, Pixel::YUV444P).unwrap(), I444);
-        assert!(resolve_output_format(Auto, Pixel::RGB24).is_err(), "unsupported src");
+        assert!(
+            resolve_output_format(Auto, Pixel::RGB24).is_err(),
+            "unsupported src"
+        );
         // A fixed request passes through regardless of the source.
         assert_eq!(resolve_output_format(I420, Pixel::YUV444P).unwrap(), I420);
         assert_eq!(resolve_output_format(Nv12, Pixel::YUV420P).unwrap(), Nv12);
@@ -1850,12 +1888,20 @@ mod tests {
         let CapsConstraint::DerivedOutput(f) = dec.caps_constraint_as_transform() else {
             panic!("expected DerivedOutput");
         };
-        let input =
-            Caps::CompressedVideo { codec: VideoCodec::H264, width: Dim::Fixed(16), height: Dim::Fixed(16), framerate: Rate::Fixed(30 << 16) };
+        let input = Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            width: Dim::Fixed(16),
+            height: Dim::Fixed(16),
+            framerate: Rate::Fixed(30 << 16),
+        };
         let set = f(&input);
         // I420, I422, I444 are all offered so a flexible downstream links; the
         // decoder then fixes the concrete chroma per frame.
-        for fmt in [RawVideoFormat::I420, RawVideoFormat::I422, RawVideoFormat::I444] {
+        for fmt in [
+            RawVideoFormat::I420,
+            RawVideoFormat::I422,
+            RawVideoFormat::I444,
+        ] {
             let one = CapsSet::one(Caps::RawVideo {
                 format: fmt,
                 width: Dim::Fixed(16),
@@ -1973,7 +2019,12 @@ mod tests {
     fn intercept_accepts_supported_codecs_rejects_raw() {
         let dec = FfmpegH264Dec::new();
         // VP9 / AV1 / H.265 are accepted now (M111), each narrowed to itself.
-        for codec in [VideoCodec::Vp9, VideoCodec::Av1, VideoCodec::H265, VideoCodec::Vp8] {
+        for codec in [
+            VideoCodec::Vp9,
+            VideoCodec::Av1,
+            VideoCodec::H265,
+            VideoCodec::Vp8,
+        ] {
             let caps = Caps::CompressedVideo {
                 codec,
                 width: Dim::Any,
@@ -2056,7 +2107,10 @@ mod tests {
     fn device_property_sets_and_reads_vaapi_render_node() {
         let mut dec = FfmpegH264Dec::new().with_backend(Backend::Vaapi);
         // Unset reads back as the empty string (= libva default).
-        assert_eq!(dec.get_property("device"), Some(PropValue::Str(String::new())));
+        assert_eq!(
+            dec.get_property("device"),
+            Some(PropValue::Str(String::new()))
+        );
         dec.set_property("device", PropValue::Str("/dev/dri/renderD128".into()))
             .expect("device is a known property");
         assert_eq!(dec.vaapi_device(), Some("/dev/dri/renderD128"));
@@ -2065,27 +2119,51 @@ mod tests {
             Some(PropValue::Str("/dev/dri/renderD128".into()))
         );
         // An empty value clears the pin back to the libva default.
-        dec.set_property("device", PropValue::Str(String::new())).unwrap();
+        dec.set_property("device", PropValue::Str(String::new()))
+            .unwrap();
         assert_eq!(dec.vaapi_device(), None);
     }
 
     #[test]
     fn output_format_property_round_trips_and_rejects_bad_value() {
         let mut dec = FfmpegH264Dec::new();
-        assert_eq!(dec.get_property("output-format"), Some(PropValue::Str("i420".into())));
-        dec.set_property("output-format", PropValue::Str("nv12".into())).unwrap();
+        assert_eq!(
+            dec.get_property("output-format"),
+            Some(PropValue::Str("i420".into()))
+        );
+        dec.set_property("output-format", PropValue::Str("nv12".into()))
+            .unwrap();
         assert_eq!(dec.output_format(), OutputFormat::Nv12);
-        assert_eq!(dec.set_property("output-format", PropValue::Str("rgb".into())), Err(PropError::Value));
+        assert_eq!(
+            dec.set_property("output-format", PropValue::Str("rgb".into())),
+            Err(PropError::Value)
+        );
         // A type mismatch and an unknown name are distinct errors.
-        assert_eq!(dec.set_property("device", PropValue::Int(7)), Err(PropError::Type));
-        assert_eq!(dec.set_property("nope", PropValue::Str("x".into())), Err(PropError::Unknown));
+        assert_eq!(
+            dec.set_property("device", PropValue::Int(7)),
+            Err(PropError::Type)
+        );
+        assert_eq!(
+            dec.set_property("nope", PropValue::Str("x".into())),
+            Err(PropError::Unknown)
+        );
     }
 
     #[test]
     fn declares_device_and_output_format_properties() {
-        let names: Vec<&str> = FfmpegH264Dec::new().properties().iter().map(|p| p.name).collect();
-        assert!(names.contains(&"device"), "device property declared: {names:?}");
-        assert!(names.contains(&"output-format"), "output-format declared: {names:?}");
+        let names: Vec<&str> = FfmpegH264Dec::new()
+            .properties()
+            .iter()
+            .map(|p| p.name)
+            .collect();
+        assert!(
+            names.contains(&"device"),
+            "device property declared: {names:?}"
+        );
+        assert!(
+            names.contains(&"output-format"),
+            "output-format declared: {names:?}"
+        );
     }
 
     #[test]
@@ -2303,7 +2381,10 @@ mod tests {
             .await
             .expect("H.264 input CapsChanged must be accepted");
 
-        assert!(log.borrow().is_empty(), "H.264 input caps must not be forwarded");
+        assert!(
+            log.borrow().is_empty(),
+            "H.264 input caps must not be forwarded"
+        );
         assert!(dec.input_caps.is_some(), "input caps must be recorded");
     }
 
@@ -2329,6 +2410,9 @@ mod tests {
             .process(PipelinePacket::CapsChanged(i420), &mut rec)
             .await;
         assert_eq!(err, Err(G2gError::CapsMismatch));
-        assert!(log.borrow().is_empty(), "rejected caps must not be forwarded");
+        assert!(
+            log.borrow().is_empty(),
+            "rejected caps must not be forwarded"
+        );
     }
 }

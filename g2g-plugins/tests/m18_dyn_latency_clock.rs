@@ -56,7 +56,10 @@ impl AsyncElement for BufferingClockTransform {
     }
 
     fn provide_clock(&self) -> Option<ClockCandidate> {
-        Some(ClockCandidate::new(ClockPriority::Provider, Arc::new(ZeroClock)))
+        Some(ClockCandidate::new(
+            ClockPriority::Provider,
+            Arc::new(ZeroClock),
+        ))
     }
 
     fn process<'a>(
@@ -83,7 +86,10 @@ async fn interior_dyn_element_contributes_latency_and_clock() {
         .await
         .expect("chain runs");
 
-    assert_eq!(stats.latency.min_ns, 5_000_000, "interior buffering folds into path min");
+    assert_eq!(
+        stats.latency.min_ns, 5_000_000,
+        "interior buffering folds into path min"
+    );
     assert_eq!(stats.latency.max_ns, Some(10_000_000), "and into path max");
     assert!(!stats.latency.live, "no live element on the path");
     assert_eq!(

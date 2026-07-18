@@ -29,7 +29,9 @@ use std::time::{Duration, Instant};
 
 use ash::vk;
 
-use g2g_core::memory::{DomainSet, MemoryDomain, MemoryDomainKind, OwnedWgpuBuffer, WgpuBufferKeepAlive};
+use g2g_core::memory::{
+    DomainSet, MemoryDomain, MemoryDomainKind, OwnedWgpuBuffer, WgpuBufferKeepAlive,
+};
 use g2g_core::pad_template::{PadTemplate, PadTemplates};
 use g2g_core::{
     AsyncElement, Caps, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError, HardwareError,
@@ -38,8 +40,12 @@ use g2g_core::{
 
 /// Raw formats the import accepts (the pixel caps pass through unchanged; only
 /// the memory domain changes from dma-buf to a GPU buffer).
-const FORMATS: [RawVideoFormat; 4] =
-    [RawVideoFormat::Rgba8, RawVideoFormat::Bgra8, RawVideoFormat::Nv12, RawVideoFormat::I420];
+const FORMATS: [RawVideoFormat; 4] = [
+    RawVideoFormat::Rgba8,
+    RawVideoFormat::Bgra8,
+    RawVideoFormat::Nv12,
+    RawVideoFormat::I420,
+];
 
 fn gpu_err() -> G2gError {
     G2gError::Hardware(HardwareError::Other)
@@ -166,7 +172,10 @@ impl Drop for DmaBufToWgpu {
             // The host waits above already blocked until each signalled value was
             // reached, so no submission still references the semaphore; destroying
             // it is legal. A device poll first is belt-and-braces for shutdown.
-            let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+            let _ = device.poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            });
             // SAFETY: `sem` was imported on this device and is no longer in use.
             unsafe {
                 if let Some(hal) = device.as_hal::<wgpu_hal::api::Vulkan>() {
@@ -191,7 +200,8 @@ impl PadTemplates for DmaBufToWgpu {
 }
 
 impl AsyncElement for DmaBufToWgpu {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -212,7 +222,11 @@ impl AsyncElement for DmaBufToWgpu {
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         (self.format, self.height) = match absolute_caps {
-            Caps::RawVideo { format, height: g2g_core::Dim::Fixed(h), .. } => (*format, *h),
+            Caps::RawVideo {
+                format,
+                height: g2g_core::Dim::Fixed(h),
+                ..
+            } => (*format, *h),
             _ => return Err(G2gError::CapsMismatch),
         };
         self.configured = true;
@@ -255,8 +269,9 @@ impl AsyncElement for DmaBufToWgpu {
                     // Plane-aware size: RGBA is one plane, NV12 / I420 add the
                     // half-height chroma region (a bare stride*height would import
                     // only the luma plane of a planar frame).
-                    let plane_bytes = dmabuf_frame_bytes(self.format, stride, u64::from(self.height))
-                        .ok_or(G2gError::CapsMismatch)?;
+                    let plane_bytes =
+                        dmabuf_frame_bytes(self.format, stride, u64::from(self.height))
+                            .ok_or(G2gError::CapsMismatch)?;
                     let size = u64::from(dmabuf.offset) + plane_bytes;
                     if size == 0 {
                         return Err(G2gError::CapsMismatch);
@@ -301,7 +316,10 @@ impl AsyncElement for DmaBufToWgpu {
                     // fd is a live dma-buf owned by `frame` for this call and is
                     // duplicated before Vulkan takes ownership.
                     let buffer = unsafe { import_dmabuf(&device, dmabuf.as_raw(), size)? };
-                    let owner = DmaBufWgpuBuffer { buffer, _device: device.clone() };
+                    let owner = DmaBufWgpuBuffer {
+                        buffer,
+                        _device: device.clone(),
+                    };
                     let mut gpu_frame = frame;
                     gpu_frame.domain = MemoryDomain::WgpuBuffer(OwnedWgpuBuffer::new(
                         size as usize,
@@ -339,17 +357,22 @@ async fn create_import_device() -> Result<(wgpu::Device, wgpu::Queue), G2gError>
     // SAFETY: read the hal adapter only to open a device carrying the dma-buf
     // import extensions; the guard outlives the open call.
     let open = unsafe {
-        let hal_adapter = adapter.as_hal::<wgpu_hal::api::Vulkan>().ok_or_else(gpu_err)?;
+        let hal_adapter = adapter
+            .as_hal::<wgpu_hal::api::Vulkan>()
+            .ok_or_else(gpu_err)?;
         hal_adapter.open_with_callback(
             wgpu::Features::empty(),
             &wgpu::Limits::default(),
             &wgpu::MemoryHints::default(),
-            Some(Box::new(|args: wgpu_hal::vulkan::CreateDeviceCallbackArgs| {
-                args.extensions.push(ash::khr::external_memory_fd::NAME);
-                args.extensions.push(ash::ext::external_memory_dma_buf::NAME);
-                // For the optional zero-stall timeline-semaphore import path.
-                args.extensions.push(ash::khr::external_semaphore_fd::NAME);
-            })),
+            Some(Box::new(
+                |args: wgpu_hal::vulkan::CreateDeviceCallbackArgs| {
+                    args.extensions.push(ash::khr::external_memory_fd::NAME);
+                    args.extensions
+                        .push(ash::ext::external_memory_dma_buf::NAME);
+                    // For the optional zero-stall timeline-semaphore import path.
+                    args.extensions.push(ash::khr::external_semaphore_fd::NAME);
+                },
+            )),
         )
     }
     .map_err(|_| gpu_err())?;
@@ -357,7 +380,10 @@ async fn create_import_device() -> Result<(wgpu::Device, wgpu::Queue), G2gError>
     let (device, queue) = unsafe {
         adapter.create_device_from_hal(
             open,
-            &wgpu::DeviceDescriptor { label: Some("dmabuftowgpu"), ..Default::default() },
+            &wgpu::DeviceDescriptor {
+                label: Some("dmabuftowgpu"),
+                ..Default::default()
+            },
         )
     }
     .map_err(|_| gpu_err())?;
@@ -376,7 +402,9 @@ unsafe fn import_timeline(device: &wgpu::Device, fd: i32) -> Result<vk::Semaphor
     // SAFETY: raw device from the live wgpu device; the semaphore created here is
     // returned to the caller (destroyed on the element's drop).
     unsafe {
-        let hal = device.as_hal::<wgpu_hal::api::Vulkan>().ok_or_else(gpu_err)?;
+        let hal = device
+            .as_hal::<wgpu_hal::api::Vulkan>()
+            .ok_or_else(gpu_err)?;
         let raw = hal.raw_device();
         let instance = hal.shared_instance().raw_instance();
 
@@ -384,7 +412,10 @@ unsafe fn import_timeline(device: &wgpu::Device, fd: i32) -> Result<vk::Semaphor
             .semaphore_type(vk::SemaphoreType::TIMELINE)
             .initial_value(0);
         let sem = raw
-            .create_semaphore(&vk::SemaphoreCreateInfo::default().push_next(&mut type_info), None)
+            .create_semaphore(
+                &vk::SemaphoreCreateInfo::default().push_next(&mut type_info),
+                None,
+            )
             .map_err(|_| gpu_err())?;
 
         // Dup the caller's fd so the frame keeps ownership of its own.
@@ -424,8 +455,12 @@ unsafe fn timeline_counter(device: &wgpu::Device, sem: vk::Semaphore) -> Result<
     // SAFETY: raw device from the live wgpu device; reading the counter is a
     // non-blocking query.
     unsafe {
-        let hal = device.as_hal::<wgpu_hal::api::Vulkan>().ok_or_else(gpu_err)?;
-        hal.raw_device().get_semaphore_counter_value(sem).map_err(|_| gpu_err())
+        let hal = device
+            .as_hal::<wgpu_hal::api::Vulkan>()
+            .ok_or_else(gpu_err)?;
+        hal.raw_device()
+            .get_semaphore_counter_value(sem)
+            .map_err(|_| gpu_err())
     }
 }
 
@@ -438,18 +473,28 @@ unsafe fn timeline_counter(device: &wgpu::Device, sem: vk::Semaphore) -> Result<
 /// `device` must carry `VK_EXT_external_memory_dma_buf`; `fd` must be a valid
 /// open dma-buf of at least `size` bytes, owned by the caller (it is duplicated
 /// before Vulkan takes ownership).
-unsafe fn import_dmabuf(device: &wgpu::Device, fd: i32, size: u64) -> Result<wgpu::Buffer, G2gError> {
+unsafe fn import_dmabuf(
+    device: &wgpu::Device,
+    fd: i32,
+    size: u64,
+) -> Result<wgpu::Buffer, G2gError> {
     // SAFETY: raw device from the live wgpu device; the raw objects created here
     // are either handed to wgpu (on success) or freed (on failure).
     let (vk_buffer, vk_memory) = unsafe {
-        let hal_device = device.as_hal::<wgpu_hal::api::Vulkan>().ok_or_else(gpu_err)?;
+        let hal_device = device
+            .as_hal::<wgpu_hal::api::Vulkan>()
+            .ok_or_else(gpu_err)?;
         let raw = hal_device.raw_device();
         let instance = hal_device.shared_instance().raw_instance();
         let loader = ash::khr::external_memory_fd::Device::new(instance, raw);
 
         let mut props = vk::MemoryFdPropertiesKHR::default();
         loader
-            .get_memory_fd_properties(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT, fd, &mut props)
+            .get_memory_fd_properties(
+                vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT,
+                fd,
+                &mut props,
+            )
             .map_err(|_| gpu_err())?;
         let bits = props.memory_type_bits;
         if bits == 0 {
@@ -507,7 +552,8 @@ unsafe fn import_dmabuf(device: &wgpu::Device, fd: i32, size: u64) -> Result<wgp
     // closing the dup fd, when the returned `wgpu::Buffer` drops).
     // SAFETY: `vk_buffer` is bound to `vk_memory` at offset 0 for `size` bytes,
     // and we relinquish all further use of the raw handles here.
-    let hal_buffer = unsafe { wgpu_hal::vulkan::Buffer::from_raw_managed(vk_buffer, vk_memory, 0, size) };
+    let hal_buffer =
+        unsafe { wgpu_hal::vulkan::Buffer::from_raw_managed(vk_buffer, vk_memory, 0, size) };
     // SAFETY: `hal_buffer` was produced from this device's hal.
     let buffer = unsafe {
         device.create_buffer_from_hal::<wgpu_hal::api::Vulkan>(

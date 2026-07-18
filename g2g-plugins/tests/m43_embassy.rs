@@ -27,5 +27,9 @@ fn pipeline_runs_to_eos_under_embassy_block_on() {
         .expect("pipeline completes under embassy block_on");
 
     assert!(sink.eos_seen(), "EOS must reach the sink");
-    assert_eq!(sink.received(), 5, "all frames delivered under the embassy executor");
+    assert_eq!(
+        sink.received(),
+        5,
+        "all frames delivered under the embassy executor"
+    );
 }

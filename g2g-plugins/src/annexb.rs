@@ -73,7 +73,9 @@ impl<'a> Iterator for AvccNals<'a> {
     fn next(&mut self) -> Option<&'a [u8]> {
         let start = self.pos.checked_add(self.len_size)?;
         let prefix = self.data.get(self.pos..start)?;
-        let len = prefix.iter().fold(0usize, |acc, &b| (acc << 8) | b as usize);
+        let len = prefix
+            .iter()
+            .fold(0usize, |acc, &b| (acc << 8) | b as usize);
         let end = start.checked_add(len)?;
         if end > self.data.len() {
             return None;
@@ -84,15 +86,27 @@ impl<'a> Iterator for AvccNals<'a> {
 }
 
 pub(crate) fn avcc_nal_units(data: &[u8]) -> AvccNals<'_> {
-    AvccNals { data, pos: 0, len_size: 4 }
+    AvccNals {
+        data,
+        pos: 0,
+        len_size: 4,
+    }
 }
 
 /// [`avcc_nal_units`] with an explicit prefix width, for containers whose config
 /// record declares a non-4-byte NAL length (FLV's `avcC` `lengthSizeMinusOne`).
 /// `len_size` outside 1..=4 yields an empty iteration.
 pub(crate) fn length_prefixed_nal_units(data: &[u8], len_size: usize) -> AvccNals<'_> {
-    let len_size = if (1..=4).contains(&len_size) { len_size } else { usize::MAX };
-    AvccNals { data, pos: 0, len_size }
+    let len_size = if (1..=4).contains(&len_size) {
+        len_size
+    } else {
+        usize::MAX
+    };
+    AvccNals {
+        data,
+        pos: 0,
+        len_size,
+    }
 }
 
 /// NAL iterator over either framing, picked by [`is_annex_b`]. Yields the same
@@ -244,14 +258,23 @@ pub(crate) fn avcc_to_annexb(avcc: &[u8]) -> Vec<u8> {
 /// First SPS and PPS out of an `avcC` payload.
 pub(crate) fn parse_avcc(avcc: &[u8]) -> Result<(Vec<u8>, Vec<u8>), G2gError> {
     // 5 fixed bytes, then SPS count (low 5 bits).
-    let sps_count = avcc.get(5).map(|b| b & 0x1F).ok_or(G2gError::CapsMismatch)?;
+    let sps_count = avcc
+        .get(5)
+        .map(|b| b & 0x1F)
+        .ok_or(G2gError::CapsMismatch)?;
     if sps_count == 0 {
         return Err(G2gError::CapsMismatch);
     }
     let sps_len = u16::from_be_bytes(
-        avcc.get(6..8).ok_or(G2gError::CapsMismatch)?.try_into().expect("2 bytes"),
+        avcc.get(6..8)
+            .ok_or(G2gError::CapsMismatch)?
+            .try_into()
+            .expect("2 bytes"),
     ) as usize;
-    let sps = avcc.get(8..8 + sps_len).ok_or(G2gError::CapsMismatch)?.to_vec();
+    let sps = avcc
+        .get(8..8 + sps_len)
+        .ok_or(G2gError::CapsMismatch)?
+        .to_vec();
     let mut at = 8 + sps_len;
     let pps_count = *avcc.get(at).ok_or(G2gError::CapsMismatch)?;
     if pps_count == 0 {
@@ -259,10 +282,16 @@ pub(crate) fn parse_avcc(avcc: &[u8]) -> Result<(Vec<u8>, Vec<u8>), G2gError> {
     }
     at += 1;
     let pps_len = u16::from_be_bytes(
-        avcc.get(at..at + 2).ok_or(G2gError::CapsMismatch)?.try_into().expect("2 bytes"),
+        avcc.get(at..at + 2)
+            .ok_or(G2gError::CapsMismatch)?
+            .try_into()
+            .expect("2 bytes"),
     ) as usize;
     at += 2;
-    let pps = avcc.get(at..at + pps_len).ok_or(G2gError::CapsMismatch)?.to_vec();
+    let pps = avcc
+        .get(at..at + pps_len)
+        .ok_or(G2gError::CapsMismatch)?
+        .to_vec();
     Ok((sps, pps))
 }
 
@@ -726,6 +755,10 @@ mod tests {
         let avcc = to_avcc(&au, |nal| !matches!(h264_nal_type(nal), Some(7..=9)));
         // The kept NALs, recovered by the AVCC iterator, are SEI then IDR.
         let kept: Vec<&[u8]> = avcc_nal_units(&avcc).collect();
-        assert_eq!(kept, vec![sei, idr], "parameter sets dropped, order preserved");
+        assert_eq!(
+            kept,
+            vec![sei, idr],
+            "parameter sets dropped, order preserved"
+        );
     }
 }

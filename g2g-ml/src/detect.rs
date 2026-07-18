@@ -74,7 +74,12 @@ impl DetectionPostprocess {
 
     /// Accept an F32 tensor of rank-3 shape `[1, 4 + C, A]` with `C >= 1`.
     fn parse_shape(caps: &Caps) -> Option<(usize, usize)> {
-        let Caps::Tensor { dtype: TensorDType::F32, shape, .. } = caps else {
+        let Caps::Tensor {
+            dtype: TensorDType::F32,
+            shape,
+            ..
+        } = caps
+        else {
             return None;
         };
         match shape.dims() {
@@ -137,13 +142,15 @@ impl DetectionPostprocess {
     /// threshold.
     fn nms(&self, mut dets: Vec<ObjectDetection>) -> Vec<ObjectDetection> {
         dets.sort_by(|x, y| {
-            y.confidence.partial_cmp(&x.confidence).unwrap_or(core::cmp::Ordering::Equal)
+            y.confidence
+                .partial_cmp(&x.confidence)
+                .unwrap_or(core::cmp::Ordering::Equal)
         });
         let mut kept: Vec<ObjectDetection> = Vec::new();
         for cand in dets {
-            let suppressed = kept.iter().any(|k| {
-                k.label == cand.label && k.bbox.iou(&cand.bbox) > self.iou_threshold
-            });
+            let suppressed = kept
+                .iter()
+                .any(|k| k.label == cand.label && k.bbox.iou(&cand.bbox) > self.iou_threshold);
             if !suppressed {
                 kept.push(cand);
             }
@@ -153,7 +160,8 @@ impl DetectionPostprocess {
 }
 
 impl AsyncElement for DetectionPostprocess {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -330,15 +338,23 @@ mod tests {
         ]);
 
         let mut sink = MetaSink::default();
-        det.process(PipelinePacket::DataFrame(frame), &mut sink).await.unwrap();
+        det.process(PipelinePacket::DataFrame(frame), &mut sink)
+            .await
+            .unwrap();
 
         let meta = sink.last.expect("frame carries AnalyticsMeta");
-        let mut got: Vec<(u32, f32)> =
-            meta.detections().map(|d| (d.label, d.confidence)).collect();
+        let mut got: Vec<(u32, f32)> = meta.detections().map(|d| (d.label, d.confidence)).collect();
         got.sort_by_key(|(l, _)| *l);
-        assert_eq!(got.len(), 2, "the overlapping same-class box was suppressed");
+        assert_eq!(
+            got.len(),
+            2,
+            "the overlapping same-class box was suppressed"
+        );
         assert_eq!(got[0].0, 0, "kept the class-0 detection");
-        assert!((got[0].1 - 0.90).abs() < 1e-6, "kept the higher-confidence class-0 box");
+        assert!(
+            (got[0].1 - 0.90).abs() < 1e-6,
+            "kept the higher-confidence class-0 box"
+        );
         assert_eq!(got[1].0, 1, "kept the distinct class-1 detection");
 
         // Box 0 is normalized: x = (100 - 20)/640.
@@ -360,7 +376,9 @@ mod tests {
             [0.1, 0.05, 0.6],
         ]);
         let mut sink = MetaSink::default();
-        det.process(PipelinePacket::DataFrame(frame), &mut sink).await.unwrap();
+        det.process(PipelinePacket::DataFrame(frame), &mut sink)
+            .await
+            .unwrap();
         let meta = sink.last.expect("empty AnalyticsMeta still attached");
         assert_eq!(meta.detections().count(), 0);
     }
@@ -371,7 +389,8 @@ mod tests {
         // the length check (CapsMismatch), not panic (debug) or wrap to a small
         // value that admits a bogus frame.
         let mut det = DetectionPostprocess::new(0.5, 0.5);
-        det.configure_pipeline(&tensor_caps(u32::MAX, u32::MAX)).unwrap();
+        det.configure_pipeline(&tensor_caps(u32::MAX, u32::MAX))
+            .unwrap();
         let frame = Frame {
             domain: MemoryDomain::System(SystemSlice::from_boxed(vec![0u8; 16].into_boxed_slice())),
             timing: FrameTiming::default(),
@@ -379,7 +398,10 @@ mod tests {
             meta: Default::default(),
         };
         let mut sink = MetaSink::default();
-        let err = det.process(PipelinePacket::DataFrame(frame), &mut sink).await.unwrap_err();
+        let err = det
+            .process(PipelinePacket::DataFrame(frame), &mut sink)
+            .await
+            .unwrap_err();
         assert!(matches!(err, G2gError::CapsMismatch));
     }
 

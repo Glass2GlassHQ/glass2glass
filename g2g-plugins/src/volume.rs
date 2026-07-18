@@ -40,7 +40,14 @@ impl Default for Volume {
 impl Volume {
     /// Unity gain, unmuted; use the builders or properties to adjust.
     pub fn new() -> Self {
-        Self { volume: 1.0, mute: false, input: None, configured: false, last_caps: None, emitted: 0 }
+        Self {
+            volume: 1.0,
+            mute: false,
+            input: None,
+            configured: false,
+            last_caps: None,
+            emitted: 0,
+        }
     }
 
     pub fn with_volume(mut self, volume: f64) -> Self {
@@ -55,9 +62,11 @@ impl Volume {
 
     fn accept_input(&self, caps: &Caps) -> Result<Caps, G2gError> {
         match caps {
-            Caps::Audio { format: AudioFormat::PcmS16Le, channels, .. } if *channels > 0 => {
-                Ok(caps.clone())
-            }
+            Caps::Audio {
+                format: AudioFormat::PcmS16Le,
+                channels,
+                ..
+            } if *channels > 0 => Ok(caps.clone()),
             _ => Err(G2gError::CapsMismatch),
         }
     }
@@ -77,7 +86,10 @@ impl AsyncElement for Volume {
     /// so the output caps equal the input for S16LE PCM.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
-            Caps::Audio { format: AudioFormat::PcmS16Le, .. } => CapsSet::one(input.clone()),
+            Caps::Audio {
+                format: AudioFormat::PcmS16Le,
+                ..
+            } => CapsSet::one(input.clone()),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
     }
@@ -175,14 +187,25 @@ impl AsyncElement for Volume {
 
 /// `Volume`'s settable properties (M104).
 static VOLUME_PROPS: &[PropertySpec] = &[
-    PropertySpec::new("volume", PropKind::Double, "linear gain, 0..N (1 = unchanged)"),
+    PropertySpec::new(
+        "volume",
+        PropKind::Double,
+        "linear gain, 0..N (1 = unchanged)",
+    ),
     PropertySpec::new("mute", PropKind::Bool, "zero the output when true"),
 ];
 
 impl PadTemplates for Volume {
     fn pad_templates() -> Vec<PadTemplate> {
-        let pcm = Caps::Audio { format: AudioFormat::PcmS16Le, channels: 2, sample_rate: 48_000 };
-        Vec::from([PadTemplate::sink(CapsSet::one(pcm.clone())), PadTemplate::source(CapsSet::one(pcm))])
+        let pcm = Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            channels: 2,
+            sample_rate: 48_000,
+        };
+        Vec::from([
+            PadTemplate::sink(CapsSet::one(pcm.clone())),
+            PadTemplate::source(CapsSet::one(pcm)),
+        ])
     }
 }
 
@@ -196,7 +219,11 @@ fn apply_gain(src: &[u8], dst: &mut [u8], volume: f64, mute: bool) {
         } else {
             let scaled = (sample as f64) * volume;
             // round half away from zero without libm, then clamp to i16.
-            let rounded = if scaled >= 0.0 { scaled + 0.5 } else { scaled - 0.5 };
+            let rounded = if scaled >= 0.0 {
+                scaled + 0.5
+            } else {
+                scaled - 0.5
+            };
             rounded.clamp(i16::MIN as f64, i16::MAX as f64) as i16
         };
         d.copy_from_slice(&out.to_le_bytes());
@@ -216,7 +243,10 @@ mod tests {
     }
 
     fn unpack(bytes: &[u8]) -> Vec<i16> {
-        bytes.chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect()
+        bytes
+            .chunks_exact(2)
+            .map(|c| i16::from_le_bytes([c[0], c[1]]))
+            .collect()
     }
 
     #[test]
@@ -241,10 +271,20 @@ mod tests {
     #[test]
     fn configure_rejects_non_s16le() {
         let mut v = Volume::new();
-        let f32_caps =
-            Caps::Audio { format: AudioFormat::PcmF32Le, channels: 2, sample_rate: 48_000 };
-        assert_eq!(v.configure_pipeline(&f32_caps).unwrap_err(), G2gError::CapsMismatch);
-        let ok = Caps::Audio { format: AudioFormat::PcmS16Le, channels: 1, sample_rate: 16_000 };
+        let f32_caps = Caps::Audio {
+            format: AudioFormat::PcmF32Le,
+            channels: 2,
+            sample_rate: 48_000,
+        };
+        assert_eq!(
+            v.configure_pipeline(&f32_caps).unwrap_err(),
+            G2gError::CapsMismatch
+        );
+        let ok = Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            channels: 1,
+            sample_rate: 16_000,
+        };
         assert!(v.configure_pipeline(&ok).is_ok());
     }
 }

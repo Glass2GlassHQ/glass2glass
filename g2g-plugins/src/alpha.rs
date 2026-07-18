@@ -82,7 +82,12 @@ impl Alpha {
     }
 
     fn accept_input(&self, caps: &Caps) -> Result<(RawVideoFormat, u32, u32, Rate), G2gError> {
-        let Caps::RawVideo { format, width: Dim::Fixed(w), height: Dim::Fixed(h), framerate } = caps
+        let Caps::RawVideo {
+            format,
+            width: Dim::Fixed(w),
+            height: Dim::Fixed(h),
+            framerate,
+        } = caps
         else {
             return Err(G2gError::CapsMismatch);
         };
@@ -118,7 +123,9 @@ impl AsyncElement for Alpha {
     /// framerate, so the output caps equal the input for any supported format.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
-            Caps::RawVideo { format, .. } if FORMATS.contains(format) => CapsSet::one(input.clone()),
+            Caps::RawVideo { format, .. } if FORMATS.contains(format) => {
+                CapsSet::one(input.clone())
+            }
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
     }
@@ -153,7 +160,13 @@ impl AsyncElement for Alpha {
                         return Err(G2gError::CapsMismatch);
                     }
                     let mut dst = vec![0u8; bytes].into_boxed_slice();
-                    apply_alpha(format, &src[..bytes], &mut dst, self.method, alpha_u8(self.alpha));
+                    apply_alpha(
+                        format,
+                        &src[..bytes],
+                        &mut dst,
+                        self.method,
+                        alpha_u8(self.alpha),
+                    );
 
                     let new_caps = Caps::RawVideo {
                         format,
@@ -162,7 +175,8 @@ impl AsyncElement for Alpha {
                         framerate: rate,
                     };
                     if self.last_caps.as_ref() != Some(&new_caps) {
-                        out.push(PipelinePacket::CapsChanged(new_caps.clone())).await?;
+                        out.push(PipelinePacket::CapsChanged(new_caps.clone()))
+                            .await?;
                         self.last_caps = Some(new_caps);
                     }
                     let out_frame = Frame {
@@ -308,7 +322,13 @@ mod tests {
     fn set_replaces_alpha_and_keeps_colour() {
         // alpha 0.5 -> round(127.5) = 128; RGB untouched.
         let mut dst = [0u8; 4];
-        apply_alpha(RawVideoFormat::Rgba8, &[10, 20, 30, 255], &mut dst, AlphaMethod::Set, alpha_u8(0.5));
+        apply_alpha(
+            RawVideoFormat::Rgba8,
+            &[10, 20, 30, 255],
+            &mut dst,
+            AlphaMethod::Set,
+            alpha_u8(0.5),
+        );
         assert_eq!(dst, [10, 20, 30, 128]);
         assert_eq!(alpha_u8(1.0), 255);
         assert_eq!(alpha_u8(0.0), 0);
@@ -319,7 +339,11 @@ mod tests {
         let key = |px: &[u8; 4]| pixel_alpha(RawVideoFormat::Rgba8, px, AlphaMethod::Green, 255);
         assert_eq!(key(&[0, 255, 0, 255]), 0, "green keyed out");
         assert_eq!(key(&[255, 0, 0, 255]), 255, "red opaque");
-        assert_eq!(key(&[128, 128, 128, 255]), 255, "grey opaque (no dominance)");
+        assert_eq!(
+            key(&[128, 128, 128, 255]),
+            255,
+            "grey opaque (no dominance)"
+        );
     }
 
     #[test]
@@ -327,8 +351,14 @@ mod tests {
         // BGRA blue pixel is [255, 0, 0, A]; the key must read blue at index 0,
         // not the byte that would be red in RGBA.
         let bgra_blue = [255u8, 0, 0, 255];
-        assert_eq!(pixel_alpha(RawVideoFormat::Bgra8, &bgra_blue, AlphaMethod::Blue, 255), 0);
+        assert_eq!(
+            pixel_alpha(RawVideoFormat::Bgra8, &bgra_blue, AlphaMethod::Blue, 255),
+            0
+        );
         // The same bytes read as RGBA are a red pixel, untouched by a blue key.
-        assert_eq!(pixel_alpha(RawVideoFormat::Rgba8, &bgra_blue, AlphaMethod::Blue, 255), 255);
+        assert_eq!(
+            pixel_alpha(RawVideoFormat::Rgba8, &bgra_blue, AlphaMethod::Blue, 255),
+            255
+        );
     }
 }
