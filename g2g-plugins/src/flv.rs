@@ -458,7 +458,10 @@ fn parse_tag(tag_type: u8, timestamp: u32, body: &[u8]) -> Option<FlvUnit> {
             }
             // The tag timestamp is the decode time; the signed 24-bit composition
             // offset gives the presentation time (negative clamps to 0).
-            let cts = ((body[2] as i32) << 16 | (body[3] as i32) << 8 | body[4] as i32) << 8 >> 8;
+            let cts =
+                ((*body.get(2)? as i32) << 16 | (*body.get(3)? as i32) << 8 | *body.get(4)? as i32)
+                    << 8
+                    >> 8;
             let pts_ms = (timestamp as i64 + cts as i64).clamp(0, u32::MAX as i64) as u32;
             // Frame type 1 is a keyframe (2 interframe, 3..5 disposable/generated).
             let keyframe = first >> 4 == 1;
@@ -545,6 +548,26 @@ mod tests {
             prev = t.len() as u32;
         }
         s
+    }
+
+    // regression: an AVC video tag whose body is shorter than the 5-byte AVC
+    // header (packet type + 24-bit composition offset) must be skipped, not
+    // panic on an out-of-bounds index into the composition offset. Found by
+    // fuzzing the demuxer.
+    #[test]
+    fn truncated_avc_video_tag_does_not_panic() {
+        // AVC (codec 7), avc_packet_type 1, then a body that runs out before the
+        // 3-byte composition offset is complete
+        for body in [
+            vec![0x17u8, 0x01],
+            vec![0x17, 0x01, 0x00],
+            vec![0x17, 0x01, 0x00, 0x00],
+        ] {
+            let stream = flv_stream(&[tag(TAG_VIDEO, 0, &body)]);
+            let mut d = FlvDemuxer::new();
+            d.push_data(&stream); // must not panic
+            assert!(d.take_units().is_empty(), "truncated tag is skipped");
+        }
     }
 
     #[test]
