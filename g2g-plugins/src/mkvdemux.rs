@@ -327,6 +327,29 @@ impl MkvDemux {
         }
     }
 
+    /// Autoplug support: WebM / Matroska carries a single video elementary stream
+    /// whose codec the caller cannot know up front (the default selection is Vp9),
+    /// so a VP8 / AV1 / H.264 file would otherwise forward nothing. Once Tracks is
+    /// parsed, if the selected stream's codec is absent, fall back to the file's
+    /// first video track.
+    fn auto_select_video_track(&mut self) {
+        let want = Self::selected_codec(self.stream);
+        let tracks = self.demux.tracks();
+        if tracks.is_empty() || tracks.iter().any(|t| t.codec == want) {
+            return;
+        }
+        if let Some(stream) = tracks.iter().find_map(|t| {
+            matches!(
+                t.codec,
+                MkvCodec::H264 | MkvCodec::H265 | MkvCodec::Vp8 | MkvCodec::Vp9 | MkvCodec::Av1
+            )
+            .then(|| codec_to_stream(t.codec))
+            .flatten()
+        }) {
+            self.stream = stream;
+        }
+    }
+
     /// Post any tags parsed since the last call as a [`BusMessage::Tag`]. A
     /// no-op without a bus attached or when nothing new has been parsed.
     fn post_tags(&mut self) {
@@ -463,6 +486,9 @@ impl MkvDemux {
         // Honor an app stream selection before computing this batch's caps, so the
         // switch (and its CapsChanged) takes effect for the frames forwarded now.
         self.apply_stream_selection();
+        // Fall back to the file's actual video track when the default (Vp9)
+        // selection is absent, so autoplug of a VP8 / AV1 / H.264 WebM works.
+        self.auto_select_video_track();
         if let Some(caps) = self.concrete_caps() {
             if self.last_caps.as_ref() != Some(&caps) {
                 out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
