@@ -55,6 +55,9 @@ pub mod state;
 pub mod spsc;
 pub mod staticelem;
 pub mod staticpool;
+// Concurrency-primitive compat layer so the SpscFrameRing can be model-checked
+// under loom (`--cfg loom`); the core primitives in every normal build.
+mod sync;
 // Runtime fault recovery (M652): a supervisor that turns a returned fault into a
 // bounded retry / degrade / reset / escalate action + a watchdog seam, for the
 // safety / cert MCU market. In the no-alloc subset.
@@ -187,7 +190,10 @@ pub use metrics::{LatencyHistogram, LatencySnapshot};
 pub use query::{AllocationParams, LatencyReport};
 pub use rtp::{RtpHeader, RtpParsed, RTP_HEADER_LEN};
 pub use segment::{Seek, SeekFlags, SeekType, Segment};
-pub use spsc::{Overrun, SpscCaptureSrc, SpscFrameRing};
+pub use spsc::{Overrun, SpscFrameRing};
+// SpscCaptureSrc uses the zero-copy lend, which is not built under loom.
+#[cfg(not(loom))]
+pub use spsc::SpscCaptureSrc;
 pub use state::{PipelineState, StateChangeReturn};
 pub use staticelem::{
     drive_ready, run_source_sink, run_source_transform_sink, run_sources_fanin_sink,
