@@ -411,7 +411,8 @@ pub(crate) fn parse_h265_short_term_rps(
         let reference = prev.get(idx.checked_sub(1)?)?;
         let delta_rps_sign = br.read_bit()? as i32;
         let abs_delta_rps_minus1 = br.read_ue()? as i32;
-        let delta_rps = (1 - 2 * delta_rps_sign) * (abs_delta_rps_minus1 + 1);
+        let delta_rps =
+            (1 - 2 * delta_rps_sign).checked_mul(abs_delta_rps_minus1.checked_add(1)?)?;
         let num_neg = reference.num_negative_pics as usize;
         let num_pos = reference.num_positive_pics as usize;
         let num_delta_pocs = num_neg + num_pos;
@@ -428,7 +429,7 @@ pub(crate) fn parse_h265_short_term_rps(
         // Derive the negative pics (S0) of the current set (H.265 7.4.8).
         let mut i = 0usize;
         for j in (0..num_pos).rev() {
-            let d_poc = reference.delta_poc_s1[j] + delta_rps;
+            let d_poc = reference.delta_poc_s1[j].checked_add(delta_rps)?;
             if d_poc < 0 && use_delta[num_neg + j] && i < 16 {
                 rps.delta_poc_s0[i] = d_poc;
                 rps.used_s0[i] = used_by_curr[num_neg + j];
@@ -441,7 +442,7 @@ pub(crate) fn parse_h265_short_term_rps(
             i += 1;
         }
         for j in 0..num_neg {
-            let d_poc = reference.delta_poc_s0[j] + delta_rps;
+            let d_poc = reference.delta_poc_s0[j].checked_add(delta_rps)?;
             if d_poc < 0 && use_delta[j] && i < 16 {
                 rps.delta_poc_s0[i] = d_poc;
                 rps.used_s0[i] = used_by_curr[j];
@@ -453,7 +454,7 @@ pub(crate) fn parse_h265_short_term_rps(
         // Derive the positive pics (S1).
         let mut i = 0usize;
         for j in (0..num_neg).rev() {
-            let d_poc = reference.delta_poc_s0[j] + delta_rps;
+            let d_poc = reference.delta_poc_s0[j].checked_add(delta_rps)?;
             if d_poc > 0 && use_delta[j] && i < 16 {
                 rps.delta_poc_s1[i] = d_poc;
                 rps.used_s1[i] = used_by_curr[j];
@@ -466,7 +467,7 @@ pub(crate) fn parse_h265_short_term_rps(
             i += 1;
         }
         for j in 0..num_pos {
-            let d_poc = reference.delta_poc_s1[j] + delta_rps;
+            let d_poc = reference.delta_poc_s1[j].checked_add(delta_rps)?;
             if d_poc > 0 && use_delta[num_neg + j] && i < 16 {
                 rps.delta_poc_s1[i] = d_poc;
                 rps.used_s1[i] = used_by_curr[num_neg + j];
@@ -484,7 +485,7 @@ pub(crate) fn parse_h265_short_term_rps(
         for k in 0..num_negative_pics as usize {
             let delta_poc_s0_minus1 = br.read_ue()? as i32;
             rps.used_s0[k] = br.read_bit()? == 1;
-            let dp = prev_poc - (delta_poc_s0_minus1 + 1);
+            let dp = prev_poc.checked_sub(delta_poc_s0_minus1.checked_add(1)?)?;
             rps.delta_poc_s0[k] = dp;
             prev_poc = dp;
         }
@@ -492,7 +493,7 @@ pub(crate) fn parse_h265_short_term_rps(
         for k in 0..num_positive_pics as usize {
             let delta_poc_s1_minus1 = br.read_ue()? as i32;
             rps.used_s1[k] = br.read_bit()? == 1;
-            let dp = prev_poc + (delta_poc_s1_minus1 + 1);
+            let dp = prev_poc.checked_add(delta_poc_s1_minus1.checked_add(1)?)?;
             rps.delta_poc_s1[k] = dp;
             prev_poc = dp;
         }
@@ -514,6 +515,20 @@ pub fn fuzz_parse(data: &[u8]) {
 mod tests {
     use super::*;
     use crate::annexb::{nal_units, BitWriter};
+
+    // A malformed HEVC SPS whose short-term RPS carries huge Exp-Golomb POC
+    // deltas: the running POC accumulation overflowed i32 (found by cargo-fuzz).
+    // It must parse to a rejection, not panic / wrap.
+    #[test]
+    fn malformed_short_term_rps_does_not_overflow() {
+        let sps = [
+            0x00, 0x00, 0x01, 0x42, 0x3b, 0x00, 0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0x20, 0xff,
+            0xff, 0xfb, 0xff, 0xe4, 0xff, 0xfb, 0xff, 0x00, 0x8b, 0xf9, 0x0b, 0x00, 0x00, 0x00,
+            0xff, 0xf8, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0x07, 0x03, 0x07, 0x07,
+            0x07, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfb, 0x00, 0x07, 0x07,
+        ];
+        let _ = extract_sps_info(&sps);
+    }
     use alloc::boxed::Box;
     use alloc::vec;
     use core::future::Future;
