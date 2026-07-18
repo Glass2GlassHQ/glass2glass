@@ -15,6 +15,7 @@ mod channel;
 mod coordinator;
 mod instrument;
 mod join;
+mod passthrough;
 mod progress;
 mod runner;
 mod seek;
@@ -36,6 +37,9 @@ mod graph_runner;
 
 #[cfg(feature = "std")]
 mod launch;
+
+#[cfg(feature = "std")]
+mod observe;
 
 pub use channel::{
     bounded, link, BitrateSlot, LinkInterceptor, LinkReceiver, LinkSender, ProbeAction, ProbeSlot,
@@ -81,18 +85,22 @@ pub use gapless::{GaplessController, GaplessInstantWait, GaplessWait};
 
 #[cfg(feature = "std")]
 pub use graph_runner::{
-    auto_plug_domain_converters, copy_plan, negotiate_graph, run_graph, run_graph_stateful,
-    run_graph_with_bus, run_graph_with_copy_policy, run_graph_with_progress, DynMultiOutputElement,
-    GraphNode, GraphNodeRef, GraphTemplate,
+    auto_plug_domain_converters, copy_plan, negotiate_graph, negotiate_graph_explained, run_graph,
+    run_graph_observed, run_graph_stateful, run_graph_with_bus, run_graph_with_copy_policy,
+    run_graph_with_progress, DynMultiOutputElement, GraphNode, GraphNodeRef, GraphTemplate,
+    NegotiateError,
 };
+
+#[cfg(feature = "std")]
+pub use observe::{EdgeInfo, NodeRole, NodeTelemetry, Observer, TelemetrySnapshot};
 
 // Thread-per-arm (opt-in multicore) runner. Needs `multi-thread` so the graph's
 // elements + channels are `Send` to cross onto worker threads (the `!Send` arm
 // future stays on its thread); `std` for the OS-thread spawner it drives.
 #[cfg(all(feature = "std", feature = "multi-thread"))]
 pub use graph_runner::{
-    run_graph_threaded, run_graph_threaded_with_progress, GraphSpawner, LocalArmFuture,
-    ThreadSpawner,
+    run_graph_threaded, run_graph_threaded_observed, run_graph_threaded_with_progress,
+    GraphSpawner, LocalArmFuture, ThreadSpawner,
 };
 
 // `PadKind` / `PadRequest` are not std-gated: the `no_std` fan-in trait

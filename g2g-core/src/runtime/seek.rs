@@ -268,6 +268,8 @@ mod tests {
         assert!(src.is_shutdown());
     }
 
+    // `block_on` parks a thread, so it exists only on the std runtime.
+    #[cfg(feature = "std")]
     #[test]
     fn wait_event_resolves_and_wakes() {
         use crate::runtime::block_on;
@@ -289,6 +291,7 @@ mod tests {
     }
 
     /// A no-op waker so a `wait_event` future can be polled directly in a test.
+    #[cfg(feature = "std")]
     fn noop_waker() -> Waker {
         use core::task::{RawWaker, RawWakerVTable};
         const VT: RawWakerVTable = RawWakerVTable::new(

@@ -385,8 +385,8 @@ mod tests {
     }
     impl StaticSink for CollectSink {
         async fn consume(&mut self, frame: Frame) -> Result<(), G2gError> {
-            if let MemoryDomain::System(s) = &frame.domain {
-                self.seen[self.n] = s.as_slice()[0];
+            if let Some(s) = frame.domain.as_system_slice() {
+                self.seen[self.n] = s[0];
                 self.n += 1;
             }
             Ok(())
@@ -454,11 +454,7 @@ mod tests {
                 return Ok(None);
             }
             fn first_byte(f: &Frame) -> u8 {
-                if let MemoryDomain::System(s) = &f.domain {
-                    s.as_slice()[0]
-                } else {
-                    0
-                }
+                f.domain.as_system_slice().map_or(0, |s| s[0])
             }
             Ok(Some(if first_byte(&b) > first_byte(&a) { b } else { a }))
         }

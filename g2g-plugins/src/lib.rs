@@ -21,6 +21,12 @@ pub mod audioresample;
 pub mod audiotestsrc;
 pub mod volume;
 pub mod audiopanorama;
+pub mod audioamplify;
+pub mod audioecho;
+pub mod level;
+pub mod cutter;
+pub mod equalizer;
+pub mod spectrum;
 pub mod audiomixer;
 pub mod capsfilter;
 pub mod fakesink;
@@ -31,6 +37,10 @@ pub mod identity;
 pub mod avoffset;
 pub mod mux;
 pub mod streamdemux;
+pub mod concat;
+pub mod inputselector;
+pub mod outputselector;
+pub mod progressreport;
 pub mod tsmuxn;
 // Shared integer source-over blend used by the compositor and CPU overlays.
 mod mathf;
@@ -82,6 +92,11 @@ pub mod videocrop;
 pub mod videoflip;
 pub mod videobalance;
 pub mod videobox;
+pub mod gamma;
+pub mod deinterlace;
+pub mod timeoverlay;
+#[cfg(feature = "std")]
+pub mod clockoverlay;
 pub mod alpha;
 // Subtitle cue parsing (SRT / WebVTT) and the embedded bitmap font, both no_std,
 // feeding the `textoverlay` element below.
@@ -277,6 +292,16 @@ pub mod clock;
 pub mod filesink;
 #[cfg(feature = "std")]
 pub mod filesrc;
+// Record / replay: dump the packet stream to a file and play it back, for
+// deterministic repro of bugs that need a live source.
+#[cfg(feature = "std")]
+pub mod record;
+#[cfg(feature = "std")]
+pub mod multifilesink;
+#[cfg(feature = "std")]
+pub mod multifilesrc;
+#[cfg(feature = "std")]
+pub mod splitmuxsink;
 // Subtitle/text file source: a .srt/.vtt/.ssa/.ttml file as a Text stream.
 #[cfg(feature = "std")]
 pub mod subtitlesrc;
@@ -365,6 +390,22 @@ pub mod udpsrc;
 // the PipelinePacket stream (g2g-core wire codec) and RemoteSrc (TCP listener)
 // reconstructs it, so any graph edge can be cut and the downstream subgraph run
 // across a process / machine boundary. Behind the `remote` feature (std + tokio).
+// JSON tooling shared by `g2g-inspect --json` and the `g2g-mcp` server: registry
+// dump, launch-line validation, bounded run.
+#[cfg(feature = "tooling-json")]
+pub mod toolingjson;
+
+// Edge content preview (observe feature): sampled packet -> JSON thumbnail /
+// waveform / hexdump for the dashboard edge tap.
+#[cfg(feature = "observe")]
+pub mod preview;
+
+// Live pipeline dashboard transport (observe feature): serves Observer telemetry
+// + bus events over one WS/HTTP port to the static dashboard page. Used by
+// `g2g-launch --observe`.
+#[cfg(feature = "observe")]
+pub mod dashboard;
+
 #[cfg(feature = "remote")]
 pub mod remotesink;
 #[cfg(feature = "remote")]

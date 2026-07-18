@@ -375,10 +375,15 @@ The container parsers and muxers (`mp4src` / `mp4sink`, `tsdemux` / `mpegtsmux`,
 `fmp4demux`), the bitstream parsers (`h264parse`, `h265parse`, `aacparse`,
 `opusparse`, `vp8parse`, `vp9parse`, `av1parse`), the software video/audio
 transforms (`videoscale` / `videorate` / `videocrop` / `videoflip` /
-`videobalance` / `videobox` / `alpha`, `audioconvert` / `audioresample` /
-`audiomixer` / `volume` / `audiopanorama`), the `compositor`, the tag system,
-and the `gst-launch` text DSL (`parse_launch` / `gst-inspect`) are all in the
-pure `no_std + alloc` default build (no feature flag).
+`videobalance` / `videobox` / `alpha` / `gamma` / `deinterlace` / `timeoverlay`,
+`audioconvert` / `audioresample` / `audiomixer` / `volume` / `audiopanorama` /
+`audioamplify` / `audioecho` / `level` / `cutter` / `equalizer-3bands` /
+`spectrum`), the flow-control elements (`concat` / `input-selector` /
+`output-selector` / `progressreport`), the `compositor`, the tag system, and the
+`gst-launch` text DSL (`parse_launch` / `gst-inspect`) are all in the pure
+`no_std + alloc` default build. The std build adds `clockoverlay`, the
+`multifilesink` / `multifilesrc` image-sequence pair, and `splitmuxsink`
+(segmented recording, `muxer=mp4|matroska|mpegts`).
 
 ## Sample pipelines
 

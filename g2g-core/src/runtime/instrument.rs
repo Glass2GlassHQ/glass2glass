@@ -31,6 +31,12 @@ pub struct ElementProbe {
     name: String,
     /// Wall-clock cost of each `DataFrame` `process()` call, in nanoseconds.
     proc_ns: LatencyHistogram,
+    /// Queue-residency (transit) time of each `DataFrame` on this element's input
+    /// link: how long the frame sat queued between the producer sending it and
+    /// this element pulling it. The per-stage "wait" half of a latency waterfall
+    /// (the `process()` cost is the "work" half). Empty on an uninstrumented edge
+    /// or under `no_std`.
+    transit_ns: LatencyHistogram,
     /// Input-link occupancy sampled at each pull (0-100), an indicator of where
     /// backpressure pools: a consistently-full input means this element is the
     /// bottleneck; a consistently-empty one means it is starved.
@@ -42,6 +48,7 @@ impl ElementProbe {
         Arc::new(Self {
             name,
             proc_ns: LatencyHistogram::new(),
+            transit_ns: LatencyHistogram::new(),
             fill: FillGauge::default(),
         })
     }
@@ -79,10 +86,18 @@ impl ElementProbe {
         self.fill.record(pct);
     }
 
+    /// Record the queue-residency time (ns) of a `DataFrame` pulled off the input
+    /// link (from [`LinkReceiver::pop_transit_ns`](crate::runtime::LinkReceiver::pop_transit_ns)).
+    #[inline]
+    pub fn record_transit(&self, ns: u64) {
+        self.transit_ns.record(ns);
+    }
+
     pub fn snapshot(&self) -> ElementLatency {
         ElementLatency {
             name: self.name.clone(),
             proc: self.proc_ns.snapshot(),
+            transit: self.transit_ns.snapshot(),
             fill_mean_pct: self.fill.mean(),
             fill_max_pct: self.fill.max(),
         }
@@ -136,6 +151,11 @@ pub struct ElementLatency {
     /// Measured `process()` latency distribution (count, p50/p95/p99, mean, max
     /// in ns). `count == 0` under `no_std` (no clock to measure with).
     pub proc: LatencySnapshot,
+    /// Input-link queue-residency (transit) distribution: how long each
+    /// `DataFrame` waited queued before this element pulled it. `count == 0` when
+    /// the edge is not instrumented (only the graph runner enables it, on edges
+    /// into transform/sink nodes) or under `no_std`.
+    pub transit: LatencySnapshot,
     /// Mean input-link fill percent observed across the run (0-100).
     pub fill_mean_pct: u8,
     /// Peak input-link fill percent (0-100); 100 means the element's input was

@@ -367,8 +367,10 @@ pub fn reset() {
 /// independent of element logging.
 pub const CAPS_CATEGORY: &str = "caps";
 
-/// Read the `G2G_DEBUG` environment variable (a `GST_DEBUG`-style spec) and, when
-/// set, install the stderr sink and apply the spec. Also honors `G2G_CAPS_TRACE`
+/// Install the stderr sink and apply logging from the environment. The sink is
+/// always installed, so ERROR-level diagnostics print by default; the
+/// `G2G_DEBUG` environment variable (a `GST_DEBUG`-style spec) tunes thresholds
+/// up from the default Error level. Also honors `G2G_CAPS_TRACE`
 /// as a shortcut for the caps explainer: a boolean-ish value (`1` / `true` / `on`
 /// / `yes`) raises the [`CAPS_CATEGORY`] to `Debug`, or a level name / number
 /// (`debug`, `trace`, `7`) sets that verbosity, installing the stderr sink if
@@ -376,10 +378,12 @@ pub const CAPS_CATEGORY: &str = "caps";
 /// binaries and apps invoke it.
 #[cfg(feature = "std")]
 pub fn init_from_env() {
-    let mut have_sink = false;
+    // Always install the stderr sink so ERROR-level diagnostics (notably the
+    // caps-negotiation narration, which already runs on every failed solve) are
+    // visible by default without opting in. The default threshold is Error
+    // (LogConfig::new), so a normal run stays quiet; G2G_DEBUG only tunes it up.
+    set_sink(Box::new(StderrSink));
     if let Ok(spec) = std::env::var("G2G_DEBUG") {
-        set_sink(Box::new(StderrSink));
-        have_sink = true;
         configure(&spec);
     }
     if let Ok(v) = std::env::var("G2G_CAPS_TRACE") {
@@ -393,9 +397,6 @@ pub fn init_from_env() {
                     .filter(|l| *l != LogLevel::Off)
                     .unwrap_or(LogLevel::Debug),
             };
-            if !have_sink {
-                set_sink(Box::new(StderrSink));
-            }
             set_category_level(CAPS_CATEGORY, level);
         }
     }

@@ -286,6 +286,110 @@ fn parse_vui_framerate(br: &mut BitReader) -> Option<u32> {
     None
 }
 
+/// The output-reorder depth (`libavcodec` `has_b_frames`) a decoder must buffer
+/// before emitting its first picture, read from the first SPS in `au`. Without
+/// it, a decoder fed raw Annex-B access units emits the opening IDR early and
+/// drops that GOP's leading pictures (lower POC, displayed before the IDR).
+///
+/// The value is the level-derived DPB bound for the frame size (0 for a baseline
+/// / constrained profile that cannot reorder), matching how ffmpeg sizes the
+/// buffer. The VUI `max_num_reorder_frames` is deliberately not trusted: a
+/// stream may declare 0 yet still reorder (JVT conformance vectors do), and a
+/// too-low value is exactly what drops the leading pictures. `None` if there is
+/// no parseable SPS.
+///
+/// Consumed by the libavcodec decoder (`ffmpegdec`), so gated on that feature.
+#[cfg(feature = "ffmpeg")]
+pub(crate) fn sps_reorder_frames(au: &[u8]) -> Option<u8> {
+    for nal in crate::annexb::nal_units_any(au) {
+        if nal.first().map(|b| b & 0x1F) != Some(7) {
+            continue;
+        }
+        let rbsp = strip_emulation_prevention(&nal[1..]);
+        if let Some(n) = parse_sps_reorder(&rbsp) {
+            return Some(n);
+        }
+    }
+    None
+}
+
+/// Parse an SPS RBSP (post NAL-header byte) for its level-derived reorder depth.
+/// Mirrors the field walk of [`parse_sps`] up to the frame dimensions.
+#[cfg(feature = "ffmpeg")]
+fn parse_sps_reorder(rbsp: &[u8]) -> Option<u8> {
+    if rbsp.len() < 3 {
+        return None;
+    }
+    let profile_idc = rbsp[0];
+    let level_idc = rbsp[2];
+    // The Baseline profile has no B-frames and no picture reordering, so it never
+    // needs output buffering. (constraint_set1 means "also Main-conformant", not
+    // "baseline", so it is not a no-reorder signal.)
+    if profile_idc == 66 {
+        return Some(0);
+    }
+    let mut br = BitReader::new(&rbsp[3..]);
+
+    let _sps_id = br.read_ue()?;
+    if matches!(profile_idc, 100 | 110 | 122 | 244 | 44 | 83 | 86 | 118 | 128 | 138 | 139 | 134 | 135) {
+        let chroma_format_idc = br.read_ue()?;
+        if chroma_format_idc == 3 {
+            br.read_bit()?; // separate_colour_plane_flag
+        }
+        br.read_ue()?; // bit_depth_luma_minus8
+        br.read_ue()?; // bit_depth_chroma_minus8
+        br.read_bit()?; // qpprime_y_zero_transform_bypass_flag
+        if br.read_bit()? == 1 {
+            return None; // scaling lists not walked; leave reorder unknown
+        }
+    }
+
+    br.read_ue()?; // log2_max_frame_num_minus4
+    let pic_order_cnt_type = br.read_ue()?;
+    if pic_order_cnt_type == 0 {
+        br.read_ue()?; // log2_max_pic_order_cnt_lsb_minus4
+    } else if pic_order_cnt_type == 1 {
+        br.read_bit()?; // delta_pic_order_always_zero_flag
+        br.read_se()?; // offset_for_non_ref_pic
+        br.read_se()?; // offset_for_top_to_bottom_field
+        let cycle = br.read_ue()?;
+        for _ in 0..cycle {
+            br.read_se()?;
+        }
+    }
+    br.read_ue()?; // max_num_ref_frames
+    br.read_bit()?; // gaps_in_frame_num_value_allowed_flag
+
+    let pic_width_in_mbs = br.read_ue()?.saturating_add(1);
+    let pic_height_in_map_units = br.read_ue()?.saturating_add(1);
+    let frame_mbs_only_flag = br.read_bit()?;
+
+    let frame_height_in_mbs = (2u32.saturating_sub(frame_mbs_only_flag)).saturating_mul(pic_height_in_map_units);
+    let pic_size_in_mbs = pic_width_in_mbs.saturating_mul(frame_height_in_mbs).max(1);
+    let max_dpb_frames = (max_dpb_mbs(level_idc) / pic_size_in_mbs).min(16);
+    Some(max_dpb_frames as u8)
+}
+
+/// `MaxDpbMbs` for an H.264 level (Table A-1), in macroblocks. The reorder /
+/// DPB frame bound is this divided by the frame size in macroblocks.
+#[cfg(feature = "ffmpeg")]
+fn max_dpb_mbs(level_idc: u8) -> u32 {
+    match level_idc {
+        0..=10 => 396,
+        11 => 900,
+        12 | 13 | 20 => 2376,
+        21 => 4752,
+        22 | 30 => 8100,
+        31 => 18000,
+        32 => 20480,
+        40 | 41 => 32768,
+        42 => 34816,
+        50 => 110400,
+        51 | 52 => 184320,
+        _ => 696320,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -343,6 +447,61 @@ mod tests {
         let mut out = vec![0u8, 0, 0, 1, 0x67, 66, 0, 30];
         out.extend_from_slice(&rbsp);
         out
+    }
+
+    /// Frame an SPS RBSP in Annex-B with an explicit profile / level (unlike
+    /// [`build_test_annexb_sps`], which hardcodes baseline). `rbsp` is the
+    /// post-NAL-header bytes.
+    #[cfg(feature = "ffmpeg")]
+    fn annexb_sps(profile_idc: u8, level_idc: u8, rbsp: &[u8]) -> Vec<u8> {
+        let mut out = vec![0u8, 0, 0, 1, 0x67, profile_idc, 0, level_idc];
+        out.extend_from_slice(rbsp);
+        out
+    }
+
+    /// Minimal SPS body (non-high-profile branch) at `width` x `height`.
+    #[cfg(feature = "ffmpeg")]
+    fn sps_body(width: u32, height: u32) -> Vec<u8> {
+        let mut w = BitWriter::default();
+        w.write_ue(0); // seq_parameter_set_id
+        w.write_ue(0); // log2_max_frame_num_minus4
+        w.write_ue(0); // pic_order_cnt_type
+        w.write_ue(0); // log2_max_pic_order_cnt_lsb_minus4
+        w.write_ue(1); // max_num_ref_frames
+        w.write_bit(0); // gaps_in_frame_num_value_allowed_flag
+        w.write_ue(width / 16 - 1);
+        w.write_ue(height / 16 - 1);
+        w.write_bit(1); // frame_mbs_only_flag
+        w.write_bit(0); // direct_8x8_inference_flag
+        w.write_bit(0); // frame_cropping_flag
+        w.write_bit(0); // vui_parameters_present_flag
+        w.write_bit(1); // rbsp_trailing_bits
+        w.align_to_byte();
+        w.into_bytes()
+    }
+
+    #[cfg(feature = "ffmpeg")]
+    #[test]
+    fn sps_reorder_frames_uses_level_dpb_for_reordering_profile() {
+        // Main profile, level 4.0, 1920x1088 (120x68 = 8160 MBs).
+        // MaxDpbMbs(40) = 32768; 32768 / 8160 = 4 (capped at 16).
+        let au = annexb_sps(77, 40, &sps_body(1920, 1088));
+        assert_eq!(sps_reorder_frames(&au), Some(4));
+    }
+
+    #[cfg(feature = "ffmpeg")]
+    #[test]
+    fn sps_reorder_frames_zero_for_baseline() {
+        // Baseline (66) has no B-frames / reordering regardless of level or size.
+        let au = annexb_sps(66, 40, &sps_body(1920, 1088));
+        assert_eq!(sps_reorder_frames(&au), Some(0));
+    }
+
+    #[cfg(feature = "ffmpeg")]
+    #[test]
+    fn sps_reorder_frames_none_without_sps() {
+        // A stream carrying only a slice NAL (type 5 = IDR) has no SPS.
+        assert_eq!(sps_reorder_frames(&[0, 0, 0, 1, 0x65, 0x88]), None);
     }
 
     #[test]

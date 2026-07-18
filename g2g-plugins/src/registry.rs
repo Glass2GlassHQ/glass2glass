@@ -36,6 +36,7 @@ use crate::capsfilter::CapsFilter;
 use crate::fakesink::FakeSink;
 use crate::filesink::FileSink;
 use crate::filesrc::FileSrc;
+use crate::record::{RecordSink, ReplaySrc};
 use crate::flvdemux::FlvDemux;
 use crate::flvmux::FlvMux;
 use crate::h264parse::H264Parse;
@@ -171,18 +172,16 @@ use crate::camera2src::Camera2Src;
 /// ```
 /// The decode-chain parser injector (M421): an auto-plugged decoder is fed one
 /// access unit per packet by splicing an access-unit-re-framing `h264parse` ahead
-/// of it, the way GStreamer's `decodebin` always inserts a parser. Returns `None`
-/// for codecs without a re-framing parser (the input decodes directly). H.264
-/// (M421) and H.265 (M425) re-frame to one access unit per packet; audio still
-/// decodes directly.
-fn video_parser_provider(input: &Caps) -> Option<Box<dyn g2g_core::element::DynAsyncElement>> {
+/// of it, the way GStreamer's `decodebin` always inserts a parser. Names the
+/// registered launch element (M676: the name-based `decodebin` expansion in
+/// `parse_launch` shares this mapping; both launch registrations construct the
+/// re-framing form). Returns `None` for codecs without a re-framing parser (the
+/// input decodes directly). H.264 (M421) and H.265 (M425) re-frame to one access
+/// unit per packet; audio still decodes directly.
+fn video_parser_provider(input: &Caps) -> Option<&'static str> {
     match input {
-        Caps::CompressedVideo { codec: g2g_core::VideoCodec::H264, .. } => {
-            Some(Box::new(crate::h264parse::H264Parse::reframing()))
-        }
-        Caps::CompressedVideo { codec: g2g_core::VideoCodec::H265, .. } => {
-            Some(Box::new(crate::h265parse::H265Parse::reframing()))
-        }
+        Caps::CompressedVideo { codec: g2g_core::VideoCodec::H264, .. } => Some("h264parse"),
+        Caps::CompressedVideo { codec: g2g_core::VideoCodec::H265, .. } => Some("h265parse"),
         _ => None,
     }
 }
@@ -252,6 +251,18 @@ pub fn default_registry() -> Registry {
         Caps::Text { format: g2g_core::TextFormat::Srt },
         || Box::new(crate::subtitlesrc::SubtitleSrc::new("", g2g_core::TextFormat::Srt)),
     ));
+    // Image-sequence source (M-gap): reads img%05d.jpg style sequences, Motion-JPEG
+    // by default so `multifilesrc location=img%05d.jpg ! mjpegdec ! ...` works.
+    reg.register_source(SourceFactory::new(
+        "multifilesrc",
+        Caps::CompressedVideo {
+            codec: g2g_core::VideoCodec::Mjpeg,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        },
+        || Box::new(crate::multifilesrc::MultiFileSrc::new("")),
+    ));
     // Application push source (M233): the real caps come from its `caps`
     // property; buffers arrive from `appsrc::register_appsrc`.
     reg.register_source(SourceFactory::new(
@@ -286,6 +297,16 @@ pub fn default_registry() -> Registry {
     }));
     reg.register_launch(LaunchFactory::of::<Alpha>("alpha", || Box::new(Alpha::new())));
     reg.register_launch(LaunchFactory::of::<VideoBox>("videobox", || Box::new(VideoBox::new())));
+    reg.register_launch(LaunchFactory::of::<crate::gamma::Gamma>("gamma", || Box::new(crate::gamma::Gamma::new())));
+    reg.register_launch(LaunchFactory::of::<crate::deinterlace::Deinterlace>("deinterlace", || {
+        Box::new(crate::deinterlace::Deinterlace::new())
+    }));
+    reg.register_launch(LaunchFactory::of::<crate::timeoverlay::TimeOverlay>("timeoverlay", || {
+        Box::new(crate::timeoverlay::TimeOverlay::new())
+    }));
+    reg.register_launch(LaunchFactory::of::<crate::clockoverlay::ClockOverlay>("clockoverlay", || {
+        Box::new(crate::clockoverlay::ClockOverlay::new())
+    }));
     // Subtitle overlay (M171): the `location=` property loads an SRT / WebVTT
     // file (std), so cues render by PTS without hand-built Rust.
     reg.register_launch(LaunchFactory::of::<TextOverlay>("textoverlay", || {
@@ -334,6 +355,26 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::of::<AudioPanorama>("audiopanorama", || {
         Box::new(AudioPanorama::new())
     }));
+    reg.register_launch(LaunchFactory::of::<crate::audioamplify::AudioAmplify>("audioamplify", || {
+        Box::new(crate::audioamplify::AudioAmplify::new())
+    }));
+    reg.register_launch(LaunchFactory::of::<crate::audioecho::AudioEcho>("audioecho", || {
+        Box::new(crate::audioecho::AudioEcho::new())
+    }));
+    // Level meter + silence detector (passthrough analyzers): measurements are
+    // read via getters, the g2g analog of gst posting them on the bus.
+    reg.register_launch(LaunchFactory::of::<crate::level::Level>("level", || {
+        Box::new(crate::level::Level::new())
+    }));
+    reg.register_launch(LaunchFactory::of::<crate::cutter::Cutter>("cutter", || {
+        Box::new(crate::cutter::Cutter::new())
+    }));
+    reg.register_launch(LaunchFactory::of::<crate::equalizer::Equalizer3Bands>("equalizer-3bands", || {
+        Box::new(crate::equalizer::Equalizer3Bands::new())
+    }));
+    reg.register_launch(LaunchFactory::of::<crate::spectrum::Spectrum>("spectrum", || {
+        Box::new(crate::spectrum::Spectrum::new())
+    }));
 
     // Demuxers + parsers + passthrough.
     reg.register_launch(LaunchFactory::of::<TsDemux>("tsdemux", || Box::new(TsDemux::new())));
@@ -368,6 +409,10 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::new("identity", Vec::new(), || {
         Box::new(IdentityTransform::new())
     }));
+    // Progress report passthrough: counts frames / bytes, logs periodically.
+    reg.register_launch(LaunchFactory::new("progressreport", Vec::new(), || {
+        Box::new(crate::progressreport::ProgressReport::new())
+    }));
     // A/V offset (M385): shifts PTS/DTS by `offset=` ns; the av-offset sync knob.
     reg.register_launch(LaunchFactory::new("avoffset", Vec::new(), || {
         Box::new(crate::avoffset::AvOffset::new(0))
@@ -392,6 +437,18 @@ pub fn default_registry() -> Registry {
                 framerate: Rate::Fixed(30 << 16),
             },
         ))
+    }));
+    // Sequential concatenation and live input switch: both N-in / 1-out, so the
+    // parser builds them by link degree (input count from the branches linked in).
+    reg.register_muxer(MuxerFactory::new("concat", |inputs| {
+        Box::new(crate::concat::Concat::new(inputs))
+    }));
+    reg.register_muxer(MuxerFactory::new("input-selector", |inputs| {
+        Box::new(crate::inputselector::InputSelector::new(inputs))
+    }));
+    // Live output switch: 1-in / N-out, built by the demux link degree.
+    reg.register_demux(g2g_core::runtime::DemuxFactory::new("output-selector", |outputs| {
+        Box::new(crate::outputselector::OutputSelector::new(outputs))
     }));
     // Subtitle-overlay fan-in (M477): the launch-line sibling of the single-input
     // `textoverlay` above, the analog of GStreamer's `textoverlay` text_sink
@@ -461,6 +518,19 @@ pub fn default_registry() -> Registry {
         Box::new(crate::appsink::AppSink::new())
     }));
     reg.register_launch(LaunchFactory::of::<FileSink>("filesink", || Box::new(FileSink::new(""))));
+    // Record / replay pair: record the packet stream to a file, play it back as a source.
+    reg.register_launch(LaunchFactory::of::<RecordSink>("recordsink", || Box::new(RecordSink::new(""))));
+    reg.register_source(SourceFactory::new(
+        "replaysrc",
+        Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs },
+        || Box::new(ReplaySrc::new("")),
+    ));
+    reg.register_launch(LaunchFactory::of::<crate::multifilesink::MultiFileSink>("multifilesink", || {
+        Box::new(crate::multifilesink::MultiFileSink::new(""))
+    }));
+    reg.register_launch(LaunchFactory::of::<crate::splitmuxsink::SplitMuxSink>("splitmuxsink", || {
+        Box::new(crate::splitmuxsink::SplitMuxSink::new(""))
+    }));
     #[cfg(feature = "rtmp")]
     reg.register_launch(LaunchFactory::of::<RtmpSink>("rtmpsink", || Box::new(RtmpSink::new(""))));
 
@@ -534,7 +604,27 @@ fn ffmpegdec_output_format(out: &Caps) -> crate::ffmpegdec::OutputFormat {
     // I420. Anything that is not raw video falls back to I420.
     match out {
         Caps::RawVideo { format: RawVideoFormat::Nv12, .. } => OutputFormat::Nv12,
+        // A downstream that pins 4:2:2 / 4:4:4 gets the source chroma preserved
+        // (software backend); otherwise default to I420.
+        Caps::RawVideo { format: RawVideoFormat::I422, .. } => OutputFormat::I422,
+        Caps::RawVideo { format: RawVideoFormat::I444, .. } => OutputFormat::I444,
         _ => OutputFormat::I420,
+    }
+}
+
+/// Autoplug output format for the **software** `ffmpegdec` (M685/M686): default
+/// to `Auto` for a loose target so the decoder keeps the source chroma and a
+/// downstream that pins 4:2:2 / 4:4:4 (a capsfilter) negotiates it. NV12 stays
+/// explicit for overlay-plane sinks. Distinct from [`ffmpegdec_output_format`],
+/// which the fixed-format hwaccel path (`ffmpegvaapidec`) keeps using.
+#[cfg(all(target_os = "linux", feature = "ffmpeg"))]
+fn ffmpegdec_sw_output_format(out: &Caps) -> crate::ffmpegdec::OutputFormat {
+    use crate::ffmpegdec::OutputFormat;
+    match out {
+        Caps::RawVideo { format: RawVideoFormat::Nv12, .. } => OutputFormat::Nv12,
+        Caps::RawVideo { format: RawVideoFormat::I422, .. } => OutputFormat::I422,
+        Caps::RawVideo { format: RawVideoFormat::I444, .. } => OutputFormat::I444,
+        _ => OutputFormat::Auto,
     }
 }
 
@@ -589,7 +679,7 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     // arm and failed startup negotiation. Default to I420 for a loose target.
     #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
     reg.register(ElementFactory::of::<FfmpegH264Dec>("ffmpegdec", |out| {
-        Box::new(FfmpegH264Dec::new().with_output_format(ffmpegdec_output_format(out)))
+        Box::new(FfmpegH264Dec::new().with_output_format(ffmpegdec_sw_output_format(out)))
     }));
     // AAC (and other libavcodec audio codecs) -> interleaved PcmS16Le (M422), the
     // audio sibling of ffmpegdec, in the auto-plug pool so a decode chain reaches
@@ -960,7 +1050,11 @@ fn register_feature_gated(reg: &mut Registry) {
     ));
     #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
     reg.register_launch(LaunchFactory::of::<FfmpegH264Dec>("ffmpegdec", || {
-        Box::new(FfmpegH264Dec::new())
+        // Auto preserves source chroma (M685/M686): a `decodebin` chain whose
+        // downstream pins 4:2:2 / 4:4:4 negotiates it, while a 4:2:0 source (or
+        // an I420 request) still resolves to I420. A downstream that needs NV12
+        // sets `output-format=nv12` explicitly.
+        Box::new(FfmpegH264Dec::new().with_output_format(crate::ffmpegdec::OutputFormat::Auto))
     }));
     #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
     reg.register_launch(LaunchFactory::of::<crate::ffmpegaudiodec::FfmpegAudioDec>(

@@ -281,6 +281,14 @@ Phased plan:
   is adequate without either (1080p HLS A/V+subs holds 30 fps); debug builds
   misrepresent it, so validate live runs with `--release`.
 
+## Cleanup
+
+- **Adopt `MemoryDomain::as_system_slice()`.** ~50 sites hand-roll
+  `if let MemoryDomain::System(s) = ..` to read CPU bytes; the accessor
+  (returning `Option<&[u8]>`) replaces them and stays refutable under no_std
+  (single-variant `MemoryDomain`), where the manual match is an irrefutable-let
+  error.
+
 ## Platform: macOS
 
 - `VtDecode`: first `cargo build` on a Mac to settle the FFI `// NOTE` spots; a
@@ -1004,26 +1012,46 @@ _(No open parser items.)_
 
 ## Developer tooling
 
-The `xtask` crate (`cargo xtask ci | test --here | size | wasm | bench |
-ffi-probe`), the DOT visualizer (with negotiated caps + per-edge memory domains
-via `negotiate_graph`), the caps explainer, and the criterion benches now exist;
-the remaining items extend them. Highest leverage first:
+Outstanding developer-tooling tasks, highest leverage first.
 
-- **Measured per-element latency report, remaining runners + link transit.**
-  M399 wired measured per-element `process()` p50/p99 + input-link fill into the
-  graph runner and the two linear runners (`RunStats::per_element`,
-  `ElementProbe`). Still open: the fan-in / fan-out / session / muxer runners
-  (leave `per_element` empty today); per-*link* transit / queue-residency time
-  (needs a wall-clock stamp carried with each packet, not just the element-side
-  `process()` timing M399 collects); and source-side timing (sources run one long
-  `run()` loop, so their cost only shows as the downstream element's input fill).
-- **Element scaffolding.** `xtask new-element` (a new subcommand) stamps the
-  `AsyncElement` / `SourceLoop` impl + pad templates + registry stub + milestone
-  test file (the boilerplate every `Mn` repeats).
-- Longer tail: a live pipeline TUI (`gst-launch -v` on steroids); a gst-parity
-  differ (same launch line through real GStreamer vs g2g, diff caps / behaviour);
-  a codec golden-fixture / PSNR conformance harness; an MCP server exposing
-  `inspect` / `launch` / `validate` for agent-driven dev.
+- **Per-element / per-link telemetry gaps.** Extend the `Observer` tap
+  (`g2g-core/src/runtime/observe.rs`) and the M399 `ElementProbe` coverage:
+  - Per-edge packet / byte counters + drops in the live tap (drops surface only
+    in end-of-run `RunStats`).
+  - The standalone fan-in / fan-out / session runners (`fanin.rs` / `runner.rs`
+    hand-built API, not reachable from `run_graph_observed`) leave `per_element`
+    empty: give them observed entry points and wire probes if that API needs to
+    be observable.
+  - Source-side timing: a source runs one long `run()` loop, so its cost only
+    shows as its downstream's input fill.
+  - Validate the dashboard live against an RTSP source.
+- **Visual builder follow-ups.** For `tools/builder/` (React Flow):
+  - YAML export (the JSON export already covers the graph model; schema shared).
+- **Edge preview follow-ups.** Remaining: per-edge tap on the fan-in / muxer arms
+  (the slot is shared via `SenderSink`, so those arms already carry it, but they
+  are not exercised).
+- **Negotiation explainer follow-ups.** `validate` (MCP / `toolingjson`) returns
+  per-edge negotiated caps and, on a solve conflict, the structured failure
+  (kind + node indices). Remaining: carry the *both caps sets* at the point of
+  failure in the structured `NegotiationFailure` (the by-default log narration
+  already prints them, but the error type still hands programmatic consumers only
+  the node indices), which needs the solver to surface the candidate sets.
+- **Per-frame latency waterfall.** The dashboard renders an aggregate stacked
+  wait+work p50 per stage. The remaining piece is a single frame's path: a
+  source-stamped sequence id carried through so one frame's queue-residency +
+  `process()` at each stage can be assembled end to end (the aggregate uses
+  per-stage distributions, not one frame's journey), plus the measured total
+  against the `2 * capacity * frame_period` floor.
+- **gst-parity differ.** Same launch line through real GStreamer and g2g;
+  diff the negotiated caps per edge, the element set after autoplug, and the
+  output (checksum, PSNR for lossy). Calliope already does differential output
+  QA in its own repo, so decide first whether this lives there (adding the
+  caps / topology diff) or in-repo; don't build both.
+- **MCP server follow-ups.** `g2g-mcp` exposes list_elements / inspect /
+  validate / launch. Add a tool to run a declarative graph file, and stream
+  `launch` telemetry (via the `Observer`) rather than only final stats.
+- Longer tail: a live pipeline TUI (a ratatui consumer of the same telemetry
+  tap); a codec golden-fixture / PSNR conformance harness.
 
 ## Code audit follow-up
 

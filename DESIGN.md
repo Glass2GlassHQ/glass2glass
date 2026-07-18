@@ -2093,6 +2093,13 @@ each field, compiles and runs it, and emits the `const _: () = assert!(size_of::
 <Struct>() == N)` to paste alongside the `#[repr(C)]` transcription. Layout is
 locked down before it is trusted, and an SDK version bump that resizes a struct
 fails the build rather than the GPU. `bench` runs the criterion benchmarks.
+`new-element <name> --kind source|transform|sink` stamps the boilerplate every
+new element repeats: the `g2g-plugins` source file with the correct
+`AsyncElement` / `SourceLoop` skeleton for the kind (`intercept_caps` /
+`configure_pipeline` / `process` or `run`, with TODOs), a scaffold test, and the
+`pub mod` wiring inserted into `lib.rs` alongside the unconditional module block;
+it prints the `registry.rs` registration line to paste (the registration
+function is context-dependent). The generated element compiles as-is.
 
 The criterion benchmarks live in a standalone `g2g-bench` crate, excluded from
 the workspace (like `examples/g2g-size`) because criterion pulls plotters / rayon
@@ -2133,9 +2140,112 @@ runners leave it empty, like their declared latency. It is `std`-gated where it
 needs a clock: the histogram is `no_std`, but with no `monotonic_ns` the timing
 compiles out (the table is then empty) so the `no_std` baseline pays nothing.
 Sources have no `process()` and so do not appear, their cost surfaces as the
-downstream element's input fill. Still open: per-*link* transit (queue-residency)
-time, which needs a wall-clock stamp carried with each packet rather than the
-element-side timing collected here.
+downstream element's input fill.
+
+The `process()` timing is the "work" half of a stage's latency; the "wait" half
+is queue residency, added as measured per-link transit. When an observer is
+attached, the graph runner builds `Block` edges into transform/sink arms with a
+per-link transit ring (`link_with_transit`): the producer's `SenderSink` stamps a
+monotonic send time as each `DataFrame` is queued, and the consuming arm pops the
+stamp when it pulls the frame (`LinkReceiver::pop_transit_ns`), recording the
+elapsed queue time into `ElementProbe::transit`. The ring stays aligned with the
+data channel because `Block` links never drop (leaky edges are left plain, so
+their transit is simply not measured), and it is `Option`-gated so an
+uninstrumented run carries no stamp and pays nothing. `RunStats::report()` prints
+`wait p50/p99` beside `proc`, and the dashboard stacks the two per stage into a
+latency waterfall.
+
+Every link also carries a per-edge content-inspection slot (`LinkSender::probe`,
+a `ProbeSlot` the wrapping `SenderSink` shares), so a tool can install a
+`LinkInterceptor` to sample the packets crossing any edge without touching the
+arms; empty (pass-through, zero cost) unless a subscriber installs one. The
+dashboard uses it for edge previews: clicking an edge sends a `subscribe` over
+the WebSocket, the server installs a rate-limited `PreviewTap` on that edge's
+slot (via `Observer::edge_probe` / `edge_caps`), and streams back a `preview`
+message: a downscaled thumbnail for RGBA/BGRA and planar NV12/I420 video (and
+MJPEG keyframes under the `mjpeg` feature, reusing `videoconvert` / `mjpegdec`
+rather than duplicating the conversion), a codec card for other compressed edges
+(codec, resolution, header-parsed frame type, and size, no decode), PCM S16
+waveform buckets, or a bounded hexdump (`g2g-plugins::preview`), sampled a few
+times a second on a copy, never blocking the data path.
+
+The same probes drive a *live* view, not just the end-of-run table. An
+`Observer` (`runtime/observe.rs`) captures the graph topology and holds clones of
+the arms' probe `Arc`s; `run_graph_observed` registers them during the prepare
+phase, before any frame flows. Because the probes are the same lock-free atomics
+the report reads, `Observer::snapshot` mid-run is a handful of relaxed loads and
+never stalls an arm. The transport lives in `g2g-plugins::dashboard` (the
+`observe` feature): `g2g-launch --observe <port>` serves one TCP port that
+answers a plain `GET /` with a self-contained dashboard page
+(`tools/dashboard/`) and a WebSocket upgrade with a JSON `telemetry` snapshot
+every 250 ms plus one `event` per `BusMessage` (fanned out to all clients via a
+broadcast channel drained off the `Bus`). Each telemetry edge carries its
+negotiated caps (from the `Observer`'s per-edge solution), which the page labels
+on the link; the page pans / zooms so a large graph stays navigable. It binds loopback by default;
+`--observe-host <addr>` (e.g. `0.0.0.0`) exposes it to other hosts, gated behind a
+no-auth warning since telemetry + edge previews carry frame content. The JSON is
+built in the transport, so `g2g-core` stays serde-free, consistent with the
+portability-core principle. The
+observer rides the cooperative graph runner and, via `run_graph_threaded_observed`,
+the threaded runner; both cover the muxer / demux fan nodes. The standalone
+hand-built fan-in / fan-out / session runners (`fanin.rs` / `runner.rs`, not
+reachable from `run_graph_observed`) are the remaining follow-up.
+
+`g2g-inspect --json [element]` (the `tooling-json` feature) emits the registry as
+JSON, the machine-readable sibling of the text dump: per element the identity,
+role, output caps or pad templates, and each property's machine type, range,
+default, and read/write flags, from the same `ElementDoc` / `PropertyDoc`
+introspection the text path uses. Like the dashboard it is serialized in
+`g2g-plugins` (serde_json), not `g2g-core`. It feeds two consumers: the visual
+pipeline builder (`tools/builder/`), a React Flow app (Vite + pnpm) that loads a
+`registry.json` snapshot, offers a typed drag-drop canvas with pan / zoom and
+either-direction linking, imports and live-exports a `gst-launch` line (the `!`
+form for linear chains, named definitions + `elem.` references for branched
+graphs) and declarative JSON (`declarative.rs` schema), all of which load back
+into g2g; and the MCP server. Links are validated live: with `g2g-validate-wasm`
+built (g2g's real caps solver wrapping `toolingjson::validate_json`, compiled to
+wasm and loaded client-side) each edge shows its negotiated caps and a failing
+link is flagged; without the blob (the strict-CSP single-file artifact) it falls
+back to a coarse caps-family heuristic when the blob is absent. A Vite plugin
+embeds the wasm as base64 and instantiates it from bytes, so the solver runs in
+`pnpm dev`, the static bundle, and the self-contained artifact alike (no fetch,
+CSP-safe). The builder is the one tool with a JS build step (source under
+`tools/builder/`, `node_modules` / `dist` / `src/wasm` gitignored); every other
+dev tool is a Rust binary or a zero-build page.
+
+`recordsink` / `replaysrc` (std-gated, in `g2g-plugins::record`) turn a live
+stream into a file and back, for deterministic repro. `recordsink` writes the
+negotiated caps (from `configure_pipeline`) then every `DataFrame` as
+length-prefixed `g2g_core::wire` records; `replaysrc` reads the leading record as
+its `intercept_caps` result and re-emits the caps + frames as a source, optionally
+paced to the recorded PTS (`sync=true`) or as fast as possible (the default, for
+deterministic tests). They are ordinary launch-line elements (`... ! recordsink
+location=x` / `replaysrc location=x ! ...`), no convenience flag, and the wire
+codec is shared with the distributed-graph transports so there is one packet
+serialization. A truncated trailing record (a recording cut off mid-write) is
+dropped on replay rather than failing.
+
+`g2g-mcp` (the `tooling-json` feature) is a Model Context Protocol server so an
+agent can drive g2g development. It speaks newline-delimited JSON-RPC 2.0 over
+stdio with no MCP framework dependency (the envelope is hand-rolled with
+serde_json), and exposes four tools: `list_elements`, `inspect(element)`,
+`validate(pipeline)` (parse + negotiate, no run), and `launch(pipeline,
+duration_secs)` (run with a deadline, report `RunStats`). The tool bodies live in
+`g2g-plugins::toolingjson`, shared with `g2g-inspect --json` so the registry-dump
+and run shapes have one definition; the async tools drive a current-thread tokio
+runtime via `block_on` while the stdio loop stays synchronous.
+
+The `validate` path returns a structured negotiation report, not just pass/fail.
+`negotiate_graph` flattens a solve conflict to an opaque `CapsMismatch`;
+`negotiate_graph_explained` (its inner) instead returns `NegotiateError`, which
+splits a setup failure (`Setup(G2gError)`, e.g. a source caps-probe I/O error)
+from a solve conflict (`Solve(NegotiationFailure)`, the structured detail naming
+the offending link). `toolingjson::validate_json` reports, on success, the
+negotiated caps per edge with the edge's endpoint node indices, and on a solve
+conflict the failure kind (`empty-link`, `unfixable`, ...) plus those indices, so
+a caller can highlight the failing link. Carrying the two candidate caps sets at
+the point of failure (upstream produce vs downstream accept) is a follow-up
+needing the solver to surface its per-edge domains.
 
 ### 4.20c Developer Tooling: Conformance and Derived Maturity
 

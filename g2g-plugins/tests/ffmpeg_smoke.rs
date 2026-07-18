@@ -161,6 +161,11 @@ async fn decode_fixture_with(
     let expected_format = match output {
         OutputFormat::I420 => RawVideoFormat::I420,
         OutputFormat::Nv12 => RawVideoFormat::Nv12,
+        OutputFormat::I422 => RawVideoFormat::I422,
+        OutputFormat::I444 => RawVideoFormat::I444,
+        // These smoke fixtures are decoded with a fixed output format; Auto is
+        // resolved per frame and covered by the unit tests in the module.
+        OutputFormat::Auto => unreachable!("smoke fixtures use a fixed output format"),
     };
     let first = caps_changes.first().unwrap();
     match first {

@@ -68,6 +68,11 @@ exclude = [
     # no_std baseline's feature resolution. Built for wasm32 only, via
     # `tools/wasm-demo/build.sh`. Standalone (its own Cargo.lock), path-deps g2g.
     "g2g-web",
+    # Caps-solver validator compiled to WebAssembly for the visual builder
+    # (tools/builder). Same rationale as g2g-web: cdylib + std + wasm-bindgen deps
+    # must not enter the native `--workspace` build. Built for wasm32 only via
+    # tools/builder/build-wasm.sh. Standalone, path-deps g2g.
+    "g2g-validate-wasm",
     # WebSocket test source / receiver for the browser demo (tokio +
     # tokio-tungstenite): dev tools, kept out of the normal build. Standalone.
     "tools/wasm-demo/ws-fixture-server",

@@ -1,0 +1,1835 @@
+{
+  "elements": [
+    {
+      "author": "g2g",
+      "caps": "RawVideo { format: Rgba8, width: Any, height: Any, framerate: Any }",
+      "description": "Generates a synthetic test pattern (SMPTE bars, snow, moving bar, ball, ...)",
+      "klass": "Source/Video",
+      "long_name": "Video test source",
+      "name": "videotestsrc",
+      "pads": [],
+      "properties": [
+        {
+          "blurb": "drawn pattern",
+          "default": "smpte",
+          "enum_values": "gradient | snow | bar | smpte | checkers-8 | ball | zone-plate",
+          "name": "pattern",
+          "range": null,
+          "readable": true,
+          "type": "String",
+          "writable": true
+        },
+        {
+          "blurb": "frames to emit then EOS (-1 = forever)",
+          "default": "-1",
+          "enum_values": null,
+          "name": "num-buffers",
+          "range": [
+            "-1",
+            "9223372036854775807"
+          ],
+          "readable": true,
+          "type": "Integer",
+          "writable": true
+        },
+        {
+          "blurb": "frame width in pixels",
+          "default": "320",
+          "enum_values": null,
+          "name": "width",
+          "range": null,
+          "readable": true,
+          "type": "Unsigned Integer",
+          "writable": true
+        },
+        {
+          "blurb": "frame height in pixels",
+          "default": "240",
+          "enum_values": null,
+          "name": "height",
+          "range": null,
+          "readable": true,
+          "type": "Unsigned Integer",
+          "writable": true
+        },
+        {
+          "blurb": "frames per second (e.g. 30/1)",
+          "default": "30/1",
+          "enum_values": null,
+          "name": "framerate",
+          "range": null,
+          "readable": true,
+          "type": "Fraction",
+          "writable": true
+        }
+      ],
+      "role": "source"
+    },
+    {
+      "author": "g2g",
+      "caps": "Audio { format: PcmS16Le, channels: 2, sample_rate: 48000 }",
+      "description": "Generates a synthetic audio test tone",
+      "klass": "Source/Audio",
+      "long_name": "Audio test source",
+      "name": "audiotestsrc",
+      "pads": [],
+      "properties": [
+        {
+          "blurb": "samples per second",
+          "default": null,
+          "enum_values": null,
+          "name": "samplerate",
+          "range": null,
+          "readable": true,
+          "type": "Unsigned Integer",
+          "writable": true
+        },
+        {
+          "blurb": "channel count",
+          "default": null,
+          "enum_values": null,
+          "name": "channels",
+          "range": null,
+          "readable": true,
+          "type": "Unsigned Integer",
+          "writable": true
+        },
+        {
+          "blurb": "test tone frequency in Hz",
+          "default": null,
+          "enum_values": null,
+          "name": "freq",
+          "range": null,
+          "readable": true,
+          "type": "Unsigned Integer",
+          "writable": true
+        },
+        {
+          "blurb": "buffers to emit then EOS (-1 = forever)",
+          "default": "-1",
+          "enum_values": null,
+          "name": "num-buffers",
+          "range": null,
+          "readable": true,
+          "type": "Integer",
+          "writable": true
+        },
+        {
+          "blurb": "waveform: sine | square | saw | triangle | white-noise | silence",
+          "default": null,
+          "enum_values": null,
+          "name": "wave",
+          "range": null,
+          "readable": true,
+          "type": "String",
+          "writable": true
+        }
+      ],
+      "role": "source"
+    },
+    {
+      "author": "g2g",
+      "caps": "ByteStream { encoding: MpegTs }",
+      "description": "Reads a local file as a byte stream",
+      "klass": "Source/File",
+      "long_name": "File source",
+      "name": "filesrc",
+      "pads": [],
+      "properties": [
+        {
+          "blurb": "input file path",
+          "default": null,
+          "enum_values": null,
+          "name": "location",
+          "range": null,
+          "readable": true,
+          "type": "String",
+          "writable": true
+        },
+        {
+          "blurb": "container of a raw byte stream: mpegts | matroska | ogg | flv | auto (sniff the header)",
+          "default": null,
+          "enum_values": null,
+          "name": "bytestream-format",
+          "range": null,
+          "readable": true,
+          "type": "String",
+          "writable": true
+        }
+      ],
+      "role": "source"
+    },
+    {
+      "author": "g2g",
+      "caps": "Text { format: Srt }",
+      "description": "Reads a SubRip / WebVTT / SSA / TTML file as a Text stream",
+      "klass": "Source/File/Subtitle",
+      "long_name": "Subtitle file source",
+      "name": "subtitlesrc",
+      "pads": [],
+      "properties": [
+        {
+          "blurb": "input subtitle file path",
+          "default": null,
+          "enum_values": null,
+          "name": "location",
+          "range": null,
+          "readable": true,
+          "type": "String",
+          "writable": true
+        },
+        {
+          "blurb": "text format: srt | vtt | ssa | ttml (else sniffed from the extension)",
+          "default": null,
+          "enum_values": null,
+          "name": "format",
+          "range": null,
+          "readable": true,
+          "type": "String",
+          "writable": true
+        }
+      ],
+      "role": "source"
+    },
+    {
+      "author": "g2g",
+      "caps": "CompressedVideo { codec: Mjpeg, width: Any, height: Any, framerate: Any }",
+      "description": "Reads a sequence of files",
+      "klass": "Source/File",
+      "long_name": "Multi-file source",
+      "name": "multifilesrc",
+      "pads": [],
+      "properties": [
+        {
+          "blurb": "printf-style file pattern, e.g. img%05d.jpg",
+          "default": null,
+          "enum_values": null,
+          "name": "location",
+          "range": null,
+          "readable": true,
+          "type": "String",
+          "writable": true
+        },
+        {
+          "blurb": "first index to read",
+          "default": null,
+          "enum_values": null,
+          "name": "start-index",
+          "range": null,
+          "readable": true,
+          "type": "Integer",
+          "writable": true
+        },
+        {
+          "blurb": "last index (-1 = until a file is missing)",
+          "default": null,
+          "enum_values": null,
+          "name": "stop-index",
+          "range": null,
+          "readable": true,
+          "type": "Integer",
+          "writable": true
+        },
+        {
+          "blurb": "restart the sequence at the end",
+          "default": null,
+          "enum_values": null,
+          "name": "loop",
+          "range": null,
+          "readable": true,
+          "type": "Boolean",
+          "writable": true
+        }
+      ],
+      "role": "source"
+    },
+    {
+      "author": "g2g",
+      "caps": "RawVideo { format: Rgba8, width: Fixed(320), height: Fixed(240), framerate: Fixed(1966080) }",
+      "description": "Emits buffers the application pushes in via register_appsrc / g2g_appsrc_push",
+      "klass": "Source",
+      "long_name": "Application source",
+      "name": "appsrc",
+      "pads": [],
+      "properties": [
+        {
+          "blurb": "feed name matching register_appsrc (default \"default\")",
+          "default": null,
+          "enum_values": null,
+          "name": "channel",
+          "range": null,
+          "readable": true,
+          "type": "String",
+          "writable": true
+        },
+        {
+          "blurb": "fixed output caps, gst-launch syntax (e.g. video/x-raw,format=RGBA,width=320,height=240,framerate=30/1)",
+          "default": null,
+          "enum_values": null,
+          "name": "caps",
+          "range": null,
+          "readable": true,
+          "type": "String",
+          "writable": true
+        }
+      ],
+      "role": "source"
+    },
+    {
+      "author": "g2g",
+      "caps": null,
+      "description": "Converts between raw video pixel formats (RGBA, BGRA, NV12, I420)",
+      "klass": "Filter/Converter/Video",
+      "long_name": "Video colorspace converter",
+      "name": "videoconvert",
+      "pads": [
+        "SINK: [RawVideo { format: Rgba8, width: Any, height: Any, framerate: Any }, RawVideo { format: Bgra8, width: Any, height: Any, framerate: Any }, RawVideo { format: Nv12, width: Any, height: Any, framerate: Any }, RawVideo { format: I420, width: Any, height: Any, framerate: Any }, RawVideo { format: I420p10, width: Any, height: Any, framerate: Any }, RawVideo { format: I420p12, width: Any, height: Any, framerate: Any }, RawVideo { format: I422, width: Any, height: Any, framerate: Any }, RawVideo { format: I422p10, width: Any, height: Any, framerate: Any }, RawVideo { format: I422p12, width: Any, height: Any, framerate: Any }, RawVideo { format: I444, width: Any, height: Any, framerate: Any }, RawVideo { format: I444p10, width: Any, height: Any, framerate: Any }, RawVideo { format: I444p12, width: Any, height: Any, framerate: Any }]",
+        "SRC: [RawVideo { format: Rgba8, width: Any, height: Any, framerate: Any }, RawVideo { format: Bgra8, width: Any, height: Any, framerate: Any }, RawVideo { format: Nv12, width: Any, height: Any, framerate: Any }, RawVideo { format: I420, width: Any, height: Any, framerate: Any }, RawVideo { format: I420p10, width: Any, height: Any, framerate: Any }, RawVideo { format: I420p12, width: Any, height: Any, framerate: Any }, RawVideo { format: I422, width: Any, height: Any, framerate: Any }, RawVideo { format: I422p10, width: Any, height: Any, framerate: Any }, RawVideo { format: I422p12, width: Any, height: Any, framerate: Any }, RawVideo { format: I444, width: Any, height: Any, framerate: Any }, RawVideo { format: I444p10, width: Any, height: Any, framerate: Any }, RawVideo { format: I444p12, width: Any, height: Any, framerate: Any }]"
+      ],
+      "properties": [
+        {
+          "blurb": "output pixel format: NV12 | I420 | RGBA | BGRA | YUY2",
+          "default": null,
+          "enum_values": null,
+          "name": "format",
+          "range": null,
+          "readable": true,
+          "type": "String",
+          "writable": true
+        }
+      ],
+      "role": "element"
+    },
+    {
+      "author": "g2g",
+      "caps": null,
+      "description": "Quantizes/dequantizes f32 <-> int8/uint8, narrows/widens f32 <-> f16, transposes NCHW <-> NHWC",
+      "klass": "Filter/Converter/Tensor",
+      "long_name": "Tensor dtype / layout converter",
+      "name": "tensorconvert",
+      "pads": [],
+      "properties": [
+        {
+          "blurb": "output dtype: f32 | f16 | i8 | u8 (int target = quantize, f16 = narrow, f32 = dequantize/widen)",
+          "default": null,
+          "enum_values": null,
+          "name": "dtype",
+          "range": null,
+          "readable": true,
+          "type": "String",
+          "writable": true
+        },
+        {
+          "blurb": "output layout: nchw | nhwc (transpose a 4D tensor)",
+          "default": null,
+          "enum_values": null,
+          "name": "layout",
+          "range": null,
+          "readable": true,
+          "type": "String",
+          "writable": true
+        },
+        {
+          "blurb": "affine quantization scale",
+          "default": null,
+          "enum_values": null,
+          "name": "scale",
+          "range": null,
+          "readable": true,
+          "type": "Double",
+          "writable": true
+        },
+        {
+          "blurb": "affine quantization zero point",
+          "default": null,
+          "enum_values": null,
+          "name": "zero-point",
+          "range": null,
+          "readable": true,
+          "type": "Integer",
+          "writable": true
+        }
+      ],
+      "role": "element"
+    },
+    {
+      "author": "g2g",
+      "caps": null,
+      "description": "Resizes raw video frames",
+      "klass": "Filter/Converter/Video",
+      "long_name": "Video scaler",
+      "name": "videoscale",
+      "pads": [
+        "SINK: [RawVideo { format: Rgba8, width: Any, height: Any, framerate: Any }, RawVideo { format: Bgra8, width: Any, height: Any, framerate: Any }, RawVideo { format: Nv12, width: Any, height: Any, framerate: Any }, RawVideo { format: I420, width: Any, height: Any, framerate: Any }, RawVideo { format: I420p10, width: Any, height: Any, framerate: Any }, RawVideo { format: I420p12, width: Any, height: Any, framerate: Any }, RawVideo { format: I422, width: Any, height: Any, framerate: Any }, RawVideo { format: I422p10, width: Any, height: Any, framerate: Any }, RawVideo { format: I422p12, width: Any, height: Any, framerate: Any }, RawVideo { format: I444, width: Any, height: Any, framerate: Any }, RawVideo { format: I444p10, width: Any, height: Any, framerate: Any }, RawVideo { format: I444p12, width: Any, height: Any, framerate: Any }]",
+        "SRC: [RawVideo { format: Rgba8, width: Any, height: Any, framerate: Any }, RawVideo { format: Bgra8, width: Any, height: Any, framerate: Any }, RawVideo { format: Nv12, width: Any, height: Any, framerate: Any }, RawVideo { format: I420, width: Any, height: Any, framerate: Any }, RawVideo { format: I420p10, width: Any, height: Any, framerate: Any }, RawVideo { format: I420p12, width: Any, height: Any, framerate: Any }, RawVideo { format: I422, width: Any, height: Any, framerate: Any }, RawVideo { format: I422p10, width: Any, height: Any, framerate: Any }, RawVideo { format: I422p12, width: Any, height: Any, framerate: Any }, RawVideo { format: I444, width: Any, height: Any, framerate: Any }, RawVideo { format: I444p10, width: Any, height: Any, framerate: Any }, RawVideo { format: I444p12, width: Any, height: Any, framerate: Any }]"
+      ],
+      "properties": [
+        {
+          "blurb": "output width in pixels",
+          "default": null,
+          "enum_values": null,
+          "name": "width",
+          "range": null,
+          "readable": true,
+          "type": "Unsigned Integer",
+          "writable": true
+        },
+        {
+          "blurb": "output height in pixels",
+          "default": null,
+          "enum_values": null,
+          "name": "height",
+          "range": null,
+          "readable": true,
+          "type": "Unsigned Integer",
+          "writable": true
+        }
+      ],
+      "role": "element"
+    },
+    {
+      "author": "g2g",
+      "caps": null,
+      "description": "Crops pixels from the edges of raw video",
+      "klass": "Filter/Effect/Video",
+      "long_name": "Video cropper",
+      "name": "videocrop",
+      "pads": [
+        "SINK: [RawVideo { format: Rgba8, width: Any, height: Any, framerate: Any }, RawVideo { format: Bgra8, width: Any, height: Any, framerate: Any }, RawVideo { format: Nv12, width: Any, height: Any, framerate: Any }, RawVideo { format: I420, width: Any, height: Any, framerate: Any }, RawVideo { format: I420p10, width: Any, height: Any, framerate: Any }, RawVideo { format: I420p12, width: Any, height: Any, framerate: Any }, RawVideo { format: I422, width: Any, height: Any, framerate: Any }, RawVideo { format: I422p10, width: Any, height: Any, framerate: Any }, RawVideo { format: I422p12, width: Any, height: Any, framerate: Any }, RawVideo { format: I444, width: Any, height: Any, framerate: Any }, RawVideo { format: I444p10, width: Any, height: Any, framerate: Any }, RawVideo { format: I444p12, width: Any, height: Any, framerate: Any }]",
+        "SRC: [RawVideo { format: Rgba8, width: Any, height: Any, framerate: Any }, RawVideo { format: Bgra8, width: Any, height: Any, framerate: Any }, RawVideo { format: Nv12, width: Any, height: Any, framerate: Any }, RawVideo { format: I420, width: Any, height: Any, framerate: Any }, RawVideo { format: I420p10, width: Any, height: Any, framerate: Any }, RawVideo { format: I420p12, width: Any, height: Any, framerate: Any }, RawVideo { format: I422, width: Any, height: Any, framerate: Any }, RawVideo { format: I422p10, width: Any, height: Any, framerate: Any }, RawVideo { format: I422p12, width: Any, height: Any, framerate: Any }, RawVideo { format: I444, width: Any, height: Any, framerate: Any }, RawVideo { format: I444p10, width: Any, height: Any, framerate: Any }, RawVideo { format: I444p12, width: Any, height: Any, framerate: Any }]"
+      ],
+      "properties": [
+        {
+          "blurb": "pixels to crop at the top",
+          "default": "0",
+          "enum_values": null,
+          "name": "top",
+          "range": null,
+          "readable": true,
+          "type": "Integer",
+          "writable": true
+        },
+        {
+          "blurb": "pixels to crop at the bottom",
+          "default": "0",
+          "enum_values": null,
+          "name": "bottom",
+          "range": null,
+          "readable": true,
+          "type": "Integer",
+          "writable": true
+        },
+        {
+          "blurb": "pixels to crop at the left",
+          "default": "0",
+          "enum_values": null,
+          "name": "left",
+          "range": null,
+          "readable": true,
+          "type": "Integer",
+          "writable": true
+        },
+        {
+          "blurb": "pixels to crop at the right",
+          "default": "0",
+          "enum_values": null,
+          "name": "right",
+          "range": null,
+          "readable": true,
+          "type": "Integer",
+          "writable": true
+        }
+      ],
+      "role": "element"
+    },
+    {
+      "author": "g2g",
+      "caps": null,
+      "description": "Flips or rotates raw video (mirror, 90/180/270 degree rotations)",
+      "klass": "Filter/Effect/Video",
+      "long_name": "Video flip / rotate",
+      "name": "videoflip",
+      "pads": [
+        "SINK: [RawVideo { format: Rgba8, width: Any, height: Any, framerate: Any }, RawVideo { format: Bgra8, width: Any, height: Any, framerate: Any }, RawVideo { format: Nv12, width: Any, height: Any, framerate: Any }, RawVideo { format: I420, width: Any, height: Any, framerate: Any }, RawVideo { format: I420p10, width: Any, height: Any, framerate: Any }, RawVideo { format: I420p12, width: Any, height: Any, framerate: Any }, RawVideo { format: I422, width: Any, height: Any, framerate: Any }, RawVideo { format: I422p10, width: Any, height: Any, framerate: Any }, RawVideo { format: I422p12, width: Any, height: Any, framerate: Any }, RawVideo { format: I444, width: Any, height: Any, framerate: Any }, RawVideo { format: I444p10, width: Any, height: Any, framerate: Any }, RawVideo { format: I444p12, width: Any, height: Any, framerate: Any }]",
+        "SRC: [RawVideo { format: Rgba8, width: Any, height: Any, framerate: Any }, RawVideo { format: Bgra8, width: Any, height: Any, framerate: Any }, RawVideo { format: Nv12, width: Any, height: Any, framerate: Any }, RawVideo { format: I420, width: Any, height: Any, framerate: Any }, RawVideo { format: I420p10, width: Any, height: Any, framerate: Any }, RawVideo { format: I420p12, width: Any, height: Any, framerate: Any }, RawVideo { format: I422, width: Any, height: Any, framerate: Any }, RawVideo { format: I422p10, width: Any, height: Any, framerate: Any }, RawVideo { format: I422p12, width: Any, height: Any, framerate: Any }, RawVideo { format: I444, width: Any, height: Any, framerate: Any }, RawVideo { format: I444p10, width: Any, height: Any, framerate: Any }, RawVideo { format: I444p12, width: Any, height: Any, framerate: Any }]"
+      ],
+      "properties": [
+        {
+          "blurb": "flip / rotate method",
+          "default": "none",
+          "enum_values": "none | clockwise | rotate-180 | counterclockwise | horizontal-flip | vertical-flip",
+          "name": "method",
+          "range": null,
+          "readable": true,
+          "type": "String",
+          "writable": true
+        }
+      ],
+      "role": "element"
+    },
+    {
+      "author": "",
+      "caps": null,
+      "description": "",
+      "klass": "",
+      "long_name": "",
+      "name": "videobalance",
+      "pads": [
+        "SINK: [RawVideo { format: Rgba8, width: Any, height: Any, framerate: Any }, RawVideo { format: Bgra8, width: Any, height: Any, framerate: Any }]",
+        "SRC: [RawVideo { format: Rgba8, width: Any, height: Any, framerate: Any }, RawVideo { format: Bgra8, width: Any, height: Any, framerate: Any }]"
+      ],
+      "properties": [
+        {
+          "blurb": "additive brightness, -1..1 (0 = none)",
+          "default": null,
+          "enum_values": null,
+          "name": "brightness",
+          "range": null,
+          "readable": true,
+          "type": "Double",
+          "writable": true
+        },
+        {
+          "blurb": "contrast about mid-grey, 0..2 (1 = none)",
+          "default": null,
+          "enum_values": null,
+          "name": "contrast",
+          "range": null,
+          "readable": true,
+          "type": "Double",
+          "writable": true
+        },
+        {
+          "blurb": "saturation, 0..2 (0 = grey, 1 = none)",
+          "default": null,
+          "enum_values": null,
+          "name": "saturation",
+          "range": null,
+          "readable": true,
+          "type": "Double",
+          "writable": true
+        },
+        {
+          "blurb": "hue rotation, -1..1 (-180..180 deg, 0 = none)",
+          "default": null,
+          "enum_values": null,
+          "name": "hue",
+          "range": null,
+          "readable": true,
+          "type": "Double",
+          "writable": true
+        }
+      ],
+      "role": "element"
+    },
+    {
+      "author": "",
+      "caps": null,
+      "description": "",
+      "klass": "",
+      "long_name": "",
+      "name": "alpha",
+      "pads": [
+        "SINK: [RawVideo { format: Rgba8, width: Any, height: Any, framerate: Any }, RawVideo { format: Bgra8, width: Any, height: Any, framerate: Any }]",
+        "SRC: [RawVideo { format: Rgba8, width: Any, height: Any, framerate: Any }, RawVideo { format: Bgra8, width: Any, height: Any, framerate: Any }]"
+      ],
+      "properties": [
+        {
+          "blurb": "alpha op: set | green | blue",
+          "default": null,
+          "enum_values": null,
+          "name": "method",
+          "range": null,
+          "readable": true,
+          "type": "String",
+          "writable": true
+        },
+        {
+          "blurb": "constant alpha for 'set', 0..1",
+          "default": null,
+          "enum_values": null,
+          "name": "alpha",
+          "range": null,
+          "readable": true,
+          "type": "Double",
+          "writable": true
+        }
+      ],
+      "role": "element"
+    },
+    {
+      "author": "g2g",
+      "caps": null,
+      "description": "Crops or borders raw video (positive edge crops, negative adds a border)",
+      "klass": "Filter/Effect/Video",
+      "long_name": "Video box",
+      "name": "videobox",
+      "pads": [
+        "SINK: [RawVideo { format: Rgba8, width: Any, height: Any, framerate: Any }, RawVideo { format: Bgra8, width: Any, height: Any, framerate: Any }]",
+        "SRC: [RawVideo { format: Rgba8, width: Any, height: Any, framerate: Any }, RawVideo { format: Bgra8, width: Any, height: Any, framerate: Any }]"
+      ],
+      "properties": [
+        {
+          "blurb": "top edge: >0 crops, <0 borders",
+          "default": "0",
+          "enum_values": null,
+          "name": "top",
+          "range": null,
+          "readable": true,
+          "type": "Integer",
+          "writable": true
+        },
+        {
+          "blurb": "bottom edge: >0 crops, <0 borders",
+          "default": "0",
+          "enum_values": null,
+          "name": "bottom",
+          "range": null,
+          "readable": true,
+          "type": "Integer",
+          "writable": true
+        },
+        {
+          "blurb": "left edge: >0 crops, <0 borders",
+          "default": "0",
+          "enum_values": null,
+          "name": "left",
+          "range": null,
+          "readable": true,
+          "type": "Integer",
+          "writable": true
+        },
+        {
+          "blurb": "right edge: >0 crops, <0 borders",
+          "default": "0",
+          "enum_values": null,
+          "name": "right",
+          "range": null,
+          "readable": true,
+          "type": "Integer",
+          "writable": true
+        },
+        {
+          "blurb": "border colour: black|green|blue|red|yellow|white|transparent",
+          "default": null,
+          "enum_values": null,
+          "name": "fill",
+          "range": null,
+          "readable": true,
+          "type": "String",
+          "writable": true
+        }
+      ],
+      "role": "element"
+    },
+    {
+      "author": "g2g",
+      "caps": null,
+      "description": "Performs gamma correction",
+      "klass": "Filter/Effect/Video",
+      "long_name": "Gamma",
+      "name": "gamma",
+      "pads": [
+        "SINK: [RawVideo { format: Rgba8, width: Any, height: Any, framerate: Any }, RawVideo { format: Bgra8, width: Any, height: Any, framerate: Any }]",
+        "SRC: [RawVideo { format: Rgba8, width: Any, height: Any, framerate: Any }, RawVideo { format: Bgra8, width: Any, height: Any, framerate: Any }]"
+      ],
+      "properties": [
+        {
+          "blurb": "gamma value (>1 brightens, 1 = none)",
+          "default": null,
+          "enum_values": null,
+          "name": "gamma",
+          "range": null,
+          "readable": true,
+          "type": "Double",
+          "writable": true
+        }
+      ],
+      "role": "element"
+    },
+    {
+      "author": "g2g",
+      "caps": null,
+      "description": "Deinterlaces video",
+      "klass": "Filter/Effect/Video/Deinterlace",
+      "long_name": "Deinterlace",
+      "name": "deinterlace",
+      "pads": [
+        "SINK: [RawVideo { format: Rgba8, width: Any, height: Any, framerate: Any }, RawVideo { format: Bgra8, width: Any, height: Any, framerate: Any }]",
+        "SRC: [RawVideo { format: Rgba8, width: Any, height: Any, framerate: Any }, RawVideo { format: Bgra8, width: Any, height: Any, framerate: Any }]"
+      ],
+      "properties": [
+        {
+          "blurb": "deinterlace method: linear | blend",
+          "default": null,
+          "enum_values": null,
+          "name": "method",
+          "range": null,
+          "readable": true,
+          "type": "String",
+          "writable": true
+        }
+      ],
+      "role": "element"
+    },
+    {
+      "author": "g2g",
+      "caps": null,
+      "description": "Overlays the buffer time on video",
+      "klass": "Filter/Editor/Video",
+      "long_name": "Time overlay",
+      "name": "timeoverlay",
+      "pads": [
+        "SINK: [RawVideo { format: Rgba8, width: Any, height: Any, framerate: Any }, RawVideo { format: Bgra8, width: Any, height: Any, framerate: Any }]",
+        "SRC: [RawVideo { format: Rgba8, width: Any, height: Any, framerate: Any }, RawVideo { format: Bgra8, width: Any, height: Any, framerate: Any }]"
+      ],
+      "properties": [
+        {
+          "blurb": "integer font magnification (>= 1)",
+          "default": null,
+          "enum_values": null,
+          "name": "scale",
+          "range": null,
+          "readable": true,
+          "type": "Unsigned Integer",
+          "writable": true
+        }
+      ],
+      "role": "element"
+    },
+    {
+      "author": "g2g",
+      "caps": null,
+      "description": "Overlays the wall-clock time on video",
+      "klass": "Filter/Editor/Video",
+      "long_name": "Clock overlay",
+      "name": "clockoverlay",
+      "pads": [
+        "SINK: [RawVideo { format: Rgba8, width: Any, height: Any, framerate: Any }, RawVideo { format: Bgra8, width: Any, height: Any, framerate: Any }]",
+        "SRC: [RawVideo { format: Rgba8, width: Any, height: Any, framerate: Any }, RawVideo { format: Bgra8, width: Any, height: Any, framerate: Any }]"
+      ],
+      "properties": [
+        {
+          "blurb": "integer font magnification (>= 1)",
+          "default": null,
+          "enum_values": null,
+          "name": "scale",
+          "range": null,
+          "readable": true,
+          "type": "Unsigned Integer",
+          "writable": true
+        }
+      ],
+      "role": "element"
+    },
+    {
+      "author": "g2g",
+      "caps": null,
+      "description": "Renders SRT / WebVTT subtitle cues over video by PTS",
+      "klass": "Filter/Editor/Video",
+      "long_name": "Text overlay",
+      "name": "textoverlay",
+      "pads": [
+        "SINK: [RawVideo { format: Rgba8, width: Any, height: Any, framerate: Any }]",
+        "SRC: [RawVideo { format: Rgba8, width: Any, height: Any, framerate: Any }]"
+      ],
+      "properties": [
+        {
+          "blurb": "path to an SRT (.srt) or WebVTT (.vtt) subtitle file; cues render by PTS",
+          "default": null,
+          "enum_values": null,
+          "name": "location",
+          "range": null,
+          "readable": true,
+          "type": "String",
+          "writable": true
+        },
+        {
+          "blurb": "path to a .ttf / .ttc font for glyph rendering (truetype-overlay); needed for CJK / accented text. Without it the 8x8 ASCII bitmap is used",
+          "default": null,
+          "enum_values": null,
+          "name": "font",
+          "range": null,
+          "readable": true,
+          "type": "String",
+          "writable": true
+        },
+        {
+          "blurb": "text color as 0xAARRGGBB (e.g. 4294967295 = opaque white)",
+          "default": "4294967295",
+          "enum_values": null,
+          "name": "color",
+          "range": null,
+          "readable": true,
+          "type": "Unsigned Integer",
+          "writable": true
+        }
+      ],
+      "role": "element"
+    },
+    {
+      "author": "g2g",
+      "caps": null,
+      "description": "Parses a SubRip / WebVTT document into timed UTF-8 text cues",
+      "klass": "Codec/Parser/Subtitle",
+      "long_name": "Subtitle parser",
+      "name": "subparse",
+      "pads": [
+        "SINK: [Text { format: Srt }, Text { format: WebVtt }, Text { format: Ssa }, Text { format: Ttml }]",
+        "SRC: [Text { format: Utf8 }]"
+      ],
+      "properties": [],
+      "role": "element"
+    },
+    {
+      "author": "g2g",
+      "caps": null,
+      "description": "Extracts CEA-608 / CEA-708 captions from H.264 / H.265 SEI into timed UTF-8 text cues",
+      "klass": "Codec/Parser/ClosedCaption",
+      "long_name": "Closed-caption extractor",
+      "name": "ccextract",
+      "pads": [
+        "SINK: [CompressedVideo { codec: H264, width: Any, height: Any, framerate: Any }, CompressedVideo { codec: H265, width: Any, height: Any, framerate: Any }]",
+        "SRC: [Text { format: Utf8 }]"
+      ],
+      "properties": [],
+      "role": "element"
+    },
+    {
+      "author": "",
+      "caps": null,
+      "description": "",
+      "klass": "",
+      "long_name": "",
+      "name": "videorate",
+      "pads": [],
+      "properties": [
+        {
+          "blurb": "target output frames per second (e.g. 10/1)",
+          "default": null,
+          "enum_values": null,
+          "name": "framerate",
+          "range": null,
+          "readable": true,
+          "type": "Fraction",
+          "writable": true
+        }
+      ],
+      "role": "element"
+    },
+    {
+      "author": "g2g",
+      "caps": null,
+      "description": "Converts between raw audio sample formats and channel layouts",
+      "klass": "Filter/Converter/Audio",
+      "long_name": "Audio format converter",
+      "name": "audioconvert",
+      "pads": [
+        "SINK: [Audio { format: PcmS16Le, channels: 2, sample_rate: 48000 }, Audio { format: PcmF32Le, channels: 2, sample_rate: 48000 }]",
+        "SRC: [Audio { format: PcmS16Le, channels: 2, sample_rate: 48000 }, Audio { format: PcmF32Le, channels: 2, sample_rate: 48000 }]"
+      ],
+      "properties": [
+        {
+          "blurb": "output sample format: S16LE | F32LE",
+          "default": null,
+          "enum_values": null,
+          "name": "format",
+          "range": null,
+          "readable": true,
+          "type": "String",
+          "writable": true
+        },
+        {
+          "blurb": "output channel count",
+          "default": null,
+          "enum_values": null,
+          "name": "channels",
+          "range": null,
+          "readable": true,
+          "type": "Unsigned Integer",
+          "writable": true
+        }
+      ],
+      "role": "element"
+    },
+    {
+      "author": "g2g",
+      "caps": null,
+      "description": "Resamples raw audio to a different sample rate",
+      "klass": "Filter/Converter/Audio",
+      "long_name": "Audio resampler",
+      "name": "audioresample",
+      "pads": [
+        "SINK: [Audio { format: PcmS16Le, channels: 2, sample_rate: 48000 }, Audio { format: PcmF32Le, channels: 2, sample_rate: 48000 }]",
+        "SRC: [Audio { format: PcmS16Le, channels: 2, sample_rate: 48000 }, Audio { format: PcmF32Le, channels: 2, sample_rate: 48000 }]"
+      ],
+      "properties": [
+        {
+          "blurb": "output samples per second",
+          "default": null,
+          "enum_values": null,
+          "name": "samplerate",
+          "range": null,
+          "readable": true,
+          "type": "Unsigned Integer",
+          "writable": true
+        }
+      ],
+      "role": "element"
+    },
+    {
+      "author": "g2g",
+      "caps": null,
+      "description": "Adjusts audio volume / gain",
+      "klass": "Filter/Effect/Audio",
+      "long_name": "Volume",
+      "name": "volume",
+      "pads": [
+        "SINK: [Audio { format: PcmS16Le, channels: 2, sample_rate: 48000 }]",
+        "SRC: [Audio { format: PcmS16Le, channels: 2, sample_rate: 48000 }]"
+      ],
+      "properties": [
+        {
+          "blurb": "linear gain, 0..N (1 = unchanged)",
+          "default": null,
+          "enum_values": null,
+          "name": "volume",
+          "range": null,
+          "readable": true,
+          "type": "Double",
+          "writable": true
+        },
+        {
+          "blurb": "zero the output when true",
+          "default": null,
+          "enum_values": null,
+          "name": "mute",
+          "range": null,
+          "readable": true,
+          "type": "Boolean",
+          "writable": true
+        }
+      ],
+      "role": "element"
+    },
+    {
+      "author": "",
+      "caps": null,
+      "description": "",
+      "klass": "",
+      "long_name": "",
+      "name": "audiopanorama",
+      "pads": [
+        "SINK: [Audio { format: PcmS16Le, channels: 2, sample_rate: 48000 }]",
+        "SRC: [Audio { format: PcmS16Le, channels: 2, sample_rate: 48000 }]"
+      ],
+      "properties": [
+        {
+          "blurb": "stereo position, -1 (left) .. 1 (right)",
+          "default": null,
+          "enum_values": null,
+          "name": "panorama",
+          "range": null,
+          "readable": true,
+          "type": "Double",
+          "writable": true
+        }
+      ],
+      "role": "element"
+    },
+    {
+      "author": "g2g",
+      "caps": null,
+      "description": "Amplifies an audio stream",
+      "klass": "Filter/Effect/Audio",
+      "long_name": "Audio amplify",
+      "name": "audioamplify",
+      "pads": [
+        "SINK: [Audio { format: PcmS16Le, channels: 2, sample_rate: 48000 }]",
+        "SRC: [Audio { format: PcmS16Le, channels: 2, sample_rate: 48000 }]"
+      ],
+      "properties": [
+        {
+          "blurb": "linear gain (1 = unchanged)",
+          "default": null,
+          "enum_values": null,
+          "name": "amplification",
+          "range": null,
+          "readable": true,
+          "type": "Double",
+          "writable": true
+        },
+        {
+          "blurb": "overflow handling: clip | wrap-negative | wrap-positive",
+          "default": null,
+          "enum_values": null,
+          "name": "amplification-method",
+          "range": null,
+          "readable": true,
+          "type": "String",
+          "writable": true
+        }
+      ],
+      "role": "element"
+    },
+    {
+      "author": "g2g",
+      "caps": null,
+      "description": "Adds an echo / delay to an audio stream",
+      "klass": "Filter/Effect/Audio",
+      "long_name": "Audio echo",
+      "name": "audioecho",
+      "pads": [
+        "SINK: [Audio { format: PcmS16Le, channels: 2, sample_rate: 48000 }]",
+        "SRC: [Audio { format: PcmS16Le, channels: 2, sample_rate: 48000 }]"
+      ],
+      "properties": [
+        {
+          "blurb": "echo delay in ns (<= max-delay)",
+          "default": null,
+          "enum_values": null,
+          "name": "delay",
+          "range": null,
+          "readable": true,
+          "type": "Unsigned Integer",
+          "writable": true
+        },
+        {
+          "blurb": "delay-line length in ns",
+          "default": null,
+          "enum_values": null,
+          "name": "max-delay",
+          "range": null,
+          "readable": true,
+          "type": "Unsigned Integer",
+          "writable": true
+        },
+        {
+          "blurb": "echo mix, 0..1",
+          "default": null,
+          "enum_values": null,
+          "name": "intensity",
+          "range": null,
+          "readable": true,
+          "type": "Double",
+          "writable": true
+        },
+        {
+          "blurb": "delay-line feedback, 0..1",
+          "default": null,
+          "enum_values": null,
+          "name": "feedback",
+          "range": null,
+          "readable": true,
+          "type": "Double",
+          "writable": true
+        }
+      ],
+      "role": "element"
+    },
+    {
+      "author": "g2g",
+      "caps": null,
+      "description": "Measures audio peak / RMS levels",
+      "klass": "Filter/Analyzer/Audio",
+      "long_name": "Level",
+      "name": "level",
+      "pads": [
+        "SINK: [Audio { format: PcmS16Le, channels: 2, sample_rate: 48000 }]",
+        "SRC: [Audio { format: PcmS16Le, channels: 2, sample_rate: 48000 }]"
+      ],
+      "properties": [
+        {
+          "blurb": "measure and expose levels when true",
+          "default": null,
+          "enum_values": null,
+          "name": "post-messages",
+          "range": null,
+          "readable": true,
+          "type": "Boolean",
+          "writable": true
+        }
+      ],
+      "role": "element"
+    },
+    {
+      "author": "g2g",
+      "caps": null,
+      "description": "Detects silence in an audio stream",
+      "klass": "Filter/Analyzer/Audio",
+      "long_name": "Cutter",
+      "name": "cutter",
+      "pads": [
+        "SINK: [Audio { format: PcmS16Le, channels: 2, sample_rate: 48000 }]",
+        "SRC: [Audio { format: PcmS16Le, channels: 2, sample_rate: 48000 }]"
+      ],
+      "properties": [
+        {
+          "blurb": "linear RMS silence threshold, 0..1",
+          "default": null,
+          "enum_values": null,
+          "name": "threshold",
+          "range": null,
+          "readable": true,
+          "type": "Double",
+          "writable": true
+        },
+        {
+          "blurb": "continuous silence before 'below', ns",
+          "default": null,
+          "enum_values": null,
+          "name": "run-length",
+          "range": null,
+          "readable": true,
+          "type": "Unsigned Integer",
+          "writable": true
+        }
+      ],
+      "role": "element"
+    },
+    {
+      "author": "g2g",
+      "caps": null,
+      "description": "Three-band audio equalizer",
+      "klass": "Filter/Effect/Audio",
+      "long_name": "3-band equalizer",
+      "name": "equalizer-3bands",
+      "pads": [
+        "SINK: [Audio { format: PcmS16Le, channels: 2, sample_rate: 48000 }]",
+        "SRC: [Audio { format: PcmS16Le, channels: 2, sample_rate: 48000 }]"
+      ],
+      "properties": [
+        {
+          "blurb": "low band (100 Hz) gain in dB",
+          "default": null,
+          "enum_values": null,
+          "name": "band0",
+          "range": null,
+          "readable": true,
+          "type": "Double",
+          "writable": true
+        },
+        {
+          "blurb": "mid band (1 kHz) gain in dB",
+          "default": null,
+          "enum_values": null,
+          "name": "band1",
+          "range": null,
+          "readable": true,
+          "type": "Double",
+          "writable": true
+        },
+        {
+          "blurb": "high band (10 kHz) gain in dB",
+          "default": null,
+          "enum_values": null,
+          "name": "band2",
+          "range": null,
+          "readable": true,
+          "type": "Double",
+          "writable": true
+        }
+      ],
+      "role": "element"
+    },
+    {
+      "author": "g2g",
+      "caps": null,
+      "description": "FFT spectrum analyzer",
+      "klass": "Filter/Analyzer/Audio",
+      "long_name": "Spectrum",
+      "name": "spectrum",
+      "pads": [
+        "SINK: [Audio { format: PcmS16Le, channels: 2, sample_rate: 48000 }]",
+        "SRC: [Audio { format: PcmS16Le, channels: 2, sample_rate: 48000 }]"
+      ],
+      "properties": [
+        {
+          "blurb": "number of output frequency bands",
+          "default": null,
+          "enum_values": null,
+          "name": "bands",
+          "range": null,
+          "readable": true,
+          "type": "Unsigned Integer",
+          "writable": true
+        },
+        {
+          "blurb": "run the analysis when true",
+          "default": null,
+          "enum_values": null,
+          "name": "post-messages",
+          "range": null,
+          "readable": true,
+          "type": "Boolean",
+          "writable": true
+        }
+      ],
+      "role": "element"
+    },
+    {
+      "author": "",
+      "caps": null,
+      "description": "",
+      "klass": "",
+      "long_name": "",
+      "name": "tsdemux",
+      "pads": [
+        "SINK: [ByteStream { encoding: MpegTs }]",
+        "SRC: [CompressedVideo { codec: H264, width: Range { min: 16, max: 65535 }, height: Range { min: 16, max: 65535 }, framerate: Range { min_q16: 65536, max_q16: 15728640 } }, CompressedVideo { codec: H265, width: Range { min: 16, max: 65535 }, height: Range { min: 16, max: 65535 }, framerate: Range { min_q16: 65536, max_q16: 15728640 } }, Audio { format: Aac, channels: 0, sample_rate: 0 }]"
+      ],
+      "properties": [
+        {
+          "blurb": "elementary stream to emit: h264 | h265 | aac",
+          "default": null,
+          "enum_values": null,
+          "name": "stream",
+          "range": null,
+          "readable": true,
+          "type": "String",
+          "writable": true
+        }
+      ],
+      "role": "element"
+    },
+    {
+      "author": "",
+      "caps": null,
+      "description": "",
+      "klass": "",
+      "long_name": "",
+      "name": "matroskademux",
+      "pads": [
+        "SINK: [ByteStream { encoding: Matroska }]",
+        "SRC: [CompressedVideo { codec: H264, width: Range { min: 16, max: 65535 }, height: Range { min: 16, max: 65535 }, framerate: Range { min_q16: 65536, max_q16: 15728640 } }, CompressedVideo { codec: H265, width: Range { min: 16, max: 65535 }, height: Range { min: 16, max: 65535 }, framerate: Range { min_q16: 65536, max_q16: 15728640 } }, CompressedVideo { codec: Vp8, width: Range { min: 16, max: 65535 }, height: Range { min: 16, max: 65535 }, framerate: Range { min_q16: 65536, max_q16: 15728640 } }, CompressedVideo { codec: Vp9, width: Range { min: 16, max: 65535 }, height: Range { min: 16, max: 65535 }, framerate: Range { min_q16: 65536, max_q16: 15728640 } }, CompressedVideo { codec: Av1, width: Range { min: 16, max: 65535 }, height: Range { min: 16, max: 65535 }, framerate: Range { min_q16: 65536, max_q16: 15728640 } }, Audio { format: Aac, channels: 0, sample_rate: 0 }, Audio { format: Opus, channels: 0, sample_rate: 0 }, Text { format: Utf8 }]"
+      ],
+      "properties": [
+        {
+          "blurb": "elementary stream to emit: h264 | h265 | vp8 | vp9 | av1 | aac | opus",
+          "default": null,
+          "enum_values": null,
+          "name": "stream",
+          "range": null,
+          "readable": true,
+          "type": "String",
+          "writable": true
+        }
+      ],
+      "role": "element"
+    },
+    {
+      "author": "",
+      "caps": null,
+      "description": "",
+      "klass": "",
+      "long_name": "",
+      "name": "mpegtsmux",
+      "pads": [
+        "SINK: [CompressedVideo { codec: H264, width: Any, height: Any, framerate: Any }, CompressedVideo { codec: H265, width: Any, height: Any, framerate: Any }, Audio { format: Aac, channels: 0, sample_rate: 0 }]",
+        "SRC: [ByteStream { encoding: MpegTs }]"
+      ],
+      "properties": [
+        {
+          "blurb": "PAT/PMT re-emission interval, milliseconds (0 = once)",
+          "default": "0",
+          "enum_values": null,
+          "name": "pat-interval",
+          "range": null,
+          "readable": true,
+          "type": "Unsigned Integer",
+          "writable": true
+        },
+        {
+          "blurb": "alias of pat-interval (the tables are emitted together)",
+          "default": "0",
+          "enum_values": null,
+          "name": "pmt-interval",
+          "range": null,
+          "readable": true,
+          "type": "Unsigned Integer",
+          "writable": true
+        }
+      ],
+      "role": "element"
+    },
+    {
+      "author": "",
+      "caps": null,
+      "description": "",
+      "klass": "",
+      "long_name": "",
+      "name": "matroskamux",
+      "pads": [
+        "SINK: [CompressedVideo { codec: H264, width: Any, height: Any, framerate: Any }, CompressedVideo { codec: H265, width: Any, height: Any, framerate: Any }, CompressedVideo { codec: Vp8, width: Any, height: Any, framerate: Any }, CompressedVideo { codec: Vp9, width: Any, height: Any, framerate: Any }, CompressedVideo { codec: Av1, width: Any, height: Any, framerate: Any }, Audio { format: Aac, channels: 0, sample_rate: 0 }, Audio { format: Opus, channels: 0, sample_rate: 0 }]",
+        "SRC: [ByteStream { encoding: Matroska }]"
+      ],
+      "properties": [
+        {
+          "blurb": "live mode: omit the seekable Cues index written at EOS",
+          "default": "false",
+          "enum_values": null,
+          "name": "streamable",
+          "range": null,
+          "readable": true,
+          "type": "Boolean",
+          "writable": true
+        }
+      ],
+      "role": "element"
+    },
+    {
+      "author": "",
+      "caps": null,
+      "description": "",
+      "klass": "",
+      "long_name": "",
+      "name": "mp4mux",
+      "pads": [
+        "SINK: [CompressedVideo { codec: H264, width: Any, height: Any, framerate: Any }, CompressedVideo { codec: H265, width: Any, height: Any, framerate: Any }]",
+        "SRC: [ByteStream { encoding: IsoBmff }]"
+      ],
+      "properties": [
+        {
+          "blurb": "target fragment duration, milliseconds (0 = one fragment per access unit)",
+          "default": "0",
+          "enum_values": null,
+          "name": "fragment-duration",
+          "range": null,
+          "readable": true,
+          "type": "Unsigned Integer",
+          "writable": true
+        }
+      ],
+      "role": "element"
+    },
+    {
+      "author": "",
+      "caps": null,
+      "description": "",
+      "klass": "",
+      "long_name": "",
+      "name": "oggdemux",
+      "pads": [
+        "SINK: [ByteStream { encoding: Ogg }]",
+        "SRC: [Audio { format: Opus, channels: 0, sample_rate: 0 }]"
+      ],
+      "properties": [],
+      "role": "element"
+    },
+    {
+      "author": "g2g",
+      "caps": null,
+      "description": "Demuxes a fragmented-MP4 / CMAF byte stream",
+      "klass": "Codec/Demuxer",
+      "long_name": "fMP4 / CMAF demuxer",
+      "name": "fmp4demux",
+      "pads": [
+        "SINK: [ByteStream { encoding: IsoBmff }]",
+        "SRC: [CompressedVideo { codec: H264, width: Any, height: Any, framerate: Any }, CompressedVideo { codec: H265, width: Any, height: Any, framerate: Any }]"
+      ],
+      "properties": [],
+      "role": "element"
+    },
+    {
+      "author": "g2g",
+      "caps": null,
+      "description": "Demuxes a whole-file (progressive) MP4 / QuickTime byte stream to its video track",
+      "klass": "Codec/Demuxer",
+      "long_name": "Progressive MP4 demuxer",
+      "name": "qtdemux",
+      "pads": [
+        "SINK: [ByteStream { encoding: Mp4 }]",
+        "SRC: [CompressedVideo { codec: H264, width: Range { min: 16, max: 65535 }, height: Range { min: 16, max: 65535 }, framerate: Range { min_q16: 65536, max_q16: 15728640 } }, CompressedVideo { codec: H265, width: Range { min: 16, max: 65535 }, height: Range { min: 16, max: 65535 }, framerate: Range { min_q16: 65536, max_q16: 15728640 } }]"
+      ],
+      "properties": [],
+      "role": "element"
+    },
+    {
+      "author": "",
+      "caps": null,
+      "description": "",
+      "klass": "",
+      "long_name": "",
+      "name": "flvdemux",
+      "pads": [
+        "SINK: [ByteStream { encoding: Flv }]",
+        "SRC: [CompressedVideo { codec: H264, width: Range { min: 16, max: 65535 }, height: Range { min: 16, max: 65535 }, framerate: Range { min_q16: 65536, max_q16: 15728640 } }, Audio { format: Aac, channels: 0, sample_rate: 0 }]"
+      ],
+      "properties": [
+        {
+          "blurb": "elementary stream to emit: h264 | aac",
+          "default": null,
+          "enum_values": null,
+          "name": "stream",
+          "range": null,
+          "readable": true,
+          "type": "String",
+          "writable": true
+        }
+      ],
+      "role": "element"
+    },
+    {
+      "author": "",
+      "caps": null,
+      "description": "",
+      "klass": "",
+      "long_name": "",
+      "name": "flvmux",
+      "pads": [
+        "SINK: [CompressedVideo { codec: H264, width: Any, height: Any, framerate: Any }, Audio { format: Aac, channels: 0, sample_rate: 0 }]",
+        "SRC: [ByteStream { encoding: Flv }]"
+      ],
+      "properties": [],
+      "role": "element"
+    },
+    {
+      "author": "g2g",
+      "caps": null,
+      "description": "Parses an H.264 Annex-B stream and refines caps from SPS/PPS",
+      "klass": "Codec/Parser/Video",
+      "long_name": "H.264 parser",
+      "name": "h264parse",
+      "pads": [
+        "SINK: [CompressedVideo { codec: H264, width: Any, height: Any, framerate: Any }]",
+        "SRC: [CompressedVideo { codec: H264, width: Any, height: Any, framerate: Any }]"
+      ],
+      "properties": [
+        {
+          "blurb": "SPS/PPS re-insertion interval in seconds (0 = off, -1 = every IDR, N = every N s)",
+          "default": "0",
+          "enum_values": null,
+          "name": "config-interval",
+          "range": [
+            "-1",
+            "3600"
+          ],
+          "readable": true,
+          "type": "Integer",
+          "writable": true
+        }
+      ],
+      "role": "element"
+    },
+    {
+      "author": "g2g",
+      "caps": null,
+      "description": "Parses an H.265 Annex-B stream and refines caps from VPS/SPS/PPS",
+      "klass": "Codec/Parser/Video",
+      "long_name": "H.265 parser",
+      "name": "h265parse",
+      "pads": [
+        "SINK: [CompressedVideo { codec: H265, width: Any, height: Any, framerate: Any }]",
+        "SRC: [CompressedVideo { codec: H265, width: Any, height: Any, framerate: Any }]"
+      ],
+      "properties": [
+        {
+          "blurb": "VPS/SPS/PPS re-insertion interval in seconds (0 = off, -1 = every IRAP, N = every N s)",
+          "default": "0",
+          "enum_values": null,
+          "name": "config-interval",
+          "range": [
+            "-1",
+            "3600"
+          ],
+          "readable": true,
+          "type": "Integer",
+          "writable": true
+        }
+      ],
+      "role": "element"
+    },
+    {
+      "author": "g2g",
+      "caps": null,
+      "description": "Parses an AAC ADTS or LOAS/LATM stream and refines caps",
+      "klass": "Codec/Parser/Audio",
+      "long_name": "AAC parser",
+      "name": "aacparse",
+      "pads": [
+        "SINK: [Audio { format: Aac, channels: 2, sample_rate: 48000 }]",
+        "SRC: [Audio { format: Aac, channels: 2, sample_rate: 48000 }]"
+      ],
+      "properties": [],
+      "role": "element"
+    },
+    {
+      "author": "g2g",
+      "caps": null,
+      "description": "Refines Opus caps (channel count) from each packet's TOC byte",
+      "klass": "Codec/Parser/Audio",
+      "long_name": "Opus parser",
+      "name": "opusparse",
+      "pads": [
+        "SINK: [Audio { format: Opus, channels: 2, sample_rate: 48000 }]",
+        "SRC: [Audio { format: Opus, channels: 2, sample_rate: 48000 }]"
+      ],
+      "properties": [],
+      "role": "element"
+    },
+    {
+      "author": "",
+      "caps": null,
+      "description": "",
+      "klass": "",
+      "long_name": "",
+      "name": "vp8parse",
+      "pads": [
+        "SINK: [CompressedVideo { codec: Vp8, width: Any, height: Any, framerate: Any }]",
+        "SRC: [CompressedVideo { codec: Vp8, width: Any, height: Any, framerate: Any }]"
+      ],
+      "properties": [],
+      "role": "element"
+    },
+    {
+      "author": "",
+      "caps": null,
+      "description": "",
+      "klass": "",
+      "long_name": "",
+      "name": "vp9parse",
+      "pads": [
+        "SINK: [CompressedVideo { codec: Vp9, width: Any, height: Any, framerate: Any }]",
+        "SRC: [CompressedVideo { codec: Vp9, width: Any, height: Any, framerate: Any }]"
+      ],
+      "properties": [],
+      "role": "element"
+    },
+    {
+      "author": "",
+      "caps": null,
+      "description": "",
+      "klass": "",
+      "long_name": "",
+      "name": "av1parse",
+      "pads": [
+        "SINK: [CompressedVideo { codec: Av1, width: Any, height: Any, framerate: Any }]",
+        "SRC: [CompressedVideo { codec: Av1, width: Any, height: Any, framerate: Any }]"
+      ],
+      "properties": [],
+      "role": "element"
+    },
+    {
+      "author": "",
+      "caps": null,
+      "description": "",
+      "klass": "",
+      "long_name": "",
+      "name": "identity",
+      "pads": [],
+      "properties": [],
+      "role": "element"
+    },
+    {
+      "author": "g2g",
+      "caps": null,
+      "description": "Periodically reports pipeline progress",
+      "klass": "Generic",
+      "long_name": "Progress report",
+      "name": "progressreport",
+      "pads": [],
+      "properties": [
+        {
+          "blurb": "report interval in seconds of stream time",
+          "default": null,
+          "enum_values": null,
+          "name": "update-freq",
+          "range": null,
+          "readable": true,
+          "type": "Integer",
+          "writable": true
+        },
+        {
+          "blurb": "suppress the log lines (still counts)",
+          "default": null,
+          "enum_values": null,
+          "name": "silent",
+          "range": null,
+          "readable": true,
+          "type": "Boolean",
+          "writable": true
+        }
+      ],
+      "role": "element"
+    },
+    {
+      "author": "g2g",
+      "caps": null,
+      "description": "Shifts frame PTS/DTS by a signed offset (the av-offset A/V sync knob)",
+      "klass": "Filter/Effect",
+      "long_name": "AvOffset",
+      "name": "avoffset",
+      "pads": [],
+      "properties": [
+        {
+          "blurb": "PTS/DTS shift in ns (positive delays, negative advances)",
+          "default": null,
+          "enum_values": null,
+          "name": "offset",
+          "range": null,
+          "readable": true,
+          "type": "Integer",
+          "writable": true
+        }
+      ],
+      "role": "element"
+    },
+    {
+      "author": "",
+      "caps": null,
+      "description": "",
+      "klass": "",
+      "long_name": "",
+      "name": "capsfilter",
+      "pads": [],
+      "properties": [
+        {
+          "blurb": "caps to filter to, gst-launch syntax: e.g. video/x-raw,format=nv12,width=320,height=240",
+          "default": null,
+          "enum_values": null,
+          "name": "caps",
+          "range": null,
+          "readable": true,
+          "type": "String",
+          "writable": true
+        }
+      ],
+      "role": "element"
+    },
+    {
+      "author": "g2g",
+      "caps": null,
+      "description": "Discards all buffers (a no-op terminal for testing)",
+      "klass": "Sink",
+      "long_name": "Fake sink",
+      "name": "fakesink",
+      "pads": [
+        "SINK: ANY"
+      ],
+      "properties": [],
+      "role": "element"
+    },
+    {
+      "author": "g2g",
+      "caps": null,
+      "description": "Delivers buffers to the application via callback or pull (g2g_appsink_*)",
+      "klass": "Sink",
+      "long_name": "Application sink",
+      "name": "appsink",
+      "pads": [
+        "SINK: ANY"
+      ],
+      "properties": [
+        {
+          "blurb": "delivery name matching set_appsink_callback / register_appsink_pull (default \"default\")",
+          "default": null,
+          "enum_values": null,
+          "name": "channel",
+          "range": null,
+          "readable": true,
+          "type": "String",
+          "writable": true
+        }
+      ],
+      "role": "element"
+    },
+    {
+      "author": "g2g",
+      "caps": null,
+      "description": "Writes incoming buffers to a local file",
+      "klass": "Sink/File",
+      "long_name": "File sink",
+      "name": "filesink",
+      "pads": [
+        "SINK: ANY"
+      ],
+      "properties": [
+        {
+          "blurb": "output file path",
+          "default": null,
+          "enum_values": null,
+          "name": "location",
+          "range": null,
+          "readable": true,
+          "type": "String",
+          "writable": true
+        }
+      ],
+      "role": "element"
+    },
+    {
+      "author": "g2g",
+      "caps": null,
+      "description": "Writes buffers to a sequence of files",
+      "klass": "Sink/File",
+      "long_name": "Multi-file sink",
+      "name": "multifilesink",
+      "pads": [
+        "SINK: ANY"
+      ],
+      "properties": [
+        {
+          "blurb": "printf-style file pattern, e.g. frame%05d.raw",
+          "default": null,
+          "enum_values": null,
+          "name": "location",
+          "range": null,
+          "readable": true,
+          "type": "String",
+          "writable": true
+        },
+        {
+          "blurb": "new-file policy: buffer | key-frame | max-size",
+          "default": null,
+          "enum_values": null,
+          "name": "next-file",
+          "range": null,
+          "readable": true,
+          "type": "String",
+          "writable": true
+        },
+        {
+          "blurb": "max bytes per file in max-size mode",
+          "default": null,
+          "enum_values": null,
+          "name": "max-file-size",
+          "range": null,
+          "readable": true,
+          "type": "Unsigned Integer",
+          "writable": true
+        },
+        {
+          "blurb": "next file index",
+          "default": null,
+          "enum_values": null,
+          "name": "index",
+          "range": null,
+          "readable": true,
+          "type": "Unsigned Integer",
+          "writable": true
+        }
+      ],
+      "role": "element"
+    },
+    {
+      "author": "g2g",
+      "caps": null,
+      "description": "Muxes to a series of MP4 files",
+      "klass": "Sink/File",
+      "long_name": "Split-muxer sink",
+      "name": "splitmuxsink",
+      "pads": [
+        "SINK: [CompressedVideo { codec: H264, width: Any, height: Any, framerate: Any }, CompressedVideo { codec: H265, width: Any, height: Any, framerate: Any }]"
+      ],
+      "properties": [
+        {
+          "blurb": "printf-style file pattern, e.g. clip%03d.mp4",
+          "default": null,
+          "enum_values": null,
+          "name": "location",
+          "range": null,
+          "readable": true,
+          "type": "String",
+          "writable": true
+        },
+        {
+          "blurb": "child container: mp4 | matroska | mpegts",
+          "default": null,
+          "enum_values": null,
+          "name": "muxer",
+          "range": null,
+          "readable": true,
+          "type": "String",
+          "writable": true
+        },
+        {
+          "blurb": "max segment duration in ns (0 = no split)",
+          "default": null,
+          "enum_values": null,
+          "name": "max-size-time",
+          "range": null,
+          "readable": true,
+          "type": "Unsigned Integer",
+          "writable": true
+        },
+        {
+          "blurb": "max segment size in bytes (0 = no split)",
+          "default": null,
+          "enum_values": null,
+          "name": "max-size-bytes",
+          "range": null,
+          "readable": true,
+          "type": "Unsigned Integer",
+          "writable": true
+        }
+      ],
+      "role": "element"
+    },
+    {
+      "author": "g2g",
+      "caps": "RawVideo { format: Rgba8, width: Fixed(320), height: Fixed(240), framerate: Fixed(1966080) }",
+      "description": "Interleaves N input streams into one output by presentation timestamp; the structural fan-in for text/data streams (the gst `funnel` analog).",
+      "klass": "Generic/Muxer",
+      "long_name": "Funnel N-to-1 forwarder",
+      "name": "funnel",
+      "pads": [],
+      "properties": [],
+      "role": "muxer (fan-in)"
+    },
+    {
+      "author": "g2g",
+      "caps": null,
+      "description": "Concatenates N streams end to end",
+      "klass": "Generic",
+      "long_name": "Concat",
+      "name": "concat",
+      "pads": [],
+      "properties": [
+        {
+          "blurb": "offset each input onto a continuous timeline",
+          "default": null,
+          "enum_values": null,
+          "name": "adjust-base",
+          "range": null,
+          "readable": true,
+          "type": "Boolean",
+          "writable": true
+        }
+      ],
+      "role": "muxer (fan-in)"
+    },
+    {
+      "author": "g2g",
+      "caps": null,
+      "description": "Forwards one of N inputs",
+      "klass": "Generic",
+      "long_name": "Input selector",
+      "name": "input-selector",
+      "pads": [],
+      "properties": [
+        {
+          "blurb": "index of the input to forward",
+          "default": null,
+          "enum_values": null,
+          "name": "active-pad",
+          "range": null,
+          "readable": true,
+          "type": "Unsigned Integer",
+          "writable": true
+        }
+      ],
+      "role": "muxer (fan-in)"
+    },
+    {
+      "author": "g2g",
+      "caps": "Audio { format: PcmS16Le, channels: 2, sample_rate: 48000 }",
+      "description": "Sums N time-aligned PCM audio inputs into one output stream (the gst `audiomixer` analog).",
+      "klass": "Filter/Audio",
+      "long_name": "Audio mixer",
+      "name": "audiomixer",
+      "pads": [],
+      "properties": [],
+      "role": "muxer (fan-in)"
+    }
+  ]
+}

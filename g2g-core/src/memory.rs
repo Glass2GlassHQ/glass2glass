@@ -221,6 +221,16 @@ impl MemoryDomain {
         }
     }
 
+    /// The CPU-readable bytes when the payload lives in system memory, else
+    /// `None` (a device-domain handle that would need a download first).
+    pub fn as_system_slice(&self) -> Option<&[u8]> {
+        match self {
+            MemoryDomain::System(s) => Some(s.as_slice()),
+            #[cfg(feature = "alloc")]
+            _ => None,
+        }
+    }
+
     /// Produce a second handle to this frame's memory for a fan-out branch
     /// (M213, M250). A **zero-copy** reference-count bump for every domain: the
     /// GPU domains and the shared-CPU [`SystemView`] are handle-shared; owned-CPU

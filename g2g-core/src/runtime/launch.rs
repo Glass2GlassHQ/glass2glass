@@ -623,9 +623,18 @@ fn expand_decodebin(registry: &Registry, chains: Vec<Chain>) -> Result<Vec<Chain
                     let (pred, props) = upstream.as_ref().ok_or(ParseError::DecodebinNoUpstream)?;
                     let caps = resolve_upstream_caps(registry, pred, props)?;
                     let target = |c: &Caps| is_raw_video(c) || is_raw_audio(c);
-                    let names = registry
+                    let mut names = registry
                         .autoplug_names(&caps, &target, DECODEBIN_MAX_DEPTH)
                         .ok_or_else(|| ParseError::NoDecodeChain(alloc::format!("{caps:?}")))?;
+                    // M421/M676: prepend the re-framing parser ahead of a real
+                    // decode of an elementary stream, like the boxed `decodebin`
+                    // splice (the caps-identity parser is invisible to the
+                    // shortest-chain search, so it never appears in `names`).
+                    if let Some(parser) = registry.parser_name(&caps) {
+                        if !names.is_empty() {
+                            names.insert(0, parser);
+                        }
+                    }
                     for name in names {
                         new_chain.push(Item::Element(ElementSpec {
                             name: name.to_string(),
