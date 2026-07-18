@@ -92,3 +92,17 @@ path = "fuzz_targets/mpegts.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "rtcp"
+path = "fuzz_targets/rtcp.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sdp"
+path = "fuzz_targets/sdp.rs"
+test = false
+doc = false
+bench = false
