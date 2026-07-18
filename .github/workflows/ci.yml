@@ -34,10 +34,20 @@ jobs:
       - name: test (default features)
         run: cargo test --workspace --locked
 
-  # Lints, default features, Linux. Not run with `-D warnings`: the workspace is
-  # hand-formatted and carries some intentional warnings, so CI fails only on
-  # clippy errors, not warnings. (No `cargo fmt --check`: the repo is deliberately
-  # not rustfmt-clean, see feedback in AGENTS.md / project memory.)
+  # Formatting: the workspace is rustfmt-clean, style pinned by rustfmt.toml.
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  # Lints, default features, Linux. Not run with `-D warnings`: the workspace
+  # carries some intentional warnings, so CI fails only on clippy errors, not
+  # warnings.
   clippy:
     name: clippy
     runs-on: ubuntu-latest
