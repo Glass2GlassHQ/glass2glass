@@ -1,0 +1,14 @@
+# Helper for gen-seeds.sh: writes crypto-valid RTMP C1/S1 handshake signatures
+# into the rtmp_handshake fuzz corpus. Random bytes never pass find_digest, so
+# the fuzzer needs real signatures (built with the crate's own key schedule) to
+# reach the handshake parsing. Standalone; not a workspace member.
+[package]
+name = "seedgen"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+g2g-plugins = { path = "../..", default-features = false, features = ["rtmp"] }
