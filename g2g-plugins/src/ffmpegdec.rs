@@ -579,6 +579,23 @@ impl FfmpegH264Dec {
             let mut frame = FfVideo::empty();
             match decoder.receive_frame(&mut frame) {
                 Ok(()) => {
+                    // Apply the H.264/H.265 conformance cropping window to the
+                    // display size. libavcodec leaves an alignment-breaking left/
+                    // top crop unapplied by default, so a cropped stream (e.g.
+                    // coded 352x288 -> display 300x168) would otherwise be emitted
+                    // at the wrong geometry. `UNALIGNED` forces the exact crop.
+                    // Software path only: the GPU backends keep opaque surfaces
+                    // whose crop is resolved when downloaded / mapped.
+                    if !outputs_cuda && !transfers_from_hw {
+                        // SAFETY: `frame` is a valid decoded AVFrame; the call only
+                        // reads its `crop_*` fields and offsets the data pointers.
+                        unsafe {
+                            ffmpeg::ffi::av_frame_apply_cropping(
+                                frame.as_mut_ptr(),
+                                ffmpeg::ffi::AV_FRAME_CROP_UNALIGNED as i32,
+                            );
+                        }
+                    }
                     // libavcodec returns the PTS we fed in (or AV_NOPTS_VALUE
                     // = INT64_MIN if it could not propagate one); treat the
                     // sentinel as zero so we don't return a wild timestamp.
@@ -713,6 +730,19 @@ impl FfmpegH264Dec {
             // `has_b_frames` is a plain int field read by the decoder at open.
             unsafe {
                 (*decoder_ctx.as_mut_ptr()).has_b_frames = n as i32;
+            }
+        }
+        // System-memory path: turn off libavcodec's built-in cropping so each
+        // frame arrives at coded size with its crop window intact, then apply the
+        // exact (possibly unaligned) crop in `drain_frames`. The built-in crop
+        // preserves alignment and leaves an unaligned left/top crop unapplied,
+        // emitting the wrong display geometry (e.g. coded 352 shown at 326, not
+        // 300). The GPU backends keep their own crop handling.
+        if !self.outputs_cuda() && !matches!(self.backend, Backend::Vaapi) {
+            // SAFETY: freshly allocated, not-yet-opened context; `apply_cropping`
+            // is a plain int field consulted by the decode path.
+            unsafe {
+                (*decoder_ctx.as_mut_ptr()).apply_cropping = 0;
             }
         }
         // cuvid's tunables live as AVOptions on the codec's private data,
