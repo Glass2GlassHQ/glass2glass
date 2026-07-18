@@ -163,6 +163,12 @@ async fn decode_fixture_with(
         OutputFormat::Nv12 => RawVideoFormat::Nv12,
         OutputFormat::I422 => RawVideoFormat::I422,
         OutputFormat::I444 => RawVideoFormat::I444,
+        OutputFormat::I420p10 => RawVideoFormat::I420p10,
+        OutputFormat::I420p12 => RawVideoFormat::I420p12,
+        OutputFormat::I422p10 => RawVideoFormat::I422p10,
+        OutputFormat::I422p12 => RawVideoFormat::I422p12,
+        OutputFormat::I444p10 => RawVideoFormat::I444p10,
+        OutputFormat::I444p12 => RawVideoFormat::I444p12,
         // These smoke fixtures are decoded with a fixed output format; Auto is
         // resolved per frame and covered by the unit tests in the module.
         OutputFormat::Auto => unreachable!("smoke fixtures use a fixed output format"),
