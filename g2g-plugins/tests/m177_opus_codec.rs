@@ -223,3 +223,68 @@ async fn mono_silence_decodes_to_silence() {
         rms(&decoded)
     );
 }
+
+/// Sink that reports a downstream bitrate target on every push (the WebRTC BWE
+/// shape), so the encoder retargets live (M721).
+struct BitrateSink {
+    bps: u32,
+    frames: usize,
+}
+impl OutputSink for BitrateSink {
+    fn push<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
+        Box::pin(async move {
+            if matches!(packet, PipelinePacket::DataFrame(_)) {
+                self.frames += 1;
+            }
+            Ok(PushOutcome::Bitrate(self.bps))
+        })
+    }
+}
+
+/// A downstream BWE estimate retargets the live encoder: the packets emitted
+/// after the signal are measurably smaller at 8 kb/s than at 96 kb/s.
+#[tokio::test]
+async fn bitrate_feedback_retargets_the_live_encoder() {
+    async fn avg_packet_len_after_feedback(bps: u32) -> f64 {
+        let mut enc = OpusEnc::new().with_bitrate(96_000);
+        enc.configure_pipeline(&pcm_caps(2)).unwrap();
+        let mut sink = BitrateSink { bps, frames: 0 };
+        let mut cap = CaptureSink::default();
+        // First batch carries the feedback back to the encoder...
+        let pcm = sine_pcm(2, FRAME_SAMPLES * 5, 12_000);
+        let frame = Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(pcm.into_boxed_slice())),
+            FrameTiming::default(),
+            0,
+        );
+        enc.process(PipelinePacket::DataFrame(frame), &mut sink)
+            .await
+            .unwrap();
+        assert!(sink.frames > 0, "first batch emitted packets");
+        // ...the second batch encodes at the new target.
+        let pcm = sine_pcm(2, FRAME_SAMPLES * 20, 12_000);
+        let frame = Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(pcm.into_boxed_slice())),
+            FrameTiming {
+                pts_ns: 100_000_000,
+                ..FrameTiming::default()
+            },
+            1,
+        );
+        enc.process(PipelinePacket::DataFrame(frame), &mut cap)
+            .await
+            .unwrap();
+        let total: usize = cap.frames.iter().map(|f| f.len()).sum();
+        total as f64 / cap.frames.len().max(1) as f64
+    }
+
+    let low = avg_packet_len_after_feedback(8_000).await;
+    let high = avg_packet_len_after_feedback(96_000).await;
+    assert!(
+        low * 2.0 < high,
+        "8 kb/s packets ({low:.0} B avg) must be far smaller than 96 kb/s ones ({high:.0} B avg)"
+    );
+}

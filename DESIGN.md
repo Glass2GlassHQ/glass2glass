@@ -2051,6 +2051,7 @@ default; encoders override) has its output adapter relay the pending
 `ForceKeyframe` / bitrate onto its input link, the QoS-relay mechanism
 generalized, so `enc ! h264parse ! webrtc-sink` reaches the encoder. `Propose` /
 `Renegotiate` never relay (they concern the adjacent element's own caps).
+`OpusEnc` retargets live too (M721, `OPUS_SET_BITRATE`, no rebuild).
 
 **Codec plumbing.** A `Track` enum unifies the per-track facts WebRTC needs to
 agree on: codec (H.264 / Opus), m-line `MediaKind`, and the RTP clock (90 kHz /
