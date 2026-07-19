@@ -46,7 +46,6 @@ use str0m::bwe::{Bitrate, BweKind};
 use str0m::change::{SdpAnswer, SdpOffer};
 use str0m::crypto::from_feature_flags;
 use str0m::media::{Direction, MediaKind, Mid, Pt};
-use str0m::net::{Protocol, Receive};
 use str0m::{Event, IceConnectionState, Input, Output, RtcConfig};
 
 use g2g_core::frame::Frame;
@@ -59,7 +58,8 @@ use g2g_core::{
 
 use crate::filesink::io_err;
 use crate::h264util::h264_au_is_keyframe;
-use crate::webrtc_util::{add_ice_candidates, select_host_ip};
+use crate::turn::TurnSet;
+use crate::webrtc_util::{add_ice_candidates, feed_datagram, select_host_ip, send_transmit};
 use crate::webrtcsink::Track;
 
 /// The two tracks a duplex session can carry, in pad order: video on pad 0, audio
@@ -126,6 +126,9 @@ pub struct WebRtcDuplexSession {
     /// `input_count` and `output_count` (input i and output i share m-line i).
     track_count: usize,
     stun_server: Option<String>,
+    turn_server: Option<String>,
+    turn_user: String,
+    turn_pass: String,
     /// How long to keep draining the peer after the local send side ends (its
     /// sources reached EOS), so in-flight received frames are not cut off.
     linger: Duration,
@@ -164,6 +167,9 @@ impl WebRtcDuplexSession {
             sig: Some(sig),
             track_count,
             stun_server: None,
+            turn_server: None,
+            turn_user: String::new(),
+            turn_pass: String::new(),
             linger: Duration::from_millis(1500),
             inputs: alloc::vec![None; track_count],
             reverse: (0..track_count).map(|_| ReverseChannel::new()).collect(),
@@ -182,6 +188,23 @@ impl WebRtcDuplexSession {
     /// default, which is all a same-host P2P loopback needs).
     pub fn with_stun_server(mut self, server: impl Into<String>) -> Self {
         self.stun_server = Some(server.into());
+        self
+    }
+
+    /// Set a TURN relay (a `host:port` / `turn:` / `turns:` server, or a
+    /// comma-separated list) + long-term credentials, as on the WHIP/WHEP
+    /// elements. The relayed candidates ride in the offer/answer SDP (the
+    /// duplex signal channel has no trickle), so allocation happens before the
+    /// exchange.
+    pub fn with_turn_server(
+        mut self,
+        server: impl Into<String>,
+        username: impl Into<String>,
+        password: impl Into<String>,
+    ) -> Self {
+        self.turn_server = Some(server.into());
+        self.turn_user = username.into();
+        self.turn_pass = password.into();
         self
     }
 
@@ -288,6 +311,9 @@ impl MultiDuplexSession for WebRtcDuplexSession {
         let track_count = self.track_count;
         let inputs = self.inputs.clone();
         let stun = self.stun_server.clone();
+        let turn_server = self.turn_server.clone();
+        let turn_user = self.turn_user.clone();
+        let turn_pass = self.turn_pass.clone();
         let linger = self.linger;
         let sig = self.sig.take();
         // The reverse channel of the input pad carrying each track kind, so a
@@ -322,9 +348,17 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                 // back via `nacks_seen`.
                 .set_stats_interval(Some(Duration::from_millis(500)))
                 .build(Instant::now());
-            // Host (and optional reflexive) candidates ride in the SDP, so they
-            // must be added before the offer/answer is generated below.
+            // Host (and optional reflexive / relayed) candidates ride in the
+            // SDP, so they must be added before the offer/answer is generated
+            // below (M719: the duplex path gained TURN).
             add_ice_candidates(&mut rtc, &socket, stun.as_deref()).await?;
+            let mut turn = match turn_server.as_deref() {
+                Some(servers) => {
+                    TurnSet::setup(&mut rtc, &socket, servers, &turn_user, &turn_pass).await
+                }
+                None => TurnSet::empty(),
+            };
+            let mut refresh_at = Instant::now() + crate::turn::REFRESH_INTERVAL;
 
             // Per-kind `Mid` and negotiated payload type, for both directions.
             // The offerer learns its `Mid`s from `add_media` (str0m does not emit
@@ -404,9 +438,7 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                 let deadline = loop {
                     match rtc.poll_output() {
                         Ok(Output::Timeout(t)) => break t,
-                        Ok(Output::Transmit(t)) => {
-                            let _ = socket.send_to(&t.contents, t.destination).await;
-                        }
+                        Ok(Output::Transmit(t)) => send_transmit(&socket, &mut turn, &t).await,
                         // The answerer learns its m-line `Mid`s here (the offerer
                         // captured them from `add_media`); harmless to set again.
                         Ok(Output::Event(Event::MediaAdded(m))) => match m.kind {
@@ -504,11 +536,13 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                 tokio::select! {
                     r = socket.recv_from(&mut buf) => {
                         let Ok((n, source)) = r else { finish!() };
-                        if let Ok(contents) = (&buf[..n]).try_into() {
-                            let input = Input::Receive(Instant::now(),
-                                Receive { proto: Protocol::Udp, source, destination: local, contents });
-                            if rtc.handle_input(input).is_err() { finish!(); }
+                        if !feed_datagram(&mut rtc, &mut turn, local, &buf[..n], source) {
+                            finish!();
                         }
+                    }
+                    _ = tokio::time::sleep_until(tokio::time::Instant::from_std(refresh_at)), if !turn.is_empty() => {
+                        turn.refresh_all(&socket).await;
+                        refresh_at = Instant::now() + crate::turn::REFRESH_INTERVAL;
                     }
                     inb = inbound.recv(), if !send_done => {
                         match inb {

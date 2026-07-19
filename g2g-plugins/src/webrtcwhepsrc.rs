@@ -50,7 +50,7 @@ use g2g_core::{
 };
 
 use crate::filesink::io_err;
-use crate::turn::{self, TurnClient};
+use crate::turn::{self, TurnSet};
 use crate::webrtc_util::{
     add_host_candidate, delete_resource, feed_datagram, ice_restart, post_sdp, select_host_ip,
     send_transmit, trickle_candidates, TricklePatch, TurnConfig, ICE_RESTART_TIMEOUT,
@@ -356,7 +356,7 @@ impl SourceLoop for WebRtcWhepSrc {
 
             // Gather reflexive / relay candidates and trickle them to the
             // resource; allocation failure degrades to host/srflx.
-            let mut turn: Option<TurnClient> = trickle_candidates(
+            let mut turn: TurnSet = trickle_candidates(
                 &mut rtc,
                 &socket,
                 &offer_sdp,
@@ -499,10 +499,8 @@ impl SourceLoop for WebRtcWhepSrc {
                         let _ = feed_datagram(&mut rtc, &mut turn, local, &buf[..n], source);
                     }
                     // Keep the TURN allocation + permissions alive.
-                    _ = tokio::time::sleep_until(tokio::time::Instant::from_std(refresh_at)), if turn.is_some() => {
-                        if let Some(tc) = turn.as_mut() {
-                            let _ = tc.refresh(&socket).await;
-                        }
+                    _ = tokio::time::sleep_until(tokio::time::Instant::from_std(refresh_at)), if !turn.is_empty() => {
+                        turn.refresh_all(&socket).await;
                         refresh_at = Instant::now() + turn::REFRESH_INTERVAL;
                     }
                     _ = tokio::time::sleep(timeout) => {

@@ -59,7 +59,7 @@ use g2g_core::{
 };
 
 use crate::filesink::io_err;
-use crate::turn::{self, TurnClient};
+use crate::turn::{self, TurnSet};
 use crate::webrtc_util::{
     add_host_candidate, delete_resource, feed_datagram, ice_restart, post_sdp, select_host_ip,
     send_transmit, trickle_candidates, TricklePatch, TurnConfig, ICE_RESTART_TIMEOUT,
@@ -309,7 +309,7 @@ impl WebRtcSink {
         })?;
 
         // Gather reflexive / relay candidates and trickle them to the resource.
-        let turn = trickle_candidates(
+        let turn: TurnSet = trickle_candidates(
             &mut rtc,
             &socket,
             &offer_sdp,
@@ -589,7 +589,7 @@ async fn run_session(
     local: SocketAddr,
     mid: Mid,
     track: Track,
-    mut turn: Option<TurnClient>,
+    mut turn: TurnSet,
     resource: Option<String>,
     etag: Option<String>,
     bearer: Option<String>,
@@ -683,10 +683,8 @@ async fn run_session(
                 }
             }
             // Keep the TURN allocation + permissions alive.
-            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(refresh_at)), if turn.is_some() => {
-                if let Some(tc) = turn.as_mut() {
-                    let _ = tc.refresh(&socket).await;
-                }
+            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(refresh_at)), if !turn.is_empty() => {
+                turn.refresh_all(&socket).await;
                 refresh_at = Instant::now() + turn::REFRESH_INTERVAL;
             }
             // A closed channel = element drop. Clean-EOS teardown is done by the

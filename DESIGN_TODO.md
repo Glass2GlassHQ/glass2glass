@@ -602,7 +602,7 @@ Phased plan:
     sendrecv, so peers exchange SDP directly over an `SdpChannel`). Validated by
     in-process P2P loopbacks (video + full A/V, localhost, no server). Remaining:
     mid-stream re-solve through the multi-track runners; launch-registry wiring;
-    STUN/TURN for the duplex path; mid-session transceiver add/remove
+    mid-session transceiver add/remove
     (renegotiation); a pluggable real-SFU (LiveKit) signaller for the duplex
     element. (Per-input reverse-signal routing (PLI / BWE) for the *fan-in*
     session landed, M523: `g2g-core` `ReverseChannel` + `MultiInputElement::
@@ -622,8 +622,6 @@ Phased plan:
     force-keyframe (needs a libvpx path `vpx-encode` does not expose); Opus
     bitrate adaptation; `ForceKeyframe`/`Bitrate` relay through an intervening
     transform.
-  - **T3: TURN / ICE completeness.** Multiple TURN servers per element.
-    Incremental on the M242 `turn.rs`.
   - **T4: signalling ecosystem.** Drop the `[patch.crates-io]` str0m fork
     (unpadded media sends) once the LiveKit forwarder fix (livekit#4690, on
     their master) ships in a release, or str0m#1014 lands; a real LiveKit Cloud
@@ -637,7 +635,7 @@ Phased plan:
     event, so EOS rides an explicit marker message; a WHIP/SFU-signalled data
     channel vs the P2P `SdpChannel` seam).
   Smaller loose ends: non-stereo / non-48 kHz Opus; graceful flush on EOS.
-  Recommended order: T0 -> T1 -> T2 (PLI first) -> T3 -> T4.
+  Recommended order: T1 remainders -> T2 -> T4 -> T5.
 
 ## Adaptive streaming (HLS / DASH)
 

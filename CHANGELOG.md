@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M719: multiple TURN servers per element (comma-separated list, GStreamer-style `turn://user:pass@host` credentials) and TURN on the duplex session; multi-allocation validated against coturn.
 - M718: IPv6 STUN/TURN (v6 XOR address codec, RFC 6156 v6 relay allocation, v6-capable host-ip pick); relay round-trip validated against coturn over `::1`.
 - M717: TURN-over-TCP / -TLS (`turn:...?transport=tcp` / `turns:` server forms via a datagram-to-stream bridge); validated against coturn on all three transports.
 - M716: TURN channel binding (ChannelData framing once the per-peer bind lands) and 438 stale-nonce recovery; validated against a real coturn relay.

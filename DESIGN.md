@@ -2032,7 +2032,12 @@ UDP toward peers. The codec is address-family agnostic (M718): XOR addresses
 encode/decode IPv6 (cookie + transaction id), and a v6-bound client requests a
 v6 relayed address (RFC 6156). Validated against a real coturn on all three
 transports and over IPv6 (allocate, bind, ChannelData round-trip both
-directions).
+directions). An element takes a comma-separated server list (M719, each entry
+optionally carrying GStreamer-style `turn://user:pass@host` credentials): a
+`TurnSet` allocates on every server, contributes one relayed candidate each,
+and the data plane routes by which relay a transmit's `source` names. The
+duplex session gained the same STUN/TURN surface; its relayed candidates ride
+in the offer/answer SDP (no trickle channel).
 
 **RTCP feedback** rides the §4.13 reverse channel. A remote PLI
 (`Event::KeyframeRequest`) becomes a `Reconfigure::ForceKeyframe` walked upstream

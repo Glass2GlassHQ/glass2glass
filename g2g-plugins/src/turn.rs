@@ -459,6 +459,93 @@ enum TurnTransport {
     Tls,
 }
 
+/// A set of TURN allocations, one per configured server (M719): each
+/// contributes its own relayed candidate, and the data plane routes by which
+/// relay / server address a transmit or datagram matches. The `Option`-like
+/// surface keeps the element run loops one-liner simple.
+#[derive(Debug, Default)]
+pub(crate) struct TurnSet(Vec<TurnClient>);
+
+impl TurnSet {
+    pub(crate) fn empty() -> Self {
+        Self(Vec::new())
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Allocate on every server in the comma-separated `servers` list (each a
+    /// `host:port`, RFC 7065 `turn:` / `turns:` URI, or GStreamer-style
+    /// `turn://user:pass@host:port` with embedded credentials; entries without
+    /// credentials use the element-level `user` / `pass`). A server that fails
+    /// to allocate is skipped, so one dead relay never blocks the rest.
+    pub(crate) async fn setup(
+        rtc: &mut Rtc,
+        socket: &UdpSocket,
+        servers: &str,
+        user: &str,
+        pass: &str,
+    ) -> Self {
+        let mut set = Vec::new();
+        for entry in servers.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            let (server, entry_user, entry_pass) = split_turn_credentials(entry);
+            let user = entry_user.as_deref().unwrap_or(user);
+            let pass = entry_pass.as_deref().unwrap_or(pass);
+            if let Some(client) = setup(rtc, socket, &server, user, pass).await {
+                set.push(client);
+            }
+        }
+        Self(set)
+    }
+
+    /// The client whose relayed candidate `relay` is (an str0m transmit from a
+    /// relay pair carries it as `source`).
+    pub(crate) fn for_relay(&mut self, relay: SocketAddr) -> Option<&mut TurnClient> {
+        self.0.iter_mut().find(|c| c.relay_addr() == relay)
+    }
+
+    /// The client for the server (or bridge) at `addr`.
+    pub(crate) fn for_server(&mut self, addr: SocketAddr) -> Option<&mut TurnClient> {
+        self.0.iter_mut().find(|c| c.is_server(addr))
+    }
+
+    /// Each allocation's relayed candidate address.
+    pub(crate) fn relay_addrs(&self) -> Vec<SocketAddr> {
+        self.0.iter().map(|c| c.relay_addr()).collect()
+    }
+
+    /// Refresh every allocation (and its channel bindings / permissions).
+    pub(crate) async fn refresh_all(&mut self, socket: &UdpSocket) {
+        for c in &mut self.0 {
+            let _ = c.refresh(socket).await;
+        }
+    }
+}
+
+/// Split GStreamer-style embedded credentials (`turn://user:pass@rest`) off a
+/// server entry, returning the credential-free server string (scheme
+/// normalized back to the RFC 7065 form) and the credentials when present.
+fn split_turn_credentials(entry: &str) -> (String, Option<String>, Option<String>) {
+    let (scheme, rest) = if let Some(r) = entry.strip_prefix("turns://") {
+        ("turns:", r)
+    } else if let Some(r) = entry.strip_prefix("turn://") {
+        ("turn:", r)
+    } else {
+        return (entry.into(), None, None);
+    };
+    match rest.split_once('@') {
+        Some((userinfo, host)) => {
+            let (user, pass) = match userinfo.split_once(':') {
+                Some((u, p)) => (u.into(), p.into()),
+                None => (userinfo.into(), String::new()),
+            };
+            (format!("{scheme}{host}"), Some(user), Some(pass))
+        }
+        None => (format!("{scheme}{rest}"), None, None),
+    }
+}
+
 /// Resolve a TURN server string to the transport address the client speaks UDP
 /// to: the server itself, or a freshly spawned stream bridge for `turn:...
 /// ?transport=tcp` / `turns:` servers.
@@ -1131,6 +1218,53 @@ mod tests {
         );
         // A non-STUN, non-ChannelData first byte is a desync, not a message.
         assert_eq!(stream_message_bounds(&[0x80, 0, 0, 0, 0]), None);
+    }
+
+    #[test]
+    fn splits_gstreamer_style_credentials() {
+        assert_eq!(
+            split_turn_credentials("turn://alice:s3cret@relay.example:3478?transport=tcp"),
+            (
+                "turn:relay.example:3478?transport=tcp".into(),
+                Some("alice".into()),
+                Some("s3cret".into())
+            )
+        );
+        assert_eq!(
+            split_turn_credentials("turns://relay.example"),
+            ("turns:relay.example".into(), None, None)
+        );
+        // Bare host:port passes through untouched.
+        assert_eq!(
+            split_turn_credentials("relay.example:3478"),
+            ("relay.example:3478".into(), None, None)
+        );
+    }
+
+    /// One allocation per configured server: `G2G_TURN_SERVER` may be a
+    /// comma-separated list (e.g. the same coturn over UDP and TCP), and the
+    /// set must expose one relayed candidate per entry.
+    #[tokio::test]
+    #[ignore = "needs a reachable TURN server (G2G_TURN_SERVER/_USER/_PASS)"]
+    async fn turn_set_allocates_per_server() {
+        let (Ok(servers), Ok(user), Ok(pass)) = (
+            std::env::var("G2G_TURN_SERVER"),
+            std::env::var("G2G_TURN_USER"),
+            std::env::var("G2G_TURN_PASS"),
+        ) else {
+            std::eprintln!("skipping: set G2G_TURN_SERVER (may be a list), _USER, _PASS");
+            return;
+        };
+        let want = servers.split(',').filter(|s| !s.trim().is_empty()).count();
+        let host_ip = crate::webrtc_util::select_host_ip();
+        let socket = UdpSocket::bind((host_ip, 0)).await.expect("bind");
+        let mut rtc = str0m::RtcConfig::new().build(std::time::Instant::now());
+        let set = TurnSet::setup(&mut rtc, &socket, &servers, &user, &pass).await;
+        assert_eq!(
+            set.relay_addrs().len(),
+            want,
+            "every server in the list allocated a relay"
+        );
     }
 
     /// Interop against a real TURN server (coturn):

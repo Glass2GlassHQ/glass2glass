@@ -21,7 +21,7 @@ use tokio::net::UdpSocket;
 use str0m::net::{Protocol, Receive, Transmit};
 use str0m::{Candidate, IceCreds, Input, Rtc};
 
-use crate::turn::{self, TurnClient};
+use crate::turn::TurnSet;
 use g2g_core::{G2gError, HardwareError};
 
 /// STUN magic cookie (RFC 5389).
@@ -39,6 +39,9 @@ pub(crate) struct WhipSession {
 }
 
 /// TURN relay config passed to the trickle gather: `None` server = no relay.
+/// `server` may be a comma-separated list (each entry a `host:port`, an RFC
+/// 7065 `turn:` / `turns:` URI, or `turn://user:pass@host:port` with embedded
+/// credentials overriding `user` / `pass`), one allocation per entry.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct TurnConfig<'a> {
     pub server: Option<&'a str>,
@@ -325,8 +328,10 @@ pub(crate) async fn trickle_candidates(
     bearer: Option<&str>,
     stun_server: Option<&str>,
     turn_cfg: TurnConfig<'_>,
-) -> Option<TurnClient> {
-    let local = socket.local_addr().ok()?;
+) -> TurnSet {
+    let Ok(local) = socket.local_addr() else {
+        return TurnSet::empty();
+    };
     let mut lines: Vec<String> = Vec::new();
 
     if let Some(server) = stun_server {
@@ -344,14 +349,14 @@ pub(crate) async fn trickle_candidates(
         }
     }
 
-    // TURN allocate (adds the relayed candidate to `rtc` inside setup); rebuild
-    // the same candidate string for the trickle frag.
+    // TURN allocate (adds each relayed candidate to `rtc` inside setup);
+    // rebuild the same candidate strings for the trickle frag.
     let turn = match turn_cfg.server {
-        Some(server) => turn::setup(rtc, socket, server, turn_cfg.user, turn_cfg.pass).await,
-        None => None,
+        Some(servers) => TurnSet::setup(rtc, socket, servers, turn_cfg.user, turn_cfg.pass).await,
+        None => TurnSet::empty(),
     };
-    if let Some(tc) = &turn {
-        if let Ok(c) = Candidate::relayed(tc.relay_addr(), local, "udp") {
+    for relay in turn.relay_addrs() {
+        if let Ok(c) = Candidate::relayed(relay, local, "udp") {
             lines.push(c.to_sdp_string());
         }
     }
@@ -509,14 +514,14 @@ pub(crate) async fn add_ice_candidates(
 /// indication to the server, after ensuring a permission for the peer); a direct
 /// host/srflx datagram goes straight out. Shared by every webrtc element's poll
 /// loop.
-pub(crate) async fn send_transmit(socket: &UdpSocket, turn: &mut Option<TurnClient>, t: &Transmit) {
-    match turn.as_mut() {
-        Some(tc) if t.source == tc.relay_addr() => {
+pub(crate) async fn send_transmit(socket: &UdpSocket, turn: &mut TurnSet, t: &Transmit) {
+    match turn.for_relay(t.source) {
+        Some(tc) => {
             let _ = tc.ensure_permission(socket, t.destination).await;
             let wrapped = tc.wrap_send(t.destination, &t.contents);
             let _ = socket.send_to(&wrapped, tc.server_addr()).await;
         }
-        _ => {
+        None => {
             let _ = socket.send_to(&t.contents, t.destination).await;
         }
     }
@@ -530,28 +535,25 @@ pub(crate) async fn send_transmit(socket: &UdpSocket, turn: &mut Option<TurnClie
 /// callers that ignore transient input errors discard the result.
 pub(crate) fn feed_datagram(
     rtc: &mut Rtc,
-    turn: &mut Option<TurnClient>,
+    turn: &mut TurnSet,
     local: SocketAddr,
     datagram: &[u8],
     source: SocketAddr,
 ) -> bool {
-    let from_turn = turn.as_ref().is_some_and(|tc| tc.is_server(source));
-    if from_turn {
-        if let Some(tc) = turn.as_mut() {
-            if let Some((peer, payload)) = tc.parse_data(datagram) {
-                let relay = tc.relay_addr();
-                if let Ok(contents) = payload.as_slice().try_into() {
-                    let input = Input::Receive(
-                        Instant::now(),
-                        Receive {
-                            proto: Protocol::Udp,
-                            source: peer,
-                            destination: relay,
-                            contents,
-                        },
-                    );
-                    return rtc.handle_input(input).is_ok();
-                }
+    if let Some(tc) = turn.for_server(source) {
+        if let Some((peer, payload)) = tc.parse_data(datagram) {
+            let relay = tc.relay_addr();
+            if let Ok(contents) = payload.as_slice().try_into() {
+                let input = Input::Receive(
+                    Instant::now(),
+                    Receive {
+                        proto: Protocol::Udp,
+                        source: peer,
+                        destination: relay,
+                        contents,
+                    },
+                );
+                return rtc.handle_input(input).is_ok();
             }
         }
     } else if let Ok(contents) = datagram.try_into() {
