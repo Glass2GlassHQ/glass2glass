@@ -52,7 +52,8 @@ use g2g_core::{
 use crate::filesink::io_err;
 use crate::turn::{self, TurnClient};
 use crate::webrtc_util::{
-    add_ice_candidates, feed_datagram, post_sdp, select_host_ip, send_transmit,
+    add_host_candidate, delete_resource, feed_datagram, ice_restart, post_sdp, select_host_ip,
+    send_transmit, trickle_candidates, TricklePatch, TurnConfig, ICE_RESTART_TIMEOUT,
 };
 
 /// Minimum gap between keyframe (PLI) requests while waiting for the first one,
@@ -334,19 +335,9 @@ impl SourceLoop for WebRtcWhepSrc {
                 Media::Audio => config.enable_opus(true),
             };
             let mut rtc = config.build(Instant::now());
-            // Host candidate, plus a STUN server-reflexive candidate when set
-            // (needed to reach a cloud SFU across NAT).
-            add_ice_candidates(&mut rtc, &socket, self.stun_server.as_deref()).await?;
-
-            // TURN relay candidate when configured (fallback for NATs STUN
-            // cannot traverse); allocation failure degrades to host/srflx.
-            let mut turn: Option<TurnClient> = match &self.turn_server {
-                Some(server) => {
-                    turn::setup(&mut rtc, &socket, server, &self.turn_user, &self.turn_pass).await
-                }
-                None => None,
-            };
-            let mut refresh_at = Instant::now() + turn::REFRESH_INTERVAL;
+            // Trickle ICE: the offer carries the host candidate only; reflexive /
+            // relay candidates are gathered after the POST and trickled by PATCH.
+            add_host_candidate(&mut rtc, &socket)?;
 
             // WHEP: offer a single recv-only m-line for the chosen track, POST
             // it, apply the answer.
@@ -356,11 +347,34 @@ impl SourceLoop for WebRtcWhepSrc {
                 let (offer, pending) = api.apply().ok_or_else(hw)?;
                 (offer.to_sdp_string(), pending)
             };
-            let answer_sdp = post_sdp(&self.whep_url, self.bearer.as_deref(), offer_sdp).await?;
-            let answer = SdpAnswer::from_sdp_string(&answer_sdp).map_err(|_| hw())?;
+            let session =
+                post_sdp(&self.whep_url, self.bearer.as_deref(), offer_sdp.clone()).await?;
+            let answer = SdpAnswer::from_sdp_string(&session.answer).map_err(|_| hw())?;
             rtc.sdp_api()
                 .accept_answer(pending, answer)
                 .map_err(|_| hw())?;
+
+            // Gather reflexive / relay candidates and trickle them to the
+            // resource; allocation failure degrades to host/srflx.
+            let mut turn: Option<TurnClient> = trickle_candidates(
+                &mut rtc,
+                &socket,
+                &offer_sdp,
+                &session,
+                self.bearer.as_deref(),
+                self.stun_server.as_deref(),
+                TurnConfig {
+                    server: self.turn_server.as_deref(),
+                    user: &self.turn_user,
+                    pass: &self.turn_pass,
+                },
+            )
+            .await;
+            let resource = session.resource;
+            let etag = session.etag;
+            let bearer = self.bearer.clone();
+            let mut disconnected_since: Option<Instant> = None;
+            let mut refresh_at = Instant::now() + turn::REFRESH_INTERVAL;
 
             // Announce the produced caps before the first frame.
             out.push(PipelinePacket::CapsChanged(self.caps())).await?;
@@ -373,6 +387,17 @@ impl SourceLoop for WebRtcWhepSrc {
             let mut seen_keyframe = false;
             let mut last_pli: Option<Instant> = None;
             let mut media_mid: Option<Mid> = None;
+            // Emit EOS and DELETE the WHEP resource (RFC 9725 teardown) on a clean
+            // end.
+            macro_rules! finish {
+                () => {{
+                    if let Some(res) = resource.as_deref() {
+                        delete_resource(res, bearer.as_deref()).await;
+                    }
+                    out.push(PipelinePacket::Eos).await?;
+                    return Ok(seq);
+                }};
+            }
             loop {
                 // Drain str0m's output to a deadline, collecting decoded access
                 // units to push after (poll_output is sync; pushes are async).
@@ -389,19 +414,38 @@ impl SourceLoop for WebRtcWhepSrc {
                             media_mid = Some(d.mid);
                             frames.push((pts_ns, d.data.to_vec()));
                         }
-                        Ok(Output::Event(Event::IceConnectionStateChange(
-                            IceConnectionState::Disconnected,
-                        ))) => {
-                            out.push(PipelinePacket::Eos).await?;
-                            return Ok(seq);
-                        }
+                        Ok(Output::Event(Event::IceConnectionStateChange(state))) => match state {
+                            IceConnectionState::Disconnected => {
+                                disconnected_since.get_or_insert_with(Instant::now);
+                            }
+                            IceConnectionState::Connected | IceConnectionState::Completed => {
+                                disconnected_since = None;
+                            }
+                            _ => {}
+                        },
                         Ok(Output::Event(_)) => {}
-                        Err(_) => {
-                            out.push(PipelinePacket::Eos).await?;
-                            return Ok(seq);
-                        }
+                        Err(_) => finish!(),
                     }
                 };
+
+                // Sustained ICE disconnect: attempt an ICE restart against the
+                // resource. A server that rejects it ends the source (fresh
+                // re-POST reconnect is owned by the element restarting).
+                if disconnected_since.is_some_and(|t| t.elapsed() >= ICE_RESTART_TIMEOUT) {
+                    disconnected_since = None;
+                    match resource.as_deref() {
+                        Some(res) => {
+                            if !matches!(
+                                ice_restart(&mut rtc, res, bearer.as_deref(), etag.as_deref())
+                                    .await,
+                                TricklePatch::Accepted
+                            ) {
+                                finish!();
+                            }
+                        }
+                        None => finish!(),
+                    }
+                }
 
                 for (pts_ns, data) in frames {
                     // Video keyframe = IDR (the sink/parser cares); every Opus
@@ -429,8 +473,7 @@ impl SourceLoop for WebRtcWhepSrc {
                     out.push(PipelinePacket::DataFrame(frame)).await?;
                     seq += 1;
                     if self.frame_limit != 0 && seq >= self.frame_limit {
-                        out.push(PipelinePacket::Eos).await?;
-                        return Ok(seq);
+                        finish!();
                     }
                 }
 
@@ -452,10 +495,7 @@ impl SourceLoop for WebRtcWhepSrc {
                 let timeout = deadline.saturating_duration_since(Instant::now());
                 tokio::select! {
                     r = socket.recv_from(&mut buf) => {
-                        let Ok((n, source)) = r else {
-                            out.push(PipelinePacket::Eos).await?;
-                            return Ok(seq);
-                        };
+                        let Ok((n, source)) = r else { finish!() };
                         let _ = feed_datagram(&mut rtc, &mut turn, local, &buf[..n], source);
                     }
                     // Keep the TURN allocation + permissions alive.

@@ -139,7 +139,7 @@ impl TurnClient {
         let mut msg = MessageBuilder::new(ALLOCATE_REQUEST, txn);
         msg.push_requested_transport();
         msg.push_lifetime(DEFAULT_LIFETIME_SECS);
-        let first = round_trip(socket, server, msg.finish()).await?;
+        let first = round_trip(socket, server, msg.finish(), &txn).await?;
 
         let (realm, nonce) = match parse_error(&first) {
             // 401 Unauthorized carries the realm/nonce we must echo.
@@ -162,7 +162,7 @@ impl TurnClient {
         msg.push_str_attr(ATTR_REALM, &realm);
         msg.push_str_attr(ATTR_NONCE, &nonce);
         let bytes = msg.finish_with_integrity(&key);
-        let resp = round_trip(socket, server, bytes).await?;
+        let resp = round_trip(socket, server, bytes, &txn).await?;
 
         if message_type(&resp) != ALLOCATE_SUCCESS {
             return Err(hw());
@@ -301,20 +301,31 @@ fn long_term_key(username: &str, realm: &str, password: &str) -> Vec<u8> {
     h.finalize().to_vec()
 }
 
-/// Send `bytes` to the TURN server and read one reply, with a short timeout.
-/// Used only during the setup Allocate handshake.
+/// Send `bytes` to the TURN server and read the reply matching `txn`, with a
+/// short overall timeout. Because the offer is POSTed before this handshake runs
+/// (trickle ICE), the peer's ICE connectivity checks also land on the socket, so
+/// skip any datagram whose transaction id is not ours (matched on bytes 8..20).
 async fn round_trip(
     socket: &UdpSocket,
     server: SocketAddr,
     bytes: Vec<u8>,
+    txn: &[u8; 12],
 ) -> Result<Vec<u8>, G2gError> {
     socket.send_to(&bytes, server).await.map_err(|_| hw())?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
     let mut buf = [0u8; 1500];
-    let (n, _) = tokio::time::timeout(Duration::from_secs(3), socket.recv_from(&mut buf))
-        .await
-        .map_err(|_| hw())?
-        .map_err(|_| hw())?;
-    Ok(buf[..n].to_vec())
+    loop {
+        let remaining = deadline
+            .checked_duration_since(std::time::Instant::now())
+            .ok_or_else(hw)?;
+        let (n, _) = tokio::time::timeout(remaining, socket.recv_from(&mut buf))
+            .await
+            .map_err(|_| hw())?
+            .map_err(|_| hw())?;
+        if n >= 20 && &buf[8..20] == txn {
+            return Ok(buf[..n].to_vec());
+        }
+    }
 }
 
 /// Derive a 12-byte transaction id from the socket's local port and a counter.

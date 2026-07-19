@@ -44,7 +44,8 @@ use g2g_core::{
 use crate::filesink::io_err;
 use crate::turn::{self, TurnClient};
 use crate::webrtc_util::{
-    add_ice_candidates, feed_datagram, post_sdp, select_host_ip, send_transmit,
+    add_host_candidate, delete_resource, feed_datagram, ice_restart, post_sdp, select_host_ip,
+    send_transmit, trickle_candidates, TricklePatch, TurnConfig, ICE_RESTART_TIMEOUT,
 };
 
 /// Output port for the H.264 video track.
@@ -174,14 +175,9 @@ impl MultiOutputSource for WebRtcWhepSessionSrc {
                 .enable_h264(true)
                 .enable_opus(true)
                 .build(Instant::now());
-            add_ice_candidates(&mut rtc, &socket, self.stun_server.as_deref()).await?;
-            let mut turn: Option<TurnClient> = match &self.turn_server {
-                Some(server) => {
-                    turn::setup(&mut rtc, &socket, server, &self.turn_user, &self.turn_pass).await
-                }
-                None => None,
-            };
-            let mut refresh_at = Instant::now() + turn::REFRESH_INTERVAL;
+            // Trickle ICE: the offer carries the host candidate only; reflexive /
+            // relay candidates are gathered after the POST and trickled by PATCH.
+            add_host_candidate(&mut rtc, &socket)?;
 
             // WHEP: offer recv-only video + audio m-lines, POST, apply answer.
             let (offer_sdp, pending, video_mid, audio_mid) = {
@@ -203,11 +199,33 @@ impl MultiOutputSource for WebRtcWhepSessionSrc {
                 let (offer, pending) = api.apply().ok_or_else(hw)?;
                 (offer.to_sdp_string(), pending, video_mid, audio_mid)
             };
-            let answer_sdp = post_sdp(&self.whep_url, self.bearer.as_deref(), offer_sdp).await?;
-            let answer = SdpAnswer::from_sdp_string(&answer_sdp).map_err(|_| hw())?;
+            let session =
+                post_sdp(&self.whep_url, self.bearer.as_deref(), offer_sdp.clone()).await?;
+            let answer = SdpAnswer::from_sdp_string(&session.answer).map_err(|_| hw())?;
             rtc.sdp_api()
                 .accept_answer(pending, answer)
                 .map_err(|_| hw())?;
+
+            // Gather reflexive / relay candidates and trickle them to the resource.
+            let mut turn: Option<TurnClient> = trickle_candidates(
+                &mut rtc,
+                &socket,
+                &offer_sdp,
+                &session,
+                self.bearer.as_deref(),
+                self.stun_server.as_deref(),
+                TurnConfig {
+                    server: self.turn_server.as_deref(),
+                    user: &self.turn_user,
+                    pass: &self.turn_pass,
+                },
+            )
+            .await;
+            let resource = session.resource;
+            let etag = session.etag;
+            let bearer = self.bearer.clone();
+            let mut disconnected_since: Option<Instant> = None;
+            let mut refresh_at = Instant::now() + turn::REFRESH_INTERVAL;
 
             // Announce each output's caps before its first frame.
             out.push_to(VIDEO_PORT, PipelinePacket::CapsChanged(video_caps()))
@@ -217,9 +235,13 @@ impl MultiOutputSource for WebRtcWhepSessionSrc {
 
             let mut buf = alloc::vec![0u8; 2000];
             let mut seq = 0u64;
-            // Emit EOS to both outputs and finish.
+            // Emit EOS to both outputs, DELETE the WHEP resource (RFC 9725
+            // teardown), and finish.
             macro_rules! finish {
                 () => {{
+                    if let Some(res) = resource.as_deref() {
+                        delete_resource(res, bearer.as_deref()).await;
+                    }
                     out.push_to(VIDEO_PORT, PipelinePacket::Eos).await?;
                     out.push_to(AUDIO_PORT, PipelinePacket::Eos).await?;
                     return Ok(seq);
@@ -245,13 +267,37 @@ impl MultiOutputSource for WebRtcWhepSessionSrc {
                             };
                             frames.push((port, pts_ns, d.data.to_vec()));
                         }
-                        Ok(Output::Event(Event::IceConnectionStateChange(
-                            IceConnectionState::Disconnected,
-                        ))) => finish!(),
+                        Ok(Output::Event(Event::IceConnectionStateChange(state))) => match state {
+                            IceConnectionState::Disconnected => {
+                                disconnected_since.get_or_insert_with(Instant::now);
+                            }
+                            IceConnectionState::Connected | IceConnectionState::Completed => {
+                                disconnected_since = None;
+                            }
+                            _ => {}
+                        },
                         Ok(Output::Event(_)) => {}
                         Err(_) => finish!(),
                     }
                 };
+
+                // Sustained ICE disconnect: attempt an ICE restart; a server that
+                // rejects it ends the source.
+                if disconnected_since.is_some_and(|t| t.elapsed() >= ICE_RESTART_TIMEOUT) {
+                    disconnected_since = None;
+                    match resource.as_deref() {
+                        Some(res) => {
+                            if !matches!(
+                                ice_restart(&mut rtc, res, bearer.as_deref(), etag.as_deref())
+                                    .await,
+                                TricklePatch::Accepted
+                            ) {
+                                finish!();
+                            }
+                        }
+                        None => finish!(),
+                    }
+                }
 
                 for (port, pts_ns, data) in frames {
                     let keyframe =

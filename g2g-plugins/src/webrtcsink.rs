@@ -61,7 +61,8 @@ use g2g_core::{
 use crate::filesink::io_err;
 use crate::turn::{self, TurnClient};
 use crate::webrtc_util::{
-    add_ice_candidates, feed_datagram, post_sdp, select_host_ip, send_transmit,
+    add_host_candidate, delete_resource, feed_datagram, ice_restart, post_sdp, select_host_ip,
+    send_transmit, trickle_candidates, TricklePatch, TurnConfig, ICE_RESTART_TIMEOUT,
 };
 
 /// Default bounded depth of the element->session media channel. Backpressures
@@ -147,6 +148,11 @@ pub struct WebRtcSink {
     track: Track,
     /// Set on the first frame, after the WHIP handshake spawns the session task.
     tx: Option<mpsc::Sender<MediaUnit>>,
+    /// The WHIP resource URL (from the handshake), so the element can DELETE it
+    /// synchronously on EOS (RFC 9725 teardown). The detached session task cannot
+    /// reliably complete a DELETE on clean end, since the runtime may tear it down
+    /// first; the element owns the clean-EOS teardown.
+    resource: Option<String>,
     /// Set by the session task when the remote sends a PLI (keyframe request);
     /// read + cleared by `take_reconfigure`, which forwards a
     /// `Reconfigure::ForceKeyframe` up the reverse channel to the encoder. Shared
@@ -187,6 +193,7 @@ impl WebRtcSink {
             configured: false,
             track: Track::Video,
             tx: None,
+            resource: None,
             keyframe_requested: Arc::new(AtomicBool::new(false)),
             bitrate_estimate: Arc::new(AtomicU64::new(0)),
             last_bitrate_sent: 0,
@@ -263,19 +270,9 @@ impl WebRtcSink {
         };
         let mut rtc = config.build(Instant::now());
 
-        // Host candidate, plus a STUN-discovered server-reflexive candidate when
-        // a STUN server is set (needed to reach a cloud SFU across NAT).
-        add_ice_candidates(&mut rtc, &socket, self.stun_server.as_deref()).await?;
-
-        // TURN relay candidate when configured: the fallback path for NATs a
-        // server-reflexive candidate cannot traverse. Allocation failure degrades
-        // gracefully to the host/srflx candidates (the publish still attempts).
-        let turn = match &self.turn_server {
-            Some(server) => {
-                turn::setup(&mut rtc, &socket, server, &self.turn_user, &self.turn_pass).await
-            }
-            None => None,
-        };
+        // Trickle ICE: the offer carries the host candidate only; reflexive /
+        // relay candidates are gathered after the POST and trickled by PATCH.
+        add_host_candidate(&mut rtc, &socket)?;
 
         // Offer a single send-only m-line for the configured track.
         let (offer_sdp, pending, mid): (String, SdpPendingOffer, Mid) = {
@@ -294,22 +291,41 @@ impl WebRtcSink {
             (offer.to_sdp_string(), pending, mid)
         };
 
-        // WHIP: POST the offer, receive the answer SDP, apply it.
-        let answer_sdp =
-            post_sdp(&self.whip_url, self.bearer.as_deref(), offer_sdp.clone()).await?;
-        let answer = SdpAnswer::from_sdp_string(&answer_sdp).map_err(|e| {
+        // WHIP: POST the offer, receive the answer SDP + resource URL, apply it.
+        let session = post_sdp(&self.whip_url, self.bearer.as_deref(), offer_sdp.clone()).await?;
+        let answer = SdpAnswer::from_sdp_string(&session.answer).map_err(|e| {
             std::eprintln!(
-                "webrtc answer SDP parse failed: {e:?}\nlocal offer:\n{offer_sdp}\nremote answer:\n{answer_sdp}"
+                "webrtc answer SDP parse failed: {e:?}\nlocal offer:\n{offer_sdp}\nremote answer:\n{}",
+                session.answer
             );
             G2gError::Hardware(HardwareError::Other)
         })?;
         rtc.sdp_api().accept_answer(pending, answer).map_err(|e| {
             std::eprintln!(
-                "webrtc answer SDP rejected: {e:?}\nlocal offer:\n{offer_sdp}\nremote answer:\n{answer_sdp}"
+                "webrtc answer SDP rejected: {e:?}\nlocal offer:\n{offer_sdp}\nremote answer:\n{}",
+                session.answer
             );
             G2gError::Hardware(HardwareError::Other)
         })?;
 
+        // Gather reflexive / relay candidates and trickle them to the resource.
+        let turn = trickle_candidates(
+            &mut rtc,
+            &socket,
+            &offer_sdp,
+            &session,
+            self.bearer.as_deref(),
+            self.stun_server.as_deref(),
+            TurnConfig {
+                server: self.turn_server.as_deref(),
+                user: &self.turn_user,
+                pass: &self.turn_pass,
+            },
+        )
+        .await;
+
+        // Keep the resource for the element's own clean-EOS DELETE.
+        self.resource = session.resource.clone();
         let (tx, rx) = mpsc::channel::<MediaUnit>(self.queue_depth);
         let keyframe_requested = Arc::clone(&self.keyframe_requested);
         let bitrate_estimate = Arc::clone(&self.bitrate_estimate);
@@ -320,6 +336,9 @@ impl WebRtcSink {
             mid,
             self.track,
             turn,
+            session.resource,
+            session.etag,
+            self.bearer.clone(),
             keyframe_requested,
             bitrate_estimate,
             rx,
@@ -539,11 +558,15 @@ impl AsyncElement for WebRtcSink {
                     }
                     self.frames_sent += 1;
                 }
-                // The session keeps running on the spawned task; dropping the
-                // sender on element drop closes the channel and the task exits
-                // once the peer disconnects. (Graceful WHIP DELETE on EOS is a
-                // follow-up.)
-                PipelinePacket::Eos => {}
+                // Clean end: DELETE the WHIP resource (RFC 9725 teardown)
+                // synchronously here, then let the session task wind down when the
+                // channel closes on element drop. Done in the element (not the
+                // task) so it completes before the runtime tears the task down.
+                PipelinePacket::Eos => {
+                    if let Some(res) = self.resource.take() {
+                        delete_resource(&res, self.bearer.as_deref()).await;
+                    }
+                }
                 // Geometry refinement lives in the in-band SPS, not the m-line.
                 PipelinePacket::CapsChanged(_) => {}
                 PipelinePacket::Flush => {}
@@ -567,6 +590,9 @@ async fn run_session(
     mid: Mid,
     track: Track,
     mut turn: Option<TurnClient>,
+    resource: Option<String>,
+    etag: Option<String>,
+    bearer: Option<String>,
     keyframe_requested: Arc<AtomicBool>,
     bitrate_estimate: Arc<AtomicU64>,
     mut rx: mpsc::Receiver<MediaUnit>,
@@ -577,6 +603,9 @@ async fn run_session(
     let mut pt: Option<Pt> = None;
     // Keep the TURN allocation + permissions alive while the session runs.
     let mut refresh_at = Instant::now() + turn::REFRESH_INTERVAL;
+    // When ICE first went Disconnected; after `ICE_RESTART_TIMEOUT` we attempt an
+    // ICE restart (RFC 9725). Cleared on recovery.
+    let mut disconnected_since: Option<Instant> = None;
 
     loop {
         // Drain pending output until str0m asks us to wait for a deadline.
@@ -584,9 +613,15 @@ async fn run_session(
             match rtc.poll_output() {
                 Ok(Output::Timeout(t)) => break t,
                 Ok(Output::Transmit(t)) => send_transmit(&socket, &mut turn, &t).await,
-                Ok(Output::Event(Event::IceConnectionStateChange(
-                    IceConnectionState::Disconnected,
-                ))) => return,
+                Ok(Output::Event(Event::IceConnectionStateChange(state))) => match state {
+                    IceConnectionState::Disconnected => {
+                        disconnected_since.get_or_insert_with(Instant::now);
+                    }
+                    IceConnectionState::Connected | IceConnectionState::Completed => {
+                        disconnected_since = None;
+                    }
+                    _ => {}
+                },
                 // Remote PLI: the peer lost data and needs a fresh keyframe.
                 // Flag it; the element's `take_reconfigure` forwards a
                 // `ForceKeyframe` up the reverse channel to the encoder.
@@ -606,9 +641,31 @@ async fn run_session(
                     }
                 }
                 Ok(Output::Event(_)) => {}
-                Err(_) => return,
+                Err(_) => {
+                    teardown(resource.as_deref(), bearer.as_deref()).await;
+                    return;
+                }
             }
         };
+
+        // Sustained ICE disconnect: attempt an ICE restart against the resource.
+        // A server that rejects the restart PATCH ends the session (the fresh
+        // re-POST reconnect is owned by the element restarting the pipeline).
+        if disconnected_since.is_some_and(|t| t.elapsed() >= ICE_RESTART_TIMEOUT) {
+            disconnected_since = None;
+            match resource.as_deref() {
+                Some(res) => {
+                    if !matches!(
+                        ice_restart(&mut rtc, res, bearer.as_deref(), etag.as_deref()).await,
+                        TricklePatch::Accepted
+                    ) {
+                        teardown(resource.as_deref(), bearer.as_deref()).await;
+                        return;
+                    }
+                }
+                None => return,
+            }
+        }
 
         let timeout = deadline.saturating_duration_since(Instant::now());
 
@@ -616,8 +673,12 @@ async fn run_session(
             // Incoming UDP (STUN / DTLS / RTCP from the peer, or TURN-framed
             // traffic from the relay server).
             r = socket.recv_from(&mut buf) => {
-                let Ok((n, source)) = r else { return };
+                let Ok((n, source)) = r else {
+                    teardown(resource.as_deref(), bearer.as_deref()).await;
+                    return;
+                };
                 if !feed_datagram(&mut rtc, &mut turn, local, &buf[..n], source) {
+                    teardown(resource.as_deref(), bearer.as_deref()).await;
                     return;
                 }
             }
@@ -628,7 +689,8 @@ async fn run_session(
                 }
                 refresh_at = Instant::now() + turn::REFRESH_INTERVAL;
             }
-            // An encoded access unit to publish.
+            // A closed channel = element drop. Clean-EOS teardown is done by the
+            // element (`process`); just exit here.
             unit = rx.recv() => {
                 let Some(unit) = unit else { return };
                 if pt.is_none() {
@@ -649,10 +711,19 @@ async fn run_session(
             // str0m's timer fired.
             _ = tokio::time::sleep(timeout) => {
                 if rtc.handle_input(Input::Timeout(Instant::now())).is_err() {
+                    teardown(resource.as_deref(), bearer.as_deref()).await;
                     return;
                 }
             }
         }
+    }
+}
+
+/// Best-effort WHIP resource teardown (RFC 9725 `DELETE`) before the session
+/// task exits. No-op when the server returned no resource URL.
+async fn teardown(resource: Option<&str>, bearer: Option<&str>) {
+    if let Some(res) = resource {
+        delete_resource(res, bearer).await;
     }
 }
 

@@ -51,7 +51,8 @@ use g2g_core::{
 use crate::filesink::io_err;
 use crate::turn::{self, TurnClient};
 use crate::webrtc_util::{
-    add_ice_candidates, feed_datagram, post_sdp, select_host_ip, send_transmit,
+    add_host_candidate, delete_resource, feed_datagram, ice_restart, post_sdp, select_host_ip,
+    send_transmit, trickle_candidates, TricklePatch, TurnConfig, ICE_RESTART_TIMEOUT,
 };
 use crate::webrtcsink::Track;
 
@@ -87,6 +88,10 @@ pub struct WebRtcSessionSink {
     reverse: [ReverseChannel; TRACK_COUNT],
     /// Set on the first frame, after the WHIP handshake spawns the session task.
     tx: Option<mpsc::Sender<MediaUnit>>,
+    /// WHIP resource URL, so the element DELETEs it synchronously on EOS (RFC
+    /// 9725 teardown); the detached task cannot reliably finish a DELETE on clean
+    /// end. See `WebRtcSink`.
+    resource: Option<String>,
     frames_sent: u64,
 }
 
@@ -116,6 +121,7 @@ impl WebRtcSessionSink {
             tracks: [None; TRACK_COUNT],
             reverse: Default::default(),
             tx: None,
+            resource: None,
             frames_sent: 0,
         }
     }
@@ -172,13 +178,9 @@ impl WebRtcSessionSink {
             .enable_opus(true)
             .build(Instant::now());
 
-        add_ice_candidates(&mut rtc, &socket, self.stun_server.as_deref()).await?;
-        let turn = match &self.turn_server {
-            Some(server) => {
-                turn::setup(&mut rtc, &socket, server, &self.turn_user, &self.turn_pass).await
-            }
-            None => None,
-        };
+        // Trickle ICE: the offer carries the host candidate only; reflexive /
+        // relay candidates are gathered after the POST and trickled by PATCH.
+        add_host_candidate(&mut rtc, &socket)?;
 
         // One send-only m-line per distinct track kind present on the inputs.
         let has_video = self.tracks.contains(&Some(Track::Video));
@@ -212,11 +214,27 @@ impl WebRtcSessionSink {
             (offer.to_sdp_string(), pending, video_mid, audio_mid)
         };
 
-        let answer_sdp = post_sdp(&self.whip_url, self.bearer.as_deref(), offer_sdp).await?;
-        let answer = SdpAnswer::from_sdp_string(&answer_sdp).map_err(|_| hw())?;
+        let session = post_sdp(&self.whip_url, self.bearer.as_deref(), offer_sdp.clone()).await?;
+        let answer = SdpAnswer::from_sdp_string(&session.answer).map_err(|_| hw())?;
         rtc.sdp_api()
             .accept_answer(pending, answer)
             .map_err(|_| hw())?;
+
+        // Gather reflexive / relay candidates and trickle them to the resource.
+        let turn = trickle_candidates(
+            &mut rtc,
+            &socket,
+            &offer_sdp,
+            &session,
+            self.bearer.as_deref(),
+            self.stun_server.as_deref(),
+            TurnConfig {
+                server: self.turn_server.as_deref(),
+                user: &self.turn_user,
+                pass: &self.turn_pass,
+            },
+        )
+        .await;
 
         // The reverse channel of the input pad carrying each track, so the
         // session task can route a per-mid PLI / BWE back to the right source.
@@ -229,6 +247,7 @@ impl WebRtcSessionSink {
         let video_reverse = reverse_for(Track::Video);
         let audio_reverse = reverse_for(Track::Audio);
 
+        self.resource = session.resource.clone();
         let (tx, rx) = mpsc::channel::<MediaUnit>(self.queue_depth);
         tokio::spawn(run_session(
             rtc,
@@ -239,6 +258,9 @@ impl WebRtcSessionSink {
             video_reverse,
             audio_reverse,
             turn,
+            session.resource,
+            session.etag,
+            self.bearer.clone(),
             rx,
         ));
         self.tx = Some(tx);
@@ -395,10 +417,14 @@ impl MultiInputElement for WebRtcSessionSink {
                     }
                     self.frames_sent += 1;
                 }
-                // The runner aggregates per-input Eos; the session task keeps
-                // running and exits when the peer disconnects (graceful WHIP
-                // DELETE on EOS is a follow-up, as for WebRtcSink).
-                PipelinePacket::Eos => {}
+                // Clean end: DELETE the WHIP resource (RFC 9725 teardown) here in
+                // the element so it completes before the runtime tears the session
+                // task down (as for `WebRtcSink`).
+                PipelinePacket::Eos => {
+                    if let Some(res) = self.resource.take() {
+                        delete_resource(&res, self.bearer.as_deref()).await;
+                    }
+                }
                 PipelinePacket::CapsChanged(_) => {}
                 PipelinePacket::Flush => {}
                 PipelinePacket::Segment(_) => {}
@@ -473,6 +499,9 @@ async fn run_session(
     video_reverse: Option<ReverseChannel>,
     audio_reverse: Option<ReverseChannel>,
     mut turn: Option<TurnClient>,
+    resource: Option<String>,
+    etag: Option<String>,
+    bearer: Option<String>,
     mut rx: mpsc::Receiver<MediaUnit>,
 ) {
     let mut buf = alloc::vec![0u8; 2000];
@@ -480,15 +509,22 @@ async fn run_session(
     let mut video_pt: Option<Pt> = None;
     let mut audio_pt: Option<Pt> = None;
     let mut refresh_at = Instant::now() + turn::REFRESH_INTERVAL;
+    let mut disconnected_since: Option<Instant> = None;
 
     loop {
         let deadline = loop {
             match rtc.poll_output() {
                 Ok(Output::Timeout(t)) => break t,
                 Ok(Output::Transmit(t)) => send_transmit(&socket, &mut turn, &t).await,
-                Ok(Output::Event(Event::IceConnectionStateChange(
-                    IceConnectionState::Disconnected,
-                ))) => return,
+                Ok(Output::Event(Event::IceConnectionStateChange(state))) => match state {
+                    IceConnectionState::Disconnected => {
+                        disconnected_since.get_or_insert_with(Instant::now);
+                    }
+                    IceConnectionState::Connected | IceConnectionState::Completed => {
+                        disconnected_since = None;
+                    }
+                    _ => {}
+                },
                 // Remote PLI: route the keyframe request to the source feeding
                 // the track whose m-line it names (by mid), so only that encoder
                 // emits an IDR.
@@ -517,18 +553,44 @@ async fn run_session(
                     }
                 }
                 Ok(Output::Event(_)) => {}
-                Err(_) => return,
+                Err(_) => {
+                    teardown(resource.as_deref(), bearer.as_deref()).await;
+                    return;
+                }
             }
         };
+
+        // Sustained ICE disconnect: attempt an ICE restart against the resource.
+        if disconnected_since.is_some_and(|t| t.elapsed() >= ICE_RESTART_TIMEOUT) {
+            disconnected_since = None;
+            match resource.as_deref() {
+                Some(res) => {
+                    if !matches!(
+                        ice_restart(&mut rtc, res, bearer.as_deref(), etag.as_deref()).await,
+                        TricklePatch::Accepted
+                    ) {
+                        teardown(resource.as_deref(), bearer.as_deref()).await;
+                        return;
+                    }
+                }
+                None => return,
+            }
+        }
 
         let timeout = deadline.saturating_duration_since(Instant::now());
         tokio::select! {
             r = socket.recv_from(&mut buf) => {
-                let Ok((n, source)) = r else { return };
+                let Ok((n, source)) = r else {
+                    teardown(resource.as_deref(), bearer.as_deref()).await;
+                    return;
+                };
                 if !feed_datagram(&mut rtc, &mut turn, local, &buf[..n], source) {
+                    teardown(resource.as_deref(), bearer.as_deref()).await;
                     return;
                 }
             }
+            // A closed channel = element drop. Clean-EOS teardown is done by the
+            // element (`process`); just exit here.
             unit = rx.recv() => {
                 let Some(unit) = unit else { return };
                 // Pick this unit's track writer (by mid), discovering the codec's
@@ -561,10 +623,19 @@ async fn run_session(
             }
             _ = tokio::time::sleep(timeout) => {
                 if rtc.handle_input(Input::Timeout(Instant::now())).is_err() {
+                    teardown(resource.as_deref(), bearer.as_deref()).await;
                     return;
                 }
             }
         }
+    }
+}
+
+/// Best-effort WHIP resource teardown (RFC 9725 `DELETE`) before the session
+/// task exits.
+async fn teardown(resource: Option<&str>, bearer: Option<&str>) {
+    if let Some(res) = resource {
+        delete_resource(res, bearer).await;
     }
 }
 

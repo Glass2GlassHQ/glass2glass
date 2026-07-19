@@ -624,15 +624,14 @@ Phased plan:
     transform.
   - **T3: TURN / ICE completeness.** TURN channel binding (lower overhead than
     Send/Data indications), TURN-over-TCP / -TLS, IPv6 reflexive + relay, multiple
-    TURN servers, 438 stale-nonce retry, trickle ICE (WHIP/WHEP `PATCH`), ICE
-    restart. Incremental on the M242 `turn.rs`.
+    TURN servers, 438 stale-nonce retry. Incremental on the M242 `turn.rs`.
   - **T4: signalling ecosystem.** Native LiveKit signaller (websocket + protocol),
     then Janus / Kinesis as wanted, layered over the T1 engine like
     `gst-plugins-rs` layers signallers over `webrtcbin`.
   - **T5: advanced.** Native data-channel source/sink on str0m SCTP (unifying the
     wasm-only `WebRtcSrc`); simulcast (encoder fan-out); FEC; full renegotiation.
-  Smaller loose ends: non-stereo / non-48 kHz Opus; WHIP/WHEP `DELETE` + graceful
-  flush on EOS. Recommended order: T0 -> T1 -> T2 (PLI first) -> T3 -> T4.
+  Smaller loose ends: non-stereo / non-48 kHz Opus; graceful flush on EOS.
+  Recommended order: T0 -> T1 -> T2 (PLI first) -> T3 -> T4.
 
 ## Adaptive streaming (HLS / DASH)
 
