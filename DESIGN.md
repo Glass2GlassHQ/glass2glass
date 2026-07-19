@@ -2028,8 +2028,11 @@ client-to-server leg also runs over TCP and TLS (M717, `turn:...?transport=tcp`
 over one stream connection, re-delimiting messages (STUN self-describing
 lengths; ChannelData padded to 4 bytes on the stream), so `TurnClient` and
 every element run loop stay transport-agnostic and the allocation still relays
-UDP toward peers. Validated against a real coturn on all three transports
-(allocate, bind, ChannelData round-trip both directions).
+UDP toward peers. The codec is address-family agnostic (M718): XOR addresses
+encode/decode IPv6 (cookie + transaction id), and a v6-bound client requests a
+v6 relayed address (RFC 6156). Validated against a real coturn on all three
+transports and over IPv6 (allocate, bind, ChannelData round-trip both
+directions).
 
 **RTCP feedback** rides the §4.13 reverse channel. A remote PLI
 (`Event::KeyframeRequest`) becomes a `Reconfigure::ForceKeyframe` walked upstream

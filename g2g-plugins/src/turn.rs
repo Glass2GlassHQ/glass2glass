@@ -34,8 +34,9 @@
 //! stored nonce from the error response and un-caches the affected state, so
 //! the existing lazy paths retry with fresh credentials.
 //!
-//! IPv4 only in v1 (matching the server-reflexive path). Behind the `webrtc`
-//! feature.
+//! Address-family agnostic (M718): the XOR address codec handles IPv4 and
+//! IPv6, and a v6-bound client requests a v6 relayed address (RFC 6156).
+//! Behind the `webrtc` feature.
 
 use alloc::collections::BTreeMap;
 use alloc::format;
@@ -81,6 +82,8 @@ const ATTR_NONCE: u16 = 0x0015;
 const ATTR_XOR_RELAYED_ADDRESS: u16 = 0x0016;
 const ATTR_REQUESTED_TRANSPORT: u16 = 0x0019;
 const ATTR_CHANNEL_NUMBER: u16 = 0x000C;
+/// RFC 6156: request an IPv6 relayed address for a v6 client.
+const ATTR_REQUESTED_ADDRESS_FAMILY: u16 = 0x0017;
 
 /// Client-assigned channel numbers (RFC 5766 §11: 0x4000-0x7FFF).
 const CHANNEL_MIN: u16 = 0x4000;
@@ -173,11 +176,17 @@ impl TurnClient {
         password: &str,
     ) -> Result<Self, G2gError> {
         let mut counter = 1u32;
+        // A v6 client asks for a v6 relayed address (RFC 6156); v4 keeps the
+        // default family (the attribute is omitted).
+        let want_v6 = socket.local_addr().map(|a| a.is_ipv6()).unwrap_or(false);
 
         // First Allocate: unauthenticated, expect 401 with realm + nonce.
         let txn = make_txn(socket, &mut counter);
         let mut msg = MessageBuilder::new(ALLOCATE_REQUEST, txn);
         msg.push_requested_transport();
+        if want_v6 {
+            msg.push_attr(ATTR_REQUESTED_ADDRESS_FAMILY, &[0x02, 0, 0, 0]);
+        }
         msg.push_lifetime(DEFAULT_LIFETIME_SECS);
         let first = round_trip(socket, server, msg.finish(), &txn).await?;
 
@@ -197,6 +206,9 @@ impl TurnClient {
         let txn = make_txn(socket, &mut counter);
         let mut msg = MessageBuilder::new(ALLOCATE_REQUEST, txn);
         msg.push_requested_transport();
+        if want_v6 {
+            msg.push_attr(ATTR_REQUESTED_ADDRESS_FAMILY, &[0x02, 0, 0, 0]);
+        }
         msg.push_lifetime(DEFAULT_LIFETIME_SECS);
         msg.push_str_attr(ATTR_USERNAME, username);
         msg.push_str_attr(ATTR_REALM, &realm);
@@ -735,25 +747,36 @@ impl MessageBuilder {
 }
 
 /// Encode a socket address as an XOR-(PEER|RELAYED|MAPPED)-ADDRESS value (RFC
-/// 5389 §15.2). IPv4 only: port XORed with the high cookie half, address with
-/// the full cookie.
-fn encode_xor_addr(addr: SocketAddr, _txn: &[u8; 12]) -> Vec<u8> {
-    let SocketAddr::V4(v4) = addr else {
-        // IPv6 relayed addresses are a v1 limitation; encode loopback so the
-        // caller still produces a well-formed (if unreachable) attribute.
-        return Vec::from([0u8, 0x01, 0, 0, 0, 0, 0, 0]);
-    };
+/// 5389 §15.2): port XORed with the high cookie half; an IPv4 address with the
+/// cookie, an IPv6 address with the cookie concatenated with the transaction id.
+fn encode_xor_addr(addr: SocketAddr, txn: &[u8; 12]) -> Vec<u8> {
     let magic = MAGIC.to_be_bytes();
-    let xport = v4.port() ^ (MAGIC >> 16) as u16;
-    let ip = v4.ip().octets();
-    let mut out = Vec::with_capacity(8);
-    out.push(0); // reserved
-    out.push(0x01); // family IPv4
-    out.extend_from_slice(&xport.to_be_bytes());
-    for k in 0..4 {
-        out.push(ip[k] ^ magic[k]);
+    let xport = addr.port() ^ (MAGIC >> 16) as u16;
+    match addr {
+        SocketAddr::V4(v4) => {
+            let ip = v4.ip().octets();
+            let mut out = Vec::with_capacity(8);
+            out.push(0); // reserved
+            out.push(0x01); // family IPv4
+            out.extend_from_slice(&xport.to_be_bytes());
+            for k in 0..4 {
+                out.push(ip[k] ^ magic[k]);
+            }
+            out
+        }
+        SocketAddr::V6(v6) => {
+            let ip = v6.ip().octets();
+            let mut out = Vec::with_capacity(20);
+            out.push(0);
+            out.push(0x02); // family IPv6
+            out.extend_from_slice(&xport.to_be_bytes());
+            for k in 0..16 {
+                let x = if k < 4 { magic[k] } else { txn[k - 4] };
+                out.push(ip[k] ^ x);
+            }
+            out
+        }
     }
-    out
 }
 
 fn message_type(msg: &[u8]) -> u16 {
@@ -796,19 +819,33 @@ fn find_bytes(msg: &[u8], atype: u16) -> Option<&[u8]> {
     None
 }
 
-/// Find and decode an XOR-address attribute (peer / relayed / mapped). IPv4.
-fn find_xor_addr(msg: &[u8], atype: u16, _txn: &[u8; 12]) -> Option<SocketAddr> {
+/// Find and decode an XOR-address attribute (peer / relayed / mapped), IPv4 or
+/// IPv6 (the latter XORed with cookie + transaction id, RFC 5389 §15.2).
+fn find_xor_addr(msg: &[u8], atype: u16, txn: &[u8; 12]) -> Option<SocketAddr> {
     let val = find_bytes(msg, atype)?;
-    if val.len() < 8 || val[1] != 0x01 {
+    if val.len() < 8 {
         return None;
     }
     let magic = MAGIC.to_be_bytes();
     let port = u16::from_be_bytes([val[2], val[3]]) ^ (MAGIC >> 16) as u16;
-    let mut ip = [val[4], val[5], val[6], val[7]];
-    for k in 0..4 {
-        ip[k] ^= magic[k];
+    match val[1] {
+        0x01 => {
+            let mut ip = [val[4], val[5], val[6], val[7]];
+            for k in 0..4 {
+                ip[k] ^= magic[k];
+            }
+            Some(SocketAddr::from((Ipv4Addr::from(ip), port)))
+        }
+        0x02 if val.len() >= 20 => {
+            let mut ip = [0u8; 16];
+            ip.copy_from_slice(&val[4..20]);
+            for k in 0..16 {
+                ip[k] ^= if k < 4 { magic[k] } else { txn[k - 4] };
+            }
+            Some(SocketAddr::from((std::net::Ipv6Addr::from(ip), port)))
+        }
+        _ => None,
     }
-    Some(SocketAddr::from((Ipv4Addr::from(ip), port)))
 }
 
 /// Decode an ERROR-CODE attribute (RFC 5389 §15.6) as `(code, reason)`. Returns
@@ -1032,6 +1069,19 @@ mod tests {
     }
 
     #[test]
+    fn xor_addr_round_trips_v6() {
+        let txn = [3u8; 12];
+        let addr: SocketAddr = "[2001:db8::17]:6001".parse().unwrap();
+        let mut msg = MessageBuilder::new(DATA_INDICATION, txn);
+        msg.push_xor_peer_address(addr, &txn);
+        let bytes = msg.finish();
+        assert_eq!(
+            find_xor_addr(&bytes, ATTR_XOR_PEER_ADDRESS, &txn),
+            Some(addr)
+        );
+    }
+
+    #[test]
     fn parses_turn_server_forms() {
         let udp = parse_turn_server("relay.example:3478");
         assert_eq!(
@@ -1107,9 +1157,16 @@ mod tests {
         let server: SocketAddr = resolve_transport(&server, host_ip)
             .await
             .expect("resolve server / spawn bridge");
+        // Match the server's address family (a `[::1]:3478` server exercises
+        // the v6 XOR codec + RFC 6156 relay allocation end to end).
+        let bind_ip: IpAddr = if server.is_ipv6() {
+            IpAddr::from(std::net::Ipv6Addr::LOCALHOST)
+        } else {
+            host_ip
+        };
 
-        let client_sock = UdpSocket::bind((host_ip, 0)).await.expect("bind client");
-        let peer_sock = UdpSocket::bind((host_ip, 0)).await.expect("bind peer");
+        let client_sock = UdpSocket::bind((bind_ip, 0)).await.expect("bind client");
+        let peer_sock = UdpSocket::bind((bind_ip, 0)).await.expect("bind peer");
         let peer_addr = peer_sock.local_addr().expect("peer addr");
 
         let mut c = TurnClient::allocate(&client_sock, server, &user, &pass)
@@ -1131,6 +1188,13 @@ mod tests {
                 .await
                 .expect("bind response arrives")
                 .expect("recv");
+            // Surface server rejections (this is a user-run diagnostic harness).
+            if let Some((code, reason)) = parse_error(&buf[..n]) {
+                std::eprintln!(
+                    "turn: response {:#06x} error {code} {reason}",
+                    message_type(&buf[..n])
+                );
+            }
             let _ = c.parse_data(&buf[..n]);
         }
 

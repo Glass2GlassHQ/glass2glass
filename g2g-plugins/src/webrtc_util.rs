@@ -84,6 +84,15 @@ pub(crate) fn select_host_ip() -> IpAddr {
             }
         }
     }
+    // No IPv4 route: an IPv6-only host still gets a usable interface address
+    // (the STUN / TURN codecs are family-agnostic, M718).
+    if let Ok(s) = StdUdpSocket::bind(("::", 0)) {
+        if s.connect(("2001:4860:4860::8888", 80)).is_ok() {
+            if let Ok(addr) = s.local_addr() {
+                return addr.ip();
+            }
+        }
+    }
     IpAddr::V4(Ipv4Addr::LOCALHOST)
 }
 
@@ -602,7 +611,8 @@ async fn gather_srflx(socket: &UdpSocket, stun_server: SocketAddr) -> Option<Soc
 }
 
 /// Parse a STUN Binding Success Response for the (XOR-)MAPPED-ADDRESS, verifying
-/// the transaction id matches our request. IPv4 only.
+/// the transaction id matches our request. IPv4 or IPv6 (the latter XORed with
+/// cookie + transaction id, M718).
 fn parse_xor_mapped_address(msg: &[u8], txn: &[u8; 12]) -> Option<SocketAddr> {
     if msg.len() < 20 {
         return None;
@@ -621,17 +631,35 @@ fn parse_xor_mapped_address(msg: &[u8], txn: &[u8; 12]) -> Option<SocketAddr> {
             break;
         }
         let val = &msg[val_start..val_start + alen];
-        // 0x0020 = XOR-MAPPED-ADDRESS, 0x0001 = MAPPED-ADDRESS; family 0x01 = IPv4.
-        if (atype == 0x0020 || atype == 0x0001) && val.len() >= 8 && val[1] == 0x01 {
+        // 0x0020 = XOR-MAPPED-ADDRESS, 0x0001 = MAPPED-ADDRESS.
+        if (atype == 0x0020 || atype == 0x0001) && val.len() >= 8 {
+            let xored = atype == 0x0020;
             let mut port = u16::from_be_bytes([val[2], val[3]]);
-            let mut ip = [val[4], val[5], val[6], val[7]];
-            if atype == 0x0020 {
+            if xored {
                 port ^= (STUN_MAGIC >> 16) as u16;
-                for k in 0..4 {
-                    ip[k] ^= magic[k];
-                }
             }
-            return Some(SocketAddr::from((Ipv4Addr::from(ip), port)));
+            match val[1] {
+                0x01 => {
+                    let mut ip = [val[4], val[5], val[6], val[7]];
+                    if xored {
+                        for k in 0..4 {
+                            ip[k] ^= magic[k];
+                        }
+                    }
+                    return Some(SocketAddr::from((Ipv4Addr::from(ip), port)));
+                }
+                0x02 if val.len() >= 20 => {
+                    let mut ip = [0u8; 16];
+                    ip.copy_from_slice(&val[4..20]);
+                    if xored {
+                        for k in 0..16 {
+                            ip[k] ^= if k < 4 { magic[k] } else { txn[k - 4] };
+                        }
+                    }
+                    return Some(SocketAddr::from((std::net::Ipv6Addr::from(ip), port)));
+                }
+                _ => {}
+            }
         }
         // Attributes are 4-byte aligned.
         i = val_start + alen + ((4 - (alen % 4)) % 4);
