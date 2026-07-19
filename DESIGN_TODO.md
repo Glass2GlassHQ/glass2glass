@@ -625,10 +625,13 @@ Phased plan:
     their master) ships in a release, or str0m#1014 lands; a real LiveKit Cloud
     run (genuine remote NAT + STUN/TURN on the LiveKit elements); then Janus /
     Kinesis as wanted.
-  - **T5: advanced.** Simulcast on the WHIP grouped-pad session. FEC; full
-    renegotiation; data-channel loose ends (str0m surfaces no remote-close
-    event, so EOS rides an explicit marker message; a WHIP/SFU-signalled data
-    channel vs the P2P `SdpChannel` seam).
+  - **T5: advanced.** Live multi-rid validation of the WHIP simulcast session
+    (needs a WHIP server that ingests client simulcast: mediamtx cannot, and
+    LiveKit's WHIP ingress transcodes a single layer; Janus + a WHIP front end
+    is the known candidate). FEC is blocked upstream (str0m has no FEC payload;
+    loss recovery is NACK/RTX). Full renegotiation; data-channel loose ends
+    (str0m surfaces no remote-close event, so EOS rides an explicit marker
+    message; a WHIP/SFU-signalled data channel vs the P2P `SdpChannel` seam).
   Smaller loose ends: non-stereo / non-48 kHz Opus; graceful flush on EOS.
   Recommended order: T1 remainders -> T2 -> T4 -> T5.
 

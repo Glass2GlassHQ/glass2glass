@@ -67,16 +67,13 @@ use crate::livekit_signal::{
     VideoGrant, VideoLayer, VideoQuality,
 };
 use crate::webrtc_simulcast::{
-    rids_high_to_low, send_simulcast, KeyframeRoutes, LayerAllocator, SendLayer,
+    rids_high_to_low, send_simulcast, track_of, KeyframeRoutes, LayerAllocator, SimulcastPads,
 };
 use crate::webrtc_util::{add_ice_candidates, feed_datagram, select_host_ip, send_transmit};
 use crate::webrtcsink::Track;
 
 /// Default bounded depth of the element->session media channel (per direction).
 const DEFAULT_QUEUE_DEPTH: usize = 256;
-
-/// The maximum simulcast video layers on one m-line (rids `q`/`h`/`f`).
-const MAX_VIDEO_LAYERS: usize = 3;
 
 /// Access-token lifetime when the sink mints one from api-key/secret.
 const TOKEN_TTL_SECS: u64 = 6 * 3600;
@@ -118,24 +115,11 @@ pub struct LiveKitSink {
     /// Pre-minted access token; when set, `api_key` / `api_secret` are unused.
     token: Option<String>,
     queue_depth: usize,
-    /// Number of video layers on one m-line (1 = single stream, >=2 = simulcast).
-    video_layers: usize,
     /// Aggregate send-bitrate cap in bits/second (0 = uncapped), applied to the
     /// BWE estimate before the layer allocator budgets it.
     max_send_bitrate: u64,
-    /// Whether an Opus audio track is published alongside the video.
-    has_audio: bool,
-    /// Number of input pads = video layers + audio, kept in sync with the above.
-    track_count: usize,
-    /// Track kind per input pad, set in `configure_pipeline`.
-    tracks: Vec<Option<Track>>,
-    /// Fixated video resolution per input pad (0,0 for audio), recorded in
-    /// `configure_pipeline` and used to build each simulcast layer's metadata.
-    dims: Vec<(u32, u32)>,
-    /// Per-input reverse channel, shared with the fan-in runner: a remote PLI /
-    /// BWE naming a track's m-line (+ rid) routes back to the source feeding that
-    /// pad.
-    reverse: Vec<ReverseChannel>,
+    /// Video-layer / audio pad bookkeeping (shared with `WebRtcSessionSink`).
+    pads: SimulcastPads,
     /// Per-input wire target, resolved during the handshake in `start_session`.
     sinks: Vec<Option<PadSink>>,
     /// Set on the first frame, after the join+publish handshake spawns the task.
@@ -149,7 +133,7 @@ impl core::fmt::Debug for LiveKitSink {
             .field("url", &self.url)
             .field("room", &self.room)
             .field("identity", &self.identity)
-            .field("track_count", &self.track_count)
+            .field("track_count", &self.pads.input_count())
             .field("frames_sent", &self.frames_sent)
             .finish()
     }
@@ -173,25 +157,20 @@ impl LiveKitSink {
             api_secret: String::new(),
             token: None,
             queue_depth: DEFAULT_QUEUE_DEPTH,
-            video_layers: 1,
             max_send_bitrate: 0,
-            has_audio: false,
-            track_count: 0,
-            tracks: Vec::new(),
-            dims: Vec::new(),
-            reverse: Vec::new(),
+            pads: SimulcastPads::new(),
             sinks: Vec::new(),
             tx: None,
             frames_sent: 0,
         };
-        s.rebuild_pads();
+        s.sinks = alloc::vec![None; s.pads.input_count()];
         s
     }
 
     /// Publish a second (Opus audio) track alongside the video.
     pub fn with_audio(mut self) -> Self {
-        self.has_audio = true;
-        self.rebuild_pads();
+        self.pads.set_audio(true);
+        self.sinks = alloc::vec![None; self.pads.input_count()];
         self
     }
 
@@ -199,19 +178,9 @@ impl LiveKitSink {
     /// pad, pad 0 = highest resolution). One layer is a plain single stream; two
     /// or more offer `a=rid`/`a=simulcast` so the SFU can forward per subscriber.
     pub fn with_simulcast(mut self, layers: usize) -> Self {
-        self.video_layers = layers.clamp(1, MAX_VIDEO_LAYERS);
-        self.rebuild_pads();
+        self.pads.set_video_layers(layers);
+        self.sinks = alloc::vec![None; self.pads.input_count()];
         self
-    }
-
-    /// Resize the per-pad vectors for the current video-layer + audio count.
-    fn rebuild_pads(&mut self) {
-        let n = self.video_layers + self.has_audio as usize;
-        self.track_count = n;
-        self.tracks = alloc::vec![None; n];
-        self.dims = alloc::vec![(0u32, 0u32); n];
-        self.reverse = (0..n).map(|_| ReverseChannel::new()).collect();
-        self.sinks = alloc::vec![None; n];
     }
 
     /// Cap the aggregate send bitrate (bits/second, 0 = uncapped). The BWE
@@ -242,10 +211,7 @@ impl LiveKitSink {
 
     /// True once every input pad has been configured.
     fn all_configured(&self) -> bool {
-        self.tracks
-            .iter()
-            .take(self.track_count)
-            .all(|t| t.is_some())
+        self.pads.all_configured()
     }
 
     /// The access token to present: the pre-minted one, or a freshly minted
@@ -306,25 +272,11 @@ impl LiveKitSink {
         };
 
         // Video input pads in order (pad 0 = top layer), each a simulcast layer;
-        // one shared video m-line groups them all. Assign rids high->low and read
+        // one shared video m-line groups them all, rids assigned high->low with
         // each layer's resolution from its fixated caps.
-        let video_inputs: Vec<usize> = self
-            .tracks
-            .iter()
-            .enumerate()
-            .filter(|(_, t)| **t == Some(Track::Video))
-            .map(|(i, _)| i)
-            .collect();
+        let video_inputs = self.pads.video_inputs();
+        let layers = self.pads.layers();
         let rids = rids_high_to_low(video_inputs.len());
-        let layers: Vec<SendLayer> = video_inputs
-            .iter()
-            .zip(rids.iter())
-            .map(|(&i, &rid)| SendLayer {
-                rid,
-                width: self.dims[i].0,
-                height: self.dims[i].1,
-            })
-            .collect();
         let simulcast = layers.len() >= 2;
         // Simulcast enables BWE so the aggregate estimate can budget the layer
         // set (whole-layer on/off in the allocator); the estimate is clamped to
@@ -347,7 +299,7 @@ impl LiveKitSink {
         // toward LiveKit Cloud is a follow-up.
         add_ice_candidates(&mut rtc, &socket, None).await?;
         let has_video = !video_inputs.is_empty();
-        let has_audio = self.tracks.contains(&Some(Track::Audio));
+        let has_audio = self.pads.has_audio;
 
         // The AddTrackRequest cid must equal the SDP msid track-id, so we choose
         // it and hand it to str0m as the track_id for that m-line.
@@ -517,17 +469,17 @@ impl LiveKitSink {
                     mid,
                     rid,
                 });
-                routes.push(mid, rid, self.reverse[i].clone());
+                routes.push(mid, rid, self.pads.reverse[i].clone());
             }
         }
-        if let Some(ai) = self.tracks.iter().position(|t| *t == Some(Track::Audio)) {
+        if let Some(ai) = self.pads.audio_input() {
             if let Some(mid) = audio_mid {
                 self.sinks[ai] = Some(PadSink {
                     track: Track::Audio,
                     mid,
                     rid: None,
                 });
-                routes.push(mid, None, self.reverse[ai].clone());
+                routes.push(mid, None, self.pads.reverse[ai].clone());
             }
         }
         // BWE per-layer routing (M722): each video layer's reverse channel,
@@ -538,7 +490,7 @@ impl LiveKitSink {
             .enumerate()
             .map(|(li, &i)| {
                 let rid = simulcast.then(|| Rid::from(rids[li]));
-                (rid, self.reverse[i].clone())
+                (rid, self.pads.reverse[i].clone())
             })
             .collect();
 
@@ -660,33 +612,6 @@ fn opus_stereo() -> Caps {
     }
 }
 
-/// The fixated `(width, height)` of a video caps, `(0, 0)` for audio or an
-/// unfixated dimension (the layer metadata then simply omits the resolution).
-fn video_dims(caps: &Caps) -> (u32, u32) {
-    if let Caps::CompressedVideo { width, height, .. } = caps {
-        let w = if let Dim::Fixed(w) = width { *w } else { 0 };
-        let h = if let Dim::Fixed(h) = height { *h } else { 0 };
-        (w, h)
-    } else {
-        (0, 0)
-    }
-}
-
-/// The track kind an input's caps select (H.264 video or Opus audio).
-fn track_of(caps: &Caps) -> Option<Track> {
-    match caps {
-        Caps::CompressedVideo {
-            codec: VideoCodec::H264,
-            ..
-        } => Some(Track::Video),
-        Caps::Audio {
-            format: AudioFormat::Opus,
-            ..
-        } => Some(Track::Audio),
-        _ => None,
-    }
-}
-
 impl MultiInputElement for LiveKitSink {
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
@@ -694,7 +619,7 @@ impl MultiInputElement for LiveKitSink {
         Self: 'a;
 
     fn input_count(&self) -> usize {
-        self.track_count
+        self.pads.input_count()
     }
 
     fn intercept_caps(&self, _input: usize, upstream_caps: &Caps) -> Result<Caps, G2gError> {
@@ -716,11 +641,7 @@ impl MultiInputElement for LiveKitSink {
         input: usize,
         absolute_caps: &Caps,
     ) -> Result<ConfigureOutcome, G2gError> {
-        let track = track_of(absolute_caps).ok_or(G2gError::CapsMismatch)?;
-        *self.tracks.get_mut(input).ok_or(G2gError::CapsMismatch)? = Some(track);
-        if let Some(d) = self.dims.get_mut(input) {
-            *d = video_dims(absolute_caps);
-        }
+        self.pads.configure(input, absolute_caps)?;
         Ok(ConfigureOutcome::Accepted)
     }
 
@@ -730,7 +651,7 @@ impl MultiInputElement for LiveKitSink {
     }
 
     fn reverse_channel(&self, input: usize) -> Option<ReverseChannel> {
-        self.reverse.get(input).cloned()
+        self.pads.reverse.get(input).cloned()
     }
 
     fn is_terminal(&self) -> bool {
@@ -1052,7 +973,7 @@ mod tests {
         assert!(s.configure_pipeline(0, &h264_any()).is_ok());
         assert!(s.configure_pipeline(1, &opus_stereo()).is_ok());
         assert_eq!(
-            s.tracks,
+            s.pads.tracks,
             alloc::vec![Some(Track::Video), Some(Track::Audio)]
         );
         assert!(s.all_configured());
@@ -1079,10 +1000,10 @@ mod tests {
         assert!(s.configure_pipeline(0, &hi).is_ok());
         assert!(s.configure_pipeline(1, &lo).is_ok());
         assert_eq!(
-            s.tracks,
+            s.pads.tracks,
             alloc::vec![Some(Track::Video), Some(Track::Video)]
         );
-        assert_eq!(s.dims, alloc::vec![(640, 480), (320, 240)]);
+        assert_eq!(s.pads.dims, alloc::vec![(640, 480), (320, 240)]);
         assert!(s.all_configured());
     }
 
@@ -1092,8 +1013,8 @@ mod tests {
             .with_simulcast(2)
             .with_audio();
         assert_eq!(s.input_count(), 3, "two video layers + one audio");
-        assert_eq!(s.video_layers, 2);
-        assert!(s.has_audio);
+        assert_eq!(s.pads.video_layers, 2);
+        assert!(s.pads.has_audio);
     }
 
     #[test]

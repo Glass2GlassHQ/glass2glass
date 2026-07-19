@@ -37,10 +37,12 @@ use tokio::sync::mpsc;
 
 use str0m::change::{SdpAnswer, SdpPendingOffer};
 use str0m::crypto::from_feature_flags;
-use str0m::media::{Direction, Mid, Pt};
+use str0m::media::{Direction, Mid, Pt, Rid};
 use str0m::{Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
 
-use str0m::bwe::BweKind;
+use core::time::Duration;
+
+use str0m::bwe::{Bitrate, BweKind};
 
 use g2g_core::{
     AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, HardwareError,
@@ -50,6 +52,9 @@ use g2g_core::{
 
 use crate::filesink::io_err;
 use crate::turn::{self, TurnSet};
+use crate::webrtc_simulcast::{
+    rids_high_to_low, send_simulcast, track_of, KeyframeRoutes, LayerAllocator, SimulcastPads,
+};
 use crate::webrtc_util::{
     add_host_candidate, delete_resource, feed_datagram, ice_restart, post_sdp, select_host_ip,
     send_transmit, trickle_candidates, TricklePatch, TurnConfig, ICE_RESTART_TIMEOUT,
@@ -59,14 +64,12 @@ use crate::webrtcsink::Track;
 /// Default bounded depth of the element->session media channel (per direction).
 const DEFAULT_QUEUE_DEPTH: usize = 256;
 
-/// Number of tracks this session carries (one video + one audio).
-const TRACK_COUNT: usize = 2;
-
-/// One encoded access unit handed to the session task, tagged with its track so
-/// the task picks the matching m-line writer.
+/// One encoded access unit handed to the session task, tagged with its track
+/// (and simulcast rid, when layered) so the task picks the matching writer.
 #[derive(Debug)]
 struct MediaUnit {
     track: Track,
+    rid: Option<Rid>,
     pts_ns: u64,
     data: Vec<u8>,
 }
@@ -80,12 +83,14 @@ pub struct WebRtcSessionSink {
     turn_user: String,
     turn_pass: String,
     queue_depth: usize,
-    /// Track kind per input pad, set in `configure_pipeline(input, caps)`.
-    tracks: [Option<Track>; TRACK_COUNT],
-    /// Per-input reverse-signal channel: the session task posts a remote PLI /
-    /// BWE for a track here, and the fan-in runner surfaces it to that input's
-    /// upstream source (so a video PLI forces only the video encoder's IDR).
-    reverse: [ReverseChannel; TRACK_COUNT],
+    /// Aggregate send-bitrate cap (bits/second, 0 = uncapped) for the simulcast
+    /// layer allocator, as on `LiveKitSink`.
+    max_send_bitrate: u64,
+    /// Video-layer / audio pad bookkeeping (shared with `LiveKitSink`); the
+    /// per-input reverse channels live here.
+    pads: SimulcastPads,
+    /// Per-input wire target `(track, rid)`, resolved in `start_session`.
+    pad_wire: Vec<Option<(Track, Option<Rid>)>>,
     /// Set on the first frame, after the WHIP handshake spawns the session task.
     tx: Option<mpsc::Sender<MediaUnit>>,
     /// WHIP resource URL, so the element DELETEs it synchronously on EOS (RFC
@@ -99,7 +104,7 @@ impl core::fmt::Debug for WebRtcSessionSink {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("WebRtcSessionSink")
             .field("whip_url", &self.whip_url)
-            .field("tracks", &self.tracks)
+            .field("tracks", &self.pads.tracks)
             .field("frames_sent", &self.frames_sent)
             .finish()
     }
@@ -110,6 +115,10 @@ impl WebRtcSessionSink {
     /// pads: connect the H.264 video stream to one and the Opus audio stream to
     /// the other (either order, the track kind is read from the caps).
     pub fn new(whip_url: impl Into<String>) -> Self {
+        let mut pads = SimulcastPads::new();
+        // The A/V session's historical shape: one video + one audio pad.
+        pads.set_audio(true);
+        let n = pads.input_count();
         Self {
             whip_url: whip_url.into(),
             bearer: None,
@@ -118,12 +127,31 @@ impl WebRtcSessionSink {
             turn_user: String::new(),
             turn_pass: String::new(),
             queue_depth: DEFAULT_QUEUE_DEPTH,
-            tracks: [None; TRACK_COUNT],
-            reverse: Default::default(),
+            max_send_bitrate: 0,
+            pads,
+            pad_wire: alloc::vec![None; n],
             tx: None,
             resource: None,
             frames_sent: 0,
         }
+    }
+
+    /// Publish the video as `layers` simulcast layers on one m-line (each an
+    /// input pad, pad 0 = highest resolution), alongside the audio pad. Two or
+    /// more layers offer `a=rid`/`a=simulcast`, exactly as on `LiveKitSink`
+    /// (M723). NOTE: the receiving WHIP server must support simulcast ingest
+    /// (mediamtx does not).
+    pub fn with_simulcast(mut self, layers: usize) -> Self {
+        self.pads.set_video_layers(layers);
+        self.pad_wire = alloc::vec![None; self.pads.input_count()];
+        self
+    }
+
+    /// Cap the aggregate send bitrate (bits/second, 0 = uncapped) budgeted by
+    /// the simulcast layer allocator.
+    pub fn with_max_send_bitrate(mut self, bps: u64) -> Self {
+        self.max_send_bitrate = bps;
+        self
     }
 
     /// Attach a bearer token for the WHIP POST.
@@ -159,7 +187,7 @@ impl WebRtcSessionSink {
     /// True once every input pad has been configured (so both track kinds are
     /// known and the offer can carry both m-lines).
     fn all_configured(&self) -> bool {
-        self.tracks.iter().all(|t| t.is_some())
+        self.pads.all_configured()
     }
 
     /// Build the `Rtc` with one m-line per configured track, do the WHIP
@@ -170,21 +198,32 @@ impl WebRtcSessionSink {
         let socket = UdpSocket::bind((host_ip, 0)).await.map_err(io_err)?;
         let local = socket.local_addr().map_err(io_err)?;
 
+        // One send-only m-line per distinct track kind present on the inputs;
+        // the video layers group as rid-tagged simulcast on one m-line (M723).
+        let video_inputs = self.pads.video_inputs();
+        let layers = self.pads.layers();
+        let rids = rids_high_to_low(video_inputs.len());
+        let simulcast = layers.len() >= 2;
+        let has_video = !video_inputs.is_empty();
+        let has_audio = self.pads.has_audio;
+        // Simulcast enables BWE so the aggregate estimate can budget the layer
+        // set; the estimate is clamped to `max-send-bitrate` when set.
+        let bwe_init = simulcast.then(|| {
+            Bitrate::bps(LayerAllocator::new(&layers, self.max_send_bitrate).initial_bps())
+        });
+
         // Enable both codecs so the single Rtc can carry video + audio.
         let mut rtc = RtcConfig::new()
             .set_crypto_provider(Arc::new(from_feature_flags()))
             .clear_codecs()
             .enable_h264(true)
             .enable_opus(true)
+            .enable_bwe(bwe_init)
             .build(Instant::now());
 
         // Trickle ICE: the offer carries the host candidate only; reflexive /
         // relay candidates are gathered after the POST and trickled by PATCH.
         add_host_candidate(&mut rtc, &socket)?;
-
-        // One send-only m-line per distinct track kind present on the inputs.
-        let has_video = self.tracks.contains(&Some(Track::Video));
-        let has_audio = self.tracks.contains(&Some(Track::Audio));
         let (offer_sdp, pending, video_mid, audio_mid): (
             String,
             SdpPendingOffer,
@@ -198,7 +237,9 @@ impl WebRtcSessionSink {
                     Direction::SendOnly,
                     None,
                     None,
-                    None,
+                    // One m-line groups every layer as a rid-tagged simulcast
+                    // stream (`None` for a plain single stream), M723.
+                    send_simulcast(&layers),
                 )
             });
             let audio_mid = has_audio.then(|| {
@@ -236,33 +277,44 @@ impl WebRtcSessionSink {
         )
         .await;
 
-        // The reverse channel of the input pad carrying each track, so the
-        // session task can route a per-mid PLI / BWE back to the right source.
-        let reverse_for = |kind: Track| {
-            self.tracks
-                .iter()
-                .position(|t| *t == Some(kind))
-                .map(|i| self.reverse[i].clone())
-        };
-        let video_reverse = reverse_for(Track::Video);
-        let audio_reverse = reverse_for(Track::Audio);
+        // Per-(mid,rid) keyframe routes + per-layer reverse channels, so a
+        // remote PLI or the allocator's per-layer target reaches exactly the
+        // source feeding that layer (the LiveKit sink's model, M723).
+        let mut routes = KeyframeRoutes::new();
+        let mut layer_reverse: Vec<(Option<Rid>, ReverseChannel)> = Vec::new();
+        for (li, &i) in video_inputs.iter().enumerate() {
+            if let Some(mid) = video_mid {
+                let rid = simulcast.then(|| Rid::from(rids[li]));
+                self.pad_wire[i] = Some((Track::Video, rid));
+                routes.push(mid, rid, self.pads.reverse[i].clone());
+                layer_reverse.push((rid, self.pads.reverse[i].clone()));
+            }
+        }
+        if let Some(ai) = self.pads.audio_input() {
+            if let Some(mid) = audio_mid {
+                self.pad_wire[ai] = Some((Track::Audio, None));
+                routes.push(mid, None, self.pads.reverse[ai].clone());
+            }
+        }
+        let allocator = simulcast.then(|| LayerAllocator::new(&layers, self.max_send_bitrate));
 
         self.resource = session.resource.clone();
         let (tx, rx) = mpsc::channel::<MediaUnit>(self.queue_depth);
-        tokio::spawn(run_session(
+        tokio::spawn(run_session(SessionArgs {
             rtc,
             socket,
             local,
             video_mid,
             audio_mid,
-            video_reverse,
-            audio_reverse,
+            keyframe_routes: routes,
+            layer_reverse,
+            allocator,
             turn,
-            session.resource,
-            session.etag,
-            self.bearer.clone(),
+            resource: session.resource,
+            etag: session.etag,
+            bearer: self.bearer.clone(),
             rx,
-        ));
+        }));
         self.tx = Some(tx);
         Ok(())
     }
@@ -301,6 +353,11 @@ static WEBRTCSESSION_PROPS: &[PropertySpec] = &[
         PropKind::Str,
         "TURN long-term credential password",
     ),
+    PropertySpec::new(
+        "max-send-bitrate",
+        PropKind::Uint,
+        "aggregate send-bitrate cap in bits/second budgeted by the simulcast layer allocator (0 = uncapped)",
+    ),
 ];
 
 fn h264_any() -> Caps {
@@ -320,21 +377,6 @@ fn opus_stereo() -> Caps {
     }
 }
 
-/// The track kind an input's caps select (H.264 video or Opus audio).
-fn track_of(caps: &Caps) -> Option<Track> {
-    match caps {
-        Caps::CompressedVideo {
-            codec: VideoCodec::H264,
-            ..
-        } => Some(Track::Video),
-        Caps::Audio {
-            format: AudioFormat::Opus,
-            ..
-        } => Some(Track::Audio),
-        _ => None,
-    }
-}
-
 impl MultiInputElement for WebRtcSessionSink {
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
@@ -342,7 +384,7 @@ impl MultiInputElement for WebRtcSessionSink {
         Self: 'a;
 
     fn input_count(&self) -> usize {
-        TRACK_COUNT
+        self.pads.input_count()
     }
 
     fn intercept_caps(&self, _input: usize, upstream_caps: &Caps) -> Result<Caps, G2gError> {
@@ -364,9 +406,7 @@ impl MultiInputElement for WebRtcSessionSink {
         input: usize,
         absolute_caps: &Caps,
     ) -> Result<ConfigureOutcome, G2gError> {
-        let track = track_of(absolute_caps).ok_or(G2gError::CapsMismatch)?;
-        let slot = self.tracks.get_mut(input).ok_or(G2gError::CapsMismatch)?;
-        *slot = Some(track);
+        self.pads.configure(input, absolute_caps)?;
         Ok(ConfigureOutcome::Accepted)
     }
 
@@ -378,7 +418,7 @@ impl MultiInputElement for WebRtcSessionSink {
     }
 
     fn reverse_channel(&self, input: usize) -> Option<ReverseChannel> {
-        self.reverse.get(input).cloned()
+        self.pads.reverse.get(input).cloned()
     }
 
     fn is_terminal(&self) -> bool {
@@ -397,17 +437,6 @@ impl MultiInputElement for WebRtcSessionSink {
                     let MemoryDomain::System(slice) = &frame.domain else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    let track = self
-                        .tracks
-                        .get(input)
-                        .copied()
-                        .flatten()
-                        .ok_or(G2gError::NotConfigured)?;
-                    let unit = MediaUnit {
-                        track,
-                        pts_ns: frame.timing.pts_ns,
-                        data: slice.as_slice().to_vec(),
-                    };
                     // Start the session once every track is known (so the offer
                     // carries both m-lines), on the first frame from any input.
                     if self.tx.is_none() {
@@ -416,6 +445,18 @@ impl MultiInputElement for WebRtcSessionSink {
                         }
                         self.start_session().await?;
                     }
+                    let (track, rid) = self
+                        .pad_wire
+                        .get(input)
+                        .copied()
+                        .flatten()
+                        .ok_or(G2gError::NotConfigured)?;
+                    let unit = MediaUnit {
+                        track,
+                        rid,
+                        pts_ns: frame.timing.pts_ns,
+                        data: slice.as_slice().to_vec(),
+                    };
                     if let Some(tx) = &self.tx {
                         tx.send(unit).await.map_err(|_| G2gError::Shutdown)?;
                     }
@@ -472,6 +513,10 @@ impl MultiInputElement for WebRtcSessionSink {
                 self.turn_pass = value.as_str().ok_or(PropError::Type)?.into();
                 Ok(())
             }
+            "max-send-bitrate" => {
+                self.max_send_bitrate = value.as_uint().ok_or(PropError::Type)?;
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -484,42 +529,55 @@ impl MultiInputElement for WebRtcSessionSink {
             "turn-server" => Some(PropValue::Str(self.turn_server.clone().unwrap_or_default())),
             "turn-user" => Some(PropValue::Str(self.turn_user.clone())),
             "turn-pass" => Some(PropValue::Str(self.turn_pass.clone())),
+            "max-send-bitrate" => Some(PropValue::Uint(self.max_send_bitrate)),
             _ => None,
         }
     }
 }
 
-/// The sans-IO driving loop for the multi-track session: owns the `Rtc` + socket,
-/// drains `poll_output` (routing relay datagrams through TURN), and routes each
-/// incoming `MediaUnit` to its track's writer. Mirrors `WebRtcSink::run_session`
-/// generalised to two writers.
-#[allow(clippy::too_many_arguments)]
-async fn run_session(
-    mut rtc: Rtc,
+/// Everything the spawned session task owns.
+struct SessionArgs {
+    rtc: Rtc,
     socket: UdpSocket,
     local: SocketAddr,
     video_mid: Option<Mid>,
     audio_mid: Option<Mid>,
-    video_reverse: Option<ReverseChannel>,
-    audio_reverse: Option<ReverseChannel>,
-    mut turn: TurnSet,
+    /// Per-(mid, rid) keyframe routing to each layer's reverse channel.
+    keyframe_routes: KeyframeRoutes,
+    /// Per video layer `(rid, reverse channel)` for BWE targets.
+    layer_reverse: Vec<(Option<Rid>, ReverseChannel)>,
+    /// Simulcast layer allocator (`None` for a single video stream).
+    allocator: Option<LayerAllocator>,
+    turn: TurnSet,
     resource: Option<String>,
     etag: Option<String>,
     bearer: Option<String>,
-    mut rx: mpsc::Receiver<MediaUnit>,
-) {
+    rx: mpsc::Receiver<MediaUnit>,
+}
+
+/// The sans-IO driving loop for the multi-track session: owns the `Rtc` + socket,
+/// drains `poll_output` (routing relay datagrams through TURN, per-(mid,rid) PLI
+/// and per-layer BWE targets back to the sources), and routes each incoming
+/// `MediaUnit` to its track writer (rid-tagged for a simulcast layer). Mirrors
+/// the LiveKit sink's loop with WHIP signalling (HTTP PATCH trickle / restart)
+/// instead of a WebSocket.
+async fn run_session(mut a: SessionArgs) {
     let mut buf = alloc::vec![0u8; 2000];
     // Negotiated payload type per track, discovered once each writer exists.
     let mut video_pt: Option<Pt> = None;
     let mut audio_pt: Option<Pt> = None;
     let mut refresh_at = Instant::now() + turn::REFRESH_INTERVAL;
     let mut disconnected_since: Option<Instant> = None;
+    // Re-tick the allocator with the last estimate (BWE only emits deltas and
+    // retargeted encoders settle exactly on it, freezing the hysteresis).
+    let mut last_estimate: Option<u64> = None;
+    let mut alloc_tick = Instant::now() + Duration::from_secs(1);
 
     loop {
         let deadline = loop {
-            match rtc.poll_output() {
+            match a.rtc.poll_output() {
                 Ok(Output::Timeout(t)) => break t,
-                Ok(Output::Transmit(t)) => send_transmit(&socket, &mut turn, &t).await,
+                Ok(Output::Transmit(t)) => send_transmit(&a.socket, &mut a.turn, &t).await,
                 Ok(Output::Event(Event::IceConnectionStateChange(state))) => match state {
                     IceConnectionState::Disconnected => {
                         disconnected_since.get_or_insert_with(Instant::now);
@@ -529,36 +587,36 @@ async fn run_session(
                     }
                     _ => {}
                 },
-                // Remote PLI: route the keyframe request to the source feeding
-                // the track whose m-line it names (by mid), so only that encoder
-                // emits an IDR.
+                // Remote PLI: only the named (mid, rid) layer's source is asked
+                // for an IDR.
                 Ok(Output::Event(Event::KeyframeRequest(req))) => {
-                    let rc = if Some(req.mid) == video_mid {
-                        video_reverse.as_ref()
-                    } else if Some(req.mid) == audio_mid {
-                        audio_reverse.as_ref()
-                    } else {
-                        None
-                    };
-                    if let Some(rc) = rc {
-                        rc.request_keyframe();
-                    }
+                    a.keyframe_routes.request_keyframe(req.mid, req.rid);
                 }
-                // Congestion-control estimate (whole-connection): relay it to the
-                // video track, the bitrate-adaptive one (Opus bitrate adaptation
-                // is a separate follow-up).
+                // Congestion-control estimate (whole-connection): budget the
+                // simulcast layer set and hand each layer its share (0 = shed
+                // idle); a single stream gets the whole estimate.
                 Ok(Output::Event(Event::EgressBitrateEstimate(kind))) => {
                     let bps = match kind {
                         BweKind::Twcc(b) | BweKind::Remb(_, b) => Some(b.as_u64()),
                         _ => None,
                     };
-                    if let (Some(bps), Some(rc)) = (bps, video_reverse.as_ref()) {
-                        rc.set_bitrate(bps.min(u32::MAX as u64) as u32);
+                    match (bps, a.allocator.as_mut()) {
+                        (Some(bps), Some(alloc)) => {
+                            last_estimate = Some(bps);
+                            let _ = alloc.update(Instant::now(), bps);
+                            send_layer_targets(alloc, bps, &a.layer_reverse);
+                        }
+                        (Some(bps), None) => {
+                            if let Some((_, rc)) = a.layer_reverse.first() {
+                                rc.set_bitrate(bps.min(u32::MAX as u64) as u32);
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 Ok(Output::Event(_)) => {}
                 Err(_) => {
-                    teardown(resource.as_deref(), bearer.as_deref()).await;
+                    teardown(a.resource.as_deref(), a.bearer.as_deref()).await;
                     return;
                 }
             }
@@ -567,13 +625,13 @@ async fn run_session(
         // Sustained ICE disconnect: attempt an ICE restart against the resource.
         if disconnected_since.is_some_and(|t| t.elapsed() >= ICE_RESTART_TIMEOUT) {
             disconnected_since = None;
-            match resource.as_deref() {
+            match a.resource.as_deref() {
                 Some(res) => {
                     if !matches!(
-                        ice_restart(&mut rtc, res, bearer.as_deref(), etag.as_deref()).await,
+                        ice_restart(&mut a.rtc, res, a.bearer.as_deref(), a.etag.as_deref()).await,
                         TricklePatch::Accepted
                     ) {
-                        teardown(resource.as_deref(), bearer.as_deref()).await;
+                        teardown(a.resource.as_deref(), a.bearer.as_deref()).await;
                         return;
                     }
                 }
@@ -583,53 +641,131 @@ async fn run_session(
 
         let timeout = deadline.saturating_duration_since(Instant::now());
         tokio::select! {
-            r = socket.recv_from(&mut buf) => {
+            r = a.socket.recv_from(&mut buf) => {
                 let Ok((n, source)) = r else {
-                    teardown(resource.as_deref(), bearer.as_deref()).await;
+                    teardown(a.resource.as_deref(), a.bearer.as_deref()).await;
                     return;
                 };
-                if !feed_datagram(&mut rtc, &mut turn, local, &buf[..n], source) {
-                    teardown(resource.as_deref(), bearer.as_deref()).await;
+                if !feed_datagram(&mut a.rtc, &mut a.turn, a.local, &buf[..n], source) {
+                    teardown(a.resource.as_deref(), a.bearer.as_deref()).await;
                     return;
                 }
             }
             // A closed channel = element drop. Clean-EOS teardown is done by the
             // element (`process`); just exit here.
-            unit = rx.recv() => {
+            unit = a.rx.recv() => {
                 let Some(unit) = unit else { return };
                 // Pick this unit's track writer (by mid), discovering the codec's
                 // negotiated payload type on first use.
                 let (mid, pt_slot) = match unit.track {
-                    Track::Video => (video_mid, &mut video_pt),
-                    Track::Audio => (audio_mid, &mut audio_pt),
+                    Track::Video => (a.video_mid, &mut video_pt),
+                    Track::Audio => (a.audio_mid, &mut audio_pt),
                 };
                 let Some(mid) = mid else { continue };
                 if pt_slot.is_none() {
-                    if let Some(writer) = rtc.writer(mid) {
+                    if let Some(writer) = a.rtc.writer(mid) {
                         *pt_slot = writer
                             .payload_params()
                             .find(|p| p.spec().codec == unit.track.codec())
                             .map(|p| p.pt());
                     }
                 }
+                // A starved simulcast layer is shed whole: skip its units.
+                let layer_on = match (unit.rid, a.allocator.as_ref()) {
+                    (Some(rid), Some(alloc)) => alloc.is_on(rid),
+                    _ => true,
+                };
                 if let Some(p) = *pt_slot {
+                    if !layer_on {
+                        continue;
+                    }
                     let rtp_time = unit.track.media_time(unit.pts_ns);
-                    if let Some(writer) = rtc.writer(mid) {
+                    if let Some(writer) = a.rtc.writer(mid) {
+                        // Tag the write with the layer's rid so str0m routes it
+                        // to that simulcast stream's SSRC.
+                        let writer = match unit.rid {
+                            Some(rid) => writer.rid(rid),
+                            None => writer,
+                        };
                         let _ = writer.write(p, Instant::now(), rtp_time, unit.data);
                     }
                 }
             }
-            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(refresh_at)), if !turn.is_empty() => {
-                turn.refresh_all(&socket).await;
+            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(alloc_tick)), if a.allocator.is_some() && last_estimate.is_some() => {
+                alloc_tick = Instant::now() + Duration::from_secs(1);
+                if let (Some(alloc), Some(bps)) = (a.allocator.as_mut(), last_estimate) {
+                    if alloc.update(Instant::now(), bps) {
+                        send_layer_targets(alloc, bps, &a.layer_reverse);
+                    }
+                }
+            }
+            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(refresh_at)), if !a.turn.is_empty() => {
+                a.turn.refresh_all(&a.socket).await;
                 refresh_at = Instant::now() + turn::REFRESH_INTERVAL;
             }
             _ = tokio::time::sleep(timeout) => {
-                if rtc.handle_input(Input::Timeout(Instant::now())).is_err() {
-                    teardown(resource.as_deref(), bearer.as_deref()).await;
+                if a.rtc.handle_input(Input::Timeout(Instant::now())).is_err() {
+                    teardown(a.resource.as_deref(), a.bearer.as_deref()).await;
                     return;
                 }
             }
         }
+    }
+}
+
+/// Hand each video layer its share of the estimate (0 = shed-layer idle).
+fn send_layer_targets(
+    alloc: &LayerAllocator,
+    bps: u64,
+    layer_reverse: &[(Option<Rid>, ReverseChannel)],
+) {
+    for (rid, target) in alloc.targets(bps) {
+        if let Some((_, rc)) = layer_reverse.iter().find(|(r, _)| *r == Some(rid)) {
+            rc.set_bitrate(target);
+        }
+    }
+}
+
+#[cfg(test)]
+mod simulcast_tests {
+    use super::*;
+
+    #[test]
+    fn with_simulcast_groups_layers_and_audio() {
+        let mut s = WebRtcSessionSink::new("http://h/whip").with_simulcast(2);
+        assert_eq!(s.input_count(), 3, "2 video layers + audio");
+        let hi = Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            width: Dim::Fixed(640),
+            height: Dim::Fixed(480),
+            framerate: Rate::Fixed(30 << 16),
+        };
+        let lo = Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            width: Dim::Fixed(320),
+            height: Dim::Fixed(240),
+            framerate: Rate::Fixed(30 << 16),
+        };
+        MultiInputElement::configure_pipeline(&mut s, 0, &hi).unwrap();
+        MultiInputElement::configure_pipeline(&mut s, 1, &lo).unwrap();
+        MultiInputElement::configure_pipeline(&mut s, 2, &opus_stereo()).unwrap();
+        assert!(s.all_configured());
+        let layers = s.pads.layers();
+        assert_eq!(layers.len(), 2);
+        assert_eq!((layers[0].width, layers[0].height), (640, 480));
+        assert_eq!((layers[1].width, layers[1].height), (320, 240));
+        assert_eq!(s.pads.audio_input(), Some(2));
+    }
+
+    #[test]
+    fn max_send_bitrate_is_a_property() {
+        let mut s = WebRtcSessionSink::new("http://h/whip");
+        MultiInputElement::set_property(&mut s, "max-send-bitrate", PropValue::Uint(400_000))
+            .unwrap();
+        assert_eq!(
+            MultiInputElement::get_property(&s, "max-send-bitrate"),
+            Some(PropValue::Uint(400_000))
+        );
     }
 }
 
@@ -652,7 +788,10 @@ mod tests {
         // Either pad order works; the track is read from the caps.
         assert!(s.configure_pipeline(0, &h264_any()).is_ok());
         assert!(s.configure_pipeline(1, &opus_stereo()).is_ok());
-        assert_eq!(s.tracks, [Some(Track::Video), Some(Track::Audio)]);
+        assert_eq!(
+            s.pads.tracks,
+            alloc::vec![Some(Track::Video), Some(Track::Audio)]
+        );
         assert!(s.all_configured());
     }
 
@@ -672,7 +811,7 @@ mod tests {
 
         // The session posts a keyframe request for input 0; the runner-side
         // handle for input 0 sees it (once), input 1's does not.
-        s.reverse[0].request_keyframe();
+        s.pads.reverse[0].request_keyframe();
         assert!(
             matches!(rc0.take(), Some(g2g_core::PushOutcome::Reconfigure(_))),
             "input 0's channel surfaces the keyframe request"
@@ -681,7 +820,7 @@ mod tests {
         assert!(rc1.take().is_none(), "input 1's channel is untouched");
 
         // A BWE estimate posted for input 0 surfaces as a bitrate outcome.
-        s.reverse[0].set_bitrate(1_200_000);
+        s.pads.reverse[0].set_bitrate(1_200_000);
         assert!(matches!(
             rc0.take(),
             Some(g2g_core::PushOutcome::Bitrate(1_200_000))

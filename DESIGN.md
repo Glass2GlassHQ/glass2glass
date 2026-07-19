@@ -1954,6 +1954,16 @@ sources into it over one tagged `(input, packet)` channel. The session source is
 the mirror: a terminal `MultiOutputSource` (0 inputs → N outputs) driven by
 `run_fanout_session` into N sinks.
 
+**Simulcast (M710-M723).** Send-side simulcast lives in `webrtc_simulcast.rs`,
+shared by `LiveKitSink` and (M723) `WebRtcSessionSink`: `SimulcastPads` (the
+video-layer + audio pad model, pad 0 = highest resolution), rid assignment
+(`f`/`h`/`q` high-to-low), the one-m-line `a=rid`/`a=simulcast` offer,
+per-(mid,rid) `KeyframeRoutes`, and the BWE `LayerAllocator` (whole-layer
+on/off with time hysteresis; per-layer targets, M722). The LiveKit path is
+browser-validated end to end; the WHIP path shares the machinery but its live
+multi-rid ingest validation is owed (no local WHIP server ingests client
+simulcast).
+
 **Session sinks as DAG nodes (M713).** A terminal fan-in is also a first-class
 graph node, `NodeKind::FaninSink(n)` via `Graph::add_fanin_sink`, so a transform
 chain can feed each session pad instead of a bare source: the live encoder fan

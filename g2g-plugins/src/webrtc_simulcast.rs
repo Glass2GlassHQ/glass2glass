@@ -10,7 +10,7 @@ use alloc::vec::Vec;
 
 use str0m::media::{Mid, Rid, Simulcast, SimulcastLayer};
 
-use g2g_core::ReverseChannel;
+use g2g_core::{AudioFormat, Caps, Dim, G2gError, ReverseChannel, VideoCodec};
 
 /// Canonical simulcast rids, lowest to highest resolution. Matches the LiveKit /
 /// browser convention (`q` = low, `h` = mid, `f` = high), so an SFU that maps rid
@@ -33,6 +33,143 @@ pub struct SendLayer {
     pub rid: &'static str,
     pub width: u32,
     pub height: u32,
+}
+
+/// The most simulcast layers a sink groups on one m-line (the `f`/`h`/`q` rids).
+pub const MAX_VIDEO_LAYERS: usize = 3;
+
+/// Per-pad bookkeeping shared by the simulcast-capable session sinks
+/// (`LiveKitSink`, `WebRtcSessionSink`): N video-layer pads (pad 0 = highest
+/// resolution) plus an optional audio pad, each with its fixated track kind,
+/// video geometry, and reverse-signal channel. The element owns the network
+/// half; this owns the pad half.
+#[derive(Debug)]
+pub(crate) struct SimulcastPads {
+    pub(crate) video_layers: usize,
+    pub(crate) has_audio: bool,
+    /// Track kind per input pad, set in `configure(input, caps)`.
+    pub(crate) tracks: Vec<Option<crate::webrtcsink::Track>>,
+    /// Fixated video resolution per input pad ((0,0) for audio).
+    pub(crate) dims: Vec<(u32, u32)>,
+    /// Per-input reverse-signal channel (PLI / per-layer bitrate).
+    pub(crate) reverse: Vec<ReverseChannel>,
+}
+
+impl SimulcastPads {
+    pub(crate) fn new() -> Self {
+        let mut p = Self {
+            video_layers: 1,
+            has_audio: false,
+            tracks: Vec::new(),
+            dims: Vec::new(),
+            reverse: Vec::new(),
+        };
+        p.rebuild();
+        p
+    }
+
+    /// Resize the per-pad vectors for the current video-layer + audio count.
+    pub(crate) fn rebuild(&mut self) {
+        let n = self.input_count();
+        self.tracks = alloc::vec![None; n];
+        self.dims = alloc::vec![(0u32, 0u32); n];
+        self.reverse = (0..n).map(|_| ReverseChannel::new()).collect();
+    }
+
+    pub(crate) fn set_audio(&mut self, on: bool) {
+        self.has_audio = on;
+        self.rebuild();
+    }
+
+    pub(crate) fn set_video_layers(&mut self, layers: usize) {
+        self.video_layers = layers.clamp(1, MAX_VIDEO_LAYERS);
+        self.rebuild();
+    }
+
+    pub(crate) fn input_count(&self) -> usize {
+        self.video_layers + self.has_audio as usize
+    }
+
+    /// Record one pad's fixated caps (track kind + geometry).
+    pub(crate) fn configure(&mut self, input: usize, caps: &Caps) -> Result<(), G2gError> {
+        let track = track_of(caps).ok_or(G2gError::CapsMismatch)?;
+        *self.tracks.get_mut(input).ok_or(G2gError::CapsMismatch)? = Some(track);
+        if let Some(d) = self.dims.get_mut(input) {
+            *d = video_dims(caps);
+        }
+        Ok(())
+    }
+
+    /// True once every input pad has been configured.
+    pub(crate) fn all_configured(&self) -> bool {
+        self.tracks.iter().all(|t| t.is_some())
+    }
+
+    /// Input pad indices carrying video, in pad order (pad 0 = top layer).
+    pub(crate) fn video_inputs(&self) -> Vec<usize> {
+        self.tracks
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| **t == Some(crate::webrtcsink::Track::Video))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// The rid-tagged simulcast layer list, highest resolution first (empty
+    /// geometry when a pad's caps were not fixated to a size).
+    pub(crate) fn layers(&self) -> Vec<SendLayer> {
+        let video = self.video_inputs();
+        let rids = rids_high_to_low(video.len());
+        video
+            .iter()
+            .zip(rids)
+            .map(|(&i, rid)| SendLayer {
+                rid,
+                width: self.dims[i].0,
+                height: self.dims[i].1,
+            })
+            .collect()
+    }
+
+    /// The audio pad's index, if audio is configured.
+    pub(crate) fn audio_input(&self) -> Option<usize> {
+        self.tracks
+            .iter()
+            .position(|t| *t == Some(crate::webrtcsink::Track::Audio))
+    }
+}
+
+impl Default for SimulcastPads {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The fixated `(width, height)` of a video caps, `(0, 0)` for audio or an
+/// unfixated dimension (the layer metadata then simply omits the resolution).
+pub(crate) fn video_dims(caps: &Caps) -> (u32, u32) {
+    if let Caps::CompressedVideo { width, height, .. } = caps {
+        let w = if let Dim::Fixed(w) = width { *w } else { 0 };
+        let h = if let Dim::Fixed(h) = height { *h } else { 0 };
+        (w, h)
+    } else {
+        (0, 0)
+    }
+}
+
+/// The track kind an input's caps select (H.264 video or Opus audio).
+pub(crate) fn track_of(caps: &Caps) -> Option<crate::webrtcsink::Track> {
+    match caps {
+        Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            ..
+        } => Some(crate::webrtcsink::Track::Video),
+        Caps::Audio {
+            format: AudioFormat::Opus,
+            ..
+        } => Some(crate::webrtcsink::Track::Audio),
+        _ => None,
+    }
 }
 
 /// Build the str0m send-simulcast description for `layers`, or `None` for fewer
@@ -69,7 +206,7 @@ pub struct KeyframeRoutes {
 }
 
 impl KeyframeRoutes {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self { routes: Vec::new() }
     }
 
