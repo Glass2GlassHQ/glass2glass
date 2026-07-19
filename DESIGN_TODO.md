@@ -625,9 +625,12 @@ Phased plan:
   - **T3: TURN / ICE completeness.** TURN channel binding (lower overhead than
     Send/Data indications), TURN-over-TCP / -TLS, IPv6 reflexive + relay, multiple
     TURN servers, 438 stale-nonce retry. Incremental on the M242 `turn.rs`.
-  - **T4: signalling ecosystem.** Native LiveKit signaller (websocket + protocol),
-    then Janus / Kinesis as wanted, layered over the T1 engine like
-    `gst-plugins-rs` layers signallers over `webrtcbin`.
+  - **T4: signalling ecosystem.** LiveKit ingest (answer the server-offered
+    subscriber PC on the `livekit_signal` seam; the codec / JWT / WS transport
+    are reusable as-is); `wss://` (TLS) signalling for LiveKit Cloud; a browser
+    subscriber renders a `LiveKitSink` stream (the SFU accepts, keyframe-detects
+    and forwards it, but Chrome assembles no frames from the forwarded RTP,
+    needs packet-level capture to diagnose); then Janus / Kinesis as wanted.
   - **T5: advanced.** Native data-channel source/sink on str0m SCTP (unifying the
     wasm-only `WebRtcSrc`); simulcast (encoder fan-out); FEC; full renegotiation.
   Smaller loose ends: non-stereo / non-48 kHz Opus; graceful flush on EOS.

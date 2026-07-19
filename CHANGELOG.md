@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M707: native LiveKit publish signaller (`LiveKitSink`, `webrtc-livekit` feature): hand-rolled JWT + protobuf signal codec over WebSocket, one str0m PeerConnection into a room, validated against livekit-server.
 - M706: WHIP/WHEP trickle ICE (immediate offer POST, post-offer STUN/TURN candidates via `PATCH` sdpfrag with a numeric-mid retry for mediamtx), ICE restart on sustained disconnect, and `DELETE` teardown on session end.
 - M705: NACK / RTX loss recovery proven for the native duplex WebRTC session over a lossy P2P relay, with a default-run localhost test asserting near-complete H.264 delivery under ~10% packet loss.
 - M704: browser interop validated live (Chrome plays a g2g WHIP A/V publish via mediamtx WHEP, and a Chrome-encoded H264 canvas publish is ingested by `WebRtcWhepSrc`), with two harness tests and a `whip-publisher` example page.

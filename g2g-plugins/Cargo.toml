@@ -110,6 +110,13 @@ observe = ["tooling-json", "tokio/net", "tokio/io-util", "tokio/rt", "tokio/time
 # tokio. str0m 0.20 requires rustc 1.85, which is the workspace MSRV; the feature
 # is off by default, so the no_std baseline is unaffected.
 webrtc = ["std", "tokio/net", "tokio/time", "tokio/macros", "dep:str0m", "dep:reqwest", "dep:sha1", "dep:hmac", "dep:md-5"]
+# Native LiveKit publisher (LiveKitSink, T4): joins a LiveKit room and publishes
+# H.264 (+ optional Opus) over the str0m PeerConnection, with a hand-rolled
+# WebSocket + protobuf signaller (livekit_rtc.proto subset) and an HS256 JWT
+# access token. Layers on the `webrtc` engine and adds the WebSocket client
+# (tokio-tungstenite, shared with remote-ws) + JWT crypto (sha2 + base64). Implies
+# std. wss:// to LiveKit Cloud needs a TLS-terminating proxy (no rustls dep here).
+webrtc-livekit = ["webrtc", "dep:tokio-tungstenite", "futures-util/sink", "dep:sha2", "dep:base64"]
 # ONVIF camera discovery + RTSP stream-URI resolution (OnvifSrc). Hand-rolled
 # WS-Discovery Probe (UDP multicast) and the two media SOAP calls
 # (GetProfiles / GetStreamUri) with a WS-Security UsernameToken digest header.
