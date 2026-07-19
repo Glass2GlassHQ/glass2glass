@@ -191,26 +191,39 @@ impl VpxEnc {
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
         let caps = self.output_caps();
-        // Downstream feedback (keyframe request, target bitrate) is dropped: the
-        // `vpx-encode` 0.6 wrapper exposes neither per-frame VPX_EFLAG_FORCE_KF nor
-        // runtime vpx_codec_enc_config_set, so VP8/VP9 force-keyframe + bitrate
-        // adaptation are owed (need the env-libvpx-sys path). av1enc (rav1e)
-        // honors both.
-        crate::encoder_base::emit_packets(
+        let feedback = crate::encoder_base::emit_packets(
             &mut self.caps_sent,
             &mut self.emitted,
             packets,
             &caps,
             out,
         )
-        .await
-        .map(|_feedback| ())
+        .await?;
+        // The `vpx-encode` 0.6 wrapper exposes neither per-frame
+        // VPX_EFLAG_FORCE_KF nor runtime vpx_codec_enc_config_set, so both
+        // signals are honored by REBUILDING the encoder (M730): a fresh libvpx
+        // context starts on a keyframe, and takes the new rate with it. The
+        // rebuild is cheap for the software codecs; bitrate is hysteresis-gated
+        // 20% like `Av1Enc` so BWE noise cannot thrash it.
+        let mut rebuild = feedback.force_keyframe;
+        if let Some(bps) = feedback.bitrate_bps {
+            let target_kbps = (bps / 1000).max(1);
+            let current = self.bitrate_kbps.max(1);
+            if (target_kbps as i64 - current as i64).unsigned_abs() * 5 >= current as u64 {
+                self.bitrate_kbps = target_kbps as u32;
+                rebuild = true;
+            }
+        }
+        if rebuild && self.enc.is_some() {
+            self.build_encoder()?;
+        }
+        Ok(())
     }
 }
 
 impl AsyncElement for VpxEnc {
-    // vpx-encode exposes no runtime force-keyframe / retarget hooks yet, but
-    // the encoder is still the semantic consumer, so the signal stops here.
+    // Both signals are honored by an encoder rebuild (see `emit`), so they
+    // stop here rather than relaying past the encoder.
     fn handles_keyframe_requests(&self) -> bool {
         true
     }
@@ -393,6 +406,80 @@ mod tests {
             height: Dim::Fixed(h),
             framerate: Rate::Any,
         }
+    }
+
+    /// VP8 frame-tag keyframe bit: byte 0 bit 0 is 0 for a key frame.
+    fn vp8_is_keyframe(data: &[u8]) -> bool {
+        data.first().is_some_and(|b| b & 0x1 == 0)
+    }
+
+    /// Sink that reports one `ForceKeyframe` after its second frame, then a low
+    /// bitrate target (the WebRTC PLI + BWE shape).
+    struct FeedbackSink {
+        frames: alloc::vec::Vec<alloc::vec::Vec<u8>>,
+        kf_sent: bool,
+        bps: u32,
+    }
+    impl OutputSink for FeedbackSink {
+        fn push<'a>(
+            &'a mut self,
+            packet: PipelinePacket,
+        ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
+            Box::pin(async move {
+                if let PipelinePacket::DataFrame(f) = packet {
+                    if let MemoryDomain::System(sl) = &f.domain {
+                        self.frames.push(sl.as_slice().to_vec());
+                    }
+                }
+                if self.frames.len() >= 2 && !core::mem::replace(&mut self.kf_sent, true) {
+                    return Ok(PushOutcome::Reconfigure(
+                        g2g_core::Reconfigure::ForceKeyframe,
+                    ));
+                }
+                if self.bps > 0 {
+                    return Ok(PushOutcome::Bitrate(self.bps));
+                }
+                Ok(PushOutcome::Accepted)
+            })
+        }
+    }
+
+    /// M730: a downstream PLI rebuilds the encoder, so the next emitted VP8
+    /// frame is a key frame; a far-off bitrate target rebuilds at the new rate.
+    #[tokio::test]
+    async fn force_keyframe_and_retarget_rebuild_the_encoder() {
+        let mut enc = VpxEnc::new()
+            .with_codec(VideoCodec::Vp8)
+            .with_bitrate_kbps(2_000);
+        enc.configure_pipeline(&i420_caps(64, 64)).unwrap();
+        let mut sink = FeedbackSink {
+            frames: alloc::vec::Vec::new(),
+            kf_sent: false,
+            bps: 100_000,
+        };
+        for seq in 0..8u64 {
+            // Vary the luma so inter frames are not degenerate.
+            let mut buf = i420_grey(64, 64);
+            buf[0] = seq as u8;
+            let frame = Frame::new(
+                MemoryDomain::System(SystemSlice::from_boxed(buf.into_boxed_slice())),
+                FrameTiming {
+                    pts_ns: seq * 33_000_000,
+                    ..FrameTiming::default()
+                },
+                seq,
+            );
+            enc.process(PipelinePacket::DataFrame(frame), &mut sink)
+                .await
+                .unwrap();
+        }
+        // Frame 0 is the natural keyframe; the PLI after frame 2 forces the
+        // next emitted frame to be a keyframe again (encoder rebuilt).
+        assert!(vp8_is_keyframe(&sink.frames[0]));
+        let later_kf = sink.frames[2..].iter().any(|f| vp8_is_keyframe(f));
+        assert!(later_kf, "the PLI produced a mid-stream keyframe");
+        // The far-off bitrate target rebuilt at the new rate.
+        assert_eq!(enc.bitrate_kbps, 100, "retargeted to 100 kb/s");
     }
 
     #[derive(Default)]

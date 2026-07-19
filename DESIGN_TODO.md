@@ -610,8 +610,8 @@ Phased plan:
     originates PLI on mid-GOP join. Adaptive bitrate / congestion control DONE
     (M244): `PushOutcome::Bitrate` + `take_bitrate`; `WebRtcSink` enables str0m
     BWE and relays `Event::EgressBitrateEstimate`, `Av1Enc` retargets (rav1e
-    context rebuild, hysteresis-gated). Remaining: VP8/VP9 runtime bitrate +
-    force-keyframe (needs a libvpx path `vpx-encode` does not expose).
+    context rebuild, hysteresis-gated). T2 is complete
+    (VP8/VP9 honor both via an encoder rebuild, M730).
   - **T4: signalling ecosystem.** Drop the `[patch.crates-io]` str0m fork
     (unpadded media sends) once the LiveKit forwarder fix (livekit#4690, on
     their master) ships in a release, or str0m#1014 lands; a real LiveKit Cloud
