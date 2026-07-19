@@ -234,6 +234,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: check g2g-plugins (vtdecode + vtencode)
         run: cargo check -p g2g-plugins --locked --all-targets --features vtdecode,vtencode
+      # M731: run the VideoToolbox elements for real (decode the reference
+      # fixtures, encode round trip): the runner's software codecs suffice, so
+      # this is the on-Mac runtime validation the Linux dev host cannot do.
+      - name: test g2g-plugins (vtdecode + vtencode runtime)
+        run: cargo test -p g2g-plugins --locked --features vtdecode,vtencode --test m731_videotoolbox -- --nocapture
       - name: check g2g-ml (wgpu + burn, Metal)
         run: cargo check -p g2g-ml --locked --all-targets --features wgpu,burn
 
