@@ -105,6 +105,17 @@ impl SdpChannel {
     pub fn from_halves(tx: mpsc::Sender<String>, rx: mpsc::Receiver<String>) -> Self {
         SdpChannel { tx, rx }
     }
+
+    /// Send one SDP blob (offer or answer) to the peer. `false` if the peer
+    /// dropped its receiver.
+    pub async fn send_sdp(&self, sdp: String) -> bool {
+        self.tx.send(sdp).await.is_ok()
+    }
+
+    /// Await the next SDP blob from the peer, `None` once the peer closed.
+    pub async fn recv_sdp(&mut self) -> Option<String> {
+        self.rx.recv().await
+    }
 }
 
 /// Bidirectional sendrecv WebRTC session. See the module docs.

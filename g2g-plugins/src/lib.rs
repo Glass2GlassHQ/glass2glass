@@ -373,6 +373,8 @@ mod turn;
 #[cfg(feature = "webrtc")]
 mod webrtc_util;
 #[cfg(feature = "webrtc")]
+pub mod webrtcdata;
+#[cfg(feature = "webrtc")]
 pub mod webrtcduplex;
 #[cfg(feature = "webrtc")]
 pub mod webrtcsession;

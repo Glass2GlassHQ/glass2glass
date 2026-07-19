@@ -631,8 +631,10 @@ Phased plan:
     subscriber renders a `LiveKitSink` stream (the SFU accepts, keyframe-detects
     and forwards it, but Chrome assembles no frames from the forwarded RTP,
     needs packet-level capture to diagnose); then Janus / Kinesis as wanted.
-  - **T5: advanced.** Native data-channel source/sink on str0m SCTP (unifying the
-    wasm-only `WebRtcSrc`); simulcast (encoder fan-out); FEC; full renegotiation.
+  - **T5: advanced.** Simulcast (encoder fan-out); FEC; full renegotiation;
+    data-channel loose ends (str0m surfaces no remote-close event, so EOS rides
+    an explicit marker message; a WHIP/SFU-signalled data channel vs the P2P
+    `SdpChannel` seam).
   Smaller loose ends: non-stereo / non-48 kHz Opus; graceful flush on EOS.
   Recommended order: T0 -> T1 -> T2 (PLI first) -> T3 -> T4.
 
