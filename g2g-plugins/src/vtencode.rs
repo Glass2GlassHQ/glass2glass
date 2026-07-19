@@ -213,7 +213,13 @@ impl VtEncode {
             Some(s) => (s.width, s.height),
             None => return Err(G2gError::NotConfigured),
         };
-        let new_caps = h264_caps(self.codec, w, h, self.framerate.clone());
+        // Never emit an `Any` rate (a downstream transform cannot fixate() it);
+        // default to 30/1 when the input caps did not declare one.
+        let framerate = match &self.framerate {
+            Rate::Fixed(q) => Rate::Fixed(*q),
+            _ => Rate::Fixed(30 << 16),
+        };
+        let new_caps = h264_caps(self.codec, w, h, framerate);
         if self.last_caps.as_ref() != Some(&new_caps) {
             out.push(PipelinePacket::CapsChanged(new_caps.clone()))
                 .await?;
@@ -356,6 +362,9 @@ impl AsyncElement for VtEncode {
                     // A mid-stream geometry / format change would need a session
                     // rebuild; reject anything but the exact configured NV12 shape
                     // loud (the bare format check let a new resolution slip past).
+                    // The runner's pre-fixed output caps (our compressed codec)
+                    // are forwarded so the sink sees them before the first access
+                    // unit, like FfmpegVideoDec.
                     let session_dims = self.state.as_ref().map(|s| (s.width, s.height));
                     match &c {
                         Caps::RawVideo {
@@ -364,6 +373,10 @@ impl AsyncElement for VtEncode {
                             height: Dim::Fixed(h),
                             ..
                         } if session_dims == Some((*w, *h)) => {}
+                        Caps::CompressedVideo { codec, .. } if *codec == self.codec => {
+                            out.push(PipelinePacket::CapsChanged(c.clone())).await?;
+                            self.last_caps = Some(c);
+                        }
                         _ => return Err(G2gError::CapsMismatch),
                     }
                 }

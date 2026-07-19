@@ -125,6 +125,10 @@ pub struct VtDecode {
     configured: bool,
     state: Option<DecoderState>,
     last_caps: Option<Caps>,
+    /// The upstream framerate (from configure / input CapsChanged), carried on
+    /// our emitted output caps: a downstream transform cannot `fixate()` an
+    /// `Any` rate, so we never emit one (mirrors `FfmpegVideoDec`).
+    input_framerate: Rate,
     emitted: u64,
 }
 
@@ -163,6 +167,7 @@ impl VtDecode {
             configured: false,
             state: None,
             last_caps: None,
+            input_framerate: Rate::Any,
             emitted: 0,
         }
     }
@@ -274,10 +279,13 @@ impl AsyncElement for VtDecode {
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         match absolute_caps {
-            Caps::CompressedVideo { codec, .. } if *codec == self.codec => {
+            Caps::CompressedVideo {
+                codec, framerate, ..
+            } if *codec == self.codec => {
                 // The session is built lazily on the first access unit carrying
                 // parameter sets, since VideoToolbox needs the actual SPS/PPS
                 // bytes (in-band), not just the geometry.
+                self.input_framerate = framerate.clone();
                 self.configured = true;
                 Ok(ConfigureOutcome::Accepted)
             }
@@ -310,11 +318,26 @@ impl AsyncElement for VtDecode {
                     }
                 }
                 PipelinePacket::CapsChanged(c) => {
-                    // Reject an incompatible mid-stream codec change loud, like
-                    // MfDecode; a resolution change is handled by the parameter-
-                    // set rebuild in `feed`.
+                    // Two callers, like FfmpegVideoDec: an input CapsChanged from
+                    // upstream (record the framerate for our emitted output caps;
+                    // a resolution change is handled by the parameter-set rebuild
+                    // in `feed`), or the runner's pre-fixed output caps for the
+                    // downstream sink, forwarded so the sink sees them before the
+                    // first decoded frame. Anything else is rejected loud, like
+                    // MfDecode.
                     match &c {
-                        Caps::CompressedVideo { codec, .. } if *codec == self.codec => {}
+                        Caps::CompressedVideo {
+                            codec, framerate, ..
+                        } if *codec == self.codec => {
+                            self.input_framerate = framerate.clone();
+                        }
+                        Caps::RawVideo {
+                            format: RawVideoFormat::Nv12,
+                            ..
+                        } => {
+                            out.push(PipelinePacket::CapsChanged(c.clone())).await?;
+                            self.last_caps = Some(c);
+                        }
                         _ => return Err(G2gError::CapsMismatch),
                     }
                 }
@@ -362,7 +385,13 @@ impl AsyncElement for VtDecode {
 
 impl VtDecode {
     async fn emit(&mut self, d: &DecodedFrame, out: &mut dyn OutputSink) -> Result<(), G2gError> {
-        let new_caps = nv12_caps(d.width, d.height);
+        // A compressed stream's rate is advisory (per-frame PTS carries the
+        // real timing); default to 30/1 when upstream did not declare one.
+        let framerate = match &self.input_framerate {
+            Rate::Fixed(q) => Rate::Fixed(*q),
+            _ => Rate::Fixed(30 << 16),
+        };
+        let new_caps = nv12_caps(d.width, d.height, framerate);
         if self.last_caps.as_ref() != Some(&new_caps) {
             out.push(PipelinePacket::CapsChanged(new_caps.clone()))
                 .await?;
@@ -412,12 +441,12 @@ impl PadTemplates for VtDecode {
     }
 }
 
-fn nv12_caps(w: u32, h: u32) -> Caps {
+fn nv12_caps(w: u32, h: u32, framerate: Rate) -> Caps {
     Caps::RawVideo {
         format: RawVideoFormat::Nv12,
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
-        framerate: Rate::Any,
+        framerate,
     }
 }
 
