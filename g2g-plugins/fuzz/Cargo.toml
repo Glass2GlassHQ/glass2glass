@@ -183,3 +183,17 @@ path = "fuzz_targets/hls.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "srt"
+path = "fuzz_targets/srt.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rtsp"
+path = "fuzz_targets/rtsp.rs"
+test = false
+doc = false
+bench = false
