@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M705: NACK / RTX loss recovery proven for the native duplex WebRTC session over a lossy P2P relay, with a default-run localhost test asserting near-complete H.264 delivery under ~10% packet loss.
 - M704: browser interop validated live (Chrome plays a g2g WHIP A/V publish via mediamtx WHEP, and a Chrome-encoded H264 canvas publish is ingested by `WebRtcWhepSrc`), with two harness tests and a `whip-publisher` example page.
 - M703: raise the workspace MSRV to 1.85 and put the `webrtc` feature under CI (compile check plus the deterministic + localhost-only tests).
 - M702: the dashboard's compressed edge card parses the packet header for the frame type (H.264 / H.265 IDR vs delta, VP8 key vs delta) and shows the packet size, no decoder.

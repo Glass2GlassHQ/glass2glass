@@ -29,6 +29,7 @@
 
 use core::future::Future;
 use core::pin::Pin;
+use core::sync::atomic::{AtomicU64, Ordering};
 use core::time::Duration;
 
 use alloc::boxed::Box;
@@ -97,6 +98,13 @@ impl SdpChannel {
             SdpChannel { tx: b_tx, rx: a_rx },
         )
     }
+
+    /// Build a channel from raw halves, so a signaller (or a test relay) can
+    /// splice itself between two sessions, e.g. to rewrite ICE candidates through
+    /// a proxy socket. `pair` is the direct-connect shortcut over this.
+    pub fn from_halves(tx: mpsc::Sender<String>, rx: mpsc::Receiver<String>) -> Self {
+        SdpChannel { tx, rx }
+    }
 }
 
 /// Bidirectional sendrecv WebRTC session. See the module docs.
@@ -116,6 +124,10 @@ pub struct WebRtcDuplexSession {
     /// m-line is routed back to the source feeding that pad. Shared (Arc-backed)
     /// with the runner, which polls each after every push from its source.
     reverse: Vec<ReverseChannel>,
+    /// Peak cumulative NACK count observed across str0m's ingress / egress stats,
+    /// so a caller can confirm loss-recovery feedback actually flowed. Shared with
+    /// the run loop.
+    nacks_seen: Arc<AtomicU64>,
 }
 
 impl core::fmt::Debug for WebRtcDuplexSession {
@@ -144,7 +156,15 @@ impl WebRtcDuplexSession {
             linger: Duration::from_millis(1500),
             inputs: alloc::vec![None; track_count],
             reverse: (0..track_count).map(|_| ReverseChannel::new()).collect(),
+            nacks_seen: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Peak cumulative NACK count str0m has reported for this session (the max of
+    /// nacks sent as a receiver and nacks received as a sender). Non-zero proves
+    /// loss-recovery feedback flowed, e.g. under a lossy link with RTX active.
+    pub fn nacks_seen(&self) -> u64 {
+        self.nacks_seen.load(Ordering::Relaxed)
     }
 
     /// Set a STUN server (`host:port`) for ICE NAT traversal (host-only by
@@ -270,6 +290,7 @@ impl MultiDuplexSession for WebRtcDuplexSession {
         };
         let video_reverse = reverse_for(Track::Video);
         let audio_reverse = reverse_for(Track::Audio);
+        let nacks_seen = self.nacks_seen.clone();
         Box::pin(async move {
             let hw = || G2gError::Hardware(HardwareError::Other);
             let mut sig = sig.ok_or_else(hw)?;
@@ -286,6 +307,9 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                 // Congestion control so the peer's BWE estimate arrives as
                 // `Event::EgressBitrateEstimate`, routed to the video track below.
                 .enable_bwe(Some(Bitrate::bps(2_000_000)))
+                // Periodic stats surface NACK counts (loss-recovery feedback), read
+                // back via `nacks_seen`.
+                .set_stats_interval(Some(Duration::from_millis(500)))
                 .build(Instant::now());
             // Host (and optional reflexive) candidates ride in the SDP, so they
             // must be added before the offer/answer is generated below.
@@ -421,6 +445,16 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                             if port < track_count {
                                 frames.push((port, pts_ns, d.data.to_vec()));
                             }
+                        }
+                        // Loss-recovery feedback counters (cumulative): nacks sent
+                        // as a receiver (ingress) and nacks received as a sender
+                        // (egress). Keep the peak so a caller can confirm RTX was
+                        // exercised under loss.
+                        Ok(Output::Event(Event::MediaIngressStats(s))) => {
+                            nacks_seen.fetch_max(s.nacks, Ordering::Relaxed);
+                        }
+                        Ok(Output::Event(Event::MediaEgressStats(s))) => {
+                            nacks_seen.fetch_max(s.nacks, Ordering::Relaxed);
                         }
                         Ok(Output::Event(_)) => {}
                         Err(_) => finish!(),

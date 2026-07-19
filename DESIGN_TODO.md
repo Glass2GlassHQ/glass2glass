@@ -621,8 +621,7 @@ Phased plan:
     context rebuild, hysteresis-gated). Remaining: VP8/VP9 runtime bitrate +
     force-keyframe (needs a libvpx path `vpx-encode` does not expose); Opus
     bitrate adaptation; `ForceKeyframe`/`Bitrate` relay through an intervening
-    transform; NACK / RTX (str0m-internal, enable by offering the RTX payload
-    type).
+    transform.
   - **T3: TURN / ICE completeness.** TURN channel binding (lower overhead than
     Send/Data indications), TURN-over-TCP / -TLS, IPv6 reflexive + relay, multiple
     TURN servers, 438 stale-nonce retry, trickle ICE (WHIP/WHEP `PATCH`), ICE
