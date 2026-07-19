@@ -194,7 +194,12 @@ impl St2110AncPacketizer {
     /// A packetizer with the given dynamic RTP payload type and SSRC. The RTP
     /// timestamp uses the 90 kHz video media clock (ANC is aligned to video).
     pub fn new(payload_type: u8, ssrc: u32) -> Self {
-        Self { payload_type: payload_type & 0x7F, ssrc, sequence: 0, clock: MediaClock::video() }
+        Self {
+            payload_type: payload_type & 0x7F,
+            ssrc,
+            sequence: 0,
+            clock: MediaClock::video(),
+        }
     }
 
     /// The media clock, for recovering a packet's PTP time on the receive side.
@@ -282,7 +287,12 @@ impl St2110AncDepacketizer {
         for _ in 0..anc_count {
             packets.push(AncPacket::decode(&mut r)?);
         }
-        Some(St2110AncFrame { sequence, rtp_timestamp, field, packets })
+        Some(St2110AncFrame {
+            sequence,
+            rtp_timestamp,
+            field,
+            packets,
+        })
     }
 }
 
@@ -299,12 +309,20 @@ struct BitWriter {
 
 impl BitWriter {
     fn new() -> Self {
-        Self { out: Vec::new(), acc: 0, nbits: 0 }
+        Self {
+            out: Vec::new(),
+            acc: 0,
+            nbits: 0,
+        }
     }
 
     /// Append the low `bits` (<= 24) of `value`, most-significant bit first.
     fn write(&mut self, value: u32, bits: u32) {
-        let mask = if bits >= 32 { u32::MAX } else { (1u32 << bits) - 1 };
+        let mask = if bits >= 32 {
+            u32::MAX
+        } else {
+            (1u32 << bits) - 1
+        };
         self.acc = (self.acc << bits) | (value & mask);
         self.nbits += bits;
         while self.nbits >= 8 {
@@ -415,7 +433,12 @@ mod tests {
         assert_eq!(frame.packets, packets);
         assert_eq!(frame.field, AncField::Progressive);
         assert_eq!(frame.sequence, 0);
-        assert_eq!(frame.rtp_timestamp, MediaClock::video().rtp_timestamp(g2g_core::TaiNs(tai)).get());
+        assert_eq!(
+            frame.rtp_timestamp,
+            MediaClock::video()
+                .rtp_timestamp(g2g_core::TaiNs(tai))
+                .get()
+        );
 
         // Extended sequence spans the 16-bit RTP field: after 0x1_0000 packets the
         // high half is 1. Cheaply check the split by driving the counter.
@@ -430,7 +453,11 @@ mod tests {
     fn rejects_corrupted_parity_and_checksum() {
         let mut tx = St2110AncPacketizer::new(100, 1);
         let rx = St2110AncDepacketizer::new();
-        let good = tx.packetize(&[AncPacket::generic(0x61, 0x01, vec![0x11, 0x22])], 0, AncField::Progressive);
+        let good = tx.packetize(
+            &[AncPacket::generic(0x61, 0x01, vec![0x11, 0x22])],
+            0,
+            AncField::Progressive,
+        );
 
         // Flip a bit inside the 10-bit-word region (past the RTP header, the
         // 8-byte ANC header, and the 4-byte ANC-packet header): that breaks a
@@ -439,19 +466,28 @@ mod tests {
         let mut bad = good.clone();
         let word_region = RTP_HEADER_LEN + ANC_HEADER_LEN + 4;
         bad[word_region] ^= 0x80;
-        assert!(rx.depacketize(&bad).is_none(), "corrupted ANC data is rejected");
+        assert!(
+            rx.depacketize(&bad).is_none(),
+            "corrupted ANC data is rejected"
+        );
 
         // A Length that overruns the datagram is rejected, not read out of bounds.
         let mut overrun = good.clone();
         overrun[RTP_HEADER_LEN + 2] = 0xFF; // Length high byte huge
         overrun[RTP_HEADER_LEN + 3] = 0xFF;
-        assert!(rx.depacketize(&overrun).is_none(), "over-long Length rejected");
+        assert!(
+            rx.depacketize(&overrun).is_none(),
+            "over-long Length rejected"
+        );
     }
 
     #[test]
     fn rejects_short_packets() {
         let rx = St2110AncDepacketizer::new();
-        assert!(rx.depacketize(&[0u8; 12]).is_none(), "no room for the ANC header");
+        assert!(
+            rx.depacketize(&[0u8; 12]).is_none(),
+            "no room for the ANC header"
+        );
         assert!(rx.depacketize(&[]).is_none());
     }
 }

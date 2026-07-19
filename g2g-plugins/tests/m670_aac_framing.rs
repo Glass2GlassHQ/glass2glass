@@ -27,7 +27,11 @@ impl OutputSink for Collect {
     ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
         Box::pin(async move {
             match packet {
-                PipelinePacket::CapsChanged(Caps::Audio { channels, sample_rate, .. }) => {
+                PipelinePacket::CapsChanged(Caps::Audio {
+                    channels,
+                    sample_rate,
+                    ..
+                }) => {
                     self.caps.push((channels, sample_rate));
                 }
                 PipelinePacket::DataFrame(_) => self.data_frames += 1,
@@ -40,7 +44,11 @@ impl OutputSink for Collect {
 
 async fn refine(stream: &[u8]) -> Collect {
     let mut parse = AacParse::new();
-    let sentinel = Caps::Audio { format: AudioFormat::Aac, channels: 0, sample_rate: 0 };
+    let sentinel = Caps::Audio {
+        format: AudioFormat::Aac,
+        channels: 0,
+        sample_rate: 0,
+    };
     parse.configure_pipeline(&sentinel).expect("configures");
     let mut sink = Collect::default();
     let frame = Frame {
@@ -49,20 +57,31 @@ async fn refine(stream: &[u8]) -> Collect {
         sequence: 0,
         meta: Default::default(),
     };
-    parse.process(PipelinePacket::DataFrame(frame), &mut sink).await.expect("process");
+    parse
+        .process(PipelinePacket::DataFrame(frame), &mut sink)
+        .await
+        .expect("process");
     sink
 }
 
 #[tokio::test]
 async fn adts_stream_refines_to_stereo_44100() {
     let sink = refine(ADTS).await;
-    assert_eq!(sink.caps, vec![(2, 44_100)], "real ADTS refined to stereo/44100");
+    assert_eq!(
+        sink.caps,
+        vec![(2, 44_100)],
+        "real ADTS refined to stereo/44100"
+    );
     assert_eq!(sink.data_frames, 1, "the frame is forwarded after the caps");
 }
 
 #[tokio::test]
 async fn loas_latm_stream_refines_to_stereo_48000() {
     let sink = refine(LATM).await;
-    assert_eq!(sink.caps, vec![(2, 48_000)], "real LOAS/LATM refined to stereo/48000");
+    assert_eq!(
+        sink.caps,
+        vec![(2, 48_000)],
+        "real LOAS/LATM refined to stereo/48000"
+    );
     assert_eq!(sink.data_frames, 1);
 }

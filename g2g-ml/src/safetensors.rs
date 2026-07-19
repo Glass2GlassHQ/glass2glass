@@ -239,7 +239,9 @@ impl<'a> SafeTensors<'a> {
             return Err(SafeTensorsError::Truncated);
         }
         let header_len = u64::from_le_bytes(buf[0..8].try_into().unwrap()) as usize;
-        let header_end = 8usize.checked_add(header_len).ok_or(SafeTensorsError::Truncated)?;
+        let header_end = 8usize
+            .checked_add(header_len)
+            .ok_or(SafeTensorsError::Truncated)?;
         if header_end > buf.len() {
             return Err(SafeTensorsError::Truncated);
         }
@@ -279,15 +281,26 @@ impl<'a> SafeTensors<'a> {
             }
             let dtype = dtype.ok_or(SafeTensorsError::BadHeader("tensor missing dtype"))?;
             let shape = shape.ok_or(SafeTensorsError::BadHeader("tensor missing shape"))?;
-            let offsets = offsets.ok_or(SafeTensorsError::BadHeader("tensor missing data_offsets"))?;
+            let offsets =
+                offsets.ok_or(SafeTensorsError::BadHeader("tensor missing data_offsets"))?;
             if offsets.len() != 2 {
-                return Err(SafeTensorsError::BadHeader("data_offsets is not [begin, end]"));
+                return Err(SafeTensorsError::BadHeader(
+                    "data_offsets is not [begin, end]",
+                ));
             }
             let (begin, end) = (offsets[0], offsets[1]);
             if begin > end || end > data.len() {
                 return Err(SafeTensorsError::BadOffsets);
             }
-            tensors.insert(name, Entry { dtype, shape, begin, end });
+            tensors.insert(
+                name,
+                Entry {
+                    dtype,
+                    shape,
+                    begin,
+                    end,
+                },
+            );
         }
         Ok(SafeTensors { data, tensors })
     }
@@ -300,7 +313,11 @@ impl<'a> SafeTensors<'a> {
     /// Look up a tensor by name.
     pub fn get(&self, name: &str) -> Result<TensorRef<'_>, SafeTensorsError> {
         let e = self.tensors.get(name).ok_or(SafeTensorsError::Missing)?;
-        Ok(TensorRef { dtype: e.dtype, shape: &e.shape, bytes: &self.data[e.begin..e.end] })
+        Ok(TensorRef {
+            dtype: e.dtype,
+            shape: &e.shape,
+            bytes: &self.data[e.begin..e.end],
+        })
     }
 }
 
@@ -368,7 +385,9 @@ fn json_usize_array(v: Json) -> Result<Vec<usize>, SafeTensorsError> {
     let mut out = Vec::with_capacity(items.len());
     for it in items {
         let Json::Number(n) = it else {
-            return Err(SafeTensorsError::BadHeader("array element is not an integer"));
+            return Err(SafeTensorsError::BadHeader(
+                "array element is not an integer",
+            ));
         };
         out.push(n as usize);
     }
@@ -398,7 +417,10 @@ const MAX_JSON_DEPTH: u32 = 64;
 
 impl Json {
     fn parse(s: &str) -> Result<Json, &'static str> {
-        let mut p = Parser { bytes: s.as_bytes(), pos: 0 };
+        let mut p = Parser {
+            bytes: s.as_bytes(),
+            pos: 0,
+        };
         p.ws();
         let v = p.value(0)?;
         p.ws();
@@ -539,7 +561,11 @@ impl Parser<'_> {
                     // Re-decode this byte plus any continuation bytes as one char.
                     let start = self.pos - 1;
                     let mut len = 1;
-                    while self.bytes.get(start + len).is_some_and(|&c| c & 0xC0 == 0x80) {
+                    while self
+                        .bytes
+                        .get(start + len)
+                        .is_some_and(|&c| c & 0xC0 == 0x80)
+                    {
                         len += 1;
                     }
                     let s = core::str::from_utf8(&self.bytes[start..start + len])
@@ -567,7 +593,9 @@ impl Parser<'_> {
             return Err("non-integer number in header");
         }
         let s = core::str::from_utf8(&self.bytes[start..self.pos]).unwrap();
-        s.parse::<u64>().map(Json::Number).map_err(|_| "integer overflow")
+        s.parse::<u64>()
+            .map(Json::Number)
+            .map_err(|_| "integer overflow")
     }
 }
 
@@ -582,7 +610,10 @@ mod tests {
         let blob = serialize(&[("conv.weight", &[2, 2, 1, 3], &w), ("conv.bias", &[2], &b)]);
 
         let st = SafeTensors::parse(&blob).expect("parses");
-        assert_eq!(st.names().collect::<Vec<_>>(), vec!["conv.bias", "conv.weight"]);
+        assert_eq!(
+            st.names().collect::<Vec<_>>(),
+            vec!["conv.bias", "conv.weight"]
+        );
 
         let wt = st.get("conv.weight").expect("weight present");
         assert_eq!(wt.dtype, Dtype::F32);
@@ -598,7 +629,10 @@ mod tests {
     fn parses_metadata_and_whitespace() {
         // Hand-built header with __metadata__, extra whitespace, and key order
         // unlike serialize's output, to exercise the parser not just the writer.
-        let data: Vec<u8> = [1.0f32, 2.0, 3.0, 4.0].iter().flat_map(|v| v.to_le_bytes()).collect();
+        let data: Vec<u8> = [1.0f32, 2.0, 3.0, 4.0]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
         let header = "{ \"__metadata__\": {\"framework\": \"pt\"} ,\n  \
             \"t\" : { \"shape\" : [2, 2] , \"dtype\":\"F32\", \"data_offsets\":[0,16] } }";
         let mut blob = (header.len() as u64).to_le_bytes().to_vec();
@@ -606,17 +640,30 @@ mod tests {
         blob.extend_from_slice(&data);
 
         let st = SafeTensors::parse(&blob).expect("parses with metadata");
-        assert_eq!(st.names().collect::<Vec<_>>(), vec!["t"], "__metadata__ is not a tensor");
-        assert_eq!(st.get("t").unwrap().to_f32().unwrap(), vec![1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(
+            st.names().collect::<Vec<_>>(),
+            vec!["t"],
+            "__metadata__ is not a tensor"
+        );
+        assert_eq!(
+            st.get("t").unwrap().to_f32().unwrap(),
+            vec![1.0, 2.0, 3.0, 4.0]
+        );
     }
 
     #[test]
     fn rejects_truncated_and_out_of_range() {
-        assert_eq!(SafeTensors::parse(&[0u8; 4]).unwrap_err(), SafeTensorsError::Truncated);
+        assert_eq!(
+            SafeTensors::parse(&[0u8; 4]).unwrap_err(),
+            SafeTensorsError::Truncated
+        );
         // Header claims more bytes than present.
         let mut blob = 1000u64.to_le_bytes().to_vec();
         blob.extend_from_slice(b"{}");
-        assert_eq!(SafeTensors::parse(&blob).unwrap_err(), SafeTensorsError::Truncated);
+        assert_eq!(
+            SafeTensors::parse(&blob).unwrap_err(),
+            SafeTensorsError::Truncated
+        );
     }
 
     #[test]
@@ -625,7 +672,10 @@ mod tests {
         let mut blob = (header.len() as u64).to_le_bytes().to_vec();
         blob.extend_from_slice(header.as_bytes());
         blob.extend_from_slice(&[0u8; 8]); // only 8 data bytes, offsets want 16
-        assert_eq!(SafeTensors::parse(&blob).unwrap_err(), SafeTensorsError::BadOffsets);
+        assert_eq!(
+            SafeTensors::parse(&blob).unwrap_err(),
+            SafeTensorsError::BadOffsets
+        );
     }
 
     #[test]
@@ -649,7 +699,11 @@ mod tests {
         // No data bytes: the zero-length range is valid, so parse succeeds.
         let st = SafeTensors::parse(&blob).unwrap();
         let t = st.get("t").unwrap();
-        assert_eq!(t.numel(), usize::MAX, "product saturates instead of wrapping");
+        assert_eq!(
+            t.numel(),
+            usize::MAX,
+            "product saturates instead of wrapping"
+        );
         assert_eq!(t.to_f32(), Err(SafeTensorsError::LenMismatch));
     }
 
@@ -661,13 +715,19 @@ mod tests {
         blob.extend_from_slice(&[0u8; 8]);
         let st = SafeTensors::parse(&blob).unwrap();
         assert_eq!(st.get("t").unwrap().dtype, Dtype::I32);
-        assert_eq!(st.get("t").unwrap().to_f32(), Err(SafeTensorsError::NotFloat));
+        assert_eq!(
+            st.get("t").unwrap().to_f32(),
+            Err(SafeTensorsError::NotFloat)
+        );
     }
 
     /// Build a one-tensor safetensors blob with a raw dtype string + data bytes.
     fn blob_of(dtype: &str, shape: &[usize], data: &[u8]) -> Vec<u8> {
-        let shape_str =
-            shape.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(",");
+        let shape_str = shape
+            .iter()
+            .map(|d| d.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
         let header = format!(
             "{{\"t\":{{\"dtype\":\"{}\",\"shape\":[{}],\"data_offsets\":[0,{}]}}}}",
             dtype,
@@ -684,8 +744,10 @@ mod tests {
     fn bf16_dequantizes_to_f32() {
         // BF16 is the high 16 bits of an f32, so each expected value is exact.
         let vals = [1.0f32, -2.0, 0.5, 0.0, -0.0];
-        let bytes: Vec<u8> =
-            vals.iter().flat_map(|v| ((v.to_bits() >> 16) as u16).to_le_bytes()).collect();
+        let bytes: Vec<u8> = vals
+            .iter()
+            .flat_map(|v| ((v.to_bits() >> 16) as u16).to_le_bytes())
+            .collect();
         let blob = blob_of("BF16", &[vals.len()], &bytes);
         let st = SafeTensors::parse(&blob).unwrap();
         let t = st.get("t").unwrap();
@@ -721,6 +783,9 @@ mod tests {
         // Three f16 elements declared but only two elements of bytes present.
         let blob = blob_of("F16", &[3], &[0u8; 4]);
         let st = SafeTensors::parse(&blob).unwrap();
-        assert_eq!(st.get("t").unwrap().to_f32(), Err(SafeTensorsError::LenMismatch));
+        assert_eq!(
+            st.get("t").unwrap().to_f32(),
+            Err(SafeTensorsError::LenMismatch)
+        );
     }
 }

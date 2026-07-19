@@ -164,7 +164,10 @@ impl MkvCodec {
 
     /// True for the WebM codec subset, so the muxer can write the `webm` DocType.
     pub fn is_webm(self) -> bool {
-        matches!(self, MkvCodec::Vp8 | MkvCodec::Vp9 | MkvCodec::Av1 | MkvCodec::Opus)
+        matches!(
+            self,
+            MkvCodec::Vp8 | MkvCodec::Vp9 | MkvCodec::Av1 | MkvCodec::Opus
+        )
     }
 
     /// `1` for video, `2` for audio, `0x11` for subtitle (the Matroska `TrackType`).
@@ -353,8 +356,12 @@ impl MatroskaDemuxer {
     /// fully buffered.
     fn drain_elements(&mut self) {
         loop {
-            let Some((id, id_len)) = read_id(&self.buf, 0) else { return };
-            let Some((size, size_len, unknown)) = read_size(&self.buf, id_len) else { return };
+            let Some((id, id_len)) = read_id(&self.buf, 0) else {
+                return;
+            };
+            let Some((size, size_len, unknown)) = read_size(&self.buf, id_len) else {
+                return;
+            };
             let header = id_len + size_len;
 
             if id == ID_SEGMENT {
@@ -387,7 +394,9 @@ impl MatroskaDemuxer {
                         if unknown {
                             return; // a Cluster child must carry a definite size
                         }
-                        let Some(total) = header.checked_add(size as usize) else { return };
+                        let Some(total) = header.checked_add(size as usize) else {
+                            return;
+                        };
                         if self.buf.len() < total {
                             return;
                         }
@@ -416,7 +425,9 @@ impl MatroskaDemuxer {
                         if unknown {
                             return; // need a definite size to skip
                         }
-                        let Some(total) = header.checked_add(size as usize) else { return };
+                        let Some(total) = header.checked_add(size as usize) else {
+                            return;
+                        };
                         if self.buf.len() < total {
                             return;
                         }
@@ -431,7 +442,9 @@ impl MatroskaDemuxer {
             if unknown {
                 return;
             }
-            let Some(total) = header.checked_add(size as usize) else { return };
+            let Some(total) = header.checked_add(size as usize) else {
+                return;
+            };
             if self.buf.len() < total {
                 return; // wait for the rest of this element
             }
@@ -453,8 +466,11 @@ impl MatroskaDemuxer {
                         }
                     }
                     ID_CLUSTER => {
-                        let frames =
-                            parse_cluster(&self.buf[header..total], &self.tracks, self.timestamp_scale);
+                        let frames = parse_cluster(
+                            &self.buf[header..total],
+                            &self.tracks,
+                            self.timestamp_scale,
+                        );
                         self.completed.extend(frames);
                     }
                     // The Cues index: time -> Cluster byte position, for indexed
@@ -530,7 +546,10 @@ fn parse_cues(body: &[u8], timestamp_scale: u64) -> Vec<CuePoint> {
             }
         }
         if let (Some(t), Some(p)) = (time, pos) {
-            out.push(CuePoint { time_ns: t.saturating_mul(timestamp_scale), cluster_position: p });
+            out.push(CuePoint {
+                time_ns: t.saturating_mul(timestamp_scale),
+                cluster_position: p,
+            });
         }
     }
     out
@@ -564,7 +583,9 @@ fn children(body: &[u8]) -> EbmlChildren<'_> {
 }
 
 fn parse_timestamp_scale(info: &[u8]) -> Option<u64> {
-    children(info).find(|(id, _)| *id == ID_TIMESTAMP_SCALE).map(|(_, d)| read_uint(d))
+    children(info)
+        .find(|(id, _)| *id == ID_TIMESTAMP_SCALE)
+        .map(|(_, d)| read_uint(d))
 }
 
 /// The Segment `Info` `Title` (the whole-file title), if present and valid UTF-8.
@@ -746,7 +767,9 @@ fn parse_block(
     duration_ns: u64,
     out: &mut Vec<MkvFrame>,
 ) {
-    let Some((track, tn_len, _)) = read_size(block, 0) else { return };
+    let Some((track, tn_len, _)) = read_size(block, 0) else {
+        return;
+    };
     let mut pos = tn_len;
     if pos + 3 > block.len() {
         return;
@@ -763,7 +786,11 @@ fn parse_block(
     // `cluster_ts` is an untrusted u64; cast-to-i64 can be negative and the add
     // can overflow, so saturate (the `abs < 0` clamp below still maps it to 0).
     let abs = (cluster_ts as i64).saturating_add(rel as i64);
-    let pts_ns = if abs < 0 { 0 } else { (abs as u64).saturating_mul(scale) };
+    let pts_ns = if abs < 0 {
+        0
+    } else {
+        (abs as u64).saturating_mul(scale)
+    };
     let keyframe = flags & 0x80 != 0;
 
     let body = &block[pos..];
@@ -782,7 +809,14 @@ fn parse_block(
         // default_duration_ns is untrusted; saturate the spacing multiply too,
         // not just the add.
         let frame_pts = pts_ns.saturating_add((i as u64).saturating_mul(default_duration_ns));
-        out.push(MkvFrame { track, codec, pts_ns: frame_pts, duration_ns, keyframe, data: data.to_vec() });
+        out.push(MkvFrame {
+            track,
+            codec,
+            pts_ns: frame_pts,
+            duration_ns,
+            keyframe,
+            data: data.to_vec(),
+        });
     }
 }
 
@@ -1012,7 +1046,10 @@ pub struct MatroskaMuxer {
 impl MatroskaMuxer {
     /// A single-track muxer (no `CodecPrivate`, the codecs that need none).
     pub fn new(spec: MkvTrackSpec) -> Self {
-        Self::new_multi(alloc::vec![MkvTrackConfig { spec, codec_private: Vec::new() }])
+        Self::new_multi(alloc::vec![MkvTrackConfig {
+            spec,
+            codec_private: Vec::new()
+        }])
     }
 
     /// A multi-track muxer: the A/V case. Input order is track order; a track's
@@ -1021,7 +1058,10 @@ impl MatroskaMuxer {
     pub fn new_multi(tracks: Vec<MkvTrackConfig>) -> Self {
         assert!(!tracks.is_empty(), "MatroskaMuxer needs at least one track");
         // Cues index the video keyframes: pick the first video track, else track 0.
-        let cue_track = tracks.iter().position(|t| t.spec.codec.track_type() == 1).unwrap_or(0);
+        let cue_track = tracks
+            .iter()
+            .position(|t| t.spec.codec.track_type() == 1)
+            .unwrap_or(0);
         Self {
             tracks,
             tags: TagList::new(),
@@ -1059,7 +1099,13 @@ impl MatroskaMuxer {
     /// the EBML header, Segment, Info, and Tracks (plus Tags when present); then a
     /// SimpleBlock for that track, opening a new (unknown-size) Cluster first when
     /// the shared time window is exceeded.
-    pub fn push_frame_on(&mut self, track: usize, data: &[u8], pts_ns: u64, keyframe: bool) -> Vec<u8> {
+    pub fn push_frame_on(
+        &mut self,
+        track: usize,
+        data: &[u8],
+        pts_ns: u64,
+        keyframe: bool,
+    ) -> Vec<u8> {
         let mut out = Vec::new();
         if !self.header_written {
             // WebM only when every track is a WebM-subset codec, else matroska.
@@ -1106,7 +1152,10 @@ impl MatroskaMuxer {
         self.segment_pos += (out.len() - before) as u64;
         // Index this Cluster in the Cues if it holds a keyframe on the cue track,
         // at most once per Cluster (the first such keyframe), to bound the index.
-        if keyframe && track == self.cue_track && self.last_cued_cluster_pos != Some(self.current_cluster_pos) {
+        if keyframe
+            && track == self.cue_track
+            && self.last_cued_cluster_pos != Some(self.current_cluster_pos)
+        {
             self.cues.push((ts, self.current_cluster_pos));
             self.last_cued_cluster_pos = Some(self.current_cluster_pos);
         }
@@ -1126,7 +1175,8 @@ impl MatroskaMuxer {
         let mut body = Vec::new();
         for &(time, cluster_pos) in &self.cues {
             let mut positions = elem_vec(ID_CUE_TRACK, &uint_bytes(track_number));
-            positions.extend_from_slice(&elem_vec(ID_CUE_CLUSTER_POSITION, &uint_bytes(cluster_pos)));
+            positions
+                .extend_from_slice(&elem_vec(ID_CUE_CLUSTER_POSITION, &uint_bytes(cluster_pos)));
             let mut point = elem_vec(ID_CUE_TIME, &uint_bytes(time));
             point.extend_from_slice(&elem_vec(ID_CUE_TRACK_POSITIONS, &positions));
             body.extend_from_slice(&elem_vec(ID_CUE_POINT, &point));
@@ -1148,7 +1198,10 @@ fn ebml_header(doctype: &[u8]) -> Vec<u8> {
 }
 
 fn info_element() -> Vec<u8> {
-    elem_vec(ID_INFO, &elem_vec(ID_TIMESTAMP_SCALE, &uint_bytes(DEFAULT_TIMESTAMP_SCALE)))
+    elem_vec(
+        ID_INFO,
+        &elem_vec(ID_TIMESTAMP_SCALE, &uint_bytes(DEFAULT_TIMESTAMP_SCALE)),
+    )
 }
 
 /// The `Tracks` element: one `TrackEntry` per track, numbered 1.. in order. A
@@ -1160,7 +1213,10 @@ fn tracks_element(tracks: &[MkvTrackConfig]) -> Vec<u8> {
         let spec = &track.spec;
         let codec_id = spec.codec.codec_id().unwrap_or(b"");
         let mut entry = elem_vec(ID_TRACK_NUMBER, &uint_bytes(i as u64 + 1));
-        entry.extend_from_slice(&elem_vec(ID_TRACK_TYPE, &uint_bytes(spec.codec.track_type() as u64)));
+        entry.extend_from_slice(&elem_vec(
+            ID_TRACK_TYPE,
+            &uint_bytes(spec.codec.track_type() as u64),
+        ));
         entry.extend_from_slice(&elem_vec(ID_CODEC_ID, codec_id));
         if !track.codec_private.is_empty() {
             entry.extend_from_slice(&elem_vec(ID_CODEC_PRIVATE, &track.codec_private));
@@ -1171,7 +1227,10 @@ fn tracks_element(tracks: &[MkvTrackConfig]) -> Vec<u8> {
             entry.extend_from_slice(&elem_vec(ID_VIDEO, &v));
         } else {
             let mut a = elem_vec(ID_CHANNELS, &uint_bytes(spec.channels.max(1) as u64));
-            a.extend_from_slice(&elem_vec(ID_SAMPLING_FREQ, &(spec.sample_rate as f64).to_be_bytes()));
+            a.extend_from_slice(&elem_vec(
+                ID_SAMPLING_FREQ,
+                &(spec.sample_rate as f64).to_be_bytes(),
+            ));
             entry.extend_from_slice(&elem_vec(ID_AUDIO, &a));
         }
         entries.extend_from_slice(&elem_vec(ID_TRACK_ENTRY, &entry));
@@ -1323,12 +1382,21 @@ mod tests {
         b
     }
 
-    fn track_entry(number: u64, codec: &[u8], video: Option<(u32, u32)>, audio: Option<(u8, u32)>) -> Vec<u8> {
+    fn track_entry(
+        number: u64,
+        codec: &[u8],
+        video: Option<(u32, u32)>,
+        audio: Option<(u8, u32)>,
+    ) -> Vec<u8> {
         let mut body = Vec::new();
         body.extend_from_slice(&elem(&[0xD7], &uint_body(number)));
         body.extend_from_slice(&elem(&[0x86], codec));
         if let Some((w, h)) = video {
-            let v = [elem(&[0xB0], &uint_body(w as u64)), elem(&[0xBA], &uint_body(h as u64))].concat();
+            let v = [
+                elem(&[0xB0], &uint_body(w as u64)),
+                elem(&[0xBA], &uint_body(h as u64)),
+            ]
+            .concat();
             body.extend_from_slice(&elem(&[0xE0], &v));
         }
         if let Some((ch, sr)) = audio {
@@ -1370,8 +1438,10 @@ mod tests {
     /// display window, so a subtitle track flows like a timed-text stream.
     #[test]
     fn extracts_a_subtitle_track_with_block_duration() {
-        let tracks =
-            elem(&[0x16, 0x54, 0xAE, 0x6B], &track_entry(1, b"S_TEXT/UTF8", None, None));
+        let tracks = elem(
+            &[0x16, 0x54, 0xAE, 0x6B],
+            &track_entry(1, b"S_TEXT/UTF8", None, None),
+        );
         // A BlockGroup: Block (track 1, rel 0, "Hello") + BlockDuration 2000 ticks.
         let block = elem(&[0xA1], &block_body(1, 0, true, b"Hello"));
         let duration = elem(&[0x9B], &uint_body(2000));
@@ -1396,7 +1466,11 @@ mod tests {
         assert_eq!(f.codec, MkvCodec::Subtitle(TextFormat::Utf8));
         assert_eq!(f.data, b"Hello", "the block payload is the cue text");
         // Default TimestampScale is 1_000_000 ns/tick (no Info element overrides it).
-        assert_eq!(f.pts_ns, 1000 * 1_000_000, "cluster+block timestamp, scaled");
+        assert_eq!(
+            f.pts_ns,
+            1000 * 1_000_000,
+            "cluster+block timestamp, scaled"
+        );
         assert_eq!(f.duration_ns, 2000 * 1_000_000, "BlockDuration, scaled");
     }
 
@@ -1417,7 +1491,10 @@ mod tests {
     fn read_id_lengths() {
         assert_eq!(read_id(&[0xA3], 0), Some((0xA3, 1)));
         assert_eq!(read_id(&[0x42, 0x86], 0), Some((0x4286, 2)));
-        assert_eq!(read_id(&[0x1F, 0x43, 0xB6, 0x75], 0), Some((0x1F43_B675, 4)));
+        assert_eq!(
+            read_id(&[0x1F, 0x43, 0xB6, 0x75], 0),
+            Some((0x1F43_B675, 4))
+        );
     }
 
     #[test]
@@ -1428,15 +1505,41 @@ mod tests {
         assert_eq!(
             d.tracks(),
             &[
-                MkvTrack { number: 1, codec: MkvCodec::Vp9, width: 640, height: 480, channels: 0, sample_rate: 0, default_duration_ns: 0 },
-                MkvTrack { number: 2, codec: MkvCodec::Opus, width: 0, height: 0, channels: 2, sample_rate: 48_000, default_duration_ns: 0 },
+                MkvTrack {
+                    number: 1,
+                    codec: MkvCodec::Vp9,
+                    width: 640,
+                    height: 480,
+                    channels: 0,
+                    sample_rate: 0,
+                    default_duration_ns: 0
+                },
+                MkvTrack {
+                    number: 2,
+                    codec: MkvCodec::Opus,
+                    width: 0,
+                    height: 0,
+                    channels: 2,
+                    sample_rate: 48_000,
+                    default_duration_ns: 0
+                },
             ]
         );
 
         let frames = d.take_frames();
         assert_eq!(frames.len(), 3, "two video + one audio");
         // Cluster ts 1000 * default scale 1_000_000 ns = 1 ms.
-        assert_eq!(frames[0], MkvFrame { track: 1, codec: MkvCodec::Vp9, pts_ns: 1_000 * 1_000_000, duration_ns: 0, keyframe: true, data: vec![0xDE, 0xAD] });
+        assert_eq!(
+            frames[0],
+            MkvFrame {
+                track: 1,
+                codec: MkvCodec::Vp9,
+                pts_ns: 1_000 * 1_000_000,
+                duration_ns: 0,
+                keyframe: true,
+                data: vec![0xDE, 0xAD]
+            }
+        );
         assert_eq!(frames[1].codec, MkvCodec::Opus);
         assert_eq!(frames[1].data, vec![0xBE, 0xEF]);
         // rel +33 -> (1000+33) * scale.
@@ -1470,7 +1573,10 @@ mod tests {
     #[test]
     fn demuxes_unknown_size_cluster() {
         // Two live Clusters with unknown size, terminated by each other / EOF.
-        let tracks = elem(&[0x16, 0x54, 0xAE, 0x6B], &track_entry(1, b"V_VP9", Some((64, 48)), None));
+        let tracks = elem(
+            &[0x16, 0x54, 0xAE, 0x6B],
+            &track_entry(1, b"V_VP9", Some((64, 48)), None),
+        );
         let cluster0 = unknown_size_elem(
             &[0x1F, 0x43, 0xB6, 0x75],
             1,
@@ -1484,8 +1590,11 @@ mod tests {
         let cluster1 = unknown_size_elem(
             &[0x1F, 0x43, 0xB6, 0x75],
             1,
-            &[elem(&[0xE7], &uint_body(100)), elem(&[0xA3], &block_body(1, 0, true, &[0xCC]))]
-                .concat(),
+            &[
+                elem(&[0xE7], &uint_body(100)),
+                elem(&[0xA3], &block_body(1, 0, true, &[0xCC])),
+            ]
+            .concat(),
         );
         let segment = unknown_size_elem(
             &[0x18, 0x53, 0x80, 0x67],
@@ -1503,7 +1612,11 @@ mod tests {
         assert_eq!(frames[1].data, vec![0xBB]);
         assert_eq!(frames[1].pts_ns, 10 * 1_000_000);
         assert_eq!(frames[2].data, vec![0xCC]);
-        assert_eq!(frames[2].pts_ns, 100 * 1_000_000, "second cluster's Timestamp applies");
+        assert_eq!(
+            frames[2].pts_ns,
+            100 * 1_000_000,
+            "second cluster's Timestamp applies"
+        );
     }
 
     #[test]
@@ -1511,8 +1624,10 @@ mod tests {
         // A live Cluster may carry CRC-32 / Void children among its blocks; these
         // must be skipped, not treated as the Cluster end (which would drop every
         // following block).
-        let tracks =
-            elem(&[0x16, 0x54, 0xAE, 0x6B], &track_entry(1, b"V_VP9", Some((64, 48)), None));
+        let tracks = elem(
+            &[0x16, 0x54, 0xAE, 0x6B],
+            &track_entry(1, b"V_VP9", Some((64, 48)), None),
+        );
         let cluster = unknown_size_elem(
             &[0x1F, 0x43, 0xB6, 0x75],
             1,
@@ -1525,13 +1640,16 @@ mod tests {
             ]
             .concat(),
         );
-        let segment =
-            unknown_size_elem(&[0x18, 0x53, 0x80, 0x67], 8, &[tracks, cluster].concat());
+        let segment = unknown_size_elem(&[0x18, 0x53, 0x80, 0x67], 8, &[tracks, cluster].concat());
         let file = [elem(&[0x1A, 0x45, 0xDF, 0xA3], &[]), segment].concat();
         let mut d = MatroskaDemuxer::new();
         d.push_data(&file);
         let frames = d.take_frames();
-        assert_eq!(frames.len(), 2, "benign children are skipped; both blocks demux");
+        assert_eq!(
+            frames.len(),
+            2,
+            "benign children are skipped; both blocks demux"
+        );
         assert_eq!(frames[0].data, vec![0xAA]);
         assert_eq!(frames[1].data, vec![0xBB]);
     }
@@ -1540,7 +1658,10 @@ mod tests {
     fn unknown_size_cluster_emits_blocks_incrementally() {
         // A block fully buffered before its Cluster is closed still emits (live
         // playback can't wait for a terminator that may never come).
-        let tracks = elem(&[0x16, 0x54, 0xAE, 0x6B], &track_entry(1, b"V_VP8", Some((16, 16)), None));
+        let tracks = elem(
+            &[0x16, 0x54, 0xAE, 0x6B],
+            &track_entry(1, b"V_VP8", Some((16, 16)), None),
+        );
         let mut file = [elem(&[0x1A, 0x45, 0xDF, 0xA3], &[])].concat();
         file.extend_from_slice(&unknown_size_elem(&[0x18, 0x53, 0x80, 0x67], 8, &tracks));
         let mut d = MatroskaDemuxer::new();
@@ -1551,7 +1672,11 @@ mod tests {
         live.extend_from_slice(&elem(&[0xA3], &block_body(1, 0, true, &[0xDD])));
         d.push_data(&live);
         let frames = d.take_frames();
-        assert_eq!(frames.len(), 1, "the block emits without waiting for a Cluster end");
+        assert_eq!(
+            frames.len(),
+            1,
+            "the block emits without waiting for a Cluster end"
+        );
         assert_eq!(frames[0].pts_ns, 5 * 1_000_000);
     }
 
@@ -1559,8 +1684,10 @@ mod tests {
     fn fixed_lacing_block_splits_into_frames() {
         // A SimpleBlock with fixed lacing (flags bit 0x04), two frames, data
         // [0xAA, 0xBB] -> one byte each, both at the cluster timestamp.
-        let tracks =
-            elem(&[0x16, 0x54, 0xAE, 0x6B], &track_entry(1, b"V_VP8", Some((16, 16)), None));
+        let tracks = elem(
+            &[0x16, 0x54, 0xAE, 0x6B],
+            &track_entry(1, b"V_VP8", Some((16, 16)), None),
+        );
         let mut laced = vint(1); // track 1
         laced.extend_from_slice(&0i16.to_be_bytes());
         laced.push(0x04); // fixed lacing
@@ -1586,8 +1713,10 @@ mod tests {
         // An untrusted Cluster Timestamp >= 2^63 casts to a negative i64; adding a
         // negative block rel must not overflow the abs-timestamp add (a debug
         // panic). It saturates and the existing `< 0` clamp maps it to pts 0.
-        let tracks =
-            elem(&[0x16, 0x54, 0xAE, 0x6B], &track_entry(1, b"V_VP8", Some((16, 16)), None));
+        let tracks = elem(
+            &[0x16, 0x54, 0xAE, 0x6B],
+            &track_entry(1, b"V_VP8", Some((16, 16)), None),
+        );
         let cluster = elem(
             &[0x1F, 0x43, 0xB6, 0x75],
             &[
@@ -1615,7 +1744,10 @@ mod tests {
             elem(&[0xD7], &uint_body(1)),                  // TrackNumber
             elem(&[0x86], b"V_VP8"),                       // CodecID
             elem(&[0x23, 0xE3, 0x83], &uint_body(dur_ns)), // DefaultDuration
-            elem(&[0xE0], &[elem(&[0xB0], &uint_body(16)), elem(&[0xBA], &uint_body(16))].concat()),
+            elem(
+                &[0xE0],
+                &[elem(&[0xB0], &uint_body(16)), elem(&[0xBA], &uint_body(16))].concat(),
+            ),
         ]
         .concat();
         let tracks = elem(&[0x16, 0x54, 0xAE, 0x6B], &elem(&[0xAE], &track_body));
@@ -1637,8 +1769,14 @@ mod tests {
         assert_eq!(d.tracks()[0].default_duration_ns, dur_ns);
         let frames = d.take_frames();
         assert_eq!(frames.len(), 2);
-        assert_eq!(frames[0].pts_ns, 0, "first laced frame at the block timestamp");
-        assert_eq!(frames[1].pts_ns, dur_ns, "second frame advanced by DefaultDuration");
+        assert_eq!(
+            frames[0].pts_ns, 0,
+            "first laced frame at the block timestamp"
+        );
+        assert_eq!(
+            frames[1].pts_ns, dur_ns,
+            "second frame advanced by DefaultDuration"
+        );
     }
 
     #[test]
@@ -1679,8 +1817,13 @@ mod tests {
     #[test]
     fn mux_demux_round_trip() {
         // Mux a VP9 video track of two frames, then demux the WebM back.
-        let spec =
-            MkvTrackSpec { codec: MkvCodec::Vp9, width: 320, height: 240, channels: 0, sample_rate: 0 };
+        let spec = MkvTrackSpec {
+            codec: MkvCodec::Vp9,
+            width: 320,
+            height: 240,
+            channels: 0,
+            sample_rate: 0,
+        };
         let mut mux = MatroskaMuxer::new(spec);
         let mut bytes = mux.push_frame(&[1, 2, 3], 0, true);
         bytes.extend_from_slice(&mux.push_frame(&[4, 5], 33_000_000, false));
@@ -1689,7 +1832,15 @@ mod tests {
         d.push_data(&bytes);
         assert_eq!(
             d.tracks(),
-            &[MkvTrack { number: 1, codec: MkvCodec::Vp9, width: 320, height: 240, channels: 0, sample_rate: 0, default_duration_ns: 0 }]
+            &[MkvTrack {
+                number: 1,
+                codec: MkvCodec::Vp9,
+                width: 320,
+                height: 240,
+                channels: 0,
+                sample_rate: 0,
+                default_duration_ns: 0
+            }]
         );
         let frames = d.take_frames();
         assert_eq!(frames.len(), 2, "both frames survive the round trip");
@@ -1706,8 +1857,11 @@ mod tests {
     fn tags_element(simple: &[(&str, &str)]) -> Vec<u8> {
         let mut tag = elem(&[0x63, 0xC0], &[]); // Targets (empty)
         for (name, value) in simple {
-            let body = [elem(&[0x45, 0xA3], name.as_bytes()), elem(&[0x44, 0x87], value.as_bytes())]
-                .concat();
+            let body = [
+                elem(&[0x45, 0xA3], name.as_bytes()),
+                elem(&[0x44, 0x87], value.as_bytes()),
+            ]
+            .concat();
             tag.extend_from_slice(&elem(&[0x67, 0xC8], &body));
         }
         elem(&[0x12, 0x54, 0xC3, 0x67], &elem(&[0x73, 0x73], &tag))
@@ -1716,7 +1870,10 @@ mod tests {
     #[test]
     fn parses_segment_title_and_tags() {
         let info = elem(&[0x15, 0x49, 0xA9, 0x66], &elem(&[0x7B, 0xA9], b"My Movie")); // Info/Title
-        let tracks = elem(&[0x16, 0x54, 0xAE, 0x6B], &track_entry(1, b"V_VP9", Some((16, 16)), None));
+        let tracks = elem(
+            &[0x16, 0x54, 0xAE, 0x6B],
+            &track_entry(1, b"V_VP9", Some((16, 16)), None),
+        );
         let tags = tags_element(&[("ARTIST", "Band"), ("ENCODER", "libvpx")]);
         let segment = elem(&[0x18, 0x53, 0x80, 0x67], &[info, tracks, tags].concat());
         let file = [elem(&[0x1A, 0x45, 0xDF, 0xA3], &[]), segment].concat();
@@ -1735,12 +1892,20 @@ mod tests {
 
     #[test]
     fn mux_writes_tags_that_demux_recovers() {
-        let spec =
-            MkvTrackSpec { codec: MkvCodec::Vp9, width: 16, height: 16, channels: 0, sample_rate: 0 };
+        let spec = MkvTrackSpec {
+            codec: MkvCodec::Vp9,
+            width: 16,
+            height: 16,
+            channels: 0,
+            sample_rate: 0,
+        };
         let tags: TagList = [
             Tag::Title("Clip".into()),
             Tag::Encoder("g2g".into()),
-            Tag::Other { key: "DIRECTOR".into(), value: "Ada".into() },
+            Tag::Other {
+                key: "DIRECTOR".into(),
+                value: "Ada".into(),
+            },
         ]
         .into_iter()
         .collect();
@@ -1749,14 +1914,27 @@ mod tests {
 
         let mut d = MatroskaDemuxer::new();
         d.push_data(&bytes);
-        assert_eq!(d.tags().tags(), tags.tags(), "tags survive the mux + demux round trip");
-        assert_eq!(d.take_frames().len(), 1, "the frame still muxes alongside the tags");
+        assert_eq!(
+            d.tags().tags(),
+            tags.tags(),
+            "tags survive the mux + demux round trip"
+        );
+        assert_eq!(
+            d.take_frames().len(),
+            1,
+            "the frame still muxes alongside the tags"
+        );
     }
 
     #[test]
     fn mux_without_tags_writes_no_tags_element() {
-        let spec =
-            MkvTrackSpec { codec: MkvCodec::Vp9, width: 16, height: 16, channels: 0, sample_rate: 0 };
+        let spec = MkvTrackSpec {
+            codec: MkvCodec::Vp9,
+            width: 16,
+            height: 16,
+            channels: 0,
+            sample_rate: 0,
+        };
         let bytes = MatroskaMuxer::new(spec).push_frame(&[0], 0, true);
         let mut d = MatroskaDemuxer::new();
         d.push_data(&bytes);
@@ -1764,42 +1942,69 @@ mod tests {
     }
 
     fn count_clusters(bytes: &[u8]) -> usize {
-        bytes.windows(4).filter(|w| *w == [0x1F, 0x43, 0xB6, 0x75]).count()
+        bytes
+            .windows(4)
+            .filter(|w| *w == [0x1F, 0x43, 0xB6, 0x75])
+            .count()
     }
 
     #[test]
     fn batches_frames_within_span_into_one_cluster() {
-        let spec =
-            MkvTrackSpec { codec: MkvCodec::Vp9, width: 16, height: 16, channels: 0, sample_rate: 0 };
+        let spec = MkvTrackSpec {
+            codec: MkvCodec::Vp9,
+            width: 16,
+            height: 16,
+            channels: 0,
+            sample_rate: 0,
+        };
         let mut mux = MatroskaMuxer::new(spec); // default 1000 ms span
         let mut out = mux.push_frame(&[1], 0, true);
         out.extend_from_slice(&mux.push_frame(&[2], 100_000_000, false)); // 100 ms
         out.extend_from_slice(&mux.push_frame(&[3], 200_000_000, false)); // 200 ms
 
-        assert_eq!(count_clusters(&out), 1, "frames within the span share one Cluster");
+        assert_eq!(
+            count_clusters(&out),
+            1,
+            "frames within the span share one Cluster"
+        );
         let mut d = MatroskaDemuxer::new();
         d.push_data(&out);
         let frames = d.take_frames();
         assert_eq!(frames.len(), 3);
         assert_eq!(frames[0].pts_ns, 0);
         assert_eq!(frames[1].pts_ns, 100_000_000);
-        assert_eq!(frames[2].pts_ns, 200_000_000, "rel timestamps within the batched Cluster");
+        assert_eq!(
+            frames[2].pts_ns, 200_000_000,
+            "rel timestamps within the batched Cluster"
+        );
     }
 
     #[test]
     fn opens_a_new_cluster_past_the_span() {
-        let spec =
-            MkvTrackSpec { codec: MkvCodec::Vp9, width: 16, height: 16, channels: 0, sample_rate: 0 };
+        let spec = MkvTrackSpec {
+            codec: MkvCodec::Vp9,
+            width: 16,
+            height: 16,
+            channels: 0,
+            sample_rate: 0,
+        };
         let mut mux = MatroskaMuxer::new(spec).with_max_cluster_span_ms(500);
         let mut out = mux.push_frame(&[1], 0, true);
         out.extend_from_slice(&mux.push_frame(&[2], 600_000_000, true)); // 600 ms > 500 ms
 
-        assert_eq!(count_clusters(&out), 2, "a frame past the span opens a new Cluster");
+        assert_eq!(
+            count_clusters(&out),
+            2,
+            "a frame past the span opens a new Cluster"
+        );
         let mut d = MatroskaDemuxer::new();
         d.push_data(&out);
         let frames = d.take_frames();
         assert_eq!(frames.len(), 2);
-        assert_eq!(frames[1].pts_ns, 600_000_000, "second Cluster carries its own base");
+        assert_eq!(
+            frames[1].pts_ns, 600_000_000,
+            "second Cluster carries its own base"
+        );
     }
 
     #[test]
@@ -1807,8 +2012,13 @@ mod tests {
         // Two keyframes a span apart open two Clusters; the EOS Cues index should
         // point each CueTime at its Cluster's byte offset (M375, the write side of
         // M373's read).
-        let spec =
-            MkvTrackSpec { codec: MkvCodec::Vp9, width: 16, height: 16, channels: 0, sample_rate: 0 };
+        let spec = MkvTrackSpec {
+            codec: MkvCodec::Vp9,
+            width: 16,
+            height: 16,
+            channels: 0,
+            sample_rate: 0,
+        };
         let mut mux = MatroskaMuxer::new(spec).with_max_cluster_span_ms(500);
         let mut out = mux.push_frame(&[1], 0, true);
         out.extend_from_slice(&mux.push_frame(&[2], 200_000_000, false)); // same Cluster, non-key
@@ -1821,21 +2031,34 @@ mod tests {
         d.push_data(&out);
         // One CuePoint per Cluster holding a keyframe (the non-key frame did not add
         // a second cue to Cluster 1).
-        assert_eq!(d.cues().len(), 2, "one cue per keyframe-bearing Cluster, deduped");
+        assert_eq!(
+            d.cues().len(),
+            2,
+            "one cue per keyframe-bearing Cluster, deduped"
+        );
         assert_eq!(d.cues()[0].time_ns, 0);
         assert_eq!(d.cues()[1].time_ns, 600_000_000);
 
         // Each cue's resolved absolute offset lands exactly on a Cluster element id.
         for target in [0u64, 600_000_000] {
             let off = d.cue_seek_offset(target).expect("offset for a cued time") as usize;
-            assert_eq!(&out[off..off + 4], &[0x1F, 0x43, 0xB6, 0x75], "cue points at a Cluster");
+            assert_eq!(
+                &out[off..off + 4],
+                &[0x1F, 0x43, 0xB6, 0x75],
+                "cue points at a Cluster"
+            );
         }
     }
 
     #[test]
     fn mux_writes_webm_doctype_for_vp9() {
-        let spec =
-            MkvTrackSpec { codec: MkvCodec::Vp9, width: 16, height: 16, channels: 0, sample_rate: 0 };
+        let spec = MkvTrackSpec {
+            codec: MkvCodec::Vp9,
+            width: 16,
+            height: 16,
+            channels: 0,
+            sample_rate: 0,
+        };
         let bytes = MatroskaMuxer::new(spec).push_frame(&[0], 0, true);
         // The DocType string appears in the EBML header for a WebM codec.
         assert!(bytes.windows(4).any(|w| w == b"webm"), "VP9 muxes as WebM");
@@ -1843,7 +2066,11 @@ mod tests {
 
     /// A `CuePoint`: CueTime + CueTrackPositions(CueTrack, CueClusterPosition).
     fn cue_point(time: u64, track: u64, pos: u64) -> Vec<u8> {
-        let tp = [elem(&[0xF7], &uint_body(track)), elem(&[0xF1], &uint_body(pos))].concat();
+        let tp = [
+            elem(&[0xF7], &uint_body(track)),
+            elem(&[0xF1], &uint_body(pos)),
+        ]
+        .concat();
         let body = [elem(&[0xB3], &uint_body(time)), elem(&[0xB7], &tp)].concat();
         elem(&[0xBB], &body)
     }
@@ -1851,23 +2078,33 @@ mod tests {
     #[test]
     fn parses_cues_and_resolves_seek_offsets() {
         let ebml = elem(&[0x1A, 0x45, 0xDF, 0xA3], &[]);
-        let tracks = elem(&[0x16, 0x54, 0xAE, 0x6B], &track_entry(1, b"V_VP9", Some((320, 240)), None));
+        let tracks = elem(
+            &[0x16, 0x54, 0xAE, 0x6B],
+            &track_entry(1, b"V_VP9", Some((320, 240)), None),
+        );
         let cluster = |ts: u64, frame: &[u8]| {
             elem(
                 &[0x1F, 0x43, 0xB6, 0x75],
-                &[elem(&[0xE7], &uint_body(ts)), elem(&[0xA3], &block_body(1, 0, true, frame))]
-                    .concat(),
+                &[
+                    elem(&[0xE7], &uint_body(ts)),
+                    elem(&[0xA3], &block_body(1, 0, true, frame)),
+                ]
+                .concat(),
             )
         };
         let cluster0 = cluster(0, &[0xAA]);
         let cluster1 = cluster(1000, &[0xBB]); // 1000 ms with the default 1 ms scale = 1 s
-        // Cues sit after the Clusters (the common layout): positions are relative
-        // to the Segment data start.
+                                               // Cues sit after the Clusters (the common layout): positions are relative
+                                               // to the Segment data start.
         let cluster0_pos = tracks.len() as u64;
         let cluster1_pos = (tracks.len() + cluster0.len()) as u64;
         let cues = elem(
             &[0x1C, 0x53, 0xBB, 0x6B],
-            &[cue_point(0, 1, cluster0_pos), cue_point(1000, 1, cluster1_pos)].concat(),
+            &[
+                cue_point(0, 1, cluster0_pos),
+                cue_point(1000, 1, cluster1_pos),
+            ]
+            .concat(),
         );
         let body = [tracks.clone(), cluster0.clone(), cluster1, cues].concat();
         let segment = elem(&[0x18, 0x53, 0x80, 0x67], &body);
@@ -1878,17 +2115,29 @@ mod tests {
         d.push_data(&file);
 
         assert_eq!(d.cues().len(), 2);
-        assert_eq!(d.cues()[0], CuePoint { time_ns: 0, cluster_position: cluster0_pos });
+        assert_eq!(
+            d.cues()[0],
+            CuePoint {
+                time_ns: 0,
+                cluster_position: cluster0_pos
+            }
+        );
         assert_eq!(
             d.cues()[1],
-            CuePoint { time_ns: 1000 * DEFAULT_TIMESTAMP_SCALE, cluster_position: cluster1_pos }
+            CuePoint {
+                time_ns: 1000 * DEFAULT_TIMESTAMP_SCALE,
+                cluster_position: cluster1_pos
+            }
         );
 
         // A seek at the second cue's exact time lands on Cluster1; the absolute
         // offset points at the Cluster element id in the file.
         let off = d.cue_seek_offset(1000 * DEFAULT_TIMESTAMP_SCALE).unwrap();
         assert_eq!(off, seg_data_pos + cluster1_pos);
-        assert_eq!(&file[off as usize..off as usize + 4], &[0x1F, 0x43, 0xB6, 0x75]);
+        assert_eq!(
+            &file[off as usize..off as usize + 4],
+            &[0x1F, 0x43, 0xB6, 0x75]
+        );
 
         // A target between cues snaps back to the largest cue at/before it (Cluster0).
         assert_eq!(
@@ -1904,12 +2153,20 @@ mod tests {
         let mut d = MatroskaDemuxer::new();
         d.push_data(&synthetic_webm()); // no Cues element
         assert!(d.cues().is_empty());
-        assert_eq!(d.cue_seek_offset(0), None, "no index -> caller re-scans from 0");
+        assert_eq!(
+            d.cue_seek_offset(0),
+            None,
+            "no index -> caller re-scans from 0"
+        );
     }
 
     /// A SeekHead Seek entry: SeekID (the target element ID, whole) + SeekPosition.
     fn seek_entry(target_id: &[u8], pos: u64) -> Vec<u8> {
-        let body = [elem(&[0x53, 0xAB], target_id), elem(&[0x53, 0xAC], &uint_body(pos))].concat();
+        let body = [
+            elem(&[0x53, 0xAB], target_id),
+            elem(&[0x53, 0xAC], &uint_body(pos)),
+        ]
+        .concat();
         elem(&[0x4D, 0xBB], &body)
     }
 
@@ -1925,7 +2182,10 @@ mod tests {
             ]
             .concat(),
         );
-        let tracks = elem(&[0x16, 0x54, 0xAE, 0x6B], &track_entry(1, b"V_VP9", Some((320, 240)), None));
+        let tracks = elem(
+            &[0x16, 0x54, 0xAE, 0x6B],
+            &track_entry(1, b"V_VP9", Some((320, 240)), None),
+        );
         let body = [seekhead, tracks].concat();
         let segment = elem(&[0x18, 0x53, 0x80, 0x67], &body);
         let seg_data_pos = ebml.len() as u64 + (segment.len() - body.len()) as u64;

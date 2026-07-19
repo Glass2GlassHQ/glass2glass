@@ -43,7 +43,11 @@ pub struct Stream {
 
 impl Stream {
     pub fn new(id: impl Into<String>, stream_type: StreamType, caps: Caps) -> Self {
-        Self { id: id.into(), stream_type, caps }
+        Self {
+            id: id.into(),
+            stream_type,
+            caps,
+        }
     }
 }
 
@@ -59,7 +63,10 @@ pub struct StreamCollection {
 
 impl StreamCollection {
     pub fn new(id: impl Into<String>, streams: Vec<Stream>) -> Self {
-        Self { id: id.into(), streams }
+        Self {
+            id: id.into(),
+            streams,
+        }
     }
 
     /// All streams, in the demuxer's declared track order.
@@ -69,7 +76,9 @@ impl StreamCollection {
 
     /// The streams of a given kind (e.g. every audio track), in track order.
     pub fn streams_of_type(&self, stream_type: StreamType) -> impl Iterator<Item = &Stream> {
-        self.streams.iter().filter(move |s| s.stream_type == stream_type)
+        self.streams
+            .iter()
+            .filter(move |s| s.stream_type == stream_type)
     }
 
     /// The stream with this id, if present.
@@ -100,7 +109,11 @@ mod tests {
         }
     }
     fn audio() -> Caps {
-        Caps::Audio { format: AudioFormat::Opus, channels: 2, sample_rate: 48_000 }
+        Caps::Audio {
+            format: AudioFormat::Opus,
+            channels: 2,
+            sample_rate: 48_000,
+        }
     }
 
     fn collection() -> StreamCollection {
@@ -126,7 +139,10 @@ mod tests {
     #[test]
     fn get_finds_by_id() {
         let c = collection();
-        assert_eq!(c.get("matroska-track-2").unwrap().stream_type, StreamType::Audio);
+        assert_eq!(
+            c.get("matroska-track-2").unwrap().stream_type,
+            StreamType::Audio
+        );
         assert!(c.get("nonexistent").is_none());
     }
 

@@ -39,16 +39,22 @@ impl WebRtcSrc {
     /// signaling handshake); `caps` is the stream's declared format, as with
     /// `FileSrc`/`WebSocketSrc`. The channel is wired in `run`.
     pub fn new(channel: RtcDataChannel, caps: Caps) -> Self {
-        Self { channel, caps, configured: false }
+        Self {
+            channel,
+            caps,
+            configured: false,
+        }
     }
 }
 
 impl SourceLoop for WebRtcSrc {
-    type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
+    type RunFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
     where
         Self: 'a;
 
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 
@@ -60,7 +66,9 @@ impl SourceLoop for WebRtcSrc {
     fn caps_constraint<'a>(
         &'a mut self,
     ) -> impl Future<Output = Result<CapsConstraint<'a>, G2gError>> + 'a {
-        core::future::ready(Ok(CapsConstraint::Produces(CapsSet::one(self.caps.clone()))))
+        core::future::ready(Ok(CapsConstraint::Produces(CapsSet::one(
+            self.caps.clone(),
+        ))))
     }
 
     fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -73,7 +81,8 @@ impl SourceLoop for WebRtcSrc {
             if !self.configured {
                 return Err(G2gError::NotConfigured);
             }
-            self.channel.set_binary_type(RtcDataChannelType::Arraybuffer);
+            self.channel
+                .set_binary_type(RtcDataChannelType::Arraybuffer);
 
             let inbox: Inbox<Vec<u8>> = Inbox::new();
 
@@ -107,7 +116,9 @@ impl SourceLoop for WebRtcSrc {
             let pump = async {
                 while let Some(bytes) = inbox.next().await {
                     let frame = Frame {
-                        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
+                        domain: MemoryDomain::System(SystemSlice::from_boxed(
+                            bytes.into_boxed_slice(),
+                        )),
                         // Raw ingest carries no timing; recovered downstream by the
                         // parser/decoder, as with FileSrc / WebSocketSrc.
                         timing: FrameTiming::default(),

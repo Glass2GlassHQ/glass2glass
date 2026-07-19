@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use g2g_core::graph::Graph;
 use g2g_core::log::{self, LogLevel, LogRecord, LogSink};
 use g2g_core::runtime::solver::{solve_graph, NodeConstraint};
-use g2g_core::{Caps, CapsConstraint, CapsSet, Dim, RawVideoFormat, Rate};
+use g2g_core::{Caps, CapsConstraint, CapsSet, Dim, Rate, RawVideoFormat};
 
 #[derive(Default)]
 struct Capture(Arc<Mutex<Vec<String>>>);
@@ -21,7 +21,10 @@ impl LogSink for Capture {
     fn emit(&self, r: &LogRecord<'_>) {
         // Keep only caps narration; record "LEVEL: message".
         if r.category == log::CAPS_CATEGORY {
-            self.0.lock().unwrap().push(format!("{}: {}", r.level.as_str(), r.message));
+            self.0
+                .lock()
+                .unwrap()
+                .push(format!("{}: {}", r.level.as_str(), r.message));
         }
     }
 }
@@ -36,7 +39,11 @@ fn rgba(w: u32, h: u32) -> Caps {
 }
 
 fn audio() -> Caps {
-    Caps::Audio { format: g2g_core::AudioFormat::PcmS16Le, channels: 2, sample_rate: 48_000 }
+    Caps::Audio {
+        format: g2g_core::AudioFormat::PcmS16Le,
+        channels: 2,
+        sample_rate: 48_000,
+    }
 }
 
 #[test]
@@ -60,11 +67,23 @@ fn caps_trace_narrates_success_and_failure() {
 
     let lines = captured.lock().unwrap().clone();
     let blob = lines.join("\n");
-    assert!(blob.contains("negotiating 2 nodes, 1 edges"), "setup header missing:\n{blob}");
-    assert!(blob.contains("produces video/x-raw,format=RGBA"), "produce line missing:\n{blob}");
-    assert!(blob.contains("accepts ANY"), "accepts line missing:\n{blob}");
+    assert!(
+        blob.contains("negotiating 2 nodes, 1 edges"),
+        "setup header missing:\n{blob}"
+    );
+    assert!(
+        blob.contains("produces video/x-raw,format=RGBA"),
+        "produce line missing:\n{blob}"
+    );
+    assert!(
+        blob.contains("accepts ANY"),
+        "accepts line missing:\n{blob}"
+    );
     // The fixated per-edge result, with the ✓ marker and the chosen caps.
-    assert!(blob.contains("✓ -> video/x-raw,format=RGBA"), "fixated edge missing:\n{blob}");
+    assert!(
+        blob.contains("✓ -> video/x-raw,format=RGBA"),
+        "fixated edge missing:\n{blob}"
+    );
 
     // --- failure: source produces video, sink accepts only audio. ---
     captured.lock().unwrap().clear();
@@ -82,8 +101,14 @@ fn caps_trace_narrates_success_and_failure() {
     let lines = captured.lock().unwrap().clone();
     let blob = lines.join("\n");
     // The failure is narrated at ERROR, names the conflict, and shows the sets.
-    assert!(blob.contains("ERROR: no caps overlap"), "failure header missing:\n{blob}");
-    assert!(blob.contains("video/x-raw,format=RGBA"), "upstream set missing:\n{blob}");
+    assert!(
+        blob.contains("ERROR: no caps overlap"),
+        "failure header missing:\n{blob}"
+    );
+    assert!(
+        blob.contains("video/x-raw,format=RGBA"),
+        "upstream set missing:\n{blob}"
+    );
 
     log::reset();
 }

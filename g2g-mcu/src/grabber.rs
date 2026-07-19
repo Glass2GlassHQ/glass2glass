@@ -62,7 +62,11 @@ impl<G: FrameGrabber, const N: usize, const BYTES: usize> GrabberSrc<'static, G,
     /// lives in a `static` / `StaticCell`), which makes the zero-copy lend
     /// safe by construction: the ring outlives every published frame.
     /// `frame_interval_ns` is the nominal frame period used to derive PTS.
-    pub fn new(grabber: G, ring: &'static StaticLendRing<N, BYTES>, frame_interval_ns: u64) -> Self {
+    pub fn new(
+        grabber: G,
+        ring: &'static StaticLendRing<N, BYTES>,
+        frame_interval_ns: u64,
+    ) -> Self {
         // SAFETY: `'static` trivially satisfies with_ring's outlives contract.
         unsafe { Self::with_ring(grabber, ring, frame_interval_ns) }
     }
@@ -80,7 +84,13 @@ impl<'r, G: FrameGrabber, const N: usize, const BYTES: usize> GrabberSrc<'r, G, 
         ring: &'r StaticLendRing<N, BYTES>,
         frame_interval_ns: u64,
     ) -> Self {
-        Self { grabber, ring, frame_interval_ns, remaining: None, seq: 0 }
+        Self {
+            grabber,
+            ring,
+            frame_interval_ns,
+            remaining: None,
+            seq: 0,
+        }
     }
 
     /// End the stream after `frames` captures (a camera is endless by
@@ -122,7 +132,10 @@ impl<G: FrameGrabber, const N: usize, const BYTES: usize> StaticSource
         let pts_ns = self.seq.saturating_mul(self.frame_interval_ns);
         let frame = Frame::new(
             MemoryDomain::System(slice),
-            FrameTiming { pts_ns, ..FrameTiming::default() },
+            FrameTiming {
+                pts_ns,
+                ..FrameTiming::default()
+            },
             self.seq,
         );
         self.seq += 1;

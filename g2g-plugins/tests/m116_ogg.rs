@@ -65,7 +65,12 @@ fn synthetic_ogg() -> Vec<u8> {
     let mut s = Vec::new();
     s.extend_from_slice(&page(0x02, serial, 0, &[&opus_head(2)]));
     s.extend_from_slice(&page(0x00, serial, 1, &[b"OpusTags\0\0\0\0"]));
-    s.extend_from_slice(&page(0x00, serial, 2, &[&[0x10, 0x11], &[0x20], &[0x30, 0x31, 0x32]]));
+    s.extend_from_slice(&page(
+        0x00,
+        serial,
+        2,
+        &[&[0x10, 0x11], &[0x20], &[0x30, 0x31, 0x32]],
+    ));
     s
 }
 
@@ -78,21 +83,38 @@ fn write_temp(name: &str, bytes: &[u8]) -> PathBuf {
 async fn run_pipeline(text: &str) -> u64 {
     let reg = default_registry();
     let graph = parse_launch(&reg, text).expect("pipeline parses");
-    run_graph(graph, &ZeroClock, 4).await.expect("pipeline runs").frames_consumed
+    run_graph(graph, &ZeroClock, 4)
+        .await
+        .expect("pipeline runs")
+        .frames_consumed
 }
 
 #[tokio::test]
 async fn filesrc_auto_sniffs_ogg_and_demuxes_opus() {
     let path = write_temp("g2g_m116_auto.opus", &synthetic_ogg());
-    let text = format!("filesrc location={} bytestream-format=auto ! oggdemux ! fakesink", path.display());
-    assert_eq!(run_pipeline(&text).await, 3, "three Opus packets demuxed to the sink");
+    let text = format!(
+        "filesrc location={} bytestream-format=auto ! oggdemux ! fakesink",
+        path.display()
+    );
+    assert_eq!(
+        run_pipeline(&text).await,
+        3,
+        "three Opus packets demuxed to the sink"
+    );
     let _ = fs::remove_file(&path);
 }
 
 #[tokio::test]
 async fn filesrc_explicit_ogg_demuxes_opus() {
     let path = write_temp("g2g_m116_explicit.opus", &synthetic_ogg());
-    let text = format!("filesrc location={} bytestream-format=ogg ! oggdemux ! fakesink", path.display());
-    assert_eq!(run_pipeline(&text).await, 3, "three Opus packets demuxed to the sink");
+    let text = format!(
+        "filesrc location={} bytestream-format=ogg ! oggdemux ! fakesink",
+        path.display()
+    );
+    assert_eq!(
+        run_pipeline(&text).await,
+        3,
+        "three Opus packets demuxed to the sink"
+    );
     let _ = fs::remove_file(&path);
 }

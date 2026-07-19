@@ -49,7 +49,8 @@ struct RgbaSource;
 
 impl SourceLoop for RgbaSource {
     type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>;
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 
@@ -169,7 +170,8 @@ async fn successful_negotiation_posts_nothing() {
     struct Nv12Source;
     impl SourceLoop for Nv12Source {
         type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>;
-        type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+        type CapsFuture<'a>
+            = core::future::Ready<Result<Caps, G2gError>>
         where
             Self: 'a;
         fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
@@ -222,8 +224,10 @@ struct Nv12Source {
 }
 
 impl SourceLoop for Nv12Source {
-    type RunFuture<'a> = std::pin::Pin<Box<dyn core::future::Future<Output = Result<u64, G2gError>> + 'a>>;
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type RunFuture<'a> =
+        std::pin::Pin<Box<dyn core::future::Future<Output = Result<u64, G2gError>> + 'a>>;
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
     fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
@@ -256,7 +260,8 @@ struct RgbaInjector {
 }
 
 impl AsyncElement for RgbaInjector {
-    type ProcessFuture<'a> = std::pin::Pin<Box<dyn core::future::Future<Output = Result<(), G2gError>> + 'a>>;
+    type ProcessFuture<'a> =
+        std::pin::Pin<Box<dyn core::future::Future<Output = Result<(), G2gError>> + 'a>>;
 
     fn intercept_caps(&self, upstream: &Caps) -> Result<Caps, G2gError> {
         Ok(upstream.clone())

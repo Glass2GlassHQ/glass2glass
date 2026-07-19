@@ -29,7 +29,9 @@ async fn sink_posts_buffering_levels_to_the_bus() {
         let src = g.add_source(GraphNode::source(VideoTestSrc::new(8, 8, 30, 8)));
         let sink = g.add_sink(GraphNode::element(FakeSink::new()));
         g.link(src, sink).unwrap();
-        run_graph_with_bus(g, &NullClock, 4, &handle).await.expect("graph runs with bus")
+        run_graph_with_bus(g, &NullClock, 4, &handle)
+            .await
+            .expect("graph runs with bus")
     };
     assert_eq!(stats.frames_consumed, 8);
 
@@ -40,5 +42,8 @@ async fn sink_posts_buffering_levels_to_the_bus() {
             levels.push(percent);
         }
     }
-    assert!(!levels.is_empty(), "the sink posts at least one buffering level");
+    assert!(
+        !levels.is_empty(),
+        "the sink posts at least one buffering level"
+    );
 }

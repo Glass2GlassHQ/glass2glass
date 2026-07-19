@@ -73,16 +73,25 @@ const VIDEO: fn() -> Caps = || Caps::RawVideo {
     height: Dim::Fixed(8),
     framerate: Rate::Fixed(30 << 16),
 };
-const AUDIO: fn() -> Caps =
-    || Caps::Audio { format: AudioFormat::PcmS16Le, channels: 2, sample_rate: 48_000 };
+const AUDIO: fn() -> Caps = || Caps::Audio {
+    format: AudioFormat::PcmS16Le,
+    channels: 2,
+    sample_rate: 48_000,
+};
 
 /// Source: two frames of `caps` then EOS.
 struct EmitSrc {
     caps: Caps,
 }
 impl SourceLoop for EmitSrc {
-    type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>> where Self: 'a;
-    type CapsFuture<'a> = Ready<Result<Caps, G2gError>> where Self: 'a;
+    type RunFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
+    where
+        Self: 'a;
+    type CapsFuture<'a>
+        = Ready<Result<Caps, G2gError>>
+    where
+        Self: 'a;
     fn intercept_caps(&mut self) -> Self::CapsFuture<'_> {
         ready(Ok(self.caps.clone()))
     }
@@ -111,7 +120,10 @@ struct PtpMasterSink {
     clock: Arc<PtpClock>,
 }
 impl AsyncElement for PtpMasterSink {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>> where Self: 'a;
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
     fn intercept_caps(&self, upstream: &Caps) -> Result<Caps, G2gError> {
         Ok(upstream.clone())
     }
@@ -133,7 +145,10 @@ impl AsyncElement for PtpMasterSink {
 /// Audio sink standing in for AlsaSink: an `AudioProvider` clock.
 struct AudioProviderSink;
 impl AsyncElement for AudioProviderSink {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>> where Self: 'a;
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
     fn intercept_caps(&self, upstream: &Caps) -> Result<Caps, G2gError> {
         Ok(upstream.clone())
     }
@@ -161,7 +176,10 @@ struct RecordingVideoSink {
     got: Arc<Mutex<Option<ElectedClock>>>,
 }
 impl AsyncElement for RecordingVideoSink {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>> where Self: 'a;
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
     fn intercept_caps(&self, upstream: &Caps) -> Result<Caps, G2gError> {
         Ok(upstream.clone())
     }
@@ -206,10 +224,14 @@ async fn ptp_clock_is_elected_master_and_slaves_the_video_sink() {
     g.link(asrc, asink).unwrap();
 
     let vsrc = g.add_source(GraphNodeRef::source(EmitSrc { caps: VIDEO() }));
-    let vsink = g.add_sink(GraphNodeRef::element(RecordingVideoSink { got: got.clone() }));
+    let vsink = g.add_sink(GraphNodeRef::element(RecordingVideoSink {
+        got: got.clone(),
+    }));
     g.link(vsrc, vsink).unwrap();
 
-    let stats = run_graph(g, &ManualClock::default(), 4).await.expect("graph runs");
+    let stats = run_graph(g, &ManualClock::default(), 4)
+        .await
+        .expect("graph runs");
 
     // PTP outranks both the audio and video local clocks.
     assert_eq!(
@@ -218,12 +240,26 @@ async fn ptp_clock_is_elected_master_and_slaves_the_video_sink() {
         "the PTP grandmaster clock wins election over audio and video"
     );
 
-    let (elected, base) = got.lock().unwrap().clone().expect("video sink got a ClockSync");
-    assert_eq!(base, expected_base, "video sink's base time is the PTP clock's reading");
+    let (elected, base) = got
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("video sink got a ClockSync");
+    assert_eq!(
+        base, expected_base,
+        "video sink's base time is the PTP clock's reading"
+    );
 
     // The video sink is slaved to the PTP (grandmaster/TAI) timeline: advancing
     // the reference, its clock tracks the PTP estimate, not raw wall time.
     clk.set(9_000_000_000);
-    assert_eq!(elected.now_ns(), ptp.now_ns(), "video sink slaved to the PTP clock");
-    assert!(elected.now_ns() > EPOCH as u64, "and that timeline is grandmaster TAI, not wall time");
+    assert_eq!(
+        elected.now_ns(),
+        ptp.now_ns(),
+        "video sink slaved to the PTP clock"
+    );
+    assert!(
+        elected.now_ns() > EPOCH as u64,
+        "and that timeline is grandmaster TAI, not wall time"
+    );
 }

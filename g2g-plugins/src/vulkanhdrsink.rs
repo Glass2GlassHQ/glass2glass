@@ -212,7 +212,9 @@ impl VulkanHdrSink {
         height: u32,
         mastering: HdrMasteringDisplay,
     ) -> Result<Self, VulkanVideoError> {
-        let ctx = device.present_context().ok_or(VulkanVideoError::PresentUnsupported)?;
+        let ctx = device
+            .present_context()
+            .ok_or(VulkanVideoError::PresentUnsupported)?;
         let surface_fn = ash::khr::surface::Instance::new(&ctx.entry, &ctx.instance);
         let swapchain_fn = ash::khr::swapchain::Device::new(&ctx.instance, &ctx.device);
         let hdr_fn = ctx
@@ -288,7 +290,8 @@ impl VulkanHdrSink {
         };
         // SAFETY: valid create info.
         let image_available = match unsafe {
-            ctx.device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
+            ctx.device
+                .create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
         } {
             Ok(s) => s,
             Err(e) => {
@@ -360,12 +363,14 @@ impl VulkanHdrSink {
         let dev = &self.ctx.device;
         // SAFETY: valid surface + physical device.
         let caps = unsafe {
-            self.surface_fn.get_physical_device_surface_capabilities(self.ctx.phys, self.surface)
+            self.surface_fn
+                .get_physical_device_surface_capabilities(self.ctx.phys, self.surface)
         }
         .map_err(VulkanVideoError::QueryFailed)?;
         // SAFETY: valid surface + physical device.
         let formats = unsafe {
-            self.surface_fn.get_physical_device_surface_formats(self.ctx.phys, self.surface)
+            self.surface_fn
+                .get_physical_device_surface_formats(self.ctx.phys, self.surface)
         }
         .map_err(VulkanVideoError::QueryFailed)?;
         let (surface_format, color_space) =
@@ -385,11 +390,17 @@ impl VulkanHdrSink {
             // Minimised window: keep the old swapchain, skip the rebuild.
             return Ok(());
         }
-        let min_images = (caps.min_image_count + 1)
-            .min(if caps.max_image_count == 0 { u32::MAX } else { caps.max_image_count });
+        let min_images = (caps.min_image_count + 1).min(if caps.max_image_count == 0 {
+            u32::MAX
+        } else {
+            caps.max_image_count
+        });
         // FIFO is always supported (vsync); the blit dst needs TRANSFER_DST.
         let usage = vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::COLOR_ATTACHMENT;
-        if !caps.supported_usage_flags.contains(vk::ImageUsageFlags::TRANSFER_DST) {
+        if !caps
+            .supported_usage_flags
+            .contains(vk::ImageUsageFlags::TRANSFER_DST)
+        {
             return Err(VulkanVideoError::PresentUnsupported);
         }
         let ci = vk::SwapchainCreateInfoKHR::default()
@@ -408,8 +419,8 @@ impl VulkanHdrSink {
             .old_swapchain(self.swapchain);
 
         // SAFETY: valid create info; the old swapchain (if any) is retired below.
-        let new_swapchain =
-            unsafe { self.swapchain_fn.create_swapchain(&ci, None) }.map_err(VulkanVideoError::QueryFailed)?;
+        let new_swapchain = unsafe { self.swapchain_fn.create_swapchain(&ci, None) }
+            .map_err(VulkanVideoError::QueryFailed)?;
         // Retire the previous swapchain now that the new one is created.
         if self.swapchain != vk::SwapchainKHR::null() {
             // SAFETY: no present in flight (CPU-synchronised); images not in use.
@@ -454,7 +465,10 @@ impl VulkanHdrSink {
     pub fn resize(&mut self, width: u32, height: u32) -> Result<(), VulkanVideoError> {
         // SAFETY: present is CPU-synchronised, so nothing is in flight here.
         unsafe {
-            self.ctx.device.device_wait_idle().map_err(VulkanVideoError::QueryFailed)?;
+            self.ctx
+                .device
+                .device_wait_idle()
+                .map_err(VulkanVideoError::QueryFailed)?;
             self.build_swapchain(width, height)
         }
     }
@@ -545,7 +559,10 @@ impl VulkanHdrSink {
             .swapchains(&swapchains)
             .image_indices(&indices);
         // SAFETY: valid present info; queue supports present to this surface.
-        match unsafe { self.swapchain_fn.queue_present(self.ctx.queue, &present_info) } {
+        match unsafe {
+            self.swapchain_fn
+                .queue_present(self.ctx.queue, &present_info)
+        } {
             Ok(_) => {
                 self.presented += 1;
                 Ok(())
@@ -632,12 +649,20 @@ impl VulkanHdrSink {
                 .src_subresource(sub)
                 .src_offsets([
                     vk::Offset3D { x: 0, y: 0, z: 0 },
-                    vk::Offset3D { x: src_w as i32, y: src_h as i32, z: 1 },
+                    vk::Offset3D {
+                        x: src_w as i32,
+                        y: src_h as i32,
+                        z: 1,
+                    },
                 ])
                 .dst_subresource(sub)
                 .dst_offsets([
                     vk::Offset3D { x: 0, y: 0, z: 0 },
-                    vk::Offset3D { x: self.extent.width as i32, y: self.extent.height as i32, z: 1 },
+                    vk::Offset3D {
+                        x: self.extent.width as i32,
+                        y: self.extent.height as i32,
+                        z: 1,
+                    },
                 ]);
             dev.cmd_blit_image(
                 cb,
@@ -673,7 +698,8 @@ impl VulkanHdrSink {
                 &[],
                 &post,
             );
-            dev.end_command_buffer(cb).map_err(VulkanVideoError::QueryFailed)?;
+            dev.end_command_buffer(cb)
+                .map_err(VulkanVideoError::QueryFailed)?;
         }
         Ok(())
     }
@@ -727,7 +753,10 @@ unsafe fn create_surface(
         (RawDisplayHandle::Xlib(d), RawWindowHandle::Xlib(w)) => {
             let sfn = ash::khr::xlib_surface::Instance::new(entry, instance);
             let ci = vk::XlibSurfaceCreateInfoKHR::default()
-                .dpy(d.display.map_or(core::ptr::null_mut(), |p| p.as_ptr().cast()))
+                .dpy(
+                    d.display
+                        .map_or(core::ptr::null_mut(), |p| p.as_ptr().cast()),
+                )
                 .window(w.window);
             // SAFETY: valid Xlib display + window.
             unsafe { sfn.create_xlib_surface(&ci, None) }.map_err(err)
@@ -759,16 +788,28 @@ mod tests {
     use super::*;
 
     fn sf(format: vk::Format, cs: vk::ColorSpaceKHR) -> vk::SurfaceFormatKHR {
-        vk::SurfaceFormatKHR { format, color_space: cs }
+        vk::SurfaceFormatKHR {
+            format,
+            color_space: cs,
+        }
     }
 
     #[test]
     fn prefers_hdr10_pq_10bit() {
         // A surface offering SDR 8-bit, scRGB 16f, and HDR10 10-bit -> pick HDR10.
         let formats = [
-            sf(vk::Format::B8G8R8A8_UNORM, vk::ColorSpaceKHR::SRGB_NONLINEAR),
-            sf(vk::Format::R16G16B16A16_SFLOAT, vk::ColorSpaceKHR::EXTENDED_SRGB_LINEAR_EXT),
-            sf(vk::Format::A2B10G10R10_UNORM_PACK32, vk::ColorSpaceKHR::HDR10_ST2084_EXT),
+            sf(
+                vk::Format::B8G8R8A8_UNORM,
+                vk::ColorSpaceKHR::SRGB_NONLINEAR,
+            ),
+            sf(
+                vk::Format::R16G16B16A16_SFLOAT,
+                vk::ColorSpaceKHR::EXTENDED_SRGB_LINEAR_EXT,
+            ),
+            sf(
+                vk::Format::A2B10G10R10_UNORM_PACK32,
+                vk::ColorSpaceKHR::HDR10_ST2084_EXT,
+            ),
         ];
         let (chosen, cs) = select_format(&formats).expect("a format");
         assert_eq!(cs, HdrColorSpace::Hdr10Pq);
@@ -779,15 +820,27 @@ mod tests {
     fn falls_back_to_scrgb_then_sdr() {
         // No HDR10 -> scRGB linear.
         let scrgb = [
-            sf(vk::Format::B8G8R8A8_UNORM, vk::ColorSpaceKHR::SRGB_NONLINEAR),
-            sf(vk::Format::R16G16B16A16_SFLOAT, vk::ColorSpaceKHR::EXTENDED_SRGB_LINEAR_EXT),
+            sf(
+                vk::Format::B8G8R8A8_UNORM,
+                vk::ColorSpaceKHR::SRGB_NONLINEAR,
+            ),
+            sf(
+                vk::Format::R16G16B16A16_SFLOAT,
+                vk::ColorSpaceKHR::EXTENDED_SRGB_LINEAR_EXT,
+            ),
         ];
         assert_eq!(select_format(&scrgb).unwrap().1, HdrColorSpace::ScRgbLinear);
         // Only SDR -> SDR.
-        let sdr = [sf(vk::Format::B8G8R8A8_SRGB, vk::ColorSpaceKHR::SRGB_NONLINEAR)];
+        let sdr = [sf(
+            vk::Format::B8G8R8A8_SRGB,
+            vk::ColorSpaceKHR::SRGB_NONLINEAR,
+        )];
         assert_eq!(select_format(&sdr).unwrap().1, HdrColorSpace::Sdr);
         // An 8-bit HDR10 surface is rejected (would band); nothing recognised.
-        let bad = [sf(vk::Format::B8G8R8A8_UNORM, vk::ColorSpaceKHR::HDR10_ST2084_EXT)];
+        let bad = [sf(
+            vk::Format::B8G8R8A8_UNORM,
+            vk::ColorSpaceKHR::HDR10_ST2084_EXT,
+        )];
         assert!(select_format(&bad).is_none());
         // Empty / unrecognised -> None.
         assert!(select_format(&[]).is_none());
@@ -795,7 +848,10 @@ mod tests {
 
     #[test]
     fn hdr10_metadata_uses_bt2020_primaries() {
-        let md = hdr10_metadata(HdrMasteringDisplay { max_luminance: 1200.0, ..Default::default() });
+        let md = hdr10_metadata(HdrMasteringDisplay {
+            max_luminance: 1200.0,
+            ..Default::default()
+        });
         // BT.2020 red primary + D65 white + the peak we passed.
         assert!((md.display_primary_red.x - 0.708).abs() < 1e-6);
         assert!((md.display_primary_green.y - 0.797).abs() < 1e-6);

@@ -126,8 +126,14 @@ fn call_tool(
     params: Option<&Value>,
 ) -> Result<Value, (i64, String)> {
     let params = params.ok_or((-32602, "missing params".into()))?;
-    let name = params.get("name").and_then(|n| n.as_str()).ok_or((-32602, "missing tool name".into()))?;
-    let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+    let name = params
+        .get("name")
+        .and_then(|n| n.as_str())
+        .ok_or((-32602, "missing tool name".into()))?;
+    let args = params
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
 
     let payload: Value = match name {
         "list_elements" => {
@@ -144,16 +150,28 @@ fn call_tool(
             json!({ "elements": list })
         }
         "inspect" => {
-            let el = args.get("element").and_then(|e| e.as_str()).ok_or((-32602, "inspect needs `element`".into()))?;
+            let el = args
+                .get("element")
+                .and_then(|e| e.as_str())
+                .ok_or((-32602, "inspect needs `element`".into()))?;
             registry_json(reg, Some(el)).map_err(|e| (-32602, e))?
         }
         "validate" => {
-            let line = args.get("pipeline").and_then(|p| p.as_str()).ok_or((-32602, "validate needs `pipeline`".into()))?;
+            let line = args
+                .get("pipeline")
+                .and_then(|p| p.as_str())
+                .ok_or((-32602, "validate needs `pipeline`".into()))?;
             rt.block_on(validate_json(reg, line))
         }
         "launch" => {
-            let line = args.get("pipeline").and_then(|p| p.as_str()).ok_or((-32602, "launch needs `pipeline`".into()))?;
-            let secs = args.get("duration_secs").and_then(|d| d.as_u64()).unwrap_or(5);
+            let line = args
+                .get("pipeline")
+                .and_then(|p| p.as_str())
+                .ok_or((-32602, "launch needs `pipeline`".into()))?;
+            let secs = args
+                .get("duration_secs")
+                .and_then(|d| d.as_u64())
+                .unwrap_or(5);
             rt.block_on(launch_json(reg, line, secs))
         }
         other => return Err((-32602, format!("unknown tool: {other}"))),

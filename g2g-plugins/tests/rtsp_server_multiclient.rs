@@ -68,14 +68,24 @@ async fn read_response(sock: &mut tokio::net::TcpStream) -> String {
 /// Connect a player, run OPTIONS/DESCRIBE/SETUP/PLAY, then receive RTP and
 /// return the first `want` access-unit tags it sees (in receive order).
 async fn run_player(rtsp_addr: SocketAddr, want: usize) -> Vec<u8> {
-    let rtp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.expect("bind player rtp");
+    let rtp = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind player rtp");
     let client_rtp_port = rtp.local_addr().unwrap().port();
-    let mut ctrl = tokio::net::TcpStream::connect(rtsp_addr).await.expect("connect rtsp");
+    let mut ctrl = tokio::net::TcpStream::connect(rtsp_addr)
+        .await
+        .expect("connect rtsp");
     let url = "rtsp://127.0.0.1/stream";
 
-    ctrl.write_all(format!("OPTIONS {url} RTSP/1.0\r\nCSeq: 1\r\n\r\n").as_bytes()).await.unwrap();
+    ctrl.write_all(format!("OPTIONS {url} RTSP/1.0\r\nCSeq: 1\r\n\r\n").as_bytes())
+        .await
+        .unwrap();
     assert!(read_response(&mut ctrl).await.contains("200 OK"));
-    ctrl.write_all(format!("DESCRIBE {url} RTSP/1.0\r\nCSeq: 2\r\nAccept: application/sdp\r\n\r\n").as_bytes()).await.unwrap();
+    ctrl.write_all(
+        format!("DESCRIBE {url} RTSP/1.0\r\nCSeq: 2\r\nAccept: application/sdp\r\n\r\n").as_bytes(),
+    )
+    .await
+    .unwrap();
     assert!(read_response(&mut ctrl).await.contains("m=video"));
     ctrl.write_all(
         format!(
@@ -87,14 +97,19 @@ async fn run_player(rtsp_addr: SocketAddr, want: usize) -> Vec<u8> {
     .await
     .unwrap();
     assert!(read_response(&mut ctrl).await.contains("server_port="));
-    ctrl.write_all(format!("PLAY {url} RTSP/1.0\r\nCSeq: 4\r\nSession: 12345678\r\n\r\n").as_bytes()).await.unwrap();
+    ctrl.write_all(
+        format!("PLAY {url} RTSP/1.0\r\nCSeq: 4\r\nSession: 12345678\r\n\r\n").as_bytes(),
+    )
+    .await
+    .unwrap();
     assert!(read_response(&mut ctrl).await.contains("200 OK"));
 
     let mut depay = RtpH264Depayloader::new();
     let mut tags = Vec::new();
     let mut pkt = [0u8; 2048];
     while tags.len() < want {
-        let recv = tokio::time::timeout(std::time::Duration::from_secs(8), rtp.recv(&mut pkt)).await;
+        let recv =
+            tokio::time::timeout(std::time::Duration::from_secs(8), rtp.recv(&mut pkt)).await;
         let n = recv.expect("rtp arrives within 8s").expect("recv rtp");
         if let Some(au) = depay.depacketize(&pkt[..n]) {
             tags.push(au.data.get(5).copied().unwrap_or(0));
@@ -108,9 +123,18 @@ async fn run_player(rtsp_addr: SocketAddr, want: usize) -> Vec<u8> {
 /// Every received run must be strictly consecutive: a clean, ordered per-client
 /// RTP session (each client gets its own sequence space, no interleave).
 fn assert_contiguous(tags: &[u8], who: &str) {
-    assert!(tags.len() >= 10, "{who} received {} frames (want >= 10)", tags.len());
+    assert!(
+        tags.len() >= 10,
+        "{who} received {} frames (want >= 10)",
+        tags.len()
+    );
     for w in tags.windows(2) {
-        assert_eq!(w[1], w[0] + 1, "{who} frames must be consecutive, saw {:?}", tags);
+        assert_eq!(
+            w[1],
+            w[0] + 1,
+            "{who} frames must be consecutive, saw {:?}",
+            tags
+        );
     }
 }
 
@@ -132,18 +156,25 @@ async fn two_players_each_receive_an_ordered_stream() {
     // The server streams COUNT tagged frames; the first blocks until a player
     // PLAYs, the rest also accept + advance new players and broadcast.
     let server = async move {
-        let mut sink = RtspServerSink::from_listener(listener).unwrap().with_rtp(96, 0x1111_1111);
+        let mut sink = RtspServerSink::from_listener(listener)
+            .unwrap()
+            .with_rtp(96, 0x1111_1111);
         sink.configure_pipeline(&h264_caps()).expect("configure");
         let mut null = NullOut;
         for i in 0u8..COUNT {
             let au = access_unit(i);
             let frame = Frame {
                 domain: MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
-                timing: FrameTiming { pts_ns: i as u64 * 33_000_000, ..FrameTiming::default() },
+                timing: FrameTiming {
+                    pts_ns: i as u64 * 33_000_000,
+                    ..FrameTiming::default()
+                },
                 sequence: i as u64,
                 meta: Default::default(),
             };
-            sink.process(PipelinePacket::DataFrame(frame), &mut null).await.expect("process");
+            sink.process(PipelinePacket::DataFrame(frame), &mut null)
+                .await
+                .expect("process");
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         sink.frames_sent()
@@ -155,7 +186,14 @@ async fn two_players_each_receive_an_ordered_stream() {
     assert_contiguous(&tags1, "player 1");
     assert_contiguous(&tags2, "player 2");
     // Player 1 bootstraps the server, so it sees the stream from the very start.
-    assert_eq!(tags1[0], 0, "the bootstrapping player receives from the first frame");
+    assert_eq!(
+        tags1[0], 0,
+        "the bootstrapping player receives from the first frame"
+    );
     // Player 2 joined later, so its first frame is strictly after player 1's.
-    assert!(tags2[0] > 0, "the late player joined mid-stream (saw {:?})", tags2);
+    assert!(
+        tags2[0] > 0,
+        "the late player joined mid-stream (saw {:?})",
+        tags2
+    );
 }

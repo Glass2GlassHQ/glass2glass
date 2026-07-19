@@ -22,7 +22,8 @@ impl PipelineClock for ZeroClock {
 }
 
 fn temp(tag: &str, ext: &str, bytes: &[u8]) -> std::path::PathBuf {
-    let path = std::env::temp_dir().join(format!("g2g-m676-{}-{}.{}", std::process::id(), tag, ext));
+    let path =
+        std::env::temp_dir().join(format!("g2g-m676-{}-{}.{}", std::process::id(), tag, ext));
     std::fs::write(&path, bytes).expect("write temp");
     path
 }
@@ -59,7 +60,10 @@ async fn filesrc_types_h264_by_extension_into_h264parse() {
             .unwrap_or_else(|e| panic!(".{ext} negotiates and runs: {e:?}"))
             .frames_consumed;
         std::fs::remove_file(&path).ok();
-        assert!(consumed >= 1, ".{ext}: an access unit reached the sink: {consumed}");
+        assert!(
+            consumed >= 1,
+            ".{ext}: an access unit reached the sink: {consumed}"
+        );
     }
 }
 
@@ -95,7 +99,10 @@ async fn filesrc_types_unknown_extension_by_content_sniff() {
             .unwrap_or_else(|e| panic!(".{ext} content-sniffs and runs: {e:?}"))
             .frames_consumed;
         std::fs::remove_file(&path).ok();
-        assert!(consumed >= 1, ".{ext}: an access unit reached the sink: {consumed}");
+        assert!(
+            consumed >= 1,
+            ".{ext}: an access unit reached the sink: {consumed}"
+        );
     }
 }
 
@@ -114,7 +121,10 @@ fn decodebin_expands_h264_extension_to_decode_chain() {
     // filesrc ! h264parse ! ffmpegdec ! fakesink: the M421 re-framing parser
     // is spliced ahead of the decoder in the name-based expansion too (it fed
     // whole file chunks to the decoder before, decoding only frame 0).
-    assert_eq!(node_count, 4, "parser + decoder expanded from extension caps");
+    assert_eq!(
+        node_count, 4,
+        "parser + decoder expanded from extension caps"
+    );
 }
 
 /// `decodebin` auto-plugs a content-sniffed unknown extension into the same

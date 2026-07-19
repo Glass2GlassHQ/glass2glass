@@ -11,7 +11,7 @@ use core::pin::Pin;
 use g2g_core::runtime::run_fanout_session;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, ConfigureOutcome, Dim, G2gError, MultiOutputSink,
-    MultiOutputSource, OutputSink, PipelineClock, PipelinePacket, RawVideoFormat, Rate,
+    MultiOutputSource, OutputSink, PipelineClock, PipelinePacket, Rate, RawVideoFormat,
 };
 
 struct ZeroClock;
@@ -35,7 +35,10 @@ fn frame(seq: u64) -> PipelinePacket {
         g2g_core::MemoryDomain::System(g2g_core::memory::SystemSlice::from_boxed(
             std::vec![0u8; 4].into_boxed_slice(),
         )),
-        g2g_core::FrameTiming { pts_ns: seq, ..Default::default() },
+        g2g_core::FrameTiming {
+            pts_ns: seq,
+            ..Default::default()
+        },
         seq,
     ))
 }
@@ -123,8 +126,14 @@ async fn fanout_session_routes_each_output_and_ends_on_eos() {
 
     let (vf, ve) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
     let (af, ae) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
-    let mut video = CountingSink { frames: vf.clone(), eos: ve.clone() };
-    let mut audio = CountingSink { frames: af.clone(), eos: ae.clone() };
+    let mut video = CountingSink {
+        frames: vf.clone(),
+        eos: ve.clone(),
+    };
+    let mut audio = CountingSink {
+        frames: af.clone(),
+        eos: ae.clone(),
+    };
     let mut session = TwoPortSource { port0: 5, port1: 3 };
 
     let sinks: std::vec::Vec<&mut dyn g2g_core::element::DynAsyncElement> =

@@ -17,7 +17,10 @@
 //! else a no-op would pass; that is asserted first.
 //!
 //! Runs on the RTX 3060; skips with no adapter / no decode support.
-#![cfg(all(any(target_os = "linux", target_os = "windows"), feature = "vulkan-video"))]
+#![cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    feature = "vulkan-video"
+))]
 
 use std::future::Future;
 use std::pin::Pin;
@@ -103,7 +106,10 @@ fn split_access_units(stream: &[u8], is_vcl: impl Fn(&[u8]) -> bool) -> Vec<Vec<
 fn au_frame(bytes: Vec<u8>, seq: u64) -> Frame {
     Frame {
         domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming { pts_ns: seq * 33_000_000, ..Default::default() },
+        timing: FrameTiming {
+            pts_ns: seq * 33_000_000,
+            ..Default::default()
+        },
         sequence: seq,
         meta: Default::default(),
     }
@@ -128,7 +134,8 @@ fn element_streaming_output(codec: VideoCodec, clip: &[u8], aus: Vec<Vec<u8>>) -
         height: Dim::Fixed(480),
         framerate: Rate::Fixed(30 << 16),
     };
-    dec.configure_pipeline(&in_caps).expect("configure opens the decode device");
+    dec.configure_pipeline(&in_caps)
+        .expect("configure opens the decode device");
     let _ = clip;
 
     let mut sink = RecordingSink::default();
@@ -141,9 +148,10 @@ fn element_streaming_output(codec: VideoCodec, clip: &[u8], aus: Vec<Vec<u8>>) -
     sink.packets
         .iter()
         .filter_map(|p| match p {
-            PipelinePacket::DataFrame(Frame { domain: MemoryDomain::System(s), .. }) => {
-                Some(s.as_slice().to_vec())
-            }
+            PipelinePacket::DataFrame(Frame {
+                domain: MemoryDomain::System(s),
+                ..
+            }) => Some(s.as_slice().to_vec()),
             _ => None,
         })
         .collect()
@@ -163,24 +171,51 @@ fn h264_streaming_bframes_emit_in_display_order() {
     };
     let ps = extract_h264_parameter_sets(H264).expect("sps/pps");
     let session = device.create_h264_session(&ps, 640, 480).expect("session");
-    let mut oracle_dec = device.create_h264_dpb_decoder(&session, &ps).expect("decoder");
+    let mut oracle_dec = device
+        .create_h264_dpb_decoder(&session, &ps)
+        .expect("decoder");
 
     // The fixture must actually reorder, else a non-reordering element would pass.
-    let pocs: Vec<i32> = oracle_dec.index_pictures(H264).expect("index").iter().map(|m| m.poc).collect();
-    assert!(pocs.windows(2).any(|w| w[1] < w[0]), "fixture has no B-frame reorder (POC monotonic)");
+    let pocs: Vec<i32> = oracle_dec
+        .index_pictures(H264)
+        .expect("index")
+        .iter()
+        .map(|m| m.poc)
+        .collect();
+    assert!(
+        pocs.windows(2).any(|w| w[1] < w[0]),
+        "fixture has no B-frame reorder (POC monotonic)"
+    );
 
     // Oracle: whole-stream decode_all, display order (M569-validated).
-    let oracle: Vec<Vec<u8>> = oracle_dec.decode_all(H264).expect("decode_all").iter().map(planes).collect();
+    let oracle: Vec<Vec<u8>> = oracle_dec
+        .decode_all(H264)
+        .expect("decode_all")
+        .iter()
+        .map(planes)
+        .collect();
 
-    let aus = split_access_units(H264, |nal| matches!(nal.first().map(|b| b & 0x1F), Some(1..=5)));
+    let aus = split_access_units(H264, |nal| {
+        matches!(nal.first().map(|b| b & 0x1F), Some(1..=5))
+    });
     assert_eq!(aus.len(), oracle.len(), "one AU per coded picture");
 
     let got = element_streaming_output(VideoCodec::H264, H264, aus);
-    assert_eq!(got.len(), oracle.len(), "element emits one frame per coded picture");
+    assert_eq!(
+        got.len(),
+        oracle.len(),
+        "element emits one frame per coded picture"
+    );
     for (i, (g, o)) in got.iter().zip(&oracle).enumerate() {
-        assert_eq!(g, o, "frame {i} differs from display-order oracle (element did not reorder)");
+        assert_eq!(
+            g, o,
+            "frame {i} differs from display-order oracle (element did not reorder)"
+        );
     }
-    eprintln!("m586 h264: {} streamed AUs emitted in display order", got.len());
+    eprintln!(
+        "m586 h264: {} streamed AUs emitted in display order",
+        got.len()
+    );
 }
 
 #[test]
@@ -198,21 +233,50 @@ fn h265_streaming_bframes_emit_in_display_order() {
     let ps = extract_h265_parameter_sets(H265).expect("vps/sps/pps");
     let std = to_std_h265_params(&ps);
     let session = device.create_h265_session(&std, 640, 480).expect("session");
-    let mut oracle_dec = device.create_h265_dpb_decoder(&session, &ps).expect("decoder");
+    let mut oracle_dec = device
+        .create_h265_dpb_decoder(&session, &ps)
+        .expect("decoder");
 
-    let pocs: Vec<i32> = oracle_dec.index_pictures(H265).expect("index").iter().map(|m| m.poc).collect();
-    assert!(pocs.windows(2).any(|w| w[1] < w[0]), "fixture has no B-frame reorder (POC monotonic)");
+    let pocs: Vec<i32> = oracle_dec
+        .index_pictures(H265)
+        .expect("index")
+        .iter()
+        .map(|m| m.poc)
+        .collect();
+    assert!(
+        pocs.windows(2).any(|w| w[1] < w[0]),
+        "fixture has no B-frame reorder (POC monotonic)"
+    );
 
-    let oracle: Vec<Vec<u8>> = oracle_dec.decode_all(H265).expect("decode_all").iter().map(planes).collect();
+    let oracle: Vec<Vec<u8>> = oracle_dec
+        .decode_all(H265)
+        .expect("decode_all")
+        .iter()
+        .map(planes)
+        .collect();
 
     // H.265 VCL NAL types are 0..=31 (nal_unit_type = (byte >> 1) & 0x3F).
-    let aus = split_access_units(H265, |nal| nal.first().map(|b| ((b >> 1) & 0x3F) <= 31).unwrap_or(false));
+    let aus = split_access_units(H265, |nal| {
+        nal.first()
+            .map(|b| ((b >> 1) & 0x3F) <= 31)
+            .unwrap_or(false)
+    });
     assert_eq!(aus.len(), oracle.len(), "one AU per coded picture");
 
     let got = element_streaming_output(VideoCodec::H265, H265, aus);
-    assert_eq!(got.len(), oracle.len(), "element emits one frame per coded picture");
+    assert_eq!(
+        got.len(),
+        oracle.len(),
+        "element emits one frame per coded picture"
+    );
     for (i, (g, o)) in got.iter().zip(&oracle).enumerate() {
-        assert_eq!(g, o, "frame {i} differs from display-order oracle (element did not reorder)");
+        assert_eq!(
+            g, o,
+            "frame {i} differs from display-order oracle (element did not reorder)"
+        );
     }
-    eprintln!("m586 h265: {} streamed AUs emitted in display order", got.len());
+    eprintln!(
+        "m586 h265: {} streamed AUs emitted in display order",
+        got.len()
+    );
 }

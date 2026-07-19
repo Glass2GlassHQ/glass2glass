@@ -3,7 +3,9 @@
 //! payoff of the properties + registry track: a pipeline expressed as text,
 //! constructed and configured by name, actually moving frames.
 
-use g2g_core::runtime::{parse_launch, run_graph, LaunchFactory, ParseError, Registry, SourceFactory};
+use g2g_core::runtime::{
+    parse_launch, run_graph, LaunchFactory, ParseError, Registry, SourceFactory,
+};
 use g2g_core::{Caps, Dim, PipelineClock, Rate, RawVideoFormat};
 use g2g_plugins::fakesink::FakeSink;
 use g2g_plugins::videoflip::{FlipMethod, VideoFlip};
@@ -38,7 +40,9 @@ fn registry() -> Registry {
     reg.register_launch(LaunchFactory::new("videorate", Vec::new(), || {
         Box::new(VideoRate::new(30.0))
     }));
-    reg.register_launch(LaunchFactory::new("fakesink", Vec::new(), || Box::new(FakeSink::new())));
+    reg.register_launch(LaunchFactory::new("fakesink", Vec::new(), || {
+        Box::new(FakeSink::new())
+    }));
     reg
 }
 
@@ -51,7 +55,9 @@ async fn parse_and_run_linear_pipeline() {
     )
     .expect("pipeline parses");
 
-    let stats = run_graph(graph, &ZeroClock, 4).await.expect("parsed pipeline runs");
+    let stats = run_graph(graph, &ZeroClock, 4)
+        .await
+        .expect("parsed pipeline runs");
     // The source's num-buffers=3 property reached it and the frames flowed all
     // the way through the flip to the sink.
     assert_eq!(stats.frames_emitted, 3, "source emitted num-buffers frames");

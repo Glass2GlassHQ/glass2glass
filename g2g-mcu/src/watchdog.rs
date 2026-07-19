@@ -83,6 +83,10 @@ mod tests {
         wd.pet();
         wd.pet();
         assert_eq!(wd.feeds(), 3, "supervisor counted three progress pets");
-        assert_eq!(wd.free().refreshes, 3, "each pet reached the hardware timer");
+        assert_eq!(
+            wd.free().refreshes,
+            3,
+            "each pet reached the hardware timer"
+        );
     }
 }

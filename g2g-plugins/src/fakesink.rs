@@ -118,7 +118,8 @@ impl FakeSink {
 }
 
 impl AsyncElement for FakeSink {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -135,10 +136,7 @@ impl AsyncElement for FakeSink {
         CapsConstraint::AcceptsAny
     }
 
-    fn configure_pipeline(
-        &mut self,
-        _absolute_caps: &Caps,
-    ) -> Result<ConfigureOutcome, G2gError> {
+    fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
     }

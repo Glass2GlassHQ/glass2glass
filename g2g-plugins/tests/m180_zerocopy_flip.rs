@@ -20,7 +20,10 @@ impl PipelineClock for NullClock {
 
 /// Split a contiguous RGBA8 byte buffer into per-pixel `[r,g,b,a]` chunks.
 fn pixels(bytes: &[u8]) -> Vec<[u8; 4]> {
-    bytes.chunks_exact(4).map(|c| [c[0], c[1], c[2], c[3]]).collect()
+    bytes
+        .chunks_exact(4)
+        .map(|c| [c[0], c[1], c[2], c[3]])
+        .collect()
 }
 
 #[tokio::test]
@@ -59,7 +62,11 @@ async fn rotate180_flips_through_shared_memory_with_zero_copies() {
     // owned-buffer path does), these pointers would differ.
     let emitted = src.emitted_ptrs();
     let received = sink.view_backing_ptrs();
-    assert_eq!(emitted.len(), frames as usize, "source emitted shared frames");
+    assert_eq!(
+        emitted.len(),
+        frames as usize,
+        "source emitted shared frames"
+    );
     assert_eq!(
         received, emitted,
         "every flipped frame aliases the source's buffer (zero copies)"
@@ -69,7 +76,10 @@ async fn rotate180_flips_through_shared_memory_with_zero_copies() {
     // reversing the materialized output's pixel order recovers the source
     // frame. Compare against the source's own pre-flip bytes.
     let out = sink.last_view_bytes().expect("a shared-view frame arrived");
-    let input = src.emitted_frames().last().expect("source recorded its frames");
+    let input = src
+        .emitted_frames()
+        .last()
+        .expect("source recorded its frames");
     let mut out_px = pixels(out);
     out_px.reverse();
     assert_eq!(

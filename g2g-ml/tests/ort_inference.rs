@@ -202,7 +202,9 @@ async fn inference_emits_tensor_caps_and_normalized_values() {
     )
     .await
     .expect("second frame");
-    inf.process(PipelinePacket::Eos, &mut sink).await.expect("eos");
+    inf.process(PipelinePacket::Eos, &mut sink)
+        .await
+        .expect("eos");
     assert_eq!(inf.inferred_count(), 2);
 
     // exactly one CapsChanged (suppressed on the unchanged second frame).
@@ -311,7 +313,9 @@ async fn uint8_tensor_input_runs_a_quantized_model() {
     // QDQ Conv->ReLU fixture; on the CPU EP here it proves the integer-input path
     // (the Edge TPU placement is the on-device probe's job).
     let model = include_bytes!("fixtures/qconv_relu_u8in.onnx");
-    let mut inf = OrtInference::from_memory(model).expect("uint8 model loads").with_tensor_input();
+    let mut inf = OrtInference::from_memory(model)
+        .expect("uint8 model loads")
+        .with_tensor_input();
     assert_eq!(inf.input_dims(), (4, 4));
 
     // The input pad is a uint8 NCHW tensor; an f32 tensor (or RGBA) is rejected.
@@ -341,8 +345,16 @@ async fn uint8_tensor_input_runs_a_quantized_model() {
         .iter()
         .find_map(|p| match p {
             PipelinePacket::DataFrame(f) => {
-                let MemoryDomain::System(slice) = &f.domain else { return None };
-                Some(slice.as_slice().chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
+                let MemoryDomain::System(slice) = &f.domain else {
+                    return None;
+                };
+                Some(
+                    slice
+                        .as_slice()
+                        .chunks_exact(4)
+                        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                        .collect(),
+                )
             }
             _ => None,
         })

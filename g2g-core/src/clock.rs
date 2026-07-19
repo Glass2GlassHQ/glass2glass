@@ -125,7 +125,9 @@ impl PlayAnchor {
 
     /// A fresh, unstamped anchor.
     pub fn new() -> Self {
-        Self { inner: Arc::new(AtomicU64::new(Self::UNSET)) }
+        Self {
+            inner: Arc::new(AtomicU64::new(Self::UNSET)),
+        }
     }
 
     /// Stamp the base time (the elected clock's `now_ns()` at the `Playing`
@@ -182,7 +184,11 @@ pub struct ClockSync {
 impl ClockSync {
     /// Eager base time, no `Playing` anchor (the non-stateful runners).
     pub fn new(clock: Arc<dyn PipelineClock + Send + Sync>, base_time_ns: u64) -> Self {
-        Self { clock, base_time_ns, play_anchor: None }
+        Self {
+            clock,
+            base_time_ns,
+            play_anchor: None,
+        }
     }
 
     /// As [`new`](ClockSync::new), but carries a [`PlayAnchor`] the
@@ -193,7 +199,11 @@ impl ClockSync {
         base_time_ns: u64,
         play_anchor: PlayAnchor,
     ) -> Self {
-        Self { clock, base_time_ns, play_anchor: Some(play_anchor) }
+        Self {
+            clock,
+            base_time_ns,
+            play_anchor: Some(play_anchor),
+        }
     }
 
     /// Current time on the elected clock.
@@ -238,11 +248,14 @@ pub fn elect_clock<I>(candidates: I) -> Option<ClockCandidate>
 where
     I: IntoIterator<Item = Option<ClockCandidate>>,
 {
-    candidates.into_iter().flatten().fold(None, |best, c| match best {
-        // `>=` keeps the earlier candidate on a priority tie.
-        Some(b) if b.priority >= c.priority => Some(b),
-        _ => Some(c),
-    })
+    candidates
+        .into_iter()
+        .flatten()
+        .fold(None, |best, c| match best {
+            // `>=` keeps the earlier candidate on a priority tie.
+            Some(b) if b.priority >= c.priority => Some(b),
+            _ => Some(c),
+        })
 }
 
 /// A disciplined clock that slaves a smooth pipeline timeline to a real
@@ -391,7 +404,11 @@ impl DriftClock {
         if n == 1 {
             // One point fixes the offset only; assume no drift until a second
             // observation gives a rate.
-            return DriftFit { anchor_local, master: anchor_master as f64, slope: 1.0 };
+            return DriftFit {
+                anchor_local,
+                master: anchor_master as f64,
+                slope: 1.0,
+            };
         }
 
         // Integer means keep the centred deltas small and exact before the
@@ -414,7 +431,11 @@ impl DriftClock {
 
         // Evaluate the fitted line at the anchor: master = ȳ + slope*(anchor - x̄).
         let master = mean_y as f64 + slope * (anchor_local as i128 - mean_x) as f64;
-        DriftFit { anchor_local, master, slope }
+        DriftFit {
+            anchor_local,
+            master,
+            slope,
+        }
     }
 }
 
@@ -477,7 +498,11 @@ mod tests {
             cand(ClockPriority::Provider, 20),
         ])
         .unwrap();
-        assert_eq!(elected.clock.now_ns(), 10, "first (most upstream) wins a tie");
+        assert_eq!(
+            elected.clock.now_ns(),
+            10,
+            "first (most upstream) wins a tie"
+        );
     }
 
     #[test]
@@ -494,7 +519,7 @@ mod tests {
         // Playback: an audio sink (AudioProvider) outranks a video sink
         // (Provider), so audio becomes the master and video slaves to it.
         let playback = elect_clock([
-            cand(ClockPriority::Provider, 1),    // video display sink
+            cand(ClockPriority::Provider, 1),      // video display sink
             cand(ClockPriority::AudioProvider, 2), // audio sink
         ])
         .unwrap();
@@ -521,12 +546,20 @@ mod tests {
         // play-anchored (so a sink first-frame-anchors until `Playing`).
         let anchor = PlayAnchor::new();
         let sync = ClockSync::with_play_anchor(Arc::new(Fixed(7_000)), 100, anchor.clone());
-        assert_eq!(sync.base_time(), 100, "unstamped anchor uses eager fallback");
+        assert_eq!(
+            sync.base_time(),
+            100,
+            "unstamped anchor uses eager fallback"
+        );
         assert!(!sync.play_anchored());
 
         // Stamped at the play edge: supersedes the eager base time.
         anchor.stamp(7_000);
-        assert_eq!(sync.base_time(), 7_000, "stamped anchor supersedes eager base");
+        assert_eq!(
+            sync.base_time(),
+            7_000,
+            "stamped anchor supersedes eager base"
+        );
         assert!(sync.play_anchored());
 
         // Cleared (a stop): back to the eager fallback until the next stamp.
@@ -560,7 +593,11 @@ mod drift_tests {
         let tick = Arc::new(Tick::default());
         let drift = DriftClock::new(tick.clone());
         tick.set(42_000);
-        assert_eq!(drift.now_ns(), 42_000, "undisciplined clock is the reference");
+        assert_eq!(
+            drift.now_ns(),
+            42_000,
+            "undisciplined clock is the reference"
+        );
         assert_eq!(drift.slope(), 1.0);
     }
 
@@ -576,8 +613,7 @@ mod drift_tests {
         // Base the reference well above zero so the f64 conditioning is realistic.
         const BASE: u64 = 1_000_000_000_000_000;
         let master_at = |local: u64| -> u64 {
-            (BASE as f64 * RATE + OFFSET as f64
-                + RATE * (local - BASE) as f64) as u64
+            (BASE as f64 * RATE + OFFSET as f64 + RATE * (local - BASE) as f64) as u64
         };
 
         // Discipline once every 100 ms for a few seconds.
@@ -633,7 +669,13 @@ mod drift_tests {
         tick.set(now);
         let reader_view = reader.now_ns() as i64;
         let truth = master_at(now) as i64;
-        assert!((reader_view - truth).abs() < 1_000_000, "reader {reader_view} vs {truth}");
-        assert!(reader_view < now as i64, "slow master must lag the reference");
+        assert!(
+            (reader_view - truth).abs() < 1_000_000,
+            "reader {reader_view} vs {truth}"
+        );
+        assert!(
+            reader_view < now as i64,
+            "slow master must lag the reference"
+        );
     }
 }

@@ -32,9 +32,9 @@ fn main() {
         .probe("gstreamer-1.0")
         .expect("gstreamer-1.0 dev package (pkg-config) is required for the `gstreamer` feature");
     // gstreamer-app-1.0 for gst_app_src_push_buffer / gst_app_sink_try_pull_sample.
-    let app = pkg_config::Config::new()
-        .probe("gstreamer-app-1.0")
-        .expect("gstreamer-app-1.0 dev package (pkg-config) is required for the `gstreamer` feature");
+    let app = pkg_config::Config::new().probe("gstreamer-app-1.0").expect(
+        "gstreamer-app-1.0 dev package (pkg-config) is required for the `gstreamer` feature",
+    );
 
     let mut build = cc::Build::new();
     build.file("csrc/gstwrap_host.c");

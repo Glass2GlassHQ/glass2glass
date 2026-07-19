@@ -57,7 +57,10 @@ fn main() {
     use g2g_plugins::videotestsrc::{Pattern, VideoTestSrc};
     use g2g_plugins::waylandsink::WaylandSink;
 
-    let frames: u64 = std::env::args().nth(1).and_then(|a| a.parse().ok()).unwrap_or(300);
+    let frames: u64 = std::env::args()
+        .nth(1)
+        .and_then(|a| a.parse().ok())
+        .unwrap_or(300);
     let (w, h) = geometry(std::env::args().nth(2));
     // Optional QoS bound, in ms: a frame later than this past its deadline is
     // dropped (and a Qos report posted) instead of presented late.
@@ -78,14 +81,19 @@ fn main() {
         VideoTestSrc::new(w, h, 30, frames).with_pattern(Pattern::SmpteBars),
     ));
     let overlay = g.add_transform(GraphNodeRef::element(TextOverlay::from_webvtt(SUBS)));
-    let convert = g.add_transform(GraphNodeRef::element(VideoConvert::new(RawVideoFormat::Nv12)));
+    let convert = g.add_transform(GraphNodeRef::element(VideoConvert::new(
+        RawVideoFormat::Nv12,
+    )));
     let sink = g.add_sink(GraphNodeRef::element(sink));
     g.link(src, overlay).expect("link src->overlay");
     g.link(overlay, convert).expect("link overlay->convert");
     g.link(convert, sink).expect("link convert->sink");
 
     let clock = WallClock::new();
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("tokio rt");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio rt");
     match max_late_ms {
         Some(ms) => println!("playing {frames} frames of {w}x{h} (QoS: drop if >{ms} ms late)..."),
         None => println!("playing {frames} frames of {w}x{h} with subtitles..."),
@@ -101,10 +109,16 @@ fn main() {
     // Drain QoS reports (the sink posted one per late-drop).
     let mut qos_drops = 0u64;
     while let Some(msg) = bus.try_recv() {
-        if let BusMessage::Qos { jitter_ns, dropped, .. } = msg {
+        if let BusMessage::Qos {
+            jitter_ns, dropped, ..
+        } = msg
+        {
             qos_drops = dropped;
             if dropped == 1 || dropped % 30 == 0 {
-                println!("  QoS: dropped late frame ({:.1} ms behind)", jitter_ns as f64 / 1e6);
+                println!(
+                    "  QoS: dropped late frame ({:.1} ms behind)",
+                    jitter_ns as f64 / 1e6
+                );
             }
         }
     }
@@ -165,7 +179,12 @@ mod still {
             CapsConstraint::AcceptsAny
         }
         fn configure_pipeline(&mut self, caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-            if let Caps::RawVideo { width: Dim::Fixed(w), height: Dim::Fixed(h), .. } = caps {
+            if let Caps::RawVideo {
+                width: Dim::Fixed(w),
+                height: Dim::Fixed(h),
+                ..
+            } = caps
+            {
                 self.width = *w;
                 self.height = *h;
             }
@@ -198,7 +217,9 @@ mod still {
     }
 
     pub(super) fn run() {
-        let path = std::env::args().nth(1).unwrap_or_else(|| "/tmp/textoverlay_demo.ppm".into());
+        let path = std::env::args()
+            .nth(1)
+            .unwrap_or_else(|| "/tmp/textoverlay_demo.ppm".into());
 
         let mut src =
             VideoTestSrc::new(super::WIDTH, super::HEIGHT, 30, 3).with_pattern(Pattern::SmpteBars);
@@ -206,10 +227,18 @@ mod still {
         let mut sink = CaptureSink::default();
         let clock = WallClock::new();
 
-        let rt =
-            tokio::runtime::Builder::new_current_thread().enable_time().build().expect("tokio rt");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("tokio rt");
         let stats = rt
-            .block_on(run_source_transform_sink(&mut src, &mut overlay, &mut sink, &clock, 4))
+            .block_on(run_source_transform_sink(
+                &mut src,
+                &mut overlay,
+                &mut sink,
+                &clock,
+                4,
+            ))
             .expect("pipeline runs");
 
         let frame = sink.last.expect("a frame was captured");

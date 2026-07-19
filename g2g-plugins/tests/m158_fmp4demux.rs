@@ -54,7 +54,12 @@ impl OutputSink for CaptureSink {
 fn frame(bytes: Vec<u8>, pts_ns: u64, sequence: u64) -> Frame {
     Frame {
         domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming { pts_ns, dts_ns: pts_ns, duration_ns: 33_333_333, ..FrameTiming::default() },
+        timing: FrameTiming {
+            pts_ns,
+            dts_ns: pts_ns,
+            duration_ns: 33_333_333,
+            ..FrameTiming::default()
+        },
         sequence,
         meta: Default::default(),
     }
@@ -64,8 +69,15 @@ fn frame(bytes: Vec<u8>, pts_ns: u64, sequence: u64) -> Frame {
 fn source_access_units() -> Vec<Vec<u8>> {
     let sps = [0x67u8, 0x42, 0xC0, 0x1E, 0x11, 0x22];
     let pps = [0x68u8, 0xCE, 0x3C, 0x80];
-    let idr: Vec<u8> =
-        [&[0, 0, 0, 1][..], &sps, &[0, 0, 0, 1], &pps, &[0, 0, 0, 1], &[0x65, 0xAA, 0xBB]].concat();
+    let idr: Vec<u8> = [
+        &[0, 0, 0, 1][..],
+        &sps,
+        &[0, 0, 0, 1],
+        &pps,
+        &[0, 0, 0, 1],
+        &[0x65, 0xAA, 0xBB],
+    ]
+    .concat();
     let p = |fill: u8| [&[0, 0, 0, 1][..], &[0x41, fill, fill]].concat();
     vec![idr, p(1), p(2), p(3)]
 }
@@ -77,9 +89,12 @@ async fn make_fmp4(aus: &[Vec<u8>]) -> Vec<u8> {
     mux.configure_pipeline(&h264_caps(64, 48)).unwrap();
     let mut out = CaptureSink::default();
     for (i, au) in aus.iter().enumerate() {
-        mux.process(PipelinePacket::DataFrame(frame(au.clone(), i as u64 * 33_333_333, i as u64)), &mut out)
-            .await
-            .unwrap();
+        mux.process(
+            PipelinePacket::DataFrame(frame(au.clone(), i as u64 * 33_333_333, i as u64)),
+            &mut out,
+        )
+        .await
+        .unwrap();
     }
     mux.process(PipelinePacket::Eos, &mut out).await.unwrap();
     out.frames.concat()
@@ -87,12 +102,18 @@ async fn make_fmp4(aus: &[Vec<u8>]) -> Vec<u8> {
 
 async fn demux(fmp4: &[u8], chunk: usize) -> CaptureSink {
     let mut dmx = Fmp4Demux::new();
-    dmx.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff }).unwrap();
+    dmx.configure_pipeline(&Caps::ByteStream {
+        encoding: ByteStreamEncoding::IsoBmff,
+    })
+    .unwrap();
     let mut sink = CaptureSink::default();
     for (seq, part) in fmp4.chunks(chunk).enumerate() {
-        dmx.process(PipelinePacket::DataFrame(frame(part.to_vec(), 0, seq as u64)), &mut sink)
-            .await
-            .unwrap();
+        dmx.process(
+            PipelinePacket::DataFrame(frame(part.to_vec(), 0, seq as u64)),
+            &mut sink,
+        )
+        .await
+        .unwrap();
     }
     dmx.process(PipelinePacket::Eos, &mut sink).await.unwrap();
     sink
@@ -114,7 +135,10 @@ async fn demuxes_fmp4_from_mp4mux_roundtrip() {
         }],
         "moov drives one CapsChanged with the real codec + geometry"
     );
-    assert_eq!(sink.frames, aus, "every access unit recovered, in order, byte-exact");
+    assert_eq!(
+        sink.frames, aus,
+        "every access unit recovered, in order, byte-exact"
+    );
 }
 
 #[tokio::test]
@@ -124,6 +148,13 @@ async fn reassembles_boxes_across_chunk_boundaries() {
     // 7-byte chunks split every box header and payload across frames.
     let sink = demux(&fmp4, 7).await;
 
-    assert_eq!(sink.caps.len(), 1, "geometry still recovered once despite fragmentation");
-    assert_eq!(sink.frames, aus, "buffered box reassembly yields the same access units");
+    assert_eq!(
+        sink.caps.len(),
+        1,
+        "geometry still recovered once despite fragmentation"
+    );
+    assert_eq!(
+        sink.frames, aus,
+        "buffered box reassembly yields the same access units"
+    );
 }

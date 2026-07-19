@@ -149,7 +149,8 @@ mod on {
         /// [`Propagation::Keep`]. An element that resamples / re-encodes calls
         /// this so stale meta never rides a frame it no longer describes.
         pub fn propagate(&mut self, transform: Transform) {
-            self.0.retain(|m| m.propagate(transform) == Propagation::Keep);
+            self.0
+                .retain(|m| m.propagate(transform) == Propagation::Keep);
         }
     }
 
@@ -315,7 +316,10 @@ mod on {
 
         /// Append a tagged blob.
         pub fn push(&mut self, header: impl Into<String>, payload: Vec<u8>) {
-            self.blobs.push(Blob { header: header.into(), payload });
+            self.blobs.push(Blob {
+                header: header.into(),
+                payload,
+            });
         }
 
         /// Iterate the carried blobs in attach order.
@@ -356,7 +360,11 @@ mod tests {
     use super::*;
 
     fn det(x: f32, y: f32, w: f32, h: f32, label: u32, conf: f32) -> ObjectDetection {
-        ObjectDetection { bbox: BBox { x, y, w, h }, label, confidence: conf }
+        ObjectDetection {
+            bbox: BBox { x, y, w, h },
+            label,
+            confidence: conf,
+        }
     }
 
     #[test]
@@ -396,10 +404,20 @@ mod tests {
     fn relation_graph_links_detection_to_classification() {
         let mut a = AnalyticsMeta::new();
         let d = a.add_detection(det(0.2, 0.2, 0.3, 0.3, 2, 0.8));
-        let c = a.push(AnalyticsNode::Classification(Classification { label: 42, confidence: 0.7 }));
+        let c = a.push(AnalyticsNode::Classification(Classification {
+            label: 42,
+            confidence: 0.7,
+        }));
         a.relate(d, c, RelationKind::Classifies);
         assert_eq!(a.relations.len(), 1);
-        assert_eq!(a.relations[0], Relation { from: d, to: c, kind: RelationKind::Classifies });
+        assert_eq!(
+            a.relations[0],
+            Relation {
+                from: d,
+                to: c,
+                kind: RelationKind::Classifies
+            }
+        );
     }
 
     #[test]
@@ -420,7 +438,11 @@ mod tests {
         b.get_mut::<AnalyticsMeta>()
             .unwrap()
             .add_detection(det(0.5, 0.5, 0.1, 0.1, 3, 0.8));
-        assert_eq!(b.get::<AnalyticsMeta>().unwrap().nodes.len(), 2, "clone mutated");
+        assert_eq!(
+            b.get::<AnalyticsMeta>().unwrap().nodes.len(),
+            2,
+            "clone mutated"
+        );
         assert_eq!(
             a.get::<AnalyticsMeta>().unwrap().nodes.len(),
             1,
@@ -430,13 +452,34 @@ mod tests {
 
     #[test]
     fn iou_is_zero_for_disjoint_and_one_for_identical() {
-        let a = BBox { x: 0.0, y: 0.0, w: 0.2, h: 0.2 };
-        let b = BBox { x: 0.5, y: 0.5, w: 0.2, h: 0.2 };
+        let a = BBox {
+            x: 0.0,
+            y: 0.0,
+            w: 0.2,
+            h: 0.2,
+        };
+        let b = BBox {
+            x: 0.5,
+            y: 0.5,
+            w: 0.2,
+            h: 0.2,
+        };
         assert_eq!(a.iou(&b), 0.0, "disjoint boxes do not overlap");
-        assert!((a.iou(&a) - 1.0).abs() < 1e-6, "identical boxes fully overlap");
+        assert!(
+            (a.iou(&a) - 1.0).abs() < 1e-6,
+            "identical boxes fully overlap"
+        );
         // Half-overlap: a and c share half their area horizontally.
-        let c = BBox { x: 0.1, y: 0.0, w: 0.2, h: 0.2 };
+        let c = BBox {
+            x: 0.1,
+            y: 0.0,
+            w: 0.2,
+            h: 0.2,
+        };
         let iou = a.iou(&c);
-        assert!(iou > 0.3 && iou < 0.34, "half-shifted overlap ~1/3 IoU: {iou}");
+        assert!(
+            iou > 0.3 && iou < 0.34,
+            "half-shifted overlap ~1/3 IoU: {iou}"
+        );
     }
 }

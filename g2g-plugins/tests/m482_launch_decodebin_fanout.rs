@@ -37,7 +37,11 @@ fn h264_caps() -> Caps {
     }
 }
 fn aac_caps() -> Caps {
-    Caps::Audio { format: AudioFormat::Aac, channels: 2, sample_rate: 48_000 }
+    Caps::Audio {
+        format: AudioFormat::Aac,
+        channels: 2,
+        sample_rate: 48_000,
+    }
 }
 
 #[derive(Default)]
@@ -62,7 +66,11 @@ impl OutputSink for Collect {
 fn frame(data: Vec<u8>, pts_ns: u64) -> PipelinePacket {
     PipelinePacket::DataFrame(Frame::new(
         MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-        FrameTiming { pts_ns, dts_ns: pts_ns, ..FrameTiming::default() },
+        FrameTiming {
+            pts_ns,
+            dts_ns: pts_ns,
+            ..FrameTiming::default()
+        },
         0,
     ))
 }
@@ -97,12 +105,28 @@ async fn mux_av<M: MultiInputElement>(mut mux: M) -> Vec<u8> {
     mux.configure_pipeline(0, &h264_caps()).unwrap();
     mux.configure_pipeline(1, &aac_caps()).unwrap();
     let mut sink = Collect::default();
-    mux.process(0, frame(annexb(&[&sps, &pps, &idr]), 0), &mut sink).await.unwrap();
-    mux.process(1, frame(adts_au(&[0xA1, 0xA2, 0xA3]), 0), &mut sink).await.unwrap();
-    mux.process(0, frame(annexb(&[&[0x41u8, 0x9a, 0x00]]), 33_000_000), &mut sink).await.unwrap();
-    mux.process(1, frame(adts_au(&[0xB4, 0xB5]), 21_000_000), &mut sink).await.unwrap();
-    mux.process(0, PipelinePacket::Eos, &mut sink).await.unwrap();
-    mux.process(1, PipelinePacket::Eos, &mut sink).await.unwrap();
+    mux.process(0, frame(annexb(&[&sps, &pps, &idr]), 0), &mut sink)
+        .await
+        .unwrap();
+    mux.process(1, frame(adts_au(&[0xA1, 0xA2, 0xA3]), 0), &mut sink)
+        .await
+        .unwrap();
+    mux.process(
+        0,
+        frame(annexb(&[&[0x41u8, 0x9a, 0x00]]), 33_000_000),
+        &mut sink,
+    )
+    .await
+    .unwrap();
+    mux.process(1, frame(adts_au(&[0xB4, 0xB5]), 21_000_000), &mut sink)
+        .await
+        .unwrap();
+    mux.process(0, PipelinePacket::Eos, &mut sink)
+        .await
+        .unwrap();
+    mux.process(1, PipelinePacket::Eos, &mut sink)
+        .await
+        .unwrap();
     sink.bytes
 }
 
@@ -122,7 +146,8 @@ async fn decodebin_name_fans_out_and_decodes_each_port() {
         "filesrc location={p} ! decodebin name=d  \
          d.video_0 ! videoconvert ! fakesink  d.audio_0 ! audioconvert ! fakesink"
     );
-    let graph = parse_launch(&reg, &line).unwrap_or_else(|e| panic!("decodebin fan-out parses `{line}`: {e}"));
+    let graph = parse_launch(&reg, &line)
+        .unwrap_or_else(|e| panic!("decodebin fan-out parses `{line}`: {e}"));
     let vg = graph.finish().expect("valid graph");
     let kinds: Vec<NodeKind> = vg.topo().iter().map(|&n| vg.kind(n)).collect();
     std::fs::remove_file(&path).ok();
@@ -135,5 +160,9 @@ async fn decodebin_name_fans_out_and_decodes_each_port() {
     // Decoders were spliced per port: filesrc + demux + (video parser + decoder +
     // convert + sink) + (audio decoder + convert + sink) is well past a bare 5-node
     // demux-only fan-out, so a healthy node count confirms the decode chains.
-    assert!(kinds.len() >= 8, "a decode chain was spliced onto each port: {} nodes", kinds.len());
+    assert!(
+        kinds.len() >= 8,
+        "a decode chain was spliced onto each port: {} nodes",
+        kinds.len()
+    );
 }

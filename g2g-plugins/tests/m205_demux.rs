@@ -27,18 +27,33 @@ impl PipelineClock for ZeroClock {
 }
 
 fn ts_input() -> Caps {
-    Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs }
+    Caps::ByteStream {
+        encoding: ByteStreamEncoding::MpegTs,
+    }
 }
 fn video_caps() -> Caps {
     Caps::CompressedVideo {
         codec: VideoCodec::H264,
-        width: Dim::Range { min: 16, max: 65_535 },
-        height: Dim::Range { min: 16, max: 65_535 },
-        framerate: Rate::Range { min_q16: 1 << 16, max_q16: 240 << 16 },
+        width: Dim::Range {
+            min: 16,
+            max: 65_535,
+        },
+        height: Dim::Range {
+            min: 16,
+            max: 65_535,
+        },
+        framerate: Rate::Range {
+            min_q16: 1 << 16,
+            max_q16: 240 << 16,
+        },
     }
 }
 fn audio_caps() -> Caps {
-    Caps::Audio { format: AudioFormat::Aac, channels: 0, sample_rate: 0 }
+    Caps::Audio {
+        format: AudioFormat::Aac,
+        channels: 0,
+        sample_rate: 0,
+    }
 }
 
 /// Emits a fixed script of frames, each prefixed with a stream-id byte
@@ -72,7 +87,10 @@ impl SourceLoop for MuxedSrc {
                 let bytes = vec![tag, i as u8];
                 let frame = Frame {
                     domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-                    timing: FrameTiming { pts_ns: i as u64 * 1000, ..FrameTiming::default() },
+                    timing: FrameTiming {
+                        pts_ns: i as u64 * 1000,
+                        ..FrameTiming::default()
+                    },
                     sequence: i as u64,
                     meta: Default::default(),
                 };
@@ -124,15 +142,16 @@ impl AsyncElement for BranchSink {
 #[tokio::test]
 async fn one_demux_splits_into_two_typed_branches() {
     // Interleaved multiplex: V A V A V (3 video, 2 audio).
-    let mut src = MuxedSrc { script: vec![0, 1, 0, 1, 0], configured: false };
-    let mut demux = StreamDemux::new(
-        ts_input(),
-        vec![video_caps(), audio_caps()],
-        |f| match &f.domain {
+    let mut src = MuxedSrc {
+        script: vec![0, 1, 0, 1, 0],
+        configured: false,
+    };
+    let mut demux = StreamDemux::new(ts_input(), vec![video_caps(), audio_caps()], |f| {
+        match &f.domain {
             MemoryDomain::System(s) => s.as_slice()[0] as usize,
             _ => 0,
-        },
-    );
+        }
+    });
     assert_eq!(demux.port_count(), 2);
 
     let mut video = BranchSink::default();
@@ -149,26 +168,49 @@ async fn one_demux_splits_into_two_typed_branches() {
     // per-branch re-solve fixates geometry, so match on the media discriminant.
     assert_eq!(video.caps_changes.len(), 1, "video port announced once");
     assert!(
-        matches!(video.caps_changes[0], Caps::CompressedVideo { codec: VideoCodec::H264, .. }),
+        matches!(
+            video.caps_changes[0],
+            Caps::CompressedVideo {
+                codec: VideoCodec::H264,
+                ..
+            }
+        ),
         "video port retyped to H264, got {:?}",
         video.caps_changes[0]
     );
     assert_eq!(audio.caps_changes.len(), 1, "audio port announced once");
     assert!(
-        matches!(audio.caps_changes[0], Caps::Audio { format: AudioFormat::Aac, .. }),
+        matches!(
+            audio.caps_changes[0],
+            Caps::Audio {
+                format: AudioFormat::Aac,
+                ..
+            }
+        ),
         "audio port retyped to AAC, got {:?}",
         audio.caps_changes[0]
     );
 
     // Frames were routed by stream id: only tag-0 to video, only tag-1 to audio.
-    assert_eq!(video.tags, vec![0, 0, 0], "all three video frames reached the video branch");
-    assert_eq!(audio.tags, vec![1, 1], "both audio frames reached the audio branch");
+    assert_eq!(
+        video.tags,
+        vec![0, 0, 0],
+        "all three video frames reached the video branch"
+    );
+    assert_eq!(
+        audio.tags,
+        vec![1, 1],
+        "both audio frames reached the audio branch"
+    );
 }
 
 #[tokio::test]
 async fn dark_port_stays_silent_when_its_stream_is_absent() {
     // The multiplex carries only video; the audio port is a dark slot.
-    let mut src = MuxedSrc { script: vec![0, 0], configured: false };
+    let mut src = MuxedSrc {
+        script: vec![0, 0],
+        configured: false,
+    };
     let mut demux = StreamDemux::new(ts_input(), vec![video_caps(), audio_caps()], |f| {
         match &f.domain {
             MemoryDomain::System(s) => s.as_slice()[0] as usize,
@@ -186,6 +228,9 @@ async fn dark_port_stays_silent_when_its_stream_is_absent() {
     }
 
     assert_eq!(video.tags, vec![0, 0]);
-    assert!(audio.tags.is_empty(), "absent stream: the dark port never emits a frame");
+    assert!(
+        audio.tags.is_empty(),
+        "absent stream: the dark port never emits a frame"
+    );
     assert!(audio.caps_changes.is_empty(), "and never announces caps");
 }

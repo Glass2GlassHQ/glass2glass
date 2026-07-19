@@ -37,7 +37,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError, HardwareError,
-    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, RawVideoFormat, Rate,
+    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate, RawVideoFormat,
 };
 
 use alloc::borrow::ToOwned;
@@ -203,7 +203,10 @@ impl Camera2Src {
     }
 
     /// Pick the camera id to open: the configured one, else the first reported.
-    fn resolve_camera_id(&self, manager: *mut ndk_sys::ACameraManager) -> Result<CString, G2gError> {
+    fn resolve_camera_id(
+        &self,
+        manager: *mut ndk_sys::ACameraManager,
+    ) -> Result<CString, G2gError> {
         if let Some(id) = &self.camera_id {
             return CString::new(id.as_str()).map_err(|_| G2gError::CapsMismatch);
         }
@@ -238,7 +241,9 @@ impl Camera2Src {
             MAX_IMAGES,
         )
         .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
-        let window = reader.window().map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+        let window = reader
+            .window()
+            .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
         let anw = window.ptr().as_ptr() as *mut ndk_sys::ACameraWindowType;
 
         let dev_cbs = Box::new(ndk_sys::ACameraDevice_StateCallbacks {
@@ -291,11 +296,25 @@ impl Camera2Src {
                 TEMPLATE_PREVIEW,
                 &mut partial.request,
             ))?;
-            ck(ndk_sys::ACameraOutputTarget_create(anw, &mut partial.target))?;
-            ck(ndk_sys::ACaptureRequest_addTarget(partial.request, partial.target))?;
-            ck(ndk_sys::ACaptureSessionOutputContainer_create(&mut partial.container))?;
-            ck(ndk_sys::ACaptureSessionOutput_create(anw, &mut partial.output))?;
-            ck(ndk_sys::ACaptureSessionOutputContainer_add(partial.container, partial.output))?;
+            ck(ndk_sys::ACameraOutputTarget_create(
+                anw,
+                &mut partial.target,
+            ))?;
+            ck(ndk_sys::ACaptureRequest_addTarget(
+                partial.request,
+                partial.target,
+            ))?;
+            ck(ndk_sys::ACaptureSessionOutputContainer_create(
+                &mut partial.container,
+            ))?;
+            ck(ndk_sys::ACaptureSessionOutput_create(
+                anw,
+                &mut partial.output,
+            ))?;
+            ck(ndk_sys::ACaptureSessionOutputContainer_add(
+                partial.container,
+                partial.output,
+            ))?;
             ck(ndk_sys::ACameraDevice_createCaptureSession(
                 partial.device,
                 partial.container,
@@ -317,11 +336,13 @@ impl Camera2Src {
 }
 
 impl SourceLoop for Camera2Src {
-    type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
+    type RunFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
     where
         Self: 'a;
 
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 
@@ -337,7 +358,12 @@ impl SourceLoop for Camera2Src {
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         match absolute_caps {
-            Caps::RawVideo { format: RawVideoFormat::Nv12, width, height, .. } => {
+            Caps::RawVideo {
+                format: RawVideoFormat::Nv12,
+                width,
+                height,
+                ..
+            } => {
                 if let Dim::Fixed(w) = width {
                     self.width = *w;
                 }

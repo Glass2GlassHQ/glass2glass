@@ -70,9 +70,16 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 /// Where a [`WgpuSink`] presents.
 enum Target {
     /// An internal texture the sink owns; readable via [`WgpuSink::read_target`].
-    Offscreen { texture: wgpu::Texture, width: u32, height: u32 },
+    Offscreen {
+        texture: wgpu::Texture,
+        width: u32,
+        height: u32,
+    },
     /// A caller-built, configured surface (an on-screen window).
-    Surface { surface: wgpu::Surface<'static>, config: wgpu::SurfaceConfiguration },
+    Surface {
+        surface: wgpu::Surface<'static>,
+        config: wgpu::SurfaceConfiguration,
+    },
 }
 
 /// Presents `MemoryDomain::WgpuTexture` frames to a target by GPU blit.
@@ -111,7 +118,11 @@ impl WgpuSink {
     pub fn offscreen(ctx: GpuContext, width: u32, height: u32) -> Self {
         let texture = ctx.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("wgpu-sink-offscreen"),
-            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -121,7 +132,15 @@ impl WgpuSink {
                 | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
-        Self::build(ctx, Self::OFFSCREEN_FORMAT, Target::Offscreen { texture, width, height })
+        Self::build(
+            ctx,
+            Self::OFFSCREEN_FORMAT,
+            Target::Offscreen {
+                texture,
+                width,
+                height,
+            },
+        )
     }
 
     /// A sink that presents to a caller-built, already-`configure`d surface (an
@@ -219,20 +238,23 @@ impl WgpuSink {
     /// the swapchain image; for offscreen, renders into the owned texture.
     fn present(&mut self, src: &wgpu::Texture) -> Result<(), G2gError> {
         let src_view = src.create_view(&wgpu::TextureViewDescriptor::default());
-        let bind_group = self.ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("wgpu-sink-bg"),
-            layout: &self.bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&src_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
-                },
-            ],
-        });
+        let bind_group = self
+            .ctx
+            .device
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("wgpu-sink-bg"),
+                layout: &self.bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&src_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                ],
+            });
 
         // Acquire the destination view. For a surface, hold the SurfaceTexture
         // until after submit so it can be presented.
@@ -257,16 +279,18 @@ impl WgpuSink {
             (Target::Offscreen { texture, .. }, _) => {
                 texture.create_view(&wgpu::TextureViewDescriptor::default())
             }
-            (Target::Surface { .. }, Some(frame)) => {
-                frame.texture.create_view(&wgpu::TextureViewDescriptor::default())
-            }
+            (Target::Surface { .. }, Some(frame)) => frame
+                .texture
+                .create_view(&wgpu::TextureViewDescriptor::default()),
             (Target::Surface { .. }, None) => unreachable!("returned above on no frame"),
         };
 
         let mut encoder = self
             .ctx
             .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("wgpu-sink") });
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("wgpu-sink"),
+            });
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("wgpu-sink-blit"),
@@ -299,7 +323,12 @@ impl WgpuSink {
     /// Read the offscreen target back to a tightly-packed RGBA8 buffer (panics if
     /// this sink targets a surface). For screenshots / tests.
     pub fn read_target(&self) -> Result<Vec<u8>, G2gError> {
-        let Target::Offscreen { texture, width, height } = &self.target else {
+        let Target::Offscreen {
+            texture,
+            width,
+            height,
+        } = &self.target
+        else {
             return Err(G2gError::UnsupportedDomain);
         };
         let (w, h) = (*width, *height);
@@ -330,7 +359,11 @@ impl WgpuSink {
                     rows_per_image: Some(h),
                 },
             },
-            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
         );
         self.ctx.queue.submit([encoder.finish()]);
 
@@ -341,7 +374,10 @@ impl WgpuSink {
         });
         self.ctx
             .device
-            .poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
             .map_err(gpu_err)?;
         rx.recv().map_err(gpu_err)?.map_err(gpu_err)?;
 
@@ -422,7 +458,11 @@ mod tests {
     fn source_texture(ctx: &GpuContext, w: u32, h: u32, pixels: &[u8]) -> wgpu::Texture {
         let texture = ctx.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("test-source"),
-            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -443,7 +483,11 @@ mod tests {
                 bytes_per_row: Some(w * 4),
                 rows_per_image: Some(h),
             },
-            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
         );
         texture
     }
@@ -502,7 +546,9 @@ mod tests {
         })
         .unwrap();
         let frame = wgpu_frame(&ctx, w, h, src);
-        sink.process(PipelinePacket::DataFrame(frame), &mut NullSink).await.unwrap();
+        sink.process(PipelinePacket::DataFrame(frame), &mut NullSink)
+            .await
+            .unwrap();
 
         let out = sink.read_target().unwrap();
         let px = |x: u32, y: u32| {
@@ -510,8 +556,16 @@ mod tests {
             [out[i], out[i + 1], out[i + 2], out[i + 3]]
         };
         // Orientation preserved: top stays red, bottom stays blue.
-        assert!(px(0, 0)[0] > 200 && px(0, 0)[2] < 50, "top row red: {:?}", px(0, 0));
-        assert!(px(0, 3)[2] > 200 && px(0, 3)[0] < 50, "bottom row blue: {:?}", px(0, 3));
+        assert!(
+            px(0, 0)[0] > 200 && px(0, 0)[2] < 50,
+            "top row red: {:?}",
+            px(0, 0)
+        );
+        assert!(
+            px(0, 3)[2] > 200 && px(0, 3)[0] < 50,
+            "bottom row blue: {:?}",
+            px(0, 3)
+        );
         assert_eq!(sink.presented_count(), 1);
     }
 
@@ -520,7 +574,7 @@ mod tests {
     async fn overlay_to_sink_presents_boxes_on_shared_device() {
         use crate::vellooverlay::VelloAnalyticsOverlay;
         use g2g_core::memory::SystemSlice;
-        use g2g_core::{AnalyticsMeta, BBox, Dim, ObjectDetection, RawVideoFormat, Rate};
+        use g2g_core::{AnalyticsMeta, BBox, Dim, ObjectDetection, Rate, RawVideoFormat};
 
         if !gpu_available().await {
             std::eprintln!("no wgpu adapter; skipping overlay->sink test");
@@ -531,7 +585,9 @@ mod tests {
 
         // Overlay and sink share ONE device: the overlay's texture is presentable
         // by the sink with no copy.
-        let mut overlay = VelloAnalyticsOverlay::new().with_context(ctx.clone()).with_thickness(4.0);
+        let mut overlay = VelloAnalyticsOverlay::new()
+            .with_context(ctx.clone())
+            .with_thickness(4.0);
         let rgba_caps = Caps::RawVideo {
             format: RawVideoFormat::Rgba8,
             width: Dim::Fixed(w),
@@ -554,7 +610,12 @@ mod tests {
         );
         let mut a = AnalyticsMeta::new();
         a.add_detection(ObjectDetection {
-            bbox: BBox { x: 0.25, y: 0.25, w: 0.5, h: 0.5 },
+            bbox: BBox {
+                x: 0.25,
+                y: 0.25,
+                w: 0.5,
+                h: 0.5,
+            },
             label: 0,
             confidence: 0.9,
         });
@@ -562,10 +623,18 @@ mod tests {
 
         // overlay -> (WgpuTexture) -> sink, all on the shared device.
         let mut relay = CaptureSink { frame: None };
-        overlay.process(PipelinePacket::DataFrame(frame), &mut relay).await.unwrap();
+        overlay
+            .process(PipelinePacket::DataFrame(frame), &mut relay)
+            .await
+            .unwrap();
         let gpu_frame = relay.frame.expect("overlay produced a GPU frame");
-        assert!(matches!(gpu_frame.domain, MemoryDomain::WgpuTexture(_)), "kept on GPU");
-        sink.process(PipelinePacket::DataFrame(gpu_frame), &mut NullSink).await.unwrap();
+        assert!(
+            matches!(gpu_frame.domain, MemoryDomain::WgpuTexture(_)),
+            "kept on GPU"
+        );
+        sink.process(PipelinePacket::DataFrame(gpu_frame), &mut NullSink)
+            .await
+            .unwrap();
 
         let out = sink.read_target().unwrap();
         let px = |x: u32, y: u32| {

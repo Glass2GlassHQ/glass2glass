@@ -95,7 +95,10 @@ async fn runnable_lines_run_end_to_end() {
         let stats = run_graph(graph, &ZeroClock, 4)
             .await
             .unwrap_or_else(|e| panic!("runs: {line}: {e:?}"));
-        assert_eq!(stats.frames_consumed, *expected, "expected frame count at sink(s): {line}");
+        assert_eq!(
+            stats.frames_consumed, *expected,
+            "expected frame count at sink(s): {line}"
+        );
     }
 }
 
@@ -105,8 +108,14 @@ fn unportable_elements_are_flagged() {
     // theoraenc / x265enc have no g2g equivalent under any feature, so the
     // linter reports them regardless of the compiled feature set.
     for (line, elem) in [
-        ("videotestsrc ! theoraenc ! filesink location=out.ogv", "theoraenc"),
-        ("videotestsrc ! x265enc ! filesink location=out.h265", "x265enc"),
+        (
+            "videotestsrc ! theoraenc ! filesink location=out.ogv",
+            "theoraenc",
+        ),
+        (
+            "videotestsrc ! x265enc ! filesink location=out.h265",
+            "x265enc",
+        ),
     ] {
         let report = lint_launch(&reg, line);
         assert!(
@@ -122,8 +131,17 @@ fn unportable_elements_map_to_guidance() {
     // The porting table gives feature-stable advice for these (no g2g element
     // exists under any feature), so a porter gets a pointer, not a dead end.
     let reg = default_registry();
-    assert!(matches!(gst_equivalent(&reg, "theoraenc"), GstEquivalent::Unsupported(_)));
-    assert!(matches!(gst_equivalent(&reg, "x265enc"), GstEquivalent::Unsupported(_)));
+    assert!(matches!(
+        gst_equivalent(&reg, "theoraenc"),
+        GstEquivalent::Unsupported(_)
+    ));
+    assert!(matches!(
+        gst_equivalent(&reg, "x265enc"),
+        GstEquivalent::Unsupported(_)
+    ));
     // A baseline element resolves as available.
-    assert_eq!(gst_equivalent(&reg, "videoconvert"), GstEquivalent::Available);
+    assert_eq!(
+        gst_equivalent(&reg, "videoconvert"),
+        GstEquivalent::Available
+    );
 }

@@ -345,8 +345,7 @@ fn pool_reference(
                         acc += v;
                     }
                 }
-                out[(ch * oh + oy) * ow + ox] =
-                    if is_max { m } else { acc / (kh * kw) as f32 };
+                out[(ch * oh + oy) * ow + ox] = if is_max { m } else { acc / (kh * kw) as f32 };
             }
         }
     }
@@ -587,7 +586,11 @@ impl ResidualStack {
             ResidualStep::Op(op) | ResidualStep::Add(op, _) => op.read_back(&cur)?,
             ResidualStep::Save(_) => return Err(G2gError::NotConfigured),
         };
-        debug_assert_eq!(bytes.len(), cur_bytes, "read-back length tracks the final op");
+        debug_assert_eq!(
+            bytes.len(),
+            cur_bytes,
+            "read-back length tracks the final op"
+        );
         Ok(Frame {
             domain: MemoryDomain::System(SystemSlice::from_boxed(bytes)),
             timing: input.timing,
@@ -681,7 +684,10 @@ impl WgpuInference {
             return Err(G2gError::CapsMismatch);
         }
         let c = channels as usize;
-        if [gamma.len(), beta.len(), mean.len(), var.len()].iter().any(|&l| l != c) {
+        if [gamma.len(), beta.len(), mean.len(), var.len()]
+            .iter()
+            .any(|&l| l != c)
+        {
             return Err(G2gError::CapsMismatch);
         }
         let hw = (height as u64)
@@ -861,7 +867,9 @@ impl WgpuInference {
         w: &mut u32,
     ) -> Result<Self, G2gError> {
         let vec_by_name = |name: &str| -> Result<Vec<f32>, G2gError> {
-            st.get(name).and_then(|t| t.to_f32()).map_err(|_| G2gError::CapsMismatch)
+            st.get(name)
+                .and_then(|t| t.to_f32())
+                .map_err(|_| G2gError::CapsMismatch)
         };
         Ok(match spec {
             StackLayer::Conv2d { name } => {
@@ -903,7 +911,9 @@ impl WgpuInference {
                 layer
             }
             StackLayer::Linear { name } => {
-                let wt = st.get(&format!("{name}.weight")).map_err(|_| G2gError::CapsMismatch)?;
+                let wt = st
+                    .get(&format!("{name}.weight"))
+                    .map_err(|_| G2gError::CapsMismatch)?;
                 let [k, n] = match wt.shape {
                     [a, b] => [*a as u32, *b as u32],
                     _ => return Err(G2gError::CapsMismatch),
@@ -962,7 +972,9 @@ impl WgpuInference {
                     }
                     steps.push(ResidualStep::Add(Self::add(c, h, w)?, slot.clone()));
                 }
-                _ => steps.push(ResidualStep::Op(Self::build_layer(spec, st, &mut c, &mut h, &mut w)?)),
+                _ => steps.push(ResidualStep::Op(Self::build_layer(
+                    spec, st, &mut c, &mut h, &mut w,
+                )?)),
             }
         }
         Ok(ResidualStack { steps })
@@ -1144,7 +1156,8 @@ impl WgpuInference {
     fn output_caps(&self) -> Caps {
         Caps::Tensor {
             dtype: TensorDType::F32,
-            shape: TensorShape::from_slice(&self.out_shape).expect("rank validated at construction"),
+            shape: TensorShape::from_slice(&self.out_shape)
+                .expect("rank validated at construction"),
             layout: TensorLayout::Nchw,
         }
     }
@@ -1232,8 +1245,14 @@ impl WgpuInference {
         // (meta=0, input=1, weights=2, bias=3, out=4); weightless ops bind
         // (meta=0, input=1, out=2). The pipeline's auto-derived layout matches.
         let mut entries = vec![
-            wgpu::BindGroupEntry { binding: 0, resource: gpu.meta_buf.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 1, resource: input.as_entire_binding() },
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: gpu.meta_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: input.as_entire_binding(),
+            },
         ];
         match (&gpu.weight_buf, &gpu.bias_buf) {
             (Some(weights), Some(bias)) => {
@@ -1263,8 +1282,9 @@ impl WgpuInference {
             entries: &entries,
         });
 
-        let mut encoder =
-            gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("wgpu-linear"),
@@ -1300,10 +1320,22 @@ impl WgpuInference {
             mapped_at_creation: false,
         });
         let entries = [
-            wgpu::BindGroupEntry { binding: 0, resource: gpu.meta_buf.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 1, resource: a.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 2, resource: b.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 3, resource: out_buf.as_entire_binding() },
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: gpu.meta_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: a.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: b.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: out_buf.as_entire_binding(),
+            },
         ];
         let layout = gpu.pipeline.get_bind_group_layout(0);
         let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1311,8 +1343,9 @@ impl WgpuInference {
             layout: &layout,
             entries: &entries,
         });
-        let mut encoder =
-            gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("wgpu-add"),
@@ -1337,8 +1370,9 @@ impl WgpuInference {
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let mut encoder =
-            gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         encoder.copy_buffer_to_buffer(logits, 0, &staging, 0, self.out_bytes as u64);
         gpu.queue.submit([encoder.finish()]);
 
@@ -1348,7 +1382,10 @@ impl WgpuInference {
             let _ = tx.send(r);
         });
         gpu.device
-            .poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
             .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
         rx.recv()
             .map_err(|_| G2gError::Hardware(HardwareError::Other))?
@@ -1360,7 +1397,8 @@ impl WgpuInference {
 }
 
 impl AsyncElement for WgpuInference {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -1422,7 +1460,8 @@ impl AsyncElement for WgpuInference {
 
                     let new_caps = self.output_caps();
                     if self.last_caps.as_ref() != Some(&new_caps) {
-                        out.push(PipelinePacket::CapsChanged(new_caps.clone())).await?;
+                        out.push(PipelinePacket::CapsChanged(new_caps.clone()))
+                            .await?;
                         self.last_caps = Some(new_caps);
                     }
 

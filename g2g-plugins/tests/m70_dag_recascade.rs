@@ -72,7 +72,8 @@ struct ScriptedSource {
 
 impl SourceLoop for ScriptedSource {
     type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>;
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 
@@ -106,9 +107,7 @@ impl SourceLoop for ScriptedSource {
 
 fn frame(seq: u64) -> PipelinePacket {
     PipelinePacket::DataFrame(Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(
-            vec![seq as u8].into_boxed_slice(),
-        )),
+        domain: MemoryDomain::System(SystemSlice::from_boxed(vec![seq as u8].into_boxed_slice())),
         timing: FrameTiming::default(),
         sequence: seq,
         meta: Default::default(),
@@ -225,7 +224,10 @@ impl MultiInputElement for RecordingMux {
         input: usize,
         absolute_caps: &Caps,
     ) -> Result<ConfigureOutcome, G2gError> {
-        self.config_log.lock().unwrap().push((input, absolute_caps.clone()));
+        self.config_log
+            .lock()
+            .unwrap()
+            .push((input, absolute_caps.clone()));
         Ok(ConfigureOutcome::Accepted)
     }
 
@@ -298,8 +300,12 @@ async fn tee_diamond_recascades_each_branch() {
         after: 2,
     }));
     let tee = g.add_tee(2);
-    let ta = g.add_transform(GraphNode::element(RecordingTransform { alloc_log: Arc::clone(&log_a) }));
-    let tb = g.add_transform(GraphNode::element(RecordingTransform { alloc_log: Arc::clone(&log_b) }));
+    let ta = g.add_transform(GraphNode::element(RecordingTransform {
+        alloc_log: Arc::clone(&log_a),
+    }));
+    let tb = g.add_transform(GraphNode::element(RecordingTransform {
+        alloc_log: Arc::clone(&log_b),
+    }));
     let sa = g.add_sink(GraphNode::element(PoolSink { accept: nv12_any() }));
     let sb = g.add_sink(GraphNode::element(PoolSink { accept: nv12_any() }));
     g.link(src, tee.input()).unwrap();
@@ -308,9 +314,14 @@ async fn tee_diamond_recascades_each_branch() {
     g.link(ta, sa).unwrap();
     g.link(tb, sb).unwrap();
 
-    let stats = run_graph(g, &NullClock, 4).await.expect("tee diamond re-solves");
+    let stats = run_graph(g, &NullClock, 4)
+        .await
+        .expect("tee diamond re-solves");
     assert_eq!(stats.frames_emitted, 4);
-    assert_eq!(stats.frames_consumed, 8, "both branches delivered all 4 frames");
+    assert_eq!(
+        stats.frames_consumed, 8,
+        "both branches delivered all 4 frames"
+    );
     assert_eq!(
         *log_a.lock().unwrap(),
         vec![8 * 8, 16 * 16],
@@ -321,7 +332,10 @@ async fn tee_diamond_recascades_each_branch() {
         vec![8 * 8, 16 * 16],
         "branch B re-cascades independently of branch A"
     );
-    assert!(stats.coordinator_events >= 2, "each sink reported its mid-stream change");
+    assert!(
+        stats.coordinator_events >= 2,
+        "each sink reported its mid-stream change"
+    );
 }
 
 /// No mid-stream change: only the startup allocation cascade configures each
@@ -340,8 +354,12 @@ async fn no_change_leaves_branches_at_startup_proposal() {
         after: 0,
     }));
     let tee = g.add_tee(2);
-    let ta = g.add_transform(GraphNode::element(RecordingTransform { alloc_log: Arc::clone(&log_a) }));
-    let tb = g.add_transform(GraphNode::element(RecordingTransform { alloc_log: Arc::clone(&log_b) }));
+    let ta = g.add_transform(GraphNode::element(RecordingTransform {
+        alloc_log: Arc::clone(&log_a),
+    }));
+    let tb = g.add_transform(GraphNode::element(RecordingTransform {
+        alloc_log: Arc::clone(&log_b),
+    }));
     let sa = g.add_sink(GraphNode::element(PoolSink { accept: nv12_any() }));
     let sb = g.add_sink(GraphNode::element(PoolSink { accept: nv12_any() }));
     g.link(src, tee.input()).unwrap();
@@ -352,9 +370,16 @@ async fn no_change_leaves_branches_at_startup_proposal() {
 
     let stats = run_graph(g, &NullClock, 4).await.expect("tee diamond runs");
     assert_eq!(stats.frames_consumed, 8);
-    assert_eq!(*log_a.lock().unwrap(), vec![8 * 8], "startup cascade only, no β");
+    assert_eq!(
+        *log_a.lock().unwrap(),
+        vec![8 * 8],
+        "startup cascade only, no β"
+    );
     assert_eq!(*log_b.lock().unwrap(), vec![8 * 8]);
-    assert_eq!(stats.coordinator_events, 0, "no reports without a mid-stream change");
+    assert_eq!(
+        stats.coordinator_events, 0,
+        "no reports without a mid-stream change"
+    );
 }
 
 /// A branch whose sink rejects the mid-stream format fails the whole graph loud
@@ -425,7 +450,9 @@ async fn muxer_resolves_per_input() {
     g.link(s1, mux.input(1)).unwrap();
     g.link(mux.output(), sink).unwrap();
 
-    let stats = run_graph(g, &NullClock, 4).await.expect("muxer per-input re-solve runs");
+    let stats = run_graph(g, &NullClock, 4)
+        .await
+        .expect("muxer per-input re-solve runs");
     assert_eq!(stats.frames_emitted, 7, "4 + 3 source frames");
 
     let log = config_log.lock().unwrap();
@@ -435,7 +462,8 @@ async fn muxer_resolves_per_input() {
         "pad 0 re-configured mid-stream: {log:?}"
     );
     assert!(
-        !log.iter().any(|(pad, caps)| *pad == 1 && *caps == nv12(16, 16)),
+        !log.iter()
+            .any(|(pad, caps)| *pad == 1 && *caps == nv12(16, 16)),
         "pad 1 did not change"
     );
 }

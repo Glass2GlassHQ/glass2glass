@@ -25,7 +25,10 @@ pub enum Tag {
     Language(String),
     Comment(String),
     /// A tag whose key is not one of the typed variants.
-    Other { key: String, value: String },
+    Other {
+        key: String,
+        value: String,
+    },
 }
 
 impl Tag {
@@ -47,7 +50,10 @@ impl Tag {
         } else if key.eq_ignore_ascii_case("comment") || key.eq_ignore_ascii_case("description") {
             Tag::Comment(v)
         } else {
-            Tag::Other { key: String::from(key), value: v }
+            Tag::Other {
+                key: String::from(key),
+                value: v,
+            }
         }
     }
 }
@@ -83,7 +89,9 @@ impl TagList {
 
 impl FromIterator<Tag> for TagList {
     fn from_iter<I: IntoIterator<Item = Tag>>(iter: I) -> Self {
-        Self { tags: iter.into_iter().collect() }
+        Self {
+            tags: iter.into_iter().collect(),
+        }
     }
 }
 
@@ -93,24 +101,40 @@ mod tests {
 
     #[test]
     fn maps_known_keys_case_insensitively() {
-        assert_eq!(Tag::from_key_value("TITLE", "Song"), Tag::Title("Song".into()));
-        assert_eq!(Tag::from_key_value("Artist", "Band"), Tag::Artist("Band".into()));
-        assert_eq!(Tag::from_key_value("encoder", "libopus"), Tag::Encoder("libopus".into()));
-        assert_eq!(Tag::from_key_value("DESCRIPTION", "hi"), Tag::Comment("hi".into()));
+        assert_eq!(
+            Tag::from_key_value("TITLE", "Song"),
+            Tag::Title("Song".into())
+        );
+        assert_eq!(
+            Tag::from_key_value("Artist", "Band"),
+            Tag::Artist("Band".into())
+        );
+        assert_eq!(
+            Tag::from_key_value("encoder", "libopus"),
+            Tag::Encoder("libopus".into())
+        );
+        assert_eq!(
+            Tag::from_key_value("DESCRIPTION", "hi"),
+            Tag::Comment("hi".into())
+        );
     }
 
     #[test]
     fn unknown_key_falls_back_to_other() {
         assert_eq!(
             Tag::from_key_value("REPLAYGAIN_TRACK_GAIN", "-3.2 dB"),
-            Tag::Other { key: "REPLAYGAIN_TRACK_GAIN".into(), value: "-3.2 dB".into() }
+            Tag::Other {
+                key: "REPLAYGAIN_TRACK_GAIN".into(),
+                value: "-3.2 dB".into()
+            }
         );
     }
 
     #[test]
     fn taglist_collects_and_reports() {
-        let list: TagList =
-            [Tag::Title("T".into()), Tag::Artist("A".into())].into_iter().collect();
+        let list: TagList = [Tag::Title("T".into()), Tag::Artist("A".into())]
+            .into_iter()
+            .collect();
         assert_eq!(list.len(), 2);
         assert!(!list.is_empty());
         assert_eq!(list.tags()[0], Tag::Title("T".into()));

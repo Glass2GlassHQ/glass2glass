@@ -117,9 +117,11 @@ impl Spectrum {
 
     fn accept_input(&self, caps: &Caps) -> Result<usize, G2gError> {
         match caps {
-            Caps::Audio { format: AudioFormat::PcmS16Le, channels, .. } if *channels > 0 => {
-                Ok(*channels as usize)
-            }
+            Caps::Audio {
+                format: AudioFormat::PcmS16Le,
+                channels,
+                ..
+            } if *channels > 0 => Ok(*channels as usize),
             _ => Err(G2gError::CapsMismatch),
         }
     }
@@ -172,7 +174,10 @@ impl AsyncElement for Spectrum {
 
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
-            Caps::Audio { format: AudioFormat::PcmS16Le, .. } => CapsSet::one(input.clone()),
+            Caps::Audio {
+                format: AudioFormat::PcmS16Le,
+                ..
+            } => CapsSet::one(input.clone()),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
     }
@@ -218,7 +223,12 @@ impl AsyncElement for Spectrum {
     }
 
     fn metadata(&self) -> ElementMetadata {
-        ElementMetadata::new("Spectrum", "Filter/Analyzer/Audio", "FFT spectrum analyzer", "g2g")
+        ElementMetadata::new(
+            "Spectrum",
+            "Filter/Analyzer/Audio",
+            "FFT spectrum analyzer",
+            "g2g",
+        )
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
@@ -248,13 +258,24 @@ impl AsyncElement for Spectrum {
 
 static SPECTRUM_PROPS: &[PropertySpec] = &[
     PropertySpec::new("bands", PropKind::Uint, "number of output frequency bands"),
-    PropertySpec::new("post-messages", PropKind::Bool, "run the analysis when true"),
+    PropertySpec::new(
+        "post-messages",
+        PropKind::Bool,
+        "run the analysis when true",
+    ),
 ];
 
 impl PadTemplates for Spectrum {
     fn pad_templates() -> Vec<PadTemplate> {
-        let pcm = Caps::Audio { format: AudioFormat::PcmS16Le, channels: 2, sample_rate: 48_000 };
-        Vec::from([PadTemplate::sink(CapsSet::one(pcm.clone())), PadTemplate::source(CapsSet::one(pcm))])
+        let pcm = Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            channels: 2,
+            sample_rate: 48_000,
+        };
+        Vec::from([
+            PadTemplate::sink(CapsSet::one(pcm.clone())),
+            PadTemplate::source(CapsSet::one(pcm)),
+        ])
     }
 }
 
@@ -272,9 +293,16 @@ mod tests {
             *slot = crate::mathf::cos_turns(3.0 * (i as f32) / (n as f32)) as f64;
         }
         fft(&mut re, &mut im);
-        let mag: Vec<f64> = (0..n).map(|k| crate::mathf::sqrt(re[k] * re[k] + im[k] * im[k])).collect();
+        let mag: Vec<f64> = (0..n)
+            .map(|k| crate::mathf::sqrt(re[k] * re[k] + im[k] * im[k]))
+            .collect();
         // bin 3 should dominate over a non-adjacent bin like 6.
-        assert!(mag[3] > mag[6] * 4.0, "bin 3 {} vs bin 6 {}", mag[3], mag[6]);
+        assert!(
+            mag[3] > mag[6] * 4.0,
+            "bin 3 {} vs bin 6 {}",
+            mag[3],
+            mag[6]
+        );
         assert!(mag[3] > mag[0] * 4.0, "bin 3 {} vs DC {}", mag[3], mag[0]);
     }
 
@@ -285,7 +313,10 @@ mod tests {
         fft(&mut re, &mut im);
         assert!((re[0] - 8.0).abs() < 1e-9, "DC bin should be N");
         for k in 1..8 {
-            assert!(re[k].abs() < 1e-9 && im[k].abs() < 1e-9, "bin {k} should be ~0");
+            assert!(
+                re[k].abs() < 1e-9 && im[k].abs() < 1e-9,
+                "bin {k} should be ~0"
+            );
         }
     }
 
@@ -300,13 +331,24 @@ mod tests {
             chunk.copy_from_slice(&v.to_le_bytes());
         }
         s.observe(&bytes);
-        assert_eq!(s.last_magnitudes().len(), 4, "one band per requested output");
+        assert_eq!(
+            s.last_magnitudes().len(),
+            4,
+            "one band per requested output"
+        );
     }
 
     #[test]
     fn configure_rejects_non_s16le() {
         let mut s = Spectrum::new();
-        let bad = Caps::Audio { format: AudioFormat::PcmF32Le, channels: 2, sample_rate: 48_000 };
-        assert_eq!(s.configure_pipeline(&bad).unwrap_err(), G2gError::CapsMismatch);
+        let bad = Caps::Audio {
+            format: AudioFormat::PcmF32Le,
+            channels: 2,
+            sample_rate: 48_000,
+        };
+        assert_eq!(
+            s.configure_pipeline(&bad).unwrap_err(),
+            G2gError::CapsMismatch
+        );
     }
 }

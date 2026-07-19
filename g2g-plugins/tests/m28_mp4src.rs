@@ -105,7 +105,8 @@ async fn mux_to_bytes(aus: &[Vec<u8>], w: u32, h: u32, tags: Option<TagList>) ->
         Some(t) => Mp4Mux::new().with_tags(t),
         None => Mp4Mux::new(),
     };
-    mux.configure_pipeline(&h264_caps(w, h)).expect("configure mux");
+    mux.configure_pipeline(&h264_caps(w, h))
+        .expect("configure mux");
     let mut cap = Capture::default();
     for (i, au) in aus.iter().enumerate() {
         mux.process(
@@ -115,7 +116,9 @@ async fn mux_to_bytes(aus: &[Vec<u8>], w: u32, h: u32, tags: Option<TagList>) ->
         .await
         .expect("mux AU");
     }
-    mux.process(PipelinePacket::Eos, &mut cap).await.expect("eos");
+    mux.process(PipelinePacket::Eos, &mut cap)
+        .await
+        .expect("eos");
     cap.bytes
 }
 
@@ -155,7 +158,10 @@ async fn round_trip_recovers_access_units_and_timing() {
             height: Dim::Fixed(48),
             // advisory range, not `Any`: per-frame PTS carries the real timing
             // and `Any` would abort fixate when nothing downstream pins the rate.
-            framerate: Rate::Range { min_q16: 1 << 16, max_q16: 240 << 16 },
+            framerate: Rate::Range {
+                min_q16: 1 << 16,
+                max_q16: 240 << 16
+            },
         }
     );
 
@@ -231,12 +237,20 @@ async fn sink_written_tags_round_trip_to_the_source_bus() {
     let path = temp_path("tag_roundtrip");
     let sps = [0x67u8, 0x42, 0xC0, 0x1E, 0x11];
     let pps = [0x68u8, 0xCE, 0x3C, 0x80];
-    let idr_au: Vec<u8> =
-        [&[0, 0, 0, 1][..], &sps, &[0, 0, 0, 1], &pps, &[0, 0, 0, 1], &[0x65, 0xAA]].concat();
+    let idr_au: Vec<u8> = [
+        &[0, 0, 0, 1][..],
+        &sps,
+        &[0, 0, 0, 1],
+        &pps,
+        &[0, 0, 0, 1],
+        &[0x65, 0xAA],
+    ]
+    .concat();
 
     // Record with tags attached to the mux's init-segment moov.
-    let tags: TagList =
-        [Tag::Title("Recorded".into()), Tag::Encoder("g2g".into())].into_iter().collect();
+    let tags: TagList = [Tag::Title("Recorded".into()), Tag::Encoder("g2g".into())]
+        .into_iter()
+        .collect();
     let bytes = mux_to_bytes(&[idr_au], 64, 48, Some(tags.clone())).await;
     std::fs::write(&path, &bytes).unwrap();
 
@@ -255,7 +269,11 @@ async fn sink_written_tags_round_trip_to_the_source_bus() {
         }
     }
     assert_eq!(posted.expect("a Tag message").tags(), tags.tags());
-    assert_eq!(out.frames().len(), 1, "the AU still demuxes alongside the tags");
+    assert_eq!(
+        out.frames().len(),
+        1,
+        "the AU still demuxes alongside the tags"
+    );
     let _ = std::fs::remove_file(&path);
 }
 
@@ -266,12 +284,23 @@ async fn surfaces_ilst_tags_on_the_bus() {
     let path = temp_path("tags");
     let sps = [0x67u8, 0x42, 0xC0, 0x1E, 0x11];
     let pps = [0x68u8, 0xCE, 0x3C, 0x80];
-    let idr_au: Vec<u8> =
-        [&[0, 0, 0, 1][..], &sps, &[0, 0, 0, 1], &pps, &[0, 0, 0, 1], &[0x65, 0xAA]].concat();
+    let idr_au: Vec<u8> = [
+        &[0, 0, 0, 1][..],
+        &sps,
+        &[0, 0, 0, 1],
+        &pps,
+        &[0, 0, 0, 1],
+        &[0x65, 0xAA],
+    ]
+    .concat();
     record(&path, &[idr_au], 64, 48).await;
 
     // splice a udta/meta/ilst (title + encoder) into the recorded moov.
-    let ilst = [text_item(b"\xA9nam", "Spliced Clip"), text_item(b"\xA9too", "g2g")].concat();
+    let ilst = [
+        text_item(b"\xA9nam", "Spliced Clip"),
+        text_item(b"\xA9too", "g2g"),
+    ]
+    .concat();
     let mut meta = vec![0u8, 0, 0, 0]; // meta full box version/flags
     meta.extend_from_slice(&mp4_box(b"ilst", &ilst));
     let udta = mp4_box(b"udta", &mp4_box(b"meta", &meta));
@@ -280,11 +309,18 @@ async fn surfaces_ilst_tags_on_the_bus() {
 
     let (bus, handle) = Bus::new(8);
     let mut src = Mp4Src::new(&path).with_bus(handle);
-    let caps = src.intercept_caps().await.expect("probe still works with udta");
+    let caps = src
+        .intercept_caps()
+        .await
+        .expect("probe still works with udta");
     src.configure_pipeline(&caps).expect("configure");
     let mut out = Collect::default();
     src.run(&mut out).await.expect("demux");
-    assert_eq!(out.frames().len(), 1, "the sample still demuxes alongside the tags");
+    assert_eq!(
+        out.frames().len(),
+        1,
+        "the sample still demuxes alongside the tags"
+    );
 
     let mut posted = None;
     while let Some(m) = bus.try_recv() {
@@ -293,7 +329,13 @@ async fn surfaces_ilst_tags_on_the_bus() {
         }
     }
     let tags = posted.expect("a Tag message was posted");
-    assert_eq!(tags.tags(), &[Tag::Title("Spliced Clip".into()), Tag::Encoder("g2g".into())]);
+    assert_eq!(
+        tags.tags(),
+        &[
+            Tag::Title("Spliced Clip".into()),
+            Tag::Encoder("g2g".into())
+        ]
+    );
     let _ = std::fs::remove_file(&path);
 }
 
@@ -307,8 +349,15 @@ async fn flush_seek_repositions_to_keyframe() {
     let pps = [0x68u8, 0xCE, 0x3C, 0x80];
     // The first AU carries the parameter sets in-band (so the moov picks them up);
     // a later IDR does not, exercising the post-seek param-set prepend.
-    let idr0: Vec<u8> =
-        [&[0, 0, 0, 1][..], &sps, &[0, 0, 0, 1], &pps, &[0, 0, 0, 1], &[0x65, 0xA0]].concat();
+    let idr0: Vec<u8> = [
+        &[0, 0, 0, 1][..],
+        &sps,
+        &[0, 0, 0, 1],
+        &pps,
+        &[0, 0, 0, 1],
+        &[0x65, 0xA0],
+    ]
+    .concat();
     let p = |tag: u8| [&[0, 0, 0, 1][..], &[0x41, tag][..]].concat();
     let idr2: Vec<u8> = [&[0, 0, 0, 1][..], &[0x65, 0xA2][..]].concat();
     let aus = vec![idr0, p(0xA1), idr2, p(0xA3)]; // keyframes at index 0 and 2
@@ -325,7 +374,9 @@ async fn flush_seek_repositions_to_keyframe() {
     let produced = src.run(&mut out).await.expect("run");
 
     assert!(
-        out.packets.iter().any(|p| matches!(p, PipelinePacket::Flush)),
+        out.packets
+            .iter()
+            .any(|p| matches!(p, PipelinePacket::Flush)),
         "the flushing seek flushed downstream"
     );
     let seg = out
@@ -336,15 +387,24 @@ async fn flush_seek_repositions_to_keyframe() {
             _ => None,
         })
         .expect("a post-seek segment");
-    assert_eq!(seg.start, 70_000_000, "segment starts at the requested target");
+    assert_eq!(
+        seg.start, 70_000_000,
+        "segment starts at the requested target"
+    );
 
     // Resumed from the keyframe (index 2), not from the file start: two frames.
     let frames = out.frames();
     assert_eq!(frames.len(), 2, "keyframe + following P-frame");
     assert_eq!(produced, 2);
     let first = frame_bytes(frames[0]);
-    assert!(first.windows(2).any(|w| w == [0x65, 0xA2]), "snapped to the 3rd AU's IDR");
-    assert!(first.windows(2).any(|w| w == [0x67, 0x42]), "parameter sets prepended for resume");
+    assert!(
+        first.windows(2).any(|w| w == [0x65, 0xA2]),
+        "snapped to the 3rd AU's IDR"
+    );
+    assert!(
+        first.windows(2).any(|w| w == [0x67, 0x42]),
+        "parameter sets prepended for resume"
+    );
     assert!(
         (frames[0].timing.pts_ns as i64 - 66_666_666).abs() < 50_000,
         "keyframe pts ~66.6 ms, got {}",
@@ -387,8 +447,15 @@ async fn mid_stream_scrub_repositions_after_frames_flow() {
     let path = temp_path("scrub");
     let sps = [0x67u8, 0x42, 0xC0, 0x1E, 0x11];
     let pps = [0x68u8, 0xCE, 0x3C, 0x80];
-    let idr0: Vec<u8> =
-        [&[0, 0, 0, 1][..], &sps, &[0, 0, 0, 1], &pps, &[0, 0, 0, 1], &[0x65, 0xA0]].concat();
+    let idr0: Vec<u8> = [
+        &[0, 0, 0, 1][..],
+        &sps,
+        &[0, 0, 0, 1],
+        &pps,
+        &[0, 0, 0, 1],
+        &[0x65, 0xA0],
+    ]
+    .concat();
     let p = |tag: u8| [&[0, 0, 0, 1][..], &[0x41, tag][..]].concat();
     let idr2: Vec<u8> = [&[0, 0, 0, 1][..], &[0x65, 0xA2][..]].concat();
     record(&path, &[idr0, p(0xA1), idr2, p(0xA3)], 64, 48).await;
@@ -397,7 +464,12 @@ async fn mid_stream_scrub_repositions_after_frames_flow() {
     let mut src = Mp4Src::new(&path).with_seek(ctl.clone());
     let caps = src.intercept_caps().await.expect("probe");
     src.configure_pipeline(&caps).expect("configure");
-    let mut sink = ScrubSink { inner: Collect::default(), ctl, target: 70_000_000, armed: true };
+    let mut sink = ScrubSink {
+        inner: Collect::default(),
+        ctl,
+        target: 70_000_000,
+        armed: true,
+    };
     src.run(&mut sink).await.expect("run");
 
     // First frame (idr0 at 0 ms) flows, then the scrub jumps to the keyframe near
@@ -414,10 +486,19 @@ async fn mid_stream_scrub_repositions_after_frames_flow() {
             _ => "other",
         })
         .collect();
-    assert_eq!(kinds, ["frame", "flush", "segment", "frame", "frame", "eos"]);
+    assert_eq!(
+        kinds,
+        ["frame", "flush", "segment", "frame", "frame", "eos"]
+    );
     let frames = sink.inner.frames();
-    assert!(frame_bytes(frames[0]).windows(2).any(|w| w == [0x65, 0xA0]), "played idr0 first");
-    assert!(frame_bytes(frames[1]).windows(2).any(|w| w == [0x65, 0xA2]), "scrubbed to idr2");
+    assert!(
+        frame_bytes(frames[0]).windows(2).any(|w| w == [0x65, 0xA0]),
+        "played idr0 first"
+    );
+    assert!(
+        frame_bytes(frames[1]).windows(2).any(|w| w == [0x65, 0xA2]),
+        "scrubbed to idr2"
+    );
     let _ = std::fs::remove_file(&path);
 }
 
@@ -436,14 +517,28 @@ async fn segment_seek_loops_clip_gaplessly_then_shuts_down() {
         } else {
             SeekFlags::SEGMENT
         };
-        Seek { rate: 1.0, flags, start_type: SeekType::Set, start: 0, stop_type: SeekType::Set, stop }
+        Seek {
+            rate: 1.0,
+            flags,
+            start_type: SeekType::Set,
+            start: 0,
+            stop_type: SeekType::Set,
+            stop,
+        }
     }
 
     let path = temp_path("segloop");
     let sps = [0x67u8, 0x42, 0xC0, 0x1E, 0x11];
     let pps = [0x68u8, 0xCE, 0x3C, 0x80];
-    let idr0: Vec<u8> =
-        [&[0, 0, 0, 1][..], &sps, &[0, 0, 0, 1], &pps, &[0, 0, 0, 1], &[0x65, 0xA0]].concat();
+    let idr0: Vec<u8> = [
+        &[0, 0, 0, 1][..],
+        &sps,
+        &[0, 0, 0, 1],
+        &pps,
+        &[0, 0, 0, 1],
+        &[0x65, 0xA0],
+    ]
+    .concat();
     let p = |tag: u8| [&[0, 0, 0, 1][..], &[0x41, tag][..]].concat();
     // 4 AUs at pts 0, 33.3, 66.6, 100 ms; keyframe only at index 0.
     record(&path, &[idr0, p(0xA1), p(0xA2), p(0xA3)], 64, 48).await;
@@ -484,7 +579,11 @@ async fn segment_seek_loops_clip_gaplessly_then_shuts_down() {
     let (run_res, ()) = tokio::join!(src.run(&mut out), driver);
     run_res.expect("run");
 
-    assert_eq!(ctl.segment_done_count(), n_loops, "one segment-done per loop");
+    assert_eq!(
+        ctl.segment_done_count(),
+        n_loops,
+        "one segment-done per loop"
+    );
     // 2 frames per loop, N loops.
     assert_eq!(out.frames().len(), (n_loops * 2) as usize);
     // Each loop replays the same clip from its keyframe: every other frame is the
@@ -492,13 +591,19 @@ async fn segment_seek_loops_clip_gaplessly_then_shuts_down() {
     let frames = out.frames();
     for k in 0..n_loops as usize {
         assert!(
-            frame_bytes(frames[k * 2]).windows(2).any(|w| w == [0x65, 0xA0]),
+            frame_bytes(frames[k * 2])
+                .windows(2)
+                .any(|w| w == [0x65, 0xA0]),
             "loop {k} restarted at the keyframe idr0"
         );
     }
 
     // Only the initial seek flushed; the loop seeks are gapless (no flush).
-    let flushes = out.packets.iter().filter(|p| matches!(p, PipelinePacket::Flush)).count();
+    let flushes = out
+        .packets
+        .iter()
+        .filter(|p| matches!(p, PipelinePacket::Flush))
+        .count();
     assert_eq!(flushes, 1, "only the initial segment seek flushes");
     // The running-time base accumulates one span (stop) per loop, so the last
     // loop's segment starts at (n_loops - 1) * stop: gapless across the loops.
@@ -510,12 +615,27 @@ async fn segment_seek_loops_clip_gaplessly_then_shuts_down() {
             _ => None,
         })
         .collect();
-    assert_eq!(segments.len() as u64, n_loops, "one segment per loop iteration");
+    assert_eq!(
+        segments.len() as u64,
+        n_loops,
+        "one segment per loop iteration"
+    );
     let last = segments.last().expect("a loop segment");
-    assert_eq!(last.base, (n_loops - 1) * stop, "base accumulates one span per loop");
-    assert_eq!(last.to_running_time(0), Some((n_loops - 1) * stop), "gapless across the loop");
+    assert_eq!(
+        last.base,
+        (n_loops - 1) * stop,
+        "base accumulates one span per loop"
+    );
+    assert_eq!(
+        last.to_running_time(0),
+        Some((n_loops - 1) * stop),
+        "gapless across the loop"
+    );
 
-    assert!(out.packets.iter().any(|p| matches!(p, PipelinePacket::Eos)), "shutdown ends with Eos");
+    assert!(
+        out.packets.iter().any(|p| matches!(p, PipelinePacket::Eos)),
+        "shutdown ends with Eos"
+    );
     let _ = std::fs::remove_file(&path);
 }
 
@@ -568,12 +688,15 @@ async fn encode_mux_demux_decode_full_circle() {
         .await
         .expect("encode");
     }
-    enc.process(PipelinePacket::Eos, &mut encoded).await.expect("drain");
+    enc.process(PipelinePacket::Eos, &mut encoded)
+        .await
+        .expect("drain");
 
     // mux to fMP4.
     let path = temp_path("full_circle");
     let mut mux = Mp4Mux::new();
-    mux.configure_pipeline(&h264_caps(W, H)).expect("configure mux");
+    mux.configure_pipeline(&h264_caps(W, H))
+        .expect("configure mux");
     let mut cap = Capture::default();
     for f in encoded.frames() {
         mux.process(
@@ -587,7 +710,9 @@ async fn encode_mux_demux_decode_full_circle() {
         .await
         .expect("mux");
     }
-    mux.process(PipelinePacket::Eos, &mut cap).await.expect("eos");
+    mux.process(PipelinePacket::Eos, &mut cap)
+        .await
+        .expect("eos");
     std::fs::write(&path, &cap.bytes).unwrap();
 
     // demux and decode.
@@ -612,7 +737,9 @@ async fn encode_mux_demux_decode_full_circle() {
         .await
         .expect("decode");
     }
-    dec.process(PipelinePacket::Eos, &mut decoded).await.expect("drain");
+    dec.process(PipelinePacket::Eos, &mut decoded)
+        .await
+        .expect("drain");
 
     let frames = decoded.frames();
     assert_eq!(frames.len(), FRAMES, "every frame survives the full circle");
@@ -631,8 +758,15 @@ async fn query_duration_reads_mdhd_duration() {
     let path = temp_path("duration");
     let sps = [0x67u8, 0x42, 0xC0, 0x1E, 0x11];
     let pps = [0x68u8, 0xCE, 0x3C, 0x80];
-    let idr_au: Vec<u8> =
-        [&[0, 0, 0, 1][..], &sps, &[0, 0, 0, 1], &pps, &[0, 0, 0, 1], &[0x65, 0xAA]].concat();
+    let idr_au: Vec<u8> = [
+        &[0, 0, 0, 1][..],
+        &sps,
+        &[0, 0, 0, 1],
+        &pps,
+        &[0, 0, 0, 1],
+        &[0x65, 0xAA],
+    ]
+    .concat();
     let p_au = |fill: u8| [&[0, 0, 0, 1][..], &[0x41, fill]].concat();
     let aus = vec![idr_au, p_au(1), p_au(2)];
     record(&path, &aus, 64, 48).await;
@@ -640,11 +774,18 @@ async fn query_duration_reads_mdhd_duration() {
     // As recorded: fragmented init segment, mdhd duration 0 -> unknown.
     let mut src0 = Mp4Src::new(&path);
     let _ = src0.intercept_caps().await.expect("probe");
-    assert_eq!(src0.query_duration(), None, "fragmented file: duration unknown");
+    assert_eq!(
+        src0.query_duration(),
+        None,
+        "fragmented file: duration unknown"
+    );
 
     // Patch a known mdhd duration (2 s at the file's own timescale) and read back.
     let mut bytes = std::fs::read(&path).unwrap();
-    let m = bytes.windows(4).position(|w| w == b"mdhd").expect("mdhd present");
+    let m = bytes
+        .windows(4)
+        .position(|w| w == b"mdhd")
+        .expect("mdhd present");
     let ts_off = m + 4 + 12; // payload starts after the 4cc; timescale at +12
     let dur_off = m + 4 + 16; // duration at +16 (mdhd v0)
     let timescale = u32::from_be_bytes(bytes[ts_off..ts_off + 4].try_into().unwrap());
@@ -655,7 +796,11 @@ async fn query_duration_reads_mdhd_duration() {
 
     let mut src = Mp4Src::new(&patched);
     let _ = src.intercept_caps().await.expect("probe patched");
-    assert_eq!(src.query_duration(), Some(2_000_000_000), "2 s read back as ns");
+    assert_eq!(
+        src.query_duration(),
+        Some(2_000_000_000),
+        "2 s read back as ns"
+    );
 
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(&patched);

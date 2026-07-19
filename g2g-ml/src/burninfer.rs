@@ -151,7 +151,8 @@ impl BurnInference {
 }
 
 impl AsyncElement for BurnInference {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -206,7 +207,8 @@ impl AsyncElement for BurnInference {
                     let bytes = self.infer(slice.as_slice())?;
                     let new_caps = self.output_caps();
                     if self.last_caps.as_ref() != Some(&new_caps) {
-                        out.push(PipelinePacket::CapsChanged(new_caps.clone())).await?;
+                        out.push(PipelinePacket::CapsChanged(new_caps.clone()))
+                            .await?;
                         self.last_caps = Some(new_caps);
                     }
                     let tensor = Frame {
@@ -309,6 +311,9 @@ mod tests {
             e.configure_pipeline(&nv12(2, 2)).err(),
             Some(G2gError::CapsMismatch)
         );
-        assert!(e.weight_t.is_none(), "no GPU tensors built on rejected caps");
+        assert!(
+            e.weight_t.is_none(),
+            "no GPU tensors built on rejected caps"
+        );
     }
 }

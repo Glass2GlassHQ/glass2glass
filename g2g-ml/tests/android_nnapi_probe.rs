@@ -21,7 +21,7 @@
 use g2g_core::element::{AsyncElement, BoxFuture, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
-use g2g_core::{Caps, Dim, G2gError, RawVideoFormat, Rate};
+use g2g_core::{Caps, Dim, G2gError, Rate, RawVideoFormat};
 use g2g_ml::ortinfer::OrtInference;
 
 // Shared hand-encoded ONNX fixture builder (tests/util/onnx_fixture.rs): a single
@@ -52,12 +52,18 @@ fn start_binder_threadpool() {
         if lib.is_null() {
             return;
         }
-        let set = dlsym(lib, b"ABinderProcess_setThreadPoolMaxThreadCount\0".as_ptr() as *const c_char);
+        let set = dlsym(
+            lib,
+            b"ABinderProcess_setThreadPoolMaxThreadCount\0".as_ptr() as *const c_char,
+        );
         if !set.is_null() {
             let set: extern "C" fn(u32) -> bool = core::mem::transmute(set);
             set(1);
         }
-        let start = dlsym(lib, b"ABinderProcess_startThreadPool\0".as_ptr() as *const c_char);
+        let start = dlsym(
+            lib,
+            b"ABinderProcess_startThreadPool\0".as_ptr() as *const c_char,
+        );
         if !start.is_null() {
             let start: extern "C" fn() = core::mem::transmute(start);
             start();
@@ -70,7 +76,10 @@ struct Collect {
     packets: Vec<PipelinePacket>,
 }
 impl OutputSink for Collect {
-    fn push<'a>(&'a mut self, packet: PipelinePacket) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
+    fn push<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+    ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
         Box::pin(async move {
             self.packets.push(packet);
             Ok(PushOutcome::Accepted)
@@ -79,7 +88,12 @@ impl OutputSink for Collect {
 }
 
 fn rgba_caps(w: u32, h: u32) -> Caps {
-    Caps::RawVideo { format: RawVideoFormat::Rgba8, width: Dim::Fixed(w), height: Dim::Fixed(h), framerate: Rate::Any }
+    Caps::RawVideo {
+        format: RawVideoFormat::Rgba8,
+        width: Dim::Fixed(w),
+        height: Dim::Fixed(h),
+        framerate: Rate::Any,
+    }
 }
 
 fn rgba_frame(bytes: Vec<u8>, sequence: u64) -> Frame {
@@ -105,16 +119,21 @@ async fn android_ep_stack_infers_identically() {
     inf.configure_pipeline(&narrowed).expect("configure");
 
     let mut sink = Collect::default();
-    inf.process(PipelinePacket::DataFrame(rgba_frame((0..16).collect(), 0)), &mut sink)
-        .await
-        .expect("frame runs on-device");
+    inf.process(
+        PipelinePacket::DataFrame(rgba_frame((0..16).collect(), 0)),
+        &mut sink,
+    )
+    .await
+    .expect("frame runs on-device");
 
     let values: Vec<f32> = sink
         .packets
         .iter()
         .find_map(|p| match p {
             PipelinePacket::DataFrame(f) => {
-                let MemoryDomain::System(slice) = &f.domain else { return None };
+                let MemoryDomain::System(slice) = &f.domain else {
+                    return None;
+                };
                 Some(
                     slice
                         .as_slice()
@@ -128,9 +147,14 @@ async fn android_ep_stack_infers_identically() {
         .expect("one tensor frame out");
 
     // Identity model: output = RGB planes / 255 in NCHW order.
-    let expected: Vec<f32> =
-        [0u8, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14].iter().map(|b| *b as f32 / 255.0).collect();
-    assert_eq!(values, expected, "Android EP output matches the CPU reference");
+    let expected: Vec<f32> = [0u8, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14]
+        .iter()
+        .map(|b| *b as f32 / 255.0)
+        .collect();
+    assert_eq!(
+        values, expected,
+        "Android EP output matches the CPU reference"
+    );
     eprintln!(
         "android NNAPI/XNNPACK EP stack ran; output byte-exact with CPU \
          (EP node assignment is logged by ORT at verbose level)"

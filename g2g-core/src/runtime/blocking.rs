@@ -79,7 +79,10 @@ mod tests {
 
     #[test]
     fn resumes_on_a_cross_thread_wake() {
-        let fut = WakeFromOtherThread { done: Arc::new(AtomicBool::new(false)), spawned: false };
+        let fut = WakeFromOtherThread {
+            done: Arc::new(AtomicBool::new(false)),
+            spawned: false,
+        };
         assert_eq!(block_on(fut), 7);
     }
 }

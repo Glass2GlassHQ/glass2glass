@@ -47,7 +47,10 @@ use crate::st2110video::Sampling;
 /// fps << 16), or 0 if not fixed (do not pace).
 fn caps_fps(caps: &Caps) -> u32 {
     match caps {
-        Caps::CompressedVideo { framerate: Rate::Fixed(q), .. } => q >> 16,
+        Caps::CompressedVideo {
+            framerate: Rate::Fixed(q),
+            ..
+        } => q >> 16,
         _ => 0,
     }
 }
@@ -163,7 +166,10 @@ impl St2110JxsSink {
 }
 
 impl AsyncElement for St2110JxsSink {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>> where Self: 'a;
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         jxs_geometry(upstream_caps)?;
@@ -182,10 +188,14 @@ impl AsyncElement for St2110JxsSink {
         self.width = width;
         self.height = height;
         self.frame_period_ns = frame_period_ns(caps_fps(absolute_caps));
-        self.packetizer =
-            Some(St2110JxsPacketizer::new(self.payload_type, self.ssrc, self.max_packet));
+        self.packetizer = Some(St2110JxsPacketizer::new(
+            self.payload_type,
+            self.ssrc,
+            self.max_packet,
+        ));
         let sock = UdpSocket::bind(("0.0.0.0", 0)).map_err(io_err)?;
-        sock.connect((self.host.as_str(), self.port)).map_err(io_err)?;
+        sock.connect((self.host.as_str(), self.port))
+            .map_err(io_err)?;
         self.socket = Some(sock);
         Ok(ConfigureOutcome::Accepted)
     }
@@ -211,8 +221,12 @@ impl AsyncElement for St2110JxsSink {
             PropertySpec::new("payload-type", PropKind::Uint, "Dynamic RTP payload type")
                 .with_default("112"),
             PropertySpec::new("ssrc", PropKind::Uint, "RTP SSRC"),
-            PropertySpec::new("max-packet", PropKind::Uint, "Max RTP packet size in octets")
-                .with_default("1460"),
+            PropertySpec::new(
+                "max-packet",
+                PropKind::Uint,
+                "Max RTP packet size in octets",
+            )
+            .with_default("1460"),
             PropertySpec::new(
                 "sampling",
                 PropKind::Str,
@@ -253,8 +267,8 @@ impl AsyncElement for St2110JxsSink {
                 Ok(())
             }
             "sampling" => {
-                self.sampling =
-                    parse_sampling(value.as_str().ok_or(PropError::Type)?).ok_or(PropError::Value)?;
+                self.sampling = parse_sampling(value.as_str().ok_or(PropError::Type)?)
+                    .ok_or(PropError::Value)?;
                 Ok(())
             }
             "pacing" => {
@@ -396,14 +410,23 @@ impl St2110JxsSrc {
     /// The bound local UDP port after `configure_pipeline` (for tests binding an
     /// ephemeral port with `port = 0`).
     pub fn local_port(&self) -> Option<u16> {
-        self.socket.as_ref().and_then(|s| s.local_addr().ok()).map(|a| a.port())
+        self.socket
+            .as_ref()
+            .and_then(|s| s.local_addr().ok())
+            .map(|a| a.port())
     }
 
     /// Auto-configure this source's geometry from a parsed JPEG XS [`St2110Sdp`] (the
     /// receiver path). Returns false, leaving the source unchanged, if the SDP is not
     /// a JPEG XS essence. Call before `configure_pipeline`.
     pub fn apply_sdp(&mut self, sdp: &St2110Sdp) -> bool {
-        let St2110Essence::JpegXs { width, height, exact_fps, .. } = &sdp.essence else {
+        let St2110Essence::JpegXs {
+            width,
+            height,
+            exact_fps,
+            ..
+        } = &sdp.essence
+        else {
             return false;
         };
         self.width = *width;
@@ -427,8 +450,14 @@ impl St2110JxsSrc {
 }
 
 impl SourceLoop for St2110JxsSrc {
-    type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>> where Self: 'a;
-    type CapsFuture<'a> = Ready<Result<Caps, G2gError>> where Self: 'a;
+    type RunFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
+    where
+        Self: 'a;
+    type CapsFuture<'a>
+        = Ready<Result<Caps, G2gError>>
+    where
+        Self: 'a;
 
     fn intercept_caps(&mut self) -> Self::CapsFuture<'_> {
         ready(Ok(self.caps()))
@@ -436,7 +465,8 @@ impl SourceLoop for St2110JxsSrc {
 
     fn configure_pipeline(&mut self, _caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         let sock = UdpSocket::bind((self.address.as_str(), self.port)).map_err(io_err)?;
-        sock.set_read_timeout(Some(Duration::from_millis(self.recv_timeout_ms))).map_err(io_err)?;
+        sock.set_read_timeout(Some(Duration::from_millis(self.recv_timeout_ms)))
+            .map_err(io_err)?;
         self.socket = Some(sock);
         Ok(ConfigureOutcome::Accepted)
     }
@@ -463,7 +493,9 @@ impl SourceLoop for St2110JxsSrc {
                     }
                     Err(e) => return Err(io_err(e)),
                 };
-                let Some(jxs) = depack.depacketize(&buf[..n]) else { continue };
+                let Some(jxs) = depack.depacketize(&buf[..n]) else {
+                    continue;
+                };
                 // PTS = the frame's media-clock offset from the first frame (the PTP
                 // grandmaster supplies absolute time upstream).
                 let base = *base_rtp.get_or_insert(jxs.rtp_timestamp);
@@ -472,7 +504,10 @@ impl SourceLoop for St2110JxsSrc {
                     domain: MemoryDomain::System(SystemSlice::from_boxed(
                         jxs.codestream.into_boxed_slice(),
                     )),
-                    timing: FrameTiming { pts_ns, ..FrameTiming::default() },
+                    timing: FrameTiming {
+                        pts_ns,
+                        ..FrameTiming::default()
+                    },
                     sequence: count,
                     meta: Default::default(),
                 };
@@ -586,7 +621,10 @@ mod tests {
     fn jxs_frame(bytes: Vec<u8>, pts_ns: u64) -> PipelinePacket {
         PipelinePacket::DataFrame(Frame {
             domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-            timing: FrameTiming { pts_ns, ..FrameTiming::default() },
+            timing: FrameTiming {
+                pts_ns,
+                ..FrameTiming::default()
+            },
             sequence: 0,
             meta: Default::default(),
         })
@@ -607,7 +645,8 @@ mod tests {
         // the codestream across many packets; UDP buffers them so we send then
         // receive sequentially, no threads. The codestream is opaque bytes here.
         let mut src = St2110JxsSrc::new();
-        src.set_property("address", PropValue::Str("127.0.0.1".into())).unwrap();
+        src.set_property("address", PropValue::Str("127.0.0.1".into()))
+            .unwrap();
         src.set_property("port", PropValue::Uint(0)).unwrap();
         src.recv_timeout_ms = 300;
         src.configure_pipeline(&caps()).expect("src binds");
@@ -632,16 +671,25 @@ mod tests {
         assert_eq!(n, 1, "one codestream reassembled");
         assert!(cap.eos, "source emitted EOS on the gap");
         assert_eq!(cap.frames.len(), 1);
-        assert_eq!(cap.frames[0], cs, "JPEG XS codestream survives sink -> UDP -> src");
+        assert_eq!(
+            cap.frames[0], cs,
+            "JPEG XS codestream survives sink -> UDP -> src"
+        );
     }
 
     #[test]
     fn sink_properties_round_trip() {
         let mut sink = St2110JxsSink::new();
-        sink.set_property("host", PropValue::Str("239.22.0.9".into())).unwrap();
-        sink.set_property("max-packet", PropValue::Uint(9000)).unwrap();
-        sink.set_property("sampling", PropValue::Str("yuyv".into())).unwrap();
-        assert_eq!(sink.get_property("host"), Some(PropValue::Str("239.22.0.9".into())));
+        sink.set_property("host", PropValue::Str("239.22.0.9".into()))
+            .unwrap();
+        sink.set_property("max-packet", PropValue::Uint(9000))
+            .unwrap();
+        sink.set_property("sampling", PropValue::Str("yuyv".into()))
+            .unwrap();
+        assert_eq!(
+            sink.get_property("host"),
+            Some(PropValue::Str("239.22.0.9".into()))
+        );
         assert_eq!(sink.get_property("max-packet"), Some(PropValue::Uint(9000)));
         assert_eq!(
             sink.set_property("port", PropValue::Uint(70_000)),
@@ -658,9 +706,16 @@ mod tests {
     #[test]
     fn pacing_property_round_trips_and_rejects_unknown() {
         let mut sink = St2110JxsSink::new();
-        assert_eq!(sink.get_property("pacing"), Some(PropValue::Str("off".into())));
-        sink.set_property("pacing", PropValue::Str("linear".into())).unwrap();
-        assert_eq!(sink.get_property("pacing"), Some(PropValue::Str("linear".into())));
+        assert_eq!(
+            sink.get_property("pacing"),
+            Some(PropValue::Str("off".into()))
+        );
+        sink.set_property("pacing", PropValue::Str("linear".into()))
+            .unwrap();
+        assert_eq!(
+            sink.get_property("pacing"),
+            Some(PropValue::Str("linear".into()))
+        );
         assert_eq!(sink.pacing, Some(PacingProfile::Linear));
         assert_eq!(
             sink.set_property("pacing", PropValue::Str("bogus".into())),
@@ -686,19 +741,25 @@ mod tests {
         sink.host = String::from("127.0.0.1");
         sink.port = port;
         sink.max_packet = 200; // force several packets across the codestream
-        sink.set_property("pacing", PropValue::Str("gapped".into())).unwrap();
+        sink.set_property("pacing", PropValue::Str("gapped".into()))
+            .unwrap();
         sink.configure_pipeline(&caps).expect("configures");
         assert_eq!(sink.frame_period_ns, 20_000_000, "50 fps -> 20 ms period");
 
         let cs: Vec<u8> = (0..3000).map(|i| (i * 13 + 1) as u8).collect();
         let start = std::time::Instant::now();
         let mut null = Capture::default();
-        sink.process(jxs_frame(cs, 0), &mut null).await.expect("sink sends");
+        sink.process(jxs_frame(cs, 0), &mut null)
+            .await
+            .expect("sink sends");
         let elapsed = start.elapsed();
 
         // Gapped packs into the active 1080/1125, but still spreads over milliseconds
         // (a burst finishes in microseconds).
-        assert!(elapsed.as_millis() >= 8, "gapped pacing spread the codestream: {elapsed:?}");
+        assert!(
+            elapsed.as_millis() >= 8,
+            "gapped pacing spread the codestream: {elapsed:?}"
+        );
         let mut count = 0;
         let mut buf = [0u8; 2048];
         while rx.recv_from(&mut buf).is_ok() {
@@ -718,7 +779,10 @@ mod tests {
 
         let sdp = sink.sdp((60000, 1001)).expect("sink is configured");
         let text = sdp.to_sdp();
-        assert!(text.contains("jxsv/90000"), "advertises the -22 rtpmap\n{text}");
+        assert!(
+            text.contains("jxsv/90000"),
+            "advertises the -22 rtpmap\n{text}"
+        );
         let parsed = St2110Sdp::parse(&text).expect("parses");
 
         let mut src = St2110JxsSrc::new();
@@ -736,6 +800,10 @@ mod tests {
             ptp: None,
         };
         assert!(!src.apply_sdp(&anc), "non-JPEG-XS SDP is rejected");
-        assert_eq!(src.get_property("port"), Some(PropValue::Uint(5010)), "unchanged");
+        assert_eq!(
+            src.get_property("port"),
+            Some(PropValue::Uint(5010)),
+            "unchanged"
+        );
     }
 }

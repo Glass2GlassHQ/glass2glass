@@ -81,15 +81,24 @@ fn write_temp(name: &str, bytes: &[u8]) -> PathBuf {
 async fn run_pipeline(text: &str) -> u64 {
     let reg = default_registry();
     let graph = parse_launch(&reg, text).expect("pipeline parses");
-    run_graph(graph, &ZeroClock, 4).await.expect("pipeline runs").frames_consumed
+    run_graph(graph, &ZeroClock, 4)
+        .await
+        .expect("pipeline runs")
+        .frames_consumed
 }
 
 #[tokio::test]
 async fn filesrc_auto_sniffs_flv_and_demuxes_video() {
     let path = write_temp("g2g_m119_auto.flv", &synthetic_flv());
-    let text =
-        format!("filesrc location={} bytestream-format=auto ! flvdemux ! fakesink", path.display());
-    assert_eq!(run_pipeline(&text).await, 2, "two H.264 access units demuxed to the sink");
+    let text = format!(
+        "filesrc location={} bytestream-format=auto ! flvdemux ! fakesink",
+        path.display()
+    );
+    assert_eq!(
+        run_pipeline(&text).await,
+        2,
+        "two H.264 access units demuxed to the sink"
+    );
     let _ = fs::remove_file(&path);
 }
 
@@ -100,7 +109,11 @@ async fn filesrc_explicit_flv_selects_audio() {
         "filesrc location={} bytestream-format=flv ! flvdemux stream=aac ! fakesink",
         path.display()
     );
-    assert_eq!(run_pipeline(&text).await, 1, "one AAC frame demuxed to the sink");
+    assert_eq!(
+        run_pipeline(&text).await,
+        1,
+        "one AAC frame demuxed to the sink"
+    );
     let _ = fs::remove_file(&path);
 }
 
@@ -114,5 +127,8 @@ async fn unknown_stream_name_is_rejected() {
         "filesrc location=x.flv bytestream-format=flv ! flvdemux stream=vp9 ! fakesink",
     )
     .unwrap_err();
-    assert!(matches!(err, ParseError::BadValue { ref key, .. } if key == "stream"), "got {err:?}");
+    assert!(
+        matches!(err, ParseError::BadValue { ref key, .. } if key == "stream"),
+        "got {err:?}"
+    );
 }

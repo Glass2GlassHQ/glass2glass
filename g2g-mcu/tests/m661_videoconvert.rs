@@ -39,7 +39,7 @@ fn yuyv_4x2() -> [u8; 16] {
 fn converts_yuyv_to_planar_i420() {
     let src: StaticLendRing<1, 16> = StaticLendRing::new();
     let ring: StaticLendRing<1, 12> = StaticLendRing::new(); // i420_len(4,2) = 12
-    // SAFETY: the rings outlive the frame within this test.
+                                                             // SAFETY: the rings outlive the frame within this test.
     let mut cvt = unsafe { YuyvToI420::with_ring(4, 2, &ring) }.expect("valid geometry");
     let out = block_on(cvt.process(frame_of(&src, &yuyv_4x2(), 0, 7)))
         .expect("convert ok")
@@ -50,9 +50,17 @@ fn converts_yuyv_to_planar_i420() {
         104, 108, // U: avg(U0,U2)=avg(100,108), avg(U1,U3)=avg(104,112)
         204, 208, // V: avg(V0,V2)=avg(200,208), avg(V1,V3)=avg(204,212)
     ];
-    assert_eq!(payload(&out), expected, "planar I420 with vertically averaged chroma");
+    assert_eq!(
+        payload(&out),
+        expected,
+        "planar I420 with vertically averaged chroma"
+    );
     assert_eq!(out.sequence, 7, "sequence carried through");
-    assert_eq!(payload(&out).len(), i420_len(4, 2).unwrap(), "output is exactly one I420 frame");
+    assert_eq!(
+        payload(&out).len(),
+        i420_len(4, 2).unwrap(),
+        "output is exactly one I420 frame"
+    );
 }
 
 #[test]
@@ -63,7 +71,10 @@ fn wrong_sized_frame_is_rejected() {
     let mut cvt = unsafe { YuyvToI420::with_ring(4, 2, &ring) }.expect("geometry");
     // 14 bytes is not a whole 4x2 YUYV frame (16 bytes).
     let short = block_on(cvt.process(frame_of(&src, &[0u8; 14], 0, 0)));
-    assert!(matches!(short, Err(G2gError::CapsMismatch)), "a partial frame is rejected");
+    assert!(
+        matches!(short, Err(G2gError::CapsMismatch)),
+        "a partial frame is rejected"
+    );
 }
 
 /// A mock YUYV camera filling each frame with a fixed test pattern.
@@ -104,9 +115,17 @@ fn camera_yuyv_to_i420_pipeline_runs() {
 
     block_on(run_source_transform_sink(source, cvt, &mut sink)).expect("pipeline runs");
 
-    assert_eq!(sink.frames.len(), 3, "one I420 frame per captured YUYV frame");
+    assert_eq!(
+        sink.frames.len(),
+        3,
+        "one I420 frame per captured YUYV frame"
+    );
     let expected = [10, 20, 30, 40, 50, 60, 70, 80, 104, 108, 204, 208];
     for f in &sink.frames {
-        assert_eq!(f.as_slice(), expected, "each converted frame is the I420 of the pattern");
+        assert_eq!(
+            f.as_slice(),
+            expected,
+            "each converted frame is the I420 of the pattern"
+        );
     }
 }

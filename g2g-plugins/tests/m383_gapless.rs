@@ -43,7 +43,11 @@ struct CountedSrc {
 }
 impl CountedSrc {
     fn new(frames: u64, period_ns: u64) -> Self {
-        Self { frames, period_ns, configured: false }
+        Self {
+            frames,
+            period_ns,
+            configured: false,
+        }
     }
 }
 impl SourceLoop for CountedSrc {
@@ -122,10 +126,18 @@ async fn preloaded_playlist_concatenates_with_rebased_timestamps() {
     assert_eq!(n, 5, "three frames from clip1 + two from clip2");
     assert_eq!(sink.eos, 1, "a single terminal Eos for the whole playlist");
     // clip1 plays at 0,1000,2000; clip2 rebased onto the timeline at 3000,4000.
-    assert_eq!(sink.pts, vec![0, 1000, 2000, 3000, 4000], "monotonic, gapless");
+    assert_eq!(
+        sink.pts,
+        vec![0, 1000, 2000, 3000, 4000],
+        "monotonic, gapless"
+    );
     // Nothing queued behind clip1 was unknown (clip2 was pre-loaded), so the
     // source never had to ask: no about-to-finish for a pre-loaded playlist.
-    assert_eq!(ctl.about_to_finish_count(), 0, "no signal needed when pre-loaded");
+    assert_eq!(
+        ctl.about_to_finish_count(),
+        0,
+        "no signal needed when pre-loaded"
+    );
 }
 
 #[tokio::test]
@@ -155,6 +167,14 @@ async fn dynamic_about_to_finish_drives_the_playlist() {
     assert_eq!(n, 5, "two frames from clip1 + three from clip2");
     assert_eq!(sink.eos, 1, "a single terminal Eos");
     // clip1 at 0,500; clip2 rebased at 1000,1500,2000.
-    assert_eq!(sink.pts, vec![0, 500, 1000, 1500, 2000], "gapless across the dynamic swap");
-    assert_eq!(app.about_to_finish_count(), 2, "one signal per item with an empty queue");
+    assert_eq!(
+        sink.pts,
+        vec![0, 500, 1000, 1500, 2000],
+        "gapless across the dynamic swap"
+    );
+    assert_eq!(
+        app.about_to_finish_count(),
+        2,
+        "one signal per item with an empty queue"
+    );
 }

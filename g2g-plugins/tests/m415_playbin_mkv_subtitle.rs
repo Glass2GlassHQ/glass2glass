@@ -20,10 +20,20 @@ use g2g_core::{
 };
 
 fn h264_any() -> Caps {
-    Caps::CompressedVideo { codec: VideoCodec::H264, width: Dim::Any, height: Dim::Any, framerate: Rate::Any }
+    Caps::CompressedVideo {
+        codec: VideoCodec::H264,
+        width: Dim::Any,
+        height: Dim::Any,
+        framerate: Rate::Any,
+    }
 }
 fn raw_video() -> Caps {
-    Caps::RawVideo { format: RawVideoFormat::Nv12, width: Dim::Any, height: Dim::Any, framerate: Rate::Any }
+    Caps::RawVideo {
+        format: RawVideoFormat::Nv12,
+        width: Dim::Any,
+        height: Dim::Any,
+        framerate: Rate::Any,
+    }
 }
 
 #[derive(Default)]
@@ -34,7 +44,10 @@ impl PadTemplates for NullSink {
     }
 }
 impl AsyncElement for NullSink {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>> where Self: 'a;
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
     fn intercept_caps(&self, c: &Caps) -> Result<Caps, G2gError> {
         Ok(c.clone())
     }
@@ -59,11 +72,18 @@ fn registry() -> Registry {
     reg.register_playbin(g2g_plugins::uridecodebin::mkv_playbin);
     reg.register(ElementFactory::new(
         "h264stub",
-        Vec::from([PadTemplate::sink(CapsSet::one(h264_any())), PadTemplate::source(CapsSet::one(raw_video()))]),
+        Vec::from([
+            PadTemplate::sink(CapsSet::one(h264_any())),
+            PadTemplate::source(CapsSet::one(raw_video())),
+        ]),
         |_| Box::new(g2g_plugins::identity::IdentityTransform::new()),
     ));
-    reg.register_launch(LaunchFactory::of::<NullSink>("autovideosink", || Box::new(NullSink)));
-    reg.register_launch(LaunchFactory::of::<NullSink>("autoaudiosink", || Box::new(NullSink)));
+    reg.register_launch(LaunchFactory::of::<NullSink>("autovideosink", || {
+        Box::new(NullSink)
+    }));
+    reg.register_launch(LaunchFactory::of::<NullSink>("autoaudiosink", || {
+        Box::new(NullSink)
+    }));
     reg
 }
 
@@ -106,17 +126,29 @@ fn uint_body(v: u64) -> Vec<u8> {
     bytes
 }
 fn video_track(num: u64, codec: &[u8], w: u32, h: u32) -> Vec<u8> {
-    let v = [elem(&[0xB0], &uint_body(w as u64)), elem(&[0xBA], &uint_body(h as u64))].concat();
+    let v = [
+        elem(&[0xB0], &uint_body(w as u64)),
+        elem(&[0xBA], &uint_body(h as u64)),
+    ]
+    .concat();
     // TrackNumber, TrackType(video=1), CodecID, Video.
-    let body =
-        [elem(&[0xD7], &uint_body(num)), elem(&[0x83], &uint_body(1)), elem(&[0x86], codec), elem(&[0xE0], &v)]
-            .concat();
+    let body = [
+        elem(&[0xD7], &uint_body(num)),
+        elem(&[0x83], &uint_body(1)),
+        elem(&[0x86], codec),
+        elem(&[0xE0], &v),
+    ]
+    .concat();
     elem(&[0xAE], &body)
 }
 fn subtitle_track(num: u64, codec: &[u8]) -> Vec<u8> {
     // TrackNumber, TrackType(subtitle=0x11), CodecID. The codec ID pins the kind.
-    let body =
-        [elem(&[0xD7], &uint_body(num)), elem(&[0x83], &uint_body(0x11)), elem(&[0x86], codec)].concat();
+    let body = [
+        elem(&[0xD7], &uint_body(num)),
+        elem(&[0x83], &uint_body(0x11)),
+        elem(&[0x86], codec),
+    ]
+    .concat();
     elem(&[0xAE], &body)
 }
 
@@ -151,26 +183,45 @@ fn subtitle_track_routes_through_a_text_overlay() {
 
     // FileSrc, MkvDemuxN, h264 stub, videoconvert(RGBA8), TextOverlayN,
     // videoconvert(NV12), autovideosink.
-    assert_eq!(graph.node_count(), 7, "source + demux + decode + 2 converts + overlay + sink");
-    assert_eq!(graph.edges().len(), 7, "video decode path + text join + sink path");
+    assert_eq!(
+        graph.node_count(),
+        7,
+        "source + demux + decode + 2 converts + overlay + sink"
+    );
+    assert_eq!(
+        graph.edges().len(),
+        7,
+        "video decode path + text join + sink path"
+    );
 
     // Exactly one node is a fan-in (the overlay), fed by the video convert and the
     // demux's text port; everything else has a single input.
     let counts = inbound_counts(&graph);
     let fan_ins: Vec<_> = counts.values().filter(|&&n| n >= 2).collect();
     assert_eq!(fan_ins.len(), 1, "one fan-in node: the subtitle overlay");
-    assert_eq!(*fan_ins[0], 2, "the overlay joins the video and the text streams");
+    assert_eq!(
+        *fan_ins[0], 2,
+        "the overlay joins the video and the text streams"
+    );
 }
 
 #[test]
 fn an_mkv_without_subtitles_keeps_the_plain_fanout() {
     let (path, uri) = temp_uri("vid_only", &mkv_with_optional_text(false));
     let reg = registry();
-    let graph = parse_launch(&reg, &format!("playbin uri={uri}")).expect("video-only playbin builds");
+    let graph =
+        parse_launch(&reg, &format!("playbin uri={uri}")).expect("video-only playbin builds");
     std::fs::remove_file(&path).ok();
 
     // FileSrc -> MkvDemuxN -> h264 stub -> autovideosink: no overlay inserted.
-    assert_eq!(graph.node_count(), 4, "source + demux + decode + sink, no overlay");
+    assert_eq!(
+        graph.node_count(),
+        4,
+        "source + demux + decode + sink, no overlay"
+    );
     let counts = inbound_counts(&graph);
-    assert!(counts.values().all(|&n| n <= 1), "no fan-in node without a subtitle track");
+    assert!(
+        counts.values().all(|&n| n <= 1),
+        "no fan-in node without a subtitle track"
+    );
 }

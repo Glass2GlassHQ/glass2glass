@@ -14,7 +14,10 @@
 //! yuv420p ref.yuv`), verified out of band as for M506: all 11 frames SAD/px 0.
 //!
 //! Runs on the RTX 3060; skips with no adapter / no AV1 decode / no compute queue.
-#![cfg(all(any(target_os = "linux", target_os = "windows"), feature = "vulkan-video"))]
+#![cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    feature = "vulkan-video"
+))]
 
 use g2g_core::runtime::block_on;
 use g2g_plugins::vulkanvideo::{
@@ -30,7 +33,10 @@ const H: usize = 480;
 fn decodes_multitile_av1_stream() {
     // The fixture must genuinely be tiled, else the multi-tile path is untested.
     let (cols, rows) = av1_frame_tile_grid(CLIP).expect("parse tile grid");
-    assert!(cols * rows > 1, "fixture is single-tile ({cols}x{rows}); not exercising tiles");
+    assert!(
+        cols * rows > 1,
+        "fixture is single-tile ({cols}x{rows}); not exercising tiles"
+    );
     assert_eq!((cols, rows), (2, 2), "fixture should be a 2x2 tile grid");
 
     let device = match block_on(open_av1_decode_device()) {
@@ -46,8 +52,12 @@ fn decodes_multitile_av1_stream() {
 
     let seq = extract_av1_sequence_header(CLIP).expect("parse sequence header");
     let std = to_std_av1_seq_header(&seq);
-    let session = device.create_av1_session(&std, W as u32, H as u32).expect("create AV1 session");
-    let mut dec = device.create_av1_dpb_decoder(&session, &seq).expect("build AV1 decoder");
+    let session = device
+        .create_av1_session(&std, W as u32, H as u32)
+        .expect("create AV1 session");
+    let mut dec = device
+        .create_av1_dpb_decoder(&session, &seq)
+        .expect("build AV1 decoder");
 
     let frames = dec.decode_all(CLIP).expect("decode whole tiled stream");
     assert_eq!(frames.len(), 11, "one frame per shown coded picture");
@@ -58,21 +68,34 @@ fn decodes_multitile_av1_stream() {
         assert_eq!(f.luma.len(), W * H, "one luma byte per sample");
         let min = *f.luma.iter().min().unwrap();
         let max = *f.luma.iter().max().unwrap();
-        assert!(max > min, "frame {i} luma is uniform ({min}=={max}); no real content");
+        assert!(
+            max > min,
+            "frame {i} luma is uniform ({min}=={max}); no real content"
+        );
     }
 
     // Inter prediction happened, and the animated content moved.
     let key = &frames[0].luma;
-    assert!(frames[1].luma != *key, "frame 1 (INTER) must differ from the key frame");
+    assert!(
+        frames[1].luma != *key,
+        "frame 1 (INTER) must differ from the key frame"
+    );
     for i in 1..frames.len() {
-        assert!(frames[i].luma != frames[i - 1].luma, "frame {i} must differ from {}", i - 1);
+        assert!(
+            frames[i].luma != frames[i - 1].luma,
+            "frame {i} must differ from {}",
+            i - 1
+        );
     }
 
     // Optional bit-exact check vs an ffmpeg yuv420p reference dump.
     if let Ok(path) = std::env::var("G2G_AV1_REF") {
         let ref_yuv = std::fs::read(&path).expect("read G2G_AV1_REF");
         let frame_bytes = W * H * 3 / 2;
-        assert!(ref_yuv.len() >= frame_bytes * frames.len(), "reference too short");
+        assert!(
+            ref_yuv.len() >= frame_bytes * frames.len(),
+            "reference too short"
+        );
         for (i, f) in frames.iter().enumerate() {
             let y0 = i * frame_bytes;
             let ref_y = &ref_yuv[y0..y0 + W * H];
@@ -84,7 +107,10 @@ fn decodes_multitile_av1_stream() {
                 .sum();
             let sad_per_px = sad as f64 / (W * H) as f64;
             eprintln!("frame {i}: SAD/px = {sad_per_px:.6}");
-            assert!(sad_per_px == 0.0, "tiled frame {i} must be bit-exact (SAD/px {sad_per_px})");
+            assert!(
+                sad_per_px == 0.0,
+                "tiled frame {i} must be bit-exact (SAD/px {sad_per_px})"
+            );
         }
     }
 }

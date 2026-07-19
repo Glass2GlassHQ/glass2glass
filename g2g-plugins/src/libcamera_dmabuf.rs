@@ -83,10 +83,13 @@ pub async fn dmabuf_import_memory_type_bits(fd: i32) -> Result<u32, G2gError> {
             wgpu::Features::empty(),
             &wgpu::Limits::default(),
             &wgpu::MemoryHints::default(),
-            Some(Box::new(|args: wgpu_hal::vulkan::CreateDeviceCallbackArgs| {
-                args.extensions.push(ash::khr::external_memory_fd::NAME);
-                args.extensions.push(ash::ext::external_memory_dma_buf::NAME);
-            })),
+            Some(Box::new(
+                |args: wgpu_hal::vulkan::CreateDeviceCallbackArgs| {
+                    args.extensions.push(ash::khr::external_memory_fd::NAME);
+                    args.extensions
+                        .push(ash::ext::external_memory_dma_buf::NAME);
+                },
+            )),
         )
     }
     .map_err(|_| gpu_err())?;
@@ -116,7 +119,11 @@ pub async fn dmabuf_import_memory_type_bits(fd: i32) -> Result<u32, G2gError> {
         let loader = ash::khr::external_memory_fd::Device::new(instance, raw);
         let mut props = vk::MemoryFdPropertiesKHR::default();
         loader
-            .get_memory_fd_properties(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT, fd, &mut props)
+            .get_memory_fd_properties(
+                vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT,
+                fd,
+                &mut props,
+            )
             .map_err(|_| gpu_err())?;
         props.memory_type_bits
     };
@@ -150,15 +157,20 @@ pub async fn import_dmabuf_to_gpu_buffer(fd: i32, len: u64) -> Result<DmabufImpo
     // SAFETY: read the hal adapter only to open a device carrying the dma-buf
     // import extensions; the guard outlives the open call.
     let open = unsafe {
-        let hal_adapter = adapter.as_hal::<wgpu_hal::api::Vulkan>().ok_or_else(gpu_err)?;
+        let hal_adapter = adapter
+            .as_hal::<wgpu_hal::api::Vulkan>()
+            .ok_or_else(gpu_err)?;
         hal_adapter.open_with_callback(
             wgpu::Features::empty(),
             &wgpu::Limits::default(),
             &wgpu::MemoryHints::default(),
-            Some(Box::new(|args: wgpu_hal::vulkan::CreateDeviceCallbackArgs| {
-                args.extensions.push(ash::khr::external_memory_fd::NAME);
-                args.extensions.push(ash::ext::external_memory_dma_buf::NAME);
-            })),
+            Some(Box::new(
+                |args: wgpu_hal::vulkan::CreateDeviceCallbackArgs| {
+                    args.extensions.push(ash::khr::external_memory_fd::NAME);
+                    args.extensions
+                        .push(ash::ext::external_memory_dma_buf::NAME);
+                },
+            )),
         )
     }
     .map_err(|_| gpu_err())?;
@@ -166,7 +178,10 @@ pub async fn import_dmabuf_to_gpu_buffer(fd: i32, len: u64) -> Result<DmabufImpo
     let (device, _queue) = unsafe {
         adapter.create_device_from_hal(
             open,
-            &wgpu::DeviceDescriptor { label: Some("libcamera-dmabuf-import"), ..Default::default() },
+            &wgpu::DeviceDescriptor {
+                label: Some("libcamera-dmabuf-import"),
+                ..Default::default()
+            },
         )
     }
     .map_err(|_| gpu_err())?;
@@ -175,18 +190,27 @@ pub async fn import_dmabuf_to_gpu_buffer(fd: i32, len: u64) -> Result<DmabufImpo
     // objects created here are destroyed before returning. `fd` is a valid open
     // dma-buf (caller contract) and is duplicated before Vulkan takes ownership.
     let import = unsafe {
-        let hal_device = device.as_hal::<wgpu_hal::api::Vulkan>().ok_or_else(gpu_err)?;
+        let hal_device = device
+            .as_hal::<wgpu_hal::api::Vulkan>()
+            .ok_or_else(gpu_err)?;
         let raw = hal_device.raw_device();
         let instance = hal_device.shared_instance().raw_instance();
         let loader = ash::khr::external_memory_fd::Device::new(instance, raw);
 
         let mut props = vk::MemoryFdPropertiesKHR::default();
         loader
-            .get_memory_fd_properties(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT, fd, &mut props)
+            .get_memory_fd_properties(
+                vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT,
+                fd,
+                &mut props,
+            )
             .map_err(|_| gpu_err())?;
         let bits = props.memory_type_bits;
         if bits == 0 {
-            return Ok(DmabufImport { memory_type_bits: 0, bound: false });
+            return Ok(DmabufImport {
+                memory_type_bits: 0,
+                bound: false,
+            });
         }
 
         // The buffer must declare the same external handle type to bind imported
@@ -235,7 +259,10 @@ pub async fn import_dmabuf_to_gpu_buffer(fd: i32, len: u64) -> Result<DmabufImpo
         }
 
         raw.destroy_buffer(buffer, None);
-        DmabufImport { memory_type_bits: bits, bound }
+        DmabufImport {
+            memory_type_bits: bits,
+            bound,
+        }
     };
     Ok(import)
 }

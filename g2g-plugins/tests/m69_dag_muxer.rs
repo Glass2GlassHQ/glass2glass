@@ -31,7 +31,8 @@ impl PipelineClock for NullClock {
 struct AnySink;
 
 impl AsyncElement for AnySink {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -101,7 +102,9 @@ async fn tee_to_muxer_diamond_runs() {
     g.link(crop, mux.input(1)).unwrap();
     g.link(mux.output(), sink).unwrap();
 
-    let stats = run_graph(g, &NullClock, 4).await.expect("tee->mux diamond runs");
+    let stats = run_graph(g, &NullClock, 4)
+        .await
+        .expect("tee->mux diamond runs");
     assert_eq!(stats.frames_emitted, 4, "source emitted 4 frames");
     assert_eq!(
         stats.frames_consumed, 8,

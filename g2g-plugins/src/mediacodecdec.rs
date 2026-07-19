@@ -43,9 +43,7 @@ use core::pin::Pin;
 use core::time::Duration;
 
 use ndk::media::image_reader::{AcquireResult, Image, ImageFormat, ImageReader};
-use ndk::media::media_codec::{
-    DequeuedOutputBufferInfoResult, MediaCodec, MediaCodecDirection,
-};
+use ndk::media::media_codec::{DequeuedOutputBufferInfoResult, MediaCodec, MediaCodecDirection};
 use ndk::media::media_format::MediaFormat;
 use ndk::native_window::NativeWindow;
 
@@ -74,11 +72,21 @@ const MAX_IMAGES: i32 = 8;
 /// zero-copy GPU path) the decoded `AHardwareBuffer` to convert to a wgpu texture.
 #[derive(Debug)]
 enum DecodedFrame {
-    Nv12 { nv12: Box<[u8]>, width: u32, height: u32, pts_ns: u64 },
+    Nv12 {
+        nv12: Box<[u8]>,
+        width: u32,
+        height: u32,
+        pts_ns: u64,
+    },
     /// An acquired reference to a decoded frame's `AHardwareBuffer`, held so it
     /// outlives the transient `Image`; converted to RGBA on the GPU in `process`.
     #[cfg(feature = "mediacodec-wgpu")]
-    Ahb { ahb: ndk::hardware_buffer::HardwareBufferRef, width: u32, height: u32, pts_ns: u64 },
+    Ahb {
+        ahb: ndk::hardware_buffer::HardwareBufferRef,
+        width: u32,
+        height: u32,
+        pts_ns: u64,
+    },
 }
 
 /// Live codec plus the parameter sets it was configured with (so a mid-stream
@@ -362,7 +370,9 @@ impl MediaCodecDec {
             MAX_IMAGES,
         )
         .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
-        let window = reader.window().map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+        let window = reader
+            .window()
+            .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
 
         let mut format = MediaFormat::new();
         format.set_str("mime", self.mime());
@@ -376,7 +386,9 @@ impl MediaCodecDec {
         codec
             .configure(&format, Some(&window), MediaCodecDirection::Decoder)
             .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
-        codec.start().map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+        codec
+            .start()
+            .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
 
         self.state = Some(CodecState {
             codec,
@@ -391,7 +403,12 @@ impl MediaCodecDec {
     }
 
     /// Submit one Annex-B access unit, then drain whatever output is ready.
-    fn feed(&mut self, au: &[u8], pts_ns: u64, out: &mut Vec<DecodedFrame>) -> Result<(), G2gError> {
+    fn feed(
+        &mut self,
+        au: &[u8],
+        pts_ns: u64,
+        out: &mut Vec<DecodedFrame>,
+    ) -> Result<(), G2gError> {
         self.ensure_codec(au)?;
         if self.state.is_none() {
             return Ok(()); // pre-keyframe: nothing to decode yet
@@ -411,8 +428,16 @@ impl MediaCodecDec {
     /// then pack the resulting images to NV12. In steady state (`until_eos ==
     /// false`) this makes one non-blocking pass; at EOS it polls (bounded) until
     /// the codec raises the end-of-stream flag, so the reorder queue fully drains.
-    fn pump_output(&mut self, out: &mut Vec<DecodedFrame>, until_eos: bool) -> Result<(), G2gError> {
-        let timeout = if until_eos { Duration::from_millis(20) } else { Duration::ZERO };
+    fn pump_output(
+        &mut self,
+        out: &mut Vec<DecodedFrame>,
+        until_eos: bool,
+    ) -> Result<(), G2gError> {
+        let timeout = if until_eos {
+            Duration::from_millis(20)
+        } else {
+            Duration::ZERO
+        };
         for _ in 0..MAX_OUTPUT_POLLS {
             let mut got = false;
             let mut eos = false;
@@ -483,7 +508,12 @@ impl MediaCodecDec {
                 if let Ok(hb) = img.hardware_buffer() {
                     let w = img.width().unwrap_or(0).max(0) as u32;
                     let h = img.height().unwrap_or(0).max(0) as u32;
-                    out.push(DecodedFrame::Ahb { ahb: hb.acquire(), width: w, height: h, pts_ns });
+                    out.push(DecodedFrame::Ahb {
+                        ahb: hb.acquire(),
+                        width: w,
+                        height: h,
+                        pts_ns,
+                    });
                 }
                 continue;
             }
@@ -500,7 +530,8 @@ impl MediaCodecDec {
 }
 
 impl AsyncElement for MediaCodecDec {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -519,7 +550,12 @@ impl AsyncElement for MediaCodecDec {
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         match absolute_caps {
-            Caps::CompressedVideo { codec, width, height, .. } if *codec == self.codec => {
+            Caps::CompressedVideo {
+                codec,
+                width,
+                height,
+                ..
+            } if *codec == self.codec => {
                 // Geometry is a hint for the initial MediaFormat; the codec's
                 // output format is authoritative for packing.
                 self.width = fixed_or_zero(width);
@@ -612,7 +648,12 @@ impl AsyncElement for MediaCodecDec {
 
             for d in decoded {
                 let (new_caps, domain, pts_ns) = match d {
-                    DecodedFrame::Nv12 { nv12, width, height, pts_ns } => (
+                    DecodedFrame::Nv12 {
+                        nv12,
+                        width,
+                        height,
+                        pts_ns,
+                    } => (
                         nv12_caps(width, height),
                         MemoryDomain::System(SystemSlice::from_boxed(nv12)),
                         pts_ns,
@@ -620,13 +661,19 @@ impl AsyncElement for MediaCodecDec {
                     // Zero-copy GPU path: convert the decoded AHardwareBuffer to an
                     // RGBA wgpu texture and emit it as MemoryDomain::WgpuTexture.
                     #[cfg(feature = "mediacodec-wgpu")]
-                    DecodedFrame::Ahb { ahb, width, height, pts_ns } => {
+                    DecodedFrame::Ahb {
+                        ahb,
+                        width,
+                        height,
+                        pts_ns,
+                    } => {
                         let domain = self.convert_ahb_to_domain(ahb, width, height).await?;
                         (rgba_caps(width, height), domain, pts_ns)
                     }
                 };
                 if self.last_caps.as_ref() != Some(&new_caps) {
-                    out.push(PipelinePacket::CapsChanged(new_caps.clone())).await?;
+                    out.push(PipelinePacket::CapsChanged(new_caps.clone()))
+                        .await?;
                     self.last_caps = Some(new_caps);
                 }
                 let frame = Frame {
@@ -724,16 +771,23 @@ fn rgba_caps(w: u32, h: u32) -> Caps {
 }
 
 fn derive_output_caps(codec: VideoCodec, rgba: bool, input: &Caps) -> CapsSet {
-    let format = if rgba { RawVideoFormat::Rgba8 } else { RawVideoFormat::Nv12 };
+    let format = if rgba {
+        RawVideoFormat::Rgba8
+    } else {
+        RawVideoFormat::Nv12
+    };
     match input {
-        Caps::CompressedVideo { codec: c, width, height, framerate } if *c == codec => {
-            CapsSet::one(Caps::RawVideo {
-                format,
-                width: width.clone(),
-                height: height.clone(),
-                framerate: framerate.clone(),
-            })
-        }
+        Caps::CompressedVideo {
+            codec: c,
+            width,
+            height,
+            framerate,
+        } if *c == codec => CapsSet::one(Caps::RawVideo {
+            format,
+            width: width.clone(),
+            height: height.clone(),
+            framerate: framerate.clone(),
+        }),
         _ => CapsSet::from_alternatives(Vec::new()),
     }
 }

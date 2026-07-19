@@ -39,7 +39,10 @@ struct MarkerSink {
 }
 
 impl AsyncElement for MarkerSink {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>> where Self: 'a;
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
     fn intercept_caps(&self, c: &Caps) -> Result<Caps, G2gError> {
         Ok(c.clone())
     }
@@ -70,7 +73,10 @@ impl AsyncElement for MarkerSink {
 /// path only reassembles bytes.
 fn access_unit() -> Vec<u8> {
     let mut au = Vec::new();
-    for nal in [vec![0x67u8, 0x42, 0x00, 0x1f], vec![0x68u8, 0xce, 0x38, 0x80]] {
+    for nal in [
+        vec![0x67u8, 0x42, 0x00, 0x1f],
+        vec![0x68u8, 0xce, 0x38, 0x80],
+    ] {
         au.extend_from_slice(&[0, 0, 0, 1]);
         au.extend_from_slice(&nal);
     }
@@ -113,7 +119,12 @@ async fn udpsrc_receives_and_depayloads_rtp_over_loopback() {
 
     let stats = tokio::time::timeout(
         std::time::Duration::from_secs(15),
-        run_simple_pipeline(&mut src, &mut sink, &clock, LatencyProfile::Live.link_capacity()),
+        run_simple_pipeline(
+            &mut src,
+            &mut sink,
+            &clock,
+            LatencyProfile::Live.link_capacity(),
+        ),
     )
     .await
     .expect("pipeline should finish within 15s")
@@ -129,9 +140,20 @@ async fn udpsrc_receives_and_depayloads_rtp_over_loopback() {
         sink.last_sequence(),
         expected_au.len()
     );
-    assert_eq!(stats.frames_emitted, TARGET, "source emits exactly the frame-limit count");
-    assert_eq!(sink.received(), TARGET, "sink receives every depayloaded access unit");
-    assert_eq!(sink.last_sequence(), Some(TARGET - 1), "access units arrive in order");
+    assert_eq!(
+        stats.frames_emitted, TARGET,
+        "source emits exactly the frame-limit count"
+    );
+    assert_eq!(
+        sink.received(),
+        TARGET,
+        "sink receives every depayloaded access unit"
+    );
+    assert_eq!(
+        sink.last_sequence(),
+        Some(TARGET - 1),
+        "access units arrive in order"
+    );
 }
 
 #[tokio::test]
@@ -190,7 +212,12 @@ async fn jitter_buffer_reorders_out_of_order_packets() {
 
     let stats = tokio::time::timeout(
         std::time::Duration::from_secs(15),
-        run_simple_pipeline(&mut src, &mut sink, &clock, LatencyProfile::Live.link_capacity()),
+        run_simple_pipeline(
+            &mut src,
+            &mut sink,
+            &clock,
+            LatencyProfile::Live.link_capacity(),
+        ),
     )
     .await
     .expect("pipeline finishes within 15s")
@@ -198,10 +225,19 @@ async fn jitter_buffer_reorders_out_of_order_packets() {
 
     send_task.abort();
 
-    eprintln!("emitted={} markers={:?}", stats.frames_emitted, sink.markers);
-    assert_eq!(stats.frames_emitted, N as u64, "every AU emitted, none lost to reorder");
+    eprintln!(
+        "emitted={} markers={:?}",
+        stats.frames_emitted, sink.markers
+    );
+    assert_eq!(
+        stats.frames_emitted, N as u64,
+        "every AU emitted, none lost to reorder"
+    );
     let expected: Vec<u8> = (0..N).collect();
-    assert_eq!(sink.markers, expected, "access units delivered in sequence order");
+    assert_eq!(
+        sink.markers, expected,
+        "access units delivered in sequence order"
+    );
 }
 
 /// A single-NAL access unit (Annex-B) whose marker byte is `index`.
@@ -244,7 +280,9 @@ async fn lossy_proxy(
     let mut sink_addr: Option<SocketAddr> = None;
     let mut buf = [0u8; 2048];
     loop {
-        let Ok((n, from)) = proxy.recv_from(&mut buf).await else { return };
+        let Ok((n, from)) = proxy.recv_from(&mut buf).await else {
+            return;
+        };
         if from == recv_addr {
             // RTCP (RR / NACK) heading back to the sender.
             if let Some(dest) = sink_addr {
@@ -269,7 +307,9 @@ async fn nack_recovers_dropped_packets_via_retransmission() {
     // sender(UdpSink) -> lossy proxy (drops seq 5,12,20 once) -> receiver(UdpSrc).
     // The receiver NACKs the gaps; the sender resends from its history; the
     // retransmits get through the proxy and the receiver recovers every AU.
-    let proxy = tokio::net::UdpSocket::bind("127.0.0.1:0").await.expect("bind proxy");
+    let proxy = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind proxy");
     let proxy_addr = proxy.local_addr().unwrap();
     let recv_std = StdUdpSocket::bind("127.0.0.1:0").expect("bind receiver");
     let recv_addr = recv_std.local_addr().unwrap();
@@ -292,7 +332,8 @@ async fn nack_recovers_dropped_packets_via_retransmission() {
     // recovers the early gaps; the receiver stops at its frame limit.
     let sink_fut = async {
         let mut sink = UdpSink::new(proxy_addr);
-        sink.configure_pipeline(&h264_caps()).expect("configure sink");
+        sink.configure_pipeline(&h264_caps())
+            .expect("configure sink");
         let mut null = NullOut;
         for i in 0u32..(N as u32 * 2) {
             let au = alloc_au((i & 0xFF) as u8);
@@ -305,7 +346,9 @@ async fn nack_recovers_dropped_packets_via_retransmission() {
                 sequence: i as u64,
                 meta: Default::default(),
             };
-            sink.process(PipelinePacket::DataFrame(frame), &mut null).await.expect("send");
+            sink.process(PipelinePacket::DataFrame(frame), &mut null)
+                .await
+                .expect("send");
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
         sink
@@ -313,23 +356,39 @@ async fn nack_recovers_dropped_packets_via_retransmission() {
 
     let recv_fut = tokio::time::timeout(
         std::time::Duration::from_secs(15),
-        run_simple_pipeline(&mut src, &mut marker, &clock, LatencyProfile::Live.link_capacity()),
+        run_simple_pipeline(
+            &mut src,
+            &mut marker,
+            &clock,
+            LatencyProfile::Live.link_capacity(),
+        ),
     );
 
     let (recv_res, sink) = tokio::join!(recv_fut, sink_fut);
     proxy_task.abort();
 
-    let stats = recv_res.expect("receiver finishes within 15s").expect("receive pipeline succeeds");
+    let stats = recv_res
+        .expect("receiver finishes within 15s")
+        .expect("receive pipeline succeeds");
     eprintln!(
         "emitted={} retransmits={} markers={:?}",
         stats.frames_emitted,
         sink.retransmits_sent(),
         marker.markers,
     );
-    assert_eq!(stats.frames_emitted, N as u64, "every AU recovered despite the drops");
+    assert_eq!(
+        stats.frames_emitted, N as u64,
+        "every AU recovered despite the drops"
+    );
     let expected: Vec<u8> = (0..N).collect();
-    assert_eq!(marker.markers, expected, "AUs delivered in order after recovery");
-    assert!(sink.retransmits_sent() >= 3, "sender retransmitted the dropped packets");
+    assert_eq!(
+        marker.markers, expected,
+        "AUs delivered in order after recovery"
+    );
+    assert!(
+        sink.retransmits_sent() >= 3,
+        "sender retransmitted the dropped packets"
+    );
 }
 
 #[tokio::test]
@@ -338,7 +397,9 @@ async fn rtx_resends_recover_dropped_packets() {
     // payload type, on its own SSRC, with the original sequence prepended) and the
     // receiver reconstructs them. The dropped AUs (5, 12, 20) have no other path to
     // recovery, so success proves the RTX wrap + reconstruct round trip end to end.
-    let proxy = tokio::net::UdpSocket::bind("127.0.0.1:0").await.expect("bind proxy");
+    let proxy = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind proxy");
     let proxy_addr = proxy.local_addr().unwrap();
     let recv_std = StdUdpSocket::bind("127.0.0.1:0").expect("bind receiver");
     let recv_addr = recv_std.local_addr().unwrap();
@@ -360,7 +421,8 @@ async fn rtx_resends_recover_dropped_packets() {
     let sink_fut = async {
         // RTX resends on PT 97, a distinct RTX SSRC (SSRC-multiplexed RTX).
         let mut sink = UdpSink::new(proxy_addr).with_rtx(97, 0x5254_5800);
-        sink.configure_pipeline(&h264_caps()).expect("configure sink");
+        sink.configure_pipeline(&h264_caps())
+            .expect("configure sink");
         let mut null = NullOut;
         for i in 0u32..(N as u32 * 2) {
             let au = alloc_au((i & 0xFF) as u8);
@@ -373,7 +435,9 @@ async fn rtx_resends_recover_dropped_packets() {
                 sequence: i as u64,
                 meta: Default::default(),
             };
-            sink.process(PipelinePacket::DataFrame(frame), &mut null).await.expect("send");
+            sink.process(PipelinePacket::DataFrame(frame), &mut null)
+                .await
+                .expect("send");
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
         sink
@@ -381,17 +445,33 @@ async fn rtx_resends_recover_dropped_packets() {
 
     let recv_fut = tokio::time::timeout(
         std::time::Duration::from_secs(15),
-        run_simple_pipeline(&mut src, &mut marker, &clock, LatencyProfile::Live.link_capacity()),
+        run_simple_pipeline(
+            &mut src,
+            &mut marker,
+            &clock,
+            LatencyProfile::Live.link_capacity(),
+        ),
     );
 
     let (recv_res, sink) = tokio::join!(recv_fut, sink_fut);
     proxy_task.abort();
 
-    let stats = recv_res.expect("receiver finishes within 15s").expect("receive pipeline succeeds");
-    assert_eq!(stats.frames_emitted, N as u64, "every AU recovered via RTX resends");
+    let stats = recv_res
+        .expect("receiver finishes within 15s")
+        .expect("receive pipeline succeeds");
+    assert_eq!(
+        stats.frames_emitted, N as u64,
+        "every AU recovered via RTX resends"
+    );
     let expected: Vec<u8> = (0..N).collect();
-    assert_eq!(marker.markers, expected, "AUs delivered in order after RTX recovery");
-    assert!(sink.retransmits_sent() >= 3, "sender resent the dropped packets as RTX");
+    assert_eq!(
+        marker.markers, expected,
+        "AUs delivered in order after RTX recovery"
+    );
+    assert!(
+        sink.retransmits_sent() >= 3,
+        "sender resent the dropped packets as RTX"
+    );
 }
 
 #[tokio::test]
@@ -399,7 +479,9 @@ async fn fec_recovers_dropped_packets_without_retransmission() {
     // One-way path: the receiver sends NO feedback (RTCP off) and the sender does
     // NOT retransmit, so the only way the dropped AUs can be recovered is the
     // ULPFEC repair packets. The proxy drops one media packet per FEC group.
-    let proxy = tokio::net::UdpSocket::bind("127.0.0.1:0").await.expect("bind proxy");
+    let proxy = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind proxy");
     let proxy_addr = proxy.local_addr().unwrap();
     let recv_std = StdUdpSocket::bind("127.0.0.1:0").expect("bind receiver");
     let recv_addr = recv_std.local_addr().unwrap();
@@ -420,18 +502,27 @@ async fn fec_recovers_dropped_packets_without_retransmission() {
 
     let sink_fut = async {
         // FEC group of 4 on payload type 98; retransmit OFF so FEC alone recovers.
-        let mut sink = UdpSink::new(proxy_addr).with_retransmit(false, 1).with_fec(4, 98, 0xFEC0_0001);
-        sink.configure_pipeline(&h264_caps()).expect("configure sink");
+        let mut sink =
+            UdpSink::new(proxy_addr)
+                .with_retransmit(false, 1)
+                .with_fec(4, 98, 0xFEC0_0001);
+        sink.configure_pipeline(&h264_caps())
+            .expect("configure sink");
         let mut null = NullOut;
         for i in 0u32..N as u32 {
             let au = alloc_au(i as u8);
             let frame = Frame {
                 domain: MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
-                timing: FrameTiming { pts_ns: i as u64 * 33_000_000, ..FrameTiming::default() },
+                timing: FrameTiming {
+                    pts_ns: i as u64 * 33_000_000,
+                    ..FrameTiming::default()
+                },
                 sequence: i as u64,
                 meta: Default::default(),
             };
-            sink.process(PipelinePacket::DataFrame(frame), &mut null).await.expect("send");
+            sink.process(PipelinePacket::DataFrame(frame), &mut null)
+                .await
+                .expect("send");
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
         sink
@@ -439,17 +530,34 @@ async fn fec_recovers_dropped_packets_without_retransmission() {
 
     let recv_fut = tokio::time::timeout(
         std::time::Duration::from_secs(15),
-        run_simple_pipeline(&mut src, &mut marker, &clock, LatencyProfile::Live.link_capacity()),
+        run_simple_pipeline(
+            &mut src,
+            &mut marker,
+            &clock,
+            LatencyProfile::Live.link_capacity(),
+        ),
     );
 
     let (recv_res, sink) = tokio::join!(recv_fut, sink_fut);
     proxy_task.abort();
 
-    let stats = recv_res.expect("receiver finishes within 15s").expect("receive pipeline succeeds");
-    assert_eq!(stats.frames_emitted, N as u64, "every dropped AU recovered by FEC");
+    let stats = recv_res
+        .expect("receiver finishes within 15s")
+        .expect("receive pipeline succeeds");
+    assert_eq!(
+        stats.frames_emitted, N as u64,
+        "every dropped AU recovered by FEC"
+    );
     let expected: Vec<u8> = (0..N).collect();
-    assert_eq!(marker.markers, expected, "AUs delivered in order after FEC recovery");
-    assert_eq!(sink.retransmits_sent(), 0, "recovery was forward error correction, not resends");
+    assert_eq!(
+        marker.markers, expected,
+        "AUs delivered in order after FEC recovery"
+    );
+    assert_eq!(
+        sink.retransmits_sent(),
+        0,
+        "recovery was forward error correction, not resends"
+    );
 }
 
 #[tokio::test]
@@ -458,14 +566,16 @@ async fn interleaved_fec_recovers_a_consecutive_burst() {
     // retransmit) loses 4 *consecutive* packets, which would put >1 loss in a
     // contiguous group. Interleaved (column) FEC over a 4x4 block spreads the
     // burst one-per-column, so each column repair recovers its loss.
-    let proxy = tokio::net::UdpSocket::bind("127.0.0.1:0").await.expect("bind proxy");
+    let proxy = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind proxy");
     let proxy_addr = proxy.local_addr().unwrap();
     let recv_std = StdUdpSocket::bind("127.0.0.1:0").expect("bind receiver");
     let recv_addr = recv_std.local_addr().unwrap();
 
     const N: u8 = 16; // one full 4x4 interleaving block (1 RTP packet per AU)
-    // Drop the consecutive burst seqs 5..=8: columns 1,2,3,0 respectively, so
-    // exactly one loss per column.
+                      // Drop the consecutive burst seqs 5..=8: columns 1,2,3,0 respectively, so
+                      // exactly one loss per column.
     let dropped: HashSet<u16> = [5u16, 6, 7, 8].into_iter().collect();
     let proxy_task = tokio::spawn(lossy_proxy(proxy, recv_addr, dropped));
 
@@ -483,17 +593,23 @@ async fn interleaved_fec_recovers_a_consecutive_burst() {
         let mut sink = UdpSink::new(proxy_addr)
             .with_retransmit(false, 1)
             .with_interleaved_fec(4, 4, 98, 0xFEC0_0002);
-        sink.configure_pipeline(&h264_caps()).expect("configure sink");
+        sink.configure_pipeline(&h264_caps())
+            .expect("configure sink");
         let mut null = NullOut;
         for i in 0u32..N as u32 {
             let au = alloc_au(i as u8);
             let frame = Frame {
                 domain: MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
-                timing: FrameTiming { pts_ns: i as u64 * 33_000_000, ..FrameTiming::default() },
+                timing: FrameTiming {
+                    pts_ns: i as u64 * 33_000_000,
+                    ..FrameTiming::default()
+                },
                 sequence: i as u64,
                 meta: Default::default(),
             };
-            sink.process(PipelinePacket::DataFrame(frame), &mut null).await.expect("send");
+            sink.process(PipelinePacket::DataFrame(frame), &mut null)
+                .await
+                .expect("send");
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
         sink
@@ -501,17 +617,34 @@ async fn interleaved_fec_recovers_a_consecutive_burst() {
 
     let recv_fut = tokio::time::timeout(
         std::time::Duration::from_secs(15),
-        run_simple_pipeline(&mut src, &mut marker, &clock, LatencyProfile::Live.link_capacity()),
+        run_simple_pipeline(
+            &mut src,
+            &mut marker,
+            &clock,
+            LatencyProfile::Live.link_capacity(),
+        ),
     );
 
     let (recv_res, sink) = tokio::join!(recv_fut, sink_fut);
     proxy_task.abort();
 
-    let stats = recv_res.expect("receiver finishes within 15s").expect("receive pipeline succeeds");
-    assert_eq!(stats.frames_emitted, N as u64, "the whole consecutive burst recovered");
+    let stats = recv_res
+        .expect("receiver finishes within 15s")
+        .expect("receive pipeline succeeds");
+    assert_eq!(
+        stats.frames_emitted, N as u64,
+        "the whole consecutive burst recovered"
+    );
     let expected: Vec<u8> = (0..N).collect();
-    assert_eq!(marker.markers, expected, "AUs delivered in order after burst recovery");
-    assert_eq!(sink.retransmits_sent(), 0, "recovery was interleaved FEC, not resends");
+    assert_eq!(
+        marker.markers, expected,
+        "AUs delivered in order after burst recovery"
+    );
+    assert_eq!(
+        sink.retransmits_sent(),
+        0,
+        "recovery was interleaved FEC, not resends"
+    );
 }
 
 #[tokio::test]
@@ -519,7 +652,9 @@ async fn flexfec_recovers_a_loss_in_a_group_beyond_ulpfec() {
     // FlexFEC's wide mask protects a 20-packet group with one repair, past
     // ULPFEC's 16-packet ceiling. One-way path (no feedback / no retransmit): the
     // single FlexFEC repair recovers the one dropped packet.
-    let proxy = tokio::net::UdpSocket::bind("127.0.0.1:0").await.expect("bind proxy");
+    let proxy = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind proxy");
     let proxy_addr = proxy.local_addr().unwrap();
     let recv_std = StdUdpSocket::bind("127.0.0.1:0").expect("bind receiver");
     let recv_addr = recv_std.local_addr().unwrap();
@@ -539,19 +674,26 @@ async fn flexfec_recovers_a_loss_in_a_group_beyond_ulpfec() {
 
     let sink_fut = async {
         // FlexFEC over a group of 20 on PT 98; retransmit OFF so only the repair recovers.
-        let mut sink =
-            UdpSink::new(proxy_addr).with_retransmit(false, 1).with_flexfec(20, 98, 0xFEC0_0003);
-        sink.configure_pipeline(&h264_caps()).expect("configure sink");
+        let mut sink = UdpSink::new(proxy_addr)
+            .with_retransmit(false, 1)
+            .with_flexfec(20, 98, 0xFEC0_0003);
+        sink.configure_pipeline(&h264_caps())
+            .expect("configure sink");
         let mut null = NullOut;
         for i in 0u32..N as u32 {
             let au = alloc_au(i as u8);
             let frame = Frame {
                 domain: MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
-                timing: FrameTiming { pts_ns: i as u64 * 33_000_000, ..FrameTiming::default() },
+                timing: FrameTiming {
+                    pts_ns: i as u64 * 33_000_000,
+                    ..FrameTiming::default()
+                },
                 sequence: i as u64,
                 meta: Default::default(),
             };
-            sink.process(PipelinePacket::DataFrame(frame), &mut null).await.expect("send");
+            sink.process(PipelinePacket::DataFrame(frame), &mut null)
+                .await
+                .expect("send");
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
         sink
@@ -559,15 +701,32 @@ async fn flexfec_recovers_a_loss_in_a_group_beyond_ulpfec() {
 
     let recv_fut = tokio::time::timeout(
         std::time::Duration::from_secs(15),
-        run_simple_pipeline(&mut src, &mut marker, &clock, LatencyProfile::Live.link_capacity()),
+        run_simple_pipeline(
+            &mut src,
+            &mut marker,
+            &clock,
+            LatencyProfile::Live.link_capacity(),
+        ),
     );
 
     let (recv_res, sink) = tokio::join!(recv_fut, sink_fut);
     proxy_task.abort();
 
-    let stats = recv_res.expect("receiver finishes within 15s").expect("receive pipeline succeeds");
-    assert_eq!(stats.frames_emitted, N as u64, "the dropped packet recovered by FlexFEC");
+    let stats = recv_res
+        .expect("receiver finishes within 15s")
+        .expect("receive pipeline succeeds");
+    assert_eq!(
+        stats.frames_emitted, N as u64,
+        "the dropped packet recovered by FlexFEC"
+    );
     let expected: Vec<u8> = (0..N).collect();
-    assert_eq!(marker.markers, expected, "AUs delivered in order after FlexFEC recovery");
-    assert_eq!(sink.retransmits_sent(), 0, "recovery was FlexFEC, not resends");
+    assert_eq!(
+        marker.markers, expected,
+        "AUs delivered in order after FlexFEC recovery"
+    );
+    assert_eq!(
+        sink.retransmits_sent(),
+        0,
+        "recovery was FlexFEC, not resends"
+    );
 }

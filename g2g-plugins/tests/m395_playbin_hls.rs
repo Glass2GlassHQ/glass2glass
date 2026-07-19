@@ -17,19 +17,39 @@ use g2g_core::{
 
 use g2g_plugins::hls::{parse, Playlist};
 use g2g_plugins::hlssrc::{variant_streams, HlsStreamInfo};
-use g2g_plugins::uridecodebin::{build_hls_fmp4_fanout, build_hls_separate_fanout, build_hls_ts_fanout};
+use g2g_plugins::uridecodebin::{
+    build_hls_fmp4_fanout, build_hls_separate_fanout, build_hls_ts_fanout,
+};
 
 fn h264_any() -> Caps {
-    Caps::CompressedVideo { codec: VideoCodec::H264, width: Dim::Any, height: Dim::Any, framerate: Rate::Any }
+    Caps::CompressedVideo {
+        codec: VideoCodec::H264,
+        width: Dim::Any,
+        height: Dim::Any,
+        framerate: Rate::Any,
+    }
 }
 fn aac_any() -> Caps {
-    Caps::Audio { format: AudioFormat::Aac, channels: 0, sample_rate: 0 }
+    Caps::Audio {
+        format: AudioFormat::Aac,
+        channels: 0,
+        sample_rate: 0,
+    }
 }
 fn raw_video() -> Caps {
-    Caps::RawVideo { format: g2g_core::RawVideoFormat::Nv12, width: Dim::Any, height: Dim::Any, framerate: Rate::Any }
+    Caps::RawVideo {
+        format: g2g_core::RawVideoFormat::Nv12,
+        width: Dim::Any,
+        height: Dim::Any,
+        framerate: Rate::Any,
+    }
 }
 fn raw_audio() -> Caps {
-    Caps::Audio { format: AudioFormat::PcmS16Le, channels: 0, sample_rate: 0 }
+    Caps::Audio {
+        format: AudioFormat::PcmS16Le,
+        channels: 0,
+        sample_rate: 0,
+    }
 }
 
 #[derive(Default)]
@@ -40,7 +60,10 @@ impl PadTemplates for NullSink {
     }
 }
 impl AsyncElement for NullSink {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>> where Self: 'a;
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
     fn intercept_caps(&self, c: &Caps) -> Result<Caps, G2gError> {
         Ok(c.clone())
     }
@@ -63,21 +86,38 @@ fn registry() -> Registry {
     let mut reg = Registry::new();
     reg.register(ElementFactory::new(
         "h264stub",
-        Vec::from([PadTemplate::sink(CapsSet::one(h264_any())), PadTemplate::source(CapsSet::one(raw_video()))]),
+        Vec::from([
+            PadTemplate::sink(CapsSet::one(h264_any())),
+            PadTemplate::source(CapsSet::one(raw_video())),
+        ]),
         |_| Box::new(g2g_plugins::identity::IdentityTransform::new()),
     ));
     reg.register(ElementFactory::new(
         "aacstub",
-        Vec::from([PadTemplate::sink(CapsSet::one(aac_any())), PadTemplate::source(CapsSet::one(raw_audio()))]),
+        Vec::from([
+            PadTemplate::sink(CapsSet::one(aac_any())),
+            PadTemplate::source(CapsSet::one(raw_audio())),
+        ]),
         |_| Box::new(g2g_plugins::identity::IdentityTransform::new()),
     ));
-    reg.register_launch(LaunchFactory::of::<NullSink>("autovideosink", || Box::new(NullSink)));
-    reg.register_launch(LaunchFactory::of::<NullSink>("autoaudiosink", || Box::new(NullSink)));
+    reg.register_launch(LaunchFactory::of::<NullSink>("autovideosink", || {
+        Box::new(NullSink)
+    }));
+    reg.register_launch(LaunchFactory::of::<NullSink>("autoaudiosink", || {
+        Box::new(NullSink)
+    }));
     reg
 }
 
 fn muxed(stream_type: StreamType, caps: Caps, video: bool) -> HlsStreamInfo {
-    HlsStreamInfo { stream_type, caps, video, uri: None, name: String::new(), language: None }
+    HlsStreamInfo {
+        stream_type,
+        caps,
+        video,
+        uri: None,
+        name: String::new(),
+        language: None,
+    }
 }
 
 #[test]
@@ -100,8 +140,16 @@ fn discovers_renditions_and_fans_out_a_muxed_ts_variant() {
     let graph = build_hls_ts_fanout(&reg, "https://example.com/master.m3u8", &streams)
         .expect("fan-out builds")
         .expect("two muxed streams fan out");
-    assert_eq!(graph.node_count(), 8, "source, demux, video decode+sink, audio decode+convert+resample+sink");
-    assert_eq!(graph.edges().len(), 7, "video branch (2) + audio branch (4) + src->demux");
+    assert_eq!(
+        graph.node_count(),
+        8,
+        "source, demux, video decode+sink, audio decode+convert+resample+sink"
+    );
+    assert_eq!(
+        graph.edges().len(),
+        7,
+        "video branch (2) + audio branch (4) + src->demux"
+    );
 }
 
 #[test]
@@ -132,7 +180,10 @@ fn ignores_separate_audio_renditions_for_the_ts_demuxer() {
         },
     ];
     let graph = build_hls_ts_fanout(&reg, "https://example.com/v.m3u8", &streams).unwrap();
-    assert!(graph.is_none(), "separate-rendition audio is not fanned through TsDemuxN");
+    assert!(
+        graph.is_none(),
+        "separate-rendition audio is not fanned through TsDemuxN"
+    );
 }
 
 /// A variant with a separate audio rendition fans out as two independent sources
@@ -165,7 +216,11 @@ fn separate_audio_rendition_builds_two_source_chains() {
     // Two chains: video = HlsSrc -> TsDemuxN -> decoder -> sink (4 nodes, 3 edges);
     // audio = HlsSrc -> TsDemuxN -> decoder -> audioconvert -> audioresample -> sink
     // (6 nodes, 5 edges, the M422+ audio branch). Total 10 nodes, 8 edges.
-    assert_eq!(graph.node_count(), 10, "video chain (4) + audio chain (6, with convert+resample)");
+    assert_eq!(
+        graph.node_count(),
+        10,
+        "video chain (4) + audio chain (6, with convert+resample)"
+    );
     assert_eq!(graph.edges().len(), 8);
 }
 
@@ -204,7 +259,11 @@ fn fmp4_variant_fans_out_via_mp4demuxn() {
     fn frame(data: Vec<u8>, pts_ns: u64) -> PipelinePacket {
         PipelinePacket::DataFrame(Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-            FrameTiming { pts_ns, dts_ns: pts_ns, ..FrameTiming::default() },
+            FrameTiming {
+                pts_ns,
+                dts_ns: pts_ns,
+                ..FrameTiming::default()
+            },
             0,
         ))
     }
@@ -219,8 +278,13 @@ fn fmp4_variant_fans_out_via_mp4demuxn() {
     fn adts(payload: &[u8]) -> Vec<u8> {
         let len = payload.len() + 7;
         let mut au = vec![
-            0xFF, 0xF1, (1 << 6) | (3 << 2), ((2 & 3) << 6) | ((len >> 11) & 3) as u8,
-            ((len >> 3) & 0xFF) as u8, (((len & 7) << 5) as u8) | 0x1F, 0xFC,
+            0xFF,
+            0xF1,
+            (1 << 6) | (3 << 2),
+            ((2 & 3) << 6) | ((len >> 11) & 3) as u8,
+            ((len >> 3) & 0xFF) as u8,
+            (((len & 7) << 5) as u8) | 0x1F,
+            0xFC,
         ];
         au.extend_from_slice(payload);
         au
@@ -230,15 +294,31 @@ fn fmp4_variant_fans_out_via_mp4demuxn() {
     let init = block_on(async {
         let mut mux = Mp4MuxN::new(2);
         mux.configure_pipeline(0, &h264_any()).unwrap();
-        mux.configure_pipeline(1, &Caps::Audio { format: AudioFormat::Aac, channels: 2, sample_rate: 48_000 }).unwrap();
+        mux.configure_pipeline(
+            1,
+            &Caps::Audio {
+                format: AudioFormat::Aac,
+                channels: 2,
+                sample_rate: 48_000,
+            },
+        )
+        .unwrap();
         let mut sink = ByteCapture::default();
         let sps = [0x67u8, 0x42, 0, 0x1e, 0x88];
         let pps = [0x68u8, 0xce, 0x3c, 0x80];
         let idr = [0x65u8, 0x88, 0x84, 0x00];
-        mux.process(0, frame(annexb(&[&sps, &pps, &idr]), 0), &mut sink).await.unwrap();
-        mux.process(1, frame(adts(&[0xA1, 0xA2]), 0), &mut sink).await.unwrap();
-        mux.process(0, PipelinePacket::Eos, &mut sink).await.unwrap();
-        mux.process(1, PipelinePacket::Eos, &mut sink).await.unwrap();
+        mux.process(0, frame(annexb(&[&sps, &pps, &idr]), 0), &mut sink)
+            .await
+            .unwrap();
+        mux.process(1, frame(adts(&[0xA1, 0xA2]), 0), &mut sink)
+            .await
+            .unwrap();
+        mux.process(0, PipelinePacket::Eos, &mut sink)
+            .await
+            .unwrap();
+        mux.process(1, PipelinePacket::Eos, &mut sink)
+            .await
+            .unwrap();
         sink.bytes
     });
 
@@ -248,6 +328,10 @@ fn fmp4_variant_fans_out_via_mp4demuxn() {
         .expect("two tracks fan out");
     // Audio track goes through the M422+ branch (decoder+convert+resample+sink):
     // source + demux + video(decoder+sink) + audio(decoder+convert+resample+sink).
-    assert_eq!(graph.node_count(), 8, "source, demux, video decode+sink, audio decode+convert+resample+sink");
+    assert_eq!(
+        graph.node_count(),
+        8,
+        "source, demux, video decode+sink, audio decode+convert+resample+sink"
+    );
     assert_eq!(graph.edges().len(), 7);
 }

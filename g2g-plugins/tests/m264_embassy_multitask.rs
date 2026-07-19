@@ -65,13 +65,16 @@ async fn transform_task(
     out: &'static SharedPacketChannel<DEPTH>,
 ) {
     let mut elem = IdentityTransform::new();
-    elem.configure_pipeline(&caps()).expect("transform configure");
+    elem.configure_pipeline(&caps())
+        .expect("transform configure");
     let rx = input.receiver();
     let mut sink = out.sink();
     loop {
         let packet = rx.receive().await;
         let eos = matches!(packet, PipelinePacket::Eos);
-        elem.process(packet, &mut sink).await.expect("transform process");
+        elem.process(packet, &mut sink)
+            .await
+            .expect("transform process");
         if eos {
             // Identity does not emit Eos itself (the runner's contract); the
             // driving loop forwards it so the downstream sink terminates.
@@ -120,7 +123,11 @@ fn three_tasks_stream_a_pipeline_on_the_embassy_executor() {
         || DONE.load(Ordering::Acquire),
     );
 
-    assert_eq!(PRODUCED.load(Ordering::Relaxed), FRAMES as u32, "source produced all frames");
+    assert_eq!(
+        PRODUCED.load(Ordering::Relaxed),
+        FRAMES as u32,
+        "source produced all frames"
+    );
     assert_eq!(
         FORWARDED.load(Ordering::Relaxed),
         FRAMES as u32,

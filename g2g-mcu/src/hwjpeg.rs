@@ -127,7 +127,11 @@ impl<'r, D: JpegDecoder, const N: usize, const BYTES: usize> HwJpegDec<'r, D, N,
     /// The ring must outlive every frame this element publishes: the
     /// pipeline must drain before the ring is dropped.
     pub unsafe fn with_ring(decoder: D, ring: &'r StaticLendRing<N, BYTES>) -> Self {
-        Self { decoder, ring, info: None }
+        Self {
+            decoder,
+            ring,
+            info: None,
+        }
     }
 
     /// The image parameters of the most recent decode (geometry +
@@ -164,7 +168,9 @@ impl<D: JpegDecoder, const N: usize, const BYTES: usize> StaticTransform
         // The peripheral's write count must equal what its own header report
         // implies; anything else is a fault, not something to propagate.
         if decoded_len(info) != Some(written) || written > BYTES {
-            return Err(G2gError::Hardware(g2g_core::error::HardwareError::Peripheral));
+            return Err(G2gError::Hardware(
+                g2g_core::error::HardwareError::Peripheral,
+            ));
         }
         self.info = Some(info);
         // The shared `lend_converted` helper takes a sync fill closure; here
@@ -173,12 +179,18 @@ impl<D: JpegDecoder, const N: usize, const BYTES: usize> StaticTransform
         // SAFETY: the constructor established the ring-outlives-frames
         // contract (`new`: 'static; `with_ring`: caller's contract).
         let out = unsafe { slot.publish(written) };
-        Ok(Some(Frame::new(MemoryDomain::System(out), input.timing, input.sequence)))
+        Ok(Some(Frame::new(
+            MemoryDomain::System(out),
+            input.timing,
+            input.sequence,
+        )))
     }
 }
 
 impl<D, const N: usize, const BYTES: usize> core::fmt::Debug for HwJpegDec<'_, D, N, BYTES> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("HwJpegDec").field("info", &self.info).finish_non_exhaustive()
+        f.debug_struct("HwJpegDec")
+            .field("info", &self.info)
+            .finish_non_exhaustive()
     }
 }

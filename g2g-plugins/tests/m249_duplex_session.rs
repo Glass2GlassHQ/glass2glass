@@ -14,8 +14,8 @@ use g2g_core::element::DynAsyncElement;
 use g2g_core::runtime::{run_duplex_session, DynSourceLoop, SourceLoop};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, ConfigureOutcome, Dim, DuplexInbound, G2gError,
-    MultiDuplexSession, MultiOutputSink, OutputSink, PipelineClock, PipelinePacket, RawVideoFormat,
-    Rate,
+    MultiDuplexSession, MultiOutputSink, OutputSink, PipelineClock, PipelinePacket, Rate,
+    RawVideoFormat,
 };
 
 struct ZeroClock;
@@ -57,7 +57,10 @@ impl SourceLoop for CountedSource {
                     g2g_core::MemoryDomain::System(g2g_core::memory::SystemSlice::from_boxed(
                         std::vec![0u8; 4].into_boxed_slice(),
                     )),
-                    g2g_core::FrameTiming { pts_ns: seq, ..Default::default() },
+                    g2g_core::FrameTiming {
+                        pts_ns: seq,
+                        ..Default::default()
+                    },
                     seq,
                 );
                 out.push(PipelinePacket::DataFrame(frame)).await?;
@@ -149,7 +152,8 @@ impl MultiDuplexSession for EchoDuplex {
             // Drain the send side; echo each frame to the matching recv output.
             while let Some((idx, packet)) = inbound.recv().await {
                 if let PipelinePacket::DataFrame(f) = packet {
-                    out.push_to(idx % outputs, PipelinePacket::DataFrame(f)).await?;
+                    out.push_to(idx % outputs, PipelinePacket::DataFrame(f))
+                        .await?;
                     received += 1;
                 }
             }
@@ -170,12 +174,21 @@ async fn duplex_session_routes_send_and_recv_both_directions() {
     // Two send sources (5 + 3 frames), two recv sinks.
     let mut send_a = CountedSource { n: 5 };
     let mut send_b = CountedSource { n: 3 };
-    let mut session = EchoDuplex { inputs: 2, outputs: 2 };
+    let mut session = EchoDuplex {
+        inputs: 2,
+        outputs: 2,
+    };
 
     let (f0, e0) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
     let (f1, e1) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
-    let mut recv0 = CountingSink { frames: f0.clone(), eos: e0.clone() };
-    let mut recv1 = CountingSink { frames: f1.clone(), eos: e1.clone() };
+    let mut recv0 = CountingSink {
+        frames: f0.clone(),
+        eos: e0.clone(),
+    };
+    let mut recv1 = CountingSink {
+        frames: f1.clone(),
+        eos: e1.clone(),
+    };
 
     let sources: std::vec::Vec<&mut dyn DynSourceLoop> = std::vec![&mut send_a, &mut send_b];
     let sinks: std::vec::Vec<&mut dyn DynAsyncElement> = std::vec![&mut recv0, &mut recv1];

@@ -37,8 +37,8 @@ use alsa::{Direction, ValueOr};
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority,
     ConfigureOutcome, DriftClock, ElementMetadata, G2gError, HardwareError, MemoryDomain,
-    MonotonicClock, OutputSink, PadTemplate, PadTemplates, PipelineClock, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec,
+    MonotonicClock, OutputSink, PadTemplate, PadTemplates, PipelineClock, PipelinePacket,
+    PropError, PropKind, PropValue, PropertySpec,
 };
 
 /// Negotiated PCM parameters: (ALSA sample format, channels, rate). Compressed
@@ -159,7 +159,8 @@ impl Drop for AlsaSink {
 }
 
 impl AsyncElement for AlsaSink {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -194,7 +195,11 @@ impl AsyncElement for AlsaSink {
         // Only discipline the clock when we actually offer it; otherwise the
         // per-buffer `delay()` probe is wasted work no one reads.
         let clock = self.provide_clock.then(|| Arc::clone(&self.clock));
-        let cfg = PcmConfig { fmt, channels, rate };
+        let cfg = PcmConfig {
+            fmt,
+            channels,
+            rate,
+        };
 
         let join = thread::Builder::new()
             .name(String::from("g2g-alsasink"))
@@ -345,7 +350,11 @@ fn worker_main(
     clock: Option<Arc<DriftClock>>,
     ready: SyncSender<Result<(), i32>>,
 ) {
-    let PcmConfig { fmt, channels, rate } = cfg;
+    let PcmConfig {
+        fmt,
+        channels,
+        rate,
+    } = cfg;
     let pcm = match open_pcm(device, fmt, channels, rate) {
         Ok(pcm) => {
             let _ = ready.send(Ok(()));
@@ -404,9 +413,11 @@ fn open_pcm(device: &str, fmt: Format, channels: u32, rate: u32) -> Result<PCM, 
     {
         let hwp = HwParams::any(&pcm).map_err(|e| e.errno())?;
         hwp.set_channels(channels).map_err(|e| e.errno())?;
-        hwp.set_rate(rate, ValueOr::Nearest).map_err(|e| e.errno())?;
+        hwp.set_rate(rate, ValueOr::Nearest)
+            .map_err(|e| e.errno())?;
         hwp.set_format(fmt).map_err(|e| e.errno())?;
-        hwp.set_access(Access::RWInterleaved).map_err(|e| e.errno())?;
+        hwp.set_access(Access::RWInterleaved)
+            .map_err(|e| e.errno())?;
         // Bound the ring so `writei` blocks (paces) at the device rate. Without
         // this some backends (pipewire-alsa) expose a very large default buffer,
         // so the whole stream queues without ever blocking, which both defeats
@@ -414,8 +425,10 @@ fn open_pcm(device: &str, fmt: Format, channels: u32, rate: u32) -> Result<PCM, 
         // backlog, so the M590 playout-clock discipline sees zero frames played.
         // ~200 ms buffer / ~20 ms period; `_near` so a device that cannot honour
         // the exact size picks its closest instead of failing configure.
-        hwp.set_period_time_near(20_000, ValueOr::Nearest).map_err(|e| e.errno())?;
-        hwp.set_buffer_time_near(200_000, ValueOr::Nearest).map_err(|e| e.errno())?;
+        hwp.set_period_time_near(20_000, ValueOr::Nearest)
+            .map_err(|e| e.errno())?;
+        hwp.set_buffer_time_near(200_000, ValueOr::Nearest)
+            .map_err(|e| e.errno())?;
         pcm.hw_params(&hwp).map_err(|e| e.errno())?;
     }
     pcm.prepare().map_err(|e| e.errno())?;
@@ -556,11 +569,21 @@ mod tests {
     #[test]
     fn provide_clock_property_toggles_the_candidate() {
         let mut sink = AlsaSink::new();
-        assert_eq!(sink.get_property("provide-clock"), Some(PropValue::Bool(true)));
+        assert_eq!(
+            sink.get_property("provide-clock"),
+            Some(PropValue::Bool(true))
+        );
 
-        sink.set_property("provide-clock", PropValue::Bool(false)).unwrap();
-        assert_eq!(sink.get_property("provide-clock"), Some(PropValue::Bool(false)));
-        assert!(sink.provide_clock().is_none(), "disabled sink offers no clock");
+        sink.set_property("provide-clock", PropValue::Bool(false))
+            .unwrap();
+        assert_eq!(
+            sink.get_property("provide-clock"),
+            Some(PropValue::Bool(false))
+        );
+        assert!(
+            sink.provide_clock().is_none(),
+            "disabled sink offers no clock"
+        );
 
         // Wrong value type is rejected, not silently accepted.
         assert_eq!(

@@ -48,7 +48,10 @@ impl OutputSink for Capture {
     ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
         Box::pin(async move {
             match packet {
-                PipelinePacket::DataFrame(Frame { domain: MemoryDomain::System(s), .. }) => {
+                PipelinePacket::DataFrame(Frame {
+                    domain: MemoryDomain::System(s),
+                    ..
+                }) => {
                     self.frames.push(s.as_slice().to_vec());
                 }
                 PipelinePacket::Flush => self.flushes += 1,
@@ -95,10 +98,17 @@ async fn flvdemux_seeks_to_the_target_keyframe_over_filesrc() {
     // Seek to 80 ms: resume from the next keyframe at 120 ms.
     time.seek(Seek::flush_to(80_000_000));
 
-    let mut src = FileSrc::new(&path, Caps::ByteStream { encoding: ByteStreamEncoding::Flv })
-        .with_chunk_size(16)
-        .with_seek(byte.clone());
-    let mut demux = FlvDemux::new().with_stream(FlvStream::H264).with_seek(time.clone(), byte.clone());
+    let mut src = FileSrc::new(
+        &path,
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::Flv,
+        },
+    )
+    .with_chunk_size(16)
+    .with_seek(byte.clone());
+    let mut demux = FlvDemux::new()
+        .with_stream(FlvStream::H264)
+        .with_seek(time.clone(), byte.clone());
 
     let caps = {
         let c: Pin<Box<dyn Future<Output = _>>> = Box::pin(src.intercept_caps());
@@ -106,16 +116,24 @@ async fn flvdemux_seeks_to_the_target_keyframe_over_filesrc() {
     };
     src.configure_pipeline(&caps).expect("configure src");
     demux
-        .configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::Flv })
+        .configure_pipeline(&Caps::ByteStream {
+            encoding: ByteStreamEncoding::Flv,
+        })
         .expect("configure demux");
 
     let mut capture = Capture::default();
     {
-        let mut chain = Chain { demux: &mut demux, capture: &mut capture };
+        let mut chain = Chain {
+            demux: &mut demux,
+            capture: &mut capture,
+        };
         src.run(&mut chain).await.expect("filesrc runs");
     }
 
-    assert!(capture.flushes >= 1, "the upstream byte-seek flushed downstream");
+    assert!(
+        capture.flushes >= 1,
+        "the upstream byte-seek flushed downstream"
+    );
     assert!(capture.segments >= 1, "a resume segment was emitted");
     assert_eq!(
         capture.frames,

@@ -17,9 +17,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
+use g2g_core::g2g_warn;
 use g2g_core::log::{short_type_name, LogSource};
 use g2g_core::memory::SystemSlice;
-use g2g_core::g2g_warn;
 use g2g_core::{
     Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, MemoryDomain,
     MultiInputElement, OutputSink, PipelinePacket, Rate, VideoCodec,
@@ -173,12 +173,10 @@ impl CcInsert {
     /// Rewrite one access unit's bytes with the caption SEI inserted before the
     /// first VCL slice NAL (spec position: after any AUD / parameter sets), and
     /// emit it preserving the frame's timing / keyframe flag.
-    async fn emit_au(
-        &mut self,
-        frame: Frame,
-        out: &mut dyn OutputSink,
-    ) -> Result<(), G2gError> {
-        let Some(codec) = self.codec else { return Err(G2gError::NotConfigured) };
+    async fn emit_au(&mut self, frame: Frame, out: &mut dyn OutputSink) -> Result<(), G2gError> {
+        let Some(codec) = self.codec else {
+            return Err(G2gError::NotConfigured);
+        };
         let MemoryDomain::System(slice) = &frame.domain else {
             // A non-system buffer carries no walkable bitstream; pass it through.
             return out.push(PipelinePacket::DataFrame(frame)).await.map(|_| ());
@@ -266,13 +264,21 @@ impl MultiInputElement for CcInsert {
             Self::VIDEO
                 if matches!(
                     upstream_caps,
-                    Caps::CompressedVideo { codec: VideoCodec::H264 | VideoCodec::H265, .. }
+                    Caps::CompressedVideo {
+                        codec: VideoCodec::H264 | VideoCodec::H265,
+                        ..
+                    }
                 ) =>
             {
                 Ok(upstream_caps.clone())
             }
             Self::CUE
-                if matches!(upstream_caps, Caps::Text { format: g2g_core::TextFormat::Utf8 }) =>
+                if matches!(
+                    upstream_caps,
+                    Caps::Text {
+                        format: g2g_core::TextFormat::Utf8
+                    }
+                ) =>
             {
                 Ok(upstream_caps.clone())
             }
@@ -297,7 +303,10 @@ impl MultiInputElement for CcInsert {
     ) -> Result<ConfigureOutcome, G2gError> {
         match input {
             Self::VIDEO => match absolute_caps {
-                Caps::CompressedVideo { codec: codec @ (VideoCodec::H264 | VideoCodec::H265), .. } => {
+                Caps::CompressedVideo {
+                    codec: codec @ (VideoCodec::H264 | VideoCodec::H265),
+                    ..
+                } => {
                     self.codec = Some(*codec);
                     self.video_caps = Some(absolute_caps.clone());
                     Ok(ConfigureOutcome::Accepted)
@@ -305,7 +314,9 @@ impl MultiInputElement for CcInsert {
                 _ => Err(G2gError::CapsMismatch),
             },
             Self::CUE => match absolute_caps {
-                Caps::Text { format: g2g_core::TextFormat::Utf8 } => Ok(ConfigureOutcome::Accepted),
+                Caps::Text {
+                    format: g2g_core::TextFormat::Utf8,
+                } => Ok(ConfigureOutcome::Accepted),
                 _ => Err(G2gError::CapsMismatch),
             },
             _ => Err(G2gError::CapsMismatch),
@@ -364,7 +375,12 @@ impl MultiInputElement for CcInsert {
                                 .unwrap_or_default();
                             #[cfg(not(feature = "metadata"))]
                             let settings = crate::subparse::CueSettings::default();
-                            let cue = crate::subparse::Cue { start_ns: start, end_ns: end, text, settings };
+                            let cue = crate::subparse::Cue {
+                                start_ns: start,
+                                end_ns: end,
+                                text,
+                                settings,
+                            };
                             self.enc.push_cue(&cue);
                             self.cues_received += 1;
                             // The new pop-on caption supersedes any shown one; erase
@@ -393,8 +409,8 @@ impl LogSource for CcInsert {
 mod tests {
     use super::*;
     use crate::cea::{extract_cc_data, Cea608, Cea708};
-    use g2g_core::{FrameTiming, PushOutcome, TextFormat};
     use alloc::vec;
+    use g2g_core::{FrameTiming, PushOutcome, TextFormat};
 
     #[derive(Default)]
     struct RecordingSink {
@@ -432,7 +448,10 @@ mod tests {
     fn video_frame(pts: u64) -> PipelinePacket {
         let f = Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(plain_au().into_boxed_slice())),
-            FrameTiming { pts_ns: pts, ..Default::default() },
+            FrameTiming {
+                pts_ns: pts,
+                ..Default::default()
+            },
             0,
         );
         PipelinePacket::DataFrame(f)
@@ -442,7 +461,11 @@ mod tests {
         let payload = text.as_bytes().to_vec().into_boxed_slice();
         let f = Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(payload)),
-            FrameTiming { pts_ns: start, duration_ns: dur, ..Default::default() },
+            FrameTiming {
+                pts_ns: start,
+                duration_ns: dur,
+                ..Default::default()
+            },
             0,
         );
         PipelinePacket::DataFrame(f)
@@ -453,22 +476,39 @@ mod tests {
         // Encode a cue into the SEI of a run of access units, then extract + decode
         // the output and recover the text: CcInsert is the inverse of CcExtract.
         let mut el = CcInsert::new();
-        el.configure_pipeline(CcInsert::VIDEO, &h264_caps()).unwrap();
-        el.configure_pipeline(CcInsert::CUE, &Caps::Text { format: TextFormat::Utf8 }).unwrap();
+        el.configure_pipeline(CcInsert::VIDEO, &h264_caps())
+            .unwrap();
+        el.configure_pipeline(
+            CcInsert::CUE,
+            &Caps::Text {
+                format: TextFormat::Utf8,
+            },
+        )
+        .unwrap();
         let mut sink = RecordingSink::default();
 
         // Cue at t=0 for ~1s, then a run of frames at 33 ms to carry the cc_data.
-        el.process(CcInsert::CUE, cue_frame("HELLO", 0, 1_000_000_000), &mut sink).await.unwrap();
+        el.process(
+            CcInsert::CUE,
+            cue_frame("HELLO", 0, 1_000_000_000),
+            &mut sink,
+        )
+        .await
+        .unwrap();
         let frame_dur = 33_000_000u64;
         for n in 0..40u64 {
-            el.process(CcInsert::VIDEO, video_frame(n * frame_dur), &mut sink).await.unwrap();
+            el.process(CcInsert::VIDEO, video_frame(n * frame_dur), &mut sink)
+                .await
+                .unwrap();
         }
         assert_eq!(sink.aus.len(), 40, "every access unit is forwarded");
 
         // The SEI carries the captions: extract + decode the output stream.
         let mut dec = Cea608::new();
         for f in &sink.aus {
-            let MemoryDomain::System(s) = &f.domain else { continue };
+            let MemoryDomain::System(s) = &f.domain else {
+                continue;
+            };
             for t in extract_cc_data(s.as_slice(), VideoCodec::H264) {
                 if t.cc_type == 0 {
                     dec.push_pair(t.b0, t.b1, f.timing.pts_ns);
@@ -495,7 +535,10 @@ mod tests {
         let mut el = CcInsert::new();
         let mut sink = RecordingSink::default();
         // The video pad before configure is NotConfigured (no codec for the SEI).
-        assert!(el.process(CcInsert::VIDEO, video_frame(0), &mut sink).await.is_err());
+        assert!(el
+            .process(CcInsert::VIDEO, video_frame(0), &mut sink)
+            .await
+            .is_err());
     }
 
     #[tokio::test]
@@ -503,19 +546,36 @@ mod tests {
         // The CEA-708 mode authors DTVCC into the SEI; extract + decode the output
         // through the 708 decoder and recover the text.
         let mut el = CcInsert::cea708(1);
-        el.configure_pipeline(CcInsert::VIDEO, &h264_caps()).unwrap();
-        el.configure_pipeline(CcInsert::CUE, &Caps::Text { format: TextFormat::Utf8 }).unwrap();
+        el.configure_pipeline(CcInsert::VIDEO, &h264_caps())
+            .unwrap();
+        el.configure_pipeline(
+            CcInsert::CUE,
+            &Caps::Text {
+                format: TextFormat::Utf8,
+            },
+        )
+        .unwrap();
         let mut sink = RecordingSink::default();
 
-        el.process(CcInsert::CUE, cue_frame("HI 708", 0, 1_000_000_000), &mut sink).await.unwrap();
+        el.process(
+            CcInsert::CUE,
+            cue_frame("HI 708", 0, 1_000_000_000),
+            &mut sink,
+        )
+        .await
+        .unwrap();
         let frame_dur = 33_000_000u64;
         for n in 0..40u64 {
-            el.process(CcInsert::VIDEO, video_frame(n * frame_dur), &mut sink).await.unwrap();
+            el.process(CcInsert::VIDEO, video_frame(n * frame_dur), &mut sink)
+                .await
+                .unwrap();
         }
 
         let mut dec = Cea708::new();
         for f in &sink.aus {
-            let MemoryDomain::System(s) = &f.domain else { continue };
+            let MemoryDomain::System(s) = &f.domain else {
+                continue;
+            };
             for t in extract_cc_data(s.as_slice(), VideoCodec::H264) {
                 dec.push_triple(t.cc_type, t.b0, t.b1, f.timing.pts_ns);
             }
@@ -533,22 +593,45 @@ mod tests {
         // output has no real captions, and the element flags the drop rather than
         // emitting a caption-free stream silently.
         let mut el = CcInsert::new();
-        el.configure_pipeline(CcInsert::VIDEO, &h264_caps()).unwrap();
-        el.configure_pipeline(CcInsert::CUE, &Caps::Text { format: TextFormat::Utf8 }).unwrap();
+        el.configure_pipeline(CcInsert::VIDEO, &h264_caps())
+            .unwrap();
+        el.configure_pipeline(
+            CcInsert::CUE,
+            &Caps::Text {
+                format: TextFormat::Utf8,
+            },
+        )
+        .unwrap();
         let mut sink = RecordingSink::default();
 
         // All video frames first (no cue yet -> null padding), then the cue, then Eos.
         for n in 0..5u64 {
-            el.process(CcInsert::VIDEO, video_frame(n * 33_000_000), &mut sink).await.unwrap();
+            el.process(CcInsert::VIDEO, video_frame(n * 33_000_000), &mut sink)
+                .await
+                .unwrap();
         }
-        el.process(CcInsert::CUE, cue_frame("LATE", 0, 1_000_000_000), &mut sink).await.unwrap();
-        el.process(CcInsert::VIDEO, PipelinePacket::Eos, &mut sink).await.unwrap();
-        el.process(CcInsert::CUE, PipelinePacket::Eos, &mut sink).await.unwrap();
+        el.process(
+            CcInsert::CUE,
+            cue_frame("LATE", 0, 1_000_000_000),
+            &mut sink,
+        )
+        .await
+        .unwrap();
+        el.process(CcInsert::VIDEO, PipelinePacket::Eos, &mut sink)
+            .await
+            .unwrap();
+        el.process(CcInsert::CUE, PipelinePacket::Eos, &mut sink)
+            .await
+            .unwrap();
 
         // No caption byte reached any access unit (every SEI is a null pair).
         for f in &sink.aus {
-            let MemoryDomain::System(s) = &f.domain else { continue };
-            assert!(extract_cc_data(s.as_slice(), VideoCodec::H264).iter().all(|t| (t.b0 & 0x7F) == 0));
+            let MemoryDomain::System(s) = &f.domain else {
+                continue;
+            };
+            assert!(extract_cc_data(s.as_slice(), VideoCodec::H264)
+                .iter()
+                .all(|t| (t.b0 & 0x7F) == 0));
         }
         assert!(el.warned, "the silent caption drop is flagged");
     }

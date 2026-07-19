@@ -44,7 +44,10 @@ async fn system_pipeline_satisfies_deny_all_and_runs() {
     let stats = run_graph_with_copy_policy(system_pipeline(), &ZeroClock, 4, CopyPolicy::DenyAll)
         .await
         .expect("an all-System pipeline satisfies DenyAll and runs");
-    assert!(stats.frames_emitted > 0 || stats.frames_consumed > 0, "the pipeline actually ran");
+    assert!(
+        stats.frames_emitted > 0 || stats.frames_consumed > 0,
+        "the pipeline actually ran"
+    );
 }
 
 #[tokio::test]

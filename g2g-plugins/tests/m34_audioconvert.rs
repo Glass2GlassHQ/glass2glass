@@ -48,10 +48,17 @@ async fn s16_source_records_as_float32_through_converter() {
     // conformant 58-byte form (fmt18 + `fact` chunk), so assert the `data` chunk
     // payload rather than the total length, which is header-layout dependent.
     let expected = (48_000f64 * 0.1) as usize * 2 * 4;
-    let data_pos = data.windows(4).position(|w| w == b"data").expect("data chunk");
+    let data_pos = data
+        .windows(4)
+        .position(|w| w == b"data")
+        .expect("data chunk");
     let data_size = u32::from_le_bytes(data[data_pos + 4..data_pos + 8].try_into().unwrap());
     assert_eq!(data_size as usize, expected, "float track length");
-    assert_eq!(data.len(), data_pos + 8 + expected, "no trailing bytes past data");
+    assert_eq!(
+        data.len(),
+        data_pos + 8 + expected,
+        "no trailing bytes past data"
+    );
     let _ = std::fs::remove_file(&path);
 }
 

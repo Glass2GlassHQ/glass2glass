@@ -21,6 +21,11 @@ async fn audiopanorama_runs_in_a_text_pipeline() {
         "audiotestsrc num-buffers=3 channels=2 wave=sine ! audiopanorama panorama=0.5 ! fakesink",
     )
     .expect("pipeline parses");
-    let stats = run_graph(graph, &ZeroClock, 4).await.expect("panorama pipeline runs");
-    assert_eq!(stats.frames_consumed, 3, "all panned buffers reached the sink");
+    let stats = run_graph(graph, &ZeroClock, 4)
+        .await
+        .expect("panorama pipeline runs");
+    assert_eq!(
+        stats.frames_consumed, 3,
+        "all panned buffers reached the sink"
+    );
 }

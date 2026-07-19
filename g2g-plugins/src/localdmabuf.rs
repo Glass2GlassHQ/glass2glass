@@ -51,8 +51,11 @@ use g2g_core::{
 };
 
 /// The `location` property shared by both ends: the Unix socket path.
-const LOCATION_PROP: &[PropertySpec] =
-    &[PropertySpec::new("location", PropKind::Str, "Unix socket path")];
+const LOCATION_PROP: &[PropertySpec] = &[PropertySpec::new(
+    "location",
+    PropKind::Str,
+    "Unix socket path",
+)];
 
 use crate::scmfd;
 
@@ -169,7 +172,9 @@ async fn send_record(sock: &UnixStream, rec: &Record, fd: Option<i32>) -> Result
     let mut fd = fd;
     while sent < buf.len() {
         sock.writable().await.map_err(io_err)?;
-        match sock.try_io(Interest::WRITABLE, || scmfd::send_with_fd(raw, &buf[sent..], fd)) {
+        match sock.try_io(Interest::WRITABLE, || {
+            scmfd::send_with_fd(raw, &buf[sent..], fd)
+        }) {
             Ok(n) => {
                 sent += n;
                 fd = None; // ancillary fd only accompanies the first chunk
@@ -190,7 +195,9 @@ async fn recv_record(sock: &UnixStream) -> Result<Option<(Record, Option<i32>)>,
     let mut fd: Option<i32> = None;
     while got < buf.len() {
         sock.readable().await.map_err(io_err)?;
-        let (n, f) = match sock.try_io(Interest::READABLE, || scmfd::recv_with_fd(raw, &mut buf[got..])) {
+        let (n, f) = match sock.try_io(Interest::READABLE, || {
+            scmfd::recv_with_fd(raw, &mut buf[got..])
+        }) {
             Ok(v) => v,
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
             Err(e) => return Err(io_err(e)),
@@ -228,8 +235,12 @@ fn close_fd(fd: i32) {
 
 /// Raw video formats the transport carries (matches the `dmabuf-wgpu` import
 /// side; the pixel caps pass through, only the transport carries them).
-const FORMATS: [RawVideoFormat; 4] =
-    [RawVideoFormat::Rgba8, RawVideoFormat::Bgra8, RawVideoFormat::Nv12, RawVideoFormat::I420];
+const FORMATS: [RawVideoFormat; 4] = [
+    RawVideoFormat::Rgba8,
+    RawVideoFormat::Bgra8,
+    RawVideoFormat::Nv12,
+    RawVideoFormat::I420,
+];
 
 fn any_dmabuf_caps() -> CapsSet {
     let any = |format| Caps::RawVideo {
@@ -255,9 +266,12 @@ fn caps_of(format: RawVideoFormat, width: u32, height: u32) -> Caps {
 
 fn dims_of(caps: &Caps) -> Option<(RawVideoFormat, u32, u32)> {
     match caps {
-        Caps::RawVideo { format, width: Dim::Fixed(w), height: Dim::Fixed(h), .. } => {
-            Some((*format, *w, *h))
-        }
+        Caps::RawVideo {
+            format,
+            width: Dim::Fixed(w),
+            height: Dim::Fixed(h),
+            ..
+        } => Some((*format, *w, *h)),
         _ => None,
     }
 }
@@ -304,7 +318,8 @@ impl PadTemplates for DmaBufSink {
 }
 
 impl AsyncElement for DmaBufSink {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -516,10 +531,12 @@ impl DmaBufSrc {
 }
 
 impl SourceLoop for DmaBufSrc {
-    type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
+    type RunFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
     where
         Self: 'a;
-    type CapsFuture<'a> = Pin<Box<dyn Future<Output = Result<Caps, G2gError>> + 'a>>
+    type CapsFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<Caps, G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -623,7 +640,8 @@ impl SourceLoop for DmaBufSrc {
                         // SAFETY: `fd` was just received via SCM_RIGHTS, so this
                         // process owns it exclusively; `OwnedDmaBuf` closes it once
                         // on drop.
-                        let mut dmabuf = unsafe { OwnedDmaBuf::from_raw(fd, rec.stride, rec.offset) };
+                        let mut dmabuf =
+                            unsafe { OwnedDmaBuf::from_raw(fd, rec.stride, rec.offset) };
                         // Re-attach the shared stream semaphore + this frame's value
                         // so the GPU consumer waits before reading.
                         if rec.sync_value != 0 {

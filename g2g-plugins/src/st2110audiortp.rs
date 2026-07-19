@@ -44,8 +44,7 @@ use crate::st2110sdp::{St2110Essence, St2110Sdp};
 fn audio_params(caps: &Caps) -> Result<(AudioFormat, u8, u32), G2gError> {
     match caps {
         Caps::Audio {
-            format:
-                format @ (AudioFormat::PcmS16Le | AudioFormat::PcmF32Le | AudioFormat::PcmS24Le),
+            format: format @ (AudioFormat::PcmS16Le | AudioFormat::PcmF32Le | AudioFormat::PcmS24Le),
             channels,
             sample_rate,
         } => Ok((*format, *channels, *sample_rate)),
@@ -69,9 +68,10 @@ fn wire_depth(format: AudioFormat) -> Option<SampleDepth> {
 /// wrap to full-scale negative).
 fn pcm_to_samples(format: AudioFormat, bytes: &[u8]) -> Vec<i32> {
     match format {
-        AudioFormat::PcmS16Le => {
-            bytes.chunks_exact(2).map(|c| i32::from(i16::from_le_bytes([c[0], c[1]]))).collect()
-        }
+        AudioFormat::PcmS16Le => bytes
+            .chunks_exact(2)
+            .map(|c| i32::from(i16::from_le_bytes([c[0], c[1]])))
+            .collect(),
         AudioFormat::PcmF32Le => bytes
             .chunks_exact(4)
             .map(|c| {
@@ -201,7 +201,10 @@ impl St2110AudioSink {
 }
 
 impl AsyncElement for St2110AudioSink {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>> where Self: 'a;
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         audio_params(upstream_caps)?;
@@ -229,7 +232,8 @@ impl AsyncElement for St2110AudioSink {
             fpp,
         ));
         let sock = UdpSocket::bind(("0.0.0.0", 0)).map_err(io_err)?;
-        sock.connect((self.host.as_str(), self.port)).map_err(io_err)?;
+        sock.connect((self.host.as_str(), self.port))
+            .map_err(io_err)?;
         self.socket = Some(sock);
         self.caps = Some(absolute_caps.clone());
         Ok(ConfigureOutcome::Accepted)
@@ -338,9 +342,17 @@ impl AsyncElement for St2110AudioSink {
 
 impl PadTemplates for St2110AudioSink {
     fn pad_templates() -> Vec<PadTemplate> {
-        let alts = [AudioFormat::PcmS16Le, AudioFormat::PcmF32Le, AudioFormat::PcmS24Le]
-            .map(|format| Caps::Audio { format, channels: 2, sample_rate: 48_000 })
-            .to_vec();
+        let alts = [
+            AudioFormat::PcmS16Le,
+            AudioFormat::PcmF32Le,
+            AudioFormat::PcmS24Le,
+        ]
+        .map(|format| Caps::Audio {
+            format,
+            channels: 2,
+            sample_rate: 48_000,
+        })
+        .to_vec();
         Vec::from([PadTemplate::sink(CapsSet::from_alternatives(alts))])
     }
 }
@@ -395,7 +407,10 @@ impl St2110AudioSrc {
     /// The bound local UDP port after `configure_pipeline` (for tests binding an
     /// ephemeral port with `port = 0`).
     pub fn local_port(&self) -> Option<u16> {
-        self.socket.as_ref().and_then(|s| s.local_addr().ok()).map(|a| a.port())
+        self.socket
+            .as_ref()
+            .and_then(|s| s.local_addr().ok())
+            .map(|a| a.port())
     }
 
     /// Auto-configure this source from a parsed audio [`St2110Sdp`] (the receiver
@@ -403,7 +418,13 @@ impl St2110AudioSrc {
     /// depth picks the output PCM format (L16 -> S16, L24 -> F32). Call before
     /// `configure_pipeline`.
     pub fn apply_sdp(&mut self, sdp: &St2110Sdp) -> bool {
-        let St2110Essence::Audio { depth, sample_rate, channels, .. } = &sdp.essence else {
+        let St2110Essence::Audio {
+            depth,
+            sample_rate,
+            channels,
+            ..
+        } = &sdp.essence
+        else {
             return false;
         };
         self.format = match depth {
@@ -426,8 +447,14 @@ impl St2110AudioSrc {
 }
 
 impl SourceLoop for St2110AudioSrc {
-    type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>> where Self: 'a;
-    type CapsFuture<'a> = Ready<Result<Caps, G2gError>> where Self: 'a;
+    type RunFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
+    where
+        Self: 'a;
+    type CapsFuture<'a>
+        = Ready<Result<Caps, G2gError>>
+    where
+        Self: 'a;
 
     fn intercept_caps(&mut self) -> Self::CapsFuture<'_> {
         ready(Ok(self.caps()))
@@ -435,7 +462,8 @@ impl SourceLoop for St2110AudioSrc {
 
     fn configure_pipeline(&mut self, _caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         let sock = UdpSocket::bind((self.address.as_str(), self.port)).map_err(io_err)?;
-        sock.set_read_timeout(Some(Duration::from_millis(self.recv_timeout_ms))).map_err(io_err)?;
+        sock.set_read_timeout(Some(Duration::from_millis(self.recv_timeout_ms)))
+            .map_err(io_err)?;
         self.socket = Some(sock);
         Ok(ConfigureOutcome::Accepted)
     }
@@ -463,7 +491,9 @@ impl SourceLoop for St2110AudioSrc {
                     }
                     Err(e) => return Err(io_err(e)),
                 };
-                let Some(p) = depack.depacketize(&buf[..n]) else { continue };
+                let Some(p) = depack.depacketize(&buf[..n]) else {
+                    continue;
+                };
                 // PTS = the packet's media-clock offset from the first packet, so
                 // the receiver reproduces the sender's timing without needing a
                 // shared epoch here (the PTP clock supplies absolute time upstream).
@@ -473,7 +503,10 @@ impl SourceLoop for St2110AudioSrc {
                 let bytes = samples_to_pcm(self.format, &p.samples);
                 let frame = Frame {
                     domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-                    timing: FrameTiming { pts_ns, ..FrameTiming::default() },
+                    timing: FrameTiming {
+                        pts_ns,
+                        ..FrameTiming::default()
+                    },
                     sequence: count,
                     meta: Default::default(),
                 };
@@ -490,7 +523,7 @@ impl SourceLoop for St2110AudioSrc {
 mod tests {
     use super::*;
     use g2g_core::runtime::block_on;
-    use g2g_core::{PushOutcome, MonotonicClock};
+    use g2g_core::{MonotonicClock, PushOutcome};
     use std::sync::Arc;
 
     /// Collects the samples of every DataFrame the source emits.
@@ -531,7 +564,10 @@ mod tests {
         }
         PipelinePacket::DataFrame(Frame {
             domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-            timing: FrameTiming { pts_ns, ..FrameTiming::default() },
+            timing: FrameTiming {
+                pts_ns,
+                ..FrameTiming::default()
+            },
             sequence: 0,
             meta: Default::default(),
         })
@@ -541,7 +577,11 @@ mod tests {
     fn audio_sink_to_src_over_udp_loopback() {
         // End to end on real UDP (localhost): sink -> UDP -> src. UDP buffers the
         // packets, so we can send then receive sequentially, no threads.
-        let caps = Caps::Audio { format: AudioFormat::PcmS16Le, channels: 2, sample_rate: 48_000 };
+        let caps = Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            channels: 2,
+            sample_rate: 48_000,
+        };
 
         // Receiver binds an ephemeral port.
         let mut src = St2110AudioSrc::new();
@@ -560,7 +600,9 @@ mod tests {
         sink.set_clock_sync(ClockSync::new(clock, 1_700_000_000_000_000_000));
 
         // 96 stereo frames (2 ms at 48 kHz -> 2 packets of 48 frames) at PTS 0.
-        let input: Vec<i16> = (0..96i16).flat_map(|i| [i * 200 - 3000, -(i * 91) - 1]).collect();
+        let input: Vec<i16> = (0..96i16)
+            .flat_map(|i| [i * 200 - 3000, -(i * 91) - 1])
+            .collect();
         let mut null = Capture::default();
         block_on(sink.process(pcm_frame(&input, 0), &mut null)).expect("sink sends");
 
@@ -577,7 +619,11 @@ mod tests {
     #[test]
     fn sdp_generated_by_sink_configures_a_src() {
         // Full out-of-band loop for -30 audio: sink SDP -> text -> parse -> src.
-        let caps = Caps::Audio { format: AudioFormat::PcmF32Le, channels: 2, sample_rate: 48_000 };
+        let caps = Caps::Audio {
+            format: AudioFormat::PcmF32Le,
+            channels: 2,
+            sample_rate: 48_000,
+        };
         let mut sink = St2110AudioSink::new();
         sink.host = String::from("239.30.1.1");
         sink.port = 5004;
@@ -630,7 +676,11 @@ mod tests {
             }
         }
 
-        let caps = Caps::Audio { format: AudioFormat::PcmF32Le, channels: 2, sample_rate: 48_000 };
+        let caps = Caps::Audio {
+            format: AudioFormat::PcmF32Le,
+            channels: 2,
+            sample_rate: 48_000,
+        };
         let mut src = St2110AudioSrc::new();
         src.address = String::from("127.0.0.1");
         src.port = 0;
@@ -645,15 +695,19 @@ mod tests {
         sink.configure_pipeline(&caps).expect("sink configures");
 
         // Stereo float samples across the range incl the extremes.
-        let input: Vec<f32> =
-            (0..48).flat_map(|i| [(i as f32 / 47.0) * 2.0 - 1.0, -(i as f32 / 47.0)]).collect();
+        let input: Vec<f32> = (0..48)
+            .flat_map(|i| [(i as f32 / 47.0) * 2.0 - 1.0, -(i as f32 / 47.0)])
+            .collect();
         let mut bytes = Vec::new();
         for &s in &input {
             bytes.extend_from_slice(&s.to_le_bytes());
         }
         let frame = PipelinePacket::DataFrame(Frame {
             domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-            timing: FrameTiming { pts_ns: 0, ..FrameTiming::default() },
+            timing: FrameTiming {
+                pts_ns: 0,
+                ..FrameTiming::default()
+            },
             sequence: 0,
             meta: Default::default(),
         });
@@ -662,12 +716,18 @@ mod tests {
 
         let mut cap = RawCapture::default();
         block_on(src.run(&mut cap)).expect("src runs");
-        let received: Vec<f32> =
-            cap.bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+        let received: Vec<f32> = cap
+            .bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
         assert_eq!(received.len(), input.len(), "all float samples returned");
         for (got, want) in received.iter().zip(&input) {
             // Round-trip through 24-bit is lossy by at most one 24-bit quantum.
-            assert!((got - want).abs() < 1e-6, "F32 survives L24 round trip: {got} vs {want}");
+            assert!(
+                (got - want).abs() < 1e-6,
+                "F32 survives L24 round trip: {got} vs {want}"
+            );
         }
     }
 
@@ -675,7 +735,11 @@ mod tests {
     fn s24_integer_audio_rides_l24_over_udp_loopback() {
         // 24-bit integer PCM maps to L24 with no float detour, so it survives the
         // round trip *exactly* (unlike F32, which is lossy by up to one quantum).
-        let caps = Caps::Audio { format: AudioFormat::PcmS24Le, channels: 2, sample_rate: 48_000 };
+        let caps = Caps::Audio {
+            format: AudioFormat::PcmS24Le,
+            channels: 2,
+            sample_rate: 48_000,
+        };
         let mut src = St2110AudioSrc::new();
         src.address = String::from("127.0.0.1");
         src.port = 0;
@@ -701,7 +765,10 @@ mod tests {
         }
         let frame = PipelinePacket::DataFrame(Frame {
             domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.clone().into_boxed_slice())),
-            timing: FrameTiming { pts_ns: 0, ..FrameTiming::default() },
+            timing: FrameTiming {
+                pts_ns: 0,
+                ..FrameTiming::default()
+            },
             sequence: 0,
             meta: Default::default(),
         });
@@ -729,16 +796,23 @@ mod tests {
         }
         let mut cap = RawCapture::default();
         block_on(src.run(&mut cap)).expect("src runs");
-        assert_eq!(cap.bytes, bytes, "24-bit integer PCM survives S24 -> L24 -> S24 byte-exact");
+        assert_eq!(
+            cap.bytes, bytes,
+            "24-bit integer PCM survives S24 -> L24 -> S24 byte-exact"
+        );
     }
 
     #[test]
     fn sink_properties_round_trip() {
         let mut sink = St2110AudioSink::new();
-        sink.set_property("host", PropValue::Str("239.0.0.1".into())).unwrap();
+        sink.set_property("host", PropValue::Str("239.0.0.1".into()))
+            .unwrap();
         sink.set_property("port", PropValue::Uint(5004)).unwrap();
         sink.set_property("ptime-us", PropValue::Uint(125)).unwrap();
-        assert_eq!(sink.get_property("host"), Some(PropValue::Str("239.0.0.1".into())));
+        assert_eq!(
+            sink.get_property("host"),
+            Some(PropValue::Str("239.0.0.1".into()))
+        );
         assert_eq!(sink.get_property("ptime-us"), Some(PropValue::Uint(125)));
         // 125 us at 48 kHz = 6 sample-frames per packet.
         assert_eq!(frames_per_packet(48_000, 125), 6);

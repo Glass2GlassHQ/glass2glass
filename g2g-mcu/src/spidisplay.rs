@@ -99,7 +99,10 @@ impl<SPI: SpiDevice, DC: OutputPin> SpiDisplaySink<SPI, DC> {
 
     /// An ILI9341 panel (`width` x `height` visible pixels), no inversion.
     pub fn ili9341(spi: SPI, dc: DC, width: u16, height: u16) -> Self {
-        Self { invert: false, ..Self::st7789(spi, dc, width, height) }
+        Self {
+            invert: false,
+            ..Self::st7789(spi, dc, width, height)
+        }
     }
 
     /// Panel-window offset for glass smaller than the controller RAM (e.g. a
@@ -200,7 +203,9 @@ impl<SPI: SpiDevice, DC: OutputPin> SpiDisplaySink<SPI, DC> {
             for (dst, src) in buf.chunks_exact_mut(2).zip(block.chunks_exact(4)) {
                 // Slice patterns, not indexing: no bounds-check panic path may
                 // enter the no-alloc subset (chunk sizes make these infallible).
-                let (&[r, g, b, _], [hi, lo]) = (src, dst) else { continue };
+                let (&[r, g, b, _], [hi, lo]) = (src, dst) else {
+                    continue;
+                };
                 let v = ((r as u16 & 0xF8) << 8) | ((g as u16 & 0xFC) << 3) | (b as u16 >> 3);
                 [*hi, *lo] = v.to_be_bytes();
                 used = used.saturating_add(2);

@@ -38,12 +38,12 @@ use g2g_core::{
     PipelinePacket, PropError, PropKind, PropValue, PropertySpec, VideoCodec,
 };
 
-use crate::mp4box::{ftyp, full_box, mp4_box, MATRIX};
 use crate::fmp4mux::{
     avcc_sample, is_keyframe_nal, parameter_sets, split_annexb, visual_sample_entry, vp8_keyframe,
     vp9_keyframe,
 };
 use crate::mp4audiosink::esds;
+use crate::mp4box::{ftyp, full_box, mp4_box, MATRIX};
 
 /// Video tracks use a 90 kHz media timescale; audio tracks use the sample rate.
 const VIDEO_TIMESCALE: u32 = 90_000;
@@ -53,15 +53,29 @@ const DEFAULT_VIDEO_DURATION_NS: u64 = 33_333_333;
 #[derive(Debug, Clone, Copy)]
 enum PadKind {
     Video(VideoCodec),
-    Audio { format: AudioFormat, channels: u8, rate: u32 },
+    Audio {
+        format: AudioFormat,
+        channels: u8,
+        rate: u32,
+    },
 }
 
 /// A track's `moov` init data, captured from its first access unit. `asc` is the
 /// AAC AudioSpecificConfig (empty for Opus, whose `dOps` is built from the caps).
 #[derive(Debug, Clone)]
 enum TrackInit {
-    Video { codec: VideoCodec, width: u32, height: u32, param_sets: Vec<Vec<u8>> },
-    Audio { format: AudioFormat, channels: u8, rate: u32, asc: Vec<u8> },
+    Video {
+        codec: VideoCodec,
+        width: u32,
+        height: u32,
+        param_sets: Vec<Vec<u8>>,
+    },
+    Audio {
+        format: AudioFormat,
+        channels: u8,
+        rate: u32,
+        asc: Vec<u8>,
+    },
 }
 
 impl TrackInit {
@@ -154,7 +168,9 @@ impl Mp4MuxN {
     }
 
     fn output_caps_value() -> Caps {
-        Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff }
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::IsoBmff,
+        }
     }
 
     fn pad_kind_for(caps: &Caps) -> Option<PadKind> {
@@ -167,7 +183,11 @@ impl Mp4MuxN {
                 format: format @ (AudioFormat::Aac | AudioFormat::Opus),
                 channels,
                 sample_rate,
-            } => Some(PadKind::Audio { format: *format, channels: *channels, rate: *sample_rate }),
+            } => Some(PadKind::Audio {
+                format: *format,
+                channels: *channels,
+                rate: *sample_rate,
+            }),
             _ => None,
         }
     }
@@ -192,31 +212,52 @@ impl Mp4MuxN {
                         // Parameter sets only ride the IDR; a leading P-frame has
                         // none, so wait for the keyframe that carries them.
                         if let Ok(param_sets) = parameter_sets(codec, &nalus) {
-                            let owned: Vec<Vec<u8>> = param_sets.iter().map(|s| s.to_vec()).collect();
-                            self.inits[input] =
-                                Some(TrackInit::Video { codec, width: w, height: h, param_sets: owned });
+                            let owned: Vec<Vec<u8>> =
+                                param_sets.iter().map(|s| s.to_vec()).collect();
+                            self.inits[input] = Some(TrackInit::Video {
+                                codec,
+                                width: w,
+                                height: h,
+                                param_sets: owned,
+                            });
                         }
                     }
                     // VP8/VP9 carry no out-of-band parameter sets; the track is
                     // ready at the first frame (the vpcC uses caps geometry).
                     _ => {
-                        self.inits[input] =
-                            Some(TrackInit::Video { codec, width: w, height: h, param_sets: Vec::new() });
+                        self.inits[input] = Some(TrackInit::Video {
+                            codec,
+                            width: w,
+                            height: h,
+                            param_sets: Vec::new(),
+                        });
                     }
                 }
             }
-            Some(PadKind::Audio { format, channels, rate }) => match format {
+            Some(PadKind::Audio {
+                format,
+                channels,
+                rate,
+            }) => match format {
                 // AAC's AudioSpecificConfig is synthesised from the first ADTS header.
                 AudioFormat::Aac => {
                     if let Some(asc) = asc_from_adts(au) {
-                        self.inits[input] =
-                            Some(TrackInit::Audio { format, channels, rate, asc: asc.to_vec() });
+                        self.inits[input] = Some(TrackInit::Audio {
+                            format,
+                            channels,
+                            rate,
+                            asc: asc.to_vec(),
+                        });
                     }
                 }
                 // Opus needs no in-band init; its `dOps` comes from the caps.
                 _ => {
-                    self.inits[input] =
-                        Some(TrackInit::Audio { format, channels, rate, asc: Vec::new() });
+                    self.inits[input] = Some(TrackInit::Audio {
+                        format,
+                        channels,
+                        rate,
+                        asc: Vec::new(),
+                    });
                 }
             },
             None => {}
@@ -239,7 +280,10 @@ impl Mp4MuxN {
             },
             // Audio access units are always sync samples. AAC strips its ADTS
             // header; Opus packets are stored raw.
-            Some(PadKind::Audio { format: AudioFormat::Aac, .. }) => (strip_adts(au).to_vec(), true),
+            Some(PadKind::Audio {
+                format: AudioFormat::Aac,
+                ..
+            }) => (strip_adts(au).to_vec(), true),
             _ => (au.to_vec(), true),
         }
     }
@@ -248,7 +292,12 @@ impl Mp4MuxN {
     /// = 0) it is flushed immediately as its own `moof`+`mdat` fragment; in
     /// batched mode it accumulates into the track's pending fragment, which is
     /// closed at the next sync sample once the target duration is reached.
-    async fn emit_au(&mut self, input: usize, frame: Frame, out: &mut dyn OutputSink) -> Result<(), G2gError> {
+    async fn emit_au(
+        &mut self,
+        input: usize,
+        frame: Frame,
+        out: &mut dyn OutputSink,
+    ) -> Result<(), G2gError> {
         let MemoryDomain::System(slice) = &frame.domain else {
             return Err(G2gError::UnsupportedDomain);
         };
@@ -257,12 +306,17 @@ impl Mp4MuxN {
         let (sample, is_sync) = self.sample_for(input, au);
 
         let track = &self.inits[input];
-        let timescale = track.as_ref().map(TrackInit::timescale).unwrap_or(VIDEO_TIMESCALE);
+        let timescale = track
+            .as_ref()
+            .map(TrackInit::timescale)
+            .unwrap_or(VIDEO_TIMESCALE);
         let default_dur_ns = match self.kinds[input] {
             // Opus frames are 20 ms (960 samples @ 48 kHz); AAC frames 1024 samples.
-            Some(PadKind::Audio { format: AudioFormat::Opus, rate, .. }) => {
-                960 * 1_000_000_000 / rate.max(1) as u64
-            }
+            Some(PadKind::Audio {
+                format: AudioFormat::Opus,
+                rate,
+                ..
+            }) => 960 * 1_000_000_000 / rate.max(1) as u64,
             Some(PadKind::Audio { rate, .. }) => 1024 * 1_000_000_000 / rate.max(1) as u64,
             _ => DEFAULT_VIDEO_DURATION_NS,
         };
@@ -290,7 +344,11 @@ impl Mp4MuxN {
             pend.base_decode_time = self.decode_time[input];
             pend.base_pts_ns = pts_ns;
         }
-        pend.samples.push(PendingSample { bytes: sample, duration, is_sync });
+        pend.samples.push(PendingSample {
+            bytes: sample,
+            duration,
+            is_sync,
+        });
         pend.accum_ticks += duration as u64;
         self.decode_time[input] += duration as u64;
 
@@ -306,13 +364,20 @@ impl Mp4MuxN {
         if self.fragment_duration_ms == 0 {
             return 0;
         }
-        ns_to_ts(self.fragment_duration_ms.saturating_mul(1_000_000), timescale)
+        ns_to_ts(
+            self.fragment_duration_ms.saturating_mul(1_000_000),
+            timescale,
+        )
     }
 
     /// Write a track's pending fragment as one `moof`+`mdat` (a multi-sample
     /// `trun`), prepending the `ftyp`+`moov` init segment on the first fragment. A
     /// no-op when the track has no buffered samples.
-    async fn flush_track(&mut self, input: usize, out: &mut dyn OutputSink) -> Result<(), G2gError> {
+    async fn flush_track(
+        &mut self,
+        input: usize,
+        out: &mut dyn OutputSink,
+    ) -> Result<(), G2gError> {
         if self.pending[input].samples.is_empty() {
             return Ok(());
         }
@@ -328,11 +393,19 @@ impl Mp4MuxN {
         // track_ID is the 1-based pad index; PTS of the first buffered sample.
         let track_id = (input + 1) as u32;
         self.sequence += 1;
-        bytes.extend_from_slice(&av_fragment(track_id, self.sequence, pend.base_decode_time, &pend.samples));
+        bytes.extend_from_slice(&av_fragment(
+            track_id,
+            self.sequence,
+            pend.base_decode_time,
+            &pend.samples,
+        ));
 
         let out_frame = Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-            FrameTiming { pts_ns: pend.base_pts_ns, ..FrameTiming::default() },
+            FrameTiming {
+                pts_ns: pend.base_pts_ns,
+                ..FrameTiming::default()
+            },
             self.emitted,
         );
         self.emitted += 1;
@@ -363,7 +436,11 @@ impl MultiInputElement for Mp4MuxN {
     /// `video_%u` / `audio_%u` / `sink_%u` each claim the next positional slot (the
     /// track type is read from the input's caps, not its index), so a launch line
     /// can name the pads (`m.video_0` / `m.audio_0`) in any order.
-    fn input_pad_index(&self, _req: &g2g_core::runtime::PadRequest, ordinal: usize) -> Option<usize> {
+    fn input_pad_index(
+        &self,
+        _req: &g2g_core::runtime::PadRequest,
+        ordinal: usize,
+    ) -> Option<usize> {
         (ordinal < self.inputs).then_some(ordinal)
     }
 
@@ -380,12 +457,23 @@ impl MultiInputElement for Mp4MuxN {
     }
 
     fn caps_constraint_for_output(&self) -> Result<CapsConstraint<'_>, G2gError> {
-        Ok(CapsConstraint::Produces(CapsSet::one(Self::output_caps_value())))
+        Ok(CapsConstraint::Produces(CapsSet::one(
+            Self::output_caps_value(),
+        )))
     }
 
-    fn configure_pipeline(&mut self, input: usize, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+    fn configure_pipeline(
+        &mut self,
+        input: usize,
+        absolute_caps: &Caps,
+    ) -> Result<ConfigureOutcome, G2gError> {
         let kind = Self::pad_kind_for(absolute_caps).ok_or(G2gError::CapsMismatch)?;
-        if let Caps::CompressedVideo { width: Dim::Fixed(w), height: Dim::Fixed(h), .. } = absolute_caps {
+        if let Caps::CompressedVideo {
+            width: Dim::Fixed(w),
+            height: Dim::Fixed(h),
+            ..
+        } = absolute_caps
+        {
             self.dims[input] = (*w, *h);
         }
         self.kinds[input] = Some(kind);
@@ -533,7 +621,12 @@ struct TrakMedia {
 
 fn trak_media(init: &TrackInit) -> TrakMedia {
     match init {
-        TrackInit::Video { codec, width, height, param_sets } => {
+        TrackInit::Video {
+            codec,
+            width,
+            height,
+            param_sets,
+        } => {
             let sample_entry = match codec {
                 VideoCodec::Vp8 | VideoCodec::Vp9 => vp_sample_entry(*codec, *width, *height),
                 _ => {
@@ -550,9 +643,16 @@ fn trak_media(init: &TrackInit) -> TrakMedia {
                 is_video: true,
             }
         }
-        TrackInit::Audio { format, channels, rate, asc } => {
+        TrackInit::Audio {
+            format,
+            channels,
+            rate,
+            asc,
+        } => {
             let sample_entry = match format {
-                AudioFormat::Opus => audio_sample_entry(b"Opus", *channels, *rate, &dops(*channels, *rate)),
+                AudioFormat::Opus => {
+                    audio_sample_entry(b"Opus", *channels, *rate, &dops(*channels, *rate))
+                }
                 _ => audio_sample_entry(b"mp4a", *channels, *rate, &esds(asc)),
             };
             TrakMedia {
@@ -638,8 +738,14 @@ fn dops(channels: u8, rate: u32) -> Vec<u8> {
 
 /// One `trak` for a track (`track_ID` 1-based).
 fn trak(track_id: u32, init: &TrackInit) -> Vec<u8> {
-    let TrakMedia { handler, media_header: header, sample_entry, timescale, dims, is_video } =
-        trak_media(init);
+    let TrakMedia {
+        handler,
+        media_header: header,
+        sample_entry,
+        timescale,
+        dims,
+        is_video,
+    } = trak_media(init);
     let tkhd = {
         let mut p = Vec::new();
         p.extend_from_slice(&[0u8; 8]); // times
@@ -649,7 +755,7 @@ fn trak(track_id: u32, init: &TrackInit) -> Vec<u8> {
         p.extend_from_slice(&[0u8; 8]); // reserved
         p.extend_from_slice(&0u16.to_be_bytes()); // layer
         p.extend_from_slice(&0u16.to_be_bytes()); // alternate group
-        // audio tracks carry volume 1.0, video tracks 0.
+                                                  // audio tracks carry volume 1.0, video tracks 0.
         p.extend_from_slice(&(if is_video { 0u16 } else { 0x0100 }).to_be_bytes());
         p.extend_from_slice(&0u16.to_be_bytes()); // reserved
         for m in MATRIX {
@@ -707,7 +813,12 @@ fn trak(track_id: u32, init: &TrackInit) -> Vec<u8> {
 /// One `moof`+`mdat` fragment holding `samples` for `track_id`, with a
 /// multi-sample `trun` (a single sample in the default per-AU mode). `tfdt` is the
 /// track's decode time at the first sample.
-fn av_fragment(track_id: u32, sequence: u64, base_decode_time: u64, samples: &[PendingSample]) -> Vec<u8> {
+fn av_fragment(
+    track_id: u32,
+    sequence: u64,
+    base_decode_time: u64,
+    samples: &[PendingSample],
+) -> Vec<u8> {
     let build_moof = |data_offset: u32| -> Vec<u8> {
         let mfhd = full_box(b"mfhd", 0, 0, &(sequence as u32).to_be_bytes());
         let tfhd = full_box(b"tfhd", 0, 0x020000, &track_id.to_be_bytes()); // default-base-is-moof
@@ -775,7 +886,10 @@ mod tests {
     fn frame(data: Vec<u8>, pts_ns: u64) -> PipelinePacket {
         PipelinePacket::DataFrame(Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-            FrameTiming { pts_ns, ..FrameTiming::default() },
+            FrameTiming {
+                pts_ns,
+                ..FrameTiming::default()
+            },
             0,
         ))
     }
@@ -825,16 +939,27 @@ mod tests {
         // Batched: a 10 ms target (frames are ~33 ms) closes the fragment at the
         // next IDR, so AU0..AU4 form one fragment and AU5 the next (flushed at EOS).
         let mut mux = Mp4MuxN::new(1);
-        mux.set_property("fragment-duration", PropValue::Uint(10)).unwrap();
-        assert_eq!(mux.get_property("fragment-duration"), Some(PropValue::Uint(10)));
+        mux.set_property("fragment-duration", PropValue::Uint(10))
+            .unwrap();
+        assert_eq!(
+            mux.get_property("fragment-duration"),
+            Some(PropValue::Uint(10))
+        );
         mux.configure_pipeline(0, &h264_caps(320, 240)).unwrap();
         let mut sink = CaptureSink::default();
         for (i, au) in aus.iter().enumerate() {
-            mux.process(0, frame(au.clone(), i as u64 * 33_333_333), &mut sink).await.unwrap();
+            mux.process(0, frame(au.clone(), i as u64 * 33_333_333), &mut sink)
+                .await
+                .unwrap();
         }
-        mux.process(0, PipelinePacket::Eos, &mut sink).await.unwrap();
+        mux.process(0, PipelinePacket::Eos, &mut sink)
+            .await
+            .unwrap();
         let (moofs, samples) = moof_and_sample_count(&sink.bytes);
-        assert_eq!(moofs, 2, "six AUs batch into two keyframe-aligned fragments");
+        assert_eq!(
+            moofs, 2,
+            "six AUs batch into two keyframe-aligned fragments"
+        );
         assert_eq!(samples, 6, "every access unit is preserved as a sample");
 
         // Default (per-AU): one fragment per access unit, byte-for-byte as before.
@@ -842,9 +967,13 @@ mod tests {
         mux0.configure_pipeline(0, &h264_caps(320, 240)).unwrap();
         let mut sink0 = CaptureSink::default();
         for (i, au) in aus.iter().enumerate() {
-            mux0.process(0, frame(au.clone(), i as u64 * 33_333_333), &mut sink0).await.unwrap();
+            mux0.process(0, frame(au.clone(), i as u64 * 33_333_333), &mut sink0)
+                .await
+                .unwrap();
         }
-        mux0.process(0, PipelinePacket::Eos, &mut sink0).await.unwrap();
+        mux0.process(0, PipelinePacket::Eos, &mut sink0)
+            .await
+            .unwrap();
         let (moofs0, samples0) = moof_and_sample_count(&sink0.bytes);
         assert_eq!(moofs0, 6, "per-AU mode emits one fragment per access unit");
         assert_eq!(samples0, 6);
@@ -876,7 +1005,10 @@ mod tests {
                 codec: VideoCodec::H264,
                 width: 320,
                 height: 240,
-                param_sets: alloc::vec![alloc::vec![0x67, 0x42, 0x00, 0x1e], alloc::vec![0x68, 0xce]],
+                param_sets: alloc::vec![
+                    alloc::vec![0x67, 0x42, 0x00, 0x1e],
+                    alloc::vec![0x68, 0xce]
+                ],
             }),
             Some(TrackInit::Audio {
                 format: AudioFormat::Aac,
@@ -914,7 +1046,10 @@ mod tests {
         assert_eq!(count(b"trex"), 1);
         let trex = moov.windows(4).position(|w| w == b"trex").unwrap();
         let track_id = u32::from_be_bytes(moov[trex + 8..trex + 12].try_into().unwrap());
-        assert_eq!(track_id, 2, "slot-1 pad keeps track_ID 2 despite the empty slot 0");
+        assert_eq!(
+            track_id, 2,
+            "slot-1 pad keeps track_ID 2 despite the empty slot 0"
+        );
     }
 
     #[test]

@@ -11,7 +11,9 @@ use core::pin::Pin;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
-use g2g_core::runtime::{parse_launch, run_graph, DynSourceLoop, LaunchFactory, Registry, SourceFactory, SourceLoop};
+use g2g_core::runtime::{
+    parse_launch, run_graph, DynSourceLoop, LaunchFactory, Registry, SourceFactory, SourceLoop,
+};
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, ConfigureOutcome, Dim, FrameTiming, G2gError,
     MemoryDomain, NodeKind, OutputSink, PipelineClock, PipelinePacket, Rate, VideoCodec,
@@ -35,7 +37,11 @@ fn h264_caps() -> Caps {
     }
 }
 fn aac_caps() -> Caps {
-    Caps::Audio { format: AudioFormat::Aac, channels: 2, sample_rate: 48_000 }
+    Caps::Audio {
+        format: AudioFormat::Aac,
+        channels: 2,
+        sample_rate: 48_000,
+    }
 }
 
 /// Emits a fixed script of (access-unit, pts_ns) for one elementary stream, then
@@ -65,7 +71,10 @@ impl SourceLoop for AuSrc {
             for (i, (au, pts)) in aus.iter().enumerate() {
                 let frame = Frame::new(
                     MemoryDomain::System(SystemSlice::from_boxed(au.clone().into_boxed_slice())),
-                    FrameTiming { pts_ns: *pts, ..FrameTiming::default() },
+                    FrameTiming {
+                        pts_ns: *pts,
+                        ..FrameTiming::default()
+                    },
                     i as u64,
                 );
                 out.push(PipelinePacket::DataFrame(frame)).await?;
@@ -92,7 +101,11 @@ fn build_h264() -> Box<dyn DynSourceLoop> {
     // SPS (type 7) + PPS (type 8) + IDR (type 5), so the MP4 / Matroska muxers can
     // build their per-track init (their avcC / CodecPrivate needs the parameter
     // sets); the rest are P-slices.
-    let key = annexb(&[&[0x67, 0x42, 0x00, 0x1E, 0x88], &[0x68, 0xCE, 0x3C, 0x80], &[0x65, 0x11]]);
+    let key = annexb(&[
+        &[0x67, 0x42, 0x00, 0x1E, 0x88],
+        &[0x68, 0xCE, 0x3C, 0x80],
+        &[0x65, 0x11],
+    ]);
     Box::new(AuSrc {
         caps: h264_caps(),
         aus: vec![
@@ -147,7 +160,9 @@ fn registry_with_av_sources() -> Registry {
     let mut reg = default_registry();
     reg.register_source(SourceFactory::new("h264src", h264_caps(), build_h264));
     reg.register_source(SourceFactory::new("aacsrc", aac_caps(), build_aac));
-    reg.register_launch(LaunchFactory::new("anysink", Vec::new(), || Box::new(AnySink)));
+    reg.register_launch(LaunchFactory::new("anysink", Vec::new(), || {
+        Box::new(AnySink)
+    }));
     reg
 }
 
@@ -162,8 +177,13 @@ async fn mpegtsmux_fans_in_audio_and_video() {
     )
     .expect("A+V fan-in pipeline parses");
 
-    let stats = run_graph(graph, &ZeroClock, 4).await.expect("A+V TS mux pipeline runs");
-    assert_eq!(stats.frames_consumed, 5, "all five AUs (3 video + 2 audio) muxed into TS frames");
+    let stats = run_graph(graph, &ZeroClock, 4)
+        .await
+        .expect("A+V TS mux pipeline runs");
+    assert_eq!(
+        stats.frames_consumed, 5,
+        "all five AUs (3 video + 2 audio) muxed into TS frames"
+    );
 }
 
 #[tokio::test]
@@ -183,7 +203,11 @@ async fn multi_input_mpegtsmux_builds_a_two_input_muxer_node() {
         .collect();
     // Two inbound links select the multi-input `tsmuxn::TsMux` over the
     // single-input launch element registered under the same name.
-    assert_eq!(muxers, [NodeKind::Muxer(2)], "one muxer node with two input pads");
+    assert_eq!(
+        muxers,
+        [NodeKind::Muxer(2)],
+        "one muxer node with two input pads"
+    );
 }
 
 #[tokio::test]
@@ -193,8 +217,14 @@ async fn single_input_mpegtsmux_stays_a_transform() {
     // transform node), not the fan-in muxer. It must not appear as a Muxer node.
     let graph = parse_launch(&reg, "h264src ! mpegtsmux ! anysink").expect("parses");
     let vg = graph.finish().expect("valid graph");
-    let has_muxer = vg.topo().iter().any(|&n| matches!(vg.kind(n), NodeKind::Muxer(_)));
-    assert!(!has_muxer, "single-input mpegtsmux is a transform, not a muxer node");
+    let has_muxer = vg
+        .topo()
+        .iter()
+        .any(|&n| matches!(vg.kind(n), NodeKind::Muxer(_)));
+    assert!(
+        !has_muxer,
+        "single-input mpegtsmux is a transform, not a muxer node"
+    );
 }
 
 // M470: the fan-in muxer shape (`name=m`) now accepts the same properties as its
@@ -213,11 +243,18 @@ async fn mpegtsmux_fan_in_accepts_pat_interval() {
     )
     .expect("fan-in mpegtsmux accepts pat-interval");
     let stats = run_graph(graph, &ZeroClock, 4).await.expect("runs");
-    assert_eq!(stats.frames_consumed, 5, "all five AUs muxed with periodic PSI");
+    assert_eq!(
+        stats.frames_consumed, 5,
+        "all five AUs muxed with periodic PSI"
+    );
 
     // An unknown property on the fan-in muxer is still rejected (no silent accept).
     assert!(
-        parse_launch(&reg, "h264src ! m.   aacsrc ! m.   mpegtsmux name=m bogus=1 ! anysink").is_err(),
+        parse_launch(
+            &reg,
+            "h264src ! m.   aacsrc ! m.   mpegtsmux name=m bogus=1 ! anysink"
+        )
+        .is_err(),
         "an unknown muxer property is rejected"
     );
 }
@@ -247,5 +284,8 @@ async fn matroskamux_fan_in_accepts_streamable() {
     )
     .expect("fan-in matroskamux accepts streamable");
     let stats = run_graph(graph, &ZeroClock, 4).await.expect("runs");
-    assert_eq!(stats.frames_consumed, 5, "all five AUs muxed in streamable mode");
+    assert_eq!(
+        stats.frames_consumed, 5,
+        "all five AUs muxed in streamable mode"
+    );
 }

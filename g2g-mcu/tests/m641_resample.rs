@@ -42,12 +42,17 @@ fn run_once(from: SampleRate, to: SampleRate, samples: &[i16]) -> Vec<u8> {
     // SAFETY: the rings outlive every frame in this test.
     let mut rs = unsafe { Resampler::with_ring(from, to, &ring) };
     let input = frame_of(&input_ring, &le_bytes(samples), 0, 0);
-    let out = block_on(rs.process(input)).expect("resample").expect("frame");
+    let out = block_on(rs.process(input))
+        .expect("resample")
+        .expect("frame");
     payload(&out).to_vec()
 }
 
 fn to_samples(bytes: &[u8]) -> Vec<i16> {
-    bytes.chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect()
+    bytes
+        .chunks_exact(2)
+        .map(|c| i16::from_le_bytes([c[0], c[1]]))
+        .collect()
 }
 
 #[test]
@@ -59,7 +64,11 @@ fn table_invariants() {
         for p in 0..t.l as usize {
             let branch = &t.coeffs[p * t.taps..(p + 1) * t.taps];
             let sum: i32 = branch.iter().map(|&c| c as i32).sum();
-            assert_eq!(sum, 1 << COEFF_SHIFT, "phase {p} of {from:?}->{to:?} sums to unity");
+            assert_eq!(
+                sum,
+                1 << COEFF_SHIFT,
+                "phase {p} of {from:?}->{to:?} sums to unity"
+            );
             let abs: i32 = branch.iter().map(|&c| (c as i32).abs()).sum();
             assert!(abs < 60_000, "i32 accumulator headroom, phase {p}");
         }
@@ -79,7 +88,10 @@ fn dc_gain_is_exact() {
         // exactly the input level (per-phase sums are exactly unity).
         let settle = 2 * t.taps * t.l as usize / t.m as usize;
         let tail = &out[settle.min(out.len())..];
-        assert!(!tail.is_empty(), "enough settled output for {from:?}->{to:?}");
+        assert!(
+            !tail.is_empty(),
+            "enough settled output for {from:?}->{to:?}"
+        );
         assert!(
             tail.iter().all(|&s| s == 1000),
             "{from:?}->{to:?}: settled DC must be exact, got {:?}",
@@ -157,7 +169,9 @@ fn chunked_streaming_matches_one_shot() {
     // The state (history + fractional position) must make frame boundaries
     // invisible: odd-sized chunks concatenate to exactly the one-shot bytes.
     let n = 2000;
-    let sig: Vec<i16> = (0..n).map(|i| ((i * 37 % 256) as i16 - 128) * 199).collect();
+    let sig: Vec<i16> = (0..n)
+        .map(|i| ((i * 37 % 256) as i16 - 128) * 199)
+        .collect();
     for (from, to) in [(Hz8000, Hz48000), (Hz48000, Hz8000), (Hz16000, Hz48000)] {
         let whole = run_once(from, to, &sig);
         let out_ring: StaticLendRing<2, { 96 * 1024 }> = StaticLendRing::new();
@@ -167,10 +181,15 @@ fn chunked_streaming_matches_one_shot() {
         for (i, chunk) in sig.chunks(311).enumerate() {
             let input_ring: StaticLendRing<1, 1024> = StaticLendRing::new();
             let input = frame_of(&input_ring, &le_bytes(chunk), 0, i as u64);
-            let out = block_on(rs.process(input)).expect("resample").expect("frame");
+            let out = block_on(rs.process(input))
+                .expect("resample")
+                .expect("frame");
             chunked.extend_from_slice(payload(&out));
         }
-        assert_eq!(chunked, whole, "{from:?}->{to:?}: chunking must be invisible");
+        assert_eq!(
+            chunked, whole,
+            "{from:?}->{to:?}: chunking must be invisible"
+        );
     }
 }
 
@@ -192,7 +211,10 @@ fn element_mechanics() {
     // SAFETY: as above.
     let mut up = unsafe { Resampler::with_ring(Hz8000, Hz16000, &ring) };
     let torn = frame_of(&input_ring2, &[1, 2, 3], 0, 0);
-    assert_eq!(block_on(up.process(torn)).unwrap_err(), G2gError::CapsMismatch);
+    assert_eq!(
+        block_on(up.process(torn)).unwrap_err(),
+        G2gError::CapsMismatch
+    );
 
     // Timing/sequence inheritance through a real conversion.
     let input_ring3: StaticLendRing<1, 64> = StaticLendRing::new();

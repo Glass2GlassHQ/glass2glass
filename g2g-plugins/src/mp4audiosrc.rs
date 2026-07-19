@@ -71,11 +71,13 @@ impl Mp4AudioSrc {
 }
 
 impl SourceLoop for Mp4AudioSrc {
-    type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
+    type RunFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
     where
         Self: 'a;
 
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 

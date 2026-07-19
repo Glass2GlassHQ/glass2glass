@@ -21,7 +21,10 @@
 //! are HEVC (the transfer stage is codec-independent, keyed only off the parsed
 //! `transfer_characteristics`). Runs on the RTX 3060; skips with no adapter / no
 //! compute queue / no 10-bit HEVC decode.
-#![cfg(all(any(target_os = "linux", target_os = "windows"), feature = "vulkan-video"))]
+#![cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    feature = "vulkan-video"
+))]
 // The transfer constants are written to the full spec precision so they read
 // identically to the GLSL shader literals (both round to the same f32).
 #![allow(clippy::excessive_precision)]
@@ -109,7 +112,11 @@ fn bt709_oetf(l: f32) -> f32 {
 /// The HDR->SDR pipeline `tonemap_hdr` from the shader, `xfer` = 1 (PQ) / 2 (HLG).
 fn tonemap_hdr(mut rgb: [f32; 3], xfer: u32) -> [f32; 3] {
     if xfer == 2 {
-        let s = [hlg_inv_oetf(rgb[0]), hlg_inv_oetf(rgb[1]), hlg_inv_oetf(rgb[2])];
+        let s = [
+            hlg_inv_oetf(rgb[0]),
+            hlg_inv_oetf(rgb[1]),
+            hlg_inv_oetf(rgb[2]),
+        ];
         let yscene = 0.2627 * s[0] + 0.6780 * s[1] + 0.0593 * s[2];
         let g = yscene.max(1e-6).powf(0.2);
         rgb = [
@@ -127,7 +134,11 @@ fn tonemap_hdr(mut rgb: [f32; 3], xfer: u32) -> [f32; 3] {
         rgb = [rgb[0] * s, rgb[1] * s, rgb[2] * s];
     }
     let norm = pq_eotf(pq_max).max(1e-6);
-    let lin = bt2020_to_709([pq_eotf(rgb[0]) / norm, pq_eotf(rgb[1]) / norm, pq_eotf(rgb[2]) / norm]);
+    let lin = bt2020_to_709([
+        pq_eotf(rgb[0]) / norm,
+        pq_eotf(rgb[1]) / norm,
+        pq_eotf(rgb[2]) / norm,
+    ]);
     [bt709_oetf(lin[0]), bt709_oetf(lin[1]), bt709_oetf(lin[2])]
 }
 
@@ -154,7 +165,9 @@ fn half_to_f32(h: u16) -> f32 {
             ((sign as u32) << 31) | (((e + 127) as u32) << 23) | (m << 13)
         }
         0x1f => ((sign as u32) << 31) | (0xff << 23) | ((mant as u32) << 13),
-        _ => ((sign as u32) << 31) | (((exp as i32 - 15 + 127) as u32) << 23) | ((mant as u32) << 13),
+        _ => {
+            ((sign as u32) << 31) | (((exp as i32 - 15 + 127) as u32) << 23) | ((mant as u32) << 13)
+        }
     };
     f32::from_bits(bits)
 }
@@ -164,7 +177,11 @@ fn rgba16f_to_rgb(bytes: &[u8]) -> Vec<[f32; 3]> {
     (0..W * H)
         .map(|p| {
             let o = p * 4;
-            [half_to_f32(le16(bytes, o)), half_to_f32(le16(bytes, o + 1)), half_to_f32(le16(bytes, o + 2))]
+            [
+                half_to_f32(le16(bytes, o)),
+                half_to_f32(le16(bytes, o + 1)),
+                half_to_f32(le16(bytes, o + 2)),
+            ]
         })
         .collect()
 }
@@ -179,8 +196,11 @@ fn nv12_10bit_to_rgb(luma: &[u8], chroma: &[u8], color: VideoColorSpace) -> Vec<
         ColorMatrix::Bt2020Ncl => (0.2627, 0.0593),
     };
     let kg = 1.0 - kr - kb;
-    let (y_off, y_span, c_off, c_span) =
-        if color.full_range { (0.0, 1023.0, 512.0, 1023.0) } else { (64.0, 876.0, 512.0, 896.0) };
+    let (y_off, y_span, c_off, c_span) = if color.full_range {
+        (0.0, 1023.0, 512.0, 1023.0)
+    } else {
+        (64.0, 876.0, 512.0, 896.0)
+    };
     let (cr_r, cb_b) = (2.0 * (1.0 - kr), 2.0 * (1.0 - kb));
     let (cr_g, cb_g) = (2.0 * kr * (1.0 - kr) / kg, 2.0 * kb * (1.0 - kb) / kg);
     let mut out = Vec::with_capacity(W * H);
@@ -231,7 +251,12 @@ fn pq_transfer_anchors() {
         approx(pq_eotf(pq_oetf(y)), y, 1e-3, "PQ round-trip");
     }
     // 100 nits (SDR peak) -> PQ code ~0.5081.
-    approx(pq_oetf(100.0 / 10000.0), 0.5081, 2e-3, "PQ code for 100 nits");
+    approx(
+        pq_oetf(100.0 / 10000.0),
+        0.5081,
+        2e-3,
+        "PQ code for 100 nits",
+    );
 }
 
 #[test]
@@ -248,7 +273,12 @@ fn eetf_endpoints_and_monotonic() {
     let pq_max = pq_oetf(DST_PEAK / 10000.0);
     // Black maps to black; the source peak maps to the target peak.
     approx(bt2390_eetf(0.0, pq_w, pq_max), 0.0, 1e-4, "EETF(0)");
-    approx(bt2390_eetf(pq_w, pq_w, pq_max), pq_max, 2e-3, "EETF(peak) = target peak");
+    approx(
+        bt2390_eetf(pq_w, pq_w, pq_max),
+        pq_max,
+        2e-3,
+        "EETF(peak) = target peak",
+    );
     // Monotonic non-decreasing across the source range.
     let mut prev = -1.0;
     for i in 0..=64 {
@@ -258,14 +288,20 @@ fn eetf_endpoints_and_monotonic() {
     }
     // A highlight above the target peak is rolled off below the source peak's raw
     // value (compression actually happened).
-    assert!(bt2390_eetf(pq_w, pq_w, pq_max) < pq_w, "EETF must compress the peak");
+    assert!(
+        bt2390_eetf(pq_w, pq_w, pq_max) < pq_w,
+        "EETF must compress the peak"
+    );
 }
 
 // ---- GPU integration: tone-mapped output matches the CPU pipeline ----
 
 fn run_codec(stream: &[u8], xfer: u32, label: &str) {
     let ps = extract_h265_parameter_sets(stream).expect("vps/sps/pps");
-    assert_eq!(ps.sps.bit_depth_luma_minus8, 2, "{label} fixture not 10-bit");
+    assert_eq!(
+        ps.sps.bit_depth_luma_minus8, 2,
+        "{label} fixture not 10-bit"
+    );
     let color = VideoColorSpace::from_cicp(
         ps.sps.matrix_coefficients,
         ps.sps.transfer_characteristics,
@@ -273,24 +309,41 @@ fn run_codec(stream: &[u8], xfer: u32, label: &str) {
         H as u32,
     );
     let expect_xfer = matches!(color.transfer, TransferFunction::Pq | TransferFunction::Hlg);
-    assert!(expect_xfer, "{label} fixture is not HDR-tagged (transfer {:?})", color.transfer);
+    assert!(
+        expect_xfer,
+        "{label} fixture is not HDR-tagged (transfer {:?})",
+        color.transfer
+    );
 
-    let Some(device) = open_or_skip(block_on(open_h265_decode_device())) else { return };
+    let Some(device) = open_or_skip(block_on(open_h265_decode_device())) else {
+        return;
+    };
     let std = to_std_h265_params(&ps);
 
     // CPU reference: system 10-bit decode -> ycbcr R'G'B' -> the shader pipeline.
-    let session = device.create_h265_session(&std, W as u32, H as u32).expect("session");
-    let mut cpu = device.create_h265_dpb_decoder(&session, &ps).expect("cpu decoder");
+    let session = device
+        .create_h265_session(&std, W as u32, H as u32)
+        .expect("session");
+    let mut cpu = device
+        .create_h265_dpb_decoder(&session, &ps)
+        .expect("cpu decoder");
     let cpu_ref: Vec<Vec<[f32; 3]>> = cpu
         .decode_all(stream)
         .expect("cpu decode")
         .iter()
-        .map(|f| nv12_10bit_to_rgb(&f.luma, &f.chroma, color).iter().map(|&c| tonemap_hdr(c, xfer)).collect())
+        .map(|f| {
+            nv12_10bit_to_rgb(&f.luma, &f.chroma, color)
+                .iter()
+                .map(|&c| tonemap_hdr(c, xfer))
+                .collect()
+        })
         .collect();
     assert!(!cpu_ref.is_empty());
 
     // Passthrough textures (no transfer stage) to prove the tone-map changed pixels.
-    let pass_session = device.create_h265_session(&std, W as u32, H as u32).expect("session");
+    let pass_session = device
+        .create_h265_session(&std, W as u32, H as u32)
+        .expect("session");
     let mut pass = match device.create_h265_dpb_decoder_gpu(&pass_session, &ps) {
         Ok(d) => d,
         Err(VulkanVideoError::NoComputeQueue) => {
@@ -303,12 +356,20 @@ fn run_codec(stream: &[u8], xfer: u32, label: &str) {
         }
         Err(e) => panic!("passthrough decoder: {e:?}"),
     };
-    let pass_rb: Vec<Vec<[f32; 3]>> =
-        pass.decode_all_to_textures(stream).expect("passthrough textures").iter().map(|t| rgba16f_to_rgb(&device.read_rgba_texture(t))).collect();
+    let pass_rb: Vec<Vec<[f32; 3]>> = pass
+        .decode_all_to_textures(stream)
+        .expect("passthrough textures")
+        .iter()
+        .map(|t| rgba16f_to_rgb(&device.read_rgba_texture(t)))
+        .collect();
 
     // Tone-mapped textures.
-    let tm_session = device.create_h265_session(&std, W as u32, H as u32).expect("session");
-    let mut tm = device.create_h265_dpb_decoder_gpu_tonemap(&tm_session, &ps).expect("tonemap decoder");
+    let tm_session = device
+        .create_h265_session(&std, W as u32, H as u32)
+        .expect("session");
+    let mut tm = device
+        .create_h265_dpb_decoder_gpu_tonemap(&tm_session, &ps)
+        .expect("tonemap decoder");
     let texes = tm.decode_all_to_textures(stream).expect("tonemap textures");
     assert_eq!(texes.len(), cpu_ref.len());
 
@@ -330,12 +391,24 @@ fn run_codec(stream: &[u8], xfer: u32, label: &str) {
         }
         let mean = sum / n as f64;
         worst_mean = worst_mean.max(mean);
-        assert!(mean < 0.03, "{label} frame {i}: GPU tone-map mean abs diff {mean:.4} (worst {worst:.3})");
+        assert!(
+            mean < 0.03,
+            "{label} frame {i}: GPU tone-map mean abs diff {mean:.4} (worst {worst:.3})"
+        );
         // The tone-map demonstrably changed the image vs passthrough.
-        let changed = gpu.iter().zip(pass_rb[i].iter()).any(|(g, p)| (g[0] - p[0]).abs() > 0.02);
-        assert!(changed, "{label} frame {i}: tone-map output equals passthrough (transfer stage did not run)");
+        let changed = gpu
+            .iter()
+            .zip(pass_rb[i].iter())
+            .any(|(g, p)| (g[0] - p[0]).abs() > 0.02);
+        assert!(
+            changed,
+            "{label} frame {i}: tone-map output equals passthrough (transfer stage did not run)"
+        );
     }
-    eprintln!("m574 {label}: {} tone-mapped textures match CPU pipeline (worst mean {worst_mean:.4})", texes.len());
+    eprintln!(
+        "m574 {label}: {} tone-mapped textures match CPU pipeline (worst mean {worst_mean:.4})",
+        texes.len()
+    );
 }
 
 #[test]

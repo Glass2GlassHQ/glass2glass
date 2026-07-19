@@ -51,5 +51,8 @@ async fn appsink_delivers_through_a_caps_driven_transform() {
             Pull::Empty => break,
         }
     }
-    assert_eq!(delivered, 1, "appsink delivered the frame past the re-configure");
+    assert_eq!(
+        delivered, 1,
+        "appsink delivered the frame past the re-configure"
+    );
 }

@@ -68,7 +68,10 @@ impl SourceLoop for BlackVideoSrc {
                 let buf = [0u8, 0, 0, 255].repeat((W * H) as usize).into_boxed_slice();
                 let frame = Frame::new(
                     MemoryDomain::System(SystemSlice::from_boxed(buf)),
-                    FrameTiming { pts_ns: pts, ..FrameTiming::default() },
+                    FrameTiming {
+                        pts_ns: pts,
+                        ..FrameTiming::default()
+                    },
                     0,
                 );
                 out.push(PipelinePacket::DataFrame(frame)).await?;
@@ -93,7 +96,9 @@ impl SourceLoop for SrtTextSrc {
         Self: 'a;
 
     fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
-        core::future::ready(Ok(Caps::Text { format: TextFormat::Srt }))
+        core::future::ready(Ok(Caps::Text {
+            format: TextFormat::Srt,
+        }))
     }
     fn configure_pipeline(&mut self, _caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         Ok(ConfigureOutcome::Accepted)
@@ -145,7 +150,10 @@ impl AsyncElement for RecSink {
                     let buf = slice.as_slice();
                     let painted = (0..(W * H) as usize)
                         .any(|i| buf[i * 4] != 0 || buf[i * 4 + 1] != 0 || buf[i * 4 + 2] != 0);
-                    self.log.lock().unwrap().push((frame.timing.pts_ns, painted));
+                    self.log
+                        .lock()
+                        .unwrap()
+                        .push((frame.timing.pts_ns, painted));
                 }
             }
             Ok(())
@@ -173,8 +181,13 @@ async fn streamed_srt_track_paints_video_in_the_cue_window() {
     g.link(subparse, mux.input(1)).unwrap();
     g.link(mux.output(), sink).unwrap();
 
-    let stats = run_graph(g, &NullClock, 4).await.expect("overlay graph runs");
-    assert_eq!(stats.frames_consumed, 4, "every video frame reaches the sink");
+    let stats = run_graph(g, &NullClock, 4)
+        .await
+        .expect("overlay graph runs");
+    assert_eq!(
+        stats.frames_consumed, 4,
+        "every video frame reaches the sink"
+    );
 
     let log = log.lock().unwrap();
     assert_eq!(log.len(), 4);

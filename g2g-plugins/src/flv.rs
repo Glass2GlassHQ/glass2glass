@@ -331,7 +331,7 @@ impl FlvMuxer {
         }
         out.extend_from_slice(b"FLV");
         out.push(1); // version
-        // Flags: bit 0 video present, bit 2 audio present.
+                     // Flags: bit 0 video present, bit 2 audio present.
         let mut flags = 0u8;
         if self.has_video {
             flags |= 0x01;
@@ -458,7 +458,10 @@ fn parse_tag(tag_type: u8, timestamp: u32, body: &[u8]) -> Option<FlvUnit> {
             }
             // The tag timestamp is the decode time; the signed 24-bit composition
             // offset gives the presentation time (negative clamps to 0).
-            let cts = ((body[2] as i32) << 16 | (body[3] as i32) << 8 | body[4] as i32) << 8 >> 8;
+            let cts =
+                ((*body.get(2)? as i32) << 16 | (*body.get(3)? as i32) << 8 | *body.get(4)? as i32)
+                    << 8
+                    >> 8;
             let pts_ms = (timestamp as i64 + cts as i64).clamp(0, u32::MAX as i64) as u32;
             // Frame type 1 is a keyframe (2 interframe, 3..5 disposable/generated).
             let keyframe = first >> 4 == 1;
@@ -547,6 +550,26 @@ mod tests {
         s
     }
 
+    // regression: an AVC video tag whose body is shorter than the 5-byte AVC
+    // header (packet type + 24-bit composition offset) must be skipped, not
+    // panic on an out-of-bounds index into the composition offset. Found by
+    // fuzzing the demuxer.
+    #[test]
+    fn truncated_avc_video_tag_does_not_panic() {
+        // AVC (codec 7), avc_packet_type 1, then a body that runs out before the
+        // 3-byte composition offset is complete
+        for body in [
+            vec![0x17u8, 0x01],
+            vec![0x17, 0x01, 0x00],
+            vec![0x17, 0x01, 0x00, 0x00],
+        ] {
+            let stream = flv_stream(&[tag(TAG_VIDEO, 0, &body)]);
+            let mut d = FlvDemuxer::new();
+            d.push_data(&stream); // must not panic
+            assert!(d.take_units().is_empty(), "truncated tag is skipped");
+        }
+    }
+
     #[test]
     fn demuxes_interleaved_video_and_audio() {
         let v0 = [0u8, 0, 0, 5, 0x65, 0x11];
@@ -565,15 +588,33 @@ mod tests {
         assert_eq!(units.len(), 3);
         assert_eq!(
             units[0],
-            FlvUnit { track: FlvTrack::Video, data: v0.to_vec(), pts_ms: 0, dts_ms: 0, keyframe: true }
+            FlvUnit {
+                track: FlvTrack::Video,
+                data: v0.to_vec(),
+                pts_ms: 0,
+                dts_ms: 0,
+                keyframe: true
+            }
         );
         assert_eq!(
             units[1],
-            FlvUnit { track: FlvTrack::Audio, data: a0.to_vec(), pts_ms: 0, dts_ms: 0, keyframe: true }
+            FlvUnit {
+                track: FlvTrack::Audio,
+                data: a0.to_vec(),
+                pts_ms: 0,
+                dts_ms: 0,
+                keyframe: true
+            }
         );
         assert_eq!(
             units[2],
-            FlvUnit { track: FlvTrack::Video, data: v1.to_vec(), pts_ms: 33, dts_ms: 33, keyframe: true }
+            FlvUnit {
+                track: FlvTrack::Video,
+                data: v1.to_vec(),
+                pts_ms: 33,
+                dts_ms: 33,
+                keyframe: true
+            }
         );
     }
 
@@ -606,14 +647,19 @@ mod tests {
         ]);
         let mut d = FlvDemuxer::new();
         d.push_data(&stream);
-        assert_eq!(d.metadata(), Some(&b"onMetaData-amf0-blob"[..]), "script body retained");
+        assert_eq!(
+            d.metadata(),
+            Some(&b"onMetaData-amf0-blob"[..]),
+            "script body retained"
+        );
         assert_eq!(d.take_units().len(), 1, "the media frame still demuxes");
     }
 
     #[test]
     fn mux_writes_on_metadata_script_tag() {
-        let tags: TagList =
-            [Tag::Title("Clip".into()), Tag::Encoder("g2g".into())].into_iter().collect();
+        let tags: TagList = [Tag::Title("Clip".into()), Tag::Encoder("g2g".into())]
+            .into_iter()
+            .collect();
         let mut mux = FlvMuxer::new(FlvTrack::Video).with_tags(tags);
         let bytes = mux.push_au(&[0x65, 0xAA], 0);
 
@@ -622,10 +668,17 @@ mod tests {
         let mut d = FlvDemuxer::new();
         d.push_data(&bytes);
         let meta = d.metadata().expect("script tag body retained");
-        assert!(meta.starts_with(&[AMF0_STRING, 0, 10]), "begins with the onMetaData string");
+        assert!(
+            meta.starts_with(&[AMF0_STRING, 0, 10]),
+            "begins with the onMetaData string"
+        );
         assert!(meta.windows(10).any(|w| w == b"onMetaData"));
         assert!(meta.windows(3).any(|w| w == b"g2g"));
-        assert_eq!(d.take_units().len(), 1, "the media AU still demuxes after the script tag");
+        assert_eq!(
+            d.take_units().len(),
+            1,
+            "the media AU still demuxes after the script tag"
+        );
     }
 
     #[test]
@@ -634,7 +687,10 @@ mod tests {
         let bytes = mux.push_au(&[0x65, 0xAA], 0);
         let mut d = FlvDemuxer::new();
         d.push_data(&bytes);
-        assert!(d.metadata().is_none(), "no script tag without attached tags");
+        assert!(
+            d.metadata().is_none(),
+            "no script tag without attached tags"
+        );
         assert_eq!(d.take_units().len(), 1);
     }
 
@@ -674,8 +730,20 @@ mod tests {
         assert_eq!(
             units,
             vec![
-                FlvUnit { track: FlvTrack::Video, data: aus[0].to_vec(), pts_ms: 0, dts_ms: 0, keyframe: true },
-                FlvUnit { track: FlvTrack::Video, data: aus[1].to_vec(), pts_ms: 33, dts_ms: 33, keyframe: true },
+                FlvUnit {
+                    track: FlvTrack::Video,
+                    data: aus[0].to_vec(),
+                    pts_ms: 0,
+                    dts_ms: 0,
+                    keyframe: true
+                },
+                FlvUnit {
+                    track: FlvTrack::Video,
+                    data: aus[1].to_vec(),
+                    pts_ms: 33,
+                    dts_ms: 33,
+                    keyframe: true
+                },
             ]
         );
     }
@@ -719,8 +787,16 @@ mod tests {
 
         let mut d = FlvDemuxer::new();
         d.push_data(&stream);
-        assert_eq!(d.video_config(), Some(&avcc[..]), "avcC retained as the side channel");
-        assert_eq!(d.audio_config(), Some(&asc[..]), "AudioSpecificConfig retained");
+        assert_eq!(
+            d.video_config(),
+            Some(&avcc[..]),
+            "avcC retained as the side channel"
+        );
+        assert_eq!(
+            d.audio_config(),
+            Some(&asc[..]),
+            "AudioSpecificConfig retained"
+        );
         assert_eq!(d.take_units().len(), 1, "config tags are not media units");
     }
 
@@ -737,9 +813,17 @@ mod tests {
         let mut d = FlvDemuxer::new();
         d.push_data(&stream);
         let units = d.take_units();
-        assert_eq!((units[0].dts_ms, units[0].pts_ms), (100, 133), "pts = dts + cts");
+        assert_eq!(
+            (units[0].dts_ms, units[0].pts_ms),
+            (100, 133),
+            "pts = dts + cts"
+        );
         assert!(!units[0].keyframe, "frame type 2 is an interframe");
-        assert_eq!((units[1].dts_ms, units[1].pts_ms), (10, 0), "negative pts clamps to 0");
+        assert_eq!(
+            (units[1].dts_ms, units[1].pts_ms),
+            (10, 0),
+            "negative pts clamps to 0"
+        );
     }
 
     #[test]

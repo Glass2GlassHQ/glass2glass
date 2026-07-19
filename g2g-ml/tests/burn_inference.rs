@@ -103,12 +103,18 @@ async fn gpu_linear_matches_cpu_matmul() {
 
     let mut out = Collect::default();
     element
-        .process(PipelinePacket::DataFrame(rgba_frame(rgba.clone(), 1234, 5)), &mut out)
+        .process(
+            PipelinePacket::DataFrame(rgba_frame(rgba.clone(), 1234, 5)),
+            &mut out,
+        )
         .await
         .expect("burn infer frame 1");
     // second frame: caps must not re-emit.
     element
-        .process(PipelinePacket::DataFrame(rgba_frame(rgba.clone(), 5678, 6)), &mut out)
+        .process(
+            PipelinePacket::DataFrame(rgba_frame(rgba.clone(), 5678, 6)),
+            &mut out,
+        )
         .await
         .expect("burn infer frame 2");
 

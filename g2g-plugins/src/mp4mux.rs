@@ -92,12 +92,20 @@ impl Mp4Mux {
     }
 
     fn output_caps() -> Caps {
-        Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff }
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::IsoBmff,
+        }
     }
 
     /// The compressed-video codecs `Fmp4Muxer` can carry: H.264 or H.265.
     fn accept_caps(&mut self, caps: &Caps) -> Result<(), G2gError> {
-        let Caps::CompressedVideo { codec, width, height, .. } = caps else {
+        let Caps::CompressedVideo {
+            codec,
+            width,
+            height,
+            ..
+        } = caps
+        else {
             return Err(G2gError::CapsMismatch);
         };
         if !matches!(codec, VideoCodec::H264 | VideoCodec::H265) {
@@ -144,9 +152,10 @@ impl AsyncElement for Mp4Mux {
 
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
-            Caps::CompressedVideo { codec: VideoCodec::H264 | VideoCodec::H265, .. } => {
-                CapsSet::one(Self::output_caps())
-            }
+            Caps::CompressedVideo {
+                codec: VideoCodec::H264 | VideoCodec::H265,
+                ..
+            } => CapsSet::one(Self::output_caps()),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
     }
@@ -205,13 +214,20 @@ impl AsyncElement for Mp4Mux {
                         Fmp4Muxer::new(self.codec, self.width, self.height, self.tags.clone())
                             .with_fragment_duration_ns(frag_ns)
                     });
-                    let bytes = mux.push_au(slice.as_slice(), frame.timing.pts_ns, frame.timing.duration_ns)?;
+                    let bytes = mux.push_au(
+                        slice.as_slice(),
+                        frame.timing.pts_ns,
+                        frame.timing.duration_ns,
+                    )?;
                     // In batched mode a buffering push yields no bytes yet; don't
                     // emit an empty frame.
                     if !bytes.is_empty() {
                         let out_frame = Frame::new(
                             MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-                            FrameTiming { pts_ns: frame.timing.pts_ns, ..FrameTiming::default() },
+                            FrameTiming {
+                                pts_ns: frame.timing.pts_ns,
+                                ..FrameTiming::default()
+                            },
                             self.emitted,
                         );
                         self.emitted += 1;
@@ -228,7 +244,9 @@ impl AsyncElement for Mp4Mux {
                         let tail = mux.flush();
                         if !tail.is_empty() {
                             let out_frame = Frame::new(
-                                MemoryDomain::System(SystemSlice::from_boxed(tail.into_boxed_slice())),
+                                MemoryDomain::System(SystemSlice::from_boxed(
+                                    tail.into_boxed_slice(),
+                                )),
                                 FrameTiming::default(),
                                 self.emitted,
                             );
@@ -307,7 +325,10 @@ mod tests {
     fn frame(data: Vec<u8>, pts_ns: u64) -> PipelinePacket {
         PipelinePacket::DataFrame(Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-            FrameTiming { pts_ns, ..FrameTiming::default() },
+            FrameTiming {
+                pts_ns,
+                ..FrameTiming::default()
+            },
             0,
         ))
     }
@@ -328,7 +349,9 @@ mod tests {
         };
         assert!(matches!(
             f(&h264_caps(320, 240)).alternatives(),
-            [Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff }]
+            [Caps::ByteStream {
+                encoding: ByteStreamEncoding::IsoBmff
+            }]
         ));
     }
 
@@ -346,12 +369,18 @@ mod tests {
         mux.configure_pipeline(&h264_caps(320, 240)).unwrap();
         let mut sink = CaptureSink::default();
         mux.process(frame(au0, 0), &mut sink).await.unwrap();
-        mux.process(frame(au1, 33_333_333), &mut sink).await.unwrap();
+        mux.process(frame(au1, 33_333_333), &mut sink)
+            .await
+            .unwrap();
 
         assert_eq!(mux.emitted(), 2, "one out frame per AU");
         // The stream starts with `ftyp` and carries a `moov` (init segment) and
         // at least one `moof` fragment box.
-        assert_eq!(&sink.bytes[4..8], b"ftyp", "ISO-BMFF starts with an ftyp box");
+        assert_eq!(
+            &sink.bytes[4..8],
+            b"ftyp",
+            "ISO-BMFF starts with an ftyp box"
+        );
         let find = |needle: &[u8]| sink.bytes.windows(4).any(|w| w == needle);
         assert!(find(b"moov"), "init segment carries a moov");
         assert!(find(b"moof"), "fragments carry moof boxes");
@@ -395,11 +424,16 @@ mod tests {
         mux.configure_pipeline(&h264_caps(320, 240)).unwrap();
         let mut sink = CaptureSink::default();
         for (i, au) in aus.iter().enumerate() {
-            mux.process(frame(au.clone(), i as u64 * 33_333_333), &mut sink).await.unwrap();
+            mux.process(frame(au.clone(), i as u64 * 33_333_333), &mut sink)
+                .await
+                .unwrap();
         }
         mux.process(PipelinePacket::Eos, &mut sink).await.unwrap();
         let (moofs, samples) = moof_and_sample_count(&sink.bytes);
-        assert_eq!(moofs, 2, "six AUs batch into two keyframe-aligned fragments");
+        assert_eq!(
+            moofs, 2,
+            "six AUs batch into two keyframe-aligned fragments"
+        );
         assert_eq!(samples, 6, "every access unit is preserved as a sample");
 
         // Default (per-AU): one fragment per access unit.
@@ -407,7 +441,9 @@ mod tests {
         mux0.configure_pipeline(&h264_caps(320, 240)).unwrap();
         let mut sink0 = CaptureSink::default();
         for (i, au) in aus.iter().enumerate() {
-            mux0.process(frame(au.clone(), i as u64 * 33_333_333), &mut sink0).await.unwrap();
+            mux0.process(frame(au.clone(), i as u64 * 33_333_333), &mut sink0)
+                .await
+                .unwrap();
         }
         mux0.process(PipelinePacket::Eos, &mut sink0).await.unwrap();
         let (moofs0, samples0) = moof_and_sample_count(&sink0.bytes);

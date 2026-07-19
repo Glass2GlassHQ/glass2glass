@@ -30,10 +30,11 @@ async fn rtspsrc_intercept_caps_with_expected_dims_skips_probe_and_fixates() {
     // from the caller, no network touch. The advertised caps must still
     // be fixable so Phase 2 doesn't abort with `CapsMismatch`.
     use g2g_core::runtime::SourceLoop as _;
-    let mut src = RtspSrc::new("rtsp://invalid.example/never-reached")
-        .with_expected_dims(1920, 1080);
+    let mut src =
+        RtspSrc::new("rtsp://invalid.example/never-reached").with_expected_dims(1920, 1080);
     let caps = src.intercept_caps().await.expect("intercept_caps");
-    caps.fixate().expect("expected-dims caps must be fixate-friendly");
+    caps.fixate()
+        .expect("expected-dims caps must be fixate-friendly");
     match &caps {
         Caps::CompressedVideo {
             codec,
@@ -57,12 +58,9 @@ async fn rtspsrc_intercept_caps_probes_and_fails_on_unreachable_url() {
     // a placeholder Range and exploding inside `run`.
     use g2g_core::runtime::SourceLoop as _;
     let mut src = RtspSrc::new("rtsp://127.0.0.1:1/never-listens");
-    let res = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        src.intercept_caps(),
-    )
-    .await
-    .expect("probe must terminate within 5s");
+    let res = tokio::time::timeout(std::time::Duration::from_secs(5), src.intercept_caps())
+        .await
+        .expect("probe must terminate within 5s");
     assert!(matches!(res, Err(G2gError::Hardware(_))), "got {res:?}");
 }
 
@@ -80,12 +78,12 @@ async fn rtspsrc_with_reconnect_retries_then_fails() {
     let clock = ZeroClock;
 
     let started = std::time::Instant::now();
-    let result =
-        tokio::time::timeout(std::time::Duration::from_secs(10),
-            run_simple_pipeline(&mut src, &mut snk, &clock, 4),
-        )
-        .await
-        .expect("reconnect retries should complete within 10s");
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        run_simple_pipeline(&mut src, &mut snk, &clock, 4),
+    )
+    .await
+    .expect("reconnect retries should complete within 10s");
     let elapsed = started.elapsed();
 
     // 3 retries with backoff 10, 20, 40 ms = 70 ms minimum of sleeps;
@@ -111,12 +109,12 @@ async fn rtspsrc_bad_url_returns_hardware_error_or_caps_mismatch() {
     let mut snk = FakeSink::new();
     let clock = ZeroClock;
 
-    let result =
-        tokio::time::timeout(std::time::Duration::from_secs(10),
-            run_simple_pipeline(&mut src, &mut snk, &clock, 4),
-        )
-        .await
-        .expect("connect attempt should not hang");
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        run_simple_pipeline(&mut src, &mut snk, &clock, 4),
+    )
+    .await
+    .expect("connect attempt should not hang");
 
     let err = result.expect_err("connecting to a nonexistent server must fail");
     assert!(
@@ -135,13 +133,13 @@ async fn rtspsrc_pulls_h264_from_live_server() {
     let mut snk = FakeSink::new();
     let clock = ZeroClock;
 
-    let stats =
-        tokio::time::timeout(std::time::Duration::from_secs(30),
-            run_simple_pipeline(&mut src, &mut snk, &clock, 4),
-        )
-        .await
-        .expect("live pull should complete in 30s")
-        .expect("live RTSP pull should succeed");
+    let stats = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        run_simple_pipeline(&mut src, &mut snk, &clock, 4),
+    )
+    .await
+    .expect("live pull should complete in 30s")
+    .expect("live RTSP pull should succeed");
 
     assert_eq!(stats.frames_consumed, 10);
     assert_eq!(snk.last_sequence(), Some(9));
@@ -153,14 +151,31 @@ async fn rtspsrc_pulls_h264_from_live_server() {
     // arrive ahead of any DataFrame (`frames_before == 0`) and carry
     // fixed pixel dimensions.
     let changes = snk.caps_changes();
-    assert!(!changes.is_empty(), "RtspSrc must emit at least one CapsChanged");
+    assert!(
+        !changes.is_empty(),
+        "RtspSrc must emit at least one CapsChanged"
+    );
     let first = &changes[0];
-    assert_eq!(first.frames_before, 0, "CapsChanged must precede first frame");
+    assert_eq!(
+        first.frames_before, 0,
+        "CapsChanged must precede first frame"
+    );
     match &first.caps {
-        Caps::CompressedVideo { codec, width, height, .. } => {
+        Caps::CompressedVideo {
+            codec,
+            width,
+            height,
+            ..
+        } => {
             assert_eq!(*codec, VideoCodec::H264);
-            assert!(matches!(width, Dim::Fixed(_)), "width should be Fixed, got {width:?}");
-            assert!(matches!(height, Dim::Fixed(_)), "height should be Fixed, got {height:?}");
+            assert!(
+                matches!(width, Dim::Fixed(_)),
+                "width should be Fixed, got {width:?}"
+            );
+            assert!(
+                matches!(height, Dim::Fixed(_)),
+                "height should be Fixed, got {height:?}"
+            );
         }
         other => panic!("expected Caps::CompressedVideo, got {other:?}"),
     }

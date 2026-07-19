@@ -154,7 +154,12 @@ impl DelayResp {
 /// Build a Delay_Req message a SLAVE multicasts to the master. The
 /// originTimestamp is left zero (a software slave times its own TX on send and
 /// carries t3 locally, not in the message).
-pub fn build_delay_req(domain: u8, clock_id: [u8; 8], port: u16, sequence_id: u16) -> [u8; DELAY_REQ_LEN] {
+pub fn build_delay_req(
+    domain: u8,
+    clock_id: [u8; 8],
+    port: u16,
+    sequence_id: u16,
+) -> [u8; DELAY_REQ_LEN] {
     let mut m = [0u8; DELAY_REQ_LEN];
     m[0] = PtpMessageType::DelayReq.nibble(); // majorSdoId 0 | messageType
     m[1] = PTP_VERSION; // minorVersion 0 | versionPTP 2
@@ -203,7 +208,10 @@ mod tests {
     fn rejects_short_buffers() {
         assert!(PtpHeader::parse(&[0u8; 10]).is_none());
         assert!(parse_timestamp(&[0u8; 5], 0).is_none());
-        assert!(DelayResp::parse(&[0u8; HEADER_LEN]).is_none(), "no room for the body");
+        assert!(
+            DelayResp::parse(&[0u8; HEADER_LEN]).is_none(),
+            "no room for the body"
+        );
     }
 
     #[test]
@@ -227,7 +235,10 @@ mod tests {
         let h = PtpHeader::parse(&buf).unwrap();
         assert_eq!(h.message_type, PtpMessageType::FollowUp);
         assert_eq!(h.correction_ns, 1234);
-        assert_eq!(parse_follow_up_origin(&buf), Some(1_700_000_000_500_000_000));
+        assert_eq!(
+            parse_follow_up_origin(&buf),
+            Some(1_700_000_000_500_000_000)
+        );
     }
 
     #[test]

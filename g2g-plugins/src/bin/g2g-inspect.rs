@@ -74,7 +74,10 @@ fn load_plugins(_reg: &mut g2g_core::runtime::Registry, plugins: &[String]) {
 #[cfg(feature = "tooling-json")]
 fn dump_json(reg: &g2g_core::runtime::Registry, name: Option<&str>) {
     match g2g_plugins::toolingjson::registry_json(reg, name) {
-        Ok(v) => println!("{}", serde_json::to_string_pretty(&v).expect("serialize registry")),
+        Ok(v) => println!(
+            "{}",
+            serde_json::to_string_pretty(&v).expect("serialize registry")
+        ),
         Err(msg) => {
             eprintln!("{msg}");
             process::exit(1);

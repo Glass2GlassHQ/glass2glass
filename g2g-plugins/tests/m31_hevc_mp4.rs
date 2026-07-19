@@ -149,7 +149,10 @@ async fn hevc_round_trips_through_the_fmp4_container() {
             height: Dim::Fixed(HEIGHT),
             // advisory range, not `Any`: per-frame PTS carries the real timing
             // and `Any` would abort fixate when nothing downstream pins the rate.
-            framerate: Rate::Range { min_q16: 1 << 16, max_q16: 240 << 16 },
+            framerate: Rate::Range {
+                min_q16: 1 << 16,
+                max_q16: 240 << 16
+            },
         },
         "probe recovers HEVC codec and geometry"
     );
@@ -162,7 +165,10 @@ async fn hevc_round_trips_through_the_fmp4_container() {
 
     // The writer keeps parameter sets in-band, so each access unit returns
     // byte-exactly (no prepend on the first frame).
-    assert_eq!(out.frames, access_units, "every access unit recovered exactly");
+    assert_eq!(
+        out.frames, access_units,
+        "every access unit recovered exactly"
+    );
 
     let _ = std::fs::remove_file(&path);
 }

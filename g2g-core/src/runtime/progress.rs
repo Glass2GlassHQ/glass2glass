@@ -86,7 +86,11 @@ impl PipelineProgress {
     pub fn set_position(&self, ns: u64) {
         // A real position never collides with the "unknown" sentinel; clamp the
         // (absurd, ~584-year) maximum so the sentinel stays meaningful.
-        let ns = if ns == POSITION_UNKNOWN { POSITION_UNKNOWN - 1 } else { ns };
+        let ns = if ns == POSITION_UNKNOWN {
+            POSITION_UNKNOWN - 1
+        } else {
+            ns
+        };
         self.inner.position_ns.store(ns, Ordering::Relaxed);
     }
 
@@ -119,7 +123,11 @@ mod tests {
     fn position_is_latest_writer() {
         let p = PipelineProgress::new();
         p.set_position(0);
-        assert_eq!(p.position(), Some(0), "zero is a valid position, not unknown");
+        assert_eq!(
+            p.position(),
+            Some(0),
+            "zero is a valid position, not unknown"
+        );
         p.set_position(5_000);
         assert_eq!(p.position(), Some(5_000));
         // A rewind (seek) just publishes a smaller value.
@@ -130,7 +138,10 @@ mod tests {
     #[test]
     fn duration_takes_max_and_reports_change() {
         let p = PipelineProgress::new();
-        assert!(p.publish_duration(10_000), "first known duration is a change");
+        assert!(
+            p.publish_duration(10_000),
+            "first known duration is a change"
+        );
         assert_eq!(p.duration(), Some(10_000));
         // A shorter source does not lower the pipeline duration, nor report a change.
         assert!(!p.publish_duration(4_000));

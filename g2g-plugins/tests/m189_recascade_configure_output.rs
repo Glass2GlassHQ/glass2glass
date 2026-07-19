@@ -58,7 +58,8 @@ struct ScriptedSource {
 
 impl SourceLoop for ScriptedSource {
     type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>;
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 
@@ -175,7 +176,9 @@ async fn linear_coordinator_recascades_configure_output() {
         before: 1,
         after: 1,
     };
-    let mut transform = RecordingConvert { out_log: Arc::clone(&out_log) };
+    let mut transform = RecordingConvert {
+        out_log: Arc::clone(&out_log),
+    };
     let mut sink = AnySink;
 
     run_source_transform_sink(&mut source, &mut transform, &mut sink, &NullClock, 4)
@@ -201,7 +204,9 @@ async fn graph_runner_recascades_configure_output() {
         before: 1,
         after: 1,
     }));
-    let t = g.add_transform(GraphNode::element(RecordingConvert { out_log: Arc::clone(&out_log) }));
+    let t = g.add_transform(GraphNode::element(RecordingConvert {
+        out_log: Arc::clone(&out_log),
+    }));
     let snk = g.add_sink(GraphNode::element(AnySink));
     g.link(src, t).unwrap();
     g.link(t, snk).unwrap();
@@ -226,7 +231,9 @@ async fn no_change_configures_output_once() {
         before: 2,
         after: 0,
     };
-    let mut transform = RecordingConvert { out_log: Arc::clone(&out_log) };
+    let mut transform = RecordingConvert {
+        out_log: Arc::clone(&out_log),
+    };
     let mut sink = AnySink;
 
     run_source_transform_sink(&mut source, &mut transform, &mut sink, &NullClock, 4)

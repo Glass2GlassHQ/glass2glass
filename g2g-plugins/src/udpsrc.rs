@@ -178,11 +178,13 @@ impl UdpSrc {
 }
 
 impl SourceLoop for UdpSrc {
-    type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
+    type RunFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
     where
         Self: 'a;
 
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 
@@ -220,8 +222,12 @@ impl SourceLoop for UdpSrc {
 
     fn properties(&self) -> &'static [PropertySpec] {
         const PROPS: &[PropertySpec] = &[
-            PropertySpec::new("address", PropKind::Str, "local bind address (IP to listen on)")
-                .with_default("0.0.0.0"),
+            PropertySpec::new(
+                "address",
+                PropKind::Str,
+                "local bind address (IP to listen on)",
+            )
+            .with_default("0.0.0.0"),
             PropertySpec::new("port", PropKind::Uint, "local UDP port to receive on")
                 .with_range("0", "65535"),
         ];
@@ -240,7 +246,11 @@ impl SourceLoop for UdpSrc {
     /// Live source: contributes one frame period so the sink keeps a frame in
     /// hand and never runs dry waiting on the network.
     fn latency(&self) -> LatencyReport {
-        let period_ns = if self.fps > 0 { 1_000_000_000 / self.fps as u64 } else { 0 };
+        let period_ns = if self.fps > 0 {
+            1_000_000_000 / self.fps as u64
+        } else {
+            0
+        };
         LatencyReport::live(period_ns, None)
     }
 
@@ -294,7 +304,13 @@ mod tests {
             .with_frame_limit(5);
         assert_eq!((src.width, src.height, src.fps), (640, 480, 25));
         assert_eq!(src.frame_limit, 5);
-        assert!(matches!(src.caps(), Caps::CompressedVideo { codec: VideoCodec::H264, .. }));
+        assert!(matches!(
+            src.caps(),
+            Caps::CompressedVideo {
+                codec: VideoCodec::H264,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -326,7 +342,8 @@ mod tests {
             fn push<'a>(
                 &'a mut self,
                 _p: PipelinePacket,
-            ) -> Pin<Box<dyn Future<Output = Result<g2g_core::PushOutcome, G2gError>> + 'a>> {
+            ) -> Pin<Box<dyn Future<Output = Result<g2g_core::PushOutcome, G2gError>> + 'a>>
+            {
                 Box::pin(async { Ok(g2g_core::PushOutcome::Accepted) })
             }
         }

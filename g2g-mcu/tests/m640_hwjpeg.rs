@@ -28,7 +28,12 @@ struct MockJpeg {
 
 impl MockJpeg {
     fn new(info: JpegImageInfo) -> Self {
-        Self { info, emit: decoded_len(info).unwrap(), fed: Vec::new(), fail: false }
+        Self {
+            info,
+            emit: decoded_len(info).unwrap(),
+            fed: Vec::new(),
+            fail: false,
+        }
     }
 }
 
@@ -61,12 +66,21 @@ fn jpeg_bytes(body: &[u8]) -> Vec<u8> {
     v
 }
 
-const QCIF_420: JpegImageInfo =
-    JpegImageInfo { width: 176, height: 144, subsampling: JpegSubsampling::Ycbcr420 };
+const QCIF_420: JpegImageInfo = JpegImageInfo {
+    width: 176,
+    height: 144,
+    subsampling: JpegSubsampling::Ycbcr420,
+};
 
 #[test]
 fn mcu_tiling_output_sizes() {
-    let len = |w, h, s| decoded_len(JpegImageInfo { width: w, height: h, subsampling: s });
+    let len = |w, h, s| {
+        decoded_len(JpegImageInfo {
+            width: w,
+            height: h,
+            subsampling: s,
+        })
+    };
     // Exact multiples.
     assert_eq!(len(16, 16, JpegSubsampling::Ycbcr420), Some(384));
     assert_eq!(len(8, 8, JpegSubsampling::Gray), Some(64));
@@ -96,12 +110,26 @@ fn decodes_and_exposes_info() {
 
     let jpeg = jpeg_bytes(&[1, 2, 3, 4]);
     let input = frame_of(&input_ring, &jpeg, 321, 4);
-    let out = block_on(dec.process(input)).expect("decode").expect("frame");
-    assert_eq!(payload(&out).len(), expect_len, "one QCIF 4:2:0 block stream");
-    assert_eq!(payload(&out)[..5], [0, 1, 2, 3, 4], "the peripheral's bytes, zero-copy");
+    let out = block_on(dec.process(input))
+        .expect("decode")
+        .expect("frame");
+    assert_eq!(
+        payload(&out).len(),
+        expect_len,
+        "one QCIF 4:2:0 block stream"
+    );
+    assert_eq!(
+        payload(&out)[..5],
+        [0, 1, 2, 3, 4],
+        "the peripheral's bytes, zero-copy"
+    );
     assert_eq!(out.timing.pts_ns, 321, "timing inherited");
     assert_eq!(out.sequence, 4, "sequence inherited");
-    assert_eq!(dec.info(), Some(QCIF_420), "header-derived parameters exposed");
+    assert_eq!(
+        dec.info(),
+        Some(QCIF_420),
+        "header-derived parameters exposed"
+    );
     drop(out);
     let fed = dec.free();
     assert_eq!(fed.fed, vec![jpeg], "bitstream delivered verbatim");
@@ -115,11 +143,22 @@ fn framing_is_validated_before_the_peripheral() {
     // SAFETY: the rings outlive every frame in this test.
     let mut dec = unsafe { HwJpegDec::with_ring(&mut mock, &out_ring) };
 
-    for bad in [&[][..], &[0xFF][..], &[0xFF, 0xD8, 0, 0][..], &[0, 0, 0xFF, 0xD9][..]] {
+    for bad in [
+        &[][..],
+        &[0xFF][..],
+        &[0xFF, 0xD8, 0, 0][..],
+        &[0, 0, 0xFF, 0xD9][..],
+    ] {
         let input = frame_of(&input_ring, bad, 0, 0);
-        assert_eq!(block_on(dec.process(input)).unwrap_err(), G2gError::CapsMismatch);
+        assert_eq!(
+            block_on(dec.process(input)).unwrap_err(),
+            G2gError::CapsMismatch
+        );
     }
-    assert!(dec.free().fed.is_empty(), "no peripheral traffic for bad framing");
+    assert!(
+        dec.free().fed.is_empty(),
+        "no peripheral traffic for bad framing"
+    );
 }
 
 #[test]
@@ -148,7 +187,10 @@ fn undersized_slot_and_failures_surface() {
     // SAFETY: the rings outlive every frame in this test.
     let mut dec = unsafe { HwJpegDec::with_ring(&mut mock, &small_ring) };
     let input = frame_of(&input_ring, &jpeg_bytes(&[0]), 0, 0);
-    assert_eq!(block_on(dec.process(input)).unwrap_err(), G2gError::CapsMismatch);
+    assert_eq!(
+        block_on(dec.process(input)).unwrap_err(),
+        G2gError::CapsMismatch
+    );
 
     // A hard peripheral failure propagates.
     let mut mock = MockJpeg::new(QCIF_420);

@@ -40,7 +40,10 @@ struct OneFrame {
 }
 
 impl OutputSink for OneFrame {
-    fn push<'a>(&'a mut self, packet: PipelinePacket) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
+    fn push<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+    ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
         Box::pin(async move {
             if let PipelinePacket::DataFrame(f) = packet {
                 if self.bytes.is_none() {
@@ -68,7 +71,11 @@ fn frame(bytes: Vec<u8>) -> PipelinePacket {
 }
 
 fn tensor_caps(dtype: TensorDType, shape: &[u32]) -> Caps {
-    Caps::Tensor { dtype, shape: TensorShape::from_slice(shape).unwrap(), layout: TensorLayout::Nchw }
+    Caps::Tensor {
+        dtype,
+        shape: TensorShape::from_slice(shape).unwrap(),
+        layout: TensorLayout::Nchw,
+    }
 }
 
 #[tokio::test]
@@ -86,15 +93,24 @@ async fn mobilenetv2_int8_classifies_a_real_image() {
 
     let model = std::fs::read(&model_path).expect("read model");
     let input = std::fs::read(&input_path).expect("read input");
-    assert_eq!(input.len(), 3 * SIZE as usize * SIZE as usize * 4, "f32 NCHW [1,3,224,224]");
+    assert_eq!(
+        input.len(),
+        3 * SIZE as usize * SIZE as usize * 4,
+        "f32 NCHW [1,3,224,224]"
+    );
 
     // Stage 1: the real quantized MobileNetV2, f32 tensor in -> [1,1000] logits.
-    let mut infer = OrtInference::from_memory(&model).expect("model loads").with_tensor_input();
+    let mut infer = OrtInference::from_memory(&model)
+        .expect("model loads")
+        .with_tensor_input();
     infer
         .configure_pipeline(&tensor_caps(TensorDType::F32, &[1, 3, SIZE, SIZE]))
         .expect("configure inference");
     let mut logits = OneFrame::default();
-    infer.process(frame(input), &mut logits).await.expect("inference runs");
+    infer
+        .process(frame(input), &mut logits)
+        .await
+        .expect("inference runs");
     let logit_bytes = logits.bytes.expect("logits tensor");
     assert_eq!(logit_bytes.len(), CLASSES * 4, "1000 f32 logits");
 
@@ -104,11 +120,17 @@ async fn mobilenetv2_int8_classifies_a_real_image() {
         .configure_pipeline(&tensor_caps(TensorDType::F32, &[1, CLASSES as u32]))
         .expect("configure argmax");
     let mut top = OneFrame::default();
-    argmax.process(frame(logit_bytes), &mut top).await.expect("argmax runs");
+    argmax
+        .process(frame(logit_bytes), &mut top)
+        .await
+        .expect("argmax runs");
     let top_bytes = top.bytes.expect("argmax output");
     let idx = f32::from_le_bytes([top_bytes[0], top_bytes[1], top_bytes[2], top_bytes[3]]) as usize;
 
     let label = std::fs::read_to_string(dir.join("expected.txt")).unwrap_or_default();
     eprintln!(">> MobileNetV2-int8 top-1 = class {idx} ({})", label.trim());
-    assert_eq!(idx, EXPECTED_IDX, "g2g argmax must match the ONNX Runtime reference top-1");
+    assert_eq!(
+        idx, EXPECTED_IDX,
+        "g2g argmax must match the ONNX Runtime reference top-1"
+    );
 }

@@ -77,10 +77,7 @@ impl OutputSink for Collect {
 
 struct Discard;
 impl OutputSink for Discard {
-    fn push<'a>(
-        &'a mut self,
-        _p: PipelinePacket,
-    ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
+    fn push<'a>(&'a mut self, _p: PipelinePacket) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
         Box::pin(async move { Ok(PushOutcome::Accepted) })
     }
 }
@@ -100,9 +97,12 @@ async fn aac_round_trips_through_the_audio_mp4_container() {
     let narrowed = sink.intercept_caps(&aac_caps).expect("intercept aac");
     sink.configure_pipeline(&narrowed).expect("configure sink");
     for (i, au) in aus.iter().enumerate() {
-        sink.process(PipelinePacket::DataFrame(frame(au.clone(), i)), &mut Discard)
-            .await
-            .expect("mux au");
+        sink.process(
+            PipelinePacket::DataFrame(frame(au.clone(), i)),
+            &mut Discard,
+        )
+        .await
+        .expect("mux au");
     }
     sink.process(PipelinePacket::Eos, &mut Discard)
         .await
@@ -169,7 +169,9 @@ async fn pcm_aac_mp4_demux_decode_full_circle() {
             .await
             .expect("encode");
     }
-    enc.process(PipelinePacket::Eos, &mut encoded).await.expect("enc eos");
+    enc.process(PipelinePacket::Eos, &mut encoded)
+        .await
+        .expect("enc eos");
     assert!(!encoded.aus.is_empty());
 
     // mux the AAC into an .m4a
@@ -181,11 +183,16 @@ async fn pcm_aac_mp4_demux_decode_full_circle() {
     };
     sink.configure_pipeline(&aac_caps).expect("mux init");
     for (i, au) in encoded.aus.iter().enumerate() {
-        sink.process(PipelinePacket::DataFrame(frame(au.clone(), i)), &mut Discard)
-            .await
-            .expect("mux");
+        sink.process(
+            PipelinePacket::DataFrame(frame(au.clone(), i)),
+            &mut Discard,
+        )
+        .await
+        .expect("mux");
     }
-    sink.process(PipelinePacket::Eos, &mut Discard).await.expect("mux eos");
+    sink.process(PipelinePacket::Eos, &mut Discard)
+        .await
+        .expect("mux eos");
 
     // demux and decode back to PCM
     let mut src = Mp4AudioSrc::new(&path);
@@ -195,8 +202,15 @@ async fn pcm_aac_mp4_demux_decode_full_circle() {
 
     let mut demuxed = Collect::default();
     src.run(&mut demuxed).await.expect("demux");
-    assert_eq!(demuxed.aus.len(), encoded.aus.len(), "all AUs survive the container");
-    assert_eq!(demuxed.aus, encoded.aus, "AUs byte-exact through the container");
+    assert_eq!(
+        demuxed.aus.len(),
+        encoded.aus.len(),
+        "all AUs survive the container"
+    );
+    assert_eq!(
+        demuxed.aus, encoded.aus,
+        "AUs byte-exact through the container"
+    );
 
     let mut dec = MfAacDecode::new().with_audio_specific_config(recovered_asc);
     dec.configure_pipeline(&probed).expect("decoder init");
@@ -208,9 +222,13 @@ async fn pcm_aac_mp4_demux_decode_full_circle() {
             sequence: 0,
             meta: Default::default(),
         };
-        dec.process(PipelinePacket::DataFrame(f), &mut pcm).await.expect("decode");
+        dec.process(PipelinePacket::DataFrame(f), &mut pcm)
+            .await
+            .expect("decode");
     }
-    dec.process(PipelinePacket::Eos, &mut pcm).await.expect("dec eos");
+    dec.process(PipelinePacket::Eos, &mut pcm)
+        .await
+        .expect("dec eos");
     assert!(
         pcm.aus.iter().map(|p| p.len()).sum::<usize>() > 0,
         "the file loop reproduces PCM audio"

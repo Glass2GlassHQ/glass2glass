@@ -287,7 +287,10 @@ mod tests {
         let mut fut = core::pin::pin!(c2.wait_event());
         assert!(fut.as_mut().poll(&mut cx).is_pending(), "no event yet");
         c2.shutdown();
-        assert!(fut.as_mut().poll(&mut cx).is_ready(), "shutdown resolves the wait");
+        assert!(
+            fut.as_mut().poll(&mut cx).is_ready(),
+            "shutdown resolves the wait"
+        );
     }
 
     /// A no-op waker so a `wait_event` future can be polled directly in a test.

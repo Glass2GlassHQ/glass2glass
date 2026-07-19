@@ -54,7 +54,11 @@ fn ts_packet(pid: u16, pusi: bool, payload: &[u8]) -> Vec<u8> {
 
 fn psi(pid: u16, table_id: u8, body: &[u8]) -> Vec<u8> {
     let section_length = body.len() + 4;
-    let mut s = vec![table_id, 0xB0 | ((section_length >> 8) as u8 & 0x0F), (section_length & 0xFF) as u8];
+    let mut s = vec![
+        table_id,
+        0xB0 | ((section_length >> 8) as u8 & 0x0F),
+        (section_length & 0xFF) as u8,
+    ];
     s.extend_from_slice(body);
     s.extend_from_slice(&[0, 0, 0, 0]);
     let mut payload = vec![0u8];
@@ -83,22 +87,50 @@ fn synthetic_av_ts() -> Vec<u8> {
     s.extend_from_slice(&psi(
         0x0000,
         0x00,
-        &[0, 1, 0xC1, 0, 0, 0, 1, 0xE0 | (pmt_pid >> 8) as u8 & 0x1F, pmt_pid as u8],
+        &[
+            0,
+            1,
+            0xC1,
+            0,
+            0,
+            0,
+            1,
+            0xE0 | (pmt_pid >> 8) as u8 & 0x1F,
+            pmt_pid as u8,
+        ],
     ));
     s.extend_from_slice(&psi(
         pmt_pid,
         0x02,
         &[
-            0x00, 0x01, 0xC1, 0x00, 0x00,
-            0xE0 | (v_pid >> 8) as u8 & 0x1F, v_pid as u8,
-            0xF0, 0x00,
-            STREAM_TYPE_H264, 0xE0 | (v_pid >> 8) as u8 & 0x1F, v_pid as u8, 0xF0, 0x00,
-            STREAM_TYPE_AAC, 0xE0 | (a_pid >> 8) as u8 & 0x1F, a_pid as u8, 0xF0, 0x00,
+            0x00,
+            0x01,
+            0xC1,
+            0x00,
+            0x00,
+            0xE0 | (v_pid >> 8) as u8 & 0x1F,
+            v_pid as u8,
+            0xF0,
+            0x00,
+            STREAM_TYPE_H264,
+            0xE0 | (v_pid >> 8) as u8 & 0x1F,
+            v_pid as u8,
+            0xF0,
+            0x00,
+            STREAM_TYPE_AAC,
+            0xE0 | (a_pid >> 8) as u8 & 0x1F,
+            a_pid as u8,
+            0xF0,
+            0x00,
         ],
     ));
     for n in 0..3u8 {
         s.extend_from_slice(&ts_packet(v_pid, true, &pes(0xE0, &[0, 0, 0, 1, 0x65, n])));
-        s.extend_from_slice(&ts_packet(a_pid, true, &pes(0xC0, &[0xFF, 0xF1, 0x50, 0x80, n])));
+        s.extend_from_slice(&ts_packet(
+            a_pid,
+            true,
+            &pes(0xC0, &[0xFF, 0xF1, 0x50, 0x80, n]),
+        ));
     }
     s
 }
@@ -112,15 +144,19 @@ impl SourceLoop for TsSource {
     type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>;
 
     fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
-        core::future::ready(Ok(Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs }))
+        core::future::ready(Ok(Caps::ByteStream {
+            encoding: ByteStreamEncoding::MpegTs,
+        }))
     }
 
     fn caps_constraint<'a>(
         &'a mut self,
     ) -> impl Future<Output = Result<CapsConstraint<'a>, G2gError>> + 'a {
-        core::future::ready(Ok(CapsConstraint::Produces(CapsSet::one(Caps::ByteStream {
-            encoding: ByteStreamEncoding::MpegTs,
-        }))))
+        core::future::ready(Ok(CapsConstraint::Produces(CapsSet::one(
+            Caps::ByteStream {
+                encoding: ByteStreamEncoding::MpegTs,
+            },
+        ))))
     }
 
     fn configure_pipeline(&mut self, _caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -144,22 +180,35 @@ impl SourceLoop for TsSource {
 
 async fn run_selected(stream: TsStream) -> u64 {
     let mut graph: Graph<GraphNode> = Graph::new();
-    let src = graph.add_source(GraphNodeRef::Source(Box::new(TsSource { bytes: Some(synthetic_av_ts()) })));
+    let src = graph.add_source(GraphNodeRef::Source(Box::new(TsSource {
+        bytes: Some(synthetic_av_ts()),
+    })));
     let demux = graph.add_transform(GraphNodeRef::element(TsDemux::new().with_stream(stream)));
     let sink = graph.add_sink(GraphNodeRef::element(FakeSink::new()));
     graph.link(src, demux).unwrap();
     graph.link(demux, sink).unwrap();
-    run_graph(graph, &ZeroClock, 4).await.expect("multiplex runs").frames_consumed
+    run_graph(graph, &ZeroClock, 4)
+        .await
+        .expect("multiplex runs")
+        .frames_consumed
 }
 
 #[tokio::test]
 async fn tsdemux_selects_video_stream_from_multiplex() {
-    assert_eq!(run_selected(TsStream::H264).await, 3, "three video AUs reached the sink");
+    assert_eq!(
+        run_selected(TsStream::H264).await,
+        3,
+        "three video AUs reached the sink"
+    );
 }
 
 #[tokio::test]
 async fn tsdemux_selects_audio_stream_from_multiplex() {
     // Audio leaves as Caps::Audio{Aac}, a different output variant than H.264,
     // so this exercises the audio caps negotiating through the solver.
-    assert_eq!(run_selected(TsStream::Aac).await, 3, "three audio AUs reached the sink");
+    assert_eq!(
+        run_selected(TsStream::Aac).await,
+        3,
+        "three audio AUs reached the sink"
+    );
 }

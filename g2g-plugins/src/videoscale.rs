@@ -144,7 +144,8 @@ impl VideoScale {
 }
 
 impl AsyncElement for VideoScale {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -176,7 +177,12 @@ impl AsyncElement for VideoScale {
         // geometry pin behind a format-only transform couples back to the scaler.
         let passthrough = PassthroughFields::NONE.with_format().with_framerate();
         let derive = Box::new(move |input: &Caps| match input {
-            Caps::RawVideo { format, width, height, framerate } if FORMATS.contains(format) => {
+            Caps::RawVideo {
+                format,
+                width,
+                height,
+                framerate,
+            } if FORMATS.contains(format) => {
                 if tw > 0 && th > 0 {
                     // Property-driven: fixed target geometry.
                     if bad_even_dims(*format, tw, th) {
@@ -203,8 +209,14 @@ impl AsyncElement for VideoScale {
                         },
                         Caps::RawVideo {
                             format: *format,
-                            width: Dim::Range { min: 1, max: MAX_DIM },
-                            height: Dim::Range { min: 1, max: MAX_DIM },
+                            width: Dim::Range {
+                                min: 1,
+                                max: MAX_DIM,
+                            },
+                            height: Dim::Range {
+                                min: 1,
+                                max: MAX_DIM,
+                            },
                             framerate: framerate.clone(),
                         },
                     ])
@@ -212,7 +224,10 @@ impl AsyncElement for VideoScale {
             }
             _ => CapsSet::from_alternatives(Vec::new()),
         });
-        CapsConstraint::DerivedCoupled { derive, passthrough }
+        CapsConstraint::DerivedCoupled {
+            derive,
+            passthrough,
+        }
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -232,8 +247,12 @@ impl AsyncElement for VideoScale {
     /// the solve already fixated the output to them, so this just records the
     /// same dims. Validates the resolved geometry (non-zero, even for 4:2:0).
     fn configure_output(&mut self, output_caps: &Caps) -> Result<(), G2gError> {
-        let Caps::RawVideo { format, width: Dim::Fixed(w), height: Dim::Fixed(h), .. } =
-            output_caps
+        let Caps::RawVideo {
+            format,
+            width: Dim::Fixed(w),
+            height: Dim::Fixed(h),
+            ..
+        } = output_caps
         else {
             return Err(G2gError::CapsMismatch);
         };
@@ -292,7 +311,8 @@ impl AsyncElement for VideoScale {
                         framerate: rate,
                     };
                     if self.last_caps.as_ref() != Some(&new_caps) {
-                        out.push(PipelinePacket::CapsChanged(new_caps.clone())).await?;
+                        out.push(PipelinePacket::CapsChanged(new_caps.clone()))
+                            .await?;
                         self.last_caps = Some(new_caps);
                     }
                     let out_frame = Frame {
@@ -392,7 +412,6 @@ impl PadTemplates for VideoScale {
     }
 }
 
-
 /// Map an output index to its source sampling position, returning the two
 /// neighbouring source indices and the Q16 weight between them. Uses
 /// half-pixel-centred coordinates (`src = (out + 0.5) * src_n / dst_n -
@@ -434,8 +453,7 @@ fn resample_plane(
     channels: usize,
 ) -> Vec<u8> {
     let mut dst = vec![0u8; dst_w * dst_h * channels];
-    let cols: Vec<(usize, usize, u32)> =
-        (0..dst_w).map(|ox| map_axis(ox, dst_w, src_w)).collect();
+    let cols: Vec<(usize, usize, u32)> = (0..dst_w).map(|ox| map_axis(ox, dst_w, src_w)).collect();
     for oy in 0..dst_h {
         let (y0, y1, fy) = map_axis(oy, dst_h, src_h);
         let (row0, row1) = (y0 * src_w, y1 * src_w);
@@ -531,14 +549,20 @@ fn bilerp16(p00: u32, p10: u32, p01: u32, p11: u32, fx: u32, fy: u32) -> u16 {
 /// (a 10/12-bit luma or chroma plane) from `src_w x src_h` to `dst_w x dst_h`.
 fn resample_plane16(src: &[u8], src_w: usize, src_h: usize, dst_w: usize, dst_h: usize) -> Vec<u8> {
     let rd = |i: usize| u16::from_le_bytes([src[i * 2], src[i * 2 + 1]]) as u32;
-    let cols: Vec<(usize, usize, u32)> =
-        (0..dst_w).map(|ox| map_axis(ox, dst_w, src_w)).collect();
+    let cols: Vec<(usize, usize, u32)> = (0..dst_w).map(|ox| map_axis(ox, dst_w, src_w)).collect();
     let mut dst = vec![0u8; dst_w * dst_h * 2];
     for oy in 0..dst_h {
         let (y0, y1, fy) = map_axis(oy, dst_h, src_h);
         let (row0, row1) = (y0 * src_w, y1 * src_w);
         for (ox, &(x0, x1, fx)) in cols.iter().enumerate() {
-            let v = bilerp16(rd(row0 + x0), rd(row0 + x1), rd(row1 + x0), rd(row1 + x1), fx, fy);
+            let v = bilerp16(
+                rd(row0 + x0),
+                rd(row0 + x1),
+                rd(row1 + x0),
+                rd(row1 + x1),
+                fx,
+                fy,
+            );
             let o = (oy * dst_w + ox) * 2;
             dst[o..o + 2].copy_from_slice(&v.to_le_bytes());
         }
@@ -575,8 +599,10 @@ mod tests {
         // interpolated as whole u16 values, not byte-wise.
         let src: Vec<u8> = [0u16, 1000].iter().flat_map(|s| s.to_le_bytes()).collect();
         let out = resample_plane16(&src, 2, 1, 4, 1);
-        let got: Vec<u16> =
-            out.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        let got: Vec<u16> = out
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
         assert_eq!(got, vec![0, 250, 750, 1000]);
     }
 
@@ -602,11 +628,20 @@ mod tests {
     #[test]
     fn output_byte_sizes_match_format() {
         let rgba: Vec<u8> = vec![0; 8 * 8 * 4];
-        assert_eq!(scale(&rgba, RawVideoFormat::Rgba8, 8, 8, 4, 4).len(), 4 * 4 * 4);
+        assert_eq!(
+            scale(&rgba, RawVideoFormat::Rgba8, 8, 8, 4, 4).len(),
+            4 * 4 * 4
+        );
         let nv12: Vec<u8> = vec![0; 8 * 8 * 3 / 2];
-        assert_eq!(scale(&nv12, RawVideoFormat::Nv12, 8, 8, 4, 4).len(), 4 * 4 * 3 / 2);
+        assert_eq!(
+            scale(&nv12, RawVideoFormat::Nv12, 8, 8, 4, 4).len(),
+            4 * 4 * 3 / 2
+        );
         let i420: Vec<u8> = vec![0; 8 * 8 * 3 / 2];
-        assert_eq!(scale(&i420, RawVideoFormat::I420, 8, 8, 4, 4).len(), 4 * 4 * 3 / 2);
+        assert_eq!(
+            scale(&i420, RawVideoFormat::I420, 8, 8, 4, 4).len(),
+            4 * 4 * 3 / 2
+        );
     }
 
     #[test]
@@ -625,12 +660,17 @@ mod tests {
     #[test]
     fn derived_output_maps_to_target_dims() {
         let scaler = VideoScale::new(64, 32);
-        let CapsConstraint::DerivedCoupled { derive: f, passthrough } =
-            scaler.caps_constraint_as_transform()
+        let CapsConstraint::DerivedCoupled {
+            derive: f,
+            passthrough,
+        } = scaler.caps_constraint_as_transform()
         else {
             panic!("expected DerivedCoupled");
         };
-        assert_eq!(passthrough, PassthroughFields::NONE.with_format().with_framerate());
+        assert_eq!(
+            passthrough,
+            PassthroughFields::NONE.with_format().with_framerate()
+        );
         let out = f(&rgba_caps(320, 240));
         assert_eq!(
             out.alternatives(),
@@ -654,19 +694,27 @@ mod tests {
     #[test]
     fn derived_output_rejects_odd_target_for_yuv420() {
         let scaler = VideoScale::new(63, 32);
-        let CapsConstraint::DerivedCoupled { derive: f, passthrough } =
-            scaler.caps_constraint_as_transform()
+        let CapsConstraint::DerivedCoupled {
+            derive: f,
+            passthrough,
+        } = scaler.caps_constraint_as_transform()
         else {
             panic!("expected DerivedCoupled");
         };
-        assert_eq!(passthrough, PassthroughFields::NONE.with_format().with_framerate());
+        assert_eq!(
+            passthrough,
+            PassthroughFields::NONE.with_format().with_framerate()
+        );
         let nv12_in = Caps::RawVideo {
             format: RawVideoFormat::Nv12,
             width: Dim::Fixed(320),
             height: Dim::Fixed(240),
             framerate: Rate::Any,
         };
-        assert!(f(&nv12_in).is_empty(), "odd target width is invalid for 4:2:0");
+        assert!(
+            f(&nv12_in).is_empty(),
+            "odd target width is invalid for 4:2:0"
+        );
         // a packed format with the same odd target is fine
         assert!(!f(&rgba_caps(320, 240)).is_empty());
     }
@@ -682,13 +730,15 @@ mod tests {
         // odd target into a 4:2:0 stream fails
         let mut s = VideoScale::new(63, 32);
         assert_eq!(
-            s.configure_pipeline(&nv12(320, 240)).expect_err("odd target"),
+            s.configure_pipeline(&nv12(320, 240))
+                .expect_err("odd target"),
             G2gError::CapsMismatch
         );
         // odd input dims fail too
         let mut s = VideoScale::new(64, 32);
         assert_eq!(
-            s.configure_pipeline(&nv12(321, 240)).expect_err("odd input"),
+            s.configure_pipeline(&nv12(321, 240))
+                .expect_err("odd input"),
             G2gError::CapsMismatch
         );
         // even in / even out is accepted

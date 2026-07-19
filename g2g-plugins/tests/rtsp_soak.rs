@@ -147,9 +147,7 @@ async fn rtsp_ffmpeg_soak_keeps_pts_monotonic_for_duration() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(seconds * 20);
 
-    eprintln!(
-        "soak target: {url} for {seconds}s, expecting at least {min_frames} decoded frames"
-    );
+    eprintln!("soak target: {url} for {seconds}s, expecting at least {min_frames} decoded frames");
 
     // Frame budget: enough to keep going through `seconds`. At ~30 fps,
     // 30 * seconds is the ideal; we cap higher so the source doesn't

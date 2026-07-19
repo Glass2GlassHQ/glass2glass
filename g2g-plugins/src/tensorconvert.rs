@@ -63,7 +63,12 @@ fn int_range(dtype: TensorDType) -> Option<(i32, i32)> {
 /// complement byte (`q as u8`). `scale` 0 is treated as 1 (a degenerate model
 /// would otherwise divide by zero); a real quantized model always carries a
 /// nonzero scale.
-pub fn quantize_f32(src: &[f32], target: TensorDType, scale: f32, zero_point: i32) -> Option<Vec<u8>> {
+pub fn quantize_f32(
+    src: &[f32],
+    target: TensorDType,
+    scale: f32,
+    zero_point: i32,
+) -> Option<Vec<u8>> {
     let (lo, hi) = int_range(target)?;
     let scale = if scale == 0.0 { 1.0 } else { scale };
     Some(
@@ -79,7 +84,12 @@ pub fn quantize_f32(src: &[f32], target: TensorDType, scale: f32, zero_point: i3
 /// Dequantize int8 / uint8 bytes back to f32: `(q - zero_point) * scale`, the
 /// inverse of [`quantize_f32`]. `src_dtype` selects the byte interpretation
 /// (I8 = signed two's complement).
-pub fn dequantize_to_f32(src: &[u8], src_dtype: TensorDType, scale: f32, zero_point: i32) -> Option<Vec<f32>> {
+pub fn dequantize_to_f32(
+    src: &[u8],
+    src_dtype: TensorDType,
+    scale: f32,
+    zero_point: i32,
+) -> Option<Vec<f32>> {
     int_range(src_dtype)?;
     Some(
         src.iter()
@@ -193,7 +203,10 @@ enum Conversion {
 /// apply. `target` `None` preserves the input dtype (identity, for a
 /// layout-only transpose). Returns `None` for an undefined pairing (a direct
 /// int8 <-> uint8, or any int <-> f16, has no affine and is rejected).
-fn resolve(in_dtype: TensorDType, target: Option<TensorDType>) -> Option<(TensorDType, Conversion)> {
+fn resolve(
+    in_dtype: TensorDType,
+    target: Option<TensorDType>,
+) -> Option<(TensorDType, Conversion)> {
     let out = target.unwrap_or(in_dtype);
     use TensorDType::{F16, F32, I8, U8};
     let conv = match (in_dtype, out) {
@@ -262,14 +275,27 @@ fn layout_permutation(
 /// The output caps an instance derives from a tensor input, matching exactly
 /// what [`TensorConvert::process`] emits. `None` if the input is not a tensor or
 /// the (dtype, layout) conversion is undefined for it.
-fn derive_output_caps(input: &Caps, target: Option<TensorDType>, out_layout: Option<TensorLayout>) -> Option<Caps> {
-    let Caps::Tensor { dtype, shape, layout } = input else {
+fn derive_output_caps(
+    input: &Caps,
+    target: Option<TensorDType>,
+    out_layout: Option<TensorLayout>,
+) -> Option<Caps> {
+    let Caps::Tensor {
+        dtype,
+        shape,
+        layout,
+    } = input
+    else {
         return None;
     };
     let (out_dtype, _) = resolve(*dtype, target)?;
     let to = out_layout.unwrap_or(*layout);
     let (out_shape, _) = layout_permutation(shape, *layout, to)?;
-    Some(Caps::Tensor { dtype: out_dtype, shape: out_shape, layout: to })
+    Some(Caps::Tensor {
+        dtype: out_dtype,
+        shape: out_shape,
+        layout: to,
+    })
 }
 
 #[derive(Debug)]
@@ -345,9 +371,17 @@ impl TensorConvert {
     }
 
     /// Validate a tensor caps as a convertible input and return its parts.
-    fn accept_input(&self, caps: &Caps) -> Result<(TensorDType, TensorShape, TensorLayout), G2gError> {
+    fn accept_input(
+        &self,
+        caps: &Caps,
+    ) -> Result<(TensorDType, TensorShape, TensorLayout), G2gError> {
         derive_output_caps(caps, self.target, self.out_layout).ok_or(G2gError::CapsMismatch)?;
-        let Caps::Tensor { dtype, shape, layout } = caps else {
+        let Caps::Tensor {
+            dtype,
+            shape,
+            layout,
+        } = caps
+        else {
             return Err(G2gError::CapsMismatch);
         };
         Ok((*dtype, *shape, *layout))
@@ -371,11 +405,13 @@ impl TensorConvert {
                     .take(count)
                     .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                     .collect();
-                quantize_f32(&floats, out_dtype, self.scale, self.zero_point).ok_or(G2gError::CapsMismatch)?
+                quantize_f32(&floats, out_dtype, self.scale, self.zero_point)
+                    .ok_or(G2gError::CapsMismatch)?
             }
             Conversion::Dequantize => {
-                let floats = dequantize_to_f32(&src[..count], in_dtype, self.scale, self.zero_point)
-                    .ok_or(G2gError::CapsMismatch)?;
+                let floats =
+                    dequantize_to_f32(&src[..count], in_dtype, self.scale, self.zero_point)
+                        .ok_or(G2gError::CapsMismatch)?;
                 let mut bytes = Vec::with_capacity(count * 4);
                 for f in floats {
                     bytes.extend_from_slice(&f.to_le_bytes());
@@ -415,7 +451,11 @@ impl TensorConvert {
             (in_shape, elems)
         };
 
-        let caps = Caps::Tensor { dtype: out_dtype, shape: out_shape, layout: to };
+        let caps = Caps::Tensor {
+            dtype: out_dtype,
+            shape: out_shape,
+            layout: to,
+        };
         Ok((caps, out_bytes))
     }
 }
@@ -429,7 +469,8 @@ impl AsyncElement for TensorConvert {
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         // A tensor caps carries a concrete shape, so there is nothing to narrow:
         // accept it when the configured conversion is defined for its dtype/layout.
-        self.accept_input(upstream_caps).map(|_| upstream_caps.clone())
+        self.accept_input(upstream_caps)
+            .map(|_| upstream_caps.clone())
     }
 
     /// Native `DerivedOutput`: a tensor input maps to the converted dtype, the
@@ -437,10 +478,13 @@ impl AsyncElement for TensorConvert {
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         let target = self.target;
         let out_layout = self.out_layout;
-        let derive = Box::new(move |input: &Caps| match derive_output_caps(input, target, out_layout) {
-            Some(caps) => CapsSet::one(caps),
-            None => CapsSet::from_alternatives(Vec::new()),
-        });
+        let derive =
+            Box::new(
+                move |input: &Caps| match derive_output_caps(input, target, out_layout) {
+                    Some(caps) => CapsSet::one(caps),
+                    None => CapsSet::from_alternatives(Vec::new()),
+                },
+            );
         CapsConstraint::DerivedOutput(derive)
     }
 
@@ -450,7 +494,11 @@ impl AsyncElement for TensorConvert {
         Ok(ConfigureOutcome::Accepted)
     }
 
-    fn process<'a>(&'a mut self, packet: PipelinePacket, out: &'a mut dyn OutputSink) -> Self::ProcessFuture<'a> {
+    fn process<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+        out: &'a mut dyn OutputSink,
+    ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
             if !self.configured {
                 return Err(G2gError::NotConfigured);
@@ -462,11 +510,14 @@ impl AsyncElement for TensorConvert {
                     };
                     let (new_caps, converted) = self.convert_frame(slice.as_slice())?;
                     if self.last_caps.as_ref() != Some(&new_caps) {
-                        out.push(PipelinePacket::CapsChanged(new_caps.clone())).await?;
+                        out.push(PipelinePacket::CapsChanged(new_caps.clone()))
+                            .await?;
                         self.last_caps = Some(new_caps);
                     }
                     let out_frame = Frame {
-                        domain: MemoryDomain::System(SystemSlice::from_boxed(converted.into_boxed_slice())),
+                        domain: MemoryDomain::System(SystemSlice::from_boxed(
+                            converted.into_boxed_slice(),
+                        )),
                         timing: frame.timing,
                         sequence: self.emitted,
                         meta: Default::default(),
@@ -515,11 +566,17 @@ impl AsyncElement for TensorConvert {
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
         match name {
             "dtype" => {
-                self.target = Some(dtype_from_str(value.as_str().ok_or(PropError::Type)?).ok_or(PropError::Value)?);
+                self.target = Some(
+                    dtype_from_str(value.as_str().ok_or(PropError::Type)?)
+                        .ok_or(PropError::Value)?,
+                );
                 Ok(())
             }
             "layout" => {
-                self.out_layout = Some(layout_from_str(value.as_str().ok_or(PropError::Type)?).ok_or(PropError::Value)?);
+                self.out_layout = Some(
+                    layout_from_str(value.as_str().ok_or(PropError::Type)?)
+                        .ok_or(PropError::Value)?,
+                );
                 Ok(())
             }
             "scale" => match value {
@@ -543,7 +600,9 @@ impl AsyncElement for TensorConvert {
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
             "dtype" => self.target.map(|d| PropValue::Str(dtype_to_str(d).into())),
-            "layout" => self.out_layout.map(|l| PropValue::Str(layout_to_str(l).into())),
+            "layout" => self
+                .out_layout
+                .map(|l| PropValue::Str(layout_to_str(l).into())),
             "scale" => Some(PropValue::Double(self.scale as f64)),
             "zero-point" => Some(PropValue::Int(self.zero_point as i64)),
             _ => None,
@@ -630,7 +689,10 @@ mod tests {
         assert_eq!(q.len(), xs.len(), "one byte per element");
         let back = dequantize_to_f32(&q, TensorDType::U8, scale, zp).expect("dequantize");
         for (x, r) in xs.iter().zip(&back) {
-            assert!((x - r).abs() <= scale, "dequant within one step: {x} vs {r}");
+            assert!(
+                (x - r).abs() <= scale,
+                "dequant within one step: {x} vs {r}"
+            );
         }
     }
 
@@ -694,15 +756,19 @@ mod tests {
     fn layout_permutation_nchw_to_nhwc_reorders_channels_last() {
         // [1, 2, 2, 2]: NCHW flat index is the value at each position.
         let shape = TensorShape::new([1, 2, 2, 2]);
-        let (out_shape, perm) =
-            layout_permutation(&shape, TensorLayout::Nchw, TensorLayout::Nhwc).expect("4D transpose");
+        let (out_shape, perm) = layout_permutation(&shape, TensorLayout::Nchw, TensorLayout::Nhwc)
+            .expect("4D transpose");
         assert_eq!(out_shape, TensorShape::new([1, 2, 2, 2]));
         assert_eq!(perm, vec![0, 4, 1, 5, 2, 6, 3, 7]);
         // Round trip back to NCHW is the identity permutation over the data.
-        let (_, back) =
-            layout_permutation(&out_shape, TensorLayout::Nhwc, TensorLayout::Nchw).expect("inverse");
+        let (_, back) = layout_permutation(&out_shape, TensorLayout::Nhwc, TensorLayout::Nchw)
+            .expect("inverse");
         let composed: Vec<usize> = back.iter().map(|&i| perm[i]).collect();
-        assert_eq!(composed, (0..8).collect::<Vec<_>>(), "NCHW->NHWC->NCHW is identity");
+        assert_eq!(
+            composed,
+            (0..8).collect::<Vec<_>>(),
+            "NCHW->NHWC->NCHW is identity"
+        );
     }
 
     #[test]
@@ -719,7 +785,8 @@ mod tests {
             layout: TensorLayout::Nchw,
         };
         // quantize + transpose to NHWC uint8.
-        let out = derive_output_caps(&nchw_f32, Some(TensorDType::U8), Some(TensorLayout::Nhwc)).unwrap();
+        let out =
+            derive_output_caps(&nchw_f32, Some(TensorDType::U8), Some(TensorLayout::Nhwc)).unwrap();
         assert_eq!(
             out,
             Caps::Tensor {
@@ -730,7 +797,14 @@ mod tests {
         );
         // narrow_f16 keeps shape and layout.
         let out = derive_output_caps(&nchw_f32, Some(TensorDType::F16), None).unwrap();
-        assert!(matches!(out, Caps::Tensor { dtype: TensorDType::F16, layout: TensorLayout::Nchw, .. }));
+        assert!(matches!(
+            out,
+            Caps::Tensor {
+                dtype: TensorDType::F16,
+                layout: TensorLayout::Nchw,
+                ..
+            }
+        ));
     }
 
     // -- Element-level tests (drive TensorConvert::process directly) ---------
@@ -764,7 +838,9 @@ mod tests {
     fn first_data(sink: &RecordingSink) -> Vec<u8> {
         for p in &sink.packets {
             if let PipelinePacket::DataFrame(f) = p {
-                let MemoryDomain::System(s) = &f.domain else { panic!("system frame") };
+                let MemoryDomain::System(s) = &f.domain else {
+                    panic!("system frame")
+                };
                 return s.as_slice().to_vec();
             }
         }
@@ -791,7 +867,9 @@ mod tests {
         };
         conv.configure_pipeline(&in_caps).unwrap();
         let mut sink = RecordingSink::default();
-        conv.process(frame((0u8..8).collect()), &mut sink).await.unwrap();
+        conv.process(frame((0u8..8).collect()), &mut sink)
+            .await
+            .unwrap();
 
         assert_eq!(first_data(&sink), vec![0, 4, 1, 5, 2, 6, 3, 7]);
         match first_caps(&sink) {
@@ -807,7 +885,8 @@ mod tests {
     async fn quantize_and_transpose_compose_in_one_pass() {
         // f32 NCHW [1,2,1,2]: c0=[0.0, 0.5], c1=[1.0, 1.5]; scale 0.5 zp 0 -> u8.
         // Quantized NCHW = [0, 1, 2, 3]; NHWC (h,w,c) reorders to [0, 2, 1, 3].
-        let mut conv = TensorConvert::quantize(TensorDType::U8, 0.5, 0).to_layout(TensorLayout::Nhwc);
+        let mut conv =
+            TensorConvert::quantize(TensorDType::U8, 0.5, 0).to_layout(TensorLayout::Nhwc);
         let in_caps = Caps::Tensor {
             dtype: TensorDType::F32,
             shape: TensorShape::new([1, 2, 1, 2]),
@@ -850,7 +929,10 @@ mod tests {
 
         let out = first_data(&sink);
         assert_eq!(out.len(), 4 * 2, "one f16 (2 bytes) per element");
-        let halves: Vec<u16> = out.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        let halves: Vec<u16> = out
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
         assert_eq!(halves, vec![0x3C00, 0x3800, 0xC000, 0x0000]);
     }
 }

@@ -20,9 +20,9 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use windows::Win32::Media::MediaFoundation::{
-    IMFSample, IMFTransform, MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample, MFShutdown,
-    MFStartup, CLSID_MSAACDecMFT, MFAudioFormat_AAC, MFAudioFormat_PCM, MFMediaType_Audio,
-    MFSTARTUP_FULL, MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_COMMAND_FLUSH,
+    CLSID_MSAACDecMFT, IMFSample, IMFTransform, MFAudioFormat_AAC, MFAudioFormat_PCM,
+    MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Audio, MFShutdown,
+    MFStartup, MFSTARTUP_FULL, MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_COMMAND_FLUSH,
     MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_OUTPUT_DATA_BUFFER,
     MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MF_E_NOTACCEPTING, MF_E_TRANSFORM_NEED_MORE_INPUT,
     MF_E_TRANSFORM_STREAM_CHANGE, MF_MT_AAC_AUDIO_PROFILE_LEVEL_INDICATION, MF_MT_AAC_PAYLOAD_TYPE,
@@ -103,7 +103,12 @@ impl MfAacDecode {
         self.emitted
     }
 
-    fn feed(&mut self, data: &[u8], pts_ns: u64, decoded: &mut Vec<Vec<u8>>) -> Result<(), G2gError> {
+    fn feed(
+        &mut self,
+        data: &[u8],
+        pts_ns: u64,
+        decoded: &mut Vec<Vec<u8>>,
+    ) -> Result<(), G2gError> {
         let sample = make_input_sample(data, pts_ns)?;
         let mut guard = 0u32;
         while !self.process_input(&sample)? {
@@ -198,7 +203,8 @@ impl MfAacDecode {
 }
 
 impl AsyncElement for MfAacDecode {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -312,7 +318,8 @@ impl AsyncElement for MfAacDecode {
             let frame_bytes = 2 * self.channels.max(1) as u64; // 16-bit
             for pcm in decoded {
                 if self.last_caps.as_ref() != Some(&pcm_caps) {
-                    out.push(PipelinePacket::CapsChanged(pcm_caps.clone())).await?;
+                    out.push(PipelinePacket::CapsChanged(pcm_caps.clone()))
+                        .await?;
                     self.last_caps = Some(pcm_caps.clone());
                 }
                 let pts_ns = self.out_frames * 1_000_000_000 / self.sample_rate.max(1) as u64;
@@ -374,7 +381,8 @@ impl Drop for MfAacDecode {
 fn init_decoder(channels: u8, sample_rate: u32, asc: &[u8]) -> Result<DecoderState, G2gError> {
     // SAFETY: COM object creation on the owning thread.
     let transform: IMFTransform =
-        unsafe { CoCreateInstance(&CLSID_MSAACDecMFT, None, CLSCTX_INPROC_SERVER) }.map_err(mf_err)?;
+        unsafe { CoCreateInstance(&CLSID_MSAACDecMFT, None, CLSCTX_INPROC_SERVER) }
+            .map_err(mf_err)?;
 
     let user_data = heaac_user_data(asc);
     let block_align = 2 * channels as u32;
@@ -382,25 +390,51 @@ fn init_decoder(channels: u8, sample_rate: u32, asc: &[u8]) -> Result<DecoderSta
     // SAFETY: media-type configuration on the owning thread.
     unsafe {
         let input = MFCreateMediaType().map_err(mf_err)?;
-        input.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio).map_err(mf_err)?;
-        input.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_AAC).map_err(mf_err)?;
-        input.SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, PCM_BITS).map_err(mf_err)?;
-        input.SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, sample_rate).map_err(mf_err)?;
-        input.SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, channels as u32).map_err(mf_err)?;
-        input.SetUINT32(&MF_MT_AAC_PAYLOAD_TYPE, 0).map_err(mf_err)?;
+        input
+            .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)
+            .map_err(mf_err)?;
+        input
+            .SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_AAC)
+            .map_err(mf_err)?;
+        input
+            .SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, PCM_BITS)
+            .map_err(mf_err)?;
+        input
+            .SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, sample_rate)
+            .map_err(mf_err)?;
+        input
+            .SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, channels as u32)
+            .map_err(mf_err)?;
+        input
+            .SetUINT32(&MF_MT_AAC_PAYLOAD_TYPE, 0)
+            .map_err(mf_err)?;
         input
             .SetUINT32(&MF_MT_AAC_AUDIO_PROFILE_LEVEL_INDICATION, AAC_PROFILE_LC)
             .map_err(mf_err)?;
-        input.SetBlob(&MF_MT_USER_DATA, &user_data).map_err(mf_err)?;
+        input
+            .SetBlob(&MF_MT_USER_DATA, &user_data)
+            .map_err(mf_err)?;
         transform.SetInputType(0, &input, 0).map_err(mf_err)?;
 
         let output = MFCreateMediaType().map_err(mf_err)?;
-        output.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio).map_err(mf_err)?;
-        output.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_PCM).map_err(mf_err)?;
-        output.SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, PCM_BITS).map_err(mf_err)?;
-        output.SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, sample_rate).map_err(mf_err)?;
-        output.SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, channels as u32).map_err(mf_err)?;
-        output.SetUINT32(&MF_MT_AUDIO_BLOCK_ALIGNMENT, block_align).map_err(mf_err)?;
+        output
+            .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)
+            .map_err(mf_err)?;
+        output
+            .SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_PCM)
+            .map_err(mf_err)?;
+        output
+            .SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, PCM_BITS)
+            .map_err(mf_err)?;
+        output
+            .SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, sample_rate)
+            .map_err(mf_err)?;
+        output
+            .SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, channels as u32)
+            .map_err(mf_err)?;
+        output
+            .SetUINT32(&MF_MT_AUDIO_BLOCK_ALIGNMENT, block_align)
+            .map_err(mf_err)?;
         output
             .SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, sample_rate * block_align)
             .map_err(mf_err)?;
@@ -450,7 +484,10 @@ fn output_buffer_size(transform: &IMFTransform, channels: u8, rate: u32) -> Resu
     // SAFETY: stream-info query on the owning thread.
     let info = unsafe { transform.GetOutputStreamInfo(0) }.map_err(mf_err)?;
     // Floor at ~1 s of PCM so an early zero estimate never under-allocates.
-    let floor = rate.saturating_mul(channels as u32).saturating_mul(2).max(8192);
+    let floor = rate
+        .saturating_mul(channels as u32)
+        .saturating_mul(2)
+        .max(8192);
     Ok(info.cbSize.max(floor.min(1 << 20)))
 }
 
@@ -467,7 +504,9 @@ fn make_input_sample(data: &[u8], pts_ns: u64) -> Result<IMFSample, G2gError> {
         buffer.SetCurrentLength(len).map_err(mf_err)?;
         let sample = MFCreateSample().map_err(mf_err)?;
         sample.AddBuffer(&buffer).map_err(mf_err)?;
-        sample.SetSampleTime((pts_ns / 100) as i64).map_err(mf_err)?;
+        sample
+            .SetSampleTime((pts_ns / 100) as i64)
+            .map_err(mf_err)?;
         Ok(sample)
     }
 }
@@ -478,7 +517,9 @@ fn copy_sample(sample: &IMFSample) -> Result<Vec<u8>, G2gError> {
         let buffer = sample.ConvertToContiguousBuffer().map_err(mf_err)?;
         let mut ptr: *mut u8 = core::ptr::null_mut();
         let mut len: u32 = 0;
-        buffer.Lock(&mut ptr, None, Some(&mut len)).map_err(mf_err)?;
+        buffer
+            .Lock(&mut ptr, None, Some(&mut len))
+            .map_err(mf_err)?;
         let bytes = core::slice::from_raw_parts(ptr, len as usize).to_vec();
         buffer.Unlock().map_err(mf_err)?;
         Ok(bytes)

@@ -8,8 +8,8 @@
 //! runner's backward-feasibility sweep and stay `std`-gated.
 
 use crate::caps::{
-    intersect_sample_rate, AudioFormat, Caps, CapsSet, Dim, PassthroughFields, Rate, RawVideoFormat,
-    VideoCodec,
+    intersect_sample_rate, AudioFormat, Caps, CapsSet, Dim, PassthroughFields, Rate,
+    RawVideoFormat, VideoCodec,
 };
 // Only the std-gated `project_passthrough` widens sample_rate back to ANY.
 #[cfg(feature = "std")]
@@ -22,11 +22,25 @@ use crate::caps::ANY_SAMPLE_RATE;
 /// independently of its input. Same media variant required; `None` if a
 /// passthrough field has no overlap (the alternative dies) or the variants
 /// differ. Used by the solver's `DerivedCoupled` backward sweep.
-pub(crate) fn couple_passthrough(input: &Caps, pin: &Caps, mask: PassthroughFields) -> Option<Caps> {
+pub(crate) fn couple_passthrough(
+    input: &Caps,
+    pin: &Caps,
+    mask: PassthroughFields,
+) -> Option<Caps> {
     match (input, pin) {
         (
-            Caps::RawVideo { format: fi, width: wi, height: hi, framerate: ri },
-            Caps::RawVideo { format: fp, width: wp, height: hp, framerate: rp },
+            Caps::RawVideo {
+                format: fi,
+                width: wi,
+                height: hi,
+                framerate: ri,
+            },
+            Caps::RawVideo {
+                format: fp,
+                width: wp,
+                height: hp,
+                framerate: rp,
+            },
         ) => {
             let format = if mask.format {
                 if fi != fp {
@@ -36,14 +50,41 @@ pub(crate) fn couple_passthrough(input: &Caps, pin: &Caps, mask: PassthroughFiel
             } else {
                 *fi
             };
-            let width = if mask.width { wi.intersect(wp)? } else { wi.clone() };
-            let height = if mask.height { hi.intersect(hp)? } else { hi.clone() };
-            let framerate = if mask.framerate { ri.intersect(rp)? } else { ri.clone() };
-            Some(Caps::RawVideo { format, width, height, framerate })
+            let width = if mask.width {
+                wi.intersect(wp)?
+            } else {
+                wi.clone()
+            };
+            let height = if mask.height {
+                hi.intersect(hp)?
+            } else {
+                hi.clone()
+            };
+            let framerate = if mask.framerate {
+                ri.intersect(rp)?
+            } else {
+                ri.clone()
+            };
+            Some(Caps::RawVideo {
+                format,
+                width,
+                height,
+                framerate,
+            })
         }
         (
-            Caps::CompressedVideo { codec: ci, width: wi, height: hi, framerate: ri },
-            Caps::CompressedVideo { codec: cp, width: wp, height: hp, framerate: rp },
+            Caps::CompressedVideo {
+                codec: ci,
+                width: wi,
+                height: hi,
+                framerate: ri,
+            },
+            Caps::CompressedVideo {
+                codec: cp,
+                width: wp,
+                height: hp,
+                framerate: rp,
+            },
         ) => {
             let codec = if mask.format {
                 if ci != cp {
@@ -53,14 +94,39 @@ pub(crate) fn couple_passthrough(input: &Caps, pin: &Caps, mask: PassthroughFiel
             } else {
                 *ci
             };
-            let width = if mask.width { wi.intersect(wp)? } else { wi.clone() };
-            let height = if mask.height { hi.intersect(hp)? } else { hi.clone() };
-            let framerate = if mask.framerate { ri.intersect(rp)? } else { ri.clone() };
-            Some(Caps::CompressedVideo { codec, width, height, framerate })
+            let width = if mask.width {
+                wi.intersect(wp)?
+            } else {
+                wi.clone()
+            };
+            let height = if mask.height {
+                hi.intersect(hp)?
+            } else {
+                hi.clone()
+            };
+            let framerate = if mask.framerate {
+                ri.intersect(rp)?
+            } else {
+                ri.clone()
+            };
+            Some(Caps::CompressedVideo {
+                codec,
+                width,
+                height,
+                framerate,
+            })
         }
         (
-            Caps::Audio { format: fi, channels: ci, sample_rate: si },
-            Caps::Audio { format: fp, channels: cp, sample_rate: sp },
+            Caps::Audio {
+                format: fi,
+                channels: ci,
+                sample_rate: si,
+            },
+            Caps::Audio {
+                format: fp,
+                channels: cp,
+                sample_rate: sp,
+            },
         ) => {
             let format = if mask.format {
                 if fi != fp {
@@ -78,9 +144,16 @@ pub(crate) fn couple_passthrough(input: &Caps, pin: &Caps, mask: PassthroughFiel
             } else {
                 *ci
             };
-            let sample_rate =
-                if mask.sample_rate { intersect_sample_rate(*si, *sp)? } else { *si };
-            Some(Caps::Audio { format, channels, sample_rate })
+            let sample_rate = if mask.sample_rate {
+                intersect_sample_rate(*si, *sp)?
+            } else {
+                *si
+            };
+            Some(Caps::Audio {
+                format,
+                channels,
+                sample_rate,
+            })
         }
         _ => None,
     }
@@ -95,7 +168,11 @@ pub(crate) fn couple_passthrough(input: &Caps, pin: &Caps, mask: PassthroughFiel
 /// codec vs raw-format boundary, so it is never a passthrough field there); the
 /// input keeps its own variant and scalar identity. `None` if a masked shared
 /// field has no overlap, or for a cross-variant pair with no shared geometry.
-pub(crate) fn couple_passthrough_derived(input: &Caps, pin: &Caps, mask: PassthroughFields) -> Option<Caps> {
+pub(crate) fn couple_passthrough_derived(
+    input: &Caps,
+    pin: &Caps,
+    mask: PassthroughFields,
+) -> Option<Caps> {
     match (input, pin) {
         (Caps::RawVideo { .. }, Caps::RawVideo { .. })
         | (Caps::CompressedVideo { .. }, Caps::CompressedVideo { .. })
@@ -107,14 +184,34 @@ pub(crate) fn couple_passthrough_derived(input: &Caps, pin: &Caps, mask: Passthr
     // boundary, so `mask.format` is not applied here).
     let (wi, hi, ri) = (geo_width(input)?, geo_height(input)?, geo_rate(input)?);
     let (wp, hp, rp) = (geo_width(pin)?, geo_height(pin)?, geo_rate(pin)?);
-    let width = if mask.width { wi.intersect(wp)? } else { wi.clone() };
-    let height = if mask.height { hi.intersect(hp)? } else { hi.clone() };
-    let framerate = if mask.framerate { ri.intersect(rp)? } else { ri.clone() };
+    let width = if mask.width {
+        wi.intersect(wp)?
+    } else {
+        wi.clone()
+    };
+    let height = if mask.height {
+        hi.intersect(hp)?
+    } else {
+        hi.clone()
+    };
+    let framerate = if mask.framerate {
+        ri.intersect(rp)?
+    } else {
+        ri.clone()
+    };
     match input {
-        Caps::RawVideo { format, .. } => Some(Caps::RawVideo { format: *format, width, height, framerate }),
-        Caps::CompressedVideo { codec, .. } => {
-            Some(Caps::CompressedVideo { codec: *codec, width, height, framerate })
-        }
+        Caps::RawVideo { format, .. } => Some(Caps::RawVideo {
+            format: *format,
+            width,
+            height,
+            framerate,
+        }),
+        Caps::CompressedVideo { codec, .. } => Some(Caps::CompressedVideo {
+            codec: *codec,
+            width,
+            height,
+            framerate,
+        }),
         _ => None,
     }
 }
@@ -130,36 +227,70 @@ pub(crate) fn couple_passthrough_derived(input: &Caps, pin: &Caps, mask: Passthr
 #[cfg(feature = "std")]
 pub(crate) fn project_passthrough(out: &Caps, mask: PassthroughFields) -> Option<Caps> {
     match out {
-        Caps::RawVideo { format, width, height, framerate } => {
+        Caps::RawVideo {
+            format,
+            width,
+            height,
+            framerate,
+        } => {
             if !mask.format {
                 return None; // retargeted format has no wildcard
             }
             Some(Caps::RawVideo {
                 format: *format,
                 width: if mask.width { width.clone() } else { Dim::Any },
-                height: if mask.height { height.clone() } else { Dim::Any },
-                framerate: if mask.framerate { framerate.clone() } else { Rate::Any },
+                height: if mask.height {
+                    height.clone()
+                } else {
+                    Dim::Any
+                },
+                framerate: if mask.framerate {
+                    framerate.clone()
+                } else {
+                    Rate::Any
+                },
             })
         }
-        Caps::CompressedVideo { codec, width, height, framerate } => {
+        Caps::CompressedVideo {
+            codec,
+            width,
+            height,
+            framerate,
+        } => {
             if !mask.format {
                 return None;
             }
             Some(Caps::CompressedVideo {
                 codec: *codec,
                 width: if mask.width { width.clone() } else { Dim::Any },
-                height: if mask.height { height.clone() } else { Dim::Any },
-                framerate: if mask.framerate { framerate.clone() } else { Rate::Any },
+                height: if mask.height {
+                    height.clone()
+                } else {
+                    Dim::Any
+                },
+                framerate: if mask.framerate {
+                    framerate.clone()
+                } else {
+                    Rate::Any
+                },
             })
         }
-        Caps::Audio { format, channels, sample_rate } => {
+        Caps::Audio {
+            format,
+            channels,
+            sample_rate,
+        } => {
             if !mask.format || !mask.channels {
                 return None; // no format / channel wildcard
             }
             Some(Caps::Audio {
                 format: *format,
                 channels: *channels,
-                sample_rate: if mask.sample_rate { *sample_rate } else { ANY_SAMPLE_RATE },
+                sample_rate: if mask.sample_rate {
+                    *sample_rate
+                } else {
+                    ANY_SAMPLE_RATE
+                },
             })
         }
         _ => None,
@@ -199,12 +330,24 @@ pub(crate) fn project_passthrough_derived(
     let (wp, hp, rp) = (geo_width(out)?, geo_height(out)?, geo_rate(out)?);
     let width = if mask.width { wp.clone() } else { Dim::Any };
     let height = if mask.height { hp.clone() } else { Dim::Any };
-    let framerate = if mask.framerate { rp.clone() } else { Rate::Any };
+    let framerate = if mask.framerate {
+        rp.clone()
+    } else {
+        Rate::Any
+    };
     match sample {
-        Caps::RawVideo { format, .. } => Some(Caps::RawVideo { format: *format, width, height, framerate }),
-        Caps::CompressedVideo { codec, .. } => {
-            Some(Caps::CompressedVideo { codec: *codec, width, height, framerate })
-        }
+        Caps::RawVideo { format, .. } => Some(Caps::RawVideo {
+            format: *format,
+            width,
+            height,
+            framerate,
+        }),
+        Caps::CompressedVideo { codec, .. } => Some(Caps::CompressedVideo {
+            codec: *codec,
+            width,
+            height,
+            framerate,
+        }),
         _ => None,
     }
 }
@@ -237,7 +380,10 @@ enum ProbeField {
 /// there (a wrong `true` would narrow the input incorrectly). `sample` is a
 /// representative input alternative; its geometry is concretised first so a
 /// `Range`/`Any` input field does not confuse the equality test.
-pub(crate) fn discover_passthrough(f: &dyn Fn(&Caps) -> CapsSet, sample: &Caps) -> PassthroughFields {
+pub(crate) fn discover_passthrough(
+    f: &dyn Fn(&Caps) -> CapsSet,
+    sample: &Caps,
+) -> PassthroughFields {
     let base = concrete_probe_base(sample);
     // Soundness gate: a field is probed by *varying* it, so a closure that is
     // multi-valued on the sample's own identity (e.g. a converter that offers
@@ -292,7 +438,12 @@ pub(crate) fn verify_passthrough_sound(
         (passthrough.sample_rate, ProbeField::SampleRate),
     ];
     for (claimed, field) in declared {
-        if claimed && !out.alternatives().iter().all(|alt| field_eq(alt, sample, field)) {
+        if claimed
+            && !out
+                .alternatives()
+                .iter()
+                .all(|alt| field_eq(alt, sample, field))
+        {
             return false;
         }
     }
@@ -317,7 +468,11 @@ fn concrete_probe_base(sample: &Caps) -> Caps {
             height: Dim::Fixed(64),
             framerate: Rate::Fixed(30 << 16),
         },
-        Caps::Audio { format, .. } => Caps::Audio { format: *format, channels: 2, sample_rate: 48_000 },
+        Caps::Audio { format, .. } => Caps::Audio {
+            format: *format,
+            channels: 2,
+            sample_rate: 48_000,
+        },
         other => other.clone(),
     }
 }
@@ -362,13 +517,25 @@ fn set_probe(base: &Caps, field: ProbeField, hi: bool) -> Option<Caps> {
             *framerate = Rate::Fixed(if hi { 60 << 16 } else { 30 << 16 });
         }
         (Caps::RawVideo { format, .. }, ProbeField::Format) => {
-            *format = if hi { RawVideoFormat::I420 } else { RawVideoFormat::Nv12 };
+            *format = if hi {
+                RawVideoFormat::I420
+            } else {
+                RawVideoFormat::Nv12
+            };
         }
         (Caps::CompressedVideo { codec, .. }, ProbeField::Format) => {
-            *codec = if hi { VideoCodec::H265 } else { VideoCodec::H264 };
+            *codec = if hi {
+                VideoCodec::H265
+            } else {
+                VideoCodec::H264
+            };
         }
         (Caps::Audio { format, .. }, ProbeField::Format) => {
-            *format = if hi { AudioFormat::PcmF32Le } else { AudioFormat::PcmS16Le };
+            *format = if hi {
+                AudioFormat::PcmF32Le
+            } else {
+                AudioFormat::PcmS16Le
+            };
         }
         (Caps::Audio { channels, .. }, ProbeField::Channels) => {
             *channels = if hi { 1 } else { 2 };
@@ -386,12 +553,20 @@ fn set_probe(base: &Caps, field: ProbeField, hi: bool) -> Option<Caps> {
 /// identity / channels / sample_rate require the same variant.
 fn field_eq(out: &Caps, inp: &Caps, field: ProbeField) -> bool {
     match field {
-        ProbeField::Width => geo_width(out).zip(geo_width(inp)).is_some_and(|(a, b)| a == b),
-        ProbeField::Height => geo_height(out).zip(geo_height(inp)).is_some_and(|(a, b)| a == b),
-        ProbeField::Framerate => geo_rate(out).zip(geo_rate(inp)).is_some_and(|(a, b)| a == b),
+        ProbeField::Width => geo_width(out)
+            .zip(geo_width(inp))
+            .is_some_and(|(a, b)| a == b),
+        ProbeField::Height => geo_height(out)
+            .zip(geo_height(inp))
+            .is_some_and(|(a, b)| a == b),
+        ProbeField::Framerate => geo_rate(out)
+            .zip(geo_rate(inp))
+            .is_some_and(|(a, b)| a == b),
         ProbeField::Format => match (out, inp) {
             (Caps::RawVideo { format: a, .. }, Caps::RawVideo { format: b, .. }) => a == b,
-            (Caps::CompressedVideo { codec: a, .. }, Caps::CompressedVideo { codec: b, .. }) => a == b,
+            (Caps::CompressedVideo { codec: a, .. }, Caps::CompressedVideo { codec: b, .. }) => {
+                a == b
+            }
             (Caps::Audio { format: a, .. }, Caps::Audio { format: b, .. }) => a == b,
             _ => false,
         },
@@ -422,7 +597,9 @@ fn geo_height(c: &Caps) -> Option<&Dim> {
 
 fn geo_rate(c: &Caps) -> Option<&Rate> {
     match c {
-        Caps::RawVideo { framerate, .. } | Caps::CompressedVideo { framerate, .. } => Some(framerate),
+        Caps::RawVideo { framerate, .. } | Caps::CompressedVideo { framerate, .. } => {
+            Some(framerate)
+        }
         _ => None,
     }
 }
@@ -433,14 +610,24 @@ mod tests {
     use alloc::{vec, vec::Vec};
 
     fn video(width: Dim, height: Dim, framerate: Rate) -> Caps {
-        Caps::RawVideo { format: RawVideoFormat::Rgba8, width, height, framerate }
+        Caps::RawVideo {
+            format: RawVideoFormat::Rgba8,
+            width,
+            height,
+            framerate,
+        }
     }
 
     #[test]
     fn discover_passthrough_decoder_geometry_and_framerate() {
         // H264 -> Nv12: geometry + framerate copied through, format retargeted.
         let dec = |input: &Caps| match input {
-            Caps::CompressedVideo { width, height, framerate, .. } => CapsSet::one(Caps::RawVideo {
+            Caps::CompressedVideo {
+                width,
+                height,
+                framerate,
+                ..
+            } => CapsSet::one(Caps::RawVideo {
                 format: RawVideoFormat::Nv12,
                 width: width.clone(),
                 height: height.clone(),
@@ -455,7 +642,10 @@ mod tests {
             framerate: Rate::Any,
         };
         let pt = discover_passthrough(&dec, &sample);
-        assert!(pt.width && pt.height && pt.framerate, "geometry + rate copied through");
+        assert!(
+            pt.width && pt.height && pt.framerate,
+            "geometry + rate copied through"
+        );
         assert!(!pt.format, "codec -> format is retargeted, not passthrough");
     }
 
@@ -492,7 +682,9 @@ mod tests {
         // A scaler fixes output geometry but keeps format + framerate: those two
         // are passthrough, width/height are not.
         let scale = |input: &Caps| match input {
-            Caps::RawVideo { format, framerate, .. } => CapsSet::one(Caps::RawVideo {
+            Caps::RawVideo {
+                format, framerate, ..
+            } => CapsSet::one(Caps::RawVideo {
                 format: *format,
                 width: Dim::Fixed(320),
                 height: Dim::Fixed(240),
@@ -502,7 +694,10 @@ mod tests {
         };
         let pt = discover_passthrough(&scale, &video(Dim::Any, Dim::Any, Rate::Any));
         assert!(pt.format && pt.framerate, "format + rate kept");
-        assert!(!pt.width && !pt.height, "geometry is retargeted by the scaler");
+        assert!(
+            !pt.width && !pt.height,
+            "geometry is retargeted by the scaler"
+        );
     }
 
     #[test]
@@ -516,7 +711,13 @@ mod tests {
         let from = [RawVideoFormat::Rgba8];
         let conv = move |input: &Caps| {
             let mut alts = vec![input.clone()];
-            if let Caps::RawVideo { format, width, height, framerate } = input {
+            if let Caps::RawVideo {
+                format,
+                width,
+                height,
+                framerate,
+            } = input
+            {
                 if from.contains(format) {
                     alts.push(Caps::RawVideo {
                         format: RawVideoFormat::Nv12,
@@ -534,7 +735,10 @@ mod tests {
             height: Dim::Fixed(480),
             framerate: Rate::Fixed(30 << 16),
         };
-        assert_eq!(discover_passthrough(&conv, &sample), PassthroughFields::NONE);
+        assert_eq!(
+            discover_passthrough(&conv, &sample),
+            PassthroughFields::NONE
+        );
     }
 
     #[test]
@@ -544,7 +748,12 @@ mod tests {
         // multi-valued (passthrough + scalable range), which `discover_passthrough`
         // could not verify.
         let scale = |input: &Caps| match input {
-            Caps::RawVideo { format, width, height, framerate } => CapsSet::from_alternatives(vec![
+            Caps::RawVideo {
+                format,
+                width,
+                height,
+                framerate,
+            } => CapsSet::from_alternatives(vec![
                 Caps::RawVideo {
                     format: *format,
                     width: width.clone(),
@@ -574,18 +783,21 @@ mod tests {
         // closure retargets width (one alternative is a Range, not the input's
         // Fixed), so the mask is unsound and the guard catches it.
         let scale = |input: &Caps| match input {
-            Caps::RawVideo { format, framerate, .. } => CapsSet::from_alternatives(vec![
-                Caps::RawVideo {
-                    format: *format,
-                    width: Dim::Range { min: 1, max: 8192 },
-                    height: Dim::Range { min: 1, max: 8192 },
-                    framerate: framerate.clone(),
-                },
-            ]),
+            Caps::RawVideo {
+                format, framerate, ..
+            } => CapsSet::from_alternatives(vec![Caps::RawVideo {
+                format: *format,
+                width: Dim::Range { min: 1, max: 8192 },
+                height: Dim::Range { min: 1, max: 8192 },
+                framerate: framerate.clone(),
+            }]),
             _ => CapsSet::from_alternatives(Vec::new()),
         };
         let sample = video(Dim::Fixed(640), Dim::Fixed(480), Rate::Fixed(30 << 16));
-        let overclaim = PassthroughFields::NONE.with_format().with_framerate().with_width();
+        let overclaim = PassthroughFields::NONE
+            .with_format()
+            .with_framerate()
+            .with_width();
         assert!(
             !verify_passthrough_sound(&scale, overclaim, &sample),
             "claiming width passthrough when the closure retargets it is unsound"

@@ -108,5 +108,9 @@ fn whole_pipeline_builds_and_runs_without_unsafe() {
         .expect("pipeline");
 
     // 4 frames x (CASET 4 + RASET 4 + RAMWR pixels 8) bytes with D/C high.
-    assert_eq!(log.borrow().data_bytes.len(), 4 * (4 + 4 + 8), "all frames reached the panel");
+    assert_eq!(
+        log.borrow().data_bytes.len(),
+        4 * (4 + 4 + 8),
+        "all frames reached the panel"
+    );
 }

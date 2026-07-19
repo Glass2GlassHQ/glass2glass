@@ -20,7 +20,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
     MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, RawVideoFormat, Rate, VideoCodec,
+    PropValue, PropertySpec, Rate, RawVideoFormat, VideoCodec,
 };
 
 use jpeg_encoder::{ColorType, Encoder};
@@ -163,7 +163,13 @@ impl AsyncElement for MjpegEnc {
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        let Caps::RawVideo { format, width, height, framerate } = absolute_caps else {
+        let Caps::RawVideo {
+            format,
+            width,
+            height,
+            framerate,
+        } = absolute_caps
+        else {
             return Err(G2gError::CapsMismatch);
         };
         if !matches!(
@@ -197,13 +203,12 @@ impl AsyncElement for MjpegEnc {
     }
 
     fn properties(&self) -> &'static [PropertySpec] {
-        const PROPS: &[PropertySpec] = &[PropertySpec::new(
-            "quality",
-            PropKind::Uint,
-            "JPEG quality, 0..=100",
-        )
-        .with_range("0", "100")
-        .with_default("85")];
+        const PROPS: &[PropertySpec] =
+            &[
+                PropertySpec::new("quality", PropKind::Uint, "JPEG quality, 0..=100")
+                    .with_range("0", "100")
+                    .with_default("85"),
+            ];
         PROPS
     }
 
@@ -240,7 +245,8 @@ impl AsyncElement for MjpegEnc {
                     };
                     let jpeg = self.encode(slice.as_slice())?;
                     if !self.caps_sent {
-                        out.push(PipelinePacket::CapsChanged(self.output_caps())).await?;
+                        out.push(PipelinePacket::CapsChanged(self.output_caps()))
+                            .await?;
                         self.caps_sent = true;
                     }
                     let encoded = Frame::new(

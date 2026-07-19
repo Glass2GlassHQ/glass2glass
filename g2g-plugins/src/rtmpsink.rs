@@ -55,7 +55,9 @@ struct RtmpTarget {
 /// path segment, `stream_key` the rest, `tc_url` the `rtmp://authority/app` the
 /// server expects echoed in the `connect` command.
 fn parse_rtmp_url(url: &str) -> Result<RtmpTarget, G2gError> {
-    let rest = url.strip_prefix("rtmp://").ok_or(G2gError::Hardware(HardwareError::Other))?;
+    let rest = url
+        .strip_prefix("rtmp://")
+        .ok_or(G2gError::Hardware(HardwareError::Other))?;
     let (authority, path) = match rest.find('/') {
         Some(i) => (&rest[..i], &rest[i + 1..]),
         None => (rest, ""),
@@ -70,7 +72,13 @@ fn parse_rtmp_url(url: &str) -> Result<RtmpTarget, G2gError> {
     let mut segs = path.splitn(2, '/');
     let app = segs.next().unwrap_or("").to_string();
     let stream_key = segs.next().unwrap_or("").to_string();
-    Ok(RtmpTarget { host, port, app: app.clone(), tc_url: format!("rtmp://{authority}/{app}"), stream_key })
+    Ok(RtmpTarget {
+        host,
+        port,
+        app: app.clone(),
+        tc_url: format!("rtmp://{authority}/{app}"),
+        stream_key,
+    })
 }
 
 #[derive(Debug)]
@@ -123,12 +131,17 @@ impl RtmpSink {
     }
 
     fn input_caps() -> Caps {
-        Caps::ByteStream { encoding: ByteStreamEncoding::Flv }
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::Flv,
+        }
     }
 }
 
 /// Write the publisher's queued bytes (handshake / commands / media) to the socket.
-async fn flush_out(stream: &mut TcpStream, publisher: &mut RtmpPublisher) -> Result<usize, G2gError> {
+async fn flush_out(
+    stream: &mut TcpStream,
+    publisher: &mut RtmpPublisher,
+) -> Result<usize, G2gError> {
     let out = publisher.take_outbound();
     if out.is_empty() {
         return Ok(0);
@@ -139,7 +152,10 @@ async fn flush_out(stream: &mut TcpStream, publisher: &mut RtmpPublisher) -> Res
 
 /// Drive the C0/C1 handshake and the connect/createStream/publish ladder to
 /// completion, exchanging bytes with the server until media may flow.
-async fn drive_publish(stream: &mut TcpStream, publisher: &mut RtmpPublisher) -> Result<(), G2gError> {
+async fn drive_publish(
+    stream: &mut TcpStream,
+    publisher: &mut RtmpPublisher,
+) -> Result<(), G2gError> {
     flush_out(stream, publisher).await?; // C0 + C1
     let mut buf = [0u8; READ_BUF];
     while !publisher.is_publishing() {
@@ -173,7 +189,10 @@ fn drain_incoming(stream: &TcpStream, publisher: &mut RtmpPublisher) {
 /// socket for the server's Acknowledgement (which advances the window). A bounded
 /// timeout keeps a silent server from wedging the pipeline forever; on timeout we
 /// proceed (best-effort, as most servers ack promptly).
-async fn await_ack_window(stream: &mut TcpStream, publisher: &mut RtmpPublisher) -> Result<(), G2gError> {
+async fn await_ack_window(
+    stream: &mut TcpStream,
+    publisher: &mut RtmpPublisher,
+) -> Result<(), G2gError> {
     use core::time::Duration;
     let mut buf = [0u8; READ_BUF];
     while publisher.throttled() {
@@ -188,7 +207,8 @@ async fn await_ack_window(stream: &mut TcpStream, publisher: &mut RtmpPublisher)
 }
 
 impl AsyncElement for RtmpSink {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -298,7 +318,11 @@ impl AsyncElement for RtmpSink {
 
 /// `RtmpSink`'s settable properties: the publish URL + the handshake mode.
 static RTMPSINK_PROPS: &[PropertySpec] = &[
-    PropertySpec::new("location", PropKind::Str, "rtmp://host[:port]/app/streamkey"),
+    PropertySpec::new(
+        "location",
+        PropKind::Str,
+        "rtmp://host[:port]/app/streamkey",
+    ),
     PropertySpec::new(
         "complex-handshake",
         PropKind::Bool,

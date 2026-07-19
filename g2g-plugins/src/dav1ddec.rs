@@ -20,4 +20,9 @@
 
 use crate::av1dec::av1_decoder;
 
-av1_decoder!(Dav1dDec, dav1d, "AV1 decoder (dav1d)", "Decodes AV1 to I420 via libdav1d");
+av1_decoder!(
+    Dav1dDec,
+    dav1d,
+    "AV1 decoder (dav1d)",
+    "Decodes AV1 to I420 via libdav1d"
+);

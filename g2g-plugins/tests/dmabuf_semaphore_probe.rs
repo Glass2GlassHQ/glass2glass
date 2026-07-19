@@ -36,9 +36,11 @@ async fn sem_device() -> Option<(wgpu::Device, wgpu::Adapter)> {
             wgpu::Features::empty(),
             &wgpu::Limits::default(),
             &wgpu::MemoryHints::default(),
-            Some(Box::new(|args: wgpu_hal::vulkan::CreateDeviceCallbackArgs| {
-                args.extensions.push(ash::khr::external_semaphore_fd::NAME);
-            })),
+            Some(Box::new(
+                |args: wgpu_hal::vulkan::CreateDeviceCallbackArgs| {
+                    args.extensions.push(ash::khr::external_semaphore_fd::NAME);
+                },
+            )),
         )
         .ok()?
     };
@@ -47,7 +49,10 @@ async fn sem_device() -> Option<(wgpu::Device, wgpu::Adapter)> {
         adapter
             .create_device_from_hal(
                 open,
-                &wgpu::DeviceDescriptor { label: Some("sem-probe"), ..Default::default() },
+                &wgpu::DeviceDescriptor {
+                    label: Some("sem-probe"),
+                    ..Default::default()
+                },
             )
             .ok()?
     };
@@ -64,7 +69,11 @@ async fn external_semaphore_fd_supported() {
         eprintln!("SKIP: could not open a second device");
         return;
     };
-    eprintln!("adapter: {} ({:?})", adapter.get_info().name, adapter.get_info().backend);
+    eprintln!(
+        "adapter: {} ({:?})",
+        adapter.get_info().name,
+        adapter.get_info().backend
+    );
 
     // Export an exportable semaphore's fd from device A, import it on device B.
     // SAFETY: raw Vulkan on the two live devices; the created semaphores are
@@ -77,7 +86,9 @@ async fn external_semaphore_fd_supported() {
         let mut export = vk::ExportSemaphoreCreateInfo::default()
             .handle_types(vk::ExternalSemaphoreHandleTypeFlags::OPAQUE_FD);
         let info = vk::SemaphoreCreateInfo::default().push_next(&mut export);
-        let sem_a = raw_a.create_semaphore(&info, None).expect("create exportable semaphore");
+        let sem_a = raw_a
+            .create_semaphore(&info, None)
+            .expect("create exportable semaphore");
 
         let loader_a = ash::khr::external_semaphore_fd::Device::new(inst_a, raw_a);
         let fd = loader_a.get_semaphore_fd(
@@ -93,8 +104,9 @@ async fn external_semaphore_fd_supported() {
                 let hal_b = dev_b.as_hal::<wgpu_hal::api::Vulkan>().expect("vk b");
                 let raw_b = hal_b.raw_device();
                 let inst_b = hal_b.shared_instance().raw_instance();
-                let sem_b =
-                    raw_b.create_semaphore(&vk::SemaphoreCreateInfo::default(), None).expect("sem b");
+                let sem_b = raw_b
+                    .create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
+                    .expect("sem b");
                 let loader_b = ash::khr::external_semaphore_fd::Device::new(inst_b, raw_b);
                 // import_semaphore_fd consumes the fd on success; use into_raw_fd so
                 // our OwnedFd does not also close it.

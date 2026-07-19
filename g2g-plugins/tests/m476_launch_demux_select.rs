@@ -43,7 +43,11 @@ fn h264_caps() -> Caps {
     }
 }
 fn aac_caps() -> Caps {
-    Caps::Audio { format: AudioFormat::Aac, channels: 2, sample_rate: 48_000 }
+    Caps::Audio {
+        format: AudioFormat::Aac,
+        channels: 2,
+        sample_rate: 48_000,
+    }
 }
 
 #[derive(Default)]
@@ -68,7 +72,11 @@ impl OutputSink for Collect {
 fn frame(data: Vec<u8>, pts_ns: u64) -> PipelinePacket {
     PipelinePacket::DataFrame(Frame::new(
         MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-        FrameTiming { pts_ns, dts_ns: pts_ns, ..FrameTiming::default() },
+        FrameTiming {
+            pts_ns,
+            dts_ns: pts_ns,
+            ..FrameTiming::default()
+        },
         0,
     ))
 }
@@ -103,12 +111,28 @@ async fn mux_av<M: MultiInputElement>(mut mux: M) -> Vec<u8> {
     mux.configure_pipeline(0, &h264_caps()).unwrap();
     mux.configure_pipeline(1, &aac_caps()).unwrap();
     let mut sink = Collect::default();
-    mux.process(0, frame(annexb(&[&sps, &pps, &idr]), 0), &mut sink).await.unwrap();
-    mux.process(1, frame(adts_au(&[0xA1, 0xA2, 0xA3]), 0), &mut sink).await.unwrap();
-    mux.process(0, frame(annexb(&[&[0x41u8, 0x9a, 0x00]]), 33_000_000), &mut sink).await.unwrap();
-    mux.process(1, frame(adts_au(&[0xB4, 0xB5]), 21_000_000), &mut sink).await.unwrap();
-    mux.process(0, PipelinePacket::Eos, &mut sink).await.unwrap();
-    mux.process(1, PipelinePacket::Eos, &mut sink).await.unwrap();
+    mux.process(0, frame(annexb(&[&sps, &pps, &idr]), 0), &mut sink)
+        .await
+        .unwrap();
+    mux.process(1, frame(adts_au(&[0xA1, 0xA2, 0xA3]), 0), &mut sink)
+        .await
+        .unwrap();
+    mux.process(
+        0,
+        frame(annexb(&[&[0x41u8, 0x9a, 0x00]]), 33_000_000),
+        &mut sink,
+    )
+    .await
+    .unwrap();
+    mux.process(1, frame(adts_au(&[0xB4, 0xB5]), 21_000_000), &mut sink)
+        .await
+        .unwrap();
+    mux.process(0, PipelinePacket::Eos, &mut sink)
+        .await
+        .unwrap();
+    mux.process(1, PipelinePacket::Eos, &mut sink)
+        .await
+        .unwrap();
     sink.bytes
 }
 
@@ -123,7 +147,10 @@ fn write_temp(name: &str, bytes: &[u8]) -> std::path::PathBuf {
 async fn run_line(line: &str) -> u64 {
     let reg = default_registry();
     let graph = parse_launch(&reg, line).unwrap_or_else(|e| panic!("parses `{line}`: {e}"));
-    run_graph(graph, &ZeroClock, 4).await.unwrap_or_else(|e| panic!("runs `{line}`: {e:?}")).frames_consumed
+    run_graph(graph, &ZeroClock, 4)
+        .await
+        .unwrap_or_else(|e| panic!("runs `{line}`: {e:?}"))
+        .frames_consumed
 }
 
 #[tokio::test]
@@ -139,7 +166,10 @@ async fn matroskademux_named_pads_fan_out() {
          d.video_0 ! h264parse ! fakesink  d.audio_0 ! aacparse ! fakesink"
     );
     let consumed = run_line(&line).await;
-    assert!(consumed >= 4, "all four access units flowed through the fan-out: {consumed}");
+    assert!(
+        consumed >= 4,
+        "all four access units flowed through the fan-out: {consumed}"
+    );
 
     // Swapped reference order: the audio branch is written first. Named selection
     // (not position) must still route audio to aacparse and video to h264parse.
@@ -148,7 +178,10 @@ async fn matroskademux_named_pads_fan_out() {
          d.audio_0 ! aacparse ! fakesink  d.video_0 ! h264parse ! fakesink"
     );
     let consumed = run_line(&swapped).await;
-    assert!(consumed >= 4, "named pads route by name regardless of reference order: {consumed}");
+    assert!(
+        consumed >= 4,
+        "named pads route by name regardless of reference order: {consumed}"
+    );
 
     let _ = std::fs::remove_file(&path);
 }
@@ -163,7 +196,10 @@ async fn tsdemux_named_pads_fan_out() {
          d.video_0 ! h264parse ! fakesink  d.audio_0 ! aacparse ! fakesink"
     );
     let consumed = run_line(&line).await;
-    assert!(consumed >= 4, "MPEG-TS fan-out routed both streams: {consumed}");
+    assert!(
+        consumed >= 4,
+        "MPEG-TS fan-out routed both streams: {consumed}"
+    );
     let _ = std::fs::remove_file(&path);
 }
 
@@ -177,6 +213,9 @@ async fn qtdemux_named_pads_fan_out() {
          d.video_0 ! h264parse ! fakesink  d.audio_0 ! aacparse ! fakesink"
     );
     let consumed = run_line(&line).await;
-    assert!(consumed >= 4, "MP4 (qtdemux) fan-out routed both streams: {consumed}");
+    assert!(
+        consumed >= 4,
+        "MP4 (qtdemux) fan-out routed both streams: {consumed}"
+    );
     let _ = std::fs::remove_file(&path);
 }

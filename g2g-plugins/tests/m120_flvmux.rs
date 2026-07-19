@@ -11,8 +11,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_graph, GraphNode, GraphNodeRef, SourceLoop};
 use g2g_core::{
-    Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, Graph, MemoryDomain, OutputSink,
-    PipelineClock, PipelinePacket, Rate, VideoCodec,
+    Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, Graph, MemoryDomain,
+    OutputSink, PipelineClock, PipelinePacket, Rate, VideoCodec,
 };
 use g2g_plugins::fakesink::FakeSink;
 use g2g_plugins::flvdemux::FlvDemux;
@@ -80,7 +80,10 @@ impl SourceLoop for H264Source {
 async fn flvmux_round_trips_through_flvdemux_in_runner() {
     // Annex-B access units, as an encoder/parser emits (M662: the muxer
     // re-frames them AVCC into the FLV tags, the demuxer re-frames them back).
-    let aus = vec![vec![0, 0, 0, 1, 0x65u8, 0xAA, 0xBB], vec![0, 0, 0, 1, 0x41u8, 0xCC]];
+    let aus = vec![
+        vec![0, 0, 0, 1, 0x65u8, 0xAA, 0xBB],
+        vec![0, 0, 0, 1, 0x41u8, 0xCC],
+    ];
 
     let mut graph: Graph<GraphNode> = Graph::new();
     let src = graph.add_source(GraphNodeRef::Source(Box::new(H264Source { aus, next: 0 })));
@@ -91,7 +94,15 @@ async fn flvmux_round_trips_through_flvdemux_in_runner() {
     graph.link(mux, demux).unwrap();
     graph.link(demux, sink).unwrap();
 
-    let stats = run_graph(graph, &ZeroClock, 4).await.expect("H.264 -> flvmux -> flvdemux -> sink");
-    assert_eq!(stats.frames_emitted, 2, "the source emitted two access units");
-    assert_eq!(stats.frames_consumed, 2, "both recovered through mux + demux");
+    let stats = run_graph(graph, &ZeroClock, 4)
+        .await
+        .expect("H.264 -> flvmux -> flvdemux -> sink");
+    assert_eq!(
+        stats.frames_emitted, 2,
+        "the source emitted two access units"
+    );
+    assert_eq!(
+        stats.frames_consumed, 2,
+        "both recovered through mux + demux"
+    );
 }

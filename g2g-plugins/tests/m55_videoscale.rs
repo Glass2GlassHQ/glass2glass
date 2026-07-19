@@ -57,6 +57,10 @@ async fn downscales_rgba_source_to_target_dims() {
     let changes = sink.caps_changes();
     assert!(changes.iter().any(|c| matches!(
         &c.caps,
-        Caps::RawVideo { width: Dim::Fixed(32), height: Dim::Fixed(24), .. }
+        Caps::RawVideo {
+            width: Dim::Fixed(32),
+            height: Dim::Fixed(24),
+            ..
+        }
     )));
 }

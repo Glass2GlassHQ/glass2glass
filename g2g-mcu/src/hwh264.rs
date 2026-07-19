@@ -112,7 +112,12 @@ impl<'r, E: H264Encoder, const N: usize, const BYTES: usize> HwH264Enc<'r, E, N,
         height: u16,
         ring: &'r StaticLendRing<N, BYTES>,
     ) -> Option<Self> {
-        Some(Self { encoder, ring, raw_len: i420_len(width, height)?, info: None })
+        Some(Self {
+            encoder,
+            ring,
+            raw_len: i420_len(width, height)?,
+            info: None,
+        })
     }
 
     /// The access unit info (byte count + keyframe flag) of the most recent
@@ -150,13 +155,19 @@ impl<E: H264Encoder, const N: usize, const BYTES: usize> StaticTransform
         // A zero-length access unit or one larger than the slot is a fault, not
         // something to propagate as a frame.
         if encoded.len == 0 || encoded.len > BYTES {
-            return Err(G2gError::Hardware(g2g_core::error::HardwareError::Peripheral));
+            return Err(G2gError::Hardware(
+                g2g_core::error::HardwareError::Peripheral,
+            ));
         }
         self.info = Some(encoded);
         // SAFETY: the constructor established the ring-outlives-frames contract
         // (`new`: 'static; `with_ring`: caller's contract).
         let out = unsafe { slot.publish(encoded.len) };
-        Ok(Some(Frame::new(MemoryDomain::System(out), input.timing, input.sequence)))
+        Ok(Some(Frame::new(
+            MemoryDomain::System(out),
+            input.timing,
+            input.sequence,
+        )))
     }
 }
 

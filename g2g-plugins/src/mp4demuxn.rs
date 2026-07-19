@@ -40,8 +40,8 @@ use g2g_core::{
 };
 
 use crate::fmp4::{
-    parse_all_tracks, parse_fragments_multi, parse_progressive_multi, starts_with_param_set, Sample,
-    TrackHeader, TrackKind,
+    parse_all_tracks, parse_fragments_multi, parse_progressive_multi, starts_with_param_set,
+    Sample, TrackHeader, TrackKind,
 };
 use crate::mp4box::find_box;
 
@@ -78,18 +78,31 @@ pub struct Mp4StreamInfo {
 /// [`real_caps`] via the port's `CapsChanged`.
 fn nego_caps(kind: &TrackKind) -> (Caps, bool) {
     match kind {
-        TrackKind::Video { codec, width, height, .. } => (
+        TrackKind::Video {
+            codec,
+            width,
+            height,
+            ..
+        } => (
             Caps::CompressedVideo {
                 codec: *codec,
                 width: Dim::Fixed(*width),
                 height: Dim::Fixed(*height),
-                framerate: Rate::Range { min_q16: 1 << 16, max_q16: 240 << 16 },
+                framerate: Rate::Range {
+                    min_q16: 1 << 16,
+                    max_q16: 240 << 16,
+                },
             },
             true,
         ),
-        TrackKind::Audio { format, .. } => {
-            (Caps::Audio { format: *format, channels: 0, sample_rate: 0 }, false)
-        }
+        TrackKind::Audio { format, .. } => (
+            Caps::Audio {
+                format: *format,
+                channels: 0,
+                sample_rate: 0,
+            },
+            false,
+        ),
         // A timed-text track plugs as its cue format directly (the container
         // carries the timing); not video, so the fan-out flag is false.
         TrackKind::Text { format, .. } => (Caps::Text { format: *format }, false),
@@ -102,9 +115,16 @@ fn nego_caps(kind: &TrackKind) -> (Caps, bool) {
 fn real_caps(kind: &TrackKind) -> Caps {
     match kind {
         TrackKind::Video { .. } | TrackKind::Text { .. } => nego_caps(kind).0,
-        TrackKind::Audio { format, channels, sample_rate, .. } => {
-            Caps::Audio { format: *format, channels: *channels, sample_rate: *sample_rate }
-        }
+        TrackKind::Audio {
+            format,
+            channels,
+            sample_rate,
+            ..
+        } => Caps::Audio {
+            format: *format,
+            channels: *channels,
+            sample_rate: *sample_rate,
+        },
     }
 }
 
@@ -154,7 +174,12 @@ pub fn subtitle_streams(data: &[u8]) -> Vec<Mp4StreamInfo> {
                 .filter(|t| matches!(t.kind, TrackKind::Text { .. }))
                 .map(|t| {
                     let (caps, video) = nego_caps(&t.kind);
-                    Mp4StreamInfo { track_id: t.track_id, caps, video, asc: Vec::new() }
+                    Mp4StreamInfo {
+                        track_id: t.track_id,
+                        caps,
+                        video,
+                        asc: Vec::new(),
+                    }
                 })
                 .collect()
         })
@@ -209,7 +234,10 @@ impl Mp4DemuxN {
     /// A demuxer with one output port per entry of `ports`, in port order. Panics
     /// if `ports` is empty (a fan-out needs a port).
     pub fn new(ports: Vec<Mp4Port>) -> Self {
-        assert!(!ports.is_empty(), "Mp4DemuxN needs at least one output port");
+        assert!(
+            !ports.is_empty(),
+            "Mp4DemuxN needs at least one output port"
+        );
         let announced = alloc::vec![false; ports.len()];
         let need_param_sets = alloc::vec![true; ports.len()];
         Self {
@@ -249,18 +277,28 @@ impl Mp4DemuxN {
     /// bus. A no-op without a controller, with no pending selection, or before the
     /// `moov` is parsed (an id resolves against the file's declared tracks).
     fn apply_stream_selection(&mut self) {
-        let Some(ctrl) = &self.stream_select else { return };
-        let Some(ids) = ctrl.take_pending() else { return };
-        let Some(tracks) = self.tracks.as_ref() else { return };
+        let Some(ctrl) = &self.stream_select else {
+            return;
+        };
+        let Some(ids) = ctrl.take_pending() else {
+            return;
+        };
+        let Some(tracks) = self.tracks.as_ref() else {
+            return;
+        };
         // Resolve against the parsed tracks first (immutable borrow), then re-map.
         let mut resolved: Vec<(usize, u32, Caps)> = Vec::new();
         let mut active = Vec::new();
         for (port, id) in ids.iter().enumerate().take(self.ports.len()) {
-            let Some(track_id) = id.strip_prefix("mp4-track-").and_then(|n| n.parse::<u32>().ok())
+            let Some(track_id) = id
+                .strip_prefix("mp4-track-")
+                .and_then(|n| n.parse::<u32>().ok())
             else {
                 continue;
             };
-            let Some(track) = tracks.iter().find(|t| t.track_id == track_id) else { continue };
+            let Some(track) = tracks.iter().find(|t| t.track_id == track_id) else {
+                continue;
+            };
             resolved.push((port, track_id, nego_caps(&track.kind).0));
             active.push(id.clone());
         }
@@ -310,7 +348,9 @@ impl Mp4DemuxN {
     fn accepts(caps: &Caps) -> bool {
         matches!(
             caps,
-            Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff | ByteStreamEncoding::Mp4 }
+            Caps::ByteStream {
+                encoding: ByteStreamEncoding::IsoBmff | ByteStreamEncoding::Mp4
+            }
         )
     }
 
@@ -337,7 +377,9 @@ impl Mp4DemuxN {
         }
         self.collection_posted = true;
         if let Some(bus) = &self.bus {
-            bus.try_post(BusMessage::StreamCollection(StreamCollection::new("mp4-0", streams)));
+            bus.try_post(BusMessage::StreamCollection(StreamCollection::new(
+                "mp4-0", streams,
+            )));
         }
     }
 
@@ -346,15 +388,26 @@ impl Mp4DemuxN {
     /// buffer or a single `moof`+`mdat` fragment (the progressive emit). Without the
     /// `mp4-cenc` feature (or a key), an encrypted track fails loud inside
     /// `parse_fragments_multi`.
-    fn parse_fragments_in(&self, data: &[u8], tracks: &[TrackHeader]) -> Result<Vec<(u32, Sample)>, G2gError> {
+    fn parse_fragments_in(
+        &self,
+        data: &[u8],
+        tracks: &[TrackHeader],
+    ) -> Result<Vec<(u32, Sample)>, G2gError> {
         #[cfg(feature = "mp4-cenc")]
         if let Some(key) = self.cenc_key {
-            let mut decrypt = move |cenc: &crate::fmp4::CencDefaults, buf: &mut [u8], subs: &[crate::fmp4::Subsample]| {
+            let mut decrypt = move |cenc: &crate::fmp4::CencDefaults,
+                                    buf: &mut [u8],
+                                    subs: &[crate::fmp4::Subsample]| {
                 // cbcs constant IV (per-sample IV size 0); a malformed IV leaves
                 // the sample untouched rather than panicking on the slice convert.
                 if let Ok(iv) = <[u8; 16]>::try_from(cenc.constant_iv.as_slice()) {
                     crate::cenc::cbcs_decrypt_sample(
-                        buf, subs, &key, &iv, cenc.crypt_byte_block, cenc.skip_byte_block,
+                        buf,
+                        subs,
+                        &key,
+                        &iv,
+                        cenc.crypt_byte_block,
+                        cenc.skip_byte_block,
                     );
                 }
             };
@@ -373,7 +426,9 @@ impl Mp4DemuxN {
         // Until the `moov` is fully buffered we cannot tell fragmented from
         // progressive, so keep accumulating. A fragmented file carries `mvex`.
         if self.fragmented.is_none() {
-            let Some(moov) = find_box(&self.buf, b"moov") else { return Ok(()) };
+            let Some(moov) = find_box(&self.buf, b"moov") else {
+                return Ok(());
+            };
             let fragmented = find_box(moov, b"mvex").is_some();
             let tracks = parse_all_tracks(&self.buf)?;
             if self.bus.is_some() {
@@ -389,7 +444,10 @@ impl Mp4DemuxN {
 
         // Take the tracks out so the per-sample emit can borrow `self` mutably while
         // reading the (now local) track headers.
-        let tracks = self.tracks.take().expect("tracks set once fragmented is known");
+        let tracks = self
+            .tracks
+            .take()
+            .expect("tracks set once fragmented is known");
         let mut off = 0usize;
         let mut consumed = 0usize; // bytes safe to drain (a pending moof is kept)
         let mut frag_start: Option<usize> = None;
@@ -432,7 +490,10 @@ impl Mp4DemuxN {
     /// one big `mdat` (nothing can emit incrementally). The fragmented path emits in
     /// [`advance`](Self::advance) instead, so this is reached only when `fragmented`
     /// is not `Some(true)`.
-    async fn parse_and_emit_whole(&mut self, out: &mut dyn MultiOutputSink) -> Result<(), G2gError> {
+    async fn parse_and_emit_whole(
+        &mut self,
+        out: &mut dyn MultiOutputSink,
+    ) -> Result<(), G2gError> {
         let tracks = parse_all_tracks(&self.buf)?;
         if self.bus.is_some() {
             self.post_stream_collection(&tracks);
@@ -463,11 +524,16 @@ impl Mp4DemuxN {
             let Some(port) = self.ports.iter().position(|p| p.track_id == track_id) else {
                 continue; // a track no port forwards
             };
-            let kind = tracks.iter().find(|t| t.track_id == track_id).map(|t| &t.kind);
+            let kind = tracks
+                .iter()
+                .find(|t| t.track_id == track_id)
+                .map(|t| &t.kind);
             // Announce the port's real caps once (refining the looser negotiation
             // caps the branch solved against, e.g. concrete AAC channels/rate).
             if !self.announced[port] {
-                let caps = kind.map(real_caps).unwrap_or_else(|| self.ports[port].caps.clone());
+                let caps = kind
+                    .map(real_caps)
+                    .unwrap_or_else(|| self.ports[port].caps.clone());
                 out.push_to(port, PipelinePacket::CapsChanged(caps)).await?;
                 self.announced[port] = true;
             }
@@ -476,7 +542,9 @@ impl Mp4DemuxN {
             match kind {
                 // Prepend out-of-band parameter sets to the first video frame if
                 // it carries none (our own muxer keeps them in-band; CMAF may not).
-                Some(TrackKind::Video { codec, param_sets, .. }) => {
+                Some(TrackKind::Video {
+                    codec, param_sets, ..
+                }) => {
                     if self.need_param_sets[port] && !starts_with_param_set(&data, *codec) {
                         let mut with = Vec::new();
                         for set in param_sets {
@@ -726,7 +794,11 @@ mod tests {
     fn vframe(data: Vec<u8>, pts_ns: u64) -> PipelinePacket {
         PipelinePacket::DataFrame(Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-            FrameTiming { pts_ns, dts_ns: pts_ns, ..FrameTiming::default() },
+            FrameTiming {
+                pts_ns,
+                dts_ns: pts_ns,
+                ..FrameTiming::default()
+            },
             0,
         ))
     }
@@ -750,16 +822,36 @@ mod tests {
             .unwrap();
             mux.configure_pipeline(
                 1,
-                &Caps::Audio { format: AudioFormat::Aac, channels: 2, sample_rate: 48000 },
+                &Caps::Audio {
+                    format: AudioFormat::Aac,
+                    channels: 2,
+                    sample_rate: 48000,
+                },
             )
             .unwrap();
             let mut sink = ByteCapture::default();
-            mux.process(0, vframe(annexb(&[&sps, &pps, &idr]), 0), &mut sink).await.unwrap();
-            mux.process(1, vframe(adts_au(&[0x01, 0x02, 0x03]), 0), &mut sink).await.unwrap();
-            mux.process(0, vframe(annexb(&[&[0x41u8, 0x9a, 0x00]]), 33_000_000), &mut sink).await.unwrap();
-            mux.process(1, vframe(adts_au(&[0x04, 0x05]), 21_000_000), &mut sink).await.unwrap();
-            mux.process(0, PipelinePacket::Eos, &mut sink).await.unwrap();
-            mux.process(1, PipelinePacket::Eos, &mut sink).await.unwrap();
+            mux.process(0, vframe(annexb(&[&sps, &pps, &idr]), 0), &mut sink)
+                .await
+                .unwrap();
+            mux.process(1, vframe(adts_au(&[0x01, 0x02, 0x03]), 0), &mut sink)
+                .await
+                .unwrap();
+            mux.process(
+                0,
+                vframe(annexb(&[&[0x41u8, 0x9a, 0x00]]), 33_000_000),
+                &mut sink,
+            )
+            .await
+            .unwrap();
+            mux.process(1, vframe(adts_au(&[0x04, 0x05]), 21_000_000), &mut sink)
+                .await
+                .unwrap();
+            mux.process(0, PipelinePacket::Eos, &mut sink)
+                .await
+                .unwrap();
+            mux.process(1, PipelinePacket::Eos, &mut sink)
+                .await
+                .unwrap();
             sink.bytes
         })
     }
@@ -774,8 +866,15 @@ mod tests {
         assert_eq!(framed[2], (1 << 6) | (3 << 2));
         // channel low 2 bits (2) in the top, then frame_len (9) high bits.
         let frame_len: u32 = 2 + 7;
-        assert_eq!(framed[3], ((2u8 & 3) << 6) | (((frame_len >> 11) & 3) as u8));
-        assert_eq!(&framed[7..], &[0xAA, 0xBB], "the AU follows the 7-byte header");
+        assert_eq!(
+            framed[3],
+            ((2u8 & 3) << 6) | (((frame_len >> 11) & 3) as u8)
+        );
+        assert_eq!(
+            &framed[7..],
+            &[0xAA, 0xBB],
+            "the AU follows the 7-byte header"
+        );
         // A too-short ASC declines (the AU would be forwarded raw).
         assert!(adts_from_asc(&[0x11], &[0xAA]).is_none());
     }
@@ -804,16 +903,36 @@ mod tests {
             .unwrap();
             mux.configure_pipeline(
                 1,
-                &Caps::Audio { format: AudioFormat::Aac, channels: 2, sample_rate: 48000 },
+                &Caps::Audio {
+                    format: AudioFormat::Aac,
+                    channels: 2,
+                    sample_rate: 48000,
+                },
             )
             .unwrap();
             let mut sink = ByteCapture::default();
-            mux.process(0, vframe(annexb(&[&sps, &pps, &idr]), 0), &mut sink).await.unwrap();
-            mux.process(1, vframe(adts_au(&[0x01, 0x02, 0x03]), 0), &mut sink).await.unwrap();
-            mux.process(0, vframe(annexb(&[&[0x41u8, 0x9a, 0x00]]), 33_000_000), &mut sink).await.unwrap();
-            mux.process(1, vframe(adts_au(&[0x04, 0x05]), 21_000_000), &mut sink).await.unwrap();
-            mux.process(0, PipelinePacket::Eos, &mut sink).await.unwrap();
-            mux.process(1, PipelinePacket::Eos, &mut sink).await.unwrap();
+            mux.process(0, vframe(annexb(&[&sps, &pps, &idr]), 0), &mut sink)
+                .await
+                .unwrap();
+            mux.process(1, vframe(adts_au(&[0x01, 0x02, 0x03]), 0), &mut sink)
+                .await
+                .unwrap();
+            mux.process(
+                0,
+                vframe(annexb(&[&[0x41u8, 0x9a, 0x00]]), 33_000_000),
+                &mut sink,
+            )
+            .await
+            .unwrap();
+            mux.process(1, vframe(adts_au(&[0x04, 0x05]), 21_000_000), &mut sink)
+                .await
+                .unwrap();
+            mux.process(0, PipelinePacket::Eos, &mut sink)
+                .await
+                .unwrap();
+            mux.process(1, PipelinePacket::Eos, &mut sink)
+                .await
+                .unwrap();
             sink.bytes
         });
 
@@ -823,8 +942,13 @@ mod tests {
         assert!(streams[0].video, "track 0 is video");
         assert!(!streams[1].video, "track 1 is audio");
 
-        let ports: Vec<Mp4Port> =
-            streams.iter().map(|s| Mp4Port { track_id: s.track_id, caps: s.caps.clone() }).collect();
+        let ports: Vec<Mp4Port> = streams
+            .iter()
+            .map(|s| Mp4Port {
+                track_id: s.track_id,
+                caps: s.caps.clone(),
+            })
+            .collect();
         let mut demux = Mp4DemuxN::new(ports);
         let mut out = PortCapture::new(2);
         block_on(async {
@@ -833,16 +957,32 @@ mod tests {
         });
 
         // Port 0 (video) got both frames; the first opens with parameter sets.
-        assert!(matches!(out.caps[0], Some(Caps::CompressedVideo { codec: VideoCodec::H264, .. })));
+        assert!(matches!(
+            out.caps[0],
+            Some(Caps::CompressedVideo {
+                codec: VideoCodec::H264,
+                ..
+            })
+        ));
         assert_eq!(out.frames[0].len(), 2, "two video access units");
         assert!(
             starts_with_param_set(&out.frames[0][0], VideoCodec::H264),
             "first video frame opens with an SPS"
         );
         // Port 1 (audio) got both AAC access units.
-        assert!(matches!(out.caps[1], Some(Caps::Audio { format: AudioFormat::Aac, .. })));
+        assert!(matches!(
+            out.caps[1],
+            Some(Caps::Audio {
+                format: AudioFormat::Aac,
+                ..
+            })
+        ));
         assert_eq!(out.frames[1].len(), 2, "two audio access units");
-        assert_eq!(demux.emitted(), 4, "four frames forwarded across both ports");
+        assert_eq!(
+            demux.emitted(),
+            4,
+            "four frames forwarded across both ports"
+        );
     }
 
     /// Progressive demux (M437): a fragmented file streamed in byte by byte must
@@ -853,14 +993,22 @@ mod tests {
     fn emits_fragments_progressively_before_eos() {
         let bytes = mux_av();
         let streams = forwardable_streams(&bytes);
-        let ports: Vec<Mp4Port> =
-            streams.iter().map(|s| Mp4Port { track_id: s.track_id, caps: s.caps.clone() }).collect();
+        let ports: Vec<Mp4Port> = streams
+            .iter()
+            .map(|s| Mp4Port {
+                track_id: s.track_id,
+                caps: s.caps.clone(),
+            })
+            .collect();
         let mut demux = Mp4DemuxN::new(ports);
         let mut out = PortCapture::new(2);
         block_on(async {
             // Stream the whole file one byte per DataFrame, NO Eos.
             for b in &bytes {
-                demux.process(vframe(alloc::vec![*b], 0), &mut out).await.unwrap();
+                demux
+                    .process(vframe(alloc::vec![*b], 0), &mut out)
+                    .await
+                    .unwrap();
             }
         });
 
@@ -876,7 +1024,11 @@ mod tests {
 
         // A final Eos must not double-emit (the fragments were already drained).
         block_on(async { demux.process(PipelinePacket::Eos, &mut out).await.unwrap() });
-        assert_eq!(demux.emitted(), 4, "Eos after a fully-streamed fragmented file adds nothing");
+        assert_eq!(
+            demux.emitted(),
+            4,
+            "Eos after a fully-streamed fragmented file adds nothing"
+        );
     }
 
     /// The audio port emits self-describing ADTS (the ASC wired in-band), so a
@@ -889,8 +1041,13 @@ mod tests {
 
         let bytes = mux_av();
         let streams = forwardable_streams(&bytes);
-        let ports: Vec<Mp4Port> =
-            streams.iter().map(|s| Mp4Port { track_id: s.track_id, caps: s.caps.clone() }).collect();
+        let ports: Vec<Mp4Port> = streams
+            .iter()
+            .map(|s| Mp4Port {
+                track_id: s.track_id,
+                caps: s.caps.clone(),
+            })
+            .collect();
         let mut demux = Mp4DemuxN::new(ports);
         let mut out = PortCapture::new(2);
         block_on(async {
@@ -900,7 +1057,10 @@ mod tests {
 
         // Every audio frame opens with an ADTS syncword (0xFFF).
         for au in &out.frames[1] {
-            assert!(au.len() >= 7 && au[0] == 0xFF && (au[1] & 0xF0) == 0xF0, "ADTS-framed AAC");
+            assert!(
+                au.len() >= 7 && au[0] == 0xFF && (au[1] & 0xF0) == 0xF0,
+                "ADTS-framed AAC"
+            );
         }
 
         // A real AAC parser recovers 48 kHz / stereo from the ADTS headers.
@@ -925,17 +1085,28 @@ mod tests {
         let recovered = block_on(async {
             let mut parser = AacParse::new();
             parser
-                .configure_pipeline(&Caps::Audio { format: AudioFormat::Aac, channels: 0, sample_rate: 0 })
+                .configure_pipeline(&Caps::Audio {
+                    format: AudioFormat::Aac,
+                    channels: 0,
+                    sample_rate: 0,
+                })
                 .unwrap();
             let mut sink = CapsCapture::default();
             for au in &out.frames[1] {
-                parser.process(vframe(au.clone(), 0), &mut sink).await.unwrap();
+                parser
+                    .process(vframe(au.clone(), 0), &mut sink)
+                    .await
+                    .unwrap();
             }
             sink.last
         });
         assert_eq!(
             recovered,
-            Some(Caps::Audio { format: AudioFormat::Aac, channels: 2, sample_rate: 48_000 }),
+            Some(Caps::Audio {
+                format: AudioFormat::Aac,
+                channels: 2,
+                sample_rate: 48_000
+            }),
             "AacParse recovers the real channel layout / sample rate from the wired-in ASC"
         );
     }
@@ -1034,15 +1205,27 @@ mod tests {
         let tracks = parse_all_tracks(&file).expect("text track parses");
         assert_eq!(tracks.len(), 1, "the subtitle track is discovered");
         assert!(
-            matches!(tracks[0].kind, TrackKind::Text { format: TextFormat::Utf8, .. }),
+            matches!(
+                tracks[0].kind,
+                TrackKind::Text {
+                    format: TextFormat::Utf8,
+                    ..
+                }
+            ),
             "tx3g maps to Caps::Text {{ Utf8 }}"
         );
 
         // The playbin fan-out omits text (no text-branch auto-plug yet).
-        assert!(forwardable_streams(&file).is_empty(), "text excluded from auto-plug");
+        assert!(
+            forwardable_streams(&file).is_empty(),
+            "text excluded from auto-plug"
+        );
 
         // --- fan out: the cues land on the text port -------------------------
-        let ports = alloc::vec![Mp4Port { track_id: 1, caps: real_caps(&tracks[0].kind) }];
+        let ports = alloc::vec![Mp4Port {
+            track_id: 1,
+            caps: real_caps(&tracks[0].kind)
+        }];
         let mut demux = Mp4DemuxN::new(ports);
         let mut out = PortCapture::new(1);
         block_on(async {
@@ -1050,11 +1233,23 @@ mod tests {
             demux.process(PipelinePacket::Eos, &mut out).await.unwrap();
         });
 
-        assert_eq!(out.caps[0], Some(Caps::Text { format: TextFormat::Utf8 }));
+        assert_eq!(
+            out.caps[0],
+            Some(Caps::Text {
+                format: TextFormat::Utf8
+            })
+        );
         assert_eq!(out.frames[0].len(), 2, "two cues");
-        assert_eq!(out.frames[0][0], b"Hello", "tx3g length prefix stripped to the cue");
+        assert_eq!(
+            out.frames[0][0], b"Hello",
+            "tx3g length prefix stripped to the cue"
+        );
         assert_eq!(out.frames[0][1], b"World");
-        assert_eq!(out.ptss[0], alloc::vec![0, 1_000_000_000], "per-cue PTS from the container");
+        assert_eq!(
+            out.ptss[0],
+            alloc::vec![0, 1_000_000_000],
+            "per-cue PTS from the container"
+        );
     }
 
     /// An encrypted (cbcs) H.264 track fans out and decrypts: a hand-built `encv`
@@ -1165,7 +1360,10 @@ mod tests {
             c.extend_from_slice(&(clear.len() as u32).to_be_bytes()); // protected bytes
             full_box(b"senc", 0, 0x2, &c)
         };
-        let moof = mp4_box(b"moof", &mp4_box(b"traf", &[tfhd, tfdt, trun, senc].concat()));
+        let moof = mp4_box(
+            b"moof",
+            &mp4_box(b"traf", &[tfhd, tfdt, trun, senc].concat()),
+        );
 
         let mut file = Vec::new();
         file.extend_from_slice(&moov);
@@ -1175,14 +1373,22 @@ mod tests {
         // forwardable_streams discovers the (encrypted) video track.
         let streams = forwardable_streams(&file);
         assert_eq!(streams.len(), 1, "the encrypted video track is discovered");
-        let ports: Vec<Mp4Port> =
-            streams.iter().map(|s| Mp4Port { track_id: s.track_id, caps: s.caps.clone() }).collect();
+        let ports: Vec<Mp4Port> = streams
+            .iter()
+            .map(|s| Mp4Port {
+                track_id: s.track_id,
+                caps: s.caps.clone(),
+            })
+            .collect();
 
         // With the key the sample decrypts back to the original Annex-B.
         let mut demux = Mp4DemuxN::new(ports.clone()).with_cenc_key(key);
         let mut out = PortCapture::new(1);
         block_on(async {
-            demux.process(vframe(file.clone(), 0), &mut out).await.unwrap();
+            demux
+                .process(vframe(file.clone(), 0), &mut out)
+                .await
+                .unwrap();
             demux.process(PipelinePacket::Eos, &mut out).await.unwrap();
         });
         assert_eq!(out.frames[0].len(), 1, "one video access unit");
@@ -1192,7 +1398,10 @@ mod tests {
         let mut idr = alloc::vec![0u8, 0, 0, 1];
         idr.extend_from_slice(&nal);
         assert!(frame.ends_with(&idr), "decrypted to the clear Annex-B IDR");
-        assert!(starts_with_param_set(frame, VideoCodec::H264), "param sets prepended");
+        assert!(
+            starts_with_param_set(frame, VideoCodec::H264),
+            "param sets prepended"
+        );
 
         // Without a key, the encrypted track fails loud rather than emitting garbage.
         let mut keyless = Mp4DemuxN::new(ports);
@@ -1201,7 +1410,10 @@ mod tests {
             keyless.process(vframe(file, 0), &mut out2).await?;
             keyless.process(PipelinePacket::Eos, &mut out2).await
         });
-        assert!(result.is_err(), "an encrypted track without a key fails loud");
+        assert!(
+            result.is_err(),
+            "an encrypted track without a key fails loud"
+        );
     }
 
     /// AES-128-CBC encrypt one 16-byte block (the fixture side of the cbcs

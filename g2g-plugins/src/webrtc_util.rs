@@ -78,7 +78,10 @@ async fn send_sdp(
     bearer: Option<&str>,
     offer_sdp: String,
 ) -> Result<reqwest::Response, reqwest::Error> {
-    let mut req = client.post(url).header("Content-Type", "application/sdp").body(offer_sdp);
+    let mut req = client
+        .post(url)
+        .header("Content-Type", "application/sdp")
+        .body(offer_sdp);
     if let Some(token) = bearer {
         req = req.header("Authorization", format!("Bearer {token}"));
     }
@@ -113,12 +116,17 @@ pub(crate) async fn add_ice_candidates(
     socket: &UdpSocket,
     stun_server: Option<&str>,
 ) -> Result<(), G2gError> {
-    let local = socket.local_addr().map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+    let local = socket
+        .local_addr()
+        .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
     if let Ok(host) = Candidate::host(local, "udp") {
         rtc.add_local_candidate(host);
     }
     if let Some(server) = stun_server {
-        if let Some(stun_addr) = tokio::net::lookup_host(server).await.ok().and_then(|mut a| a.next())
+        if let Some(stun_addr) = tokio::net::lookup_host(server)
+            .await
+            .ok()
+            .and_then(|mut a| a.next())
         {
             if let Some(srflx) = gather_srflx(socket, stun_addr).await {
                 if let Ok(c) = Candidate::server_reflexive(srflx, local, "udp") {
@@ -168,7 +176,12 @@ pub(crate) fn feed_datagram(
                 if let Ok(contents) = payload.as_slice().try_into() {
                     let input = Input::Receive(
                         Instant::now(),
-                        Receive { proto: Protocol::Udp, source: peer, destination: relay, contents },
+                        Receive {
+                            proto: Protocol::Udp,
+                            source: peer,
+                            destination: relay,
+                            contents,
+                        },
                     );
                     return rtc.handle_input(input).is_ok();
                 }
@@ -177,7 +190,12 @@ pub(crate) fn feed_datagram(
     } else if let Ok(contents) = datagram.try_into() {
         let input = Input::Receive(
             Instant::now(),
-            Receive { proto: Protocol::Udp, source, destination: local, contents },
+            Receive {
+                proto: Protocol::Udp,
+                source,
+                destination: local,
+                contents,
+            },
         );
         return rtc.handle_input(input).is_ok();
     }
@@ -201,7 +219,7 @@ async fn gather_srflx(socket: &UdpSocket, stun_server: SocketAddr) -> Option<Soc
 
     let mut req = [0u8; 20];
     req[0..2].copy_from_slice(&0x0001u16.to_be_bytes()); // Binding Request
-    // bytes 2..4 = length 0
+                                                         // bytes 2..4 = length 0
     req[4..8].copy_from_slice(&STUN_MAGIC.to_be_bytes());
     req[8..20].copy_from_slice(&txn);
 
@@ -283,7 +301,10 @@ mod tests {
         msg.extend_from_slice(&xip);
 
         let addr = parse_xor_mapped_address(&msg, &txn).expect("parses");
-        assert_eq!(addr, SocketAddr::from((Ipv4Addr::new(203, 0, 113, 7), 51234)));
+        assert_eq!(
+            addr,
+            SocketAddr::from((Ipv4Addr::new(203, 0, 113, 7), 51234))
+        );
     }
 
     #[test]

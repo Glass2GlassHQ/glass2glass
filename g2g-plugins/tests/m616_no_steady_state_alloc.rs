@@ -61,7 +61,9 @@ const PAYLOAD: usize = 4;
 fn run_data_path(ring: &StaticLendRing<SLOTS, BYTES>, frames: u64) -> u64 {
     let mut acc = 0u64;
     for i in 0..frames {
-        let mut slot = ring.acquire().expect("a slot is free (each frame is dropped before the next)");
+        let mut slot = ring
+            .acquire()
+            .expect("a slot is free (each frame is dropped before the next)");
         for b in slot.buf_mut()[..PAYLOAD].iter_mut() {
             *b = i as u8;
         }

@@ -15,7 +15,10 @@
 //!    that the cache never exceeds its capacity.
 //!
 //! Runs on the RTX 3060; skips with no Vulkan H.264 adapter / no compute queue.
-#![cfg(all(any(target_os = "linux", target_os = "windows"), feature = "vulkan-video"))]
+#![cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    feature = "vulkan-video"
+))]
 
 use g2g_core::runtime::block_on;
 use g2g_plugins::vulkanvideo::{
@@ -26,12 +29,21 @@ const CLIP: &[u8] = include_bytes!("fixtures/h264_640x480.h264");
 
 /// Mean absolute per-byte difference between two equal-length RGBA buffers.
 fn sad_per_byte(a: &[u8], b: &[u8]) -> f64 {
-    assert_eq!(a.len(), b.len(), "frame sizes differ ({} vs {})", a.len(), b.len());
+    assert_eq!(
+        a.len(),
+        b.len(),
+        "frame sizes differ ({} vs {})",
+        a.len(),
+        b.len()
+    );
     if a.is_empty() {
         return 0.0;
     }
-    let sum: u64 =
-        a.iter().zip(b).map(|(&x, &y)| (x as i32 - y as i32).unsigned_abs() as u64).sum();
+    let sum: u64 = a
+        .iter()
+        .zip(b)
+        .map(|(&x, &y)| (x as i32 - y as i32).unsigned_abs() as u64)
+        .sum();
     sum as f64 / a.len() as f64
 }
 
@@ -54,7 +66,9 @@ fn m499_vulkan_video_cache() {
 
     // Linear-decode ground truth (decoding order), read back to RGBA bytes.
     let reference: Vec<Vec<u8>> = {
-        let session = device.create_h264_session(&ps, width, height).expect("reference session");
+        let session = device
+            .create_h264_session(&ps, width, height)
+            .expect("reference session");
         let mut dec = match device.create_h264_dpb_decoder_gpu(&session, &ps) {
             Ok(d) => d,
             Err(VulkanVideoError::NoComputeQueue) => {
@@ -87,29 +101,49 @@ fn m499_vulkan_video_cache() {
         "linear playback must decode each coded picture exactly once (forward-continue), \
          not O(n^2) via a keyframe reset per frame",
     );
-    assert_eq!(player.decode_calls(), n, "n distinct frames = n cache misses");
+    assert_eq!(
+        player.decode_calls(),
+        n,
+        "n distinct frames = n cache misses"
+    );
 
     // A full re-play is served entirely from cache: no further pictures decoded.
     let pics = player.pictures_decoded();
     for p in 0..n {
         let _ = player.frame_at_index(p).expect("cached frame_at_index");
     }
-    assert_eq!(player.pictures_decoded(), pics, "a cached re-play decodes nothing");
+    assert_eq!(
+        player.pictures_decoded(),
+        pics,
+        "a cached re-play decodes nothing"
+    );
 
     // --- 2. LRU bound: cap to 1 resident frame ---
     player.set_cache_capacity(1);
-    assert_eq!(player.cache_len(), 1, "shrinking capacity evicts down to the bound");
+    assert_eq!(
+        player.cache_len(),
+        1,
+        "shrinking capacity evicts down to the bound"
+    );
 
     let base = player.decode_calls();
     // Frame 3 was evicted by the trim (only the most-recent frame survives), so
     // this is a miss.
     let _ = player.frame_at_index(3).expect("frame 3");
-    assert_eq!(player.decode_calls(), base + 1, "an unresident frame decodes");
+    assert_eq!(
+        player.decode_calls(),
+        base + 1,
+        "an unresident frame decodes"
+    );
     assert_eq!(player.cache_len(), 1, "cache never exceeds capacity");
 
     // Immediately re-request it: resident, a cache hit (no decode).
     let _ = player.frame_at_index(3).expect("frame 3 again");
-    assert_eq!(player.decode_calls(), base + 1, "a resident frame hits the cache");
+    assert_eq!(
+        player.decode_calls(),
+        base + 1,
+        "a resident frame hits the cache"
+    );
 
     // Visit another frame (evicts 3), then request 3 again: a miss, proving the
     // LRU actually evicted it.
@@ -127,5 +161,8 @@ fn m499_vulkan_video_cache() {
     let tex = player.frame_at_index(3).expect("frame 3 final").clone();
     let got = player.read_texture(&tex);
     let d = player.decode_index(3).expect("decode index");
-    assert!(sad_per_byte(&got, &reference[d]) == 0.0, "re-decoded frame still matches reference");
+    assert!(
+        sad_per_byte(&got, &reference[d]) == 0.0,
+        "re-decoded frame still matches reference"
+    );
 }

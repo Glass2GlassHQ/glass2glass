@@ -63,7 +63,8 @@ struct ConvSource {
 
 impl SourceLoop for ConvSource {
     type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>;
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 
@@ -74,7 +75,9 @@ impl SourceLoop for ConvSource {
     fn caps_constraint<'a>(
         &'a mut self,
     ) -> impl Future<Output = Result<CapsConstraint<'a>, G2gError>> + 'a {
-        core::future::ready(Ok(CapsConstraint::Produces(CapsSet::one(self.start.clone()))))
+        core::future::ready(Ok(CapsConstraint::Produces(CapsSet::one(
+            self.start.clone(),
+        ))))
     }
 
     fn configure_pipeline(&mut self, _: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -92,7 +95,8 @@ impl SourceLoop for ConvSource {
                 }))
                 .await?;
                 if i == 0 {
-                    out.push(PipelinePacket::CapsChanged(self.change_to.clone())).await?;
+                    out.push(PipelinePacket::CapsChanged(self.change_to.clone()))
+                        .await?;
                 }
             }
             out.push(PipelinePacket::Eos).await?;
@@ -120,7 +124,13 @@ impl AsyncElement for FormatConverter {
         let nv12_from = self.nv12_from.clone();
         CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| {
             let mut alts = std::vec![input.clone()];
-            if let Caps::RawVideo { format, width, height, framerate } = input {
+            if let Caps::RawVideo {
+                format,
+                width,
+                height,
+                framerate,
+            } = input
+            {
                 if nv12_from.contains(format) {
                     alts.push(Caps::RawVideo {
                         format: RawVideoFormat::Nv12,
@@ -198,7 +208,9 @@ async fn midstream_change_steers_converter_to_sink_acceptable_output() {
     let mut conv = FormatConverter {
         nv12_from: std::vec![RawVideoFormat::Rgba8, RawVideoFormat::I420],
     };
-    let mut sink = RecordingSink { caps_log: Arc::clone(&caps_log) };
+    let mut sink = RecordingSink {
+        caps_log: Arc::clone(&caps_log),
+    };
     let clock = ZeroClock;
 
     let transforms: Vec<&mut dyn DynAsyncElement> = std::vec![&mut conv];
@@ -206,7 +218,10 @@ async fn midstream_change_steers_converter_to_sink_acceptable_output() {
         .await
         .expect("chain runs");
 
-    assert_eq!(stats.frames_consumed, 8, "every frame crosses the converter");
+    assert_eq!(
+        stats.frames_consumed, 8,
+        "every frame crosses the converter"
+    );
     assert_eq!(
         *caps_log.lock().unwrap(),
         std::vec![RawVideoFormat::Nv12],
@@ -226,8 +241,12 @@ async fn midstream_change_with_no_acceptable_output_fails_loud_to_bus() {
         change_to: video(RawVideoFormat::I420, 640, 480),
         total: 8,
     };
-    let mut conv = FormatConverter { nv12_from: std::vec![RawVideoFormat::Rgba8] };
-    let mut sink = RecordingSink { caps_log: Arc::clone(&caps_log) };
+    let mut conv = FormatConverter {
+        nv12_from: std::vec![RawVideoFormat::Rgba8],
+    };
+    let mut sink = RecordingSink {
+        caps_log: Arc::clone(&caps_log),
+    };
     let clock = ZeroClock;
     let (bus, handle) = Bus::new(4);
 
@@ -240,11 +259,17 @@ async fn midstream_change_with_no_acceptable_output_fails_loud_to_bus() {
     // it, since this failure is mid-stream (after frames flow), not at startup.
     let mut saw_empty_link = false;
     while let Some(m) = bus.try_recv() {
-        if matches!(m, BusMessage::NegotiationFailed(NegotiationFailure::EmptyLink { .. })) {
+        if matches!(
+            m,
+            BusMessage::NegotiationFailed(NegotiationFailure::EmptyLink { .. })
+        ) {
             saw_empty_link = true;
         }
     }
-    assert!(saw_empty_link, "expected a NegotiationFailed(EmptyLink) on the bus");
+    assert!(
+        saw_empty_link,
+        "expected a NegotiationFailed(EmptyLink) on the bus"
+    );
     assert!(
         caps_log.lock().unwrap().is_empty(),
         "no NV12 reached the sink: the infeasible change was rejected, not forwarded"
@@ -265,7 +290,9 @@ async fn single_transform_runner_also_steers_to_sink_acceptable_output() {
     let mut conv = FormatConverter {
         nv12_from: std::vec![RawVideoFormat::Rgba8, RawVideoFormat::I420],
     };
-    let mut sink = RecordingSink { caps_log: Arc::clone(&caps_log) };
+    let mut sink = RecordingSink {
+        caps_log: Arc::clone(&caps_log),
+    };
     let clock = ZeroClock;
 
     let stats = run_source_transform_sink(&mut src, &mut conv, &mut sink, &clock, 4)

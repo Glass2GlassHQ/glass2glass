@@ -123,10 +123,7 @@ pub trait AsyncElement: ElementBound {
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError>;
 
-    fn configure_pipeline(
-        &mut self,
-        absolute_caps: &Caps,
-    ) -> Result<ConfigureOutcome, G2gError>;
+    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError>;
 
     /// Receive this element's negotiated OUTPUT (source-pad) caps after the
     /// solve, alongside the input caps from [`configure_pipeline`] (M185). A
@@ -348,10 +345,7 @@ pub trait AsyncElement: ElementBound {
 pub trait DynAsyncElement: ElementBound {
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError>;
 
-    fn configure_pipeline(
-        &mut self,
-        absolute_caps: &Caps,
-    ) -> Result<ConfigureOutcome, G2gError>;
+    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError>;
 
     /// Dyn-safe mirror of [`AsyncElement::configure_output`] (M185). Defaults to
     /// no-op so unaffected erased elements need not implement it.
@@ -363,9 +357,7 @@ pub trait DynAsyncElement: ElementBound {
         &'a mut self,
         packet: PipelinePacket,
         out: &'a mut dyn OutputSink,
-    ) -> core::pin::Pin<
-        alloc::boxed::Box<dyn Future<Output = Result<(), G2gError>> + 'a>,
-    >;
+    ) -> core::pin::Pin<alloc::boxed::Box<dyn Future<Output = Result<(), G2gError>> + 'a>>;
 
     /// Dyn-safe mirror of [`AsyncElement::caps_constraint_as_sink`], so a
     /// `Box`-erased branch sink (fan-out Phase C FO-2) can be re-solved
@@ -487,10 +479,7 @@ impl<T: AsyncElement> DynAsyncElement for T {
         AsyncElement::intercept_caps(self, upstream_caps)
     }
 
-    fn configure_pipeline(
-        &mut self,
-        absolute_caps: &Caps,
-    ) -> Result<ConfigureOutcome, G2gError> {
+    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         AsyncElement::configure_pipeline(self, absolute_caps)
     }
 
@@ -594,10 +583,7 @@ impl<'b> DynAsyncElement for &'b mut (dyn DynAsyncElement + 'b) {
         (**self).intercept_caps(upstream_caps)
     }
 
-    fn configure_pipeline(
-        &mut self,
-        absolute_caps: &Caps,
-    ) -> Result<ConfigureOutcome, G2gError> {
+    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         (**self).configure_pipeline(absolute_caps)
     }
 

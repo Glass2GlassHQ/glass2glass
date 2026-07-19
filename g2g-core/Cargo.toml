@@ -67,5 +67,11 @@ portable-atomic = { version = "1" }
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-time = "1"
 
+# loom models the SpscFrameRing's hand-rolled no-CAS Acquire/Release protocol
+# under every thread interleaving. Only pulled with `--cfg loom` (the loom test
+# run), so it never touches the normal / no_std build.
+[target.'cfg(loom)'.dependencies]
+loom = "0.7"
+
 [lints]
 workspace = true

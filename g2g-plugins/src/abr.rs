@@ -72,7 +72,11 @@ mod tests {
     #[test]
     fn no_sample_means_no_cap_so_initial_pick_uses_user_cap() {
         let est = BandwidthEstimator::new();
-        assert_eq!(est.effective_cap(0), None, "no estimate yet -> caller uses its own cap");
+        assert_eq!(
+            est.effective_cap(0),
+            None,
+            "no estimate yet -> caller uses its own cap"
+        );
         assert_eq!(est.effective_cap(5_000_000), None);
     }
 
@@ -88,8 +92,8 @@ mod tests {
     fn ewma_smooths_toward_a_dropped_rate() {
         let mut est = BandwidthEstimator::new();
         est.sample(10_000_000, 1_000_000_000); // 80 Mbit/s
-        // Bandwidth collapses to 8 Mbit/s; the EWMA (alpha 0.5) moves halfway to
-        // 44 Mbit/s, so the cap is 0.8 * 44 = 35.2 Mbit/s.
+                                               // Bandwidth collapses to 8 Mbit/s; the EWMA (alpha 0.5) moves halfway to
+                                               // 44 Mbit/s, so the cap is 0.8 * 44 = 35.2 Mbit/s.
         est.sample(1_000_000, 1_000_000_000);
         assert_eq!(est.effective_cap(0), Some(35_200_000));
     }
@@ -98,7 +102,7 @@ mod tests {
     fn effective_cap_is_bounded_by_the_user_cap() {
         let mut est = BandwidthEstimator::new();
         est.sample(10_000_000, 1_000_000_000); // 80 Mbit/s -> 64 Mbit/s after safety
-        // User caps at 5 Mbit/s: the smaller wins.
+                                               // User caps at 5 Mbit/s: the smaller wins.
         assert_eq!(est.effective_cap(5_000_000), Some(5_000_000));
         // No user cap: the ABR cap stands.
         assert_eq!(est.effective_cap(0), Some(64_000_000));

@@ -163,23 +163,38 @@ impl WebCodecsDecode {
     }
 
     /// Announce the output caps if they changed since the last frame.
-    async fn announce_caps(&mut self, w: u32, h: u32, out: &mut dyn OutputSink) -> Result<(), G2gError> {
+    async fn announce_caps(
+        &mut self,
+        w: u32,
+        h: u32,
+        out: &mut dyn OutputSink,
+    ) -> Result<(), G2gError> {
         let new_caps = rgba_caps(w, h);
         if self.last_caps.as_ref() != Some(&new_caps) {
-            out.push(PipelinePacket::CapsChanged(new_caps.clone())).await?;
+            out.push(PipelinePacket::CapsChanged(new_caps.clone()))
+                .await?;
             self.last_caps = Some(new_caps);
         }
         Ok(())
     }
 
     /// Copy the decoded frame out to system RGBA (the CPU-consumer path).
-    async fn emit_system_rgba(&mut self, frame: VideoFrame, out: &mut dyn OutputSink) -> Result<(), G2gError> {
+    async fn emit_system_rgba(
+        &mut self,
+        frame: VideoFrame,
+        out: &mut dyn OutputSink,
+    ) -> Result<(), G2gError> {
         let (bytes, w, h, pts_ns) = copy_out_rgba(&frame).await?;
         frame.close();
         self.announce_caps(w, h, out).await?;
         let out_frame = Frame {
             domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-            timing: FrameTiming { pts_ns, dts_ns: pts_ns, capture_ns: pts_ns, ..FrameTiming::default() },
+            timing: FrameTiming {
+                pts_ns,
+                dts_ns: pts_ns,
+                capture_ns: pts_ns,
+                ..FrameTiming::default()
+            },
             sequence: self.emitted,
             meta: Default::default(),
         };
@@ -192,7 +207,11 @@ impl WebCodecsDecode {
     /// frame is not closed here: a VideoFrame-sourced external texture is valid
     /// until the frame closes, so the keep-alive owner closes it on drop once
     /// downstream has imported and used it.
-    async fn emit_external_texture(&mut self, frame: VideoFrame, out: &mut dyn OutputSink) -> Result<(), G2gError> {
+    async fn emit_external_texture(
+        &mut self,
+        frame: VideoFrame,
+        out: &mut dyn OutputSink,
+    ) -> Result<(), G2gError> {
         // Visible dims (see `copy_out_rgba` / `visible_dims`): the region the
         // external texture samples, not the SAR-corrected display size.
         let (w, h) = visible_dims(&frame);
@@ -207,7 +226,12 @@ impl WebCodecsDecode {
         ));
         let out_frame = Frame {
             domain,
-            timing: FrameTiming { pts_ns, dts_ns: pts_ns, capture_ns: pts_ns, ..FrameTiming::default() },
+            timing: FrameTiming {
+                pts_ns,
+                dts_ns: pts_ns,
+                capture_ns: pts_ns,
+                ..FrameTiming::default()
+            },
             sequence: self.emitted,
             meta: Default::default(),
         };
@@ -218,7 +242,8 @@ impl WebCodecsDecode {
 }
 
 impl AsyncElement for WebCodecsDecode {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -238,14 +263,19 @@ impl AsyncElement for WebCodecsDecode {
     /// fails non-H.264 upstream at negotiation time.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         let codec = self.codec;
-        CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| derive_output_caps(codec, input)))
+        CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| {
+            derive_output_caps(codec, input)
+        }))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         let (w, h) = match absolute_caps {
-            Caps::CompressedVideo { codec, width, height, .. } if *codec == self.codec => {
-                (fixed_or_zero(width), fixed_or_zero(height))
-            }
+            Caps::CompressedVideo {
+                codec,
+                width,
+                height,
+                ..
+            } if *codec == self.codec => (fixed_or_zero(width), fixed_or_zero(height)),
             _ => return Err(G2gError::CapsMismatch),
         };
         // Only H.264 has a `codec`-string builder wired for M40.
@@ -376,7 +406,9 @@ impl core::fmt::Debug for WebCodecsDecode {
 /// a wasm-memory slice) because the await can outlive a linear-memory grow that
 /// would dangle a raw slice view. Shared with `WebCameraSrc` (getUserMedia
 /// capture), which reads `VideoFrame`s from a `MediaStreamTrackProcessor`.
-pub(crate) async fn copy_out_rgba(frame: &VideoFrame) -> Result<(Vec<u8>, u32, u32, u64), G2gError> {
+pub(crate) async fn copy_out_rgba(
+    frame: &VideoFrame,
+) -> Result<(Vec<u8>, u32, u32, u64), G2gError> {
     // Visible-rect dims: `copyTo`/`allocationSize` default to the visible rect,
     // so the RGBA buffer is exactly `visible.w * visible.h * 4`.
     let (w, h) = visible_dims(frame);
@@ -429,14 +461,17 @@ fn rgba_caps(w: u32, h: u32) -> Caps {
 /// rejects it. Shared by the `DerivedOutput` constraint closure.
 fn derive_output_caps(codec: VideoCodec, input: &Caps) -> CapsSet {
     match input {
-        Caps::CompressedVideo { codec: c, width, height, framerate } if *c == codec => {
-            CapsSet::one(Caps::RawVideo {
-                format: RawVideoFormat::Rgba8,
-                width: width.clone(),
-                height: height.clone(),
-                framerate: framerate.clone(),
-            })
-        }
+        Caps::CompressedVideo {
+            codec: c,
+            width,
+            height,
+            framerate,
+        } if *c == codec => CapsSet::one(Caps::RawVideo {
+            format: RawVideoFormat::Rgba8,
+            width: width.clone(),
+            height: height.clone(),
+            framerate: framerate.clone(),
+        }),
         _ => CapsSet::from_alternatives(Vec::new()),
     }
 }

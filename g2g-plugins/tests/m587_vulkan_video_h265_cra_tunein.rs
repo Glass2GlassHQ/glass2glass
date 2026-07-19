@@ -18,7 +18,10 @@
 //! (garbage or error) and emit the wrong count.
 //!
 //! Runs on the RTX 3060; skips with no adapter / no decode support.
-#![cfg(all(any(target_os = "linux", target_os = "windows"), feature = "vulkan-video"))]
+#![cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    feature = "vulkan-video"
+))]
 
 use g2g_core::runtime::block_on;
 use g2g_plugins::vulkanvideo::{
@@ -77,17 +80,25 @@ fn h265_cra_tunein_skips_rasl() {
         Err(e) => panic!("open h265 device: {e:?}"),
     };
     let ps = extract_h265_parameter_sets(CLIP).expect("vps/sps/pps");
-    let (w, h) = (ps.sps.pic_width_in_luma_samples, ps.sps.pic_height_in_luma_samples);
+    let (w, h) = (
+        ps.sps.pic_width_in_luma_samples,
+        ps.sps.pic_height_in_luma_samples,
+    );
     let std = to_std_h265_params(&ps);
     let session = device.create_h265_session(&std, w, h).expect("session");
-    let mut dec = device.create_h265_dpb_decoder(&session, &ps).expect("decoder");
+    let mut dec = device
+        .create_h265_dpb_decoder(&session, &ps)
+        .expect("decoder");
 
     // Oracle: whole-stream decode (M577-validated). Collect every frame's bytes.
     let (fm, mut ff) = dec.decode_push_meta(CLIP).expect("full decode");
     ff.extend(dec.decode_flush().expect("full flush"));
     assert_eq!(fm.len(), ff.len(), "one meta per full-decode frame");
     let full_frames: Vec<Vec<u8>> = ff.iter().map(planes).collect();
-    assert!(full_frames.len() >= 20, "open-GOP fixture decodes its whole timeline");
+    assert!(
+        full_frames.len() >= 20,
+        "open-GOP fixture decodes its whole timeline"
+    );
 
     // Find the first mid-stream CRA (nal_unit_type 21) and slice the substream from
     // its start code (VCL only from there; the session already holds the params).
@@ -103,7 +114,10 @@ fn h265_cra_tunein_skips_rasl() {
     // (its contiguous leading run: NAL types 6/7 RADL + 8/9 RASL, right after the
     // CRA, until the first non-leading VCL). Those RASL are what tune-in drops.
     let sub_nals = nal_units(from_cra);
-    let n_pics = sub_nals.iter().filter(|&&(_, p)| nal_type(from_cra, p) <= 31).count();
+    let n_pics = sub_nals
+        .iter()
+        .filter(|&&(_, p)| nal_type(from_cra, p) <= 31)
+        .count();
     let mut dropped_rasl = 0usize;
     for (k, &(_, p)) in sub_nals.iter().enumerate() {
         let t = nal_type(from_cra, p);
@@ -116,15 +130,23 @@ fn h265_cra_tunein_skips_rasl() {
             _ => break,                 // first non-leading VCL ends the CRA's leading run
         }
     }
-    assert!(dropped_rasl > 0, "fixture's tuned-in CRA must have RASL followers to skip");
+    assert!(
+        dropped_rasl > 0,
+        "fixture's tuned-in CRA must have RASL followers to skip"
+    );
 
     // Tune in: reset (a seek) then decode from the CRA. The CRA is now the first
     // picture (NoRaslOutputFlag == 1), so its RASL followers are discarded.
     dec.reset();
-    let (tm, mut tf) = dec.decode_push_meta(from_cra).expect("tune-in decode (RASL must be skipped)");
+    let (tm, mut tf) = dec
+        .decode_push_meta(from_cra)
+        .expect("tune-in decode (RASL must be skipped)");
     tf.extend(dec.decode_flush().expect("tune-in flush"));
     assert_eq!(tm.len(), tf.len(), "one meta per tuned-in frame");
-    assert!(!tf.is_empty(), "tune-in decodes the CRA and its trailing pictures");
+    assert!(
+        !tf.is_empty(),
+        "tune-in decodes the CRA and its trailing pictures"
+    );
 
     // (b) Exactly the CRA's RASL were dropped.
     assert_eq!(

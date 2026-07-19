@@ -86,13 +86,19 @@ impl StaticSource for RingSource<'_> {
             return Ok(None);
         }
         self.remaining -= 1;
-        let mut slot = self.ring.acquire().expect("a slot is free (each frame drops before the next)");
+        let mut slot = self
+            .ring
+            .acquire()
+            .expect("a slot is free (each frame drops before the next)");
         slot.buf_mut()[0] = self.seq as u8;
         // SAFETY: `ring` outlives every frame (the caller owns it for the whole run).
         let payload = unsafe { slot.publish(1) };
         let frame = Frame::new(
             MemoryDomain::System(payload),
-            FrameTiming { pts_ns: self.seq, ..FrameTiming::default() },
+            FrameTiming {
+                pts_ns: self.seq,
+                ..FrameTiming::default()
+            },
             self.seq,
         );
         self.seq = self.seq.wrapping_add(1);
@@ -132,7 +138,11 @@ fn block_on<F: Future>(fut: F) -> F::Output {
 
 /// Run `frames` through the static runner and return the sink checksum.
 fn run(ring: &StaticLendRing<SLOTS, BYTES>, frames: u64) -> u64 {
-    let source = RingSource { ring, remaining: frames, seq: 0 };
+    let source = RingSource {
+        ring,
+        remaining: frames,
+        seq: 0,
+    };
     let mut sink = SumSink { sum: 0 };
     block_on(run_source_transform_sink(source, Touch, &mut sink)).expect("pipeline runs");
     sink.sum

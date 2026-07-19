@@ -79,7 +79,10 @@ impl fmt::Display for CompileError {
             CompileError::MissingInput(id) => write!(f, "node `{id}` needs an input but has none"),
             CompileError::BadGeometry { node, detail } => write!(f, "node `{node}`: {detail}"),
             CompileError::FractionalFrame { rate, frame_ns } => {
-                write!(f, "rate {rate} Hz over {frame_ns} ns is not a whole number of samples")
+                write!(
+                    f,
+                    "rate {rate} Hz over {frame_ns} ns is not a whole number of samples"
+                )
             }
             CompileError::MixerInputMismatch { a, b } => {
                 write!(f, "fan-in inputs disagree: {a} vs {b}")
@@ -100,7 +103,8 @@ fn valid_ident(name: &str) -> bool {
 
 /// Parse a graph document from YAML (a superset of JSON, so both load).
 pub fn parse(text: &str) -> Result<GraphDoc, CompileError> {
-    let doc: GraphDoc = serde_yaml::from_str(text).map_err(|e| CompileError::Parse(e.to_string()))?;
+    let doc: GraphDoc =
+        serde_yaml::from_str(text).map_err(|e| CompileError::Parse(e.to_string()))?;
     if !valid_ident(&doc.name) {
         return Err(CompileError::BadName(doc.name));
     }

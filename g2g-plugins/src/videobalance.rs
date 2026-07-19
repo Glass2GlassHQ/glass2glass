@@ -83,7 +83,12 @@ impl VideoBalance {
     }
 
     fn accept_input(&self, caps: &Caps) -> Result<(RawVideoFormat, u32, u32, Rate), G2gError> {
-        let Caps::RawVideo { format, width: Dim::Fixed(w), height: Dim::Fixed(h), framerate } = caps
+        let Caps::RawVideo {
+            format,
+            width: Dim::Fixed(w),
+            height: Dim::Fixed(h),
+            framerate,
+        } = caps
         else {
             return Err(G2gError::CapsMismatch);
         };
@@ -157,12 +162,8 @@ impl AsyncElement for VideoBalance {
                         return Err(G2gError::CapsMismatch);
                     }
                     let mut dst = vec![0u8; bytes].into_boxed_slice();
-                    let bal = Balance::new(
-                        self.brightness,
-                        self.contrast,
-                        self.saturation,
-                        self.hue,
-                    );
+                    let bal =
+                        Balance::new(self.brightness, self.contrast, self.saturation, self.hue);
                     apply_balance(format, &src[..bytes], &mut dst, &bal);
 
                     let new_caps = Caps::RawVideo {
@@ -172,7 +173,8 @@ impl AsyncElement for VideoBalance {
                         framerate: rate,
                     };
                     if self.last_caps.as_ref() != Some(&new_caps) {
-                        out.push(PipelinePacket::CapsChanged(new_caps.clone())).await?;
+                        out.push(PipelinePacket::CapsChanged(new_caps.clone()))
+                            .await?;
                         self.last_caps = Some(new_caps);
                     }
                     let out_frame = Frame {
@@ -232,10 +234,26 @@ impl AsyncElement for VideoBalance {
 
 /// `VideoBalance`'s settable properties (M104).
 static VIDEOBALANCE_PROPS: &[PropertySpec] = &[
-    PropertySpec::new("brightness", PropKind::Double, "additive brightness, -1..1 (0 = none)"),
-    PropertySpec::new("contrast", PropKind::Double, "contrast about mid-grey, 0..2 (1 = none)"),
-    PropertySpec::new("saturation", PropKind::Double, "saturation, 0..2 (0 = grey, 1 = none)"),
-    PropertySpec::new("hue", PropKind::Double, "hue rotation, -1..1 (-180..180 deg, 0 = none)"),
+    PropertySpec::new(
+        "brightness",
+        PropKind::Double,
+        "additive brightness, -1..1 (0 = none)",
+    ),
+    PropertySpec::new(
+        "contrast",
+        PropKind::Double,
+        "contrast about mid-grey, 0..2 (1 = none)",
+    ),
+    PropertySpec::new(
+        "saturation",
+        PropKind::Double,
+        "saturation, 0..2 (0 = grey, 1 = none)",
+    ),
+    PropertySpec::new(
+        "hue",
+        PropKind::Double,
+        "hue rotation, -1..1 (-180..180 deg, 0 = none)",
+    ),
 ];
 
 impl PadTemplates for VideoBalance {
@@ -340,28 +358,55 @@ mod tests {
         // exact cos=1/sin=0 so the rotation is the identity).
         let src: Vec<u8> = (0..(4 * 4 * 4) as u8).collect();
         let mut dst = vec![0u8; src.len()];
-        apply_balance(RawVideoFormat::Rgba8, &src, &mut dst, &bal(0.0, 1.0, 1.0, 0.0));
+        apply_balance(
+            RawVideoFormat::Rgba8,
+            &src,
+            &mut dst,
+            &bal(0.0, 1.0, 1.0, 0.0),
+        );
         assert_eq!(dst, src);
     }
 
     #[test]
     fn brightness_adds_a_scaled_offset() {
         // +0.2 brightness adds 0.2*255 = 51 to each channel; alpha is untouched.
-        let px = balance_pixel(RawVideoFormat::Rgba8, &[100, 100, 100, 200], &bal(0.2, 1.0, 1.0, 0.0));
+        let px = balance_pixel(
+            RawVideoFormat::Rgba8,
+            &[100, 100, 100, 200],
+            &bal(0.2, 1.0, 1.0, 0.0),
+        );
         assert_eq!(px, [151, 151, 151, 200]);
     }
 
     #[test]
     fn contrast_pivots_around_mid_grey() {
         // contrast 2 doubles the distance from 128: 100 -> 72, 128 stays put.
-        assert_eq!(balance_pixel(RawVideoFormat::Rgba8, &[100, 100, 100, 255], &bal(0.0, 2.0, 1.0, 0.0))[0], 72);
-        assert_eq!(balance_pixel(RawVideoFormat::Rgba8, &[128, 128, 128, 255], &bal(0.0, 2.0, 1.0, 0.0))[0], 128);
+        assert_eq!(
+            balance_pixel(
+                RawVideoFormat::Rgba8,
+                &[100, 100, 100, 255],
+                &bal(0.0, 2.0, 1.0, 0.0)
+            )[0],
+            72
+        );
+        assert_eq!(
+            balance_pixel(
+                RawVideoFormat::Rgba8,
+                &[128, 128, 128, 255],
+                &bal(0.0, 2.0, 1.0, 0.0)
+            )[0],
+            128
+        );
     }
 
     #[test]
     fn saturation_zero_is_greyscale() {
         // saturation 0 collapses every channel to the pixel's luma, so R=G=B.
-        let px = balance_pixel(RawVideoFormat::Rgba8, &[200, 100, 50, 255], &bal(0.0, 1.0, 0.0, 0.0));
+        let px = balance_pixel(
+            RawVideoFormat::Rgba8,
+            &[200, 100, 50, 255],
+            &bal(0.0, 1.0, 0.0, 0.0),
+        );
         assert_eq!(px[0], px[1]);
         assert_eq!(px[1], px[2]);
         // Rec.601 luma of (200,100,50) = 59.8 + 58.7 + 5.7 = 124.2 -> 124.
@@ -373,7 +418,11 @@ mod tests {
         // Same colour as above but stored BGRA: bytes [50,100,200,255]. Luma must
         // match the RGBA case (channel roles respected), not be computed on the
         // raw byte order.
-        let px = balance_pixel(RawVideoFormat::Bgra8, &[50, 100, 200, 255], &bal(0.0, 1.0, 0.0, 0.0));
+        let px = balance_pixel(
+            RawVideoFormat::Bgra8,
+            &[50, 100, 200, 255],
+            &bal(0.0, 1.0, 0.0, 0.0),
+        );
         assert_eq!(px[0], px[2]);
         assert_eq!(px[0], 124, "luma uses true R/G/B, not byte order");
     }
@@ -384,9 +433,16 @@ mod tests {
         // one LSB of u8 quantization; the luma of grey is not exactly integral in
         // f64, so a rotated near-zero chroma can truncate a step).
         for hue in [-0.5, 0.25, 0.75, 1.0] {
-            let px = balance_pixel(RawVideoFormat::Rgba8, &[128, 128, 128, 255], &bal(0.0, 1.0, 1.0, hue));
+            let px = balance_pixel(
+                RawVideoFormat::Rgba8,
+                &[128, 128, 128, 255],
+                &bal(0.0, 1.0, 1.0, hue),
+            );
             for (ch, &v) in px[..3].iter().enumerate() {
-                assert!((v as i32 - 128).abs() <= 1, "hue {hue} shifted grey channel {ch} to {v}");
+                assert!(
+                    (v as i32 - 128).abs() <= 1,
+                    "hue {hue} shifted grey channel {ch} to {v}"
+                );
             }
             assert_eq!(px[3], 255);
         }
@@ -399,11 +455,19 @@ mod tests {
         let src = [200u8, 40, 40, 255];
         let px = balance_pixel(RawVideoFormat::Rgba8, &src, &bal(0.0, 1.0, 1.0, 2.0 / 3.0));
         assert!(px[1] > px[0], "green {} should exceed red {}", px[1], px[0]);
-        assert!(px[1] > px[2], "green {} should exceed blue {}", px[1], px[2]);
+        assert!(
+            px[1] > px[2],
+            "green {} should exceed blue {}",
+            px[1],
+            px[2]
+        );
         // the rotation is luma-preserving by construction; only u8 rounding drifts.
         let luma_in = 0.299 * 200.0 + 0.587 * 40.0 + 0.114 * 40.0;
         let luma_out = 0.299 * px[0] as f64 + 0.587 * px[1] as f64 + 0.114 * px[2] as f64;
-        assert!((luma_out - luma_in).abs() < 2.0, "luma drifted: {luma_in} -> {luma_out}");
+        assert!(
+            (luma_out - luma_in).abs() < 2.0,
+            "luma drifted: {luma_in} -> {luma_out}"
+        );
     }
 
     #[test]
@@ -414,6 +478,9 @@ mod tests {
         let minus = balance_pixel(RawVideoFormat::Rgba8, &src, &bal(0.0, 1.0, 1.0, -0.25));
         assert_ne!(plus, minus);
         // green rises under one sign and blue under the other.
-        assert!((plus[1] as i32 - minus[1] as i32).signum() != (plus[2] as i32 - minus[2] as i32).signum());
+        assert!(
+            (plus[1] as i32 - minus[1] as i32).signum()
+                != (plus[2] as i32 - minus[2] as i32).signum()
+        );
     }
 }

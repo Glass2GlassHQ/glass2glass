@@ -21,6 +21,11 @@ async fn videobox_runs_in_a_text_pipeline() {
         "videotestsrc num-buffers=3 pattern=smpte ! videobox left=-8 right=-8 fill=black ! fakesink",
     )
     .expect("pipeline parses");
-    let stats = run_graph(graph, &ZeroClock, 4).await.expect("videobox pipeline runs");
-    assert_eq!(stats.frames_consumed, 3, "all bordered frames reached the sink");
+    let stats = run_graph(graph, &ZeroClock, 4)
+        .await
+        .expect("videobox pipeline runs");
+    assert_eq!(
+        stats.frames_consumed, 3,
+        "all bordered frames reached the sink"
+    );
 }

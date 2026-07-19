@@ -273,7 +273,12 @@ mod tests {
         // Delay_Resp: master received our req at t4 = 1200.
         assert_eq!(
             s.on_message(&delay_resp_msg(dr, 1200, US, US_PORT), 0),
-            SlaveAction::Exchange { t1: 900, t2: 1000, t3: 1100, t4: 1200 }
+            SlaveAction::Exchange {
+                t1: 900,
+                t2: 1000,
+                t3: 1100,
+                t4: 1200
+            }
         );
     }
 
@@ -287,7 +292,12 @@ mod tests {
         s.delay_req_sent(dr, 1100);
         assert_eq!(
             s.on_message(&delay_resp_msg(dr, 1200, US, US_PORT), 0),
-            SlaveAction::Exchange { t1: 900, t2: 1000, t3: 1100, t4: 1200 }
+            SlaveAction::Exchange {
+                t1: 900,
+                t2: 1000,
+                t3: 1100,
+                t4: 1200
+            }
         );
     }
 
@@ -325,7 +335,10 @@ mod tests {
             clk.set(local);
             // Sync arrives at t2 = local; t1 (sent DELAY earlier, in master time).
             let t1 = (master(local) - DELAY) as u64;
-            assert_eq!(slave.on_message(&sync_msg(seq, true, 0), local), SlaveAction::Idle);
+            assert_eq!(
+                slave.on_message(&sync_msg(seq, true, 0), local),
+                SlaveAction::Idle
+            );
             let action = slave.on_message(&follow_up_msg(seq, t1), local);
             let SlaveAction::SendDelayReq(dr) = action else {
                 panic!("expected SendDelayReq");
@@ -344,12 +357,22 @@ mod tests {
             local += 125_000_000;
         }
 
-        assert_eq!(servo.state(), PtpState::Locked, "the full slave path locks the servo");
-        assert!(servo.error_ns().unsigned_abs() < 1_000, "sub-us servo error");
+        assert_eq!(
+            servo.state(),
+            PtpState::Locked,
+            "the full slave path locks the servo"
+        );
+        assert!(
+            servo.error_ns().unsigned_abs() < 1_000,
+            "sub-us servo error"
+        );
         // Path delay recovered (~100 us; the tiny drift-over-gap term is < 1 us).
         assert!((servo.mean_path_delay_ns() - DELAY as i64).abs() < 1_000);
         clk.set(local);
         let est = servo.now_ns() as i128;
-        assert!((est - (EPOCH + local as i128)).abs() < 100_000, "TAI estimate within 100 us");
+        assert!(
+            (est - (EPOCH + local as i128)).abs() < 100_000,
+            "TAI estimate within 100 us"
+        );
     }
 }

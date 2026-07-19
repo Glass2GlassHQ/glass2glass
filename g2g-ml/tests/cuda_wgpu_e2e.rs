@@ -63,7 +63,12 @@ impl OutputSink for Collect {
 }
 
 fn h264_caps() -> Caps {
-    Caps::CompressedVideo { codec: VideoCodec::H264, width: Dim::Any, height: Dim::Any, framerate: Rate::Any }
+    Caps::CompressedVideo {
+        codec: VideoCodec::H264,
+        width: Dim::Any,
+        height: Dim::Any,
+        framerate: Rate::Any,
+    }
 }
 
 fn nv12_caps(w: u32, h: u32) -> Caps {
@@ -76,7 +81,11 @@ fn nv12_caps(w: u32, h: u32) -> Caps {
 }
 
 fn tensor_caps(w: u32, h: u32) -> Caps {
-    Caps::Tensor { dtype: TensorDType::F32, shape: TensorShape::new([1, 3, h, w]), layout: TensorLayout::Nchw }
+    Caps::Tensor {
+        dtype: TensorDType::F32,
+        shape: TensorShape::new([1, 3, h, w]),
+        layout: TensorLayout::Nchw,
+    }
 }
 
 fn weights_bias(k: usize) -> (Vec<f32>, Vec<f32>) {
@@ -112,9 +121,16 @@ fn first_nv12_dims(packets: &[PipelinePacket]) -> Option<(u32, u32)> {
 
 fn logits_from(frame: &Frame) -> Vec<f32> {
     let MemoryDomain::System(slice) = &frame.domain else {
-        panic!("inference must read logits back to System, got {:?}", frame.domain.kind());
+        panic!(
+            "inference must read logits back to System, got {:?}",
+            frame.domain.kind()
+        );
     };
-    slice.as_slice().chunks_exact(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect()
+    slice
+        .as_slice()
+        .chunks_exact(4)
+        .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+        .collect()
 }
 
 fn p50_ms(mut s: Vec<f64>) -> f64 {
@@ -132,7 +148,12 @@ fn split_access_units(bs: &[u8]) -> Vec<Vec<u8>> {
         if bs[i] == 0 && bs[i + 1] == 0 && bs[i + 2] == 1 {
             codes.push((i, i + 3));
             i += 3;
-        } else if i + 4 <= bs.len() && bs[i] == 0 && bs[i + 1] == 0 && bs[i + 2] == 0 && bs[i + 3] == 1 {
+        } else if i + 4 <= bs.len()
+            && bs[i] == 0
+            && bs[i + 1] == 0
+            && bs[i + 2] == 0
+            && bs[i + 3] == 1
+        {
             codes.push((i, i + 4));
             i += 4;
         } else {
@@ -165,11 +186,22 @@ async fn run_preprocess_infer(
     frame: Frame,
 ) -> Vec<f32> {
     let mut pout = Collect::default();
-    pre.process(PipelinePacket::DataFrame(frame), &mut pout).await.expect("preprocess");
-    let tensor = data_frames(pout.packets).into_iter().next().expect("GPU tensor");
-    assert!(matches!(tensor.domain, MemoryDomain::WgpuBuffer(_)), "tensor stays on the GPU");
+    pre.process(PipelinePacket::DataFrame(frame), &mut pout)
+        .await
+        .expect("preprocess");
+    let tensor = data_frames(pout.packets)
+        .into_iter()
+        .next()
+        .expect("GPU tensor");
+    assert!(
+        matches!(tensor.domain, MemoryDomain::WgpuBuffer(_)),
+        "tensor stays on the GPU"
+    );
     let mut iout = Collect::default();
-    infer.process(PipelinePacket::DataFrame(tensor), &mut iout).await.expect("infer");
+    infer
+        .process(PipelinePacket::DataFrame(tensor), &mut iout)
+        .await
+        .expect("infer");
     logits_from(data_frames(iout.packets).first().expect("logits"))
 }
 
@@ -190,7 +222,10 @@ async fn cuda_to_wgpu_zero_copy_matches_cpu_reference() {
     // Decode on the GPU: NV12 stays in CUDA device memory.
     let mut dec = FfmpegVideoDec::new().with_backend(Backend::NvdecCuda);
     let narrowed = dec.intercept_caps(&h264_caps()).expect("H.264 supported");
-    assert!(matches!(dec.configure_pipeline(&narrowed).expect("NVDEC init"), ConfigureOutcome::Accepted));
+    assert!(matches!(
+        dec.configure_pipeline(&narrowed).expect("NVDEC init"),
+        ConfigureOutcome::Accepted
+    ));
     let mut decoded = Collect::default();
     for (seq, au) in access_units.into_iter().enumerate() {
         let frame = Frame {
@@ -199,14 +234,24 @@ async fn cuda_to_wgpu_zero_copy_matches_cpu_reference() {
             sequence: seq as u64,
             meta: Default::default(),
         };
-        dec.process(PipelinePacket::DataFrame(frame), &mut decoded).await.expect("decode");
+        dec.process(PipelinePacket::DataFrame(frame), &mut decoded)
+            .await
+            .expect("decode");
     }
-    dec.process(PipelinePacket::Eos, &mut decoded).await.expect("flush");
+    dec.process(PipelinePacket::Eos, &mut decoded)
+        .await
+        .expect("flush");
 
     let (w, h) = first_nv12_dims(&decoded.packets).expect("NV12 caps");
     eprintln!("NVDEC decoded NV12 {w}x{h}");
     let cuda_frames = data_frames(decoded.packets);
-    assert!(matches!(cuda_frames.first().map(|f| &f.domain), Some(MemoryDomain::Cuda(_))), "NvdecCuda");
+    assert!(
+        matches!(
+            cuda_frames.first().map(|f| &f.domain),
+            Some(MemoryDomain::Cuda(_))
+        ),
+        "NvdecCuda"
+    );
 
     let k = 3 * w as usize * h as usize;
     let (weights, bias) = weights_bias(k);
@@ -214,15 +259,22 @@ async fn cuda_to_wgpu_zero_copy_matches_cpu_reference() {
     // Reference branch: download to NV12 system bytes (only to derive the CPU
     // reference; the zero-copy branch never downloads).
     let mut download = CudaDownload::new();
-    download.configure_pipeline(&nv12_caps(w, h)).expect("configure download");
+    download
+        .configure_pipeline(&nv12_caps(w, h))
+        .expect("configure download");
 
     // Zero-copy branch under test.
     let mut bridge = CudaToWgpu::new();
-    bridge.configure_pipeline(&nv12_caps(w, h)).expect("configure bridge");
+    bridge
+        .configure_pipeline(&nv12_caps(w, h))
+        .expect("configure bridge");
     let mut pre = WgpuPreprocess::new().with_gpu_output();
-    pre.configure_pipeline(&nv12_caps(w, h)).expect("configure preprocess");
+    pre.configure_pipeline(&nv12_caps(w, h))
+        .expect("configure preprocess");
     let mut infer = WgpuInference::linear(w, h, weights.clone(), bias.clone()).expect("linear");
-    infer.configure_pipeline(&tensor_caps(w, h)).expect("configure inference");
+    infer
+        .configure_pipeline(&tensor_caps(w, h))
+        .expect("configure inference");
 
     // G2G_CUDAWGPU_NOPOOL=1 drops the reuse pool before each frame, forcing the
     // per-frame allocate + CUDA-import path, to A/B the pool against it.
@@ -242,9 +294,17 @@ async fn cuda_to_wgpu_zero_copy_matches_cpu_reference() {
             meta: Default::default(),
         };
         let mut dl = Collect::default();
-        download.process(PipelinePacket::DataFrame(ref_frame), &mut dl).await.expect("download");
-        let nv12 = data_frames(dl.packets).into_iter().next().expect("downloaded NV12");
-        let MemoryDomain::System(slice) = &nv12.domain else { panic!("System NV12") };
+        download
+            .process(PipelinePacket::DataFrame(ref_frame), &mut dl)
+            .await
+            .expect("download");
+        let nv12 = data_frames(dl.packets)
+            .into_iter()
+            .next()
+            .expect("downloaded NV12");
+        let MemoryDomain::System(slice) = &nv12.domain else {
+            panic!("System NV12")
+        };
         let cpu_tensor = nv12_to_rgb_tensor(slice.as_slice(), w as usize, h as usize);
         let expected = linear_reference(&cpu_tensor, &weights, &bias);
 
@@ -255,9 +315,15 @@ async fn cuda_to_wgpu_zero_copy_matches_cpu_reference() {
         let t0 = Instant::now();
         let mut bout = Collect::default();
         let tb = Instant::now();
-        bridge.process(PipelinePacket::DataFrame(frame), &mut bout).await.expect("bridge");
+        bridge
+            .process(PipelinePacket::DataFrame(frame), &mut bout)
+            .await
+            .expect("bridge");
         bridge_ms.push(tb.elapsed().as_secs_f64() * 1e3);
-        let tex_frame = data_frames(bout.packets).into_iter().next().expect("wgpu texture frame");
+        let tex_frame = data_frames(bout.packets)
+            .into_iter()
+            .next()
+            .expect("wgpu texture frame");
         assert!(
             matches!(tex_frame.domain, MemoryDomain::WgpuTexture(_)),
             "bridge must emit a GPU texture (no download)"
@@ -268,14 +334,21 @@ async fn cuda_to_wgpu_zero_copy_matches_cpu_reference() {
         assert_eq!(got.len(), N);
         for (i, (g, e)) in got.iter().zip(&expected).enumerate() {
             let tol = 1e-2 * e.abs().max(1.0) + 1e-1;
-            assert!((g - e).abs() <= tol, "logit {i}: zero-copy {g} vs cpu reference {e} (tol {tol})");
+            assert!(
+                (g - e).abs() <= tol,
+                "logit {i}: zero-copy {g} vs cpu reference {e} (tol {tol})"
+            );
         }
         assert!((got[0] - got[1]).abs() > 1e-3, "outputs must differ");
         matched += 1;
     }
 
     assert!(matched > 0, "no frames bridged");
-    assert_eq!(matched as u64, bridge.converted(), "every frame went through the bridge");
+    assert_eq!(
+        matched as u64,
+        bridge.converted(),
+        "every frame went through the bridge"
+    );
     eprintln!(
         "zero-copy: bridged + matched {matched} frame(s) against CPU reference; \
          p50 bridge+preprocess+infer {:.2} ms (no PCIe download)",
@@ -283,7 +356,11 @@ async fn cuda_to_wgpu_zero_copy_matches_cpu_reference() {
     );
     eprintln!(
         "bridge step only ({}): p50 {:.2} ms",
-        if nopool { "per-frame alloc, G2G_CUDAWGPU_NOPOOL" } else { "pooled reuse" },
+        if nopool {
+            "per-frame alloc, G2G_CUDAWGPU_NOPOOL"
+        } else {
+            "pooled reuse"
+        },
         p50_ms(bridge_ms),
     );
 }

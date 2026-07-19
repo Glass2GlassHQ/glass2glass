@@ -13,8 +13,8 @@ use core::pin::Pin;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, FrameTiming, G2gError, MemoryDomain, OutputSink, PushOutcome,
-    PipelinePacket,
+    AsyncElement, AudioFormat, Caps, FrameTiming, G2gError, MemoryDomain, OutputSink,
+    PipelinePacket, PushOutcome,
 };
 use g2g_plugins::opusdec::OpusDec;
 use g2g_plugins::opusenc::OpusEnc;
@@ -64,8 +64,10 @@ fn sine_pcm(channels: u8, n: usize, amp: i16) -> Vec<u8> {
 
 /// RMS of an interleaved S16LE buffer (all channels pooled).
 fn rms(bytes: &[u8]) -> f64 {
-    let samples: Vec<i16> =
-        bytes.chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect();
+    let samples: Vec<i16> = bytes
+        .chunks_exact(2)
+        .map(|c| i16::from_le_bytes([c[0], c[1]]))
+        .collect();
     if samples.is_empty() {
         return 0.0;
     }
@@ -74,7 +76,11 @@ fn rms(bytes: &[u8]) -> f64 {
 }
 
 fn pcm_caps(channels: u8) -> Caps {
-    Caps::Audio { format: AudioFormat::PcmS16Le, channels, sample_rate: OPUS_RATE_HZ }
+    Caps::Audio {
+        format: AudioFormat::PcmS16Le,
+        channels,
+        sample_rate: OPUS_RATE_HZ,
+    }
 }
 
 async fn encode(channels: u8, pcm: &[u8]) -> CaptureSink {
@@ -83,10 +89,15 @@ async fn encode(channels: u8, pcm: &[u8]) -> CaptureSink {
     let mut sink = CaptureSink::default();
     let frame = Frame::new(
         MemoryDomain::System(SystemSlice::from_boxed(pcm.to_vec().into_boxed_slice())),
-        FrameTiming { pts_ns: 0, ..FrameTiming::default() },
+        FrameTiming {
+            pts_ns: 0,
+            ..FrameTiming::default()
+        },
         0,
     );
-    enc.process(PipelinePacket::DataFrame(frame), &mut sink).await.unwrap();
+    enc.process(PipelinePacket::DataFrame(frame), &mut sink)
+        .await
+        .unwrap();
     enc.process(PipelinePacket::Eos, &mut sink).await.unwrap();
     sink
 }
@@ -106,7 +117,9 @@ async fn decode(channels: u8, packets: &[Vec<u8>]) -> CaptureSink {
             FrameTiming::default(),
             0,
         );
-        dec.process(PipelinePacket::DataFrame(f), &mut sink).await.unwrap();
+        dec.process(PipelinePacket::DataFrame(f), &mut sink)
+            .await
+            .unwrap();
     }
     sink
 }
@@ -123,7 +136,11 @@ async fn stereo_roundtrip_preserves_signal_energy() {
     assert!(enc.frames.iter().all(|p| !p.is_empty()), "no empty packets");
     assert_eq!(
         enc.caps,
-        vec![Caps::Audio { format: AudioFormat::Opus, channels, sample_rate: OPUS_RATE_HZ }],
+        vec![Caps::Audio {
+            format: AudioFormat::Opus,
+            channels,
+            sample_rate: OPUS_RATE_HZ
+        }],
         "encoder announces Opus caps once",
     );
 
@@ -131,7 +148,11 @@ async fn stereo_roundtrip_preserves_signal_energy() {
     // bytes are a structurally valid Opus elementary stream.
     let mut parse = OpusParse::new();
     parse
-        .configure_pipeline(&Caps::Audio { format: AudioFormat::Opus, channels: 0, sample_rate: 0 })
+        .configure_pipeline(&Caps::Audio {
+            format: AudioFormat::Opus,
+            channels: 0,
+            sample_rate: 0,
+        })
         .unwrap();
     let mut psink = CaptureSink::default();
     for data in &enc.frames {
@@ -140,23 +161,42 @@ async fn stereo_roundtrip_preserves_signal_energy() {
             FrameTiming::default(),
             0,
         );
-        parse.process(PipelinePacket::DataFrame(f), &mut psink).await.unwrap();
+        parse
+            .process(PipelinePacket::DataFrame(f), &mut psink)
+            .await
+            .unwrap();
     }
     let parsed_channels = psink.caps.iter().find_map(|c| match c {
-        Caps::Audio { format: AudioFormat::Opus, channels, .. } => Some(*channels),
+        Caps::Audio {
+            format: AudioFormat::Opus,
+            channels,
+            ..
+        } => Some(*channels),
         _ => None,
     });
-    assert_eq!(parsed_channels, Some(2), "opusparse recovers the stereo channel count");
+    assert_eq!(
+        parsed_channels,
+        Some(2),
+        "opusparse recovers the stereo channel count"
+    );
 
     // Decode back to PCM and check the tone survived (lossy: energy, not samples).
     let dec = decode(channels, &enc.frames).await;
     assert_eq!(
         dec.caps,
-        vec![Caps::Audio { format: AudioFormat::PcmS16Le, channels, sample_rate: OPUS_RATE_HZ }],
+        vec![Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            channels,
+            sample_rate: OPUS_RATE_HZ
+        }],
         "decoder announces PCM caps once",
     );
     let total: usize = dec.frames.iter().map(|f| f.len()).sum();
-    assert_eq!(total, n * channels as usize * 2, "decoded PCM length matches the input");
+    assert_eq!(
+        total,
+        n * channels as usize * 2,
+        "decoded PCM length matches the input"
+    );
     let decoded: Vec<u8> = dec.frames.concat();
     let in_rms = rms(&pcm);
     let out_rms = rms(&decoded);
@@ -177,5 +217,9 @@ async fn mono_silence_decodes_to_silence() {
 
     let dec = decode(channels, &enc.frames).await;
     let decoded: Vec<u8> = dec.frames.concat();
-    assert!(rms(&decoded) < 5.0, "silence in, silence out (rms={:.3})", rms(&decoded));
+    assert!(
+        rms(&decoded) < 5.0,
+        "silence in, silence out (rms={:.3})",
+        rms(&decoded)
+    );
 }

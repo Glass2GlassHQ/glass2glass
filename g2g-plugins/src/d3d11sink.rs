@@ -58,7 +58,8 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11_VIDEO_PROCESSOR_CONTENT_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC,
     D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC,
     D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_STREAM,
-    D3D11_VIDEO_USAGE_PLAYBACK_NORMAL, D3D11_VPIV_DIMENSION_TEXTURE2D, D3D11_VPOV_DIMENSION_TEXTURE2D,
+    D3D11_VIDEO_USAGE_PLAYBACK_NORMAL, D3D11_VPIV_DIMENSION_TEXTURE2D,
+    D3D11_VPOV_DIMENSION_TEXTURE2D,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_UNSPECIFIED, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_RATIONAL, DXGI_SAMPLE_DESC,
@@ -188,7 +189,8 @@ impl PipelineClock for D3D11Clock {
 }
 
 impl AsyncElement for D3D11Sink {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -229,7 +231,11 @@ impl AsyncElement for D3D11Sink {
         };
         // Even NV12 (the sink rejects odd dims): packed size is w*h*3/2.
         let size = w as usize * h as usize * 3 / 2;
-        Some(AllocationParams::d3d11(size, D3D11_POOL_HEADROOM, D3D11_ALIGN))
+        Some(AllocationParams::d3d11(
+            size,
+            D3D11_POOL_HEADROOM,
+            D3D11_ALIGN,
+        ))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -366,7 +372,11 @@ fn worker_main(
     loop {
         pump_messages();
         match rx.recv_timeout(Duration::from_millis(8)) {
-            Ok(WorkerCmd::Frame { texture, arrival_ns, ack }) => {
+            Ok(WorkerCmd::Frame {
+                texture,
+                arrival_ns,
+                ack,
+            }) => {
                 if let Err(e) = present_frame(&mut gpu, hwnd, &texture) {
                     std::eprintln!("g2g-d3d11sink present error: {e:?}");
                 } else {
@@ -528,7 +538,12 @@ fn present_frame(
     texture: &OwnedD3D11Texture,
 ) -> Result<(), G2gError> {
     if gpu.is_none() {
-        *gpu = Some(init_gpu(texture.device, texture.width, texture.height, hwnd)?);
+        *gpu = Some(init_gpu(
+            texture.device,
+            texture.width,
+            texture.height,
+            hwnd,
+        )?);
     }
     let gpu = gpu.as_ref().unwrap();
 
@@ -600,7 +615,10 @@ fn present_frame(
         )));
         blt.map_err(win_err)?;
 
-        gpu.swapchain.Present(1, DXGI_PRESENT(0)).ok().map_err(win_err)?;
+        gpu.swapchain
+            .Present(1, DXGI_PRESENT(0))
+            .ok()
+            .map_err(win_err)?;
     }
     Ok(())
 }
@@ -683,9 +701,7 @@ mod tests {
 
     #[test]
     fn pad_template_links_from_an_nv12_source() {
-        use g2g_core::{
-            types_can_link, CapsSet, PadCaps, PadDirection, PadTemplate, PadTemplates,
-        };
+        use g2g_core::{types_can_link, CapsSet, PadCaps, PadDirection, PadTemplate, PadTemplates};
 
         // The sink exposes one NV12 sink pad and no source pad.
         let t = D3D11Sink::pad_templates();

@@ -140,7 +140,8 @@ fn wave_format(tag: u16, bits: u16, channels: u16, rate: u32) -> WAVEFORMATEX {
 }
 
 impl AsyncElement for WasapiSink {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -445,7 +446,10 @@ mod tests {
             channels: 1,
             sample_rate: 44_100,
         };
-        assert_eq!(pcm_params(&f32), Ok((WAVE_FORMAT_IEEE_FLOAT, 32, 1, 44_100)));
+        assert_eq!(
+            pcm_params(&f32),
+            Ok((WAVE_FORMAT_IEEE_FLOAT, 32, 1, 44_100))
+        );
         let aac = Caps::Audio {
             format: AudioFormat::Aac,
             channels: 2,

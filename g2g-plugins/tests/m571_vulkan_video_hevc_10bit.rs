@@ -17,7 +17,10 @@
 //! 10-bit today with `UnsupportedStream`.)
 //!
 //! Runs on the RTX 3060; skips with no adapter / no 10-bit HEVC decode support.
-#![cfg(all(any(target_os = "linux", target_os = "windows"), feature = "vulkan-video"))]
+#![cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    feature = "vulkan-video"
+))]
 
 use g2g_core::runtime::block_on;
 use g2g_plugins::vulkanvideo::{
@@ -36,7 +39,10 @@ fn le16(b: &[u8], i: usize) -> u16 {
 #[test]
 fn decodes_hevc_main10_10bit() {
     let ps = extract_h265_parameter_sets(CLIP).expect("vps/sps/pps");
-    assert_eq!(ps.sps.bit_depth_luma_minus8, 2, "fixture is not 10-bit; feature untested");
+    assert_eq!(
+        ps.sps.bit_depth_luma_minus8, 2,
+        "fixture is not 10-bit; feature untested"
+    );
 
     let device = match block_on(open_h265_decode_device()) {
         Ok(d) => d,
@@ -49,7 +55,9 @@ fn decodes_hevc_main10_10bit() {
         Err(e) => panic!("open h265 device: {e:?}"),
     };
     let std = to_std_h265_params(&ps);
-    let session = device.create_h265_session(&std, W as u32, H as u32).expect("session");
+    let session = device
+        .create_h265_session(&std, W as u32, H as u32)
+        .expect("session");
     let mut dec = match device.create_h265_dpb_decoder(&session, &ps) {
         Ok(d) => d,
         // A device without 10-bit HEVC decode fails session/decoder creation.
@@ -66,7 +74,11 @@ fn decodes_hevc_main10_10bit() {
         assert_eq!((f.width, f.height), (W as u32, H as u32));
         assert_eq!(f.bit_depth, 10, "frame {i} not reported 10-bit");
         assert_eq!(f.luma.len(), W * H * 2, "10-bit luma is 2 bytes/sample");
-        assert_eq!(f.chroma.len(), W * H, "10-bit chroma is 2 bytes/sample, half the luma count");
+        assert_eq!(
+            f.chroma.len(),
+            W * H,
+            "10-bit chroma is 2 bytes/sample, half the luma count"
+        );
         // Real content: samples span a range (a failed decode is flat). Values are
         // the top-10-bit G10X6 packing, so shift down to the 0..=1023 range.
         let (mut lo, mut hi) = (u16::MAX, 0u16);
@@ -75,7 +87,10 @@ fn decodes_hevc_main10_10bit() {
             lo = lo.min(v);
             hi = hi.max(v);
         }
-        assert!(hi > lo + 64, "frame {i} luma nearly uniform ({lo}..={hi}); decode likely failed");
+        assert!(
+            hi > lo + 64,
+            "frame {i} luma nearly uniform ({lo}..={hi}); decode likely failed"
+        );
     }
 
     // Optional bit-exact check vs an ffmpeg yuv420p10le reference (display order).
@@ -98,8 +113,10 @@ fn decodes_hevc_main10_10bit() {
             let mut usad = 0u64;
             let mut vsad = 0u64;
             for k in 0..cw * ch {
-                usad += ((le16(&f.chroma, 2 * k) >> 6) as i32 - le16(ru, k) as i32).unsigned_abs() as u64;
-                vsad += ((le16(&f.chroma, 2 * k + 1) >> 6) as i32 - le16(rv, k) as i32).unsigned_abs() as u64;
+                usad += ((le16(&f.chroma, 2 * k) >> 6) as i32 - le16(ru, k) as i32).unsigned_abs()
+                    as u64;
+                vsad += ((le16(&f.chroma, 2 * k + 1) >> 6) as i32 - le16(rv, k) as i32)
+                    .unsigned_abs() as u64;
             }
             eprintln!(
                 "frame {i}: Y SAD/px={:.6} U={:.6} V={:.6}",
@@ -111,6 +128,9 @@ fn decodes_hevc_main10_10bit() {
             assert_eq!(usad, 0, "frame {i} Cb not bit-exact");
             assert_eq!(vsad, 0, "frame {i} Cr not bit-exact");
         }
-        eprintln!("m571: {} HEVC Main 10 frames bit-exact (10-bit)", frames.len());
+        eprintln!(
+            "m571: {} HEVC Main 10 frames bit-exact (10-bit)",
+            frames.len()
+        );
     }
 }

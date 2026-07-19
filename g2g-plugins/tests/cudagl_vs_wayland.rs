@@ -59,7 +59,10 @@ struct Collect {
 }
 
 impl OutputSink for Collect {
-    fn push<'a>(&'a mut self, packet: PipelinePacket) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
+    fn push<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+    ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
         Box::pin(async move {
             self.packets.push(packet);
             Ok(PushOutcome::Accepted)
@@ -68,7 +71,12 @@ impl OutputSink for Collect {
 }
 
 fn h264_caps() -> Caps {
-    Caps::CompressedVideo { codec: VideoCodec::H264, width: Dim::Any, height: Dim::Any, framerate: Rate::Any }
+    Caps::CompressedVideo {
+        codec: VideoCodec::H264,
+        width: Dim::Any,
+        height: Dim::Any,
+        framerate: Rate::Any,
+    }
 }
 
 fn nv12_caps(w: u32, h: u32) -> Caps {
@@ -100,7 +108,12 @@ fn split_access_units(bs: &[u8]) -> Vec<Vec<u8>> {
         if bs[i] == 0 && bs[i + 1] == 0 && bs[i + 2] == 1 {
             codes.push((i, i + 3));
             i += 3;
-        } else if i + 4 <= bs.len() && bs[i] == 0 && bs[i + 1] == 0 && bs[i + 2] == 0 && bs[i + 3] == 1 {
+        } else if i + 4 <= bs.len()
+            && bs[i] == 0
+            && bs[i + 1] == 0
+            && bs[i + 2] == 0
+            && bs[i + 3] == 1
+        {
             codes.push((i, i + 4));
             i += 4;
         } else {
@@ -131,7 +144,10 @@ fn split_access_units(bs: &[u8]) -> Vec<Vec<u8>> {
 /// the NV12 dimensions the decoder fixated.
 async fn decode_all(dec: &mut FfmpegVideoDec, access_units: &[Vec<u8>]) -> (Vec<Frame>, u32, u32) {
     let narrowed = dec.intercept_caps(&h264_caps()).expect("H.264 supported");
-    assert!(matches!(dec.configure_pipeline(&narrowed).expect("decoder init"), ConfigureOutcome::Accepted));
+    assert!(matches!(
+        dec.configure_pipeline(&narrowed).expect("decoder init"),
+        ConfigureOutcome::Accepted
+    ));
     let mut out = Collect::default();
     for (seq, au) in access_units.iter().enumerate() {
         let frame = Frame {
@@ -140,9 +156,13 @@ async fn decode_all(dec: &mut FfmpegVideoDec, access_units: &[Vec<u8>]) -> (Vec<
             sequence: seq as u64,
             meta: Default::default(),
         };
-        dec.process(PipelinePacket::DataFrame(frame), &mut out).await.expect("decode");
+        dec.process(PipelinePacket::DataFrame(frame), &mut out)
+            .await
+            .expect("decode");
     }
-    dec.process(PipelinePacket::Eos, &mut out).await.expect("flush");
+    dec.process(PipelinePacket::Eos, &mut out)
+        .await
+        .expect("flush");
     let (w, h) = first_nv12_dims(&out.packets).expect("NV12 caps from decoder");
     let frames = out
         .packets
@@ -161,11 +181,21 @@ async fn present_all<S: AsyncElement>(sink: &mut S, frames: Vec<Frame>) -> usize
     let mut out = Collect::default();
     let mut n = 0;
     for frame in frames {
-        let frame = Frame { timing: FrameTiming { arrival_ns: monotonic_ns(), ..frame.timing }, ..frame };
-        sink.process(PipelinePacket::DataFrame(frame), &mut out).await.expect("present");
+        let frame = Frame {
+            timing: FrameTiming {
+                arrival_ns: monotonic_ns(),
+                ..frame.timing
+            },
+            ..frame
+        };
+        sink.process(PipelinePacket::DataFrame(frame), &mut out)
+            .await
+            .expect("present");
         n += 1;
     }
-    sink.process(PipelinePacket::Eos, &mut out).await.expect("eos");
+    sink.process(PipelinePacket::Eos, &mut out)
+        .await
+        .expect("eos");
     n
 }
 
@@ -199,12 +229,20 @@ async fn cudagl_vs_wayland_present_latency() {
     let mut dec_a = FfmpegVideoDec::new().with_backend(Backend::NvdecCuda);
     let (frames_a, wa, ha) = decode_all(&mut dec_a, &access_units).await;
     assert!(
-        frames_a.first().map(|f| matches!(f.domain, MemoryDomain::Cuda(_))).unwrap_or(false),
+        frames_a
+            .first()
+            .map(|f| matches!(f.domain, MemoryDomain::Cuda(_)))
+            .unwrap_or(false),
         "NvdecCuda must emit CUDA device frames"
     );
-    eprintln!("A decoded {} NvdecCuda NV12 {wa}x{ha} frame(s)", frames_a.len());
+    eprintln!(
+        "A decoded {} NvdecCuda NV12 {wa}x{ha} frame(s)",
+        frames_a.len()
+    );
     let mut cudagl = CudaGlSink::new().with_title("glass2glass A: CudaGlSink");
-    cudagl.configure_pipeline(&nv12_caps(wa, ha)).expect("CudaGlSink configure");
+    cudagl
+        .configure_pipeline(&nv12_caps(wa, ha))
+        .expect("CudaGlSink configure");
     let t = Instant::now();
     let fed_a = present_all(&mut cudagl, frames_a).await;
     let elapsed_a = t.elapsed().as_secs_f64();
@@ -218,12 +256,20 @@ async fn cudagl_vs_wayland_present_latency() {
         .with_backend(Backend::NvdecCuvid);
     let (frames_b, wb, hb) = decode_all(&mut dec_b, &access_units).await;
     assert!(
-        frames_b.first().map(|f| matches!(f.domain, MemoryDomain::System(_))).unwrap_or(false),
+        frames_b
+            .first()
+            .map(|f| matches!(f.domain, MemoryDomain::System(_)))
+            .unwrap_or(false),
         "NvdecCuvid must emit system-memory frames"
     );
-    eprintln!("B decoded {} NvdecCuvid NV12 {wb}x{hb} frame(s)", frames_b.len());
+    eprintln!(
+        "B decoded {} NvdecCuvid NV12 {wb}x{hb} frame(s)",
+        frames_b.len()
+    );
     let mut wayland = WaylandSink::new().with_title("glass2glass B: WaylandSink");
-    wayland.configure_pipeline(&nv12_caps(wb, hb)).expect("WaylandSink configure");
+    wayland
+        .configure_pipeline(&nv12_caps(wb, hb))
+        .expect("WaylandSink configure");
     let t = Instant::now();
     let fed_b = present_all(&mut wayland, frames_b).await;
     let elapsed_b = t.elapsed().as_secs_f64();
@@ -232,8 +278,20 @@ async fn cudagl_vs_wayland_present_latency() {
     drop(wayland);
 
     eprintln!("\n=== A/B present-path latency ({wa}x{ha}) ===");
-    report("A CudaGlSink  (GPU convert) ", pres_a, fed_a, &lat_a, elapsed_a);
-    report("B WaylandSink (CPU convert) ", pres_b, fed_b, &lat_b, elapsed_b);
+    report(
+        "A CudaGlSink  (GPU convert) ",
+        pres_a,
+        fed_a,
+        &lat_a,
+        elapsed_a,
+    );
+    report(
+        "B WaylandSink (CPU convert) ",
+        pres_b,
+        fed_b,
+        &lat_b,
+        elapsed_b,
+    );
     if lat_a.count > 0 && lat_b.count > 0 {
         let ratio = lat_b.p50_ns as f64 / lat_a.p50_ns.max(1) as f64;
         eprintln!("p50 ratio (B/A) = {ratio:.2}x  (>1 means the device-resident path is faster)");
@@ -241,5 +299,8 @@ async fn cudagl_vs_wayland_present_latency() {
 
     assert!(pres_a > 0, "CudaGlSink presented nothing");
     assert!(pres_b > 0, "WaylandSink presented nothing");
-    assert!(lat_a.count > 0 && lat_b.count > 0, "both sinks must record latency samples");
+    assert!(
+        lat_a.count > 0 && lat_b.count > 0,
+        "both sinks must record latency samples"
+    );
 }

@@ -243,7 +243,10 @@ impl CopyPlan {
     /// The number of counted frame copies: byte-copying transfers of a raw heavy
     /// buffer. This is what [`CopyPolicy`] budgets against.
     pub fn frame_copies(&self) -> usize {
-        self.transfers.iter().filter(|t| t.is_counted_copy()).count()
+        self.transfers
+            .iter()
+            .filter(|t| t.is_counted_copy())
+            .count()
     }
 
     /// The number of device-to-host round trips of a raw frame (the PCIe copies):
@@ -277,7 +280,11 @@ impl CopyPlan {
             .filter(|t| t.is_counted_copy())
             .map(|t| format!("{}: {:?} -> {:?}", t.label, t.from, t.to))
             .collect();
-        Err(CopyBudgetError { copies, budget, offenders })
+        Err(CopyBudgetError {
+            copies,
+            budget,
+            offenders,
+        })
     }
 
     /// A human-readable report: the per-hop domain trace with each transfer marked
@@ -289,7 +296,10 @@ impl CopyPlan {
         let verdict = if copies == 0 {
             "zero-copy".to_string()
         } else {
-            format!("{copies} frame cop{}", if copies == 1 { "y" } else { "ies" })
+            format!(
+                "{copies} frame cop{}",
+                if copies == 1 { "y" } else { "ies" }
+            )
         };
         s.push_str(&format!("Copy plan ({verdict}):\n"));
         for hop in &self.hops {
@@ -357,7 +367,10 @@ mod tests {
     }
 
     fn node(label: &str, out: MemoryDomainKind) -> NodeProfile {
-        NodeProfile { label: label.to_string(), out_domain: out }
+        NodeProfile {
+            label: label.to_string(),
+            out_domain: out,
+        }
     }
 
     /// Wire up a linear chain: nodes[i] -> nodes[i+1], each edge carrying the given
@@ -373,19 +386,35 @@ mod tests {
     #[test]
     fn classify_covers_the_domain_families() {
         assert_eq!(classify(System, System), TransferKind::None);
-        assert_eq!(classify(System, SystemView), TransferKind::None, "host<->host is free");
+        assert_eq!(
+            classify(System, SystemView),
+            TransferKind::None,
+            "host<->host is free"
+        );
         assert_eq!(classify(System, Cuda), TransferKind::DeviceHost, "upload");
         assert_eq!(classify(Cuda, System), TransferKind::DeviceHost, "download");
         assert_eq!(classify(Cuda, WgpuTexture), TransferKind::CrossDevice);
-        assert_eq!(classify(Cuda, DmaBuf), TransferKind::Interop, "dma-buf is zero-copy");
+        assert_eq!(
+            classify(Cuda, DmaBuf),
+            TransferKind::Interop,
+            "dma-buf is zero-copy"
+        );
         assert_eq!(classify(DmaBuf, System), TransferKind::Interop);
     }
 
     #[test]
     fn all_system_pipeline_is_zero_copy() {
         // filesrc -> parse -> dec -> sink, all in System memory: no transfers.
-        let nodes = [node("filesrc", System), node("h264parse", System), node("dec", System), node("sink", System)];
-        let plan = chain(&nodes, alloc::vec![compressed(System), compressed(System), raw(System)]);
+        let nodes = [
+            node("filesrc", System),
+            node("h264parse", System),
+            node("dec", System),
+            node("sink", System),
+        ];
+        let plan = chain(
+            &nodes,
+            alloc::vec![compressed(System), compressed(System), raw(System)],
+        );
         assert!(plan.is_zero_copy());
         assert_eq!(plan.frame_copies(), 0);
         assert!(plan.transfers.is_empty(), "no domain changes");
@@ -403,8 +432,15 @@ mod tests {
             node("cudascale", Cuda),
             node("cudasink", Cuda),
         ];
-        let plan = chain(&nodes, alloc::vec![compressed(System), raw(Cuda), raw(Cuda)]);
-        assert_eq!(plan.frame_copies(), 0, "decode-into-device is not a raw-frame copy");
+        let plan = chain(
+            &nodes,
+            alloc::vec![compressed(System), raw(Cuda), raw(Cuda)],
+        );
+        assert_eq!(
+            plan.frame_copies(),
+            0,
+            "decode-into-device is not a raw-frame copy"
+        );
         assert!(plan.is_zero_copy());
         // The transition is still surfaced in the trace.
         assert_eq!(plan.transfers.len(), 1);
@@ -440,7 +476,11 @@ mod tests {
         // nvenc reads raw(Cuda) and emits compressed(System): the raw frame is
         // consumed on-device, only the small bitstream lands in System. Domain
         // changes, but the output is not raw -> not a counted copy.
-        let nodes = [node("cudasrc", Cuda), node("nvenc", System), node("filesink", System)];
+        let nodes = [
+            node("cudasrc", Cuda),
+            node("nvenc", System),
+            node("filesink", System),
+        ];
         let plan = chain(&nodes, alloc::vec![raw(Cuda), compressed(System)]);
         assert_eq!(plan.frame_copies(), 0);
         assert!(plan.is_zero_copy());
@@ -448,11 +488,24 @@ mod tests {
 
     #[test]
     fn report_marks_the_offending_copy() {
-        let nodes = [node("nvdec", Cuda), node("download", System), node("sink", System)];
+        let nodes = [
+            node("nvdec", Cuda),
+            node("download", System),
+            node("sink", System),
+        ];
         let plan = chain(&nodes, alloc::vec![raw(Cuda), raw(System)]);
         let report = plan.to_report();
-        assert!(report.contains("1 frame copy"), "verdict counts the copy:\n{report}");
-        assert!(report.contains("! download"), "the copy is flagged:\n{report}");
-        assert!(report.contains("Cuda"), "trace shows the GPU hop:\n{report}");
+        assert!(
+            report.contains("1 frame copy"),
+            "verdict counts the copy:\n{report}"
+        );
+        assert!(
+            report.contains("! download"),
+            "the copy is flagged:\n{report}"
+        );
+        assert!(
+            report.contains("Cuda"),
+            "trace shows the GPU hop:\n{report}"
+        );
     }
 }

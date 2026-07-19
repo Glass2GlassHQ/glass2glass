@@ -46,14 +46,23 @@ fn ptp_client_binds_and_locks_when_a_grandmaster_is_present() {
     }
 
     // Locked: it followed a real grandmaster.
-    assert!(client.candidate().is_some(), "a locked PTP client is offered to election");
+    assert!(
+        client.candidate().is_some(),
+        "a locked PTP client is offered to election"
+    );
     let now = client.now_ns();
-    assert!(now > TAI_FLOOR_NS, "grandmaster estimate should be TAI-scale, got {now}");
+    assert!(
+        now > TAI_FLOOR_NS,
+        "grandmaster estimate should be TAI-scale, got {now}"
+    );
     assert!(
         client.error_ns().unsigned_abs() < 1_000_000,
         "servo error should be sub-ms once locked: {}",
         client.error_ns()
     );
 
-    eprintln!("m594 ptpclient: LOCKED to grandmaster, now_ns={now} (TAI), error {} ns", client.error_ns());
+    eprintln!(
+        "m594 ptpclient: LOCKED to grandmaster, now_ns={now} (TAI), error {} ns",
+        client.error_ns()
+    );
 }

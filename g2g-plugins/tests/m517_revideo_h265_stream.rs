@@ -9,7 +9,10 @@
 //! and `reset()` + re-decode of the keyframe reproduces frame 0 bit-for-bit.
 //!
 //! Runs on the RTX 3060; skips with no Vulkan H.265 decode support.
-#![cfg(all(any(target_os = "linux", target_os = "windows"), feature = "vulkan-video"))]
+#![cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    feature = "vulkan-video"
+))]
 
 use g2g_core::runtime::block_on;
 use g2g_plugins::revideo::{VideoCodec, VideoPixelLayout, VulkanStreamDecoder};
@@ -86,7 +89,11 @@ fn revideo_adapter_streams_h265_i420_frames() {
     assert_eq!(dec.height(), H as u32);
 
     let chunks = split_pictures(CLIP);
-    assert_eq!(chunks.len(), 10, "fixture is two GOPs of a keyframe + four P frames");
+    assert_eq!(
+        chunks.len(),
+        10,
+        "fixture is two GOPs of a keyframe + four P frames"
+    );
 
     // Feed one coded picture at a time; DPB reference state must carry across
     // calls for the P frames to decode against their references.
@@ -112,7 +119,11 @@ fn revideo_adapter_streams_h265_i420_frames() {
     // Consecutive frames must differ (motion decoded against carried references,
     // not a frozen or reused picture).
     for i in 1..frames.len() {
-        assert!(frames[i].data != frames[i - 1].data, "frame {i} == {}", i - 1);
+        assert!(
+            frames[i].data != frames[i - 1].data,
+            "frame {i} == {}",
+            i - 1
+        );
     }
 
     // reset() then re-decode the keyframe reproduces frame 0 BIT-EXACTLY: H.265
@@ -120,7 +131,12 @@ fn revideo_adapter_streams_h265_i420_frames() {
     // clean DPB and re-decodes the identical picture (a broken reset would return
     // a stale or garbage frame).
     dec.reset().expect("reset");
-    let f0_again = dec.submit_chunk(&chunks[0], true).expect("re-decode frame 0");
+    let f0_again = dec
+        .submit_chunk(&chunks[0], true)
+        .expect("re-decode frame 0");
     assert_eq!(f0_again.len(), 1);
-    assert_eq!(f0_again[0].data, frames[0].data, "reset + re-decode must reproduce frame 0");
+    assert_eq!(
+        f0_again[0].data, frames[0].data,
+        "reset + re-decode must reproduce frame 0"
+    );
 }

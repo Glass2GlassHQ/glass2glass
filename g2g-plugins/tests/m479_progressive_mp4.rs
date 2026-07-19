@@ -23,12 +23,18 @@ use g2g_plugins::registry::default_registry;
 #[test]
 fn qtdemux_single_output_is_a_linear_transform() {
     let reg = default_registry();
-    let graph = parse_launch(&reg, "filesrc location=/x/movie.mp4 ! qtdemux ! h264parse ! fakesink")
-        .expect("progressive-MP4 qtdemux chain parses");
+    let graph = parse_launch(
+        &reg,
+        "filesrc location=/x/movie.mp4 ! qtdemux ! h264parse ! fakesink",
+    )
+    .expect("progressive-MP4 qtdemux chain parses");
     let vg = graph.finish().expect("valid graph");
     let kinds: Vec<NodeKind> = vg.topo().iter().map(|&n| vg.kind(n)).collect();
     assert_eq!(kinds.len(), 4, "source + demux + parser + sink");
-    assert!(!kinds.iter().any(|k| matches!(k, NodeKind::Tee(_))), "single-output demux, not a fan-out");
+    assert!(
+        !kinds.iter().any(|k| matches!(k, NodeKind::Tee(_))),
+        "single-output demux, not a fan-out"
+    );
 }
 
 /// The `d.video_0` named-pad form on a single branch also resolves to the
@@ -37,12 +43,16 @@ fn qtdemux_single_output_is_a_linear_transform() {
 #[test]
 fn qtdemux_named_video_pad_single_branch_parses() {
     let reg = default_registry();
-    let graph =
-        parse_launch(&reg, "filesrc location=/x/movie.mp4 ! qtdemux name=d d.video_0 ! h264parse ! fakesink")
-            .expect("single-branch named video pad parses");
+    let graph = parse_launch(
+        &reg,
+        "filesrc location=/x/movie.mp4 ! qtdemux name=d d.video_0 ! h264parse ! fakesink",
+    )
+    .expect("single-branch named video pad parses");
     let vg = graph.finish().expect("valid graph");
     assert!(
-        !vg.topo().iter().any(|&n| matches!(vg.kind(n), NodeKind::Tee(_))),
+        !vg.topo()
+            .iter()
+            .any(|&n| matches!(vg.kind(n), NodeKind::Tee(_))),
         "one branch resolves to the single-output demux, not a fan-out"
     );
 }
@@ -54,12 +64,22 @@ fn qtdemux_named_video_pad_single_branch_parses() {
 #[test]
 fn decodebin_autoplugs_the_progressive_mp4_demuxer() {
     let reg = default_registry();
-    let graph = parse_launch(&reg, "filesrc location=/x/movie.mp4 ! decodebin ! videoconvert ! fakesink")
-        .expect("decodebin auto-plugs a demux + decode chain for a progressive MP4");
+    let graph = parse_launch(
+        &reg,
+        "filesrc location=/x/movie.mp4 ! decodebin ! videoconvert ! fakesink",
+    )
+    .expect("decodebin auto-plugs a demux + decode chain for a progressive MP4");
     let vg = graph.finish().expect("valid graph");
     let kinds: Vec<NodeKind> = vg.topo().iter().map(|&n| vg.kind(n)).collect();
     // filesrc -> Mp4Demux -> (parser) -> ffmpeg decoder -> videoconvert -> fakesink:
     // a single linear chain, no fan-out.
-    assert!(kinds.len() >= 5, "demux + parser + decoder + convert + sink: {}", kinds.len());
-    assert!(!kinds.iter().any(|k| matches!(k, NodeKind::Tee(_))), "linear decode path, no fan-out");
+    assert!(
+        kinds.len() >= 5,
+        "demux + parser + decoder + convert + sink: {}",
+        kinds.len()
+    );
+    assert!(
+        !kinds.iter().any(|k| matches!(k, NodeKind::Tee(_))),
+        "linear decode path, no fan-out"
+    );
 }

@@ -3507,6 +3507,7 @@ name = "g2g-core"
 version = "0.2.0"
 dependencies = [
  "arc-swap",
+ "loom",
  "portable-atomic",
  "spin 0.9.8",
  "tracing",

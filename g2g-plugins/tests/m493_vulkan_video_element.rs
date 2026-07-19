@@ -6,7 +6,10 @@
 //! per `process` call, so the DPB reference state must carry across calls -- and
 //! asserts it emits one NV12 frame per coded picture with real content, plus the
 //! output `CapsChanged`. Runs on the RTX 3060; skips with no adapter / support.
-#![cfg(all(any(target_os = "linux", target_os = "windows"), feature = "vulkan-video"))]
+#![cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    feature = "vulkan-video"
+))]
 
 use std::future::Future;
 use std::pin::Pin;
@@ -16,7 +19,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::block_on;
 use g2g_core::{
     AsyncElement, Caps, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket,
-    PushOutcome, RawVideoFormat, Rate, VideoCodec,
+    PushOutcome, Rate, RawVideoFormat, VideoCodec,
 };
 use g2g_plugins::vulkanvideo::{open_h264_decode_device, VulkanVideoDec, VulkanVideoError};
 
@@ -91,7 +94,10 @@ fn start_code_offsets(data: &[u8]) -> Vec<usize> {
 fn au_frame(bytes: Vec<u8>, seq: u64) -> Frame {
     Frame {
         domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming { pts_ns: seq * 33_000_000, ..Default::default() },
+        timing: FrameTiming {
+            pts_ns: seq * 33_000_000,
+            ..Default::default()
+        },
         sequence: seq,
         meta: Default::default(),
     }
@@ -121,7 +127,8 @@ fn element_decodes_stream_to_nv12_frames() {
         height: Dim::Fixed(480),
         framerate: Rate::Fixed(30 << 16),
     };
-    dec.configure_pipeline(&in_caps).expect("configure opens the decode device");
+    dec.configure_pipeline(&in_caps)
+        .expect("configure opens the decode device");
 
     let aus = split_access_units(CLIP);
     assert_eq!(aus.len(), 10, "clip splits into 10 access units");
@@ -177,7 +184,13 @@ fn element_decodes_stream_to_nv12_frames() {
         let luma = &bytes[..640 * 480];
         let min = *luma.iter().min().unwrap();
         let max = *luma.iter().max().unwrap();
-        assert!(min <= 20 && max >= 200, "frame {i} luma range {min}..={max} not a real picture");
+        assert!(
+            min <= 20 && max >= 200,
+            "frame {i} luma range {min}..={max} not a real picture"
+        );
     }
-    eprintln!("VulkanVideoDec emitted {} NV12 frames (640x480)", frames.len());
+    eprintln!(
+        "VulkanVideoDec emitted {} NV12 frames (640x480)",
+        frames.len()
+    );
 }

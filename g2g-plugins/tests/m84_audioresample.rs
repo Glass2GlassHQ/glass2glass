@@ -30,7 +30,9 @@ async fn audioresample_retargets_rate_through_run_graph() {
         let k = g.add_sink(GraphNodeRef::element_ref(&mut sink));
         g.link(s, r).unwrap();
         g.link(r, k).unwrap();
-        run_graph(g, &NullClock, 4).await.expect("audio resample graph runs")
+        run_graph(g, &NullClock, 4)
+            .await
+            .expect("audio resample graph runs")
     };
 
     // One output buffer per input buffer; all reach the sink.
@@ -39,9 +41,19 @@ async fn audioresample_retargets_rate_through_run_graph() {
     assert_eq!(sink.received(), 4);
 
     // The sink saw the retargeted caps: same format + channels, 48 kHz out.
-    let retargeted = sink
-        .caps_changes()
-        .iter()
-        .any(|c| matches!(c.caps, Caps::Audio { format: AudioFormat::PcmS16Le, channels: 2, sample_rate: 48_000 }));
-    assert!(retargeted, "sink observed 48 kHz S16 stereo caps: {:?}", sink.caps_changes());
+    let retargeted = sink.caps_changes().iter().any(|c| {
+        matches!(
+            c.caps,
+            Caps::Audio {
+                format: AudioFormat::PcmS16Le,
+                channels: 2,
+                sample_rate: 48_000
+            }
+        )
+    });
+    assert!(
+        retargeted,
+        "sink observed 48 kHz S16 stereo caps: {:?}",
+        sink.caps_changes()
+    );
 }

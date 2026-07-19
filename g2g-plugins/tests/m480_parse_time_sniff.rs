@@ -22,7 +22,8 @@ fn ftyp_bytes() -> Vec<u8> {
 }
 
 fn write_temp(tag: &str, ext: &str, bytes: &[u8]) -> std::path::PathBuf {
-    let path = std::env::temp_dir().join(format!("g2g-m480-{}-{}.{}", std::process::id(), tag, ext));
+    let path =
+        std::env::temp_dir().join(format!("g2g-m480-{}-{}.{}", std::process::id(), tag, ext));
     std::fs::write(&path, bytes).expect("write temp");
     path
 }
@@ -34,13 +35,17 @@ fn write_temp(tag: &str, ext: &str, bytes: &[u8]) -> std::path::PathBuf {
 fn auto_sniff_overrides_a_wrong_extension_at_parse_time() {
     let path = write_temp("mislabeled", "ts", &ftyp_bytes());
     let mut fs = FileSrc::untyped();
-    fs.set_property("location", PropValue::Str(path.to_str().unwrap().into())).unwrap();
-    fs.set_property("bytestream-format", PropValue::Str("auto".into())).unwrap();
+    fs.set_property("location", PropValue::Str(path.to_str().unwrap().into()))
+        .unwrap();
+    fs.set_property("bytestream-format", PropValue::Str("auto".into()))
+        .unwrap();
     let caps = fs.probe_output_caps();
     std::fs::remove_file(&path).ok();
     assert_eq!(
         caps,
-        Some(Caps::ByteStream { encoding: ByteStreamEncoding::Mp4 }),
+        Some(Caps::ByteStream {
+            encoding: ByteStreamEncoding::Mp4
+        }),
         "content sniff at parse time detects MP4 despite the .ts extension"
     );
 }
@@ -52,12 +57,15 @@ fn auto_sniff_overrides_a_wrong_extension_at_parse_time() {
 fn extension_alone_is_trusted_without_auto() {
     let path = write_temp("trusted", "ts", &ftyp_bytes());
     let mut fs = FileSrc::untyped();
-    fs.set_property("location", PropValue::Str(path.to_str().unwrap().into())).unwrap();
+    fs.set_property("location", PropValue::Str(path.to_str().unwrap().into()))
+        .unwrap();
     let caps = fs.probe_output_caps();
     std::fs::remove_file(&path).ok();
     assert_eq!(
         caps,
-        Some(Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs }),
+        Some(Caps::ByteStream {
+            encoding: ByteStreamEncoding::MpegTs
+        }),
         "the .ts extension types as MPEG-TS without a content sniff"
     );
 }
@@ -67,7 +75,13 @@ fn extension_alone_is_trusted_without_auto() {
 #[test]
 fn auto_probe_on_a_missing_file_is_none() {
     let mut fs = FileSrc::untyped();
-    fs.set_property("location", PropValue::Str("/no/such/file.mp4".into())).unwrap();
-    fs.set_property("bytestream-format", PropValue::Str("auto".into())).unwrap();
-    assert_eq!(fs.probe_output_caps(), None, "a missing auto file resolves to no caps, not a panic");
+    fs.set_property("location", PropValue::Str("/no/such/file.mp4".into()))
+        .unwrap();
+    fs.set_property("bytestream-format", PropValue::Str("auto".into()))
+        .unwrap();
+    assert_eq!(
+        fs.probe_output_caps(),
+        None,
+        "a missing auto file resolves to no caps, not a panic"
+    );
 }

@@ -60,7 +60,9 @@ use g2g_core::{
 
 use crate::filesink::io_err;
 use crate::turn::{self, TurnClient};
-use crate::webrtc_util::{add_ice_candidates, feed_datagram, post_sdp, select_host_ip, send_transmit};
+use crate::webrtc_util::{
+    add_ice_candidates, feed_datagram, post_sdp, select_host_ip, send_transmit,
+};
 
 /// Default bounded depth of the element->session media channel. Backpressures
 /// the pipeline if the session task falls behind the encoder.
@@ -278,7 +280,13 @@ impl WebRtcSink {
         // Offer a single send-only m-line for the configured track.
         let (offer_sdp, pending, mid): (String, SdpPendingOffer, Mid) = {
             let mut api = rtc.sdp_api();
-            let mid = api.add_media(self.track.media_kind(), Direction::SendOnly, None, None, None);
+            let mid = api.add_media(
+                self.track.media_kind(),
+                Direction::SendOnly,
+                None,
+                None,
+                None,
+            );
             let (offer, pending) = api.apply().ok_or_else(|| {
                 std::eprintln!("webrtc offer creation failed");
                 G2gError::Hardware(HardwareError::Other)
@@ -287,7 +295,8 @@ impl WebRtcSink {
         };
 
         // WHIP: POST the offer, receive the answer SDP, apply it.
-        let answer_sdp = post_sdp(&self.whip_url, self.bearer.as_deref(), offer_sdp.clone()).await?;
+        let answer_sdp =
+            post_sdp(&self.whip_url, self.bearer.as_deref(), offer_sdp.clone()).await?;
         let answer = SdpAnswer::from_sdp_string(&answer_sdp).map_err(|e| {
             std::eprintln!(
                 "webrtc answer SDP parse failed: {e:?}\nlocal offer:\n{offer_sdp}\nremote answer:\n{answer_sdp}"
@@ -324,7 +333,11 @@ impl WebRtcSink {
 /// bearer token, so a `gst-launch` line can target a server without the builder.
 static WEBRTCSINK_PROPS: &[PropertySpec] = &[
     PropertySpec::new("location", PropKind::Str, "WHIP endpoint URL to publish to"),
-    PropertySpec::new("bearer", PropKind::Str, "optional Authorization: Bearer token for the WHIP POST"),
+    PropertySpec::new(
+        "bearer",
+        PropKind::Str,
+        "optional Authorization: Bearer token for the WHIP POST",
+    ),
     PropertySpec::new(
         "stun-server",
         PropKind::Str,
@@ -335,8 +348,16 @@ static WEBRTCSINK_PROPS: &[PropertySpec] = &[
         PropKind::Str,
         "TURN relay host:port for the NAT cases STUN cannot traverse (empty = no relay)",
     ),
-    PropertySpec::new("turn-user", PropKind::Str, "TURN long-term credential username"),
-    PropertySpec::new("turn-pass", PropKind::Str, "TURN long-term credential password"),
+    PropertySpec::new(
+        "turn-user",
+        PropKind::Str,
+        "TURN long-term credential username",
+    ),
+    PropertySpec::new(
+        "turn-pass",
+        PropKind::Str,
+        "TURN long-term credential password",
+    ),
 ];
 
 /// The H.264 sink caps this element accepts (any geometry / framerate).
@@ -353,31 +374,51 @@ fn h264_any() -> Caps {
 /// `opusenc` default; other channel counts / rates are a follow-up (the audio
 /// `Caps` has no wildcard fields, so the declared sink caps must be concrete).
 fn opus_stereo() -> Caps {
-    Caps::Audio { format: AudioFormat::Opus, channels: 2, sample_rate: 48_000 }
+    Caps::Audio {
+        format: AudioFormat::Opus,
+        channels: 2,
+        sample_rate: 48_000,
+    }
 }
 
 impl AsyncElement for WebRtcSink {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         // Accept H.264 video or Opus audio; one track per sink instance.
         match upstream_caps {
-            Caps::CompressedVideo { codec: VideoCodec::H264, .. }
-            | Caps::Audio { format: AudioFormat::Opus, .. } => Ok(upstream_caps.clone()),
+            Caps::CompressedVideo {
+                codec: VideoCodec::H264,
+                ..
+            }
+            | Caps::Audio {
+                format: AudioFormat::Opus,
+                ..
+            } => Ok(upstream_caps.clone()),
             _ => Err(G2gError::CapsMismatch),
         }
     }
 
     fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
-        CapsConstraint::Accepts(CapsSet::from_alternatives(Vec::from([h264_any(), opus_stereo()])))
+        CapsConstraint::Accepts(CapsSet::from_alternatives(Vec::from([
+            h264_any(),
+            opus_stereo(),
+        ])))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         self.track = match absolute_caps {
-            Caps::CompressedVideo { codec: VideoCodec::H264, .. } => Track::Video,
-            Caps::Audio { format: AudioFormat::Opus, .. } => Track::Audio,
+            Caps::CompressedVideo {
+                codec: VideoCodec::H264,
+                ..
+            } => Track::Video,
+            Caps::Audio {
+                format: AudioFormat::Opus,
+                ..
+            } => Track::Audio,
             _ => return Err(G2gError::CapsMismatch),
         };
         self.configured = true;
@@ -406,7 +447,11 @@ impl AsyncElement for WebRtcSink {
             }
             "bearer" => {
                 let token = value.as_str().ok_or(PropError::Type)?;
-                self.bearer = if token.is_empty() { None } else { Some(token.into()) };
+                self.bearer = if token.is_empty() {
+                    None
+                } else {
+                    Some(token.into())
+                };
                 Ok(())
             }
             "stun-server" => {
@@ -479,8 +524,10 @@ impl AsyncElement for WebRtcSink {
                     let MemoryDomain::System(slice) = &frame.domain else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    let unit =
-                        MediaUnit { pts_ns: frame.timing.pts_ns, data: slice.as_slice().to_vec() };
+                    let unit = MediaUnit {
+                        pts_ns: frame.timing.pts_ns,
+                        data: slice.as_slice().to_vec(),
+                    };
                     if self.tx.is_none() {
                         self.start_session().await?;
                     }
@@ -637,7 +684,10 @@ mod tests {
             height: Dim::Fixed(2),
             framerate: Rate::Any,
         };
-        assert!(matches!(sink2.configure_pipeline(&raw), Err(G2gError::CapsMismatch)));
+        assert!(matches!(
+            sink2.configure_pipeline(&raw),
+            Err(G2gError::CapsMismatch)
+        ));
     }
 
     #[test]
@@ -657,29 +707,53 @@ mod tests {
     #[test]
     fn location_and_bearer_properties_round_trip() {
         let mut sink = WebRtcSink::new("http://h/whip");
-        sink.set_property("location", PropValue::Str("http://srv:8889/s/whip".into())).unwrap();
+        sink.set_property("location", PropValue::Str("http://srv:8889/s/whip".into()))
+            .unwrap();
         assert_eq!(sink.whip_url, "http://srv:8889/s/whip");
-        assert_eq!(sink.get_property("location"), Some(PropValue::Str("http://srv:8889/s/whip".into())));
+        assert_eq!(
+            sink.get_property("location"),
+            Some(PropValue::Str("http://srv:8889/s/whip".into()))
+        );
         // `whip-url` is an accepted alias for the same field.
-        sink.set_property("whip-url", PropValue::Str("http://x/whip".into())).unwrap();
+        sink.set_property("whip-url", PropValue::Str("http://x/whip".into()))
+            .unwrap();
         assert_eq!(sink.whip_url, "http://x/whip");
-        sink.set_property("bearer", PropValue::Str("secret".into())).unwrap();
+        sink.set_property("bearer", PropValue::Str("secret".into()))
+            .unwrap();
         assert_eq!(sink.bearer.as_deref(), Some("secret"));
-        sink.set_property("stun-server", PropValue::Str("stun.l.google.com:19302".into())).unwrap();
+        sink.set_property(
+            "stun-server",
+            PropValue::Str("stun.l.google.com:19302".into()),
+        )
+        .unwrap();
         assert_eq!(sink.stun_server.as_deref(), Some("stun.l.google.com:19302"));
-        sink.set_property("turn-server", PropValue::Str("relay:3478".into())).unwrap();
-        sink.set_property("turn-user", PropValue::Str("u".into())).unwrap();
-        sink.set_property("turn-pass", PropValue::Str("p".into())).unwrap();
+        sink.set_property("turn-server", PropValue::Str("relay:3478".into()))
+            .unwrap();
+        sink.set_property("turn-user", PropValue::Str("u".into()))
+            .unwrap();
+        sink.set_property("turn-pass", PropValue::Str("p".into()))
+            .unwrap();
         assert_eq!(sink.turn_server.as_deref(), Some("relay:3478"));
-        assert_eq!(sink.get_property("turn-user"), Some(PropValue::Str("u".into())));
+        assert_eq!(
+            sink.get_property("turn-user"),
+            Some(PropValue::Str("u".into()))
+        );
         // Empty turn-server clears the relay.
-        sink.set_property("turn-server", PropValue::Str(String::new())).unwrap();
+        sink.set_property("turn-server", PropValue::Str(String::new()))
+            .unwrap();
         assert_eq!(sink.turn_server, None);
         // Empty bearer clears it; unknown name and wrong type are distinct errors.
-        sink.set_property("bearer", PropValue::Str(String::new())).unwrap();
+        sink.set_property("bearer", PropValue::Str(String::new()))
+            .unwrap();
         assert_eq!(sink.bearer, None);
-        assert_eq!(sink.set_property("nope", PropValue::Str("x".into())), Err(PropError::Unknown));
-        assert_eq!(sink.set_property("location", PropValue::Int(1)), Err(PropError::Type));
+        assert_eq!(
+            sink.set_property("nope", PropValue::Str("x".into())),
+            Err(PropError::Unknown)
+        );
+        assert_eq!(
+            sink.set_property("location", PropValue::Int(1)),
+            Err(PropError::Type)
+        );
     }
 
     #[test]

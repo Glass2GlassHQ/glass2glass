@@ -36,9 +36,9 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
-    HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec, RawVideoFormat, Rate, VideoCodec,
+    AsyncElement, Caps, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError, HardwareError,
+    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec, Rate, RawVideoFormat, VideoCodec,
 };
 
 // ================================================================
@@ -179,7 +179,11 @@ mod ffi {
             out_image_config: *mut ImageConfig,
             out_bytes_per_frame: *mut u32,
         ) -> i32;
-        pub(super) fn svt_jpeg_xs_encoder_init(major: u64, minor: u64, enc_api: *mut EncoderApi) -> i32;
+        pub(super) fn svt_jpeg_xs_encoder_init(
+            major: u64,
+            minor: u64,
+            enc_api: *mut EncoderApi,
+        ) -> i32;
         pub(super) fn svt_jpeg_xs_encoder_close(enc_api: *mut EncoderApi);
         pub(super) fn svt_jpeg_xs_encoder_send_picture(
             enc_api: *mut EncoderApi,
@@ -239,11 +243,12 @@ fn svt_to_format(colour: i32, bit_depth: u8) -> Option<RawVideoFormat> {
 /// JPEG-XS-mappable planar format.
 fn raw_geometry(caps: &Caps) -> Result<(RawVideoFormat, u32, u32), G2gError> {
     match caps {
-        Caps::RawVideo { format, width: Dim::Fixed(w), height: Dim::Fixed(h), .. }
-            if format_to_svt(*format).is_some() =>
-        {
-            Ok((*format, *w, *h))
-        }
+        Caps::RawVideo {
+            format,
+            width: Dim::Fixed(w),
+            height: Dim::Fixed(h),
+            ..
+        } if format_to_svt(*format).is_some() => Ok((*format, *w, *h)),
         _ => Err(G2gError::CapsMismatch),
     }
 }
@@ -323,7 +328,10 @@ impl Drop for SvtJpegXsEnc {
 }
 
 impl AsyncElement for SvtJpegXsEnc {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>> where Self: 'a;
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         let (_, w, h) = raw_geometry(upstream_caps)?;
@@ -437,7 +445,10 @@ impl AsyncElement for SvtJpegXsEnc {
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
-            "bpp" => Some(PropValue::Fraction(self.bpp_num as i32, self.bpp_den as i32)),
+            "bpp" => Some(PropValue::Fraction(
+                self.bpp_num as i32,
+                self.bpp_den as i32,
+            )),
             _ => None,
         }
     }
@@ -493,7 +504,9 @@ impl SvtJpegXsEnc {
         let mut offset = 0usize;
         for i in 0..self.components_num {
             let (stride_samples, byte_size) = self.components[i];
-            let end = offset.checked_add(byte_size as usize).ok_or(G2gError::CapsMismatch)?;
+            let end = offset
+                .checked_add(byte_size as usize)
+                .ok_or(G2gError::CapsMismatch)?;
             if end > input.len() {
                 return Err(G2gError::CapsMismatch);
             }
@@ -536,14 +549,18 @@ impl SvtJpegXsEnc {
 
 impl PadTemplates for SvtJpegXsEnc {
     fn pad_templates() -> Vec<PadTemplate> {
-        let alts = [RawVideoFormat::I420, RawVideoFormat::I422, RawVideoFormat::I422p10]
-            .map(|format| Caps::RawVideo {
-                format,
-                width: Dim::Any,
-                height: Dim::Any,
-                framerate: Rate::Any,
-            })
-            .to_vec();
+        let alts = [
+            RawVideoFormat::I420,
+            RawVideoFormat::I422,
+            RawVideoFormat::I422p10,
+        ]
+        .map(|format| Caps::RawVideo {
+            format,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        })
+        .to_vec();
         Vec::from([
             PadTemplate::sink(CapsSet::from_alternatives(alts)),
             PadTemplate::source(CapsSet::one(Caps::CompressedVideo {
@@ -623,11 +640,19 @@ impl Drop for SvtJpegXsDec {
 }
 
 impl AsyncElement for SvtJpegXsDec {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>> where Self: 'a;
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         match upstream_caps {
-            Caps::CompressedVideo { codec: VideoCodec::JpegXs, width, height, .. } => {
+            Caps::CompressedVideo {
+                codec: VideoCodec::JpegXs,
+                width,
+                height,
+                ..
+            } => {
                 // Output format is unknown until the first codestream; advertise the
                 // broadcast-norm default and refine via CapsChanged at first frame.
                 Ok(Caps::RawVideo {
@@ -643,7 +668,10 @@ impl AsyncElement for SvtJpegXsDec {
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         match absolute_caps {
-            Caps::CompressedVideo { codec: VideoCodec::JpegXs, .. } => Ok(ConfigureOutcome::Accepted),
+            Caps::CompressedVideo {
+                codec: VideoCodec::JpegXs,
+                ..
+            } => Ok(ConfigureOutcome::Accepted),
             // A pass-through no-op configure with the downstream (raw) caps also lands
             // here after the runner cascades the source-side format.
             Caps::RawVideo { .. } => Ok(ConfigureOutcome::Accepted),
@@ -690,7 +718,9 @@ impl AsyncElement for SvtJpegXsDec {
                         sequence: frame.sequence,
                         meta: frame.meta,
                     };
-                    out.push(PipelinePacket::DataFrame(out_frame)).await.map(|_| ())
+                    out.push(PipelinePacket::DataFrame(out_frame))
+                        .await
+                        .map(|_| ())
                 }
                 // A compressed CapsChanged upstream carries no pixel layout; swallow it
                 // (our own output CapsChanged is emitted from the first decoded frame).
@@ -787,14 +817,18 @@ impl SvtJpegXsDec {
 
 impl PadTemplates for SvtJpegXsDec {
     fn pad_templates() -> Vec<PadTemplate> {
-        let alts = [RawVideoFormat::I420, RawVideoFormat::I422, RawVideoFormat::I422p10]
-            .map(|format| Caps::RawVideo {
-                format,
-                width: Dim::Any,
-                height: Dim::Any,
-                framerate: Rate::Any,
-            })
-            .to_vec();
+        let alts = [
+            RawVideoFormat::I420,
+            RawVideoFormat::I422,
+            RawVideoFormat::I422p10,
+        ]
+        .map(|format| Caps::RawVideo {
+            format,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        })
+        .to_vec();
         Vec::from([
             PadTemplate::sink(CapsSet::one(Caps::CompressedVideo {
                 codec: VideoCodec::JpegXs,
@@ -888,7 +922,10 @@ mod tests {
         assert_eq!(enc_out.frames.len(), 1, "one codestream out");
         let codestream = enc_out.frames.remove(0);
         assert!(!codestream.is_empty(), "non-empty JPEG XS codestream");
-        assert!(codestream.len() < input.len(), "codestream is smaller than raw");
+        assert!(
+            codestream.len() < input.len(),
+            "codestream is smaller than raw"
+        );
         assert_eq!(
             enc_out.caps[0],
             Caps::CompressedVideo {
@@ -925,6 +962,9 @@ mod tests {
             sum_err += u64::from(a.abs_diff(b));
         }
         let mean_err = sum_err as f64 / n as f64;
-        assert!(mean_err < 8.0, "mean 10-bit error {mean_err} too high (round trip broken)");
+        assert!(
+            mean_err < 8.0,
+            "mean 10-bit error {mean_err} too high (round trip broken)"
+        );
     }
 }

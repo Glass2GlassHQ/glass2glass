@@ -20,8 +20,8 @@ use core::pin::Pin;
 
 use g2g_core::frame::Frame;
 use g2g_core::{
-    AsyncElement, Caps, Dim, G2gError, MemoryDomain, OutputSink, PipelinePacket, PushOutcome,
-    RawVideoFormat, Rate, VideoCodec,
+    AsyncElement, Caps, Dim, G2gError, MemoryDomain, OutputSink, PipelinePacket, PushOutcome, Rate,
+    RawVideoFormat, VideoCodec,
 };
 use g2g_plugins::cudawgpu::{create_interop_device, WgpuToCuda};
 use g2g_plugins::nvenc::NvEnc;
@@ -100,7 +100,8 @@ async fn wgpu_rgba_texture_encodes_through_nvenc_no_readback() {
         framerate: Rate::Fixed(30 << 16),
     };
     let mut enc = NvEnc::new();
-    enc.configure_pipeline(&caps).expect("configure NvEnc for RGBA");
+    enc.configure_pipeline(&caps)
+        .expect("configure NvEnc for RGBA");
 
     let mut sink = CaptureSink::default();
     for seq in 0..10u32 {
@@ -120,17 +121,25 @@ async fn wgpu_rgba_texture_encodes_through_nvenc_no_readback() {
                 bytes_per_row: Some(W * 4),
                 rows_per_image: Some(H),
             },
-            wgpu::Extent3d { width: W, height: H, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width: W,
+                height: H,
+                depth_or_array_layers: 1,
+            },
         );
         bridge.queue().submit([]);
         // Ensure the write is visible to CUDA before the device->device copy.
         bridge
             .device()
-            .poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
             .expect("poll");
 
-        let frame: Frame =
-            bridge.to_cuda_frame(seq as u64 * 33_000_000).expect("bridge texture to CUDA frame");
+        let frame: Frame = bridge
+            .to_cuda_frame(seq as u64 * 33_000_000)
+            .expect("bridge texture to CUDA frame");
         // Sanity: the frame is CUDA-resident in the bridge's context.
         match &frame.domain {
             MemoryDomain::Cuda(buf) => {
@@ -140,14 +149,23 @@ async fn wgpu_rgba_texture_encodes_through_nvenc_no_readback() {
             }
             _ => panic!("bridge must emit a MemoryDomain::Cuda frame"),
         }
-        if enc.process(PipelinePacket::DataFrame(frame), &mut sink).await.is_err() {
+        if enc
+            .process(PipelinePacket::DataFrame(frame), &mut sink)
+            .await
+            .is_err()
+        {
             eprintln!("skipping: NVENC unavailable on this host");
             return;
         }
     }
-    enc.process(PipelinePacket::Eos, &mut sink).await.expect("flush NvEnc");
+    enc.process(PipelinePacket::Eos, &mut sink)
+        .await
+        .expect("flush NvEnc");
 
-    assert!(!sink.aus.is_empty(), "NVENC produced H.264 access units from the GPU texture");
+    assert!(
+        !sink.aus.is_empty(),
+        "NVENC produced H.264 access units from the GPU texture"
+    );
     assert_eq!(
         sink.caps,
         vec![Caps::CompressedVideo {
@@ -160,8 +178,15 @@ async fn wgpu_rgba_texture_encodes_through_nvenc_no_readback() {
     );
     let first = &sink.aus[0];
     let annex_b = first.starts_with(&[0, 0, 0, 1]) || first.starts_with(&[0, 0, 1]);
-    assert!(annex_b, "encoded output is Annex-B framed, got {:?}", &first[..4.min(first.len())]);
-    eprintln!("encoded {} H.264 access units from a GPU RGBA texture, no read-back", sink.aus.len());
+    assert!(
+        annex_b,
+        "encoded output is Annex-B framed, got {:?}",
+        &first[..4.min(first.len())]
+    );
+    eprintln!(
+        "encoded {} H.264 access units from a GPU RGBA texture, no read-back",
+        sink.aus.len()
+    );
 }
 
 /// Captures a single bridged frame, to relay the bridge's `process` output into
@@ -221,14 +246,19 @@ async fn wgpu_to_cuda_element_bridges_and_recycles() {
     };
     bridge.configure_pipeline(&caps).expect("configure bridge");
     let mut enc = NvEnc::new();
-    enc.configure_pipeline(&caps).expect("configure NvEnc for RGBA");
+    enc.configure_pipeline(&caps)
+        .expect("configure NvEnc for RGBA");
 
     // An upstream render target on the bridge's interop device (what a real wgpu
     // producer would draw into). COPY_SRC so the bridge can copy it into its own
     // exportable texture; COPY_DST so the test can upload the pattern.
     let src = dev.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("upstream-rgba"),
-        size: wgpu::Extent3d { width: W, height: H, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: W,
+            height: H,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -255,7 +285,11 @@ async fn wgpu_to_cuda_element_bridges_and_recycles() {
                 bytes_per_row: Some(W * 4),
                 rows_per_image: Some(H),
             },
-            wgpu::Extent3d { width: W, height: H, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width: W,
+                height: H,
+                depth_or_array_layers: 1,
+            },
         );
         dev.queue.submit([]);
 
@@ -275,7 +309,11 @@ async fn wgpu_to_cuda_element_bridges_and_recycles() {
         );
 
         let mut relay = CaptureCuda::default();
-        if bridge.process(PipelinePacket::DataFrame(in_frame), &mut relay).await.is_err() {
+        if bridge
+            .process(PipelinePacket::DataFrame(in_frame), &mut relay)
+            .await
+            .is_err()
+        {
             eprintln!("skipping: bridge process failed (no CUDA?)");
             return;
         }
@@ -284,16 +322,28 @@ async fn wgpu_to_cuda_element_bridges_and_recycles() {
             matches!(cuda_frame.domain, MemoryDomain::Cuda(_)),
             "element output stays on the GPU"
         );
-        if enc.process(PipelinePacket::DataFrame(cuda_frame), &mut sink).await.is_err() {
+        if enc
+            .process(PipelinePacket::DataFrame(cuda_frame), &mut sink)
+            .await
+            .is_err()
+        {
             eprintln!("skipping: NVENC unavailable on this host");
             return;
         }
         // `cuda_frame` dropped here -> its linear buffer returns to the pool, so
         // the next iteration's to_cuda_frame reuses it rather than allocating.
     }
-    enc.process(PipelinePacket::Eos, &mut sink).await.expect("flush NvEnc");
+    enc.process(PipelinePacket::Eos, &mut sink)
+        .await
+        .expect("flush NvEnc");
 
     assert_eq!(bridge.frames(), 10, "element bridged every frame");
-    assert!(!sink.aus.is_empty(), "NVENC produced H.264 from the bridged element frames");
-    eprintln!("bridged {} frames through WgpuToCuda element (buffer pool recycled)", bridge.frames());
+    assert!(
+        !sink.aus.is_empty(),
+        "NVENC produced H.264 from the bridged element frames"
+    );
+    eprintln!(
+        "bridged {} frames through WgpuToCuda element (buffer pool recycled)",
+        bridge.frames()
+    );
 }

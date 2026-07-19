@@ -94,7 +94,8 @@ fn wav_header(tag: u16, bits: u16, channels: u16, rate: u32) -> Vec<u8> {
 }
 
 impl AsyncElement for WavSink {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -148,16 +149,19 @@ impl AsyncElement for WavSink {
                     // The data chunk's size word is always the last 4 bytes of
                     // the header; riff size is everything after the RIFF+size.
                     let riff_size = (self.header_len - 8 + self.data_bytes) as u32;
-                    file.seek(SeekFrom::Start(RIFF_SIZE_OFFSET)).map_err(io_err)?;
+                    file.seek(SeekFrom::Start(RIFF_SIZE_OFFSET))
+                        .map_err(io_err)?;
                     file.write_all(&riff_size.to_le_bytes()).map_err(io_err)?;
                     // The non-PCM `fact` chunk (when present) carries the per-
                     // channel sample count, 12 bytes before the data size word.
                     if self.header_len > 44 && self.block_align > 0 {
                         let samples = (self.data_bytes / self.block_align as u64) as u32;
-                        file.seek(SeekFrom::Start(self.header_len - 12)).map_err(io_err)?;
+                        file.seek(SeekFrom::Start(self.header_len - 12))
+                            .map_err(io_err)?;
                         file.write_all(&samples.to_le_bytes()).map_err(io_err)?;
                     }
-                    file.seek(SeekFrom::Start(self.header_len - 4)).map_err(io_err)?;
+                    file.seek(SeekFrom::Start(self.header_len - 4))
+                        .map_err(io_err)?;
                     file.write_all(&(self.data_bytes as u32).to_le_bytes())
                         .map_err(io_err)?;
                     file.seek(SeekFrom::End(0)).map_err(io_err)?;
@@ -218,8 +222,16 @@ mod tests {
         let h = wav_header(WAVE_FORMAT_IEEE_FLOAT, 32, 2, 48_000);
         assert_eq!(h.len(), 58);
         assert_eq!(&h[12..16], b"fmt ");
-        assert_eq!(u32::from_le_bytes(h[16..20].try_into().unwrap()), 18, "18-byte fmt for float");
-        assert_eq!(u16::from_le_bytes(h[36..38].try_into().unwrap()), 0, "cbSize = 0");
+        assert_eq!(
+            u32::from_le_bytes(h[16..20].try_into().unwrap()),
+            18,
+            "18-byte fmt for float"
+        );
+        assert_eq!(
+            u16::from_le_bytes(h[36..38].try_into().unwrap()),
+            0,
+            "cbSize = 0"
+        );
         assert_eq!(&h[38..42], b"fact");
         assert_eq!(&h[50..54], b"data");
     }
@@ -239,25 +251,46 @@ mod tests {
         let path = std::env::temp_dir().join("g2g_wavsink_float.wav");
         let _ = std::fs::remove_file(&path);
         let mut sink = WavSink::new(&path);
-        let caps = Caps::Audio { format: AudioFormat::PcmF32Le, channels: 2, sample_rate: 48_000 };
+        let caps = Caps::Audio {
+            format: AudioFormat::PcmF32Le,
+            channels: 2,
+            sample_rate: 48_000,
+        };
         sink.configure_pipeline(&caps).unwrap();
         let mut out = NullSink;
         // 8 f32 = 32 bytes = 4 stereo frames (block_align 8).
-        let data: Vec<u8> = [0.5f32; 8].into_iter().flat_map(|v| v.to_le_bytes()).collect();
+        let data: Vec<u8> = [0.5f32; 8]
+            .into_iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
         let frame = Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
             FrameTiming::default(),
             0,
         );
-        sink.process(PipelinePacket::DataFrame(frame), &mut out).await.unwrap();
+        sink.process(PipelinePacket::DataFrame(frame), &mut out)
+            .await
+            .unwrap();
         sink.process(PipelinePacket::Eos, &mut out).await.unwrap();
 
         let bytes = std::fs::read(&path).unwrap();
         assert_eq!(bytes.len(), 58 + 32);
         assert_eq!(&bytes[38..42], b"fact");
-        assert_eq!(u32::from_le_bytes(bytes[46..50].try_into().unwrap()), 4, "4 samples/channel");
-        assert_eq!(u32::from_le_bytes(bytes[54..58].try_into().unwrap()), 32, "data size");
-        assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), 82, "riff size");
+        assert_eq!(
+            u32::from_le_bytes(bytes[46..50].try_into().unwrap()),
+            4,
+            "4 samples/channel"
+        );
+        assert_eq!(
+            u32::from_le_bytes(bytes[54..58].try_into().unwrap()),
+            32,
+            "data size"
+        );
+        assert_eq!(
+            u32::from_le_bytes(bytes[4..8].try_into().unwrap()),
+            82,
+            "riff size"
+        );
         let _ = std::fs::remove_file(&path);
     }
 

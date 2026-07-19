@@ -1,0 +1,6 @@
+# Bulk reformatting commits to skip in `git blame`.
+# Enable locally with: git config blame.ignoreRevsFile .git-blame-ignore-revs
+# (GitHub applies this file automatically.)
+
+# format: rustfmt the workspace
+853883160152f7a7d366de41d4a4bd762aa05b19

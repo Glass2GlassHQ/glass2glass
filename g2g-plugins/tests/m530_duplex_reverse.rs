@@ -17,7 +17,7 @@ use g2g_core::runtime::{run_duplex_session, DynSourceLoop, SourceLoop};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, ConfigureOutcome, Dim, DuplexInbound, G2gError,
     MultiDuplexSession, MultiOutputSink, OutputSink, PipelineClock, PipelinePacket, PushOutcome,
-    RawVideoFormat, Rate, Reconfigure, ReverseChannel,
+    Rate, RawVideoFormat, Reconfigure, ReverseChannel,
 };
 
 struct ZeroClock;
@@ -68,7 +68,10 @@ impl SourceLoop for RecordingSource {
                     g2g_core::MemoryDomain::System(g2g_core::memory::SystemSlice::from_boxed(
                         std::vec![0u8; 4].into_boxed_slice(),
                     )),
-                    g2g_core::FrameTiming { pts_ns: seq, ..Default::default() },
+                    g2g_core::FrameTiming {
+                        pts_ns: seq,
+                        ..Default::default()
+                    },
                     seq,
                 );
                 if let PushOutcome::Reconfigure(Reconfigure::ForceKeyframe) =
@@ -117,7 +120,10 @@ struct SignalingDuplex {
 
 impl SignalingDuplex {
     fn new(inputs: usize, outputs: usize) -> Self {
-        Self { reverse: (0..inputs).map(|_| ReverseChannel::new()).collect(), outputs }
+        Self {
+            reverse: (0..inputs).map(|_| ReverseChannel::new()).collect(),
+            outputs,
+        }
     }
     /// A clone of send input `i`'s reverse channel, for the test to post on.
     fn channel(&self, i: usize) -> ReverseChannel {
@@ -182,8 +188,14 @@ async fn duplex_runner_routes_reverse_signal_to_matching_send_source() {
 
     let saw0 = Arc::new(AtomicBool::new(false));
     let saw1 = Arc::new(AtomicBool::new(false));
-    let mut send0 = RecordingSource { n: 3, saw_keyframe: saw0.clone() };
-    let mut send1 = RecordingSource { n: 3, saw_keyframe: saw1.clone() };
+    let mut send0 = RecordingSource {
+        n: 3,
+        saw_keyframe: saw0.clone(),
+    };
+    let mut send1 = RecordingSource {
+        n: 3,
+        saw_keyframe: saw1.clone(),
+    };
     let mut recv0 = DrainSink;
     let mut recv1 = DrainSink;
 
@@ -193,7 +205,10 @@ async fn duplex_runner_routes_reverse_signal_to_matching_send_source() {
         .await
         .expect("duplex session runs to completion");
 
-    assert!(saw0.load(Ordering::SeqCst), "send source 0 saw the reverse keyframe request");
+    assert!(
+        saw0.load(Ordering::SeqCst),
+        "send source 0 saw the reverse keyframe request"
+    );
     assert!(
         !saw1.load(Ordering::SeqCst),
         "send source 1 must NOT see input 0's reverse signal (per-input routing)"

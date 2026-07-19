@@ -174,8 +174,9 @@ where
             if parsed.payload_len > PAYLOAD {
                 return Err(G2gError::CapsMismatch);
             }
-            let Some(payload) =
-                self.scratch.get(parsed.payload_offset..parsed.payload_offset + parsed.payload_len)
+            let Some(payload) = self
+                .scratch
+                .get(parsed.payload_offset..parsed.payload_offset + parsed.payload_len)
             else {
                 self.malformed = self.malformed.wrapping_add(1);
                 continue;
@@ -184,13 +185,22 @@ where
             // sender's clock, so it wraps at 32 bits; the reorder key is the
             // sequence number, carried in `Frame::sequence`).
             let pts_ns = self.clock.ticks_to_ns(parsed.header.timestamp as u64);
-            let timing = FrameTiming { pts_ns, ..FrameTiming::default() };
+            let timing = FrameTiming {
+                pts_ns,
+                ..FrameTiming::default()
+            };
             // SAFETY: the constructor established the ring-outlives-frames
             // contract (`new`: 'static; `with_ring`: caller's contract).
             let frame = unsafe {
-                lend_slot(ring, timing, parsed.header.sequence as u64, parsed.payload_len, |dst| {
-                    dst.copy_from_slice(payload);
-                })?
+                lend_slot(
+                    ring,
+                    timing,
+                    parsed.header.sequence as u64,
+                    parsed.payload_len,
+                    |dst| {
+                        dst.copy_from_slice(payload);
+                    },
+                )?
             };
             if let Some(remaining) = &mut self.remaining {
                 *remaining -= 1;

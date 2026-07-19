@@ -131,7 +131,8 @@ impl Drop for PulseSink {
 }
 
 impl AsyncElement for PulseSink {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -262,14 +263,14 @@ fn worker_main(
     ready: SyncSender<Result<(), i32>>,
 ) {
     let simple = match Simple::new(
-        None,             // default server
-        app_name,         // application name
+        None,     // default server
+        app_name, // application name
         Direction::Playback,
-        None,             // default device
-        "playback",       // stream description
+        None,       // default device
+        "playback", // stream description
         &spec,
-        None,             // default channel map
-        None,             // default buffering attributes
+        None, // default channel map
+        None, // default buffering attributes
     ) {
         Ok(s) => {
             let _ = ready.send(Ok(()));

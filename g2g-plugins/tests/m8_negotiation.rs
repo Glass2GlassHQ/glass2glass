@@ -14,7 +14,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_simple_pipeline, SourceLoop};
 use g2g_core::{
     AsyncElement, Caps, ConfigureOutcome, Dim, G2gError, MemoryDomain, OutputSink, PipelineClock,
-    PipelinePacket, PushOutcome, Rate, Reconfigure, RawVideoFormat,
+    PipelinePacket, PushOutcome, Rate, RawVideoFormat, Reconfigure,
 };
 
 struct ZeroClock;
@@ -47,7 +47,8 @@ impl SourceLoop for CapsChangingTestSrc {
     where
         Self: 'a;
 
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 
@@ -66,12 +67,10 @@ impl SourceLoop for CapsChangingTestSrc {
 
             let refined = self.refined.clone();
 
-            out.push(PipelinePacket::DataFrame(make_frame(0)))
-                .await?;
+            out.push(PipelinePacket::DataFrame(make_frame(0))).await?;
             out.push(PipelinePacket::CapsChanged(refined.clone()))
                 .await?;
-            out.push(PipelinePacket::DataFrame(make_frame(1)))
-                .await?;
+            out.push(PipelinePacket::DataFrame(make_frame(1))).await?;
             out.push(PipelinePacket::Eos).await?;
             Ok(2)
         })
@@ -127,7 +126,10 @@ impl AsyncElement for OrderedRecordingSink {
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         let width = match absolute_caps {
-            Caps::RawVideo { width: Dim::Fixed(w), .. } => *w,
+            Caps::RawVideo {
+                width: Dim::Fixed(w),
+                ..
+            } => *w,
             _ => 0,
         };
         self.push(Event::Configure { width });
@@ -141,9 +143,10 @@ impl AsyncElement for OrderedRecordingSink {
     ) -> Self::ProcessFuture<'a> {
         let event = match &packet {
             PipelinePacket::DataFrame(f) => Event::Data { seq: f.sequence },
-            PipelinePacket::CapsChanged(Caps::RawVideo { width: Dim::Fixed(w), .. }) => {
-                Event::CapsChanged { width: *w }
-            }
+            PipelinePacket::CapsChanged(Caps::RawVideo {
+                width: Dim::Fixed(w),
+                ..
+            }) => Event::CapsChanged { width: *w },
             PipelinePacket::CapsChanged(_) => Event::CapsChanged { width: 0 },
             PipelinePacket::Flush => Event::Flush,
             PipelinePacket::Eos => Event::Eos,
@@ -168,7 +171,11 @@ struct RefixateOnceSink {
 
 impl RefixateOnceSink {
     fn new(counter: Caps) -> Self {
-        Self { counter, configures: 0, last_accepted_caps: None }
+        Self {
+            counter,
+            configures: 0,
+            last_accepted_caps: None,
+        }
     }
 }
 
@@ -214,7 +221,8 @@ impl SourceLoop for StaticCapsSrc {
     where
         Self: 'a;
 
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 
@@ -236,7 +244,9 @@ impl SourceLoop for StaticCapsSrc {
 
 #[tokio::test]
 async fn phase3_refixate_restarts_negotiation_with_counter() {
-    let mut src = StaticCapsSrc { proposal: caps_at(640, 480) };
+    let mut src = StaticCapsSrc {
+        proposal: caps_at(640, 480),
+    };
     let counter = caps_at(320, 240);
     let mut snk = RefixateOnceSink::new(counter.clone());
     let clock = ZeroClock;
@@ -284,8 +294,12 @@ impl AsyncElement for AlwaysRefixateSink {
 
 #[tokio::test]
 async fn phase3_refixate_gives_up_after_bounded_attempts() {
-    let mut src = StaticCapsSrc { proposal: caps_at(640, 480) };
-    let mut snk = AlwaysRefixateSink { counter: caps_at(320, 240) };
+    let mut src = StaticCapsSrc {
+        proposal: caps_at(640, 480),
+    };
+    let mut snk = AlwaysRefixateSink {
+        counter: caps_at(320, 240),
+    };
     let clock = ZeroClock;
 
     let err = run_simple_pipeline(&mut src, &mut snk, &clock, 4)
@@ -340,7 +354,10 @@ impl AsyncElement for PickyByWidthSink {
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         let w = match absolute_caps {
-            Caps::RawVideo { width: Dim::Fixed(w), .. } => *w,
+            Caps::RawVideo {
+                width: Dim::Fixed(w),
+                ..
+            } => *w,
             _ => 0,
         };
         self.configures.lock().unwrap().push(w);
@@ -358,7 +375,10 @@ impl AsyncElement for PickyByWidthSink {
         _out: &'a mut dyn OutputSink,
     ) -> Self::ProcessFuture<'a> {
         match &packet {
-            PipelinePacket::CapsChanged(Caps::RawVideo { width: Dim::Fixed(w), .. }) => {
+            PipelinePacket::CapsChanged(Caps::RawVideo {
+                width: Dim::Fixed(w),
+                ..
+            }) => {
                 *self.current_width.lock().unwrap() = *w;
             }
             PipelinePacket::DataFrame(_) => {
@@ -393,7 +413,8 @@ impl SourceLoop for ReconfigurableTestSrc {
     where
         Self: 'a;
 
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 
@@ -410,9 +431,7 @@ impl SourceLoop for ReconfigurableTestSrc {
         match request {
             // For test determinism we accept whatever the sink proposed.
             Reconfigure::Propose(c) => Ok(c),
-            Reconfigure::Renegotiate | Reconfigure::ForceKeyframe => {
-                Err(G2gError::FixationFailed)
-            }
+            Reconfigure::Renegotiate | Reconfigure::ForceKeyframe => Err(G2gError::FixationFailed),
         }
     }
 
@@ -421,29 +440,28 @@ impl SourceLoop for ReconfigurableTestSrc {
             let rejected = self.rejected_proposal.clone();
 
             // 1. Frame under initial caps , sink configured for initial, accepts.
-            out.push(PipelinePacket::DataFrame(make_frame(0)))
-                .await?;
+            out.push(PipelinePacket::DataFrame(make_frame(0))).await?;
 
             // 2. CapsChanged the sink will reject. Runner fires
             //    Reconfigure(Propose(counter)) on this link's reverse
             //    channel. We don't see the signal yet , push N+1 does.
-            out.push(PipelinePacket::CapsChanged(rejected.clone())).await?;
+            out.push(PipelinePacket::CapsChanged(rejected.clone()))
+                .await?;
 
             // 3. Next push observes the Reconfigure. The sink tracks the
             //    current caps via CapsChanged events, so the rejected caps
             //    are what the sink "sees" for this frame. We immediately
             //    handle the reconfigure and emit a fresh CapsChanged the
             //    sink will accept.
-            let outcome = out
-                .push(PipelinePacket::DataFrame(make_frame(1)))
-                .await?;
+            let outcome = out.push(PipelinePacket::DataFrame(make_frame(1))).await?;
             let agreed = match outcome {
                 PushOutcome::Reconfigure(r) => self.reconfigure(r)?,
                 PushOutcome::Accepted => panic!("expected Reconfigure on push N+1"),
                 PushOutcome::Qos(_) => panic!("no QoS signalled in this test"),
                 PushOutcome::Bitrate(_) => panic!("no bitrate signalled in this test"),
             };
-            out.push(PipelinePacket::CapsChanged(agreed.clone())).await?;
+            out.push(PipelinePacket::CapsChanged(agreed.clone()))
+                .await?;
 
             // 4. Frame under agreed caps , sink accepts these.
             out.push(PipelinePacket::DataFrame(make_frame(2))).await?;
@@ -506,7 +524,10 @@ struct IntersectingRecordingSink {
 
 impl IntersectingRecordingSink {
     fn new(supported: Caps) -> Self {
-        Self { supported, configured_caps: Mutex::new(None) }
+        Self {
+            supported,
+            configured_caps: Mutex::new(None),
+        }
     }
 
     fn configured_caps(&self) -> Option<Caps> {
@@ -546,13 +567,19 @@ impl AsyncElement for IntersectingRecordingSink {
 async fn range_negotiation_intersects_then_fixates_to_minimum() {
     let proposal = Caps::RawVideo {
         format: RawVideoFormat::Rgba8,
-        width: Dim::Range { min: 640, max: 1920 },
+        width: Dim::Range {
+            min: 640,
+            max: 1920,
+        },
         height: Dim::Fixed(480),
         framerate: Rate::Fixed(30 << 16),
     };
     let supported = Caps::RawVideo {
         format: RawVideoFormat::Rgba8,
-        width: Dim::Range { min: 1280, max: 3840 },
+        width: Dim::Range {
+            min: 1280,
+            max: 3840,
+        },
         height: Dim::Any,
         framerate: Rate::Any,
     };
@@ -565,7 +592,10 @@ async fn range_negotiation_intersects_then_fixates_to_minimum() {
         .expect("range negotiation must converge");
 
     let got = snk.configured_caps().expect("sink must be configured");
-    assert!(got.is_fixed(), "Phase 2 must hand the sink fully-fixed caps: {got:?}");
+    assert!(
+        got.is_fixed(),
+        "Phase 2 must hand the sink fully-fixed caps: {got:?}"
+    );
     assert_eq!(
         got,
         caps_at(1280, 480),

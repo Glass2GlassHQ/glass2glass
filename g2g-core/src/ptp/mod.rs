@@ -175,8 +175,12 @@ impl PtpServo {
     pub fn sync_exchange(&mut self, t1: TaiNs, t2: RefNs, t3: RefNs, t4: TaiNs) -> ExchangeResult {
         // Widen to i128: the master-minus-reference differences span the whole
         // TAI-vs-monotonic epoch gap (~1.7e18) and must not overflow.
-        let (t1, t2, t3, t4) =
-            (t1.get() as i128, t2.get() as i128, t3.get() as i128, t4.get() as i128);
+        let (t1, t2, t3, t4) = (
+            t1.get() as i128,
+            t2.get() as i128,
+            t3.get() as i128,
+            t4.get() as i128,
+        );
         let master_to_us = t2 - t1;
         let us_to_master = t4 - t3;
         let offset = (master_to_us - us_to_master) / 2;
@@ -267,10 +271,14 @@ impl PtpServo {
         if self.samples < Self::MIN_LOCK_SAMPLES {
             return PtpState::FreeRunning;
         }
-        let stale = self.reference.now_ns().saturating_sub(self.last_update_ns)
-            > Self::HOLDOVER_TIMEOUT_NS;
+        let stale =
+            self.reference.now_ns().saturating_sub(self.last_update_ns) > Self::HOLDOVER_TIMEOUT_NS;
         if stale {
-            return if self.ever_locked { PtpState::Holdover } else { PtpState::FreeRunning };
+            return if self.ever_locked {
+                PtpState::Holdover
+            } else {
+                PtpState::FreeRunning
+            };
         }
         if self.locked {
             PtpState::Locked
@@ -333,7 +341,9 @@ pub struct PtpClock {
 
 impl core::fmt::Debug for PtpClock {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("PtpClock").field("servo", &*self.servo.lock()).finish()
+        f.debug_struct("PtpClock")
+            .field("servo", &*self.servo.lock())
+            .finish()
     }
 }
 
@@ -341,12 +351,16 @@ impl PtpClock {
     /// A PTP clock over `reference` (the monotonic clock the caller timestamps
     /// `t2` / `t3` against), wrapping a fresh [`PtpServo`].
     pub fn new(reference: Arc<dyn PipelineClock + Send + Sync>) -> Self {
-        Self { servo: Mutex::new(PtpServo::new(reference)) }
+        Self {
+            servo: Mutex::new(PtpServo::new(reference)),
+        }
     }
 
     /// Wrap an existing servo (eg one already driven to lock).
     pub fn from_servo(servo: PtpServo) -> Self {
-        Self { servo: Mutex::new(servo) }
+        Self {
+            servo: Mutex::new(servo),
+        }
     }
 
     /// Feed one PTP exchange to the servo. Takes `&self` (interior mutability) so
@@ -441,7 +455,14 @@ mod tests {
 
     /// Drive `count` exchanges at `period` spacing, advancing the reference each
     /// time so staleness stays zero, starting at reference time `start`.
-    fn drive(servo: &mut PtpServo, clk: &ManualClock, start: u64, period: u64, count: u64, slope: f64) -> u64 {
+    fn drive(
+        servo: &mut PtpServo,
+        clk: &ManualClock,
+        start: u64,
+        period: u64,
+        count: u64,
+        slope: f64,
+    ) -> u64 {
         let mut local = start;
         for _ in 0..count {
             clk.set(local);
@@ -469,9 +490,21 @@ mod tests {
         // ~8/s for 3 s.
         let last = drive(&mut servo, &clk, 1_000_000_000, 125_000_000, 24, 1.0);
 
-        assert_eq!(servo.state(), PtpState::Locked, "servo locks onto a steady GM");
-        assert!(servo.error_ns().unsigned_abs() < 1_000, "servo error is sub-us: {}", servo.error_ns());
-        assert!((servo.slope() - 1.0).abs() < 1e-6, "rate ~1.0: {}", servo.slope());
+        assert_eq!(
+            servo.state(),
+            PtpState::Locked,
+            "servo locks onto a steady GM"
+        );
+        assert!(
+            servo.error_ns().unsigned_abs() < 1_000,
+            "servo error is sub-us: {}",
+            servo.error_ns()
+        );
+        assert!(
+            (servo.slope() - 1.0).abs() < 1e-6,
+            "rate ~1.0: {}",
+            servo.slope()
+        );
         // Path delay recovered (~100 us; the tiny drift-over-gap term is < 1 us).
         assert!(
             (servo.mean_path_delay_ns() - DELAY as i64).abs() < 1_000,
@@ -483,7 +516,11 @@ mod tests {
         clk.set(last);
         let est = servo.now_ns() as i128;
         let truth = EPOCH + last as i128;
-        assert!((est - truth).abs() < 100_000, "master estimate within 100 us: off by {}", est - truth);
+        assert!(
+            (est - truth).abs() < 100_000,
+            "master estimate within 100 us: off by {}",
+            est - truth
+        );
     }
 
     #[test]
@@ -506,7 +543,11 @@ mod tests {
         clk.set(probe);
         let est = servo.now_ns() as i128;
         let truth = EPOCH + (slope_true * probe as f64) as i128;
-        assert!((est - truth).abs() < 100_000, "drifted-clock estimate off by {}", est - truth);
+        assert!(
+            (est - truth).abs() < 100_000,
+            "drifted-clock estimate off by {}",
+            est - truth
+        );
     }
 
     #[test]
@@ -528,7 +569,11 @@ mod tests {
             servo.sync_exchange(TaiNs(bad_t1), RefNs(t2), RefNs(t3), TaiNs(t4)),
             ExchangeResult::RejectedOutlier
         );
-        assert_eq!(servo.state(), PtpState::Locked, "one outlier does not break lock");
+        assert_eq!(
+            servo.state(),
+            PtpState::Locked,
+            "one outlier does not break lock"
+        );
         // The estimate is essentially unmoved (fit untouched).
         assert!((servo.now_ns() as i64 - before as i64).abs() < 1_000_000);
     }
@@ -565,18 +610,33 @@ mod tests {
             servo.observe_master(RefNs(local), TaiNs(master as u64));
             local += 62_500_000; // ~16 Hz
         }
-        assert_eq!(servo.state(), PtpState::Locked, "delegate observations lock the servo");
-        assert!((servo.slope() - slope).abs() < 1e-5, "recovered rate {}", servo.slope());
+        assert_eq!(
+            servo.state(),
+            PtpState::Locked,
+            "delegate observations lock the servo"
+        );
+        assert!(
+            (servo.slope() - slope).abs() < 1e-5,
+            "recovered rate {}",
+            servo.slope()
+        );
         // No PTP exchange, so no path-delay measurement.
         assert_eq!(servo.mean_path_delay_ns(), 0);
 
         clk.set(local);
         let est = servo.now_ns() as i128;
         let truth = EPOCH + (slope * local as f64) as i128;
-        assert!((est - truth).abs() < 100_000, "master estimate off by {}", est - truth);
+        assert!(
+            (est - truth).abs() < 100_000,
+            "master estimate off by {}",
+            est - truth
+        );
 
         // Zero master time is rejected as invalid.
-        assert_eq!(servo.observe_master(RefNs(local), TaiNs(0)), ExchangeResult::RejectedInvalid);
+        assert_eq!(
+            servo.observe_master(RefNs(local), TaiNs(0)),
+            ExchangeResult::RejectedInvalid
+        );
     }
 
     #[test]
@@ -603,7 +663,10 @@ mod tests {
         // The candidate's clock is the PTP estimate (TAI), not the raw reference.
         clk.set(local);
         assert_eq!(cand.clock.now_ns(), ptp.now_ns());
-        assert!(cand.clock.now_ns() > EPOCH as u64, "reads TAI, not monotonic");
+        assert!(
+            cand.clock.now_ns() > EPOCH as u64,
+            "reads TAI, not monotonic"
+        );
     }
 
     #[test]
@@ -615,10 +678,18 @@ mod tests {
 
         // No new exchange, but wall time marches past the holdover timeout.
         clk.set(last + PtpServo::HOLDOVER_TIMEOUT_NS + 1);
-        assert_eq!(servo.state(), PtpState::Holdover, "silent GM past timeout -> holdover");
+        assert_eq!(
+            servo.state(),
+            PtpState::Holdover,
+            "silent GM past timeout -> holdover"
+        );
         // Still projects a plausible master time (coasting on the last fit).
         let est = servo.now_ns() as i128;
         let truth = EPOCH + (last + PtpServo::HOLDOVER_TIMEOUT_NS) as i128;
-        assert!((est - truth).abs() < 1_000_000, "holdover still coasts: off by {}", est - truth);
+        assert!(
+            (est - truth).abs() < 1_000_000,
+            "holdover still coasts: off by {}",
+            est - truth
+        );
     }
 }

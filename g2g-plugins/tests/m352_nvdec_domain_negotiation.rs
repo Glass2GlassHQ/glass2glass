@@ -69,7 +69,12 @@ fn split_access_units(bs: &[u8]) -> Vec<Vec<u8>> {
         if bs[i] == 0 && bs[i + 1] == 0 && bs[i + 2] == 1 {
             codes.push((i, i + 3));
             i += 3;
-        } else if i + 4 <= bs.len() && bs[i] == 0 && bs[i + 1] == 0 && bs[i + 2] == 0 && bs[i + 3] == 1 {
+        } else if i + 4 <= bs.len()
+            && bs[i] == 0
+            && bs[i + 1] == 0
+            && bs[i + 2] == 0
+            && bs[i + 3] == 1
+        {
             codes.push((i, i + 4));
             i += 4;
         } else {
@@ -97,7 +102,10 @@ fn split_access_units(bs: &[u8]) -> Vec<Vec<u8>> {
 }
 
 fn fixture_access_units() -> Vec<Vec<u8>> {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/h264_640x480.h264");
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/h264_640x480.h264"
+    );
     let bs = std::fs::read(path).expect("read committed H.264 fixture");
     let aus = split_access_units(&bs);
     assert!(!aus.is_empty(), "no access units in fixture");
@@ -112,7 +120,8 @@ struct H264Replay {
 
 impl SourceLoop for H264Replay {
     type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>;
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 
@@ -131,7 +140,10 @@ impl SourceLoop for H264Replay {
             for au in aus {
                 let frame = Frame {
                     domain: MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
-                    timing: FrameTiming { pts_ns: seq * 33_000_000, ..FrameTiming::default() },
+                    timing: FrameTiming {
+                        pts_ns: seq * 33_000_000,
+                        ..FrameTiming::default()
+                    },
                     sequence: seq,
                     meta: Default::default(),
                 };
@@ -187,20 +199,38 @@ impl AsyncElement for CaptureSink {
 
 fn capture(proposal: AllocationParams) -> (CaptureSink, Arc<Mutex<Vec<MemoryDomainKind>>>) {
     let seen = Arc::new(Mutex::new(Vec::new()));
-    (CaptureSink { proposal, seen: Arc::clone(&seen) }, seen)
+    (
+        CaptureSink {
+            proposal,
+            seen: Arc::clone(&seen),
+        },
+        seen,
+    )
 }
 
 /// A proposal accepting exactly the given domain set, preferring `prefer`.
 fn proposal(prefer: MemoryDomainKind, accepts: DomainSet) -> AllocationParams {
-    AllocationParams { size_bytes: 64, min_buffers: 2, align: 256, domain: prefer, accepts }
+    AllocationParams {
+        size_bytes: 64,
+        min_buffers: 2,
+        align: 256,
+        domain: prefer,
+        accepts,
+    }
 }
 
 fn cuda_only() -> AllocationParams {
-    proposal(MemoryDomainKind::Cuda, DomainSet::only(MemoryDomainKind::Cuda))
+    proposal(
+        MemoryDomainKind::Cuda,
+        DomainSet::only(MemoryDomainKind::Cuda),
+    )
 }
 
 fn system_only() -> AllocationParams {
-    proposal(MemoryDomainKind::System, DomainSet::only(MemoryDomainKind::System))
+    proposal(
+        MemoryDomainKind::System,
+        DomainSet::only(MemoryDomainKind::System),
+    )
 }
 
 fn cuda_or_system() -> AllocationParams {
@@ -226,7 +256,9 @@ fn skip_if_no_gpu(err: &G2gError) -> bool {
 #[tokio::test]
 async fn nvdec_keeps_frames_on_gpu_for_cuda_sink() {
     let mut g: Graph<GraphNode> = Graph::new();
-    let src = g.add_source(GraphNode::source(H264Replay { aus: fixture_access_units() }));
+    let src = g.add_source(GraphNode::source(H264Replay {
+        aus: fixture_access_units(),
+    }));
     let dec = g.add_transform(GraphNode::element(NvDec::new()));
     let (sink, seen) = capture(cuda_only());
     let snk = g.add_sink(GraphNode::element(sink));
@@ -251,7 +283,9 @@ async fn nvdec_keeps_frames_on_gpu_for_cuda_sink() {
 #[tokio::test]
 async fn nvdec_downloads_for_system_sink() {
     let mut g: Graph<GraphNode> = Graph::new();
-    let src = g.add_source(GraphNode::source(H264Replay { aus: fixture_access_units() }));
+    let src = g.add_source(GraphNode::source(H264Replay {
+        aus: fixture_access_units(),
+    }));
     let dec = g.add_transform(GraphNode::element(NvDec::new()));
     let (sink, seen) = capture(system_only());
     let snk = g.add_sink(GraphNode::element(sink));
@@ -277,7 +311,9 @@ async fn nvdec_downloads_for_system_sink() {
 #[tokio::test]
 async fn nvdec_diamond_joins_to_gpu() {
     let mut g: Graph<GraphNode> = Graph::new();
-    let src = g.add_source(GraphNode::source(H264Replay { aus: fixture_access_units() }));
+    let src = g.add_source(GraphNode::source(H264Replay {
+        aus: fixture_access_units(),
+    }));
     let dec = g.add_transform(GraphNode::element(NvDec::new()));
     let tee = g.add_tee(2);
     let (sink_a, seen_a) = capture(cuda_or_system());
@@ -310,7 +346,9 @@ async fn nvdec_diamond_joins_to_gpu() {
 #[tokio::test]
 async fn nvdec_diamond_joins_to_system() {
     let mut g: Graph<GraphNode> = Graph::new();
-    let src = g.add_source(GraphNode::source(H264Replay { aus: fixture_access_units() }));
+    let src = g.add_source(GraphNode::source(H264Replay {
+        aus: fixture_access_units(),
+    }));
     let dec = g.add_transform(GraphNode::element(NvDec::new()));
     let tee = g.add_tee(2);
     let (sink_a, seen_a) = capture(cuda_or_system());

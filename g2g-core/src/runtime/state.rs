@@ -100,10 +100,16 @@ impl core::fmt::Debug for Inner {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let anchor = self.play_anchor.lock().as_ref().map(|(_, a)| a.get());
         f.debug_struct("Inner")
-            .field("state", &PipelineState::from_u8(self.state.load(Ordering::Acquire)))
+            .field(
+                "state",
+                &PipelineState::from_u8(self.state.load(Ordering::Acquire)),
+            )
             .field("live", &self.live.load(Ordering::Acquire))
             .field("prerolled", &self.prerolled.load(Ordering::Acquire))
-            .field("pending_preroll", &self.pending_preroll.load(Ordering::Acquire))
+            .field(
+                "pending_preroll",
+                &self.pending_preroll.load(Ordering::Acquire),
+            )
             .field("play_anchor", &anchor)
             .finish_non_exhaustive()
     }
@@ -245,9 +251,10 @@ impl StateController {
                 // Re-arm the preroll count alongside clearing the latch so a
                 // later `Paused` can re-complete preroll; the previous cycle
                 // drained `pending_preroll` to 0.
-                self.inner
-                    .pending_preroll
-                    .store(self.inner.preroll_target.load(Ordering::Acquire), Ordering::Release);
+                self.inner.pending_preroll.store(
+                    self.inner.preroll_target.load(Ordering::Acquire),
+                    Ordering::Release,
+                );
                 self.inner.prerolled.store(false, Ordering::Release);
             }
             PipelineState::Paused => {}
@@ -288,9 +295,10 @@ impl StateController {
         }
         self.inner.preroll_gen.fetch_add(1, Ordering::AcqRel);
         self.inner.prerolled.store(false, Ordering::Release);
-        self.inner
-            .pending_preroll
-            .store(self.inner.preroll_target.load(Ordering::Acquire), Ordering::Release);
+        self.inner.pending_preroll.store(
+            self.inner.preroll_target.load(Ordering::Acquire),
+            Ordering::Release,
+        );
         // Wake parked flow gates so they re-evaluate against the new generation.
         let mut w = self.inner.wakers.lock();
         for waker in w.drain(..) {
@@ -636,20 +644,31 @@ mod tests {
         sc.request_repreroll();
         assert_eq!(sc.preroll_generation(), 1, "generation advanced");
         assert!(!sc.is_prerolled(), "preroll latch re-armed");
-        assert!(flag.load(Ordering::SeqCst), "request_repreroll woke the held gate");
+        assert!(
+            flag.load(Ordering::SeqCst),
+            "request_repreroll woke the held gate"
+        );
 
         // The arm still holds gen 0, so on re-poll the gate reopens (a stale
         // generation re-prerolls), admitting the post-flush target frame.
         // SAFETY: same pinned gate, re-polled after the wake.
         let pinned = unsafe { Pin::new_unchecked(&mut gate) };
-        assert_eq!(pinned.poll(&mut cx), Poll::Ready(Flow::Go), "stale generation re-prerolls");
+        assert_eq!(
+            pinned.poll(&mut cx),
+            Poll::Ready(Flow::Go),
+            "stale generation re-prerolls"
+        );
 
         // Once the arm has caught up to the new generation and re-prerolled, it
         // holds again (one buffer per generation).
         let mut held = sc.flow_gate(true, 1);
         // SAFETY: pinned to the stack for the poll.
         let pinned = unsafe { Pin::new_unchecked(&mut held) };
-        assert_eq!(pinned.poll(&mut cx), Poll::Pending, "re-prerolled gate holds again");
+        assert_eq!(
+            pinned.poll(&mut cx),
+            Poll::Pending,
+            "re-prerolled gate holds again"
+        );
     }
 
     #[test]
@@ -658,7 +677,11 @@ mod tests {
         // the latch / generation.
         let sc = StateController::new(PipelineState::Playing);
         sc.request_repreroll();
-        assert_eq!(sc.preroll_generation(), 0, "no generation bump while Playing");
+        assert_eq!(
+            sc.preroll_generation(),
+            0,
+            "no generation bump while Playing"
+        );
     }
 
     #[test]
@@ -756,7 +779,11 @@ mod tests {
 
         // The play edge stamps the anchor with the clock reading at that moment.
         sc.set_state(PipelineState::Playing);
-        assert_eq!(anchor.get(), Some(5000), "stamped at the Playing transition");
+        assert_eq!(
+            anchor.get(),
+            Some(5000),
+            "stamped at the Playing transition"
+        );
 
         // A stop clears it so a later Playing re-stamps a fresh epoch.
         sc.set_state(PipelineState::Ready);

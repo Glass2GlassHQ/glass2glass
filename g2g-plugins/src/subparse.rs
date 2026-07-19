@@ -233,8 +233,10 @@ fn parse_cue_styles(css: &str) -> Vec<CueStyleRule> {
         let decl_str = &after[..close];
         rest = &after[close + 1..];
 
-        let selectors: Vec<CueSelector> =
-            sel_str.split(',').filter_map(|s| parse_cue_selector(s.trim())).collect();
+        let selectors: Vec<CueSelector> = sel_str
+            .split(',')
+            .filter_map(|s| parse_cue_selector(s.trim()))
+            .collect();
         if selectors.is_empty() {
             continue;
         }
@@ -250,7 +252,11 @@ fn parse_cue_styles(css: &str) -> Vec<CueStyleRule> {
                 _ => {}
             }
         }
-        rules.push(CueStyleRule { selectors, color, background });
+        rules.push(CueStyleRule {
+            selectors,
+            color,
+            background,
+        });
     }
     rules
 }
@@ -279,13 +285,21 @@ fn apply_cue_style(sheet: &[CueStyleRule], id: Option<&str>, settings: &mut CueS
         }
     };
     for rule in sheet {
-        if rule.selectors.iter().any(|sel| matches!(sel, CueSelector::All)) {
+        if rule
+            .selectors
+            .iter()
+            .any(|sel| matches!(sel, CueSelector::All))
+        {
             apply(rule, settings);
         }
     }
     if let Some(id) = id {
         for rule in sheet {
-            if rule.selectors.iter().any(|sel| matches!(sel, CueSelector::Id(rid) if rid == id)) {
+            if rule
+                .selectors
+                .iter()
+                .any(|sel| matches!(sel, CueSelector::Id(rid) if rid == id))
+            {
                 apply(rule, settings);
             }
         }
@@ -324,7 +338,13 @@ fn parse_css_color(v: &str) -> Option<[u8; 4]> {
     if let Some(rest) = v.strip_prefix("rgba(").or_else(|| v.strip_prefix("rgb(")) {
         let rest = rest.strip_suffix(')')?;
         let mut it = rest.split(',');
-        let mut chan = || it.next()?.trim().parse::<u32>().ok().map(|n| n.min(255) as u8);
+        let mut chan = || {
+            it.next()?
+                .trim()
+                .parse::<u32>()
+                .ok()
+                .map(|n| n.min(255) as u8)
+        };
         let r = chan()?;
         let g = chan()?;
         let b = chan()?;
@@ -427,7 +447,12 @@ impl Default for SsaState {
         // V4+ default column order, used until an explicit `Format:` line
         // overrides it: Layer, Start, End, Style, Name, MarginL, MarginR,
         // MarginV, Effect, Text.
-        Self { in_events: false, i_start: 1, i_end: 2, i_text: 9 }
+        Self {
+            in_events: false,
+            i_start: 1,
+            i_end: 2,
+            i_text: 9,
+        }
     }
 }
 
@@ -468,7 +493,8 @@ fn col_index(cols: &[&str], name: &str) -> Option<usize> {
 /// opening with a multi-byte char never panics.
 fn strip_prefix_ci<'a>(line: &'a str, prefix: &str) -> Option<&'a str> {
     let head = line.get(..prefix.len())?;
-    head.eq_ignore_ascii_case(prefix).then(|| &line[prefix.len()..])
+    head.eq_ignore_ascii_case(prefix)
+        .then(|| &line[prefix.len()..])
 }
 
 /// Parse one `Dialogue:` body into a cue using the resolved column indices. The
@@ -486,7 +512,12 @@ fn parse_ass_dialogue(body: &str, i_start: usize, i_end: usize, i_text: usize) -
     if text.trim().is_empty() {
         return None;
     }
-    Some(Cue { start_ns, end_ns, text, settings: CueSettings::default() })
+    Some(Cue {
+        start_ns,
+        end_ns,
+        text,
+        settings: CueSettings::default(),
+    })
 }
 
 /// Strip ASS override blocks (`{...}`) and turn the `\N` / `\n` line breaks and
@@ -580,7 +611,12 @@ pub fn parse_ttml(input: &str) -> Vec<Cue> {
         };
         let text = ttml_text(body);
         if !text.trim().is_empty() {
-            cues.push(Cue { start_ns, end_ns, text, settings: CueSettings::default() });
+            cues.push(Cue {
+                start_ns,
+                end_ns,
+                text,
+                settings: CueSettings::default(),
+            });
         }
     }
     cues
@@ -600,7 +636,10 @@ fn next_paragraph(input: &str) -> Option<(&str, &str, &str)> {
         let after_tag = &after_lt[gt + 1..];
         // Tag name is up to the first whitespace / '/' ; strip a namespace prefix.
         let name = tag.trim_start_matches('/');
-        let name = name.split([' ', '\t', '\r', '\n', '/']).next().unwrap_or("");
+        let name = name
+            .split([' ', '\t', '\r', '\n', '/'])
+            .next()
+            .unwrap_or("");
         let local = name.rsplit(':').next().unwrap_or(name);
         if local.eq_ignore_ascii_case("p") && !tag.starts_with('/') {
             // Open <p ...>. Self-closing (`<p/>`) has no body.
@@ -641,7 +680,11 @@ fn xml_attr<'a>(attrs: &'a str, name: &str) -> Option<&'a str> {
     while let Some(pos) = attrs[from..].find(name) {
         let at = from + pos;
         let before_ok = at == 0
-            || attrs[..at].chars().next_back().map(|c| c.is_whitespace()).unwrap_or(true);
+            || attrs[..at]
+                .chars()
+                .next_back()
+                .map(|c| c.is_whitespace())
+                .unwrap_or(true);
         let after = attrs[at + name.len()..].trim_start();
         if before_ok {
             if let Some(rest) = after.strip_prefix('=') {
@@ -670,7 +713,10 @@ fn ttml_text(body: &str) -> String {
         let Some(gt) = after.find('>') else { break };
         let tag = &after[..gt];
         let name = tag.trim_start_matches('/');
-        let name = name.split([' ', '\t', '\r', '\n', '/']).next().unwrap_or("");
+        let name = name
+            .split([' ', '\t', '\r', '\n', '/'])
+            .next()
+            .unwrap_or("");
         let local = name.rsplit(':').next().unwrap_or(name);
         if local.eq_ignore_ascii_case("br") {
             // A hard line break: drop a trailing collapse-space first.
@@ -721,7 +767,9 @@ fn decode_entities(s: &str) -> String {
                     "quot" => Some('"'),
                     "apos" => Some('\''),
                     _ if ent.starts_with("#x") || ent.starts_with("#X") => {
-                        u32::from_str_radix(&ent[2..], 16).ok().and_then(char::from_u32)
+                        u32::from_str_radix(&ent[2..], 16)
+                            .ok()
+                            .and_then(char::from_u32)
                     }
                     _ if ent.starts_with('#') => {
                         ent[1..].parse::<u32>().ok().and_then(char::from_u32)
@@ -776,11 +824,17 @@ fn parse_ttml_time(s: &str) -> Option<u64> {
 /// Fractional part of an offset-time as nanoseconds: `0.frac * unit_ns`, computed
 /// in `u128` to avoid overflow, with the fraction capped at 9 digits.
 fn frac_of_unit_ns(frac: &str, unit_ns: u64) -> u64 {
-    let frac: alloc::string::String = frac.chars().take_while(|c| c.is_ascii_digit()).take(9).collect();
+    let frac: alloc::string::String = frac
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .take(9)
+        .collect();
     if frac.is_empty() {
         return 0;
     }
-    let Ok(frac_int) = frac.parse::<u64>() else { return 0 };
+    let Ok(frac_int) = frac.parse::<u64>() else {
+        return 0;
+    };
     let denom = 10u128.pow(frac.len() as u32);
     ((unit_ns as u128 * frac_int as u128) / denom) as u64
 }
@@ -871,7 +925,12 @@ fn block_to_cue(block: &[&str], webvtt: bool) -> Option<Cue> {
     if text.trim().is_empty() {
         return None;
     }
-    Some(Cue { start_ns, end_ns, text, settings })
+    Some(Cue {
+        start_ns,
+        end_ns,
+        text,
+        settings,
+    })
 }
 
 /// Parse a `start --> end [settings...]` timing line into a nanosecond span plus
@@ -1052,15 +1111,25 @@ impl SubParse {
     /// The structured subtitle formats this element parses (its sink pad).
     fn input_alternatives() -> CapsSet {
         CapsSet::from_alternatives(Vec::from([
-            Caps::Text { format: TextFormat::Srt },
-            Caps::Text { format: TextFormat::WebVtt },
-            Caps::Text { format: TextFormat::Ssa },
-            Caps::Text { format: TextFormat::Ttml },
+            Caps::Text {
+                format: TextFormat::Srt,
+            },
+            Caps::Text {
+                format: TextFormat::WebVtt,
+            },
+            Caps::Text {
+                format: TextFormat::Ssa,
+            },
+            Caps::Text {
+                format: TextFormat::Ttml,
+            },
         ]))
     }
 
     fn output_caps() -> Caps {
-        Caps::Text { format: TextFormat::Utf8 }
+        Caps::Text {
+            format: TextFormat::Utf8,
+        }
     }
 
     /// Consume a leading UTF-8 BOM from the buffer the first time enough bytes
@@ -1182,10 +1251,7 @@ impl AsyncElement for SubParse {
         match absolute_caps {
             Caps::Text {
                 format:
-                    format @ (TextFormat::Srt
-                    | TextFormat::WebVtt
-                    | TextFormat::Ssa
-                    | TextFormat::Ttml),
+                    format @ (TextFormat::Srt | TextFormat::WebVtt | TextFormat::Ssa | TextFormat::Ttml),
             } => {
                 self.format = Some(*format);
                 Ok(ConfigureOutcome::Accepted)
@@ -1247,7 +1313,8 @@ impl AsyncElement for SubParse {
             };
             for cue in cues {
                 if !self.caps_emitted {
-                    out.push(PipelinePacket::CapsChanged(Self::output_caps())).await?;
+                    out.push(PipelinePacket::CapsChanged(Self::output_caps()))
+                        .await?;
                     self.caps_emitted = true;
                 }
                 let timing = FrameTiming {
@@ -1265,7 +1332,9 @@ impl AsyncElement for SubParse {
                 // Carry the cue placement as frame-meta so an overlay can honour
                 // WebVTT / SSA positioning (no-op on the ZST baseline).
                 #[cfg(feature = "metadata")]
-                frame.meta.attach(TextCueMeta { settings: cue.settings });
+                frame.meta.attach(TextCueMeta {
+                    settings: cue.settings,
+                });
                 self.sequence += 1;
                 out.push(PipelinePacket::DataFrame(frame)).await?;
             }
@@ -1290,14 +1359,20 @@ mod tests {
     #[test]
     fn deframe_subtitle_block_per_source_format() {
         // S_TEXT/UTF8: the block is the text already.
-        assert_eq!(deframe_subtitle_block("Hello\nworld", TextFormat::Utf8), "Hello\nworld");
+        assert_eq!(
+            deframe_subtitle_block("Hello\nworld", TextFormat::Utf8),
+            "Hello\nworld"
+        );
 
         // S_TEXT/ASS: take the Text field (after 8 commas), strip {...} and \N.
         let ass = "0,0,Default,,0,0,0,,{\\i1}Hello{\\i0}\\Nworld";
         assert_eq!(deframe_subtitle_block(ass, TextFormat::Ssa), "Hello\nworld");
         // A Text field that itself contains commas survives (split into 9 parts).
         let ass_commas = "1,0,Default,,0,0,0,,one, two, three";
-        assert_eq!(deframe_subtitle_block(ass_commas, TextFormat::Ssa), "one, two, three");
+        assert_eq!(
+            deframe_subtitle_block(ass_commas, TextFormat::Ssa),
+            "one, two, three"
+        );
 
         // S_TEXT/WEBVTT: the block is cue text with inline tags, which are stripped.
         assert_eq!(
@@ -1330,7 +1405,10 @@ mod tests {
         // SRT comma, full clock.
         assert_eq!(parse_timestamp("00:00:01,000"), Some(1_000_000_000));
         // WebVTT dot, full clock with millis.
-        assert_eq!(parse_timestamp("01:02:03.500"), Some((3600 + 120 + 3) * 1_000_000_000 + 500_000_000));
+        assert_eq!(
+            parse_timestamp("01:02:03.500"),
+            Some((3600 + 120 + 3) * 1_000_000_000 + 500_000_000)
+        );
         // WebVTT short form (no hours).
         assert_eq!(parse_timestamp("00:04.250"), Some(4_250_000_000));
         // Short fractional digits right-pad to millis.
@@ -1455,7 +1533,10 @@ mod tests {
         assert_eq!(cues.len(), 1, "header and NOTE blocks skipped");
         assert_eq!(cues[0].start_ns, 0);
         assert_eq!(cues[0].end_ns, 2_000_000_000);
-        assert_eq!(cues[0].text, "Italic text", "tags stripped, settings ignored");
+        assert_eq!(
+            cues[0].text, "Italic text",
+            "tags stripped, settings ignored"
+        );
     }
 
     #[test]
@@ -1468,8 +1549,14 @@ mod tests {
 
     #[test]
     fn auto_detects_format() {
-        assert_eq!(parse_auto("WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nhi\n").len(), 1);
-        assert_eq!(parse_auto("1\n00:00:01,000 --> 00:00:02,000\nhi\n").len(), 1);
+        assert_eq!(
+            parse_auto("WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nhi\n").len(),
+            1
+        );
+        assert_eq!(
+            parse_auto("1\n00:00:01,000 --> 00:00:02,000\nhi\n").len(),
+            1
+        );
         assert_eq!(
             parse_auto("[Script Info]\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:01.00,0:00:02.50,Default,,0,0,0,,hi\n").len(),
             1,
@@ -1572,7 +1659,8 @@ mod tests {
     #[test]
     fn ttml_namespace_prefixed_tags() {
         // A `tt:` prefix on the paragraph + break must still match (local name).
-        let doc = r#"<tt:tt><tt:body><tt:p begin="0s" end="1s">hi<tt:br/>there</tt:p></tt:body></tt:tt>"#;
+        let doc =
+            r#"<tt:tt><tt:body><tt:p begin="0s" end="1s">hi<tt:br/>there</tt:p></tt:body></tt:tt>"#;
         let cues = parse_ttml(doc);
         assert_eq!(cues.len(), 1);
         assert_eq!(cues[0].text, "hi\nthere");
@@ -1588,7 +1676,12 @@ mod tests {
 
     #[test]
     fn covers_is_half_open() {
-        let cue = Cue { start_ns: 1000, end_ns: 2000, text: "x".into(), settings: CueSettings::default() };
+        let cue = Cue {
+            start_ns: 1000,
+            end_ns: 2000,
+            text: "x".into(),
+            settings: CueSettings::default(),
+        };
         assert!(!cue.covers(999));
         assert!(cue.covers(1000));
         assert!(cue.covers(1999));
@@ -1628,32 +1721,65 @@ mod tests {
     fn element_negotiates_srt_to_utf8() {
         let el = SubParse::new();
         // Decoder-style: SRT/WebVTT in on the sink, UTF-8 derived on the source.
-        assert_eq!(el.intercept_caps(&Caps::Text { format: TextFormat::Srt }).unwrap(),
-            Caps::Text { format: TextFormat::Srt });
-        assert!(el.intercept_caps(&Caps::Text { format: TextFormat::Utf8 }).is_err());
+        assert_eq!(
+            el.intercept_caps(&Caps::Text {
+                format: TextFormat::Srt
+            })
+            .unwrap(),
+            Caps::Text {
+                format: TextFormat::Srt
+            }
+        );
+        assert!(el
+            .intercept_caps(&Caps::Text {
+                format: TextFormat::Utf8
+            })
+            .is_err());
         let CapsConstraint::DerivedOutput(derive) = el.caps_constraint_as_transform() else {
             panic!("expected DerivedOutput");
         };
-        let out = derive(&Caps::Text { format: TextFormat::WebVtt });
-        assert_eq!(out.alternatives(), &[Caps::Text { format: TextFormat::Utf8 }]);
+        let out = derive(&Caps::Text {
+            format: TextFormat::WebVtt,
+        });
+        assert_eq!(
+            out.alternatives(),
+            &[Caps::Text {
+                format: TextFormat::Utf8
+            }]
+        );
         // SSA and TTML negotiate the same way (also -> Utf8).
         assert_eq!(
-            el.intercept_caps(&Caps::Text { format: TextFormat::Ssa }).unwrap(),
-            Caps::Text { format: TextFormat::Ssa }
+            el.intercept_caps(&Caps::Text {
+                format: TextFormat::Ssa
+            })
+            .unwrap(),
+            Caps::Text {
+                format: TextFormat::Ssa
+            }
         );
         assert_eq!(
-            el.intercept_caps(&Caps::Text { format: TextFormat::Ttml }).unwrap(),
-            Caps::Text { format: TextFormat::Ttml }
+            el.intercept_caps(&Caps::Text {
+                format: TextFormat::Ttml
+            })
+            .unwrap(),
+            Caps::Text {
+                format: TextFormat::Ttml
+            }
         );
     }
 
     #[tokio::test]
     async fn element_parses_ttml_to_timed_utf8() {
         let mut el = SubParse::new();
-        el.configure_pipeline(&Caps::Text { format: TextFormat::Ttml }).expect("accepts TTML");
+        el.configure_pipeline(&Caps::Text {
+            format: TextFormat::Ttml,
+        })
+        .expect("accepts TTML");
 
         let mut sink = RecordingSink::default();
-        el.process(srt_bytes_frame(TTML.as_bytes()), &mut sink).await.unwrap();
+        el.process(srt_bytes_frame(TTML.as_bytes()), &mut sink)
+            .await
+            .unwrap();
         el.process(PipelinePacket::Eos, &mut sink).await.unwrap();
 
         let frames: Vec<&Frame> = sink
@@ -1676,10 +1802,15 @@ mod tests {
     #[tokio::test]
     async fn element_parses_ssa_to_timed_utf8() {
         let mut el = SubParse::new();
-        el.configure_pipeline(&Caps::Text { format: TextFormat::Ssa }).expect("accepts SSA");
+        el.configure_pipeline(&Caps::Text {
+            format: TextFormat::Ssa,
+        })
+        .expect("accepts SSA");
 
         let mut sink = RecordingSink::default();
-        el.process(srt_bytes_frame(ASS.as_bytes()), &mut sink).await.unwrap();
+        el.process(srt_bytes_frame(ASS.as_bytes()), &mut sink)
+            .await
+            .unwrap();
         el.process(PipelinePacket::Eos, &mut sink).await.unwrap();
 
         let frames: Vec<&Frame> = sink
@@ -1704,7 +1835,10 @@ mod tests {
         let doc = "1\n00:00:01,000 --> 00:00:04,000\nHello world\n\n\
                    2\n00:01:02,500 --> 00:01:05,000\nSecond cue\nacross two lines\n";
         let mut el = SubParse::new();
-        el.configure_pipeline(&Caps::Text { format: TextFormat::Srt }).expect("accepts SRT");
+        el.configure_pipeline(&Caps::Text {
+            format: TextFormat::Srt,
+        })
+        .expect("accepts SRT");
 
         let mut sink = RecordingSink::default();
         // Two chunks then EOS, exercising the byte buffer.
@@ -1715,7 +1849,9 @@ mod tests {
 
         assert!(matches!(
             sink.packets.first(),
-            Some(PipelinePacket::CapsChanged(Caps::Text { format: TextFormat::Utf8 }))
+            Some(PipelinePacket::CapsChanged(Caps::Text {
+                format: TextFormat::Utf8
+            }))
         ));
         let frames: Vec<&Frame> = sink
             .packets
@@ -1741,7 +1877,10 @@ mod tests {
         // A complete first cue (terminated by a blank line) then a dangling
         // second cue arrive in one chunk; the complete one streams out at once.
         let mut el = SubParse::new();
-        el.configure_pipeline(&Caps::Text { format: TextFormat::Srt }).unwrap();
+        el.configure_pipeline(&Caps::Text {
+            format: TextFormat::Srt,
+        })
+        .unwrap();
         let mut sink = RecordingSink::default();
 
         el.process(
@@ -1752,7 +1891,10 @@ mod tests {
         .unwrap();
 
         let count = |sink: &RecordingSink| {
-            sink.packets.iter().filter(|p| matches!(p, PipelinePacket::DataFrame(_))).count()
+            sink.packets
+                .iter()
+                .filter(|p| matches!(p, PipelinePacket::DataFrame(_)))
+                .count()
         };
         assert_eq!(count(&sink), 1, "the terminated cue is emitted before Eos");
 
@@ -1766,19 +1908,32 @@ mod tests {
         // A multi-byte char split across the chunk boundary must not corrupt the
         // cue, and the earlier complete cue must still stream immediately.
         let mut el = SubParse::new();
-        el.configure_pipeline(&Caps::Text { format: TextFormat::Srt }).unwrap();
+        el.configure_pipeline(&Caps::Text {
+            format: TextFormat::Srt,
+        })
+        .unwrap();
         let mut sink = RecordingSink::default();
 
         let mut chunk1 = Vec::from(
             &b"1\n00:00:01,000 --> 00:00:02,000\nokay\n\n2\n00:00:03,000 --> 00:00:04,000\ncaf"[..],
         );
         chunk1.push(0xC3); // first byte of 'e-acute', completed in the next chunk
-        el.process(srt_bytes_frame(&chunk1), &mut sink).await.unwrap();
-        let after_chunk1 =
-            sink.packets.iter().filter(|p| matches!(p, PipelinePacket::DataFrame(_))).count();
-        assert_eq!(after_chunk1, 1, "the terminated cue streams before the rest arrives");
+        el.process(srt_bytes_frame(&chunk1), &mut sink)
+            .await
+            .unwrap();
+        let after_chunk1 = sink
+            .packets
+            .iter()
+            .filter(|p| matches!(p, PipelinePacket::DataFrame(_)))
+            .count();
+        assert_eq!(
+            after_chunk1, 1,
+            "the terminated cue streams before the rest arrives"
+        );
 
-        el.process(srt_bytes_frame(&[0xA9, b'\n', b'\n']), &mut sink).await.unwrap();
+        el.process(srt_bytes_frame(&[0xA9, b'\n', b'\n']), &mut sink)
+            .await
+            .unwrap();
         el.process(PipelinePacket::Eos, &mut sink).await.unwrap();
 
         let frames: Vec<&Frame> = sink
@@ -1802,11 +1957,17 @@ mod tests {
     async fn element_attaches_cue_positioning_meta() {
         // WebVTT placement is parsed into CueSettings; the element carries it on
         // the cue frame as TextCueMeta so an overlay recovers it (M406).
-        let doc = "WEBVTT\n\n00:00:00.000 --> 00:00:02.000 position:20% line:80% align:start\nplaced\n\n";
+        let doc =
+            "WEBVTT\n\n00:00:00.000 --> 00:00:02.000 position:20% line:80% align:start\nplaced\n\n";
         let mut el = SubParse::new();
-        el.configure_pipeline(&Caps::Text { format: TextFormat::WebVtt }).unwrap();
+        el.configure_pipeline(&Caps::Text {
+            format: TextFormat::WebVtt,
+        })
+        .unwrap();
         let mut sink = RecordingSink::default();
-        el.process(srt_bytes_frame(doc.as_bytes()), &mut sink).await.unwrap();
+        el.process(srt_bytes_frame(doc.as_bytes()), &mut sink)
+            .await
+            .unwrap();
         el.process(PipelinePacket::Eos, &mut sink).await.unwrap();
 
         let frame = sink
@@ -1817,7 +1978,10 @@ mod tests {
                 _ => None,
             })
             .expect("a cue frame");
-        let meta = frame.meta.get::<TextCueMeta>().expect("cue carries placement meta");
+        let meta = frame
+            .meta
+            .get::<TextCueMeta>()
+            .expect("cue carries placement meta");
         assert_eq!(
             meta.settings,
             CueSettings {

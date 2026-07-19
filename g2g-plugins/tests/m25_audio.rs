@@ -38,7 +38,11 @@ async fn tone_records_to_a_valid_wav_file() {
     assert_eq!(&data[12..16], b"fmt ");
     assert_eq!(&data[36..40], b"data");
     let riff_size = u32::from_le_bytes(data[4..8].try_into().unwrap());
-    assert_eq!(riff_size as usize, data.len() - 8, "riff size patched at Eos");
+    assert_eq!(
+        riff_size as usize,
+        data.len() - 8,
+        "riff size patched at Eos"
+    );
     let channels = u16::from_le_bytes(data[22..24].try_into().unwrap());
     let rate = u32::from_le_bytes(data[24..28].try_into().unwrap());
     let bits = u16::from_le_bytes(data[34..36].try_into().unwrap());

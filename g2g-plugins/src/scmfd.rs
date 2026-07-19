@@ -96,7 +96,10 @@ extern "C" {
 /// remainder (on a short write) without it.
 pub fn send_with_fd(sock: c_int, buf: &[u8], fd: Option<c_int>) -> io::Result<usize> {
     debug_assert!(!buf.is_empty(), "SCM_RIGHTS needs at least one data byte");
-    let mut iov = IoVec { iov_base: buf.as_ptr() as *mut c_void, iov_len: buf.len() };
+    let mut iov = IoVec {
+        iov_base: buf.as_ptr() as *mut c_void,
+        iov_len: buf.len(),
+    };
     let mut cmsg = SingleFdCmsg {
         cmsg_len: CMSG_LEN_ONE_FD,
         cmsg_level: SOL_SOCKET,
@@ -114,7 +117,11 @@ pub fn send_with_fd(sock: c_int, buf: &[u8], fd: Option<c_int>) -> io::Result<us
         } else {
             core::ptr::null_mut()
         },
-        msg_controllen: if fd.is_some() { core::mem::size_of::<SingleFdCmsg>() } else { 0 },
+        msg_controllen: if fd.is_some() {
+            core::mem::size_of::<SingleFdCmsg>()
+        } else {
+            0
+        },
         msg_flags: 0,
     };
     // SAFETY: `msg` points at a live iovec (and cmsg iff an fd is attached); the
@@ -135,7 +142,10 @@ pub fn send_with_fd(sock: c_int, buf: &[u8], fd: Option<c_int>) -> io::Result<us
 /// kernel discard the fd, so the caller must never do a plain read across a
 /// frame boundary.
 pub fn recv_with_fd(sock: c_int, buf: &mut [u8]) -> io::Result<(usize, Option<c_int>)> {
-    let mut iov = IoVec { iov_base: buf.as_mut_ptr() as *mut c_void, iov_len: buf.len() };
+    let mut iov = IoVec {
+        iov_base: buf.as_mut_ptr() as *mut c_void,
+        iov_len: buf.len(),
+    };
     let mut cmsg = SingleFdCmsg {
         cmsg_len: 0,
         cmsg_level: 0,

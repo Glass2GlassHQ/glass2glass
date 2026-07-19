@@ -103,10 +103,16 @@ pub async fn validate_json(reg: &Registry, line: &str) -> Value {
 /// offending link.
 fn failure_json(nf: &NegotiationFailure) -> Value {
     match nf {
-        NegotiationFailure::EmptyLink { upstream, downstream } => {
+        NegotiationFailure::EmptyLink {
+            upstream,
+            downstream,
+        } => {
             json!({ "kind": "empty-link", "upstream": upstream, "downstream": downstream })
         }
-        NegotiationFailure::Unfixable { upstream, downstream } => {
+        NegotiationFailure::Unfixable {
+            upstream,
+            downstream,
+        } => {
             json!({ "kind": "unfixable", "upstream": upstream, "downstream": downstream })
         }
         NegotiationFailure::EndpointShapeMismatch { index } => {
@@ -132,7 +138,9 @@ pub async fn launch_json(reg: &Registry, line: &str, secs: u64) -> Value {
     match tokio::time::timeout(core::time::Duration::from_secs(secs.max(1)), run).await {
         Ok(Ok(stats)) => json!({ "ok": true, "stats": stats_json(&stats) }),
         Ok(Err(e)) => json!({ "ok": false, "stage": "run", "error": format!("{e:?}") }),
-        Err(_) => json!({ "ok": true, "timed_out": true, "note": "deadline reached; forever source has no final stats" }),
+        Err(_) => {
+            json!({ "ok": true, "timed_out": true, "note": "deadline reached; forever source has no final stats" })
+        }
     }
 }
 
@@ -185,7 +193,11 @@ mod tests {
     #[tokio::test]
     async fn validate_ok_reports_per_edge_caps() {
         let reg = default_registry();
-        let ok = validate_json(&reg, "videotestsrc ! videoscale width=64 height=48 ! fakesink").await;
+        let ok = validate_json(
+            &reg,
+            "videotestsrc ! videoscale width=64 height=48 ! fakesink",
+        )
+        .await;
         assert_eq!(ok["ok"], true);
         let edges = ok["edges"].as_array().unwrap();
         assert!(edges.len() >= 2);
@@ -207,11 +219,7 @@ mod tests {
         // Force a negotiation conflict: pin a capsfilter to a format videotestsrc
         // cannot produce so the solver empties that link.
         let reg = default_registry();
-        let bad = validate_json(
-            &reg,
-            "videotestsrc ! audio/x-raw,format=S16LE ! fakesink",
-        )
-        .await;
+        let bad = validate_json(&reg, "videotestsrc ! audio/x-raw,format=S16LE ! fakesink").await;
         assert_eq!(bad["ok"], false);
         // Either the parser rejects the audio caps on a video src, or the solve
         // empties the link; if it reached the solver, the failure is structured.

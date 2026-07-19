@@ -111,7 +111,9 @@ impl DemuxSeek {
                 };
                 upstream.seek(Seek::flush_to(offset));
                 self.keep_state = keep;
-                self.phase = Phase::AwaitingFlush { target_ns: seek.start };
+                self.phase = Phase::AwaitingFlush {
+                    target_ns: seek.start,
+                };
                 true
             }
             _ => false,
@@ -212,9 +214,21 @@ mod tests {
         // The source's flush arrives: reset, then discard until a keyframe >= 5000.
         assert!(s.on_flush());
         assert!(!s.dropping_input());
-        assert_eq!(s.admit(0, true), Admit::Drop, "keyframe before target: drop");
-        assert_eq!(s.admit(6_000, false), Admit::Drop, "after target but not a keyframe: drop");
-        assert_eq!(s.admit(8_000, true), Admit::Resume(8_000), "first keyframe >= target resumes");
+        assert_eq!(
+            s.admit(0, true),
+            Admit::Drop,
+            "keyframe before target: drop"
+        );
+        assert_eq!(
+            s.admit(6_000, false),
+            Admit::Drop,
+            "after target but not a keyframe: drop"
+        );
+        assert_eq!(
+            s.admit(8_000, true),
+            Admit::Resume(8_000),
+            "first keyframe >= target resumes"
+        );
         // Back to idle.
         assert_eq!(s.admit(9_000, false), Admit::Emit);
     }

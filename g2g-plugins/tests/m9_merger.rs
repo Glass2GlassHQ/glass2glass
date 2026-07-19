@@ -17,7 +17,7 @@ use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_fanin_sink, DynSourceLoop, SourceLoop};
 use g2g_core::{
-    AsyncElement, Caps, ConfigureOutcome, Dim, G2gError, Merger, MemoryDomain, OutputSink,
+    AsyncElement, Caps, ConfigureOutcome, Dim, G2gError, MemoryDomain, Merger, OutputSink,
     PipelineClock, PipelinePacket, Rate, RawVideoFormat,
 };
 use g2g_plugins::fakesink::FakeSink;
@@ -62,7 +62,8 @@ impl SourceLoop for BranchSrc {
     where
         Self: 'a;
 
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 
@@ -86,7 +87,8 @@ impl SourceLoop for BranchSrc {
                 gate.notified().await;
             }
             for i in 0..count {
-                out.push(PipelinePacket::DataFrame(make_frame(start + i))).await?;
+                out.push(PipelinePacket::DataFrame(make_frame(start + i)))
+                    .await?;
             }
             out.push(PipelinePacket::Eos).await?;
             Ok(count)
@@ -106,7 +108,13 @@ struct SignalSink {
 
 impl SignalSink {
     fn new(signal_at: u64, tx: oneshot::Sender<()>) -> Self {
-        Self { received: 0, last_seq: None, eos: false, signal_at, tx: Some(tx) }
+        Self {
+            received: 0,
+            last_seq: None,
+            eos: false,
+            signal_at,
+            tx: Some(tx),
+        }
     }
 }
 
@@ -140,7 +148,8 @@ impl AsyncElement for SignalSink {
                 }
             }
             PipelinePacket::Eos => self.eos = true,
-            PipelinePacket::CapsChanged(_) | PipelinePacket::Flush | PipelinePacket::Segment(_) => {}
+            PipelinePacket::CapsChanged(_) | PipelinePacket::Flush | PipelinePacket::Segment(_) => {
+            }
             _ => {}
         }
         Box::pin(async { Ok(()) })
@@ -150,8 +159,18 @@ impl AsyncElement for SignalSink {
 #[tokio::test]
 async fn merger_forwards_selected_input_and_discards_others() {
     let mut merger = Merger::new(2); // selected = 0
-    let mut a = BranchSrc { start_seq: 0, count: 3, park: None, configured: false };
-    let mut b = BranchSrc { start_seq: 100, count: 2, park: None, configured: false };
+    let mut a = BranchSrc {
+        start_seq: 0,
+        count: 3,
+        park: None,
+        configured: false,
+    };
+    let mut b = BranchSrc {
+        start_seq: 100,
+        count: 2,
+        park: None,
+        configured: false,
+    };
     let mut snk = FakeSink::new();
     let clock = ZeroClock;
 
@@ -163,7 +182,10 @@ async fn merger_forwards_selected_input_and_discards_others() {
     };
 
     assert_eq!(stats.frames_emitted, 5, "both branches produced (3 + 2)");
-    assert_eq!(stats.frames_consumed, 3, "only input 0 forwarded; input 1 discarded");
+    assert_eq!(
+        stats.frames_consumed, 3,
+        "only input 0 forwarded; input 1 discarded"
+    );
     assert_eq!(snk.received(), 3);
     assert_eq!(snk.last_sequence(), Some(2));
     assert!(snk.eos_seen(), "single merged EOS after both inputs ended");
@@ -178,13 +200,24 @@ async fn merger_switched_mid_stream_cuts_over_inputs() {
 
     // A runs free (input 0, frames 0,1); B parks until the switch (input 1,
     // frames 2,3).
-    let mut a = BranchSrc { start_seq: 0, count: 2, park: None, configured: false };
-    let mut b = BranchSrc { start_seq: 2, count: 2, park: Some(release.clone()), configured: false };
+    let mut a = BranchSrc {
+        start_seq: 0,
+        count: 2,
+        park: None,
+        configured: false,
+    };
+    let mut b = BranchSrc {
+        start_seq: 2,
+        count: 2,
+        park: Some(release.clone()),
+        configured: false,
+    };
     let mut snk = SignalSink::new(2, tx);
     let clock = ZeroClock;
 
     let driver = async move {
-        rx.await.expect("sink must signal after input 0's two frames");
+        rx.await
+            .expect("sink must signal after input 0's two frames");
         merger_handle.select(1);
         release.notify_one();
     };
@@ -198,8 +231,15 @@ async fn merger_switched_mid_stream_cuts_over_inputs() {
     let stats = res.expect("fan-in should complete");
 
     assert_eq!(stats.frames_emitted, 4);
-    assert_eq!(stats.frames_consumed, 4, "input 0 then input 1 both forwarded");
+    assert_eq!(
+        stats.frames_consumed, 4,
+        "input 0 then input 1 both forwarded"
+    );
     assert_eq!(snk.received, 4);
-    assert_eq!(snk.last_seq, Some(3), "branch B's frames followed branch A's");
+    assert_eq!(
+        snk.last_seq,
+        Some(3),
+        "branch B's frames followed branch A's"
+    );
     assert!(snk.eos, "single merged EOS after both inputs ended");
 }

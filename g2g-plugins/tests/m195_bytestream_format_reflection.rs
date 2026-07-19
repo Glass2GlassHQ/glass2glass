@@ -56,7 +56,11 @@ fn filesrc_auto_is_unknown_until_runtime() {
     // `auto` sniffs the header at run time, so the container is not known
     // synchronously: the parser falls back to the declared default.
     let fs = filesrc_with_format("auto");
-    assert_eq!(SourceLoop::configured_output_caps(&fs), None, "auto needs a run-time sniff");
+    assert_eq!(
+        SourceLoop::configured_output_caps(&fs),
+        None,
+        "auto needs a run-time sniff"
+    );
 }
 
 #[test]
@@ -101,7 +105,10 @@ fn registry_with_vp9_stub() -> Registry {
     };
     reg.register(ElementFactory::new(
         "vp9stub",
-        Vec::from([PadTemplate::sink(CapsSet::one(vp9)), PadTemplate::source(CapsSet::one(raw))]),
+        Vec::from([
+            PadTemplate::sink(CapsSet::one(vp9)),
+            PadTemplate::source(CapsSet::one(raw)),
+        ]),
         |_| Box::new(IdentityTransform::new()),
     ));
     reg.register_launch(g2g_core::runtime::LaunchFactory::new(
@@ -121,7 +128,11 @@ fn decodebin_uses_the_reflected_container() {
     // with only a VP9 stub the chain would not reach raw, so the parse would fail.
     let line = "filesrc bytestream-format=matroska ! decodebin ! fakesink";
     let graph = parse_launch(&reg, line).unwrap_or_else(|e| panic!("{line:?} parse: {e}"));
-    assert_eq!(graph.edges().len(), 3, "matroska decode chain: demux + decoder");
+    assert_eq!(
+        graph.edges().len(),
+        3,
+        "matroska decode chain: demux + decoder"
+    );
 }
 
 // The contrast that nails it down: without the property, filesrc's MPEG-TS

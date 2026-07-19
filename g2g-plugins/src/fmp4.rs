@@ -126,7 +126,11 @@ pub(crate) fn parse_header(data: &[u8]) -> Result<Header, G2gError> {
             return Err(G2gError::CapsMismatch);
         }
         // The VOL header is the single config blob (empty if carried in-band).
-        let sets = if dsi.is_empty() { Vec::new() } else { Vec::from([dsi]) };
+        let sets = if dsi.is_empty() {
+            Vec::new()
+        } else {
+            Vec::from([dsi])
+        };
         (VideoCodec::Mpeg4Part2, sets, None)
     } else if let Some(encv) = find_box(entries, b"encv") {
         let children = encv.get(78..).ok_or(G2gError::CapsMismatch)?;
@@ -150,7 +154,15 @@ pub(crate) fn parse_header(data: &[u8]) -> Result<Header, G2gError> {
         return Err(G2gError::CapsMismatch);
     };
 
-    Ok(Header { codec, width, height, timescale, duration_ns, param_sets, cenc })
+    Ok(Header {
+        codec,
+        width,
+        height,
+        timescale,
+        duration_ns,
+        param_sets,
+        cenc,
+    })
 }
 
 /// What one track carries: a video elementary stream (codec + geometry +
@@ -160,14 +172,27 @@ pub(crate) fn parse_header(data: &[u8]) -> Result<Header, G2gError> {
 /// (encryption stays single-track via [`parse_header`]).
 #[derive(Debug, Clone)]
 pub(crate) enum TrackKind {
-    Video { codec: VideoCodec, width: u32, height: u32, param_sets: Vec<Vec<u8>> },
-    Audio { format: AudioFormat, channels: u8, sample_rate: u32, asc: Vec<u8> },
+    Video {
+        codec: VideoCodec,
+        width: u32,
+        height: u32,
+        param_sets: Vec<Vec<u8>>,
+    },
+    Audio {
+        format: AudioFormat,
+        channels: u8,
+        sample_rate: u32,
+        asc: Vec<u8>,
+    },
     /// A timed-text subtitle track. The container carries the per-cue timing
     /// (sample PTS + duration); `format` names the elementary cue payload's syntax
     /// downstream, and `sample` the on-disk sample-entry framing (which selects
     /// de-framing): `tx3g` / `wvtt` cues are plain UTF-8 ([`TextFormat::Utf8`]),
     /// `stpp` samples are TTML documents ([`TextFormat::Ttml`]).
-    Text { format: TextFormat, sample: TextSampleFormat },
+    Text {
+        format: TextFormat,
+        sample: TextSampleFormat,
+    },
 }
 
 /// The on-disk timed-text sample format an MP4 text `trak` stores. Distinct from
@@ -264,7 +289,12 @@ fn parse_trak(trak: &[u8]) -> Result<Option<TrackHeader>, G2gError> {
         },
         _ => return Ok(None), // hint / metadata / unknown handler: not forwarded
     };
-    Ok(Some(TrackHeader { track_id, timescale, kind, cenc }))
+    Ok(Some(TrackHeader {
+        track_id,
+        timescale,
+        kind,
+        cenc,
+    }))
 }
 
 /// Read a video sample entry (`avc1` / `hvc1` / `hev1`, or the encrypted `encv`)
@@ -296,7 +326,11 @@ fn parse_video_entry(
             return Err(G2gError::CapsMismatch);
         }
         // The VOL header is the single config blob (empty if carried in-band).
-        let sets = if dsi.is_empty() { Vec::new() } else { Vec::from([dsi]) };
+        let sets = if dsi.is_empty() {
+            Vec::new()
+        } else {
+            Vec::from([dsi])
+        };
         (VideoCodec::Mpeg4Part2, sets, None)
     } else if let Some(encv) = find_box(entries, b"encv") {
         let children = encv.get(78..).ok_or(G2gError::CapsMismatch)?;
@@ -319,7 +353,15 @@ fn parse_video_entry(
     } else {
         return Err(G2gError::CapsMismatch);
     };
-    Ok((TrackKind::Video { codec, width, height, param_sets }, cenc))
+    Ok((
+        TrackKind::Video {
+            codec,
+            width,
+            height,
+            param_sets,
+        },
+        cenc,
+    ))
 }
 
 /// Read an AAC audio sample entry (`mp4a`/`esds`, or the encrypted `enca`) into a
@@ -340,7 +382,11 @@ fn parse_audio_entry(
     };
     // AudioSampleEntry: channelcount at offset 16, then 28 bytes before the esds.
     let channels = u16::from_be_bytes(
-        entry.get(16..18).ok_or(G2gError::CapsMismatch)?.try_into().expect("2 bytes"),
+        entry
+            .get(16..18)
+            .ok_or(G2gError::CapsMismatch)?
+            .try_into()
+            .expect("2 bytes"),
     ) as u8;
     if channels == 0 {
         return Err(G2gError::CapsMismatch);
@@ -348,7 +394,15 @@ fn parse_audio_entry(
     let esds = find_box(entry.get(28..).ok_or(G2gError::CapsMismatch)?, b"esds")
         .ok_or(G2gError::CapsMismatch)?;
     let asc = parse_esds(esds)?;
-    Ok((TrackKind::Audio { format: AudioFormat::Aac, channels, sample_rate: timescale, asc }, cenc))
+    Ok((
+        TrackKind::Audio {
+            format: AudioFormat::Aac,
+            channels,
+            sample_rate: timescale,
+            asc,
+        },
+        cenc,
+    ))
 }
 
 /// Recognize a timed-text sample entry and map it to the [`TrackKind::Text`] the
@@ -357,11 +411,20 @@ fn parse_audio_entry(
 /// An unrecognized text codec declines (the track is skipped, not an error).
 fn parse_text_entry(entries: &[u8]) -> Option<TrackKind> {
     if find_box(entries, b"tx3g").is_some() {
-        Some(TrackKind::Text { format: TextFormat::Utf8, sample: TextSampleFormat::Tx3g })
+        Some(TrackKind::Text {
+            format: TextFormat::Utf8,
+            sample: TextSampleFormat::Tx3g,
+        })
     } else if find_box(entries, b"wvtt").is_some() {
-        Some(TrackKind::Text { format: TextFormat::Utf8, sample: TextSampleFormat::Wvtt })
+        Some(TrackKind::Text {
+            format: TextFormat::Utf8,
+            sample: TextSampleFormat::Wvtt,
+        })
     } else if find_box(entries, b"stpp").is_some() {
-        Some(TrackKind::Text { format: TextFormat::Ttml, sample: TextSampleFormat::Stpp })
+        Some(TrackKind::Text {
+            format: TextFormat::Ttml,
+            sample: TextSampleFormat::Stpp,
+        })
     } else {
         None
     }
@@ -373,10 +436,15 @@ fn parse_text_entry(entries: &[u8]) -> Option<TrackKind> {
 /// an empty string, so a downstream overlay clears. The length is untrusted: a
 /// prefix longer than the sample yields an empty cue rather than panicking.
 fn deframe_tx3g(raw: &[u8]) -> Vec<u8> {
-    let Some(len) = raw.get(0..2).map(|b| u16::from_be_bytes([b[0], b[1]]) as usize) else {
+    let Some(len) = raw
+        .get(0..2)
+        .map(|b| u16::from_be_bytes([b[0], b[1]]) as usize)
+    else {
         return Vec::new();
     };
-    raw.get(2..2usize.saturating_add(len)).map(<[u8]>::to_vec).unwrap_or_default()
+    raw.get(2..2usize.saturating_add(len))
+        .map(<[u8]>::to_vec)
+        .unwrap_or_default()
 }
 
 /// Strip a WebVTT-in-MP4 (`wvtt`) sample to its UTF-8 cue text (ISO 14496-30). A
@@ -391,7 +459,8 @@ fn deframe_wvtt(raw: &[u8]) -> Vec<u8> {
     let mut out: Vec<u8> = Vec::new();
     let mut off = 0usize;
     while off.saturating_add(8) <= raw.len() {
-        let size = u32::from_be_bytes([raw[off], raw[off + 1], raw[off + 2], raw[off + 3]]) as usize;
+        let size =
+            u32::from_be_bytes([raw[off], raw[off + 1], raw[off + 2], raw[off + 3]]) as usize;
         if size < 8 || off.saturating_add(size) > raw.len() {
             break;
         }
@@ -488,7 +557,9 @@ pub(crate) fn parse_fragments_multi(
                 };
                 let mut at = 0usize;
                 for (i, (size, pts_ns)) in tagged.iter().enumerate() {
-                    let raw = payload.get(at..at + *size as usize).ok_or(G2gError::CapsMismatch)?;
+                    let raw = payload
+                        .get(at..at + *size as usize)
+                        .ok_or(G2gError::CapsMismatch)?;
                     at += *size as usize;
                     // Decrypt an encrypted track's sample in place before de-framing.
                     let owned;
@@ -524,7 +595,12 @@ pub(crate) fn parse_fragments_multi(
                     };
                     out.push((
                         track_id,
-                        Sample { annexb, pts_ns: *pts_ns, duration_ns: durations[i], keyframe },
+                        Sample {
+                            annexb,
+                            pts_ns: *pts_ns,
+                            duration_ns: durations[i],
+                            keyframe,
+                        },
                     ));
                 }
             }
@@ -562,16 +638,26 @@ fn parse_cenc(sinf: &[u8]) -> Result<CencDefaults, G2gError> {
     }
     let constant_iv = if is_protected {
         let size = *tenc.get(24).ok_or(G2gError::CapsMismatch)? as usize;
-        tenc.get(25..25 + size).ok_or(G2gError::CapsMismatch)?.to_vec()
+        tenc.get(25..25 + size)
+            .ok_or(G2gError::CapsMismatch)?
+            .to_vec()
     } else {
         Vec::new()
     };
-    Ok(CencDefaults { crypt_byte_block, skip_byte_block, per_sample_iv_size, constant_iv })
+    Ok(CencDefaults {
+        crypt_byte_block,
+        skip_byte_block,
+        per_sample_iv_size,
+        constant_iv,
+    })
 }
 
 /// Parse a `senc` box into per-sample subsample maps (cbcs: no per-sample IV).
 /// An empty map for a sample means the whole sample is one protected range.
-pub(crate) fn parse_senc(senc: &[u8], per_sample_iv_size: u8) -> Result<Vec<Vec<Subsample>>, G2gError> {
+pub(crate) fn parse_senc(
+    senc: &[u8],
+    per_sample_iv_size: u8,
+) -> Result<Vec<Vec<Subsample>>, G2gError> {
     let flags = be32(senc, 0)? & 0x00FF_FFFF;
     let has_subsamples = flags & 0x2 != 0;
     let count = be32(senc, 4)? as usize;
@@ -589,12 +675,18 @@ pub(crate) fn parse_senc(senc: &[u8], per_sample_iv_size: u8) -> Result<Vec<Vec<
         let mut subs = Vec::new();
         if has_subsamples {
             let sub_count = u16::from_be_bytes(
-                senc.get(at..at + 2).ok_or(G2gError::CapsMismatch)?.try_into().expect("2 bytes"),
+                senc.get(at..at + 2)
+                    .ok_or(G2gError::CapsMismatch)?
+                    .try_into()
+                    .expect("2 bytes"),
             ) as usize;
             at += 2;
             for _ in 0..sub_count {
                 let clear = u16::from_be_bytes(
-                    senc.get(at..at + 2).ok_or(G2gError::CapsMismatch)?.try_into().expect("2 bytes"),
+                    senc.get(at..at + 2)
+                        .ok_or(G2gError::CapsMismatch)?
+                        .try_into()
+                        .expect("2 bytes"),
                 ) as u32;
                 let protected = be32(senc, at + 2)?;
                 at += 6;
@@ -617,12 +709,18 @@ pub(crate) fn parse_hvcc(hvcc: &[u8]) -> Result<Vec<Vec<u8>>, G2gError> {
         // array header byte: array_completeness | reserved | NAL_unit_type.
         at += 1;
         let num_nalus = u16::from_be_bytes(
-            hvcc.get(at..at + 2).ok_or(G2gError::CapsMismatch)?.try_into().expect("2 bytes"),
+            hvcc.get(at..at + 2)
+                .ok_or(G2gError::CapsMismatch)?
+                .try_into()
+                .expect("2 bytes"),
         );
         at += 2;
         for _ in 0..num_nalus {
             let len = u16::from_be_bytes(
-                hvcc.get(at..at + 2).ok_or(G2gError::CapsMismatch)?.try_into().expect("2 bytes"),
+                hvcc.get(at..at + 2)
+                    .ok_or(G2gError::CapsMismatch)?
+                    .try_into()
+                    .expect("2 bytes"),
             ) as usize;
             at += 2;
             let nalu = hvcc.get(at..at + len).ok_or(G2gError::CapsMismatch)?;
@@ -698,7 +796,9 @@ pub(crate) fn parse_fragments(
                 };
                 let mut at = 0usize;
                 for (i, (size, pts_ns)) in tagged.iter().enumerate() {
-                    let raw = payload.get(at..at + *size as usize).ok_or(G2gError::CapsMismatch)?;
+                    let raw = payload
+                        .get(at..at + *size as usize)
+                        .ok_or(G2gError::CapsMismatch)?;
                     let annexb = if cenc.is_some() {
                         // Encrypted: decrypt the sample in place, then de-frame.
                         let decrypt = decrypt.as_deref_mut().ok_or(G2gError::CapsMismatch)?;
@@ -774,7 +874,10 @@ impl SampleFraming {
         match kind {
             // MPEG-4 Part 2 samples are raw elementary stream (start codes), like
             // the single-track case in [`parse_progressive`]; H.264/H.265 are AVCC.
-            TrackKind::Video { codec: VideoCodec::Mpeg4Part2, .. } => SampleFraming::PassThrough,
+            TrackKind::Video {
+                codec: VideoCodec::Mpeg4Part2,
+                ..
+            } => SampleFraming::PassThrough,
             TrackKind::Video { .. } => SampleFraming::Video,
             TrackKind::Audio { .. } => SampleFraming::PassThrough,
             TrackKind::Text { sample, .. } => Self::of_text(*sample),
@@ -818,7 +921,9 @@ fn parse_progressive_track(
     let sizes: Vec<u32> = if default_size != 0 {
         alloc::vec![default_size; sample_count]
     } else {
-        (0..sample_count).map(|i| be32(stsz, 12 + i * 4)).collect::<Result<_, _>>()?
+        (0..sample_count)
+            .map(|i| be32(stsz, 12 + i * 4))
+            .collect::<Result<_, _>>()?
     };
 
     // stts: decode durations, run-length encoded, expanded to one per sample.
@@ -840,7 +945,11 @@ fn parse_progressive_track(
             for e in 0..be32(ctts, 4)? as usize {
                 let cnt = be32(ctts, 8 + e * 8)? as usize;
                 let raw = be32(ctts, 12 + e * 8)?;
-                let off = if signed { raw as i32 as i64 } else { raw as i64 };
+                let off = if signed {
+                    raw as i32 as i64
+                } else {
+                    raw as i64
+                };
                 let target = out.len().saturating_add(cnt).min(sample_count);
                 out.resize(target, off);
             }
@@ -908,9 +1017,11 @@ fn parse_progressive_track(
     // Short-circuit on the first out-of-range entry (like stco/stsz) so a bogus
     // count fails loud instead of spinning the full untrusted range.
     let sync: Option<Vec<u32>> = match find_box(stbl, b"stss") {
-        Some(stss) => {
-            Some((0..be32(stss, 4)? as usize).map(|i| be32(stss, 8 + i * 4)).collect::<Result<_, _>>()?)
-        }
+        Some(stss) => Some(
+            (0..be32(stss, 4)? as usize)
+                .map(|i| be32(stss, 8 + i * 4))
+                .collect::<Result<_, _>>()?,
+        ),
         None => None,
     };
 
@@ -921,7 +1032,9 @@ fn parse_progressive_track(
         // `off` comes from an untrusted co64/stco chunk offset, so bound the end
         // with checked arithmetic (a u64 offset near usize::MAX would otherwise
         // overflow the `off + size` add and panic in debug).
-        let end = off.checked_add(sizes[i] as usize).ok_or(G2gError::CapsMismatch)?;
+        let end = off
+            .checked_add(sizes[i] as usize)
+            .ok_or(G2gError::CapsMismatch)?;
         let raw = data.get(off..end).ok_or(G2gError::CapsMismatch)?;
         let pts = (dts as i64).saturating_add(ctts_offsets[i]).max(0) as u64;
         let keyframe = match &sync {
@@ -973,12 +1086,15 @@ pub(crate) fn parse_progressive_multi(
 
 /// The `trak` box (payload) in `moov` whose `tkhd` carries `track_id`, or `None`.
 fn find_trak_by_id(moov: &[u8], track_id: u32) -> Option<&[u8]> {
-    boxes(moov).filter(|(k, _)| *k == b"trak").map(|(_, t)| t).find(|trak| {
-        find_box(trak, b"tkhd")
-            .filter(|tkhd| tkhd.first() == Some(&0))
-            .and_then(|tkhd| be32(tkhd, 12).ok())
-            == Some(track_id)
-    })
+    boxes(moov)
+        .filter(|(k, _)| *k == b"trak")
+        .map(|(_, t)| t)
+        .find(|trak| {
+            find_box(trak, b"tkhd")
+                .filter(|tkhd| tkhd.first() == Some(&0))
+                .and_then(|tkhd| be32(tkhd, 12).ok())
+                == Some(track_id)
+        })
 }
 
 /// `trun` (v0 or v1) with explicit sample sizes; returns (sizes, durations) with
@@ -1105,10 +1221,22 @@ mod tests {
 
     #[test]
     fn sps_detection_reads_the_first_nal_type() {
-        assert!(starts_with_param_set(&[0, 0, 0, 1, 0x67, 0xAA], VideoCodec::H264));
-        assert!(!starts_with_param_set(&[0, 0, 0, 1, 0x65, 0xAA], VideoCodec::H264));
-        assert!(starts_with_param_set(&[0, 0, 0, 1, 0x40, 0x01], VideoCodec::H265));
-        assert!(!starts_with_param_set(&[0, 0, 0, 1, 0x26, 0x01], VideoCodec::H265));
+        assert!(starts_with_param_set(
+            &[0, 0, 0, 1, 0x67, 0xAA],
+            VideoCodec::H264
+        ));
+        assert!(!starts_with_param_set(
+            &[0, 0, 0, 1, 0x65, 0xAA],
+            VideoCodec::H264
+        ));
+        assert!(starts_with_param_set(
+            &[0, 0, 0, 1, 0x40, 0x01],
+            VideoCodec::H265
+        ));
+        assert!(!starts_with_param_set(
+            &[0, 0, 0, 1, 0x26, 0x01],
+            VideoCodec::H265
+        ));
     }
 
     #[test]
@@ -1292,9 +1420,16 @@ mod tests {
         assert_eq!(header.codec, VideoCodec::Mpeg4Part2);
         assert_eq!(header.width, 320);
         assert_eq!(header.height, 240);
-        assert_eq!(header.param_sets, vec![vol.to_vec()], "VOL header is the config");
+        assert_eq!(
+            header.param_sets,
+            vec![vol.to_vec()],
+            "VOL header is the config"
+        );
 
-        assert!(parse_header(&build(0x21)).is_err(), "non-Visual objectTypeIndication rejected");
+        assert!(
+            parse_header(&build(0x21)).is_err(),
+            "non-Visual objectTypeIndication rejected"
+        );
     }
 
     /// MPEG-4 Part 2 config framing differs from H.264/H.265: the VOL header
@@ -1307,15 +1442,29 @@ mod tests {
         let frame: Vec<u8> = vec![0x00, 0x00, 0x01, 0xB6, 0x00]; // I-VOP
 
         let out = prepend_param_sets(&frame, core::slice::from_ref(&vol), VideoCodec::Mpeg4Part2);
-        assert_eq!(out, [vol.clone(), frame.clone()].concat(), "VOL prepended verbatim");
+        assert_eq!(
+            out,
+            [vol.clone(), frame.clone()].concat(),
+            "VOL prepended verbatim"
+        );
 
         // H.264 param sets still get a 4-byte start code injected.
         let sps: Vec<u8> = vec![0x67, 0x42];
         let h264 = prepend_param_sets(&frame, core::slice::from_ref(&sps), VideoCodec::H264);
-        assert_eq!(h264[..4], [0, 0, 0, 1], "H.264 set gets an Annex-B start code");
+        assert_eq!(
+            h264[..4],
+            [0, 0, 0, 1],
+            "H.264 set gets an Annex-B start code"
+        );
 
-        assert!(starts_with_param_set(&vol, VideoCodec::Mpeg4Part2), "VOS start code detected");
-        assert!(!starts_with_param_set(&frame, VideoCodec::Mpeg4Part2), "an I-VOP is not config");
+        assert!(
+            starts_with_param_set(&vol, VideoCodec::Mpeg4Part2),
+            "VOS start code detected"
+        );
+        assert!(
+            !starts_with_param_set(&frame, VideoCodec::Mpeg4Part2),
+            "an I-VOP is not config"
+        );
     }
 
     /// A two-track fragmented file (an H.264 `vide` trak + an AAC `soun` trak,
@@ -1428,7 +1577,10 @@ mod tests {
             full_box(b"trun", 0, 0x000301, &p) // data-offset | duration | size
         };
         let moof = |track_id: u32, dur: u32, size: u32| {
-            let traf = mp4_box(b"traf", &[tfhd(track_id), tfdt(0), trun(dur, size)].concat());
+            let traf = mp4_box(
+                b"traf",
+                &[tfhd(track_id), tfdt(0), trun(dur, size)].concat(),
+            );
             mp4_box(b"moof", &traf)
         };
 
@@ -1448,7 +1600,12 @@ mod tests {
         assert_eq!(tracks.len(), 2);
         assert_eq!(tracks[0].track_id, 1);
         match &tracks[0].kind {
-            TrackKind::Video { codec, width, height, param_sets } => {
+            TrackKind::Video {
+                codec,
+                width,
+                height,
+                param_sets,
+            } => {
                 assert_eq!(*codec, VideoCodec::H264);
                 assert_eq!((*width, *height), (320, 240));
                 assert_eq!(param_sets, &alloc::vec![sps.to_vec(), pps.to_vec()]);
@@ -1457,7 +1614,12 @@ mod tests {
         }
         assert_eq!(tracks[1].track_id, 2);
         match &tracks[1].kind {
-            TrackKind::Audio { format, channels, sample_rate, asc: got } => {
+            TrackKind::Audio {
+                format,
+                channels,
+                sample_rate,
+                asc: got,
+            } => {
                 assert_eq!(*format, AudioFormat::Aac);
                 assert_eq!(*channels, 2);
                 assert_eq!(*sample_rate, 48_000);
@@ -1599,8 +1761,23 @@ mod tests {
         // The moov length is constant in the (u32) chunk-offset values, so a
         // placeholder build gives the offsets to fill into the real one.
         let build = |off_v: u32, off_a: u32| {
-            let v_stbl = [stsd(&avc1), stsz(&v_sizes), stts(2, 3000), stsc(2), stco(off_v), stss(1)].concat();
-            let a_stbl = [stsd(&mp4a), stsz(&a_sizes), stts(2, 1024), stsc(2), stco(off_a)].concat();
+            let v_stbl = [
+                stsd(&avc1),
+                stsz(&v_sizes),
+                stts(2, 3000),
+                stsc(2),
+                stco(off_v),
+                stss(1),
+            ]
+            .concat();
+            let a_stbl = [
+                stsd(&mp4a),
+                stsz(&a_sizes),
+                stts(2, 1024),
+                stsc(2),
+                stco(off_a),
+            ]
+            .concat();
             let video_trak = trak(&tkhd(1, 320, 240), &mdhd(90_000), &hdlr(b"vide"), &v_stbl);
             let audio_trak = trak(&tkhd(2, 0, 0), &mdhd(48_000), &hdlr(b"soun"), &a_stbl);
             mp4_box(b"moov", &[video_trak, audio_trak].concat())
@@ -1644,17 +1821,26 @@ mod tests {
         let tx3g = mp4_box(b"tx3g", &[0u8; 8]);
         assert!(matches!(
             parse_text_entry(&tx3g),
-            Some(TrackKind::Text { format: TextFormat::Utf8, sample: TextSampleFormat::Tx3g })
+            Some(TrackKind::Text {
+                format: TextFormat::Utf8,
+                sample: TextSampleFormat::Tx3g
+            })
         ));
         let wvtt = mp4_box(b"wvtt", &mp4_box(b"vttC", b"WEBVTT"));
         assert!(matches!(
             parse_text_entry(&wvtt),
-            Some(TrackKind::Text { format: TextFormat::Utf8, sample: TextSampleFormat::Wvtt })
+            Some(TrackKind::Text {
+                format: TextFormat::Utf8,
+                sample: TextSampleFormat::Wvtt
+            })
         ));
         let stpp = mp4_box(b"stpp", &[0u8; 8]);
         assert!(matches!(
             parse_text_entry(&stpp),
-            Some(TrackKind::Text { format: TextFormat::Ttml, sample: TextSampleFormat::Stpp })
+            Some(TrackKind::Text {
+                format: TextFormat::Ttml,
+                sample: TextSampleFormat::Stpp
+            })
         ));
         // An unrecognized text codec declines (the track is skipped).
         assert!(parse_text_entry(&mp4_box(b"c608", &[0u8; 8])).is_none());

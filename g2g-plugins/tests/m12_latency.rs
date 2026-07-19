@@ -56,7 +56,8 @@ impl SourceLoop for LatencySrc {
     where
         Self: 'a;
 
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 
@@ -214,7 +215,10 @@ async fn source_sink_path_reports_source_latency() {
 #[tokio::test]
 async fn elements_without_override_report_zero_latency() {
     // A non-live source (default latency) and a default sink: ZERO path.
-    let mut src = LatencySrc { frames: 1, latency: LatencyReport::ZERO };
+    let mut src = LatencySrc {
+        frames: 1,
+        latency: LatencyReport::ZERO,
+    };
     let mut sink = PlainSink;
     let clock = ZeroClock;
 

@@ -106,11 +106,13 @@ impl PipeWireSrc {
 }
 
 impl SourceLoop for PipeWireSrc {
-    type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
+    type RunFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
     where
         Self: 'a;
 
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 
@@ -123,7 +125,10 @@ impl SourceLoop for PipeWireSrc {
     fn caps_constraint<'a>(
         &'a mut self,
     ) -> impl Future<Output = Result<CapsConstraint<'a>, G2gError>> + 'a {
-        core::future::ready(self.caps().map(|c| CapsConstraint::Produces(CapsSet::one(c))))
+        core::future::ready(
+            self.caps()
+                .map(|c| CapsConstraint::Produces(CapsSet::one(c))),
+        )
     }
 
     fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -157,7 +162,9 @@ impl SourceLoop for PipeWireSrc {
             let handle = std::thread::Builder::new()
                 .name(alloc::string::String::from("g2g-pipewiresrc"))
                 .spawn(move || {
-                    worker_main(spa_format, channels, rate, stride, audio_tx, ctrl_rx, ready_tx);
+                    worker_main(
+                        spa_format, channels, rate, stride, audio_tx, ctrl_rx, ready_tx,
+                    );
                 })
                 .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
 
@@ -240,10 +247,9 @@ impl PadTemplates for PipeWireSrc {
             channels: 2,
             sample_rate: 48_000,
         };
-        Vec::from([PadTemplate::source(CapsSet::from_alternatives(Vec::from([
-            pcm(AudioFormat::PcmS16Le),
-            pcm(AudioFormat::PcmF32Le),
-        ])))])
+        Vec::from([PadTemplate::source(CapsSet::from_alternatives(Vec::from(
+            [pcm(AudioFormat::PcmS16Le), pcm(AudioFormat::PcmF32Le)],
+        )))])
     }
 }
 

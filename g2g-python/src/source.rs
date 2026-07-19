@@ -75,14 +75,24 @@ impl PySource {
 
     /// Mutate the RawVideo caps fields in place (no-op on non-RawVideo caps).
     fn edit_caps(&mut self, f: impl FnOnce(&mut RawVideoFormat, &mut Dim, &mut Dim, &mut Rate)) {
-        if let Caps::RawVideo { format, width, height, framerate } = &mut self.caps {
+        if let Caps::RawVideo {
+            format,
+            width,
+            height,
+            framerate,
+        } = &mut self.caps
+        {
             f(format, width, height, framerate);
         }
     }
 
     #[cfg(feature = "python")]
     async fn produce_one(&self, frame: Frame) -> Result<Option<Frame>, G2gError> {
-        self.worker.as_ref().ok_or(G2gError::NotConfigured)?.run_produce(frame, &self.caps).await
+        self.worker
+            .as_ref()
+            .ok_or(G2gError::NotConfigured)?
+            .run_produce(frame, &self.caps)
+            .await
     }
 
     #[cfg(not(feature = "python"))]
@@ -93,7 +103,12 @@ impl PySource {
     /// Allocate a zeroed frame of the output geometry, stamped at `seq` /
     /// `pts_step_ns`, for the Python source to fill.
     fn blank_frame(&self, seq: u64, pts_step_ns: u64) -> Result<Frame, G2gError> {
-        let Caps::RawVideo { format, width: Dim::Fixed(w), height: Dim::Fixed(h), .. } = &self.caps
+        let Caps::RawVideo {
+            format,
+            width: Dim::Fixed(w),
+            height: Dim::Fixed(h),
+            ..
+        } = &self.caps
         else {
             return Err(G2gError::FixationFailed);
         };
@@ -118,18 +133,21 @@ impl PySource {
 /// Per-frame PTS step from a fixed framerate, or 0 when the rate is not fixed.
 fn pts_step_ns(caps: &Caps) -> u64 {
     match caps {
-        Caps::RawVideo { framerate: Rate::Fixed(fps), .. } if *fps > 0 => {
-            1_000_000_000u64 / u64::from(*fps)
-        }
+        Caps::RawVideo {
+            framerate: Rate::Fixed(fps),
+            ..
+        } if *fps > 0 => 1_000_000_000u64 / u64::from(*fps),
         _ => 0,
     }
 }
 
 impl SourceLoop for PySource {
-    type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
+    type RunFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
     where
         Self: 'a;
-    type CapsFuture<'a> = Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 
@@ -148,8 +166,12 @@ impl SourceLoop for PySource {
             if self.worker.is_none() {
                 // Property forwarding to the hosted source instance is a
                 // follow-up; transforms (PyTransform) forward theirs today.
-                self.worker =
-                    Some(crate::host::PyWorker::spawn(&self.module, &self.class, false, &[])?);
+                self.worker = Some(crate::host::PyWorker::spawn(
+                    &self.module,
+                    &self.class,
+                    false,
+                    &[],
+                )?);
             }
         }
         self.configured = true;
@@ -241,9 +263,12 @@ impl SourceLoop for PySource {
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
         let raw = match &self.caps {
-            Caps::RawVideo { format, width, height, framerate } => {
-                Some((format, width, height, framerate))
-            }
+            Caps::RawVideo {
+                format,
+                width,
+                height,
+                framerate,
+            } => Some((format, width, height, framerate)),
             _ => None,
         };
         match name {
@@ -270,13 +295,29 @@ impl SourceLoop for PySource {
 
 /// `PySource`'s settable properties (the runtime / `gst-launch` face).
 static PYSOURCE_PROPS: &[PropertySpec] = &[
-    PropertySpec::new("module", PropKind::Str, "Python module to import (the source element)"),
-    PropertySpec::new("class", PropKind::Str, "class within the module to instantiate"),
-    PropertySpec::new("format", PropKind::Str, "output pixel format (RGBA | BGRA | NV12 | I420 | YUY2)")
-        .with_default("RGBA"),
+    PropertySpec::new(
+        "module",
+        PropKind::Str,
+        "Python module to import (the source element)",
+    ),
+    PropertySpec::new(
+        "class",
+        PropKind::Str,
+        "class within the module to instantiate",
+    ),
+    PropertySpec::new(
+        "format",
+        PropKind::Str,
+        "output pixel format (RGBA | BGRA | NV12 | I420 | YUY2)",
+    )
+    .with_default("RGBA"),
     PropertySpec::new("width", PropKind::Uint, "output width in pixels").with_default("320"),
     PropertySpec::new("height", PropKind::Uint, "output height in pixels").with_default("240"),
     PropertySpec::new("framerate", PropKind::Fraction, "output framerate").with_default("30/1"),
-    PropertySpec::new("num-buffers", PropKind::Int, "frames to produce, or -1 until EOS")
-        .with_default("-1"),
+    PropertySpec::new(
+        "num-buffers",
+        PropKind::Int,
+        "frames to produce, or -1 until EOS",
+    )
+    .with_default("-1"),
 ];

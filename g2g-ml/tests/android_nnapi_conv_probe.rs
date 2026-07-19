@@ -27,7 +27,7 @@
 use g2g_core::element::{AsyncElement, BoxFuture, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
-use g2g_core::{Caps, Dim, G2gError, RawVideoFormat, Rate};
+use g2g_core::{Caps, Dim, G2gError, Rate, RawVideoFormat};
 use g2g_ml::ortinfer::OrtInference;
 
 use ::ort::ep::{NNAPI, XNNPACK};
@@ -44,7 +44,8 @@ const QCONV_U8IN: &[u8] = include_bytes!("fixtures/qconv_relu_u8in.onnx");
 /// scan, no JSON dep, whitespace-tolerant: ORT writes `"provider": "..."`). NNAPI
 /// fuses its claimed subgraph into one node tagged NnapiExecutionProvider.
 fn providers_from_profiling(json: &str) -> std::collections::BTreeMap<String, usize> {
-    let mut providers: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut providers: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
     let mut rest = json;
     while let Some(i) = rest.find("\"provider\"") {
         rest = &rest[i + "\"provider\"".len()..];
@@ -78,12 +79,18 @@ fn start_binder_threadpool() {
         if lib.is_null() {
             return;
         }
-        let set = dlsym(lib, b"ABinderProcess_setThreadPoolMaxThreadCount\0".as_ptr() as *const c_char);
+        let set = dlsym(
+            lib,
+            b"ABinderProcess_setThreadPoolMaxThreadCount\0".as_ptr() as *const c_char,
+        );
         if !set.is_null() {
             let set: extern "C" fn(u32) -> bool = core::mem::transmute(set);
             set(1);
         }
-        let start = dlsym(lib, b"ABinderProcess_startThreadPool\0".as_ptr() as *const c_char);
+        let start = dlsym(
+            lib,
+            b"ABinderProcess_startThreadPool\0".as_ptr() as *const c_char,
+        );
         if !start.is_null() {
             let start: extern "C" fn() = core::mem::transmute(start);
             start();
@@ -96,7 +103,10 @@ struct Collect {
     packets: Vec<PipelinePacket>,
 }
 impl OutputSink for Collect {
-    fn push<'a>(&'a mut self, packet: PipelinePacket) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
+    fn push<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+    ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
         Box::pin(async move {
             self.packets.push(packet);
             Ok(PushOutcome::Accepted)
@@ -122,7 +132,12 @@ async fn conv_runs_through_android_ep_stack() {
     let mut inf = OrtInference::from_memory_for_android(QCONV).expect("quantized conv model loads");
     // OrtInference reads the model's static [N,3,H,W] input geometry as W x H RGBA.
     assert_eq!(inf.input_dims(), (4, 4));
-    let caps = Caps::RawVideo { format: RawVideoFormat::Rgba8, width: Dim::Fixed(4), height: Dim::Fixed(4), framerate: Rate::Any };
+    let caps = Caps::RawVideo {
+        format: RawVideoFormat::Rgba8,
+        width: Dim::Fixed(4),
+        height: Dim::Fixed(4),
+        framerate: Rate::Any,
+    };
     let narrowed = inf.intercept_caps(&caps).expect("4x4 accepted");
     inf.configure_pipeline(&narrowed).expect("configure");
 
@@ -138,8 +153,16 @@ async fn conv_runs_through_android_ep_stack() {
         .iter()
         .find_map(|p| match p {
             PipelinePacket::DataFrame(f) => {
-                let MemoryDomain::System(slice) = &f.domain else { return None };
-                Some(slice.as_slice().chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
+                let MemoryDomain::System(slice) = &f.domain else {
+                    return None;
+                };
+                Some(
+                    slice
+                        .as_slice()
+                        .chunks_exact(4)
+                        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                        .collect(),
+                )
             }
             _ => None,
         })
@@ -147,7 +170,10 @@ async fn conv_runs_through_android_ep_stack() {
 
     // Output is [1,4,4,4] = 64 floats, post-ReLU so non-negative and finite.
     assert_eq!(out.len(), 64, "conv output [1,4,4,4]");
-    assert!(out.iter().all(|v| v.is_finite() && *v >= 0.0), "ReLU output finite + non-negative");
+    assert!(
+        out.iter().all(|v| v.is_finite() && *v >= 0.0),
+        "ReLU output finite + non-negative"
+    );
     eprintln!("quantized Conv->ReLU ran through the Android EP stack, output [1,4,4,4] ok");
 }
 
@@ -175,7 +201,9 @@ async fn nnapi_claims_the_quantized_conv() {
     // Scope the run so `outputs` (which borrows `session`) drops before
     // `end_profiling` takes its own &mut borrow.
     let out_len = {
-        let outputs = session.run(::ort::inputs![input_name.as_str() => tensor]).expect("run on-device");
+        let outputs = session
+            .run(::ort::inputs![input_name.as_str() => tensor])
+            .expect("run on-device");
         let (_shape, data) = outputs[0].try_extract_tensor::<f32>().expect("f32 output");
         data.len()
     };
@@ -189,14 +217,21 @@ async fn nnapi_claims_the_quantized_conv() {
     if providers.is_empty() {
         // Diagnostic: show the profiling shape so we can fix the scan if the schema
         // differs (the file should be a non-empty Chrome-trace JSON array).
-        eprintln!("(no providers parsed; profiling json is {} bytes, head: {})",
-            json.len(), &json[..json.len().min(400)]);
+        eprintln!(
+            "(no providers parsed; profiling json is {} bytes, head: {})",
+            json.len(),
+            &json[..json.len().min(400)]
+        );
     }
     eprintln!("--- ORT node placement (provider -> node count) ---");
     for (prov, n) in &providers {
         eprintln!("    {prov}: {n}");
     }
-    let nnapi_nodes = providers.iter().filter(|(p, _)| p.contains("Nnapi")).map(|(_, n)| *n).sum::<usize>();
+    let nnapi_nodes = providers
+        .iter()
+        .filter(|(p, _)| p.contains("Nnapi"))
+        .map(|(_, n)| *n)
+        .sum::<usize>();
     if nnapi_nodes > 0 {
         eprintln!(">> NNAPI claimed {nnapi_nodes} node(s): the quantized conv ran on the NNAPI accelerator");
     } else {
@@ -246,14 +281,27 @@ async fn fully_on_tpu_with_uint8_input() {
     for (prov, n) in &providers {
         eprintln!("    {prov}: {n}");
     }
-    let nnapi: usize = providers.iter().filter(|(p, _)| p.contains("Nnapi")).map(|(_, n)| *n).sum();
-    let non_nnapi: usize = providers.iter().filter(|(p, _)| !p.contains("Nnapi")).map(|(_, n)| *n).sum();
+    let nnapi: usize = providers
+        .iter()
+        .filter(|(p, _)| p.contains("Nnapi"))
+        .map(|(_, n)| *n)
+        .sum();
+    let non_nnapi: usize = providers
+        .iter()
+        .filter(|(p, _)| !p.contains("Nnapi"))
+        .map(|(_, n)| *n)
+        .sum();
     if non_nnapi == 0 && nnapi > 0 {
-        eprintln!(">> FULLY on NNAPI: every node ran on the Edge TPU accelerator (no CPU fallback)");
+        eprintln!(
+            ">> FULLY on NNAPI: every node ran on the Edge TPU accelerator (no CPU fallback)"
+        );
     } else {
         eprintln!(">> {nnapi} node(s) on NNAPI, {non_nnapi} still off-accelerator (see breakdown)");
     }
     // The conv must be on NNAPI; with the float boundary gone we expect nothing on CPU.
     assert!(nnapi > 0, "NNAPI claimed no node; placement: {providers:?}");
-    assert_eq!(non_nnapi, 0, "expected the whole uint8 graph on NNAPI; placement: {providers:?}");
+    assert_eq!(
+        non_nnapi, 0,
+        "expected the whole uint8 graph on NNAPI; placement: {providers:?}"
+    );
 }

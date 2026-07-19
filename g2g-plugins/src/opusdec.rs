@@ -64,7 +64,13 @@ impl Default for OpusDec {
 
 impl OpusDec {
     pub fn new() -> Self {
-        Self { channels: 0, dec: None, caps_sent: false, sequence: 0, configured: false }
+        Self {
+            channels: 0,
+            dec: None,
+            caps_sent: false,
+            sequence: 0,
+            configured: false,
+        }
     }
 
     /// Sink pad template: Opus at any channel count / nominal rate. The auto-plug
@@ -74,7 +80,11 @@ impl OpusDec {
     /// not match `rate: 0`). OpusDec ignores the nominal rate anyway: Opus always
     /// decodes at 48 kHz, and the real channel count is read in `configure_pipeline`.
     fn input_template() -> Caps {
-        Caps::Audio { format: AudioFormat::Opus, channels: ANY_CHANNELS, sample_rate: ANY_SAMPLE_RATE }
+        Caps::Audio {
+            format: AudioFormat::Opus,
+            channels: ANY_CHANNELS,
+            sample_rate: ANY_SAMPLE_RATE,
+        }
     }
 
     fn output_caps(&self) -> Caps {
@@ -93,7 +103,8 @@ impl OpusDec {
         let mut pcm = alloc::vec![0i16; MAX_FRAME_SAMPLES * channels];
         let per_channel = {
             let signals = MutSignals::try_from(&mut pcm[..]).map_err(|_| G2gError::CapsMismatch)?;
-            dec.decode(Some(packet), signals, false).map_err(|_| G2gError::CapsMismatch)?
+            dec.decode(Some(packet), signals, false)
+                .map_err(|_| G2gError::CapsMismatch)?
         };
         pcm.truncate(per_channel * channels);
         // Serialize interleaved i16 to little-endian bytes.
@@ -113,26 +124,36 @@ impl AsyncElement for OpusDec {
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         match upstream_caps {
-            Caps::Audio { format: AudioFormat::Opus, .. } => Ok(upstream_caps.clone()),
+            Caps::Audio {
+                format: AudioFormat::Opus,
+                ..
+            } => Ok(upstream_caps.clone()),
             _ => Err(G2gError::CapsMismatch),
         }
     }
 
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
-            Caps::Audio { format: AudioFormat::Opus, channels, .. } if *channels == 1 || *channels == 2 => {
-                CapsSet::one(Caps::Audio {
-                    format: AudioFormat::PcmS16Le,
-                    channels: *channels,
-                    sample_rate: OPUS_RATE_HZ,
-                })
-            }
+            Caps::Audio {
+                format: AudioFormat::Opus,
+                channels,
+                ..
+            } if *channels == 1 || *channels == 2 => CapsSet::one(Caps::Audio {
+                format: AudioFormat::PcmS16Le,
+                channels: *channels,
+                sample_rate: OPUS_RATE_HZ,
+            }),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        let Caps::Audio { format: AudioFormat::Opus, channels, .. } = absolute_caps else {
+        let Caps::Audio {
+            format: AudioFormat::Opus,
+            channels,
+            ..
+        } = absolute_caps
+        else {
             return Err(G2gError::CapsMismatch);
         };
         let ch = match channels {
@@ -172,7 +193,8 @@ impl AsyncElement for OpusDec {
                     };
                     let pcm = self.decode(slice.as_slice())?;
                     if !self.caps_sent {
-                        out.push(PipelinePacket::CapsChanged(self.output_caps())).await?;
+                        out.push(PipelinePacket::CapsChanged(self.output_caps()))
+                            .await?;
                         self.caps_sent = true;
                     }
                     let decoded = Frame::new(
@@ -195,8 +217,11 @@ impl AsyncElement for OpusDec {
 
 impl PadTemplates for OpusDec {
     fn pad_templates() -> Vec<PadTemplate> {
-        let out =
-            Caps::Audio { format: AudioFormat::PcmS16Le, channels: 2, sample_rate: OPUS_RATE_HZ };
+        let out = Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            channels: 2,
+            sample_rate: OPUS_RATE_HZ,
+        };
         Vec::from([
             PadTemplate::sink(CapsSet::one(Self::input_template())),
             PadTemplate::source(CapsSet::one(out)),

@@ -50,7 +50,7 @@ use g2g_core::memory::{CudaKeepAlive, DomainSet, MemoryDomainKind, OwnedCudaBuff
 use g2g_core::{
     AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
     ElementMetadata, G2gError, HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, RawVideoFormat, Rate, SystemSlice, VideoCodec,
+    PipelinePacket, Rate, RawVideoFormat, SystemSlice, VideoCodec,
 };
 
 /// Number of decode surfaces the parser cycles through. Also the cap on the
@@ -244,7 +244,10 @@ impl NvDec {
         // SAFETY: valid context; on success `ctx_lock` receives the lock handle.
         let ctx_lock = unsafe {
             let mut lock: *mut core::ffi::c_void = core::ptr::null_mut();
-            cuchk(ffi::cuvid_ctx_lock_create(&mut lock, context as *mut core::ffi::c_void))?;
+            cuchk(ffi::cuvid_ctx_lock_create(
+                &mut lock,
+                context as *mut core::ffi::c_void,
+            ))?;
             lock
         };
         self.state.ctx_lock = ctx_lock;
@@ -274,7 +277,12 @@ impl NvDec {
 
     /// Feed one Annex-B access unit (or an EOS flush) to the parser, then drain
     /// whatever frames the display callback produced.
-    fn parse(&mut self, payload: &[u8], pts_ns: u64, eos: bool) -> Result<Vec<ReadyFrame>, G2gError> {
+    fn parse(
+        &mut self,
+        payload: &[u8],
+        pts_ns: u64,
+        eos: bool,
+    ) -> Result<Vec<ReadyFrame>, G2gError> {
         let _ctx = ContextGuard::push(self.context)?;
         // SAFETY: the NVCUVID param structs are plain old data (ints, pointers,
         // reserved arrays); all-zero is a valid initial state we then fill.
@@ -309,7 +317,8 @@ impl NvDec {
             return Ok(());
         }
         if !self.caps_sent {
-            out.push(PipelinePacket::CapsChanged(self.output_caps())).await?;
+            out.push(PipelinePacket::CapsChanged(self.output_caps()))
+                .await?;
             self.caps_sent = true;
         }
         for f in frames {
@@ -327,7 +336,11 @@ impl NvDec {
             };
             let frame = g2g_core::frame::Frame::new(
                 domain,
-                g2g_core::FrameTiming { pts_ns: f.pts_ns, dts_ns: f.pts_ns, ..Default::default() },
+                g2g_core::FrameTiming {
+                    pts_ns: f.pts_ns,
+                    dts_ns: f.pts_ns,
+                    ..Default::default()
+                },
                 self.emitted,
             );
             self.emitted += 1;
@@ -596,7 +609,10 @@ extern "C" fn handle_display(user: *mut core::ffi::c_void, disp: *mut ffi::Parse
         state.context,
         Arc::new(CuvidMappedFrame { owner, dev_ptr }),
     );
-    state.ready.push(ReadyFrame { buffer, pts_ns: d.timestamp as u64 });
+    state.ready.push(ReadyFrame {
+        buffer,
+        pts_ns: d.timestamp as u64,
+    });
     1
 }
 
@@ -675,7 +691,13 @@ impl AsyncElement for NvDec {
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        let Caps::CompressedVideo { codec, width, height, framerate } = absolute_caps else {
+        let Caps::CompressedVideo {
+            codec,
+            width,
+            height,
+            framerate,
+        } = absolute_caps
+        else {
             return Err(G2gError::CapsMismatch);
         };
         // Pick the NVCUVID codec before opening the parser; reject unsupported ones.
@@ -1033,14 +1055,22 @@ mod tests {
         // Before decode: negotiated dims.
         assert!(matches!(
             d.output_caps(),
-            Caps::RawVideo { width: Dim::Fixed(1920), height: Dim::Fixed(1080), .. }
+            Caps::RawVideo {
+                width: Dim::Fixed(1920),
+                height: Dim::Fixed(1080),
+                ..
+            }
         ));
         // After the sequence callback learns the real (cropped) display dims.
         d.state.target_width = 1280;
         d.state.target_height = 720;
         assert!(matches!(
             d.output_caps(),
-            Caps::RawVideo { width: Dim::Fixed(1280), height: Dim::Fixed(720), .. }
+            Caps::RawVideo {
+                width: Dim::Fixed(1280),
+                height: Dim::Fixed(720),
+                ..
+            }
         ));
     }
 
@@ -1174,7 +1204,8 @@ mod tests {
                 let _ = cu::cu_ctx_push_current(ctx as *mut core::ffi::c_void);
                 let mut dptr = 0u64;
                 let ok = cu::cu_mem_alloc(&mut dptr, size) == 0
-                    && cu::cu_memcpy_htod(dptr, host.as_ptr() as *const core::ffi::c_void, size) == 0;
+                    && cu::cu_memcpy_htod(dptr, host.as_ptr() as *const core::ffi::c_void, size)
+                        == 0;
                 let mut popped = core::ptr::null_mut();
                 let _ = cu::cu_ctx_pop_current(&mut popped);
                 if !ok {
@@ -1191,7 +1222,10 @@ mod tests {
                         ctx,
                         Arc::new(DevAlloc { dptr, ctx }),
                     )),
-                    FrameTiming { pts_ns: seq * 33_000_000, ..FrameTiming::default() },
+                    FrameTiming {
+                        pts_ns: seq * 33_000_000,
+                        ..FrameTiming::default()
+                    },
                     seq,
                 ))
             }
@@ -1232,13 +1266,22 @@ mod tests {
                 std::eprintln!("skipping: CUDA alloc/upload failed");
                 return;
             };
-            if enc.process(PipelinePacket::DataFrame(frame), &mut au_sink).await.is_err() {
+            if enc
+                .process(PipelinePacket::DataFrame(frame), &mut au_sink)
+                .await
+                .is_err()
+            {
                 std::eprintln!("skipping: NVENC unavailable on this host");
                 return;
             }
         }
-        enc.process(PipelinePacket::Eos, &mut au_sink).await.unwrap();
-        assert!(!au_sink.aus.is_empty(), "NVENC produced access units to decode");
+        enc.process(PipelinePacket::Eos, &mut au_sink)
+            .await
+            .unwrap();
+        assert!(
+            !au_sink.aus.is_empty(),
+            "NVENC produced access units to decode"
+        );
 
         // Decode the Annex-B back through the native NvDec; capture NV12 Cuda
         // frames and verify geometry + that the luma plane holds real content.
@@ -1310,11 +1353,18 @@ mod tests {
                 FrameTiming::default(),
                 0,
             );
-            dec.process(PipelinePacket::DataFrame(f), &mut cuda_sink).await.expect("decode AU");
+            dec.process(PipelinePacket::DataFrame(f), &mut cuda_sink)
+                .await
+                .expect("decode AU");
         }
-        dec.process(PipelinePacket::Eos, &mut cuda_sink).await.expect("flush decoder");
+        dec.process(PipelinePacket::Eos, &mut cuda_sink)
+            .await
+            .expect("flush decoder");
 
-        assert!(cuda_sink.count > 0, "NvDec produced decoded NV12 CUDA frames");
+        assert!(
+            cuda_sink.count > 0,
+            "NvDec produced decoded NV12 CUDA frames"
+        );
         assert_eq!(
             cuda_sink.caps,
             std::vec![Caps::RawVideo {
@@ -1330,6 +1380,9 @@ mod tests {
             "every decoded frame is {W}x{H}, got {:?}",
             cuda_sink.dims
         );
-        assert!(cuda_sink.luma_varied, "decoded luma holds real (non-uniform) content");
+        assert!(
+            cuda_sink.luma_varied,
+            "decoded luma holds real (non-uniform) content"
+        );
     }
 }

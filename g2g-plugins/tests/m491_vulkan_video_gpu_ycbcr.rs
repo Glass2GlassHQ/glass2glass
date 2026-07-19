@@ -7,7 +7,10 @@
 //! -- unlike M490's CPU NV12->RGBA round-trip. Decodes the fixture's IDR, then
 //! reads the wgpu texture back and asserts real content. Runs on the RTX 3060;
 //! skips with no adapter or no distinct compute queue.
-#![cfg(all(any(target_os = "linux", target_os = "windows"), feature = "vulkan-video"))]
+#![cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    feature = "vulkan-video"
+))]
 
 use g2g_core::runtime::block_on;
 use g2g_plugins::vulkanvideo::{
@@ -32,7 +35,9 @@ fn decodes_idr_into_wgpu_texture_gpu_resident() {
     };
 
     let ps = extract_h264_parameter_sets(CLIP).expect("parse SPS+PPS");
-    let session = device.create_h264_session(&ps, 640, 480).expect("create session");
+    let session = device
+        .create_h264_session(&ps, 640, 480)
+        .expect("create session");
 
     let texture = match device.decode_idr_to_rgba_texture_gpu(&session, CLIP) {
         Ok(t) => t,
@@ -51,7 +56,10 @@ fn decodes_idr_into_wgpu_texture_gpu_resident() {
     assert_eq!(rgba.len(), 640 * 480 * 4);
     let min = *rgba.iter().min().unwrap();
     let max = *rgba.iter().max().unwrap();
-    assert!(max > min, "GPU-converted RGBA texture is uniform ({min}=={max})");
+    assert!(
+        max > min,
+        "GPU-converted RGBA texture is uniform ({min}=={max})"
+    );
 
     let sum: u64 = rgba.iter().map(|&b| b as u64).sum();
     let mean = sum / rgba.len() as u64;

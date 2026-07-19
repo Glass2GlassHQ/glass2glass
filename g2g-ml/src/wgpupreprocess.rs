@@ -374,8 +374,9 @@ impl WgpuPreprocess {
             mapped_at_creation: false,
         });
 
-        let mut encoder =
-            gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("nv12->rgb"),
@@ -391,9 +392,16 @@ impl WgpuPreprocess {
         encoder.copy_buffer_to_buffer(&gpu.out_buf, 0, &frame_buf, 0, gpu.out_bytes as u64);
         gpu.queue.submit([encoder.finish()]);
 
-        let owner =
-            WgpuBufferOwner::new(gpu.device.clone(), gpu.queue.clone(), frame_buf, gpu.out_bytes);
-        Ok(OwnedWgpuBuffer::new(gpu.out_bytes, std::sync::Arc::new(owner)))
+        let owner = WgpuBufferOwner::new(
+            gpu.device.clone(),
+            gpu.queue.clone(),
+            frame_buf,
+            gpu.out_bytes,
+        );
+        Ok(OwnedWgpuBuffer::new(
+            gpu.out_bytes,
+            std::sync::Arc::new(owner),
+        ))
     }
 
     /// Build the surface-import pipeline and output buffers on `device` (M217).
@@ -440,8 +448,9 @@ impl WgpuPreprocess {
             ],
         });
 
-        let mut encoder =
-            tg.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        let mut encoder = tg
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("nv12-tex->rgb"),
@@ -482,7 +491,10 @@ impl WgpuPreprocess {
                 let _ = tx.send(r);
             });
             tg.device
-                .poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
+                .poll(wgpu::PollType::Wait {
+                    submission_index: None,
+                    timeout: None,
+                })
                 .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
             rx.recv()
                 .map_err(|_| G2gError::Hardware(HardwareError::Other))?
@@ -501,7 +513,8 @@ impl WgpuPreprocess {
         &mut self,
         any: &dyn core::any::Any,
     ) -> Result<Option<MemoryDomain>, G2gError> {
-        let Some(owner) = any.downcast_ref::<g2g_plugins::mediacodec_wgpu::WgpuRgbaTexture>() else {
+        let Some(owner) = any.downcast_ref::<g2g_plugins::mediacodec_wgpu::WgpuRgbaTexture>()
+        else {
             return Ok(None);
         };
         self.ensure_tex_rgba_gpu(owner.device(), owner.queue());
@@ -545,17 +558,24 @@ impl WgpuPreprocess {
             label: Some("rgba-tex-binding"),
             layout: &layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: tg.dims_buf.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: tg.dims_buf.as_entire_binding(),
+                },
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::TextureView(&view),
                 },
-                wgpu::BindGroupEntry { binding: 2, resource: tg.out_buf.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: tg.out_buf.as_entire_binding(),
+                },
             ],
         });
 
-        let mut encoder =
-            tg.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        let mut encoder = tg
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("rgba-tex->tensor"),
@@ -594,7 +614,10 @@ impl WgpuPreprocess {
                 let _ = tx.send(r);
             });
             tg.device
-                .poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
+                .poll(wgpu::PollType::Wait {
+                    submission_index: None,
+                    timeout: None,
+                })
                 .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
             rx.recv()
                 .map_err(|_| G2gError::Hardware(HardwareError::Other))?
@@ -632,7 +655,12 @@ impl WgpuBufferOwner {
     /// downstream as a [`MemoryDomain::WgpuBuffer`]. `len` is the valid f32
     /// payload length in bytes.
     pub fn new(device: wgpu::Device, queue: wgpu::Queue, buffer: wgpu::Buffer, len: usize) -> Self {
-        Self { device, queue, buffer, len }
+        Self {
+            device,
+            queue,
+            buffer,
+            len,
+        }
     }
 
     /// The backing GPU buffer, for a downstream GPU consumer to bind directly.
@@ -664,8 +692,9 @@ impl WgpuBufferOwner {
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let mut encoder =
-            self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         encoder.copy_buffer_to_buffer(&self.buffer, 0, &staging, 0, self.len as u64);
         self.queue.submit([encoder.finish()]);
 
@@ -675,7 +704,10 @@ impl WgpuBufferOwner {
             let _ = tx.send(r);
         });
         self.device
-            .poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
             .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
         rx.recv()
             .map_err(|_| G2gError::Hardware(HardwareError::Other))?
@@ -724,7 +756,12 @@ impl core::fmt::Debug for WgpuNv12Texture {
 impl WgpuNv12Texture {
     /// Wrap an NV12 R8Uint texture with the device / queue it lives on.
     pub fn new(device: wgpu::Device, queue: wgpu::Queue, texture: wgpu::Texture) -> Self {
-        Self { device, queue, texture, _recycle: None }
+        Self {
+            device,
+            queue,
+            texture,
+            _recycle: None,
+        }
     }
 
     /// Like [`new`](Self::new), but carries a drop guard recycled when the frame
@@ -735,7 +772,12 @@ impl WgpuNv12Texture {
         texture: wgpu::Texture,
         recycle: Box<dyn core::any::Any + Send + Sync>,
     ) -> Self {
-        Self { device, queue, texture, _recycle: Some(recycle) }
+        Self {
+            device,
+            queue,
+            texture,
+            _recycle: Some(recycle),
+        }
     }
 
     /// The backing NV12 texture, for the importer to sample directly.
@@ -762,7 +804,8 @@ impl WgpuKeepAlive for WgpuNv12Texture {
 }
 
 impl AsyncElement for WgpuPreprocess {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -888,7 +931,8 @@ impl AsyncElement for WgpuPreprocess {
                     };
                     let new_caps = self.tensor_caps();
                     if self.last_caps.as_ref() != Some(&new_caps) {
-                        out.push(PipelinePacket::CapsChanged(new_caps.clone())).await?;
+                        out.push(PipelinePacket::CapsChanged(new_caps.clone()))
+                            .await?;
                         self.last_caps = Some(new_caps);
                     }
                     let tensor = Frame {
@@ -1089,7 +1133,12 @@ fn build_tex_gpu(device: &wgpu::Device, queue: &wgpu::Queue, width: u32, height:
 /// [`build_tex_gpu`], but the `TEX_SHADER_RGBA` pipeline that samples an
 /// `Rgba8Unorm` texture (no YCbCr math). The input texture is `width x height`.
 #[cfg(all(target_os = "android", feature = "mediacodec-wgpu"))]
-fn build_tex_rgba_gpu(device: &wgpu::Device, queue: &wgpu::Queue, width: u32, height: u32) -> TexGpu {
+fn build_tex_rgba_gpu(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    width: u32,
+    height: u32,
+) -> TexGpu {
     let area = width as usize * height as usize;
     let out_bytes = 3 * area * 4;
 
@@ -1129,7 +1178,15 @@ fn build_tex_rgba_gpu(device: &wgpu::Device, queue: &wgpu::Queue, width: u32, he
         cache: None,
     });
 
-    TexGpu { device: device.clone(), queue: queue.clone(), pipeline, dims_buf, out_buf, staging, out_bytes }
+    TexGpu {
+        device: device.clone(),
+        queue: queue.clone(),
+        pipeline,
+        dims_buf,
+        out_buf,
+        staging,
+        out_bytes,
+    }
 }
 
 /// Stand-in for a GPU NV12 decoder until one lands (M217): upload NV12 system
@@ -1163,7 +1220,11 @@ pub async fn nv12_to_gpu_texture(
 
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("nv12-surface"),
-        size: wgpu::Extent3d { width, height: tex_rows, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width,
+            height: tex_rows,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -1186,7 +1247,11 @@ pub async fn nv12_to_gpu_texture(
             bytes_per_row: Some(width),
             rows_per_image: Some(tex_rows),
         },
-        wgpu::Extent3d { width, height: tex_rows, depth_or_array_layers: 1 },
+        wgpu::Extent3d {
+            width,
+            height: tex_rows,
+            depth_or_array_layers: 1,
+        },
     );
 
     let owner = WgpuNv12Texture::new(device, queue, texture);
@@ -1211,7 +1276,10 @@ mod tests {
         assert!((t[1] - 1.0).abs() < 1e-4, "Y=235 -> 1");
         for plane in 0..3 {
             for px in 0..4 {
-                assert!((t[plane * 4 + px] - t[px]).abs() < 1e-6, "grayscale planes equal");
+                assert!(
+                    (t[plane * 4 + px] - t[px]).abs() < 1e-6,
+                    "grayscale planes equal"
+                );
             }
         }
     }

@@ -18,7 +18,11 @@ use g2g_plugins::audiomixer::AudioMixer;
 const MS: u64 = 1_000_000;
 
 fn out_caps() -> Caps {
-    Caps::Audio { format: AudioFormat::PcmS16Le, channels: 1, sample_rate: 1000 }
+    Caps::Audio {
+        format: AudioFormat::PcmS16Le,
+        channels: 1,
+        sample_rate: 1000,
+    }
 }
 
 /// A mono S16LE frame of `samples` at `pts_ms`.
@@ -29,7 +33,10 @@ fn frame(pts_ms: u64, samples: &[i16]) -> PipelinePacket {
     }
     PipelinePacket::DataFrame(Frame {
         domain: MemoryDomain::System(SystemSlice::from_boxed(bytes)),
-        timing: FrameTiming { pts_ns: pts_ms * MS, ..FrameTiming::default() },
+        timing: FrameTiming {
+            pts_ns: pts_ms * MS,
+            ..FrameTiming::default()
+        },
         sequence: 0,
         meta: Default::default(),
     })
@@ -58,7 +65,8 @@ impl OutputSink for Collect {
                         .chunks_exact(2)
                         .map(|c| i16::from_le_bytes([c[0], c[1]]))
                         .collect();
-                    self.frames.push((f.timing.pts_ns, f.timing.duration_ns, samples));
+                    self.frames
+                        .push((f.timing.pts_ns, f.timing.duration_ns, samples));
                 }
             }
             Ok(PushOutcome::Accepted)
@@ -78,11 +86,18 @@ async fn overlapping_ranges_sum_and_offset_is_silence() {
     // input 0 covers frames 0..4; input 1 arrives late at 2 ms covering 2..4.
     feed(&mut m, 0, frame(0, &[100, 100, 100, 100]), &mut sink).await;
     // input 1 has delivered nothing yet, so nothing is safe to emit.
-    assert!(sink.frames.is_empty(), "cannot emit before every input covers the span");
+    assert!(
+        sink.frames.is_empty(),
+        "cannot emit before every input covers the span"
+    );
 
     feed(&mut m, 1, frame(2, &[10, 10]), &mut sink).await;
 
-    assert_eq!(sink.frames.len(), 1, "one contiguous span emits once both inputs cover it");
+    assert_eq!(
+        sink.frames.len(),
+        1,
+        "one contiguous span emits once both inputs cover it"
+    );
     let (pts, dur, samples) = &sink.frames[0];
     assert_eq!(*pts, 0);
     assert_eq!(*dur, 4 * MS);

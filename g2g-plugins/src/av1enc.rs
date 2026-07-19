@@ -24,9 +24,9 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata,
-    G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec, RawVideoFormat, Rate, VideoCodec,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
+    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec, Rate, RawVideoFormat, VideoCodec,
 };
 
 use rav1e::prelude::{
@@ -145,15 +145,23 @@ impl Av1Enc {
             speed_settings: SpeedSettings::from_preset(self.speed),
             // 0 = rav1e's default quantizer mode; a downstream BWE target switches
             // to rate control (rav1e's `bitrate` is bits/second).
-            bitrate: self.bitrate_bps.map_or(0, |b| b.min(i32::MAX as u32) as i32),
+            bitrate: self
+                .bitrate_bps
+                .map_or(0, |b| b.min(i32::MAX as u32) as i32),
             ..Default::default()
         };
         let cfg = Config::new().with_encoder_config(enc);
         // rav1e packs 10/12-bit samples into `u16`; 8-bit uses `u8`.
         self.ctx = Some(if depth > 8 {
-            RavCtx::U16(cfg.new_context::<u16>().map_err(|_| G2gError::CapsMismatch)?)
+            RavCtx::U16(
+                cfg.new_context::<u16>()
+                    .map_err(|_| G2gError::CapsMismatch)?,
+            )
         } else {
-            RavCtx::U8(cfg.new_context::<u8>().map_err(|_| G2gError::CapsMismatch)?)
+            RavCtx::U8(
+                cfg.new_context::<u8>()
+                    .map_err(|_| G2gError::CapsMismatch)?,
+            )
         });
         self.pts_by_frameno.clear();
         self.next_frameno = 0;
@@ -377,20 +385,29 @@ impl AsyncElement for Av1Enc {
 
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
-            Caps::RawVideo { format, width, height, framerate } if chroma_for(*format).is_some() => {
-                CapsSet::one(Caps::CompressedVideo {
-                    codec: VideoCodec::Av1,
-                    width: width.clone(),
-                    height: height.clone(),
-                    framerate: framerate.clone(),
-                })
-            }
+            Caps::RawVideo {
+                format,
+                width,
+                height,
+                framerate,
+            } if chroma_for(*format).is_some() => CapsSet::one(Caps::CompressedVideo {
+                codec: VideoCodec::Av1,
+                width: width.clone(),
+                height: height.clone(),
+                framerate: framerate.clone(),
+            }),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        let Caps::RawVideo { format, width, height, framerate } = absolute_caps else {
+        let Caps::RawVideo {
+            format,
+            width,
+            height,
+            framerate,
+        } = absolute_caps
+        else {
             return Err(G2gError::CapsMismatch);
         };
         if chroma_for(*format).is_none() {
@@ -419,11 +436,19 @@ impl AsyncElement for Av1Enc {
 
     fn properties(&self) -> &'static [PropertySpec] {
         const PROPS: &[PropertySpec] = &[
-            PropertySpec::new("bitrate", PropKind::Uint, "target bitrate, bits/second (0 = quantizer default)")
-                .with_default("0"),
-            PropertySpec::new("speed", PropKind::Uint, "rav1e speed preset (0 slowest/best .. 10 fastest)")
-                .with_range("0", "10")
-                .with_default("9"),
+            PropertySpec::new(
+                "bitrate",
+                PropKind::Uint,
+                "target bitrate, bits/second (0 = quantizer default)",
+            )
+            .with_default("0"),
+            PropertySpec::new(
+                "speed",
+                PropKind::Uint,
+                "rav1e speed preset (0 slowest/best .. 10 fastest)",
+            )
+            .with_range("0", "10")
+            .with_default("9"),
         ];
         PROPS
     }
@@ -503,7 +528,10 @@ impl PadTemplates for Av1Enc {
             any(RawVideoFormat::I422),
             any(RawVideoFormat::I444),
         ]));
-        Vec::from([PadTemplate::sink(sink), PadTemplate::source(CapsSet::one(out))])
+        Vec::from([
+            PadTemplate::sink(sink),
+            PadTemplate::source(CapsSet::one(out)),
+        ])
     }
 }
 
@@ -567,15 +595,23 @@ mod tests {
                 MemoryDomain::System(SystemSlice::from_boxed(
                     i420_grey(64, 64).into_boxed_slice(),
                 )),
-                FrameTiming { pts_ns: i * 33_000_000, ..FrameTiming::default() },
+                FrameTiming {
+                    pts_ns: i * 33_000_000,
+                    ..FrameTiming::default()
+                },
                 i,
             );
-            enc.process(PipelinePacket::DataFrame(frame), &mut sink).await.unwrap();
+            enc.process(PipelinePacket::DataFrame(frame), &mut sink)
+                .await
+                .unwrap();
         }
         enc.process(PipelinePacket::Eos, &mut sink).await.unwrap();
 
         assert!(!sink.frames.is_empty(), "the encoder produced AV1 frames");
-        assert!(sink.frames.iter().all(|f| !f.is_empty()), "no empty packets");
+        assert!(
+            sink.frames.iter().all(|f| !f.is_empty()),
+            "no empty packets"
+        );
         assert_eq!(
             sink.caps,
             alloc::vec![Caps::CompressedVideo {
@@ -597,15 +633,24 @@ mod tests {
                 FrameTiming::default(),
                 0,
             );
-            parse.process(PipelinePacket::DataFrame(f), &mut psink).await.unwrap();
+            parse
+                .process(PipelinePacket::DataFrame(f), &mut psink)
+                .await
+                .unwrap();
         }
         let geometry = psink.caps.iter().find_map(|c| match c {
-            Caps::CompressedVideo { width: Dim::Fixed(w), height: Dim::Fixed(h), .. } => {
-                Some((*w, *h))
-            }
+            Caps::CompressedVideo {
+                width: Dim::Fixed(w),
+                height: Dim::Fixed(h),
+                ..
+            } => Some((*w, *h)),
             _ => None,
         });
-        assert_eq!(geometry, Some((64, 64)), "av1parse recovers the encoded 64x64 geometry");
+        assert_eq!(
+            geometry,
+            Some((64, 64)),
+            "av1parse recovers the encoded 64x64 geometry"
+        );
     }
 
     #[tokio::test]
@@ -634,13 +679,23 @@ mod tests {
         let n = 40u64;
         for i in 0..n {
             let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(i420_grey(64, 64).into_boxed_slice())),
-                FrameTiming { pts_ns: (i + 1) * 33_000_000, ..FrameTiming::default() },
+                MemoryDomain::System(SystemSlice::from_boxed(
+                    i420_grey(64, 64).into_boxed_slice(),
+                )),
+                FrameTiming {
+                    pts_ns: (i + 1) * 33_000_000,
+                    ..FrameTiming::default()
+                },
                 i,
             );
-            enc.process(PipelinePacket::DataFrame(frame), &mut sink).await.unwrap();
+            enc.process(PipelinePacket::DataFrame(frame), &mut sink)
+                .await
+                .unwrap();
             // The map holds only the in-flight lookahead, never one slot per frame.
-            assert!(enc.pts_by_frameno.len() < n as usize, "pts map stays bounded");
+            assert!(
+                enc.pts_by_frameno.len() < n as usize,
+                "pts map stays bounded"
+            );
         }
         enc.process(PipelinePacket::Eos, &mut sink).await.unwrap();
 
@@ -655,7 +710,10 @@ mod tests {
     fn bitrate_target_applies_with_hysteresis() {
         let mut enc = Av1Enc::new().with_speed(10);
         enc.configure_pipeline(&i420_caps(64, 64)).unwrap();
-        assert_eq!(enc.bitrate_bps, None, "default quantizer mode until a target arrives");
+        assert_eq!(
+            enc.bitrate_bps, None,
+            "default quantizer mode until a target arrives"
+        );
 
         // First target always applies.
         enc.set_target_bitrate(1_000_000);
@@ -680,24 +738,44 @@ mod tests {
         let mut sink = CaptureSink::default();
         for i in 0..3u64 {
             let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(i420_grey(64, 64).into_boxed_slice())),
-                FrameTiming { pts_ns: i * 33_000_000, ..FrameTiming::default() },
+                MemoryDomain::System(SystemSlice::from_boxed(
+                    i420_grey(64, 64).into_boxed_slice(),
+                )),
+                FrameTiming {
+                    pts_ns: i * 33_000_000,
+                    ..FrameTiming::default()
+                },
                 i,
             );
-            enc.process(PipelinePacket::DataFrame(frame), &mut sink).await.unwrap();
+            enc.process(PipelinePacket::DataFrame(frame), &mut sink)
+                .await
+                .unwrap();
         }
         enc.set_target_bitrate(500_000);
         for i in 3..6u64 {
             let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(i420_grey(64, 64).into_boxed_slice())),
-                FrameTiming { pts_ns: i * 33_000_000, ..FrameTiming::default() },
+                MemoryDomain::System(SystemSlice::from_boxed(
+                    i420_grey(64, 64).into_boxed_slice(),
+                )),
+                FrameTiming {
+                    pts_ns: i * 33_000_000,
+                    ..FrameTiming::default()
+                },
                 i,
             );
-            enc.process(PipelinePacket::DataFrame(frame), &mut sink).await.unwrap();
+            enc.process(PipelinePacket::DataFrame(frame), &mut sink)
+                .await
+                .unwrap();
         }
         enc.process(PipelinePacket::Eos, &mut sink).await.unwrap();
-        assert!(!sink.frames.is_empty(), "still produces frames after a bitrate change");
-        assert!(sink.frames.iter().all(|f| !f.is_empty()), "no empty packets after rebuild");
+        assert!(
+            !sink.frames.is_empty(),
+            "still produces frames after a bitrate change"
+        );
+        assert!(
+            sink.frames.iter().all(|f| !f.is_empty()),
+            "no empty packets after rebuild"
+        );
     }
 
     #[test]
@@ -706,15 +784,24 @@ mod tests {
         enc.configure_pipeline(&i420_caps(64, 64)).unwrap();
         let mut emitted = 0usize;
         for i in 0..6u64 {
-            emitted += enc.encode(&i420_grey(64, 64), i * 33_000_000).unwrap().len();
+            emitted += enc
+                .encode(&i420_grey(64, 64), i * 33_000_000)
+                .unwrap()
+                .len();
         }
         // The rebuild flushes the running context's lookahead (returned here),
         // so those buffered frames are not lost.
         emitted += enc.set_target_bitrate(2_000_000).len();
         for i in 6..12u64 {
-            emitted += enc.encode(&i420_grey(64, 64), i * 33_000_000).unwrap().len();
+            emitted += enc
+                .encode(&i420_grey(64, 64), i * 33_000_000)
+                .unwrap()
+                .len();
         }
         emitted += enc.flush().unwrap().len();
-        assert_eq!(emitted, 12, "every source frame is emitted across the rebuild");
+        assert_eq!(
+            emitted, 12,
+            "every source frame is emitted across the rebuild"
+        );
     }
 }

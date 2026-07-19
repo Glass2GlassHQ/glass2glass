@@ -77,7 +77,10 @@ impl SourceLoop for ProgressSrc {
                     domain: MemoryDomain::System(SystemSlice::from_boxed(
                         vec![0u8; 4].into_boxed_slice(),
                     )),
-                    timing: FrameTiming { pts_ns: i * self.step_ns, ..FrameTiming::default() },
+                    timing: FrameTiming {
+                        pts_ns: i * self.step_ns,
+                        ..FrameTiming::default()
+                    },
                     sequence: self.sequence,
                     meta: Default::default(),
                 };
@@ -102,10 +105,16 @@ async fn progress_handle_reports_duration_and_position() {
     let step_ns = 33_000_000u64; // ~30 fps
     let stats = {
         let mut g: Graph<GraphNode> = Graph::new();
-        let src = g.add_source(GraphNode::source(ProgressSrc { total, step_ns, sequence: 0 }));
+        let src = g.add_source(GraphNode::source(ProgressSrc {
+            total,
+            step_ns,
+            sequence: 0,
+        }));
         let sink = g.add_sink(GraphNode::element(FakeSink::new()));
         g.link(src, sink).unwrap();
-        run_graph_with_progress(g, &NullClock, 4, &progress).await.expect("graph runs")
+        run_graph_with_progress(g, &NullClock, 4, &progress)
+            .await
+            .expect("graph runs")
     };
     assert_eq!(stats.frames_consumed, total);
 
@@ -124,10 +133,16 @@ async fn bus_gets_duration_changed_once() {
 
     {
         let mut g: Graph<GraphNode> = Graph::new();
-        let src = g.add_source(GraphNode::source(ProgressSrc { total, step_ns, sequence: 0 }));
+        let src = g.add_source(GraphNode::source(ProgressSrc {
+            total,
+            step_ns,
+            sequence: 0,
+        }));
         let sink = g.add_sink(GraphNode::element(FakeSink::new()));
         g.link(src, sink).unwrap();
-        run_graph_with_bus(g, &NullClock, 4, &handle).await.expect("graph runs with bus");
+        run_graph_with_bus(g, &NullClock, 4, &handle)
+            .await
+            .expect("graph runs with bus");
     }
 
     let mut durations = Vec::new();
@@ -136,5 +151,9 @@ async fn bus_gets_duration_changed_once() {
             durations.push(duration_ns);
         }
     }
-    assert_eq!(durations, vec![duration_ns], "exactly one DurationChanged with the source's duration");
+    assert_eq!(
+        durations,
+        vec![duration_ns],
+        "exactly one DurationChanged with the source's duration"
+    );
 }

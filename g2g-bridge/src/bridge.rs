@@ -151,7 +151,11 @@ impl BridgeGraph {
             })
             .map_err(BridgeError::Spawn)?;
 
-        Ok(BridgeGraph { feed: Some(feed), pull: Some(pull), join: Some(join) })
+        Ok(BridgeGraph {
+            feed: Some(feed),
+            pull: Some(pull),
+            join: Some(join),
+        })
     }
 
     /// Push one buffer (copied) with presentation timestamp `pts_ns` into the
@@ -172,7 +176,9 @@ impl BridgeGraph {
     /// import / download). With a system-memory fragment, use [`push`](Self::push)
     /// instead; a `DmaBuf` frame handed to such a graph has no consumer.
     pub fn push_dmabuf(&self, dmabuf: OwnedDmaBuf, pts_ns: u64) -> bool {
-        self.feed.as_ref().is_some_and(|f| f.push_dmabuf(dmabuf, pts_ns))
+        self.feed
+            .as_ref()
+            .is_some_and(|f| f.push_dmabuf(dmabuf, pts_ns))
     }
 
     /// Drain one processed frame if ready. Returns [`Pull::Empty`] when the graph
@@ -198,7 +204,9 @@ impl BridgeGraph {
     /// Signal end-of-stream on the feed; no more [`push`](BridgeGraph::push)es
     /// will be delivered. The graph drains its in-flight buffers and then ends.
     pub fn end_of_stream(&self) -> bool {
-        self.feed.as_ref().is_some_and(g2g_plugins::appsrc::AppSrcFeed::end_of_stream)
+        self.feed
+            .as_ref()
+            .is_some_and(g2g_plugins::appsrc::AppSrcFeed::end_of_stream)
     }
 
     /// Whether the run thread has finished (EOS reached or errored).

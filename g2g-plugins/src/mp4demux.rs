@@ -61,11 +61,18 @@ impl Mp4Demux {
     }
 
     fn input_caps() -> Caps {
-        Caps::ByteStream { encoding: ByteStreamEncoding::Mp4 }
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::Mp4,
+        }
     }
 
     fn output_caps(codec: VideoCodec, width: Dim, height: Dim) -> Caps {
-        Caps::CompressedVideo { codec, width, height, framerate: Rate::Any }
+        Caps::CompressedVideo {
+            codec,
+            width,
+            height,
+            framerate: Rate::Any,
+        }
     }
 
     /// The negotiation placeholder: a fixatable `Range` (not `Dim::Any`, which
@@ -74,9 +81,18 @@ impl Mp4Demux {
     fn nego_caps(codec: VideoCodec) -> Caps {
         Caps::CompressedVideo {
             codec,
-            width: Dim::Range { min: 16, max: 65_535 },
-            height: Dim::Range { min: 16, max: 65_535 },
-            framerate: Rate::Range { min_q16: 1 << 16, max_q16: 240 << 16 },
+            width: Dim::Range {
+                min: 16,
+                max: 65_535,
+            },
+            height: Dim::Range {
+                min: 16,
+                max: 65_535,
+            },
+            framerate: Rate::Range {
+                min_q16: 1 << 16,
+                max_q16: 240 << 16,
+            },
         }
     }
 
@@ -90,8 +106,11 @@ impl Mp4Demux {
         self.drained = true;
         let header = parse_header(&self.buffer)?;
         if !self.caps_sent {
-            let caps =
-                Self::output_caps(header.codec, Dim::Fixed(header.width), Dim::Fixed(header.height));
+            let caps = Self::output_caps(
+                header.codec,
+                Dim::Fixed(header.width),
+                Dim::Fixed(header.height),
+            );
             out.push(PipelinePacket::CapsChanged(caps)).await?;
             self.out_codec = header.codec;
             self.caps_sent = true;
@@ -142,15 +161,20 @@ impl AsyncElement for Mp4Demux {
         // and is refined from the moov via CapsChanged at Eos (like fmp4demux).
         let codec = self.out_codec;
         CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| match input {
-            Caps::ByteStream { encoding: ByteStreamEncoding::Mp4 } => {
-                CapsSet::one(Self::nego_caps(codec))
-            }
+            Caps::ByteStream {
+                encoding: ByteStreamEncoding::Mp4,
+            } => CapsSet::one(Self::nego_caps(codec)),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        if !matches!(absolute_caps, Caps::ByteStream { encoding: ByteStreamEncoding::Mp4 }) {
+        if !matches!(
+            absolute_caps,
+            Caps::ByteStream {
+                encoding: ByteStreamEncoding::Mp4
+            }
+        ) {
             return Err(G2gError::CapsMismatch);
         }
         self.configured = true;

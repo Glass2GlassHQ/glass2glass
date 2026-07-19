@@ -108,11 +108,19 @@ impl OpusEnc {
 
     fn input_template() -> Caps {
         // Audio caps carry no `Any`; pin the supported shape (48 kHz stereo).
-        Caps::Audio { format: AudioFormat::PcmS16Le, channels: 2, sample_rate: OPUS_RATE_HZ }
+        Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            channels: 2,
+            sample_rate: OPUS_RATE_HZ,
+        }
     }
 
     fn output_caps(&self) -> Caps {
-        Caps::Audio { format: AudioFormat::Opus, channels: self.channels, sample_rate: OPUS_RATE_HZ }
+        Caps::Audio {
+            format: AudioFormat::Opus,
+            channels: self.channels,
+            sample_rate: OPUS_RATE_HZ,
+        }
     }
 
     /// Encode one full interleaved frame (`FRAME_SAMPLES * channels` samples)
@@ -120,7 +128,9 @@ impl OpusEnc {
     fn encode_frame(&self, frame: &[i16]) -> Result<Vec<u8>, G2gError> {
         let enc = self.enc.as_ref().ok_or(G2gError::NotConfigured)?;
         let mut out = alloc::vec![0u8; MAX_PACKET];
-        let len = enc.encode(frame, &mut out).map_err(|_| G2gError::CapsMismatch)?;
+        let len = enc
+            .encode(frame, &mut out)
+            .map_err(|_| G2gError::CapsMismatch)?;
         out.truncate(len);
         Ok(out)
     }
@@ -182,9 +192,11 @@ impl AsyncElement for OpusEnc {
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         match upstream_caps {
-            Caps::Audio { format: AudioFormat::PcmS16Le, channels, sample_rate }
-                if (*channels == 1 || *channels == 2) && *sample_rate == OPUS_RATE_HZ =>
-            {
+            Caps::Audio {
+                format: AudioFormat::PcmS16Le,
+                channels,
+                sample_rate,
+            } if (*channels == 1 || *channels == 2) && *sample_rate == OPUS_RATE_HZ => {
                 Ok(upstream_caps.clone())
             }
             _ => Err(G2gError::CapsMismatch),
@@ -193,9 +205,11 @@ impl AsyncElement for OpusEnc {
 
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
-            Caps::Audio { format: AudioFormat::PcmS16Le, channels, sample_rate }
-                if (*channels == 1 || *channels == 2) && *sample_rate == OPUS_RATE_HZ =>
-            {
+            Caps::Audio {
+                format: AudioFormat::PcmS16Le,
+                channels,
+                sample_rate,
+            } if (*channels == 1 || *channels == 2) && *sample_rate == OPUS_RATE_HZ => {
                 CapsSet::one(Caps::Audio {
                     format: AudioFormat::Opus,
                     channels: *channels,
@@ -207,7 +221,11 @@ impl AsyncElement for OpusEnc {
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        let Caps::Audio { format: AudioFormat::PcmS16Le, channels, sample_rate } = absolute_caps
+        let Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            channels,
+            sample_rate,
+        } = absolute_caps
         else {
             return Err(G2gError::CapsMismatch);
         };
@@ -221,7 +239,8 @@ impl AsyncElement for OpusEnc {
         };
         let mut enc = Encoder::new(SampleRate::Hz48000, ch, Application::Audio)
             .map_err(|_| G2gError::CapsMismatch)?;
-        enc.set_bitrate(self.bitrate).map_err(|_| G2gError::CapsMismatch)?;
+        enc.set_bitrate(self.bitrate)
+            .map_err(|_| G2gError::CapsMismatch)?;
         self.enc = Some(enc);
         self.channels = *channels;
         self.buf.clear();
@@ -295,7 +314,9 @@ impl AsyncElement for OpusEnc {
                     // Append interleaved S16LE samples to the pending buffer.
                     let bytes = slice.as_slice();
                     self.buf.extend(
-                        bytes.chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])),
+                        bytes
+                            .chunks_exact(2)
+                            .map(|c| i16::from_le_bytes([c[0], c[1]])),
                     );
                     let packets = self.drain_frames()?;
                     self.emit(packets, out).await?;
@@ -324,7 +345,11 @@ impl AsyncElement for OpusEnc {
 
 impl PadTemplates for OpusEnc {
     fn pad_templates() -> Vec<PadTemplate> {
-        let out = Caps::Audio { format: AudioFormat::Opus, channels: 2, sample_rate: OPUS_RATE_HZ };
+        let out = Caps::Audio {
+            format: AudioFormat::Opus,
+            channels: 2,
+            sample_rate: OPUS_RATE_HZ,
+        };
         Vec::from([
             PadTemplate::sink(CapsSet::one(Self::input_template())),
             PadTemplate::source(CapsSet::one(out)),

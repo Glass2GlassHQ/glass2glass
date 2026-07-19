@@ -91,7 +91,14 @@ impl VideoBox {
 
     /// Add a border of the given pixel widths on each edge (a convenience over
     /// the signed model: border widths are negative `videobox` edge values).
-    pub fn with_borders(mut self, top: u32, bottom: u32, left: u32, right: u32, fill: Fill) -> Self {
+    pub fn with_borders(
+        mut self,
+        top: u32,
+        bottom: u32,
+        left: u32,
+        right: u32,
+        fill: Fill,
+    ) -> Self {
         self.top = -(top as i32);
         self.bottom = -(bottom as i32);
         self.left = -(left as i32);
@@ -101,7 +108,12 @@ impl VideoBox {
     }
 
     fn accept_input(&self, caps: &Caps) -> Result<(RawVideoFormat, u32, u32, Rate), G2gError> {
-        let Caps::RawVideo { format, width: Dim::Fixed(w), height: Dim::Fixed(h), framerate } = caps
+        let Caps::RawVideo {
+            format,
+            width: Dim::Fixed(w),
+            height: Dim::Fixed(h),
+            framerate,
+        } = caps
         else {
             return Err(G2gError::CapsMismatch);
         };
@@ -151,17 +163,20 @@ impl AsyncElement for VideoBox {
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         let (lr, tb) = (self.left + self.right, self.top + self.bottom);
         CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| match input {
-            Caps::RawVideo { format, width, height, framerate } if FORMATS.contains(format) => {
-                match (adjust(width, lr), adjust(height, tb)) {
-                    (Some(w), Some(h)) => CapsSet::one(Caps::RawVideo {
-                        format: *format,
-                        width: w,
-                        height: h,
-                        framerate: framerate.clone(),
-                    }),
-                    _ => CapsSet::from_alternatives(Vec::new()),
-                }
-            }
+            Caps::RawVideo {
+                format,
+                width,
+                height,
+                framerate,
+            } if FORMATS.contains(format) => match (adjust(width, lr), adjust(height, tb)) {
+                (Some(w), Some(h)) => CapsSet::one(Caps::RawVideo {
+                    format: *format,
+                    width: w,
+                    height: h,
+                    framerate: framerate.clone(),
+                }),
+                _ => CapsSet::from_alternatives(Vec::new()),
+            },
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
     }
@@ -218,7 +233,8 @@ impl AsyncElement for VideoBox {
                         framerate: rate,
                     };
                     if self.last_caps.as_ref() != Some(&new_caps) {
-                        out.push(PipelinePacket::CapsChanged(new_caps.clone())).await?;
+                        out.push(PipelinePacket::CapsChanged(new_caps.clone()))
+                            .await?;
                         self.last_caps = Some(new_caps);
                     }
                     let out_frame = Frame {
@@ -299,10 +315,15 @@ impl AsyncElement for VideoBox {
 /// `VideoBox`'s settable properties (GStreamer `videobox` model, M183).
 static VIDEOBOX_PROPS: &[PropertySpec] = &[
     PropertySpec::new("top", PropKind::Int, "top edge: >0 crops, <0 borders").with_default("0"),
-    PropertySpec::new("bottom", PropKind::Int, "bottom edge: >0 crops, <0 borders").with_default("0"),
+    PropertySpec::new("bottom", PropKind::Int, "bottom edge: >0 crops, <0 borders")
+        .with_default("0"),
     PropertySpec::new("left", PropKind::Int, "left edge: >0 crops, <0 borders").with_default("0"),
     PropertySpec::new("right", PropKind::Int, "right edge: >0 crops, <0 borders").with_default("0"),
-    PropertySpec::new("fill", PropKind::Str, "border colour: black|green|blue|red|yellow|white|transparent"),
+    PropertySpec::new(
+        "fill",
+        PropKind::Str,
+        "border colour: black|green|blue|red|yellow|white|transparent",
+    ),
 ];
 
 fn fill_from_str(s: &str) -> Option<Fill> {
@@ -344,7 +365,10 @@ fn adjust(d: &Dim, delta: i32) -> Option<Dim> {
                 return None;
             }
             let min = (*min as i64 - delta as i64).max(1).min(max);
-            Some(Dim::Range { min: min as u32, max: max as u32 })
+            Some(Dim::Range {
+                min: min as u32,
+                max: max as u32,
+            })
         }
         Dim::Any => Some(Dim::Any),
     }
@@ -457,17 +481,39 @@ mod tests {
         let vb = VideoBox::new().with_borders(2, 0, 1, 0, Fill::Black);
         let (ow, oh) = vb.out_dims(2, 2).unwrap();
         assert_eq!((ow, oh), (3, 4), "width 2+1, height 2+2");
-        let out = build_boxed(RawVideoFormat::Rgba8, &src, 2, 2, vb.left, vb.top, ow, oh, Fill::Black);
+        let out = build_boxed(
+            RawVideoFormat::Rgba8,
+            &src,
+            2,
+            2,
+            vb.left,
+            vb.top,
+            ow,
+            oh,
+            Fill::Black,
+        );
         assert_eq!(out.len(), 3 * 4 * 4);
     }
 
     #[test]
     fn fill_colour_respects_channel_order() {
         // Red in RGBA is [255,0,0,A]; in BGRA the red byte is index 2.
-        assert_eq!(fill_bytes(RawVideoFormat::Rgba8, Fill::Red), [255, 0, 0, 255]);
-        assert_eq!(fill_bytes(RawVideoFormat::Bgra8, Fill::Red), [0, 0, 255, 255]);
-        assert_eq!(fill_bytes(RawVideoFormat::Rgba8, Fill::Yellow), [255, 255, 0, 255]);
-        assert_eq!(fill_bytes(RawVideoFormat::Rgba8, Fill::Transparent), [0, 0, 0, 0]);
+        assert_eq!(
+            fill_bytes(RawVideoFormat::Rgba8, Fill::Red),
+            [255, 0, 0, 255]
+        );
+        assert_eq!(
+            fill_bytes(RawVideoFormat::Bgra8, Fill::Red),
+            [0, 0, 255, 255]
+        );
+        assert_eq!(
+            fill_bytes(RawVideoFormat::Rgba8, Fill::Yellow),
+            [255, 255, 0, 255]
+        );
+        assert_eq!(
+            fill_bytes(RawVideoFormat::Rgba8, Fill::Transparent),
+            [0, 0, 0, 0]
+        );
     }
 
     #[test]

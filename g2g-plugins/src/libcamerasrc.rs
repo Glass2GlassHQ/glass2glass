@@ -107,11 +107,24 @@ impl OutKind {
         let height = Dim::Fixed(h);
         let framerate = Rate::Fixed(fps << 16);
         match self {
-            OutKind::Nv12 => Caps::RawVideo { format: RawVideoFormat::Nv12, width, height, framerate },
-            OutKind::Yuyv => Caps::RawVideo { format: RawVideoFormat::Yuyv, width, height, framerate },
-            OutKind::Mjpeg => {
-                Caps::CompressedVideo { codec: VideoCodec::Mjpeg, width, height, framerate }
-            }
+            OutKind::Nv12 => Caps::RawVideo {
+                format: RawVideoFormat::Nv12,
+                width,
+                height,
+                framerate,
+            },
+            OutKind::Yuyv => Caps::RawVideo {
+                format: RawVideoFormat::Yuyv,
+                width,
+                height,
+                framerate,
+            },
+            OutKind::Mjpeg => Caps::CompressedVideo {
+                codec: VideoCodec::Mjpeg,
+                width,
+                height,
+                framerate,
+            },
         }
     }
 }
@@ -137,8 +150,9 @@ fn resolve_camera_index(
     id: Option<&str>,
 ) -> Option<usize> {
     match id {
-        Some(want) => (0..cameras.len())
-            .find(|&i| cameras.get(i).is_some_and(|c| c.id().contains(want))),
+        Some(want) => {
+            (0..cameras.len()).find(|&i| cameras.get(i).is_some_and(|c| c.id().contains(want)))
+        }
         None => Some(index),
     }
 }
@@ -392,8 +406,8 @@ impl LibCameraSrc {
                     return Err(G2gError::CapsMismatch);
                 }
                 let cfg = cfgs.get(0).ok_or_else(lc_other)?;
-                let kind =
-                    OutKind::from_pixel_format(cfg.get_pixel_format()).ok_or(G2gError::CapsMismatch)?;
+                let kind = OutKind::from_pixel_format(cfg.get_pixel_format())
+                    .ok_or(G2gError::CapsMismatch)?;
                 let size = cfg.get_size();
                 (kind, size.width, size.height)
             }
@@ -411,11 +425,13 @@ impl Default for LibCameraSrc {
 }
 
 impl SourceLoop for LibCameraSrc {
-    type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
+    type RunFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
     where
         Self: 'a;
 
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 
@@ -432,7 +448,8 @@ impl SourceLoop for LibCameraSrc {
         &'a mut self,
     ) -> impl Future<Output = Result<CapsConstraint<'a>, G2gError>> + 'a {
         core::future::ready(
-            self.negotiate().map(|caps| CapsConstraint::Produces(CapsSet::one(caps))),
+            self.negotiate()
+                .map(|caps| CapsConstraint::Produces(CapsSet::one(caps))),
         )
     }
 
@@ -456,8 +473,15 @@ impl SourceLoop for LibCameraSrc {
     /// Live source: contributes one frame period so the sink keeps a frame in
     /// hand and never runs dry waiting on capture.
     fn latency(&self) -> LatencyReport {
-        let fps = self.negotiated.map(|(_, _, _, f)| f).unwrap_or(self.req_fps);
-        let period_ns = if fps > 0 { 1_000_000_000 / fps as u64 } else { 0 };
+        let fps = self
+            .negotiated
+            .map(|(_, _, _, f)| f)
+            .unwrap_or(self.req_fps);
+        let period_ns = if fps > 0 {
+            1_000_000_000 / fps as u64
+        } else {
+            0
+        };
         LatencyReport::live(period_ns, None)
     }
 
@@ -534,7 +558,9 @@ impl SourceLoop for LibCameraSrc {
             "width" => Some(PropValue::Uint(self.req_width as u64)),
             "height" => Some(PropValue::Uint(self.req_height as u64)),
             "framerate" => Some(PropValue::Uint(self.req_fps as u64)),
-            "format" => Some(PropValue::Str(if self.prefer_mjpeg { "mjpeg" } else { "raw" }.into())),
+            "format" => Some(PropValue::Str(
+                if self.prefer_mjpeg { "mjpeg" } else { "raw" }.into(),
+            )),
             "auto-exposure" => self.ae_enable.map(PropValue::Bool),
             "exposure" => self.exposure_us.map(|e| PropValue::Int(e as i64)),
             "gain" => self.gain.map(|g| PropValue::Double(g as f64)),
@@ -579,7 +605,11 @@ impl SourceLoop for LibCameraSrc {
                 capture_loop(setup, controls, tx)
             });
 
-            let pts_step_ns = if fps > 0 { 1_000_000_000 / fps as u64 } else { 0 };
+            let pts_step_ns = if fps > 0 {
+                1_000_000_000 / fps as u64
+            } else {
+                0
+            };
             let mut seq = 0u64;
             while let Some(bytes) = rx.recv().await {
                 let arrival_ns = g2g_core::metrics::monotonic_ns();
@@ -649,7 +679,14 @@ fn capture_loop(
     controls: CamControls,
     tx: tokio::sync::mpsc::Sender<Vec<u8>>,
 ) -> Result<(), G2gError> {
-    let CaptureSetup { index, camera_id, pf, w, h, limit } = setup;
+    let CaptureSetup {
+        index,
+        camera_id,
+        pf,
+        w,
+        h,
+        limit,
+    } = setup;
     let mgr = CameraManager::new().map_err(|e| lc_err(&e))?;
     let cameras = mgr.cameras();
     let idx = resolve_camera_index(&cameras, index, camera_id.as_deref()).ok_or_else(lc_other)?;
@@ -662,7 +699,10 @@ fn capture_loop(
     {
         let mut cfg = cfgs.get_mut(0).ok_or_else(lc_other)?;
         cfg.set_pixel_format(pf);
-        cfg.set_size(Size { width: w, height: h });
+        cfg.set_size(Size {
+            width: w,
+            height: h,
+        });
     }
     if matches!(cfgs.validate(), CameraConfigurationStatus::Invalid) {
         return Err(G2gError::CapsMismatch);
@@ -671,7 +711,11 @@ fn capture_loop(
 
     // The stream handle is owned once copied out (it points into `cfgs`, which
     // stays alive for the whole function); the `cfg` borrow ends here.
-    let stream = cfgs.get(0).ok_or_else(lc_other)?.stream().ok_or_else(lc_other)?;
+    let stream = cfgs
+        .get(0)
+        .ok_or_else(lc_other)?
+        .stream()
+        .ok_or_else(lc_other)?;
 
     let mut alloc = FrameBufferAllocator::new(&cam);
     let buffers = alloc.alloc(&stream).map_err(|e| lc_err(&e))?;
@@ -741,7 +785,8 @@ fn capture_loop(
         any |= set_if_supported(&mut ctrls, infos, Saturation(s));
     }
     let start_controls = any.then_some(ctrls);
-    cam.start(start_controls.as_deref()).map_err(|e| lc_err(&e))?;
+    cam.start(start_controls.as_deref())
+        .map_err(|e| lc_err(&e))?;
     for req in reqs.drain(..) {
         cam.queue_request(req).map_err(|(_, e)| lc_err(&e))?;
     }
@@ -793,18 +838,62 @@ fn capture_loop(
 }
 
 static LIBCAMERA_PROPS: &[PropertySpec] = &[
-    PropertySpec::new("camera", PropKind::Uint, "camera index (libcamera enumeration order)"),
-    PropertySpec::new("camera-id", PropKind::Str, "select camera by id substring (stable across reboots)"),
+    PropertySpec::new(
+        "camera",
+        PropKind::Uint,
+        "camera index (libcamera enumeration order)",
+    ),
+    PropertySpec::new(
+        "camera-id",
+        PropKind::Str,
+        "select camera by id substring (stable across reboots)",
+    ),
     PropertySpec::new("width", PropKind::Uint, "requested capture width in pixels"),
-    PropertySpec::new("height", PropKind::Uint, "requested capture height in pixels"),
-    PropertySpec::new("framerate", PropKind::Uint, "capture frame rate (enforced via FrameDurationLimits)"),
-    PropertySpec::new("format", PropKind::Str, "output: raw (NV12/YUYV) | mjpeg (pair with mjpegdec)"),
-    PropertySpec::new("auto-exposure", PropKind::Bool, "auto-exposure on/off (off lifts the low-light fps cap)"),
-    PropertySpec::new("exposure", PropKind::Int, "manual exposure time in microseconds (disables AE)"),
-    PropertySpec::new("gain", PropKind::Double, "manual analogue gain (disables AE)"),
-    PropertySpec::new("brightness", PropKind::Double, "image brightness [-1,1]; brightens without lowering fps"),
-    PropertySpec::new("contrast", PropKind::Double, "image contrast (1.0 = default)"),
-    PropertySpec::new("saturation", PropKind::Double, "colour saturation (1.0 = default, 0 = grey)"),
+    PropertySpec::new(
+        "height",
+        PropKind::Uint,
+        "requested capture height in pixels",
+    ),
+    PropertySpec::new(
+        "framerate",
+        PropKind::Uint,
+        "capture frame rate (enforced via FrameDurationLimits)",
+    ),
+    PropertySpec::new(
+        "format",
+        PropKind::Str,
+        "output: raw (NV12/YUYV) | mjpeg (pair with mjpegdec)",
+    ),
+    PropertySpec::new(
+        "auto-exposure",
+        PropKind::Bool,
+        "auto-exposure on/off (off lifts the low-light fps cap)",
+    ),
+    PropertySpec::new(
+        "exposure",
+        PropKind::Int,
+        "manual exposure time in microseconds (disables AE)",
+    ),
+    PropertySpec::new(
+        "gain",
+        PropKind::Double,
+        "manual analogue gain (disables AE)",
+    ),
+    PropertySpec::new(
+        "brightness",
+        PropKind::Double,
+        "image brightness [-1,1]; brightens without lowering fps",
+    ),
+    PropertySpec::new(
+        "contrast",
+        PropKind::Double,
+        "image contrast (1.0 = default)",
+    ),
+    PropertySpec::new(
+        "saturation",
+        PropKind::Double,
+        "colour saturation (1.0 = default, 0 = grey)",
+    ),
 ];
 
 #[cfg(test)]
@@ -834,9 +923,16 @@ mod tests {
         assert_eq!(src.get_property("height"), Some(PropValue::Uint(720)));
         assert_eq!(src.get_property("framerate"), Some(PropValue::Uint(60)));
         // format property toggles MJPEG output.
-        assert_eq!(src.get_property("format"), Some(PropValue::Str("raw".into())));
-        src.set_property("format", PropValue::Str("mjpeg".into())).unwrap();
-        assert_eq!(src.get_property("format"), Some(PropValue::Str("mjpeg".into())));
+        assert_eq!(
+            src.get_property("format"),
+            Some(PropValue::Str("raw".into()))
+        );
+        src.set_property("format", PropValue::Str("mjpeg".into()))
+            .unwrap();
+        assert_eq!(
+            src.get_property("format"),
+            Some(PropValue::Str("mjpeg".into()))
+        );
         assert_eq!(
             src.set_property("format", PropValue::Str("bogus".into())),
             Err(PropError::Value)
@@ -862,18 +958,27 @@ mod tests {
         // Raw kinds produce RawVideo; MJPEG produces CompressedVideo{Mjpeg}.
         assert!(matches!(
             OutKind::Nv12.caps(640, 480, 30),
-            Caps::RawVideo { format: RawVideoFormat::Nv12, .. }
+            Caps::RawVideo {
+                format: RawVideoFormat::Nv12,
+                ..
+            }
         ));
         assert!(matches!(
             OutKind::Mjpeg.caps(1280, 720, 30),
-            Caps::CompressedVideo { codec: VideoCodec::Mjpeg, .. }
+            Caps::CompressedVideo {
+                codec: VideoCodec::Mjpeg,
+                ..
+            }
         ));
     }
 
     #[test]
     fn with_mjpeg_sets_preference() {
         let src = LibCameraSrc::new().with_mjpeg(true);
-        assert_eq!(src.get_property("format"), Some(PropValue::Str("mjpeg".into())));
+        assert_eq!(
+            src.get_property("format"),
+            Some(PropValue::Str("mjpeg".into()))
+        );
     }
 
     #[test]
@@ -886,18 +991,31 @@ mod tests {
         // Setting exposure or gain turns auto-exposure off automatically.
         let src = LibCameraSrc::new().with_exposure(8000);
         assert_eq!(src.get_property("exposure"), Some(PropValue::Int(8000)));
-        assert_eq!(src.get_property("auto-exposure"), Some(PropValue::Bool(false)));
+        assert_eq!(
+            src.get_property("auto-exposure"),
+            Some(PropValue::Bool(false))
+        );
 
         let src = LibCameraSrc::new().with_gain(4.0);
         assert_eq!(src.get_property("gain"), Some(PropValue::Double(4.0)));
-        assert_eq!(src.get_property("auto-exposure"), Some(PropValue::Bool(false)));
+        assert_eq!(
+            src.get_property("auto-exposure"),
+            Some(PropValue::Bool(false))
+        );
 
         // The property setters mirror the builders.
         let mut src = LibCameraSrc::new();
         src.set_property("exposure", PropValue::Int(5000)).unwrap();
-        assert_eq!(src.get_property("auto-exposure"), Some(PropValue::Bool(false)));
-        src.set_property("auto-exposure", PropValue::Bool(true)).unwrap();
-        assert_eq!(src.get_property("auto-exposure"), Some(PropValue::Bool(true)));
+        assert_eq!(
+            src.get_property("auto-exposure"),
+            Some(PropValue::Bool(false))
+        );
+        src.set_property("auto-exposure", PropValue::Bool(true))
+            .unwrap();
+        assert_eq!(
+            src.get_property("auto-exposure"),
+            Some(PropValue::Bool(true))
+        );
         assert_eq!(
             src.set_property("gain", PropValue::Str("x".into())),
             Err(PropError::Type)
@@ -917,7 +1035,11 @@ mod tests {
         assert_eq!(src.get_property("brightness"), Some(PropValue::Double(0.5)));
         assert_eq!(src.get_property("contrast"), Some(PropValue::Double(1.25)));
         assert_eq!(src.get_property("saturation"), Some(PropValue::Double(0.0)));
-        assert_eq!(src.get_property("auto-exposure"), None, "brightness must not disable AE");
+        assert_eq!(
+            src.get_property("auto-exposure"),
+            None,
+            "brightness must not disable AE"
+        );
     }
 
     #[test]
@@ -925,8 +1047,15 @@ mod tests {
         let src = LibCameraSrc::new();
         assert_eq!(src.get_property("camera-id"), None);
         let mut src = LibCameraSrc::new().with_camera_id("usb-1.2");
-        assert_eq!(src.get_property("camera-id"), Some(PropValue::Str("usb-1.2".into())));
-        src.set_property("camera-id", PropValue::Str("front".into())).unwrap();
-        assert_eq!(src.get_property("camera-id"), Some(PropValue::Str("front".into())));
+        assert_eq!(
+            src.get_property("camera-id"),
+            Some(PropValue::Str("usb-1.2".into()))
+        );
+        src.set_property("camera-id", PropValue::Str("front".into()))
+            .unwrap();
+        assert_eq!(
+            src.get_property("camera-id"),
+            Some(PropValue::Str("front".into()))
+        );
     }
 }

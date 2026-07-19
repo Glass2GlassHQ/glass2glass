@@ -69,7 +69,11 @@ pub enum PluginError {
     /// The plugin's ABI tag does not match the host's. Loading would risk UB, so
     /// it is refused. Both tags are reported so the difference is legible
     /// (version, `rustc`, or layout-feature skew).
-    AbiMismatch { path: PathBuf, plugin: String, host: String },
+    AbiMismatch {
+        path: PathBuf,
+        plugin: String,
+        host: String,
+    },
     /// A directory scan could not read the directory.
     DirRead { path: PathBuf, message: String },
 }
@@ -131,8 +135,10 @@ pub fn load_plugin(path: impl AsRef<Path>, reg: &mut Registry) -> Result<(), Plu
     // SAFETY: loading an arbitrary shared object runs its initializers and is
     // inherently unsafe; the caller is trusting `path`. We constrain what we do
     // with it to the documented `g2g-plugin` C-ABI entry points below.
-    let lib = unsafe { Library::new(path) }
-        .map_err(|e| PluginError::Open { path: path.to_path_buf(), message: e.to_string() })?;
+    let lib = unsafe { Library::new(path) }.map_err(|e| PluginError::Open {
+        path: path.to_path_buf(),
+        message: e.to_string(),
+    })?;
 
     // Read the ABI tag first, before touching any other plugin code.
     // SAFETY: we assert the symbol's type matches the SDK's `g2g_plugin_abi`
@@ -151,9 +157,9 @@ pub fn load_plugin(path: impl AsRef<Path>, reg: &mut Registry) -> Result<(), Plu
     // SAFETY: `abi_ptr` is the non-null pointer just returned by the plugin's
     // `abi_cstr`; it points to a valid NUL-terminated C string.
     let abi_cstr = unsafe { CStr::from_ptr(abi_ptr) };
-    let plugin_abi = abi_cstr
-        .to_str()
-        .map_err(|_| PluginError::BadAbiString { path: path.to_path_buf() })?;
+    let plugin_abi = abi_cstr.to_str().map_err(|_| PluginError::BadAbiString {
+        path: path.to_path_buf(),
+    })?;
 
     check_abi(path, plugin_abi)?;
 
@@ -187,7 +193,9 @@ fn is_dylib(path: &Path) -> bool {
     } else {
         "so"
     };
-    path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case(ext))
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case(ext))
 }
 
 /// Load every dynamic library in `dir` (non-recursive), registering each into
@@ -198,8 +206,10 @@ pub fn load_plugin_dir(
     reg: &mut Registry,
 ) -> Result<Vec<PathBuf>, PluginError> {
     let dir = dir.as_ref();
-    let entries = std::fs::read_dir(dir)
-        .map_err(|e| PluginError::DirRead { path: dir.to_path_buf(), message: e.to_string() })?;
+    let entries = std::fs::read_dir(dir).map_err(|e| PluginError::DirRead {
+        path: dir.to_path_buf(),
+        message: e.to_string(),
+    })?;
     let mut loaded = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
@@ -242,8 +252,11 @@ mod tests {
 
     #[test]
     fn mismatched_abi_tag_is_refused_with_both_tags() {
-        let err = check_abi(Path::new("x.so"), "g2g-core 0.0.1 | rustc 1.0.0 | feat:none")
-            .expect_err("a foreign tag must be refused");
+        let err = check_abi(
+            Path::new("x.so"),
+            "g2g-core 0.0.1 | rustc 1.0.0 | feat:none",
+        )
+        .expect_err("a foreign tag must be refused");
         match err {
             PluginError::AbiMismatch { plugin, host, .. } => {
                 assert_eq!(plugin, "g2g-core 0.0.1 | rustc 1.0.0 | feat:none");

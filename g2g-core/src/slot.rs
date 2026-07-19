@@ -58,7 +58,9 @@ fn store_element(cell: &SlotCell, element: Box<dyn DynAsyncElement + Send>) {
 
 impl ElementSlot {
     pub fn new(element: Box<dyn DynAsyncElement + Send>) -> Self {
-        Self { inner: Arc::new(ArcSwap::new(Arc::new(Mutex::new(element)))) }
+        Self {
+            inner: Arc::new(ArcSwap::new(Arc::new(Mutex::new(element)))),
+        }
     }
 
     /// Atomically install `element` as the slot's contents. Process calls
@@ -76,7 +78,9 @@ impl ElementSlot {
     /// `Reconfigure` or codec switch replaces an element without stalling
     /// or rebuilding the pipeline (DESIGN.md §4.8.2).
     pub fn handle(&self) -> SwapHandle {
-        SwapHandle { inner: self.inner.clone() }
+        SwapHandle {
+            inner: self.inner.clone(),
+        }
     }
 }
 
@@ -114,10 +118,7 @@ impl AsyncElement for ElementSlot {
         self.inner.load().lock().intercept_caps(upstream_caps)
     }
 
-    fn configure_pipeline(
-        &mut self,
-        absolute_caps: &Caps,
-    ) -> Result<ConfigureOutcome, G2gError> {
+    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         self.inner.load().lock().configure_pipeline(absolute_caps)
     }
 
@@ -192,10 +193,7 @@ mod tests {
             crate::format_element::CapsConstraint::IdentityAny
         }
 
-        fn propose_allocation(
-            &self,
-            _caps: &Caps,
-        ) -> Option<crate::query::AllocationParams> {
+        fn propose_allocation(&self, _caps: &Caps) -> Option<crate::query::AllocationParams> {
             None
         }
 
@@ -288,8 +286,8 @@ mod tests {
         }));
         let mut sink = NoopSink;
 
-        block_on(AsyncElement::process(&mut slot,dummy_frame(), &mut sink)).unwrap();
-        block_on(AsyncElement::process(&mut slot,dummy_frame(), &mut sink)).unwrap();
+        block_on(AsyncElement::process(&mut slot, dummy_frame(), &mut sink)).unwrap();
+        block_on(AsyncElement::process(&mut slot, dummy_frame(), &mut sink)).unwrap();
 
         assert_eq!(initial_counter.load(Ordering::SeqCst), 2);
     }
@@ -306,8 +304,8 @@ mod tests {
         let mut sink = NoopSink;
 
         // Two pushes to A.
-        block_on(AsyncElement::process(&mut slot,dummy_frame(), &mut sink)).unwrap();
-        block_on(AsyncElement::process(&mut slot,dummy_frame(), &mut sink)).unwrap();
+        block_on(AsyncElement::process(&mut slot, dummy_frame(), &mut sink)).unwrap();
+        block_on(AsyncElement::process(&mut slot, dummy_frame(), &mut sink)).unwrap();
 
         // Swap to B.
         slot.swap(Box::new(CountingElement {
@@ -316,9 +314,9 @@ mod tests {
         }));
 
         // Three pushes to B.
-        block_on(AsyncElement::process(&mut slot,dummy_frame(), &mut sink)).unwrap();
-        block_on(AsyncElement::process(&mut slot,dummy_frame(), &mut sink)).unwrap();
-        block_on(AsyncElement::process(&mut slot,dummy_frame(), &mut sink)).unwrap();
+        block_on(AsyncElement::process(&mut slot, dummy_frame(), &mut sink)).unwrap();
+        block_on(AsyncElement::process(&mut slot, dummy_frame(), &mut sink)).unwrap();
+        block_on(AsyncElement::process(&mut slot, dummy_frame(), &mut sink)).unwrap();
 
         assert_eq!(counter_a.load(Ordering::SeqCst), 2);
         assert_eq!(counter_b.load(Ordering::SeqCst), 3);
@@ -329,12 +327,13 @@ mod tests {
         let counter = StdArc::new(AtomicU64::new(0));
         // A type that implements only AsyncElement still boxes into the slot
         // via the DynAsyncElement blanket impl.
-        let boxed: Box<dyn DynAsyncElement + Send> =
-            Box::new(AsyncOnlyElement { counter: counter.clone() });
+        let boxed: Box<dyn DynAsyncElement + Send> = Box::new(AsyncOnlyElement {
+            counter: counter.clone(),
+        });
         let mut slot = ElementSlot::new(boxed);
         let mut sink = NoopSink;
 
-        block_on(AsyncElement::process(&mut slot,dummy_frame(), &mut sink)).unwrap();
+        block_on(AsyncElement::process(&mut slot, dummy_frame(), &mut sink)).unwrap();
 
         assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
@@ -351,12 +350,15 @@ mod tests {
         let handle = slot.handle();
         let mut sink = NoopSink;
 
-        block_on(AsyncElement::process(&mut slot,dummy_frame(), &mut sink)).unwrap();
+        block_on(AsyncElement::process(&mut slot, dummy_frame(), &mut sink)).unwrap();
 
         // Swap via the detached handle rather than the slot itself.
-        handle.swap(Box::new(CountingElement { counter: counter_b.clone(), configured: true }));
+        handle.swap(Box::new(CountingElement {
+            counter: counter_b.clone(),
+            configured: true,
+        }));
 
-        block_on(AsyncElement::process(&mut slot,dummy_frame(), &mut sink)).unwrap();
+        block_on(AsyncElement::process(&mut slot, dummy_frame(), &mut sink)).unwrap();
 
         assert_eq!(counter_a.load(Ordering::SeqCst), 1);
         assert_eq!(counter_b.load(Ordering::SeqCst), 1);

@@ -47,8 +47,16 @@ fn main() -> ExitCode {
     for (name, bytes) in &compiled.rings {
         eprintln!("  {name:<24} {bytes:>6} bytes");
     }
-    eprintln!("  {:<24} {:>6} bytes total", "RING_BYTES_TOTAL", compiled.ring_bytes_total);
-    let entry_params = compiled.grabber_params.iter().chain(&compiled.sink_params).cloned().collect::<Vec<_>>();
+    eprintln!(
+        "  {:<24} {:>6} bytes total",
+        "RING_BYTES_TOTAL", compiled.ring_bytes_total
+    );
+    let entry_params = compiled
+        .grabber_params
+        .iter()
+        .chain(&compiled.sink_params)
+        .cloned()
+        .collect::<Vec<_>>();
     eprintln!("  entry: {}({})", compiled.entry, entry_params.join(", "));
 
     match &output {

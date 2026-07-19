@@ -167,7 +167,12 @@ impl AsyncElement for MultiFileSink {
     }
 
     fn metadata(&self) -> ElementMetadata {
-        ElementMetadata::new("Multi-file sink", "Sink/File", "Writes buffers to a sequence of files", "g2g")
+        ElementMetadata::new(
+            "Multi-file sink",
+            "Sink/File",
+            "Writes buffers to a sequence of files",
+            "g2g",
+        )
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
@@ -196,9 +201,21 @@ impl AsyncElement for MultiFileSink {
 }
 
 static MULTIFILESINK_PROPS: &[PropertySpec] = &[
-    PropertySpec::new("location", PropKind::Str, "printf-style file pattern, e.g. frame%05d.raw"),
-    PropertySpec::new("next-file", PropKind::Str, "new-file policy: buffer | key-frame | max-size"),
-    PropertySpec::new("max-file-size", PropKind::Uint, "max bytes per file in max-size mode"),
+    PropertySpec::new(
+        "location",
+        PropKind::Str,
+        "printf-style file pattern, e.g. frame%05d.raw",
+    ),
+    PropertySpec::new(
+        "next-file",
+        PropKind::Str,
+        "new-file policy: buffer | key-frame | max-size",
+    ),
+    PropertySpec::new(
+        "max-file-size",
+        PropKind::Uint,
+        "max bytes per file in max-size mode",
+    ),
     PropertySpec::new("index", PropKind::Uint, "next file index"),
 ];
 
@@ -272,9 +289,13 @@ mod tests {
     #[tokio::test]
     async fn key_frame_mode_starts_a_file_at_each_keyframe() {
         let dir = std::env::temp_dir();
-        let pat = dir.join("g2g_mfs_kf_%03d.bin").to_string_lossy().into_owned();
+        let pat = dir
+            .join("g2g_mfs_kf_%03d.bin")
+            .to_string_lossy()
+            .into_owned();
         let mut sink = MultiFileSink::new(&pat);
-        sink.set_property("next-file", PropValue::Str("key-frame".into())).unwrap();
+        sink.set_property("next-file", PropValue::Str("key-frame".into()))
+            .unwrap();
         let mut out = NullSink;
         sink.configure_pipeline(&Caps::ByteStream {
             encoding: g2g_core::ByteStreamEncoding::MpegTs,
@@ -304,9 +325,14 @@ mod tests {
 
     fn frame(bytes: &[u8], keyframe: bool) -> PipelinePacket {
         use g2g_core::{Frame, FrameTiming, SystemSlice};
-        let timing = FrameTiming { keyframe, ..FrameTiming::default() };
+        let timing = FrameTiming {
+            keyframe,
+            ..FrameTiming::default()
+        };
         PipelinePacket::DataFrame(Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.to_vec().into_boxed_slice())),
+            domain: MemoryDomain::System(SystemSlice::from_boxed(
+                bytes.to_vec().into_boxed_slice(),
+            )),
             timing,
             sequence: 0,
             meta: Default::default(),

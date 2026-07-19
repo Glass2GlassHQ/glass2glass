@@ -51,7 +51,11 @@ impl Concat {
 
     /// Forward one packet from the active input, applying the timeline offset to
     /// data frames when `adjust-base` is on, and tracking the input's end time.
-    async fn forward(&mut self, packet: PipelinePacket, out: &mut dyn OutputSink) -> Result<(), G2gError> {
+    async fn forward(
+        &mut self,
+        packet: PipelinePacket,
+        out: &mut dyn OutputSink,
+    ) -> Result<(), G2gError> {
         let packet = match packet {
             PipelinePacket::DataFrame(mut frame) => {
                 let end = frame.timing.pts_ns.saturating_add(frame.timing.duration_ns);
@@ -61,7 +65,8 @@ impl Concat {
                 if self.adjust_base {
                     frame.timing.pts_ns = frame.timing.pts_ns.saturating_add(self.base_offset_ns);
                     if frame.timing.dts_ns != 0 {
-                        frame.timing.dts_ns = frame.timing.dts_ns.saturating_add(self.base_offset_ns);
+                        frame.timing.dts_ns =
+                            frame.timing.dts_ns.saturating_add(self.base_offset_ns);
                     }
                 }
                 PipelinePacket::DataFrame(frame)
@@ -119,7 +124,11 @@ impl MultiInputElement for Concat {
         Some(0)
     }
 
-    fn configure_pipeline(&mut self, input: usize, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+    fn configure_pipeline(
+        &mut self,
+        input: usize,
+        absolute_caps: &Caps,
+    ) -> Result<ConfigureOutcome, G2gError> {
         self.configured[input] = Some(absolute_caps.clone());
         Ok(ConfigureOutcome::Accepted)
     }
@@ -129,7 +138,12 @@ impl MultiInputElement for Concat {
     }
 
     fn metadata(&self) -> ElementMetadata {
-        ElementMetadata::new("Concat", "Generic", "Concatenates N streams end to end", "g2g")
+        ElementMetadata::new(
+            "Concat",
+            "Generic",
+            "Concatenates N streams end to end",
+            "g2g",
+        )
     }
 
     fn properties(&self) -> &'static [PropertySpec] {
@@ -181,8 +195,11 @@ impl MultiInputElement for Concat {
     }
 }
 
-static CONCAT_PROPS: &[PropertySpec] =
-    &[PropertySpec::new("adjust-base", PropKind::Bool, "offset each input onto a continuous timeline")];
+static CONCAT_PROPS: &[PropertySpec] = &[PropertySpec::new(
+    "adjust-base",
+    PropKind::Bool,
+    "offset each input onto a continuous timeline",
+)];
 
 #[cfg(test)]
 mod tests {
@@ -206,7 +223,11 @@ mod tests {
     }
 
     fn frame(pts_ns: u64, dur_ns: u64) -> PipelinePacket {
-        let timing = FrameTiming { pts_ns, duration_ns: dur_ns, ..FrameTiming::default() };
+        let timing = FrameTiming {
+            pts_ns,
+            duration_ns: dur_ns,
+            ..FrameTiming::default()
+        };
         PipelinePacket::DataFrame(Frame {
             domain: MemoryDomain::System(SystemSlice::from_boxed(vec![0u8; 4].into_boxed_slice())),
             timing,
@@ -245,7 +266,8 @@ mod tests {
     #[tokio::test]
     async fn adjust_base_off_keeps_original_pts() {
         let mut c = Concat::new(2);
-        c.set_property("adjust-base", PropValue::Bool(false)).unwrap();
+        c.set_property("adjust-base", PropValue::Bool(false))
+            .unwrap();
         let mut out = CollectSink::default();
         c.process(0, frame(0, 100), &mut out).await.unwrap();
         c.process(0, PipelinePacket::Eos, &mut out).await.unwrap();

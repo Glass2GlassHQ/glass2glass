@@ -32,14 +32,14 @@ use alloc::vec::Vec;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
     MemoryDomain, MultiInputElement, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-    PropError, PropKind, PropValue, PropertySpec, RawVideoFormat, Rate, TextFormat,
+    PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, TextFormat,
 };
 
 use crate::bitmapfont::{glyph, GLYPH_ADVANCE, GLYPH_HEIGHT};
 use crate::paint::blend_px;
-use crate::subparse::{parse_srt, parse_ssa, parse_ttml, parse_webvtt, Cue, TextAlign};
 #[cfg(feature = "truetype-overlay")]
 use crate::subparse::WritingMode;
+use crate::subparse::{parse_srt, parse_ssa, parse_ttml, parse_webvtt, Cue, TextAlign};
 
 /// A parsed TrueType / OpenType face used by the [`truetype-overlay`](crate)
 /// render path. Wraps `ab_glyph` (glyf + CFF/CFF2 outlines) behind a small shim
@@ -81,7 +81,10 @@ impl FontFace {
     fn line_metrics(&self, px: f32) -> LineMetrics {
         use ab_glyph::{Font, ScaleFont};
         let sf = self.0.as_scaled(px);
-        LineMetrics { ascent: sf.ascent(), new_line_size: sf.height() + sf.line_gap() }
+        LineMetrics {
+            ascent: sf.ascent(),
+            new_line_size: sf.height() + sf.line_gap(),
+        }
     }
 
     /// Advance width of `c` at `px` (no rasterization); other `Metrics` fields
@@ -106,7 +109,16 @@ impl FontFace {
         let advance_width = self.0.as_scaled(px).h_advance(id);
         let glyph = id.with_scale_and_position(px, ab_glyph::point(0.0, 0.0));
         let Some(outlined) = self.0.outline_glyph(glyph) else {
-            return (Metrics { advance_width, xmin: 0, ymin: 0, width: 0, height: 0 }, Vec::new());
+            return (
+                Metrics {
+                    advance_width,
+                    xmin: 0,
+                    ymin: 0,
+                    width: 0,
+                    height: 0,
+                },
+                Vec::new(),
+            );
         };
         let b = outlined.px_bounds();
         let width = b.width().round() as usize;
@@ -214,7 +226,11 @@ impl TextOverlay {
 
     /// Builder form of [`add_font_bytes`](Self::add_font_bytes).
     #[cfg(feature = "truetype-overlay")]
-    pub fn with_font_bytes(mut self, bytes: &[u8], collection_index: u32) -> Result<Self, G2gError> {
+    pub fn with_font_bytes(
+        mut self,
+        bytes: &[u8],
+        collection_index: u32,
+    ) -> Result<Self, G2gError> {
         self.add_font_bytes(bytes, collection_index)?;
         Ok(self)
     }
@@ -329,7 +345,13 @@ impl TextOverlay {
 
     /// Whether `caps` is RGBA8 (geometry may still be unfixed at negotiation).
     fn accepts(caps: &Caps) -> bool {
-        matches!(caps, Caps::RawVideo { format: RawVideoFormat::Rgba8, .. })
+        matches!(
+            caps,
+            Caps::RawVideo {
+                format: RawVideoFormat::Rgba8,
+                ..
+            }
+        )
     }
 
     /// Integer font scale: one source pixel per `scale` output pixels, derived
@@ -415,7 +437,15 @@ impl TextOverlay {
 
     /// Blit one 8x8 glyph at output `(gx, gy)`, each set bit a `scale` x `scale`
     /// block of `color`, clipped to the canvas.
-    fn blit_glyph(&self, buf: &mut [u8], gx: i32, gy: i32, scale: i32, rows: [u8; 8], color: [u8; 4]) {
+    fn blit_glyph(
+        &self,
+        buf: &mut [u8],
+        gx: i32,
+        gy: i32,
+        scale: i32,
+        rows: [u8; 8],
+        color: [u8; 4],
+    ) {
         for (ry, bits) in rows.iter().enumerate() {
             if *bits == 0 {
                 continue;
@@ -462,7 +492,15 @@ impl TextOverlay {
     /// Alpha-blend a rasterized glyph's coverage bitmap (`gw` x `gh`, one byte
     /// per pixel) at output `(x0, y0)` in the text colour, clipped to the canvas.
     #[cfg(feature = "truetype-overlay")]
-    fn blit_coverage(&self, buf: &mut [u8], x0: i32, y0: i32, (gw, gh): (usize, usize), cov: &[u8], color: [u8; 4]) {
+    fn blit_coverage(
+        &self,
+        buf: &mut [u8],
+        x0: i32,
+        y0: i32,
+        (gw, gh): (usize, usize),
+        cov: &[u8],
+        color: [u8; 4],
+    ) {
         let w = self.width as i32;
         let h = self.height as i32;
         for ry in 0..gh as i32 {
@@ -514,7 +552,10 @@ impl TextOverlay {
             let fg = s.color.unwrap_or(self.text_color);
             let bg = s.background.unwrap_or(self.bg_color);
 
-            if matches!(s.vertical, WritingMode::VerticalRl | WritingMode::VerticalLr) {
+            if matches!(
+                s.vertical,
+                WritingMode::VerticalRl | WritingMode::VerticalLr
+            ) {
                 let rl = matches!(s.vertical, WritingMode::VerticalRl);
                 let col_w = px * 1.3;
                 let cell_h = px * 1.15;
@@ -531,7 +572,9 @@ impl TextOverlay {
                 }
                 .clamp(0.0, (w - block_w).max(0.0));
                 let block_top = match s.line {
-                    Some(p) => (p as f32 / 100.0 * h).clamp(margin, (h - margin - block_h).max(margin)),
+                    Some(p) => {
+                        (p as f32 / 100.0 * h).clamp(margin, (h - margin - block_h).max(margin))
+                    }
                     None => margin,
                 };
                 self.fill_rect(
@@ -559,13 +602,24 @@ impl TextOverlay {
                         let gx = col_x + (col_w - m.advance_width) / 2.0 + m.xmin as f32;
                         let baseline = start_y + lm.ascent + j as f32 * cell_h;
                         let gy = baseline - m.ymin as f32 - m.height as f32;
-                        self.blit_coverage(buf, gx as i32, gy as i32, (m.width, m.height), &cov, fg);
+                        self.blit_coverage(
+                            buf,
+                            gx as i32,
+                            gy as i32,
+                            (m.width, m.height),
+                            &cov,
+                            fg,
+                        );
                     }
                 }
             } else {
                 let line_ws: Vec<f32> = lines
                     .iter()
-                    .map(|l| l.chars().map(|c| self.glyph_font(c).metrics(c, px).advance_width).sum())
+                    .map(|l| {
+                        l.chars()
+                            .map(|c| self.glyph_font(c).metrics(c, px).advance_width)
+                            .sum()
+                    })
                     .collect();
                 let block_w = line_ws.iter().copied().fold(0.0_f32, f32::max);
                 let block_h = lines.len() as f32 * line_h;
@@ -573,7 +627,9 @@ impl TextOverlay {
                 let block_left =
                     ttf_align_left(s.align, anchor_x, block_w).clamp(0.0, (w - block_w).max(0.0));
                 let block_top = match s.line {
-                    Some(p) => (p as f32 / 100.0 * h).clamp(margin, (h - margin - block_h).max(margin)),
+                    Some(p) => {
+                        (p as f32 / 100.0 * h).clamp(margin, (h - margin - block_h).max(margin))
+                    }
                     None => {
                         let t = (auto_bottom - block_h).max(margin);
                         auto_bottom = t - pad - line_h * 0.2;
@@ -601,7 +657,14 @@ impl TextOverlay {
                         let (m, cov) = self.glyph_font(c).rasterize(c, px);
                         let gx = pen + m.xmin as f32;
                         let gy = baseline - m.ymin as f32 - m.height as f32;
-                        self.blit_coverage(buf, gx as i32, gy as i32, (m.width, m.height), &cov, fg);
+                        self.blit_coverage(
+                            buf,
+                            gx as i32,
+                            gy as i32,
+                            (m.width, m.height),
+                            &cov,
+                            fg,
+                        );
                         pen += m.advance_width;
                     }
                 }
@@ -804,8 +867,12 @@ impl AsyncElement for TextOverlay {
             // element stores [R, G, B, A].
             "color" => {
                 let argb = value.as_uint().ok_or(PropError::Type)? as u32;
-                self.text_color =
-                    [(argb >> 16) as u8, (argb >> 8) as u8, argb as u8, (argb >> 24) as u8];
+                self.text_color = [
+                    (argb >> 16) as u8,
+                    (argb >> 8) as u8,
+                    argb as u8,
+                    (argb >> 24) as u8,
+                ];
                 Ok(())
             }
             _ => Err(PropError::Unknown),
@@ -814,9 +881,7 @@ impl AsyncElement for TextOverlay {
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
-            "location" => {
-                Some(PropValue::Str(self.location.clone().unwrap_or_default()))
-            }
+            "location" => Some(PropValue::Str(self.location.clone().unwrap_or_default())),
             #[cfg(feature = "truetype-overlay")]
             "font" => Some(PropValue::Str(self.font_path.clone().unwrap_or_default())),
             #[cfg(not(feature = "truetype-overlay"))]
@@ -868,7 +933,10 @@ impl TextOverlayN {
     /// (`output_follows_input`), so no output geometry need be supplied: the
     /// solver derives it from whatever RGBA8 the video source negotiates.
     pub fn new() -> Self {
-        Self { inner: TextOverlay::new(), video_caps: None }
+        Self {
+            inner: TextOverlay::new(),
+            video_caps: None,
+        }
     }
 
     /// Number of cues received on the text pad so far.
@@ -923,7 +991,14 @@ impl MultiInputElement for TextOverlayN {
     fn intercept_caps(&self, input: usize, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         match input {
             Self::VIDEO if TextOverlay::accepts(upstream_caps) => Ok(upstream_caps.clone()),
-            Self::TEXT if matches!(upstream_caps, Caps::Text { format: TextFormat::Utf8 }) => {
+            Self::TEXT
+                if matches!(
+                    upstream_caps,
+                    Caps::Text {
+                        format: TextFormat::Utf8
+                    }
+                ) =>
+            {
                 Ok(upstream_caps.clone())
             }
             _ => Err(G2gError::CapsMismatch),
@@ -935,9 +1010,9 @@ impl MultiInputElement for TextOverlayN {
     /// edge (unlike a wildcard interleave).
     fn caps_constraint_as_input(&self, input: usize) -> CapsConstraint<'_> {
         match input {
-            Self::TEXT => {
-                CapsConstraint::Accepts(CapsSet::one(Caps::Text { format: TextFormat::Utf8 }))
-            }
+            Self::TEXT => CapsConstraint::Accepts(CapsSet::one(Caps::Text {
+                format: TextFormat::Utf8,
+            })),
             // VIDEO (and any out-of-range pad, defensively): RGBA8, any geometry.
             _ => CapsConstraint::Accepts(CapsSet::one(Caps::RawVideo {
                 format: RawVideoFormat::Rgba8,
@@ -962,7 +1037,9 @@ impl MultiInputElement for TextOverlayN {
                 Ok(ConfigureOutcome::Accepted)
             }
             Self::TEXT => match absolute_caps {
-                Caps::Text { format: TextFormat::Utf8 } => Ok(ConfigureOutcome::Accepted),
+                Caps::Text {
+                    format: TextFormat::Utf8,
+                } => Ok(ConfigureOutcome::Accepted),
                 _ => Err(G2gError::CapsMismatch),
             },
             _ => Err(G2gError::CapsMismatch),
@@ -995,8 +1072,7 @@ impl MultiInputElement for TextOverlayN {
                     match packet {
                         PipelinePacket::DataFrame(frame) => {
                             if let MemoryDomain::System(slice) = &frame.domain {
-                                let text =
-                                    String::from_utf8_lossy(slice.as_slice()).into_owned();
+                                let text = String::from_utf8_lossy(slice.as_slice()).into_owned();
                                 let start = frame.timing.pts_ns;
                                 let end = start.saturating_add(frame.timing.duration_ns);
                                 // Recover the cue placement from frame-meta (M406)
@@ -1043,8 +1119,12 @@ static TEXTOVERLAY_PROPS: &[PropertySpec] = &[
         "path to a .ttf / .ttc font for glyph rendering (truetype-overlay); \
          needed for CJK / accented text. Without it the 8x8 ASCII bitmap is used",
     ),
-    PropertySpec::new("color", PropKind::Uint, "text color as 0xAARRGGBB (e.g. 4294967295 = opaque white)")
-        .with_default("4294967295"),
+    PropertySpec::new(
+        "color",
+        PropKind::Uint,
+        "text color as 0xAARRGGBB (e.g. 4294967295 = opaque white)",
+    )
+    .with_default("4294967295"),
 ];
 
 #[cfg(test)]
@@ -1081,7 +1161,10 @@ mod tests {
             MemoryDomain::System(SystemSlice::from_boxed(
                 black(w as usize, h as usize).into_boxed_slice(),
             )),
-            FrameTiming { pts_ns, ..FrameTiming::default() },
+            FrameTiming {
+                pts_ns,
+                ..FrameTiming::default()
+            },
             0,
         )
     }
@@ -1112,8 +1195,20 @@ mod tests {
             "1\n00:00:01,000 --> 00:00:04,000\nHELLO\n\n2\n00:00:05,000 --> 00:00:06,000\nBYE\n",
         );
         assert_eq!(ov.cue_count(), 2);
-        assert_eq!(ov.active(2_000_000_000).iter().map(|c| c.text.as_str()).collect::<Vec<_>>(), ["HELLO"]);
-        assert_eq!(ov.active(5_500_000_000).iter().map(|c| c.text.as_str()).collect::<Vec<_>>(), ["BYE"]);
+        assert_eq!(
+            ov.active(2_000_000_000)
+                .iter()
+                .map(|c| c.text.as_str())
+                .collect::<Vec<_>>(),
+            ["HELLO"]
+        );
+        assert_eq!(
+            ov.active(5_500_000_000)
+                .iter()
+                .map(|c| c.text.as_str())
+                .collect::<Vec<_>>(),
+            ["BYE"]
+        );
         assert!(ov.active(10_000_000_000).is_empty());
     }
 
@@ -1127,8 +1222,16 @@ mod tests {
         );
         assert_eq!(ov.cue_count(), 2);
         assert_eq!(ov.active(1_000_000_000).len(), 1, "only the banner early");
-        assert_eq!(ov.active(3_000_000_000).len(), 2, "both in the overlap window");
-        assert_eq!(ov.active(5_000_000_000).len(), 1, "banner again after the second ends");
+        assert_eq!(
+            ov.active(3_000_000_000).len(),
+            2,
+            "both in the overlap window"
+        );
+        assert_eq!(
+            ov.active(5_000_000_000).len(),
+            1,
+            "banner again after the second ends"
+        );
     }
 
     #[tokio::test]
@@ -1138,9 +1241,14 @@ mod tests {
 
         // Before the cue: untouched (all black).
         let mut sink = PixelSink::default();
-        ov.process(PipelinePacket::DataFrame(frame_at(160, 64, 0)), &mut sink).await.unwrap();
+        ov.process(PipelinePacket::DataFrame(frame_at(160, 64, 0)), &mut sink)
+            .await
+            .unwrap();
         let before = sink.last.take().expect("forwarded");
-        assert!(!any_nonblack(&before, 160, 64), "no text before the cue starts");
+        assert!(
+            !any_nonblack(&before, 160, 64),
+            "no text before the cue starts"
+        );
 
         // During the cue: some white pixels were painted.
         ov.process(
@@ -1150,7 +1258,10 @@ mod tests {
         .await
         .unwrap();
         let during = sink.last.take().expect("forwarded");
-        assert!(any_nonblack(&during, 160, 64), "text painted during the cue");
+        assert!(
+            any_nonblack(&during, 160, 64),
+            "text painted during the cue"
+        );
 
         // After the cue: untouched again.
         ov.process(
@@ -1185,8 +1296,19 @@ mod tests {
 
     /// A one-cue overlay (active for all time) of `text` with `settings`, at the
     /// given geometry, configured and ready to `render_active`.
-    fn overlay_with(w: u32, h: u32, text: &str, settings: crate::subparse::CueSettings) -> TextOverlay {
-        TextOverlay { width: w, height: h, configured: true, ..TextOverlay::new() }.with_cues(vec![Cue {
+    fn overlay_with(
+        w: u32,
+        h: u32,
+        text: &str,
+        settings: crate::subparse::CueSettings,
+    ) -> TextOverlay {
+        TextOverlay {
+            width: w,
+            height: h,
+            configured: true,
+            ..TextOverlay::new()
+        }
+        .with_cues(vec![Cue {
             start_ns: 0,
             end_ns: u64::MAX,
             text: text.into(),
@@ -1211,16 +1333,31 @@ mod tests {
 
         // line:0% -> top of the frame.
         let mut top_buf = black(w, h);
-        overlay_with(w as u32, h as u32, "HI", CueSettings { line: Some(0), ..CueSettings::default() })
-            .render_active(&mut top_buf, 0);
+        overlay_with(
+            w as u32,
+            h as u32,
+            "HI",
+            CueSettings {
+                line: Some(0),
+                ..CueSettings::default()
+            },
+        )
+        .render_active(&mut top_buf, 0);
         let (_, _, _, top_max_y) = drawn_bounds(&top_buf, w, h).expect("drawn");
-        assert!(top_max_y < h / 2, "line:0% lands in the top half ({top_max_y})");
+        assert!(
+            top_max_y < h / 2,
+            "line:0% lands in the top half ({top_max_y})"
+        );
 
         // Default (auto line) -> bottom of the frame.
         let mut auto_buf = black(w, h);
-        overlay_with(w as u32, h as u32, "HI", CueSettings::default()).render_active(&mut auto_buf, 0);
+        overlay_with(w as u32, h as u32, "HI", CueSettings::default())
+            .render_active(&mut auto_buf, 0);
         let (_, auto_min_y, _, _) = drawn_bounds(&auto_buf, w, h).expect("drawn");
-        assert!(auto_min_y > h / 2, "auto line stacks at the bottom ({auto_min_y})");
+        assert!(
+            auto_min_y > h / 2,
+            "auto line stacks at the bottom ({auto_min_y})"
+        );
     }
 
     #[test]
@@ -1234,12 +1371,22 @@ mod tests {
             w as u32,
             h as u32,
             "HI",
-            CueSettings { position: Some(0), align: TextAlign::Start, ..CueSettings::default() },
+            CueSettings {
+                position: Some(0),
+                align: TextAlign::Start,
+                ..CueSettings::default()
+            },
         )
         .render_active(&mut left_buf, 0);
         let (left_min_x, _, left_max_x, _) = drawn_bounds(&left_buf, w, h).expect("drawn");
-        assert!(left_min_x < w / 4, "left-aligned cue starts near the left edge ({left_min_x})");
-        assert!(left_max_x < w / 2, "and stays in the left half ({left_max_x})");
+        assert!(
+            left_min_x < w / 4,
+            "left-aligned cue starts near the left edge ({left_min_x})"
+        );
+        assert!(
+            left_max_x < w / 2,
+            "and stays in the left half ({left_max_x})"
+        );
 
         // position:100% align:end -> hugs the right edge.
         let mut right_buf = black(w, h);
@@ -1247,12 +1394,22 @@ mod tests {
             w as u32,
             h as u32,
             "HI",
-            CueSettings { position: Some(100), align: TextAlign::End, ..CueSettings::default() },
+            CueSettings {
+                position: Some(100),
+                align: TextAlign::End,
+                ..CueSettings::default()
+            },
         )
         .render_active(&mut right_buf, 0);
         let (right_min_x, _, right_max_x, _) = drawn_bounds(&right_buf, w, h).expect("drawn");
-        assert!(right_max_x > 3 * w / 4, "right-aligned cue ends near the right edge ({right_max_x})");
-        assert!(right_min_x > w / 2, "and stays in the right half ({right_min_x})");
+        assert!(
+            right_max_x > 3 * w / 4,
+            "right-aligned cue ends near the right edge ({right_max_x})"
+        );
+        assert!(
+            right_min_x > w / 2,
+            "and stays in the right half ({right_min_x})"
+        );
     }
 
     #[test]
@@ -1287,12 +1444,22 @@ mod tests {
     }
 
     #[cfg(feature = "truetype-overlay")]
-    fn cjk_overlay(w: u32, h: u32, text: &str, settings: crate::subparse::CueSettings) -> Option<TextOverlay> {
+    fn cjk_overlay(
+        w: u32,
+        h: u32,
+        text: &str,
+        settings: crate::subparse::CueSettings,
+    ) -> Option<TextOverlay> {
         let bytes = cjk_font_bytes()?;
         let mut ov = TextOverlay::new()
             .with_font_bytes(&bytes, 0)
             .expect("font parses")
-            .with_cues(vec![Cue { start_ns: 0, end_ns: u64::MAX, text: text.into(), settings }]);
+            .with_cues(vec![Cue {
+                start_ns: 0,
+                end_ns: u64::MAX,
+                text: text.into(),
+                settings,
+            }]);
         ov.width = w;
         ov.height = h;
         ov.configured = true;
@@ -1305,11 +1472,24 @@ mod tests {
         use crate::subparse::CueSettings;
         let (w, h) = (480usize, 160usize);
         // The bitmap path paints nothing for CJK (no glyphs); the TTF path must.
-        let bitmap = TextOverlay { width: w as u32, height: h as u32, configured: true, ..TextOverlay::new() }
-            .with_cues(vec![Cue { start_ns: 0, end_ns: u64::MAX, text: "日本語".into(), settings: CueSettings::default() }]);
+        let bitmap = TextOverlay {
+            width: w as u32,
+            height: h as u32,
+            configured: true,
+            ..TextOverlay::new()
+        }
+        .with_cues(vec![Cue {
+            start_ns: 0,
+            end_ns: u64::MAX,
+            text: "日本語".into(),
+            settings: CueSettings::default(),
+        }]);
         let mut bbuf = black(w, h);
         bitmap.render_active(&mut bbuf, 0);
-        assert!(drawn_bounds(&bbuf, w, h).is_none(), "bitmap font has no CJK glyphs");
+        assert!(
+            drawn_bounds(&bbuf, w, h).is_none(),
+            "bitmap font has no CJK glyphs"
+        );
 
         let Some(ov) = cjk_overlay(w as u32, h as u32, "日本語", CueSettings::default()) else {
             std::eprintln!("skip: no CJK system font found");
@@ -1317,7 +1497,10 @@ mod tests {
         };
         let mut buf = black(w, h);
         ov.render_active_ttf(&mut buf, 0);
-        assert!(drawn_bounds(&buf, w, h).is_some(), "TTF font renders CJK glyphs");
+        assert!(
+            drawn_bounds(&buf, w, h).is_some(),
+            "TTF font renders CJK glyphs"
+        );
     }
 
     #[test]
@@ -1327,7 +1510,10 @@ mod tests {
         let (w, h) = (320usize, 320usize);
         // vertical:rl with two logical lines -> two columns; both must paint, and
         // the rightmost column (first line) should sit to the right of the second.
-        let settings = CueSettings { vertical: WritingMode::VerticalRl, ..CueSettings::default() };
+        let settings = CueSettings {
+            vertical: WritingMode::VerticalRl,
+            ..CueSettings::default()
+        };
         let Some(ov) = cjk_overlay(w as u32, h as u32, "縦書き\n二列目", settings) else {
             std::eprintln!("skip: no CJK system font found");
             return;
@@ -1382,15 +1568,24 @@ mod tests {
         let mut buf = black(w, h);
         ov.render_active_ttf(&mut buf, 0);
         // fontdue produced empty glyphs for CFF; ab_glyph rasterizes the outlines.
-        assert!(drawn_bounds(&buf, w, h).is_some(), "CFF outlines rasterize to visible glyphs");
+        assert!(
+            drawn_bounds(&buf, w, h).is_some(),
+            "CFF outlines rasterize to visible glyphs"
+        );
     }
 
     // -- TextOverlayN (M403): the two-input video + text-stream overlay. --------
 
     fn text_cue_frame(pts_ns: u64, duration_ns: u64, text: &str) -> Frame {
         Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(text.as_bytes().to_vec().into_boxed_slice())),
-            FrameTiming { pts_ns, duration_ns, ..FrameTiming::default() },
+            MemoryDomain::System(SystemSlice::from_boxed(
+                text.as_bytes().to_vec().into_boxed_slice(),
+            )),
+            FrameTiming {
+                pts_ns,
+                duration_ns,
+                ..FrameTiming::default()
+            },
             0,
         )
     }
@@ -1401,8 +1596,22 @@ mod tests {
         let ov = TextOverlayN::new();
         // Pad 0 = video (RGBA8), pad 1 = text (Utf8); each rejects the other's caps.
         assert!(ov.intercept_caps(0, &rgba_caps(16, 16)).is_ok());
-        assert!(ov.intercept_caps(0, &Caps::Text { format: TextFormat::Utf8 }).is_err());
-        assert!(ov.intercept_caps(1, &Caps::Text { format: TextFormat::Utf8 }).is_ok());
+        assert!(ov
+            .intercept_caps(
+                0,
+                &Caps::Text {
+                    format: TextFormat::Utf8
+                }
+            )
+            .is_err());
+        assert!(ov
+            .intercept_caps(
+                1,
+                &Caps::Text {
+                    format: TextFormat::Utf8
+                }
+            )
+            .is_ok());
         assert!(ov.intercept_caps(1, &rgba_caps(16, 16)).is_err());
     }
 
@@ -1410,33 +1619,67 @@ mod tests {
     async fn overlayn_paints_streamed_cue_onto_video() {
         use g2g_core::TextFormat;
         let mut ov = TextOverlayN::new();
-        ov.configure_pipeline(0, &rgba_caps(160, 64)).expect("video pad");
-        ov.configure_pipeline(1, &Caps::Text { format: TextFormat::Utf8 }).expect("text pad");
+        ov.configure_pipeline(0, &rgba_caps(160, 64))
+            .expect("video pad");
+        ov.configure_pipeline(
+            1,
+            &Caps::Text {
+                format: TextFormat::Utf8,
+            },
+        )
+        .expect("text pad");
         // Merged output is the video caps.
         assert_eq!(ov.output_caps().unwrap(), rgba_caps(160, 64));
 
         let mut sink = PixelSink::default();
         // A cue arrives on the text pad first (PTS-merged: it precedes its video).
-        ov.process(1, PipelinePacket::DataFrame(text_cue_frame(1_000_000_000, 2_000_000_000, "HELLO")), &mut sink)
-            .await
-            .unwrap();
+        ov.process(
+            1,
+            PipelinePacket::DataFrame(text_cue_frame(1_000_000_000, 2_000_000_000, "HELLO")),
+            &mut sink,
+        )
+        .await
+        .unwrap();
         assert_eq!(ov.cue_count(), 1, "cue stored from the text stream");
 
         // Video frame before the cue window: untouched.
-        ov.process(0, PipelinePacket::DataFrame(frame_at(160, 64, 0)), &mut sink).await.unwrap();
-        assert!(!any_nonblack(&sink.last.take().unwrap(), 160, 64), "no text before the cue");
+        ov.process(
+            0,
+            PipelinePacket::DataFrame(frame_at(160, 64, 0)),
+            &mut sink,
+        )
+        .await
+        .unwrap();
+        assert!(
+            !any_nonblack(&sink.last.take().unwrap(), 160, 64),
+            "no text before the cue"
+        );
 
         // Video frame inside the window: the streamed cue is painted.
-        ov.process(0, PipelinePacket::DataFrame(frame_at(160, 64, 1_500_000_000)), &mut sink)
-            .await
-            .unwrap();
-        assert!(any_nonblack(&sink.last.take().unwrap(), 160, 64), "streamed cue painted on video");
+        ov.process(
+            0,
+            PipelinePacket::DataFrame(frame_at(160, 64, 1_500_000_000)),
+            &mut sink,
+        )
+        .await
+        .unwrap();
+        assert!(
+            any_nonblack(&sink.last.take().unwrap(), 160, 64),
+            "streamed cue painted on video"
+        );
 
         // Video frame after the window: untouched again.
-        ov.process(0, PipelinePacket::DataFrame(frame_at(160, 64, 4_000_000_000)), &mut sink)
-            .await
-            .unwrap();
-        assert!(!any_nonblack(&sink.last.take().unwrap(), 160, 64), "no text after the cue");
+        ov.process(
+            0,
+            PipelinePacket::DataFrame(frame_at(160, 64, 4_000_000_000)),
+            &mut sink,
+        )
+        .await
+        .unwrap();
+        assert!(
+            !any_nonblack(&sink.last.take().unwrap(), 160, 64),
+            "no text after the cue"
+        );
         assert_eq!(ov.drawn_count(), 3);
     }
 
@@ -1450,7 +1693,13 @@ mod tests {
         let (w, h) = (200u32, 96u32);
         let mut ov = TextOverlayN::new();
         ov.configure_pipeline(0, &rgba_caps(w, h)).unwrap();
-        ov.configure_pipeline(1, &Caps::Text { format: TextFormat::Utf8 }).unwrap();
+        ov.configure_pipeline(
+            1,
+            &Caps::Text {
+                format: TextFormat::Utf8,
+            },
+        )
+        .unwrap();
 
         let mut frame = text_cue_frame(0, u64::MAX / 2, "HI");
         frame.meta.attach(TextCueMeta {
@@ -1462,14 +1711,24 @@ mod tests {
             },
         });
         let mut sink = PixelSink::default();
-        ov.process(1, PipelinePacket::DataFrame(frame), &mut sink).await.unwrap();
+        ov.process(1, PipelinePacket::DataFrame(frame), &mut sink)
+            .await
+            .unwrap();
 
-        ov.process(0, PipelinePacket::DataFrame(frame_at(w, h, 0)), &mut sink).await.unwrap();
+        ov.process(0, PipelinePacket::DataFrame(frame_at(w, h, 0)), &mut sink)
+            .await
+            .unwrap();
         let painted = sink.last.take().expect("forwarded");
         let (_, _, max_x, max_y) =
             drawn_bounds(&painted, w as usize, h as usize).expect("cue painted");
-        assert!(max_x < (w / 2) as usize, "meta position placed the cue in the left half ({max_x})");
-        assert!(max_y < (h / 2) as usize, "meta line placed the cue in the top half ({max_y})");
+        assert!(
+            max_x < (w / 2) as usize,
+            "meta position placed the cue in the left half ({max_x})"
+        );
+        assert!(
+            max_y < (h / 2) as usize,
+            "meta line placed the cue in the top half ({max_y})"
+        );
     }
 
     #[tokio::test]
@@ -1477,13 +1736,25 @@ mod tests {
         use g2g_core::TextFormat;
         let mut ov = TextOverlayN::new();
         ov.configure_pipeline(0, &rgba_caps(32, 32)).unwrap();
-        ov.configure_pipeline(1, &Caps::Text { format: TextFormat::Utf8 }).unwrap();
+        ov.configure_pipeline(
+            1,
+            &Caps::Text {
+                format: TextFormat::Utf8,
+            },
+        )
+        .unwrap();
         let mut sink = PixelSink::default();
-        ov.process(1, PipelinePacket::DataFrame(text_cue_frame(0, 1_000_000_000, "X")), &mut sink)
+        ov.process(
+            1,
+            PipelinePacket::DataFrame(text_cue_frame(0, 1_000_000_000, "X")),
+            &mut sink,
+        )
+        .await
+        .unwrap();
+        assert_eq!(ov.cue_count(), 1);
+        ov.process(1, PipelinePacket::Flush, &mut sink)
             .await
             .unwrap();
-        assert_eq!(ov.cue_count(), 1);
-        ov.process(1, PipelinePacket::Flush, &mut sink).await.unwrap();
         assert_eq!(ov.cue_count(), 0, "flush clears pending cues");
     }
 }

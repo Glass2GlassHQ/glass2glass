@@ -32,7 +32,7 @@ use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ClockSync, ConfigureOutcome, Dim, ElementMetadata,
     FrameTiming, G2gError, MediaClock, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, RawVideoFormat, Rate,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
 };
 
 use crate::capsfilter::parse_raw_format;
@@ -47,7 +47,10 @@ use crate::videoconvert::raw_format_to_str;
 /// or 0 if not fixed (do not pace).
 fn caps_fps(caps: &Caps) -> u32 {
     match caps {
-        Caps::RawVideo { framerate: Rate::Fixed(q), .. } => q >> 16,
+        Caps::RawVideo {
+            framerate: Rate::Fixed(q),
+            ..
+        } => q >> 16,
         _ => 0,
     }
 }
@@ -57,11 +60,12 @@ fn caps_fps(caps: &Caps) -> u32 {
 /// format, or a non-fixed dimension.
 fn video_geometry(caps: &Caps) -> Result<(RawVideoFormat, usize, usize), G2gError> {
     match caps {
-        Caps::RawVideo { format, width: Dim::Fixed(w), height: Dim::Fixed(h), .. }
-            if Sampling::from_format(*format).is_some() =>
-        {
-            Ok((*format, *w as usize, *h as usize))
-        }
+        Caps::RawVideo {
+            format,
+            width: Dim::Fixed(w),
+            height: Dim::Fixed(h),
+            ..
+        } if Sampling::from_format(*format).is_some() => Ok((*format, *w as usize, *h as usize)),
         _ => Err(G2gError::CapsMismatch),
     }
 }
@@ -148,7 +152,10 @@ impl St2110VideoSink {
 }
 
 impl AsyncElement for St2110VideoSink {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>> where Self: 'a;
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         video_geometry(upstream_caps)?;
@@ -169,10 +176,15 @@ impl AsyncElement for St2110VideoSink {
         self.height = height;
         self.sampling = Some(sampling);
         self.frame_period_ns = frame_period_ns(caps_fps(absolute_caps));
-        self.packetizer =
-            Some(St2110VideoPacketizer::new(self.payload_type, self.ssrc, sampling, self.max_packet));
+        self.packetizer = Some(St2110VideoPacketizer::new(
+            self.payload_type,
+            self.ssrc,
+            sampling,
+            self.max_packet,
+        ));
         let sock = UdpSocket::bind(("0.0.0.0", 0)).map_err(io_err)?;
-        sock.connect((self.host.as_str(), self.port)).map_err(io_err)?;
+        sock.connect((self.host.as_str(), self.port))
+            .map_err(io_err)?;
         self.socket = Some(sock);
         Ok(ConfigureOutcome::Accepted)
     }
@@ -198,8 +210,12 @@ impl AsyncElement for St2110VideoSink {
             PropertySpec::new("payload-type", PropKind::Uint, "Dynamic RTP payload type")
                 .with_default("96"),
             PropertySpec::new("ssrc", PropKind::Uint, "RTP SSRC"),
-            PropertySpec::new("max-packet", PropKind::Uint, "Max RTP packet size in octets")
-                .with_default("1460"),
+            PropertySpec::new(
+                "max-packet",
+                PropKind::Uint,
+                "Max RTP packet size in octets",
+            )
+            .with_default("1460"),
             PropertySpec::new(
                 "pacing",
                 PropKind::Str,
@@ -314,14 +330,18 @@ impl AsyncElement for St2110VideoSink {
 
 impl PadTemplates for St2110VideoSink {
     fn pad_templates() -> Vec<PadTemplate> {
-        let alts = [RawVideoFormat::Rgba8, RawVideoFormat::Yuyv, RawVideoFormat::I422p10]
-            .map(|format| Caps::RawVideo {
-                format,
-                width: Dim::Any,
-                height: Dim::Any,
-                framerate: Rate::Any,
-            })
-            .to_vec();
+        let alts = [
+            RawVideoFormat::Rgba8,
+            RawVideoFormat::Yuyv,
+            RawVideoFormat::I422p10,
+        ]
+        .map(|format| Caps::RawVideo {
+            format,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        })
+        .to_vec();
         Vec::from([PadTemplate::sink(CapsSet::from_alternatives(alts))])
     }
 }
@@ -367,7 +387,10 @@ fn build_frame(
     let pts_ns = clock.ticks_to_ns(u64::from(rtp_timestamp.wrapping_sub(base)));
     Frame {
         domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming { pts_ns, ..FrameTiming::default() },
+        timing: FrameTiming {
+            pts_ns,
+            ..FrameTiming::default()
+        },
         sequence: count,
         meta: Default::default(),
     }
@@ -413,13 +436,19 @@ impl St2110VideoSrc {
     /// The bound local UDP port of the primary ("red") path after
     /// `configure_pipeline` (for tests binding an ephemeral port with `port = 0`).
     pub fn local_port(&self) -> Option<u16> {
-        self.socket.as_ref().and_then(|s| s.local_addr().ok()).map(|a| a.port())
+        self.socket
+            .as_ref()
+            .and_then(|s| s.local_addr().ok())
+            .map(|a| a.port())
     }
 
     /// The bound local UDP port of the redundant ("blue") path, or `None` if
     /// redundancy is off or unbound.
     pub fn redundant_local_port(&self) -> Option<u16> {
-        self.socket2.as_ref().and_then(|s| s.local_addr().ok()).map(|a| a.port())
+        self.socket2
+            .as_ref()
+            .and_then(|s| s.local_addr().ok())
+            .map(|a| a.port())
     }
 
     /// Auto-configure this source's geometry from a parsed video [`St2110Sdp`] (the
@@ -429,7 +458,13 @@ impl St2110VideoSrc {
     /// configured (a receiver joins the group on its chosen interface); the group
     /// address is available on the SDP for a caller that wants to bind it directly.
     pub fn apply_sdp(&mut self, sdp: &St2110Sdp) -> bool {
-        let St2110Essence::Video { sampling, width, height, exact_fps } = &sdp.essence else {
+        let St2110Essence::Video {
+            sampling,
+            width,
+            height,
+            exact_fps,
+        } = &sdp.essence
+        else {
             return false;
         };
         self.format = sampling.raw_format();
@@ -455,8 +490,14 @@ impl St2110VideoSrc {
 }
 
 impl SourceLoop for St2110VideoSrc {
-    type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>> where Self: 'a;
-    type CapsFuture<'a> = Ready<Result<Caps, G2gError>> where Self: 'a;
+    type RunFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
+    where
+        Self: 'a;
+    type CapsFuture<'a>
+        = Ready<Result<Caps, G2gError>>
+    where
+        Self: 'a;
 
     fn intercept_caps(&mut self) -> Self::CapsFuture<'_> {
         ready(Ok(self.caps()))
@@ -467,13 +508,14 @@ impl SourceLoop for St2110VideoSrc {
         St2110VideoDepacketizer::new(self.format, self.width, self.height)
             .ok_or(G2gError::CapsMismatch)?;
         let sock = UdpSocket::bind((self.address.as_str(), self.port)).map_err(io_err)?;
-        sock.set_read_timeout(Some(Duration::from_millis(self.recv_timeout_ms))).map_err(io_err)?;
+        sock.set_read_timeout(Some(Duration::from_millis(self.recv_timeout_ms)))
+            .map_err(io_err)?;
         self.socket = Some(sock);
         // ST 2110-7: bind the redundant ("blue") path too; the receiver sets its own
         // (shorter) poll timeout on both sockets when the run loop starts.
         if self.redundant {
-            let sock2 =
-                UdpSocket::bind((self.redundant_address.as_str(), self.redundant_port)).map_err(io_err)?;
+            let sock2 = UdpSocket::bind((self.redundant_address.as_str(), self.redundant_port))
+                .map_err(io_err)?;
             self.socket2 = Some(sock2);
         }
         Ok(ConfigureOutcome::Accepted)
@@ -498,9 +540,16 @@ impl SourceLoop for St2110VideoSrc {
                 let idle = Duration::from_millis(self.recv_timeout_ms);
                 let mut rx = RedundantRtpReceiver::new(&socks, poll, idle).map_err(io_err)?;
                 while let Some(n) = rx.recv_novel(&mut buf).map_err(io_err)? {
-                    let Some(vframe) = depack.depacketize(&buf[..n]) else { continue };
-                    let frame =
-                        build_frame(vframe.bytes, vframe.rtp_timestamp, &clock, &mut base_rtp, count);
+                    let Some(vframe) = depack.depacketize(&buf[..n]) else {
+                        continue;
+                    };
+                    let frame = build_frame(
+                        vframe.bytes,
+                        vframe.rtp_timestamp,
+                        &clock,
+                        &mut base_rtp,
+                        count,
+                    );
                     out.push(PipelinePacket::DataFrame(frame)).await?;
                     count += 1;
                 }
@@ -520,11 +569,18 @@ impl SourceLoop for St2110VideoSrc {
                         }
                         Err(e) => return Err(io_err(e)),
                     };
-                    let Some(vframe) = depack.depacketize(&buf[..n]) else { continue };
+                    let Some(vframe) = depack.depacketize(&buf[..n]) else {
+                        continue;
+                    };
                     // PTS = the frame's media-clock offset from the first frame (the PTP
                     // grandmaster supplies absolute time upstream).
-                    let frame =
-                        build_frame(vframe.bytes, vframe.rtp_timestamp, &clock, &mut base_rtp, count);
+                    let frame = build_frame(
+                        vframe.bytes,
+                        vframe.rtp_timestamp,
+                        &clock,
+                        &mut base_rtp,
+                        count,
+                    );
                     out.push(PipelinePacket::DataFrame(frame)).await?;
                     count += 1;
                 }
@@ -537,14 +593,18 @@ impl SourceLoop for St2110VideoSrc {
 
 impl PadTemplates for St2110VideoSrc {
     fn pad_templates() -> Vec<PadTemplate> {
-        let alts = [RawVideoFormat::Rgba8, RawVideoFormat::Yuyv, RawVideoFormat::I422p10]
-            .map(|format| Caps::RawVideo {
-                format,
-                width: Dim::Any,
-                height: Dim::Any,
-                framerate: Rate::Any,
-            })
-            .to_vec();
+        let alts = [
+            RawVideoFormat::Rgba8,
+            RawVideoFormat::Yuyv,
+            RawVideoFormat::I422p10,
+        ]
+        .map(|format| Caps::RawVideo {
+            format,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        })
+        .to_vec();
         Vec::from([PadTemplate::source(CapsSet::from_alternatives(alts))])
     }
 }
@@ -675,7 +735,10 @@ mod tests {
     fn raw_frame(bytes: Vec<u8>, pts_ns: u64) -> PipelinePacket {
         PipelinePacket::DataFrame(Frame {
             domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-            timing: FrameTiming { pts_ns, ..FrameTiming::default() },
+            timing: FrameTiming {
+                pts_ns,
+                ..FrameTiming::default()
+            },
             sequence: 0,
             meta: Default::default(),
         })
@@ -695,11 +758,15 @@ mod tests {
         };
 
         let mut src = St2110VideoSrc::new();
-        src.set_property("address", PropValue::Str("127.0.0.1".into())).unwrap();
+        src.set_property("address", PropValue::Str("127.0.0.1".into()))
+            .unwrap();
         src.set_property("port", PropValue::Uint(0)).unwrap();
-        src.set_property("format", PropValue::Str("rgba".into())).unwrap();
-        src.set_property("width", PropValue::Uint(w as u64)).unwrap();
-        src.set_property("height", PropValue::Uint(h as u64)).unwrap();
+        src.set_property("format", PropValue::Str("rgba".into()))
+            .unwrap();
+        src.set_property("width", PropValue::Uint(w as u64))
+            .unwrap();
+        src.set_property("height", PropValue::Uint(h as u64))
+            .unwrap();
         src.recv_timeout_ms = 300;
         src.configure_pipeline(&caps).expect("src binds");
         let port = src.local_port().expect("bound port");
@@ -723,7 +790,10 @@ mod tests {
         assert_eq!(n, 1, "one frame reassembled");
         assert!(cap.eos, "source emitted EOS on the gap");
         assert_eq!(cap.frames.len(), 1);
-        assert_eq!(cap.frames[0], input, "RGBA frame survives sink -> UDP -> src");
+        assert_eq!(
+            cap.frames[0], input,
+            "RGBA frame survives sink -> UDP -> src"
+        );
     }
 
     #[test]
@@ -739,11 +809,15 @@ mod tests {
         };
 
         let mut src = St2110VideoSrc::new();
-        src.set_property("address", PropValue::Str("127.0.0.1".into())).unwrap();
+        src.set_property("address", PropValue::Str("127.0.0.1".into()))
+            .unwrap();
         src.set_property("port", PropValue::Uint(0)).unwrap();
-        src.set_property("format", PropValue::Str("i422_10le".into())).unwrap();
-        src.set_property("width", PropValue::Uint(w as u64)).unwrap();
-        src.set_property("height", PropValue::Uint(h as u64)).unwrap();
+        src.set_property("format", PropValue::Str("i422_10le".into()))
+            .unwrap();
+        src.set_property("width", PropValue::Uint(w as u64))
+            .unwrap();
+        src.set_property("height", PropValue::Uint(h as u64))
+            .unwrap();
         src.recv_timeout_ms = 300;
         src.configure_pipeline(&caps).expect("src binds");
         let port = src.local_port().expect("bound port");
@@ -764,7 +838,10 @@ mod tests {
         let mut cap = Capture::default();
         let n = block_on(src.run(&mut cap)).expect("src runs");
         assert_eq!(n, 1);
-        assert_eq!(cap.frames[0], input, "10-bit 4:2:2 frame survives sink -> UDP -> src");
+        assert_eq!(
+            cap.frames[0], input,
+            "10-bit 4:2:2 frame survives sink -> UDP -> src"
+        );
     }
 
     #[test]
@@ -783,14 +860,21 @@ mod tests {
         };
 
         let mut src = St2110VideoSrc::new();
-        src.set_property("address", PropValue::Str("127.0.0.1".into())).unwrap();
+        src.set_property("address", PropValue::Str("127.0.0.1".into()))
+            .unwrap();
         src.set_property("port", PropValue::Uint(0)).unwrap();
-        src.set_property("redundant", PropValue::Bool(true)).unwrap();
-        src.set_property("redundant-address", PropValue::Str("127.0.0.1".into())).unwrap();
-        src.set_property("redundant-port", PropValue::Uint(0)).unwrap();
-        src.set_property("format", PropValue::Str("rgba".into())).unwrap();
-        src.set_property("width", PropValue::Uint(w as u64)).unwrap();
-        src.set_property("height", PropValue::Uint(h as u64)).unwrap();
+        src.set_property("redundant", PropValue::Bool(true))
+            .unwrap();
+        src.set_property("redundant-address", PropValue::Str("127.0.0.1".into()))
+            .unwrap();
+        src.set_property("redundant-port", PropValue::Uint(0))
+            .unwrap();
+        src.set_property("format", PropValue::Str("rgba".into()))
+            .unwrap();
+        src.set_property("width", PropValue::Uint(w as u64))
+            .unwrap();
+        src.set_property("height", PropValue::Uint(h as u64))
+            .unwrap();
         src.recv_timeout_ms = 300;
         src.configure_pipeline(&caps).expect("src binds both paths");
         let red = src.local_port().expect("red bound");
@@ -803,7 +887,9 @@ mod tests {
         // both, and the marker (last) packet is never dropped, so -7 recovers the frame.
         let input: Vec<u8> = (0..w * 4 * h).map(|i| (i * 11 + 5) as u8).collect();
         let mut tx = St2110VideoPacketizer::new(96, 0xABCD, Sampling::Rgba8, 60);
-        let packets = tx.packetize(&input, w, h, 1_000_000_000).expect("packetizes");
+        let packets = tx
+            .packetize(&input, w, h, 1_000_000_000)
+            .expect("packetizes");
         assert!(packets.len() > 6, "frame split into several packets");
         let last = packets.len() - 1;
         let red_drops = [2usize];
@@ -827,27 +913,44 @@ mod tests {
         let n = block_on(src.run(&mut cap)).expect("src runs");
         assert_eq!(n, 1, "one frame reassembled from the merged paths");
         assert!(cap.eos, "source emitted EOS on the gap");
-        assert_eq!(cap.frames[0], input, "the RGBA frame is reconstructed byte-exact via -7 merge");
+        assert_eq!(
+            cap.frames[0], input,
+            "the RGBA frame is reconstructed byte-exact via -7 merge"
+        );
     }
 
     #[test]
     fn redundant_properties_round_trip() {
         let mut src = St2110VideoSrc::new();
         assert_eq!(src.get_property("redundant"), Some(PropValue::Bool(false)));
-        src.set_property("redundant", PropValue::Bool(true)).unwrap();
-        src.set_property("redundant-address", PropValue::Str("239.0.0.2".into())).unwrap();
-        src.set_property("redundant-port", PropValue::Uint(5009)).unwrap();
+        src.set_property("redundant", PropValue::Bool(true))
+            .unwrap();
+        src.set_property("redundant-address", PropValue::Str("239.0.0.2".into()))
+            .unwrap();
+        src.set_property("redundant-port", PropValue::Uint(5009))
+            .unwrap();
         assert_eq!(src.get_property("redundant"), Some(PropValue::Bool(true)));
-        assert_eq!(src.get_property("redundant-address"), Some(PropValue::Str("239.0.0.2".into())));
-        assert_eq!(src.get_property("redundant-port"), Some(PropValue::Uint(5009)));
+        assert_eq!(
+            src.get_property("redundant-address"),
+            Some(PropValue::Str("239.0.0.2".into()))
+        );
+        assert_eq!(
+            src.get_property("redundant-port"),
+            Some(PropValue::Uint(5009))
+        );
     }
 
     #[test]
     fn sink_properties_round_trip() {
         let mut sink = St2110VideoSink::new();
-        sink.set_property("host", PropValue::Str("239.0.0.9".into())).unwrap();
-        sink.set_property("max-packet", PropValue::Uint(9000)).unwrap();
-        assert_eq!(sink.get_property("host"), Some(PropValue::Str("239.0.0.9".into())));
+        sink.set_property("host", PropValue::Str("239.0.0.9".into()))
+            .unwrap();
+        sink.set_property("max-packet", PropValue::Uint(9000))
+            .unwrap();
+        assert_eq!(
+            sink.get_property("host"),
+            Some(PropValue::Str("239.0.0.9".into()))
+        );
         assert_eq!(sink.get_property("max-packet"), Some(PropValue::Uint(9000)));
         assert_eq!(
             sink.set_property("port", PropValue::Uint(70_000)),
@@ -878,7 +981,10 @@ mod tests {
 
         let mut src = St2110VideoSrc::new();
         assert!(src.apply_sdp(&parsed), "video SDP configures the src");
-        assert_eq!(src.get_property("format"), Some(PropValue::Str("I422_10LE".into())));
+        assert_eq!(
+            src.get_property("format"),
+            Some(PropValue::Str("I422_10LE".into()))
+        );
         assert_eq!(src.get_property("width"), Some(PropValue::Uint(1920)));
         assert_eq!(src.get_property("height"), Some(PropValue::Uint(1080)));
         assert_eq!(src.get_property("framerate"), Some(PropValue::Uint(60))); // 59.94 -> 60
@@ -892,7 +998,11 @@ mod tests {
             ptp: None,
         };
         assert!(!src.apply_sdp(&audio), "non-video SDP is rejected");
-        assert_eq!(src.get_property("port"), Some(PropValue::Uint(5008)), "unchanged");
+        assert_eq!(
+            src.get_property("port"),
+            Some(PropValue::Uint(5008)),
+            "unchanged"
+        );
     }
 
     #[test]
@@ -903,16 +1013,27 @@ mod tests {
             Err(PropError::Value),
             "NV12 has no -20 sampling"
         );
-        src.set_property("format", PropValue::Str("rgba".into())).unwrap();
-        assert_eq!(src.get_property("format"), Some(PropValue::Str("RGBA".into())));
+        src.set_property("format", PropValue::Str("rgba".into()))
+            .unwrap();
+        assert_eq!(
+            src.get_property("format"),
+            Some(PropValue::Str("RGBA".into()))
+        );
     }
 
     #[test]
     fn pacing_property_round_trips_and_rejects_unknown() {
         let mut sink = St2110VideoSink::new();
-        assert_eq!(sink.get_property("pacing"), Some(PropValue::Str("off".into())));
-        sink.set_property("pacing", PropValue::Str("gapped".into())).unwrap();
-        assert_eq!(sink.get_property("pacing"), Some(PropValue::Str("gapped".into())));
+        assert_eq!(
+            sink.get_property("pacing"),
+            Some(PropValue::Str("off".into()))
+        );
+        sink.set_property("pacing", PropValue::Str("gapped".into()))
+            .unwrap();
+        assert_eq!(
+            sink.get_property("pacing"),
+            Some(PropValue::Str("gapped".into()))
+        );
         assert_eq!(sink.pacing, Some(PacingProfile::Gapped));
         assert_eq!(
             sink.set_property("pacing", PropValue::Str("bogus".into())),
@@ -940,19 +1061,25 @@ mod tests {
         sink.host = String::from("127.0.0.1");
         sink.port = port;
         sink.max_packet = 60; // force several packets across the frame
-        sink.set_property("pacing", PropValue::Str("linear".into())).unwrap();
+        sink.set_property("pacing", PropValue::Str("linear".into()))
+            .unwrap();
         sink.configure_pipeline(&caps).expect("configures");
         assert_eq!(sink.frame_period_ns, 20_000_000, "50 fps -> 20 ms period");
 
         let input: Vec<u8> = (0..w * 4 * h).map(|i| (i * 7) as u8).collect();
         let start = std::time::Instant::now();
         let mut null = Capture::default();
-        sink.process(raw_frame(input, 0), &mut null).await.expect("sink sends");
+        sink.process(raw_frame(input, 0), &mut null)
+            .await
+            .expect("sink sends");
         let elapsed = start.elapsed();
 
         // The frame was paced: sending took a meaningful fraction of the 20 ms period
         // (a burst would finish in microseconds).
-        assert!(elapsed.as_millis() >= 10, "linear pacing spread the frame: {elapsed:?}");
+        assert!(
+            elapsed.as_millis() >= 10,
+            "linear pacing spread the frame: {elapsed:?}"
+        );
 
         let mut count = 0;
         let mut buf = [0u8; 2048];

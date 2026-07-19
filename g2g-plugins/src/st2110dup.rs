@@ -49,7 +49,10 @@ impl Default for SeamlessDedup {
 impl SeamlessDedup {
     /// A fresh de-duplicator (no packets seen yet).
     pub fn new() -> Self {
-        Self { high: None, seen: [0; WORDS] }
+        Self {
+            high: None,
+            seen: [0; WORDS],
+        }
     }
 
     /// Extend a 16-bit RTP sequence number against the highest seen, choosing the
@@ -58,16 +61,14 @@ impl SeamlessDedup {
         match self.high {
             None => u64::from(seq),
             Some(high) => {
-                let base = high & !0xFFFF;
-                let mut ext = base | u64::from(seq);
-                // Pick the candidate (previous / this / next 16-bit epoch) closest to
-                // `high`, so a wrap resolves to the intended absolute sequence.
-                let candidates = [ext.wrapping_sub(0x1_0000), ext, ext.wrapping_add(0x1_0000)];
-                ext = *candidates
-                    .iter()
-                    .min_by_key(|&&c| (c as i64).wrapping_sub(high as i64).unsigned_abs())
-                    .unwrap();
-                ext
+                // The signed 16-bit delta from the low bits of `high` is the
+                // nearest offset in either direction. Applying it keeps a
+                // backward step just below `high` instead of wrapping up to a
+                // huge absolute number (which the unsigned `ext > high` in
+                // `accept` would misread as a giant forward jump). Clamp at 0:
+                // a packet older than the anchor cannot have a negative sequence.
+                let delta = seq.wrapping_sub(high as u16) as i16 as i64;
+                (high as i64 + delta).max(0) as u64
             }
         }
     }
@@ -98,10 +99,17 @@ impl SeamlessDedup {
 
         if ext > high {
             // Advance the window, clearing the sequence slots it now uncovers so a
-            // number from the previous wrap cannot masquerade as already-seen.
-            for s in (high + 1)..=ext {
-                let (w, b) = self.bit(s);
-                self.seen[w] &= !b;
+            // number from the previous wrap cannot masquerade as already-seen. A
+            // jump of a whole window or more uncovers every slot, so clear the
+            // bitset at once instead of looping over an attacker-controlled span
+            // (a wrap can resolve `ext` far above `high`).
+            if ext - high >= WINDOW {
+                self.seen = [0; WORDS];
+            } else {
+                for s in (high + 1)..=ext {
+                    let (w, b) = self.bit(s);
+                    self.seen[w] &= !b;
+                }
             }
             self.high = Some(ext);
         } else if high.saturating_sub(ext) >= WINDOW {
@@ -163,7 +171,13 @@ mod net {
             for s in sockets {
                 s.set_read_timeout(Some(poll))?;
             }
-            Ok(Self { sockets, dedup: SeamlessDedup::new(), poll, idle_limit, next: 0 })
+            Ok(Self {
+                sockets,
+                dedup: SeamlessDedup::new(),
+                poll,
+                idle_limit,
+                next: 0,
+            })
         }
 
         /// Receive the next novel RTP packet into `buf`, returning its length, or
@@ -237,6 +251,36 @@ mod tests {
         assert!(!d.accept(&pkt(101, 2)), "its duplicate dropped");
     }
 
+    // regression: a sequence number that wraps backward (65535 right after 0)
+    // extends to a value far above `high`; the window-advance loop must not
+    // iterate that whole span (~2^64). Completing at all is the assertion, before
+    // the fix this hung. Found by fuzzing.
+    #[test]
+    fn backward_wrapping_sequence_does_not_hang() {
+        let mut d = SeamlessDedup::new();
+        assert!(d.accept(&pkt(0, 1)));
+        // seq 65535 arriving after the anchor 0 is one step *before* it, an old
+        // packet: dropped, not forwarded, and (before the fix) must not loop.
+        assert!(
+            !d.accept(&pkt(65535, 2)),
+            "pre-anchor packet is old, dropped"
+        );
+    }
+
+    #[test]
+    fn resolves_backward_and_forward_wrap_relative_to_high() {
+        // Within-window backward step is novel and forwarded.
+        let mut d = SeamlessDedup::new();
+        assert!(d.accept(&pkt(100, 1)));
+        assert!(d.accept(&pkt(50, 2)), "50 is within the window below 100");
+        assert!(!d.accept(&pkt(50, 2)), "its duplicate dropped");
+        // Forward across the 16-bit wrap advances the window (65530 -> 5).
+        let mut d = SeamlessDedup::new();
+        assert!(d.accept(&pkt(65530, 1)));
+        assert!(d.accept(&pkt(5, 2)), "5 wraps forward past 65535");
+        assert!(!d.accept(&pkt(65530, 3)), "65530 already seen, dropped");
+    }
+
     #[test]
     fn two_lossy_paths_reconstruct_the_complete_stream() {
         // 200 sequence numbers. Path A drops seq%3==0, path B drops seq%3==1, so
@@ -257,7 +301,10 @@ mod tests {
             }
         }
         let expected: Vec<u16> = (0..200).collect();
-        assert_eq!(forwarded, expected, "every sequence delivered exactly once, in order");
+        assert_eq!(
+            forwarded, expected,
+            "every sequence delivered exactly once, in order"
+        );
     }
 
     #[test]
@@ -270,7 +317,10 @@ mod tests {
         for &s in &seqs {
             let first = d.accept(&pkt(s, 1));
             let second = d.accept(&pkt(s, 1));
-            assert!(first && !second, "seq {s}: first forwarded, dup dropped across the wrap");
+            assert!(
+                first && !second,
+                "seq {s}: first forwarded, dup dropped across the wrap"
+            );
             count += 1;
         }
         assert_eq!(count, 10);
@@ -279,14 +329,15 @@ mod tests {
     #[test]
     fn rejects_short_packets() {
         let mut d = SeamlessDedup::new();
-        assert!(!d.accept(&[0u8; 8]), "shorter than an RTP header is dropped");
+        assert!(
+            !d.accept(&[0u8; 8]),
+            "shorter than an RTP header is dropped"
+        );
     }
 
     #[test]
     fn reconstructs_a_frame_through_the_real_20_depacketizer() {
-        use crate::st2110video::{
-            Sampling, St2110VideoDepacketizer, St2110VideoPacketizer,
-        };
+        use crate::st2110video::{Sampling, St2110VideoDepacketizer, St2110VideoPacketizer};
         use g2g_core::RawVideoFormat;
 
         // Packetize an 8x4 RGBA frame into many small packets, then split them across
@@ -295,7 +346,9 @@ mod tests {
         let (w, h) = (8usize, 4usize);
         let frame: Vec<u8> = (0..w * 4 * h).map(|i| (i * 13 + 1) as u8).collect();
         let mut tx = St2110VideoPacketizer::new(96, 0xABCD, Sampling::Rgba8, 12 + 2 + 6 + 8);
-        let packets = tx.packetize(&frame, w, h, 1_000_000_000).expect("packetizes");
+        let packets = tx
+            .packetize(&frame, w, h, 1_000_000_000)
+            .expect("packetizes");
         assert!(packets.len() > 4, "frame split into several packets");
 
         let mut dedup = SeamlessDedup::new();
@@ -316,6 +369,9 @@ mod tests {
             }
         }
         let f = done.expect("frame completes despite each path dropping half the packets");
-        assert_eq!(f.bytes, frame, "the RGBA frame is reconstructed byte-exact via -7 merge");
+        assert_eq!(
+            f.bytes, frame,
+            "the RGBA frame is reconstructed byte-exact via -7 merge"
+        );
     }
 }

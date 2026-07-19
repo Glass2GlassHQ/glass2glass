@@ -94,7 +94,12 @@ impl Fmp4Muxer {
     /// Apply a mid-stream caps refinement. A geometry change before the header is
     /// written is absorbed; a codec swap after the `moov` is written is not
     /// expressible and fails loud.
-    pub(crate) fn update_caps(&mut self, codec: VideoCodec, width: u32, height: u32) -> Result<(), G2gError> {
+    pub(crate) fn update_caps(
+        &mut self,
+        codec: VideoCodec,
+        width: u32,
+        height: u32,
+    ) -> Result<(), G2gError> {
         if self.header_written && codec != self.codec {
             return Err(G2gError::CapsMismatch);
         }
@@ -125,7 +130,13 @@ impl Fmp4Muxer {
         if !self.header_written {
             let param_sets = parameter_sets(self.codec, &nalus)?;
             out.extend_from_slice(&ftyp());
-            out.extend_from_slice(&moov(self.codec, self.width, self.height, &param_sets, &self.tags));
+            out.extend_from_slice(&moov(
+                self.codec,
+                self.width,
+                self.height,
+                &param_sets,
+                &self.tags,
+            ));
             self.header_written = true;
         }
         // duration: explicit, else pts delta, else the default.
@@ -144,7 +155,11 @@ impl Fmp4Muxer {
 
         if self.fragment_duration_ns == 0 {
             // Default: one access unit per fragment.
-            let frag = fragment(self.fragments + 1, self.decode_time, &[(duration, &sample, is_sync)]);
+            let frag = fragment(
+                self.fragments + 1,
+                self.decode_time,
+                &[(duration, &sample, is_sync)],
+            );
             out.extend_from_slice(&frag);
             self.fragments += 1;
             self.decode_time += duration as u64;
@@ -159,7 +174,11 @@ impl Fmp4Muxer {
         if self.pending.is_empty() {
             self.pending_decode_time = self.decode_time;
         }
-        self.pending.push(PendingSample { data: sample, duration, is_sync });
+        self.pending.push(PendingSample {
+            data: sample,
+            duration,
+            is_sync,
+        });
         self.pending_dur_ns += duration_ns;
         Ok(out)
     }
@@ -170,8 +189,11 @@ impl Fmp4Muxer {
         if self.pending.is_empty() {
             return Vec::new();
         }
-        let samples: Vec<(u32, &[u8], bool)> =
-            self.pending.iter().map(|s| (s.duration, s.data.as_slice(), s.is_sync)).collect();
+        let samples: Vec<(u32, &[u8], bool)> = self
+            .pending
+            .iter()
+            .map(|s| (s.duration, s.data.as_slice(), s.is_sync))
+            .collect();
         let frag = fragment(self.fragments + 1, self.pending_decode_time, &samples);
         let total: u64 = self.pending.iter().map(|s| s.duration as u64).sum();
         self.fragments += 1;
@@ -205,7 +227,13 @@ use crate::mp4box::{ftyp, full_box, mp4_box, udta_with_tags, MATRIX};
 
 // --- box writers ----------------------------------------------------------
 
-fn moov(codec: VideoCodec, width: u32, height: u32, param_sets: &[&[u8]], tags: &TagList) -> Vec<u8> {
+fn moov(
+    codec: VideoCodec,
+    width: u32,
+    height: u32,
+    param_sets: &[&[u8]],
+    tags: &TagList,
+) -> Vec<u8> {
     let mvhd = {
         let mut p = Vec::new();
         p.extend_from_slice(&[0u8; 8]); // creation/modification time
@@ -350,7 +378,9 @@ pub(crate) fn vp8_keyframe(frame: &[u8]) -> bool {
 /// frame_type(1) where `0` = key frame. Superframes are not unpacked (the vpx
 /// encoder emits a single frame per buffer). Shared by the VP9-carrying muxers.
 pub(crate) fn vp9_keyframe(frame: &[u8]) -> bool {
-    let Some(&b0) = frame.first() else { return false };
+    let Some(&b0) = frame.first() else {
+        return false;
+    };
     let bit = |i: u32| (b0 >> (7 - i)) & 1;
     if ((bit(0) << 1) | bit(1)) != 0b10 {
         return false; // not a valid VP9 frame marker
@@ -400,8 +430,8 @@ pub(crate) fn hvcc_record(param_sets: &[&[u8]]) -> Vec<u8> {
     p.push(0xF8); // reserved + bitDepthLumaMinus8 0
     p.push(0xF8); // reserved + bitDepthChromaMinus8 0
     p.extend_from_slice(&0u16.to_be_bytes()); // avgFrameRate (unspecified)
-    // constantFrameRate(2)=0 | numTemporalLayers(3)=1 | temporalIdNested(1)=1
-    // | lengthSizeMinusOne(2)=3
+                                              // constantFrameRate(2)=0 | numTemporalLayers(3)=1 | temporalIdNested(1)=1
+                                              // | lengthSizeMinusOne(2)=3
     p.push((1 << 3) | (1 << 2) | 3);
     p.push(3); // numOfArrays: VPS, SPS, PPS
 
@@ -447,7 +477,10 @@ fn fragment(sequence: u64, decode_time: u64, samples: &[(u32, &[u8], bool)]) -> 
     // size-stable, so one rebuild with the measured size is exact.
     let moof_len = build_moof(0).len() as u32;
     let moof = build_moof(moof_len + 8);
-    let mdat_payload: Vec<u8> = samples.iter().flat_map(|(_, data, _)| data.iter().copied()).collect();
+    let mdat_payload: Vec<u8> = samples
+        .iter()
+        .flat_map(|(_, data, _)| data.iter().copied())
+        .collect();
     let mdat = mp4_box(b"mdat", &mdat_payload);
     [moof, mdat].concat()
 }
@@ -499,7 +532,11 @@ mod tests {
         assert_eq!(&cfg[4..8], b"hvcC");
         let payload = &cfg[8..];
         assert_eq!(payload[0], 1, "configuration version");
-        assert_eq!(&payload[1..13], &sps_v[3..15], "general PTL copied from SPS");
+        assert_eq!(
+            &payload[1..13],
+            &sps_v[3..15],
+            "general PTL copied from SPS"
+        );
         assert_eq!(payload[22], 3, "numOfArrays = VPS, SPS, PPS");
         // the three parameter sets must appear in the record
         assert!(cfg.windows(vps.len()).any(|w| w == vps));
@@ -542,8 +579,7 @@ mod tests {
         // the trun's data_offset (relative to moof start) must equal that.
         // locate trun: search for the fourcc and read its data_offset field.
         let pos = frag.windows(4).position(|w| w == b"trun").unwrap();
-        let data_offset =
-            u32::from_be_bytes(frag[pos + 12..pos + 16].try_into().unwrap()) as usize;
+        let data_offset = u32::from_be_bytes(frag[pos + 12..pos + 16].try_into().unwrap()) as usize;
         assert_eq!(data_offset, payload_at);
     }
 }

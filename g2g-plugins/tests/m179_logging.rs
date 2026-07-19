@@ -77,15 +77,26 @@ async fn run_graph_names_instances_and_elements_self_log() {
         added.contains(&("VideoTestSrc", Some("VideoTestSrc0"))),
         "source named + logged, got: {added:?}"
     );
-    assert!(added.contains(&("VideoFlip", Some("VideoFlip0"))), "transform named, got: {added:?}");
-    assert!(added.contains(&("FakeSink", Some("FakeSink0"))), "sink named, got: {added:?}");
+    assert!(
+        added.contains(&("VideoFlip", Some("VideoFlip0"))),
+        "transform named, got: {added:?}"
+    );
+    assert!(
+        added.contains(&("FakeSink", Some("FakeSink0"))),
+        "sink named, got: {added:?}"
+    );
 
     // VideoFlip logs about itself, carrying its assigned instance name and its
     // own category (same as the runner-derived one, so one filter covers both).
     let flip_configured = recs.iter().find(|r| {
-        r.category == "VideoFlip" && r.instance.as_deref() == Some("VideoFlip0") && r.message.starts_with("configured")
+        r.category == "VideoFlip"
+            && r.instance.as_deref() == Some("VideoFlip0")
+            && r.message.starts_with("configured")
     });
-    assert!(flip_configured.is_some(), "videoflip self-logged its configure with its name");
+    assert!(
+        flip_configured.is_some(),
+        "videoflip self-logged its configure with its name"
+    );
     assert_eq!(flip_configured.unwrap().level, LogLevel::Info);
 
     // Per-frame TRACE lines from the element, two frames in.
@@ -118,7 +129,10 @@ async fn run_graph_names_instances_and_elements_self_log() {
         "only VideoFlip passed the filter: {:?}",
         recs.iter().map(|r| &r.category).collect::<Vec<_>>()
     );
-    assert!(recs.iter().any(|r| r.message == "added to pipeline"), "videoflip addition logged");
+    assert!(
+        recs.iter().any(|r| r.message == "added to pipeline"),
+        "videoflip addition logged"
+    );
     assert!(
         recs.iter().all(|r| r.level != LogLevel::Trace),
         "per-frame TRACE is above the DEBUG threshold, so suppressed"

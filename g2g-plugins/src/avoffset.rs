@@ -36,7 +36,10 @@ impl AvOffset {
     /// An offsetter with `offset_ns` (positive delays the stream, negative
     /// advances it). `0` is a pass-through.
     pub fn new(offset_ns: i64) -> Self {
-        Self { offset_ns, configured: false }
+        Self {
+            offset_ns,
+            configured: false,
+        }
     }
 
     /// Apply the offset to one timestamp, saturating at the `u64` bounds (a
@@ -138,5 +141,8 @@ impl AsyncElement for AvOffset {
 }
 
 /// `AvOffset`'s settable properties (M104).
-static AVOFFSET_PROPS: &[PropertySpec] =
-    &[PropertySpec::new("offset", PropKind::Int, "PTS/DTS shift in ns (positive delays, negative advances)")];
+static AVOFFSET_PROPS: &[PropertySpec] = &[PropertySpec::new(
+    "offset",
+    PropKind::Int,
+    "PTS/DTS shift in ns (positive delays, negative advances)",
+)];

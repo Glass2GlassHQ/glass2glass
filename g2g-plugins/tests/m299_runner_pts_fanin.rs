@@ -66,7 +66,10 @@ impl SourceLoop for PtsSrc {
                     domain: MemoryDomain::System(SystemSlice::from_boxed(
                         vec![0u8; 4].into_boxed_slice(),
                     )),
-                    timing: FrameTiming { pts_ns: *p, ..FrameTiming::default() },
+                    timing: FrameTiming {
+                        pts_ns: *p,
+                        ..FrameTiming::default()
+                    },
                     sequence: *p,
                     meta: Default::default(),
                 };
@@ -101,7 +104,11 @@ impl MultiInputElement for PassThroughMux {
         Ok(upstream.clone())
     }
 
-    fn configure_pipeline(&mut self, _input: usize, _: &Caps) -> Result<ConfigureOutcome, G2gError> {
+    fn configure_pipeline(
+        &mut self,
+        _input: usize,
+        _: &Caps,
+    ) -> Result<ConfigureOutcome, G2gError> {
         Ok(ConfigureOutcome::Accepted)
     }
 
@@ -159,8 +166,14 @@ impl AsyncElement for OrderSink {
 async fn runner_orders_a_non_aggregating_muxers_inputs_by_pts() {
     // A at 0,20,40; B at 10,30,50. The muxer does no buffering, so a sorted
     // output can only be the runner's PTS merge.
-    let mut a = PtsSrc { pts: vec![0, 20, 40], configured: false };
-    let mut b = PtsSrc { pts: vec![10, 30, 50], configured: false };
+    let mut a = PtsSrc {
+        pts: vec![0, 20, 40],
+        configured: false,
+    };
+    let mut b = PtsSrc {
+        pts: vec![10, 30, 50],
+        configured: false,
+    };
     let mut mux = PassThroughMux { inputs: 2 };
     let mut sink = OrderSink::default();
 
@@ -183,8 +196,14 @@ async fn runner_orders_a_non_aggregating_muxers_inputs_by_pts() {
 async fn runner_flushes_pts_fanin_when_one_input_ends_early() {
     // A ends after one frame (5); B continues (10,20,30). Once A ends and drains,
     // B's later frames must still flow (A drops out of the merge round).
-    let mut a = PtsSrc { pts: vec![5], configured: false };
-    let mut b = PtsSrc { pts: vec![10, 20, 30], configured: false };
+    let mut a = PtsSrc {
+        pts: vec![5],
+        configured: false,
+    };
+    let mut b = PtsSrc {
+        pts: vec![10, 20, 30],
+        configured: false,
+    };
     let mut mux = PassThroughMux { inputs: 2 };
     let mut sink = OrderSink::default();
 
@@ -195,5 +214,9 @@ async fn runner_flushes_pts_fanin_when_one_input_ends_early() {
             .expect("muxer pipeline completes");
     }
 
-    assert_eq!(sink.pts, vec![5, 10, 20, 30], "earliest first, then B drains after A ends");
+    assert_eq!(
+        sink.pts,
+        vec![5, 10, 20, 30],
+        "earliest first, then B drains after A ends"
+    );
 }

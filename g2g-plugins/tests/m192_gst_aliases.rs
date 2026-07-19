@@ -22,7 +22,10 @@ async fn autovideosink_resolves_and_runs() {
     let reg = default_registry();
     let line = "videotestsrc num-buffers=3 ! videoconvert ! autovideosink";
     let graph = parse_launch(&reg, line).unwrap_or_else(|e| panic!("{line:?} parse: {e:?}"));
-    let consumed = run_graph(graph, &ZeroClock, 4).await.expect("runs").frames_consumed;
+    let consumed = run_graph(graph, &ZeroClock, 4)
+        .await
+        .expect("runs")
+        .frames_consumed;
     assert_eq!(consumed, 3, "{line}");
 }
 
@@ -35,15 +38,20 @@ async fn autoaudiosink_resolves_and_runs() {
     // the source, not the alias.
     match parse_launch(&reg, line) {
         Ok(graph) => {
-            let consumed =
-                run_graph(graph, &ZeroClock, 4).await.expect("runs").frames_consumed;
+            let consumed = run_graph(graph, &ZeroClock, 4)
+                .await
+                .expect("runs")
+                .frames_consumed;
             assert_eq!(consumed, 3, "{line}");
         }
         Err(e) => {
             // The failure must be the missing source, never an unknown
             // autoaudiosink (the alias must resolve to fakesink).
             let msg = format!("{e}");
-            assert!(!msg.contains("autoaudiosink"), "autoaudiosink must resolve: {msg}");
+            assert!(
+                !msg.contains("autoaudiosink"),
+                "autoaudiosink must resolve: {msg}"
+            );
         }
     }
 }
@@ -54,7 +62,13 @@ async fn aliases_do_not_shadow_canonical_names() {
     let reg = default_registry();
     let line = "videotestsrc num-buffers=2 ! videoconvert ! fakesink";
     let graph = parse_launch(&reg, line).unwrap_or_else(|e| panic!("{line:?} parse: {e:?}"));
-    assert_eq!(run_graph(graph, &ZeroClock, 4).await.expect("runs").frames_consumed, 2);
+    assert_eq!(
+        run_graph(graph, &ZeroClock, 4)
+            .await
+            .expect("runs")
+            .frames_consumed,
+        2
+    );
 }
 
 #[tokio::test]
@@ -65,7 +79,14 @@ async fn desktop_video_sink_names_alias_to_a_sink() {
     for sink in ["xvimagesink", "ximagesink", "glimagesink"] {
         let line = format!("videotestsrc num-buffers=1 ! videoconvert ! {sink}");
         let graph = parse_launch(&reg, &line).unwrap_or_else(|e| panic!("{line:?} parse: {e:?}"));
-        assert_eq!(run_graph(graph, &ZeroClock, 4).await.expect("runs").frames_consumed, 1, "{line}");
+        assert_eq!(
+            run_graph(graph, &ZeroClock, 4)
+                .await
+                .expect("runs")
+                .frames_consumed,
+            1,
+            "{line}"
+        );
     }
 }
 
@@ -83,7 +104,10 @@ async fn avdec_h264_alias_resolves_to_ffmpegdec() {
     // (the alias resolved); a parse error naming avdec_h264 would be the bug.
     if let Err(e) = parse_launch(&reg, line) {
         let msg = format!("{e}");
-        assert!(!msg.contains("avdec_h264"), "avdec_h264 must resolve to ffmpegdec: {msg}");
+        assert!(
+            !msg.contains("avdec_h264"),
+            "avdec_h264 must resolve to ffmpegdec: {msg}"
+        );
     }
 }
 
@@ -98,7 +122,10 @@ fn webrtcsink_resolves_from_launch() {
     let line = "videotestsrc num-buffers=1 ! webrtcsink location=http://localhost:8889/s/whip";
     if let Err(e) = parse_launch(&reg, line) {
         let msg = format!("{e}");
-        assert!(!msg.contains("webrtcsink"), "webrtcsink must resolve as a launch element: {msg}");
+        assert!(
+            !msg.contains("webrtcsink"),
+            "webrtcsink must resolve as a launch element: {msg}"
+        );
     }
 }
 
@@ -110,8 +137,14 @@ fn webrtcsink_resolves_from_launch() {
 fn webrtcsrc_resolves_and_takes_location() {
     use g2g_core::PropValue;
     let reg = default_registry();
-    let mut src = reg.make_source("webrtcsrc").expect("webrtcsrc builds by name");
-    src.set_property("location", PropValue::Str("http://localhost:8889/s/whep".into())).unwrap();
+    let mut src = reg
+        .make_source("webrtcsrc")
+        .expect("webrtcsrc builds by name");
+    src.set_property(
+        "location",
+        PropValue::Str("http://localhost:8889/s/whep".into()),
+    )
+    .unwrap();
     assert_eq!(
         src.get_property("location"),
         Some(PropValue::Str("http://localhost:8889/s/whep".into()))
@@ -134,7 +167,10 @@ async fn vaapi_hwaccel_names_resolve_to_ffmpegvaapidec() {
         // bug we're guarding against.
         if let Err(e) = parse_launch(&reg, &line) {
             let msg = format!("{e}");
-            assert!(!msg.contains(name), "{name} must resolve to ffmpegvaapidec: {msg}");
+            assert!(
+                !msg.contains(name),
+                "{name} must resolve to ffmpegvaapidec: {msg}"
+            );
         }
     }
 }
@@ -147,9 +183,18 @@ async fn vaapi_hwaccel_names_resolve_to_ffmpegvaapidec() {
 fn ffmpegvaapidec_device_property_round_trips() {
     use g2g_core::PropValue;
     let reg = default_registry();
-    let mut dec = reg.make_element("ffmpegvaapidec").expect("ffmpegvaapidec builds by name");
+    let mut dec = reg
+        .make_element("ffmpegvaapidec")
+        .expect("ffmpegvaapidec builds by name");
     // Unset reads back empty (libva default), then a pin round-trips.
-    assert_eq!(dec.get_property("device"), Some(PropValue::Str(String::new())));
-    dec.set_property("device", PropValue::Str("/dev/dri/renderD128".into())).unwrap();
-    assert_eq!(dec.get_property("device"), Some(PropValue::Str("/dev/dri/renderD128".into())));
+    assert_eq!(
+        dec.get_property("device"),
+        Some(PropValue::Str(String::new()))
+    );
+    dec.set_property("device", PropValue::Str("/dev/dri/renderD128".into()))
+        .unwrap();
+    assert_eq!(
+        dec.get_property("device"),
+        Some(PropValue::Str("/dev/dri/renderD128".into()))
+    );
 }

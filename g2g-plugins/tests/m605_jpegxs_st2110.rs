@@ -16,7 +16,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{block_on, SourceLoop};
 use g2g_core::{
     AsyncElement, Caps, ClockSync, Dim, G2gError, MemoryDomain, MonotonicClock, OutputSink,
-    PipelinePacket, PropValue, PushOutcome, RawVideoFormat, Rate,
+    PipelinePacket, PropValue, PushOutcome, Rate, RawVideoFormat,
 };
 
 use g2g_plugins::st2110jxsrtp::{St2110JxsSink, St2110JxsSrc};
@@ -46,7 +46,10 @@ impl OutputSink for Capture {
 fn data_frame(bytes: Vec<u8>, pts_ns: u64) -> PipelinePacket {
     PipelinePacket::DataFrame(Frame {
         domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: g2g_core::FrameTiming { pts_ns, ..Default::default() },
+        timing: g2g_core::FrameTiming {
+            pts_ns,
+            ..Default::default()
+        },
         sequence: 0,
         meta: Default::default(),
     })
@@ -92,25 +95,32 @@ fn raw_jpegxs_st2110_22_roundtrip() {
     // 1. Encode raw -> JPEG XS codestream (high bpp: near-lossless).
     let mut enc = SvtJpegXsEnc::new();
     enc.set_property("bpp", PropValue::Fraction(10, 1)).unwrap();
-    enc.configure_pipeline(&raw_caps).expect("encoder configures");
+    enc.configure_pipeline(&raw_caps)
+        .expect("encoder configures");
     let mut enc_out = Capture::default();
     block_on(enc.process(data_frame(input.clone(), 0), &mut enc_out)).expect("encode");
     let codestream = enc_out.frames.remove(0);
 
     // 2. Bind the -22 source on an ephemeral port.
     let mut src = St2110JxsSrc::new();
-    src.set_property("address", PropValue::Str("127.0.0.1".into())).unwrap();
+    src.set_property("address", PropValue::Str("127.0.0.1".into()))
+        .unwrap();
     src.set_property("port", PropValue::Uint(0)).unwrap();
-    src.set_property("width", PropValue::Uint(w as u64)).unwrap();
-    src.set_property("height", PropValue::Uint(h as u64)).unwrap();
+    src.set_property("width", PropValue::Uint(w as u64))
+        .unwrap();
+    src.set_property("height", PropValue::Uint(h as u64))
+        .unwrap();
     src.configure_pipeline(&jxs_caps).expect("src binds");
     let port = src.local_port().expect("bound");
 
     // 3. Send the codestream over the -22 sink (RFC 9134 over UDP).
     let mut sink = St2110JxsSink::new();
-    sink.set_property("host", PropValue::Str("127.0.0.1".into())).unwrap();
-    sink.set_property("port", PropValue::Uint(u64::from(port))).unwrap();
-    sink.set_property("max-packet", PropValue::Uint(400)).unwrap(); // split across packets
+    sink.set_property("host", PropValue::Str("127.0.0.1".into()))
+        .unwrap();
+    sink.set_property("port", PropValue::Uint(u64::from(port)))
+        .unwrap();
+    sink.set_property("max-packet", PropValue::Uint(400))
+        .unwrap(); // split across packets
     sink.configure_pipeline(&jxs_caps).expect("sink configures");
     let clock: Arc<dyn g2g_core::PipelineClock + Send + Sync> = Arc::new(MonotonicClock);
     sink.set_clock_sync(ClockSync::new(clock, 1_700_000_000_000_000_000));
@@ -139,5 +149,8 @@ fn raw_jpegxs_st2110_22_roundtrip() {
         sum += u64::from(a.abs_diff(b));
     }
     let mean = sum as f64 / n as f64;
-    assert!(mean < 8.0, "mean 10-bit error {mean} too high across the full -22 path");
+    assert!(
+        mean < 8.0,
+        "mean 10-bit error {mean} too high across the full -22 path"
+    );
 }

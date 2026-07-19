@@ -80,7 +80,12 @@ impl GpuContext {
         device: wgpu::Device,
         queue: wgpu::Queue,
     ) -> Self {
-        Self { instance, adapter, device, queue }
+        Self {
+            instance,
+            adapter,
+            device,
+            queue,
+        }
     }
 
     async fn from_adapter(
@@ -98,7 +103,12 @@ impl GpuContext {
             })
             .await
             .map_err(gpu_err)?;
-        Ok(Self { instance, adapter, device, queue })
+        Ok(Self {
+            instance,
+            adapter,
+            device,
+            queue,
+        })
     }
 }
 
@@ -174,8 +184,7 @@ pub(crate) fn read_rgba_texture_dq(
         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
-    let mut enc =
-        device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
     enc.copy_texture_to_buffer(
         wgpu::TexelCopyTextureInfo {
             texture,
@@ -191,7 +200,11 @@ pub(crate) fn read_rgba_texture_dq(
                 rows_per_image: Some(h),
             },
         },
-        wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
     );
     queue.submit([enc.finish()]);
     let slice = buffer.slice(..);
@@ -200,7 +213,10 @@ pub(crate) fn read_rgba_texture_dq(
         let _ = tx.send(r);
     });
     device
-        .poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
+        .poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        })
         .map_err(gpu_err)?;
     rx.recv().map_err(gpu_err)?.map_err(gpu_err)?;
     let mapped = slice.get_mapped_range();
@@ -233,7 +249,11 @@ pub(crate) fn gpu_err<E>(_e: E) -> G2gError {
 /// # Safety
 /// `device` must be the Vulkan wgpu device `image` / `memory` were allocated on,
 /// and this takes ownership of them: they must not be freed by any other path.
-#[cfg(any(feature = "cuda-wgpu", feature = "vulkan-video", feature = "mediacodec-wgpu"))]
+#[cfg(any(
+    feature = "cuda-wgpu",
+    feature = "vulkan-video",
+    feature = "mediacodec-wgpu"
+))]
 // A thin wrapper over the raw Vulkan image + wgpu-hal descriptors; each argument
 // is a distinct piece of the import (image, memory, geometry, format, the two
 // usage masks, label) with no natural grouping.
@@ -305,8 +325,8 @@ mod tests {
     /// Stand in for an embedding application (a game engine / Tauri app) that
     /// already owns a wgpu device: open one the ordinary way. `None` if the host
     /// has no adapter (CI), so the test skips.
-    async fn embedder_device(
-    ) -> Option<(wgpu::Instance, wgpu::Adapter, wgpu::Device, wgpu::Queue)> {
+    async fn embedder_device() -> Option<(wgpu::Instance, wgpu::Adapter, wgpu::Device, wgpu::Queue)>
+    {
         let instance = wgpu::Instance::default();
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -330,7 +350,11 @@ mod tests {
     fn pattern() -> Vec<u8> {
         let mut p = Vec::with_capacity((W * H * 4) as usize);
         for y in 0..H {
-            let px = if y == 0 { [255, 0, 0, 255] } else { [0, 0, 255, 255] };
+            let px = if y == 0 {
+                [255, 0, 0, 255]
+            } else {
+                [0, 0, 255, 255]
+            };
             for _ in 0..W {
                 p.extend_from_slice(&px);
             }
@@ -343,7 +367,11 @@ mod tests {
     fn upload(device: &wgpu::Device, queue: &wgpu::Queue, pixels: &[u8]) -> wgpu::Texture {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("decoded-frame"),
-            size: wgpu::Extent3d { width: W, height: H, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: W,
+                height: H,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -366,7 +394,11 @@ mod tests {
                 bytes_per_row: Some(W * 4),
                 rows_per_image: Some(H),
             },
-            wgpu::Extent3d { width: W, height: H, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width: W,
+                height: H,
+                depth_or_array_layers: 1,
+            },
         );
         texture
     }
@@ -399,7 +431,11 @@ mod tests {
                     rows_per_image: Some(H),
                 },
             },
-            wgpu::Extent3d { width: W, height: H, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width: W,
+                height: H,
+                depth_or_array_layers: 1,
+            },
         );
         queue.submit([enc.finish()]);
         let slice = buffer.slice(..);
@@ -407,7 +443,12 @@ mod tests {
         slice.map_async(wgpu::MapMode::Read, move |r| {
             let _ = tx.send(r);
         });
-        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
+            .unwrap();
         rx.recv().unwrap().unwrap();
         let data = slice.get_mapped_range().to_vec();
         buffer.unmap();
@@ -453,6 +494,9 @@ mod tests {
         };
         let tex = texture_of(owned).expect("recover the wgpu texture");
         let got = read_back(&embedder_device, &embedder_queue, tex);
-        assert_eq!(got, pixels, "g2g's texture reads back correctly on the embedder's own device");
+        assert_eq!(
+            got, pixels,
+            "g2g's texture reads back correctly on the embedder's own device"
+        );
     }
 }

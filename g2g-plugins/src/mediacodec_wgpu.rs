@@ -97,11 +97,13 @@ pub async fn create_android_interop_device() -> Result<InteropDevice, G2gError> 
             features,
             &limits,
             &memory_hints,
-            Some(Box::new(|args: wgpu_hal::vulkan::CreateDeviceCallbackArgs| {
-                args.extensions
-                    .push(ash::android::external_memory_android_hardware_buffer::NAME);
-                args.extensions.push(ash::ext::queue_family_foreign::NAME);
-            })),
+            Some(Box::new(
+                |args: wgpu_hal::vulkan::CreateDeviceCallbackArgs| {
+                    args.extensions
+                        .push(ash::android::external_memory_android_hardware_buffer::NAME);
+                    args.extensions.push(ash::ext::queue_family_foreign::NAME);
+                },
+            )),
         )
     }
     .map_err(gpu_err)?;
@@ -120,7 +122,12 @@ pub async fn create_android_interop_device() -> Result<InteropDevice, G2gError> 
     }
     .map_err(gpu_err)?;
 
-    Ok(InteropDevice { device, queue, adapter, instance })
+    Ok(InteropDevice {
+        device,
+        queue,
+        adapter,
+        instance,
+    })
 }
 
 impl InteropDevice {
@@ -167,19 +174,20 @@ pub fn create_android_surface(
     width: u32,
     height: u32,
 ) -> Result<(wgpu::Surface<'static>, wgpu::SurfaceConfiguration), G2gError> {
-    let raw_window = wgpu::rwh::RawWindowHandle::AndroidNdk(wgpu::rwh::AndroidNdkWindowHandle::new(
-        window.ptr().cast(),
-    ));
+    let raw_window = wgpu::rwh::RawWindowHandle::AndroidNdk(
+        wgpu::rwh::AndroidNdkWindowHandle::new(window.ptr().cast()),
+    );
     let raw_display = wgpu::rwh::RawDisplayHandle::Android(wgpu::rwh::AndroidDisplayHandle::new());
     // SAFETY: `window.ptr()` is a live `ANativeWindow` for the duration of this
     // call; the caller's documented contract keeps it alive while the surface is
     // used (the surface borrows nothing, hence `'static`). The display handle is
     // the empty Android display, matching the Vulkan backend's expectation.
     let surface = unsafe {
-        dev.instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
-            raw_display_handle: Some(raw_display),
-            raw_window_handle: raw_window,
-        })
+        dev.instance
+            .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+                raw_display_handle: Some(raw_display),
+                raw_window_handle: raw_window,
+            })
     }
     .map_err(gpu_err)?;
     let config = surface
@@ -253,13 +261,12 @@ pub unsafe fn ahb_format_info(
         let raw: &ash::Device = hal_device.raw_device();
         let instance: &ash::Instance = hal_device.shared_instance().raw_instance();
 
-        let ext =
-            ash::android::external_memory_android_hardware_buffer::Device::new(instance, raw);
+        let ext = ash::android::external_memory_android_hardware_buffer::Device::new(instance, raw);
 
         let mut fmt = vk::AndroidHardwareBufferFormatPropertiesANDROID::default();
-        let mut props =
-            vk::AndroidHardwareBufferPropertiesANDROID::default().push_next(&mut fmt);
-        ext.get_android_hardware_buffer_properties(ahb, &mut props).map_err(gpu_err)?;
+        let mut props = vk::AndroidHardwareBufferPropertiesANDROID::default().push_next(&mut fmt);
+        ext.get_android_hardware_buffer_properties(ahb, &mut props)
+            .map_err(gpu_err)?;
 
         // `props` holds a mutable borrow of `fmt` (the push_next chain), so read
         // its fields out first; after this its borrow of `fmt` ends and `fmt`'s
@@ -380,7 +387,11 @@ pub unsafe fn ahb_to_rgba_readback(
         let qfi = hal.queue_family_index();
         let mem_props = inst.get_physical_device_memory_properties(phys);
 
-        let extent = vk::Extent3D { width, height, depth: 1 };
+        let extent = vk::Extent3D {
+            width,
+            height,
+            depth: 1,
+        };
         let color_range = vk::ImageSubresourceRange {
             aspect_mask: vk::ImageAspectFlags::COLOR,
             base_mip_level: 0,
@@ -470,7 +481,8 @@ pub unsafe fn ahb_to_rgba_readback(
             .allocation_size(out_reqs.size)
             .memory_type_index(out_mt);
         let out_mem = d.allocate_memory(&out_alloc, None).map_err(gpu_err)?;
-        d.bind_image_memory(out_image, out_mem, 0).map_err(gpu_err)?;
+        d.bind_image_memory(out_image, out_mem, 0)
+            .map_err(gpu_err)?;
         let out_view_info = vk::ImageViewCreateInfo::default()
             .image(out_image)
             .view_type(vk::ImageViewType::TYPE_2D)
@@ -514,13 +526,16 @@ pub unsafe fn ahb_to_rgba_readback(
                 .stage_flags(vk::ShaderStageFlags::COMPUTE),
         ];
         let dsl_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
-        let dsl = d.create_descriptor_set_layout(&dsl_info, None).map_err(gpu_err)?;
+        let dsl = d
+            .create_descriptor_set_layout(&dsl_info, None)
+            .map_err(gpu_err)?;
         let set_layouts = [dsl];
         let pl_info = vk::PipelineLayoutCreateInfo::default().set_layouts(&set_layouts);
         let pipeline_layout = d.create_pipeline_layout(&pl_info, None).map_err(gpu_err)?;
 
         // ---- compute pipeline ----
-        let code = ash::util::read_spv(&mut std::io::Cursor::new(YCBCR_COMP_SPV)).map_err(gpu_err)?;
+        let code =
+            ash::util::read_spv(&mut std::io::Cursor::new(YCBCR_COMP_SPV)).map_err(gpu_err)?;
         let sm_info = vk::ShaderModuleCreateInfo::default().code(&code);
         let shader = d.create_shader_module(&sm_info, None).map_err(gpu_err)?;
         let entry = CStr::from_bytes_with_nul(b"main\0").map_err(gpu_err)?;
@@ -528,7 +543,9 @@ pub unsafe fn ahb_to_rgba_readback(
             .stage(vk::ShaderStageFlags::COMPUTE)
             .module(shader)
             .name(entry);
-        let cp_info = vk::ComputePipelineCreateInfo::default().stage(stage).layout(pipeline_layout);
+        let cp_info = vk::ComputePipelineCreateInfo::default()
+            .stage(stage)
+            .layout(pipeline_layout);
         let pipelines = d
             .create_compute_pipelines(vk::PipelineCache::null(), &[cp_info], None)
             .map_err(|(_, e)| gpu_err(e))?;
@@ -543,10 +560,15 @@ pub unsafe fn ahb_to_rgba_readback(
                 .ty(vk::DescriptorType::STORAGE_IMAGE)
                 .descriptor_count(1),
         ];
-        let pool_info = vk::DescriptorPoolCreateInfo::default().max_sets(1).pool_sizes(&pool_sizes);
-        let pool = d.create_descriptor_pool(&pool_info, None).map_err(gpu_err)?;
-        let set_alloc =
-            vk::DescriptorSetAllocateInfo::default().descriptor_pool(pool).set_layouts(&set_layouts);
+        let pool_info = vk::DescriptorPoolCreateInfo::default()
+            .max_sets(1)
+            .pool_sizes(&pool_sizes);
+        let pool = d
+            .create_descriptor_pool(&pool_info, None)
+            .map_err(gpu_err)?;
+        let set_alloc = vk::DescriptorSetAllocateInfo::default()
+            .descriptor_pool(pool)
+            .set_layouts(&set_layouts);
         let set = d.allocate_descriptor_sets(&set_alloc).map_err(gpu_err)?[0];
 
         let in_desc = [vk::DescriptorImageInfo::default()
@@ -572,14 +594,16 @@ pub unsafe fn ahb_to_rgba_readback(
 
         // ---- record + submit ----
         let cmd_pool_info = vk::CommandPoolCreateInfo::default().queue_family_index(qfi);
-        let cmd_pool = d.create_command_pool(&cmd_pool_info, None).map_err(gpu_err)?;
+        let cmd_pool = d
+            .create_command_pool(&cmd_pool_info, None)
+            .map_err(gpu_err)?;
         let cb_alloc = vk::CommandBufferAllocateInfo::default()
             .command_pool(cmd_pool)
             .level(vk::CommandBufferLevel::PRIMARY)
             .command_buffer_count(1);
         let cb = d.allocate_command_buffers(&cb_alloc).map_err(gpu_err)?[0];
-        let begin =
-            vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+        let begin = vk::CommandBufferBeginInfo::default()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
         d.begin_command_buffer(cb, &begin).map_err(gpu_err)?;
 
         // Imported image UNDEFINED -> SHADER_READ_ONLY; output UNDEFINED ->
@@ -666,9 +690,12 @@ pub unsafe fn ahb_to_rgba_readback(
 
         let cbs = [cb];
         let submit = vk::SubmitInfo::default().command_buffers(&cbs);
-        let fence = d.create_fence(&vk::FenceCreateInfo::default(), None).map_err(gpu_err)?;
+        let fence = d
+            .create_fence(&vk::FenceCreateInfo::default(), None)
+            .map_err(gpu_err)?;
         d.queue_submit(queue, &[submit], fence).map_err(gpu_err)?;
-        d.wait_for_fences(&[fence], true, u64::MAX).map_err(gpu_err)?;
+        d.wait_for_fences(&[fence], true, u64::MAX)
+            .map_err(gpu_err)?;
 
         // ---- read back ----
         let ptr = d
@@ -717,14 +744,20 @@ pub struct WgpuRgbaTexture {
 
 impl core::fmt::Debug for WgpuRgbaTexture {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("WgpuRgbaTexture").field("texture", &self.texture).finish_non_exhaustive()
+        f.debug_struct("WgpuRgbaTexture")
+            .field("texture", &self.texture)
+            .finish_non_exhaustive()
     }
 }
 
 impl WgpuRgbaTexture {
     /// Wrap an RGBA texture with the device / queue it lives on.
     pub fn new(device: wgpu::Device, queue: wgpu::Queue, texture: wgpu::Texture) -> Self {
-        Self { device, queue, texture }
+        Self {
+            device,
+            queue,
+            texture,
+        }
     }
 
     /// The backing RGBA (`Rgba8Unorm`) texture, for the importer to sample.
@@ -947,7 +980,9 @@ impl YcbcrToRgba {
             let pipeline = d
                 .create_compute_pipelines(
                     vk::PipelineCache::null(),
-                    &[vk::ComputePipelineCreateInfo::default().stage(stage).layout(pipeline_layout)],
+                    &[vk::ComputePipelineCreateInfo::default()
+                        .stage(stage)
+                        .layout(pipeline_layout)],
                     None,
                 )
                 .map_err(|(_, e)| gpu_err(e))?[0];
@@ -965,7 +1000,9 @@ impl YcbcrToRgba {
             ];
             let desc_pool = d
                 .create_descriptor_pool(
-                    &vk::DescriptorPoolCreateInfo::default().max_sets(ring).pool_sizes(&pool_sizes),
+                    &vk::DescriptorPoolCreateInfo::default()
+                        .max_sets(ring)
+                        .pool_sizes(&pool_sizes),
                     None,
                 )
                 .map_err(gpu_err)?;
@@ -999,8 +1036,9 @@ impl YcbcrToRgba {
 
             let mut slots = Vec::with_capacity(RING_DEPTH);
             for i in 0..RING_DEPTH {
-                let fence =
-                    d.create_fence(&vk::FenceCreateInfo::default(), None).map_err(gpu_err)?;
+                let fence = d
+                    .create_fence(&vk::FenceCreateInfo::default(), None)
+                    .map_err(gpu_err)?;
                 slots.push(ConvSlot {
                     fence,
                     cmd_buf: cmd_bufs[i],
@@ -1069,7 +1107,11 @@ impl YcbcrToRgba {
             out_view: vk::ImageView::null(),
             armed: true,
         };
-        let extent = vk::Extent3D { width: self.width, height: self.height, depth: 1 };
+        let extent = vk::Extent3D {
+            width: self.width,
+            height: self.height,
+            depth: 1,
+        };
         let color_range = vk::ImageSubresourceRange {
             aspect_mask: vk::ImageAspectFlags::COLOR,
             base_mip_level: 0,
@@ -1181,7 +1223,8 @@ impl YcbcrToRgba {
                 )
                 .map_err(gpu_err)?;
             guard.out_mem = out_mem;
-            d.bind_image_memory(out_image, out_mem, 0).map_err(gpu_err)?;
+            d.bind_image_memory(out_image, out_mem, 0)
+                .map_err(gpu_err)?;
             let out_view = d
                 .create_image_view(
                     &vk::ImageViewCreateInfo::default()
@@ -1200,7 +1243,8 @@ impl YcbcrToRgba {
             let (cb, desc_set, fence) = {
                 let slot = &mut self.slots[idx];
                 if let Some(old) = slot.in_flight.take() {
-                    d.wait_for_fences(&[slot.fence], true, u64::MAX).map_err(gpu_err)?;
+                    d.wait_for_fences(&[slot.fence], true, u64::MAX)
+                        .map_err(gpu_err)?;
                     d.destroy_image_view(old.in_view, None);
                     d.destroy_image(old.in_image, None);
                     d.free_memory(old.in_mem, None);
@@ -1234,7 +1278,8 @@ impl YcbcrToRgba {
                 &[],
             );
 
-            d.reset_command_buffer(cb, vk::CommandBufferResetFlags::empty()).map_err(gpu_err)?;
+            d.reset_command_buffer(cb, vk::CommandBufferResetFlags::empty())
+                .map_err(gpu_err)?;
             d.begin_command_buffer(
                 cb,
                 &vk::CommandBufferBeginInfo::default()
@@ -1309,7 +1354,12 @@ impl YcbcrToRgba {
             .map_err(gpu_err)?;
             // Submitted: the ring slot and the returned texture now own these.
             guard.armed = false;
-            self.slots[idx].in_flight = Some(InFlight { in_image, in_mem, in_view, out_view });
+            self.slots[idx].in_flight = Some(InFlight {
+                in_image,
+                in_mem,
+                in_view,
+                out_view,
+            });
 
             // ---- wrap the output image as a wgpu texture ----
             Ok(self.wrap_rgba_texture(out_image, out_mem))
@@ -1366,11 +1416,11 @@ impl Drop for YcbcrToRgba {
             self.raw.destroy_pipeline_layout(self.pipeline_layout, None);
             self.raw.destroy_descriptor_set_layout(self.dsl, None);
             self.raw.destroy_sampler(self.sampler, None);
-            self.raw.destroy_sampler_ycbcr_conversion(self.conversion, None);
+            self.raw
+                .destroy_sampler_ycbcr_conversion(self.conversion, None);
         }
     }
 }
-
 
 /// Read a converted [`WgpuRgbaTexture`] back to host memory through wgpu, for
 /// on-device validation of the zero-copy output path: a normal

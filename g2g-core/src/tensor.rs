@@ -72,7 +72,13 @@ impl TensorView {
             st[i] = acc;
             acc *= shape[i] as isize;
         }
-        Self { dtype, rank: rank as u8, shape: s, strides: st, offset: 0 }
+        Self {
+            dtype,
+            rank: rank as u8,
+            shape: s,
+            strides: st,
+            offset: 0,
+        }
     }
 
     pub fn dtype(&self) -> TensorDType {

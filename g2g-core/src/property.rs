@@ -91,11 +91,18 @@ impl PropValue {
                 "false" | "0" | "no" => Ok(PropValue::Bool(false)),
                 _ => Err(PropError::Value),
             },
-            PropKind::Int => t.parse::<i64>().map(PropValue::Int).map_err(|_| PropError::Value),
-            PropKind::Uint => t.parse::<u64>().map(PropValue::Uint).map_err(|_| PropError::Value),
-            PropKind::Double => {
-                t.parse::<f64>().map(PropValue::Double).map_err(|_| PropError::Value)
-            }
+            PropKind::Int => t
+                .parse::<i64>()
+                .map(PropValue::Int)
+                .map_err(|_| PropError::Value),
+            PropKind::Uint => t
+                .parse::<u64>()
+                .map(PropValue::Uint)
+                .map_err(|_| PropError::Value),
+            PropKind::Double => t
+                .parse::<f64>()
+                .map(PropValue::Double)
+                .map_err(|_| PropError::Value),
             PropKind::Fraction => match t.split_once('/') {
                 Some((n, d)) => {
                     let n = n.trim().parse::<i32>().map_err(|_| PropError::Value)?;
@@ -174,9 +181,15 @@ pub struct PropFlags {
 
 impl PropFlags {
     /// Readable and writable (the default).
-    pub const READWRITE: Self = Self { readable: true, writable: true };
+    pub const READWRITE: Self = Self {
+        readable: true,
+        writable: true,
+    };
     /// Readable only (a computed / status property).
-    pub const READ_ONLY: Self = Self { readable: true, writable: false };
+    pub const READ_ONLY: Self = Self {
+        readable: true,
+        writable: false,
+    };
 }
 
 impl Default for PropFlags {
@@ -282,7 +295,12 @@ impl ElementMetadata {
         description: &'static str,
         author: &'static str,
     ) -> Self {
-        Self { long_name, klass, description, author }
+        Self {
+            long_name,
+            klass,
+            description,
+            author,
+        }
     }
 
     /// Whether any field is set (an element that overrode `metadata()`).
@@ -390,13 +408,31 @@ mod tests {
 
     #[test]
     fn parse_matches_kind() {
-        assert_eq!(PropValue::parse(PropKind::Bool, "true").unwrap(), PropValue::Bool(true));
-        assert_eq!(PropValue::parse(PropKind::Bool, "0").unwrap(), PropValue::Bool(false));
-        assert_eq!(PropValue::parse(PropKind::Int, "-7").unwrap(), PropValue::Int(-7));
-        assert_eq!(PropValue::parse(PropKind::Uint, "42").unwrap(), PropValue::Uint(42));
-        assert_eq!(PropValue::parse(PropKind::Fraction, "30/1").unwrap(), PropValue::Fraction(30, 1));
+        assert_eq!(
+            PropValue::parse(PropKind::Bool, "true").unwrap(),
+            PropValue::Bool(true)
+        );
+        assert_eq!(
+            PropValue::parse(PropKind::Bool, "0").unwrap(),
+            PropValue::Bool(false)
+        );
+        assert_eq!(
+            PropValue::parse(PropKind::Int, "-7").unwrap(),
+            PropValue::Int(-7)
+        );
+        assert_eq!(
+            PropValue::parse(PropKind::Uint, "42").unwrap(),
+            PropValue::Uint(42)
+        );
+        assert_eq!(
+            PropValue::parse(PropKind::Fraction, "30/1").unwrap(),
+            PropValue::Fraction(30, 1)
+        );
         // A bare integer parses as n/1 for a fraction property.
-        assert_eq!(PropValue::parse(PropKind::Fraction, "25").unwrap(), PropValue::Fraction(25, 1));
+        assert_eq!(
+            PropValue::parse(PropKind::Fraction, "25").unwrap(),
+            PropValue::Fraction(25, 1)
+        );
         assert_eq!(
             PropValue::parse(PropKind::Str, "file.mp4").unwrap(),
             PropValue::Str("file.mp4".into())
@@ -406,9 +442,18 @@ mod tests {
     #[test]
     fn parse_rejects_bad_values() {
         assert_eq!(PropValue::parse(PropKind::Int, "x"), Err(PropError::Value));
-        assert_eq!(PropValue::parse(PropKind::Uint, "-1"), Err(PropError::Value));
-        assert_eq!(PropValue::parse(PropKind::Fraction, "1/0"), Err(PropError::Value));
-        assert_eq!(PropValue::parse(PropKind::Bool, "maybe"), Err(PropError::Value));
+        assert_eq!(
+            PropValue::parse(PropKind::Uint, "-1"),
+            Err(PropError::Value)
+        );
+        assert_eq!(
+            PropValue::parse(PropKind::Fraction, "1/0"),
+            Err(PropError::Value)
+        );
+        assert_eq!(
+            PropValue::parse(PropKind::Bool, "maybe"),
+            Err(PropError::Value)
+        );
     }
 
     #[test]
@@ -424,9 +469,13 @@ mod tests {
             PropertySpec::new("pattern", PropKind::Str, "test pattern")
                 .with_enum_values("smpte | snow | ball")
                 .with_default("smpte"),
-            PropertySpec::new("num-buffers", PropKind::Int, "frames then EOS (-1 = forever)")
-                .with_range("-1", "9223372036854775807")
-                .with_default("-1"),
+            PropertySpec::new(
+                "num-buffers",
+                PropKind::Int,
+                "frames then EOS (-1 = forever)",
+            )
+            .with_range("-1", "9223372036854775807")
+            .with_default("-1"),
         ];
         let dump = format_specs(&specs);
         // Header line: name + blurb.

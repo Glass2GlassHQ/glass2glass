@@ -68,8 +68,8 @@ use alloc::vec::Vec;
 
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
-    delegate_compositor, delegate_output, delegate_registry, delegate_shm,
-    delegate_xdg_shell, delegate_xdg_window,
+    delegate_compositor, delegate_output, delegate_registry, delegate_shm, delegate_xdg_shell,
+    delegate_xdg_window,
     output::{OutputHandler, OutputState},
     reexports::calloop::{
         channel::{channel, Channel, Event as ChanEvent, Sender as CalloopSender},
@@ -313,7 +313,11 @@ impl WaylandSink {
         // No anchor yet: establish one. Prefer the stamped play-edge base time
         // unless a seek just flushed (then present the target now).
         let use_play = sync.play_anchored() && !self.seek_reanchor;
-        let anchor = if use_play { sync.base_time() } else { sync.now_ns().saturating_sub(rt) };
+        let anchor = if use_play {
+            sync.base_time()
+        } else {
+            sync.now_ns().saturating_sub(rt)
+        };
         self.anchor_ns = Some(anchor);
         // Mark provisional only if anchored before `Playing` stamped, so it
         // re-bases later; a post-seek first-frame anchor is final.
@@ -381,7 +385,8 @@ impl PipelineClock for WaylandClock {
 }
 
 impl AsyncElement for WaylandSink {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -472,7 +477,15 @@ impl AsyncElement for WaylandSink {
             .name(String::from("g2g-waylandsink"))
             .spawn(move || {
                 if let Err(e) = worker_main(
-                    w, h, title, app_id, rx, presented, dropped, latency, ready_for_worker,
+                    w,
+                    h,
+                    title,
+                    app_id,
+                    rx,
+                    presented,
+                    dropped,
+                    latency,
+                    ready_for_worker,
                 ) {
                     std::eprintln!("g2g-waylandsink worker error: {e:?}");
                 }
@@ -506,11 +519,14 @@ impl AsyncElement for WaylandSink {
 
     fn properties(&self) -> &'static [PropertySpec] {
         const PROPS: &[PropertySpec] = &[
-            PropertySpec::new("title", PropKind::Str, "window title")
-                .with_default("glass2glass"),
+            PropertySpec::new("title", PropKind::Str, "window title").with_default("glass2glass"),
             PropertySpec::new("app-id", PropKind::Str, "Wayland xdg app id")
                 .with_default("io.glass2glass.WaylandSink"),
-            PropertySpec::new("max-lateness", PropKind::Uint, "QoS drop threshold, nanoseconds past the deadline"),
+            PropertySpec::new(
+                "max-lateness",
+                PropKind::Uint,
+                "QoS drop threshold, nanoseconds past the deadline",
+            ),
         ];
         PROPS
     }
@@ -594,10 +610,7 @@ impl AsyncElement for WaylandSink {
                     }
 
                     let xrgb = nv12_to_xrgb8888(slice.as_slice(), self.width, self.height)?;
-                    let tx = self
-                        .cmd_tx
-                        .as_ref()
-                        .ok_or(G2gError::NotConfigured)?;
+                    let tx = self.cmd_tx.as_ref().ok_or(G2gError::NotConfigured)?;
                     let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
                     tx.send(WorkerCmd::Frame {
                         bytes: xrgb,
@@ -743,7 +756,11 @@ fn worker_main(
 
     // Wire the cmd channel into calloop so we wake on frame arrival.
     loop_handle.insert_source(rx, |event, _, state: &mut WorkerState| match event {
-        ChanEvent::Msg(WorkerCmd::Frame { bytes, arrival_ns, ack }) => {
+        ChanEvent::Msg(WorkerCmd::Frame {
+            bytes,
+            arrival_ns,
+            ack,
+        }) => {
             // Producer is blocked on `ack` until our `frame` callback
             // fires, so we should only ever see one in flight. If the
             // surface isn't mappable yet, stash it; otherwise draw now.
@@ -844,13 +861,7 @@ impl CompositorHandler for WorkerState {
         _: wl_output::Transform,
     ) {
     }
-    fn frame(
-        &mut self,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-        _: &wl_surface::WlSurface,
-        _: u32,
-    ) {
+    fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: u32) {
         // The compositor is ready for the next frame. Record the
         // glass-to-glass delta (source ingest -> on-screen), then
         // release the producer blocked on this commit's ack.
@@ -918,13 +929,7 @@ impl OutputHandler for WorkerState {
     }
     fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
     fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
-    fn output_destroyed(
-        &mut self,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-        _: wl_output::WlOutput,
-    ) {
-    }
+    fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
 }
 
 impl ShmHandler for WorkerState {
@@ -1065,8 +1070,14 @@ mod tests {
         };
         // A native decoder lands NV12 on this link; a non-NV12 sink input
         // is a real error (e.g. an undecoded display chain), not a no-op.
-        assert_eq!(sink.configure_pipeline(&h264).err(), Some(G2gError::CapsMismatch));
-        assert!(sink.worker.is_none(), "no worker should be spawned on rejected caps");
+        assert_eq!(
+            sink.configure_pipeline(&h264).err(),
+            Some(G2gError::CapsMismatch)
+        );
+        assert!(
+            sink.worker.is_none(),
+            "no worker should be spawned on rejected caps"
+        );
     }
 
     #[test]
@@ -1077,7 +1088,10 @@ mod tests {
         assert!(sink.clock_sync.is_none());
         let sync = ClockSync::new(Arc::new(WaylandClock), 0);
         AsyncElement::set_clock_sync(&mut sink, sync);
-        assert!(sink.clock_sync.is_some(), "clock sync stored, PTS pacing on");
+        assert!(
+            sink.clock_sync.is_some(),
+            "clock sync stored, PTS pacing on"
+        );
     }
 
     #[test]
@@ -1089,7 +1103,10 @@ mod tests {
         // Bound 0: any frame past its deadline is too late.
         let strict = WaylandSink::new().with_max_lateness_ns(0);
         assert!(!strict.is_too_late(100, 100), "on time is not late");
-        assert!(strict.is_too_late(100, 101), "1ns past the deadline is late");
+        assert!(
+            strict.is_too_late(100, 101),
+            "1ns past the deadline is late"
+        );
 
         // Bound N: late only once past the deadline by more than N.
         let tol = WaylandSink::new().with_max_lateness_ns(10);
@@ -1121,7 +1138,10 @@ mod tests {
         use g2g_core::memory::SystemSlice;
         Frame {
             domain: MemoryDomain::System(SystemSlice::from_boxed(Box::new([0u8; 4]))),
-            timing: FrameTiming { pts_ns, ..FrameTiming::default() },
+            timing: FrameTiming {
+                pts_ns,
+                ..FrameTiming::default()
+            },
             sequence: 0,
             meta: Default::default(),
         }
@@ -1133,11 +1153,8 @@ mod tests {
         let clock = Arc::new(AtomicU64::new(1_000));
         let mut sink = WaylandSink::new();
         let anchor = PlayAnchor::new();
-        let sync = ClockSync::with_play_anchor(
-            Arc::new(ManualClock(clock.clone())),
-            0,
-            anchor.clone(),
-        );
+        let sync =
+            ClockSync::with_play_anchor(Arc::new(ManualClock(clock.clone())), 0, anchor.clone());
 
         // Preroll frame consumed during `Paused` (anchor not yet stamped): the
         // sink first-frame-anchors so it presents immediately, provisionally.
@@ -1172,18 +1189,28 @@ mod tests {
         let (bus, handle) = g2g_core::Bus::new(4);
         let clock = Arc::new(AtomicU64::new(0));
         let mut sink = WaylandSink::new().with_max_lateness_ns(0).with_bus(handle);
-        AsyncElement::set_clock_sync(&mut sink, ClockSync::new(Arc::new(ManualClock(clock.clone())), 0));
+        AsyncElement::set_clock_sync(
+            &mut sink,
+            ClockSync::new(Arc::new(ManualClock(clock.clone())), 0),
+        );
         // Pretend the first frame already anchored presentation at clock 0.
         sink.anchor_ns = Some(0);
 
         // Clock is now 1 ms; a frame with deadline 0 is 1 ms late (> 0 bound).
         clock.store(1_000_000, Ordering::Relaxed);
         let mut out = NullOut;
-        sink.process(PipelinePacket::DataFrame(nv12_frame(0)), &mut out).await.unwrap();
+        sink.process(PipelinePacket::DataFrame(nv12_frame(0)), &mut out)
+            .await
+            .unwrap();
 
         assert_eq!(sink.late_dropped(), 1, "the late frame was dropped");
         match bus.try_recv() {
-            Some(BusMessage::Qos { running_time_ns, jitter_ns, dropped, .. }) => {
+            Some(BusMessage::Qos {
+                running_time_ns,
+                jitter_ns,
+                dropped,
+                ..
+            }) => {
                 assert_eq!(running_time_ns, 0, "deadline reported");
                 assert_eq!(jitter_ns, 1_000_000, "1 ms late");
                 assert_eq!(dropped, 1, "cumulative drop count");
@@ -1201,7 +1228,10 @@ mod tests {
         let mut sink = WaylandSink::new();
         AsyncElement::set_clock_sync(&mut sink, ClockSync::new(Arc::new(ManualClock(clock)), 0));
         // First frame anchors at now, so it is never late under any bound.
-        assert!(!sink.is_too_late(0, 5_000_000), "anchored first frame on time");
+        assert!(
+            !sink.is_too_late(0, 5_000_000),
+            "anchored first frame on time"
+        );
         assert_eq!(sink.late_dropped(), 0);
     }
 
@@ -1219,7 +1249,11 @@ mod tests {
         let mut sink = WaylandSink::new();
         let seg = Segment::for_flush_seek(&g2g_core::Seek::flush_to(70_000_000), None);
         sink.segment = Some(seg);
-        assert_eq!(sink.running_time(66_000_000), None, "pre-target frame clips");
+        assert_eq!(
+            sink.running_time(66_000_000),
+            None,
+            "pre-target frame clips"
+        );
         assert_eq!(
             sink.running_time(70_000_000),
             Some(0),
@@ -1250,21 +1284,13 @@ mod tests {
         src[5] = 128; // V
         let out = nv12_to_xrgb8888(&src, 2, 2).unwrap();
         for px in out.chunks_exact(4) {
-            assert!(
-                (125..=131).contains(&px[0]),
-                "blue out of range: {}",
-                px[0]
-            );
+            assert!((125..=131).contains(&px[0]), "blue out of range: {}", px[0]);
             assert!(
                 (125..=131).contains(&px[1]),
                 "green out of range: {}",
                 px[1]
             );
-            assert!(
-                (125..=131).contains(&px[2]),
-                "red out of range: {}",
-                px[2]
-            );
+            assert!((125..=131).contains(&px[2]), "red out of range: {}", px[2]);
             assert_eq!(px[3], 0xFF, "alpha must be 0xFF");
         }
     }

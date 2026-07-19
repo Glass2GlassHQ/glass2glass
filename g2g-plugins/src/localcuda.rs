@@ -55,8 +55,11 @@ use g2g_core::{
 };
 
 /// The `location` property shared by both ends: the Unix socket path.
-const LOCATION_PROP: &[PropertySpec] =
-    &[PropertySpec::new("location", PropKind::Str, "Unix socket path")];
+const LOCATION_PROP: &[PropertySpec] = &[PropertySpec::new(
+    "location",
+    PropKind::Str,
+    "Unix socket path",
+)];
 
 use crate::localipc;
 
@@ -151,7 +154,9 @@ async fn write_msg<W: AsyncWrite + Unpin>(
     payload: &[u8],
 ) -> Result<(), G2gError> {
     sock.write_all(&[tag]).await.map_err(io_err)?;
-    sock.write_all(&(payload.len() as u32).to_le_bytes()).await.map_err(io_err)?;
+    sock.write_all(&(payload.len() as u32).to_le_bytes())
+        .await
+        .map_err(io_err)?;
     sock.write_all(payload).await.map_err(io_err)?;
     Ok(())
 }
@@ -183,8 +188,12 @@ fn plane_sizes(d: &FrameDesc) -> (u64, u64) {
 /// past the allocation.
 fn planes_in_bounds(d: &FrameDesc) -> bool {
     let (luma, chroma) = plane_sizes(d);
-    d.luma_off.checked_add(luma).is_some_and(|e| e <= d.alloc_size)
-        && d.chroma_off.checked_add(chroma).is_some_and(|e| e <= d.alloc_size)
+    d.luma_off
+        .checked_add(luma)
+        .is_some_and(|e| e <= d.alloc_size)
+        && d.chroma_off
+            .checked_add(chroma)
+            .is_some_and(|e| e <= d.alloc_size)
 }
 
 fn nv12(width: u32, height: u32) -> Caps {
@@ -201,9 +210,12 @@ fn nv12(width: u32, height: u32) -> Caps {
 
 fn dims_of(caps: &Caps) -> Option<(u32, u32)> {
     match caps {
-        Caps::RawVideo { format: RawVideoFormat::Nv12, width: Dim::Fixed(w), height: Dim::Fixed(h), .. } => {
-            Some((*w, *h))
-        }
+        Caps::RawVideo {
+            format: RawVideoFormat::Nv12,
+            width: Dim::Fixed(w),
+            height: Dim::Fixed(h),
+            ..
+        } => Some((*w, *h)),
         _ => None,
     }
 }
@@ -246,7 +258,8 @@ impl PadTemplates for LocalCudaSink {
 }
 
 impl AsyncElement for LocalCudaSink {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -338,7 +351,9 @@ impl AsyncElement for LocalCudaSink {
                         let _ = sock.shutdown().await;
                     }
                 }
-                PipelinePacket::CapsChanged(_) | PipelinePacket::Flush | PipelinePacket::Segment(_) => {}
+                PipelinePacket::CapsChanged(_)
+                | PipelinePacket::Flush
+                | PipelinePacket::Segment(_) => {}
                 // future PipelinePacket variants: no-op (terminal sink).
                 _ => {}
             }
@@ -428,7 +443,9 @@ struct IpcMapping {
 
 impl core::fmt::Debug for IpcMapping {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("IpcMapping").field("base", &self.base).finish_non_exhaustive()
+        f.debug_struct("IpcMapping")
+            .field("base", &self.base)
+            .finish_non_exhaustive()
     }
 }
 
@@ -513,7 +530,9 @@ impl LocalCudaSrc {
         let listener = tokio::net::UnixListener::from_std(listener).map_err(io_err)?;
         let (mut stream, _) = listener.accept().await.map_err(io_err)?;
         // First message is the NV12 caps (dims).
-        let (tag, payload) = read_msg(&mut stream).await?.ok_or(G2gError::NotConfigured)?;
+        let (tag, payload) = read_msg(&mut stream)
+            .await?
+            .ok_or(G2gError::NotConfigured)?;
         if tag != TAG_CAPS || payload.len() < 8 {
             return Err(G2gError::Hardware(HardwareError::Other));
         }
@@ -527,10 +546,12 @@ impl LocalCudaSrc {
 }
 
 impl SourceLoop for LocalCudaSrc {
-    type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
+    type RunFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
     where
         Self: 'a;
-    type CapsFuture<'a> = Pin<Box<dyn Future<Output = Result<Caps, G2gError>> + 'a>>
+    type CapsFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<Caps, G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -598,7 +619,11 @@ impl SourceLoop for LocalCudaSrc {
             // Split so a frame descriptor can be read while the ack for the
             // previous frame is written (the zero-copy path waits on consumption
             // between the read and the ack).
-            let (mut rd, mut wr) = self.socket.take().ok_or(G2gError::NotConfigured)?.into_split();
+            let (mut rd, mut wr) = self
+                .socket
+                .take()
+                .ok_or(G2gError::NotConfigured)?
+                .into_split();
             out.push(PipelinePacket::CapsChanged(caps)).await?;
 
             let limit = self.frame_limit;
@@ -656,7 +681,9 @@ impl SourceLoop for LocalCudaSrc {
                             // IpcMapping dropped, closing our mapping), then tell
                             // the producer it may free the source.
                             let _ = done_rx.await;
-                            wr.write_all(&desc.sequence.to_le_bytes()).await.map_err(io_err)?;
+                            wr.write_all(&desc.sequence.to_le_bytes())
+                                .await
+                                .map_err(io_err)?;
                         } else {
                             // Copy mode: take one on-GPU copy into our own packed
                             // buffer, close the mapping, ack immediately (the
@@ -697,7 +724,9 @@ impl SourceLoop for LocalCudaSrc {
                                 }
                                 dest
                             };
-                            wr.write_all(&desc.sequence.to_le_bytes()).await.map_err(io_err)?;
+                            wr.write_all(&desc.sequence.to_le_bytes())
+                                .await
+                                .map_err(io_err)?;
                             let buf = OwnedCudaBuffer::new(
                                 dest,
                                 dest + luma_sz,
@@ -706,7 +735,10 @@ impl SourceLoop for LocalCudaSrc {
                                 desc.width,
                                 desc.height,
                                 ctx.0,
-                                Arc::new(DestAlloc { dptr: dest, _ctx: Arc::clone(&ctx) }),
+                                Arc::new(DestAlloc {
+                                    dptr: dest,
+                                    _ctx: Arc::clone(&ctx),
+                                }),
                             );
                             out.push(PipelinePacket::DataFrame(Frame {
                                 domain: MemoryDomain::Cuda(buf),

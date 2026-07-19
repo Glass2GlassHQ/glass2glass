@@ -34,7 +34,10 @@ fn ptp_system_clock_locks_onto_the_os_tai_clock() {
         return;
     }
 
-    assert!(ptp.is_locked(), "servo should lock onto the smooth OS clock");
+    assert!(
+        ptp.is_locked(),
+        "servo should lock onto the smooth OS clock"
+    );
     assert!(
         ptp.candidate().is_some(),
         "a locked PTP system clock is offered to election"

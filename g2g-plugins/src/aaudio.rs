@@ -96,9 +96,11 @@ fn g2g_format(format: NdkAudioFormat) -> Option<AudioFormat> {
 /// Validate that `caps` is interleaved PCM and extract `(format, channels, rate)`.
 fn pcm_params(caps: &Caps) -> Result<(AudioFormat, u8, u32), G2gError> {
     match caps {
-        Caps::Audio { format, channels, sample_rate }
-            if bytes_per_sample(*format).is_some() && *channels > 0 && *sample_rate > 0 =>
-        {
+        Caps::Audio {
+            format,
+            channels,
+            sample_rate,
+        } if bytes_per_sample(*format).is_some() && *channels > 0 && *sample_rate > 0 => {
             Ok((*format, *channels, *sample_rate))
         }
         _ => Err(G2gError::CapsMismatch),
@@ -198,7 +200,11 @@ impl AAudioSink {
             // SAFETY: `off` is frame-aligned and `remaining` frames fit within
             // `pcm[off..]`; the stream is an open output stream owned here.
             let wrote = frames_transferred(unsafe {
-                stream.write(pcm[off..].as_ptr() as *const c_void, remaining, IO_TIMEOUT_NS)
+                stream.write(
+                    pcm[off..].as_ptr() as *const c_void,
+                    remaining,
+                    IO_TIMEOUT_NS,
+                )
             })?;
             if wrote == 0 {
                 // Timed out with no progress: surface rather than spin.
@@ -212,7 +218,8 @@ impl AAudioSink {
 }
 
 impl AsyncElement for AAudioSink {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -274,7 +281,11 @@ impl AsyncElement for AAudioSink {
 
 impl PadTemplates for AAudioSink {
     fn pad_templates() -> Vec<PadTemplate> {
-        let pcm = |format| Caps::Audio { format, channels: 2, sample_rate: 48_000 };
+        let pcm = |format| Caps::Audio {
+            format,
+            channels: 2,
+            sample_rate: 48_000,
+        };
         Vec::from([PadTemplate::sink(CapsSet::from_alternatives(Vec::from([
             pcm(AudioFormat::PcmS16Le),
             pcm(AudioFormat::PcmF32Le),
@@ -349,7 +360,11 @@ impl AAudioSrc {
         let format = g2g_format(stream.format()).ok_or(G2gError::CapsMismatch)?;
         let channels = stream.channel_count().max(1) as u8;
         let sample_rate = stream.sample_rate().max(1) as u32;
-        let caps = Caps::Audio { format, channels, sample_rate };
+        let caps = Caps::Audio {
+            format,
+            channels,
+            sample_rate,
+        };
         self.stream = Some(stream);
         self.caps = Some(caps.clone());
         Ok(caps)
@@ -357,11 +372,13 @@ impl AAudioSrc {
 }
 
 impl SourceLoop for AAudioSrc {
-    type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
+    type RunFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
     where
         Self: 'a;
 
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 
@@ -388,8 +405,11 @@ impl SourceLoop for AAudioSrc {
             if !self.configured {
                 return Err(G2gError::NotConfigured);
             }
-            let Caps::Audio { format, channels, sample_rate } =
-                self.caps.clone().ok_or(G2gError::NotConfigured)?
+            let Caps::Audio {
+                format,
+                channels,
+                sample_rate,
+            } = self.caps.clone().ok_or(G2gError::NotConfigured)?
             else {
                 return Err(G2gError::CapsMismatch);
             };

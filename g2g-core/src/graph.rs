@@ -107,7 +107,10 @@ impl NodeIdOffset {
 
     /// Translate a pad (re-base its node id; the pad index is unchanged).
     pub fn apply_pad(self, pad: PadId) -> PadId {
-        PadId { node: self.apply(pad.node), index: pad.index }
+        PadId {
+            node: self.apply(pad.node),
+            index: pad.index,
+        }
     }
 }
 
@@ -133,10 +136,16 @@ impl Tee {
         self.0
     }
     pub fn input(self) -> PadId {
-        PadId { node: self.0, index: 0 }
+        PadId {
+            node: self.0,
+            index: 0,
+        }
     }
     pub fn out(self, index: u8) -> PadId {
-        PadId { node: self.0, index }
+        PadId {
+            node: self.0,
+            index,
+        }
     }
 }
 
@@ -152,10 +161,16 @@ impl Demux {
         self.0
     }
     pub fn input(self) -> PadId {
-        PadId { node: self.0, index: 0 }
+        PadId {
+            node: self.0,
+            index: 0,
+        }
     }
     pub fn out(self, index: u8) -> PadId {
-        PadId { node: self.0, index }
+        PadId {
+            node: self.0,
+            index,
+        }
     }
 }
 
@@ -168,10 +183,16 @@ impl Muxer {
         self.0
     }
     pub fn input(self, index: u8) -> PadId {
-        PadId { node: self.0, index }
+        PadId {
+            node: self.0,
+            index,
+        }
     }
     pub fn output(self) -> PadId {
-        PadId { node: self.0, index: 0 }
+        PadId {
+            node: self.0,
+            index: 0,
+        }
     }
 }
 
@@ -181,12 +202,24 @@ pub enum GraphError {
     /// A linked pad referenced a node id that doesn't exist.
     UnknownNode(NodeId),
     /// A pad index is past the node kind's pad count for that direction.
-    PadOutOfRange { node: NodeId, index: u8, direction: PadDir },
+    PadOutOfRange {
+        node: NodeId,
+        index: u8,
+        direction: PadDir,
+    },
     /// A pad has no link where the kind requires one.
-    UnlinkedPad { node: NodeId, index: u8, direction: PadDir },
+    UnlinkedPad {
+        node: NodeId,
+        index: u8,
+        direction: PadDir,
+    },
     /// A pad has more than one link (a pad peers with exactly one other pad;
     /// fan-out/in is expressed with `Tee`/`Muxer`, not multi-linked pads).
-    PadCountMismatch { node: NodeId, index: u8, direction: PadDir },
+    PadCountMismatch {
+        node: NodeId,
+        index: u8,
+        direction: PadDir,
+    },
     /// A node participates in no link at all.
     OrphanNode(NodeId),
     /// The graph has a cycle; the listed nodes are the unresolved set.
@@ -194,7 +227,11 @@ pub enum GraphError {
     /// The same interior pad was exposed as a ghost pad twice on a [`Bin`]. A
     /// ghost pad peers 1:1 with one internal pad (as in GStreamer), so a pad can
     /// back at most one ghost.
-    DuplicateGhostPad { node: NodeId, index: u8, direction: PadDir },
+    DuplicateGhostPad {
+        node: NodeId,
+        index: u8,
+        direction: PadDir,
+    },
     /// A `Tee`/`Demux` with zero outputs or a `Muxer` with zero inputs. The
     /// runner's broadcast computes `senders.len() - 1`, so a zero-fan node
     /// underflows and panics; reject it at validation instead.
@@ -225,7 +262,10 @@ impl<E> Default for Graph<E> {
 
 impl<E> Graph<E> {
     pub fn new() -> Self {
-        Self { nodes: Vec::new(), edges: Vec::new() }
+        Self {
+            nodes: Vec::new(),
+            edges: Vec::new(),
+        }
     }
 
     pub fn add_source(&mut self, element: E) -> NodeId {
@@ -271,16 +311,16 @@ impl<E> Graph<E> {
 
     fn push(&mut self, kind: NodeKind, element: Option<E>) -> NodeId {
         let id = NodeId(self.nodes.len() as u32);
-        self.nodes.push(Node { kind, element, fanout: FanOutPolicy::FailLoud });
+        self.nodes.push(Node {
+            kind,
+            element,
+            fanout: FanOutPolicy::FailLoud,
+        });
         id
     }
 
     /// Link an output pad to an input pad with the default `Block` policy.
-    pub fn link(
-        &mut self,
-        from: impl Into<PadId>,
-        to: impl Into<PadId>,
-    ) -> Result<(), GraphError> {
+    pub fn link(&mut self, from: impl Into<PadId>, to: impl Into<PadId>) -> Result<(), GraphError> {
         self.link_with(from, to, LinkPolicy::Block)
     }
 
@@ -307,7 +347,12 @@ impl<E> Graph<E> {
         let (src, dst) = (from.into(), to.into());
         self.check_pad(src, PadDir::Out)?;
         self.check_pad(dst, PadDir::In)?;
-        self.edges.push(Edge { src, dst, policy, capacity });
+        self.edges.push(Edge {
+            src,
+            dst,
+            policy,
+            capacity,
+        });
         Ok(())
     }
 
@@ -333,9 +378,20 @@ impl<E> Graph<E> {
         let policy = self.edges[edge_idx].policy;
         let capacity = self.edges[edge_idx].capacity;
         // P -> K (rewire the original edge's destination to the new node).
-        self.edges[edge_idx].dst = PadId { node: new, index: 0 };
+        self.edges[edge_idx].dst = PadId {
+            node: new,
+            index: 0,
+        };
         // K -> C (the original destination), preserving policy + depth on both halves.
-        self.edges.push(Edge { src: PadId { node: new, index: 0 }, dst: old_dst, policy, capacity });
+        self.edges.push(Edge {
+            src: PadId {
+                node: new,
+                index: 0,
+            },
+            dst: old_dst,
+            policy,
+            capacity,
+        });
         new
     }
 
@@ -354,7 +410,9 @@ impl<E> Graph<E> {
     /// Borrow a node's element payload (`None` for tee nodes or an unknown id),
     /// for labeling a pre-validation dump from the element itself.
     pub fn element(&self, node: NodeId) -> Option<&E> {
-        self.nodes.get(node.0 as usize).and_then(|n| n.element.as_ref())
+        self.nodes
+            .get(node.0 as usize)
+            .and_then(|n| n.element.as_ref())
     }
 
     /// Append every node and edge of `inner` into this graph, returning the
@@ -385,7 +443,11 @@ impl<E> Graph<E> {
     /// Construction-time only, no new node kind, so the solver and runner see the
     /// flattened union with no awareness the bin ever existed.
     pub fn add_bin(&mut self, bin: Bin<E>) -> BinInstance {
-        let Bin { graph, ghost_in, ghost_out } = bin;
+        let Bin {
+            graph,
+            ghost_in,
+            ghost_out,
+        } = bin;
         let offset = self.merge(graph);
         BinInstance {
             ghost_in: ghost_in.into_iter().map(|p| offset.apply_pad(p)).collect(),
@@ -407,7 +469,11 @@ impl<E> Graph<E> {
             PadDir::Out => kind.out_pads(),
         };
         if pad.index >= count {
-            return Err(GraphError::PadOutOfRange { node: pad.node, index: pad.index, direction });
+            return Err(GraphError::PadOutOfRange {
+                node: pad.node,
+                index: pad.index,
+                direction,
+            });
         }
         Ok(())
     }
@@ -445,7 +511,13 @@ impl<E> Graph<E> {
         }
 
         let topo = topo_sort(n, &in_edges, &out_edges, &self.edges)?;
-        Ok(ValidatedGraph { nodes: self.nodes, edges: self.edges, topo, in_edges, out_edges })
+        Ok(ValidatedGraph {
+            nodes: self.nodes,
+            edges: self.edges,
+            topo,
+            in_edges,
+            out_edges,
+        })
     }
 }
 
@@ -483,7 +555,11 @@ impl<E> Default for Bin<E> {
 
 impl<E> Bin<E> {
     pub fn new() -> Self {
-        Self { graph: Graph::new(), ghost_in: Vec::new(), ghost_out: Vec::new() }
+        Self {
+            graph: Graph::new(),
+            ghost_in: Vec::new(),
+            ghost_out: Vec::new(),
+        }
     }
 
     pub fn add_source(&mut self, element: E) -> NodeId {
@@ -506,11 +582,7 @@ impl<E> Bin<E> {
         self.graph.add_muxer(element, inputs)
     }
 
-    pub fn link(
-        &mut self,
-        from: impl Into<PadId>,
-        to: impl Into<PadId>,
-    ) -> Result<(), GraphError> {
+    pub fn link(&mut self, from: impl Into<PadId>, to: impl Into<PadId>) -> Result<(), GraphError> {
         self.graph.link(from, to)
     }
 
@@ -695,10 +767,18 @@ fn check_pads(
     for (idx, &c) in seen.iter().enumerate() {
         let index = idx as u8;
         if c == 0 {
-            return Err(GraphError::UnlinkedPad { node, index, direction });
+            return Err(GraphError::UnlinkedPad {
+                node,
+                index,
+                direction,
+            });
         }
         if c > 1 {
-            return Err(GraphError::PadCountMismatch { node, index, direction });
+            return Err(GraphError::PadCountMismatch {
+                node,
+                index,
+                direction,
+            });
         }
     }
     Ok(())
@@ -843,7 +923,11 @@ mod tests {
         g.link(src, tee.input()).unwrap();
         g.link(tee.out(0), a).unwrap();
         match g.finish() {
-            Err(GraphError::UnlinkedPad { node, index, direction }) => {
+            Err(GraphError::UnlinkedPad {
+                node,
+                index,
+                direction,
+            }) => {
                 assert_eq!((node, index, direction), (tee.node(), 1, PadDir::Out));
             }
             other => panic!("expected UnlinkedPad, got {other:?}"),
@@ -860,7 +944,11 @@ mod tests {
         g.link(s0, sink).unwrap();
         g.link(s1, sink).unwrap();
         match g.finish() {
-            Err(GraphError::PadCountMismatch { node, index, direction }) => {
+            Err(GraphError::PadCountMismatch {
+                node,
+                index,
+                direction,
+            }) => {
                 assert_eq!((node, index, direction), (sink, 0, PadDir::In));
             }
             other => panic!("expected PadCountMismatch, got {other:?}"),
@@ -884,7 +972,10 @@ mod tests {
         let src = g.add_source("src");
         let tee = g.add_tee(0);
         g.link(src, tee.input()).unwrap();
-        assert_eq!(g.finish().err(), Some(GraphError::DegenerateFanNode(tee.node())));
+        assert_eq!(
+            g.finish().err(),
+            Some(GraphError::DegenerateFanNode(tee.node()))
+        );
     }
 
     #[test]
@@ -897,7 +988,11 @@ mod tests {
         // tee(2) has output pads 0 and 1; pad 2 is out of range.
         assert_eq!(
             g.link(tee.out(2), s).err(),
-            Some(GraphError::PadOutOfRange { node: tee.node(), index: 2, direction: PadDir::Out })
+            Some(GraphError::PadOutOfRange {
+                node: tee.node(),
+                index: 2,
+                direction: PadDir::Out
+            })
         );
     }
 
@@ -999,7 +1094,11 @@ mod tests {
         bin.ghost_output(a).unwrap();
         assert_eq!(
             bin.ghost_output(a),
-            Err(GraphError::DuplicateGhostPad { node: a, index: 0, direction: PadDir::Out }),
+            Err(GraphError::DuplicateGhostPad {
+                node: a,
+                index: 0,
+                direction: PadDir::Out
+            }),
             "the same interior pad cannot back two ghosts",
         );
     }

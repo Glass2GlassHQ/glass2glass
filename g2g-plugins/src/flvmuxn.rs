@@ -88,14 +88,22 @@ impl FlvMuxN {
     }
 
     fn output_caps_value() -> Caps {
-        Caps::ByteStream { encoding: ByteStreamEncoding::Flv }
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::Flv,
+        }
     }
 
     /// FLV carries H.264 video and AAC audio only.
     fn pad_kind_for(caps: &Caps) -> Option<PadKind> {
         match caps {
-            Caps::CompressedVideo { codec: VideoCodec::H264, .. } => Some(PadKind::Video),
-            Caps::Audio { format: AudioFormat::Aac, .. } => Some(PadKind::Audio),
+            Caps::CompressedVideo {
+                codec: VideoCodec::H264,
+                ..
+            } => Some(PadKind::Video),
+            Caps::Audio {
+                format: AudioFormat::Aac,
+                ..
+            } => Some(PadKind::Audio),
             _ => None,
         }
     }
@@ -145,7 +153,12 @@ impl FlvMuxN {
     }
 
     /// Emit one access unit as its track's FLV tag.
-    async fn emit_au(&mut self, input: usize, frame: Frame, out: &mut dyn OutputSink) -> Result<(), G2gError> {
+    async fn emit_au(
+        &mut self,
+        input: usize,
+        frame: Frame,
+        out: &mut dyn OutputSink,
+    ) -> Result<(), G2gError> {
         let MemoryDomain::System(slice) = &frame.domain else {
             return Err(G2gError::UnsupportedDomain);
         };
@@ -163,7 +176,10 @@ impl FlvMuxN {
 
         let out_frame = Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-            FrameTiming { pts_ns: frame.timing.pts_ns, ..FrameTiming::default() },
+            FrameTiming {
+                pts_ns: frame.timing.pts_ns,
+                ..FrameTiming::default()
+            },
             self.emitted,
         );
         self.emitted += 1;
@@ -186,7 +202,11 @@ impl MultiInputElement for FlvMuxN {
     /// `video_%u` / `audio_%u` / `sink_%u` each claim the next positional slot (the
     /// track type is read from the input's caps, not its index), so a launch line
     /// can name the pads (`m.video_0` / `m.audio_0`) in any order.
-    fn input_pad_index(&self, _req: &g2g_core::runtime::PadRequest, ordinal: usize) -> Option<usize> {
+    fn input_pad_index(
+        &self,
+        _req: &g2g_core::runtime::PadRequest,
+        ordinal: usize,
+    ) -> Option<usize> {
         (ordinal < self.inputs).then_some(ordinal)
     }
 
@@ -203,13 +223,24 @@ impl MultiInputElement for FlvMuxN {
     }
 
     fn caps_constraint_for_output(&self) -> Result<CapsConstraint<'_>, G2gError> {
-        Ok(CapsConstraint::Produces(CapsSet::one(Self::output_caps_value())))
+        Ok(CapsConstraint::Produces(CapsSet::one(
+            Self::output_caps_value(),
+        )))
     }
 
-    fn configure_pipeline(&mut self, input: usize, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+    fn configure_pipeline(
+        &mut self,
+        input: usize,
+        absolute_caps: &Caps,
+    ) -> Result<ConfigureOutcome, G2gError> {
         let kind = Self::pad_kind_for(absolute_caps).ok_or(G2gError::CapsMismatch)?;
         // FLV carries at most one video and one audio track; reject a duplicate.
-        if self.kinds.iter().enumerate().any(|(i, k)| i != input && *k == Some(kind)) {
+        if self
+            .kinds
+            .iter()
+            .enumerate()
+            .any(|(i, k)| i != input && *k == Some(kind))
+        {
             return Err(G2gError::CapsMismatch);
         }
         self.kinds[input] = Some(kind);
@@ -293,13 +324,20 @@ mod tests {
     }
 
     fn audio_caps() -> Caps {
-        Caps::Audio { format: AudioFormat::Aac, channels: 2, sample_rate: 48_000 }
+        Caps::Audio {
+            format: AudioFormat::Aac,
+            channels: 2,
+            sample_rate: 48_000,
+        }
     }
 
     fn frame(data: Vec<u8>, pts_ns: u64) -> PipelinePacket {
         PipelinePacket::DataFrame(Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-            FrameTiming { pts_ns, ..FrameTiming::default() },
+            FrameTiming {
+                pts_ns,
+                ..FrameTiming::default()
+            },
             0,
         ))
     }
@@ -331,12 +369,24 @@ mod tests {
         mux.configure_pipeline(1, &audio_caps()).unwrap();
 
         let mut sink = CaptureSink::default();
-        mux.process(0, frame(h264_idr(), 0), &mut sink).await.unwrap();
-        mux.process(1, frame(aac_adts(), 0), &mut sink).await.unwrap();
-        mux.process(0, frame(h264_idr(), 33_000_000), &mut sink).await.unwrap();
-        mux.process(1, frame(aac_adts(), 21_000_000), &mut sink).await.unwrap();
-        mux.process(0, PipelinePacket::Eos, &mut sink).await.unwrap();
-        mux.process(1, PipelinePacket::Eos, &mut sink).await.unwrap();
+        mux.process(0, frame(h264_idr(), 0), &mut sink)
+            .await
+            .unwrap();
+        mux.process(1, frame(aac_adts(), 0), &mut sink)
+            .await
+            .unwrap();
+        mux.process(0, frame(h264_idr(), 33_000_000), &mut sink)
+            .await
+            .unwrap();
+        mux.process(1, frame(aac_adts(), 21_000_000), &mut sink)
+            .await
+            .unwrap();
+        mux.process(0, PipelinePacket::Eos, &mut sink)
+            .await
+            .unwrap();
+        mux.process(1, PipelinePacket::Eos, &mut sink)
+            .await
+            .unwrap();
 
         // The byte stream is FLV with both tracks present (flags bit0|bit2 = 0x05).
         assert_eq!(&sink.bytes[0..3], b"FLV");
@@ -348,14 +398,31 @@ mod tests {
         let mut d = FlvDemuxer::new();
         d.push_data(&sink.bytes);
         let units = d.take_units();
-        let video: Vec<_> = units.iter().filter(|u| u.track == DemuxTrack::Video).collect();
-        let audio: Vec<_> = units.iter().filter(|u| u.track == DemuxTrack::Audio).collect();
-        assert_eq!(video.len(), 2, "two video media frames (sequence header skipped)");
+        let video: Vec<_> = units
+            .iter()
+            .filter(|u| u.track == DemuxTrack::Video)
+            .collect();
+        let audio: Vec<_> = units
+            .iter()
+            .filter(|u| u.track == DemuxTrack::Audio)
+            .collect();
+        assert_eq!(
+            video.len(),
+            2,
+            "two video media frames (sequence header skipped)"
+        );
         assert_eq!(audio.len(), 2, "two audio media frames");
-        assert_eq!(audio[0].data, alloc::vec![0xAB, 0xCD], "AAC payload, ADTS stripped");
+        assert_eq!(
+            audio[0].data,
+            alloc::vec![0xAB, 0xCD],
+            "AAC payload, ADTS stripped"
+        );
         // The recovered video AU is AVCC (length-prefixed), so it carries no
         // Annex-B start code.
-        assert!(!video[0].data.windows(4).any(|w| w == [0, 0, 0, 1]), "AVCC framing");
+        assert!(
+            !video[0].data.windows(4).any(|w| w == [0, 0, 0, 1]),
+            "AVCC framing"
+        );
     }
 
     #[test]

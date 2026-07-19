@@ -90,7 +90,8 @@ fn argmax_caps() -> Caps {
 }
 
 impl AsyncElement for TensorPostprocess {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -167,7 +168,8 @@ impl AsyncElement for TensorPostprocess {
                     };
 
                     if self.last_caps.as_ref() != Some(&new_caps) {
-                        out.push(PipelinePacket::CapsChanged(new_caps.clone())).await?;
+                        out.push(PipelinePacket::CapsChanged(new_caps.clone()))
+                            .await?;
                         self.last_caps = Some(new_caps);
                     }
                     let mut out_bytes = Vec::with_capacity(result.len() * 4);

@@ -76,7 +76,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata,
     FrameTiming, G2gError, HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, VideoCodec, RawVideoFormat,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, VideoCodec,
 };
 
 /// Default DRM render node. The user can pick a different device via
@@ -190,8 +190,7 @@ impl VaapiH264Dec {
                     }
                     offset += consumed;
                 }
-                Err(DecodeError::CheckEvents)
-                | Err(DecodeError::NotEnoughOutputBuffers(_)) => {
+                Err(DecodeError::CheckEvents) | Err(DecodeError::NotEnoughOutputBuffers(_)) => {
                     self.drain_events(decoded)?;
                 }
                 Err(_) => return Err(G2gError::Hardware(HardwareError::V4l2(0))),
@@ -289,7 +288,8 @@ impl PadTemplates for VaapiH264Dec {
 }
 
 impl AsyncElement for VaapiH264Dec {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -325,8 +325,7 @@ impl AsyncElement for VaapiH264Dec {
             } => {}
             _ => return Err(G2gError::CapsMismatch),
         }
-        let display = libva::Display::open()
-            .ok_or(G2gError::Hardware(HardwareError::V4l2(0)))?;
+        let display = libva::Display::open().ok_or(G2gError::Hardware(HardwareError::V4l2(0)))?;
         let gbm = GbmDevice::open(&self.render_node)
             .map_err(|_| G2gError::Hardware(HardwareError::V4l2(0)))?;
         let decoder = StatelessDecoder::<H264, _>::new_vaapi(display, BlockingMode::Blocking)
@@ -368,7 +367,9 @@ impl AsyncElement for VaapiH264Dec {
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
-            "device" => Some(PropValue::Str(self.render_node.to_string_lossy().into_owned())),
+            "device" => Some(PropValue::Str(
+                self.render_node.to_string_lossy().into_owned(),
+            )),
             _ => None,
         }
     }
@@ -441,7 +442,8 @@ impl AsyncElement for VaapiH264Dec {
                             "vaapidec decode-time output {new_caps:?} inconsistent with derive_output_caps({input:?}) = {expected:?}"
                         );
                     }
-                    out.push(PipelinePacket::CapsChanged(new_caps.clone())).await?;
+                    out.push(PipelinePacket::CapsChanged(new_caps.clone()))
+                        .await?;
                     self.last_caps = Some(new_caps.clone());
                 }
                 let frame = Frame {

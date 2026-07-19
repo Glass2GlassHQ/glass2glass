@@ -16,7 +16,9 @@ pub struct WallClock {
 
 impl WallClock {
     pub fn new() -> Self {
-        Self { epoch: Instant::now() }
+        Self {
+            epoch: Instant::now(),
+        }
     }
 }
 
@@ -30,7 +32,11 @@ impl PipelineClock for WallClock {
     fn now_ns(&self) -> u64 {
         // Saturate: u64 ns covers ~584 years; a pipeline runtime measured
         // from process start will not overflow this in practice.
-        self.epoch.elapsed().as_nanos().try_into().unwrap_or(u64::MAX)
+        self.epoch
+            .elapsed()
+            .as_nanos()
+            .try_into()
+            .unwrap_or(u64::MAX)
     }
 }
 

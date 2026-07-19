@@ -63,7 +63,11 @@ impl RingSource<'_> {
         }
         // SAFETY: the ring outlives the caller's loop, so the lent slice never dangles.
         let payload = unsafe { slot.publish(PAYLOAD) };
-        let frame = Frame::new(MemoryDomain::System(payload), FrameTiming::default(), self.seq);
+        let frame = Frame::new(
+            MemoryDomain::System(payload),
+            FrameTiming::default(),
+            self.seq,
+        );
         self.seq += 1;
         Some(frame)
     }
@@ -105,7 +109,9 @@ fn run_chain(ring: &StaticLendRing<SLOTS, BYTES>, frames: u64) -> (u64, u64) {
     let mut xform = InspectTransform::default();
     let mut sink = SumSink::default();
     for _ in 0..frames {
-        let frame = src.produce().expect("a slot is free (each frame drops before the next)");
+        let frame = src
+            .produce()
+            .expect("a slot is free (each frame drops before the next)");
         let frame = xform.apply(frame);
         sink.consume(frame);
     }

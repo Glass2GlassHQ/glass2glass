@@ -34,7 +34,9 @@ pub(crate) fn h264_codec_string(au: &[u8]) -> Option<String> {
     let profile = *sps.get(1)?;
     let constraints = *sps.get(2)?;
     let level = *sps.get(3)?;
-    Some(alloc::format!("avc1.{profile:02X}{constraints:02X}{level:02X}"))
+    Some(alloc::format!(
+        "avc1.{profile:02X}{constraints:02X}{level:02X}"
+    ))
 }
 
 #[cfg(test)]

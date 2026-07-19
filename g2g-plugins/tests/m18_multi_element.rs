@@ -8,7 +8,9 @@
 
 use g2g_core::element::DynAsyncElement;
 use g2g_core::runtime::{run_linear_chain, run_linear_chain_with_bus};
-use g2g_core::{Bus, BusMessage, Caps, Dim, G2gError, NegotiationFailure, PipelineClock, Rate, RawVideoFormat};
+use g2g_core::{
+    Bus, BusMessage, Caps, Dim, G2gError, NegotiationFailure, PipelineClock, Rate, RawVideoFormat,
+};
 
 use g2g_plugins::capsfilter::CapsFilter;
 use g2g_plugins::fakesink::FakeSink;

@@ -76,7 +76,8 @@ impl RtpH264Depayloader {
         self.last_seq = Some(seq);
         self.timestamp = parsed.header.timestamp;
 
-        let payload = packet.get(parsed.payload_offset..parsed.payload_offset + parsed.payload_len)?;
+        let payload =
+            packet.get(parsed.payload_offset..parsed.payload_offset + parsed.payload_len)?;
         if payload.is_empty() {
             return None;
         }
@@ -91,7 +92,9 @@ impl RtpH264Depayloader {
                 while i + 2 <= payload.len() {
                     let size = u16::from_be_bytes([payload[i], payload[i + 1]]) as usize;
                     i += 2;
-                    let Some(nal) = payload.get(i..i + size) else { break };
+                    let Some(nal) = payload.get(i..i + size) else {
+                        break;
+                    };
                     self.push_nal(nal);
                     i += size;
                 }
@@ -248,7 +251,14 @@ mod tests {
         );
     }
 
-    fn fu_a_packet(seq: u16, ts: u32, marker: bool, start: bool, end: bool, frag: &[u8]) -> Vec<u8> {
+    fn fu_a_packet(
+        seq: u16,
+        ts: u32,
+        marker: bool,
+        start: bool,
+        end: bool,
+        frag: &[u8],
+    ) -> Vec<u8> {
         let mut p = alloc::vec![0x80u8, if marker { 0x80 | 96 } else { 96 }];
         p.extend_from_slice(&seq.to_be_bytes());
         p.extend_from_slice(&ts.to_be_bytes());
@@ -270,14 +280,20 @@ mod tests {
     fn unterminated_fu_a_run_is_bounded_and_resyncs() {
         let mut depay = RtpH264Depayloader::new();
         let frag = alloc::vec![0xABu8; 1024 * 1024]; // 1 MiB per packet
-        // Start a fragment run, then never send the end bit: the buffer must cap
-        // and emit nothing instead of growing without bound.
-        assert!(depay.depacketize(&fu_a_packet(0, 1, false, true, false, &frag)).is_none());
+                                                     // Start a fragment run, then never send the end bit: the buffer must cap
+                                                     // and emit nothing instead of growing without bound.
+        assert!(depay
+            .depacketize(&fu_a_packet(0, 1, false, true, false, &frag))
+            .is_none());
         for seq in 1..16u16 {
-            assert!(depay.depacketize(&fu_a_packet(seq, 1, false, false, false, &frag)).is_none());
+            assert!(depay
+                .depacketize(&fu_a_packet(seq, 1, false, false, false, &frag))
+                .is_none());
         }
         // A fresh complete FU-A NAL still reassembles after the run is dropped.
-        assert!(depay.depacketize(&fu_a_packet(100, 2, false, true, false, &[1, 2, 3])).is_none());
+        assert!(depay
+            .depacketize(&fu_a_packet(100, 2, false, true, false, &[1, 2, 3]))
+            .is_none());
         let unit = depay
             .depacketize(&fu_a_packet(101, 2, true, false, true, &[4, 5, 6]))
             .expect("resyncs and completes a new AU");

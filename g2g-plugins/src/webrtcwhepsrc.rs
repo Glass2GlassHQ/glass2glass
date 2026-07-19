@@ -44,14 +44,16 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming,
-    G2gError, HardwareError, LatencyReport, MemoryDomain, OutputSink, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec, Rate, VideoCodec,
+    AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata,
+    FrameTiming, G2gError, HardwareError, LatencyReport, MemoryDomain, OutputSink, PipelinePacket,
+    PropError, PropKind, PropValue, PropertySpec, Rate, VideoCodec,
 };
 
 use crate::filesink::io_err;
 use crate::turn::{self, TurnClient};
-use crate::webrtc_util::{add_ice_candidates, feed_datagram, post_sdp, select_host_ip, send_transmit};
+use crate::webrtc_util::{
+    add_ice_candidates, feed_datagram, post_sdp, select_host_ip, send_transmit,
+};
 
 /// Minimum gap between keyframe (PLI) requests while waiting for the first one,
 /// so a slow producer is not spammed every frame period.
@@ -89,11 +91,16 @@ impl Media {
                 codec: VideoCodec::H264,
                 width: Dim::Range { min: 2, max: 8192 },
                 height: Dim::Range { min: 2, max: 8192 },
-                framerate: Rate::Range { min_q16: 1 << 16, max_q16: 240 << 16 },
+                framerate: Rate::Range {
+                    min_q16: 1 << 16,
+                    max_q16: 240 << 16,
+                },
             },
-            Media::Audio => {
-                Caps::Audio { format: AudioFormat::Opus, channels: 2, sample_rate: 48_000 }
-            }
+            Media::Audio => Caps::Audio {
+                format: AudioFormat::Opus,
+                channels: 2,
+                sample_rate: 48_000,
+            },
         }
     }
 }
@@ -195,11 +202,13 @@ impl WebRtcWhepSrc {
 }
 
 impl SourceLoop for WebRtcWhepSrc {
-    type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
+    type RunFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
     where
         Self: 'a;
 
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 
@@ -247,7 +256,11 @@ impl SourceLoop for WebRtcWhepSrc {
             }
             "bearer" => {
                 let token = value.as_str().ok_or(PropError::Type)?;
-                self.bearer = if token.is_empty() { None } else { Some(token.into()) };
+                self.bearer = if token.is_empty() {
+                    None
+                } else {
+                    Some(token.into())
+                };
                 Ok(())
             }
             "stun-server" => {
@@ -345,7 +358,9 @@ impl SourceLoop for WebRtcWhepSrc {
             };
             let answer_sdp = post_sdp(&self.whep_url, self.bearer.as_deref(), offer_sdp).await?;
             let answer = SdpAnswer::from_sdp_string(&answer_sdp).map_err(|_| hw())?;
-            rtc.sdp_api().accept_answer(pending, answer).map_err(|_| hw())?;
+            rtc.sdp_api()
+                .accept_answer(pending, answer)
+                .map_err(|_| hw())?;
 
             // Announce the produced caps before the first frame.
             out.push(PipelinePacket::CapsChanged(self.caps())).await?;
@@ -462,8 +477,16 @@ impl SourceLoop for WebRtcWhepSrc {
 /// `WebRtcWhepSrc`'s settable properties: the WHEP endpoint URL + an optional
 /// bearer token, so a `gst-launch` line can target a server without the builder.
 static WEBRTCSRC_PROPS: &[PropertySpec] = &[
-    PropertySpec::new("location", PropKind::Str, "WHEP endpoint URL to subscribe to"),
-    PropertySpec::new("bearer", PropKind::Str, "optional Authorization: Bearer token for the WHEP POST"),
+    PropertySpec::new(
+        "location",
+        PropKind::Str,
+        "WHEP endpoint URL to subscribe to",
+    ),
+    PropertySpec::new(
+        "bearer",
+        PropKind::Str,
+        "optional Authorization: Bearer token for the WHEP POST",
+    ),
     PropertySpec::new(
         "stun-server",
         PropKind::Str,
@@ -474,9 +497,21 @@ static WEBRTCSRC_PROPS: &[PropertySpec] = &[
         PropKind::Str,
         "TURN relay host:port for the NAT cases STUN cannot traverse (empty = no relay)",
     ),
-    PropertySpec::new("turn-user", PropKind::Str, "TURN long-term credential username"),
-    PropertySpec::new("turn-pass", PropKind::Str, "TURN long-term credential password"),
-    PropertySpec::new("media", PropKind::Str, "track to subscribe to: video (H.264) or audio (Opus)"),
+    PropertySpec::new(
+        "turn-user",
+        PropKind::Str,
+        "TURN long-term credential username",
+    ),
+    PropertySpec::new(
+        "turn-pass",
+        PropKind::Str,
+        "TURN long-term credential password",
+    ),
+    PropertySpec::new(
+        "media",
+        PropKind::Str,
+        "track to subscribe to: video (H.264) or audio (Opus)",
+    ),
 ];
 
 #[cfg(test)]
@@ -488,7 +523,10 @@ mod tests {
         let src = WebRtcWhepSrc::new("http://localhost:8889/s/whep");
         assert!(matches!(
             src.caps(),
-            Caps::CompressedVideo { codec: VideoCodec::H264, .. }
+            Caps::CompressedVideo {
+                codec: VideoCodec::H264,
+                ..
+            }
         ));
     }
 
@@ -496,15 +534,30 @@ mod tests {
     fn location_and_bearer_properties_round_trip() {
         let mut src = WebRtcWhepSrc::new("http://h/whep").with_frame_limit(10);
         assert_eq!(src.frame_limit, 10);
-        src.set_property("location", PropValue::Str("http://srv/whep".into())).unwrap();
+        src.set_property("location", PropValue::Str("http://srv/whep".into()))
+            .unwrap();
         assert_eq!(src.whep_url, "http://srv/whep");
-        assert_eq!(src.get_property("location"), Some(PropValue::Str("http://srv/whep".into())));
-        src.set_property("bearer", PropValue::Str("tok".into())).unwrap();
+        assert_eq!(
+            src.get_property("location"),
+            Some(PropValue::Str("http://srv/whep".into()))
+        );
+        src.set_property("bearer", PropValue::Str("tok".into()))
+            .unwrap();
         assert_eq!(src.bearer.as_deref(), Some("tok"));
-        src.set_property("stun-server", PropValue::Str("stun.l.google.com:19302".into())).unwrap();
+        src.set_property(
+            "stun-server",
+            PropValue::Str("stun.l.google.com:19302".into()),
+        )
+        .unwrap();
         assert_eq!(src.stun_server.as_deref(), Some("stun.l.google.com:19302"));
-        assert_eq!(src.set_property("nope", PropValue::Str("x".into())), Err(PropError::Unknown));
-        assert_eq!(src.set_property("location", PropValue::Int(1)), Err(PropError::Type));
+        assert_eq!(
+            src.set_property("nope", PropValue::Str("x".into())),
+            Err(PropError::Unknown)
+        );
+        assert_eq!(
+            src.set_property("location", PropValue::Int(1)),
+            Err(PropError::Type)
+        );
     }
 
     #[test]
@@ -515,13 +568,20 @@ mod tests {
         assert_eq!(src.turn_pass, "p");
 
         let mut src = WebRtcWhepSrc::new("http://h/whep");
-        src.set_property("turn-server", PropValue::Str("relay:3478".into())).unwrap();
-        src.set_property("turn-user", PropValue::Str("user".into())).unwrap();
-        src.set_property("turn-pass", PropValue::Str("secret".into())).unwrap();
+        src.set_property("turn-server", PropValue::Str("relay:3478".into()))
+            .unwrap();
+        src.set_property("turn-user", PropValue::Str("user".into()))
+            .unwrap();
+        src.set_property("turn-pass", PropValue::Str("secret".into()))
+            .unwrap();
         assert_eq!(src.turn_server.as_deref(), Some("relay:3478"));
-        assert_eq!(src.get_property("turn-user"), Some(PropValue::Str("user".into())));
+        assert_eq!(
+            src.get_property("turn-user"),
+            Some(PropValue::Str("user".into()))
+        );
         // Empty turn-server clears the relay (host/srflx only).
-        src.set_property("turn-server", PropValue::Str(String::new())).unwrap();
+        src.set_property("turn-server", PropValue::Str(String::new()))
+            .unwrap();
         assert_eq!(src.turn_server, None);
     }
 
@@ -529,17 +589,31 @@ mod tests {
     fn audio_selects_opus_track_and_caps() {
         let src = WebRtcWhepSrc::new("http://h/whep").audio();
         assert_eq!(src.media, Media::Audio);
-        assert!(matches!(src.caps(), Caps::Audio { format: AudioFormat::Opus, .. }));
+        assert!(matches!(
+            src.caps(),
+            Caps::Audio {
+                format: AudioFormat::Opus,
+                ..
+            }
+        ));
 
         // Default is video; the `media` property flips it and rejects garbage.
         let mut src = WebRtcWhepSrc::new("http://h/whep");
         assert_eq!(src.media, Media::Video);
-        src.set_property("media", PropValue::Str("audio".into())).unwrap();
+        src.set_property("media", PropValue::Str("audio".into()))
+            .unwrap();
         assert_eq!(src.media, Media::Audio);
-        assert_eq!(src.get_property("media"), Some(PropValue::Str("audio".into())));
-        src.set_property("media", PropValue::Str("video".into())).unwrap();
+        assert_eq!(
+            src.get_property("media"),
+            Some(PropValue::Str("audio".into()))
+        );
+        src.set_property("media", PropValue::Str("video".into()))
+            .unwrap();
         assert_eq!(src.media, Media::Video);
-        assert_eq!(src.set_property("media", PropValue::Str("subtitle".into())), Err(PropError::Value));
+        assert_eq!(
+            src.set_property("media", PropValue::Str("subtitle".into())),
+            Err(PropError::Value)
+        );
     }
 
     #[test]

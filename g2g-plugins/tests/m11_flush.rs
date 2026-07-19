@@ -53,7 +53,8 @@ impl SourceLoop for FlushingSrc {
     where
         Self: 'a;
 
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 
@@ -92,6 +93,13 @@ async fn flush_resets_sink_position_allowing_sequence_restart() {
     assert_eq!(stats.frames_consumed, 2);
     assert_eq!(snk.received(), 2);
     assert_eq!(snk.flushes(), 1, "sink observed one flush");
-    assert_eq!(snk.last_sequence(), Some(0), "stream resumed at the restarted sequence");
-    assert!(snk.eos_seen(), "flush is non-terminal; EOS still ends the stream");
+    assert_eq!(
+        snk.last_sequence(),
+        Some(0),
+        "stream resumed at the restarted sequence"
+    );
+    assert!(
+        snk.eos_seen(),
+        "flush is non-terminal; EOS still ends the stream"
+    );
 }

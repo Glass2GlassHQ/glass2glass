@@ -100,7 +100,9 @@ fn access_units(data: &[u8]) -> Vec<Vec<u8>> {
 async fn ffmpeg_plays_interleaved_from_rtspserversink() {
     let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind rtsp control");
     let port = listener.local_addr().unwrap().port();
-    let mut sink = RtspServerSink::from_listener(listener).unwrap().with_rtp(96, 0x1234_5678);
+    let mut sink = RtspServerSink::from_listener(listener)
+        .unwrap()
+        .with_rtp(96, 0x1234_5678);
     sink.configure_pipeline(&h264_caps()).expect("configure");
 
     // ffmpeg connects as a player over TCP-interleaved and decodes a few frames.
@@ -108,9 +110,18 @@ async fn ffmpeg_plays_interleaved_from_rtspserversink() {
     let ffmpeg = tokio::task::spawn_blocking(move || {
         Command::new("ffmpeg")
             .args([
-                "-hide_banner", "-loglevel", "error",
-                "-rtsp_transport", "tcp", "-i", &url,
-                "-frames:v", "3", "-f", "null", "-",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-rtsp_transport",
+                "tcp",
+                "-i",
+                &url,
+                "-frames:v",
+                "3",
+                "-f",
+                "null",
+                "-",
             ])
             .status()
     });
@@ -127,11 +138,18 @@ async fn ffmpeg_plays_interleaved_from_rtspserversink() {
             let au = aus[(i as usize) % aus.len()].clone();
             let frame = Frame {
                 domain: MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
-                timing: FrameTiming { pts_ns: i * 33_000_000, ..FrameTiming::default() },
+                timing: FrameTiming {
+                    pts_ns: i * 33_000_000,
+                    ..FrameTiming::default()
+                },
                 sequence: i,
                 meta: Default::default(),
             };
-            if sink.process(PipelinePacket::DataFrame(frame), &mut null).await.is_err() {
+            if sink
+                .process(PipelinePacket::DataFrame(frame), &mut null)
+                .await
+                .is_err()
+            {
                 break; // ffmpeg left after decoding its frames
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -139,9 +157,17 @@ async fn ffmpeg_plays_interleaved_from_rtspserversink() {
         sink.frames_sent()
     };
 
-    let (status, frames_sent) =
-        tokio::join!(tokio::time::timeout(Duration::from_secs(25), ffmpeg), server);
-    let status = status.expect("ffmpeg finishes within 25s").expect("join").expect("ffmpeg ran");
-    assert!(status.success(), "ffmpeg decoded the interleaved RTSP stream (exit {status:?})");
+    let (status, frames_sent) = tokio::join!(
+        tokio::time::timeout(Duration::from_secs(25), ffmpeg),
+        server
+    );
+    let status = status
+        .expect("ffmpeg finishes within 25s")
+        .expect("join")
+        .expect("ffmpeg ran");
+    assert!(
+        status.success(),
+        "ffmpeg decoded the interleaved RTSP stream (exit {status:?})"
+    );
     assert!(frames_sent > 0, "sink served frames after PLAY");
 }

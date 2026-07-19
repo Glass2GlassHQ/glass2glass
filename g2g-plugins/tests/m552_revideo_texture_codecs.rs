@@ -18,7 +18,10 @@
 //! Both run in ONE test function, sequentially, because parallel Vulkan device
 //! creation SIGSEGVs (see m504 / m535). Runs on the RTX 3060; skips with no
 //! Vulkan decode support / no distinct compute queue.
-#![cfg(all(any(target_os = "linux", target_os = "windows"), feature = "vulkan-video"))]
+#![cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    feature = "vulkan-video"
+))]
 
 use g2g_core::runtime::block_on;
 use g2g_plugins::revideo::{VideoCodec, VideoPixelLayout, VulkanStreamDecoder};
@@ -111,7 +114,10 @@ fn split_obu_frames(stream: &[u8]) -> Vec<&[u8]> {
 }
 
 /// Common checks over a decoded texture: right dims / format, real picture.
-fn assert_real_texture(t: &g2g_plugins::revideo::DecodedVideoTexture, dec: &VulkanStreamDecoder) -> Vec<u8> {
+fn assert_real_texture(
+    t: &g2g_plugins::revideo::DecodedVideoTexture,
+    dec: &VulkanStreamDecoder,
+) -> Vec<u8> {
     assert_eq!(t.width, W as u32);
     assert_eq!(t.height, H as u32);
     assert_eq!(t.texture.format(), wgpu::TextureFormat::Rgba8Unorm);
@@ -121,7 +127,10 @@ fn assert_real_texture(t: &g2g_plugins::revideo::DecodedVideoTexture, dec: &Vulk
     assert_eq!(rgba.len(), W * H * 4);
     let min = *rgba.iter().min().unwrap();
     let max = *rgba.iter().max().unwrap();
-    assert!(min <= 20 && max >= 200, "RGBA range {min}..={max} not a real picture");
+    assert!(
+        min <= 20 && max >= 200,
+        "RGBA range {min}..={max} not a real picture"
+    );
     rgba
 }
 
@@ -158,18 +167,31 @@ fn revideo_streams_h265_and_av1_gpu_textures() {
         assert_eq!(dec.height(), H as u32);
 
         // Whole elementary stream in one call (internal DPB decodes every picture).
-        let textures = dec.submit_chunk_texture(H265, true).expect("H.265 submit chunk (GPU)");
-        assert_eq!(textures.len(), 10, "one GPU texture per H.265 coded picture");
+        let textures = dec
+            .submit_chunk_texture(H265, true)
+            .expect("H.265 submit chunk (GPU)");
+        assert_eq!(
+            textures.len(),
+            10,
+            "one GPU texture per H.265 coded picture"
+        );
         // A CPU-mode method on a GPU-mode decoder is rejected, not misdecoded.
-        assert!(matches!(dec.submit_chunk(H265, true), Err(VulkanVideoError::WrongOutputMode)));
+        assert!(matches!(
+            dec.submit_chunk(H265, true),
+            Err(VulkanVideoError::WrongOutputMode)
+        ));
 
-        let readbacks: Vec<Vec<u8>> = textures.iter().map(|t| assert_real_texture(t, &dec)).collect();
+        let readbacks: Vec<Vec<u8>> = textures
+            .iter()
+            .map(|t| assert_real_texture(t, &dec))
+            .collect();
         // Inter frames differ from their GOP's IDR (GPU DPB reference decode ran).
         // The fixture is two GOPs starting at 0 and 5 (IDR/CRA), as in m503/m517.
         for gop_start in [0usize, 5] {
             for p in 1..5 {
                 assert_ne!(
-                    readbacks[gop_start + p], readbacks[gop_start],
+                    readbacks[gop_start + p],
+                    readbacks[gop_start],
                     "H.265 texture {} identical to its IRAP; GPU reference decode failed",
                     gop_start + p
                 );
@@ -198,9 +220,14 @@ fn revideo_streams_h265_and_av1_gpu_textures() {
                 n += 1;
             }
             let mean = sum as f64 / n as f64;
-            assert!(mean < 3.0, "H.265 frame {i}: GPU RGBA mean abs diff {mean:.2} vs BT.601(I420)");
+            assert!(
+                mean < 3.0,
+                "H.265 frame {i}: GPU RGBA mean abs diff {mean:.2} vs BT.601(I420)"
+            );
         }
-        eprintln!("m552 H.265: 10 GPU-resident RGBA textures match CPU I420 (worst channel diff {worst})");
+        eprintln!(
+            "m552 H.265: 10 GPU-resident RGBA textures match CPU I420 (worst channel diff {worst})"
+        );
     }
 
     // ---- AV1: loose anchor (driver AV1 decode is run-to-run nondeterministic) ----
@@ -222,11 +249,17 @@ fn revideo_streams_h265_and_av1_gpu_textures() {
         assert_eq!(chunks.len(), 10, "fixture is 1 KEY + 9 INTER frames");
         let mut textures = Vec::new();
         for (i, chunk) in chunks.iter().enumerate() {
-            textures.extend(dec.submit_chunk_texture(chunk, i == 0).expect("AV1 submit chunk (GPU)"));
+            textures.extend(
+                dec.submit_chunk_texture(chunk, i == 0)
+                    .expect("AV1 submit chunk (GPU)"),
+            );
         }
         assert_eq!(textures.len(), 10, "one GPU texture per AV1 coded picture");
 
-        let readbacks: Vec<Vec<u8>> = textures.iter().map(|t| assert_real_texture(t, &dec)).collect();
+        let readbacks: Vec<Vec<u8>> = textures
+            .iter()
+            .map(|t| assert_real_texture(t, &dec))
+            .collect();
         // Inter frames differ from the keyframe: the GPU DPB reference decode ran
         // (this holds despite AV1's small nondeterminism, which is <=few % of
         // samples off by <=3, far below a whole-frame difference).

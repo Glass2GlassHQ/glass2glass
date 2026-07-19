@@ -71,16 +71,25 @@ const VIDEO: fn() -> Caps = || Caps::RawVideo {
     framerate: Rate::Fixed(30 << 16),
 };
 
-const AUDIO: fn() -> Caps =
-    || Caps::Audio { format: AudioFormat::PcmS16Le, channels: 2, sample_rate: 48_000 };
+const AUDIO: fn() -> Caps = || Caps::Audio {
+    format: AudioFormat::PcmS16Le,
+    channels: 2,
+    sample_rate: 48_000,
+};
 
 /// Source: emit two frames of `caps` then EOS.
 struct EmitSrc {
     caps: Caps,
 }
 impl SourceLoop for EmitSrc {
-    type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>> where Self: 'a;
-    type CapsFuture<'a> = Ready<Result<Caps, G2gError>> where Self: 'a;
+    type RunFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
+    where
+        Self: 'a;
+    type CapsFuture<'a>
+        = Ready<Result<Caps, G2gError>>
+    where
+        Self: 'a;
 
     fn intercept_caps(&mut self) -> Self::CapsFuture<'_> {
         ready(Ok(self.caps.clone()))
@@ -111,7 +120,10 @@ struct AudioMasterSink {
     clock: Arc<DriftClock>,
 }
 impl AsyncElement for AudioMasterSink {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>> where Self: 'a;
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
     fn intercept_caps(&self, upstream: &Caps) -> Result<Caps, G2gError> {
         Ok(upstream.clone())
     }
@@ -142,7 +154,10 @@ struct RecordingVideoSink {
     got: Arc<Mutex<Option<ElectedClock>>>,
 }
 impl AsyncElement for RecordingVideoSink {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>> where Self: 'a;
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
     fn intercept_caps(&self, upstream: &Caps) -> Result<Caps, G2gError> {
         Ok(upstream.clone())
     }
@@ -177,16 +192,21 @@ async fn audio_clock_is_elected_and_handed_to_the_video_sink() {
 
     // Audio arm: source -> clock-providing sink (the master).
     let asrc = g.add_source(GraphNodeRef::source(EmitSrc { caps: AUDIO() }));
-    let asink =
-        g.add_sink(GraphNodeRef::element(AudioMasterSink { clock: audio_clock.clone() }));
+    let asink = g.add_sink(GraphNodeRef::element(AudioMasterSink {
+        clock: audio_clock.clone(),
+    }));
     g.link(asrc, asink).unwrap();
 
     // Video arm: source -> recording sink that adopts the elected clock.
     let vsrc = g.add_source(GraphNodeRef::source(EmitSrc { caps: VIDEO() }));
-    let vsink = g.add_sink(GraphNodeRef::element(RecordingVideoSink { got: got.clone() }));
+    let vsink = g.add_sink(GraphNodeRef::element(RecordingVideoSink {
+        got: got.clone(),
+    }));
     g.link(vsrc, vsink).unwrap();
 
-    let stats = run_graph(g, &ManualClock::default(), 4).await.expect("graph runs");
+    let stats = run_graph(g, &ManualClock::default(), 4)
+        .await
+        .expect("graph runs");
 
     // Audio outranks the video sink's Provider clock.
     assert_eq!(
@@ -195,8 +215,15 @@ async fn audio_clock_is_elected_and_handed_to_the_video_sink() {
         "the audio sink's clock is elected master"
     );
 
-    let (elected, base) = got.lock().unwrap().clone().expect("video sink got a ClockSync");
-    assert_eq!(base, expected_base, "video sink's base time is the audio clock's reading");
+    let (elected, base) = got
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("video sink got a ClockSync");
+    assert_eq!(
+        base, expected_base,
+        "video sink's base time is the audio clock's reading"
+    );
 
     // The clinching check: the clock the video sink is slaved to *is* the audio
     // drift clock. Move wall time and confirm the video sink's clock tracks the
@@ -219,7 +246,10 @@ async fn slaving_to_the_drift_clock_keeps_av_in_lipsync() {
     // Audio DAC runs 0.1% fast (a realistic ppm-scale drift, exaggerated).
     let (drift, manual) = disciplined_drift_clock(1.001);
     let slope = drift.slope();
-    assert!((slope - 1.001).abs() < 1e-4, "drift fit locked onto the rate: {slope}");
+    assert!(
+        (slope - 1.001).abs() < 1e-4,
+        "drift fit locked onto the rate: {slope}"
+    );
 
     // Election instant: base time = the audio clock's reading now.
     let w0 = 1_000_000_000u64;

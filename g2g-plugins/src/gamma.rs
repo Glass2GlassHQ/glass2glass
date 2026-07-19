@@ -79,7 +79,12 @@ impl Gamma {
     }
 
     fn accept_input(&self, caps: &Caps) -> Result<(RawVideoFormat, u32, u32, Rate), G2gError> {
-        let Caps::RawVideo { format, width: Dim::Fixed(w), height: Dim::Fixed(h), framerate } = caps
+        let Caps::RawVideo {
+            format,
+            width: Dim::Fixed(w),
+            height: Dim::Fixed(h),
+            framerate,
+        } = caps
         else {
             return Err(G2gError::CapsMismatch);
         };
@@ -114,7 +119,9 @@ impl AsyncElement for Gamma {
     /// Native `DerivedOutput`: gamma preserves format, geometry, and framerate.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
-            Caps::RawVideo { format, .. } if FORMATS.contains(format) => CapsSet::one(input.clone()),
+            Caps::RawVideo { format, .. } if FORMATS.contains(format) => {
+                CapsSet::one(input.clone())
+            }
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
     }
@@ -158,7 +165,8 @@ impl AsyncElement for Gamma {
                         framerate: rate,
                     };
                     if self.last_caps.as_ref() != Some(&new_caps) {
-                        out.push(PipelinePacket::CapsChanged(new_caps.clone())).await?;
+                        out.push(PipelinePacket::CapsChanged(new_caps.clone()))
+                            .await?;
                         self.last_caps = Some(new_caps);
                     }
                     let out_frame = Frame {
@@ -194,7 +202,12 @@ impl AsyncElement for Gamma {
     }
 
     fn metadata(&self) -> ElementMetadata {
-        ElementMetadata::new("Gamma", "Filter/Effect/Video", "Performs gamma correction", "g2g")
+        ElementMetadata::new(
+            "Gamma",
+            "Filter/Effect/Video",
+            "Performs gamma correction",
+            "g2g",
+        )
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
@@ -216,8 +229,11 @@ impl AsyncElement for Gamma {
     }
 }
 
-static GAMMA_PROPS: &[PropertySpec] =
-    &[PropertySpec::new("gamma", PropKind::Double, "gamma value (>1 brightens, 1 = none)")];
+static GAMMA_PROPS: &[PropertySpec] = &[PropertySpec::new(
+    "gamma",
+    PropKind::Double,
+    "gamma value (>1 brightens, 1 = none)",
+)];
 
 impl PadTemplates for Gamma {
     fn pad_templates() -> Vec<PadTemplate> {
@@ -274,7 +290,11 @@ mod tests {
     fn gamma_above_one_brightens_midtones() {
         let lut = build_lut(2.0);
         // mid-grey rises: (128/255)^(1/2) * 255 ~ 181.
-        assert!(lut[128] > 128, "gamma 2.0 should brighten 128, got {}", lut[128]);
+        assert!(
+            lut[128] > 128,
+            "gamma 2.0 should brighten 128, got {}",
+            lut[128]
+        );
         assert!((lut[128] as i32 - 181).abs() <= 1);
     }
 

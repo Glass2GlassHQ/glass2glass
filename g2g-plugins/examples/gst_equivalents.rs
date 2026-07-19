@@ -37,16 +37,23 @@ fn main() {
     }
 
     let reg = default_registry();
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("tokio rt");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio rt");
 
     // Run a gst-launch line through the text parser (the `g2g-launch` path).
     let run_text = |line: &str| -> u64 {
         let g = parse_launch(&reg, line).expect("gst-launch line parses");
-        rt.block_on(run_graph(g, &ZeroClock, 4)).expect("text pipeline runs").frames_consumed
+        rt.block_on(run_graph(g, &ZeroClock, 4))
+            .expect("text pipeline runs")
+            .frames_consumed
     };
     // Run a hand-built typed graph.
     let run_typed = |g: Graph<GraphNode>| -> u64 {
-        rt.block_on(run_graph(g, &ZeroClock, 4)).expect("typed pipeline runs").frames_consumed
+        rt.block_on(run_graph(g, &ZeroClock, 4))
+            .expect("typed pipeline runs")
+            .frames_consumed
     };
 
     // A recipe: report the two runs and assert they agree.
@@ -55,7 +62,10 @@ fn main() {
         println!("  gst-launch-1.0 {line}");
         println!("  text : {text} frames");
         println!("  typed: {typed} frames");
-        assert_eq!(text, typed, "text and typed builds must be equivalent: {title}");
+        assert_eq!(
+            text, typed,
+            "text and typed builds must be equivalent: {title}"
+        );
         println!("  -> equivalent\n");
     };
 
@@ -107,7 +117,12 @@ fn main() {
         g.link(src, tee.input()).unwrap();
         g.link(tee.out(0), sink0).unwrap();
         g.link(tee.out(1), sink1).unwrap();
-        report("tee fan-out to two sinks", line, run_text(line), run_typed(g));
+        report(
+            "tee fan-out to two sinks",
+            line,
+            run_text(line),
+            run_typed(g),
+        );
     }
 
     println!("all recipes: gst-launch text == typed graph");

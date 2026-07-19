@@ -117,7 +117,10 @@ fn serve(playlist: String, segs: Vec<Vec<u8>>) -> String {
 
 async fn run_and_capture(url: String) -> CaptureSink {
     let mut src = HlsSrc::new(url);
-    src.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs }).unwrap();
+    src.configure_pipeline(&Caps::ByteStream {
+        encoding: ByteStreamEncoding::MpegTs,
+    })
+    .unwrap();
     let mut sink = CaptureSink::default();
     src.run(&mut sink).await.unwrap();
     sink
@@ -142,7 +145,10 @@ async fn aes128_explicit_iv_decrypts_segments() {
     assert!(sink.eos);
     assert_eq!(sink.frames, 2);
     let expected = [pt0, pt1].concat();
-    assert_eq!(sink.body, expected, "explicit-IV AES-128 segments decrypt to plaintext");
+    assert_eq!(
+        sink.body, expected,
+        "explicit-IV AES-128 segments decrypt to plaintext"
+    );
 }
 
 #[tokio::test]
@@ -167,5 +173,8 @@ async fn aes128_sequence_derived_iv_decrypts_segments() {
     assert!(sink.eos);
     assert_eq!(sink.frames, 2);
     let expected = [pt0, pt1].concat();
-    assert_eq!(sink.body, expected, "sequence-derived-IV AES-128 segments decrypt to plaintext");
+    assert_eq!(
+        sink.body, expected,
+        "sequence-derived-IV AES-128 segments decrypt to plaintext"
+    );
 }

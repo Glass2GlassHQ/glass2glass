@@ -74,7 +74,8 @@ impl PoolStage {
 }
 
 impl AsyncElement for PoolStage {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -146,7 +147,12 @@ impl PoolStage {
         buf[..len].copy_from_slice(src.as_slice());
         let domain = MemoryDomain::System(SystemSlice::from_pool(buf, len));
         self.staged += 1;
-        Ok(Frame { domain, timing: frame.timing, sequence: frame.sequence, meta: frame.meta })
+        Ok(Frame {
+            domain,
+            timing: frame.timing,
+            sequence: frame.sequence,
+            meta: frame.meta,
+        })
     }
 }
 

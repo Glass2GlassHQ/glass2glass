@@ -12,9 +12,7 @@ use std::process::Command;
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
-use g2g_core::{
-    AsyncElement, Caps, Dim, G2gError, OutputSink, PushOutcome, Rate, VideoCodec,
-};
+use g2g_core::{AsyncElement, Caps, Dim, G2gError, OutputSink, PushOutcome, Rate, VideoCodec};
 use g2g_plugins::h265parse::H265Parse;
 
 #[derive(Default)]
@@ -52,15 +50,33 @@ async fn recovers_geometry_and_vui_framerate_from_a_libx265_stream() {
     }
     let path = std::env::temp_dir().join("g2g_m663.h265");
     let out = Command::new("ffmpeg")
-        .args(["-y", "-f", "lavfi", "-i", "testsrc=duration=1:size=320x240:rate=25"])
-        .args(["-pix_fmt", "yuv420p", "-c:v", "libx265", "-preset", "ultrafast", "-f", "hevc"])
+        .args([
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=1:size=320x240:rate=25",
+        ])
+        .args([
+            "-pix_fmt",
+            "yuv420p",
+            "-c:v",
+            "libx265",
+            "-preset",
+            "ultrafast",
+            "-f",
+            "hevc",
+        ])
         .arg(&path)
         .output()
         .expect("ffmpeg runs");
     if !out.status.success() {
         eprintln!(
             "ffmpeg has no libx265; skipping: {}",
-            String::from_utf8_lossy(&out.stderr).lines().last().unwrap_or("")
+            String::from_utf8_lossy(&out.stderr)
+                .lines()
+                .last()
+                .unwrap_or("")
         );
         return;
     }
@@ -84,7 +100,10 @@ async fn recovers_geometry_and_vui_framerate_from_a_libx265_stream() {
             FrameTiming::default(),
             i as u64,
         );
-        parse.process(PipelinePacket::DataFrame(frame), &mut sink).await.unwrap();
+        parse
+            .process(PipelinePacket::DataFrame(frame), &mut sink)
+            .await
+            .unwrap();
     }
     parse.process(PipelinePacket::Eos, &mut sink).await.unwrap();
 

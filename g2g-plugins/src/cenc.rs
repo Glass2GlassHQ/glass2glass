@@ -47,13 +47,18 @@ fn decrypt_protected_range(range: &mut [u8], key: &[u8; 16], iv: &[u8; 16], cryp
         (0..block_count).map(|b| b * 16).collect()
     } else {
         let span = (crypt + skip) as usize;
-        (0..block_count).filter(|b| b % span < crypt as usize).map(|b| b * 16).collect()
+        (0..block_count)
+            .filter(|b| b % span < crypt as usize)
+            .map(|b| b * 16)
+            .collect()
     };
     if offsets.is_empty() {
         return;
     }
-    let mut gathered: Vec<u8> =
-        offsets.iter().flat_map(|&o| range[o..o + 16].iter().copied()).collect();
+    let mut gathered: Vec<u8> = offsets
+        .iter()
+        .flat_map(|&o| range[o..o + 16].iter().copied())
+        .collect();
     Dec::new(&(*key).into(), &(*iv).into())
         .decrypt_padded_mut::<NoPadding>(&mut gathered)
         .expect("cbcs region is block-aligned");

@@ -12,7 +12,13 @@ use g2g_plugins::fakesink::FakeSink;
 use g2g_plugins::uridecodebin;
 
 fn is_h264(c: &Caps) -> bool {
-    matches!(c, Caps::CompressedVideo { codec: VideoCodec::H264, .. })
+    matches!(
+        c,
+        Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            ..
+        }
+    )
 }
 
 fn registry() -> Registry {
@@ -62,7 +68,11 @@ fn udp_uri_to_h264_target_is_a_direct_source_sink_graph() {
     let graph = reg
         .build_uridecodebin("udp://0.0.0.0:5004", FakeSink::new(), &is_h264, 4)
         .expect("empty chain links source straight to sink");
-    assert_eq!(graph.finish().expect("graph validates").node_count(), 2, "source + sink, no decoder");
+    assert_eq!(
+        graph.finish().expect("graph validates").node_count(),
+        2,
+        "source + sink, no decoder"
+    );
 }
 
 #[test]
@@ -83,9 +93,10 @@ fn udp_uri_autoplugs_a_decoder_to_reach_raw() {
     use g2g_plugins::ffmpegdec::{FfmpegH264Dec, OutputFormat};
 
     let mut reg = registry();
-    reg.register(ElementFactory::of::<FfmpegH264Dec>("ffmpegh264dec", |_out| {
-        Box::new(FfmpegH264Dec::new().with_output_format(OutputFormat::Nv12))
-    }));
+    reg.register(ElementFactory::of::<FfmpegH264Dec>(
+        "ffmpegh264dec",
+        |_out| Box::new(FfmpegH264Dec::new().with_output_format(OutputFormat::Nv12)),
+    ));
 
     let graph = reg
         .build_uridecodebin("udp://0.0.0.0:5004", FakeSink::new(), &is_raw_video, 4)

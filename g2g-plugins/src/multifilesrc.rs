@@ -47,9 +47,18 @@ impl MultiFileSrc {
             location: location.into(),
             caps: Caps::CompressedVideo {
                 codec: VideoCodec::Mjpeg,
-                width: Dim::Range { min: 16, max: 65535 },
-                height: Dim::Range { min: 16, max: 65535 },
-                framerate: Rate::Range { min_q16: 1 << 16, max_q16: 240 << 16 },
+                width: Dim::Range {
+                    min: 16,
+                    max: 65535,
+                },
+                height: Dim::Range {
+                    min: 16,
+                    max: 65535,
+                },
+                framerate: Rate::Range {
+                    min_q16: 1 << 16,
+                    max_q16: 240 << 16,
+                },
             },
             start_index: 0,
             // -1 means "until the first missing file".
@@ -67,11 +76,13 @@ impl MultiFileSrc {
 }
 
 impl SourceLoop for MultiFileSrc {
-    type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
+    type RunFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
     where
         Self: 'a;
 
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 
@@ -82,7 +93,9 @@ impl SourceLoop for MultiFileSrc {
     fn caps_constraint<'a>(
         &'a mut self,
     ) -> impl Future<Output = Result<CapsConstraint<'a>, G2gError>> + 'a {
-        core::future::ready(Ok(CapsConstraint::Produces(CapsSet::one(self.caps.clone()))))
+        core::future::ready(Ok(CapsConstraint::Produces(CapsSet::one(
+            self.caps.clone(),
+        ))))
     }
 
     fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -126,7 +139,10 @@ impl SourceLoop for MultiFileSrc {
                 file.read_to_end(&mut buf).map_err(io_err)?;
                 let frame = Frame {
                     domain: MemoryDomain::System(SystemSlice::from_boxed(buf.into_boxed_slice())),
-                    timing: FrameTiming { keyframe: true, ..FrameTiming::default() },
+                    timing: FrameTiming {
+                        keyframe: true,
+                        ..FrameTiming::default()
+                    },
                     sequence,
                     meta: Default::default(),
                 };
@@ -144,7 +160,12 @@ impl SourceLoop for MultiFileSrc {
     }
 
     fn metadata(&self) -> ElementMetadata {
-        ElementMetadata::new("Multi-file source", "Source/File", "Reads a sequence of files", "g2g")
+        ElementMetadata::new(
+            "Multi-file source",
+            "Source/File",
+            "Reads a sequence of files",
+            "g2g",
+        )
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
@@ -170,9 +191,17 @@ impl SourceLoop for MultiFileSrc {
 }
 
 static MULTIFILESRC_PROPS: &[PropertySpec] = &[
-    PropertySpec::new("location", PropKind::Str, "printf-style file pattern, e.g. img%05d.jpg"),
+    PropertySpec::new(
+        "location",
+        PropKind::Str,
+        "printf-style file pattern, e.g. img%05d.jpg",
+    ),
     PropertySpec::new("start-index", PropKind::Int, "first index to read"),
-    PropertySpec::new("stop-index", PropKind::Int, "last index (-1 = until a file is missing)"),
+    PropertySpec::new(
+        "stop-index",
+        PropKind::Int,
+        "last index (-1 = until a file is missing)",
+    ),
     PropertySpec::new("loop", PropKind::Bool, "restart the sequence at the end"),
 ];
 
@@ -205,7 +234,10 @@ mod tests {
     #[tokio::test]
     async fn reads_sequence_until_gap() {
         let dir = std::env::temp_dir();
-        let pat = dir.join("g2g_mfsrc_%02d.bin").to_string_lossy().into_owned();
+        let pat = dir
+            .join("g2g_mfsrc_%02d.bin")
+            .to_string_lossy()
+            .into_owned();
         std::fs::write(crate::multifilesink::expand(&pat, 0), b"one").unwrap();
         std::fs::write(crate::multifilesink::expand(&pat, 1), b"two").unwrap();
         // index 2 is missing -> the sequence ends after two frames.
@@ -213,7 +245,10 @@ mod tests {
 
         let mut src = MultiFileSrc::new(&pat);
         src.configure_pipeline(&src.caps.clone()).unwrap();
-        let mut out = CollectSink { frames: alloc::vec::Vec::new(), eos: false };
+        let mut out = CollectSink {
+            frames: alloc::vec::Vec::new(),
+            eos: false,
+        };
         let n = src.run(&mut out).await.unwrap();
         assert_eq!(n, 2);
         assert_eq!(out.frames, alloc::vec![b"one".to_vec(), b"two".to_vec()]);

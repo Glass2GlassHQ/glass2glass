@@ -25,7 +25,10 @@ struct Collect {
     packets: Vec<PipelinePacket>,
 }
 impl OutputSink for Collect {
-    fn push<'a>(&'a mut self, packet: PipelinePacket) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
+    fn push<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+    ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
         Box::pin(async move {
             self.packets.push(packet);
             Ok(PushOutcome::Accepted)
@@ -57,16 +60,22 @@ async fn export_gpu_dmabuf(size: u64) -> Option<OwnedFd> {
             wgpu::Features::empty(),
             &wgpu::Limits::default(),
             &wgpu::MemoryHints::default(),
-            Some(Box::new(|args: wgpu_hal::vulkan::CreateDeviceCallbackArgs| {
-                args.extensions.push(ash::khr::external_memory_fd::NAME);
-                args.extensions.push(ash::ext::external_memory_dma_buf::NAME);
-            })),
+            Some(Box::new(
+                |args: wgpu_hal::vulkan::CreateDeviceCallbackArgs| {
+                    args.extensions.push(ash::khr::external_memory_fd::NAME);
+                    args.extensions
+                        .push(ash::ext::external_memory_dma_buf::NAME);
+                },
+            )),
         )
         .ok()?
     };
     // SAFETY: `open` came from this adapter's hal.
-    let (device, _q) =
-        unsafe { adapter.create_device_from_hal(open, &wgpu::DeviceDescriptor::default()).ok()? };
+    let (device, _q) = unsafe {
+        adapter
+            .create_device_from_hal(open, &wgpu::DeviceDescriptor::default())
+            .ok()?
+    };
 
     // SAFETY: raw Vulkan objects; the exported dma-buf holds its own reference to
     // the memory, so it stays valid after this one-shot export (buffer/memory
@@ -142,7 +151,8 @@ fn imports_a_gpu_dmabuf_into_a_wgpu_buffer() {
         framerate: Rate::Fixed(30 << 16),
     };
     let mut elem = DmaBufToWgpu::new();
-    elem.configure_pipeline(&caps).expect("configures for RGBA caps");
+    elem.configure_pipeline(&caps)
+        .expect("configures for RGBA caps");
 
     let frame = Frame::new(MemoryDomain::DmaBuf(dmabuf), FrameTiming::default(), 0);
     let mut sink = Collect::default();
@@ -153,10 +163,21 @@ fn imports_a_gpu_dmabuf_into_a_wgpu_buffer() {
         panic!("expected one output DataFrame, got {:?}", sink.packets);
     };
     let MemoryDomain::WgpuBuffer(buf) = &out.domain else {
-        panic!("output should be GPU-resident WgpuBuffer, got {:?}", out.domain);
+        panic!(
+            "output should be GPU-resident WgpuBuffer, got {:?}",
+            out.domain
+        );
     };
     assert_eq!(buf.len, size as usize, "buffer sized to the frame");
     // The keep-alive owns a real wgpu::Buffer aliasing the imported dma-buf.
-    let owner = buf.keep_alive().as_any().downcast_ref::<DmaBufWgpuBuffer>().expect("owner type");
-    assert_eq!(owner.buffer().size(), size, "wgpu buffer wraps the imported memory");
+    let owner = buf
+        .keep_alive()
+        .as_any()
+        .downcast_ref::<DmaBufWgpuBuffer>()
+        .expect("owner type");
+    assert_eq!(
+        owner.buffer().size(),
+        size,
+        "wgpu buffer wraps the imported memory"
+    );
 }

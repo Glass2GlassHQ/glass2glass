@@ -43,7 +43,9 @@ fn registry() -> Registry {
     reg.register_launch(LaunchFactory::new("videorate", Vec::new(), || {
         Box::new(VideoRate::new(30.0))
     }));
-    reg.register_launch(LaunchFactory::new("fakesink", Vec::new(), || Box::new(FakeSink::new())));
+    reg.register_launch(LaunchFactory::new("fakesink", Vec::new(), || {
+        Box::new(FakeSink::new())
+    }));
     reg
 }
 
@@ -59,8 +61,14 @@ async fn threaded_matches_cooperative() {
     let coop = run_graph(parse_launch(&reg, PIPELINE).expect("parses"), &ZeroClock, 4)
         .await
         .expect("cooperative run");
-    assert_eq!(coop.frames_emitted, 8, "cooperative: source emitted num-buffers");
-    assert_eq!(coop.frames_consumed, 8, "cooperative: all frames reached the sink");
+    assert_eq!(
+        coop.frames_emitted, 8,
+        "cooperative: source emitted num-buffers"
+    );
+    assert_eq!(
+        coop.frames_consumed, 8,
+        "cooperative: all frames reached the sink"
+    );
 
     let threaded = run_graph_threaded(
         parse_launch(&reg, PIPELINE).expect("parses"),
@@ -71,9 +79,18 @@ async fn threaded_matches_cooperative() {
     .await
     .expect("threaded run");
 
-    assert_eq!(threaded.frames_emitted, coop.frames_emitted, "threaded: same emitted count");
-    assert_eq!(threaded.frames_consumed, coop.frames_consumed, "threaded: same consumed count");
-    assert_eq!(threaded.frames_dropped, coop.frames_dropped, "threaded: same drop count");
+    assert_eq!(
+        threaded.frames_emitted, coop.frames_emitted,
+        "threaded: same emitted count"
+    );
+    assert_eq!(
+        threaded.frames_consumed, coop.frames_consumed,
+        "threaded: same consumed count"
+    );
+    assert_eq!(
+        threaded.frames_dropped, coop.frames_dropped,
+        "threaded: same drop count"
+    );
 }
 
 /// The dependency-free core [`ThreadSpawner`] (std threads + park-based block_on,
@@ -89,5 +106,8 @@ async fn core_thread_spawner_runs() {
     )
     .await
     .expect("core ThreadSpawner run");
-    assert_eq!(stats.frames_consumed, 8, "all frames reached the sink under ThreadSpawner");
+    assert_eq!(
+        stats.frames_consumed, 8,
+        "all frames reached the sink under ThreadSpawner"
+    );
 }

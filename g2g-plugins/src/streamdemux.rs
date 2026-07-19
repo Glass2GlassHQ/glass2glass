@@ -70,9 +70,17 @@ impl StreamDemux {
         port_caps: Vec<Caps>,
         classify: impl Fn(&Frame) -> usize + Send + 'static,
     ) -> Self {
-        assert!(!port_caps.is_empty(), "StreamDemux needs at least one output port");
+        assert!(
+            !port_caps.is_empty(),
+            "StreamDemux needs at least one output port"
+        );
         let announced = alloc::vec![false; port_caps.len()];
-        Self { input, port_caps, classify: Box::new(classify), announced }
+        Self {
+            input,
+            port_caps,
+            classify: Box::new(classify),
+            announced,
+        }
     }
 
     /// Number of output ports (the dark-slot count).
@@ -94,7 +102,9 @@ impl MultiOutputElement for StreamDemux {
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         // Accept the negotiated input (the byte stream); per-port output caps are
         // announced from `process` as each stream first routes.
-        absolute_caps.intersect(&self.input).map(|_| ConfigureOutcome::Accepted)
+        absolute_caps
+            .intersect(&self.input)
+            .map(|_| ConfigureOutcome::Accepted)
     }
 
     fn process<'a>(
@@ -110,8 +120,11 @@ impl MultiOutputElement for StreamDemux {
                     // Announce this port's caps before its first frame, so the
                     // branch retypes from the input (byte-stream) caps.
                     if !self.announced[port] {
-                        out.push_to(port, PipelinePacket::CapsChanged(self.port_caps[port].clone()))
-                            .await?;
+                        out.push_to(
+                            port,
+                            PipelinePacket::CapsChanged(self.port_caps[port].clone()),
+                        )
+                        .await?;
                         self.announced[port] = true;
                     }
                     out.push_to(port, PipelinePacket::DataFrame(frame)).await?;

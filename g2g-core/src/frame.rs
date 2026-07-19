@@ -43,7 +43,12 @@ impl Frame {
     /// addition does not break them.
     #[inline]
     pub fn new(domain: MemoryDomain, timing: FrameTiming, sequence: u64) -> Self {
-        Frame { domain, timing, sequence, meta: FrameMetaSet::new() }
+        Frame {
+            domain,
+            timing,
+            sequence,
+            meta: FrameMetaSet::new(),
+        }
     }
 
     /// Duplicate this frame for fan-out (a tee branch, or a multicast route).
@@ -65,7 +70,12 @@ impl Frame {
         // copy (clippy's clone_on_copy fires only in that config).
         #[allow(clippy::clone_on_copy)]
         let meta = self.meta.clone();
-        Frame { domain: self.domain.share(), timing: self.timing, sequence: self.sequence, meta }
+        Frame {
+            domain: self.domain.share(),
+            timing: self.timing,
+            sequence: self.sequence,
+            meta,
+        }
     }
 }
 
@@ -121,7 +131,10 @@ mod tests {
         // that mutates one does not disturb the other.
         let mut orig = Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(Box::new([1u8, 2, 3, 4]))),
-            FrameTiming { pts_ns: 42, ..FrameTiming::default() },
+            FrameTiming {
+                pts_ns: 42,
+                ..FrameTiming::default()
+            },
             7,
         );
         let dup = orig.share();
@@ -131,7 +144,11 @@ mod tests {
             (MemoryDomain::System(a), MemoryDomain::System(b)) => {
                 assert_eq!(a.as_slice(), b.as_slice(), "the copy sees the same bytes");
                 a.as_mut_slice()[0] = 99;
-                assert_eq!(b.as_slice()[0], 1, "owned CPU bytes are deep-copied, not aliased");
+                assert_eq!(
+                    b.as_slice()[0],
+                    1,
+                    "owned CPU bytes are deep-copied, not aliased"
+                );
             }
             _ => panic!("expected System memory on both"),
         }

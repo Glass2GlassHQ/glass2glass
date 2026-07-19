@@ -203,7 +203,8 @@ fn emit_slots(prev_pts: u64, cur_pts: u64, next_pts: u64, dt_ns: u64) -> (Vec<u6
 }
 
 impl AsyncElement for VideoRate {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -225,9 +226,17 @@ impl AsyncElement for VideoRate {
         // Passthrough format + geometry (retarget framerate only), so a
         // downstream geometry pin still couples back through this rate-only
         // element. Framerate is the changed field.
-        let passthrough = PassthroughFields::NONE.with_format().with_width().with_height();
+        let passthrough = PassthroughFields::NONE
+            .with_format()
+            .with_width()
+            .with_height();
         let derive = Box::new(move |input: &Caps| match input {
-            Caps::RawVideo { format, width, height, framerate } => {
+            Caps::RawVideo {
+                format,
+                width,
+                height,
+                framerate,
+            } => {
                 let mk = |fr: Rate| Caps::RawVideo {
                     format: *format,
                     width: width.clone(),
@@ -249,7 +258,10 @@ impl AsyncElement for VideoRate {
             }
             _ => CapsSet::from_alternatives(Vec::new()),
         });
-        CapsConstraint::DerivedCoupled { derive, passthrough }
+        CapsConstraint::DerivedCoupled {
+            derive,
+            passthrough,
+        }
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -271,7 +283,11 @@ impl AsyncElement for VideoRate {
         if !self.auto {
             return Ok(());
         }
-        let Caps::RawVideo { framerate: Rate::Fixed(q), .. } = output_caps else {
+        let Caps::RawVideo {
+            framerate: Rate::Fixed(q),
+            ..
+        } = output_caps
+        else {
             return Err(G2gError::CapsMismatch);
         };
         if *q == 0 {
@@ -308,9 +324,12 @@ impl AsyncElement for VideoRate {
                     // fill the output slots the held frame still owns, then
                     // make the new frame the held one.
                     let (slots, new_next) = match &self.prev {
-                        Some(p) => {
-                            emit_slots(p.pts_ns, cur_pts, self.next_pts.unwrap_or(cur_pts), self.dt_ns)
-                        }
+                        Some(p) => emit_slots(
+                            p.pts_ns,
+                            cur_pts,
+                            self.next_pts.unwrap_or(cur_pts),
+                            self.dt_ns,
+                        ),
                         None => (Vec::new(), cur_pts),
                     };
                     if !slots.is_empty() {
@@ -404,7 +423,10 @@ impl AsyncElement for VideoRate {
             // integer, so a fractional target (e.g. 30000/1001) round-trips.
             "framerate" => {
                 let g = gcd(self.rate_q16, 1 << 16).max(1);
-                Some(PropValue::Fraction((self.rate_q16 / g) as i32, ((1u32 << 16) / g) as i32))
+                Some(PropValue::Fraction(
+                    (self.rate_q16 / g) as i32,
+                    ((1u32 << 16) / g) as i32,
+                ))
             }
             _ => None,
         }
@@ -439,13 +461,17 @@ mod tests {
     #[test]
     fn framerate_property_round_trips_a_fraction() {
         let mut vr = VideoRate::new(30.0);
-        vr.set_property("framerate", PropValue::Fraction(30000, 1001)).unwrap();
+        vr.set_property("framerate", PropValue::Fraction(30000, 1001))
+            .unwrap();
         let Some(PropValue::Fraction(num, den)) = vr.get_property("framerate") else {
             panic!("framerate reads back as a fraction");
         };
         // Reads back at ~29.97 within Q16 precision, not floored to 29/1.
         let fps = num as f64 / den as f64;
-        assert!((fps - 30000.0 / 1001.0).abs() < 0.01, "got {num}/{den} = {fps}");
+        assert!(
+            (fps - 30000.0 / 1001.0).abs() < 0.01,
+            "got {num}/{den} = {fps}"
+        );
     }
 
     #[test]
@@ -561,12 +587,21 @@ mod tests {
     #[test]
     fn derived_output_replaces_framerate_only() {
         let r = VideoRate::new(10.0);
-        let CapsConstraint::DerivedCoupled { derive, passthrough } = r.caps_constraint_as_transform()
+        let CapsConstraint::DerivedCoupled {
+            derive,
+            passthrough,
+        } = r.caps_constraint_as_transform()
         else {
             panic!("expected DerivedCoupled");
         };
         // format + geometry pass through; framerate is the retargeted field.
-        assert_eq!(passthrough, PassthroughFields::NONE.with_format().with_width().with_height());
+        assert_eq!(
+            passthrough,
+            PassthroughFields::NONE
+                .with_format()
+                .with_width()
+                .with_height()
+        );
         let out = derive(&nv12_320x240(Rate::Fixed(30 << 16)));
         assert_eq!(out.alternatives(), &[nv12_320x240(Rate::Fixed(10 << 16))]);
     }
@@ -591,13 +626,15 @@ mod tests {
         }
         // The solver fixates the output to the pinned 15 fps; configure_output
         // captures it as the effective target.
-        r.configure_output(&nv12_320x240(Rate::Fixed(15 << 16))).expect("fixed output rate");
+        r.configure_output(&nv12_320x240(Rate::Fixed(15 << 16)))
+            .expect("fixed output rate");
         assert_eq!(r.rate_q16, 15 << 16);
         assert_eq!(r.dt_ns, (1_000_000_000u64 << 16) / (15 << 16) as u64);
         // An un-fixated (Any) output rate is rejected loud.
         let mut r2 = VideoRate::auto();
         assert_eq!(
-            r2.configure_output(&nv12_320x240(Rate::Any)).expect_err("any rate"),
+            r2.configure_output(&nv12_320x240(Rate::Any))
+                .expect_err("any rate"),
             G2gError::CapsMismatch
         );
     }

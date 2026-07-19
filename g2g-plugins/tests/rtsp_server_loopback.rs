@@ -77,23 +77,38 @@ async fn rtsp_player_handshakes_then_receives_rtp() {
     // Server sink on an ephemeral RTSP port.
     let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind rtsp");
     let rtsp_addr = listener.local_addr().unwrap();
-    let mut sink = RtspServerSink::from_listener(listener).unwrap().with_rtp(96, 0x1234_5678);
+    let mut sink = RtspServerSink::from_listener(listener)
+        .unwrap()
+        .with_rtp(96, 0x1234_5678);
     sink.configure_pipeline(&h264_caps()).expect("configure");
 
     // Client RTP socket; its port is what we put in the SETUP Transport header.
-    let rtp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.expect("bind client rtp");
+    let rtp = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind client rtp");
     let client_rtp_port = rtp.local_addr().unwrap().port();
 
     // The player: connect, run the handshake, then receive RTP and depayload.
     let client = async move {
-        let mut ctrl = tokio::net::TcpStream::connect(rtsp_addr).await.expect("connect rtsp");
+        let mut ctrl = tokio::net::TcpStream::connect(rtsp_addr)
+            .await
+            .expect("connect rtsp");
         let url = "rtsp://127.0.0.1/stream";
 
-        ctrl.write_all(format!("OPTIONS {url} RTSP/1.0\r\nCSeq: 1\r\n\r\n").as_bytes()).await.unwrap();
+        ctrl.write_all(format!("OPTIONS {url} RTSP/1.0\r\nCSeq: 1\r\n\r\n").as_bytes())
+            .await
+            .unwrap();
         assert!(read_response(&mut ctrl).await.contains("200 OK"));
 
-        ctrl.write_all(format!("DESCRIBE {url} RTSP/1.0\r\nCSeq: 2\r\nAccept: application/sdp\r\n\r\n").as_bytes()).await.unwrap();
-        assert!(read_response(&mut ctrl).await.contains("m=video 0 RTP/AVP 96"));
+        ctrl.write_all(
+            format!("DESCRIBE {url} RTSP/1.0\r\nCSeq: 2\r\nAccept: application/sdp\r\n\r\n")
+                .as_bytes(),
+        )
+        .await
+        .unwrap();
+        assert!(read_response(&mut ctrl)
+            .await
+            .contains("m=video 0 RTP/AVP 96"));
 
         let setup = format!(
             "SETUP {url}/streamid=0 RTSP/1.0\r\nCSeq: 3\r\nTransport: RTP/AVP;unicast;client_port={client_rtp_port}-{}\r\n\r\n",
@@ -104,7 +119,11 @@ async fn rtsp_player_handshakes_then_receives_rtp() {
         assert!(setup_resp.contains("Session:"), "SETUP assigns a session");
         assert!(setup_resp.contains("server_port="));
 
-        ctrl.write_all(format!("PLAY {url} RTSP/1.0\r\nCSeq: 4\r\nSession: 12345678\r\n\r\n").as_bytes()).await.unwrap();
+        ctrl.write_all(
+            format!("PLAY {url} RTSP/1.0\r\nCSeq: 4\r\nSession: 12345678\r\n\r\n").as_bytes(),
+        )
+        .await
+        .unwrap();
         assert!(read_response(&mut ctrl).await.contains("200 OK"));
 
         // Now receive the RTP stream and recover the access units.
@@ -112,7 +131,8 @@ async fn rtsp_player_handshakes_then_receives_rtp() {
         let mut tags = Vec::new();
         let mut pkt = [0u8; 2048];
         while tags.len() < N as usize {
-            let recv = tokio::time::timeout(std::time::Duration::from_secs(5), rtp.recv(&mut pkt)).await;
+            let recv =
+                tokio::time::timeout(std::time::Duration::from_secs(5), rtp.recv(&mut pkt)).await;
             let n = recv.expect("rtp arrives within 5s").expect("recv rtp");
             if let Some(au) = depay.depacketize(&pkt[..n]) {
                 // Annex-B payload: [0,0,0,1][NAL][tag ..]; recover the tag byte.
@@ -132,11 +152,17 @@ async fn rtsp_player_handshakes_then_receives_rtp() {
             let au = access_unit(i % N);
             let frame = Frame {
                 domain: MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
-                timing: FrameTiming { pts_ns: i as u64 * 33_000_000, ..FrameTiming::default() },
+                timing: FrameTiming {
+                    pts_ns: i as u64 * 33_000_000,
+                    ..FrameTiming::default()
+                },
                 sequence: i as u64,
                 meta: Default::default(),
             };
-            match sink.process(PipelinePacket::DataFrame(frame), &mut null).await {
+            match sink
+                .process(PipelinePacket::DataFrame(frame), &mut null)
+                .await
+            {
                 Ok(()) => {}
                 Err(_) if sink.frames_sent() >= N as u64 => break, // player left after draining
                 Err(e) => panic!("stream frame: {e:?}"),
@@ -149,7 +175,10 @@ async fn rtsp_player_handshakes_then_receives_rtp() {
     let (tags, frames_sent) = tokio::join!(client, server);
     assert!(frames_sent >= N as u64, "server streamed frames after PLAY");
     let expected: Vec<u8> = (0..N).collect();
-    assert_eq!(tags, expected, "player received and depayloaded every AU in order");
+    assert_eq!(
+        tags, expected,
+        "player received and depayloaded every AU in order"
+    );
 }
 
 /// Drain the RTSP response header block from `buf`, reading more if needed;
@@ -177,18 +206,31 @@ async fn rtsp_player_receives_interleaved_rtp_over_control() {
 
     let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind rtsp");
     let rtsp_addr = listener.local_addr().unwrap();
-    let mut sink = RtspServerSink::from_listener(listener).unwrap().with_rtp(96, 0x1234_5678);
+    let mut sink = RtspServerSink::from_listener(listener)
+        .unwrap()
+        .with_rtp(96, 0x1234_5678);
     sink.configure_pipeline(&h264_caps()).expect("configure");
 
     let client = async move {
-        let mut ctrl = tokio::net::TcpStream::connect(rtsp_addr).await.expect("connect rtsp");
+        let mut ctrl = tokio::net::TcpStream::connect(rtsp_addr)
+            .await
+            .expect("connect rtsp");
         let url = "rtsp://127.0.0.1/stream";
         let mut buf: Vec<u8> = Vec::new();
 
-        ctrl.write_all(format!("OPTIONS {url} RTSP/1.0\r\nCSeq: 1\r\n\r\n").as_bytes()).await.unwrap();
-        assert!(consume_response(&mut ctrl, &mut buf).await.contains("200 OK"));
+        ctrl.write_all(format!("OPTIONS {url} RTSP/1.0\r\nCSeq: 1\r\n\r\n").as_bytes())
+            .await
+            .unwrap();
+        assert!(consume_response(&mut ctrl, &mut buf)
+            .await
+            .contains("200 OK"));
 
-        ctrl.write_all(format!("DESCRIBE {url} RTSP/1.0\r\nCSeq: 2\r\nAccept: application/sdp\r\n\r\n").as_bytes()).await.unwrap();
+        ctrl.write_all(
+            format!("DESCRIBE {url} RTSP/1.0\r\nCSeq: 2\r\nAccept: application/sdp\r\n\r\n")
+                .as_bytes(),
+        )
+        .await
+        .unwrap();
         consume_response(&mut ctrl, &mut buf).await;
 
         let setup = format!(
@@ -196,11 +238,23 @@ async fn rtsp_player_receives_interleaved_rtp_over_control() {
         );
         ctrl.write_all(setup.as_bytes()).await.unwrap();
         let setup_resp = consume_response(&mut ctrl, &mut buf).await;
-        assert!(setup_resp.contains("RTP/AVP/TCP"), "server negotiates interleaved: {setup_resp}");
-        assert!(setup_resp.contains("interleaved=0-1"), "server echoes the channels: {setup_resp}");
+        assert!(
+            setup_resp.contains("RTP/AVP/TCP"),
+            "server negotiates interleaved: {setup_resp}"
+        );
+        assert!(
+            setup_resp.contains("interleaved=0-1"),
+            "server echoes the channels: {setup_resp}"
+        );
 
-        ctrl.write_all(format!("PLAY {url} RTSP/1.0\r\nCSeq: 4\r\nSession: 12345678\r\n\r\n").as_bytes()).await.unwrap();
-        assert!(consume_response(&mut ctrl, &mut buf).await.contains("200 OK"));
+        ctrl.write_all(
+            format!("PLAY {url} RTSP/1.0\r\nCSeq: 4\r\nSession: 12345678\r\n\r\n").as_bytes(),
+        )
+        .await
+        .unwrap();
+        assert!(consume_response(&mut ctrl, &mut buf)
+            .await
+            .contains("200 OK"));
 
         // Read `$`-framed RTP off the control connection and depayload.
         let mut depay = RtpH264Depayloader::new();
@@ -208,10 +262,11 @@ async fn rtsp_player_receives_interleaved_rtp_over_control() {
         let mut tmp = [0u8; 2048];
         while tags.len() < N as usize {
             while buf.len() < 4 {
-                let n = tokio::time::timeout(std::time::Duration::from_secs(5), ctrl.read(&mut tmp))
-                    .await
-                    .expect("interleaved data within 5s")
-                    .expect("read control");
+                let n =
+                    tokio::time::timeout(std::time::Duration::from_secs(5), ctrl.read(&mut tmp))
+                        .await
+                        .expect("interleaved data within 5s")
+                        .expect("read control");
                 assert!(n > 0, "server closed before N frames");
                 buf.extend_from_slice(&tmp[..n]);
             }
@@ -238,11 +293,17 @@ async fn rtsp_player_receives_interleaved_rtp_over_control() {
             let au = access_unit(i % N);
             let frame = Frame {
                 domain: MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
-                timing: FrameTiming { pts_ns: i as u64 * 33_000_000, ..FrameTiming::default() },
+                timing: FrameTiming {
+                    pts_ns: i as u64 * 33_000_000,
+                    ..FrameTiming::default()
+                },
                 sequence: i as u64,
                 meta: Default::default(),
             };
-            match sink.process(PipelinePacket::DataFrame(frame), &mut null).await {
+            match sink
+                .process(PipelinePacket::DataFrame(frame), &mut null)
+                .await
+            {
                 Ok(()) => {}
                 Err(_) if sink.frames_sent() >= N as u64 => break,
                 Err(e) => panic!("stream frame: {e:?}"),
@@ -255,5 +316,8 @@ async fn rtsp_player_receives_interleaved_rtp_over_control() {
     let (tags, frames_sent) = tokio::join!(client, server);
     assert!(frames_sent >= N as u64, "server streamed frames after PLAY");
     let expected: Vec<u8> = (0..N).collect();
-    assert_eq!(tags, expected, "player received every AU in order over the interleaved channel");
+    assert_eq!(
+        tags, expected,
+        "player received every AU in order over the interleaved channel"
+    );
 }

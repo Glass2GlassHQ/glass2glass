@@ -18,7 +18,9 @@ fn enumerate_formats() {
         .unwrap_or(0);
     let cam = cameras.get(idx).expect("camera present");
     let cam = cam.acquire().expect("acquire");
-    let cfgs = cam.generate_configuration(&[StreamRole::ViewFinder]).unwrap();
+    let cfgs = cam
+        .generate_configuration(&[StreamRole::ViewFinder])
+        .unwrap();
     let cfg = cfgs.get(0).unwrap();
     let formats = cfg.formats();
     for pf in formats.pixel_formats().into_iter() {

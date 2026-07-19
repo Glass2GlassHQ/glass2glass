@@ -23,7 +23,9 @@ async fn run_with(policy: LinkPolicy, frames: u64, capacity: usize) -> g2g_core:
     let src = g.add_source(GraphNode::source(VideoTestSrc::new(8, 8, 30, frames)));
     let sink = g.add_sink(GraphNode::element(FakeSink::new()));
     g.link_with(src, sink, policy).unwrap();
-    run_graph(g, &NullClock, capacity).await.expect("leaky pipeline runs to completion")
+    run_graph(g, &NullClock, capacity)
+        .await
+        .expect("leaky pipeline runs to completion")
 }
 
 #[tokio::test]

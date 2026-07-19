@@ -18,7 +18,7 @@ use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_source_transform_sink, SourceLoop};
 use g2g_core::{
-    AsyncElement, Caps, ConfigureOutcome, Dim, Gate, G2gError, MemoryDomain, OutputSink,
+    AsyncElement, Caps, ConfigureOutcome, Dim, G2gError, Gate, MemoryDomain, OutputSink,
     PipelineClock, PipelinePacket, Rate, RawVideoFormat,
 };
 
@@ -61,7 +61,8 @@ impl SourceLoop for BarrierSrc {
     where
         Self: 'a;
 
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 
@@ -99,7 +100,12 @@ struct SignalSink {
 
 impl SignalSink {
     fn new(first_tx: Option<oneshot::Sender<()>>) -> Self {
-        Self { received: 0, last_seq: None, eos: false, first_tx }
+        Self {
+            received: 0,
+            last_seq: None,
+            eos: false,
+            first_tx,
+        }
     }
 }
 
@@ -131,7 +137,8 @@ impl AsyncElement for SignalSink {
                 }
             }
             PipelinePacket::Eos => self.eos = true,
-            PipelinePacket::CapsChanged(_) | PipelinePacket::Flush | PipelinePacket::Segment(_) => {}
+            PipelinePacket::CapsChanged(_) | PipelinePacket::Flush | PipelinePacket::Segment(_) => {
+            }
             _ => {}
         }
         Box::pin(async { Ok(()) })
@@ -145,7 +152,10 @@ async fn gate_closed_mid_stream_stops_data_but_not_eos() {
     let release = Arc::new(Notify::new());
     let (first_tx, first_rx) = oneshot::channel();
 
-    let mut src = BarrierSrc { release: release.clone(), configured: false };
+    let mut src = BarrierSrc {
+        release: release.clone(),
+        configured: false,
+    };
     let mut snk = SignalSink::new(Some(first_tx));
     let clock = ZeroClock;
 
@@ -160,7 +170,10 @@ async fn gate_closed_mid_stream_stops_data_but_not_eos() {
     let stats = res.expect("gated pipeline should complete");
 
     assert_eq!(stats.frames_emitted, 4, "source emits all four frames");
-    assert_eq!(stats.frames_consumed, 1, "only frame 0 passed before the gate closed");
+    assert_eq!(
+        stats.frames_consumed, 1,
+        "only frame 0 passed before the gate closed"
+    );
     assert_eq!(snk.received, 1);
     assert_eq!(snk.last_seq, Some(0));
     assert!(snk.eos, "EOS passes the gate regardless of open state");

@@ -30,7 +30,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     AsyncElement, Caps, ConfigureOutcome, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink,
-    PipelineClock, PipelinePacket, Rate, VideoCodec, RawVideoFormat,
+    PipelineClock, PipelinePacket, Rate, RawVideoFormat, VideoCodec,
 };
 use g2g_plugins::fakesink::FakeSink;
 
@@ -94,7 +94,8 @@ impl ScriptedSource {
 impl SourceLoop for ScriptedSource {
     type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>;
 
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 
@@ -258,7 +259,8 @@ impl AsyncElement for FakeReorderDecoder {
                         // ordering invariant under test.
                         let need_emit = self.last_out_caps.borrow().as_ref() != Some(&out_caps);
                         if need_emit {
-                            out.push(PipelinePacket::CapsChanged(out_caps.clone())).await?;
+                            out.push(PipelinePacket::CapsChanged(out_caps.clone()))
+                                .await?;
                             *self.last_out_caps.borrow_mut() = Some(out_caps.clone());
                         }
                         let seq = self.out_sequence.get();
@@ -293,7 +295,8 @@ impl AsyncElement for FakeReorderDecoder {
                         };
                         let need_emit = self.last_out_caps.borrow().as_ref() != Some(&out_caps);
                         if need_emit {
-                            out.push(PipelinePacket::CapsChanged(out_caps.clone())).await?;
+                            out.push(PipelinePacket::CapsChanged(out_caps.clone()))
+                                .await?;
                             *self.last_out_caps.borrow_mut() = Some(out_caps.clone());
                         }
                         let seq = self.out_sequence.get();
@@ -441,7 +444,8 @@ struct ScriptedSourceBadCaps {
 impl SourceLoop for ScriptedSourceBadCaps {
     type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>;
 
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 

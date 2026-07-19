@@ -19,7 +19,11 @@ fn pyelement_parses_as_a_first_class_element() {
     let line = "videotestsrc ! videoconvert ! \
                 pyelement module=echo_element class=EchoTransform draw-label=true ! fakesink";
     let graph = parse_launch(&reg, line);
-    assert!(graph.is_ok(), "pyelement should parse in a launch line: {:?}", graph.err());
+    assert!(
+        graph.is_ok(),
+        "pyelement should parse in a launch line: {:?}",
+        graph.err()
+    );
 }
 
 #[test]
@@ -28,7 +32,10 @@ fn pyelement_unknown_property_is_rejected() {
     let line = "videotestsrc ! videoconvert ! pyelement module=m class=C bogus=1 ! fakesink";
     // An unknown property name surfaces as a parse error (set_property -> Unknown),
     // proving properties are actually routed to the element, not ignored.
-    assert!(parse_launch(&reg, line).is_err(), "unknown property should be rejected");
+    assert!(
+        parse_launch(&reg, line).is_err(),
+        "unknown property should be rejected"
+    );
 }
 
 #[test]
@@ -37,7 +44,10 @@ fn pyelement_bad_bool_value_is_rejected() {
     let line = "videotestsrc ! videoconvert ! \
                 pyelement module=m class=C draw-label=notabool ! fakesink";
     // draw-label is a Bool; a non-bool text fails parsing/validation.
-    assert!(parse_launch(&reg, line).is_err(), "a bad draw-label value should be rejected");
+    assert!(
+        parse_launch(&reg, line).is_err(),
+        "a bad draw-label value should be rejected"
+    );
 }
 
 #[test]
@@ -49,7 +59,11 @@ fn pyaggregator_parses_as_a_launch_muxer() {
                 videotestsrc num-buffers=1 ! m. \
                 pyaggregator name=m module=batch class=BatchInfer ! fakesink";
     let graph = parse_launch(&reg, line);
-    assert!(graph.is_ok(), "pyaggregator should parse as a muxer: {:?}", graph.err());
+    assert!(
+        graph.is_ok(),
+        "pyaggregator should parse as a muxer: {:?}",
+        graph.err()
+    );
 }
 
 #[test]
@@ -58,5 +72,8 @@ fn pyaggregator_unknown_property_is_rejected() {
     let line = "videotestsrc num-buffers=1 ! m. \
                 videotestsrc num-buffers=1 ! m. \
                 pyaggregator name=m module=batch class=BatchInfer bogus=1 ! fakesink";
-    assert!(parse_launch(&reg, line).is_err(), "unknown muxer property should be rejected");
+    assert!(
+        parse_launch(&reg, line).is_err(),
+        "unknown muxer property should be rejected"
+    );
 }

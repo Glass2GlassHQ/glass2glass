@@ -54,18 +54,20 @@ use std::io::Write;
 use std::process;
 use std::time::{Duration, Instant};
 
-use g2g_core::runtime::{parse_launch, run_graph_with_progress, GraphNode, PipelineProgress, Registry};
-use g2g_core::Graph;
+#[cfg(feature = "multi-thread")]
+use g2g_core::runtime::run_graph_threaded_with_progress;
+use g2g_core::runtime::{
+    parse_launch, run_graph_with_progress, GraphNode, PipelineProgress, Registry,
+};
 #[cfg(feature = "observe")]
 use g2g_core::runtime::{run_graph_observed, Observer};
 #[cfg(feature = "observe")]
 use g2g_core::Bus;
-#[cfg(feature = "multi-thread")]
-use g2g_core::runtime::run_graph_threaded_with_progress;
-#[cfg(feature = "multi-thread")]
-use g2g_plugins::TokioThreadSpawner;
+use g2g_core::Graph;
 use g2g_plugins::clock::WallClock;
 use g2g_plugins::registry::default_registry;
+#[cfg(feature = "multi-thread")]
+use g2g_plugins::TokioThreadSpawner;
 
 // Steady-state link depth. Matches the integration-test default; small enough to
 // keep latency low without starving the source (see DESIGN notes on
@@ -208,8 +210,8 @@ fn parse_opts(args: impl Iterator<Item = String>) -> (Opts, Vec<String>) {
             // Accepted for compatibility (see the module-level notes): these
             // govern live shutdown / bus output, which g2g does not yet expose
             // a run-time channel for. Recognized and ignored so the line runs.
-            "-e" | "--eos-on-shutdown" | "-m" | "--messages" | "-f" | "--no-fault"
-            | "-t" | "--tags" => {}
+            "-e" | "--eos-on-shutdown" | "-m" | "--messages" | "-f" | "--no-fault" | "-t"
+            | "--tags" => {}
             other => eprintln!("g2g-launch: ignoring unrecognized option '{other}'"),
         }
     }
@@ -258,11 +260,7 @@ fn load_plugins(_reg: &mut g2g_core::runtime::Registry, plugins: &[String]) {
 /// (`--graph`), a Rhai script file (`--script`), or the joined text `pipeline`.
 /// Callable more than once (the `--dot` / `--verbose` paths build a throwaway
 /// copy to negotiate), so it takes only borrows. Errors are pre-formatted.
-fn build_graph(
-    reg: &Registry,
-    opts: &Opts,
-    pipeline: &str,
-) -> Result<Graph<GraphNode>, String> {
+fn build_graph(reg: &Registry, opts: &Opts, pipeline: &str) -> Result<Graph<GraphNode>, String> {
     if let Some(path) = &opts.graph {
         load_graph_file(reg, path)
     } else if let Some(path) = &opts.script {
@@ -454,8 +452,13 @@ fn main() {
                 eprintln!("negotiated links ({}):", vg.edge_count());
                 for id in 0..vg.edge_count() {
                     let e = vg.edge(id);
-                    let caps = caps.get(id).map_or_else(|| "?".to_string(), |c| c.to_gst_string());
-                    let mem = memory.get(id).copied().unwrap_or(g2g_core::MemoryDomainKind::System);
+                    let caps = caps
+                        .get(id)
+                        .map_or_else(|| "?".to_string(), |c| c.to_gst_string());
+                    let mem = memory
+                        .get(id)
+                        .copied()
+                        .unwrap_or(g2g_core::MemoryDomainKind::System);
                     eprintln!(
                         "  [{id}] {} -> {} : {caps}  mem={mem:?} policy={:?}",
                         name(e.src.node),
@@ -523,7 +526,11 @@ fn main() {
         // is the cooperative single-thread runner. Both return the same
         // `Result<RunStats, _>`, boxed to one type so the heartbeat loop is shared.
         type RunFut<'r> = core::pin::Pin<
-            Box<dyn core::future::Future<Output = Result<g2g_core::runtime::RunStats, g2g_core::G2gError>> + 'r>,
+            Box<
+                dyn core::future::Future<
+                        Output = Result<g2g_core::runtime::RunStats, g2g_core::G2gError>,
+                    > + 'r,
+            >,
         >;
         let mut run: RunFut = if opts.threads {
             #[cfg(feature = "multi-thread")]
@@ -546,7 +553,12 @@ fn main() {
                 process::exit(1);
             }
         } else {
-            Box::pin(run_graph_with_progress(graph, &clock, LINK_CAPACITY, &progress))
+            Box::pin(run_graph_with_progress(
+                graph,
+                &clock,
+                LINK_CAPACITY,
+                &progress,
+            ))
         };
         loop {
             match tokio::time::timeout(Duration::from_secs(1), &mut run).await {
@@ -557,7 +569,10 @@ fn main() {
                             Some(ns) => format!("t={:.1}s", ns as f64 / 1.0e9),
                             None => String::from("prerolling"),
                         };
-                        eprint!("\r  running... {pos} ({:.0}s wall)   ", started.elapsed().as_secs_f64());
+                        eprint!(
+                            "\r  running... {pos} ({:.0}s wall)   ",
+                            started.elapsed().as_secs_f64()
+                        );
                         let _ = std::io::stderr().flush();
                         printed_status = true;
                     }
@@ -685,7 +700,8 @@ mod tests {
 
     #[test]
     fn leading_flags_split_from_pipeline() {
-        let (opts, rest) = parse_opts(toks(&["-v", "-e", "videotestsrc", "!", "fakesink"]).into_iter());
+        let (opts, rest) =
+            parse_opts(toks(&["-v", "-e", "videotestsrc", "!", "fakesink"]).into_iter());
         assert!(opts.verbose);
         assert!(!opts.quiet);
         assert_eq!(rest, toks(&["videotestsrc", "!", "fakesink"]));
@@ -709,7 +725,8 @@ mod tests {
 
     #[test]
     fn dot_flag_splits_from_pipeline() {
-        let (opts, rest) = parse_opts(toks(&["--dot", "videotestsrc", "!", "fakesink"]).into_iter());
+        let (opts, rest) =
+            parse_opts(toks(&["--dot", "videotestsrc", "!", "fakesink"]).into_iter());
         assert!(opts.dot);
         assert!(!opts.verbose);
         assert_eq!(rest, toks(&["videotestsrc", "!", "fakesink"]));

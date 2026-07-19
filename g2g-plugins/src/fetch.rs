@@ -42,8 +42,13 @@ pub(crate) async fn get_bytes(
     url: &str,
     max: usize,
 ) -> Result<Vec<u8>, G2gError> {
-    let mut resp =
-        client.get(url).send().await.map_err(net_err)?.error_for_status().map_err(net_err)?;
+    let mut resp = client
+        .get(url)
+        .send()
+        .await
+        .map_err(net_err)?
+        .error_for_status()
+        .map_err(net_err)?;
     if let Some(len) = resp.content_length() {
         if len > max as u64 {
             return Err(body_too_large());
@@ -146,8 +151,10 @@ pub(crate) fn resolve_url(base: &str, rel: &str) -> String {
     let scheme_end = base.find("://").map(|i| i + 3).unwrap_or(0);
     if let Some(stripped) = rel.strip_prefix('/') {
         // absolute path: keep scheme://authority, replace the path
-        let authority_end =
-            base[scheme_end..].find('/').map(|i| scheme_end + i).unwrap_or(base.len());
+        let authority_end = base[scheme_end..]
+            .find('/')
+            .map(|i| scheme_end + i)
+            .unwrap_or(base.len());
         let mut out = String::from(&base[..authority_end]);
         out.push('/');
         out.push_str(stripped);
@@ -157,7 +164,10 @@ pub(crate) fn resolve_url(base: &str, rel: &str) -> String {
         // Scan only the path, not the query/fragment, so a '/' inside a signed
         // CDN query string is not mistaken for a path separator.
         let path_end = base.find(['?', '#']).unwrap_or(base.len());
-        let dir_end = base[..path_end].rfind('/').map(|i| i + 1).unwrap_or(path_end);
+        let dir_end = base[..path_end]
+            .rfind('/')
+            .map(|i| i + 1)
+            .unwrap_or(path_end);
         let mut out = String::from(&base[..dir_end]);
         out.push_str(rel);
         out

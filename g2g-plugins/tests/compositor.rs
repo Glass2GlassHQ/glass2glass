@@ -11,12 +11,12 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_graph, run_muxer_sink, DynSourceLoop, GraphNode, SourceLoop};
 use g2g_core::Graph;
-use g2g_plugins::videoscale::VideoScale;
 use g2g_core::{
     AsyncElement, Caps, ConfigureOutcome, Dim, G2gError, MemoryDomain, OutputSink, PipelineClock,
     PipelinePacket, Rate, RawVideoFormat,
 };
 use g2g_plugins::compositor::{Compositor, CompositorPad};
+use g2g_plugins::videoscale::VideoScale;
 use g2g_plugins::videotestsrc::{Pattern, VideoTestSrc};
 
 struct ZeroClock;
@@ -45,8 +45,14 @@ struct ColorSrc {
 }
 
 impl SourceLoop for ColorSrc {
-    type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>> where Self: 'a;
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>> where Self: 'a;
+    type RunFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
+    where
+        Self: 'a;
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
+    where
+        Self: 'a;
 
     fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
         core::future::ready(Ok(rgba(self.w, self.h)))
@@ -93,7 +99,10 @@ struct CapturingSink {
 }
 
 impl AsyncElement for CapturingSink {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>> where Self: 'a;
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         Ok(upstream_caps.clone())
@@ -126,12 +135,27 @@ impl AsyncElement for CapturingSink {
 async fn compositor_emits_one_frame_per_base_frame() {
     // input 0: 4x4 red background (the timing driver, 5 frames).
     // input 1: 2x2 blue overlay at (1,1) (3 frames).
-    let mut base = ColorSrc { w: 4, h: 4, color: [255, 0, 0, 255], count: 5, configured: false };
-    let mut overlay = ColorSrc { w: 2, h: 2, color: [0, 0, 255, 255], count: 3, configured: false };
+    let mut base = ColorSrc {
+        w: 4,
+        h: 4,
+        color: [255, 0, 0, 255],
+        count: 5,
+        configured: false,
+    };
+    let mut overlay = ColorSrc {
+        w: 2,
+        h: 2,
+        color: [0, 0, 255, 255],
+        count: 3,
+        configured: false,
+    };
     let mut comp = Compositor::new(
         4,
         4,
-        Vec::from([CompositorPad::at(0, 0), CompositorPad::at(1, 1).with_zorder(1)]),
+        Vec::from([
+            CompositorPad::at(0, 0),
+            CompositorPad::at(1, 1).with_zorder(1),
+        ]),
     );
     let mut sink = CapturingSink::default();
     let clock = ZeroClock;
@@ -145,7 +169,10 @@ async fn compositor_emits_one_frame_per_base_frame() {
     assert_eq!(sink.lens.len(), 5, "one output frame per base frame");
     assert_eq!(comp.emitted(), 5);
     // Output is the 4x4 RGBA canvas.
-    assert!(sink.lens.iter().all(|&l| l == 4 * 4 * 4), "every output is the canvas size");
+    assert!(
+        sink.lens.iter().all(|&l| l == 4 * 4 * 4),
+        "every output is the canvas size"
+    );
     // The base layer covers the whole canvas, so (0,0) is always red regardless
     // of how the two inputs interleaved (the blue overlay only covers (1,1)).
     assert!(
@@ -160,7 +187,10 @@ use std::sync::{Arc, Mutex};
 /// after `run_graph` (which owns the sink).
 struct ShareSink(Arc<Mutex<Vec<Box<[u8]>>>>);
 impl AsyncElement for ShareSink {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>> where Self: 'a;
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
     fn intercept_caps(&self, c: &Caps) -> Result<Caps, G2gError> {
         Ok(c.clone())
     }
@@ -199,16 +229,28 @@ async fn pip_scale_overlay_is_visible_in_the_inset() {
     let frames = Arc::new(Mutex::new(Vec::<Box<[u8]>>::new()));
     let mut g: Graph<GraphNode> = Graph::new();
     let bg = g.add_source(GraphNode::source(ColorSrc {
-        w: CW as u32, h: CH as u32, color: [255, 0, 0, 255], count: 8, configured: false,
+        w: CW as u32,
+        h: CH as u32,
+        color: [255, 0, 0, 255],
+        count: 8,
+        configured: false,
     }));
     let cam = g.add_source(GraphNode::source(ColorSrc {
-        w: 160, h: 120, color: [0, 255, 0, 255], count: 8, configured: false,
+        w: 160,
+        h: 120,
+        color: [0, 255, 0, 255],
+        count: 8,
+        configured: false,
     }));
     let scale = g.add_transform(GraphNode::element(VideoScale::new(IW, IH)));
     let comp = g.add_muxer(
         GraphNode::muxer(Compositor::new(
-            CW as u32, CH as u32,
-            Vec::from([CompositorPad::at(0, 0), CompositorPad::at(IX, IY).with_zorder(1)]),
+            CW as u32,
+            CH as u32,
+            Vec::from([
+                CompositorPad::at(0, 0),
+                CompositorPad::at(IX, IY).with_zorder(1),
+            ]),
         )),
         2,
     );
@@ -218,7 +260,9 @@ async fn pip_scale_overlay_is_visible_in_the_inset() {
     g.link(scale, comp.input(1)).unwrap();
     g.link(comp.output(), snk).unwrap();
 
-    run_graph(g, &ZeroClock, 4).await.expect("PiP-scale DAG runs");
+    run_graph(g, &ZeroClock, 4)
+        .await
+        .expect("PiP-scale DAG runs");
 
     let frames = frames.lock().unwrap();
     let pixel = |buf: &[u8], x: usize, y: usize| {
@@ -230,8 +274,15 @@ async fn pip_scale_overlay_is_visible_in_the_inset() {
     let last = frames.last().expect("at least one composited frame");
     let inset = pixel(last, (IX as usize) + 40, (IY as usize) + 30);
     let outside = pixel(last, 10, 10);
-    eprintln!("inset={inset:?} outside={outside:?} frames={}", frames.len());
-    assert_eq!(outside, [255, 0, 0, 255], "background red outside the inset");
+    eprintln!(
+        "inset={inset:?} outside={outside:?} frames={}",
+        frames.len()
+    );
+    assert_eq!(
+        outside,
+        [255, 0, 0, 255],
+        "background red outside the inset"
+    );
     assert_eq!(inset, [0, 255, 0, 255], "green camera visible in the inset");
 }
 
@@ -264,8 +315,14 @@ struct Nv12ColorSrc {
 }
 
 impl SourceLoop for Nv12ColorSrc {
-    type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>> where Self: 'a;
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>> where Self: 'a;
+    type RunFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
+    where
+        Self: 'a;
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
+    where
+        Self: 'a;
 
     fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
         core::future::ready(Ok(nv12_caps(self.w, self.h)))
@@ -279,7 +336,13 @@ impl SourceLoop for Nv12ColorSrc {
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
         Box::pin(async move {
             for seq in 0..self.count {
-                let buf = solid_nv12(self.w as usize, self.h as usize, self.yuv[0], self.yuv[1], self.yuv[2]);
+                let buf = solid_nv12(
+                    self.w as usize,
+                    self.h as usize,
+                    self.yuv[0],
+                    self.yuv[1],
+                    self.yuv[2],
+                );
                 let frame = Frame {
                     domain: MemoryDomain::System(SystemSlice::from_boxed(buf.into_boxed_slice())),
                     timing: Default::default(),
@@ -304,16 +367,28 @@ async fn nv12_fan_in_mixes_planar_end_to_end() {
     let frames = Arc::new(Mutex::new(Vec::<Box<[u8]>>::new()));
     let mut g: Graph<GraphNode> = Graph::new();
     let base = g.add_source(GraphNode::source(Nv12ColorSrc {
-        w: W as u32, h: H as u32, yuv: [50, 60, 70], count: 4, configured: false,
+        w: W as u32,
+        h: H as u32,
+        yuv: [50, 60, 70],
+        count: 4,
+        configured: false,
     }));
     let overlay = g.add_source(GraphNode::source(Nv12ColorSrc {
-        w: 4, h: 4, yuv: [200, 100, 150], count: 4, configured: false,
+        w: 4,
+        h: 4,
+        yuv: [200, 100, 150],
+        count: 4,
+        configured: false,
     }));
     let comp = g.add_muxer(
         GraphNode::muxer(
             Compositor::new(
-                W as u32, H as u32,
-                Vec::from([CompositorPad::at(0, 0), CompositorPad::at(2, 2).with_zorder(1)]),
+                W as u32,
+                H as u32,
+                Vec::from([
+                    CompositorPad::at(0, 0),
+                    CompositorPad::at(2, 2).with_zorder(1),
+                ]),
             )
             .with_format(RawVideoFormat::Nv12),
         ),
@@ -324,7 +399,9 @@ async fn nv12_fan_in_mixes_planar_end_to_end() {
     g.link(overlay, comp.input(1)).unwrap();
     g.link(comp.output(), snk).unwrap();
 
-    run_graph(g, &ZeroClock, 4).await.expect("NV12 compositor DAG runs");
+    run_graph(g, &ZeroClock, 4)
+        .await
+        .expect("NV12 compositor DAG runs");
 
     let frames = frames.lock().unwrap();
     let last = frames.last().expect("a composited frame");
@@ -352,7 +429,10 @@ struct InsetProbe {
     pixels: Arc<Mutex<Vec<[u8; 4]>>>,
 }
 impl AsyncElement for InsetProbe {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>> where Self: 'a;
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
     fn intercept_caps(&self, c: &Caps) -> Result<Caps, G2gError> {
         Ok(c.clone())
     }
@@ -370,7 +450,10 @@ impl AsyncElement for InsetProbe {
                 if let MemoryDomain::System(slice) = &frame.domain {
                     let s = slice.as_slice();
                     let i = (self.y * self.cw + self.x) * 4;
-                    self.pixels.lock().unwrap().push([s[i], s[i + 1], s[i + 2], s[i + 3]]);
+                    self.pixels
+                        .lock()
+                        .unwrap()
+                        .push([s[i], s[i + 1], s[i + 2], s[i + 3]]);
                 }
             }
             Ok(())
@@ -404,8 +487,12 @@ async fn live_overlay_animates_and_background_never_collapses() {
     ));
     let comp = g.add_muxer(
         GraphNode::muxer(Compositor::new(
-            CW, CH,
-            Vec::from([CompositorPad::at(0, 0), CompositorPad::at(IX, IY).with_zorder(1)]),
+            CW,
+            CH,
+            Vec::from([
+                CompositorPad::at(0, 0),
+                CompositorPad::at(IX, IY).with_zorder(1),
+            ]),
         )),
         2,
     );
@@ -419,13 +506,25 @@ async fn live_overlay_animates_and_background_never_collapses() {
     g.link(overlay, comp.input(1)).unwrap();
     g.link(comp.output(), snk).unwrap();
 
-    let stats = run_graph(g, &ZeroClock, 4).await.expect("compositor DAG runs");
+    let stats = run_graph(g, &ZeroClock, 4)
+        .await
+        .expect("compositor DAG runs");
 
     let pixels = pixels.lock().unwrap();
     // No collapse: one output per background frame.
-    assert_eq!(pixels.len() as u64, N, "every background frame produced an output");
+    assert_eq!(
+        pixels.len() as u64,
+        N,
+        "every background frame produced an output"
+    );
     assert_eq!(stats.frames_consumed, N);
     // The overlay animated: the inset took many distinct values, not one frozen.
-    let distinct = pixels.iter().collect::<std::collections::HashSet<_>>().len();
-    assert!(distinct > (N as usize) / 2, "inset froze: only {distinct} distinct over {N} frames");
+    let distinct = pixels
+        .iter()
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+    assert!(
+        distinct > (N as usize) / 2,
+        "inset froze: only {distinct} distinct over {N} frames"
+    );
 }

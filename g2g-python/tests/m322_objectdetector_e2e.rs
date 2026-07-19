@@ -27,8 +27,8 @@ use std::process::Command;
 
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AnalyticsMeta, AsyncElement, Caps, Dim, Frame, FrameTiming, G2gError, MemoryDomain,
-    OutputSink, PipelinePacket, PropValue, PushOutcome, Rate, RawVideoFormat,
+    AnalyticsMeta, AsyncElement, Caps, Dim, Frame, FrameTiming, G2gError, MemoryDomain, OutputSink,
+    PipelinePacket, PropValue, PushOutcome, Rate, RawVideoFormat,
 };
 use g2g_python::PyTransform;
 
@@ -72,7 +72,11 @@ np.ascontiguousarray(rgba).tofile("{out}")
         H = H,
         out = out_path.display(),
     );
-    let status = Command::new(&venv_py).arg("-c").arg(&script).status().ok()?;
+    let status = Command::new(&venv_py)
+        .arg("-c")
+        .arg(&script)
+        .status()
+        .ok()?;
     if !status.success() {
         return None;
     }
@@ -110,7 +114,8 @@ fn hosted_objectdetector_loads_model_and_detects() {
     };
 
     let mut el = PyTransform::new("objectdetector", "ObjectDetector");
-    el.set_property("engine-name", PropValue::Str("onnx".into())).unwrap();
+    el.set_property("engine-name", PropValue::Str("onnx".into()))
+        .unwrap();
     el.set_property("model-name", PropValue::Str(format!("{pyml}/yolo11m.onnx")))
         .unwrap();
     el.set_property("device", PropValue::Str(device)).unwrap();
@@ -138,7 +143,9 @@ fn hosted_objectdetector_loads_model_and_detects() {
     };
 
     let mut sink = CollectSink::default();
-    let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
     rt.block_on(el.process(PipelinePacket::DataFrame(frame), &mut sink))
         .expect("hosted objectdetector should run inference without error");
 
@@ -150,8 +157,14 @@ fn hosted_objectdetector_loads_model_and_detects() {
         .get::<AnalyticsMeta>()
         .expect("the detector should attach detections as AnalyticsMeta");
     let dets: Vec<_> = analytics.detections().collect();
-    eprintln!("hosted objectdetector produced {} detections on the people frame", dets.len());
-    assert!(!dets.is_empty(), "expected at least one detection on a frame full of people");
+    eprintln!(
+        "hosted objectdetector produced {} detections on the people frame",
+        dets.len()
+    );
+    assert!(
+        !dets.is_empty(),
+        "expected at least one detection on a frame full of people"
+    );
     // label 0 is COCO "person"; a people clip must contain at least one.
     assert!(
         dets.iter().any(|d| d.label == 0),

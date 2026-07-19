@@ -46,7 +46,6 @@ mod pymod {
     const LINK_CAPACITY: usize = 4;
     const BUS_CAPACITY: usize = 64;
 
-
     /// A running pipeline parsed from a `gst-launch`-style string. Runs on a
     /// background thread; poll the bus and `wait()` for the end of stream.
     #[pyclass]
@@ -74,9 +73,7 @@ mod pymod {
             G2gError::UnsupportedDomain => {
                 "an element was handed a memory domain it cannot consume".into()
             }
-            G2gError::AllocationConflict => {
-                "fan-out branches share no common memory domain".into()
-            }
+            G2gError::AllocationConflict => "fan-out branches share no common memory domain".into(),
             G2gError::Hardware(h) => format!("hardware/driver failure: {h:?}"),
             G2gError::Shutdown => "pipeline shut down before completing".into(),
             other => format!("pipeline error: {other:?}"),
@@ -114,7 +111,11 @@ mod pymod {
                     rt.block_on(run_graph_with_bus(graph, &clock, LINK_CAPACITY, &handle))
                 })
                 .map_err(|e| PyValueError::new_err(format!("spawn run thread: {e}")))?;
-            Ok(Pipeline { bus, join: Some(join), result: None })
+            Ok(Pipeline {
+                bus,
+                join: Some(join),
+                result: None,
+            })
         }
 
         /// Pop one bus message as `(kind, text_or_None, a, b)`, or `None` if the
@@ -141,9 +142,10 @@ mod pymod {
                 self.result = Some(match py.detach(|| j.join()) {
                     Ok(Ok(s)) => Ok(s),
                     Ok(Err(e)) => Err(describe_error(&e)),
-                    Err(panic) => {
-                        Err(format!("pipeline run thread panicked: {}", panic_message(&*panic)))
-                    }
+                    Err(panic) => Err(format!(
+                        "pipeline run thread panicked: {}",
+                        panic_message(&*panic)
+                    )),
                 });
             }
             match &self.result {
@@ -167,7 +169,9 @@ mod pymod {
         #[new]
         #[pyo3(signature = (channel="default"))]
         fn new(channel: &str) -> Self {
-            AppSrc { feed: register_appsrc(channel) }
+            AppSrc {
+                feed: register_appsrc(channel),
+            }
         }
 
         /// Push a buffer (copied) with timestamp `pts_ns`. False if the feed is
@@ -210,7 +214,11 @@ mod pymod {
                 MemoryDomain::SystemView(sv) => Some(sv.materialize()),
                 _ => None,
             };
-            FrameView { frame, materialized, pts_ns }
+            FrameView {
+                frame,
+                materialized,
+                pts_ns,
+            }
         }
 
         /// The host-visible bytes to lend, or `None` for a non-host (GPU /
@@ -289,7 +297,9 @@ mod pymod {
         #[new]
         #[pyo3(signature = (channel="default"))]
         fn new(channel: &str) -> Self {
-            AppSink { pull: register_appsink_pull(channel) }
+            AppSink {
+                pull: register_appsink_pull(channel),
+            }
         }
 
         /// Block for the next sample, returning a zero-copy [`FrameView`] or
@@ -416,7 +426,8 @@ assert consumed == 2, consumed
                 // Fresh globals so concurrent tests sharing the one interpreter
                 // do not clobber each other's module-level variables.
                 let globals = PyDict::new(py);
-                py.run(script.as_c_str(), Some(&globals), None).expect("python script runs");
+                py.run(script.as_c_str(), Some(&globals), None)
+                    .expect("python script runs");
             });
         }
 
@@ -462,7 +473,8 @@ except ImportError:
                 )
                 .unwrap();
                 let globals = PyDict::new(py);
-                py.run(script.as_c_str(), Some(&globals), None).expect("lifetime script runs");
+                py.run(script.as_c_str(), Some(&globals), None)
+                    .expect("lifetime script runs");
             });
         }
 
@@ -510,7 +522,8 @@ assert consumed == 1, consumed
                 )
                 .unwrap();
                 let globals = PyDict::new(py);
-                py.run(script.as_c_str(), Some(&globals), None).expect("try_pull script runs");
+                py.run(script.as_c_str(), Some(&globals), None)
+                    .expect("try_pull script runs");
             });
         }
 

@@ -55,7 +55,11 @@ fn ts_packet(pid: u16, pusi: bool, payload: &[u8]) -> Vec<u8> {
 
 fn psi(pid: u16, table_id: u8, body: &[u8]) -> Vec<u8> {
     let section_length = body.len() + 4;
-    let mut s = vec![table_id, 0xB0 | ((section_length >> 8) as u8 & 0x0F), (section_length & 0xFF) as u8];
+    let mut s = vec![
+        table_id,
+        0xB0 | ((section_length >> 8) as u8 & 0x0F),
+        (section_length & 0xFF) as u8,
+    ];
     s.extend_from_slice(body);
     s.extend_from_slice(&[0, 0, 0, 0]);
     let mut payload = vec![0u8];
@@ -64,7 +68,21 @@ fn psi(pid: u16, table_id: u8, body: &[u8]) -> Vec<u8> {
 }
 
 fn pat(pmt_pid: u16) -> Vec<u8> {
-    psi(0x0000, 0x00, &[0, 1, 0xC1, 0, 0, 0, 1, 0xE0 | (pmt_pid >> 8) as u8 & 0x1F, pmt_pid as u8])
+    psi(
+        0x0000,
+        0x00,
+        &[
+            0,
+            1,
+            0xC1,
+            0,
+            0,
+            0,
+            1,
+            0xE0 | (pmt_pid >> 8) as u8 & 0x1F,
+            pmt_pid as u8,
+        ],
+    )
 }
 
 /// A two-stream PMT (one video, one audio), the common A/V multiplex shape.
@@ -73,11 +91,25 @@ fn pmt2(v_pid: u16, v_type: u8, a_pid: u16, a_type: u8) -> Vec<u8> {
         0x1000,
         0x02,
         &[
-            0x00, 0x01, 0xC1, 0x00, 0x00,
-            0xE0 | (v_pid >> 8) as u8 & 0x1F, v_pid as u8, // PCR_PID
-            0xF0, 0x00,
-            v_type, 0xE0 | (v_pid >> 8) as u8 & 0x1F, v_pid as u8, 0xF0, 0x00,
-            a_type, 0xE0 | (a_pid >> 8) as u8 & 0x1F, a_pid as u8, 0xF0, 0x00,
+            0x00,
+            0x01,
+            0xC1,
+            0x00,
+            0x00,
+            0xE0 | (v_pid >> 8) as u8 & 0x1F,
+            v_pid as u8, // PCR_PID
+            0xF0,
+            0x00,
+            v_type,
+            0xE0 | (v_pid >> 8) as u8 & 0x1F,
+            v_pid as u8,
+            0xF0,
+            0x00,
+            a_type,
+            0xE0 | (a_pid >> 8) as u8 & 0x1F,
+            a_pid as u8,
+            0xF0,
+            0x00,
         ],
     )
 }
@@ -119,7 +151,9 @@ async fn tsdemux_announces_a_stream_collection_from_the_pmt() {
     let (bus, handle) = Bus::new(16);
     let mut demux = TsDemux::new().with_bus(handle);
     demux
-        .configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs })
+        .configure_pipeline(&Caps::ByteStream {
+            encoding: ByteStreamEncoding::MpegTs,
+        })
         .expect("configure");
 
     let mut sink = Drain::default();
@@ -136,21 +170,46 @@ async fn tsdemux_announces_a_stream_collection_from_the_pmt() {
         .unwrap();
 
     let collections: Vec<_> = core::iter::from_fn(|| bus.try_recv())
-        .filter_map(|m| if let BusMessage::StreamCollection(c) = m { Some(c) } else { None })
+        .filter_map(|m| {
+            if let BusMessage::StreamCollection(c) = m {
+                Some(c)
+            } else {
+                None
+            }
+        })
         .collect();
-    assert_eq!(collections.len(), 1, "exactly one StreamCollection from the PMT");
+    assert_eq!(
+        collections.len(),
+        1,
+        "exactly one StreamCollection from the PMT"
+    );
     let c = &collections[0];
     assert_eq!(c.len(), 2, "both PMT streams listed");
 
     let video: Vec<_> = c.streams_of_type(StreamType::Video).collect();
     assert_eq!(video.len(), 1);
-    assert_eq!(video[0].id, "mpegts-pid-256", "video stream keyed by its PID");
-    assert!(matches!(video[0].caps, Caps::CompressedVideo { codec: VideoCodec::H264, .. }));
+    assert_eq!(
+        video[0].id, "mpegts-pid-256",
+        "video stream keyed by its PID"
+    );
+    assert!(matches!(
+        video[0].caps,
+        Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            ..
+        }
+    ));
 
     let audio: Vec<_> = c.streams_of_type(StreamType::Audio).collect();
     assert_eq!(audio.len(), 1);
     assert_eq!(audio[0].id, "mpegts-pid-257");
-    assert!(matches!(audio[0].caps, Caps::Audio { format: AudioFormat::Aac, .. }));
+    assert!(matches!(
+        audio[0].caps,
+        Caps::Audio {
+            format: AudioFormat::Aac,
+            ..
+        }
+    ));
 }
 
 // --- MP4 fixture: mux a tiny H.264 track with Mp4Mux, read it back with Mp4Src ---
@@ -165,7 +224,12 @@ fn h264_caps() -> Caps {
 fn frame(data: Vec<u8>, i: u64) -> PipelinePacket {
     PipelinePacket::DataFrame(Frame::new(
         MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-        FrameTiming { pts_ns: i * 33_000_000, dts_ns: i * 33_000_000, duration_ns: 33_000_000, ..FrameTiming::default() },
+        FrameTiming {
+            pts_ns: i * 33_000_000,
+            dts_ns: i * 33_000_000,
+            duration_ns: 33_000_000,
+            ..FrameTiming::default()
+        },
         i,
     ))
 }
@@ -180,8 +244,7 @@ fn annexb(nals: &[&[u8]]) -> Vec<u8> {
 
 #[tokio::test]
 async fn mp4src_announces_its_single_video_track() {
-    let path: PathBuf =
-        std::env::temp_dir().join(format!("g2g_m386_{}.mp4", std::process::id()));
+    let path: PathBuf = std::env::temp_dir().join(format!("g2g_m386_{}.mp4", std::process::id()));
 
     // Mux a 2-frame H.264 track.
     let sps = [0x67u8, 0x42, 0x00, 0x1e, 0x88];
@@ -191,8 +254,12 @@ async fn mp4src_announces_its_single_video_track() {
     let narrowed = mux.intercept_caps(&h264_caps()).expect("intercept H.264");
     mux.configure_pipeline(&narrowed).expect("configure mux");
     let mut cap = Drain::default();
-    mux.process(frame(annexb(&[&sps, &pps, &idr]), 0), &mut cap).await.unwrap();
-    mux.process(frame(annexb(&[&[0x41u8, 0x9a, 0x00]]), 1), &mut cap).await.unwrap();
+    mux.process(frame(annexb(&[&sps, &pps, &idr]), 0), &mut cap)
+        .await
+        .unwrap();
+    mux.process(frame(annexb(&[&[0x41u8, 0x9a, 0x00]]), 1), &mut cap)
+        .await
+        .unwrap();
     mux.process(PipelinePacket::Eos, &mut cap).await.unwrap();
     std::fs::write(&path, &cap.bytes).expect("write mp4");
 
@@ -206,7 +273,13 @@ async fn mp4src_announces_its_single_video_track() {
     let _ = std::fs::remove_file(&path);
 
     let collections: Vec<_> = core::iter::from_fn(|| bus.try_recv())
-        .filter_map(|m| if let BusMessage::StreamCollection(c) = m { Some(c) } else { None })
+        .filter_map(|m| {
+            if let BusMessage::StreamCollection(c) = m {
+                Some(c)
+            } else {
+                None
+            }
+        })
         .collect();
     assert_eq!(collections.len(), 1, "one StreamCollection for the MP4");
     let c = &collections[0];
@@ -216,6 +289,11 @@ async fn mp4src_announces_its_single_video_track() {
     assert_eq!(video[0].id, "mp4-track-0");
     assert!(matches!(
         video[0].caps,
-        Caps::CompressedVideo { codec: VideoCodec::H264, width: Dim::Fixed(320), height: Dim::Fixed(240), .. }
+        Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            width: Dim::Fixed(320),
+            height: Dim::Fixed(240),
+            ..
+        }
     ));
 }

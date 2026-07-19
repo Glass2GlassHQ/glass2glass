@@ -12,9 +12,7 @@ use core::ffi::c_void;
 
 use g2g_core::rtp::RTP_HEADER_LEN;
 use g2g_core::staticpool::StaticLendRing;
-use g2g_core::{
-    run_source_transform_sink, step_source_sink, MediaClock, SinkChain, Step,
-};
+use g2g_core::{run_source_transform_sink, step_source_sink, MediaClock, SinkChain, Step};
 use g2g_mcu::{
     CFrameGrabber, CPacketSender, FrameGrabber, G711Enc, GrabberSrc, Law, PacketSender, RtpSink,
 };
@@ -93,8 +91,12 @@ struct CapCtx {
 extern "C" fn c_capture(ctx: *mut c_void, buf: *mut u8, len: usize) -> isize {
     // SAFETY: the test passes a live `&mut CapCtx` as `ctx` and a valid
     // `buf`/`len` from the lent ring slot.
-    let (ctx, buf) =
-        unsafe { (&mut *(ctx as *mut CapCtx), core::slice::from_raw_parts_mut(buf, len)) };
+    let (ctx, buf) = unsafe {
+        (
+            &mut *(ctx as *mut CapCtx),
+            core::slice::from_raw_parts_mut(buf, len),
+        )
+    };
     fill_ramp(buf, &mut ctx.next);
     len as isize
 }
@@ -134,7 +136,13 @@ fn run_native() -> u64 {
         .with_frame_limit(FRAMES);
     // SAFETY: the encoder's ring likewise outlives the runner.
     let enc = unsafe { G711Enc::with_ring(Law::Mulaw, &enc_ring) };
-    let mut rtp = RtpSink::new(SumSender { sum: 0, packets: 0 }, MediaClock::audio(8000), 0, SSRC, 0);
+    let mut rtp = RtpSink::new(
+        SumSender { sum: 0, packets: 0 },
+        MediaClock::audio(8000),
+        0,
+        SSRC,
+        0,
+    );
     g2g_core::drive_ready(run_source_transform_sink(src, enc, &mut rtp))
         .expect("native pipeline is synchronous")
         .expect("native pipeline runs clean");

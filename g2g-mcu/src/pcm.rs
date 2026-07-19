@@ -83,7 +83,9 @@ impl<W: PcmWriter> StaticSink for PcmSink<W> {
 
 impl<W> core::fmt::Debug for PcmSink<W> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("PcmSink").field("channels", &self.channels).finish()
+        f.debug_struct("PcmSink")
+            .field("channels", &self.channels)
+            .finish()
     }
 }
 

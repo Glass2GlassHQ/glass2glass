@@ -84,7 +84,11 @@ impl PtpSystemClock {
             })
             .ok(); // spawn failure leaves the clock free-running (never elected).
 
-        Self { clock, stop, worker }
+        Self {
+            clock,
+            stop,
+            worker,
+        }
     }
 
     /// The disciplined clock, to share via an element's `provide_clock` or read.
@@ -137,7 +141,10 @@ impl Drop for PtpSystemClock {
 /// Read `CLOCK_TAI` (the OS PTP-disciplined absolute clock) as nanoseconds, or
 /// `None` if the call fails or the value is out of range.
 fn read_clock_tai() -> Option<u64> {
-    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
     // SAFETY: `ts` is a valid, writable `timespec`; `clock_gettime` only writes
     // into it and returns 0 on success.
     let rc = unsafe { libc::clock_gettime(libc::CLOCK_TAI, &mut ts) };

@@ -32,7 +32,11 @@ fn h264_caps() -> Caps {
     }
 }
 fn aac_caps() -> Caps {
-    Caps::Audio { format: AudioFormat::Aac, channels: 2, sample_rate: 48_000 }
+    Caps::Audio {
+        format: AudioFormat::Aac,
+        channels: 2,
+        sample_rate: 48_000,
+    }
 }
 
 /// Records, per port, the DataFrame payloads and CapsChanged it receives.
@@ -43,7 +47,10 @@ struct PortTap {
 }
 impl PortTap {
     fn new(ports: usize) -> Self {
-        Self { frames: vec![Vec::new(); ports], caps: vec![Vec::new(); ports] }
+        Self {
+            frames: vec![Vec::new(); ports],
+            caps: vec![Vec::new(); ports],
+        }
     }
 }
 impl MultiOutputSink for PortTap {
@@ -54,7 +61,10 @@ impl MultiOutputSink for PortTap {
     ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
         Box::pin(async move {
             match packet {
-                PipelinePacket::DataFrame(Frame { domain: MemoryDomain::System(s), .. }) => {
+                PipelinePacket::DataFrame(Frame {
+                    domain: MemoryDomain::System(s),
+                    ..
+                }) => {
                     self.frames[port].push(s.as_slice().to_vec());
                 }
                 PipelinePacket::CapsChanged(c) => self.caps[port].push(c),
@@ -92,7 +102,11 @@ impl OutputSink for Collect {
 fn frame(data: Vec<u8>, pts_ns: u64) -> PipelinePacket {
     PipelinePacket::DataFrame(Frame::new(
         MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-        FrameTiming { pts_ns, dts_ns: pts_ns, ..FrameTiming::default() },
+        FrameTiming {
+            pts_ns,
+            dts_ns: pts_ns,
+            ..FrameTiming::default()
+        },
         0,
     ))
 }
@@ -130,8 +144,14 @@ fn adts_au(payload: &[u8]) -> Vec<u8> {
 fn discover_av_ids(bus: &Bus) -> Option<(String, String)> {
     while let Some(msg) = bus.try_recv() {
         if let BusMessage::StreamCollection(c) = msg {
-            let v = c.streams_of_type(StreamType::Video).next().map(|s| s.id.clone());
-            let a = c.streams_of_type(StreamType::Audio).next().map(|s| s.id.clone());
+            let v = c
+                .streams_of_type(StreamType::Video)
+                .next()
+                .map(|s| s.id.clone());
+            let a = c
+                .streams_of_type(StreamType::Audio)
+                .next()
+                .map(|s| s.id.clone());
             if let (Some(v), Some(a)) = (v, a) {
                 return Some((v, a));
             }
@@ -150,12 +170,28 @@ async fn mux_ts_av() -> Vec<u8> {
     mux.configure_pipeline(0, &h264_caps()).unwrap();
     mux.configure_pipeline(1, &aac_caps()).unwrap();
     let mut sink = Collect::default();
-    mux.process(0, frame(annexb(&[&sps, &pps, &idr]), 0), &mut sink).await.unwrap();
-    mux.process(1, frame(adts_au(&[0xA1, 0xA2, 0xA3]), 0), &mut sink).await.unwrap();
-    mux.process(0, frame(annexb(&[&[0x41u8, 0x9a, 0x00]]), 40_000_000), &mut sink).await.unwrap();
-    mux.process(1, frame(adts_au(&[0xB4, 0xB5]), 20_000_000), &mut sink).await.unwrap();
-    mux.process(0, PipelinePacket::Eos, &mut sink).await.unwrap();
-    mux.process(1, PipelinePacket::Eos, &mut sink).await.unwrap();
+    mux.process(0, frame(annexb(&[&sps, &pps, &idr]), 0), &mut sink)
+        .await
+        .unwrap();
+    mux.process(1, frame(adts_au(&[0xA1, 0xA2, 0xA3]), 0), &mut sink)
+        .await
+        .unwrap();
+    mux.process(
+        0,
+        frame(annexb(&[&[0x41u8, 0x9a, 0x00]]), 40_000_000),
+        &mut sink,
+    )
+    .await
+    .unwrap();
+    mux.process(1, frame(adts_au(&[0xB4, 0xB5]), 20_000_000), &mut sink)
+        .await
+        .unwrap();
+    mux.process(0, PipelinePacket::Eos, &mut sink)
+        .await
+        .unwrap();
+    mux.process(1, PipelinePacket::Eos, &mut sink)
+        .await
+        .unwrap();
     sink.bytes
 }
 
@@ -171,7 +207,9 @@ async fn tsdemuxn_selection_remaps_which_stream_each_port_carries() {
         .with_bus(handle)
         .with_stream_select(select.clone());
     demux
-        .configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs })
+        .configure_pipeline(&Caps::ByteStream {
+            encoding: ByteStreamEncoding::MpegTs,
+        })
         .expect("configure");
 
     let mut tap = PortTap::new(2);
@@ -193,20 +231,55 @@ async fn tsdemuxn_selection_remaps_which_stream_each_port_carries() {
 
     // Port 0 re-mapped to audio, port 1 to video.
     assert!(
-        tap.caps[0].last().map(|c| matches!(c, Caps::Audio { format: AudioFormat::Aac, .. })).unwrap_or(false),
+        tap.caps[0]
+            .last()
+            .map(|c| matches!(
+                c,
+                Caps::Audio {
+                    format: AudioFormat::Aac,
+                    ..
+                }
+            ))
+            .unwrap_or(false),
         "port 0 re-mapped to the audio stream: {:?}",
         tap.caps[0]
     );
     // The demuxed AAC is ADTS-framed (7-byte header + the payload).
-    assert_eq!(tap.frames[0].len(), 2, "port 0 carries the two audio access units after the swap");
-    assert!(tap.frames[0].iter().all(|au| au[0] == 0xFF && (au[1] & 0xF0) == 0xF0), "ADTS-framed AAC");
-    assert!(tap.frames[0][0].ends_with(&[0xA1, 0xA2, 0xA3]) && tap.frames[0][1].ends_with(&[0xB4, 0xB5]), "audio payloads preserved");
+    assert_eq!(
+        tap.frames[0].len(),
+        2,
+        "port 0 carries the two audio access units after the swap"
+    );
     assert!(
-        tap.caps[1].last().map(|c| matches!(c, Caps::CompressedVideo { codec: VideoCodec::H264, .. })).unwrap_or(false),
+        tap.frames[0]
+            .iter()
+            .all(|au| au[0] == 0xFF && (au[1] & 0xF0) == 0xF0),
+        "ADTS-framed AAC"
+    );
+    assert!(
+        tap.frames[0][0].ends_with(&[0xA1, 0xA2, 0xA3])
+            && tap.frames[0][1].ends_with(&[0xB4, 0xB5]),
+        "audio payloads preserved"
+    );
+    assert!(
+        tap.caps[1]
+            .last()
+            .map(|c| matches!(
+                c,
+                Caps::CompressedVideo {
+                    codec: VideoCodec::H264,
+                    ..
+                }
+            ))
+            .unwrap_or(false),
         "port 1 re-mapped to the video stream: {:?}",
         tap.caps[1]
     );
-    assert_eq!(tap.frames[1].len(), 2, "port 1 carries the two H.264 access units after the swap");
+    assert_eq!(
+        tap.frames[1].len(),
+        2,
+        "port 1 carries the two H.264 access units after the swap"
+    );
 
     // The active selection is confirmed on the bus.
     let selected_ids: Vec<_> = core::iter::from_fn(|| bus.try_recv())
@@ -215,7 +288,10 @@ async fn tsdemuxn_selection_remaps_which_stream_each_port_carries() {
             _ => None,
         })
         .collect();
-    assert!(!selected_ids.is_empty(), "StreamsSelected confirms the per-port ids");
+    assert!(
+        !selected_ids.is_empty(),
+        "StreamsSelected confirms the per-port ids"
+    );
 }
 
 // ---- fragmented MP4 ------------------------------------------------------
@@ -229,12 +305,28 @@ async fn mux_mp4_av() -> Vec<u8> {
     mux.configure_pipeline(0, &h264_caps()).unwrap();
     mux.configure_pipeline(1, &aac_caps()).unwrap();
     let mut sink = Collect::default();
-    mux.process(0, frame(annexb(&[&sps, &pps, &idr]), 0), &mut sink).await.unwrap();
-    mux.process(1, frame(adts_au(&[0xA1, 0xA2, 0xA3]), 0), &mut sink).await.unwrap();
-    mux.process(0, frame(annexb(&[&[0x41u8, 0x9a, 0x00]]), 33_000_000), &mut sink).await.unwrap();
-    mux.process(1, frame(adts_au(&[0xB4, 0xB5]), 21_000_000), &mut sink).await.unwrap();
-    mux.process(0, PipelinePacket::Eos, &mut sink).await.unwrap();
-    mux.process(1, PipelinePacket::Eos, &mut sink).await.unwrap();
+    mux.process(0, frame(annexb(&[&sps, &pps, &idr]), 0), &mut sink)
+        .await
+        .unwrap();
+    mux.process(1, frame(adts_au(&[0xA1, 0xA2, 0xA3]), 0), &mut sink)
+        .await
+        .unwrap();
+    mux.process(
+        0,
+        frame(annexb(&[&[0x41u8, 0x9a, 0x00]]), 33_000_000),
+        &mut sink,
+    )
+    .await
+    .unwrap();
+    mux.process(1, frame(adts_au(&[0xB4, 0xB5]), 21_000_000), &mut sink)
+        .await
+        .unwrap();
+    mux.process(0, PipelinePacket::Eos, &mut sink)
+        .await
+        .unwrap();
+    mux.process(1, PipelinePacket::Eos, &mut sink)
+        .await
+        .unwrap();
     sink.bytes
 }
 
@@ -246,44 +338,88 @@ async fn mp4demuxn_selection_remaps_which_track_each_port_carries() {
     let streams = forwardable_streams(&file);
     assert_eq!(streams.len(), 2, "video + audio tracks discovered");
     // Ports start [track for stream 0 (video), track for stream 1 (audio)].
-    let ports: Vec<Mp4Port> =
-        streams.iter().map(|s| Mp4Port { track_id: s.track_id, caps: s.caps.clone() }).collect();
+    let ports: Vec<Mp4Port> = streams
+        .iter()
+        .map(|s| Mp4Port {
+            track_id: s.track_id,
+            caps: s.caps.clone(),
+        })
+        .collect();
 
     let (bus, handle): (Bus, BusHandle) = Bus::new(16);
     let select = StreamSelectController::new();
-    let mut demux = Mp4DemuxN::new(ports).with_bus(handle).with_stream_select(select.clone());
+    let mut demux = Mp4DemuxN::new(ports)
+        .with_bus(handle)
+        .with_stream_select(select.clone());
     demux
-        .configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff })
+        .configure_pipeline(&Caps::ByteStream {
+            encoding: ByteStreamEncoding::IsoBmff,
+        })
         .expect("configure");
 
     // Split the init segment (ftyp+moov) from the fragments, so the collection is
     // announced (and the swap selected) before any fragment is emitted.
-    let split = file.windows(4).position(|w| w == b"moof").expect("fragmented file has a moof");
+    let split = file
+        .windows(4)
+        .position(|w| w == b"moof")
+        .expect("fragmented file has a moof");
     let (init, fragments) = file.split_at(split);
 
     let mut tap = PortTap::new(2);
     demux.process(data_frame(init), &mut tap).await.unwrap();
-    assert!(tap.frames.iter().all(|p| p.is_empty()), "no frames before any fragment");
+    assert!(
+        tap.frames.iter().all(|p| p.is_empty()),
+        "no frames before any fragment"
+    );
 
     let (v, a) = discover_av_ids(&bus).expect("collection announced from the moov");
     select.select(vec![a.clone(), v.clone()]); // swap: port 0 <- audio, port 1 <- video
 
-    demux.process(data_frame(fragments), &mut tap).await.unwrap();
+    demux
+        .process(data_frame(fragments), &mut tap)
+        .await
+        .unwrap();
     demux.process(PipelinePacket::Eos, &mut tap).await.unwrap();
 
     // Port 0 re-mapped to the audio track, port 1 to the video track.
     assert!(
-        tap.caps[0].last().map(|c| matches!(c, Caps::Audio { format: AudioFormat::Aac, .. })).unwrap_or(false),
+        tap.caps[0]
+            .last()
+            .map(|c| matches!(
+                c,
+                Caps::Audio {
+                    format: AudioFormat::Aac,
+                    ..
+                }
+            ))
+            .unwrap_or(false),
         "port 0 re-mapped to the audio track: {:?}",
         tap.caps[0]
     );
-    assert_eq!(tap.frames[0].len(), 2, "port 0 carries the two audio access units after the swap");
+    assert_eq!(
+        tap.frames[0].len(),
+        2,
+        "port 0 carries the two audio access units after the swap"
+    );
     assert!(
-        tap.caps[1].last().map(|c| matches!(c, Caps::CompressedVideo { codec: VideoCodec::H264, .. })).unwrap_or(false),
+        tap.caps[1]
+            .last()
+            .map(|c| matches!(
+                c,
+                Caps::CompressedVideo {
+                    codec: VideoCodec::H264,
+                    ..
+                }
+            ))
+            .unwrap_or(false),
         "port 1 re-mapped to the video track: {:?}",
         tap.caps[1]
     );
-    assert_eq!(tap.frames[1].len(), 2, "port 1 carries the two video access units after the swap");
+    assert_eq!(
+        tap.frames[1].len(),
+        2,
+        "port 1 carries the two video access units after the swap"
+    );
 
     let selected_ids: Vec<_> = core::iter::from_fn(|| bus.try_recv())
         .filter_map(|m| match m {
@@ -291,5 +427,9 @@ async fn mp4demuxn_selection_remaps_which_track_each_port_carries() {
             _ => None,
         })
         .collect();
-    assert_eq!(selected_ids, vec![vec![a, v]], "StreamsSelected confirms the per-port track ids");
+    assert_eq!(
+        selected_ids,
+        vec![vec![a, v]],
+        "StreamsSelected confirms the per-port track ids"
+    );
 }

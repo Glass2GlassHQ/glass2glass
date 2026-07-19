@@ -26,7 +26,9 @@ fn registry() -> Registry {
     reg.register_launch(LaunchFactory::of::<VideoFlip>("videoflip", || {
         Box::new(VideoFlip::new(FlipMethod::Rotate180))
     }));
-    reg.register_launch(LaunchFactory::new("fakesink", Vec::new(), || Box::new(FakeSink::new())));
+    reg.register_launch(LaunchFactory::new("fakesink", Vec::new(), || {
+        Box::new(FakeSink::new())
+    }));
     reg
 }
 
@@ -45,21 +47,48 @@ fn inspect_dumps_properties_and_templates() {
 
     let src = reg.inspect("videotestsrc").expect("source registered");
     // M178: gst-inspect-shaped dump with a Factory Details header + role.
-    assert!(src.contains("Factory Details:"), "has the metadata header:\n{src}");
-    assert!(src.contains("Long-name   Video test source"), "shows the long name:\n{src}");
+    assert!(
+        src.contains("Factory Details:"),
+        "has the metadata header:\n{src}"
+    );
+    assert!(
+        src.contains("Long-name   Video test source"),
+        "shows the long name:\n{src}"
+    );
     assert!(src.contains("Role        source"));
-    assert!(src.contains("pattern"), "lists the pattern property:\n{src}");
-    assert!(src.contains("framerate"), "lists the framerate property:\n{src}");
+    assert!(
+        src.contains("pattern"),
+        "lists the pattern property:\n{src}"
+    );
+    assert!(
+        src.contains("framerate"),
+        "lists the framerate property:\n{src}"
+    );
     // Enriched property detail: the pattern default and its flags line.
-    assert!(src.contains("Default: smpte"), "shows the pattern default:\n{src}");
-    assert!(src.contains("flags: readable, writable"), "shows property flags:\n{src}");
+    assert!(
+        src.contains("Default: smpte"),
+        "shows the pattern default:\n{src}"
+    );
+    assert!(
+        src.contains("flags: readable, writable"),
+        "shows property flags:\n{src}"
+    );
 
     let flip = reg.inspect("videoflip").expect("element registered");
     assert!(flip.contains("Role        element"));
-    assert!(flip.contains("Klass       Filter/Effect/Video"), "shows the classification:\n{flip}");
-    assert!(flip.contains("method"), "lists the method property:\n{flip}");
+    assert!(
+        flip.contains("Klass       Filter/Effect/Video"),
+        "shows the classification:\n{flip}"
+    );
+    assert!(
+        flip.contains("method"),
+        "lists the method property:\n{flip}"
+    );
     // VideoFlip declares pad templates, so the dump shows SINK / SRC lines.
-    assert!(flip.contains("SINK") && flip.contains("SRC"), "lists pad templates:\n{flip}");
+    assert!(
+        flip.contains("SINK") && flip.contains("SRC"),
+        "lists pad templates:\n{flip}"
+    );
 
     assert!(reg.inspect("nonesuch").is_none(), "unknown name -> None");
 }
@@ -73,21 +102,34 @@ fn inspect_muxer_carries_metadata_and_properties() {
     use g2g_plugins::mux::InterleaveMux;
 
     let mut reg = Registry::new();
-    reg.register_muxer(MuxerFactory::new("funnel", |n| Box::new(InterleaveMux::new(n, rgba_any()))));
+    reg.register_muxer(MuxerFactory::new("funnel", |n| {
+        Box::new(InterleaveMux::new(n, rgba_any()))
+    }));
     #[cfg(feature = "std")]
-    reg.register_muxer(MuxerFactory::new("mp4mux", |n| Box::new(g2g_plugins::mp4muxn::Mp4MuxN::new(n))));
+    reg.register_muxer(MuxerFactory::new("mp4mux", |n| {
+        Box::new(g2g_plugins::mp4muxn::Mp4MuxN::new(n))
+    }));
 
     let f = reg.inspect("funnel").expect("muxer registered");
     assert!(f.contains("Role        muxer (fan-in)"), "muxer role:\n{f}");
     // Metadata is only present if inspect actually built an instance to read it.
-    assert!(f.contains("Long-name   Funnel"), "carries metadata from a built instance:\n{f}");
-    assert!(f.contains("Output caps:"), "shows the muxer output caps:\n{f}");
+    assert!(
+        f.contains("Long-name   Funnel"),
+        "carries metadata from a built instance:\n{f}"
+    );
+    assert!(
+        f.contains("Output caps:"),
+        "shows the muxer output caps:\n{f}"
+    );
 
     // A fan-in muxer with a property (M471) lists it in the muxer inspect branch.
     #[cfg(feature = "std")]
     {
         let m = reg.inspect("mp4mux").expect("muxer registered");
-        assert!(m.contains("fragment-duration"), "lists the fan-in muxer property:\n{m}");
+        assert!(
+            m.contains("fragment-duration"),
+            "lists the fan-in muxer property:\n{m}"
+        );
     }
 }
 
@@ -101,9 +143,19 @@ fn make_by_name_then_set_property() {
 
     let mut flip = reg.make_element("videoflip").expect("element built");
     // gst nickname canonical; old g2g `rotate-90cw` still accepted as an alias.
-    flip.set_property("method", PropValue::Str("clockwise".into())).unwrap();
-    assert_eq!(flip.get_property("method"), Some(PropValue::Str("clockwise".into())));
+    flip.set_property("method", PropValue::Str("clockwise".into()))
+        .unwrap();
+    assert_eq!(
+        flip.get_property("method"),
+        Some(PropValue::Str("clockwise".into()))
+    );
 
-    assert!(reg.make_source("videoflip").is_none(), "videoflip is not a source");
-    assert!(reg.make_element("videotestsrc").is_none(), "videotestsrc is not a launch element");
+    assert!(
+        reg.make_source("videoflip").is_none(),
+        "videoflip is not a source"
+    );
+    assert!(
+        reg.make_element("videotestsrc").is_none(),
+        "videotestsrc is not a launch element"
+    );
 }

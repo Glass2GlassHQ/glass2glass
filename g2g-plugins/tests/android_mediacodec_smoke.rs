@@ -19,7 +19,7 @@
 use g2g_core::element::{AsyncElement, BoxFuture, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
-use g2g_core::{Caps, ConfigureOutcome, Dim, G2gError, RawVideoFormat, Rate, VideoCodec};
+use g2g_core::{Caps, ConfigureOutcome, Dim, G2gError, Rate, RawVideoFormat, VideoCodec};
 use g2g_plugins::mediacodecdec::MediaCodecDec;
 
 /// Start a binder threadpool so Codec2 can allocate the decoder's output graphic
@@ -43,12 +43,18 @@ fn start_binder_threadpool() {
         if lib.is_null() {
             return;
         }
-        let set = dlsym(lib, b"ABinderProcess_setThreadPoolMaxThreadCount\0".as_ptr() as *const c_char);
+        let set = dlsym(
+            lib,
+            b"ABinderProcess_setThreadPoolMaxThreadCount\0".as_ptr() as *const c_char,
+        );
         if !set.is_null() {
             let set: extern "C" fn(u32) -> bool = core::mem::transmute(set);
             set(1);
         }
-        let start = dlsym(lib, b"ABinderProcess_startThreadPool\0".as_ptr() as *const c_char);
+        let start = dlsym(
+            lib,
+            b"ABinderProcess_startThreadPool\0".as_ptr() as *const c_char,
+        );
         if !start.is_null() {
             let start: extern "C" fn() = core::mem::transmute(start);
             start();
@@ -71,7 +77,10 @@ struct Collect {
 }
 
 impl OutputSink for Collect {
-    fn push<'a>(&'a mut self, packet: PipelinePacket) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
+    fn push<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+    ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
         Box::pin(async move {
             self.packets.push(packet);
             Ok(PushOutcome::Accepted)
@@ -89,21 +98,33 @@ impl OutputSink for Collect {
 /// (VCL = 0..=31).
 fn access_units(s: &[u8], codec: VideoCodec) -> Vec<&[u8]> {
     let is_h265 = codec == VideoCodec::H265;
-    let nal_type = |hdr: u8| if is_h265 { (hdr >> 1) & 0x3f } else { hdr & 0x1f };
-    let is_vcl = |t: u8| if is_h265 { t <= 31 } else { (1..=5).contains(&t) };
+    let nal_type = |hdr: u8| {
+        if is_h265 {
+            (hdr >> 1) & 0x3f
+        } else {
+            hdr & 0x1f
+        }
+    };
+    let is_vcl = |t: u8| {
+        if is_h265 {
+            t <= 31
+        } else {
+            (1..=5).contains(&t)
+        }
+    };
 
     // Offsets of each NAL's start code, paired with the NAL type.
     let mut nals: Vec<(usize, u8)> = Vec::new();
     let mut i = 0;
     while i + 3 <= s.len() {
-        let sc_len = if i + 4 <= s.len() && s[i] == 0 && s[i + 1] == 0 && s[i + 2] == 0 && s[i + 3] == 1
-        {
-            Some(4)
-        } else if s[i] == 0 && s[i + 1] == 0 && s[i + 2] == 1 {
-            Some(3)
-        } else {
-            None
-        };
+        let sc_len =
+            if i + 4 <= s.len() && s[i] == 0 && s[i + 1] == 0 && s[i + 2] == 0 && s[i + 3] == 1 {
+                Some(4)
+            } else if s[i] == 0 && s[i + 1] == 0 && s[i + 2] == 1 {
+                Some(3)
+            } else {
+                None
+            };
         match sc_len {
             Some(len) => {
                 let hdr = i + len;
@@ -147,7 +168,11 @@ async fn decode_to_nv12(mut dec: MediaCodecDec, stream: &[u8], codec: VideoCodec
     start_binder_threadpool();
 
     let aus = access_units(stream, codec);
-    assert!(aus.len() > 1, "fixture must split into multiple access units, got {}", aus.len());
+    assert!(
+        aus.len() > 1,
+        "fixture must split into multiple access units, got {}",
+        aus.len()
+    );
 
     // Negotiation surrogate: upstream caps carry the fixture's geometry, as a
     // parser would emit from the SPS. MediaCodec's `configure()` requires
@@ -160,7 +185,9 @@ async fn decode_to_nv12(mut dec: MediaCodecDec, stream: &[u8], codec: VideoCodec
         framerate: Rate::Any,
     };
     let narrowed = dec.intercept_caps(&upstream).expect("intercept caps");
-    let outcome = dec.configure_pipeline(&narrowed).expect("configure decoder");
+    let outcome = dec
+        .configure_pipeline(&narrowed)
+        .expect("configure decoder");
     assert!(matches!(outcome, ConfigureOutcome::Accepted));
 
     let mut sink = Collect::default();
@@ -168,15 +195,24 @@ async fn decode_to_nv12(mut dec: MediaCodecDec, stream: &[u8], codec: VideoCodec
     for au in aus {
         let frame = Frame {
             domain: MemoryDomain::System(SystemSlice::from_boxed(au.to_vec().into_boxed_slice())),
-            timing: FrameTiming { pts_ns, dts_ns: pts_ns, capture_ns: pts_ns, ..FrameTiming::default() },
+            timing: FrameTiming {
+                pts_ns,
+                dts_ns: pts_ns,
+                capture_ns: pts_ns,
+                ..FrameTiming::default()
+            },
             sequence: 0,
             meta: Default::default(),
         };
-        dec.process(PipelinePacket::DataFrame(frame), &mut sink).await.expect("process access unit");
+        dec.process(PipelinePacket::DataFrame(frame), &mut sink)
+            .await
+            .expect("process access unit");
         pts_ns += 33_366_700; // ~29.97 fps
     }
     // EOS drains any frames the codec is still holding.
-    dec.process(PipelinePacket::Eos, &mut sink).await.expect("process Eos drains the codec");
+    dec.process(PipelinePacket::Eos, &mut sink)
+        .await
+        .expect("process Eos drains the codec");
 
     let caps_changes: Vec<_> = sink
         .packets
@@ -201,19 +237,34 @@ async fn decode_to_nv12(mut dec: MediaCodecDec, stream: &[u8], codec: VideoCodec
         data_frames.len(),
         caps_changes.len()
     );
-    assert!(!caps_changes.is_empty(), "expected at least one NV12 CapsChanged");
-    assert!(!data_frames.is_empty(), "expected at least one decoded frame");
+    assert!(
+        !caps_changes.is_empty(),
+        "expected at least one NV12 CapsChanged"
+    );
+    assert!(
+        !data_frames.is_empty(),
+        "expected at least one decoded frame"
+    );
 
     // The first CapsChanged advertises the decoded NV12 geometry; the first
     // frame's buffer must match it (Y + interleaved UV = w*h*3/2).
     match caps_changes.first().unwrap() {
-        Caps::RawVideo { format: RawVideoFormat::Nv12, width: Dim::Fixed(fw), height: Dim::Fixed(fh), .. } => {
+        Caps::RawVideo {
+            format: RawVideoFormat::Nv12,
+            width: Dim::Fixed(fw),
+            height: Dim::Fixed(fh),
+            ..
+        } => {
             eprintln!("first NV12 caps: {}x{}", fw, fh);
             assert!(*fw > 0 && *fh > 0);
             let expected = (*fw as usize) * (*fh as usize) * 3 / 2;
             match &data_frames.first().unwrap().domain {
                 MemoryDomain::System(slice) => {
-                    assert_eq!(slice.as_slice().len(), expected, "NV12 byte length mismatch");
+                    assert_eq!(
+                        slice.as_slice().len(),
+                        expected,
+                        "NV12 byte length mismatch"
+                    );
                 }
                 _ => panic!("decoder must emit System-domain NV12 frames"),
             }

@@ -9,7 +9,10 @@
 //! and that adding those extensions did not regress opening the device.
 //!
 //! Runs on the RTX 3060 (which supports both); skips with no Vulkan adapter.
-#![cfg(all(any(target_os = "linux", target_os = "windows"), feature = "hdr-present"))]
+#![cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    feature = "hdr-present"
+))]
 
 use g2g_core::runtime::block_on;
 use g2g_plugins::vulkanvideo::{open_h265_decode_device, VulkanVideoError};

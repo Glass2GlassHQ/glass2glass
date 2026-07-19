@@ -52,8 +52,12 @@ fn initialize_lists_tools_and_calls_them() {
     assert_eq!(resp[0]["result"]["serverInfo"]["name"], "g2g-mcp");
 
     // tools/list
-    let tools: Vec<&str> =
-        resp[1]["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+    let tools: Vec<&str> = resp[1]["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
     assert!(tools.contains(&"inspect") && tools.contains(&"validate") && tools.contains(&"launch"));
 
     // validate -> ok

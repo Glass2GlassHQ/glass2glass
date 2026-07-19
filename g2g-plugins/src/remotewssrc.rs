@@ -47,10 +47,18 @@ impl PacketTransport for WsTransport {
     const DESCRIPTION: &'static str =
         "Receives a serialized PipelinePacket stream over a WebSocket from a remote RemoteWsSink";
     const PROPERTIES: &'static [PropertySpec] = &[
-        PropertySpec::new("address", PropKind::Str, "local bind address (IP to listen on)")
-            .with_default("0.0.0.0"),
-        PropertySpec::new("port", PropKind::Uint, "local TCP port to listen on for WebSocket clients")
-            .with_range("0", "65535"),
+        PropertySpec::new(
+            "address",
+            PropKind::Str,
+            "local bind address (IP to listen on)",
+        )
+        .with_default("0.0.0.0"),
+        PropertySpec::new(
+            "port",
+            PropKind::Uint,
+            "local TCP port to listen on for WebSocket clients",
+        )
+        .with_range("0", "65535"),
         PropertySpec::new(
             "keep-listening",
             PropKind::Bool,
@@ -63,7 +71,10 @@ impl PacketTransport for WsTransport {
         Box::pin(async move {
             let (tcp, _peer) = listener.accept().await.map_err(io_err)?;
             let mut socket = accept_async(tcp).await.map_err(crate::remotewsio::ws_err)?;
-            let caps = match recv_wire(&mut socket).await?.ok_or(G2gError::NotConfigured)? {
+            let caps = match recv_wire(&mut socket)
+                .await?
+                .ok_or(G2gError::NotConfigured)?
+            {
                 PipelinePacket::CapsChanged(caps) => caps,
                 // Any other first packet violates the protocol.
                 _ => return Err(G2gError::Hardware(HardwareError::Other)),

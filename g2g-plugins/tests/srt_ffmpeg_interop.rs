@@ -68,12 +68,16 @@ async fn run_interop(crypto: Option<(&str, u32)>) -> Vec<u8> {
     // the kernel buffers ffmpeg's induction datagrams until SrtSrc reads them.
     let sock = StdUdpSocket::bind("127.0.0.1:0").expect("bind srt listener");
     let port = sock.local_addr().unwrap().port();
-    let mut src = SrtSrc::from_socket(sock).expect("adopt socket").with_frame_limit(N);
+    let mut src = SrtSrc::from_socket(sock)
+        .expect("adopt socket")
+        .with_frame_limit(N);
     if let Some((passphrase, _)) = crypto {
         src = src.with_passphrase(passphrase);
     }
-    src.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs })
-        .expect("configure");
+    src.configure_pipeline(&Caps::ByteStream {
+        encoding: ByteStreamEncoding::MpegTs,
+    })
+    .expect("configure");
 
     // ffmpeg pushes ~3 s of synthetic MPEG-TS as an SRT caller to our listener.
     let mut url = format!("srt://127.0.0.1:{port}");
@@ -83,10 +87,23 @@ async fn run_interop(crypto: Option<(&str, u32)>) -> Vec<u8> {
     let ffmpeg = tokio::task::spawn_blocking(move || {
         std::process::Command::new("ffmpeg")
             .args([
-                "-hide_banner", "-loglevel", "error",
-                "-re", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=15:duration=3",
-                "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
-                "-f", "mpegts", &url,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-re",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=320x240:rate=15:duration=3",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-tune",
+                "zerolatency",
+                "-f",
+                "mpegts",
+                &url,
             ])
             .status()
     });
@@ -108,7 +125,10 @@ async fn run_interop(crypto: Option<(&str, u32)>) -> Vec<u8> {
     let detail: String = match crypto {
         None => "ffmpeg (libsrt) caller: HSv5 handshake + data framing".into(),
         Some((_, pbkeylen)) => {
-            format!("ffmpeg (libsrt) caller: AES-{}-encrypted KM exchange + payload", pbkeylen * 8)
+            format!(
+                "ffmpeg (libsrt) caller: AES-{}-encrypted KM exchange + payload",
+                pbkeylen * 8
+            )
         }
     };
     g2g_plugins::conformance::persist::record_evidence(
@@ -171,27 +191,52 @@ impl OutputSink for NullOut {
 
 /// A grab an ephemeral UDP port, then release it so ffmpeg's listener can bind it.
 fn free_udp_port() -> u16 {
-    StdUdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    StdUdpSocket::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 fn ffmpeg_generate_ts(path: &Path) {
     let status = Command::new("ffmpeg")
         .args([
-            "-hide_banner", "-loglevel", "error", "-y",
-            "-f", "lavfi", "-i", "testsrc=size=320x240:rate=15:duration=2",
-            "-c:v", "libx264", "-preset", "ultrafast", "-f", "mpegts",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=320x240:rate=15:duration=2",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-f",
+            "mpegts",
             path.to_str().unwrap(),
         ])
         .status()
         .expect("spawn ffmpeg to generate the input TS");
-    assert!(status.success(), "ffmpeg generated the input MPEG-TS fixture");
+    assert!(
+        status.success(),
+        "ffmpeg generated the input MPEG-TS fixture"
+    );
 }
 
 fn ffprobe_video_frame_count(path: &Path) -> u64 {
     let out = Command::new("ffprobe")
         .args([
-            "-v", "error", "-select_streams", "v", "-count_frames",
-            "-show_entries", "stream=nb_read_frames", "-of", "csv=p=0",
+            "-v",
+            "error",
+            "-select_streams",
+            "v",
+            "-count_frames",
+            "-show_entries",
+            "stream=nb_read_frames",
+            "-of",
+            "csv=p=0",
             path.to_str().unwrap(),
         ])
         .output()
@@ -237,8 +282,16 @@ async fn run_reverse_interop(crypto: Option<(&str, u32)>) {
     let ffmpeg = tokio::task::spawn_blocking(move || {
         Command::new("ffmpeg")
             .args([
-                "-hide_banner", "-loglevel", "error", "-y",
-                "-i", &url, "-c", "copy", "-f", "mpegts",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-i",
+                &url,
+                "-c",
+                "copy",
+                "-f",
+                "mpegts",
                 out_path.to_str().unwrap(),
             ])
             .status()
@@ -254,30 +307,44 @@ async fn run_reverse_interop(crypto: Option<(&str, u32)>) {
             sink = sink.with_aes256();
         }
     }
-    sink.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs })
-        .expect("configure SrtSink");
+    sink.configure_pipeline(&Caps::ByteStream {
+        encoding: ByteStreamEncoding::MpegTs,
+    })
+    .expect("configure SrtSink");
     let mut null = NullOut;
     for (i, chunk) in ts_bytes.chunks(1316).enumerate() {
         let frame = Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(chunk.to_vec().into_boxed_slice())),
-            timing: FrameTiming { pts_ns: i as u64 * 1_000_000, ..FrameTiming::default() },
+            domain: MemoryDomain::System(SystemSlice::from_boxed(
+                chunk.to_vec().into_boxed_slice(),
+            )),
+            timing: FrameTiming {
+                pts_ns: i as u64 * 1_000_000,
+                ..FrameTiming::default()
+            },
             sequence: i as u64,
             meta: Default::default(),
         };
-        sink.process(PipelinePacket::DataFrame(frame), &mut null).await.expect("send TS chunk");
+        sink.process(PipelinePacket::DataFrame(frame), &mut null)
+            .await
+            .expect("send TS chunk");
         // Pace lightly so the SRT send buffer does not overrun in live mode.
         if i % 8 == 0 {
             tokio::time::sleep(Duration::from_millis(2)).await;
         }
     }
-    sink.process(PipelinePacket::Eos, &mut null).await.expect("EOS closes the SRT session");
+    sink.process(PipelinePacket::Eos, &mut null)
+        .await
+        .expect("EOS closes the SRT session");
 
     let status = tokio::time::timeout(Duration::from_secs(20), ffmpeg)
         .await
         .expect("ffmpeg listener finishes within 20s")
         .expect("join ffmpeg task")
         .expect("ffmpeg status");
-    assert!(status.success(), "ffmpeg listener received + finalized the stream");
+    assert!(
+        status.success(),
+        "ffmpeg listener received + finalized the stream"
+    );
 
     let got_frames = ffprobe_video_frame_count(&out_ts);
     let _ = std::fs::remove_file(&in_ts);
@@ -293,7 +360,10 @@ async fn run_reverse_interop(crypto: Option<(&str, u32)>) {
     let detail: String = match crypto {
         None => "g2g caller -> ffmpeg (libsrt) listener: HSv5 handshake + data framing".into(),
         Some((_, pbkeylen)) => {
-            format!("g2g caller -> ffmpeg (libsrt): AES-{}-encrypted KMREQ + payload", pbkeylen * 8)
+            format!(
+                "g2g caller -> ffmpeg (libsrt): AES-{}-encrypted KMREQ + payload",
+                pbkeylen * 8
+            )
         }
     };
     g2g_plugins::conformance::persist::record_evidence(

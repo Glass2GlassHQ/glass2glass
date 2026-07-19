@@ -203,11 +203,13 @@ impl RtspSrc {
 }
 
 impl SourceLoop for RtspSrc {
-    type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
+    type RunFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
     where
         Self: 'a;
 
-    type CapsFuture<'a> = Pin<Box<dyn Future<Output = Result<Caps, G2gError>> + 'a>>
+    type CapsFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<Caps, G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -255,10 +257,7 @@ impl SourceLoop for RtspSrc {
         Ok(CapsConstraint::Produces(CapsSet::one(caps)))
     }
 
-    fn configure_pipeline(
-        &mut self,
-        _absolute_caps: &Caps,
-    ) -> Result<ConfigureOutcome, G2gError> {
+    fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
     }
@@ -274,9 +273,17 @@ impl SourceLoop for RtspSrc {
 
     fn properties(&self) -> &'static [PropertySpec] {
         const PROPS: &[PropertySpec] = &[
-            PropertySpec::new("location", PropKind::Str, "RTSP URL (rtsp://host:port/path)"),
-            PropertySpec::new("user-agent", PropKind::Str, "User-Agent sent on DESCRIBE/SETUP")
-                .with_default("glass2glass/0.1"),
+            PropertySpec::new(
+                "location",
+                PropKind::Str,
+                "RTSP URL (rtsp://host:port/path)",
+            ),
+            PropertySpec::new(
+                "user-agent",
+                PropKind::Str,
+                "User-Agent sent on DESCRIBE/SETUP",
+            )
+            .with_default("glass2glass/0.1"),
             PropertySpec::new("user-id", PropKind::Str, "RTSP auth username"),
             PropertySpec::new("user-pw", PropKind::Str, "RTSP auth password"),
         ];
@@ -297,13 +304,21 @@ impl SourceLoop for RtspSrc {
             // set first, so each preserves the other's current value.
             "user-id" => {
                 let username = value.as_str().ok_or(PropError::Type)?.to_string();
-                let password = self.creds.as_ref().map(|c| c.password.clone()).unwrap_or_default();
+                let password = self
+                    .creds
+                    .as_ref()
+                    .map(|c| c.password.clone())
+                    .unwrap_or_default();
                 self.creds = Some(retina::client::Credentials { username, password });
                 Ok(())
             }
             "user-pw" => {
                 let password = value.as_str().ok_or(PropError::Type)?.to_string();
-                let username = self.creds.as_ref().map(|c| c.username.clone()).unwrap_or_default();
+                let username = self
+                    .creds
+                    .as_ref()
+                    .map(|c| c.username.clone())
+                    .unwrap_or_default();
                 self.creds = Some(retina::client::Credentials { username, password });
                 Ok(())
             }
@@ -315,20 +330,23 @@ impl SourceLoop for RtspSrc {
         match name {
             "location" => Some(PropValue::Str(self.url.clone())),
             "user-agent" => Some(PropValue::Str(self.user_agent.clone())),
-            "user-id" => {
-                Some(PropValue::Str(self.creds.as_ref().map(|c| c.username.clone()).unwrap_or_default()))
-            }
-            "user-pw" => {
-                Some(PropValue::Str(self.creds.as_ref().map(|c| c.password.clone()).unwrap_or_default()))
-            }
+            "user-id" => Some(PropValue::Str(
+                self.creds
+                    .as_ref()
+                    .map(|c| c.username.clone())
+                    .unwrap_or_default(),
+            )),
+            "user-pw" => Some(PropValue::Str(
+                self.creds
+                    .as_ref()
+                    .map(|c| c.password.clone())
+                    .unwrap_or_default(),
+            )),
             _ => None,
         }
     }
 
-    fn run<'a>(
-        &'a mut self,
-        out: &'a mut dyn OutputSink,
-    ) -> Self::RunFuture<'a> {
+    fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
         Box::pin(async move {
             if !self.configured {
                 return Err(G2gError::NotConfigured);
@@ -352,10 +370,7 @@ impl SourceLoop for RtspSrc {
 ///   downstream sees monotonic timestamps even across discontinuities.
 ///   Bumped by `1 s` (a deliberate gap to mark the reconnect boundary)
 ///   after each successful session before the next one runs.
-async fn run_rtsp(
-    src: &mut RtspSrc,
-    out: &mut dyn OutputSink,
-) -> Result<u64, G2gError> {
+async fn run_rtsp(src: &mut RtspSrc, out: &mut dyn OutputSink) -> Result<u64, G2gError> {
     let limit = src.target_frames.unwrap_or(u64::MAX);
     let mut total_emitted: u64 = 0;
     let mut pts_base_ns: u64 = 0;
@@ -365,9 +380,15 @@ async fn run_rtsp(
 
     loop {
         let emitted_before = total_emitted;
-        let outcome =
-            run_session(src, out, &mut total_emitted, pts_base_ns, limit, &mut last_session_max_pts)
-                .await;
+        let outcome = run_session(
+            src,
+            out,
+            &mut total_emitted,
+            pts_base_ns,
+            limit,
+            &mut last_session_max_pts,
+        )
+        .await;
         match outcome {
             SessionOutcome::LimitReached | SessionOutcome::GracefulEnd => {
                 return Ok(total_emitted);
@@ -511,8 +532,7 @@ async fn run_session(
         }
 
         if vf.has_new_parameters() {
-            let refreshed =
-                caps_from_video_params(video_params_for(demuxed.streams(), video_idx));
+            let refreshed = caps_from_video_params(video_params_for(demuxed.streams(), video_idx));
             if refreshed != current_caps {
                 if let Some(caps) = &refreshed {
                     if let Err(e) = out.push(PipelinePacket::CapsChanged(caps.clone())).await {
@@ -590,7 +610,9 @@ async fn probe_session_with_reconnect(
                 }
                 tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
                 attempt += 1;
-                backoff_ms = backoff_ms.saturating_mul(2).min(policy.max_backoff_ms.max(backoff_ms));
+                backoff_ms = backoff_ms
+                    .saturating_mul(2)
+                    .min(policy.max_backoff_ms.max(backoff_ms));
             }
         }
     }
@@ -614,7 +636,11 @@ async fn probe_session(
     let (session, video_idx) = connect_describe_setup(url, user_agent, creds).await?;
     let caps = caps_from_video_params(video_params_for(session.streams(), video_idx))
         .ok_or(G2gError::CapsMismatch)?;
-    Ok(StashedSession { session, video_idx, caps })
+    Ok(StashedSession {
+        session,
+        video_idx,
+        caps,
+    })
 }
 
 /// Shared DESCRIBE + SETUP step. Used both by the probe path (caching
@@ -705,7 +731,12 @@ mod tests {
         let mut src = RtspSrc::new("rtsp://example/stream").with_expected_dims(1920, 1080);
         let caps = src.intercept_caps().await.expect("caps");
         match caps {
-            Caps::CompressedVideo { codec, width, height, .. } => {
+            Caps::CompressedVideo {
+                codec,
+                width,
+                height,
+                ..
+            } => {
                 assert_eq!(codec, VideoCodec::H264);
                 assert_eq!(width, Dim::Fixed(1920));
                 assert_eq!(height, Dim::Fixed(1080));
@@ -776,4 +807,3 @@ mod tests {
         }
     }
 }
-

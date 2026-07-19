@@ -42,7 +42,10 @@ struct CollectSink {
     seqs: Vec<u64>,
 }
 impl AsyncElement for CollectSink {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>> where Self: 'a;
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
     fn intercept_caps(&self, c: &Caps) -> Result<Caps, G2gError> {
         Ok(c.clone())
     }
@@ -77,8 +80,13 @@ fn test_caps() -> Caps {
 
 fn frame(seq: u64) -> Frame {
     Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(vec![seq as u8; 16].into_boxed_slice())),
-        timing: FrameTiming { pts_ns: seq * 1_000_000, ..FrameTiming::default() },
+        domain: MemoryDomain::System(SystemSlice::from_boxed(
+            vec![seq as u8; 16].into_boxed_slice(),
+        )),
+        timing: FrameTiming {
+            pts_ns: seq * 1_000_000,
+            ..FrameTiming::default()
+        },
         sequence: seq,
         meta: Default::default(),
     }
@@ -110,13 +118,19 @@ async fn ws_sink_retries_connect_until_server_is_up() {
     let receiver = async move {
         tokio::time::sleep(Duration::from_millis(200)).await;
         let listener = StdTcpListener::bind(("127.0.0.1", port)).expect("late bind");
-        let mut src = RemoteWsSrc::from_listener(listener).unwrap().with_frame_limit(N);
+        let mut src = RemoteWsSrc::from_listener(listener)
+            .unwrap()
+            .with_frame_limit(N);
         let mut sink = CollectSink::default();
         let clock = ZeroClock;
-        let stats =
-            run_simple_pipeline(&mut src, &mut sink, &clock, LatencyProfile::Live.link_capacity())
-                .await
-                .expect("receive ok");
+        let stats = run_simple_pipeline(
+            &mut src,
+            &mut sink,
+            &clock,
+            LatencyProfile::Live.link_capacity(),
+        )
+        .await
+        .expect("receive ok");
         (stats.frames_emitted, sink)
     };
 
@@ -124,7 +138,18 @@ async fn ws_sink_retries_connect_until_server_is_up() {
     let (recv_res, ()) = tokio::join!(recv, sender);
     let (emitted, sink) = recv_res.expect("finishes within 10s");
 
-    assert_eq!(emitted, N, "all frames crossed after the WS sink retried the handshake");
-    assert_eq!(sink.caps.first(), Some(&test_caps()), "caps discovered from the wire");
-    assert_eq!(sink.seqs, (0..N).collect::<Vec<_>>(), "every frame in order");
+    assert_eq!(
+        emitted, N,
+        "all frames crossed after the WS sink retried the handshake"
+    );
+    assert_eq!(
+        sink.caps.first(),
+        Some(&test_caps()),
+        "caps discovered from the wire"
+    );
+    assert_eq!(
+        sink.seqs,
+        (0..N).collect::<Vec<_>>(),
+        "every frame in order"
+    );
 }

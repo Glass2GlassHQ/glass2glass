@@ -81,7 +81,12 @@ fn synthetic_ogg() -> Vec<u8> {
     let serial = 0x0C0F_FEE0;
     let mut s = Vec::new();
     s.extend_from_slice(&page(0x02, serial, 0, &[&opus_head(2)]));
-    s.extend_from_slice(&page(0x00, serial, 1, &[&opus_tags(&[("TITLE", "Glass"), ("ARTIST", "g2g")])]));
+    s.extend_from_slice(&page(
+        0x00,
+        serial,
+        1,
+        &[&opus_tags(&[("TITLE", "Glass"), ("ARTIST", "g2g")])],
+    ));
     s.extend_from_slice(&page(0x00, serial, 2, &[&[0x10, 0x11], &[0x20, 0x21]]));
     s
 }
@@ -95,15 +100,19 @@ impl SourceLoop for OggSource {
     type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>;
 
     fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
-        core::future::ready(Ok(Caps::ByteStream { encoding: ByteStreamEncoding::Ogg }))
+        core::future::ready(Ok(Caps::ByteStream {
+            encoding: ByteStreamEncoding::Ogg,
+        }))
     }
 
     fn caps_constraint<'a>(
         &'a mut self,
     ) -> impl Future<Output = Result<CapsConstraint<'a>, G2gError>> + 'a {
-        core::future::ready(Ok(CapsConstraint::Produces(CapsSet::one(Caps::ByteStream {
-            encoding: ByteStreamEncoding::Ogg,
-        }))))
+        core::future::ready(Ok(CapsConstraint::Produces(CapsSet::one(
+            Caps::ByteStream {
+                encoding: ByteStreamEncoding::Ogg,
+            },
+        ))))
     }
 
     fn configure_pipeline(&mut self, _caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -130,15 +139,21 @@ async fn oggdemux_surfaces_vorbis_comment_tags_on_the_bus() {
     let (bus, handle) = Bus::new(8);
     let stats = {
         let mut graph: Graph<GraphNode> = Graph::new();
-        let src =
-            graph.add_source(GraphNodeRef::Source(Box::new(OggSource { bytes: Some(synthetic_ogg()) })));
+        let src = graph.add_source(GraphNodeRef::Source(Box::new(OggSource {
+            bytes: Some(synthetic_ogg()),
+        })));
         let demux = graph.add_transform(GraphNodeRef::element(OggDemux::new().with_bus(handle)));
         let sink = graph.add_sink(GraphNodeRef::element(FakeSink::new()));
         graph.link(src, demux).unwrap();
         graph.link(demux, sink).unwrap();
-        run_graph(graph, &ZeroClock, 4).await.expect("ogg pipeline runs")
+        run_graph(graph, &ZeroClock, 4)
+            .await
+            .expect("ogg pipeline runs")
     };
-    assert_eq!(stats.frames_consumed, 2, "two Opus packets reached the sink");
+    assert_eq!(
+        stats.frames_consumed, 2,
+        "two Opus packets reached the sink"
+    );
 
     let mut posted = None;
     while let Some(m) = bus.try_recv() {
@@ -147,5 +162,8 @@ async fn oggdemux_surfaces_vorbis_comment_tags_on_the_bus() {
         }
     }
     let tags = posted.expect("oggdemux posted a Tag message");
-    assert_eq!(tags.tags(), &[Tag::Title("Glass".into()), Tag::Artist("g2g".into())]);
+    assert_eq!(
+        tags.tags(),
+        &[Tag::Title("Glass".into()), Tag::Artist("g2g".into())]
+    );
 }

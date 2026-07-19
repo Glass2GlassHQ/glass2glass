@@ -134,7 +134,10 @@ impl<T> InputAggregator<T> {
             .iter()
             .copied()
             .min_by_key(|&i| key(self.queues[i].front().expect("checked non-empty")))?;
-        Some((winner, self.queues[winner].pop_front().expect("checked non-empty")))
+        Some((
+            winner,
+            self.queues[winner].pop_front().expect("checked non-empty"),
+        ))
     }
 
     /// True once every input has ended and all queues have drained: no further

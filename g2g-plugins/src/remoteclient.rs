@@ -61,8 +61,11 @@ pub trait PacketClient: Send + 'static {
     fn configure_connect(&mut self, eager: bool) -> Result<(), G2gError>;
     /// Handle the transport-specific half of `set_property`; `None` if `name` is
     /// not one of this transport's knobs (the caller's `match` falls through).
-    fn set_transport_prop(&mut self, name: &str, value: &PropValue)
-        -> Option<Result<(), PropError>>;
+    fn set_transport_prop(
+        &mut self,
+        name: &str,
+        value: &PropValue,
+    ) -> Option<Result<(), PropError>>;
     /// Handle the transport-specific half of `get_property`.
     fn get_transport_prop(&self, name: &str) -> Option<PropValue>;
 }
@@ -135,7 +138,9 @@ impl<T: PacketClient> RemoteClient<T> {
                 }
                 if let Some(caps) = self.configured_caps.clone() {
                     if self.last_sent.as_ref() != Some(&caps) {
-                        self.transport.send(&PipelinePacket::CapsChanged(caps.clone())).await?;
+                        self.transport
+                            .send(&PipelinePacket::CapsChanged(caps.clone()))
+                            .await?;
                         self.sent += 1;
                         self.last_sent = Some(caps);
                     }
@@ -182,7 +187,8 @@ impl<T: PacketClient> AsyncElement for RemoteClient<T> {
         // Without reconnect, connect eagerly so a connect failure surfaces at
         // configure time; with reconnect, defer so it can be retried against a
         // late-starting peer. (A transport with an async handshake always defers.)
-        self.transport.configure_connect(self.reconnect_attempts == 0)?;
+        self.transport
+            .configure_connect(self.reconnect_attempts == 0)?;
         // The caps send is deferred to `process`; record the current caps so the
         // next send emits them if they changed.
         self.configured_caps = Some(absolute_caps.clone());
@@ -235,7 +241,9 @@ impl<T: PacketClient> AsyncElement for RemoteClient<T> {
             self.reconnect_attempts = n.min(u32::MAX as u64) as u32;
             return Ok(());
         }
-        self.transport.set_transport_prop(name, &value).unwrap_or(Err(PropError::Unknown))
+        self.transport
+            .set_transport_prop(name, &value)
+            .unwrap_or(Err(PropError::Unknown))
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {

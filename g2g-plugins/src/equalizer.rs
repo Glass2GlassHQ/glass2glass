@@ -38,7 +38,13 @@ struct Biquad {
 impl Biquad {
     /// The identity filter (used before the rate is known).
     fn identity() -> Self {
-        Self { b0: 1.0, b1: 0.0, b2: 0.0, a1: 0.0, a2: 0.0 }
+        Self {
+            b0: 1.0,
+            b1: 0.0,
+            b2: 0.0,
+            a1: 0.0,
+            a2: 0.0,
+        }
     }
 
     /// RBJ cookbook peaking EQ at `f0` for sample rate `fs`, `gain_db` dB.
@@ -124,9 +130,11 @@ impl Equalizer3Bands {
 
     fn accept_input(&self, caps: &Caps) -> Result<(u32, u32), G2gError> {
         match caps {
-            Caps::Audio { format: AudioFormat::PcmS16Le, channels, sample_rate } if *channels > 0 => {
-                Ok((*channels as u32, *sample_rate))
-            }
+            Caps::Audio {
+                format: AudioFormat::PcmS16Le,
+                channels,
+                sample_rate,
+            } if *channels > 0 => Ok((*channels as u32, *sample_rate)),
             _ => Err(G2gError::CapsMismatch),
         }
     }
@@ -168,7 +176,10 @@ impl AsyncElement for Equalizer3Bands {
 
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
-            Caps::Audio { format: AudioFormat::PcmS16Le, .. } => CapsSet::one(input.clone()),
+            Caps::Audio {
+                format: AudioFormat::PcmS16Le,
+                ..
+            } => CapsSet::one(input.clone()),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
     }
@@ -222,7 +233,12 @@ impl AsyncElement for Equalizer3Bands {
     }
 
     fn metadata(&self) -> ElementMetadata {
-        ElementMetadata::new("3-band equalizer", "Filter/Effect/Audio", "Three-band audio equalizer", "g2g")
+        ElementMetadata::new(
+            "3-band equalizer",
+            "Filter/Effect/Audio",
+            "Three-band audio equalizer",
+            "g2g",
+        )
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
@@ -255,8 +271,15 @@ static EQUALIZER_PROPS: &[PropertySpec] = &[
 
 impl PadTemplates for Equalizer3Bands {
     fn pad_templates() -> Vec<PadTemplate> {
-        let pcm = Caps::Audio { format: AudioFormat::PcmS16Le, channels: 2, sample_rate: 48_000 };
-        Vec::from([PadTemplate::sink(CapsSet::one(pcm.clone())), PadTemplate::source(CapsSet::one(pcm))])
+        let pcm = Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            channels: 2,
+            sample_rate: 48_000,
+        };
+        Vec::from([
+            PadTemplate::sink(CapsSet::one(pcm.clone())),
+            PadTemplate::source(CapsSet::one(pcm)),
+        ])
     }
 }
 
@@ -273,7 +296,10 @@ mod tests {
     }
 
     fn unpack(bytes: &[u8]) -> Vec<i16> {
-        bytes.chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect()
+        bytes
+            .chunks_exact(2)
+            .map(|c| i16::from_le_bytes([c[0], c[1]]))
+            .collect()
     }
 
     #[test]
@@ -281,8 +307,12 @@ mod tests {
         // A peaking EQ at 0 dB has b == a after normalization, so H(z) = 1: the
         // output equals the input to within i16 rounding.
         let mut eq = Equalizer3Bands::new();
-        eq.configure(&Caps::Audio { format: AudioFormat::PcmS16Le, channels: 1, sample_rate: 48_000 })
-            .unwrap();
+        eq.configure(&Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            channels: 1,
+            sample_rate: 48_000,
+        })
+        .unwrap();
         let src = pack(&[1000, -2000, 3000, -4000, 5000, 100, -100, 0]);
         let mut dst = vec![0u8; src.len()];
         eq.filter(&src, &mut dst);
@@ -294,12 +324,20 @@ mod tests {
     #[test]
     fn boost_changes_the_output() {
         let mut eq = Equalizer3Bands::new().with_band(0, 12.0);
-        eq.configure(&Caps::Audio { format: AudioFormat::PcmS16Le, channels: 1, sample_rate: 48_000 })
-            .unwrap();
+        eq.configure(&Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            channels: 1,
+            sample_rate: 48_000,
+        })
+        .unwrap();
         let src = pack(&[8000, 8000, 8000, 8000, 8000, 8000]);
         let mut dst = vec![0u8; src.len()];
         eq.filter(&src, &mut dst);
-        assert_ne!(unpack(&src), unpack(&dst), "a 12 dB boost must alter the signal");
+        assert_ne!(
+            unpack(&src),
+            unpack(&dst),
+            "a 12 dB boost must alter the signal"
+        );
     }
 
     #[test]
@@ -313,7 +351,14 @@ mod tests {
     #[test]
     fn configure_rejects_non_s16le() {
         let mut eq = Equalizer3Bands::new();
-        let bad = Caps::Audio { format: AudioFormat::PcmF32Le, channels: 2, sample_rate: 48_000 };
-        assert_eq!(eq.configure_pipeline(&bad).unwrap_err(), G2gError::CapsMismatch);
+        let bad = Caps::Audio {
+            format: AudioFormat::PcmF32Le,
+            channels: 2,
+            sample_rate: 48_000,
+        };
+        assert_eq!(
+            eq.configure_pipeline(&bad).unwrap_err(),
+            G2gError::CapsMismatch
+        );
     }
 }

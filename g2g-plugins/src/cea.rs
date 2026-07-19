@@ -139,9 +139,13 @@ fn parse_sei_messages(rbsp: &[u8], out: &mut Vec<CcTriple>) {
     let mut i = 0usize;
     // Stop once only the rbsp_trailing_bits (a lone 0x80) remain.
     while i + 1 < rbsp.len() {
-        let Some((payload_type, n)) = read_ff_extended(rbsp, i) else { break };
+        let Some((payload_type, n)) = read_ff_extended(rbsp, i) else {
+            break;
+        };
         i = n;
-        let Some((payload_size, n)) = read_ff_extended(rbsp, i) else { break };
+        let Some((payload_size, n)) = read_ff_extended(rbsp, i) else {
+            break;
+        };
         i = n;
         let end = match i.checked_add(payload_size) {
             Some(e) if e <= rbsp.len() => e,
@@ -183,7 +187,9 @@ fn parse_user_data_registered(p: &[u8], out: &mut Vec<CcTriple>) {
         i += 1;
     }
     // provider_code (16) + user_identifier (32) = 6 bytes after the country code.
-    let Some(window) = p.get(i..i + 6) else { return };
+    let Some(window) = p.get(i..i + 6) else {
+        return;
+    };
     let user_identifier = u32::from_be_bytes([window[2], window[3], window[4], window[5]]);
     if user_identifier != USER_IDENTIFIER_GA94 {
         return;
@@ -209,7 +215,11 @@ fn parse_user_data_registered(p: &[u8], out: &mut Vec<CcTriple>) {
         let cc_valid = marker & 0x04 != 0;
         let cc_type = marker & 0x03;
         if cc_valid {
-            out.push(CcTriple { cc_type, b0: triple[1], b1: triple[2] });
+            out.push(CcTriple {
+                cc_type,
+                b0: triple[1],
+                b1: triple[2],
+            });
         }
     }
 }
@@ -267,7 +277,8 @@ enum Mode {
 /// CEA-608 `Screen` and CEA-708 `Window`, whose grids differ in backing storage
 /// (fixed array vs `Vec`) but present the same rows-of-chars shape.
 fn grid_is_empty<R: AsRef<[char]>>(rows: impl IntoIterator<Item = R>) -> bool {
-    rows.into_iter().all(|r| r.as_ref().iter().all(|&c| c == ' '))
+    rows.into_iter()
+        .all(|r| r.as_ref().iter().all(|&c| c == ' '))
 }
 
 /// Join the non-blank rows top-to-bottom into cue text: each row collected to a
@@ -297,7 +308,9 @@ struct Screen {
 
 impl Screen {
     fn new() -> Self {
-        Self { rows: [[' '; COLS]; ROWS] }
+        Self {
+            rows: [[' '; COLS]; ROWS],
+        }
     }
 
     fn clear(&mut self) {
@@ -332,7 +345,13 @@ impl Screen {
         }
         let line = first_row.map(|r| ((r as u32 * 100) / (ROWS as u32 - 1)) as u8);
         let position = (min_indent < COLS).then(|| ((min_indent as u32 * 100) / COLS as u32) as u8);
-        CueSettings { position, line, align: TextAlign::Start, color, ..CueSettings::default() }
+        CueSettings {
+            position,
+            line,
+            align: TextAlign::Start,
+            color,
+            ..CueSettings::default()
+        }
     }
 }
 
@@ -513,8 +532,8 @@ impl Cea608 {
     /// Misc-control command (`0x14`, second byte `0x20..=0x2F`).
     fn misc_control(&mut self, b1: u8, pts_ns: u64) {
         match b1 {
-            0x20 => self.mode = Mode::PopOn,                  // RCL: resume caption loading
-            0x21 => self.backspace(),                         // BS
+            0x20 => self.mode = Mode::PopOn, // RCL: resume caption loading
+            0x21 => self.backspace(),        // BS
             0x25..=0x27 => {
                 // RU2/RU3/RU4: enter roll-up with a 2/3/4-row window at the base row.
                 self.mode = Mode::RollUp;
@@ -523,16 +542,16 @@ impl Cea608 {
                 self.row = ROWS;
                 self.col = 0;
             }
-            0x29 => self.mode = Mode::PaintOn,                // RDC: resume direct captioning
+            0x29 => self.mode = Mode::PaintOn, // RDC: resume direct captioning
             0x2C => {
                 // EDM: erase displayed memory.
                 self.snapshot(pts_ns);
                 self.disp.clear();
                 self.disp_start = None;
             }
-            0x2D => self.carriage_return(pts_ns),             // CR
-            0x2E => self.back.clear(),                        // ENM: erase non-displayed memory
-            0x2F => self.end_of_caption(pts_ns),             // EOC
+            0x2D => self.carriage_return(pts_ns), // CR
+            0x2E => self.back.clear(),            // ENM: erase non-displayed memory
+            0x2F => self.end_of_caption(pts_ns),  // EOC
             _ => {}
         }
     }
@@ -640,13 +659,13 @@ fn pac_row(b0: u8, b1: u8) -> Option<u8> {
 /// `None` for white / italics (no override; the overlay uses its default).
 fn pac_color(idx: u8) -> Option<[u8; 4]> {
     Some(match idx {
-        1 => [0, 255, 0, 255],     // green
-        2 => [0, 0, 255, 255],     // blue
-        3 => [0, 255, 255, 255],   // cyan
-        4 => [255, 0, 0, 255],     // red
-        5 => [255, 255, 0, 255],   // yellow
-        6 => [255, 0, 255, 255],   // magenta
-        _ => return None,          // 0 = white, 7 = italics
+        1 => [0, 255, 0, 255],   // green
+        2 => [0, 0, 255, 255],   // blue
+        3 => [0, 255, 255, 255], // cyan
+        4 => [255, 0, 0, 255],   // red
+        5 => [255, 255, 0, 255], // yellow
+        6 => [255, 0, 255, 255], // magenta
+        _ => return None,        // 0 = white, 7 = italics
     })
 }
 
@@ -872,13 +891,17 @@ impl Cc608Enc {
     /// caption window). Returns nothing; the bytes are drained via `next_pair`.
     pub fn push_cue(&mut self, cue: &Cue) {
         self.ctrl(0x14, 0x20); // RCL: resume caption loading (write the back buffer)
-        // line/position are percentages; map back to a 1-based row and a column.
+                               // line/position are percentages; map back to a 1-based row and a column.
         let base_row = cue
             .settings
             .line
             .map(|pct| ((pct as usize * (ROWS - 1)) / 100) + 1)
             .unwrap_or(ROWS); // default: row 15 (bottom)
-        let indent = cue.settings.position.map(|pct| (pct as usize * COLS) / 100).unwrap_or(0);
+        let indent = cue
+            .settings
+            .position
+            .map(|pct| (pct as usize * COLS) / 100)
+            .unwrap_or(0);
         for (i, line) in cue.text.lines().take(4).enumerate() {
             let row = (base_row + i).min(ROWS) as u8;
             let (p0, p1) = pac_encode(row, indent);
@@ -918,7 +941,11 @@ impl Cc608Enc {
         let bytes: Vec<u8> = line.chars().map(char_to_608).collect();
         for chunk in bytes.chunks(2) {
             let b0 = odd_parity(chunk[0]);
-            let b1 = if chunk.len() == 2 { odd_parity(chunk[1]) } else { CC_NULL };
+            let b1 = if chunk.len() == 2 {
+                odd_parity(chunk[1])
+            } else {
+                CC_NULL
+            };
             self.queue.push_back((b0, b1));
         }
     }
@@ -1030,7 +1057,12 @@ impl Cea708 {
     pub fn flush(&mut self, end_ns: u64) {
         if let Some((text, start, settings)) = self.shown.take() {
             if end_ns > start && !text.is_empty() {
-                self.out.push(Cue { start_ns: start, end_ns, text, settings });
+                self.out.push(Cue {
+                    start_ns: start,
+                    end_ns,
+                    text,
+                    settings,
+                });
             }
         }
     }
@@ -1062,9 +1094,15 @@ impl Cea708 {
     /// byte's `packet_size_code` gives the data length; the data is a sequence of
     /// service blocks.
     fn try_decode_packet(&mut self) {
-        let Some(&header) = self.buf.first() else { return };
+        let Some(&header) = self.buf.first() else {
+            return;
+        };
         let size_code = header & 0x3F;
-        let data_size = if size_code == 0 { 127 } else { size_code as usize * 2 - 1 };
+        let data_size = if size_code == 0 {
+            127
+        } else {
+            size_code as usize * 2 - 1
+        };
         let total = 1 + data_size;
         if self.buf.len() < total {
             return;
@@ -1165,15 +1203,19 @@ impl Cea708 {
     fn handle_c1(&mut self, c: u8, params: &[u8], _now: u64) {
         match c {
             0x80..=0x87 => self.current_window = (c & 0x07) as usize, // CWx
-            0x88 => self.for_each_window(params, |w| w.grid.iter_mut().for_each(|r| r.iter_mut().for_each(|c| *c = ' '))), // CLW
-            0x89 => self.for_each_window(params, |w| w.visible = true),  // DSW
+            0x88 => self.for_each_window(params, |w| {
+                w.grid
+                    .iter_mut()
+                    .for_each(|r| r.iter_mut().for_each(|c| *c = ' '))
+            }), // CLW
+            0x89 => self.for_each_window(params, |w| w.visible = true), // DSW
             0x8A => self.for_each_window(params, |w| w.visible = false), // HDW
             0x8B => self.for_each_window(params, |w| w.visible = !w.visible), // TGW
             0x8C => self.for_each_window(params, |w| {
                 *w = Window::new();
             }), // DLW
             0x8F => self.windows = core::array::from_fn(|_| Window::new()), // RST
-            0x92 => self.set_pen_location(params),                       // SPL
+            0x92 => self.set_pen_location(params),                    // SPL
             0x98..=0x9F => self.define_window((c & 0x07) as usize, params), // DFx
             // CLW/DSW/... handled above; DLY/DLC/SPA/SPC/SWA carry no text effect here.
             _ => {}
@@ -1182,7 +1224,9 @@ impl Cea708 {
 
     /// Apply `f` to each window whose bit is set in the 1-byte window bitmap.
     fn for_each_window(&mut self, params: &[u8], f: impl Fn(&mut Window)) {
-        let Some(&bitmap) = params.first() else { return };
+        let Some(&bitmap) = params.first() else {
+            return;
+        };
         for (i, w) in self.windows.iter_mut().enumerate() {
             if bitmap & (1 << i) != 0 {
                 f(w);
@@ -1262,7 +1306,12 @@ impl Cea708 {
         }
         if let Some((text, start, settings)) = self.shown.take() {
             if now > start && !text.is_empty() {
-                self.out.push(Cue { start_ns: start, end_ns: now, text, settings });
+                self.out.push(Cue {
+                    start_ns: start,
+                    end_ns: now,
+                    text,
+                    settings,
+                });
             }
         }
         self.shown = new.map(|(text, settings)| (text, now, settings));
@@ -1369,7 +1418,11 @@ impl Cc708Enc {
     /// A fresh encoder writing `service` (1 = primary; clamped to 1..=6, the range
     /// the single-byte service-block header carries without an extension).
     pub fn for_service(service: u8) -> Self {
-        Self { service: service.clamp(1, 6), queue: VecDeque::new(), seq: 0 }
+        Self {
+            service: service.clamp(1, 6),
+            queue: VecDeque::new(),
+            seq: 0,
+        }
     }
 
     /// Queue the command sequence that displays `cue` in window 0: define the
@@ -1378,7 +1431,12 @@ impl Cc708Enc {
     pub fn push_cue(&mut self, cue: &Cue) {
         let lines: Vec<&str> = cue.text.lines().collect();
         let rows = lines.len().clamp(1, 16) as u8;
-        let cols = lines.iter().map(|l| l.chars().count()).max().unwrap_or(1).clamp(1, 64) as u8;
+        let cols = lines
+            .iter()
+            .map(|l| l.chars().count())
+            .max()
+            .unwrap_or(1)
+            .clamp(1, 64) as u8;
         // Relative anchor: the decoder reads the percent directly. Default near the
         // bottom-left when the cue carries no placement.
         let line = cue.settings.line.unwrap_or(90).min(100);
@@ -1387,13 +1445,13 @@ impl Cc708Enc {
         // Command units (each atomic: a control command, or one G0 glyph byte).
         let mut units: Vec<Vec<u8>> = Vec::new();
         units.push(alloc::vec![
-            0x98,                 // DefineWindow 0
-            0x00,                 // hidden (no 0x20 visible bit), priority 0
-            0x80 | line,          // relative positioning | anchor vertical
-            pos,                  // anchor horizontal
-            (rows - 1) & 0x0F,    // anchor id 0 | row_count - 1
-            (cols - 1) & 0x3F,    // column_count - 1
-            0x09,                 // window style 1 | pen style 1 (a standard popup)
+            0x98,              // DefineWindow 0
+            0x00,              // hidden (no 0x20 visible bit), priority 0
+            0x80 | line,       // relative positioning | anchor vertical
+            pos,               // anchor horizontal
+            (rows - 1) & 0x0F, // anchor id 0 | row_count - 1
+            (cols - 1) & 0x3F, // column_count - 1
+            0x09,              // window style 1 | pen style 1 (a standard popup)
         ]);
         for (r, line) in lines.iter().enumerate() {
             units.push(alloc::vec![0x92, (r as u8) & 0x0F, 0x00]); // SetPenLocation(row, 0)
@@ -1501,8 +1559,13 @@ impl CcSource {
             "cc4" | "4" => Some(CcSource::Cea608(Cea608Channel::Cc4)),
             other => {
                 // CEA-708 service: `service-N` or `708-N`, N >= 1.
-                let svc = other.strip_prefix("service-").or_else(|| other.strip_prefix("708-"))?;
-                svc.parse::<u8>().ok().filter(|n| *n >= 1).map(CcSource::Cea708)
+                let svc = other
+                    .strip_prefix("service-")
+                    .or_else(|| other.strip_prefix("708-"))?;
+                svc.parse::<u8>()
+                    .ok()
+                    .filter(|n| *n >= 1)
+                    .map(CcSource::Cea708)
             }
         }
     }
@@ -1626,10 +1689,10 @@ pub fn build_cdp(triples: &[CcTriple], frame_rate_code: u8, seq: u16) -> Vec<u8>
     cdp.extend_from_slice(&CDP_IDENTIFIER.to_be_bytes());
     cdp.push(0); // cdp_length placeholder (index 2), filled in below
     cdp.push((frame_rate_code << 4) | 0x0F); // frame_rate | reserved marker
-    // cdp_flags: ccdata_present (0x40) | caption_service_active (0x02) | reserved (0x01).
+                                             // cdp_flags: ccdata_present (0x40) | caption_service_active (0x02) | reserved (0x01).
     cdp.push(0x40 | 0x02 | 0x01);
     cdp.extend_from_slice(&seq.to_be_bytes()); // cdp_hdr_sequence_counter
-    // ccdata_section.
+                                               // ccdata_section.
     cdp.push(CDP_CCDATA_ID);
     cdp.push(0xE0 | cc_count); // marker (111) | cc_count
     for t in triples.iter().take(0x1F) {
@@ -1640,7 +1703,7 @@ pub fn build_cdp(triples: &[CcTriple], frame_rate_code: u8, seq: u16) -> Vec<u8>
     // cdp_footer.
     cdp.push(CDP_FOOTER_ID);
     cdp.extend_from_slice(&seq.to_be_bytes()); // cdp_ftr_sequence_counter
-    // cdp_length counts the whole packet including the checksum byte to follow.
+                                               // cdp_length counts the whole packet including the checksum byte to follow.
     cdp[2] = (cdp.len() + 1).min(0xFF) as u8;
     let sum = cdp.iter().fold(0u8, |a, &b| a.wrapping_add(b));
     cdp.push(0u8.wrapping_sub(sum)); // packet_checksum: total == 0 mod 256
@@ -1716,7 +1779,7 @@ mod tests {
         payload.extend_from_slice(&[0x00, 0x31]); // provider_code (ATSC)
         payload.extend_from_slice(&[0x47, 0x41, 0x39, 0x34]); // user_identifier GA94
         payload.push(0x03); // user_data_type_code: cc_data
-        // flags: process_cc_data_flag (0x40) | reserved (0x80) | cc_count.
+                            // flags: process_cc_data_flag (0x40) | reserved (0x80) | cc_count.
         payload.push(0xC0 | (triples.len() as u8 & 0x1F));
         payload.push(0xFF); // em_data
         for &(t, b0, b1) in triples {
@@ -1745,8 +1808,16 @@ mod tests {
         assert_eq!(
             triples,
             vec![
-                CcTriple { cc_type: 0, b0: 0x12, b1: 0x34 },
-                CcTriple { cc_type: 0, b0: 0x56, b1: 0x78 },
+                CcTriple {
+                    cc_type: 0,
+                    b0: 0x12,
+                    b1: 0x34
+                },
+                CcTriple {
+                    cc_type: 0,
+                    b0: 0x56,
+                    b1: 0x78
+                },
             ]
         );
     }
@@ -1755,12 +1826,24 @@ mod tests {
     fn build_cc_sei_round_trips_through_extract() {
         // The SEI builder is the inverse of the extractor, for both codecs.
         let triples = [
-            CcTriple { cc_type: 0, b0: 0x94, b1: 0x20 },
-            CcTriple { cc_type: 0, b0: 0xC8, b1: 0xC9 },
+            CcTriple {
+                cc_type: 0,
+                b0: 0x94,
+                b1: 0x20,
+            },
+            CcTriple {
+                cc_type: 0,
+                b0: 0xC8,
+                b1: 0xC9,
+            },
         ];
         for codec in [VideoCodec::H264, VideoCodec::H265] {
             let nal = build_cc_sei(&triples, codec);
-            assert_eq!(extract_cc_data(&nal, codec), triples, "{codec:?} SEI round trips");
+            assert_eq!(
+                extract_cc_data(&nal, codec),
+                triples,
+                "{codec:?} SEI round trips"
+            );
         }
     }
 
@@ -1803,7 +1886,12 @@ mod tests {
         // exercises RCL / PAC / character / EOC encoding plus control doubling and
         // parity end to end.
         let mut enc = Cc608Enc::new();
-        let cue = Cue { start_ns: 0, end_ns: 0, text: "HELLO".into(), settings: CueSettings::default() };
+        let cue = Cue {
+            start_ns: 0,
+            end_ns: 0,
+            text: "HELLO".into(),
+            settings: CueSettings::default(),
+        };
         enc.push_cue(&cue);
         let mut dec = Cea608::new();
         let mut t = 1000u64;
@@ -1903,7 +1991,7 @@ mod tests {
         // Channel-1 control + text (base byte 0x14) must be ignored by a CC2 decoder.
         dec.push_pair(parity(0x14), parity(0x20), 0); // RCL on channel 1
         dec.push_pair(parity(b'Z'), parity(b'Z'), 0); // channel-1 text
-        // Channel-2 control + text (base byte 0x1C = 0x14 | 0x08) is rendered.
+                                                      // Channel-2 control + text (base byte 0x1C = 0x14 | 0x08) is rendered.
         dec.push_pair(parity(0x1C), parity(0x20), 0); // RCL on channel 2
         dec.push_pair(parity(b'X'), parity(b'Y'), 0); // channel-2 text
         dec.push_pair(parity(0x1C), parity(0x2F), 100); // EOC channel 2
@@ -1931,7 +2019,7 @@ mod tests {
     fn pac_indent_drives_position() {
         let mut dec = Cea608::new();
         dec.push_pair(parity(0x14), parity(0x20), 0); // RCL
-        // PAC row 3, indent form, column group 2 (= 8 columns): 0x40|0x10|0x04.
+                                                      // PAC row 3, indent form, column group 2 (= 8 columns): 0x40|0x10|0x04.
         dec.push_pair(parity(0x12), parity(0x54), 0);
         dec.push_pair(parity(b'H'), parity(b'I'), 0);
         dec.push_pair(parity(0x14), parity(0x2F), 100); // EOC
@@ -1957,7 +2045,14 @@ mod tests {
             v
         };
         let triples = extract_cc_data(&au, VideoCodec::H265);
-        assert_eq!(triples, vec![CcTriple { cc_type: 1, b0: 0x20, b1: 0x21 }]);
+        assert_eq!(
+            triples,
+            vec![CcTriple {
+                cc_type: 1,
+                b0: 0x20,
+                b1: 0x21
+            }]
+        );
     }
 
     /// Wrap service-block command bytes for `service` in a DTVCC service-block
@@ -2018,7 +2113,11 @@ mod tests {
         cmds.extend_from_slice(&[0x89, 0x01]); // DSW window 0
         feed(&mut dec, &dtvcc_packet(&service_block(1, &cmds)), 1000);
         // Packet 2: HideWindows 0 -> ends the caption.
-        feed(&mut dec, &dtvcc_packet(&service_block(1, &[0x8A, 0x01])), 5000);
+        feed(
+            &mut dec,
+            &dtvcc_packet(&service_block(1, &[0x8A, 0x01])),
+            5000,
+        );
         let cues = dec.take_cues();
         assert_eq!(cues.len(), 1);
         assert_eq!(cues[0].text, "HI");
@@ -2096,7 +2195,11 @@ mod tests {
             start_ns: 0,
             end_ns: 0,
             text: "HELLO".into(),
-            settings: CueSettings { line: Some(50), position: Some(20), ..CueSettings::default() },
+            settings: CueSettings {
+                line: Some(50),
+                position: Some(20),
+                ..CueSettings::default()
+            },
         };
         enc.push_cue(&cue);
         let mut dec = Cea708::new();
@@ -2115,7 +2218,11 @@ mod tests {
         let cues = dec.take_cues();
         assert_eq!(cues.len(), 1, "one finished caption");
         assert_eq!(cues[0].text, "HELLO");
-        assert_eq!(cues[0].settings.line, Some(50), "relative anchor round-trips");
+        assert_eq!(
+            cues[0].settings.line,
+            Some(50),
+            "relative anchor round-trips"
+        );
         assert_eq!(cues[0].settings.position, Some(20));
     }
 
@@ -2152,15 +2259,31 @@ mod tests {
     fn cdp_round_trips_mixed_608_708_triples() {
         // A CDP carrying both a 608 field-1 pair and a 708 DTVCC start/continuation.
         let triples = vec![
-            CcTriple { cc_type: 0, b0: 0x14, b1: 0x20 },
-            CcTriple { cc_type: 3, b0: 0x01, b1: 0x02 },
-            CcTriple { cc_type: 2, b0: 0x03, b1: 0x04 },
+            CcTriple {
+                cc_type: 0,
+                b0: 0x14,
+                b1: 0x20,
+            },
+            CcTriple {
+                cc_type: 3,
+                b0: 0x01,
+                b1: 0x02,
+            },
+            CcTriple {
+                cc_type: 2,
+                b0: 0x03,
+                b1: 0x04,
+            },
         ];
         let cdp = build_cdp(&triples, 4, 0x1234);
         // Well-formed: CDP identifier, declared length matches, checksum zeroes it.
         assert_eq!(&cdp[..2], &[0x96, 0x69]);
         assert_eq!(usize::from(cdp[2]), cdp.len());
-        assert_eq!(cdp.iter().fold(0u8, |a, &b| a.wrapping_add(b)), 0, "checksum sums to 0");
+        assert_eq!(
+            cdp.iter().fold(0u8, |a, &b| a.wrapping_add(b)),
+            0,
+            "checksum sums to 0"
+        );
         assert_eq!(parse_cdp(&cdp), Some(triples));
     }
 
@@ -2168,7 +2291,15 @@ mod tests {
     fn cdp_skips_invalid_triples_and_a_time_code_section() {
         // Hand-build a CDP with a time-code section before the ccdata section, and
         // one cc_valid-clear triple that must be dropped.
-        let mut cdp = vec![0x96, 0x69, 0x00, (4 << 4) | 0x0F, 0x40 | 0x02 | 0x01, 0x00, 0x01];
+        let mut cdp = vec![
+            0x96,
+            0x69,
+            0x00,
+            (4 << 4) | 0x0F,
+            0x40 | 0x02 | 0x01,
+            0x00,
+            0x01,
+        ];
         cdp.extend_from_slice(&[CDP_TIMECODE_ID, 0x00, 0x00, 0x00, 0x00]); // time-code section
         cdp.extend_from_slice(&[CDP_CCDATA_ID, 0xE0 | 2]); // ccdata, cc_count = 2
         cdp.extend_from_slice(&[0xF8 | 0x04, b'H', b'I']); // valid 608 pair (cc_type 0)
@@ -2178,12 +2309,27 @@ mod tests {
         let sum = cdp.iter().fold(0u8, |a, &b| a.wrapping_add(b));
         cdp.push(0u8.wrapping_sub(sum));
 
-        assert_eq!(parse_cdp(&cdp), Some(vec![CcTriple { cc_type: 0, b0: b'H', b1: b'I' }]));
+        assert_eq!(
+            parse_cdp(&cdp),
+            Some(vec![CcTriple {
+                cc_type: 0,
+                b0: b'H',
+                b1: b'I'
+            }])
+        );
     }
 
     #[test]
     fn cdp_rejects_bad_identifier_length_and_checksum() {
-        let good = build_cdp(&[CcTriple { cc_type: 0, b0: 0x11, b1: 0x22 }], 5, 1);
+        let good = build_cdp(
+            &[CcTriple {
+                cc_type: 0,
+                b0: 0x11,
+                b1: 0x22,
+            }],
+            5,
+            1,
+        );
         assert!(parse_cdp(&good).is_some());
 
         let mut bad_id = good.clone();
@@ -2208,13 +2354,32 @@ mod tests {
         let mut dec = CaptionDecoder::new(CcSource::default());
         dec.push_triples(
             &[
-                CcTriple { cc_type: 0, b0: 0x14, b1: 0x20 }, // RCL
-                CcTriple { cc_type: 0, b0: b'H', b1: b'I' },
-                CcTriple { cc_type: 0, b0: 0x14, b1: 0x2F }, // EOC (display)
+                CcTriple {
+                    cc_type: 0,
+                    b0: 0x14,
+                    b1: 0x20,
+                }, // RCL
+                CcTriple {
+                    cc_type: 0,
+                    b0: b'H',
+                    b1: b'I',
+                },
+                CcTriple {
+                    cc_type: 0,
+                    b0: 0x14,
+                    b1: 0x2F,
+                }, // EOC (display)
             ],
             1_000,
         );
-        dec.push_triples(&[CcTriple { cc_type: 0, b0: 0x14, b1: 0x2C }], 5_000); // EDM
+        dec.push_triples(
+            &[CcTriple {
+                cc_type: 0,
+                b0: 0x14,
+                b1: 0x2C,
+            }],
+            5_000,
+        ); // EDM
         let cues = dec.take_cues();
         assert_eq!(cues.len(), 1);
         assert_eq!(cues[0].text, "HI");

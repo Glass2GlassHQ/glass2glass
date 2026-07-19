@@ -24,8 +24,8 @@ use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
-    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropValue, PropertySpec, Rate,
-    VideoCodec,
+    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropValue, PropertySpec,
+    Rate, VideoCodec,
 };
 
 use crate::annexb::nal_units;
@@ -158,7 +158,10 @@ impl<C: NalCodec> NalParse<C> {
     /// input bitstream and emits one access-unit-aligned Annex-B `DataFrame` per
     /// coded picture (see [`reframe`](Self::reframe)).
     pub fn reframing() -> Self {
-        Self { reframe: true, ..Self::default() }
+        Self {
+            reframe: true,
+            ..Self::default()
+        }
     }
 
     /// Count of `CapsChanged` packets this element has pushed downstream. Useful
@@ -250,7 +253,8 @@ impl<C: NalCodec> NalParse<C> {
                 framerate: info.framerate.map_or(Rate::Any, Rate::Fixed),
             };
             if self.last_emitted_caps.as_ref() != Some(&new_caps) {
-                out.push(PipelinePacket::CapsChanged(new_caps.clone())).await?;
+                out.push(PipelinePacket::CapsChanged(new_caps.clone()))
+                    .await?;
                 self.last_emitted_caps = Some(new_caps);
                 self.sps_emitted += 1;
             }
@@ -277,14 +281,17 @@ impl<C: NalCodec> NalParse<C> {
         // a mid-AU Annex-B continuation buffer (no leading start code) would
         // otherwise be misread as length-prefixed.
         let bytes = slice.as_slice();
-        let is_annexb = *self.input_is_annexb.get_or_insert_with(|| crate::annexb::is_annex_b(bytes));
+        let is_annexb = *self
+            .input_is_annexb
+            .get_or_insert_with(|| crate::annexb::is_annex_b(bytes));
         if self.accum.is_empty() {
             self.au_timing = frame.timing;
         }
         if is_annexb {
             self.accum.extend_from_slice(bytes);
         } else {
-            self.accum.extend_from_slice(&crate::annexb::avcc_to_annexb(bytes));
+            self.accum
+                .extend_from_slice(&crate::annexb::avcc_to_annexb(bytes));
         }
 
         // Guard against unbounded growth on non-conforming input: flush what we
@@ -311,7 +318,11 @@ impl<C: NalCodec> NalParse<C> {
             let (lo, hi) = (w[0], w[1]);
             // The head AU carries the timing captured when it began; AUs that both
             // begin and end inside this buffer take this buffer's timing.
-            let timing = if lo == 0 { self.au_timing } else { frame_timing };
+            let timing = if lo == 0 {
+                self.au_timing
+            } else {
+                frame_timing
+            };
             self.emit_au(done[lo..hi].to_vec(), timing, out).await?;
         }
         // The retained tail began within this buffer (its predecessor ended here).

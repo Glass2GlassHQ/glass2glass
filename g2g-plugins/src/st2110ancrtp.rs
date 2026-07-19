@@ -52,9 +52,10 @@ const CC_SDID: u8 = 0x01;
 /// returns the codec.
 fn video_codec(caps: &Caps) -> Result<VideoCodec, G2gError> {
     match caps {
-        Caps::CompressedVideo { codec: codec @ (VideoCodec::H264 | VideoCodec::H265), .. } => {
-            Ok(*codec)
-        }
+        Caps::CompressedVideo {
+            codec: codec @ (VideoCodec::H264 | VideoCodec::H265),
+            ..
+        } => Ok(*codec),
         _ => Err(G2gError::CapsMismatch),
     }
 }
@@ -127,7 +128,10 @@ impl St2110AncSink {
 }
 
 impl AsyncElement for St2110AncSink {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>> where Self: 'a;
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         video_codec(upstream_caps)?;
@@ -145,7 +149,8 @@ impl AsyncElement for St2110AncSink {
         self.codec = Some(video_codec(absolute_caps)?);
         self.packetizer = Some(St2110AncPacketizer::new(self.payload_type, self.ssrc));
         let sock = UdpSocket::bind(("0.0.0.0", 0)).map_err(io_err)?;
-        sock.connect((self.host.as_str(), self.port)).map_err(io_err)?;
+        sock.connect((self.host.as_str(), self.port))
+            .map_err(io_err)?;
         self.socket = Some(sock);
         Ok(ConfigureOutcome::Accepted)
     }
@@ -171,8 +176,12 @@ impl AsyncElement for St2110AncSink {
             PropertySpec::new("payload-type", PropKind::Uint, "Dynamic RTP payload type")
                 .with_default("100"),
             PropertySpec::new("ssrc", PropKind::Uint, "RTP SSRC"),
-            PropertySpec::new("cdp-frame-rate", PropKind::Uint, "CDP frame-rate code (4=29.97, 5=30, 8=60)")
-                .with_default("4"),
+            PropertySpec::new(
+                "cdp-frame-rate",
+                PropKind::Uint,
+                "CDP frame-rate code (4=29.97, 5=30, 8=60)",
+            )
+            .with_default("4"),
         ];
         PROPS
     }
@@ -269,7 +278,9 @@ impl PadTemplates for St2110AncSink {
             height: Dim::Any,
             framerate: Rate::Any,
         };
-        Vec::from([PadTemplate::sink(CapsSet::from_alternatives(Vec::from([h264, h265])))])
+        Vec::from([PadTemplate::sink(CapsSet::from_alternatives(Vec::from([
+            h264, h265,
+        ])))])
     }
 }
 
@@ -323,7 +334,10 @@ impl St2110AncSrc {
     /// The bound local UDP port after `configure_pipeline` (for tests binding an
     /// ephemeral port with `port = 0`).
     pub fn local_port(&self) -> Option<u16> {
-        self.socket.as_ref().and_then(|s| s.local_addr().ok()).map(|a| a.port())
+        self.socket
+            .as_ref()
+            .and_then(|s| s.local_addr().ok())
+            .map(|a| a.port())
     }
 
     /// Auto-configure this source from a parsed ancillary [`St2110Sdp`] (the
@@ -341,16 +355,25 @@ impl St2110AncSrc {
 }
 
 impl SourceLoop for St2110AncSrc {
-    type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>> where Self: 'a;
-    type CapsFuture<'a> = Ready<Result<Caps, G2gError>> where Self: 'a;
+    type RunFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
+    where
+        Self: 'a;
+    type CapsFuture<'a>
+        = Ready<Result<Caps, G2gError>>
+    where
+        Self: 'a;
 
     fn intercept_caps(&mut self) -> Self::CapsFuture<'_> {
-        ready(Ok(Caps::Text { format: g2g_core::TextFormat::Utf8 }))
+        ready(Ok(Caps::Text {
+            format: g2g_core::TextFormat::Utf8,
+        }))
     }
 
     fn configure_pipeline(&mut self, _caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         let sock = UdpSocket::bind((self.address.as_str(), self.port)).map_err(io_err)?;
-        sock.set_read_timeout(Some(Duration::from_millis(self.recv_timeout_ms))).map_err(io_err)?;
+        sock.set_read_timeout(Some(Duration::from_millis(self.recv_timeout_ms)))
+            .map_err(io_err)?;
         self.socket = Some(sock);
         Ok(ConfigureOutcome::Accepted)
     }
@@ -380,7 +403,9 @@ impl SourceLoop for St2110AncSrc {
                     }
                     Err(e) => return Err(io_err(e)),
                 };
-                let Some(anc_frame) = depack.depacketize(&buf[..n]) else { continue };
+                let Some(anc_frame) = depack.depacketize(&buf[..n]) else {
+                    continue;
+                };
                 // PTS = the packet's media-clock offset from the first packet (the
                 // PTP grandmaster supplies absolute time upstream).
                 let base = *base_rtp.get_or_insert(anc_frame.rtp_timestamp);
@@ -443,7 +468,8 @@ mod tests {
                     PipelinePacket::DataFrame(f) => {
                         if let MemoryDomain::System(s) = &f.domain {
                             let text = String::from_utf8_lossy(s.as_slice()).into_owned();
-                            self.texts.push((f.timing.pts_ns, f.timing.duration_ns, text));
+                            self.texts
+                                .push((f.timing.pts_ns, f.timing.duration_ns, text));
                         }
                     }
                     PipelinePacket::Eos => self.eos = true,
@@ -486,7 +512,10 @@ mod tests {
     fn video_frame(au: Vec<u8>, pts: u64) -> PipelinePacket {
         PipelinePacket::DataFrame(Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
-            FrameTiming { pts_ns: pts, ..FrameTiming::default() },
+            FrameTiming {
+                pts_ns: pts,
+                ..FrameTiming::default()
+            },
             0,
         ))
     }
@@ -516,12 +545,28 @@ mod tests {
         // then EDM (erase). Each frame's captions become one -40 ANC RTP packet.
         let mut null = Capture::default();
         let au1 = h264_au(&[
-            CcTriple { cc_type: 0, b0: 0x14, b1: 0x20 }, // RCL
-            CcTriple { cc_type: 0, b0: b'H', b1: b'I' },
-            CcTriple { cc_type: 0, b0: 0x14, b1: 0x2F }, // EOC
+            CcTriple {
+                cc_type: 0,
+                b0: 0x14,
+                b1: 0x20,
+            }, // RCL
+            CcTriple {
+                cc_type: 0,
+                b0: b'H',
+                b1: b'I',
+            },
+            CcTriple {
+                cc_type: 0,
+                b0: 0x14,
+                b1: 0x2F,
+            }, // EOC
         ]);
         block_on(sink.process(video_frame(au1, 0), &mut null)).expect("sink sends au1");
-        let au2 = h264_au(&[CcTriple { cc_type: 0, b0: 0x14, b1: 0x2C }]); // EDM
+        let au2 = h264_au(&[CcTriple {
+            cc_type: 0,
+            b0: 0x14,
+            b1: 0x2C,
+        }]); // EDM
         block_on(sink.process(video_frame(au2, 1_000_000_000), &mut null)).expect("sink sends au2");
 
         // Drain the receiver: reads the buffered -40 packets, decodes captions, then
@@ -532,7 +577,10 @@ mod tests {
         assert_eq!(n, 1, "one finished caption cue");
         assert!(cap.eos, "source emitted EOS on the gap");
         assert_eq!(cap.texts.len(), 1);
-        assert_eq!(cap.texts[0].2, "HI", "caption text survives sink -> UDP -> src");
+        assert_eq!(
+            cap.texts[0].2, "HI",
+            "caption text survives sink -> UDP -> src"
+        );
         // Started at the EOC frame (PTS 0), ended at the EDM frame (PTS 1s).
         assert_eq!(cap.texts[0].0, 0);
         assert_eq!(cap.texts[0].0 + cap.texts[0].1, 1_000_000_000);
@@ -555,10 +603,18 @@ mod tests {
     #[test]
     fn sink_properties_round_trip() {
         let mut sink = St2110AncSink::new();
-        sink.set_property("host", PropValue::Str("239.0.0.5".into())).unwrap();
-        sink.set_property("cdp-frame-rate", PropValue::Uint(8)).unwrap();
-        assert_eq!(sink.get_property("host"), Some(PropValue::Str("239.0.0.5".into())));
-        assert_eq!(sink.get_property("cdp-frame-rate"), Some(PropValue::Uint(8)));
+        sink.set_property("host", PropValue::Str("239.0.0.5".into()))
+            .unwrap();
+        sink.set_property("cdp-frame-rate", PropValue::Uint(8))
+            .unwrap();
+        assert_eq!(
+            sink.get_property("host"),
+            Some(PropValue::Str("239.0.0.5".into()))
+        );
+        assert_eq!(
+            sink.get_property("cdp-frame-rate"),
+            Some(PropValue::Uint(8))
+        );
         assert_eq!(
             sink.set_property("port", PropValue::Uint(70_000)),
             Err(PropError::Value),

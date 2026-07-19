@@ -24,12 +24,21 @@ pub(crate) fn frame_of<const N: usize, const B: usize>(
     slot.buf_mut()[..payload.len()].copy_from_slice(payload);
     // SAFETY: every test keeps the ring alive past the frame.
     let slice = unsafe { slot.publish(payload.len()) };
-    Frame::new(MemoryDomain::System(slice), FrameTiming { pts_ns, ..FrameTiming::default() }, seq)
+    Frame::new(
+        MemoryDomain::System(slice),
+        FrameTiming {
+            pts_ns,
+            ..FrameTiming::default()
+        },
+        seq,
+    )
 }
 
 #[allow(dead_code)] // not every test binary that includes this module uses it
 pub(crate) fn payload(frame: &Frame) -> &[u8] {
-    let MemoryDomain::System(s) = &frame.domain else { panic!("system frame") };
+    let MemoryDomain::System(s) = &frame.domain else {
+        panic!("system frame")
+    };
     s.as_slice()
 }
 

@@ -70,7 +70,11 @@ fn lend_reaches_sink_without_copy_and_frees_once() {
     assert_eq!(rc, 0);
 
     // Zero-copy witness: the sink read the very bytes we lent, in place.
-    assert_eq!(seen_ptr.load(SeqCst), lent_ptr, "appsink saw the lent pointer (no copy)");
+    assert_eq!(
+        seen_ptr.load(SeqCst),
+        lent_ptr,
+        "appsink saw the lent pointer (no copy)"
+    );
     // The lend was released exactly once, after consumption.
     assert_eq!(free_count.load(SeqCst), 1, "free fired exactly once");
 

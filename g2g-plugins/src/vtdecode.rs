@@ -51,9 +51,9 @@ use objc2_core_foundation::CFRetained;
 #[allow(non_camel_case_types)]
 type OSStatus = i32;
 use objc2_core_media::{
-    CMBlockBuffer, CMBlockBufferCreateWithMemoryBlock,
-    CMBlockBufferReplaceDataBytes, CMFormatDescription, CMSampleBuffer, CMSampleBufferCreateReady,
-    CMSampleTimingInfo, CMTime, CMTimeFlags, CMVideoFormatDescriptionCreateFromH264ParameterSets,
+    CMBlockBuffer, CMBlockBufferCreateWithMemoryBlock, CMBlockBufferReplaceDataBytes,
+    CMFormatDescription, CMSampleBuffer, CMSampleBufferCreateReady, CMSampleTimingInfo, CMTime,
+    CMTimeFlags, CMVideoFormatDescriptionCreateFromH264ParameterSets,
     CMVideoFormatDescriptionCreateFromHEVCParameterSets,
 };
 use objc2_core_video::{
@@ -128,7 +128,9 @@ struct DecoderState {
 
 impl core::fmt::Debug for DecoderState {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("DecoderState").field("collector", &self.collector).finish_non_exhaustive()
+        f.debug_struct("DecoderState")
+            .field("collector", &self.collector)
+            .finish_non_exhaustive()
     }
 }
 
@@ -171,7 +173,13 @@ impl VtDecode {
     }
 
     fn for_codec(codec: VideoCodec) -> Self {
-        Self { codec, configured: false, state: None, last_caps: None, emitted: 0 }
+        Self {
+            codec,
+            configured: false,
+            state: None,
+            last_caps: None,
+            emitted: 0,
+        }
     }
 
     /// Count of decoded NV12 `DataFrame`s pushed downstream. Useful in tests.
@@ -258,7 +266,8 @@ impl VtDecode {
 }
 
 impl AsyncElement for VtDecode {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -273,7 +282,9 @@ impl AsyncElement for VtDecode {
     /// `MfDecode` / `FfmpegH264Dec`.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         let codec = self.codec;
-        CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| derive_output_caps(codec, input)))
+        CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| {
+            derive_output_caps(codec, input)
+        }))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -368,7 +379,8 @@ impl VtDecode {
     async fn emit(&mut self, d: &DecodedFrame, out: &mut dyn OutputSink) -> Result<(), G2gError> {
         let new_caps = nv12_caps(d.width, d.height);
         if self.last_caps.as_ref() != Some(&new_caps) {
-            out.push(PipelinePacket::CapsChanged(new_caps.clone())).await?;
+            out.push(PipelinePacket::CapsChanged(new_caps.clone()))
+                .await?;
             self.last_caps = Some(new_caps);
         }
         let frame = Frame {
@@ -426,14 +438,17 @@ fn nv12_caps(w: u32, h: u32) -> Caps {
 
 fn derive_output_caps(codec: VideoCodec, input: &Caps) -> CapsSet {
     match input {
-        Caps::CompressedVideo { codec: c, width, height, framerate } if *c == codec => {
-            CapsSet::one(Caps::RawVideo {
-                format: RawVideoFormat::Nv12,
-                width: width.clone(),
-                height: height.clone(),
-                framerate: framerate.clone(),
-            })
-        }
+        Caps::CompressedVideo {
+            codec: c,
+            width,
+            height,
+            framerate,
+        } if *c == codec => CapsSet::one(Caps::RawVideo {
+            format: RawVideoFormat::Nv12,
+            width: width.clone(),
+            height: height.clone(),
+            framerate: framerate.clone(),
+        }),
         _ => CapsSet::from_alternatives(Vec::new()),
     }
 }
@@ -519,7 +534,7 @@ unsafe fn pack_nv12(pb: &CVPixelBuffer, width: usize, height: usize) -> Option<B
         let stride = CVPixelBufferGetBytesPerRowOfPlane(pb, plane);
         let pw = CVPixelBufferGetWidthOfPlane(pb, plane); // luma: w, chroma: w/2 (CbCr pairs)
         let ph = CVPixelBufferGetHeightOfPlane(pb, plane); // luma: h, chroma: h/2
-        // Bytes per row of valid data: luma = pw, chroma = pw * 2 (CbCr pair).
+                                                           // Bytes per row of valid data: luma = pw, chroma = pw * 2 (CbCr pair).
         let row_bytes = if plane == 0 { pw } else { pw * 2 };
         for row in 0..ph {
             // SAFETY: row < plane height, row_bytes <= stride, base valid for the
@@ -560,7 +575,7 @@ unsafe fn build_session(codec: VideoCodec, params: &[Vec<u8>]) -> Result<Decoder
                 params.len(),
                 ptrs_arg,
                 sizes_arg,
-                4, // 4-byte AVCC length prefix (matches `to_avcc`)
+                4,    // 4-byte AVCC length prefix (matches `to_avcc`)
                 None, // no extensions dictionary
                 NonNull::from(&mut fmt),
             ),
@@ -581,9 +596,10 @@ unsafe fn build_session(codec: VideoCodec, params: &[Vec<u8>]) -> Result<Decoder
     // (`CFRetained::from_raw`) and whether CMVideoFormatDescription is the same
     // type as CMFormatDescription may need a tweak.
     let format = unsafe {
-        CFRetained::from_raw(NonNull::new(fmt as *mut CMFormatDescription).ok_or(
-            G2gError::Hardware(HardwareError::Other),
-        )?)
+        CFRetained::from_raw(
+            NonNull::new(fmt as *mut CMFormatDescription)
+                .ok_or(G2gError::Hardware(HardwareError::Other))?,
+        )
     };
 
     let mut collector = Box::new(Collector::default());
@@ -610,12 +626,15 @@ unsafe fn build_session(codec: VideoCodec, params: &[Vec<u8>]) -> Result<Decoder
         return Err(G2gError::Hardware(HardwareError::Other));
     }
     let session = unsafe {
-        CFRetained::from_raw(
-            NonNull::new(session).ok_or(G2gError::Hardware(HardwareError::Other))?,
-        )
+        CFRetained::from_raw(NonNull::new(session).ok_or(G2gError::Hardware(HardwareError::Other))?)
     };
 
-    Ok(DecoderState { session, _format: format, collector, params: params.to_vec() })
+    Ok(DecoderState {
+        session,
+        _format: format,
+        collector,
+        params: params.to_vec(),
+    })
 }
 
 /// Decode one AVCC access unit synchronously: wrap it in a `CMBlockBuffer` +
@@ -724,7 +743,12 @@ fn cm_time(pts_ns: u64) -> CMTime {
 
 /// An invalid `CMTime` (unknown duration / DTS).
 fn cm_time_invalid() -> CMTime {
-    CMTime { value: 0, timescale: 0, flags: CMTimeFlags::empty(), epoch: 0 }
+    CMTime {
+        value: 0,
+        timescale: 0,
+        flags: CMTimeFlags::empty(),
+        epoch: 0,
+    }
 }
 
 /// Convert a valid nanosecond-or-other-timescale `CMTime` back to nanoseconds.

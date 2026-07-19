@@ -27,7 +27,9 @@ async fn video_chain_parses_and_runs() {
         "videotestsrc num-buffers=4 ! videoscale width=160 height=120 ! videoflip method=rotate-180 ! fakesink",
     )
     .expect("video pipeline parses");
-    let stats = run_graph(graph, &ZeroClock, 4).await.expect("video pipeline runs");
+    let stats = run_graph(graph, &ZeroClock, 4)
+        .await
+        .expect("video pipeline runs");
     assert_eq!(stats.frames_consumed, 4, "all frames reached the sink");
 }
 
@@ -35,8 +37,11 @@ async fn video_chain_parses_and_runs() {
 async fn videoconvert_format_property_runs() {
     let reg = default_registry();
     // 320x240 RGBA -> NV12 (even dims), exercising the format= string property.
-    let graph = parse_launch(&reg, "videotestsrc num-buffers=2 ! videoconvert format=nv12 ! fakesink")
-        .expect("parses");
+    let graph = parse_launch(
+        &reg,
+        "videotestsrc num-buffers=2 ! videoconvert format=nv12 ! fakesink",
+    )
+    .expect("parses");
     let stats = run_graph(graph, &ZeroClock, 4).await.expect("runs");
     assert_eq!(stats.frames_consumed, 2);
 }
@@ -49,7 +54,9 @@ async fn audio_chain_parses_and_runs() {
         "audiotestsrc num-buffers=3 freq=440 ! audioconvert channels=1 ! audioresample samplerate=16000 ! fakesink",
     )
     .expect("audio pipeline parses");
-    let stats = run_graph(graph, &ZeroClock, 4).await.expect("audio pipeline runs");
+    let stats = run_graph(graph, &ZeroClock, 4)
+        .await
+        .expect("audio pipeline runs");
     assert_eq!(stats.frames_consumed, 3);
 }
 
@@ -63,8 +70,13 @@ async fn inline_caps_filter_parses_and_runs() {
         "videotestsrc num-buffers=3 ! video/x-raw,format=rgba,width=320,height=240,framerate=30/1 ! fakesink",
     )
     .expect("inline caps pipeline parses");
-    let stats = run_graph(graph, &ZeroClock, 4).await.expect("inline caps pipeline runs");
-    assert_eq!(stats.frames_consumed, 3, "frames pass the caps filter to the sink");
+    let stats = run_graph(graph, &ZeroClock, 4)
+        .await
+        .expect("inline caps pipeline runs");
+    assert_eq!(
+        stats.frames_consumed, 3,
+        "frames pass the caps filter to the sink"
+    );
 }
 
 #[test]
@@ -79,9 +91,14 @@ fn default_registry_inspects_new_elements() {
     assert!(reg.inspect("filesink").unwrap().contains("location"));
 
     let names = reg.element_names();
-    for expected in
-        ["videotestsrc", "audiotestsrc", "videoscale", "videoconvert", "audioconvert", "fakesink"]
-    {
+    for expected in [
+        "videotestsrc",
+        "audiotestsrc",
+        "videoscale",
+        "videoconvert",
+        "audioconvert",
+        "fakesink",
+    ] {
         assert!(names.contains(&expected), "registry has {expected}");
     }
 }
@@ -99,21 +116,37 @@ fn new_elements_property_round_trip_by_name() {
     // Lowercase format accepted as an alias; normalized to the gst-canonical
     // uppercase name on read (M182).
     let mut conv = reg.make_element("videoconvert").unwrap();
-    conv.set_property("format", PropValue::Str("i420".into())).unwrap();
-    assert_eq!(conv.get_property("format"), Some(PropValue::Str("I420".into())));
+    conv.set_property("format", PropValue::Str("i420".into()))
+        .unwrap();
+    assert_eq!(
+        conv.get_property("format"),
+        Some(PropValue::Str("I420".into()))
+    );
 
     let mut ac = reg.make_element("audioconvert").unwrap();
-    ac.set_property("format", PropValue::Str("f32le".into())).unwrap();
+    ac.set_property("format", PropValue::Str("f32le".into()))
+        .unwrap();
     ac.set_property("channels", PropValue::Uint(2)).unwrap();
-    assert_eq!(ac.get_property("format"), Some(PropValue::Str("F32LE".into())));
+    assert_eq!(
+        ac.get_property("format"),
+        Some(PropValue::Str("F32LE".into()))
+    );
 
     let mut sink = reg.make_element("filesink").unwrap();
-    sink.set_property("location", PropValue::Str("/tmp/out.bin".into())).unwrap();
-    assert_eq!(sink.get_property("location"), Some(PropValue::Str("/tmp/out.bin".into())));
+    sink.set_property("location", PropValue::Str("/tmp/out.bin".into()))
+        .unwrap();
+    assert_eq!(
+        sink.get_property("location"),
+        Some(PropValue::Str("/tmp/out.bin".into()))
+    );
 
     let mut ats = reg.make_source("audiotestsrc").unwrap();
-    ats.set_property("wave", PropValue::Str("square".into())).unwrap();
-    assert_eq!(ats.get_property("wave"), Some(PropValue::Str("square".into())));
+    ats.set_property("wave", PropValue::Str("square".into()))
+        .unwrap();
+    assert_eq!(
+        ats.get_property("wave"),
+        Some(PropValue::Str("square".into()))
+    );
 }
 
 #[test]
@@ -128,9 +161,17 @@ fn demuxer_and_its_parsers_registered() {
     assert!(reg.inspect("tsdemux").unwrap().contains("stream"));
 
     let mut demux = reg.make_element("tsdemux").unwrap();
-    assert_eq!(demux.get_property("stream"), Some(PropValue::Str("h264".into())));
-    demux.set_property("stream", PropValue::Str("aac".into())).unwrap();
-    assert_eq!(demux.get_property("stream"), Some(PropValue::Str("aac".into())));
+    assert_eq!(
+        demux.get_property("stream"),
+        Some(PropValue::Str("h264".into()))
+    );
+    demux
+        .set_property("stream", PropValue::Str("aac".into()))
+        .unwrap();
+    assert_eq!(
+        demux.get_property("stream"),
+        Some(PropValue::Str("aac".into()))
+    );
 }
 
 #[test]
@@ -138,14 +179,26 @@ fn filesrc_registered_with_bytestream_format() {
     // M112: filesrc joins the registry; its bytestream-format property supplies
     // the container a raw byte stream lacks, so it can feed a demuxer as text.
     let reg = default_registry();
-    assert!(reg.inspect("filesrc").unwrap().contains("bytestream-format"));
+    assert!(reg
+        .inspect("filesrc")
+        .unwrap()
+        .contains("bytestream-format"));
 
     let mut src = reg.make_source("filesrc").unwrap();
-    src.set_property("location", PropValue::Str("/tmp/x.webm".into())).unwrap();
-    src.set_property("bytestream-format", PropValue::Str("matroska".into())).unwrap();
-    assert_eq!(src.get_property("bytestream-format"), Some(PropValue::Str("matroska".into())));
-    src.set_property("bytestream-format", PropValue::Str("auto".into())).unwrap();
-    assert_eq!(src.get_property("bytestream-format"), Some(PropValue::Str("auto".into())));
+    src.set_property("location", PropValue::Str("/tmp/x.webm".into()))
+        .unwrap();
+    src.set_property("bytestream-format", PropValue::Str("matroska".into()))
+        .unwrap();
+    assert_eq!(
+        src.get_property("bytestream-format"),
+        Some(PropValue::Str("matroska".into()))
+    );
+    src.set_property("bytestream-format", PropValue::Str("auto".into()))
+        .unwrap();
+    assert_eq!(
+        src.get_property("bytestream-format"),
+        Some(PropValue::Str("auto".into()))
+    );
 }
 
 #[test]
@@ -156,9 +209,16 @@ fn matroska_demuxer_registered() {
     assert!(reg.inspect("matroskamux").is_some()); // M115: the MKV / WebM muxer
 
     let mut mkv = reg.make_element("matroskademux").unwrap();
-    assert_eq!(mkv.get_property("stream"), Some(PropValue::Str("vp9".into())));
-    mkv.set_property("stream", PropValue::Str("opus".into())).unwrap();
-    assert_eq!(mkv.get_property("stream"), Some(PropValue::Str("opus".into())));
+    assert_eq!(
+        mkv.get_property("stream"),
+        Some(PropValue::Str("vp9".into()))
+    );
+    mkv.set_property("stream", PropValue::Str("opus".into()))
+        .unwrap();
+    assert_eq!(
+        mkv.get_property("stream"),
+        Some(PropValue::Str("opus".into()))
+    );
 }
 
 #[test]
@@ -169,17 +229,31 @@ fn describe_returns_structured_element_docs() {
     let reg = default_registry();
 
     // A source: role, output caps, and its geometry properties.
-    let src = reg.describe("videotestsrc").expect("videotestsrc is registered");
+    let src = reg
+        .describe("videotestsrc")
+        .expect("videotestsrc is registered");
     assert_eq!(src.role, "source");
     assert!(src.caps.is_some(), "a source advertises output caps");
-    assert!(src.pads.is_empty(), "a source has no pad templates in the dump");
-    let pattern = src.properties.iter().find(|p| p.name == "pattern").expect("pattern property");
+    assert!(
+        src.pads.is_empty(),
+        "a source has no pad templates in the dump"
+    );
+    let pattern = src
+        .properties
+        .iter()
+        .find(|p| p.name == "pattern")
+        .expect("pattern property");
     assert_eq!(pattern.type_label, "String");
-    assert!(pattern.enum_values.is_some(), "pattern is an enum-valued string");
+    assert!(
+        pattern.enum_values.is_some(),
+        "pattern is an enum-valued string"
+    );
     assert!(pattern.readable && pattern.writable);
 
     // A transform: advertises pad templates rather than a single output caps.
-    let scale = reg.describe("videoscale").expect("videoscale is registered");
+    let scale = reg
+        .describe("videoscale")
+        .expect("videoscale is registered");
     assert_eq!(scale.role, "element");
     assert!(!scale.pads.is_empty(), "a transform lists pad templates");
 

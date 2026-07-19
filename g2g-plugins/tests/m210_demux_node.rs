@@ -95,8 +95,12 @@ async fn demux_node_routes_frames_to_branches() {
         )),
         2,
     );
-    let s0 = g.add_sink(GraphNode::element(CountSink { frames: even.clone() }));
-    let s1 = g.add_sink(GraphNode::element(CountSink { frames: odd.clone() }));
+    let s0 = g.add_sink(GraphNode::element(CountSink {
+        frames: even.clone(),
+    }));
+    let s1 = g.add_sink(GraphNode::element(CountSink {
+        frames: odd.clone(),
+    }));
     g.link(src, demux.input()).unwrap();
     g.link(demux.out(0), s0).unwrap();
     g.link(demux.out(1), s1).unwrap();
@@ -104,15 +108,25 @@ async fn demux_node_routes_frames_to_branches() {
     let stats = run_graph(g, &NullClock, 4).await.expect("demux DAG runs");
     assert_eq!(stats.frames_emitted, 4, "source emitted 4 frames");
     assert_eq!(stats.frames_consumed, 4, "every frame reached one branch");
-    assert_eq!(even.load(Ordering::Relaxed), 2, "even-sequence frames routed to port 0");
-    assert_eq!(odd.load(Ordering::Relaxed), 2, "odd-sequence frames routed to port 1");
+    assert_eq!(
+        even.load(Ordering::Relaxed),
+        2,
+        "even-sequence frames routed to port 0"
+    );
+    assert_eq!(
+        odd.load(Ordering::Relaxed),
+        2,
+        "odd-sequence frames routed to port 1"
+    );
 }
 
 /// A parity demux built from an output count, for `register_demux`: routes by
 /// sequence parity, one pass-through port-caps slot per output.
 fn build_parity_demux(outputs: usize) -> Box<dyn g2g_core::runtime::DynMultiOutputElement> {
     let port_caps = (0..outputs).map(|_| rgba()).collect();
-    Box::new(StreamDemux::new(rgba(), port_caps, |f: &Frame| (f.sequence % 2) as usize))
+    Box::new(StreamDemux::new(rgba(), port_caps, |f: &Frame| {
+        (f.sequence % 2) as usize
+    }))
 }
 
 /// AnySink registered for the launch path (the runner counts frames via RunStats).
@@ -144,10 +158,14 @@ impl AsyncElement for AnySink {
 #[tokio::test]
 async fn gst_launch_demux_fans_out() {
     let mut reg = Registry::new();
-    reg.register_source(g2g_core::runtime::SourceFactory::new("videotestsrc", rgba(), || {
-        Box::new(VideoTestSrc::new(8, 8, 30, 4))
+    reg.register_source(g2g_core::runtime::SourceFactory::new(
+        "videotestsrc",
+        rgba(),
+        || Box::new(VideoTestSrc::new(8, 8, 30, 4)),
+    ));
+    reg.register_launch(LaunchFactory::new("anysink", std::vec::Vec::new(), || {
+        Box::new(AnySink)
     }));
-    reg.register_launch(LaunchFactory::new("anysink", std::vec::Vec::new(), || Box::new(AnySink)));
     reg.register_demux(DemuxFactory::new("paritydemux", build_parity_demux));
 
     // A demux node `d`: one input from the source, two outputs (the `d.` refs).
@@ -159,8 +177,13 @@ async fn gst_launch_demux_fans_out() {
     )
     .expect("demux fan-out pipeline parses");
 
-    let stats = run_graph(graph, &NullClock, 4).await.expect("demux pipeline runs");
-    assert_eq!(stats.frames_consumed, 4, "all 4 frames routed across the two branches");
+    let stats = run_graph(graph, &NullClock, 4)
+        .await
+        .expect("demux pipeline runs");
+    assert_eq!(
+        stats.frames_consumed, 4,
+        "all 4 frames routed across the two branches"
+    );
 }
 
 #[test]
@@ -170,10 +193,14 @@ fn unregistered_fan_out_gets_a_broadcast_tee() {
     // demux exemption only changes *which* fan-out primitive is used, not whether
     // fan-out is allowed.
     let mut reg = Registry::new();
-    reg.register_source(g2g_core::runtime::SourceFactory::new("videotestsrc", rgba(), || {
-        Box::new(VideoTestSrc::new(8, 8, 30, 4))
+    reg.register_source(g2g_core::runtime::SourceFactory::new(
+        "videotestsrc",
+        rgba(),
+        || Box::new(VideoTestSrc::new(8, 8, 30, 4)),
+    ));
+    reg.register_launch(LaunchFactory::new("anysink", std::vec::Vec::new(), || {
+        Box::new(AnySink)
     }));
-    reg.register_launch(LaunchFactory::new("anysink", std::vec::Vec::new(), || Box::new(AnySink)));
     // `identity` is a 1-in/1-out transform, not a registered demux.
     reg.register_launch(LaunchFactory::new("identity", std::vec::Vec::new(), || {
         Box::new(g2g_plugins::identity::IdentityTransform::new())
@@ -185,7 +212,13 @@ fn unregistered_fan_out_gets_a_broadcast_tee() {
     .expect("non-demux fan-out auto-inserts a tee");
     let vg = graph.finish().expect("valid graph");
     // A broadcast Tee was spliced in (not a demux routing node).
-    let tees =
-        vg.topo().iter().filter(|&&n| matches!(vg.kind(n), g2g_core::NodeKind::Tee(2))).count();
-    assert_eq!(tees, 1, "the identity fan-out is served by one broadcast tee");
+    let tees = vg
+        .topo()
+        .iter()
+        .filter(|&&n| matches!(vg.kind(n), g2g_core::NodeKind::Tee(2)))
+        .count();
+    assert_eq!(
+        tees, 1,
+        "the identity fan-out is served by one broadcast tee"
+    );
 }

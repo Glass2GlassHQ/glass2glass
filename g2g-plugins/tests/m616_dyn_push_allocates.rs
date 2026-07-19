@@ -16,7 +16,9 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use std::alloc::{GlobalAlloc, Layout, System};
 
 use g2g_core::memory::MemoryDomain;
-use g2g_core::{Frame, FrameTiming, G2gError, OutputSink, PipelinePacket, PushOutcome, StaticLendRing};
+use g2g_core::{
+    Frame, FrameTiming, G2gError, OutputSink, PipelinePacket, PushOutcome, StaticLendRing,
+};
 
 static ALLOCS: AtomicUsize = AtomicUsize::new(0);
 

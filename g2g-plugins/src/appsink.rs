@@ -81,7 +81,9 @@ static SINKS: Mutex<BTreeMap<String, SinkMode>> = Mutex::new(BTreeMap::new());
 /// Register the per-frame callback for `appsink channel=<channel>`. Call before
 /// launching. Replaces any prior registration under the same name.
 pub fn set_appsink_callback(channel: &str, cb: SampleCallback, user: *mut c_void) {
-    SINKS.lock().insert(channel.to_string(), SinkMode::Callback(Slot { cb, user }));
+    SINKS
+        .lock()
+        .insert(channel.to_string(), SinkMode::Callback(Slot { cb, user }));
 }
 
 /// Register `appsink channel=<channel>` in pull mode and return the
@@ -168,7 +170,8 @@ impl AppSink {
 }
 
 impl AsyncElement for AppSink {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 

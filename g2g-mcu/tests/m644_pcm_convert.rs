@@ -20,7 +20,11 @@ fn slots_le(slots: &[i32]) -> Vec<u8> {
 fn narrows_left_justified_slots() {
     // A 24-bit sample sits in the top 3 bytes; the top 16 bits survive.
     assert_eq!(s32_slot_to_s16(0x1234_5600), 0x1234);
-    assert_eq!(s32_slot_to_s16(-0x1234_5600), -0x1235, "arithmetic shift floors toward -inf");
+    assert_eq!(
+        s32_slot_to_s16(-0x1234_5600),
+        -0x1235,
+        "arithmetic shift floors toward -inf"
+    );
     assert_eq!(s32_slot_to_s16(i32::MIN), i16::MIN);
     assert_eq!(s32_slot_to_s16(i32::MAX), i16::MAX);
     assert_eq!(s32_slot_to_s16(0xFFFF), 0, "low-16 dither never leaks");
@@ -35,11 +39,18 @@ fn element_converts_and_inherits_timing() {
 
     let slots = [0x7FFF_0000i32, -0x8000_0000, 0x0001_8000, -0x0001_8000];
     let input = frame_of(&input_ring, &slots_le(&slots), 555, 7);
-    let out = block_on(conv.process(input)).expect("convert").expect("frame");
-    let samples: Vec<i16> =
-        payload(&out).chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect();
+    let out = block_on(conv.process(input))
+        .expect("convert")
+        .expect("frame");
+    let samples: Vec<i16> = payload(&out)
+        .chunks_exact(2)
+        .map(|c| i16::from_le_bytes([c[0], c[1]]))
+        .collect();
     let expect: Vec<i16> = slots.iter().map(|&s| s32_slot_to_s16(s)).collect();
-    assert_eq!(samples, expect, "each slot narrows independently, order preserved");
+    assert_eq!(
+        samples, expect,
+        "each slot narrows independently, order preserved"
+    );
     assert_eq!(out.timing.pts_ns, 555, "timing inherited");
     assert_eq!(out.sequence, 7, "sequence inherited");
 }

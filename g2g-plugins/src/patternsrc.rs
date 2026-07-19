@@ -41,7 +41,13 @@ impl PatternSrc {
     /// A `width` x `height` animated gradient at `fps`, emitting `frames` frames
     /// then EOS.
     pub fn new(width: u32, height: u32, fps: u32, frames: u64) -> Self {
-        Self { width, height, fps, frames, configured: false }
+        Self {
+            width,
+            height,
+            fps,
+            frames,
+            configured: false,
+        }
     }
 
     fn caps(&self) -> Caps {
@@ -55,11 +61,13 @@ impl PatternSrc {
 }
 
 impl SourceLoop for PatternSrc {
-    type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
+    type RunFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
     where
         Self: 'a;
 
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 
@@ -96,7 +104,12 @@ impl SourceLoop for PatternSrc {
                     domain: MemoryDomain::System(SystemSlice::from_boxed(buf.into_boxed_slice())),
                     timing: {
                         let pts = i * frame_ns;
-                        FrameTiming { pts_ns: pts, dts_ns: pts, capture_ns: pts, ..FrameTiming::default() }
+                        FrameTiming {
+                            pts_ns: pts,
+                            dts_ns: pts,
+                            capture_ns: pts,
+                            ..FrameTiming::default()
+                        }
                     },
                     sequence: i,
                     meta: Default::default(),

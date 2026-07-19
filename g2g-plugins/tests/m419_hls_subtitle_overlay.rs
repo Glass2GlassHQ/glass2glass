@@ -20,10 +20,20 @@ use g2g_core::{
 use g2g_plugins::hlssrc::HlsStreamInfo;
 
 fn h264_any() -> Caps {
-    Caps::CompressedVideo { codec: VideoCodec::H264, width: Dim::Any, height: Dim::Any, framerate: Rate::Any }
+    Caps::CompressedVideo {
+        codec: VideoCodec::H264,
+        width: Dim::Any,
+        height: Dim::Any,
+        framerate: Rate::Any,
+    }
 }
 fn raw_video() -> Caps {
-    Caps::RawVideo { format: RawVideoFormat::Nv12, width: Dim::Any, height: Dim::Any, framerate: Rate::Any }
+    Caps::RawVideo {
+        format: RawVideoFormat::Nv12,
+        width: Dim::Any,
+        height: Dim::Any,
+        framerate: Rate::Any,
+    }
 }
 
 #[derive(Default)]
@@ -34,7 +44,10 @@ impl PadTemplates for NullSink {
     }
 }
 impl AsyncElement for NullSink {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>> where Self: 'a;
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
     fn intercept_caps(&self, c: &Caps) -> Result<Caps, G2gError> {
         Ok(c.clone())
     }
@@ -59,11 +72,18 @@ fn registry() -> Registry {
     let mut reg = Registry::new();
     reg.register(ElementFactory::new(
         "h264stub",
-        Vec::from([PadTemplate::sink(CapsSet::one(h264_any())), PadTemplate::source(CapsSet::one(raw_video()))]),
+        Vec::from([
+            PadTemplate::sink(CapsSet::one(h264_any())),
+            PadTemplate::source(CapsSet::one(raw_video())),
+        ]),
         |_| Box::new(g2g_plugins::identity::IdentityTransform::new()),
     ));
-    reg.register_launch(LaunchFactory::of::<NullSink>("autovideosink", || Box::new(NullSink)));
-    reg.register_launch(LaunchFactory::of::<NullSink>("autoaudiosink", || Box::new(NullSink)));
+    reg.register_launch(LaunchFactory::of::<NullSink>("autovideosink", || {
+        Box::new(NullSink)
+    }));
+    reg.register_launch(LaunchFactory::of::<NullSink>("autoaudiosink", || {
+        Box::new(NullSink)
+    }));
     reg
 }
 
@@ -101,21 +121,33 @@ fn builds_a_cross_source_subtitle_overlay() {
 
     // HlsSrc(video), TsDemuxN, h264 stub, videoconvert(RGBA8), TextOverlayN,
     // videoconvert(NV12), autovideosink, HlsSrc(subtitle), SubParse = 9 nodes.
-    assert_eq!(graph.node_count(), 9, "video chain + overlay + sink + subtitle source + subparse");
+    assert_eq!(
+        graph.node_count(),
+        9,
+        "video chain + overlay + sink + subtitle source + subparse"
+    );
 
     // Exactly one fan-in (the overlay), fed by the video convert and the subtitle
     // SubParse from a *different* source.
     let counts = inbound_counts(&graph);
     let fan_ins: Vec<_> = counts.values().filter(|&&n| n >= 2).collect();
     assert_eq!(fan_ins.len(), 1, "one fan-in node: the subtitle overlay");
-    assert_eq!(*fan_ins[0], 2, "the overlay joins the video and the WebVTT text stream");
+    assert_eq!(
+        *fan_ins[0], 2,
+        "the overlay joins the video and the WebVTT text stream"
+    );
 
     // Two source nodes with no inbound edges: the video master + the separate
     // subtitle rendition (the cross-source shape).
     let has_inbound: std::collections::HashSet<u32> =
         graph.edges().iter().map(|e| e.dst.node.0).collect();
-    let sources = (0..graph.node_count() as u32).filter(|n| !has_inbound.contains(n)).count();
-    assert_eq!(sources, 2, "two independent HLS sources (video master + subtitle rendition)");
+    let sources = (0..graph.node_count() as u32)
+        .filter(|n| !has_inbound.contains(n))
+        .count();
+    assert_eq!(
+        sources, 2,
+        "two independent HLS sources (video master + subtitle rendition)"
+    );
 }
 
 #[test]
@@ -124,7 +156,11 @@ fn declines_without_a_muxed_video() {
     // An audio-only muxed set (no video): nothing to overlay onto.
     let audio = HlsStreamInfo {
         stream_type: StreamType::Audio,
-        caps: Caps::Audio { format: g2g_core::AudioFormat::Aac, channels: 0, sample_rate: 0 },
+        caps: Caps::Audio {
+            format: g2g_core::AudioFormat::Aac,
+            channels: 0,
+            sample_rate: 0,
+        },
         video: false,
         uri: None,
         name: "audio".into(),

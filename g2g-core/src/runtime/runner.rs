@@ -15,13 +15,13 @@ use crate::memory::{DomainSet, MemoryDomainKind};
 use crate::property::{ElementMetadata, PropError, PropValue, PropertySpec};
 use crate::query::{AllocationParams, LatencyReport};
 use crate::runtime::channel::{link, SenderSink};
-use crate::runtime::instrument::ElementProbe;
+#[cfg(feature = "std")]
+use crate::runtime::coordinator::realloc_local_dyn;
 use crate::runtime::coordinator::{
     coordinator_with_recascade, negotiate_source_transform_sink, realloc_local,
     report_nego_failure, solve_last_link, ArmDirective, CoordinatorEvent, MAX_FIXATION_ATTEMPTS,
 };
-#[cfg(feature = "std")]
-use crate::runtime::coordinator::realloc_local_dyn;
+use crate::runtime::instrument::ElementProbe;
 use crate::runtime::join::{select2, Either, Join2};
 use crate::runtime::solver::{
     resolve_forward_output, solve_linear, ForwardResolve, NegotiationFailure,
@@ -48,19 +48,19 @@ where
 }
 
 #[cfg(feature = "std")]
-use alloc::vec::Vec;
-#[cfg(feature = "std")]
 use crate::element::DynAsyncElement;
 #[cfg(feature = "std")]
 use crate::fanout::{MultiOutputElement, MultiOutputSink, MultiOutputSource, MultiSenderSink};
 #[cfg(feature = "std")]
 use crate::graph::Graph;
 #[cfg(feature = "std")]
-use crate::runtime::graph_runner::{broadcast, run_graph_inner, GraphNodeRef};
-#[cfg(feature = "std")]
 use crate::runtime::channel::{bounded, Sender};
 #[cfg(feature = "std")]
+use crate::runtime::graph_runner::{broadcast, run_graph_inner, GraphNodeRef};
+#[cfg(feature = "std")]
 use crate::runtime::join::{dynamic_join, join_all};
+#[cfg(feature = "std")]
+use alloc::vec::Vec;
 
 /// Source-side element trait. Sources have no input pad, so the packet-in /
 /// packet-out shape of [`AsyncElement`] does not fit them. A `SourceLoop`
@@ -86,18 +86,12 @@ pub trait SourceLoop: ElementBound {
     /// `core::future::ready(Ok(caps))`.
     fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a>;
 
-    fn configure_pipeline(
-        &mut self,
-        absolute_caps: &Caps,
-    ) -> Result<ConfigureOutcome, G2gError>;
+    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError>;
 
     /// Runs the source until EOS or error. The implementation MUST emit a
     /// final `PipelinePacket::Eos` before returning `Ok`. Returns the number
     /// of `DataFrame` packets pushed (excluding `Eos`).
-    fn run<'a>(
-        &'a mut self,
-        out: &'a mut dyn OutputSink,
-    ) -> Self::RunFuture<'a>;
+    fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a>;
 
     /// Handle a downstream-originated `Reconfigure` request observed via
     /// `PushOutcome::Reconfigure` during `run`. Implementations that can
@@ -353,7 +347,11 @@ impl RunStats {
         use alloc::format;
         let ms = |ns: u64| ns as f64 / 1.0e6;
         let seen = self.frames_consumed + self.frames_dropped;
-        let drop_pct = if seen > 0 { self.frames_dropped as f64 * 100.0 / seen as f64 } else { 0.0 };
+        let drop_pct = if seen > 0 {
+            self.frames_dropped as f64 * 100.0 / seen as f64
+        } else {
+            0.0
+        };
 
         let mut s = alloc::string::String::from("pipeline run summary:\n");
         s.push_str(&format!(
@@ -367,7 +365,11 @@ impl RunStats {
         s.push_str(&format!(
             "  latency: {:.1} ms .. {max} ({}) [declared]\n",
             ms(self.latency.min_ns),
-            if self.latency.live { "live" } else { "non-live" },
+            if self.latency.live {
+                "live"
+            } else {
+                "non-live"
+            },
         ));
         s.push_str(&format!(
             "  clock:   {:?} (base {} ns)\n",
@@ -392,7 +394,11 @@ impl RunStats {
                     // the edge was instrumented; it is the "wait" half of the
                     // per-stage latency, complementing the `process()` "work".
                     let transit = if e.transit.count > 0 {
-                        format!(", wait p50 {:.2} ms / p99 {:.2} ms", ms(e.transit.p50_ns), ms(e.transit.p99_ns))
+                        format!(
+                            ", wait p50 {:.2} ms / p99 {:.2} ms",
+                            ms(e.transit.p50_ns),
+                            ms(e.transit.p99_ns)
+                        )
                     } else {
                         alloc::string::String::new()
                     };
@@ -460,7 +466,10 @@ fn re_solve_against_sink_constraint(
 ) -> Result<Caps, NegotiationFailure> {
     let src_c = CapsConstraint::LegacySource(new_caps.clone());
     match solve_linear(&[&src_c, sink_c]) {
-        Ok(links) => links.into_iter().last().ok_or(NegotiationFailure::Degenerate),
+        Ok(links) => links
+            .into_iter()
+            .last()
+            .ok_or(NegotiationFailure::Degenerate),
         Err(NegotiationFailure::Unfixable { .. }) => Ok(new_caps.clone()),
         Err(other) => Err(other),
     }
@@ -516,7 +525,15 @@ where
     Snk: AsyncElement,
     Clk: PipelineClock,
 {
-    run_simple_pipeline_inner(source, sink, clock, link_capacity, None, Some(state.clone())).await
+    run_simple_pipeline_inner(
+        source,
+        sink,
+        clock,
+        link_capacity,
+        None,
+        Some(state.clone()),
+    )
+    .await
 }
 
 /// As [`run_simple_pipeline`], but posts a structured
@@ -646,9 +663,9 @@ where
 
     // M399: measured per-element telemetry for the sink (the linear runner's one
     // interior element with a `process()`); the source's cost surfaces as fill.
-    let sink_probe = ElementProbe::new(alloc::string::String::from(
-        crate::log::short_type_name::<Snk>(),
-    ));
+    let sink_probe = ElementProbe::new(alloc::string::String::from(crate::log::short_type_name::<
+        Snk,
+    >()));
     let probe_for_sink = sink_probe.clone();
 
     let bus_for_sink = bus.cloned();
@@ -663,7 +680,9 @@ where
         // M360 re-preroll: the generation this arm last prerolled at, and whether
         // it is currently draining stale pre-seek frames (after a paused flushing
         // seek) until the `Flush` arrives.
-        let mut preroll_gen = state_for_sink.as_ref().map_or(0, |sc| sc.preroll_generation());
+        let mut preroll_gen = state_for_sink
+            .as_ref()
+            .map_or(0, |sc| sc.preroll_generation());
         let mut flushing = false;
         loop {
             // Flow gate (M76/M77): below `Playing` the sink parks here, so it
@@ -714,8 +733,7 @@ where
                         Ok(caps) => caps,
                         Err(failure) => {
                             report_nego_failure(bus_for_sink.as_ref(), failure);
-                            link_rx
-                                .request_reconfigure(Reconfigure::Renegotiate);
+                            link_rx.request_reconfigure(Reconfigure::Renegotiate);
                             continue;
                         }
                     };
@@ -728,11 +746,8 @@ where
                             // M18 α: element-local re-allocation under the
                             // new caps before the sink sees the packet.
                             realloc_local(sink, &sink_caps);
-                            sink.process(
-                                PipelinePacket::CapsChanged(sink_caps),
-                                &mut null,
-                            )
-                            .await?;
+                            sink.process(PipelinePacket::CapsChanged(sink_caps), &mut null)
+                                .await?;
                         }
                         // M8 piece 5: a sink that rejects new caps fires
                         // its counter-proposal upstream as a Reconfigure
@@ -944,8 +959,7 @@ where
         }
     });
 
-    let mut arms: Vec<BoxFuture<'_, Result<u64, G2gError>>> =
-        Vec::with_capacity(branch_count + 2);
+    let mut arms: Vec<BoxFuture<'_, Result<u64, G2gError>>> = Vec::with_capacity(branch_count + 2);
     arms.push(source_fut);
     arms.push(router_fut);
 
@@ -971,8 +985,8 @@ where
                         // fails the fan-out loud (matches GStreamer's
                         // `tee`-with-rejecting-downstream). `AllowBranchDrop`
                         // graceful degradation is a future opt-in.
-                        let branch_caps = re_solve_downstream_dyn_sink(&new_caps, &*sink)
-                            .map_err(|f| {
+                        let branch_caps =
+                            re_solve_downstream_dyn_sink(&new_caps, &*sink).map_err(|f| {
                                 report_nego_failure(bus_for_branch.as_ref(), f);
                                 G2gError::CapsMismatch
                             })?;
@@ -981,11 +995,8 @@ where
                                 // M18 α: element-local re-allocation of this
                                 // branch under its re-solved caps.
                                 realloc_local_dyn(sink, &branch_caps);
-                                sink.process(
-                                    PipelinePacket::CapsChanged(branch_caps),
-                                    &mut null,
-                                )
-                                .await?;
+                                sink.process(PipelinePacket::CapsChanged(branch_caps), &mut null)
+                                    .await?;
                             }
                             ConfigureOutcome::ReFixate(counter) => {
                                 rx.request_reconfigure(Reconfigure::Propose(counter));
@@ -1077,7 +1088,9 @@ impl<'a> DynamicFanoutHandle<'a> {
         &self,
         sink: alloc::boxed::Box<dyn DynAsyncElement + 'a>,
     ) -> Result<(), G2gError> {
-        self.new_branch_tx.try_send(sink).map_err(|_| G2gError::Shutdown)
+        self.new_branch_tx
+            .try_send(sink)
+            .map_err(|_| G2gError::Shutdown)
     }
 }
 
@@ -1112,7 +1125,10 @@ enum FanOutMode {
 pub fn run_source_router_dynamic<'a, Src>(
     source: &'a mut Src,
     link_capacity: impl Into<LinkCapacity>,
-) -> (DynamicFanoutHandle<'a>, impl Future<Output = Result<RunStats, G2gError>> + 'a)
+) -> (
+    DynamicFanoutHandle<'a>,
+    impl Future<Output = Result<RunStats, G2gError>> + 'a,
+)
 where
     Src: SourceLoop + 'a,
 {
@@ -1136,7 +1152,10 @@ where
 pub fn run_source_tee_dynamic<'a, Src>(
     source: &'a mut Src,
     link_capacity: impl Into<LinkCapacity>,
-) -> (DynamicFanoutHandle<'a>, impl Future<Output = Result<RunStats, G2gError>> + 'a)
+) -> (
+    DynamicFanoutHandle<'a>,
+    impl Future<Output = Result<RunStats, G2gError>> + 'a,
+)
 where
     Src: SourceLoop + 'a,
 {
@@ -1151,7 +1170,10 @@ fn run_source_fanout_dynamic<'a, Src>(
     source: &'a mut Src,
     link_capacity: impl Into<LinkCapacity>,
     mode: FanOutMode,
-) -> (DynamicFanoutHandle<'a>, impl Future<Output = Result<RunStats, G2gError>> + 'a)
+) -> (
+    DynamicFanoutHandle<'a>,
+    impl Future<Output = Result<RunStats, G2gError>> + 'a,
+)
 where
     Src: SourceLoop + 'a,
 {
@@ -1214,7 +1236,8 @@ where
         // Drop our keep-alive arm sender into the router so that when the router
         // returns (source EOS), the arm channel closes and the join can finish.
         // (new_arm_tx is moved into router_fut above.)
-        let arms: Vec<BoxFuture<'a, Result<DynArmOut, G2gError>>> = alloc::vec![source_fut, router_fut];
+        let arms: Vec<BoxFuture<'a, Result<DynArmOut, G2gError>>> =
+            alloc::vec![source_fut, router_fut];
         let results = dynamic_join(arms, new_arm_rx).await;
 
         let mut emitted = 0u64;
@@ -1255,11 +1278,14 @@ async fn attach_branch<'a>(
 ) -> Result<(), G2gError> {
     let (btx, brx) = link(link_capacity);
     let mut port = SenderSink::new(btx);
-    port.push(PipelinePacket::CapsChanged(sticky.clone())).await?;
+    port.push(PipelinePacket::CapsChanged(sticky.clone()))
+        .await?;
     ports.push(port);
     let arm: BoxFuture<'a, Result<DynArmOut, G2gError>> = Box::pin(async move {
         let mut sink = sink;
-        dyn_branch_loop(sink.as_mut(), brx).await.map(DynArmOut::Branch)
+        dyn_branch_loop(sink.as_mut(), brx)
+            .await
+            .map(DynArmOut::Branch)
     });
     new_arm_tx.try_send(arm).map_err(|_| G2gError::Shutdown)
 }
@@ -1341,11 +1367,12 @@ async fn dyn_branch_loop(
                 return Ok(consumed);
             }
             Some(PipelinePacket::CapsChanged(caps)) => {
-                let branch_caps =
-                    re_solve_downstream_dyn_sink(&caps, &*sink).map_err(|_| G2gError::CapsMismatch)?;
+                let branch_caps = re_solve_downstream_dyn_sink(&caps, &*sink)
+                    .map_err(|_| G2gError::CapsMismatch)?;
                 match sink.configure_pipeline(&branch_caps)? {
                     ConfigureOutcome::Accepted => {
-                        sink.process(PipelinePacket::CapsChanged(branch_caps), &mut null).await?;
+                        sink.process(PipelinePacket::CapsChanged(branch_caps), &mut null)
+                            .await?;
                     }
                     ConfigureOutcome::ReFixate(counter) => {
                         rx.request_reconfigure(Reconfigure::Propose(counter));
@@ -1706,10 +1733,12 @@ where
 
     // M399: measured per-element telemetry for the two interior elements; each
     // arm writes its own probe, the runner snapshots them once both have joined.
-    let transform_probe =
-        ElementProbe::new(alloc::string::String::from(crate::log::short_type_name::<Tx>()));
-    let sink_probe =
-        ElementProbe::new(alloc::string::String::from(crate::log::short_type_name::<Snk>()));
+    let transform_probe = ElementProbe::new(alloc::string::String::from(
+        crate::log::short_type_name::<Tx>(),
+    ));
+    let sink_probe = ElementProbe::new(alloc::string::String::from(crate::log::short_type_name::<
+        Snk,
+    >()));
     let probe_for_transform = transform_probe.clone();
     let probe_for_sink = sink_probe.clone();
 
@@ -1815,10 +1844,7 @@ where
                             // re-fixated output caps before forwarding.
                             realloc_local(transform, &forward_caps);
                             transform
-                                .process(
-                                    PipelinePacket::CapsChanged(forward_caps),
-                                    &mut adapter,
-                                )
+                                .process(PipelinePacket::CapsChanged(forward_caps), &mut adapter)
                                 .await?;
                         }
                         // Mid-stream ReFixate: fire upstream via this
@@ -1879,8 +1905,7 @@ where
                             // return to carry the detail. Post the structured
                             // failure, then drive the reverse Reconfigure.
                             report_nego_failure(bus_for_sink.as_ref(), failure);
-                            link2_rx
-                                .request_reconfigure(Reconfigure::Renegotiate);
+                            link2_rx.request_reconfigure(Reconfigure::Renegotiate);
                             continue;
                         }
                     };
@@ -1901,11 +1926,8 @@ where
                                     proposal,
                                 })
                                 .await;
-                            sink.process(
-                                PipelinePacket::CapsChanged(sink_caps),
-                                &mut null,
-                            )
-                            .await?;
+                            sink.process(PipelinePacket::CapsChanged(sink_caps), &mut null)
+                                .await?;
                         }
                         ConfigureOutcome::ReFixate(counter) => {
                             link2_rx.request_reconfigure(Reconfigure::Propose(counter));
@@ -1959,9 +1981,11 @@ where
     // M81: prefer a substantive error over a secondary `Shutdown`. A real error
     // in the transform or sink closes a link, which can surface as `Shutdown` on
     // the source arm (checked first); without this, that masks the real cause.
-    if let Some(e) =
-        substantive_error([src_res.as_ref().err(), tx_res.as_ref().err(), snk_res.as_ref().err()])
-    {
+    if let Some(e) = substantive_error([
+        src_res.as_ref().err(),
+        tx_res.as_ref().err(),
+        snk_res.as_ref().err(),
+    ]) {
         return Err(e);
     }
     let emitted = src_res?;
@@ -1999,12 +2023,19 @@ mod profile_tests {
             frames_emitted: 100,
             frames_consumed: 90,
             frames_dropped: 10,
-            latency: LatencyReport { live: true, min_ns: 5_000_000, max_ns: Some(20_000_000) },
+            latency: LatencyReport {
+                live: true,
+                min_ns: 5_000_000,
+                max_ns: Some(20_000_000),
+            },
             ..RunStats::default()
         };
         let r = stats.report();
         // Frame line with the computed drop rate (10 / (90 + 10) = 10%).
-        assert!(r.contains("emitted 100, consumed 90, dropped 10 (10.0% drop)"), "{r}");
+        assert!(
+            r.contains("emitted 100, consumed 90, dropped 10 (10.0% drop)"),
+            "{r}"
+        );
         // Declared latency window + live flag.
         assert!(r.contains("5.0 ms .. 20.0 ms (live) [declared]"), "{r}");
         assert!(r.contains("clock:"), "{r}");
@@ -2013,7 +2044,11 @@ mod profile_tests {
         let clean = RunStats {
             frames_emitted: 5,
             frames_consumed: 5,
-            latency: LatencyReport { live: false, min_ns: 0, max_ns: None },
+            latency: LatencyReport {
+                live: false,
+                min_ns: 0,
+                max_ns: None,
+            },
             ..RunStats::default()
         };
         let r = clean.report();

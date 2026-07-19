@@ -66,11 +66,18 @@ fn opus_with_concrete_channels_auto_plugs_opusdec() {
     use g2g_plugins::registry::default_registry;
 
     let reg = default_registry();
-    let opus = Caps::Audio { format: AudioFormat::Opus, channels: 2, sample_rate: 0 };
+    let opus = Caps::Audio {
+        format: AudioFormat::Opus,
+        channels: 2,
+        sample_rate: 0,
+    };
     let names = reg
         .autoplug_names(&opus, &is_raw_audio, 6)
         .expect("a concrete-channel Opus stream plugs a decode chain");
-    assert!(names.contains(&"opusdec"), "opusdec auto-plugs for Opus -> PCM: {names:?}");
+    assert!(
+        names.contains(&"opusdec"),
+        "opusdec auto-plugs for Opus -> PCM: {names:?}"
+    );
 }
 
 /// OpusDec must be configured with a concrete channel count (libopus is created
@@ -83,7 +90,11 @@ fn opusdec_requires_concrete_channels_at_configure() {
     use g2g_core::{AudioFormat, Caps, G2gError};
     use g2g_plugins::opusdec::OpusDec;
 
-    let opus = |ch| Caps::Audio { format: AudioFormat::Opus, channels: ch, sample_rate: 0 };
+    let opus = |ch| Caps::Audio {
+        format: AudioFormat::Opus,
+        channels: ch,
+        sample_rate: 0,
+    };
     // The channels-0 placeholder cannot create a decoder.
     assert!(matches!(
         OpusDec::new().configure_pipeline(&opus(0)),

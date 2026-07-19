@@ -20,12 +20,13 @@ use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{
-    is_raw_audio, is_raw_video, run_graph, ElementFactory, GraphNode, PlaybinGraphError, PlaybinPort,
-    Registry, SourceLoop, UriError, UriSourceFactory,
+    is_raw_audio, is_raw_video, run_graph, ElementFactory, GraphNode, PlaybinGraphError,
+    PlaybinPort, Registry, SourceLoop, UriError, UriSourceFactory,
 };
 use g2g_core::{
-    AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, Graph, MultiInputElement,
-    OutputSink, PadTemplate, PipelineClock, PushOutcome, RawVideoFormat, Rate, VideoCodec,
+    AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, Graph,
+    MultiInputElement, OutputSink, PadTemplate, PipelineClock, PushOutcome, Rate, RawVideoFormat,
+    VideoCodec,
 };
 use g2g_plugins::mkvdemux::{MkvDemuxN, MkvStream};
 use g2g_plugins::mkvmuxn::MkvMuxN;
@@ -38,16 +39,34 @@ impl PipelineClock for NullClock {
 }
 
 fn h264_any() -> Caps {
-    Caps::CompressedVideo { codec: VideoCodec::H264, width: Dim::Any, height: Dim::Any, framerate: Rate::Any }
+    Caps::CompressedVideo {
+        codec: VideoCodec::H264,
+        width: Dim::Any,
+        height: Dim::Any,
+        framerate: Rate::Any,
+    }
 }
 fn aac_any() -> Caps {
-    Caps::Audio { format: AudioFormat::Aac, channels: 0, sample_rate: 0 }
+    Caps::Audio {
+        format: AudioFormat::Aac,
+        channels: 0,
+        sample_rate: 0,
+    }
 }
 fn raw_video() -> Caps {
-    Caps::RawVideo { format: RawVideoFormat::Nv12, width: Dim::Any, height: Dim::Any, framerate: Rate::Any }
+    Caps::RawVideo {
+        format: RawVideoFormat::Nv12,
+        width: Dim::Any,
+        height: Dim::Any,
+        framerate: Rate::Any,
+    }
 }
 fn raw_audio() -> Caps {
-    Caps::Audio { format: AudioFormat::PcmS16Le, channels: 0, sample_rate: 0 }
+    Caps::Audio {
+        format: AudioFormat::PcmS16Le,
+        channels: 0,
+        sample_rate: 0,
+    }
 }
 
 /// A `mem://` URI source stand-in (its identity is irrelevant to graph assembly,
@@ -57,7 +76,9 @@ fn mem_uri_build(
 ) -> Result<(Box<dyn g2g_core::runtime::DynSourceLoop>, Caps), UriError> {
     Ok((
         Box::new(g2g_plugins::videotestsrc::VideoTestSrc::new(8, 8, 30, 1)),
-        Caps::ByteStream { encoding: g2g_core::ByteStreamEncoding::Matroska },
+        Caps::ByteStream {
+            encoding: g2g_core::ByteStreamEncoding::Matroska,
+        },
     ))
 }
 
@@ -68,12 +89,18 @@ fn registry_with_stubs() -> Registry {
     reg.register_uri(UriSourceFactory::new("mem", mem_uri_build));
     reg.register(ElementFactory::new(
         "h264stub",
-        Vec::from([PadTemplate::sink(CapsSet::one(h264_any())), PadTemplate::source(CapsSet::one(raw_video()))]),
+        Vec::from([
+            PadTemplate::sink(CapsSet::one(h264_any())),
+            PadTemplate::source(CapsSet::one(raw_video())),
+        ]),
         |_| Box::new(g2g_plugins::identity::IdentityTransform::new()),
     ));
     reg.register(ElementFactory::new(
         "aacstub",
-        Vec::from([PadTemplate::sink(CapsSet::one(aac_any())), PadTemplate::source(CapsSet::one(raw_audio()))]),
+        Vec::from([
+            PadTemplate::sink(CapsSet::one(aac_any())),
+            PadTemplate::source(CapsSet::one(raw_audio())),
+        ]),
         |_| Box::new(g2g_plugins::identity::IdentityTransform::new()),
     ));
     reg
@@ -116,8 +143,16 @@ fn build_playbin_graph_assembles_per_stream_decode_branches() {
     let reg = registry_with_stubs();
     let demux = MkvDemuxN::new(vec![MkvStream::H264, MkvStream::Aac]);
     let ports = vec![
-        PlaybinPort { input_caps: h264_any(), target: Box::new(is_raw_video), sink: Box::new(CountSink::default()) },
-        PlaybinPort { input_caps: aac_any(), target: Box::new(is_raw_audio), sink: Box::new(CountSink::default()) },
+        PlaybinPort {
+            input_caps: h264_any(),
+            target: Box::new(is_raw_video),
+            sink: Box::new(CountSink::default()),
+        },
+        PlaybinPort {
+            input_caps: aac_any(),
+            target: Box::new(is_raw_audio),
+            sink: Box::new(CountSink::default()),
+        },
     ];
 
     let graph = reg
@@ -126,16 +161,26 @@ fn build_playbin_graph_assembles_per_stream_decode_branches() {
 
     // source -> demux(2); each port: demux.out(i) -> stub decoder -> sink.
     // Nodes: source + demux + 2 decoders + 2 sinks = 6.
-    assert_eq!(graph.node_count(), 6, "source, demux, two decoders, two sinks");
+    assert_eq!(
+        graph.node_count(),
+        6,
+        "source, demux, two decoders, two sinks"
+    );
     // Edges: src->demux, demux->dec0, dec0->sink0, demux->dec1, dec1->sink1 = 5.
-    assert_eq!(graph.edges().len(), 5, "one decode branch per selected stream");
+    assert_eq!(
+        graph.edges().len(),
+        5,
+        "one decode branch per selected stream"
+    );
 }
 
 #[test]
 fn build_playbin_graph_rejects_no_ports() {
     let reg = registry_with_stubs();
     let demux = MkvDemuxN::new(vec![MkvStream::H264]);
-    let err = reg.build_playbin_graph("mem://clip.mkv", demux, Vec::new(), 6).unwrap_err();
+    let err = reg
+        .build_playbin_graph("mem://clip.mkv", demux, Vec::new(), 6)
+        .unwrap_err();
     assert!(matches!(err, PlaybinGraphError::NoPorts), "got {err:?}");
 }
 
@@ -148,8 +193,13 @@ fn build_playbin_graph_rejects_unknown_scheme() {
         target: Box::new(is_raw_video),
         sink: Box::new(CountSink::default()),
     }];
-    let err = reg.build_playbin_graph("bogus://x", demux, ports, 6).unwrap_err();
-    assert!(matches!(err, PlaybinGraphError::Uri(UriError::UnknownScheme)), "got {err:?}");
+    let err = reg
+        .build_playbin_graph("bogus://x", demux, ports, 6)
+        .unwrap_err();
+    assert!(
+        matches!(err, PlaybinGraphError::Uri(UriError::UnknownScheme)),
+        "got {err:?}"
+    );
 }
 
 // --- end-to-end: MkvDemuxN runs as a run_graph demux node feeding two branches ---
@@ -165,7 +215,9 @@ impl SourceLoop for BytesSrc {
     type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>;
     type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>;
     fn intercept_caps(&mut self) -> Self::CapsFuture<'_> {
-        core::future::ready(Ok(Caps::ByteStream { encoding: g2g_core::ByteStreamEncoding::Matroska }))
+        core::future::ready(Ok(Caps::ByteStream {
+            encoding: g2g_core::ByteStreamEncoding::Matroska,
+        }))
     }
     fn configure_pipeline(&mut self, _c: &Caps) -> Result<ConfigureOutcome, G2gError> {
         Ok(ConfigureOutcome::Accepted)
@@ -208,7 +260,11 @@ impl OutputSink for Collect {
 fn frame(data: Vec<u8>, pts_ns: u64) -> PipelinePacket {
     PipelinePacket::DataFrame(Frame::new(
         MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-        FrameTiming { pts_ns, dts_ns: pts_ns, ..FrameTiming::default() },
+        FrameTiming {
+            pts_ns,
+            dts_ns: pts_ns,
+            ..FrameTiming::default()
+        },
         0,
     ))
 }
@@ -240,14 +296,38 @@ async fn mux_av() -> Vec<u8> {
     let idr = [0x65u8, 0x88, 0x84, 0x00];
     let mut mux = MkvMuxN::new(2);
     mux.configure_pipeline(0, &h264_any()).unwrap();
-    mux.configure_pipeline(1, &Caps::Audio { format: AudioFormat::Aac, channels: 2, sample_rate: 48_000 }).unwrap();
+    mux.configure_pipeline(
+        1,
+        &Caps::Audio {
+            format: AudioFormat::Aac,
+            channels: 2,
+            sample_rate: 48_000,
+        },
+    )
+    .unwrap();
     let mut sink = Collect::default();
-    mux.process(0, frame(annexb(&[&sps, &pps, &idr]), 0), &mut sink).await.unwrap();
-    mux.process(1, frame(adts_au(&[0xA1, 0xA2, 0xA3]), 0), &mut sink).await.unwrap();
-    mux.process(0, frame(annexb(&[&[0x41u8, 0x9a, 0x00]]), 33_000_000), &mut sink).await.unwrap();
-    mux.process(1, frame(adts_au(&[0xB4, 0xB5]), 21_000_000), &mut sink).await.unwrap();
-    mux.process(0, PipelinePacket::Eos, &mut sink).await.unwrap();
-    mux.process(1, PipelinePacket::Eos, &mut sink).await.unwrap();
+    mux.process(0, frame(annexb(&[&sps, &pps, &idr]), 0), &mut sink)
+        .await
+        .unwrap();
+    mux.process(1, frame(adts_au(&[0xA1, 0xA2, 0xA3]), 0), &mut sink)
+        .await
+        .unwrap();
+    mux.process(
+        0,
+        frame(annexb(&[&[0x41u8, 0x9a, 0x00]]), 33_000_000),
+        &mut sink,
+    )
+    .await
+    .unwrap();
+    mux.process(1, frame(adts_au(&[0xB4, 0xB5]), 21_000_000), &mut sink)
+        .await
+        .unwrap();
+    mux.process(0, PipelinePacket::Eos, &mut sink)
+        .await
+        .unwrap();
+    mux.process(1, PipelinePacket::Eos, &mut sink)
+        .await
+        .unwrap();
     sink.bytes
 }
 
@@ -259,15 +339,35 @@ async fn mkvdemuxn_runs_as_a_graph_demux_node() {
 
     let mut g: Graph<GraphNode> = Graph::new();
     let src = g.add_source(GraphNode::source(BytesSrc { bytes: Some(file) }));
-    let demux = g.add_demux(GraphNode::demux(MkvDemuxN::new(vec![MkvStream::H264, MkvStream::Aac])), 2);
-    let s0 = g.add_sink(GraphNode::element(CountSink { frames: video.clone() }));
-    let s1 = g.add_sink(GraphNode::element(CountSink { frames: audio.clone() }));
+    let demux = g.add_demux(
+        GraphNode::demux(MkvDemuxN::new(vec![MkvStream::H264, MkvStream::Aac])),
+        2,
+    );
+    let s0 = g.add_sink(GraphNode::element(CountSink {
+        frames: video.clone(),
+    }));
+    let s1 = g.add_sink(GraphNode::element(CountSink {
+        frames: audio.clone(),
+    }));
     g.link(src, demux.input()).unwrap();
     g.link(demux.out(0), s0).unwrap();
     g.link(demux.out(1), s1).unwrap();
 
-    let stats = run_graph(g, &NullClock, 4).await.expect("playbin demux graph runs");
-    assert_eq!(stats.frames_consumed, 4, "all four access units reached a branch");
-    assert_eq!(video.load(Ordering::Relaxed), 2, "two H.264 access units on the video port");
-    assert_eq!(audio.load(Ordering::Relaxed), 2, "two AAC packets on the audio port");
+    let stats = run_graph(g, &NullClock, 4)
+        .await
+        .expect("playbin demux graph runs");
+    assert_eq!(
+        stats.frames_consumed, 4,
+        "all four access units reached a branch"
+    );
+    assert_eq!(
+        video.load(Ordering::Relaxed),
+        2,
+        "two H.264 access units on the video port"
+    );
+    assert_eq!(
+        audio.load(Ordering::Relaxed),
+        2,
+        "two AAC packets on the audio port"
+    );
 }

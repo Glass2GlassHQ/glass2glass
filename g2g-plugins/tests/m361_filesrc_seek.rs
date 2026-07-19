@@ -41,7 +41,10 @@ impl OutputSink for SeekOnFirst {
     ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
         Box::pin(async move {
             match packet {
-                PipelinePacket::DataFrame(Frame { domain: MemoryDomain::System(s), .. }) => {
+                PipelinePacket::DataFrame(Frame {
+                    domain: MemoryDomain::System(s),
+                    ..
+                }) => {
                     if self.flushed {
                         self.after_flush.extend_from_slice(s.as_slice());
                     } else {
@@ -69,9 +72,14 @@ async fn flushing_byte_seek_repositions_the_read() {
 
     let seek_to = 120u64;
     let ctl = SeekController::new();
-    let mut src = FileSrc::new(&path, Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs })
-        .with_chunk_size(50)
-        .with_seek(ctl.clone());
+    let mut src = FileSrc::new(
+        &path,
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::MpegTs,
+        },
+    )
+    .with_chunk_size(50)
+    .with_seek(ctl.clone());
 
     let caps = {
         let c: Pin<Box<dyn Future<Output = _>>> = Box::pin(src.intercept_caps());
@@ -91,7 +99,11 @@ async fn flushing_byte_seek_repositions_the_read() {
 
     assert!(sink.flushed, "the byte-seek flushed downstream");
     // First chunk (offset 0..50) arrived before the seek.
-    assert_eq!(sink.before_flush, &data[0..50], "pre-seek bytes are the file head");
+    assert_eq!(
+        sink.before_flush,
+        &data[0..50],
+        "pre-seek bytes are the file head"
+    );
     // After the flush, the read resumed at the requested byte offset and ran to
     // EOF: exactly the file tail from `seek_to`.
     assert_eq!(

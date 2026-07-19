@@ -40,7 +40,11 @@ impl HttpSrc {
     /// `Caps::ByteStream { encoding: MpegTs }` for an HLS `.ts` segment. No
     /// request is issued until `run`.
     pub fn new(url: impl Into<String>, caps: Caps) -> Self {
-        Self { url: url.into(), caps, configured: false }
+        Self {
+            url: url.into(),
+            caps,
+            configured: false,
+        }
     }
 }
 
@@ -68,7 +72,9 @@ impl SourceLoop for HttpSrc {
     fn caps_constraint<'a>(
         &'a mut self,
     ) -> impl Future<Output = Result<CapsConstraint<'a>, G2gError>> + 'a {
-        core::future::ready(Ok(CapsConstraint::Produces(CapsSet::one(self.caps.clone()))))
+        core::future::ready(Ok(CapsConstraint::Produces(CapsSet::one(
+            self.caps.clone(),
+        ))))
     }
 
     fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -148,7 +154,9 @@ impl SourceLoop for HttpSrc {
         match name {
             "location" => Some(PropValue::Str(self.url.clone())),
             "bytestream-format" => match &self.caps {
-                Caps::ByteStream { encoding } => Some(PropValue::Str(encoding_to_str(*encoding).into())),
+                Caps::ByteStream { encoding } => {
+                    Some(PropValue::Str(encoding_to_str(*encoding).into()))
+                }
                 _ => None,
             },
             _ => None,
@@ -157,7 +165,11 @@ impl SourceLoop for HttpSrc {
 }
 
 static HTTPSRC_PROPS: &[PropertySpec] = &[
-    PropertySpec::new("location", PropKind::Str, "source URL (http:// or https://)"),
+    PropertySpec::new(
+        "location",
+        PropKind::Str,
+        "source URL (http:// or https://)",
+    ),
     PropertySpec::new(
         "bytestream-format",
         PropKind::Str,

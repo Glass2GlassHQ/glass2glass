@@ -6,7 +6,10 @@
 //! back the decoded NV12 luma plane. Asserts the luma is non-uniform, i.e. the
 //! GPU produced real image content, not a cleared/garbage buffer. Runs on the
 //! RTX 3060; skips with no adapter / no support.
-#![cfg(all(any(target_os = "linux", target_os = "windows"), feature = "vulkan-video"))]
+#![cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    feature = "vulkan-video"
+))]
 
 use g2g_core::runtime::block_on;
 use g2g_plugins::vulkanvideo::{
@@ -31,7 +34,9 @@ fn decodes_idr_frame_to_luma() {
     };
 
     let ps = extract_h264_parameter_sets(CLIP).expect("parse SPS+PPS");
-    let session = device.create_h264_session(&ps, 640, 480).expect("create session");
+    let session = device
+        .create_h264_session(&ps, 640, 480)
+        .expect("create session");
 
     let frame = device
         .decode_idr_luma(&session, CLIP)
@@ -45,13 +50,22 @@ fn decodes_idr_frame_to_luma() {
     // be uniform. This fails if the decode silently produced nothing.
     let min = *frame.luma.iter().min().unwrap();
     let max = *frame.luma.iter().max().unwrap();
-    assert!(max > min, "decoded luma is uniform ({min}=={max}); no real content");
+    assert!(
+        max > min,
+        "decoded luma is uniform ({min}=={max}); no real content"
+    );
     // The fixture is a test card with near-black (16) and near-white regions.
     // A mid-slice CAVLC desync (e.g. a mis-parsed PPS) conceals as flat mid-grey
     // that clips well below white, so require the bright content to be present:
     // this catches a decode that is non-uniform but still wrong.
-    assert!(min <= 20, "no near-black content (min {min}); decode likely wrong");
-    assert!(max >= 200, "no bright content (max {max}); decode likely desynced");
+    assert!(
+        min <= 20,
+        "no near-black content (min {min}); decode likely wrong"
+    );
+    assert!(
+        max >= 200,
+        "no bright content (max {max}); decode likely desynced"
+    );
 
     // Report the mean so the run shows a plausible picture, not just non-uniform.
     let sum: u64 = frame.luma.iter().map(|&b| b as u64).sum();

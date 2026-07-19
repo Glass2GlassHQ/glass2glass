@@ -31,7 +31,10 @@ fn write_srt(tag: &str) -> std::path::PathBuf {
 async fn run_line(line: &str) -> u64 {
     let reg = default_registry();
     let graph = parse_launch(&reg, line).unwrap_or_else(|e| panic!("parses `{line}`: {e}"));
-    run_graph(graph, &ZeroClock, 4).await.unwrap_or_else(|e| panic!("runs `{line}`: {e:?}")).frames_consumed
+    run_graph(graph, &ZeroClock, 4)
+        .await
+        .unwrap_or_else(|e| panic!("runs `{line}`: {e:?}"))
+        .frames_consumed
 }
 
 /// Video branch referenced first: `o.video` -> pad 0, `o.text` -> pad 1.
@@ -45,7 +48,10 @@ async fn textoverlay_named_pads_video_first() {
     );
     let consumed = run_line(&line).await;
     std::fs::remove_file(&srt).ok();
-    assert!(consumed >= 3, "named-pad overlay passed the video frames: {consumed}");
+    assert!(
+        consumed >= 3,
+        "named-pad overlay passed the video frames: {consumed}"
+    );
 }
 
 /// SWAPPED: text branch referenced FIRST. Named pads must still route video to
@@ -61,7 +67,10 @@ async fn textoverlay_named_pads_text_first_is_order_independent() {
     );
     let consumed = run_line(&line).await;
     std::fs::remove_file(&srt).ok();
-    assert!(consumed >= 3, "text-first named pads still route video to pad 0: {consumed}");
+    assert!(
+        consumed >= 3,
+        "text-first named pads still route video to pad 0: {consumed}"
+    );
 }
 
 /// Two references to the same named pad collide: a clear parse error, not a
@@ -77,7 +86,10 @@ fn duplicate_named_input_pad_is_an_error() {
     );
     let err = parse_launch(&reg, &line).expect_err("two o.video refs collide");
     std::fs::remove_file(&srt).ok();
-    assert!(matches!(err, ParseError::DuplicateInputPad(_)), "got {err:?}");
+    assert!(
+        matches!(err, ParseError::DuplicateInputPad(_)),
+        "got {err:?}"
+    );
 }
 
 /// A typed request pad on a muxer with no such pad (a homogeneous `funnel` has no

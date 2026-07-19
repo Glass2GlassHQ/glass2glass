@@ -41,7 +41,8 @@ struct CountingSource {
 
 impl SourceLoop for CountingSource {
     type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>;
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 
@@ -132,11 +133,18 @@ async fn template_instantiates_a_fresh_graph_each_run() {
         g
     });
 
-    let stats_a = run_graph(template.instantiate(), &NullClock, 4).await.expect("run A");
-    let stats_b = run_graph(template.instantiate(), &NullClock, 4).await.expect("run B");
+    let stats_a = run_graph(template.instantiate(), &NullClock, 4)
+        .await
+        .expect("run A");
+    let stats_b = run_graph(template.instantiate(), &NullClock, 4)
+        .await
+        .expect("run B");
 
     assert_eq!(stats_a.frames_consumed, 3);
-    assert_eq!(stats_b.frames_consumed, 3, "the second run got fresh elements, not an exhausted graph");
+    assert_eq!(
+        stats_b.frames_consumed, 3,
+        "the second run got fresh elements, not an exhausted graph"
+    );
     assert_eq!(*run_a.lock().unwrap(), 3);
     assert_eq!(*run_b.lock().unwrap(), 3);
 }

@@ -152,8 +152,17 @@ fn av1_inter_unit() -> Vec<u8> {
 
 fn synthetic_av1_webm() -> Vec<u8> {
     let video = {
-        let v = [elem(&[0xB0], &uint_body(1920)), elem(&[0xBA], &uint_body(1080))].concat();
-        let body = [elem(&[0xD7], &uint_body(1)), elem(&[0x86], b"V_AV1"), elem(&[0xE0], &v)].concat();
+        let v = [
+            elem(&[0xB0], &uint_body(1920)),
+            elem(&[0xBA], &uint_body(1080)),
+        ]
+        .concat();
+        let body = [
+            elem(&[0xD7], &uint_body(1)),
+            elem(&[0x86], b"V_AV1"),
+            elem(&[0xE0], &v),
+        ]
+        .concat();
         elem(&[0xAE], &body)
     };
     let tracks = elem(&[0x16, 0x54, 0xAE, 0x6B], &video);
@@ -179,15 +188,19 @@ impl SourceLoop for MkvSource {
     type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>;
 
     fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
-        core::future::ready(Ok(Caps::ByteStream { encoding: ByteStreamEncoding::Matroska }))
+        core::future::ready(Ok(Caps::ByteStream {
+            encoding: ByteStreamEncoding::Matroska,
+        }))
     }
 
     fn caps_constraint<'a>(
         &'a mut self,
     ) -> impl Future<Output = Result<CapsConstraint<'a>, G2gError>> + 'a {
-        core::future::ready(Ok(CapsConstraint::Produces(CapsSet::one(Caps::ByteStream {
-            encoding: ByteStreamEncoding::Matroska,
-        }))))
+        core::future::ready(Ok(CapsConstraint::Produces(CapsSet::one(
+            Caps::ByteStream {
+                encoding: ByteStreamEncoding::Matroska,
+            },
+        ))))
     }
 
     fn configure_pipeline(&mut self, _caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -212,17 +225,25 @@ impl SourceLoop for MkvSource {
 #[tokio::test]
 async fn mkvdemux_feeds_av1parse_end_to_end() {
     let mut graph: Graph<GraphNode> = Graph::new();
-    let src =
-        graph.add_source(GraphNodeRef::Source(Box::new(MkvSource { bytes: Some(synthetic_av1_webm()) })));
-    let demux = graph.add_transform(GraphNodeRef::element(MkvDemux::new().with_stream(MkvStream::Av1)));
+    let src = graph.add_source(GraphNodeRef::Source(Box::new(MkvSource {
+        bytes: Some(synthetic_av1_webm()),
+    })));
+    let demux = graph.add_transform(GraphNodeRef::element(
+        MkvDemux::new().with_stream(MkvStream::Av1),
+    ));
     let parse = graph.add_transform(GraphNodeRef::element(Av1Parse::new()));
     let sink = graph.add_sink(GraphNodeRef::element(FakeSink::new()));
     graph.link(src, demux).unwrap();
     graph.link(demux, parse).unwrap();
     graph.link(parse, sink).unwrap();
 
-    let stats = run_graph(graph, &ZeroClock, 4).await.expect("av1 pipeline runs");
-    assert_eq!(stats.frames_consumed, 2, "keyframe + inter unit pass through the parser to the sink");
+    let stats = run_graph(graph, &ZeroClock, 4)
+        .await
+        .expect("av1 pipeline runs");
+    assert_eq!(
+        stats.frames_consumed, 2,
+        "keyframe + inter unit pass through the parser to the sink"
+    );
 }
 
 #[cfg(feature = "std")]
@@ -230,6 +251,12 @@ async fn mkvdemux_feeds_av1parse_end_to_end() {
 fn av1parse_registered_and_constructable() {
     use g2g_plugins::registry::default_registry;
     let reg = default_registry();
-    assert!(reg.inspect("av1parse").is_some(), "av1parse joins the default registry");
-    assert!(reg.make_element("av1parse").is_some(), "av1parse builds by name");
+    assert!(
+        reg.inspect("av1parse").is_some(),
+        "av1parse joins the default registry"
+    );
+    assert!(
+        reg.make_element("av1parse").is_some(),
+        "av1parse builds by name"
+    );
 }

@@ -59,7 +59,9 @@ impl AsyncElement for AnySink {
 
 fn registry_with_anysink() -> Registry {
     let mut reg = default_registry();
-    reg.register_launch(LaunchFactory::new("anysink", Vec::new(), || Box::new(AnySink)));
+    reg.register_launch(LaunchFactory::new("anysink", Vec::new(), || {
+        Box::new(AnySink)
+    }));
     reg
 }
 
@@ -75,7 +77,9 @@ async fn observed_muxer_fanin_reports_the_fan_node() {
     let graph = parse_launch(&reg, FANIN).expect("fan-in pipeline parses");
 
     let obs = Observer::new();
-    let stats = run_graph_observed(graph, &ZeroClock, 4, &obs, None).await.expect("observed run");
+    let stats = run_graph_observed(graph, &ZeroClock, 4, &obs, None)
+        .await
+        .expect("observed run");
     assert_eq!(stats.frames_consumed, 7, "4 + 3 frames reached the sink");
 
     // The muxer node is now probed: it appears in the end-of-run per-element
@@ -85,7 +89,11 @@ async fn observed_muxer_fanin_reports_the_fan_node() {
         .iter()
         .find(|e| e.name == "mux0")
         .expect("muxer node present in per_element");
-    assert!(mux.proc.count > 0, "muxer process() was timed, count={}", mux.proc.count);
+    assert!(
+        mux.proc.count > 0,
+        "muxer process() was timed, count={}",
+        mux.proc.count
+    );
     assert!(!stats.per_element.is_empty());
 
     // The live observer snapshot carries the same fan node with a Muxer role.
@@ -118,11 +126,17 @@ async fn threaded_observed_muxer_fanin_reports_the_fan_node() {
         .iter()
         .find(|e| e.name == "mux0")
         .expect("muxer node present in per_element under the threaded runner");
-    assert!(mux.proc.count > 0, "threaded muxer process() timed, count={}", mux.proc.count);
+    assert!(
+        mux.proc.count > 0,
+        "threaded muxer process() timed, count={}",
+        mux.proc.count
+    );
 
     let snap = obs.snapshot();
     assert!(
-        snap.nodes.iter().any(|n| n.role == NodeRole::Muxer && n.latency.is_some()),
+        snap.nodes
+            .iter()
+            .any(|n| n.role == NodeRole::Muxer && n.latency.is_some()),
         "threaded observer snapshot carries the probed muxer node"
     );
 }

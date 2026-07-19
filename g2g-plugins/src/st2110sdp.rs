@@ -26,13 +26,28 @@ pub enum St2110Essence {
     /// ST 2110-20 uncompressed video (`rtpmap raw/90000`). `exact_fps` is the
     /// SMPTE `exactframerate` numerator / denominator (e.g. `(60000, 1001)` for
     /// 59.94, `(50, 1)` for 50).
-    Video { sampling: Sampling, width: u32, height: u32, exact_fps: (u32, u32) },
+    Video {
+        sampling: Sampling,
+        width: u32,
+        height: u32,
+        exact_fps: (u32, u32),
+    },
     /// ST 2110-22 JPEG XS compressed video (`rtpmap jxsv/90000`, RFC 9134). Rides
     /// under an `m=video` line like -20, but the `fmtp` names JPEG XS
     /// (`packetmode` / `transmode`) alongside the descriptive sampling / geometry.
-    JpegXs { sampling: Sampling, width: u32, height: u32, exact_fps: (u32, u32) },
+    JpegXs {
+        sampling: Sampling,
+        width: u32,
+        height: u32,
+        exact_fps: (u32, u32),
+    },
     /// ST 2110-30 PCM audio (`rtpmap L16`/`L24` / rate / channels, `a=ptime`).
-    Audio { depth: SampleDepth, sample_rate: u32, channels: u16, ptime_us: u32 },
+    Audio {
+        depth: SampleDepth,
+        sample_rate: u32,
+        channels: u16,
+        ptime_us: u32,
+    },
     /// ST 2110-40 ancillary data (`rtpmap smpte291/90000`).
     Ancillary,
 }
@@ -87,7 +102,12 @@ impl St2110Sdp {
     fn push_media(&self, s: &mut String, mid: Option<usize>) {
         let pt = self.payload_type;
         match &self.essence {
-            St2110Essence::Video { sampling, width, height, exact_fps } => {
+            St2110Essence::Video {
+                sampling,
+                width,
+                height,
+                exact_fps,
+            } => {
                 let (samp, depth) = sampling_sdp(*sampling);
                 s.push_str(&format!("m=video {} RTP/AVP {}\r\n", self.port, pt));
                 s.push_str(&format!("c=IN IP4 {}/64\r\n", self.address));
@@ -99,7 +119,12 @@ impl St2110Sdp {
                     fps_str(*exact_fps),
                 ));
             }
-            St2110Essence::JpegXs { sampling, width, height, exact_fps } => {
+            St2110Essence::JpegXs {
+                sampling,
+                width,
+                height,
+                exact_fps,
+            } => {
                 let (samp, depth) = sampling_sdp(*sampling);
                 s.push_str(&format!("m=video {} RTP/AVP {}\r\n", self.port, pt));
                 s.push_str(&format!("c=IN IP4 {}/64\r\n", self.address));
@@ -113,7 +138,12 @@ impl St2110Sdp {
                     fps_str(*exact_fps),
                 ));
             }
-            St2110Essence::Audio { depth, sample_rate, channels, ptime_us } => {
+            St2110Essence::Audio {
+                depth,
+                sample_rate,
+                channels,
+                ptime_us,
+            } => {
                 let enc = match depth {
                     SampleDepth::L16 => "L16",
                     SampleDepth::L24 => "L24",
@@ -139,7 +169,9 @@ impl St2110Sdp {
             s.push_str(&format!("a=mid:{m}\r\n"));
         }
         if let Some((gmid, domain)) = &self.ptp {
-            s.push_str(&format!("a=ts-refclk:ptp=IEEE1588-2008:{gmid}:{domain}\r\n"));
+            s.push_str(&format!(
+                "a=ts-refclk:ptp=IEEE1588-2008:{gmid}:{domain}\r\n"
+            ));
             s.push_str("a=mediaclk:direct=0\r\n");
         }
     }
@@ -190,15 +222,23 @@ impl St2110Sdp {
         let essence = match (media_kind.as_deref(), rtpmap.as_deref()) {
             (Some("video"), Some(enc)) if enc.starts_with("raw/") => {
                 let (sampling, width, height, exact_fps) = parse_video_fmtp(fmtp.as_deref()?)?;
-                St2110Essence::Video { sampling, width, height, exact_fps }
+                St2110Essence::Video {
+                    sampling,
+                    width,
+                    height,
+                    exact_fps,
+                }
             }
             (Some("video"), Some(enc)) if enc.starts_with("jxsv/") => {
                 let (sampling, width, height, exact_fps) = parse_video_fmtp(fmtp.as_deref()?)?;
-                St2110Essence::JpegXs { sampling, width, height, exact_fps }
+                St2110Essence::JpegXs {
+                    sampling,
+                    width,
+                    height,
+                    exact_fps,
+                }
             }
-            (Some("video"), Some(enc)) if enc.starts_with("smpte291/") => {
-                St2110Essence::Ancillary
-            }
+            (Some("video"), Some(enc)) if enc.starts_with("smpte291/") => St2110Essence::Ancillary,
             (Some("audio"), Some(enc)) => parse_audio_rtpmap(enc, ptime_us.unwrap_or(1000))?,
             _ => return None,
         };
@@ -263,10 +303,13 @@ impl St2110Session {
     /// that does not carry its own. Returns `None` if there is no parseable ST 2110
     /// media section. Unmappable sections are skipped (never trust the stream).
     pub fn parse(text: &str) -> Option<Self> {
-        let lines: alloc::vec::Vec<&str> =
-            text.lines().map(|l| l.trim_end_matches('\r')).collect();
-        let m_idx: alloc::vec::Vec<usize> =
-            lines.iter().enumerate().filter(|(_, l)| l.starts_with("m=")).map(|(i, _)| i).collect();
+        let lines: alloc::vec::Vec<&str> = text.lines().map(|l| l.trim_end_matches('\r')).collect();
+        let m_idx: alloc::vec::Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.starts_with("m="))
+            .map(|(i, _)| i)
+            .collect();
         let first_m = *m_idx.first()?;
 
         // Session-level origin address, default reference clock, and -7 groups.
@@ -279,8 +322,10 @@ impl St2110Session {
             } else if l.starts_with("a=ts-refclk:") {
                 session_refclk = Some(*l);
             } else if let Some(g) = l.strip_prefix("a=group:DUP ") {
-                let mids: alloc::vec::Vec<usize> =
-                    g.split_whitespace().filter_map(|m| m.parse().ok()).collect();
+                let mids: alloc::vec::Vec<usize> = g
+                    .split_whitespace()
+                    .filter_map(|m| m.parse().ok())
+                    .collect();
                 if !mids.is_empty() {
                     dup_groups.push(mids);
                 }
@@ -309,7 +354,11 @@ impl St2110Session {
         let address = address
             .or_else(|| media.first().map(|m| m.address.clone()))
             .unwrap_or_else(|| "0.0.0.0".to_string());
-        Some(St2110Session { address, media, dup_groups })
+        Some(St2110Session {
+            address,
+            media,
+            dup_groups,
+        })
     }
 }
 
@@ -387,7 +436,12 @@ fn parse_audio_rtpmap(enc: &str, ptime_us: u32) -> Option<St2110Essence> {
     };
     let sample_rate = it.next()?.parse::<u32>().ok()?;
     let channels = it.next()?.parse::<u16>().ok()?;
-    Some(St2110Essence::Audio { depth, sample_rate, channels, ptime_us })
+    Some(St2110Essence::Audio {
+        depth,
+        sample_rate,
+        channels,
+        ptime_us,
+    })
 }
 
 #[cfg(test)]
@@ -420,7 +474,12 @@ mod tests {
     fn video_rgba_and_yuyv_round_trip() {
         for sampling in [Sampling::Rgba8, Sampling::YCbCr422_8] {
             round_trip(&St2110Sdp {
-                essence: St2110Essence::Video { sampling, width: 1280, height: 720, exact_fps: (50, 1) },
+                essence: St2110Essence::Video {
+                    sampling,
+                    width: 1280,
+                    height: 720,
+                    exact_fps: (50, 1),
+                },
                 payload_type: 112,
                 address: "192.168.1.5".to_string(),
                 port: 5000,
@@ -444,9 +503,18 @@ mod tests {
             ptp: Some(("08-00-11-FF-FE-21-E1-B0".to_string(), 127)),
         };
         let text = sdp.to_sdp();
-        assert!(text.contains("a=rtpmap:112 jxsv/90000"), "advertises the -22 rtpmap\n{text}");
-        assert!(text.contains("packetmode=0"), "codestream packetization mode\n{text}");
-        assert!(text.contains("SSN=ST2110-22:2019"), "names the -22 spec\n{text}");
+        assert!(
+            text.contains("a=rtpmap:112 jxsv/90000"),
+            "advertises the -22 rtpmap\n{text}"
+        );
+        assert!(
+            text.contains("packetmode=0"),
+            "codestream packetization mode\n{text}"
+        );
+        assert!(
+            text.contains("SSN=ST2110-22:2019"),
+            "names the -22 spec\n{text}"
+        );
         round_trip(&sdp);
     }
 
@@ -515,9 +583,16 @@ mod tests {
         };
         let text = session.to_sdp();
         // One session header, three media sections, each tagged with a=mid.
-        assert_eq!(text.matches("m=").count(), 3, "three media sections\n{text}");
+        assert_eq!(
+            text.matches("m=").count(),
+            3,
+            "three media sections\n{text}"
+        );
         assert_eq!(text.matches("v=0").count(), 1, "one session header\n{text}");
-        assert!(text.contains("a=mid:0") && text.contains("a=mid:2"), "media tagged\n{text}");
+        assert!(
+            text.contains("a=mid:0") && text.contains("a=mid:2"),
+            "media tagged\n{text}"
+        );
 
         let parsed = St2110Session::parse(&text).expect("session parses");
         assert_eq!(parsed, session, "the whole program round-trips");
@@ -544,7 +619,10 @@ mod tests {
             dup_groups: alloc::vec![alloc::vec![0, 1]],
         };
         let text = session.to_sdp();
-        assert!(text.contains("a=group:DUP 0 1"), "advertises the -7 duplicate group\n{text}");
+        assert!(
+            text.contains("a=group:DUP 0 1"),
+            "advertises the -7 duplicate group\n{text}"
+        );
         let parsed = St2110Session::parse(&text).expect("parses");
         assert_eq!(parsed, session, "the redundant-pair session round-trips");
     }
@@ -570,9 +648,18 @@ mod tests {
         let session = St2110Session::parse(text).expect("parses");
         assert_eq!(session.media.len(), 2, "video + audio");
         // The session-level PTP clock is inherited by both streams.
-        assert!(session.media.iter().all(|m| m.ptp.as_ref().map(|(_, d)| *d) == Some(127)));
-        assert!(matches!(session.media[0].essence, St2110Essence::Video { width: 1280, .. }));
-        assert!(matches!(session.media[1].essence, St2110Essence::Audio { channels: 2, .. }));
+        assert!(session
+            .media
+            .iter()
+            .all(|m| m.ptp.as_ref().map(|(_, d)| *d) == Some(127)));
+        assert!(matches!(
+            session.media[0].essence,
+            St2110Essence::Video { width: 1280, .. }
+        ));
+        assert!(matches!(
+            session.media[1].essence,
+            St2110Essence::Audio { channels: 2, .. }
+        ));
     }
 
     #[test]

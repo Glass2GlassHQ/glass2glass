@@ -29,12 +29,18 @@ async fn borrowing_graph_runs_and_caller_keeps_elements() {
         let k = g.add_sink(GraphNodeRef::element_ref(&mut sink));
         g.link(s, f).unwrap();
         g.link(f, k).unwrap();
-        run_graph(g, &NullClock, 4).await.expect("borrowing graph runs")
+        run_graph(g, &NullClock, 4)
+            .await
+            .expect("borrowing graph runs")
     };
 
     assert_eq!(stats.frames_emitted, 4);
     assert_eq!(stats.frames_consumed, 4);
     // The borrows ended with the graph; the caller still owns the elements.
-    assert_eq!(sink.received(), 4, "caller reads the borrowed sink after the run");
+    assert_eq!(
+        sink.received(),
+        4,
+        "caller reads the borrowed sink after the run"
+    );
     assert!(sink.eos_seen());
 }

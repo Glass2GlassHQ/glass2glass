@@ -40,7 +40,13 @@ const FULL_SCALE: f64 = 32768.0;
 
 impl Level {
     pub fn new() -> Self {
-        Self { post_messages: true, channels: 0, peak: Vec::new(), rms: Vec::new(), configured: false }
+        Self {
+            post_messages: true,
+            channels: 0,
+            peak: Vec::new(),
+            rms: Vec::new(),
+            configured: false,
+        }
     }
 
     /// Per-channel peak of the last measured buffer, linear 0..1.
@@ -55,9 +61,11 @@ impl Level {
 
     fn accept_input(&self, caps: &Caps) -> Result<usize, G2gError> {
         match caps {
-            Caps::Audio { format: AudioFormat::PcmS16Le, channels, .. } if *channels > 0 => {
-                Ok(*channels as usize)
-            }
+            Caps::Audio {
+                format: AudioFormat::PcmS16Le,
+                channels,
+                ..
+            } if *channels > 0 => Ok(*channels as usize),
             _ => Err(G2gError::CapsMismatch),
         }
     }
@@ -78,8 +86,11 @@ impl Level {
             counts[c] += 1;
         }
         for c in 0..ch {
-            sumsq[c] =
-                if counts[c] > 0 { crate::mathf::sqrt(sumsq[c] / counts[c] as f64) } else { 0.0 };
+            sumsq[c] = if counts[c] > 0 {
+                crate::mathf::sqrt(sumsq[c] / counts[c] as f64)
+            } else {
+                0.0
+            };
         }
         self.peak = peak;
         self.rms = sumsq;
@@ -100,7 +111,10 @@ impl AsyncElement for Level {
     /// Pure passthrough: the meter never changes the stream.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
-            Caps::Audio { format: AudioFormat::PcmS16Le, .. } => CapsSet::one(input.clone()),
+            Caps::Audio {
+                format: AudioFormat::PcmS16Le,
+                ..
+            } => CapsSet::one(input.clone()),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
     }
@@ -146,7 +160,12 @@ impl AsyncElement for Level {
     }
 
     fn metadata(&self) -> ElementMetadata {
-        ElementMetadata::new("Level", "Filter/Analyzer/Audio", "Measures audio peak / RMS levels", "g2g")
+        ElementMetadata::new(
+            "Level",
+            "Filter/Analyzer/Audio",
+            "Measures audio peak / RMS levels",
+            "g2g",
+        )
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
@@ -165,13 +184,23 @@ impl AsyncElement for Level {
     }
 }
 
-static LEVEL_PROPS: &[PropertySpec] =
-    &[PropertySpec::new("post-messages", PropKind::Bool, "measure and expose levels when true")];
+static LEVEL_PROPS: &[PropertySpec] = &[PropertySpec::new(
+    "post-messages",
+    PropKind::Bool,
+    "measure and expose levels when true",
+)];
 
 impl PadTemplates for Level {
     fn pad_templates() -> Vec<PadTemplate> {
-        let pcm = Caps::Audio { format: AudioFormat::PcmS16Le, channels: 2, sample_rate: 48_000 };
-        Vec::from([PadTemplate::sink(CapsSet::one(pcm.clone())), PadTemplate::source(CapsSet::one(pcm))])
+        let pcm = Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            channels: 2,
+            sample_rate: 48_000,
+        };
+        Vec::from([
+            PadTemplate::sink(CapsSet::one(pcm.clone())),
+            PadTemplate::source(CapsSet::one(pcm)),
+        ])
     }
 }
 
@@ -221,7 +250,8 @@ mod tests {
     #[test]
     fn post_messages_false_leaves_measurements_empty() {
         let mut l = Level::new();
-        l.set_property("post-messages", PropValue::Bool(false)).unwrap();
+        l.set_property("post-messages", PropValue::Bool(false))
+            .unwrap();
         assert!(!l.post_messages);
     }
 }

@@ -128,7 +128,12 @@ fn decode_mask(m: &[u8]) -> Option<(Vec<u16>, usize)> {
 /// sequence, `media[0]` the SN base, spanning at most 109 sequence numbers). The
 /// repair is an RTP packet on `fec_pt` / `fec_ssrc` / `fec_seq`. `None` if
 /// `media` is empty, over 109 packets, or spans more than 109 sequence numbers.
-pub fn build_flexfec_packet(media: &[&[u8]], fec_pt: u8, fec_ssrc: u32, fec_seq: u16) -> Option<Vec<u8>> {
+pub fn build_flexfec_packet(
+    media: &[&[u8]],
+    fec_pt: u8,
+    fec_ssrc: u32,
+    fec_seq: u16,
+) -> Option<Vec<u8>> {
     if media.is_empty() || media.len() > 109 {
         return None;
     }
@@ -137,7 +142,10 @@ pub fn build_flexfec_packet(media: &[&[u8]], fec_pt: u8, fec_ssrc: u32, fec_seq:
     }
     let sn_base = seq_of(media[0]);
     let media_ssrc = u32::from_be_bytes(media[0][8..12].try_into().ok()?);
-    let offsets: Vec<u16> = media.iter().map(|p| seq_of(p).wrapping_sub(sn_base)).collect();
+    let offsets: Vec<u16> = media
+        .iter()
+        .map(|p| seq_of(p).wrapping_sub(sn_base))
+        .collect();
     if offsets.iter().any(|&o| o > MAX_OFFSET) {
         return None; // out of order, or spans more than the mask can express
     }
@@ -148,7 +156,11 @@ pub fn build_flexfec_packet(media: &[&[u8]], fec_pt: u8, fec_ssrc: u32, fec_seq:
     let mut mpt = 0u8; // M|PT (byte 1)
     let mut ts = 0u32;
     let mut len_recovery = 0u16;
-    let protection_len = media.iter().map(|p| p.len() - RTP_HEADER).max().unwrap_or(0);
+    let protection_len = media
+        .iter()
+        .map(|p| p.len() - RTP_HEADER)
+        .max()
+        .unwrap_or(0);
     let mut payload = vec![0u8; protection_len];
     for p in media {
         pxcc ^= p[0] & 0x3F;
@@ -187,7 +199,10 @@ fn flex_header(fec: &[u8]) -> Option<(u16, Vec<u16>, usize)> {
     if fec.len() < MASK_OFF + 2 || fec[RTP_HEADER + 8] != 1 {
         return None; // need the fixed header + one SSRC block + at least one mask word
     }
-    let sn_base = u16::from_be_bytes([fec[RTP_HEADER + FLEX_FIXED + 4], fec[RTP_HEADER + FLEX_FIXED + 5]]);
+    let sn_base = u16::from_be_bytes([
+        fec[RTP_HEADER + FLEX_FIXED + 4],
+        fec[RTP_HEADER + FLEX_FIXED + 5],
+    ]);
     let (offsets, mask_len) = decode_mask(&fec[MASK_OFF..])?;
     let seqs = offsets.iter().map(|o| sn_base.wrapping_add(*o)).collect();
     Some((sn_base, seqs, MASK_OFF + mask_len))
@@ -203,13 +218,20 @@ fn protected_seqs(fec: &[u8]) -> Option<Vec<u16>> {
 /// sequence is absent.
 pub fn recover_packet(fec: &[u8], present: &[(u16, &[u8])]) -> Option<Vec<u8>> {
     let (_, seqs, payload_off) = flex_header(fec)?;
-    let missing: Vec<u16> = seqs.iter().copied().filter(|s| !present.iter().any(|(p, _)| p == s)).collect();
+    let missing: Vec<u16> = seqs
+        .iter()
+        .copied()
+        .filter(|s| !present.iter().any(|(p, _)| p == s))
+        .collect();
     if missing.len() != 1 {
         return None; // a single repair recovers exactly one loss per group
     }
     let missing_seq = missing[0];
-    let group: Vec<&[u8]> =
-        present.iter().filter(|(s, _)| seqs.contains(s)).map(|(_, p)| *p).collect();
+    let group: Vec<&[u8]> = present
+        .iter()
+        .filter(|(s, _)| seqs.contains(s))
+        .map(|(_, p)| *p)
+        .collect();
     if group.iter().any(|p| p.len() < RTP_HEADER) {
         return None;
     }
@@ -263,7 +285,13 @@ pub struct FlexFecEncoder {
 
 impl FlexFecEncoder {
     pub fn new(group: usize, fec_pt: u8, fec_ssrc: u32) -> Self {
-        Self { group: group.clamp(1, 109), fec_pt: fec_pt & 0x7F, fec_ssrc, fec_seq: 0, pending: Vec::new() }
+        Self {
+            group: group.clamp(1, 109),
+            fec_pt: fec_pt & 0x7F,
+            fec_ssrc,
+            fec_seq: 0,
+            pending: Vec::new(),
+        }
     }
 
     /// Feed a media RTP packet; returns a repair packet when the group closes.
@@ -298,7 +326,12 @@ impl Default for FlexFecDecoder {
 
 impl FlexFecDecoder {
     pub fn new(capacity: usize) -> Self {
-        Self { media: BTreeMap::new(), fecs: VecDeque::new(), recovered: Vec::new(), capacity: capacity.max(16) }
+        Self {
+            media: BTreeMap::new(),
+            fecs: VecDeque::new(),
+            recovered: Vec::new(),
+            capacity: capacity.max(16),
+        }
     }
 
     /// Record a received media packet and attempt recovery of any open group.
@@ -335,9 +368,13 @@ impl FlexFecDecoder {
             progressed = false;
             let mut spent = None;
             for (idx, fec) in self.fecs.iter().enumerate() {
-                let Some(seqs) = protected_seqs(fec) else { continue };
-                let present: Vec<(u16, &[u8])> =
-                    seqs.iter().filter_map(|s| self.media.get(s).map(|p| (*s, p.as_slice()))).collect();
+                let Some(seqs) = protected_seqs(fec) else {
+                    continue;
+                };
+                let present: Vec<(u16, &[u8])> = seqs
+                    .iter()
+                    .filter_map(|s| self.media.get(s).map(|p| (*s, p.as_slice())))
+                    .collect();
                 let missing = seqs.len().saturating_sub(present.len());
                 if missing == 1 {
                     if let Some(rec) = recover_packet(fec, &present) {
@@ -408,9 +445,13 @@ mod tests {
         let refs: Vec<&[u8]> = media.iter().map(|v| v.as_slice()).collect();
         let fec = build_flexfec_packet(&refs, 110, 0xFEC0_0000, 0).expect("fec");
         let present = present_except(&media, &[3]);
-        let present_refs: Vec<(u16, &[u8])> = present.iter().map(|(s, p)| (*s, p.as_slice())).collect();
+        let present_refs: Vec<(u16, &[u8])> =
+            present.iter().map(|(s, p)| (*s, p.as_slice())).collect();
         let recovered = recover_packet(&fec, &present_refs).expect("recovered");
-        assert_eq!(recovered, media[3], "FlexFEC reconstructs the lost packet byte-exact");
+        assert_eq!(
+            recovered, media[3],
+            "FlexFEC reconstructs the lost packet byte-exact"
+        );
     }
 
     #[test]
@@ -420,9 +461,14 @@ mod tests {
         let media = media_run(24);
         let refs: Vec<&[u8]> = media.iter().map(|v| v.as_slice()).collect();
         let fec = build_flexfec_packet(&refs, 110, 0xFEC0_0000, 0).expect("24-packet fec");
-        assert_eq!(protected_seqs(&fec).unwrap().len(), 24, "all 24 packets protected by one repair");
+        assert_eq!(
+            protected_seqs(&fec).unwrap().len(),
+            24,
+            "all 24 packets protected by one repair"
+        );
         let present = present_except(&media, &[20]);
-        let present_refs: Vec<(u16, &[u8])> = present.iter().map(|(s, p)| (*s, p.as_slice())).collect();
+        let present_refs: Vec<(u16, &[u8])> =
+            present.iter().map(|(s, p)| (*s, p.as_slice())).collect();
         let recovered = recover_packet(&fec, &present_refs).expect("recovered the 21st packet");
         assert_eq!(recovered, media[20]);
     }
@@ -458,8 +504,10 @@ mod tests {
         // beyond a single repair, but the column repairs complete the rows by
         // chained recovery (the FlexFEC payoff over single 1-D FEC).
         let media = media_run(16);
-        let row = |r: usize| -> Vec<&[u8]> { (0..4).map(|c| media[r * 4 + c].as_slice()).collect() };
-        let col = |c: usize| -> Vec<&[u8]> { (0..4).map(|r| media[r * 4 + c].as_slice()).collect() };
+        let row =
+            |r: usize| -> Vec<&[u8]> { (0..4).map(|c| media[r * 4 + c].as_slice()).collect() };
+        let col =
+            |c: usize| -> Vec<&[u8]> { (0..4).map(|r| media[r * 4 + c].as_slice()).collect() };
 
         let mut dec = FlexFecDecoder::new(64);
         let mut seq = 0u16;

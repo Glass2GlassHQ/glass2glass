@@ -15,7 +15,10 @@
 //! `yuv420p10le` dump: every luma and chroma sample SAD 0.
 //!
 //! Runs on the RTX 3060; skips with no adapter / no 10-bit AV1 decode support.
-#![cfg(all(any(target_os = "linux", target_os = "windows"), feature = "vulkan-video"))]
+#![cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    feature = "vulkan-video"
+))]
 
 use g2g_core::runtime::block_on;
 use g2g_plugins::vulkanvideo::{
@@ -33,7 +36,10 @@ fn le16(b: &[u8], i: usize) -> u16 {
 #[test]
 fn decodes_av1_10bit() {
     let seq = extract_av1_sequence_header(CLIP).expect("sequence header");
-    assert_eq!(seq.color.bit_depth, 10, "fixture is not 10-bit; feature untested");
+    assert_eq!(
+        seq.color.bit_depth, 10,
+        "fixture is not 10-bit; feature untested"
+    );
 
     let device = match block_on(open_av1_decode_device()) {
         Ok(d) => d,
@@ -46,7 +52,9 @@ fn decodes_av1_10bit() {
         Err(e) => panic!("open AV1 device: {e:?}"),
     };
     let std = to_std_av1_seq_header(&seq);
-    let session = device.create_av1_session(&std, W as u32, H as u32).expect("session");
+    let session = device
+        .create_av1_session(&std, W as u32, H as u32)
+        .expect("session");
     let mut dec = match device.create_av1_dpb_decoder(&session, &seq) {
         Ok(d) => d,
         Err(VulkanVideoError::UnsupportedStream) | Err(VulkanVideoError::ExtensionUnsupported) => {
@@ -69,7 +77,10 @@ fn decodes_av1_10bit() {
             lo = lo.min(v);
             hi = hi.max(v);
         }
-        assert!(hi > lo + 64, "frame {i} luma nearly uniform ({lo}..={hi}); decode likely failed");
+        assert!(
+            hi > lo + 64,
+            "frame {i} luma nearly uniform ({lo}..={hi}); decode likely failed"
+        );
     }
 
     if let Ok(path) = std::env::var("G2G_AV1_10BIT_REF") {
@@ -90,8 +101,10 @@ fn decodes_av1_10bit() {
             let mut usad = 0u64;
             let mut vsad = 0u64;
             for k in 0..cw * ch {
-                usad += ((le16(&f.chroma, 2 * k) >> 6) as i32 - le16(ru, k) as i32).unsigned_abs() as u64;
-                vsad += ((le16(&f.chroma, 2 * k + 1) >> 6) as i32 - le16(rv, k) as i32).unsigned_abs() as u64;
+                usad += ((le16(&f.chroma, 2 * k) >> 6) as i32 - le16(ru, k) as i32).unsigned_abs()
+                    as u64;
+                vsad += ((le16(&f.chroma, 2 * k + 1) >> 6) as i32 - le16(rv, k) as i32)
+                    .unsigned_abs() as u64;
             }
             eprintln!(
                 "frame {i}: Y SAD/px={:.6} U={:.6} V={:.6}",

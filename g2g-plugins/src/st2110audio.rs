@@ -18,7 +18,6 @@ use alloc::vec::Vec;
 use g2g_core::rtp::{RtpHeader, RTP_HEADER_LEN};
 use g2g_core::MediaClock;
 
-
 /// PCM sample depth on the wire (ST 2110-30 permits 16- and 24-bit).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SampleDepth {
@@ -107,7 +106,10 @@ impl St2110AudioPacketizer {
         let total_frames = samples.len() / ch;
         // RTP timestamps advance by exact sample counts from the first frame's
         // media-clock value, not by re-deriving from ns each packet.
-        let base_ts = self.clock.rtp_timestamp(g2g_core::TaiNs(first_sample_tai_ns)).get();
+        let base_ts = self
+            .clock
+            .rtp_timestamp(g2g_core::TaiNs(first_sample_tai_ns))
+            .get();
 
         let mut packets = Vec::new();
         let mut frame = 0usize;
@@ -163,7 +165,10 @@ pub struct St2110AudioDepacketizer {
 impl St2110AudioDepacketizer {
     /// A depacketizer for `channels` at `depth` (must match the sender).
     pub fn new(channels: u16, depth: SampleDepth) -> Self {
-        Self { channels: channels.max(1), depth }
+        Self {
+            channels: channels.max(1),
+            depth,
+        }
     }
 
     /// Parse one RTP packet into its sequence, timestamp, and interleaved samples,
@@ -191,7 +196,11 @@ impl St2110AudioDepacketizer {
         for chunk in payload.chunks_exact(sample_bytes) {
             samples.push(self.depth.read(chunk));
         }
-        Some(St2110AudioPacket { sequence, rtp_timestamp, samples })
+        Some(St2110AudioPacket {
+            sequence,
+            rtp_timestamp,
+            samples,
+        })
     }
 }
 
@@ -217,7 +226,8 @@ mod tests {
     #[test]
     fn round_trips_l24_stereo_across_packets() {
         let tai = 1_700_000_000_000_000_000u64;
-        let mut tx = St2110AudioPacketizer::new(97, 0xCAFE, RATE, 2, SampleDepth::L24, FRAMES_PER_PKT);
+        let mut tx =
+            St2110AudioPacketizer::new(97, 0xCAFE, RATE, 2, SampleDepth::L24, FRAMES_PER_PKT);
         let rx = St2110AudioDepacketizer::new(2, SampleDepth::L24);
         let input = stereo(120); // 120 frames -> 3 packets (48 + 48 + 24)
 
@@ -231,7 +241,13 @@ mod tests {
         for (i, pkt) in packets.iter().enumerate() {
             let p = rx.depacketize(pkt).expect("valid packet");
             assert_eq!(p.sequence, i as u16, "sequence increments per packet");
-            assert_eq!(p.rtp_timestamp, clock.rtp_timestamp(g2g_core::TaiNs(tai)).wrapping_add((i * FRAMES_PER_PKT) as u32).get());
+            assert_eq!(
+                p.rtp_timestamp,
+                clock
+                    .rtp_timestamp(g2g_core::TaiNs(tai))
+                    .wrapping_add((i * FRAMES_PER_PKT) as u32)
+                    .get()
+            );
             out.extend_from_slice(&p.samples);
         }
         assert_eq!(out, input, "L24 PCM survives the round trip, sign-extended");
@@ -258,7 +274,10 @@ mod tests {
         let p = rx.depacketize(&packets[0]).unwrap();
         // A receiver recovers the sampling time from the timestamp + its PTP clock.
         let recovered = MediaClock::audio(RATE)
-            .tai_from_rtp(g2g_core::RtpTs(p.rtp_timestamp), g2g_core::TaiNs(tai + 5_000_000))
+            .tai_from_rtp(
+                g2g_core::RtpTs(p.rtp_timestamp),
+                g2g_core::TaiNs(tai + 5_000_000),
+            )
             .get();
         assert!(tai.abs_diff(recovered) <= MediaClock::audio(RATE).ticks_to_ns(1) + 1);
     }
@@ -266,10 +285,16 @@ mod tests {
     #[test]
     fn rejects_short_and_ragged_packets() {
         let rx = St2110AudioDepacketizer::new(2, SampleDepth::L24);
-        assert!(rx.depacketize(&[0u8; 8]).is_none(), "shorter than an RTP header");
+        assert!(
+            rx.depacketize(&[0u8; 8]).is_none(),
+            "shorter than an RTP header"
+        );
         // A header plus a payload that is not a whole stereo L24 frame (6 bytes).
         let mut ragged = vec![0x80, 96, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         ragged.extend_from_slice(&[1, 2, 3, 4]); // 4 bytes, not a multiple of 6
-        assert!(rx.depacketize(&ragged).is_none(), "partial sample-frame rejected");
+        assert!(
+            rx.depacketize(&ragged).is_none(),
+            "partial sample-frame rejected"
+        );
     }
 }

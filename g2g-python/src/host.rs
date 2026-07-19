@@ -44,7 +44,9 @@ use pyo3::ffi;
 use pyo3::prelude::*;
 
 use g2g_core::runtime::{bounded, Receiver};
-use g2g_core::{Caps, Dim, Frame, G2gError, HardwareError, MemoryDomain, PropValue, RawVideoFormat};
+use g2g_core::{
+    Caps, Dim, Frame, G2gError, HardwareError, MemoryDomain, PropValue, RawVideoFormat,
+};
 
 use crate::format::format_to_py;
 
@@ -143,9 +145,22 @@ impl FrameBuffer {
 #[cfg_attr(not(feature = "analytics"), allow(dead_code))]
 #[derive(Debug, Clone)]
 enum Staged {
-    Object { label: u32, x: f32, y: f32, w: f32, h: f32, score: f32 },
-    Classification { label: u32, score: f32 },
-    Blob { header: String, payload: Vec<u8> },
+    Object {
+        label: u32,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        score: f32,
+    },
+    Classification {
+        label: u32,
+        score: f32,
+    },
+    Blob {
+        header: String,
+        payload: Vec<u8>,
+    },
 }
 
 /// The analytics sink handed to `g2g_process` as `meta`: the `AnalyticsBackend`
@@ -172,7 +187,10 @@ struct MetaSink {
 
 impl MetaSink {
     fn stage(&self, item: Staged) {
-        self.staged.lock().expect("MetaSink staged lock poisoned").push(item);
+        self.staged
+            .lock()
+            .expect("MetaSink staged lock poisoned")
+            .push(item);
     }
 }
 
@@ -181,7 +199,14 @@ impl MetaSink {
     /// Add an object-detection box: class `label` id, pixel `(x, y, w, h)`,
     /// confidence `score` in `[0, 1]`.
     fn add_object(&self, label: u32, x: f32, y: f32, w: f32, h: f32, score: f32) {
-        self.stage(Staged::Object { label, x, y, w, h, score });
+        self.stage(Staged::Object {
+            label,
+            x,
+            y,
+            w,
+            h,
+            score,
+        });
     }
 
     /// Add a whole-frame classification: class `label` id and `score`.
@@ -253,9 +278,11 @@ impl PyWorker {
             .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
 
         match ack_rx.recv() {
-            Ok(Ok(())) => {
-                Ok(Self { job_tx: Some(job_tx), result_rx, handle: Some(handle) })
-            }
+            Ok(Ok(())) => Ok(Self {
+                job_tx: Some(job_tx),
+                result_rx,
+                handle: Some(handle),
+            }),
             // Construction failed in Python: drain the now-finished thread.
             Ok(Err(e)) => {
                 let _ = handle.join();
@@ -275,7 +302,13 @@ impl PyWorker {
     pub(crate) async fn run(&self, frame: Frame, caps: &Caps) -> Result<Frame, G2gError> {
         let (width, height, fmt) = raw_video_dims(caps)?;
         let mut out = self
-            .dispatch(Job { frames: vec![frame], width, height, fmt, kind: JobKind::Transform })
+            .dispatch(Job {
+                frames: vec![frame],
+                width,
+                height,
+                fmt,
+                kind: JobKind::Transform,
+            })
             .await?;
         out.pop().ok_or(G2gError::Shutdown)
     }
@@ -289,7 +322,14 @@ impl PyWorker {
         caps: &Caps,
     ) -> Result<Vec<Frame>, G2gError> {
         let (width, height, fmt) = raw_video_dims(caps)?;
-        self.dispatch(Job { frames, width, height, fmt, kind: JobKind::Batch }).await
+        self.dispatch(Job {
+            frames,
+            width,
+            height,
+            fmt,
+            kind: JobKind::Batch,
+        })
+        .await
     }
 
     /// Hand a blank frame to the Python source to fill. Returns the produced
@@ -301,7 +341,13 @@ impl PyWorker {
     ) -> Result<Option<Frame>, G2gError> {
         let (width, height, fmt) = raw_video_dims(caps)?;
         let mut out = self
-            .dispatch(Job { frames: vec![frame], width, height, fmt, kind: JobKind::Produce })
+            .dispatch(Job {
+                frames: vec![frame],
+                width,
+                height,
+                fmt,
+                kind: JobKind::Produce,
+            })
             .await?;
         Ok(out.pop())
     }
@@ -312,7 +358,10 @@ impl PyWorker {
             .ok_or(G2gError::Shutdown)?
             .send(job)
             .map_err(|_| G2gError::Shutdown)?;
-        self.result_rx.recv().await.unwrap_or(Err(G2gError::Shutdown))
+        self.result_rx
+            .recv()
+            .await
+            .unwrap_or(Err(G2gError::Shutdown))
     }
 }
 
@@ -338,7 +387,8 @@ fn worker_main(
     jobs: mpsc::Receiver<Job>,
     results: g2g_core::runtime::Sender<Reply>,
 ) {
-    let instance = match Python::attach(|py| instantiate(py, &module, &class, draw_label, &params)) {
+    let instance = match Python::attach(|py| instantiate(py, &module, &class, draw_label, &params))
+    {
         Ok(obj) => {
             let _ = ack.send(Ok(()));
             obj
@@ -429,7 +479,16 @@ fn process_job(py: Python<'_>, instance: &Py<PyAny>, mut job: Job) -> Reply {
     let produced = (|| -> PyResult<bool> {
         let buffers: Vec<Py<FrameBuffer>> = spans
             .iter()
-            .map(|&(ptr, len)| Py::new(py, FrameBuffer { ptr, len, exports: core::cell::Cell::new(0) }))
+            .map(|&(ptr, len)| {
+                Py::new(
+                    py,
+                    FrameBuffer {
+                        ptr,
+                        len,
+                        exports: core::cell::Cell::new(0),
+                    },
+                )
+            })
             .collect::<PyResult<_>>()?;
         let bound = instance.bind(py);
         let (w, h, fmt) = (job.width, job.height, format_to_py(job.fmt));
@@ -442,12 +501,18 @@ fn process_job(py: Python<'_>, instance: &Py<PyAny>, mut job: Job) -> Reply {
                 true
             }
             JobKind::Transform => {
-                let buffer = buffers.first().expect("single job has one frame").clone_ref(py);
+                let buffer = buffers
+                    .first()
+                    .expect("single job has one frame")
+                    .clone_ref(py);
                 bound.call_method1("g2g_process", (buffer, w, h, fmt, sink.clone_ref(py)))?;
                 true
             }
             JobKind::Produce => {
-                let buffer = buffers.first().expect("produce job has one frame").clone_ref(py);
+                let buffer = buffers
+                    .first()
+                    .expect("produce job has one frame")
+                    .clone_ref(py);
                 let ret =
                     bound.call_method1("g2g_produce", (buffer, w, h, fmt, sink.clone_ref(py)))?;
                 ret.extract::<bool>()?
@@ -468,7 +533,11 @@ fn process_job(py: Python<'_>, instance: &Py<PyAny>, mut job: Job) -> Reply {
     // Drain the staged results regardless (so the field is always read);
     // materialize onto the anchor frame (frame 0) only under `analytics`.
     let staged = core::mem::take(
-        &mut *sink.borrow(py).staged.lock().expect("MetaSink staged lock poisoned"),
+        &mut *sink
+            .borrow(py)
+            .staged
+            .lock()
+            .expect("MetaSink staged lock poisoned"),
     );
 
     match produced {
@@ -499,22 +568,44 @@ fn attach_metadata(frame: &mut Frame, staged: Vec<Staged>, frame_w: u32, frame_h
     // to [0, 1] so it survives a downstream scale / crop. Divide by the frame
     // dims here (the one place that knows them), so an `analyticsoverlay`
     // denormalizes back to the right pixels. Guard against a zero dim.
-    let sx = if frame_w > 0 { 1.0 / frame_w as f32 } else { 0.0 };
-    let sy = if frame_h > 0 { 1.0 / frame_h as f32 } else { 0.0 };
+    let sx = if frame_w > 0 {
+        1.0 / frame_w as f32
+    } else {
+        0.0
+    };
+    let sy = if frame_h > 0 {
+        1.0 / frame_h as f32
+    } else {
+        0.0
+    };
     let mut analytics = AnalyticsMeta::new();
     let mut blobs = BlobMeta::new();
     for s in staged {
         match s {
-            Staged::Object { label, x, y, w, h, score } => {
+            Staged::Object {
+                label,
+                x,
+                y,
+                w,
+                h,
+                score,
+            } => {
                 analytics.add_detection(ObjectDetection {
-                    bbox: BBox { x: x * sx, y: y * sy, w: w * sx, h: h * sy },
+                    bbox: BBox {
+                        x: x * sx,
+                        y: y * sy,
+                        w: w * sx,
+                        h: h * sy,
+                    },
                     label,
                     confidence: score,
                 });
             }
             Staged::Classification { label, score } => {
-                analytics
-                    .push(AnalyticsNode::Classification(Classification { label, confidence: score }));
+                analytics.push(AnalyticsNode::Classification(Classification {
+                    label,
+                    confidence: score,
+                }));
             }
             Staged::Blob { header, payload } => blobs.push(header, payload),
         }
@@ -535,9 +626,12 @@ fn attach_metadata(_frame: &mut Frame, _staged: Vec<Staged>, _frame_w: u32, _fra
 /// Pull the fixed `(width, height, format)` out of negotiated raw-video caps.
 fn raw_video_dims(caps: &Caps) -> Result<(u32, u32, RawVideoFormat), G2gError> {
     match caps {
-        Caps::RawVideo { format, width, height, .. } => {
-            Ok((dim_fixed(width)?, dim_fixed(height)?, *format))
-        }
+        Caps::RawVideo {
+            format,
+            width,
+            height,
+            ..
+        } => Ok((dim_fixed(width)?, dim_fixed(height)?, *format)),
         _ => Err(G2gError::CapsMismatch),
     }
 }

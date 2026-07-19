@@ -34,7 +34,11 @@ impl Variant {
     /// (`avc1.4d401e`, `mp4a.40.2`, ...), empty when the attribute is absent.
     pub fn codec_list(&self) -> Vec<&str> {
         match &self.codecs {
-            Some(c) => c.split(',').map(str::trim).filter(|s| !s.is_empty()).collect(),
+            Some(c) => c
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .collect(),
             None => Vec::new(),
         }
     }
@@ -180,21 +184,34 @@ impl MasterPlaylist {
     /// empty group. The `playbin` HLS fan-out uses this to honour a
     /// `#audio-lang=` / `#subtitle-lang=` URI hint when choosing the alternate
     /// audio / subtitle rendition.
-    pub fn pick_rendition(&self, media_type: MediaType, group_id: &str, language: Option<&str>) -> Option<&Rendition> {
+    pub fn pick_rendition(
+        &self,
+        media_type: MediaType,
+        group_id: &str,
+        language: Option<&str>,
+    ) -> Option<&Rendition> {
         let group = self.renditions_in(media_type, group_id);
         if let Some(pref) = language.map(str::trim).filter(|p| !p.is_empty()) {
-            if let Some(r) =
-                group.iter().find(|r| r.language.as_deref().is_some_and(|l| l.eq_ignore_ascii_case(pref)))
-            {
+            if let Some(r) = group.iter().find(|r| {
+                r.language
+                    .as_deref()
+                    .is_some_and(|l| l.eq_ignore_ascii_case(pref))
+            }) {
                 return Some(r);
             }
-            if let Some(r) =
-                group.iter().find(|r| r.language.as_deref().is_some_and(|l| lang_prefix_match(l, pref)))
-            {
+            if let Some(r) = group.iter().find(|r| {
+                r.language
+                    .as_deref()
+                    .is_some_and(|l| lang_prefix_match(l, pref))
+            }) {
                 return Some(r);
             }
         }
-        group.iter().find(|r| r.default).or_else(|| group.first()).copied()
+        group
+            .iter()
+            .find(|r| r.default)
+            .or_else(|| group.first())
+            .copied()
     }
 }
 
@@ -260,8 +277,10 @@ pub fn parse(text: &str) -> Result<Playlist, HlsError> {
                 .find(|(k, _)| *k == "BYTERANGE")
                 .and_then(|(_, v)| {
                     let (length, offset) = parse_byterange(v.trim_matches('"'));
-                    (length > 0)
-                        .then_some(ByteRange { offset: offset.unwrap_or(0), length })
+                    (length > 0).then_some(ByteRange {
+                        offset: offset.unwrap_or(0),
+                        length,
+                    })
                 });
         } else if let Some(attrs) = line.strip_prefix("#EXT-X-KEY:") {
             current_key = parse_key(attrs);
@@ -286,7 +305,12 @@ pub fn parse(text: &str) -> Result<Playlist, HlsError> {
                 });
                 ByteRange { offset, length }
             });
-            segments.push(Segment { uri, duration_ms, key: current_key.clone(), byte_range });
+            segments.push(Segment {
+                uri,
+                duration_ms,
+                key: current_key.clone(),
+                byte_range,
+            });
         }
         // a bare URI with no pending tag is ignored
     }
@@ -296,7 +320,10 @@ pub fn parse(text: &str) -> Result<Playlist, HlsError> {
     }
 
     if !variants.is_empty() || !renditions.is_empty() {
-        Ok(Playlist::Master(MasterPlaylist { variants, renditions }))
+        Ok(Playlist::Master(MasterPlaylist {
+            variants,
+            renditions,
+        }))
     } else {
         Ok(Playlist::Media(MediaPlaylist {
             target_duration_secs,
@@ -383,7 +410,9 @@ fn parse_key(attrs: &str) -> Option<SegmentKey> {
 
 /// `IV=0x<32 hex digits>` -> 16 bytes. Anything else is rejected.
 fn parse_iv(value: &str) -> Option<[u8; 16]> {
-    let hex = value.strip_prefix("0x").or_else(|| value.strip_prefix("0X"))?;
+    let hex = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))?;
     // Work on bytes: slicing the &str by index would panic on a non-ASCII byte
     // that lands mid-char in the untrusted attribute.
     let hex = hex.as_bytes();
@@ -490,7 +519,12 @@ mod tests {
         assert_eq!(m.segments.len(), 3);
         assert_eq!(
             m.segments[0],
-            Segment { uri: "seg0.ts".into(), duration_ms: 9009, key: None, byte_range: None }
+            Segment {
+                uri: "seg0.ts".into(),
+                duration_ms: 9009,
+                key: None,
+                byte_range: None
+            }
         );
         assert_eq!(m.segments[2].duration_ms, 3003);
     }
@@ -506,7 +540,11 @@ mod tests {
         let Playlist::Media(m) = parse(text).unwrap() else {
             panic!("expected media playlist");
         };
-        assert_eq!(m.map_uri.as_deref(), Some("init.mp4"), "EXT-X-MAP init segment recovered");
+        assert_eq!(
+            m.map_uri.as_deref(),
+            Some("init.mp4"),
+            "EXT-X-MAP init segment recovered"
+        );
         assert_eq!(m.segments[0].uri, "seg0.m4s");
     }
 
@@ -526,13 +564,37 @@ mod tests {
             panic!("expected media playlist");
         };
         assert_eq!(m.map_uri.as_deref(), Some("all.mp4"));
-        assert_eq!(m.map_byte_range, Some(ByteRange { offset: 0, length: 800 }));
+        assert_eq!(
+            m.map_byte_range,
+            Some(ByteRange {
+                offset: 0,
+                length: 800
+            })
+        );
         assert_eq!(m.segments.len(), 3);
-        assert_eq!(m.segments[0].byte_range, Some(ByteRange { offset: 800, length: 200 }));
+        assert_eq!(
+            m.segments[0].byte_range,
+            Some(ByteRange {
+                offset: 800,
+                length: 200
+            })
+        );
         // Implicit offset continues after the previous sub-range (800+200=1000).
-        assert_eq!(m.segments[1].byte_range, Some(ByteRange { offset: 1000, length: 300 }));
+        assert_eq!(
+            m.segments[1].byte_range,
+            Some(ByteRange {
+                offset: 1000,
+                length: 300
+            })
+        );
         // And again (1000+300=1300).
-        assert_eq!(m.segments[2].byte_range, Some(ByteRange { offset: 1300, length: 150 }));
+        assert_eq!(
+            m.segments[2].byte_range,
+            Some(ByteRange {
+                offset: 1300,
+                length: 150
+            })
+        );
     }
 
     #[test]
@@ -556,7 +618,10 @@ mod tests {
         };
         assert_eq!(master.variants.len(), 2);
         assert_eq!(master.variants[0].resolution, Some((640, 360)));
-        assert_eq!(master.variants[0].codecs.as_deref(), Some("avc1.4d401e,mp4a.40.2"));
+        assert_eq!(
+            master.variants[0].codecs.as_deref(),
+            Some("avc1.4d401e,mp4a.40.2")
+        );
 
         // No cap: highest bandwidth wins.
         assert_eq!(master.select(None).unwrap().uri, "high.m3u8");
@@ -606,18 +671,40 @@ mod tests {
             #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"a\",NAME=\"English\",LANGUAGE=\"en\",DEFAULT=YES,URI=\"a/en.m3u8\"\n\
             #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"a\",NAME=\"Français\",LANGUAGE=\"fr-FR\",URI=\"a/fr.m3u8\"\n\
             #EXT-X-STREAM-INF:BANDWIDTH=1,AUDIO=\"a\"\nv.m3u8\n";
-        let Playlist::Master(m) = parse(text).unwrap() else { panic!("master") };
+        let Playlist::Master(m) = parse(text).unwrap() else {
+            panic!("master")
+        };
 
         // Exact language (case-insensitive).
-        assert_eq!(m.pick_rendition(MediaType::Audio, "a", Some("FR-fr")).unwrap().name, "Français");
+        assert_eq!(
+            m.pick_rendition(MediaType::Audio, "a", Some("FR-fr"))
+                .unwrap()
+                .name,
+            "Français"
+        );
         // Primary-subtag prefix: `fr` matches `fr-FR`.
-        assert_eq!(m.pick_rendition(MediaType::Audio, "a", Some("fr")).unwrap().name, "Français");
+        assert_eq!(
+            m.pick_rendition(MediaType::Audio, "a", Some("fr"))
+                .unwrap()
+                .name,
+            "Français"
+        );
         // No preference -> the DEFAULT=YES rendition.
-        assert_eq!(m.pick_rendition(MediaType::Audio, "a", None).unwrap().name, "English");
+        assert_eq!(
+            m.pick_rendition(MediaType::Audio, "a", None).unwrap().name,
+            "English"
+        );
         // An unknown language falls back to DEFAULT, not nothing.
-        assert_eq!(m.pick_rendition(MediaType::Audio, "a", Some("de")).unwrap().name, "English");
+        assert_eq!(
+            m.pick_rendition(MediaType::Audio, "a", Some("de"))
+                .unwrap()
+                .name,
+            "English"
+        );
         // An empty group yields None.
-        assert!(m.pick_rendition(MediaType::Audio, "nope", Some("en")).is_none());
+        assert!(m
+            .pick_rendition(MediaType::Audio, "nope", Some("en"))
+            .is_none());
     }
 
     #[test]
@@ -656,7 +743,11 @@ mod tests {
         iv1[15] = 1;
         assert_eq!(
             m.segments[0].key,
-            Some(SegmentKey { method: KeyMethod::Aes128, uri: "k1.key".into(), iv: Some(iv1) }),
+            Some(SegmentKey {
+                method: KeyMethod::Aes128,
+                uri: "k1.key".into(),
+                iv: Some(iv1)
+            }),
         );
         // The key carries forward to the next segment unchanged.
         assert_eq!(m.segments[1].key, m.segments[0].key);
@@ -665,7 +756,11 @@ mod tests {
         // A new key with no IV defaults to a sequence-derived IV (resolved later).
         assert_eq!(
             m.segments[3].key,
-            Some(SegmentKey { method: KeyMethod::Aes128, uri: "k2.key".into(), iv: None }),
+            Some(SegmentKey {
+                method: KeyMethod::Aes128,
+                uri: "k2.key".into(),
+                iv: None
+            }),
         );
     }
 

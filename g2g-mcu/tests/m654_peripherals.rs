@@ -41,12 +41,23 @@ fn crc8_matches_the_datasheet_worked_example() {
 fn conversion_matches_the_datasheet_transfer_functions() {
     // Endpoints of T = -45 + 175 * raw/65535.
     assert_eq!(raw_to_millicelsius(0), -45_000, "raw 0 -> -45.000 C");
-    assert_eq!(raw_to_millicelsius(65_535), 130_000, "raw full-scale -> 130.000 C");
+    assert_eq!(
+        raw_to_millicelsius(65_535),
+        130_000,
+        "raw full-scale -> 130.000 C"
+    );
     // Endpoints of RH = 100 * raw/65535.
     assert_eq!(raw_to_milli_rh(0), 0);
-    assert_eq!(raw_to_milli_rh(65_535), 100_000, "raw full-scale -> 100.000 %RH");
+    assert_eq!(
+        raw_to_milli_rh(65_535),
+        100_000,
+        "raw full-scale -> 100.000 %RH"
+    );
     // A midpoint, hand-checked: 0x6667 = 26215 -> 175000*26215/65535 - 45000.
-    assert_eq!(raw_to_millicelsius(0x6667), (-45_000_i64 + 175_000 * 26_215 / 65_535) as i32);
+    assert_eq!(
+        raw_to_millicelsius(0x6667),
+        (-45_000_i64 + 175_000 * 26_215 / 65_535) as i32
+    );
 }
 
 /// A mock SHT3x on the I2C bus: every read returns the canned 6-byte response.
@@ -82,21 +93,38 @@ fn sht3x_response(raw_t: u16, raw_rh: u16) -> [u8; 6] {
 #[test]
 fn sht3x_source_reads_converts_and_lends_a_reading() {
     let last_write = Rc::new(RefCell::new(Vec::new()));
-    let i2c = MockSht3x { response: sht3x_response(0x6667, 0x8000), last_write: last_write.clone() };
+    let i2c = MockSht3x {
+        response: sht3x_response(0x6667, 0x8000),
+        last_write: last_write.clone(),
+    };
     let ring: &'static StaticLendRing<2, SHT3X_READING_BYTES> = leaked_ring();
     let mut src = Sht3xSrc::new(i2c, SHT3X_ADDR_DEFAULT, ring, 1_000_000).with_frame_limit(1);
 
     let frame = block_on(src.next()).expect("read").expect("frame");
-    let MemoryDomain::System(s) = &frame.domain else { panic!("system frame") };
+    let MemoryDomain::System(s) = &frame.domain else {
+        panic!("system frame")
+    };
     let bytes = s.as_slice();
     assert_eq!(bytes.len(), SHT3X_READING_BYTES);
     // The reading is [t_mC i32 LE, rh_mpct i32 LE], the datasheet conversion.
     let t = i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
     let rh = i32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
-    assert_eq!(t, raw_to_millicelsius(0x6667), "temperature converted per datasheet");
-    assert_eq!(rh, raw_to_milli_rh(0x8000), "humidity converted per datasheet");
+    assert_eq!(
+        t,
+        raw_to_millicelsius(0x6667),
+        "temperature converted per datasheet"
+    );
+    assert_eq!(
+        rh,
+        raw_to_milli_rh(0x8000),
+        "humidity converted per datasheet"
+    );
     // The driver issued the single-shot high-repeatability command.
-    assert_eq!(*last_write.borrow(), vec![0x2C, 0x06], "datasheet measurement command");
+    assert_eq!(
+        *last_write.borrow(),
+        vec![0x2C, 0x06],
+        "datasheet measurement command"
+    );
 }
 
 #[test]
@@ -104,7 +132,10 @@ fn sht3x_source_rejects_a_corrupt_crc() {
     let last_write = Rc::new(RefCell::new(Vec::new()));
     let mut bad = sht3x_response(0x6667, 0x8000);
     bad[2] ^= 0xFF; // corrupt the temperature CRC
-    let i2c = MockSht3x { response: bad, last_write };
+    let i2c = MockSht3x {
+        response: bad,
+        last_write,
+    };
     let ring: &'static StaticLendRing<2, SHT3X_READING_BYTES> = leaked_ring();
     let mut src = Sht3xSrc::new(i2c, SHT3X_ADDR_DEFAULT, ring, 0);
     assert_eq!(
@@ -155,7 +186,14 @@ fn frame(seq: u64, payload: &[u8]) -> Frame {
     let slice = unsafe {
         SystemSlice::from_foreign(leaked.as_ptr(), leaked.len(), None, core::ptr::null_mut())
     };
-    Frame::new(MemoryDomain::System(slice), FrameTiming { pts_ns: seq, ..FrameTiming::default() }, seq)
+    Frame::new(
+        MemoryDomain::System(slice),
+        FrameTiming {
+            pts_ns: seq,
+            ..FrameTiming::default()
+        },
+        seq,
+    )
 }
 
 #[test]
@@ -174,10 +212,16 @@ fn uart_sink_and_source_round_trip_fixed_frames() {
     let mut src = UartSrc::new(MockRx { wire: wire.clone() }, ring, 4, 0).with_frame_limit(3);
     let mut got = Vec::new();
     while let Some(f) = block_on(src.next()).expect("rx") {
-        let MemoryDomain::System(s) = &f.domain else { panic!("system frame") };
+        let MemoryDomain::System(s) = &f.domain else {
+            panic!("system frame")
+        };
         got.push(s.as_slice().to_vec());
     }
-    assert_eq!(got, payloads.iter().map(|p| p.to_vec()).collect::<Vec<_>>(), "frames round-trip in order");
+    assert_eq!(
+        got,
+        payloads.iter().map(|p| p.to_vec()).collect::<Vec<_>>(),
+        "frames round-trip in order"
+    );
     assert!(wire.borrow().is_empty(), "the wire drained exactly");
 }
 
@@ -188,8 +232,14 @@ fn uart_source_reports_clean_eos_at_a_frame_boundary() {
     wire.borrow_mut().extend([0xAA, 0xBB, 0xCC, 0xDD]);
     let ring: &'static StaticLendRing<2, 4> = leaked_ring();
     let mut src = UartSrc::new(MockRx { wire }, ring, 4, 0);
-    assert!(block_on(src.next()).expect("frame").is_some(), "the whole frame reads");
-    assert!(block_on(src.next()).expect("eos").is_none(), "drained link is a clean EOS at a boundary");
+    assert!(
+        block_on(src.next()).expect("frame").is_some(),
+        "the whole frame reads"
+    );
+    assert!(
+        block_on(src.next()).expect("eos").is_none(),
+        "drained link is a clean EOS at a boundary"
+    );
 }
 
 // --- I2C sensor -> UART egress pipeline (the telemetry path) ---
@@ -216,5 +266,8 @@ fn sensor_to_uart_telemetry_pipeline() {
         expect.extend_from_slice(&raw_to_millicelsius(0x5000).to_le_bytes());
         expect.extend_from_slice(&raw_to_milli_rh(0x9000).to_le_bytes());
     }
-    assert_eq!(out, expect, "sensor readings reach the UART converted per datasheet");
+    assert_eq!(
+        out, expect,
+        "sensor readings reach the UART converted per datasheet"
+    );
 }

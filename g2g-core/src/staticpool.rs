@@ -36,7 +36,10 @@ impl<T, const N: usize> StaticBufferPool<T, N> {
     /// Build a pool from `N` pre-allocated buffers; capacity is fixed at `N`.
     pub fn new(buffers: [T; N]) -> Self {
         Self {
-            inner: RefCell::new(Inner { slots: buffers.map(Some), waker: None }),
+            inner: RefCell::new(Inner {
+                slots: buffers.map(Some),
+                waker: None,
+            }),
         }
     }
 
@@ -47,7 +50,12 @@ impl<T, const N: usize> StaticBufferPool<T, N> {
 
     /// Buffers currently available for acquisition.
     pub fn available(&self) -> usize {
-        self.inner.borrow().slots.iter().filter(|s| s.is_some()).count()
+        self.inner
+            .borrow()
+            .slots
+            .iter()
+            .filter(|s| s.is_some())
+            .count()
     }
 
     /// Buffers currently checked out (`capacity - available`).
@@ -60,7 +68,10 @@ impl<T, const N: usize> StaticBufferPool<T, N> {
         let mut inner = self.inner.borrow_mut();
         for slot in inner.slots.iter_mut() {
             if let Some(value) = slot.take() {
-                return Some(StaticPooled { pool: self, value: Some(value) });
+                return Some(StaticPooled {
+                    pool: self,
+                    value: Some(value),
+                });
             }
         }
         None
@@ -102,13 +113,17 @@ pub struct StaticPooled<'a, T, const N: usize> {
 impl<T, const N: usize> Deref for StaticPooled<'_, T, N> {
     type Target = T;
     fn deref(&self) -> &T {
-        self.value.as_ref().expect("StaticPooled accessed after drop")
+        self.value
+            .as_ref()
+            .expect("StaticPooled accessed after drop")
     }
 }
 
 impl<T, const N: usize> DerefMut for StaticPooled<'_, T, N> {
     fn deref_mut(&mut self) -> &mut T {
-        self.value.as_mut().expect("StaticPooled accessed after drop")
+        self.value
+            .as_mut()
+            .expect("StaticPooled accessed after drop")
     }
 }
 
@@ -200,7 +215,10 @@ impl<const N: usize, const BYTES: usize> StaticLendRing<N, BYTES> {
     /// `&'static` ring trivially outlives every published frame (see e.g.
     /// `g2g-mcu`'s `GrabberSrc::new`).
     pub const fn new() -> Self {
-        Self { slots: [Self::EMPTY_SLOT; N], leased: [Self::UNLEASED; N] }
+        Self {
+            slots: [Self::EMPTY_SLOT; N],
+            leased: [Self::UNLEASED; N],
+        }
     }
 
     /// Slot count (the const `N`).
@@ -215,7 +233,10 @@ impl<const N: usize, const BYTES: usize> StaticLendRing<N, BYTES> {
 
     /// Slots currently lent and not yet reclaimed.
     pub fn leased_count(&self) -> usize {
-        self.leased.iter().filter(|f| f.load(Ordering::Acquire)).count()
+        self.leased
+            .iter()
+            .filter(|f| f.load(Ordering::Acquire))
+            .count()
     }
 
     /// Reserve a free slot for capture, or `None` if all `N` are still in flight
@@ -230,7 +251,10 @@ impl<const N: usize, const BYTES: usize> StaticLendRing<N, BYTES> {
         for idx in 0..N {
             if !self.leased[idx].load(Ordering::Acquire) {
                 self.leased[idx].store(true, Ordering::Release);
-                return Some(RingSlot { slot: &self.slots[idx], lease: &self.leased[idx] });
+                return Some(RingSlot {
+                    slot: &self.slots[idx],
+                    lease: &self.leased[idx],
+                });
             }
         }
         None
@@ -305,7 +329,9 @@ impl<const N: usize, const BYTES: usize> RingSlot<'_, N, BYTES> {
 
 impl<const N: usize, const BYTES: usize> fmt::Debug for RingSlot<'_, N, BYTES> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("RingSlot").field("slot", &self.slot.get()).finish()
+        f.debug_struct("RingSlot")
+            .field("slot", &self.slot.get())
+            .finish()
     }
 }
 
@@ -404,20 +430,34 @@ mod tests {
     #[test]
     fn lend_ring_publish_borrows_slot_and_drop_reclaims() {
         let ring: StaticLendRing<2, 8> = StaticLendRing::new();
-        assert_eq!((ring.capacity(), ring.slot_bytes(), ring.leased_count()), (2, 8, 0));
+        assert_eq!(
+            (ring.capacity(), ring.slot_bytes(), ring.leased_count()),
+            (2, 8, 0)
+        );
 
         let mut slot = ring.acquire().expect("free slot");
         slot.buf_mut()[..3].copy_from_slice(&[1, 2, 3]);
         assert_eq!(ring.leased_count(), 1, "acquire leases the slot");
         // SAFETY: `ring` outlives `frame` (both drop at end of scope, frame first).
         let frame = unsafe { slot.publish(3) };
-        assert_eq!(ring.leased_count(), 1, "publish keeps the lease until the frame drops");
+        assert_eq!(
+            ring.leased_count(),
+            1,
+            "publish keeps the lease until the frame drops"
+        );
         // Zero-copy witness: the published bytes alias the ring slot, not a copy.
         assert_eq!(frame.as_slice(), &[1, 2, 3]);
-        assert!(ring.contains(frame.as_slice().as_ptr()), "frame bytes live in the ring");
+        assert!(
+            ring.contains(frame.as_slice().as_ptr()),
+            "frame bytes live in the ring"
+        );
 
         drop(frame);
-        assert_eq!(ring.leased_count(), 0, "dropping the frame reclaims the slot");
+        assert_eq!(
+            ring.leased_count(),
+            0,
+            "dropping the frame reclaims the slot"
+        );
     }
 
     #[test]
@@ -425,9 +465,16 @@ mod tests {
         let ring: StaticLendRing<1, 4> = StaticLendRing::new();
         {
             let _slot = ring.acquire().expect("free slot");
-            assert!(ring.acquire().is_none(), "ring full while the lease is held");
+            assert!(
+                ring.acquire().is_none(),
+                "ring full while the lease is held"
+            );
         }
-        assert_eq!(ring.leased_count(), 0, "dropping an unpublished lease frees the slot");
+        assert_eq!(
+            ring.leased_count(),
+            0,
+            "dropping an unpublished lease frees the slot"
+        );
         assert!(ring.acquire().is_some(), "slot reusable again");
     }
 
@@ -440,13 +487,20 @@ mod tests {
         // SAFETY: as above, the ring outlives this frame and len is 1.
         let f1 = unsafe { ring.acquire().unwrap().publish(1) };
         let p0 = f0.as_slice().as_ptr();
-        assert!(ring.acquire().is_none(), "both slots lent: ring is full (back-pressure)");
+        assert!(
+            ring.acquire().is_none(),
+            "both slots lent: ring is full (back-pressure)"
+        );
 
         drop(f0); // a downstream drop frees one slot
-        // SAFETY: as above; the slot freed by the drop above is reacquired here.
+                  // SAFETY: as above; the slot freed by the drop above is reacquired here.
         let f2 = unsafe { ring.acquire().expect("slot freed by the drop").publish(1) };
         // The recycled frame reuses slot 0's physical buffer: no fresh allocation.
-        assert_eq!(f2.as_slice().as_ptr(), p0, "the freed slot's buffer is recycled");
+        assert_eq!(
+            f2.as_slice().as_ptr(),
+            p0,
+            "the freed slot's buffer is recycled"
+        );
         drop(f1);
         drop(f2);
         assert_eq!(ring.leased_count(), 0);

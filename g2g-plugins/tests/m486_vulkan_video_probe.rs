@@ -5,7 +5,10 @@
 //! H.264 and report the decode limits `intercept_caps` and DPB sizing will use.
 //! Runs for real on a Vulkan GPU (the RTX 3060 dev host); skips cleanly with no
 //! adapter / no Vulkan-video support so CI and non-GPU hosts stay green.
-#![cfg(all(any(target_os = "linux", target_os = "windows"), feature = "vulkan-video"))]
+#![cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    feature = "vulkan-video"
+))]
 
 use g2g_core::runtime::block_on;
 use g2g_plugins::vulkanvideo::{probe_decode_caps, VulkanVideoCodec, VulkanVideoError};

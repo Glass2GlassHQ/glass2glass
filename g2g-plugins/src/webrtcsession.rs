@@ -50,7 +50,9 @@ use g2g_core::{
 
 use crate::filesink::io_err;
 use crate::turn::{self, TurnClient};
-use crate::webrtc_util::{add_ice_candidates, feed_datagram, post_sdp, select_host_ip, send_transmit};
+use crate::webrtc_util::{
+    add_ice_candidates, feed_datagram, post_sdp, select_host_ip, send_transmit,
+};
 use crate::webrtcsink::Track;
 
 /// Default bounded depth of the element->session media channel (per direction).
@@ -189,10 +191,22 @@ impl WebRtcSessionSink {
         ) = {
             let mut api = rtc.sdp_api();
             let video_mid = has_video.then(|| {
-                api.add_media(Track::Video.media_kind(), Direction::SendOnly, None, None, None)
+                api.add_media(
+                    Track::Video.media_kind(),
+                    Direction::SendOnly,
+                    None,
+                    None,
+                    None,
+                )
             });
             let audio_mid = has_audio.then(|| {
-                api.add_media(Track::Audio.media_kind(), Direction::SendOnly, None, None, None)
+                api.add_media(
+                    Track::Audio.media_kind(),
+                    Direction::SendOnly,
+                    None,
+                    None,
+                    None,
+                )
             });
             let (offer, pending) = api.apply().ok_or_else(hw)?;
             (offer.to_sdp_string(), pending, video_mid, audio_mid)
@@ -200,19 +214,32 @@ impl WebRtcSessionSink {
 
         let answer_sdp = post_sdp(&self.whip_url, self.bearer.as_deref(), offer_sdp).await?;
         let answer = SdpAnswer::from_sdp_string(&answer_sdp).map_err(|_| hw())?;
-        rtc.sdp_api().accept_answer(pending, answer).map_err(|_| hw())?;
+        rtc.sdp_api()
+            .accept_answer(pending, answer)
+            .map_err(|_| hw())?;
 
         // The reverse channel of the input pad carrying each track, so the
         // session task can route a per-mid PLI / BWE back to the right source.
         let reverse_for = |kind: Track| {
-            self.tracks.iter().position(|t| *t == Some(kind)).map(|i| self.reverse[i].clone())
+            self.tracks
+                .iter()
+                .position(|t| *t == Some(kind))
+                .map(|i| self.reverse[i].clone())
         };
         let video_reverse = reverse_for(Track::Video);
         let audio_reverse = reverse_for(Track::Audio);
 
         let (tx, rx) = mpsc::channel::<MediaUnit>(self.queue_depth);
         tokio::spawn(run_session(
-            rtc, socket, local, video_mid, audio_mid, video_reverse, audio_reverse, turn, rx,
+            rtc,
+            socket,
+            local,
+            video_mid,
+            audio_mid,
+            video_reverse,
+            audio_reverse,
+            turn,
+            rx,
         ));
         self.tx = Some(tx);
         Ok(())
@@ -222,12 +249,36 @@ impl WebRtcSessionSink {
 /// Settable properties, mirroring `WebRtcSink` (so a `gst-launch` line can target
 /// a server without the builder).
 static WEBRTCSESSION_PROPS: &[PropertySpec] = &[
-    PropertySpec::new("location", PropKind::Str, "WHIP endpoint URL to publish A/V to"),
-    PropertySpec::new("bearer", PropKind::Str, "optional Authorization: Bearer token"),
-    PropertySpec::new("stun-server", PropKind::Str, "STUN server host:port (empty = host-only)"),
-    PropertySpec::new("turn-server", PropKind::Str, "TURN relay host:port (empty = no relay)"),
-    PropertySpec::new("turn-user", PropKind::Str, "TURN long-term credential username"),
-    PropertySpec::new("turn-pass", PropKind::Str, "TURN long-term credential password"),
+    PropertySpec::new(
+        "location",
+        PropKind::Str,
+        "WHIP endpoint URL to publish A/V to",
+    ),
+    PropertySpec::new(
+        "bearer",
+        PropKind::Str,
+        "optional Authorization: Bearer token",
+    ),
+    PropertySpec::new(
+        "stun-server",
+        PropKind::Str,
+        "STUN server host:port (empty = host-only)",
+    ),
+    PropertySpec::new(
+        "turn-server",
+        PropKind::Str,
+        "TURN relay host:port (empty = no relay)",
+    ),
+    PropertySpec::new(
+        "turn-user",
+        PropKind::Str,
+        "TURN long-term credential username",
+    ),
+    PropertySpec::new(
+        "turn-pass",
+        PropKind::Str,
+        "TURN long-term credential password",
+    ),
 ];
 
 fn h264_any() -> Caps {
@@ -240,20 +291,31 @@ fn h264_any() -> Caps {
 }
 
 fn opus_stereo() -> Caps {
-    Caps::Audio { format: AudioFormat::Opus, channels: 2, sample_rate: 48_000 }
+    Caps::Audio {
+        format: AudioFormat::Opus,
+        channels: 2,
+        sample_rate: 48_000,
+    }
 }
 
 /// The track kind an input's caps select (H.264 video or Opus audio).
 fn track_of(caps: &Caps) -> Option<Track> {
     match caps {
-        Caps::CompressedVideo { codec: VideoCodec::H264, .. } => Some(Track::Video),
-        Caps::Audio { format: AudioFormat::Opus, .. } => Some(Track::Audio),
+        Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            ..
+        } => Some(Track::Video),
+        Caps::Audio {
+            format: AudioFormat::Opus,
+            ..
+        } => Some(Track::Audio),
         _ => None,
     }
 }
 
 impl MultiInputElement for WebRtcSessionSink {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -269,7 +331,10 @@ impl MultiInputElement for WebRtcSessionSink {
     }
 
     fn caps_constraint_as_input(&self, _input: usize) -> CapsConstraint<'_> {
-        CapsConstraint::Accepts(CapsSet::from_alternatives(Vec::from([h264_any(), opus_stereo()])))
+        CapsConstraint::Accepts(CapsSet::from_alternatives(Vec::from([
+            h264_any(),
+            opus_stereo(),
+        ])))
     }
 
     fn configure_pipeline(
@@ -306,7 +371,12 @@ impl MultiInputElement for WebRtcSessionSink {
                     let MemoryDomain::System(slice) = &frame.domain else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    let track = self.tracks.get(input).copied().flatten().ok_or(G2gError::NotConfigured)?;
+                    let track = self
+                        .tracks
+                        .get(input)
+                        .copied()
+                        .flatten()
+                        .ok_or(G2gError::NotConfigured)?;
                     let unit = MediaUnit {
                         track,
                         pts_ns: frame.timing.pts_ns,
@@ -522,7 +592,10 @@ mod tests {
         let s = WebRtcSessionSink::new("http://h/whip");
         let rc0 = s.reverse_channel(0).expect("input 0 has a reverse channel");
         let rc1 = s.reverse_channel(1).expect("input 1 has a reverse channel");
-        assert!(s.reverse_channel(2).is_none(), "no channel past the track count");
+        assert!(
+            s.reverse_channel(2).is_none(),
+            "no channel past the track count"
+        );
 
         // The session posts a keyframe request for input 0; the runner-side
         // handle for input 0 sees it (once), input 1's does not.
@@ -536,7 +609,10 @@ mod tests {
 
         // A BWE estimate posted for input 0 surfaces as a bitrate outcome.
         s.reverse[0].set_bitrate(1_200_000);
-        assert!(matches!(rc0.take(), Some(g2g_core::PushOutcome::Bitrate(1_200_000))));
+        assert!(matches!(
+            rc0.take(),
+            Some(g2g_core::PushOutcome::Bitrate(1_200_000))
+        ));
     }
 
     #[test]
@@ -560,10 +636,18 @@ mod tests {
             .with_turn_server("relay:3478", "u", "p");
         assert_eq!(s.bearer.as_deref(), Some("tok"));
         assert_eq!(s.turn_server.as_deref(), Some("relay:3478"));
-        s.set_property("location", PropValue::Str("http://srv/whip".into())).unwrap();
-        assert_eq!(s.get_property("location"), Some(PropValue::Str("http://srv/whip".into())));
-        s.set_property("stun-server", PropValue::Str("stun:3478".into())).unwrap();
+        s.set_property("location", PropValue::Str("http://srv/whip".into()))
+            .unwrap();
+        assert_eq!(
+            s.get_property("location"),
+            Some(PropValue::Str("http://srv/whip".into()))
+        );
+        s.set_property("stun-server", PropValue::Str("stun:3478".into()))
+            .unwrap();
         assert_eq!(s.stun_server.as_deref(), Some("stun:3478"));
-        assert_eq!(s.set_property("nope", PropValue::Str("x".into())), Err(PropError::Unknown));
+        assert_eq!(
+            s.set_property("nope", PropValue::Str("x".into())),
+            Err(PropError::Unknown)
+        );
     }
 }

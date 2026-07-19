@@ -82,8 +82,11 @@ use crate::dmabufwgpu::{dmabuf_frame_bytes, dmabuf_row_stride, DmaBufWgpuBuffer}
 /// packed luma + interleaved-chroma buffer, luma stride). The frame byte size and
 /// row stride come from the shared [`dmabuf_frame_bytes`] / [`dmabuf_row_stride`]
 /// helpers so the export and the [`DmaBufToWgpu`] import agree.
-const FORMATS: [RawVideoFormat; 3] =
-    [RawVideoFormat::Rgba8, RawVideoFormat::Bgra8, RawVideoFormat::Nv12];
+const FORMATS: [RawVideoFormat; 3] = [
+    RawVideoFormat::Rgba8,
+    RawVideoFormat::Bgra8,
+    RawVideoFormat::Nv12,
+];
 
 fn gpu_err() -> G2gError {
     G2gError::Hardware(HardwareError::Other)
@@ -219,7 +222,13 @@ impl WgpuToDmaBuf {
     /// device, with `COPY_SRC` usage) as a `WgpuBuffer` frame domain this element
     /// accepts.
     pub fn wrap_buffer(device: &wgpu::Device, buffer: wgpu::Buffer, len: usize) -> OwnedWgpuBuffer {
-        OwnedWgpuBuffer::new(len, Arc::new(PlainWgpuBuffer { buffer, _device: device.clone() }))
+        OwnedWgpuBuffer::new(
+            len,
+            Arc::new(PlainWgpuBuffer {
+                buffer,
+                _device: device.clone(),
+            }),
+        )
     }
 
     /// Create the persistent exportable timeline semaphore and export its fd, once.
@@ -243,7 +252,9 @@ impl WgpuToDmaBuf {
     /// never stalls on the copy, it just reclaims buffers a frame or two later.
     fn reap_retired(&mut self) {
         let Some(sem) = self.semaphore else { return };
-        let Some(device) = self.device.as_ref() else { return };
+        let Some(device) = self.device.as_ref() else {
+            return;
+        };
         // SAFETY: `sem` is a live timeline semaphore on `device`; reading its
         // counter is a non-blocking query.
         let counter = unsafe {
@@ -259,13 +270,18 @@ impl WgpuToDmaBuf {
 
 impl Drop for WgpuToDmaBuf {
     fn drop(&mut self) {
-        let Some(device) = self.device.as_ref() else { return };
+        let Some(device) = self.device.as_ref() else {
+            return;
+        };
         // Any in-flight copy must finish before we free its `dst` and destroy the
         // semaphore it signals. A blocking poll is fine here (shutdown, not the hot
         // path). Then the pending buffers drop (freeing their Vulkan handles; the
         // exported dma-buf fds keep the memory alive for consumers) and the
         // timeline semaphore is destroyed.
-        let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+        let _ = device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
         self.pending.clear();
         if let Some(sem) = self.semaphore.take() {
             // SAFETY: the semaphore was created on this device; after the wait above
@@ -293,7 +309,8 @@ impl PadTemplates for WgpuToDmaBuf {
 }
 
 impl AsyncElement for WgpuToDmaBuf {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -325,9 +342,12 @@ impl AsyncElement for WgpuToDmaBuf {
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         let (format, w, h) = match absolute_caps {
-            Caps::RawVideo { format, width: Dim::Fixed(w), height: Dim::Fixed(h), .. } => {
-                (*format, *w, *h)
-            }
+            Caps::RawVideo {
+                format,
+                width: Dim::Fixed(w),
+                height: Dim::Fixed(h),
+                ..
+            } => (*format, *w, *h),
             _ => return Err(G2gError::CapsMismatch),
         };
         self.stride = dmabuf_row_stride(format, w).ok_or(G2gError::CapsMismatch)?;
@@ -355,9 +375,12 @@ impl AsyncElement for WgpuToDmaBuf {
                     let src = input_buffer(owned).ok_or(G2gError::UnsupportedDomain)?;
                     self.gpu().await?;
 
-                    let size =
-                        dmabuf_frame_bytes(self.format, u64::from(self.stride), u64::from(self.height))
-                            .ok_or(G2gError::CapsMismatch)?;
+                    let size = dmabuf_frame_bytes(
+                        self.format,
+                        u64::from(self.stride),
+                        u64::from(self.height),
+                    )
+                    .ok_or(G2gError::CapsMismatch)?;
                     if size == 0 || (owned.len as u64) < size {
                         return Err(G2gError::CapsMismatch);
                     }
@@ -426,17 +449,22 @@ async fn create_export_device() -> Result<(wgpu::Device, wgpu::Queue), G2gError>
     // SAFETY: read the hal adapter only to open a device carrying the export
     // extensions; the guard outlives the open call.
     let open = unsafe {
-        let hal = adapter.as_hal::<wgpu_hal::api::Vulkan>().ok_or_else(gpu_err)?;
+        let hal = adapter
+            .as_hal::<wgpu_hal::api::Vulkan>()
+            .ok_or_else(gpu_err)?;
         hal.open_with_callback(
             wgpu::Features::empty(),
             &wgpu::Limits::default(),
             &wgpu::MemoryHints::default(),
-            Some(Box::new(|args: wgpu_hal::vulkan::CreateDeviceCallbackArgs| {
-                args.extensions.push(ash::khr::external_memory_fd::NAME);
-                args.extensions.push(ash::ext::external_memory_dma_buf::NAME);
-                // For the optional zero-stall timeline-semaphore export path.
-                args.extensions.push(ash::khr::external_semaphore_fd::NAME);
-            })),
+            Some(Box::new(
+                |args: wgpu_hal::vulkan::CreateDeviceCallbackArgs| {
+                    args.extensions.push(ash::khr::external_memory_fd::NAME);
+                    args.extensions
+                        .push(ash::ext::external_memory_dma_buf::NAME);
+                    // For the optional zero-stall timeline-semaphore export path.
+                    args.extensions.push(ash::khr::external_semaphore_fd::NAME);
+                },
+            )),
         )
     }
     .map_err(|_| gpu_err())?;
@@ -444,7 +472,10 @@ async fn create_export_device() -> Result<(wgpu::Device, wgpu::Queue), G2gError>
     let (device, queue) = unsafe {
         adapter.create_device_from_hal(
             open,
-            &wgpu::DeviceDescriptor { label: Some("wgputodmabuf"), ..Default::default() },
+            &wgpu::DeviceDescriptor {
+                label: Some("wgputodmabuf"),
+                ..Default::default()
+            },
         )
     }
     .map_err(|_| gpu_err())?;
@@ -464,7 +495,9 @@ unsafe fn create_export_semaphore(device: &wgpu::Device) -> Result<(vk::Semaphor
     // SAFETY: caller guarantees the export device; the hal guard is held for the
     // whole creation + export.
     unsafe {
-        let hal = device.as_hal::<wgpu_hal::api::Vulkan>().ok_or_else(gpu_err)?;
+        let hal = device
+            .as_hal::<wgpu_hal::api::Vulkan>()
+            .ok_or_else(gpu_err)?;
         let raw = hal.raw_device();
         let instance = hal.shared_instance().raw_instance();
 
@@ -473,8 +506,9 @@ unsafe fn create_export_semaphore(device: &wgpu::Device) -> Result<(vk::Semaphor
             .initial_value(0);
         let mut export = vk::ExportSemaphoreCreateInfo::default()
             .handle_types(vk::ExternalSemaphoreHandleTypeFlags::OPAQUE_FD);
-        let info =
-            vk::SemaphoreCreateInfo::default().push_next(&mut type_info).push_next(&mut export);
+        let info = vk::SemaphoreCreateInfo::default()
+            .push_next(&mut type_info)
+            .push_next(&mut export);
         let sem = raw.create_semaphore(&info, None).map_err(|_| gpu_err())?;
 
         let loader = ash::khr::external_semaphore_fd::Device::new(instance, raw);
@@ -500,7 +534,10 @@ fn find_memory_type(
     flags: vk::MemoryPropertyFlags,
 ) -> Option<u32> {
     (0..props.memory_type_count).find(|&i| {
-        (type_bits & (1 << i)) != 0 && props.memory_types[i as usize].property_flags.contains(flags)
+        (type_bits & (1 << i)) != 0
+            && props.memory_types[i as usize]
+                .property_flags
+                .contains(flags)
     })
 }
 
@@ -539,7 +576,9 @@ unsafe fn export_copy(
         // SAFETY: caller guarantees a Vulkan export device; the hal guard is held
         // for the whole allocation and the raw handles are handed to wgpu below.
         unsafe {
-            let hal = device.as_hal::<wgpu_hal::api::Vulkan>().ok_or_else(gpu_err)?;
+            let hal = device
+                .as_hal::<wgpu_hal::api::Vulkan>()
+                .ok_or_else(gpu_err)?;
             let raw = hal.raw_device();
             let instance = hal.shared_instance().raw_instance();
             let phys = hal.raw_physical_device();
@@ -559,9 +598,11 @@ unsafe fn export_copy(
 
             let reqs = raw.get_buffer_memory_requirements(buffer);
             let props = instance.get_physical_device_memory_properties(phys);
-            let Some(mem_type) =
-                find_memory_type(&props, reqs.memory_type_bits, vk::MemoryPropertyFlags::DEVICE_LOCAL)
-            else {
+            let Some(mem_type) = find_memory_type(
+                &props,
+                reqs.memory_type_bits,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            ) else {
                 raw.destroy_buffer(buffer, None);
                 return Err(gpu_err());
             };
@@ -650,7 +691,10 @@ unsafe fn export_copy(
             queue.submit([enc.finish()]);
             // Wait for the copy so a consumer of the dma-buf sees finished pixels.
             device
-                .poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
+                .poll(wgpu::PollType::Wait {
+                    submission_index: None,
+                    timeout: None,
+                })
                 .map_err(|_| gpu_err())?;
             // Drop the wgpu wrapper: wgpu frees vk_buffer + vk_memory. The exported
             // dma-buf fd remains a valid, independent reference to the memory.

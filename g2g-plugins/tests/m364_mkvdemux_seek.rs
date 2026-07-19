@@ -65,14 +65,26 @@ fn block(track: u64, rel: i16, keyframe: bool, frame: &[u8]) -> Vec<u8> {
     elem(&[0xA3], &b) // SimpleBlock
 }
 fn video_track(num: u64, codec: &[u8], w: u32, h: u32) -> Vec<u8> {
-    let v = [elem(&[0xB0], &uint_body(w as u64)), elem(&[0xBA], &uint_body(h as u64))].concat();
-    let body = [elem(&[0xD7], &uint_body(num)), elem(&[0x86], codec), elem(&[0xE0], &v)].concat();
+    let v = [
+        elem(&[0xB0], &uint_body(w as u64)),
+        elem(&[0xBA], &uint_body(h as u64)),
+    ]
+    .concat();
+    let body = [
+        elem(&[0xD7], &uint_body(num)),
+        elem(&[0x86], codec),
+        elem(&[0xE0], &v),
+    ]
+    .concat();
     elem(&[0xAE], &body)
 }
 
 /// One VP9 track; keyframe blocks at 0 ms and 120 ms (default 1 ms timescale).
 fn webm() -> Vec<u8> {
-    let tracks = elem(&[0x16, 0x54, 0xAE, 0x6B], &video_track(1, b"V_VP9", 320, 240));
+    let tracks = elem(
+        &[0x16, 0x54, 0xAE, 0x6B],
+        &video_track(1, b"V_VP9", 320, 240),
+    );
     let cluster = elem(
         &[0x1F, 0x43, 0xB6, 0x75],
         &[
@@ -102,7 +114,10 @@ impl OutputSink for Capture {
     ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
         Box::pin(async move {
             match packet {
-                PipelinePacket::DataFrame(Frame { domain: MemoryDomain::System(s), .. }) => {
+                PipelinePacket::DataFrame(Frame {
+                    domain: MemoryDomain::System(s),
+                    ..
+                }) => {
                     self.frames.push(s.as_slice().to_vec());
                 }
                 PipelinePacket::Flush => self.flushes += 1,
@@ -143,7 +158,9 @@ async fn mkvdemux_seeks_to_the_target_keyframe_over_filesrc() {
     let mut src = FileSrc::new(&path, Caps::ByteStream { encoding: ByteStreamEncoding::Matroska })
         .with_chunk_size(16) // small chunks: byte-seek observed mid-read
         .with_seek(byte.clone());
-    let mut demux = MkvDemux::new().with_stream(MkvStream::Vp9).with_seek(time.clone(), byte.clone());
+    let mut demux = MkvDemux::new()
+        .with_stream(MkvStream::Vp9)
+        .with_seek(time.clone(), byte.clone());
 
     let caps = {
         let c: Pin<Box<dyn Future<Output = _>>> = Box::pin(src.intercept_caps());
@@ -151,17 +168,25 @@ async fn mkvdemux_seeks_to_the_target_keyframe_over_filesrc() {
     };
     src.configure_pipeline(&caps).expect("configure src");
     demux
-        .configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::Matroska })
+        .configure_pipeline(&Caps::ByteStream {
+            encoding: ByteStreamEncoding::Matroska,
+        })
         .expect("configure demux");
 
     let mut capture = Capture::default();
     {
-        let mut chain = Chain { demux: &mut demux, capture: &mut capture };
+        let mut chain = Chain {
+            demux: &mut demux,
+            capture: &mut capture,
+        };
         src.run(&mut chain).await.expect("filesrc runs");
     }
 
     // Re-synced from the 120 ms keyframe: blocks [0x04] (kf), [0x05].
-    assert!(capture.flushes >= 1, "the upstream byte-seek flushed downstream");
+    assert!(
+        capture.flushes >= 1,
+        "the upstream byte-seek flushed downstream"
+    );
     assert!(capture.segments >= 1, "a resume segment was emitted");
     assert_eq!(
         capture.frames,

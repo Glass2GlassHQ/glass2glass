@@ -35,7 +35,8 @@ use g2g_core::{MediaClock, StaticSink};
 pub trait PacketSender {
     /// Send one datagram consisting of `header` immediately followed by
     /// `payload`.
-    async fn send(&mut self, header: &[u8; RTP_HEADER_LEN], payload: &[u8]) -> Result<(), G2gError>;
+    async fn send(&mut self, header: &[u8; RTP_HEADER_LEN], payload: &[u8])
+        -> Result<(), G2gError>;
 
     /// Re-initialize the network stack after a fault (re-open the socket,
     /// re-bind, clear a stuck send queue), so the next `send` starts clean. The

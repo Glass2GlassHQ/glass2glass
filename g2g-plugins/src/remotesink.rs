@@ -80,7 +80,9 @@ pub struct TcpClient {
 impl TcpClient {
     /// Length-frame and write one already-encoded wire body.
     async fn write_frame(sock: &mut tokio::net::TcpStream, body: &[u8]) -> Result<(), G2gError> {
-        sock.write_all(&(body.len() as u32).to_le_bytes()).await.map_err(io_err)?;
+        sock.write_all(&(body.len() as u32).to_le_bytes())
+            .await
+            .map_err(io_err)?;
         sock.write_all(body).await.map_err(io_err)?;
         Ok(())
     }
@@ -91,8 +93,12 @@ impl PacketClient for TcpClient {
     const DESCRIPTION: &'static str =
         "Serializes the PipelinePacket stream and sends it over TCP to a remote RemoteSrc";
     const PROPERTIES: &'static [PropertySpec] = &[
-        PropertySpec::new("host", PropKind::Str, "remote host to connect to (RemoteSrc address)")
-            .with_default("127.0.0.1"),
+        PropertySpec::new(
+            "host",
+            PropKind::Str,
+            "remote host to connect to (RemoteSrc address)",
+        )
+        .with_default("127.0.0.1"),
         PropertySpec::new("port", PropKind::Uint, "remote TCP port to connect to")
             .with_range("0", "65535"),
         PropertySpec::new(
@@ -112,7 +118,9 @@ impl PacketClient for TcpClient {
             // Reuse the eagerly-connected std stream if present, else dial `dest`.
             let sock = match self.std_stream.take() {
                 Some(std) => tokio::net::TcpStream::from_std(std).map_err(io_err)?,
-                None => tokio::net::TcpStream::connect(self.dest).await.map_err(io_err)?,
+                None => tokio::net::TcpStream::connect(self.dest)
+                    .await
+                    .map_err(io_err)?,
             };
             self.socket = Some(sock);
             Ok(())

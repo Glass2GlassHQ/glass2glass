@@ -51,7 +51,10 @@ struct CollectSink {
 }
 
 impl AsyncElement for CollectSink {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>> where Self: 'a;
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
     fn intercept_caps(&self, c: &Caps) -> Result<Caps, G2gError> {
         Ok(c.clone())
     }
@@ -69,7 +72,8 @@ impl AsyncElement for CollectSink {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
                     if let MemoryDomain::System(slice) = &frame.domain {
-                        self.frames.push((frame.sequence, frame.timing, slice.as_slice().to_vec()));
+                        self.frames
+                            .push((frame.sequence, frame.timing, slice.as_slice().to_vec()));
                     }
                 }
                 PipelinePacket::CapsChanged(c) => self.caps.push(c),
@@ -99,7 +103,9 @@ async fn remote_ws_transport_carries_a_split_graph_edge() {
     // accept() runs) and read the actual ephemeral port.
     let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind");
     let port = listener.local_addr().unwrap().port();
-    let mut src = RemoteWsSrc::from_listener(listener).unwrap().with_frame_limit(N as u64);
+    let mut src = RemoteWsSrc::from_listener(listener)
+        .unwrap()
+        .with_frame_limit(N as u64);
     let mut sink = CollectSink::default();
     let clock = ZeroClock;
 
@@ -127,7 +133,11 @@ async fn remote_ws_transport_carries_a_split_graph_edge() {
                 sequence: i as u64,
                 meta: Default::default(),
             };
-            if remote.process(PipelinePacket::DataFrame(frame), &mut null).await.is_err() {
+            if remote
+                .process(PipelinePacket::DataFrame(frame), &mut null)
+                .await
+                .is_err()
+            {
                 break;
             }
         }
@@ -139,19 +149,36 @@ async fn remote_ws_transport_carries_a_split_graph_edge() {
 
     let recv = tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        run_simple_pipeline(&mut src, &mut sink, &clock, LatencyProfile::Live.link_capacity()),
+        run_simple_pipeline(
+            &mut src,
+            &mut sink,
+            &clock,
+            LatencyProfile::Live.link_capacity(),
+        ),
     );
 
     let (recv_res, sent) = tokio::join!(recv, sender);
-    let stats = recv_res.expect("receiver finishes within 10s").expect("receive pipeline ok");
+    let stats = recv_res
+        .expect("receiver finishes within 10s")
+        .expect("receive pipeline ok");
 
     // Every frame delivered.
-    assert_eq!(stats.frames_emitted, N as u64, "all frames crossed the boundary");
-    assert!(sent >= (N as u64 + 1), "sender emitted caps + {N} frames: {sent}");
+    assert_eq!(
+        stats.frames_emitted, N as u64,
+        "all frames crossed the boundary"
+    );
+    assert!(
+        sent >= (N as u64 + 1),
+        "sender emitted caps + {N} frames: {sent}"
+    );
 
     // The far side discovered the sender's caps from the wire.
     assert!(!sink.caps.is_empty(), "caps were carried");
-    assert_eq!(sink.caps[0], test_caps(), "discovered caps match the sender's");
+    assert_eq!(
+        sink.caps[0],
+        test_caps(),
+        "discovered caps match the sender's"
+    );
 
     // Each frame's sequence, timing, and bytes survived byte-for-byte.
     assert_eq!(sink.frames.len(), N as usize);

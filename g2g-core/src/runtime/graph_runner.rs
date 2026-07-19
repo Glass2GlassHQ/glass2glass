@@ -40,6 +40,7 @@ use core::pin::Pin;
 #[cfg(all(feature = "std", feature = "multi-thread"))]
 extern crate std;
 
+use crate::aggregator::InputAggregator;
 use crate::bus::{BusHandle, BusMessage};
 use crate::caps::{Caps, CapsSet};
 use crate::clock::{elect_clock, ClockCandidate, ClockPriority, ClockSync, PipelineClock};
@@ -48,14 +49,12 @@ use crate::element::{
     Reconfigure,
 };
 use crate::error::G2gError;
-use crate::aggregator::InputAggregator;
 use crate::fanout::{MultiInputElement, MultiOutputElement, MultiOutputSink, MultiSenderSink};
 use crate::format_element::CapsConstraint;
 use crate::frame::{Frame, PipelinePacket};
 use crate::graph::{FanOutPolicy, Graph, NodeId, NodeKind, ValidatedGraph};
 use crate::memory::{DomainSet, MemoryDomainKind};
 use crate::property::{PropError, PropValue, PropertySpec};
-use crate::segment::Segment;
 use crate::query::{AllocationParams, LatencyReport};
 use crate::runtime::channel::{
     bounded, link, link_with_transit, LinkReceiver, LinkSender, Receiver, Sender, SenderSink,
@@ -63,7 +62,6 @@ use crate::runtime::channel::{
 use crate::runtime::coordinator::{realloc_local_dyn, report_nego_failure, ArmDirective};
 use crate::runtime::fanin::{DynMultiInputElement, DynSourceLoop};
 use crate::runtime::instrument::{snapshot_all, ElementProbe, Probe};
-use crate::runtime::Observer;
 use crate::runtime::join::{join_all, select2, Either};
 use crate::runtime::progress::PipelineProgress;
 use crate::runtime::runner::{
@@ -74,6 +72,8 @@ use crate::runtime::solver::{
     ForwardResolve, NegotiationFailure, NodeConstraint,
 };
 use crate::runtime::state::{Flow, StateController};
+use crate::runtime::Observer;
+use crate::segment::Segment;
 
 /// Element payload for a [`Graph`] driven by [`run_graph`]. Sources,
 /// transforms/sinks, and muxers implement different traits (a source has no
@@ -454,7 +454,9 @@ impl GraphTemplate {
     /// (nodes + links) from scratch on each call, so each instance gets its own
     /// elements.
     pub fn new(build: impl Fn() -> Graph<GraphNode> + Send + Sync + 'static) -> Self {
-        Self { build: Box::new(build) }
+        Self {
+            build: Box::new(build),
+        }
     }
 
     /// Build a fresh runnable graph. Call once per [`run_graph`] invocation.
@@ -501,7 +503,17 @@ pub async fn run_graph_with_copy_policy<'a, Clk: PipelineClock>(
     link_capacity: impl Into<LinkCapacity>,
     policy: crate::copyplan::CopyPolicy,
 ) -> Result<RunStats, G2gError> {
-    run_graph_inner(graph, clock, link_capacity, None, None, None, Some(policy), None).await
+    run_graph_inner(
+        graph,
+        clock,
+        link_capacity,
+        None,
+        None,
+        None,
+        Some(policy),
+        None,
+    )
+    .await
 }
 
 /// Splice memory-domain converters where a producer and consumer cannot agree on
@@ -531,8 +543,10 @@ pub fn auto_plug_domain_converters<'a>(
     for e in 0..original_edges {
         let edge = graph.edges()[e];
         let producer = traced_output_domains(&graph, edge.src.node);
-        let consumer =
-            graph.element(edge.dst.node).map(|n| n.input_domains()).unwrap_or(DomainSet::ALL);
+        let consumer = graph
+            .element(edge.dst.node)
+            .map(|n| n.input_domains())
+            .unwrap_or(DomainSet::ALL);
         if !producer.intersect(consumer).is_empty() {
             continue; // already compatible, no converter needed
         }
@@ -575,7 +589,17 @@ pub async fn run_graph_with_bus<'a, Clk: PipelineClock>(
     link_capacity: impl Into<LinkCapacity>,
     bus: &BusHandle,
 ) -> Result<RunStats, G2gError> {
-    run_graph_inner(graph, clock, link_capacity, Some(bus), None, None, None, None).await
+    run_graph_inner(
+        graph,
+        clock,
+        link_capacity,
+        Some(bus),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
 }
 
 /// As [`run_graph`], but taps live telemetry into `observer` and (optionally)
@@ -592,7 +616,17 @@ pub async fn run_graph_observed<'a, Clk: PipelineClock>(
     observer: &Observer,
     bus: Option<&BusHandle>,
 ) -> Result<RunStats, G2gError> {
-    run_graph_inner(graph, clock, link_capacity, bus, None, None, None, Some(observer)).await
+    run_graph_inner(
+        graph,
+        clock,
+        link_capacity,
+        bus,
+        None,
+        None,
+        None,
+        Some(observer),
+    )
+    .await
 }
 
 /// As [`run_graph`], but publishes playback progress into `progress` (M203): the
@@ -608,7 +642,17 @@ pub async fn run_graph_with_progress<'a, Clk: PipelineClock>(
     link_capacity: impl Into<LinkCapacity>,
     progress: &PipelineProgress,
 ) -> Result<RunStats, G2gError> {
-    run_graph_inner(graph, clock, link_capacity, None, None, Some(progress), None, None).await
+    run_graph_inner(
+        graph,
+        clock,
+        link_capacity,
+        None,
+        None,
+        Some(progress),
+        None,
+        None,
+    )
+    .await
 }
 
 /// Coarsen a link fill percent into a 0..=4 quartile band, so a sink posts a
@@ -629,7 +673,17 @@ pub async fn run_graph_stateful<'a, Clk: PipelineClock>(
     link_capacity: impl Into<LinkCapacity>,
     state: &StateController,
 ) -> Result<RunStats, G2gError> {
-    run_graph_inner(graph, clock, link_capacity, None, Some(state.clone()), None, None, None).await
+    run_graph_inner(
+        graph,
+        clock,
+        link_capacity,
+        None,
+        Some(state.clone()),
+        None,
+        None,
+        None,
+    )
+    .await
 }
 
 /// As [`run_graph`], but posts a structured
@@ -720,12 +774,17 @@ async fn prepare_graph<'a>(
             // Mint a measured-latency probe for every node with a `process()`:
             // transforms, sinks, muxers, and demuxers (a demux is a `Tee`-kind
             // node whose payload is a `Demux` element).
-            let has_process = matches!(vg.kind(node), NodeKind::Transform | NodeKind::Sink | NodeKind::Muxer(_))
-                || matches!(vg.element(node), Some(GraphNodeRef::Demux(_)));
+            let has_process = matches!(
+                vg.kind(node),
+                NodeKind::Transform | NodeKind::Sink | NodeKind::Muxer(_)
+            ) || matches!(vg.element(node), Some(GraphNodeRef::Demux(_)));
             if has_process {
                 probes[node.0 as usize] = Some(ElementProbe::new(name.clone()));
             }
-            crate::g2g_info!(crate::log::Target::named(category, &name), "added to pipeline");
+            crate::g2g_info!(
+                crate::log::Target::named(category, &name),
+                "added to pipeline"
+            );
         }
     }
 
@@ -752,7 +811,8 @@ async fn prepare_graph<'a>(
     let mut source_caps: Vec<Option<Caps>> = (0..n).map(|_| None).collect();
     for &node in topo {
         if matches!(vg.kind(node), NodeKind::Source) {
-            let GraphNodeRef::Source(src) = vg.element_mut(node).ok_or(G2gError::CapsMismatch)? else {
+            let GraphNodeRef::Source(src) = vg.element_mut(node).ok_or(G2gError::CapsMismatch)?
+            else {
                 return Err(G2gError::CapsMismatch);
             };
             source_caps[node.0 as usize] = Some(src.intercept_caps().await?);
@@ -794,10 +854,7 @@ async fn prepare_graph<'a>(
                 // caps-driven transform (videoscale fed by a downstream
                 // capsfilter) can take its target from the solve. Sinks have no
                 // output edge and skip it.
-                let out_caps = vg
-                    .out_edges(node)
-                    .first()
-                    .map(|&eid| solution[eid].clone());
+                let out_caps = vg.out_edges(node).first().map(|&eid| solution[eid].clone());
                 let GraphNodeRef::Element(elem) =
                     vg.element_mut(node).ok_or(G2gError::CapsMismatch)?
                 else {
@@ -895,7 +952,9 @@ async fn prepare_graph<'a>(
                     // reports.
                     let can = node_output_domains(vg, node);
                     let resolved = p.resolve_for_producer(can)?;
-                    if let GraphNodeRef::Source(src) = vg.element_mut(node).ok_or(G2gError::CapsMismatch)? {
+                    if let GraphNodeRef::Source(src) =
+                        vg.element_mut(node).ok_or(G2gError::CapsMismatch)?
+                    {
                         src.configure_allocation(&resolved);
                     }
                     allocation = Some(resolved);
@@ -964,7 +1023,14 @@ async fn prepare_graph<'a>(
 
     Ok((
         probes,
-        Prepared { solution, feasibility, latency, allocation, clock_priority, base_time_ns },
+        Prepared {
+            solution,
+            feasibility,
+            latency,
+            allocation,
+            clock_priority,
+            base_time_ns,
+        },
     ))
 }
 
@@ -1008,7 +1074,11 @@ fn build_channels<'a>(
         let instr_edge = instrument
             && vg.edge(eid).policy == crate::link::LinkPolicy::Block
             && matches!(dst_kind, NodeKind::Transform | NodeKind::Sink);
-        let (mut tx, rx) = if instr_edge { link_with_transit(cap) } else { link(cap) };
+        let (mut tx, rx) = if instr_edge {
+            link_with_transit(cap)
+        } else {
+            link(cap)
+        };
         let policy = vg.edge(eid).policy;
         tx.set_policy(policy);
         if policy != crate::link::LinkPolicy::Block {
@@ -1050,9 +1120,20 @@ fn build_channels<'a>(
     }
     let (coord_tx, coord_rx) = bounded::<Recascade>(link_capacity);
     let coord_handle = GraphCoordHandle { tx: coord_tx };
-    let coordinator = GraphCoordinator { rx: coord_rx, arm_ctrl, upstream_arms };
+    let coordinator = GraphCoordinator {
+        rx: coord_rx,
+        arm_ctrl,
+        upstream_arms,
+    };
 
-    GraphChannels { txs, rxs, dropped, arm_ctrl_rx, coord_handle, coordinator }
+    GraphChannels {
+        txs,
+        rxs,
+        dropped,
+        arm_ctrl_rx,
+        coord_handle,
+        coordinator,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1074,8 +1155,17 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
     }
     let topo = vg.topo().to_vec();
 
-    let (probes, Prepared { solution, feasibility, latency, allocation, clock_priority, base_time_ns }) =
-        prepare_graph(&mut vg, &topo, &state, bus, clock, observer).await?;
+    let (
+        probes,
+        Prepared {
+            solution,
+            feasibility,
+            latency,
+            allocation,
+            clock_priority,
+            base_time_ns,
+        },
+    ) = prepare_graph(&mut vg, &topo, &state, bus, clock, observer).await?;
 
     // Enforce the memory-domain copy budget (M617) before any frame flows: the graph
     // is negotiated, so the per-edge domains are known and the copy plan is exact. A
@@ -1097,8 +1187,14 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
         }
     }
 
-    let GraphChannels { mut txs, mut rxs, dropped, mut arm_ctrl_rx, coord_handle, coordinator } =
-        build_channels(&vg, &topo, link_capacity, observer.is_some());
+    let GraphChannels {
+        mut txs,
+        mut rxs,
+        dropped,
+        mut arm_ctrl_rx,
+        coord_handle,
+        coordinator,
+    } = build_channels(&vg, &topo, link_capacity, observer.is_some());
 
     // Dev-tooling edge tap: hand the observer each edge's content-inspection slot
     // (shared with the arm's `SenderSink`) + its negotiated caps, so a preview
@@ -1106,7 +1202,12 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
     // slot is empty (pass-through) until a subscriber installs an interceptor.
     if let Some(obs) = observer {
         let edge_probes: Vec<crate::runtime::channel::ProbeSlot> = (0..vg.edge_count())
-            .map(|e| txs.get(e).and_then(|o| o.as_ref()).map(|s| s.probe.clone()).unwrap_or_default())
+            .map(|e| {
+                txs.get(e)
+                    .and_then(|o| o.as_ref())
+                    .map(|s| s.probe.clone())
+                    .unwrap_or_default()
+            })
             .collect();
         obs.register_edges(edge_probes, solution.clone());
     }
@@ -1118,10 +1219,14 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
         let kind = vg.kind(node);
         let in_e: Vec<usize> = vg.in_edges(node).to_vec();
         let out_e: Vec<usize> = vg.out_edges(node).to_vec();
-        let mut in_rxs: Vec<LinkReceiver> =
-            in_e.iter().map(|&e| rxs[e].take().expect("edge rx present")).collect();
-        let mut out_txs: Vec<LinkSender> =
-            out_e.iter().map(|&e| txs[e].take().expect("edge tx present")).collect();
+        let mut in_rxs: Vec<LinkReceiver> = in_e
+            .iter()
+            .map(|&e| rxs[e].take().expect("edge rx present"))
+            .collect();
+        let mut out_txs: Vec<LinkSender> = out_e
+            .iter()
+            .map(|&e| txs[e].take().expect("edge tx present"))
+            .collect();
         let element = vg.take_element(node);
 
         // A muxer contributes N+1 arms (one forwarder per input pad plus the
@@ -1132,15 +1237,19 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
             };
             let out_tx = out_txs.pop().expect("muxer output edge");
             let mux_out_caps = solution[out_e[0]].clone();
-            let pads: Vec<usize> =
-                in_e.iter().map(|&eid| vg.edge(eid).dst.index as usize).collect();
+            let pads: Vec<usize> = in_e
+                .iter()
+                .map(|&eid| vg.edge(eid).dst.index as usize)
+                .collect();
             // The interior arm feeding each input pad (resolved through structural
             // tees; `None` when a source feeds the pad directly, which has no
             // mid-stream re-cascade channel). Aligned with `pads` / `pad_rxs`, so
             // the muxer arm can re-cascade a per-pad β proposal up just that
             // branch. `in_e` order matches `in_rxs`, so slot k maps to pad k here.
-            let pad_upstream: Vec<Option<NodeId>> =
-                in_e.iter().map(|&eid| nearest_upstream_arm(&vg, eid)).collect();
+            let pad_upstream: Vec<Option<NodeId>> = in_e
+                .iter()
+                .map(|&eid| nearest_upstream_arm(&vg, eid))
+                .collect();
             let input_count = in_rxs.len();
             // Each input pad gets its OWN bounded channel feeding the muxer arm,
             // which drains them round-robin. A single shared FIFO would let a
@@ -1209,7 +1318,9 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                 let in_rx = in_rxs.pop().expect("transform input edge");
                 let out_tx = out_txs.pop().expect("transform output edge");
                 let out_edge = out_e[0];
-                let arm_rx = arm_ctrl_rx[node.0 as usize].take().expect("transform ctrl rx");
+                let arm_rx = arm_ctrl_rx[node.0 as usize]
+                    .take()
+                    .expect("transform ctrl rx");
                 let out_caps = solution[out_edge].clone();
                 let downstream_feasible = feasibility[out_edge].clone();
                 Box::pin(transform_arm(
@@ -1250,9 +1361,12 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                 // tolerates a branch that has dropped out (closed its channel).
                 let branch_drop = vg.fanout_policy(node) == FanOutPolicy::AllowBranchDrop;
                 match element {
-                    Some(GraphNodeRef::Demux(demux)) => {
-                        Box::pin(demux_arm(demux, in_rx, out_txs, probes[node.0 as usize].clone()))
-                    }
+                    Some(GraphNodeRef::Demux(demux)) => Box::pin(demux_arm(
+                        demux,
+                        in_rx,
+                        out_txs,
+                        probes[node.0 as usize].clone(),
+                    )),
                     _ => Box::pin(tee_arm(in_rx, out_txs, branch_drop)),
                 }
             }
@@ -1404,17 +1518,37 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
     }
     let topo = vg.topo().to_vec();
 
-    let (probes, Prepared { solution, feasibility, latency, allocation, clock_priority, base_time_ns }) =
-        prepare_graph(&mut vg, &topo, &state, bus, clock, observer).await?;
+    let (
+        probes,
+        Prepared {
+            solution,
+            feasibility,
+            latency,
+            allocation,
+            clock_priority,
+            base_time_ns,
+        },
+    ) = prepare_graph(&mut vg, &topo, &state, bus, clock, observer).await?;
 
-    let GraphChannels { mut txs, mut rxs, dropped, mut arm_ctrl_rx, coord_handle, coordinator } =
-        build_channels(&vg, &topo, link_capacity, observer.is_some());
+    let GraphChannels {
+        mut txs,
+        mut rxs,
+        dropped,
+        mut arm_ctrl_rx,
+        coord_handle,
+        coordinator,
+    } = build_channels(&vg, &topo, link_capacity, observer.is_some());
 
     // Dev-tooling edge tap: same as the cooperative path, hand the observer each
     // edge's content-inspection slot + negotiated caps. No arm changes needed.
     if let Some(obs) = observer {
         let edge_probes: Vec<crate::runtime::channel::ProbeSlot> = (0..vg.edge_count())
-            .map(|e| txs.get(e).and_then(|o| o.as_ref()).map(|s| s.probe.clone()).unwrap_or_default())
+            .map(|e| {
+                txs.get(e)
+                    .and_then(|o| o.as_ref())
+                    .map(|s| s.probe.clone())
+                    .unwrap_or_default()
+            })
             .collect();
         obs.register_edges(edge_probes, solution.clone());
     }
@@ -1428,10 +1562,14 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
         let kind = vg.kind(node);
         let in_e: Vec<usize> = vg.in_edges(node).to_vec();
         let out_e: Vec<usize> = vg.out_edges(node).to_vec();
-        let mut in_rxs: Vec<LinkReceiver> =
-            in_e.iter().map(|&e| rxs[e].take().expect("edge rx present")).collect();
-        let mut out_txs: Vec<LinkSender> =
-            out_e.iter().map(|&e| txs[e].take().expect("edge tx present")).collect();
+        let mut in_rxs: Vec<LinkReceiver> = in_e
+            .iter()
+            .map(|&e| rxs[e].take().expect("edge rx present"))
+            .collect();
+        let mut out_txs: Vec<LinkSender> = out_e
+            .iter()
+            .map(|&e| txs[e].take().expect("edge tx present"))
+            .collect();
         let element = vg.take_element(node);
 
         if let NodeKind::Muxer(_) = kind {
@@ -1440,10 +1578,14 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
             };
             let out_tx = out_txs.pop().expect("muxer output edge");
             let mux_out_caps = solution[out_e[0]].clone();
-            let pads: Vec<usize> =
-                in_e.iter().map(|&eid| vg.edge(eid).dst.index as usize).collect();
-            let pad_upstream: Vec<Option<NodeId>> =
-                in_e.iter().map(|&eid| nearest_upstream_arm(&vg, eid)).collect();
+            let pads: Vec<usize> = in_e
+                .iter()
+                .map(|&eid| vg.edge(eid).dst.index as usize)
+                .collect();
+            let pad_upstream: Vec<Option<NodeId>> = in_e
+                .iter()
+                .map(|&eid| nearest_upstream_arm(&vg, eid))
+                .collect();
             let input_count = in_rxs.len();
             let mut pad_rxs: Vec<(usize, Receiver<PipelinePacket>)> =
                 Vec::with_capacity(input_count);
@@ -1463,14 +1605,28 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
             let build: alloc::boxed::Box<dyn FnOnce() -> LocalArmFuture + Send> = if pts_ordered {
                 alloc::boxed::Box::new(move || -> LocalArmFuture {
                     Box::pin(muxer_arm_pts(
-                        mux, pad_rxs, out_tx, input_count, mux_out_caps, ch, node, pad_upstream,
+                        mux,
+                        pad_rxs,
+                        out_tx,
+                        input_count,
+                        mux_out_caps,
+                        ch,
+                        node,
+                        pad_upstream,
                         mux_probe,
                     ))
                 })
             } else {
                 alloc::boxed::Box::new(move || -> LocalArmFuture {
                     Box::pin(muxer_arm(
-                        mux, pad_rxs, out_tx, input_count, mux_out_caps, ch, node, pad_upstream,
+                        mux,
+                        pad_rxs,
+                        out_tx,
+                        input_count,
+                        mux_out_caps,
+                        ch,
+                        node,
+                        pad_upstream,
                         mux_probe,
                     ))
                 })
@@ -1499,7 +1655,9 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                 let in_rx = in_rxs.pop().expect("transform input edge");
                 let out_tx = out_txs.pop().expect("transform output edge");
                 let out_edge = out_e[0];
-                let arm_rx = arm_ctrl_rx[node.0 as usize].take().expect("transform ctrl rx");
+                let arm_rx = arm_ctrl_rx[node.0 as usize]
+                    .take()
+                    .expect("transform ctrl rx");
                 let out_caps = solution[out_edge].clone();
                 let downstream_feasible = feasibility[out_edge].clone();
                 let bm = branch_mode(&vg, node);
@@ -1508,8 +1666,17 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                 let ch = coord_handle.clone();
                 alloc::boxed::Box::new(move || -> LocalArmFuture {
                     Box::pin(transform_arm(
-                        elem, in_rx, out_tx, arm_rx, ch, node, out_caps, downstream_feasible, bm,
-                        bus_c, probe,
+                        elem,
+                        in_rx,
+                        out_tx,
+                        arm_rx,
+                        ch,
+                        node,
+                        out_caps,
+                        downstream_feasible,
+                        bm,
+                        bus_c,
+                        probe,
                     ))
                 })
             }
@@ -1525,7 +1692,9 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                 let probe = probes[node.0 as usize].clone();
                 let ch = coord_handle.clone();
                 alloc::boxed::Box::new(move || -> LocalArmFuture {
-                    Box::pin(sink_arm(elem, in_rx, ch, node, bm, bus_c, state_c, prog_c, probe))
+                    Box::pin(sink_arm(
+                        elem, in_rx, ch, node, bm, bus_c, state_c, prog_c, probe,
+                    ))
                 })
             }
             NodeKind::Tee(_) => {
@@ -1553,9 +1722,11 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
     // drops; append the coordinator as the final arm on its own thread.
     drop(coord_handle);
     let coord_arm_index = handles.len();
-    handles.push(spawner.spawn_arm(alloc::boxed::Box::new(move || -> LocalArmFuture {
-        Box::pin(async move { Ok(coordinator.run().await) })
-    })));
+    handles.push(
+        spawner.spawn_arm(alloc::boxed::Box::new(move || -> LocalArmFuture {
+            Box::pin(async move { Ok(coordinator.run().await) })
+        })),
+    );
 
     let results = join_all(handles).await;
     fold_run_stats(
@@ -1595,8 +1766,17 @@ pub async fn run_graph_threaded_with_progress<Clk: PipelineClock, S: GraphSpawne
     progress: &PipelineProgress,
     spawner: &S,
 ) -> Result<RunStats, G2gError> {
-    run_graph_threaded_inner(graph, clock, link_capacity, None, None, Some(progress), None, spawner)
-        .await
+    run_graph_threaded_inner(
+        graph,
+        clock,
+        link_capacity,
+        None,
+        None,
+        Some(progress),
+        None,
+        spawner,
+    )
+    .await
 }
 
 /// As [`run_graph_threaded`], but taps live telemetry into `observer` (the
@@ -1612,8 +1792,17 @@ pub async fn run_graph_threaded_observed<Clk: PipelineClock, S: GraphSpawner>(
     observer: &Observer,
     spawner: &S,
 ) -> Result<RunStats, G2gError> {
-    run_graph_threaded_inner(graph, clock, link_capacity, None, None, None, Some(observer), spawner)
-        .await
+    run_graph_threaded_inner(
+        graph,
+        clock,
+        link_capacity,
+        None,
+        None,
+        None,
+        Some(observer),
+        spawner,
+    )
+    .await
 }
 
 /// Zero-dependency [`GraphSpawner`]: each arm runs on its own `std` thread driven
@@ -1721,9 +1910,15 @@ fn build_node_constraints<'g, 'a>(
                 // only ask for them in the independent-output case.
                 let output = match follows {
                     Some(_) => CapsConstraint::AcceptsAny,
-                    None => elem.caps_constraint_for_output().map_err(|_| G2gError::CapsMismatch)?,
+                    None => elem
+                        .caps_constraint_for_output()
+                        .map_err(|_| G2gError::CapsMismatch)?,
                 };
-                NodeConstraint::Muxer { inputs, output, follows }
+                NodeConstraint::Muxer {
+                    inputs,
+                    output,
+                    follows,
+                }
             }
         };
         constraints.push(nc);
@@ -1758,7 +1953,11 @@ fn caps_label(vg: &ValidatedGraph<GraphNodeRef<'_>>, node: NodeId) -> alloc::str
 pub async fn negotiate_graph<'a>(
     graph: Graph<GraphNodeRef<'a>>,
 ) -> Result<
-    (ValidatedGraph<GraphNodeRef<'a>>, Vec<Caps>, Vec<crate::memory::MemoryDomainKind>),
+    (
+        ValidatedGraph<GraphNodeRef<'a>>,
+        Vec<Caps>,
+        Vec<crate::memory::MemoryDomainKind>,
+    ),
     G2gError,
 > {
     negotiate_graph_explained(graph).await.map_err(|e| match e {
@@ -1784,10 +1983,16 @@ pub enum NegotiateError {
 pub async fn negotiate_graph_explained<'a>(
     graph: Graph<GraphNodeRef<'a>>,
 ) -> Result<
-    (ValidatedGraph<GraphNodeRef<'a>>, Vec<Caps>, Vec<crate::memory::MemoryDomainKind>),
+    (
+        ValidatedGraph<GraphNodeRef<'a>>,
+        Vec<Caps>,
+        Vec<crate::memory::MemoryDomainKind>,
+    ),
     NegotiateError,
 > {
-    let mut vg = graph.finish().map_err(|_| NegotiateError::Setup(G2gError::CapsMismatch))?;
+    let mut vg = graph
+        .finish()
+        .map_err(|_| NegotiateError::Setup(G2gError::CapsMismatch))?;
     let n = vg.node_count();
     if n < 2 {
         return Err(NegotiateError::Setup(G2gError::CapsMismatch));
@@ -1891,7 +2096,9 @@ fn node_output_domains(
 ) -> crate::memory::DomainSet {
     vg.element(node)
         .map(|n| n.output_domains())
-        .unwrap_or(crate::memory::DomainSet::only(crate::memory::MemoryDomainKind::System))
+        .unwrap_or(crate::memory::DomainSet::only(
+            crate::memory::MemoryDomainKind::System,
+        ))
 }
 
 /// Apply a downstream-derived allocation proposal to a transform's own pool.
@@ -1954,7 +2161,9 @@ fn solve_mux_input_dyn(
 
 /// Re-derive the merged muxer output from its current per-input config (MX-2).
 fn solve_mux_output_dyn(mux: &dyn DynMultiInputElement) -> Result<Caps, G2gError> {
-    let mux_c = mux.caps_constraint_for_output().map_err(|_| G2gError::CapsMismatch)?;
+    let mux_c = mux
+        .caps_constraint_for_output()
+        .map_err(|_| G2gError::CapsMismatch)?;
     let sink_c = CapsConstraint::AcceptsAny;
     let links = solve_linear(&[&mux_c, &sink_c]).map_err(|_| G2gError::CapsMismatch)?;
     links.last().cloned().ok_or(G2gError::CapsMismatch)
@@ -1976,7 +2185,10 @@ async fn source_arm<'a>(
     // change on the bus. Polled once here; a source that discovers its length
     // mid-stream is a follow-up (it would publish through the handle directly).
     if let Some(duration_ns) = src.query_duration() {
-        let changed = progress.as_ref().map(|p| p.publish_duration(duration_ns)).unwrap_or(true);
+        let changed = progress
+            .as_ref()
+            .map(|p| p.publish_duration(duration_ns))
+            .unwrap_or(true);
         if changed {
             if let Some(b) = &bus {
                 b.try_post(BusMessage::DurationChanged { duration_ns });
@@ -2028,7 +2240,13 @@ async fn transform_arm<'a>(
                     // our upstream neighbour.
                     elem.configure_allocation(&params);
                     let proposal = elem.propose_allocation(&out_caps);
-                    coord.report(Recascade { node, target: None, proposal }).await;
+                    coord
+                        .report(Recascade {
+                            node,
+                            target: None,
+                            proposal,
+                        })
+                        .await;
                     continue;
                 }
                 Either::Left(None) => {
@@ -2062,8 +2280,11 @@ async fn transform_arm<'a>(
                 // `Infeasible` surfaces loud as a reverse reconfigure.
                 let forward_caps = {
                     let constraint = elem.caps_constraint_as_transform();
-                    match resolve_forward_output(&constraint, &new_caps, downstream_feasible.as_ref())
-                    {
+                    match resolve_forward_output(
+                        &constraint,
+                        &new_caps,
+                        downstream_feasible.as_ref(),
+                    ) {
                         ForwardResolve::Fixed(caps) => caps,
                         ForwardResolve::Defer => new_caps.clone(),
                         ForwardResolve::Infeasible(failure) => {
@@ -2108,8 +2329,9 @@ async fn transform_arm<'a>(
                 // M399: time the data-frame `process()` and sample input fill;
                 // control packets (segment/flush) are excluded so the histogram
                 // reflects real per-frame work, not cheap signalling.
-                let timed =
-                    probe.as_deref().filter(|_| matches!(&packet, PipelinePacket::DataFrame(_)));
+                let timed = probe
+                    .as_deref()
+                    .filter(|_| matches!(&packet, PipelinePacket::DataFrame(_)));
                 if let Some(p) = timed {
                     p.record_fill(in_rx.fill_percent());
                     // Queue-residency of this frame on the input link (M684).
@@ -2226,7 +2448,13 @@ async fn sink_arm<'a>(
                         if let Some(p) = &proposal {
                             elem.configure_allocation(p);
                         }
-                        coord.report(Recascade { node, target: None, proposal }).await;
+                        coord
+                            .report(Recascade {
+                                node,
+                                target: None,
+                                proposal,
+                            })
+                            .await;
                         elem.process(PipelinePacket::CapsChanged(sink_caps), &mut null)
                             .await?;
                     }
@@ -2402,8 +2630,9 @@ async fn demux_arm<'a>(
             Some(packet) => {
                 // M694: time the data-frame `process()` and sample input fill;
                 // control packets are excluded so the histogram reflects real work.
-                let timed =
-                    probe.as_deref().filter(|_| matches!(&packet, PipelinePacket::DataFrame(_)));
+                let timed = probe
+                    .as_deref()
+                    .filter(|_| matches!(&packet, PipelinePacket::DataFrame(_)));
                 if let Some(p) = timed {
                     p.record_fill(in_rx.fill_percent());
                     if let Some(t) = in_rx.pop_transit_ns() {
@@ -2450,7 +2679,10 @@ async fn muxer_forwarder(
     loop {
         match in_rx.recv().await {
             Some(PipelinePacket::Eos) | None => {
-                tagged.send(PipelinePacket::Eos).await.map_err(|_| G2gError::Shutdown)?;
+                tagged
+                    .send(PipelinePacket::Eos)
+                    .await
+                    .map_err(|_| G2gError::Shutdown)?;
                 return Ok(0);
             }
             Some(packet) => {
@@ -2556,30 +2788,41 @@ async fn muxer_arm<'a>(
                 // reconfigure the pad; the input-side `CapsChanged` is consumed,
                 // not forwarded as if it were the merged output.
                 let input_caps = solve_mux_input_dyn(&new_caps, &*mux, pad)?;
-                mux.configure_pipeline(pad, &input_caps)?.reject_refixate()?;
+                mux.configure_pipeline(pad, &input_caps)?
+                    .reject_refixate()?;
                 // MX-1β: the muxer's per-pad allocation demand may shift with the
                 // new input caps; re-cascade it up exactly this pad's branch (the
                 // other inputs are untouched). A source feeding the pad directly
                 // has no interruptible arm, so there is nothing to walk.
-                if let (Some(target), Some(p)) =
-                    (pad_upstream[slot], mux.propose_allocation_for_input(pad, &input_caps))
-                {
-                    coord.report(Recascade { node, target: Some(target), proposal: Some(p) }).await;
+                if let (Some(target), Some(p)) = (
+                    pad_upstream[slot],
+                    mux.propose_allocation_for_input(pad, &input_caps),
+                ) {
+                    coord
+                        .report(Recascade {
+                            node,
+                            target: Some(target),
+                            proposal: Some(p),
+                        })
+                        .await;
                 }
                 // MX-2: the per-input change may shift the merged output. Emit one
                 // downstream `CapsChanged` only when it actually changed.
                 let new_output = solve_mux_output_dyn(&*mux)?;
                 if new_output != current_output {
                     current_output = new_output.clone();
-                    adapter.push(PipelinePacket::CapsChanged(new_output)).await?;
+                    adapter
+                        .push(PipelinePacket::CapsChanged(new_output))
+                        .await?;
                 }
             }
             packet => {
                 // M694: time the data-frame `process()` and sample this pad's
                 // input fill; the per-pad channel is a plain `Receiver`, so it has
                 // no transit ring (transit stays empty for muxer pads).
-                let timed =
-                    probe.as_deref().filter(|_| matches!(&packet, PipelinePacket::DataFrame(_)));
+                let timed = probe
+                    .as_deref()
+                    .filter(|_| matches!(&packet, PipelinePacket::DataFrame(_)));
                 if let Some(p) = timed {
                     p.record_fill(pad_rxs[slot].1.fill_percent());
                 }
@@ -2631,7 +2874,8 @@ async fn muxer_arm_pts<'a>(
                 p.record_fill(pad_rxs[slot].1.fill_percent());
             }
             let t0 = ElementProbe::mark();
-            mux.process(pad, PipelinePacket::DataFrame(frame), &mut adapter).await?;
+            mux.process(pad, PipelinePacket::DataFrame(frame), &mut adapter)
+                .await?;
             if let Some(p) = probe.as_deref() {
                 p.record_proc_since(t0);
             }
@@ -2660,16 +2904,26 @@ async fn muxer_arm_pts<'a>(
                 // and emit one downstream `CapsChanged` only when the merged
                 // output actually shifts.
                 let input_caps = solve_mux_input_dyn(&new_caps, &*mux, pad)?;
-                mux.configure_pipeline(pad, &input_caps)?.reject_refixate()?;
-                if let (Some(target), Some(p)) =
-                    (pad_upstream[slot], mux.propose_allocation_for_input(pad, &input_caps))
-                {
-                    coord.report(Recascade { node, target: Some(target), proposal: Some(p) }).await;
+                mux.configure_pipeline(pad, &input_caps)?
+                    .reject_refixate()?;
+                if let (Some(target), Some(p)) = (
+                    pad_upstream[slot],
+                    mux.propose_allocation_for_input(pad, &input_caps),
+                ) {
+                    coord
+                        .report(Recascade {
+                            node,
+                            target: Some(target),
+                            proposal: Some(p),
+                        })
+                        .await;
                 }
                 let new_output = solve_mux_output_dyn(&*mux)?;
                 if new_output != current_output {
                     current_output = new_output.clone();
-                    adapter.push(PipelinePacket::CapsChanged(new_output)).await?;
+                    adapter
+                        .push(PipelinePacket::CapsChanged(new_output))
+                        .await?;
                 }
             }
             // Flush / Segment are not part of the muxer-input contract here.
@@ -2708,8 +2962,13 @@ mod tests {
 
     fn system_frame(bytes: &[u8], seq: u64) -> PipelinePacket {
         PipelinePacket::DataFrame(Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.to_vec().into_boxed_slice())),
-            timing: FrameTiming { pts_ns: 7, ..FrameTiming::default() },
+            domain: MemoryDomain::System(SystemSlice::from_boxed(
+                bytes.to_vec().into_boxed_slice(),
+            )),
+            timing: FrameTiming {
+                pts_ns: 7,
+                ..FrameTiming::default()
+            },
             sequence: seq,
             meta: Default::default(),
         })
@@ -2735,10 +2994,18 @@ mod tests {
         else {
             panic!("expected data frames");
         };
-        let MemoryDomain::System(sa) = &a.domain else { panic!() };
-        let MemoryDomain::System(sb) = &b.domain else { panic!() };
+        let MemoryDomain::System(sa) = &a.domain else {
+            panic!()
+        };
+        let MemoryDomain::System(sb) = &b.domain else {
+            panic!()
+        };
         assert_eq!(sa.as_slice(), sb.as_slice(), "bytes copied");
-        assert_ne!(sb.as_slice().as_ptr(), sa.as_slice().as_ptr(), "distinct allocation");
+        assert_ne!(
+            sb.as_slice().as_ptr(),
+            sa.as_slice().as_ptr(),
+            "distinct allocation"
+        );
         assert_eq!(b.timing, a.timing);
         assert_eq!(b.sequence, 9);
     }
@@ -2766,15 +3033,25 @@ mod tests {
         };
         let mut a = AnalyticsMeta::new();
         a.add_detection(ObjectDetection {
-            bbox: BBox { x: 0.1, y: 0.1, w: 0.2, h: 0.2 },
+            bbox: BBox {
+                x: 0.1,
+                y: 0.1,
+                w: 0.2,
+                h: 0.2,
+            },
             label: 5,
             confidence: 0.9,
         });
         original.meta.attach(a);
 
         let cloned = try_clone_packet(&PipelinePacket::DataFrame(original)).expect("clone");
-        let PipelinePacket::DataFrame(b) = cloned else { panic!("data frame") };
-        let meta = b.meta.get::<AnalyticsMeta>().expect("meta carried to tee branch");
+        let PipelinePacket::DataFrame(b) = cloned else {
+            panic!("data frame")
+        };
+        let meta = b
+            .meta
+            .get::<AnalyticsMeta>()
+            .expect("meta carried to tee branch");
         assert_eq!(meta.detections().count(), 1);
         assert_eq!(meta.detections().next().unwrap().label, 5);
     }

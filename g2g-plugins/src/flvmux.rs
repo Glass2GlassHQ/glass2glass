@@ -31,8 +31,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
-    Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-    Rate, TagList, VideoCodec,
+    Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
+    PipelinePacket, Rate, TagList, VideoCodec,
 };
 
 use crate::aacparse::{asc_from_adts, strip_adts};
@@ -84,14 +84,22 @@ impl FlvMux {
 
     /// The output it produces: an FLV byte stream.
     fn output_caps() -> Caps {
-        Caps::ByteStream { encoding: ByteStreamEncoding::Flv }
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::Flv,
+        }
     }
 
     /// The FLV track for an input caps, or `None` if the codec is unsupported.
     fn track_for(caps: &Caps) -> Option<FlvTrack> {
         match caps {
-            Caps::CompressedVideo { codec: VideoCodec::H264, .. } => Some(FlvTrack::Video),
-            Caps::Audio { format: AudioFormat::Aac, .. } => Some(FlvTrack::Audio),
+            Caps::CompressedVideo {
+                codec: VideoCodec::H264,
+                ..
+            } => Some(FlvTrack::Video),
+            Caps::Audio {
+                format: AudioFormat::Aac,
+                ..
+            } => Some(FlvTrack::Audio),
             _ => None,
         }
     }
@@ -105,7 +113,11 @@ impl FlvMux {
                 height: Dim::Any,
                 framerate: Rate::Any,
             },
-            Caps::Audio { format: AudioFormat::Aac, channels: 0, sample_rate: 0 },
+            Caps::Audio {
+                format: AudioFormat::Aac,
+                channels: 0,
+                sample_rate: 0,
+            },
         ])
     }
 }
@@ -189,7 +201,10 @@ impl AsyncElement for FlvMux {
                     };
                     let out_frame = Frame::new(
                         MemoryDomain::System(SystemSlice::from_boxed(flv.into_boxed_slice())),
-                        FrameTiming { pts_ns: frame.timing.pts_ns, ..FrameTiming::default() },
+                        FrameTiming {
+                            pts_ns: frame.timing.pts_ns,
+                            ..FrameTiming::default()
+                        },
                         self.emitted,
                     );
                     self.emitted += 1;
@@ -255,7 +270,10 @@ mod tests {
     fn h264_frame(au: Vec<u8>, pts_ns: u64) -> PipelinePacket {
         PipelinePacket::DataFrame(Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
-            FrameTiming { pts_ns, ..FrameTiming::default() },
+            FrameTiming {
+                pts_ns,
+                ..FrameTiming::default()
+            },
             0,
         ))
     }
@@ -277,7 +295,9 @@ mod tests {
         };
         assert!(matches!(
             f(&h264_caps()).alternatives(),
-            [Caps::ByteStream { encoding: ByteStreamEncoding::Flv }]
+            [Caps::ByteStream {
+                encoding: ByteStreamEncoding::Flv
+            }]
         ));
     }
 
@@ -295,27 +315,39 @@ mod tests {
     async fn element_round_trips_tags_through_flvdemux() {
         use g2g_core::{Bus, BusMessage, Tag};
 
-        let tags: TagList =
-            [Tag::Title("My Clip".into()), Tag::Encoder("g2g".into())].into_iter().collect();
+        let tags: TagList = [Tag::Title("My Clip".into()), Tag::Encoder("g2g".into())]
+            .into_iter()
+            .collect();
         let mut mux = FlvMux::new().with_tags(tags.clone());
         mux.configure_pipeline(&h264_caps()).unwrap();
         let mut flv_sink = CaptureSink::default();
-        mux.process(h264_frame(annexb(&[&[0x65, 0xAA]]), 0), &mut flv_sink).await.unwrap();
+        mux.process(h264_frame(annexb(&[&[0x65, 0xAA]]), 0), &mut flv_sink)
+            .await
+            .unwrap();
 
         let mut flv = Vec::new();
         for f in &flv_sink.frames {
             flv.extend_from_slice(f);
         }
         let (bus, handle) = Bus::new(8);
-        let mut demux = FlvDemux::new().with_stream(FlvStream::H264).with_bus(handle);
-        demux.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::Flv }).unwrap();
+        let mut demux = FlvDemux::new()
+            .with_stream(FlvStream::H264)
+            .with_bus(handle);
+        demux
+            .configure_pipeline(&Caps::ByteStream {
+                encoding: ByteStreamEncoding::Flv,
+            })
+            .unwrap();
         let mut au_sink = CaptureSink::default();
         let flv_frame = Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(flv.into_boxed_slice())),
             FrameTiming::default(),
             0,
         );
-        demux.process(PipelinePacket::DataFrame(flv_frame), &mut au_sink).await.unwrap();
+        demux
+            .process(PipelinePacket::DataFrame(flv_frame), &mut au_sink)
+            .await
+            .unwrap();
 
         let mut posted = None;
         while let Some(m) = bus.try_recv() {
@@ -324,7 +356,11 @@ mod tests {
             }
         }
         assert_eq!(posted.expect("a Tag message").tags(), tags.tags());
-        assert_eq!(au_sink.frames, alloc::vec![annexb(&[&[0x65, 0xAA]])], "the AU still demuxes");
+        assert_eq!(
+            au_sink.frames,
+            alloc::vec![annexb(&[&[0x65, 0xAA]])],
+            "the AU still demuxes"
+        );
     }
 
     #[tokio::test]
@@ -335,8 +371,12 @@ mod tests {
         let mut mux = FlvMux::new();
         mux.configure_pipeline(&h264_caps()).unwrap();
         let mut flv_sink = CaptureSink::default();
-        mux.process(h264_frame(au0.clone(), 0), &mut flv_sink).await.unwrap();
-        mux.process(h264_frame(au1.clone(), 33_000_000), &mut flv_sink).await.unwrap();
+        mux.process(h264_frame(au0.clone(), 0), &mut flv_sink)
+            .await
+            .unwrap();
+        mux.process(h264_frame(au1.clone(), 33_000_000), &mut flv_sink)
+            .await
+            .unwrap();
         assert_eq!(mux.emitted(), 2);
 
         // Feed the muxed FLV bytes back through the demuxer.
@@ -345,16 +385,27 @@ mod tests {
             flv.extend_from_slice(f);
         }
         let mut demux = FlvDemux::new().with_stream(FlvStream::H264);
-        demux.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::Flv }).unwrap();
+        demux
+            .configure_pipeline(&Caps::ByteStream {
+                encoding: ByteStreamEncoding::Flv,
+            })
+            .unwrap();
         let mut au_sink = CaptureSink::default();
         let flv_frame = Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(flv.into_boxed_slice())),
             FrameTiming::default(),
             0,
         );
-        demux.process(PipelinePacket::DataFrame(flv_frame), &mut au_sink).await.unwrap();
+        demux
+            .process(PipelinePacket::DataFrame(flv_frame), &mut au_sink)
+            .await
+            .unwrap();
 
-        assert_eq!(au_sink.frames, alloc::vec![au0, au1], "AUs recovered through mux + demux");
+        assert_eq!(
+            au_sink.frames,
+            alloc::vec![au0, au1],
+            "AUs recovered through mux + demux"
+        );
     }
 
     #[tokio::test]
@@ -370,7 +421,9 @@ mod tests {
         let mut mux = FlvMux::new();
         mux.configure_pipeline(&h264_caps()).unwrap();
         let mut flv_sink = CaptureSink::default();
-        mux.process(h264_frame(annexb(&[sps, pps, idr]), 0), &mut flv_sink).await.unwrap();
+        mux.process(h264_frame(annexb(&[sps, pps, idr]), 0), &mut flv_sink)
+            .await
+            .unwrap();
 
         let mut d = FlvDemuxer::new();
         d.push_data(&flv_sink.frames[0]);
@@ -390,16 +443,30 @@ mod tests {
 
         // 48 kHz (index 3) stereo AAC-LC ADTS frame; the muxer derives the ASC.
         let adts = alloc::vec![0xFFu8, 0xF1, 0x4C, 0x80, 0x00, 0x1F, 0xFC, 0xAB, 0xCD];
-        let aac = Caps::Audio { format: AudioFormat::Aac, channels: 2, sample_rate: 48_000 };
+        let aac = Caps::Audio {
+            format: AudioFormat::Aac,
+            channels: 2,
+            sample_rate: 48_000,
+        };
         let mut mux = FlvMux::new();
         mux.configure_pipeline(&aac).unwrap();
         let mut flv_sink = CaptureSink::default();
-        mux.process(h264_frame(adts, 0), &mut flv_sink).await.unwrap();
+        mux.process(h264_frame(adts, 0), &mut flv_sink)
+            .await
+            .unwrap();
 
         let mut d = FlvDemuxer::new();
         d.push_data(&flv_sink.frames[0]);
-        assert_eq!(d.audio_config(), Some(&[0x11u8, 0x90][..]), "ASC from the ADTS header");
+        assert_eq!(
+            d.audio_config(),
+            Some(&[0x11u8, 0x90][..]),
+            "ASC from the ADTS header"
+        );
         let units = d.take_units();
-        assert_eq!(units[0].data, alloc::vec![0xAB, 0xCD], "media tag carries the raw AAC frame");
+        assert_eq!(
+            units[0].data,
+            alloc::vec![0xAB, 0xCD],
+            "media tag carries the raw AAC frame"
+        );
     }
 }

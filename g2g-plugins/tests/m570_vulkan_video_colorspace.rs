@@ -19,7 +19,10 @@
 //! clip would diverge by tens of levels; honouring it keeps the mean diff tiny.
 //!
 //! Runs on the RTX 3060 for the reconstruction check; the parse check runs anywhere.
-#![cfg(all(any(target_os = "linux", target_os = "windows"), feature = "vulkan-video"))]
+#![cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    feature = "vulkan-video"
+))]
 
 use g2g_core::runtime::block_on;
 use g2g_plugins::vulkanvideo::{
@@ -97,7 +100,10 @@ fn gpu_conversion_honours_stream_colour_matrix() {
 
     // Real content in each (not a flat / failed convert).
     let amax = *a.iter().max().unwrap();
-    assert!(amax >= 200 && *a.iter().min().unwrap() <= 20, "601 texture not a real picture");
+    assert!(
+        amax >= 200 && *a.iter().min().unwrap() <= 20,
+        "601 texture not a real picture"
+    );
 
     // Both must reconstruct ~the same source: mean abs RGB diff tiny. A decoder that
     // ignored the tag (decoding the 709 clip as 601) would diverge by tens of levels.
@@ -111,5 +117,8 @@ fn gpu_conversion_honours_stream_colour_matrix() {
     }
     let mean = sum as f64 / n as f64;
     eprintln!("m570: BT.601 vs BT.709 reconstruction mean abs diff = {mean:.3}");
-    assert!(mean < 4.0, "reconstructions diverge ({mean:.3}); a stream's colour matrix was ignored");
+    assert!(
+        mean < 4.0,
+        "reconstructions diverge ({mean:.3}); a stream's colour matrix was ignored"
+    );
 }

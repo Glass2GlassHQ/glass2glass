@@ -22,9 +22,7 @@ use alloc::vec::Vec;
 use tokio::io::AsyncReadExt;
 
 use g2g_core::wire::decode_packet;
-use g2g_core::{
-    Caps, G2gError, HardwareError, PipelinePacket, PropKind, PropertySpec,
-};
+use g2g_core::{Caps, G2gError, HardwareError, PipelinePacket, PropKind, PropertySpec};
 
 use crate::filesink::io_err;
 use crate::remotesource::{PacketTransport, RemoteSource, TransportFuture};
@@ -44,8 +42,12 @@ impl PacketTransport for TcpTransport {
     const DESCRIPTION: &'static str =
         "Receives a serialized PipelinePacket stream over TCP from a remote RemoteSink";
     const PROPERTIES: &'static [PropertySpec] = &[
-        PropertySpec::new("address", PropKind::Str, "local bind address (IP to listen on)")
-            .with_default("0.0.0.0"),
+        PropertySpec::new(
+            "address",
+            PropKind::Str,
+            "local bind address (IP to listen on)",
+        )
+        .with_default("0.0.0.0"),
         PropertySpec::new("port", PropKind::Uint, "local TCP port to listen on")
             .with_range("0", "65535"),
         PropertySpec::new(
@@ -59,7 +61,9 @@ impl PacketTransport for TcpTransport {
     fn accept(listener: &tokio::net::TcpListener) -> TransportFuture<'_, (Self::Conn, Caps)> {
         Box::pin(async move {
             let (mut stream, _peer) = listener.accept().await.map_err(io_err)?;
-            let body = read_frame(&mut stream).await?.ok_or(G2gError::NotConfigured)?;
+            let body = read_frame(&mut stream)
+                .await?
+                .ok_or(G2gError::NotConfigured)?;
             let caps = match decode_packet(&body).map_err(map_wire)? {
                 PipelinePacket::CapsChanged(caps) => caps,
                 // Any other first packet violates the protocol.

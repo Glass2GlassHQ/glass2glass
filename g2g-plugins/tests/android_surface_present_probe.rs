@@ -27,7 +27,7 @@
 use g2g_core::element::{AsyncElement, BoxFuture, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
-use g2g_core::{Caps, ConfigureOutcome, Dim, G2gError, RawVideoFormat, Rate, VideoCodec};
+use g2g_core::{Caps, ConfigureOutcome, Dim, G2gError, Rate, RawVideoFormat, VideoCodec};
 use g2g_plugins::mediacodec_wgpu::{create_android_interop_device, create_android_surface};
 use g2g_plugins::mediacodecdec::MediaCodecDec;
 use g2g_plugins::wgpusink::WgpuSink;
@@ -54,12 +54,18 @@ fn start_binder_threadpool() {
         if lib.is_null() {
             return;
         }
-        let set = dlsym(lib, b"ABinderProcess_setThreadPoolMaxThreadCount\0".as_ptr() as *const c_char);
+        let set = dlsym(
+            lib,
+            b"ABinderProcess_setThreadPoolMaxThreadCount\0".as_ptr() as *const c_char,
+        );
         if !set.is_null() {
             let set: extern "C" fn(u32) -> bool = core::mem::transmute(set);
             set(1);
         }
-        let start = dlsym(lib, b"ABinderProcess_startThreadPool\0".as_ptr() as *const c_char);
+        let start = dlsym(
+            lib,
+            b"ABinderProcess_startThreadPool\0".as_ptr() as *const c_char,
+        );
         if !start.is_null() {
             let start: extern "C" fn() = core::mem::transmute(start);
             start();
@@ -76,7 +82,10 @@ const H264: &[u8] = include_bytes!("fixtures/h264_640x480.h264");
 struct Discard;
 
 impl OutputSink for Discard {
-    fn push<'a>(&'a mut self, _packet: PipelinePacket) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
+    fn push<'a>(
+        &'a mut self,
+        _packet: PipelinePacket,
+    ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
         Box::pin(async move { Ok(PushOutcome::Accepted) })
     }
 }
@@ -89,7 +98,10 @@ struct PresentRelay<'s> {
 }
 
 impl OutputSink for PresentRelay<'_> {
-    fn push<'a>(&'a mut self, packet: PipelinePacket) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
+    fn push<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+    ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
         Box::pin(async move {
             let mut nil = Discard;
             self.sink.process(packet, &mut nil).await?;
@@ -107,14 +119,14 @@ fn access_units(s: &[u8]) -> Vec<&[u8]> {
     let mut nals: Vec<(usize, u8)> = Vec::new();
     let mut i = 0;
     while i + 3 <= s.len() {
-        let sc_len = if i + 4 <= s.len() && s[i] == 0 && s[i + 1] == 0 && s[i + 2] == 0 && s[i + 3] == 1
-        {
-            Some(4)
-        } else if s[i] == 0 && s[i + 1] == 0 && s[i + 2] == 1 {
-            Some(3)
-        } else {
-            None
-        };
+        let sc_len =
+            if i + 4 <= s.len() && s[i] == 0 && s[i + 1] == 0 && s[i + 2] == 0 && s[i + 3] == 1 {
+                Some(4)
+            } else if s[i] == 0 && s[i + 1] == 0 && s[i + 2] == 1 {
+                Some(3)
+            } else {
+                None
+            };
         match sc_len {
             Some(len) => {
                 let hdr = i + len;
@@ -182,13 +194,19 @@ async fn present_decoded_frames_to_android_surface() {
     // One interop device, shared by the decoder and the present sink: a wgpu
     // texture binds only to the device that made it, so decode and present must
     // be on the same device for the hand-off to be copy-free.
-    let dev = create_android_interop_device().await.expect("create interop device");
+    let dev = create_android_interop_device()
+        .await
+        .expect("create interop device");
     let ctx = dev.gpu_context();
     let (surface, config) =
         create_android_surface(&dev, &window, w, h).expect("create android surface");
-    eprintln!("=== M305 surface configured: {:?} {}x{} ===", config.format, config.width, config.height);
+    eprintln!(
+        "=== M305 surface configured: {:?} {}x{} ===",
+        config.format, config.width, config.height
+    );
     let mut sink = WgpuSink::with_surface(ctx, surface, config);
-    sink.configure_pipeline(&rgba_caps(w, h)).expect("configure sink");
+    sink.configure_pipeline(&rgba_caps(w, h))
+        .expect("configure sink");
 
     let mut dec = MediaCodecDec::h264().with_gpu_device(dev);
     let upstream = Caps::CompressedVideo {
@@ -199,7 +217,8 @@ async fn present_decoded_frames_to_android_surface() {
     };
     let narrowed = dec.intercept_caps(&upstream).expect("intercept caps");
     assert!(matches!(
-        dec.configure_pipeline(&narrowed).expect("configure decoder"),
+        dec.configure_pipeline(&narrowed)
+            .expect("configure decoder"),
         ConfigureOutcome::Accepted
     ));
 
@@ -209,8 +228,15 @@ async fn present_decoded_frames_to_android_surface() {
         let mut pts_ns = 0u64;
         for au in access_units(H264) {
             let frame = Frame {
-                domain: MemoryDomain::System(SystemSlice::from_boxed(au.to_vec().into_boxed_slice())),
-                timing: FrameTiming { pts_ns, dts_ns: pts_ns, capture_ns: pts_ns, ..FrameTiming::default() },
+                domain: MemoryDomain::System(SystemSlice::from_boxed(
+                    au.to_vec().into_boxed_slice(),
+                )),
+                timing: FrameTiming {
+                    pts_ns,
+                    dts_ns: pts_ns,
+                    capture_ns: pts_ns,
+                    ..FrameTiming::default()
+                },
                 sequence: 0,
                 meta: Default::default(),
             };
@@ -219,7 +245,9 @@ async fn present_decoded_frames_to_android_surface() {
                 .expect("decode + present access unit");
             pts_ns += 33_366_700;
         }
-        dec.process(PipelinePacket::Eos, &mut relay).await.expect("Eos drains the codec");
+        dec.process(PipelinePacket::Eos, &mut relay)
+            .await
+            .expect("Eos drains the codec");
     }
 
     let presented = sink.presented_count();
@@ -227,7 +255,10 @@ async fn present_decoded_frames_to_android_surface() {
     // The hard invariant: the Android surface produced acquirable swapchain
     // textures and we presented decoded frames onto them. A broken surface would
     // never return a current texture, so this would be zero.
-    assert!(presented > 0, "expected at least one frame presented to the Android surface");
+    assert!(
+        presented > 0,
+        "expected at least one frame presented to the Android surface"
+    );
 
     // Informational tap: try to read a presented frame back through the
     // ImageReader's BufferQueue. Whether a wgpu swapchain over an ImageReader

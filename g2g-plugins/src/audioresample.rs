@@ -144,7 +144,8 @@ impl AudioResample {
 }
 
 impl AsyncElement for AudioResample {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -160,9 +161,11 @@ impl AsyncElement for AudioResample {
         // Passthrough format + channels (retarget sample_rate only).
         let passthrough = PassthroughFields::NONE.with_format().with_channels();
         let derive = Box::new(move |input: &Caps| match input {
-            Caps::Audio { format, channels, sample_rate }
-                if PCM_FORMATS.contains(format) && *channels > 0 =>
-            {
+            Caps::Audio {
+                format,
+                channels,
+                sample_rate,
+            } if PCM_FORMATS.contains(format) && *channels > 0 => {
                 let mk = |rate| Caps::Audio {
                     format: *format,
                     channels: *channels,
@@ -181,7 +184,10 @@ impl AsyncElement for AudioResample {
             }
             _ => CapsSet::from_alternatives(Vec::new()),
         });
-        CapsConstraint::DerivedCoupled { derive, passthrough }
+        CapsConstraint::DerivedCoupled {
+            derive,
+            passthrough,
+        }
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -239,7 +245,8 @@ impl AsyncElement for AudioResample {
                         sample_rate: out_rate,
                     };
                     if self.last_caps.as_ref() != Some(&new_caps) {
-                        out.push(PipelinePacket::CapsChanged(new_caps.clone())).await?;
+                        out.push(PipelinePacket::CapsChanged(new_caps.clone()))
+                            .await?;
                         self.last_caps = Some(new_caps);
                     }
                     let out_frame = Frame {
@@ -315,8 +322,11 @@ impl AsyncElement for AudioResample {
 }
 
 /// `AudioResample`'s settable properties (M107): the output sample rate.
-static AUDIORESAMPLE_PROPS: &[PropertySpec] =
-    &[PropertySpec::new("samplerate", PropKind::Uint, "output samples per second")];
+static AUDIORESAMPLE_PROPS: &[PropertySpec] = &[PropertySpec::new(
+    "samplerate",
+    PropKind::Uint,
+    "output samples per second",
+)];
 
 impl AudioResample {
     /// Resample one interleaved PCM buffer from `in_rate` to `out_rate`,
@@ -440,21 +450,32 @@ mod tests {
     }
 
     fn f32_samples(bytes: &[u8]) -> Vec<f32> {
-        bytes.chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect()
+        bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .collect()
     }
 
     #[test]
     fn derived_output_retargets_rate_only() {
         let r = AudioResample::new(48_000);
-        let CapsConstraint::DerivedCoupled { derive: f, passthrough } =
-            r.caps_constraint_as_transform()
+        let CapsConstraint::DerivedCoupled {
+            derive: f,
+            passthrough,
+        } = r.caps_constraint_as_transform()
         else {
             panic!("expected DerivedCoupled");
         };
-        assert_eq!(passthrough, PassthroughFields::NONE.with_format().with_channels());
+        assert_eq!(
+            passthrough,
+            PassthroughFields::NONE.with_format().with_channels()
+        );
         // format + channels preserved, rate retargeted.
         let out = f(&audio(AudioFormat::PcmS16Le, 2, 44_100));
-        assert_eq!(out.alternatives(), &[audio(AudioFormat::PcmS16Le, 2, 48_000)]);
+        assert_eq!(
+            out.alternatives(),
+            &[audio(AudioFormat::PcmS16Le, 2, 48_000)]
+        );
         // compressed audio is not resamplable.
         assert!(f(&audio(AudioFormat::Aac, 2, 48_000)).is_empty());
     }
@@ -462,9 +483,12 @@ mod tests {
     #[test]
     fn identity_rate_passes_samples_through() {
         let mut r = AudioResample::new(48_000);
-        r.configure_pipeline(&audio(AudioFormat::PcmF32Le, 1, 48_000)).unwrap();
+        r.configure_pipeline(&audio(AudioFormat::PcmF32Le, 1, 48_000))
+            .unwrap();
         let src = interleave_f32(&[&[0.0, 0.25, 0.5, 0.75]]);
-        let out = r.resample(&src, AudioFormat::PcmF32Le, 1, 48_000, 48_000).unwrap();
+        let out = r
+            .resample(&src, AudioFormat::PcmF32Le, 1, 48_000, 48_000)
+            .unwrap();
         let got = f32_samples(&out);
         // 1:1 produces n-1 outputs from this buffer (the last sample is carried
         // to interpolate with the next buffer) and reproduces them exactly.
@@ -474,13 +498,20 @@ mod tests {
     #[test]
     fn upsampling_2x_doubles_length_and_interpolates_midpoints() {
         let mut r = AudioResample::new(96_000);
-        r.configure_pipeline(&audio(AudioFormat::PcmF32Le, 1, 48_000)).unwrap();
+        r.configure_pipeline(&audio(AudioFormat::PcmF32Le, 1, 48_000))
+            .unwrap();
         // ramp 0,1,2,3; upsample 2x -> step 0.5 -> 0,0.5,1,1.5,2,2.5 (stops
         // before the last sample, which is carried).
         let src = interleave_f32(&[&[0.0, 1.0, 2.0, 3.0]]);
-        let out = r.resample(&src, AudioFormat::PcmF32Le, 1, 48_000, 96_000).unwrap();
+        let out = r
+            .resample(&src, AudioFormat::PcmF32Le, 1, 48_000, 96_000)
+            .unwrap();
         let got = f32_samples(&out);
-        assert_eq!(got.len(), 6, "2x upsample of 4 samples yields ~2*(n-1) outputs");
+        assert_eq!(
+            got.len(),
+            6,
+            "2x upsample of 4 samples yields ~2*(n-1) outputs"
+        );
         let want = [0.0, 0.5, 1.0, 1.5, 2.0, 2.5];
         for (g, w) in got.iter().zip(want) {
             assert!((g - w).abs() < 1e-5, "got {g} want {w}");
@@ -490,11 +521,14 @@ mod tests {
     #[test]
     fn downsampling_halves_length() {
         let mut r = AudioResample::new(24_000);
-        r.configure_pipeline(&audio(AudioFormat::PcmF32Le, 1, 48_000)).unwrap();
+        r.configure_pipeline(&audio(AudioFormat::PcmF32Le, 1, 48_000))
+            .unwrap();
         // step 2.0 over indices 0..7 -> reads at 0,2,4,6 (the loop runs while
         // rel < n-1 = 7, so rel=6 still interpolates 6..7).
         let src = interleave_f32(&[&[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]]);
-        let out = r.resample(&src, AudioFormat::PcmF32Le, 1, 48_000, 24_000).unwrap();
+        let out = r
+            .resample(&src, AudioFormat::PcmF32Le, 1, 48_000, 24_000)
+            .unwrap();
         let got = f32_samples(&out);
         assert_eq!(got, &[0.0, 2.0, 4.0, 6.0]);
     }
@@ -505,22 +539,37 @@ mod tests {
         // seamlessly, using the carried last sample of buffer 1 to interpolate
         // the boundary value (3 -> 4 midpoint = 3.5).
         let mut r = AudioResample::new(96_000);
-        r.configure_pipeline(&audio(AudioFormat::PcmF32Le, 1, 48_000)).unwrap();
+        r.configure_pipeline(&audio(AudioFormat::PcmF32Le, 1, 48_000))
+            .unwrap();
         let b1 = interleave_f32(&[&[0.0, 1.0, 2.0, 3.0]]);
         let b2 = interleave_f32(&[&[4.0, 5.0, 6.0, 7.0]]);
-        let o1 = f32_samples(&r.resample(&b1, AudioFormat::PcmF32Le, 1, 48_000, 96_000).unwrap());
-        let o2 = f32_samples(&r.resample(&b2, AudioFormat::PcmF32Le, 1, 48_000, 96_000).unwrap());
+        let o1 = f32_samples(
+            &r.resample(&b1, AudioFormat::PcmF32Le, 1, 48_000, 96_000)
+                .unwrap(),
+        );
+        let o2 = f32_samples(
+            &r.resample(&b2, AudioFormat::PcmF32Le, 1, 48_000, 96_000)
+                .unwrap(),
+        );
         assert_eq!(o1, &[0.0, 0.5, 1.0, 1.5, 2.0, 2.5]);
         // buffer 2 resumes at read position 3.0 (carried): 3,3.5,4,4.5,5,5.5,6.5?
         // grid: 3.0,3.5,4.0,4.5,5.0,5.5,6.0,6.5 stopping before last (index 7).
-        assert_eq!(o2.first().copied(), Some(3.0), "resumes exactly where it left off");
-        assert!((o2[1] - 3.5).abs() < 1e-5, "boundary midpoint uses carried sample");
+        assert_eq!(
+            o2.first().copied(),
+            Some(3.0),
+            "resumes exactly where it left off"
+        );
+        assert!(
+            (o2[1] - 3.5).abs() < 1e-5,
+            "boundary midpoint uses carried sample"
+        );
     }
 
     #[test]
     fn ragged_input_fails_loud() {
         let mut r = AudioResample::new(48_000);
-        r.configure_pipeline(&audio(AudioFormat::PcmS16Le, 2, 44_100)).unwrap();
+        r.configure_pipeline(&audio(AudioFormat::PcmS16Le, 2, 44_100))
+            .unwrap();
         // 3 bytes is not a whole s16 stereo frame (4 bytes).
         assert_eq!(
             r.resample(&[0, 0, 0], AudioFormat::PcmS16Le, 2, 44_100, 48_000),

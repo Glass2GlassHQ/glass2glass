@@ -53,7 +53,13 @@ impl WebCameraSrc {
     /// Request a `width` x `height` camera stream, emitting `frames` frames then
     /// EOS (0 = until the track ends).
     pub fn new(width: u32, height: u32, frames: u64) -> Self {
-        Self { width, height, frames, configured: false, last_dims: None }
+        Self {
+            width,
+            height,
+            frames,
+            configured: false,
+            last_dims: None,
+        }
     }
 
     fn caps(&self) -> Caps {
@@ -87,11 +93,13 @@ impl WebCameraSrc {
 }
 
 impl SourceLoop for WebCameraSrc {
-    type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
+    type RunFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
     where
         Self: 'a;
 
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 
@@ -126,25 +134,42 @@ impl SourceLoop for WebCameraSrc {
                 .media_devices()
                 .map_err(|_| hw())?;
             let video = js_sys::Object::new();
-            let _ = js_sys::Reflect::set(&video, &JsValue::from_str("width"), &JsValue::from_f64(self.width as f64));
-            let _ = js_sys::Reflect::set(&video, &JsValue::from_str("height"), &JsValue::from_f64(self.height as f64));
+            let _ = js_sys::Reflect::set(
+                &video,
+                &JsValue::from_str("width"),
+                &JsValue::from_f64(self.width as f64),
+            );
+            let _ = js_sys::Reflect::set(
+                &video,
+                &JsValue::from_str("height"),
+                &JsValue::from_f64(self.height as f64),
+            );
             let constraints = MediaStreamConstraints::new();
             constraints.set_video(&video);
-            let stream: MediaStream =
-                JsFuture::from(devices.get_user_media_with_constraints(&constraints).map_err(|_| hw())?)
-                    .await
-                    .map_err(|_| hw())?
-                    .dyn_into()
-                    .map_err(|_| hw())?;
+            let stream: MediaStream = JsFuture::from(
+                devices
+                    .get_user_media_with_constraints(&constraints)
+                    .map_err(|_| hw())?,
+            )
+            .await
+            .map_err(|_| hw())?
+            .dyn_into()
+            .map_err(|_| hw())?;
 
-            let track: MediaStreamTrack =
-                stream.get_video_tracks().get(0).dyn_into().map_err(|_| hw())?;
+            let track: MediaStreamTrack = stream
+                .get_video_tracks()
+                .get(0)
+                .dyn_into()
+                .map_err(|_| hw())?;
 
             // MediaStreamTrackProcessor exposes the track as a ReadableStream<VideoFrame>.
             let init = MediaStreamTrackProcessorInit::new(&track);
             let processor = MediaStreamTrackProcessor::new(&init).map_err(|_| hw())?;
-            let reader: ReadableStreamDefaultReader =
-                processor.readable().get_reader().dyn_into().map_err(|_| hw())?;
+            let reader: ReadableStreamDefaultReader = processor
+                .readable()
+                .get_reader()
+                .dyn_into()
+                .map_err(|_| hw())?;
 
             let mut sequence = 0u64;
             let result = async {
@@ -157,7 +182,8 @@ impl SourceLoop for WebCameraSrc {
                     if done {
                         break;
                     }
-                    let value = js_sys::Reflect::get(&res, &JsValue::from_str("value")).map_err(|_| hw())?;
+                    let value = js_sys::Reflect::get(&res, &JsValue::from_str("value"))
+                        .map_err(|_| hw())?;
                     let frame: VideoFrame = value.dyn_into().map_err(|_| hw())?;
 
                     let (bytes, w, h, pts_ns) = copy_out_rgba(&frame).await?;
@@ -165,8 +191,15 @@ impl SourceLoop for WebCameraSrc {
 
                     self.announce(w, h, out).await?;
                     let out_frame = Frame {
-                        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-                        timing: FrameTiming { pts_ns, dts_ns: pts_ns, capture_ns: pts_ns, ..FrameTiming::default() },
+                        domain: MemoryDomain::System(SystemSlice::from_boxed(
+                            bytes.into_boxed_slice(),
+                        )),
+                        timing: FrameTiming {
+                            pts_ns,
+                            dts_ns: pts_ns,
+                            capture_ns: pts_ns,
+                            ..FrameTiming::default()
+                        },
                         sequence,
                         meta: Default::default(),
                     };

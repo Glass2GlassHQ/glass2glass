@@ -40,12 +40,18 @@ fn start_binder_threadpool() {
         if lib.is_null() {
             return;
         }
-        let set = dlsym(lib, b"ABinderProcess_setThreadPoolMaxThreadCount\0".as_ptr() as *const c_char);
+        let set = dlsym(
+            lib,
+            b"ABinderProcess_setThreadPoolMaxThreadCount\0".as_ptr() as *const c_char,
+        );
         if !set.is_null() {
             let set: extern "C" fn(u32) -> bool = core::mem::transmute(set);
             set(4);
         }
-        let start = dlsym(lib, b"ABinderProcess_startThreadPool\0".as_ptr() as *const c_char);
+        let start = dlsym(
+            lib,
+            b"ABinderProcess_startThreadPool\0".as_ptr() as *const c_char,
+        );
         if !start.is_null() {
             let start: extern "C" fn() = core::mem::transmute(start);
             start();
@@ -100,11 +106,16 @@ async fn camera2_capture_best_effort() {
     let mut out = CaptureSink::default();
     match src.run(&mut out).await {
         Ok(n) => {
-            eprintln!(">>> captured {n} frame(s); first NV12 buffer = {} bytes", out.first_len);
+            eprintln!(
+                ">>> captured {n} frame(s); first NV12 buffer = {} bytes",
+                out.first_len
+            );
             assert!(n > 0, "camera opened but produced no frames");
             assert_eq!(out.first_len, (w * h * 3 / 2) as usize, "NV12 frame size");
             eprintln!(">>> M308 Camera2 capture validated on device.");
         }
-        Err(e) => eprintln!(">>> capture failed after open ({e:?}); headless/permission limitation"),
+        Err(e) => {
+            eprintln!(">>> capture failed after open ({e:?}); headless/permission limitation")
+        }
     }
 }

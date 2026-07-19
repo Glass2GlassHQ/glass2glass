@@ -13,7 +13,10 @@
 //! queue. Correctness is anchored to the CPU adapter path (Tier A, already
 //! bit-exact vs ffmpeg): the GPU RGBA readback must match a from-I420 reference
 //! reconstructed with the same BT.601-limited matrix the compute pass uses.
-#![cfg(all(any(target_os = "linux", target_os = "windows"), feature = "vulkan-video"))]
+#![cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    feature = "vulkan-video"
+))]
 
 use g2g_core::runtime::block_on;
 use g2g_plugins::revideo::{VideoCodec, VideoPixelLayout, VulkanStreamDecoder};
@@ -82,7 +85,9 @@ fn revideo_adapter_streams_gpu_textures() {
 
     // Feed the whole elementary stream as one chunk (the H.264 splitter inside the
     // decoder frames it into access units), collecting GPU-resident textures.
-    let textures = dec.submit_chunk_texture(CLIP, true).expect("submit chunk (GPU)");
+    let textures = dec
+        .submit_chunk_texture(CLIP, true)
+        .expect("submit chunk (GPU)");
     assert_eq!(textures.len(), 10, "one GPU texture per coded picture");
 
     // A CPU-mode method on a GPU-mode decoder is rejected, not silently misdecoded.
@@ -104,12 +109,18 @@ fn revideo_adapter_streams_gpu_textures() {
         let rgba = dec.read_rgba_texture(&t.texture);
         if i == 0 {
             let via_ctx = g2g_plugins::gpu::read_rgba_texture(&dec.gpu_context(), &t.texture);
-            assert_eq!(via_ctx, rgba, "gpu::read_rgba_texture matches the adapter readback");
+            assert_eq!(
+                via_ctx, rgba,
+                "gpu::read_rgba_texture matches the adapter readback"
+            );
         }
         assert_eq!(rgba.len(), W * H * 4);
         let min = *rgba.iter().min().unwrap();
         let max = *rgba.iter().max().unwrap();
-        assert!(min <= 20 && max >= 200, "frame {i} RGBA range {min}..={max} not a real picture");
+        assert!(
+            min <= 20 && max >= 200,
+            "frame {i} RGBA range {min}..={max} not a real picture"
+        );
         readbacks.push(rgba);
     }
 
@@ -118,7 +129,8 @@ fn revideo_adapter_streams_gpu_textures() {
     for gop_start in [0usize, 5] {
         for p in 1..5 {
             assert_ne!(
-                readbacks[gop_start + p], readbacks[gop_start],
+                readbacks[gop_start + p],
+                readbacks[gop_start],
                 "texture {} identical to its IDR; GPU DPB reference decode failed",
                 gop_start + p
             );
@@ -129,8 +141,8 @@ fn revideo_adapter_streams_gpu_textures() {
     // I420 (Tier A, bit-exact vs ffmpeg) converted with the same BT.601 matrix.
     // A fresh CPU-mode decoder over the same stream gives the reference I420.
     let device2 = block_on(open_h264_decode_device()).expect("re-open decode device");
-    let mut cpu = VulkanStreamDecoder::new(device2, VideoCodec::H264, CLIP)
-        .expect("build CPU-mode adapter");
+    let mut cpu =
+        VulkanStreamDecoder::new(device2, VideoCodec::H264, CLIP).expect("build CPU-mode adapter");
     let cpu_frames = cpu.submit_chunk(CLIP, true).expect("CPU decode");
     assert_eq!(cpu_frames.len(), textures.len());
 

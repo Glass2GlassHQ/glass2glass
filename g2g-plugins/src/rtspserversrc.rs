@@ -38,8 +38,8 @@ use g2g_core::{
 
 use crate::filesink::io_err;
 use crate::rtpdepay::RtpH264Depayloader;
-use crate::rtprecv::{push_access_unit, RtpRecvConfig};
 use crate::rtpjitter::JitterConfig;
+use crate::rtprecv::{push_access_unit, RtpRecvConfig};
 use crate::rtspserver::{sdp_h264, RtspEvent, RtspRequest, RtspResponder};
 
 /// Default dynamic RTP payload type for H.264.
@@ -100,7 +100,11 @@ impl RtspServerSrc {
     /// Use an already-bound listener (so a test can pick an ephemeral port).
     pub fn from_listener(listener: StdTcpListener) -> Result<Self, G2gError> {
         let addr = listener.local_addr().map_err(io_err)?;
-        Ok(Self { listener: Some(listener), configured: true, ..Self::new(addr) })
+        Ok(Self {
+            listener: Some(listener),
+            configured: true,
+            ..Self::new(addr)
+        })
     }
 
     /// Set the RTP payload type and SSRC negotiated in SETUP.
@@ -153,7 +157,10 @@ impl RtspServerSrc {
     /// The TCP control port actually bound, once a listener exists (ephemeral
     /// lookup for tests).
     pub fn local_port(&self) -> Option<u16> {
-        self.listener.as_ref().and_then(|l| l.local_addr().ok()).map(|a| a.port())
+        self.listener
+            .as_ref()
+            .and_then(|l| l.local_addr().ok())
+            .map(|a| a.port())
     }
 
     fn caps(&self) -> Caps {
@@ -184,7 +191,9 @@ impl RtspServerSrc {
         // The UDP socket the publisher will push RTP to (UDP transport); its local
         // port is advertised in the SETUP response (server_port). Unused, but
         // still bound, if the publisher instead picks TCP-interleaved.
-        let rtp_socket = tokio::net::UdpSocket::bind(("0.0.0.0", 0)).await.map_err(io_err)?;
+        let rtp_socket = tokio::net::UdpSocket::bind(("0.0.0.0", 0))
+            .await
+            .map_err(io_err)?;
         let server_rtp_port = rtp_socket.local_addr().map_err(io_err)?.port();
 
         let mut responder =
@@ -222,7 +231,10 @@ impl RtspServerSrc {
                                 rtp_channel,
                                 leftover: pending,
                             },
-                            None => RecordTransport::Udp { rtp_socket, control },
+                            None => RecordTransport::Udp {
+                                rtp_socket,
+                                control,
+                            },
                         });
                     }
                     RtspEvent::Teardown => return Err(G2gError::Shutdown),
@@ -239,10 +251,17 @@ impl RtspServerSrc {
 #[derive(Debug)]
 enum RecordTransport {
     /// Unicast UDP: RTP arrives on `rtp_socket`; `control` is held open.
-    Udp { rtp_socket: tokio::net::UdpSocket, control: tokio::net::TcpStream },
+    Udp {
+        rtp_socket: tokio::net::UdpSocket,
+        control: tokio::net::TcpStream,
+    },
     /// TCP-interleaved (RFC 2326 §10.12): RTP arrives on `control` as `$`-framed
     /// binary on `rtp_channel`; `leftover` is any binary already buffered.
-    Interleaved { control: tokio::net::TcpStream, rtp_channel: u8, leftover: Vec<u8> },
+    Interleaved {
+        control: tokio::net::TcpStream,
+        rtp_channel: u8,
+        leftover: Vec<u8>,
+    },
 }
 
 /// One parsed item from an interleaved control stream (RFC 2326 §10.12).
@@ -250,7 +269,12 @@ enum RecordTransport {
 enum Interleaved {
     /// A `$`-framed binary packet on `channel`; its payload is `buf[start..end]`,
     /// and `consumed` bytes (header + payload) form the whole frame.
-    Binary { channel: u8, start: usize, end: usize, consumed: usize },
+    Binary {
+        channel: u8,
+        start: usize,
+        end: usize,
+        consumed: usize,
+    },
     /// An embedded RTSP request occupying `consumed` bytes (`teardown` if it was a
     /// TEARDOWN), interleaved between binary frames.
     Rtsp { teardown: bool, consumed: usize },
@@ -274,13 +298,19 @@ fn next_interleaved(buf: &[u8]) -> Interleaved {
             if buf.len() < consumed {
                 return Interleaved::NeedMore;
             }
-            Interleaved::Binary { channel, start: 4, end: consumed, consumed }
+            Interleaved::Binary {
+                channel,
+                start: 4,
+                end: consumed,
+                consumed,
+            }
         }
         // Not a binary frame: an interleaved RTSP request (e.g. TEARDOWN).
         Some(_) => match RtspRequest::parse(buf) {
-            Some((req, consumed)) => {
-                Interleaved::Rtsp { teardown: req.method == "TEARDOWN", consumed }
-            }
+            Some((req, consumed)) => Interleaved::Rtsp {
+                teardown: req.method == "TEARDOWN",
+                consumed,
+            },
             None => Interleaved::NeedMore,
         },
     }
@@ -308,12 +338,22 @@ async fn receive_interleaved(
         // Drain every complete interleaved item currently buffered.
         loop {
             match next_interleaved(&pending) {
-                Interleaved::Binary { channel, start, end, consumed } => {
+                Interleaved::Binary {
+                    channel,
+                    start,
+                    end,
+                    consumed,
+                } => {
                     // Depayload only the RTP channel (skip RTCP / other channels).
                     if channel == rtp_channel {
                         if let Some(au) = depay.depacketize(&pending[start..end]) {
                             if push_access_unit(
-                                au, &mut ts_base, &mut seq, seq_base, frame_limit, out,
+                                au,
+                                &mut ts_base,
+                                &mut seq,
+                                seq_base,
+                                frame_limit,
+                                out,
                             )
                             .await?
                             {
@@ -345,11 +385,13 @@ async fn receive_interleaved(
 }
 
 impl SourceLoop for RtspServerSrc {
-    type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
+    type RunFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
     where
         Self: 'a;
 
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 
@@ -386,7 +428,11 @@ impl SourceLoop for RtspServerSrc {
     /// Live source: contributes one frame period so the sink keeps a frame in
     /// hand and never runs dry waiting on the network.
     fn latency(&self) -> LatencyReport {
-        let period_ns = if self.fps > 0 { 1_000_000_000 / self.fps as u64 } else { 0 };
+        let period_ns = if self.fps > 0 {
+            1_000_000_000 / self.fps as u64
+        } else {
+            0
+        };
         LatencyReport::live(period_ns, None)
     }
 
@@ -399,7 +445,10 @@ impl SourceLoop for RtspServerSrc {
                 // UDP: `_control` is held for the whole receive loop (a real RTSP
                 // publisher aborts if the server closes it); the jitter + (optional)
                 // RTCP + depayload path is shared with UdpSrc.
-                RecordTransport::Udp { rtp_socket, control: _control } => {
+                RecordTransport::Udp {
+                    rtp_socket,
+                    control: _control,
+                } => {
                     crate::rtprecv::receive_rtp_h264(
                         &rtp_socket,
                         &self.recv,
@@ -410,7 +459,11 @@ impl SourceLoop for RtspServerSrc {
                     .await
                 }
                 // TCP-interleaved: the control stream itself carries `$`-framed RTP.
-                RecordTransport::Interleaved { control, rtp_channel, leftover } => {
+                RecordTransport::Interleaved {
+                    control,
+                    rtp_channel,
+                    leftover,
+                } => {
                     receive_interleaved(control, rtp_channel, leftover, self.frame_limit, 0, out)
                         .await
                 }

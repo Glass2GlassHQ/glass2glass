@@ -51,7 +51,13 @@ impl Default for AnalyticsOverlay {
 impl AnalyticsOverlay {
     /// A new overlay with a 2px outline. Geometry is set at negotiation.
     pub fn new() -> Self {
-        Self { width: 0, height: 0, thickness: 2, configured: false, drawn: 0 }
+        Self {
+            width: 0,
+            height: 0,
+            thickness: 2,
+            configured: false,
+            drawn: 0,
+        }
     }
 
     /// Set the box outline thickness in pixels (clamped to at least 1).
@@ -82,7 +88,13 @@ impl AnalyticsOverlay {
 
     /// Whether `caps` is RGBA8 (geometry may still be unfixed at negotiation).
     fn accepts(caps: &Caps) -> bool {
-        matches!(caps, Caps::RawVideo { format: RawVideoFormat::Rgba8, .. })
+        matches!(
+            caps,
+            Caps::RawVideo {
+                format: RawVideoFormat::Rgba8,
+                ..
+            }
+        )
     }
 
     /// Paint every detection box onto the RGBA8 `buf` of `self.width` x
@@ -303,14 +315,24 @@ mod tests {
     }
 
     fn det(x: f32, y: f32, w: f32, h: f32, label: u32) -> ObjectDetection {
-        ObjectDetection { bbox: BBox { x, y, w, h }, label, confidence: 0.9 }
+        ObjectDetection {
+            bbox: BBox { x, y, w, h },
+            label,
+            confidence: 0.9,
+        }
     }
 
     #[test]
     fn render_paints_box_border_and_leaves_interior() {
         // 8x8 black canvas; a normalized box covering [0.25,0.75] -> pixels (2,2)
         // to (5,5). A 1px red (class 0) outline; the interior stays black.
-        let ov = AnalyticsOverlay { width: 8, height: 8, thickness: 1, configured: true, drawn: 0 };
+        let ov = AnalyticsOverlay {
+            width: 8,
+            height: 8,
+            thickness: 1,
+            configured: true,
+            drawn: 0,
+        };
         let mut buf = solid(8, 8, [0, 0, 0, 255]);
         ov.render(&mut buf, &[det(0.25, 0.25, 0.5, 0.5, 0)]);
         let red = class_color(0);
@@ -318,13 +340,23 @@ mod tests {
         assert_eq!(px(&buf, 8, 5, 5), red, "bottom-right corner on the border");
         assert_eq!(px(&buf, 8, 5, 2), red, "top-right corner on the border");
         assert_eq!(px(&buf, 8, 3, 3), [0, 0, 0, 255], "interior untouched");
-        assert_eq!(px(&buf, 8, 0, 0), [0, 0, 0, 255], "outside the box untouched");
+        assert_eq!(
+            px(&buf, 8, 0, 0),
+            [0, 0, 0, 255],
+            "outside the box untouched"
+        );
     }
 
     #[test]
     fn render_clips_box_to_canvas_bounds() {
         // A box running off the right/bottom edge must not panic or write OOB.
-        let ov = AnalyticsOverlay { width: 4, height: 4, thickness: 2, configured: true, drawn: 0 };
+        let ov = AnalyticsOverlay {
+            width: 4,
+            height: 4,
+            thickness: 2,
+            configured: true,
+            drawn: 0,
+        };
         let mut buf = solid(4, 4, [0, 0, 0, 255]);
         ov.render(&mut buf, &[det(0.5, 0.5, 1.0, 1.0, 1)]);
         // The far corner is on the clipped border, painted the class-1 colour.
@@ -374,7 +406,9 @@ mod tests {
         let frame = rgba_frame_with_meta(8, 8, &[det(0.25, 0.25, 0.5, 0.5, 0)]);
 
         let mut sink = PixelSink::default();
-        ov.process(PipelinePacket::DataFrame(frame), &mut sink).await.unwrap();
+        ov.process(PipelinePacket::DataFrame(frame), &mut sink)
+            .await
+            .unwrap();
 
         let out = sink.last.expect("frame forwarded");
         assert_eq!(px(&out, 8, 2, 2), class_color(0), "box border drawn");
@@ -394,8 +428,14 @@ mod tests {
         );
 
         let mut sink = PixelSink::default();
-        ov.process(PipelinePacket::DataFrame(frame), &mut sink).await.unwrap();
-        assert_eq!(sink.last.expect("forwarded"), bytes, "pixels unchanged without meta");
+        ov.process(PipelinePacket::DataFrame(frame), &mut sink)
+            .await
+            .unwrap();
+        assert_eq!(
+            sink.last.expect("forwarded"),
+            bytes,
+            "pixels unchanged without meta"
+        );
     }
 
     #[test]

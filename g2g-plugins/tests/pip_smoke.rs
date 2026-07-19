@@ -68,7 +68,10 @@ async fn webcam_picture_in_picture_over_a_test_pattern() {
     // other goes straight to its own Wayland window so the raw camera motion is
     // visible side by side (a reference for the inset).
     let cam = g.add_source(GraphNode::source(
-        V4l2Src::new(device).with_size(640, 480).with_fps(30).with_frame_limit(frames),
+        V4l2Src::new(device)
+            .with_size(640, 480)
+            .with_fps(30)
+            .with_frame_limit(frames),
     ));
     // The inset branch only converts to RGBA; the compositor pad scales it to
     // the inset size (no upstream VideoScale needed, M97 per-pad scaling).
@@ -90,7 +93,9 @@ async fn webcam_picture_in_picture_over_a_test_pattern() {
             CANVAS_H,
             Vec::from([
                 CompositorPad::at(0, 0),
-                CompositorPad::at(inset_x, inset_y).with_zorder(1).with_size(PIP_W, PIP_H),
+                CompositorPad::at(inset_x, inset_y)
+                    .with_zorder(1)
+                    .with_size(PIP_W, PIP_H),
             ]),
         )),
         2,
@@ -125,6 +130,9 @@ async fn webcam_picture_in_picture_over_a_test_pattern() {
     .expect("PiP pipeline should finish within the timeout")
     .expect("PiP DAG should run");
 
-    eprintln!("stats: emitted={} consumed={}", stats.frames_emitted, stats.frames_consumed);
+    eprintln!(
+        "stats: emitted={} consumed={}",
+        stats.frames_emitted, stats.frames_consumed
+    );
     assert!(stats.frames_emitted > 0, "sources produced no frames");
 }

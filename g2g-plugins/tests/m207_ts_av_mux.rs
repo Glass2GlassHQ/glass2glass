@@ -35,10 +35,16 @@ fn h264_caps() -> Caps {
     }
 }
 fn aac_caps() -> Caps {
-    Caps::Audio { format: AudioFormat::Aac, channels: 2, sample_rate: 48_000 }
+    Caps::Audio {
+        format: AudioFormat::Aac,
+        channels: 2,
+        sample_rate: 48_000,
+    }
 }
 fn ts_caps() -> Caps {
-    Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs }
+    Caps::ByteStream {
+        encoding: ByteStreamEncoding::MpegTs,
+    }
 }
 
 /// Emits a script of (access-unit, pts_ns) for one elementary stream, then EOS.
@@ -67,7 +73,10 @@ impl SourceLoop for AuSrc {
             for (i, (au, pts)) in aus.iter().enumerate() {
                 let frame = Frame::new(
                     MemoryDomain::System(SystemSlice::from_boxed(au.clone().into_boxed_slice())),
-                    FrameTiming { pts_ns: *pts, ..FrameTiming::default() },
+                    FrameTiming {
+                        pts_ns: *pts,
+                        ..FrameTiming::default()
+                    },
                     i as u64,
                 );
                 out.push(PipelinePacket::DataFrame(frame)).await?;
@@ -117,7 +126,10 @@ async fn demux_stream(ts: &[u8], stream: TsStream) -> Vec<Vec<u8>> {
         FrameTiming::default(),
         0,
     );
-    demux.process(PipelinePacket::DataFrame(frame), &mut sink).await.unwrap();
+    demux
+        .process(PipelinePacket::DataFrame(frame), &mut sink)
+        .await
+        .unwrap();
     demux.process(PipelinePacket::Eos, &mut sink).await.unwrap();
     sink.aus
 }
@@ -156,8 +168,16 @@ async fn av_muxed_into_one_ts_then_demuxed_back() {
         (vec![0xFFu8, 0xF1, 0xBB], 60_000_000),
     ];
 
-    let mut video = AuSrc { caps: h264_caps(), aus: video_aus.clone(), configured: false };
-    let mut audio = AuSrc { caps: aac_caps(), aus: audio_aus.clone(), configured: false };
+    let mut video = AuSrc {
+        caps: h264_caps(),
+        aus: video_aus.clone(),
+        configured: false,
+    };
+    let mut audio = AuSrc {
+        caps: aac_caps(),
+        aus: audio_aus.clone(),
+        configured: false,
+    };
     let mut mux = TsMux::new(2); // input 0 = video, input 1 = audio
     let mut sink = CaptureSink::default();
 
@@ -176,6 +196,12 @@ async fn av_muxed_into_one_ts_then_demuxed_back() {
 
     let want_video: Vec<Vec<u8>> = video_aus.iter().map(|(au, _)| au.clone()).collect();
     let want_audio: Vec<Vec<u8>> = audio_aus.iter().map(|(au, _)| au.clone()).collect();
-    assert_eq!(got_video, want_video, "video AUs recovered from the multiplex");
-    assert_eq!(got_audio, want_audio, "audio AUs recovered from the multiplex");
+    assert_eq!(
+        got_video, want_video,
+        "video AUs recovered from the multiplex"
+    );
+    assert_eq!(
+        got_audio, want_audio,
+        "audio AUs recovered from the multiplex"
+    );
 }

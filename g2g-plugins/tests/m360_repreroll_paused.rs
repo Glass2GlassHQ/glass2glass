@@ -18,7 +18,9 @@ use core::future::Future;
 use g2g_core::element::{AsyncElement, BoxFuture, ConfigureOutcome, OutputSink};
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
-use g2g_core::runtime::{run_simple_pipeline_stateful, SeekController, SourceLoop, StateController};
+use g2g_core::runtime::{
+    run_simple_pipeline_stateful, SeekController, SourceLoop, StateController,
+};
 use g2g_core::{
     Caps, Dim, FrameTiming, G2gError, MemoryDomain, PipelineClock, PipelinePacket, PipelineState,
     Rate, RawVideoFormat, Seek, Segment, StateChangeReturn,
@@ -80,7 +82,10 @@ impl SourceLoop for SeekableSrc {
                     domain: MemoryDomain::System(SystemSlice::from_boxed(
                         vec![0u8; 4].into_boxed_slice(),
                     )),
-                    timing: FrameTiming { pts_ns: self.position, ..FrameTiming::default() },
+                    timing: FrameTiming {
+                        pts_ns: self.position,
+                        ..FrameTiming::default()
+                    },
                     sequence: self.sequence,
                     meta: Default::default(),
                 };
@@ -143,7 +148,10 @@ async fn flushing_seek_while_paused_re_prerolls_the_target_frame() {
         sequence: 0,
         seek_ctl: seek_ctl.clone(),
     };
-    let mut sink = RecordSink { presented: presented.clone(), last_pts: last_pts.clone() };
+    let mut sink = RecordSink {
+        presented: presented.clone(),
+        last_pts: last_pts.clone(),
+    };
     let clock = ZeroClock;
     let ctrl = StateController::new(PipelineState::Ready); // non-live default
 
@@ -153,10 +161,17 @@ async fn flushing_seek_while_paused_re_prerolls_the_target_frame() {
     let ctrl_d = ctrl.clone();
     let driver = async move {
         // Non-live Paused prerolls one frame (pts 0) and holds.
-        assert_eq!(ctrl_d.set_state(PipelineState::Paused), StateChangeReturn::Async);
+        assert_eq!(
+            ctrl_d.set_state(PipelineState::Paused),
+            StateChangeReturn::Async
+        );
         ctrl_d.await_prerolled().await;
         assert_eq!(presented.load(Ordering::SeqCst), 1, "one preroll frame");
-        assert_eq!(last_pts.load(Ordering::SeqCst), 0, "the preroll frame is the first one");
+        assert_eq!(
+            last_pts.load(Ordering::SeqCst),
+            0,
+            "the preroll frame is the first one"
+        );
 
         // Flushing seek while still paused, with the re-preroll request. The
         // target frame must become the new preroll without leaving Paused.
@@ -180,7 +195,11 @@ async fn flushing_seek_while_paused_re_prerolls_the_target_frame() {
         for _ in 0..50 {
             tokio::task::yield_now().await;
         }
-        assert_eq!(presented.load(Ordering::SeqCst), 2, "held after the re-preroll");
+        assert_eq!(
+            presented.load(Ordering::SeqCst),
+            2,
+            "held after the re-preroll"
+        );
 
         ctrl_d.set_state(PipelineState::Playing);
     };

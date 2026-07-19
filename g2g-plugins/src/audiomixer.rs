@@ -54,7 +54,11 @@ impl AudioMixer {
     pub fn new(inputs: usize, output: Caps) -> Self {
         assert!(inputs > 0, "AudioMixer needs at least one input");
         let (channels, sample_rate) = match &output {
-            Caps::Audio { channels, sample_rate, .. } => (*channels as usize, *sample_rate),
+            Caps::Audio {
+                channels,
+                sample_rate,
+                ..
+            } => (*channels as usize, *sample_rate),
             _ => panic!("AudioMixer output must be Caps::Audio"),
         };
         Self {
@@ -122,7 +126,12 @@ impl AudioMixer {
             .min()
         {
             Some(open_min) => open_min,
-            None => self.end_frame.iter().copied().max().unwrap_or(self.acc_start),
+            None => self
+                .end_frame
+                .iter()
+                .copied()
+                .max()
+                .unwrap_or(self.acc_start),
         };
         if !self.started || safe <= self.acc_start {
             return Ok(());
@@ -138,7 +147,11 @@ impl AudioMixer {
 
         let out_frame = Frame {
             domain: MemoryDomain::System(SystemSlice::from_boxed(bytes)),
-            timing: FrameTiming { pts_ns, duration_ns, ..FrameTiming::default() },
+            timing: FrameTiming {
+                pts_ns,
+                duration_ns,
+                ..FrameTiming::default()
+            },
             sequence: self.emitted,
             meta: Default::default(),
         };
@@ -180,7 +193,10 @@ impl MultiInputElement for AudioMixer {
         absolute_caps: &Caps,
     ) -> Result<ConfigureOutcome, G2gError> {
         match absolute_caps {
-            Caps::Audio { format: AudioFormat::PcmS16Le, .. } => Ok(ConfigureOutcome::Accepted),
+            Caps::Audio {
+                format: AudioFormat::PcmS16Le,
+                ..
+            } => Ok(ConfigureOutcome::Accepted),
             _ => Err(G2gError::CapsMismatch),
         }
     }
@@ -297,7 +313,10 @@ mod tests {
     }
 
     fn unpack(bytes: &[u8]) -> Vec<i16> {
-        bytes.chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect()
+        bytes
+            .chunks_exact(2)
+            .map(|c| i16::from_le_bytes([c[0], c[1]]))
+            .collect()
     }
 
     #[test]

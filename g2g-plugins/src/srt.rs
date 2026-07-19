@@ -111,7 +111,14 @@ pub fn parse_data_packet(buf: &[u8]) -> Option<DataPacket> {
     let kk = ((word1 >> 27) & 0b11) as u8;
     let timestamp = u32::from_be_bytes(buf[8..12].try_into().ok()?);
     let dst_socket_id = u32::from_be_bytes(buf[12..16].try_into().ok()?);
-    Some(DataPacket { seq, retransmit, kk, timestamp, dst_socket_id, payload: buf[HEADER_LEN..].to_vec() })
+    Some(DataPacket {
+        seq,
+        retransmit,
+        kk,
+        timestamp,
+        dst_socket_id,
+        payload: buf[HEADER_LEN..].to_vec(),
+    })
 }
 
 /// The control packets this implementation builds / parses.
@@ -122,16 +129,26 @@ pub enum Control {
     Keepalive,
     /// Full ACK: the acknowledged packet sequence number (everything before it
     /// is received), with the ACK sub-sequence number in the type-specific field.
-    Ack { ack_no: u32, ack_seq: u32 },
+    Ack {
+        ack_no: u32,
+        ack_seq: u32,
+    },
     /// ACKACK: confirms an ACK by its sub-sequence number.
-    AckAck { ack_no: u32 },
+    AckAck {
+        ack_no: u32,
+    },
     /// Loss report: the sequence numbers (or ranges) the receiver is missing.
-    Nak { loss: Vec<u32> },
+    Nak {
+        loss: Vec<u32>,
+    },
     Shutdown,
     /// Mid-stream Keying Material update (rekey): the opaque KM blob (the new
     /// wrapped key + salt for the even or odd slot, [`crate::srtcrypto`] builds /
     /// reads it). `rsp` distinguishes a request (KMREQ) from a response (KMRSP).
-    KeyMaterial { rsp: bool, km: Vec<u8> },
+    KeyMaterial {
+        rsp: bool,
+        km: Vec<u8>,
+    },
 }
 
 /// The HSv5 handshake Control Information Field.
@@ -202,9 +219,15 @@ pub fn build_control(ctrl: &Control, timestamp: u32, dst_socket_id: u32) -> Vec<
         Control::Nak { loss } => (CTRL_NAK, 0, build_nak_cif(loss)),
         Control::Shutdown => (CTRL_SHUTDOWN, 0, Vec::new()),
         // Subtype (type-specific field): KMREQ (3) or KMRSP (4); CIF is the KM blob.
-        Control::KeyMaterial { rsp, km } => {
-            (CTRL_USER, if *rsp { EXT_KMRSP as u32 } else { EXT_KMREQ as u32 }, km.clone())
-        }
+        Control::KeyMaterial { rsp, km } => (
+            CTRL_USER,
+            if *rsp {
+                EXT_KMRSP as u32
+            } else {
+                EXT_KMREQ as u32
+            },
+            km.clone(),
+        ),
     };
     let mut out = Vec::with_capacity(HEADER_LEN + cif.len());
     // word0: F=1 | Control Type (15 bits) | Subtype (16 bits, 0 here).
@@ -235,13 +258,21 @@ pub fn parse_control(buf: &[u8]) -> Option<Control> {
             } else {
                 0
             };
-            Some(Control::Ack { ack_no: type_info, ack_seq })
+            Some(Control::Ack {
+                ack_no: type_info,
+                ack_seq,
+            })
         }
         CTRL_ACKACK => Some(Control::AckAck { ack_no: type_info }),
-        CTRL_NAK => Some(Control::Nak { loss: parse_nak_cif(cif) }),
+        CTRL_NAK => Some(Control::Nak {
+            loss: parse_nak_cif(cif),
+        }),
         CTRL_SHUTDOWN => Some(Control::Shutdown),
         CTRL_USER if type_info == EXT_KMREQ as u32 || type_info == EXT_KMRSP as u32 => {
-            Some(Control::KeyMaterial { rsp: type_info == EXT_KMRSP as u32, km: cif.to_vec() })
+            Some(Control::KeyMaterial {
+                rsp: type_info == EXT_KMRSP as u32,
+                km: cif.to_vec(),
+            })
         }
         _ => None,
     }
@@ -272,7 +303,7 @@ fn build_handshake_cif(hs: &Handshake) -> Vec<u8> {
         cif.extend_from_slice(&3u16.to_be_bytes()); // length in 32-bit words
         cif.extend_from_slice(&SRT_VERSION.to_be_bytes());
         cif.extend_from_slice(&0u32.to_be_bytes()); // flags
-        // recv TSBPD delay (high 16) | send TSBPD delay (low 16).
+                                                    // recv TSBPD delay (high 16) | send TSBPD delay (low 16).
         cif.extend_from_slice(&((latency as u32) << 16 | latency as u32).to_be_bytes());
     }
     // KMREQ / KMRSP extension: the opaque Keying Material blob, padded to a
@@ -528,17 +559,24 @@ impl SrtHandshake {
     /// The caller's opening induction packet (listener returns `None` and waits).
     pub fn start(&self) -> Option<Vec<u8>> {
         match self.role {
-            Role::Caller => {
-                Some(build_control(&Control::Handshake(Handshake::induction(self.socket_id, self.init_seq)), 0, 0))
-            }
+            Role::Caller => Some(build_control(
+                &Control::Handshake(Handshake::induction(self.socket_id, self.init_seq)),
+                0,
+                0,
+            )),
             Role::Listener => None,
         }
     }
 
     /// Advance the handshake on a received packet.
     pub fn on_packet(&mut self, buf: &[u8]) -> HandshakeStep {
-        let none = HandshakeStep { reply: None, established: self.established };
-        let Some(Control::Handshake(hs)) = parse_control(buf) else { return none };
+        let none = HandshakeStep {
+            reply: None,
+            established: self.established,
+        };
+        let Some(Control::Handshake(hs)) = parse_control(buf) else {
+            return none;
+        };
         match (self.role, hs.hs_type) {
             // Listener: a caller's induction -> reply induction with our cookie.
             (Role::Listener, t) if t == URQ_INDUCTION => {
@@ -547,7 +585,11 @@ impl SrtHandshake {
                 resp.version = HS_VERSION_5;
                 resp.syn_cookie = self.cookie;
                 HandshakeStep {
-                    reply: Some(build_control(&Control::Handshake(resp), 0, self.peer_socket_id)),
+                    reply: Some(build_control(
+                        &Control::Handshake(resp),
+                        0,
+                        self.peer_socket_id,
+                    )),
                     established: false,
                 }
             }
@@ -584,7 +626,11 @@ impl SrtHandshake {
                 self.established = true;
                 let concl = self.conclusion();
                 HandshakeStep {
-                    reply: Some(build_control(&Control::Handshake(concl), 0, self.peer_socket_id)),
+                    reply: Some(build_control(
+                        &Control::Handshake(concl),
+                        0,
+                        self.peer_socket_id,
+                    )),
                     established: true,
                 }
             }
@@ -599,7 +645,10 @@ impl SrtHandshake {
                 }
                 self.peer_km = hs.km; // the listener's KMRSP (our echoed KM)
                 self.established = true;
-                HandshakeStep { reply: None, established: true }
+                HandshakeStep {
+                    reply: None,
+                    established: true,
+                }
             }
             _ => none,
         }
@@ -608,8 +657,16 @@ impl SrtHandshake {
     /// Build this side's conclusion handshake (carries HSREQ latency + SID).
     fn conclusion(&self) -> Handshake {
         let ext_field = HS_EXT_FLAG_HSREQ
-            | if self.stream_id.is_some() { HS_EXT_FLAG_CONFIG } else { 0 }
-            | if self.km.is_some() { HS_EXT_FLAG_KMREQ } else { 0 };
+            | if self.stream_id.is_some() {
+                HS_EXT_FLAG_CONFIG
+            } else {
+                0
+            }
+            | if self.km.is_some() {
+                HS_EXT_FLAG_KMREQ
+            } else {
+                0
+            };
         Handshake {
             version: HS_VERSION_5,
             encryption: if self.km.is_some() { 1 } else { 0 },
@@ -711,7 +768,11 @@ impl SrtSender {
         let km = new.build_km(passphrase, next_kk);
         self.install_key(next_kk, new);
         self.active_kk = next_kk;
-        build_control(&Control::KeyMaterial { rsp: false, km }, 0, self.dst_socket_id)
+        build_control(
+            &Control::KeyMaterial { rsp: false, km },
+            0,
+            self.dst_socket_id,
+        )
     }
 
     /// The active key slot, if any.
@@ -770,7 +831,15 @@ impl SrtSender {
                     // Resend with the parity the packet was originally encrypted
                     // under, not the current active key.
                     if let Some((_, kk, payload)) = self.buffer.iter().find(|(s, _, _)| *s == seq) {
-                        out.push(build_data_packet(seq, 0, true, *kk, timestamp, self.dst_socket_id, payload));
+                        out.push(build_data_packet(
+                            seq,
+                            0,
+                            true,
+                            *kk,
+                            timestamp,
+                            self.dst_socket_id,
+                            payload,
+                        ));
                         self.retransmits += 1;
                     }
                 }
@@ -900,7 +969,9 @@ impl SrtReceiver {
                 }
                 p
             };
-            self.pending.entry(pkt.seq).or_insert((payload, pkt.timestamp));
+            self.pending
+                .entry(pkt.seq)
+                .or_insert((payload, pkt.timestamp));
         }
     }
 
@@ -1032,7 +1103,9 @@ impl LiveCc {
     fn target_rate(&self) -> u64 {
         match self.maxbw {
             Some(bw) => bw,
-            None => self.est_rate.saturating_add(self.est_rate.saturating_mul(self.overhead) / 100),
+            None => self
+                .est_rate
+                .saturating_add(self.est_rate.saturating_mul(self.overhead) / 100),
         }
     }
 
@@ -1042,7 +1115,10 @@ impl LiveCc {
     pub fn snd_period_us(&self, next_len: usize) -> u64 {
         // A zero target rate (rate-follow before the estimate warms up) yields no
         // pacing delay (checked_div -> None -> 0).
-        (next_len as u64).saturating_mul(1_000_000).checked_div(self.target_rate()).unwrap_or(0)
+        (next_len as u64)
+            .saturating_mul(1_000_000)
+            .checked_div(self.target_rate())
+            .unwrap_or(0)
     }
 }
 
@@ -1105,7 +1181,11 @@ mod tests {
         assert_eq!(parsed.srt_socket_id, 0xDEAD_BEEF);
         assert_eq!(parsed.syn_cookie, 0x0BAD_F00D);
         assert_eq!(parsed.latency_ms, Some(120), "HSREQ latency survives");
-        assert_eq!(parsed.stream_id.as_deref(), Some("live/cam0"), "stream id survives");
+        assert_eq!(
+            parsed.stream_id.as_deref(),
+            Some("live/cam0"),
+            "stream id survives"
+        );
         assert_eq!(
             parsed.km.as_deref(),
             Some(&[0xAA, 0xBB, 0xCC, 0xDD, 0x11, 0x22, 0x33, 0x44][..]),
@@ -1117,7 +1197,9 @@ mod tests {
     fn induction_handshake_carries_no_extensions() {
         let hs = Handshake::induction(0x1111_2222, 500);
         let bytes = build_control(&Control::Handshake(hs), 0, 0);
-        let Control::Handshake(p) = parse_control(&bytes).unwrap() else { panic!() };
+        let Control::Handshake(p) = parse_control(&bytes).unwrap() else {
+            panic!()
+        };
         assert_eq!(p.version, HS_VERSION_INDUCTION);
         assert_eq!(p.ext_field, SRT_MAGIC);
         assert_eq!(p.hs_type, URQ_INDUCTION);
@@ -1128,19 +1210,30 @@ mod tests {
     #[test]
     fn ack_ackack_keepalive_shutdown_round_trip() {
         for (ctrl, name) in [
-            (Control::Ack { ack_no: 5, ack_seq: 1000 }, "ack"),
+            (
+                Control::Ack {
+                    ack_no: 5,
+                    ack_seq: 1000,
+                },
+                "ack",
+            ),
             (Control::AckAck { ack_no: 5 }, "ackack"),
             (Control::Keepalive, "keepalive"),
             (Control::Shutdown, "shutdown"),
         ] {
             let bytes = build_control(&ctrl, 7, 13);
-            assert_eq!(parse_control(&bytes).expect(name), ctrl, "{name} round trips");
+            assert_eq!(
+                parse_control(&bytes).expect(name),
+                ctrl,
+                "{name} round trips"
+            );
         }
     }
 
     #[test]
     fn caller_and_listener_complete_the_handshake() {
-        let mut caller = SrtHandshake::new_caller(0x0A0A_0A0A, 1000, 120, Some("live".into()), None);
+        let mut caller =
+            SrtHandshake::new_caller(0x0A0A_0A0A, 1000, 120, Some("live".into()), None);
         let mut listener = SrtHandshake::new_listener(0x0B0B_0B0B, 80, 0x1357_9BDF);
 
         // Caller induction -> listener induction response -> caller conclusion ->
@@ -1164,7 +1257,11 @@ mod tests {
         // Each side learned the other's socket id (the data destination).
         assert_eq!(caller.peer_socket_id(), 0x0B0B_0B0B);
         assert_eq!(listener.peer_socket_id(), 0x0A0A_0A0A);
-        assert_eq!(listener.peer_init_seq(), 1000, "caller's ISN reached the listener");
+        assert_eq!(
+            listener.peer_init_seq(),
+            1000,
+            "caller's ISN reached the listener"
+        );
     }
 
     #[test]
@@ -1173,8 +1270,11 @@ mod tests {
         // from the public socket id, so an off-path attacker can't predict it.
         let cookie = 0x1357_9BDF;
         let mut listener = SrtHandshake::new_listener(0x0B0B_0B0B, 80, cookie);
-        let induction =
-            build_control(&Control::Handshake(Handshake::induction(0x0A0A_0A0A, 1)), 0, 0);
+        let induction = build_control(
+            &Control::Handshake(Handshake::induction(0x0A0A_0A0A, 1)),
+            0,
+            0,
+        );
         let step = listener.on_packet(&induction);
         let reply = step.reply.expect("listener answers induction");
         let Control::Handshake(hs) = parse_control(&reply).expect("handshake reply") else {
@@ -1192,7 +1292,7 @@ mod tests {
             0,
         );
         let _ = listener.on_packet(&induction); // learns peer, sets cookie
-        // A conclusion echoing the wrong cookie must not establish.
+                                                // A conclusion echoing the wrong cookie must not establish.
         let mut bad = Handshake::induction(0x0A0A_0A0A, 1);
         bad.version = HS_VERSION_5;
         bad.hs_type = URQ_CONCLUSION;
@@ -1260,15 +1360,33 @@ mod tests {
 
         // At the anchor instant (now=1_000_000 us) nothing is due: the first
         // packet schedules to now+latency.
-        assert!(rx.take_ready_at(1_000_000).is_empty(), "held for the latency");
+        assert!(
+            rx.take_ready_at(1_000_000).is_empty(),
+            "held for the latency"
+        );
         // Just before the first packet's delivery time: still nothing.
         assert!(rx.take_ready_at(1_099_999).is_empty(), "not quite due");
         // At now+100 ms the first packet releases; the next two are not yet due
         // (they sit 20/40 ms further along).
-        assert_eq!(rx.take_ready_at(1_100_000), vec![vec![10u8]], "first packet due");
-        assert!(rx.take_ready_at(1_110_000).is_empty(), "second not due for 10 more ms");
-        assert_eq!(rx.take_ready_at(1_120_000), vec![vec![11u8]], "second due at +20 ms");
-        assert_eq!(rx.take_ready_at(1_140_000), vec![vec![12u8]], "third due at +40 ms");
+        assert_eq!(
+            rx.take_ready_at(1_100_000),
+            vec![vec![10u8]],
+            "first packet due"
+        );
+        assert!(
+            rx.take_ready_at(1_110_000).is_empty(),
+            "second not due for 10 more ms"
+        );
+        assert_eq!(
+            rx.take_ready_at(1_120_000),
+            vec![vec![11u8]],
+            "second due at +20 ms"
+        );
+        assert_eq!(
+            rx.take_ready_at(1_140_000),
+            vec![vec![12u8]],
+            "third due at +40 ms"
+        );
     }
 
     #[test]
@@ -1319,10 +1437,19 @@ mod tests {
     fn key_material_control_round_trips() {
         let km = vec![0x12u8, 0x20, 0x29, 0x01, 0xDE, 0xAD, 0xBE, 0xEF];
         for rsp in [false, true] {
-            let bytes = build_control(&Control::KeyMaterial { rsp, km: km.clone() }, 7, 42);
+            let bytes = build_control(
+                &Control::KeyMaterial {
+                    rsp,
+                    km: km.clone(),
+                },
+                7,
+                42,
+            );
             assert!(is_control(&bytes), "KM update is a control packet");
-            let Control::KeyMaterial { rsp: got_rsp, km: got_km } =
-                parse_control(&bytes).expect("parse KM")
+            let Control::KeyMaterial {
+                rsp: got_rsp,
+                km: got_km,
+            } = parse_control(&bytes).expect("parse KM")
             else {
                 panic!("not a KeyMaterial control");
             };
@@ -1364,14 +1491,27 @@ mod tests {
 
         // The wire carries the parity switch, and every payload decrypts with the
         // slot its KK selects, across the rekey.
-        assert_eq!(parse_data_packet(&p1).unwrap().kk, KM_KK_EVEN, "pre-rekey packets are even");
-        assert_eq!(parse_data_packet(&p2).unwrap().kk, KM_KK_ODD, "post-rekey packets are odd");
+        assert_eq!(
+            parse_data_packet(&p1).unwrap().kk,
+            KM_KK_EVEN,
+            "pre-rekey packets are even"
+        );
+        assert_eq!(
+            parse_data_packet(&p2).unwrap().kk,
+            KM_KK_ODD,
+            "post-rekey packets are odd"
+        );
         for pkt in [&p0, &p1, &p2, &p3] {
             receiver.on_data(parse_data_packet(pkt).unwrap());
         }
         assert_eq!(
             receiver.take_ready(),
-            vec![b"aaa".to_vec(), b"bbb".to_vec(), b"ccc".to_vec(), b"ddd".to_vec()],
+            vec![
+                b"aaa".to_vec(),
+                b"bbb".to_vec(),
+                b"ccc".to_vec(),
+                b"ddd".to_vec()
+            ],
             "payloads decrypt across the even -> odd rekey",
         );
     }
@@ -1395,8 +1535,16 @@ mod tests {
             cc.on_packet(1250, t);
             t += 1000;
         }
-        assert_eq!(cc.estimated_rate_bps(), 1_250_000, "EWMA settles on the steady input rate");
-        assert_eq!(cc.snd_period_us(1250), 800, "25% headroom shortens the pacing interval");
+        assert_eq!(
+            cc.estimated_rate_bps(),
+            1_250_000,
+            "EWMA settles on the steady input rate"
+        );
+        assert_eq!(
+            cc.snd_period_us(1250),
+            800,
+            "25% headroom shortens the pacing interval"
+        );
     }
 
     #[test]
@@ -1414,7 +1562,11 @@ mod tests {
         let mut cif = Vec::new();
         cif.extend_from_slice(&0x8000_0000u32.to_be_bytes()); // range start 0 (high bit set)
         cif.extend_from_slice(&0x7FFF_FFFFu32.to_be_bytes()); // inclusive end
-        assert_eq!(parse_nak_cif(&cif).len(), MAX_LOSS_LIST, "loss list is capped");
+        assert_eq!(
+            parse_nak_cif(&cif).len(),
+            MAX_LOSS_LIST,
+            "loss list is capped"
+        );
     }
 
     #[test]
@@ -1430,7 +1582,11 @@ mod tests {
         };
         receiver.on_data(pkt(10)); // delivery base
         receiver.on_data(pkt(10 + 3_000_000)); // one far-ahead packet jumps max_seen
-        assert_eq!(receiver.missing().len(), MAX_LOSS_LIST, "loss list is capped, not the full gap");
+        assert_eq!(
+            receiver.missing().len(),
+            MAX_LOSS_LIST,
+            "loss list is capped, not the full gap"
+        );
     }
 
     #[test]
@@ -1438,10 +1594,14 @@ mod tests {
         // 5 is a singleton; 10..=13 a range; 20 a singleton again.
         let loss = vec![5u32, 10, 11, 12, 13, 20];
         let bytes = build_control(&Control::Nak { loss: loss.clone() }, 0, 0);
-        let Control::Nak { loss: got } = parse_control(&bytes).unwrap() else { panic!() };
+        let Control::Nak { loss: got } = parse_control(&bytes).unwrap() else {
+            panic!()
+        };
         assert_eq!(got, loss, "loss list round trips through range coding");
         // The range must use the compact 2-word form, not 4 singletons.
-        let Control::Nak { .. } = parse_control(&bytes).unwrap() else { panic!() };
+        let Control::Nak { .. } = parse_control(&bytes).unwrap() else {
+            panic!()
+        };
         // 1 (single 5) + 2 (range 10-13) + 1 (single 20) = 4 words = 16 bytes CIF.
         assert_eq!(bytes.len(), HEADER_LEN + 16, "range-coded CIF is compact");
     }

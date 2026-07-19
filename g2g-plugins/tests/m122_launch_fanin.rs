@@ -55,7 +55,9 @@ impl AsyncElement for AnySink {
 
 fn registry_with_anysink() -> Registry {
     let mut reg = default_registry();
-    reg.register_launch(LaunchFactory::new("anysink", Vec::new(), || Box::new(AnySink)));
+    reg.register_launch(LaunchFactory::new("anysink", Vec::new(), || {
+        Box::new(AnySink)
+    }));
     reg
 }
 
@@ -71,8 +73,13 @@ async fn funnel_fans_in_two_sources() {
     )
     .expect("fan-in pipeline parses");
 
-    let stats = run_graph(graph, &ZeroClock, 4).await.expect("fan-in pipeline runs");
-    assert_eq!(stats.frames_consumed, 7, "4 + 3 source frames reached the sink");
+    let stats = run_graph(graph, &ZeroClock, 4)
+        .await
+        .expect("fan-in pipeline runs");
+    assert_eq!(
+        stats.frames_consumed, 7,
+        "4 + 3 source frames reached the sink"
+    );
 }
 
 #[tokio::test]
@@ -90,7 +97,11 @@ async fn funnel_builds_a_two_input_muxer_node() {
         .map(|&n| vg.kind(n))
         .filter(|k| matches!(k, NodeKind::Muxer(_)))
         .collect();
-    assert_eq!(muxers, [NodeKind::Muxer(2)], "one muxer node with two input pads");
+    assert_eq!(
+        muxers,
+        [NodeKind::Muxer(2)],
+        "one muxer node with two input pads"
+    );
 }
 
 #[test]

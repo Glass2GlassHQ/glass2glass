@@ -14,7 +14,11 @@ fn inspect(args: &[&str]) -> String {
         .args(args)
         .output()
         .expect("run g2g-inspect");
-    assert!(out.status.success(), "g2g-inspect {args:?} failed: {:?}", out);
+    assert!(
+        out.status.success(),
+        "g2g-inspect {args:?} failed: {:?}",
+        out
+    );
     String::from_utf8(out.stdout).expect("utf8 output")
 }
 
@@ -27,13 +31,19 @@ fn json_single_element_has_typed_properties() {
     let e = &elements[0];
     assert_eq!(e["name"], "videoscale");
     assert_eq!(e["role"], "element");
-    assert!(e["pads"].as_array().unwrap().len() >= 2, "SINK + SRC pad templates");
+    assert!(
+        e["pads"].as_array().unwrap().len() >= 2,
+        "SINK + SRC pad templates"
+    );
 
     let props = e["properties"].as_array().expect("properties array");
     let names: Vec<&str> = props.iter().map(|p| p["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"width") && names.contains(&"height"));
     let width = props.iter().find(|p| p["name"] == "width").unwrap();
-    assert_eq!(width["type"], "Unsigned Integer", "machine type for typed inputs");
+    assert_eq!(
+        width["type"], "Unsigned Integer",
+        "machine type for typed inputs"
+    );
     assert_eq!(width["writable"], true);
 }
 
@@ -42,15 +52,23 @@ fn json_full_catalog_covers_all_roles() {
     let json = inspect(&["--json"]);
     let v: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
     let elements = v["elements"].as_array().expect("elements array");
-    assert!(elements.len() > 20, "the standard registry has many elements");
+    assert!(
+        elements.len() > 20,
+        "the standard registry has many elements"
+    );
 
-    let roles: std::collections::HashSet<&str> =
-        elements.iter().map(|e| e["role"].as_str().unwrap()).collect();
+    let roles: std::collections::HashSet<&str> = elements
+        .iter()
+        .map(|e| e["role"].as_str().unwrap())
+        .collect();
     assert!(roles.contains("source"), "sources present");
     assert!(roles.contains("element"), "transforms / sinks present");
 
     // A source advertises output caps; a transform advertises pad templates.
-    let src = elements.iter().find(|e| e["name"] == "videotestsrc").unwrap();
+    let src = elements
+        .iter()
+        .find(|e| e["name"] == "videotestsrc")
+        .unwrap();
     assert!(!src["caps"].is_null(), "source carries output caps");
 }
 

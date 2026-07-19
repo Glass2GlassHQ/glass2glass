@@ -39,7 +39,10 @@ struct OneFrame {
     bytes: Option<Vec<u8>>,
 }
 impl OutputSink for OneFrame {
-    fn push<'a>(&'a mut self, packet: PipelinePacket) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
+    fn push<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+    ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
         Box::pin(async move {
             if let PipelinePacket::DataFrame(f) = packet {
                 if self.bytes.is_none() {
@@ -59,7 +62,10 @@ struct MetaSink {
     dets: Vec<(u32, f32)>,
 }
 impl OutputSink for MetaSink {
-    fn push<'a>(&'a mut self, packet: PipelinePacket) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
+    fn push<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+    ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
         Box::pin(async move {
             if let PipelinePacket::DataFrame(f) = &packet {
                 if let Some(a) = f.meta.get::<AnalyticsMeta>() {
@@ -85,7 +91,11 @@ fn frame(bytes: Vec<u8>) -> PipelinePacket {
 }
 
 fn tensor_caps(shape: &[u32]) -> Caps {
-    Caps::Tensor { dtype: TensorDType::F32, shape: TensorShape::from_slice(shape).unwrap(), layout: TensorLayout::Nchw }
+    Caps::Tensor {
+        dtype: TensorDType::F32,
+        shape: TensorShape::from_slice(shape).unwrap(),
+        layout: TensorLayout::Nchw,
+    }
 }
 
 #[tokio::test]
@@ -103,28 +113,55 @@ async fn yolo_detects_the_dog() {
 
     let model = std::fs::read(&model_path).expect("read model");
     let input = std::fs::read(&input_path).expect("read input");
-    assert_eq!(input.len(), 3 * SIZE as usize * SIZE as usize * 4, "f32 NCHW [1,3,640,640]");
+    assert_eq!(
+        input.len(),
+        3 * SIZE as usize * SIZE as usize * 4,
+        "f32 NCHW [1,3,640,640]"
+    );
 
     // Stage 1: the real YOLO, image tensor in -> [1,84,8400] raw detections.
-    let mut infer = OrtInference::from_memory(&model).expect("model loads").with_tensor_input();
-    infer.configure_pipeline(&tensor_caps(&[1, 3, SIZE, SIZE])).expect("configure inference");
+    let mut infer = OrtInference::from_memory(&model)
+        .expect("model loads")
+        .with_tensor_input();
+    infer
+        .configure_pipeline(&tensor_caps(&[1, 3, SIZE, SIZE]))
+        .expect("configure inference");
     let mut raw = OneFrame::default();
-    infer.process(frame(input), &mut raw).await.expect("inference runs");
+    infer
+        .process(frame(input), &mut raw)
+        .await
+        .expect("inference runs");
     let raw_bytes = raw.bytes.expect("raw detection tensor");
-    assert_eq!(raw_bytes.len(), (CHANNELS * ANCHORS) as usize * 4, "[1,84,8400] f32");
+    assert_eq!(
+        raw_bytes.len(),
+        (CHANNELS * ANCHORS) as usize * 4,
+        "[1,84,8400] f32"
+    );
 
     // Stage 2: decode + per-class NMS -> structured detections on the frame.
     let mut decode = DetectionPostprocess::new(0.25, 0.45).with_input_size(SIZE, SIZE);
-    decode.configure_pipeline(&tensor_caps(&[1, CHANNELS, ANCHORS])).expect("configure decode");
+    decode
+        .configure_pipeline(&tensor_caps(&[1, CHANNELS, ANCHORS]))
+        .expect("configure decode");
     let mut sink = MetaSink::default();
-    decode.process(frame(raw_bytes), &mut sink).await.expect("decode runs");
+    decode
+        .process(frame(raw_bytes), &mut sink)
+        .await
+        .expect("decode runs");
 
     eprintln!(">> YOLO detections after NMS: {:?}", sink.dets);
     assert!(!sink.dets.is_empty(), "expected at least one detection");
     // NMS must have collapsed the ~10 overlapping raw dog boxes to a handful.
-    assert!(sink.dets.len() <= 10, "NMS should suppress overlaps, got {}", sink.dets.len());
+    assert!(
+        sink.dets.len() <= 10,
+        "NMS should suppress overlaps, got {}",
+        sink.dets.len()
+    );
     let dog = sink.dets.iter().find(|(label, _)| *label == COCO_DOG);
     let (_, conf) = dog.expect("a 'dog' (COCO class 16) detection");
-    assert!(*conf > 0.5, "dog detected with confidence > 0.5, got {conf}");
+    assert!(
+        *conf > 0.5,
+        "dog detected with confidence > 0.5, got {conf}"
+    );
     eprintln!(">> detected COCO class {COCO_DOG} (dog) at confidence {conf:.3}");
 }

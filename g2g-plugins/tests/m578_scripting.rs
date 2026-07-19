@@ -30,8 +30,13 @@ edges:
     let graph = declarative::from_yaml(&reg, yaml).expect("build the graph from YAML");
     let clock = WallClock::new();
     let progress = PipelineProgress::new();
-    let stats = run_graph_with_progress(graph, &clock, 4, &progress).await.expect("run");
-    assert_eq!(stats.frames_consumed, 8, "all 8 frames flow src->scriptelement->sink");
+    let stats = run_graph_with_progress(graph, &clock, 4, &progress)
+        .await
+        .expect("run");
+    assert_eq!(
+        stats.frames_consumed, 8,
+        "all 8 frames flow src->scriptelement->sink"
+    );
 }
 
 /// The native bulk ops run end to end over more frames than the link capacity,
@@ -51,7 +56,9 @@ edges:
     let graph = declarative::from_yaml(&reg, yaml).expect("build");
     let clock = WallClock::new();
     let progress = PipelineProgress::new();
-    let stats = run_graph_with_progress(graph, &clock, 4, &progress).await.expect("run");
+    let stats = run_graph_with_progress(graph, &clock, 4, &progress)
+        .await
+        .expect("run");
     assert_eq!(stats.frames_consumed, 12);
 }
 
@@ -84,7 +91,9 @@ async fn rhai_script_built_graph_runs() {
     let graph = script::build_from_script(&reg, src).expect("build from script");
     let clock = WallClock::new();
     let progress = PipelineProgress::new();
-    let stats = run_graph_with_progress(graph, &clock, 4, &progress).await.expect("run");
+    let stats = run_graph_with_progress(graph, &clock, 4, &progress)
+        .await
+        .expect("run");
     assert_eq!(stats.frames_consumed, 2);
 }
 
@@ -108,10 +117,15 @@ edges:
     let graph = declarative::from_yaml(&reg, yaml).expect("build a routing graph");
     let clock = WallClock::new();
     let progress = PipelineProgress::new();
-    let stats = run_graph_with_progress(graph, &clock, 4, &progress).await.expect("run");
+    let stats = run_graph_with_progress(graph, &clock, 4, &progress)
+        .await
+        .expect("run");
     // Every frame is routed to exactly one branch (parity keeps them all), so all
     // 6 flow through the router to a sink.
-    assert_eq!(stats.frames_consumed, 6, "all frames routed across the two branches");
+    assert_eq!(
+        stats.frames_consumed, 6,
+        "all frames routed across the two branches"
+    );
 }
 
 /// A `route()` that drops (negative) some frames: fewer reach the sinks.
@@ -132,9 +146,14 @@ edges:
     let graph = declarative::from_yaml(&reg, yaml).expect("build");
     let clock = WallClock::new();
     let progress = PipelineProgress::new();
-    let stats = run_graph_with_progress(graph, &clock, 4, &progress).await.expect("run");
+    let stats = run_graph_with_progress(graph, &clock, 4, &progress)
+        .await
+        .expect("run");
     // Sequences 0..4 route to port 0; 4 and 5 are dropped: 4 consumed.
-    assert_eq!(stats.frames_consumed, 4, "dropped frames do not reach a sink");
+    assert_eq!(
+        stats.frames_consumed, 4,
+        "dropped frames do not reach a sink"
+    );
 }
 
 /// Multicast (M584): `route()` returns an array `[0, 1]`, so every frame is fanned
@@ -157,8 +176,13 @@ edges:
     let graph = declarative::from_yaml(&reg, yaml).expect("build a multicast graph");
     let clock = WallClock::new();
     let progress = PipelineProgress::new();
-    let stats = run_graph_with_progress(graph, &clock, 4, &progress).await.expect("run");
-    assert_eq!(stats.frames_consumed, 10, "each of 5 frames reached both branches");
+    let stats = run_graph_with_progress(graph, &clock, 4, &progress)
+        .await
+        .expect("run");
+    assert_eq!(
+        stats.frames_consumed, 10,
+        "each of 5 frames reached both branches"
+    );
 }
 
 /// The live appsink-egress path end to end (M584): a `scriptrouter` splits the
@@ -210,6 +234,14 @@ edges:
     let stats = stats.expect("egress pipeline runs to completion");
 
     assert_eq!(stats.frames_consumed, 6, "all 6 frames reached a sink");
-    assert_eq!(even_seqs, std::vec![0, 2, 4], "even sequences delivered in order on 'even'");
-    assert_eq!(odd_seqs, std::vec![1, 3, 5], "odd sequences delivered in order on 'odd'");
+    assert_eq!(
+        even_seqs,
+        std::vec![0, 2, 4],
+        "even sequences delivered in order on 'even'"
+    );
+    assert_eq!(
+        odd_seqs,
+        std::vec![1, 3, 5],
+        "odd sequences delivered in order on 'odd'"
+    );
 }

@@ -26,7 +26,8 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
-    FrameTiming, G2gError, MemoryDomain, OutputSink, PipelineClock, PipelinePacket, Rate, RawVideoFormat,
+    FrameTiming, G2gError, MemoryDomain, OutputSink, PipelineClock, PipelinePacket, Rate,
+    RawVideoFormat,
 };
 
 struct ZeroClock;
@@ -54,7 +55,8 @@ struct NvSource {
 impl SourceLoop for NvSource {
     type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>;
 
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 
@@ -175,7 +177,11 @@ impl AsyncElement for PoolSink {
     }
 
     fn configure_allocation(&mut self, params: &AllocationParams) {
-        self.log.lock().unwrap().configured_sizes.push(params.size_bytes);
+        self.log
+            .lock()
+            .unwrap()
+            .configured_sizes
+            .push(params.size_bytes);
     }
 
     fn process<'a>(

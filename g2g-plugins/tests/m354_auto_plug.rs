@@ -60,7 +60,8 @@ struct SysSource {
 
 impl SourceLoop for SysSource {
     type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>;
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 
@@ -178,11 +179,21 @@ async fn splices_converter_on_linear_domain_conflict() {
     g.link(src, snk).unwrap();
 
     let g = auto_plug_domain_converters(g, &fake_factory);
-    assert_eq!(g.node_count(), 3, "a converter was spliced between source and sink");
+    assert_eq!(
+        g.node_count(),
+        3,
+        "a converter was spliced between source and sink"
+    );
 
-    let stats = run_graph(g, &NullClock, 4).await.expect("spliced graph runs");
+    let stats = run_graph(g, &NullClock, 4)
+        .await
+        .expect("spliced graph runs");
     assert_eq!(stats.frames_consumed, 4);
-    assert_eq!(*seen.lock().unwrap(), 4, "all frames reached the Cuda-only sink via the converter");
+    assert_eq!(
+        *seen.lock().unwrap(),
+        4,
+        "all frames reached the Cuda-only sink via the converter"
+    );
 }
 
 /// No conflict, no splice: a System sink leaves the graph untouched.
@@ -225,11 +236,24 @@ async fn splices_only_the_conflicting_tee_branch() {
     g.link(tee.out(1), sys).unwrap();
 
     let g = auto_plug_domain_converters(g, &fake_factory);
-    assert_eq!(g.node_count(), 5, "exactly one converter spliced (on the Cuda branch)");
+    assert_eq!(
+        g.node_count(),
+        5,
+        "exactly one converter spliced (on the Cuda branch)"
+    );
 
-    let stats = run_graph(g, &NullClock, 4).await.expect("spliced diamond runs");
-    assert_eq!(stats.frames_consumed, 10, "5 frames to each of the two branches");
-    assert_eq!(*cuda_seen.lock().unwrap(), 5, "Cuda branch fed via the converter");
+    let stats = run_graph(g, &NullClock, 4)
+        .await
+        .expect("spliced diamond runs");
+    assert_eq!(
+        stats.frames_consumed, 10,
+        "5 frames to each of the two branches"
+    );
+    assert_eq!(
+        *cuda_seen.lock().unwrap(),
+        5,
+        "Cuda branch fed via the converter"
+    );
     assert_eq!(*sys_seen.lock().unwrap(), 5, "System branch untouched");
 }
 
@@ -262,7 +286,8 @@ async fn auto_plugs_cuda_upload_before_nvenc() {
     }
     impl SourceLoop for HwSysSource {
         type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>;
-        type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+        type CapsFuture<'a>
+            = core::future::Ready<Result<Caps, G2gError>>
         where
             Self: 'a;
         fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
@@ -281,8 +306,13 @@ async fn auto_plugs_cuda_upload_before_nvenc() {
                         *b = ((i as u64 + seq) & 0xff) as u8;
                     }
                     out.push(PipelinePacket::DataFrame(Frame {
-                        domain: MemoryDomain::System(SystemSlice::from_boxed(buf.into_boxed_slice())),
-                        timing: FrameTiming { pts_ns: seq * 33_000_000, ..FrameTiming::default() },
+                        domain: MemoryDomain::System(SystemSlice::from_boxed(
+                            buf.into_boxed_slice(),
+                        )),
+                        timing: FrameTiming {
+                            pts_ns: seq * 33_000_000,
+                            ..FrameTiming::default()
+                        },
                         sequence: seq,
                         meta: Default::default(),
                     }))
@@ -329,13 +359,19 @@ async fn auto_plugs_cuda_upload_before_nvenc() {
     let mut g: Graph<GraphNode> = Graph::new();
     let src = g.add_source(GraphNode::source(HwSysSource { count: 8 }));
     let enc = g.add_transform(GraphNode::element(NvEnc::new()));
-    let snk = g.add_sink(GraphNode::element(AuSink { aus: Arc::clone(&aus) }));
+    let snk = g.add_sink(GraphNode::element(AuSink {
+        aus: Arc::clone(&aus),
+    }));
     g.link(src, enc).unwrap();
     g.link(enc, snk).unwrap();
 
     // The System source and CUDA-only NvEnc disagree on domain; auto-plug bridges.
     let g = auto_plug_cuda_converters(g);
-    assert_eq!(g.node_count(), 4, "a CudaUpload was spliced between source and NvEnc");
+    assert_eq!(
+        g.node_count(),
+        4,
+        "a CudaUpload was spliced between source and NvEnc"
+    );
 
     match run_graph(g, &NullClock, 4).await {
         Ok(_) => {}
@@ -346,7 +382,10 @@ async fn auto_plugs_cuda_upload_before_nvenc() {
         Err(e) => panic!("unexpected error: {e:?}"),
     }
     let aus = aus.lock().unwrap();
-    assert!(!aus.is_empty(), "encoder produced H.264 via the auto-plugged CudaUpload");
+    assert!(
+        !aus.is_empty(),
+        "encoder produced H.264 via the auto-plugged CudaUpload"
+    );
     assert!(
         aus.iter().any(|au| au.windows(3).any(|w| w == [0, 0, 1])),
         "access units carry Annex-B start codes",

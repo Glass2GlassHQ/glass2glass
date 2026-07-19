@@ -61,24 +61,39 @@ async fn hosts_a_real_gstreamer_videoflip() {
         parse_caps("video/x-raw,format=RGBA,width=2,height=1,framerate=1/1").expect("caps parse");
 
     let mut el = GstWrap::new();
-    el.set_property("element", PropValue::Str("videoflip method=horizontal-flip".into()))
-        .expect("element property");
+    el.set_property(
+        "element",
+        PropValue::Str("videoflip method=horizontal-flip".into()),
+    )
+    .expect("element property");
     el.configure_pipeline(&caps)
         .expect("gst pipeline builds (needs host GStreamer + gst-plugins-good videoflip)");
 
     let input: Vec<u8> = vec![0xFF, 0xFF, 0xFF, 0xFF, 0x10, 0x20, 0x30, 0x40];
     let frame = Frame::new(
         MemoryDomain::System(SystemSlice::from_boxed(input.into_boxed_slice())),
-        FrameTiming { pts_ns: 0, dts_ns: 0, ..FrameTiming::default() },
+        FrameTiming {
+            pts_ns: 0,
+            dts_ns: 0,
+            ..FrameTiming::default()
+        },
         0,
     );
 
     let mut sink = Collect::default();
-    el.process(PipelinePacket::DataFrame(frame), &mut sink).await.expect("process frame");
+    el.process(PipelinePacket::DataFrame(frame), &mut sink)
+        .await
+        .expect("process frame");
     // EOS flushes videoflip's buffered frame; drain collects it.
-    el.process(PipelinePacket::Eos, &mut sink).await.expect("process eos");
+    el.process(PipelinePacket::Eos, &mut sink)
+        .await
+        .expect("process eos");
 
-    assert_eq!(sink.frames.len(), 1, "the hosted GStreamer element produced one frame");
+    assert_eq!(
+        sink.frames.len(),
+        1,
+        "the hosted GStreamer element produced one frame"
+    );
     // Horizontal flip of a 2x1 image swaps the two pixels.
     assert_eq!(
         sink.frames[0],
@@ -98,6 +113,11 @@ async fn runs_from_a_launch_line_with_a_spaced_property() {
         "videotestsrc num-buffers=3 ! gstwrap element=\"videoflip method=horizontal-flip\" ! fakesink",
     )
     .expect("quoted gstwrap line parses and builds");
-    let stats = run_graph(graph, &ZeroClock, 4).await.expect("pipeline runs");
-    assert_eq!(stats.frames_consumed, 3, "all frames flowed through the hosted GStreamer element");
+    let stats = run_graph(graph, &ZeroClock, 4)
+        .await
+        .expect("pipeline runs");
+    assert_eq!(
+        stats.frames_consumed, 3,
+        "all frames flowed through the hosted GStreamer element"
+    );
 }

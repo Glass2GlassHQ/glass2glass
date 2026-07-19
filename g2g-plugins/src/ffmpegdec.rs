@@ -81,11 +81,14 @@
 //! negotiation, then per frame resolves to the decoded pixel format's native
 //! chroma and emits the concrete output caps via `CapsChanged`. The GPU backends
 //! stay NV12-only.
+//! High bit depth: 10-/12-bit planar sources (`YUV4{2,4}0P1{0,2}LE`, e.g. HEVC
+//! Main10 / High 10) decode under `Auto` to the matching `RawVideoFormat`
+//! (`I420p10` .. `I444p12`) via a lossless 2-byte-per-sample plane copy. A fixed
+//! 8-bit output request from a high-depth source stays a loud `CapsMismatch`
+//! (no depth conversion here; put a converter upstream).
 //!
 //! Deferred:
-//! - 10-bit pixel formats (`YUV420P10` / `P010`). Mainline H.264 cameras emit
-//!   8-bit YUV420P; 10-bit and other formats are still rejected with
-//!   `CapsMismatch`.
+//! - Semi-planar 10-bit (`P010`) and packed formats.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -94,13 +97,13 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use ffmpeg_next as ffmpeg;
 use ffmpeg::codec::{self, Flags, Id};
 use ffmpeg::format::Pixel;
 use ffmpeg::frame::Video as FfVideo;
 use ffmpeg::packet::Packet;
 use ffmpeg::Dictionary;
 use ffmpeg::Error as FfError;
+use ffmpeg_next as ffmpeg;
 
 use crate::yuv::downsample_chroma_420;
 use g2g_core::frame::Frame;
@@ -109,7 +112,7 @@ use g2g_core::{
     AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, CudaKeepAlive,
     Dim, ElementMetadata, FrameTiming, G2gError, HardwareError, MemoryDomain, OutputSink,
     PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate,
-    VideoCodec, RawVideoFormat,
+    RawVideoFormat, VideoCodec,
 };
 
 /// Cap on pending input-pts -> arrival entries, so frames the decoder drops
@@ -131,12 +134,23 @@ pub enum OutputFormat {
     /// Planar 4:4:4 Y / U / V (full-resolution chroma). Preserves the chroma of a
     /// 4:4:4 (High 4:4:4 profile) source. Software backend only.
     I444,
-    /// Match the source chroma: emit I420 / I422 / I444 to preserve whatever the
-    /// stream carries, resolved per frame from the decoded pixel format. Software
-    /// backend only; the caller sets it when it does not know (or want to fix)
-    /// the source chroma up front (e.g. a differential-QA harness matching a
-    /// reference of unknown chroma).
+    /// Match the source chroma: emit I420 / I422 / I444 (8-bit) or their 10-/
+    /// 12-bit siblings to preserve whatever the stream carries, resolved per
+    /// frame from the decoded pixel format. Software backend only; the caller
+    /// sets it when it does not know (or want to fix) the source chroma up front
+    /// (e.g. a differential-QA harness matching a reference of unknown chroma).
     Auto,
+    /// High-bit-depth planar preserve formats: same chroma as I420 / I422 / I444
+    /// but each sample a little-endian 2-byte word (10- or 12-bit in the low
+    /// bits). Software backend only; emitted for a High 10 / High 12 / Main10
+    /// source, and a lossless plane copy (no depth or chroma conversion), so the
+    /// output depth must match the source. Reached via `Auto` or set explicitly.
+    I420p10,
+    I420p12,
+    I422p10,
+    I422p12,
+    I444p10,
+    I444p12,
 }
 
 impl OutputFormat {
@@ -149,6 +163,25 @@ impl OutputFormat {
             OutputFormat::Nv12 => RawVideoFormat::Nv12,
             OutputFormat::I422 => RawVideoFormat::I422,
             OutputFormat::I444 => RawVideoFormat::I444,
+            OutputFormat::I420p10 => RawVideoFormat::I420p10,
+            OutputFormat::I420p12 => RawVideoFormat::I420p12,
+            OutputFormat::I422p10 => RawVideoFormat::I422p10,
+            OutputFormat::I422p12 => RawVideoFormat::I422p12,
+            OutputFormat::I444p10 => RawVideoFormat::I444p10,
+            OutputFormat::I444p12 => RawVideoFormat::I444p12,
+        }
+    }
+
+    /// Bytes per sample: 2 for the 10-/12-bit variants (LE `u16`), else 1.
+    fn bytes_per_sample(self) -> usize {
+        match self {
+            OutputFormat::I420p10
+            | OutputFormat::I420p12
+            | OutputFormat::I422p10
+            | OutputFormat::I422p12
+            | OutputFormat::I444p10
+            | OutputFormat::I444p12 => 2,
+            _ => 1,
         }
     }
 
@@ -158,9 +191,13 @@ impl OutputFormat {
     /// before packing); treated as 4:2:0.
     fn chroma_shift(self) -> (u32, u32) {
         match self {
-            OutputFormat::I420 | OutputFormat::Nv12 | OutputFormat::Auto => (1, 1),
-            OutputFormat::I422 => (1, 0),
-            OutputFormat::I444 => (0, 0),
+            OutputFormat::I420
+            | OutputFormat::Nv12
+            | OutputFormat::Auto
+            | OutputFormat::I420p10
+            | OutputFormat::I420p12 => (1, 1),
+            OutputFormat::I422 | OutputFormat::I422p10 | OutputFormat::I422p12 => (1, 0),
+            OutputFormat::I444 | OutputFormat::I444p10 | OutputFormat::I444p12 => (0, 0),
         }
     }
 }
@@ -175,6 +212,13 @@ fn resolve_output_format(requested: OutputFormat, src: Pixel) -> Result<OutputFo
             Pixel::YUV420P | Pixel::YUVJ420P | Pixel::NV12 => Ok(OutputFormat::I420),
             Pixel::YUV422P | Pixel::YUVJ422P => Ok(OutputFormat::I422),
             Pixel::YUV444P | Pixel::YUVJ444P => Ok(OutputFormat::I444),
+            // high bit depth: preserve chroma and depth (LE 2-byte samples)
+            Pixel::YUV420P10LE => Ok(OutputFormat::I420p10),
+            Pixel::YUV420P12LE => Ok(OutputFormat::I420p12),
+            Pixel::YUV422P10LE => Ok(OutputFormat::I422p10),
+            Pixel::YUV422P12LE => Ok(OutputFormat::I422p12),
+            Pixel::YUV444P10LE => Ok(OutputFormat::I444p10),
+            Pixel::YUV444P12LE => Ok(OutputFormat::I444p12),
             _ => Err(G2gError::CapsMismatch),
         },
         other => Ok(other),
@@ -187,7 +231,15 @@ fn accepts_output(requested: OutputFormat, format: RawVideoFormat) -> bool {
     match requested {
         OutputFormat::Auto => matches!(
             format,
-            RawVideoFormat::I420 | RawVideoFormat::I422 | RawVideoFormat::I444
+            RawVideoFormat::I420
+                | RawVideoFormat::I422
+                | RawVideoFormat::I444
+                | RawVideoFormat::I420p10
+                | RawVideoFormat::I420p12
+                | RawVideoFormat::I422p10
+                | RawVideoFormat::I422p12
+                | RawVideoFormat::I444p10
+                | RawVideoFormat::I444p12
         ),
         other => other.raw_format() == format,
     }
@@ -527,6 +579,23 @@ impl FfmpegH264Dec {
             let mut frame = FfVideo::empty();
             match decoder.receive_frame(&mut frame) {
                 Ok(()) => {
+                    // Apply the H.264/H.265 conformance cropping window to the
+                    // display size. libavcodec leaves an alignment-breaking left/
+                    // top crop unapplied by default, so a cropped stream (e.g.
+                    // coded 352x288 -> display 300x168) would otherwise be emitted
+                    // at the wrong geometry. `UNALIGNED` forces the exact crop.
+                    // Software path only: the GPU backends keep opaque surfaces
+                    // whose crop is resolved when downloaded / mapped.
+                    if !outputs_cuda && !transfers_from_hw {
+                        // SAFETY: `frame` is a valid decoded AVFrame; the call only
+                        // reads its `crop_*` fields and offsets the data pointers.
+                        unsafe {
+                            ffmpeg::ffi::av_frame_apply_cropping(
+                                frame.as_mut_ptr(),
+                                ffmpeg::ffi::AV_FRAME_CROP_UNALIGNED as i32,
+                            );
+                        }
+                    }
                     // libavcodec returns the PTS we fed in (or AV_NOPTS_VALUE
                     // = INT64_MIN if it could not propagate one); treat the
                     // sentinel as zero so we don't return a wild timestamp.
@@ -559,7 +628,10 @@ impl FfmpegH264Dec {
                         (DecodedPayload::System(copy_yuv(&sw, resolved)?), resolved)
                     } else {
                         let resolved = resolve_output_format(format, frame.format())?;
-                        (DecodedPayload::System(copy_yuv(&frame, resolved)?), resolved)
+                        (
+                            DecodedPayload::System(copy_yuv(&frame, resolved)?),
+                            resolved,
+                        )
                     };
                     let arrival_ns = self.pts_to_arrival.remove(&pts_ns).unwrap_or(0);
                     decoded.push(DecodedPicture {
@@ -658,6 +730,19 @@ impl FfmpegH264Dec {
             // `has_b_frames` is a plain int field read by the decoder at open.
             unsafe {
                 (*decoder_ctx.as_mut_ptr()).has_b_frames = n as i32;
+            }
+        }
+        // System-memory path: turn off libavcodec's built-in cropping so each
+        // frame arrives at coded size with its crop window intact, then apply the
+        // exact (possibly unaligned) crop in `drain_frames`. The built-in crop
+        // preserves alignment and leaves an unaligned left/top crop unapplied,
+        // emitting the wrong display geometry (e.g. coded 352 shown at 326, not
+        // 300). The GPU backends keep their own crop handling.
+        if !self.outputs_cuda() && !matches!(self.backend, Backend::Vaapi) {
+            // SAFETY: freshly allocated, not-yet-opened context; `apply_cropping`
+            // is a plain int field consulted by the decode path.
+            unsafe {
+                (*decoder_ctx.as_mut_ptr()).apply_cropping = 0;
             }
         }
         // cuvid's tunables live as AVOptions on the codec's private data,
@@ -821,7 +906,8 @@ impl PadTemplates for FfmpegH264Dec {
 }
 
 impl AsyncElement for FfmpegH264Dec {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -912,7 +998,11 @@ impl AsyncElement for FfmpegH264Dec {
                 // VAAPI render node (only consulted by Backend::Vaapi). An empty
                 // value clears the pin so libva picks its default device.
                 let path = value.as_str().ok_or(PropError::Type)?;
-                self.vaapi_device = if path.is_empty() { None } else { Some(path.into()) };
+                self.vaapi_device = if path.is_empty() {
+                    None
+                } else {
+                    Some(path.into())
+                };
                 Ok(())
             }
             "output-format" => {
@@ -934,9 +1024,9 @@ impl AsyncElement for FfmpegH264Dec {
         match name {
             // Empty string when unpinned (= libva default), like other
             // always-present string properties (see filesrc `location`).
-            "device" => {
-                Some(PropValue::Str(self.vaapi_device.clone().unwrap_or_default()))
-            }
+            "device" => Some(PropValue::Str(
+                self.vaapi_device.clone().unwrap_or_default(),
+            )),
             "output-format" => Some(PropValue::Str(
                 match self.output_format {
                     OutputFormat::I420 => "i420",
@@ -944,6 +1034,12 @@ impl AsyncElement for FfmpegH264Dec {
                     OutputFormat::I422 => "i422",
                     OutputFormat::I444 => "i444",
                     OutputFormat::Auto => "auto",
+                    OutputFormat::I420p10 => "i420p10",
+                    OutputFormat::I420p12 => "i420p12",
+                    OutputFormat::I422p10 => "i422p10",
+                    OutputFormat::I422p12 => "i422p12",
+                    OutputFormat::I444p10 => "i444p10",
+                    OutputFormat::I444p12 => "i444p12",
                 }
                 .into(),
             )),
@@ -1002,16 +1098,16 @@ impl AsyncElement for FfmpegH264Dec {
                     //      decoded frame; suppress re-emission from the
                     //      decode loop by recording `last_caps`.
                     match &c {
-                        Caps::CompressedVideo { codec, .. }
-                            if SUPPORTED_CODECS.contains(codec) =>
-                        {
+                        Caps::CompressedVideo { codec, .. } if SUPPORTED_CODECS.contains(codec) => {
                             self.input_caps = Some(c);
                         }
                         // A pre-fixed output CapsChanged from the runner: accept
                         // any format this decoder can emit. Under `Auto` that is
                         // any of the three chromas it advertised; otherwise the
                         // one configured format.
-                        Caps::RawVideo { format, .. } if accepts_output(self.output_format, *format) => {
+                        Caps::RawVideo { format, .. }
+                            if accepts_output(self.output_format, *format) =>
+                        {
                             out.push(PipelinePacket::CapsChanged(c.clone())).await?;
                             self.last_caps = Some(c);
                         }
@@ -1049,7 +1145,10 @@ impl AsyncElement for FfmpegH264Dec {
             // (per-frame PTS carries the real timing); default to 30/1 when the
             // container did not declare one.
             let out_framerate = match &self.input_caps {
-                Some(Caps::CompressedVideo { framerate: Rate::Fixed(q), .. }) => Rate::Fixed(*q),
+                Some(Caps::CompressedVideo {
+                    framerate: Rate::Fixed(q),
+                    ..
+                }) => Rate::Fixed(*q),
                 _ => Rate::Fixed(30 << 16),
             };
             for d in decoded {
@@ -1068,15 +1167,28 @@ impl AsyncElement for FfmpegH264Dec {
                     // stale.
                     #[cfg(debug_assertions)]
                     if let Some(input) = self.input_caps.as_ref() {
-                        let expected = derive_output_caps(input, self.output_format);
-                        debug_assert!(
-                            !expected
-                                .intersect(&CapsSet::one(new_caps.clone()))
-                                .is_empty(),
-                            "ffmpegdec decode-time output {new_caps:?} inconsistent with derive_output_caps({input:?}) = {expected:?}"
+                        // Skip on a mid-stream geometry change: a resolution change
+                        // decodes a picture that legitimately differs from the
+                        // recorded input caps (emitted afresh as new caps above).
+                        // This guard validates the output-*format* closure, so run
+                        // it only while the decoded geometry still matches.
+                        let geometry_matches = matches!(
+                            input,
+                            Caps::CompressedVideo { width, height, .. }
+                                if *width == Dim::Fixed(d.width) && *height == Dim::Fixed(d.height)
                         );
+                        if geometry_matches {
+                            let expected = derive_output_caps(input, self.output_format);
+                            debug_assert!(
+                                !expected
+                                    .intersect(&CapsSet::one(new_caps.clone()))
+                                    .is_empty(),
+                                "ffmpegdec decode-time output {new_caps:?} inconsistent with derive_output_caps({input:?}) = {expected:?}"
+                            );
+                        }
                     }
-                    out.push(PipelinePacket::CapsChanged(new_caps.clone())).await?;
+                    out.push(PipelinePacket::CapsChanged(new_caps.clone()))
+                        .await?;
                     self.last_caps = Some(new_caps.clone());
                 }
                 let domain = match d.payload {
@@ -1133,7 +1245,11 @@ static FFMPEGDEC_PROPS: &[PropertySpec] = &[
         PropKind::Str,
         "VAAPI render node, e.g. /dev/dri/renderD128 (Backend::Vaapi only; empty = libva default)",
     ),
-    PropertySpec::new("output-format", PropKind::Str, "decoded pixel layout: i420 | nv12"),
+    PropertySpec::new(
+        "output-format",
+        PropKind::Str,
+        "decoded pixel layout: i420 | nv12",
+    ),
 ];
 
 /// The libavcodec `AVCodecID` for a g2g codec (generic + CUDA-hwaccel path).
@@ -1184,9 +1300,12 @@ fn cuvid_name(codec: VideoCodec) -> &'static str {
 
 fn derive_output_caps(input: &Caps, out: OutputFormat) -> CapsSet {
     match input {
-        Caps::CompressedVideo { codec, width, height, framerate }
-            if SUPPORTED_CODECS.contains(codec) =>
-        {
+        Caps::CompressedVideo {
+            codec,
+            width,
+            height,
+            framerate,
+        } if SUPPORTED_CODECS.contains(codec) => {
             let mk = |f: RawVideoFormat| Caps::RawVideo {
                 format: f,
                 width: width.clone(),
@@ -1194,13 +1313,20 @@ fn derive_output_caps(input: &Caps, out: OutputFormat) -> CapsSet {
                 framerate: framerate.clone(),
             };
             match out {
-                // Auto emits whichever chroma the stream carries; advertise all
-                // three so a flexible downstream links, then the decoder fixes
-                // the concrete format via its own `CapsChanged` after decode.
+                // Auto emits whichever chroma / depth the stream carries;
+                // advertise every preserve format so a flexible downstream links,
+                // then the decoder fixes the concrete one via its own
+                // `CapsChanged` after decode.
                 OutputFormat::Auto => CapsSet::from_alternatives(alloc::vec![
                     mk(RawVideoFormat::I420),
                     mk(RawVideoFormat::I422),
                     mk(RawVideoFormat::I444),
+                    mk(RawVideoFormat::I420p10),
+                    mk(RawVideoFormat::I420p12),
+                    mk(RawVideoFormat::I422p10),
+                    mk(RawVideoFormat::I422p12),
+                    mk(RawVideoFormat::I444p10),
+                    mk(RawVideoFormat::I444p12),
                 ]),
                 other => CapsSet::one(mk(other.raw_format())),
             }
@@ -1228,13 +1354,86 @@ fn yuv420_caps(format: OutputFormat, w: u32, h: u32, framerate: Rate) -> Caps {
 /// exceed the visible width due to libavcodec's alignment, so rows are
 /// copied individually.
 ///
-/// Three source pixel layouts are accepted: planar `YUV420P` (the software
-/// H.264 decoder's native output), semi-planar `NV12` (h264_cuvid's native
-/// output), and planar `YUV444P` (High 4:4:4 profile), whose full-resolution
-/// chroma is box-averaged down to 4:2:0 (lossy). Any other format (e.g.
-/// 10-bit) is rejected loud — those streams need a `ColorConvert` element
-/// upstream of any I420/NV12 consumer.
+/// Three 8-bit source layouts are accepted here: planar `YUV420P` (the software
+/// decoder's native output), semi-planar `NV12` (h264_cuvid's native output),
+/// and planar `YUV444P` (High 4:4:4 profile), whose full-resolution chroma is
+/// box-averaged down to 4:2:0 (lossy). High-bit-depth planar sources are handled
+/// first by the preserve path above (lossless 2-byte copy). Any other format is
+/// rejected loud — those streams need a `ColorConvert` element upstream.
+/// Chroma subsampling `(x, y)` of a high-bit-depth (10-/12-bit LE) planar source
+/// pixel format, or `None` for anything else (8-bit, semi-planar, packed).
+fn high_depth_source_shift(px: Pixel) -> Option<(u32, u32)> {
+    match px {
+        Pixel::YUV420P10LE | Pixel::YUV420P12LE => Some((1, 1)),
+        Pixel::YUV422P10LE | Pixel::YUV422P12LE => Some((1, 0)),
+        Pixel::YUV444P10LE | Pixel::YUV444P12LE => Some((0, 0)),
+        _ => None,
+    }
+}
+
+/// Pack a high-bit-depth planar frame (Y, then U, then V) into a tightly-packed
+/// buffer of LE 2-byte samples, honouring libavcodec's per-plane row stride.
+fn pack_planar_16(frame: &FfVideo, (sx, sy): (u32, u32)) -> Box<[u8]> {
+    let w = frame.width() as usize;
+    let h = frame.height() as usize;
+    let cw = w.div_ceil(1 << sx);
+    let ch = h.div_ceil(1 << sy);
+    let y_bytes = w * h * 2;
+    let c_bytes = cw * ch * 2;
+    let mut out = alloc::vec![0u8; y_bytes + 2 * c_bytes];
+    copy_plane_16(&mut out, 0, frame.data(0), frame.stride(0), w * 2, h);
+    copy_plane_16(
+        &mut out,
+        y_bytes,
+        frame.data(1),
+        frame.stride(1),
+        cw * 2,
+        ch,
+    );
+    copy_plane_16(
+        &mut out,
+        y_bytes + c_bytes,
+        frame.data(2),
+        frame.stride(2),
+        cw * 2,
+        ch,
+    );
+    out.into_boxed_slice()
+}
+
+/// Copy `rows` rows of `row_bytes` bytes from a strided source plane into `out`
+/// at `dst_off`, packing the rows contiguously. The LE sample bytes are copied
+/// verbatim, so the destination keeps the source's little-endian layout.
+fn copy_plane_16(
+    out: &mut [u8],
+    dst_off: usize,
+    src: &[u8],
+    stride: usize,
+    row_bytes: usize,
+    rows: usize,
+) {
+    for row in 0..rows {
+        let s = row * stride;
+        let d = dst_off + row * row_bytes;
+        out[d..d + row_bytes].copy_from_slice(&src[s..s + row_bytes]);
+    }
+}
+
 fn copy_yuv(frame: &FfVideo, format: OutputFormat) -> Result<Box<[u8]>, G2gError> {
+    // High-bit-depth planar source (10/12-bit): a lossless 2-byte-per-sample
+    // plane copy that preserves depth and chroma. The resolved output must match
+    // the source chroma at 2 bytes/sample (Auto guarantees it); the plane bytes
+    // are copied verbatim, so 10- vs 12-bit only differs in the emitted caps
+    // label, not the packing.
+    if let Some(src_shift) = high_depth_source_shift(frame.format()) {
+        if format.bytes_per_sample() != 2 || format.chroma_shift() != src_shift {
+            return Err(G2gError::CapsMismatch);
+        }
+        if frame.planes() < 3 {
+            return Err(G2gError::Hardware(HardwareError::Other));
+        }
+        return Ok(pack_planar_16(frame, src_shift));
+    }
     let src = match frame.format() {
         // YUVJ*P is the JPEG (full) range sibling; same plane layout, so accept
         // it (range fidelity is preserved in the pixel values).
@@ -1244,7 +1443,11 @@ fn copy_yuv(frame: &FfVideo, format: OutputFormat) -> Result<Box<[u8]>, G2gError
         Pixel::YUV444P | Pixel::YUVJ444P => SourceLayout::Planar444,
         _ => return Err(G2gError::CapsMismatch),
     };
-    let required_planes = if matches!(src, SourceLayout::SemiPlanar420) { 2 } else { 3 };
+    let required_planes = if matches!(src, SourceLayout::SemiPlanar420) {
+        2
+    } else {
+        3
+    };
     if frame.planes() < required_planes {
         return Err(G2gError::Hardware(HardwareError::Other));
     }
@@ -1600,7 +1803,11 @@ mod tests {
             for x in 0..w {
                 assert_eq!(out[y * w + x], val(0, x, y), "Y");
                 assert_eq!(out[ysz + y * w + x], val(1, x, y), "U preserved full-res");
-                assert_eq!(out[2 * ysz + y * w + x], val(2, x, y), "V preserved full-res");
+                assert_eq!(
+                    out[2 * ysz + y * w + x],
+                    val(2, x, y),
+                    "V preserved full-res"
+                );
             }
         }
     }
@@ -1619,8 +1826,16 @@ mod tests {
         assert_eq!(out.len(), ysz + 2 * csz);
         for y in 0..ch {
             for x in 0..cw {
-                assert_eq!(out[ysz + y * cw + x], val(1, x, y), "U half-width full-height");
-                assert_eq!(out[ysz + csz + y * cw + x], val(2, x, y), "V half-width full-height");
+                assert_eq!(
+                    out[ysz + y * cw + x],
+                    val(1, x, y),
+                    "U half-width full-height"
+                );
+                assert_eq!(
+                    out[ysz + csz + y * cw + x],
+                    val(2, x, y),
+                    "V half-width full-height"
+                );
             }
         }
     }
@@ -1633,10 +1848,80 @@ mod tests {
         assert_eq!(resolve_output_format(Auto, Pixel::NV12).unwrap(), I420);
         assert_eq!(resolve_output_format(Auto, Pixel::YUV422P).unwrap(), I422);
         assert_eq!(resolve_output_format(Auto, Pixel::YUV444P).unwrap(), I444);
-        assert!(resolve_output_format(Auto, Pixel::RGB24).is_err(), "unsupported src");
+        assert!(
+            resolve_output_format(Auto, Pixel::RGB24).is_err(),
+            "unsupported src"
+        );
         // A fixed request passes through regardless of the source.
         assert_eq!(resolve_output_format(I420, Pixel::YUV444P).unwrap(), I420);
         assert_eq!(resolve_output_format(Nv12, Pixel::YUV420P).unwrap(), Nv12);
+    }
+
+    /// Build a planar high-bit-depth (LE `u16`) frame; `fill` gives the sample.
+    fn planar_frame_16(
+        pixfmt: Pixel,
+        w: u32,
+        h: u32,
+        chroma: (u32, u32),
+        fill: impl Fn(usize, usize, usize) -> u16,
+    ) -> FfVideo {
+        let mut frame = FfVideo::new(pixfmt, w, h);
+        let dims = [
+            (w as usize, h as usize),
+            ((w >> chroma.0) as usize, (h >> chroma.1) as usize),
+            ((w >> chroma.0) as usize, (h >> chroma.1) as usize),
+        ];
+        for (p, &(pw, ph)) in dims.iter().enumerate() {
+            let stride = frame.stride(p);
+            let data = frame.data_mut(p);
+            for y in 0..ph {
+                for x in 0..pw {
+                    let bytes = fill(p, x, y).to_le_bytes();
+                    data[y * stride + 2 * x] = bytes[0];
+                    data[y * stride + 2 * x + 1] = bytes[1];
+                }
+            }
+        }
+        frame
+    }
+
+    #[test]
+    fn auto_resolves_and_packs_high_bit_depth() {
+        use OutputFormat::*;
+        assert_eq!(
+            resolve_output_format(Auto, Pixel::YUV420P10LE).unwrap(),
+            I420p10
+        );
+        assert_eq!(
+            resolve_output_format(Auto, Pixel::YUV444P12LE).unwrap(),
+            I444p12
+        );
+
+        // 10-bit 4:2:0 -> I420p10: a lossless LE 2-byte-per-sample plane copy.
+        let (w, h) = (4usize, 2usize);
+        // values above 8-bit range, so a truncation to 1 byte would show
+        let val = |p: usize, x: usize, y: usize| (p * 300 + y * 4 + x) as u16;
+        let frame = planar_frame_16(Pixel::YUV420P10LE, w as u32, h as u32, (1, 1), val);
+        let out = copy_yuv(&frame, I420p10).expect("10-bit 4:2:0 -> I420p10");
+        let (cw, ch) = (w / 2, h / 2);
+        let ysz = w * h * 2;
+        let csz = cw * ch * 2;
+        assert_eq!(out.len(), ysz + 2 * csz, "2 bytes per sample");
+        for y in 0..h {
+            for x in 0..w {
+                let o = 2 * (y * w + x);
+                assert_eq!(out[o..o + 2], val(0, x, y).to_le_bytes(), "Y sample LE");
+            }
+        }
+        for y in 0..ch {
+            for x in 0..cw {
+                let u = ysz + 2 * (y * cw + x);
+                assert_eq!(out[u..u + 2], val(1, x, y).to_le_bytes(), "U sample LE");
+            }
+        }
+        // an 8-bit request from a 10-bit source is a loud mismatch, not a silent
+        // truncation
+        assert!(copy_yuv(&frame, I420).is_err());
     }
 
     #[test]
@@ -1645,12 +1930,20 @@ mod tests {
         let CapsConstraint::DerivedOutput(f) = dec.caps_constraint_as_transform() else {
             panic!("expected DerivedOutput");
         };
-        let input =
-            Caps::CompressedVideo { codec: VideoCodec::H264, width: Dim::Fixed(16), height: Dim::Fixed(16), framerate: Rate::Fixed(30 << 16) };
+        let input = Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            width: Dim::Fixed(16),
+            height: Dim::Fixed(16),
+            framerate: Rate::Fixed(30 << 16),
+        };
         let set = f(&input);
         // I420, I422, I444 are all offered so a flexible downstream links; the
         // decoder then fixes the concrete chroma per frame.
-        for fmt in [RawVideoFormat::I420, RawVideoFormat::I422, RawVideoFormat::I444] {
+        for fmt in [
+            RawVideoFormat::I420,
+            RawVideoFormat::I422,
+            RawVideoFormat::I444,
+        ] {
             let one = CapsSet::one(Caps::RawVideo {
                 format: fmt,
                 width: Dim::Fixed(16),
@@ -1768,7 +2061,12 @@ mod tests {
     fn intercept_accepts_supported_codecs_rejects_raw() {
         let dec = FfmpegH264Dec::new();
         // VP9 / AV1 / H.265 are accepted now (M111), each narrowed to itself.
-        for codec in [VideoCodec::Vp9, VideoCodec::Av1, VideoCodec::H265, VideoCodec::Vp8] {
+        for codec in [
+            VideoCodec::Vp9,
+            VideoCodec::Av1,
+            VideoCodec::H265,
+            VideoCodec::Vp8,
+        ] {
             let caps = Caps::CompressedVideo {
                 codec,
                 width: Dim::Any,
@@ -1851,7 +2149,10 @@ mod tests {
     fn device_property_sets_and_reads_vaapi_render_node() {
         let mut dec = FfmpegH264Dec::new().with_backend(Backend::Vaapi);
         // Unset reads back as the empty string (= libva default).
-        assert_eq!(dec.get_property("device"), Some(PropValue::Str(String::new())));
+        assert_eq!(
+            dec.get_property("device"),
+            Some(PropValue::Str(String::new()))
+        );
         dec.set_property("device", PropValue::Str("/dev/dri/renderD128".into()))
             .expect("device is a known property");
         assert_eq!(dec.vaapi_device(), Some("/dev/dri/renderD128"));
@@ -1860,27 +2161,51 @@ mod tests {
             Some(PropValue::Str("/dev/dri/renderD128".into()))
         );
         // An empty value clears the pin back to the libva default.
-        dec.set_property("device", PropValue::Str(String::new())).unwrap();
+        dec.set_property("device", PropValue::Str(String::new()))
+            .unwrap();
         assert_eq!(dec.vaapi_device(), None);
     }
 
     #[test]
     fn output_format_property_round_trips_and_rejects_bad_value() {
         let mut dec = FfmpegH264Dec::new();
-        assert_eq!(dec.get_property("output-format"), Some(PropValue::Str("i420".into())));
-        dec.set_property("output-format", PropValue::Str("nv12".into())).unwrap();
+        assert_eq!(
+            dec.get_property("output-format"),
+            Some(PropValue::Str("i420".into()))
+        );
+        dec.set_property("output-format", PropValue::Str("nv12".into()))
+            .unwrap();
         assert_eq!(dec.output_format(), OutputFormat::Nv12);
-        assert_eq!(dec.set_property("output-format", PropValue::Str("rgb".into())), Err(PropError::Value));
+        assert_eq!(
+            dec.set_property("output-format", PropValue::Str("rgb".into())),
+            Err(PropError::Value)
+        );
         // A type mismatch and an unknown name are distinct errors.
-        assert_eq!(dec.set_property("device", PropValue::Int(7)), Err(PropError::Type));
-        assert_eq!(dec.set_property("nope", PropValue::Str("x".into())), Err(PropError::Unknown));
+        assert_eq!(
+            dec.set_property("device", PropValue::Int(7)),
+            Err(PropError::Type)
+        );
+        assert_eq!(
+            dec.set_property("nope", PropValue::Str("x".into())),
+            Err(PropError::Unknown)
+        );
     }
 
     #[test]
     fn declares_device_and_output_format_properties() {
-        let names: Vec<&str> = FfmpegH264Dec::new().properties().iter().map(|p| p.name).collect();
-        assert!(names.contains(&"device"), "device property declared: {names:?}");
-        assert!(names.contains(&"output-format"), "output-format declared: {names:?}");
+        let names: Vec<&str> = FfmpegH264Dec::new()
+            .properties()
+            .iter()
+            .map(|p| p.name)
+            .collect();
+        assert!(
+            names.contains(&"device"),
+            "device property declared: {names:?}"
+        );
+        assert!(
+            names.contains(&"output-format"),
+            "output-format declared: {names:?}"
+        );
     }
 
     #[test]
@@ -2098,7 +2423,10 @@ mod tests {
             .await
             .expect("H.264 input CapsChanged must be accepted");
 
-        assert!(log.borrow().is_empty(), "H.264 input caps must not be forwarded");
+        assert!(
+            log.borrow().is_empty(),
+            "H.264 input caps must not be forwarded"
+        );
         assert!(dec.input_caps.is_some(), "input caps must be recorded");
     }
 
@@ -2124,6 +2452,9 @@ mod tests {
             .process(PipelinePacket::CapsChanged(i420), &mut rec)
             .await;
         assert_eq!(err, Err(G2gError::CapsMismatch));
-        assert!(log.borrow().is_empty(), "rejected caps must not be forwarded");
+        assert!(
+            log.borrow().is_empty(),
+            "rejected caps must not be forwarded"
+        );
     }
 }

@@ -39,7 +39,13 @@ impl Default for AudioPanorama {
 impl AudioPanorama {
     /// Centred (no pan); use the builder or the `panorama` property to adjust.
     pub fn new() -> Self {
-        Self { panorama: 0.0, input: None, configured: false, last_caps: None, emitted: 0 }
+        Self {
+            panorama: 0.0,
+            input: None,
+            configured: false,
+            last_caps: None,
+            emitted: 0,
+        }
     }
 
     pub fn with_panorama(mut self, panorama: f64) -> Self {
@@ -49,7 +55,11 @@ impl AudioPanorama {
 
     fn accept_input(&self, caps: &Caps) -> Result<Caps, G2gError> {
         match caps {
-            Caps::Audio { format: AudioFormat::PcmS16Le, channels: 2, .. } => Ok(caps.clone()),
+            Caps::Audio {
+                format: AudioFormat::PcmS16Le,
+                channels: 2,
+                ..
+            } => Ok(caps.clone()),
             _ => Err(G2gError::CapsMismatch),
         }
     }
@@ -69,9 +79,11 @@ impl AsyncElement for AudioPanorama {
     /// the output caps equal the input for S16LE stereo.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
-            Caps::Audio { format: AudioFormat::PcmS16Le, channels: 2, .. } => {
-                CapsSet::one(input.clone())
-            }
+            Caps::Audio {
+                format: AudioFormat::PcmS16Le,
+                channels: 2,
+                ..
+            } => CapsSet::one(input.clone()),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
     }
@@ -157,12 +169,19 @@ impl AsyncElement for AudioPanorama {
 }
 
 /// `AudioPanorama`'s settable properties (M104).
-static AUDIOPANORAMA_PROPS: &[PropertySpec] =
-    &[PropertySpec::new("panorama", PropKind::Double, "stereo position, -1 (left) .. 1 (right)")];
+static AUDIOPANORAMA_PROPS: &[PropertySpec] = &[PropertySpec::new(
+    "panorama",
+    PropKind::Double,
+    "stereo position, -1 (left) .. 1 (right)",
+)];
 
 impl PadTemplates for AudioPanorama {
     fn pad_templates() -> Vec<PadTemplate> {
-        let stereo = Caps::Audio { format: AudioFormat::PcmS16Le, channels: 2, sample_rate: 48_000 };
+        let stereo = Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            channels: 2,
+            sample_rate: 48_000,
+        };
         Vec::from([
             PadTemplate::sink(CapsSet::one(stereo.clone())),
             PadTemplate::source(CapsSet::one(stereo)),
@@ -173,7 +192,11 @@ impl PadTemplates for AudioPanorama {
 fn scale(sample: i16, gain: f64) -> i16 {
     let scaled = (sample as f64) * gain;
     // round half away from zero without libm, then clamp to i16.
-    let rounded = if scaled >= 0.0 { scaled + 0.5 } else { scaled - 0.5 };
+    let rounded = if scaled >= 0.0 {
+        scaled + 0.5
+    } else {
+        scaled - 0.5
+    };
     rounded.clamp(i16::MIN as f64, i16::MAX as f64) as i16
 }
 
@@ -238,9 +261,20 @@ mod tests {
     #[test]
     fn configure_requires_s16le_stereo() {
         let mut p = AudioPanorama::new();
-        let mono = Caps::Audio { format: AudioFormat::PcmS16Le, channels: 1, sample_rate: 48_000 };
-        assert_eq!(p.configure_pipeline(&mono).unwrap_err(), G2gError::CapsMismatch);
-        let stereo = Caps::Audio { format: AudioFormat::PcmS16Le, channels: 2, sample_rate: 44_100 };
+        let mono = Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            channels: 1,
+            sample_rate: 48_000,
+        };
+        assert_eq!(
+            p.configure_pipeline(&mono).unwrap_err(),
+            G2gError::CapsMismatch
+        );
+        let stereo = Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            channels: 2,
+            sample_rate: 44_100,
+        };
         assert!(p.configure_pipeline(&stereo).is_ok());
     }
 }

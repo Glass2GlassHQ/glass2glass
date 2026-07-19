@@ -73,7 +73,11 @@ impl<'r, const N: usize, const BYTES: usize> Mixer<'r, N, BYTES> {
     /// The ring must outlive every frame this element publishes: the
     /// pipeline must drain before the ring is dropped.
     pub unsafe fn with_ring(gain_a: i16, gain_b: i16, ring: &'r StaticLendRing<N, BYTES>) -> Self {
-        Self { gain_a, gain_b, ring }
+        Self {
+            gain_a,
+            gain_b,
+            ring,
+        }
     }
 }
 
@@ -96,7 +100,9 @@ impl<const N: usize, const BYTES: usize> StaticFanIn2 for Mixer<'_, N, BYTES> {
                 for ((ca, cb), d) in pairs.zip(dst.chunks_exact_mut(2)) {
                     // Slice patterns, not indexing: no bounds-check panic
                     // path may enter the no-alloc subset.
-                    let (&[al, ah], &[bl, bh]) = (ca, cb) else { continue };
+                    let (&[al, ah], &[bl, bh]) = (ca, cb) else {
+                        continue;
+                    };
                     let [dl, dh] = d else { continue };
                     let mixed = mix_q15(
                         i16::from_le_bytes([al, ah]),

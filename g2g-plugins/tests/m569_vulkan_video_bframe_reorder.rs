@@ -20,7 +20,10 @@
 //! frame at its display index is SAD/px 0, which only holds if the ordering is right.
 //!
 //! Runs on the RTX 3060; skips with no adapter / no decode support.
-#![cfg(all(any(target_os = "linux", target_os = "windows"), feature = "vulkan-video"))]
+#![cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    feature = "vulkan-video"
+))]
 
 use g2g_core::runtime::block_on;
 use g2g_plugins::vulkanvideo::{
@@ -46,8 +49,12 @@ fn assert_bit_exact(frames: &[Nv12Frame], ref_path: &str) {
         let ry = &ref_yuv[base..base + W * H];
         let ru = &ref_yuv[base + W * H..base + W * H + cw * ch];
         let rv = &ref_yuv[base + W * H + cw * ch..base + fb];
-        let ysad: u64 =
-            f.luma.iter().zip(ry).map(|(&a, &b)| (a as i32 - b as i32).unsigned_abs() as u64).sum();
+        let ysad: u64 = f
+            .luma
+            .iter()
+            .zip(ry)
+            .map(|(&a, &b)| (a as i32 - b as i32).unsigned_abs() as u64)
+            .sum();
         let mut usad = 0u64;
         let mut vsad = 0u64;
         for k in 0..cw * ch {
@@ -60,7 +67,10 @@ fn assert_bit_exact(frames: &[Nv12Frame], ref_path: &str) {
             usad as f64 / (cw * ch) as f64,
             vsad as f64 / (cw * ch) as f64
         );
-        assert_eq!(ysad, 0, "frame {i} luma not bit-exact (ordering or decode wrong)");
+        assert_eq!(
+            ysad, 0,
+            "frame {i} luma not bit-exact (ordering or decode wrong)"
+        );
         assert_eq!(usad, 0, "frame {i} Cb not bit-exact");
         assert_eq!(vsad, 0, "frame {i} Cr not bit-exact");
     }
@@ -79,14 +89,21 @@ fn h264_bframes_decode_in_display_order() {
         Err(e) => panic!("open h264 device: {e:?}"),
     };
     let ps = extract_h264_parameter_sets(H264).expect("sps/pps");
-    let session = device.create_h264_session(&ps, W as u32, H as u32).expect("session");
-    let mut dec = device.create_h264_dpb_decoder(&session, &ps).expect("decoder");
+    let session = device
+        .create_h264_session(&ps, W as u32, H as u32)
+        .expect("session");
+    let mut dec = device
+        .create_h264_dpb_decoder(&session, &ps)
+        .expect("decoder");
 
     // The stream must actually reorder (POC non-monotonic in decode order), else the
     // display-order path is not exercised.
     let metas = dec.index_pictures(H264).expect("index");
     let pocs: Vec<i32> = metas.iter().map(|m| m.poc).collect();
-    assert!(pocs.windows(2).any(|w| w[1] < w[0]), "fixture has no B-frame reorder (POC monotonic)");
+    assert!(
+        pocs.windows(2).any(|w| w[1] < w[0]),
+        "fixture has no B-frame reorder (POC monotonic)"
+    );
 
     let frames = dec.decode_all(H264).expect("decode");
     assert_eq!(frames.len(), metas.len(), "one frame per coded picture");
@@ -95,7 +112,10 @@ fn h264_bframes_decode_in_display_order() {
     }
     if let Ok(p) = std::env::var("G2G_H264_BF_REF") {
         assert_bit_exact(&frames, &p);
-        eprintln!("m569 h264: {} B-frame frames bit-exact in display order", frames.len());
+        eprintln!(
+            "m569 h264: {} B-frame frames bit-exact in display order",
+            frames.len()
+        );
     }
 }
 
@@ -113,17 +133,27 @@ fn h265_bframes_decode_in_display_order() {
     };
     let ps = extract_h265_parameter_sets(H265).expect("vps/sps/pps");
     let std = to_std_h265_params(&ps);
-    let session = device.create_h265_session(&std, W as u32, H as u32).expect("session");
-    let mut dec = device.create_h265_dpb_decoder(&session, &ps).expect("decoder");
+    let session = device
+        .create_h265_session(&std, W as u32, H as u32)
+        .expect("session");
+    let mut dec = device
+        .create_h265_dpb_decoder(&session, &ps)
+        .expect("decoder");
 
     let metas = dec.index_pictures(H265).expect("index");
     let pocs: Vec<i32> = metas.iter().map(|m| m.poc).collect();
-    assert!(pocs.windows(2).any(|w| w[1] < w[0]), "fixture has no B-frame reorder (POC monotonic)");
+    assert!(
+        pocs.windows(2).any(|w| w[1] < w[0]),
+        "fixture has no B-frame reorder (POC monotonic)"
+    );
 
     let frames = dec.decode_all(H265).expect("decode");
     assert_eq!(frames.len(), metas.len(), "one frame per coded picture");
     if let Ok(p) = std::env::var("G2G_H265_BF_REF") {
         assert_bit_exact(&frames, &p);
-        eprintln!("m569 h265: {} B-frame frames bit-exact in display order", frames.len());
+        eprintln!(
+            "m569 h265: {} B-frame frames bit-exact in display order",
+            frames.len()
+        );
     }
 }

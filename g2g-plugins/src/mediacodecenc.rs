@@ -36,9 +36,7 @@ use core::future::Future;
 use core::pin::Pin;
 use core::time::Duration;
 
-use ndk::media::media_codec::{
-    DequeuedOutputBufferInfoResult, MediaCodec, MediaCodecDirection,
-};
+use ndk::media::media_codec::{DequeuedOutputBufferInfoResult, MediaCodec, MediaCodecDirection};
 use ndk::media::media_format::MediaFormat;
 
 use g2g_core::frame::Frame;
@@ -214,10 +212,15 @@ impl MediaCodecEnc {
         codec
             .configure(&format, None, MediaCodecDirection::Encoder)
             .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
-        codec.start().map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+        codec
+            .start()
+            .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
 
-        self.state =
-            Some(CodecState { codec, width: self.width, height: self.height });
+        self.state = Some(CodecState {
+            codec,
+            width: self.width,
+            height: self.height,
+        });
         Ok(())
     }
 
@@ -253,7 +256,11 @@ impl MediaCodecEnc {
         out: &mut Vec<EncodedChunk>,
         until_eos: bool,
     ) -> Result<(), G2gError> {
-        let timeout = if until_eos { Duration::from_millis(20) } else { Duration::ZERO };
+        let timeout = if until_eos {
+            Duration::from_millis(20)
+        } else {
+            Duration::ZERO
+        };
         for _ in 0..MAX_OUTPUT_POLLS {
             let mut got = false;
             let mut eos = false;
@@ -319,7 +326,8 @@ impl MediaCodecEnc {
 }
 
 impl AsyncElement for MediaCodecEnc {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -335,7 +343,9 @@ impl AsyncElement for MediaCodecEnc {
 
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         let codec = self.codec;
-        CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| derive_output_caps(codec, input)))
+        CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| {
+            derive_output_caps(codec, input)
+        }))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -365,8 +375,12 @@ impl AsyncElement for MediaCodecEnc {
                 .with_default("4000000"),
             PropertySpec::new("framerate", PropKind::Uint, "encode frame rate, fps")
                 .with_default("30"),
-            PropertySpec::new("i-frame-interval", PropKind::Uint, "keyframe interval, seconds")
-                .with_default("1"),
+            PropertySpec::new(
+                "i-frame-interval",
+                PropKind::Uint,
+                "keyframe interval, seconds",
+            )
+            .with_default("1"),
         ];
         PROPS
     }
@@ -417,7 +431,10 @@ impl AsyncElement for MediaCodecEnc {
                 }
                 PipelinePacket::CapsChanged(c) => {
                     match &c {
-                        Caps::RawVideo { format: RawVideoFormat::Nv12, .. } => {}
+                        Caps::RawVideo {
+                            format: RawVideoFormat::Nv12,
+                            ..
+                        } => {}
                         _ => return Err(G2gError::CapsMismatch),
                     }
                     // Geometry / rate changes would need a codec rebuild; v1 keeps
@@ -447,9 +464,11 @@ impl AsyncElement for MediaCodecEnc {
                 }
             }
 
-            let new_caps = compressed_caps(self.codec, self.width, self.height, &self.framerate_caps);
+            let new_caps =
+                compressed_caps(self.codec, self.width, self.height, &self.framerate_caps);
             if self.last_caps.as_ref() != Some(&new_caps) {
-                out.push(PipelinePacket::CapsChanged(new_caps.clone())).await?;
+                out.push(PipelinePacket::CapsChanged(new_caps.clone()))
+                    .await?;
                 self.last_caps = Some(new_caps);
             }
             for chunk in encoded {
@@ -529,14 +548,17 @@ fn starts_with_parameter_set(codec: VideoCodec, au: &[u8]) -> bool {
 
 fn derive_output_caps(codec: VideoCodec, input: &Caps) -> CapsSet {
     match input {
-        Caps::RawVideo { format: RawVideoFormat::Nv12, width, height, framerate } => {
-            CapsSet::one(Caps::CompressedVideo {
-                codec,
-                width: width.clone(),
-                height: height.clone(),
-                framerate: framerate.clone(),
-            })
-        }
+        Caps::RawVideo {
+            format: RawVideoFormat::Nv12,
+            width,
+            height,
+            framerate,
+        } => CapsSet::one(Caps::CompressedVideo {
+            codec,
+            width: width.clone(),
+            height: height.clone(),
+            framerate: framerate.clone(),
+        }),
         _ => CapsSet::from_alternatives(Vec::new()),
     }
 }

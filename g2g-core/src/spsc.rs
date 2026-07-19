@@ -23,13 +23,20 @@
 //!
 //! [`produce`]: SpscFrameRing::produce
 
-use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use crate::sync::{AtomicU32, AtomicUsize, Ordering, UnsafeCell};
 
+// The consumer lend (`borrow`) and the `SpscCaptureSrc` source are not built
+// under loom (the zero-copy raw-pointer lend cannot be modeled), so their
+// supporting imports are gated with it to stay used in every configuration.
+#[cfg(not(loom))]
 use crate::error::G2gError;
+#[cfg(not(loom))]
 use crate::frame::{Frame, FrameTiming};
+#[cfg(not(loom))]
 use crate::memory::{MemoryDomain, SystemSlice};
+#[cfg(not(loom))]
 use crate::staticelem::StaticSource;
+#[cfg(not(loom))]
 use crate::supervise::Recover;
 
 /// [`SpscFrameRing::produce`] found the ring full (the consumer is behind), so
@@ -74,14 +81,28 @@ impl<const N: usize, const BYTES: usize> SpscFrameRing<N, BYTES> {
     // Associated const as the array-repeat operand: the MSRV-1.75 way to build
     // the slot array in a `const fn` (inline-const repeat needs 1.79). Copying a
     // fresh zeroed slot into each array element is exactly the intent.
+    #[cfg(not(loom))]
     #[allow(clippy::declare_interior_mutable_const)]
     const EMPTY_SLOT: UnsafeCell<[u8; BYTES]> = UnsafeCell::new([0u8; BYTES]);
 
     /// Build an empty ring. `const`, so it lives in a `static` (the DMA-ring
     /// idiom) shared between the producer ISR and the consumer. `N >= 2`.
+    #[cfg(not(loom))]
     pub const fn new() -> Self {
         Self {
             slots: [Self::EMPTY_SLOT; N],
+            head: AtomicUsize::new(0),
+            tail: AtomicUsize::new(0),
+            overruns: AtomicU32::new(0),
+        }
+    }
+
+    /// loom build only: loom's atomics / cells are not const-constructible, so
+    /// build the slots at run time. Same empty ring, model-checkable.
+    #[cfg(loom)]
+    pub fn new() -> Self {
+        Self {
+            slots: core::array::from_fn(|_| UnsafeCell::new([0u8; BYTES])),
             head: AtomicUsize::new(0),
             tail: AtomicUsize::new(0),
             overruns: AtomicU32::new(0),
@@ -128,7 +149,10 @@ impl<const N: usize, const BYTES: usize> SpscFrameRing<N, BYTES> {
         if next == self.head.load(Ordering::Acquire) {
             // Full: drop and count (single producer, so a load+store bump on the
             // counter needs no CAS and cannot lose an update).
-            self.overruns.store(self.overruns.load(Ordering::Relaxed).wrapping_add(1), Ordering::Relaxed);
+            self.overruns.store(
+                self.overruns.load(Ordering::Relaxed).wrapping_add(1),
+                Ordering::Relaxed,
+            );
             return Err(Overrun);
         }
         let Some(cell) = self.slots.get(tail) else {
@@ -138,7 +162,7 @@ impl<const N: usize, const BYTES: usize> SpscFrameRing<N, BYTES> {
         // SAFETY: slot[tail] is free (outside the published range [head, tail),
         // guaranteed by the full check above), and the producer is its sole
         // writer until the Release store below publishes it.
-        fill(unsafe { &mut *cell.get() });
+        cell.with_mut(|ptr| fill(unsafe { &mut *ptr }));
         self.tail.store(next, Ordering::Release); // publish
         Ok(())
     }
@@ -153,6 +177,11 @@ impl<const N: usize, const BYTES: usize> SpscFrameRing<N, BYTES> {
     /// in-flight discipline the static runners already follow (each frame is
     /// dropped before the next `next()`). Releasing a still-referenced slice
     /// would let the producer reuse the slot under the reader.
+    ///
+    /// Not built under `--cfg loom`: the lend hands out a raw pointer that
+    /// outlives any scoped cell access, which loom's `UnsafeCell` cannot model.
+    /// The loom consumer reads through [`Self::loom_peek0`] instead.
+    #[cfg(not(loom))]
     pub fn borrow(&self) -> Option<SystemSlice> {
         let head = self.head.load(Ordering::Relaxed); // sole consumer owns head
         if head == self.tail.load(Ordering::Acquire) {
@@ -166,6 +195,22 @@ impl<const N: usize, const BYTES: usize> SpscFrameRing<N, BYTES> {
         // lend stays valid. `free` is None: the consumer reclaims the slot
         // explicitly via `release`, not on the slice's drop.
         Some(unsafe { SystemSlice::from_foreign(ptr, BYTES, None, core::ptr::null_mut()) })
+    }
+
+    /// loom build only: the consumer read the SPSC test uses in place of the
+    /// zero-copy [`borrow`](Self::borrow) lend. It returns the oldest published
+    /// frame's first byte (`None` if empty) through a scoped cell access, so
+    /// loom tracks the read and flags any overlap with the producer's write.
+    /// Same head/tail protocol as `borrow`.
+    #[cfg(loom)]
+    pub fn loom_peek0(&self) -> Option<u8> {
+        let head = self.head.load(Ordering::Relaxed);
+        if head == self.tail.load(Ordering::Acquire) {
+            return None; // empty
+        }
+        self.slots
+            .get(head)
+            .map(|cell| cell.with(|ptr| unsafe { (*ptr)[0] }))
     }
 
     /// CONSUMER side: reclaim the slot last returned by [`borrow`], freeing it for
@@ -208,6 +253,7 @@ impl<const N: usize, const BYTES: usize> core::fmt::Debug for SpscFrameRing<N, B
 /// Single frame in flight (the static runners drop each frame before the next
 /// `next()`), which is what makes the zero-copy borrow sound: the borrowed slot
 /// is released only after its frame is gone.
+#[cfg(not(loom))]
 pub struct SpscCaptureSrc<'r, I, const N: usize, const BYTES: usize> {
     ring: &'r SpscFrameRing<N, BYTES>,
     idle: I,
@@ -217,6 +263,7 @@ pub struct SpscCaptureSrc<'r, I, const N: usize, const BYTES: usize> {
     holding: bool,
 }
 
+#[cfg(not(loom))]
 impl<'r, I: FnMut(), const N: usize, const BYTES: usize> SpscCaptureSrc<'r, I, N, BYTES> {
     /// A capture source draining `ring` (filled by a producer in another context,
     /// e.g. a DMA/timer ISR). `idle` runs while waiting for the producer to
@@ -224,7 +271,14 @@ impl<'r, I: FnMut(), const N: usize, const BYTES: usize> SpscCaptureSrc<'r, I, N
     /// interrupt), a yield or `core::hint::spin_loop` in a host test.
     /// `frame_interval_ns` sets the derived PTS cadence.
     pub fn new(ring: &'r SpscFrameRing<N, BYTES>, idle: I, frame_interval_ns: u64) -> Self {
-        Self { ring, idle, frame_interval_ns, remaining: None, seq: 0, holding: false }
+        Self {
+            ring,
+            idle,
+            frame_interval_ns,
+            remaining: None,
+            seq: 0,
+            holding: false,
+        }
     }
 
     /// End the stream after `frames` captures (a capture is endless by default).
@@ -234,6 +288,7 @@ impl<'r, I: FnMut(), const N: usize, const BYTES: usize> SpscCaptureSrc<'r, I, N
     }
 }
 
+#[cfg(not(loom))]
 impl<I: FnMut(), const N: usize, const BYTES: usize> StaticSource
     for SpscCaptureSrc<'_, I, N, BYTES>
 {
@@ -257,7 +312,10 @@ impl<I: FnMut(), const N: usize, const BYTES: usize> StaticSource
                 let pts_ns = self.seq.saturating_mul(self.frame_interval_ns);
                 let frame = Frame::new(
                     MemoryDomain::System(slice),
-                    FrameTiming { pts_ns, ..FrameTiming::default() },
+                    FrameTiming {
+                        pts_ns,
+                        ..FrameTiming::default()
+                    },
                     self.seq,
                 );
                 self.seq = self.seq.wrapping_add(1);
@@ -268,6 +326,7 @@ impl<I: FnMut(), const N: usize, const BYTES: usize> StaticSource
     }
 }
 
+#[cfg(not(loom))]
 impl<I: FnMut(), const N: usize, const BYTES: usize> Recover for SpscCaptureSrc<'_, I, N, BYTES> {
     /// Recover a capture source after a fault by dropping any stale buffered
     /// frames, so the pipeline resumes from live data instead of replaying a
@@ -290,6 +349,7 @@ impl<I: FnMut(), const N: usize, const BYTES: usize> Recover for SpscCaptureSrc<
     }
 }
 
+#[cfg(not(loom))]
 impl<I, const N: usize, const BYTES: usize> core::fmt::Debug for SpscCaptureSrc<'_, I, N, BYTES> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("SpscCaptureSrc")
@@ -302,7 +362,9 @@ impl<I, const N: usize, const BYTES: usize> core::fmt::Debug for SpscCaptureSrc<
     }
 }
 
-#[cfg(test)]
+// The existing single-threaded tests exercise `borrow`, which is not built under
+// loom; the loom model test below covers the concurrent protocol instead.
+#[cfg(all(test, not(loom)))]
 mod tests {
     use super::*;
 
@@ -357,7 +419,11 @@ mod tests {
         let ring: SpscFrameRing<3, 1> = SpscFrameRing::new();
         for k in 0..20u8 {
             ring.produce(|b| b[0] = k).expect("space (one in flight)");
-            assert_eq!(peek(&ring), Some(k), "each frame consumed in order across wraps");
+            assert_eq!(
+                peek(&ring),
+                Some(k),
+                "each frame consumed in order across wraps"
+            );
             ring.release();
         }
         assert!(ring.is_empty());
@@ -371,5 +437,61 @@ mod tests {
         assert!(ring.is_empty());
         ring.produce(|b| b[0] = 7).expect("space");
         assert_eq!(peek(&ring), Some(7));
+    }
+}
+
+// Loom model check of the hand-rolled no-CAS Acquire/Release protocol: a producer
+// thread fills the ring while a consumer thread drains it, and loom explores every
+// interleaving. Run with `tools/loom-spsc.sh` (RUSTFLAGS="--cfg loom"). The scoped
+// cell accesses (`with_mut` on produce, `.with` on `loom_peek0`) let loom flag any
+// producer/consumer overlap on a slot; the value asserts catch a lost, duplicated,
+// or reordered frame.
+#[cfg(all(test, loom))]
+mod loom_tests {
+    use super::*;
+    use loom::sync::Arc;
+    use loom::thread;
+
+    // Frames pushed through the ring. `FRAMES > N` forces the cursors to wrap and
+    // reuse slots, exercising the full check (the producer must not refill a slot
+    // the consumer still holds). Kept small so loom's interleaving search stays
+    // tractable; every frame still flows through because the producer retries on a
+    // full ring rather than dropping (real backpressure, not the ISR drop policy).
+    const FRAMES: u8 = 4;
+
+    #[test]
+    fn producer_consumer_handoff_preserves_fifo_without_races() {
+        loom::model(|| {
+            // usable capacity 2 (N = 3); FRAMES = 4 wraps twice.
+            let ring = Arc::new(SpscFrameRing::<3, 1>::new());
+            let producer = {
+                let ring = ring.clone();
+                thread::spawn(move || {
+                    for v in 1..=FRAMES {
+                        // retry on a full ring so no frame is dropped: the consumer
+                        // must free a slot first, which is the full-check handshake.
+                        while ring.produce(|b| b[0] = v).is_err() {
+                            thread::yield_now();
+                        }
+                    }
+                })
+            };
+            // The consumer must receive every frame exactly once, in order: the
+            // handoff loses, duplicates, or reorders nothing. It spins (the ISR
+            // capture source's idle) until each expected frame is published; a
+            // wrong full check would let the producer write a slot the consumer is
+            // mid-read of, which loom flags as a concurrent cell access.
+            for expected in 1..=FRAMES {
+                loop {
+                    if let Some(v) = ring.loom_peek0() {
+                        assert_eq!(v, expected, "FIFO: exactly one of each, in order");
+                        ring.release();
+                        break;
+                    }
+                    thread::yield_now();
+                }
+            }
+            producer.join().unwrap();
+        });
     }
 }

@@ -18,9 +18,17 @@ use crate::CompileError;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Geometry {
     /// Interleaved PCM: sampling rate, bytes per sample, channels.
-    Audio { sample_rate: u32, width: u8, channels: u8 },
+    Audio {
+        sample_rate: u32,
+        width: u8,
+        channels: u8,
+    },
     /// A raster frame: pixel dimensions and bytes per pixel.
-    Raster { width_px: u32, height_px: u32, bpp: u8 },
+    Raster {
+        width_px: u32,
+        height_px: u32,
+        bpp: u8,
+    },
 }
 
 /// Samples per channel in one audio frame, requiring the rate and period to
@@ -28,7 +36,10 @@ pub(crate) enum Geometry {
 pub(crate) fn samples_per_frame(sample_rate: u32, frame_ns: u64) -> Result<u32, CompileError> {
     match u64::from(sample_rate).checked_mul(frame_ns) {
         Some(n) if n % 1_000_000_000 == 0 => Ok((n / 1_000_000_000) as u32),
-        _ => Err(CompileError::FractionalFrame { rate: sample_rate, frame_ns }),
+        _ => Err(CompileError::FractionalFrame {
+            rate: sample_rate,
+            frame_ns,
+        }),
     }
 }
 
@@ -36,13 +47,19 @@ impl Geometry {
     /// Bytes in one frame at this geometry (the ring size for a lending node).
     pub(crate) fn ring_bytes(&self, frame_ns: u64) -> Result<usize, CompileError> {
         match self {
-            Geometry::Audio { sample_rate, width, channels } => {
+            Geometry::Audio {
+                sample_rate,
+                width,
+                channels,
+            } => {
                 let samples = samples_per_frame(*sample_rate, frame_ns)?;
                 Ok(samples as usize * *channels as usize * *width as usize)
             }
-            Geometry::Raster { width_px, height_px, bpp } => {
-                Ok(*width_px as usize * *height_px as usize * *bpp as usize)
-            }
+            Geometry::Raster {
+                width_px,
+                height_px,
+                bpp,
+            } => Ok(*width_px as usize * *height_px as usize * *bpp as usize),
         }
     }
 }
@@ -63,13 +80,32 @@ pub(crate) enum Role {
 /// shared byte-capture seam, audio or video by its geometry.
 #[derive(Debug, Clone)]
 pub(crate) enum Kind {
-    GrabberSrc { geom: Geometry },
+    GrabberSrc {
+        geom: Geometry,
+    },
     PcmConvert,
-    Resample { from: u32, to: u32 },
-    Mixer { gain_a: i16, gain_b: i16 },
-    G711Enc { law: Law },
-    RtpSink { clock_rate: u32, payload_type: u8, ssrc: u32, sequence: u16 },
-    SpiDisplaySink { driver: Driver, width_px: u32, height_px: u32 },
+    Resample {
+        from: u32,
+        to: u32,
+    },
+    Mixer {
+        gain_a: i16,
+        gain_b: i16,
+    },
+    G711Enc {
+        law: Law,
+    },
+    RtpSink {
+        clock_rate: u32,
+        payload_type: u8,
+        ssrc: u32,
+        sequence: u16,
+    },
+    SpiDisplaySink {
+        driver: Driver,
+        width_px: u32,
+        height_px: u32,
+    },
 }
 
 /// G.711 companding law (mirrors `g2g_mcu::Law`).
@@ -126,11 +162,18 @@ impl Kind {
         input: Option<Geometry>,
     ) -> Result<Option<Geometry>, CompileError> {
         let need = |g: Option<Geometry>| g.ok_or_else(|| CompileError::MissingInput(id.into()));
-        let bad = |detail: &str| CompileError::BadGeometry { node: id.into(), detail: detail.into() };
+        let bad = |detail: &str| CompileError::BadGeometry {
+            node: id.into(),
+            detail: detail.into(),
+        };
         // Unpack an audio input link or fail: the PCM elements are audio-only.
         let audio = |g: Geometry| -> Result<(u32, u8, u8), CompileError> {
             match g {
-                Geometry::Audio { sample_rate, width, channels } => Ok((sample_rate, width, channels)),
+                Geometry::Audio {
+                    sample_rate,
+                    width,
+                    channels,
+                } => Ok((sample_rate, width, channels)),
                 Geometry::Raster { .. } => Err(bad("expected an audio input link")),
             }
         };
@@ -141,14 +184,22 @@ impl Kind {
                 if width != 4 {
                     return Err(bad("pcmconvert needs 32-bit (width 4) input slots"));
                 }
-                Ok(Some(Geometry::Audio { sample_rate: rate, width: 2, channels }))
+                Ok(Some(Geometry::Audio {
+                    sample_rate: rate,
+                    width: 2,
+                    channels,
+                }))
             }
             Kind::Resample { from, to } => {
                 let (rate, width, channels) = audio(need(input)?)?;
                 if rate != *from {
                     return Err(bad("resample `from` rate does not match the input link"));
                 }
-                Ok(Some(Geometry::Audio { sample_rate: *to, width, channels }))
+                Ok(Some(Geometry::Audio {
+                    sample_rate: *to,
+                    width,
+                    channels,
+                }))
             }
             Kind::Mixer { .. } => {
                 audio(need(input)?)?;
@@ -159,32 +210,48 @@ impl Kind {
                 if width != 2 {
                     return Err(bad("g711enc needs 16-bit (width 2) PCM input"));
                 }
-                Ok(Some(Geometry::Audio { sample_rate: rate, width: 1, channels }))
+                Ok(Some(Geometry::Audio {
+                    sample_rate: rate,
+                    width: 1,
+                    channels,
+                }))
             }
             Kind::RtpSink { .. } => {
                 audio(need(input)?)?;
                 Ok(None)
             }
-            Kind::SpiDisplaySink { width_px, height_px, .. } => {
-                match need(input)? {
-                    Geometry::Raster { width_px: w, height_px: h, bpp } => {
-                        if bpp != 4 {
-                            return Err(bad("spidisplaysink needs RGBA (bpp 4) input"));
-                        }
-                        if w != *width_px || h != *height_px {
-                            return Err(bad("spidisplaysink input dimensions do not match the panel"));
-                        }
-                        Ok(None)
+            Kind::SpiDisplaySink {
+                width_px,
+                height_px,
+                ..
+            } => match need(input)? {
+                Geometry::Raster {
+                    width_px: w,
+                    height_px: h,
+                    bpp,
+                } => {
+                    if bpp != 4 {
+                        return Err(bad("spidisplaysink needs RGBA (bpp 4) input"));
                     }
-                    Geometry::Audio { .. } => Err(bad("spidisplaysink needs a raster (video) input")),
+                    if w != *width_px || h != *height_px {
+                        return Err(bad(
+                            "spidisplaysink input dimensions do not match the panel",
+                        ));
+                    }
+                    Ok(None)
                 }
-            }
+                Geometry::Audio { .. } => Err(bad("spidisplaysink needs a raster (video) input")),
+            },
         }
     }
 }
 
 /// Read an integer property, or a default when absent.
-fn int_prop(props: &BTreeMap<String, Scalar>, key: &str, default: i64) -> Result<i64, CompileError> {
+fn int_prop(
+    props: &BTreeMap<String, Scalar>,
+    key: &str,
+    default: i64,
+) -> Result<i64, CompileError> {
     match props.get(key) {
         None => Ok(default),
         Some(v) => v.as_int().ok_or_else(|| CompileError::BadProp {
@@ -200,7 +267,10 @@ fn req_int(props: &BTreeMap<String, Scalar>, key: &str) -> Result<i64, CompileEr
         .get(key)
         .ok_or_else(|| CompileError::MissingProp(key.into()))?
         .as_int()
-        .ok_or_else(|| CompileError::BadProp { key: key.into(), detail: "expected an integer".into() })
+        .ok_or_else(|| CompileError::BadProp {
+            key: key.into(),
+            detail: "expected an integer".into(),
+        })
 }
 
 fn as_rate(v: i64, key: &str) -> Result<u32, CompileError> {
@@ -221,7 +291,10 @@ fn as_small<T: TryFrom<i64>>(v: i64, key: &str, ty: &str) -> Result<T, CompileEr
 }
 
 fn bad_prop(key: &str, detail: impl Into<String>) -> CompileError {
-    CompileError::BadProp { key: key.into(), detail: detail.into() }
+    CompileError::BadProp {
+        key: key.into(),
+        detail: detail.into(),
+    }
 }
 
 /// Bytes per pixel from a raster `format` property (default RGBA8888).
@@ -230,7 +303,10 @@ fn pixel_bpp(props: &BTreeMap<String, Scalar>) -> Result<u8, CompileError> {
         None | Some("rgba8888") | Some("rgba") => Ok(4),
         Some("rgb565") => Ok(2),
         Some("gray8") | Some("gray") => Ok(1),
-        Some(other) => Err(bad_prop("format", format!("unknown pixel format `{other}`"))),
+        Some(other) => Err(bad_prop(
+            "format",
+            format!("unknown pixel format `{other}`"),
+        )),
     }
 }
 
@@ -246,12 +322,21 @@ pub(crate) fn resolve(node: &Node) -> Result<Kind, CompileError> {
                 let width = as_small(int_prop(p, "width", 2)?, "width", "u8")?;
                 let channels = as_small(int_prop(p, "channels", 1)?, "channels", "u8")?;
                 if width != 2 && width != 4 {
-                    return Err(bad_prop("width", "capture width must be 2 (S16) or 4 (S32 slot)"));
+                    return Err(bad_prop(
+                        "width",
+                        "capture width must be 2 (S16) or 4 (S32 slot)",
+                    ));
                 }
                 if channels == 0 {
                     return Err(bad_prop("channels", "channels must be >= 1"));
                 }
-                Ok(Kind::GrabberSrc { geom: Geometry::Audio { sample_rate, width, channels } })
+                Ok(Kind::GrabberSrc {
+                    geom: Geometry::Audio {
+                        sample_rate,
+                        width,
+                        channels,
+                    },
+                })
             } else {
                 let width_px = as_small::<u32>(req_int(p, "width-px")?, "width-px", "u32")?;
                 let height_px = as_small::<u32>(req_int(p, "height-px")?, "height-px", "u32")?;
@@ -259,7 +344,13 @@ pub(crate) fn resolve(node: &Node) -> Result<Kind, CompileError> {
                 if width_px == 0 || height_px == 0 {
                     return Err(bad_prop("width-px", "pixel dimensions must be >= 1"));
                 }
-                Ok(Kind::GrabberSrc { geom: Geometry::Raster { width_px, height_px, bpp } })
+                Ok(Kind::GrabberSrc {
+                    geom: Geometry::Raster {
+                        width_px,
+                        height_px,
+                        bpp,
+                    },
+                })
             }
         }
         "pcmconvert" => Ok(Kind::PcmConvert),
@@ -297,19 +388,31 @@ pub(crate) fn resolve(node: &Node) -> Result<Kind, CompileError> {
             let payload_type = as_small(int_prop(p, "payload-type", 0)?, "payload-type", "u8")?;
             let ssrc = as_small::<u32>(req_int(p, "ssrc")?, "ssrc", "u32")?;
             let sequence = as_small(int_prop(p, "sequence", 0)?, "sequence", "u16")?;
-            Ok(Kind::RtpSink { clock_rate, payload_type, ssrc, sequence })
+            Ok(Kind::RtpSink {
+                clock_rate,
+                payload_type,
+                ssrc,
+                sequence,
+            })
         }
         "spidisplaysink" => {
             let driver = match p.get("driver").and_then(Scalar::as_str) {
                 None | Some("st7789") => Driver::St7789,
                 Some("ili9341") => Driver::Ili9341,
                 Some(other) => {
-                    return Err(bad_prop("driver", format!("unknown driver `{other}` (st7789 | ili9341)")))
+                    return Err(bad_prop(
+                        "driver",
+                        format!("unknown driver `{other}` (st7789 | ili9341)"),
+                    ))
                 }
             };
             let width_px = as_small::<u32>(req_int(p, "width-px")?, "width-px", "u32")?;
             let height_px = as_small::<u32>(req_int(p, "height-px")?, "height-px", "u32")?;
-            Ok(Kind::SpiDisplaySink { driver, width_px, height_px })
+            Ok(Kind::SpiDisplaySink {
+                driver,
+                width_px,
+                height_px,
+            })
         }
         other => Err(CompileError::UnknownElement(other.into())),
     }

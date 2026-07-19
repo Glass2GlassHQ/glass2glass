@@ -81,7 +81,10 @@ struct SegmentSink {
 impl SegmentSink {
     fn create(path: &str) -> Result<Self, G2gError> {
         let file = File::create(path).map_err(io_err)?;
-        Ok(Self { writer: BufWriter::new(file), bytes: 0 })
+        Ok(Self {
+            writer: BufWriter::new(file),
+            bytes: 0,
+        })
     }
 
     fn flush(&mut self) -> Result<(), G2gError> {
@@ -165,7 +168,10 @@ impl SplitMuxSink {
 
     fn accept_input(&self, caps: &Caps) -> Result<(), G2gError> {
         match caps {
-            Caps::CompressedVideo { codec: VideoCodec::H264 | VideoCodec::H265, .. } => Ok(()),
+            Caps::CompressedVideo {
+                codec: VideoCodec::H264 | VideoCodec::H265,
+                ..
+            } => Ok(()),
             _ => Err(G2gError::CapsMismatch),
         }
     }
@@ -187,7 +193,8 @@ impl SplitMuxSink {
     /// flush the file.
     async fn finalize_current(&mut self) -> Result<(), G2gError> {
         if let (Some(mux), Some(seg)) = (self.mux.as_mut(), self.seg.as_mut()) {
-            g2g_core::element::DynAsyncElement::process(mux.as_mut(), PipelinePacket::Eos, seg).await?;
+            g2g_core::element::DynAsyncElement::process(mux.as_mut(), PipelinePacket::Eos, seg)
+                .await?;
             seg.flush()?;
         }
         self.mux = None;
@@ -282,7 +289,12 @@ impl AsyncElement for SplitMuxSink {
     }
 
     fn metadata(&self) -> ElementMetadata {
-        ElementMetadata::new("Split-muxer sink", "Sink/File", "Muxes to a series of MP4 files", "g2g")
+        ElementMetadata::new(
+            "Split-muxer sink",
+            "Sink/File",
+            "Muxes to a series of MP4 files",
+            "g2g",
+        )
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
@@ -311,10 +323,26 @@ impl AsyncElement for SplitMuxSink {
 }
 
 static SPLITMUXSINK_PROPS: &[PropertySpec] = &[
-    PropertySpec::new("location", PropKind::Str, "printf-style file pattern, e.g. clip%03d.mp4"),
-    PropertySpec::new("muxer", PropKind::Str, "child container: mp4 | matroska | mpegts"),
-    PropertySpec::new("max-size-time", PropKind::Uint, "max segment duration in ns (0 = no split)"),
-    PropertySpec::new("max-size-bytes", PropKind::Uint, "max segment size in bytes (0 = no split)"),
+    PropertySpec::new(
+        "location",
+        PropKind::Str,
+        "printf-style file pattern, e.g. clip%03d.mp4",
+    ),
+    PropertySpec::new(
+        "muxer",
+        PropKind::Str,
+        "child container: mp4 | matroska | mpegts",
+    ),
+    PropertySpec::new(
+        "max-size-time",
+        PropKind::Uint,
+        "max segment duration in ns (0 = no split)",
+    ),
+    PropertySpec::new(
+        "max-size-bytes",
+        PropKind::Uint,
+        "max segment size in bytes (0 = no split)",
+    ),
 ];
 
 impl PadTemplates for SplitMuxSink {
@@ -370,10 +398,19 @@ mod tests {
 
     fn keyframe(pts_ns: u64) -> PipelinePacket {
         // SPS (type 7), PPS (type 8), IDR (type 5).
-        let bytes = au(&[&[0x67, 0x42, 0x00, 0x0a, 0x8b, 0x95], &[0x68, 0xce, 0x3c, 0x80], &[0x65, 0x88, 0x80]]);
+        let bytes = au(&[
+            &[0x67, 0x42, 0x00, 0x0a, 0x8b, 0x95],
+            &[0x68, 0xce, 0x3c, 0x80],
+            &[0x65, 0x88, 0x80],
+        ]);
         PipelinePacket::DataFrame(Frame {
             domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-            timing: FrameTiming { pts_ns, keyframe: true, duration_ns: 40_000_000, ..FrameTiming::default() },
+            timing: FrameTiming {
+                pts_ns,
+                keyframe: true,
+                duration_ns: 40_000_000,
+                ..FrameTiming::default()
+            },
             sequence: 0,
             meta: Default::default(),
         })
@@ -394,7 +431,11 @@ mod tests {
         sink.process(keyframe(60_000_000), &mut out).await.unwrap();
         sink.process(keyframe(120_000_000), &mut out).await.unwrap();
         sink.process(PipelinePacket::Eos, &mut out).await.unwrap();
-        assert_eq!(sink.files_written(), 3, "one file per keyframe past the limit");
+        assert_eq!(
+            sink.files_written(),
+            3,
+            "one file per keyframe past the limit"
+        );
         for i in 0..3 {
             let path = crate::multifilesink::expand(&pat, i);
             let meta = std::fs::metadata(&path).expect("segment file exists");
@@ -405,22 +446,32 @@ mod tests {
 
     async fn split_into_two_with_muxer(muxer: &str, ext: &str) {
         let dir = std::env::temp_dir();
-        let pat = dir.join(format!("g2g_smux_{muxer}_%03d.{ext}")).to_string_lossy().into_owned();
+        let pat = dir
+            .join(format!("g2g_smux_{muxer}_%03d.{ext}"))
+            .to_string_lossy()
+            .into_owned();
         for i in 0..3 {
             let _ = std::fs::remove_file(crate::multifilesink::expand(&pat, i));
         }
         let mut sink = SplitMuxSink::new(&pat);
-        sink.set_property("muxer", PropValue::Str(muxer.into())).unwrap();
-        sink.set_property("max-size-time", PropValue::Uint(50_000_000)).unwrap();
+        sink.set_property("muxer", PropValue::Str(muxer.into()))
+            .unwrap();
+        sink.set_property("max-size-time", PropValue::Uint(50_000_000))
+            .unwrap();
         sink.configure_pipeline(&h264(320, 240)).unwrap();
         let mut out = NullSink;
         sink.process(keyframe(0), &mut out).await.unwrap();
         sink.process(keyframe(60_000_000), &mut out).await.unwrap();
         sink.process(PipelinePacket::Eos, &mut out).await.unwrap();
-        assert_eq!(sink.files_written(), 2, "{muxer}: one file per keyframe past the limit");
+        assert_eq!(
+            sink.files_written(),
+            2,
+            "{muxer}: one file per keyframe past the limit"
+        );
         for i in 0..2 {
             let path = crate::multifilesink::expand(&pat, i);
-            let meta = std::fs::metadata(&path).unwrap_or_else(|_| panic!("{muxer} segment {i} exists"));
+            let meta =
+                std::fs::metadata(&path).unwrap_or_else(|_| panic!("{muxer} segment {i} exists"));
             assert!(meta.len() > 0, "{muxer} segment {i} has data");
             let _ = std::fs::remove_file(&path);
         }
@@ -439,7 +490,10 @@ mod tests {
     #[tokio::test]
     async fn no_limit_writes_a_single_file() {
         let dir = std::env::temp_dir();
-        let pat = dir.join("g2g_smux_single_%03d.mp4").to_string_lossy().into_owned();
+        let pat = dir
+            .join("g2g_smux_single_%03d.mp4")
+            .to_string_lossy()
+            .into_owned();
         let _ = std::fs::remove_file(crate::multifilesink::expand(&pat, 0));
         let mut sink = SplitMuxSink::new(&pat);
         sink.configure_pipeline(&h264(320, 240)).unwrap();

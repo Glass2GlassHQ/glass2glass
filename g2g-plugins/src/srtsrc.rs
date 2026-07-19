@@ -43,7 +43,9 @@ const NACK_MIN_INTERVAL_NS: u64 = 20_000_000;
 const TSBPD_WAKE_MS: u64 = 5;
 
 fn ts_bytestream() -> Caps {
-    Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs }
+    Caps::ByteStream {
+        encoding: ByteStreamEncoding::MpegTs,
+    }
 }
 
 #[derive(Debug)]
@@ -73,7 +75,11 @@ impl SrtSrc {
     pub fn from_socket(socket: StdUdpSocket) -> Result<Self, G2gError> {
         let bind = socket.local_addr().map_err(io_err)?;
         socket.set_nonblocking(true).map_err(io_err)?;
-        Ok(Self { std_socket: Some(socket), configured: true, ..Self::new(bind) })
+        Ok(Self {
+            std_socket: Some(socket),
+            configured: true,
+            ..Self::new(bind)
+        })
     }
 
     /// Stop after `n` payloads and emit EOS (the bounded / test path).
@@ -92,14 +98,20 @@ impl SrtSrc {
 
     /// The bound port, once a socket exists.
     pub fn local_port(&self) -> Option<u16> {
-        self.std_socket.as_ref().and_then(|s| s.local_addr().ok()).map(|a| a.port())
+        self.std_socket
+            .as_ref()
+            .and_then(|s| s.local_addr().ok())
+            .map(|a| a.port())
     }
 }
 
 fn ts_frame(bytes: alloc::vec::Vec<u8>, sequence: u64) -> Frame {
     Frame {
         domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming { arrival_ns: g2g_core::metrics::monotonic_ns(), ..FrameTiming::default() },
+        timing: FrameTiming {
+            arrival_ns: g2g_core::metrics::monotonic_ns(),
+            ..FrameTiming::default()
+        },
         sequence,
         meta: Default::default(),
     }
@@ -147,12 +159,24 @@ impl SourceLoop for SrtSrc {
 
     fn properties(&self) -> &'static [PropertySpec] {
         const PROPS: &[PropertySpec] = &[
-            PropertySpec::new("address", PropKind::Str, "local bind address (IP to listen on)")
-                .with_default("0.0.0.0"),
+            PropertySpec::new(
+                "address",
+                PropKind::Str,
+                "local bind address (IP to listen on)",
+            )
+            .with_default("0.0.0.0"),
             PropertySpec::new("port", PropKind::Uint, "local SRT port to listen on")
                 .with_range("0", "65535"),
-            PropertySpec::new("latency", PropKind::Uint, "SRT receiver latency, milliseconds"),
-            PropertySpec::new("passphrase", PropKind::Str, "AES passphrase (empty = unencrypted)"),
+            PropertySpec::new(
+                "latency",
+                PropKind::Uint,
+                "SRT receiver latency, milliseconds",
+            ),
+            PropertySpec::new(
+                "passphrase",
+                PropKind::Str,
+                "AES passphrase (empty = unencrypted)",
+            ),
         ];
         PROPS
     }
@@ -218,7 +242,8 @@ impl SourceLoop for SrtSrc {
             let peer_socket_id = hs.peer_socket_id();
 
             // The MPEG-TS byte stream the depayloaded packets reconstruct.
-            out.push(PipelinePacket::CapsChanged(ts_bytestream())).await?;
+            out.push(PipelinePacket::CapsChanged(ts_bytestream()))
+                .await?;
 
             let mut receiver = SrtReceiver::new();
             // Hold packets back to the advertised latency (TSBPD): the negotiated
@@ -226,7 +251,9 @@ impl SourceLoop for SrtSrc {
             receiver.set_tsbpd((self.latency_ms as u32) * 1000);
             // Derive the shared stream key from the caller's KM and our passphrase.
             if let Some(pass) = &self.passphrase {
-                let km = hs.peer_km().ok_or(G2gError::Hardware(HardwareError::Other))?;
+                let km = hs
+                    .peer_km()
+                    .ok_or(G2gError::Hardware(HardwareError::Other))?;
                 let crypto =
                     SrtCrypto::from_km(km, pass).ok_or(G2gError::Hardware(HardwareError::Other))?;
                 receiver.set_crypto(crypto);
@@ -286,7 +313,8 @@ impl SourceLoop for SrtSrc {
 
                 // Deliver packets whose TSBPD delivery time is due, in order.
                 for payload in receiver.take_ready_at(now_us) {
-                    out.push(PipelinePacket::DataFrame(ts_frame(payload, emitted))).await?;
+                    out.push(PipelinePacket::DataFrame(ts_frame(payload, emitted)))
+                        .await?;
                     emitted += 1;
                     if limit != 0 && emitted >= limit {
                         out.push(PipelinePacket::Eos).await?;
@@ -298,12 +326,16 @@ impl SourceLoop for SrtSrc {
                 if now.saturating_sub(last_nack_ns) >= NACK_MIN_INTERVAL_NS {
                     let missing = receiver.missing();
                     if !missing.is_empty() {
-                        let nak = srt::build_control(&Control::Nak { loss: missing }, 0, peer_socket_id);
+                        let nak =
+                            srt::build_control(&Control::Nak { loss: missing }, 0, peer_socket_id);
                         socket.send_to(&nak, peer).await.map_err(io_err)?;
                         last_nack_ns = now;
                     }
                     let ack = srt::build_control(
-                        &Control::Ack { ack_no: 0, ack_seq: receiver.ack_seq() },
+                        &Control::Ack {
+                            ack_no: 0,
+                            ack_seq: receiver.ack_seq(),
+                        },
                         0,
                         peer_socket_id,
                     );

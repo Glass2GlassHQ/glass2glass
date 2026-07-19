@@ -92,7 +92,10 @@ impl SdpChannel {
         let (b_tx, b_rx) = mpsc::channel(4);
         // Offerer sends on a_tx (-> b_rx), reads on b_rx... wire crossed:
         // offerer.tx -> answerer.rx, answerer.tx -> offerer.rx.
-        (SdpChannel { tx: a_tx, rx: b_rx }, SdpChannel { tx: b_tx, rx: a_rx })
+        (
+            SdpChannel { tx: a_tx, rx: b_rx },
+            SdpChannel { tx: b_tx, rx: a_rx },
+        )
     }
 }
 
@@ -129,7 +132,10 @@ impl WebRtcDuplexSession {
     /// A sendrecv session carrying `track_count` tracks (1 = video; 2 = video +
     /// audio), with the given `role` and SDP signaling channel.
     pub fn new(role: SignalRole, sig: SdpChannel, track_count: usize) -> Self {
-        assert!(track_count >= 1 && track_count <= KINDS.len(), "track_count must be 1 or 2");
+        assert!(
+            track_count >= 1 && track_count <= KINDS.len(),
+            "track_count must be 1 or 2"
+        );
         Self {
             role,
             sig: Some(sig),
@@ -163,12 +169,19 @@ fn video_caps() -> Caps {
         codec: VideoCodec::H264,
         width: Dim::Range { min: 2, max: 8192 },
         height: Dim::Range { min: 2, max: 8192 },
-        framerate: Rate::Range { min_q16: 1 << 16, max_q16: 240 << 16 },
+        framerate: Rate::Range {
+            min_q16: 1 << 16,
+            max_q16: 240 << 16,
+        },
     }
 }
 
 fn audio_caps() -> Caps {
-    Caps::Audio { format: AudioFormat::Opus, channels: 2, sample_rate: 48_000 }
+    Caps::Audio {
+        format: AudioFormat::Opus,
+        channels: 2,
+        sample_rate: 48_000,
+    }
 }
 
 /// The output caps for a given track kind.
@@ -182,8 +195,14 @@ fn caps_for(kind: Track) -> Caps {
 /// The track kind an input's caps select (H.264 video or Opus audio).
 fn track_of(caps: &Caps) -> Option<Track> {
     match caps {
-        Caps::CompressedVideo { codec: VideoCodec::H264, .. } => Some(Track::Video),
-        Caps::Audio { format: AudioFormat::Opus, .. } => Some(Track::Audio),
+        Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            ..
+        } => Some(Track::Video),
+        Caps::Audio {
+            format: AudioFormat::Opus,
+            ..
+        } => Some(Track::Audio),
         _ => None,
     }
 }
@@ -307,19 +326,25 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                     sig.tx.send(offer_sdp).await.map_err(|_| hw())?;
                     let answer_sdp = sig.rx.recv().await.ok_or_else(hw)?;
                     let answer = SdpAnswer::from_sdp_string(&answer_sdp).map_err(|_| hw())?;
-                    rtc.sdp_api().accept_answer(pending, answer).map_err(|_| hw())?;
+                    rtc.sdp_api()
+                        .accept_answer(pending, answer)
+                        .map_err(|_| hw())?;
                 }
                 SignalRole::Answerer => {
                     let offer_sdp = sig.rx.recv().await.ok_or_else(hw)?;
                     let offer = SdpOffer::from_sdp_string(&offer_sdp).map_err(|_| hw())?;
                     let answer = rtc.sdp_api().accept_offer(offer).map_err(|_| hw())?;
-                    sig.tx.send(answer.to_sdp_string()).await.map_err(|_| hw())?;
+                    sig.tx
+                        .send(answer.to_sdp_string())
+                        .await
+                        .map_err(|_| hw())?;
                 }
             }
 
             // Announce each output's caps before its first frame.
             for (o, kind) in KINDS.iter().enumerate().take(track_count) {
-                out.push_to(o, PipelinePacket::CapsChanged(caps_for(*kind))).await?;
+                out.push_to(o, PipelinePacket::CapsChanged(caps_for(*kind)))
+                    .await?;
             }
 
             let mut buf = alloc::vec![0u8; 2000];
@@ -520,9 +545,18 @@ mod tests {
         assert_eq!(s.output_count(), 2);
         assert!(matches!(
             s.output_caps(0),
-            Ok(Caps::CompressedVideo { codec: VideoCodec::H264, .. })
+            Ok(Caps::CompressedVideo {
+                codec: VideoCodec::H264,
+                ..
+            })
         ));
-        assert!(matches!(s.output_caps(1), Ok(Caps::Audio { format: AudioFormat::Opus, .. })));
+        assert!(matches!(
+            s.output_caps(1),
+            Ok(Caps::Audio {
+                format: AudioFormat::Opus,
+                ..
+            })
+        ));
         assert!(s.output_caps(2).is_err());
     }
 
@@ -532,7 +566,10 @@ mod tests {
         let mut s = WebRtcDuplexSession::new(SignalRole::Answerer, a, 2);
         assert!(s.configure_input(0, &h264_caps()).is_ok());
         assert!(s.configure_input(1, &audio_caps()).is_ok());
-        assert_eq!(s.inputs, alloc::vec![Some(Track::Video), Some(Track::Audio)]);
+        assert_eq!(
+            s.inputs,
+            alloc::vec![Some(Track::Video), Some(Track::Audio)]
+        );
         // Non-A/V caps rejected.
         let raw = Caps::RawVideo {
             format: g2g_core::RawVideoFormat::I420,

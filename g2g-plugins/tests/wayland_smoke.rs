@@ -85,7 +85,10 @@ async fn wayland_sink_shows_rtsp_h264_in_a_window() {
     // models a camera-to-display feed. `G2G_LINK_CAP=N` overrides to
     // probe behaviour at an arbitrary depth (the live-edge bisection
     // tooling uses this).
-    let link_cap: LinkCapacity = match std::env::var("G2G_LINK_CAP").ok().and_then(|s| s.parse().ok()) {
+    let link_cap: LinkCapacity = match std::env::var("G2G_LINK_CAP")
+        .ok()
+        .and_then(|s| s.parse().ok())
+    {
         Some(n) => LinkCapacity::new(n),
         None => LatencyProfile::Live.link_capacity(),
     };
@@ -145,7 +148,10 @@ async fn wayland_sink_shows_rtsp_h264_in_a_window() {
         lat.p99_ns as f64 / 1e6,
         lat.max_ns as f64 / 1e6,
     );
-    assert!(lat.count > 0, "no latency samples — arrival_ns not threaded through");
+    assert!(
+        lat.count > 0,
+        "no latency samples — arrival_ns not threaded through"
+    );
 
     assert!(dec.decoded_count() > 0, "decoder produced no NV12 frames");
     // We don't assert `presented > 0` because the compositor's frame-

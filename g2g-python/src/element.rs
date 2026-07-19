@@ -18,8 +18,8 @@ use core::pin::Pin;
 
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, Frame,
-    G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec, Rate, RawVideoFormat,
+    G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec, Rate, RawVideoFormat,
 };
 
 /// A gst-python-ml element hosted as a first-class g2g transform.
@@ -114,7 +114,8 @@ impl PyTransform {
 }
 
 impl AsyncElement for PyTransform {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
@@ -253,7 +254,11 @@ impl AsyncElement for PyTransform {
             "module" => Some(PropValue::Str(self.module.clone())),
             "class" => Some(PropValue::Str(self.class.clone())),
             "draw-label" => Some(PropValue::Bool(self.draw_label)),
-            other => self.params.iter().find(|(k, _)| k == other).map(|(_, v)| v.clone()),
+            other => self
+                .params
+                .iter()
+                .find(|(k, _)| k == other)
+                .map(|(_, v)| v.clone()),
         }
     }
 }
@@ -277,28 +282,76 @@ impl PadTemplates for PyTransform {
 
 /// `PyTransform`'s settable properties (the runtime / `gst-launch` face).
 static PYTRANSFORM_PROPS: &[PropertySpec] = &[
-    PropertySpec::new("module", PropKind::Str, "Python module to import (the element shell)"),
-    PropertySpec::new("class", PropKind::Str, "class within the module to instantiate"),
-    PropertySpec::new("draw-label", PropKind::Bool, "overlay the inferred label on the frame")
-        .with_default("false"),
+    PropertySpec::new(
+        "module",
+        PropKind::Str,
+        "Python module to import (the element shell)",
+    ),
+    PropertySpec::new(
+        "class",
+        PropKind::Str,
+        "class within the module to instantiate",
+    ),
+    PropertySpec::new(
+        "draw-label",
+        PropKind::Bool,
+        "overlay the inferred label on the frame",
+    )
+    .with_default("false"),
     // Common ML tunables declared by the gst-python-ml backend BaseTransform.
     // These are forwarded to the hosted Python instance (a property absent from
     // the Python class is simply set as an attribute it ignores). Declaring them
     // here lets `gst-launch` type and accept `model-name=...` etc.
-    PropertySpec::new("model-name", PropKind::Str, "pre-trained model name or local path"),
+    PropertySpec::new(
+        "model-name",
+        PropKind::Str,
+        "pre-trained model name or local path",
+    ),
     PropertySpec::new(
         "engine-name",
         PropKind::Str,
         "ML engine: pytorch, onnx, tensorflow, tflite, openvino, ...",
     ),
-    PropertySpec::new("device", PropKind::Str, "inference device: cpu, cuda, cuda:0, ..."),
-    PropertySpec::new("batch-size", PropKind::Int, "number of items to process in a batch"),
-    PropertySpec::new("frame-stride", PropKind::Int, "how often to process a frame"),
-    PropertySpec::new("input-format", PropKind::Str, "input tensor layout: auto, nhwc, or nchw"),
-    PropertySpec::new("post-process", PropKind::Str, "post-processing format for raw output"),
-    PropertySpec::new("device-queue-id", PropKind::Int, "DeviceQueue id from the pool to use"),
-    PropertySpec::new("compile", PropKind::Bool, "enable torch.compile for the model")
-        .with_default("false"),
-    PropertySpec::new("track", PropKind::Bool, "enable object tracking (detectors)")
-        .with_default("false"),
+    PropertySpec::new(
+        "device",
+        PropKind::Str,
+        "inference device: cpu, cuda, cuda:0, ...",
+    ),
+    PropertySpec::new(
+        "batch-size",
+        PropKind::Int,
+        "number of items to process in a batch",
+    ),
+    PropertySpec::new(
+        "frame-stride",
+        PropKind::Int,
+        "how often to process a frame",
+    ),
+    PropertySpec::new(
+        "input-format",
+        PropKind::Str,
+        "input tensor layout: auto, nhwc, or nchw",
+    ),
+    PropertySpec::new(
+        "post-process",
+        PropKind::Str,
+        "post-processing format for raw output",
+    ),
+    PropertySpec::new(
+        "device-queue-id",
+        PropKind::Int,
+        "DeviceQueue id from the pool to use",
+    ),
+    PropertySpec::new(
+        "compile",
+        PropKind::Bool,
+        "enable torch.compile for the model",
+    )
+    .with_default("false"),
+    PropertySpec::new(
+        "track",
+        PropKind::Bool,
+        "enable object tracking (detectors)",
+    )
+    .with_default("false"),
 ];

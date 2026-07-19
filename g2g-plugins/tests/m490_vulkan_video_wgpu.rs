@@ -10,7 +10,10 @@
 //!
 //! NV12 -> RGBA is a CPU conversion in this increment; the zero-copy GPU-resident
 //! `VkSamplerYcbcrConversion` path is the next step.
-#![cfg(all(any(target_os = "linux", target_os = "windows"), feature = "vulkan-video"))]
+#![cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    feature = "vulkan-video"
+))]
 
 use g2g_core::runtime::block_on;
 use g2g_plugins::vulkanvideo::{
@@ -35,7 +38,9 @@ fn decodes_idr_into_wgpu_rgba_texture() {
     };
 
     let ps = extract_h264_parameter_sets(CLIP).expect("parse SPS+PPS");
-    let session = device.create_h264_session(&ps, 640, 480).expect("create session");
+    let session = device
+        .create_h264_session(&ps, 640, 480)
+        .expect("create session");
 
     // The wedge payload: a decoded frame as a wgpu texture on the decode device.
     let texture = device
@@ -53,7 +58,10 @@ fn decodes_idr_into_wgpu_rgba_texture() {
     let max = *rgba.iter().max().unwrap();
     assert!(max > min, "decoded RGBA texture is uniform ({min}=={max})");
     // The converter sets alpha to 255 (fully opaque).
-    assert!(rgba.iter().skip(3).step_by(4).all(|&a| a == 255), "alpha not opaque");
+    assert!(
+        rgba.iter().skip(3).step_by(4).all(|&a| a == 255),
+        "alpha not opaque"
+    );
 
     let sum: u64 = rgba.iter().map(|&b| b as u64).sum();
     let mean = sum / rgba.len() as u64;

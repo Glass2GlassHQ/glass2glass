@@ -139,7 +139,11 @@ async fn encode_emits_h264_caps_and_annexb_access_units() {
     );
 
     let frames = sink.data_frames();
-    assert_eq!(frames.len(), FRAMES, "low-latency mode: one output per input");
+    assert_eq!(
+        frames.len(),
+        FRAMES,
+        "low-latency mode: one output per input"
+    );
     for f in &frames {
         let MemoryDomain::System(slice) = &f.domain else {
             panic!("encoder must emit System-domain frames");
@@ -157,7 +161,10 @@ async fn encode_emits_h264_caps_and_annexb_access_units() {
     let MemoryDomain::System(first) = &frames[0].domain else {
         unreachable!()
     };
-    assert!(first.as_slice().len() > 16, "IDR access unit implausibly small");
+    assert!(
+        first.as_slice().len() > 16,
+        "IDR access unit implausibly small"
+    );
 }
 
 #[cfg(feature = "mf-decode")]

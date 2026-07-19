@@ -11,7 +11,10 @@
 //! this driver is byte-exact (unlike AV1, see m508), so the assertion is strict.
 //!
 //! Runs on the RTX 3060; skips with no Vulkan H.265 decode adapter.
-#![cfg(all(any(target_os = "linux", target_os = "windows"), feature = "vulkan-video"))]
+#![cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    feature = "vulkan-video"
+))]
 
 use g2g_core::runtime::block_on;
 use g2g_plugins::revideo::{VideoCodec, VulkanStreamDecoder};
@@ -80,7 +83,11 @@ fn have_adapter() -> bool {
 fn decode_whole_clip() -> Vec<Vec<u8>> {
     let device = block_on(open_h265_decode_device()).expect("open H.265 device");
     let mut dec = VulkanStreamDecoder::new(device, VideoCodec::H265, CLIP).expect("build decoder");
-    dec.submit_chunk(CLIP, true).expect("whole-clip decode").into_iter().map(|f| f.data).collect()
+    dec.submit_chunk(CLIP, true)
+        .expect("whole-clip decode")
+        .into_iter()
+        .map(|f| f.data)
+        .collect()
 }
 
 /// Per-picture pipelined decode: push each picture without draining, drain the
@@ -90,7 +97,10 @@ fn decode_incremental(pics: &[Vec<u8>]) -> Vec<Vec<u8>> {
     let mut dec = VulkanStreamDecoder::new(device, VideoCodec::H265, CLIP).expect("build decoder");
     let mut out = Vec::new();
     for pic in pics {
-        for f in dec.submit_chunk_push(pic, false).expect("submit_chunk_push") {
+        for f in dec
+            .submit_chunk_push(pic, false)
+            .expect("submit_chunk_push")
+        {
             out.push(f.data);
         }
     }
@@ -109,7 +119,10 @@ fn h265_pipelined_decode_bit_exact_solo() {
     let golden = decode_whole_clip();
     let pics = split_pictures(CLIP);
     assert_eq!(golden.len(), pics.len(), "golden vs picture count");
-    assert!(golden.len() >= 2, "fixture must have an IRAP + at least one inter frame");
+    assert!(
+        golden.len() >= 2,
+        "fixture must have an IRAP + at least one inter frame"
+    );
 
     // A few runs: the pipelined path must be bit-exact every time (the ring's
     // decode-order output must pair with the right timing and match dense decode).
@@ -117,7 +130,13 @@ fn h265_pipelined_decode_bit_exact_solo() {
         let inc = decode_incremental(&pics);
         assert_eq!(inc.len(), golden.len(), "run {run}: pipelined frame count");
         let diverged = golden.iter().zip(&inc).filter(|(g, i)| g != i).count();
-        assert_eq!(diverged, 0, "run {run}: H.265 pipelined decode diverged from golden");
+        assert_eq!(
+            diverged, 0,
+            "run {run}: H.265 pipelined decode diverged from golden"
+        );
     }
-    eprintln!("m553: H.265 pipelined push/flush bit-exact vs whole-clip golden ({} frames)", golden.len());
+    eprintln!(
+        "m553: H.265 pipelined push/flush bit-exact vs whole-clip golden ({} frames)",
+        golden.len()
+    );
 }

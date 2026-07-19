@@ -35,7 +35,9 @@ fn introspects_pad_templates_without_constructing() {
     // A transform exposes both a sink and a source pad.
     let parse_pads = H264Parse::pad_templates();
     assert!(parse_pads.iter().any(|p| p.direction == PadDirection::Sink));
-    assert!(parse_pads.iter().any(|p| p.direction == PadDirection::Source));
+    assert!(parse_pads
+        .iter()
+        .any(|p| p.direction == PadDirection::Source));
 
     // A wildcard sink reports an `Any` pad.
     let sink_pads = FakeSink::pad_templates();
@@ -60,7 +62,10 @@ fn pre_instantiation_query_rejects_incompatible_types() {
     let producer = VideoTestSrc::pad_template(PadDirection::Source).unwrap();
     let consumer = H264Parse::pad_template(PadDirection::Sink).unwrap();
     assert!(
-        matches!(pad_link(&producer, &consumer), Err(NegotiationFailure::EmptyLink { .. })),
+        matches!(
+            pad_link(&producer, &consumer),
+            Err(NegotiationFailure::EmptyLink { .. })
+        ),
         "RGBA vs H.264 must be a structured EmptyLink, not a vague failure"
     );
 }

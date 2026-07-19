@@ -31,7 +31,10 @@ const FORMATS: [RawVideoFormat; 2] = [RawVideoFormat::Rgba8, RawVideoFormat::Bgr
 
 /// Current UTC time of day as `HH:MM:SS`.
 fn wall_clock_utc() -> String {
-    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     let tod = secs % 86_400;
     format!("{:02}:{:02}:{:02}", tod / 3600, (tod % 3600) / 60, tod % 60)
 }
@@ -53,7 +56,13 @@ impl Default for ClockOverlay {
 
 impl ClockOverlay {
     pub fn new() -> Self {
-        Self { scale: 2, input: None, configured: false, last_caps: None, emitted: 0 }
+        Self {
+            scale: 2,
+            input: None,
+            configured: false,
+            last_caps: None,
+            emitted: 0,
+        }
     }
 
     pub fn with_scale(mut self, scale: u32) -> Self {
@@ -62,7 +71,12 @@ impl ClockOverlay {
     }
 
     fn accept_input(&self, caps: &Caps) -> Result<(RawVideoFormat, u32, u32, Rate), G2gError> {
-        let Caps::RawVideo { format, width: Dim::Fixed(w), height: Dim::Fixed(h), framerate } = caps
+        let Caps::RawVideo {
+            format,
+            width: Dim::Fixed(w),
+            height: Dim::Fixed(h),
+            framerate,
+        } = caps
         else {
             return Err(G2gError::CapsMismatch);
         };
@@ -96,7 +110,9 @@ impl AsyncElement for ClockOverlay {
 
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
-            Caps::RawVideo { format, .. } if FORMATS.contains(format) => CapsSet::one(input.clone()),
+            Caps::RawVideo { format, .. } if FORMATS.contains(format) => {
+                CapsSet::one(input.clone())
+            }
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
     }
@@ -132,7 +148,13 @@ impl AsyncElement for ClockOverlay {
                     }
                     let mut dst = vec![0u8; bytes].into_boxed_slice();
                     dst.copy_from_slice(&src[..bytes]);
-                    draw_text(&mut dst, w as usize, h as usize, &wall_clock_utc(), self.scale.max(1));
+                    draw_text(
+                        &mut dst,
+                        w as usize,
+                        h as usize,
+                        &wall_clock_utc(),
+                        self.scale.max(1),
+                    );
 
                     let new_caps = Caps::RawVideo {
                         format,
@@ -141,7 +163,8 @@ impl AsyncElement for ClockOverlay {
                         framerate: rate,
                     };
                     if self.last_caps.as_ref() != Some(&new_caps) {
-                        out.push(PipelinePacket::CapsChanged(new_caps.clone())).await?;
+                        out.push(PipelinePacket::CapsChanged(new_caps.clone()))
+                            .await?;
                         self.last_caps = Some(new_caps);
                     }
                     let out_frame = Frame {
@@ -177,7 +200,12 @@ impl AsyncElement for ClockOverlay {
     }
 
     fn metadata(&self) -> ElementMetadata {
-        ElementMetadata::new("Clock overlay", "Filter/Editor/Video", "Overlays the wall-clock time on video", "g2g")
+        ElementMetadata::new(
+            "Clock overlay",
+            "Filter/Editor/Video",
+            "Overlays the wall-clock time on video",
+            "g2g",
+        )
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
@@ -202,8 +230,11 @@ impl AsyncElement for ClockOverlay {
     }
 }
 
-static CLOCKOVERLAY_PROPS: &[PropertySpec] =
-    &[PropertySpec::new("scale", PropKind::Uint, "integer font magnification (>= 1)")];
+static CLOCKOVERLAY_PROPS: &[PropertySpec] = &[PropertySpec::new(
+    "scale",
+    PropKind::Uint,
+    "integer font magnification (>= 1)",
+)];
 
 impl PadTemplates for ClockOverlay {
     fn pad_templates() -> Vec<PadTemplate> {
@@ -238,7 +269,14 @@ mod tests {
     #[test]
     fn configure_rejects_non_video() {
         let mut c = ClockOverlay::new();
-        let bad = Caps::Audio { format: g2g_core::AudioFormat::PcmS16Le, channels: 2, sample_rate: 48_000 };
-        assert_eq!(c.configure_pipeline(&bad).unwrap_err(), G2gError::CapsMismatch);
+        let bad = Caps::Audio {
+            format: g2g_core::AudioFormat::PcmS16Le,
+            channels: 2,
+            sample_rate: 48_000,
+        };
+        assert_eq!(
+            c.configure_pipeline(&bad).unwrap_err(),
+            G2gError::CapsMismatch
+        );
     }
 }

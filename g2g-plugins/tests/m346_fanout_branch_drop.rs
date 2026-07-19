@@ -76,7 +76,8 @@ struct ScriptedSource {
 
 impl SourceLoop for ScriptedSource {
     type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>;
-    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
 
@@ -95,7 +96,8 @@ impl SourceLoop for ScriptedSource {
                 out.push(frame(seq)).await?;
                 seq += 1;
             }
-            out.push(PipelinePacket::CapsChanged(self.switch.clone())).await?;
+            out.push(PipelinePacket::CapsChanged(self.switch.clone()))
+                .await?;
             for _ in 0..self.after {
                 out.push(frame(seq)).await?;
                 seq += 1;
@@ -174,7 +176,9 @@ async fn allow_branch_drop_keeps_surviving_branch_flowing() {
     g.link(tee.out(0), any).unwrap();
     g.link(tee.out(1), nv12_only).unwrap();
 
-    let stats = run_graph(g, &NullClock, 8).await.expect("branch drop does not fail the run");
+    let stats = run_graph(g, &NullClock, 8)
+        .await
+        .expect("branch drop does not fail the run");
     assert_eq!(
         *any_count.lock().unwrap(),
         5,
@@ -214,5 +218,9 @@ async fn fail_loud_is_the_default() {
     g.link(tee.out(1), nv12_only).unwrap();
 
     let result = run_graph(g, &NullClock, 8).await;
-    assert_eq!(result.err(), Some(G2gError::CapsMismatch), "default tee fails loud");
+    assert_eq!(
+        result.err(),
+        Some(G2gError::CapsMismatch),
+        "default tee fails loud"
+    );
 }

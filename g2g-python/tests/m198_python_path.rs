@@ -38,7 +38,14 @@ fn frame_2x1_rgba(first: u8) -> Frame {
     bytes[0] = first;
     Frame {
         domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming { pts_ns: 0, dts_ns: 0, duration_ns: 0, capture_ns: 0, arrival_ns: 0 , keyframe: false},
+        timing: FrameTiming {
+            pts_ns: 0,
+            dts_ns: 0,
+            duration_ns: 0,
+            capture_ns: 0,
+            arrival_ns: 0,
+            keyframe: false,
+        },
         sequence: 0,
         meta: Default::default(),
     }
@@ -64,7 +71,9 @@ fn python_writes_into_frame_memory_in_place() {
     el.configure_pipeline(&caps).unwrap();
 
     let mut sink = CollectSink::default();
-    let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
     rt.block_on(el.process(PipelinePacket::DataFrame(frame_2x1_rgba(10)), &mut sink))
         .unwrap();
 
@@ -97,7 +106,9 @@ fn worker_is_reused_across_frames() {
     el.configure_pipeline(&caps).unwrap();
 
     let mut sink = CollectSink::default();
-    let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
     // Three frames through the one persistent worker thread (the reply channel
     // is capacity-1 and reused, so this also exercises that it cycles cleanly).
     for first in [10u8, 20, 30] {
@@ -116,6 +127,10 @@ fn worker_is_reused_across_frames() {
             _ => panic!("expected DataFrames"),
         })
         .collect();
-    assert_eq!(got, vec![11, 21, 31], "each frame should be incremented in place");
+    assert_eq!(
+        got,
+        vec![11, 21, 31],
+        "each frame should be incremented in place"
+    );
     assert_eq!(el.emitted_count(), 3);
 }

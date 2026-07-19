@@ -69,14 +69,28 @@ fn block(track: u64, rel: i16, frame: &[u8]) -> Vec<u8> {
 
 fn synthetic_webm() -> Vec<u8> {
     let video = {
-        let v = [elem(&[0xB0], &uint_body(640)), elem(&[0xBA], &uint_body(360))].concat();
-        let body = [elem(&[0xD7], &uint_body(1)), elem(&[0x86], b"V_VP9"), elem(&[0xE0], &v)].concat();
+        let v = [
+            elem(&[0xB0], &uint_body(640)),
+            elem(&[0xBA], &uint_body(360)),
+        ]
+        .concat();
+        let body = [
+            elem(&[0xD7], &uint_body(1)),
+            elem(&[0x86], b"V_VP9"),
+            elem(&[0xE0], &v),
+        ]
+        .concat();
         elem(&[0xAE], &body)
     };
     let audio = {
         let mut a = elem(&[0x9F], &uint_body(2));
         a.extend_from_slice(&elem(&[0xB5], &48_000f32.to_be_bytes()));
-        let body = [elem(&[0xD7], &uint_body(2)), elem(&[0x86], b"A_OPUS"), elem(&[0xE1], &a)].concat();
+        let body = [
+            elem(&[0xD7], &uint_body(2)),
+            elem(&[0x86], b"A_OPUS"),
+            elem(&[0xE1], &a),
+        ]
+        .concat();
         elem(&[0xAE], &body)
     };
     let tracks = elem(&[0x16, 0x54, 0xAE, 0x6B], &[video, audio].concat());
@@ -104,15 +118,19 @@ impl SourceLoop for MkvSource {
     type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>;
 
     fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
-        core::future::ready(Ok(Caps::ByteStream { encoding: ByteStreamEncoding::Matroska }))
+        core::future::ready(Ok(Caps::ByteStream {
+            encoding: ByteStreamEncoding::Matroska,
+        }))
     }
 
     fn caps_constraint<'a>(
         &'a mut self,
     ) -> impl Future<Output = Result<CapsConstraint<'a>, G2gError>> + 'a {
-        core::future::ready(Ok(CapsConstraint::Produces(CapsSet::one(Caps::ByteStream {
-            encoding: ByteStreamEncoding::Matroska,
-        }))))
+        core::future::ready(Ok(CapsConstraint::Produces(CapsSet::one(
+            Caps::ByteStream {
+                encoding: ByteStreamEncoding::Matroska,
+            },
+        ))))
     }
 
     fn configure_pipeline(&mut self, _caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -136,22 +154,35 @@ impl SourceLoop for MkvSource {
 
 async fn run_selected(stream: MkvStream) -> u64 {
     let mut graph: Graph<GraphNode> = Graph::new();
-    let src = graph.add_source(GraphNodeRef::Source(Box::new(MkvSource { bytes: Some(synthetic_webm()) })));
+    let src = graph.add_source(GraphNodeRef::Source(Box::new(MkvSource {
+        bytes: Some(synthetic_webm()),
+    })));
     let demux = graph.add_transform(GraphNodeRef::element(MkvDemux::new().with_stream(stream)));
     let sink = graph.add_sink(GraphNodeRef::element(FakeSink::new()));
     graph.link(src, demux).unwrap();
     graph.link(demux, sink).unwrap();
-    run_graph(graph, &ZeroClock, 4).await.expect("webm runs").frames_consumed
+    run_graph(graph, &ZeroClock, 4)
+        .await
+        .expect("webm runs")
+        .frames_consumed
 }
 
 #[tokio::test]
 async fn mkvdemux_selects_video_stream() {
-    assert_eq!(run_selected(MkvStream::Vp9).await, 2, "two VP9 frames reached the sink");
+    assert_eq!(
+        run_selected(MkvStream::Vp9).await,
+        2,
+        "two VP9 frames reached the sink"
+    );
 }
 
 #[tokio::test]
 async fn mkvdemux_selects_audio_stream() {
     // Opus leaves as Caps::Audio, a different output variant than the VP9 video,
     // so this exercises the audio caps negotiating through the solver.
-    assert_eq!(run_selected(MkvStream::Opus).await, 2, "two Opus frames reached the sink");
+    assert_eq!(
+        run_selected(MkvStream::Opus).await,
+        2,
+        "two Opus frames reached the sink"
+    );
 }

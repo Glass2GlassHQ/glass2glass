@@ -94,7 +94,8 @@ impl MultiOutputElement for OutputSelector {
                 // works. PipelinePacket is not Clone, so rebuild per port.
                 PipelinePacket::CapsChanged(caps) => {
                     for port in 0..self.ports {
-                        out.push_to(port, PipelinePacket::CapsChanged(caps.clone())).await?;
+                        out.push_to(port, PipelinePacket::CapsChanged(caps.clone()))
+                            .await?;
                     }
                 }
                 PipelinePacket::Segment(seg) => {
@@ -117,8 +118,11 @@ impl MultiOutputElement for OutputSelector {
     }
 }
 
-static OUTPUTSELECTOR_PROPS: &[PropertySpec] =
-    &[PropertySpec::new("active-pad", PropKind::Uint, "index of the output to route to")];
+static OUTPUTSELECTOR_PROPS: &[PropertySpec] = &[PropertySpec::new(
+    "active-pad",
+    PropKind::Uint,
+    "index of the output to route to",
+)];
 
 #[cfg(test)]
 mod tests {
@@ -134,7 +138,9 @@ mod tests {
     }
     impl CollectSink {
         fn new(ports: usize) -> Self {
-            Self { got: (0..ports).map(|_| Vec::new()).collect() }
+            Self {
+                got: (0..ports).map(|_| Vec::new()).collect(),
+            }
         }
     }
     impl MultiOutputSink for CollectSink {
@@ -176,6 +182,10 @@ mod tests {
     #[test]
     fn active_pad_out_of_range_rejected() {
         let mut s = OutputSelector::new(2);
-        assert_eq!(s.set_property("active-pad", PropValue::Uint(9)).unwrap_err(), PropError::Value);
+        assert_eq!(
+            s.set_property("active-pad", PropValue::Uint(9))
+                .unwrap_err(),
+            PropError::Value
+        );
     }
 }

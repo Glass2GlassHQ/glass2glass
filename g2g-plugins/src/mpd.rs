@@ -189,7 +189,9 @@ impl SegmentTemplate {
 
     /// The init-segment URL template expanded for `rep_id`.
     pub fn init_url(&self, rep_id: &str) -> Option<String> {
-        self.initialization.as_ref().map(|t| expand(t, rep_id, None, None))
+        self.initialization
+            .as_ref()
+            .map(|t| expand(t, rep_id, None, None))
     }
 
     /// The media-segment URL template expanded for `rep_id` and a segment's
@@ -239,14 +241,19 @@ impl Sidx {
     /// first_offset`. Hierarchical references (`reference_type == 1`, a child
     /// `sidx`) are not media, so they advance the cursor but emit no segment.
     pub fn subsegments(&self, index_offset: u64) -> Vec<ResolvedSegment> {
-        let mut pos = index_offset.saturating_add(self.box_size).saturating_add(self.first_offset);
+        let mut pos = index_offset
+            .saturating_add(self.box_size)
+            .saturating_add(self.first_offset);
         let mut time = 0u64;
         let mut out = Vec::new();
         for e in &self.entries {
             if !e.reference_type {
                 out.push(ResolvedSegment {
                     url: String::new(),
-                    byte_range: Some(ByteRange { offset: pos, length: e.size }),
+                    byte_range: Some(ByteRange {
+                        offset: pos,
+                        length: e.size,
+                    }),
                     time,
                 });
             }
@@ -370,7 +377,12 @@ pub fn parse_sidx(data: &[u8]) -> Option<Sidx> {
             duration,
         });
     }
-    Some(Sidx { box_size, first_offset, timescale, entries })
+    Some(Sidx {
+        box_size,
+        first_offset,
+        timescale,
+        entries,
+    })
 }
 
 fn read_u16(d: &[u8], p: &mut usize) -> Option<u16> {
@@ -409,11 +421,14 @@ pub fn parse(xml: &str) -> Result<Mpd, MpdError> {
     let doc = Document::parse(xml).map_err(|_| MpdError::Invalid)?;
     let root = doc.root_element();
 
-    let duration_secs =
-        root.attribute("mediaPresentationDuration").and_then(parse_iso_duration).unwrap_or(0.0);
+    let duration_secs = root
+        .attribute("mediaPresentationDuration")
+        .and_then(parse_iso_duration)
+        .unwrap_or(0.0);
     let dynamic = root.attribute("type") == Some("dynamic");
-    let minimum_update_period_secs =
-        root.attribute("minimumUpdatePeriod").and_then(parse_iso_duration);
+    let minimum_update_period_secs = root
+        .attribute("minimumUpdatePeriod")
+        .and_then(parse_iso_duration);
     let base_url = root
         .descendants()
         .find(|n| n.has_tag_name("BaseURL"))
@@ -421,12 +436,21 @@ pub fn parse(xml: &str) -> Result<Mpd, MpdError> {
         .map(|s| String::from(s.trim()));
 
     let mut representations = Vec::new();
-    for rep in root.descendants().filter(|n| n.has_tag_name("Representation")) {
-        let Some(id) = rep.attribute("id") else { continue };
-        let Some(source) = segment_source(rep) else { continue };
+    for rep in root
+        .descendants()
+        .filter(|n| n.has_tag_name("Representation"))
+    {
+        let Some(id) = rep.attribute("id") else {
+            continue;
+        };
+        let Some(source) = segment_source(rep) else {
+            continue;
+        };
         representations.push(Representation {
             id: String::from(id),
-            bandwidth: inherited(rep, "bandwidth").and_then(|s| s.parse().ok()).unwrap_or(0),
+            bandwidth: inherited(rep, "bandwidth")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0),
             width: inherited(rep, "width").and_then(|s| s.parse().ok()),
             height: inherited(rep, "height").and_then(|s| s.parse().ok()),
             codecs: inherited(rep, "codecs").map(String::from),
@@ -438,7 +462,13 @@ pub fn parse(xml: &str) -> Result<Mpd, MpdError> {
     if representations.is_empty() {
         return Err(MpdError::Invalid);
     }
-    Ok(Mpd { base_url, duration_secs, dynamic, minimum_update_period_secs, representations })
+    Ok(Mpd {
+        base_url,
+        duration_secs,
+        dynamic,
+        minimum_update_period_secs,
+        representations,
+    })
 }
 
 /// The addressing for a Representation: its nearest `SegmentList` (preferred when
@@ -446,15 +476,18 @@ pub fn parse(xml: &str) -> Result<Mpd, MpdError> {
 /// (AdaptationSet / Period inheritance). `None` if neither is usable (e.g. a
 /// `SegmentBase`-only Representation, a follow-up).
 fn segment_source(rep: Node) -> Option<SegmentSource> {
-    if let Some(sl) = rep
-        .ancestors()
-        .find_map(|n| n.children().find(|c| c.is_element() && c.has_tag_name("SegmentList")))
-    {
+    if let Some(sl) = rep.ancestors().find_map(|n| {
+        n.children()
+            .find(|c| c.is_element() && c.has_tag_name("SegmentList"))
+    }) {
         return Some(SegmentSource::List(parse_segment_list(sl)));
     }
     if let Some(sb) = rep
         .ancestors()
-        .find_map(|n| n.children().find(|c| c.is_element() && c.has_tag_name("SegmentBase")))
+        .find_map(|n| {
+            n.children()
+                .find(|c| c.is_element() && c.has_tag_name("SegmentBase"))
+        })
         .and_then(parse_segment_base)
     {
         return Some(SegmentSource::Base(sb));
@@ -466,11 +499,18 @@ fn segment_source(rep: Node) -> Option<SegmentSource> {
 /// without it there is no way to discover the subsegments, so it is not usable.
 fn parse_segment_base(sb: Node) -> Option<SegmentBase> {
     let index_range = sb.attribute("indexRange").and_then(parse_dash_range)?;
-    let init = sb.children().find(|c| c.is_element() && c.has_tag_name("Initialization"));
+    let init = sb
+        .children()
+        .find(|c| c.is_element() && c.has_tag_name("Initialization"));
     Some(SegmentBase {
         index_range,
-        timescale: sb.attribute("timescale").and_then(|s| s.parse().ok()).unwrap_or(1),
-        init_range: init.and_then(|n| n.attribute("range")).and_then(parse_dash_range),
+        timescale: sb
+            .attribute("timescale")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1),
+        init_range: init
+            .and_then(|n| n.attribute("range"))
+            .and_then(parse_dash_range),
         init_present: init.is_some(),
     })
 }
@@ -479,9 +519,10 @@ fn parse_segment_base(sb: Node) -> Option<SegmentBase> {
 /// from an ancestor AdaptationSet / Period), parsed into a [`SegmentTemplate`].
 /// Requires a `media` attribute (number addressing).
 fn segment_template(rep: Node) -> Option<SegmentTemplate> {
-    let st = rep
-        .ancestors()
-        .find_map(|n| n.children().find(|c| c.is_element() && c.has_tag_name("SegmentTemplate")))?;
+    let st = rep.ancestors().find_map(|n| {
+        n.children()
+            .find(|c| c.is_element() && c.has_tag_name("SegmentTemplate"))
+    })?;
     let timeline = st
         .children()
         .find(|c| c.is_element() && c.has_tag_name("SegmentTimeline"))
@@ -490,16 +531,27 @@ fn segment_template(rep: Node) -> Option<SegmentTemplate> {
     Some(SegmentTemplate {
         initialization: st.attribute("initialization").map(String::from),
         media: String::from(st.attribute("media")?),
-        start_number: st.attribute("startNumber").and_then(|s| s.parse().ok()).unwrap_or(1),
-        duration: st.attribute("duration").and_then(|s| s.parse().ok()).unwrap_or(0),
-        timescale: st.attribute("timescale").and_then(|s| s.parse().ok()).unwrap_or(1),
+        start_number: st
+            .attribute("startNumber")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1),
+        duration: st
+            .attribute("duration")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0),
+        timescale: st
+            .attribute("timescale")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1),
         timeline,
     })
 }
 
 /// Parse a `SegmentList` element into its init + ordered `<SegmentURL>` entries.
 fn parse_segment_list(sl: Node) -> SegmentList {
-    let init = sl.children().find(|c| c.is_element() && c.has_tag_name("Initialization"));
+    let init = sl
+        .children()
+        .find(|c| c.is_element() && c.has_tag_name("Initialization"));
     let segments = sl
         .children()
         .filter(|c| c.is_element() && c.has_tag_name("SegmentURL"))
@@ -509,11 +561,22 @@ fn parse_segment_list(sl: Node) -> SegmentList {
         })
         .collect();
     SegmentList {
-        init_url: init.and_then(|n| n.attribute("sourceURL")).map(String::from).unwrap_or_default(),
-        init_range: init.and_then(|n| n.attribute("range")).and_then(parse_dash_range),
+        init_url: init
+            .and_then(|n| n.attribute("sourceURL"))
+            .map(String::from)
+            .unwrap_or_default(),
+        init_range: init
+            .and_then(|n| n.attribute("range"))
+            .and_then(parse_dash_range),
         init_present: init.is_some(),
-        duration: sl.attribute("duration").and_then(|s| s.parse().ok()).unwrap_or(0),
-        timescale: sl.attribute("timescale").and_then(|s| s.parse().ok()).unwrap_or(1),
+        duration: sl
+            .attribute("duration")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0),
+        timescale: sl
+            .attribute("timescale")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1),
         segments,
     }
 }
@@ -524,7 +587,10 @@ fn parse_dash_range(s: &str) -> Option<ByteRange> {
     let (start, end) = s.trim().split_once('-')?;
     let offset: u64 = start.trim().parse().ok()?;
     let end: u64 = end.trim().parse().ok()?;
-    Some(ByteRange { offset, length: end.checked_sub(offset)?.checked_add(1)? })
+    Some(ByteRange {
+        offset,
+        length: end.checked_sub(offset)?.checked_add(1)?,
+    })
 }
 
 /// Parse a `SegmentTimeline`'s `<S>` entries. A negative `@r` (live "repeat to
@@ -569,7 +635,11 @@ fn expand(tmpl: &str, rep_id: &str, number: Option<u64>, time: Option<u64>) -> S
 
 /// Format a `$Number...$` value, honoring a `%0Nd` zero-pad width.
 fn format_number(fmt: &str, n: u64) -> String {
-    if let Some(width) = fmt.strip_prefix("%0").and_then(|s| s.strip_suffix('d')).and_then(|s| s.parse::<usize>().ok()) {
+    if let Some(width) = fmt
+        .strip_prefix("%0")
+        .and_then(|s| s.strip_suffix('d'))
+        .and_then(|s| s.parse::<usize>().ok())
+    {
         alloc::format!("{n:0width$}")
     } else {
         alloc::format!("{n}")
@@ -651,13 +721,31 @@ mod tests {
         // 12s / 4s = 3 segments.
         assert_eq!(template.segment_count(mpd.duration_secs), 3);
         assert_eq!(template.init_url(&rep.id).as_deref(), Some("init-high.mp4"));
-        assert_eq!(template.media_url(&rep.id, SegmentRef { number: 1, time: 0 }), "seg-high-001.m4s");
-        assert_eq!(template.media_url(&rep.id, SegmentRef { number: 12, time: 0 }), "seg-high-012.m4s");
+        assert_eq!(
+            template.media_url(&rep.id, SegmentRef { number: 1, time: 0 }),
+            "seg-high-001.m4s"
+        );
+        assert_eq!(
+            template.media_url(
+                &rep.id,
+                SegmentRef {
+                    number: 12,
+                    time: 0
+                }
+            ),
+            "seg-high-012.m4s"
+        );
         // The @duration profile yields startNumber.. with cumulative $Time$.
         let segs = template.segments(mpd.duration_secs);
         assert_eq!(segs.len(), 3);
         assert_eq!(segs[0], SegmentRef { number: 1, time: 0 });
-        assert_eq!(segs[2], SegmentRef { number: 3, time: 8000 });
+        assert_eq!(
+            segs[2],
+            SegmentRef {
+                number: 3,
+                time: 8000
+            }
+        );
     }
 
     #[test]
@@ -669,7 +757,11 @@ mod tests {
             start_number: 1,
             duration: 0,
             timescale: 1000,
-            timeline: Vec::from([TimelineEntry { t: Some(0), d: 1000, r: u64::MAX }]),
+            timeline: Vec::from([TimelineEntry {
+                t: Some(0),
+                d: 1000,
+                r: u64::MAX,
+            }]),
         };
         assert_eq!(timeline.segments(10.0).len() as u64, MAX_SEGMENTS);
 
@@ -709,11 +801,32 @@ mod tests {
         let segs = rep.template().unwrap().segments(mpd.duration_secs);
         assert_eq!(segs.len(), 4);
         assert_eq!(segs[0], SegmentRef { number: 1, time: 0 });
-        assert_eq!(segs[1], SegmentRef { number: 2, time: 180_000 });
-        assert_eq!(segs[2], SegmentRef { number: 3, time: 360_000 });
-        assert_eq!(segs[3], SegmentRef { number: 4, time: 540_000 });
+        assert_eq!(
+            segs[1],
+            SegmentRef {
+                number: 2,
+                time: 180_000
+            }
+        );
+        assert_eq!(
+            segs[2],
+            SegmentRef {
+                number: 3,
+                time: 360_000
+            }
+        );
+        assert_eq!(
+            segs[3],
+            SegmentRef {
+                number: 4,
+                time: 540_000
+            }
+        );
         // $Time$ addressing uses each segment's start time.
-        assert_eq!(rep.template().unwrap().media_url(&rep.id, segs[2]), "seg-360000.m4s");
+        assert_eq!(
+            rep.template().unwrap().media_url(&rep.id, segs[2]),
+            "seg-360000.m4s"
+        );
     }
 
     #[test]
@@ -731,8 +844,14 @@ mod tests {
             segs,
             [
                 SegmentRef { number: 1, time: 0 },
-                SegmentRef { number: 2, time: 5000 },
-                SegmentRef { number: 3, time: 6000 },
+                SegmentRef {
+                    number: 2,
+                    time: 5000
+                },
+                SegmentRef {
+                    number: 3,
+                    time: 6000
+                },
             ]
         );
     }
@@ -758,20 +877,44 @@ mod tests {
         // Init is a byte range of the BaseURL (empty URL, range present).
         let (init_url, init_range) = rep.init().unwrap();
         assert_eq!(init_url, "");
-        assert_eq!(init_range, Some(ByteRange { offset: 0, length: 800 }));
+        assert_eq!(
+            init_range,
+            Some(ByteRange {
+                offset: 0,
+                length: 800
+            })
+        );
 
         let segs = rep.resolved_segments(mpd.duration_secs);
         assert_eq!(segs.len(), 3);
         // Range "800-999" (inclusive) -> offset 800, length 200; times accumulate
         // by @duration (0, 1000, 2000 in timescale units).
-        assert_eq!(segs[0], ResolvedSegment {
-            url: String::new(),
-            byte_range: Some(ByteRange { offset: 800, length: 200 }),
-            time: 0,
-        });
-        assert_eq!(segs[1].byte_range, Some(ByteRange { offset: 1000, length: 300 }));
+        assert_eq!(
+            segs[0],
+            ResolvedSegment {
+                url: String::new(),
+                byte_range: Some(ByteRange {
+                    offset: 800,
+                    length: 200
+                }),
+                time: 0,
+            }
+        );
+        assert_eq!(
+            segs[1].byte_range,
+            Some(ByteRange {
+                offset: 1000,
+                length: 300
+            })
+        );
         assert_eq!(segs[1].time, 1000);
-        assert_eq!(segs[2].byte_range, Some(ByteRange { offset: 1300, length: 150 }));
+        assert_eq!(
+            segs[2].byte_range,
+            Some(ByteRange {
+                offset: 1300,
+                length: 150
+            })
+        );
         assert_eq!(segs[2].time, 2000);
         // A SegmentList Representation has no template.
         assert!(rep.template().is_none());
@@ -828,7 +971,14 @@ mod tests {
         assert_eq!(sidx.first_offset, 0);
         assert_eq!(sidx.box_size as usize, sidx_bytes.len());
         assert_eq!(sidx.entries.len(), 3);
-        assert_eq!(sidx.entries[0], SidxEntry { size: 200, duration: 1000, reference_type: false });
+        assert_eq!(
+            sidx.entries[0],
+            SidxEntry {
+                size: 200,
+                duration: 1000,
+                reference_type: false
+            }
+        );
 
         // The sidx sits at byte `index_offset`; media starts right after it
         // (box_size + first_offset). Ranges accumulate by size, times by duration.
@@ -836,11 +986,29 @@ mod tests {
         let media_start = index_offset + sidx.box_size; // first_offset 0
         let segs = sidx.subsegments(index_offset);
         assert_eq!(segs.len(), 3);
-        assert_eq!(segs[0].byte_range, Some(ByteRange { offset: media_start, length: 200 }));
+        assert_eq!(
+            segs[0].byte_range,
+            Some(ByteRange {
+                offset: media_start,
+                length: 200
+            })
+        );
         assert_eq!(segs[0].time, 0);
-        assert_eq!(segs[1].byte_range, Some(ByteRange { offset: media_start + 200, length: 300 }));
+        assert_eq!(
+            segs[1].byte_range,
+            Some(ByteRange {
+                offset: media_start + 200,
+                length: 300
+            })
+        );
         assert_eq!(segs[1].time, 1000);
-        assert_eq!(segs[2].byte_range, Some(ByteRange { offset: media_start + 500, length: 150 }));
+        assert_eq!(
+            segs[2].byte_range,
+            Some(ByteRange {
+                offset: media_start + 500,
+                length: 150
+            })
+        );
         assert_eq!(segs[2].time, 2000);
     }
 
@@ -870,9 +1038,24 @@ mod tests {
         let mpd = parse(xml).unwrap();
         let rep = mpd.select(None).unwrap();
         let sb = rep.segment_base().expect("SegmentBase addressing");
-        assert_eq!(sb.index_range, ByteRange { offset: 900, length: 300 });
+        assert_eq!(
+            sb.index_range,
+            ByteRange {
+                offset: 900,
+                length: 300
+            }
+        );
         assert_eq!(rep.timescale(), 1000);
-        assert_eq!(rep.init(), Some((String::new(), Some(ByteRange { offset: 0, length: 900 }))));
+        assert_eq!(
+            rep.init(),
+            Some((
+                String::new(),
+                Some(ByteRange {
+                    offset: 0,
+                    length: 900
+                })
+            ))
+        );
         // SegmentBase resolves segments only after fetching the sidx, so the
         // pure (no-I/O) path is empty.
         assert!(rep.resolved_segments(mpd.duration_secs).is_empty());
@@ -881,8 +1064,20 @@ mod tests {
 
     #[test]
     fn dash_range_parse_rejects_reversed_and_malformed() {
-        assert_eq!(parse_dash_range("0-799"), Some(ByteRange { offset: 0, length: 800 }));
-        assert_eq!(parse_dash_range("800-800"), Some(ByteRange { offset: 800, length: 1 }));
+        assert_eq!(
+            parse_dash_range("0-799"),
+            Some(ByteRange {
+                offset: 0,
+                length: 800
+            })
+        );
+        assert_eq!(
+            parse_dash_range("800-800"),
+            Some(ByteRange {
+                offset: 800,
+                length: 1
+            })
+        );
         assert_eq!(parse_dash_range("999-800"), None, "reversed range rejected");
         assert_eq!(parse_dash_range("notarange"), None);
     }

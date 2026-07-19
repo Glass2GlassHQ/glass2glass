@@ -32,14 +32,19 @@ fn properties_round_trip() {
         PropValue::Str("http://cam/onvif/device_service".into()),
     )
     .unwrap();
-    src.set_property("user", PropValue::Str("admin".into())).unwrap();
-    src.set_property("password", PropValue::Str("secret".into())).unwrap();
+    src.set_property("user", PropValue::Str("admin".into()))
+        .unwrap();
+    src.set_property("password", PropValue::Str("secret".into()))
+        .unwrap();
 
     assert_eq!(
         src.get_property("location"),
         Some(PropValue::Str("http://cam/onvif/device_service".into()))
     );
-    assert_eq!(src.get_property("user"), Some(PropValue::Str("admin".into())));
+    assert_eq!(
+        src.get_property("user"),
+        Some(PropValue::Str("admin".into()))
+    );
     // Password is write-only.
     assert_eq!(src.get_property("password"), None);
 
@@ -161,13 +166,18 @@ async fn resolve_uri_against_mock_server() {
     assert_eq!(uri, "rtsp://192.168.1.50:554/Streaming/Channels/101");
 
     let reqs = captured.lock().unwrap();
-    assert_eq!(reqs.len(), 3, "expected GetCapabilities, GetProfiles, GetStreamUri");
+    assert_eq!(
+        reqs.len(),
+        3,
+        "expected GetCapabilities, GetProfiles, GetStreamUri"
+    );
     assert!(reqs.iter().any(|r| r.contains("GetCapabilities")));
     assert!(reqs.iter().any(|r| r.contains("GetProfiles")));
     assert!(reqs.iter().any(|r| r.contains("GetStreamUri")));
     // Every call carried a WS-Security UsernameToken digest (auth was sent).
     assert!(
-        reqs.iter().all(|r| r.contains("PasswordDigest") && r.contains("<Username>admin</Username>")),
+        reqs.iter()
+            .all(|r| r.contains("PasswordDigest") && r.contains("<Username>admin</Username>")),
         "each SOAP call must carry the WS-Security digest"
     );
 }

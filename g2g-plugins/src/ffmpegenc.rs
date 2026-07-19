@@ -41,7 +41,6 @@ use core::pin::Pin;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use ffmpeg_next as ffmpeg;
 use ffmpeg::codec::encoder::video::Encoder as VideoEncoder;
 use ffmpeg::format::Pixel;
 use ffmpeg::frame::Video as FfVideo;
@@ -49,11 +48,12 @@ use ffmpeg::packet::Packet;
 use ffmpeg::Dictionary;
 use ffmpeg::Error as FfError;
 use ffmpeg::Rational;
+use ffmpeg_next as ffmpeg;
 
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
     HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec, RawVideoFormat, Rate, VideoCodec,
+    PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, VideoCodec,
 };
 
 /// Default constant target bitrate (bits/second) when the caller sets none. 4
@@ -283,8 +283,20 @@ impl FfmpegH264Enc {
         // borrow checker won't allow `data_mut` and `stride` in one call).
         let (s0, s1, s2) = (frame.stride(0), frame.stride(1), frame.stride(2));
         copy_plane(frame.data_mut(0), s0, &i420[..y_size], w, h);
-        copy_plane(frame.data_mut(1), s1, &i420[y_size..y_size + c_size], cw, ch);
-        copy_plane(frame.data_mut(2), s2, &i420[y_size + c_size..y_size + 2 * c_size], cw, ch);
+        copy_plane(
+            frame.data_mut(1),
+            s1,
+            &i420[y_size..y_size + c_size],
+            cw,
+            ch,
+        );
+        copy_plane(
+            frame.data_mut(2),
+            s2,
+            &i420[y_size + c_size..y_size + 2 * c_size],
+            cw,
+            ch,
+        );
 
         let frameno = self.frame_no;
         frame.set_pts(Some(frameno));
@@ -310,7 +322,8 @@ impl FfmpegH264Enc {
     /// Flush the encoder at EOS and return the remaining packets.
     fn flush(&mut self) -> Result<Vec<(Vec<u8>, u64)>, G2gError> {
         if let Some(enc) = self.encoder.as_mut() {
-            enc.send_eof().map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+            enc.send_eof()
+                .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
         }
         self.drain()
     }
@@ -390,21 +403,28 @@ impl AsyncElement for FfmpegH264Enc {
     /// framerate out. Non-I420 input yields an empty set, rejected at solve.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
-            Caps::RawVideo { format: RawVideoFormat::I420, width, height, framerate } => {
-                CapsSet::one(Caps::CompressedVideo {
-                    codec: VideoCodec::H264,
-                    width: width.clone(),
-                    height: height.clone(),
-                    framerate: framerate.clone(),
-                })
-            }
+            Caps::RawVideo {
+                format: RawVideoFormat::I420,
+                width,
+                height,
+                framerate,
+            } => CapsSet::one(Caps::CompressedVideo {
+                codec: VideoCodec::H264,
+                width: width.clone(),
+                height: height.clone(),
+                framerate: framerate.clone(),
+            }),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        let Caps::RawVideo { format: RawVideoFormat::I420, width, height, framerate } =
-            absolute_caps
+        let Caps::RawVideo {
+            format: RawVideoFormat::I420,
+            width,
+            height,
+            framerate,
+        } = absolute_caps
         else {
             return Err(G2gError::CapsMismatch);
         };
@@ -518,8 +538,16 @@ impl PadTemplates for FfmpegH264Enc {
 /// Settable properties: backend (nvenc | software) and the target bitrate, so a
 /// `gst-launch` line can pick the encoder and rate without the builder.
 static FFMPEGENC_PROPS: &[PropertySpec] = &[
-    PropertySpec::new("backend", PropKind::Str, "h264 encoder: nvenc | software (libx264)"),
-    PropertySpec::new("bitrate", PropKind::Uint, "constant target bitrate, bits/second"),
+    PropertySpec::new(
+        "backend",
+        PropKind::Str,
+        "h264 encoder: nvenc | software (libx264)",
+    ),
+    PropertySpec::new(
+        "bitrate",
+        PropKind::Uint,
+        "constant target bitrate, bits/second",
+    ),
 ];
 
 /// Preferred alias once this encodes more than H.264 (HEVC via `hevc_nvenc` is
@@ -599,10 +627,15 @@ mod tests {
         for i in 0..10u64 {
             let frame = Frame::new(
                 MemoryDomain::System(SystemSlice::from_boxed(i420_frame(i).into_boxed_slice())),
-                FrameTiming { pts_ns: i * 33_000_000, ..FrameTiming::default() },
+                FrameTiming {
+                    pts_ns: i * 33_000_000,
+                    ..FrameTiming::default()
+                },
                 i,
             );
-            enc.process(PipelinePacket::DataFrame(frame), &mut sink).await.ok()?;
+            enc.process(PipelinePacket::DataFrame(frame), &mut sink)
+                .await
+                .ok()?;
         }
         enc.process(PipelinePacket::Eos, &mut sink).await.ok()?;
         Some(sink)
@@ -614,10 +647,16 @@ mod tests {
     /// for whichever backend this host has; both skip cleanly if absent.
     async fn round_trip(backend: Backend) {
         let Some(sink) = encode_with(backend).await else {
-            std::eprintln!("skipping: {:?} H.264 encoder not available on this host", backend);
+            std::eprintln!(
+                "skipping: {:?} H.264 encoder not available on this host",
+                backend
+            );
             return;
         };
-        assert!(!sink.frames.is_empty(), "{backend:?} produced H.264 access units");
+        assert!(
+            !sink.frames.is_empty(),
+            "{backend:?} produced H.264 access units"
+        );
         assert_eq!(
             sink.caps,
             std::vec![Caps::CompressedVideo {
@@ -631,7 +670,11 @@ mod tests {
         // Annex-B: the first unit starts with a 3- or 4-byte start code.
         let first = &sink.frames[0];
         let annex_b = first.starts_with(&[0, 0, 0, 1]) || first.starts_with(&[0, 0, 1]);
-        assert!(annex_b, "{backend:?} output is Annex-B framed, got {:?}", &first[..4.min(first.len())]);
+        assert!(
+            annex_b,
+            "{backend:?} output is Annex-B framed, got {:?}",
+            &first[..4.min(first.len())]
+        );
 
         // Decode the stream back and confirm it yields I420 at the right geometry,
         // proving the encoder produced a real, decodable H.264 bitstream.
@@ -650,16 +693,31 @@ mod tests {
                 FrameTiming::default(),
                 0,
             );
-            dec.process(PipelinePacket::DataFrame(f), &mut dsink).await.expect("decode AU");
+            dec.process(PipelinePacket::DataFrame(f), &mut dsink)
+                .await
+                .expect("decode AU");
         }
-        dec.process(PipelinePacket::Eos, &mut dsink).await.expect("drain decoder");
+        dec.process(PipelinePacket::Eos, &mut dsink)
+            .await
+            .expect("drain decoder");
 
         let geometry = dsink.caps.iter().find_map(|c| match c {
-            Caps::RawVideo { width: Dim::Fixed(w), height: Dim::Fixed(h), .. } => Some((*w, *h)),
+            Caps::RawVideo {
+                width: Dim::Fixed(w),
+                height: Dim::Fixed(h),
+                ..
+            } => Some((*w, *h)),
             _ => None,
         });
-        assert_eq!(geometry, Some((W, H)), "{backend:?} stream decodes back to {W}x{H}");
-        assert!(!dsink.frames.is_empty(), "{backend:?} stream decoded to raw frames");
+        assert_eq!(
+            geometry,
+            Some((W, H)),
+            "{backend:?} stream decodes back to {W}x{H}"
+        );
+        assert!(
+            !dsink.frames.is_empty(),
+            "{backend:?} stream decoded to raw frames"
+        );
         let expected = (W * H + 2 * W.div_ceil(2) * H.div_ceil(2)) as usize;
         assert!(
             dsink.frames.iter().all(|f| f.len() == expected),

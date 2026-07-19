@@ -18,9 +18,7 @@
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 
-use g2g_plugins::localipc::{
-    self, CudaIpcDescriptor, CudaIpcHandle, CUDA_IPC_HANDLE_SIZE,
-};
+use g2g_plugins::localipc::{self, CudaIpcDescriptor, CudaIpcHandle, CUDA_IPC_HANDLE_SIZE};
 
 /// Bytes shared across the two processes (a stand-in for one video frame).
 const SIZE: usize = 1920 * 1080 * 3 / 2; // one 1080p NV12 frame's worth
@@ -52,7 +50,10 @@ fn run_parent() {
     // Export a handle to the whole allocation (plain bytes, transport-agnostic).
     // SAFETY: `dptr` is the base of a live cuMemAlloc allocation.
     let handle: CudaIpcHandle = unsafe { localipc::ipc_export(dptr).expect("ipc export") };
-    let desc = CudaIpcDescriptor { handle, size: SIZE as u64 };
+    let desc = CudaIpcDescriptor {
+        handle,
+        size: SIZE as u64,
+    };
 
     // Spawn a fresh process (its own CUDA context) and hand it the descriptor
     // over stdin. Wait for it, so our allocation stays alive until it has opened

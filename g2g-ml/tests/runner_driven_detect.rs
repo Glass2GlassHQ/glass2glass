@@ -25,8 +25,8 @@ use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{run_linear_chain, SourceLoop};
 use g2g_core::{
-    AnalyticsMeta, Caps, CapsConstraint, CapsSet, ConfigureOutcome, G2gError, PipelineClock, TensorDType,
-    TensorLayout, TensorShape,
+    AnalyticsMeta, Caps, CapsConstraint, CapsSet, ConfigureOutcome, G2gError, PipelineClock,
+    TensorDType, TensorLayout, TensorShape,
 };
 use g2g_ml::detect::DetectionPostprocess;
 use g2g_ml::ortinfer::OrtInference;
@@ -41,7 +41,11 @@ fn detect_dir() -> PathBuf {
 }
 
 fn tensor_caps(dtype: TensorDType, shape: &[u32]) -> Caps {
-    Caps::Tensor { dtype, shape: TensorShape::from_slice(shape).unwrap(), layout: TensorLayout::Nchw }
+    Caps::Tensor {
+        dtype,
+        shape: TensorShape::from_slice(shape).unwrap(),
+        layout: TensorLayout::Nchw,
+    }
 }
 
 struct NullClock;
@@ -72,7 +76,9 @@ impl SourceLoop for TensorSource {
     }
 
     fn caps_constraint(&mut self) -> impl Future<Output = Result<CapsConstraint<'_>, G2gError>> {
-        core::future::ready(Ok(CapsConstraint::Produces(CapsSet::one(self.caps.clone()))))
+        core::future::ready(Ok(CapsConstraint::Produces(CapsSet::one(
+            self.caps.clone(),
+        ))))
     }
 
     fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -119,7 +125,11 @@ impl AsyncElement for DetectSink {
         Ok(ConfigureOutcome::Accepted)
     }
 
-    fn process<'a>(&'a mut self, packet: PipelinePacket, _out: &'a mut dyn OutputSink) -> Self::ProcessFuture<'a> {
+    fn process<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+        _out: &'a mut dyn OutputSink,
+    ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
             if let PipelinePacket::DataFrame(f) = &packet {
                 if let Some(a) = f.meta.get::<AnalyticsMeta>() {
@@ -137,14 +147,22 @@ async fn runner_drives_detect_chain() {
     let model_path = dir.join("model.onnx");
     let input_path = dir.join("input_f32.bin");
     if !model_path.exists() || !input_path.exists() {
-        eprintln!("detect fixtures absent ({}); run tools/detect-fixture.sh. skipping.", dir.display());
+        eprintln!(
+            "detect fixtures absent ({}); run tools/detect-fixture.sh. skipping.",
+            dir.display()
+        );
         return;
     }
     let model = std::fs::read(&model_path).expect("read model");
     let input = std::fs::read(&input_path).expect("read input");
 
-    let mut src = TensorSource { caps: tensor_caps(TensorDType::F32, &[1, 3, SIZE, SIZE]), data: Some(input) };
-    let mut infer = OrtInference::from_memory(&model).expect("model loads").with_tensor_input();
+    let mut src = TensorSource {
+        caps: tensor_caps(TensorDType::F32, &[1, 3, SIZE, SIZE]),
+        data: Some(input),
+    };
+    let mut infer = OrtInference::from_memory(&model)
+        .expect("model loads")
+        .with_tensor_input();
     let mut decode = DetectionPostprocess::new(0.25, 0.45).with_input_size(SIZE, SIZE);
     let mut sink = DetectSink::default();
 
@@ -153,10 +171,16 @@ async fn runner_drives_detect_chain() {
         .await
         .expect("runner drives the infer -> detect chain");
 
-    eprintln!(">> one-graph detector: {stats:?}; detections = {:?}", sink.dets);
+    eprintln!(
+        ">> one-graph detector: {stats:?}; detections = {:?}",
+        sink.dets
+    );
     assert!(!sink.dets.is_empty(), "expected at least one detection");
     let dog = sink.dets.iter().find(|(label, _)| *label == COCO_DOG);
     let (_, conf) = dog.expect("a 'dog' (COCO class 16) detection through the negotiated graph");
-    assert!(*conf > 0.5, "dog detected with confidence > 0.5, got {conf}");
+    assert!(
+        *conf > 0.5,
+        "dog detected with confidence > 0.5, got {conf}"
+    );
     eprintln!(">> the whole detector ran as one negotiated graph; dog @ {conf:.3}");
 }

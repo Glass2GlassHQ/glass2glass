@@ -50,7 +50,11 @@ fn ts_packet(pid: u16, pusi: bool, payload: &[u8]) -> Vec<u8> {
 
 fn psi(pid: u16, table_id: u8, body: &[u8]) -> Vec<u8> {
     let section_length = body.len() + 4;
-    let mut s = vec![table_id, 0xB0 | ((section_length >> 8) as u8 & 0x0F), (section_length & 0xFF) as u8];
+    let mut s = vec![
+        table_id,
+        0xB0 | ((section_length >> 8) as u8 & 0x0F),
+        (section_length & 0xFF) as u8,
+    ];
     s.extend_from_slice(body);
     s.extend_from_slice(&[0, 0, 0, 0]);
     let mut payload = vec![0u8];
@@ -77,18 +81,36 @@ fn synthetic_ts() -> Vec<u8> {
     s.extend_from_slice(&psi(
         0x0000,
         0x00,
-        &[0, 1, 0xC1, 0, 0, 0, 1, 0xE0 | (pmt_pid >> 8) as u8 & 0x1F, pmt_pid as u8],
+        &[
+            0,
+            1,
+            0xC1,
+            0,
+            0,
+            0,
+            1,
+            0xE0 | (pmt_pid >> 8) as u8 & 0x1F,
+            pmt_pid as u8,
+        ],
     ));
     s.extend_from_slice(&psi(
         pmt_pid,
         0x02,
         &[
-            0x00, 0x01, 0xC1, 0x00, 0x00,
-            0xE0 | (es_pid >> 8) as u8 & 0x1F, es_pid as u8,
-            0xF0, 0x00,
+            0x00,
+            0x01,
+            0xC1,
+            0x00,
+            0x00,
+            0xE0 | (es_pid >> 8) as u8 & 0x1F,
+            es_pid as u8,
+            0xF0,
+            0x00,
             0x1B, // stream_type H.264
-            0xE0 | (es_pid >> 8) as u8 & 0x1F, es_pid as u8,
-            0xF0, 0x00,
+            0xE0 | (es_pid >> 8) as u8 & 0x1F,
+            es_pid as u8,
+            0xF0,
+            0x00,
         ],
     ));
     for n in 0..3u8 {
@@ -96,7 +118,11 @@ fn synthetic_ts() -> Vec<u8> {
         // slice header whose first byte has the top bit set (`first_mb_in_slice ==
         // 0`, the mark of a new picture's first slice) so the access-unit-aligning
         // h264parse counts three distinct pictures; `n` keeps them distinguishable.
-        s.extend_from_slice(&ts_packet(es_pid, true, &h264_pes(&[0, 0, 0, 1, 0x65, 0x88, n])));
+        s.extend_from_slice(&ts_packet(
+            es_pid,
+            true,
+            &h264_pes(&[0, 0, 0, 1, 0x65, 0x88, n]),
+        ));
     }
     s
 }
@@ -129,7 +155,12 @@ fn synthetic_webm() -> Vec<u8> {
         // PixelWidth / PixelHeight as single-byte uints (value only needs to be
         // a valid positive dim for the demuxer to emit refined caps).
         let v = [elem(&[0xB0], &[64]), elem(&[0xBA], &[64])].concat();
-        let body = [elem(&[0xD7], &[1]), elem(&[0x86], b"V_VP9"), elem(&[0xE0], &v)].concat();
+        let body = [
+            elem(&[0xD7], &[1]),
+            elem(&[0x86], b"V_VP9"),
+            elem(&[0xE0], &v),
+        ]
+        .concat();
         elem(&[0xAE], &body)
     };
     let tracks = elem(&[0x16, 0x54, 0xAE, 0x6B], &video);
@@ -162,7 +193,10 @@ fn write_temp(name: &str, bytes: &[u8]) -> PathBuf {
 async fn run_pipeline(text: &str) -> u64 {
     let reg = default_registry();
     let graph = parse_launch(&reg, text).expect("pipeline parses");
-    run_graph(graph, &ZeroClock, 4).await.expect("pipeline runs").frames_consumed
+    run_graph(graph, &ZeroClock, 4)
+        .await
+        .expect("pipeline runs")
+        .frames_consumed
 }
 
 #[tokio::test]
@@ -172,15 +206,26 @@ async fn filesrc_mpegts_explicit_feeds_tsdemux() {
         "filesrc location={} bytestream-format=mpegts ! tsdemux ! h264parse ! fakesink",
         path.display()
     );
-    assert_eq!(run_pipeline(&text).await, 3, "three demuxed H.264 AUs reached the sink");
+    assert_eq!(
+        run_pipeline(&text).await,
+        3,
+        "three demuxed H.264 AUs reached the sink"
+    );
     let _ = fs::remove_file(&path);
 }
 
 #[tokio::test]
 async fn filesrc_auto_sniffs_mpegts() {
     let path = write_temp("g2g_m112_auto.ts", &synthetic_ts());
-    let text = format!("filesrc location={} bytestream-format=auto ! tsdemux ! fakesink", path.display());
-    assert_eq!(run_pipeline(&text).await, 3, "auto-detected TS demuxed to the sink");
+    let text = format!(
+        "filesrc location={} bytestream-format=auto ! tsdemux ! fakesink",
+        path.display()
+    );
+    assert_eq!(
+        run_pipeline(&text).await,
+        3,
+        "auto-detected TS demuxed to the sink"
+    );
     let _ = fs::remove_file(&path);
 }
 
@@ -191,6 +236,10 @@ async fn filesrc_auto_sniffs_matroska() {
         "filesrc location={} bytestream-format=auto ! matroskademux stream=vp9 ! fakesink",
         path.display()
     );
-    assert_eq!(run_pipeline(&text).await, 2, "auto-detected WebM VP9 demuxed to the sink");
+    assert_eq!(
+        run_pipeline(&text).await,
+        2,
+        "auto-detected WebM VP9 demuxed to the sink"
+    );
     let _ = fs::remove_file(&path);
 }

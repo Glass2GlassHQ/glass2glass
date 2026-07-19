@@ -77,7 +77,9 @@ impl RtpHeader {
             let len_hi = *buf.get(offset.checked_add(2)?)?;
             let len_lo = *buf.get(offset.checked_add(3)?)?;
             let ext_words = u16::from_be_bytes([len_hi, len_lo]) as usize;
-            offset = offset.checked_add(4)?.checked_add(ext_words.checked_mul(4)?)?;
+            offset = offset
+                .checked_add(4)?
+                .checked_add(ext_words.checked_mul(4)?)?;
         }
 
         // Padding, if present, is counted by the datagram's last byte.
@@ -90,7 +92,13 @@ impl RtpHeader {
             return None; // header (and padding) overrun the datagram
         }
         Some(RtpParsed {
-            header: RtpHeader { payload_type, marker, sequence, timestamp, ssrc },
+            header: RtpHeader {
+                payload_type,
+                marker,
+                sequence,
+                timestamp,
+                ssrc,
+            },
             payload_offset: offset,
             payload_len: end - offset,
         })
@@ -105,9 +113,16 @@ impl RtpHeader {
         [
             0x80, // V=2, P=0, X=0, CC=0
             (if self.marker { 0x80 } else { 0 }) | (self.payload_type & 0x7F),
-            seq[0], seq[1],
-            ts[0], ts[1], ts[2], ts[3],
-            ssrc[0], ssrc[1], ssrc[2], ssrc[3],
+            seq[0],
+            seq[1],
+            ts[0],
+            ts[1],
+            ts[2],
+            ts[3],
+            ssrc[0],
+            ssrc[1],
+            ssrc[2],
+            ssrc[3],
         ]
     }
 }
@@ -131,10 +146,22 @@ mod tests {
             "V=2 | M+PT | seq | timestamp | ssrc, all big-endian"
         );
         let unmarked = RtpHeader { marker: false, ..h };
-        assert_eq!(unmarked.to_bytes()[1], 96, "marker bit clear leaves the bare PT");
+        assert_eq!(
+            unmarked.to_bytes()[1],
+            96,
+            "marker bit clear leaves the bare PT"
+        );
         // PT is 7 bits: bit 7 of an oversized PT must not leak into marker.
-        let overwide = RtpHeader { payload_type: 0xFF, marker: false, ..h };
-        assert_eq!(overwide.to_bytes()[1], 0x7F, "payload type masked to 7 bits");
+        let overwide = RtpHeader {
+            payload_type: 0xFF,
+            marker: false,
+            ..h
+        };
+        assert_eq!(
+            overwide.to_bytes()[1],
+            0x7F,
+            "payload type masked to 7 bits"
+        );
     }
 
     #[test]
@@ -150,12 +177,16 @@ mod tests {
         dgram[..RTP_HEADER_LEN].copy_from_slice(&h.to_bytes());
         dgram[RTP_HEADER_LEN..].copy_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
         let p = RtpHeader::parse(&dgram).expect("valid RTP");
-        assert_eq!(p.header, h, "fixed fields round-trip through to_bytes/parse");
+        assert_eq!(
+            p.header, h,
+            "fixed fields round-trip through to_bytes/parse"
+        );
         assert_eq!(p.payload_offset, RTP_HEADER_LEN);
         assert_eq!(p.payload_len, 4);
-        assert_eq!(&dgram[p.payload_offset..p.payload_offset + p.payload_len], &[
-            0xDE, 0xAD, 0xBE, 0xEF
-        ]);
+        assert_eq!(
+            &dgram[p.payload_offset..p.payload_offset + p.payload_len],
+            &[0xDE, 0xAD, 0xBE, 0xEF]
+        );
     }
 
     #[test]
@@ -163,14 +194,32 @@ mod tests {
         // V=2, P=1, X=1, CC=1; PT=96, no marker; then 1 CSRC word, a 1-word
         // extension, 2 payload bytes, and 2 padding bytes (last byte = 2).
         let d: [u8; 26] = [
-            0b1011_0001, 96, // V/P/X/CC, M/PT
-            0x00, 0x01, // sequence
-            0, 0, 0, 0, // timestamp
-            0, 0, 0, 0, // ssrc
-            9, 9, 9, 9, // 1 CSRC identifier
-            0xBE, 0xDE, 0x00, 0x01, // ext profile + len = 1 word
-            1, 2, 3, 4, // 1 word of extension data
-            0x55, 0x66, // payload (padding count byte follows in the next 2)
+            0b1011_0001,
+            96, // V/P/X/CC, M/PT
+            0x00,
+            0x01, // sequence
+            0,
+            0,
+            0,
+            0, // timestamp
+            0,
+            0,
+            0,
+            0, // ssrc
+            9,
+            9,
+            9,
+            9, // 1 CSRC identifier
+            0xBE,
+            0xDE,
+            0x00,
+            0x01, // ext profile + len = 1 word
+            1,
+            2,
+            3,
+            4, // 1 word of extension data
+            0x55,
+            0x66, // payload (padding count byte follows in the next 2)
         ];
         // Append the 2 padding bytes (0x00, count=2) to a 28-byte datagram.
         let mut dg = [0u8; 28];
@@ -180,18 +229,27 @@ mod tests {
         let p = RtpHeader::parse(&dg).expect("valid RTP with CC/X/P");
         assert_eq!(p.header.payload_type, 96);
         assert_eq!(p.payload_len, 2, "CSRC, extension and padding all excluded");
-        assert_eq!(&dg[p.payload_offset..p.payload_offset + p.payload_len], &[0x55, 0x66]);
+        assert_eq!(
+            &dg[p.payload_offset..p.payload_offset + p.payload_len],
+            &[0x55, 0x66]
+        );
     }
 
     #[test]
     fn parse_rejects_malformed_input_without_panicking() {
         assert!(RtpHeader::parse(&[]).is_none(), "empty");
-        assert!(RtpHeader::parse(&[0x80, 0]).is_none(), "truncated fixed header");
+        assert!(
+            RtpHeader::parse(&[0x80, 0]).is_none(),
+            "truncated fixed header"
+        );
         assert!(RtpHeader::parse(&[0x00; 12]).is_none(), "version != 2");
         // CC=15 claims 60 CSRC bytes a 12-byte datagram does not have.
         let mut d = [0u8; RTP_HEADER_LEN];
         d[0] = 0x8F; // V=2, CC=15
-        assert!(RtpHeader::parse(&d).is_none(), "CSRC list overruns the datagram");
+        assert!(
+            RtpHeader::parse(&d).is_none(),
+            "CSRC list overruns the datagram"
+        );
         // Padding count larger than the datagram.
         let mut pad = [0u8; RTP_HEADER_LEN + 1];
         pad[0] = 0xA0; // V=2, P=1
