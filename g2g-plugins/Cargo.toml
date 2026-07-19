@@ -115,8 +115,9 @@ webrtc = ["std", "tokio/net", "tokio/time", "tokio/macros", "dep:str0m", "dep:re
 # WebSocket + protobuf signaller (livekit_rtc.proto subset) and an HS256 JWT
 # access token. Layers on the `webrtc` engine and adds the WebSocket client
 # (tokio-tungstenite, shared with remote-ws) + JWT crypto (sha2 + base64). Implies
-# std. wss:// to LiveKit Cloud needs a TLS-terminating proxy (no rustls dep here).
-webrtc-livekit = ["webrtc", "dep:tokio-tungstenite", "futures-util/sink", "dep:sha2", "dep:base64"]
+# std. `wss://` (LiveKit Cloud) works natively: tungstenite's native-tls is the
+# same TLS stack reqwest (the `webrtc` WHIP client) already links.
+webrtc-livekit = ["webrtc", "dep:tokio-tungstenite", "tokio-tungstenite/native-tls", "futures-util/sink", "dep:sha2", "dep:base64"]
 # ONVIF camera discovery + RTSP stream-URI resolution (OnvifSrc). Hand-rolled
 # WS-Discovery Probe (UDP multicast) and the two media SOAP calls
 # (GetProfiles / GetStreamUri) with a WS-Security UsernameToken digest header.
