@@ -32,13 +32,16 @@ use std::time::{Duration, Instant};
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
-use g2g_core::runtime::{run_fanin_session, DynSourceLoop, SourceLoop};
+use g2g_core::runtime::{run_fanin_session, run_source_transform_sink, DynSourceLoop, SourceLoop};
 use g2g_core::{
-    Caps, ConfigureOutcome, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PipelineClock,
-    PipelinePacket, Rate, VideoCodec,
+    AsyncElement, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, ConfigureOutcome, Dim,
+    FrameTiming, G2gError, MemoryDomain, OutputSink, PipelineClock, PipelinePacket, Rate,
+    VideoCodec,
 };
+use g2g_plugins::filesrc::FileSrc;
 use g2g_plugins::livekit_signal::{mint_token, VideoGrant};
 use g2g_plugins::livekitsink::LiveKitSink;
+use g2g_plugins::oggdemux::OggDemux;
 
 /// Build a self-contained Annex-B H.264 stream: every `keyframe_period`th access
 /// unit is SPS + PPS + IDR, the rest are P slices. Payload bytes stay in 1..=254
@@ -175,6 +178,115 @@ fn caps_wh(width: u32, height: u32) -> Caps {
     }
 }
 
+fn opus_caps() -> Caps {
+    Caps::Audio {
+        format: AudioFormat::Opus,
+        channels: 2,
+        sample_rate: 48_000,
+    }
+}
+
+/// Audio analog of `PacedH264Src`: loops a fixture's Opus packets in real time
+/// (one 20 ms frame per push), same as the WHIP smoke test's paced audio source.
+struct PacedOpusSrc {
+    packets: Arc<Vec<Vec<u8>>>,
+    duration: Duration,
+}
+
+impl SourceLoop for PacedOpusSrc {
+    type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>;
+    type CapsFuture<'a> = Ready<Result<Caps, G2gError>>;
+
+    fn intercept_caps(&mut self) -> Self::CapsFuture<'_> {
+        ready(Ok(opus_caps()))
+    }
+    fn configure_pipeline(&mut self, _c: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        Ok(ConfigureOutcome::Accepted)
+    }
+    fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
+        Box::pin(async move {
+            out.push(PipelinePacket::CapsChanged(opus_caps())).await?;
+            let start = Instant::now();
+            let mut seq = 0u64;
+            let mut idx = 0usize;
+            while Instant::now().duration_since(start) < self.duration {
+                let pkt = self.packets[idx % self.packets.len()].clone();
+                idx += 1;
+                let frame = Frame::new(
+                    MemoryDomain::System(SystemSlice::from_boxed(pkt.into_boxed_slice())),
+                    FrameTiming {
+                        pts_ns: seq * 20_000_000,
+                        ..FrameTiming::default()
+                    },
+                    seq,
+                );
+                out.push(PipelinePacket::DataFrame(frame)).await?;
+                seq += 1;
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            out.push(PipelinePacket::Eos).await?;
+            Ok(seq)
+        })
+    }
+}
+
+/// Sink that collects each `DataFrame`'s System-memory payload, used to extract
+/// the Opus elementary packets from an Ogg fixture once, before pacing them.
+struct CapturingSink {
+    out: Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
+}
+
+impl AsyncElement for CapturingSink {
+    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>;
+
+    fn intercept_caps(&self, c: &Caps) -> Result<Caps, G2gError> {
+        Ok(c.clone())
+    }
+    fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
+        CapsConstraint::AcceptsAny
+    }
+    fn configure_pipeline(&mut self, _c: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        Ok(ConfigureOutcome::Accepted)
+    }
+    fn process<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+        _out: &'a mut dyn OutputSink,
+    ) -> Self::ProcessFuture<'a> {
+        Box::pin(async move {
+            if let PipelinePacket::DataFrame(frame) = packet {
+                if let MemoryDomain::System(slice) = &frame.domain {
+                    self.out.lock().unwrap().push(slice.as_slice().to_vec());
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+/// Extract the Opus elementary packets from an Ogg-Opus fixture by running the
+/// real `FileSrc -> OggDemux` path once (so the paced source loops genuine
+/// packets, not synthetic ones).
+async fn extract_opus_packets(ogg_path: &str) -> Vec<Vec<u8>> {
+    let mut src = FileSrc::new(
+        ogg_path,
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::Ogg,
+        },
+    );
+    let mut demux = OggDemux::new();
+    let collected = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut sink = CapturingSink {
+        out: collected.clone(),
+    };
+    let clock = ZeroClock;
+    run_source_transform_sink(&mut src, &mut demux, &mut sink, &clock, 8)
+        .await
+        .expect("ogg->opus extraction should succeed");
+    let packets = core::mem::take(&mut *collected.lock().unwrap());
+    packets
+}
+
 struct ZeroClock;
 impl PipelineClock for ZeroClock {
     fn now_ns(&self) -> u64 {
@@ -257,8 +369,16 @@ async fn livekit_publishes_h264() {
         }
         Err(_) => Arc::new(synthetic_h264(300)),
     };
+    // `G2G_OPUS_FIXTURE` (Ogg-Opus) adds an Opus audio track alongside the
+    // video, so a browser subscriber verifies both payload kinds survive the
+    // SFU forwarder.
+    let opus = match std::env::var("G2G_OPUS_FIXTURE") {
+        Ok(path) => Some(Arc::new(extract_opus_packets(&path).await)),
+        Err(_) => None,
+    };
+    let has_audio = opus.is_some();
 
-    // Publisher: paced video source fans into the LiveKit sink (1 input).
+    // Publisher: paced video (and optional audio) sources fan into the sink.
     let publisher = {
         let (nals, url, room, api_key, api_secret) = (
             nals.clone(),
@@ -280,9 +400,19 @@ async fn livekit_publishes_h264() {
                 width: 640,
                 height: 480,
             };
+            let mut asrc = opus.map(|packets| PacedOpusSrc {
+                packets,
+                duration: Duration::from_secs(secs),
+            });
             let mut sink = LiveKitSink::new(url, room, identity).with_api_key(api_key, api_secret);
+            if asrc.is_some() {
+                sink = sink.with_audio();
+            }
             let clock = ZeroClock;
-            let sources: Vec<&mut dyn DynSourceLoop> = vec![&mut src];
+            let mut sources: Vec<&mut dyn DynSourceLoop> = vec![&mut src];
+            if let Some(a) = asrc.as_mut() {
+                sources.push(a);
+            }
             let stats = run_fanin_session(sources, &mut sink, &clock, 8).await;
             (stats, sink.frames_sent())
         }
@@ -299,6 +429,7 @@ async fn livekit_publishes_h264() {
         );
         async move {
             let base = http_base(&url);
+            let want_tracks = 1 + has_audio as usize;
             let deadline = Instant::now() + Duration::from_secs(9);
             let mut last = String::new();
             while Instant::now() < deadline {
@@ -306,11 +437,12 @@ async fn livekit_publishes_h264() {
                 match list_participants(&base, &api_key, &api_secret, &room).await {
                     Ok(body) => {
                         last = body;
-                        // The participant is present with at least one track once
-                        // the identity and a track SID (`TR_...`) are in the JSON.
+                        // The participant is present once the identity and a
+                        // track SID (`TR_...`) per published track are in the
+                        // JSON (two SIDs when audio publishes alongside video).
                         if last.contains(identity)
                             && last.contains("\"tracks\"")
-                            && last.contains("TR_")
+                            && last.matches("TR_").count() >= want_tracks
                         {
                             return Ok(last);
                         }
