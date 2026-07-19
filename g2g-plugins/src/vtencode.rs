@@ -18,22 +18,15 @@
 //! decoder / muxer. Those framing helpers are pure and host-tested; the
 //! VideoToolbox session is macOS-only.
 //!
-//! COMPILE-PENDING: gated `#[cfg(all(target_os = "macos", feature = "vtencode"))]`,
-//! so it never builds in this repo's Linux CI; the macOS CI job is what compiles
-//! it. Written against the objc2 0.3 binding signatures (verified against the
-//! fetched crate source, per the `mf-decode` rule in AGENTS.md) but NOT compiled.
-//! Expect to adjust on the first `cargo build` on a Mac: the `VTCompressionSession`
-//! create/encode/complete method forms, `VTSessionSetProperty` + the CFNumber /
-//! CFBoolean property values, `CVPixelBufferCreate` and the plane-fill, and the
-//! parameter-set accessor. Each such spot is marked `// NOTE`. The g2g element
-//! contract (caps, pad templates, `process`, `Send`) mirrors `VtDecode` /
-//! `MfEncode` and is the stable part.
+//! Gated `#[cfg(all(target_os = "macos", feature = "vtencode"))]`, so it never
+//! builds on the Linux dev host; the macOS CI job compiles it and runs the
+//! `m731_videotoolbox` tests (encode to Annex-B + decode round trip, H.264 +
+//! HEVC), so the encode path is runtime-validated on a real Mac.
 
 // objc2 renamed these free CoreMedia functions to associated functions (e.g.
-// `CMSampleBuffer::data_buffer`). VtEncode is compile-pending (never run on a
-// Mac), so the migration is deferred to when it is validated on real hardware;
-// the deprecated calls behave identically. TODO: migrate to the associated
-// forms.
+// `CMSampleBuffer::data_buffer`); the deprecated calls behave identically.
+// TODO: migrate to the associated forms (tracked in DESIGN_TODO
+// "Platform: macOS").
 #![allow(deprecated)]
 
 use core::ffi::{c_char, c_void};
@@ -480,8 +473,8 @@ unsafe fn sample_to_annexb(
     let mut len_at: usize = 0;
     // c_char (i8) pointer per `CMBlockBuffer::data_pointer`; cast to u8 for the slice.
     let mut data_ptr: *mut c_char = ptr::null_mut();
-    // NOTE (verify on-device): objc2 exposes this as `CMBlockBuffer::data_pointer`
-    // (associated fn taking &CMBlockBuffer); the out-params are usize lengths.
+    // objc2 exposes this as `CMBlockBuffer::data_pointer` (associated fn taking
+    // &CMBlockBuffer); the out-params are usize lengths.
     let st = unsafe {
         CMBlockBuffer::data_pointer(&block, 0, &mut len_at, &mut total_len, &mut data_ptr)
     };
@@ -594,8 +587,8 @@ unsafe fn build_session(
     };
 
     let mut session: *mut VTCompressionSession = ptr::null_mut();
-    // NOTE (verify on-device): objc2 exposes this as `VTCompressionSession::create`
-    // (associated fn). `output_callback` is the `VTCompressionOutputCallback`.
+    // objc2 exposes this as `VTCompressionSession::create` (associated fn).
+    // `output_callback` is the `VTCompressionOutputCallback`.
     let st = unsafe {
         VTCompressionSession::create(
             None,
@@ -615,9 +608,8 @@ unsafe fn build_session(
     }
     let session = unsafe { CFRetained::from_raw(NonNull::new(session).ok_or_else(hw)?) };
 
-    // Low-latency tuning. NOTE (verify on-device): VTSessionSetProperty takes the
-    // session as a VTSession, a CFString key, and a CFType value; CFBoolean /
-    // CFNumber construction via objc2-core-foundation may need small tweaks.
+    // Low-latency tuning. VTSessionSetProperty takes the session as a VTSession,
+    // a CFString key, and a CFType value.
     unsafe {
         set_bool(&session, kVTCompressionPropertyKey_RealTime, true)?;
         set_bool(
@@ -650,9 +642,9 @@ unsafe fn encode_into(state: &EncoderState, nv12: &[u8], pts_ns: u64) -> Result<
     let pixel_buffer = unsafe { make_pixel_buffer(nv12, state.width, state.height)? };
 
     let mut info = VTEncodeInfoFlags::empty();
-    // NOTE (verify on-device): `encode_frame` takes the image buffer, PTS,
-    // duration, optional frame-properties dict, source refcon, and an info-flags
-    // out-param. A CVPixelBuffer is a CVImageBuffer (typedef).
+    // `encode_frame` takes the image buffer, PTS, duration, optional
+    // frame-properties dict, source refcon, and an info-flags out-param. A
+    // CVPixelBuffer is a CVImageBuffer (typedef).
     let image: &CVImageBuffer =
         unsafe { &*(CFRetained::as_ptr(&pixel_buffer).as_ptr() as *const CVImageBuffer) };
     let st = unsafe {
@@ -678,7 +670,7 @@ unsafe fn encode_into(state: &EncoderState, nv12: &[u8], pts_ns: u64) -> Result<
 ///
 /// SAFETY: `session` is live.
 unsafe fn complete_frames(session: &VTCompressionSession) {
-    // NOTE (verify on-device): completing up to an invalid PTS flushes everything.
+    // Completing up to an invalid PTS flushes everything.
     let _ = unsafe { session.complete_frames(cm_time_invalid()) };
 }
 
@@ -697,8 +689,8 @@ unsafe fn make_pixel_buffer(
         return Err(hw());
     }
     let mut pb: *mut CVPixelBuffer = ptr::null_mut();
-    // NOTE (verify on-device): CVPixelBufferCreate(allocator, w, h, fourcc,
-    // attrs, out). None attributes lets CoreVideo pick the plane strides.
+    // CVPixelBufferCreate(allocator, w, h, fourcc, attrs, out). None attributes
+    // lets CoreVideo pick the plane strides.
     let st = unsafe {
         CVPixelBufferCreate(
             None,
@@ -745,7 +737,7 @@ unsafe fn make_pixel_buffer(
     Ok(pb)
 }
 
-/// Set a CFBoolean session property. NOTE: CFBoolean handling is compile-pending.
+/// Set a CFBoolean session property.
 unsafe fn set_bool(
     session: &VTCompressionSession,
     key: &objc2_core_foundation::CFString,

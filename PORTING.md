@@ -418,8 +418,8 @@ g2g-launch 'videotestsrc ! gstwrap element="videoflip method=horizontal-flip" ! 
 
 - **Platform coverage.** Linux and Windows are the primary targets. Android
   (MediaCodec decode/encode, Camera2, AAudio, Surface present, plus ML inference)
-  is device-validated. macOS (VideoToolbox / AVFoundation / Core Audio / Metal)
-  is started but not yet built on Apple hardware, so treat it as unverified. The
+  is device-validated. macOS VideoToolbox decode/encode is validated on the CI
+  Mac; AVFoundation / Core Audio / Metal present are still open. The
   cross-platform software path (parsers, container mux/demux, SW transforms,
   ffmpeg, `gst-launch` DSL) works everywhere. See DESIGN_TODO.md "Gap analysis".
 - Transport: SRT (TSBPD/AES/key-rotation), RTP with RTCP and FEC (ULPFEC,

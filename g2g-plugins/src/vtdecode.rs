@@ -23,22 +23,15 @@
 //! ([`crate::annexb::to_avcc`]) for the decode sample. Those helpers are pure and
 //! unit-tested on the host; the VideoToolbox session itself is macOS-only.
 //!
-//! COMPILE-PENDING: this module is `#[cfg(all(target_os = "macos", feature =
-//! "vtdecode"))]`, so it never builds in this repo's Linux CI. It is written
-//! against the real objc2 0.3.2 binding signatures (verified against the fetched
-//! crate source, per the `mf-decode` rule in AGENTS.md), but it has NOT been
-//! compiled. Expect to adjust on the first `cargo build` on a Mac: a few objc2
-//! import paths (`OSStatus`, the `CFRetained` adopt helper), the
-//! `CVImageBuffer` -> `CVPixelBuffer` cast, and the `CMVideoFormatDescription` /
-//! `CMFormatDescription` type relationship. Each such spot is marked `// NOTE`.
-//! The g2g element contract (caps, pad templates, `process` loop, `Send`) mirrors
-//! `MfDecode` and is the stable part.
+//! This module is `#[cfg(all(target_os = "macos", feature = "vtdecode"))]`, so
+//! it never builds on the Linux dev host; the macOS CI job compiles it and runs
+//! the `m731_videotoolbox` tests (reference-fixture decode to NV12, H.264 +
+//! HEVC), so the decode path is runtime-validated on a real Mac.
 
 // objc2 renamed these free CoreMedia / VideoToolbox functions to associated
-// functions (e.g. `CMBlockBuffer::create_with_memory_block`). VtDecode is
-// compile-pending (never run on a Mac), so the migration is deferred to when it
-// is validated on real hardware; the deprecated calls behave identically. TODO:
-// migrate to the associated-function forms.
+// functions (e.g. `CMBlockBuffer::create_with_memory_block`); the deprecated
+// calls behave identically. TODO: migrate to the associated-function forms
+// (tracked in DESIGN_TODO "Platform: macOS").
 #![allow(deprecated)]
 
 use core::ffi::c_void;
@@ -478,9 +471,8 @@ unsafe extern "C-unwind" fn output_callback(
     if image_buffer.is_null() {
         return; // dropped frame, not an error
     }
-    // NOTE (verify on-device): a CVPixelBufferRef IS a CVImageBufferRef in
-    // CoreVideo (typedef), so this reinterpret is sound; objc2 may instead expose
-    // a checked downcast (`CVImageBuffer` -> `CVPixelBuffer`) to prefer.
+    // A CVPixelBufferRef IS a CVImageBufferRef in CoreVideo (typedef), so this
+    // reinterpret is sound.
     let pb = unsafe { &*(image_buffer as *const CVPixelBuffer) };
 
     let fmt = CVPixelBufferGetPixelFormatType(pb);
@@ -592,9 +584,8 @@ unsafe fn build_session(codec: VideoCodec, params: &[Vec<u8>]) -> Result<Decoder
     if st != 0 {
         return Err(G2gError::Hardware(HardwareError::Other));
     }
-    // NOTE (verify on-device): adopt the +1 Create result. The exact adopt helper
-    // (`CFRetained::from_raw`) and whether CMVideoFormatDescription is the same
-    // type as CMFormatDescription may need a tweak.
+    // Adopt the +1 Create result (the CoreFoundation Create rule);
+    // CMVideoFormatDescription is an alias of CMFormatDescription.
     let format = unsafe {
         CFRetained::from_raw(
             NonNull::new(fmt as *mut CMFormatDescription)

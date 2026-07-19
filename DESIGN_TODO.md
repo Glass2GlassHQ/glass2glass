@@ -13,8 +13,7 @@ SEGMENT, auto-plug / decodebin / playbin) are done. What remains, highest
 leverage first:
 
 1. **Platforms** (largest track). macOS: AVFoundation capture, Core Audio,
-   Metal present, plus on-device validation of `VtDecode` / `VtEncode`.
-   Android: encode, Camera2, AAudio, Surface present.
+   Metal present. Android: encode, Camera2, AAudio, Surface present.
 2. **Egress / transports.** SRT congestion control + real-peer interop, AES-256
    + key rotation; FlexFEC + multi-level burst FEC.
 3. **Depth.** Codec decode to cut reliance on the ffmpeg FFI: AV1 landed both as
@@ -291,14 +290,10 @@ Phased plan:
 
 ## Platform: macOS
 
-- `VtDecode`: first `cargo build` on a Mac to settle the FFI `// NOTE` spots; a
-  `CVPixelBuffer` / `IOSurface` zero-copy domain; registry wiring (`avdec_h264`
-  alias); on-device runtime validation. (HEVC done, M534: `VtDecode::h265` +
-  `CMVideoFormatDescriptionCreateFromHEVCParameterSets` + VPS/SPS/PPS parameter
-  sets; compile-pending like the rest of the module.)
-- `VtEncode`: on-device runtime validation. (HEVC done, M534: `VtEncode::h265` +
-  the `'hvc1'` codec FourCC + the HEVC parameter-set accessor for the keyframe
-  prefix; compile-pending.)
+- `VtDecode`: a `CVPixelBuffer` / `IOSurface` zero-copy domain; registry wiring
+  (`avdec_h264` alias).
+- `VtDecode` / `VtEncode`: migrate the deprecated objc2 free-function calls to
+  the associated-function forms.
 - `avfvideosrc` / `avfaudiosrc` (AVFoundation camera + mic).
 - `coreaudiosink` / `coreaudiosrc`.
 - `metalvideosink` (Metal present).
