@@ -56,8 +56,9 @@ use crate::webrtc_simulcast::{
     rids_high_to_low, send_simulcast, track_of, KeyframeRoutes, LayerAllocator, SimulcastPads,
 };
 use crate::webrtc_util::{
-    add_host_candidate, delete_resource, feed_datagram, ice_restart, post_sdp, select_host_ip,
-    send_transmit, trickle_candidates, TricklePatch, TurnConfig, ICE_RESTART_TIMEOUT,
+    add_host_candidate, delete_resource, drain_pacer, feed_datagram, ice_restart, post_sdp,
+    select_host_ip, send_transmit, trickle_candidates, TricklePatch, TurnConfig,
+    ICE_RESTART_TIMEOUT,
 };
 use crate::webrtcsink::Track;
 
@@ -380,6 +381,14 @@ fn h264_any() -> Caps {
     }
 }
 
+fn opus_mono() -> Caps {
+    Caps::Audio {
+        format: AudioFormat::Opus,
+        channels: 1,
+        sample_rate: 48_000,
+    }
+}
+
 fn opus_stereo() -> Caps {
     Caps::Audio {
         format: AudioFormat::Opus,
@@ -409,6 +418,7 @@ impl MultiInputElement for WebRtcSessionSink {
         CapsConstraint::Accepts(CapsSet::from_alternatives(Vec::from([
             h264_any(),
             opus_stereo(),
+            opus_mono(),
         ])))
     }
 
@@ -665,7 +675,11 @@ async fn run_session(mut a: SessionArgs) {
             // A closed channel = element drop. Clean-EOS teardown is done by the
             // element (`process`); just exit here.
             unit = a.rx.recv() => {
-                let Some(unit) = unit else { return };
+                let Some(unit) = unit else {
+                    // Clean end: flush the pacer tail before dropping the socket.
+                    drain_pacer(&mut a.rtc, &a.socket, &mut a.turn).await;
+                    return;
+                };
                 // Pick this unit's track writer (by mid), discovering the codec's
                 // negotiated payload type on first use.
                 let (mid, pt_slot) = match unit.track {

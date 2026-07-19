@@ -510,6 +510,33 @@ pub(crate) async fn add_ice_candidates(
     Ok(())
 }
 
+/// Drive `rtc` briefly after the media ends so packets still queued in str0m's
+/// pacer reach the wire before the socket drops (graceful EOS flush, M726).
+/// Bounded to a short window: the media is done, this only flushes the tail.
+pub(crate) async fn drain_pacer(rtc: &mut Rtc, socket: &UdpSocket, turn: &mut TurnSet) {
+    use str0m::Output;
+    let deadline = Instant::now() + Duration::from_millis(250);
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            return;
+        }
+        match rtc.poll_output() {
+            Ok(Output::Transmit(t)) => send_transmit(socket, turn, &t).await,
+            Ok(Output::Timeout(t)) => {
+                let wake = t.min(deadline);
+                let wait = wake.saturating_duration_since(Instant::now());
+                if !wait.is_zero() {
+                    tokio::time::sleep(wait).await;
+                }
+                let _ = rtc.handle_input(Input::Timeout(Instant::now()));
+            }
+            Ok(Output::Event(_)) => {}
+            Err(_) => return,
+        }
+    }
+}
+
 /// Send one str0m `Transmit`: a relay-sourced datagram goes through TURN (a Send
 /// indication to the server, after ensuring a permission for the peer); a direct
 /// host/srflx datagram goes straight out. Shared by every webrtc element's poll

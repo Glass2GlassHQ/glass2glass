@@ -615,6 +615,14 @@ fn h264_any() -> Caps {
     }
 }
 
+fn opus_mono() -> Caps {
+    Caps::Audio {
+        format: AudioFormat::Opus,
+        channels: 1,
+        sample_rate: 48_000,
+    }
+}
+
 fn opus_stereo() -> Caps {
     Caps::Audio {
         format: AudioFormat::Opus,
@@ -644,6 +652,7 @@ impl MultiInputElement for LiveKitSink {
         CapsConstraint::Accepts(CapsSet::from_alternatives(Vec::from([
             h264_any(),
             opus_stereo(),
+            opus_mono(),
         ])))
     }
 
@@ -887,7 +896,11 @@ async fn run_session(mut a: SessionArgs) {
                 }
             }
             unit = a.rx.recv() => {
-                let Some(unit) = unit else { return };
+                let Some(unit) = unit else {
+                    // Clean end: flush the pacer tail before dropping the socket.
+                    crate::webrtc_util::drain_pacer(&mut a.rtc, &a.socket, &mut turn).await;
+                    return;
+                };
                 let mid = unit.mid;
                 let pt_slot = match unit.track {
                     Track::Video => &mut video_pt,

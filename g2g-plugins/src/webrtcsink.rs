@@ -61,8 +61,9 @@ use g2g_core::{
 use crate::filesink::io_err;
 use crate::turn::{self, TurnSet};
 use crate::webrtc_util::{
-    add_host_candidate, delete_resource, feed_datagram, ice_restart, post_sdp, select_host_ip,
-    send_transmit, trickle_candidates, TricklePatch, TurnConfig, ICE_RESTART_TIMEOUT,
+    add_host_candidate, delete_resource, drain_pacer, feed_datagram, ice_restart, post_sdp,
+    select_host_ip, send_transmit, trickle_candidates, TricklePatch, TurnConfig,
+    ICE_RESTART_TIMEOUT,
 };
 
 /// Default bounded depth of the element->session media channel. Backpressures
@@ -392,6 +393,14 @@ fn h264_any() -> Caps {
 /// The Opus audio caps this element accepts. Stereo 48 kHz is the WebRTC /
 /// `opusenc` default; other channel counts / rates are a follow-up (the audio
 /// `Caps` has no wildcard fields, so the declared sink caps must be concrete).
+fn opus_mono() -> Caps {
+    Caps::Audio {
+        format: AudioFormat::Opus,
+        channels: 1,
+        sample_rate: 48_000,
+    }
+}
+
 fn opus_stereo() -> Caps {
     Caps::Audio {
         format: AudioFormat::Opus,
@@ -425,6 +434,7 @@ impl AsyncElement for WebRtcSink {
         CapsConstraint::Accepts(CapsSet::from_alternatives(Vec::from([
             h264_any(),
             opus_stereo(),
+            opus_mono(),
         ])))
     }
 
@@ -690,7 +700,11 @@ async fn run_session(
             // A closed channel = element drop. Clean-EOS teardown is done by the
             // element (`process`); just exit here.
             unit = rx.recv() => {
-                let Some(unit) = unit else { return };
+                let Some(unit) = unit else {
+                    // Clean end: flush the pacer tail before dropping the socket.
+                    drain_pacer(&mut rtc, &socket, &mut turn).await;
+                    return;
+                };
                 if pt.is_none() {
                     if let Some(writer) = rtc.writer(mid) {
                         pt = writer

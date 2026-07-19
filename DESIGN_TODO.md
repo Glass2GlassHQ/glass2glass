@@ -626,7 +626,6 @@ Phased plan:
     loss recovery is NACK/RTX). Full renegotiation; data-channel loose ends
     (str0m surfaces no remote-close event, so EOS rides an explicit marker
     message; a WHIP/SFU-signalled data channel vs the P2P `SdpChannel` seam).
-  Smaller loose ends: non-stereo / non-48 kHz Opus; graceful flush on EOS.
   Recommended order: T1 remainders -> T2 -> T4 -> T5.
 
 ## Adaptive streaming (HLS / DASH)
