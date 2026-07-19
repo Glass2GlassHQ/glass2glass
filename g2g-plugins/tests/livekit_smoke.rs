@@ -882,6 +882,7 @@ async fn livekit_duplex_participants_exchange_av() {
     let opus = Arc::new(extract_opus_packets(&opus_fixture).await);
 
     // One duplex participant: paced A/V sources in, counting sinks out.
+    #[allow(clippy::too_many_arguments)] // test harness plumbing, not API
     async fn participant(
         url: String,
         room: String,
