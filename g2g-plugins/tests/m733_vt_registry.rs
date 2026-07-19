@@ -31,6 +31,8 @@ fn temp(tag: &str, ext: &str, bytes: &[u8]) -> std::path::PathBuf {
 
 /// Run `line` and return the sink's consumed-frame count.
 async fn run_line(line: &str) -> u64 {
+    // Honor G2G_DEBUG / G2G_CAPS_TRACE so a red CI run shows the negotiation.
+    g2g_core::log::init_from_env();
     let reg = default_registry();
     let graph = parse_launch(&reg, line).unwrap_or_else(|e| panic!("parses `{line}`: {e}"));
     run_graph(graph, &ZeroClock, 4)
