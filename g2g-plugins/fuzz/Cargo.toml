@@ -20,6 +20,12 @@ default-features = false
 # other targets are no_std modules
 features = ["std", "rtmp"]
 
+# for the parse_launch target: the launch-string parser lives in g2g-core's
+# runtime layer (the untrusted-text surface the g2g-capi C ABI forwards).
+[dependencies.g2g-core]
+path = "../../g2g-core"
+features = ["std", "runtime"]
+
 [profile.release]
 debug = 1
 
@@ -194,6 +200,13 @@ bench = false
 [[bin]]
 name = "rtsp"
 path = "fuzz_targets/rtsp.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parse_launch"
+path = "fuzz_targets/parse_launch.rs"
 test = false
 doc = false
 bench = false

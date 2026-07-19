@@ -38,5 +38,13 @@ $FF -f lavfi -i "$SRC" -c:v libsvtav1 -f obu corpus/av1parse/seed.obu 2>/dev/nul
 # parse_opus_head clears the magic gate
 printf 'OpusHead\x01\x02\x38\x01\x80\xbb\x00\x00\x00\x00\x00' > corpus/opusparse/seed.opushead
 
+# parse_launch: valid gst-launch-style descriptions so the fuzzer starts from
+# real element / property / caps / link / bin syntax (the surface the g2g-capi
+# C entry forwards) rather than rediscovering element names.
+mkdir -p corpus/parse_launch
+printf 'videotestsrc num-buffers=10 ! video/x-raw,width=320,height=240 ! fakesink' > corpus/parse_launch/seed1
+printf 'filesrc location=a.mp4 ! decodebin ! videoconvert ! autovideosink' > corpus/parse_launch/seed2
+printf 'audiotestsrc ! tee name=t ! queue ! fakesink t. ! queue ! fakesink' > corpus/parse_launch/seed3
+
 echo "seed corpora ready:"
 du -sh corpus/* 2>/dev/null

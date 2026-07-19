@@ -144,6 +144,7 @@ dependencies = [
 name = "g2g-plugins-fuzz"
 version = "0.0.0"
 dependencies = [
+ "g2g-core",
  "g2g-plugins",
  "libfuzzer-sys",
 ]
