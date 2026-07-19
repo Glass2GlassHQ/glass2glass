@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M729: duplex renegotiation (`DuplexControl::set_track_enabled` renegotiates the m-line direction mid-session; peers answer re-offers); pause/resume validated on a live P2P loopback.
 - M728: `LiveKitDuplex` full participant (publisher + subscriber PCs over one signalling socket, on the duplex runner); two participants exchanging A/V validated live.
 - M727: terminal fan-out source graph node (`Graph::add_fanout_src` + `FanoutSrcFactory` launch wiring), so session sources (`livekitsrc`, `webrtcwhepsessionsrc`) run inside graphs and launch lines; validated live against a LiveKit server.
 - M726: mono Opus accepted on the WebRTC sinks and a graceful EOS pacer drain (queued RTP flushes before the socket drops).

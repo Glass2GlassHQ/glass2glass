@@ -881,6 +881,126 @@ async fn webrtc_duplex_p2p_loopback() {
 ///     cargo test -p g2g-plugins --features webrtc \
 ///     --test webrtc_whip_smoke webrtc_duplex_p2p_av_loopback -- --ignored --nocapture
 /// ```
+/// M729 renegotiation: the offerer toggles its video track mid-stream via the
+/// `DuplexControl` handle, renegotiating the m-line direction with the peer.
+#[tokio::test]
+#[ignore = "needs H.264 + Ogg-Opus fixtures (G2G_H264_FIXTURE / G2G_OPUS_FIXTURE); localhost, no server"]
+async fn webrtc_duplex_renegotiation_toggles_video() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let (Ok(h264_fixture), Ok(opus_fixture)) = (
+        std::env::var("G2G_H264_FIXTURE"),
+        std::env::var("G2G_OPUS_FIXTURE"),
+    ) else {
+        eprintln!("skipping: set G2G_H264_FIXTURE and G2G_OPUS_FIXTURE to run");
+        return;
+    };
+    let nals = Arc::new(split_annexb(
+        &std::fs::read(&h264_fixture).expect("fixture"),
+    ));
+    let opus_packets = Arc::new(extract_opus_packets(&opus_fixture).await);
+    let (off_sig, ans_sig) = SdpChannel::pair();
+
+    let b_v = Arc::new(AtomicU64::new(0));
+    let b_a = Arc::new(AtomicU64::new(0));
+    let a_v = Arc::new(AtomicU64::new(0));
+    let a_a = Arc::new(AtomicU64::new(0));
+
+    // The offerer disables its VIDEO track mid-stream, then re-enables it: the
+    // answerer's video reception pauses and resumes while audio never stops.
+    let offerer_session = WebRtcDuplexSession::new(SignalRole::Offerer, off_sig, 2);
+    let control = offerer_session.control();
+    let toggles = {
+        let (b_v, b_a) = (b_v.clone(), b_a.clone());
+        async move {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            control.set_track_enabled(0, false);
+            tokio::time::sleep(Duration::from_secs(1)).await; // settle
+            let v_paused_start = b_v.load(Ordering::SeqCst);
+            let a_paused_start = b_a.load(Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            let v_paused_end = b_v.load(Ordering::SeqCst);
+            let a_paused_end = b_a.load(Ordering::SeqCst);
+            control.set_track_enabled(0, true);
+            tokio::time::sleep(Duration::from_secs(1)).await; // settle
+            let v_resumed_start = b_v.load(Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            let v_resumed_end = b_v.load(Ordering::SeqCst);
+            (
+                v_paused_end - v_paused_start,
+                a_paused_end - a_paused_start,
+                v_resumed_end - v_resumed_start,
+            )
+        }
+    };
+
+    let mut offerer_session = offerer_session;
+    let peer_a = async {
+        let mut vsrc = PacedH264Src {
+            nals: nals.clone(),
+            duration: Duration::from_secs(10),
+        };
+        let mut asrc = PacedOpusSrc {
+            packets: opus_packets.clone(),
+            duration: Duration::from_secs(10),
+        };
+        let mut vsink = CountingSink {
+            frames: a_v.clone(),
+        };
+        let mut asink = CountingSink {
+            frames: a_a.clone(),
+        };
+        let clock = ZeroClock;
+        let sources: std::vec::Vec<&mut dyn DynSourceLoop> = std::vec![&mut vsrc, &mut asrc];
+        let sinks: std::vec::Vec<&mut dyn DynAsyncElement> = std::vec![&mut vsink, &mut asink];
+        run_duplex_session(sources, &mut offerer_session, sinks, &clock, 8).await
+    };
+    let peer_b = async {
+        let mut vsrc = PacedH264Src {
+            nals: nals.clone(),
+            duration: Duration::from_secs(10),
+        };
+        let mut asrc = PacedOpusSrc {
+            packets: opus_packets.clone(),
+            duration: Duration::from_secs(10),
+        };
+        let mut sess = WebRtcDuplexSession::new(SignalRole::Answerer, ans_sig, 2);
+        let mut vsink = CountingSink {
+            frames: b_v.clone(),
+        };
+        let mut asink = CountingSink {
+            frames: b_a.clone(),
+        };
+        let clock = ZeroClock;
+        let sources: std::vec::Vec<&mut dyn DynSourceLoop> = std::vec![&mut vsrc, &mut asrc];
+        let sinks: std::vec::Vec<&mut dyn DynAsyncElement> = std::vec![&mut vsink, &mut asink];
+        run_duplex_session(sources, &mut sess, sinks, &clock, 8).await
+    };
+
+    let (windows, ra, rb) = tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::join!(toggles, peer_a, peer_b)
+    })
+    .await
+    .expect("renegotiation loopback completes");
+    ra.expect("offerer duplex ok");
+    rb.expect("answerer duplex ok");
+    let (v_paused, a_paused, v_resumed) = windows;
+    eprintln!(
+        "paused window: video={v_paused} audio={a_paused}; resumed window: video={v_resumed}"
+    );
+    assert!(
+        v_paused < 60,
+        "video mostly stopped while the m-line was inactive, got {v_paused}"
+    );
+    assert!(
+        a_paused > 40,
+        "audio kept flowing through the video pause, got {a_paused}"
+    );
+    assert!(
+        v_resumed > 100,
+        "video resumed after the re-enable, got {v_resumed}"
+    );
+}
+
 #[tokio::test]
 #[ignore = "needs H.264 (G2G_H264_FIXTURE) + Ogg-Opus (G2G_OPUS_FIXTURE) fixtures; runs on localhost"]
 async fn webrtc_duplex_p2p_av_loopback() {

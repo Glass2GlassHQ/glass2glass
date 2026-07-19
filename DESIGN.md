@@ -2008,6 +2008,12 @@ no peer-to-peer mode for WHIP/WHEP. WHIP/WHEP are unidirectional by spec, so
 sendrecv cannot use them: the duplex session instead exchanges SDP **directly**
 between two peers over an `SdpChannel` (an in-process offer/answer transport for a
 P2P loopback; a real SFU signaller — LiveKit, etc. — plugs into the same seam).
+Mid-session renegotiation (M729): a cloneable `DuplexControl` toggles a track,
+batching direction changes (SendRecv <-> Inactive) into one re-offer over the
+`SdpChannel`; the peer answers it in its loop (typed `offer\n` / `answer\n`
+prefixes distinguish the exchange; on glare the answerer role yields). A
+genuinely NEW track has no target pad under the fixed-arity model and stays a
+design question.
 The two roles discover their m-line `Mid`s differently and this asymmetry is
 load-bearing: the **offerer** captures its `Mid`s from `SdpApi::add_media`'s
 return, while the **answerer** learns them from `Event::MediaAdded` after

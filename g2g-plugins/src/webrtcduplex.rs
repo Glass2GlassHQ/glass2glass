@@ -119,6 +119,33 @@ impl SdpChannel {
 }
 
 /// Bidirectional sendrecv WebRTC session. See the module docs.
+/// Cloneable mid-session control for a [`WebRtcDuplexSession`] (M729): toggle
+/// a track on/off, which renegotiates that m-line's direction with the peer
+/// (SendRecv <-> Inactive) over the session's `SdpChannel`. The handle can be
+/// used from any task; the session applies pending toggles in its loop.
+#[derive(Debug, Clone, Default)]
+pub struct DuplexControl {
+    toggles: Arc<std::sync::Mutex<Vec<(usize, bool)>>>,
+}
+
+impl DuplexControl {
+    /// Enable / disable send+receive on track `input` (0 = video, 1 = audio).
+    pub fn set_track_enabled(&self, input: usize, enabled: bool) {
+        self.toggles.lock().unwrap().push((input, enabled));
+    }
+
+    fn drain(&self) -> Vec<(usize, bool)> {
+        core::mem::take(&mut *self.toggles.lock().unwrap())
+    }
+}
+
+/// Message prefixes for MID-SESSION renegotiation over the `SdpChannel` (the
+/// initial offer/answer stays a bare SDP string, so existing relays keep
+/// working): the receiver needs to know whether an SDP is a peer re-offer to
+/// answer or the answer to its own pending re-offer.
+const RENEGO_OFFER: &str = "offer\n";
+const RENEGO_ANSWER: &str = "answer\n";
+
 pub struct WebRtcDuplexSession {
     role: SignalRole,
     sig: Option<SdpChannel>,
@@ -142,6 +169,9 @@ pub struct WebRtcDuplexSession {
     /// so a caller can confirm loss-recovery feedback actually flowed. Shared with
     /// the run loop.
     nacks_seen: Arc<AtomicU64>,
+    /// Mid-session renegotiation control (track enable/disable), shared with
+    /// [`Self::control`] handles.
+    control: DuplexControl,
 }
 
 impl core::fmt::Debug for WebRtcDuplexSession {
@@ -174,7 +204,14 @@ impl WebRtcDuplexSession {
             inputs: alloc::vec![None; track_count],
             reverse: (0..track_count).map(|_| ReverseChannel::new()).collect(),
             nacks_seen: Arc::new(AtomicU64::new(0)),
+            control: DuplexControl::default(),
         }
+    }
+
+    /// A cloneable mid-session control handle (M729): toggling a track
+    /// renegotiates its m-line direction with the peer.
+    pub fn control(&self) -> DuplexControl {
+        self.control.clone()
     }
 
     /// Peak cumulative NACK count str0m has reported for this session (the max of
@@ -316,6 +353,7 @@ impl MultiDuplexSession for WebRtcDuplexSession {
         let turn_pass = self.turn_pass.clone();
         let linger = self.linger;
         let sig = self.sig.take();
+        let control_handle = self.control.clone();
         // The reverse channel of the input pad carrying each track kind, so a
         // remote PLI / BWE naming that track's m-line routes back to the source
         // feeding it (the send pads may be wired in either order).
@@ -422,6 +460,13 @@ impl MultiDuplexSession for WebRtcDuplexSession {
             let mut send_done = false;
             // Set when the local send side ends; the loop finishes after it.
             let mut drain_deadline: Option<Instant> = None;
+            // Mid-session renegotiation (M729): pending toggles come in via the
+            // control handle; one exchange in flight at a time (its answer
+            // clears `renego_pending`). On glare (a peer re-offer arriving
+            // while ours is pending) the ANSWERER role yields: it drops its
+            // pending exchange and answers the peer's offer.
+            let control = control_handle;
+            let mut renego_pending: Option<str0m::change::SdpPendingOffer> = None;
 
             macro_rules! finish {
                 () => {{
@@ -532,8 +577,80 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                     }
                 }
 
+                // Apply pending track toggles as ONE renegotiation exchange
+                // (all direction changes batched into a single re-offer).
+                if renego_pending.is_none() {
+                    let toggles = control.drain();
+                    if !toggles.is_empty() {
+                        let mut api = rtc.sdp_api();
+                        let mut changed = false;
+                        for (idx, enabled) in toggles {
+                            let mid = match inputs.get(idx).copied().flatten() {
+                                Some(Track::Video) => video_mid,
+                                Some(Track::Audio) => audio_mid,
+                                None => None,
+                            };
+                            if let Some(mid) = mid {
+                                let dir = if enabled {
+                                    Direction::SendRecv
+                                } else {
+                                    Direction::Inactive
+                                };
+                                api.set_direction(mid, dir);
+                                changed = true;
+                            }
+                        }
+                        if changed {
+                            if let Some((offer, pending)) = api.apply() {
+                                let msg = alloc::format!("{RENEGO_OFFER}{}", offer.to_sdp_string());
+                                if sig.tx.send(msg).await.is_ok() {
+                                    renego_pending = Some(pending);
+                                }
+                            }
+                        }
+                    }
+                }
+
                 let timeout = deadline.saturating_duration_since(Instant::now());
                 tokio::select! {
+                    msg = sig.rx.recv() => {
+                        match msg {
+                            // Peer signalling closed: media keeps flowing (the
+                            // channel is only needed for renegotiation).
+                            None => {}
+                            Some(m) => {
+                                if let Some(sdp) = m.strip_prefix(RENEGO_ANSWER) {
+                                    if let (Some(pending), Ok(answer)) = (
+                                        renego_pending.take(),
+                                        SdpAnswer::from_sdp_string(sdp),
+                                    ) {
+                                        let _ = rtc.sdp_api().accept_answer(pending, answer);
+                                    }
+                                } else if let Some(sdp) = m.strip_prefix(RENEGO_OFFER) {
+                                    // Glare rule: the answerer role yields its
+                                    // own pending exchange to the peer's offer.
+                                    if renego_pending.is_some()
+                                        && matches!(role, SignalRole::Answerer)
+                                    {
+                                        renego_pending = None;
+                                    }
+                                    if renego_pending.is_none() {
+                                        if let Ok(offer) =
+                                            str0m::change::SdpOffer::from_sdp_string(sdp)
+                                        {
+                                            if let Ok(answer) = rtc.sdp_api().accept_offer(offer) {
+                                                let msg = alloc::format!(
+                                                    "{RENEGO_ANSWER}{}",
+                                                    answer.to_sdp_string()
+                                                );
+                                                let _ = sig.tx.send(msg).await;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     r = socket.recv_from(&mut buf) => {
                         let Ok((n, source)) = r else { finish!() };
                         if !feed_datagram(&mut rtc, &mut turn, local, &buf[..n], source) {
