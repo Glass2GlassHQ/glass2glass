@@ -620,8 +620,7 @@ Phased plan:
     BWE and relays `Event::EgressBitrateEstimate`, `Av1Enc` retargets (rav1e
     context rebuild, hysteresis-gated). Remaining: VP8/VP9 runtime bitrate +
     force-keyframe (needs a libvpx path `vpx-encode` does not expose); Opus
-    bitrate adaptation; `ForceKeyframe`/`Bitrate` relay through an intervening
-    transform.
+    bitrate adaptation.
   - **T4: signalling ecosystem.** Drop the `[patch.crates-io]` str0m fork
     (unpadded media sends) once the LiveKit forwarder fix (livekit#4690, on
     their master) ships in a release, or str0m#1014 lands; a real LiveKit Cloud

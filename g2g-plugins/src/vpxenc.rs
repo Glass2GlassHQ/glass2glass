@@ -209,6 +209,15 @@ impl VpxEnc {
 }
 
 impl AsyncElement for VpxEnc {
+    // vpx-encode exposes no runtime force-keyframe / retarget hooks yet, but
+    // the encoder is still the semantic consumer, so the signal stops here.
+    fn handles_keyframe_requests(&self) -> bool {
+        true
+    }
+
+    fn handles_bitrate_requests(&self) -> bool {
+        true
+    }
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where

@@ -419,6 +419,17 @@ impl LinkReceiver {
     pub(crate) fn qos_slot(&self) -> QosSlot {
         self.qos.clone()
     }
+
+    /// A clone of this link's reverse reconfigure slot (M720), the
+    /// keyframe-request analog of [`qos_slot`](Self::qos_slot).
+    pub(crate) fn reconfigure_slot(&self) -> ReconfigureSlot {
+        self.reconfigure.clone()
+    }
+
+    /// A clone of this link's reverse bitrate slot (M720).
+    pub(crate) fn bitrate_slot(&self) -> BitrateSlot {
+        self.bitrate.clone()
+    }
 }
 
 /// Build a bidirectional inter-element link with `capacity` forward
@@ -543,6 +554,11 @@ pub struct SenderSink {
     /// slot instead, forwarding it one hop toward the source. A generic
     /// transform thus relays QoS without having to observe it in `process`.
     upstream_qos: Option<QosSlot>,
+    /// As `upstream_qos`, for downstream keyframe requests (M720): set on a
+    /// transform whose element does not consume `PushOutcome::Reconfigure`.
+    upstream_reconfigure: Option<ReconfigureSlot>,
+    /// As `upstream_qos`, for downstream bitrate targets (M720).
+    upstream_bitrate: Option<BitrateSlot>,
 }
 
 impl SenderSink {
@@ -555,6 +571,8 @@ impl SenderSink {
             link,
             probe,
             upstream_qos: None,
+            upstream_reconfigure: None,
+            upstream_bitrate: None,
         }
     }
 
@@ -571,30 +589,58 @@ impl SenderSink {
         self.upstream_qos = Some(upstream);
     }
 
+    /// Relay a downstream keyframe-request (reconfigure) onto the upstream link
+    /// (M720), for a transform whose element does not consume it, so a PLI
+    /// crosses any number of pass-through transforms to reach the encoder.
+    pub(crate) fn relay_reconfigure_to(&mut self, upstream: ReconfigureSlot) {
+        self.upstream_reconfigure = Some(upstream);
+    }
+
+    /// Relay a downstream bitrate target onto the upstream link (M720).
+    pub(crate) fn relay_bitrate_to(&mut self, upstream: BitrateSlot) {
+        self.upstream_bitrate = Some(upstream);
+    }
+
     /// Outcome to report once a packet has been enqueued: a pending reverse
     /// signal (reconfigure first, then QoS), else `Accepted`. Reconfigure takes
     /// priority because it is negotiation-critical; QoS is advisory. When a
     /// relay target is set (a transform adapter), an observed QoS is forwarded
     /// upstream and the outcome stays `Accepted` rather than surfacing `Qos`.
-    fn post_send_outcome(&self) -> PushOutcome {
-        if let Some(r) = self.link.reconfigure.take() {
-            PushOutcome::Reconfigure(r)
-        } else if let Some(q) = self.link.qos.take() {
-            match &self.upstream_qos {
-                Some(upstream) => {
-                    upstream.store(q);
-                    PushOutcome::Accepted
-                }
-                None => PushOutcome::Qos(q),
+    /// Drain a pending downstream reconfigure: `ForceKeyframe` is relayed onto
+    /// the upstream link when a relay target is set (M720, a transform that
+    /// does not consume it), so a PLI crosses pass-through elements; anything
+    /// else (or no relay target) is returned for the producer to observe.
+    /// Shared by the pre-send check and the post-send outcome.
+    fn take_reconfigure_or_relay(&self) -> Option<crate::element::Reconfigure> {
+        let r = self.link.reconfigure.take()?;
+        match (&self.upstream_reconfigure, &r) {
+            (Some(upstream), crate::element::Reconfigure::ForceKeyframe) => {
+                upstream.store(r);
+                None
             }
-        } else if let Some(bps) = self.link.bitrate.take() {
-            // Lowest priority: surfaced to the immediate producer (the encoder is
-            // adjacent to a WebRTC sink in practice). Relay through an intervening
-            // transform is a follow-up, like the keyframe-request path.
-            PushOutcome::Bitrate(bps)
-        } else {
-            PushOutcome::Accepted
+            _ => Some(r),
         }
+    }
+
+    fn post_send_outcome(&self) -> PushOutcome {
+        if let Some(r) = self.take_reconfigure_or_relay() {
+            return PushOutcome::Reconfigure(r);
+        }
+        if let Some(q) = self.link.qos.take() {
+            match &self.upstream_qos {
+                Some(upstream) => upstream.store(q),
+                None => return PushOutcome::Qos(q),
+            }
+        }
+        if let Some(bps) = self.link.bitrate.take() {
+            // Lowest priority: surfaced to the immediate producer, or relayed
+            // upstream past a non-consuming transform (M720).
+            match &self.upstream_bitrate {
+                Some(upstream) => upstream.store(bps),
+                None => return PushOutcome::Bitrate(bps),
+            }
+        }
+        PushOutcome::Accepted
     }
 }
 
@@ -611,8 +657,9 @@ impl OutputSink for SenderSink {
             // Pre-send check: if downstream already requested a
             // reconfigure, surface it before this packet enters the
             // link. Caller renegotiates and decides what to do with
-            // `packet` (resend under agreed caps, drop, etc.).
-            if let Some(r) = self.link.reconfigure.take() {
+            // `packet` (resend under agreed caps, drop, etc.). A relayed
+            // ForceKeyframe hops upstream instead (M720).
+            if let Some(r) = self.take_reconfigure_or_relay() {
                 return Ok(PushOutcome::Reconfigure(r));
             }
             // Leaky links drop *data frames* under a full channel rather than

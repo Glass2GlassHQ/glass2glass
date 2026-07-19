@@ -157,6 +157,12 @@ impl AsyncElement for KeyframeObserver {
         Ok(ConfigureOutcome::Accepted)
     }
 
+    // Stands in for an encoder: consumes the keyframe request (M720 would
+    // otherwise relay it past this element toward the source).
+    fn handles_keyframe_requests(&self) -> bool {
+        true
+    }
+
     fn process<'a>(
         &'a mut self,
         packet: PipelinePacket,

@@ -1763,8 +1763,16 @@ where
         // M175: relay a QoS report from the sink (seen on the transform's output
         // link) onto the transform's input link, so the source observes it as
         // `PushOutcome::Qos` and sheds load. Without this the report dies at the
-        // transform (its `process` push outcome is discarded).
+        // transform (its `process` push outcome is discarded). M720 extends the
+        // same hop to keyframe requests / bitrate targets the transform does
+        // not consume itself.
         adapter.relay_qos_to(link1_rx.qos_slot());
+        if !transform.handles_keyframe_requests() {
+            adapter.relay_reconfigure_to(link1_rx.reconfigure_slot());
+        }
+        if !transform.handles_bitrate_requests() {
+            adapter.relay_bitrate_to(link1_rx.bitrate_slot());
+        }
         // β: while the coordinator is alive, race the data link against the
         // re-cascade control channel so a directive is applied promptly. Once
         // control closes (coordinator gone) we degrade to data-only so the

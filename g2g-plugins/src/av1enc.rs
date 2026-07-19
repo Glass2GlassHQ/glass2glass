@@ -362,6 +362,13 @@ fn drain_ready<T: Pixel>(ctx: &mut Context<T>) -> Vec<(Vec<u8>, u64)> {
 }
 
 impl AsyncElement for Av1Enc {
+    fn handles_keyframe_requests(&self) -> bool {
+        true
+    }
+
+    fn handles_bitrate_requests(&self) -> bool {
+        true
+    }
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where

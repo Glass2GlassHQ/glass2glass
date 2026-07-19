@@ -2044,7 +2044,13 @@ in the offer/answer SDP (no trickle channel).
 via `AsyncElement::take_reconfigure` to the encoder (`Av1Enc` forces a rav1e IDR);
 ingress originates PLI on a mid-GOP join. str0m's BWE (`Event::EgressBitrateEstimate`,
 TWCC/REMB) becomes `PushOutcome::Bitrate` via `take_bitrate`, and the encoder
-retargets (rav1e by a hysteresis-gated context rebuild).
+retargets (rav1e by a hysteresis-gated context rebuild). Both signals hop past
+intervening transforms (M720): an element that does not consume them
+(`AsyncElement::handles_keyframe_requests` / `handles_bitrate_requests`, false by
+default; encoders override) has its output adapter relay the pending
+`ForceKeyframe` / bitrate onto its input link, the QoS-relay mechanism
+generalized, so `enc ! h264parse ! webrtc-sink` reaches the encoder. `Propose` /
+`Renegotiate` never relay (they concern the adjacent element's own caps).
 
 **Codec plumbing.** A `Track` enum unifies the per-track facts WebRTC needs to
 agree on: codec (H.264 / Opus), m-line `MediaKind`, and the RTP clock (90 kHz /

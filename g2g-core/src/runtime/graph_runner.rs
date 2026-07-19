@@ -2283,8 +2283,17 @@ async fn transform_arm<'a>(
     // M175: relay a downstream QoS report (seen on this transform's output link)
     // onto its input link, so it reaches the source/decoder one hop at a time
     // through any number of generic transforms, not just the sink's direct
-    // upstream. The element's `process` is unaffected.
+    // upstream. The element's `process` is unaffected. M720 extends the same
+    // hop to keyframe requests and bitrate targets when the element does not
+    // consume them itself, so a PLI / BWE estimate crosses a parser between
+    // the encoder and a WebRTC sink.
     adapter.relay_qos_to(in_rx.qos_slot());
+    if !elem.handles_keyframe_requests() {
+        adapter.relay_reconfigure_to(in_rx.reconfigure_slot());
+    }
+    if !elem.handles_bitrate_requests() {
+        adapter.relay_bitrate_to(in_rx.bitrate_slot());
+    }
     let mut control_open = true;
     loop {
         let packet = if control_open {

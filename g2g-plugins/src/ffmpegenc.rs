@@ -397,6 +397,15 @@ fn copy_plane(dst: &mut [u8], stride: usize, src: &[u8], w: usize, h: usize) {
 }
 
 impl AsyncElement for FfmpegH264Enc {
+    // Bitrate is recorded (a live reopen retarget is deferred), but the
+    // encoder is still the semantic consumer, so the signal stops here.
+    fn handles_keyframe_requests(&self) -> bool {
+        true
+    }
+
+    fn handles_bitrate_requests(&self) -> bool {
+        true
+    }
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
