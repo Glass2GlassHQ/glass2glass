@@ -155,3 +155,17 @@ path = "fuzz_targets/opusparse.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "st2110anc"
+path = "fuzz_targets/st2110anc.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rtmp_chunk"
+path = "fuzz_targets/rtmp_chunk.rs"
+test = false
+doc = false
+bench = false

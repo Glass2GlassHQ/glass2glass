@@ -441,6 +441,18 @@ impl RtmpSession {
         core::mem::take(&mut self.flv)
     }
 
+    /// Fuzzing entry: feed an attacker-controlled chunk stream straight into a
+    /// post-handshake server session (chunk reassembly + AMF0 command parsing,
+    /// the remote surface a malicious publisher reaches). The server handshake
+    /// accepts any C1/C2, so forcing `Streaming` faithfully models that state.
+    /// Exposed only under `--cfg fuzzing` so the public API is unchanged.
+    #[cfg(fuzzing)]
+    pub fn fuzz_feed_chunk_stream(data: &[u8]) {
+        let mut session = Self::new();
+        session.phase = Phase::Streaming;
+        session.push(data);
+    }
+
     fn try_handshake_c0c1(&mut self) -> bool {
         if self.hs_inbound.len() < 1 + HANDSHAKE_SIZE {
             return false;
