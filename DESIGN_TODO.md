@@ -282,6 +282,13 @@ Phased plan:
 
 ## Cleanup
 
+- **Platform codecs in launch graphs.** `MfDecode` / `MfEncode` /
+  `MediaCodecDec` / `MediaCodecEnc` reject the graph runner's pre-fixed output
+  `CapsChanged` and the decoders emit `Rate::Any` output caps, so they fail in
+  a `parse_launch` graph the same way the VideoToolbox pair did before M733.
+  Apply the `FfmpegVideoDec` / `VtDecode` handling (accept + forward the
+  pre-fixed output caps; carry a concrete emitted framerate).
+
 - **Adopt `MemoryDomain::as_system_slice()`.** ~50 sites hand-roll
   `if let MemoryDomain::System(s) = ..` to read CPU bytes; the accessor
   (returning `Option<&[u8]>`) replaces them and stays refutable under no_std
