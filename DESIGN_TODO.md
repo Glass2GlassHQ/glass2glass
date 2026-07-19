@@ -292,8 +292,6 @@ Phased plan:
 
 - `VtDecode`: a `CVPixelBuffer` / `IOSurface` zero-copy domain; registry wiring
   (`avdec_h264` alias).
-- `VtDecode` / `VtEncode`: migrate the deprecated objc2 free-function calls to
-  the associated-function forms.
 - `avfvideosrc` / `avfaudiosrc` (AVFoundation camera + mic).
 - `coreaudiosink` / `coreaudiosrc`.
 - `metalvideosink` (Metal present).

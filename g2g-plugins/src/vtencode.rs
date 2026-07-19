@@ -23,12 +23,6 @@
 //! `m731_videotoolbox` tests (encode to Annex-B + decode round trip, H.264 +
 //! HEVC), so the encode path is runtime-validated on a real Mac.
 
-// objc2 renamed these free CoreMedia functions to associated functions (e.g.
-// `CMSampleBuffer::data_buffer`); the deprecated calls behave identically.
-// TODO: migrate to the associated forms (tracked in DESIGN_TODO
-// "Platform: macOS").
-#![allow(deprecated)]
-
 use core::ffi::{c_char, c_void};
 use core::ptr::{self, NonNull};
 
@@ -39,8 +33,7 @@ use objc2_core_foundation::CFRetained;
 #[allow(non_camel_case_types)]
 type OSStatus = i32;
 use objc2_core_media::{
-    CMBlockBuffer, CMFormatDescription, CMSampleBuffer, CMSampleBufferGetDataBuffer,
-    CMSampleBufferGetFormatDescription, CMTime, CMTimeFlags,
+    CMBlockBuffer, CMFormatDescription, CMSampleBuffer, CMTime, CMTimeFlags,
     CMVideoFormatDescriptionGetH264ParameterSetAtIndex,
     CMVideoFormatDescriptionGetHEVCParameterSetAtIndex,
 };
@@ -467,8 +460,7 @@ unsafe fn sample_to_annexb(
     let hw = || G2gError::Hardware(HardwareError::Other);
 
     // The encoded bytes live in the sample's block buffer in AVCC framing.
-    let block: CFRetained<CMBlockBuffer> =
-        unsafe { CMSampleBufferGetDataBuffer(sample) }.ok_or_else(hw)?;
+    let block: CFRetained<CMBlockBuffer> = unsafe { sample.data_buffer() }.ok_or_else(hw)?;
     let mut total_len: usize = 0;
     let mut len_at: usize = 0;
     // c_char (i8) pointer per `CMBlockBuffer::data_pointer`; cast to u8 for the slice.
@@ -490,7 +482,7 @@ unsafe fn sample_to_annexb(
     let keyframe = au_is_keyframe(codec, &annexb);
     if keyframe {
         // Prepend the parameter sets (Annex-B framed) ahead of the IRAP picture.
-        if let Some(fmt) = unsafe { CMSampleBufferGetFormatDescription(sample) } {
+        if let Some(fmt) = unsafe { sample.format_description() } {
             let mut prefix = unsafe { parameter_sets_annexb(codec, &fmt)? };
             prefix.append(&mut annexb);
             annexb = prefix;
@@ -797,8 +789,7 @@ fn cm_time_invalid() -> CMTime {
 ///
 /// SAFETY: `sample` is a valid `CMSampleBuffer`.
 unsafe fn sample_pts(sample: &CMSampleBuffer) -> CMTime {
-    // NOTE (verify on-device): objc2 exposes CMSampleBufferGetPresentationTimeStamp.
-    unsafe { objc2_core_media::CMSampleBufferGetPresentationTimeStamp(sample) }
+    unsafe { sample.presentation_time_stamp() }
 }
 
 /// Convert a valid `CMTime` to nanoseconds.

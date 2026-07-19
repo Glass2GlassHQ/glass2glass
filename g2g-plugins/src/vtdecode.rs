@@ -28,12 +28,6 @@
 //! the `m731_videotoolbox` tests (reference-fixture decode to NV12, H.264 +
 //! HEVC), so the decode path is runtime-validated on a real Mac.
 
-// objc2 renamed these free CoreMedia / VideoToolbox functions to associated
-// functions (e.g. `CMBlockBuffer::create_with_memory_block`); the deprecated
-// calls behave identically. TODO: migrate to the associated-function forms
-// (tracked in DESIGN_TODO "Platform: macOS").
-#![allow(deprecated)]
-
 use core::ffi::c_void;
 use core::ptr::{self, NonNull};
 
@@ -44,9 +38,8 @@ use objc2_core_foundation::CFRetained;
 #[allow(non_camel_case_types)]
 type OSStatus = i32;
 use objc2_core_media::{
-    CMBlockBuffer, CMBlockBufferCreateWithMemoryBlock, CMBlockBufferReplaceDataBytes,
-    CMFormatDescription, CMSampleBuffer, CMSampleBufferCreateReady, CMSampleTimingInfo, CMTime,
-    CMTimeFlags, CMVideoFormatDescriptionCreateFromH264ParameterSets,
+    CMBlockBuffer, CMFormatDescription, CMSampleBuffer, CMSampleTimingInfo, CMTime, CMTimeFlags,
+    CMVideoFormatDescriptionCreateFromH264ParameterSets,
     CMVideoFormatDescriptionCreateFromHEVCParameterSets,
 };
 use objc2_core_video::{
@@ -57,8 +50,7 @@ use objc2_core_video::{
 };
 use objc2_video_toolbox::{
     VTDecodeFrameFlags, VTDecodeInfoFlags, VTDecompressionOutputCallbackRecord,
-    VTDecompressionSession, VTDecompressionSessionCreate, VTDecompressionSessionDecodeFrame,
-    VTDecompressionSessionWaitForAsynchronousFrames,
+    VTDecompressionSession,
 };
 
 use g2g_core::frame::Frame;
@@ -331,7 +323,7 @@ impl AsyncElement for VtDecode {
                         // SAFETY: live session; synchronous wait on the owning
                         // thread. Discards in-flight frames on a flush.
                         unsafe {
-                            VTDecompressionSessionWaitForAsynchronousFrames(&st.session);
+                            st.session.wait_for_asynchronous_frames();
                         }
                     }
                     if let Some(st) = self.state.as_mut() {
@@ -345,7 +337,7 @@ impl AsyncElement for VtDecode {
                     if let Some(st) = self.state.as_ref() {
                         // SAFETY: live session; drain delayed frames at EOS.
                         unsafe {
-                            VTDecompressionSessionWaitForAsynchronousFrames(&st.session);
+                            st.session.wait_for_asynchronous_frames();
                         }
                     }
                     let decoded = match self.state.as_mut() {
@@ -604,7 +596,7 @@ unsafe fn build_session(codec: VideoCodec, params: &[Vec<u8>]) -> Result<Decoder
     // None destination attributes lets VT pick a (bi-planar NV12) output, which
     // the callback validates.
     let st = unsafe {
-        VTDecompressionSessionCreate(
+        VTDecompressionSession::create(
             None,
             &format,
             None,
@@ -638,7 +630,7 @@ unsafe fn decode_into(state: &DecoderState, avcc: &[u8], pts_ns: u64) -> Result<
     // length lets VT allocate; ReplaceDataBytes fills it).
     let mut block: *mut CMBlockBuffer = ptr::null_mut();
     let st = unsafe {
-        CMBlockBufferCreateWithMemoryBlock(
+        CMBlockBuffer::create_with_memory_block(
             None,
             ptr::null_mut(),
             avcc.len(),
@@ -658,7 +650,7 @@ unsafe fn decode_into(state: &DecoderState, avcc: &[u8], pts_ns: u64) -> Result<
     };
     // SAFETY: copy our AVCC bytes into the freshly allocated block.
     let st = unsafe {
-        CMBlockBufferReplaceDataBytes(
+        CMBlockBuffer::replace_data_bytes(
             NonNull::new(avcc.as_ptr() as *mut c_void)
                 .ok_or(G2gError::Hardware(HardwareError::Other))?,
             &block,
@@ -679,7 +671,7 @@ unsafe fn decode_into(state: &DecoderState, avcc: &[u8], pts_ns: u64) -> Result<
     let mut sample: *mut CMSampleBuffer = ptr::null_mut();
     // SAFETY: block + format are live; arrays outlive the call; out slot valid.
     let st = unsafe {
-        CMSampleBufferCreateReady(
+        CMSampleBuffer::create_ready(
             None,
             // CFRetained<T> -> &T explicitly: Option does not deref-coerce through
             // the &, unlike a bare &T argument.
@@ -704,8 +696,7 @@ unsafe fn decode_into(state: &DecoderState, avcc: &[u8], pts_ns: u64) -> Result<
     // SAFETY: session + sample live; synchronous decode (no async flag), so the
     // callback runs before the wait returns.
     let st = unsafe {
-        VTDecompressionSessionDecodeFrame(
-            &state.session,
+        state.session.decode_frame(
             &sample,
             VTDecodeFrameFlags::empty(),
             ptr::null_mut(),
@@ -717,7 +708,7 @@ unsafe fn decode_into(state: &DecoderState, avcc: &[u8], pts_ns: u64) -> Result<
     }
     // SAFETY: drain so the callback has fired for this frame before we return.
     unsafe {
-        VTDecompressionSessionWaitForAsynchronousFrames(&state.session);
+        state.session.wait_for_asynchronous_frames();
     }
     Ok(())
 }

@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M732: migrate the VideoToolbox elements off the deprecated objc2 free functions to the associated-function forms.
 - M731: `VtDecode` / `VtEncode` runtime-validated on the macOS CI runner (reference-fixture decode and encode round trip, H.264 and HEVC), with persisted hardware conformance evidence.
 - M730: VP8/VP9 runtime force-keyframe and bitrate retarget (encoder rebuild on the reverse signals, hysteresis-gated).
 - M729: duplex renegotiation (`DuplexControl::set_track_enabled` renegotiates the m-line direction mid-session; peers answer re-offers); pause/resume validated on a live P2P loopback.
