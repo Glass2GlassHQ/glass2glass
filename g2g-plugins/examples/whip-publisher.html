@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>g2g WHIP publisher</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #0a0e14; color: #e2e8f0; margin: 24px; }
+    canvas { width: 100%; max-width: 640px; background: #000; border-radius: 8px; }
+    input { width: 28rem; padding: 6px; }
+    button { padding: 6px 14px; cursor: pointer; }
+    pre { color: #94a3b8; white-space: pre-wrap; }
+    a { color: #22d3ee; }
+  </style>
+</head>
+<body>
+  <h1>glass2glass WHIP publisher</h1>
+  <p>
+    Publishes an animated canvas as a WebRTC video track to a WHIP endpoint, so
+    g2g can read it back over WHEP. No camera or microphone: the canvas is
+    captured directly, so the browser shows no permission prompt. With mediamtx,
+    publishing to <code>http://host:8889/browserpub/whip</code> is read back at
+    <code>http://host:8889/browserpub/whep</code>.
+  </p>
+  <canvas id="canvas" width="640" height="480"></canvas>
+  <p>
+    WHIP URL:
+    <input id="url" value="http://127.0.0.1:8889/browserpub/whip">
+    <button onclick="publish()">Publish</button>
+  </p>
+  <pre id="log"></pre>
+  <script>
+    function log(m) { document.getElementById('log').textContent += m + '\n'; }
+
+    // Animated pattern: a moving gradient plus a frame counter, drawn at ~30 fps
+    // so captureStream has real, changing content to encode.
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    let frame = 0;
+    function draw() {
+      const t = frame / 30;
+      const x = (Math.sin(t) * 0.5 + 0.5) * canvas.width;
+      const grad = ctx.createLinearGradient(x, 0, canvas.width - x, canvas.height);
+      grad.addColorStop(0, '#0ea5e9');
+      grad.addColorStop(1, '#7c3aed');
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = '#ffffff';
+      ctx.font = '48px monospace';
+      ctx.fillText('frame ' + frame, 40, canvas.height / 2);
+      frame++;
+      requestAnimationFrame(draw);
+    }
+    draw();
+
+    async function publish() {
+      const url = document.getElementById('url').value;
+      const pc = new RTCPeerConnection();
+      const stream = canvas.captureStream(30);
+      // WHIP: the publisher offers a sendonly video track; the server answers.
+      for (const track of stream.getVideoTracks()) {
+        pc.addTrack(track, stream);
+      }
+      // g2g's WHEP ingest offers H264 only, so pin the sender to H264 (Chrome
+      // defaults to VP8, which WebRtcWhepSrc never negotiates).
+      const h264 = RTCRtpSender.getCapabilities('video').codecs.filter(
+        (c) => c.mimeType === 'video/H264');
+      pc.getTransceivers().forEach((tr) => {
+        tr.direction = 'sendonly';
+        if (h264.length) tr.setCodecPreferences(h264);
+      });
+      pc.oniceconnectionstatechange = () => log('ICE: ' + pc.iceConnectionState);
+
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      log('POST offer -> ' + url);
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/sdp' },
+        body: offer.sdp,
+      });
+      if (!resp.ok) { log('WHIP POST failed: ' + resp.status + ' ' + resp.statusText); return; }
+      const answer = await resp.text();
+      await pc.setRemoteDescription({ type: 'answer', sdp: answer });
+      log('answer applied; sending media...');
+      setInterval(async () => {
+        const stats = await pc.getStats();
+        stats.forEach((s) => {
+          if (s.type === 'outbound-rtp' && s.kind === 'video') {
+            log('video bytesSent=' + (s.bytesSent || 0) + ' framesEncoded=' + (s.framesEncoded || 0));
+          }
+        });
+      }, 2000);
+    }
+  </script>
+</body>
+</html>

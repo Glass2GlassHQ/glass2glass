@@ -51,6 +51,10 @@ const MAX_PACKET: usize = 4_000;
 pub struct OpusEnc {
     channels: u8,
     bitrate: Bitrate,
+    /// The bitrate actually applied to the live encoder, so a repeated BWE
+    /// estimate is not re-applied every batch (`OPUS_SET_BITRATE` is cheap and
+    /// glitch-free, but the ctl still need not run per packet).
+    applied_bps: Option<i32>,
     enc: Option<Encoder>,
     /// Interleaved S16 samples not yet packed into a full Opus frame.
     buf: Vec<i16>,
@@ -85,6 +89,7 @@ impl OpusEnc {
         Self {
             channels: 0,
             bitrate: Bitrate::Auto,
+            applied_bps: None,
             enc: None,
             buf: Vec::new(),
             next_pts_ns: None,
@@ -171,16 +176,35 @@ impl OpusEnc {
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
         let caps = self.output_caps();
-        // Audio has no keyframes; runtime Opus bitrate adaptation is a follow-up.
-        crate::encoder_base::emit_packets(
+        let feedback = crate::encoder_base::emit_packets(
             &mut self.caps_sent,
             &mut self.emitted,
             packets,
             &caps,
             out,
         )
-        .await
-        .map(|_feedback| ())
+        .await?;
+        // Runtime bitrate adaptation (M721): a downstream BWE estimate
+        // retargets the live encoder via `OPUS_SET_BITRATE` (no rebuild, no
+        // glitch). Audio has no keyframes, so `force_keyframe` is ignored.
+        if let Some(bps) = feedback.bitrate_bps {
+            self.retarget(bps);
+        }
+        Ok(())
+    }
+
+    /// Apply a downstream bitrate target to the live encoder, clamped to the
+    /// libopus-valid range, skipping a repeat of the already-applied value.
+    fn retarget(&mut self, bps: u32) {
+        let bps = bps.clamp(500, 512_000) as i32;
+        if self.applied_bps == Some(bps) {
+            return;
+        }
+        if let Some(enc) = self.enc.as_mut() {
+            if enc.set_bitrate(Bitrate::BitsPerSecond(bps)).is_ok() {
+                self.applied_bps = Some(bps);
+            }
+        }
     }
 }
 
@@ -201,6 +225,10 @@ impl AsyncElement for OpusEnc {
             }
             _ => Err(G2gError::CapsMismatch),
         }
+    }
+
+    fn handles_bitrate_requests(&self) -> bool {
+        true
     }
 
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {

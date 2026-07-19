@@ -107,10 +107,17 @@ observe = ["tooling-json", "tokio/net", "tokio/io-util", "tokio/rt", "tokio/time
 # sans-IO WebRTC stack; we drive its handle_input / poll_output loop on a tokio
 # UDP socket, using its pure-Rust `rust-crypto` backend so there is no OpenSSL
 # system dep. WHIP signaling (HTTP offer/answer) reuses reqwest. Implies std +
-# tokio. NOTE: str0m 0.20 needs a rustc newer than the workspace MSRV 1.75; this
-# feature is off by default, so the no_std baseline and MSRV floor are unaffected
-# (same situation noted for AudioResample / rubato).
-webrtc = ["std", "tokio/net", "tokio/time", "tokio/macros", "dep:str0m", "dep:reqwest", "dep:sha1", "dep:hmac", "dep:md-5"]
+# tokio. str0m 0.20 requires rustc 1.85, which is the workspace MSRV; the feature
+# is off by default, so the no_std baseline is unaffected.
+webrtc = ["std", "tokio/net", "tokio/time", "tokio/macros", "tokio/io-util", "dep:str0m", "dep:reqwest", "dep:sha1", "dep:hmac", "dep:md-5", "dep:tokio-native-tls"]
+# Native LiveKit publisher (LiveKitSink, T4): joins a LiveKit room and publishes
+# H.264 (+ optional Opus) over the str0m PeerConnection, with a hand-rolled
+# WebSocket + protobuf signaller (livekit_rtc.proto subset) and an HS256 JWT
+# access token. Layers on the `webrtc` engine and adds the WebSocket client
+# (tokio-tungstenite, shared with remote-ws) + JWT crypto (sha2 + base64). Implies
+# std. `wss://` (LiveKit Cloud) works natively: tungstenite's native-tls is the
+# same TLS stack reqwest (the `webrtc` WHIP client) already links.
+webrtc-livekit = ["webrtc", "dep:tokio-tungstenite", "tokio-tungstenite/native-tls", "futures-util/sink", "dep:sha2", "dep:base64"]
 # ONVIF camera discovery + RTSP stream-URI resolution (OnvifSrc). Hand-rolled
 # WS-Discovery Probe (UDP multicast) and the two media SOAP calls
 # (GetProfiles / GetStreamUri) with a WS-Security UsernameToken digest header.
@@ -133,6 +140,7 @@ vtdecode = [
     "dep:objc2-core-media",
     "dep:objc2-core-video",
     "dep:objc2-core-foundation",
+    "dep:objc2-io-surface",
 ]
 # macOS hardware H.264 encode via VideoToolbox (VTCompressionSession); same objc2
 # framework deps as vtdecode, plus the compression-session bindings.
@@ -143,6 +151,57 @@ vtencode = [
     "dep:objc2-core-media",
     "dep:objc2-core-video",
     "dep:objc2-core-foundation",
+]
+# AVFoundation camera (AvfVideoSrc) + mic (AvfAudioSrc) capture (M738).
+# macOS-only, implies std; both devices are permission-gated (TCC) in a real
+# app and absent on the CI runner, which probes the denial path.
+avfoundation = [
+    "std",
+    "dep:objc2",
+    "dep:objc2-av-foundation",
+    "dep:objc2-avf-audio",
+    "dep:dispatch2",
+    "dep:objc2-foundation",
+    "dep:objc2-core-media",
+    "dep:objc2-core-video",
+    "dep:objc2-core-foundation",
+    "dep:objc2-core-audio-types",
+    "dep:objc2-io-surface",
+]
+# ScreenCaptureKit display capture (ScreenCaptureSrc, M739). macOS-only,
+# implies std; screen recording is TCC permission-gated, the CI runner probes
+# the denial path.
+screencapture = [
+    "std",
+    "dep:objc2",
+    "dep:objc2-screen-capture-kit",
+    "dep:block2",
+    "dep:dispatch2",
+    "dep:objc2-foundation",
+    "dep:objc2-core-media",
+    "dep:objc2-core-video",
+    "dep:objc2-core-foundation",
+    "dep:objc2-io-surface",
+]
+# macOS Core Audio PCM render (CoreAudioSink) + capture (CoreAudioSrc) via the
+# AudioToolbox AudioQueue API (M737). macOS-only, implies std.
+coreaudio = [
+    "std",
+    "dep:objc2-audio-toolbox",
+    "dep:objc2-core-audio-types",
+]
+# macOS Metal present sink (M736): renders NV12 (System bytes or the M735
+# zero-copy CVPixelBuffer domain, imported via CVMetalTextureCache) to a
+# CAMetalLayer drawable. macOS-only, implies std, like vtdecode.
+metal-sink = [
+    "std",
+    "dep:objc2",
+    "dep:objc2-metal",
+    "dep:objc2-quartz-core",
+    "dep:objc2-core-video",
+    "dep:objc2-core-foundation",
+    "dep:objc2-foundation",
+    "dep:objc2-io-surface",
 ]
 # Android hardware H.264 decode via the NDK MediaCodec (AMediaCodec) through the
 # `ndk` crate. Android-only (the dep lives under [target.'cfg(target_os =
@@ -474,9 +533,8 @@ dav1d = ["std", "dep:dav1d"]
 # safe API, so the element is Dav1dDec with the backend swapped from libdav1d (FFI)
 # to Rust. default-features = false drops its NASM asm and pulls only bitdepth_8 /
 # bitdepth_16, so it builds with no system deps and reaches pure-Rust / wasm targets
-# the libdav1d path cannot. Implies std; the decoder needs alloc + threads. NOTE:
-# re_rav1d's MSRV is 1.79 (above the workspace 1.75), so this feature raises the
-# build floor to 1.79; the no_std baseline stays at 1.75.
+# the libdav1d path cannot. Implies std; the decoder needs alloc + threads.
+# re_rav1d's MSRV is 1.79, within the workspace 1.85.
 rav1d = ["std", "dep:re_rav1d"]
 # VP8 / VP9 encode via libvpx through the `vpx-encode` crate (FFI), the GStreamer
 # vp8enc/vp9enc analog. NOT pure Rust: it links the system `libvpx` and runs
@@ -585,7 +643,7 @@ serde_yaml = { version = "0.9", optional = true }
 rhai = { version = "1", optional = true, default-features = false, features = ["std", "sync"] }
 # Pure-Rust AV1 encoder (av1-encode feature). default-features = false drops the
 # NASM assembly, the CLI `binaries` deps, and `threading`: a portable software
-# encoder with no system dependencies. MSRV 1.74 (within the workspace 1.75).
+# encoder with no system dependencies. MSRV 1.74 (within the workspace 1.85).
 rav1e = { version = "0.8", optional = true, default-features = false }
 # libdav1d AV1 decoder bindings (dav1d feature). Safe Rust wrapper over dav1d-sys,
 # which links the system libdav1d (pkg-config) at build.
@@ -626,8 +684,8 @@ str0m = { version = "0.20", optional = true, default-features = false, features 
 # xmlparser), no system deps.
 roxmltree = { version = "0.21", optional = true }
 # Pure-Rust AES + CBC for HLS AES-128 segment decryption (`#EXT-X-KEY`, hls
-# feature). Pinned to the cipher-0.4 line (aes 0.8 / cbc 0.1, MSRV 1.56): cbc 0.2
-# / aes 0.9 need rustc 1.85, above the workspace MSRV 1.75.
+# feature). Pinned to the cipher-0.4 line (aes 0.8 / cbc 0.1, MSRV 1.56); the cbc
+# 0.2 / aes 0.9 line (rustc 1.85) is left unadopted to avoid an untested bump.
 aes = { version = "0.8", optional = true }
 cbc = { version = "0.1", optional = true }
 # SRT encryption (srt feature): AES-CTR payload cipher, a passphrase-derived KEK
@@ -658,6 +716,9 @@ futures-util = { version = "0.3", optional = true, default-features = false, fea
 # tungstenite version. Default features (connect + handshake, no TLS) suffice: the
 # pair speaks plain ws:// (wrap in a TLS terminator for wss://).
 tokio-tungstenite = { version = "0.24", optional = true }
+# TLS for TURN-over-TLS (`turns:`) and the LiveKit `wss://` signalling: the same
+# native-tls stack reqwest's default-tls already links.
+tokio-native-tls = { version = "0.3", optional = true }
 url = { version = "2", optional = true }
 bytes = { version = "1", optional = true }
 # TrueType / OpenType font parser + rasterizer (truetype-overlay feature, M409).
@@ -754,6 +815,9 @@ objc2-core-video = { version = "0.3", optional = true, default-features = false,
     "CVBuffer",
     "CVImageBuffer",
     "CVPixelBuffer",
+    # CVPixelBufferGetIOSurface, for the M735 zero-copy domain's backing check.
+    "CVPixelBufferIOSurface",
+    "objc2-io-surface",
 ] }
 objc2-core-foundation = { version = "0.3", optional = true, default-features = false, features = [
     "std",
@@ -761,6 +825,105 @@ objc2-core-foundation = { version = "0.3", optional = true, default-features = f
     "CFString",
     "CFNumber",
     "CFDictionary",
+    # CGSize, for the CAMetalLayer drawable size (metal-sink).
+    "CFCGTypes",
+] }
+# NSString / NSError, for compiling the metal-sink's MSL shader source.
+objc2-foundation = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "NSString",
+    "NSError",
+    "NSObject",
+] }
+# Not used directly: objc2-core-video's CVPixelBufferGetIOSurface needs
+# IOSurfaceRef's CoreFoundation `Type` impl, which lives behind THIS crate's
+# `objc2-core-foundation` feature and is not forwarded by core-video.
+objc2-io-surface = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "IOSurfaceRef",
+    "objc2-core-foundation",
+] }
+# Metal present sink (M736): device/queue/pipeline + CAMetalLayer drawables.
+objc2-metal = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    # newTextureWithDescriptor:iosurface:plane:, the zero-copy import.
+    "objc2-io-surface",
+    "MTLAllocation",
+    "MTLDevice",
+    "MTLCommandQueue",
+    "MTLCommandBuffer",
+    "MTLCommandEncoder",
+    "MTLRenderCommandEncoder",
+    "MTLRenderPass",
+    "MTLRenderPipeline",
+    "MTLLibrary",
+    "MTLTexture",
+    "MTLPixelFormat",
+    "MTLResource",
+    "MTLDrawable",
+    "MTLBlitCommandEncoder",
+    "MTLBuffer",
+    "MTLTypes",
+] }
+objc2-quartz-core = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "objc2-metal",
+    "objc2-core-foundation",
+    "CALayer",
+    "CAMetalLayer",
+] }
+# AVFoundation camera + mic capture (M738).
+objc2-av-foundation = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "objc2-core-media",
+    "objc2-core-video",
+    # setSampleBufferDelegate:queue: takes a DispatchQueue, gated on this.
+    "dispatch2",
+    "AVCaptureSession",
+    "AVCaptureSessionPreset",
+    "AVCaptureDevice",
+    "AVCaptureInput",
+    "AVCaptureOutputBase",
+    "AVCaptureVideoDataOutput",
+    "AVCaptureAudioDataOutput",
+    "AVMediaFormat",
+] }
+# The serial queue AVFoundation delivers capture callbacks on.
+dispatch2 = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+] }
+# ScreenCaptureKit display capture (M739).
+objc2-screen-capture-kit = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "objc2-core-media",
+    "objc2-core-foundation",
+    "objc2-core-graphics",
+    "block2",
+    "dispatch2",
+    "SCShareableContent",
+    "SCStream",
+    "SCError",
+] }
+block2 = { version = "0.6", optional = true, default-features = false, features = [
+    "std",
+] }
+# The AV audio-settings key statics (AVFormatIDKey etc.) live in AVFAudio,
+# not AVFoundation.
+objc2-avf-audio = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "AVAudioSettings",
+] }
+# Core Audio render / capture (M737) via the AudioToolbox AudioQueue C API.
+objc2-audio-toolbox = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "objc2-core-audio-types",
+    # AudioQueueNewOutput/NewInput take CFRunLoop params, gated on this.
+    "objc2-core-foundation",
+    "AudioQueue",
+] }
+objc2-core-audio-types = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "CoreAudioBaseTypes",
 ] }
 
 # NDK MediaCodec bindings are Android-only; target-gate so other platforms never

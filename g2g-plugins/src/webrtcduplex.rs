@@ -29,6 +29,7 @@
 
 use core::future::Future;
 use core::pin::Pin;
+use core::sync::atomic::{AtomicU64, Ordering};
 use core::time::Duration;
 
 use alloc::boxed::Box;
@@ -45,7 +46,6 @@ use str0m::bwe::{Bitrate, BweKind};
 use str0m::change::{SdpAnswer, SdpOffer};
 use str0m::crypto::from_feature_flags;
 use str0m::media::{Direction, MediaKind, Mid, Pt};
-use str0m::net::{Protocol, Receive};
 use str0m::{Event, IceConnectionState, Input, Output, RtcConfig};
 
 use g2g_core::frame::Frame;
@@ -58,7 +58,8 @@ use g2g_core::{
 
 use crate::filesink::io_err;
 use crate::h264util::h264_au_is_keyframe;
-use crate::webrtc_util::{add_ice_candidates, select_host_ip};
+use crate::turn::TurnSet;
+use crate::webrtc_util::{add_ice_candidates, feed_datagram, select_host_ip, send_transmit};
 use crate::webrtcsink::Track;
 
 /// The two tracks a duplex session can carry, in pad order: video on pad 0, audio
@@ -97,9 +98,54 @@ impl SdpChannel {
             SdpChannel { tx: b_tx, rx: a_rx },
         )
     }
+
+    /// Build a channel from raw halves, so a signaller (or a test relay) can
+    /// splice itself between two sessions, e.g. to rewrite ICE candidates through
+    /// a proxy socket. `pair` is the direct-connect shortcut over this.
+    pub fn from_halves(tx: mpsc::Sender<String>, rx: mpsc::Receiver<String>) -> Self {
+        SdpChannel { tx, rx }
+    }
+
+    /// Send one SDP blob (offer or answer) to the peer. `false` if the peer
+    /// dropped its receiver.
+    pub async fn send_sdp(&self, sdp: String) -> bool {
+        self.tx.send(sdp).await.is_ok()
+    }
+
+    /// Await the next SDP blob from the peer, `None` once the peer closed.
+    pub async fn recv_sdp(&mut self) -> Option<String> {
+        self.rx.recv().await
+    }
 }
 
 /// Bidirectional sendrecv WebRTC session. See the module docs.
+/// Cloneable mid-session control for a [`WebRtcDuplexSession`] (M729): toggle
+/// a track on/off, which renegotiates that m-line's direction with the peer
+/// (SendRecv <-> Inactive) over the session's `SdpChannel`. The handle can be
+/// used from any task; the session applies pending toggles in its loop.
+#[derive(Debug, Clone, Default)]
+pub struct DuplexControl {
+    toggles: Arc<std::sync::Mutex<Vec<(usize, bool)>>>,
+}
+
+impl DuplexControl {
+    /// Enable / disable send+receive on track `input` (0 = video, 1 = audio).
+    pub fn set_track_enabled(&self, input: usize, enabled: bool) {
+        self.toggles.lock().unwrap().push((input, enabled));
+    }
+
+    fn drain(&self) -> Vec<(usize, bool)> {
+        core::mem::take(&mut *self.toggles.lock().unwrap())
+    }
+}
+
+/// Message prefixes for MID-SESSION renegotiation over the `SdpChannel` (the
+/// initial offer/answer stays a bare SDP string, so existing relays keep
+/// working): the receiver needs to know whether an SDP is a peer re-offer to
+/// answer or the answer to its own pending re-offer.
+const RENEGO_OFFER: &str = "offer\n";
+const RENEGO_ANSWER: &str = "answer\n";
+
 pub struct WebRtcDuplexSession {
     role: SignalRole,
     sig: Option<SdpChannel>,
@@ -107,6 +153,9 @@ pub struct WebRtcDuplexSession {
     /// `input_count` and `output_count` (input i and output i share m-line i).
     track_count: usize,
     stun_server: Option<String>,
+    turn_server: Option<String>,
+    turn_user: String,
+    turn_pass: String,
     /// How long to keep draining the peer after the local send side ends (its
     /// sources reached EOS), so in-flight received frames are not cut off.
     linger: Duration,
@@ -116,6 +165,13 @@ pub struct WebRtcDuplexSession {
     /// m-line is routed back to the source feeding that pad. Shared (Arc-backed)
     /// with the runner, which polls each after every push from its source.
     reverse: Vec<ReverseChannel>,
+    /// Peak cumulative NACK count observed across str0m's ingress / egress stats,
+    /// so a caller can confirm loss-recovery feedback actually flowed. Shared with
+    /// the run loop.
+    nacks_seen: Arc<AtomicU64>,
+    /// Mid-session renegotiation control (track enable/disable), shared with
+    /// [`Self::control`] handles.
+    control: DuplexControl,
 }
 
 impl core::fmt::Debug for WebRtcDuplexSession {
@@ -141,16 +197,51 @@ impl WebRtcDuplexSession {
             sig: Some(sig),
             track_count,
             stun_server: None,
+            turn_server: None,
+            turn_user: String::new(),
+            turn_pass: String::new(),
             linger: Duration::from_millis(1500),
             inputs: alloc::vec![None; track_count],
             reverse: (0..track_count).map(|_| ReverseChannel::new()).collect(),
+            nacks_seen: Arc::new(AtomicU64::new(0)),
+            control: DuplexControl::default(),
         }
+    }
+
+    /// A cloneable mid-session control handle (M729): toggling a track
+    /// renegotiates its m-line direction with the peer.
+    pub fn control(&self) -> DuplexControl {
+        self.control.clone()
+    }
+
+    /// Peak cumulative NACK count str0m has reported for this session (the max of
+    /// nacks sent as a receiver and nacks received as a sender). Non-zero proves
+    /// loss-recovery feedback flowed, e.g. under a lossy link with RTX active.
+    pub fn nacks_seen(&self) -> u64 {
+        self.nacks_seen.load(Ordering::Relaxed)
     }
 
     /// Set a STUN server (`host:port`) for ICE NAT traversal (host-only by
     /// default, which is all a same-host P2P loopback needs).
     pub fn with_stun_server(mut self, server: impl Into<String>) -> Self {
         self.stun_server = Some(server.into());
+        self
+    }
+
+    /// Set a TURN relay (a `host:port` / `turn:` / `turns:` server, or a
+    /// comma-separated list) + long-term credentials, as on the WHIP/WHEP
+    /// elements. The relayed candidates ride in the offer/answer SDP (the
+    /// duplex signal channel has no trickle), so allocation happens before the
+    /// exchange.
+    pub fn with_turn_server(
+        mut self,
+        server: impl Into<String>,
+        username: impl Into<String>,
+        password: impl Into<String>,
+    ) -> Self {
+        self.turn_server = Some(server.into());
+        self.turn_user = username.into();
+        self.turn_pass = password.into();
         self
     }
 
@@ -257,8 +348,12 @@ impl MultiDuplexSession for WebRtcDuplexSession {
         let track_count = self.track_count;
         let inputs = self.inputs.clone();
         let stun = self.stun_server.clone();
+        let turn_server = self.turn_server.clone();
+        let turn_user = self.turn_user.clone();
+        let turn_pass = self.turn_pass.clone();
         let linger = self.linger;
         let sig = self.sig.take();
+        let control_handle = self.control.clone();
         // The reverse channel of the input pad carrying each track kind, so a
         // remote PLI / BWE naming that track's m-line routes back to the source
         // feeding it (the send pads may be wired in either order).
@@ -270,6 +365,7 @@ impl MultiDuplexSession for WebRtcDuplexSession {
         };
         let video_reverse = reverse_for(Track::Video);
         let audio_reverse = reverse_for(Track::Audio);
+        let nacks_seen = self.nacks_seen.clone();
         Box::pin(async move {
             let hw = || G2gError::Hardware(HardwareError::Other);
             let mut sig = sig.ok_or_else(hw)?;
@@ -286,10 +382,21 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                 // Congestion control so the peer's BWE estimate arrives as
                 // `Event::EgressBitrateEstimate`, routed to the video track below.
                 .enable_bwe(Some(Bitrate::bps(2_000_000)))
+                // Periodic stats surface NACK counts (loss-recovery feedback), read
+                // back via `nacks_seen`.
+                .set_stats_interval(Some(Duration::from_millis(500)))
                 .build(Instant::now());
-            // Host (and optional reflexive) candidates ride in the SDP, so they
-            // must be added before the offer/answer is generated below.
+            // Host (and optional reflexive / relayed) candidates ride in the
+            // SDP, so they must be added before the offer/answer is generated
+            // below (M719: the duplex path gained TURN).
             add_ice_candidates(&mut rtc, &socket, stun.as_deref()).await?;
+            let mut turn = match turn_server.as_deref() {
+                Some(servers) => {
+                    TurnSet::setup(&mut rtc, &socket, servers, &turn_user, &turn_pass).await
+                }
+                None => TurnSet::empty(),
+            };
+            let mut refresh_at = Instant::now() + crate::turn::REFRESH_INTERVAL;
 
             // Per-kind `Mid` and negotiated payload type, for both directions.
             // The offerer learns its `Mid`s from `add_media` (str0m does not emit
@@ -353,6 +460,13 @@ impl MultiDuplexSession for WebRtcDuplexSession {
             let mut send_done = false;
             // Set when the local send side ends; the loop finishes after it.
             let mut drain_deadline: Option<Instant> = None;
+            // Mid-session renegotiation (M729): pending toggles come in via the
+            // control handle; one exchange in flight at a time (its answer
+            // clears `renego_pending`). On glare (a peer re-offer arriving
+            // while ours is pending) the ANSWERER role yields: it drops its
+            // pending exchange and answers the peer's offer.
+            let control = control_handle;
+            let mut renego_pending: Option<str0m::change::SdpPendingOffer> = None;
 
             macro_rules! finish {
                 () => {{
@@ -369,9 +483,7 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                 let deadline = loop {
                     match rtc.poll_output() {
                         Ok(Output::Timeout(t)) => break t,
-                        Ok(Output::Transmit(t)) => {
-                            let _ = socket.send_to(&t.contents, t.destination).await;
-                        }
+                        Ok(Output::Transmit(t)) => send_transmit(&socket, &mut turn, &t).await,
                         // The answerer learns its m-line `Mid`s here (the offerer
                         // captured them from `add_media`); harmless to set again.
                         Ok(Output::Event(Event::MediaAdded(m))) => match m.kind {
@@ -422,6 +534,16 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                                 frames.push((port, pts_ns, d.data.to_vec()));
                             }
                         }
+                        // Loss-recovery feedback counters (cumulative): nacks sent
+                        // as a receiver (ingress) and nacks received as a sender
+                        // (egress). Keep the peak so a caller can confirm RTX was
+                        // exercised under loss.
+                        Ok(Output::Event(Event::MediaIngressStats(s))) => {
+                            nacks_seen.fetch_max(s.nacks, Ordering::Relaxed);
+                        }
+                        Ok(Output::Event(Event::MediaEgressStats(s))) => {
+                            nacks_seen.fetch_max(s.nacks, Ordering::Relaxed);
+                        }
                         Ok(Output::Event(_)) => {}
                         Err(_) => finish!(),
                     }
@@ -455,15 +577,89 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                     }
                 }
 
+                // Apply pending track toggles as ONE renegotiation exchange
+                // (all direction changes batched into a single re-offer).
+                if renego_pending.is_none() {
+                    let toggles = control.drain();
+                    if !toggles.is_empty() {
+                        let mut api = rtc.sdp_api();
+                        let mut changed = false;
+                        for (idx, enabled) in toggles {
+                            let mid = match inputs.get(idx).copied().flatten() {
+                                Some(Track::Video) => video_mid,
+                                Some(Track::Audio) => audio_mid,
+                                None => None,
+                            };
+                            if let Some(mid) = mid {
+                                let dir = if enabled {
+                                    Direction::SendRecv
+                                } else {
+                                    Direction::Inactive
+                                };
+                                api.set_direction(mid, dir);
+                                changed = true;
+                            }
+                        }
+                        if changed {
+                            if let Some((offer, pending)) = api.apply() {
+                                let msg = alloc::format!("{RENEGO_OFFER}{}", offer.to_sdp_string());
+                                if sig.tx.send(msg).await.is_ok() {
+                                    renego_pending = Some(pending);
+                                }
+                            }
+                        }
+                    }
+                }
+
                 let timeout = deadline.saturating_duration_since(Instant::now());
                 tokio::select! {
+                    msg = sig.rx.recv() => {
+                        match msg {
+                            // Peer signalling closed: media keeps flowing (the
+                            // channel is only needed for renegotiation).
+                            None => {}
+                            Some(m) => {
+                                if let Some(sdp) = m.strip_prefix(RENEGO_ANSWER) {
+                                    if let (Some(pending), Ok(answer)) = (
+                                        renego_pending.take(),
+                                        SdpAnswer::from_sdp_string(sdp),
+                                    ) {
+                                        let _ = rtc.sdp_api().accept_answer(pending, answer);
+                                    }
+                                } else if let Some(sdp) = m.strip_prefix(RENEGO_OFFER) {
+                                    // Glare rule: the answerer role yields its
+                                    // own pending exchange to the peer's offer.
+                                    if renego_pending.is_some()
+                                        && matches!(role, SignalRole::Answerer)
+                                    {
+                                        renego_pending = None;
+                                    }
+                                    if renego_pending.is_none() {
+                                        if let Ok(offer) =
+                                            str0m::change::SdpOffer::from_sdp_string(sdp)
+                                        {
+                                            if let Ok(answer) = rtc.sdp_api().accept_offer(offer) {
+                                                let msg = alloc::format!(
+                                                    "{RENEGO_ANSWER}{}",
+                                                    answer.to_sdp_string()
+                                                );
+                                                let _ = sig.tx.send(msg).await;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     r = socket.recv_from(&mut buf) => {
                         let Ok((n, source)) = r else { finish!() };
-                        if let Ok(contents) = (&buf[..n]).try_into() {
-                            let input = Input::Receive(Instant::now(),
-                                Receive { proto: Protocol::Udp, source, destination: local, contents });
-                            if rtc.handle_input(input).is_err() { finish!(); }
+                        if !feed_datagram(&mut rtc, &mut turn, local, &buf[..n], source) {
+                            finish!();
                         }
+                    }
+                    _ = tokio::time::sleep_until(tokio::time::Instant::from_std(refresh_at)), if !turn.is_empty() => {
+                        turn.refresh_all(&socket).await;
+                        refresh_at = Instant::now() + crate::turn::REFRESH_INTERVAL;
                     }
                     inb = inbound.recv(), if !send_done => {
                         match inb {

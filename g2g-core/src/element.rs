@@ -81,7 +81,10 @@ pub enum PushOutcome {
     /// relaying its congestion-control / BWE estimate). Advisory: an encoder
     /// upstream should retarget its bitrate. Lowest priority of the reverse
     /// signals (Reconfigure > Qos > Bitrate); a held estimate surfaces on a
-    /// later push, and BWE updates far slower than the frame rate.
+    /// later push, and BWE updates far slower than the frame rate. A target of
+    /// `0` is the shed-layer idle hint (M722): the consumer downstream is
+    /// discarding this stream (a starved simulcast layer), so the encoder
+    /// should mostly stop encoding until a non-zero target resumes it.
     Bitrate(u32),
 }
 
@@ -240,6 +243,22 @@ pub trait AsyncElement: ElementBound {
     /// and retargets. Called by the runner after each `process`. Default: none.
     fn take_bitrate(&mut self) -> Option<u32> {
         None
+    }
+
+    /// Whether this element consumes a downstream keyframe request
+    /// (`PushOutcome::Reconfigure(ForceKeyframe)`) itself, i.e. it is an
+    /// encoder that forces an IDR. Default `false`: the runner then relays the
+    /// request onto the element's input link (M720), so a PLI crosses any
+    /// number of pass-through transforms (a parser between the encoder and a
+    /// WebRTC sink) to reach the encoder.
+    fn handles_keyframe_requests(&self) -> bool {
+        false
+    }
+
+    /// As [`Self::handles_keyframe_requests`], for a downstream bitrate target
+    /// (`PushOutcome::Bitrate`): an encoder that retargets returns `true`.
+    fn handles_bitrate_requests(&self) -> bool {
+        false
     }
 
     /// Declares that this element changes the caps "domain" between its
@@ -431,6 +450,16 @@ pub trait DynAsyncElement: ElementBound {
         None
     }
 
+    /// Dyn-safe mirror of [`AsyncElement::handles_keyframe_requests`] (M720).
+    fn handles_keyframe_requests(&self) -> bool {
+        false
+    }
+
+    /// Dyn-safe mirror of [`AsyncElement::handles_bitrate_requests`] (M720).
+    fn handles_bitrate_requests(&self) -> bool {
+        false
+    }
+
     /// Dyn-safe mirror of [`AsyncElement::properties`], so a `gst-inspect` dump
     /// and the `gst-launch` parser can introspect / set an erased element.
     fn properties(&self) -> &'static [PropertySpec] {
@@ -547,6 +576,14 @@ impl<T: AsyncElement> DynAsyncElement for T {
         AsyncElement::take_bitrate(self)
     }
 
+    fn handles_keyframe_requests(&self) -> bool {
+        AsyncElement::handles_keyframe_requests(self)
+    }
+
+    fn handles_bitrate_requests(&self) -> bool {
+        AsyncElement::handles_bitrate_requests(self)
+    }
+
     fn properties(&self) -> &'static [PropertySpec] {
         AsyncElement::properties(self)
     }
@@ -649,6 +686,14 @@ impl<'b> DynAsyncElement for &'b mut (dyn DynAsyncElement + 'b) {
 
     fn take_bitrate(&mut self) -> Option<u32> {
         (**self).take_bitrate()
+    }
+
+    fn handles_keyframe_requests(&self) -> bool {
+        (**self).handles_keyframe_requests()
+    }
+
+    fn handles_bitrate_requests(&self) -> bool {
+        (**self).handles_bitrate_requests()
     }
 
     fn properties(&self) -> &'static [PropertySpec] {

@@ -628,6 +628,38 @@ mod factory {
         build: fn(usize) -> Box<dyn DynMultiOutputElement>,
     }
 
+    /// Factory for a terminal fan-out *source* (M727): a 0-in / N-out
+    /// [`MultiOutputSource`](crate::fanout::MultiOutputSource) generating every
+    /// output itself (a WebRTC session receiving its tracks). The build takes
+    /// the linked output count so the parser can validate it against the
+    /// element's intrinsic port count.
+    pub struct FanoutSrcFactory {
+        name: &'static str,
+        build: fn(usize) -> Box<dyn crate::fanout::DynMultiOutputSource>,
+    }
+
+    impl FanoutSrcFactory {
+        pub fn new(
+            name: &'static str,
+            build: fn(usize) -> Box<dyn crate::fanout::DynMultiOutputSource>,
+        ) -> Self {
+            Self { name, build }
+        }
+
+        /// This factory's element name.
+        pub fn name(&self) -> &'static str {
+            self.name
+        }
+    }
+
+    impl core::fmt::Debug for FanoutSrcFactory {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            f.debug_struct("FanoutSrcFactory")
+                .field("name", &self.name)
+                .finish_non_exhaustive()
+        }
+    }
+
     impl DemuxFactory {
         /// Register a fan-out demuxer by name and an output-count constructor
         /// (`|n| Box::new(MyDemux::new(n, ...))`).
@@ -946,6 +978,7 @@ mod factory {
         launch: Vec<LaunchFactory>,
         muxers: Vec<MuxerFactory>,
         demuxes: Vec<DemuxFactory>,
+        fanout_srcs: Vec<FanoutSrcFactory>,
         /// gst-canonical-name aliases (M192): each maps a name to an ordered list
         /// of registered targets, the first that is actually registered wins. A
         /// plain rename is a one-entry list; `autovideosink` is a fallback chain
@@ -1029,6 +1062,28 @@ mod factory {
 
         /// Register a named fan-out demuxer for the `gst-launch` parser (M210),
         /// returning `&mut self` to chain calls.
+        pub fn register_fanout_src(&mut self, factory: FanoutSrcFactory) -> &mut Self {
+            self.fanout_srcs.push(factory);
+            self
+        }
+
+        /// Whether `name` is a registered terminal fan-out source.
+        pub fn is_fanout_src(&self, name: &str) -> bool {
+            self.fanout_srcs.iter().any(|f| f.name == name)
+        }
+
+        /// Build a registered terminal fan-out source with `outputs` ports.
+        pub fn make_fanout_src(
+            &self,
+            name: &str,
+            outputs: usize,
+        ) -> Option<Box<dyn crate::fanout::DynMultiOutputSource>> {
+            self.fanout_srcs
+                .iter()
+                .find(|f| f.name == name)
+                .map(|f| (f.build)(outputs))
+        }
+
         pub fn register_demux(&mut self, factory: DemuxFactory) -> &mut Self {
             self.demuxes.push(factory);
             self
@@ -1774,9 +1829,9 @@ mod factory {
 #[cfg(feature = "std")]
 pub use factory::{
     declared_source_caps, DecodebinError, DecodebinSelectHook, DemuxFactory, DemuxSelectHook,
-    ElementDoc, ElementFactory, LaunchFactory, MuxerFactory, PlaybinError, PlaybinGraphError,
-    PlaybinHook, PlaybinPort, PropertyDoc, Registry, SourceFactory, Uri, UriError,
-    UriSourceFactory,
+    ElementDoc, ElementFactory, FanoutSrcFactory, LaunchFactory, MuxerFactory, PlaybinError,
+    PlaybinGraphError, PlaybinHook, PlaybinPort, PropertyDoc, Registry, SourceFactory, Uri,
+    UriError, UriSourceFactory,
 };
 
 #[cfg(test)]

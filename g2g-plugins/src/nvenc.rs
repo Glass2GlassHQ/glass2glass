@@ -728,6 +728,13 @@ impl Drop for ContextGuard {
 }
 
 impl AsyncElement for NvEnc {
+    fn handles_keyframe_requests(&self) -> bool {
+        true
+    }
+
+    fn handles_bitrate_requests(&self) -> bool {
+        true
+    }
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where

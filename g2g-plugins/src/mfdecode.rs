@@ -472,12 +472,23 @@ impl AsyncElement for MfDecode {
                     // (e.g. H.264 -> VP9, or a codec swap) loud; previously
                     // dropped silently. Output `CapsChanged` is still emitted
                     // from decoded geometry at the decode boundary so
-                    // the ordering invariant from §3 is preserved.
+                    // the ordering invariant from §3 is preserved. The runner's
+                    // pre-fixed output caps (our NV12) are forwarded so the sink
+                    // sees them before the first decoded frame (M733/M734, see
+                    // `ffmpegdec.rs` "Two callers").
                     match &c {
-                        Caps::CompressedVideo { codec, .. } if *codec == self.codec => {}
+                        Caps::CompressedVideo { codec, .. } if *codec == self.codec => {
+                            self.input_caps = Some(c);
+                        }
+                        Caps::RawVideo {
+                            format: RawVideoFormat::Nv12,
+                            ..
+                        } => {
+                            out.push(PipelinePacket::CapsChanged(c.clone())).await?;
+                            self.last_caps = Some(c);
+                        }
                         _ => return Err(G2gError::CapsMismatch),
                     }
-                    self.input_caps = Some(c);
                 }
                 PipelinePacket::Flush => {
                     if let Some(st) = self.state.as_ref() {
@@ -503,8 +514,18 @@ impl AsyncElement for MfDecode {
                 }
             }
 
+            // A compressed stream's rate is advisory (per-frame PTS carries the
+            // real timing); never emit `Rate::Any` (a downstream transform
+            // cannot fixate() it), default 30/1 like `ffmpegdec`.
+            let out_framerate = match &self.input_caps {
+                Some(Caps::CompressedVideo {
+                    framerate: Rate::Fixed(q),
+                    ..
+                }) => Rate::Fixed(*q),
+                _ => Rate::Fixed(30 << 16),
+            };
             for d in decoded {
-                let new_caps = nv12_caps(d.width, d.height);
+                let new_caps = nv12_caps(d.width, d.height, out_framerate.clone());
                 if self.last_caps.as_ref() != Some(&new_caps) {
                     // M16 workaround #3 Phase A debug assertion:
                     // decode-time output must overlap the closure's
@@ -917,12 +938,12 @@ impl core::fmt::Debug for SampleOwner {
 
 impl D3D11KeepAlive for SampleOwner {}
 
-fn nv12_caps(w: u32, h: u32) -> Caps {
+fn nv12_caps(w: u32, h: u32, framerate: Rate) -> Caps {
     Caps::RawVideo {
         format: RawVideoFormat::Nv12,
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
-        framerate: Rate::Any,
+        framerate,
     }
 }
 
@@ -982,12 +1003,12 @@ mod tests {
     #[test]
     fn nv12_caps_are_fixed() {
         assert_eq!(
-            nv12_caps(640, 480),
+            nv12_caps(640, 480, Rate::Fixed(30 << 16)),
             Caps::RawVideo {
                 format: RawVideoFormat::Nv12,
                 width: Dim::Fixed(640),
                 height: Dim::Fixed(480),
-                framerate: Rate::Any,
+                framerate: Rate::Fixed(30 << 16),
             }
         );
     }

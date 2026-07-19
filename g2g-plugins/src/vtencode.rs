@@ -18,23 +18,10 @@
 //! decoder / muxer. Those framing helpers are pure and host-tested; the
 //! VideoToolbox session is macOS-only.
 //!
-//! COMPILE-PENDING: gated `#[cfg(all(target_os = "macos", feature = "vtencode"))]`,
-//! so it never builds in this repo's Linux CI; the macOS CI job is what compiles
-//! it. Written against the objc2 0.3 binding signatures (verified against the
-//! fetched crate source, per the `mf-decode` rule in AGENTS.md) but NOT compiled.
-//! Expect to adjust on the first `cargo build` on a Mac: the `VTCompressionSession`
-//! create/encode/complete method forms, `VTSessionSetProperty` + the CFNumber /
-//! CFBoolean property values, `CVPixelBufferCreate` and the plane-fill, and the
-//! parameter-set accessor. Each such spot is marked `// NOTE`. The g2g element
-//! contract (caps, pad templates, `process`, `Send`) mirrors `VtDecode` /
-//! `MfEncode` and is the stable part.
-
-// objc2 renamed these free CoreMedia functions to associated functions (e.g.
-// `CMSampleBuffer::data_buffer`). VtEncode is compile-pending (never run on a
-// Mac), so the migration is deferred to when it is validated on real hardware;
-// the deprecated calls behave identically. TODO: migrate to the associated
-// forms.
-#![allow(deprecated)]
+//! Gated `#[cfg(all(target_os = "macos", feature = "vtencode"))]`, so it never
+//! builds on the Linux dev host; the macOS CI job compiles it and runs the
+//! `m731_videotoolbox` tests (encode to Annex-B + decode round trip, H.264 +
+//! HEVC), so the encode path is runtime-validated on a real Mac.
 
 use core::ffi::{c_char, c_void};
 use core::ptr::{self, NonNull};
@@ -46,8 +33,7 @@ use objc2_core_foundation::CFRetained;
 #[allow(non_camel_case_types)]
 type OSStatus = i32;
 use objc2_core_media::{
-    CMBlockBuffer, CMFormatDescription, CMSampleBuffer, CMSampleBufferGetDataBuffer,
-    CMSampleBufferGetFormatDescription, CMTime, CMTimeFlags,
+    CMBlockBuffer, CMFormatDescription, CMSampleBuffer, CMTime, CMTimeFlags,
     CMVideoFormatDescriptionGetH264ParameterSetAtIndex,
     CMVideoFormatDescriptionGetHEVCParameterSetAtIndex,
 };
@@ -67,8 +53,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError,
-    HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate,
-    RawVideoFormat, VideoCodec,
+    HardwareError, MemoryDomain, OutputSink, OwnedCvPixelBuffer, PadTemplate, PadTemplates,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, VideoCodec,
 };
 
 use crate::annexb::{au_is_keyframe, avcc_to_annexb};
@@ -222,12 +208,41 @@ impl VtEncode {
         Ok(())
     }
 
+    /// Encode a decoded `CVPixelBuffer` frame directly (M735 zero-copy input):
+    /// no NV12 staging buffer, the decoder's pixels go straight into the
+    /// compression session.
+    fn feed_cv(&mut self, buf: &OwnedCvPixelBuffer, pts_ns: u64) -> Result<(), G2gError> {
+        let Some(state) = self.state.as_mut() else {
+            return Err(G2gError::NotConfigured);
+        };
+        if (buf.width, buf.height) != (state.width, state.height) {
+            // A geometry change would need a session rebuild, like the packed
+            // NV12 CapsChanged path; reject loud.
+            return Err(G2gError::CapsMismatch);
+        }
+        // SAFETY: the frame's keep-alive pins the CVPixelBufferRef for the
+        // whole call; the session is live and the encode is completed
+        // synchronously before we return.
+        let pb = unsafe { &*(buf.pixel_buffer as *const CVPixelBuffer) };
+        unsafe { encode_pixel_buffer(state, pb, pts_ns)? };
+        if let Some(err) = state.collector.error.take() {
+            return Err(err);
+        }
+        Ok(())
+    }
+
     async fn emit(&mut self, e: &EncodedFrame, out: &mut dyn OutputSink) -> Result<(), G2gError> {
         let (w, h) = match &self.state {
             Some(s) => (s.width, s.height),
             None => return Err(G2gError::NotConfigured),
         };
-        let new_caps = h264_caps(self.codec, w, h, self.framerate.clone());
+        // Never emit an `Any` rate (a downstream transform cannot fixate() it);
+        // default to 30/1 when the input caps did not declare one.
+        let framerate = match &self.framerate {
+            Rate::Fixed(q) => Rate::Fixed(*q),
+            _ => Rate::Fixed(30 << 16),
+        };
+        let new_caps = h264_caps(self.codec, w, h, framerate);
         if self.last_caps.as_ref() != Some(&new_caps) {
             out.push(PipelinePacket::CapsChanged(new_caps.clone()))
                 .await?;
@@ -283,6 +298,42 @@ impl AsyncElement for VtEncode {
         }))
     }
 
+    fn properties(&self) -> &'static [PropertySpec] {
+        const PROPS: &[PropertySpec] = &[
+            PropertySpec::new("bitrate", PropKind::Uint, "target bitrate, bits/second")
+                .with_default("4000000"),
+            PropertySpec::new(
+                "max-keyframe-interval",
+                PropKind::Uint,
+                "maximum frames between keyframes",
+            )
+            .with_default("60"),
+        ];
+        PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "bitrate" => {
+                self.bitrate = value.as_uint().ok_or(PropError::Type)? as u32;
+                Ok(())
+            }
+            "max-keyframe-interval" => {
+                self.keyframe_interval = (value.as_uint().ok_or(PropError::Type)? as u32).max(1);
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "bitrate" => Some(PropValue::Uint(self.bitrate as u64)),
+            "max-keyframe-interval" => Some(PropValue::Uint(self.keyframe_interval as u64)),
+            _ => None,
+        }
+    }
+
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         let (w, h, framerate) = match absolute_caps {
             Caps::RawVideo {
@@ -324,16 +375,26 @@ impl AsyncElement for VtEncode {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
-                        return Err(G2gError::UnsupportedDomain);
-                    };
-                    self.feed(slice.as_slice(), frame.timing.pts_ns)?;
+                    match &frame.domain {
+                        MemoryDomain::System(slice) => {
+                            self.feed(slice.as_slice(), frame.timing.pts_ns)?;
+                        }
+                        // M735 zero-copy: a `VtDecode cv-output` frame is already
+                        // a CVPixelBuffer; encode it directly, no NV12 staging.
+                        MemoryDomain::CvPixelBuffer(buf) => {
+                            self.feed_cv(buf, frame.timing.pts_ns)?;
+                        }
+                        _ => return Err(G2gError::UnsupportedDomain),
+                    }
                     self.drain(out).await?;
                 }
                 PipelinePacket::CapsChanged(c) => {
                     // A mid-stream geometry / format change would need a session
                     // rebuild; reject anything but the exact configured NV12 shape
                     // loud (the bare format check let a new resolution slip past).
+                    // The runner's pre-fixed output caps (our compressed codec)
+                    // are forwarded so the sink sees them before the first access
+                    // unit, like FfmpegVideoDec.
                     let session_dims = self.state.as_ref().map(|s| (s.width, s.height));
                     match &c {
                         Caps::RawVideo {
@@ -342,6 +403,10 @@ impl AsyncElement for VtEncode {
                             height: Dim::Fixed(h),
                             ..
                         } if session_dims == Some((*w, *h)) => {}
+                        Caps::CompressedVideo { codec, .. } if *codec == self.codec => {
+                            out.push(PipelinePacket::CapsChanged(c.clone())).await?;
+                            self.last_caps = Some(c);
+                        }
                         _ => return Err(G2gError::CapsMismatch),
                     }
                 }
@@ -474,14 +539,13 @@ unsafe fn sample_to_annexb(
     let hw = || G2gError::Hardware(HardwareError::Other);
 
     // The encoded bytes live in the sample's block buffer in AVCC framing.
-    let block: CFRetained<CMBlockBuffer> =
-        unsafe { CMSampleBufferGetDataBuffer(sample) }.ok_or_else(hw)?;
+    let block: CFRetained<CMBlockBuffer> = unsafe { sample.data_buffer() }.ok_or_else(hw)?;
     let mut total_len: usize = 0;
     let mut len_at: usize = 0;
     // c_char (i8) pointer per `CMBlockBuffer::data_pointer`; cast to u8 for the slice.
     let mut data_ptr: *mut c_char = ptr::null_mut();
-    // NOTE (verify on-device): objc2 exposes this as `CMBlockBuffer::data_pointer`
-    // (associated fn taking &CMBlockBuffer); the out-params are usize lengths.
+    // objc2 exposes this as `CMBlockBuffer::data_pointer` (associated fn taking
+    // &CMBlockBuffer); the out-params are usize lengths.
     let st = unsafe {
         CMBlockBuffer::data_pointer(&block, 0, &mut len_at, &mut total_len, &mut data_ptr)
     };
@@ -497,7 +561,7 @@ unsafe fn sample_to_annexb(
     let keyframe = au_is_keyframe(codec, &annexb);
     if keyframe {
         // Prepend the parameter sets (Annex-B framed) ahead of the IRAP picture.
-        if let Some(fmt) = unsafe { CMSampleBufferGetFormatDescription(sample) } {
+        if let Some(fmt) = unsafe { sample.format_description() } {
             let mut prefix = unsafe { parameter_sets_annexb(codec, &fmt)? };
             prefix.append(&mut annexb);
             annexb = prefix;
@@ -594,8 +658,8 @@ unsafe fn build_session(
     };
 
     let mut session: *mut VTCompressionSession = ptr::null_mut();
-    // NOTE (verify on-device): objc2 exposes this as `VTCompressionSession::create`
-    // (associated fn). `output_callback` is the `VTCompressionOutputCallback`.
+    // objc2 exposes this as `VTCompressionSession::create` (associated fn).
+    // `output_callback` is the `VTCompressionOutputCallback`.
     let st = unsafe {
         VTCompressionSession::create(
             None,
@@ -615,9 +679,8 @@ unsafe fn build_session(
     }
     let session = unsafe { CFRetained::from_raw(NonNull::new(session).ok_or_else(hw)?) };
 
-    // Low-latency tuning. NOTE (verify on-device): VTSessionSetProperty takes the
-    // session as a VTSession, a CFString key, and a CFType value; CFBoolean /
-    // CFNumber construction via objc2-core-foundation may need small tweaks.
+    // Low-latency tuning. VTSessionSetProperty takes the session as a VTSession,
+    // a CFString key, and a CFType value.
     unsafe {
         set_bool(&session, kVTCompressionPropertyKey_RealTime, true)?;
         set_bool(
@@ -646,15 +709,27 @@ unsafe fn build_session(
 ///
 /// SAFETY: `state.session` is live; `nv12` outlives the synchronous encode.
 unsafe fn encode_into(state: &EncoderState, nv12: &[u8], pts_ns: u64) -> Result<(), G2gError> {
-    let hw = || G2gError::Hardware(HardwareError::Other);
     let pixel_buffer = unsafe { make_pixel_buffer(nv12, state.width, state.height)? };
+    unsafe { encode_pixel_buffer(state, &pixel_buffer, pts_ns) }
+}
 
+/// Submit one `CVPixelBuffer` to the compression session and complete it, so
+/// the output callback fires before returning. Shared by the packed-NV12 path
+/// (a staging buffer) and the M735 zero-copy `CvPixelBuffer` input.
+///
+/// SAFETY: `state.session` is live; `pb` is a valid pixel buffer that outlives
+/// the synchronous encode.
+unsafe fn encode_pixel_buffer(
+    state: &EncoderState,
+    pb: &CVPixelBuffer,
+    pts_ns: u64,
+) -> Result<(), G2gError> {
+    let hw = || G2gError::Hardware(HardwareError::Other);
     let mut info = VTEncodeInfoFlags::empty();
-    // NOTE (verify on-device): `encode_frame` takes the image buffer, PTS,
-    // duration, optional frame-properties dict, source refcon, and an info-flags
-    // out-param. A CVPixelBuffer is a CVImageBuffer (typedef).
-    let image: &CVImageBuffer =
-        unsafe { &*(CFRetained::as_ptr(&pixel_buffer).as_ptr() as *const CVImageBuffer) };
+    // `encode_frame` takes the image buffer, PTS, duration, optional
+    // frame-properties dict, source refcon, and an info-flags out-param. A
+    // CVPixelBuffer is a CVImageBuffer (typedef).
+    let image: &CVImageBuffer = unsafe { &*(pb as *const CVPixelBuffer as *const CVImageBuffer) };
     let st = unsafe {
         state.session.encode_frame(
             image,
@@ -678,7 +753,7 @@ unsafe fn encode_into(state: &EncoderState, nv12: &[u8], pts_ns: u64) -> Result<
 ///
 /// SAFETY: `session` is live.
 unsafe fn complete_frames(session: &VTCompressionSession) {
-    // NOTE (verify on-device): completing up to an invalid PTS flushes everything.
+    // Completing up to an invalid PTS flushes everything.
     let _ = unsafe { session.complete_frames(cm_time_invalid()) };
 }
 
@@ -697,8 +772,8 @@ unsafe fn make_pixel_buffer(
         return Err(hw());
     }
     let mut pb: *mut CVPixelBuffer = ptr::null_mut();
-    // NOTE (verify on-device): CVPixelBufferCreate(allocator, w, h, fourcc,
-    // attrs, out). None attributes lets CoreVideo pick the plane strides.
+    // CVPixelBufferCreate(allocator, w, h, fourcc, attrs, out). None attributes
+    // lets CoreVideo pick the plane strides.
     let st = unsafe {
         CVPixelBufferCreate(
             None,
@@ -745,7 +820,7 @@ unsafe fn make_pixel_buffer(
     Ok(pb)
 }
 
-/// Set a CFBoolean session property. NOTE: CFBoolean handling is compile-pending.
+/// Set a CFBoolean session property.
 unsafe fn set_bool(
     session: &VTCompressionSession,
     key: &objc2_core_foundation::CFString,
@@ -805,8 +880,7 @@ fn cm_time_invalid() -> CMTime {
 ///
 /// SAFETY: `sample` is a valid `CMSampleBuffer`.
 unsafe fn sample_pts(sample: &CMSampleBuffer) -> CMTime {
-    // NOTE (verify on-device): objc2 exposes CMSampleBufferGetPresentationTimeStamp.
-    unsafe { objc2_core_media::CMSampleBufferGetPresentationTimeStamp(sample) }
+    unsafe { sample.presentation_time_stamp() }
 }
 
 /// Convert a valid `CMTime` to nanoseconds.

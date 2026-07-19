@@ -320,7 +320,7 @@ catalogs, `tools/mcugen-check.sh`).
 
 ## Build
 
-Stable Rust, MSRV 1.75, `resolver = "2"`.
+Stable Rust, MSRV 1.85, `resolver = "2"`.
 
 ```sh
 cargo check --workspace          # no_std baseline
@@ -337,11 +337,12 @@ OS-coupled elements live behind cargo features:
 | `FfmpegH264Dec` (sw / `NvdecCuvid` / `NvdecCuda` / `Vaapi`) | `ffmpeg` | Linux + libavcodec |
 | `VaapiH264Dec` | `vaapi` | Linux + libva + GBM |
 | `MfDecode` / `MfEncode` / `MfAacEncode` / `MfAacDecode` | `mf-decode`, `mf-encode`, `mf-aac` | Windows + Media Foundation |
-| `VtDecode` (H.264; CI-compiled, on-device decode pending) | `vtdecode` | macOS + VideoToolbox |
+| `VtDecode` / `VtEncode` (H.264 / H.265, validated on the CI Mac; zero-copy `CVPixelBuffer` output via `cv-output`) | `vtdecode`, `vtencode` | macOS + VideoToolbox |
 | `MediaCodecDec` (H.264 / H.265, on-device validated; zero-copy GPU output via `with_gpu_output`) | `mediacodec`, `mediacodec-wgpu` | Android + NDK MediaCodec (+ wgpu / Vulkan for GPU output) |
 | `WaylandSink` | `wayland-sink` | Linux + Wayland |
 | `KmsSink` | `kms-sink` | Linux + libdrm; needs DRM master / tty |
 | `D3D11Sink` | `d3d11-sink` | Windows |
+| `MetalVideoSink` (zero-copy from `CVPixelBuffer`, validated on the CI Mac) | `metal-sink` | macOS + Metal |
 | `NvDec` (native NVDEC H.264/H.265 → CUDA NV12, NVCUVID) | `nvdec` | Linux + NVIDIA driver (libnvcuvid) |
 | `NvEnc` (native NVENC CUDA NV12 → H.264/H.265) | `nvenc` | Linux + NVIDIA driver (libnvidia-encode) |
 | `CudaDownload` (CUDA → System), `CudaUpload` (System → CUDA) | `cuda` | Linux + NVIDIA driver (libcuda) |
@@ -350,7 +351,9 @@ OS-coupled elements live behind cargo features:
 | `UdpSink` + RTP packetizer | `udp-egress` | — |
 | `UdpSrc` (RTP ingest + jitter buffer + RTCP/NACK) | `udp-ingress` | — |
 | `RtmpSrc` (RTMP publisher ingest) | `rtmp` | — |
-| `WebRtcSink` (WHIP egress, H.264 + Opus) / `WebRtcWhepSrc` (WHEP ingest, H.264), via str0m: ICE/DTLS/SRTP | `webrtc` | str0m (rust-crypto) + reqwest |
+| `WebRtcSink` (WHIP egress, H.264 + Opus) / `WebRtcWhepSrc` (WHEP ingest, H.264), via str0m: ICE/DTLS/SRTP, trickle ICE + ICE restart, NACK/RTX | `webrtc` | str0m (rust-crypto) + reqwest |
+| `WebRtcDataSrc` / `WebRtcDataSink` (P2P data channels on SCTP) | `webrtc` | str0m |
+| `LiveKitSink` (publish into a LiveKit room: JWT + protobuf signalling) | `webrtc-livekit` | + tokio-tungstenite |
 | `HttpSrc` (HTTP(S) byte-stream source) | `http-src` | reqwest |
 | `HlsSrc` (HLS: TS + fMP4/CMAF, live, AES-128 / SAMPLE-AES) | `hls` | reqwest + aes |
 | `DashSrc` (DASH: SegmentTemplate / SegmentTimeline, live) | `dash` | reqwest + roxmltree |

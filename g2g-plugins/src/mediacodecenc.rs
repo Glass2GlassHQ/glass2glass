@@ -435,6 +435,13 @@ impl AsyncElement for MediaCodecEnc {
                             format: RawVideoFormat::Nv12,
                             ..
                         } => {}
+                        // The runner's pre-fixed output caps (our compressed
+                        // codec): forward so the sink sees them before the first
+                        // access unit (M733/M734, see `ffmpegdec.rs`).
+                        Caps::CompressedVideo { codec, .. } if *codec == self.codec => {
+                            out.push(PipelinePacket::CapsChanged(c.clone())).await?;
+                            self.last_caps = Some(c);
+                        }
                         _ => return Err(G2gError::CapsMismatch),
                     }
                     // Geometry / rate changes would need a codec rebuild; v1 keeps
@@ -464,8 +471,13 @@ impl AsyncElement for MediaCodecEnc {
                 }
             }
 
-            let new_caps =
-                compressed_caps(self.codec, self.width, self.height, &self.framerate_caps);
+            // Never emit an `Any` rate (a downstream transform cannot fixate()
+            // it); default to 30/1 when the input caps did not declare one.
+            let framerate = match &self.framerate_caps {
+                Rate::Fixed(q) => Rate::Fixed(*q),
+                _ => Rate::Fixed(30 << 16),
+            };
+            let new_caps = compressed_caps(self.codec, self.width, self.height, &framerate);
             if self.last_caps.as_ref() != Some(&new_caps) {
                 out.push(PipelinePacket::CapsChanged(new_caps.clone()))
                     .await?;

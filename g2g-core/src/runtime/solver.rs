@@ -1108,7 +1108,11 @@ fn node_consistent<E>(
     let get = |e: usize| assign[e].as_ref().expect("checked all assigned");
     match graph.kind(node) {
         // Membership is already ensured by arc consistency; nothing cross-edge.
-        NodeKind::Source | NodeKind::Sink | NodeKind::Muxer(_) => true,
+        NodeKind::Source
+        | NodeKind::Sink
+        | NodeKind::Muxer(_)
+        | NodeKind::FaninSink(_)
+        | NodeKind::FanoutSrc(_) => true,
         NodeKind::Tee(_) => {
             // A demux decouples its ports (each its own produce set, ensured by arc
             // consistency), so there is no cross-edge equality; a broadcast tee
@@ -1157,6 +1161,8 @@ fn kind_short(kind: NodeKind) -> &'static str {
         NodeKind::Sink => "sink",
         NodeKind::Tee(_) => "tee",
         NodeKind::Muxer(_) => "mux",
+        NodeKind::FaninSink(_) => "fanin-sink",
+        NodeKind::FanoutSrc(_) => "fanout-src",
     }
 }
 
@@ -1248,7 +1254,8 @@ pub(crate) fn graph_downstream_feasibility<E>(
     for &node in graph.topo().iter().rev() {
         let idx = node.0 as usize;
         match graph.kind(node) {
-            NodeKind::Source => {}
+            // Terminal ends of the DAG: no in-edges to write feasibility for.
+            NodeKind::Source | NodeKind::FanoutSrc(_) => {}
             NodeKind::Sink => {
                 let ie = graph.in_edges(node)[0];
                 feas[ie] = match &constraints[idx] {
@@ -1287,7 +1294,10 @@ pub(crate) fn graph_downstream_feasibility<E>(
                     feas[graph.in_edges(node)[0]] = acc;
                 }
             }
-            NodeKind::Muxer(_) => {
+            // A muxer and a terminal fan-in both take their input pads' accept
+            // sets independently (a muxer's output does not feed back to its
+            // inputs; a terminal fan-in has no output at all).
+            NodeKind::Muxer(_) | NodeKind::FaninSink(_) => {
                 if let NodeConstraint::Muxer { inputs, .. } = &constraints[idx] {
                     for &ie in graph.in_edges(node) {
                         let pad = graph.edge(ie).dst.index as usize;
@@ -1365,6 +1375,32 @@ fn apply_node<E>(
                 output,
                 follows,
             } => apply_muxer_node(graph, node, inputs, output, *follows, edges),
+            _ => Err(shape_err),
+        },
+        // A terminal fan-in narrows only its input pads (no output edge to
+        // couple); it reuses the muxer constraint shape with `output` / `follows`
+        // unused.
+        NodeKind::FaninSink(_) => match nc {
+            NodeConstraint::Muxer { inputs, .. } => narrow_muxer_inputs(graph, node, inputs, edges),
+            _ => Err(shape_err),
+        },
+        // A terminal fan-out source narrows each output edge by its port's
+        // produce set (the demux constraint shape with the input half unused:
+        // there is no input edge).
+        NodeKind::FanoutSrc(_) => match nc {
+            NodeConstraint::Demux { ports, .. } => {
+                for &oe in out_e {
+                    let port = graph.edge(oe).src.index as usize;
+                    match ports.get(port) {
+                        Some(CapsConstraint::Produces(set)) => narrow_edge(graph, edges, oe, set)?,
+                        Some(CapsConstraint::LegacySource(caps)) => {
+                            narrow_edge(graph, edges, oe, &CapsSet::one(caps.clone()))?
+                        }
+                        _ => return Err(shape_err),
+                    }
+                }
+                Ok(())
+            }
             _ => Err(shape_err),
         },
     }
@@ -1755,11 +1791,34 @@ fn apply_demux_node<E>(
     Ok(())
 }
 
-/// A muxer fans in: apply each input pad's constraint to its edge (`Accepts`
-/// narrows, `AcceptsAny` leaves the edge to carry whatever per-frame caps flow
-/// through), and the single output edge by the `Produces` set. `inputs[i]`
-/// applies to input pad `i`; D1 validation guarantees each input pad index
-/// appears exactly once.
+/// Narrow each of a fan-in node's input edges by its pad's accept set, shared by
+/// the muxer (which also couples an output) and the terminal fan-in (which does
+/// not). `Accepts` narrows; an `AcceptsAny` / legacy pad forwards per-frame caps
+/// without narrowing. `inputs[i]` applies to input pad `i`; D1 validation
+/// guarantees each input pad index appears exactly once.
+fn narrow_muxer_inputs<E>(
+    graph: &ValidatedGraph<E>,
+    node: NodeId,
+    inputs: &[CapsConstraint<'_>],
+    edges: &mut [Option<CapsSet>],
+) -> Result<(), NegotiationFailure> {
+    let shape_err = NegotiationFailure::EndpointShapeMismatch {
+        index: node.0 as usize,
+    };
+    for &eid in graph.in_edges(node) {
+        let pad = graph.edge(eid).dst.index as usize;
+        match inputs.get(pad) {
+            Some(CapsConstraint::Accepts(set)) => narrow_edge(graph, edges, eid, set)?,
+            Some(CapsConstraint::AcceptsAny) | Some(CapsConstraint::LegacySink(_)) => {}
+            _ => return Err(shape_err),
+        }
+    }
+    Ok(())
+}
+
+/// A muxer fans in: apply each input pad's constraint to its edge, and the
+/// single output edge by the `Produces` set (or couple it to the followed
+/// input pad).
 fn apply_muxer_node<E>(
     graph: &ValidatedGraph<E>,
     node: NodeId,
@@ -1770,16 +1829,7 @@ fn apply_muxer_node<E>(
 ) -> Result<(), NegotiationFailure> {
     let idx = node.0 as usize;
     let shape_err = NegotiationFailure::EndpointShapeMismatch { index: idx };
-    for &eid in graph.in_edges(node) {
-        let pad = graph.edge(eid).dst.index as usize;
-        match inputs.get(pad) {
-            Some(CapsConstraint::Accepts(set)) => narrow_edge(graph, edges, eid, set)?,
-            // `AcceptsAny` and a legacy input pad both forward per-frame caps
-            // without narrowing the edge.
-            Some(CapsConstraint::AcceptsAny) | Some(CapsConstraint::LegacySink(_)) => {}
-            _ => return Err(shape_err),
-        }
-    }
+    narrow_muxer_inputs(graph, node, inputs, edges)?;
     let out_edge = graph.out_edges(node)[0];
     // Identity-passthrough mux: the output edge is the followed input pad's caps.
     // The solver iterates to a fixpoint, so if that input edge is not yet solved

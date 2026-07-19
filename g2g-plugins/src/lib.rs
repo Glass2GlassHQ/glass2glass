@@ -371,7 +371,11 @@ pub mod udpsink;
 #[cfg(feature = "webrtc")]
 mod turn;
 #[cfg(feature = "webrtc")]
+pub mod webrtc_simulcast;
+#[cfg(feature = "webrtc")]
 mod webrtc_util;
+#[cfg(feature = "webrtc")]
+pub mod webrtcdata;
 #[cfg(feature = "webrtc")]
 pub mod webrtcduplex;
 #[cfg(feature = "webrtc")]
@@ -382,6 +386,20 @@ pub mod webrtcsink;
 pub mod webrtcwhepsession;
 #[cfg(feature = "webrtc")]
 pub mod webrtcwhepsrc;
+
+// Native LiveKit publisher + subscriber (T4): WebSocket + protobuf signaller
+// layered over the str0m engine. `livekit_signal` is the transport/protocol seam
+// (JWT + hand-rolled protobuf), `livekitsink` the publish element, `livekitsrc`
+// the room subscriber (answers the server-offered subscriber PC). Gated behind
+// `webrtc-livekit` (implies `webrtc`, adds the WebSocket client + JWT crypto).
+#[cfg(feature = "webrtc-livekit")]
+pub mod livekit_signal;
+#[cfg(feature = "webrtc-livekit")]
+pub mod livekitduplex;
+#[cfg(feature = "webrtc-livekit")]
+pub mod livekitsink;
+#[cfg(feature = "webrtc-livekit")]
+pub mod livekitsrc;
 
 // UDP ingress source (M91): receives RTP on a tokio UdpSocket and depayloads
 // H.264 (rtpdepay) into Annex-B access units, the receive-side inverse of
@@ -482,6 +500,30 @@ pub mod vtdecode;
 // VideoToolbox H.264 encode (M231), the encode counterpart of vtdecode.
 #[cfg(all(target_os = "macos", feature = "vtencode"))]
 pub mod vtencode;
+// macOS Metal present sink (M736): NV12 (System bytes or the M735 zero-copy
+// CvPixelBuffer domain) rendered to a CAMetalLayer drawable.
+#[cfg(all(target_os = "macos", feature = "metal-sink"))]
+pub mod metalvideosink;
+// macOS Core Audio render + capture via AudioToolbox AudioQueue (M737).
+#[cfg(all(target_os = "macos", feature = "coreaudio"))]
+pub mod coreaudio;
+// Shared CVPixelBuffer helpers (NV12 pack + zero-copy keep-alive + the capture
+// delegate handoff) for the macOS video elements.
+#[cfg(all(
+    target_os = "macos",
+    any(
+        feature = "vtdecode",
+        feature = "avfoundation",
+        feature = "screencapture"
+    )
+))]
+pub(crate) mod cvnv12;
+// AVFoundation camera + mic capture (M738).
+#[cfg(all(target_os = "macos", feature = "avfoundation"))]
+pub mod avf;
+// ScreenCaptureKit display capture (M739).
+#[cfg(all(target_os = "macos", feature = "screencapture"))]
+pub mod sck;
 
 // NDK MediaCodec H.264 decode is Android-only, the Android counterpart of
 // vtdecode / mfdecode. The `ndk` dependency is target-gated, so the module only

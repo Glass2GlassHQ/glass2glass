@@ -10,7 +10,7 @@ elements rather than runtime string-keyed factories. Full design: `DESIGN.md`.
 
 ## Workspace
 
-Cargo workspace (`resolver = "2"`, edition 2021, MSRV 1.75, stable toolchain):
+Cargo workspace (`resolver = "2"`, edition 2021, MSRV 1.85, stable toolchain):
 
 | Crate | Role |
 | :--- | :--- |

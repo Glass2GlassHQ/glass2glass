@@ -450,6 +450,12 @@ fn propvalue_to_py(py: Python<'_>, value: &PropValue) -> PyResult<Py<PyAny>> {
         // A fraction arrives as a (num, den) tuple, matching gst's fraction props.
         PropValue::Fraction(n, d) => (*n, *d).into_py_any(py),
         PropValue::Str(s) => s.into_py_any(py),
+        // `PropValue` is non_exhaustive: a kind added later must be mapped here
+        // before a Python element can receive it.
+        other => Err(pyo3::exceptions::PyTypeError::new_err(format!(
+            "unsupported property kind {:?}",
+            other.kind()
+        ))),
     }
 }
 

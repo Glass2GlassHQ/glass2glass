@@ -588,6 +588,14 @@ impl AsyncElement for MfEncode {
                     self.feed(slice.as_slice(), frame.timing.pts_ns, &mut encoded)?;
                 }
                 PipelinePacket::CapsChanged(c) => {
+                    // The runner's pre-fixed output caps (our compressed codec)
+                    // are forwarded so the sink sees them before the first
+                    // access unit (M733/M734, see `ffmpegdec.rs` "Two callers").
+                    if matches!(&c, Caps::CompressedVideo { codec, .. } if *codec == self.codec) {
+                        out.push(PipelinePacket::CapsChanged(c.clone())).await?;
+                        self.last_caps = Some(c);
+                        return Ok(());
+                    }
                     let (w, h, framerate) = match &c {
                         Caps::RawVideo {
                             format: RawVideoFormat::Nv12,
@@ -653,7 +661,13 @@ impl AsyncElement for MfEncode {
             }
 
             for c in encoded {
-                let new_caps = compressed_caps(self.codec, c.width, c.height, c.framerate.clone());
+                // Never emit an `Any` rate (a downstream transform cannot
+                // fixate() it); default 30/1 when input caps did not declare one.
+                let framerate = match &c.framerate {
+                    Rate::Fixed(q) => Rate::Fixed(*q),
+                    _ => Rate::Fixed(30 << 16),
+                };
+                let new_caps = compressed_caps(self.codec, c.width, c.height, framerate);
                 if self.last_caps.as_ref() != Some(&new_caps) {
                     // Encode-time output must overlap the closure's
                     // derivation of the recorded input (same Phase A

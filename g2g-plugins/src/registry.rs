@@ -912,6 +912,108 @@ fn register_autoplug_candidates(reg: &mut Registry) {
         "mediacodecench265",
         || Box::new(MediaCodecEnc::h265()),
     ));
+    // macOS hardware video decode via VideoToolbox (M218/M534); one factory per
+    // codec, like the MediaCodec pair. `vtdec` matches the gst applemedia name.
+    // Registered twice like `ffmpegdec`: as an auto-plug candidate and as a
+    // launch factory (a bare name in a text pipeline resolves via the latter).
+    #[cfg(all(target_os = "macos", feature = "vtdecode"))]
+    reg.register(
+        ElementFactory::of::<crate::vtdecode::VtDecode>("vtdec", |_| {
+            Box::new(crate::vtdecode::VtDecode::h264())
+        })
+        .hardware(),
+    );
+    #[cfg(all(target_os = "macos", feature = "vtdecode"))]
+    reg.register(
+        ElementFactory::of::<crate::vtdecode::VtDecode>("vtdech265", |_| {
+            Box::new(crate::vtdecode::VtDecode::h265())
+        })
+        .hardware(),
+    );
+    #[cfg(all(target_os = "macos", feature = "vtdecode"))]
+    reg.register_launch(LaunchFactory::of::<crate::vtdecode::VtDecode>(
+        "vtdec",
+        || Box::new(crate::vtdecode::VtDecode::h264()),
+    ));
+    #[cfg(all(target_os = "macos", feature = "vtdecode"))]
+    reg.register_launch(LaunchFactory::of::<crate::vtdecode::VtDecode>(
+        "vtdech265",
+        || Box::new(crate::vtdecode::VtDecode::h265()),
+    ));
+    // macOS hardware video encode via VideoToolbox (M231/M534); launch-only
+    // (encoders are not auto-plug candidates), under the gst applemedia names.
+    #[cfg(all(target_os = "macos", feature = "vtencode"))]
+    reg.register_launch(LaunchFactory::of::<crate::vtencode::VtEncode>(
+        "vtenc_h264",
+        || Box::new(crate::vtencode::VtEncode::h264()),
+    ));
+    #[cfg(all(target_os = "macos", feature = "vtencode"))]
+    reg.register_launch(LaunchFactory::of::<crate::vtencode::VtEncode>(
+        "vtenc_h265",
+        || Box::new(crate::vtencode::VtEncode::h265()),
+    ));
+    // macOS Metal present sink (M736); the display sink on this platform, so
+    // it also backs the `autovideosink` alias below.
+    #[cfg(all(target_os = "macos", feature = "metal-sink"))]
+    reg.register_launch(LaunchFactory::of::<crate::metalvideosink::MetalVideoSink>(
+        "metalvideosink",
+        || Box::new(crate::metalvideosink::MetalVideoSink::new()),
+    ));
+    // macOS Core Audio render (M737); `osxaudiosink` is the gst analog and an
+    // alias below, and `autoaudiosink` falls back to it on this platform.
+    #[cfg(all(target_os = "macos", feature = "coreaudio"))]
+    reg.register_launch(LaunchFactory::of::<crate::coreaudio::CoreAudioSink>(
+        "coreaudiosink",
+        || Box::new(crate::coreaudio::CoreAudioSink::new()),
+    ));
+    // macOS Core Audio mic capture (M737); `osxaudiosrc` is the gst analog.
+    #[cfg(all(target_os = "macos", feature = "coreaudio"))]
+    reg.register_source(SourceFactory::new(
+        "coreaudiosrc",
+        Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            channels: 2,
+            sample_rate: 48_000,
+        },
+        || Box::new(crate::coreaudio::CoreAudioSrc::new(48_000, 2, u64::MAX)),
+    ));
+    // AVFoundation camera capture (M738), VGA NV12; `avfvideosrc` matches gst.
+    #[cfg(all(target_os = "macos", feature = "avfoundation"))]
+    reg.register_source(SourceFactory::new(
+        "avfvideosrc",
+        Caps::RawVideo {
+            format: RawVideoFormat::Nv12,
+            width: Dim::Fixed(640),
+            height: Dim::Fixed(480),
+            framerate: Rate::Fixed(30 << 16),
+        },
+        || Box::new(crate::avf::AvfVideoSrc::new(u64::MAX)),
+    ));
+    // AVFoundation mic capture (M738); `avfaudiosrc` matches gst's osxaudiosrc
+    // sibling naming.
+    #[cfg(all(target_os = "macos", feature = "avfoundation"))]
+    reg.register_source(SourceFactory::new(
+        "avfaudiosrc",
+        Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            channels: 2,
+            sample_rate: 48_000,
+        },
+        || Box::new(crate::avf::AvfAudioSrc::new(48_000, 2, u64::MAX)),
+    ));
+    // ScreenCaptureKit display capture (M739). The registered caps are nominal;
+    // the source reports the real display geometry at negotiation.
+    #[cfg(all(target_os = "macos", feature = "screencapture"))]
+    reg.register_source(SourceFactory::new(
+        "screencapturesrc",
+        Caps::RawVideo {
+            format: RawVideoFormat::Nv12,
+            width: Dim::Fixed(1920),
+            height: Dim::Fixed(1080),
+            framerate: Rate::Fixed(30 << 16),
+        },
+        || Box::new(crate::sck::ScreenCaptureSrc::new(u64::MAX)),
+    ));
 }
 
 /// Register gst-canonical-name aliases (M192) so pasted `gst-launch` lines using
@@ -922,8 +1024,17 @@ fn register_autoplug_candidates(reg: &mut Registry) {
 /// `fakesink` (always present), which keeps a tutorial line running headless.
 fn register_aliases(reg: &mut Registry) {
     // Auto sinks: prefer a real display / audio sink, fall back to fakesink.
-    reg.register_alias("autovideosink", &["waylandsink", "kmssink", "fakesink"]);
-    reg.register_alias("autoaudiosink", &["alsasink", "pulsesink", "fakesink"]);
+    reg.register_alias(
+        "autovideosink",
+        &["waylandsink", "kmssink", "metalvideosink", "fakesink"],
+    );
+    reg.register_alias(
+        "autoaudiosink",
+        &["alsasink", "pulsesink", "coreaudiosink", "fakesink"],
+    );
+    // gst's macOS audio element names.
+    reg.register_alias("osxaudiosink", &["coreaudiosink", "fakesink"]);
+    reg.register_alias("osxaudiosrc", &["coreaudiosrc"]);
     // Common desktop video-sink names map onto whatever display sink we have.
     for name in ["xvimagesink", "ximagesink", "glimagesink"] {
         reg.register_alias(name, &["waylandsink", "kmssink", "fakesink"]);
@@ -932,7 +1043,9 @@ fn register_aliases(reg: &mut Registry) {
     // names prefer the ffmpeg VAAPI hwaccel (`ffmpegvaapidec`, works on Mesa
     // radeonsi) and fall back to the cros-codecs `vaapidec` when only that
     // feature is on; the alias resolves to the first registered target.
-    reg.register_alias("avdec_h264", &["ffmpegdec"]);
+    // `avdec_h264` falls back to VideoToolbox `vtdec` on macOS builds without
+    // the ffmpeg feature.
+    reg.register_alias("avdec_h264", &["ffmpegdec", "vtdec"]);
     reg.register_alias("vaapih264dec", &["ffmpegvaapidec", "vaapidec"]);
     // AV1 decode: gst's libav name -> the libdav1d decoder, falling back to the
     // pure-Rust re_rav1d decoder when only the `rav1d` feature is built.
@@ -1339,6 +1452,31 @@ fn register_feature_gated(reg: &mut Registry) {
     reg.register_launch(LaunchFactory::new("webrtcsink", Vec::new(), || {
         Box::new(WebRtcSink::new(""))
     }));
+    // Multi-track WHIP session sink (M725): a terminal fan-in whose track kinds
+    // come from each linked pad's caps (video pads group as simulcast layers in
+    // pad order): `v ! s.  a ! s.  webrtcsessionsink name=s location=...`.
+    #[cfg(feature = "webrtc")]
+    reg.register_muxer(MuxerFactory::new("webrtcsessionsink", |inputs| {
+        Box::new(crate::webrtcsession::WebRtcSessionSink::new("").with_inputs(inputs))
+    }));
+    // LiveKit publisher, the same terminal fan-in shape with room/credential
+    // properties (`livekitsink name=s url=... room=... api-key=...`).
+    #[cfg(feature = "webrtc-livekit")]
+    reg.register_muxer(MuxerFactory::new("livekitsink", |inputs| {
+        Box::new(crate::livekitsink::LiveKitSink::new("", "", "g2g").with_inputs(inputs))
+    }));
+    // Terminal fan-out session sources (M727): output 0 = H.264 video, output
+    // 1 = Opus audio (`livekitsrc name=s url=...  s. ! ...  s. ! ...`).
+    #[cfg(feature = "webrtc-livekit")]
+    reg.register_fanout_src(g2g_core::runtime::FanoutSrcFactory::new(
+        "livekitsrc",
+        |_n| Box::new(crate::livekitsrc::LiveKitSrc::new("", "", "g2g-sub")),
+    ));
+    #[cfg(feature = "webrtc")]
+    reg.register_fanout_src(g2g_core::runtime::FanoutSrcFactory::new(
+        "webrtcwhepsessionsrc",
+        |_n| Box::new(crate::webrtcwhepsession::WebRtcWhepSessionSrc::new("")),
+    ));
     #[cfg(all(target_os = "linux", feature = "kms-sink"))]
     reg.register_launch(LaunchFactory::new("kmssink", Vec::new(), || {
         Box::new(KmsSink::new())

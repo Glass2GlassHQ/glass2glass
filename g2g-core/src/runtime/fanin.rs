@@ -323,6 +323,18 @@ pub trait DynMultiInputElement: ElementBound {
     /// Dyn-safe mirror of [`MultiInputElement::metadata`], for the `gst-inspect`
     /// "Factory Details" of an erased fan-in muxer.
     fn metadata(&self) -> ElementMetadata;
+
+    /// Dyn-safe mirror of [`MultiInputElement::reverse_channel`], so a terminal
+    /// fan-in node's arm can route a per-input reverse signal (WebRTC PLI / BWE)
+    /// back to the upstream feeding that pad. Default `None`.
+    fn reverse_channel(&self, _input: usize) -> Option<crate::fanout::ReverseChannel> {
+        None
+    }
+
+    /// Dyn-safe mirror of [`MultiInputElement::is_terminal`].
+    fn is_terminal(&self) -> bool {
+        false
+    }
 }
 
 impl<T: MultiInputElement> DynMultiInputElement for T {
@@ -389,6 +401,14 @@ impl<T: MultiInputElement> DynMultiInputElement for T {
 
     fn metadata(&self) -> ElementMetadata {
         MultiInputElement::metadata(self)
+    }
+
+    fn reverse_channel(&self, input: usize) -> Option<crate::fanout::ReverseChannel> {
+        MultiInputElement::reverse_channel(self, input)
+    }
+
+    fn is_terminal(&self) -> bool {
+        MultiInputElement::is_terminal(self)
     }
 }
 
@@ -460,6 +480,14 @@ impl<'b> DynMultiInputElement for &'b mut (dyn DynMultiInputElement + 'b) {
 
     fn metadata(&self) -> ElementMetadata {
         (**self).metadata()
+    }
+
+    fn reverse_channel(&self, input: usize) -> Option<crate::fanout::ReverseChannel> {
+        (**self).reverse_channel(input)
+    }
+
+    fn is_terminal(&self) -> bool {
+        (**self).is_terminal()
     }
 }
 
@@ -734,6 +762,16 @@ where
                     if live_inputs.fetch_sub(1, Ordering::SeqCst) == 1 {
                         return Ok::<u64, G2gError>(consumed);
                     }
+                }
+                Some((idx, PipelinePacket::CapsChanged(new_caps))) => {
+                    // Mid-stream re-solve (M724): re-configure the changed pad
+                    // before the session sees the new caps. A counter-fixation
+                    // cannot travel back to the tagged source, so it fails loud.
+                    MultiInputElement::configure_pipeline(session, idx, &new_caps)?
+                        .reject_refixate()?;
+                    session
+                        .process(idx, PipelinePacket::CapsChanged(new_caps), &mut null)
+                        .await?;
                 }
                 Some((idx, packet)) => {
                     if matches!(packet, PipelinePacket::DataFrame(_)) {

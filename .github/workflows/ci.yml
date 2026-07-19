@@ -190,6 +190,21 @@ jobs:
         run: |
           cargo test -p g2g-plugins --locked --features script-rhai,declarative-yaml --test m578_scripting
           cargo test -p g2g-plugins --locked --features script-rhai,declarative-yaml --lib script::
+      # Native WebRTC (str0m sans-IO stack): needs rustc 1.85 (the workspace MSRV),
+      # so it stays out of the default suite. Compile the feature, then run the
+      # deterministic + localhost-only tests: the webrtc element/util/turn lib
+      # units, the duplex session runner, and the synthetic lossy-relay NACK/RTX
+      # resilience test. The WHIP/WHEP + P2P loopback harness is #[ignore] (needs
+      # mediamtx / an H.264 fixture), so it does not run here.
+      - name: test g2g-plugins (webrtc)
+        run: |
+          cargo check -p g2g-plugins --locked --all-targets --features webrtc
+          cargo check -p g2g-plugins --locked --all-targets --features webrtc-livekit
+          cargo test -p g2g-plugins --locked --features webrtc --lib -- webrtc turn::
+          cargo test -p g2g-plugins --locked --features webrtc-livekit --lib -- livekit
+          cargo test -p g2g-plugins --locked --features webrtc --test m249_duplex_session
+          cargo test -p g2g-plugins --locked --features webrtc --test webrtc_loss_resilience
+          cargo test -p g2g-plugins --locked --features webrtc --test webrtc_data_channel
 
   # Windows platform build: Media Foundation decode/encode/AAC, WASAPI audio,
   # Direct3D11 present, MF camera. The `windows` crate bundles its bindings, so no
@@ -217,8 +232,22 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: check g2g-plugins (vtdecode + vtencode)
-        run: cargo check -p g2g-plugins --locked --all-targets --features vtdecode,vtencode
+      - name: check g2g-plugins (macos platform features)
+        run: >
+          cargo check -p g2g-plugins --locked --all-targets
+          --features vtdecode,vtencode,metal-sink,coreaudio,avfoundation,screencapture
+      # M731+: run the VideoToolbox / Metal / Core Audio / AVFoundation /
+      # ScreenCaptureKit elements for real (decode the reference fixtures,
+      # encode round trip, CAMetalLayer present, AudioQueue render + capture;
+      # the camera and screen tests probe, the runner grants neither): the
+      # on-Mac runtime validation the Linux dev host cannot do.
+      - name: test g2g-plugins (macos platform runtime)
+        run: >
+          cargo test -p g2g-plugins --locked
+          --features vtdecode,vtencode,metal-sink,coreaudio,avfoundation,screencapture
+          --test m731_videotoolbox --test m733_vt_registry --test m735_vt_zerocopy
+          --test m736_metal_sink --test m737_coreaudio --test m738_avf
+          --test m739_screencapture -- --nocapture
       - name: check g2g-ml (wgpu + burn, Metal)
         run: cargo check -p g2g-ml --locked --all-targets --features wgpu,burn
 

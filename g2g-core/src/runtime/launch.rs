@@ -484,6 +484,42 @@ fn parse_chains(pipeline: &str) -> Result<Vec<Chain>, ParseError> {
 
 /// Apply parsed `key=value` props to a source, parsing each value for its
 /// declared [`PropKind`](crate::PropKind).
+/// Apply launch-line properties to a terminal fan-out source (M727), the
+/// fanout-source analog of [`apply_source_props`].
+fn apply_fanout_src_props(
+    src: &mut alloc::boxed::Box<dyn crate::fanout::DynMultiOutputSource>,
+    name: &str,
+    props: &[(String, String)],
+) -> Result<(), ParseError> {
+    for (key, raw) in props {
+        if key == "name" {
+            continue;
+        }
+        let spec = src
+            .properties()
+            .iter()
+            .find(|p| p.name == key)
+            .ok_or_else(|| ParseError::UnknownProperty {
+                element: name.to_string(),
+                key: key.clone(),
+            })?;
+        let value = crate::property::PropValue::parse(spec.kind, raw).map_err(|_| {
+            ParseError::BadValue {
+                element: name.to_string(),
+                key: key.clone(),
+                value: raw.clone(),
+            }
+        })?;
+        src.set_property(key, value)
+            .map_err(|_| ParseError::BadValue {
+                element: name.to_string(),
+                key: key.clone(),
+                value: raw.clone(),
+            })?;
+    }
+    Ok(())
+}
+
 fn apply_source_props(
     el: &mut Box<dyn DynSourceLoop>,
     name: &str,
@@ -1080,16 +1116,22 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
     // several consumers gets an implicit `tee` spliced in below, so a gst-launch
     // line that omits the explicit tee still builds. `tee`, registered demuxers,
     // and explicit-demux fan-out nodes fan out on their own pads and are left alone.
-    let needs_tee = |ei: usize| !is_tee(ei) && !is_demux(ei) && !is_select[ei] && out_deg[ei] > 1;
-    for ei in 0..specs.len() {
-        if is_muxer(ei) && out_deg[ei] == 0 {
-            return Err(ParseError::MuxerWithoutOutput(specs[ei].name.clone()));
-        }
-        if is_tee(ei) && !specs[ei].props.is_empty() {
+    let needs_tee = |ei: usize| {
+        !is_tee(ei)
+            && !is_demux(ei)
+            && !is_select[ei]
+            && !registry.is_fanout_src(&specs[ei].name)
+            && out_deg[ei] > 1
+    };
+    // A fan-in element with no output is checked at construction below: a
+    // terminal session (`is_terminal`) legally ends the graph (M713), a
+    // merging muxer without a downstream stays `MuxerWithoutOutput`.
+    for (ei, spec) in specs.iter().enumerate() {
+        if is_tee(ei) && !spec.props.is_empty() {
             // The structural tee carries no element, so it has no properties.
             return Err(ParseError::UnknownProperty {
                 element: "tee".to_string(),
-                key: specs[ei].props[0].0.clone(),
+                key: spec.props[0].0.clone(),
             });
         }
     }
@@ -1125,6 +1167,20 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
         let spec = &specs[ei];
         let node = if is_tee(ei) {
             graph.add_tee(out_deg[ei] as u8).node()
+        } else if in_deg[ei] == 0 && registry.is_fanout_src(&spec.name) {
+            // Terminal fan-out source (M727): 0 inputs, one output per named
+            // pad reference (`s. ! ...`). The element's intrinsic port count
+            // must match the linked outputs.
+            let mut src = registry
+                .make_fanout_src(&spec.name, out_deg[ei])
+                .ok_or_else(|| ParseError::UnknownElement(spec.name.clone()))?;
+            if src.output_count() != out_deg[ei] {
+                return Err(ParseError::UnknownInputPad(spec.name.clone()));
+            }
+            apply_fanout_src_props(&mut src, &spec.name, &spec.props)?;
+            graph
+                .add_fanout_src(GraphNodeRef::FanoutSource(src), out_deg[ei] as u8)
+                .node()
         } else if in_deg[ei] == 0 {
             let mut src = registry
                 .make_source(&spec.name)
@@ -1172,9 +1228,21 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
                     mux_pad_of_link[k] = Some(idx as u8);
                 }
             }
-            graph
-                .add_muxer(GraphNodeRef::Muxer(mux), in_deg[ei] as u8)
-                .node()
+            if out_deg[ei] == 0 {
+                // Nothing downstream: legal only for a terminal fan-in session
+                // (M713), whose element consumes its inputs with no merged
+                // output. A merging muxer here would silently drop its output.
+                if !mux.is_terminal() {
+                    return Err(ParseError::MuxerWithoutOutput(spec.name.clone()));
+                }
+                graph
+                    .add_fanin_sink(GraphNodeRef::Muxer(mux), in_deg[ei] as u8)
+                    .node()
+            } else {
+                graph
+                    .add_muxer(GraphNodeRef::Muxer(mux), in_deg[ei] as u8)
+                    .node()
+            }
         } else if is_select[ei] {
             // M476: a demux-select hook already built the multi-output demuxer
             // (probing the upstream file); splice it in with one port per pad.
@@ -1235,7 +1303,8 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
             let index = tee_next[s];
             tee_next[s] += 1;
             PadId { node: tee, index }
-        } else if is_tee(s) || is_demux(s) || is_select[s] {
+        } else if is_tee(s) || is_demux(s) || is_select[s] || registry.is_fanout_src(&specs[s].name)
+        {
             let index = tee_next[s];
             tee_next[s] += 1;
             PadId {

@@ -1954,6 +1954,42 @@ sources into it over one tagged `(input, packet)` channel. The session source is
 the mirror: a terminal `MultiOutputSource` (0 inputs → N outputs) driven by
 `run_fanout_session` into N sinks.
 
+**Simulcast (M710-M723).** Send-side simulcast lives in `webrtc_simulcast.rs`,
+shared by `LiveKitSink` and (M723) `WebRtcSessionSink`: `SimulcastPads` (the
+video-layer + audio pad model, pad 0 = highest resolution), rid assignment
+(`f`/`h`/`q` high-to-low), the one-m-line `a=rid`/`a=simulcast` offer,
+per-(mid,rid) `KeyframeRoutes`, and the BWE `LayerAllocator` (whole-layer
+on/off with time hysteresis; per-layer targets, M722). The LiveKit path is
+browser-validated end to end; the WHIP path shares the machinery but its live
+multi-rid ingest validation is owed (no local WHIP server ingests client
+simulcast).
+
+**Session sources as DAG nodes (M727).** The receive-side mirror:
+`NodeKind::FanoutSrc(n)` via `Graph::add_fanout_src` runs a terminal
+`MultiOutputSource` (0 inputs, N outputs it generates itself) as a graph node,
+its ports solved from `output_caps` (the demux constraint shape with the input
+half inert) and its arm just running the element into per-edge senders (the
+element owes every port an `Eos`). `FanoutSrcFactory` + named output pads wire
+it into `parse_launch` (`livekitsrc name=s url=...  s. ! ...  s. ! ...`), with
+a properties surface added to `MultiOutputSource` for the launch knobs.
+Validated live: `LiveKitSrc` as a graph node subscribing on a real server.
+
+**Session sinks as DAG nodes (M713).** A terminal fan-in is also a first-class
+graph node, `NodeKind::FaninSink(n)` via `Graph::add_fanin_sink`, so a transform
+chain can feed each session pad instead of a bare source: the live encoder fan
+graph `src -> tee -> videoscale -> ffmpegenc` per simulcast layer ends on
+`LiveKitSink` inside one `run_graph` (cooperative or threaded). The node reuses
+the muxer's `GraphNodeRef::Muxer` payload and negotiation shape with the output
+half inert (no output edge exists), and its arm is the `run_fanin_session`
+discipline over the DAG's per-edge channels: round-robin drain, per-input `Eos`
+flush, end on all-`Eos`, and each pad's `reverse_channel` relayed onto its own
+in-edge, so a per-`(mid,rid)` PLI reaches exactly the encoder feeding that layer
+as a `PushOutcome::Reconfigure(ForceKeyframe)`. `MultiInputElement::is_terminal`
+marks a session element as legal to end a graph; in `parse_launch` a fan-in name
+with nothing downstream builds this node, while a merging muxer without a
+downstream stays a `MuxerWithoutOutput` parse error (its merged output would be
+silently discarded).
+
 **The duplex shape.** Bidirectional sendrecv needs an element that is *at once* a
 sink (for the tracks it publishes) and a source (for the tracks it receives) over
 **one** connection — which neither the fan-in nor the fan-out session runner could
@@ -1972,28 +2008,89 @@ no peer-to-peer mode for WHIP/WHEP. WHIP/WHEP are unidirectional by spec, so
 sendrecv cannot use them: the duplex session instead exchanges SDP **directly**
 between two peers over an `SdpChannel` (an in-process offer/answer transport for a
 P2P loopback; a real SFU signaller — LiveKit, etc. — plugs into the same seam).
+Mid-session renegotiation (M729): a cloneable `DuplexControl` toggles a track,
+batching direction changes (SendRecv <-> Inactive) into one re-offer over the
+`SdpChannel`; the peer answers it in its loop (typed `offer\n` / `answer\n`
+prefixes distinguish the exchange; on glare the answerer role yields). A
+genuinely NEW track has no target pad under the fixed-arity model and stays a
+design question.
 The two roles discover their m-line `Mid`s differently and this asymmetry is
 load-bearing: the **offerer** captures its `Mid`s from `SdpApi::add_media`'s
 return, while the **answerer** learns them from `Event::MediaAdded` after
 `accept_offer` (str0m does not emit `MediaAdded` for media the local side added).
+
+**LiveKit signaller (M707/M714).** `livekit_signal` is the protocol seam: an
+HS256 JWT access-token mint and a hand-rolled protobuf codec for the
+`livekit_rtc.proto` subset, over a tokio-tungstenite WebSocket (`ws://` and,
+M715, `wss://` via native-tls, the TLS stack the WHIP reqwest client already
+links). `LiveKitSink` publishes (client offers, per WHIP habits) and
+`LiveKitSrc` subscribes — where the offer direction REVERSES: the SFU offers the
+subscriber PeerConnection over the signalling socket and re-offers on every
+track-set change, and the element answers each with `accept_offer`, learning its
+mids from `MediaAdded` per the answerer rule above. The source is a terminal
+`MultiOutputSource` (video + audio ports, `run_fanout_session`), gates video
+until the first keyframe and repeats a PLI until it arrives, and takes the first
+video / audio m-line offered (one-subscription element). Both validated against
+a real LiveKit server, including an in-room sink-to-src A/V loopback and the
+same loopback over a TLS-terminated `wss://` proxy. `LiveKitDuplex` (M728) is
+the full participant: LiveKit has no sendrecv m-lines, so it runs BOTH PCs (a
+publisher it offers, a subscriber the server offers) in one loop over one
+socket, routing trickle by `SignalTarget`, exposed as a `MultiDuplexSession`
+for the duplex runner; two participants exchanging A/V validated live.
 
 **ICE / NAT traversal.** `webrtc_util::add_ice_candidates` always adds the socket's
 host candidate and, when a STUN server is configured, a server-reflexive candidate
 discovered by a hand-rolled RFC 5389 Binding on the ICE socket; candidates ride in
 the SDP, so a same-host P2P pair connects over localhost with no STUN. For the NAT
 cases a reflexive candidate cannot punch through, a hand-rolled TURN client
-(`turn.rs`, RFC 5766/8656: Allocate with long-term auth, Send/Data indications,
-CreatePermission, periodic Refresh) provides a relay. str0m only offers
+(`turn.rs`, RFC 5766/8656: Allocate with long-term auth, channel binding,
+periodic Refresh) provides a relay. str0m only offers
 `Candidate::relayed`; the data plane is the run loop's job — a relayed pair's
 transmits all carry `source == relay_addr`, which is the routing signal to wrap
-the datagram in a TURN Send indication (direct host/srflx paths are untouched).
+the datagram for the relay (direct host/srflx paths are untouched). The first
+transmit to a new peer sends a ChannelBind (M716), which installs the peer
+permission and, once its success lands, upgrades that peer from 36-byte Send /
+Data indications to 4-byte-header ChannelData frames both ways; a `438 Stale
+Nonce` on any authenticated request adopts the error response's nonce and
+un-caches the affected state so the lazy paths retry with it. The
+client-to-server leg also runs over TCP and TLS (M717, `turn:...?transport=tcp`
+/ `turns:` RFC 7065 forms): a local bridge task tunnels the client's datagrams
+over one stream connection, re-delimiting messages (STUN self-describing
+lengths; ChannelData padded to 4 bytes on the stream), so `TurnClient` and
+every element run loop stay transport-agnostic and the allocation still relays
+UDP toward peers. The codec is address-family agnostic (M718): XOR addresses
+encode/decode IPv6 (cookie + transaction id), and a v6-bound client requests a
+v6 relayed address (RFC 6156). Validated against a real coturn on all three
+transports and over IPv6 (allocate, bind, ChannelData round-trip both
+directions). An element takes a comma-separated server list (M719, each entry
+optionally carrying GStreamer-style `turn://user:pass@host` credentials): a
+`TurnSet` allocates on every server, contributes one relayed candidate each,
+and the data plane routes by which relay a transmit's `source` names. The
+duplex session gained the same STUN/TURN surface; its relayed candidates ride
+in the offer/answer SDP (no trickle channel).
 
 **RTCP feedback** rides the §4.13 reverse channel. A remote PLI
 (`Event::KeyframeRequest`) becomes a `Reconfigure::ForceKeyframe` walked upstream
 via `AsyncElement::take_reconfigure` to the encoder (`Av1Enc` forces a rav1e IDR);
 ingress originates PLI on a mid-GOP join. str0m's BWE (`Event::EgressBitrateEstimate`,
 TWCC/REMB) becomes `PushOutcome::Bitrate` via `take_bitrate`, and the encoder
-retargets (rav1e by a hysteresis-gated context rebuild).
+retargets (rav1e by a hysteresis-gated context rebuild). Both signals hop past
+intervening transforms (M720): an element that does not consume them
+(`AsyncElement::handles_keyframe_requests` / `handles_bitrate_requests`, false by
+default; encoders override) has its output adapter relay the pending
+`ForceKeyframe` / bitrate onto its input link, the QoS-relay mechanism
+generalized, so `enc ! h264parse ! webrtc-sink` reaches the encoder. `Propose` /
+`Renegotiate` never relay (they concern the adjacent element's own caps).
+`OpusEnc` retargets live too (M721, `OPUS_SET_BITRATE`, no rebuild), and
+`FfmpegH264Enc` by a hysteresis-gated reopen (M722; zerolatency, nothing in
+flight). Simulcast splits the aggregate BWE estimate per layer (M722): the
+allocator hands each active layer its nominal share of the estimate on that
+layer's reverse channel and a shed layer the `Bitrate(0)` idle hint, on which
+the encoder skips frames unencoded except a sparse 1-in-32 keep-alive (the
+resume signal rides push outcomes, so the cadence must not fully stop; resume
+forces an IDR). The allocator is also re-ticked with the last estimate once a
+second: BWE only emits deltas, and retargeted encoders settle exactly on the
+estimate, which would otherwise freeze the drop/restore hysteresis windows.
 
 **Codec plumbing.** A `Track` enum unifies the per-track facts WebRTC needs to
 agree on: codec (H.264 / Opus), m-line `MediaKind`, and the RTP clock (90 kHz /

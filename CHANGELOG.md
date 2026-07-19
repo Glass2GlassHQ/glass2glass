@@ -6,6 +6,43 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M739: ScreenCaptureKit display capture (`screencapturesrc`, `screencapture` feature) with zero-copy `cv-output`; the CI runner denies screen recording, so the probe path is validated and real capture awaits a permitted Mac.
+- M738: AVFoundation capture (`avfvideosrc` camera with zero-copy `cv-output`, `avfaudiosrc` mic, `avfoundation` feature); mic capture validated on the CI runner, the camera path probes the permission/no-device denial until a Mac with one.
+- M737: Core Audio elements (`coreaudiosink` / `coreaudiosrc`, `coreaudio` feature) on the AudioToolbox AudioQueue API, with `autoaudiosink` / `osxaudiosink` aliases; render and capture validated on the CI runner's audio devices.
+- M736: `MetalVideoSink` (`metalvideosink`, `metal-sink` feature): NV12 presented to a `CAMetalLayer` drawable, zero-copy from the CvPixelBuffer domain via IOSurface plane import; render + present validated on the macOS CI runner, `autovideosink` resolves to it on macOS.
+- M735: `CVPixelBuffer` zero-copy memory domain (`MemoryDomain::CvPixelBuffer`): `VtDecode cv-output` emits retained IOSurface-backed buffers and `VtEncode` encodes them directly, transcode validated on the macOS CI runner.
+- M734: the MF and MediaCodec codecs accept the graph runner's pre-fixed output caps and emit concrete output framerates (the M733 VideoToolbox fixes applied to the sibling platform codecs).
+- M733: VideoToolbox elements in the launch registry (`vtdec` / `vtdech265` / `vtenc_h264` / `vtenc_h265`, `avdec_h264` alias fallback, encoder `bitrate` / `max-keyframe-interval` properties); text pipelines validated on the macOS CI runner.
+- M732: migrate the VideoToolbox elements off the deprecated objc2 free functions to the associated-function forms.
+- M731: `VtDecode` / `VtEncode` runtime-validated on the macOS CI runner (reference-fixture decode and encode round trip, H.264 and HEVC), with persisted hardware conformance evidence.
+- M730: VP8/VP9 runtime force-keyframe and bitrate retarget (encoder rebuild on the reverse signals, hysteresis-gated).
+- M729: duplex renegotiation (`DuplexControl::set_track_enabled` renegotiates the m-line direction mid-session; peers answer re-offers); pause/resume validated on a live P2P loopback.
+- M728: `LiveKitDuplex` full participant (publisher + subscriber PCs over one signalling socket, on the duplex runner); two participants exchanging A/V validated live.
+- M727: terminal fan-out source graph node (`Graph::add_fanout_src` + `FanoutSrcFactory` launch wiring), so session sources (`livekitsrc`, `webrtcwhepsessionsrc`) run inside graphs and launch lines; validated live against a LiveKit server.
+- M726: mono Opus accepted on the WebRTC sinks and a graceful EOS pacer drain (queued RTP flushes before the socket drops).
+- M725: `webrtcsessionsink` / `livekitsink` in the launch registry as terminal fan-in elements (track kinds from each linked pad's caps, endpoint/room via properties).
+- M724: mid-stream caps re-solve through the fan-in session runners (a source's caps change re-configures its session input pad, standalone and graph arms).
+- M723: simulcast on the WHIP session sink (`WebRtcSessionSink::with_simulcast`, shared `SimulcastPads` pad model with `LiveKitSink`); machinery unit-tested, live multi-rid WHIP ingest validation owed (no local server supports it).
+- M722: per-layer simulcast bitrate targets (the allocator splits the BWE estimate across layers; `Bitrate(0)` idles a shed layer's encoder) and `FfmpegH264Enc` runtime retarget via reopen; shed + idle validated live through the encoder fan graph.
+- M721: Opus runtime bitrate adaptation (`OpusEnc` retargets the live encoder from downstream BWE estimates).
+- M720: keyframe-request / bitrate reverse signals relay past non-consuming transforms to the encoder (`handles_keyframe_requests` / `handles_bitrate_requests` element capability), in the linear and DAG runners.
+- M719: multiple TURN servers per element (comma-separated list, GStreamer-style `turn://user:pass@host` credentials) and TURN on the duplex session; multi-allocation validated against coturn.
+- M718: IPv6 STUN/TURN (v6 XOR address codec, RFC 6156 v6 relay allocation, v6-capable host-ip pick); relay round-trip validated against coturn over `::1`.
+- M717: TURN-over-TCP / -TLS (`turn:...?transport=tcp` / `turns:` server forms via a datagram-to-stream bridge); validated against coturn on all three transports.
+- M716: TURN channel binding (ChannelData framing once the per-peer bind lands) and 438 stale-nonce recovery; validated against a real coturn relay.
+- M715: `wss://` (TLS) LiveKit signalling via tokio-tungstenite native-tls; ingest loopback validated through a TLS-terminating proxy.
+- M714: `LiveKitSrc` room subscriber (answers the server-offered subscriber PC, video + audio outputs, PLI until first keyframe); validated live incl. a sink-to-src loopback on a real server.
+- M713: terminal fan-in graph node (`Graph::add_fanin_sink`, session sinks in `run_graph`/`parse_launch` with per-input Eos flush and per-pad reverse-signal routing), enabling the live encoder fan graph (`tee -> videoscale -> ffmpegenc` per simulcast layer into `LiveKitSink`); validated live incl. a Chrome subscriber.
+- M712: third simulcast layer (rids `f`/`h`/`q`) and per-rid `a=rid` max-width/max-height restrictions from each pad's fixated caps; all three layers validated live incl. Chrome LOW/MEDIUM/HIGH switching.
+- M711: simulcast BWE layer allocator (aggregate estimate budgeted as whole-layer on/off, top layer sheds first with hysteresis, last layer never drops) plus a `max-send-bitrate` cap property; shed + fallback validated live in Chrome.
+- M710: two-layer send simulcast on `LiveKitSink` (`with_simulcast`, shared `webrtc_simulcast` machinery: one m-line with rid-tagged layers, per-`(mid,rid)` keyframe routing); validated live incl. a Chrome subscriber switching layers.
+- M709: patch str0m to send media packets unpadded (fork via `[patch.crates-io]`, pending upstream str0m#1014 / livekit#4689), fixing browser playback of a `LiveKitSink` stream; validated live in Chrome.
+- M708: native WebRTC data-channel elements (`WebRtcDataSrc` / `WebRtcDataSink`) on str0m SCTP, P2P over the `SdpChannel` seam, mirroring the wasm `WebRtcSrc` byte-stream surface.
+- M707: native LiveKit publish signaller (`LiveKitSink`, `webrtc-livekit` feature): hand-rolled JWT + protobuf signal codec over WebSocket, one str0m PeerConnection into a room, validated against livekit-server.
+- M706: WHIP/WHEP trickle ICE (immediate offer POST, post-offer STUN/TURN candidates via `PATCH` sdpfrag with a numeric-mid retry for mediamtx), ICE restart on sustained disconnect, and `DELETE` teardown on session end.
+- M705: NACK / RTX loss recovery proven for the native duplex WebRTC session over a lossy P2P relay, with a default-run localhost test asserting near-complete H.264 delivery under ~10% packet loss.
+- M704: browser interop validated live (Chrome plays a g2g WHIP A/V publish via mediamtx WHEP, and a Chrome-encoded H264 canvas publish is ingested by `WebRtcWhepSrc`), with two harness tests and a `whip-publisher` example page.
+- M703: raise the workspace MSRV to 1.85 and put the `webrtc` feature under CI (compile check plus the deterministic + localhost-only tests).
 - M702: the dashboard's compressed edge card parses the packet header for the frame type (H.264 / H.265 IDR vs delta, VP8 key vs delta) and shows the packet size, no decoder.
 - M701: the builder embeds the wasm caps solver as base64 and instantiates it from bytes, so the real solver runs in the static bundle and the self-contained artifact (not just `pnpm dev`).
 - M700: `ffmpegdec` seeds libavcodec with the stream's parameter sets and SPS-derived reorder depth at open, so a stream that reorders around its first IDR no longer loses the opening GOP's leading pictures.

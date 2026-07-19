@@ -13,8 +13,7 @@ SEGMENT, auto-plug / decodebin / playbin) are done. What remains, highest
 leverage first:
 
 1. **Platforms** (largest track). macOS: AVFoundation capture, Core Audio,
-   Metal present, plus on-device validation of `VtDecode` / `VtEncode`.
-   Android: encode, Camera2, AAudio, Surface present.
+   Metal present. Android: encode, Camera2, AAudio, Surface present.
 2. **Egress / transports.** SRT congestion control + real-peer interop, AES-256
    + key rotation; FlexFEC + multi-level burst FEC.
 3. **Depth.** Codec decode to cut reliance on the ffmpeg FFI: AV1 landed both as
@@ -291,18 +290,11 @@ Phased plan:
 
 ## Platform: macOS
 
-- `VtDecode`: first `cargo build` on a Mac to settle the FFI `// NOTE` spots; a
-  `CVPixelBuffer` / `IOSurface` zero-copy domain; registry wiring (`avdec_h264`
-  alias); on-device runtime validation. (HEVC done, M534: `VtDecode::h265` +
-  `CMVideoFormatDescriptionCreateFromHEVCParameterSets` + VPS/SPS/PPS parameter
-  sets; compile-pending like the rest of the module.)
-- `VtEncode`: on-device runtime validation. (HEVC done, M534: `VtEncode::h265` +
-  the `'hvc1'` codec FourCC + the HEVC parameter-set accessor for the keyframe
-  prefix; compile-pending.)
-- `avfvideosrc` / `avfaudiosrc` (AVFoundation camera + mic).
-- `coreaudiosink` / `coreaudiosrc`.
-- `metalvideosink` (Metal present).
-- Screen capture (ScreenCaptureKit).
+- `AvfVideoSrc` / `ScreenCaptureSrc`: real capture validation on a Mac with a
+  camera / screen-recording permission (the CI runner grants neither, so only
+  the probe paths are validated).
+- `MetalVideoSink`: an on-screen example (app-owned `NSWindow` + `with_layer`);
+  the element and its headless present path are done.
 
 ## Platform: Android
 
@@ -584,8 +576,7 @@ Phased plan:
     fixate-failure bug. Multi-track A/V DONE (M248): `WebRtcSessionSink` publishes
     H.264 + Opus over one PeerConnection and `WebRtcWhepSessionSrc` reads both back
     (`webrtc_av_session_loopback`, both tracks received; mediamtx logs `2 tracks`).
-    Remaining: browser playback via the WHEP player, and a real LiveKit Cloud /
-    TURN-relay run (genuine remote NAT).
+    Remaining: a real LiveKit Cloud / TURN-relay run (genuine remote NAT).
   - **T1 (keystone): unified `WebRtcBin`-equivalent session element.** One element
     owning one `Rtc` with N tracks, on the multi-pad traits, so BUNDLE / A-V on one
     PeerConnection / sendrecv / data channels all hang off it. Fixed-arity-from-caps
@@ -602,39 +593,30 @@ Phased plan:
     + `WebRtcDuplexSession` (one `Rtc`, sendrecv m-lines; WHIP/WHEP can't carry
     sendrecv, so peers exchange SDP directly over an `SdpChannel`). Validated by
     in-process P2P loopbacks (video + full A/V, localhost, no server). Remaining:
-    mid-stream re-solve through the multi-track runners; launch-registry wiring;
-    STUN/TURN for the duplex path; mid-session transceiver add/remove
-    (renegotiation); a pluggable real-SFU (LiveKit) signaller for the duplex
-    element. (Per-input reverse-signal routing (PLI / BWE) for the *fan-in*
-    session landed, M523: `g2g-core` `ReverseChannel` + `MultiInputElement::
-    reverse_channel`, and `WebRtcSessionSink` routes a per-mid `KeyframeRequest`
-    to the matching source. The *duplex* runner routes per-input reverse signals
-    too, M530: `MultiDuplexSession::reverse_channel` + `run_duplex_session` polling,
-    and `WebRtcDuplexSession` maps a remote per-mid `KeyframeRequest` / BWE estimate
-    back to the send source feeding that track. Per-branch mid-stream re-solve on
-    the recv side is the remaining follow-up.)
+    mid-session transceiver ADD (a new m-line on a live session; direction
+    renegotiation landed M729, and the fixed-arity pad model has no target pad
+    for a genuinely new track, so this needs a design call).
   - **T2 (mostly wiring): RTCP feedback.** PLI / keyframe-request DONE (M243):
     `Reconfigure::ForceKeyframe` + `take_reconfigure`; `WebRtcSink` maps a remote
     `Event::KeyframeRequest` to it, `Av1Enc` forces an IDR, `WebRtcWhepSrc`
     originates PLI on mid-GOP join. Adaptive bitrate / congestion control DONE
     (M244): `PushOutcome::Bitrate` + `take_bitrate`; `WebRtcSink` enables str0m
     BWE and relays `Event::EgressBitrateEstimate`, `Av1Enc` retargets (rav1e
-    context rebuild, hysteresis-gated). Remaining: VP8/VP9 runtime bitrate +
-    force-keyframe (needs a libvpx path `vpx-encode` does not expose); Opus
-    bitrate adaptation; `ForceKeyframe`/`Bitrate` relay through an intervening
-    transform; NACK / RTX (str0m-internal, enable by offering the RTX payload
-    type).
-  - **T3: TURN / ICE completeness.** TURN channel binding (lower overhead than
-    Send/Data indications), TURN-over-TCP / -TLS, IPv6 reflexive + relay, multiple
-    TURN servers, 438 stale-nonce retry, trickle ICE (WHIP/WHEP `PATCH`), ICE
-    restart. Incremental on the M242 `turn.rs`.
-  - **T4: signalling ecosystem.** Native LiveKit signaller (websocket + protocol),
-    then Janus / Kinesis as wanted, layered over the T1 engine like
-    `gst-plugins-rs` layers signallers over `webrtcbin`.
-  - **T5: advanced.** Native data-channel source/sink on str0m SCTP (unifying the
-    wasm-only `WebRtcSrc`); simulcast (encoder fan-out); FEC; full renegotiation.
-  Smaller loose ends: non-stereo / non-48 kHz Opus; WHIP/WHEP `DELETE` + graceful
-  flush on EOS. Recommended order: T0 -> T1 -> T2 (PLI first) -> T3 -> T4.
+    context rebuild, hysteresis-gated). T2 is complete
+    (VP8/VP9 honor both via an encoder rebuild, M730).
+  - **T4: signalling ecosystem.** Drop the `[patch.crates-io]` str0m fork
+    (unpadded media sends) once the LiveKit forwarder fix (livekit#4690, on
+    their master) ships in a release, or str0m#1014 lands; a real LiveKit Cloud
+    run (genuine remote NAT + STUN/TURN on the LiveKit elements); then Janus /
+    Kinesis as wanted.
+  - **T5: advanced.** Live multi-rid validation of the WHIP simulcast session
+    (needs a WHIP server that ingests client simulcast: mediamtx cannot, and
+    LiveKit's WHIP ingress transcodes a single layer; Janus + a WHIP front end
+    is the known candidate). FEC is blocked upstream (str0m has no FEC payload;
+    loss recovery is NACK/RTX). Full renegotiation; data-channel loose ends
+    (str0m surfaces no remote-close event, so EOS rides an explicit marker
+    message; a WHIP/SFU-signalled data channel vs the P2P `SdpChannel` seam).
+  Recommended order: T1 remainders -> T2 -> T4 -> T5.
 
 ## Adaptive streaming (HLS / DASH)
 

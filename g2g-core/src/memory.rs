@@ -45,6 +45,14 @@ pub enum MemoryDomain {
     /// [`OwnedD3D11Texture`]. The Windows analog of [`MemoryDomain::Cuda`].
     #[cfg(feature = "alloc")]
     D3D11Texture(OwnedD3D11Texture),
+    /// A decoded picture left in a CoreVideo `CVPixelBuffer` (macOS / iOS). The
+    /// frame stays in the decoder's (ideally IOSurface-backed) pixel buffer, so
+    /// a VideoToolbox encoder or a Metal consumer uses it without the CPU NV12
+    /// pack. The buffer is owned elsewhere (the producing element retains it
+    /// behind a [`CvPixelBufferKeepAlive`]); see [`OwnedCvPixelBuffer`]. The
+    /// macOS analog of [`MemoryDomain::D3D11Texture`].
+    #[cfg(feature = "alloc")]
+    CvPixelBuffer(OwnedCvPixelBuffer),
     /// A decoded picture left as a browser `VideoFrame`, to be imported into
     /// WebGPU as a `GPUExternalTexture` and sampled on the GPU (browser/wasm),
     /// so a WebCodecs-decoded frame never round-trips to CPU. The frame is
@@ -88,6 +96,7 @@ pub enum MemoryDomainKind {
     WebGPUBuffer,
     Cuda,
     D3D11Texture,
+    CvPixelBuffer,
     WebGPUExternalTexture,
     WgpuTexture,
     WgpuBuffer,
@@ -95,7 +104,7 @@ pub enum MemoryDomainKind {
 
 impl MemoryDomainKind {
     /// Stable bit index for [`DomainSet`]. Keep in sync with the enum (one bit
-    /// per variant, 10 variants fit a `u16`).
+    /// per variant, 11 variants fit a `u16`).
     const fn bit_index(self) -> u16 {
         match self {
             MemoryDomainKind::System => 0,
@@ -108,6 +117,7 @@ impl MemoryDomainKind {
             MemoryDomainKind::WebGPUExternalTexture => 7,
             MemoryDomainKind::WgpuTexture => 8,
             MemoryDomainKind::WgpuBuffer => 9,
+            MemoryDomainKind::CvPixelBuffer => 10,
         }
     }
 }
@@ -116,9 +126,10 @@ impl MemoryDomainKind {
 /// zero-copy GPU-resident domains first, plain `System` bytes last. So when a
 /// producer and its consumer(s) both accept several domains, the negotiation
 /// keeps the frame on the device rather than falling back to a host copy.
-const DOMAIN_PREFERENCE: [MemoryDomainKind; 10] = [
+const DOMAIN_PREFERENCE: [MemoryDomainKind; 11] = [
     MemoryDomainKind::Cuda,
     MemoryDomainKind::D3D11Texture,
+    MemoryDomainKind::CvPixelBuffer,
     MemoryDomainKind::VulkanTexture,
     MemoryDomainKind::WgpuTexture,
     MemoryDomainKind::WgpuBuffer,
@@ -218,6 +229,8 @@ impl MemoryDomain {
             #[cfg(feature = "alloc")]
             MemoryDomain::D3D11Texture(_) => MemoryDomainKind::D3D11Texture,
             #[cfg(feature = "alloc")]
+            MemoryDomain::CvPixelBuffer(_) => MemoryDomainKind::CvPixelBuffer,
+            #[cfg(feature = "alloc")]
             MemoryDomain::WebGPUExternalTexture(_) => MemoryDomainKind::WebGPUExternalTexture,
             #[cfg(feature = "alloc")]
             MemoryDomain::WgpuTexture(_) => MemoryDomainKind::WgpuTexture,
@@ -261,6 +274,7 @@ impl MemoryDomain {
             MemoryDomain::WebGPUBuffer(b) => MemoryDomain::WebGPUBuffer(b.clone()),
             MemoryDomain::Cuda(c) => MemoryDomain::Cuda(c.clone()),
             MemoryDomain::D3D11Texture(t) => MemoryDomain::D3D11Texture(t.clone()),
+            MemoryDomain::CvPixelBuffer(b) => MemoryDomain::CvPixelBuffer(b.clone()),
             MemoryDomain::WebGPUExternalTexture(t) => {
                 MemoryDomain::WebGPUExternalTexture(t.clone())
             }
@@ -866,6 +880,75 @@ impl OwnedD3D11Texture {
 /// contract under which the owners assert `Send`.
 #[cfg(feature = "alloc")]
 pub trait D3D11KeepAlive: core::fmt::Debug + Send + Sync {}
+
+/// A decoded picture in a CoreVideo `CVPixelBuffer` (macOS / iOS), typically
+/// IOSurface-backed so a Metal consumer can import it. `g2g-core` cannot link
+/// the objc2 framework crates (it is `no_std`), so the producing element
+/// (`VtDecode`) retains the buffer behind a [`CvPixelBufferKeepAlive`] trait
+/// object; dropping this struct drops the retain. The pointer stays valid for
+/// exactly the keep-alive's lifetime. The macOS analog of
+/// [`OwnedD3D11Texture`]. `Clone` is a zero-copy refcount bump (the buffer is
+/// shared, not copied), so the frame can fan out through a tee; see
+/// [`MemoryDomain::share`].
+#[cfg(feature = "alloc")]
+#[derive(Debug, Clone)]
+pub struct OwnedCvPixelBuffer {
+    /// `CVPixelBufferRef` (as `u64`) backing this frame.
+    pub pixel_buffer: u64,
+    /// Visible picture dimensions in pixels.
+    pub width: u32,
+    pub height: u32,
+    /// CoreVideo pixel format FourCC (as `u32`), eg `'420v'` (bi-planar 4:2:0,
+    /// the NV12 layout, video range) or `'420f'` (full range).
+    pub pixel_format: u32,
+    /// Whether the buffer is IOSurface-backed (importable into Metal / shared
+    /// across processes). Decoders request IOSurface backing; `false` means a
+    /// consumer can still lock and read the planes on the CPU.
+    pub io_surface_backed: bool,
+    /// Pins the retained `CVPixelBuffer` for the life of the pointer.
+    /// Reference-counted (`Arc`), so a tee branch shares the buffer rather
+    /// than copying it; the last drop releases it.
+    keep_alive: Arc<dyn CvPixelBufferKeepAlive>,
+}
+
+#[cfg(feature = "alloc")]
+impl OwnedCvPixelBuffer {
+    /// Wrap a `CVPixelBufferRef` with the owner that keeps it retained. The
+    /// owner is `Arc`-held so the frame is cheaply shareable across a tee.
+    pub fn new(
+        pixel_buffer: u64,
+        width: u32,
+        height: u32,
+        pixel_format: u32,
+        io_surface_backed: bool,
+        keep_alive: Arc<dyn CvPixelBufferKeepAlive>,
+    ) -> Self {
+        Self {
+            pixel_buffer,
+            width,
+            height,
+            pixel_format,
+            io_surface_backed,
+            keep_alive,
+        }
+    }
+
+    /// The keep-alive owner, exposed so a consumer that imports the buffer
+    /// into another API (eg a Metal texture cache) can take shared ownership.
+    pub fn keep_alive(&self) -> &dyn CvPixelBufferKeepAlive {
+        self.keep_alive.as_ref()
+    }
+}
+
+/// Owner token kept alongside an [`OwnedCvPixelBuffer`]'s pointer. The buffer
+/// is retained by the producing element (a VideoToolbox decoder's output
+/// callback); `g2g-core` cannot link the objc2 framework crates, so the
+/// element boxes its retained handle as this trait object. Dropping the box
+/// releases the buffer. `Send + Sync` under the same contract as
+/// [`D3D11KeepAlive`]: CoreFoundation retain/release is thread-safe and the
+/// producing element certifies the pixels are read-only downstream.
+#[cfg(feature = "alloc")]
+pub trait CvPixelBufferKeepAlive: core::fmt::Debug + Send + Sync {}
 
 /// A decoded picture left as a browser `VideoFrame`, to be imported into
 /// WebGPU as a `GPUExternalTexture` (`device.importExternalTexture`) and
