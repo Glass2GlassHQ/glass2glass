@@ -482,7 +482,7 @@ impl SourceLoop for WebRtcWhepSrc {
                 if media == Media::Video && !seen_keyframe {
                     if let Some(mid) = media_mid {
                         let now = Instant::now();
-                        let due = last_pli.map_or(true, |t| now.duration_since(t) >= PLI_INTERVAL);
+                        let due = last_pli.is_none_or(|t| now.duration_since(t) >= PLI_INTERVAL);
                         if due {
                             if let Some(rx) = rtc.direct_api().stream_rx_by_mid(mid, None) {
                                 rx.request_keyframe(KeyframeRequestKind::Pli);

@@ -407,7 +407,7 @@ impl Mpd {
     /// Pick the highest-bandwidth Representation at or below `max_bandwidth`
     /// (or the overall highest when `None` / nothing fits).
     pub fn select(&self, max_bandwidth: Option<u64>) -> Option<&Representation> {
-        let under = |r: &&Representation| max_bandwidth.map_or(true, |cap| r.bandwidth <= cap);
+        let under = |r: &&Representation| max_bandwidth.is_none_or(|cap| r.bandwidth <= cap);
         self.representations
             .iter()
             .filter(under)

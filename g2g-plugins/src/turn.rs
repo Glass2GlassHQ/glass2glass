@@ -371,7 +371,7 @@ impl MessageBuilder {
             .extend_from_slice(&(value.len() as u16).to_be_bytes());
         self.buf.extend_from_slice(value);
         let pad = (4 - (value.len() % 4)) % 4;
-        self.buf.extend(core::iter::repeat(0u8).take(pad));
+        self.buf.extend(core::iter::repeat_n(0u8, pad));
     }
 
     fn push_str_attr(&mut self, atype: u16, s: &str) {

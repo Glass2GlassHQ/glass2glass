@@ -190,7 +190,7 @@ impl Segment {
 
     /// Whether `ts` (ns, stream timeline) lies within `[start, stop]`.
     pub fn contains(&self, ts: u64) -> bool {
-        ts >= self.start && self.stop.map_or(true, |stop| ts <= stop)
+        ts >= self.start && self.stop.is_none_or(|stop| ts <= stop)
     }
 
     /// Map a stream timestamp to **running time** (pipeline-clock ns), or

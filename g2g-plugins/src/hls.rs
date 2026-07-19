@@ -169,7 +169,7 @@ impl MasterPlaylist {
     /// overall highest when `None` / nothing fits). The simplest ABR rule; a
     /// real rate adaptor would track throughput across segments.
     pub fn select(&self, max_bandwidth: Option<u64>) -> Option<&Variant> {
-        let under = |v: &&Variant| max_bandwidth.map_or(true, |cap| v.bandwidth <= cap);
+        let under = |v: &&Variant| max_bandwidth.is_none_or(|cap| v.bandwidth <= cap);
         self.variants
             .iter()
             .filter(under)
