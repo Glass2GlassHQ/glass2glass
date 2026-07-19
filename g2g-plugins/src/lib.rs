@@ -387,14 +387,17 @@ pub mod webrtcwhepsession;
 #[cfg(feature = "webrtc")]
 pub mod webrtcwhepsrc;
 
-// Native LiveKit publisher (T4): WebSocket + protobuf signaller layered over the
-// str0m engine. `livekit_signal` is the transport/protocol seam (JWT + hand-rolled
-// protobuf), `livekitsink` the publish element. Gated behind `webrtc-livekit`
-// (implies `webrtc`, adds the WebSocket client + JWT crypto).
+// Native LiveKit publisher + subscriber (T4): WebSocket + protobuf signaller
+// layered over the str0m engine. `livekit_signal` is the transport/protocol seam
+// (JWT + hand-rolled protobuf), `livekitsink` the publish element, `livekitsrc`
+// the room subscriber (answers the server-offered subscriber PC). Gated behind
+// `webrtc-livekit` (implies `webrtc`, adds the WebSocket client + JWT crypto).
 #[cfg(feature = "webrtc-livekit")]
 pub mod livekit_signal;
 #[cfg(feature = "webrtc-livekit")]
 pub mod livekitsink;
+#[cfg(feature = "webrtc-livekit")]
+pub mod livekitsrc;
 
 // UDP ingress source (M91): receives RTP on a tokio UdpSocket and depayloads
 // H.264 (rtpdepay) into Annex-B access units, the receive-side inverse of

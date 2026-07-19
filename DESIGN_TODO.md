@@ -625,11 +625,11 @@ Phased plan:
   - **T3: TURN / ICE completeness.** TURN channel binding (lower overhead than
     Send/Data indications), TURN-over-TCP / -TLS, IPv6 reflexive + relay, multiple
     TURN servers, 438 stale-nonce retry. Incremental on the M242 `turn.rs`.
-  - **T4: signalling ecosystem.** LiveKit ingest (answer the server-offered
-    subscriber PC on the `livekit_signal` seam; the codec / JWT / WS transport
-    are reusable as-is); `wss://` (TLS) signalling for LiveKit Cloud; drop the
-    `[patch.crates-io]` str0m fork (unpadded media sends) once an upstream fix
-    lands (str0m#1014 / livekit#4689); then Janus / Kinesis as wanted.
+  - **T4: signalling ecosystem.** Drop the `[patch.crates-io]` str0m fork
+    (unpadded media sends) once the LiveKit forwarder fix (livekit#4690, on
+    their master) ships in a release, or str0m#1014 lands; a real LiveKit Cloud
+    run (genuine remote NAT + STUN/TURN on the LiveKit elements); then Janus /
+    Kinesis as wanted.
   - **T5: advanced.** Simulcast follow-ups: per-layer runtime retarget where
     the encoder supports it, sources idling a shed layer (the allocator skips
     its units at the writer; the encoder keeps encoding), simulcast on the WHIP

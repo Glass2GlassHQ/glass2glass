@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M714: `LiveKitSrc` room subscriber (answers the server-offered subscriber PC, video + audio outputs, PLI until first keyframe); validated live incl. a sink-to-src loopback on a real server.
 - M713: terminal fan-in graph node (`Graph::add_fanin_sink`, session sinks in `run_graph`/`parse_launch` with per-input Eos flush and per-pad reverse-signal routing), enabling the live encoder fan graph (`tee -> videoscale -> ffmpegenc` per simulcast layer into `LiveKitSink`); validated live incl. a Chrome subscriber.
 - M712: third simulcast layer (rids `f`/`h`/`q`) and per-rid `a=rid` max-width/max-height restrictions from each pad's fixated caps; all three layers validated live incl. Chrome LOW/MEDIUM/HIGH switching.
 - M711: simulcast BWE layer allocator (aggregate estimate budgeted as whole-layer on/off, top layer sheds first with hysteresis, last layer never drops) plus a `max-send-bitrate` cap property; shed + fallback validated live in Chrome.

@@ -69,6 +69,18 @@ impl VideoGrant {
         }
     }
 
+    /// A subscriber grant: join `room`, subscribe only (no publishing).
+    pub fn subscriber(room: impl Into<String>) -> Self {
+        Self {
+            room_join: true,
+            room: room.into(),
+            can_publish: false,
+            can_subscribe: true,
+            can_publish_data: false,
+            room_admin: false,
+        }
+    }
+
     fn to_json(&self) -> String {
         let mut fields: Vec<String> = Vec::new();
         if self.room_join {

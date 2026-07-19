@@ -1993,6 +1993,21 @@ load-bearing: the **offerer** captures its `Mid`s from `SdpApi::add_media`'s
 return, while the **answerer** learns them from `Event::MediaAdded` after
 `accept_offer` (str0m does not emit `MediaAdded` for media the local side added).
 
+**LiveKit signaller (M707/M714).** `livekit_signal` is the protocol seam: an
+HS256 JWT access-token mint and a hand-rolled protobuf codec for the
+`livekit_rtc.proto` subset, over a tokio-tungstenite WebSocket (`ws://` and,
+M715, `wss://` via native-tls, the TLS stack the WHIP reqwest client already
+links). `LiveKitSink` publishes (client offers, per WHIP habits) and
+`LiveKitSrc` subscribes — where the offer direction REVERSES: the SFU offers the
+subscriber PeerConnection over the signalling socket and re-offers on every
+track-set change, and the element answers each with `accept_offer`, learning its
+mids from `MediaAdded` per the answerer rule above. The source is a terminal
+`MultiOutputSource` (video + audio ports, `run_fanout_session`), gates video
+until the first keyframe and repeats a PLI until it arrives, and takes the first
+video / audio m-line offered (one-subscription element). Both validated against
+a real LiveKit server, including an in-room sink-to-src A/V loopback and the
+same loopback over a TLS-terminated `wss://` proxy.
+
 **ICE / NAT traversal.** `webrtc_util::add_ice_candidates` always adds the socket's
 host candidate and, when a STUN server is configured, a server-reflexive candidate
 discovered by a hand-rolled RFC 5389 Binding on the ICE socket; candidates ride in

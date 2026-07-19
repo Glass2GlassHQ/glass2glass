@@ -32,7 +32,9 @@ use std::time::{Duration, Instant};
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
-use g2g_core::runtime::{run_fanin_session, run_source_transform_sink, DynSourceLoop, SourceLoop};
+use g2g_core::runtime::{
+    run_fanin_session, run_fanout_session, run_source_transform_sink, DynSourceLoop, SourceLoop,
+};
 use g2g_core::{
     AsyncElement, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, ConfigureOutcome, Dim,
     FrameTiming, G2gError, MemoryDomain, OutputSink, PipelineClock, PipelinePacket, Rate,
@@ -41,6 +43,7 @@ use g2g_core::{
 use g2g_plugins::filesrc::FileSrc;
 use g2g_plugins::livekit_signal::{mint_token, VideoGrant};
 use g2g_plugins::livekitsink::LiveKitSink;
+use g2g_plugins::livekitsrc::LiveKitSrc;
 use g2g_plugins::oggdemux::OggDemux;
 
 /// Build a self-contained Annex-B H.264 stream: every `keyframe_period`th access
@@ -628,6 +631,137 @@ async fn livekit_publishes_simulcast() {
             panic!("RoomService never showed 2 video layers; last response:\n{last}")
         }
     }
+}
+
+/// Sink that counts `DataFrame`s into a shared atomic (same helper as the WHIP
+/// smoke test), one per subscriber output.
+struct CountingSink {
+    frames: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl AsyncElement for CountingSink {
+    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>;
+
+    fn intercept_caps(&self, c: &Caps) -> Result<Caps, G2gError> {
+        Ok(c.clone())
+    }
+    fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
+        CapsConstraint::AcceptsAny
+    }
+    fn configure_pipeline(&mut self, _c: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        Ok(ConfigureOutcome::Accepted)
+    }
+    fn process<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+        _out: &'a mut dyn OutputSink,
+    ) -> Self::ProcessFuture<'a> {
+        Box::pin(async move {
+            if let PipelinePacket::DataFrame(_) = packet {
+                self.frames
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            Ok(())
+        })
+    }
+}
+
+/// M714 LiveKit ingest loopback: `LiveKitSink` publishes A/V into the room and
+/// `LiveKitSrc` subscribes to it over the server-offered subscriber PC, so both
+/// native elements are validated against the real SFU in one run. Requires the
+/// H.264 + Opus fixtures (the subscriber gates video on a decodable keyframe).
+#[tokio::test]
+#[ignore = "needs a LiveKit server + G2G_H264_FIXTURE + G2G_OPUS_FIXTURE"]
+async fn livekit_ingest_loopback() {
+    let (Ok(url), Ok(api_key), Ok(api_secret), Ok(fixture)) = (
+        std::env::var("G2G_LIVEKIT_URL"),
+        std::env::var("G2G_LIVEKIT_API_KEY"),
+        std::env::var("G2G_LIVEKIT_API_SECRET"),
+        std::env::var("G2G_H264_FIXTURE"),
+    ) else {
+        eprintln!("skipping: set G2G_LIVEKIT_URL, api key/secret and G2G_H264_FIXTURE");
+        return;
+    };
+    let Ok(opus_fixture) = std::env::var("G2G_OPUS_FIXTURE") else {
+        eprintln!("skipping: set G2G_OPUS_FIXTURE");
+        return;
+    };
+    let room = std::env::var("G2G_LIVEKIT_ROOM").unwrap_or_else(|_| "g2g-ingest".to_string());
+    let secs: u64 = std::env::var("G2G_PUBLISH_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(15);
+    eprintln!("ingest loopback -> {url} room={room}");
+
+    let nals = Arc::new(group_access_units(split_annexb(
+        &std::fs::read(&fixture).expect("read h264 fixture"),
+    )));
+    let opus = Arc::new(extract_opus_packets(&opus_fixture).await);
+
+    let publisher = {
+        let (url, room, api_key, api_secret) = (
+            url.clone(),
+            room.clone(),
+            api_key.clone(),
+            api_secret.clone(),
+        );
+        async move {
+            let mut vsrc = PacedH264Src {
+                nals,
+                duration: Duration::from_secs(secs),
+                width: 640,
+                height: 480,
+            };
+            let mut asrc = PacedOpusSrc {
+                packets: opus,
+                duration: Duration::from_secs(secs),
+            };
+            let mut sink = LiveKitSink::new(url, room, "g2g-publisher")
+                .with_api_key(api_key, api_secret)
+                .with_audio();
+            let clock = ZeroClock;
+            let sources: Vec<&mut dyn DynSourceLoop> = vec![&mut vsrc, &mut asrc];
+            run_fanin_session(sources, &mut sink, &clock, 8).await
+        }
+    };
+
+    let video_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let audio_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let subscriber = {
+        let (url, room, api_key, api_secret) = (url, room, api_key, api_secret);
+        let (vc, ac) = (video_count.clone(), audio_count.clone());
+        async move {
+            // Let the publisher's track land first, then subscribe for the rest
+            // of the publish window (bounded so the test always ends).
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            let mut src = LiveKitSrc::new(url, room, "g2g-subscriber")
+                .with_api_key(api_key, api_secret)
+                .with_frame_limit(secs.saturating_mul(120));
+            let mut vsink = CountingSink { frames: vc };
+            let mut asink = CountingSink { frames: ac };
+            let clock = ZeroClock;
+            let sinks: Vec<&mut dyn g2g_core::element::DynAsyncElement> =
+                vec![&mut vsink, &mut asink];
+            tokio::time::timeout(
+                Duration::from_secs(secs + 5),
+                run_fanout_session(&mut src, sinks, &clock, 8),
+            )
+            .await
+        }
+    };
+
+    let (pub_res, sub_res) = tokio::join!(publisher, subscriber);
+    pub_res.expect("publisher session runs");
+    // The subscriber may still be waiting on EOS when the timeout fires; the
+    // frame counts are the assertion, not its exit path.
+    if let Ok(r) = sub_res {
+        r.expect("subscriber session ends cleanly");
+    }
+    let v = video_count.load(std::sync::atomic::Ordering::SeqCst);
+    let a = audio_count.load(std::sync::atomic::Ordering::SeqCst);
+    eprintln!("subscriber received video={v} audio={a}");
+    assert!(v > 30, "expected a continuous video feed, got {v}");
+    assert!(a > 30, "expected a continuous audio feed, got {a}");
 }
 
 /// M713 encoder fan graph: the simulcast layers are ENCODED live inside one
