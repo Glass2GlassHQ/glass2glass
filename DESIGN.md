@@ -2026,7 +2026,11 @@ mids from `MediaAdded` per the answerer rule above. The source is a terminal
 until the first keyframe and repeats a PLI until it arrives, and takes the first
 video / audio m-line offered (one-subscription element). Both validated against
 a real LiveKit server, including an in-room sink-to-src A/V loopback and the
-same loopback over a TLS-terminated `wss://` proxy.
+same loopback over a TLS-terminated `wss://` proxy. `LiveKitDuplex` (M728) is
+the full participant: LiveKit has no sendrecv m-lines, so it runs BOTH PCs (a
+publisher it offers, a subscriber the server offers) in one loop over one
+socket, routing trickle by `SignalTarget`, exposed as a `MultiDuplexSession`
+for the duplex runner; two participants exchanging A/V validated live.
 
 **ICE / NAT traversal.** `webrtc_util::add_ice_candidates` always adds the socket's
 host candidate and, when a STUN server is configured, a server-reflexive candidate

@@ -395,6 +395,8 @@ pub mod webrtcwhepsrc;
 #[cfg(feature = "webrtc-livekit")]
 pub mod livekit_signal;
 #[cfg(feature = "webrtc-livekit")]
+pub mod livekitduplex;
+#[cfg(feature = "webrtc-livekit")]
 pub mod livekitsink;
 #[cfg(feature = "webrtc-livekit")]
 pub mod livekitsrc;

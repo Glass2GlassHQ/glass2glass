@@ -154,7 +154,7 @@ impl LiveKitSrc {
     }
 }
 
-fn video_caps() -> Caps {
+pub(crate) fn video_caps() -> Caps {
     // Geometry is unknown until the in-band SPS, so advertise a `Range`
     // placeholder (a downstream parser recovers the real dimensions).
     Caps::CompressedVideo {
@@ -168,7 +168,7 @@ fn video_caps() -> Caps {
     }
 }
 
-fn audio_caps() -> Caps {
+pub(crate) fn audio_caps() -> Caps {
     Caps::Audio {
         format: AudioFormat::Opus,
         channels: 2,
@@ -178,7 +178,7 @@ fn audio_caps() -> Caps {
 
 /// Read the next server `SignalResponse`, skipping non-binary frames. `Ok(None)`
 /// on a clean close. (The sink has an identical helper on its own socket half.)
-async fn recv_signal(
+pub(crate) async fn recv_signal(
     ws: &mut WebSocketStream<MaybeTlsStream<TcpStream>>,
 ) -> Result<Option<SignalResponse>, G2gError> {
     loop {
@@ -194,7 +194,7 @@ async fn recv_signal(
     }
 }
 
-async fn send_signal(
+pub(crate) async fn send_signal(
     ws: &mut WebSocketStream<MaybeTlsStream<TcpStream>>,
     req: &SignalRequest,
 ) -> Result<(), G2gError> {
@@ -205,7 +205,7 @@ async fn send_signal(
 }
 
 /// Accept one server offer on the subscriber PC and send the answer back.
-async fn answer_offer(
+pub(crate) async fn answer_offer(
     rtc: &mut Rtc,
     ws: &mut WebSocketStream<MaybeTlsStream<TcpStream>>,
     sd: &SessionDescription,

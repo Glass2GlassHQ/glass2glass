@@ -854,6 +854,127 @@ async fn livekit_ingest_via_graph_node() {
     assert!(a > 30, "continuous audio via the graph node, got {a}");
 }
 
+/// M728 duplex participants: two `LiveKitDuplex` elements join one room as
+/// full participants, each publishing its own A/V (paced fixtures) and
+/// receiving the other's, over LiveKit's two-PC model (publisher + subscriber)
+/// on one signalling socket each. Both directions must flow.
+#[tokio::test]
+#[ignore = "needs a LiveKit server + G2G_H264_FIXTURE + G2G_OPUS_FIXTURE"]
+async fn livekit_duplex_participants_exchange_av() {
+    let (Ok(url), Ok(api_key), Ok(api_secret), Ok(fixture), Ok(opus_fixture)) = (
+        std::env::var("G2G_LIVEKIT_URL"),
+        std::env::var("G2G_LIVEKIT_API_KEY"),
+        std::env::var("G2G_LIVEKIT_API_SECRET"),
+        std::env::var("G2G_H264_FIXTURE"),
+        std::env::var("G2G_OPUS_FIXTURE"),
+    ) else {
+        eprintln!("skipping: set G2G_LIVEKIT_URL, api key/secret and both fixtures");
+        return;
+    };
+    let room = std::env::var("G2G_LIVEKIT_ROOM").unwrap_or_else(|_| "g2g-duplex".to_string());
+    let secs: u64 = std::env::var("G2G_PUBLISH_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(12);
+    let nals = Arc::new(group_access_units(split_annexb(
+        &std::fs::read(&fixture).expect("read h264 fixture"),
+    )));
+    let opus = Arc::new(extract_opus_packets(&opus_fixture).await);
+
+    // One duplex participant: paced A/V sources in, counting sinks out.
+    async fn participant(
+        url: String,
+        room: String,
+        identity: &str,
+        api_key: String,
+        api_secret: String,
+        nals: Arc<Vec<Vec<u8>>>,
+        opus: Arc<Vec<Vec<u8>>>,
+        secs: u64,
+        vc: Arc<std::sync::atomic::AtomicU64>,
+        ac: Arc<std::sync::atomic::AtomicU64>,
+    ) -> Result<(), G2gError> {
+        use g2g_core::element::DynAsyncElement;
+        use g2g_core::runtime::run_duplex_session;
+        let mut vsrc = PacedH264Src {
+            nals,
+            duration: Duration::from_secs(secs),
+            width: 640,
+            height: 480,
+        };
+        let mut asrc = PacedOpusSrc {
+            packets: opus,
+            duration: Duration::from_secs(secs),
+        };
+        // Unbounded receive: the run ends via the send-side EOS + linger
+        // drain, so the paced sources always outlive the session cleanly.
+        let mut session = g2g_plugins::livekitduplex::LiveKitDuplex::new(url, room, identity)
+            .with_api_key(api_key, api_secret);
+        let mut vsink = CountingSink { frames: vc };
+        let mut asink = CountingSink { frames: ac };
+        let clock = ZeroClock;
+        let sources: Vec<&mut dyn DynSourceLoop> = vec![&mut vsrc, &mut asrc];
+        let sinks: Vec<&mut dyn DynAsyncElement> = vec![&mut vsink, &mut asink];
+        run_duplex_session(sources, &mut session, sinks, &clock, 8)
+            .await
+            .map(|_| ())
+    }
+
+    let (av, aa) = (
+        Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        Arc::new(std::sync::atomic::AtomicU64::new(0)),
+    );
+    let (bv, ba) = (
+        Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        Arc::new(std::sync::atomic::AtomicU64::new(0)),
+    );
+    let a = participant(
+        url.clone(),
+        room.clone(),
+        "g2g-alice",
+        api_key.clone(),
+        api_secret.clone(),
+        nals.clone(),
+        opus.clone(),
+        secs,
+        av.clone(),
+        aa.clone(),
+    );
+    let b = participant(
+        url,
+        room,
+        "g2g-bob",
+        api_key,
+        api_secret,
+        nals,
+        opus,
+        secs,
+        bv.clone(),
+        ba.clone(),
+    );
+    let (ra, rb) = tokio::join!(
+        tokio::time::timeout(Duration::from_secs(secs + 15), a),
+        tokio::time::timeout(Duration::from_secs(secs + 15), b),
+    );
+    // The frame counts are the assertion; a timeout on the drain path is fine.
+    if let Ok(r) = ra {
+        r.expect("alice runs");
+    }
+    if let Ok(r) = rb {
+        r.expect("bob runs");
+    }
+    use std::sync::atomic::Ordering;
+    let (av, aa, bv, ba) = (
+        av.load(Ordering::SeqCst),
+        aa.load(Ordering::SeqCst),
+        bv.load(Ordering::SeqCst),
+        ba.load(Ordering::SeqCst),
+    );
+    eprintln!("alice received video={av} audio={aa}; bob received video={bv} audio={ba}");
+    assert!(av > 30 && aa > 30, "alice receives bob's A/V ({av}/{aa})");
+    assert!(bv > 30 && ba > 30, "bob receives alice's A/V ({bv}/{ba})");
+}
+
 /// M713 encoder fan graph: the simulcast layers are ENCODED live inside one
 /// graph instead of fed from pre-encoded fixtures. One paced raw source tees
 /// into per-layer branches (`videoscale -> ffmpegenc`) that end on the
