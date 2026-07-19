@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M711: simulcast BWE layer allocator (aggregate estimate budgeted as whole-layer on/off, top layer sheds first with hysteresis, last layer never drops) plus a `max-send-bitrate` cap property; shed + fallback validated live in Chrome.
 - M710: two-layer send simulcast on `LiveKitSink` (`with_simulcast`, shared `webrtc_simulcast` machinery: one m-line with rid-tagged layers, per-`(mid,rid)` keyframe routing); validated live incl. a Chrome subscriber switching layers.
 - M709: patch str0m to send media packets unpadded (fork via `[patch.crates-io]`, pending upstream str0m#1014 / livekit#4689), fixing browser playback of a `LiveKitSink` stream; validated live in Chrome.
 - M708: native WebRTC data-channel elements (`WebRtcDataSrc` / `WebRtcDataSink`) on str0m SCTP, P2P over the `SdpChannel` seam, mirroring the wasm `WebRtcSrc` byte-stream surface.

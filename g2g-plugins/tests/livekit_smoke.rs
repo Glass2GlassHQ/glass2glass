@@ -404,9 +404,16 @@ async fn livekit_publishes_simulcast() {
                 width: 320,
                 height: 240,
             };
+            // `G2G_MAX_SEND_BITRATE` exercises the layer allocator: a cap below
+            // the layers' combined nominal rate sheds the top layer live.
+            let cap: u64 = std::env::var("G2G_MAX_SEND_BITRATE")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
             let mut sink = LiveKitSink::new(url, room, identity)
                 .with_api_key(api_key, api_secret)
-                .with_simulcast(2);
+                .with_simulcast(2)
+                .with_max_send_bitrate(cap);
             let clock = ZeroClock;
             // Pad 0 = high layer, pad 1 = low layer.
             let sources: Vec<&mut dyn DynSourceLoop> = vec![&mut src_hi, &mut src_lo];

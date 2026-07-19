@@ -81,6 +81,117 @@ impl KeyframeRoutes {
     }
 }
 
+/// Nominal send bitrate for a layer, from its resolution at ~30 fps (the 0.1
+/// bits-per-pixel rule of thumb: `w * h * 30 * 0.1`). Only used to budget the
+/// aggregate BWE estimate across layers, not to configure any encoder.
+pub fn nominal_bps(width: u32, height: u32) -> u64 {
+    (width as u64) * (height as u64) * 3
+}
+
+/// How long starvation must persist before a layer is dropped.
+const DROP_AFTER: core::time::Duration = core::time::Duration::from_secs(2);
+/// How long headroom must persist before a dropped layer is restored.
+const RESTORE_AFTER: core::time::Duration = core::time::Duration::from_secs(5);
+/// Drop when the estimate is below this fraction of the active layers' budget.
+const DROP_BELOW: f64 = 0.9;
+/// Restore only when the estimate covers the would-be budget with this margin.
+const RESTORE_ABOVE: f64 = 1.15;
+
+/// Splits the aggregate BWE estimate across simulcast layers as whole-layer
+/// on/off (str0m's estimate is per-connection; per-layer budgeting is the
+/// caller's job by design). Under sustained starvation the TOP layer drops
+/// first: it costs the most, and subscribers fall back to a lower layer, which
+/// matches libwebrtc's behavior (the design doc said lowest-first; that saves
+/// almost nothing and starves low-bandwidth subscribers instead). The lowest
+/// layer never drops. Hysteresis on both edges so a noisy estimate cannot flap
+/// a layer.
+#[derive(Debug)]
+pub struct LayerAllocator {
+    /// Per layer: rid + nominal bps, ordered LOWEST first (drop order is from
+    /// the back). `on` count tracks how many of the front layers are active.
+    layers: Vec<(Rid, u64)>,
+    active: usize,
+    /// Estimates are clamped to this before budgeting (0 = no cap): the
+    /// `max-send-bitrate` knob, and the deterministic test lever.
+    cap: u64,
+    starved_since: Option<std::time::Instant>,
+    headroom_since: Option<std::time::Instant>,
+}
+
+impl LayerAllocator {
+    /// `layers`: (rid, width, height) in any order; sorted lowest-resolution
+    /// first internally. All layers start active.
+    pub fn new(layers: &[SendLayer], cap: u64) -> Self {
+        let mut l: Vec<(Rid, u64)> = layers
+            .iter()
+            .map(|s| (Rid::from(s.rid), nominal_bps(s.width, s.height)))
+            .collect();
+        l.sort_by_key(|(_, bps)| *bps);
+        Self {
+            active: l.len(),
+            layers: l,
+            cap,
+            starved_since: None,
+            headroom_since: None,
+        }
+    }
+
+    fn budget(&self, count: usize) -> u64 {
+        self.layers[..count].iter().map(|(_, b)| b).sum()
+    }
+
+    /// Feed one aggregate estimate. Returns `true` when the active layer set
+    /// changed (the caller logs / signals sources on the edge).
+    pub fn update(&mut self, now: std::time::Instant, estimate_bps: u64) -> bool {
+        let est = if self.cap > 0 {
+            estimate_bps.min(self.cap)
+        } else {
+            estimate_bps
+        };
+        let needed = self.budget(self.active);
+        let starved = self.active > 1 && (est as f64) < (needed as f64) * DROP_BELOW;
+        let would_restore = self.active < self.layers.len()
+            && (est as f64) >= (self.budget(self.active + 1) as f64) * RESTORE_ABOVE;
+
+        if starved {
+            self.headroom_since = None;
+            let since = *self.starved_since.get_or_insert(now);
+            if now.duration_since(since) >= DROP_AFTER {
+                self.active -= 1;
+                self.starved_since = None;
+                return true;
+            }
+        } else if would_restore {
+            self.starved_since = None;
+            let since = *self.headroom_since.get_or_insert(now);
+            if now.duration_since(since) >= RESTORE_AFTER {
+                self.active += 1;
+                self.headroom_since = None;
+                return true;
+            }
+        } else {
+            self.starved_since = None;
+            self.headroom_since = None;
+        }
+        false
+    }
+
+    /// Whether the layer with `rid` is currently sent.
+    pub fn is_on(&self, rid: Rid) -> bool {
+        self.layers[..self.active].iter().any(|(r, _)| *r == rid)
+    }
+
+    /// The initial BWE target: every layer's nominal budget, capped.
+    pub fn initial_bps(&self) -> u64 {
+        let all = self.budget(self.layers.len());
+        if self.cap > 0 {
+            all.min(self.cap)
+        } else {
+            all
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,6 +261,79 @@ mod tests {
             sdp.contains("a=simulcast:send h;q") || sdp.contains("a=simulcast:send q;h"),
             "simulcast line must list both rids:\n{sdp}"
         );
+    }
+
+    #[test]
+    fn allocator_drops_top_layer_after_sustained_starvation_and_restores() {
+        use std::time::{Duration as D, Instant};
+        let layers = [
+            SendLayer {
+                rid: "h",
+                width: 640,
+                height: 480,
+            },
+            SendLayer {
+                rid: "q",
+                width: 320,
+                height: 240,
+            },
+        ];
+        // Budget: 640*480*3 + 320*240*3 = 921600 + 230400 = 1152000 bps.
+        let mut a = LayerAllocator::new(&layers, 0);
+        assert_eq!(a.initial_bps(), 1_152_000);
+        let t0 = Instant::now();
+        let (h, q) = (Rid::from("h"), Rid::from("q"));
+
+        // A single starved sample does not drop (hysteresis).
+        assert!(!a.update(t0, 400_000));
+        assert!(a.is_on(h) && a.is_on(q));
+        // Recovery in between resets the window.
+        assert!(!a.update(t0 + D::from_secs(1), 2_000_000));
+        assert!(!a.update(t0 + D::from_secs(2), 400_000));
+        assert!(!a.update(t0 + D::from_secs(3), 400_000));
+        // Sustained starvation drops exactly the TOP layer.
+        assert!(a.update(t0 + D::from_secs(5), 400_000));
+        assert!(!a.is_on(h), "top layer drops first");
+        assert!(a.is_on(q), "low layer stays");
+        // The last layer never drops, however starved.
+        assert!(!a.update(t0 + D::from_secs(6), 10_000));
+        assert!(!a.update(t0 + D::from_secs(60), 10_000));
+        assert!(a.is_on(q));
+
+        // Restore needs sustained headroom over the FULL budget.
+        assert!(!a.update(t0 + D::from_secs(61), 2_000_000));
+        assert!(!a.update(t0 + D::from_secs(64), 2_000_000));
+        assert!(a.update(t0 + D::from_secs(67), 2_000_000));
+        assert!(a.is_on(h) && a.is_on(q));
+    }
+
+    #[test]
+    fn allocator_cap_bounds_the_estimate() {
+        use std::time::{Duration as D, Instant};
+        let layers = [
+            SendLayer {
+                rid: "h",
+                width: 640,
+                height: 480,
+            },
+            SendLayer {
+                rid: "q",
+                width: 320,
+                height: 240,
+            },
+        ];
+        // Cap below the full budget: even a huge estimate reads as 400k, so the
+        // top layer must drop after the window.
+        let mut a = LayerAllocator::new(&layers, 400_000);
+        assert_eq!(a.initial_bps(), 400_000);
+        let t0 = Instant::now();
+        assert!(!a.update(t0, 100_000_000));
+        assert!(a.update(t0 + D::from_secs(3), 100_000_000));
+        assert!(!a.is_on(Rid::from("h")));
+        // And it can never restore: the capped estimate cannot clear the full
+        // budget with margin.
+        assert!(!a.update(t0 + D::from_secs(30), 100_000_000));
+        assert!(!a.is_on(Rid::from("h")));
     }
 
     #[test]

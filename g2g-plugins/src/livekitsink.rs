@@ -48,7 +48,7 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
-use str0m::bwe::BweKind;
+use str0m::bwe::{Bitrate, BweKind};
 use str0m::change::{SdpAnswer, SdpPendingOffer};
 use str0m::crypto::from_feature_flags;
 use str0m::media::{Direction, Mid, Pt, Rid};
@@ -66,7 +66,9 @@ use crate::livekit_signal::{
     SessionDescription, SignalRequest, SignalResponse, SignalTarget, TrackSource, TrackType,
     VideoGrant, VideoLayer, VideoQuality,
 };
-use crate::webrtc_simulcast::{rids_high_to_low, send_simulcast, KeyframeRoutes, SendLayer};
+use crate::webrtc_simulcast::{
+    rids_high_to_low, send_simulcast, KeyframeRoutes, LayerAllocator, SendLayer,
+};
 use crate::webrtc_util::{add_ice_candidates, feed_datagram, select_host_ip, send_transmit};
 use crate::webrtcsink::Track;
 
@@ -118,6 +120,9 @@ pub struct LiveKitSink {
     queue_depth: usize,
     /// Number of video layers on one m-line (1 = single stream, >=2 = simulcast).
     video_layers: usize,
+    /// Aggregate send-bitrate cap in bits/second (0 = uncapped), applied to the
+    /// BWE estimate before the layer allocator budgets it.
+    max_send_bitrate: u64,
     /// Whether an Opus audio track is published alongside the video.
     has_audio: bool,
     /// Number of input pads = video layers + audio, kept in sync with the above.
@@ -169,6 +174,7 @@ impl LiveKitSink {
             token: None,
             queue_depth: DEFAULT_QUEUE_DEPTH,
             video_layers: 1,
+            max_send_bitrate: 0,
             has_audio: false,
             track_count: 0,
             tracks: Vec::new(),
@@ -206,6 +212,14 @@ impl LiveKitSink {
         self.dims = alloc::vec![(0u32, 0u32); n];
         self.reverse = (0..n).map(|_| ReverseChannel::new()).collect();
         self.sinks = alloc::vec![None; n];
+    }
+
+    /// Cap the aggregate send bitrate (bits/second, 0 = uncapped). The BWE
+    /// estimate is clamped to this before the simulcast layer allocator budgets
+    /// it, so a cap below the layers' combined nominal rate sheds the top layer.
+    pub fn with_max_send_bitrate(mut self, bps: u64) -> Self {
+        self.max_send_bitrate = bps;
+        self
     }
 
     /// LiveKit API key + secret; the sink mints a publish-only access token.
@@ -291,21 +305,6 @@ impl LiveKitSink {
             Duration::from_secs(15)
         };
 
-        // Build the publisher Rtc with a send-only m-line per configured track.
-        let host_ip = select_host_ip();
-        let socket = UdpSocket::bind((host_ip, 0)).await.map_err(io_err)?;
-        let local = socket.local_addr().map_err(io_err)?;
-
-        let mut rtc = RtcConfig::new()
-            .set_crypto_provider(Arc::new(from_feature_flags()))
-            .clear_codecs()
-            .enable_h264(true)
-            .enable_opus(true)
-            .build(Instant::now());
-        // Host candidate only for the local dev server; STUN/TURN NAT traversal
-        // toward LiveKit Cloud is a follow-up.
-        add_ice_candidates(&mut rtc, &socket, None).await?;
-
         // Video input pads in order (pad 0 = top layer), each a simulcast layer;
         // one shared video m-line groups them all. Assign rids high->low and read
         // each layer's resolution from its fixated caps.
@@ -327,6 +326,26 @@ impl LiveKitSink {
             })
             .collect();
         let simulcast = layers.len() >= 2;
+        // Simulcast enables BWE so the aggregate estimate can budget the layer
+        // set (whole-layer on/off in the allocator); the estimate is clamped to
+        // `max-send-bitrate` when set.
+        let allocator = simulcast.then(|| LayerAllocator::new(&layers, self.max_send_bitrate));
+
+        // Build the publisher Rtc with a send-only m-line per configured track.
+        let host_ip = select_host_ip();
+        let socket = UdpSocket::bind((host_ip, 0)).await.map_err(io_err)?;
+        let local = socket.local_addr().map_err(io_err)?;
+
+        let mut rtc = RtcConfig::new()
+            .set_crypto_provider(Arc::new(from_feature_flags()))
+            .clear_codecs()
+            .enable_h264(true)
+            .enable_opus(true)
+            .enable_bwe(allocator.as_ref().map(|a| Bitrate::bps(a.initial_bps())))
+            .build(Instant::now());
+        // Host candidate only for the local dev server; STUN/TURN NAT traversal
+        // toward LiveKit Cloud is a follow-up.
+        add_ice_candidates(&mut rtc, &socket, None).await?;
         let has_video = !video_inputs.is_empty();
         let has_audio = self.tracks.contains(&Some(Track::Audio));
 
@@ -524,6 +543,7 @@ impl LiveKitSink {
             local,
             keyframe_routes: routes,
             video_reverse,
+            allocator,
             ws_write,
             ws_read,
             ping_interval,
@@ -609,6 +629,11 @@ static LIVEKIT_PROPS: &[PropertySpec] = &[
         "token",
         PropKind::Str,
         "pre-minted access token (overrides api-key/secret)",
+    ),
+    PropertySpec::new(
+        "max-send-bitrate",
+        PropKind::Uint,
+        "aggregate send bitrate cap in bits/second (0 = uncapped); a cap below the simulcast layers' combined nominal rate sheds the top layer",
     ),
 ];
 
@@ -765,6 +790,10 @@ impl MultiInputElement for LiveKitSink {
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        if name == "max-send-bitrate" {
+            self.max_send_bitrate = value.as_uint().ok_or(PropError::Type)?;
+            return Ok(());
+        }
         let s = value.as_str().ok_or(PropError::Type)?;
         match name {
             "url" => self.url = s.into(),
@@ -779,6 +808,9 @@ impl MultiInputElement for LiveKitSink {
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
+        if name == "max-send-bitrate" {
+            return Some(PropValue::Uint(self.max_send_bitrate));
+        }
         let v = match name {
             "url" => self.url.clone(),
             "room" => self.room.clone(),
@@ -803,6 +835,9 @@ struct SessionArgs {
     keyframe_routes: KeyframeRoutes,
     /// Aggregate-BWE target (the top video layer's source).
     video_reverse: Option<ReverseChannel>,
+    /// Whole-layer on/off budgeting of the aggregate BWE estimate (simulcast
+    /// only). A dropped layer's units are skipped at the writer.
+    allocator: Option<LayerAllocator>,
     ws_write: WsWrite,
     ws_read: WsRead,
     ping_interval: Duration,
@@ -842,6 +877,11 @@ async fn run_session(mut a: SessionArgs) {
                     };
                     if let (Some(bps), Some(rc)) = (bps, a.video_reverse.as_ref()) {
                         rc.set_bitrate(bps.min(u32::MAX as u64) as u32);
+                    }
+                    if let (Some(bps), Some(alloc)) = (bps, a.allocator.as_mut()) {
+                        if alloc.update(Instant::now(), bps) {
+                            std::eprintln!("livekit: layer set changed at {bps} bps estimate");
+                        }
                     }
                 }
                 Ok(Output::Event(_)) => {}
@@ -902,7 +942,15 @@ async fn run_session(mut a: SessionArgs) {
                         *pt_slot = mode1.or(any).map(|p| p.pt());
                     }
                 }
+                // A starved simulcast layer is shed whole: skip its units.
+                let layer_on = match (unit.rid, a.allocator.as_ref()) {
+                    (Some(rid), Some(alloc)) => alloc.is_on(rid),
+                    _ => true,
+                };
                 if let Some(p) = *pt_slot {
+                    if !layer_on {
+                        continue;
+                    }
                     let rtp_time = unit.track.media_time(unit.pts_ns);
                     if let Some(writer) = a.rtc.writer(mid) {
                         // Tag the write with the layer's rid so str0m routes it to
