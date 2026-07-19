@@ -630,8 +630,7 @@ Phased plan:
     are reusable as-is); `wss://` (TLS) signalling for LiveKit Cloud; drop the
     `[patch.crates-io]` str0m fork (unpadded media sends) once an upstream fix
     lands (str0m#1014 / livekit#4689); then Janus / Kinesis as wanted.
-  - **T5: advanced.** Simulcast follow-ups: a third layer + `a=rid`
-    max-width/height restrictions from fixated caps, the real encoder fan graph
+  - **T5: advanced.** Simulcast follow-ups: the real encoder fan graph
     (tee -> videoscale -> enc per layer; the harness feeds pre-encoded layers
     today), per-layer runtime retarget where the encoder supports it, sources
     idling a shed layer (the allocator skips its units at the writer; the

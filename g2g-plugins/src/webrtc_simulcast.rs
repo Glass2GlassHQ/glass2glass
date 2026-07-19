@@ -36,16 +36,25 @@ pub struct SendLayer {
 }
 
 /// Build the str0m send-simulcast description for `layers`, or `None` for fewer
-/// than two layers (a single stream is not simulcast and takes no rid). The rids
-/// carry no restriction attributes: resolution is announced out-of-band in the
-/// SFU's track metadata for this milestone.
+/// than two layers (a single stream is not simulcast and takes no rid). Each
+/// rid carries its `max-width` / `max-height` restriction (RFC 8851) from the
+/// pad's fixated caps, so an SFU that orders layers from the SDP (not from
+/// out-of-band track metadata) still binds each rid to the right quality.
 pub fn send_simulcast(layers: &[SendLayer]) -> Option<Simulcast> {
     if layers.len() < 2 {
         return None;
     }
     let mut sc = Simulcast::new();
     for l in layers {
-        sc.add_send_layer(SimulcastLayer::new(l.rid));
+        let layer = if l.width > 0 && l.height > 0 {
+            SimulcastLayer::new_with_attributes(l.rid)
+                .max_width(l.width)
+                .max_height(l.height)
+                .build()
+        } else {
+            SimulcastLayer::new(l.rid)
+        };
+        sc.add_send_layer(layer);
     }
     Some(sc)
 }
@@ -252,6 +261,16 @@ mod tests {
 
         assert!(sdp.contains("a=rid:h send"), "missing high rid:\n{sdp}");
         assert!(sdp.contains("a=rid:q send"), "missing low rid:\n{sdp}");
+        // Each rid carries its resolution restriction (RFC 8851) so the SFU can
+        // order layers from the SDP alone.
+        assert!(
+            sdp.contains("max-width=640") && sdp.contains("max-height=480"),
+            "high rid missing restrictions:\n{sdp}"
+        );
+        assert!(
+            sdp.contains("max-width=320") && sdp.contains("max-height=240"),
+            "low rid missing restrictions:\n{sdp}"
+        );
         assert_eq!(
             sdp.matches("a=simulcast:send").count(),
             1,

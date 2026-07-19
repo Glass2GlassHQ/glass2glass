@@ -375,7 +375,7 @@ async fn livekit_publishes_simulcast() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(10);
-    eprintln!("simulcast publish (2 layers) -> {url} room={room} as {identity}");
+    eprintln!("simulcast publish -> {url} room={room} as {identity}");
 
     let hi = Arc::new(group_access_units(split_annexb(
         &std::fs::read(&fix_hi).expect("read high fixture"),
@@ -383,6 +383,13 @@ async fn livekit_publishes_simulcast() {
     let lo = Arc::new(group_access_units(split_annexb(
         &std::fs::read(&fix_lo).expect("read low fixture"),
     )));
+    // Optional third (middle) layer: set `G2G_H264_FIXTURE_MID` to publish 3
+    // rids (f/h/q) instead of 2 (h/q).
+    let mid = std::env::var("G2G_H264_FIXTURE_MID").ok().map(|p| {
+        Arc::new(group_access_units(split_annexb(
+            &std::fs::read(&p).expect("read mid fixture"),
+        )))
+    });
 
     let publisher = {
         let (url, room, api_key, api_secret) = (
@@ -404,26 +411,39 @@ async fn livekit_publishes_simulcast() {
                 width: 320,
                 height: 240,
             };
+            let mut src_mid = mid.map(|nals| PacedH264Src {
+                nals,
+                duration: Duration::from_secs(secs),
+                width: 480,
+                height: 360,
+            });
             // `G2G_MAX_SEND_BITRATE` exercises the layer allocator: a cap below
             // the layers' combined nominal rate sheds the top layer live.
             let cap: u64 = std::env::var("G2G_MAX_SEND_BITRATE")
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0);
+            let layers = 2 + src_mid.is_some() as usize;
             let mut sink = LiveKitSink::new(url, room, identity)
                 .with_api_key(api_key, api_secret)
-                .with_simulcast(2)
+                .with_simulcast(layers)
                 .with_max_send_bitrate(cap);
             let clock = ZeroClock;
-            // Pad 0 = high layer, pad 1 = low layer.
-            let sources: Vec<&mut dyn DynSourceLoop> = vec![&mut src_hi, &mut src_lo];
+            // Pad order is highest resolution first.
+            let mut sources: Vec<&mut dyn DynSourceLoop> = Vec::new();
+            sources.push(&mut src_hi);
+            if let Some(m) = src_mid.as_mut() {
+                sources.push(m);
+            }
+            sources.push(&mut src_lo);
             let stats = run_fanin_session(sources, &mut sink, &clock, 8).await;
             (stats, sink.frames_sent())
         }
     };
+    let want_layers = 2 + std::env::var("G2G_H264_FIXTURE_MID").is_ok() as usize;
 
-    // Verifier: the participant's track must list BOTH video layers (the sink
-    // announces them in AddTrackRequest, and the SFU updates them from the two
+    // Verifier: the participant's track must list every video layer (the sink
+    // announces them in AddTrackRequest, and the SFU updates them from the
     // arriving rid streams).
     let verifier = {
         let (url, room, api_key, api_secret) = (
@@ -442,7 +462,10 @@ async fn livekit_publishes_simulcast() {
                     Ok(body) => {
                         last = body;
                         let layer_count = last.matches("\"quality\"").count();
-                        if last.contains(identity) && last.contains("TR_") && layer_count >= 2 {
+                        if last.contains(identity)
+                            && last.contains("TR_")
+                            && layer_count >= want_layers
+                        {
                             return Ok(last);
                         }
                     }
@@ -466,7 +489,7 @@ async fn livekit_publishes_simulcast() {
     );
     match verified {
         Ok(body) => eprintln!(
-            "RoomService confirmed the track with 2 layers:\n{}",
+            "RoomService confirmed the track with all layers:\n{}",
             &body[..body.len().min(1500)]
         ),
         Err(last) => {

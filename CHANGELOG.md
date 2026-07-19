@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M712: third simulcast layer (rids `f`/`h`/`q`) and per-rid `a=rid` max-width/max-height restrictions from each pad's fixated caps; all three layers validated live incl. Chrome LOW/MEDIUM/HIGH switching.
 - M711: simulcast BWE layer allocator (aggregate estimate budgeted as whole-layer on/off, top layer sheds first with hysteresis, last layer never drops) plus a `max-send-bitrate` cap property; shed + fallback validated live in Chrome.
 - M710: two-layer send simulcast on `LiveKitSink` (`with_simulcast`, shared `webrtc_simulcast` machinery: one m-line with rid-tagged layers, per-`(mid,rid)` keyframe routing); validated live incl. a Chrome subscriber switching layers.
 - M709: patch str0m to send media packets unpadded (fork via `[patch.crates-io]`, pending upstream str0m#1014 / livekit#4689), fixing browser playback of a `LiveKitSink` stream; validated live in Chrome.
