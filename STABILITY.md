@@ -131,7 +131,7 @@ The type tiers above translate to per-crate promises:
   **not** breaking, by design.
 - **Feature flags** are additive and not part of the semver contract; enabling one
   may pull in `std` / OS deps. Default (`no_std + alloc`) is the stable baseline.
-- **MSRV.** Currently Rust 1.75 (`rust-version` in `[workspace.package]`). An MSRV
+- **MSRV.** Currently Rust 1.85 (`rust-version` in `[workspace.package]`). An MSRV
   bump is a minor-version change and called out in `CHANGELOG.md`. We do not raise
   MSRV in a patch release.
 - **The `wire` codec** carries its own `WIRE_VERSION`; on-wire format changes are

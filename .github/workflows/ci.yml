@@ -190,6 +190,16 @@ jobs:
         run: |
           cargo test -p g2g-plugins --locked --features script-rhai,declarative-yaml --test m578_scripting
           cargo test -p g2g-plugins --locked --features script-rhai,declarative-yaml --lib script::
+      # Native WebRTC (str0m sans-IO stack): needs rustc 1.85 (the workspace MSRV),
+      # so it stays out of the default suite. Compile the feature, then run the
+      # deterministic + localhost-only tests: the webrtc element/util/turn lib
+      # units and the duplex session runner. The WHIP/WHEP + P2P loopback harness
+      # is #[ignore] (needs mediamtx / an H.264 fixture), so it does not run here.
+      - name: test g2g-plugins (webrtc)
+        run: |
+          cargo check -p g2g-plugins --locked --all-targets --features webrtc
+          cargo test -p g2g-plugins --locked --features webrtc --lib -- webrtc turn::
+          cargo test -p g2g-plugins --locked --features webrtc --test m249_duplex_session
 
   # Windows platform build: Media Foundation decode/encode/AAC, WASAPI audio,
   # Direct3D11 present, MF camera. The `windows` crate bundles its bindings, so no

@@ -107,9 +107,8 @@ observe = ["tooling-json", "tokio/net", "tokio/io-util", "tokio/rt", "tokio/time
 # sans-IO WebRTC stack; we drive its handle_input / poll_output loop on a tokio
 # UDP socket, using its pure-Rust `rust-crypto` backend so there is no OpenSSL
 # system dep. WHIP signaling (HTTP offer/answer) reuses reqwest. Implies std +
-# tokio. NOTE: str0m 0.20 needs a rustc newer than the workspace MSRV 1.75; this
-# feature is off by default, so the no_std baseline and MSRV floor are unaffected
-# (same situation noted for AudioResample / rubato).
+# tokio. str0m 0.20 requires rustc 1.85, which is the workspace MSRV; the feature
+# is off by default, so the no_std baseline is unaffected.
 webrtc = ["std", "tokio/net", "tokio/time", "tokio/macros", "dep:str0m", "dep:reqwest", "dep:sha1", "dep:hmac", "dep:md-5"]
 # ONVIF camera discovery + RTSP stream-URI resolution (OnvifSrc). Hand-rolled
 # WS-Discovery Probe (UDP multicast) and the two media SOAP calls
@@ -474,9 +473,8 @@ dav1d = ["std", "dep:dav1d"]
 # safe API, so the element is Dav1dDec with the backend swapped from libdav1d (FFI)
 # to Rust. default-features = false drops its NASM asm and pulls only bitdepth_8 /
 # bitdepth_16, so it builds with no system deps and reaches pure-Rust / wasm targets
-# the libdav1d path cannot. Implies std; the decoder needs alloc + threads. NOTE:
-# re_rav1d's MSRV is 1.79 (above the workspace 1.75), so this feature raises the
-# build floor to 1.79; the no_std baseline stays at 1.75.
+# the libdav1d path cannot. Implies std; the decoder needs alloc + threads.
+# re_rav1d's MSRV is 1.79, within the workspace 1.85.
 rav1d = ["std", "dep:re_rav1d"]
 # VP8 / VP9 encode via libvpx through the `vpx-encode` crate (FFI), the GStreamer
 # vp8enc/vp9enc analog. NOT pure Rust: it links the system `libvpx` and runs
@@ -585,7 +583,7 @@ serde_yaml = { version = "0.9", optional = true }
 rhai = { version = "1", optional = true, default-features = false, features = ["std", "sync"] }
 # Pure-Rust AV1 encoder (av1-encode feature). default-features = false drops the
 # NASM assembly, the CLI `binaries` deps, and `threading`: a portable software
-# encoder with no system dependencies. MSRV 1.74 (within the workspace 1.75).
+# encoder with no system dependencies. MSRV 1.74 (within the workspace 1.85).
 rav1e = { version = "0.8", optional = true, default-features = false }
 # libdav1d AV1 decoder bindings (dav1d feature). Safe Rust wrapper over dav1d-sys,
 # which links the system libdav1d (pkg-config) at build.
@@ -626,8 +624,8 @@ str0m = { version = "0.20", optional = true, default-features = false, features 
 # xmlparser), no system deps.
 roxmltree = { version = "0.21", optional = true }
 # Pure-Rust AES + CBC for HLS AES-128 segment decryption (`#EXT-X-KEY`, hls
-# feature). Pinned to the cipher-0.4 line (aes 0.8 / cbc 0.1, MSRV 1.56): cbc 0.2
-# / aes 0.9 need rustc 1.85, above the workspace MSRV 1.75.
+# feature). Pinned to the cipher-0.4 line (aes 0.8 / cbc 0.1, MSRV 1.56); the cbc
+# 0.2 / aes 0.9 line (rustc 1.85) is left unadopted to avoid an untested bump.
 aes = { version = "0.8", optional = true }
 cbc = { version = "0.1", optional = true }
 # SRT encryption (srt feature): AES-CTR payload cipher, a passphrase-derived KEK
