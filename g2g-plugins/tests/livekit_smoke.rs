@@ -124,6 +124,8 @@ fn synthetic_h264(frames: usize) -> Vec<Vec<u8>> {
 struct PacedH264Src {
     nals: Arc<Vec<Vec<u8>>>,
     duration: Duration,
+    width: u32,
+    height: u32,
 }
 
 impl SourceLoop for PacedH264Src {
@@ -131,14 +133,15 @@ impl SourceLoop for PacedH264Src {
     type CapsFuture<'a> = Ready<Result<Caps, G2gError>>;
 
     fn intercept_caps(&mut self) -> Self::CapsFuture<'_> {
-        ready(Ok(paced_caps()))
+        ready(Ok(caps_wh(self.width, self.height)))
     }
     fn configure_pipeline(&mut self, _c: &Caps) -> Result<ConfigureOutcome, G2gError> {
         Ok(ConfigureOutcome::Accepted)
     }
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
+        let caps = caps_wh(self.width, self.height);
         Box::pin(async move {
-            out.push(PipelinePacket::CapsChanged(paced_caps())).await?;
+            out.push(PipelinePacket::CapsChanged(caps)).await?;
             let start = Instant::now();
             let mut seq = 0u64;
             let mut idx = 0usize;
@@ -163,11 +166,11 @@ impl SourceLoop for PacedH264Src {
     }
 }
 
-fn paced_caps() -> Caps {
+fn caps_wh(width: u32, height: u32) -> Caps {
     Caps::CompressedVideo {
         codec: VideoCodec::H264,
-        width: Dim::Fixed(640),
-        height: Dim::Fixed(480),
+        width: Dim::Fixed(width),
+        height: Dim::Fixed(height),
         framerate: Rate::Fixed(30 << 16),
     }
 }
@@ -274,6 +277,8 @@ async fn livekit_publishes_h264() {
             let mut src = PacedH264Src {
                 nals,
                 duration: Duration::from_secs(secs),
+                width: 640,
+                height: 480,
             };
             let mut sink = LiveKitSink::new(url, room, identity).with_api_key(api_key, api_secret);
             let clock = ZeroClock;
@@ -342,5 +347,123 @@ async fn livekit_publishes_h264() {
         Err(last) => panic!(
             "RoomService never showed the publisher with a published track; last response:\n{last}"
         ),
+    }
+}
+
+/// Two-layer simulcast publish: two paced H.264 sources of different resolutions
+/// fan into one [`LiveKitSink`] with `with_simulcast(2)`, so both ride ONE video
+/// m-line as rids `h` (pad 0, high) and `q` (pad 1, low). Server-side proof is
+/// the RoomService listing the track with two video layers; the SFU logs also
+/// show both rid streams binding. Fixtures: `G2G_H264_FIXTURE` (high layer) and
+/// `G2G_H264_FIXTURE_LOW` (low layer), both Annex-B.
+#[tokio::test]
+#[ignore = "needs a LiveKit server + two H.264 fixtures (G2G_H264_FIXTURE / G2G_H264_FIXTURE_LOW)"]
+async fn livekit_publishes_simulcast() {
+    let (Ok(url), Ok(api_key), Ok(api_secret), Ok(fix_hi), Ok(fix_lo)) = (
+        std::env::var("G2G_LIVEKIT_URL"),
+        std::env::var("G2G_LIVEKIT_API_KEY"),
+        std::env::var("G2G_LIVEKIT_API_SECRET"),
+        std::env::var("G2G_H264_FIXTURE"),
+        std::env::var("G2G_H264_FIXTURE_LOW"),
+    ) else {
+        eprintln!("skipping: set G2G_LIVEKIT_URL, api key/secret and both fixtures to run");
+        return;
+    };
+    let room = std::env::var("G2G_LIVEKIT_ROOM").unwrap_or_else(|_| "g2g-simulcast".to_string());
+    let identity = "g2g-simulcaster";
+    let secs: u64 = std::env::var("G2G_PUBLISH_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(10);
+    eprintln!("simulcast publish (2 layers) -> {url} room={room} as {identity}");
+
+    let hi = Arc::new(group_access_units(split_annexb(
+        &std::fs::read(&fix_hi).expect("read high fixture"),
+    )));
+    let lo = Arc::new(group_access_units(split_annexb(
+        &std::fs::read(&fix_lo).expect("read low fixture"),
+    )));
+
+    let publisher = {
+        let (url, room, api_key, api_secret) = (
+            url.clone(),
+            room.clone(),
+            api_key.clone(),
+            api_secret.clone(),
+        );
+        async move {
+            let mut src_hi = PacedH264Src {
+                nals: hi,
+                duration: Duration::from_secs(secs),
+                width: 640,
+                height: 480,
+            };
+            let mut src_lo = PacedH264Src {
+                nals: lo,
+                duration: Duration::from_secs(secs),
+                width: 320,
+                height: 240,
+            };
+            let mut sink = LiveKitSink::new(url, room, identity)
+                .with_api_key(api_key, api_secret)
+                .with_simulcast(2);
+            let clock = ZeroClock;
+            // Pad 0 = high layer, pad 1 = low layer.
+            let sources: Vec<&mut dyn DynSourceLoop> = vec![&mut src_hi, &mut src_lo];
+            let stats = run_fanin_session(sources, &mut sink, &clock, 8).await;
+            (stats, sink.frames_sent())
+        }
+    };
+
+    // Verifier: the participant's track must list BOTH video layers (the sink
+    // announces them in AddTrackRequest, and the SFU updates them from the two
+    // arriving rid streams).
+    let verifier = {
+        let (url, room, api_key, api_secret) = (
+            url.clone(),
+            room.clone(),
+            api_key.clone(),
+            api_secret.clone(),
+        );
+        async move {
+            let base = http_base(&url);
+            let deadline = Instant::now() + Duration::from_secs(9);
+            let mut last = String::new();
+            while Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                match list_participants(&base, &api_key, &api_secret, &room).await {
+                    Ok(body) => {
+                        last = body;
+                        let layer_count = last.matches("\"quality\"").count();
+                        if last.contains(identity) && last.contains("TR_") && layer_count >= 2 {
+                            return Ok(last);
+                        }
+                    }
+                    Err(e) => last = e,
+                }
+            }
+            Err(last)
+        }
+    };
+
+    let publisher_fut = tokio::time::timeout(Duration::from_secs(secs + 10), publisher);
+    let (pub_res, verified) = tokio::join!(publisher_fut, verifier);
+    let (stats, frames_sent) = pub_res.expect("publisher completes in time");
+    eprintln!("simulcast publisher frames handed to session = {frames_sent}");
+    if let Err(e) = &stats {
+        eprintln!("publisher session ended with: {e:?}");
+    }
+    assert!(
+        frames_sent > 100,
+        "expected both layers to feed continuously, got {frames_sent}"
+    );
+    match verified {
+        Ok(body) => eprintln!(
+            "RoomService confirmed the track with 2 layers:\n{}",
+            &body[..body.len().min(1500)]
+        ),
+        Err(last) => {
+            panic!("RoomService never showed 2 video layers; last response:\n{last}")
+        }
     }
 }

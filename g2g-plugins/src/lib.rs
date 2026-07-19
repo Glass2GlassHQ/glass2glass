@@ -371,6 +371,8 @@ pub mod udpsink;
 #[cfg(feature = "webrtc")]
 mod turn;
 #[cfg(feature = "webrtc")]
+pub mod webrtc_simulcast;
+#[cfg(feature = "webrtc")]
 mod webrtc_util;
 #[cfg(feature = "webrtc")]
 pub mod webrtcdata;

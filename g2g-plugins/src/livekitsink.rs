@@ -51,7 +51,7 @@ use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 use str0m::bwe::BweKind;
 use str0m::change::{SdpAnswer, SdpPendingOffer};
 use str0m::crypto::from_feature_flags;
-use str0m::media::{Direction, Mid, Pt};
+use str0m::media::{Direction, Mid, Pt, Rid};
 use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
 
 use g2g_core::{
@@ -64,16 +64,17 @@ use crate::filesink::io_err;
 use crate::livekit_signal::{
     candidate_from_init_json, candidate_init_json, mint_token, signal_ws_url, AddTrackRequest,
     SessionDescription, SignalRequest, SignalResponse, SignalTarget, TrackSource, TrackType,
-    VideoGrant,
+    VideoGrant, VideoLayer, VideoQuality,
 };
+use crate::webrtc_simulcast::{rids_high_to_low, send_simulcast, KeyframeRoutes, SendLayer};
 use crate::webrtc_util::{add_ice_candidates, feed_datagram, select_host_ip, send_transmit};
 use crate::webrtcsink::Track;
 
 /// Default bounded depth of the element->session media channel (per direction).
 const DEFAULT_QUEUE_DEPTH: usize = 256;
 
-/// The maximum tracks a publisher session carries (video + audio).
-const MAX_TRACKS: usize = 2;
+/// The maximum simulcast video layers on one m-line (rids `q`/`h`/`f`).
+const MAX_VIDEO_LAYERS: usize = 3;
 
 /// Access-token lifetime when the sink mints one from api-key/secret.
 const TOKEN_TTL_SECS: u64 = 6 * 3600;
@@ -82,12 +83,26 @@ const TOKEN_TTL_SECS: u64 = 6 * 3600;
 type WsWrite = SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
 type WsRead = SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>;
 
-/// One encoded access unit handed to the session task, tagged with its track.
+/// One encoded access unit handed to the session task, tagged with the m-line
+/// writer it targets (`mid` + an optional simulcast `rid`) and its track kind
+/// (for the RTP clock + payload type).
 #[derive(Debug)]
 struct MediaUnit {
     track: Track,
+    mid: Mid,
+    rid: Option<Rid>,
     pts_ns: u64,
     data: Vec<u8>,
+}
+
+/// Where one input pad's access units go on the wire, resolved once the session
+/// handshake fixes the m-lines: the track kind, its `mid`, and a simulcast `rid`
+/// for a video layer (`None` = the sole video stream or an audio track).
+#[derive(Debug, Clone, Copy)]
+struct PadSink {
+    track: Track,
+    mid: Mid,
+    rid: Option<Rid>,
 }
 
 /// LiveKit publisher sink. See the module docs.
@@ -101,13 +116,23 @@ pub struct LiveKitSink {
     /// Pre-minted access token; when set, `api_key` / `api_secret` are unused.
     token: Option<String>,
     queue_depth: usize,
-    /// Number of tracks to publish (1 = video only, 2 = video + audio).
+    /// Number of video layers on one m-line (1 = single stream, >=2 = simulcast).
+    video_layers: usize,
+    /// Whether an Opus audio track is published alongside the video.
+    has_audio: bool,
+    /// Number of input pads = video layers + audio, kept in sync with the above.
     track_count: usize,
     /// Track kind per input pad, set in `configure_pipeline`.
     tracks: Vec<Option<Track>>,
+    /// Fixated video resolution per input pad (0,0 for audio), recorded in
+    /// `configure_pipeline` and used to build each simulcast layer's metadata.
+    dims: Vec<(u32, u32)>,
     /// Per-input reverse channel, shared with the fan-in runner: a remote PLI /
-    /// BWE naming a track's m-line routes back to the source feeding that pad.
+    /// BWE naming a track's m-line (+ rid) routes back to the source feeding that
+    /// pad.
     reverse: Vec<ReverseChannel>,
+    /// Per-input wire target, resolved during the handshake in `start_session`.
+    sinks: Vec<Option<PadSink>>,
     /// Set on the first frame, after the join+publish handshake spawns the task.
     tx: Option<mpsc::Sender<MediaUnit>>,
     frames_sent: u64,
@@ -135,7 +160,7 @@ impl LiveKitSink {
         room: impl Into<String>,
         identity: impl Into<String>,
     ) -> Self {
-        Self {
+        let mut s = Self {
             url: url.into(),
             room: room.into(),
             identity: identity.into(),
@@ -143,20 +168,44 @@ impl LiveKitSink {
             api_secret: String::new(),
             token: None,
             queue_depth: DEFAULT_QUEUE_DEPTH,
-            track_count: 1,
-            tracks: alloc::vec![None],
-            reverse: alloc::vec![ReverseChannel::new()],
+            video_layers: 1,
+            has_audio: false,
+            track_count: 0,
+            tracks: Vec::new(),
+            dims: Vec::new(),
+            reverse: Vec::new(),
+            sinks: Vec::new(),
             tx: None,
             frames_sent: 0,
-        }
+        };
+        s.rebuild_pads();
+        s
     }
 
-    /// Publish a second (Opus audio) track alongside the video track.
+    /// Publish a second (Opus audio) track alongside the video.
     pub fn with_audio(mut self) -> Self {
-        self.track_count = MAX_TRACKS;
-        self.tracks = alloc::vec![None; MAX_TRACKS];
-        self.reverse = (0..MAX_TRACKS).map(|_| ReverseChannel::new()).collect();
+        self.has_audio = true;
+        self.rebuild_pads();
         self
+    }
+
+    /// Publish the video as `layers` simulcast layers on one m-line (each an input
+    /// pad, pad 0 = highest resolution). One layer is a plain single stream; two
+    /// or more offer `a=rid`/`a=simulcast` so the SFU can forward per subscriber.
+    pub fn with_simulcast(mut self, layers: usize) -> Self {
+        self.video_layers = layers.clamp(1, MAX_VIDEO_LAYERS);
+        self.rebuild_pads();
+        self
+    }
+
+    /// Resize the per-pad vectors for the current video-layer + audio count.
+    fn rebuild_pads(&mut self) {
+        let n = self.video_layers + self.has_audio as usize;
+        self.track_count = n;
+        self.tracks = alloc::vec![None; n];
+        self.dims = alloc::vec![(0u32, 0u32); n];
+        self.reverse = (0..n).map(|_| ReverseChannel::new()).collect();
+        self.sinks = alloc::vec![None; n];
     }
 
     /// LiveKit API key + secret; the sink mints a publish-only access token.
@@ -257,7 +306,28 @@ impl LiveKitSink {
         // toward LiveKit Cloud is a follow-up.
         add_ice_candidates(&mut rtc, &socket, None).await?;
 
-        let has_video = self.tracks.contains(&Some(Track::Video));
+        // Video input pads in order (pad 0 = top layer), each a simulcast layer;
+        // one shared video m-line groups them all. Assign rids high->low and read
+        // each layer's resolution from its fixated caps.
+        let video_inputs: Vec<usize> = self
+            .tracks
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| **t == Some(Track::Video))
+            .map(|(i, _)| i)
+            .collect();
+        let rids = rids_high_to_low(video_inputs.len());
+        let layers: Vec<SendLayer> = video_inputs
+            .iter()
+            .zip(rids.iter())
+            .map(|(&i, &rid)| SendLayer {
+                rid,
+                width: self.dims[i].0,
+                height: self.dims[i].1,
+            })
+            .collect();
+        let simulcast = layers.len() >= 2;
+        let has_video = !video_inputs.is_empty();
         let has_audio = self.tracks.contains(&Some(Track::Audio));
 
         // The AddTrackRequest cid must equal the SDP msid track-id, so we choose
@@ -279,7 +349,7 @@ impl LiveKitSink {
                     Direction::SendOnly,
                     Some(stream_id.clone()),
                     Some(video_cid.clone()),
-                    None,
+                    send_simulcast(&layers),
                 )
             });
             let audio_mid = has_audio.then(|| {
@@ -298,15 +368,34 @@ impl LiveKitSink {
         // Phase B: announce each track and await its TrackPublishedResponse.
         let mut want_cids: Vec<String> = Vec::new();
         if has_video {
+            // The track's geometry is the top layer; `layers` announces each
+            // simulcast layer's quality + resolution (empty for a single stream).
+            let (top_w, top_h) = layers
+                .first()
+                .map(|l| (l.width, l.height))
+                .unwrap_or((0, 0));
+            let layer_meta: Vec<VideoLayer> = if simulcast {
+                layers
+                    .iter()
+                    .map(|l| VideoLayer {
+                        quality: VideoQuality::for_rid(l.rid),
+                        width: l.width,
+                        height: l.height,
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
             send_signal(
                 &mut ws,
                 &SignalRequest::AddTrack(AddTrackRequest {
                     cid: video_cid.clone(),
                     name: "video".into(),
                     track_type: TrackType::Video,
-                    width: 0,
-                    height: 0,
+                    width: top_w,
+                    height: top_h,
                     source: TrackSource::Camera,
+                    layers: layer_meta,
                 }),
             )
             .await?;
@@ -322,6 +411,7 @@ impl LiveKitSink {
                     width: 0,
                     height: 0,
                     source: TrackSource::Microphone,
+                    layers: Vec::new(),
                 }),
             )
             .await?;
@@ -396,21 +486,44 @@ impl LiveKitSink {
                 .await;
         }
 
-        let reverse_for = |kind: Track| {
-            self.tracks
-                .iter()
-                .position(|t| *t == Some(kind))
-                .and_then(|i| self.reverse.get(i).cloned())
-        };
+        // Resolve each input pad's wire target and per-(mid, rid) keyframe route.
+        // A video layer writes to the shared video mid tagged with its rid (None
+        // when there is only one layer); audio writes to its own mid.
+        let mut routes = KeyframeRoutes::new();
+        for (li, &i) in video_inputs.iter().enumerate() {
+            if let Some(mid) = video_mid {
+                let rid = simulcast.then(|| Rid::from(rids[li]));
+                self.sinks[i] = Some(PadSink {
+                    track: Track::Video,
+                    mid,
+                    rid,
+                });
+                routes.push(mid, rid, self.reverse[i].clone());
+            }
+        }
+        if let Some(ai) = self.tracks.iter().position(|t| *t == Some(Track::Audio)) {
+            if let Some(mid) = audio_mid {
+                self.sinks[ai] = Some(PadSink {
+                    track: Track::Audio,
+                    mid,
+                    rid: None,
+                });
+                routes.push(mid, None, self.reverse[ai].clone());
+            }
+        }
+        // BWE is aggregate per connection; route the estimate to the top video
+        // layer's source (per-layer allocation is a follow-up milestone).
+        let video_reverse = video_inputs
+            .first()
+            .and_then(|&i| self.reverse.get(i).cloned());
+
         let (tx, rx) = mpsc::channel::<MediaUnit>(self.queue_depth);
         tokio::spawn(run_session(SessionArgs {
             rtc,
             socket,
             local,
-            video_mid,
-            audio_mid,
-            video_reverse: reverse_for(Track::Video),
-            audio_reverse: reverse_for(Track::Audio),
+            keyframe_routes: routes,
+            video_reverse,
             ws_write,
             ws_read,
             ping_interval,
@@ -516,6 +629,18 @@ fn opus_stereo() -> Caps {
     }
 }
 
+/// The fixated `(width, height)` of a video caps, `(0, 0)` for audio or an
+/// unfixated dimension (the layer metadata then simply omits the resolution).
+fn video_dims(caps: &Caps) -> (u32, u32) {
+    if let Caps::CompressedVideo { width, height, .. } = caps {
+        let w = if let Dim::Fixed(w) = width { *w } else { 0 };
+        let h = if let Dim::Fixed(h) = height { *h } else { 0 };
+        (w, h)
+    } else {
+        (0, 0)
+    }
+}
+
 /// The track kind an input's caps select (H.264 video or Opus audio).
 fn track_of(caps: &Caps) -> Option<Track> {
     match caps {
@@ -562,6 +687,9 @@ impl MultiInputElement for LiveKitSink {
     ) -> Result<ConfigureOutcome, G2gError> {
         let track = track_of(absolute_caps).ok_or(G2gError::CapsMismatch)?;
         *self.tracks.get_mut(input).ok_or(G2gError::CapsMismatch)? = Some(track);
+        if let Some(d) = self.dims.get_mut(input) {
+            *d = video_dims(absolute_caps);
+        }
         Ok(ConfigureOutcome::Accepted)
     }
 
@@ -595,23 +723,28 @@ impl MultiInputElement for LiveKitSink {
                     let MemoryDomain::System(slice) = &frame.domain else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    let track = self
-                        .tracks
-                        .get(input)
-                        .copied()
-                        .flatten()
-                        .ok_or(G2gError::NotConfigured)?;
-                    let unit = MediaUnit {
-                        track,
-                        pts_ns: frame.timing.pts_ns,
-                        data: slice.as_slice().to_vec(),
-                    };
+                    let data = slice.as_slice().to_vec();
+                    let pts_ns = frame.timing.pts_ns;
+                    // The handshake (first frame) resolves each pad's wire target.
                     if self.tx.is_none() {
                         if !self.all_configured() {
                             return Err(G2gError::NotConfigured);
                         }
                         self.start_session().await?;
                     }
+                    let sink = self
+                        .sinks
+                        .get(input)
+                        .copied()
+                        .flatten()
+                        .ok_or(G2gError::NotConfigured)?;
+                    let unit = MediaUnit {
+                        track: sink.track,
+                        mid: sink.mid,
+                        rid: sink.rid,
+                        pts_ns,
+                        data,
+                    };
                     if let Some(tx) = &self.tx {
                         tx.send(unit).await.map_err(|_| G2gError::Shutdown)?;
                     }
@@ -665,10 +798,11 @@ struct SessionArgs {
     rtc: Rtc,
     socket: UdpSocket,
     local: SocketAddr,
-    video_mid: Option<Mid>,
-    audio_mid: Option<Mid>,
+    /// Per-(mid, rid) keyframe routing, so a remote PLI fires exactly the layer's
+    /// source and never a sibling.
+    keyframe_routes: KeyframeRoutes,
+    /// Aggregate-BWE target (the top video layer's source).
     video_reverse: Option<ReverseChannel>,
-    audio_reverse: Option<ReverseChannel>,
     ws_write: WsWrite,
     ws_read: WsRead,
     ping_interval: Duration,
@@ -699,16 +833,7 @@ async fn run_session(mut a: SessionArgs) {
                     return;
                 }
                 Ok(Output::Event(Event::KeyframeRequest(req))) => {
-                    let rc = if Some(req.mid) == a.video_mid {
-                        a.video_reverse.as_ref()
-                    } else if Some(req.mid) == a.audio_mid {
-                        a.audio_reverse.as_ref()
-                    } else {
-                        None
-                    };
-                    if let Some(rc) = rc {
-                        rc.request_keyframe();
-                    }
+                    a.keyframe_routes.request_keyframe(req.mid, req.rid);
                 }
                 Ok(Output::Event(Event::EgressBitrateEstimate(kind))) => {
                     let bps = match kind {
@@ -754,11 +879,12 @@ async fn run_session(mut a: SessionArgs) {
             }
             unit = a.rx.recv() => {
                 let Some(unit) = unit else { return };
-                let (mid, pt_slot) = match unit.track {
-                    Track::Video => (a.video_mid, &mut video_pt),
-                    Track::Audio => (a.audio_mid, &mut audio_pt),
+                let mid = unit.mid;
+                let pt_slot = match unit.track {
+                    Track::Video => &mut video_pt,
+                    Track::Audio => &mut audio_pt,
                 };
-                let Some(mid) = mid else { continue };
+                // The pt is per-m-line, so all layers on the video mid share it.
                 if pt_slot.is_none() {
                     if let Some(writer) = a.rtc.writer(mid) {
                         // Prefer a packetization-mode=1 payload type: str0m's
@@ -779,6 +905,12 @@ async fn run_session(mut a: SessionArgs) {
                 if let Some(p) = *pt_slot {
                     let rtp_time = unit.track.media_time(unit.pts_ns);
                     if let Some(writer) = a.rtc.writer(mid) {
+                        // Tag the write with the layer's rid so str0m routes it to
+                        // that simulcast stream's SSRC (no rid = single stream).
+                        let writer = match unit.rid {
+                            Some(rid) => writer.rid(rid),
+                            None => writer,
+                        };
                         let _ = writer.write(p, Instant::now(), rtp_time, unit.data);
                     }
                 }
@@ -824,6 +956,44 @@ mod tests {
             alloc::vec![Some(Track::Video), Some(Track::Audio)]
         );
         assert!(s.all_configured());
+    }
+
+    #[test]
+    fn simulcast_groups_video_layers_and_records_dims() {
+        // Two video layers on one m-line: two input pads, both video, each with
+        // its fixated resolution recorded for the layer metadata.
+        let mut s = LiveKitSink::new("ws://h:7880", "room", "id").with_simulcast(2);
+        assert_eq!(s.input_count(), 2);
+        let hi = Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            width: Dim::Fixed(640),
+            height: Dim::Fixed(480),
+            framerate: Rate::Fixed(30 << 16),
+        };
+        let lo = Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            width: Dim::Fixed(320),
+            height: Dim::Fixed(240),
+            framerate: Rate::Fixed(30 << 16),
+        };
+        assert!(s.configure_pipeline(0, &hi).is_ok());
+        assert!(s.configure_pipeline(1, &lo).is_ok());
+        assert_eq!(
+            s.tracks,
+            alloc::vec![Some(Track::Video), Some(Track::Video)]
+        );
+        assert_eq!(s.dims, alloc::vec![(640, 480), (320, 240)]);
+        assert!(s.all_configured());
+    }
+
+    #[test]
+    fn simulcast_with_audio_adds_an_extra_pad() {
+        let s = LiveKitSink::new("ws://h:7880", "room", "id")
+            .with_simulcast(2)
+            .with_audio();
+        assert_eq!(s.input_count(), 3, "two video layers + one audio");
+        assert_eq!(s.video_layers, 2);
+        assert!(s.has_audio);
     }
 
     #[test]

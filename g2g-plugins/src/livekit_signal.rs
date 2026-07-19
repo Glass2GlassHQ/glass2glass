@@ -309,6 +309,53 @@ impl TrackSource {
     }
 }
 
+/// LiveKit video quality tier (livekit_models.proto `VideoQuality`). A simulcast
+/// layer's rid maps to a tier by the server's convention (`q` = low, `h` = mid,
+/// `f` = high), so the SFU knows which quality each published rid carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoQuality {
+    Low,
+    Medium,
+    High,
+}
+
+impl VideoQuality {
+    fn wire(self) -> u64 {
+        match self {
+            VideoQuality::Low => 0,
+            VideoQuality::Medium => 1,
+            VideoQuality::High => 2,
+        }
+    }
+
+    /// The tier for a simulcast rid, matching the server's rid->layer table.
+    pub fn for_rid(rid: &str) -> VideoQuality {
+        match rid {
+            "f" => VideoQuality::High,
+            "h" => VideoQuality::Medium,
+            _ => VideoQuality::Low,
+        }
+    }
+}
+
+/// One published simulcast layer's metadata (livekit_models.proto `VideoLayer`):
+/// the quality tier and the layer's resolution. Announced in [`AddTrackRequest`]
+/// so the SFU can map each rid to a quality and forward the right layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VideoLayer {
+    pub quality: VideoQuality,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl VideoLayer {
+    fn encode_into(&self, buf: &mut Vec<u8>) {
+        pb::put_varint_field(buf, 1, self.quality.wire());
+        pb::put_varint_field(buf, 2, self.width as u64);
+        pb::put_varint_field(buf, 3, self.height as u64);
+    }
+}
+
 /// SDP session description (`type` = "offer" / "answer", plus the SDP blob).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionDescription {
@@ -378,6 +425,9 @@ pub struct AddTrackRequest {
     pub width: u32,
     pub height: u32,
     pub source: TrackSource,
+    /// Simulcast layers, empty for a single-stream track. Each carries a quality
+    /// tier + resolution so the SFU can forward the right layer per subscriber.
+    pub layers: Vec<VideoLayer>,
 }
 
 impl AddTrackRequest {
@@ -388,6 +438,11 @@ impl AddTrackRequest {
         pb::put_varint_field(buf, 4, self.width as u64);
         pb::put_varint_field(buf, 5, self.height as u64);
         pb::put_varint_field(buf, 8, self.source.wire());
+        for layer in &self.layers {
+            let mut inner = Vec::new();
+            layer.encode_into(&mut inner);
+            pb::put_len_field(buf, 9, &inner);
+        }
     }
 }
 
@@ -698,6 +753,7 @@ mod tests {
             width: 640,
             height: 480,
             source: TrackSource::Camera,
+            layers: Vec::new(),
         };
         let bytes = SignalRequest::AddTrack(a.clone()).encode();
         let mut pos = 0;
@@ -723,6 +779,63 @@ mod tests {
         assert_eq!(width, 640);
         assert_eq!(height, 480);
         assert_eq!(source, 1); // CAMERA
+    }
+
+    #[test]
+    fn add_track_encodes_simulcast_layers() {
+        // A two-layer simulcast track: field 9 repeats a VideoLayer per rid, each
+        // carrying its quality tier + resolution.
+        let a = AddTrackRequest {
+            cid: "vid-cid".into(),
+            name: "video".into(),
+            track_type: TrackType::Video,
+            width: 640,
+            height: 480,
+            source: TrackSource::Camera,
+            layers: alloc::vec![
+                VideoLayer {
+                    quality: VideoQuality::Medium,
+                    width: 640,
+                    height: 480,
+                },
+                VideoLayer {
+                    quality: VideoQuality::Low,
+                    width: 320,
+                    height: 240,
+                },
+            ],
+        };
+        let bytes = SignalRequest::AddTrack(a).encode();
+        let mut pos = 0;
+        let pb::Field::Len(4, inner) = pb::next_field(&bytes, &mut pos).unwrap() else {
+            panic!("expected add_track field 4");
+        };
+        // Collect the two VideoLayer submessages (field 9) and decode their
+        // quality + width.
+        let mut layers = Vec::new();
+        let mut p = 0;
+        while let Some(f) = pb::next_field(inner, &mut p) {
+            if let pb::Field::Len(9, sub) = f {
+                let (mut quality, mut width) = (0u64, 0u64);
+                let mut q = 0;
+                while let Some(lf) = pb::next_field(sub, &mut q) {
+                    match lf {
+                        pb::Field::Varint(1, v) => quality = v,
+                        pb::Field::Varint(2, v) => width = v,
+                        _ => {}
+                    }
+                }
+                layers.push((quality, width));
+            }
+        }
+        assert_eq!(layers, alloc::vec![(1, 640), (0, 320)]);
+    }
+
+    #[test]
+    fn video_quality_maps_from_rid() {
+        assert_eq!(VideoQuality::for_rid("q"), VideoQuality::Low);
+        assert_eq!(VideoQuality::for_rid("h"), VideoQuality::Medium);
+        assert_eq!(VideoQuality::for_rid("f"), VideoQuality::High);
     }
 
     #[test]
