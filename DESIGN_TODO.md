@@ -584,8 +584,7 @@ Phased plan:
     fixate-failure bug. Multi-track A/V DONE (M248): `WebRtcSessionSink` publishes
     H.264 + Opus over one PeerConnection and `WebRtcWhepSessionSrc` reads both back
     (`webrtc_av_session_loopback`, both tracks received; mediamtx logs `2 tracks`).
-    Remaining: browser playback via the WHEP player, and a real LiveKit Cloud /
-    TURN-relay run (genuine remote NAT).
+    Remaining: a real LiveKit Cloud / TURN-relay run (genuine remote NAT).
   - **T1 (keystone): unified `WebRtcBin`-equivalent session element.** One element
     owning one `Rtc` with N tracks, on the multi-pad traits, so BUNDLE / A-V on one
     PeerConnection / sendrecv / data channels all hang off it. Fixed-arity-from-caps

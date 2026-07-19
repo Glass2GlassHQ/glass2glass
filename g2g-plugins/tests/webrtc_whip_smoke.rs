@@ -35,6 +35,18 @@
 //! (`host:port`) for a server-reflexive candidate, and/or `G2G_TURN_SERVER` +
 //! `G2G_TURN_USER` + `G2G_TURN_PASS` for the relay fallback. Both are applied to
 //! the sink (and, in the loopback, the source) when present.
+//!
+//! Browser validation (both directions, over mediamtx):
+//!
+//! ```sh
+//! # serve the example pages over http (getStats/captureStream need a real origin):
+//! python3 -m http.server 8000 -d g2g-plugins/examples
+//! # g2g -> browser: run `webrtc_browser_publish`, then open
+//! #   http://localhost:8000/whep-player.html at the WHEP URL to watch the A/V.
+//! # browser -> g2g: open http://localhost:8000/whip-publisher.html, publish the
+//! #   canvas to .../browserpub/whip, then run `webrtc_browser_ingest` on
+//! #   .../browserpub/whep (asserts frames arrive).
+//! ```
 
 #![cfg(all(target_os = "linux", feature = "webrtc"))]
 
@@ -661,6 +673,119 @@ async fn webrtc_av_session_loopback() {
     assert!(
         a >= 1,
         "expected at least one audio frame back over the A/V session"
+    );
+}
+
+/// Browser interop, publish side: hold a live A/V stream up over one WHIP
+/// PeerConnection (H.264 video + Opus audio via [`WebRtcSessionSink`] + the
+/// fan-in runner, exactly like the publisher half of
+/// [`webrtc_av_session_loopback`]) long enough for a human or a browser to watch
+/// it back over WHEP. Duration comes from `G2G_PUBLISH_SECS` (default 60), so an
+/// orchestrator can start a browser subscriber against the same mediamtx path
+/// while this holds the feed.
+///
+/// ```sh
+/// docker run -d --network host bluenviron/mediamtx
+/// ffmpeg -f lavfi -i testsrc=size=640x480:rate=30:duration=12 \
+///        -c:v libx264 -bsf:v h264_mp4toannexb -f h264 /tmp/clip.h264
+/// ffmpeg -f lavfi -i sine=frequency=440:sample_rate=48000:duration=12 \
+///        -c:a libopus -b:a 64k -f ogg /tmp/clip.opus.ogg
+/// G2G_H264_FIXTURE=/tmp/clip.h264 G2G_OPUS_FIXTURE=/tmp/clip.opus.ogg \
+/// G2G_WHIP_URL=http://localhost:8889/browserpub/whip G2G_PUBLISH_SECS=60 \
+///     cargo test -p g2g-plugins --features webrtc \
+///     --test webrtc_whip_smoke webrtc_browser_publish -- --ignored --nocapture
+/// # then open g2g-plugins/examples/whep-player.html at .../browserpub/whep
+/// ```
+#[tokio::test]
+#[ignore = "needs mediamtx (WHIP) + H.264 (G2G_H264_FIXTURE) + Ogg-Opus (G2G_OPUS_FIXTURE) fixtures"]
+async fn webrtc_browser_publish() {
+    let (Ok(whip), Ok(h264_fixture), Ok(opus_fixture)) = (
+        std::env::var("G2G_WHIP_URL"),
+        std::env::var("G2G_H264_FIXTURE"),
+        std::env::var("G2G_OPUS_FIXTURE"),
+    ) else {
+        eprintln!("skipping: set G2G_WHIP_URL, G2G_H264_FIXTURE and G2G_OPUS_FIXTURE");
+        return;
+    };
+    let secs = std::env::var("G2G_PUBLISH_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(60);
+
+    let h264_bytes = std::fs::read(&h264_fixture).expect("read h264 fixture");
+    let nals = Arc::new(split_annexb(&h264_bytes));
+    assert!(!nals.is_empty(), "h264 fixture had no NAL units");
+    let opus_packets = Arc::new(extract_opus_packets(&opus_fixture).await);
+    assert!(
+        !opus_packets.is_empty(),
+        "ogg fixture yielded no Opus packets"
+    );
+
+    let duration = Duration::from_secs(secs);
+    let publisher = async move {
+        let mut vsrc = PacedH264Src { nals, duration };
+        let mut asrc = PacedOpusSrc {
+            packets: opus_packets,
+            duration,
+        };
+        let mut sink = with_ice_env_session_sink(WebRtcSessionSink::new(whip));
+        let clock = ZeroClock;
+        let sources: std::vec::Vec<&mut dyn DynSourceLoop> = std::vec![&mut vsrc, &mut asrc];
+        run_fanin_session(sources, &mut sink, &clock, 8).await
+    };
+
+    eprintln!(
+        "browser-publish: holding A/V ({} NALs, {} Opus) live for {secs}s",
+        h264_bytes.len(),
+        opus_fixture,
+    );
+    tokio::time::timeout(duration + Duration::from_secs(20), publisher)
+        .await
+        .expect("publish completes within duration + 20s")
+        .expect("A/V WHIP publish ok");
+}
+
+/// Browser interop, ingest side: a browser (or ffmpeg) publishes into mediamtx
+/// over WHIP and g2g reads the video back over WHEP via [`WebRtcWhepSrc`], the
+/// subscriber half of [`webrtc_whip_to_whep_loopback`] with no g2g publisher.
+/// The orchestrator starts the browser publisher separately, so the timeout is
+/// generous.
+///
+/// ```sh
+/// docker run -d --network host bluenviron/mediamtx
+/// # start a browser publisher at http://localhost:8889/browserpub/whip
+/// G2G_WHEP_URL=http://localhost:8889/browserpub/whep \
+///     cargo test -p g2g-plugins --features webrtc \
+///     --test webrtc_whip_smoke webrtc_browser_ingest -- --ignored --nocapture
+/// ```
+#[tokio::test]
+#[ignore = "needs mediamtx (WHEP) with a browser publisher (G2G_WHEP_URL)"]
+async fn webrtc_browser_ingest() {
+    let Ok(whep) = std::env::var("G2G_WHEP_URL") else {
+        eprintln!("skipping: set G2G_WHEP_URL to run");
+        return;
+    };
+    eprintln!("browser-ingest: subscribing <- {whep}");
+
+    let mut rsrc = with_ice_env_src(WebRtcWhepSrc::new(whep).with_frame_limit(60));
+    let mut rparse = H264Parse::new();
+    let mut rsink = FakeSink::new();
+    let clock = ZeroClock;
+    let stats = tokio::time::timeout(
+        Duration::from_secs(90),
+        run_source_transform_sink(&mut rsrc, &mut rparse, &mut rsink, &clock, 4),
+    )
+    .await
+    .expect("subscribe completes within 90s")
+    .expect("WHEP subscribe ok");
+
+    eprintln!(
+        "browser-ingest received {} frames over WHEP",
+        stats.frames_emitted
+    );
+    assert!(
+        stats.frames_emitted >= 1,
+        "expected at least one frame from the browser publisher"
     );
 }
 

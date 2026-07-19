@@ -61,6 +61,9 @@
           if (s.type === 'inbound-rtp' && s.kind === 'video') {
             log('video bytes=' + (s.bytesReceived || 0) + ' frames=' + (s.framesDecoded || 0));
           }
+          if (s.type === 'inbound-rtp' && s.kind === 'audio') {
+            log('audio bytes=' + (s.bytesReceived || 0));
+          }
         });
       }, 2000);
     }
