@@ -238,9 +238,12 @@ jobs:
       # fixtures, encode round trip): the runner's software codecs suffice, so
       # this is the on-Mac runtime validation the Linux dev host cannot do.
       - name: test g2g-plugins (vtdecode + vtencode runtime)
+        # TODO(M733): drop G2G_DEBUG once the vt launch negotiation is green.
+        env:
+          G2G_DEBUG: caps:debug
         run: >
           cargo test -p g2g-plugins --locked --features vtdecode,vtencode
-          --test m731_videotoolbox --test m733_vt_registry -- --nocapture
+          --test m731_videotoolbox --test m733_vt_registry -- --nocapture --test-threads=1
       - name: check g2g-ml (wgpu + burn, Metal)
         run: cargo check -p g2g-ml --locked --all-targets --features wgpu,burn
 
