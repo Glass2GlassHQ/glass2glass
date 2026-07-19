@@ -34,6 +34,13 @@
 //! at open; a BWE change would need a reopen, like `Av1Enc`'s context rebuild),
 //! NV12 input (I420 only for now), and 10-bit. The downstream bitrate feedback is
 //! recorded but not yet acted on.
+//!
+//! Known driver issue: two NVENC instances in one process crash intermittently
+//! inside a libnvcuvid worker thread under concurrent load (observed on driver
+//! 580.173.02 / ffmpeg 7.1.5, same faulting instruction each time; single
+//! instances are stable, and the same double-instance sequence is stable when
+//! run serially). Multi-encoder graphs (simulcast fan) should prefer
+//! [`Backend::Software`] until the driver is fixed.
 
 use core::future::Future;
 use core::pin::Pin;
