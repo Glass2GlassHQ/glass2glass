@@ -912,6 +912,34 @@ fn register_autoplug_candidates(reg: &mut Registry) {
         "mediacodecench265",
         || Box::new(MediaCodecEnc::h265()),
     ));
+    // macOS hardware video decode via VideoToolbox (M218/M534); one factory per
+    // codec, like the MediaCodec pair. `vtdec` matches the gst applemedia name.
+    #[cfg(all(target_os = "macos", feature = "vtdecode"))]
+    reg.register(
+        ElementFactory::of::<crate::vtdecode::VtDecode>("vtdec", |_| {
+            Box::new(crate::vtdecode::VtDecode::h264())
+        })
+        .hardware(),
+    );
+    #[cfg(all(target_os = "macos", feature = "vtdecode"))]
+    reg.register(
+        ElementFactory::of::<crate::vtdecode::VtDecode>("vtdech265", |_| {
+            Box::new(crate::vtdecode::VtDecode::h265())
+        })
+        .hardware(),
+    );
+    // macOS hardware video encode via VideoToolbox (M231/M534); launch-only
+    // (encoders are not auto-plug candidates), under the gst applemedia names.
+    #[cfg(all(target_os = "macos", feature = "vtencode"))]
+    reg.register_launch(LaunchFactory::of::<crate::vtencode::VtEncode>(
+        "vtenc_h264",
+        || Box::new(crate::vtencode::VtEncode::h264()),
+    ));
+    #[cfg(all(target_os = "macos", feature = "vtencode"))]
+    reg.register_launch(LaunchFactory::of::<crate::vtencode::VtEncode>(
+        "vtenc_h265",
+        || Box::new(crate::vtencode::VtEncode::h265()),
+    ));
 }
 
 /// Register gst-canonical-name aliases (M192) so pasted `gst-launch` lines using
@@ -932,7 +960,9 @@ fn register_aliases(reg: &mut Registry) {
     // names prefer the ffmpeg VAAPI hwaccel (`ffmpegvaapidec`, works on Mesa
     // radeonsi) and fall back to the cros-codecs `vaapidec` when only that
     // feature is on; the alias resolves to the first registered target.
-    reg.register_alias("avdec_h264", &["ffmpegdec"]);
+    // `avdec_h264` falls back to VideoToolbox `vtdec` on macOS builds without
+    // the ffmpeg feature.
+    reg.register_alias("avdec_h264", &["ffmpegdec", "vtdec"]);
     reg.register_alias("vaapih264dec", &["ffmpegvaapidec", "vaapidec"]);
     // AV1 decode: gst's libav name -> the libdav1d decoder, falling back to the
     // pure-Rust re_rav1d decoder when only the `rav1d` feature is built.

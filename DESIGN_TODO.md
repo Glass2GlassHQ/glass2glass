@@ -290,8 +290,7 @@ Phased plan:
 
 ## Platform: macOS
 
-- `VtDecode`: a `CVPixelBuffer` / `IOSurface` zero-copy domain; registry wiring
-  (`avdec_h264` alias).
+- `VtDecode`: a `CVPixelBuffer` / `IOSurface` zero-copy domain.
 - `avfvideosrc` / `avfaudiosrc` (AVFoundation camera + mic).
 - `coreaudiosink` / `coreaudiosrc`.
 - `metalvideosink` (Metal present).

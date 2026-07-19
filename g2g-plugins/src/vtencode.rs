@@ -53,8 +53,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError,
-    HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate,
-    RawVideoFormat, VideoCodec,
+    HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
+    PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, VideoCodec,
 };
 
 use crate::annexb::{au_is_keyframe, avcc_to_annexb};
@@ -267,6 +267,42 @@ impl AsyncElement for VtEncode {
         CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| {
             derive_output_caps(codec, input)
         }))
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        const PROPS: &[PropertySpec] = &[
+            PropertySpec::new("bitrate", PropKind::Uint, "target bitrate, bits/second")
+                .with_default("4000000"),
+            PropertySpec::new(
+                "max-keyframe-interval",
+                PropKind::Uint,
+                "maximum frames between keyframes",
+            )
+            .with_default("60"),
+        ];
+        PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "bitrate" => {
+                self.bitrate = value.as_uint().ok_or(PropError::Type)? as u32;
+                Ok(())
+            }
+            "max-keyframe-interval" => {
+                self.keyframe_interval = (value.as_uint().ok_or(PropError::Type)? as u32).max(1);
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "bitrate" => Some(PropValue::Uint(self.bitrate as u64)),
+            "max-keyframe-interval" => Some(PropValue::Uint(self.keyframe_interval as u64)),
+            _ => None,
+        }
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
