@@ -1081,15 +1081,15 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
     // line that omits the explicit tee still builds. `tee`, registered demuxers,
     // and explicit-demux fan-out nodes fan out on their own pads and are left alone.
     let needs_tee = |ei: usize| !is_tee(ei) && !is_demux(ei) && !is_select[ei] && out_deg[ei] > 1;
-    for ei in 0..specs.len() {
-        if is_muxer(ei) && out_deg[ei] == 0 {
-            return Err(ParseError::MuxerWithoutOutput(specs[ei].name.clone()));
-        }
-        if is_tee(ei) && !specs[ei].props.is_empty() {
+    // A fan-in element with no output is checked at construction below: a
+    // terminal session (`is_terminal`) legally ends the graph (M713), a
+    // merging muxer without a downstream stays `MuxerWithoutOutput`.
+    for (ei, spec) in specs.iter().enumerate() {
+        if is_tee(ei) && !spec.props.is_empty() {
             // The structural tee carries no element, so it has no properties.
             return Err(ParseError::UnknownProperty {
                 element: "tee".to_string(),
-                key: specs[ei].props[0].0.clone(),
+                key: spec.props[0].0.clone(),
             });
         }
     }
@@ -1172,9 +1172,21 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
                     mux_pad_of_link[k] = Some(idx as u8);
                 }
             }
-            graph
-                .add_muxer(GraphNodeRef::Muxer(mux), in_deg[ei] as u8)
-                .node()
+            if out_deg[ei] == 0 {
+                // Nothing downstream: legal only for a terminal fan-in session
+                // (M713), whose element consumes its inputs with no merged
+                // output. A merging muxer here would silently drop its output.
+                if !mux.is_terminal() {
+                    return Err(ParseError::MuxerWithoutOutput(spec.name.clone()));
+                }
+                graph
+                    .add_fanin_sink(GraphNodeRef::Muxer(mux), in_deg[ei] as u8)
+                    .node()
+            } else {
+                graph
+                    .add_muxer(GraphNodeRef::Muxer(mux), in_deg[ei] as u8)
+                    .node()
+            }
         } else if is_select[ei] {
             // M476: a demux-select hook already built the multi-output demuxer
             // (probing the upstream file); splice it in with one port per pad.

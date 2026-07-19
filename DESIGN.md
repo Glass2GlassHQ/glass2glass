@@ -1954,6 +1954,22 @@ sources into it over one tagged `(input, packet)` channel. The session source is
 the mirror: a terminal `MultiOutputSource` (0 inputs → N outputs) driven by
 `run_fanout_session` into N sinks.
 
+**Session sinks as DAG nodes (M713).** A terminal fan-in is also a first-class
+graph node, `NodeKind::FaninSink(n)` via `Graph::add_fanin_sink`, so a transform
+chain can feed each session pad instead of a bare source: the live encoder fan
+graph `src -> tee -> videoscale -> ffmpegenc` per simulcast layer ends on
+`LiveKitSink` inside one `run_graph` (cooperative or threaded). The node reuses
+the muxer's `GraphNodeRef::Muxer` payload and negotiation shape with the output
+half inert (no output edge exists), and its arm is the `run_fanin_session`
+discipline over the DAG's per-edge channels: round-robin drain, per-input `Eos`
+flush, end on all-`Eos`, and each pad's `reverse_channel` relayed onto its own
+in-edge, so a per-`(mid,rid)` PLI reaches exactly the encoder feeding that layer
+as a `PushOutcome::Reconfigure(ForceKeyframe)`. `MultiInputElement::is_terminal`
+marks a session element as legal to end a graph; in `parse_launch` a fan-in name
+with nothing downstream builds this node, while a merging muxer without a
+downstream stays a `MuxerWithoutOutput` parse error (its merged output would be
+silently discarded).
+
 **The duplex shape.** Bidirectional sendrecv needs an element that is *at once* a
 sink (for the tracks it publishes) and a source (for the tracks it receives) over
 **one** connection — which neither the fan-in nor the fan-out session runner could

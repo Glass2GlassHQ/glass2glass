@@ -629,3 +629,195 @@ async fn livekit_publishes_simulcast() {
         }
     }
 }
+
+/// M713 encoder fan graph: the simulcast layers are ENCODED live inside one
+/// graph instead of fed from pre-encoded fixtures. One paced raw source tees
+/// into per-layer branches (`videoscale -> ffmpegenc`) that end on the
+/// [`LiveKitSink`] as a terminal fan-in node (`Graph::add_fanin_sink`), so a
+/// remote per-rid PLI travels the graph edges back to the matching encoder.
+/// No fixtures needed: the encoders make the video.
+#[cfg(feature = "ffmpeg")]
+mod fan_graph {
+    use super::*;
+    use g2g_core::runtime::{run_graph, GraphNode};
+    use g2g_core::{Graph, RawVideoFormat};
+    use g2g_plugins::ffmpegenc::{Backend, FfmpegH264Enc};
+    use g2g_plugins::videoscale::VideoScale;
+
+    fn i420_caps(width: u32, height: u32) -> Caps {
+        Caps::RawVideo {
+            format: RawVideoFormat::I420,
+            width: Dim::Fixed(width),
+            height: Dim::Fixed(height),
+            framerate: Rate::Fixed(30 << 16),
+        }
+    }
+
+    /// Paced raw I420 source: a moving vertical bar at 30 fps in real time, so
+    /// the encoders have live motion to encode across the whole publish window.
+    struct PacedI420Src {
+        width: u32,
+        height: u32,
+        duration: Duration,
+    }
+
+    impl SourceLoop for PacedI420Src {
+        type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>;
+        type CapsFuture<'a> = Ready<Result<Caps, G2gError>>;
+
+        fn intercept_caps(&mut self) -> Self::CapsFuture<'_> {
+            ready(Ok(i420_caps(self.width, self.height)))
+        }
+        fn configure_pipeline(&mut self, _c: &Caps) -> Result<ConfigureOutcome, G2gError> {
+            Ok(ConfigureOutcome::Accepted)
+        }
+        fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
+            let (w, h) = (self.width as usize, self.height as usize);
+            let caps = i420_caps(self.width, self.height);
+            Box::pin(async move {
+                out.push(PipelinePacket::CapsChanged(caps)).await?;
+                let start = Instant::now();
+                let mut seq = 0u64;
+                while Instant::now().duration_since(start) < self.duration {
+                    let mut buf = vec![128u8; w * h * 3 / 2];
+                    let bar = (seq as usize * 4) % w;
+                    for row in buf[..w * h].chunks_exact_mut(w) {
+                        row.fill(16);
+                        let end = (bar + w / 8).min(w);
+                        row[bar..end].fill(235);
+                    }
+                    let frame = Frame::new(
+                        MemoryDomain::System(SystemSlice::from_boxed(buf.into_boxed_slice())),
+                        FrameTiming {
+                            pts_ns: seq * 33_333_333,
+                            ..FrameTiming::default()
+                        },
+                        seq,
+                    );
+                    out.push(PipelinePacket::DataFrame(frame)).await?;
+                    seq += 1;
+                    tokio::time::sleep(Duration::from_millis(33)).await;
+                }
+                out.push(PipelinePacket::Eos).await?;
+                Ok(seq)
+            })
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "needs a LiveKit server (G2G_LIVEKIT_URL + api key/secret); encodes live via ffmpeg"]
+    async fn livekit_publishes_encoder_fan_graph() {
+        let (Ok(url), Ok(api_key), Ok(api_secret)) = (
+            std::env::var("G2G_LIVEKIT_URL"),
+            std::env::var("G2G_LIVEKIT_API_KEY"),
+            std::env::var("G2G_LIVEKIT_API_SECRET"),
+        ) else {
+            eprintln!("skipping: set G2G_LIVEKIT_URL, api key/secret to run");
+            return;
+        };
+        let room =
+            std::env::var("G2G_LIVEKIT_ROOM").unwrap_or_else(|_| "g2g-fan-graph".to_string());
+        let identity = "g2g-fan-publisher";
+        let secs: u64 = std::env::var("G2G_PUBLISH_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(15);
+        eprintln!("encoder fan graph publish -> {url} room={room} as {identity}");
+
+        let publisher = {
+            let (url, room, api_key, api_secret) = (
+                url.clone(),
+                room.clone(),
+                api_key.clone(),
+                api_secret.clone(),
+            );
+            async move {
+                let mut g: Graph<GraphNode> = Graph::new();
+                let src = g.add_source(GraphNode::source(PacedI420Src {
+                    width: 640,
+                    height: 480,
+                    duration: Duration::from_secs(secs),
+                }));
+                let tee = g.add_tee(2);
+                let enc_hi = g.add_transform(GraphNode::element(
+                    FfmpegH264Enc::new()
+                        .with_backend(Backend::Software)
+                        .with_bitrate(1_200_000),
+                ));
+                let scale_lo = g.add_transform(GraphNode::element(VideoScale::new(320, 240)));
+                let enc_lo = g.add_transform(GraphNode::element(
+                    FfmpegH264Enc::new()
+                        .with_backend(Backend::Software)
+                        .with_bitrate(300_000),
+                ));
+                let sink = LiveKitSink::new(url, room, identity)
+                    .with_api_key(api_key, api_secret)
+                    .with_simulcast(2);
+                let session = g.add_fanin_sink(GraphNode::muxer(sink), 2);
+                g.link(src, tee.input()).unwrap();
+                g.link(tee.out(0), enc_hi).unwrap();
+                g.link(enc_hi, session.input(0)).unwrap();
+                g.link(tee.out(1), scale_lo).unwrap();
+                g.link(scale_lo, enc_lo).unwrap();
+                g.link(enc_lo, session.input(1)).unwrap();
+                run_graph(g, &ZeroClock, 4).await
+            }
+        };
+
+        // Verifier: the RoomService must list the track with both video layers
+        // (the sink announces them; the SFU binds them from the arriving rids).
+        let verifier = {
+            let (url, room, api_key, api_secret) = (
+                url.clone(),
+                room.clone(),
+                api_key.clone(),
+                api_secret.clone(),
+            );
+            async move {
+                let base = http_base(&url);
+                let deadline = Instant::now() + Duration::from_secs(secs.min(20));
+                let mut last = String::new();
+                while Instant::now() < deadline {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    match list_participants(&base, &api_key, &api_secret, &room).await {
+                        Ok(body) => {
+                            last = body;
+                            let layer_count = last.matches("\"quality\"").count();
+                            if last.contains(identity) && last.contains("TR_") && layer_count >= 2 {
+                                return Ok(last);
+                            }
+                        }
+                        Err(e) => last = e,
+                    }
+                }
+                Err(last)
+            }
+        };
+
+        let publisher_fut = tokio::time::timeout(Duration::from_secs(secs + 15), publisher);
+        let (pub_res, verified) = tokio::join!(publisher_fut, verifier);
+        let stats = pub_res.expect("publisher completes in time");
+        match &stats {
+            Ok(s) => eprintln!(
+                "fan graph run: emitted {} raw frames, session consumed {}",
+                s.frames_emitted, s.frames_consumed
+            ),
+            Err(e) => eprintln!("fan graph run ended with: {e:?}"),
+        }
+        let stats = stats.expect("fan graph runs to Eos");
+        assert!(
+            stats.frames_consumed > 100,
+            "expected both encoded layers to feed continuously, got {}",
+            stats.frames_consumed
+        );
+        match verified {
+            Ok(body) => eprintln!(
+                "RoomService confirmed the encoded track with both layers:\n{}",
+                &body[..body.len().min(1500)]
+            ),
+            Err(last) => {
+                panic!("RoomService never showed 2 video layers; last response:\n{last}")
+            }
+        }
+    }
+}

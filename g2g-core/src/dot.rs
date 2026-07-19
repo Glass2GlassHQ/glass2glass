@@ -167,6 +167,7 @@ fn kind_label(kind: NodeKind) -> &'static str {
         NodeKind::Sink => "sink",
         NodeKind::Tee(_) => "tee",
         NodeKind::Muxer(_) => "mux",
+        NodeKind::FaninSink(_) => "fanin-sink",
     }
 }
 
@@ -180,6 +181,7 @@ fn node_style(kind: NodeKind) -> &'static str {
         NodeKind::Transform => ", shape=box, style=\"rounded,filled\", fillcolor=\"#cddcf0\"",
         NodeKind::Tee(_) => ", shape=diamond, style=filled, fillcolor=\"#f0e8cd\"",
         NodeKind::Muxer(_) => ", shape=trapezium, style=filled, fillcolor=\"#f0e8cd\"",
+        NodeKind::FaninSink(_) => ", shape=trapezium, style=filled, fillcolor=\"#f0cdcd\"",
     }
 }
 

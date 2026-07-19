@@ -576,8 +576,8 @@ mod tests {
                 v.push(((x + y + seq as usize * 7) & 0xff) as u8);
             }
         }
-        v.extend(std::iter::repeat(110u8).take(cw * ch)); // U
-        v.extend(std::iter::repeat(150u8).take(cw * ch)); // V
+        v.extend(core::iter::repeat_n(110u8, cw * ch)); // U
+        v.extend(core::iter::repeat_n(150u8, cw * ch)); // V
         v
     }
 

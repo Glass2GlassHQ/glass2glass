@@ -5,7 +5,8 @@
 //! per node over per-edge channels, joined with [`join_all`]. It collapses the
 //! linear + fan-out runner shapes into one entry point.
 //!
-//! Scope: source / transform / sink / tee (fan-out) + muxer (fan-in). A tee
+//! Scope: source / transform / sink / tee (fan-out) + muxer (fan-in) + terminal
+//! fan-in (M713). A tee
 //! broadcasts each packet to all its branches via [`MemoryDomain::share`]
 //! (M213): a zero-copy refcount bump for the GPU domains and the shared-CPU
 //! `SystemView`, a deep copy only for owned-CPU `System` bytes. So a GPU-decoded
@@ -13,7 +14,13 @@
 //! device-to-host copy. A muxer node
 //! runs a [`DynMultiInputElement`]: per-input forwarder arms tag each packet
 //! with its pad and feed one muxer arm that combines them, emitting a single
-//! `Eos` after every input ends (the `run_muxer_sink` shape).
+//! `Eos` after every input ends (the `run_muxer_sink` shape). A terminal fan-in
+//! node ([`Graph::add_fanin_sink`]) runs a `DynMultiInputElement` with NO
+//! downstream (the `run_fanin_session` shape, e.g. a WebRTC session publishing
+//! its inputs): one arm drains the input edges round-robin, delivers per-input
+//! `Eos` flushes, ends once every input has ended, and relays each pad's
+//! reverse signal (PLI / BWE) onto its own in-edge so it reaches the encoder
+//! feeding that pad.
 //!
 //! D4 adds the mid-stream re-solve and the β allocation re-cascade over the
 //! DAG. Each arm gets a per-edge downstream feasibility snapshot at startup
@@ -46,10 +53,12 @@ use crate::caps::{Caps, CapsSet};
 use crate::clock::{elect_clock, ClockCandidate, ClockPriority, ClockSync, PipelineClock};
 use crate::element::{
     AsyncElement, BoxFuture, ConfigureOutcome, DynAsyncElement, ElementBound, OutputSink,
-    Reconfigure,
+    PushOutcome, Reconfigure,
 };
 use crate::error::G2gError;
-use crate::fanout::{MultiInputElement, MultiOutputElement, MultiOutputSink, MultiSenderSink};
+use crate::fanout::{
+    MultiInputElement, MultiOutputElement, MultiOutputSink, MultiSenderSink, ReverseChannel,
+};
 use crate::format_element::CapsConstraint;
 use crate::frame::{Frame, PipelinePacket};
 use crate::graph::{FanOutPolicy, Graph, NodeId, NodeKind, ValidatedGraph};
@@ -57,7 +66,8 @@ use crate::memory::{DomainSet, MemoryDomainKind};
 use crate::property::{PropError, PropValue, PropertySpec};
 use crate::query::{AllocationParams, LatencyReport};
 use crate::runtime::channel::{
-    bounded, link, link_with_transit, LinkReceiver, LinkSender, Receiver, Sender, SenderSink,
+    bounded, link, link_with_transit, LinkReceiver, LinkSender, Receiver, RecvFuture, Sender,
+    SenderSink,
 };
 use crate::runtime::coordinator::{realloc_local_dyn, report_nego_failure, ArmDirective};
 use crate::runtime::fanin::{DynMultiInputElement, DynSourceLoop};
@@ -746,12 +756,17 @@ async fn prepare_graph<'a>(
             // M694: fan-in / fan-out nodes carry a `process()` too, so name and
             // probe them alongside transforms / sinks (a plain broadcast tee has
             // no element and no `process()`, so it stays unnamed / unprobed).
-            let category = match vg.element_mut(node) {
-                Some(GraphNodeRef::Source(src)) => src.log_category(),
-                Some(GraphNodeRef::Element(elem)) => elem.log_category(),
-                Some(GraphNodeRef::Muxer(_)) => "mux",
-                Some(GraphNodeRef::Demux(_)) => "demux",
-                None => continue, // plain broadcast tee: no element to name
+            let category = match vg.kind(node) {
+                // A terminal fan-in carries a `Muxer` payload but is a session
+                // sink, not a merging mux; name it accordingly.
+                NodeKind::FaninSink(_) => "session",
+                _ => match vg.element_mut(node) {
+                    Some(GraphNodeRef::Source(src)) => src.log_category(),
+                    Some(GraphNodeRef::Element(elem)) => elem.log_category(),
+                    Some(GraphNodeRef::Muxer(_)) => "mux",
+                    Some(GraphNodeRef::Demux(_)) => "demux",
+                    None => continue, // plain broadcast tee: no element to name
+                },
             };
             let n = match counts.iter_mut().find(|(c, _)| *c == category) {
                 Some(e) => {
@@ -776,7 +791,7 @@ async fn prepare_graph<'a>(
             // node whose payload is a `Demux` element).
             let has_process = matches!(
                 vg.kind(node),
-                NodeKind::Transform | NodeKind::Sink | NodeKind::Muxer(_)
+                NodeKind::Transform | NodeKind::Sink | NodeKind::Muxer(_) | NodeKind::FaninSink(_)
             ) || matches!(vg.element(node), Some(GraphNodeRef::Demux(_)));
             if has_process {
                 probes[node.0 as usize] = Some(ElementProbe::new(name.clone()));
@@ -880,8 +895,9 @@ async fn prepare_graph<'a>(
                     elem.configure_pipeline(&caps)?.reject_refixate()?;
                 }
             }
-            NodeKind::Muxer(_) => {
-                // Configure each input pad with its in-edge's negotiated caps.
+            NodeKind::Muxer(_) | NodeKind::FaninSink(_) => {
+                // Configure each input pad with its in-edge's negotiated caps
+                // (a terminal fan-in has no output edge to configure).
                 let in_edges: Vec<usize> = vg.in_edges(node).to_vec();
                 for &eid in &in_edges {
                     let pad = vg.edge(eid).dst.index as usize;
@@ -960,13 +976,14 @@ async fn prepare_graph<'a>(
                     allocation = Some(resolved);
                 }
             }
-            NodeKind::Muxer(_) => {
-                // A muxer asks each input pad for the allocation it wants (most
-                // are content-agnostic and propose nothing), storing it on that
-                // input edge so the demand crosses the boundary and re-cascades
-                // up the branch like any other downstream proposal. The muxer's
-                // own output edge proposal is not absorbed here: a container
-                // muxer's byte output has no memory-domain tie to its inputs.
+            NodeKind::Muxer(_) | NodeKind::FaninSink(_) => {
+                // A muxer / terminal fan-in asks each input pad for the allocation
+                // it wants (most are content-agnostic and propose nothing), storing
+                // it on that input edge so the demand crosses the boundary and
+                // re-cascades up the branch like any other downstream proposal. The
+                // muxer's own output edge proposal is not absorbed here: a container
+                // muxer's byte output has no memory-domain tie to its inputs, and a
+                // terminal fan-in has no output at all.
                 if let Some(GraphNodeRef::Muxer(mux)) = vg.element(node) {
                     for &in_e in vg.in_edges(node) {
                         let pad = vg.edge(in_e).dst.index as usize;
@@ -1370,6 +1387,18 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                     _ => Box::pin(tee_arm(in_rx, out_txs, branch_drop)),
                 }
             }
+            NodeKind::FaninSink(_) => {
+                let Some(GraphNodeRef::Muxer(session)) = element else {
+                    return Err(G2gError::CapsMismatch);
+                };
+                let (pad_rxs, reverse) = fanin_sink_pads(&vg, node, in_rxs, &*session);
+                Box::pin(fanin_sink_arm(
+                    session,
+                    pad_rxs,
+                    reverse,
+                    probes[node.0 as usize].clone(),
+                ))
+            }
             NodeKind::Muxer(_) => unreachable!("muxer handled above"),
         };
         arms.push(arm);
@@ -1438,7 +1467,7 @@ fn fold_run_stats(
     for (kind, &count) in arm_kinds.iter().zip(counts.iter()) {
         match kind {
             NodeKind::Source => emitted += count,
-            NodeKind::Sink => consumed += count,
+            NodeKind::Sink | NodeKind::FaninSink(_) => consumed += count,
             _ => {}
         }
     }
@@ -1712,6 +1741,16 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                     }),
                 }
             }
+            NodeKind::FaninSink(_) => {
+                let Some(GraphNodeRef::Muxer(session)) = element else {
+                    return Err(G2gError::CapsMismatch);
+                };
+                let (pad_rxs, reverse) = fanin_sink_pads(&vg, node, in_rxs, &*session);
+                let probe = probes[node.0 as usize].clone();
+                alloc::boxed::Box::new(move || -> LocalArmFuture {
+                    Box::pin(fanin_sink_arm(session, pad_rxs, reverse, probe))
+                })
+            }
             NodeKind::Muxer(_) => unreachable!("muxer handled above"),
         };
         handles.push(spawner.spawn_arm(build));
@@ -1918,6 +1957,22 @@ fn build_node_constraints<'g, 'a>(
                     inputs,
                     output,
                     follows,
+                }
+            }
+            // A terminal fan-in reuses the muxer constraint shape with the
+            // output half inert (no output edge exists to couple).
+            NodeKind::FaninSink(_) => {
+                let GraphNodeRef::Muxer(elem) = vg.element(node).ok_or(G2gError::CapsMismatch)?
+                else {
+                    return Err(G2gError::CapsMismatch);
+                };
+                let inputs: Vec<CapsConstraint<'g>> = (0..elem.input_count())
+                    .map(|pad| elem.caps_constraint_as_input(pad))
+                    .collect();
+                NodeConstraint::Muxer {
+                    inputs,
+                    output: CapsConstraint::AcceptsAny,
+                    follows: None,
                 }
             }
         };
@@ -2692,13 +2747,32 @@ async fn muxer_forwarder(
     }
 }
 
+/// A pad receiver a fan-in arm can round-robin over: either a muxer's per-pad
+/// bounded [`Receiver`] or a terminal fan-in's input-edge [`LinkReceiver`]. Both
+/// expose the same `RecvFuture`, so [`muxer_recv_any`] blocks on either kind.
+trait PadReceiver {
+    fn recv_packet(&self) -> RecvFuture<'_, PipelinePacket>;
+}
+
+impl PadReceiver for Receiver<PipelinePacket> {
+    fn recv_packet(&self) -> RecvFuture<'_, PipelinePacket> {
+        self.recv()
+    }
+}
+
+impl PadReceiver for LinkReceiver {
+    fn recv_packet(&self) -> RecvFuture<'_, PipelinePacket> {
+        self.recv()
+    }
+}
+
 /// Block until some open input pad delivers a packet (or closes), scanning
 /// round-robin from `start` so the wake-up path stays fair too. Returns the
 /// pad's slot index (into `pad_rxs`) and its packet; `None` means that pad's
 /// channel closed without an `Eos` (an upstream error), treated as an end. All
 /// receivers register the same task waker, so a push on any one wakes us.
-async fn muxer_recv_any(
-    pad_rxs: &[(usize, Receiver<PipelinePacket>)],
+async fn muxer_recv_any<R: PadReceiver>(
+    pad_rxs: &[(usize, R)],
     open: &[bool],
     start: usize,
 ) -> (usize, Option<PipelinePacket>) {
@@ -2711,7 +2785,7 @@ async fn muxer_recv_any(
             }
             // `RecvFuture` holds only a `&Receiver`, so it is `Unpin`; polling it
             // parks our waker on that channel when pending.
-            let mut f = pad_rxs[slot].1.recv();
+            let mut f = pad_rxs[slot].1.recv_packet();
             if let core::task::Poll::Ready(v) = core::future::Future::poll(Pin::new(&mut f), cx) {
                 return core::task::Poll::Ready((slot, v));
             }
@@ -2719,6 +2793,128 @@ async fn muxer_recv_any(
         core::task::Poll::Pending
     })
     .await
+}
+
+/// Pair each of a terminal fan-in's input-edge receivers with its pad index, and
+/// clone each pad's reverse-signal channel from the session before it moves into
+/// the arm. `in_rxs` is in the node's `in_edges` order, so it aligns with the pad
+/// indices read from those same edges.
+fn fanin_sink_pads<'a>(
+    vg: &ValidatedGraph<GraphNodeRef<'a>>,
+    node: NodeId,
+    in_rxs: Vec<LinkReceiver>,
+    session: &dyn DynMultiInputElement,
+) -> (Vec<(usize, LinkReceiver)>, Vec<Option<ReverseChannel>>) {
+    let pads: Vec<usize> = vg
+        .in_edges(node)
+        .iter()
+        .map(|&eid| vg.edge(eid).dst.index as usize)
+        .collect();
+    let reverse: Vec<Option<ReverseChannel>> = pads
+        .iter()
+        .map(|&pad| session.reverse_channel(pad))
+        .collect();
+    let pad_rxs: Vec<(usize, LinkReceiver)> = in_rxs
+        .into_iter()
+        .zip(pads)
+        .map(|(rx, pad)| (pad, rx))
+        .collect();
+    (pad_rxs, reverse)
+}
+
+/// Relay each terminal fan-in input's pending reverse signal (WebRTC PLI / BWE)
+/// onto that pad's edge, so it reaches the upstream encoder as a [`PushOutcome`]
+/// on its next push, the same one-hop route a linked sink's reverse channel takes.
+/// `reverse` is aligned with `pad_rxs` by slot.
+fn relay_reverse(pad_rxs: &[(usize, LinkReceiver)], reverse: &[Option<ReverseChannel>]) {
+    for (slot, (_pad, in_rx)) in pad_rxs.iter().enumerate() {
+        let Some(rc) = &reverse[slot] else { continue };
+        match rc.take() {
+            Some(PushOutcome::Reconfigure(r)) => in_rx.request_reconfigure(r),
+            Some(PushOutcome::Bitrate(bps)) => in_rx.request_bitrate(bps),
+            _ => {}
+        }
+    }
+}
+
+/// Drive a terminal fan-in element (an N-input [`MultiInputElement`] with no
+/// downstream output, e.g. a WebRTC session) the `run_fanin_session` way but over
+/// the DAG's per-edge channels. Drains the input edges round-robin (fairness, so a
+/// fast layer cannot starve a slow one), calls `session.process(pad, ..)` serially,
+/// delivers a per-input `Eos` so the session can flush that track, and ends once
+/// every input has ended. Per-input reverse signals (`session.reverse_channel(pad)`)
+/// are relayed onto each pad's edge, so a per-layer PLI reaches the encoder feeding
+/// it (`Reconfigure::ForceKeyframe` through that arm), the analog of the
+/// `TaggingSink` reverse routing in the standalone fan-in session runner.
+async fn fanin_sink_arm<'a>(
+    mut session: Box<dyn DynMultiInputElement + 'a>,
+    pad_rxs: Vec<(usize, LinkReceiver)>,
+    reverse: Vec<Option<ReverseChannel>>,
+    probe: Probe,
+) -> Result<u64, G2gError> {
+    let mut null = NullSink;
+    let input_count = pad_rxs.len();
+    let mut open = alloc::vec![true; input_count];
+    let mut ended = 0usize;
+    let mut consumed = 0u64;
+    let mut next = 0usize;
+    loop {
+        relay_reverse(&pad_rxs, &reverse);
+        // Round-robin try-drain across the input edges, then block on any.
+        let mut picked: Option<(usize, PipelinePacket)> = None;
+        for k in 0..input_count {
+            let slot = (next + k) % input_count;
+            if !open[slot] {
+                continue;
+            }
+            if let Some(pkt) = pad_rxs[slot].1.try_recv() {
+                picked = Some((slot, pkt));
+                next = (slot + 1) % input_count;
+                break;
+            }
+        }
+        let (slot, packet) = match picked {
+            Some(p) => p,
+            None => {
+                if !open.iter().any(|&o| o) {
+                    return Ok(consumed);
+                }
+                let (slot, maybe) = muxer_recv_any(&pad_rxs, &open, next).await;
+                next = (slot + 1) % input_count;
+                // A closed channel with no `Eos` is an upstream end.
+                (slot, maybe.unwrap_or(PipelinePacket::Eos))
+            }
+        };
+        let pad = pad_rxs[slot].0;
+        match packet {
+            PipelinePacket::Eos => {
+                session.process(pad, PipelinePacket::Eos, &mut null).await?;
+                open[slot] = false;
+                ended += 1;
+                if ended == input_count {
+                    return Ok(consumed);
+                }
+            }
+            packet => {
+                let is_frame = matches!(packet, PipelinePacket::DataFrame(_));
+                let timed = probe.as_deref().filter(|_| is_frame);
+                if let Some(p) = timed {
+                    p.record_fill(pad_rxs[slot].1.fill_percent());
+                }
+                if is_frame {
+                    consumed += 1;
+                }
+                let t0 = ElementProbe::mark();
+                session.process(pad, packet, &mut null).await?;
+                if let Some(p) = timed {
+                    p.record_proc_since(t0);
+                }
+                // The session may have raised a reverse signal for this track
+                // during `process`; relay it up its pad now.
+                relay_reverse(&pad_rxs, &reverse);
+            }
+        }
+    }
 }
 
 /// The muxer arm: drain the per-input channels round-robin, combine each input's

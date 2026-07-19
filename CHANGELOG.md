@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M713: terminal fan-in graph node (`Graph::add_fanin_sink`, session sinks in `run_graph`/`parse_launch` with per-input Eos flush and per-pad reverse-signal routing), enabling the live encoder fan graph (`tee -> videoscale -> ffmpegenc` per simulcast layer into `LiveKitSink`); validated live incl. a Chrome subscriber.
 - M712: third simulcast layer (rids `f`/`h`/`q`) and per-rid `a=rid` max-width/max-height restrictions from each pad's fixated caps; all three layers validated live incl. Chrome LOW/MEDIUM/HIGH switching.
 - M711: simulcast BWE layer allocator (aggregate estimate budgeted as whole-layer on/off, top layer sheds first with hysteresis, last layer never drops) plus a `max-send-bitrate` cap property; shed + fallback validated live in Chrome.
 - M710: two-layer send simulcast on `LiveKitSink` (`with_simulcast`, shared `webrtc_simulcast` machinery: one m-line with rid-tagged layers, per-`(mid,rid)` keyframe routing); validated live incl. a Chrome subscriber switching layers.

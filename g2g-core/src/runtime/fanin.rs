@@ -323,6 +323,18 @@ pub trait DynMultiInputElement: ElementBound {
     /// Dyn-safe mirror of [`MultiInputElement::metadata`], for the `gst-inspect`
     /// "Factory Details" of an erased fan-in muxer.
     fn metadata(&self) -> ElementMetadata;
+
+    /// Dyn-safe mirror of [`MultiInputElement::reverse_channel`], so a terminal
+    /// fan-in node's arm can route a per-input reverse signal (WebRTC PLI / BWE)
+    /// back to the upstream feeding that pad. Default `None`.
+    fn reverse_channel(&self, _input: usize) -> Option<crate::fanout::ReverseChannel> {
+        None
+    }
+
+    /// Dyn-safe mirror of [`MultiInputElement::is_terminal`].
+    fn is_terminal(&self) -> bool {
+        false
+    }
 }
 
 impl<T: MultiInputElement> DynMultiInputElement for T {
@@ -389,6 +401,14 @@ impl<T: MultiInputElement> DynMultiInputElement for T {
 
     fn metadata(&self) -> ElementMetadata {
         MultiInputElement::metadata(self)
+    }
+
+    fn reverse_channel(&self, input: usize) -> Option<crate::fanout::ReverseChannel> {
+        MultiInputElement::reverse_channel(self, input)
+    }
+
+    fn is_terminal(&self) -> bool {
+        MultiInputElement::is_terminal(self)
     }
 }
 
@@ -460,6 +480,14 @@ impl<'b> DynMultiInputElement for &'b mut (dyn DynMultiInputElement + 'b) {
 
     fn metadata(&self) -> ElementMetadata {
         (**self).metadata()
+    }
+
+    fn reverse_channel(&self, input: usize) -> Option<crate::fanout::ReverseChannel> {
+        (**self).reverse_channel(input)
+    }
+
+    fn is_terminal(&self) -> bool {
+        (**self).is_terminal()
     }
 }
 

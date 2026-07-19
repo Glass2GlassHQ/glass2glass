@@ -727,6 +727,10 @@ impl MultiInputElement for LiveKitSink {
         self.reverse.get(input).cloned()
     }
 
+    fn is_terminal(&self) -> bool {
+        true
+    }
+
     fn metadata(&self) -> ElementMetadata {
         ElementMetadata::new(
             "LiveKit sink",

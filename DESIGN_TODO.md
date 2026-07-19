@@ -630,11 +630,10 @@ Phased plan:
     are reusable as-is); `wss://` (TLS) signalling for LiveKit Cloud; drop the
     `[patch.crates-io]` str0m fork (unpadded media sends) once an upstream fix
     lands (str0m#1014 / livekit#4689); then Janus / Kinesis as wanted.
-  - **T5: advanced.** Simulcast follow-ups: the real encoder fan graph
-    (tee -> videoscale -> enc per layer; the harness feeds pre-encoded layers
-    today), per-layer runtime retarget where the encoder supports it, sources
-    idling a shed layer (the allocator skips its units at the writer; the
-    encoder keeps encoding), simulcast on the WHIP grouped-pad session. FEC; full
+  - **T5: advanced.** Simulcast follow-ups: per-layer runtime retarget where
+    the encoder supports it, sources idling a shed layer (the allocator skips
+    its units at the writer; the encoder keeps encoding), simulcast on the WHIP
+    grouped-pad session. FEC; full
     renegotiation; data-channel loose ends (str0m surfaces no remote-close
     event, so EOS rides an explicit marker message; a WHIP/SFU-signalled data
     channel vs the P2P `SdpChannel` seam).

@@ -384,6 +384,15 @@ pub trait MultiInputElement: ElementBound {
         None
     }
 
+    /// Whether this element is a terminal fan-in (a session sink that consumes
+    /// its inputs and produces no merged output, e.g. a WebRTC publisher). A
+    /// terminal element may end a graph with nothing downstream
+    /// (`Graph::add_fanin_sink`); a merging muxer without a downstream stays a
+    /// parse error, since its output would be silently dropped. Default `false`.
+    fn is_terminal(&self) -> bool {
+        false
+    }
+
     /// If `Some(pad)`, the merged output's caps are the negotiated caps of input
     /// pad `pad` (an identity-passthrough mux: an overlay / watermark / alpha
     /// mixer that decorates a primary stream with a sidecar one). The solver then

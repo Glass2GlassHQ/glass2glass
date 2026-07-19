@@ -381,6 +381,10 @@ impl MultiInputElement for WebRtcSessionSink {
         self.reverse.get(input).cloned()
     }
 
+    fn is_terminal(&self) -> bool {
+        true
+    }
+
     fn process<'a>(
         &'a mut self,
         input: usize,
