@@ -109,7 +109,7 @@ observe = ["tooling-json", "tokio/net", "tokio/io-util", "tokio/rt", "tokio/time
 # system dep. WHIP signaling (HTTP offer/answer) reuses reqwest. Implies std +
 # tokio. str0m 0.20 requires rustc 1.85, which is the workspace MSRV; the feature
 # is off by default, so the no_std baseline is unaffected.
-webrtc = ["std", "tokio/net", "tokio/time", "tokio/macros", "dep:str0m", "dep:reqwest", "dep:sha1", "dep:hmac", "dep:md-5"]
+webrtc = ["std", "tokio/net", "tokio/time", "tokio/macros", "tokio/io-util", "dep:str0m", "dep:reqwest", "dep:sha1", "dep:hmac", "dep:md-5", "dep:tokio-native-tls"]
 # Native LiveKit publisher (LiveKitSink, T4): joins a LiveKit room and publishes
 # H.264 (+ optional Opus) over the str0m PeerConnection, with a hand-rolled
 # WebSocket + protobuf signaller (livekit_rtc.proto subset) and an HS256 JWT
@@ -664,6 +664,9 @@ futures-util = { version = "0.3", optional = true, default-features = false, fea
 # tungstenite version. Default features (connect + handshake, no TLS) suffice: the
 # pair speaks plain ws:// (wrap in a TLS terminator for wss://).
 tokio-tungstenite = { version = "0.24", optional = true }
+# TLS for TURN-over-TLS (`turns:`) and the LiveKit `wss://` signalling: the same
+# native-tls stack reqwest's default-tls already links.
+tokio-native-tls = { version = "0.3", optional = true }
 url = { version = "2", optional = true }
 bytes = { version = "1", optional = true }
 # TrueType / OpenType font parser + rasterizer (truetype-overlay feature, M409).

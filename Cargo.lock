@@ -3617,6 +3617,7 @@ dependencies = [
  "spin 0.9.8",
  "str0m",
  "tokio",
+ "tokio-native-tls",
  "tokio-tungstenite",
  "url",
  "v4l",

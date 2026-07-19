@@ -2022,8 +2022,14 @@ transmit to a new peer sends a ChannelBind (M716), which installs the peer
 permission and, once its success lands, upgrades that peer from 36-byte Send /
 Data indications to 4-byte-header ChannelData frames both ways; a `438 Stale
 Nonce` on any authenticated request adopts the error response's nonce and
-un-caches the affected state so the lazy paths retry with it. Validated against
-a real coturn (allocate, bind, ChannelData round-trip both directions).
+un-caches the affected state so the lazy paths retry with it. The
+client-to-server leg also runs over TCP and TLS (M717, `turn:...?transport=tcp`
+/ `turns:` RFC 7065 forms): a local bridge task tunnels the client's datagrams
+over one stream connection, re-delimiting messages (STUN self-describing
+lengths; ChannelData padded to 4 bytes on the stream), so `TurnClient` and
+every element run loop stay transport-agnostic and the allocation still relays
+UDP toward peers. Validated against a real coturn on all three transports
+(allocate, bind, ChannelData round-trip both directions).
 
 **RTCP feedback** rides the §4.13 reverse channel. A remote PLI
 (`Event::KeyframeRequest`) becomes a `Reconfigure::ForceKeyframe` walked upstream

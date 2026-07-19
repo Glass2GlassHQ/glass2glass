@@ -38,11 +38,12 @@
 //! feature.
 
 use alloc::collections::BTreeMap;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use core::time::Duration;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use hmac::{Hmac, Mac};
 use md5::{Digest, Md5};
@@ -405,12 +406,20 @@ impl TurnClient {
 /// lapse mid-session.
 pub(crate) const REFRESH_INTERVAL: Duration = Duration::from_secs(240);
 
-/// Resolve `server` (`host:port`), do the Allocate handshake on `socket`, and
-/// add the resulting relay address to `rtc` as a relayed ICE candidate. Returns
-/// the live client to drive the relay data plane, or `None` if the server is
+/// Resolve `server`, do the Allocate handshake on `socket`, and add the
+/// resulting relay address to `rtc` as a relayed ICE candidate. Returns the
+/// live client to drive the relay data plane, or `None` if the server is
 /// unreachable / refuses the allocation, degrading gracefully to STUN/host (the
 /// run continues, just without the relay candidate). `socket` must not yet be
 /// owned by str0m's loop (the handshake reads replies directly).
+///
+/// `server` is a bare `host:port` (UDP, the default) or an RFC 7065-style URI:
+/// `turn:host[:port][?transport=udp|tcp]` or `turns:host[:port]` (TLS, always
+/// over TCP). For the stream transports a local bridge task (below) tunnels the
+/// client's datagrams over one TCP / TLS connection to the server, so the
+/// `TurnClient` and every element run loop stay transport-agnostic; the
+/// allocation itself still requests UDP relaying toward peers (RFC 5766 §2.1,
+/// not RFC 6062 TCP allocations).
 pub(crate) async fn setup(
     rtc: &mut Rtc,
     socket: &UdpSocket,
@@ -418,7 +427,8 @@ pub(crate) async fn setup(
     username: &str,
     password: &str,
 ) -> Option<TurnClient> {
-    let server_addr = tokio::net::lookup_host(server).await.ok()?.next()?;
+    let local_ip = socket.local_addr().ok()?.ip();
+    let server_addr = resolve_transport(server, local_ip).await?;
     let client = TurnClient::allocate(socket, server_addr, username, password)
         .await
         .ok()?;
@@ -427,6 +437,170 @@ pub(crate) async fn setup(
         rtc.add_local_candidate(c);
     }
     Some(client)
+}
+
+/// The TURN client-to-server leg's transport (RFC 7065 URI schemes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TurnTransport {
+    Udp,
+    Tcp,
+    Tls,
+}
+
+/// Resolve a TURN server string to the transport address the client speaks UDP
+/// to: the server itself, or a freshly spawned stream bridge for `turn:...
+/// ?transport=tcp` / `turns:` servers.
+async fn resolve_transport(server: &str, local_ip: IpAddr) -> Option<SocketAddr> {
+    let (hostport, transport, sni) = parse_turn_server(server);
+    match transport {
+        TurnTransport::Udp => tokio::net::lookup_host(hostport.as_str())
+            .await
+            .ok()?
+            .next(),
+        TurnTransport::Tcp | TurnTransport::Tls => {
+            spawn_stream_bridge(
+                &hostport,
+                matches!(transport, TurnTransport::Tls),
+                &sni,
+                local_ip,
+            )
+            .await
+        }
+    }
+}
+
+/// Parse a TURN server string into `(host:port, transport, sni-host)`. A bare
+/// `host:port` keeps the historical UDP behavior; `turn:` / `turns:` URIs pick
+/// the transport (`turns` implies TLS-over-TCP), with the RFC 7065 default
+/// ports (3478 / 5349) when omitted.
+fn parse_turn_server(server: &str) -> (String, TurnTransport, String) {
+    let (rest, mut transport, default_port) = if let Some(r) = server.strip_prefix("turns:") {
+        (r, TurnTransport::Tls, 5349u16)
+    } else if let Some(r) = server.strip_prefix("turn:") {
+        (r, TurnTransport::Udp, 3478u16)
+    } else {
+        (server, TurnTransport::Udp, 3478u16)
+    };
+    let (hostport, query) = match rest.split_once('?') {
+        Some((h, q)) => (h, Some(q)),
+        None => (rest, None),
+    };
+    if transport != TurnTransport::Tls {
+        if let Some(q) = query {
+            if q.split('&').any(|kv| kv == "transport=tcp") {
+                transport = TurnTransport::Tcp;
+            }
+        }
+    }
+    let (host, port) = match hostport.rsplit_once(':') {
+        // Guard against a bare IPv6 literal (no port) misparsing at its last colon.
+        Some((h, p)) if p.parse::<u16>().is_ok() => (h, p.parse::<u16>().unwrap_or(default_port)),
+        _ => (hostport, default_port),
+    };
+    (format!("{host}:{port}"), transport, host.into())
+}
+
+/// Spawn the datagram <-> stream bridge: a task owning one TCP (or TLS)
+/// connection to the TURN server and a local UDP socket the `TurnClient`
+/// treats as its server. Element -> server datagrams are written to the stream
+/// (a ChannelData frame padded to 4 bytes, RFC 5766 §11.5; STUN messages
+/// as-is); the stream is re-delimited into messages (self-describing lengths)
+/// and each is forwarded back as one datagram. Returns the bridge's UDP
+/// address. The task ends when the stream closes.
+async fn spawn_stream_bridge(
+    hostport: &str,
+    tls: bool,
+    sni: &str,
+    local_ip: IpAddr,
+) -> Option<SocketAddr> {
+    let tcp = tokio::net::TcpStream::connect(hostport).await.ok()?;
+    let _ = tcp.set_nodelay(true);
+    let udp = UdpSocket::bind((local_ip, 0)).await.ok()?;
+    let addr = udp.local_addr().ok()?;
+    if tls {
+        let connector = tokio_native_tls::TlsConnector::from(
+            tokio_native_tls::native_tls::TlsConnector::new().ok()?,
+        );
+        let stream = connector.connect(sni, tcp).await.ok()?;
+        tokio::spawn(bridge_loop(udp, stream));
+    } else {
+        tokio::spawn(bridge_loop(udp, tcp));
+    }
+    Some(addr)
+}
+
+async fn bridge_loop<S>(udp: UdpSocket, mut stream: S)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    // The element's socket address, learned from its first datagram.
+    let mut element: Option<SocketAddr> = None;
+    let mut dgram = alloc::vec![0u8; 65_535];
+    let mut chunk = [0u8; 8192];
+    let mut inbound: Vec<u8> = Vec::with_capacity(4096);
+    loop {
+        tokio::select! {
+            r = udp.recv_from(&mut dgram) => {
+                let Ok((n, from)) = r else { break };
+                element = Some(from);
+                if stream.write_all(&dgram[..n]).await.is_err() {
+                    break;
+                }
+                // Over a stream a ChannelData message is padded to 4 bytes.
+                if n >= 1 && dgram[0] & 0xC0 == 0x40 {
+                    let pad = (4 - (n % 4)) % 4;
+                    if pad > 0 && stream.write_all(&[0u8; 3][..pad]).await.is_err() {
+                        break;
+                    }
+                }
+            }
+            r = stream.read(&mut chunk) => {
+                let n = match r {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => n,
+                };
+                inbound.extend_from_slice(&chunk[..n]);
+                loop {
+                    match stream_message_bounds(&inbound) {
+                        Some((consumed, msg_len)) => {
+                            if let Some(el) = element {
+                                let _ = udp.send_to(&inbound[..msg_len], el).await;
+                            }
+                            inbound.drain(..consumed);
+                        }
+                        // Incomplete: wait for more bytes. A first byte that is
+                        // neither STUN nor ChannelData means the stream lost
+                        // sync: unrecoverable, drop the connection.
+                        None if inbound.first().is_some_and(|b| b & 0xC0 > 0x40) => return,
+                        None => break,
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Delimit the next complete TURN message at the head of a stream buffer,
+/// returning `(bytes_to_consume_incl_padding, message_len)`, or `None` when the
+/// buffer holds only a partial message.
+fn stream_message_bounds(buf: &[u8]) -> Option<(usize, usize)> {
+    if buf.len() < 4 {
+        return None;
+    }
+    let len = u16::from_be_bytes([buf[2], buf[3]]) as usize;
+    if buf[0] & 0xC0 == 0x40 {
+        // ChannelData: 4-byte header + data, padded to 4 on the stream.
+        let msg = 4 + len;
+        let total = msg + ((4 - (msg % 4)) % 4);
+        (buf.len() >= total).then_some((total, msg))
+    } else if buf[0] & 0xC0 == 0 {
+        // STUN: 20-byte header + attributes (already 4-aligned).
+        let total = 20 + len;
+        (buf.len() >= total).then_some((total, total))
+    } else {
+        None
+    }
 }
 
 /// `MD5(username ":" realm ":" password)`, the long-term credential key used as
@@ -857,6 +1031,58 @@ mod tests {
         assert!(c.pending.is_empty());
     }
 
+    #[test]
+    fn parses_turn_server_forms() {
+        let udp = parse_turn_server("relay.example:3478");
+        assert_eq!(
+            udp,
+            (
+                "relay.example:3478".into(),
+                TurnTransport::Udp,
+                "relay.example".into()
+            )
+        );
+        let uri_udp = parse_turn_server("turn:relay.example");
+        assert_eq!(uri_udp.0, "relay.example:3478");
+        assert_eq!(uri_udp.1, TurnTransport::Udp);
+        let tcp = parse_turn_server("turn:relay.example:3478?transport=tcp");
+        assert_eq!(tcp.1, TurnTransport::Tcp);
+        let tls = parse_turn_server("turns:relay.example");
+        assert_eq!(
+            tls,
+            (
+                "relay.example:5349".into(),
+                TurnTransport::Tls,
+                "relay.example".into()
+            )
+        );
+    }
+
+    #[test]
+    fn stream_delimiting_handles_partials_and_padding() {
+        // Partial STUN header: incomplete.
+        assert_eq!(stream_message_bounds(&[0x01, 0x13, 0x00]), None);
+        // STUN message with 4 attribute bytes: 24 total, no extra padding.
+        let mut stun = MessageBuilder::new(ALLOCATE_SUCCESS, [0u8; 12]);
+        stun.push_lifetime(60);
+        let stun = stun.finish();
+        let mut buf = stun.clone();
+        buf.extend_from_slice(&[0x40, 0x00]); // trailing partial frame
+        assert_eq!(stream_message_bounds(&buf), Some((stun.len(), stun.len())));
+        // ChannelData of length 5 is padded to 12 on the stream, payload len 9.
+        let frame = [
+            0x40u8, 0x00, 0x00, 0x05, b'h', b'e', b'l', b'l', b'o', 0, 0, 0,
+        ];
+        assert_eq!(stream_message_bounds(&frame), Some((12, 9)));
+        assert_eq!(
+            stream_message_bounds(&frame[..10]),
+            None,
+            "padding not yet arrived"
+        );
+        // A non-STUN, non-ChannelData first byte is a desync, not a message.
+        assert_eq!(stream_message_bounds(&[0x80, 0, 0, 0, 0]), None);
+    }
+
     /// Interop against a real TURN server (coturn):
     /// `docker run -d --network host coturn/coturn -n --no-tls --no-dtls
     ///  --listening-port=3478 --fingerprint --lt-cred-mech --user=g2g:g2gpass
@@ -875,13 +1101,13 @@ mod tests {
             std::eprintln!("skipping: set G2G_TURN_SERVER, G2G_TURN_USER, G2G_TURN_PASS");
             return;
         };
-        let server: SocketAddr = tokio::net::lookup_host(&server)
-            .await
-            .expect("resolve server")
-            .next()
-            .expect("server addr");
-
         let host_ip = crate::webrtc_util::select_host_ip();
+        // The same resolution the elements use: a `turn:...?transport=tcp` or
+        // `turns:` server spawns the stream bridge here.
+        let server: SocketAddr = resolve_transport(&server, host_ip)
+            .await
+            .expect("resolve server / spawn bridge");
+
         let client_sock = UdpSocket::bind((host_ip, 0)).await.expect("bind client");
         let peer_sock = UdpSocket::bind((host_ip, 0)).await.expect("bind peer");
         let peer_addr = peer_sock.local_addr().expect("peer addr");
