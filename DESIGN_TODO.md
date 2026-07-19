@@ -601,17 +601,9 @@ Phased plan:
     + `WebRtcDuplexSession` (one `Rtc`, sendrecv m-lines; WHIP/WHEP can't carry
     sendrecv, so peers exchange SDP directly over an `SdpChannel`). Validated by
     in-process P2P loopbacks (video + full A/V, localhost, no server). Remaining:
-    mid-stream re-solve through the multi-track runners; launch-registry wiring;
-    mid-session transceiver add/remove
+    launch-registry wiring; mid-session transceiver add/remove
     (renegotiation); a pluggable real-SFU (LiveKit) signaller for the duplex
-    element. (Per-input reverse-signal routing (PLI / BWE) for the *fan-in*
-    session landed, M523: `g2g-core` `ReverseChannel` + `MultiInputElement::
-    reverse_channel`, and `WebRtcSessionSink` routes a per-mid `KeyframeRequest`
-    to the matching source. The *duplex* runner routes per-input reverse signals
-    too, M530: `MultiDuplexSession::reverse_channel` + `run_duplex_session` polling,
-    and `WebRtcDuplexSession` maps a remote per-mid `KeyframeRequest` / BWE estimate
-    back to the send source feeding that track. Per-branch mid-stream re-solve on
-    the recv side is the remaining follow-up.)
+    element.
   - **T2 (mostly wiring): RTCP feedback.** PLI / keyframe-request DONE (M243):
     `Reconfigure::ForceKeyframe` + `take_reconfigure`; `WebRtcSink` maps a remote
     `Event::KeyframeRequest` to it, `Av1Enc` forces an IDR, `WebRtcWhepSrc`

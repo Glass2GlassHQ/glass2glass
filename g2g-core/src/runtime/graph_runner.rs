@@ -2904,6 +2904,23 @@ async fn fanin_sink_arm<'a>(
                     return Ok(consumed);
                 }
             }
+            PipelinePacket::CapsChanged(new_caps) => {
+                // Mid-stream re-solve (M724): re-configure the changed pad
+                // before the session sees the new caps. A counter-fixation
+                // travels back up this pad's edge like a sink's would.
+                match session.configure_pipeline(pad, &new_caps)? {
+                    ConfigureOutcome::Accepted => {
+                        session
+                            .process(pad, PipelinePacket::CapsChanged(new_caps), &mut null)
+                            .await?;
+                    }
+                    ConfigureOutcome::ReFixate(counter) => {
+                        pad_rxs[slot]
+                            .1
+                            .request_reconfigure(Reconfigure::Propose(counter));
+                    }
+                }
+            }
             packet => {
                 let is_frame = matches!(packet, PipelinePacket::DataFrame(_));
                 let timed = probe.as_deref().filter(|_| is_frame);

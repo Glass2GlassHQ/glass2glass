@@ -763,6 +763,16 @@ where
                         return Ok::<u64, G2gError>(consumed);
                     }
                 }
+                Some((idx, PipelinePacket::CapsChanged(new_caps))) => {
+                    // Mid-stream re-solve (M724): re-configure the changed pad
+                    // before the session sees the new caps. A counter-fixation
+                    // cannot travel back to the tagged source, so it fails loud.
+                    MultiInputElement::configure_pipeline(session, idx, &new_caps)?
+                        .reject_refixate()?;
+                    session
+                        .process(idx, PipelinePacket::CapsChanged(new_caps), &mut null)
+                        .await?;
+                }
                 Some((idx, packet)) => {
                     if matches!(packet, PipelinePacket::DataFrame(_)) {
                         consumed += 1;
