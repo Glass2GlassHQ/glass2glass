@@ -301,6 +301,8 @@ impl MultiOutputSource for LiveKitSrc {
             let mut next_ping = Instant::now() + ping_interval;
 
             let mut buf = alloc::vec![0u8; 2000];
+            // No TURN on the LiveKit path yet; the empty set feeds direct.
+            let mut turn = crate::turn::TurnSet::empty();
             let mut seq = 0u64;
             macro_rules! finish {
                 () => {{
@@ -418,7 +420,7 @@ impl MultiOutputSource for LiveKitSrc {
                     r = socket.recv_from(&mut buf) => {
                         let Ok((n, source)) = r else { finish!() };
                         let _ = crate::webrtc_util::feed_datagram(
-                            &mut rtc, &mut None, local, &buf[..n], source,
+                            &mut rtc, &mut turn, local, &buf[..n], source,
                         );
                     }
                     _ = tokio::time::sleep_until(tokio::time::Instant::from_std(next_ping)) => {

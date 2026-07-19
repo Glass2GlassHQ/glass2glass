@@ -859,11 +859,14 @@ async fn run_session(mut a: SessionArgs) {
     let mut audio_pt: Option<Pt> = None;
     let mut ping_at = Instant::now() + a.ping_interval;
 
+    // No TURN on the LiveKit path yet (host candidates only); the empty set
+    // routes every transmit direct.
+    let mut turn = crate::turn::TurnSet::empty();
     loop {
         let deadline = loop {
             match a.rtc.poll_output() {
                 Ok(Output::Timeout(t)) => break t,
-                Ok(Output::Transmit(t)) => send_transmit(&a.socket, &mut None, &t).await,
+                Ok(Output::Transmit(t)) => send_transmit(&a.socket, &mut turn, &t).await,
                 Ok(Output::Event(Event::IceConnectionStateChange(
                     IceConnectionState::Disconnected,
                 ))) => {
@@ -897,7 +900,7 @@ async fn run_session(mut a: SessionArgs) {
         tokio::select! {
             r = a.socket.recv_from(&mut buf) => {
                 let Ok((n, source)) = r else { return };
-                if !feed_datagram(&mut a.rtc, &mut None, a.local, &buf[..n], source) {
+                if !feed_datagram(&mut a.rtc, &mut turn, a.local, &buf[..n], source) {
                     return;
                 }
             }

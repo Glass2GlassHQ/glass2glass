@@ -199,7 +199,9 @@ jobs:
       - name: test g2g-plugins (webrtc)
         run: |
           cargo check -p g2g-plugins --locked --all-targets --features webrtc
+          cargo check -p g2g-plugins --locked --all-targets --features webrtc-livekit
           cargo test -p g2g-plugins --locked --features webrtc --lib -- webrtc turn::
+          cargo test -p g2g-plugins --locked --features webrtc-livekit --lib -- livekit
           cargo test -p g2g-plugins --locked --features webrtc --test m249_duplex_session
           cargo test -p g2g-plugins --locked --features webrtc --test webrtc_loss_resilience
           cargo test -p g2g-plugins --locked --features webrtc --test webrtc_data_channel
