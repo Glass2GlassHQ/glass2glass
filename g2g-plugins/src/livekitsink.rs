@@ -530,11 +530,17 @@ impl LiveKitSink {
                 routes.push(mid, None, self.reverse[ai].clone());
             }
         }
-        // BWE is aggregate per connection; route the estimate to the top video
-        // layer's source (per-layer allocation is a follow-up milestone).
-        let video_reverse = video_inputs
-            .first()
-            .and_then(|&i| self.reverse.get(i).cloned());
+        // BWE per-layer routing (M722): each video layer's reverse channel,
+        // paired with its rid, so the allocator's per-layer targets reach the
+        // matching encoder (a single stream is one rid-less entry).
+        let layer_reverse: Vec<(Option<Rid>, ReverseChannel)> = video_inputs
+            .iter()
+            .enumerate()
+            .map(|(li, &i)| {
+                let rid = simulcast.then(|| Rid::from(rids[li]));
+                (rid, self.reverse[i].clone())
+            })
+            .collect();
 
         let (tx, rx) = mpsc::channel::<MediaUnit>(self.queue_depth);
         tokio::spawn(run_session(SessionArgs {
@@ -542,7 +548,7 @@ impl LiveKitSink {
             socket,
             local,
             keyframe_routes: routes,
-            video_reverse,
+            layer_reverse,
             allocator,
             ws_write,
             ws_read,
@@ -838,7 +844,8 @@ struct SessionArgs {
     /// source and never a sibling.
     keyframe_routes: KeyframeRoutes,
     /// Aggregate-BWE target (the top video layer's source).
-    video_reverse: Option<ReverseChannel>,
+    /// Per video layer `(rid, reverse channel)`, rid-less for a single stream.
+    layer_reverse: Vec<(Option<Rid>, ReverseChannel)>,
     /// Whole-layer on/off budgeting of the aggregate BWE estimate (simulcast
     /// only). A dropped layer's units are skipped at the writer.
     allocator: Option<LayerAllocator>,
@@ -858,6 +865,12 @@ async fn run_session(mut a: SessionArgs) {
     let mut video_pt: Option<Pt> = None;
     let mut audio_pt: Option<Pt> = None;
     let mut ping_at = Instant::now() + a.ping_interval;
+    // The allocator is time-hysteresis based but BWE only emits deltas: once
+    // the retargeted encoders settle exactly on the estimate it stops changing,
+    // so a periodic tick re-feeds the last estimate to let the drop/restore
+    // windows elapse (M722).
+    let mut last_estimate: Option<u64> = None;
+    let mut alloc_tick = Instant::now() + Duration::from_secs(1);
 
     // No TURN on the LiveKit path yet (host candidates only); the empty set
     // routes every transmit direct.
@@ -882,13 +895,30 @@ async fn run_session(mut a: SessionArgs) {
                         BweKind::Twcc(b) | BweKind::Remb(_, b) => Some(b.as_u64()),
                         _ => None,
                     };
-                    if let (Some(bps), Some(rc)) = (bps, a.video_reverse.as_ref()) {
-                        rc.set_bitrate(bps.min(u32::MAX as u64) as u32);
-                    }
-                    if let (Some(bps), Some(alloc)) = (bps, a.allocator.as_mut()) {
-                        if alloc.update(Instant::now(), bps) {
-                            std::eprintln!("livekit: layer set changed at {bps} bps estimate");
+                    match (bps, a.allocator.as_mut()) {
+                        // Simulcast: budget the layer set, then hand each layer
+                        // its share (0 = shed-layer idle) so every encoder in
+                        // the fan graph retargets (M722).
+                        (Some(bps), Some(alloc)) => {
+                            last_estimate = Some(bps);
+                            if alloc.update(Instant::now(), bps) {
+                                std::eprintln!("livekit: layer set changed at {bps} bps estimate");
+                            }
+                            for (rid, target) in alloc.targets(bps) {
+                                if let Some((_, rc)) =
+                                    a.layer_reverse.iter().find(|(r, _)| *r == Some(rid))
+                                {
+                                    rc.set_bitrate(target);
+                                }
+                            }
                         }
+                        // Single stream: the whole estimate goes to its encoder.
+                        (Some(bps), None) => {
+                            if let Some((_, rc)) = a.layer_reverse.first() {
+                                rc.set_bitrate(bps.min(u32::MAX as u64) as u32);
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 Ok(Output::Event(_)) => {}
@@ -967,6 +997,21 @@ async fn run_session(mut a: SessionArgs) {
                             None => writer,
                         };
                         let _ = writer.write(p, Instant::now(), rtp_time, unit.data);
+                    }
+                }
+            }
+            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(alloc_tick)), if a.allocator.is_some() && last_estimate.is_some() => {
+                alloc_tick = Instant::now() + Duration::from_secs(1);
+                if let (Some(alloc), Some(bps)) = (a.allocator.as_mut(), last_estimate) {
+                    if alloc.update(Instant::now(), bps) {
+                        std::eprintln!("livekit: layer set changed at {bps} bps estimate");
+                        for (rid, target) in alloc.targets(bps) {
+                            if let Some((_, rc)) =
+                                a.layer_reverse.iter().find(|(r, _)| *r == Some(rid))
+                            {
+                                rc.set_bitrate(target);
+                            }
+                        }
                     }
                 }
             }

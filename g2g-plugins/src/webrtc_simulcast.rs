@@ -190,6 +190,33 @@ impl LayerAllocator {
         self.layers[..self.active].iter().any(|(r, _)| *r == rid)
     }
 
+    /// Per-layer bitrate targets for one aggregate estimate (M722): each
+    /// active layer gets its nominal share scaled by the estimate over the
+    /// active set's total (clamped to 0.25x..2x nominal so a transient
+    /// estimate cannot starve or balloon an encoder), and a shed layer gets
+    /// `0`, the idle hint (see `PushOutcome::Bitrate`).
+    pub fn targets(&self, estimate_bps: u64) -> Vec<(Rid, u32)> {
+        let est = if self.cap > 0 {
+            estimate_bps.min(self.cap)
+        } else {
+            estimate_bps
+        };
+        let needed = self.budget(self.active).max(1);
+        let scale = (est as f64 / needed as f64).clamp(0.25, 2.0);
+        self.layers
+            .iter()
+            .enumerate()
+            .map(|(i, (rid, nominal))| {
+                let bps = if i < self.active {
+                    (*nominal as f64 * scale) as u32
+                } else {
+                    0
+                };
+                (*rid, bps)
+            })
+            .collect()
+    }
+
     /// The initial BWE target: every layer's nominal budget, capped.
     pub fn initial_bps(&self) -> u64 {
         let all = self.budget(self.layers.len());
@@ -210,6 +237,52 @@ mod tests {
     use str0m::crypto::from_feature_flags;
     use str0m::media::{Direction, MediaKind};
     use str0m::RtcConfig;
+
+    #[test]
+    fn targets_share_the_estimate_and_idle_shed_layers() {
+        let layers = [
+            SendLayer {
+                rid: "f",
+                width: 640,
+                height: 480,
+            },
+            SendLayer {
+                rid: "h",
+                width: 480,
+                height: 360,
+            },
+            SendLayer {
+                rid: "q",
+                width: 320,
+                height: 240,
+            },
+        ];
+        let mut a = LayerAllocator::new(&layers, 0);
+        // All active at exactly the nominal budget: every target ~= nominal.
+        let full = a.initial_bps();
+        let t = a.targets(full);
+        assert!(
+            t.iter().all(|(_, bps)| *bps > 0),
+            "all layers funded: {t:?}"
+        );
+        // Starve long enough to shed the top layer: it gets the 0 idle hint,
+        // the survivors share the estimate proportionally.
+        let t0 = Instant::now();
+        let low = full / 4;
+        a.update(t0, low);
+        a.update(t0 + DROP_AFTER, low);
+        assert_eq!(a.active, 2, "top layer shed");
+        let t = a.targets(low);
+        let top = t.iter().find(|(r, _)| *r == Rid::from("f")).unwrap();
+        assert_eq!(top.1, 0, "shed layer gets the idle hint");
+        let kept: Vec<_> = t.iter().filter(|(_, bps)| *bps > 0).collect();
+        assert_eq!(kept.len(), 2);
+        // Scale clamps: a wildly low estimate cannot starve an active encoder
+        // below a quarter of its nominal rate.
+        let t = a.targets(1);
+        let q = t.iter().find(|(r, _)| *r == Rid::from("q")).unwrap();
+        assert!(q.1 > 0);
+    }
 
     #[test]
     fn rids_are_high_to_low_and_clamped() {

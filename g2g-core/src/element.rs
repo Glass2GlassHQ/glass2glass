@@ -81,7 +81,10 @@ pub enum PushOutcome {
     /// relaying its congestion-control / BWE estimate). Advisory: an encoder
     /// upstream should retarget its bitrate. Lowest priority of the reverse
     /// signals (Reconfigure > Qos > Bitrate); a held estimate surfaces on a
-    /// later push, and BWE updates far slower than the frame rate.
+    /// later push, and BWE updates far slower than the frame rate. A target of
+    /// `0` is the shed-layer idle hint (M722): the consumer downstream is
+    /// discarding this stream (a starved simulcast layer), so the encoder
+    /// should mostly stop encoding until a non-zero target resumes it.
     Bitrate(u32),
 }
 

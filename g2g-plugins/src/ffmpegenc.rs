@@ -30,10 +30,12 @@
 //! sound on the ownership-transfer grounds documented on `FfmpegVideoDec` /
 //! `MfDecode`.
 //!
-//! Deferred (v1): runtime bitrate retarget (a libavcodec encoder fixes the rate
-//! at open; a BWE change would need a reopen, like `Av1Enc`'s context rebuild),
-//! NV12 input (I420 only for now), and 10-bit. The downstream bitrate feedback is
-//! recorded but not yet acted on.
+//! Runtime bitrate retarget (M722): a libavcodec encoder fixes its rate at
+//! open, so a downstream BWE target reopens the encoder (hysteresis-gated 20%;
+//! zerolatency means nothing in flight is lost and the fresh encoder starts on
+//! an IDR). A target of 0 is the shed-layer idle hint: frames are skipped
+//! unencoded except a sparse 1-in-32 keep-alive that keeps the reverse-signal
+//! path alive for the resume. Deferred (v1): NV12 input (I420 only), 10-bit.
 //!
 //! Known driver issue: two NVENC instances in one process crash intermittently
 //! inside a libnvcuvid worker thread under concurrent load (observed on driver
@@ -115,6 +117,12 @@ pub struct FfmpegH264Enc {
     caps_sent: bool,
     /// A downstream PLI latched a keyframe request; the next encode forces an IDR.
     force_keyframe: bool,
+    /// Shed-layer idle (M722, `Bitrate(0)`): most frames are skipped unencoded;
+    /// a sparse 1-in-32 keep-alive encode keeps the push cadence (and thus the
+    /// reverse-signal path that will deliver the resume target) alive.
+    idle: bool,
+    /// Frame counter driving the sparse keep-alive cadence while idle.
+    idle_skip: u32,
     configured: bool,
 }
 
@@ -156,6 +164,8 @@ impl FfmpegH264Enc {
             emitted: 0,
             caps_sent: false,
             force_keyframe: false,
+            idle: false,
+            idle_skip: 0,
             configured: false,
         }
     }
@@ -376,11 +386,31 @@ impl FfmpegH264Enc {
             out,
         )
         .await?;
-        // A downstream PLI latches a forced IDR on the next encode. Runtime
-        // bitrate retarget (feedback.bitrate_bps) is recorded by the encoder API
-        // but not yet acted on (a libavcodec encoder fixes its rate at open).
+        // A downstream PLI latches a forced IDR on the next encode.
         if feedback.force_keyframe {
             self.force_keyframe = true;
+        }
+        // Runtime bitrate retarget (M722): a libavcodec encoder fixes its rate
+        // at open, so a BWE change reopens the encoder (zerolatency /
+        // `delay=0` means nothing is in flight to lose; the fresh encoder
+        // starts on an IDR). Hysteresis-gated 20% like `Av1Enc`. A target of 0
+        // is the shed-layer idle hint (see `PushOutcome::Bitrate`).
+        if let Some(bps) = feedback.bitrate_bps {
+            if bps == 0 {
+                self.idle = true;
+            } else {
+                if self.idle {
+                    self.idle = false;
+                    self.force_keyframe = true;
+                }
+                let target = bps as usize;
+                let current = self.bitrate_bps.max(1);
+                let delta = target.abs_diff(current) as f64 / current as f64;
+                if delta >= 0.2 {
+                    self.bitrate_bps = target.max(1);
+                    self.open_encoder()?;
+                }
+            }
         }
         Ok(())
     }
@@ -515,6 +545,15 @@ impl AsyncElement for FfmpegH264Enc {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
+                    // Shed-layer idle: skip the encode for most frames, keeping
+                    // a sparse keep-alive cadence so the resume signal (which
+                    // rides push outcomes) can still reach this element.
+                    if self.idle {
+                        self.idle_skip = self.idle_skip.wrapping_add(1);
+                        if self.idle_skip % 32 != 1 {
+                            return Ok(());
+                        }
+                    }
                     let MemoryDomain::System(slice) = &frame.domain else {
                         return Err(G2gError::UnsupportedDomain);
                     };
@@ -655,6 +694,148 @@ mod tests {
         }
         enc.process(PipelinePacket::Eos, &mut sink).await.ok()?;
         Some(sink)
+    }
+
+    /// Sink that reports a fixed downstream bitrate target on every push (the
+    /// WebRTC BWE shape), plus captured frames.
+    struct BitrateSink {
+        bps: u32,
+        frames: Vec<Vec<u8>>,
+    }
+    impl OutputSink for BitrateSink {
+        fn push<'a>(
+            &'a mut self,
+            packet: PipelinePacket,
+        ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
+            Box::pin(async move {
+                if let PipelinePacket::DataFrame(f) = packet {
+                    if let MemoryDomain::System(s) = &f.domain {
+                        self.frames.push(s.as_slice().to_vec());
+                    }
+                }
+                Ok(PushOutcome::Bitrate(self.bps))
+            })
+        }
+    }
+
+    /// Pseudorandom (incompressible) I420 frame, so the encoder's rate target
+    /// actually bites: the scrolling pattern hits x264's entropy floor at any
+    /// bitrate and would mask a retarget.
+    fn noise_frame(seq: u64) -> Vec<u8> {
+        let (w, h) = (W as usize, H as usize);
+        let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
+        let mut state = seq.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let mut v = Vec::with_capacity(w * h + 2 * cw * ch);
+        for _ in 0..w * h {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            v.push((state >> 33) as u8);
+        }
+        v.extend(core::iter::repeat_n(110u8, cw * ch));
+        v.extend(core::iter::repeat_n(150u8, cw * ch));
+        v
+    }
+
+    /// M722 runtime retarget: a downstream BWE target far below the configured
+    /// rate reopens the encoder, and the later access units come out smaller.
+    #[tokio::test]
+    async fn bitrate_feedback_retargets_via_reopen() {
+        async fn bytes_after_feedback(bps: u32) -> Option<f64> {
+            let mut enc = FfmpegH264Enc::new()
+                .with_backend(Backend::Software)
+                .with_bitrate(2_000_000);
+            if enc.configure_pipeline(&i420_caps(W, H)).is_err() {
+                return None; // libx264 absent on this host
+            }
+            let mut sink = BitrateSink {
+                bps,
+                frames: Vec::new(),
+            };
+            for i in 0..60u64 {
+                let frame = Frame::new(
+                    MemoryDomain::System(SystemSlice::from_boxed(
+                        noise_frame(i).into_boxed_slice(),
+                    )),
+                    FrameTiming {
+                        pts_ns: i * 33_000_000,
+                        ..FrameTiming::default()
+                    },
+                    i,
+                );
+                enc.process(PipelinePacket::DataFrame(frame), &mut sink)
+                    .await
+                    .ok()?;
+            }
+            // Compare the tail (well after the reopen), skipping the fresh IDR.
+            let tail = &sink.frames[sink.frames.len().saturating_sub(20)..];
+            let total: usize = tail.iter().skip(1).map(|f| f.len()).sum();
+            Some(total as f64 / tail.len().saturating_sub(1).max(1) as f64)
+        }
+
+        let (Some(low), Some(high)) = (
+            bytes_after_feedback(100_000).await,
+            bytes_after_feedback(2_000_000).await,
+        ) else {
+            std::eprintln!("skipping: libx264 not available");
+            return;
+        };
+        assert!(
+            low * 1.5 < high,
+            "100 kb/s tail ({low:.0} B/AU) must be far smaller than 2 Mb/s ({high:.0} B/AU)"
+        );
+    }
+
+    /// M722 shed-layer idle: `Bitrate(0)` mostly stops the encoder (sparse
+    /// 1-in-32 keep-alives only), and a non-zero target resumes it on an IDR.
+    #[tokio::test]
+    async fn bitrate_zero_idles_and_resume_restarts_on_idr() {
+        let mut enc = FfmpegH264Enc::new().with_backend(Backend::Software);
+        if enc.configure_pipeline(&i420_caps(W, H)).is_err() {
+            std::eprintln!("skipping: libx264 not available");
+            return;
+        }
+        async fn push_n(enc: &mut FfmpegH264Enc, n: u64, base: u64, bps: u32) -> Vec<Vec<u8>> {
+            let mut sink = BitrateSink {
+                bps,
+                frames: Vec::new(),
+            };
+            for i in 0..n {
+                let seq = base + i;
+                let frame = Frame::new(
+                    MemoryDomain::System(SystemSlice::from_boxed(
+                        i420_frame(seq).into_boxed_slice(),
+                    )),
+                    FrameTiming {
+                        pts_ns: seq * 33_000_000,
+                        ..FrameTiming::default()
+                    },
+                    seq,
+                );
+                enc.process(PipelinePacket::DataFrame(frame), &mut sink)
+                    .await
+                    .unwrap();
+            }
+            sink.frames
+        }
+        // Prime (delivers the Bitrate(0) idle hint on these pushes)...
+        let primed = push_n(&mut enc, 5, 0, 0).await;
+        assert!(!primed.is_empty(), "primed frames encoded");
+        // ...then 60 idle frames encode at most the sparse keep-alives.
+        let idle = push_n(&mut enc, 60, 5, 0).await;
+        assert!(
+            idle.len() <= 3,
+            "idle encodes only sparse keep-alives, got {}",
+            idle.len()
+        );
+        // A non-zero target resumes, and the first resumed AU is an IDR.
+        let resumed = push_n(&mut enc, 5, 65, 1_000_000).await;
+        assert!(resumed.len() >= 4, "resume encodes again");
+        assert!(
+            crate::h264util::h264_au_is_keyframe(&resumed[1.min(resumed.len() - 1)])
+                || crate::h264util::h264_au_is_keyframe(&resumed[0]),
+            "resume starts on a keyframe"
+        );
     }
 
     /// The encoded stream must be a valid H.264 Annex-B elementary stream: the

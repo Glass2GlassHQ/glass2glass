@@ -625,10 +625,7 @@ Phased plan:
     their master) ships in a release, or str0m#1014 lands; a real LiveKit Cloud
     run (genuine remote NAT + STUN/TURN on the LiveKit elements); then Janus /
     Kinesis as wanted.
-  - **T5: advanced.** Simulcast follow-ups: per-layer runtime retarget where
-    the encoder supports it, sources idling a shed layer (the allocator skips
-    its units at the writer; the encoder keeps encoding), simulcast on the WHIP
-    grouped-pad session. FEC; full
+  - **T5: advanced.** Simulcast on the WHIP grouped-pad session. FEC; full
     renegotiation; data-channel loose ends (str0m surfaces no remote-close
     event, so EOS rides an explicit marker message; a WHIP/SFU-signalled data
     channel vs the P2P `SdpChannel` seam).

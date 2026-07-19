@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M722: per-layer simulcast bitrate targets (the allocator splits the BWE estimate across layers; `Bitrate(0)` idles a shed layer's encoder) and `FfmpegH264Enc` runtime retarget via reopen; shed + idle validated live through the encoder fan graph.
 - M721: Opus runtime bitrate adaptation (`OpusEnc` retargets the live encoder from downstream BWE estimates).
 - M720: keyframe-request / bitrate reverse signals relay past non-consuming transforms to the encoder (`handles_keyframe_requests` / `handles_bitrate_requests` element capability), in the linear and DAG runners.
 - M719: multiple TURN servers per element (comma-separated list, GStreamer-style `turn://user:pass@host` credentials) and TURN on the duplex session; multi-allocation validated against coturn.

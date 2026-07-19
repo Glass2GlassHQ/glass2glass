@@ -884,9 +884,17 @@ mod fan_graph {
                         .with_backend(Backend::Software)
                         .with_bitrate(300_000),
                 ));
+                // `G2G_MAX_SEND_BITRATE` caps the BWE estimate so the layer
+                // allocator sheds live (the shed layer's encoder then idles on
+                // the Bitrate(0) hint, M722).
+                let cap: u64 = std::env::var("G2G_MAX_SEND_BITRATE")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
                 let sink = LiveKitSink::new(url, room, identity)
                     .with_api_key(api_key, api_secret)
-                    .with_simulcast(2);
+                    .with_simulcast(2)
+                    .with_max_send_bitrate(cap);
                 let session = g.add_fanin_sink(GraphNode::muxer(sink), 2);
                 g.link(src, tee.input()).unwrap();
                 g.link(tee.out(0), enc_hi).unwrap();

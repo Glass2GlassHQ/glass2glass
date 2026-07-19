@@ -2051,7 +2051,16 @@ default; encoders override) has its output adapter relay the pending
 `ForceKeyframe` / bitrate onto its input link, the QoS-relay mechanism
 generalized, so `enc ! h264parse ! webrtc-sink` reaches the encoder. `Propose` /
 `Renegotiate` never relay (they concern the adjacent element's own caps).
-`OpusEnc` retargets live too (M721, `OPUS_SET_BITRATE`, no rebuild).
+`OpusEnc` retargets live too (M721, `OPUS_SET_BITRATE`, no rebuild), and
+`FfmpegH264Enc` by a hysteresis-gated reopen (M722; zerolatency, nothing in
+flight). Simulcast splits the aggregate BWE estimate per layer (M722): the
+allocator hands each active layer its nominal share of the estimate on that
+layer's reverse channel and a shed layer the `Bitrate(0)` idle hint, on which
+the encoder skips frames unencoded except a sparse 1-in-32 keep-alive (the
+resume signal rides push outcomes, so the cadence must not fully stop; resume
+forces an IDR). The allocator is also re-ticked with the last estimate once a
+second: BWE only emits deltas, and retargeted encoders settle exactly on the
+estimate, which would otherwise freeze the drop/restore hysteresis windows.
 
 **Codec plumbing.** A `Track` enum unifies the per-track facts WebRTC needs to
 agree on: codec (H.264 / Opus), m-line `MediaKind`, and the RTP clock (90 kHz /
