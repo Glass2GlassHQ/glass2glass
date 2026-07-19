@@ -147,6 +147,15 @@ impl WebRtcSessionSink {
         self
     }
 
+    /// Shape by bare input-pad count (the launch-registry fan-in path): track
+    /// kinds are read from each pad's caps, video pads group as simulcast
+    /// layers in pad order (pad 0 = highest resolution).
+    pub fn with_inputs(mut self, n: usize) -> Self {
+        self.pads.set_pad_count(n);
+        self.pad_wire = alloc::vec![None; self.pads.input_count()];
+        self
+    }
+
     /// Cap the aggregate send bitrate (bits/second, 0 = uncapped) budgeted by
     /// the simulcast layer allocator.
     pub fn with_max_send_bitrate(mut self, bps: u64) -> Self {
@@ -205,7 +214,9 @@ impl WebRtcSessionSink {
         let rids = rids_high_to_low(video_inputs.len());
         let simulcast = layers.len() >= 2;
         let has_video = !video_inputs.is_empty();
-        let has_audio = self.pads.has_audio;
+        // Derived from the configured caps (not the builder shape), so the
+        // bare-pad-count launch path works too (M725).
+        let has_audio = self.pads.audio_input().is_some();
         // Simulcast enables BWE so the aggregate estimate can budget the layer
         // set; the estimate is clamped to `max-send-bitrate` when set.
         let bwe_init = simulcast.then(|| {

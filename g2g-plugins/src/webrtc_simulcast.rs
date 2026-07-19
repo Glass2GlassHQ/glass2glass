@@ -86,6 +86,16 @@ impl SimulcastPads {
         self.rebuild();
     }
 
+    /// Shape by bare pad count (the launch-registry path, M725): the track
+    /// kinds are read from each pad's caps at configure time, so `n` linked
+    /// pads simply become `n` slots (an audio-caps pad is the audio track, the
+    /// video-caps pads are the layers in pad order).
+    pub(crate) fn set_pad_count(&mut self, n: usize) {
+        self.video_layers = n.max(1);
+        self.has_audio = false;
+        self.rebuild();
+    }
+
     pub(crate) fn input_count(&self) -> usize {
         self.video_layers + self.has_audio as usize
     }

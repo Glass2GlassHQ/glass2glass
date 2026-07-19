@@ -1339,6 +1339,19 @@ fn register_feature_gated(reg: &mut Registry) {
     reg.register_launch(LaunchFactory::new("webrtcsink", Vec::new(), || {
         Box::new(WebRtcSink::new(""))
     }));
+    // Multi-track WHIP session sink (M725): a terminal fan-in whose track kinds
+    // come from each linked pad's caps (video pads group as simulcast layers in
+    // pad order): `v ! s.  a ! s.  webrtcsessionsink name=s location=...`.
+    #[cfg(feature = "webrtc")]
+    reg.register_muxer(MuxerFactory::new("webrtcsessionsink", |inputs| {
+        Box::new(crate::webrtcsession::WebRtcSessionSink::new("").with_inputs(inputs))
+    }));
+    // LiveKit publisher, the same terminal fan-in shape with room/credential
+    // properties (`livekitsink name=s url=... room=... api-key=...`).
+    #[cfg(feature = "webrtc-livekit")]
+    reg.register_muxer(MuxerFactory::new("livekitsink", |inputs| {
+        Box::new(crate::livekitsink::LiveKitSink::new("", "", "g2g").with_inputs(inputs))
+    }));
     #[cfg(all(target_os = "linux", feature = "kms-sink"))]
     reg.register_launch(LaunchFactory::new("kmssink", Vec::new(), || {
         Box::new(KmsSink::new())

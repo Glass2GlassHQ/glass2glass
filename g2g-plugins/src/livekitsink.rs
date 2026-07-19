@@ -204,6 +204,15 @@ impl LiveKitSink {
         self
     }
 
+    /// Shape by bare input-pad count (the launch-registry fan-in path): track
+    /// kinds are read from each pad's caps, video pads group as simulcast
+    /// layers in pad order (pad 0 = highest resolution).
+    pub fn with_inputs(mut self, n: usize) -> Self {
+        self.pads.set_pad_count(n);
+        self.sinks = alloc::vec![None; self.pads.input_count()];
+        self
+    }
+
     /// Access units handed to the session so far.
     pub fn frames_sent(&self) -> u64 {
         self.frames_sent
@@ -299,7 +308,9 @@ impl LiveKitSink {
         // toward LiveKit Cloud is a follow-up.
         add_ice_candidates(&mut rtc, &socket, None).await?;
         let has_video = !video_inputs.is_empty();
-        let has_audio = self.pads.has_audio;
+        // Derived from the configured caps (not the builder shape), so the
+        // bare-pad-count launch path works too (M725).
+        let has_audio = self.pads.audio_input().is_some();
 
         // The AddTrackRequest cid must equal the SDP msid track-id, so we choose
         // it and hand it to str0m as the track_id for that m-line.
