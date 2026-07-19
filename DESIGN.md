@@ -2013,11 +2013,17 @@ host candidate and, when a STUN server is configured, a server-reflexive candida
 discovered by a hand-rolled RFC 5389 Binding on the ICE socket; candidates ride in
 the SDP, so a same-host P2P pair connects over localhost with no STUN. For the NAT
 cases a reflexive candidate cannot punch through, a hand-rolled TURN client
-(`turn.rs`, RFC 5766/8656: Allocate with long-term auth, Send/Data indications,
-CreatePermission, periodic Refresh) provides a relay. str0m only offers
+(`turn.rs`, RFC 5766/8656: Allocate with long-term auth, channel binding,
+periodic Refresh) provides a relay. str0m only offers
 `Candidate::relayed`; the data plane is the run loop's job — a relayed pair's
 transmits all carry `source == relay_addr`, which is the routing signal to wrap
-the datagram in a TURN Send indication (direct host/srflx paths are untouched).
+the datagram for the relay (direct host/srflx paths are untouched). The first
+transmit to a new peer sends a ChannelBind (M716), which installs the peer
+permission and, once its success lands, upgrades that peer from 36-byte Send /
+Data indications to 4-byte-header ChannelData frames both ways; a `438 Stale
+Nonce` on any authenticated request adopts the error response's nonce and
+un-caches the affected state so the lazy paths retry with it. Validated against
+a real coturn (allocate, bind, ChannelData round-trip both directions).
 
 **RTCP feedback** rides the §4.13 reverse channel. A remote PLI
 (`Event::KeyframeRequest`) becomes a `Reconfigure::ForceKeyframe` walked upstream

@@ -622,9 +622,8 @@ Phased plan:
     force-keyframe (needs a libvpx path `vpx-encode` does not expose); Opus
     bitrate adaptation; `ForceKeyframe`/`Bitrate` relay through an intervening
     transform.
-  - **T3: TURN / ICE completeness.** TURN channel binding (lower overhead than
-    Send/Data indications), TURN-over-TCP / -TLS, IPv6 reflexive + relay, multiple
-    TURN servers, 438 stale-nonce retry. Incremental on the M242 `turn.rs`.
+  - **T3: TURN / ICE completeness.** TURN-over-TCP / -TLS, IPv6 reflexive +
+    relay, multiple TURN servers. Incremental on the M242 `turn.rs`.
   - **T4: signalling ecosystem.** Drop the `[patch.crates-io]` str0m fork
     (unpadded media sends) once the LiveKit forwarder fix (livekit#4690, on
     their master) ships in a release, or str0m#1014 lands; a real LiveKit Cloud

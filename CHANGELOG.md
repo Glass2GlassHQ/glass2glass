@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M716: TURN channel binding (ChannelData framing once the per-peer bind lands) and 438 stale-nonce recovery; validated against a real coturn relay.
 - M715: `wss://` (TLS) LiveKit signalling via tokio-tungstenite native-tls; ingest loopback validated through a TLS-terminating proxy.
 - M714: `LiveKitSrc` room subscriber (answers the server-offered subscriber PC, video + audio outputs, PLI until first keyframe); validated live incl. a sink-to-src loopback on a real server.
 - M713: terminal fan-in graph node (`Graph::add_fanin_sink`, session sinks in `run_graph`/`parse_launch` with per-input Eos flush and per-pad reverse-signal routing), enabling the live encoder fan graph (`tee -> videoscale -> ffmpegenc` per simulcast layer into `LiveKitSink`); validated live incl. a Chrome subscriber.

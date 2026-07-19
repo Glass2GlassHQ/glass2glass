@@ -13,28 +13,36 @@
 //!   The element adds that address to str0m as a relayed local candidate.
 //! - str0m emits every `Output::Transmit` from a relay pair with
 //!   `source == relay_addr` (the relayed candidate's base). The run loop routes
-//!   those through the relay: [`TurnClient::wrap_send`] boxes the payload in a
-//!   TURN Send indication addressed to the peer and sends it to the TURN
-//!   server. Direct (host / server-reflexive) transmits are unchanged.
-//! - Inbound UDP from the TURN server arrives as a Data indication;
-//!   [`TurnClient::parse_data`] unwraps it to `(peer, payload)` and the element
-//!   feeds str0m an `Input::Receive` with `source = peer`, `destination =
-//!   relay_addr`. The server only relays peer traffic once a permission for that
-//!   peer's IP exists, so the run loop calls [`TurnClient::ensure_permission`]
-//!   (a `CreatePermission` request) for each new peer before relaying to it.
-//! - [`TurnClient::refresh`] keeps the allocation (and, by re-permitting, the
-//!   per-peer permissions) alive past their lifetimes.
+//!   those through the relay: [`TurnClient::wrap_send`] frames the payload for
+//!   the TURN server (ChannelData or a Send indication, below) and sends it to
+//!   the server. Direct (host / server-reflexive) transmits are unchanged.
+//! - Inbound UDP from the TURN server is a ChannelData frame or a Data
+//!   indication; [`TurnClient::parse_data`] unwraps either to `(peer, payload)`
+//!   and the element feeds str0m an `Input::Receive` with `source = peer`,
+//!   `destination = relay_addr`. The server only relays peer traffic once a
+//!   permission for that peer's IP exists, so the run loop calls
+//!   [`TurnClient::ensure_permission`] for each new peer before relaying to it.
+//! - [`TurnClient::refresh`] keeps the allocation, the channel bindings, and
+//!   the per-peer permissions alive past their lifetimes.
 //!
-//! IPv4 only in v1 (matching the server-reflexive path); channel binding (the
-//! lower-overhead alternative to Send/Data indications) is a follow-up. Behind
-//! the `webrtc` feature.
+//! Channel binding (RFC 5766 §11) upgrades the per-peer data plane: for each
+//! new peer the client sends a ChannelBind (which also installs the IP
+//! permission server-side, so no separate CreatePermission is needed) and keeps
+//! using Send indications until the bind success lands; from then on datagrams
+//! ride 4-byte-header ChannelData frames instead of 36-byte indications, both
+//! directions. A `438 Stale Nonce` on any authenticated request updates the
+//! stored nonce from the error response and un-caches the affected state, so
+//! the existing lazy paths retry with fresh credentials.
+//!
+//! IPv4 only in v1 (matching the server-reflexive path). Behind the `webrtc`
+//! feature.
 
-use alloc::collections::BTreeSet;
+use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use core::time::Duration;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{Ipv4Addr, SocketAddr};
 
 use hmac::{Hmac, Mac};
 use md5::{Digest, Md5};
@@ -53,9 +61,12 @@ const MAGIC: u32 = 0x2112_A442;
 const ALLOCATE_REQUEST: u16 = 0x0003;
 const ALLOCATE_SUCCESS: u16 = 0x0103;
 const REFRESH_REQUEST: u16 = 0x0004;
-const CREATE_PERMISSION_REQUEST: u16 = 0x0008;
+const CHANNEL_BIND_REQUEST: u16 = 0x0009;
+const CHANNEL_BIND_SUCCESS: u16 = 0x0109;
 const SEND_INDICATION: u16 = 0x0016;
 const DATA_INDICATION: u16 = 0x0017;
+/// Error-class bit pattern (RFC 5389 §6): request type | 0x0110.
+const ERROR_CLASS: u16 = 0x0110;
 
 // Attribute types.
 const ATTR_USERNAME: u16 = 0x0006;
@@ -68,6 +79,13 @@ const ATTR_REALM: u16 = 0x0014;
 const ATTR_NONCE: u16 = 0x0015;
 const ATTR_XOR_RELAYED_ADDRESS: u16 = 0x0016;
 const ATTR_REQUESTED_TRANSPORT: u16 = 0x0019;
+const ATTR_CHANNEL_NUMBER: u16 = 0x000C;
+
+/// Client-assigned channel numbers (RFC 5766 §11: 0x4000-0x7FFF).
+const CHANNEL_MIN: u16 = 0x4000;
+const CHANNEL_MAX: u16 = 0x7FFF;
+/// 438 Stale Nonce (RFC 5389 §15.6).
+const STALE_NONCE: u16 = 438;
 
 /// Desired allocation lifetime requested from the server (seconds). The server
 /// may shorten it; the actual lifetime comes back in the success response.
@@ -95,11 +113,32 @@ pub(crate) struct TurnClient {
     nonce: String,
     /// Server-allocated relay address; the relayed ICE candidate's address.
     relay: SocketAddr,
-    /// Peer IPs we have already issued a CreatePermission for this lifetime.
-    permitted: BTreeSet<IpAddr>,
+    /// Per-peer channel state: assigned number + whether the bind confirmed
+    /// (ChannelData may only be sent after the ChannelBind success, §11.3).
+    channels: BTreeMap<SocketAddr, Channel>,
+    /// Next channel number to assign (wraps within the client range).
+    next_channel: u16,
+    /// In-flight authenticated requests by transaction id, so their success /
+    /// 438-stale-nonce responses can be matched in the data plane.
+    pending: BTreeMap<[u8; 12], Pending>,
     /// Monotonic transaction-id counter (responses are matched by server source
     /// + message class, so uniqueness within the socket is all that is needed).
     txn_counter: u32,
+}
+
+/// One peer's channel binding.
+#[derive(Debug, Clone, Copy)]
+struct Channel {
+    number: u16,
+    bound: bool,
+}
+
+/// What an in-flight authenticated request was for, so its response can update
+/// (success) or revert (438) the matching client state.
+#[derive(Debug, Clone, Copy)]
+enum Pending {
+    Bind(SocketAddr),
+    Refresh,
 }
 
 impl TurnClient {
@@ -176,47 +215,100 @@ impl TurnClient {
             realm,
             nonce,
             relay,
-            permitted: BTreeSet::new(),
+            channels: BTreeMap::new(),
+            next_channel: CHANNEL_MIN,
+            pending: BTreeMap::new(),
             txn_counter: counter,
         })
     }
 
-    /// Ensure the server will relay to/from `peer`'s IP, sending a
-    /// CreatePermission request the first time we see that IP this lifetime.
-    /// Fire-and-forget: ICE retransmits its connectivity checks, so a check
-    /// dropped before the permission lands is re-sent and succeeds. Permissions
-    /// are re-established after [`Self::refresh`] clears the set.
+    /// Append the long-term-credential attributes + MESSAGE-INTEGRITY and record
+    /// the request as pending under `txn`.
+    fn finish_authenticated(
+        &mut self,
+        mut msg: MessageBuilder,
+        txn: [u8; 12],
+        p: Pending,
+    ) -> Vec<u8> {
+        msg.push_str_attr(ATTR_USERNAME, &self.username);
+        msg.push_str_attr(ATTR_REALM, &self.realm);
+        msg.push_str_attr(ATTR_NONCE, &self.nonce);
+        self.pending.insert(txn, p);
+        msg.finish_with_integrity(&self.key)
+    }
+
+    /// Send a ChannelBind for `peer` on channel `number` (installs / refreshes
+    /// the peer-IP permission server-side too, RFC 5766 §11.2).
+    async fn send_channel_bind(
+        &mut self,
+        socket: &UdpSocket,
+        peer: SocketAddr,
+        number: u16,
+    ) -> Result<(), G2gError> {
+        self.txn_counter = self.txn_counter.wrapping_add(1);
+        let txn = txn_bytes(self.server, self.txn_counter);
+        let mut msg = MessageBuilder::new(CHANNEL_BIND_REQUEST, txn);
+        msg.push_attr(
+            ATTR_CHANNEL_NUMBER,
+            &[(number >> 8) as u8, number as u8, 0, 0],
+        );
+        msg.push_xor_peer_address(peer, &txn);
+        let bytes = self.finish_authenticated(msg, txn, Pending::Bind(peer));
+        socket
+            .send_to(&bytes, self.server)
+            .await
+            .map_err(|_| hw())?;
+        Ok(())
+    }
+
+    /// Ensure the server will relay to/from `peer`: the first transmit to a new
+    /// peer sends a ChannelBind (RFC 5766 §11), which both installs the peer-IP
+    /// permission and starts the channel; [`Self::wrap_send`] uses Send
+    /// indications until the bind success lands. Fire-and-forget: ICE
+    /// retransmits its connectivity checks, so a check dropped in the one-RTT
+    /// window before the server processes the bind is re-sent and succeeds.
     pub(crate) async fn ensure_permission(
         &mut self,
         socket: &UdpSocket,
         peer: SocketAddr,
     ) -> Result<(), G2gError> {
-        if self.permitted.contains(&peer.ip()) {
+        if self.channels.contains_key(&peer) {
             return Ok(());
         }
-        self.txn_counter = self.txn_counter.wrapping_add(1);
-        let txn = txn_bytes(self.server, self.txn_counter);
-        let mut msg = MessageBuilder::new(CREATE_PERMISSION_REQUEST, txn);
-        msg.push_xor_peer_address(peer, &txn);
-        msg.push_str_attr(ATTR_USERNAME, &self.username);
-        msg.push_str_attr(ATTR_REALM, &self.realm);
-        msg.push_str_attr(ATTR_NONCE, &self.nonce);
-        let bytes = msg.finish_with_integrity(&self.key);
-        // Mark the peer permitted only after the request is actually sent, so a
-        // transient send failure leaves it unset and ICE's retransmit retries.
-        socket
-            .send_to(&bytes, self.server)
-            .await
-            .map_err(|_| hw())?;
-        self.permitted.insert(peer.ip());
+        let number = self.next_channel;
+        self.next_channel = if self.next_channel >= CHANNEL_MAX {
+            CHANNEL_MIN
+        } else {
+            self.next_channel + 1
+        };
+        // Insert only after the request is actually sent, so a transient send
+        // failure leaves the peer unknown and the next transmit retries.
+        self.send_channel_bind(socket, peer, number).await?;
+        self.channels.insert(
+            peer,
+            Channel {
+                number,
+                bound: false,
+            },
+        );
         Ok(())
     }
 
-    /// Wrap `payload` (an str0m datagram bound for `peer`) in a Send indication
-    /// for the TURN server to relay. Send indications are unauthenticated (RFC
-    /// 5766 §10.1), so this is allocation-free of the credential dance and cheap
-    /// enough for the per-packet hot path.
+    /// Wrap `payload` (an str0m datagram bound for `peer`) for the TURN server
+    /// to relay: a 4-byte-header ChannelData frame once the peer's channel is
+    /// bound, else a Send indication (unauthenticated, RFC 5766 §10.1). Both are
+    /// cheap enough for the per-packet hot path; ChannelData saves the 36-byte
+    /// indication envelope in the steady state.
     pub(crate) fn wrap_send(&mut self, peer: SocketAddr, payload: &[u8]) -> Vec<u8> {
+        if let Some(ch) = self.channels.get(&peer) {
+            if ch.bound {
+                let mut out = Vec::with_capacity(4 + payload.len());
+                out.extend_from_slice(&ch.number.to_be_bytes());
+                out.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+                out.extend_from_slice(payload);
+                return out;
+            }
+        }
         self.txn_counter = self.txn_counter.wrapping_add(1);
         let txn = txn_bytes(self.server, self.txn_counter);
         let mut msg = MessageBuilder::new(SEND_INDICATION, txn);
@@ -225,38 +317,86 @@ impl TurnClient {
         msg.finish()
     }
 
-    /// If `msg` (received from the TURN server) is a Data indication, unwrap it
-    /// to `(peer, payload)` to be fed back into str0m. Returns `None` for the
-    /// server's control responses (CreatePermission / Refresh success), which
-    /// the run loop discards.
-    pub(crate) fn parse_data(&self, msg: &[u8]) -> Option<(SocketAddr, Vec<u8>)> {
-        if message_type(msg) != DATA_INDICATION {
-            return None;
+    /// Unwrap one datagram received from the TURN server. Relayed peer traffic
+    /// (a ChannelData frame or a Data indication) returns `(peer, payload)` to
+    /// be fed back into str0m. Control responses return `None` after updating
+    /// client state: a ChannelBind success flips that peer to ChannelData
+    /// framing, and a `438 Stale Nonce` on any pending request adopts the error
+    /// response's fresh nonce and un-caches the affected state so the lazy
+    /// paths retry with it.
+    pub(crate) fn parse_data(&mut self, msg: &[u8]) -> Option<(SocketAddr, Vec<u8>)> {
+        // ChannelData: first two bits 0b01 (STUN messages start 0b00, §11.4).
+        if msg.len() >= 4 && msg[0] & 0xC0 == 0x40 {
+            let number = u16::from_be_bytes([msg[0], msg[1]]);
+            let len = u16::from_be_bytes([msg[2], msg[3]]) as usize;
+            let end = 4usize.checked_add(len)?;
+            if end > msg.len() {
+                return None;
+            }
+            let peer = self
+                .channels
+                .iter()
+                .find(|(_, c)| c.number == number)
+                .map(|(p, _)| *p)?;
+            return Some((peer, msg[4..end].to_vec()));
         }
+        let mtype = message_type(msg);
+        if mtype == DATA_INDICATION {
+            let txn = txn_of(msg)?;
+            let peer = find_xor_addr(msg, ATTR_XOR_PEER_ADDRESS, &txn)?;
+            let data = find_bytes(msg, ATTR_DATA)?;
+            return Some((peer, data.to_vec()));
+        }
+        // A response to one of our authenticated requests.
         let txn = txn_of(msg)?;
-        let peer = find_xor_addr(msg, ATTR_XOR_PEER_ADDRESS, &txn)?;
-        let data = find_bytes(msg, ATTR_DATA)?;
-        Some((peer, data.to_vec()))
+        let pending = self.pending.remove(&txn)?;
+        if mtype == CHANNEL_BIND_SUCCESS {
+            if let Pending::Bind(peer) = pending {
+                if let Some(ch) = self.channels.get_mut(&peer) {
+                    ch.bound = true;
+                }
+            }
+        } else if mtype & ERROR_CLASS == ERROR_CLASS {
+            if let Some((STALE_NONCE, _)) = parse_error(msg) {
+                if let Some(nonce) = find_str(msg, ATTR_NONCE) {
+                    self.nonce = nonce;
+                }
+            }
+            // Un-cache the failed state (stale nonce or otherwise), so the next
+            // transmit / refresh tick retries the request with current fields.
+            match pending {
+                Pending::Bind(peer) => {
+                    self.channels.remove(&peer);
+                }
+                Pending::Refresh => {}
+            }
+        }
+        None
     }
 
-    /// Refresh the allocation (RFC 5766 §7) and drop the permission set so the
-    /// run loop re-issues CreatePermission lazily. Call well inside the
-    /// permission lifetime (300 s) and the allocation lifetime. Fire-and-forget:
-    /// the success response is consumed as ordinary server traffic in the loop.
+    /// Refresh the allocation (RFC 5766 §7) and re-send each peer's ChannelBind,
+    /// which refreshes both the channel binding (600 s lifetime) and its peer
+    /// permission (300 s). Call well inside the permission lifetime.
+    /// Fire-and-forget: the responses are consumed by [`Self::parse_data`] as
+    /// ordinary server traffic in the loop.
     pub(crate) async fn refresh(&mut self, socket: &UdpSocket) -> Result<(), G2gError> {
         self.txn_counter = self.txn_counter.wrapping_add(1);
         let txn = txn_bytes(self.server, self.txn_counter);
-        let mut msg = MessageBuilder::new(REFRESH_REQUEST, txn);
-        msg.push_lifetime(DEFAULT_LIFETIME_SECS);
-        msg.push_str_attr(ATTR_USERNAME, &self.username);
-        msg.push_str_attr(ATTR_REALM, &self.realm);
-        msg.push_str_attr(ATTR_NONCE, &self.nonce);
-        let bytes = msg.finish_with_integrity(&self.key);
+        let msg = {
+            let mut m = MessageBuilder::new(REFRESH_REQUEST, txn);
+            m.push_lifetime(DEFAULT_LIFETIME_SECS);
+            m
+        };
+        let bytes = self.finish_authenticated(msg, txn, Pending::Refresh);
         socket
             .send_to(&bytes, self.server)
             .await
             .map_err(|_| hw())?;
-        self.permitted.clear();
+        let rebind: Vec<(SocketAddr, u16)> =
+            self.channels.iter().map(|(p, c)| (*p, c.number)).collect();
+        for (peer, number) in rebind {
+            self.send_channel_bind(socket, peer, number).await?;
+        }
         Ok(())
     }
 }
@@ -542,12 +682,12 @@ mod tests {
 
     #[test]
     fn message_integrity_is_verifiable() {
-        // Build an authenticated CreatePermission and re-derive the HMAC the way
+        // Build an authenticated ChannelBind and re-derive the HMAC the way
         // a server would, confirming the length field and HMAC input agree.
         let key = long_term_key("u", "r", "p");
         let txn = [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
         let peer = SocketAddr::from((Ipv4Addr::new(10, 0, 0, 9), 4000));
-        let mut msg = MessageBuilder::new(CREATE_PERMISSION_REQUEST, txn);
+        let mut msg = MessageBuilder::new(CHANNEL_BIND_REQUEST, txn);
         msg.push_xor_peer_address(peer, &txn);
         msg.push_str_attr(ATTR_USERNAME, "u");
         msg.push_str_attr(ATTR_REALM, "r");
@@ -584,20 +724,11 @@ mod tests {
         msg.push_bytes_attr(ATTR_DATA, payload);
         let bytes = msg.finish();
 
-        let client = TurnClient {
-            server: SocketAddr::from((Ipv4Addr::LOCALHOST, 3478)),
-            username: "u".into(),
-            key: Vec::new(),
-            realm: "r".into(),
-            nonce: "n".into(),
-            relay: SocketAddr::from((Ipv4Addr::LOCALHOST, 5000)),
-            permitted: BTreeSet::new(),
-            txn_counter: 0,
-        };
+        let mut client = test_client();
         let (got_peer, got_data) = client.parse_data(&bytes).expect("data indication");
         assert_eq!(got_peer, peer);
         assert_eq!(got_data, payload);
-        // A non-Data message yields None.
+        // A non-Data message that matches no pending request yields None.
         let other = MessageBuilder::new(ALLOCATE_SUCCESS, txn).finish();
         assert!(client.parse_data(&other).is_none());
     }
@@ -625,5 +756,194 @@ mod tests {
             f(atype, start);
             i = start + alen + ((4 - (alen % 4)) % 4);
         }
+    }
+
+    fn test_client() -> TurnClient {
+        TurnClient {
+            server: SocketAddr::from((Ipv4Addr::LOCALHOST, 3478)),
+            username: "u".into(),
+            key: long_term_key("u", "r", "p"),
+            realm: "r".into(),
+            nonce: "n1".into(),
+            relay: SocketAddr::from((Ipv4Addr::LOCALHOST, 50000)),
+            channels: BTreeMap::new(),
+            next_channel: CHANNEL_MIN,
+            pending: BTreeMap::new(),
+            txn_counter: 0,
+        }
+    }
+
+    fn peer() -> SocketAddr {
+        SocketAddr::from((Ipv4Addr::new(10, 0, 0, 9), 4000))
+    }
+
+    /// A bare response of `msg_type` matching `txn` (success shapes carry no
+    /// attributes the client reads).
+    fn response(msg_type: u16, txn: [u8; 12]) -> Vec<u8> {
+        MessageBuilder::new(msg_type, txn).finish()
+    }
+
+    #[test]
+    fn wrap_send_upgrades_to_channel_data_after_bind_success() {
+        let mut c = test_client();
+        c.channels.insert(
+            peer(),
+            Channel {
+                number: CHANNEL_MIN,
+                bound: false,
+            },
+        );
+        let txn = [9u8; 12];
+        c.pending.insert(txn, Pending::Bind(peer()));
+
+        // Unbound: a Send indication (STUN-framed, starts 0b00).
+        let ind = c.wrap_send(peer(), b"payload");
+        assert_eq!(message_type(&ind), SEND_INDICATION);
+
+        // Bind success flips the peer to ChannelData framing.
+        assert!(c.parse_data(&response(CHANNEL_BIND_SUCCESS, txn)).is_none());
+        let framed = c.wrap_send(peer(), b"payload");
+        assert_eq!(&framed[..2], &CHANNEL_MIN.to_be_bytes());
+        assert_eq!(&framed[2..4], &7u16.to_be_bytes());
+        assert_eq!(&framed[4..], b"payload");
+    }
+
+    #[test]
+    fn parse_data_unwraps_channel_data_frames() {
+        let mut c = test_client();
+        c.channels.insert(
+            peer(),
+            Channel {
+                number: 0x4005,
+                bound: true,
+            },
+        );
+        let mut frame = Vec::from(0x4005u16.to_be_bytes());
+        frame.extend_from_slice(&5u16.to_be_bytes());
+        frame.extend_from_slice(b"hello");
+        assert_eq!(c.parse_data(&frame), Some((peer(), b"hello".to_vec())));
+        // Unknown channel number: dropped.
+        frame[0..2].copy_from_slice(&0x4009u16.to_be_bytes());
+        assert_eq!(c.parse_data(&frame), None);
+        // Truncated length: dropped, not panicked (network input).
+        let short = [0x40u8, 0x05, 0x00, 0xFF, b'x'];
+        assert_eq!(c.parse_data(&short), None);
+    }
+
+    #[test]
+    fn stale_nonce_adopts_new_nonce_and_reverts_bind() {
+        let mut c = test_client();
+        c.channels.insert(
+            peer(),
+            Channel {
+                number: CHANNEL_MIN,
+                bound: false,
+            },
+        );
+        let txn = [7u8; 12];
+        c.pending.insert(txn, Pending::Bind(peer()));
+
+        // 438 error response carrying the fresh nonce.
+        let mut msg = MessageBuilder::new(CHANNEL_BIND_REQUEST | ERROR_CLASS, txn);
+        msg.push_attr(ATTR_ERROR_CODE, &[0, 0, 4, 38]);
+        msg.push_str_attr(ATTR_NONCE, "n2");
+        assert!(c.parse_data(&msg.finish()).is_none());
+
+        assert_eq!(c.nonce, "n2", "stale nonce adopted from the error response");
+        assert!(
+            !c.channels.contains_key(&peer()),
+            "bind state reverted so the next transmit retries with the new nonce"
+        );
+        assert!(c.pending.is_empty());
+    }
+
+    /// Interop against a real TURN server (coturn):
+    /// `docker run -d --network host coturn/coturn -n --no-tls --no-dtls
+    ///  --listening-port=3478 --fingerprint --lt-cred-mech --user=g2g:g2gpass
+    ///  --realm=g2g --no-multicast-peers`, then
+    /// `G2G_TURN_SERVER=127.0.0.1:3478 G2G_TURN_USER=g2g G2G_TURN_PASS=g2gpass`.
+    /// Allocates, channel-binds a local peer socket, and round-trips payloads
+    /// both ways through the relay over ChannelData framing.
+    #[tokio::test]
+    #[ignore = "needs a reachable TURN server (G2G_TURN_SERVER/_USER/_PASS)"]
+    async fn channel_binding_relays_both_ways_against_real_server() {
+        let (Ok(server), Ok(user), Ok(pass)) = (
+            std::env::var("G2G_TURN_SERVER"),
+            std::env::var("G2G_TURN_USER"),
+            std::env::var("G2G_TURN_PASS"),
+        ) else {
+            std::eprintln!("skipping: set G2G_TURN_SERVER, G2G_TURN_USER, G2G_TURN_PASS");
+            return;
+        };
+        let server: SocketAddr = tokio::net::lookup_host(&server)
+            .await
+            .expect("resolve server")
+            .next()
+            .expect("server addr");
+
+        let host_ip = crate::webrtc_util::select_host_ip();
+        let client_sock = UdpSocket::bind((host_ip, 0)).await.expect("bind client");
+        let peer_sock = UdpSocket::bind((host_ip, 0)).await.expect("bind peer");
+        let peer_addr = peer_sock.local_addr().expect("peer addr");
+
+        let mut c = TurnClient::allocate(&client_sock, server, &user, &pass)
+            .await
+            .expect("allocate against the real server");
+        let relay = c.relay_addr();
+
+        // Bind a channel to the peer and wait for the success response.
+        c.ensure_permission(&client_sock, peer_addr)
+            .await
+            .expect("channel bind sent");
+        let mut buf = [0u8; 1500];
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while !c.channels.get(&peer_addr).is_some_and(|ch| ch.bound) {
+            let remaining = deadline
+                .checked_duration_since(std::time::Instant::now())
+                .expect("bind confirmed before timeout");
+            let (n, _) = tokio::time::timeout(remaining, client_sock.recv_from(&mut buf))
+                .await
+                .expect("bind response arrives")
+                .expect("recv");
+            let _ = c.parse_data(&buf[..n]);
+        }
+
+        // Client -> peer through the relay: the peer sees the raw payload from
+        // the relay address.
+        let framed = c.wrap_send(peer_addr, b"to-peer");
+        assert_eq!(
+            &framed[..2],
+            &CHANNEL_MIN.to_be_bytes(),
+            "ChannelData framing"
+        );
+        client_sock
+            .send_to(&framed, c.server_addr())
+            .await
+            .expect("send");
+        let (n, from) = tokio::time::timeout(Duration::from_secs(3), peer_sock.recv_from(&mut buf))
+            .await
+            .expect("relayed datagram arrives")
+            .expect("recv");
+        assert_eq!(&buf[..n], b"to-peer");
+        assert_eq!(from, relay, "peer sees the relay as the sender");
+
+        // Peer -> client: arrives as a ChannelData frame that unwraps to the
+        // peer + payload.
+        peer_sock.send_to(b"to-client", relay).await.expect("send");
+        let unwrapped = loop {
+            let (n, _) =
+                tokio::time::timeout(Duration::from_secs(3), client_sock.recv_from(&mut buf))
+                    .await
+                    .expect("relayed frame arrives")
+                    .expect("recv");
+            assert_eq!(buf[0] & 0xC0, 0x40, "server relays over the bound channel");
+            if let Some(v) = c.parse_data(&buf[..n]) {
+                break v;
+            }
+        };
+        assert_eq!(unwrapped, (peer_addr, b"to-client".to_vec()));
+
+        // Refresh re-issues the bind (and the allocation) without erroring.
+        c.refresh(&client_sock).await.expect("refresh");
     }
 }
