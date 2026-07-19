@@ -169,3 +169,17 @@ path = "fuzz_targets/rtmp_chunk.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "subparse"
+path = "fuzz_targets/subparse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hls"
+path = "fuzz_targets/hls.rs"
+test = false
+doc = false
+bench = false
