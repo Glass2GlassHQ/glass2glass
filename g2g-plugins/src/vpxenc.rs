@@ -210,7 +210,7 @@ impl VpxEnc {
             let target_kbps = (bps / 1000).max(1);
             let current = self.bitrate_kbps.max(1);
             if (target_kbps as i64 - current as i64).unsigned_abs() * 5 >= current as u64 {
-                self.bitrate_kbps = target_kbps as u32;
+                self.bitrate_kbps = target_kbps;
                 rebuild = true;
             }
         }
