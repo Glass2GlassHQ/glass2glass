@@ -57,7 +57,8 @@ use crate::element::{
 };
 use crate::error::G2gError;
 use crate::fanout::{
-    MultiInputElement, MultiOutputElement, MultiOutputSink, MultiSenderSink, ReverseChannel,
+    DynMultiOutputSource, MultiInputElement, MultiOutputElement, MultiOutputSink,
+    MultiOutputSource, MultiSenderSink, ReverseChannel,
 };
 use crate::format_element::CapsConstraint;
 use crate::frame::{Frame, PipelinePacket};
@@ -99,6 +100,9 @@ pub enum GraphNodeRef<'a> {
     Source(Box<dyn DynSourceLoop + 'a>),
     Element(Box<dyn DynAsyncElement + 'a>),
     Muxer(Box<dyn DynMultiInputElement + 'a>),
+    /// A terminal fan-out source (M727): 0 inputs, N outputs it generates
+    /// itself (a WebRTC session receiving several tracks). `Graph::add_fanout_src`.
+    FanoutSource(Box<dyn DynMultiOutputSource + 'a>),
     /// A content-routing demultiplexer: 1 input, N outputs. Structurally a tee
     /// (its node kind is `Tee(n)`), so it negotiates as a tee at startup, but it
     /// carries a [`MultiOutputElement`] that routes each packet to a chosen
@@ -126,6 +130,11 @@ impl<'a> GraphNodeRef<'a> {
         GraphNodeRef::Muxer(Box::new(muxer))
     }
 
+    /// Box an owned terminal fan-out source (`add_fanout_src`).
+    pub fn fanout_source<S: MultiOutputSource + 'static>(source: S) -> Self {
+        GraphNodeRef::FanoutSource(Box::new(source))
+    }
+
     /// Box a borrowed source, for a borrowing graph (the convenience wrappers).
     pub fn source_ref(source: &'a mut (dyn DynSourceLoop + 'a)) -> Self {
         GraphNodeRef::Source(Box::new(source))
@@ -139,6 +148,11 @@ impl<'a> GraphNodeRef<'a> {
     /// Box a borrowed fan-in muxer.
     pub fn muxer_ref(muxer: &'a mut (dyn DynMultiInputElement + 'a)) -> Self {
         GraphNodeRef::Muxer(Box::new(muxer))
+    }
+
+    /// Box a borrowed terminal fan-out source.
+    pub fn fanout_source_ref(source: &'a mut (dyn DynMultiOutputSource + 'a)) -> Self {
+        GraphNodeRef::FanoutSource(Box::new(source))
     }
 
     /// Box an owned fan-out demultiplexer (`add_demux`).
@@ -162,6 +176,7 @@ impl<'a> GraphNodeRef<'a> {
             GraphNodeRef::Source(s) => s.log_category(),
             GraphNodeRef::Element(e) => e.log_category(),
             GraphNodeRef::Muxer(_) => "mux",
+            GraphNodeRef::FanoutSource(_) => "session-src",
             GraphNodeRef::Demux(_) => "demux",
         }
     }
@@ -175,7 +190,7 @@ impl<'a> GraphNodeRef<'a> {
         match self {
             GraphNodeRef::Source(s) => s.output_memory(),
             GraphNodeRef::Element(e) => e.output_memory(),
-            GraphNodeRef::Muxer(_) | GraphNodeRef::Demux(_) => {
+            GraphNodeRef::Muxer(_) | GraphNodeRef::FanoutSource(_) | GraphNodeRef::Demux(_) => {
                 crate::memory::MemoryDomainKind::System
             }
         }
@@ -190,7 +205,7 @@ impl<'a> GraphNodeRef<'a> {
         match self {
             GraphNodeRef::Source(s) => s.output_domains(),
             GraphNodeRef::Element(e) => e.output_domains(),
-            GraphNodeRef::Muxer(_) | GraphNodeRef::Demux(_) => {
+            GraphNodeRef::Muxer(_) | GraphNodeRef::FanoutSource(_) | GraphNodeRef::Demux(_) => {
                 crate::memory::DomainSet::only(crate::memory::MemoryDomainKind::System)
             }
         }
@@ -202,9 +217,10 @@ impl<'a> GraphNodeRef<'a> {
     pub fn input_domains(&self) -> crate::memory::DomainSet {
         match self {
             GraphNodeRef::Element(e) => e.input_domains(),
-            GraphNodeRef::Source(_) | GraphNodeRef::Muxer(_) | GraphNodeRef::Demux(_) => {
-                crate::memory::DomainSet::ALL
-            }
+            GraphNodeRef::Source(_)
+            | GraphNodeRef::Muxer(_)
+            | GraphNodeRef::FanoutSource(_)
+            | GraphNodeRef::Demux(_) => crate::memory::DomainSet::ALL,
         }
     }
 }
@@ -215,6 +231,7 @@ impl core::fmt::Debug for GraphNodeRef<'_> {
             GraphNodeRef::Source(_) => f.write_str("GraphNodeRef::Source(..)"),
             GraphNodeRef::Element(_) => f.write_str("GraphNodeRef::Element(..)"),
             GraphNodeRef::Muxer(_) => f.write_str("GraphNodeRef::Muxer(..)"),
+            GraphNodeRef::FanoutSource(_) => f.write_str("GraphNodeRef::FanoutSource(..)"),
             GraphNodeRef::Demux(_) => f.write_str("GraphNodeRef::Demux(..)"),
         }
     }
@@ -758,12 +775,15 @@ async fn prepare_graph<'a>(
             // no element and no `process()`, so it stays unnamed / unprobed).
             let category = match vg.kind(node) {
                 // A terminal fan-in carries a `Muxer` payload but is a session
-                // sink, not a merging mux; name it accordingly.
+                // sink, not a merging mux; name it accordingly. The fan-out
+                // source is its receive-side mirror.
                 NodeKind::FaninSink(_) => "session",
+                NodeKind::FanoutSrc(_) => "session-src",
                 _ => match vg.element_mut(node) {
                     Some(GraphNodeRef::Source(src)) => src.log_category(),
                     Some(GraphNodeRef::Element(elem)) => elem.log_category(),
                     Some(GraphNodeRef::Muxer(_)) => "mux",
+                    Some(GraphNodeRef::FanoutSource(_)) => "session-src",
                     Some(GraphNodeRef::Demux(_)) => "demux",
                     None => continue, // plain broadcast tee: no element to name
                 },
@@ -895,6 +915,10 @@ async fn prepare_graph<'a>(
                     elem.configure_pipeline(&caps)?.reject_refixate()?;
                 }
             }
+            // A terminal fan-out source has no configure hook: its ports'
+            // caps were solved from `output_caps` and each downstream sink
+            // configures from its own in-edge.
+            NodeKind::FanoutSrc(_) => {}
             NodeKind::Muxer(_) | NodeKind::FaninSink(_) => {
                 // Configure each input pad with its in-edge's negotiated caps
                 // (a terminal fan-in has no output edge to configure).
@@ -976,6 +1000,9 @@ async fn prepare_graph<'a>(
                     allocation = Some(resolved);
                 }
             }
+            // A terminal fan-out source exposes no allocation hook (its
+            // outputs are network-generated System bytes).
+            NodeKind::FanoutSrc(_) => {}
             NodeKind::Muxer(_) | NodeKind::FaninSink(_) => {
                 // A muxer / terminal fan-in asks each input pad for the allocation
                 // it wants (most are content-agnostic and propose nothing), storing
@@ -1399,6 +1426,13 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                     probes[node.0 as usize].clone(),
                 ))
             }
+            NodeKind::FanoutSrc(_) => {
+                let Some(GraphNodeRef::FanoutSource(source)) = element else {
+                    return Err(G2gError::CapsMismatch);
+                };
+                let sinks = fanout_src_ports(&vg, node, out_txs);
+                Box::pin(fanout_src_arm(source, sinks))
+            }
             NodeKind::Muxer(_) => unreachable!("muxer handled above"),
         };
         arms.push(arm);
@@ -1466,7 +1500,7 @@ fn fold_run_stats(
     let mut consumed = 0u64;
     for (kind, &count) in arm_kinds.iter().zip(counts.iter()) {
         match kind {
-            NodeKind::Source => emitted += count,
+            NodeKind::Source | NodeKind::FanoutSrc(_) => emitted += count,
             NodeKind::Sink | NodeKind::FaninSink(_) => consumed += count,
             _ => {}
         }
@@ -1751,6 +1785,15 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                     Box::pin(fanin_sink_arm(session, pad_rxs, reverse, probe))
                 })
             }
+            NodeKind::FanoutSrc(_) => {
+                let Some(GraphNodeRef::FanoutSource(source)) = element else {
+                    return Err(G2gError::CapsMismatch);
+                };
+                let sinks = fanout_src_ports(&vg, node, out_txs);
+                alloc::boxed::Box::new(move || -> LocalArmFuture {
+                    Box::pin(fanout_src_arm(source, sinks))
+                })
+            }
             NodeKind::Muxer(_) => unreachable!("muxer handled above"),
         };
         handles.push(spawner.spawn_arm(build));
@@ -1881,7 +1924,10 @@ fn element_ref<'g, 'a>(
 ) -> Option<&'g (dyn DynAsyncElement + 'a)> {
     match vg.element(node)? {
         GraphNodeRef::Element(elem) => Some(&**elem),
-        GraphNodeRef::Source(_) | GraphNodeRef::Muxer(_) | GraphNodeRef::Demux(_) => None,
+        GraphNodeRef::Source(_)
+        | GraphNodeRef::Muxer(_)
+        | GraphNodeRef::FanoutSource(_)
+        | GraphNodeRef::Demux(_) => None,
     }
 }
 
@@ -1957,6 +2003,25 @@ fn build_node_constraints<'g, 'a>(
                     inputs,
                     output,
                     follows,
+                }
+            }
+            // A terminal fan-out source produces per-port caps: the demux
+            // constraint shape with the input half inert (no input edge).
+            NodeKind::FanoutSrc(n) => {
+                let GraphNodeRef::FanoutSource(elem) =
+                    vg.element(node).ok_or(G2gError::CapsMismatch)?
+                else {
+                    return Err(G2gError::CapsMismatch);
+                };
+                let ports: Vec<CapsConstraint<'g>> = (0..n as usize)
+                    .map(|p| {
+                        elem.output_caps(p)
+                            .map(|c| CapsConstraint::Produces(CapsSet::one(c)))
+                    })
+                    .collect::<Result<_, _>>()?;
+                NodeConstraint::Demux {
+                    input: CapsConstraint::AcceptsAny,
+                    ports,
                 }
             }
             // A terminal fan-in reuses the muxer constraint shape with the
@@ -2844,6 +2909,41 @@ fn relay_reverse(pad_rxs: &[(usize, LinkReceiver)], reverse: &[Option<ReverseCha
             _ => {}
         }
     }
+}
+
+/// Order a terminal fan-out source's output senders by PORT (out-edges arrive
+/// in edge order; the port is each edge's `src.index`), wrapped as the
+/// [`MultiOutputSink`] the source pushes into.
+fn fanout_src_ports<'a>(
+    vg: &ValidatedGraph<GraphNodeRef<'a>>,
+    node: NodeId,
+    out_txs: Vec<LinkSender>,
+) -> MultiSenderSink {
+    let mut by_port: Vec<Option<SenderSink>> = (0..out_txs.len()).map(|_| None).collect();
+    for (tx, &oe) in out_txs.into_iter().zip(vg.out_edges(node)) {
+        let port = vg.edge(oe).src.index as usize;
+        if let Some(slot) = by_port.get_mut(port) {
+            *slot = Some(SenderSink::new(tx));
+        }
+    }
+    // D1 validation guarantees each declared port is linked exactly once.
+    MultiSenderSink::new(
+        by_port
+            .into_iter()
+            .map(|s| s.expect("validated: every fan-out port linked"))
+            .collect(),
+    )
+}
+
+/// Drive a terminal fan-out source (a 0-in / N-out [`MultiOutputSource`], e.g.
+/// a WebRTC session receiving several tracks) over the DAG's per-edge channels:
+/// the element pushes to each port itself and owes every port an `Eos`
+/// (its `run` contract), so the arm just runs it to completion.
+async fn fanout_src_arm<'a>(
+    mut source: Box<dyn DynMultiOutputSource + 'a>,
+    mut sinks: MultiSenderSink,
+) -> Result<u64, G2gError> {
+    source.run(&mut sinks).await
 }
 
 /// Drive a terminal fan-in element (an N-input [`MultiInputElement`] with no

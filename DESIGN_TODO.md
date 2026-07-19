@@ -601,11 +601,8 @@ Phased plan:
     + `WebRtcDuplexSession` (one `Rtc`, sendrecv m-lines; WHIP/WHEP can't carry
     sendrecv, so peers exchange SDP directly over an `SdpChannel`). Validated by
     in-process P2P loopbacks (video + full A/V, localhost, no server). Remaining:
-    graph/launch expression for the terminal fan-out session sources (a
-    `FanoutSrc` node kind, the fan-out mirror of the M713 terminal fan-in;
-    the session sinks are launch-wired, M725); mid-session transceiver
-    add/remove (renegotiation); a pluggable real-SFU (LiveKit) signaller for
-    the duplex element.
+    mid-session transceiver add/remove (renegotiation); a pluggable real-SFU
+    (LiveKit) signaller for the duplex element.
   - **T2 (mostly wiring): RTCP feedback.** PLI / keyframe-request DONE (M243):
     `Reconfigure::ForceKeyframe` + `take_reconfigure`; `WebRtcSink` maps a remote
     `Event::KeyframeRequest` to it, `Av1Enc` forces an IDR, `WebRtcWhepSrc`

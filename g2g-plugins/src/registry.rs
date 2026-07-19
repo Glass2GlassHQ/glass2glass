@@ -1352,6 +1352,18 @@ fn register_feature_gated(reg: &mut Registry) {
     reg.register_muxer(MuxerFactory::new("livekitsink", |inputs| {
         Box::new(crate::livekitsink::LiveKitSink::new("", "", "g2g").with_inputs(inputs))
     }));
+    // Terminal fan-out session sources (M727): output 0 = H.264 video, output
+    // 1 = Opus audio (`livekitsrc name=s url=...  s. ! ...  s. ! ...`).
+    #[cfg(feature = "webrtc-livekit")]
+    reg.register_fanout_src(g2g_core::runtime::FanoutSrcFactory::new(
+        "livekitsrc",
+        |_n| Box::new(crate::livekitsrc::LiveKitSrc::new("", "", "g2g-sub")),
+    ));
+    #[cfg(feature = "webrtc")]
+    reg.register_fanout_src(g2g_core::runtime::FanoutSrcFactory::new(
+        "webrtcwhepsessionsrc",
+        |_n| Box::new(crate::webrtcwhepsession::WebRtcWhepSessionSrc::new("")),
+    ));
     #[cfg(all(target_os = "linux", feature = "kms-sink"))]
     reg.register_launch(LaunchFactory::new("kmssink", Vec::new(), || {
         Box::new(KmsSink::new())

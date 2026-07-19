@@ -171,6 +171,82 @@ pub trait MultiOutputSource: ElementBound {
     /// [`PipelinePacket::Eos`] to every output before returning `Ok`, so no
     /// downstream branch is stranded. Returns the count of `DataFrame`s pushed.
     fn run<'a>(&'a mut self, out: &'a mut dyn MultiOutputSink) -> Self::RunFuture<'a>;
+
+    /// Settable properties, so a `gst-launch` line can configure the source
+    /// (M727). Default none.
+    fn properties(&self) -> &'static [PropertySpec] {
+        &[]
+    }
+
+    fn set_property(&mut self, _name: &str, _value: PropValue) -> Result<(), PropError> {
+        Err(PropError::Unknown)
+    }
+
+    fn get_property(&self, _name: &str) -> Option<PropValue> {
+        None
+    }
+}
+
+/// Dyn-safe mirror of [`MultiOutputSource`] (boxed-future `run`), so a terminal
+/// fan-out source can be a graph node payload (M727), like
+/// [`DynSourceLoop`](crate::runtime::DynSourceLoop) for single-output sources.
+pub trait DynMultiOutputSource: ElementBound {
+    fn output_count(&self) -> usize;
+    fn output_caps(&self, output: usize) -> Result<Caps, G2gError>;
+    fn run<'a>(
+        &'a mut self,
+        out: &'a mut dyn MultiOutputSink,
+    ) -> BoxFuture<'a, Result<u64, G2gError>>;
+    fn properties(&self) -> &'static [PropertySpec] {
+        &[]
+    }
+    fn set_property(&mut self, _name: &str, _value: PropValue) -> Result<(), PropError> {
+        Err(PropError::Unknown)
+    }
+    fn get_property(&self, _name: &str) -> Option<PropValue> {
+        None
+    }
+}
+
+impl<T: MultiOutputSource> DynMultiOutputSource for T {
+    fn output_count(&self) -> usize {
+        MultiOutputSource::output_count(self)
+    }
+    fn output_caps(&self, output: usize) -> Result<Caps, G2gError> {
+        MultiOutputSource::output_caps(self, output)
+    }
+    fn run<'a>(
+        &'a mut self,
+        out: &'a mut dyn MultiOutputSink,
+    ) -> BoxFuture<'a, Result<u64, G2gError>> {
+        Box::pin(MultiOutputSource::run(self, out))
+    }
+    fn properties(&self) -> &'static [PropertySpec] {
+        MultiOutputSource::properties(self)
+    }
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        MultiOutputSource::set_property(self, name, value)
+    }
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        MultiOutputSource::get_property(self, name)
+    }
+}
+
+/// Forwarding impl so a borrowed `&mut dyn DynMultiOutputSource` can be boxed
+/// as a graph payload without taking ownership.
+impl<'b> DynMultiOutputSource for &'b mut (dyn DynMultiOutputSource + 'b) {
+    fn output_count(&self) -> usize {
+        (**self).output_count()
+    }
+    fn output_caps(&self, output: usize) -> Result<Caps, G2gError> {
+        (**self).output_caps(output)
+    }
+    fn run<'a>(
+        &'a mut self,
+        out: &'a mut dyn MultiOutputSink,
+    ) -> BoxFuture<'a, Result<u64, G2gError>> {
+        (**self).run(out)
+    }
 }
 
 /// Inbound side of a [`MultiDuplexSession`]: the runner hands the session a

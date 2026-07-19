@@ -764,6 +764,96 @@ async fn livekit_ingest_loopback() {
     assert!(a > 30, "expected a continuous audio feed, got {a}");
 }
 
+/// M727 graph-node ingest: the same sink-publish + `LiveKitSrc` subscribe
+/// loopback, but the subscriber runs as a `FanoutSrc` GRAPH node
+/// (`Graph::add_fanout_src`) feeding two counting sinks, proving the terminal
+/// fan-out node against the real SFU.
+#[tokio::test]
+#[ignore = "needs a LiveKit server + G2G_H264_FIXTURE + G2G_OPUS_FIXTURE"]
+async fn livekit_ingest_via_graph_node() {
+    let (Ok(url), Ok(api_key), Ok(api_secret), Ok(fixture), Ok(opus_fixture)) = (
+        std::env::var("G2G_LIVEKIT_URL"),
+        std::env::var("G2G_LIVEKIT_API_KEY"),
+        std::env::var("G2G_LIVEKIT_API_SECRET"),
+        std::env::var("G2G_H264_FIXTURE"),
+        std::env::var("G2G_OPUS_FIXTURE"),
+    ) else {
+        eprintln!("skipping: set G2G_LIVEKIT_URL, api key/secret and both fixtures");
+        return;
+    };
+    let room = std::env::var("G2G_LIVEKIT_ROOM").unwrap_or_else(|_| "g2g-ingest-graph".to_string());
+    let secs: u64 = std::env::var("G2G_PUBLISH_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(12);
+    let nals = Arc::new(group_access_units(split_annexb(
+        &std::fs::read(&fixture).expect("read h264 fixture"),
+    )));
+    let opus = Arc::new(extract_opus_packets(&opus_fixture).await);
+
+    let publisher = {
+        let (url, room, api_key, api_secret) = (
+            url.clone(),
+            room.clone(),
+            api_key.clone(),
+            api_secret.clone(),
+        );
+        async move {
+            let mut vsrc = PacedH264Src {
+                nals,
+                duration: Duration::from_secs(secs),
+                width: 640,
+                height: 480,
+            };
+            let mut asrc = PacedOpusSrc {
+                packets: opus,
+                duration: Duration::from_secs(secs),
+            };
+            let mut sink = LiveKitSink::new(url, room, "g2g-publisher")
+                .with_api_key(api_key, api_secret)
+                .with_audio();
+            let clock = ZeroClock;
+            let sources: Vec<&mut dyn DynSourceLoop> = vec![&mut vsrc, &mut asrc];
+            run_fanin_session(sources, &mut sink, &clock, 8).await
+        }
+    };
+
+    let video_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let audio_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let subscriber = {
+        let (vc, ac) = (video_count.clone(), audio_count.clone());
+        async move {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            use g2g_core::runtime::{run_graph, GraphNode};
+            let mut g: g2g_core::Graph<GraphNode> = g2g_core::Graph::new();
+            let src = g.add_fanout_src(
+                GraphNode::fanout_source(
+                    LiveKitSrc::new(url, room, "g2g-graph-subscriber")
+                        .with_api_key(api_key, api_secret)
+                        .with_frame_limit(secs.saturating_mul(120)),
+                ),
+                2,
+            );
+            let vsink = g.add_sink(GraphNode::element(CountingSink { frames: vc }));
+            let asink = g.add_sink(GraphNode::element(CountingSink { frames: ac }));
+            g.link(src.output(0), vsink).unwrap();
+            g.link(src.output(1), asink).unwrap();
+            tokio::time::timeout(Duration::from_secs(secs + 5), run_graph(g, &ZeroClock, 8)).await
+        }
+    };
+
+    let (pub_res, sub_res) = tokio::join!(publisher, subscriber);
+    pub_res.expect("publisher session runs");
+    if let Ok(r) = sub_res {
+        r.expect("graph subscriber ends cleanly");
+    }
+    let v = video_count.load(std::sync::atomic::Ordering::SeqCst);
+    let a = audio_count.load(std::sync::atomic::Ordering::SeqCst);
+    eprintln!("graph subscriber received video={v} audio={a}");
+    assert!(v > 30, "continuous video via the graph node, got {v}");
+    assert!(a > 30, "continuous audio via the graph node, got {a}");
+}
+
 /// M713 encoder fan graph: the simulcast layers are ENCODED live inside one
 /// graph instead of fed from pre-encoded fixtures. One paced raw source tees
 /// into per-layer branches (`videoscale -> ffmpegenc`) that end on the

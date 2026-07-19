@@ -47,6 +47,7 @@ impl From<NodeKind> for NodeRole {
             NodeKind::Sink => NodeRole::Sink,
             NodeKind::Tee(_) => NodeRole::Tee,
             NodeKind::Muxer(_) | NodeKind::FaninSink(_) => NodeRole::Muxer,
+            NodeKind::FanoutSrc(_) => NodeRole::Source,
         }
     }
 }

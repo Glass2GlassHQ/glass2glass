@@ -1964,6 +1964,16 @@ browser-validated end to end; the WHIP path shares the machinery but its live
 multi-rid ingest validation is owed (no local WHIP server ingests client
 simulcast).
 
+**Session sources as DAG nodes (M727).** The receive-side mirror:
+`NodeKind::FanoutSrc(n)` via `Graph::add_fanout_src` runs a terminal
+`MultiOutputSource` (0 inputs, N outputs it generates itself) as a graph node,
+its ports solved from `output_caps` (the demux constraint shape with the input
+half inert) and its arm just running the element into per-edge senders (the
+element owes every port an `Eos`). `FanoutSrcFactory` + named output pads wire
+it into `parse_launch` (`livekitsrc name=s url=...  s. ! ...  s. ! ...`), with
+a properties surface added to `MultiOutputSource` for the launch knobs.
+Validated live: `LiveKitSrc` as a graph node subscribing on a real server.
+
 **Session sinks as DAG nodes (M713).** A terminal fan-in is also a first-class
 graph node, `NodeKind::FaninSink(n)` via `Graph::add_fanin_sink`, so a transform
 chain can feed each session pad instead of a bare source: the live encoder fan

@@ -47,7 +47,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AudioFormat, Caps, Dim, FrameTiming, G2gError, HardwareError, MemoryDomain, MultiOutputSink,
-    MultiOutputSource, PipelinePacket, Rate, VideoCodec,
+    MultiOutputSource, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate,
+    VideoCodec,
 };
 
 use crate::filesink::io_err;
@@ -228,6 +229,29 @@ async fn answer_offer(
     .await
 }
 
+/// Settable properties, so a `gst-launch` line can subscribe without the
+/// builder (`livekitsrc url=... room=... api-key=... api-secret=...`).
+static LIVEKITSRC_PROPS: &[PropertySpec] = &[
+    PropertySpec::new(
+        "url",
+        PropKind::Str,
+        "LiveKit signalling URL (ws:// or wss://)",
+    ),
+    PropertySpec::new("room", PropKind::Str, "room name to join"),
+    PropertySpec::new("identity", PropKind::Str, "participant identity"),
+    PropertySpec::new("api-key", PropKind::Str, "LiveKit API key (mints a token)"),
+    PropertySpec::new(
+        "api-secret",
+        PropKind::Str,
+        "LiveKit API secret (mints a token)",
+    ),
+    PropertySpec::new(
+        "token",
+        PropKind::Str,
+        "pre-minted access token (overrides api-key/secret)",
+    ),
+];
+
 impl MultiOutputSource for LiveKitSrc {
     type RunFuture<'a>
         = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
@@ -243,6 +267,36 @@ impl MultiOutputSource for LiveKitSrc {
             VIDEO_PORT => Ok(video_caps()),
             AUDIO_PORT => Ok(audio_caps()),
             _ => Err(G2gError::CapsMismatch),
+        }
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        LIVEKITSRC_PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        let v = value.as_str().ok_or(PropError::Type)?;
+        match name {
+            "url" => self.url = v.into(),
+            "room" => self.room = v.into(),
+            "identity" => self.identity = v.into(),
+            "api-key" => self.api_key = v.into(),
+            "api-secret" => self.api_secret = v.into(),
+            "token" => self.token = (!v.is_empty()).then(|| v.into()),
+            _ => return Err(PropError::Unknown),
+        }
+        Ok(())
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "url" => Some(PropValue::Str(self.url.clone())),
+            "room" => Some(PropValue::Str(self.room.clone())),
+            "identity" => Some(PropValue::Str(self.identity.clone())),
+            "api-key" => Some(PropValue::Str(self.api_key.clone())),
+            "api-secret" => Some(PropValue::Str(self.api_secret.clone())),
+            "token" => Some(PropValue::Str(self.token.clone().unwrap_or_default())),
+            _ => None,
         }
     }
 

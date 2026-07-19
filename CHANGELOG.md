@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M727: terminal fan-out source graph node (`Graph::add_fanout_src` + `FanoutSrcFactory` launch wiring), so session sources (`livekitsrc`, `webrtcwhepsessionsrc`) run inside graphs and launch lines; validated live against a LiveKit server.
 - M726: mono Opus accepted on the WebRTC sinks and a graceful EOS pacer drain (queued RTP flushes before the socket drops).
 - M725: `webrtcsessionsink` / `livekitsink` in the launch registry as terminal fan-in elements (track kinds from each linked pad's caps, endpoint/room via properties).
 - M724: mid-stream caps re-solve through the fan-in session runners (a source's caps change re-configures its session input pad, standalone and graph arms).

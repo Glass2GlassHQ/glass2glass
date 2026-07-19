@@ -38,7 +38,9 @@ impl From<NodeId> for PadId {
 
 /// The topology role of a node, which fixes its pad counts. `Tee(n)` is
 /// 1-in/n-out, `Muxer(n)` is n-in/1-out, `FaninSink(n)` is n-in/0-out (a
-/// terminal fan-in element: a multi-input sink with no merged output).
+/// terminal fan-in element: a multi-input sink with no merged output), and
+/// `FanoutSrc(n)` is 0-in/n-out (a terminal fan-out source generating each
+/// output itself, e.g. a WebRTC session receiving several tracks).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeKind {
     Source,
@@ -47,13 +49,14 @@ pub enum NodeKind {
     Tee(u8),
     Muxer(u8),
     FaninSink(u8),
+    FanoutSrc(u8),
 }
 
 impl NodeKind {
     /// Number of input pads this kind exposes.
     pub fn in_pads(self) -> u8 {
         match self {
-            NodeKind::Source => 0,
+            NodeKind::Source | NodeKind::FanoutSrc(_) => 0,
             NodeKind::Transform | NodeKind::Sink | NodeKind::Tee(_) => 1,
             NodeKind::Muxer(n) | NodeKind::FaninSink(n) => n,
         }
@@ -64,7 +67,7 @@ impl NodeKind {
         match self {
             NodeKind::Sink | NodeKind::FaninSink(_) => 0,
             NodeKind::Source | NodeKind::Transform | NodeKind::Muxer(_) => 1,
-            NodeKind::Tee(n) => n,
+            NodeKind::Tee(n) | NodeKind::FanoutSrc(n) => n,
         }
     }
 }
@@ -217,6 +220,24 @@ impl FaninSink {
     }
 }
 
+/// A terminal fan-out handle returned by [`Graph::add_fanout_src`]: no inputs,
+/// `n` output pads. The source-side mirror of [`FaninSink`]: the element
+/// generates its outputs itself (a WebRTC session receiving N tracks).
+#[derive(Debug, Clone, Copy)]
+pub struct FanoutSrc(NodeId);
+
+impl FanoutSrc {
+    pub fn node(self) -> NodeId {
+        self.0
+    }
+    pub fn output(self, index: u8) -> PadId {
+        PadId {
+            node: self.0,
+            index,
+        }
+    }
+}
+
 /// Validation failures from [`Graph::link`] and [`Graph::finish`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GraphError {
@@ -327,6 +348,15 @@ impl<E> Graph<E> {
     /// reverse-signal routing back to the arm feeding each pad.
     pub fn add_fanin_sink(&mut self, element: E, inputs: u8) -> FaninSink {
         FaninSink(self.push(NodeKind::FaninSink(inputs), Some(element)))
+    }
+
+    /// Add a terminal fan-out source: no inputs, `outputs` output pads.
+    /// `element` is a [`MultiOutputSource`](crate::MultiOutputSource) that
+    /// generates every output itself (a WebRTC session receiving its tracks
+    /// over one PeerConnection). The runner drives it the `run_fanout_session`
+    /// way: the element pushes to each port and owes every port an `Eos`.
+    pub fn add_fanout_src(&mut self, element: E, outputs: u8) -> FanoutSrc {
+        FanoutSrc(self.push(NodeKind::FanoutSrc(outputs), Some(element)))
     }
 
     /// Add a content-routing demultiplexer: 1 input, `outputs` outputs. The node
@@ -526,7 +556,10 @@ impl<E> Graph<E> {
             }
             if matches!(
                 node.kind,
-                NodeKind::Tee(0) | NodeKind::Muxer(0) | NodeKind::FaninSink(0)
+                NodeKind::Tee(0)
+                    | NodeKind::Muxer(0)
+                    | NodeKind::FaninSink(0)
+                    | NodeKind::FanoutSrc(0)
             ) {
                 return Err(GraphError::DegenerateFanNode(id));
             }

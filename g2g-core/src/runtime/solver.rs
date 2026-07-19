@@ -1108,7 +1108,11 @@ fn node_consistent<E>(
     let get = |e: usize| assign[e].as_ref().expect("checked all assigned");
     match graph.kind(node) {
         // Membership is already ensured by arc consistency; nothing cross-edge.
-        NodeKind::Source | NodeKind::Sink | NodeKind::Muxer(_) | NodeKind::FaninSink(_) => true,
+        NodeKind::Source
+        | NodeKind::Sink
+        | NodeKind::Muxer(_)
+        | NodeKind::FaninSink(_)
+        | NodeKind::FanoutSrc(_) => true,
         NodeKind::Tee(_) => {
             // A demux decouples its ports (each its own produce set, ensured by arc
             // consistency), so there is no cross-edge equality; a broadcast tee
@@ -1158,6 +1162,7 @@ fn kind_short(kind: NodeKind) -> &'static str {
         NodeKind::Tee(_) => "tee",
         NodeKind::Muxer(_) => "mux",
         NodeKind::FaninSink(_) => "fanin-sink",
+        NodeKind::FanoutSrc(_) => "fanout-src",
     }
 }
 
@@ -1249,7 +1254,8 @@ pub(crate) fn graph_downstream_feasibility<E>(
     for &node in graph.topo().iter().rev() {
         let idx = node.0 as usize;
         match graph.kind(node) {
-            NodeKind::Source => {}
+            // Terminal ends of the DAG: no in-edges to write feasibility for.
+            NodeKind::Source | NodeKind::FanoutSrc(_) => {}
             NodeKind::Sink => {
                 let ie = graph.in_edges(node)[0];
                 feas[ie] = match &constraints[idx] {
@@ -1376,6 +1382,25 @@ fn apply_node<E>(
         // unused.
         NodeKind::FaninSink(_) => match nc {
             NodeConstraint::Muxer { inputs, .. } => narrow_muxer_inputs(graph, node, inputs, edges),
+            _ => Err(shape_err),
+        },
+        // A terminal fan-out source narrows each output edge by its port's
+        // produce set (the demux constraint shape with the input half unused:
+        // there is no input edge).
+        NodeKind::FanoutSrc(_) => match nc {
+            NodeConstraint::Demux { ports, .. } => {
+                for &oe in out_e {
+                    let port = graph.edge(oe).src.index as usize;
+                    match ports.get(port) {
+                        Some(CapsConstraint::Produces(set)) => narrow_edge(graph, edges, oe, set)?,
+                        Some(CapsConstraint::LegacySource(caps)) => {
+                            narrow_edge(graph, edges, oe, &CapsSet::one(caps.clone()))?
+                        }
+                        _ => return Err(shape_err),
+                    }
+                }
+                Ok(())
+            }
             _ => Err(shape_err),
         },
     }
