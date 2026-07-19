@@ -80,8 +80,11 @@ async fn avdec_h264_alias_resolves_and_decodes() {
 #[cfg(feature = "vtencode")]
 #[tokio::test(flavor = "current_thread")]
 async fn vtenc_h264_encodes_in_a_text_pipeline() {
+    // The explicit NV12 filter is the repo idiom for driving `videoconvert` to
+    // a specific target (see gst_launch_corpus / m197).
     let consumed = run_line(
-        "videotestsrc num-buffers=5 ! videoconvert ! vtenc_h264 bitrate=1000000 ! fakesink",
+        "videotestsrc num-buffers=5 ! videoconvert ! video/x-raw,format=NV12 \
+         ! vtenc_h264 bitrate=1000000 ! fakesink",
     )
     .await;
     assert_eq!(consumed, 5, "every test picture encoded to an access unit");
@@ -90,7 +93,10 @@ async fn vtenc_h264_encodes_in_a_text_pipeline() {
 #[cfg(feature = "vtencode")]
 #[tokio::test(flavor = "current_thread")]
 async fn vtenc_h265_encodes_in_a_text_pipeline() {
-    let consumed =
-        run_line("videotestsrc num-buffers=5 ! videoconvert ! vtenc_h265 ! fakesink").await;
+    let consumed = run_line(
+        "videotestsrc num-buffers=5 ! videoconvert ! video/x-raw,format=NV12 \
+         ! vtenc_h265 ! fakesink",
+    )
+    .await;
     assert_eq!(consumed, 5, "every test picture encoded to an access unit");
 }

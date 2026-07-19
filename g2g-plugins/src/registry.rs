@@ -914,6 +914,8 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     ));
     // macOS hardware video decode via VideoToolbox (M218/M534); one factory per
     // codec, like the MediaCodec pair. `vtdec` matches the gst applemedia name.
+    // Registered twice like `ffmpegdec`: as an auto-plug candidate and as a
+    // launch factory (a bare name in a text pipeline resolves via the latter).
     #[cfg(all(target_os = "macos", feature = "vtdecode"))]
     reg.register(
         ElementFactory::of::<crate::vtdecode::VtDecode>("vtdec", |_| {
@@ -928,6 +930,16 @@ fn register_autoplug_candidates(reg: &mut Registry) {
         })
         .hardware(),
     );
+    #[cfg(all(target_os = "macos", feature = "vtdecode"))]
+    reg.register_launch(LaunchFactory::of::<crate::vtdecode::VtDecode>(
+        "vtdec",
+        || Box::new(crate::vtdecode::VtDecode::h264()),
+    ));
+    #[cfg(all(target_os = "macos", feature = "vtdecode"))]
+    reg.register_launch(LaunchFactory::of::<crate::vtdecode::VtDecode>(
+        "vtdech265",
+        || Box::new(crate::vtdecode::VtDecode::h265()),
+    ));
     // macOS hardware video encode via VideoToolbox (M231/M534); launch-only
     // (encoders are not auto-plug candidates), under the gst applemedia names.
     #[cfg(all(target_os = "macos", feature = "vtencode"))]
