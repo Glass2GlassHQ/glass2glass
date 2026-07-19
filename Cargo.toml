@@ -125,3 +125,9 @@ panic = "abort"
 [profile.bench]
 lto = "thin"
 codegen-units = 1
+
+# str0m 0.20 pads every media packet to the SRTP block size, which LiveKit's
+# forwarder mangles for browser subscribers (str0m #1014, livekit #4689). The
+# fork branch sends media unpadded; drop this patch when either upstream fixes.
+[patch.crates-io]
+str0m = { git = "https://github.com/boxerab/str0m", branch = "no-media-padding" }

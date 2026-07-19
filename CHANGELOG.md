@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M709: patch str0m to send media packets unpadded (fork via `[patch.crates-io]`, pending upstream str0m#1014 / livekit#4689), fixing browser playback of a `LiveKitSink` stream; validated live in Chrome.
 - M708: native WebRTC data-channel elements (`WebRtcDataSrc` / `WebRtcDataSink`) on str0m SCTP, P2P over the `SdpChannel` seam, mirroring the wasm `WebRtcSrc` byte-stream surface.
 - M707: native LiveKit publish signaller (`LiveKitSink`, `webrtc-livekit` feature): hand-rolled JWT + protobuf signal codec over WebSocket, one str0m PeerConnection into a room, validated against livekit-server.
 - M706: WHIP/WHEP trickle ICE (immediate offer POST, post-offer STUN/TURN candidates via `PATCH` sdpfrag with a numeric-mid retry for mediamtx), ICE restart on sustained disconnect, and `DELETE` teardown on session end.

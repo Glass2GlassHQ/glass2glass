@@ -627,14 +627,9 @@ Phased plan:
     TURN servers, 438 stale-nonce retry. Incremental on the M242 `turn.rs`.
   - **T4: signalling ecosystem.** LiveKit ingest (answer the server-offered
     subscriber PC on the `livekit_signal` seam; the codec / JWT / WS transport
-    are reusable as-is); `wss://` (TLS) signalling for LiveKit Cloud; the
-    str0m-padding x LiveKit-forwarding interop bug (str0m pads every media
-    packet to the 16-byte SRTP block with the RTP P bit set; LiveKit's
-    forwarder strips the padding bytes but keeps the flag, so a browser
-    subscriber reads H.264 tail bytes as padding lengths and assembles no
-    frames; root-caused by packet capture, fix is upstream in str0m
-    (optional padding) or LiveKit (forwarding), not in g2g); then Janus /
-    Kinesis as wanted.
+    are reusable as-is); `wss://` (TLS) signalling for LiveKit Cloud; drop the
+    `[patch.crates-io]` str0m fork (unpadded media sends) once an upstream fix
+    lands (str0m#1014 / livekit#4689); then Janus / Kinesis as wanted.
   - **T5: advanced.** Simulcast (encoder fan-out); FEC; full renegotiation;
     data-channel loose ends (str0m surfaces no remote-close event, so EOS rides
     an explicit marker message; a WHIP/SFU-signalled data channel vs the P2P
