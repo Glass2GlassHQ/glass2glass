@@ -421,7 +421,7 @@ Phased plan:
      `NoRaslOutputFlag == 1` and its RASL leading pictures (which reference absent
      pre-CRA frames) are discarded (`h265_is_rasl` + a `skip_rasl` flag set per
      IRAP); the CRA's trailing pictures and following GOPs decode bit-exact vs a
-     full decode. What remains for H.265: long-term references. Streaming B-frame reorder in the
+     full decode. Streaming B-frame reorder in the
      `VulkanVideoDec` element is done (M586, validated on the 3060): its system
      (NV12) path feeds retired `decode_push` frames through a `ReorderBuffer` keyed
      by (coded-video-sequence, POC), so an AU-by-AU stream with B-frames emits in

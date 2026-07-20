@@ -253,7 +253,9 @@ fn parse_vui_framerate(br: &mut BitReader, sps_max_sub_layers_minus1: u32) -> Op
     }
     let mut sets = Vec::with_capacity(num_short_term_ref_pic_sets as usize);
     for idx in 0..num_short_term_ref_pic_sets as usize {
-        sets.push(parse_h265_short_term_rps(br, idx, &sets)?);
+        let (set, _) =
+            parse_h265_short_term_rps(br, idx, num_short_term_ref_pic_sets as usize, &sets)?;
+        sets.push(set);
     }
     if br.read_bit()? == 1 {
         // long_term_ref_pics_present_flag
@@ -392,23 +394,33 @@ pub struct H265ShortTermRps {
 
 /// Parse the `st_ref_pic_set(stRpsIdx)` at index `idx` (H.265 7.3.7), deriving
 /// the canonical explicit form. When the set is coded by inter-RPS prediction it
-/// is derived from `prev[idx - 1]` per H.265 7.4.8; the bit reader is always
+/// is derived from `prev[RefRpsIdx]` per H.265 7.4.8; the bit reader is always
 /// advanced by `NumDeltaPocs[RefRpsIdx] + 1` used/use-delta flags in that branch.
-/// Within an SPS `stRpsIdx` is never `num_short_term_ref_pic_sets`, so
-/// `delta_idx_minus1` is not present. `None` on truncation or an out-of-range
-/// count.
+/// `num_sets` is the SPS's `num_short_term_ref_pic_sets`: only a slice-coded set
+/// (`idx == num_sets`) carries `delta_idx_minus1`; within the SPS it is inferred
+/// 0 (RefRpsIdx = idx - 1). Also returns `NumDeltaPocs[RefRpsIdx]` (0 for an
+/// explicitly-coded set): a Vulkan driver re-parsing an inter-predicted slice
+/// RPS needs it (`NumDeltaPocsOfRefRpsIdx`). `None` on truncation or an
+/// out-of-range count.
 pub(crate) fn parse_h265_short_term_rps(
     br: &mut BitReader,
     idx: usize,
+    num_sets: usize,
     prev: &[H265ShortTermRps],
-) -> Option<H265ShortTermRps> {
+) -> Option<(H265ShortTermRps, u8)> {
     let mut rps = H265ShortTermRps::default();
+    let mut ref_num_delta_pocs = 0u8;
     let inter_pred = if idx != 0 { br.read_bit()? == 1 } else { false };
 
     if inter_pred {
-        // RefRpsIdx = stRpsIdx - (delta_idx_minus1 + 1); delta_idx_minus1 is not
-        // coded in the SPS, so it is 0 and RefRpsIdx = idx - 1.
-        let reference = prev.get(idx.checked_sub(1)?)?;
+        // RefRpsIdx = stRpsIdx - (delta_idx_minus1 + 1); delta_idx_minus1 is
+        // coded only for a slice-header set (stRpsIdx == num_sets).
+        let delta_idx = if idx == num_sets {
+            br.read_ue()? as usize + 1
+        } else {
+            1
+        };
+        let reference = prev.get(idx.checked_sub(delta_idx)?)?;
         let delta_rps_sign = br.read_bit()? as i32;
         let abs_delta_rps_minus1 = br.read_ue()? as i32;
         let delta_rps =
@@ -416,6 +428,7 @@ pub(crate) fn parse_h265_short_term_rps(
         let num_neg = reference.num_negative_pics as usize;
         let num_pos = reference.num_positive_pics as usize;
         let num_delta_pocs = num_neg + num_pos;
+        ref_num_delta_pocs = num_delta_pocs as u8;
 
         // used_by_curr_pic_flag[j] / use_delta_flag[j] for j in 0..=NumDeltaPocs.
         let mut used_by_curr = [false; 33];
@@ -500,7 +513,7 @@ pub(crate) fn parse_h265_short_term_rps(
         rps.num_negative_pics = num_negative_pics as u8;
         rps.num_positive_pics = num_positive_pics as u8;
     }
-    Some(rps)
+    Some((rps, ref_num_delta_pocs))
 }
 
 /// Fuzzing entry: walk an H.265 access unit for the SPS and parse its geometry

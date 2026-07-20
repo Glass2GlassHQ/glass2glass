@@ -851,6 +851,21 @@ gotcha: NVIDIA's Vulkan HEVC slice-header parser needs a 3-byte start code (`00
 00 01`); a 4-byte one breaks every non-IDR slice (the IDR tolerates it via the
 picture info), so the H.265 path frames slices with 3 bytes while H.264 keeps 4.
 
+**Long-term reference pictures (M743).** The SPS long-term table rides
+`pLongTermRefPicsSps`; the slice header's long-term entries (SPS-indexed and
+slice-coded, with the accumulated `DeltaPocMsbCycleLt` per 7.4.7.1) resolve
+against the DPB by full POC (MSB cycle present) or POC lsb alone, the RPS prune
+keeps long-term-listed pictures, `RefPicSetLtCurr` carries the used-by-current
+slots, and each reference's `Std*` info flags its short/long-term marking (which
+changes the driver's MV scaling, so a wrong marking corrupts prediction silently
+rather than erroring). Landing this exposed two latent slice-RPS bugs: an inline
+`st_ref_pic_set` coded in a slice header *does* carry `delta_idx_minus1` when
+inter-RPS-predicted (the SPS-context parse never read it, desyncing every later
+field), and `NumDeltaPocsOfRefRpsIdx` must be the referenced set's delta count,
+not 0, for the driver's own slice-header re-parse. All 500 frames of the JCT-VC
+`LTRPSPS_A_Qualcomm_1` conformance vector decode bit-exact vs ffmpeg on the 3060
+(`m743`); the GPU-texture path shares the same DPB machinery.
+
 **B-frames and display order.** The hardware decode handles B-frames directly: the
 driver builds the L0 / L1 reference lists from the DPB and the per-picture POC the
 decoder supplies (H.264 supplies every DPB slot's FrameNum/POC; H.265 the
