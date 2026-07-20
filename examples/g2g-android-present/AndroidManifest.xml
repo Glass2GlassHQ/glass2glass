@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- NativeActivity-only APK (no Java/Kotlin, hasCode=false): the native lib
+     below is the whole app. RECORD_AUDIO / CAMERA are declared so the
+     permission-gated capture probes can run from this harness too (granted via
+     `adb shell pm grant`, no in-app permission UI). -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="dev.g2g.present">
+
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.CAMERA" />
+
+    <application
+        android:label="g2g present"
+        android:hasCode="false"
+        android:extractNativeLibs="true">
+        <activity
+            android:name="android.app.NativeActivity"
+            android:exported="true"
+            android:configChanges="orientation|screenSize|keyboardHidden|keyboard">
+            <meta-data
+                android:name="android.app.lib_name"
+                android:value="g2g_android_present" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

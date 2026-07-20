@@ -25,6 +25,9 @@ exclude = [
     "examples/bevy-g2g-stream",
     # Bevy bring-your-own-device decode demo (M741): same standalone setup.
     "examples/bevy-g2g-decode",
+    # Android NativeActivity present harness (M742): NDK-built cdylib APK,
+    # packaged by tools/android-apk-present-smoke.sh, never in the host build.
+    "examples/g2g-android-present",
     # Cortex-M footprint-measurement harness (M268): a no_std staticlib measured
     # with size+gc-sections, kept out of the normal build.
     "examples/g2g-size",

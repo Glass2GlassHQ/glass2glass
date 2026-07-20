@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M742: Android on-screen present harness (`examples/g2g-android-present` + `tools/android-apk-present-smoke.sh`): a NativeActivity APK decoding zero-copy to the GPU and presenting to the activity's real window, device-validated.
 - M741: Bevy embedder example (`examples/bevy-g2g-decode`): a stock Bevy app adopts its own wgpu device via `GpuContext::from_wgpu` and samples g2g-decoded frames zero-copy on a 3D surface.
 - M740: on-screen macOS present example (`metal_video_on_screen`): VideoToolbox zero-copy decode into an app-owned window's `CAMetalLayer` via `MetalVideoSink::with_layer`.
 - M739: ScreenCaptureKit display capture (`screencapturesrc`, `screencapture` feature) with zero-copy `cv-output`; the CI runner denies screen recording, so the probe path is validated and real capture awaits a permitted Mac.

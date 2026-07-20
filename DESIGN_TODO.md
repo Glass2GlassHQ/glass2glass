@@ -13,9 +13,8 @@ SEGMENT, auto-plug / decodebin / playbin) are done. What remains, highest
 leverage first:
 
 1. **Platforms.** macOS: camera / screen capture validation on a permitted
-   Mac. Android: an on-screen `SurfaceView` / `NativeActivity` present harness.
-2. **Egress / transports.** SRT congestion control + real-peer interop, AES-256
-   + key rotation; FlexFEC + multi-level burst FEC.
+   Mac.
+2. **Egress / transports.** FlexFEC + multi-level burst FEC.
 3. **Depth.** Codec decode to cut reliance on the ffmpeg FFI: AV1 landed both as
    libdav1d (`Dav1dDec`, `dav1d` feature, C FFI) and pure Rust (`Rav1dDec`,
    `rav1d` feature, via `re_rav1d`). VP8 / VP9 decode is covered by `FfmpegVideoDec`
@@ -293,12 +292,6 @@ Phased plan:
 - `AvfVideoSrc` / `ScreenCaptureSrc`: real capture validation on a Mac with a
   camera / screen-recording permission (the CI runner grants neither, so only
   the probe paths are validated).
-
-## Platform: Android
-
-- On-screen present: a true `SurfaceView` / `NativeActivity` harness. Needs an
-  APK; a bare binary run from `/data/local/tmp` cannot own an on-screen
-  surface.
 
 ## Receive / decode
 

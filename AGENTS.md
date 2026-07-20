@@ -125,6 +125,12 @@ task established architecture worth keeping, document that in `DESIGN.md`.
   agent-facing caveats: a bare native binary has no binder threadpool (Codec2
   needs it to allocate the decoder's graphic buffers, so the decode probes dlsym
   `ABinderProcess_startThreadPool` from `libbinder_ndk.so`); the permission-gated
-  capture paths (mic = `RECORD_AUDIO`, camera = `CAMERA`) and a true on-screen
-  `SurfaceView` present cannot run from `/data/local/tmp` and need an APK harness,
-  so those probes report the denial and assert only the parts they can check.
+  capture paths (mic = `RECORD_AUDIO`, camera = `CAMERA`) cannot run from
+  `/data/local/tmp`, so those probes report the denial and assert only the parts
+  they can check. The APK harness exists for the on-screen case
+  (`examples/g2g-android-present` + `tools/android-apk-present-smoke.sh`,
+  NativeActivity, device must be unlocked); its manifest declares the capture
+  permissions (grantable via `pm grant`) for future in-app probes. Two APK
+  gotchas: never do slow init inside the `poll_events` callback (the Java main
+  thread waits on the ack and framework calls can deadlock against it), and the
+  `NativeWindow` must outlive the `wgpu::Surface` built over it.
