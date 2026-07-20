@@ -303,7 +303,7 @@ mod demo {
         }
     }
 
-    pub fn run() {
+    pub(crate) fn run() {
         if !MetalVideoSink::device_available() {
             eprintln!("no Metal device; nothing to present on.");
             return;
