@@ -5612,6 +5612,7 @@ dependencies = [
  "bitflags 2.13.0",
  "objc2 0.6.4",
  "objc2-core-audio-types",
+ "objc2-core-foundation",
  "objc2-foundation 0.3.2",
 ]
 

@@ -845,6 +845,8 @@ objc2-quartz-core = { version = "0.3", optional = true, default-features = false
 objc2-audio-toolbox = { version = "0.3", optional = true, default-features = false, features = [
     "std",
     "objc2-core-audio-types",
+    # AudioQueueNewOutput/NewInput take CFRunLoop params, gated on this.
+    "objc2-core-foundation",
     "AudioQueue",
 ] }
 objc2-core-audio-types = { version = "0.3", optional = true, default-features = false, features = [
