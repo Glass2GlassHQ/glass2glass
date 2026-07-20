@@ -182,9 +182,10 @@ pub use memory::{DomainSet, MemoryDomain, MemoryDomainKind, SystemSlice};
 // The GPU / shared-CPU domains are heap-backed (Arc/Box keep-alives).
 #[cfg(feature = "alloc")]
 pub use memory::{
-    CudaKeepAlive, D3D11KeepAlive, OwnedCudaBuffer, OwnedD3D11Texture, OwnedDmaBuf,
-    OwnedVulkanTexture, OwnedWebGPUBuffer, OwnedWebGPUExternalTexture, OwnedWgpuBuffer,
-    OwnedWgpuTexture, SyncFd, SystemView, WebGPUKeepAlive, WgpuBufferKeepAlive, WgpuKeepAlive,
+    CudaKeepAlive, CvPixelBufferKeepAlive, D3D11KeepAlive, OwnedCudaBuffer, OwnedCvPixelBuffer,
+    OwnedD3D11Texture, OwnedDmaBuf, OwnedVulkanTexture, OwnedWebGPUBuffer,
+    OwnedWebGPUExternalTexture, OwnedWgpuBuffer, OwnedWgpuTexture, SyncFd, SystemView,
+    WebGPUKeepAlive, WgpuBufferKeepAlive, WgpuKeepAlive,
 };
 pub use metrics::{LatencyHistogram, LatencySnapshot};
 pub use query::{AllocationParams, LatencyReport};

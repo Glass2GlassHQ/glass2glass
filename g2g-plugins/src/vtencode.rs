@@ -53,8 +53,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError,
-    HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, VideoCodec,
+    HardwareError, MemoryDomain, OutputSink, OwnedCvPixelBuffer, PadTemplate, PadTemplates,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, VideoCodec,
 };
 
 use crate::annexb::{au_is_keyframe, avcc_to_annexb};
@@ -208,6 +208,29 @@ impl VtEncode {
         Ok(())
     }
 
+    /// Encode a decoded `CVPixelBuffer` frame directly (M735 zero-copy input):
+    /// no NV12 staging buffer, the decoder's pixels go straight into the
+    /// compression session.
+    fn feed_cv(&mut self, buf: &OwnedCvPixelBuffer, pts_ns: u64) -> Result<(), G2gError> {
+        let Some(state) = self.state.as_mut() else {
+            return Err(G2gError::NotConfigured);
+        };
+        if (buf.width, buf.height) != (state.width, state.height) {
+            // A geometry change would need a session rebuild, like the packed
+            // NV12 CapsChanged path; reject loud.
+            return Err(G2gError::CapsMismatch);
+        }
+        // SAFETY: the frame's keep-alive pins the CVPixelBufferRef for the
+        // whole call; the session is live and the encode is completed
+        // synchronously before we return.
+        let pb = unsafe { &*(buf.pixel_buffer as *const CVPixelBuffer) };
+        unsafe { encode_pixel_buffer(state, pb, pts_ns)? };
+        if let Some(err) = state.collector.error.take() {
+            return Err(err);
+        }
+        Ok(())
+    }
+
     async fn emit(&mut self, e: &EncodedFrame, out: &mut dyn OutputSink) -> Result<(), G2gError> {
         let (w, h) = match &self.state {
             Some(s) => (s.width, s.height),
@@ -352,10 +375,17 @@ impl AsyncElement for VtEncode {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
-                        return Err(G2gError::UnsupportedDomain);
-                    };
-                    self.feed(slice.as_slice(), frame.timing.pts_ns)?;
+                    match &frame.domain {
+                        MemoryDomain::System(slice) => {
+                            self.feed(slice.as_slice(), frame.timing.pts_ns)?;
+                        }
+                        // M735 zero-copy: a `VtDecode cv-output` frame is already
+                        // a CVPixelBuffer; encode it directly, no NV12 staging.
+                        MemoryDomain::CvPixelBuffer(buf) => {
+                            self.feed_cv(buf, frame.timing.pts_ns)?;
+                        }
+                        _ => return Err(G2gError::UnsupportedDomain),
+                    }
                     self.drain(out).await?;
                 }
                 PipelinePacket::CapsChanged(c) => {
@@ -679,15 +709,27 @@ unsafe fn build_session(
 ///
 /// SAFETY: `state.session` is live; `nv12` outlives the synchronous encode.
 unsafe fn encode_into(state: &EncoderState, nv12: &[u8], pts_ns: u64) -> Result<(), G2gError> {
-    let hw = || G2gError::Hardware(HardwareError::Other);
     let pixel_buffer = unsafe { make_pixel_buffer(nv12, state.width, state.height)? };
+    unsafe { encode_pixel_buffer(state, &pixel_buffer, pts_ns) }
+}
 
+/// Submit one `CVPixelBuffer` to the compression session and complete it, so
+/// the output callback fires before returning. Shared by the packed-NV12 path
+/// (a staging buffer) and the M735 zero-copy `CvPixelBuffer` input.
+///
+/// SAFETY: `state.session` is live; `pb` is a valid pixel buffer that outlives
+/// the synchronous encode.
+unsafe fn encode_pixel_buffer(
+    state: &EncoderState,
+    pb: &CVPixelBuffer,
+    pts_ns: u64,
+) -> Result<(), G2gError> {
+    let hw = || G2gError::Hardware(HardwareError::Other);
     let mut info = VTEncodeInfoFlags::empty();
     // `encode_frame` takes the image buffer, PTS, duration, optional
     // frame-properties dict, source refcon, and an info-flags out-param. A
     // CVPixelBuffer is a CVImageBuffer (typedef).
-    let image: &CVImageBuffer =
-        unsafe { &*(CFRetained::as_ptr(&pixel_buffer).as_ptr() as *const CVImageBuffer) };
+    let image: &CVImageBuffer = unsafe { &*(pb as *const CVPixelBuffer as *const CVImageBuffer) };
     let st = unsafe {
         state.session.encode_frame(
             image,

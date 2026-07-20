@@ -240,7 +240,7 @@ jobs:
       - name: test g2g-plugins (vtdecode + vtencode runtime)
         run: >
           cargo test -p g2g-plugins --locked --features vtdecode,vtencode
-          --test m731_videotoolbox --test m733_vt_registry -- --nocapture
+          --test m731_videotoolbox --test m733_vt_registry --test m735_vt_zerocopy -- --nocapture
       - name: check g2g-ml (wgpu + burn, Metal)
         run: cargo check -p g2g-ml --locked --all-targets --features wgpu,burn
 

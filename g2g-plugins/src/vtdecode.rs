@@ -5,9 +5,10 @@
 //! it consumes Annex-B H.264 *or* H.265 (HEVC) `DataFrame`s (`MemoryDomain::
 //! System`, what `RtspSrc` / `H264Parse` / `H265Parse` emit) and produces decoded
 //! NV12 frames, also `MemoryDomain::System` (a CPU copy out of the decoder's
-//! `CVPixelBuffer`). It is the first element of the macOS platform track
-//! (DESIGN_TODO.md "Platform: macOS"); a zero-copy `CVPixelBuffer` / `IOSurface`
-//! memory domain and a Metal present sink are the follow-ups.
+//! `CVPixelBuffer`). In `cv-output` mode (M735) the copy is skipped: frames are
+//! emitted as retained IOSurface-backed `CVPixelBuffer`s
+//! (`MemoryDomain::CvPixelBuffer`), so a VideoToolbox encoder or Metal consumer
+//! reads the decoder's buffer directly. A Metal present sink is the follow-up.
 //!
 //! The two codecs differ only in the format-description constructor
 //! (`...FromH264ParameterSets` vs `...FromHEVCParameterSets`, the latter taking an
@@ -31,7 +32,7 @@
 use core::ffi::c_void;
 use core::ptr::{self, NonNull};
 
-use objc2_core_foundation::CFRetained;
+use objc2_core_foundation::{CFDictionary, CFNumber, CFRetained, CFString, CFType};
 
 // OSStatus is `pub(crate)` in the objc2 framework crates (not importable). It is
 // a transparent `i32` alias, so a local alias matches the FFI signatures exactly.
@@ -43,8 +44,9 @@ use objc2_core_media::{
     CMVideoFormatDescriptionCreateFromHEVCParameterSets,
 };
 use objc2_core_video::{
-    CVImageBuffer, CVPixelBuffer, CVPixelBufferGetBaseAddressOfPlane,
-    CVPixelBufferGetBytesPerRowOfPlane, CVPixelBufferGetHeight, CVPixelBufferGetHeightOfPlane,
+    kCVPixelBufferIOSurfacePropertiesKey, kCVPixelBufferPixelFormatTypeKey, CVImageBuffer,
+    CVPixelBuffer, CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRowOfPlane,
+    CVPixelBufferGetHeight, CVPixelBufferGetHeightOfPlane, CVPixelBufferGetIOSurface,
     CVPixelBufferGetPixelFormatType, CVPixelBufferGetWidth, CVPixelBufferGetWidthOfPlane,
     CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
 };
@@ -56,9 +58,10 @@ use objc2_video_toolbox::{
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError,
-    HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate,
-    RawVideoFormat, VideoCodec,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, CvPixelBufferKeepAlive, Dim,
+    FrameTiming, G2gError, HardwareError, MemoryDomain, MemoryDomainKind, OutputSink,
+    OwnedCvPixelBuffer, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec, Rate, RawVideoFormat, VideoCodec,
 };
 
 use crate::annexb::{
@@ -66,6 +69,7 @@ use crate::annexb::{
 };
 
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::future::Future;
 use core::pin::Pin;
@@ -76,14 +80,72 @@ use core::pin::Pin;
 const K_CV_PIXEL_FORMAT_420V: u32 = 0x3432_3076; // '420v'
 const K_CV_PIXEL_FORMAT_420F: u32 = 0x3432_3066; // '420f'
 
-/// One decoded frame the output callback has packed to tight NV12.
-#[derive(Debug)]
-struct DecodedFrame {
-    nv12: Box<[u8]>,
-    width: u32,
-    height: u32,
-    pts_ns: u64,
+/// One decoded frame the output callback captured: packed to tight NV12 bytes
+/// (the default), or the decoder's retained `CVPixelBuffer` unread (`cv-output`
+/// mode, the M735 zero-copy domain).
+enum DecodedFrame {
+    Nv12 {
+        nv12: Box<[u8]>,
+        width: u32,
+        height: u32,
+        pts_ns: u64,
+    },
+    Cv {
+        buf: CFRetained<CVPixelBuffer>,
+        width: u32,
+        height: u32,
+        pixel_format: u32,
+        io_surface_backed: bool,
+        pts_ns: u64,
+    },
 }
+
+// Manual impl: `CFRetained` has no `Debug`.
+impl core::fmt::Debug for DecodedFrame {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            DecodedFrame::Nv12 { width, height, .. } => f
+                .debug_struct("Nv12")
+                .field("width", width)
+                .field("height", height)
+                .finish_non_exhaustive(),
+            DecodedFrame::Cv {
+                width,
+                height,
+                pixel_format,
+                io_surface_backed,
+                ..
+            } => f
+                .debug_struct("Cv")
+                .field("width", width)
+                .field("height", height)
+                .field("pixel_format", pixel_format)
+                .field("io_surface_backed", io_surface_backed)
+                .finish_non_exhaustive(),
+        }
+    }
+}
+
+/// Pins a decoded `CVPixelBuffer` for a downstream frame's lifetime (the
+/// keep-alive inside [`OwnedCvPixelBuffer`]); the last drop releases the
+/// decoder's buffer.
+struct CvBufferOwner(CFRetained<CVPixelBuffer>);
+
+impl core::fmt::Debug for CvBufferOwner {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "CvBufferOwner({:p})", CFRetained::as_ptr(&self.0))
+    }
+}
+
+impl CvPixelBufferKeepAlive for CvBufferOwner {}
+
+// SAFETY: CoreFoundation retain/release is thread-safe, and the decoded pixels
+// are immutable once VideoToolbox hands the buffer to the output callback, so
+// sharing read-only across threads is sound. Same contract as `MfDecode`'s
+// sample owner.
+unsafe impl Send for CvBufferOwner {}
+// SAFETY: see the `Send` justification; the owner exposes no mutation.
+unsafe impl Sync for CvBufferOwner {}
 
 /// Shared sink the VideoToolbox output callback writes into. The session's
 /// callback record holds a raw `*mut Collector` (the refcon); the box keeps a
@@ -95,6 +157,9 @@ struct DecodedFrame {
 struct Collector {
     frames: Vec<DecodedFrame>,
     error: Option<G2gError>,
+    /// `cv-output` mode: retain the decoder's pixel buffer instead of packing
+    /// NV12 bytes (set once at session build).
+    cv_output: bool,
 }
 
 /// Live VideoToolbox session plus the parameter sets it was built from (so a
@@ -129,6 +194,10 @@ pub struct VtDecode {
     /// our emitted output caps: a downstream transform cannot `fixate()` an
     /// `Any` rate, so we never emit one (mirrors `FfmpegVideoDec`).
     input_framerate: Rate,
+    /// M735 zero-copy output: emit decoded frames as retained (IOSurface-backed)
+    /// `CVPixelBuffer`s (`MemoryDomain::CvPixelBuffer`) instead of packing NV12
+    /// bytes to system memory.
+    cv_output: bool,
     emitted: u64,
 }
 
@@ -168,8 +237,18 @@ impl VtDecode {
             state: None,
             last_caps: None,
             input_framerate: Rate::Any,
+            cv_output: false,
             emitted: 0,
         }
+    }
+
+    /// Emit decoded frames as retained `CVPixelBuffer`s
+    /// (`MemoryDomain::CvPixelBuffer`, IOSurface-backed) instead of packed NV12
+    /// system bytes, so a VideoToolbox encoder or Metal consumer reads them
+    /// with no CPU copy. Also settable as the `cv-output` property.
+    pub fn with_cv_output(mut self) -> Self {
+        self.cv_output = true;
+        self
     }
 
     /// Count of decoded NV12 `DataFrame`s pushed downstream. Useful in tests.
@@ -194,7 +273,7 @@ impl VtDecode {
         // call, and the out-params are valid stack slots. The created session and
         // format description are +1 retained (the CoreFoundation Create rule) and
         // adopted into `CFRetained` so they release on drop.
-        let state = unsafe { build_session(self.codec, params)? };
+        let state = unsafe { build_session(self.codec, params, self.cv_output)? };
         self.state = Some(state);
         Ok(())
     }
@@ -275,6 +354,43 @@ impl AsyncElement for VtDecode {
         CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| {
             derive_output_caps(codec, input)
         }))
+    }
+
+    /// The emitted domain follows the mode: retained `CVPixelBuffer`s in
+    /// `cv-output`, packed System bytes otherwise.
+    fn output_memory(&self) -> MemoryDomainKind {
+        if self.cv_output {
+            MemoryDomainKind::CvPixelBuffer
+        } else {
+            MemoryDomainKind::System
+        }
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        const PROPS: &[PropertySpec] = &[PropertySpec::new(
+            "cv-output",
+            PropKind::Bool,
+            "emit retained IOSurface-backed CVPixelBuffers (zero-copy) instead of packed NV12",
+        )
+        .with_default("false")];
+        PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "cv-output" => {
+                self.cv_output = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "cv-output" => Some(PropValue::Bool(self.cv_output)),
+            _ => None,
+        }
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -385,25 +501,62 @@ impl AsyncElement for VtDecode {
 
 impl VtDecode {
     async fn emit(&mut self, d: &DecodedFrame, out: &mut dyn OutputSink) -> Result<(), G2gError> {
+        let (width, height, pts_ns) = match d {
+            DecodedFrame::Nv12 {
+                width,
+                height,
+                pts_ns,
+                ..
+            }
+            | DecodedFrame::Cv {
+                width,
+                height,
+                pts_ns,
+                ..
+            } => (*width, *height, *pts_ns),
+        };
         // A compressed stream's rate is advisory (per-frame PTS carries the
         // real timing); default to 30/1 when upstream did not declare one.
         let framerate = match &self.input_framerate {
             Rate::Fixed(q) => Rate::Fixed(*q),
             _ => Rate::Fixed(30 << 16),
         };
-        let new_caps = nv12_caps(d.width, d.height, framerate);
+        // Both '420v' and '420f' are the NV12 byte layout, so the caps are the
+        // same in either mode; only the memory domain differs.
+        let new_caps = nv12_caps(width, height, framerate);
         if self.last_caps.as_ref() != Some(&new_caps) {
             out.push(PipelinePacket::CapsChanged(new_caps.clone()))
                 .await?;
             self.last_caps = Some(new_caps);
         }
+        let domain = match d {
+            DecodedFrame::Nv12 { nv12, .. } => {
+                MemoryDomain::System(SystemSlice::from_boxed(nv12.clone()))
+            }
+            DecodedFrame::Cv {
+                buf,
+                pixel_format,
+                io_surface_backed,
+                ..
+            } => {
+                let ptr = CFRetained::as_ptr(buf).as_ptr() as u64;
+                MemoryDomain::CvPixelBuffer(OwnedCvPixelBuffer::new(
+                    ptr,
+                    width,
+                    height,
+                    *pixel_format,
+                    *io_surface_backed,
+                    Arc::new(CvBufferOwner(buf.clone())),
+                ))
+            }
+        };
         let frame = Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(d.nv12.clone())),
+            domain,
             timing: FrameTiming {
-                pts_ns: d.pts_ns,
-                dts_ns: d.pts_ns,
+                pts_ns,
+                dts_ns: pts_ns,
                 duration_ns: 0,
-                capture_ns: d.pts_ns,
+                capture_ns: pts_ns,
                 ..FrameTiming::default()
             },
             sequence: self.emitted,
@@ -417,7 +570,7 @@ impl VtDecode {
 
 impl PadTemplates for VtDecode {
     /// Consumes H.264 or H.265 and produces NV12, all at any geometry. Memory
-    /// domain (System today, `CVPixelBuffer`/`IOSurface` later) is not in caps.
+    /// domain (System, or `CvPixelBuffer` in `cv-output` mode) is not in caps.
     fn pad_templates() -> Vec<PadTemplate> {
         let compressed = |codec| Caps::CompressedVideo {
             codec,
@@ -498,11 +651,27 @@ unsafe extern "C-unwind" fn output_callback(
 
     let fmt = CVPixelBufferGetPixelFormatType(pb);
     if fmt != K_CV_PIXEL_FORMAT_420V && fmt != K_CV_PIXEL_FORMAT_420F {
-        // We did not request a destination format (None attributes), so VT picked
-        // one; if it is not NV12, surface it rather than mis-packing. To force
-        // NV12, build destination_image_buffer_attributes with
-        // kCVPixelBufferPixelFormatTypeKey = '420v' (a CFDictionary).
+        // In the default (None attributes) mode VT picked the format; if it is
+        // not NV12, surface it rather than mis-packing. cv-output mode pins
+        // '420v' via the destination attributes, so this cannot trip there.
         collector.error = Some(G2gError::Hardware(HardwareError::Other));
+        return;
+    }
+
+    if collector.cv_output {
+        // Zero-copy: keep the decoder's buffer and hand it downstream unread.
+        // SAFETY: `pb` is valid for the callback; retain takes our own +1 so the
+        // buffer outlives VideoToolbox's interest in it.
+        let buf = unsafe { CFRetained::retain(NonNull::from(pb)) };
+        let io_surface_backed = CVPixelBufferGetIOSurface(Some(pb)).is_some();
+        collector.frames.push(DecodedFrame::Cv {
+            buf,
+            width: CVPixelBufferGetWidth(pb) as u32,
+            height: CVPixelBufferGetHeight(pb) as u32,
+            pixel_format: fmt,
+            io_surface_backed,
+            pts_ns: cmtime_to_ns(presentation_ts),
+        });
         return;
     }
 
@@ -521,7 +690,7 @@ unsafe extern "C-unwind" fn output_callback(
     }
 
     match packed {
-        Some(nv12) => collector.frames.push(DecodedFrame {
+        Some(nv12) => collector.frames.push(DecodedFrame::Nv12 {
             nv12,
             width,
             height,
@@ -567,7 +736,11 @@ unsafe fn pack_nv12(pb: &CVPixelBuffer, width: usize, height: usize) -> Option<B
 /// SAFETY: parameter-set byte buffers and the pointer/size arrays are live for
 /// the create call; out-params are valid slots; the boxed collector outlives the
 /// session (stored in the returned state).
-unsafe fn build_session(codec: VideoCodec, params: &[Vec<u8>]) -> Result<DecoderState, G2gError> {
+unsafe fn build_session(
+    codec: VideoCodec,
+    params: &[Vec<u8>],
+    cv_output: bool,
+) -> Result<DecoderState, G2gError> {
     // Parameter-set pointer + size arrays, as VideoToolbox expects for the
     // ...FromH264/HEVCParameterSets constructor.
     let ptrs: Vec<NonNull<u8>> = params
@@ -614,11 +787,32 @@ unsafe fn build_session(codec: VideoCodec, params: &[Vec<u8>]) -> Result<Decoder
         )
     };
 
-    let mut collector = Box::new(Collector::default());
+    let mut collector = Box::new(Collector {
+        cv_output,
+        ..Collector::default()
+    });
     let callback = VTDecompressionOutputCallbackRecord {
         decompressionOutputCallback: Some(output_callback),
         decompressionOutputRefCon: collector.as_mut() as *mut Collector as *mut c_void,
     };
+
+    // cv-output mode pins the destination: '420v' NV12 in IOSurface-backed
+    // buffers, so the handed-out frames are Metal-importable. The default
+    // (None) lets VT pick, which the callback validates as NV12 either way.
+    let dest_attrs = cv_output.then(|| {
+        let fourcc = CFNumber::new_i32(K_CV_PIXEL_FORMAT_420V as i32);
+        let io_props = CFDictionary::<CFString, CFType>::from_slices(&[], &[]);
+        // SAFETY: the kCV keys are static CFStrings.
+        let keys: [&CFString; 2] = unsafe {
+            [
+                kCVPixelBufferPixelFormatTypeKey,
+                kCVPixelBufferIOSurfacePropertiesKey,
+            ]
+        };
+        let values: [&CFType; 2] = [fourcc.as_ref(), io_props.as_ref()];
+        CFDictionary::<CFString, CFType>::from_slices(&keys, &values)
+    });
+    let dest_attrs_ref: Option<&CFDictionary> = dest_attrs.as_deref().map(|d| d.as_ref());
 
     let mut session: *mut VTDecompressionSession = ptr::null_mut();
     // SAFETY: format description is live; callback record + out slot are valid;
@@ -629,7 +823,7 @@ unsafe fn build_session(codec: VideoCodec, params: &[Vec<u8>]) -> Result<Decoder
             None,
             &format,
             None,
-            None,
+            dest_attrs_ref,
             &callback,
             NonNull::from(&mut session),
         )
