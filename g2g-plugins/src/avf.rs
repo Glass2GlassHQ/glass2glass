@@ -127,7 +127,7 @@ define_class!(
 
     unsafe impl AVCaptureVideoDataOutputSampleBufferDelegate for VideoDelegate {
         #[unsafe(method(captureOutput:didOutputSampleBuffer:fromConnection:))]
-        unsafe fn captureOutput_didOutputSampleBuffer_fromConnection(
+        unsafe fn capture_output_did_output_sample_buffer_from_connection(
             &self,
             _output: &AVCaptureOutput,
             sample_buffer: &CMSampleBuffer,
@@ -182,7 +182,7 @@ define_class!(
 
     unsafe impl AVCaptureAudioDataOutputSampleBufferDelegate for AudioDelegate {
         #[unsafe(method(captureOutput:didOutputSampleBuffer:fromConnection:))]
-        unsafe fn captureOutput_didOutputSampleBuffer_fromConnection(
+        unsafe fn capture_output_did_output_sample_buffer_from_connection(
             &self,
             _output: &AVCaptureOutput,
             sample_buffer: &CMSampleBuffer,
