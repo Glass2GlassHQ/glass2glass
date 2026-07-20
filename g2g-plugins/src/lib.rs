@@ -500,6 +500,10 @@ pub mod vtdecode;
 // VideoToolbox H.264 encode (M231), the encode counterpart of vtdecode.
 #[cfg(all(target_os = "macos", feature = "vtencode"))]
 pub mod vtencode;
+// macOS Metal present sink (M736): NV12 (System bytes or the M735 zero-copy
+// CvPixelBuffer domain) rendered to a CAMetalLayer drawable.
+#[cfg(all(target_os = "macos", feature = "metal-sink"))]
+pub mod metalvideosink;
 
 // NDK MediaCodec H.264 decode is Android-only, the Android counterpart of
 // vtdecode / mfdecode. The `ndk` dependency is target-gated, so the module only

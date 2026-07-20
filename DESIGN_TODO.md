@@ -292,7 +292,8 @@ Phased plan:
 
 - `avfvideosrc` / `avfaudiosrc` (AVFoundation camera + mic).
 - `coreaudiosink` / `coreaudiosrc`.
-- `metalvideosink` (Metal present).
+- `MetalVideoSink`: an on-screen example (app-owned `NSWindow` + `with_layer`);
+  the element and its headless present path are done.
 - Screen capture (ScreenCaptureKit).
 
 ## Platform: Android

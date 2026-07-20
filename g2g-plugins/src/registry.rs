@@ -952,6 +952,13 @@ fn register_autoplug_candidates(reg: &mut Registry) {
         "vtenc_h265",
         || Box::new(crate::vtencode::VtEncode::h265()),
     ));
+    // macOS Metal present sink (M736); the display sink on this platform, so
+    // it also backs the `autovideosink` alias below.
+    #[cfg(all(target_os = "macos", feature = "metal-sink"))]
+    reg.register_launch(LaunchFactory::of::<crate::metalvideosink::MetalVideoSink>(
+        "metalvideosink",
+        || Box::new(crate::metalvideosink::MetalVideoSink::new()),
+    ));
 }
 
 /// Register gst-canonical-name aliases (M192) so pasted `gst-launch` lines using
@@ -962,7 +969,10 @@ fn register_autoplug_candidates(reg: &mut Registry) {
 /// `fakesink` (always present), which keeps a tutorial line running headless.
 fn register_aliases(reg: &mut Registry) {
     // Auto sinks: prefer a real display / audio sink, fall back to fakesink.
-    reg.register_alias("autovideosink", &["waylandsink", "kmssink", "fakesink"]);
+    reg.register_alias(
+        "autovideosink",
+        &["waylandsink", "kmssink", "metalvideosink", "fakesink"],
+    );
     reg.register_alias("autoaudiosink", &["alsasink", "pulsesink", "fakesink"]);
     // Common desktop video-sink names map onto whatever display sink we have.
     for name in ["xvimagesink", "ximagesink", "glimagesink"] {

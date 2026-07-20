@@ -152,6 +152,19 @@ vtencode = [
     "dep:objc2-core-video",
     "dep:objc2-core-foundation",
 ]
+# macOS Metal present sink (M736): renders NV12 (System bytes or the M735
+# zero-copy CVPixelBuffer domain, imported via CVMetalTextureCache) to a
+# CAMetalLayer drawable. macOS-only, implies std, like vtdecode.
+metal-sink = [
+    "std",
+    "dep:objc2",
+    "dep:objc2-metal",
+    "dep:objc2-quartz-core",
+    "dep:objc2-core-video",
+    "dep:objc2-core-foundation",
+    "dep:objc2-foundation",
+    "dep:objc2-io-surface",
+]
 # Android hardware H.264 decode via the NDK MediaCodec (AMediaCodec) through the
 # `ndk` crate. Android-only (the dep lives under [target.'cfg(target_os =
 # "android")']), implies std. The Android counterpart of vtdecode / mf-decode;
@@ -774,6 +787,15 @@ objc2-core-foundation = { version = "0.3", optional = true, default-features = f
     "CFString",
     "CFNumber",
     "CFDictionary",
+    # CGSize, for the CAMetalLayer drawable size (metal-sink).
+    "CFCGTypes",
+] }
+# NSString / NSError, for compiling the metal-sink's MSL shader source.
+objc2-foundation = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "NSString",
+    "NSError",
+    "NSObject",
 ] }
 # Not used directly: objc2-core-video's CVPixelBufferGetIOSurface needs
 # IOSurfaceRef's CoreFoundation `Type` impl, which lives behind THIS crate's
@@ -782,6 +804,33 @@ objc2-io-surface = { version = "0.3", optional = true, default-features = false,
     "std",
     "IOSurfaceRef",
     "objc2-core-foundation",
+] }
+# Metal present sink (M736): device/queue/pipeline + CAMetalLayer drawables.
+objc2-metal = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "MTLAllocation",
+    "MTLDevice",
+    "MTLCommandQueue",
+    "MTLCommandBuffer",
+    "MTLCommandEncoder",
+    "MTLRenderCommandEncoder",
+    "MTLRenderPass",
+    "MTLRenderPipeline",
+    "MTLLibrary",
+    "MTLTexture",
+    "MTLPixelFormat",
+    "MTLResource",
+    "MTLDrawable",
+    "MTLBlitCommandEncoder",
+    "MTLBuffer",
+    "MTLTypes",
+] }
+objc2-quartz-core = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "objc2-metal",
+    "objc2-core-foundation",
+    "CALayer",
+    "CAMetalLayer",
 ] }
 
 # NDK MediaCodec bindings are Android-only; target-gate so other platforms never

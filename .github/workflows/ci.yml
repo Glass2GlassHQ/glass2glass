@@ -232,15 +232,19 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: check g2g-plugins (vtdecode + vtencode)
-        run: cargo check -p g2g-plugins --locked --all-targets --features vtdecode,vtencode
-      # M731: run the VideoToolbox elements for real (decode the reference
-      # fixtures, encode round trip): the runner's software codecs suffice, so
-      # this is the on-Mac runtime validation the Linux dev host cannot do.
-      - name: test g2g-plugins (vtdecode + vtencode runtime)
+      - name: check g2g-plugins (vtdecode + vtencode + metal-sink)
         run: >
-          cargo test -p g2g-plugins --locked --features vtdecode,vtencode
-          --test m731_videotoolbox --test m733_vt_registry --test m735_vt_zerocopy -- --nocapture
+          cargo check -p g2g-plugins --locked --all-targets
+          --features vtdecode,vtencode,metal-sink
+      # M731: run the VideoToolbox + Metal elements for real (decode the
+      # reference fixtures, encode round trip, CAMetalLayer present): the
+      # runner's software codecs and Metal device suffice, so this is the
+      # on-Mac runtime validation the Linux dev host cannot do.
+      - name: test g2g-plugins (videotoolbox + metal runtime)
+        run: >
+          cargo test -p g2g-plugins --locked --features vtdecode,vtencode,metal-sink
+          --test m731_videotoolbox --test m733_vt_registry --test m735_vt_zerocopy
+          --test m736_metal_sink -- --nocapture
       - name: check g2g-ml (wgpu + burn, Metal)
         run: cargo check -p g2g-ml --locked --all-targets --features wgpu,burn
 
