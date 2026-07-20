@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M739: ScreenCaptureKit display capture (`screencapturesrc`, `screencapture` feature) with zero-copy `cv-output`; the CI runner denies screen recording, so the probe path is validated and real capture awaits a permitted Mac.
 - M738: AVFoundation capture (`avfvideosrc` camera with zero-copy `cv-output`, `avfaudiosrc` mic, `avfoundation` feature); mic capture validated on the CI runner, the camera path probes the permission/no-device denial until a Mac with one.
 - M737: Core Audio elements (`coreaudiosink` / `coreaudiosrc`, `coreaudio` feature) on the AudioToolbox AudioQueue API, with `autoaudiosink` / `osxaudiosink` aliases; render and capture validated on the CI runner's audio devices.
 - M736: `MetalVideoSink` (`metalvideosink`, `metal-sink` feature): NV12 presented to a `CAMetalLayer` drawable, zero-copy from the CvPixelBuffer domain via IOSurface plane import; render + present validated on the macOS CI runner, `autovideosink` resolves to it on macOS.

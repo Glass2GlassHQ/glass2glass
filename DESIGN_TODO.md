@@ -290,11 +290,11 @@ Phased plan:
 
 ## Platform: macOS
 
-- `AvfVideoSrc`: real camera validation on a Mac with one (the CI runner has
-  none, so only the probe path is validated).
+- `AvfVideoSrc` / `ScreenCaptureSrc`: real capture validation on a Mac with a
+  camera / screen-recording permission (the CI runner grants neither, so only
+  the probe paths are validated).
 - `MetalVideoSink`: an on-screen example (app-owned `NSWindow` + `with_layer`);
   the element and its headless present path are done.
-- Screen capture (ScreenCaptureKit).
 
 ## Platform: Android
 

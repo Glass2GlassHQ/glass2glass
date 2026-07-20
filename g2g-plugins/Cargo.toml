@@ -168,6 +168,21 @@ avfoundation = [
     "dep:objc2-core-audio-types",
     "dep:objc2-io-surface",
 ]
+# ScreenCaptureKit display capture (ScreenCaptureSrc, M739). macOS-only,
+# implies std; screen recording is TCC permission-gated, the CI runner probes
+# the denial path.
+screencapture = [
+    "std",
+    "dep:objc2",
+    "dep:objc2-screen-capture-kit",
+    "dep:block2",
+    "dep:dispatch2",
+    "dep:objc2-foundation",
+    "dep:objc2-core-media",
+    "dep:objc2-core-video",
+    "dep:objc2-core-foundation",
+    "dep:objc2-io-surface",
+]
 # macOS Core Audio PCM render (CoreAudioSink) + capture (CoreAudioSrc) via the
 # AudioToolbox AudioQueue API (M737). macOS-only, implies std.
 coreaudio = [
@@ -875,6 +890,21 @@ objc2-av-foundation = { version = "0.3", optional = true, default-features = fal
 ] }
 # The serial queue AVFoundation delivers capture callbacks on.
 dispatch2 = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+] }
+# ScreenCaptureKit display capture (M739).
+objc2-screen-capture-kit = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "objc2-core-media",
+    "objc2-core-foundation",
+    "objc2-core-graphics",
+    "block2",
+    "dispatch2",
+    "SCShareableContent",
+    "SCStream",
+    "SCError",
+] }
+block2 = { version = "0.6", optional = true, default-features = false, features = [
     "std",
 ] }
 # The AV audio-settings key statics (AVFormatIDKey etc.) live in AVFAudio,

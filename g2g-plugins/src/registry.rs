@@ -1001,6 +1001,19 @@ fn register_autoplug_candidates(reg: &mut Registry) {
         },
         || Box::new(crate::avf::AvfAudioSrc::new(48_000, 2, u64::MAX)),
     ));
+    // ScreenCaptureKit display capture (M739). The registered caps are nominal;
+    // the source reports the real display geometry at negotiation.
+    #[cfg(all(target_os = "macos", feature = "screencapture"))]
+    reg.register_source(SourceFactory::new(
+        "screencapturesrc",
+        Caps::RawVideo {
+            format: RawVideoFormat::Nv12,
+            width: Dim::Fixed(1920),
+            height: Dim::Fixed(1080),
+            framerate: Rate::Fixed(30 << 16),
+        },
+        || Box::new(crate::sck::ScreenCaptureSrc::new(u64::MAX)),
+    ));
 }
 
 /// Register gst-canonical-name aliases (M192) so pasted `gst-launch` lines using

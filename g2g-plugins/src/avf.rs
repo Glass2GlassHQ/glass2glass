@@ -21,8 +21,7 @@
 use core::future::Future;
 use core::pin::Pin;
 
-use std::collections::VecDeque;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use dispatch2::{DispatchQueue, DispatchRetained};
@@ -42,10 +41,7 @@ use objc2_avf_audio::{
 use objc2_core_audio_types::kAudioFormatLinearPCM;
 use objc2_core_foundation::{CFRetained, CFString};
 use objc2_core_media::{CMBlockBuffer, CMSampleBuffer};
-use objc2_core_video::{
-    kCVPixelBufferPixelFormatTypeKey, CVPixelBuffer, CVPixelBufferGetHeight,
-    CVPixelBufferGetIOSurface, CVPixelBufferGetPixelFormatType, CVPixelBufferGetWidth,
-};
+use objc2_core_video::kCVPixelBufferPixelFormatTypeKey;
 use objc2_foundation::{NSDictionary, NSNumber, NSObject, NSObjectProtocol, NSString};
 
 use g2g_core::frame::Frame;
@@ -57,7 +53,9 @@ use g2g_core::{
     PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
 };
 
-use crate::cvnv12::{pack_nv12_locked, CvBufferOwner};
+use crate::cvnv12::{
+    captured_video_from_sample, pack_nv12_locked, CapturedVideo, CvBufferOwner, Shared,
+};
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -69,46 +67,6 @@ const MAX_IDLE_WAITS: u32 = 3;
 
 fn hw() -> G2gError {
     G2gError::Hardware(HardwareError::Other)
-}
-
-/// One captured camera frame, retained straight from the delegate.
-struct CapturedVideo {
-    buf: CFRetained<CVPixelBuffer>,
-    width: u32,
-    height: u32,
-    pixel_format: u32,
-    io_surface_backed: bool,
-}
-
-// SAFETY: the retained pixel buffer crosses from the delegate queue to the run
-// loop through the mutex; CoreFoundation retain/release is thread-safe and the
-// pixels are immutable after capture.
-unsafe impl Send for CapturedVideo {}
-
-/// Shared between a capture delegate (on its dispatch queue) and the element's
-/// run loop.
-struct Shared<T> {
-    filled: Mutex<VecDeque<T>>,
-    cv: Condvar,
-}
-
-// Manual impls: derives would bound `T: Default` / `T: Debug`, which the
-// captured payloads don't carry.
-impl<T> Default for Shared<T> {
-    fn default() -> Self {
-        Self {
-            filled: Mutex::new(VecDeque::new()),
-            cv: Condvar::new(),
-        }
-    }
-}
-
-impl<T> core::fmt::Debug for Shared<T> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("Shared")
-            .field("queued", &self.filled.lock().map(|q| q.len()).unwrap_or(0))
-            .finish_non_exhaustive()
-    }
 }
 
 struct VideoIvars {
@@ -132,27 +90,11 @@ define_class!(
             sample_buffer: &CMSampleBuffer,
             _connection: &AVCaptureConnection,
         ) {
-            // SAFETY: the sample buffer is valid for the callback; the image
-            // buffer is retained (+1) by the accessor, keeping it alive past
-            // the delegate's scope as Apple's docs require.
-            let Some(image) = (unsafe { sample_buffer.image_buffer() }) else {
+            let Some(captured) = captured_video_from_sample(sample_buffer) else {
                 return;
             };
-            // A CVImageBufferRef IS a CVPixelBufferRef here (video output).
-            // SAFETY: same-representation CF types; the retain moves over.
-            let buf: CFRetained<CVPixelBuffer> = unsafe { CFRetained::cast_unchecked(image) };
-            let width = CVPixelBufferGetWidth(&buf) as u32;
-            let height = CVPixelBufferGetHeight(&buf) as u32;
-            let pixel_format = CVPixelBufferGetPixelFormatType(&buf);
-            let io_surface_backed = CVPixelBufferGetIOSurface(Some(&buf)).is_some();
             let shared = &self.ivars().shared;
-            shared.filled.lock().unwrap().push_back(CapturedVideo {
-                buf,
-                width,
-                height,
-                pixel_format,
-                io_surface_backed,
-            });
+            shared.filled.lock().unwrap().push_back(captured);
             shared.cv.notify_one();
         }
     }

@@ -507,16 +507,23 @@ pub mod metalvideosink;
 // macOS Core Audio render + capture via AudioToolbox AudioQueue (M737).
 #[cfg(all(target_os = "macos", feature = "coreaudio"))]
 pub mod coreaudio;
-// Shared CVPixelBuffer helpers (NV12 pack + zero-copy keep-alive) for the
-// macOS video elements.
+// Shared CVPixelBuffer helpers (NV12 pack + zero-copy keep-alive + the capture
+// delegate handoff) for the macOS video elements.
 #[cfg(all(
     target_os = "macos",
-    any(feature = "vtdecode", feature = "avfoundation")
+    any(
+        feature = "vtdecode",
+        feature = "avfoundation",
+        feature = "screencapture"
+    )
 ))]
 pub(crate) mod cvnv12;
 // AVFoundation camera + mic capture (M738).
 #[cfg(all(target_os = "macos", feature = "avfoundation"))]
 pub mod avf;
+// ScreenCaptureKit display capture (M739).
+#[cfg(all(target_os = "macos", feature = "screencapture"))]
+pub mod sck;
 
 // NDK MediaCodec H.264 decode is Android-only, the Android counterpart of
 // vtdecode / mfdecode. The `ndk` dependency is target-gated, so the module only

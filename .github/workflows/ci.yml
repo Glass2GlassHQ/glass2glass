@@ -235,18 +235,19 @@ jobs:
       - name: check g2g-plugins (macos platform features)
         run: >
           cargo check -p g2g-plugins --locked --all-targets
-          --features vtdecode,vtencode,metal-sink,coreaudio,avfoundation
-      # M731+: run the VideoToolbox / Metal / Core Audio / AVFoundation
-      # elements for real (decode the reference fixtures, encode round trip,
-      # CAMetalLayer present, AudioQueue render + capture; the camera test
-      # probes, the runner has none): the on-Mac runtime validation the Linux
-      # dev host cannot do.
+          --features vtdecode,vtencode,metal-sink,coreaudio,avfoundation,screencapture
+      # M731+: run the VideoToolbox / Metal / Core Audio / AVFoundation /
+      # ScreenCaptureKit elements for real (decode the reference fixtures,
+      # encode round trip, CAMetalLayer present, AudioQueue render + capture;
+      # the camera and screen tests probe, the runner grants neither): the
+      # on-Mac runtime validation the Linux dev host cannot do.
       - name: test g2g-plugins (macos platform runtime)
         run: >
           cargo test -p g2g-plugins --locked
-          --features vtdecode,vtencode,metal-sink,coreaudio,avfoundation
+          --features vtdecode,vtencode,metal-sink,coreaudio,avfoundation,screencapture
           --test m731_videotoolbox --test m733_vt_registry --test m735_vt_zerocopy
-          --test m736_metal_sink --test m737_coreaudio --test m738_avf -- --nocapture
+          --test m736_metal_sink --test m737_coreaudio --test m738_avf
+          --test m739_screencapture -- --nocapture
       - name: check g2g-ml (wgpu + burn, Metal)
         run: cargo check -p g2g-ml --locked --all-targets --features wgpu,burn
 
