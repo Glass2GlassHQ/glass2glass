@@ -111,7 +111,12 @@ fn main() {
     let queue = (**app.world().resource::<RenderQueue>().0).clone();
     let adapter = (**app.world().resource::<RenderAdapter>().0).clone();
     // Bevy keeps the instance in the render world only.
-    let instance = (**app.sub_app(RenderApp).world().resource::<RenderInstance>().0).clone();
+    let instance = (**app
+        .sub_app(RenderApp)
+        .world()
+        .resource::<RenderInstance>()
+        .0)
+        .clone();
     let ctx = GpuContext::from_wgpu(instance, adapter, device, queue);
 
     app.cleanup();
@@ -227,6 +232,7 @@ fn setup(
     ));
     commands.spawn((
         PointLight {
+            intensity: 4_000_000.0,
             shadow_maps_enabled: true,
             ..default()
         },
@@ -234,6 +240,12 @@ fn setup(
     ));
     commands.spawn((
         Camera3d::default(),
+        // Per-view ambient (bevy 0.19: a camera component, not a resource)
+        // so the video texture stays readable on the faces away from the light.
+        AmbientLight {
+            brightness: 400.0,
+            ..default()
+        },
         Transform::from_xyz(-2.0, 2.5, 5.0).looking_at(Vec3::new(0.0, 1.0, 0.0), Vec3::Y),
     ));
 }
@@ -272,7 +284,10 @@ fn ingest_frames(
             Pull::Ended => {
                 if !playback.ended {
                     playback.ended = true;
-                    info!("decode ended: {} frames; looping playback", playback.frames.len());
+                    info!(
+                        "decode ended: {} frames; looping playback",
+                        playback.frames.len()
+                    );
                 }
                 break;
             }
