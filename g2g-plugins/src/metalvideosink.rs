@@ -424,9 +424,10 @@ fn iosurface_plane_texture(
         )
     };
     desc.setUsage(MTLTextureUsage::ShaderRead);
-    // SAFETY: the IOSurface is retained and its plane geometry matches the
-    // descriptor (the decoder produced it at these dims).
-    unsafe { device.newTextureWithDescriptor_iosurface_plane(&desc, surface, plane) }
+    // The IOSurface is retained and its plane geometry matches the descriptor
+    // (the decoder produced it at these dims); the binding is safe.
+    device
+        .newTextureWithDescriptor_iosurface_plane(&desc, surface, plane)
         .ok_or(G2gError::Hardware(HardwareError::Other))
 }
 
