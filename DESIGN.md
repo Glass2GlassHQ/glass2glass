@@ -881,7 +881,20 @@ consumer such as the re_video adapter reorders by PTS itself), but the g2g-nativ
 `VulkanVideoDec` element does reorder its system (NV12) path: `decode_push_meta`
 returns one `PictureMeta` per submitted picture (the POC the decode already
 computed, no second pass), and the element feeds retired frames through a small
-`ReorderBuffer` keyed by the same (coded-video-sequence, POC). It releases the whole
+`ReorderBuffer` keyed by the same (coded-video-sequence, POC). The GPU-texture
+path streams the same way (M744): `decode_push_to_textures` decodes each AU's
+pictures to textures with the DPB/POC state intact across calls (the whole-stream
+`decode_all_to_textures` indexing pass resets it, so it cannot stream), and the
+element reorders them through a texture `ReorderBuffer`. AV1 needs neither
+buffer: its display order is the bitstream's op order, so the element op-walks
+each temporal unit (`decode_display` / `decode_display_to_textures`, the DPB
+persisting across calls), which also makes `show_existing_frame` re-displays and
+per-frame film-grain synthesis work when streamed (the old pipelined path
+silently skipped both). M744 also fixed a latent AV1 use-after-free: NVIDIA's
+driver retains the `pStdSequenceHeader` / `pColorConfig` pointers handed to
+`vkCreateVideoSessionParametersKHR` and dereferences them per decode, so
+`Av1DecodeSession` now owns a stable boxed copy for its lifetime (dropping the
+Std block after creation yielded small, nondeterministic pixel corruption). It releases the whole
 previous coded video sequence at each keyframe (where POC resets) and bumps the
 lowest-POC held frame once a sequence exceeds the DPB depth (a safe reorder-depth
 bound, so a long GOP does not buffer unbounded); `Eos` and a resolution-reconfig

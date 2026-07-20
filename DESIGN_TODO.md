@@ -428,10 +428,7 @@ Phased plan:
      display order (byte-exact vs the `decode_all` oracle for H.264 / H.265). The
      low-level `decode_push` / the re_video adapter stay in coding order by design
      (re_video reorders by PTS itself). Still open: a VUI-derived tighter
-     reorder-depth bound (the element uses the DPB size, a safe over-approximation),
-     and AV1 / GPU-texture streaming reorder (AV1's display order is
-     `show_existing_frame` / `order_hint`, not a POC sort; the element's
-     GPU-texture path is fed whole-stream and rides `decode_all_to_textures`).
+     reorder-depth bound (the element uses the DPB size, a safe over-approximation).
   5. AV1: DONE (M504) the OBU framing + sequence-header parse + `StdVideoAV1SequenceHeader`
      mapping + a top-level frame-header classifier (`parse_av1_sequence_header`,
      `to_std_av1_seq_header`, `av1_frame_infos`), the parse half, with GPU-free unit

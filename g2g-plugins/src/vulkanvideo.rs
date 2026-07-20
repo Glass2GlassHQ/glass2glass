@@ -2378,6 +2378,25 @@ pub struct StdAv1Params {
     _color: alloc::boxed::Box<vk::native::StdVideoAV1ColorConfig>,
 }
 
+impl StdAv1Params {
+    /// Deep copy with the color-config pointee re-wired to the copy's own box,
+    /// boxed so every internal address stays stable for as long as the box
+    /// lives. The AV1 decode session stores one: NVIDIA's driver retains the
+    /// `pStdSequenceHeader` (and its nested `pColorConfig`) pointers past
+    /// `vkCreateVideoSessionParametersKHR` and reads them per decode, so the
+    /// pointed-at memory must live as long as the session (dropping it after
+    /// creation yields silent, nondeterministic decode corruption).
+    fn deep_clone_boxed(&self) -> alloc::boxed::Box<StdAv1Params> {
+        let color = alloc::boxed::Box::new(*self._color);
+        let mut seq_header = self.seq_header;
+        seq_header.pColorConfig = &*color as *const _;
+        alloc::boxed::Box::new(StdAv1Params {
+            seq_header,
+            _color: color,
+        })
+    }
+}
+
 impl core::fmt::Debug for StdAv1Params {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("StdAv1Params")
@@ -6831,7 +6850,22 @@ pub struct Av1DecodeSession {
     /// The decode picture format chosen at session creation (e.g. NV12).
     pub picture_format: vk::Format,
     pub coded_extent: (u32, u32),
+    /// The Std sequence header handed to the driver at parameters creation.
+    /// NVIDIA retains and dereferences the pointer per decode (it does NOT
+    /// copy), so the session owns this stable-address block for its lifetime.
+    _std: RetainedAv1Std,
 }
+
+/// Owner of the driver-retained Std AV1 sequence-header block. Its raw
+/// pointers all point into the same boxed allocation (self-contained), which
+/// is what makes the manual `Send` sound.
+struct RetainedAv1Std(alloc::boxed::Box<StdAv1Params>);
+
+// SAFETY: the block's internal pointers reference its own boxed allocation,
+// never external data; moving the owner moves only the box handle (the pointees
+// stay put), and the block is only ever read by the driver during decode calls
+// made through the owning session.
+unsafe impl Send for RetainedAv1Std {}
 
 impl core::fmt::Debug for Av1DecodeSession {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -7259,17 +7293,21 @@ impl VulkanVideoDevice {
             }
         };
 
-        // Session parameters carry the Std sequence header. It references `std`'s
-        // owned color-config block, which outlives the call.
+        // Session parameters carry the Std sequence header. The driver retains
+        // the pointer past creation (see `StdAv1Params::deep_clone_boxed`), so
+        // hand it the session-owned copy's address, not the caller's.
+        let own_std = RetainedAv1Std(std.deep_clone_boxed());
         let mut av1_params = vk::VideoDecodeAV1SessionParametersCreateInfoKHR::default()
-            .std_sequence_header(&std.seq_header);
+            .std_sequence_header(&own_std.0.seq_header);
         let params_ci = vk::VideoSessionParametersCreateInfoKHR::default()
             .video_session(session)
             .push_next(&mut av1_params);
 
         let mut parameters = vk::VideoSessionParametersKHR::null();
-        // SAFETY: `params_ci` and its chained AV1 create-info (referencing
-        // `std.seq_header`, whose color-config pointee `std` owns) outlive the call.
+        // SAFETY: `params_ci` and its chained AV1 create-info reference
+        // `own_std.seq_header`, whose boxed addresses stay stable through the
+        // call AND for the session's lifetime (stored below; the driver keeps
+        // reading them per decode).
         let ret = unsafe {
             (self.video_fns.fp().create_video_session_parameters_khr)(
                 self.raw_device.handle(),
@@ -7302,6 +7340,7 @@ impl VulkanVideoDevice {
             video_fns: self.video_fns.clone(),
             picture_format,
             coded_extent: (w, h),
+            _std: own_std,
         })
     }
 
@@ -9881,6 +9920,38 @@ impl H264DpbDecoder {
         Ok(reorder_to_display_order(textures, &metas))
     }
 
+    /// Streaming decode of one access unit to GPU-resident RGBA textures: one
+    /// `(PictureMeta, wgpu::Texture)` per coded picture, in CODING order, with
+    /// the DPB / POC state left intact across calls (unlike
+    /// [`decode_all_to_textures`](Self::decode_all_to_textures), whose indexing
+    /// pass resets it, making it whole-stream-only). A streaming caller reorders
+    /// by the metas' (coded-video-sequence, POC), as the element's texture
+    /// reorder buffer does. Synchronous (each decode chained to its convert).
+    pub fn decode_push_to_textures(
+        &mut self,
+        stream: &[u8],
+    ) -> Result<(alloc::vec::Vec<PictureMeta>, alloc::vec::Vec<wgpu::Texture>), VulkanVideoError>
+    {
+        if self.core.gpu.is_none() {
+            return Err(VulkanVideoError::NoComputeQueue);
+        }
+        let pictures = self.split_pictures(stream)?;
+        let mut metas = alloc::vec::Vec::with_capacity(pictures.len());
+        let mut textures = alloc::vec::Vec::with_capacity(pictures.len());
+        for (hdr, slices) in pictures {
+            let (w, h) = self.core.coded_extent;
+            self.core.chain_next = true;
+            let (target, meta) = self.decode_into_slot(&hdr, &slices, false)?;
+            let image = self.core.slots[target].image;
+            // SAFETY: same contract as `decode_picture_to_texture` (the slot was
+            // just decoded, SAMPLED + CONCURRENT, chained via `sem_dc`).
+            let texture = unsafe { self.core.convert_slot_chained(image, w, h) }?;
+            metas.push(meta);
+            textures.push(texture);
+        }
+        Ok((metas, textures))
+    }
+
     /// Reset the reference / POC state so the next decode begins a fresh coded
     /// sequence, re-arming the session `RESET` control. This is how a seek works:
     /// after a reset, decoding from a keyframe reconstructs pictures correctly
@@ -10566,6 +10637,38 @@ impl H265DpbDecoder {
         Ok(reorder_to_display_order(textures, &metas))
     }
 
+    /// Streaming decode of one access unit to GPU-resident RGBA textures: one
+    /// `(PictureMeta, wgpu::Texture)` per DECODED picture, in coding order, with
+    /// the DPB / POC state left intact across calls (the H.265 sibling of
+    /// [`H264DpbDecoder::decode_push_to_textures`]). A RASL discarded by a
+    /// tune-in yields neither a meta nor a texture, keeping the pair aligned.
+    pub fn decode_push_to_textures(
+        &mut self,
+        stream: &[u8],
+    ) -> Result<(alloc::vec::Vec<PictureMeta>, alloc::vec::Vec<wgpu::Texture>), VulkanVideoError>
+    {
+        if self.core.gpu.is_none() {
+            return Err(VulkanVideoError::NoComputeQueue);
+        }
+        let pictures = self.split_pictures(stream)?;
+        let mut metas = alloc::vec::Vec::with_capacity(pictures.len());
+        let mut textures = alloc::vec::Vec::with_capacity(pictures.len());
+        for (hdr, slices) in pictures {
+            let (w, h) = self.core.coded_extent;
+            self.core.chain_next = true;
+            let Some((target, meta)) = self.decode_into_slot(&hdr, &slices, false)? else {
+                continue;
+            };
+            let image = self.core.slots[target].image;
+            // SAFETY: same contract as `decode_picture_to_texture` (the slot was
+            // just decoded, SAMPLED + CONCURRENT, chained via `sem_dc`).
+            let texture = unsafe { self.core.convert_slot_chained(image, w, h) }?;
+            metas.push(meta);
+            textures.push(texture);
+        }
+        Ok((metas, textures))
+    }
+
     /// Decode the run of pictures `start..=target` (decoding order) and return only
     /// `target`, GPU-resident as an RGBA `wgpu::Texture` (the random-access seek
     /// primitive, see [`H264DpbDecoder::decode_range_to_texture`]). `start` must be
@@ -11197,6 +11300,34 @@ impl Av1DpbDecoder {
             out.extend(self.decode_flush()?);
             return Ok(out);
         }
+        self.decode_ops(ops)
+    }
+
+    /// Decode one temporal unit in DISPLAY order via the synchronous op-walk,
+    /// unconditionally (no pipelined fast path): the streaming entry the
+    /// element feeds AU by AU. AV1 display order is the bitstream's op order,
+    /// and the DPB persists across calls, so a `show_existing_frame` resolves
+    /// frames decoded in earlier calls; the one path also keeps its output
+    /// byte-identical to a whole-stream reorder-aware [`decode_all`]
+    /// (the pipelined ring path skips film grain and invisible-frame ops).
+    ///
+    /// [`decode_all`]: Self::decode_all
+    pub fn decode_display(
+        &mut self,
+        stream: &[u8],
+    ) -> Result<alloc::vec::Vec<Nv12Frame>, VulkanVideoError> {
+        let (ops, _) = self.scan_ops(stream)?;
+        self.decode_ops(ops)
+    }
+
+    /// The reorder-aware op-walk shared by [`decode_all`](Self::decode_all) and
+    /// [`decode_display`](Self::decode_display): decode each coded frame
+    /// (emitting it only when shown), re-display stored slots on
+    /// `show_existing_frame`, and synthesize film grain per displayed frame.
+    fn decode_ops(
+        &mut self,
+        ops: alloc::vec::Vec<Av1Op<'_>>,
+    ) -> Result<alloc::vec::Vec<Nv12Frame>, VulkanVideoError> {
         let is_id = self.seq.color.matrix_coefficients == 0;
         let mut out = alloc::vec::Vec::new();
         for op in ops {
@@ -11248,6 +11379,30 @@ impl Av1DpbDecoder {
             }
             return Ok(out);
         }
+        self.decode_ops_to_textures(ops)
+    }
+
+    /// Decode one temporal unit to GPU textures in DISPLAY order via the
+    /// synchronous op-walk, unconditionally: the streaming texture entry the
+    /// element feeds AU by AU (the GPU sibling of
+    /// [`decode_display`](Self::decode_display)).
+    pub fn decode_display_to_textures(
+        &mut self,
+        stream: &[u8],
+    ) -> Result<alloc::vec::Vec<wgpu::Texture>, VulkanVideoError> {
+        if self.core.gpu.is_none() {
+            return Err(VulkanVideoError::NoComputeQueue);
+        }
+        let (ops, _) = self.scan_ops(stream)?;
+        self.decode_ops_to_textures(ops)
+    }
+
+    /// The reorder-aware texture op-walk shared by the whole-stream and
+    /// streaming entries.
+    fn decode_ops_to_textures(
+        &mut self,
+        ops: alloc::vec::Vec<Av1Op<'_>>,
+    ) -> Result<alloc::vec::Vec<wgpu::Texture>, VulkanVideoError> {
         // Film grain (when present) is synthesized on the CPU-read-back NV12 and the
         // result uploaded, since the GPU ycbcr pass produces the grain-free
         // reconstruction (see `grained_slot_to_texture`); a grain-free displayed
@@ -12546,20 +12701,6 @@ impl core::fmt::Debug for DpbDecoderKind {
 }
 
 impl DpbDecoderKind {
-    /// Pipelined system-path decode of one access unit WITHOUT draining the ring,
-    /// returning `(submitted, retired)` (see [`H264DpbDecoder::decode_push`]).
-    /// The element uses this so the decode queue stays saturated across AUs.
-    fn decode_push(
-        &mut self,
-        au: &[u8],
-    ) -> Result<(usize, alloc::vec::Vec<Nv12Frame>), VulkanVideoError> {
-        match self {
-            DpbDecoderKind::H264(d) => d.decode_push(au),
-            DpbDecoderKind::H265(d) => d.decode_push(au),
-            DpbDecoderKind::Av1(d) => d.decode_push(au),
-        }
-    }
-
     /// Streaming decode returning per-submitted-picture [`PictureMeta`] so the
     /// element can reorder the retired frames into display order (see
     /// [`H264DpbDecoder::decode_push_meta`]). Only H.264 / H.265 carry a POC the
@@ -12609,15 +12750,49 @@ impl DpbDecoderKind {
         }
     }
 
-    /// Decode an access unit to GPU-resident RGBA `wgpu::Texture`s (zero-copy).
-    fn decode_all_to_textures(
+    /// Per-AU DISPLAY-order texture decode for AV1 (the op-walk with the DPB
+    /// persisting across calls); H.264 / H.265 stream through
+    /// [`decode_push_to_textures`](Self::decode_push_to_textures) instead.
+    fn decode_display_to_textures(
         &mut self,
         au: &[u8],
     ) -> Result<alloc::vec::Vec<wgpu::Texture>, VulkanVideoError> {
         match self {
-            DpbDecoderKind::H264(d) => d.decode_all_to_textures(au),
-            DpbDecoderKind::H265(d) => d.decode_all_to_textures(au),
-            DpbDecoderKind::Av1(d) => d.decode_all_to_textures(au),
+            DpbDecoderKind::Av1(d) => d.decode_display_to_textures(au),
+            DpbDecoderKind::H264(_) | DpbDecoderKind::H265(_) => {
+                Err(VulkanVideoError::UnsupportedStream)
+            }
+        }
+    }
+
+    /// Per-AU DISPLAY-order system decode for AV1 (the op-walk `decode_all`
+    /// applied to one temporal unit; the DPB persists across calls, so
+    /// `show_existing_frame` resolves frames decoded in earlier AUs). H.264 /
+    /// H.265 stream through `decode_push_meta` + the element's reorder instead.
+    fn decode_display(
+        &mut self,
+        au: &[u8],
+    ) -> Result<alloc::vec::Vec<Nv12Frame>, VulkanVideoError> {
+        match self {
+            DpbDecoderKind::Av1(d) => d.decode_display(au),
+            DpbDecoderKind::H264(_) | DpbDecoderKind::H265(_) => {
+                Err(VulkanVideoError::UnsupportedStream)
+            }
+        }
+    }
+
+    /// Streaming per-AU decode to textures with per-picture metas (coding
+    /// order, DPB/POC state intact across calls); the element reorders by the
+    /// metas' (coded-video-sequence, POC). H.264 / H.265 only.
+    fn decode_push_to_textures(
+        &mut self,
+        au: &[u8],
+    ) -> Result<(alloc::vec::Vec<PictureMeta>, alloc::vec::Vec<wgpu::Texture>), VulkanVideoError>
+    {
+        match self {
+            DpbDecoderKind::H264(d) => d.decode_push_to_textures(au),
+            DpbDecoderKind::H265(d) => d.decode_push_to_textures(au),
+            DpbDecoderKind::Av1(_) => Err(VulkanVideoError::UnsupportedStream),
         }
     }
 }
@@ -12784,6 +12959,11 @@ pub struct VulkanVideoDec {
     /// decoded frames until their display position is settled; emptied on `Eos`,
     /// a reconfig boundary, and `Flush`. Unused on the AV1 / GPU-texture paths.
     reorder: ReorderBuffer<(FrameTiming, Nv12Frame)>,
+    /// The GPU-texture path's display-order buffer (H.264 / H.265): the same
+    /// (coded-video-sequence, POC) reorder over `wgpu::Texture` payloads, fed
+    /// synchronously by `decode_push_to_textures` (metas pair 1:1, no FIFO).
+    /// AV1's texture path needs none: its display order is the op order.
+    reorder_tex: ReorderBuffer<(FrameTiming, wgpu::Texture)>,
 }
 
 impl core::fmt::Debug for VulkanVideoDec {
@@ -12821,6 +13001,7 @@ impl VulkanVideoDec {
             reorder_enabled: false,
             pending_meta: alloc::collections::VecDeque::new(),
             reorder: ReorderBuffer::new(),
+            reorder_tex: ReorderBuffer::new(),
         }
     }
 
@@ -12970,6 +13151,7 @@ impl VulkanVideoDec {
         // Size the reorder window to this decoder's DPB (a safe upper bound on the
         // reorder depth), so a long GOP releases frames without buffering unbounded.
         self.reorder.max_hold = decoder.dpb_slots();
+        self.reorder_tex.max_hold = decoder.dpb_slots();
         self.decoder = Some(decoder);
         self.session = Some(session);
         self.coded_geometry = Some(geometry);
@@ -13087,6 +13269,39 @@ impl VulkanVideoDec {
             self.emit_one_nv12(t, rf, out).await?;
         }
         self.reorder.reset();
+        Ok(())
+    }
+
+    /// Push GPU-texture frames downstream, each with its own AU's timing and a
+    /// `CapsChanged` whenever the geometry changes (so a reconfig boundary's
+    /// old-geometry stragglers emit against their own caps).
+    async fn emit_textures(
+        &mut self,
+        textures: alloc::vec::Vec<(FrameTiming, wgpu::Texture)>,
+        out: &mut dyn OutputSink,
+    ) -> Result<(), G2gError> {
+        for (timing, tex) in textures {
+            let (w, h) = (tex.width(), tex.height());
+            let caps = Caps::RawVideo {
+                format: RawVideoFormat::Rgba8,
+                width: Dim::Fixed(w),
+                height: Dim::Fixed(h),
+                framerate: self.framerate.clone(),
+            };
+            if self.last_caps.as_ref() != Some(&caps) {
+                out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
+                self.last_caps = Some(caps);
+            }
+            let keep = alloc::sync::Arc::new(crate::gpu::WgpuTextureKeepAlive(tex));
+            let out_frame = Frame {
+                domain: MemoryDomain::WgpuTexture(OwnedWgpuTexture::new(w, h, keep)),
+                timing: self.out_timing(&timing),
+                sequence: self.emitted,
+                meta: Default::default(),
+            };
+            self.emitted += 1;
+            out.push(PipelinePacket::DataFrame(out_frame)).await?;
+        }
         Ok(())
     }
 }
@@ -13277,35 +13492,46 @@ impl AsyncElement for VulkanVideoDec {
                         // Zero-copy: each decoded picture is an RGBA wgpu::Texture
                         // on the decode device, wrapped so a WgpuSink (sharing the
                         // device via `gpu_context`) presents it with no copy.
-                        let textures = self
-                            .decoder
-                            .as_mut()
-                            .expect("decoder built")
-                            .decode_all_to_textures(&au)
-                            .map_err(|_| G2gError::CapsMismatch)?;
-                        for tex in textures {
-                            let (w, h) = (tex.width(), tex.height());
-                            let caps = Caps::RawVideo {
-                                format: RawVideoFormat::Rgba8,
-                                width: Dim::Fixed(w),
-                                height: Dim::Fixed(h),
-                                framerate: self.framerate.clone(),
+                        if matches!(self.codec, VideoCodec::Av1) {
+                            // AV1 display order is the bitstream's op order
+                            // (`show_existing_frame` re-displays a stored slot),
+                            // so a per-AU op-walk with the DPB persisting across
+                            // calls emits display order directly. A frameless AU
+                            // (e.g. a bare temporal delimiter) emits nothing.
+                            let textures = match self
+                                .decoder
+                                .as_mut()
+                                .expect("decoder built")
+                                .decode_display_to_textures(&au)
+                            {
+                                Ok(t) => t,
+                                Err(VulkanVideoError::NoDecodableSlice) => alloc::vec::Vec::new(),
+                                Err(_) => return Err(G2gError::CapsMismatch),
                             };
-                            if self.last_caps.as_ref() != Some(&caps) {
-                                out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
-                                self.last_caps = Some(caps);
+                            let paired = textures.into_iter().map(|t| (src_timing, t)).collect();
+                            self.emit_textures(paired, out).await?;
+                        } else {
+                            // H.264 / H.265: stream each AU through the DPB (state
+                            // intact across calls) and reorder the coding-order
+                            // textures into display order by (cvs, POC), the
+                            // texture analog of the system path (a keyframe also
+                            // releases the previous sequence, so a reconfig's
+                            // old-geometry stragglers emit first).
+                            let (metas, textures) = self
+                                .decoder
+                                .as_mut()
+                                .expect("decoder built")
+                                .decode_push_to_textures(&au)
+                                .map_err(|_| G2gError::CapsMismatch)?;
+                            let mut ready = alloc::vec::Vec::new();
+                            for (meta, tex) in metas.into_iter().zip(textures) {
+                                ready.extend(self.reorder_tex.push(
+                                    meta.is_keyframe,
+                                    meta.poc,
+                                    (src_timing, tex),
+                                ));
                             }
-                            let keep = alloc::sync::Arc::new(crate::gpu::WgpuTextureKeepAlive(tex));
-                            let out_frame = Frame {
-                                domain: MemoryDomain::WgpuTexture(OwnedWgpuTexture::new(
-                                    w, h, keep,
-                                )),
-                                timing: self.out_timing(&src_timing),
-                                sequence: self.emitted,
-                                meta: Default::default(),
-                            };
-                            self.emitted += 1;
-                            out.push(PipelinePacket::DataFrame(out_frame)).await?;
+                            self.emit_textures(ready, out).await?;
                         }
                         return Ok(());
                     }
@@ -13328,13 +13554,23 @@ impl AsyncElement for VulkanVideoDec {
                         }
                         self.emit_reordered(decoded, out).await?;
                     } else {
-                        let (submitted, decoded) = self
+                        // AV1: decode the AU with the display-order op-walk
+                        // (`show_existing_frame` re-displays, an alt-ref decodes
+                        // without displaying, film grain synthesizes per shown
+                        // frame), the DPB persisting across calls. Every frame
+                        // this AU emits is displayed at this AU's time. Trades
+                        // the cross-AU ring pipelining for display correctness.
+                        let decoded = match self
                             .decoder
                             .as_mut()
                             .expect("decoder built")
-                            .decode_push(&au)
-                            .map_err(|_| G2gError::CapsMismatch)?;
-                        for _ in 0..submitted {
+                            .decode_display(&au)
+                        {
+                            Ok(f) => f,
+                            Err(VulkanVideoError::NoDecodableSlice) => alloc::vec::Vec::new(),
+                            Err(_) => return Err(G2gError::CapsMismatch),
+                        };
+                        for _ in 0..decoded.len() {
                             self.pending_timings.push_back(src_timing);
                         }
                         self.emit_nv12_frames(decoded, out).await?;
@@ -13348,10 +13584,18 @@ impl AsyncElement for VulkanVideoDec {
                     _ => Err(G2gError::CapsMismatch),
                 },
                 PipelinePacket::Eos => {
+                    // The GPU-texture path is synchronous per AU; only its
+                    // display-order buffer can still hold textures.
+                    if self.emit_wgpu {
+                        let held = self.reorder_tex.flush();
+                        self.reorder_tex.reset();
+                        self.emit_textures(held, out).await?;
+                        out.push(PipelinePacket::Eos).await?;
+                        return Ok(());
+                    }
                     // Emit the pipelined tail (frames held back by `decode_push`)
-                    // before forwarding end-of-stream. The GPU-texture path is
-                    // synchronous (nothing in flight), so this only matters for the
-                    // system path; `decode_flush` on an idle ring returns nothing.
+                    // before forwarding end-of-stream; `decode_flush` on an idle
+                    // ring (the per-AU AV1 display path) returns nothing.
                     let tail = match self.decoder.as_mut() {
                         Some(dec) => dec.decode_flush().map_err(|_| G2gError::CapsMismatch)?,
                         None => alloc::vec::Vec::new(),
@@ -13377,6 +13621,7 @@ impl AsyncElement for VulkanVideoDec {
                     self.pending_timings.clear();
                     self.pending_meta.clear();
                     self.reorder.reset();
+                    self.reorder_tex.reset();
                     self.last_caps = None;
                     out.push(PipelinePacket::Flush).await?;
                     Ok(())
