@@ -23,6 +23,8 @@ exclude = [
     # that must stay out of the normal build / CI. Standalone (its own
     # Cargo.lock), built against g2g as path packages. See its README.
     "examples/bevy-g2g-stream",
+    # Bevy bring-your-own-device decode demo (M741): same standalone setup.
+    "examples/bevy-g2g-decode",
     # Cortex-M footprint-measurement harness (M268): a no_std staticlib measured
     # with size+gc-sections, kept out of the normal build.
     "examples/g2g-size",

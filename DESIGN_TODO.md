@@ -778,13 +778,6 @@ _(No open parser items.)_
 - `push` vs `pull` propagation across transforms (today push-only, explicit).
 - A turnkey windowed runner for `WgpuSink` (a winit/SCTK example that opens a
   window and drives the overlay -> sink graph; validate on a real display).
-- An embedder example for the bring-your-own-device path (M263): a real engine
-  (Bevy / a raw `wgpu` app) that builds a `GpuContext::from_wgpu` over its own
-  device, runs `decode -> (preprocess) -> appsink`, and samples the yielded
-  `WgpuTexture` onto an in-app 3D surface. The mechanism is validated (M263 unit
-  test); a worked example is the adoption artifact for the game-engine wedge.
-  Bevy 0.19 pins the same wgpu 29 as g2g, so the device handoff type-checks
-  (clone Bevy's `RenderDevice`/`Queue`/`Adapter`/`Instance` into `from_wgpu`).
 - The native gst-`nvcodec`-style pair is done: `NvEnc` (zero-copy CUDA NV12 ->
   H.264, M269) and `NvDec` (H.264 -> CUDA NV12 via NVCUVID, M270). Remaining
   extensions on both:

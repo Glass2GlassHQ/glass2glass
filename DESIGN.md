@@ -2733,7 +2733,14 @@ picture. Two pieces, both `no_std`-friendly:
   texture produced through a `from_wgpu` context reads back correctly on the
   embedder's own device handles). The frame still flows to the app through any
   sink, including the `appsink` pull channel, which carries a GPU-domain `Frame`
-  unchanged.
+  unchanged. `examples/bevy-g2g-decode` (M741) is the runnable proof: a stock
+  Bevy app adopts its own render device into `from_wgpu`, a
+  `filesrc -> h264parse -> ffmpegdec -> videoconvert -> vello overlay -> appsink`
+  pipeline lands each decoded frame in a `wgpu::Texture` on Bevy's device, and
+  the app registers it as a render-world `GpuImage` and samples it on a spinning
+  cube (through an sRGB view; the overlay's texture lists `Rgba8UnormSrgb` in
+  `view_formats` for exactly this). The mirror of `bevy-g2g-stream` (§4.11.3),
+  which renders in Bevy and encodes in g2g.
 
 ---
 

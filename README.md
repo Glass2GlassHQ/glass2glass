@@ -31,7 +31,7 @@ hardware elements) changes.
 | **MCU** | a heap-free static pipeline on bare-metal Cortex-M | `alloc` is optional: the no-alloc build links **no allocator at all**, is proven panic-free, and has a budgeted ~KB-scale footprint. `g2g-mcu` peripheral elements (SPI display, camera / PCM capture, G.711 / ADPCM codecs, RTP egress + ingress, jitter buffer) over `embedded-hal` seams, plus interrupt/DMA capture and a bounded fault-recovery supervisor (retry / degrade / reset / watchdog). See [the embedded wedge](#embedded-heap-free-pipelines-on-a-bare-metal-mcu). |
 | **RTOS** | the same static pipeline under a real RTOS task | one graph runs bit-exact under **bare-metal, Embassy, FreeRTOS, and Zephyr**; `embassy-sync` stack channels (`embassy` / `embassy-link` features) |
 | **CPU** | the full media + protocol stack | Tokio, multi-thread on servers or current-thread on edge; the whole element library |
-| **GPU** | zero-copy hardware pipelines | frames stay in Vulkan / CUDA / wgpu / DMABUF domains: Vulkan Video decode → `wgpu::Texture`, NVDEC / NVENC, CUDA ↔ wgpu bridge, no PCIe round-trip |
+| **GPU** | zero-copy hardware pipelines | frames stay in Vulkan / CUDA / wgpu / DMABUF domains: Vulkan Video decode → `wgpu::Texture`, NVDEC / NVENC, CUDA ↔ wgpu bridge, no PCIe round-trip; embeddable in an app's own wgpu device (`GpuContext::from_wgpu`, Bevy demos in `examples/bevy-g2g-decode` and `-stream`) |
 | **WASM** | the same graph in the browser | `wasm32`, single-threaded (no cross-origin isolation): WebCodecs decode, WebGPU present, in-browser or server-offloaded ML |
 
 Same `AsyncElement`, same `Caps`, same runner on all five. This is proven, not
