@@ -12,8 +12,8 @@ re-cascade), and the full lifecycle spine (state machine + preroll, seek +
 SEGMENT, auto-plug / decodebin / playbin) are done. What remains, highest
 leverage first:
 
-1. **Platforms** (largest track). macOS: AVFoundation capture, Core Audio,
-   Metal present. Android: encode, Camera2, AAudio, Surface present.
+1. **Platforms.** macOS: camera / screen capture validation on a permitted
+   Mac. Android: an on-screen `SurfaceView` / `NativeActivity` present harness.
 2. **Egress / transports.** SRT congestion control + real-peer interop, AES-256
    + key rotation; FlexFEC + multi-level burst FEC.
 3. **Depth.** Codec decode to cut reliance on the ffmpeg FFI: AV1 landed both as
@@ -293,8 +293,6 @@ Phased plan:
 - `AvfVideoSrc` / `ScreenCaptureSrc`: real capture validation on a Mac with a
   camera / screen-recording permission (the CI runner grants neither, so only
   the probe paths are validated).
-- `MetalVideoSink`: an on-screen example (app-owned `NSWindow` + `with_layer`);
-  the element and its headless present path are done.
 
 ## Platform: Android
 

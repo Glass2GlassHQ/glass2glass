@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M740: on-screen macOS present example (`metal_video_on_screen`): VideoToolbox zero-copy decode into an app-owned window's `CAMetalLayer` via `MetalVideoSink::with_layer`.
 - M739: ScreenCaptureKit display capture (`screencapturesrc`, `screencapture` feature) with zero-copy `cv-output`; the CI runner denies screen recording, so the probe path is validated and real capture awaits a permitted Mac.
 - M738: AVFoundation capture (`avfvideosrc` camera with zero-copy `cv-output`, `avfaudiosrc` mic, `avfoundation` feature); mic capture validated on the CI runner, the camera path probes the permission/no-device denial until a Mac with one.
 - M737: Core Audio elements (`coreaudiosink` / `coreaudiosrc`, `coreaudio` feature) on the AudioToolbox AudioQueue API, with `autoaudiosink` / `osxaudiosink` aliases; render and capture validated on the CI runner's audio devices.
