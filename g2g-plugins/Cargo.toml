@@ -862,6 +862,8 @@ objc2-av-foundation = { version = "0.3", optional = true, default-features = fal
     "std",
     "objc2-core-media",
     "objc2-core-video",
+    # setSampleBufferDelegate:queue: takes a DispatchQueue, gated on this.
+    "dispatch2",
     "AVCaptureSession",
     "AVCaptureSessionPreset",
     "AVCaptureDevice",

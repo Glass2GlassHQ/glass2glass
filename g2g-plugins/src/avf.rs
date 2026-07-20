@@ -88,10 +88,28 @@ unsafe impl Send for CapturedVideo {}
 
 /// Shared between a capture delegate (on its dispatch queue) and the element's
 /// run loop.
-#[derive(Default)]
 struct Shared<T> {
     filled: Mutex<VecDeque<T>>,
     cv: Condvar,
+}
+
+// Manual impls: derives would bound `T: Default` / `T: Debug`, which the
+// captured payloads don't carry.
+impl<T> Default for Shared<T> {
+    fn default() -> Self {
+        Self {
+            filled: Mutex::new(VecDeque::new()),
+            cv: Condvar::new(),
+        }
+    }
+}
+
+impl<T> core::fmt::Debug for Shared<T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Shared")
+            .field("queued", &self.filled.lock().map(|q| q.len()).unwrap_or(0))
+            .finish_non_exhaustive()
+    }
 }
 
 struct VideoIvars {
@@ -237,7 +255,8 @@ unsafe fn open_session(
     // SAFETY: the device is live; a deny (TCC) or busy device errors here.
     let input =
         unsafe { AVCaptureDeviceInput::deviceInputWithDevice_error(&device) }.map_err(|_| hw())?;
-    let session = AVCaptureSession::new();
+    // SAFETY: plain object creation.
+    let session = unsafe { AVCaptureSession::new() };
     // SAFETY: freshly created session; the input was just opened for it.
     unsafe {
         if !session.canAddInput(&input) {
@@ -309,7 +328,8 @@ impl AvfVideoSrc {
         // SAFETY: fresh session; VGA is universally supported.
         unsafe { session.setSessionPreset(AVCaptureSessionPreset640x480) };
 
-        let output = AVCaptureVideoDataOutput::new();
+        // SAFETY: plain object creation.
+        let output = unsafe { AVCaptureVideoDataOutput::new() };
         // Pin the delivered format to '420v' NV12 (every Apple camera pipeline
         // supports the bi-planar 4:2:0 formats).
         // SAFETY: the CF and NS string types are toll-free bridged; the key
@@ -521,7 +541,8 @@ impl AvfAudioSrc {
         // SAFETY: static access; open_session validates everything else.
         let session = unsafe { open_session(AVMediaTypeAudio)? };
 
-        let output = AVCaptureAudioDataOutput::new();
+        // SAFETY: plain object creation.
+        let output = unsafe { AVCaptureAudioDataOutput::new() };
         // Pin the delivered format to interleaved packed S16 at our rate.
         // SAFETY: the key statics are valid NSStrings on macOS.
         let settings = unsafe {
