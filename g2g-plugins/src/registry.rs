@@ -959,6 +959,24 @@ fn register_autoplug_candidates(reg: &mut Registry) {
         "metalvideosink",
         || Box::new(crate::metalvideosink::MetalVideoSink::new()),
     ));
+    // macOS Core Audio render (M737); `osxaudiosink` is the gst analog and an
+    // alias below, and `autoaudiosink` falls back to it on this platform.
+    #[cfg(all(target_os = "macos", feature = "coreaudio"))]
+    reg.register_launch(LaunchFactory::of::<crate::coreaudio::CoreAudioSink>(
+        "coreaudiosink",
+        || Box::new(crate::coreaudio::CoreAudioSink::new()),
+    ));
+    // macOS Core Audio mic capture (M737); `osxaudiosrc` is the gst analog.
+    #[cfg(all(target_os = "macos", feature = "coreaudio"))]
+    reg.register_source(SourceFactory::new(
+        "coreaudiosrc",
+        Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            channels: 2,
+            sample_rate: 48_000,
+        },
+        || Box::new(crate::coreaudio::CoreAudioSrc::new(48_000, 2, u64::MAX)),
+    ));
 }
 
 /// Register gst-canonical-name aliases (M192) so pasted `gst-launch` lines using
@@ -973,7 +991,13 @@ fn register_aliases(reg: &mut Registry) {
         "autovideosink",
         &["waylandsink", "kmssink", "metalvideosink", "fakesink"],
     );
-    reg.register_alias("autoaudiosink", &["alsasink", "pulsesink", "fakesink"]);
+    reg.register_alias(
+        "autoaudiosink",
+        &["alsasink", "pulsesink", "coreaudiosink", "fakesink"],
+    );
+    // gst's macOS audio element names.
+    reg.register_alias("osxaudiosink", &["coreaudiosink", "fakesink"]);
+    reg.register_alias("osxaudiosrc", &["coreaudiosrc"]);
     // Common desktop video-sink names map onto whatever display sink we have.
     for name in ["xvimagesink", "ximagesink", "glimagesink"] {
         reg.register_alias(name, &["waylandsink", "kmssink", "fakesink"]);

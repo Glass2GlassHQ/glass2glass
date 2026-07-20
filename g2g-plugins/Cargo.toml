@@ -152,6 +152,13 @@ vtencode = [
     "dep:objc2-core-video",
     "dep:objc2-core-foundation",
 ]
+# macOS Core Audio PCM render (CoreAudioSink) + capture (CoreAudioSrc) via the
+# AudioToolbox AudioQueue API (M737). macOS-only, implies std.
+coreaudio = [
+    "std",
+    "dep:objc2-audio-toolbox",
+    "dep:objc2-core-audio-types",
+]
 # macOS Metal present sink (M736): renders NV12 (System bytes or the M735
 # zero-copy CVPixelBuffer domain, imported via CVMetalTextureCache) to a
 # CAMetalLayer drawable. macOS-only, implies std, like vtdecode.
@@ -833,6 +840,16 @@ objc2-quartz-core = { version = "0.3", optional = true, default-features = false
     "objc2-core-foundation",
     "CALayer",
     "CAMetalLayer",
+] }
+# Core Audio render / capture (M737) via the AudioToolbox AudioQueue C API.
+objc2-audio-toolbox = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "objc2-core-audio-types",
+    "AudioQueue",
+] }
+objc2-core-audio-types = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "CoreAudioBaseTypes",
 ] }
 
 # NDK MediaCodec bindings are Android-only; target-gate so other platforms never

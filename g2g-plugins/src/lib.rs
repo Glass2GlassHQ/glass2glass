@@ -504,6 +504,9 @@ pub mod vtencode;
 // CvPixelBuffer domain) rendered to a CAMetalLayer drawable.
 #[cfg(all(target_os = "macos", feature = "metal-sink"))]
 pub mod metalvideosink;
+// macOS Core Audio render + capture via AudioToolbox AudioQueue (M737).
+#[cfg(all(target_os = "macos", feature = "coreaudio"))]
+pub mod coreaudio;
 
 // NDK MediaCodec H.264 decode is Android-only, the Android counterpart of
 // vtdecode / mfdecode. The `ndk` dependency is target-gated, so the module only
