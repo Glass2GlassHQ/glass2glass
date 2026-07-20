@@ -6,7 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
-- M737: Core Audio elements (`coreaudiosink` / `coreaudiosrc`, `coreaudio` feature) on the AudioToolbox AudioQueue API, with `autoaudiosink` / `osxaudiosink` aliases; the CI mac has no audio device, so the tests probe the graceful-failure path and real render awaits a Mac with hardware.
+- M738: AVFoundation capture (`avfvideosrc` camera with zero-copy `cv-output`, `avfaudiosrc` mic, `avfoundation` feature); mic capture validated on the CI runner, the camera path probes the permission/no-device denial until a Mac with one.
+- M737: Core Audio elements (`coreaudiosink` / `coreaudiosrc`, `coreaudio` feature) on the AudioToolbox AudioQueue API, with `autoaudiosink` / `osxaudiosink` aliases; render and capture validated on the CI runner's audio devices.
 - M736: `MetalVideoSink` (`metalvideosink`, `metal-sink` feature): NV12 presented to a `CAMetalLayer` drawable, zero-copy from the CvPixelBuffer domain via IOSurface plane import; render + present validated on the macOS CI runner, `autovideosink` resolves to it on macOS.
 - M735: `CVPixelBuffer` zero-copy memory domain (`MemoryDomain::CvPixelBuffer`): `VtDecode cv-output` emits retained IOSurface-backed buffers and `VtEncode` encodes them directly, transcode validated on the macOS CI runner.
 - M734: the MF and MediaCodec codecs accept the graph runner's pre-fixed output caps and emit concrete output framerates (the M733 VideoToolbox fixes applied to the sibling platform codecs).

@@ -152,6 +152,22 @@ vtencode = [
     "dep:objc2-core-video",
     "dep:objc2-core-foundation",
 ]
+# AVFoundation camera (AvfVideoSrc) + mic (AvfAudioSrc) capture (M738).
+# macOS-only, implies std; both devices are permission-gated (TCC) in a real
+# app and absent on the CI runner, which probes the denial path.
+avfoundation = [
+    "std",
+    "dep:objc2",
+    "dep:objc2-av-foundation",
+    "dep:objc2-avf-audio",
+    "dep:dispatch2",
+    "dep:objc2-foundation",
+    "dep:objc2-core-media",
+    "dep:objc2-core-video",
+    "dep:objc2-core-foundation",
+    "dep:objc2-core-audio-types",
+    "dep:objc2-io-surface",
+]
 # macOS Core Audio PCM render (CoreAudioSink) + capture (CoreAudioSrc) via the
 # AudioToolbox AudioQueue API (M737). macOS-only, implies std.
 coreaudio = [
@@ -847,6 +863,7 @@ objc2-av-foundation = { version = "0.3", optional = true, default-features = fal
     "objc2-core-media",
     "objc2-core-video",
     "AVCaptureSession",
+    "AVCaptureSessionPreset",
     "AVCaptureDevice",
     "AVCaptureInput",
     "AVCaptureOutputBase",

@@ -290,9 +290,8 @@ Phased plan:
 
 ## Platform: macOS
 
-- `avfvideosrc` / `avfaudiosrc` (AVFoundation camera + mic).
-- `CoreAudioSink` / `CoreAudioSrc`: real render + capture on a Mac with audio
-  hardware (the CI runner has none, so only the probe paths are validated).
+- `AvfVideoSrc`: real camera validation on a Mac with one (the CI runner has
+  none, so only the probe path is validated).
 - `MetalVideoSink`: an on-screen example (app-owned `NSWindow` + `with_layer`);
   the element and its headless present path are done.
 - Screen capture (ScreenCaptureKit).

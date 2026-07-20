@@ -977,6 +977,30 @@ fn register_autoplug_candidates(reg: &mut Registry) {
         },
         || Box::new(crate::coreaudio::CoreAudioSrc::new(48_000, 2, u64::MAX)),
     ));
+    // AVFoundation camera capture (M738), VGA NV12; `avfvideosrc` matches gst.
+    #[cfg(all(target_os = "macos", feature = "avfoundation"))]
+    reg.register_source(SourceFactory::new(
+        "avfvideosrc",
+        Caps::RawVideo {
+            format: RawVideoFormat::Nv12,
+            width: Dim::Fixed(640),
+            height: Dim::Fixed(480),
+            framerate: Rate::Fixed(30 << 16),
+        },
+        || Box::new(crate::avf::AvfVideoSrc::new(u64::MAX)),
+    ));
+    // AVFoundation mic capture (M738); `avfaudiosrc` matches gst's osxaudiosrc
+    // sibling naming.
+    #[cfg(all(target_os = "macos", feature = "avfoundation"))]
+    reg.register_source(SourceFactory::new(
+        "avfaudiosrc",
+        Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            channels: 2,
+            sample_rate: 48_000,
+        },
+        || Box::new(crate::avf::AvfAudioSrc::new(48_000, 2, u64::MAX)),
+    ));
 }
 
 /// Register gst-canonical-name aliases (M192) so pasted `gst-launch` lines using

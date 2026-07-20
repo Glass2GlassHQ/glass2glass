@@ -45,10 +45,8 @@ use objc2_core_media::{
 };
 use objc2_core_video::{
     kCVPixelBufferIOSurfacePropertiesKey, kCVPixelBufferPixelFormatTypeKey, CVImageBuffer,
-    CVPixelBuffer, CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRowOfPlane,
-    CVPixelBufferGetHeight, CVPixelBufferGetHeightOfPlane, CVPixelBufferGetIOSurface,
-    CVPixelBufferGetPixelFormatType, CVPixelBufferGetWidth, CVPixelBufferGetWidthOfPlane,
-    CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
+    CVPixelBuffer, CVPixelBufferGetHeight, CVPixelBufferGetIOSurface,
+    CVPixelBufferGetPixelFormatType, CVPixelBufferGetWidth,
 };
 use objc2_video_toolbox::{
     VTDecodeFrameFlags, VTDecodeInfoFlags, VTDecompressionOutputCallbackRecord,
@@ -58,10 +56,10 @@ use objc2_video_toolbox::{
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, CvPixelBufferKeepAlive, Dim,
-    FrameTiming, G2gError, HardwareError, MemoryDomain, MemoryDomainKind, OutputSink,
-    OwnedCvPixelBuffer, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec, Rate, RawVideoFormat, VideoCodec,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError,
+    HardwareError, MemoryDomain, MemoryDomainKind, OutputSink, OwnedCvPixelBuffer, PadTemplate,
+    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate,
+    RawVideoFormat, VideoCodec,
 };
 
 use crate::annexb::{
@@ -74,11 +72,9 @@ use alloc::vec::Vec;
 use core::future::Future;
 use core::pin::Pin;
 
-/// The two NV12 (4:2:0 bi-planar) pixel formats VideoToolbox emits for H.264:
-/// video-range `'420v'` and full-range `'420f'`. We accept either and pack to
-/// our NV12 byte layout; the BT.601 / range semantics ride in caps, not here.
-const K_CV_PIXEL_FORMAT_420V: u32 = 0x3432_3076; // '420v'
-const K_CV_PIXEL_FORMAT_420F: u32 = 0x3432_3066; // '420f'
+use crate::cvnv12::{
+    pack_nv12_locked, CvBufferOwner, K_CV_PIXEL_FORMAT_420F, K_CV_PIXEL_FORMAT_420V,
+};
 
 /// One decoded frame the output callback captured: packed to tight NV12 bytes
 /// (the default), or the decoder's retained `CVPixelBuffer` unread (`cv-output`
@@ -125,27 +121,6 @@ impl core::fmt::Debug for DecodedFrame {
         }
     }
 }
-
-/// Pins a decoded `CVPixelBuffer` for a downstream frame's lifetime (the
-/// keep-alive inside [`OwnedCvPixelBuffer`]); the last drop releases the
-/// decoder's buffer.
-struct CvBufferOwner(CFRetained<CVPixelBuffer>);
-
-impl core::fmt::Debug for CvBufferOwner {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "CvBufferOwner({:p})", CFRetained::as_ptr(&self.0))
-    }
-}
-
-impl CvPixelBufferKeepAlive for CvBufferOwner {}
-
-// SAFETY: CoreFoundation retain/release is thread-safe, and the decoded pixels
-// are immutable once VideoToolbox hands the buffer to the output callback, so
-// sharing read-only across threads is sound. Same contract as `MfDecode`'s
-// sample owner.
-unsafe impl Send for CvBufferOwner {}
-// SAFETY: see the `Send` justification; the owner exposes no mutation.
-unsafe impl Sync for CvBufferOwner {}
 
 /// Shared sink the VideoToolbox output callback writes into. The session's
 /// callback record holds a raw `*mut Collector` (the refcon); the box keeps a
@@ -675,19 +650,9 @@ unsafe extern "C-unwind" fn output_callback(
         return;
     }
 
-    // SAFETY: lock for read while we copy the planes out, unlock after.
-    let lock = unsafe { CVPixelBufferLockBaseAddress(pb, CVPixelBufferLockFlags::ReadOnly) };
-    if lock != 0 {
-        collector.error = Some(G2gError::Hardware(HardwareError::Other));
-        return;
-    }
     let width = CVPixelBufferGetWidth(pb) as u32;
     let height = CVPixelBufferGetHeight(pb) as u32;
-    let packed = unsafe { pack_nv12(pb, width as usize, height as usize) };
-    // SAFETY: paired with the lock above.
-    unsafe {
-        CVPixelBufferUnlockBaseAddress(pb, CVPixelBufferLockFlags::ReadOnly);
-    }
+    let packed = pack_nv12_locked(pb, width as usize, height as usize);
 
     match packed {
         Some(nv12) => collector.frames.push(DecodedFrame::Nv12 {
@@ -698,34 +663,6 @@ unsafe extern "C-unwind" fn output_callback(
         }),
         None => collector.error = Some(G2gError::Hardware(HardwareError::Other)),
     }
-}
-
-/// Copy the locked bi-planar pixel buffer into a tight NV12 byte buffer
-/// (`w*h` luma + `w*(h/2)` interleaved chroma), stripping per-row padding.
-///
-/// SAFETY: `pb` is locked for read; plane base addresses / strides are valid for
-/// the plane dimensions VideoToolbox reports.
-unsafe fn pack_nv12(pb: &CVPixelBuffer, width: usize, height: usize) -> Option<Box<[u8]>> {
-    let mut out = Vec::with_capacity(width * height * 3 / 2);
-    // Plane 0: luma (w x h). Plane 1: interleaved CbCr (w x h/2 bytes/row).
-    for plane in 0..2usize {
-        let base = CVPixelBufferGetBaseAddressOfPlane(pb, plane) as *const u8;
-        if base.is_null() {
-            return None;
-        }
-        let stride = CVPixelBufferGetBytesPerRowOfPlane(pb, plane);
-        let pw = CVPixelBufferGetWidthOfPlane(pb, plane); // luma: w, chroma: w/2 (CbCr pairs)
-        let ph = CVPixelBufferGetHeightOfPlane(pb, plane); // luma: h, chroma: h/2
-                                                           // Bytes per row of valid data: luma = pw, chroma = pw * 2 (CbCr pair).
-        let row_bytes = if plane == 0 { pw } else { pw * 2 };
-        for row in 0..ph {
-            // SAFETY: row < plane height, row_bytes <= stride, base valid for the
-            // plane; the source slice stays within the locked plane.
-            let src = unsafe { core::slice::from_raw_parts(base.add(row * stride), row_bytes) };
-            out.extend_from_slice(src);
-        }
-    }
-    Some(out.into_boxed_slice())
 }
 
 /// Build a VideoToolbox session from the parameter sets (H.264 SPS+PPS or H.265
