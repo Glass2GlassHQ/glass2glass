@@ -808,6 +808,8 @@ objc2-io-surface = { version = "0.3", optional = true, default-features = false,
 # Metal present sink (M736): device/queue/pipeline + CAMetalLayer drawables.
 objc2-metal = { version = "0.3", optional = true, default-features = false, features = [
     "std",
+    # newTextureWithDescriptor:iosurface:plane:, the zero-copy import.
+    "objc2-io-surface",
     "MTLAllocation",
     "MTLDevice",
     "MTLCommandQueue",
