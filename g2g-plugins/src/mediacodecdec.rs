@@ -620,7 +620,7 @@ impl AsyncElement for MediaCodecDec {
                     // for the downstream sink (the active mode's format),
                     // forwarded so the sink sees them before the first decoded
                     // frame (M733/M734).
-                    let out_format = if self.gpu_output {
+                    let out_format = if self.gpu_output_enabled() {
                         RawVideoFormat::Rgba8
                     } else {
                         RawVideoFormat::Nv12
