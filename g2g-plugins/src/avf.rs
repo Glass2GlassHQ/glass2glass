@@ -18,7 +18,6 @@
 //! is validated on a Mac with devices, like the Android capture elements were
 //! on a Pixel.
 
-use core::ffi::c_void;
 use core::future::Future;
 use core::pin::Pin;
 
