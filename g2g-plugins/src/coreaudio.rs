@@ -48,7 +48,6 @@ use g2g_core::{
 };
 
 use alloc::boxed::Box;
-use alloc::vec;
 use alloc::vec::Vec;
 
 /// Render buffers in flight; the sink blocks when all are queued (device-paced

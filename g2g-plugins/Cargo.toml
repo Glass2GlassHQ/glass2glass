@@ -841,6 +841,29 @@ objc2-quartz-core = { version = "0.3", optional = true, default-features = false
     "CALayer",
     "CAMetalLayer",
 ] }
+# AVFoundation camera + mic capture (M738).
+objc2-av-foundation = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "objc2-core-media",
+    "objc2-core-video",
+    "AVCaptureSession",
+    "AVCaptureDevice",
+    "AVCaptureInput",
+    "AVCaptureOutputBase",
+    "AVCaptureVideoDataOutput",
+    "AVCaptureAudioDataOutput",
+    "AVMediaFormat",
+] }
+# The serial queue AVFoundation delivers capture callbacks on.
+dispatch2 = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+] }
+# The AV audio-settings key statics (AVFormatIDKey etc.) live in AVFAudio,
+# not AVFoundation.
+objc2-avf-audio = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "AVAudioSettings",
+] }
 # Core Audio render / capture (M737) via the AudioToolbox AudioQueue C API.
 objc2-audio-toolbox = { version = "0.3", optional = true, default-features = false, features = [
     "std",
