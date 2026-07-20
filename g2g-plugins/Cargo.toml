@@ -140,6 +140,7 @@ vtdecode = [
     "dep:objc2-core-media",
     "dep:objc2-core-video",
     "dep:objc2-core-foundation",
+    "dep:objc2-io-surface",
 ]
 # macOS hardware H.264 encode via VideoToolbox (VTCompressionSession); same objc2
 # framework deps as vtdecode, plus the compression-session bindings.
@@ -773,6 +774,14 @@ objc2-core-foundation = { version = "0.3", optional = true, default-features = f
     "CFString",
     "CFNumber",
     "CFDictionary",
+] }
+# Not used directly: objc2-core-video's CVPixelBufferGetIOSurface needs
+# IOSurfaceRef's CoreFoundation `Type` impl, which lives behind THIS crate's
+# `objc2-core-foundation` feature and is not forwarded by core-video.
+objc2-io-surface = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "IOSurfaceRef",
+    "objc2-core-foundation",
 ] }
 
 # NDK MediaCodec bindings are Android-only; target-gate so other platforms never

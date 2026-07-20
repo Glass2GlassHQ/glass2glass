@@ -3597,6 +3597,7 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-core-media",
  "objc2-core-video",
+ "objc2-io-surface",
  "objc2-video-toolbox",
  "pbkdf2 0.12.2",
  "pipewire",
