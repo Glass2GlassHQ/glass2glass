@@ -615,11 +615,26 @@ impl AsyncElement for MediaCodecDec {
                     self.feed(slice.as_slice(), frame.timing.pts_ns, &mut decoded)?;
                 }
                 PipelinePacket::CapsChanged(c) => {
+                    // Two callers, like FfmpegVideoDec: an input CapsChanged from
+                    // upstream (record it), or the runner's pre-fixed output caps
+                    // for the downstream sink (the active mode's format),
+                    // forwarded so the sink sees them before the first decoded
+                    // frame (M733/M734).
+                    let out_format = if self.gpu_output {
+                        RawVideoFormat::Rgba8
+                    } else {
+                        RawVideoFormat::Nv12
+                    };
                     match &c {
-                        Caps::CompressedVideo { codec, .. } if *codec == self.codec => {}
+                        Caps::CompressedVideo { codec, .. } if *codec == self.codec => {
+                            self.input_caps = Some(c);
+                        }
+                        Caps::RawVideo { format, .. } if *format == out_format => {
+                            out.push(PipelinePacket::CapsChanged(c.clone())).await?;
+                            self.last_caps = Some(c);
+                        }
                         _ => return Err(G2gError::CapsMismatch),
                     }
-                    self.input_caps = Some(c);
                 }
                 PipelinePacket::Flush => {
                     if let Some(st) = self.state.as_ref() {
@@ -646,6 +661,16 @@ impl AsyncElement for MediaCodecDec {
                 }
             }
 
+            // A compressed stream's rate is advisory (per-frame PTS carries the
+            // real timing); never emit `Rate::Any` (a downstream transform
+            // cannot fixate() it), default 30/1 like `ffmpegdec`.
+            let out_framerate = match &self.input_caps {
+                Some(Caps::CompressedVideo {
+                    framerate: Rate::Fixed(q),
+                    ..
+                }) => Rate::Fixed(*q),
+                _ => Rate::Fixed(30 << 16),
+            };
             for d in decoded {
                 let (new_caps, domain, pts_ns) = match d {
                     DecodedFrame::Nv12 {
@@ -654,7 +679,7 @@ impl AsyncElement for MediaCodecDec {
                         height,
                         pts_ns,
                     } => (
-                        nv12_caps(width, height),
+                        nv12_caps(width, height, out_framerate.clone()),
                         MemoryDomain::System(SystemSlice::from_boxed(nv12)),
                         pts_ns,
                     ),
@@ -668,7 +693,11 @@ impl AsyncElement for MediaCodecDec {
                         pts_ns,
                     } => {
                         let domain = self.convert_ahb_to_domain(ahb, width, height).await?;
-                        (rgba_caps(width, height), domain, pts_ns)
+                        (
+                            rgba_caps(width, height, out_framerate.clone()),
+                            domain,
+                            pts_ns,
+                        )
                     }
                 };
                 if self.last_caps.as_ref() != Some(&new_caps) {
@@ -749,24 +778,24 @@ fn image_to_nv12(img: &Image, pts_ns: u64) -> Option<DecodedFrame> {
     })
 }
 
-fn nv12_caps(w: u32, h: u32) -> Caps {
+fn nv12_caps(w: u32, h: u32, framerate: Rate) -> Caps {
     Caps::RawVideo {
         format: RawVideoFormat::Nv12,
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
-        framerate: Rate::Any,
+        framerate,
     }
 }
 
 /// Caps for the M304 zero-copy GPU path: RGBA (the converter's output format),
 /// carried on a `MemoryDomain::WgpuTexture` frame.
 #[cfg(feature = "mediacodec-wgpu")]
-fn rgba_caps(w: u32, h: u32) -> Caps {
+fn rgba_caps(w: u32, h: u32, framerate: Rate) -> Caps {
     Caps::RawVideo {
         format: RawVideoFormat::Rgba8,
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
-        framerate: Rate::Any,
+        framerate,
     }
 }
 

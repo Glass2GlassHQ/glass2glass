@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M734: the MF and MediaCodec codecs accept the graph runner's pre-fixed output caps and emit concrete output framerates (the M733 VideoToolbox fixes applied to the sibling platform codecs).
 - M733: VideoToolbox elements in the launch registry (`vtdec` / `vtdech265` / `vtenc_h264` / `vtenc_h265`, `avdec_h264` alias fallback, encoder `bitrate` / `max-keyframe-interval` properties); text pipelines validated on the macOS CI runner.
 - M732: migrate the VideoToolbox elements off the deprecated objc2 free functions to the associated-function forms.
 - M731: `VtDecode` / `VtEncode` runtime-validated on the macOS CI runner (reference-fixture decode and encode round trip, H.264 and HEVC), with persisted hardware conformance evidence.
