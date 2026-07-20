@@ -296,30 +296,9 @@ Phased plan:
 
 ## Platform: Android
 
-- `MediaCodecDec` zero-copy to GPU (M304): DONE, decode -> preprocess on GPU.
-  `with_gpu_output()` emits decoded frames as `MemoryDomain::WgpuTexture` (RGBA)
-  via the `YcbcrToRgba` converter (opaque AHB import -> immutable
-  `VkSamplerYcbcrConversion` compute pass -> RGBA `wgpu::Texture`), and
-  `WgpuPreprocess` consumes that texture straight into its tensor (g2g-ml
-  `mediacodec-wgpu` feature). The converter pipelines via a `RING_DEPTH`-slot
-  in-flight ring (no per-frame fence block), and both elements negotiate the
-  RGBA-GPU path (decoder derives Rgba8 in gpu mode, WgpuPreprocess accepts it) so
-  a runner can auto-plug it. Validated on the Pixel 10a end to end (9 frames ->
-  NCHW tensor, no CPU frame copy). Pillar complete.
-- Android `Surface` present sink (M305): DONE, validated on a Pixel. Decoded RGBA
-  `WgpuTexture` (M304) presented through a `wgpu::Surface` over an `ANativeWindow`
-  by the existing `WgpuSink` on the shared interop device (copy-free).
-  `mediacodec_wgpu::create_android_surface` + `InteropDevice::gpu_context()` +
-  `MediaCodecDec::with_gpu_device`. Remaining: a real on-screen `SurfaceView` /
-  `NativeActivity` (production target; the `ImageReader`-backed surface is the
-  validated headless equivalent).
-- Encode (M306): `MediaCodecEnc` (NV12 -> Annex-B H.264/H.265). DONE, validated on
-  a Pixel. Registered `mediacodecenc` / `mediacodecench265`.
-- AAudio (M307): `AAudioSink` render + `AAudioSrc` capture. DONE, validated on a
-  Pixel (render + mic capture). Registered `aaudiosink` / `aaudiosrc`.
-- Camera2 capture (M308): `Camera2Src` (YUV_420_888 -> NV12 via NDK Camera2 over
-  ndk-sys). DONE, validated on a Pixel (real rear-camera NV12). Registered
-  `camera2src`.
+- On-screen present: a true `SurfaceView` / `NativeActivity` harness. Needs an
+  APK; a bare binary run from `/data/local/tmp` cannot own an on-screen
+  surface.
 
 ## Receive / decode
 
