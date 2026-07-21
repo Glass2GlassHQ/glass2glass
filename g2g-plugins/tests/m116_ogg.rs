@@ -98,8 +98,8 @@ async fn filesrc_auto_sniffs_ogg_and_demuxes_opus() {
     );
     assert_eq!(
         run_pipeline(&text).await,
-        3,
-        "three Opus packets demuxed to the sink"
+        4,
+        "in-band OpusHead (for the decoder's pre-skip) plus three audio packets"
     );
     let _ = fs::remove_file(&path);
 }
@@ -113,8 +113,8 @@ async fn filesrc_explicit_ogg_demuxes_opus() {
     );
     assert_eq!(
         run_pipeline(&text).await,
-        3,
-        "three Opus packets demuxed to the sink"
+        4,
+        "in-band OpusHead (for the decoder's pre-skip) plus three audio packets"
     );
     let _ = fs::remove_file(&path);
 }

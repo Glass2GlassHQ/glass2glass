@@ -1715,6 +1715,19 @@ headers), and `OggDemux` emits the Opus audio packets as `Caps::Audio{Opus}` wit
 the channel count refined from `OpusHead`. The container is auto-detectable
 (`typefind` "OggS", `filesrc bytestream-format=auto`).
 
+Opus decode applies the two container trims so the PCM sample count matches
+ffmpeg / gstreamer (RFC 7845). Pre-skip is codec config the decoder owns:
+`OggDemux` forwards the `OpusHead` in-band (the g2g parameter-set convention) and
+`OpusDec` reads its pre-skip (offset 10) and drops that many leading output
+samples. End-of-stream padding is container knowledge only the demuxer has:
+`OggDemux` tracks the running decoded sample count against the final page's
+granule position and marks the closing packet(s) short via `duration_ns` (fully
+padded packets are dropped), which `OpusDec` honors as a per-frame keep count.
+Both trims are attacker-controlled inputs, folded with saturating math (an
+oversized pre-skip trims a frame to nothing, an underflowing granule drops it).
+A stream with no `OpusHead` and no per-frame duration (the RTP path) decodes
+untrimmed, matching gstreamer's SDP-less default.
+
 An audio decoder fixates its output caps even when a demuxer only knows the
 channel count once it parses the stream: it advertises `PcmS16Le` at a concrete
 rate with the `ANY_CHANNELS` placeholder (fixated to stereo for the negotiated

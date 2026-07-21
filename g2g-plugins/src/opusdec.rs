@@ -13,6 +13,13 @@
 //! channel count arrives via a `CapsChanged`. A `CapsChanged` carries the output
 //! format before the first frame.
 //!
+//! Pre-skip / end-trim: Opus streams carry encoder lookahead (pre-skip) at the
+//! head and codec padding at the tail. `OggDemux` forwards the `OpusHead` in-band
+//! (its pre-skip drops the leading output samples) and marks the final packet(s)
+//! short via `duration_ns` (the end-of-stream granule trim), so the decoded PCM
+//! matches ffmpeg / gstreamer sample-for-sample. Streams with no `OpusHead` and
+//! no per-frame duration (RTP) decode untrimmed, as before.
+//!
 //! Scope (v1): 48 kHz mono/stereo, S16LE output. Float output and packet-loss
 //! concealment (decode of a `None` packet) are follow-ups.
 
@@ -49,6 +56,12 @@ pub struct OpusDec {
     last_out: Option<Caps>,
     sequence: u64,
     configured: bool,
+    /// Leading 48 kHz output samples (per channel) to discard: the Opus encoder
+    /// lookahead from `OpusHead`. `0` when no header was seen (e.g. the RTP path).
+    pre_skip: u32,
+    /// Running count of decoded samples (per channel) across all frames, to place
+    /// the pre-skip window against the stream, not each frame in isolation.
+    decoded_samples: u64,
 }
 
 impl core::fmt::Debug for OpusDec {
@@ -76,6 +89,8 @@ impl OpusDec {
             last_out: None,
             sequence: 0,
             configured: false,
+            pre_skip: 0,
+            decoded_samples: 0,
         }
     }
 
@@ -115,8 +130,9 @@ impl OpusDec {
         }
     }
 
-    /// Decode one Opus packet into interleaved S16LE bytes.
-    fn decode(&mut self, opus: &[u8]) -> Result<Vec<u8>, G2gError> {
+    /// Decode one Opus packet, returning interleaved i16 samples and the
+    /// per-channel sample count.
+    fn decode(&mut self, opus: &[u8]) -> Result<(Vec<i16>, usize), G2gError> {
         let channels = self.channels as usize;
         let dec = self.dec.as_mut().ok_or(G2gError::NotConfigured)?;
         let packet = Packet::try_from(opus).map_err(|_| G2gError::CapsMismatch)?;
@@ -127,12 +143,61 @@ impl OpusDec {
                 .map_err(|_| G2gError::CapsMismatch)?
         };
         pcm.truncate(per_channel * channels);
-        // Serialize interleaved i16 to little-endian bytes.
-        let mut bytes = Vec::with_capacity(pcm.len() * 2);
-        for s in pcm {
+        Ok((pcm, per_channel))
+    }
+
+    /// Decode `opus` and serialize only the valid window to little-endian bytes.
+    /// The window drops the pre-skip lookahead at the stream head and any padding
+    /// past `keep` (per-channel valid count for this frame, from `duration_ns`;
+    /// `None` keeps the whole frame). Returns the trimmed S16LE bytes.
+    fn decode_trimmed(&mut self, opus: &[u8], keep: Option<u64>) -> Result<Vec<u8>, G2gError> {
+        let channels = self.channels as usize;
+        let (pcm, per_channel) = self.decode(opus)?;
+        let n = per_channel as u64;
+        // Head drop: pre-skip samples still ahead of this frame's start.
+        let head = self
+            .pre_skip
+            .saturating_sub(self.decoded_samples.min(u32::MAX as u64) as u32)
+            as u64;
+        let head = head.min(n);
+        // Tail cap: keep at most `keep` per-channel samples from the frame start.
+        let end = keep.map_or(n, |k| k.min(n)).max(head);
+        self.decoded_samples = self.decoded_samples.saturating_add(n);
+        let start_i = head as usize * channels;
+        let end_i = end as usize * channels;
+        let mut bytes = Vec::with_capacity((end_i - start_i) * 2);
+        for &s in &pcm[start_i..end_i] {
             bytes.extend_from_slice(&s.to_le_bytes());
         }
         Ok(bytes)
+    }
+}
+
+/// Per-channel valid sample count encoded in a frame's `duration_ns` (48 kHz),
+/// or `None` when unset (`0`). Rounds to the nearest sample; the demuxer's
+/// truncating ns conversion round-trips back to the exact count.
+fn duration_to_samples(duration_ns: u64) -> Option<u64> {
+    if duration_ns == 0 {
+        return None;
+    }
+    Some(
+        (duration_ns
+            .saturating_mul(48_000)
+            .saturating_add(500_000_000))
+            / 1_000_000_000,
+    )
+}
+
+/// Channel count and pre-skip from an in-band `OpusHead` (RFC 7845), or `None`
+/// if `packet` is not one. Offset 9 is the channel count, offset 10 the LE u16
+/// pre-skip. A full family-0 header is 19 bytes; only the fixed prefix is read.
+fn parse_opus_head(packet: &[u8]) -> Option<(u8, u16)> {
+    if packet.len() >= 12 && packet.starts_with(b"OpusHead") {
+        let channels = packet[9];
+        let pre_skip = u16::from_le_bytes([packet[10], packet[11]]);
+        (channels >= 1).then_some((channels, pre_skip))
+    } else {
+        None
     }
 }
 
@@ -213,7 +278,24 @@ impl AsyncElement for OpusDec {
                     let MemoryDomain::System(slice) = &frame.domain else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    let pcm = self.decode(slice.as_slice())?;
+                    // An in-band OpusHead is codec config, not audio: read its
+                    // channel count + pre-skip, (re)build the decoder, and consume
+                    // it (no PCM out). The demuxer forwards it before the audio.
+                    if let Some((channels, pre_skip)) = parse_opus_head(slice.as_slice()) {
+                        if self.channels != channels {
+                            self.build_decoder(channels)?;
+                        }
+                        self.pre_skip = pre_skip as u32;
+                        self.decoded_samples = 0;
+                        return Ok(());
+                    }
+                    let keep = duration_to_samples(frame.timing.duration_ns);
+                    let pcm = self.decode_trimmed(slice.as_slice(), keep)?;
+                    // A frame fully inside the pre-skip window trims to nothing;
+                    // consume it without emitting an empty PCM frame.
+                    if pcm.is_empty() {
+                        return Ok(());
+                    }
                     let new_caps = self.output_caps();
                     if self.last_out.as_ref() != Some(&new_caps) {
                         out.push(PipelinePacket::CapsChanged(new_caps.clone()))
@@ -227,6 +309,13 @@ impl AsyncElement for OpusDec {
                     );
                     self.sequence += 1;
                     out.push(PipelinePacket::DataFrame(decoded)).await?;
+                }
+                PipelinePacket::Flush => {
+                    // A seek/flush restarts sample accounting; the re-read stream
+                    // re-sends its OpusHead, which resets pre-skip again.
+                    self.pre_skip = 0;
+                    self.decoded_samples = 0;
+                    out.push(PipelinePacket::Flush).await?;
                 }
                 PipelinePacket::CapsChanged(c) => match &c {
                     // The demuxer's input refine carries the real channel count

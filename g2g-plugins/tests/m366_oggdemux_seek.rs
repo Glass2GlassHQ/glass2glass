@@ -95,7 +95,12 @@ impl OutputSink for Capture {
                     domain: MemoryDomain::System(s),
                     ..
                 }) => {
-                    self.frames.push(s.as_slice().to_vec());
+                    // The demuxer forwards OpusHead in-band (the decoder's
+                    // pre-skip source); it is codec config, not an audio packet,
+                    // so the seek assertion ignores it.
+                    if !s.as_slice().starts_with(b"OpusHead") {
+                        self.frames.push(s.as_slice().to_vec());
+                    }
                 }
                 PipelinePacket::Flush => self.flushes += 1,
                 PipelinePacket::Segment(_) => self.segments += 1,

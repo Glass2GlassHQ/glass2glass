@@ -81,6 +81,13 @@ pub struct OggDemux {
     /// Running stream-time (ns) of the next audio packet, accumulated from each
     /// Opus packet's decoded duration (the demuxer carries no per-packet PTS).
     pts_ns: u64,
+    /// Running count of decoded 48 kHz samples (per channel, incl. pre-skip) over
+    /// the audio packets seen so far. Compared against the end-of-stream granule
+    /// position to trim the encoder padding off the final packet(s).
+    decoded_samples: u64,
+    /// Whether the in-band `OpusHead` was forwarded to the decoder (it reads its
+    /// pre-skip from it). Reset on a flush so the re-read stream re-sends it.
+    head_forwarded: bool,
     /// Seek support (M362): app time seeks drive an upstream byte-seek and a
     /// re-sync. Inert unless `with_seek` wired the controllers.
     seek: DemuxSeek,
@@ -102,6 +109,8 @@ impl OggDemux {
             bus: None,
             tags_posted: false,
             pts_ns: 0,
+            decoded_samples: 0,
+            head_forwarded: false,
             seek: DemuxSeek::default(),
         }
     }
@@ -122,6 +131,8 @@ impl OggDemux {
     fn reset_parser(&mut self) {
         self.demux = OggDemuxer::new();
         self.pts_ns = 0;
+        self.decoded_samples = 0;
+        self.head_forwarded = false;
     }
 
     /// Attach the pipeline bus so the stream's VorbisComment metadata posts as a
@@ -189,14 +200,44 @@ impl OggDemux {
             }
         }
         let is_opus = self.demux.info().map(|i| i.codec) == Some(OggCodec::Opus);
+        // Forward OpusHead in-band once (the decoder reads its pre-skip from it),
+        // before the first audio packet. It is codec config, not audio, so the
+        // decoder consumes it without emitting PCM.
+        if is_opus && !self.head_forwarded {
+            if let Some(head) = self.demux.head_header() {
+                let head = head.to_vec();
+                self.head_forwarded = true;
+                let frame = Frame::new(
+                    MemoryDomain::System(SystemSlice::from_boxed(head.into_boxed_slice())),
+                    FrameTiming::default(),
+                    self.emitted,
+                );
+                self.emitted += 1;
+                out.push(PipelinePacket::DataFrame(frame)).await?;
+            }
+        }
+        // Total decodable samples (incl. pre-skip); the tail beyond it is padding.
+        let end_granule = self.demux.end_granule();
         for packet in self.demux.take_packets() {
             if !is_opus {
                 continue;
             }
+            let pkt_samples = opus_packet_samples(&packet) as u64;
+            let decoded_before = self.decoded_samples;
+            self.decoded_samples = decoded_before.saturating_add(pkt_samples);
+            // End-of-stream trim: keep only the samples up to the final granule
+            // position. A packet wholly past it is pure padding, so drop it; a
+            // straddling packet is kept but marked short via `duration_ns`, which
+            // the decoder honors. Without a known end granule keep the packet whole.
+            let keep = match end_granule {
+                Some(gp) => gp.saturating_sub(decoded_before).min(pkt_samples),
+                None => pkt_samples,
+            };
             let pts_ns = self.pts_ns;
-            self.pts_ns = self
-                .pts_ns
-                .saturating_add(opus_samples_to_ns(opus_packet_samples(&packet) as u64));
+            self.pts_ns = self.pts_ns.saturating_add(opus_samples_to_ns(pkt_samples));
+            if keep == 0 {
+                continue;
+            }
             // M362 seek: every audio packet is a resync point, so drop until the
             // first packet at/after the target, which emits a fresh segment.
             match self.seek.admit(pts_ns, true) {
@@ -212,6 +253,7 @@ impl OggDemux {
                 FrameTiming {
                     pts_ns,
                     dts_ns: pts_ns,
+                    duration_ns: opus_samples_to_ns(keep),
                     ..FrameTiming::default()
                 },
                 self.emitted,
@@ -493,15 +535,17 @@ mod tests {
                 sample_rate: 48_000
             }]
         );
+        // OpusHead is forwarded in-band (the decoder's pre-skip source), ahead of
+        // the two audio packets.
         assert_eq!(
             sink.frames,
-            alloc::vec![alloc::vec![0x11, 0x22], alloc::vec![0x33]]
+            alloc::vec![opus_head(2), alloc::vec![0x11, 0x22], alloc::vec![0x33]]
         );
         assert!(
             !sink.eos,
             "EOS is forwarded by the runner's arm, not the element"
         );
-        assert_eq!(d.emitted(), 2);
+        assert_eq!(d.emitted(), 3);
     }
 
     #[test]

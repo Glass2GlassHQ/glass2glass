@@ -36,6 +36,10 @@ pub struct OggStreamInfo {
     pub codec: OggCodec,
     pub channels: u8,
     pub sample_rate: u32,
+    /// Opus encoder lookahead: the count of leading 48 kHz output samples the
+    /// decoder must discard (RFC 7845 `OpusHead` offset 10, LE u16). `0` for
+    /// non-Opus streams.
+    pub pre_skip: u16,
 }
 
 /// Incremental Ogg demuxer: feed bytes, drain elementary-stream packets.
@@ -51,6 +55,15 @@ pub struct OggDemuxer {
     /// The comment header (packet index 1: `OpusTags` / Vorbis comment), kept so
     /// the element can surface its VorbisComment tags. `None` until parsed.
     comment_header: Option<Vec<u8>>,
+    /// The identification header (packet index 0: `OpusHead`), kept so the
+    /// element can forward it in-band to the decoder (which reads its pre-skip).
+    /// `None` until parsed.
+    head_header: Option<Vec<u8>>,
+    /// Granule position of the stream's final page (the one flagged end-of-stream,
+    /// header bit `0x04`). For Opus this is the total 48 kHz sample count including
+    /// pre-skip; samples decoded beyond it are encoder padding. `None` until the
+    /// EOS page is parsed, or if it carried the -1 "no packet completed" sentinel.
+    end_granulepos: Option<u64>,
     completed: Vec<Vec<u8>>,
 }
 
@@ -73,6 +86,19 @@ impl OggDemuxer {
     /// stream's VorbisComment metadata.
     pub fn comment_header(&self) -> Option<&[u8]> {
         self.comment_header.as_deref()
+    }
+
+    /// The identification header (`OpusHead`), once parsed. The decoder reads its
+    /// pre-skip from it.
+    pub fn head_header(&self) -> Option<&[u8]> {
+        self.head_header.as_deref()
+    }
+
+    /// The final page's granule position (total 48 kHz samples incl. pre-skip),
+    /// once the end-of-stream page is parsed. Drives the end-of-stream padding
+    /// trim: decoded samples beyond it are encoder padding.
+    pub fn end_granule(&self) -> Option<u64> {
+        self.end_granulepos
     }
 
     /// Feed Ogg bytes. Complete pages are parsed as they arrive; a partial
@@ -137,6 +163,18 @@ impl OggDemuxer {
             None => self.serial = Some(serial),
             _ => {}
         }
+        // End-of-stream page (bit 0x04): its granule position (offset 6, LE u64)
+        // is the stream's total sample count. Ignore the -1 sentinel (a page that
+        // completes no packet). Attacker-controlled, so only stored, bounded when
+        // used against the running decoded count.
+        if header_type & 0x04 != 0 {
+            let gp = u64::from_le_bytes([
+                page[6], page[7], page[8], page[9], page[10], page[11], page[12], page[13],
+            ]);
+            if gp != u64::MAX {
+                self.end_granulepos = Some(gp);
+            }
+        }
         // A page not flagged "continued" abandons any half-built packet (a lost
         // page upstream); otherwise the first packet continues `partial`.
         let mut acc = if header_type & 0x01 != 0 {
@@ -175,8 +213,11 @@ impl OggDemuxer {
             _ => 0,
         };
         if self.packets_seen < header_count {
-            // Packet index 1 is the comment header (OpusTags / Vorbis comment).
-            if self.packets_seen == 1 {
+            // Packet index 0 is the identification header (OpusHead), index 1 the
+            // comment header (OpusTags / Vorbis comment).
+            if self.packets_seen == 0 {
+                self.head_header = Some(packet);
+            } else if self.packets_seen == 1 {
                 self.comment_header = Some(packet);
             }
             self.packets_seen += 1;
@@ -189,25 +230,29 @@ impl OggDemuxer {
 
 /// Identify the logical stream from its first packet's magic.
 fn detect(packet: &[u8]) -> OggStreamInfo {
-    if packet.starts_with(b"OpusHead") && packet.len() >= 10 {
-        // OpusHead: magic(8), version(1), channel_count(1) at offset 9. Opus
-        // always decodes at 48 kHz regardless of the original input rate.
+    if packet.starts_with(b"OpusHead") && packet.len() >= 12 {
+        // OpusHead: magic(8), version(1), channel_count(1) at offset 9, pre-skip
+        // (LE u16) at offset 10. Opus always decodes at 48 kHz regardless of the
+        // original input rate.
         OggStreamInfo {
             codec: OggCodec::Opus,
             channels: packet[9],
             sample_rate: 48_000,
+            pre_skip: u16::from_le_bytes([packet[10], packet[11]]),
         }
     } else if packet.starts_with(b"\x01vorbis") {
         OggStreamInfo {
             codec: OggCodec::Vorbis,
             channels: 0,
             sample_rate: 0,
+            pre_skip: 0,
         }
     } else {
         OggStreamInfo {
             codec: OggCodec::Other,
             channels: 0,
             sample_rate: 0,
+            pre_skip: 0,
         }
     }
 }
@@ -259,6 +304,45 @@ mod tests {
         h
     }
 
+    /// Like `page`, but with an explicit granule position.
+    fn page_g(header_type: u8, serial: u32, seq: u32, granule: u64, packets: &[&[u8]]) -> Vec<u8> {
+        let mut p = page(header_type, serial, seq, packets);
+        p[6..14].copy_from_slice(&granule.to_le_bytes());
+        p
+    }
+
+    #[test]
+    fn parses_pre_skip_and_end_granule() {
+        let serial = 5;
+        let mut head = b"OpusHead".to_vec();
+        head.push(1);
+        head.push(2);
+        head.extend_from_slice(&312u16.to_le_bytes()); // pre-skip
+        head.extend_from_slice(&48_000u32.to_le_bytes());
+        head.extend_from_slice(&[0, 0, 0]);
+
+        let mut d = OggDemuxer::new();
+        d.push_data(&page(0x02, serial, 0, &[&head]));
+        d.push_data(&page(0x00, serial, 1, &[b"OpusTags"]));
+        // End-of-stream page (bit 0x04) with a real granule position.
+        d.push_data(&page_g(0x04, serial, 2, 96_312, &[&[0xAA, 0xBB]]));
+
+        assert_eq!(d.info().unwrap().pre_skip, 312);
+        assert_eq!(d.end_granule(), Some(96_312));
+        assert!(d.head_header().unwrap().starts_with(b"OpusHead"));
+    }
+
+    #[test]
+    fn end_granule_ignores_minus_one_sentinel() {
+        let serial = 6;
+        let mut d = OggDemuxer::new();
+        d.push_data(&page(0x02, serial, 0, &[&opus_head(1)]));
+        d.push_data(&page(0x00, serial, 1, &[b"OpusTags"]));
+        // A -1 granule (no packet completed on the page) must not be recorded.
+        d.push_data(&page_g(0x04, serial, 2, u64::MAX, &[&[0xAA]]));
+        assert_eq!(d.end_granule(), None);
+    }
+
     #[test]
     fn demuxes_opus_packets_skipping_headers() {
         let serial = 0xDEAD_BEEF;
@@ -277,7 +361,8 @@ mod tests {
             Some(OggStreamInfo {
                 codec: OggCodec::Opus,
                 channels: 2,
-                sample_rate: 48_000
+                sample_rate: 48_000,
+                pre_skip: 0
             })
         );
         let packets = d.take_packets();

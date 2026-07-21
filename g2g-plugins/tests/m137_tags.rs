@@ -151,8 +151,8 @@ async fn oggdemux_surfaces_vorbis_comment_tags_on_the_bus() {
             .expect("ogg pipeline runs")
     };
     assert_eq!(
-        stats.frames_consumed, 2,
-        "two Opus packets reached the sink"
+        stats.frames_consumed, 3,
+        "in-band OpusHead (the decoder's pre-skip source) plus two audio packets"
     );
 
     let mut posted = None;
