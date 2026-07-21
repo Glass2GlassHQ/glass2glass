@@ -105,6 +105,12 @@ pub enum MkvCodec {
     Av1,
     Aac,
     Opus,
+    /// Dolby Digital audio (`A_AC3`, incl. BSID-suffixed forms). Self-syncing
+    /// frames, no CodecPrivate needed.
+    Ac3,
+    /// FLAC audio (`A_FLAC`). The `CodecPrivate` carries the native `fLaC`
+    /// STREAMINFO header the decoder needs as extradata.
+    Flac,
     /// A timed-text subtitle track (`S_TEXT/*`); `format` names the on-disk block
     /// payload's syntax, which the demuxer de-frames to plain UTF-8 cue text:
     /// `S_TEXT/UTF8` -> [`TextFormat::Utf8`] (verbatim), `S_TEXT/ASS` / `S_TEXT/SSA`
@@ -135,6 +141,10 @@ impl MkvCodec {
             MkvCodec::Aac
         } else if id == b"A_OPUS" {
             MkvCodec::Opus
+        } else if id.starts_with(b"A_AC3") {
+            MkvCodec::Ac3
+        } else if id == b"A_FLAC" {
+            MkvCodec::Flac
         } else if id == b"S_TEXT/UTF8" {
             MkvCodec::Subtitle(TextFormat::Utf8)
         } else if id == b"S_TEXT/ASS" || id == b"S_TEXT/SSA" {
@@ -157,6 +167,8 @@ impl MkvCodec {
             MkvCodec::Av1 => b"V_AV1",
             MkvCodec::Aac => b"A_AAC",
             MkvCodec::Opus => b"A_OPUS",
+            MkvCodec::Ac3 => b"A_AC3",
+            MkvCodec::Flac => b"A_FLAC",
             MkvCodec::Subtitle(TextFormat::Utf8) => b"S_TEXT/UTF8",
             MkvCodec::Subtitle(_) | MkvCodec::Other => return None,
         })
@@ -173,7 +185,7 @@ impl MkvCodec {
     /// `1` for video, `2` for audio, `0x11` for subtitle (the Matroska `TrackType`).
     fn track_type(self) -> u8 {
         match self {
-            MkvCodec::Aac | MkvCodec::Opus => 2,
+            MkvCodec::Aac | MkvCodec::Opus | MkvCodec::Ac3 | MkvCodec::Flac => 2,
             MkvCodec::Subtitle(_) => 0x11,
             _ => 1,
         }
@@ -232,6 +244,9 @@ pub struct MatroskaDemuxer {
     in_segment: bool,
     timestamp_scale: u64,
     tracks: Vec<MkvTrack>,
+    /// Per-track `CodecPrivate` decoder-init bytes (track number, bytes), kept
+    /// beside `tracks` so `MkvTrack` stays `Copy`. Empty entries are not stored.
+    codec_privates: Vec<(u64, Vec<u8>)>,
     tags: TagList,
     /// The current Timestamp of an open unknown-size Cluster (the live shape).
     /// `Some` while its children are being parsed at the top level, `None`
@@ -267,6 +282,7 @@ impl MatroskaDemuxer {
             in_segment: false,
             timestamp_scale: DEFAULT_TIMESTAMP_SCALE,
             tracks: Vec::new(),
+            codec_privates: Vec::new(),
             tags: TagList::new(),
             open_cluster_ts: None,
             consumed: 0,
@@ -330,6 +346,15 @@ impl MatroskaDemuxer {
     /// The elementary streams announced by `Tracks` (empty until it is seen).
     pub fn tracks(&self) -> &[MkvTrack] {
         &self.tracks
+    }
+
+    /// The `CodecPrivate` decoder-init bytes for a track number, if the track
+    /// carried a non-empty one (FLAC's native `fLaC` STREAMINFO header).
+    pub fn codec_private(&self, track: u64) -> Option<&[u8]> {
+        self.codec_privates
+            .iter()
+            .find(|(n, _)| *n == track)
+            .map(|(_, p)| p.as_slice())
     }
 
     /// The stream metadata from the Segment's `Tags` element and the `Info`
@@ -459,7 +484,14 @@ impl MatroskaDemuxer {
                             self.tags.push(Tag::Title(title));
                         }
                     }
-                    ID_TRACKS => self.tracks = parse_tracks(&self.buf[header..total]),
+                    ID_TRACKS => {
+                        for (track, private) in parse_tracks(&self.buf[header..total]) {
+                            self.tracks.push(track);
+                            if !private.is_empty() {
+                                self.codec_privates.push((track.number, private));
+                            }
+                        }
+                    }
                     ID_TAGS => {
                         for tag in parse_tags(&self.buf[header..total]) {
                             self.tags.push(tag);
@@ -631,7 +663,7 @@ fn parse_simple_tag(body: &[u8]) -> Option<Tag> {
     Some(Tag::from_key_value(name?, value?))
 }
 
-fn parse_tracks(body: &[u8]) -> Vec<MkvTrack> {
+fn parse_tracks(body: &[u8]) -> Vec<(MkvTrack, Vec<u8>)> {
     let mut tracks = Vec::new();
     for (id, entry) in children(body) {
         if id == ID_TRACK_ENTRY {
@@ -643,9 +675,10 @@ fn parse_tracks(body: &[u8]) -> Vec<MkvTrack> {
     tracks
 }
 
-fn parse_track_entry(body: &[u8]) -> Option<MkvTrack> {
+fn parse_track_entry(body: &[u8]) -> Option<(MkvTrack, Vec<u8>)> {
     let mut number = 0u64;
     let mut codec_id: &[u8] = &[];
+    let mut codec_private: &[u8] = &[];
     let mut width = 0u32;
     let mut height = 0u32;
     let mut channels = 0u8;
@@ -655,6 +688,8 @@ fn parse_track_entry(body: &[u8]) -> Option<MkvTrack> {
         match id {
             ID_TRACK_NUMBER => number = read_uint(data),
             ID_CODEC_ID => codec_id = data,
+            // decoder-init bytes (FLAC's fLaC STREAMINFO); kept per track number.
+            ID_CODEC_PRIVATE => codec_private = data,
             ID_DEFAULT_DURATION => default_duration_ns = read_uint(data),
             ID_VIDEO => {
                 for (vid, vdata) in children(data) {
@@ -680,15 +715,18 @@ fn parse_track_entry(body: &[u8]) -> Option<MkvTrack> {
     if number == 0 {
         return None;
     }
-    Some(MkvTrack {
-        number,
-        codec: MkvCodec::from_codec_id(codec_id),
-        width,
-        height,
-        channels,
-        sample_rate,
-        default_duration_ns,
-    })
+    Some((
+        MkvTrack {
+            number,
+            codec: MkvCodec::from_codec_id(codec_id),
+            width,
+            height,
+            channels,
+            sample_rate,
+            default_duration_ns,
+        },
+        codec_private.to_vec(),
+    ))
 }
 
 /// Parse one Cluster's body, appending its frames. The Cluster `Timestamp`
@@ -1430,6 +1468,36 @@ mod tests {
         );
         let segment = elem(&[0x18, 0x53, 0x80, 0x67], &[tracks, cluster].concat());
         [elem(&[0x1A, 0x45, 0xDF, 0xA3], &[]), segment].concat()
+    }
+
+    /// An `A_FLAC` track parses to `MkvCodec::Flac` with its `CodecPrivate`
+    /// (the native `fLaC` STREAMINFO header) retrievable per track number, and an
+    /// `A_AC3` track (incl. a BSID-suffixed CodecID) parses to `MkvCodec::Ac3`
+    /// with no private data. Drives M757's decoder extradata forwarding.
+    #[test]
+    fn parses_ac3_and_flac_tracks_with_codec_private() {
+        // track_entry has no CodecPrivate arg; build the FLAC entry by hand.
+        let flac_private = b"fLaC\x00\x00\x00\x22streaminfo-bytes";
+        let mut flac_body = Vec::new();
+        flac_body.extend_from_slice(&elem(&[0xD7], &uint_body(1)));
+        flac_body.extend_from_slice(&elem(&[0x86], b"A_FLAC"));
+        flac_body.extend_from_slice(&elem(&[0x63, 0xA2], flac_private));
+        let tracks = elem(
+            &[0x16, 0x54, 0xAE, 0x6B],
+            &[
+                elem(&[0xAE], &flac_body),
+                track_entry(2, b"A_AC3/BSID", None, Some((2, 48_000))),
+            ]
+            .concat(),
+        );
+        let segment = elem(&[0x18, 0x53, 0x80, 0x67], &tracks);
+        let mut d = MatroskaDemuxer::new();
+        d.push_data(&[elem(&[0x1A, 0x45, 0xDF, 0xA3], &[]), segment].concat());
+
+        assert_eq!(d.tracks()[0].codec, MkvCodec::Flac);
+        assert_eq!(d.codec_private(1), Some(&flac_private[..]));
+        assert_eq!(d.tracks()[1].codec, MkvCodec::Ac3);
+        assert_eq!(d.codec_private(2), None, "AC-3 carries no private data");
     }
 
     /// A Matroska `S_TEXT/UTF8` subtitle track is recognized as

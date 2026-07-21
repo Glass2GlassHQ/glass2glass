@@ -1049,6 +1049,39 @@ pub fn mp4_primary_stream(location: &str, caps: &Caps) -> Option<PrimaryStream> 
     })
 }
 
+/// Bare-`decodebin` primary-stream hook for Matroska (M757): the mkv sibling of
+/// [`ts_primary_stream`]. An audio-only `.mka` / `.mkv` through `filesrc !
+/// decodebin` selects the demux's audio track (`matroskademux stream=<codec>`)
+/// instead of failing on the default video port. Declines when a video track is
+/// present or the prefix does not parse as Matroska.
+pub fn mkv_primary_stream(location: &str, caps: &Caps) -> Option<PrimaryStream> {
+    if !matches!(
+        caps,
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::Matroska
+        }
+    ) {
+        return None;
+    }
+    let prefix = read_prefix(location)?;
+    let mut demux = crate::matroska::MatroskaDemuxer::new();
+    demux.push_data(&prefix);
+    let infos = crate::mkvdemux::forwardable_streams(&demux);
+    // A video track present: the demux's default video port is right, decline.
+    if infos.is_empty() || infos.iter().any(|i| i.video) {
+        return None;
+    }
+    let audio = infos.into_iter().find(|i| !i.video)?;
+    Some(PrimaryStream {
+        demux: "matroskademux",
+        props: alloc::vec![(
+            "stream".to_string(),
+            crate::mkvdemux::mkv_stream_str(audio.stream).to_string(),
+        )],
+        caps: audio.caps,
+    })
+}
+
 /// Probe an MP4 file and build an [`Mp4DemuxN`](crate::mp4demuxn::Mp4DemuxN) with
 /// the requested tracks + their caps (M482). Shared by `qtdemux` demux-select and
 /// `decodebin` fan-out. Declines a non-MP4 file (or a `moov` past the probe window).

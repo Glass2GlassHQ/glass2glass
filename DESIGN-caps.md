@@ -587,9 +587,12 @@ The hook declines a container with a video track (the default video port is
 correct), leaving A/V behavior unchanged. A `mp4_primary_stream` sibling does the
 same for MP4, sniffing the `moov` and naming `qtdemux stream=aac` so an audio-only
 `.m4a` / `.mp4` plugs an audio decoder too. The TS selection also covers MPEG
-audio (`stream=mp2`, PMT types 0x03/0x04) and Opus (`stream=opus`, a private
+audio (`stream=mp2`, PMT types 0x03/0x04), Opus (`stream=opus`, a private
 0x06 PES marked by an 'Opus' registration descriptor, its control-header AUs
-unwrapped to raw packets by the demux).
+unwrapped to raw packets by the demux), and AC-3 (`stream=ac3`, ATSC 0x81 or a
+DVB 0x06 with an AC-3 descriptor). An `mkv_primary_stream` sibling covers
+audio-only Matroska (AAC / Opus / AC-3 / FLAC; FLAC's `CodecPrivate` is
+forwarded in-band ahead of the first frame as decoder extradata).
 
 - **playbin / uridecodebin** (`std`). `Registry::build_playbin(source_name,
   sink, target, max_depth)` assembles a complete `source → chain → sink` graph

@@ -9,6 +9,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M756: device-validated that `MediaCodecDec` accepts and forwards the runner's pre-fixed output `CapsChanged`, with on-device regression coverage in the decode smoke test.
 - M755: `audioresample ! audioconvert ! rate-pin` now flows like the reverse order; the resampler keeps its caps-resolved target across an intervening converter.
 - M754: audio decoders negotiate a downstream pin at the stream's native sample rate with no resampler; a cross-rate pin without one still fails loud.
+- M757: AC-3 decodes from MPEG-TS (ATSC and DVB carriage) and Matroska, and FLAC from Matroska (`CodecPrivate` forwarded as decoder extradata).
 - M753: MPEG-TS demux carries MPEG audio (`mp2`) and Opus elementary streams, selectable and auto-plugged like AAC.
 - M752: `audioresample` flushes its interpolation carry at end of stream when resampling, so the output reaches the rate-ratio-consistent sample count instead of stopping one window short.
 - M751: `audioresample` at rate 1:1 is a byte-exact pass-through instead of losing the stream's final sample to the interpolation carry.

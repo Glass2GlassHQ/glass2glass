@@ -40,9 +40,13 @@ pub const STREAM_TYPE_AAC: u8 = 0x0F;
 pub const STREAM_TYPE_MPEG1_AUDIO: u8 = 0x03;
 /// PMT `stream_type` for MPEG-2 Audio (the low-sample-rate extension of the above).
 pub const STREAM_TYPE_MPEG2_AUDIO: u8 = 0x04;
-/// PMT `stream_type` for a private PES stream (0x06). Opus in MPEG-TS rides this,
-/// identified by an 'Opus' registration descriptor (DVB/ETSI carriage).
+/// PMT `stream_type` for a private PES stream (0x06). Opus and DVB AC-3 both ride
+/// this, identified by their ES descriptors (an 'Opus' registration for Opus, an
+/// AC-3 descriptor (tag 0x6A) for AC-3).
 pub const STREAM_TYPE_PRIVATE_PES: u8 = 0x06;
+/// PMT `stream_type` for ATSC AC-3 audio (A/52). The ATSC carriage of Dolby
+/// Digital; DVB instead uses a private PES (0x06) with an AC-3 descriptor.
+pub const STREAM_TYPE_AC3: u8 = 0x81;
 
 /// One elementary stream announced by the PMT.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +57,10 @@ pub struct ElementaryStream {
     /// the 'Opus' registration + DVB extension descriptor. `Some` marks the stream
     /// as Opus (disambiguating the generic 0x06); `None` for any other 0x06 use.
     pub opus_channels: Option<u8>,
+    /// True for a private (0x06) stream carrying an AC-3 descriptor (tag 0x6A), the
+    /// DVB carriage of AC-3 (disambiguating the generic 0x06). ATSC AC-3 rides its
+    /// own `stream_type` 0x81 and does not set this.
+    pub ac3: bool,
 }
 
 /// A reassembled PES payload: one access unit of an elementary stream.
@@ -101,6 +109,15 @@ impl TsDemuxer {
             .iter()
             .find(|s| s.pid == pid)
             .and_then(|s| s.opus_channels)
+    }
+
+    /// Whether `pid` is a private (0x06) stream carrying an AC-3 descriptor (the
+    /// DVB AC-3 carriage); `false` for any other stream.
+    pub fn is_dvb_ac3(&self, pid: u16) -> bool {
+        self.streams
+            .iter()
+            .find(|s| s.pid == pid)
+            .is_some_and(|s| s.ac3)
     }
 
     /// The PID of the first video elementary stream (H.264 or H.265), if any.
@@ -239,15 +256,19 @@ impl TsDemuxer {
             let pid = (((body[i + 1] & 0x1F) as u16) << 8) | body[i + 2] as u16;
             let es_info_length = (((body[i + 3] & 0x0F) as usize) << 8) | body[i + 4] as usize;
             // Bounds-check the descriptor slice: a bogus es_info_length must not
-            // read past the section body (the count is attacker-controlled).
-            let opus_channels = body
+            // read past the section body (the count is attacker-controlled). Only a
+            // private (0x06) stream needs its descriptors inspected to tell Opus /
+            // AC-3 apart from an unidentified private stream.
+            let descriptors = body
                 .get(i + 5..i + 5 + es_info_length)
-                .filter(|_| stream_type == STREAM_TYPE_PRIVATE_PES)
-                .and_then(parse_opus_descriptors);
+                .filter(|_| stream_type == STREAM_TYPE_PRIVATE_PES);
+            let opus_channels = descriptors.and_then(parse_opus_descriptors);
+            let ac3 = descriptors.is_some_and(has_ac3_descriptor);
             self.streams.push(ElementaryStream {
                 pid,
                 stream_type,
                 opus_channels,
+                ac3,
             });
             i = i.saturating_add(5).saturating_add(es_info_length);
         }
@@ -356,6 +377,27 @@ fn parse_opus_descriptors(mut desc: &[u8]) -> Option<u8> {
         desc = &desc[2 + len..];
     }
     is_opus.then(|| channels.unwrap_or(2))
+}
+
+/// Whether a PMT ES-info descriptor list carries an AC-3 descriptor (tag 0x6A,
+/// the DVB carriage of AC-3) or an 'AC-3' registration descriptor (tag 0x05).
+/// Every field is bounds-checked so a malformed loop returns `false`, never
+/// panics.
+fn has_ac3_descriptor(mut desc: &[u8]) -> bool {
+    while desc.len() >= 2 {
+        let tag = desc[0];
+        let len = desc[1] as usize;
+        let Some(body) = desc.get(2..2 + len) else {
+            return false;
+        };
+        match tag {
+            0x6A => return true, // DVB AC-3_descriptor
+            0x05 if body.len() >= 4 && &body[..4] == b"AC-3" => return true,
+            _ => {}
+        }
+        desc = &desc[2 + len..];
+    }
+    false
 }
 
 /// Unwrap the Opus-in-MPEG-TS control-header access units in one PES payload into
@@ -839,7 +881,8 @@ mod tests {
             &[ElementaryStream {
                 pid: es_pid,
                 stream_type: STREAM_TYPE_H264,
-                opus_channels: None
+                opus_channels: None,
+                ac3: false
             }]
         );
         assert_eq!(d.video_pid(), Some(es_pid));

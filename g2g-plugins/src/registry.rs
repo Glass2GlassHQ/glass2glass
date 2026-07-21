@@ -676,6 +676,7 @@ fn register_uri_handlers(reg: &mut Registry) {
     // sniffs the file and selects the real (audio) stream instead.
     reg.register_primary_stream(crate::uridecodebin::ts_primary_stream);
     reg.register_primary_stream(crate::uridecodebin::mp4_primary_stream);
+    reg.register_primary_stream(crate::uridecodebin::mkv_primary_stream);
     // hls:// fan-out (M395): probe the master playlist, fan its variant's muxed TS
     // streams out; the hls_handler is the single-stream fallback it declines to.
     #[cfg(feature = "hls")]

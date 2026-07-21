@@ -258,6 +258,8 @@ fn audio_format_to_u8(f: AudioFormat) -> u8 {
         AudioFormat::Alaw => 6,
         AudioFormat::ImaAdpcm => 7,
         AudioFormat::Mp2 => 8,
+        AudioFormat::Ac3 => 9,
+        AudioFormat::Flac => 10,
     }
 }
 fn audio_format_from_u8(v: u8) -> Result<AudioFormat, WireError> {
@@ -271,6 +273,8 @@ fn audio_format_from_u8(v: u8) -> Result<AudioFormat, WireError> {
         6 => AudioFormat::Alaw,
         7 => AudioFormat::ImaAdpcm,
         8 => AudioFormat::Mp2,
+        9 => AudioFormat::Ac3,
+        10 => AudioFormat::Flac,
         _ => return Err(WireError::BadTag),
     })
 }

@@ -722,12 +722,15 @@ _(No open parser items.)_
   the audio branch (M425: `mkvdemux::forwardable_streams` surfaces concrete channels,
   `OpusDec` sink template relaxed to match). The overlay graph runs end to end.
   Remaining playback follow-ups:
-  - **Audio breadth.** More codecs (AC-3, FLAC, etc.). The layout-agnostic downmix in
-    `audioconvert` folds channels round-robin rather than applying ITU/speaker-position
-    coefficients (no channel-position metadata is carried yet). Opus in MP4 / TS
-    (`dOps`) is not demuxed yet (WebM / Matroska only). The audio sink needs the
-    `pulse-sink` (or `alsa-sink`) feature built in, else `autoaudiosink` falls back to
-    `fakesink`.
+  - **Audio breadth.** The layout-agnostic downmix in `audioconvert` folds
+    channels round-robin rather than applying ITU/speaker-position coefficients
+    (no channel-position metadata is carried yet). Opus in MP4 (`dOps`) is not
+    demuxed yet. FLAC rides Matroska only: Ogg-FLAC detection and a native
+    `.flac` parse layer are open. The audio sink needs the `pulse-sink` (or
+    `alsa-sink`) feature built in, else `autoaudiosink` falls back to `fakesink`.
+  - **H.264 in Matroska.** A bare `decodebin` on an `.mkv` with an AVCC-framed
+    H.264 track fails NAL splitting: the demux forwards length-prefixed samples
+    and never converts to Annex-B from the `avcC` CodecPrivate.
   Parsing SSA / TTML placement into `CueSettings` (only
   WebVTT populates it today, though all three now ride the frame-meta). Glyph
   rendering (incl. `vertical:rl` / `lr` layout) is the `truetype-overlay` feature
