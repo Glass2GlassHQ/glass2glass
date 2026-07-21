@@ -158,9 +158,13 @@ full topology space: linear, fan-out (tee), fan-in (muxer), and diamonds.
 constructs the corresponding borrowing `Graph` and delegates to `run_graph`,
 so the four historical runner shapes share one negotiation + data plane. A
 node's mid-stream rejection policy is topology-derived: a node on a
-single-producer chain reverse-reconfigures and keeps flowing (posting the
-structured failure to the bus), while a node behind a tee cannot (a shared
-upstream can't honour a per-branch reconfigure). What a behind-a-tee rejection
+single-producer chain forwards a feasible re-solve and keeps flowing, but a
+genuinely infeasible one (the refined caps have no solution against the
+downstream chain) fails the run loud (posting the structured failure to the
+bus), since no runtime producer renegotiates its output caps and there is
+nothing to reverse-reconfigure into. A node behind a tee likewise cannot
+reverse-reconfigure (a shared upstream can't honour a per-branch reconfigure).
+What a behind-a-tee rejection
 then does is the tee's [`FanOutPolicy`](crate::graph::FanOutPolicy): `FailLoud`
 (the `add_tee` default) fails the whole run, and `AllowBranchDrop`
 (`add_tee_with_policy`) drops just that branch (its arm ends, the tee removes its
@@ -211,8 +215,10 @@ correctly downstream-aware:
 1. At startup, each interior arm receives its `downstream_feasible:
    Option<CapsSet>` from the backward sweep.
 2. Mid-stream, arm *i* on `CapsChanged(in)`:
-   - intersect `in` with the element's input constraint; empty → loud
-     `EmptyLink` and reverse `Reconfigure` upstream;
+   - intersect `in` with the element's input constraint; empty → fail the run
+     loud (`CapsMismatch`) with a structured `EmptyLink` on the bus (M749: no
+     runtime producer renegotiates its output, so the chain does not run on with
+     stale caps);
    - derive output candidates from `in` via the constraint;
    - intersect candidates with `downstream_feasible[i]`;
    - fixate; `configure_pipeline(in)`; element-local realloc; forward

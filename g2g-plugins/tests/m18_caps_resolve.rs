@@ -230,9 +230,11 @@ async fn midstream_change_steers_converter_to_sink_acceptable_output() {
 }
 
 /// Same chain, but the converter can only emit NV12 from RGBA. After the
-/// mid-stream switch to I420 it has no sink-acceptable output: Caps-α fails
-/// loud (reverse reconfigure + structured `EmptyLink` on the bus) instead of
-/// forwarding a doomed I420 the sink silently mishandles.
+/// mid-stream switch to I420 it has no sink-acceptable output: the refinement is
+/// genuinely infeasible and no runtime producer renegotiates its output caps, so
+/// M749 fails the run loud (`CapsMismatch`) with a structured `EmptyLink` still
+/// posted to the bus, rather than forwarding a doomed I420 the sink silently
+/// mishandles or dropping it and running on with stale caps.
 #[tokio::test]
 async fn midstream_change_with_no_acceptable_output_fails_loud_to_bus() {
     let caps_log = Arc::new(Mutex::new(Vec::new()));
@@ -251,12 +253,17 @@ async fn midstream_change_with_no_acceptable_output_fails_loud_to_bus() {
     let (bus, handle) = Bus::new(4);
 
     let transforms: Vec<&mut dyn DynAsyncElement> = std::vec![&mut conv];
-    run_linear_chain_with_bus(&mut src, transforms, &mut sink, &clock, 4, &handle)
-        .await
-        .expect("run completes (the failure is signalled out-of-band, not fatal)");
+    let result =
+        run_linear_chain_with_bus(&mut src, transforms, &mut sink, &clock, 4, &handle).await;
+    assert_eq!(
+        result,
+        Err(G2gError::CapsMismatch),
+        "the infeasible mid-stream change fails the run loud, not out-of-band"
+    );
 
-    // Drain and look for the failure: a per-source `StreamStart` (M206) precedes
-    // it, since this failure is mid-stream (after frames flow), not at startup.
+    // The structured failure is still posted to the bus before the run returns:
+    // a per-source `StreamStart` (M206) precedes it, since this failure is
+    // mid-stream (after frames flow), not at startup.
     let mut saw_empty_link = false;
     while let Some(m) = bus.try_recv() {
         if matches!(
