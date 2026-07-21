@@ -948,6 +948,27 @@ fn parse_error(msg: &[u8]) -> Option<(u16, String)> {
     Some((code, reason))
 }
 
+#[cfg(fuzzing)]
+pub fn fuzz_parse(data: &[u8]) {
+    let _ = parse_error(data);
+    let _ = txn_of(data);
+    let _ = find_xor_addr(data, ATTR_XOR_PEER_ADDRESS, &[0u8; 12]);
+    let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 3478));
+    let mut client = TurnClient {
+        server: addr,
+        username: String::new(),
+        key: Vec::new(),
+        realm: String::new(),
+        nonce: String::new(),
+        relay: addr,
+        channels: BTreeMap::new(),
+        next_channel: 0x4000,
+        pending: BTreeMap::new(),
+        txn_counter: 0,
+    };
+    let _ = client.parse_data(data);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -16,9 +16,10 @@ libfuzzer-sys = "0.4"
 [dependencies.g2g-plugins]
 path = ".."
 default-features = false
-# std pulls in the mp4demuxn box parser; rtmp pulls the handshake module; the
-# other targets are no_std modules
-features = ["std", "rtmp"]
+# std pulls in the mp4demuxn box parser; rtmp pulls the handshake module; srt
+# gates srtcrypto (KM parsing); webrtc gates turn / webrtc_util (STUN/TURN
+# parsing). The other targets are no_std modules.
+features = ["std", "rtmp", "srt", "webrtc"]
 
 # for the parse_launch target: the launch-string parser lives in g2g-core's
 # runtime layer (the untrusted-text surface the g2g-capi C ABI forwards).
@@ -207,6 +208,69 @@ bench = false
 [[bin]]
 name = "parse_launch"
 path = "fuzz_targets/parse_launch.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "typefind"
+path = "fuzz_targets/typefind.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ivfdemux"
+path = "fuzz_targets/ivfdemux.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fmp4"
+path = "fuzz_targets/fmp4.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "st2110sdp"
+path = "fuzz_targets/st2110sdp.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "srtcrypto"
+path = "fuzz_targets/srtcrypto.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ulpfec"
+path = "fuzz_targets/ulpfec.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rtx"
+path = "fuzz_targets/rtx.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rtpjitter"
+path = "fuzz_targets/rtpjitter.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "turn_stun"
+path = "fuzz_targets/turn_stun.rs"
 test = false
 doc = false
 bench = false

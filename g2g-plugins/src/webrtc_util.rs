@@ -696,6 +696,14 @@ fn parse_xor_mapped_address(msg: &[u8], txn: &[u8; 12]) -> Option<SocketAddr> {
     None
 }
 
+#[cfg(fuzzing)]
+pub fn fuzz_parse(data: &[u8]) {
+    let _ = parse_xor_mapped_address(data, &[0u8; 12]);
+    let text = String::from_utf8_lossy(data);
+    let _ = parse_ice_params(&text);
+    let _ = parse_restart_answer_frag(&text);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
