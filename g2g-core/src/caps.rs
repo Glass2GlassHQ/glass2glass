@@ -620,7 +620,7 @@ pub(crate) fn intersect_sample_rate(a: u32, b: u32) -> Option<u32> {
 /// disjoint (`None`). Unlike [`intersect_sample_rate`] this applies to compressed
 /// audio too, so a decoder's concrete output channels coupling back onto a
 /// demuxer's unknown `0` input intersects rather than emptying the link.
-fn intersect_channels(a: u8, b: u8) -> Option<u8> {
+pub(crate) fn intersect_channels(a: u8, b: u8) -> Option<u8> {
     match (a, b) {
         (ANY_CHANNELS, x) | (x, ANY_CHANNELS) => Some(x),
         (x, y) if x == y => Some(x),

@@ -124,12 +124,14 @@ impl AudioResample {
         else {
             return Err(G2gError::CapsMismatch);
         };
-        // A 0 (`ANY_SAMPLE_RATE`) input rate is the negotiation placeholder a
-        // decoder advertises before it has decoded a frame; accept it deferred (the
-        // real rate arrives as a `CapsChanged`, which the runner turns into a fresh
-        // `configure_pipeline`). A `DataFrame` never precedes that `CapsChanged`, so
-        // `resample` is never asked to interpolate at rate 0 (guarded in `process`).
-        if !PCM_FORMATS.contains(format) || *channels == 0 {
+        // A 0 rate (`ANY_SAMPLE_RATE`) or 0 channel count (`ANY_CHANNELS`) is the
+        // negotiation placeholder a decoder advertises before it has decoded a
+        // frame; accept both deferred (the real values arrive as a `CapsChanged`,
+        // which the runner turns into a fresh `configure_pipeline`, and channels is
+        // a passthrough field so a downstream capsfilter pins it). A `DataFrame`
+        // never precedes that `CapsChanged`, so `resample` never interpolates at a
+        // placeholder rate / channel count (guarded in `process` / `resample`).
+        if !PCM_FORMATS.contains(format) {
             return Err(G2gError::CapsMismatch);
         }
         Ok((*format, *channels, *sample_rate))
@@ -161,11 +163,16 @@ impl AsyncElement for AudioResample {
         // Passthrough format + channels (retarget sample_rate only).
         let passthrough = PassthroughFields::NONE.with_format().with_channels();
         let derive = Box::new(move |input: &Caps| match input {
+            // `channels` passes through untouched, so an `ANY_CHANNELS` (0)
+            // placeholder input derives an `ANY_CHANNELS` output (a downstream
+            // capsfilter pins it); do not require a concrete count here, else a
+            // decoder's pre-decode placeholder collapses the derived set to empty
+            // and the solver reads it as an unsatisfiable link.
             Caps::Audio {
                 format,
                 channels,
                 sample_rate,
-            } if PCM_FORMATS.contains(format) && *channels > 0 => {
+            } if PCM_FORMATS.contains(format) => {
                 let mk = |rate| Caps::Audio {
                     format: *format,
                     channels: *channels,

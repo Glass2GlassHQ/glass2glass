@@ -1014,9 +1014,12 @@ differential); AAC is not, so it wants a golden / determinism check instead.
 
 Audio-only MP4 through a bare `decodebin` still needs the `decodebin name=d
 d.audio_0` fan-out or `uridecodebin`: the single-stream `mp4demux` exposes only
-the video track, and the fan-out audio branch itself fails at runtime (the
-demux's per-port `CapsChanged` re-solve past `FfmpegAudioDec` mismatches when the
-decoded rate differs from the branch's fixated rate).
+the video track.
+
+A linear chain with no `audioresample` and an infeasible rate pin silently
+writes native-rate PCM labeled with the pinned rate: the Reconfigure branch mode
+drops the infeasible runtime `CapsChanged` and continues with stale caps. It
+should fail loud like the fan-out path.
 
 ## Documentation
 

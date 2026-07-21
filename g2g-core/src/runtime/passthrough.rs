@@ -8,8 +8,8 @@
 //! runner's backward-feasibility sweep and stay `std`-gated.
 
 use crate::caps::{
-    intersect_sample_rate, AudioFormat, Caps, CapsSet, Dim, PassthroughFields, Rate,
-    RawVideoFormat, VideoCodec,
+    intersect_channels, intersect_sample_rate, AudioFormat, Caps, CapsSet, Dim, PassthroughFields,
+    Rate, RawVideoFormat, VideoCodec,
 };
 // Only the std-gated `project_passthrough` widens sample_rate back to ANY.
 #[cfg(feature = "std")]
@@ -137,10 +137,9 @@ pub(crate) fn couple_passthrough(
                 *fi
             };
             let channels = if mask.channels {
-                if ci != cp {
-                    return None;
-                }
-                *ci
+                // `ANY_CHANNELS` (0) is a wildcard: an unknown input channel count
+                // couples to a concrete downstream pin (mirrors `Caps::intersect`).
+                intersect_channels(*ci, *cp)?
             } else {
                 *ci
             };
