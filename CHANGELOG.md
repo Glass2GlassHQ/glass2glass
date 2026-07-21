@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M758: FlexFEC gains 2-D (row + column) protection, so a burst of up to a full row of consecutive losses recovers via the column repairs.
 - M756: device-validated that `MediaCodecDec` accepts and forwards the runner's pre-fixed output `CapsChanged`, with on-device regression coverage in the decode smoke test.
 - M755: `audioresample ! audioconvert ! rate-pin` now flows like the reverse order; the resampler keeps its caps-resolved target across an intervening converter.
 - M754: audio decoders negotiate a downstream pin at the stream's native sample rate with no resampler; a cross-rate pin without one still fails loud.

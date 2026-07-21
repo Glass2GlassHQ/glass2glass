@@ -14,7 +14,9 @@ leverage first:
 
 1. **Platforms.** macOS: camera / screen capture validation on a permitted
    Mac.
-2. **Egress / transports.** FlexFEC + multi-level burst FEC.
+2. **Egress / transports.** FEC knobs as launch properties (`UdpSink`'s
+   FEC modes are builder-only today); real-peer FlexFEC interop when a peer
+   implementation is available (GStreamer here lacks `rtpflexfecenc`).
 3. **Depth.** Codec decode to cut reliance on the ffmpeg FFI: AV1 landed both as
    libdav1d (`Dav1dDec`, `dav1d` feature, C FFI) and pure Rust (`Rav1dDec`,
    `rav1d` feature, via `re_rav1d`). VP8 / VP9 decode is covered by `FfmpegVideoDec`

@@ -210,6 +210,23 @@ impl UdpSink {
         self
     }
 
+    /// Two-dimensional FlexFEC (M758): row repairs every `group` packets plus
+    /// column repairs at stride `group` over a `group` x `rows` block, so a burst
+    /// of up to `group` consecutive losses is recoverable (the multi-level burst
+    /// counterpart of [`with_flexfec`](Self::with_flexfec)).
+    pub fn with_flexfec_2d(
+        mut self,
+        group: usize,
+        rows: usize,
+        fec_payload_type: u8,
+        fec_ssrc: u32,
+    ) -> Self {
+        self.fec = FecMode::FlexFec(
+            FlexFecEncoder::new(group, fec_payload_type, fec_ssrc).with_rows(rows),
+        );
+        self
+    }
+
     /// Emit an RFC 3550 RTCP sender report every `interval_ms` on the RTP socket
     /// (RTP/RTCP-muxed): it carries the NTP wall time, the matching RTP timestamp,
     /// and this SSRC's packet / octet counts, so a receiver can map the RTP clock
@@ -445,11 +462,11 @@ impl AsyncElement for UdpSink {
                                 fec_packets.extend(enc.push(pkt));
                             }
                         }
+                        // FlexFec emits the due row repair, plus a batch of
+                        // column repairs when a 2-D block completes.
                         FecMode::FlexFec(enc) => {
                             for pkt in &packets {
-                                if let Some(repair) = enc.push(pkt) {
-                                    fec_packets.push(repair);
-                                }
+                                fec_packets.extend(enc.push(pkt));
                             }
                         }
                     }
