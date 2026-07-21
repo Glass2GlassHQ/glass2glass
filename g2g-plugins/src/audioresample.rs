@@ -12,6 +12,11 @@
 //! filter is a quality follow-up); it is exact at rate 1:1 and introduces the
 //! usual linear-interp high-frequency rolloff otherwise. CPU-only and `no_std`:
 //! this element lives in the crate baseline alongside `AudioConvert`.
+//!
+//! The per-buffer loop defers the last input sample into the carry, so at end
+//! of stream `process(Eos)` flushes the pending output positions in the final
+//! window, interpolating toward a held last sample (sample-and-hold), landing
+//! the total output at the rate-ratio count `ceil(n_in * out/in)`.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -19,7 +24,7 @@ use core::pin::Pin;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use g2g_core::frame::Frame;
+use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
@@ -66,6 +71,9 @@ pub struct AudioResample {
     configured: bool,
     last_caps: Option<Caps>,
     emitted: u64,
+    /// Timing of the last input `DataFrame`, reused to stamp the EOS tail frame
+    /// (its exact timestamp is not critical, the tail is a fraction of a buffer).
+    last_timing: FrameTiming,
 }
 
 impl AudioResample {
@@ -80,6 +88,7 @@ impl AudioResample {
             configured: false,
             last_caps: None,
             emitted: 0,
+            last_timing: FrameTiming::default(),
         }
     }
 
@@ -96,6 +105,7 @@ impl AudioResample {
             configured: false,
             last_caps: None,
             emitted: 0,
+            last_timing: FrameTiming::default(),
         }
     }
 
@@ -241,6 +251,7 @@ impl AsyncElement for AudioResample {
                     let MemoryDomain::System(slice) = &frame.domain else {
                         return Err(G2gError::UnsupportedDomain);
                     };
+                    self.last_timing = frame.timing;
                     // Effective output rate: property, or caps-resolved (auto).
                     let out_rate = self.out_rate().ok_or(G2gError::NotConfigured)?;
                     let resampled =
@@ -287,8 +298,22 @@ impl AsyncElement for AudioResample {
                 PipelinePacket::Segment(seg) => {
                     out.push(PipelinePacket::Segment(seg)).await?;
                 }
-                // the runner forwards Eos; the transform does not re-emit it.
-                PipelinePacket::Eos => {}
+                // The runner's transform arm calls `process(Eos)` before it
+                // forwards Eos downstream, so the flushed tail frame lands ahead
+                // of Eos. Flush the pending final-window output, then let the
+                // runner emit Eos (do not re-emit it here).
+                PipelinePacket::Eos => {
+                    if let Some(tail) = self.flush_tail()? {
+                        let out_frame = Frame {
+                            domain: MemoryDomain::System(SystemSlice::from_boxed(tail)),
+                            timing: self.last_timing,
+                            sequence: self.emitted,
+                            meta: Default::default(),
+                        };
+                        self.emitted += 1;
+                        out.push(PipelinePacket::DataFrame(out_frame)).await?;
+                    }
+                }
                 other => {
                     out.push(other).await?;
                 }
@@ -424,6 +449,48 @@ impl AudioResample {
         self.phase = rel - n as f64;
         Ok(dst.into_boxed_slice())
     }
+
+    /// At end of stream, emit the output samples the per-buffer loop deferred:
+    /// the read positions in the final input window `[n-1, n)` that `resample`
+    /// left pending (it stops at `rel < n-1` and carries the buffer's last
+    /// sample into `prev`). Interpolates toward a held last sample (b = a,
+    /// sample-and-hold), so the total stream output lands at `ceil(n_in *
+    /// out/in)`. Returns `None` when there is no carry: rate 1:1 (bypass) or a
+    /// stream that ended before any resampled frame.
+    fn flush_tail(&mut self) -> Result<Option<Box<[u8]>>, G2gError> {
+        let Some(prev) = self.prev.take() else {
+            return Ok(None);
+        };
+        let (in_format, in_channels, in_rate) = self.input.ok_or(G2gError::NotConfigured)?;
+        let out_rate = self.out_rate().ok_or(G2gError::NotConfigured)?;
+        // 1:1 bypasses and never populates the carry; guard against a zero rate.
+        if in_rate == out_rate || in_rate == 0 || out_rate == 0 {
+            return Ok(None);
+        }
+        let ch = in_channels as usize;
+        if prev.len() != ch {
+            return Err(G2gError::CapsMismatch);
+        }
+        let step = in_rate as f64 / out_rate as f64;
+        // After the last buffer `phase` is `rel - n` relative to that buffer's
+        // sample 0, so the carried `prev` sits at relative index -1 and the
+        // pending window is `phase in [-1, 0)`. Emit while `phase < 0`, holding
+        // `prev` as both interpolation endpoints (the signal past the last
+        // sample is held constant).
+        let mut rel = self.phase;
+        let mut dst = Vec::new();
+        while rel < 0.0 {
+            for &sample in &prev {
+                write_sample(&mut dst, sample, in_format);
+            }
+            rel += step;
+        }
+        self.phase = 0.0;
+        if dst.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(dst.into_boxed_slice()))
+    }
 }
 
 impl PadTemplates for AudioResample {
@@ -546,6 +613,37 @@ mod tests {
             .unwrap();
         let got = f32_samples(&out);
         assert_eq!(got, &[0.0, 2.0, 4.0, 6.0]);
+    }
+
+    #[test]
+    fn eos_flush_emits_deferred_tail() {
+        // 2x upsample of 4 samples: the per-buffer loop yields 6 (deferring the
+        // last window), then the EOS flush emits the held tail so the total lands
+        // at round(4*2) = 8 = ceil(4 / 0.5).
+        let mut r = AudioResample::new(96_000);
+        r.configure_pipeline(&audio(AudioFormat::PcmF32Le, 1, 48_000))
+            .unwrap();
+        let src = interleave_f32(&[&[0.0, 1.0, 2.0, 3.0]]);
+        let body = f32_samples(
+            &r.resample(&src, AudioFormat::PcmF32Le, 1, 48_000, 96_000)
+                .unwrap(),
+        );
+        assert_eq!(body.len(), 6);
+        let tail = f32_samples(&r.flush_tail().unwrap().expect("tail emitted"));
+        // held last sample (3.0) fills positions 3.0 and 3.5.
+        assert_eq!(tail, &[3.0, 3.0]);
+        assert_eq!(body.len() + tail.len(), 8);
+        // flush is idempotent: the carry is consumed, a second flush emits nothing.
+        assert!(r.flush_tail().unwrap().is_none());
+    }
+
+    #[test]
+    fn eos_flush_without_data_emits_nothing() {
+        // A stream that ends before any DataFrame has no carry to flush.
+        let mut r = AudioResample::new(48_000);
+        r.configure_pipeline(&audio(AudioFormat::PcmF32Le, 1, 44_100))
+            .unwrap();
+        assert!(r.flush_tail().unwrap().is_none());
     }
 
     #[test]

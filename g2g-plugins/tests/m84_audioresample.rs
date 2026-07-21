@@ -35,10 +35,11 @@ async fn audioresample_retargets_rate_through_run_graph() {
             .expect("audio resample graph runs")
     };
 
-    // One output buffer per input buffer; all reach the sink.
+    // The source emits 4 buffers; the resampler adds the EOS tail-flush frame
+    // (the deferred final interpolation window), so the sink consumes 5.
     assert_eq!(stats.frames_emitted, 4);
-    assert_eq!(stats.frames_consumed, 4);
-    assert_eq!(sink.received(), 4);
+    assert_eq!(stats.frames_consumed, 5);
+    assert_eq!(sink.received(), 5);
 
     // The sink saw the retargeted caps: same format + channels, 48 kHz out.
     let retargeted = sink.caps_changes().iter().any(|c| {
