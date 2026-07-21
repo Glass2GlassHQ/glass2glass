@@ -1715,6 +1715,16 @@ headers), and `OggDemux` emits the Opus audio packets as `Caps::Audio{Opus}` wit
 the channel count refined from `OpusHead`. The container is auto-detectable
 (`typefind` "OggS", `filesrc bytestream-format=auto`).
 
+An audio decoder fixates its output caps even when a demuxer only knows the
+channel count once it parses the stream: it advertises `PcmS16Le` at a concrete
+rate with the `ANY_CHANNELS` placeholder (fixated to stereo for the negotiated
+edge), and the real count arrives via a `CapsChanged` (`OpusDec` (re)builds
+libopus for it, since the decoder is per-channel-count). So a decode-to-PCM line
+negotiates before the count is known. `AudioConvert` is caps-driven like
+`AudioResample`: a bare `audioconvert` takes its output format / channel count
+from a downstream capsfilter (a mono `channels=1` pin) and otherwise passes the
+input through.
+
 The FLV demuxer is the fourth, on `Caps::ByteStream{Flv}`.
 `g2g-plugins::flv::FlvDemuxer` parses the flat FLV tag stream (the "FLV" header,
 then `PreviousTagSize` / tag pairs, each tag's 11-byte header framing its body),

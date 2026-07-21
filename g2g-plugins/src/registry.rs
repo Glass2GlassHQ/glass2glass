@@ -379,7 +379,9 @@ pub fn default_registry() -> Registry {
 
     // Audio transforms.
     reg.register_launch(LaunchFactory::of::<AudioConvert>("audioconvert", || {
-        Box::new(AudioConvert::new(AudioFormat::PcmS16Le, 2))
+        // Caps-driven by default: a bare `audioconvert` takes its output format /
+        // channels from a downstream capsfilter, or passes the input through.
+        Box::new(AudioConvert::auto())
     }));
     reg.register_launch(LaunchFactory::of::<AudioResample>("audioresample", || {
         // Caps-driven by default (M187): a bare `audioresample` takes its output
@@ -606,6 +608,11 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::of::<FileSink>("filesink", || {
         Box::new(FileSink::new(""))
     }));
+    // Raw-PCM WAV file sink: `... ! audioconvert ! wavsink location=out.wav`.
+    reg.register_launch(LaunchFactory::of::<crate::wavsink::WavSink>(
+        "wavsink",
+        || Box::new(crate::wavsink::WavSink::new("")),
+    ));
     // Record / replay pair: record the packet stream to a file, play it back as a source.
     reg.register_launch(LaunchFactory::of::<RecordSink>("recordsink", || {
         Box::new(RecordSink::new(""))

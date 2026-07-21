@@ -5,9 +5,13 @@
 //!
 //! Each Opus packet is self-contained, so decode is one packet in, one PCM frame
 //! out. libopus always decodes at 48 kHz ([`crate::opusparse::OPUS_RATE_HZ`])
-//! regardless of the coded bandwidth, so the output rate is constant; the channel
-//! count is fixed at configure (the decoder is created for a channel count). A
-//! `CapsChanged` carries the output format before the first frame.
+//! regardless of the coded bandwidth, so the output rate is constant. The channel
+//! count comes from `OpusHead`; a demuxer (OggDemux) only knows it once it has
+//! parsed the stream, so at negotiation the input channels can be the
+//! `ANY_CHANNELS` placeholder. The output therefore advertises `ANY_CHANNELS`
+//! (fixated to stereo for the edge) and the decoder is (re)built when the real
+//! channel count arrives via a `CapsChanged`. A `CapsChanged` carries the output
+//! format before the first frame.
 //!
 //! Scope (v1): 48 kHz mono/stereo, S16LE output. Float output and packet-loss
 //! concealment (decode of a `None` packet) are follow-ups.
@@ -40,7 +44,9 @@ const MAX_FRAME_SAMPLES: usize = (OPUS_RATE_HZ as usize * 120) / 1000;
 pub struct OpusDec {
     channels: u8,
     dec: Option<Decoder>,
-    caps_sent: bool,
+    /// Last emitted output caps, to suppress re-emitting an unchanged
+    /// `CapsChanged` and to detect a channel-count change.
+    last_out: Option<Caps>,
     sequence: u64,
     configured: bool,
 }
@@ -67,10 +73,24 @@ impl OpusDec {
         Self {
             channels: 0,
             dec: None,
-            caps_sent: false,
+            last_out: None,
             sequence: 0,
             configured: false,
         }
+    }
+
+    /// (Re)create the libopus decoder for a concrete channel count. Called from
+    /// `configure_pipeline` when the negotiated input already carries a real
+    /// count, and from `process` when the demuxer's `CapsChanged` delivers it.
+    fn build_decoder(&mut self, channels: u8) -> Result<(), G2gError> {
+        let ch = match channels {
+            1 => Channels::Mono,
+            2 => Channels::Stereo,
+            _ => return Err(G2gError::CapsMismatch),
+        };
+        self.dec = Some(Decoder::new(SampleRate::Hz48000, ch).map_err(|_| G2gError::CapsMismatch)?);
+        self.channels = channels;
+        Ok(())
     }
 
     /// Sink pad template: Opus at any channel count / nominal rate. The auto-plug
@@ -132,15 +152,20 @@ impl AsyncElement for OpusDec {
         }
     }
 
+    /// Native `DerivedOutput`: Opus in -> interleaved `PcmS16Le` out at 48 kHz.
+    /// The output channel count is the `ANY_CHANNELS` placeholder, not the input
+    /// count: a demuxer only knows the real count once it parses `OpusHead`, so
+    /// the negotiated input can be `ANY_CHANNELS`. `fixate` collapses the output
+    /// placeholder to stereo for the edge; the real count arrives via the
+    /// `CapsChanged` the demuxer emits and the decoded frame carries.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
             Caps::Audio {
                 format: AudioFormat::Opus,
-                channels,
                 ..
-            } if *channels == 1 || *channels == 2 => CapsSet::one(Caps::Audio {
+            } => CapsSet::one(Caps::Audio {
                 format: AudioFormat::PcmS16Le,
-                channels: *channels,
+                channels: ANY_CHANNELS,
                 sample_rate: OPUS_RATE_HZ,
             }),
             _ => CapsSet::from_alternatives(Vec::new()),
@@ -156,15 +181,12 @@ impl AsyncElement for OpusDec {
         else {
             return Err(G2gError::CapsMismatch);
         };
-        let ch = match channels {
-            1 => Channels::Mono,
-            2 => Channels::Stereo,
-            _ => return Err(G2gError::CapsMismatch),
-        };
-        let dec = Decoder::new(SampleRate::Hz48000, ch).map_err(|_| G2gError::CapsMismatch)?;
-        self.dec = Some(dec);
-        self.channels = *channels;
         self.configured = true;
+        // A concrete count (the direct OpusParse path) builds the decoder now; the
+        // `ANY_CHANNELS` (0) placeholder defers it to the demuxer's `CapsChanged`.
+        if *channels == 1 || *channels == 2 {
+            self.build_decoder(*channels)?;
+        }
         Ok(ConfigureOutcome::Accepted)
     }
 
@@ -192,10 +214,11 @@ impl AsyncElement for OpusDec {
                         return Err(G2gError::UnsupportedDomain);
                     };
                     let pcm = self.decode(slice.as_slice())?;
-                    if !self.caps_sent {
-                        out.push(PipelinePacket::CapsChanged(self.output_caps()))
+                    let new_caps = self.output_caps();
+                    if self.last_out.as_ref() != Some(&new_caps) {
+                        out.push(PipelinePacket::CapsChanged(new_caps.clone()))
                             .await?;
-                        self.caps_sent = true;
+                        self.last_out = Some(new_caps);
                     }
                     let decoded = Frame::new(
                         MemoryDomain::System(SystemSlice::from_boxed(pcm.into_boxed_slice())),
@@ -205,7 +228,27 @@ impl AsyncElement for OpusDec {
                     self.sequence += 1;
                     out.push(PipelinePacket::DataFrame(decoded)).await?;
                 }
-                PipelinePacket::CapsChanged(_) => {}
+                PipelinePacket::CapsChanged(c) => match &c {
+                    // The demuxer's input refine carries the real channel count
+                    // (from `OpusHead`); (re)build the decoder for it. The decoder
+                    // re-derives its own output, so this is not forwarded.
+                    Caps::Audio {
+                        format: AudioFormat::Opus,
+                        channels,
+                        ..
+                    } => {
+                        self.build_decoder(*channels)?;
+                    }
+                    // The runner's pre-fixed forward output caps: forward on.
+                    Caps::Audio {
+                        format: AudioFormat::PcmS16Le,
+                        ..
+                    } => {
+                        out.push(PipelinePacket::CapsChanged(c.clone())).await?;
+                        self.last_out = Some(c);
+                    }
+                    _ => return Err(G2gError::CapsMismatch),
+                },
                 other => {
                     out.push(other).await?;
                 }
