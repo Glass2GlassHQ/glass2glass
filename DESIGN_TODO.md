@@ -1006,6 +1006,26 @@ export counter; PyTransform worker re-spawn guarded). The audit areas are now
 covered; the flagged hardening follow-ups are now fixed (segment-fetch body cap,
 free-threaded analytics sink, descriptive `Pipeline::wait` errors).
 
+## Audio decode-to-PCM from the launch CLI
+
+A `g2g-launch` built with `ffmpeg,opus` cannot negotiate a decode-to-raw-PCM
+pipeline from the CLI, so there is no way to dump comparable PCM for QA (blocks
+calliope's audio decode differential / golden / determinism):
+- `filesrc ! decodebin ! audioconvert ! audio/x-raw,format=S16LE,rate=48000,channels=1 ! filesink`
+  fails: `OpusDec -> AudioConvert: unconstrained`, `AudioConvert -> CapsFilter:
+  unconstrained` (OpusDec's output caps don't fixate a rate / format the
+  downstream can pin against).
+- aac `filesrc ! decodebin ! filesink` is a `CapsMismatch` (no chain to a byte
+  sink; filesink rejects `audio/x-raw`).
+- no raw-audio file sink is registered: `wavsink` is unknown to launch even
+  though `wavsink.rs` compiles under `std` (not in the element registry).
+
+Fix: make the audio decoders fixate concrete output caps (rate / channels /
+format) so `audioconvert` can negotiate, and register a PCM / WAV file sink (or
+let `filesink` accept `audio/x-raw`). The calliope side then adds audio adapters
++ whole-stream PCM hashing + an `[audio]` spec; note only Opus is bit-exact
+across decoders, so AAC wants golden / determinism, not a cross-engine differential.
+
 ## Documentation
 
 - Architecture diagrams in [docs/](docs/) (the Pages site is text-only).
