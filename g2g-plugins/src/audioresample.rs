@@ -169,7 +169,15 @@ impl AsyncElement for AudioResample {
     /// Native `DerivedOutput`: a supported PCM input maps to the same format +
     /// channels at the target sample rate.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        let target_rate = self.target_rate;
+        // Property, or the caps-resolved target from startup (M755). Reflecting the
+        // resolved rate (not just the property) lets a mid-stream input-rate change
+        // re-derive to a single fixed output, so the element keeps its 48 kHz target
+        // even when its downstream feasibility snapshot is blanked by an intervening
+        // format converter (`audioresample ! audioconvert ! rate-pin`, where the
+        // converter retargets `format`, a scalar with no wildcard, so the backward
+        // feasibility projection is empty). Auto + unresolved (startup) stays the
+        // passthrough+wildcard set, so startup negotiation is unchanged.
+        let out_rate = self.out_rate();
         // Passthrough format + channels (retarget sample_rate only).
         let passthrough = PassthroughFields::NONE.with_format().with_channels();
         let derive = Box::new(move |input: &Caps| match input {
@@ -188,15 +196,17 @@ impl AsyncElement for AudioResample {
                     channels: *channels,
                     sample_rate: rate,
                 };
-                if target_rate != 0 {
-                    // Property-driven: the fixed target rate.
-                    CapsSet::one(mk(target_rate))
-                } else {
-                    // Caps-driven (auto): default to passthrough (the input
-                    // rate, no resampling), but advertise "any rate" so a
+                match out_rate {
+                    // Property-driven, or a caps-resolved target: the fixed rate.
+                    Some(rate) => CapsSet::one(mk(rate)),
+                    // Caps-driven (auto), not yet resolved: default to passthrough
+                    // (the input rate, no resampling), but advertise "any rate" so a
                     // downstream capsfilter pins the target. Passthrough is the
                     // preferred (first) alternative.
-                    CapsSet::from_alternatives(alloc::vec![mk(*sample_rate), mk(ANY_SAMPLE_RATE)])
+                    None => CapsSet::from_alternatives(alloc::vec![
+                        mk(*sample_rate),
+                        mk(ANY_SAMPLE_RATE)
+                    ]),
                 }
             }
             _ => CapsSet::from_alternatives(Vec::new()),
