@@ -578,9 +578,9 @@ it sniffs a bounded prefix (`ts_primary_stream` reads the PMT via
 plus its stream-selection property (`tsdemux stream=aac`) and the audio elementary
 caps, so the search builds `filesrc ! tsdemux stream=aac ! <audio decoder> ! …`.
 The hook declines a container with a video track (the default video port is
-correct), leaving A/V behavior unchanged. MP4 is out of scope here: the
-single-stream `mp4demux` exposes only the video track, so audio-only MP4 routes
-through the `decodebin name=d d.audio_0` fan-out or `uridecodebin`.
+correct), leaving A/V behavior unchanged. A `mp4_primary_stream` sibling does the
+same for MP4, sniffing the `moov` and naming `qtdemux stream=aac` so an audio-only
+`.m4a` / `.mp4` plugs an audio decoder too.
 
 - **playbin / uridecodebin** (`std`). `Registry::build_playbin(source_name,
   sink, target, max_depth)` assembles a complete `source → chain → sink` graph

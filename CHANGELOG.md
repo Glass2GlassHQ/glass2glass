@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M748: a bare `filesrc ! decodebin` on an audio-only MP4 sniffs the `moov` and selects the demux's audio track, so it plugs an audio decoder instead of failing on the default video port.
 - M747: a `decodebin` fan-out audio branch survives a runtime sample-rate refinement (an `audioresample` bridges 44.1 kHz decode to a 48 kHz pin), and without a bridging converter the branch fails loud naming the conflicting caps instead of silently or opaquely.
 - M746: a bare `filesrc ! decodebin` on an audio-only MPEG-TS sniffs the PMT and selects the demux's audio stream, so it plugs an audio decoder instead of failing on the default video port.
 - M745: decode-to-PCM launch lines negotiate: audio decoders fixate a concrete PCM output, `audioconvert` is caps-driven (format/channels), and `wavsink` is registered.

@@ -1017,6 +1017,38 @@ pub fn ts_primary_stream(location: &str, caps: &Caps) -> Option<PrimaryStream> {
     })
 }
 
+/// Bare-`decodebin` primary-stream hook for MP4 (M748): the MP4 sibling of
+/// [`ts_primary_stream`]. A `filesrc location=X.m4a ! decodebin` on an audio-only
+/// MP4 needs the single-stream [`Mp4Demux`](crate::mp4demux::Mp4Demux) to select
+/// its audio track (the default is the video port, so the auto-plug would pick a
+/// video decoder and fail "no caps overlap"). Sniff the `moov`; decline (`None`) a
+/// non-MP4 file, a `moov` past the probe window, an empty track set, or a file that
+/// carries a video track (the default video path is right), else return `qtdemux`
+/// with `stream=aac` and the audio elementary caps for the decoder search.
+#[cfg(feature = "std")]
+pub fn mp4_primary_stream(location: &str, caps: &Caps) -> Option<PrimaryStream> {
+    if !matches!(
+        caps,
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::Mp4
+        }
+    ) {
+        return None;
+    }
+    let prefix = read_prefix(location)?;
+    let infos = crate::mp4demuxn::forwardable_streams(&prefix);
+    // A video track present: the demux's default video port is right, decline.
+    if infos.is_empty() || infos.iter().any(|i| i.video) {
+        return None;
+    }
+    let audio = infos.into_iter().find(|i| !i.video)?;
+    Some(PrimaryStream {
+        demux: "qtdemux",
+        props: alloc::vec![("stream".to_string(), "aac".to_string())],
+        caps: audio.caps,
+    })
+}
+
 /// Probe an MP4 file and build an [`Mp4DemuxN`](crate::mp4demuxn::Mp4DemuxN) with
 /// the requested tracks + their caps (M482). Shared by `qtdemux` demux-select and
 /// `decodebin` fan-out. Declines a non-MP4 file (or a `moov` past the probe window).

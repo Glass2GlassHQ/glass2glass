@@ -1012,10 +1012,6 @@ calliope adds audio adapters, whole-stream PCM hashing, and an `[audio]` spec so
 decoded PCM is comparable. Opus is bit-exact across decoders (cross-engine
 differential); AAC is not, so it wants a golden / determinism check instead.
 
-Audio-only MP4 through a bare `decodebin` still needs the `decodebin name=d
-d.audio_0` fan-out or `uridecodebin`: the single-stream `mp4demux` exposes only
-the video track.
-
 A linear chain with no `audioresample` and an infeasible rate pin silently
 writes native-rate PCM labeled with the pinned rate: the Reconfigure branch mode
 drops the infeasible runtime `CapsChanged` and continues with stale caps. It
