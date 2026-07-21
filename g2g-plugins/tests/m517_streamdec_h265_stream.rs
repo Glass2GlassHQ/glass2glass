@@ -1,4 +1,4 @@
-//! M517: the streaming adapter ([`g2g_plugins::revideo::VulkanStreamDecoder`])
+//! M517: the streaming adapter ([`g2g_plugins::streamdec::VulkanStreamDecoder`])
 //! streams H.265, not just AV1 (m508) and H.264 (m512 / m513).
 //!
 //! Drives the adapter the way a viewer's async chunk decoder would: one coded
@@ -15,7 +15,7 @@
 ))]
 
 use g2g_core::runtime::block_on;
-use g2g_plugins::revideo::{VideoCodec, VideoPixelLayout, VulkanStreamDecoder};
+use g2g_plugins::streamdec::{VideoCodec, VideoPixelLayout, VulkanStreamDecoder};
 use g2g_plugins::vulkanvideo::{open_h265_decode_device, VulkanVideoError};
 
 const CLIP: &[u8] = include_bytes!("fixtures/h265_640x480.h265");
@@ -71,7 +71,7 @@ fn split_pictures(stream: &[u8]) -> Vec<Vec<u8>> {
 }
 
 #[test]
-fn revideo_adapter_streams_h265_i420_frames() {
+fn streamdec_adapter_streams_h265_i420_frames() {
     let device = match block_on(open_h265_decode_device()) {
         Ok(d) => d,
         Err(VulkanVideoError::NoVulkanAdapter)

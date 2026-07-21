@@ -33,7 +33,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use g2g_core::runtime::block_on;
-use g2g_plugins::revideo::{VideoCodec, VulkanStreamDecoder};
+use g2g_plugins::streamdec::{VideoCodec, VulkanStreamDecoder};
 use g2g_plugins::vulkanvideo::{open_h264_decode_device, VulkanVideoError};
 
 const CLIP: &[u8] = include_bytes!("fixtures/h264_640x480.h264");

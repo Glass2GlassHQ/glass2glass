@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- the `revideo` streaming-adapter module is renamed `streamdec` (API rename, no behavior change).
+
 - M758: FlexFEC gains 2-D (row + column) protection, so a burst of up to a full row of consecutive losses recovers via the column repairs.
 - M756: device-validated that `MediaCodecDec` accepts and forwards the runner's pre-fixed output `CapsChanged`, with on-device regression coverage in the decode smoke test.
 - M755: `audioresample ! audioconvert ! rate-pin` now flows like the reverse order; the resampler keeps its caps-resolved target across an intervening converter.

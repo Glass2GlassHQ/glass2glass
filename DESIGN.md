@@ -877,7 +877,7 @@ index the stream's POCs (`index_pictures`) and reorder the coding-order output i
 display order via `reorder_to_display_order`, keyed by (coded-video-sequence, POC)
 so POC resets at each keyframe group correctly; for an I/P stream this is the
 identity. The low-level streaming `decode_push` stays in coding order (a low-latency
-consumer such as the streaming (`revideo`) adapter reorders by PTS itself), but the g2g-native
+consumer such as the streaming (`streamdec`) adapter reorders by PTS itself), but the g2g-native
 `VulkanVideoDec` element does reorder its system (NV12) path: `decode_push_meta`
 returns one `PictureMeta` per submitted picture (the POC the decode already
 computed, no second pass), and the element feeds retired frames through a small

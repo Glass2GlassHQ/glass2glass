@@ -17,7 +17,7 @@
 ))]
 
 use g2g_core::runtime::block_on;
-use g2g_plugins::revideo::{VideoCodec, VulkanStreamDecoder};
+use g2g_plugins::streamdec::{VideoCodec, VulkanStreamDecoder};
 use g2g_plugins::vulkanvideo::{open_h265_decode_device, VulkanVideoError};
 
 const CLIP: &[u8] = include_bytes!("fixtures/h265_640x480.h265");

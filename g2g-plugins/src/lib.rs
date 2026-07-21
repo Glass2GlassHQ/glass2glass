@@ -836,7 +836,7 @@ pub mod vulkanhdrsink;
     any(target_os = "linux", target_os = "windows"),
     feature = "vulkan-video"
 ))]
-pub mod revideo;
+pub mod streamdec;
 
 // Reverse GStreamer bridge (`gstwrap`): host an unported GStreamer element
 // inside a g2g graph. Drives `appsrc ! <element> ! appsink` via a C helper.

@@ -13,7 +13,7 @@
 ))]
 
 use g2g_core::runtime::block_on;
-use g2g_plugins::revideo::{VideoCodec, VulkanStreamDecoder};
+use g2g_plugins::streamdec::{VideoCodec, VulkanStreamDecoder};
 use g2g_plugins::vulkanvideo::{
     open_av1_decode_device, open_h264_decode_device, open_h265_decode_device, VulkanVideoDevice,
     VulkanVideoError,

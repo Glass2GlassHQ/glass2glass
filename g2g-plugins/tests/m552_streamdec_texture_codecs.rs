@@ -7,7 +7,7 @@
 //! `wgpu::Texture` (YUV->RGB applied by g2g's fixed BT.601 compute pass) with no
 //! CPU readback in the decode path. m535 exercised these `decode_all_to_textures`
 //! paths through the pipeline *element*; this exercises the consumer-facing
-//! `revideo` adapter API for H.265 + AV1, which had only ever run for H.264.
+//! `streamdec` adapter API for H.265 + AV1, which had only ever run for H.264.
 //!
 //! H.265 is asserted strictly (this driver's HEVC decode is byte-exact): the GPU
 //! RGBA must match the already-bit-exact CPU I420 path converted with the same
@@ -24,7 +24,7 @@
 ))]
 
 use g2g_core::runtime::block_on;
-use g2g_plugins::revideo::{VideoCodec, VideoPixelLayout, VulkanStreamDecoder};
+use g2g_plugins::streamdec::{VideoCodec, VideoPixelLayout, VulkanStreamDecoder};
 use g2g_plugins::vulkanvideo::{
     open_av1_decode_device, open_h265_decode_device, VulkanVideoDevice, VulkanVideoError,
 };
@@ -115,7 +115,7 @@ fn split_obu_frames(stream: &[u8]) -> Vec<&[u8]> {
 
 /// Common checks over a decoded texture: right dims / format, real picture.
 fn assert_real_texture(
-    t: &g2g_plugins::revideo::DecodedVideoTexture,
+    t: &g2g_plugins::streamdec::DecodedVideoTexture,
     dec: &VulkanStreamDecoder,
 ) -> Vec<u8> {
     assert_eq!(t.width, W as u32);
@@ -152,7 +152,7 @@ fn open_or_skip(
 }
 
 #[test]
-fn revideo_streams_h265_and_av1_gpu_textures() {
+fn streamdec_streams_h265_and_av1_gpu_textures() {
     // ---- H.265: strict CPU-I420 BT.601 anchor (byte-exact driver path) ----
     if let Some(device) = open_or_skip(block_on(open_h265_decode_device()), "H.265") {
         let mut dec = match VulkanStreamDecoder::new_gpu(device, VideoCodec::H265, H265) {

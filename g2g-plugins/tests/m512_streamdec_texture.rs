@@ -19,7 +19,7 @@
 ))]
 
 use g2g_core::runtime::block_on;
-use g2g_plugins::revideo::{VideoCodec, VideoPixelLayout, VulkanStreamDecoder};
+use g2g_plugins::streamdec::{VideoCodec, VideoPixelLayout, VulkanStreamDecoder};
 use g2g_plugins::vulkanvideo::{open_h264_decode_device, VulkanVideoError};
 
 const CLIP: &[u8] = include_bytes!("fixtures/h264_640x480.h264");
@@ -27,7 +27,7 @@ const W: usize = 640;
 const H: usize = 480;
 
 /// BT.601 limited-range YUV -> RGB, the conversion g2g's ycbcr compute pass runs
-/// on the decoder's NV12 output. Matches `revideo`'s default colorimetry for
+/// on the decoder's NV12 output. Matches `streamdec`'s default colorimetry for
 /// H.264 (`Bt601` / `Limited`). Used only to reconstruct a reference from the
 /// already-validated CPU I420 path, so the GPU pass can be checked without an
 /// external RGB fixture.
@@ -60,7 +60,7 @@ fn i420_to_rgba_bt601(i420: &[u8], w: usize, h: usize) -> Vec<u8> {
 }
 
 #[test]
-fn revideo_adapter_streams_gpu_textures() {
+fn streamdec_adapter_streams_gpu_textures() {
     let device = match block_on(open_h264_decode_device()) {
         Ok(d) => d,
         Err(VulkanVideoError::NoVulkanAdapter)

@@ -1,4 +1,4 @@
-//! M508: the streaming-decoder adapter ([`g2g_plugins::revideo`]).
+//! M508: the streaming-decoder adapter ([`g2g_plugins::streamdec`]).
 //!
 //! Drives [`VulkanStreamDecoder`] the way a wgpu viewer's async chunk decoder
 //! would: one coded sample per `submit_chunk`, DPB state carried across calls,
@@ -14,7 +14,7 @@
 ))]
 
 use g2g_core::runtime::block_on;
-use g2g_plugins::revideo::{
+use g2g_plugins::streamdec::{
     VideoCodec, VideoColorRange, VideoMatrixCoefficients, VideoPixelLayout, VulkanStreamDecoder,
 };
 use g2g_plugins::vulkanvideo::{open_av1_decode_device, VulkanVideoError};
@@ -72,7 +72,7 @@ fn split_obu_frames(stream: &[u8]) -> Vec<&[u8]> {
 }
 
 #[test]
-fn revideo_adapter_streams_i420_frames() {
+fn streamdec_adapter_streams_i420_frames() {
     let device = match block_on(open_av1_decode_device()) {
         Ok(d) => d,
         Err(VulkanVideoError::NoVulkanAdapter)
