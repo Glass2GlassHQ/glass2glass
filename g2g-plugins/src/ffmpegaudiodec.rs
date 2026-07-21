@@ -10,13 +10,16 @@
 //! decoders (it does in every standard build).
 //!
 //! Negotiation: the channel count and sample rate are only known once a frame
-//! decodes, so the element advertises a `PcmS16Le { ANY_CHANNELS, ANY_SAMPLE_RATE }`
-//! output at negotiation (both wildcards; `fixate` pins channels to a stereo
-//! placeholder for the edge) and emits a `CapsChanged` with the real channels /
-//! rate before the first decoded `DataFrame`. A downstream `audioconvert`
-//! retargets the real channel layout (mono fan-out, multichannel downmix) and
-//! `audioresample` (which tolerates the `ANY_SAMPLE_RATE` placeholder and learns
-//! the real rate from that `CapsChanged`) retargets to the sink's fixed rate.
+//! decodes, so the element advertises a `PcmS16Le { ANY_CHANNELS, .. }` output at
+//! negotiation, channels a wildcard (`fixate` pins it to a stereo placeholder for
+//! the edge) and the rate two alternatives, a concrete `48_000` default plus an
+//! `ANY_SAMPLE_RATE` wildcard (M754), so a downstream `rate=44100` / `rate=48000`
+//! pin negotiates directly while an any-rate sink still fixates to the default. It
+//! then emits a `CapsChanged` with the real channels / rate before the first
+//! decoded `DataFrame`. A downstream `audioconvert` retargets the real channel
+//! layout (mono fan-out, multichannel downmix) and `audioresample` (which tolerates
+//! the placeholder rate and learns the real rate from that `CapsChanged`) retargets
+//! to the sink's fixed rate.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -130,27 +133,36 @@ impl AsyncElement for FfmpegAudioDec {
     }
 
     /// Native `DerivedOutput`: AAC in -> interleaved `PcmS16Le` out at an
-    /// `ANY_CHANNELS`, any-rate placeholder. The output channel count must not
-    /// depend on the input: an input-coupled count reads as a passthrough field,
-    /// and the solver then couples the output's concrete channels back onto the
-    /// input. With the channels wildcard that back-coupling is no longer fatal
-    /// (`Aac{N} ∩ Aac{0} = Aac{N}`), but a wildcard output is still cleaner: the
-    /// decoder genuinely does not know the layout until it parses a frame, so it
-    /// advertises `ANY_CHANNELS` (like the video decoder's `Dim::Any`) and the real
-    /// channel count / rate arrive via the `CapsChanged` a decoded frame emits.
-    /// `fixate` collapses the placeholder to stereo for the negotiated edge, which
-    /// the downstream `audioconvert` retargets (mono fan-out, multichannel downmix).
+    /// `ANY_CHANNELS` placeholder, over two rate alternatives. The output channel
+    /// count must not depend on the input: an input-coupled count reads as a
+    /// passthrough field, and the solver then couples the output's concrete
+    /// channels back onto the input. With the channels wildcard that back-coupling
+    /// is no longer fatal (`Aac{N} ∩ Aac{0} = Aac{N}`), but a wildcard output is
+    /// still cleaner: the decoder genuinely does not know the layout until it parses
+    /// a frame, so it advertises `ANY_CHANNELS` (like the video decoder's `Dim::Any`)
+    /// and the real channel count / rate arrive via the `CapsChanged` a decoded frame
+    /// emits. `fixate` collapses the placeholder to stereo for the negotiated edge,
+    /// which the downstream `audioconvert` retargets (mono fan-out, downmix).
+    ///
+    /// The rate is two alternatives (M754): a concrete default first (`48_000`, the
+    /// fixate fallback when nothing downstream pins the rate, e.g. an any-rate sink)
+    /// plus an `ANY_SAMPLE_RATE` wildcard second, so a downstream concrete pin (a
+    /// `rate=44100` or `rate=48000` capsfilter) intersects to that rate and no
+    /// resampler is forced. A lone `ANY_SAMPLE_RATE` is deliberately unfixable
+    /// (M187), hence the concrete first alternative; this mirrors audioresample's
+    /// `[passthrough, ANY_SAMPLE_RATE]` set. The real rate still arrives via the
+    /// CapsChanged a decoded frame emits, so a 44.1 kHz decode reaching a 48 kHz pin
+    /// with no `audioresample` still fails loud at runtime (M749).
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
-            Caps::Audio { format, .. } if Self::decodes(*format) => CapsSet::one(Caps::Audio {
-                format: AudioFormat::PcmS16Le,
-                channels: ANY_CHANNELS,
-                // A concrete default rate (a raw-PCM `ANY_SAMPLE_RATE` is
-                // deliberately unfixable, M187); the real rate arrives via the
-                // CapsChanged a decoded frame emits, which the downstream
-                // audioresample retargets back to this rate.
-                sample_rate: 48_000,
-            }),
+            Caps::Audio { format, .. } if Self::decodes(*format) => {
+                let pcm = |sample_rate| Caps::Audio {
+                    format: AudioFormat::PcmS16Le,
+                    channels: ANY_CHANNELS,
+                    sample_rate,
+                };
+                CapsSet::from_alternatives(alloc::vec![pcm(48_000), pcm(ANY_SAMPLE_RATE)])
+            }
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
     }
