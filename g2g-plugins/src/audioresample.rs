@@ -337,8 +337,8 @@ static AUDIORESAMPLE_PROPS: &[PropertySpec] = &[PropertySpec::new(
 
 impl AudioResample {
     /// Resample one interleaved PCM buffer from `in_rate` to `out_rate`,
-    /// advancing the per-channel carry + fractional phase. At rate 1:1 the
-    /// output equals the input (phase stays integral, interpolation is exact).
+    /// advancing the per-channel carry + fractional phase. Rate 1:1 short-circuits
+    /// to a byte-exact pass-through (no carry, no interpolation).
     fn resample(
         &mut self,
         src: &[u8],
@@ -356,6 +356,14 @@ impl AudioResample {
         let n = src.len() / in_frame;
         if n == 0 {
             return Ok(Vec::new().into_boxed_slice());
+        }
+        // Rate 1:1 is a byte-exact pass-through. The interpolation loop below
+        // would defer each buffer's last sample into the carry, and the final
+        // one is never flushed at end of stream (one sample lost per stream,
+        // caught by calliope's opus differential). Skip the loop entirely; the
+        // carry state stays reset (a mid-stream rate change reconfigures first).
+        if in_rate == out_rate {
+            return Ok(src.to_vec().into_boxed_slice());
         }
 
         // Decode the buffer to per-channel f32 (channels-major), so the inner
@@ -497,9 +505,9 @@ mod tests {
             .resample(&src, AudioFormat::PcmF32Le, 1, 48_000, 48_000)
             .unwrap();
         let got = f32_samples(&out);
-        // 1:1 produces n-1 outputs from this buffer (the last sample is carried
-        // to interpolate with the next buffer) and reproduces them exactly.
-        assert_eq!(got, &[0.0, 0.25, 0.5]);
+        // 1:1 is a byte-exact pass-through: every sample, including the last
+        // (the old carry deferred it and lost the stream's final sample at EOS).
+        assert_eq!(got, &[0.0, 0.25, 0.5, 0.75]);
     }
 
     #[test]

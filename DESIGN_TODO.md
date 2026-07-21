@@ -658,6 +658,10 @@ _(No open parser items.)_
 
 ## Transforms and effects
 
+- **`audioresample` tail flush.** When actually resampling, the last carried
+  input sample is never flushed at end of stream, so the output is one
+  interpolation window short; flush the carry on `Eos` (rate 1:1 already
+  passes through).
 - **`textoverlay` font backend:** the `truetype-overlay` feature (M409, `ab_glyph`
   since M668) renders both glyf and CFF/CFF2 outlines (CJK / accented / mixed-case,
   horizontal + vertical) with an explicit Latin+CJK fallback chain, so OpenType-CFF

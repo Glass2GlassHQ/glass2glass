@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M751: `audioresample` at rate 1:1 is a byte-exact pass-through instead of losing the stream's final sample to the interpolation carry.
 - M750: Opus decode discards the `OpusHead` pre-skip and the Ogg granule-position end padding, so decoded PCM has the same sample count as ffmpeg / gstreamer.
 - M749: a linear decode chain whose infeasible mid-stream caps refinement cannot cross a downstream pin (e.g. 44.1 kHz decode reaching a `rate=48000` capsfilter with no `audioresample`) now fails loud naming the conflict instead of writing native-rate samples under the pinned label.
 - M748: a bare `filesrc ! decodebin` on an audio-only MP4 sniffs the `moov` and selects the demux's audio track, so it plugs an audio decoder instead of failing on the default video port.
