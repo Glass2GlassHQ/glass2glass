@@ -444,6 +444,10 @@ fn audio_gst_media_type(f: AudioFormat) -> (&'static str, Option<&'static str>) 
     match f {
         AudioFormat::Aac => ("audio/mpeg", None),
         AudioFormat::Opus => ("audio/x-opus", None),
+        // gst distinguishes mp2 from AAC by mpegversion/layer on audio/mpeg; the
+        // bare media type is the same. This helper carries no version field, so
+        // mp2 shares the AAC media type here (the codec split lives in the caps).
+        AudioFormat::Mp2 => ("audio/mpeg", None),
         AudioFormat::PcmS16Le => ("audio/x-raw", Some("S16LE")),
         AudioFormat::PcmF32Le => ("audio/x-raw", Some("F32LE")),
         AudioFormat::PcmS24Le => ("audio/x-raw", Some("S24LE")),
@@ -981,6 +985,11 @@ impl RawVideoFormat {
 pub enum AudioFormat {
     Aac,
     Opus,
+    /// MPEG-1/2 Audio Layer II (`mp2`), the standard broadcast/DVB audio codec
+    /// (GStreamer `audio/mpeg,mpegversion=1,layer=2`). Encoded like `Aac`, so it
+    /// keeps a nominal channels/rate rather than the PCM wildcards; MPEG-TS carries
+    /// it under stream_type 0x03 (MPEG-1) / 0x04 (MPEG-2). Decoded via libavcodec.
+    Mp2,
     PcmS16Le,
     PcmF32Le,
     /// 24-bit signed integer PCM, little-endian, 3 bytes packed (GStreamer `S24LE`).

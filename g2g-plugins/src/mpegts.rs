@@ -36,12 +36,23 @@ pub const STREAM_TYPE_H265: u8 = 0x24;
 pub const STREAM_TYPE_MPEG4P2: u8 = 0x10;
 /// PMT `stream_type` for ADTS AAC audio.
 pub const STREAM_TYPE_AAC: u8 = 0x0F;
+/// PMT `stream_type` for MPEG-1 Audio (Layer I/II/III, e.g. `mp2`).
+pub const STREAM_TYPE_MPEG1_AUDIO: u8 = 0x03;
+/// PMT `stream_type` for MPEG-2 Audio (the low-sample-rate extension of the above).
+pub const STREAM_TYPE_MPEG2_AUDIO: u8 = 0x04;
+/// PMT `stream_type` for a private PES stream (0x06). Opus in MPEG-TS rides this,
+/// identified by an 'Opus' registration descriptor (DVB/ETSI carriage).
+pub const STREAM_TYPE_PRIVATE_PES: u8 = 0x06;
 
 /// One elementary stream announced by the PMT.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ElementaryStream {
     pub pid: u16,
     pub stream_type: u8,
+    /// Opus channel count for a private (0x06) stream whose ES descriptors carry
+    /// the 'Opus' registration + DVB extension descriptor. `Some` marks the stream
+    /// as Opus (disambiguating the generic 0x06); `None` for any other 0x06 use.
+    pub opus_channels: Option<u8>,
 }
 
 /// A reassembled PES payload: one access unit of an elementary stream.
@@ -81,6 +92,15 @@ impl TsDemuxer {
     /// The elementary streams announced by the PMT (empty until a PMT is seen).
     pub fn streams(&self) -> &[ElementaryStream] {
         &self.streams
+    }
+
+    /// Opus channel count for `pid`, if its PMT entry is a private (0x06) stream
+    /// carrying the 'Opus' registration descriptor; `None` for any other stream.
+    pub fn opus_channels(&self, pid: u16) -> Option<u8> {
+        self.streams
+            .iter()
+            .find(|s| s.pid == pid)
+            .and_then(|s| s.opus_channels)
     }
 
     /// The PID of the first video elementary stream (H.264 or H.265), if any.
@@ -213,13 +233,23 @@ impl TsDemuxer {
             return;
         }
         let program_info_length = (((body[10] & 0x0F) as usize) << 8) | body[11] as usize;
-        let mut i = 12 + program_info_length;
+        let mut i = 12usize.saturating_add(program_info_length);
         while i + 5 <= body.len() {
             let stream_type = body[i];
             let pid = (((body[i + 1] & 0x1F) as u16) << 8) | body[i + 2] as u16;
             let es_info_length = (((body[i + 3] & 0x0F) as usize) << 8) | body[i + 4] as usize;
-            self.streams.push(ElementaryStream { pid, stream_type });
-            i += 5 + es_info_length;
+            // Bounds-check the descriptor slice: a bogus es_info_length must not
+            // read past the section body (the count is attacker-controlled).
+            let opus_channels = body
+                .get(i + 5..i + 5 + es_info_length)
+                .filter(|_| stream_type == STREAM_TYPE_PRIVATE_PES)
+                .and_then(parse_opus_descriptors);
+            self.streams.push(ElementaryStream {
+                pid,
+                stream_type,
+                opus_channels,
+            });
+            i = i.saturating_add(5).saturating_add(es_info_length);
         }
     }
 
@@ -297,6 +327,91 @@ fn decode_timestamp(b: &[u8]) -> u64 {
         | (((b[2] >> 1) & 0x7F) as u64) << 15
         | (b[3] as u64) << 7
         | ((b[4] >> 1) & 0x7F) as u64
+}
+
+/// Walk a PMT ES-info descriptor list for the Opus carriage (DVB/ETSI): an
+/// `registration_descriptor` (tag 0x05) with format_identifier "Opus", plus a
+/// DVB `extension_descriptor` (tag 0x7F) whose extension tag is 0x80 carrying the
+/// `channel_config_code`. Returns the Opus channel count when the registration is
+/// present (`code == 0` is dual-mono, mapped to 2 channels; `1..=8` is the count;
+/// a missing/unknown extension defaults to stereo), else `None`. Every field is
+/// bounds-checked so a malformed descriptor loop fails to `None`, never panics.
+fn parse_opus_descriptors(mut desc: &[u8]) -> Option<u8> {
+    let mut is_opus = false;
+    let mut channels: Option<u8> = None;
+    while desc.len() >= 2 {
+        let tag = desc[0];
+        let len = desc[1] as usize;
+        let body = desc.get(2..2 + len)?;
+        match tag {
+            // registration_descriptor: format_identifier is the first 4 bytes.
+            0x05 if body.len() >= 4 && &body[..4] == b"Opus" => is_opus = true,
+            // DVB extension_descriptor: ext tag 0x80 (provisional Opus) + code.
+            0x7F if body.len() >= 2 && body[0] == 0x80 => {
+                let code = body[1];
+                channels = Some(if code == 0 { 2 } else { code });
+            }
+            _ => {}
+        }
+        desc = &desc[2 + len..];
+    }
+    is_opus.then(|| channels.unwrap_or(2))
+}
+
+/// Unwrap the Opus-in-MPEG-TS control-header access units in one PES payload into
+/// the raw Opus packets (Opus-in-TS spec / ETSI TS 103 420): each is prefixed by
+/// an 11-bit `0x3FF` sync (`hdr & 0xFFE0 == 0x7FE0`), a flags byte
+/// (start_trim / end_trim / control_extension), a variable-length `au_size` (a run
+/// of `0xFF` plus a final byte), then optional 2-byte trim fields and a
+/// control-extension blob, and finally `au_size` bytes of Opus packet. The trim
+/// values are read past but not applied (the no-`OpusHead` path decodes untrimmed,
+/// RTP-like). Walking stops at the first malformed / truncated header, so a partial
+/// tail is dropped rather than over-read; `au_size` is bounds-checked against the
+/// payload before slicing.
+pub(crate) fn opus_ts_packets(buf: &[u8]) -> Vec<&[u8]> {
+    let mut out = Vec::new();
+    let mut pos = 0;
+    while pos + 2 <= buf.len() {
+        let hdr = ((buf[pos] as u16) << 8) | buf[pos + 1] as u16;
+        if hdr & 0xFFE0 != 0x7FE0 {
+            break; // not a control-header prefix
+        }
+        let flags = buf[pos + 1];
+        let start_trim = (flags >> 4) & 1 == 1;
+        let end_trim = (flags >> 3) & 1 == 1;
+        let control_ext = (flags >> 2) & 1 == 1;
+        let mut i = pos + 2;
+        // au_size: sum of a 0xFF run then the final (< 0xFF) byte.
+        let mut au_size: usize = 0;
+        loop {
+            let Some(&b) = buf.get(i) else { return out };
+            i += 1;
+            au_size = au_size.saturating_add(b as usize);
+            if b != 0xFF {
+                break;
+            }
+        }
+        if start_trim {
+            i = i.saturating_add(2);
+        }
+        if end_trim {
+            i = i.saturating_add(2);
+        }
+        if control_ext {
+            let Some(&ext_len) = buf.get(i) else {
+                return out;
+            };
+            i = i.saturating_add(1).saturating_add(ext_len as usize);
+        }
+        match i.checked_add(au_size) {
+            Some(end) if au_size > 0 && end <= buf.len() => {
+                out.push(&buf[i..end]);
+                pos = end;
+            }
+            _ => break, // truncated / overrun / empty au: drop the tail
+        }
+    }
+    out
 }
 
 // --- Muxing (M114): the inverse of the demuxer above. ---
@@ -723,7 +838,8 @@ mod tests {
             d.streams(),
             &[ElementaryStream {
                 pid: es_pid,
-                stream_type: STREAM_TYPE_H264
+                stream_type: STREAM_TYPE_H264,
+                opus_channels: None
             }]
         );
         assert_eq!(d.video_pid(), Some(es_pid));
@@ -898,5 +1014,42 @@ mod tests {
             })
             .count();
         assert_eq!(pats, 0, "default cadence emits the tables only once");
+    }
+
+    #[test]
+    fn opus_descriptors_parse_and_reject_malformed() {
+        // registration 'Opus' + extension channel code 1 (mono).
+        let desc = [0x05, 4, b'O', b'p', b'u', b's', 0x7F, 2, 0x80, 1];
+        assert_eq!(parse_opus_descriptors(&desc), Some(1));
+        // registration alone defaults to stereo; dual-mono code 0 maps to 2.
+        assert_eq!(
+            parse_opus_descriptors(&[0x05, 4, b'O', b'p', b'u', b's']),
+            Some(2)
+        );
+        let dual = [0x05, 4, b'O', b'p', b'u', b's', 0x7F, 2, 0x80, 0];
+        assert_eq!(parse_opus_descriptors(&dual), Some(2));
+        // no 'Opus' registration: not Opus. Truncated descriptor: fails to None.
+        assert_eq!(parse_opus_descriptors(&[0x7F, 2, 0x80, 2]), None);
+        assert_eq!(parse_opus_descriptors(&[0x05, 40, b'O']), None);
+    }
+
+    #[test]
+    fn opus_ts_control_headers_unwrap_and_bound() {
+        // Two AUs: sizes 3 and 2, no trim, no extension (header 0x7FE0).
+        let pes = [0x7F, 0xE0, 3, 9, 9, 9, 0x7F, 0xE0, 2, 8, 8];
+        let pkts = opus_ts_packets(&pes);
+        assert_eq!(pkts.len(), 2);
+        assert_eq!(pkts[0], &[9, 9, 9]);
+        assert_eq!(pkts[1], &[8, 8]);
+        // au_size overrunning the payload drops the tail, keeps the first AU.
+        let overrun = [0x7F, 0xE0, 3, 9, 9, 9, 0x7F, 0xE0, 200, 1];
+        assert_eq!(opus_ts_packets(&overrun).len(), 1);
+        // a 0xFF size-run that never terminates must not loop or panic.
+        assert!(opus_ts_packets(&[0x7F, 0xE0, 0xFF, 0xFF, 0xFF]).is_empty());
+        // start/end trim fields are skipped to reach the AU.
+        let trimmed = [0x7F, 0xF8, 2, 0, 10, 0, 20, 5, 5];
+        let p = opus_ts_packets(&trimmed);
+        assert_eq!(p.len(), 1);
+        assert_eq!(p[0], &[5, 5]);
     }
 }

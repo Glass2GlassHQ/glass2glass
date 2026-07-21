@@ -39,7 +39,8 @@ use g2g_core::{
 
 use crate::demuxseek::{Admit, DemuxSeek};
 use crate::mpegts::{
-    EsUnit, TsDemuxer, STREAM_TYPE_AAC, STREAM_TYPE_H264, STREAM_TYPE_H265, STREAM_TYPE_MPEG4P2,
+    EsUnit, TsDemuxer, STREAM_TYPE_AAC, STREAM_TYPE_H264, STREAM_TYPE_H265,
+    STREAM_TYPE_MPEG1_AUDIO, STREAM_TYPE_MPEG2_AUDIO, STREAM_TYPE_MPEG4P2, STREAM_TYPE_PRIVATE_PES,
     TS_PACKET_LEN,
 };
 
@@ -61,6 +62,13 @@ pub enum TsStream {
     Mpeg4Part2,
     /// The first AAC (ADTS) audio elementary stream.
     Aac,
+    /// The first MPEG-1/2 Audio (Layer II, `mp2`) elementary stream (stream_type
+    /// 0x03 / 0x04).
+    Mp2,
+    /// The first Opus audio elementary stream (private PES 0x06 with an 'Opus'
+    /// registration descriptor); the control-header framing is unwrapped to raw
+    /// Opus packets before forwarding.
+    Opus,
 }
 
 /// Demuxes an MPEG-TS byte stream into one selected elementary stream.
@@ -82,6 +90,10 @@ pub struct TsDemux {
     /// Seek support (M362): app time seeks drive an upstream byte-seek and a
     /// re-sync. Inert unless `with_seek` wired the controllers.
     seek: DemuxSeek,
+    /// Opus only: whether the `CapsChanged` carrying the descriptor's channel
+    /// count has been emitted (OpusDec needs a concrete count before it decodes,
+    /// and there is no in-band `OpusHead` on this path). Re-armed on a flush.
+    opus_caps_emitted: bool,
 }
 
 impl Default for TsDemux {
@@ -101,6 +113,7 @@ impl TsDemux {
             bus: None,
             collection_posted: false,
             seek: DemuxSeek::default(),
+            opus_caps_emitted: false,
         }
     }
 
@@ -156,18 +169,25 @@ impl TsDemux {
             height: Dim::Any,
             framerate: Rate::Any,
         };
+        let audio = |format| {
+            (
+                StreamType::Audio,
+                Caps::Audio {
+                    format,
+                    channels: 0,
+                    sample_rate: 0,
+                },
+            )
+        };
         let (stream_type, caps) = match es.stream_type {
             STREAM_TYPE_H264 => (StreamType::Video, video(VideoCodec::H264)),
             STREAM_TYPE_H265 => (StreamType::Video, video(VideoCodec::H265)),
             STREAM_TYPE_MPEG4P2 => (StreamType::Video, video(VideoCodec::Mpeg4Part2)),
-            STREAM_TYPE_AAC => (
-                StreamType::Audio,
-                Caps::Audio {
-                    format: AudioFormat::Aac,
-                    channels: 0,
-                    sample_rate: 0,
-                },
-            ),
+            STREAM_TYPE_AAC => audio(AudioFormat::Aac),
+            STREAM_TYPE_MPEG1_AUDIO | STREAM_TYPE_MPEG2_AUDIO => audio(AudioFormat::Mp2),
+            // 0x06 is a generic private PES; only an 'Opus' registration marks it
+            // as Opus (else g2g does not forward it).
+            STREAM_TYPE_PRIVATE_PES if es.opus_channels.is_some() => audio(AudioFormat::Opus),
             _ => return None,
         };
         Some(Stream::new(id, stream_type, caps))
@@ -188,6 +208,7 @@ impl TsDemux {
     fn reset_parser(&mut self) {
         self.buf.clear();
         self.demux = TsDemuxer::new();
+        self.opus_caps_emitted = false;
     }
 
     /// The elementary stream this instance forwards.
@@ -219,11 +240,17 @@ impl TsDemux {
             TsStream::H264 => Self::compressed_video(VideoCodec::H264),
             TsStream::H265 => Self::compressed_video(VideoCodec::H265),
             TsStream::Mpeg4Part2 => Self::compressed_video(VideoCodec::Mpeg4Part2),
-            TsStream::Aac => Caps::Audio {
-                format: AudioFormat::Aac,
-                channels: 0,
-                sample_rate: 0,
-            },
+            TsStream::Aac => Self::compressed_audio(AudioFormat::Aac),
+            TsStream::Mp2 => Self::compressed_audio(AudioFormat::Mp2),
+            TsStream::Opus => Self::compressed_audio(AudioFormat::Opus),
+        }
+    }
+
+    fn compressed_audio(format: AudioFormat) -> Caps {
+        Caps::Audio {
+            format,
+            channels: 0,
+            sample_rate: 0,
         }
     }
 
@@ -245,13 +272,29 @@ impl TsDemux {
         }
     }
 
-    /// The PMT `stream_type` the selected output corresponds to.
+    /// The canonical PMT `stream_type` for a selection (the first, for Mp2 which
+    /// spans 0x03 / 0x04). Prefer [`accepts_stream_type`](Self::accepts_stream_type)
+    /// for routing; this is the representative value the PMT round-trip test uses.
     fn selected_stream_type(stream: TsStream) -> u8 {
         match stream {
             TsStream::H264 => STREAM_TYPE_H264,
             TsStream::H265 => STREAM_TYPE_H265,
             TsStream::Mpeg4Part2 => STREAM_TYPE_MPEG4P2,
             TsStream::Aac => STREAM_TYPE_AAC,
+            TsStream::Mp2 => STREAM_TYPE_MPEG1_AUDIO,
+            TsStream::Opus => STREAM_TYPE_PRIVATE_PES,
+        }
+    }
+
+    /// Whether a selection carries a PMT `stream_type`. Mp2 accepts both MPEG-1
+    /// (0x03) and MPEG-2 (0x04) audio; Opus accepts the private PES 0x06 (the
+    /// 'Opus' registration is checked separately, at PMT parse).
+    fn accepts_stream_type(stream: TsStream, stream_type: u8) -> bool {
+        match stream {
+            TsStream::Mp2 => {
+                stream_type == STREAM_TYPE_MPEG1_AUDIO || stream_type == STREAM_TYPE_MPEG2_AUDIO
+            }
+            other => Self::selected_stream_type(other) == stream_type,
         }
     }
 
@@ -284,16 +327,22 @@ impl TsDemux {
     }
 
     /// Emit each completed access unit of the selected elementary stream as a
-    /// frame (Annex-B for H.264 / H.265, ADTS for AAC), carrying its PTS.
+    /// frame (Annex-B for H.264 / H.265, ADTS for AAC, raw MPEG-audio frames for
+    /// Mp2, and control-header-unwrapped raw Opus packets for Opus), carrying its
+    /// PTS.
     async fn emit_units(
         &mut self,
         units: Vec<EsUnit>,
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
-        let want = Self::selected_stream_type(self.stream);
         for u in units {
-            if u.stream_type != want {
+            if !Self::accepts_stream_type(self.stream, u.stream_type) {
                 continue; // a stream other than the selected one
+            }
+            // A private (0x06) PES is only Opus when its PMT descriptors said so;
+            // skip any other 0x06 the mux may carry.
+            if self.stream == TsStream::Opus && self.demux.opus_channels(u.pid).is_none() {
+                continue;
             }
             let pts_ns = u
                 .pts_90khz
@@ -307,7 +356,7 @@ impl TsDemux {
                 TsStream::Mpeg4Part2 => {
                     crate::annexb::au_is_keyframe(VideoCodec::Mpeg4Part2, &u.data)
                 }
-                TsStream::Aac => true,
+                TsStream::Aac | TsStream::Mp2 | TsStream::Opus => true,
             };
             match self.seek.admit(pts_ns, keyframe) {
                 Admit::Drop => continue,
@@ -317,8 +366,47 @@ impl TsDemux {
                 }
                 Admit::Emit => {}
             }
+            if self.stream == TsStream::Opus {
+                self.emit_opus(u, pts_ns, out).await?;
+                continue;
+            }
             let frame = Frame::new(
                 MemoryDomain::System(SystemSlice::from_boxed(u.data.into_boxed_slice())),
+                FrameTiming {
+                    pts_ns,
+                    dts_ns: pts_ns,
+                    ..FrameTiming::default()
+                },
+                self.emitted,
+            );
+            self.emitted += 1;
+            out.push(PipelinePacket::DataFrame(frame)).await?;
+        }
+        Ok(())
+    }
+
+    /// Unwrap one Opus PES into raw Opus packets and forward each as a frame,
+    /// preceded once by a `CapsChanged` carrying the descriptor's channel count
+    /// (OpusDec needs a concrete count, and this path has no in-band `OpusHead`).
+    async fn emit_opus(
+        &mut self,
+        u: EsUnit,
+        pts_ns: u64,
+        out: &mut dyn OutputSink,
+    ) -> Result<(), G2gError> {
+        if !self.opus_caps_emitted {
+            let channels = self.demux.opus_channels(u.pid).unwrap_or(2);
+            out.push(PipelinePacket::CapsChanged(Caps::Audio {
+                format: AudioFormat::Opus,
+                channels,
+                sample_rate: 0,
+            }))
+            .await?;
+            self.opus_caps_emitted = true;
+        }
+        for pkt in crate::mpegts::opus_ts_packets(&u.data) {
+            let frame = Frame::new(
+                MemoryDomain::System(SystemSlice::from_boxed(pkt.to_vec().into_boxed_slice())),
                 FrameTiming {
                     pts_ns,
                     dts_ns: pts_ns,
@@ -449,7 +537,7 @@ impl AsyncElement for TsDemux {
 static TSDEMUX_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "stream",
     PropKind::Str,
-    "elementary stream to emit: h264 | h265 | aac",
+    "elementary stream to emit: h264 | h265 | aac | mp2 | opus",
 )];
 
 /// Parse a `stream` property string to a [`TsStream`].
@@ -459,6 +547,8 @@ fn ts_stream_from_str(s: &str) -> Option<TsStream> {
         "h265" => Some(TsStream::H265),
         "mpeg4part2" => Some(TsStream::Mpeg4Part2),
         "aac" => Some(TsStream::Aac),
+        "mp2" => Some(TsStream::Mp2),
+        "opus" => Some(TsStream::Opus),
         _ => None,
     }
 }
@@ -470,17 +560,22 @@ pub(crate) fn ts_stream_to_str(stream: TsStream) -> &'static str {
         TsStream::H265 => "h265",
         TsStream::Mpeg4Part2 => "mpeg4part2",
         TsStream::Aac => "aac",
+        TsStream::Mp2 => "mp2",
+        TsStream::Opus => "opus",
     }
 }
 
-/// The [`TsStream`] a demuxer forwards for a PMT `stream_type`, or `None` for one
-/// g2g does not forward.
-fn stream_type_to_ts(stream_type: u8) -> Option<TsStream> {
-    match stream_type {
+/// The [`TsStream`] a demuxer forwards for a PMT elementary stream, or `None` for
+/// one g2g does not forward. Takes the whole [`ElementaryStream`] because a private
+/// (0x06) stream is only Opus when its descriptors carried the 'Opus' registration.
+fn es_to_ts_stream(es: &crate::mpegts::ElementaryStream) -> Option<TsStream> {
+    match es.stream_type {
         STREAM_TYPE_H264 => Some(TsStream::H264),
         STREAM_TYPE_H265 => Some(TsStream::H265),
         STREAM_TYPE_MPEG4P2 => Some(TsStream::Mpeg4Part2),
         STREAM_TYPE_AAC => Some(TsStream::Aac),
+        STREAM_TYPE_MPEG1_AUDIO | STREAM_TYPE_MPEG2_AUDIO => Some(TsStream::Mp2),
+        STREAM_TYPE_PRIVATE_PES if es.opus_channels.is_some() => Some(TsStream::Opus),
         _ => None,
     }
 }
@@ -510,7 +605,7 @@ pub fn forwardable_streams(demux: &TsDemuxer) -> Vec<TsStreamInfo> {
         .streams()
         .iter()
         .filter_map(|es| {
-            let stream = stream_type_to_ts(es.stream_type)?;
+            let stream = es_to_ts_stream(es)?;
             let video = matches!(stream, TsStream::H264 | TsStream::H265);
             Some(TsStreamInfo {
                 stream,
@@ -529,6 +624,8 @@ impl PadTemplates for TsDemux {
             Self::output_caps(TsStream::H264),
             Self::output_caps(TsStream::H265),
             Self::output_caps(TsStream::Aac),
+            Self::output_caps(TsStream::Mp2),
+            Self::output_caps(TsStream::Opus),
         ]));
         Vec::from([
             PadTemplate::sink(CapsSet::one(Self::input_caps())),
@@ -655,7 +752,7 @@ impl TsDemuxN {
     fn port_for_stream_type(&self, stream_type: u8) -> Option<usize> {
         self.ports
             .iter()
-            .position(|&s| TsDemux::selected_stream_type(s) == stream_type)
+            .position(|&s| TsDemux::accepts_stream_type(s, stream_type))
     }
 
     /// Consume whole 188-byte TS packets from `buf`, resyncing to the sync byte,
@@ -848,6 +945,7 @@ mod tests {
         let es = crate::mpegts::ElementaryStream {
             pid: 0x100,
             stream_type: STREAM_TYPE_MPEG4P2,
+            opus_channels: None,
         };
         let stream = TsDemux::es_to_stream(&es).expect("0x10 is forwarded");
         assert_eq!(stream.stream_type, StreamType::Video);
@@ -863,7 +961,11 @@ mod tests {
         );
 
         assert_eq!(
-            stream_type_to_ts(STREAM_TYPE_MPEG4P2),
+            es_to_ts_stream(&crate::mpegts::ElementaryStream {
+                pid: 0x100,
+                stream_type: STREAM_TYPE_MPEG4P2,
+                opus_channels: None,
+            }),
             Some(TsStream::Mpeg4Part2)
         );
         assert_eq!(

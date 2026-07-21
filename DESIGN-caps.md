@@ -586,7 +586,10 @@ caps, so the search builds `filesrc ! tsdemux stream=aac ! <audio decoder> ! …
 The hook declines a container with a video track (the default video port is
 correct), leaving A/V behavior unchanged. A `mp4_primary_stream` sibling does the
 same for MP4, sniffing the `moov` and naming `qtdemux stream=aac` so an audio-only
-`.m4a` / `.mp4` plugs an audio decoder too.
+`.m4a` / `.mp4` plugs an audio decoder too. The TS selection also covers MPEG
+audio (`stream=mp2`, PMT types 0x03/0x04) and Opus (`stream=opus`, a private
+0x06 PES marked by an 'Opus' registration descriptor, its control-header AUs
+unwrapped to raw packets by the demux).
 
 - **playbin / uridecodebin** (`std`). `Registry::build_playbin(source_name,
   sink, target, max_depth)` assembles a complete `source → chain → sink` graph
