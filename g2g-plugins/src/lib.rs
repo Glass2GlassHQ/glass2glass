@@ -9,6 +9,29 @@
 
 extern crate alloc;
 
+// Drive a leaf future to completion by spinning. Only for the `#[cfg(fuzzing)]`
+// element shims: they parse buffered bytes into a synchronous sink and never
+// await real IO, so a no-op waker never leaves them pending.
+#[cfg(fuzzing)]
+pub(crate) fn fuzz_block_on<F: core::future::Future>(f: F) -> F::Output {
+    use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+    fn clone(_: *const ()) -> RawWaker {
+        RawWaker::new(core::ptr::null(), &VT)
+    }
+    fn noop(_: *const ()) {}
+    static VT: RawWakerVTable = RawWakerVTable::new(clone, noop, noop, noop);
+    let waker = unsafe { Waker::from_raw(RawWaker::new(core::ptr::null(), &VT)) };
+    let mut cx = Context::from_waker(&waker);
+    let mut f = f;
+    // SAFETY: `f` is owned here and never moved again before it is dropped.
+    let mut f = unsafe { core::pin::Pin::new_unchecked(&mut f) };
+    loop {
+        if let Poll::Ready(v) = f.as_mut().poll(&mut cx) {
+            return v;
+        }
+    }
+}
+
 pub mod aacparse;
 pub mod appsink;
 pub mod appsrc;
@@ -374,6 +397,10 @@ mod turn;
 pub mod webrtc_simulcast;
 #[cfg(feature = "webrtc")]
 mod webrtc_util;
+#[cfg(all(feature = "webrtc", fuzzing))]
+pub use turn::fuzz_parse as turn_fuzz_parse;
+#[cfg(all(feature = "webrtc", fuzzing))]
+pub use webrtc_util::fuzz_parse as stun_fuzz_parse;
 #[cfg(feature = "webrtc")]
 pub mod webrtcdata;
 #[cfg(feature = "webrtc")]

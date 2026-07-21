@@ -6,6 +6,11 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M744: `VulkanVideoDec` streams display order on the GPU-texture path (H.264/H.265 texture reorder) and on AV1 (per-AU op-walk incl. `show_existing_frame` + film grain); fixes an AV1 session use-after-free (the driver retains the Std sequence header).
+- M743: Vulkan Video H.265 long-term reference pictures, bit-exact on the LTRPSPS conformance vector; also fixes slice-inline inter-predicted RPS parsing (`delta_idx_minus1`, `NumDeltaPocsOfRefRpsIdx`).
+- M742: Android on-screen present harness (`examples/g2g-android-present` + `tools/android-apk-present-smoke.sh`): a NativeActivity APK decoding zero-copy to the GPU and presenting to the activity's real window, device-validated.
+- M741: Bevy embedder example (`examples/bevy-g2g-decode`): a stock Bevy app adopts its own wgpu device via `GpuContext::from_wgpu` and samples g2g-decoded frames zero-copy on a 3D surface.
+- M740: on-screen macOS present example (`metal_video_on_screen`): VideoToolbox zero-copy decode into an app-owned window's `CAMetalLayer` via `MetalVideoSink::with_layer`.
 - M739: ScreenCaptureKit display capture (`screencapturesrc`, `screencapture` feature) with zero-copy `cv-output`; the CI runner denies screen recording, so the probe path is validated and real capture awaits a permitted Mac.
 - M738: AVFoundation capture (`avfvideosrc` camera with zero-copy `cv-output`, `avfaudiosrc` mic, `avfoundation` feature); mic capture validated on the CI runner, the camera path probes the permission/no-device denial until a Mac with one.
 - M737: Core Audio elements (`coreaudiosink` / `coreaudiosrc`, `coreaudio` feature) on the AudioToolbox AudioQueue API, with `autoaudiosink` / `osxaudiosink` aliases; render and capture validated on the CI runner's audio devices.

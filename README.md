@@ -31,7 +31,7 @@ hardware elements) changes.
 | **MCU** | a heap-free static pipeline on bare-metal Cortex-M | `alloc` is optional: the no-alloc build links **no allocator at all**, is proven panic-free, and has a budgeted ~KB-scale footprint. `g2g-mcu` peripheral elements (SPI display, camera / PCM capture, G.711 / ADPCM codecs, RTP egress + ingress, jitter buffer) over `embedded-hal` seams, plus interrupt/DMA capture and a bounded fault-recovery supervisor (retry / degrade / reset / watchdog). See [the embedded wedge](#embedded-heap-free-pipelines-on-a-bare-metal-mcu). |
 | **RTOS** | the same static pipeline under a real RTOS task | one graph runs bit-exact under **bare-metal, Embassy, FreeRTOS, and Zephyr**; `embassy-sync` stack channels (`embassy` / `embassy-link` features) |
 | **CPU** | the full media + protocol stack | Tokio, multi-thread on servers or current-thread on edge; the whole element library |
-| **GPU** | zero-copy hardware pipelines | frames stay in Vulkan / CUDA / wgpu / DMABUF domains: Vulkan Video decode → `wgpu::Texture`, NVDEC / NVENC, CUDA ↔ wgpu bridge, no PCIe round-trip |
+| **GPU** | zero-copy hardware pipelines | frames stay in Vulkan / CUDA / wgpu / DMABUF domains: Vulkan Video decode → `wgpu::Texture`, NVDEC / NVENC, CUDA ↔ wgpu bridge, no PCIe round-trip; embeddable in an app's own wgpu device (`GpuContext::from_wgpu`, Bevy demos in `examples/bevy-g2g-decode` and `-stream`) |
 | **WASM** | the same graph in the browser | `wasm32`, single-threaded (no cross-origin isolation): WebCodecs decode, WebGPU present, in-browser or server-offloaded ML |
 
 Same `AsyncElement`, same `Caps`, same runner on all five. This is proven, not
@@ -739,7 +739,8 @@ tools/android-mediacodec-smoke.sh        # decode  (H.264 + HEVC -> NV12)
 tools/android-mediacodec-enc-smoke.sh    # encode  (NV12 -> Annex-B H.264)
 tools/android-aaudio-smoke.sh            # audio   (render; mic capture best-effort)
 tools/android-camera2-smoke.sh           # camera  (caps + FFI; capture best-effort)
-tools/android-surface-present-smoke.sh   # decode -> GPU -> on-screen present
+tools/android-surface-present-smoke.sh   # decode -> GPU -> present (headless ImageReader window)
+tools/android-apk-present-smoke.sh       # decode -> GPU -> TRUE on-screen present (NativeActivity APK)
 tools/android-nnapi-smoke.sh             # ML inference (NNAPI + XNNPACK ORT EPs)
 tools/android-nnapi-conv-smoke.sh        # ML on the Edge TPU (int8 conv, NNAPI placement + DarwiNN logcat)
 tools/android-camera-tpu-smoke.sh        # live camera -> quantize -> Edge TPU inference, end to end
@@ -757,6 +758,15 @@ adb shell /data/local/tmp/probe --nocapture --test-threads=1
 ```
 
 (`--platform`: 24 for `AImageReader`, 26 for `AHardwareBuffer` / AAudio.)
+
+The APK harness (`examples/g2g-android-present`, M742) is the one probe that is
+a real app, not a pushed binary: a `NativeActivity` whose window `WgpuSink`
+presents to (gradle-free: aapt2 + zipalign + apksigner from the SDK
+build-tools, plus `keytool` for the one-time debug keystore; point
+`ANDROID_SDK_ROOT` at an SDK with `build-tools/` and `platforms/`). The device
+must be unlocked while it runs. Its manifest declares `RECORD_AUDIO` / `CAMERA`
+(granted by the script via `pm grant`) so permission-gated capture can run
+in-app later.
 
 **Permission caveats.** A bare `/data/local/tmp` binary has no app manifest, so
 the permission-gated capture paths can't run there: **mic capture** needs

@@ -46,5 +46,21 @@ printf 'videotestsrc num-buffers=10 ! video/x-raw,width=320,height=240 ! fakesin
 printf 'filesrc location=a.mp4 ! decodebin ! videoconvert ! autovideosink' > corpus/parse_launch/seed2
 printf 'audiotestsrc ! tee name=t ! queue ! fakesink t. ! queue ! fakesink' > corpus/parse_launch/seed3
 
+# ivfdemux: a real IVF (DKIF header + frame headers). fmp4: a fragmented MP4 so
+# the fuzzer starts inside moof / traf / trun instead of rediscovering the box
+# structure. Both gate on a magic / box layout.
+mkdir -p corpus/ivfdemux corpus/fmp4
+$FF -f lavfi -i "$SRC" -c:v libvpx-vp9 -f ivf corpus/ivfdemux/seed.ivf 2>/dev/null \
+    || $FF -f lavfi -i "$SRC" -c:v libvpx -f ivf corpus/ivfdemux/seed.ivf 2>/dev/null || true
+$FF -f lavfi -i "$SRC" -c:v libx264 -pix_fmt yuv420p \
+    -movflags +frag_keyframe+empty_moov+default_base_moof corpus/fmp4/seed.mp4 2>/dev/null || true
+
+# srtcrypto: a structurally valid KM message (AES-128) with a garbage wrapped key.
+# The header magic / version / SLen / KLen clear every early gate, so the fuzzer
+# reaches PBKDF2 KEK derivation + the AES-KW unwrap attempt (which fails on the
+# garbage key, as intended). 16-byte header, 16-byte salt, 24-byte wrapped key.
+mkdir -p corpus/srtcrypto
+printf '\x12\x20\x29\x01\x00\x00\x00\x00\x02\x00\x02\x00\x00\x00\x04\x04\xAA\xAA\xAA\xAA\xAA\xAA\xAA\xAA\xAA\xAA\xAA\xAA\xAA\xAA\xAA\xAA\xBB\xBB\xBB\xBB\xBB\xBB\xBB\xBB\xBB\xBB\xBB\xBB\xBB\xBB\xBB\xBB\xBB\xBB\xBB\xBB\xBB\xBB\xBB\xBB' > corpus/srtcrypto/seed.km
+
 echo "seed corpora ready:"
 du -sh corpus/* 2>/dev/null

@@ -249,6 +249,41 @@ impl PadTemplates for IvfDemux {
     }
 }
 
+#[cfg(fuzzing)]
+pub fn fuzz_parse(data: &[u8]) {
+    use g2g_core::PushOutcome;
+
+    let _ = IvfDemux::parse_header(data);
+
+    struct NoopSink;
+    impl OutputSink for NoopSink {
+        fn push<'a>(
+            &'a mut self,
+            _packet: PipelinePacket,
+        ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
+            Box::pin(async { Ok(PushOutcome::Accepted) })
+        }
+    }
+
+    let mut demux = IvfDemux::new();
+    if demux
+        .configure_pipeline(&Caps::ByteStream {
+            encoding: ByteStreamEncoding::Ivf,
+        })
+        .is_err()
+    {
+        return;
+    }
+    let frame = Frame {
+        domain: MemoryDomain::System(SystemSlice::from_boxed(data.to_vec().into_boxed_slice())),
+        timing: FrameTiming::default(),
+        sequence: 0,
+        meta: Default::default(),
+    };
+    let mut sink = NoopSink;
+    let _ = crate::fuzz_block_on(demux.process(PipelinePacket::DataFrame(frame), &mut sink));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,0 +1,27 @@
+# Standalone APK harness crate (M742): NOT a workspace member (see root
+# Cargo.toml `exclude`). Builds a cdylib for a NativeActivity APK against g2g
+# as path packages; built + packaged by tools/android-apk-present-smoke.sh.
+[package]
+name = "g2g-android-present"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+# Own workspace root so cargo does not fold it into the parent workspace.
+[workspace]
+
+# Everything is Android-only; a host build produces an empty lib.
+[target.'cfg(target_os = "android")'.dependencies]
+# NativeActivity glue: android_main + the lifecycle/event loop. Pins the same
+# ndk 0.9 g2g-plugins uses, so its NativeWindow is the type
+# create_android_surface takes.
+android-activity = { version = "0.6", features = ["native-activity"] }
+android_logger = "0.15"
+log = "0.4"
+ndk = { version = "0.9", default-features = false }
+
+g2g-core = { path = "../../g2g-core", features = ["std", "runtime"] }
+g2g-plugins = { path = "../../g2g-plugins", features = ["std", "mediacodec-wgpu"] }

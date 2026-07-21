@@ -229,7 +229,9 @@ impl VelloAnalyticsOverlay {
             usage: wgpu::TextureUsages::STORAGE_BINDING
                 | wgpu::TextureUsages::COPY_SRC
                 | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
+            // The pixels are sRGB-encoded video; an embedder sampling the frame
+            // in a lit/tonemapped scene needs an sRGB view for correct gamma.
+            view_formats: &[wgpu::TextureFormat::Rgba8UnormSrgb],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         gpu.renderer

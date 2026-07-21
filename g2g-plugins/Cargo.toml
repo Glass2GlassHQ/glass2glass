@@ -1127,6 +1127,13 @@ required-features = ["vulkan-video", "wgpu-sink"]
 name = "vulkan_video_engine_embed"
 required-features = ["vulkan-video"]
 
+# M740: on-screen macOS present (VideoToolbox zero-copy decode into an
+# app-owned window's CAMetalLayer via `MetalVideoSink::with_layer`). Non-macOS
+# builds get a stub main; the real path needs macOS.
+[[example]]
+name = "metal_video_on_screen"
+required-features = ["vtdecode", "metal-sink"]
+
 # M495: zero-copy VulkanVideoDec -> WgpuSink (decoded texture presented, no readback).
 [[test]]
 name = "m495_vulkan_video_wgpu_sink"

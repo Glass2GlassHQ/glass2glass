@@ -851,6 +851,21 @@ gotcha: NVIDIA's Vulkan HEVC slice-header parser needs a 3-byte start code (`00
 00 01`); a 4-byte one breaks every non-IDR slice (the IDR tolerates it via the
 picture info), so the H.265 path frames slices with 3 bytes while H.264 keeps 4.
 
+**Long-term reference pictures (M743).** The SPS long-term table rides
+`pLongTermRefPicsSps`; the slice header's long-term entries (SPS-indexed and
+slice-coded, with the accumulated `DeltaPocMsbCycleLt` per 7.4.7.1) resolve
+against the DPB by full POC (MSB cycle present) or POC lsb alone, the RPS prune
+keeps long-term-listed pictures, `RefPicSetLtCurr` carries the used-by-current
+slots, and each reference's `Std*` info flags its short/long-term marking (which
+changes the driver's MV scaling, so a wrong marking corrupts prediction silently
+rather than erroring). Landing this exposed two latent slice-RPS bugs: an inline
+`st_ref_pic_set` coded in a slice header *does* carry `delta_idx_minus1` when
+inter-RPS-predicted (the SPS-context parse never read it, desyncing every later
+field), and `NumDeltaPocsOfRefRpsIdx` must be the referenced set's delta count,
+not 0, for the driver's own slice-header re-parse. All 500 frames of the JCT-VC
+`LTRPSPS_A_Qualcomm_1` conformance vector decode bit-exact vs ffmpeg on the 3060
+(`m743`); the GPU-texture path shares the same DPB machinery.
+
 **B-frames and display order.** The hardware decode handles B-frames directly: the
 driver builds the L0 / L1 reference lists from the DPB and the per-picture POC the
 decoder supplies (H.264 supplies every DPB slot's FrameNum/POC; H.265 the
@@ -866,7 +881,20 @@ consumer such as the re_video adapter reorders by PTS itself), but the g2g-nativ
 `VulkanVideoDec` element does reorder its system (NV12) path: `decode_push_meta`
 returns one `PictureMeta` per submitted picture (the POC the decode already
 computed, no second pass), and the element feeds retired frames through a small
-`ReorderBuffer` keyed by the same (coded-video-sequence, POC). It releases the whole
+`ReorderBuffer` keyed by the same (coded-video-sequence, POC). The GPU-texture
+path streams the same way (M744): `decode_push_to_textures` decodes each AU's
+pictures to textures with the DPB/POC state intact across calls (the whole-stream
+`decode_all_to_textures` indexing pass resets it, so it cannot stream), and the
+element reorders them through a texture `ReorderBuffer`. AV1 needs neither
+buffer: its display order is the bitstream's op order, so the element op-walks
+each temporal unit (`decode_display` / `decode_display_to_textures`, the DPB
+persisting across calls), which also makes `show_existing_frame` re-displays and
+per-frame film-grain synthesis work when streamed (the old pipelined path
+silently skipped both). M744 also fixed a latent AV1 use-after-free: NVIDIA's
+driver retains the `pStdSequenceHeader` / `pColorConfig` pointers handed to
+`vkCreateVideoSessionParametersKHR` and dereferences them per decode, so
+`Av1DecodeSession` now owns a stable boxed copy for its lifetime (dropping the
+Std block after creation yielded small, nondeterministic pixel corruption). It releases the whole
 previous coded video sequence at each keyframe (where POC resets) and bumps the
 lowest-POC held frame once a sequence exceeds the DPB depth (a safe reorder-depth
 bound, so a long GOP does not buffer unbounded); `Eos` and a resolution-reconfig
@@ -2733,7 +2761,14 @@ picture. Two pieces, both `no_std`-friendly:
   texture produced through a `from_wgpu` context reads back correctly on the
   embedder's own device handles). The frame still flows to the app through any
   sink, including the `appsink` pull channel, which carries a GPU-domain `Frame`
-  unchanged.
+  unchanged. `examples/bevy-g2g-decode` (M741) is the runnable proof: a stock
+  Bevy app adopts its own render device into `from_wgpu`, a
+  `filesrc -> h264parse -> ffmpegdec -> videoconvert -> vello overlay -> appsink`
+  pipeline lands each decoded frame in a `wgpu::Texture` on Bevy's device, and
+  the app registers it as a render-world `GpuImage` and samples it on a spinning
+  cube (through an sRGB view; the overlay's texture lists `Rgba8UnormSrgb` in
+  `view_formats` for exactly this). The mirror of `bevy-g2g-stream` (§4.11.3),
+  which renders in Bevy and encodes in g2g.
 
 ---
 

@@ -1023,7 +1023,7 @@ g2g-launch <span class="flag">--script</span> build.rhai</div>
             <div class="target-card">
                 <div class="t-icon">&#9889;</div>
                 <h3>GPU (zero-copy)</h3>
-                <p>Frames stay in Vulkan / CUDA / wgpu / DMABUF domains: Vulkan Video decode &rarr; <code>wgpu::Texture</code>, native NVDEC / NVENC, a CUDA &harr; wgpu bridge &mdash; no PCIe round-trip.</p>
+                <p>Frames stay in Vulkan / CUDA / wgpu / DMABUF domains: Vulkan Video decode &rarr; <code>wgpu::Texture</code>, native NVDEC / NVENC, a CUDA &harr; wgpu bridge &mdash; no PCIe round-trip. Embeds in an app's own wgpu device (<code>GpuContext::from_wgpu</code>; Bevy decode + encode demos).</p>
             </div>
             <div class="target-card">
                 <div class="t-icon">&#127760;</div>

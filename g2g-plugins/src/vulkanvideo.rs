@@ -870,6 +870,11 @@ pub struct H265Sps {
     pub num_short_term_ref_pic_sets: u8,
     pub short_term_rps: alloc::vec::Vec<H265ShortTermRps>,
     pub long_term_ref_pics_present_flag: u8,
+    /// SPS-declared long-term candidates (7.3.2.2.1): valid for the first
+    /// `num_long_term_ref_pics_sps` entries of the two arrays.
+    pub num_long_term_ref_pics_sps: u8,
+    pub lt_ref_pic_poc_lsb_sps: [u32; 32],
+    pub used_by_curr_pic_lt_sps_flag: [bool; 32],
     pub sps_temporal_mvp_enabled_flag: u8,
     pub strong_intra_smoothing_enabled_flag: u8,
     /// VUI colour description (CICP codepoints, 2 = unspecified) + full-range flag,
@@ -1076,16 +1081,29 @@ pub fn parse_h265_sps(rbsp: &[u8]) -> Option<H265Sps> {
     }
     let mut short_term_rps = alloc::vec::Vec::with_capacity(num_short_term_ref_pic_sets as usize);
     for idx in 0..num_short_term_ref_pic_sets as usize {
-        let rps = parse_h265_short_term_rps(&mut br, idx, &short_term_rps)?;
+        let (rps, _) = parse_h265_short_term_rps(
+            &mut br,
+            idx,
+            num_short_term_ref_pic_sets as usize,
+            &short_term_rps,
+        )?;
         short_term_rps.push(rps);
     }
 
     let long_term_ref_pics_present_flag = br.read_bit()?;
-    // Long-term reference pictures are not carried into the Std SPS
-    // (pLongTermRefPicsSps null) nor handled in the slice-header parse / DPB;
-    // reject a stream that uses them rather than mis-decode.
+    let mut num_long_term_ref_pics_sps = 0u32;
+    let mut lt_ref_pic_poc_lsb_sps = [0u32; 32];
+    let mut used_by_curr_pic_lt_sps_flag = [false; 32];
     if long_term_ref_pics_present_flag == 1 {
-        return None;
+        num_long_term_ref_pics_sps = br.read_ue()?;
+        if num_long_term_ref_pics_sps > 32 {
+            return None;
+        }
+        for i in 0..num_long_term_ref_pics_sps as usize {
+            lt_ref_pic_poc_lsb_sps[i] =
+                br.read_bits(log2_max_pic_order_cnt_lsb_minus4 as u32 + 4)?;
+            used_by_curr_pic_lt_sps_flag[i] = br.read_bit()? == 1;
+        }
     }
     let sps_temporal_mvp_enabled_flag = br.read_bit()?;
     let strong_intra_smoothing_enabled_flag = br.read_bit()?;
@@ -1138,6 +1156,9 @@ pub fn parse_h265_sps(rbsp: &[u8]) -> Option<H265Sps> {
         num_short_term_ref_pic_sets: num_short_term_ref_pic_sets as u8,
         short_term_rps,
         long_term_ref_pics_present_flag: long_term_ref_pics_present_flag as u8,
+        num_long_term_ref_pics_sps: num_long_term_ref_pics_sps as u8,
+        lt_ref_pic_poc_lsb_sps,
+        used_by_curr_pic_lt_sps_flag,
         sps_temporal_mvp_enabled_flag: sps_temporal_mvp_enabled_flag as u8,
         strong_intra_smoothing_enabled_flag: strong_intra_smoothing_enabled_flag as u8,
         color_primaries,
@@ -1473,6 +1494,7 @@ pub struct StdH265Params {
     _sps_ptl: alloc::boxed::Box<vk::native::StdVideoH265ProfileTierLevel>,
     _sps_dpb: alloc::boxed::Box<vk::native::StdVideoH265DecPicBufMgr>,
     _sps_rps: alloc::vec::Vec<vk::native::StdVideoH265ShortTermRefPicSet>,
+    _sps_lt: alloc::boxed::Box<vk::native::StdVideoH265LongTermRefPicsSps>,
     _vps_ptl: alloc::boxed::Box<vk::native::StdVideoH265ProfileTierLevel>,
     _vps_dpb: alloc::boxed::Box<vk::native::StdVideoH265DecPicBufMgr>,
 }
@@ -1520,7 +1542,14 @@ pub fn to_std_h265_params(ps: &H265ParameterSets) -> StdH265Params {
         &ps.vps.max_latency_increase_plus1,
     ));
 
-    let sps = to_std_h265_sps(&ps.sps, &*sps_ptl, &*sps_dpb, &sps_rps);
+    let sps_lt = alloc::boxed::Box::new(to_std_h265_lt_sps(&ps.sps));
+    let lt_ptr = if ps.sps.long_term_ref_pics_present_flag == 1 {
+        &*sps_lt as *const _
+    } else {
+        core::ptr::null()
+    };
+
+    let sps = to_std_h265_sps(&ps.sps, &*sps_ptl, &*sps_dpb, &sps_rps, lt_ptr);
     let pps = to_std_h265_pps(&ps.pps, ps.sps.sps_video_parameter_set_id);
     let vps = to_std_h265_vps(&ps.vps, &*vps_ptl, &*vps_dpb);
 
@@ -1531,8 +1560,27 @@ pub fn to_std_h265_params(ps: &H265ParameterSets) -> StdH265Params {
         _sps_ptl: sps_ptl,
         _sps_dpb: sps_dpb,
         _sps_rps: sps_rps,
+        _sps_lt: sps_lt,
         _vps_ptl: vps_ptl,
         _vps_dpb: vps_dpb,
+    }
+}
+
+/// The `Std*` SPS long-term table: the per-entry used-by-current flags packed
+/// into a bitmask (bit `i` = entry `i`), the POC lsbs in a fixed array.
+fn to_std_h265_lt_sps(sps: &H265Sps) -> vk::native::StdVideoH265LongTermRefPicsSps {
+    let mut used = 0u32;
+    let mut lsb = [0u32; 32];
+    let n = sps.num_long_term_ref_pics_sps as usize;
+    lsb[..n].copy_from_slice(&sps.lt_ref_pic_poc_lsb_sps[..n]);
+    for (i, &u) in sps.used_by_curr_pic_lt_sps_flag[..n].iter().enumerate() {
+        if u {
+            used |= 1 << i;
+        }
+    }
+    vk::native::StdVideoH265LongTermRefPicsSps {
+        used_by_curr_pic_lt_sps_flag: used,
+        lt_ref_pic_poc_lsb_sps: lsb,
     }
 }
 
@@ -1541,6 +1589,7 @@ fn to_std_h265_sps(
     ptl: *const vk::native::StdVideoH265ProfileTierLevel,
     dpb: *const vk::native::StdVideoH265DecPicBufMgr,
     rps: &[vk::native::StdVideoH265ShortTermRefPicSet],
+    lt: *const vk::native::StdVideoH265LongTermRefPicsSps,
 ) -> vk::native::StdVideoH265SequenceParameterSet {
     // SAFETY: `StdVideoH265SpsFlags` is a plain repr(C) bitfield POD, valid
     // all-zero (all flags clear).
@@ -1581,7 +1630,7 @@ fn to_std_h265_sps(
         max_transform_hierarchy_depth_inter: sps.max_transform_hierarchy_depth_inter,
         max_transform_hierarchy_depth_intra: sps.max_transform_hierarchy_depth_intra,
         num_short_term_ref_pic_sets: sps.num_short_term_ref_pic_sets,
-        num_long_term_ref_pics_sps: 0,
+        num_long_term_ref_pics_sps: sps.num_long_term_ref_pics_sps,
         pcm_sample_bit_depth_luma_minus1: sps.pcm_sample_bit_depth_luma_minus1,
         pcm_sample_bit_depth_chroma_minus1: sps.pcm_sample_bit_depth_chroma_minus1,
         log2_min_pcm_luma_coding_block_size_minus3: sps.log2_min_pcm_luma_coding_block_size_minus3,
@@ -1605,7 +1654,7 @@ fn to_std_h265_sps(
         } else {
             rps.as_ptr()
         },
-        pLongTermRefPicsSps: core::ptr::null(),
+        pLongTermRefPicsSps: lt,
         pSequenceParameterSetVui: core::ptr::null(),
         pPredictorPaletteEntries: core::ptr::null(),
     }
@@ -2327,6 +2376,25 @@ pub fn av1_uses_loop_restoration(stream: &[u8]) -> Option<bool> {
 pub struct StdAv1Params {
     pub seq_header: vk::native::StdVideoAV1SequenceHeader,
     _color: alloc::boxed::Box<vk::native::StdVideoAV1ColorConfig>,
+}
+
+impl StdAv1Params {
+    /// Deep copy with the color-config pointee re-wired to the copy's own box,
+    /// boxed so every internal address stays stable for as long as the box
+    /// lives. The AV1 decode session stores one: NVIDIA's driver retains the
+    /// `pStdSequenceHeader` (and its nested `pColorConfig`) pointers past
+    /// `vkCreateVideoSessionParametersKHR` and reads them per decode, so the
+    /// pointed-at memory must live as long as the session (dropping it after
+    /// creation yields silent, nondeterministic decode corruption).
+    fn deep_clone_boxed(&self) -> alloc::boxed::Box<StdAv1Params> {
+        let color = alloc::boxed::Box::new(*self._color);
+        let mut seq_header = self.seq_header;
+        seq_header.pColorConfig = &*color as *const _;
+        alloc::boxed::Box::new(StdAv1Params {
+            seq_header,
+            _color: color,
+        })
+    }
 }
 
 impl core::fmt::Debug for StdAv1Params {
@@ -4946,6 +5014,29 @@ pub struct H265SliceHeader {
     /// Bits the inline `st_ref_pic_set()` occupies in the slice header (0 when the
     /// RPS came from the SPS); the driver's `NumBitsForSTRefPicSetInSlice`.
     pub num_bits_for_st_rps: u16,
+    /// `NumDeltaPocs[RefRpsIdx]` when the inline RPS is inter-RPS-predicted
+    /// (0 otherwise): the driver re-parses the slice's `st_ref_pic_set` and
+    /// needs it (`NumDeltaPocsOfRefRpsIdx`).
+    pub num_delta_pocs_of_ref_rps_idx: u8,
+    /// The long-term reference entries of this slice (SPS-indexed entries first,
+    /// then slice-coded ones), empty when the SPS has no long-term ref pics.
+    pub lt: alloc::vec::Vec<H265LtEntry>,
+}
+
+/// One long-term reference entry from a slice header (H.265 7.3.6.1), with the
+/// MSB-cycle delta already accumulated per 7.4.7.1.
+#[derive(Debug, Clone, Copy)]
+pub struct H265LtEntry {
+    /// `PocLsbLt[i]`: from the SPS table (the first `num_long_term_sps` entries)
+    /// or coded inline in the slice.
+    pub poc_lsb: u32,
+    /// `UsedByCurrPicLt[i]`: referenced by the current picture (vs kept only).
+    pub used_by_curr: bool,
+    /// `delta_poc_msb_present_flag[i]`: the entry identifies its picture by full
+    /// POC; otherwise by POC lsb alone.
+    pub has_msb_cycle: bool,
+    /// `DeltaPocMsbCycleLt[i]` (accumulated).
+    pub delta_poc_msb_cycle: u32,
 }
 
 impl H265SliceHeader {
@@ -4991,8 +5082,8 @@ fn h265_is_rasl(nal_unit_type: u8) -> bool {
 /// Parse the slice-segment-header prefix of a VCL NAL (type 0..=21). `sps`/`pps`
 /// supply the field widths, POC lsb size, and `num_short_term_ref_pic_sets`.
 /// `None` on truncation, a non-VCL NAL, or an unsupported tool (dependent slice
-/// segments, long-term ref pics). Non-first slice segments parse only the flag
-/// (the DPB uses just the first slice's header per picture).
+/// segments). Non-first slice segments parse only the flag (the DPB uses just
+/// the first slice's header per picture).
 pub fn parse_h265_slice_header(
     nal: &[u8],
     sps: &H265Sps,
@@ -5025,6 +5116,8 @@ pub fn parse_h265_slice_header(
             short_term_ref_pic_set_sps_flag: false,
             st_rps: H265ShortTermRps::default(),
             num_bits_for_st_rps: 0,
+            num_delta_pocs_of_ref_rps_idx: 0,
+            lt: alloc::vec::Vec::new(),
         });
     }
     if is_irap {
@@ -5046,6 +5139,8 @@ pub fn parse_h265_slice_header(
     let mut short_term_ref_pic_set_sps_flag = false;
     let mut st_rps = H265ShortTermRps::default();
     let mut num_bits_for_st_rps = 0u16;
+    let mut num_delta_pocs_of_ref_rps_idx = 0u8;
+    let mut lt: alloc::vec::Vec<H265LtEntry> = alloc::vec::Vec::new();
     if !is_idr {
         slice_pic_order_cnt_lsb = br.read_bits(sps.log2_max_pic_order_cnt_lsb_minus4 as u32 + 4)?;
         short_term_ref_pic_set_sps_flag = br.read_bit()? == 1;
@@ -5053,11 +5148,14 @@ pub fn parse_h265_slice_header(
             // Inline RPS: st_ref_pic_set(num_short_term_ref_pic_sets). Measure the
             // bits it spans for the driver's NumBitsForSTRefPicSetInSlice.
             let before = br.bit_pos();
-            st_rps = parse_h265_short_term_rps(
+            let (parsed, ref_delta_pocs) = parse_h265_short_term_rps(
                 &mut br,
+                sps.num_short_term_ref_pic_sets as usize,
                 sps.num_short_term_ref_pic_sets as usize,
                 &sps.short_term_rps,
             )?;
+            st_rps = parsed;
+            num_delta_pocs_of_ref_rps_idx = ref_delta_pocs;
             num_bits_for_st_rps = (br.bit_pos() - before) as u16;
         } else if sps.num_short_term_ref_pic_sets > 1 {
             let bits = ceil_log2(sps.num_short_term_ref_pic_sets as u32);
@@ -5066,8 +5164,53 @@ pub fn parse_h265_slice_header(
         } else if sps.num_short_term_ref_pic_sets == 1 {
             st_rps = sps.short_term_rps.first()?.clone();
         }
-        // long_term_ref_pics_present_flag is rejected at SPS parse, so the
-        // long-term ref-pic block never appears here.
+        if sps.long_term_ref_pics_present_flag == 1 {
+            let num_long_term_sps = if sps.num_long_term_ref_pics_sps > 0 {
+                br.read_ue()?
+            } else {
+                0
+            };
+            let num_long_term_pics = br.read_ue()?;
+            let total = num_long_term_sps.checked_add(num_long_term_pics)?;
+            if num_long_term_sps > sps.num_long_term_ref_pics_sps as u32 || total > 32 {
+                return None;
+            }
+            let mut prev_cycle = 0u32;
+            for i in 0..total {
+                let (poc_lsb, used_by_curr) = if i < num_long_term_sps {
+                    // An index into the SPS long-term table.
+                    let idx = if sps.num_long_term_ref_pics_sps > 1 {
+                        br.read_bits(ceil_log2(sps.num_long_term_ref_pics_sps as u32))? as usize
+                    } else {
+                        0
+                    };
+                    if idx >= sps.num_long_term_ref_pics_sps as usize {
+                        return None;
+                    }
+                    (
+                        sps.lt_ref_pic_poc_lsb_sps[idx],
+                        sps.used_by_curr_pic_lt_sps_flag[idx],
+                    )
+                } else {
+                    let lsb = br.read_bits(sps.log2_max_pic_order_cnt_lsb_minus4 as u32 + 4)?;
+                    (lsb, br.read_bit()? == 1)
+                };
+                let has_msb_cycle = br.read_bit()? == 1;
+                let mut cycle = if has_msb_cycle { br.read_ue()? } else { 0 };
+                // 7.4.7.1: the MSB cycle is delta-coded against the previous
+                // entry, except at i == 0 and at the first slice-coded entry.
+                if i != 0 && i != num_long_term_sps {
+                    cycle = cycle.checked_add(prev_cycle)?;
+                }
+                prev_cycle = cycle;
+                lt.push(H265LtEntry {
+                    poc_lsb,
+                    used_by_curr,
+                    has_msb_cycle,
+                    delta_poc_msb_cycle: cycle,
+                });
+            }
+        }
     }
 
     Some(H265SliceHeader {
@@ -5081,6 +5224,8 @@ pub fn parse_h265_slice_header(
         short_term_ref_pic_set_sps_flag,
         st_rps,
         num_bits_for_st_rps,
+        num_delta_pocs_of_ref_rps_idx,
+        lt,
     })
 }
 
@@ -6705,7 +6850,22 @@ pub struct Av1DecodeSession {
     /// The decode picture format chosen at session creation (e.g. NV12).
     pub picture_format: vk::Format,
     pub coded_extent: (u32, u32),
+    /// The Std sequence header handed to the driver at parameters creation.
+    /// NVIDIA retains and dereferences the pointer per decode (it does NOT
+    /// copy), so the session owns this stable-address block for its lifetime.
+    _std: RetainedAv1Std,
 }
+
+/// Owner of the driver-retained Std AV1 sequence-header block. Its raw
+/// pointers all point into the same boxed allocation (self-contained), which
+/// is what makes the manual `Send` sound.
+struct RetainedAv1Std(alloc::boxed::Box<StdAv1Params>);
+
+// SAFETY: the block's internal pointers reference its own boxed allocation,
+// never external data; moving the owner moves only the box handle (the pointees
+// stay put), and the block is only ever read by the driver during decode calls
+// made through the owning session.
+unsafe impl Send for RetainedAv1Std {}
 
 impl core::fmt::Debug for Av1DecodeSession {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -7133,17 +7293,21 @@ impl VulkanVideoDevice {
             }
         };
 
-        // Session parameters carry the Std sequence header. It references `std`'s
-        // owned color-config block, which outlives the call.
+        // Session parameters carry the Std sequence header. The driver retains
+        // the pointer past creation (see `StdAv1Params::deep_clone_boxed`), so
+        // hand it the session-owned copy's address, not the caller's.
+        let own_std = RetainedAv1Std(std.deep_clone_boxed());
         let mut av1_params = vk::VideoDecodeAV1SessionParametersCreateInfoKHR::default()
-            .std_sequence_header(&std.seq_header);
+            .std_sequence_header(&own_std.0.seq_header);
         let params_ci = vk::VideoSessionParametersCreateInfoKHR::default()
             .video_session(session)
             .push_next(&mut av1_params);
 
         let mut parameters = vk::VideoSessionParametersKHR::null();
-        // SAFETY: `params_ci` and its chained AV1 create-info (referencing
-        // `std.seq_header`, whose color-config pointee `std` owns) outlive the call.
+        // SAFETY: `params_ci` and its chained AV1 create-info reference
+        // `own_std.seq_header`, whose boxed addresses stay stable through the
+        // call AND for the session's lifetime (stored below; the driver keeps
+        // reading them per decode).
         let ret = unsafe {
             (self.video_fns.fp().create_video_session_parameters_khr)(
                 self.raw_device.handle(),
@@ -7176,6 +7340,7 @@ impl VulkanVideoDevice {
             video_fns: self.video_fns.clone(),
             picture_format,
             coded_extent: (w, h),
+            _std: own_std,
         })
     }
 
@@ -9755,6 +9920,38 @@ impl H264DpbDecoder {
         Ok(reorder_to_display_order(textures, &metas))
     }
 
+    /// Streaming decode of one access unit to GPU-resident RGBA textures: one
+    /// `(PictureMeta, wgpu::Texture)` per coded picture, in CODING order, with
+    /// the DPB / POC state left intact across calls (unlike
+    /// [`decode_all_to_textures`](Self::decode_all_to_textures), whose indexing
+    /// pass resets it, making it whole-stream-only). A streaming caller reorders
+    /// by the metas' (coded-video-sequence, POC), as the element's texture
+    /// reorder buffer does. Synchronous (each decode chained to its convert).
+    pub fn decode_push_to_textures(
+        &mut self,
+        stream: &[u8],
+    ) -> Result<(alloc::vec::Vec<PictureMeta>, alloc::vec::Vec<wgpu::Texture>), VulkanVideoError>
+    {
+        if self.core.gpu.is_none() {
+            return Err(VulkanVideoError::NoComputeQueue);
+        }
+        let pictures = self.split_pictures(stream)?;
+        let mut metas = alloc::vec::Vec::with_capacity(pictures.len());
+        let mut textures = alloc::vec::Vec::with_capacity(pictures.len());
+        for (hdr, slices) in pictures {
+            let (w, h) = self.core.coded_extent;
+            self.core.chain_next = true;
+            let (target, meta) = self.decode_into_slot(&hdr, &slices, false)?;
+            let image = self.core.slots[target].image;
+            // SAFETY: same contract as `decode_picture_to_texture` (the slot was
+            // just decoded, SAMPLED + CONCURRENT, chained via `sem_dc`).
+            let texture = unsafe { self.core.convert_slot_chained(image, w, h) }?;
+            metas.push(meta);
+            textures.push(texture);
+        }
+        Ok((metas, textures))
+    }
+
     /// Reset the reference / POC state so the next decode begins a fresh coded
     /// sequence, re-arming the session `RESET` control. This is how a seek works:
     /// after a reset, decoding from a keyframe reconstructs pictures correctly
@@ -10253,6 +10450,8 @@ impl H264DpbDecoder {
 #[derive(Debug, Clone, Copy)]
 struct H265RefPic {
     poc: i32,
+    /// Marked long-term by the current slice's RPS (re-derived per picture).
+    is_long_term: bool,
 }
 
 /// Pictures split out of an H.265 stream: each is a first-slice header plus the
@@ -10438,6 +10637,38 @@ impl H265DpbDecoder {
         Ok(reorder_to_display_order(textures, &metas))
     }
 
+    /// Streaming decode of one access unit to GPU-resident RGBA textures: one
+    /// `(PictureMeta, wgpu::Texture)` per DECODED picture, in coding order, with
+    /// the DPB / POC state left intact across calls (the H.265 sibling of
+    /// [`H264DpbDecoder::decode_push_to_textures`]). A RASL discarded by a
+    /// tune-in yields neither a meta nor a texture, keeping the pair aligned.
+    pub fn decode_push_to_textures(
+        &mut self,
+        stream: &[u8],
+    ) -> Result<(alloc::vec::Vec<PictureMeta>, alloc::vec::Vec<wgpu::Texture>), VulkanVideoError>
+    {
+        if self.core.gpu.is_none() {
+            return Err(VulkanVideoError::NoComputeQueue);
+        }
+        let pictures = self.split_pictures(stream)?;
+        let mut metas = alloc::vec::Vec::with_capacity(pictures.len());
+        let mut textures = alloc::vec::Vec::with_capacity(pictures.len());
+        for (hdr, slices) in pictures {
+            let (w, h) = self.core.coded_extent;
+            self.core.chain_next = true;
+            let Some((target, meta)) = self.decode_into_slot(&hdr, &slices, false)? else {
+                continue;
+            };
+            let image = self.core.slots[target].image;
+            // SAFETY: same contract as `decode_picture_to_texture` (the slot was
+            // just decoded, SAMPLED + CONCURRENT, chained via `sem_dc`).
+            let texture = unsafe { self.core.convert_slot_chained(image, w, h) }?;
+            metas.push(meta);
+            textures.push(texture);
+        }
+        Ok((metas, textures))
+    }
+
     /// Decode the run of pictures `start..=target` (decoding order) and return only
     /// `target`, GPU-resident as an RGBA `wgpu::Texture` (the random-access seek
     /// primitive, see [`H264DpbDecoder::decode_range_to_texture`]). `start` must be
@@ -10614,6 +10845,35 @@ impl H265DpbDecoder {
         // open-GOP CRA mid-stream, keep only the pictures the current RPS lists
         // (used or kept-for-future) and drop the rest (H.265 8.3.2): the CRA's RPS
         // retains the pre-CRA pictures its RASL leading pictures reference.
+        // Resolve the slice's long-term entries against the DPB first (H.265
+        // 8.3.2): an entry with an MSB cycle identifies its picture by full POC;
+        // one without matches on POC lsb alone. A resolved slot is (re)marked
+        // long-term, so the driver's reference info (and its MV scaling) mirrors
+        // the slice's classification; the marking is re-derived per picture.
+        let max_lsb = 1i32 << self.log2_max_pic_order_cnt_lsb;
+        for r in self.refs.iter_mut().flatten() {
+            r.is_long_term = false;
+        }
+        let mut lt_resolved: alloc::vec::Vec<(usize, bool)> = alloc::vec::Vec::new();
+        for e in &hdr.lt {
+            let slot = if e.has_msb_cycle {
+                let full = poc
+                    - e.delta_poc_msb_cycle as i32 * max_lsb
+                    - (hdr.slice_pic_order_cnt_lsb as i32 - e.poc_lsb as i32);
+                self.slot_of_poc(full)
+            } else {
+                self.refs.iter().position(
+                    |r| matches!(r, Some(rp) if rp.poc & (max_lsb - 1) == e.poc_lsb as i32),
+                )
+            };
+            if let Some(s) = slot {
+                if let Some(rp) = self.refs[s].as_mut() {
+                    rp.is_long_term = true;
+                }
+                lt_resolved.push((s, e.used_by_curr));
+            }
+        }
+
         if hdr.is_irap && no_rasl_output {
             for r in &mut self.refs {
                 *r = None;
@@ -10625,6 +10885,12 @@ impl H265DpbDecoder {
             }
             for i in 0..hdr.st_rps.num_positive_pics as usize {
                 keep.push(poc + hdr.st_rps.delta_poc_s1[i]);
+            }
+            // Long-term-listed pictures are kept too (used-by-current or not).
+            for (s, _) in &lt_resolved {
+                if let Some(rp) = self.refs[*s] {
+                    keep.push(rp.poc);
+                }
             }
             for r in &mut self.refs {
                 if let Some(rp) = r {
@@ -10660,6 +10926,16 @@ impl H265DpbDecoder {
                             na += 1;
                         }
                     }
+                }
+            }
+        }
+        let mut lt = [0xffu8; 8];
+        if !hdr.is_irap {
+            let mut nl = 0usize;
+            for (s, used) in &lt_resolved {
+                if *used && nl < 8 {
+                    lt[nl] = *s as u8;
+                    nl += 1;
                 }
             }
         }
@@ -10700,13 +10976,17 @@ impl H265DpbDecoder {
             &active,
             &before,
             &after,
+            &lt,
             &bitstream_data,
             &slice_offsets,
             to_system,
         )?;
 
         if h265_is_reference(hdr.nal_unit_type) {
-            self.refs[target] = Some(H265RefPic { poc });
+            self.refs[target] = Some(H265RefPic {
+                poc,
+                is_long_term: false,
+            });
         }
         Ok(Some((target, meta)))
     }
@@ -10745,6 +11025,7 @@ impl H265DpbDecoder {
         active: &[(usize, H265RefPic)],
         ref_before: &[u8; 8],
         ref_after: &[u8; 8],
+        ref_lt: &[u8; 8],
         bitstream_data: &[u8],
         slice_offsets: &[u32],
         to_system: bool,
@@ -10770,13 +11051,13 @@ impl H265DpbDecoder {
             sps_video_parameter_set_id: self.sps.sps_video_parameter_set_id,
             pps_seq_parameter_set_id: self.pps.pps_seq_parameter_set_id,
             pps_pic_parameter_set_id: hdr.slice_pic_parameter_set_id,
-            NumDeltaPocsOfRefRpsIdx: 0,
+            NumDeltaPocsOfRefRpsIdx: hdr.num_delta_pocs_of_ref_rps_idx,
             PicOrderCntVal: poc,
             NumBitsForSTRefPicSetInSlice: hdr.num_bits_for_st_rps,
             reserved: 0,
             RefPicSetStCurrBefore: *ref_before,
             RefPicSetStCurrAfter: *ref_after,
-            RefPicSetLtCurr: [0xff; 8],
+            RefPicSetLtCurr: *ref_lt,
         };
         let mut h265_pic = vk::VideoDecodeH265PictureInfoKHR::default()
             .std_picture_info(&std_pic)
@@ -10788,9 +11069,9 @@ impl H265DpbDecoder {
         let mut std_refs: alloc::vec::Vec<vk::native::StdVideoDecodeH265ReferenceInfo> =
             alloc::vec::Vec::with_capacity(num_refs);
         for (_, rp) in active {
-            std_refs.push(std_h265_ref_info(rp.poc));
+            std_refs.push(std_h265_ref_info(rp.poc, rp.is_long_term));
         }
-        let std_cur = std_h265_ref_info(poc);
+        let std_cur = std_h265_ref_info(poc, false);
 
         let mut dpb_infos: alloc::vec::Vec<vk::VideoDecodeH265DpbSlotInfoKHR> =
             alloc::vec::Vec::with_capacity(num_refs);
@@ -11019,6 +11300,34 @@ impl Av1DpbDecoder {
             out.extend(self.decode_flush()?);
             return Ok(out);
         }
+        self.decode_ops(ops)
+    }
+
+    /// Decode one temporal unit in DISPLAY order via the synchronous op-walk,
+    /// unconditionally (no pipelined fast path): the streaming entry the
+    /// element feeds AU by AU. AV1 display order is the bitstream's op order,
+    /// and the DPB persists across calls, so a `show_existing_frame` resolves
+    /// frames decoded in earlier calls; the one path also keeps its output
+    /// byte-identical to a whole-stream reorder-aware [`decode_all`]
+    /// (the pipelined ring path skips film grain and invisible-frame ops).
+    ///
+    /// [`decode_all`]: Self::decode_all
+    pub fn decode_display(
+        &mut self,
+        stream: &[u8],
+    ) -> Result<alloc::vec::Vec<Nv12Frame>, VulkanVideoError> {
+        let (ops, _) = self.scan_ops(stream)?;
+        self.decode_ops(ops)
+    }
+
+    /// The reorder-aware op-walk shared by [`decode_all`](Self::decode_all) and
+    /// [`decode_display`](Self::decode_display): decode each coded frame
+    /// (emitting it only when shown), re-display stored slots on
+    /// `show_existing_frame`, and synthesize film grain per displayed frame.
+    fn decode_ops(
+        &mut self,
+        ops: alloc::vec::Vec<Av1Op<'_>>,
+    ) -> Result<alloc::vec::Vec<Nv12Frame>, VulkanVideoError> {
         let is_id = self.seq.color.matrix_coefficients == 0;
         let mut out = alloc::vec::Vec::new();
         for op in ops {
@@ -11070,6 +11379,30 @@ impl Av1DpbDecoder {
             }
             return Ok(out);
         }
+        self.decode_ops_to_textures(ops)
+    }
+
+    /// Decode one temporal unit to GPU textures in DISPLAY order via the
+    /// synchronous op-walk, unconditionally: the streaming texture entry the
+    /// element feeds AU by AU (the GPU sibling of
+    /// [`decode_display`](Self::decode_display)).
+    pub fn decode_display_to_textures(
+        &mut self,
+        stream: &[u8],
+    ) -> Result<alloc::vec::Vec<wgpu::Texture>, VulkanVideoError> {
+        if self.core.gpu.is_none() {
+            return Err(VulkanVideoError::NoComputeQueue);
+        }
+        let (ops, _) = self.scan_ops(stream)?;
+        self.decode_ops_to_textures(ops)
+    }
+
+    /// The reorder-aware texture op-walk shared by the whole-stream and
+    /// streaming entries.
+    fn decode_ops_to_textures(
+        &mut self,
+        ops: alloc::vec::Vec<Av1Op<'_>>,
+    ) -> Result<alloc::vec::Vec<wgpu::Texture>, VulkanVideoError> {
         // Film grain (when present) is synthesized on the CPU-read-back NV12 and the
         // result uploaded, since the GPU ycbcr pass produces the grain-free
         // reconstruction (see `grained_slot_to_texture`); a grain-free displayed
@@ -11536,6 +11869,9 @@ fn av1_ref_info(st: &Av1SlotState) -> vk::native::StdVideoDecodeAV1ReferenceInfo
 /// by POC, so B-frame reordering is handled. For H.265 open-GOP, a CRA is a valid
 /// seek target (the tune-in discards its RASL leading pictures); a leading picture
 /// itself seeks from an earlier random-access point so its references exist.
+// Both variants are ~5 KB (each embeds its parsed parameter sets); boxing one
+// to close the small size gap would buy nothing.
+#[allow(clippy::large_enum_variant)]
 enum PlayerDecoder {
     H264(H264DpbDecoder),
     H265(H265DpbDecoder),
@@ -11995,13 +12331,14 @@ fn std_ref_info(frame_num: u32, poc: i32) -> vk::native::StdVideoDecodeH264Refer
     }
 }
 
-/// The `Std*` H.265 reference info for a DPB slot: the reference picture's POC,
-/// marked short-term and in-use (H.265 reference lists match on POC).
-fn std_h265_ref_info(poc: i32) -> vk::native::StdVideoDecodeH265ReferenceInfo {
+/// The `Std*` H.265 reference info for a DPB slot: the reference picture's POC
+/// and its short/long-term marking (H.265 reference lists match on POC; the
+/// long-term flag changes MV scaling, so it must mirror the slice's RPS).
+fn std_h265_ref_info(poc: i32, long_term: bool) -> vk::native::StdVideoDecodeH265ReferenceInfo {
     // SAFETY: bitfield POD, valid all-zero (short-term, used for reference).
     let mut flags: vk::native::StdVideoDecodeH265ReferenceInfoFlags =
         unsafe { core::mem::zeroed() };
-    flags.set_used_for_long_term_reference(0);
+    flags.set_used_for_long_term_reference(long_term as u32);
     flags.set_unused_for_reference(0);
     vk::native::StdVideoDecodeH265ReferenceInfo {
         flags,
@@ -12364,20 +12701,6 @@ impl core::fmt::Debug for DpbDecoderKind {
 }
 
 impl DpbDecoderKind {
-    /// Pipelined system-path decode of one access unit WITHOUT draining the ring,
-    /// returning `(submitted, retired)` (see [`H264DpbDecoder::decode_push`]).
-    /// The element uses this so the decode queue stays saturated across AUs.
-    fn decode_push(
-        &mut self,
-        au: &[u8],
-    ) -> Result<(usize, alloc::vec::Vec<Nv12Frame>), VulkanVideoError> {
-        match self {
-            DpbDecoderKind::H264(d) => d.decode_push(au),
-            DpbDecoderKind::H265(d) => d.decode_push(au),
-            DpbDecoderKind::Av1(d) => d.decode_push(au),
-        }
-    }
-
     /// Streaming decode returning per-submitted-picture [`PictureMeta`] so the
     /// element can reorder the retired frames into display order (see
     /// [`H264DpbDecoder::decode_push_meta`]). Only H.264 / H.265 carry a POC the
@@ -12427,15 +12750,49 @@ impl DpbDecoderKind {
         }
     }
 
-    /// Decode an access unit to GPU-resident RGBA `wgpu::Texture`s (zero-copy).
-    fn decode_all_to_textures(
+    /// Per-AU DISPLAY-order texture decode for AV1 (the op-walk with the DPB
+    /// persisting across calls); H.264 / H.265 stream through
+    /// [`decode_push_to_textures`](Self::decode_push_to_textures) instead.
+    fn decode_display_to_textures(
         &mut self,
         au: &[u8],
     ) -> Result<alloc::vec::Vec<wgpu::Texture>, VulkanVideoError> {
         match self {
-            DpbDecoderKind::H264(d) => d.decode_all_to_textures(au),
-            DpbDecoderKind::H265(d) => d.decode_all_to_textures(au),
-            DpbDecoderKind::Av1(d) => d.decode_all_to_textures(au),
+            DpbDecoderKind::Av1(d) => d.decode_display_to_textures(au),
+            DpbDecoderKind::H264(_) | DpbDecoderKind::H265(_) => {
+                Err(VulkanVideoError::UnsupportedStream)
+            }
+        }
+    }
+
+    /// Per-AU DISPLAY-order system decode for AV1 (the op-walk `decode_all`
+    /// applied to one temporal unit; the DPB persists across calls, so
+    /// `show_existing_frame` resolves frames decoded in earlier AUs). H.264 /
+    /// H.265 stream through `decode_push_meta` + the element's reorder instead.
+    fn decode_display(
+        &mut self,
+        au: &[u8],
+    ) -> Result<alloc::vec::Vec<Nv12Frame>, VulkanVideoError> {
+        match self {
+            DpbDecoderKind::Av1(d) => d.decode_display(au),
+            DpbDecoderKind::H264(_) | DpbDecoderKind::H265(_) => {
+                Err(VulkanVideoError::UnsupportedStream)
+            }
+        }
+    }
+
+    /// Streaming per-AU decode to textures with per-picture metas (coding
+    /// order, DPB/POC state intact across calls); the element reorders by the
+    /// metas' (coded-video-sequence, POC). H.264 / H.265 only.
+    fn decode_push_to_textures(
+        &mut self,
+        au: &[u8],
+    ) -> Result<(alloc::vec::Vec<PictureMeta>, alloc::vec::Vec<wgpu::Texture>), VulkanVideoError>
+    {
+        match self {
+            DpbDecoderKind::H264(d) => d.decode_push_to_textures(au),
+            DpbDecoderKind::H265(d) => d.decode_push_to_textures(au),
+            DpbDecoderKind::Av1(_) => Err(VulkanVideoError::UnsupportedStream),
         }
     }
 }
@@ -12602,6 +12959,11 @@ pub struct VulkanVideoDec {
     /// decoded frames until their display position is settled; emptied on `Eos`,
     /// a reconfig boundary, and `Flush`. Unused on the AV1 / GPU-texture paths.
     reorder: ReorderBuffer<(FrameTiming, Nv12Frame)>,
+    /// The GPU-texture path's display-order buffer (H.264 / H.265): the same
+    /// (coded-video-sequence, POC) reorder over `wgpu::Texture` payloads, fed
+    /// synchronously by `decode_push_to_textures` (metas pair 1:1, no FIFO).
+    /// AV1's texture path needs none: its display order is the op order.
+    reorder_tex: ReorderBuffer<(FrameTiming, wgpu::Texture)>,
 }
 
 impl core::fmt::Debug for VulkanVideoDec {
@@ -12639,6 +13001,7 @@ impl VulkanVideoDec {
             reorder_enabled: false,
             pending_meta: alloc::collections::VecDeque::new(),
             reorder: ReorderBuffer::new(),
+            reorder_tex: ReorderBuffer::new(),
         }
     }
 
@@ -12788,6 +13151,7 @@ impl VulkanVideoDec {
         // Size the reorder window to this decoder's DPB (a safe upper bound on the
         // reorder depth), so a long GOP releases frames without buffering unbounded.
         self.reorder.max_hold = decoder.dpb_slots();
+        self.reorder_tex.max_hold = decoder.dpb_slots();
         self.decoder = Some(decoder);
         self.session = Some(session);
         self.coded_geometry = Some(geometry);
@@ -12905,6 +13269,39 @@ impl VulkanVideoDec {
             self.emit_one_nv12(t, rf, out).await?;
         }
         self.reorder.reset();
+        Ok(())
+    }
+
+    /// Push GPU-texture frames downstream, each with its own AU's timing and a
+    /// `CapsChanged` whenever the geometry changes (so a reconfig boundary's
+    /// old-geometry stragglers emit against their own caps).
+    async fn emit_textures(
+        &mut self,
+        textures: alloc::vec::Vec<(FrameTiming, wgpu::Texture)>,
+        out: &mut dyn OutputSink,
+    ) -> Result<(), G2gError> {
+        for (timing, tex) in textures {
+            let (w, h) = (tex.width(), tex.height());
+            let caps = Caps::RawVideo {
+                format: RawVideoFormat::Rgba8,
+                width: Dim::Fixed(w),
+                height: Dim::Fixed(h),
+                framerate: self.framerate.clone(),
+            };
+            if self.last_caps.as_ref() != Some(&caps) {
+                out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
+                self.last_caps = Some(caps);
+            }
+            let keep = alloc::sync::Arc::new(crate::gpu::WgpuTextureKeepAlive(tex));
+            let out_frame = Frame {
+                domain: MemoryDomain::WgpuTexture(OwnedWgpuTexture::new(w, h, keep)),
+                timing: self.out_timing(&timing),
+                sequence: self.emitted,
+                meta: Default::default(),
+            };
+            self.emitted += 1;
+            out.push(PipelinePacket::DataFrame(out_frame)).await?;
+        }
         Ok(())
     }
 }
@@ -13095,35 +13492,46 @@ impl AsyncElement for VulkanVideoDec {
                         // Zero-copy: each decoded picture is an RGBA wgpu::Texture
                         // on the decode device, wrapped so a WgpuSink (sharing the
                         // device via `gpu_context`) presents it with no copy.
-                        let textures = self
-                            .decoder
-                            .as_mut()
-                            .expect("decoder built")
-                            .decode_all_to_textures(&au)
-                            .map_err(|_| G2gError::CapsMismatch)?;
-                        for tex in textures {
-                            let (w, h) = (tex.width(), tex.height());
-                            let caps = Caps::RawVideo {
-                                format: RawVideoFormat::Rgba8,
-                                width: Dim::Fixed(w),
-                                height: Dim::Fixed(h),
-                                framerate: self.framerate.clone(),
+                        if matches!(self.codec, VideoCodec::Av1) {
+                            // AV1 display order is the bitstream's op order
+                            // (`show_existing_frame` re-displays a stored slot),
+                            // so a per-AU op-walk with the DPB persisting across
+                            // calls emits display order directly. A frameless AU
+                            // (e.g. a bare temporal delimiter) emits nothing.
+                            let textures = match self
+                                .decoder
+                                .as_mut()
+                                .expect("decoder built")
+                                .decode_display_to_textures(&au)
+                            {
+                                Ok(t) => t,
+                                Err(VulkanVideoError::NoDecodableSlice) => alloc::vec::Vec::new(),
+                                Err(_) => return Err(G2gError::CapsMismatch),
                             };
-                            if self.last_caps.as_ref() != Some(&caps) {
-                                out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
-                                self.last_caps = Some(caps);
+                            let paired = textures.into_iter().map(|t| (src_timing, t)).collect();
+                            self.emit_textures(paired, out).await?;
+                        } else {
+                            // H.264 / H.265: stream each AU through the DPB (state
+                            // intact across calls) and reorder the coding-order
+                            // textures into display order by (cvs, POC), the
+                            // texture analog of the system path (a keyframe also
+                            // releases the previous sequence, so a reconfig's
+                            // old-geometry stragglers emit first).
+                            let (metas, textures) = self
+                                .decoder
+                                .as_mut()
+                                .expect("decoder built")
+                                .decode_push_to_textures(&au)
+                                .map_err(|_| G2gError::CapsMismatch)?;
+                            let mut ready = alloc::vec::Vec::new();
+                            for (meta, tex) in metas.into_iter().zip(textures) {
+                                ready.extend(self.reorder_tex.push(
+                                    meta.is_keyframe,
+                                    meta.poc,
+                                    (src_timing, tex),
+                                ));
                             }
-                            let keep = alloc::sync::Arc::new(crate::gpu::WgpuTextureKeepAlive(tex));
-                            let out_frame = Frame {
-                                domain: MemoryDomain::WgpuTexture(OwnedWgpuTexture::new(
-                                    w, h, keep,
-                                )),
-                                timing: self.out_timing(&src_timing),
-                                sequence: self.emitted,
-                                meta: Default::default(),
-                            };
-                            self.emitted += 1;
-                            out.push(PipelinePacket::DataFrame(out_frame)).await?;
+                            self.emit_textures(ready, out).await?;
                         }
                         return Ok(());
                     }
@@ -13146,13 +13554,23 @@ impl AsyncElement for VulkanVideoDec {
                         }
                         self.emit_reordered(decoded, out).await?;
                     } else {
-                        let (submitted, decoded) = self
+                        // AV1: decode the AU with the display-order op-walk
+                        // (`show_existing_frame` re-displays, an alt-ref decodes
+                        // without displaying, film grain synthesizes per shown
+                        // frame), the DPB persisting across calls. Every frame
+                        // this AU emits is displayed at this AU's time. Trades
+                        // the cross-AU ring pipelining for display correctness.
+                        let decoded = match self
                             .decoder
                             .as_mut()
                             .expect("decoder built")
-                            .decode_push(&au)
-                            .map_err(|_| G2gError::CapsMismatch)?;
-                        for _ in 0..submitted {
+                            .decode_display(&au)
+                        {
+                            Ok(f) => f,
+                            Err(VulkanVideoError::NoDecodableSlice) => alloc::vec::Vec::new(),
+                            Err(_) => return Err(G2gError::CapsMismatch),
+                        };
+                        for _ in 0..decoded.len() {
                             self.pending_timings.push_back(src_timing);
                         }
                         self.emit_nv12_frames(decoded, out).await?;
@@ -13166,10 +13584,18 @@ impl AsyncElement for VulkanVideoDec {
                     _ => Err(G2gError::CapsMismatch),
                 },
                 PipelinePacket::Eos => {
+                    // The GPU-texture path is synchronous per AU; only its
+                    // display-order buffer can still hold textures.
+                    if self.emit_wgpu {
+                        let held = self.reorder_tex.flush();
+                        self.reorder_tex.reset();
+                        self.emit_textures(held, out).await?;
+                        out.push(PipelinePacket::Eos).await?;
+                        return Ok(());
+                    }
                     // Emit the pipelined tail (frames held back by `decode_push`)
-                    // before forwarding end-of-stream. The GPU-texture path is
-                    // synchronous (nothing in flight), so this only matters for the
-                    // system path; `decode_flush` on an idle ring returns nothing.
+                    // before forwarding end-of-stream; `decode_flush` on an idle
+                    // ring (the per-AU AV1 display path) returns nothing.
                     let tail = match self.decoder.as_mut() {
                         Some(dec) => dec.decode_flush().map_err(|_| G2gError::CapsMismatch)?,
                         None => alloc::vec::Vec::new(),
@@ -13195,6 +13621,7 @@ impl AsyncElement for VulkanVideoDec {
                     self.pending_timings.clear();
                     self.pending_meta.clear();
                     self.reorder.reset();
+                    self.reorder_tex.reset();
                     self.last_caps = None;
                     out.push(PipelinePacket::Flush).await?;
                     Ok(())
@@ -13438,7 +13865,7 @@ mod tests {
         w.align_to_byte();
         let bytes = w.into_bytes();
         let mut br = BitReader::new(&bytes);
-        let rps = parse_h265_short_term_rps(&mut br, 0, &[]).expect("explicit RPS parses");
+        let (rps, _) = parse_h265_short_term_rps(&mut br, 0, 1, &[]).expect("explicit RPS parses");
         assert_eq!(rps.num_negative_pics, 2);
         assert_eq!(rps.num_positive_pics, 0);
         assert_eq!(rps.delta_poc_s0[0], -1);
@@ -13488,7 +13915,7 @@ mod tests {
         w.align_to_byte();
         let bytes = w.into_bytes();
         let mut br = BitReader::new(&bytes);
-        let rps = parse_h265_short_term_rps(&mut br, 1, core::slice::from_ref(&reference))
+        let (rps, _) = parse_h265_short_term_rps(&mut br, 1, 2, core::slice::from_ref(&reference))
             .expect("inter-predicted RPS derives");
         assert_eq!(
             rps.num_negative_pics, 0,

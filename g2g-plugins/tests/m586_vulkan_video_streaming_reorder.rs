@@ -3,8 +3,8 @@
 //!
 //! Hardware decode retires pictures in coding order; a stream with B-frames has a
 //! different display (POC) order. The whole-stream `decode_all` path already
-//! reorders (M569), and the element's GPU-texture path is fed whole-stream and
-//! rides that. But the element's system (NV12) path is the true streaming shape:
+//! reorders (M569), and the element's GPU-texture path streams too since M744.
+//! The element's system (NV12) path is the true streaming shape:
 //! one access unit per `process` call, decoded through the pipelined `decode_push`
 //! ring, which stays in coding order. This drives that path with a real B-frame
 //! clip fed one AU at a time and asserts the element emits frames in DISPLAY

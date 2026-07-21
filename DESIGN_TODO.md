@@ -12,10 +12,9 @@ re-cascade), and the full lifecycle spine (state machine + preroll, seek +
 SEGMENT, auto-plug / decodebin / playbin) are done. What remains, highest
 leverage first:
 
-1. **Platforms** (largest track). macOS: AVFoundation capture, Core Audio,
-   Metal present. Android: encode, Camera2, AAudio, Surface present.
-2. **Egress / transports.** SRT congestion control + real-peer interop, AES-256
-   + key rotation; FlexFEC + multi-level burst FEC.
+1. **Platforms.** macOS: camera / screen capture validation on a permitted
+   Mac.
+2. **Egress / transports.** FlexFEC + multi-level burst FEC.
 3. **Depth.** Codec decode to cut reliance on the ffmpeg FFI: AV1 landed both as
    libdav1d (`Dav1dDec`, `dav1d` feature, C FFI) and pure Rust (`Rav1dDec`,
    `rav1d` feature, via `re_rav1d`). VP8 / VP9 decode is covered by `FfmpegVideoDec`
@@ -293,35 +292,6 @@ Phased plan:
 - `AvfVideoSrc` / `ScreenCaptureSrc`: real capture validation on a Mac with a
   camera / screen-recording permission (the CI runner grants neither, so only
   the probe paths are validated).
-- `MetalVideoSink`: an on-screen example (app-owned `NSWindow` + `with_layer`);
-  the element and its headless present path are done.
-
-## Platform: Android
-
-- `MediaCodecDec` zero-copy to GPU (M304): DONE, decode -> preprocess on GPU.
-  `with_gpu_output()` emits decoded frames as `MemoryDomain::WgpuTexture` (RGBA)
-  via the `YcbcrToRgba` converter (opaque AHB import -> immutable
-  `VkSamplerYcbcrConversion` compute pass -> RGBA `wgpu::Texture`), and
-  `WgpuPreprocess` consumes that texture straight into its tensor (g2g-ml
-  `mediacodec-wgpu` feature). The converter pipelines via a `RING_DEPTH`-slot
-  in-flight ring (no per-frame fence block), and both elements negotiate the
-  RGBA-GPU path (decoder derives Rgba8 in gpu mode, WgpuPreprocess accepts it) so
-  a runner can auto-plug it. Validated on the Pixel 10a end to end (9 frames ->
-  NCHW tensor, no CPU frame copy). Pillar complete.
-- Android `Surface` present sink (M305): DONE, validated on a Pixel. Decoded RGBA
-  `WgpuTexture` (M304) presented through a `wgpu::Surface` over an `ANativeWindow`
-  by the existing `WgpuSink` on the shared interop device (copy-free).
-  `mediacodec_wgpu::create_android_surface` + `InteropDevice::gpu_context()` +
-  `MediaCodecDec::with_gpu_device`. Remaining: a real on-screen `SurfaceView` /
-  `NativeActivity` (production target; the `ImageReader`-backed surface is the
-  validated headless equivalent).
-- Encode (M306): `MediaCodecEnc` (NV12 -> Annex-B H.264/H.265). DONE, validated on
-  a Pixel. Registered `mediacodecenc` / `mediacodecench265`.
-- AAudio (M307): `AAudioSink` render + `AAudioSrc` capture. DONE, validated on a
-  Pixel (render + mic capture). Registered `aaudiosink` / `aaudiosrc`.
-- Camera2 capture (M308): `Camera2Src` (YUV_420_888 -> NV12 via NDK Camera2 over
-  ndk-sys). DONE, validated on a Pixel (real rear-camera NV12). Registered
-  `camera2src`.
 
 ## Receive / decode
 
@@ -451,17 +421,14 @@ Phased plan:
      `NoRaslOutputFlag == 1` and its RASL leading pictures (which reference absent
      pre-CRA frames) are discarded (`h265_is_rasl` + a `skip_rasl` flag set per
      IRAP); the CRA's trailing pictures and following GOPs decode bit-exact vs a
-     full decode. What remains for H.265: long-term references. Streaming B-frame reorder in the
+     full decode. Streaming B-frame reorder in the
      `VulkanVideoDec` element is done (M586, validated on the 3060): its system
      (NV12) path feeds retired `decode_push` frames through a `ReorderBuffer` keyed
      by (coded-video-sequence, POC), so an AU-by-AU stream with B-frames emits in
      display order (byte-exact vs the `decode_all` oracle for H.264 / H.265). The
      low-level `decode_push` / the re_video adapter stay in coding order by design
      (re_video reorders by PTS itself). Still open: a VUI-derived tighter
-     reorder-depth bound (the element uses the DPB size, a safe over-approximation),
-     and AV1 / GPU-texture streaming reorder (AV1's display order is
-     `show_existing_frame` / `order_hint`, not a POC sort; the element's
-     GPU-texture path is fed whole-stream and rides `decode_all_to_textures`).
+     reorder-depth bound (the element uses the DPB size, a safe over-approximation).
   5. AV1: DONE (M504) the OBU framing + sequence-header parse + `StdVideoAV1SequenceHeader`
      mapping + a top-level frame-header classifier (`parse_av1_sequence_header`,
      `to_std_av1_seq_header`, `av1_frame_infos`), the parse half, with GPU-free unit
@@ -801,13 +768,6 @@ _(No open parser items.)_
 - `push` vs `pull` propagation across transforms (today push-only, explicit).
 - A turnkey windowed runner for `WgpuSink` (a winit/SCTK example that opens a
   window and drives the overlay -> sink graph; validate on a real display).
-- An embedder example for the bring-your-own-device path (M263): a real engine
-  (Bevy / a raw `wgpu` app) that builds a `GpuContext::from_wgpu` over its own
-  device, runs `decode -> (preprocess) -> appsink`, and samples the yielded
-  `WgpuTexture` onto an in-app 3D surface. The mechanism is validated (M263 unit
-  test); a worked example is the adoption artifact for the game-engine wedge.
-  Bevy 0.19 pins the same wgpu 29 as g2g, so the device handoff type-checks
-  (clone Bevy's `RenderDevice`/`Queue`/`Adapter`/`Instance` into `from_wgpu`).
 - The native gst-`nvcodec`-style pair is done: `NvEnc` (zero-copy CUDA NV12 ->
   H.264, M269) and `NvDec` (H.264 -> CUDA NV12 via NVCUVID, M270). Remaining
   extensions on both:
@@ -1045,6 +1005,26 @@ g2g-python hosting boundary (zero-copy frame-buffer retention now caught by an
 export counter; PyTransform worker re-spawn guarded). The audit areas are now
 covered; the flagged hardening follow-ups are now fixed (segment-fetch body cap,
 free-threaded analytics sink, descriptive `Pipeline::wait` errors).
+
+## Audio decode-to-PCM from the launch CLI
+
+A `g2g-launch` built with `ffmpeg,opus` cannot negotiate a decode-to-raw-PCM
+pipeline from the CLI, so there is no way to dump comparable PCM for QA (blocks
+calliope's audio decode differential / golden / determinism):
+- `filesrc ! decodebin ! audioconvert ! audio/x-raw,format=S16LE,rate=48000,channels=1 ! filesink`
+  fails: `OpusDec -> AudioConvert: unconstrained`, `AudioConvert -> CapsFilter:
+  unconstrained` (OpusDec's output caps don't fixate a rate / format the
+  downstream can pin against).
+- aac `filesrc ! decodebin ! filesink` is a `CapsMismatch` (no chain to a byte
+  sink; filesink rejects `audio/x-raw`).
+- no raw-audio file sink is registered: `wavsink` is unknown to launch even
+  though `wavsink.rs` compiles under `std` (not in the element registry).
+
+Fix: make the audio decoders fixate concrete output caps (rate / channels /
+format) so `audioconvert` can negotiate, and register a PCM / WAV file sink (or
+let `filesink` accept `audio/x-raw`). The calliope side then adds audio adapters
++ whole-stream PCM hashing + an `[audio]` spec; note only Opus is bit-exact
+across decoders, so AAC wants golden / determinism, not a cross-engine differential.
 
 ## Documentation
 
