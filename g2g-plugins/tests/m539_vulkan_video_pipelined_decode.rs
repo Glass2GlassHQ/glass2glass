@@ -2,14 +2,14 @@
 //! ([`VulkanStreamDecoder::submit_chunk_push`] + [`flush`](VulkanStreamDecoder::flush),
 //! backed by the per-codec `decode_push` / `decode_flush` ring split).
 //!
-//! This is the low-latency streaming shape a Rerun `re_video::decode::AsyncDecoder`
-//! backend feeds: one coded sample per `submit_chunk_push` WITHOUT draining the
+//! This is the low-latency streaming shape a wgpu viewer's async chunk decoder
+//! feeds: one coded sample per `submit_chunk_push` WITHOUT draining the
 //! decode ring, so output pipelines (lags submission by up to `DECODE_RING_DEPTH-1`
 //! pictures) and the tail is emitted by `flush` at end of stream. This guards that
 //! the pipelined path decodes bit-exactly against the whole-clip
 //! [`submit_chunk`](VulkanStreamDecoder::submit_chunk) golden, both solo and under
 //! realistic IN-PROCESS concurrency (several decoders on the one GPU, the
-//! multi-stream Rerun case).
+//! multi-stream viewer case).
 //!
 //! Not guarded here: concurrent decode while Vulkan DEVICES are being created /
 //! torn down. On this NVIDIA driver, opening / destroying a decode device
@@ -18,8 +18,8 @@
 //! wrong bottom rows; the decode reports success and the status query cannot
 //! detect it). That is a driver-level race g2g cannot fix in software, it does NOT
 //! occur with persistent decoders (the pattern below stays bit-exact across many
-//! concurrent threads), and no Rerun deployment hits it: `re_video` builds one
-//! decoder per stream and reuses it, it does not churn devices during playback.
+//! concurrent threads), and a real viewer does not hit it: the norm is one
+//! decoder per stream, reused, with no device churn during playback.
 //! Steady-state concurrent decode with persistent decoders is bit-exact. See the
 //! M539 block in the vulkan-video track note for the full characterisation.
 //!
@@ -163,14 +163,14 @@ fn pipelined_decode_bit_exact_solo() {
     }
 }
 
-/// In-process concurrency (the realistic Rerun multi-stream case): several
-/// PERSISTENT decoders (one per thread, reused across runs, as `re_video` reuses a
+/// In-process concurrency (the realistic multi-stream viewer case): several
+/// PERSISTENT decoders (one per thread, reused across runs, as a viewer reuses a
 /// decoder per stream) running the pipelined path at once on the one GPU stay
 /// bit-exact.
 ///
 /// The decoders are opened SERIALLY on the main thread, then moved into workers
-/// that only DECODE concurrently (Rerun does not open decoders in a concurrent
-/// burst either, so this is the realistic shape).
+/// that only DECODE concurrently (a viewer does not open decoders in a
+/// concurrent burst either, so this is the realistic shape).
 ///
 /// `#[ignore]` by default: run it on demand
 /// (`cargo test -p g2g-plugins --release --features vulkan-video -- --ignored

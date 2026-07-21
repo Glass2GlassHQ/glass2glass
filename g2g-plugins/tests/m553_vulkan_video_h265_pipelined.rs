@@ -5,8 +5,8 @@
 //! by the shared `DpbCore` decode ring) is codec-independent, but the per-codec
 //! `decode_push` / `decode_flush` dispatch and the decode-order/timing pairing
 //! were only validated for H.264. This guards that feeding H.265 one coded
-//! picture at a time WITHOUT draining the ring (the low-latency Rerun
-//! `AsyncDecoder` shape) decodes bit-exactly against the whole-clip
+//! picture at a time WITHOUT draining the ring (the low-latency async-decoder
+//! shape a viewer feeds) decodes bit-exactly against the whole-clip
 //! [`submit_chunk`](VulkanStreamDecoder::submit_chunk) golden. H.265 decode on
 //! this driver is byte-exact (unlike AV1, see m508), so the assertion is strict.
 //!

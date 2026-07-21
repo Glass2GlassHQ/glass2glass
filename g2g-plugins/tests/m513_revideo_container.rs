@@ -1,6 +1,6 @@
-//! M513: real-container ingestion on the re_video adapter.
+//! M513: real-container ingestion on the streaming adapter.
 //!
-//! Rerun demuxes MP4/CMAF, so its `re_video` decoder receives the container's
+//! A viewer demuxes MP4/CMAF, so its decoder receives the container's
 //! stored form: parameter sets out of band in the sample-entry box (`avcC`) and
 //! samples length-prefixed (AVCC), NOT the raw Annex-B elementary stream the
 //! earlier tests fed. This drives [`VulkanStreamDecoder::from_config`] exactly

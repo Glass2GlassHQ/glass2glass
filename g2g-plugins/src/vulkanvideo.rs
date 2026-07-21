@@ -9816,7 +9816,7 @@ impl H264DpbDecoder {
     ///
     /// This is the low-latency streaming form: output lags submission by up to
     /// `DECODE_RING_DEPTH - 1` pictures (the ring keeps that many decodes in
-    /// flight), which is the shape a chunk-at-a-time consumer (re_video's
+    /// flight), which is the shape a chunk-at-a-time consumer (a viewer's
     /// `AsyncDecoder`) wants, one sample in per call, frames out as they retire.
     /// Call [`decode_flush`](Self::decode_flush) at end of stream to emit the
     /// pipelined tail. For a one-shot whole-stream decode use
@@ -11859,9 +11859,9 @@ fn av1_ref_info(st: &Av1SlotState) -> vk::native::StdVideoDecodeAV1ReferenceInfo
 /// RGBA `wgpu::Texture`, decoding forward from the enclosing random-access point on
 /// a seek and caching decoded frames. This is the timeline-scrubber model, a viewer
 /// asking `frame_at(t)` as the user drags, as opposed to the streaming push model
-/// of [`VulkanVideoDec`]: the wedge for a wgpu visualization viewer (e.g. Rerun)
-/// that needs hardware decode straight into its render device with no CPU round
-/// trip (whose native decode today is CPU software + an upload copy).
+/// of [`VulkanVideoDec`]: the wedge for a wgpu visualization viewer that needs
+/// hardware decode straight into its render device with no CPU round trip
+/// (instead of CPU software decode + an upload copy).
 ///
 /// Owns its decode device, session and decoder. H.264 and H.265 (sniffed from the
 /// stream), GPU-texture mode (needs a distinct compute queue); the same profile

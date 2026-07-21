@@ -1,30 +1,29 @@
-//! Fork-ready adapter: presents g2g's Vulkan Video hardware decoders in the
-//! chunk-at-a-time, CPU-frame shape that Rerun's `re_video::decode::AsyncDecoder`
+//! Streaming-decoder adapter: presents g2g's Vulkan Video hardware decoders in
+//! the chunk-at-a-time, CPU-frame shape a wgpu-based viewer's async video
 //! backend consumes (the wgpu-texture wedge, see the wedge-strategy note).
 //!
-//! g2g does NOT depend on `re_video` (its dependency graph is the whole Rerun
-//! workspace: `cros-codecs`, `dav1d`, ~8 sibling `re_*` crates). Instead this
-//! module mirrors re_video's native decode-output layout exactly:
+//! g2g depends on no viewer crates; this module exposes the conventional
+//! decode-output layout such consumers use:
 //!
 //! * `DecodedVideoFrame::data` is I420 planar (Y, then U, then V, packed with no
-//!   stride padding), the same layout re_video's dav1d/ffmpeg backends emit for
-//!   `PixelFormat::Yuv { layout: Y_U_V420, .. }`.
+//!   stride padding), the layout software decode backends (dav1d/ffmpeg)
+//!   conventionally emit for 4:2:0.
 //! * [`VideoPixelLayout`] / [`VideoColorRange`] / [`VideoMatrixCoefficients`]
-//!   are 1:1 with re_video's `YuvPixelLayout` / `YuvRange` / `YuvMatrixCoefficients`.
+//!   carry the colour metadata a renderer needs for its own YUV->RGB.
 //!
-//! So a small re_video fork wraps [`VulkanStreamDecoder`] in ONE
-//! `impl AsyncDecoder`: `submit_chunk` -> [`VulkanStreamDecoder::submit_chunk`],
-//! mapping each [`DecodedVideoFrame`] onto `re_video::decode::Frame` and sending
-//! it on the output channel; `reset` -> [`VulkanStreamDecoder::reset`]. Because
-//! the decode is real hardware Vulkan Video, this is the "Tier A" readback path
-//! (GPU decode -> CPU I420 -> re_renderer uploads + does YUV->RGB on the GPU).
+//! A consumer wraps [`VulkanStreamDecoder`] in one async-decoder impl:
+//! `submit_chunk` -> [`VulkanStreamDecoder::submit_chunk`], mapping each
+//! [`DecodedVideoFrame`] onto its own frame type; `reset` ->
+//! [`VulkanStreamDecoder::reset`]. Because the decode is real hardware Vulkan
+//! Video, this is the "Tier A" readback path (GPU decode -> CPU I420 -> the
+//! renderer uploads + does YUV->RGB on the GPU).
 //!
 //! ## Container ingestion (real MP4 / CMAF, not just elementary streams)
 //!
 //! [`VulkanStreamDecoder::new`] takes a raw Annex-B / OBU elementary stream with
-//! the parameter sets in-band. Real container content (what re_video demuxes from
+//! the parameter sets in-band. Real container content (what a viewer demuxes from
 //! an MP4) is different: the parameter sets live out of band in the sample-entry
-//! box (`avcC` / `hvcC` / `av1C`, carried by re_video's `VideoDataDescription`)
+//! box (`avcC` / `hvcC` / `av1C`)
 //! and the samples are length-prefixed (AVCC), not Annex-B.
 //! [`VulkanStreamDecoder::from_config`] handles that shape: it builds the session
 //! from a [`CodecConfig`] and records the NAL length size, so `submit_chunk` /
@@ -38,14 +37,14 @@
 //! [`Self::submit_chunk_texture`] returns the decoded frame as a GPU-resident RGBA
 //! [`wgpu::Texture`] (YUV->RGB already applied on the GPU by g2g's
 //! `VkSamplerYcbcrConversion` compute pass, M494), so the frame never leaves the
-//! decode device. A re_video fork wraps this in a GPU-texture `FrameContent`
-//! variant and hands the texture straight to `re_renderer`, skipping both the
-//! CPU readback and re_renderer's upload + YUV->RGB.
+//! decode device. A consumer hands the texture
+//! straight to its renderer, skipping both the CPU readback and the renderer's
+//! upload + YUV->RGB.
 //!
 //! The one integration constraint is device identity: the texture is bound to the
 //! decode device, which g2g creates itself (it must enable Vulkan video-decode
 //! queue families the render device would not). So zero-copy requires
-//! `re_renderer` to run on the decode device, not the reverse: a consumer takes
+//! the renderer to run on the decode device, not the reverse: a consumer takes
 //! [`Self::gpu_context`] (instance / adapter / device / queue) and builds its
 //! renderer on it. On a single-GPU host that is the display GPU too; on a split
 //! decode/display host (decode dGPU, present iGPU) a cross-device copy is
@@ -60,8 +59,8 @@ use crate::vulkanvideo::{
     VulkanVideoDevice, VulkanVideoError,
 };
 
-/// Which codec a [`VulkanStreamDecoder`] decodes. Mirrors the subset of
-/// `re_video::VideoCodec` g2g's Vulkan Video path supports.
+/// Which codec a [`VulkanStreamDecoder`] decodes (the codecs g2g's Vulkan Video
+/// path supports).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoCodec {
     H264,
@@ -70,7 +69,7 @@ pub enum VideoCodec {
 }
 
 /// Out-of-band codec configuration from a container sample-entry box, the shape
-/// re_video's `VideoDataDescription` provides for MP4 / CMAF: `avcC` for H.264,
+/// an MP4 / CMAF demuxer provides: `avcC` for H.264,
 /// `hvcC` for H.265, `av1C` for AV1. Build with [`VulkanStreamDecoder::from_config`]
 /// when the samples are the container's stored form (length-prefixed NALs with the
 /// parameter sets carried out of band) rather than a raw Annex-B / OBU elementary
@@ -87,8 +86,8 @@ pub enum CodecConfig<'a> {
 }
 
 /// Chroma layout of [`DecodedVideoFrame::data`]. The Vulkan decoders emit 4:2:0,
-/// so only [`Self::Y_U_V420`] is produced today; the enum matches re_video's
-/// `YuvPixelLayout` so a fork maps it with no lookup.
+/// so only [`Self::Y_U_V420`] is produced today; the other variants name the
+/// layouts a consumer's renderer conventionally distinguishes.
 #[expect(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoPixelLayout {
@@ -98,14 +97,14 @@ pub enum VideoPixelLayout {
     Y400,
 }
 
-/// YUV value range. 1:1 with re_video's `YuvRange`.
+/// YUV value range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoColorRange {
     Limited,
     Full,
 }
 
-/// YUV->RGB matrix coefficients. 1:1 with re_video's `YuvMatrixCoefficients`.
+/// YUV->RGB matrix coefficients.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoMatrixCoefficients {
     /// YUV is actually GBR.
@@ -114,7 +113,7 @@ pub enum VideoMatrixCoefficients {
     Bt709,
 }
 
-/// One decoded frame in re_video's native CPU layout: packed I420 planar YUV.
+/// One decoded frame in the conventional CPU layout: packed I420 planar YUV.
 #[derive(Debug, Clone)]
 pub struct DecodedVideoFrame {
     /// Packed planar YUV: Y (`width*height`), then U, then V (each
@@ -146,7 +145,7 @@ enum Inner {
     },
 }
 
-/// A chunk-fed hardware video decoder producing re_video-shaped CPU frames.
+/// A chunk-fed hardware video decoder producing viewer-shaped CPU frames.
 ///
 /// Feed one coded sample (access unit for H.26x, temporal unit for AV1) per
 /// [`Self::submit_chunk`]; DPB state carries across calls, so P/B frames decode
@@ -179,8 +178,8 @@ pub struct VulkanStreamDecoder {
 
 /// One decoded frame kept GPU-resident (Tier B): an RGBA [`wgpu::Texture`] on the
 /// decode device, YUV->RGB already applied by g2g's compute pass. This is the
-/// zero-copy analog of [`DecodedVideoFrame`]; a re_video fork maps it onto a
-/// GPU-texture `FrameContent` and hands it straight to `re_renderer`.
+/// zero-copy analog of [`DecodedVideoFrame`]; a consumer maps it onto its own
+/// GPU-texture frame type and hands it straight to the renderer.
 #[derive(Debug)]
 pub struct DecodedVideoTexture {
     /// RGBA8 texture on the decode device. Bind it with the same wgpu device the
@@ -233,7 +232,7 @@ impl VulkanStreamDecoder {
                     // H.264/H.265 VUI colorimetry is not parsed yet; default to
                     // BT.601 limited, which matches the decoder's NV12 output and
                     // is the safe SD default. A fork can override from container
-                    // metadata (`re_video::VideoDataDescription`).
+                    // metadata (the container's sample-entry description).
                     range: VideoColorRange::Limited,
                     coefficients: VideoMatrixCoefficients::Bt601,
                     gpu_mode: false,
@@ -371,7 +370,7 @@ impl VulkanStreamDecoder {
     }
 
     /// Build a decoder from an out-of-band container config ([`CodecConfig`], the
-    /// shape re_video's `VideoDataDescription` carries for MP4 / CMAF). The
+    /// shape an MP4 / CMAF demuxer carries). The
     /// parameter sets come from the config, not scavenged from the first sample, so
     /// this works on real container streams whose samples carry no in-band SPS/PPS.
     /// For H.26x it also records the NAL length-prefix size, so subsequent
@@ -422,7 +421,7 @@ impl VulkanStreamDecoder {
 
     /// Decode one coded sample and return every frame it produced (usually one)
     /// as packed I420. `is_sync` (keyframe) is accepted for API parity with
-    /// re_video's `Chunk`; the DPB decoders derive reference management from the
+    /// a demuxed sample; the DPB decoders derive reference management from the
     /// bitstream itself, so it is currently advisory.
     pub fn submit_chunk(
         &mut self,
@@ -446,7 +445,7 @@ impl VulkanStreamDecoder {
     /// into the decode ring WITHOUT draining, returning only the frames that have
     /// already retired. Output lags submission by up to `DECODE_RING_DEPTH - 1`
     /// frames; this is the low-latency streaming form a chunk-at-a-time consumer
-    /// (re_video's `AsyncDecoder`) wants, one sample in per call, frames out as
+    /// (an async chunk decoder) wants, one sample in per call, frames out as
     /// they retire, rather than a full drain per sample. Pair with [`Self::flush`],
     /// which must be called at end of stream to emit the pipelined tail.
     pub fn submit_chunk_push(
@@ -533,7 +532,7 @@ impl VulkanStreamDecoder {
 
     /// The decode device's wgpu context (instance / adapter / device / queue). A
     /// GPU-mode texture from [`Self::submit_chunk_texture`] is bound to this
-    /// device, so a zero-copy consumer (a `re_renderer`, a `WgpuSink`) must build
+    /// device, so a zero-copy consumer (a viewer renderer, a `WgpuSink`) must build
     /// on this context. See the Tier B note in the module docs: g2g owns the
     /// decode device, so the renderer runs on it, not the other way round.
     pub fn gpu_context(&self) -> crate::gpu::GpuContext {
@@ -581,7 +580,7 @@ impl VulkanStreamDecoder {
 }
 
 /// Deinterleave a decoder NV12 frame (Y plane + interleaved Cb/Cr) into packed
-/// I420 (Y, then U, then V), the layout re_video expects.
+/// I420 (Y, then U, then V), the conventional planar layout.
 fn nv12_to_i420(nv12: &Nv12Frame) -> Vec<u8> {
     let w = nv12.width as usize;
     let h = nv12.height as usize;
@@ -711,7 +710,7 @@ fn parse_av1c_config(av1c: &[u8]) -> Option<Vec<u8>> {
 
 /// Map an AV1 sequence header's color config to (range, coefficients). Matrix
 /// coefficients follow the AV1 / ISO 23091-2 codepoints; unspecified (2) is
-/// guessed as BT.709, matching what re_video (and mpv/VLC) do.
+/// guessed as BT.709, matching what players (mpv/VLC) do.
 fn av1_colorimetry(seq: &Av1SequenceHeader) -> (VideoColorRange, VideoMatrixCoefficients) {
     let range = if seq.color.color_range {
         VideoColorRange::Full

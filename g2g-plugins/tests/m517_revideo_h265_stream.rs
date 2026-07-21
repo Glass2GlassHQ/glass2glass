@@ -1,7 +1,7 @@
-//! M517: the re_video adapter ([`g2g_plugins::revideo::VulkanStreamDecoder`])
+//! M517: the streaming adapter ([`g2g_plugins::revideo::VulkanStreamDecoder`])
 //! streams H.265, not just AV1 (m508) and H.264 (m512 / m513).
 //!
-//! Drives the adapter the way a Rerun `AsyncDecoder` backend would: one coded
+//! Drives the adapter the way a viewer's async chunk decoder would: one coded
 //! picture per `submit_chunk`, DPB reference state carried across calls, output
 //! packed I420. H.265 decode on this driver is byte-exact (unlike AV1, see
 //! m508), so this asserts the streaming contract strictly: 10 real I420 frames,
@@ -84,7 +84,7 @@ fn revideo_adapter_streams_h265_i420_frames() {
     };
 
     let mut dec =
-        VulkanStreamDecoder::new(device, VideoCodec::H265, CLIP).expect("build re_video adapter");
+        VulkanStreamDecoder::new(device, VideoCodec::H265, CLIP).expect("build streaming adapter");
     assert_eq!(dec.width(), W as u32);
     assert_eq!(dec.height(), H as u32);
 

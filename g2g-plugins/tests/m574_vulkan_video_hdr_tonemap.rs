@@ -4,7 +4,7 @@
 //! The fixed-function `VkSamplerYcbcrConversion` applies the matrix + range but
 //! NOT the transfer function, so an HDR (PQ / HLG, BT.2020) stream came out of
 //! the M573 10-bit converter as its raw transfer-encoded R'G'B' (too dark / wrong
-//! colour on an SDR consumer, Rerun #7594). The `create_*_dpb_decoder_gpu_tonemap`
+//! colour on an SDR consumer). The `create_*_dpb_decoder_gpu_tonemap`
 //! constructors enable a transfer stage in the `rgba16f` compute pass: EOTF (PQ
 //! ST 2084 or HLG B67) -> BT.2390 EETF display mapping (maxRGB, 1000 -> 100 nits)
 //! -> BT.2020 -> BT.709 gamut -> BT.709 OETF, producing display-ready SDR.

@@ -1,12 +1,12 @@
-//! M552: Tier B (zero-copy) re_video adapter GPU-texture output for H.265 and
+//! M552: Tier B (zero-copy) streaming-adapter GPU-texture output for H.265 and
 //! AV1, closing the codec gap in m512 (which validated only H.264).
 //!
 //! Drives [`VulkanStreamDecoder::new_gpu`] / `submit_chunk_texture` the way a
-//! Rerun `re_video` GPU-texture backend would, for the other two codecs the
+//! wgpu viewer's GPU-texture backend would, for the other two codecs the
 //! adapter supports. Each decoded picture comes back as a GPU-resident RGBA
 //! `wgpu::Texture` (YUV->RGB applied by g2g's fixed BT.601 compute pass) with no
 //! CPU readback in the decode path. m535 exercised these `decode_all_to_textures`
-//! paths through the pipeline *element*; this exercises the Rerun-facing
+//! paths through the pipeline *element*; this exercises the consumer-facing
 //! `revideo` adapter API for H.265 + AV1, which had only ever run for H.264.
 //!
 //! H.265 is asserted strictly (this driver's HEVC decode is byte-exact): the GPU

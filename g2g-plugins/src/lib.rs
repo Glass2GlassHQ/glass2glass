@@ -88,10 +88,10 @@ pub mod analyticsoverlay;
     feature = "mediacodec-wgpu"
 ))]
 pub mod gpu;
-// Re-export wgpu so a downstream consumer (e.g. the Rerun `re_video` fork wiring
-// g2g's GPU-texture decode into re_renderer) can name `wgpu::Texture` / build on a
-// shared device with the EXACT wgpu version g2g's textures are bound to. A version
-// mismatch would make the handle types incompatible.
+// Re-export wgpu so a downstream consumer (a viewer wiring g2g's GPU-texture
+// decode into its renderer) can name `wgpu::Texture` / build on a shared device
+// with the EXACT wgpu version g2g's textures are bound to. A version mismatch
+// would make the handle types incompatible.
 #[cfg(any(
     feature = "vello-overlay",
     feature = "wgpu-sink",
@@ -829,9 +829,9 @@ pub mod vulkanvideo;
 ))]
 pub mod vulkanhdrsink;
 
-// Fork-ready adapter presenting the Vulkan Video decoders in Rerun's
-// `re_video::decode::AsyncDecoder` CPU-frame (I420) shape (the wgpu-texture
-// wedge). g2g does not depend on re_video; see the module docs.
+// Streaming-decoder adapter presenting the Vulkan Video decoders in the
+// chunk-at-a-time CPU-frame (I420) shape a wgpu viewer's async decoder consumes
+// (the wgpu-texture wedge); see the module docs.
 #[cfg(all(
     any(target_os = "linux", target_os = "windows"),
     feature = "vulkan-video"

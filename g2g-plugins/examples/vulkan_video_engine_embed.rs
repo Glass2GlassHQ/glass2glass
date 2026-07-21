@@ -1,5 +1,5 @@
 //! M500: consume Vulkan-Video-decoded frames in an application-owned wgpu render
-//! pipeline (the Rerun / Bevy integration surface), and dump the result as PPMs.
+//! pipeline (the game-engine / viewer integration surface), and dump the result as PPMs.
 //!
 //! Unlike `vulkan_video_smoke` (which reads the decoder's NV12 back on the CPU)
 //! and `vulkan_video_on_screen` (which lets g2g's own `WgpuSink` present the

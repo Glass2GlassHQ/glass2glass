@@ -428,8 +428,8 @@ Phased plan:
      (NV12) path feeds retired `decode_push` frames through a `ReorderBuffer` keyed
      by (coded-video-sequence, POC), so an AU-by-AU stream with B-frames emits in
      display order (byte-exact vs the `decode_all` oracle for H.264 / H.265). The
-     low-level `decode_push` / the re_video adapter stay in coding order by design
-     (re_video reorders by PTS itself). Still open: a VUI-derived tighter
+     low-level `decode_push` / the streaming adapter stay in coding order by design
+     (a viewer consumer reorders by PTS itself). Still open: a VUI-derived tighter
      reorder-depth bound (the element uses the DPB size, a safe over-approximation).
   5. AV1: DONE (M504) the OBU framing + sequence-header parse + `StdVideoAV1SequenceHeader`
      mapping + a top-level frame-header classifier (`parse_av1_sequence_header`,

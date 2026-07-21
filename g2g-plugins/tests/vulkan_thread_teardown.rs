@@ -1,6 +1,6 @@
 //! Diagnostic: is g2g's Vulkan Video decoder safe to create + decode + drop on a
-//! worker thread (not the main thread), the way re_video's `SyncDecoderWrapper`
-//! drives a decoder? The M509 Rerun PoC saw non-deterministic heap corruption
+//! worker thread (not the main thread), the way a viewer's pooled decode-thread
+//! wrapper drives a decoder? The M509 viewer PoC saw non-deterministic heap corruption
 //! (`free(): invalid size`) when wired through that pooled-thread wrapper, but was
 //! rock-solid inline on the main thread. This test isolates the cause: it opens,
 //! decodes, and drops the decoder entirely on a spawned thread that is then
@@ -177,7 +177,7 @@ fn decode_frames() -> Result<Vec<Vec<u8>>, VulkanVideoError> {
     // `dec` (device + session + decoder, all its Vulkan objects) drops here.
 }
 
-/// Isolate the AV1 off-main-thread decode nondeterminism (no re_video involved):
+/// Isolate the AV1 off-main-thread decode nondeterminism (no viewer code involved):
 /// decode the fixture on the main thread (reference) and on a spawned, joined
 /// worker thread, and compare frame-for-frame. Every fed `Std*` param and the GPU
 /// op sequence are byte-identical between the two (verified), so any pixel
@@ -253,7 +253,7 @@ fn decode_retrying() -> Option<usize> {
 /// The teardown regression: create + decode + drop the whole decoder (device,
 /// session, DPB, all Vulkan objects) on JOINED worker threads, many times. A
 /// double-free / heap corruption in cross-thread teardown aborts the process
-/// here (that was the M509 symptom when driven through re_video's *detached*
+/// here (that was the M509 symptom when driven through a viewer's *detached*
 /// `SyncDecoderWrapper` thread). Transient adapter unavailability is tolerated;
 /// the meaningful checks are "no process abort" and "10 correct frames per open".
 #[test]

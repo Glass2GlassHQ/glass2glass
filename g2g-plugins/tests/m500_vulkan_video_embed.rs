@@ -1,7 +1,7 @@
 //! M500: consume decoded frames in an *application-owned* wgpu render pipeline.
 //!
 //! The M498/M499 player hands out decoded frames as `wgpu::Texture`s, but so far
-//! only g2g's own `WgpuSink` has sampled them. The Rerun / Bevy integration
+//! only g2g's own `WgpuSink` has sampled them. The game-engine / viewer integration
 //! surface is the opposite: a viewer brings its *own* renderer and samples the
 //! decoded frame as a texture in its *own* render pass. This test stands in for
 //! that consumer -- a tiny "engine" with its own shader, bind group and pipeline,

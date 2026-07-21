@@ -4,9 +4,8 @@
 //! [`VulkanVideoPlayer`]: as you scrub the timeline the app calls
 //! `frame_at_index` and the player decodes forward from the enclosing keyframe
 //! on demand, straight into a GPU-resident RGBA `wgpu::Texture` that `WgpuSink`
-//! presents. This is the model a timeline viewer (e.g. Rerun) needs, and the
-//! thing Rerun's native pipeline lacks: hardware decode into the render device
-//! with no CPU round-trip.
+//! presents. This is the model a timeline viewer needs and typically lacks:
+//! hardware decode into the render device with no CPU round-trip.
 //!
 //! The title bar shows the current frame and the running **decode count** so the
 //! cache is visible: scrub forward and the count climbs; scrub back over frames
