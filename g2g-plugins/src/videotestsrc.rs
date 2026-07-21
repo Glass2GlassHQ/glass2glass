@@ -632,7 +632,10 @@ mod tests {
         const N: u32 = 64;
         let mut buf = vec![0u8; (N * N * 4) as usize];
         fill_pattern(Pattern::ZonePlate, &mut buf, N, 0);
-        let levels: std::collections::HashSet<u8> = buf.chunks_exact(4).map(|px| px[0]).collect();
+        // BTreeSet, not HashSet: the crate is no_std + alloc, and this test also
+        // compiles in the no-default-features config where `std` is not linked.
+        let levels: alloc::collections::BTreeSet<u8> =
+            buf.chunks_exact(4).map(|px| px[0]).collect();
         assert!(
             levels.len() > 16,
             "sinusoid should span many grey levels, got {}",
