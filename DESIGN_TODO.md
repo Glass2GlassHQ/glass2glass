@@ -1012,9 +1012,11 @@ calliope adds audio adapters, whole-stream PCM hashing, and an `[audio]` spec so
 decoded PCM is comparable. Opus is bit-exact across decoders (cross-engine
 differential); AAC is not, so it wants a golden / determinism check instead.
 
-AAC decode-to-PCM needs explicit demux stream selection (`tsdemux stream=aac`):
-`decodebin` does not yet auto-plug an audio-only MPEG-TS / MP4 (the demuxer
-advertises a video port by default, so the search plugs a video decoder).
+Audio-only MP4 through a bare `decodebin` still needs the `decodebin name=d
+d.audio_0` fan-out or `uridecodebin`: the single-stream `mp4demux` exposes only
+the video track, and the fan-out audio branch itself fails at runtime (the
+demux's per-port `CapsChanged` re-solve past `FfmpegAudioDec` mismatches when the
+decoded rate differs from the branch's fixated rate).
 
 ## Documentation
 

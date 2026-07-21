@@ -710,15 +710,42 @@ fn expand_decodebin(registry: &Registry, chains: Vec<Chain>) -> Result<Vec<Chain
                 Item::Element(spec) if is_decodebin(&spec.name) => {
                     let (pred, props) = upstream.as_ref().ok_or(ParseError::DecodebinNoUpstream)?;
                     let caps = resolve_upstream_caps(registry, pred, props)?;
+                    // M746: a single-stream demux fixes its output pad before parsing
+                    // any byte, so it defaults to a video port; on an audio-only
+                    // container the default auto-plug would pick a video decoder and
+                    // fail "no caps overlap". If a primary-stream hook sniffs the file
+                    // and names the real (audio) stream, plug that demux with its
+                    // stream selection and auto-plug the decoder from the elementary
+                    // caps instead. A hook declines a container with a video track (the
+                    // default video path is right) or one it does not parse.
+                    let location = props
+                        .iter()
+                        .find(|(k, _)| k == "location")
+                        .map(|(_, v)| v.as_str());
+                    let chain_input =
+                        match location.and_then(|loc| registry.primary_stream(loc, &caps)) {
+                            Some(primary) => {
+                                new_chain.push(Item::Element(ElementSpec {
+                                    name: primary.demux.to_string(),
+                                    props: primary.props.clone(),
+                                    instance: None,
+                                }));
+                                upstream = Some((primary.demux.to_string(), primary.props));
+                                primary.caps
+                            }
+                            None => caps,
+                        };
                     let target = |c: &Caps| is_raw_video(c) || is_raw_audio(c);
                     let mut names = registry
-                        .autoplug_names(&caps, &target, DECODEBIN_MAX_DEPTH)
-                        .ok_or_else(|| ParseError::NoDecodeChain(alloc::format!("{caps:?}")))?;
+                        .autoplug_names(&chain_input, &target, DECODEBIN_MAX_DEPTH)
+                        .ok_or_else(|| {
+                            ParseError::NoDecodeChain(alloc::format!("{chain_input:?}"))
+                        })?;
                     // M421/M676: prepend the re-framing parser ahead of a real
                     // decode of an elementary stream, like the boxed `decodebin`
                     // splice (the caps-identity parser is invisible to the
                     // shortest-chain search, so it never appears in `names`).
-                    if let Some(parser) = registry.parser_name(&caps) {
+                    if let Some(parser) = registry.parser_name(&chain_input) {
                         if !names.is_empty() {
                             names.insert(0, parser);
                         }

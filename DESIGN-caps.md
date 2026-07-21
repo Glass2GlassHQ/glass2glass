@@ -567,6 +567,21 @@ Source-side `typefind` is not needed: a g2g source declares its output caps via
 its source pad template / `caps_constraint`, so the caps feeding `decodebin` are
 known without sniffing the byte stream.
 
+A single-stream demuxer is the one place the *demux output* is content-ambiguous:
+it fixes its output pad before parsing any byte, so `TsDemux` defaults to a video
+port and a bare `filesrc location=X.ts ! decodebin` on an audio-only stream would
+auto-plug a video decoder and fail negotiation. `expand_decodebin` resolves this
+with a `PrimaryStreamHook` (`register_primary_stream`, a `Default`-friendly
+fn-pointer slot, cross-crate like the playbin hooks): for a file-backed container
+it sniffs a bounded prefix (`ts_primary_stream` reads the PMT via
+`forwardable_streams`) and, finding no video track, names the single-stream demux
+plus its stream-selection property (`tsdemux stream=aac`) and the audio elementary
+caps, so the search builds `filesrc ! tsdemux stream=aac ! <audio decoder> ! …`.
+The hook declines a container with a video track (the default video port is
+correct), leaving A/V behavior unchanged. MP4 is out of scope here: the
+single-stream `mp4demux` exposes only the video track, so audio-only MP4 routes
+through the `decodebin name=d d.audio_0` fan-out or `uridecodebin`.
+
 - **playbin / uridecodebin** (`std`). `Registry::build_playbin(source_name,
   sink, target, max_depth)` assembles a complete `source → chain → sink` graph
   from a *named* registered source. `build_uridecodebin(uri, sink, target,

@@ -464,7 +464,7 @@ fn ts_stream_from_str(s: &str) -> Option<TsStream> {
 }
 
 /// The `stream` property string for a [`TsStream`].
-fn ts_stream_to_str(stream: TsStream) -> &'static str {
+pub(crate) fn ts_stream_to_str(stream: TsStream) -> &'static str {
     match stream {
         TsStream::H264 => "h264",
         TsStream::H265 => "h265",
