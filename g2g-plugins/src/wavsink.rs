@@ -15,8 +15,9 @@ use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, G2gError,
-    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
+    G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
+    PropKind, PropValue, PropertySpec,
 };
 
 use crate::audio::WAVE_FORMAT_IEEE_FLOAT;
@@ -126,6 +127,36 @@ impl AsyncElement for WavSink {
         Ok(ConfigureOutcome::Accepted)
     }
 
+    fn properties(&self) -> &'static [PropertySpec] {
+        WAVSINK_PROPS
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "WAV file sink",
+            "Sink/File",
+            "Writes interleaved PCM to a RIFF/WAVE file",
+            "g2g",
+        )
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "location" => {
+                self.path = PathBuf::from(value.as_str().ok_or(PropError::Type)?);
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "location" => Some(PropValue::Str(self.path.to_string_lossy().into_owned())),
+            _ => None,
+        }
+    }
+
     fn process<'a>(
         &'a mut self,
         packet: PipelinePacket,
@@ -183,6 +214,13 @@ impl AsyncElement for WavSink {
         })
     }
 }
+
+/// `WavSink`'s settable properties: the output file path.
+static WAVSINK_PROPS: &[PropertySpec] = &[PropertySpec::new(
+    "location",
+    PropKind::Str,
+    "output file path",
+)];
 
 impl PadTemplates for WavSink {
     /// Terminal PCM sink pad. `Caps::Audio` has no open dims, so the

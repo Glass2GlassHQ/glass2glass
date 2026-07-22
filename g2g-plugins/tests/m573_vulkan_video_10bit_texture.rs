@@ -2,7 +2,7 @@
 //! hardware.
 //!
 //! M571 / M572 landed 10-bit HEVC Main 10 and AV1 decode on the *system* readback
-//! path; the GPU-texture path (the Rerun / Bevy zero-copy wedge) still rejected
+//! path; the GPU-texture path (the game-engine / viewer zero-copy wedge) still rejected
 //! 10-bit with `UnsupportedStream` because its `VkSamplerYcbcrConversion` +
 //! compute pass were hardcoded to 8-bit NV12 -> `Rgba8Unorm`. The converter now
 //! picks its formats from the decode bit depth: a `G10X6` (10-bit) frame samples

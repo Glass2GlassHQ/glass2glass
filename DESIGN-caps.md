@@ -158,9 +158,13 @@ full topology space: linear, fan-out (tee), fan-in (muxer), and diamonds.
 constructs the corresponding borrowing `Graph` and delegates to `run_graph`,
 so the four historical runner shapes share one negotiation + data plane. A
 node's mid-stream rejection policy is topology-derived: a node on a
-single-producer chain reverse-reconfigures and keeps flowing (posting the
-structured failure to the bus), while a node behind a tee cannot (a shared
-upstream can't honour a per-branch reconfigure). What a behind-a-tee rejection
+single-producer chain forwards a feasible re-solve and keeps flowing, but a
+genuinely infeasible one (the refined caps have no solution against the
+downstream chain) fails the run loud (posting the structured failure to the
+bus), since no runtime producer renegotiates its output caps and there is
+nothing to reverse-reconfigure into. A node behind a tee likewise cannot
+reverse-reconfigure (a shared upstream can't honour a per-branch reconfigure).
+What a behind-a-tee rejection
 then does is the tee's [`FanOutPolicy`](crate::graph::FanOutPolicy): `FailLoud`
 (the `add_tee` default) fails the whole run, and `AllowBranchDrop`
 (`add_tee_with_policy`) drops just that branch (its arm ends, the tee removes its
@@ -211,8 +215,10 @@ correctly downstream-aware:
 1. At startup, each interior arm receives its `downstream_feasible:
    Option<CapsSet>` from the backward sweep.
 2. Mid-stream, arm *i* on `CapsChanged(in)`:
-   - intersect `in` with the element's input constraint; empty → loud
-     `EmptyLink` and reverse `Reconfigure` upstream;
+   - intersect `in` with the element's input constraint; empty → fail the run
+     loud (`CapsMismatch`) with a structured `EmptyLink` on the bus (M749: no
+     runtime producer renegotiates its output, so the chain does not run on with
+     stale caps);
    - derive output candidates from `in` via the constraint;
    - intersect candidates with `downstream_feasible[i]`;
    - fixate; `configure_pipeline(in)`; element-local realloc; forward
@@ -566,6 +572,27 @@ solver. `g2g-core::runtime::autoplug` is two layers split by what they need:
 Source-side `typefind` is not needed: a g2g source declares its output caps via
 its source pad template / `caps_constraint`, so the caps feeding `decodebin` are
 known without sniffing the byte stream.
+
+A single-stream demuxer is the one place the *demux output* is content-ambiguous:
+it fixes its output pad before parsing any byte, so `TsDemux` defaults to a video
+port and a bare `filesrc location=X.ts ! decodebin` on an audio-only stream would
+auto-plug a video decoder and fail negotiation. `expand_decodebin` resolves this
+with a `PrimaryStreamHook` (`register_primary_stream`, a `Default`-friendly
+fn-pointer slot, cross-crate like the playbin hooks): for a file-backed container
+it sniffs a bounded prefix (`ts_primary_stream` reads the PMT via
+`forwardable_streams`) and, finding no video track, names the single-stream demux
+plus its stream-selection property (`tsdemux stream=aac`) and the audio elementary
+caps, so the search builds `filesrc ! tsdemux stream=aac ! <audio decoder> ! …`.
+The hook declines a container with a video track (the default video port is
+correct), leaving A/V behavior unchanged. A `mp4_primary_stream` sibling does the
+same for MP4, sniffing the `moov` and naming `qtdemux stream=aac` so an audio-only
+`.m4a` / `.mp4` plugs an audio decoder too. The TS selection also covers MPEG
+audio (`stream=mp2`, PMT types 0x03/0x04), Opus (`stream=opus`, a private
+0x06 PES marked by an 'Opus' registration descriptor, its control-header AUs
+unwrapped to raw packets by the demux), and AC-3 (`stream=ac3`, ATSC 0x81 or a
+DVB 0x06 with an AC-3 descriptor). An `mkv_primary_stream` sibling covers
+audio-only Matroska (AAC / Opus / AC-3 / FLAC; FLAC's `CodecPrivate` is
+forwarded in-band ahead of the first frame as decoder extradata).
 
 - **playbin / uridecodebin** (`std`). `Registry::build_playbin(source_name,
   sink, target, max_depth)` assembles a complete `source → chain → sink` graph

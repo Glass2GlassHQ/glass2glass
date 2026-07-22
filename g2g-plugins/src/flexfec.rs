@@ -11,7 +11,8 @@
 //!   so one repair can protect far more than ULPFEC's 16, and arbitrary
 //!   (strided / 2-D) protection patterns are expressible.
 //!
-//! [`FlexFecEncoder`] emits one repair per group; [`FlexFecDecoder`] buffers
+//! [`FlexFecEncoder`] emits one repair per group (and, in 2-D mode, column
+//! repairs per block, [`FlexFecEncoder::with_rows`]); [`FlexFecDecoder`] buffers
 //! media + repairs and recovers any group missing exactly one member, chaining
 //! recoveries so 2-D (row + column) protection reconstructs bursts. The recovery
 //! math (the XORed RTP fields) matches ULPFEC; only the header / mask differ.
@@ -273,13 +274,26 @@ pub fn recover_packet(fec: &[u8], present: &[(u16, &[u8])]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Emits one FlexFEC repair per group of `group` media packets (up to 109).
+/// Emits FlexFEC repairs over groups of `group` media packets (up to 109).
+///
+/// 1-D by default: one ROW repair per `group` consecutive packets, recovering a
+/// single loss per group. With [`with_rows`](Self::with_rows) it becomes 2-D
+/// (multi-level burst protection, RFC 8627's L x D pattern with L = `group`,
+/// D = `rows`): row repairs as before, plus one COLUMN repair per column of the
+/// L x D block (the packets at stride L), emitted when the block completes. A
+/// burst of up to L consecutive losses then recovers via the column repairs,
+/// and mixed patterns via the decoder's row/column chaining. Block FEC is
+/// block-aligned by nature: a partial block at end of stream has row repairs
+/// for its full rows but no column repairs.
 #[derive(Debug)]
 pub struct FlexFecEncoder {
     group: usize,
+    /// Column depth D of the 2-D block; `1` = 1-D (rows only, no columns).
+    rows: usize,
     fec_pt: u8,
     fec_ssrc: u32,
     fec_seq: u16,
+    /// The packets of the current L x D block, row-major, at most `group * rows`.
     pending: Vec<Vec<u8>>,
 }
 
@@ -287,6 +301,7 @@ impl FlexFecEncoder {
     pub fn new(group: usize, fec_pt: u8, fec_ssrc: u32) -> Self {
         Self {
             group: group.clamp(1, 109),
+            rows: 1,
             fec_pt: fec_pt & 0x7F,
             fec_ssrc,
             fec_seq: 0,
@@ -294,17 +309,56 @@ impl FlexFecEncoder {
         }
     }
 
-    /// Feed a media RTP packet; returns a repair packet when the group closes.
-    pub fn push(&mut self, media: &[u8]) -> Option<Vec<u8>> {
+    /// Protect an L x D block: column repairs at stride L over `rows` rows, in
+    /// addition to the per-row repairs. A column's largest mask offset is
+    /// `group * (rows - 1)`, so `rows` is clamped to keep it within the 109-bit
+    /// mask (`rows = 1` disables columns).
+    pub fn with_rows(mut self, rows: usize) -> Self {
+        let max_rows = MAX_OFFSET as usize / self.group + 1;
+        self.rows = rows.clamp(1, max_rows);
+        self
+    }
+
+    /// Feed a media RTP packet; returns the repair packets that became due: the
+    /// row repair when a row of `group` closes, plus the `group` column repairs
+    /// when the L x D block completes (empty otherwise, or on a build failure
+    /// for malformed media, which protects nothing rather than panicking).
+    pub fn push(&mut self, media: &[u8]) -> Vec<Vec<u8>> {
         self.pending.push(media.to_vec());
-        if self.pending.len() >= self.group {
-            let refs: Vec<&[u8]> = self.pending.iter().map(|v| v.as_slice()).collect();
-            let fec = build_flexfec_packet(&refs, self.fec_pt, self.fec_ssrc, self.fec_seq);
+        let mut out = Vec::new();
+        if self.pending.len() % self.group == 0 {
+            let row = &self.pending[self.pending.len() - self.group..];
+            let refs: Vec<&[u8]> = row.iter().map(|v| v.as_slice()).collect();
+            out.extend(build_flexfec_packet(
+                &refs,
+                self.fec_pt,
+                self.fec_ssrc,
+                self.fec_seq,
+            ));
             self.fec_seq = self.fec_seq.wrapping_add(1);
-            self.pending.clear();
-            return fec;
         }
-        None
+        if self.pending.len() >= self.group * self.rows {
+            if self.rows > 1 {
+                for c in 0..self.group {
+                    let column: Vec<&[u8]> = self
+                        .pending
+                        .iter()
+                        .skip(c)
+                        .step_by(self.group)
+                        .map(|v| v.as_slice())
+                        .collect();
+                    out.extend(build_flexfec_packet(
+                        &column,
+                        self.fec_pt,
+                        self.fec_ssrc,
+                        self.fec_seq,
+                    ));
+                    self.fec_seq = self.fec_seq.wrapping_add(1);
+                }
+            }
+            self.pending.clear();
+        }
+        out
     }
 }
 
@@ -479,13 +533,12 @@ mod tests {
         let mut dec = FlexFecDecoder::new(64);
         let media = media_run(20);
 
-        let mut fec = None;
+        let mut fec = Vec::new();
         for p in &media {
-            if let Some(f) = enc.push(p) {
-                fec = Some(f);
-            }
+            fec.extend(enc.push(p));
         }
-        let fec = fec.expect("a repair closed the group of 20");
+        assert_eq!(fec.len(), 1, "a repair closed the group of 20");
+        let fec = fec.remove(0);
 
         for (i, p) in media.iter().enumerate() {
             if i != 7 {
@@ -537,5 +590,79 @@ mod tests {
         assert_eq!(recovered.len(), 2, "2-D protection recovered both losses");
         assert!(recovered.iter().any(|r| *r == media[5]));
         assert!(recovered.iter().any(|r| *r == media[6]));
+    }
+
+    #[test]
+    fn encoder_2d_recovers_a_full_row_burst() {
+        // 4x3 block: losing an entire row of 4 consecutive packets defeats every
+        // row repair, but each loss sits in its own column repair.
+        let mut enc = FlexFecEncoder::new(4, 110, 0xFEC0_0003).with_rows(3);
+        let mut dec = FlexFecDecoder::new(64);
+        let media = media_run(12);
+        let mut repairs = Vec::new();
+        for p in &media {
+            repairs.extend(enc.push(p));
+        }
+        assert_eq!(repairs.len(), 3 + 4, "3 row + 4 column repairs per block");
+
+        let lost = [4usize, 5, 6, 7]; // the whole middle row
+        for (i, p) in media.iter().enumerate() {
+            if !lost.contains(&i) {
+                dec.push_media(u16::from_be_bytes([p[2], p[3]]), p);
+            }
+        }
+        for f in &repairs {
+            dec.push_fec(f);
+        }
+        let mut recovered = dec.take_recovered();
+        recovered.sort_by_key(|p| u16::from_be_bytes([p[2], p[3]]));
+        assert_eq!(recovered.len(), 4, "the whole burst row came back");
+        for (r, i) in recovered.iter().zip(lost) {
+            assert_eq!(*r, media[i], "packet {i} bit-exact");
+        }
+    }
+
+    #[test]
+    fn encoder_2d_column_masks_cross_the_wide_mask_widths() {
+        // group=16, rows=7: a column's largest offset is 16*6 = 96, landing in
+        // the 109-bit mask; intermediate offsets cross the 15- and 46-bit words.
+        // Recover a loss in the LAST row purely from its column repair, proving
+        // the strided wide mask round-trips through encode_mask/decode_mask.
+        let mut enc = FlexFecEncoder::new(16, 110, 0xFEC0_0004).with_rows(7);
+        let mut dec = FlexFecDecoder::new(256);
+        let media = media_run(112);
+        let mut repairs = Vec::new();
+        for p in &media {
+            repairs.extend(enc.push(p));
+        }
+        assert_eq!(repairs.len(), 7 + 16, "7 row + 16 column repairs");
+
+        // Drop two packets in the last row: its row repair cannot recover both,
+        // so the recoveries must come through the strided column masks.
+        let lost = [96usize + 3, 96 + 9];
+        for (i, p) in media.iter().enumerate() {
+            if !lost.contains(&i) {
+                dec.push_media(u16::from_be_bytes([p[2], p[3]]), p);
+            }
+        }
+        for f in &repairs {
+            dec.push_fec(f);
+        }
+        let mut recovered = dec.take_recovered();
+        recovered.sort_by_key(|p| u16::from_be_bytes([p[2], p[3]]));
+        assert_eq!(recovered.len(), 2);
+        assert_eq!(recovered[0], media[lost[0]]);
+        assert_eq!(recovered[1], media[lost[1]]);
+    }
+
+    #[test]
+    fn with_rows_clamps_to_the_mask_limit() {
+        // group=16: max column offset 16*(rows-1) must stay <= 108, so rows
+        // clamps to 7 (16*6 = 96 fits; 16*7 = 112 would not).
+        let enc = FlexFecEncoder::new(16, 110, 0).with_rows(50);
+        assert_eq!(enc.rows, 7);
+        // rows=0 degrades to 1-D rather than panicking.
+        let enc = FlexFecEncoder::new(16, 110, 0).with_rows(0);
+        assert_eq!(enc.rows, 1);
     }
 }

@@ -12,6 +12,11 @@
 //! filter is a quality follow-up); it is exact at rate 1:1 and introduces the
 //! usual linear-interp high-frequency rolloff otherwise. CPU-only and `no_std`:
 //! this element lives in the crate baseline alongside `AudioConvert`.
+//!
+//! The per-buffer loop defers the last input sample into the carry, so at end
+//! of stream `process(Eos)` flushes the pending output positions in the final
+//! window, interpolating toward a held last sample (sample-and-hold), landing
+//! the total output at the rate-ratio count `ceil(n_in * out/in)`.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -19,7 +24,7 @@ use core::pin::Pin;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use g2g_core::frame::Frame;
+use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
@@ -66,6 +71,9 @@ pub struct AudioResample {
     configured: bool,
     last_caps: Option<Caps>,
     emitted: u64,
+    /// Timing of the last input `DataFrame`, reused to stamp the EOS tail frame
+    /// (its exact timestamp is not critical, the tail is a fraction of a buffer).
+    last_timing: FrameTiming,
 }
 
 impl AudioResample {
@@ -80,6 +88,7 @@ impl AudioResample {
             configured: false,
             last_caps: None,
             emitted: 0,
+            last_timing: FrameTiming::default(),
         }
     }
 
@@ -96,6 +105,7 @@ impl AudioResample {
             configured: false,
             last_caps: None,
             emitted: 0,
+            last_timing: FrameTiming::default(),
         }
     }
 
@@ -124,12 +134,14 @@ impl AudioResample {
         else {
             return Err(G2gError::CapsMismatch);
         };
-        // A 0 (`ANY_SAMPLE_RATE`) input rate is the negotiation placeholder a
-        // decoder advertises before it has decoded a frame; accept it deferred (the
-        // real rate arrives as a `CapsChanged`, which the runner turns into a fresh
-        // `configure_pipeline`). A `DataFrame` never precedes that `CapsChanged`, so
-        // `resample` is never asked to interpolate at rate 0 (guarded in `process`).
-        if !PCM_FORMATS.contains(format) || *channels == 0 {
+        // A 0 rate (`ANY_SAMPLE_RATE`) or 0 channel count (`ANY_CHANNELS`) is the
+        // negotiation placeholder a decoder advertises before it has decoded a
+        // frame; accept both deferred (the real values arrive as a `CapsChanged`,
+        // which the runner turns into a fresh `configure_pipeline`, and channels is
+        // a passthrough field so a downstream capsfilter pins it). A `DataFrame`
+        // never precedes that `CapsChanged`, so `resample` never interpolates at a
+        // placeholder rate / channel count (guarded in `process` / `resample`).
+        if !PCM_FORMATS.contains(format) {
             return Err(G2gError::CapsMismatch);
         }
         Ok((*format, *channels, *sample_rate))
@@ -157,29 +169,44 @@ impl AsyncElement for AudioResample {
     /// Native `DerivedOutput`: a supported PCM input maps to the same format +
     /// channels at the target sample rate.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        let target_rate = self.target_rate;
+        // Property, or the caps-resolved target from startup (M755). Reflecting the
+        // resolved rate (not just the property) lets a mid-stream input-rate change
+        // re-derive to a single fixed output, so the element keeps its 48 kHz target
+        // even when its downstream feasibility snapshot is blanked by an intervening
+        // format converter (`audioresample ! audioconvert ! rate-pin`, where the
+        // converter retargets `format`, a scalar with no wildcard, so the backward
+        // feasibility projection is empty). Auto + unresolved (startup) stays the
+        // passthrough+wildcard set, so startup negotiation is unchanged.
+        let out_rate = self.out_rate();
         // Passthrough format + channels (retarget sample_rate only).
         let passthrough = PassthroughFields::NONE.with_format().with_channels();
         let derive = Box::new(move |input: &Caps| match input {
+            // `channels` passes through untouched, so an `ANY_CHANNELS` (0)
+            // placeholder input derives an `ANY_CHANNELS` output (a downstream
+            // capsfilter pins it); do not require a concrete count here, else a
+            // decoder's pre-decode placeholder collapses the derived set to empty
+            // and the solver reads it as an unsatisfiable link.
             Caps::Audio {
                 format,
                 channels,
                 sample_rate,
-            } if PCM_FORMATS.contains(format) && *channels > 0 => {
+            } if PCM_FORMATS.contains(format) => {
                 let mk = |rate| Caps::Audio {
                     format: *format,
                     channels: *channels,
                     sample_rate: rate,
                 };
-                if target_rate != 0 {
-                    // Property-driven: the fixed target rate.
-                    CapsSet::one(mk(target_rate))
-                } else {
-                    // Caps-driven (auto): default to passthrough (the input
-                    // rate, no resampling), but advertise "any rate" so a
+                match out_rate {
+                    // Property-driven, or a caps-resolved target: the fixed rate.
+                    Some(rate) => CapsSet::one(mk(rate)),
+                    // Caps-driven (auto), not yet resolved: default to passthrough
+                    // (the input rate, no resampling), but advertise "any rate" so a
                     // downstream capsfilter pins the target. Passthrough is the
                     // preferred (first) alternative.
-                    CapsSet::from_alternatives(alloc::vec![mk(*sample_rate), mk(ANY_SAMPLE_RATE)])
+                    None => CapsSet::from_alternatives(alloc::vec![
+                        mk(*sample_rate),
+                        mk(ANY_SAMPLE_RATE)
+                    ]),
                 }
             }
             _ => CapsSet::from_alternatives(Vec::new()),
@@ -234,6 +261,7 @@ impl AsyncElement for AudioResample {
                     let MemoryDomain::System(slice) = &frame.domain else {
                         return Err(G2gError::UnsupportedDomain);
                     };
+                    self.last_timing = frame.timing;
                     // Effective output rate: property, or caps-resolved (auto).
                     let out_rate = self.out_rate().ok_or(G2gError::NotConfigured)?;
                     let resampled =
@@ -280,8 +308,22 @@ impl AsyncElement for AudioResample {
                 PipelinePacket::Segment(seg) => {
                     out.push(PipelinePacket::Segment(seg)).await?;
                 }
-                // the runner forwards Eos; the transform does not re-emit it.
-                PipelinePacket::Eos => {}
+                // The runner's transform arm calls `process(Eos)` before it
+                // forwards Eos downstream, so the flushed tail frame lands ahead
+                // of Eos. Flush the pending final-window output, then let the
+                // runner emit Eos (do not re-emit it here).
+                PipelinePacket::Eos => {
+                    if let Some(tail) = self.flush_tail()? {
+                        let out_frame = Frame {
+                            domain: MemoryDomain::System(SystemSlice::from_boxed(tail)),
+                            timing: self.last_timing,
+                            sequence: self.emitted,
+                            meta: Default::default(),
+                        };
+                        self.emitted += 1;
+                        out.push(PipelinePacket::DataFrame(out_frame)).await?;
+                    }
+                }
                 other => {
                     out.push(other).await?;
                 }
@@ -330,8 +372,8 @@ static AUDIORESAMPLE_PROPS: &[PropertySpec] = &[PropertySpec::new(
 
 impl AudioResample {
     /// Resample one interleaved PCM buffer from `in_rate` to `out_rate`,
-    /// advancing the per-channel carry + fractional phase. At rate 1:1 the
-    /// output equals the input (phase stays integral, interpolation is exact).
+    /// advancing the per-channel carry + fractional phase. Rate 1:1 short-circuits
+    /// to a byte-exact pass-through (no carry, no interpolation).
     fn resample(
         &mut self,
         src: &[u8],
@@ -349,6 +391,14 @@ impl AudioResample {
         let n = src.len() / in_frame;
         if n == 0 {
             return Ok(Vec::new().into_boxed_slice());
+        }
+        // Rate 1:1 is a byte-exact pass-through. The interpolation loop below
+        // would defer each buffer's last sample into the carry, and the final
+        // one is never flushed at end of stream (one sample lost per stream,
+        // caught by calliope's opus differential). Skip the loop entirely; the
+        // carry state stays reset (a mid-stream rate change reconfigures first).
+        if in_rate == out_rate {
+            return Ok(src.to_vec().into_boxed_slice());
         }
 
         // Decode the buffer to per-channel f32 (channels-major), so the inner
@@ -408,6 +458,48 @@ impl AudioResample {
         // relative index -1, exactly where the boundary interpolation reads it.
         self.phase = rel - n as f64;
         Ok(dst.into_boxed_slice())
+    }
+
+    /// At end of stream, emit the output samples the per-buffer loop deferred:
+    /// the read positions in the final input window `[n-1, n)` that `resample`
+    /// left pending (it stops at `rel < n-1` and carries the buffer's last
+    /// sample into `prev`). Interpolates toward a held last sample (b = a,
+    /// sample-and-hold), so the total stream output lands at `ceil(n_in *
+    /// out/in)`. Returns `None` when there is no carry: rate 1:1 (bypass) or a
+    /// stream that ended before any resampled frame.
+    fn flush_tail(&mut self) -> Result<Option<Box<[u8]>>, G2gError> {
+        let Some(prev) = self.prev.take() else {
+            return Ok(None);
+        };
+        let (in_format, in_channels, in_rate) = self.input.ok_or(G2gError::NotConfigured)?;
+        let out_rate = self.out_rate().ok_or(G2gError::NotConfigured)?;
+        // 1:1 bypasses and never populates the carry; guard against a zero rate.
+        if in_rate == out_rate || in_rate == 0 || out_rate == 0 {
+            return Ok(None);
+        }
+        let ch = in_channels as usize;
+        if prev.len() != ch {
+            return Err(G2gError::CapsMismatch);
+        }
+        let step = in_rate as f64 / out_rate as f64;
+        // After the last buffer `phase` is `rel - n` relative to that buffer's
+        // sample 0, so the carried `prev` sits at relative index -1 and the
+        // pending window is `phase in [-1, 0)`. Emit while `phase < 0`, holding
+        // `prev` as both interpolation endpoints (the signal past the last
+        // sample is held constant).
+        let mut rel = self.phase;
+        let mut dst = Vec::new();
+        while rel < 0.0 {
+            for &sample in &prev {
+                write_sample(&mut dst, sample, in_format);
+            }
+            rel += step;
+        }
+        self.phase = 0.0;
+        if dst.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(dst.into_boxed_slice()))
     }
 }
 
@@ -490,9 +582,9 @@ mod tests {
             .resample(&src, AudioFormat::PcmF32Le, 1, 48_000, 48_000)
             .unwrap();
         let got = f32_samples(&out);
-        // 1:1 produces n-1 outputs from this buffer (the last sample is carried
-        // to interpolate with the next buffer) and reproduces them exactly.
-        assert_eq!(got, &[0.0, 0.25, 0.5]);
+        // 1:1 is a byte-exact pass-through: every sample, including the last
+        // (the old carry deferred it and lost the stream's final sample at EOS).
+        assert_eq!(got, &[0.0, 0.25, 0.5, 0.75]);
     }
 
     #[test]
@@ -531,6 +623,37 @@ mod tests {
             .unwrap();
         let got = f32_samples(&out);
         assert_eq!(got, &[0.0, 2.0, 4.0, 6.0]);
+    }
+
+    #[test]
+    fn eos_flush_emits_deferred_tail() {
+        // 2x upsample of 4 samples: the per-buffer loop yields 6 (deferring the
+        // last window), then the EOS flush emits the held tail so the total lands
+        // at round(4*2) = 8 = ceil(4 / 0.5).
+        let mut r = AudioResample::new(96_000);
+        r.configure_pipeline(&audio(AudioFormat::PcmF32Le, 1, 48_000))
+            .unwrap();
+        let src = interleave_f32(&[&[0.0, 1.0, 2.0, 3.0]]);
+        let body = f32_samples(
+            &r.resample(&src, AudioFormat::PcmF32Le, 1, 48_000, 96_000)
+                .unwrap(),
+        );
+        assert_eq!(body.len(), 6);
+        let tail = f32_samples(&r.flush_tail().unwrap().expect("tail emitted"));
+        // held last sample (3.0) fills positions 3.0 and 3.5.
+        assert_eq!(tail, &[3.0, 3.0]);
+        assert_eq!(body.len() + tail.len(), 8);
+        // flush is idempotent: the carry is consumed, a second flush emits nothing.
+        assert!(r.flush_tail().unwrap().is_none());
+    }
+
+    #[test]
+    fn eos_flush_without_data_emits_nothing() {
+        // A stream that ends before any DataFrame has no carry to flush.
+        let mut r = AudioResample::new(48_000);
+        r.configure_pipeline(&audio(AudioFormat::PcmF32Le, 1, 44_100))
+            .unwrap();
+        assert!(r.flush_tail().unwrap().is_none());
     }
 
     #[test]

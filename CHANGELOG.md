@@ -6,6 +6,22 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- the `revideo` streaming-adapter module is renamed `streamdec` (API rename, no behavior change).
+
+- M758: FlexFEC gains 2-D (row + column) protection, so a burst of up to a full row of consecutive losses recovers via the column repairs.
+- M756: device-validated that `MediaCodecDec` accepts and forwards the runner's pre-fixed output `CapsChanged`, with on-device regression coverage in the decode smoke test.
+- M755: `audioresample ! audioconvert ! rate-pin` now flows like the reverse order; the resampler keeps its caps-resolved target across an intervening converter.
+- M754: audio decoders negotiate a downstream pin at the stream's native sample rate with no resampler; a cross-rate pin without one still fails loud.
+- M757: AC-3 decodes from MPEG-TS (ATSC and DVB carriage) and Matroska, and FLAC from Matroska (`CodecPrivate` forwarded as decoder extradata).
+- M753: MPEG-TS demux carries MPEG audio (`mp2`) and Opus elementary streams, selectable and auto-plugged like AAC.
+- M752: `audioresample` flushes its interpolation carry at end of stream when resampling, so the output reaches the rate-ratio-consistent sample count instead of stopping one window short.
+- M751: `audioresample` at rate 1:1 is a byte-exact pass-through instead of losing the stream's final sample to the interpolation carry.
+- M750: Opus decode discards the `OpusHead` pre-skip and the Ogg granule-position end padding, so decoded PCM has the same sample count as ffmpeg / gstreamer.
+- M749: a linear decode chain whose infeasible mid-stream caps refinement cannot cross a downstream pin (e.g. 44.1 kHz decode reaching a `rate=48000` capsfilter with no `audioresample`) now fails loud naming the conflict instead of writing native-rate samples under the pinned label.
+- M748: a bare `filesrc ! decodebin` on an audio-only MP4 sniffs the `moov` and selects the demux's audio track, so it plugs an audio decoder instead of failing on the default video port.
+- M747: a `decodebin` fan-out audio branch survives a runtime sample-rate refinement (an `audioresample` bridges 44.1 kHz decode to a 48 kHz pin), and without a bridging converter the branch fails loud naming the conflicting caps instead of silently or opaquely.
+- M746: a bare `filesrc ! decodebin` on an audio-only MPEG-TS sniffs the PMT and selects the demux's audio stream, so it plugs an audio decoder instead of failing on the default video port.
+- M745: decode-to-PCM launch lines negotiate: audio decoders fixate a concrete PCM output, `audioconvert` is caps-driven (format/channels), and `wavsink` is registered.
 - M744: `VulkanVideoDec` streams display order on the GPU-texture path (H.264/H.265 texture reorder) and on AV1 (per-AU op-walk incl. `show_existing_frame` + film grain); fixes an AV1 session use-after-free (the driver retains the Std sequence header).
 - M743: Vulkan Video H.265 long-term reference pictures, bit-exact on the LTRPSPS conformance vector; also fixes slice-inline inter-predicted RPS parsing (`delta_idx_minus1`, `NumDeltaPocsOfRefRpsIdx`).
 - M742: Android on-screen present harness (`examples/g2g-android-present` + `tools/android-apk-present-smoke.sh`): a NativeActivity APK decoding zero-copy to the GPU and presenting to the activity's real window, device-validated.

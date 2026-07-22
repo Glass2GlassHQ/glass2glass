@@ -1,6 +1,6 @@
 //! M498: random-access ("pull") scrubbing over the Vulkan Video decoder.
 //!
-//! The wedge for a timeline viewer (e.g. Rerun): instead of the streaming push
+//! The wedge for a timeline viewer: instead of the streaming push
 //! path (`VulkanVideoDec`), a `VulkanVideoPlayer` serves the frame at an
 //! arbitrary index straight as a GPU-resident RGBA `wgpu::Texture`, decoding
 //! forward from the enclosing keyframe on each seek and caching results.

@@ -828,7 +828,7 @@ application-owned wgpu render pipeline, not just `WgpuSink`: the imported RGBA
 texture carries `TEXTURE_BINDING`, so a foreign pipeline on the shared decode
 device samples it zero-copy (`m500_vulkan_video_embed` + the
 `vulkan_video_engine_embed` example), the integration primitive a Bevy
-`re_renderer`-style consumer builds on.
+viewer-renderer consumer builds on.
 
 **H.265.** The HEVC parameter-set parse + `Std*` mapping and the
 decode session are in place (the H.264 analog). `parse_h265_vps/sps/pps`
@@ -877,7 +877,7 @@ index the stream's POCs (`index_pictures`) and reorder the coding-order output i
 display order via `reorder_to_display_order`, keyed by (coded-video-sequence, POC)
 so POC resets at each keyframe group correctly; for an I/P stream this is the
 identity. The low-level streaming `decode_push` stays in coding order (a low-latency
-consumer such as the re_video adapter reorders by PTS itself), but the g2g-native
+consumer such as the streaming (`streamdec`) adapter reorders by PTS itself), but the g2g-native
 `VulkanVideoDec` element does reorder its system (NV12) path: `decode_push_meta`
 returns one `PictureMeta` per submitted picture (the POC the decode already
 computed, no second pass), and the element feeds retired frames through a small
@@ -1714,6 +1714,29 @@ reassembly, sniff the codec from the first packet's `OpusHead`, skip the setup
 headers), and `OggDemux` emits the Opus audio packets as `Caps::Audio{Opus}` with
 the channel count refined from `OpusHead`. The container is auto-detectable
 (`typefind` "OggS", `filesrc bytestream-format=auto`).
+
+Opus decode applies the two container trims so the PCM sample count matches
+ffmpeg / gstreamer (RFC 7845). Pre-skip is codec config the decoder owns:
+`OggDemux` forwards the `OpusHead` in-band (the g2g parameter-set convention) and
+`OpusDec` reads its pre-skip (offset 10) and drops that many leading output
+samples. End-of-stream padding is container knowledge only the demuxer has:
+`OggDemux` tracks the running decoded sample count against the final page's
+granule position and marks the closing packet(s) short via `duration_ns` (fully
+padded packets are dropped), which `OpusDec` honors as a per-frame keep count.
+Both trims are attacker-controlled inputs, folded with saturating math (an
+oversized pre-skip trims a frame to nothing, an underflowing granule drops it).
+A stream with no `OpusHead` and no per-frame duration (the RTP path) decodes
+untrimmed, matching gstreamer's SDP-less default.
+
+An audio decoder fixates its output caps even when a demuxer only knows the
+channel count once it parses the stream: it advertises `PcmS16Le` at a concrete
+rate with the `ANY_CHANNELS` placeholder (fixated to stereo for the negotiated
+edge), and the real count arrives via a `CapsChanged` (`OpusDec` (re)builds
+libopus for it, since the decoder is per-channel-count). So a decode-to-PCM line
+negotiates before the count is known. `AudioConvert` is caps-driven like
+`AudioResample`: a bare `audioconvert` takes its output format / channel count
+from a downstream capsfilter (a mono `channels=1` pin) and otherwise passes the
+input through.
 
 The FLV demuxer is the fourth, on `Caps::ByteStream{Flv}`.
 `g2g-plugins::flv::FlvDemuxer` parses the flat FLV tag stream (the "FLV" header,

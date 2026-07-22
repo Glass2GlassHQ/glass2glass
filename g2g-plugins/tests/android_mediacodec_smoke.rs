@@ -191,6 +191,29 @@ async fn decode_to_nv12(mut dec: MediaCodecDec, stream: &[u8], codec: VideoCodec
     assert!(matches!(outcome, ConfigureOutcome::Accepted));
 
     let mut sink = Collect::default();
+
+    // M756: the graph runner hands each element its own solved OUTPUT caps as an
+    // incoming `CapsChanged` before the first frame (transform_arm in
+    // graph_runner.rs sends `process(CapsChanged(forward_caps))`, where
+    // forward_caps is the derived NV12 output). The element must accept and
+    // forward it, not reject it as an unrecognised input shape. This drives that
+    // packet exactly as the runner would; a decoder that only accepts its
+    // compressed input shape returns a bare `CapsMismatch` here.
+    let prefixed_out = Caps::RawVideo {
+        format: RawVideoFormat::Nv12,
+        width: Dim::Fixed(w),
+        height: Dim::Fixed(h),
+        framerate: Rate::Fixed(30 << 16),
+    };
+    dec.process(PipelinePacket::CapsChanged(prefixed_out.clone()), &mut sink)
+        .await
+        .expect("decoder must accept the runner's pre-fixed output CapsChanged");
+    assert!(
+        matches!(sink.packets.first(), Some(PipelinePacket::CapsChanged(c)) if *c == prefixed_out),
+        "the pre-fixed output caps must be forwarded downstream before any frame, got {:?}",
+        sink.packets.first()
+    );
+
     let mut pts_ns = 0u64;
     for au in aus {
         let frame = Frame {

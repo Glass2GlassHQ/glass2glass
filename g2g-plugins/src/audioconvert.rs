@@ -23,8 +23,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
-    G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec,
+    G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PassthroughFields,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, ANY_CHANNELS,
 };
 
 /// The PCM sample formats this element reads and writes.
@@ -32,8 +32,15 @@ const FORMATS: [AudioFormat; 2] = [AudioFormat::PcmS16Le, AudioFormat::PcmF32Le]
 
 #[derive(Debug)]
 pub struct AudioConvert {
-    target_format: AudioFormat,
-    target_channels: u8,
+    /// Target sample format, or `None` for caps-driven (take it from a downstream
+    /// capsfilter, else passthrough the input format).
+    target_format: Option<AudioFormat>,
+    /// Target channel count, or `None` for caps-driven.
+    target_channels: Option<u8>,
+    /// Output format/channels resolved from the negotiated output caps (a
+    /// downstream capsfilter), set by `configure_output`. Used when the matching
+    /// target is caps-driven; `None` until then.
+    resolved: Option<(AudioFormat, u8)>,
     /// Input format/channels/rate of the configured stream, updated by a
     /// mid-stream `CapsChanged`.
     input: Option<(AudioFormat, u8, u32)>,
@@ -50,8 +57,9 @@ impl AudioConvert {
             "AudioConvert is a raw-PCM converter; target must be a PCM format"
         );
         Self {
-            target_format,
-            target_channels,
+            target_format: Some(target_format),
+            target_channels: Some(target_channels),
+            resolved: None,
             input: None,
             configured: false,
             last_caps: None,
@@ -59,12 +67,43 @@ impl AudioConvert {
         }
     }
 
-    pub fn target_format(&self) -> AudioFormat {
+    /// Caps-driven: take the output format + channel count from the negotiated
+    /// caps (a downstream capsfilter), the gst idiom. With no downstream
+    /// constraint it passes the input through unchanged.
+    pub fn auto() -> Self {
+        Self {
+            target_format: None,
+            target_channels: None,
+            resolved: None,
+            input: None,
+            configured: false,
+            last_caps: None,
+            emitted: 0,
+        }
+    }
+
+    /// Effective output format: the property when set, else the caps-resolved
+    /// format (auto), else the input format (passthrough).
+    fn out_format(&self, in_format: AudioFormat) -> AudioFormat {
         self.target_format
+            .or(self.resolved.map(|(f, _)| f))
+            .unwrap_or(in_format)
+    }
+
+    /// Effective output channel count: the property when set, else the
+    /// caps-resolved count (auto), else the input count (passthrough).
+    fn out_channels(&self, in_channels: u8) -> u8 {
+        self.target_channels
+            .or(self.resolved.map(|(_, c)| c))
+            .unwrap_or(in_channels)
+    }
+
+    pub fn target_format(&self) -> AudioFormat {
+        self.out_format(AudioFormat::PcmS16Le)
     }
 
     pub fn target_channels(&self) -> u8 {
-        self.target_channels
+        self.out_channels(2)
     }
 
     /// Validate a PCM caps as a convertible input, returning its
@@ -81,21 +120,11 @@ impl AudioConvert {
         else {
             return Err(G2gError::CapsMismatch);
         };
-        if !FORMATS.contains(format) || !channel_map_supported(*channels, self.target_channels) {
+        if !FORMATS.contains(format) {
             return Err(G2gError::CapsMismatch);
         }
         Ok((*format, *channels, *sample_rate))
     }
-}
-
-/// Whether `AudioConvert` can produce `out_ch` channels from `in_ch`. Every
-/// concrete input count converts now (identity, mono fan-out, downmix to mono,
-/// and the layout-agnostic round-robin downmix/upmix in [`map_channel`]);
-/// `ANY_CHANNELS` (0) is the negotiation wildcard (the real count arrives via
-/// `CapsChanged`). The only unsupported shape is a zero *target*, which `new`
-/// already forbids.
-fn channel_map_supported(_in_ch: u8, out_ch: u8) -> bool {
-    out_ch > 0
 }
 
 pub(crate) fn sample_bytes(format: AudioFormat) -> usize {
@@ -121,25 +150,62 @@ impl AsyncElement for AudioConvert {
         Ok(upstream_caps.clone())
     }
 
-    /// Native `DerivedOutput`: a supported PCM input maps to the target
-    /// format + channel count at the same sample rate.
+    /// Native `DerivedCoupled`: a supported PCM input maps to the target format +
+    /// channel count at the same sample rate (rate is the one passthrough field).
+    /// A fixed target emits that single output; a caps-driven (`auto`) target
+    /// advertises the passthrough as the preferred alternative plus the retarget
+    /// options (the other PCM format, and an `ANY_CHANNELS` wildcard) so a
+    /// downstream capsfilter pins the real format / channel count.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         let target_format = self.target_format;
         let target_channels = self.target_channels;
-        CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| match input {
+        // Only sample_rate is preserved; format + channels are retargeted.
+        let passthrough = PassthroughFields::NONE.with_sample_rate();
+        let derive = Box::new(move |input: &Caps| match input {
             Caps::Audio {
                 format,
                 channels,
                 sample_rate,
-            } if FORMATS.contains(format) && channel_map_supported(*channels, target_channels) => {
-                CapsSet::one(Caps::Audio {
-                    format: target_format,
-                    channels: target_channels,
-                    sample_rate: *sample_rate,
-                })
+            } if FORMATS.contains(format) => {
+                // Candidate output formats: the fixed target, or (auto) the input
+                // format first (passthrough) then the other PCM format.
+                let formats: Vec<AudioFormat> = match target_format {
+                    Some(f) => alloc::vec![f],
+                    None => {
+                        let mut v = alloc::vec![*format];
+                        v.extend(FORMATS.iter().copied().filter(|f| f != format));
+                        v
+                    }
+                };
+                // Candidate channel counts: the fixed target, or (auto) the input
+                // count (passthrough) then the `ANY_CHANNELS` wildcard. A `0`
+                // (ANY_CHANNELS) input is the decoder's pre-decode placeholder:
+                // advertise only the wildcard so a downstream capsfilter pins it
+                // (else it fixates to stereo) and the real count flows in a
+                // runtime `CapsChanged`.
+                let chans: Vec<u8> = match (target_channels, *channels) {
+                    (Some(c), _) => alloc::vec![c],
+                    (None, ANY_CHANNELS) => alloc::vec![ANY_CHANNELS],
+                    (None, c) => alloc::vec![c, ANY_CHANNELS],
+                };
+                let mut alts = Vec::new();
+                for f in &formats {
+                    for c in &chans {
+                        alts.push(Caps::Audio {
+                            format: *f,
+                            channels: *c,
+                            sample_rate: *sample_rate,
+                        });
+                    }
+                }
+                CapsSet::from_alternatives(alts)
             }
             _ => CapsSet::from_alternatives(Vec::new()),
-        }))
+        });
+        CapsConstraint::DerivedCoupled {
+            derive,
+            passthrough,
+        }
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -147,6 +213,22 @@ impl AsyncElement for AudioConvert {
         self.input = Some((format, channels, rate));
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
+    }
+
+    /// Caps-driven: take the output format + channel count from the negotiated
+    /// output caps when a target is unset (auto). Already fixated, so concrete.
+    fn configure_output(&mut self, output_caps: &Caps) -> Result<(), G2gError> {
+        let Caps::Audio {
+            format, channels, ..
+        } = output_caps
+        else {
+            return Err(G2gError::CapsMismatch);
+        };
+        if !FORMATS.contains(format) || *channels == ANY_CHANNELS {
+            return Err(G2gError::CapsMismatch);
+        }
+        self.resolved = Some((*format, *channels));
+        Ok(())
     }
 
     fn process<'a>(
@@ -165,17 +247,19 @@ impl AsyncElement for AudioConvert {
                     let MemoryDomain::System(slice) = &frame.domain else {
                         return Err(G2gError::UnsupportedDomain);
                     };
+                    let out_format = self.out_format(in_format);
+                    let out_channels = self.out_channels(in_channels);
                     let converted = convert_pcm(
                         slice.as_slice(),
                         in_format,
                         in_channels,
-                        self.target_format,
-                        self.target_channels,
+                        out_format,
+                        out_channels,
                     )?;
 
                     let new_caps = Caps::Audio {
-                        format: self.target_format,
-                        channels: self.target_channels,
+                        format: out_format,
+                        channels: out_channels,
                         sample_rate: rate,
                     };
                     if self.last_caps.as_ref() != Some(&new_caps) {
@@ -240,11 +324,15 @@ impl AsyncElement for AudioConvert {
         match name {
             "format" => {
                 let s = value.as_str().ok_or(PropError::Type)?;
-                self.target_format = audio_format_from_str(s).ok_or(PropError::Value)?;
+                self.target_format = Some(audio_format_from_str(s).ok_or(PropError::Value)?);
                 Ok(())
             }
             "channels" => {
-                self.target_channels = value.as_uint().ok_or(PropError::Type)? as u8;
+                let c = value.as_uint().ok_or(PropError::Type)? as u8;
+                if c == 0 {
+                    return Err(PropError::Value);
+                }
+                self.target_channels = Some(c);
                 Ok(())
             }
             _ => Err(PropError::Unknown),
@@ -254,9 +342,9 @@ impl AsyncElement for AudioConvert {
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
             "format" => Some(PropValue::Str(
-                audio_format_to_str(self.target_format).into(),
+                audio_format_to_str(self.target_format()).into(),
             )),
-            "channels" => Some(PropValue::Uint(self.target_channels as u64)),
+            "channels" => Some(PropValue::Uint(self.target_channels() as u64)),
             _ => None,
         }
     }
@@ -439,11 +527,17 @@ mod tests {
     }
 
     #[test]
-    fn derived_output_maps_pcm_to_target() {
+    fn fixed_target_maps_pcm_to_target() {
         let conv = AudioConvert::new(AudioFormat::PcmS16Le, 2);
-        let CapsConstraint::DerivedOutput(f) = conv.caps_constraint_as_transform() else {
-            panic!("expected DerivedOutput");
+        let CapsConstraint::DerivedCoupled {
+            derive: f,
+            passthrough,
+        } = conv.caps_constraint_as_transform()
+        else {
+            panic!("expected DerivedCoupled");
         };
+        // only sample_rate is preserved; format + channels are retargeted.
+        assert_eq!(passthrough, PassthroughFields::NONE.with_sample_rate());
         let out = f(&audio(AudioFormat::PcmF32Le, 2, 44_100));
         assert_eq!(
             out.alternatives(),
@@ -456,6 +550,35 @@ mod tests {
             f(&audio(AudioFormat::PcmF32Le, 3, 48_000)).alternatives(),
             &[audio(AudioFormat::PcmS16Le, 2, 48_000)]
         );
+    }
+
+    #[test]
+    fn auto_target_advertises_passthrough_and_retarget_options() {
+        // Caps-driven: a downstream capsfilter should be able to pin either PCM
+        // format and any channel count, so the derive advertises the passthrough
+        // (input) shape first plus the retarget alternatives.
+        let conv = AudioConvert::auto();
+        let CapsConstraint::DerivedCoupled { derive: f, .. } = conv.caps_constraint_as_transform()
+        else {
+            panic!("expected DerivedCoupled");
+        };
+        let out = f(&audio(AudioFormat::PcmS16Le, 2, 48_000));
+        let alts = out.alternatives();
+        // passthrough (S16, 2) is the preferred first alternative.
+        assert_eq!(alts[0], audio(AudioFormat::PcmS16Le, 2, 48_000));
+        // a mono capsfilter pins through the ANY_CHANNELS wildcard alternative.
+        assert!(alts.contains(&audio(AudioFormat::PcmS16Le, ANY_CHANNELS, 48_000)));
+        // the other PCM format is offered so a format-changing capsfilter matches.
+        assert!(alts.iter().any(|c| matches!(
+            c,
+            Caps::Audio {
+                format: AudioFormat::PcmF32Le,
+                ..
+            }
+        )));
+        // the decoder's pre-decode ANY_CHANNELS placeholder still derives an
+        // output (the wildcard), rather than an empty set.
+        assert!(!f(&audio(AudioFormat::PcmS16Le, ANY_CHANNELS, 48_000)).is_empty());
     }
 
     #[test]

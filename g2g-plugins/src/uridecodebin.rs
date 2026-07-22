@@ -132,7 +132,8 @@ use alloc::string::ToString;
 use alloc::vec::Vec;
 #[cfg(feature = "std")]
 use g2g_core::runtime::{
-    is_raw_audio, is_raw_video, DecodebinError, GraphNode, GraphNodeRef, ParseError, Registry,
+    is_raw_audio, is_raw_video, DecodebinError, GraphNode, GraphNodeRef, ParseError, PrimaryStream,
+    Registry,
 };
 #[cfg(feature = "hls")]
 use g2g_core::AudioFormat;
@@ -972,6 +973,113 @@ pub fn ts_decodebin_select(
     pads: &[PadRequest],
 ) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)> {
     ts_select(location, pads)
+}
+
+/// Bare-`decodebin` primary-stream hook for MPEG-TS (M746): a `filesrc
+/// location=X.ts ! decodebin` on an audio-only transport stream needs the
+/// single-stream [`TsDemux`](crate::tsdemux::TsDemux) to select its audio stream
+/// (the default is a video port, so the auto-plug would pick a video decoder).
+/// Sniff the PMT; decline (`None`) a non-TS file, an empty PMT, or one that carries
+/// a video track (the default video path is correct), else return `tsdemux` with the
+/// `stream=<codec>` selection and the audio elementary caps for the decoder search.
+#[cfg(feature = "std")]
+pub fn ts_primary_stream(location: &str, caps: &Caps) -> Option<PrimaryStream> {
+    if !matches!(
+        caps,
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::MpegTs
+        }
+    ) {
+        return None;
+    }
+    let prefix = read_prefix(location)?;
+    let mut demux = crate::mpegts::TsDemuxer::new();
+    let mut off = 0;
+    while off + 188 <= prefix.len() {
+        if prefix[off] == 0x47 {
+            demux.push_packet(&prefix[off..off + 188]);
+        }
+        off += 188;
+    }
+    let infos = crate::tsdemux::forwardable_streams(&demux);
+    // A video track present: the demux's default video port is right, decline.
+    if infos.is_empty() || infos.iter().any(|i| i.video) {
+        return None;
+    }
+    let audio = infos.into_iter().find(|i| !i.video)?;
+    Some(PrimaryStream {
+        demux: "tsdemux",
+        props: alloc::vec![(
+            "stream".to_string(),
+            crate::tsdemux::ts_stream_to_str(audio.stream).to_string(),
+        )],
+        caps: audio.caps,
+    })
+}
+
+/// Bare-`decodebin` primary-stream hook for MP4 (M748): the MP4 sibling of
+/// [`ts_primary_stream`]. A `filesrc location=X.m4a ! decodebin` on an audio-only
+/// MP4 needs the single-stream [`Mp4Demux`](crate::mp4demux::Mp4Demux) to select
+/// its audio track (the default is the video port, so the auto-plug would pick a
+/// video decoder and fail "no caps overlap"). Sniff the `moov`; decline (`None`) a
+/// non-MP4 file, a `moov` past the probe window, an empty track set, or a file that
+/// carries a video track (the default video path is right), else return `qtdemux`
+/// with `stream=aac` and the audio elementary caps for the decoder search.
+#[cfg(feature = "std")]
+pub fn mp4_primary_stream(location: &str, caps: &Caps) -> Option<PrimaryStream> {
+    if !matches!(
+        caps,
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::Mp4
+        }
+    ) {
+        return None;
+    }
+    let prefix = read_prefix(location)?;
+    let infos = crate::mp4demuxn::forwardable_streams(&prefix);
+    // A video track present: the demux's default video port is right, decline.
+    if infos.is_empty() || infos.iter().any(|i| i.video) {
+        return None;
+    }
+    let audio = infos.into_iter().find(|i| !i.video)?;
+    Some(PrimaryStream {
+        demux: "qtdemux",
+        props: alloc::vec![("stream".to_string(), "aac".to_string())],
+        caps: audio.caps,
+    })
+}
+
+/// Bare-`decodebin` primary-stream hook for Matroska (M757): the mkv sibling of
+/// [`ts_primary_stream`]. An audio-only `.mka` / `.mkv` through `filesrc !
+/// decodebin` selects the demux's audio track (`matroskademux stream=<codec>`)
+/// instead of failing on the default video port. Declines when a video track is
+/// present or the prefix does not parse as Matroska.
+pub fn mkv_primary_stream(location: &str, caps: &Caps) -> Option<PrimaryStream> {
+    if !matches!(
+        caps,
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::Matroska
+        }
+    ) {
+        return None;
+    }
+    let prefix = read_prefix(location)?;
+    let mut demux = crate::matroska::MatroskaDemuxer::new();
+    demux.push_data(&prefix);
+    let infos = crate::mkvdemux::forwardable_streams(&demux);
+    // A video track present: the demux's default video port is right, decline.
+    if infos.is_empty() || infos.iter().any(|i| i.video) {
+        return None;
+    }
+    let audio = infos.into_iter().find(|i| !i.video)?;
+    Some(PrimaryStream {
+        demux: "matroskademux",
+        props: alloc::vec![(
+            "stream".to_string(),
+            crate::mkvdemux::mkv_stream_str(audio.stream).to_string(),
+        )],
+        caps: audio.caps,
+    })
 }
 
 /// Probe an MP4 file and build an [`Mp4DemuxN`](crate::mp4demuxn::Mp4DemuxN) with

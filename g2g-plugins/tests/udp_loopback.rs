@@ -648,6 +648,86 @@ async fn interleaved_fec_recovers_a_consecutive_burst() {
 }
 
 #[tokio::test]
+async fn flexfec_2d_recovers_a_burst_row_of_losses() {
+    // M758 multi-level burst FEC: a 4x3 block (row repairs every 4 packets +
+    // 4 column repairs at stride 4). Dropping 4 CONSECUTIVE packets (a whole
+    // row) defeats every row repair; the column repairs recover all four.
+    // One-way path: retransmit off, so only FEC can bring them back.
+    let proxy = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind proxy");
+    let proxy_addr = proxy.local_addr().unwrap();
+    let recv_std = StdUdpSocket::bind("127.0.0.1:0").expect("bind receiver");
+    let recv_addr = recv_std.local_addr().unwrap();
+
+    const N: u8 = 12; // one 4x3 FlexFEC block (1 RTP packet per AU)
+    let dropped: HashSet<u16> = [4u16, 5, 6, 7].into_iter().collect();
+    let proxy_task = tokio::spawn(lossy_proxy(proxy, recv_addr, dropped));
+
+    let mut src = UdpSrc::from_socket(recv_std)
+        .unwrap()
+        .with_jitter(500, 256)
+        .with_rtcp(0, false)
+        .with_flexfec(98)
+        .with_frame_limit(N as u64);
+    let mut marker = MarkerSink::default();
+    let clock = ZeroClock;
+
+    let sink_fut = async {
+        let mut sink = UdpSink::new(proxy_addr)
+            .with_retransmit(false, 1)
+            .with_flexfec_2d(4, 3, 98, 0xFEC0_0004);
+        sink.configure_pipeline(&h264_caps())
+            .expect("configure sink");
+        let mut null = NullOut;
+        for i in 0u32..N as u32 {
+            let au = alloc_au(i as u8);
+            let frame = Frame {
+                domain: MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
+                timing: FrameTiming {
+                    pts_ns: i as u64 * 33_000_000,
+                    ..FrameTiming::default()
+                },
+                sequence: i as u64,
+                meta: Default::default(),
+            };
+            sink.process(PipelinePacket::DataFrame(frame), &mut null)
+                .await
+                .expect("send");
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        sink
+    };
+
+    let recv_fut = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        run_simple_pipeline(
+            &mut src,
+            &mut marker,
+            &clock,
+            LatencyProfile::Live.link_capacity(),
+        ),
+    );
+
+    let (recv_res, sink) = tokio::join!(recv_fut, sink_fut);
+    proxy_task.abort();
+
+    let stats = recv_res
+        .expect("receiver finishes within 15s")
+        .expect("receive pipeline succeeds");
+    assert_eq!(
+        stats.frames_emitted, N as u64,
+        "the burst row recovered via column repairs"
+    );
+    let expected: Vec<u8> = (0..N).collect();
+    assert_eq!(
+        marker.markers, expected,
+        "AUs delivered in order after 2-D burst recovery"
+    );
+    assert_eq!(sink.retransmits_sent(), 0, "recovery was FEC, not resends");
+}
+
+#[tokio::test]
 async fn flexfec_recovers_a_loss_in_a_group_beyond_ulpfec() {
     // FlexFEC's wide mask protects a 20-packet group with one repair, past
     // ULPFEC's 16-packet ceiling. One-way path (no feedback / no retransmit): the

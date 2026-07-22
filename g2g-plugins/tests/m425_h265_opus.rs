@@ -80,14 +80,16 @@ fn opus_with_concrete_channels_auto_plugs_opusdec() {
     );
 }
 
-/// OpusDec must be configured with a concrete channel count (libopus is created
-/// per channel count): the channels-0 placeholder is rejected at configure, which
-/// is why `forwardable_streams` surfaces the track's real channels up front.
+/// libopus is created per channel count, but a demuxer only knows the real
+/// count once it parses `OpusHead`, so `OpusDec` accepts the channels-0
+/// placeholder at configure (deferring the decoder to the `CapsChanged` that
+/// carries the real count) instead of rejecting it. A concrete count configures
+/// the decoder up front (the direct `OpusParse` path).
 #[cfg(feature = "opus")]
 #[test]
-fn opusdec_requires_concrete_channels_at_configure() {
+fn opusdec_defers_placeholder_channels_at_configure() {
     use g2g_core::element::AsyncElement;
-    use g2g_core::{AudioFormat, Caps, G2gError};
+    use g2g_core::{AudioFormat, Caps};
     use g2g_plugins::opusdec::OpusDec;
 
     let opus = |ch| Caps::Audio {
@@ -95,12 +97,10 @@ fn opusdec_requires_concrete_channels_at_configure() {
         channels: ch,
         sample_rate: 0,
     };
-    // The channels-0 placeholder cannot create a decoder.
-    assert!(matches!(
-        OpusDec::new().configure_pipeline(&opus(0)),
-        Err(G2gError::CapsMismatch)
-    ));
-    // A concrete mono / stereo count configures.
+    // The channels-0 placeholder is accepted (decoder deferred), so the
+    // OggDemux / decodebin path negotiates before the count is known.
+    assert!(OpusDec::new().configure_pipeline(&opus(0)).is_ok());
+    // A concrete mono / stereo count configures the decoder immediately.
     assert!(OpusDec::new().configure_pipeline(&opus(1)).is_ok());
     assert!(OpusDec::new().configure_pipeline(&opus(2)).is_ok());
 }

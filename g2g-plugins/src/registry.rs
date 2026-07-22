@@ -379,7 +379,9 @@ pub fn default_registry() -> Registry {
 
     // Audio transforms.
     reg.register_launch(LaunchFactory::of::<AudioConvert>("audioconvert", || {
-        Box::new(AudioConvert::new(AudioFormat::PcmS16Le, 2))
+        // Caps-driven by default: a bare `audioconvert` takes its output format /
+        // channels from a downstream capsfilter, or passes the input through.
+        Box::new(AudioConvert::auto())
     }));
     reg.register_launch(LaunchFactory::of::<AudioResample>("audioresample", || {
         // Caps-driven by default (M187): a bare `audioresample` takes its output
@@ -606,6 +608,11 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::of::<FileSink>("filesink", || {
         Box::new(FileSink::new(""))
     }));
+    // Raw-PCM WAV file sink: `... ! audioconvert ! wavsink location=out.wav`.
+    reg.register_launch(LaunchFactory::of::<crate::wavsink::WavSink>(
+        "wavsink",
+        || Box::new(crate::wavsink::WavSink::new("")),
+    ));
     // Record / replay pair: record the packet stream to a file, play it back as a source.
     reg.register_launch(LaunchFactory::of::<RecordSink>("recordsink", || {
         Box::new(RecordSink::new(""))
@@ -664,6 +671,12 @@ fn register_uri_handlers(reg: &mut Registry) {
     reg.register_decodebin_select(crate::uridecodebin::mkv_decodebin_select);
     reg.register_decodebin_select(crate::uridecodebin::ts_decodebin_select);
     reg.register_decodebin_select(crate::uridecodebin::mp4_decodebin_select);
+    // Bare `filesrc location=X ! decodebin` primary-stream selection (M746): an
+    // audio-only container's single-stream demux defaults to a video port; the hook
+    // sniffs the file and selects the real (audio) stream instead.
+    reg.register_primary_stream(crate::uridecodebin::ts_primary_stream);
+    reg.register_primary_stream(crate::uridecodebin::mp4_primary_stream);
+    reg.register_primary_stream(crate::uridecodebin::mkv_primary_stream);
     // hls:// fan-out (M395): probe the master playlist, fan its variant's muxed TS
     // streams out; the hls_handler is the single-stream fallback it declines to.
     #[cfg(feature = "hls")]

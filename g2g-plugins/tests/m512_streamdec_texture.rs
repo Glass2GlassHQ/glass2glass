@@ -1,15 +1,15 @@
-//! M512: Tier B (zero-copy) re_video adapter output.
+//! M512: Tier B (zero-copy) streaming-adapter output.
 //!
-//! Drives [`VulkanStreamDecoder::new_gpu`] the way a Rerun `re_video` GPU-texture
+//! Drives [`VulkanStreamDecoder::new_gpu`] the way a wgpu viewer's GPU-texture
 //! backend would: one coded sample per `submit_chunk_texture`, DPB state carried
 //! across calls, each frame handed back as a GPU-resident RGBA `wgpu::Texture`
 //! (YUV->RGB already applied by g2g's compute pass) with NO CPU readback in the
-//! decode path. This is the wedge Tier B relies on: a re_video fork wraps this in
-//! a GPU-texture `FrameContent` and passes the texture straight to `re_renderer`,
-//! skipping both the readback and re_renderer's upload + colour convert.
+//! decode path. This is the wedge Tier B relies on: a consumer passes the
+//! texture straight to its renderer, skipping both the readback and the
+//! renderer's upload + colour convert.
 //!
-//! Uses H.264, the codec the Tier-A PoC settled on (bit-exact across threads, the
-//! common Rerun codec). Runs on the RTX 3060; skips with no adapter / no compute
+//! Uses H.264, the codec the Tier-A PoC settled on (bit-exact across threads,
+//! the common viewer codec). Runs on the RTX 3060; skips with no adapter / no compute
 //! queue. Correctness is anchored to the CPU adapter path (Tier A, already
 //! bit-exact vs ffmpeg): the GPU RGBA readback must match a from-I420 reference
 //! reconstructed with the same BT.601-limited matrix the compute pass uses.
@@ -19,7 +19,7 @@
 ))]
 
 use g2g_core::runtime::block_on;
-use g2g_plugins::revideo::{VideoCodec, VideoPixelLayout, VulkanStreamDecoder};
+use g2g_plugins::streamdec::{VideoCodec, VideoPixelLayout, VulkanStreamDecoder};
 use g2g_plugins::vulkanvideo::{open_h264_decode_device, VulkanVideoError};
 
 const CLIP: &[u8] = include_bytes!("fixtures/h264_640x480.h264");
@@ -27,7 +27,7 @@ const W: usize = 640;
 const H: usize = 480;
 
 /// BT.601 limited-range YUV -> RGB, the conversion g2g's ycbcr compute pass runs
-/// on the decoder's NV12 output. Matches `revideo`'s default colorimetry for
+/// on the decoder's NV12 output. Matches `streamdec`'s default colorimetry for
 /// H.264 (`Bt601` / `Limited`). Used only to reconstruct a reference from the
 /// already-validated CPU I420 path, so the GPU pass can be checked without an
 /// external RGB fixture.
@@ -60,7 +60,7 @@ fn i420_to_rgba_bt601(i420: &[u8], w: usize, h: usize) -> Vec<u8> {
 }
 
 #[test]
-fn revideo_adapter_streams_gpu_textures() {
+fn streamdec_adapter_streams_gpu_textures() {
     let device = match block_on(open_h264_decode_device()) {
         Ok(d) => d,
         Err(VulkanVideoError::NoVulkanAdapter)
@@ -78,7 +78,7 @@ fn revideo_adapter_streams_gpu_textures() {
             eprintln!("skip m512: decode device has no distinct compute queue for the GPU path");
             return;
         }
-        Err(e) => panic!("build GPU-mode re_video adapter: {e:?}"),
+        Err(e) => panic!("build GPU-mode streaming adapter: {e:?}"),
     };
     assert_eq!(dec.width(), W as u32);
     assert_eq!(dec.height(), H as u32);
@@ -105,7 +105,7 @@ fn revideo_adapter_streams_gpu_textures() {
         assert_eq!(t.texture.height(), H as u32);
         // Readback is the test's verification only, never the pipeline path.
         // Exercise both the adapter helper and the shared-context free helper
-        // (the one a re_renderer-style consumer uses on `gpu_context()`).
+        // (the one a viewer renderer uses on `gpu_context()`).
         let rgba = dec.read_rgba_texture(&t.texture);
         if i == 0 {
             let via_ctx = g2g_plugins::gpu::read_rgba_texture(&dec.gpu_context(), &t.texture);

@@ -1,10 +1,10 @@
-//! M508: the fork-ready re_video adapter ([`g2g_plugins::revideo`]).
+//! M508: the streaming-decoder adapter ([`g2g_plugins::streamdec`]).
 //!
-//! Drives [`VulkanStreamDecoder`] the way a Rerun `re_video::decode::AsyncDecoder`
-//! backend would: one coded sample per `submit_chunk`, DPB state carried across
-//! calls, output as packed I420 (re_video's native CPU frame layout). Proves the
-//! adapter satisfies that contract on real hardware, so a small re_video fork can
-//! wrap it in one `impl AsyncDecoder` (the wgpu-texture wedge, Tier A readback).
+//! Drives [`VulkanStreamDecoder`] the way a wgpu viewer's async chunk decoder
+//! would: one coded sample per `submit_chunk`, DPB state carried across calls,
+//! output as packed I420 (the conventional CPU frame layout). Proves the adapter
+//! satisfies that contract on real hardware, so a consumer can wrap it in one
+//! async-decoder impl (the wgpu-texture wedge, Tier A readback).
 //!
 //! Runs on the RTX 3060; skips with no AV1 decode adapter. Optional bit-exact
 //! check vs an ffmpeg `yuv420p` (== I420) dump via `G2G_AV1_REF`.
@@ -14,7 +14,7 @@
 ))]
 
 use g2g_core::runtime::block_on;
-use g2g_plugins::revideo::{
+use g2g_plugins::streamdec::{
     VideoCodec, VideoColorRange, VideoMatrixCoefficients, VideoPixelLayout, VulkanStreamDecoder,
 };
 use g2g_plugins::vulkanvideo::{open_av1_decode_device, VulkanVideoError};
@@ -72,7 +72,7 @@ fn split_obu_frames(stream: &[u8]) -> Vec<&[u8]> {
 }
 
 #[test]
-fn revideo_adapter_streams_i420_frames() {
+fn streamdec_adapter_streams_i420_frames() {
     let device = match block_on(open_av1_decode_device()) {
         Ok(d) => d,
         Err(VulkanVideoError::NoVulkanAdapter)
@@ -85,7 +85,7 @@ fn revideo_adapter_streams_i420_frames() {
     };
 
     let mut dec =
-        VulkanStreamDecoder::new(device, VideoCodec::Av1, CLIP).expect("build re_video adapter");
+        VulkanStreamDecoder::new(device, VideoCodec::Av1, CLIP).expect("build streaming adapter");
     assert_eq!(dec.width(), W as u32);
     assert_eq!(dec.height(), H as u32);
 

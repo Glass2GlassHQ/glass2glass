@@ -422,7 +422,9 @@ fn nearest_upstream_arm<E>(vg: &ValidatedGraph<E>, edge_id: usize) -> Option<Nod
 /// reconfigure on a rejected mid-stream change: under `FailLoud` it fails the
 /// run (the `run_source_fanout` strict default), under `AllowBranchDrop` it
 /// drops out. A node on a single-producer chain (`run_linear_chain` /
-/// `run_source_transform_sink`) reverse-reconfigures and keeps flowing.
+/// `run_source_transform_sink`) forwards a feasible re-solve and keeps flowing,
+/// but a genuinely infeasible one fails loud too: no runtime producer
+/// renegotiates its output caps, so there is nothing to reverse-reconfigure into.
 fn behind_tee_policy<E>(vg: &ValidatedGraph<E>, node: NodeId) -> Option<FanOutPolicy> {
     let mut cur = node;
     loop {
@@ -442,8 +444,9 @@ fn behind_tee_policy<E>(vg: &ValidatedGraph<E>, node: NodeId) -> Option<FanOutPo
 /// derived from its position ([`behind_tee_policy`]).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BranchMode {
-    /// Single-producer chain: post the failure and reverse-reconfigure into the
-    /// boundary that emitted the change, then keep flowing.
+    /// Single-producer chain: a feasible mid-stream re-solve is forwarded and
+    /// the chain keeps flowing; a genuinely infeasible one fails the run loud,
+    /// since no runtime producer renegotiates its output caps.
     Reconfigure,
     /// Behind a `FailLoud` tee: a rejected change fails the whole run loud.
     FailLoud,
@@ -458,6 +461,23 @@ fn branch_mode<E>(vg: &ValidatedGraph<E>, node: NodeId) -> BranchMode {
         Some(FanOutPolicy::FailLoud) => BranchMode::FailLoud,
         Some(FanOutPolicy::AllowBranchDrop) => BranchMode::Drop,
     }
+}
+
+/// Name the caps an arm could not re-solve at runtime, at error level on the
+/// caps category (the same channel the negotiation solver narrates a conflict
+/// on), so the run's `CapsMismatch` is diagnosable rather than opaque. The
+/// common cause is a rate / format the chain has no converter for (e.g. a
+/// 44.1 kHz decode reaching a `rate=48000` pin with no `audioresample` to bridge
+/// it). A tee branch cannot reverse-reconfigure its shared upstream; a
+/// single-producer chain has nothing to reverse-reconfigure into either, since
+/// no runtime producer renegotiates its output caps. Either way the refinement
+/// has no solution, so the run fails here rather than flowing stale caps.
+fn report_runtime_caps_conflict(rejected: &Caps) {
+    crate::g2g_error!(
+        crate::log::Target::category(crate::log::CAPS_CATEGORY),
+        "runtime caps {} cannot be re-solved against the downstream chain (no converter bridges the refinement, and no upstream element renegotiates its output caps)",
+        rejected.to_gst_string()
+    );
 }
 
 /// A reusable recipe for an owned graph: a builder closure that produces a fresh
@@ -2406,7 +2426,7 @@ async fn transform_arm<'a>(
                 // Caps-α: derive the forwarded output from this element's
                 // constraint steered by the downstream feasibility snapshot.
                 // `Defer` keeps the prior behavior (forward the incoming caps);
-                // `Infeasible` surfaces loud as a reverse reconfigure.
+                // `Infeasible` fails the run loud (no producer renegotiates).
                 let forward_caps = {
                     let constraint = elem.caps_constraint_as_transform();
                     match resolve_forward_output(
@@ -2417,21 +2437,23 @@ async fn transform_arm<'a>(
                         ForwardResolve::Fixed(caps) => caps,
                         ForwardResolve::Defer => new_caps.clone(),
                         ForwardResolve::Infeasible(failure) => {
-                            // Behind a tee (shared upstream): can't reverse-
-                            // reconfigure. `FailLoud` fails the run; `Drop` ends
-                            // this branch (siblings continue). On a single-producer
-                            // chain: post the failure and reverse-reconfigure into
-                            // the boundary, then keep flowing.
+                            // A genuinely infeasible re-solve: the refined caps
+                            // have no solution against the downstream chain, and
+                            // no runtime producer renegotiates its output caps, so
+                            // there is nothing to reverse-reconfigure into. A tee
+                            // branch (`FailLoud`) and a single-producer chain
+                            // (`Reconfigure`) both fail the run loud, naming the
+                            // conflict, rather than flowing stale caps; `Drop` (a
+                            // tee) ends this branch while its siblings continue.
                             match mode {
-                                BranchMode::FailLoud => return Err(G2gError::CapsMismatch),
+                                BranchMode::FailLoud | BranchMode::Reconfigure => {
+                                    report_runtime_caps_conflict(&new_caps);
+                                    report_nego_failure(bus.as_ref(), failure);
+                                    return Err(G2gError::CapsMismatch);
+                                }
                                 BranchMode::Drop => {
                                     report_nego_failure(bus.as_ref(), failure);
                                     return Ok(0);
-                                }
-                                BranchMode::Reconfigure => {
-                                    report_nego_failure(bus.as_ref(), failure);
-                                    in_rx.request_reconfigure(Reconfigure::Renegotiate);
-                                    continue;
                                 }
                             }
                         }
@@ -2552,22 +2574,22 @@ async fn sink_arm<'a>(
                 return Ok(consumed);
             }
             Some(PipelinePacket::CapsChanged(new_caps)) => {
-                // Behind a tee (shared upstream): can't reverse-reconfigure.
-                // `FailLoud` fails the run; `Drop` ends this branch (siblings
-                // continue). On a single-producer chain: post the failure and
-                // reverse-reconfigure into the boundary, then keep flowing.
+                // A sink that rejects the refined caps has no solution: no
+                // runtime producer renegotiates its output caps, so a tee branch
+                // (`FailLoud`) and a single-producer chain (`Reconfigure`) both
+                // fail the run loud rather than flowing stale caps; `Drop` (a
+                // tee) ends this branch while its siblings continue.
                 let sink_caps = match re_solve_downstream_dyn_sink(&new_caps, &*elem) {
                     Ok(caps) => caps,
                     Err(failure) => match mode {
-                        BranchMode::FailLoud => return Err(G2gError::CapsMismatch),
+                        BranchMode::FailLoud | BranchMode::Reconfigure => {
+                            report_runtime_caps_conflict(&new_caps);
+                            report_nego_failure(bus.as_ref(), failure);
+                            return Err(G2gError::CapsMismatch);
+                        }
                         BranchMode::Drop => {
                             report_nego_failure(bus.as_ref(), failure);
                             return Ok(consumed);
-                        }
-                        BranchMode::Reconfigure => {
-                            report_nego_failure(bus.as_ref(), failure);
-                            in_rx.request_reconfigure(Reconfigure::Renegotiate);
-                            continue;
                         }
                     },
                 };

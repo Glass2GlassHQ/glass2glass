@@ -413,6 +413,8 @@ pub fn parse_caps_set(desc: &str) -> Option<CapsSet> {
         "video/x-av1" => compressed_set(VideoCodec::Av1),
         "image/jpeg" => compressed_set(VideoCodec::Mjpeg),
         "audio/x-opus" => audio_set(&[AudioFormat::Opus]),
+        "audio/x-ac3" => audio_set(&[AudioFormat::Ac3]),
+        "audio/x-flac" => audio_set(&[AudioFormat::Flac]),
         // gst names AAC `audio/mpeg` (with mpegversion=4, which we don't require).
         "audio/mpeg" => audio_set(&[AudioFormat::Aac]),
         _ => None,

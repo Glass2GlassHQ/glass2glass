@@ -957,6 +957,34 @@ mod factory {
         pads: &[PadRequest],
     ) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)>;
 
+    /// The single-stream demux + decode chain a bare (non-fan-out) `decodebin`
+    /// should build for a file-backed container whose default single-stream demux
+    /// guesses the wrong port (M746). A single-stream demuxer fixes its output pad
+    /// at negotiation before parsing any byte, so it defaults to a video port; an
+    /// audio-only MPEG-TS then auto-plugs a video decoder and fails "no caps
+    /// overlap". `expand_decodebin` consults a hook so the demux instead selects the
+    /// container's real (audio) stream, building `filesrc ! demux stream=X !
+    /// <decoder> ! ...`.
+    #[derive(Debug, Clone)]
+    pub struct PrimaryStream {
+        /// The single-stream demux element to plug (e.g. `"tsdemux"`).
+        pub demux: &'static str,
+        /// Properties that select the primary stream on `demux` (e.g.
+        /// `[("stream", "aac")]`).
+        pub props: Vec<(String, String)>,
+        /// The elementary caps the demux emits for that stream, the auto-plug input
+        /// for the decoder chain spliced after it.
+        pub caps: Caps,
+    }
+
+    /// A bare-`decodebin` primary-stream hook (M746): given the upstream file
+    /// location and the container caps, sniff the container and return the
+    /// single-stream demux + stream selection for its primary decodable stream, or
+    /// `None` when the default video port is correct (a video track is present), the
+    /// file is unreadable, or the hook does not parse the container. Registered via
+    /// [`Registry::register_primary_stream`].
+    pub type PrimaryStreamHook = fn(location: &str, caps: &Caps) -> Option<PrimaryStream>;
+
     impl core::fmt::Debug for ElementFactory {
         fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
             f.debug_struct("ElementFactory")
@@ -1002,6 +1030,12 @@ mod factory {
         /// upstream tries each until one parses the container, returning the
         /// demuxer + per-port caps so the parser splices a decoder onto each port.
         decodebin_select: Vec<DecodebinSelectHook>,
+        /// Bare-`decodebin` primary-stream hooks (M746): a `filesrc location=X !
+        /// decodebin` on a container tries each until one sniffs the file and names
+        /// the single-stream demux + stream selection for its primary decodable
+        /// stream. Empty (the default) keeps the demux's declared default port, so
+        /// an audio-only container plugs the wrong (video) decoder.
+        primary_stream: Vec<PrimaryStreamHook>,
         /// Optional parser injector (M421): given a decode-chain input caps,
         /// returns a parser element to splice in just before the decoder (e.g. an
         /// access-unit-re-framing `h264parse` for `CompressedVideo { H264, .. }`),
@@ -1130,6 +1164,25 @@ mod factory {
         pub fn register_decodebin_select(&mut self, hook: DecodebinSelectHook) -> &mut Self {
             self.decodebin_select.push(hook);
             self
+        }
+
+        /// Register a bare-`decodebin` primary-stream hook (M746): a `filesrc
+        /// location=X ! decodebin` on a container tries each until one sniffs the
+        /// file and names the single-stream demux + stream selection for its primary
+        /// decodable stream. One per container type. Returns `&mut self`.
+        pub fn register_primary_stream(&mut self, hook: PrimaryStreamHook) -> &mut Self {
+            self.primary_stream.push(hook);
+            self
+        }
+
+        /// The single-stream demux + decode selection for a bare `decodebin` on the
+        /// container at `location` with `caps`, from the first hook that parses it
+        /// (M746); `None` when none applies (no video-less container to fix, an
+        /// unreadable file, or no hook registered).
+        pub fn primary_stream(&self, location: &str, caps: &Caps) -> Option<PrimaryStream> {
+            self.primary_stream
+                .iter()
+                .find_map(|hook| hook(location, caps))
         }
 
         /// Set the parser injector consulted by [`decodebin`](Self::decodebin) and
@@ -1830,8 +1883,8 @@ mod factory {
 pub use factory::{
     declared_source_caps, DecodebinError, DecodebinSelectHook, DemuxFactory, DemuxSelectHook,
     ElementDoc, ElementFactory, FanoutSrcFactory, LaunchFactory, MuxerFactory, PlaybinError,
-    PlaybinGraphError, PlaybinHook, PlaybinPort, PropertyDoc, Registry, SourceFactory, Uri,
-    UriError, UriSourceFactory,
+    PlaybinGraphError, PlaybinHook, PlaybinPort, PrimaryStream, PrimaryStreamHook, PropertyDoc,
+    Registry, SourceFactory, Uri, UriError, UriSourceFactory,
 };
 
 #[cfg(test)]

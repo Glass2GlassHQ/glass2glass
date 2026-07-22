@@ -14,7 +14,9 @@ leverage first:
 
 1. **Platforms.** macOS: camera / screen capture validation on a permitted
    Mac.
-2. **Egress / transports.** FlexFEC + multi-level burst FEC.
+2. **Egress / transports.** FEC knobs as launch properties (`UdpSink`'s
+   FEC modes are builder-only today); real-peer FlexFEC interop when a peer
+   implementation is available (GStreamer here lacks `rtpflexfecenc`).
 3. **Depth.** Codec decode to cut reliance on the ffmpeg FFI: AV1 landed both as
    libdav1d (`Dav1dDec`, `dav1d` feature, C FFI) and pure Rust (`Rav1dDec`,
    `rav1d` feature, via `re_rav1d`). VP8 / VP9 decode is covered by `FfmpegVideoDec`
@@ -426,8 +428,8 @@ Phased plan:
      (NV12) path feeds retired `decode_push` frames through a `ReorderBuffer` keyed
      by (coded-video-sequence, POC), so an AU-by-AU stream with B-frames emits in
      display order (byte-exact vs the `decode_all` oracle for H.264 / H.265). The
-     low-level `decode_push` / the re_video adapter stay in coding order by design
-     (re_video reorders by PTS itself). Still open: a VUI-derived tighter
+     low-level `decode_push` / the streaming adapter stay in coding order by design
+     (a viewer consumer reorders by PTS itself). Still open: a VUI-derived tighter
      reorder-depth bound (the element uses the DPB size, a safe over-approximation).
   5. AV1: DONE (M504) the OBU framing + sequence-header parse + `StdVideoAV1SequenceHeader`
      mapping + a top-level frame-header classifier (`parse_av1_sequence_header`,
@@ -722,12 +724,15 @@ _(No open parser items.)_
   the audio branch (M425: `mkvdemux::forwardable_streams` surfaces concrete channels,
   `OpusDec` sink template relaxed to match). The overlay graph runs end to end.
   Remaining playback follow-ups:
-  - **Audio breadth.** More codecs (AC-3, FLAC, etc.). The layout-agnostic downmix in
-    `audioconvert` folds channels round-robin rather than applying ITU/speaker-position
-    coefficients (no channel-position metadata is carried yet). Opus in MP4 / TS
-    (`dOps`) is not demuxed yet (WebM / Matroska only). The audio sink needs the
-    `pulse-sink` (or `alsa-sink`) feature built in, else `autoaudiosink` falls back to
-    `fakesink`.
+  - **Audio breadth.** The layout-agnostic downmix in `audioconvert` folds
+    channels round-robin rather than applying ITU/speaker-position coefficients
+    (no channel-position metadata is carried yet). Opus in MP4 (`dOps`) is not
+    demuxed yet. FLAC rides Matroska only: Ogg-FLAC detection and a native
+    `.flac` parse layer are open. The audio sink needs the `pulse-sink` (or
+    `alsa-sink`) feature built in, else `autoaudiosink` falls back to `fakesink`.
+  - **H.264 in Matroska.** A bare `decodebin` on an `.mkv` with an AVCC-framed
+    H.264 track fails NAL splitting: the demux forwards length-prefixed samples
+    and never converts to Annex-B from the `avcC` CodecPrivate.
   Parsing SSA / TTML placement into `CueSettings` (only
   WebVTT populates it today, though all three now ride the frame-meta). Glyph
   rendering (incl. `vertical:rl` / `lr` layout) is the `truetype-overlay` feature
@@ -1006,25 +1011,11 @@ export counter; PyTransform worker re-spawn guarded). The audit areas are now
 covered; the flagged hardening follow-ups are now fixed (segment-fetch body cap,
 free-threaded analytics sink, descriptive `Pipeline::wait` errors).
 
-## Audio decode-to-PCM from the launch CLI
+## Audio decode-to-PCM QA
 
-A `g2g-launch` built with `ffmpeg,opus` cannot negotiate a decode-to-raw-PCM
-pipeline from the CLI, so there is no way to dump comparable PCM for QA (blocks
-calliope's audio decode differential / golden / determinism):
-- `filesrc ! decodebin ! audioconvert ! audio/x-raw,format=S16LE,rate=48000,channels=1 ! filesink`
-  fails: `OpusDec -> AudioConvert: unconstrained`, `AudioConvert -> CapsFilter:
-  unconstrained` (OpusDec's output caps don't fixate a rate / format the
-  downstream can pin against).
-- aac `filesrc ! decodebin ! filesink` is a `CapsMismatch` (no chain to a byte
-  sink; filesink rejects `audio/x-raw`).
-- no raw-audio file sink is registered: `wavsink` is unknown to launch even
-  though `wavsink.rs` compiles under `std` (not in the element registry).
-
-Fix: make the audio decoders fixate concrete output caps (rate / channels /
-format) so `audioconvert` can negotiate, and register a PCM / WAV file sink (or
-let `filesink` accept `audio/x-raw`). The calliope side then adds audio adapters
-+ whole-stream PCM hashing + an `[audio]` spec; note only Opus is bit-exact
-across decoders, so AAC wants golden / determinism, not a cross-engine differential.
+calliope adds audio adapters, whole-stream PCM hashing, and an `[audio]` spec so
+decoded PCM is comparable. Opus is bit-exact across decoders (cross-engine
+differential); AAC is not, so it wants a golden / determinism check instead.
 
 ## Documentation
 

@@ -64,6 +64,11 @@ pub enum MkvStream {
     Av1,
     Aac,
     Opus,
+    /// The first AC-3 audio stream (`A_AC3`).
+    Ac3,
+    /// The first FLAC audio stream (`A_FLAC`); its `CodecPrivate` `fLaC` header
+    /// is forwarded in-band before the first frame (decoder extradata).
+    Flac,
     /// A timed-text subtitle stream (`S_TEXT/UTF8` -> `Caps::Text { format }`).
     Subtitle(TextFormat),
 }
@@ -104,6 +109,10 @@ pub struct MkvDemux {
     /// Seek support (M362): app time seeks drive an upstream byte-seek and a
     /// re-sync. Inert unless `with_seek` wired the controllers.
     seek: DemuxSeek,
+    /// FLAC only: whether the track's `CodecPrivate` (the native `fLaC`
+    /// STREAMINFO header) has been forwarded in-band, once, before the first
+    /// frame (the decoder takes it as extradata). Re-armed on a flush.
+    flac_header_sent: bool,
     /// Clones of the seek controllers (M374): the `Cues` prefetch consumes the app
     /// seek and drives the two-hop upstream byte-seek directly, so it needs the
     /// same channels `seek` holds. `None` unless `with_seek` wired them.
@@ -132,6 +141,7 @@ impl MkvDemux {
             collection_posted: false,
             stream_select: None,
             seek: DemuxSeek::default(),
+            flac_header_sent: false,
             app: None,
             upstream: None,
             prefetch: CuePrefetch::Idle,
@@ -248,6 +258,16 @@ impl MkvDemux {
                 channels: 0,
                 sample_rate: 0,
             },
+            MkvStream::Ac3 => Caps::Audio {
+                format: AudioFormat::Ac3,
+                channels: 0,
+                sample_rate: 0,
+            },
+            MkvStream::Flac => Caps::Audio {
+                format: AudioFormat::Flac,
+                channels: 0,
+                sample_rate: 0,
+            },
             MkvStream::Opus => Caps::Audio {
                 format: AudioFormat::Opus,
                 channels: 0,
@@ -290,6 +310,8 @@ impl MkvDemux {
             MkvStream::Av1 => MkvCodec::Av1,
             MkvStream::Aac => MkvCodec::Aac,
             MkvStream::Opus => MkvCodec::Opus,
+            MkvStream::Ac3 => MkvCodec::Ac3,
+            MkvStream::Flac => MkvCodec::Flac,
             MkvStream::Subtitle(format) => MkvCodec::Subtitle(format),
         }
     }
@@ -427,6 +449,8 @@ impl MkvDemux {
             MkvCodec::Av1 => (StreamType::Video, video(VideoCodec::Av1)),
             MkvCodec::Aac => (StreamType::Audio, audio(AudioFormat::Aac)),
             MkvCodec::Opus => (StreamType::Audio, audio(AudioFormat::Opus)),
+            MkvCodec::Ac3 => (StreamType::Audio, audio(AudioFormat::Ac3)),
+            MkvCodec::Flac => (StreamType::Audio, audio(AudioFormat::Flac)),
             // Forwarded as plain UTF-8 text (de-framed at emit), whatever the source.
             MkvCodec::Subtitle(_) => (
                 StreamType::Text,
@@ -509,6 +533,26 @@ impl MkvDemux {
                     out.push(PipelinePacket::Segment(seg)).await?;
                 }
                 Admit::Emit => {}
+            }
+            // FLAC: the decoder needs the track's `fLaC` STREAMINFO (CodecPrivate)
+            // as extradata; forward it in-band once, ahead of the first frame.
+            if self.stream == MkvStream::Flac && !self.flac_header_sent {
+                self.flac_header_sent = true;
+                if let Some(private) = self.demux.codec_private(f.track) {
+                    let header = Frame::new(
+                        MemoryDomain::System(SystemSlice::from_boxed(
+                            private.to_vec().into_boxed_slice(),
+                        )),
+                        FrameTiming {
+                            pts_ns: f.pts_ns,
+                            dts_ns: f.pts_ns,
+                            ..FrameTiming::default()
+                        },
+                        self.emitted,
+                    );
+                    self.emitted += 1;
+                    out.push(PipelinePacket::DataFrame(header)).await?;
+                }
             }
             let frame = Frame::new(
                 MemoryDomain::System(SystemSlice::from_boxed(
@@ -633,6 +677,8 @@ impl AsyncElement for MkvDemux {
                     } else {
                         self.reset_parser();
                     }
+                    // a fresh decoder after the flush needs the header again.
+                    self.flac_header_sent = false;
                     out.push(PipelinePacket::Flush).await?;
                 }
                 PipelinePacket::Eos => {
@@ -690,6 +736,8 @@ fn codec_to_stream(codec: MkvCodec) -> Option<MkvStream> {
         MkvCodec::Av1 => Some(MkvStream::Av1),
         MkvCodec::Aac => Some(MkvStream::Aac),
         MkvCodec::Opus => Some(MkvStream::Opus),
+        MkvCodec::Ac3 => Some(MkvStream::Ac3),
+        MkvCodec::Flac => Some(MkvStream::Flac),
         MkvCodec::Subtitle(format) => Some(MkvStream::Subtitle(format)),
         MkvCodec::Other => None,
     }
@@ -823,8 +871,15 @@ fn mkv_stream_from_str(s: &str) -> Option<MkvStream> {
         "av1" => Some(MkvStream::Av1),
         "aac" => Some(MkvStream::Aac),
         "opus" => Some(MkvStream::Opus),
+        "ac3" => Some(MkvStream::Ac3),
+        "flac" => Some(MkvStream::Flac),
         _ => None,
     }
+}
+
+/// The `stream` property value naming an [`MkvStream`] (the hook and launch use it).
+pub fn mkv_stream_str(stream: MkvStream) -> &'static str {
+    mkv_stream_to_str(stream)
 }
 
 fn mkv_stream_to_str(stream: MkvStream) -> &'static str {
@@ -836,6 +891,8 @@ fn mkv_stream_to_str(stream: MkvStream) -> &'static str {
         MkvStream::Av1 => "av1",
         MkvStream::Aac => "aac",
         MkvStream::Opus => "opus",
+        MkvStream::Ac3 => "ac3",
+        MkvStream::Flac => "flac",
         MkvStream::Subtitle(_) => "text",
     }
 }
@@ -852,6 +909,8 @@ impl PadTemplates for MkvDemux {
             Self::output_caps(MkvStream::Av1),
             Self::output_caps(MkvStream::Aac),
             Self::output_caps(MkvStream::Opus),
+            Self::output_caps(MkvStream::Ac3),
+            Self::output_caps(MkvStream::Flac),
             Self::output_caps(MkvStream::Subtitle(TextFormat::Utf8)),
         ]));
         Vec::from([
