@@ -16,7 +16,7 @@ use alloc::vec::Vec;
 
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, HardwareError,
-    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate, VideoCodec,
+    OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate, VideoCodec,
 };
 
 use wasm_bindgen::prelude::*;
@@ -130,11 +130,11 @@ impl AsyncElement for WebSocketSink {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
                     // Copy out of the borrow so the send future owns its bytes.
-                    let bytes: Vec<u8> = slice.as_slice().to_vec();
+                    let bytes: Vec<u8> = slice.to_vec();
                     self.send_bytes(&bytes).await?;
                 }
                 PipelinePacket::Eos => {
@@ -145,6 +145,8 @@ impl AsyncElement for WebSocketSink {
                 PipelinePacket::CapsChanged(_)
                 | PipelinePacket::Flush
                 | PipelinePacket::Segment(_) => {}
+                // future PipelinePacket variants: no-op (terminal sink).
+                _ => {}
             }
             Ok(())
         })

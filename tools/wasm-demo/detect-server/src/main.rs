@@ -53,7 +53,7 @@ impl OutputSink for OneFrame {
         Box::pin(async move {
             if let PipelinePacket::DataFrame(f) = packet {
                 if self.bytes.is_none() {
-                    if let MemoryDomain::System(s) = &f.domain {
+                    if let Some(s) = f.domain.as_system_slice() {
                         self.bytes = Some(s.as_slice().to_vec());
                     }
                 }

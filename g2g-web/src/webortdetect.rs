@@ -33,7 +33,7 @@ use core::pin::Pin;
 
 use g2g_core::{
     AnalyticsMeta, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError,
-    HardwareError, MemoryDomain, OutputSink, PipelinePacket, RawVideoFormat, TensorDType,
+    HardwareError, OutputSink, PipelinePacket, RawVideoFormat, TensorDType,
     TensorLayout, TensorShape,
 };
 use g2g_ml::detect::DetectionPostprocess;
@@ -197,11 +197,11 @@ impl AsyncElement for WebOrtDetect {
                         out.push(PipelinePacket::DataFrame(frame)).await?;
                         return Ok(());
                     }
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
                     let need = self.width as usize * self.height as usize * 4;
-                    let bytes = slice.as_slice();
+                    let bytes = slice;
                     if bytes.len() < need {
                         return Err(G2gError::CapsMismatch);
                     }
@@ -228,7 +228,7 @@ impl AsyncElement for WebOrtDetect {
                             .collect();
                         let caps = Caps::Tensor {
                             dtype: TensorDType::F32,
-                            shape: TensorShape(dims),
+                            shape: TensorShape::from_slice(&dims).ok_or(G2gError::CapsMismatch)?,
                             layout: TensorLayout::Nchw,
                         };
                         self.postprocess.configure_pipeline(&caps)?;
