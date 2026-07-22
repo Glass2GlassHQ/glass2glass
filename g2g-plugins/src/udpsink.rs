@@ -22,8 +22,8 @@ use std::net::{SocketAddr, UdpSocket as StdUdpSocket};
 
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
-    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, Rate, VideoCodec,
+    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec, Rate, VideoCodec,
 };
 
 use crate::filesink::io_err;
@@ -43,6 +43,79 @@ enum FecMode {
     Single(FecEncoder),
     Interleaved(InterleavedFecEncoder),
     FlexFec(FlexFecEncoder),
+}
+
+/// Which FEC scheme the sink runs, chosen by the `fec-mode` property (or a
+/// builder). `columns`/`rows` describe the protection block: `columns` is the
+/// row length L (ULPFEC/FlexFEC group, or the interleave stride); `rows` is the
+/// depth D (`1` = 1-D, no column repairs). The remaining knobs are the FEC
+/// stream's payload type and SSRC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FecKind {
+    None,
+    Ulpfec,
+    UlpfecInterleaved,
+    FlexFec,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FecConfig {
+    kind: FecKind,
+    columns: usize,
+    rows: usize,
+    pt: u8,
+    ssrc: u32,
+}
+
+/// Default protection block width (ULPFEC/FlexFEC group / interleave stride).
+const DEFAULT_FEC_COLUMNS: usize = 4;
+
+impl Default for FecConfig {
+    fn default() -> Self {
+        Self {
+            kind: FecKind::None,
+            columns: DEFAULT_FEC_COLUMNS,
+            rows: 1,
+            pt: 0,
+            ssrc: 0,
+        }
+    }
+}
+
+impl FecConfig {
+    /// Build the encoder for the configured scheme (called at `configure_pipeline`
+    /// once all knobs are set, in any order). The per-scheme clamps live in the
+    /// encoders (`FlexFecEncoder` bounds the group / rows to the mask width).
+    fn build(&self) -> FecMode {
+        match self.kind {
+            FecKind::None => FecMode::None,
+            FecKind::Ulpfec => FecMode::Single(FecEncoder::new(self.columns, self.pt, self.ssrc)),
+            FecKind::UlpfecInterleaved => FecMode::Interleaved(InterleavedFecEncoder::new(
+                self.rows,
+                self.columns,
+                self.pt,
+                self.ssrc,
+            )),
+            FecKind::FlexFec => {
+                let enc = FlexFecEncoder::new(self.columns, self.pt, self.ssrc);
+                let enc = if self.rows > 1 {
+                    enc.with_rows(self.rows)
+                } else {
+                    enc
+                };
+                FecMode::FlexFec(enc)
+            }
+        }
+    }
+
+    fn mode_str(&self) -> &'static str {
+        match self.kind {
+            FecKind::None => "none",
+            FecKind::Ulpfec => "ulpfec",
+            FecKind::UlpfecInterleaved => "ulpfec-interleaved",
+            FecKind::FlexFec => "flexfec",
+        }
+    }
 }
 
 /// H.264 RTP media clock (RFC 6184): timestamps tick at 90 kHz.
@@ -85,9 +158,14 @@ pub struct UdpSink {
     rtx: Option<(u8, u32)>,
     /// Sequence counter for the RTX stream (its own numbering space).
     rtx_seq: u16,
-    /// RFC 5109 ULPFEC: emits repair packets for latency-free loss recovery
-    /// (independent of NACK/RTX). Single-level recovers one loss per group;
-    /// interleaved recovers a burst of consecutive losses.
+    /// FEC scheme + block geometry, settable via builders or the `fec-*`
+    /// properties. The encoder ([`fec`](Self::fec)) is built from this at
+    /// `configure_pipeline`, so properties set in any order all take effect.
+    fec_config: FecConfig,
+    /// RFC 5109 ULPFEC / RFC 8627 FlexFEC encoder, built from
+    /// [`fec_config`](Self::fec_config): emits repair packets for latency-free
+    /// loss recovery (independent of NACK/RTX). Single-level recovers one loss per
+    /// group; interleaved / 2-D recovers a burst of consecutive losses.
     fec: FecMode,
     /// Recently sent packets, `(sequence, bytes)`, oldest first, capped at
     /// [`retx_cap`](Self::retx_cap). Resent on a matching NACK.
@@ -126,6 +204,7 @@ impl UdpSink {
             retransmit: true,
             rtx: None,
             rtx_seq: 0,
+            fec_config: FecConfig::default(),
             fec: FecMode::None,
             retx_buf: VecDeque::new(),
             retx_cap: DEFAULT_RETX_CAPACITY,
@@ -177,7 +256,13 @@ impl UdpSink {
     /// `fec_payload_type` / `fec_ssrc`, recovering a single per-group loss at the
     /// receiver with no round trip. Complements (does not replace) NACK/RTX.
     pub fn with_fec(mut self, group: usize, fec_payload_type: u8, fec_ssrc: u32) -> Self {
-        self.fec = FecMode::Single(FecEncoder::new(group, fec_payload_type, fec_ssrc));
+        self.fec_config = FecConfig {
+            kind: FecKind::Ulpfec,
+            columns: group,
+            rows: 1,
+            pt: fec_payload_type & 0x7F,
+            ssrc: fec_ssrc,
+        };
         self
     }
 
@@ -192,12 +277,13 @@ impl UdpSink {
         fec_payload_type: u8,
         fec_ssrc: u32,
     ) -> Self {
-        self.fec = FecMode::Interleaved(InterleavedFecEncoder::new(
+        self.fec_config = FecConfig {
+            kind: FecKind::UlpfecInterleaved,
+            columns: stride,
             rows,
-            stride,
-            fec_payload_type,
-            fec_ssrc,
-        ));
+            pt: fec_payload_type & 0x7F,
+            ssrc: fec_ssrc,
+        };
         self
     }
 
@@ -206,7 +292,13 @@ impl UdpSink {
     /// protects up to 109 packets via the variable-length mask, beyond ULPFEC's
     /// 16; recovers a single loss per group at the receiver with no round trip.
     pub fn with_flexfec(mut self, group: usize, fec_payload_type: u8, fec_ssrc: u32) -> Self {
-        self.fec = FecMode::FlexFec(FlexFecEncoder::new(group, fec_payload_type, fec_ssrc));
+        self.fec_config = FecConfig {
+            kind: FecKind::FlexFec,
+            columns: group,
+            rows: 1,
+            pt: fec_payload_type & 0x7F,
+            ssrc: fec_ssrc,
+        };
         self
     }
 
@@ -221,9 +313,13 @@ impl UdpSink {
         fec_payload_type: u8,
         fec_ssrc: u32,
     ) -> Self {
-        self.fec = FecMode::FlexFec(
-            FlexFecEncoder::new(group, fec_payload_type, fec_ssrc).with_rows(rows),
-        );
+        self.fec_config = FecConfig {
+            kind: FecKind::FlexFec,
+            columns: group,
+            rows,
+            pt: fec_payload_type & 0x7F,
+            ssrc: fec_ssrc,
+        };
         self
     }
 
@@ -361,6 +457,7 @@ impl AsyncElement for UdpSink {
         self.packetizer = Some(
             RtpH264Packetizer::new(self.payload_type, self.ssrc).with_max_payload(self.max_payload),
         );
+        self.fec = self.fec_config.build();
         let socket = StdUdpSocket::bind(("0.0.0.0", 0)).map_err(io_err)?;
         socket.set_nonblocking(true).map_err(io_err)?;
         socket.connect(self.dest).map_err(io_err)?;
@@ -390,6 +487,30 @@ impl AsyncElement for UdpSink {
             )
             .with_range("0", "127"),
             PropertySpec::new("ssrc", PropKind::Uint, "RTP synchronization source id"),
+            PropertySpec::new("fec-mode", PropKind::Str, "forward error correction scheme")
+                .with_default("none")
+                .with_enum_values("none | ulpfec | ulpfec-interleaved | flexfec"),
+            PropertySpec::new(
+                "fec-columns",
+                PropKind::Uint,
+                "FEC block row length L (ULPFEC/FlexFEC group, or interleave stride)",
+            )
+            .with_default("4")
+            .with_range("1", "109"),
+            PropertySpec::new(
+                "fec-rows",
+                PropKind::Uint,
+                "FEC block depth D (1 = 1-D row repairs only; >1 adds column repairs)",
+            )
+            .with_default("1")
+            .with_range("1", "109"),
+            PropertySpec::new(
+                "fec-payload-type",
+                PropKind::Uint,
+                "RTP payload type of the FEC repair stream (0..=127)",
+            )
+            .with_range("0", "127"),
+            PropertySpec::new("fec-ssrc", PropKind::Uint, "SSRC of the FEC repair stream"),
         ];
         PROPS
     }
@@ -411,6 +532,44 @@ impl AsyncElement for UdpSink {
                 self.ssrc = value.as_uint().ok_or(PropError::Type)? as u32;
                 Ok(())
             }
+            "fec-mode" => {
+                self.fec_config.kind = match value.as_str().ok_or(PropError::Type)? {
+                    "none" | "off" => FecKind::None,
+                    "ulpfec" => FecKind::Ulpfec,
+                    "ulpfec-interleaved" => FecKind::UlpfecInterleaved,
+                    "flexfec" => FecKind::FlexFec,
+                    _ => return Err(PropError::Value),
+                };
+                Ok(())
+            }
+            "fec-columns" => {
+                let c = value.as_uint().ok_or(PropError::Type)?;
+                if !(1..=109).contains(&c) {
+                    return Err(PropError::Value);
+                }
+                self.fec_config.columns = c as usize;
+                Ok(())
+            }
+            "fec-rows" => {
+                let r = value.as_uint().ok_or(PropError::Type)?;
+                if !(1..=109).contains(&r) {
+                    return Err(PropError::Value);
+                }
+                self.fec_config.rows = r as usize;
+                Ok(())
+            }
+            "fec-payload-type" => {
+                let pt = value.as_uint().ok_or(PropError::Type)?;
+                if pt > 127 {
+                    return Err(PropError::Value);
+                }
+                self.fec_config.pt = pt as u8;
+                Ok(())
+            }
+            "fec-ssrc" => {
+                self.fec_config.ssrc = value.as_uint().ok_or(PropError::Type)? as u32;
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -422,6 +581,11 @@ impl AsyncElement for UdpSink {
         match name {
             "payload-type" => Some(PropValue::Uint(self.payload_type as u64)),
             "ssrc" => Some(PropValue::Uint(self.ssrc as u64)),
+            "fec-mode" => Some(PropValue::Str(self.fec_config.mode_str().into())),
+            "fec-columns" => Some(PropValue::Uint(self.fec_config.columns as u64)),
+            "fec-rows" => Some(PropValue::Uint(self.fec_config.rows as u64)),
+            "fec-payload-type" => Some(PropValue::Uint(self.fec_config.pt as u64)),
+            "fec-ssrc" => Some(PropValue::Uint(self.fec_config.ssrc as u64)),
             _ => None,
         }
     }
@@ -434,14 +598,14 @@ impl AsyncElement for UdpSink {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
                     let timestamp = Self::rtp_timestamp(frame.timing.pts_ns);
                     self.last_rtp_ts = timestamp;
                     let packets = {
                         let packetizer = self.packetizer.as_mut().ok_or(G2gError::NotConfigured)?;
-                        packetizer.packetize(slice.as_slice(), timestamp)
+                        packetizer.packetize(slice, timestamp)
                     };
                     self.ensure_socket()?;
                     // Generate any ULPFEC repair packets for the just-built media
