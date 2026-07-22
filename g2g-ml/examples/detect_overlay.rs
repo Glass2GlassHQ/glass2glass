@@ -404,7 +404,7 @@ impl AsyncElement for CaptureSink {
         Box::pin(async move {
             if let PipelinePacket::DataFrame(frame) = packet {
                 if let Some(slice) = frame.domain.as_system_slice() {
-                    self.last = Some(slice.as_slice().to_vec());
+                    self.last = Some(slice.to_vec());
                 }
             }
             Ok(())

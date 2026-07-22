@@ -616,7 +616,7 @@ impl AsyncElement for WaylandSink {
                     #[cfg(feature = "offload")]
                     let xrgb = {
                         let (w, h) = (self.width, self.height);
-                        let src: Vec<u8> = slice.as_slice().to_vec();
+                        let src: Vec<u8> = slice.to_vec();
                         crate::offload::run_blocking(move || nv12_to_xrgb8888(&src, w, h)).await?
                     };
                     #[cfg(not(feature = "offload"))]

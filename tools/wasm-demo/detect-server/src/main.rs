@@ -54,7 +54,7 @@ impl OutputSink for OneFrame {
             if let PipelinePacket::DataFrame(f) = packet {
                 if self.bytes.is_none() {
                     if let Some(s) = f.domain.as_system_slice() {
-                        self.bytes = Some(s.as_slice().to_vec());
+                        self.bytes = Some(s.to_vec());
                     }
                 }
             }

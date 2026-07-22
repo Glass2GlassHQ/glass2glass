@@ -85,7 +85,7 @@ impl OutputSink for FrameGrab {
             if let PipelinePacket::DataFrame(f) = packet {
                 if let Some(s) = f.domain.as_system_slice() {
                     if self.first.is_none() {
-                        self.first = Some(s.as_slice().to_vec());
+                        self.first = Some(s.to_vec());
                     }
                     self.count += 1;
                 }
@@ -109,7 +109,7 @@ impl OutputSink for OneFrame {
             if let PipelinePacket::DataFrame(f) = packet {
                 if self.bytes.is_none() {
                     if let Some(s) = f.domain.as_system_slice() {
-                        self.bytes = Some(s.as_slice().to_vec());
+                        self.bytes = Some(s.to_vec());
                     }
                 }
             }

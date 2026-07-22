@@ -20,7 +20,7 @@ use g2g_core::error::G2gError;
 use g2g_core::mediaclock::MediaClock;
 use g2g_core::rtp::RtpHeader;
 use g2g_core::staticpool::StaticLendRing;
-use g2g_core::{drive_ready, run_source_transform_sink, Chain, Frame, MemoryDomain, StaticSink};
+use g2g_core::{drive_ready, run_source_transform_sink, Chain, Frame, StaticSink};
 use g2g_mcu::{G711Dec, JitterBuffer, Law, PacketReceiver, RtpSrc};
 
 #[panic_handler]
@@ -95,7 +95,7 @@ struct HashSink {
 impl StaticSink for HashSink {
     async fn consume(&mut self, frame: Frame) -> Result<(), G2gError> {
         if let Some(s) = frame.domain.as_system_slice() {
-            for &b in s.as_slice() {
+            for &b in s {
                 self.acc = roll(self.acc, b);
             }
         }

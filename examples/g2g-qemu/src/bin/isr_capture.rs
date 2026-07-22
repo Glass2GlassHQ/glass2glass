@@ -29,7 +29,7 @@ use cortex_m_semihosting::{debug, hio};
 
 use g2g_core::staticpool::StaticLendRing;
 use g2g_core::{
-    drive_ready, run_source_transform_sink, step_source_sink, Frame, MemoryDomain, SinkChain,
+    drive_ready, run_source_transform_sink, step_source_sink, Frame, SinkChain,
     SpscCaptureSrc, SpscFrameRing, StaticSink, Step,
 };
 use g2g_mcu::{FrameGrabber, G711Enc, GrabberSrc, Law};
@@ -100,7 +100,7 @@ struct SumSink {
 impl StaticSink for SumSink {
     async fn consume(&mut self, frame: Frame) -> Result<(), g2g_core::error::G2gError> {
         if let Some(s) = frame.domain.as_system_slice() {
-            for &b in s.as_slice() {
+            for &b in s {
                 self.sum = self.sum.wrapping_add(b as u64);
             }
         }

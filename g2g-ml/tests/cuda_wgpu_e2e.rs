@@ -127,7 +127,6 @@ fn logits_from(frame: &Frame) -> Vec<f32> {
         );
     };
     slice
-        .as_slice()
         .chunks_exact(4)
         .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
         .collect()
@@ -305,7 +304,7 @@ async fn cuda_to_wgpu_zero_copy_matches_cpu_reference() {
         let Some(slice) = nv12.domain.as_system_slice() else {
             panic!("System NV12")
         };
-        let cpu_tensor = nv12_to_rgb_tensor(slice.as_slice(), w as usize, h as usize);
+        let cpu_tensor = nv12_to_rgb_tensor(slice, w as usize, h as usize);
         let expected = linear_reference(&cpu_tensor, &weights, &bias);
 
         // Zero-copy: bridge -> preprocess (surface-import) -> infer.

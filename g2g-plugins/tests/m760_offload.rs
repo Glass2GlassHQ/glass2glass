@@ -61,7 +61,7 @@ impl AsyncElement for CapturingSink {
                 let Some(slice) = frame.domain.as_system_slice() else {
                     return Err(G2gError::UnsupportedDomain);
                 };
-                self.frames.lock().unwrap().push(slice.as_slice().to_vec());
+                self.frames.lock().unwrap().push(slice.to_vec());
             }
             Ok(())
         })

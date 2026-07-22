@@ -116,7 +116,6 @@ fn logits_from_system(f: &Frame) -> Vec<f32> {
         );
     };
     slice
-        .as_slice()
         .chunks_exact(4)
         .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
         .collect()
@@ -290,7 +289,7 @@ async fn cuda_to_wgpu_scaffold_matches_cpu_reference() {
         let Some(slice) = nv12_frame.domain.as_system_slice() else {
             panic!("CudaDownload must produce a System NV12 frame");
         };
-        let nv12_bytes = slice.as_slice().to_vec();
+        let nv12_bytes = slice.to_vec();
 
         // NV12 -> GPU RGB tensor -> logits, tensor never leaving the device
         // between the two GPU elements.

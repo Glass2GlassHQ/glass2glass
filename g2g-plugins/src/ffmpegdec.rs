@@ -1162,7 +1162,7 @@ impl AsyncElement for FfmpegH264Dec {
                     #[cfg(feature = "offload")]
                     {
                         let cfg = self.decode_config();
-                        let bitstream: Vec<u8> = slice.as_slice().to_vec();
+                        let bitstream: Vec<u8> = slice.to_vec();
                         let pts_ns = frame.timing.pts_ns;
                         let arrival_ns = frame.timing.arrival_ns;
                         let mut bundle = OffloadDecode {
