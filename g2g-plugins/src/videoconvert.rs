@@ -177,6 +177,13 @@ impl AsyncElement for VideoConvert {
         Err(G2gError::CapsMismatch)
     }
 
+    // M759: a format-only convert preserves geometry, so normalized meta rides
+    // through unchanged (Copy keeps everything).
+    #[cfg(feature = "metadata")]
+    fn meta_transform(&self) -> Option<g2g_core::meta::Transform> {
+        Some(g2g_core::meta::Transform::Copy)
+    }
+
     /// Native `DerivedOutput`: any supported raw input maps to the target
     /// format at the same dims/framerate.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {

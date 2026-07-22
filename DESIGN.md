@@ -2740,6 +2740,23 @@ picture. Two pieces, both `no_std`-friendly:
   `copy_func` analog): `FrameMetaSet::get_mut` deep-copies a shared entry before
   the mutable borrow, so a branch editing its analytics never aliases the
   sibling. Still a ZST no-op when the `metadata` feature is off.
+- **Metadata through a linear transform.** Fan-out shares the same frame, so
+  meta rides for free; a transform that emits a *new* frame (videoscale,
+  videoconvert, videocrop, a re-encode) would otherwise drop it. An element
+  declares `AsyncElement::meta_transform() -> Option<Transform>`; when it returns
+  `Some(t)`, the graph runner clones the input frame's `FrameMetaSet`, applies
+  `propagate(t)`, and stashes the survivors on the transform arm's output
+  adapter, which attaches them to any outgoing `DataFrame` whose own meta is
+  empty (element-authored meta is never overwritten, and a Drop verdict that
+  empties the set clears the stash so nothing stale leaks). `None` (the default)
+  opts out: a pass-through that forwards the same frame already carries its meta,
+  and an element that produces none wants nothing added. The stash is recomputed
+  per input frame, so association is exact for a 1-in-1-out transform and
+  most-recent-input for a pipelined one (an encoder with lookahead). The standard
+  elements declare the obvious mapping: videoconvert `Copy`, videoscale `Scale`,
+  videocrop `Crop`, the software video encoders (av1enc, vpxenc, ffmpegenc,
+  mjpegenc) `Encode`. Still a no-op when the `metadata` feature is off (the
+  method and stash are cfg'd out, so the baseline build is byte-identical).
 - **The overlay.** The visible end of the detector chain reads the
   `AnalyticsMeta` carried onto the *display* frame (via the fan-out path) and
   draws each box, so `decode -> tee -> {detect, video} -> overlay -> display`

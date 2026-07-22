@@ -222,6 +222,13 @@ impl VpxEnc {
 }
 
 impl AsyncElement for VpxEnc {
+    // M759: a re-encode to a compressed codec drops pixel-derived meta
+    // (AnalyticsMeta); opaque side-data (BlobMeta) rides through.
+    #[cfg(feature = "metadata")]
+    fn meta_transform(&self) -> Option<g2g_core::meta::Transform> {
+        Some(g2g_core::meta::Transform::Encode)
+    }
+
     // Both signals are honored by an encoder rebuild (see `emit`), so they
     // stop here rather than relaying past the encoder.
     fn handles_keyframe_requests(&self) -> bool {

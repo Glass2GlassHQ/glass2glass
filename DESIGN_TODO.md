@@ -74,14 +74,9 @@ Sequenced next:
   seam: `PtpServo` / `PtpClock` `sync_exchange` take `(TaiNs, RefNs, RefNs, TaiNs)`
   and `observe_master` takes `(RefNs, TaiNs)`, so master and reference can no longer
   be swapped where the meaningless-offset mixing bug lived. No remaining work.
-- **Metadata propagation contract (already in place).** The `Transform` /
-  `Propagation` enums, `FrameMeta::propagate`, and `FrameMetaSet::propagate` exist,
-  and `AnalyticsMeta` / `BlobMeta` declare honest drops (drop on `Encode`, keep on
-  `Scale`). Remaining: framework-level *auto-application*, the runner carrying an
-  input frame's meta onto a transform's output frames applying the element's declared
-  transform, so meta survives a linear transform, not only a tee. This lands with the
-  first non-analytics `FrameMeta` payload producer (captions / HDR / timecode still
-  ride bespoke paths). See "## Metadata".
+- **Metadata carriers.** Route captions / HDR / timecode through `FrameMeta` so
+  they ride the standard propagation path instead of the bespoke ones they take
+  today. See "## Metadata".
 
 ## Alloc-optional (heap-free) MCU core
 
@@ -770,7 +765,7 @@ _(No open parser items.)_
 
 - A `Segmentation` node (mask handle); more standard metas (`GstVideoMeta`-style
   strides, ROI).
-- `push` vs `pull` propagation across transforms (today push-only, explicit).
+- `pull`-based metadata propagation across transforms (push is auto-applied).
 - A turnkey windowed runner for `WgpuSink` (a winit/SCTK example that opens a
   window and drives the overlay -> sink graph; validate on a real display).
 - The native gst-`nvcodec`-style pair is done: `NvEnc` (zero-copy CUDA NV12 ->

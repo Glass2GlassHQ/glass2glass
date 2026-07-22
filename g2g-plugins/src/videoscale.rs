@@ -149,6 +149,12 @@ impl AsyncElement for VideoScale {
     where
         Self: 'a;
 
+    // M759: a geometry resample; normalized meta survives a scale (Scale keeps).
+    #[cfg(feature = "metadata")]
+    fn meta_transform(&self) -> Option<g2g_core::meta::Transform> {
+        Some(g2g_core::meta::Transform::Scale)
+    }
+
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         // input side only: any supported raw format at the upstream
         // geometry. The output geometry is the configured target, declared

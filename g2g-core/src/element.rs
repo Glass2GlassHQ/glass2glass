@@ -300,6 +300,21 @@ pub trait AsyncElement: ElementBound {
         input.clone()
     }
 
+    /// The metadata [`Transform`](crate::meta::Transform) this element applies to
+    /// per-frame metadata, or `None` to opt out (the default). When `Some(t)` the
+    /// runner clones each input frame's metadata,
+    /// [`propagate(t)`](crate::meta::FrameMetaSet::propagate)s it, and attaches
+    /// the survivors to output frames whose own metadata is empty
+    /// (element-authored meta is never overwritten). `None` means the element
+    /// carries meta through itself (a pass-through forwarding the same frame) or
+    /// produces none, so the runner does nothing. Association is exact for a
+    /// 1-in-1-out transform; a pipelined element gets most-recent-input
+    /// association. See DESIGN.md 5.4.
+    #[cfg(feature = "metadata")]
+    fn meta_transform(&self) -> Option<crate::meta::Transform> {
+        None
+    }
+
     /// M16 step 5b: declare this element's negotiation-time constraint
     /// when used as the **sink** of a chain. The default returns the
     /// legacy bridge (`LegacySink` wrapping today's `intercept_caps`).
@@ -419,6 +434,12 @@ pub trait DynAsyncElement: ElementBound {
     /// [`DomainSet::ALL`].
     fn input_domains(&self) -> DomainSet {
         DomainSet::ALL
+    }
+
+    /// Dyn-safe mirror of [`AsyncElement::meta_transform`]. Default `None`.
+    #[cfg(feature = "metadata")]
+    fn meta_transform(&self) -> Option<crate::meta::Transform> {
+        None
     }
 
     /// Dyn-safe mirror of [`AsyncElement::provide_clock`], so an interior
@@ -556,6 +577,11 @@ impl<T: AsyncElement> DynAsyncElement for T {
         AsyncElement::input_domains(self)
     }
 
+    #[cfg(feature = "metadata")]
+    fn meta_transform(&self) -> Option<crate::meta::Transform> {
+        AsyncElement::meta_transform(self)
+    }
+
     fn provide_clock(&self) -> Option<ClockCandidate> {
         AsyncElement::provide_clock(self)
     }
@@ -666,6 +692,11 @@ impl<'b> DynAsyncElement for &'b mut (dyn DynAsyncElement + 'b) {
 
     fn input_domains(&self) -> DomainSet {
         (**self).input_domains()
+    }
+
+    #[cfg(feature = "metadata")]
+    fn meta_transform(&self) -> Option<crate::meta::Transform> {
+        (**self).meta_transform()
     }
 
     fn provide_clock(&self) -> Option<ClockCandidate> {

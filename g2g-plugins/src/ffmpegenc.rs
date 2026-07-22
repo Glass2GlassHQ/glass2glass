@@ -427,6 +427,13 @@ fn copy_plane(dst: &mut [u8], stride: usize, src: &[u8], w: usize, h: usize) {
 }
 
 impl AsyncElement for FfmpegH264Enc {
+    // M759: a re-encode to a compressed codec drops pixel-derived meta
+    // (AnalyticsMeta); opaque side-data (BlobMeta) rides through.
+    #[cfg(feature = "metadata")]
+    fn meta_transform(&self) -> Option<g2g_core::meta::Transform> {
+        Some(g2g_core::meta::Transform::Encode)
+    }
+
     // Bitrate is recorded (a live reopen retarget is deferred), but the
     // encoder is still the semantic consumer, so the signal stops here.
     fn handles_keyframe_requests(&self) -> bool {

@@ -144,6 +144,12 @@ impl AsyncElement for VideoCrop {
     where
         Self: 'a;
 
+    // M759: a spatial crop; meta propagates per its own Crop policy.
+    #[cfg(feature = "metadata")]
+    fn meta_transform(&self) -> Option<g2g_core::meta::Transform> {
+        Some(g2g_core::meta::Transform::Crop)
+    }
+
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         for format in FORMATS {
             let candidate = Caps::RawVideo {

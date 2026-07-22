@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M759: per-frame metadata survives a linear transform, not just a tee: an element declares a `meta_transform` and the runner propagates and re-attaches the surviving meta to its fresh outputs.
+
 - the `revideo` streaming-adapter module is renamed `streamdec` (API rename, no behavior change).
 
 - M758: FlexFEC gains 2-D (row + column) protection, so a burst of up to a full row of consecutive losses recovers via the column repairs.

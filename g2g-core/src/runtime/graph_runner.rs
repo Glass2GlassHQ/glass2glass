@@ -2477,6 +2477,25 @@ async fn transform_arm<'a>(
                 }
             }
             Some(packet) => {
+                // M759: if this element opts into metadata auto-application,
+                // derive the propagated set from this input frame and stash it on
+                // the adapter, which attaches it to fresh (meta-empty) outputs.
+                // Recomputed per input frame: exact for a 1-in-1-out transform,
+                // most-recent-input association for a pipelined one. Cloning the
+                // set is cheap (Arc refcount bumps); an empty result clears the
+                // stash so a Drop verdict never leaks a stale set.
+                #[cfg(feature = "metadata")]
+                if let (Some(t), PipelinePacket::DataFrame(frame)) =
+                    (elem.meta_transform(), &packet)
+                {
+                    if frame.meta.is_empty() {
+                        adapter.set_meta_stash(None);
+                    } else {
+                        let mut propagated = frame.meta.clone();
+                        propagated.propagate(t);
+                        adapter.set_meta_stash((!propagated.is_empty()).then_some(propagated));
+                    }
+                }
                 // M399: time the data-frame `process()` and sample input fill;
                 // control packets (segment/flush) are excluded so the histogram
                 // reflects real per-frame work, not cheap signalling.
