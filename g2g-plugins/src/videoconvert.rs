@@ -282,14 +282,30 @@ impl AsyncElement for VideoConvert {
                         return Err(G2gError::UnsupportedDomain);
                     };
                     let src = slice.as_slice();
-                    if src.len() < frame_byte_size(format, w, h) {
+                    let needed = frame_byte_size(format, w, h);
+                    if src.len() < needed {
                         return Err(G2gError::CapsMismatch);
                     }
                     // Effective output format: property, or caps-resolved (auto).
                     // Auto without a delivered output caps (a runner that doesn't
                     // call configure_output) is unfixed.
                     let out_fmt = self.out_format().ok_or(G2gError::NotConfigured)?;
-                    let converted = convert(src, format, out_fmt, w as usize, h as usize);
+                    let (wu, hu) = (w as usize, h as usize);
+                    // M760: offload the pixel convert onto tokio's blocking pool so
+                    // the cooperative runner keeps servicing sibling arms while it
+                    // runs. Own the input bytes (Frame is not Send: it can hold a
+                    // GPU domain) so the closure is Send; the extra copy is cheap
+                    // next to the per-pixel color math.
+                    #[cfg(feature = "offload")]
+                    let converted = {
+                        let owned: Vec<u8> = src[..needed].to_vec();
+                        crate::offload::run_blocking(move || {
+                            convert(&owned, format, out_fmt, wu, hu)
+                        })
+                        .await
+                    };
+                    #[cfg(not(feature = "offload"))]
+                    let converted = convert(src, format, out_fmt, wu, hu);
 
                     // A convert changes format/geometry but not rate: carry the
                     // input framerate so a fixating downstream peer (e.g. a

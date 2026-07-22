@@ -536,6 +536,8 @@ impl FfmpegH264Dec {
     /// Send one access unit to the decoder and drain whatever it is ready
     /// to release. libavcodec buffers for B-frame reordering, so early
     /// inputs commonly yield zero outputs.
+    // Offload builds call `feed_access_unit_into` directly from `process`.
+    #[cfg(not(feature = "offload"))]
     fn feed_access_unit(
         &mut self,
         bitstream: &[u8],
@@ -543,116 +545,190 @@ impl FfmpegH264Dec {
         arrival_ns: u64,
         decoded: &mut Vec<DecodedPicture>,
     ) -> Result<(), G2gError> {
-        let mut packet = Packet::copy(bitstream);
-        // libavcodec uses the packet's PTS verbatim; the unit is opaque to
-        // the codec layer and is echoed back on the decoded frame. We feed
-        // nanoseconds straight through.
-        packet.set_pts(Some(pts_ns as i64));
-        packet.set_dts(Some(pts_ns as i64));
-        if arrival_ns != 0 {
-            self.pts_to_arrival.insert(pts_ns, arrival_ns);
-            // A decoder-dropped frame never echoes its pts back, so its entry
-            // would linger; cap the map and evict the oldest, losing only a
-            // latency sample for a frame the decoder discarded.
-            while self.pts_to_arrival.len() > MAX_PENDING_ARRIVALS {
-                self.pts_to_arrival.pop_first();
-            }
-        }
-
+        let cfg = self.decode_config();
         let decoder = self.decoder.as_mut().ok_or(G2gError::NotConfigured)?;
-        decoder
-            .send_packet(&packet)
-            .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
-        self.drain_frames(decoded)
+        feed_access_unit_into(
+            decoder,
+            &mut self.pts_to_arrival,
+            &cfg,
+            bitstream,
+            pts_ns,
+            arrival_ns,
+            decoded,
+        )
     }
 
     fn drain_frames(&mut self, decoded: &mut Vec<DecodedPicture>) -> Result<(), G2gError> {
-        let format = self.output_format;
-        let outputs_cuda = self.outputs_cuda();
-        let transfers_from_hw = matches!(self.backend, Backend::Vaapi);
-        let cuda_context = self.cuda_context;
+        let cfg = self.decode_config();
         let decoder = self.decoder.as_mut().ok_or(G2gError::NotConfigured)?;
-        loop {
-            // Fresh frame per iteration: the CUDA path moves the whole
-            // `AVFrame` into the emitted buffer's keep-alive, so it cannot be
-            // a reused scratch frame. The system path copies out and drops it.
-            let mut frame = FfVideo::empty();
-            match decoder.receive_frame(&mut frame) {
-                Ok(()) => {
-                    // Apply the H.264/H.265 conformance cropping window to the
-                    // display size. libavcodec leaves an alignment-breaking left/
-                    // top crop unapplied by default, so a cropped stream (e.g.
-                    // coded 352x288 -> display 300x168) would otherwise be emitted
-                    // at the wrong geometry. `UNALIGNED` forces the exact crop.
-                    // Software path only: the GPU backends keep opaque surfaces
-                    // whose crop is resolved when downloaded / mapped.
-                    if !outputs_cuda && !transfers_from_hw {
-                        // SAFETY: `frame` is a valid decoded AVFrame; the call only
-                        // reads its `crop_*` fields and offsets the data pointers.
-                        unsafe {
-                            ffmpeg::ffi::av_frame_apply_cropping(
-                                frame.as_mut_ptr(),
-                                ffmpeg::ffi::AV_FRAME_CROP_UNALIGNED as i32,
-                            );
-                        }
-                    }
-                    // libavcodec returns the PTS we fed in (or AV_NOPTS_VALUE
-                    // = INT64_MIN if it could not propagate one); treat the
-                    // sentinel as zero so we don't return a wild timestamp.
-                    let pts_ns = match frame.pts() {
-                        Some(p) if p >= 0 => p as u64,
-                        _ => 0,
-                    };
-                    let width = frame.width();
-                    let height = frame.height();
-                    // `Auto` resolves to each frame's native chroma (a fixed
-                    // request passes through), so the packed payload and the
-                    // emitted caps agree. Resolved per backend against the real
-                    // source pixel format (the CUDA path is always NV12; VAAPI
-                    // resolves against the downloaded system frame).
-                    let (payload, resolved) = if outputs_cuda {
-                        // SAFETY: the NvdecCuda backend decodes into
-                        // `AV_PIX_FMT_CUDA` frames; `cuda_context` is the
-                        // `CUcontext` its hwdevice was created with. The
-                        // helper reads the device pointers and moves the
-                        // frame into the buffer's keep-alive.
-                        let buf = unsafe { cuda_buffer_from_frame(frame, cuda_context)? };
-                        (DecodedPayload::Cuda(buf), OutputFormat::Nv12)
-                    } else if transfers_from_hw {
-                        // VAAPI: the decoded frame is a GPU surface
-                        // (AV_PIX_FMT_VAAPI). Download it into a system-memory
-                        // frame (NV12 on radeonsi / Intel), then pack like the
-                        // software path.
-                        let sw = transfer_hw_to_sw(&frame)?;
-                        let resolved = resolve_output_format(format, sw.format())?;
-                        (DecodedPayload::System(copy_yuv(&sw, resolved)?), resolved)
-                    } else {
-                        let resolved = resolve_output_format(format, frame.format())?;
-                        (
-                            DecodedPayload::System(copy_yuv(&frame, resolved)?),
-                            resolved,
-                        )
-                    };
-                    let arrival_ns = self.pts_to_arrival.remove(&pts_ns).unwrap_or(0);
-                    decoded.push(DecodedPicture {
-                        payload,
-                        width,
-                        height,
-                        format: resolved,
-                        pts_ns,
-                        arrival_ns,
-                    });
-                }
-                Err(FfError::Other { errno }) if errno == ffmpeg::error::EAGAIN => {
-                    // Need more input.
-                    return Ok(());
-                }
-                Err(FfError::Eof) => return Ok(()),
-                Err(_) => return Err(G2gError::Hardware(HardwareError::Other)),
-            }
+        drain_frames_into(decoder, &mut self.pts_to_arrival, &cfg, decoded)
+    }
+
+    fn decode_config(&self) -> DecodeConfig {
+        DecodeConfig {
+            output_format: self.output_format,
+            backend: self.backend,
+            cuda_context: self.cuda_context,
+        }
+    }
+}
+
+/// Config the offloadable decode helpers read instead of `&self`, so they can
+/// run on tokio's blocking pool without borrowing the element (all `Copy`).
+#[derive(Clone, Copy)]
+struct DecodeConfig {
+    output_format: OutputFormat,
+    backend: Backend,
+    cuda_context: u64,
+}
+
+/// State the M760 offload moves onto the blocking pool and hands back: the
+/// decoder, its pts->arrival map, the decoded pictures, and the decode result.
+#[cfg(feature = "offload")]
+struct OffloadDecode {
+    decoder: Option<ffmpeg::decoder::Video>,
+    pts_to_arrival: alloc::collections::BTreeMap<u64, u64>,
+    decoded: Vec<DecodedPicture>,
+    result: Result<(), G2gError>,
+}
+
+// SAFETY: the bundle holds `!Send` libavcodec state (the decoder's raw
+// `AVCodecContext`, and a decoded picture's `OwnedCudaBuffer` keeps a raw
+// `AVFrame` alive). The offload moves the whole bundle to one blocking-pool
+// thread, which is the sole thread that touches it until `run_blocking` hands
+// it back; the arm future is suspended at the `await` meanwhile and the bundle
+// is owned (not aliased), so a dropped future never leaves the task pointing at
+// freed state. Same one-thread-at-a-time contract as the element's `impl Send`.
+#[cfg(feature = "offload")]
+unsafe impl Send for OffloadDecode {}
+
+/// Feed one access unit to the decoder and drain whatever it is ready to
+/// release. libavcodec buffers for B-frame reordering, so early inputs commonly
+/// yield zero outputs. Free fn (not a method) so the offload path can move the
+/// decoder + pts map into a blocking-pool closure; `feed_access_unit` delegates.
+fn feed_access_unit_into(
+    decoder: &mut ffmpeg::decoder::Video,
+    pts_to_arrival: &mut alloc::collections::BTreeMap<u64, u64>,
+    cfg: &DecodeConfig,
+    bitstream: &[u8],
+    pts_ns: u64,
+    arrival_ns: u64,
+    decoded: &mut Vec<DecodedPicture>,
+) -> Result<(), G2gError> {
+    let mut packet = Packet::copy(bitstream);
+    // libavcodec uses the packet's PTS verbatim; the unit is opaque to
+    // the codec layer and is echoed back on the decoded frame. We feed
+    // nanoseconds straight through.
+    packet.set_pts(Some(pts_ns as i64));
+    packet.set_dts(Some(pts_ns as i64));
+    if arrival_ns != 0 {
+        pts_to_arrival.insert(pts_ns, arrival_ns);
+        // A decoder-dropped frame never echoes its pts back, so its entry
+        // would linger; cap the map and evict the oldest, losing only a
+        // latency sample for a frame the decoder discarded.
+        while pts_to_arrival.len() > MAX_PENDING_ARRIVALS {
+            pts_to_arrival.pop_first();
         }
     }
 
+    decoder
+        .send_packet(&packet)
+        .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+    drain_frames_into(decoder, pts_to_arrival, cfg, decoded)
+}
+
+fn drain_frames_into(
+    decoder: &mut ffmpeg::decoder::Video,
+    pts_to_arrival: &mut alloc::collections::BTreeMap<u64, u64>,
+    cfg: &DecodeConfig,
+    decoded: &mut Vec<DecodedPicture>,
+) -> Result<(), G2gError> {
+    let format = cfg.output_format;
+    let outputs_cuda = matches!(cfg.backend, Backend::NvdecCuda);
+    let transfers_from_hw = matches!(cfg.backend, Backend::Vaapi);
+    let cuda_context = cfg.cuda_context;
+    loop {
+        // Fresh frame per iteration: the CUDA path moves the whole
+        // `AVFrame` into the emitted buffer's keep-alive, so it cannot be
+        // a reused scratch frame. The system path copies out and drops it.
+        let mut frame = FfVideo::empty();
+        match decoder.receive_frame(&mut frame) {
+            Ok(()) => {
+                // Apply the H.264/H.265 conformance cropping window to the
+                // display size. libavcodec leaves an alignment-breaking left/
+                // top crop unapplied by default, so a cropped stream (e.g.
+                // coded 352x288 -> display 300x168) would otherwise be emitted
+                // at the wrong geometry. `UNALIGNED` forces the exact crop.
+                // Software path only: the GPU backends keep opaque surfaces
+                // whose crop is resolved when downloaded / mapped.
+                if !outputs_cuda && !transfers_from_hw {
+                    // SAFETY: `frame` is a valid decoded AVFrame; the call only
+                    // reads its `crop_*` fields and offsets the data pointers.
+                    unsafe {
+                        ffmpeg::ffi::av_frame_apply_cropping(
+                            frame.as_mut_ptr(),
+                            ffmpeg::ffi::AV_FRAME_CROP_UNALIGNED as i32,
+                        );
+                    }
+                }
+                // libavcodec returns the PTS we fed in (or AV_NOPTS_VALUE
+                // = INT64_MIN if it could not propagate one); treat the
+                // sentinel as zero so we don't return a wild timestamp.
+                let pts_ns = match frame.pts() {
+                    Some(p) if p >= 0 => p as u64,
+                    _ => 0,
+                };
+                let width = frame.width();
+                let height = frame.height();
+                // `Auto` resolves to each frame's native chroma (a fixed
+                // request passes through), so the packed payload and the
+                // emitted caps agree. Resolved per backend against the real
+                // source pixel format (the CUDA path is always NV12; VAAPI
+                // resolves against the downloaded system frame).
+                let (payload, resolved) = if outputs_cuda {
+                    // SAFETY: the NvdecCuda backend decodes into
+                    // `AV_PIX_FMT_CUDA` frames; `cuda_context` is the
+                    // `CUcontext` its hwdevice was created with. The
+                    // helper reads the device pointers and moves the
+                    // frame into the buffer's keep-alive.
+                    let buf = unsafe { cuda_buffer_from_frame(frame, cuda_context)? };
+                    (DecodedPayload::Cuda(buf), OutputFormat::Nv12)
+                } else if transfers_from_hw {
+                    // VAAPI: the decoded frame is a GPU surface
+                    // (AV_PIX_FMT_VAAPI). Download it into a system-memory
+                    // frame (NV12 on radeonsi / Intel), then pack like the
+                    // software path.
+                    let sw = transfer_hw_to_sw(&frame)?;
+                    let resolved = resolve_output_format(format, sw.format())?;
+                    (DecodedPayload::System(copy_yuv(&sw, resolved)?), resolved)
+                } else {
+                    let resolved = resolve_output_format(format, frame.format())?;
+                    (
+                        DecodedPayload::System(copy_yuv(&frame, resolved)?),
+                        resolved,
+                    )
+                };
+                let arrival_ns = pts_to_arrival.remove(&pts_ns).unwrap_or(0);
+                decoded.push(DecodedPicture {
+                    payload,
+                    width,
+                    height,
+                    format: resolved,
+                    pts_ns,
+                    arrival_ns,
+                });
+            }
+            Err(FfError::Other { errno }) if errno == ffmpeg::error::EAGAIN => {
+                // Need more input.
+                return Ok(());
+            }
+            Err(FfError::Eof) => return Ok(()),
+            Err(_) => return Err(G2gError::Hardware(HardwareError::Other)),
+        }
+    }
+}
+
+impl FfmpegH264Dec {
     fn drain_eos(&mut self, decoded: &mut Vec<DecodedPicture>) -> Result<(), G2gError> {
         if let Some(d) = self.decoder.as_mut() {
             d.send_eof()
@@ -1076,6 +1152,48 @@ impl AsyncElement for FfmpegH264Dec {
                         };
                         self.open_decoder(codec_kind, extradata.as_deref(), reorder)?;
                     }
+                    // M760: offload the per-frame decode onto tokio's blocking
+                    // pool so the cooperative runner keeps servicing sibling arms
+                    // (the sink renders) while decode runs. Move the decoder + pts
+                    // map into the closure by value and hand them back, so a
+                    // dropped arm future never leaves the blocking task aliasing
+                    // freed state (the `!Send` context travels via `OffloadDecode`,
+                    // upholding the element's one-thread-at-a-time contract).
+                    #[cfg(feature = "offload")]
+                    {
+                        let cfg = self.decode_config();
+                        let bitstream: Vec<u8> = slice.as_slice().to_vec();
+                        let pts_ns = frame.timing.pts_ns;
+                        let arrival_ns = frame.timing.arrival_ns;
+                        let mut bundle = OffloadDecode {
+                            decoder: self.decoder.take(),
+                            pts_to_arrival: core::mem::take(&mut self.pts_to_arrival),
+                            decoded: Vec::new(),
+                            result: Ok(()),
+                        };
+                        bundle = crate::offload::run_blocking(move || {
+                            let mut b = bundle;
+                            b.result = match b.decoder.as_mut() {
+                                Some(decoder) => feed_access_unit_into(
+                                    decoder,
+                                    &mut b.pts_to_arrival,
+                                    &cfg,
+                                    &bitstream,
+                                    pts_ns,
+                                    arrival_ns,
+                                    &mut b.decoded,
+                                ),
+                                None => Err(G2gError::NotConfigured),
+                            };
+                            b
+                        })
+                        .await;
+                        self.decoder = bundle.decoder.take();
+                        self.pts_to_arrival = core::mem::take(&mut bundle.pts_to_arrival);
+                        bundle.result?;
+                        decoded = bundle.decoded;
+                    }
+                    #[cfg(not(feature = "offload"))]
                     self.feed_access_unit(
                         slice.as_slice(),
                         frame.timing.pts_ns,

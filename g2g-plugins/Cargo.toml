@@ -32,6 +32,11 @@ linux-full = [
 ]
 std = ["g2g-core/std", "dep:tokio"]
 multi-thread = ["g2g-core/multi-thread"]
+# Element-level cooperative offload (M760): a heavy synchronous element moves
+# its per-frame compute onto tokio's blocking pool (`offload::run_blocking`), so
+# the cooperative `run_graph` keeps servicing sibling arms while it runs, without
+# opting into `run_graph_threaded`. std + tokio's `rt` (spawn_blocking + Handle).
+offload = ["std", "tokio/rt"]
 # Declarative graph format (M578): load a `Graph` from a JSON document
 # (`declarative::from_json`), the structured sibling of the `gst-launch` text
 # parser. Pulls serde + serde_json; implies std (the Registry + loader are std).

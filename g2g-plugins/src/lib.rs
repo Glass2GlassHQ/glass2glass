@@ -56,6 +56,8 @@ pub mod inputselector;
 pub mod level;
 pub mod mux;
 pub mod nalparse;
+#[cfg(feature = "offload")]
+pub mod offload;
 pub mod opusparse;
 pub mod outputselector;
 pub mod progressreport;

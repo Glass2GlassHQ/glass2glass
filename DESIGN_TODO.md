@@ -262,20 +262,6 @@ Phased plan:
 - A hardware-backed end-to-end decode-through-`decodebin` run (current tests
   read templates / assert splicing, decode no real media).
 
-## Runtime / scheduling
-
-- **Cooperative-runner element offload (Approach C).** Opt-in cross-arm
-  parallelism now exists (`run_graph_threaded`, thread-per-arm, DESIGN.md
-  §4.13.3). The remaining win is for the *cooperative default* runner: offload a
-  heavy synchronous element's per-frame CPU (software `ffmpegdec` decode, the
-  waylandsink XRGB convert) via a runtime-guarded `spawn_blocking`, so the sink
-  renders while decode runs, without opting into `--threads`. `ffmpegdec` holds a
-  `!Send` `AVCodecContext`, so it needs a small `unsafe Send` offload wrapper
-  consistent with the element's existing single-threaded-access contract; a
-  pure-CPU transform (videoconvert) is a cleaner first target. Release-build perf
-  is adequate without either (1080p HLS A/V+subs holds 30 fps); debug builds
-  misrepresent it, so validate live runs with `--release`.
-
 ## Cleanup
 
 - **Adopt `MemoryDomain::as_system_slice()`.** ~50 sites hand-roll

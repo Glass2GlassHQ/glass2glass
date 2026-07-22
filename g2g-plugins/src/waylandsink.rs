@@ -609,6 +609,17 @@ impl AsyncElement for WaylandSink {
                         }
                     }
 
+                    // M760: offload the NV12 -> XRGB8888 convert (pure CPU pixel
+                    // math, not the Wayland calls) onto tokio's blocking pool so
+                    // the cooperative runner keeps servicing sibling arms while it
+                    // runs. Own the input bytes so the closure is Send.
+                    #[cfg(feature = "offload")]
+                    let xrgb = {
+                        let (w, h) = (self.width, self.height);
+                        let src: Vec<u8> = slice.as_slice().to_vec();
+                        crate::offload::run_blocking(move || nv12_to_xrgb8888(&src, w, h)).await?
+                    };
+                    #[cfg(not(feature = "offload"))]
                     let xrgb = nv12_to_xrgb8888(slice.as_slice(), self.width, self.height)?;
                     let tx = self.cmd_tx.as_ref().ok_or(G2gError::NotConfigured)?;
                     let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();

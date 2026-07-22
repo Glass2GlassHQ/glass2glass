@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M760: an `offload` feature lets a heavy synchronous element move its per-frame compute onto tokio's blocking pool, so the cooperative runner keeps rendering sibling arms without opting into thread-per-arm (`videoconvert`, `waylandsink`, `ffmpegdec`).
+
 - M759: per-frame metadata survives a linear transform, not just a tee: an element declares a `meta_transform` and the runner propagates and re-attaches the surviving meta to its fresh outputs.
 
 - the `revideo` streaming-adapter module is renamed `streamdec` (API rename, no behavior change).
