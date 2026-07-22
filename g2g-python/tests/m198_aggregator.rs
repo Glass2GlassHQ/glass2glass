@@ -138,11 +138,11 @@ fn batches_two_inputs_into_one_frame_with_metadata() {
     let PipelinePacket::DataFrame(out) = &sink.packets[0] else {
         panic!("expected a DataFrame");
     };
-    let MemoryDomain::System(slice) = &out.domain else {
+    let Some(slice) = out.domain.as_system_slice() else {
         panic!("expected System memory")
     };
     // Anchor byte 0 = sum of the batch's first bytes (10 + 20).
-    assert_eq!(slice.as_slice()[0], 30);
+    assert_eq!(slice[0], 30);
     // The batch attached one detection whose label is the batch size (2).
     let analytics = out
         .meta

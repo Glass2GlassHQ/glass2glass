@@ -118,8 +118,8 @@ impl AsyncElement for CollectingSink {
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
             if let PipelinePacket::DataFrame(frame) = packet {
-                if let MemoryDomain::System(slice) = &frame.domain {
-                    self.got.lock().unwrap().push(slice.as_slice().to_vec());
+                if let Some(slice) = frame.domain.as_system_slice() {
+                    self.got.lock().unwrap().push(slice.to_vec());
                 }
             }
             Ok(())

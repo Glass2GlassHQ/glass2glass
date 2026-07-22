@@ -144,7 +144,7 @@ impl StaticTransform for Touch {
     async fn process(&mut self, input: Frame) -> Result<Option<Frame>, G2gError> {
         // The payload must be exactly the negotiated tensor: a mismatch fails
         // the pipeline (and with it the checksum comparison) honestly.
-        if let MemoryDomain::System(s) = &input.domain {
+        if let Some(s) = input.domain.as_system_slice() {
             if s.as_slice().len() != self.frame_bytes {
                 return Err(G2gError::CapsMismatch);
             }

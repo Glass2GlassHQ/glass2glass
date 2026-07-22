@@ -175,10 +175,10 @@ fn element_decodes_stream_to_nv12_frames() {
 
     let nv12_len = 640 * 480 * 3 / 2;
     for (i, f) in frames.iter().enumerate() {
-        let MemoryDomain::System(slice) = &f.domain else {
+        let Some(slice) = f.domain.as_system_slice() else {
             panic!("frame {i} is not system memory");
         };
-        let bytes = slice.as_slice();
+        let bytes = slice;
         assert_eq!(bytes.len(), nv12_len, "frame {i} is a full NV12 buffer");
         // The luma plane (first 640*480 bytes) must be real, varied content.
         let luma = &bytes[..640 * 480];

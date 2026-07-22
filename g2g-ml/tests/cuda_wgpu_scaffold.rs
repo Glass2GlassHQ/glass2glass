@@ -109,7 +109,7 @@ fn weights_bias(k: usize) -> (Vec<f32>, Vec<f32>) {
 }
 
 fn logits_from_system(f: &Frame) -> Vec<f32> {
-    let MemoryDomain::System(slice) = &f.domain else {
+    let Some(slice) = f.domain.as_system_slice() else {
         panic!(
             "inference must read logits back to System, got {:?}",
             f.domain.kind()
@@ -287,7 +287,7 @@ async fn cuda_to_wgpu_scaffold_matches_cpu_reference() {
             .into_iter()
             .next()
             .expect("downloaded NV12");
-        let MemoryDomain::System(slice) = &nv12_frame.domain else {
+        let Some(slice) = nv12_frame.domain.as_system_slice() else {
             panic!("CudaDownload must produce a System NV12 frame");
         };
         let nv12_bytes = slice.as_slice().to_vec();

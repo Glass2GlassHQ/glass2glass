@@ -114,8 +114,8 @@ impl OutputSink for CaptureSink {
     ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
         Box::pin(async move {
             if let PipelinePacket::DataFrame(f) = packet {
-                if let MemoryDomain::System(s) = &f.domain {
-                    self.frames.push(s.as_slice().to_vec());
+                if let Some(s) = f.domain.as_system_slice() {
+                    self.frames.push(s.to_vec());
                 }
             }
             Ok(PushOutcome::Accepted)
@@ -241,8 +241,8 @@ async fn decoder_clamps_oversized_preskip_and_duration() {
         ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
             Box::pin(async move {
                 if let PipelinePacket::DataFrame(f) = packet {
-                    if let MemoryDomain::System(s) = &f.domain {
-                        self.packets.push(s.as_slice().to_vec());
+                    if let Some(s) = f.domain.as_system_slice() {
+                        self.packets.push(s.to_vec());
                     }
                 }
                 Ok(PushOutcome::Accepted)

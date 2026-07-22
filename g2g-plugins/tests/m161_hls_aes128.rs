@@ -15,9 +15,7 @@ use std::thread;
 
 use aes::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
 use g2g_core::runtime::SourceLoop;
-use g2g_core::{
-    ByteStreamEncoding, Caps, G2gError, MemoryDomain, OutputSink, PipelinePacket, PushOutcome,
-};
+use g2g_core::{ByteStreamEncoding, Caps, G2gError, OutputSink, PipelinePacket, PushOutcome};
 use g2g_plugins::hlssrc::HlsSrc;
 
 type Aes128CbcEnc = cbc::Encryptor<aes::Aes128>;
@@ -55,8 +53,8 @@ impl OutputSink for CaptureSink {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(f) => {
-                    if let MemoryDomain::System(s) = &f.domain {
-                        self.body.extend_from_slice(s.as_slice());
+                    if let Some(s) = f.domain.as_system_slice() {
+                        self.body.extend_from_slice(s);
                         self.frames += 1;
                     }
                 }

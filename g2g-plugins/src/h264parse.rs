@@ -920,10 +920,7 @@ mod tests {
         sink.packets
             .iter()
             .filter_map(|p| match p {
-                PipelinePacket::DataFrame(f) => match &f.domain {
-                    MemoryDomain::System(s) => Some(s.as_slice().to_vec()),
-                    _ => None,
-                },
+                PipelinePacket::DataFrame(f) => f.domain.as_system_slice().map(<[u8]>::to_vec),
                 _ => None,
             })
             .collect()

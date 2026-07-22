@@ -395,10 +395,10 @@ impl AsyncElement for VtDecode {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    self.feed(slice.as_slice(), frame.timing.pts_ns)?;
+                    self.feed(slice, frame.timing.pts_ns)?;
                     // Drain whatever the callback packed.
                     let decoded = match self.state.as_mut() {
                         Some(st) => core::mem::take(&mut st.collector.frames),

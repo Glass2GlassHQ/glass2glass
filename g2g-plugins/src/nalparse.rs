@@ -272,7 +272,7 @@ impl<C: NalCodec> NalParse<C> {
         frame: Frame,
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
-        let MemoryDomain::System(slice) = &frame.domain else {
+        let Some(bytes) = frame.domain.as_system_slice() else {
             out.push(PipelinePacket::DataFrame(frame)).await?;
             return Ok(());
         };
@@ -280,7 +280,6 @@ impl<C: NalCodec> NalParse<C> {
         // one is appended as-is. The framing is latched from the first frame, since
         // a mid-AU Annex-B continuation buffer (no leading start code) would
         // otherwise be misread as length-prefixed.
-        let bytes = slice.as_slice();
         let is_annexb = *self
             .input_is_annexb
             .get_or_insert_with(|| crate::annexb::is_annex_b(bytes));
@@ -442,11 +441,11 @@ impl<C: NalCodec> AsyncElement for NalParse<C> {
                     if self.reframe {
                         return self.reframe_frame(frame, out).await;
                     }
-                    if let MemoryDomain::System(slice) = &frame.domain {
+                    if let Some(slice) = frame.domain.as_system_slice() {
                         // Surface the keyframe flag for trick-mode / keyframe seek
                         // (the parser is the producer that can detect it).
-                        let is_keyframe = C::au_is_keyframe(slice.as_slice());
-                        self.refine_caps(slice.as_slice(), out).await?;
+                        let is_keyframe = C::au_is_keyframe(slice);
+                        self.refine_caps(slice, out).await?;
                         frame.timing.keyframe = is_keyframe;
                     }
                     out.push(PipelinePacket::DataFrame(frame)).await?;

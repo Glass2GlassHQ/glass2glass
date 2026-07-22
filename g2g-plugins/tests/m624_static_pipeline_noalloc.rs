@@ -110,8 +110,8 @@ impl StaticSource for RingSource<'_> {
 struct Touch;
 impl StaticTransform for Touch {
     async fn process(&mut self, input: Frame) -> Result<Option<Frame>, G2gError> {
-        if let MemoryDomain::System(s) = &input.domain {
-            let _ = core::hint::black_box(s.as_slice()[0]);
+        if let Some(s) = input.domain.as_system_slice() {
+            let _ = core::hint::black_box(s[0]);
         }
         Ok(Some(input))
     }
@@ -123,8 +123,8 @@ struct SumSink {
 }
 impl StaticSink for SumSink {
     async fn consume(&mut self, frame: Frame) -> Result<(), G2gError> {
-        if let MemoryDomain::System(s) = &frame.domain {
-            self.sum = self.sum.wrapping_add(u64::from(s.as_slice()[0]));
+        if let Some(s) = frame.domain.as_system_slice() {
+            self.sum = self.sum.wrapping_add(u64::from(s[0]));
         }
         Ok(())
     }

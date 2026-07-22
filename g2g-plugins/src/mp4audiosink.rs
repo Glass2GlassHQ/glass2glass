@@ -23,7 +23,7 @@ use std::path::PathBuf;
 
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, G2gError,
-    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    OutputSink, PadTemplate, PadTemplates, PipelinePacket,
 };
 
 use crate::filesink::io_err;
@@ -144,10 +144,9 @@ impl AsyncElement for Mp4AudioSink {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(au) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    let au = slice.as_slice();
                     if au.is_empty() {
                         return Err(G2gError::CapsMismatch);
                     }

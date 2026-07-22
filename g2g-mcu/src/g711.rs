@@ -25,7 +25,6 @@
 
 use g2g_core::error::G2gError;
 use g2g_core::frame::Frame;
-use g2g_core::memory::MemoryDomain;
 use g2g_core::staticpool::StaticLendRing;
 use g2g_core::{AudioFormat, StaticTransform};
 
@@ -189,10 +188,10 @@ impl<'r, const N: usize, const BYTES: usize> G711Enc<'r, N, BYTES> {
 
 impl<const N: usize, const BYTES: usize> StaticTransform for G711Enc<'_, N, BYTES> {
     async fn process(&mut self, input: Frame) -> Result<Option<Frame>, G2gError> {
-        let MemoryDomain::System(slice) = &input.domain else {
+        let Some(slice) = input.domain.as_system_slice() else {
             return Err(G2gError::UnsupportedDomain);
         };
-        let len = slice.as_slice().len();
+        let len = slice.len();
         // Whole 16-bit samples only.
         if len % 2 != 0 {
             return Err(G2gError::CapsMismatch);
@@ -257,10 +256,10 @@ impl<'r, const N: usize, const BYTES: usize> G711Dec<'r, N, BYTES> {
 
 impl<const N: usize, const BYTES: usize> StaticTransform for G711Dec<'_, N, BYTES> {
     async fn process(&mut self, input: Frame) -> Result<Option<Frame>, G2gError> {
-        let MemoryDomain::System(slice) = &input.domain else {
+        let Some(slice) = input.domain.as_system_slice() else {
             return Err(G2gError::UnsupportedDomain);
         };
-        let len = slice.as_slice().len();
+        let len = slice.len();
         let Some(out_len) = len.checked_mul(2) else {
             return Err(G2gError::CapsMismatch);
         };

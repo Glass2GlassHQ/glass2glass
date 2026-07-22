@@ -130,10 +130,9 @@ impl AsyncElement for TensorPostprocess {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(bytes) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    let bytes = slice.as_slice();
                     if bytes.is_empty() || bytes.len() % 4 != 0 {
                         return Err(G2gError::CapsMismatch);
                     }

@@ -201,10 +201,9 @@ impl AsyncElement for Equalizer3Bands {
                     if !self.configured {
                         return Err(G2gError::NotConfigured);
                     }
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(src) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    let src = slice.as_slice();
                     let mut dst = vec![0u8; src.len()].into_boxed_slice();
                     self.filter(src, &mut dst);
                     let out_frame = Frame {

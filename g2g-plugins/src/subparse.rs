@@ -1282,9 +1282,9 @@ impl AsyncElement for SubParse {
             // streams the just-terminated cues, Eos flushes the trailing block.
             let cues = match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    if let MemoryDomain::System(slice) = &frame.domain {
+                    if let Some(slice) = frame.domain.as_system_slice() {
                         // The parsers handle CRLF / BOM, so accumulate raw bytes.
-                        self.buf.extend_from_slice(slice.as_slice());
+                        self.buf.extend_from_slice(slice);
                     }
                     self.strip_bom();
                     self.drain_cues(false)
@@ -1792,8 +1792,8 @@ mod tests {
             .collect();
         assert_eq!(frames.len(), 3);
         assert_eq!(frames[0].timing.pts_ns, 1_000_000_000);
-        if let MemoryDomain::System(s) = &frames[0].domain {
-            assert_eq!(s.as_slice(), b"Hello & world");
+        if let Some(s) = frames[0].domain.as_system_slice() {
+            assert_eq!(s, b"Hello & world");
         } else {
             panic!("cue payload must be a system buffer");
         }
@@ -1823,8 +1823,8 @@ mod tests {
             .collect();
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0].timing.pts_ns, 1_000_000_000);
-        if let MemoryDomain::System(s) = &frames[0].domain {
-            assert_eq!(s.as_slice(), b"Hello, world");
+        if let Some(s) = frames[0].domain.as_system_slice() {
+            assert_eq!(s, b"Hello, world");
         } else {
             panic!("cue payload must be a system buffer");
         }
@@ -1864,8 +1864,8 @@ mod tests {
         assert_eq!(frames.len(), 2, "one frame per cue");
         assert_eq!(frames[0].timing.pts_ns, 1_000_000_000);
         assert_eq!(frames[0].timing.duration_ns, 3_000_000_000);
-        if let MemoryDomain::System(s) = &frames[0].domain {
-            assert_eq!(s.as_slice(), b"Hello world");
+        if let Some(s) = frames[0].domain.as_system_slice() {
+            assert_eq!(s, b"Hello world");
         } else {
             panic!("cue payload must be a system buffer");
         }
@@ -1945,8 +1945,8 @@ mod tests {
             })
             .collect();
         assert_eq!(frames.len(), 2);
-        if let MemoryDomain::System(s) = &frames[1].domain {
-            assert_eq!(core::str::from_utf8(s.as_slice()).unwrap(), "café");
+        if let Some(s) = frames[1].domain.as_system_slice() {
+            assert_eq!(core::str::from_utf8(s).unwrap(), "café");
         } else {
             panic!("cue payload must be a system buffer");
         }

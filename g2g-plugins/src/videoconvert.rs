@@ -278,10 +278,9 @@ impl AsyncElement for VideoConvert {
                 PipelinePacket::DataFrame(frame) => {
                     let (format, w, h, framerate) =
                         self.input.clone().ok_or(G2gError::NotConfigured)?;
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(src) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    let src = slice.as_slice();
                     let needed = frame_byte_size(format, w, h);
                     if src.len() < needed {
                         return Err(G2gError::CapsMismatch);

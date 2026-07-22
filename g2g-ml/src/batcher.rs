@@ -137,10 +137,10 @@ impl TensorBatcher {
             let mut bytes = Vec::with_capacity(self.slot_bytes * parts.len());
             let mut timing = parts[0].timing;
             for p in &parts {
-                let MemoryDomain::System(slice) = &p.domain else {
+                let Some(slice) = p.domain.as_system_slice() else {
                     unreachable!("validated on enqueue");
                 };
-                bytes.extend_from_slice(slice.as_slice());
+                bytes.extend_from_slice(slice);
                 // batch pts is the newest constituent (the batch exists once
                 // its last frame arrives); arrival keeps the oldest non-zero
                 // stamp so glass-to-glass latency reports the worst case.
@@ -215,10 +215,10 @@ impl MultiInputElement for TensorBatcher {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    if slice.as_slice().len() != self.slot_bytes {
+                    if slice.len() != self.slot_bytes {
                         return Err(G2gError::CapsMismatch);
                     }
                     self.queues[input].push_back(frame);

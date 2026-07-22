@@ -223,11 +223,10 @@ impl MultiInputElement for AudioMixer {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(bytes) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
                     let pts_ns = frame.timing.pts_ns;
-                    let bytes = slice.as_slice();
                     self.accumulate_frame(input, pts_ns, bytes);
                 }
                 // A per-input Eos is informational: the runner emits the single

@@ -136,10 +136,9 @@ impl<E: H264Encoder, const N: usize, const BYTES: usize> StaticTransform
     for HwH264Enc<'_, E, N, BYTES>
 {
     async fn process(&mut self, input: Frame) -> Result<Option<Frame>, G2gError> {
-        let MemoryDomain::System(slice) = &input.domain else {
+        let Some(raw) = input.domain.as_system_slice() else {
             return Err(G2gError::UnsupportedDomain);
         };
-        let raw = slice.as_slice();
         // Exactly one full I420 frame per input; a partial/mis-sized capture is
         // rejected before any peripheral traffic (the silicon would encode
         // garbage or stall, not error).

@@ -603,10 +603,10 @@ impl AsyncElement for WebRtcDataSink {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    let data = slice.as_slice().to_vec();
+                    let data = slice.to_vec();
                     if self.tx.is_none() {
                         self.start_session().await?;
                     }

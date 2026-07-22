@@ -6,6 +6,12 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M763: sites that hand-rolled a `MemoryDomain::System` match to read CPU bytes now call `MemoryDomain::as_system_slice()`.
+
+- M762: the browser runs a real ONNX model over decoded video via onnxruntime-web (`WebSocketSrc -> WebCodecsDecode -> WebOrtDetect -> CanvasSink`, CPU tensors, plain static HTTPS, no COOP/COEP), validated headless against a committed model fixture.
+
+- M761: `UdpSink`'s FEC modes are settable via `fec-mode` / `fec-columns` / `fec-rows` / `fec-payload-type` / `fec-ssrc` launch properties, not builders only.
+
 - M760: an `offload` feature lets a heavy synchronous element move its per-frame compute onto tokio's blocking pool, so the cooperative runner keeps rendering sibling arms without opting into thread-per-arm (`videoconvert`, `waylandsink`, `ffmpegdec`).
 
 - M759: per-frame metadata survives a linear transform, not just a tee: an element declares a `meta_transform` and the runner propagates and re-attaches the surviving meta to its fresh outputs.

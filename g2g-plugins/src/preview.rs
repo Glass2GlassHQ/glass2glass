@@ -13,7 +13,7 @@ use alloc::vec::Vec;
 
 use serde_json::{json, Value};
 
-use g2g_core::{AudioFormat, Caps, Dim, MemoryDomain, PipelinePacket, RawVideoFormat, VideoCodec};
+use g2g_core::{AudioFormat, Caps, Dim, PipelinePacket, RawVideoFormat, VideoCodec};
 
 /// Longest thumbnail edge in pixels.
 const MAX_THUMB: usize = 48;
@@ -35,11 +35,11 @@ pub fn packet_preview(packet: &PipelinePacket, caps: &Caps) -> Option<Value> {
     let PipelinePacket::DataFrame(frame) = packet else {
         return None;
     };
-    let MemoryDomain::System(slice) = &frame.domain else {
+    let Some(slice) = frame.domain.as_system_slice() else {
         // A GPU / foreign frame can't be sampled without a download.
         return Some(json!({ "kind": "opaque", "note": "non-system memory" }));
     };
-    let bytes = slice.as_slice();
+    let bytes = slice;
     Some(match caps {
         Caps::RawVideo {
             format,
@@ -243,7 +243,7 @@ fn hexdump(bytes: &[u8]) -> Value {
 mod tests {
     use super::*;
     use alloc::vec;
-    use g2g_core::{Dim, Frame, FrameTiming, Rate, SystemSlice};
+    use g2g_core::{Dim, Frame, FrameTiming, MemoryDomain, Rate, SystemSlice};
 
     fn frame(bytes: Vec<u8>) -> PipelinePacket {
         PipelinePacket::DataFrame(Frame::new(

@@ -56,9 +56,9 @@ impl AsyncElement for MarkerSink {
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
             if let PipelinePacket::DataFrame(frame) = packet {
-                if let MemoryDomain::System(slice) = &frame.domain {
+                if let Some(slice) = frame.domain.as_system_slice() {
                     // Annex-B: [0,0,0,1][NAL header][index marker ..].
-                    if let Some(&marker) = slice.as_slice().get(5) {
+                    if let Some(&marker) = slice.get(5) {
                         self.markers.push(marker);
                     }
                 }

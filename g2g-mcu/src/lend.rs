@@ -53,13 +53,13 @@ pub(crate) unsafe fn lend_converted<const N: usize, const BYTES: usize>(
     out_len: usize,
     fill: impl FnOnce(&[u8], &mut [u8]),
 ) -> Result<Frame, G2gError> {
-    let MemoryDomain::System(slice) = &input.domain else {
+    let Some(slice) = input.domain.as_system_slice() else {
         return Err(G2gError::UnsupportedDomain);
     };
     // SAFETY: forwarded; the caller upholds the ring-outlives-frames contract.
     unsafe {
         lend_slot(ring, input.timing, input.sequence, out_len, |dst| {
-            fill(slice.as_slice(), dst)
+            fill(slice, dst)
         })
     }
 }

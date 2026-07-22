@@ -21,7 +21,6 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-use g2g_core::memory::MemoryDomain;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{ByteStreamEncoding, Caps, G2gError, OutputSink, PipelinePacket, PushOutcome};
 
@@ -39,8 +38,8 @@ impl OutputSink for FlvCollect {
         p: PipelinePacket,
     ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
         if let PipelinePacket::DataFrame(frame) = &p {
-            if let MemoryDomain::System(slice) = &frame.domain {
-                self.bytes.extend_from_slice(slice.as_slice());
+            if let Some(slice) = frame.domain.as_system_slice() {
+                self.bytes.extend_from_slice(slice);
             }
         }
         Box::pin(async { Ok(PushOutcome::Accepted) })

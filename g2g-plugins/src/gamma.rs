@@ -147,10 +147,9 @@ impl AsyncElement for Gamma {
                         Some((f, w, h, r)) => (*f, *w, *h, r.clone()),
                         None => return Err(G2gError::NotConfigured),
                     };
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(src) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    let src = slice.as_slice();
                     let bytes = (w as usize) * (h as usize) * 4;
                     if src.len() < bytes {
                         return Err(G2gError::CapsMismatch);

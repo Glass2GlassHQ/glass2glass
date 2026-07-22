@@ -13460,13 +13460,13 @@ impl AsyncElement for VulkanVideoDec {
         alloc::boxed::Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
                     // Decode the access unit. The whole thing is owned by the
                     // packet, so borrow the bytes into an owned Vec first (the
                     // decoder borrows `self.decoder` mutably below).
-                    let au = slice.as_slice().to_vec();
+                    let au = slice.to_vec();
                     let src_timing = frame.timing;
                     if !self.ensure_decoder(&au)? {
                         // No SPS/PPS yet (a leading non-keyframe AU); skip it.

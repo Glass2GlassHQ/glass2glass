@@ -21,7 +21,7 @@ use std::net::SocketAddr;
 
 use g2g_core::{
     AsyncElement, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
-    ElementMetadata, G2gError, HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
+    ElementMetadata, G2gError, HardwareError, OutputSink, PadTemplate, PadTemplates,
     PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
@@ -406,7 +406,7 @@ impl AsyncElement for SrtSink {
                     if !self.configured {
                         return Err(G2gError::NotConfigured);
                     }
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
                     if self.socket.is_none() {
@@ -414,7 +414,7 @@ impl AsyncElement for SrtSink {
                     }
                     let timestamp = (frame.timing.pts_ns / 1000) as u32;
                     // Fragment the TS byte stream into SRT payloads (7 TS packets).
-                    let bytes = slice.as_slice();
+                    let bytes = slice;
                     let mut sent = Vec::new();
                     {
                         let sender = self.sender.as_mut().ok_or(G2gError::NotConfigured)?;

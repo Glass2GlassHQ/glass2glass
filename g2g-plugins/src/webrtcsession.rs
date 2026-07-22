@@ -46,8 +46,8 @@ use str0m::bwe::{Bitrate, BweKind};
 
 use g2g_core::{
     AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, HardwareError,
-    MemoryDomain, MultiInputElement, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec, Rate, ReverseChannel, VideoCodec,
+    MultiInputElement, OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    Rate, ReverseChannel, VideoCodec,
 };
 
 use crate::filesink::io_err;
@@ -455,7 +455,7 @@ impl MultiInputElement for WebRtcSessionSink {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
                     // Start the session once every track is known (so the offer
@@ -476,7 +476,7 @@ impl MultiInputElement for WebRtcSessionSink {
                         track,
                         rid,
                         pts_ns: frame.timing.pts_ns,
-                        data: slice.as_slice().to_vec(),
+                        data: slice.to_vec(),
                     };
                     if let Some(tx) = &self.tx {
                         tx.send(unit).await.map_err(|_| G2gError::Shutdown)?;

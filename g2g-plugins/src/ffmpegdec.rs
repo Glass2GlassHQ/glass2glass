@@ -1135,7 +1135,7 @@ impl AsyncElement for FfmpegH264Dec {
             let mut decoded = Vec::new();
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
                     // Open the decoder on the first access unit, seeding it with
@@ -1144,7 +1144,7 @@ impl AsyncElement for FfmpegH264Dec {
                     // instead of dropping them (see `open_decoder`).
                     if self.decoder.is_none() {
                         let codec_kind = self.codec_kind.ok_or(G2gError::NotConfigured)?;
-                        let au = slice.as_slice();
+                        let au = slice;
                         let extradata = annexb_extradata(codec_kind, au);
                         let reorder = match codec_kind {
                             VideoCodec::H264 => crate::h264parse::sps_reorder_frames(au),
@@ -1195,7 +1195,7 @@ impl AsyncElement for FfmpegH264Dec {
                     }
                     #[cfg(not(feature = "offload"))]
                     self.feed_access_unit(
-                        slice.as_slice(),
+                        slice,
                         frame.timing.pts_ns,
                         frame.timing.arrival_ns,
                         &mut decoded,

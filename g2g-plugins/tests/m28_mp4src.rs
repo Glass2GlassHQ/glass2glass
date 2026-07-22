@@ -56,10 +56,10 @@ impl Collect {
 }
 
 fn frame_bytes(f: &Frame) -> &[u8] {
-    let MemoryDomain::System(slice) = &f.domain else {
+    let Some(slice) = f.domain.as_system_slice() else {
         panic!("System frames expected");
     };
-    slice.as_slice()
+    slice
 }
 
 fn au_frame(bytes: Vec<u8>, pts_ns: u64, sequence: u64) -> Frame {
@@ -89,8 +89,8 @@ impl OutputSink for Capture {
     ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
         Box::pin(async move {
             if let PipelinePacket::DataFrame(f) = packet {
-                if let MemoryDomain::System(s) = &f.domain {
-                    self.bytes.extend_from_slice(s.as_slice());
+                if let Some(s) = f.domain.as_system_slice() {
+                    self.bytes.extend_from_slice(s);
                 }
             }
             Ok(PushOutcome::Accepted)

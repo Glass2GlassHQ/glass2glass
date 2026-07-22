@@ -46,8 +46,8 @@ impl OutputSink for Capture {
         p: PipelinePacket,
     ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
         if let PipelinePacket::DataFrame(frame) = &p {
-            if let MemoryDomain::System(slice) = &frame.domain {
-                let s = slice.as_slice();
+            if let Some(slice) = frame.domain.as_system_slice() {
+                let s = slice;
                 self.first_bytes.push(s.first().copied().unwrap_or(0));
                 self.total_bytes += s.len();
             }

@@ -21,7 +21,6 @@ use core::future::Future;
 use core::pin::Pin;
 use std::sync::{Arc, Mutex};
 
-use g2g_core::memory::MemoryDomain;
 use g2g_core::runtime::{run_graph, GraphNode};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, ConfigureOutcome, G2gError, Graph, OutputSink,
@@ -79,8 +78,8 @@ impl AsyncElement for Recorder {
                         tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
                     }
                 }
-                if let MemoryDomain::System(slice) = &frame.domain {
-                    let s = slice.as_slice();
+                if let Some(slice) = frame.domain.as_system_slice() {
+                    let s = slice;
                     // FNV-1a over the whole frame: distinguishes a static-but-live
                     // scene (noise -> differing hashes) from a repeated buffer
                     // (identical hashes), which the mean alone cannot.
@@ -226,8 +225,8 @@ impl AsyncElement for InsetRecorder {
                         tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
                     }
                 }
-                if let MemoryDomain::System(slice) = &frame.domain {
-                    let s = slice.as_slice();
+                if let Some(slice) = frame.domain.as_system_slice() {
+                    let s = slice;
                     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
                     for row in 0..self.h {
                         let start = ((self.y + row) * self.canvas_w + self.x) * 4;

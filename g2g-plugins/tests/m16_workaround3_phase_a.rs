@@ -227,10 +227,10 @@ impl AsyncElement for FakeReorderDecoder {
                     // currently in force, regardless of whether the
                     // queue still holds older-caps frames. This is the
                     // reorder behavior the test is set up to expose.
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    let tag = slice.as_slice().first().copied().unwrap_or(0);
+                    let tag = slice.first().copied().unwrap_or(0);
                     let caps_at_arrival = self
                         .input_caps
                         .borrow()

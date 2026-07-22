@@ -94,7 +94,7 @@ struct HashSink {
 }
 impl StaticSink for HashSink {
     async fn consume(&mut self, frame: Frame) -> Result<(), G2gError> {
-        if let MemoryDomain::System(s) = &frame.domain {
+        if let Some(s) = frame.domain.as_system_slice() {
             for &b in s.as_slice() {
                 self.acc = roll(self.acc, b);
             }

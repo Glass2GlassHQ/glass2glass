@@ -172,8 +172,8 @@ impl OutputSink for Collect {
     ) -> Pin<Box<dyn Future<Output = Result<g2g_core::PushOutcome, G2gError>> + 'a>> {
         Box::pin(async move {
             if let PipelinePacket::DataFrame(f) = packet {
-                if let MemoryDomain::System(s) = &f.domain {
-                    self.bytes.extend_from_slice(s.as_slice());
+                if let Some(s) = f.domain.as_system_slice() {
+                    self.bytes.extend_from_slice(s);
                 }
             }
             Ok(g2g_core::PushOutcome::Accepted)

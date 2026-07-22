@@ -179,10 +179,10 @@ fn element_reconfigures_on_resolution_change() {
 
     let nv12_len = |w: usize, h: usize| w * h * 3 / 2;
     for (i, f) in frames.iter().enumerate() {
-        let MemoryDomain::System(slice) = &f.domain else {
+        let Some(slice) = f.domain.as_system_slice() else {
             panic!("frame {i} is not system memory");
         };
-        let bytes = slice.as_slice();
+        let bytes = slice;
         let (w, h) = if i < 6 { (640, 480) } else { (320, 240) };
         assert_eq!(
             bytes.len(),

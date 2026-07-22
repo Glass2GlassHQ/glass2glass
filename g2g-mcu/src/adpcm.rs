@@ -27,7 +27,6 @@
 
 use g2g_core::error::G2gError;
 use g2g_core::frame::Frame;
-use g2g_core::memory::MemoryDomain;
 use g2g_core::staticpool::StaticLendRing;
 use g2g_core::StaticTransform;
 
@@ -211,11 +210,11 @@ impl<'r, const N: usize, const BYTES: usize> AdpcmEnc<'r, N, BYTES> {
 
 impl<const N: usize, const BYTES: usize> StaticTransform for AdpcmEnc<'_, N, BYTES> {
     async fn process(&mut self, input: Frame) -> Result<Option<Frame>, G2gError> {
-        let MemoryDomain::System(slice) = &input.domain else {
+        let Some(slice) = input.domain.as_system_slice() else {
             return Err(G2gError::UnsupportedDomain);
         };
         let src_block = samples_per_block(self.block_bytes) * 2;
-        let len = slice.as_slice().len();
+        let len = slice.len();
         // Whole blocks only.
         if src_block == 0 || len % src_block != 0 {
             return Err(G2gError::CapsMismatch);
@@ -291,10 +290,10 @@ impl<'r, const N: usize, const BYTES: usize> AdpcmDec<'r, N, BYTES> {
 
 impl<const N: usize, const BYTES: usize> StaticTransform for AdpcmDec<'_, N, BYTES> {
     async fn process(&mut self, input: Frame) -> Result<Option<Frame>, G2gError> {
-        let MemoryDomain::System(slice) = &input.domain else {
+        let Some(slice) = input.domain.as_system_slice() else {
             return Err(G2gError::UnsupportedDomain);
         };
-        let len = slice.as_slice().len();
+        let len = slice.len();
         // Whole blocks only.
         if len % self.block_bytes != 0 {
             return Err(G2gError::CapsMismatch);

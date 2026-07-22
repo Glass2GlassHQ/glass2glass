@@ -43,8 +43,8 @@ impl OutputSink for CaptureSink {
             match packet {
                 PipelinePacket::CapsChanged(c) => self.caps.push(c),
                 PipelinePacket::DataFrame(f) => {
-                    if let MemoryDomain::System(s) = &f.domain {
-                        self.aus.push(s.as_slice().to_vec());
+                    if let Some(s) = f.domain.as_system_slice() {
+                        self.aus.push(s.to_vec());
                     }
                 }
                 _ => {}

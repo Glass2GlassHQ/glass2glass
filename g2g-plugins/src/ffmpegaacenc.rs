@@ -382,10 +382,10 @@ impl AsyncElement for FfmpegAacEnc {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    self.ingest(slice.as_slice())?;
+                    self.ingest(slice)?;
                     let ch = self.channels as usize;
                     let frame_len = self.frame_size * ch;
                     let mut packets = Vec::new();

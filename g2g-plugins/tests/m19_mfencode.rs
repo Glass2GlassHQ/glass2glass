@@ -145,10 +145,10 @@ async fn encode_emits_h264_caps_and_annexb_access_units() {
         "low-latency mode: one output per input"
     );
     for f in &frames {
-        let MemoryDomain::System(slice) = &f.domain else {
+        let Some(slice) = f.domain.as_system_slice() else {
             panic!("encoder must emit System-domain frames");
         };
-        let data = slice.as_slice();
+        let data = slice;
         assert!(!data.is_empty(), "encoded access unit must not be empty");
         assert!(
             starts_with_annexb_start_code(data),
@@ -158,13 +158,10 @@ async fn encode_emits_h264_caps_and_annexb_access_units() {
     }
     // The first access unit carries an IDR, so it must be the largest-ish;
     // at minimum it must hold more than a bare start code (SPS/PPS + IDR).
-    let MemoryDomain::System(first) = &frames[0].domain else {
+    let Some(first) = frames[0].domain.as_system_slice() else {
         unreachable!()
     };
-    assert!(
-        first.as_slice().len() > 16,
-        "IDR access unit implausibly small"
-    );
+    assert!(first.len() > 16, "IDR access unit implausibly small");
 }
 
 #[cfg(feature = "mf-decode")]
@@ -184,12 +181,12 @@ async fn encode_decode_round_trip_recovers_all_frames() {
 
     let mut sink = Collect::default();
     for f in encoded.data_frames() {
-        let MemoryDomain::System(slice) = &f.domain else {
+        let Some(slice) = f.domain.as_system_slice() else {
             unreachable!()
         };
         let frame = Frame {
             domain: MemoryDomain::System(SystemSlice::from_boxed(
-                slice.as_slice().to_vec().into_boxed_slice(),
+                slice.to_vec().into_boxed_slice(),
             )),
             timing: f.timing,
             sequence: f.sequence,
@@ -225,9 +222,9 @@ async fn encode_decode_round_trip_recovers_all_frames() {
     );
     let expected_len = (WIDTH * HEIGHT * 3 / 2) as usize;
     for f in frames {
-        let MemoryDomain::System(slice) = &f.domain else {
+        let Some(slice) = f.domain.as_system_slice() else {
             panic!("decoder must emit System-domain frames");
         };
-        assert_eq!(slice.as_slice().len(), expected_len, "packed NV12 length");
+        assert_eq!(slice.len(), expected_len, "packed NV12 length");
     }
 }

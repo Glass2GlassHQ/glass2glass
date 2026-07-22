@@ -102,8 +102,8 @@ use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
     AsyncElement, BusHandle, BusMessage, Caps, CapsConstraint, CapsSet, ClockCandidate,
     ClockPriority, ClockSync, ConfigureOutcome, Dim, ElementMetadata, G2gError, HardwareError,
-    MemoryDomain, OutputSink, PipelineClock, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec, Rate, RawVideoFormat, Segment,
+    OutputSink, PipelineClock, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate,
+    RawVideoFormat, Segment,
 };
 
 /// Worker-thread message. `Frame` carries the pre-converted XRGB8888
@@ -566,7 +566,7 @@ impl AsyncElement for WaylandSink {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(Frame { domain, timing, .. }) => {
-                    let MemoryDomain::System(slice) = domain else {
+                    let Some(slice) = domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
 
@@ -620,7 +620,7 @@ impl AsyncElement for WaylandSink {
                         crate::offload::run_blocking(move || nv12_to_xrgb8888(&src, w, h)).await?
                     };
                     #[cfg(not(feature = "offload"))]
-                    let xrgb = nv12_to_xrgb8888(slice.as_slice(), self.width, self.height)?;
+                    let xrgb = nv12_to_xrgb8888(slice, self.width, self.height)?;
                     let tx = self.cmd_tx.as_ref().ok_or(G2gError::NotConfigured)?;
                     let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
                     tx.send(WorkerCmd::Frame {
@@ -1146,7 +1146,7 @@ mod tests {
 
     fn nv12_frame(pts_ns: u64) -> Frame {
         use g2g_core::frame::FrameTiming;
-        use g2g_core::memory::SystemSlice;
+        use g2g_core::memory::{MemoryDomain, SystemSlice};
         Frame {
             domain: MemoryDomain::System(SystemSlice::from_boxed(Box::new([0u8; 4]))),
             timing: FrameTiming {

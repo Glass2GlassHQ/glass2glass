@@ -137,14 +137,13 @@ async fn preprocess_to_gpu_tensor(nv12: Vec<u8>) -> Frame {
 }
 
 fn logits_from_system(f: &Frame) -> Vec<f32> {
-    let MemoryDomain::System(slice) = &f.domain else {
+    let Some(slice) = f.domain.as_system_slice() else {
         panic!(
             "default mode must read logits back to System, got {:?}",
             f.domain.kind()
         );
     };
     slice
-        .as_slice()
         .chunks_exact(4)
         .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
         .collect()

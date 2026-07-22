@@ -109,10 +109,9 @@ impl AsyncElement for CueSink {
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
             if let PipelinePacket::DataFrame(frame) = packet {
-                if let MemoryDomain::System(slice) = &frame.domain {
+                if let Some(slice) = frame.domain.as_system_slice() {
                     self.pts.push(frame.timing.pts_ns);
-                    self.texts
-                        .push(String::from_utf8_lossy(slice.as_slice()).into_owned());
+                    self.texts.push(String::from_utf8_lossy(slice).into_owned());
                 }
             }
             Ok(())

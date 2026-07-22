@@ -38,8 +38,8 @@ impl OutputSink for CountFrames {
     fn push<'a>(&'a mut self, p: PipelinePacket) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
         if let PipelinePacket::DataFrame(f) = &p {
             self.frames += 1;
-            if let MemoryDomain::System(s) = &f.domain {
-                self.bytes += s.as_slice().len();
+            if let Some(s) = f.domain.as_system_slice() {
+                self.bytes += s.len();
             }
         }
         Box::pin(async move { Ok(PushOutcome::Accepted) })

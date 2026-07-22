@@ -99,7 +99,7 @@ struct SumSink {
 
 impl StaticSink for SumSink {
     async fn consume(&mut self, frame: Frame) -> Result<(), g2g_core::error::G2gError> {
-        if let MemoryDomain::System(s) = &frame.domain {
+        if let Some(s) = frame.domain.as_system_slice() {
             for &b in s.as_slice() {
                 self.sum = self.sum.wrapping_add(b as u64);
             }

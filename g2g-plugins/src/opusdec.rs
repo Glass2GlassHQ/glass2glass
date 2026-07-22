@@ -275,13 +275,13 @@ impl AsyncElement for OpusDec {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
                     // An in-band OpusHead is codec config, not audio: read its
                     // channel count + pre-skip, (re)build the decoder, and consume
                     // it (no PCM out). The demuxer forwards it before the audio.
-                    if let Some((channels, pre_skip)) = parse_opus_head(slice.as_slice()) {
+                    if let Some((channels, pre_skip)) = parse_opus_head(slice) {
                         if self.channels != channels {
                             self.build_decoder(channels)?;
                         }
@@ -290,7 +290,7 @@ impl AsyncElement for OpusDec {
                         return Ok(());
                     }
                     let keep = duration_to_samples(frame.timing.duration_ns);
-                    let pcm = self.decode_trimmed(slice.as_slice(), keep)?;
+                    let pcm = self.decode_trimmed(slice, keep)?;
                     // A frame fully inside the pre-skip window trims to nothing;
                     // consume it without emitting an empty PCM frame.
                     if pcm.is_empty() {

@@ -220,10 +220,10 @@ impl AsyncElement for MjpegDec {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    let (pixels, w, h) = self.decode(slice.as_slice())?;
+                    let (pixels, w, h) = self.decode(slice)?;
                     if self.out_dims != Some((w, h)) {
                         out.push(PipelinePacket::CapsChanged(self.output_caps(w, h)))
                             .await?;

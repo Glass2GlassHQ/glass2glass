@@ -247,10 +247,10 @@ impl AsyncElement for MjpegEnc {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    let jpeg = self.encode(slice.as_slice())?;
+                    let jpeg = self.encode(slice)?;
                     if !self.caps_sent {
                         out.push(PipelinePacket::CapsChanged(self.output_caps()))
                             .await?;

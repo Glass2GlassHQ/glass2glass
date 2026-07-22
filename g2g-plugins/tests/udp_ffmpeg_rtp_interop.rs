@@ -19,7 +19,6 @@ use std::net::UdpSocket as StdUdpSocket;
 use std::process::Command;
 use std::time::Duration;
 
-use g2g_core::memory::MemoryDomain;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{G2gError, OutputSink, PipelinePacket, PushOutcome};
 
@@ -37,8 +36,8 @@ impl OutputSink for AuCollect {
         p: PipelinePacket,
     ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
         if let PipelinePacket::DataFrame(frame) = &p {
-            if let MemoryDomain::System(slice) = &frame.domain {
-                let s = slice.as_slice();
+            if let Some(slice) = frame.domain.as_system_slice() {
+                let s = slice;
                 let head = s[..s.len().min(5)].to_vec();
                 self.aus.push((head, s.len(), frame.timing.keyframe));
             }

@@ -146,8 +146,7 @@ impl AsyncElement for RecSink {
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
             if let PipelinePacket::DataFrame(frame) = packet {
-                if let MemoryDomain::System(slice) = &frame.domain {
-                    let buf = slice.as_slice();
+                if let Some(buf) = frame.domain.as_system_slice() {
                     let painted = (0..(W * H) as usize)
                         .any(|i| buf[i * 4] != 0 || buf[i * 4 + 1] != 0 || buf[i * 4 + 2] != 0);
                     self.log

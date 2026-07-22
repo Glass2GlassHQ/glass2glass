@@ -14,8 +14,7 @@ leverage first:
 
 1. **Platforms.** macOS: camera / screen capture validation on a permitted
    Mac.
-2. **Egress / transports.** FEC knobs as launch properties (`UdpSink`'s
-   FEC modes are builder-only today); real-peer FlexFEC interop when a peer
+2. **Egress / transports.** Real-peer FlexFEC interop when a peer
    implementation is available (GStreamer here lacks `rtpflexfecenc`).
 3. **Depth.** Codec decode to cut reliance on the ffmpeg FFI: AV1 landed both as
    libdav1d (`Dav1dDec`, `dav1d` feature, C FFI) and pure Rust (`Rav1dDec`,
@@ -27,10 +26,9 @@ leverage first:
    generalization of the CUDA-locked `NvDec` path and the wedge that gives a
    wgpu-based consumer (game engine / visualization viewer) hardware decode on its
    own render device.
-4. **Browser demo (speculative product path).** Cross-target ONNX in-browser:
-   CPU-round-trip MVP via `ort-web` (`WebSocketSrc -> WebCodecsDecode ->
-   ort-web -> CanvasSink`), then a deployed reference app + native sibling. The
-   GPU-resident in-browser chain is not achievable from idiomatic Rust (wgpu
+4. **Browser demo (speculative product path).** A deployed reference app for the
+   in-browser `ort-web` ONNX chain, plus a native sibling running the same graph.
+   The GPU-resident in-browser chain is not achievable from idiomatic Rust (wgpu
    can't import a WebCodecs `VideoFrame` as an external texture or adopt ORT's
    device on wasm); it would need raw `web_sys` WebGPU + hand-rolled
    onnxruntime-web bindings.
@@ -261,14 +259,6 @@ Phased plan:
 - Richer auto-plug factory construction params (geometry / device / file path).
 - A hardware-backed end-to-end decode-through-`decodebin` run (current tests
   read templates / assert splicing, decode no real media).
-
-## Cleanup
-
-- **Adopt `MemoryDomain::as_system_slice()`.** ~50 sites hand-roll
-  `if let MemoryDomain::System(s) = ..` to read CPU bytes; the accessor
-  (returning `Option<&[u8]>`) replaces them and stays refutable under no_std
-  (single-variant `MemoryDomain`), where the manual match is an irrefutable-let
-  error.
 
 ## Platform: macOS
 
@@ -895,14 +885,14 @@ _(No open parser items.)_
 
 ## Browser / Wasm
 
-- In-browser runtime validation of `WebSocketSrc -> WebCodecsDecode ->
-  CanvasSink` (compiles; live WebSocket + `performance.now()` pacing unvalidated).
+- An unbounded source feeding an `ort-web` chain faster than inference drains it
+  trips a wasm async-runtime reentrancy (`closure invoked recursively`) once
+  backpressure crosses a source loop; a finite source runs clean. Pin down the
+  `spawn_local` re-entrancy on a per-frame JS-promise `await`.
 - WebGPU-texture zero-copy sink (`MemoryDomain::WebGPUBuffer` into a
   `GPUTexture`; needs the async device handshake in the keepalive).
 - Web Workers executor (off-main-thread; needs JS bootstrap).
 - HEVC in `WebCodecsDecode`.
-- Browser MVP via `ort-web` (CPU tensors, same `.onnx` as native, plain static
-  HTTPS, no COOP/COEP).
 - Raw-`web_sys` WebGPU path (only if the GPU-resident browser claim is revived):
   external-texture import + compute + `ort.Tensor.fromGpuBuffer` on one
   ORT-owned `GPUDevice`. Large, browser-unverifiable on the dev host.

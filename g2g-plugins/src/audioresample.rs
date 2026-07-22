@@ -258,14 +258,14 @@ impl AsyncElement for AudioResample {
                     if in_rate == 0 {
                         return Err(G2gError::NotConfigured);
                     }
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
                     self.last_timing = frame.timing;
                     // Effective output rate: property, or caps-resolved (auto).
                     let out_rate = self.out_rate().ok_or(G2gError::NotConfigured)?;
                     let resampled =
-                        self.resample(slice.as_slice(), in_format, in_channels, in_rate, out_rate)?;
+                        self.resample(slice, in_format, in_channels, in_rate, out_rate)?;
 
                     let new_caps = Caps::Audio {
                         format: in_format,

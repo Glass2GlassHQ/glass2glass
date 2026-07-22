@@ -204,7 +204,7 @@ impl AsyncElement for Mp4Mux {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
                     // Build the box writer on the first AU (its moov needs the
@@ -214,11 +214,8 @@ impl AsyncElement for Mp4Mux {
                         Fmp4Muxer::new(self.codec, self.width, self.height, self.tags.clone())
                             .with_fragment_duration_ns(frag_ns)
                     });
-                    let bytes = mux.push_au(
-                        slice.as_slice(),
-                        frame.timing.pts_ns,
-                        frame.timing.duration_ns,
-                    )?;
+                    let bytes =
+                        mux.push_au(slice, frame.timing.pts_ns, frame.timing.duration_ns)?;
                     // In batched mode a buffering push yields no bytes yet; don't
                     // emit an empty frame.
                     if !bytes.is_empty() {
@@ -312,8 +309,8 @@ mod tests {
         ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
             Box::pin(async move {
                 if let PipelinePacket::DataFrame(f) = packet {
-                    if let MemoryDomain::System(s) = &f.domain {
-                        self.bytes.extend_from_slice(s.as_slice());
+                    if let Some(s) = f.domain.as_system_slice() {
+                        self.bytes.extend_from_slice(s);
                         self.frames += 1;
                     }
                 }

@@ -244,18 +244,13 @@ impl AsyncElement for AudioConvert {
                 PipelinePacket::DataFrame(frame) => {
                     let (in_format, in_channels, rate) =
                         self.input.ok_or(G2gError::NotConfigured)?;
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
                     let out_format = self.out_format(in_format);
                     let out_channels = self.out_channels(in_channels);
-                    let converted = convert_pcm(
-                        slice.as_slice(),
-                        in_format,
-                        in_channels,
-                        out_format,
-                        out_channels,
-                    )?;
+                    let converted =
+                        convert_pcm(slice, in_format, in_channels, out_format, out_channels)?;
 
                     let new_caps = Caps::Audio {
                         format: out_format,

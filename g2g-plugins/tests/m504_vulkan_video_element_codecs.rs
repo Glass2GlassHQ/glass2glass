@@ -115,10 +115,10 @@ fn drive_codec(codec: VideoCodec, clip: &[u8]) {
 
     let nv12_len = 640 * 480 * 3 / 2;
     for (i, f) in frames.iter().enumerate() {
-        let MemoryDomain::System(slice) = &f.domain else {
+        let Some(slice) = f.domain.as_system_slice() else {
             panic!("{codec:?} frame {i} is not system memory");
         };
-        let bytes = slice.as_slice();
+        let bytes = slice;
         assert_eq!(
             bytes.len(),
             nv12_len,

@@ -16,7 +16,6 @@
 
 use g2g_core::error::G2gError;
 use g2g_core::frame::Frame;
-use g2g_core::memory::MemoryDomain;
 use g2g_core::staticpool::StaticLendRing;
 use g2g_core::StaticTransform;
 
@@ -129,10 +128,10 @@ impl<'r, const N: usize, const BYTES: usize> YuyvToI420<'r, N, BYTES> {
 
 impl<const N: usize, const BYTES: usize> StaticTransform for YuyvToI420<'_, N, BYTES> {
     async fn process(&mut self, input: Frame) -> Result<Option<Frame>, G2gError> {
-        let MemoryDomain::System(slice) = &input.domain else {
+        let Some(slice) = input.domain.as_system_slice() else {
             return Err(G2gError::UnsupportedDomain);
         };
-        if slice.as_slice().len() != self.in_len {
+        if slice.len() != self.in_len {
             return Err(G2gError::CapsMismatch);
         }
         let (w, h) = (self.width, self.height);

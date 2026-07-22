@@ -45,8 +45,8 @@ impl OutputSink for Collect {
     ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
         Box::pin(async move {
             if let PipelinePacket::DataFrame(f) = packet {
-                if let MemoryDomain::System(s) = &f.domain {
-                    self.frames.push(s.as_slice().to_vec());
+                if let Some(s) = f.domain.as_system_slice() {
+                    self.frames.push(s.to_vec());
                 }
             }
             Ok(PushOutcome::Accepted)

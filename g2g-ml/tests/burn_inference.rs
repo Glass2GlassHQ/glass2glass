@@ -45,11 +45,10 @@ impl OutputSink for Collect {
 }
 
 fn frame_f32(f: &Frame) -> Vec<f32> {
-    let MemoryDomain::System(slice) = &f.domain else {
+    let Some(slice) = f.domain.as_system_slice() else {
         panic!("tensor frame must be System memory");
     };
     slice
-        .as_slice()
         .chunks_exact(4)
         .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
         .collect()

@@ -220,8 +220,8 @@ mod tests {
         ) -> Pin<Box<dyn Future<Output = Result<g2g_core::PushOutcome, G2gError>> + 'a>> {
             match packet {
                 PipelinePacket::DataFrame(f) => {
-                    if let MemoryDomain::System(s) = &f.domain {
-                        self.frames.push(s.as_slice().to_vec());
+                    if let Some(s) = f.domain.as_system_slice() {
+                        self.frames.push(s.to_vec());
                     }
                 }
                 PipelinePacket::Eos => self.eos = true,

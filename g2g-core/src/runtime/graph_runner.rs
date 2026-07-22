@@ -3357,18 +3357,14 @@ mod tests {
         else {
             panic!("expected data frames");
         };
-        let MemoryDomain::System(sa) = &a.domain else {
+        let Some(sa) = a.domain.as_system_slice() else {
             panic!()
         };
-        let MemoryDomain::System(sb) = &b.domain else {
+        let Some(sb) = b.domain.as_system_slice() else {
             panic!()
         };
-        assert_eq!(sa.as_slice(), sb.as_slice(), "bytes copied");
-        assert_ne!(
-            sb.as_slice().as_ptr(),
-            sa.as_slice().as_ptr(),
-            "distinct allocation"
-        );
+        assert_eq!(sa, sb, "bytes copied");
+        assert_ne!(sb.as_ptr(), sa.as_ptr(), "distinct allocation");
         assert_eq!(b.timing, a.timing);
         assert_eq!(b.sequence, 9);
     }

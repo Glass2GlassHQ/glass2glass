@@ -177,7 +177,7 @@ impl CcInsert {
         let Some(codec) = self.codec else {
             return Err(G2gError::NotConfigured);
         };
-        let MemoryDomain::System(slice) = &frame.domain else {
+        let Some(au) = frame.domain.as_system_slice() else {
             // A non-system buffer carries no walkable bitstream; pass it through.
             return out.push(PipelinePacket::DataFrame(frame)).await.map(|_| ());
         };
@@ -190,7 +190,6 @@ impl CcInsert {
         }
         let sei = build_cc_sei(&[triple], codec);
 
-        let au = slice.as_slice();
         let mut bytes = Vec::with_capacity(au.len() + sei.len());
         match vcl_start(au, codec) {
             Some(off) => {
@@ -361,8 +360,8 @@ impl MultiInputElement for CcInsert {
                         self.warn_if_dropped();
                     }
                     if let PipelinePacket::DataFrame(frame) = packet {
-                        if let MemoryDomain::System(slice) = &frame.domain {
-                            let text = String::from_utf8_lossy(slice.as_slice()).into_owned();
+                        if let Some(slice) = frame.domain.as_system_slice() {
+                            let text = String::from_utf8_lossy(slice).into_owned();
                             let start = frame.timing.pts_ns;
                             let end = start.saturating_add(frame.timing.duration_ns);
                             // Recover the cue placement from frame-meta (M406) when
@@ -506,10 +505,10 @@ mod tests {
         // The SEI carries the captions: extract + decode the output stream.
         let mut dec = Cea608::new();
         for f in &sink.aus {
-            let MemoryDomain::System(s) = &f.domain else {
+            let Some(s) = f.domain.as_system_slice() else {
                 continue;
             };
-            for t in extract_cc_data(s.as_slice(), VideoCodec::H264) {
+            for t in extract_cc_data(s, VideoCodec::H264) {
                 if t.cc_type == 0 {
                     dec.push_pair(t.b0, t.b1, f.timing.pts_ns);
                 }
@@ -573,10 +572,10 @@ mod tests {
 
         let mut dec = Cea708::new();
         for f in &sink.aus {
-            let MemoryDomain::System(s) = &f.domain else {
+            let Some(s) = f.domain.as_system_slice() else {
                 continue;
             };
-            for t in extract_cc_data(s.as_slice(), VideoCodec::H264) {
+            for t in extract_cc_data(s, VideoCodec::H264) {
                 dec.push_triple(t.cc_type, t.b0, t.b1, f.timing.pts_ns);
             }
         }
@@ -626,10 +625,10 @@ mod tests {
 
         // No caption byte reached any access unit (every SEI is a null pair).
         for f in &sink.aus {
-            let MemoryDomain::System(s) = &f.domain else {
+            let Some(s) = f.domain.as_system_slice() else {
                 continue;
             };
-            assert!(extract_cc_data(s.as_slice(), VideoCodec::H264)
+            assert!(extract_cc_data(s, VideoCodec::H264)
                 .iter()
                 .all(|t| (t.b0 & 0x7F) == 0));
         }

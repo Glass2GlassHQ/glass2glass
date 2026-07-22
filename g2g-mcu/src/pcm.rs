@@ -11,7 +11,6 @@
 
 use g2g_core::error::G2gError;
 use g2g_core::frame::Frame;
-use g2g_core::memory::MemoryDomain;
 use g2g_core::staticpool::StaticLendRing;
 use g2g_core::{StaticSink, StaticTransform};
 
@@ -55,10 +54,9 @@ impl<W: PcmWriter> PcmSink<W> {
 
 impl<W: PcmWriter> StaticSink for PcmSink<W> {
     async fn consume(&mut self, frame: Frame) -> Result<(), G2gError> {
-        let MemoryDomain::System(slice) = &frame.domain else {
+        let Some(bytes) = frame.domain.as_system_slice() else {
             return Err(G2gError::UnsupportedDomain);
         };
-        let bytes = slice.as_slice();
         // Whole interleaved sample frames only: 2 bytes per sample x channels.
         let frame_bytes = 2usize.saturating_mul(self.channels.max(1) as usize);
         if bytes.len() % frame_bytes != 0 {
@@ -130,10 +128,10 @@ impl<'r, const N: usize, const BYTES: usize> PcmConvert<'r, N, BYTES> {
 
 impl<const N: usize, const BYTES: usize> StaticTransform for PcmConvert<'_, N, BYTES> {
     async fn process(&mut self, input: Frame) -> Result<Option<Frame>, G2gError> {
-        let MemoryDomain::System(slice) = &input.domain else {
+        let Some(slice) = input.domain.as_system_slice() else {
             return Err(G2gError::UnsupportedDomain);
         };
-        let len = slice.as_slice().len();
+        let len = slice.len();
         // Whole 32-bit slots only.
         if len % 4 != 0 {
             return Err(G2gError::CapsMismatch);

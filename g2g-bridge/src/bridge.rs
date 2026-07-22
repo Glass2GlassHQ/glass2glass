@@ -4,7 +4,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::JoinHandle;
 
-use g2g_core::memory::{MemoryDomain, OwnedDmaBuf};
+use g2g_core::memory::OwnedDmaBuf;
 use g2g_core::runtime::{parse_launch, run_graph, ParseError, RunStats};
 use g2g_core::{Frame, G2gError, PipelineClock};
 
@@ -252,8 +252,5 @@ impl Drop for BridgeGraph {
 /// Returns `None` for a GPU-resident frame, which the embedder must download
 /// before it can be handed back to GStreamer as a `GstBuffer`.
 pub fn frame_bytes(frame: &Frame) -> Option<&[u8]> {
-    match &frame.domain {
-        MemoryDomain::System(slice) => Some(slice.as_slice()),
-        _ => None,
-    }
+    frame.domain.as_system_slice()
 }

@@ -101,10 +101,9 @@ fn sht3x_source_reads_converts_and_lends_a_reading() {
     let mut src = Sht3xSrc::new(i2c, SHT3X_ADDR_DEFAULT, ring, 1_000_000).with_frame_limit(1);
 
     let frame = block_on(src.next()).expect("read").expect("frame");
-    let MemoryDomain::System(s) = &frame.domain else {
+    let Some(bytes) = frame.domain.as_system_slice() else {
         panic!("system frame")
     };
-    let bytes = s.as_slice();
     assert_eq!(bytes.len(), SHT3X_READING_BYTES);
     // The reading is [t_mC i32 LE, rh_mpct i32 LE], the datasheet conversion.
     let t = i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
@@ -212,10 +211,10 @@ fn uart_sink_and_source_round_trip_fixed_frames() {
     let mut src = UartSrc::new(MockRx { wire: wire.clone() }, ring, 4, 0).with_frame_limit(3);
     let mut got = Vec::new();
     while let Some(f) = block_on(src.next()).expect("rx") {
-        let MemoryDomain::System(s) = &f.domain else {
+        let Some(s) = f.domain.as_system_slice() else {
             panic!("system frame")
         };
-        got.push(s.as_slice().to_vec());
+        got.push(s.to_vec());
     }
     assert_eq!(
         got,

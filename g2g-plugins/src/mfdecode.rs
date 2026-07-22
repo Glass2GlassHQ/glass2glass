@@ -461,10 +461,10 @@ impl AsyncElement for MfDecode {
             let mut decoded = Vec::new();
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    self.feed(slice.as_slice(), frame.timing.pts_ns, &mut decoded)?;
+                    self.feed(slice, frame.timing.pts_ns, &mut decoded)?;
                 }
                 PipelinePacket::CapsChanged(c) => {
                     // M16 workaround #3 Phase A: validate + record.

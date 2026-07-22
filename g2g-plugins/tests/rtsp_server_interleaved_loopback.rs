@@ -11,9 +11,7 @@ use core::pin::Pin;
 use std::net::TcpListener as StdTcpListener;
 
 use g2g_core::runtime::SourceLoop;
-use g2g_core::{
-    Caps, Dim, G2gError, MemoryDomain, OutputSink, PipelinePacket, PushOutcome, Rate, VideoCodec,
-};
+use g2g_core::{Caps, Dim, G2gError, OutputSink, PipelinePacket, PushOutcome, Rate, VideoCodec};
 
 use g2g_plugins::rtppay::RtpH264Packetizer;
 use g2g_plugins::rtspserversrc::RtspServerSrc;
@@ -30,9 +28,8 @@ impl OutputSink for Capture {
         p: PipelinePacket,
     ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
         if let PipelinePacket::DataFrame(frame) = &p {
-            if let MemoryDomain::System(slice) = &frame.domain {
-                self.tags
-                    .push(slice.as_slice().get(5).copied().unwrap_or(0));
+            if let Some(slice) = frame.domain.as_system_slice() {
+                self.tags.push(slice.get(5).copied().unwrap_or(0));
             }
         }
         Box::pin(async { Ok(PushOutcome::Accepted) })

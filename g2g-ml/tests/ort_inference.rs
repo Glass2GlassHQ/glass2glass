@@ -109,7 +109,7 @@ async fn directml_session_infers_identically() {
         .iter()
         .find_map(|p| match p {
             PipelinePacket::DataFrame(f) => {
-                let MemoryDomain::System(slice) = &f.domain else {
+                let Some(slice) = f.domain.as_system_slice() else {
                     return None;
                 };
                 Some(
@@ -155,12 +155,11 @@ async fn cuda_session_infers_identically() {
         .iter()
         .find_map(|p| match p {
             PipelinePacket::DataFrame(f) => {
-                let MemoryDomain::System(slice) = &f.domain else {
+                let Some(slice) = f.domain.as_system_slice() else {
                     return None;
                 };
                 Some(
                     slice
-                        .as_slice()
                         .chunks_exact(4)
                         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                         .collect(),
@@ -236,10 +235,10 @@ async fn inference_emits_tensor_caps_and_normalized_values() {
         })
         .collect();
     assert_eq!(frames.len(), 2);
-    let MemoryDomain::System(slice) = &frames[0].domain else {
+    let Some(slice) = frames[0].domain.as_system_slice() else {
         panic!("tensor frames are System-domain");
     };
-    let bytes = slice.as_slice();
+    let bytes = slice;
     assert_eq!(bytes.len(), 12 * 4, "1x3x2x2 f32 tensor");
     let values: Vec<f32> = bytes
         .chunks_exact(4)
@@ -289,12 +288,11 @@ async fn tensor_input_mode_feeds_preprocessed_tensor_directly() {
         .iter()
         .find_map(|p| match p {
             PipelinePacket::DataFrame(f) => {
-                let MemoryDomain::System(slice) = &f.domain else {
+                let Some(slice) = f.domain.as_system_slice() else {
                     return None;
                 };
                 Some(
                     slice
-                        .as_slice()
                         .chunks_exact(4)
                         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                         .collect(),
@@ -345,12 +343,11 @@ async fn uint8_tensor_input_runs_a_quantized_model() {
         .iter()
         .find_map(|p| match p {
             PipelinePacket::DataFrame(f) => {
-                let MemoryDomain::System(slice) = &f.domain else {
+                let Some(slice) = f.domain.as_system_slice() else {
                     return None;
                 };
                 Some(
                     slice
-                        .as_slice()
                         .chunks_exact(4)
                         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                         .collect(),

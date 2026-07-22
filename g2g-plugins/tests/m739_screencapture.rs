@@ -62,11 +62,11 @@ async fn captures_display_or_reports_denied() {
         Ok(n) => {
             assert_eq!(n, 3, "captured the requested frames");
             for d in &out.frames {
-                let MemoryDomain::System(s) = d else {
+                let Some(s) = d.as_system_slice() else {
                     panic!("packed mode emits System frames");
                 };
                 assert_eq!(
-                    s.as_slice().len(),
+                    s.len(),
                     (w * h * 3 / 2) as usize,
                     "tight NV12 at the display geometry"
                 );

@@ -21,7 +21,6 @@ use embedded_hal::digital::OutputPin;
 use embedded_hal::spi::SpiDevice;
 use g2g_core::error::{G2gError, HardwareError};
 use g2g_core::frame::Frame;
-use g2g_core::memory::MemoryDomain;
 use g2g_core::StaticSink;
 
 // MIPI-DCS opcodes shared by the ST7789 / ILI9341 controller family.
@@ -227,10 +226,9 @@ impl<SPI: SpiDevice, DC: OutputPin> StaticSink for SpiDisplaySink<SPI, DC> {
         if !self.initialized {
             return Err(G2gError::NotConfigured);
         }
-        let MemoryDomain::System(slice) = &frame.domain else {
+        let Some(rgba) = frame.domain.as_system_slice() else {
             return Err(G2gError::UnsupportedDomain);
         };
-        let rgba = slice.as_slice();
         // Rows this frame carries, and where they land: the whole panel from
         // row 0, or one stripe at the running cursor.
         let (row0, rows) = if self.stripe_rows == 0 {

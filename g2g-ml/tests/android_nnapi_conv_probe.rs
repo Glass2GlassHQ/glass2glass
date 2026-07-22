@@ -153,7 +153,7 @@ async fn conv_runs_through_android_ep_stack() {
         .iter()
         .find_map(|p| match p {
             PipelinePacket::DataFrame(f) => {
-                let MemoryDomain::System(slice) = &f.domain else {
+                let Some(slice) = f.domain.as_system_slice() else {
                     return None;
                 };
                 Some(

@@ -18,7 +18,6 @@
 
 use g2g_core::error::G2gError;
 use g2g_core::frame::Frame;
-use g2g_core::memory::MemoryDomain;
 use g2g_core::staticpool::StaticLendRing;
 use g2g_core::StaticTransform;
 
@@ -191,10 +190,10 @@ impl<const N: usize, const BYTES: usize> StaticTransform for Resampler<'_, N, BY
             // Same-rate: identity, zero-copy.
             return Ok(Some(input));
         };
-        let MemoryDomain::System(slice) = &input.domain else {
+        let Some(slice) = input.domain.as_system_slice() else {
             return Err(G2gError::UnsupportedDomain);
         };
-        let len = slice.as_slice().len();
+        let len = slice.len();
         // Whole 16-bit samples only.
         if len % 2 != 0 {
             return Err(G2gError::CapsMismatch);
@@ -223,8 +222,8 @@ impl<const N: usize, const BYTES: usize> StaticTransform for Resampler<'_, N, BY
             }
         };
         self.next_u = next_u;
-        if let MemoryDomain::System(s) = &input.domain {
-            self.push_history(s.as_slice(), n_in, t.taps);
+        if let Some(s) = input.domain.as_system_slice() {
+            self.push_history(s, n_in, t.taps);
         }
         Ok(Some(out))
     }

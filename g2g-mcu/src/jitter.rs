@@ -224,10 +224,9 @@ impl<const N: usize, const BYTES: usize> JitterBuffer<N, BYTES> {
 
 impl<const N: usize, const BYTES: usize> StaticTransform for JitterBuffer<N, BYTES> {
     async fn process(&mut self, input: Frame) -> Result<Option<Frame>, G2gError> {
-        let MemoryDomain::System(slice) = &input.domain else {
+        let Some(payload) = input.domain.as_system_slice() else {
             return Err(G2gError::UnsupportedDomain);
         };
-        let payload = slice.as_slice();
         if payload.len() > BYTES {
             return Err(G2gError::CapsMismatch);
         }

@@ -81,8 +81,8 @@ struct InspectTransform {
 }
 impl InspectTransform {
     fn apply(&mut self, frame: Frame) -> Frame {
-        if let MemoryDomain::System(s) = &frame.domain {
-            self.fold = self.fold.wrapping_add(u64::from(s.as_slice()[0]));
+        if let Some(s) = frame.domain.as_system_slice() {
+            self.fold = self.fold.wrapping_add(u64::from(s[0]));
         }
         frame
     }
@@ -96,8 +96,8 @@ struct SumSink {
 }
 impl SumSink {
     fn consume(&mut self, frame: Frame) {
-        if let MemoryDomain::System(s) = &frame.domain {
-            self.sum = self.sum.wrapping_add(u64::from(s.as_slice()[PAYLOAD - 1]));
+        if let Some(s) = frame.domain.as_system_slice() {
+            self.sum = self.sum.wrapping_add(u64::from(s[PAYLOAD - 1]));
         }
         // frame drops here: the slot returns to the ring.
     }

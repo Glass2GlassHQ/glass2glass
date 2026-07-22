@@ -129,8 +129,8 @@ impl AsyncElement for BranchSink {
         match packet {
             PipelinePacket::CapsChanged(c) => self.caps_changes.push(c),
             PipelinePacket::DataFrame(f) => {
-                if let MemoryDomain::System(s) = &f.domain {
-                    self.tags.push(s.as_slice()[0]);
+                if let Some(s) = f.domain.as_system_slice() {
+                    self.tags.push(s[0]);
                 }
             }
             _ => {}
@@ -147,10 +147,7 @@ async fn one_demux_splits_into_two_typed_branches() {
         configured: false,
     };
     let mut demux = StreamDemux::new(ts_input(), vec![video_caps(), audio_caps()], |f| {
-        match &f.domain {
-            MemoryDomain::System(s) => s.as_slice()[0] as usize,
-            _ => 0,
-        }
+        f.domain.as_system_slice().map_or(0, |s| s[0] as usize)
     });
     assert_eq!(demux.port_count(), 2);
 
@@ -212,10 +209,7 @@ async fn dark_port_stays_silent_when_its_stream_is_absent() {
         configured: false,
     };
     let mut demux = StreamDemux::new(ts_input(), vec![video_caps(), audio_caps()], |f| {
-        match &f.domain {
-            MemoryDomain::System(s) => s.as_slice()[0] as usize,
-            _ => 0,
-        }
+        f.domain.as_system_slice().map_or(0, |s| s[0] as usize)
     });
 
     let mut video = BranchSink::default();

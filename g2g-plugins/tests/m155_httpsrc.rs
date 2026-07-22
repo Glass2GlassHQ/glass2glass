@@ -13,8 +13,8 @@ use std::thread;
 
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    ByteStreamEncoding, Caps, CapsConstraint, CapsSet, G2gError, MemoryDomain, OutputSink,
-    PipelinePacket, PushOutcome,
+    ByteStreamEncoding, Caps, CapsConstraint, CapsSet, G2gError, OutputSink, PipelinePacket,
+    PushOutcome,
 };
 use g2g_plugins::httpsrc::HttpSrc;
 
@@ -33,8 +33,8 @@ impl OutputSink for CaptureSink {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(f) => {
-                    if let MemoryDomain::System(s) = &f.domain {
-                        self.body.extend_from_slice(s.as_slice());
+                    if let Some(s) = f.domain.as_system_slice() {
+                        self.body.extend_from_slice(s);
                         self.frames += 1;
                     }
                 }

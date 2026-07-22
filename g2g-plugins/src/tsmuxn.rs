@@ -232,13 +232,13 @@ impl MultiInputElement for TsMux {
             // Drain every AU now safe to emit, in global PTS order, writing each
             // to its stream's PID.
             while let Some((stream, frame)) = self.agg.take_earliest_by(|f| f.timing.pts_ns) {
-                let MemoryDomain::System(slice) = &frame.domain else {
+                let Some(slice) = frame.domain.as_system_slice() else {
                     return Err(G2gError::UnsupportedDomain);
                 };
                 let pts_90khz = (frame.timing.pts_ns as u128 * 90_000 / 1_000_000_000) as u64;
                 let ts = self.mux.as_mut().expect("built above").push_au_on(
                     stream,
-                    slice.as_slice(),
+                    slice,
                     Some(pts_90khz),
                 );
                 let out_frame = Frame::new(
@@ -273,8 +273,8 @@ mod tests {
         ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
             Box::pin(async move {
                 if let PipelinePacket::DataFrame(f) = packet {
-                    if let MemoryDomain::System(s) = &f.domain {
-                        self.bytes.extend_from_slice(s.as_slice());
+                    if let Some(s) = f.domain.as_system_slice() {
+                        self.bytes.extend_from_slice(s);
                     }
                 }
                 Ok(PushOutcome::Accepted)

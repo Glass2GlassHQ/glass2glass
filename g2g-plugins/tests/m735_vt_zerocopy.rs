@@ -165,10 +165,10 @@ async fn cv_output_transcode_never_touches_system_memory() {
         .expect("decoder session");
     let frames = run_element(&mut check, encoded).await;
     assert_eq!(frames.len(), fed, "every transcoded picture decodes");
-    let MemoryDomain::System(slice) = &frames[0].domain else {
+    let Some(slice) = frames[0].domain.as_system_slice() else {
         panic!("packed path emits System frames");
     };
-    let luma = &slice.as_slice()[..640 * 480];
+    let luma = &slice[..640 * 480];
     let min = *luma.iter().min().unwrap();
     let max = *luma.iter().max().unwrap();
     assert!(min <= 30, "no near-black content (min {min})");

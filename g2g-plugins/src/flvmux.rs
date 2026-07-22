@@ -165,10 +165,9 @@ impl AsyncElement for FlvMux {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(au) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    let au = slice.as_slice();
                     let track = self.track.ok_or(G2gError::NotConfigured)?;
                     let mux = self.mux.as_mut().ok_or(G2gError::NotConfigured)?;
                     let pts_ms = (frame.timing.pts_ns / 1_000_000) as u32;
@@ -258,8 +257,8 @@ mod tests {
         ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
             Box::pin(async move {
                 if let PipelinePacket::DataFrame(f) = packet {
-                    if let MemoryDomain::System(s) = &f.domain {
-                        self.frames.push(s.as_slice().to_vec());
+                    if let Some(s) = f.domain.as_system_slice() {
+                        self.frames.push(s.to_vec());
                     }
                 }
                 Ok(PushOutcome::Accepted)

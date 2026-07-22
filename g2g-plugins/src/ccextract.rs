@@ -291,9 +291,8 @@ mod tests {
             .iter()
             .filter_map(|p| match p {
                 PipelinePacket::DataFrame(f) => {
-                    if let MemoryDomain::System(s) = &f.domain {
-                        let text =
-                            alloc::string::String::from_utf8_lossy(s.as_slice()).into_owned();
+                    if let Some(s) = f.domain.as_system_slice() {
+                        let text = alloc::string::String::from_utf8_lossy(s).into_owned();
                         Some((f.timing.pts_ns, f.timing.duration_ns, text))
                     } else {
                         None

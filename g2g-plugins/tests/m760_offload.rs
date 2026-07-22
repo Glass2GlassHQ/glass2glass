@@ -58,7 +58,7 @@ impl AsyncElement for CapturingSink {
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
             if let PipelinePacket::DataFrame(frame) = packet {
-                let MemoryDomain::System(slice) = &frame.domain else {
+                let Some(slice) = frame.domain.as_system_slice() else {
                     return Err(G2gError::UnsupportedDomain);
                 };
                 self.frames.lock().unwrap().push(slice.as_slice().to_vec());

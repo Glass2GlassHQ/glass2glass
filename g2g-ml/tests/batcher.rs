@@ -92,10 +92,10 @@ impl Collect {
 }
 
 fn frame_bytes(f: &Frame) -> &[u8] {
-    let MemoryDomain::System(slice) = &f.domain else {
+    let Some(slice) = f.domain.as_system_slice() else {
         panic!("batcher emits System frames");
     };
-    slice.as_slice()
+    slice
 }
 
 #[tokio::test]

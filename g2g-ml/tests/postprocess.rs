@@ -46,11 +46,10 @@ fn f32_frame(values: &[f32], sequence: u64) -> Frame {
 }
 
 fn frame_values(f: &Frame) -> Vec<f32> {
-    let MemoryDomain::System(slice) = &f.domain else {
+    let Some(slice) = f.domain.as_system_slice() else {
         panic!("System frames expected");
     };
     slice
-        .as_slice()
         .chunks_exact(4)
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect()

@@ -140,11 +140,11 @@ async fn hevc_encode_decode_round_trip_or_skip() {
         "encoder must emit H.265 caps, got {hevc_caps:?}"
     );
     for f in encoded.data_frames() {
-        let MemoryDomain::System(slice) = &f.domain else {
+        let Some(slice) = f.domain.as_system_slice() else {
             panic!("encoder must emit System-domain frames");
         };
         assert!(
-            starts_with_annexb_start_code(slice.as_slice()),
+            starts_with_annexb_start_code(slice),
             "HEVC output must be Annex-B"
         );
     }
@@ -162,12 +162,12 @@ async fn hevc_encode_decode_round_trip_or_skip() {
 
     let mut decoded = Collect::default();
     for f in encoded.data_frames() {
-        let MemoryDomain::System(slice) = &f.domain else {
+        let Some(slice) = f.domain.as_system_slice() else {
             unreachable!()
         };
         let frame = Frame {
             domain: MemoryDomain::System(SystemSlice::from_boxed(
-                slice.as_slice().to_vec().into_boxed_slice(),
+                slice.to_vec().into_boxed_slice(),
             )),
             timing: f.timing,
             sequence: f.sequence,
@@ -203,9 +203,9 @@ async fn hevc_encode_decode_round_trip_or_skip() {
     );
     let expected_len = (WIDTH * HEIGHT * 3 / 2) as usize;
     for f in frames {
-        let MemoryDomain::System(slice) = &f.domain else {
+        let Some(slice) = f.domain.as_system_slice() else {
             panic!("decoder must emit System-domain frames");
         };
-        assert_eq!(slice.as_slice().len(), expected_len, "packed NV12 length");
+        assert_eq!(slice.len(), expected_len, "packed NV12 length");
     }
 }

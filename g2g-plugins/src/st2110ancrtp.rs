@@ -33,8 +33,8 @@ use std::time::Duration;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ClockSync, ConfigureOutcome, Dim, ElementMetadata,
-    G2gError, MediaClock, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-    PropError, PropKind, PropValue, PropertySpec, Rate, VideoCodec,
+    G2gError, MediaClock, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
+    PropKind, PropValue, PropertySpec, Rate, VideoCodec,
 };
 
 use crate::ccextract::push_cue_frames;
@@ -232,7 +232,7 @@ impl AsyncElement for St2110AncSink {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
                     let codec = self.codec.ok_or(G2gError::NotConfigured)?;
@@ -240,7 +240,7 @@ impl AsyncElement for St2110AncSink {
                     let sock = self.socket.as_ref().ok_or(G2gError::NotConfigured)?;
                     // Mine this access unit's caption triples; a frame with no
                     // captions sends no -40 packet.
-                    let triples = extract_cc_data(slice.as_slice(), codec);
+                    let triples = extract_cc_data(slice, codec);
                     if triples.is_empty() {
                         return Ok(());
                     }
@@ -447,7 +447,7 @@ mod tests {
     use super::*;
     use crate::cea::CcTriple;
     use g2g_core::frame::Frame;
-    use g2g_core::memory::SystemSlice;
+    use g2g_core::memory::{MemoryDomain, SystemSlice};
     use g2g_core::runtime::block_on;
     use g2g_core::{FrameTiming, MonotonicClock, PushOutcome};
     use std::sync::Arc;
@@ -466,8 +466,8 @@ mod tests {
             Box::pin(async move {
                 match packet {
                     PipelinePacket::DataFrame(f) => {
-                        if let MemoryDomain::System(s) = &f.domain {
-                            let text = String::from_utf8_lossy(s.as_slice()).into_owned();
+                        if let Some(s) = f.domain.as_system_slice() {
+                            let text = String::from_utf8_lossy(s).into_owned();
                             self.texts
                                 .push((f.timing.pts_ns, f.timing.duration_ns, text));
                         }

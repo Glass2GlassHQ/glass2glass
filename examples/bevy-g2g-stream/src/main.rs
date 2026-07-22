@@ -356,7 +356,7 @@ impl OutputSink for CaptureAus {
     {
         Box::pin(async move {
             if let PipelinePacket::DataFrame(f) = packet {
-                if let MemoryDomain::System(s) = &f.domain {
+                if let Some(s) = f.domain.as_system_slice() {
                     self.aus.push((s.as_slice().to_vec(), f.timing.pts_ns));
                 }
             }

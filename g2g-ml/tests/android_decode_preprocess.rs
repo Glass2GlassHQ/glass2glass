@@ -238,10 +238,7 @@ async fn decode_gpu_to_preprocess_tensor() {
 
     // The preprocess output is an NCHW f32 tensor read back to system memory.
     let tensor_bytes = pre_sink.packets.iter().find_map(|p| match p {
-        PipelinePacket::DataFrame(f) => match &f.domain {
-            MemoryDomain::System(s) => Some(s.as_slice().to_vec()),
-            _ => None,
-        },
+        PipelinePacket::DataFrame(f) => f.domain.as_system_slice().map(<[u8]>::to_vec),
         _ => None,
     });
     let tensor_bytes = tensor_bytes.expect("preprocess must emit a System tensor frame");
