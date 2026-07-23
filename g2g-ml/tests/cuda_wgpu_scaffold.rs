@@ -109,14 +109,13 @@ fn weights_bias(k: usize) -> (Vec<f32>, Vec<f32>) {
 }
 
 fn logits_from_system(f: &Frame) -> Vec<f32> {
-    let MemoryDomain::System(slice) = &f.domain else {
+    let Some(slice) = f.domain.as_system_slice() else {
         panic!(
             "inference must read logits back to System, got {:?}",
             f.domain.kind()
         );
     };
     slice
-        .as_slice()
         .chunks_exact(4)
         .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
         .collect()
@@ -287,10 +286,10 @@ async fn cuda_to_wgpu_scaffold_matches_cpu_reference() {
             .into_iter()
             .next()
             .expect("downloaded NV12");
-        let MemoryDomain::System(slice) = &nv12_frame.domain else {
+        let Some(slice) = nv12_frame.domain.as_system_slice() else {
             panic!("CudaDownload must produce a System NV12 frame");
         };
-        let nv12_bytes = slice.as_slice().to_vec();
+        let nv12_bytes = slice.to_vec();
 
         // NV12 -> GPU RGB tensor -> logits, tensor never leaving the device
         // between the two GPU elements.

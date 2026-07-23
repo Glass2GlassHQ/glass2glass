@@ -216,7 +216,7 @@ impl AsyncElement for MkvMux {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
                     if self.mux.is_none() {
@@ -226,7 +226,7 @@ impl AsyncElement for MkvMux {
                     }
                     let mux = self.mux.as_mut().ok_or(G2gError::NotConfigured)?;
                     // No upstream delta-frame signal yet: flag every frame a keyframe.
-                    let bytes = mux.push_frame(slice.as_slice(), frame.timing.pts_ns, true);
+                    let bytes = mux.push_frame(slice, frame.timing.pts_ns, true);
                     let out_frame = Frame::new(
                         MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
                         FrameTiming {
@@ -339,8 +339,8 @@ mod tests {
             Box::pin(async move {
                 match packet {
                     PipelinePacket::DataFrame(f) => {
-                        if let MemoryDomain::System(s) = &f.domain {
-                            self.frames.push(s.as_slice().to_vec());
+                        if let Some(s) = f.domain.as_system_slice() {
+                            self.frames.push(s.to_vec());
                         }
                     }
                     PipelinePacket::Eos => self.eos = true,

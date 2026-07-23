@@ -36,7 +36,6 @@ use alloc::vec::Vec;
 
 use std::ffi::CString;
 
-use g2g_core::memory::MemoryDomain;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, G2gError,
     HardwareError, OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
@@ -290,10 +289,10 @@ impl AsyncElement for GstWrap {
             let p = self.handle.ok_or(G2gError::NotConfigured)?;
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    let bytes = slice.as_slice();
+                    let bytes = slice;
                     // SAFETY: `p` is valid; `bytes` is valid for `bytes.len()`;
                     // `push` copies the bytes into a GstBuffer.
                     let r = unsafe {

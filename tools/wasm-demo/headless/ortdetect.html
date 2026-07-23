@@ -1,0 +1,19 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>g2g ort-web headless test</title>
+<!--
+  Headless test page for the browser ONNX MVP. Loads the g2g wasm module and runs
+  WebSocketSrc -> WebCodecsDecode -> WebOrtDetect (ort-web) -> AnalyticsOverlay ->
+  CanvasSink against the ws + model URLs in the query string. Driven by
+  run-ortdetect.mjs; not part of the interactive demo (index.html).
+-->
+<canvas id="view" width="640" height="480"></canvas>
+<script type="module">
+  import init, { run_websocket_ortdetect_to_canvas } from "../pkg/g2g_web.js";
+  const q = new URLSearchParams(location.search);
+  const ws = q.get("ws");
+  const model = q.get("model");
+  await init();
+  console.log("g2g[test]: module init ok, ws=" + ws + " model=" + model);
+  run_websocket_ortdetect_to_canvas(ws, "view", model);
+</script>

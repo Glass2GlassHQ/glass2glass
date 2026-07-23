@@ -256,10 +256,10 @@ impl AsyncElement for AAudioSink {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    self.write_all(slice.as_slice())?;
+                    self.write_all(slice)?;
                 }
                 PipelinePacket::Eos => {
                     if let Some(st) = self.stream.as_ref() {

@@ -315,11 +315,11 @@ impl AsyncElement for VideoRate {
                         return Err(G2gError::NotConfigured);
                     }
                     let (format, w, h) = self.input.ok_or(G2gError::NotConfigured)?;
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
                     let cur_pts = frame.timing.pts_ns;
-                    let cur_bytes: Box<[u8]> = slice.as_slice().into();
+                    let cur_bytes: Box<[u8]> = slice.into();
 
                     // fill the output slots the held frame still owns, then
                     // make the new frame the held one.

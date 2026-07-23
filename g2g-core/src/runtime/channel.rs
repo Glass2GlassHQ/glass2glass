@@ -559,6 +559,15 @@ pub struct SenderSink {
     upstream_reconfigure: Option<ReconfigureSlot>,
     /// As `upstream_qos`, for downstream bitrate targets (M720).
     upstream_bitrate: Option<BitrateSlot>,
+    /// M759 auto-propagation: the propagated metadata set the owning transform
+    /// arm derived from its most recent input frame (its element declared a
+    /// [`meta_transform`](crate::element::AsyncElement::meta_transform)). Attached
+    /// to any outgoing `DataFrame` whose own meta is empty, so a transform that
+    /// emits fresh frames still carries the survivors forward without touching
+    /// its `process`. `None` on every other adapter and when the propagated set
+    /// came out empty (a Drop verdict must not leak a stale set).
+    #[cfg(feature = "metadata")]
+    meta_stash: Option<crate::meta::FrameMetaSet>,
 }
 
 impl SenderSink {
@@ -573,7 +582,17 @@ impl SenderSink {
             upstream_qos: None,
             upstream_reconfigure: None,
             upstream_bitrate: None,
+            #[cfg(feature = "metadata")]
+            meta_stash: None,
         }
+    }
+
+    /// Stash the propagated metadata set to attach to outgoing meta-empty
+    /// `DataFrame`s (M759). The transform arm replaces it on each new input
+    /// frame, passing `None` to clear it (a Drop verdict, so no stale set leaks).
+    #[cfg(feature = "metadata")]
+    pub(crate) fn set_meta_stash(&mut self, meta: Option<crate::meta::FrameMetaSet>) {
+        self.meta_stash = meta;
     }
 
     /// A handle to this link's probe slot, for installing/removing a
@@ -647,9 +666,20 @@ impl SenderSink {
 impl OutputSink for SenderSink {
     fn push<'a>(
         &'a mut self,
-        packet: PipelinePacket,
+        #[cfg_attr(not(feature = "metadata"), allow(unused_mut))] mut packet: PipelinePacket,
     ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
         Box::pin(async move {
+            // M759: attach the arm's stashed propagated metadata to a fresh
+            // output frame (one whose own meta is empty), so a transform that
+            // emits new frames still carries the survivors forward.
+            // Element-authored meta is never overwritten.
+            #[cfg(feature = "metadata")]
+            if let (Some(stash), PipelinePacket::DataFrame(frame)) = (&self.meta_stash, &mut packet)
+            {
+                if frame.meta.is_empty() {
+                    frame.meta = stash.clone();
+                }
+            }
             // A probe may drop the packet before it ever enters the link.
             if self.probe.action(&packet) == ProbeAction::Drop {
                 return Ok(PushOutcome::Accepted);

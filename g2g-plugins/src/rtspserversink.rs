@@ -31,8 +31,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
-    HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate,
-    VideoCodec,
+    HardwareError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate, VideoCodec,
 };
 
 use crate::filesink::io_err;
@@ -426,7 +425,7 @@ impl AsyncElement for RtspServerSink {
                     if !self.configured {
                         return Err(G2gError::NotConfigured);
                     }
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
                     // Block on the first buffer until one player connects + PLAYs,
@@ -439,7 +438,7 @@ impl AsyncElement for RtspServerSink {
                         self.advance_handshakes().await;
                     }
                     let timestamp = Self::rtp_timestamp(frame.timing.pts_ns);
-                    let bytes = slice.as_slice();
+                    let bytes = slice;
                     self.broadcast(bytes, timestamp).await?;
                     self.frames_sent += 1;
                 }

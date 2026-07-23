@@ -289,7 +289,7 @@ impl AsyncElement for St2110VideoSink {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
                     let pkt = self.packetizer.as_mut().ok_or(G2gError::NotConfigured)?;
@@ -298,7 +298,7 @@ impl AsyncElement for St2110VideoSink {
                     let base = self.clock_sync.as_ref().map_or(0, ClockSync::base_time);
                     let tai = base.saturating_add(frame.timing.pts_ns);
                     let packets = pkt
-                        .packetize(slice.as_slice(), self.width, self.height, tai)
+                        .packetize(slice, self.width, self.height, tai)
                         .ok_or(G2gError::CapsMismatch)?;
                     match self.pacing {
                         // ST 2110-21: spread the frame's packets across the frame
@@ -720,8 +720,8 @@ mod tests {
             Box::pin(async move {
                 match packet {
                     PipelinePacket::DataFrame(f) => {
-                        if let MemoryDomain::System(s) = &f.domain {
-                            self.frames.push(s.as_slice().to_vec());
+                        if let Some(s) = f.domain.as_system_slice() {
+                            self.frames.push(s.to_vec());
                         }
                     }
                     PipelinePacket::Eos => self.eos = true,

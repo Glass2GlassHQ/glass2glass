@@ -54,8 +54,8 @@ use str0m::{Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
 
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
-    ElementMetadata, G2gError, HardwareError, MemoryDomain, OutputSink, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec, Rate, Reconfigure, VideoCodec,
+    ElementMetadata, G2gError, HardwareError, OutputSink, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec, Rate, Reconfigure, VideoCodec,
 };
 
 use crate::filesink::io_err;
@@ -550,12 +550,12 @@ impl AsyncElement for WebRtcSink {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
                     let unit = MediaUnit {
                         pts_ns: frame.timing.pts_ns,
-                        data: slice.as_slice().to_vec(),
+                        data: slice.to_vec(),
                     };
                     if self.tx.is_none() {
                         self.start_session().await?;

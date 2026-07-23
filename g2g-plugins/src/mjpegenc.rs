@@ -136,6 +136,13 @@ impl AsyncElement for MjpegEnc {
     where
         Self: 'a;
 
+    // M759: a re-encode to compressed JPEG drops pixel-derived meta
+    // (AnalyticsMeta); opaque side-data (BlobMeta) rides through.
+    #[cfg(feature = "metadata")]
+    fn meta_transform(&self) -> Option<g2g_core::meta::Transform> {
+        Some(g2g_core::meta::Transform::Encode)
+    }
+
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         for alt in Self::input_alternatives() {
             if let Ok(c) = upstream_caps.intersect(&alt) {
@@ -240,10 +247,10 @@ impl AsyncElement for MjpegEnc {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    let jpeg = self.encode(slice.as_slice())?;
+                    let jpeg = self.encode(slice)?;
                     if !self.caps_sent {
                         out.push(PipelinePacket::CapsChanged(self.output_caps()))
                             .await?;

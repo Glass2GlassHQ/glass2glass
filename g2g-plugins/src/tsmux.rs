@@ -204,12 +204,12 @@ impl AsyncElement for TsMux {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
                     let mux = self.mux.as_mut().ok_or(G2gError::NotConfigured)?;
                     let pts_90khz = (frame.timing.pts_ns as u128 * 90_000 / 1_000_000_000) as u64;
-                    let ts = mux.push_au(slice.as_slice(), Some(pts_90khz));
+                    let ts = mux.push_au(slice, Some(pts_90khz));
                     let out_frame = Frame::new(
                         MemoryDomain::System(SystemSlice::from_boxed(ts.into_boxed_slice())),
                         FrameTiming {
@@ -271,8 +271,8 @@ mod tests {
             Box::pin(async move {
                 match packet {
                     PipelinePacket::DataFrame(f) => {
-                        if let MemoryDomain::System(s) = &f.domain {
-                            self.frames.push(s.as_slice().to_vec());
+                        if let Some(s) = f.domain.as_system_slice() {
+                            self.frames.push(s.to_vec());
                         }
                     }
                     PipelinePacket::Eos => self.eos = true,

@@ -518,7 +518,7 @@ impl MultiDuplexSession for LiveKitDuplex {
                                 let Some(track) = self.inputs.get(idx).copied().flatten() else {
                                     continue;
                                 };
-                                let MemoryDomain::System(slice) = &frame.domain else {
+                                let Some(slice) = frame.domain.as_system_slice() else {
                                     continue;
                                 };
                                 let (mid, pt_slot) = match track {
@@ -544,7 +544,7 @@ impl MultiDuplexSession for LiveKitDuplex {
                                             p,
                                             Instant::now(),
                                             rtp_time,
-                                            slice.as_slice().to_vec(),
+                                            slice.to_vec(),
                                         );
                                     }
                                 }

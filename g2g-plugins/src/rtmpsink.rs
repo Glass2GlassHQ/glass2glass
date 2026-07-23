@@ -28,7 +28,7 @@ use tokio::net::TcpStream;
 
 use g2g_core::{
     AsyncElement, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
-    ElementMetadata, G2gError, HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
+    ElementMetadata, G2gError, HardwareError, OutputSink, PadTemplate, PadTemplates,
     PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
@@ -233,7 +233,7 @@ impl AsyncElement for RtmpSink {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
                     // Lazily connect + publish on the first buffer.
@@ -255,7 +255,7 @@ impl AsyncElement for RtmpSink {
                     // Apply the server's ack-window back-pressure before queuing
                     // more media, so the socket buffer does not bloat unboundedly.
                     await_ack_window(stream, publisher).await?;
-                    publisher.push_flv(slice.as_slice());
+                    publisher.push_flv(slice);
                     self.bytes_sent += flush_out(stream, publisher).await? as u64;
                     self.frames_sent += 1;
                 }

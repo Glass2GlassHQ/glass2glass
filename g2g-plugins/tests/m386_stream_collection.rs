@@ -127,8 +127,8 @@ impl OutputSink for Drain {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(f) => {
-                    if let MemoryDomain::System(s) = &f.domain {
-                        self.bytes.extend_from_slice(s.as_slice());
+                    if let Some(s) = f.domain.as_system_slice() {
+                        self.bytes.extend_from_slice(s);
                     }
                 }
                 PipelinePacket::Eos => self.eos = true,

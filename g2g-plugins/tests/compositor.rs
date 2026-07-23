@@ -119,8 +119,7 @@ impl AsyncElement for CapturingSink {
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
             if let PipelinePacket::DataFrame(frame) = packet {
-                if let MemoryDomain::System(slice) = &frame.domain {
-                    let s = slice.as_slice();
+                if let Some(s) = frame.domain.as_system_slice() {
                     self.lens.push(s.len());
                     self.top_left.push([s[0], s[1], s[2], s[3]]);
                     self.last = Some(s.into());
@@ -204,8 +203,8 @@ impl AsyncElement for ShareSink {
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
             if let PipelinePacket::DataFrame(frame) = packet {
-                if let MemoryDomain::System(slice) = &frame.domain {
-                    self.0.lock().unwrap().push(slice.as_slice().into());
+                if let Some(slice) = frame.domain.as_system_slice() {
+                    self.0.lock().unwrap().push(slice.into());
                 }
             }
             Ok(())
@@ -447,8 +446,7 @@ impl AsyncElement for InsetProbe {
         Box::pin(async move {
             if let PipelinePacket::DataFrame(frame) = packet {
                 tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-                if let MemoryDomain::System(slice) = &frame.domain {
-                    let s = slice.as_slice();
+                if let Some(s) = frame.domain.as_system_slice() {
                     let i = (self.y * self.cw + self.x) * 4;
                     self.pixels
                         .lock()

@@ -61,8 +61,8 @@ use ffmpeg_next as ffmpeg;
 
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
-    HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, VideoCodec,
+    HardwareError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec, Rate, RawVideoFormat, VideoCodec,
 };
 
 /// Default constant target bitrate (bits/second) when the caller sets none. 4
@@ -427,6 +427,13 @@ fn copy_plane(dst: &mut [u8], stride: usize, src: &[u8], w: usize, h: usize) {
 }
 
 impl AsyncElement for FfmpegH264Enc {
+    // M759: a re-encode to a compressed codec drops pixel-derived meta
+    // (AnalyticsMeta); opaque side-data (BlobMeta) rides through.
+    #[cfg(feature = "metadata")]
+    fn meta_transform(&self) -> Option<g2g_core::meta::Transform> {
+        Some(g2g_core::meta::Transform::Encode)
+    }
+
     // Bitrate is recorded (a live reopen retarget is deferred), but the
     // encoder is still the semantic consumer, so the signal stops here.
     fn handles_keyframe_requests(&self) -> bool {
@@ -554,10 +561,10 @@ impl AsyncElement for FfmpegH264Enc {
                             return Ok(());
                         }
                     }
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    let packets = self.encode(slice.as_slice(), frame.timing.pts_ns)?;
+                    let packets = self.encode(slice, frame.timing.pts_ns)?;
                     self.emit(packets, out).await?;
                 }
                 PipelinePacket::Eos => {
@@ -614,7 +621,7 @@ mod tests {
     use super::*;
     use crate::ffmpegdec::FfmpegVideoDec;
     use g2g_core::frame::Frame;
-    use g2g_core::memory::SystemSlice;
+    use g2g_core::memory::{MemoryDomain, SystemSlice};
     use g2g_core::{FrameTiming, PushOutcome};
 
     const W: u32 = 320;
@@ -659,8 +666,8 @@ mod tests {
                 match packet {
                     PipelinePacket::CapsChanged(c) => self.caps.push(c),
                     PipelinePacket::DataFrame(f) => {
-                        if let MemoryDomain::System(s) = &f.domain {
-                            self.frames.push(s.as_slice().to_vec());
+                        if let Some(s) = f.domain.as_system_slice() {
+                            self.frames.push(s.to_vec());
                         }
                     }
                     _ => {}
@@ -709,8 +716,8 @@ mod tests {
         ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
             Box::pin(async move {
                 if let PipelinePacket::DataFrame(f) = packet {
-                    if let MemoryDomain::System(s) = &f.domain {
-                        self.frames.push(s.as_slice().to_vec());
+                    if let Some(s) = f.domain.as_system_slice() {
+                        self.frames.push(s.to_vec());
                     }
                 }
                 Ok(PushOutcome::Bitrate(self.bps))

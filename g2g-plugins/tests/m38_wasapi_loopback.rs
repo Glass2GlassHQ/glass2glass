@@ -15,7 +15,6 @@
 
 use g2g_core::element::{BoxFuture, OutputSink, PushOutcome};
 use g2g_core::frame::PipelinePacket;
-use g2g_core::memory::MemoryDomain;
 use g2g_core::runtime::{run_simple_pipeline, SourceLoop};
 use g2g_core::{Caps, G2gError, PipelineClock};
 use g2g_plugins::audiotestsrc::AudioTestSrc;
@@ -44,8 +43,8 @@ impl OutputSink for Collect {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(f) => {
-                    if let MemoryDomain::System(s) = &f.domain {
-                        self.sample_bytes += s.as_slice().len();
+                    if let Some(s) = f.domain.as_system_slice() {
+                        self.sample_bytes += s.len();
                     }
                     self.data_frames += 1;
                 }

@@ -148,8 +148,8 @@ impl AsyncElement for ProposingSink {
         _out: &'a mut dyn OutputSink,
     ) -> Self::ProcessFuture<'a> {
         if let PipelinePacket::DataFrame(f) = &packet {
-            if let MemoryDomain::System(slice) = &f.domain {
-                self.received_sizes.push(slice.as_slice().len());
+            if let Some(slice) = f.domain.as_system_slice() {
+                self.received_sizes.push(slice.len());
             }
         }
         Box::pin(async { Ok(()) })

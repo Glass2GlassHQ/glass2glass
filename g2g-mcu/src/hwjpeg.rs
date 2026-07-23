@@ -150,10 +150,9 @@ impl<D: JpegDecoder, const N: usize, const BYTES: usize> StaticTransform
     for HwJpegDec<'_, D, N, BYTES>
 {
     async fn process(&mut self, input: Frame) -> Result<Option<Frame>, G2gError> {
-        let MemoryDomain::System(slice) = &input.domain else {
+        let Some(jpeg) = input.domain.as_system_slice() else {
             return Err(G2gError::UnsupportedDomain);
         };
-        let jpeg = slice.as_slice();
         // One complete JFIF stream per frame: SOI first, EOI last. Checked
         // before any peripheral traffic (the silicon would stall on a
         // truncated stream, not error).

@@ -23,8 +23,8 @@ use alloc::vec::Vec;
 
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
-    G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec,
+    G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec,
 };
 
 use audiopus::coder::Encoder;
@@ -332,7 +332,7 @@ impl AsyncElement for OpusEnc {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
                     // Anchor the output timeline to the first input PTS.
@@ -340,7 +340,7 @@ impl AsyncElement for OpusEnc {
                         self.next_pts_ns = Some(frame.timing.pts_ns);
                     }
                     // Append interleaved S16LE samples to the pending buffer.
-                    let bytes = slice.as_slice();
+                    let bytes = slice;
                     self.buf.extend(
                         bytes
                             .chunks_exact(2)

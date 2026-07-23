@@ -94,13 +94,11 @@ async fn pcm_aac_pcm_round_trip_recovers_the_stream() {
 
     let mut decoded = Collect::default();
     for f in &encoded.frames {
-        let MemoryDomain::System(s) = &f.domain else {
+        let Some(s) = f.domain.as_system_slice() else {
             unreachable!()
         };
         let au = Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(
-                s.as_slice().to_vec().into_boxed_slice(),
-            )),
+            domain: MemoryDomain::System(SystemSlice::from_boxed(s.to_vec().into_boxed_slice())),
             timing: f.timing,
             sequence: f.sequence,
             meta: Default::default(),
@@ -132,9 +130,10 @@ async fn pcm_aac_pcm_round_trip_recovers_the_stream() {
     let decoded_frames: usize = decoded
         .frames
         .iter()
-        .map(|f| match &f.domain {
-            MemoryDomain::System(s) => s.as_slice().len() / frame_bytes,
-            _ => 0,
+        .map(|f| {
+            f.domain
+                .as_system_slice()
+                .map_or(0, |s| s.len() / frame_bytes)
         })
         .sum();
     let input_frames = BUFFERS * SAMPLES_PER_BUFFER;

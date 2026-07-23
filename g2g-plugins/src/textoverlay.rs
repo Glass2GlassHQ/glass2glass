@@ -1071,8 +1071,8 @@ impl MultiInputElement for TextOverlayN {
                 Self::TEXT => {
                     match packet {
                         PipelinePacket::DataFrame(frame) => {
-                            if let MemoryDomain::System(slice) = &frame.domain {
-                                let text = String::from_utf8_lossy(slice.as_slice()).into_owned();
+                            if let Some(slice) = frame.domain.as_system_slice() {
+                                let text = String::from_utf8_lossy(slice).into_owned();
                                 let start = frame.timing.pts_ns;
                                 let end = start.saturating_add(frame.timing.duration_ns);
                                 // Recover the cue placement from frame-meta (M406)
@@ -1180,8 +1180,8 @@ mod tests {
         ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
             Box::pin(async move {
                 if let PipelinePacket::DataFrame(frame) = packet {
-                    if let MemoryDomain::System(slice) = &frame.domain {
-                        self.last = Some(slice.as_slice().to_vec());
+                    if let Some(slice) = frame.domain.as_system_slice() {
+                        self.last = Some(slice.to_vec());
                     }
                 }
                 Ok(PushOutcome::Accepted)

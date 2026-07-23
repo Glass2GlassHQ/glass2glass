@@ -56,8 +56,8 @@ use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcConfig}
 
 use g2g_core::{
     AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
-    HardwareError, MemoryDomain, MultiInputElement, OutputSink, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec, Rate, ReverseChannel, VideoCodec,
+    HardwareError, MultiInputElement, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec, Rate, ReverseChannel, VideoCodec,
 };
 
 use crate::filesink::io_err;
@@ -696,10 +696,10 @@ impl MultiInputElement for LiveKitSink {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    let data = slice.as_slice().to_vec();
+                    let data = slice.to_vec();
                     let pts_ns = frame.timing.pts_ns;
                     // The handshake (first frame) resolves each pad's wire target.
                     if self.tx.is_none() {

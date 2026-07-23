@@ -30,7 +30,7 @@ use libpulse_simple_binding::Simple;
 
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
-    G2gError, HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    G2gError, HardwareError, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
 };
 
 /// Negotiated PCM parameters as a PulseAudio `Spec`. Compressed audio
@@ -209,11 +209,11 @@ impl AsyncElement for PulseSink {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
                     let tx = self.cmd_tx.as_ref().ok_or(G2gError::NotConfigured)?;
-                    tx.send(WorkerCmd::Samples(slice.as_slice().to_vec()))
+                    tx.send(WorkerCmd::Samples(slice.to_vec()))
                         .map_err(|_| G2gError::Hardware(HardwareError::PulseAudio(-1)))?;
                     Ok(())
                 }

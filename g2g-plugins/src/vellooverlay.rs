@@ -311,14 +311,14 @@ impl AsyncElement for VelloAnalyticsOverlay {
                         .get::<AnalyticsMeta>()
                         .map(|a| a.detections().copied().collect())
                         .unwrap_or_default();
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
                     let need = self.width as usize * self.height as usize * 4;
-                    if slice.as_slice().len() < need {
+                    if slice.len() < need {
                         return Err(G2gError::CapsMismatch);
                     }
-                    let rgba = slice.as_slice()[..need].to_vec();
+                    let rgba = slice[..need].to_vec();
 
                     self.ensure_gpu().await?;
                     let texture = self.render(rgba, &detections)?;

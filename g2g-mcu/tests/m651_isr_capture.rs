@@ -14,7 +14,6 @@ use std::thread;
 
 use g2g_core::error::G2gError;
 use g2g_core::frame::Frame;
-use g2g_core::memory::MemoryDomain;
 use g2g_core::{step_source_sink, SpscCaptureSrc, SpscFrameRing, StaticSink, Step};
 
 const BYTES: usize = 8;
@@ -26,10 +25,9 @@ fn stamp(buf: &mut [u8; BYTES], seq: u32) {
 }
 
 fn frame_seq(frame: &Frame) -> u32 {
-    let MemoryDomain::System(s) = &frame.domain else {
+    let Some(b) = frame.domain.as_system_slice() else {
         panic!("capture frames are System-domain");
     };
-    let b = s.as_slice();
     u32::from_le_bytes([b[0], b[1], b[2], b[3]])
 }
 

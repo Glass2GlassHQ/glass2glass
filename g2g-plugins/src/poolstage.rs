@@ -134,17 +134,17 @@ impl PoolStage {
         let (Some(pool), Some((_, bytes))) = (self.pool.as_ref(), self.shape) else {
             return Ok(frame);
         };
-        let MemoryDomain::System(src) = &frame.domain else {
+        let Some(src) = frame.domain.as_system_slice() else {
             return Ok(frame);
         };
-        let len = src.as_slice().len();
+        let len = src.len();
         if len > bytes {
             // Larger than the pool's buffers; pass through rather than truncate.
             return Ok(frame);
         }
         let pool = pool.clone();
         let mut buf = pool.acquire().await;
-        buf[..len].copy_from_slice(src.as_slice());
+        buf[..len].copy_from_slice(src);
         let domain = MemoryDomain::System(SystemSlice::from_pool(buf, len));
         self.staged += 1;
         Ok(Frame {

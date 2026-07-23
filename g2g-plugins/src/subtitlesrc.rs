@@ -289,14 +289,10 @@ mod tests {
         );
         match &sink.packets[0] {
             PipelinePacket::DataFrame(f) => {
-                let MemoryDomain::System(s) = &f.domain else {
+                let Some(s) = f.domain.as_system_slice() else {
                     panic!("system buffer")
                 };
-                assert_eq!(
-                    s.as_slice(),
-                    doc.as_bytes(),
-                    "the file bytes are emitted verbatim"
-                );
+                assert_eq!(s, doc.as_bytes(), "the file bytes are emitted verbatim");
             }
             _ => panic!("first packet is the document frame"),
         }

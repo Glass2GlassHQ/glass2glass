@@ -436,17 +436,17 @@ impl AsyncElement for OrtInference {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
                     let (bytes, dims) = if self.tensor_input {
                         if self.input_dtype == TensorDType::F32 {
-                            self.infer_tensor(slice.as_slice())?
+                            self.infer_tensor(slice)?
                         } else {
-                            self.infer_tensor_int(slice.as_slice())?
+                            self.infer_tensor_int(slice)?
                         }
                     } else {
-                        self.infer(slice.as_slice())?
+                        self.infer(slice)?
                     };
                     let new_caps = Caps::Tensor {
                         dtype: TensorDType::F32,

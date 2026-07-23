@@ -339,10 +339,10 @@ impl AsyncElement for Fmp4Demux {
                     if self.seek.dropping_input() {
                         return Ok(());
                     }
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    self.buffer.extend_from_slice(slice.as_slice());
+                    self.buffer.extend_from_slice(slice);
                     self.drain(out).await?;
                 }
                 // The upstream byte-seek's flush: reset the parser, then re-sync

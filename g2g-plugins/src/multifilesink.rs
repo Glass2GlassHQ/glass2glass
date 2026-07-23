@@ -18,9 +18,8 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError, MemoryDomain,
-    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec,
+    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError, OutputSink,
+    PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
 use crate::filesink::io_err;
@@ -146,10 +145,10 @@ impl AsyncElement for MultiFileSink {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    self.write_frame(slice.as_slice(), frame.timing.keyframe)?;
+                    self.write_frame(slice, frame.timing.keyframe)?;
                 }
                 PipelinePacket::Eos => {
                     if let Some(w) = self.writer.as_mut() {
@@ -324,7 +323,7 @@ mod tests {
     }
 
     fn frame(bytes: &[u8], keyframe: bool) -> PipelinePacket {
-        use g2g_core::{Frame, FrameTiming, SystemSlice};
+        use g2g_core::{Frame, FrameTiming, MemoryDomain, SystemSlice};
         let timing = FrameTiming {
             keyframe,
             ..FrameTiming::default()

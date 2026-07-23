@@ -311,7 +311,7 @@ impl AsyncElement for St2110JxsSink {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
                     let pkt = self.packetizer.as_mut().ok_or(G2gError::NotConfigured)?;
@@ -319,7 +319,7 @@ impl AsyncElement for St2110JxsSink {
                     // The frame's sampling instant on the PTP timeline: base + PTS.
                     let base = self.clock_sync.as_ref().map_or(0, ClockSync::base_time);
                     let tai = base.saturating_add(frame.timing.pts_ns);
-                    let packets = pkt.packetize(slice.as_slice(), tai);
+                    let packets = pkt.packetize(slice, tai);
                     match self.pacing {
                         // ST 2110-21: spread the codestream's packets across the frame
                         // period on the async timer (needs a real framerate + a tokio
@@ -606,8 +606,8 @@ mod tests {
             Box::pin(async move {
                 match packet {
                     PipelinePacket::DataFrame(f) => {
-                        if let MemoryDomain::System(s) = &f.domain {
-                            self.frames.push(s.as_slice().to_vec());
+                        if let Some(s) = f.domain.as_system_slice() {
+                            self.frames.push(s.to_vec());
                         }
                     }
                     PipelinePacket::Eos => self.eos = true,

@@ -36,10 +36,10 @@ pub(crate) fn frame_of<const N: usize, const B: usize>(
 
 #[allow(dead_code)] // not every test binary that includes this module uses it
 pub(crate) fn payload(frame: &Frame) -> &[u8] {
-    let MemoryDomain::System(s) = &frame.domain else {
+    let Some(s) = frame.domain.as_system_slice() else {
         panic!("system frame")
     };
-    s.as_slice()
+    s
 }
 
 // Not every test binary that includes this module uses every helper.

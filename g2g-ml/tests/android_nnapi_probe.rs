@@ -131,12 +131,11 @@ async fn android_ep_stack_infers_identically() {
         .iter()
         .find_map(|p| match p {
             PipelinePacket::DataFrame(f) => {
-                let MemoryDomain::System(slice) = &f.domain else {
+                let Some(slice) = f.domain.as_system_slice() else {
                     return None;
                 };
                 Some(
                     slice
-                        .as_slice()
                         .chunks_exact(4)
                         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                         .collect(),

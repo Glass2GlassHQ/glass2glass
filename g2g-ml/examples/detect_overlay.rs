@@ -403,8 +403,8 @@ impl AsyncElement for CaptureSink {
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
             if let PipelinePacket::DataFrame(frame) = packet {
-                if let MemoryDomain::System(slice) = &frame.domain {
-                    self.last = Some(slice.as_slice().to_vec());
+                if let Some(slice) = frame.domain.as_system_slice() {
+                    self.last = Some(slice.to_vec());
                 }
             }
             Ok(())

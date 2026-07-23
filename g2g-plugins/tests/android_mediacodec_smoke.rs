@@ -281,16 +281,17 @@ async fn decode_to_nv12(mut dec: MediaCodecDec, stream: &[u8], codec: VideoCodec
             eprintln!("first NV12 caps: {}x{}", fw, fh);
             assert!(*fw > 0 && *fh > 0);
             let expected = (*fw as usize) * (*fh as usize) * 3 / 2;
-            match &data_frames.first().unwrap().domain {
-                MemoryDomain::System(slice) => {
-                    assert_eq!(
-                        slice.as_slice().len(),
-                        expected,
-                        "NV12 byte length mismatch"
-                    );
-                }
-                _ => panic!("decoder must emit System-domain NV12 frames"),
-            }
+            assert_eq!(
+                data_frames
+                    .first()
+                    .unwrap()
+                    .domain
+                    .as_system_slice()
+                    .expect("decoder must emit System-domain NV12 frames")
+                    .len(),
+                expected,
+                "NV12 byte length mismatch"
+            );
         }
         other => panic!("expected NV12 fixed caps, got {:?}", other),
     }

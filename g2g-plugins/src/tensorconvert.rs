@@ -505,10 +505,10 @@ impl AsyncElement for TensorConvert {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    let (new_caps, converted) = self.convert_frame(slice.as_slice())?;
+                    let (new_caps, converted) = self.convert_frame(slice)?;
                     if self.last_caps.as_ref() != Some(&new_caps) {
                         out.push(PipelinePacket::CapsChanged(new_caps.clone()))
                             .await?;
@@ -838,10 +838,10 @@ mod tests {
     fn first_data(sink: &RecordingSink) -> Vec<u8> {
         for p in &sink.packets {
             if let PipelinePacket::DataFrame(f) = p {
-                let MemoryDomain::System(s) = &f.domain else {
+                let Some(s) = f.domain.as_system_slice() else {
                     panic!("system frame")
                 };
-                return s.as_slice().to_vec();
+                return s.to_vec();
             }
         }
         panic!("no DataFrame emitted");

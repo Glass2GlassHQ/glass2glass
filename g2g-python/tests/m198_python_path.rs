@@ -83,10 +83,10 @@ fn python_writes_into_frame_memory_in_place() {
     let PipelinePacket::DataFrame(frame) = &sink.packets[0] else {
         panic!("expected a DataFrame downstream");
     };
-    let MemoryDomain::System(slice) = &frame.domain else {
+    let Some(slice) = frame.domain.as_system_slice() else {
         panic!("expected System memory");
     };
-    assert_eq!(slice.as_slice()[0], 11, "in-place write did not reach Rust");
+    assert_eq!(slice[0], 11, "in-place write did not reach Rust");
 }
 
 #[test]
@@ -120,10 +120,9 @@ fn worker_is_reused_across_frames() {
         .packets
         .iter()
         .map(|p| match p {
-            PipelinePacket::DataFrame(f) => match &f.domain {
-                MemoryDomain::System(s) => s.as_slice()[0],
-                _ => panic!("expected System memory"),
-            },
+            PipelinePacket::DataFrame(f) => {
+                f.domain.as_system_slice().expect("expected System memory")[0]
+            }
             _ => panic!("expected DataFrames"),
         })
         .collect();

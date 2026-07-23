@@ -147,10 +147,9 @@ impl AsyncElement for AudioAmplify {
                         Some(c) => c.clone(),
                         None => return Err(G2gError::NotConfigured),
                     };
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(src) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    let src = slice.as_slice();
                     let mut dst = vec![0u8; src.len()].into_boxed_slice();
                     apply_amplify(src, &mut dst, self.amplification, self.method);
 

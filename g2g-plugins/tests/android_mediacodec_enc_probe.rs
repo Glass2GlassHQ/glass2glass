@@ -180,10 +180,10 @@ async fn encode_nv12_to_annexb_h264() {
         .iter()
         .find(|f| f.timing.keyframe)
         .expect("at least one key frame");
-    let MemoryDomain::System(slice) = &first_key.domain else {
+    let Some(slice) = first_key.domain.as_system_slice() else {
         panic!("system memory")
     };
-    let types = nal_types(slice.as_slice());
+    let types = nal_types(slice);
     eprintln!(">>> first key-frame NAL types: {types:?}");
     assert!(
         types.contains(&7),
@@ -200,10 +200,7 @@ async fn encode_nv12_to_annexb_h264() {
 
     let total_bytes: usize = aus
         .iter()
-        .map(|f| match &f.domain {
-            MemoryDomain::System(s) => s.as_slice().len(),
-            _ => 0,
-        })
+        .map(|f| f.domain.as_system_slice().map_or(0, <[u8]>::len))
         .sum();
     eprintln!(
         ">>> {} encoded bytes total; {} key frame(s)",

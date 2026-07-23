@@ -14,9 +14,7 @@ use std::net::TcpListener;
 use std::thread;
 
 use g2g_core::runtime::SourceLoop;
-use g2g_core::{
-    ByteStreamEncoding, Caps, G2gError, MemoryDomain, OutputSink, PipelinePacket, PushOutcome,
-};
+use g2g_core::{ByteStreamEncoding, Caps, G2gError, OutputSink, PipelinePacket, PushOutcome};
 use g2g_plugins::hlssrc::HlsSrc;
 use g2g_plugins::sampleaesdecrypt::{new_key_handle, SampleAesKey};
 
@@ -37,8 +35,8 @@ impl OutputSink for CaptureSink {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(f) => {
-                    if let MemoryDomain::System(s) = &f.domain {
-                        self.body.extend_from_slice(s.as_slice());
+                    if let Some(s) = f.domain.as_system_slice() {
+                        self.body.extend_from_slice(s);
                     }
                 }
                 PipelinePacket::Eos => self.eos = true,

@@ -62,8 +62,8 @@ use g2g_core::frame::Frame;
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority, ConfigureOutcome,
-    Dim, ElementMetadata, G2gError, HardwareError, MemoryDomain, OutputSink, PipelineClock,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
+    Dim, ElementMetadata, G2gError, HardwareError, OutputSink, PipelineClock, PipelinePacket,
+    PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
 };
 
 /// Thin wrapper over `/dev/dri/cardN` implementing the `drm` device traits
@@ -565,10 +565,10 @@ impl AsyncElement for KmsSink {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(Frame { domain, timing, .. }) => {
-                    let MemoryDomain::System(slice) = domain else {
+                    let Some(slice) = domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    self.present(slice.as_slice())?;
+                    self.present(slice)?;
                     // Record glass-to-glass latency after page-flip
                     // submission. Stamped frames only; unstamped
                     // (synthetic or arrival_ns=0) are skipped silently.

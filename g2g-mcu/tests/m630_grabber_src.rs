@@ -10,7 +10,6 @@ use std::rc::Rc;
 
 use embedded_hal::spi::{ErrorKind, Operation, SpiDevice};
 use g2g_core::error::{G2gError, HardwareError};
-use g2g_core::memory::MemoryDomain;
 use g2g_core::run_source_sink;
 use g2g_core::staticpool::StaticLendRing;
 use g2g_core::StaticSource;
@@ -53,15 +52,11 @@ fn captures_flow_with_sequence_and_pts() {
             expect * 33_000_000,
             "interval-derived PTS"
         );
-        let MemoryDomain::System(s) = &frame.domain else {
+        let Some(s) = frame.domain.as_system_slice() else {
             panic!("system frame")
         };
-        assert_eq!(
-            s.as_slice().first().copied(),
-            Some(expect as u8),
-            "pattern payload"
-        );
-        assert_eq!(s.as_slice().len(), 8, "full-slot capture");
+        assert_eq!(s.first().copied(), Some(expect as u8), "pattern payload");
+        assert_eq!(s.len(), 8, "full-slot capture");
     }
     assert!(
         block_on(src.next()).expect("eos poll").is_none(),
@@ -74,10 +69,10 @@ fn lends_ring_memory_zero_copy() {
     let ring: &'static StaticLendRing<2, 8> = leaked_ring();
     let mut src = GrabberSrc::new(PatternGrabber::default(), ring, 0).with_frame_limit(1);
     let frame = block_on(src.next()).expect("capture").expect("frame");
-    let MemoryDomain::System(s) = &frame.domain else {
+    let Some(s) = frame.domain.as_system_slice() else {
         panic!("system frame")
     };
-    let ptr = s.as_slice().as_ptr();
+    let ptr = s.as_ptr();
     assert!(
         ring.contains(ptr),
         "payload aliases the ring slot: no copy was made"

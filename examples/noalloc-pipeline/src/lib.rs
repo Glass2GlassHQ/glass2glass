@@ -44,7 +44,6 @@ use embedded_hal::digital::OutputPin;
 use embedded_hal::spi::{ErrorKind, Operation, SpiDevice};
 use g2g_core::error::G2gError;
 use g2g_core::frame::Frame;
-use g2g_core::memory::MemoryDomain;
 use g2g_core::staticpool::StaticLendRing;
 use g2g_core::{
     run_source_sink, run_source_transform_sink, Caps, StaticTransform, TensorDType, TensorLayout,
@@ -144,11 +143,11 @@ impl StaticTransform for Touch {
     async fn process(&mut self, input: Frame) -> Result<Option<Frame>, G2gError> {
         // The payload must be exactly the negotiated tensor: a mismatch fails
         // the pipeline (and with it the checksum comparison) honestly.
-        if let MemoryDomain::System(s) = &input.domain {
-            if s.as_slice().len() != self.frame_bytes {
+        if let Some(s) = input.domain.as_system_slice() {
+            if s.len() != self.frame_bytes {
                 return Err(G2gError::CapsMismatch);
             }
-            let _ = core::hint::black_box(s.as_slice().first().copied());
+            let _ = core::hint::black_box(s.first().copied());
         }
         Ok(Some(input))
     }

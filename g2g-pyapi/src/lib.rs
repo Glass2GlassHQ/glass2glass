@@ -227,13 +227,10 @@ mod pymod {
             if let Some(b) = &self.materialized {
                 return Some((b.as_ptr(), b.len()));
             }
-            match &self.frame.domain {
-                MemoryDomain::System(s) => {
-                    let sl = s.as_slice();
-                    Some((sl.as_ptr(), sl.len()))
-                }
-                _ => None,
-            }
+            self.frame
+                .domain
+                .as_system_slice()
+                .map(|sl| (sl.as_ptr(), sl.len()))
         }
     }
 

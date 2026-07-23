@@ -386,10 +386,10 @@ impl AsyncElement for VaapiH264Dec {
             let mut decoded = Vec::new();
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    self.feed_access_unit(slice.as_slice(), frame.timing.pts_ns, &mut decoded)?;
+                    self.feed_access_unit(slice, frame.timing.pts_ns, &mut decoded)?;
                 }
                 PipelinePacket::CapsChanged(c) => {
                     // M16 workaround #3 Phase A: validate + record.

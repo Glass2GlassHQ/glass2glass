@@ -120,14 +120,13 @@ fn first_nv12_dims(packets: &[PipelinePacket]) -> Option<(u32, u32)> {
 }
 
 fn logits_from(frame: &Frame) -> Vec<f32> {
-    let MemoryDomain::System(slice) = &frame.domain else {
+    let Some(slice) = frame.domain.as_system_slice() else {
         panic!(
             "inference must read logits back to System, got {:?}",
             frame.domain.kind()
         );
     };
     slice
-        .as_slice()
         .chunks_exact(4)
         .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
         .collect()
@@ -302,10 +301,10 @@ async fn cuda_to_wgpu_zero_copy_matches_cpu_reference() {
             .into_iter()
             .next()
             .expect("downloaded NV12");
-        let MemoryDomain::System(slice) = &nv12.domain else {
+        let Some(slice) = nv12.domain.as_system_slice() else {
             panic!("System NV12")
         };
-        let cpu_tensor = nv12_to_rgb_tensor(slice.as_slice(), w as usize, h as usize);
+        let cpu_tensor = nv12_to_rgb_tensor(slice, w as usize, h as usize);
         let expected = linear_reference(&cpu_tensor, &weights, &bias);
 
         // Zero-copy: bridge -> preprocess (surface-import) -> infer.

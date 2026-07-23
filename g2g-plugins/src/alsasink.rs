@@ -36,9 +36,9 @@ use alsa::{Direction, ValueOr};
 
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority,
-    ConfigureOutcome, DriftClock, ElementMetadata, G2gError, HardwareError, MemoryDomain,
-    MonotonicClock, OutputSink, PadTemplate, PadTemplates, PipelineClock, PipelinePacket,
-    PropError, PropKind, PropValue, PropertySpec,
+    ConfigureOutcome, DriftClock, ElementMetadata, G2gError, HardwareError, MonotonicClock,
+    OutputSink, PadTemplate, PadTemplates, PipelineClock, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec,
 };
 
 /// Negotiated PCM parameters: (ALSA sample format, channels, rate). Compressed
@@ -296,11 +296,11 @@ impl AsyncElement for AlsaSink {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
                     let tx = self.cmd_tx.as_ref().ok_or(G2gError::NotConfigured)?;
-                    tx.send(WorkerCmd::Samples(slice.as_slice().to_vec()))
+                    tx.send(WorkerCmd::Samples(slice.to_vec()))
                         .map_err(|_| G2gError::Hardware(HardwareError::Alsa(-1)))?;
                     Ok(())
                 }

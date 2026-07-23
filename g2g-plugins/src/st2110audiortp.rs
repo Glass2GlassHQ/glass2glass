@@ -312,14 +312,14 @@ impl AsyncElement for St2110AudioSink {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
                     let format = self.format.ok_or(G2gError::NotConfigured)?;
                     let pkt = self.packetizer.as_mut().ok_or(G2gError::NotConfigured)?;
                     let sock = self.socket.as_ref().ok_or(G2gError::NotConfigured)?;
                     // Interleaved PCM bytes -> i32 samples for the -30 core (S16 or F32).
-                    let samples = pcm_to_samples(format, slice.as_slice());
+                    let samples = pcm_to_samples(format, slice);
                     // The sampling instant on the PTP timeline: base time + the
                     // frame's running time (its PTS). Without an elected clock,
                     // fall back to the PTS directly.
@@ -540,10 +540,9 @@ mod tests {
             Box::pin(async move {
                 match packet {
                     PipelinePacket::DataFrame(f) => {
-                        if let MemoryDomain::System(s) = &f.domain {
+                        if let Some(s) = f.domain.as_system_slice() {
                             self.frames.push(
-                                s.as_slice()
-                                    .chunks_exact(2)
+                                s.chunks_exact(2)
                                     .map(|c| i16::from_le_bytes([c[0], c[1]]))
                                     .collect(),
                             );
@@ -667,8 +666,8 @@ mod tests {
             ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
                 Box::pin(async move {
                     if let PipelinePacket::DataFrame(f) = packet {
-                        if let MemoryDomain::System(s) = &f.domain {
-                            self.bytes.extend_from_slice(s.as_slice());
+                        if let Some(s) = f.domain.as_system_slice() {
+                            self.bytes.extend_from_slice(s);
                         }
                     }
                     Ok(PushOutcome::Accepted)
@@ -786,8 +785,8 @@ mod tests {
             ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
                 Box::pin(async move {
                     if let PipelinePacket::DataFrame(f) = packet {
-                        if let MemoryDomain::System(s) = &f.domain {
-                            self.bytes.extend_from_slice(s.as_slice());
+                        if let Some(s) = f.domain.as_system_slice() {
+                            self.bytes.extend_from_slice(s);
                         }
                     }
                     Ok(PushOutcome::Accepted)

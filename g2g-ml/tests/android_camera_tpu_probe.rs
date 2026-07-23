@@ -83,9 +83,9 @@ impl OutputSink for FrameGrab {
     ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
         Box::pin(async move {
             if let PipelinePacket::DataFrame(f) = packet {
-                if let MemoryDomain::System(s) = &f.domain {
+                if let Some(s) = f.domain.as_system_slice() {
                     if self.first.is_none() {
-                        self.first = Some(s.as_slice().to_vec());
+                        self.first = Some(s.to_vec());
                     }
                     self.count += 1;
                 }
@@ -108,8 +108,8 @@ impl OutputSink for OneFrame {
         Box::pin(async move {
             if let PipelinePacket::DataFrame(f) = packet {
                 if self.bytes.is_none() {
-                    if let MemoryDomain::System(s) = &f.domain {
-                        self.bytes = Some(s.as_slice().to_vec());
+                    if let Some(s) = f.domain.as_system_slice() {
+                        self.bytes = Some(s.to_vec());
                     }
                 }
             }

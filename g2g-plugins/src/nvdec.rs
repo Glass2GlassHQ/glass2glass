@@ -763,10 +763,10 @@ impl AsyncElement for NvDec {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    let frames = self.parse(slice.as_slice(), frame.timing.pts_ns, false)?;
+                    let frames = self.parse(slice, frame.timing.pts_ns, false)?;
                     self.emit(frames, out).await?;
                 }
                 PipelinePacket::Eos => {
@@ -1243,8 +1243,8 @@ mod tests {
             ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
                 Box::pin(async move {
                     if let PipelinePacket::DataFrame(f) = packet {
-                        if let MemoryDomain::System(s) = &f.domain {
-                            self.aus.push(s.as_slice().to_vec());
+                        if let Some(s) = f.domain.as_system_slice() {
+                            self.aus.push(s.to_vec());
                         }
                     }
                     Ok(PushOutcome::Accepted)

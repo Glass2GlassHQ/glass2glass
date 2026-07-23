@@ -19,8 +19,8 @@ use alloc::vec::Vec;
 
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
-    HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, VideoCodec,
+    HardwareError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec, Rate, RawVideoFormat, VideoCodec,
 };
 
 use vpx_encode::{Config, Encoder, VideoCodecId};
@@ -222,6 +222,13 @@ impl VpxEnc {
 }
 
 impl AsyncElement for VpxEnc {
+    // M759: a re-encode to a compressed codec drops pixel-derived meta
+    // (AnalyticsMeta); opaque side-data (BlobMeta) rides through.
+    #[cfg(feature = "metadata")]
+    fn meta_transform(&self) -> Option<g2g_core::meta::Transform> {
+        Some(g2g_core::meta::Transform::Encode)
+    }
+
     // Both signals are honored by an encoder rebuild (see `emit`), so they
     // stop here rather than relaying past the encoder.
     fn handles_keyframe_requests(&self) -> bool {
@@ -345,10 +352,10 @@ impl AsyncElement for VpxEnc {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    let packets = self.encode(slice.as_slice(), frame.timing.pts_ns)?;
+                    let packets = self.encode(slice, frame.timing.pts_ns)?;
                     self.emit(packets, out).await?;
                 }
                 PipelinePacket::Eos => {
@@ -388,7 +395,7 @@ mod tests {
     use super::*;
     use crate::vp9parse::Vp9Parse;
     use g2g_core::frame::Frame;
-    use g2g_core::memory::SystemSlice;
+    use g2g_core::memory::{MemoryDomain, SystemSlice};
     use g2g_core::{FrameTiming, PushOutcome};
 
     fn i420_grey(w: usize, h: usize) -> Vec<u8> {
@@ -427,8 +434,8 @@ mod tests {
         ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
             Box::pin(async move {
                 if let PipelinePacket::DataFrame(f) = packet {
-                    if let MemoryDomain::System(sl) = &f.domain {
-                        self.frames.push(sl.as_slice().to_vec());
+                    if let Some(sl) = f.domain.as_system_slice() {
+                        self.frames.push(sl.to_vec());
                     }
                 }
                 if self.frames.len() >= 2 && !core::mem::replace(&mut self.kf_sent, true) {
@@ -496,8 +503,8 @@ mod tests {
                 match packet {
                     PipelinePacket::CapsChanged(c) => self.caps.push(c),
                     PipelinePacket::DataFrame(f) => {
-                        if let MemoryDomain::System(s) = &f.domain {
-                            self.frames.push(s.as_slice().to_vec());
+                        if let Some(s) = f.domain.as_system_slice() {
+                            self.frames.push(s.to_vec());
                         }
                     }
                     _ => {}

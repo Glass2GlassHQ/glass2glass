@@ -217,8 +217,8 @@ impl OutputSink for CollectAus<'_> {
     ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
         Box::pin(async move {
             if let PipelinePacket::DataFrame(f) = packet {
-                if let MemoryDomain::System(s) = &f.domain {
-                    self.aus.push(s.as_slice().to_vec());
+                if let Some(s) = f.domain.as_system_slice() {
+                    self.aus.push(s.to_vec());
                 }
             }
             Ok(PushOutcome::Accepted)

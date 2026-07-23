@@ -19,7 +19,6 @@
 
 use g2g_core::error::G2gError;
 use g2g_core::frame::Frame;
-use g2g_core::memory::MemoryDomain;
 use g2g_core::rtp::{RtpHeader, RTP_HEADER_LEN};
 use g2g_core::time::TaiNs;
 use g2g_core::{MediaClock, StaticSink};
@@ -107,10 +106,9 @@ impl<S: PacketSender> RtpSink<S> {
 
 impl<S: PacketSender> StaticSink for RtpSink<S> {
     async fn consume(&mut self, frame: Frame) -> Result<(), G2gError> {
-        let MemoryDomain::System(slice) = &frame.domain else {
+        let Some(payload) = frame.domain.as_system_slice() else {
             return Err(G2gError::UnsupportedDomain);
         };
-        let payload = slice.as_slice();
         // One frame is one packet: an empty or over-MTU payload is a
         // configuration bug upstream, not something to paper over here.
         if payload.is_empty() || payload.len() > self.max_payload {

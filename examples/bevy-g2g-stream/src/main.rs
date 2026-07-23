@@ -60,7 +60,7 @@ use crossbeam_channel::{Receiver, Sender};
 use g2g_core::element::DynAsyncElement;
 use g2g_core::runtime::{run_linear_chain, SourceLoop};
 use g2g_core::{
-    AsyncElement, Caps, Dim, G2gError, MemoryDomain, OutputSink, PipelineClock, PipelinePacket,
+    AsyncElement, Caps, Dim, G2gError, OutputSink, PipelineClock, PipelinePacket,
     PropValue, PushOutcome, Rate, RawVideoFormat,
 };
 use g2g_plugins::appsrc::{register_appsrc, AppSrc, AppSrcFeed};
@@ -356,8 +356,8 @@ impl OutputSink for CaptureAus {
     {
         Box::pin(async move {
             if let PipelinePacket::DataFrame(f) = packet {
-                if let MemoryDomain::System(s) = &f.domain {
-                    self.aus.push((s.as_slice().to_vec(), f.timing.pts_ns));
+                if let Some(s) = f.domain.as_system_slice() {
+                    self.aus.push((s.to_vec(), f.timing.pts_ns));
                 }
             }
             Ok(PushOutcome::Accepted)

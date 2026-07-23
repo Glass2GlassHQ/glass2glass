@@ -19,7 +19,7 @@ use core::pin::Pin;
 
 use g2g_core::{
     AnalyticsMeta, AsyncElement, BBox, Caps, CapsConstraint, CapsSet, ConfigureOutcome, G2gError,
-    MemoryDomain, ObjectDetection, OutputSink, PipelinePacket, TensorDType,
+    ObjectDetection, OutputSink, PipelinePacket, TensorDType,
 };
 
 /// Default model input resolution used to normalize box coordinates.
@@ -204,10 +204,10 @@ impl AsyncElement for DetectionPostprocess {
             }
             match packet {
                 PipelinePacket::DataFrame(mut frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    let bytes = slice.as_slice();
+                    let bytes = slice;
                     // channels/anchors come from the upstream tensor caps (model
                     // output shape), so fold with checked_mul: an overflowing
                     // product fails the length check instead of panicking (debug)
@@ -272,7 +272,7 @@ impl AsyncElement for DetectionPostprocess {
 mod tests {
     use super::*;
     use g2g_core::frame::Frame;
-    use g2g_core::memory::SystemSlice;
+    use g2g_core::memory::{MemoryDomain, SystemSlice};
     use g2g_core::{FrameTiming, PushOutcome, TensorLayout, TensorShape};
 
     /// Capturing sink that records the AnalyticsMeta of the last frame pushed.

@@ -397,10 +397,10 @@ impl AsyncElement for FlvDemux {
                     if self.seek.dropping_input() {
                         return Ok(());
                     }
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    self.demux.push_data(slice.as_slice());
+                    self.demux.push_data(slice);
                     self.maybe_post_tags();
                     self.sync_configs();
                     let units = self.demux.take_units();
@@ -711,8 +711,8 @@ mod tests {
             Box::pin(async move {
                 match packet {
                     PipelinePacket::DataFrame(f) => {
-                        if let MemoryDomain::System(s) = &f.domain {
-                            self.frames.push(s.as_slice().to_vec());
+                        if let Some(s) = f.domain.as_system_slice() {
+                            self.frames.push(s.to_vec());
                         }
                         self.pts.push(f.timing.pts_ns);
                     }

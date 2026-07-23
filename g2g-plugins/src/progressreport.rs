@@ -16,7 +16,7 @@ use alloc::string::String;
 use g2g_core::log::{short_type_name, LogSource};
 use g2g_core::{
     g2g_info, AsyncElement, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError,
-    MemoryDomain, OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
 #[derive(Debug)]
@@ -89,8 +89,8 @@ impl AsyncElement for ProgressReport {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
                     self.frames += 1;
-                    if let MemoryDomain::System(slice) = &frame.domain {
-                        self.bytes += slice.as_slice().len() as u64;
+                    if let Some(slice) = frame.domain.as_system_slice() {
+                        self.bytes += slice.len() as u64;
                     }
                     let pts = frame.timing.pts_ns;
                     if pts >= self.next_report_ns {
@@ -178,7 +178,7 @@ impl LogSource for ProgressReport {
 mod tests {
     use super::*;
     use core::pin::Pin;
-    use g2g_core::{Frame, FrameTiming, PushOutcome, SystemSlice};
+    use g2g_core::{Frame, FrameTiming, MemoryDomain, PushOutcome, SystemSlice};
 
     struct NullSink;
     impl OutputSink for NullSink {

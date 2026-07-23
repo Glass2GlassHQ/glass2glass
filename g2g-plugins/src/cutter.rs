@@ -16,8 +16,8 @@ use alloc::boxed::Box;
 
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
-    G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec,
+    G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec,
 };
 
 /// The debounced silence state machine. Kept separate from the element so the
@@ -187,8 +187,8 @@ impl AsyncElement for Cutter {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    if let MemoryDomain::System(slice) = &frame.domain {
-                        self.observe(slice.as_slice());
+                    if let Some(slice) = frame.domain.as_system_slice() {
+                        self.observe(slice);
                     }
                     out.push(PipelinePacket::DataFrame(frame)).await?;
                 }

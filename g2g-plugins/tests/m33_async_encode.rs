@@ -42,8 +42,8 @@ impl OutputSink for Collect {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(f) => {
-                    if let MemoryDomain::System(slice) = &f.domain {
-                        let d = slice.as_slice();
+                    if let Some(slice) = f.domain.as_system_slice() {
+                        let d = slice;
                         if self.data_frames == 0 {
                             self.annexb_ok =
                                 d.starts_with(&[0, 0, 0, 1]) || d.starts_with(&[0, 0, 1]);

@@ -320,10 +320,10 @@ mod tests {
         match &records[2] {
             PipelinePacket::DataFrame(f) => {
                 assert_eq!(f.sequence, 1);
-                let MemoryDomain::System(s) = &f.domain else {
+                let Some(s) = f.domain.as_system_slice() else {
                     panic!("system")
                 };
-                assert_eq!(s.as_slice(), b"defg");
+                assert_eq!(s, b"defg");
             }
             _ => panic!("expected DataFrame"),
         }

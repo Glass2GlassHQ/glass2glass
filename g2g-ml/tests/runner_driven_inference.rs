@@ -138,8 +138,8 @@ impl AsyncElement for ClassSink {
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
             if let PipelinePacket::DataFrame(f) = packet {
-                if let MemoryDomain::System(s) = &f.domain {
-                    let b = s.as_slice();
+                if let Some(s) = f.domain.as_system_slice() {
+                    let b = s;
                     if b.len() >= 4 {
                         self.idx = Some(f32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize);
                     }

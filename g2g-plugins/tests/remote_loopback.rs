@@ -70,9 +70,9 @@ impl AsyncElement for CollectSink {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    if let MemoryDomain::System(slice) = &frame.domain {
+                    if let Some(slice) = frame.domain.as_system_slice() {
                         self.frames
-                            .push((frame.sequence, frame.timing, slice.as_slice().to_vec()));
+                            .push((frame.sequence, frame.timing, slice.to_vec()));
                     }
                 }
                 PipelinePacket::CapsChanged(c) => self.caps.push(c),

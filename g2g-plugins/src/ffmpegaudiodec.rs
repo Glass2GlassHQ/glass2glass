@@ -269,11 +269,11 @@ impl AsyncElement for FfmpegAudioDec {
             let mut timing = FrameTiming::default();
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
                     timing = frame.timing;
-                    let buf = slice.as_slice();
+                    let buf = slice;
                     // FLAC arrives container-framed (one frame per packet), led by
                     // the native `fLaC` STREAMINFO header the demuxer forwards
                     // in-band: take it as extradata and open the decoder, emitting

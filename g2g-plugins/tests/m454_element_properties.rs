@@ -172,6 +172,58 @@ fn udpsink_host_port_payload() {
     );
 }
 
+#[cfg(feature = "udp-egress")]
+#[test]
+fn udpsink_fec_knobs() {
+    use g2g_plugins::udpsink::UdpSink;
+    let mut e = UdpSink::new("127.0.0.1:5004".parse().unwrap());
+    for name in [
+        "fec-mode",
+        "fec-columns",
+        "fec-rows",
+        "fec-payload-type",
+        "fec-ssrc",
+    ] {
+        assert!(declares(e.properties(), name), "declares {name}");
+    }
+    e.set_property("fec-mode", PropValue::Str("flexfec".into()))
+        .unwrap();
+    e.set_property("fec-columns", PropValue::Uint(4)).unwrap();
+    e.set_property("fec-rows", PropValue::Uint(3)).unwrap();
+    e.set_property("fec-payload-type", PropValue::Uint(98))
+        .unwrap();
+    e.set_property("fec-ssrc", PropValue::Uint(0xFEC0_0004))
+        .unwrap();
+    assert_eq!(
+        e.get_property("fec-mode"),
+        Some(PropValue::Str("flexfec".into()))
+    );
+    assert_eq!(e.get_property("fec-columns"), Some(PropValue::Uint(4)));
+    assert_eq!(e.get_property("fec-rows"), Some(PropValue::Uint(3)));
+    assert_eq!(
+        e.get_property("fec-payload-type"),
+        Some(PropValue::Uint(98))
+    );
+    assert_eq!(
+        e.get_property("fec-ssrc"),
+        Some(PropValue::Uint(0xFEC0_0004))
+    );
+    assert!(
+        e.set_property("fec-mode", PropValue::Str("bogus".into()))
+            .is_err(),
+        "unknown FEC scheme rejected"
+    );
+    assert!(
+        e.set_property("fec-columns", PropValue::Uint(0)).is_err(),
+        "block width must be >= 1"
+    );
+    assert!(
+        e.set_property("fec-payload-type", PropValue::Uint(200))
+            .is_err(),
+        "FEC PT must be <= 127"
+    );
+}
+
 #[test]
 fn h264parse_config_interval() {
     use g2g_plugins::h264parse::H264Parse;

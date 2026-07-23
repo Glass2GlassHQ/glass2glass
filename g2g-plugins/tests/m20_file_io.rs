@@ -11,8 +11,8 @@ use std::path::PathBuf;
 use g2g_core::element::{BoxFuture, PushOutcome};
 use g2g_core::runtime::{run_simple_pipeline, SourceLoop};
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, Dim, G2gError, HardwareError,
-    MemoryDomain, OutputSink, PipelineClock, PipelinePacket, Rate, VideoCodec,
+    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, Dim, G2gError, HardwareError, OutputSink,
+    PipelineClock, PipelinePacket, Rate, VideoCodec,
 };
 use g2g_plugins::filesink::FileSink;
 use g2g_plugins::filesrc::FileSrc;
@@ -91,10 +91,10 @@ impl AsyncElement for ByteCollectSink {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(f) => {
-                    let MemoryDomain::System(slice) = &f.domain else {
+                    let Some(slice) = f.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    self.bytes.extend_from_slice(slice.as_slice());
+                    self.bytes.extend_from_slice(slice);
                 }
                 PipelinePacket::Eos => self.eos_seen = true,
                 _ => {}
@@ -157,12 +157,12 @@ async fn filesrc_chunks_file_and_emits_eos() {
     for (i, p) in out.packets.iter().enumerate() {
         match p {
             PipelinePacket::DataFrame(f) => {
-                let MemoryDomain::System(slice) = &f.domain else {
+                let Some(slice) = f.domain.as_system_slice() else {
                     panic!("FileSrc must emit System frames");
                 };
                 assert_eq!(f.sequence, i as u64, "sequences count up from zero");
-                chunk_lens.push(slice.as_slice().len());
-                reassembled.extend_from_slice(slice.as_slice());
+                chunk_lens.push(slice.len());
+                reassembled.extend_from_slice(slice);
             }
             PipelinePacket::Eos => eos = true,
             other => panic!("unexpected packet {other:?}"),

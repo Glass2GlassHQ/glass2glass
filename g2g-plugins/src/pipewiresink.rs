@@ -39,7 +39,7 @@ use pw::spa;
 
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, G2gError,
-    HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    HardwareError, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
 };
 
 use crate::pwaudio::{format_pod_bytes, frame_bytes, pw_params};
@@ -201,13 +201,13 @@ impl AsyncElement for PipeWireSink {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
                     if self.worker.is_none() {
                         return Err(G2gError::NotConfigured);
                     }
-                    let bytes = slice.as_slice();
+                    let bytes = slice;
                     let mut q = self
                         .queue
                         .lock()

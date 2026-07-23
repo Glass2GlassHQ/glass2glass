@@ -201,10 +201,10 @@ impl AsyncElement for BurnInference {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    let bytes = self.infer(slice.as_slice())?;
+                    let bytes = self.infer(slice)?;
                     let new_caps = self.output_caps();
                     if self.last_caps.as_ref() != Some(&new_caps) {
                         out.push(PipelinePacket::CapsChanged(new_caps.clone()))

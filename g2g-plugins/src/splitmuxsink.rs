@@ -22,8 +22,8 @@ use std::io::{BufWriter, Write};
 
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
-    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, PushOutcome, Rate, VideoCodec,
+    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec, PushOutcome, Rate, VideoCodec,
 };
 
 use crate::filesink::io_err;
@@ -99,8 +99,7 @@ impl OutputSink for SegmentSink {
     ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
         Box::pin(async move {
             if let PipelinePacket::DataFrame(frame) = &packet {
-                if let MemoryDomain::System(slice) = &frame.domain {
-                    let b = slice.as_slice();
+                if let Some(b) = frame.domain.as_system_slice() {
                     self.writer.write_all(b).map_err(io_err)?;
                     self.bytes += b.len() as u64;
                 }
@@ -364,7 +363,7 @@ impl PadTemplates for SplitMuxSink {
 mod tests {
     use super::*;
     use alloc::format;
-    use g2g_core::{Frame, FrameTiming, SystemSlice};
+    use g2g_core::{Frame, FrameTiming, MemoryDomain, SystemSlice};
 
     struct NullSink;
     impl OutputSink for NullSink {

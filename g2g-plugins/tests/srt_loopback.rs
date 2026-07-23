@@ -53,8 +53,8 @@ impl AsyncElement for TagSink {
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
             if let PipelinePacket::DataFrame(frame) = packet {
-                if let MemoryDomain::System(slice) = &frame.domain {
-                    if let Some(&tag) = slice.as_slice().first() {
+                if let Some(slice) = frame.domain.as_system_slice() {
+                    if let Some(&tag) = slice.first() {
                         self.tags.push(tag);
                     }
                 }

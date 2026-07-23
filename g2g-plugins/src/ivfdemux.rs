@@ -219,10 +219,10 @@ impl AsyncElement for IvfDemux {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    self.buf.extend_from_slice(slice.as_slice());
+                    self.buf.extend_from_slice(slice);
                     self.drain(out).await?;
                 }
                 PipelinePacket::Eos => {
@@ -353,10 +353,7 @@ mod tests {
         packets
             .iter()
             .filter_map(|p| match p {
-                PipelinePacket::DataFrame(f) => match &f.domain {
-                    MemoryDomain::System(s) => Some(s.as_slice()),
-                    _ => None,
-                },
+                PipelinePacket::DataFrame(f) => f.domain.as_system_slice(),
                 _ => None,
             })
             .collect()

@@ -151,8 +151,8 @@ mod still {
 
     use g2g_core::runtime::run_source_transform_sink;
     use g2g_core::{
-        AsyncElement, Caps, CapsConstraint, ConfigureOutcome, Dim, G2gError, MemoryDomain,
-        OutputSink, PipelinePacket,
+        AsyncElement, Caps, CapsConstraint, ConfigureOutcome, Dim, G2gError, OutputSink,
+        PipelinePacket,
     };
     use g2g_plugins::clock::WallClock;
     use g2g_plugins::textoverlay::TextOverlay;
@@ -197,8 +197,8 @@ mod still {
         ) -> Self::ProcessFuture<'a> {
             Box::pin(async move {
                 if let PipelinePacket::DataFrame(frame) = packet {
-                    if let MemoryDomain::System(slice) = &frame.domain {
-                        self.last = Some(slice.as_slice().to_vec());
+                    if let Some(slice) = frame.domain.as_system_slice() {
+                        self.last = Some(slice.to_vec());
                     }
                 }
                 Ok(())

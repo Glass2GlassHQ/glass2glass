@@ -71,8 +71,8 @@ fn run_data_path(ring: &StaticLendRing<SLOTS, BYTES>, frames: u64) -> u64 {
         // the whole loop), so the lent slice never dangles.
         let payload = unsafe { slot.publish(PAYLOAD) };
         let frame = Frame::new(MemoryDomain::System(payload), FrameTiming::default(), i);
-        if let MemoryDomain::System(s) = &frame.domain {
-            acc = acc.wrapping_add(u64::from(s.as_slice()[0]));
+        if let Some(s) = frame.domain.as_system_slice() {
+            acc = acc.wrapping_add(u64::from(s[0]));
         }
         drop(frame); // the slot returns to the ring; nothing is freed to the heap
     }

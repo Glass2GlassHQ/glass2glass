@@ -25,8 +25,8 @@ use std::vec::Vec;
 use g2g_core::element::DynAsyncElement;
 use g2g_core::runtime::run_linear_chain;
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, MemoryDomain,
-    OutputSink, PipelineClock, PipelinePacket, Rate, RawVideoFormat,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, OutputSink,
+    PipelineClock, PipelinePacket, Rate, RawVideoFormat,
 };
 use g2g_plugins::videoconvert::VideoConvert;
 use g2g_plugins::videotestsrc::VideoTestSrc;
@@ -76,8 +76,8 @@ impl AsyncElement for CapturingSink {
         let frames = Arc::clone(&self.frames);
         Box::pin(async move {
             if let PipelinePacket::DataFrame(f) = packet {
-                if let MemoryDomain::System(s) = &f.domain {
-                    frames.lock().unwrap().push(s.as_slice().to_vec());
+                if let Some(s) = f.domain.as_system_slice() {
+                    frames.lock().unwrap().push(s.to_vec());
                 }
             }
             Ok(())

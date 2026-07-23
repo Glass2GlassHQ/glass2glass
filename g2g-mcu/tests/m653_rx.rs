@@ -221,8 +221,8 @@ struct PcmCollector {
 }
 impl StaticSink for PcmCollector {
     async fn consume(&mut self, frame: Frame) -> Result<(), G2gError> {
-        if let MemoryDomain::System(s) = &frame.domain {
-            self.bytes.extend_from_slice(s.as_slice());
+        if let Some(s) = frame.domain.as_system_slice() {
+            self.bytes.extend_from_slice(s);
         }
         self.frames += 1;
         Ok(())

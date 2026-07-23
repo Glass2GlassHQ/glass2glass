@@ -159,19 +159,19 @@ impl FlvMuxN {
         frame: Frame,
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
-        let MemoryDomain::System(slice) = &frame.domain else {
+        let Some(slice) = frame.domain.as_system_slice() else {
             return Err(G2gError::UnsupportedDomain);
         };
         let pts_ms = (frame.timing.pts_ns / 1_000_000) as u32;
         let mux = self.mux.as_mut().ok_or(G2gError::NotConfigured)?;
         let bytes = match self.kinds[input] {
             Some(PadKind::Video) => {
-                let nalus = split_annexb(slice.as_slice());
+                let nalus = split_annexb(slice);
                 let keyframe = nalus.iter().any(|n| is_keyframe_nal(VideoCodec::H264, n));
                 mux.push_video(&avcc_sample(&nalus), pts_ms, keyframe)
             }
             // Audio access units are raw AAC frames once the ADTS header is stripped.
-            _ => mux.push_audio(strip_adts(slice.as_slice()), pts_ms),
+            _ => mux.push_audio(strip_adts(slice), pts_ms),
         };
 
         let out_frame = Frame::new(
@@ -260,8 +260,8 @@ impl MultiInputElement for FlvMuxN {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    if let MemoryDomain::System(s) = &frame.domain {
-                        self.capture_init(input, s.as_slice());
+                    if let Some(s) = frame.domain.as_system_slice() {
+                        self.capture_init(input, s);
                     }
                     self.agg.push(input, frame);
                 }
@@ -353,8 +353,8 @@ mod tests {
         ) -> Pin<Box<dyn Future<Output = Result<g2g_core::PushOutcome, G2gError>> + 'a>> {
             Box::pin(async move {
                 if let PipelinePacket::DataFrame(f) = packet {
-                    if let MemoryDomain::System(s) = &f.domain {
-                        self.bytes.extend_from_slice(s.as_slice());
+                    if let Some(s) = f.domain.as_system_slice() {
+                        self.bytes.extend_from_slice(s);
                     }
                 }
                 Ok(g2g_core::PushOutcome::Accepted)

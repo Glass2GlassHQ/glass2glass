@@ -314,10 +314,10 @@ impl AsyncElement for OggDemux {
                     if self.seek.dropping_input() {
                         return Ok(());
                     }
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    self.demux.push_data(slice.as_slice());
+                    self.demux.push_data(slice);
                     self.emit_ready(out).await?;
                 }
                 // The upstream byte-seek's flush: reset the parser, then re-sync
@@ -476,8 +476,8 @@ mod tests {
                 match packet {
                     PipelinePacket::CapsChanged(c) => self.caps.push(c),
                     PipelinePacket::DataFrame(f) => {
-                        if let MemoryDomain::System(s) = &f.domain {
-                            self.frames.push(s.as_slice().to_vec());
+                        if let Some(s) = f.domain.as_system_slice() {
+                            self.frames.push(s.to_vec());
                         }
                     }
                     PipelinePacket::Eos => self.eos = true,

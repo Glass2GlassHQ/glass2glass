@@ -292,10 +292,10 @@ impl AsyncElement for MfAacEncode {
             let mut encoded = Vec::new();
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    self.feed(slice.as_slice(), frame.timing.pts_ns, &mut encoded)?;
+                    self.feed(slice, frame.timing.pts_ns, &mut encoded)?;
                 }
                 PipelinePacket::CapsChanged(c) => {
                     // Only the configured PCM format passes; a change is rejected.

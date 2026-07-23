@@ -59,9 +59,8 @@ impl OutputSink for Collect {
     ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
         Box::pin(async move {
             if let PipelinePacket::DataFrame(f) = packet {
-                if let MemoryDomain::System(s) = &f.domain {
+                if let Some(s) = f.domain.as_system_slice() {
                     let samples = s
-                        .as_slice()
                         .chunks_exact(2)
                         .map(|c| i16::from_le_bytes([c[0], c[1]]))
                         .collect();

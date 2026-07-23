@@ -14,8 +14,7 @@ leverage first:
 
 1. **Platforms.** macOS: camera / screen capture validation on a permitted
    Mac.
-2. **Egress / transports.** FEC knobs as launch properties (`UdpSink`'s
-   FEC modes are builder-only today); real-peer FlexFEC interop when a peer
+2. **Egress / transports.** Real-peer FlexFEC interop when a peer
    implementation is available (GStreamer here lacks `rtpflexfecenc`).
 3. **Depth.** Codec decode to cut reliance on the ffmpeg FFI: AV1 landed both as
    libdav1d (`Dav1dDec`, `dav1d` feature, C FFI) and pure Rust (`Rav1dDec`,
@@ -27,10 +26,9 @@ leverage first:
    generalization of the CUDA-locked `NvDec` path and the wedge that gives a
    wgpu-based consumer (game engine / visualization viewer) hardware decode on its
    own render device.
-4. **Browser demo (speculative product path).** Cross-target ONNX in-browser:
-   CPU-round-trip MVP via `ort-web` (`WebSocketSrc -> WebCodecsDecode ->
-   ort-web -> CanvasSink`), then a deployed reference app + native sibling. The
-   GPU-resident in-browser chain is not achievable from idiomatic Rust (wgpu
+4. **Browser demo (speculative product path).** A deployed reference app for the
+   in-browser `ort-web` ONNX chain, plus a native sibling running the same graph.
+   The GPU-resident in-browser chain is not achievable from idiomatic Rust (wgpu
    can't import a WebCodecs `VideoFrame` as an external texture or adopt ORT's
    device on wasm); it would need raw `web_sys` WebGPU + hand-rolled
    onnxruntime-web bindings.
@@ -74,14 +72,9 @@ Sequenced next:
   seam: `PtpServo` / `PtpClock` `sync_exchange` take `(TaiNs, RefNs, RefNs, TaiNs)`
   and `observe_master` takes `(RefNs, TaiNs)`, so master and reference can no longer
   be swapped where the meaningless-offset mixing bug lived. No remaining work.
-- **Metadata propagation contract (already in place).** The `Transform` /
-  `Propagation` enums, `FrameMeta::propagate`, and `FrameMetaSet::propagate` exist,
-  and `AnalyticsMeta` / `BlobMeta` declare honest drops (drop on `Encode`, keep on
-  `Scale`). Remaining: framework-level *auto-application*, the runner carrying an
-  input frame's meta onto a transform's output frames applying the element's declared
-  transform, so meta survives a linear transform, not only a tee. This lands with the
-  first non-analytics `FrameMeta` payload producer (captions / HDR / timecode still
-  ride bespoke paths). See "## Metadata".
+- **Metadata carriers.** Route captions / HDR / timecode through `FrameMeta` so
+  they ride the standard propagation path instead of the bespoke ones they take
+  today. See "## Metadata".
 
 ## Alloc-optional (heap-free) MCU core
 
@@ -266,28 +259,6 @@ Phased plan:
 - Richer auto-plug factory construction params (geometry / device / file path).
 - A hardware-backed end-to-end decode-through-`decodebin` run (current tests
   read templates / assert splicing, decode no real media).
-
-## Runtime / scheduling
-
-- **Cooperative-runner element offload (Approach C).** Opt-in cross-arm
-  parallelism now exists (`run_graph_threaded`, thread-per-arm, DESIGN.md
-  §4.13.3). The remaining win is for the *cooperative default* runner: offload a
-  heavy synchronous element's per-frame CPU (software `ffmpegdec` decode, the
-  waylandsink XRGB convert) via a runtime-guarded `spawn_blocking`, so the sink
-  renders while decode runs, without opting into `--threads`. `ffmpegdec` holds a
-  `!Send` `AVCodecContext`, so it needs a small `unsafe Send` offload wrapper
-  consistent with the element's existing single-threaded-access contract; a
-  pure-CPU transform (videoconvert) is a cleaner first target. Release-build perf
-  is adequate without either (1080p HLS A/V+subs holds 30 fps); debug builds
-  misrepresent it, so validate live runs with `--release`.
-
-## Cleanup
-
-- **Adopt `MemoryDomain::as_system_slice()`.** ~50 sites hand-roll
-  `if let MemoryDomain::System(s) = ..` to read CPU bytes; the accessor
-  (returning `Option<&[u8]>`) replaces them and stays refutable under no_std
-  (single-variant `MemoryDomain`), where the manual match is an irrefutable-let
-  error.
 
 ## Platform: macOS
 
@@ -770,7 +741,7 @@ _(No open parser items.)_
 
 - A `Segmentation` node (mask handle); more standard metas (`GstVideoMeta`-style
   strides, ROI).
-- `push` vs `pull` propagation across transforms (today push-only, explicit).
+- `pull`-based metadata propagation across transforms (push is auto-applied).
 - A turnkey windowed runner for `WgpuSink` (a winit/SCTK example that opens a
   window and drives the overlay -> sink graph; validate on a real display).
 - The native gst-`nvcodec`-style pair is done: `NvEnc` (zero-copy CUDA NV12 ->
@@ -914,14 +885,14 @@ _(No open parser items.)_
 
 ## Browser / Wasm
 
-- In-browser runtime validation of `WebSocketSrc -> WebCodecsDecode ->
-  CanvasSink` (compiles; live WebSocket + `performance.now()` pacing unvalidated).
+- An unbounded source feeding an `ort-web` chain faster than inference drains it
+  trips a wasm async-runtime reentrancy (`closure invoked recursively`) once
+  backpressure crosses a source loop; a finite source runs clean. Pin down the
+  `spawn_local` re-entrancy on a per-frame JS-promise `await`.
 - WebGPU-texture zero-copy sink (`MemoryDomain::WebGPUBuffer` into a
   `GPUTexture`; needs the async device handshake in the keepalive).
 - Web Workers executor (off-main-thread; needs JS bootstrap).
 - HEVC in `WebCodecsDecode`.
-- Browser MVP via `ort-web` (CPU tensors, same `.onnx` as native, plain static
-  HTTPS, no COOP/COEP).
 - Raw-`web_sys` WebGPU path (only if the GPU-resident browser claim is revived):
   external-texture import + compute + `ort.Tensor.fromGpuBuffer` on one
   ORT-owned `GPUDevice`. Large, browser-unverifiable on the dev host.

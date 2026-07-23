@@ -439,6 +439,8 @@ impl AsyncElement for WebGpuCanvasSink {
                     self.render(&frame)?;
                 }
                 PipelinePacket::Flush | PipelinePacket::Eos | PipelinePacket::Segment(_) => {}
+                // future PipelinePacket variants: no-op (terminal sink).
+                _ => {}
             }
             Ok(())
         })

@@ -17,8 +17,8 @@ use alloc::vec::Vec;
 
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
-    G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec,
+    G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec,
 };
 
 #[derive(Debug)]
@@ -134,8 +134,8 @@ impl AsyncElement for Level {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
                     if self.post_messages {
-                        if let MemoryDomain::System(slice) = &frame.domain {
-                            self.measure(slice.as_slice());
+                        if let Some(slice) = frame.domain.as_system_slice() {
+                            self.measure(slice);
                         }
                     }
                     out.push(PipelinePacket::DataFrame(frame)).await?;

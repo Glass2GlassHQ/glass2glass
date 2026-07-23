@@ -333,11 +333,11 @@ impl AsyncElement for Mp4Demux {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
                     // Accumulate; the moov may be at the end, so parse only at Eos.
-                    self.buffer.extend_from_slice(slice.as_slice());
+                    self.buffer.extend_from_slice(slice);
                 }
                 // The whole file is in hand: parse and emit, then the runner's
                 // transform arm forwards the EOS.

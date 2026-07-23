@@ -623,7 +623,7 @@ impl AsyncElement for MkvDemux {
             self.poll_seek();
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
                     match self.prefetch {
@@ -636,7 +636,7 @@ impl AsyncElement for MkvDemux {
                             flushed: true,
                             target_ns,
                         } => {
-                            self.demux.push_data(slice.as_slice());
+                            self.demux.push_data(slice);
                             if !self.demux.cues().is_empty() {
                                 let off = self.demux.cue_seek_offset(target_ns).unwrap_or(0);
                                 self.seek.begin_indexed_seek(target_ns, off);
@@ -649,7 +649,7 @@ impl AsyncElement for MkvDemux {
                     if self.seek.dropping_input() {
                         return Ok(());
                     }
-                    self.demux.push_data(slice.as_slice());
+                    self.demux.push_data(slice);
                     self.emit_ready(out).await?;
                 }
                 // The upstream byte-seek's flush. The internal Cues-prefetch flush
@@ -1105,10 +1105,10 @@ impl MultiOutputElement for MkvDemuxN {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    self.demux.push_data(slice.as_slice());
+                    self.demux.push_data(slice);
                     if self.bus.is_some() {
                         self.post_stream_collection();
                     }
@@ -1281,8 +1281,8 @@ mod tests {
                 match packet {
                     PipelinePacket::CapsChanged(c) => self.caps.push(c),
                     PipelinePacket::DataFrame(f) => {
-                        if let MemoryDomain::System(s) = &f.domain {
-                            self.frames.push(s.as_slice().to_vec());
+                        if let Some(s) = f.domain.as_system_slice() {
+                            self.frames.push(s.to_vec());
                         }
                     }
                     PipelinePacket::Eos => self.eos = true,

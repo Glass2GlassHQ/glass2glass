@@ -135,10 +135,10 @@ fn dma_ring_streams_zero_copy_through_embassy_channel_no_alloc() {
             loop {
                 match rx.receive().await {
                     PipelinePacket::DataFrame(frame) => {
-                        let MemoryDomain::System(slice) = &frame.domain else {
+                        let Some(slice) = frame.domain.as_system_slice() else {
                             panic!("expected a System frame");
                         };
-                        let bytes = slice.as_slice();
+                        let bytes = slice;
                         let base = bytes.as_ptr() as usize;
                         log.lock().unwrap().push((
                             frame.sequence,

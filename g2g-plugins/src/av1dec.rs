@@ -219,11 +219,11 @@ macro_rules! av1_decoder {
                     }
                     match packet {
                         PipelinePacket::DataFrame(frame) => {
-                            let MemoryDomain::System(slice) = &frame.domain else {
+                            let Some(slice) = frame.domain.as_system_slice() else {
                                 return Err(G2gError::UnsupportedDomain);
                             };
                             let decoder = self.decoder.as_mut().ok_or(G2gError::NotConfigured)?;
-                            let unit = slice.as_slice().to_vec();
+                            let unit = slice.to_vec();
                             let frames = Self::feed(decoder, unit)?;
                             for (format, pixels, (w, h)) in frames {
                                 if self.out != Some((format, w, h)) {

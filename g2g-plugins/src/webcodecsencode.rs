@@ -222,10 +222,10 @@ impl AsyncElement for WebCodecsEncode {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    self.feed(slice.as_slice(), frame.timing.pts_ns)?;
+                    self.feed(slice, frame.timing.pts_ns)?;
                     self.drain_ready(out).await?;
                 }
                 // The runner's transform arm hands us our *derived output* caps
@@ -254,6 +254,10 @@ impl AsyncElement for WebCodecsEncode {
                 }
                 PipelinePacket::Segment(seg) => {
                     out.push(PipelinePacket::Segment(seg)).await?;
+                }
+                // future PipelinePacket variants: forward unchanged.
+                other => {
+                    out.push(other).await?;
                 }
             }
             Ok(())

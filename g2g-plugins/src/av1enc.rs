@@ -25,8 +25,8 @@ use alloc::vec::Vec;
 
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
-    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, Rate, RawVideoFormat, VideoCodec,
+    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec, Rate, RawVideoFormat, VideoCodec,
 };
 
 use rav1e::prelude::{
@@ -362,6 +362,13 @@ fn drain_ready<T: Pixel>(ctx: &mut Context<T>) -> Vec<(Vec<u8>, u64)> {
 }
 
 impl AsyncElement for Av1Enc {
+    // M759: a re-encode to a compressed codec drops pixel-derived meta
+    // (AnalyticsMeta); opaque side-data (BlobMeta) rides through.
+    #[cfg(feature = "metadata")]
+    fn meta_transform(&self) -> Option<g2g_core::meta::Transform> {
+        Some(g2g_core::meta::Transform::Encode)
+    }
+
     fn handles_keyframe_requests(&self) -> bool {
         true
     }
@@ -495,10 +502,10 @@ impl AsyncElement for Av1Enc {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    let packets = self.encode(slice.as_slice(), frame.timing.pts_ns)?;
+                    let packets = self.encode(slice, frame.timing.pts_ns)?;
                     self.emit(packets, out).await?;
                 }
                 PipelinePacket::Eos => {
@@ -547,7 +554,7 @@ mod tests {
     use super::*;
     use crate::av1parse::Av1Parse;
     use g2g_core::frame::Frame;
-    use g2g_core::memory::SystemSlice;
+    use g2g_core::memory::{MemoryDomain, SystemSlice};
     use g2g_core::{FrameTiming, PushOutcome};
 
     fn i420_grey(w: usize, h: usize) -> Vec<u8> {
@@ -581,8 +588,8 @@ mod tests {
                 match packet {
                     PipelinePacket::CapsChanged(c) => self.caps.push(c),
                     PipelinePacket::DataFrame(f) => {
-                        if let MemoryDomain::System(s) = &f.domain {
-                            self.frames.push(s.as_slice().to_vec());
+                        if let Some(s) = f.domain.as_system_slice() {
+                            self.frames.push(s.to_vec());
                         }
                     }
                     _ => {}

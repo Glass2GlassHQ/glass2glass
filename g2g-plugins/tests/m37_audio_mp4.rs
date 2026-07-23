@@ -62,10 +62,10 @@ impl OutputSink for Collect {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(f) => {
-                    let MemoryDomain::System(s) = &f.domain else {
+                    let Some(s) = f.domain.as_system_slice() else {
                         panic!("expected system frame");
                     };
-                    self.aus.push(s.as_slice().to_vec());
+                    self.aus.push(s.to_vec());
                 }
                 PipelinePacket::Eos => self.eos = true,
                 _ => {}

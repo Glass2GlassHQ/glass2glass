@@ -207,6 +207,27 @@ executors, which the `run_graph_threaded` gate (`std + multi-thread`) excludes.
 `run_graph_threaded` requires an owning `Graph<GraphNode>` (`'static`) so each arm
 can move its element onto a worker thread.
 
+**Element-level cooperative offload.** A separate, opt-in path lets the
+cooperative default runner overlap one heavy synchronous stage without a
+per-arm thread. `run_graph` polls every arm inside one `JoinAll` future on a
+single task, so a runner-level `block_in_place` would park all arms, not just
+the heavy one: the offload has to be at the element. `g2g_plugins::offload::run_blocking`
+(behind the `offload = ["std", "tokio/rt"]` feature) moves a pure-compute closure
+onto `tokio::task::spawn_blocking` when a runtime handle exists (inline fallback
+otherwise) and awaits the `JoinHandle`. Only the calling element's arm suspends
+at that `await`; the `JoinAll` keeps polling the siblings, so the sink renders
+while the stage runs, and the blocking pool is separate from the runtime workers
+so this pipelines even on a `current_thread` runtime. The closure must be `Send`,
+so an element owns the input bytes before offloading (`videoconvert`'s pixel
+convert, `waylandsink`'s NV12->XRGB convert). `ffmpegdec` moves its `!Send`
+libavcodec decoder + pts map into the closure by value and takes them back via an
+`OffloadDecode` bundle (`unsafe Send`, sound because the bundle is owned by the
+one blocking-pool thread until `run_blocking` hands it back, never aliased),
+holding the element's one-thread-at-a-time contract. Off-tokio executors
+(`no_std` / embassy / the park-based `block_on`) hit the inline fallback, so the
+path is transparent there. This is the lower-effort complement to
+`run_graph_threaded`: no thread-per-arm, just the one CPU-bound stage overlapped.
+
 #### 4.13.4 Mid-stream re-solve
 
 A mid-stream `PipelinePacket::CapsChanged` triggers a re-fixation that stays

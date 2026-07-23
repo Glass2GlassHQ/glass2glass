@@ -44,7 +44,7 @@ use windows::Win32::System::Com::{
 
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, G2gError,
-    HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    HardwareError, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
 };
 
 use crate::audio::pcm_params;
@@ -208,11 +208,11 @@ impl AsyncElement for WasapiSink {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
                     let tx = self.cmd_tx.as_ref().ok_or(G2gError::NotConfigured)?;
-                    tx.send(WorkerCmd::Samples(slice.as_slice().to_vec()))
+                    tx.send(WorkerCmd::Samples(slice.to_vec()))
                         .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
                     Ok(())
                 }

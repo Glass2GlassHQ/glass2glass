@@ -20,8 +20,8 @@ use std::path::PathBuf;
 
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError, HardwareError,
-    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec,
+    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec,
 };
 
 /// Map a filesystem error to the structured `Hardware(Io)` variant, carrying
@@ -102,10 +102,9 @@ impl AsyncElement for FileSink {
             let writer = self.writer.as_mut().ok_or(G2gError::NotConfigured)?;
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(bytes) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    let bytes = slice.as_slice();
                     writer.write_all(bytes).map_err(io_err)?;
                     self.bytes_written += bytes.len() as u64;
                     self.frames_written += 1;
@@ -177,7 +176,9 @@ impl PadTemplates for FileSink {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use g2g_core::{ByteStreamEncoding, Frame, FrameTiming, PushOutcome, SystemSlice};
+    use g2g_core::{
+        ByteStreamEncoding, Frame, FrameTiming, MemoryDomain, PushOutcome, SystemSlice,
+    };
 
     struct NullSink;
     impl OutputSink for NullSink {

@@ -88,6 +88,22 @@ Then pick a detect mode and **Start**. The in-browser YOLO runs at a few fps
 (CPU-wasm); the server-side path keeps up with the stream (native ORT) and is the
 "thin client, offload the model" shape.
 
+### Headless test (ort-web MVP)
+
+`headless/run-ortdetect.mjs` drives the ort-web chain end to end in a
+WebCodecs-capable Chromium against a committed, deterministic model fixture
+(`fixtures/tiny-detect.onnx`, ~0.6 KB, regenerable via
+`uv run --with onnx --with numpy fixtures/gen-tiny-detect.py`). The fixture plants
+exactly two detections per frame, so the test asserts the model loads, every frame
+yields two decoded detections, and the overlay boxes render to the canvas. It needs
+`playwright` (`npm i -D playwright`) and a full Chromium; env overrides `G2G_CHROME`,
+`G2G_WS_SERVER_BIN` (prebuilt `ws-fixture-server`, else `cargo run`), `G2G_FIXTURE`.
+
+```sh
+./build.sh                        # build pkg/ first
+node headless/run-ortdetect.mjs   # -> PASS ...
+```
+
 ## Pieces
 
 | File | Role |
@@ -98,6 +114,8 @@ Then pick a detect mode and **Start**. The in-browser YOLO runs at a few fps
 | `ws-fixture-server/` | native tokio + tokio-tungstenite server; splits the Annex-B fixture into access units and streams them on a timer (the receive demo's source) |
 | `ws-recv-server/` | native receiver for the send demo; appends the browser's encoded access units to `received.h264` |
 | `serve.sh` | `python3 -m http.server` (no special headers) |
+| `fixtures/` | committed tiny deterministic ONNX detector (`tiny-detect.onnx`) + `gen-tiny-detect.py` |
+| `headless/` | `run-ortdetect.mjs` + `ortdetect.html`: headless validation of the ort-web chain |
 
 ## Notes
 

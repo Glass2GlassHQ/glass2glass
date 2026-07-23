@@ -642,10 +642,10 @@ impl MultiOutputElement for Mp4DemuxN {
                 // Buffer the bytes, then emit any complete fragments that have
                 // landed (a fragmented file streams; a progressive one waits for Eos).
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    self.buf.extend_from_slice(slice.as_slice());
+                    self.buf.extend_from_slice(slice);
                     // Honor an app selection before emitting this batch, so a re-map
                     // takes effect for the fragments now (no-op until the moov parsed).
                     self.apply_stream_selection();
@@ -715,8 +715,8 @@ mod tests {
         ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
             Box::pin(async move {
                 if let PipelinePacket::DataFrame(f) = packet {
-                    if let MemoryDomain::System(s) = &f.domain {
-                        self.bytes.extend_from_slice(s.as_slice());
+                    if let Some(s) = f.domain.as_system_slice() {
+                        self.bytes.extend_from_slice(s);
                     }
                 }
                 Ok(PushOutcome::Accepted)
@@ -756,8 +756,8 @@ mod tests {
                     PipelinePacket::CapsChanged(c) => self.caps[port] = Some(c),
                     PipelinePacket::DataFrame(f) => {
                         self.ptss[port].push(f.timing.pts_ns);
-                        if let MemoryDomain::System(s) = &f.domain {
-                            self.frames[port].push(s.as_slice().to_vec());
+                        if let Some(s) = f.domain.as_system_slice() {
+                            self.frames[port].push(s.to_vec());
                         }
                     }
                     _ => {}

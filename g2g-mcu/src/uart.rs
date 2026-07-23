@@ -67,10 +67,10 @@ impl<T: SerialTx> UartSink<T> {
 
 impl<T: SerialTx> StaticSink for UartSink<T> {
     async fn consume(&mut self, frame: Frame) -> Result<(), G2gError> {
-        let MemoryDomain::System(slice) = &frame.domain else {
+        let Some(slice) = frame.domain.as_system_slice() else {
             return Err(G2gError::UnsupportedDomain);
         };
-        self.tx.write_all(slice.as_slice()).await
+        self.tx.write_all(slice).await
     }
 }
 

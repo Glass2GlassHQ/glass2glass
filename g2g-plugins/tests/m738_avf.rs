@@ -52,10 +52,10 @@ async fn camera_captures_or_reports_no_device() {
         Ok(n) => {
             assert_eq!(n, 3, "captured the requested frames");
             for d in &out.frames {
-                let MemoryDomain::System(s) = d else {
+                let Some(s) = d.as_system_slice() else {
                     panic!("packed mode emits System frames");
                 };
-                assert_eq!(s.as_slice().len(), 640 * 480 * 3 / 2, "tight VGA NV12");
+                assert_eq!(s.len(), 640 * 480 * 3 / 2, "tight VGA NV12");
             }
             eprintln!("captured {n} camera frames");
         }

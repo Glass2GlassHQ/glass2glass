@@ -461,7 +461,7 @@ impl AsyncElement for SvtJpegXsEnc {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
                     if !self.caps_sent {
@@ -474,7 +474,7 @@ impl AsyncElement for SvtJpegXsEnc {
                         .await?;
                         self.caps_sent = true;
                     }
-                    let codestream = self.encode_one(slice.as_slice())?;
+                    let codestream = self.encode_one(slice)?;
                     let out_frame = Frame {
                         domain: MemoryDomain::System(SystemSlice::from_boxed(
                             codestream.into_boxed_slice(),
@@ -696,10 +696,10 @@ impl AsyncElement for SvtJpegXsDec {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    let pixels = self.decode_one(slice.as_slice())?;
+                    let pixels = self.decode_one(slice)?;
                     if !self.caps_sent {
                         out.push(PipelinePacket::CapsChanged(Caps::RawVideo {
                             format: self.out_format,
@@ -860,8 +860,8 @@ mod tests {
             Box::pin(async move {
                 match packet {
                     PipelinePacket::DataFrame(f) => {
-                        if let MemoryDomain::System(s) = &f.domain {
-                            self.frames.push(s.as_slice().to_vec());
+                        if let Some(s) = f.domain.as_system_slice() {
+                            self.frames.push(s.to_vec());
                         }
                     }
                     PipelinePacket::CapsChanged(c) => self.caps.push(c),

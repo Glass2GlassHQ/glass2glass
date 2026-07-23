@@ -16,8 +16,8 @@ use std::path::PathBuf;
 
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
-    G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec,
+    G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec,
 };
 
 use crate::audio::WAVE_FORMAT_IEEE_FLOAT;
@@ -166,11 +166,11 @@ impl AsyncElement for WavSink {
             let writer = self.writer.as_mut().ok_or(G2gError::NotConfigured)?;
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    writer.write_all(slice.as_slice()).map_err(io_err)?;
-                    self.data_bytes += slice.as_slice().len() as u64;
+                    writer.write_all(slice).map_err(io_err)?;
+                    self.data_bytes += slice.len() as u64;
                 }
                 PipelinePacket::Eos => {
                     // patch the running sizes, then return to the end so a
@@ -276,7 +276,7 @@ mod tests {
 
     #[tokio::test]
     async fn float_wav_patches_fact_and_data_sizes() {
-        use g2g_core::{Frame, FrameTiming, PushOutcome, SystemSlice};
+        use g2g_core::{Frame, FrameTiming, MemoryDomain, PushOutcome, SystemSlice};
         struct NullSink;
         impl OutputSink for NullSink {
             fn push<'a>(

@@ -123,8 +123,8 @@ impl AsyncElement for CollectSink {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    if let MemoryDomain::System(s) = &frame.domain {
-                        self.frames.push((frame.sequence, s.as_slice()[0]));
+                    if let Some(s) = frame.domain.as_system_slice() {
+                        self.frames.push((frame.sequence, s[0]));
                     }
                 }
                 PipelinePacket::Eos => self.eos = true,

@@ -172,19 +172,19 @@ async fn decode_fixture(mut dec: VtDecode, codec: VideoCodec, es: &[u8]) {
     );
     let expected_len = 640 * 480 * 3 / 2;
     for f in &frames {
-        let MemoryDomain::System(slice) = &f.domain else {
+        let Some(slice) = f.domain.as_system_slice() else {
             panic!("decoder must emit System-domain frames");
         };
-        assert_eq!(slice.as_slice().len(), expected_len, "packed NV12 length");
+        assert_eq!(slice.len(), expected_len, "packed NV12 length");
     }
 
     // The fixtures are test cards with near-black (16) and near-white regions.
     // Uniform luma = no real decode; missing extremes = a desynced one (same
     // checks as the Vulkan Video decode test).
-    let MemoryDomain::System(first) = &frames[0].domain else {
+    let Some(first) = frames[0].domain.as_system_slice() else {
         unreachable!()
     };
-    let luma = &first.as_slice()[..640 * 480];
+    let luma = &first[..640 * 480];
     let min = *luma.iter().min().unwrap();
     let max = *luma.iter().max().unwrap();
     assert!(max > min, "decoded luma is uniform ({min}=={max})");
@@ -329,10 +329,10 @@ mod encode {
         let aus = encoded.data_frames();
         assert_eq!(aus.len(), FRAMES, "no-reorder mode: one output per input");
         for f in &aus {
-            let MemoryDomain::System(slice) = &f.domain else {
+            let Some(slice) = f.domain.as_system_slice() else {
                 panic!("encoder must emit System-domain frames");
             };
-            let data = slice.as_slice();
+            let data = slice;
             assert!(
                 data.starts_with(&[0, 0, 0, 1]) || data.starts_with(&[0, 0, 1]),
                 "encoded output must be Annex-B (got {:?})",
@@ -342,10 +342,10 @@ mod encode {
 
         // The first access unit is the IDR/IRAP and must carry the in-band
         // parameter sets the element prepends from the format description.
-        let MemoryDomain::System(first) = &aus[0].domain else {
+        let Some(first) = aus[0].domain.as_system_slice() else {
             unreachable!()
         };
-        let headers = nal_header_bytes(first.as_slice());
+        let headers = nal_header_bytes(first);
         let has_params = match codec {
             VideoCodec::H265 => {
                 let types: Vec<u8> = headers.iter().map(|b| (b >> 1) & 0x3f).collect();
@@ -384,10 +384,10 @@ mod encode {
         assert_eq!(frames.len(), FRAMES, "every picture must decode back out");
         let expected_len = (WIDTH * HEIGHT * 3 / 2) as usize;
         for f in frames {
-            let MemoryDomain::System(slice) = &f.domain else {
+            let Some(slice) = f.domain.as_system_slice() else {
                 panic!("decoder must emit System-domain frames");
             };
-            assert_eq!(slice.as_slice().len(), expected_len, "packed NV12 length");
+            assert_eq!(slice.len(), expected_len, "packed NV12 length");
         }
     }
 

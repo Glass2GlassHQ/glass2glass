@@ -298,10 +298,9 @@ impl Mp4MuxN {
         frame: Frame,
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
-        let MemoryDomain::System(slice) = &frame.domain else {
+        let Some(au) = frame.domain.as_system_slice() else {
             return Err(G2gError::UnsupportedDomain);
         };
-        let au = slice.as_slice();
         let pts_ns = frame.timing.pts_ns;
         let (sample, is_sync) = self.sample_for(input, au);
 
@@ -521,8 +520,8 @@ impl MultiInputElement for Mp4MuxN {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
                     // Capture this track's init from its first AU before queueing.
-                    if let MemoryDomain::System(s) = &frame.domain {
-                        self.capture_init(input, s.as_slice());
+                    if let Some(s) = frame.domain.as_system_slice() {
+                        self.capture_init(input, s);
                     }
                     self.agg.push(input, frame);
                 }
@@ -865,8 +864,8 @@ mod tests {
         ) -> Pin<Box<dyn Future<Output = Result<g2g_core::PushOutcome, G2gError>> + 'a>> {
             Box::pin(async move {
                 if let PipelinePacket::DataFrame(f) = packet {
-                    if let MemoryDomain::System(s) = &f.domain {
-                        self.bytes.extend_from_slice(s.as_slice());
+                    if let Some(s) = f.domain.as_system_slice() {
+                        self.bytes.extend_from_slice(s);
                     }
                 }
                 Ok(g2g_core::PushOutcome::Accepted)

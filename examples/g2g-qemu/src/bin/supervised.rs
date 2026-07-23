@@ -30,7 +30,7 @@ use cortex_m_semihosting::{debug, hio};
 use g2g_core::error::{G2gError, HardwareError};
 use g2g_core::staticpool::StaticLendRing;
 use g2g_core::supervise::{run_supervised, Recover, RetryThenReset, RunOutcome};
-use g2g_core::{drive_ready, run_source_transform_sink, Frame, MemoryDomain, SinkChain, StaticSink};
+use g2g_core::{drive_ready, run_source_transform_sink, Frame, SinkChain, StaticSink};
 use g2g_mcu::{FrameGrabber, G711Enc, GrabberSrc, Law, SupervisorWatchdog, WatchdogTimer};
 
 #[panic_handler]
@@ -68,8 +68,8 @@ struct SumSink {
 }
 impl StaticSink for SumSink {
     async fn consume(&mut self, frame: Frame) -> Result<(), G2gError> {
-        if let MemoryDomain::System(s) = &frame.domain {
-            for &b in s.as_slice() {
+        if let Some(s) = frame.domain.as_system_slice() {
+            for &b in s {
                 self.sum = self.sum.wrapping_add(b as u64);
             }
         }

@@ -18,7 +18,7 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, HardwareError,
-    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate, RawVideoFormat,
+    OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate, RawVideoFormat,
 };
 
 use wasm_bindgen::{Clamped, JsCast};
@@ -58,10 +58,10 @@ impl CanvasSink {
         if w == 0 || h == 0 {
             return Ok(()); // no caps yet: nothing to size an ImageData with
         }
-        let MemoryDomain::System(slice) = &frame.domain else {
+        let Some(slice) = frame.domain.as_system_slice() else {
             return Err(G2gError::UnsupportedDomain);
         };
-        let bytes = slice.as_slice();
+        let bytes = slice;
         if bytes.len() != (w as usize) * (h as usize) * 4 {
             return Err(G2gError::CapsMismatch);
         }
@@ -130,6 +130,8 @@ impl AsyncElement for CanvasSink {
                 PipelinePacket::CapsChanged(_) => return Err(G2gError::CapsMismatch),
                 PipelinePacket::DataFrame(frame) => self.present(&frame)?,
                 PipelinePacket::Flush | PipelinePacket::Eos | PipelinePacket::Segment(_) => {}
+                // future PipelinePacket variants: no-op (terminal sink).
+                _ => {}
             }
             Ok(())
         })

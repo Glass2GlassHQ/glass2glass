@@ -841,10 +841,7 @@ impl ScriptRouter {
         let guard = Arc::new(FrameGuard::new());
         // Arm the byte-peek pointer only for System memory; other domains route by
         // metadata alone (`frame[i]` then errors, the getters still work).
-        let buf: Option<&[u8]> = match &frame.domain {
-            MemoryDomain::System(s) => Some(s.as_slice()),
-            _ => None,
-        };
+        let buf: Option<&[u8]> = frame.domain.as_system_slice();
         if let Some(b) = buf {
             guard.arm(b.as_ptr() as *mut u8, b.len());
         }
@@ -1188,10 +1185,14 @@ mod tests {
             .expect("configure compiles the script");
         let mut frame = rgba_frame(2, 2);
         el.run_script(&mut frame).expect("run");
-        match &frame.domain {
-            MemoryDomain::System(s) => assert_eq!(s.as_slice()[0], 255, "pixel written in place"),
-            _ => panic!("expected System memory"),
-        }
+        assert_eq!(
+            frame
+                .domain
+                .as_system_slice()
+                .expect("expected System memory")[0],
+            255,
+            "pixel written in place"
+        );
     }
 
     #[test]
@@ -1203,10 +1204,13 @@ mod tests {
         el.configure_pipeline(&rgba_caps(2, 2)).expect("configure");
         let mut frame = rgba_frame(2, 2);
         el.run_script(&mut frame).expect("run");
-        match &frame.domain {
-            MemoryDomain::System(s) => assert_eq!(s.as_slice()[3], 200),
-            _ => panic!("expected System memory"),
-        }
+        assert_eq!(
+            frame
+                .domain
+                .as_system_slice()
+                .expect("expected System memory")[3],
+            200
+        );
     }
 
     #[test]
@@ -1233,11 +1237,13 @@ mod tests {
         el.configure_pipeline(&rgba_caps(2, 2)).expect("configure");
         let mut frame = rgba_frame(2, 2);
         el.run_script(&mut frame).expect("run");
-        match &frame.domain {
-            // fill(10) -> invert -> 245; LUT maps 245 -> 99.
-            MemoryDomain::System(s) => assert!(s.as_slice().iter().all(|&b| b == 99)),
-            _ => panic!("expected System memory"),
-        }
+        // fill(10) -> invert -> 245; LUT maps 245 -> 99.
+        assert!(frame
+            .domain
+            .as_system_slice()
+            .expect("expected System memory")
+            .iter()
+            .all(|&b| b == 99));
     }
 
     #[test]

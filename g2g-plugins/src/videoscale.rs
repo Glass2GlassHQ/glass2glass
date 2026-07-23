@@ -149,6 +149,12 @@ impl AsyncElement for VideoScale {
     where
         Self: 'a;
 
+    // M759: a geometry resample; normalized meta survives a scale (Scale keeps).
+    #[cfg(feature = "metadata")]
+    fn meta_transform(&self) -> Option<g2g_core::meta::Transform> {
+        Some(g2g_core::meta::Transform::Scale)
+    }
+
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         // input side only: any supported raw format at the upstream
         // geometry. The output geometry is the configured target, declared
@@ -281,10 +287,9 @@ impl AsyncElement for VideoScale {
                         Some((f, w, h, r)) => (*f, *w, *h, r.clone()),
                         None => return Err(G2gError::NotConfigured),
                     };
-                    let MemoryDomain::System(slice) = &frame.domain else {
+                    let Some(src) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    let src = slice.as_slice();
                     if src.len() < frame_byte_size(format, in_w, in_h) {
                         return Err(G2gError::CapsMismatch);
                     }

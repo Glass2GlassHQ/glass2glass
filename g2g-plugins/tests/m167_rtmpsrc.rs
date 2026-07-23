@@ -12,9 +12,7 @@ use std::net::{TcpListener, TcpStream};
 use std::thread;
 
 use g2g_core::runtime::SourceLoop;
-use g2g_core::{
-    ByteStreamEncoding, Caps, G2gError, MemoryDomain, OutputSink, PipelinePacket, PushOutcome,
-};
+use g2g_core::{ByteStreamEncoding, Caps, G2gError, OutputSink, PipelinePacket, PushOutcome};
 use g2g_plugins::flv::{FlvDemuxer, FlvTrack};
 use g2g_plugins::rtmpsrc::RtmpSrc;
 
@@ -31,8 +29,8 @@ impl OutputSink for CaptureSink {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(f) => {
-                    if let MemoryDomain::System(s) = &f.domain {
-                        self.flv.extend_from_slice(s.as_slice());
+                    if let Some(s) = f.domain.as_system_slice() {
+                        self.flv.extend_from_slice(s);
                     }
                 }
                 PipelinePacket::Eos => self.eos = true,
