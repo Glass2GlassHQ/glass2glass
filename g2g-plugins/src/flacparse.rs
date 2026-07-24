@@ -32,15 +32,15 @@ use g2g_core::{
 
 /// Sample rate / channel count out of the mandatory STREAMINFO block.
 #[derive(Clone, Copy, Debug)]
-struct StreamInfo {
-    sample_rate: u32,
-    channels: u8,
+pub(crate) struct StreamInfo {
+    pub(crate) sample_rate: u32,
+    pub(crate) channels: u8,
 }
 
 /// A validated frame header at a sync candidate: the frame's per-channel
 /// sample count (its block size).
-struct FrameHeader {
-    block_size: u32,
+pub(crate) struct FrameHeader {
+    pub(crate) block_size: u32,
 }
 
 pub struct FlacParse {
@@ -191,8 +191,9 @@ fn complete_header_len(buf: &[u8]) -> Result<Option<usize>, G2gError> {
 }
 
 /// Sample rate / channels out of the header's STREAMINFO block (type 0, the
-/// mandatory first metadata block). `None` if absent or malformed.
-fn parse_streaminfo(header: &[u8]) -> Option<StreamInfo> {
+/// mandatory first metadata block). `None` if absent or malformed. Shared with
+/// the Ogg-FLAC mapping in [`crate::ogg`] (its first packet embeds this header).
+pub(crate) fn parse_streaminfo(header: &[u8]) -> Option<StreamInfo> {
     let block = header.get(4..)?;
     if block.first()? & 0x7F != 0 {
         return None; // STREAMINFO must be the first block
@@ -229,7 +230,8 @@ fn crc8(data: &[u8]) -> u8 {
 /// frame/sample number, the optional block-size / sample-rate bytes, and the
 /// trailing CRC-8 over all of it. `None` unless everything checks out, so an
 /// audio byte pair that aliases the sync pattern cannot mis-split a frame.
-fn parse_frame_header(data: &[u8]) -> Option<FrameHeader> {
+/// Shared with [`crate::oggdemux`], which times Ogg-FLAC packets by block size.
+pub(crate) fn parse_frame_header(data: &[u8]) -> Option<FrameHeader> {
     let b1 = *data.get(1)?;
     // 14 sync bits (0b11111111_111110) and the reserved bit after them.
     if data[0] != 0xFF || b1 & 0xFC != 0xF8 || b1 & 0x02 != 0 {

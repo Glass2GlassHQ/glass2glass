@@ -26,6 +26,9 @@ const MAX_PACKET_BYTES: usize = 8 * 1024 * 1024;
 pub enum OggCodec {
     Opus,
     Vorbis,
+    /// The Ogg-FLAC mapping (`\x7fFLAC` first packet embedding the native
+    /// `fLaC` + STREAMINFO header).
+    Flac,
     /// A first packet this demuxer does not recognize.
     Other,
 }
@@ -207,6 +210,25 @@ impl OggDemuxer {
         if self.info.is_none() {
             self.info = Some(detect(&packet));
         }
+        // Ogg-FLAC: the first packet declares how many header packets follow,
+        // but that count is attacker-controlled, so classify instead: metadata
+        // blocks lead with a block-type byte (never 0xFF, an invalid type),
+        // audio frames with the 0xFF sync. VorbisComment is block type 4.
+        if self.info.map(|i| i.codec) == Some(OggCodec::Flac) {
+            if self.packets_seen == 0 {
+                self.head_header = Some(packet);
+            } else if packet[0] != 0xFF {
+                if packet[0] & 0x7F == 4 {
+                    self.comment_header = Some(packet);
+                }
+            } else {
+                self.packets_seen += 1;
+                self.completed.push(packet);
+                return;
+            }
+            self.packets_seen += 1;
+            return;
+        }
         let header_count = match self.info.map(|i| i.codec) {
             Some(OggCodec::Opus) => 2,   // OpusHead + OpusTags
             Some(OggCodec::Vorbis) => 3, // id + comment + setup
@@ -239,6 +261,24 @@ fn detect(packet: &[u8]) -> OggStreamInfo {
             channels: packet[9],
             sample_rate: 48_000,
             pre_skip: u16::from_le_bytes([packet[10], packet[11]]),
+        }
+    } else if packet.starts_with(b"\x7fFLAC") && packet.len() >= 13 && &packet[9..13] == b"fLaC" {
+        // Ogg-FLAC mapping: 0x7F "FLAC" major(1) minor(1) header-count(2 BE),
+        // then the native "fLaC" marker + STREAMINFO block at offset 9.
+        // A first packet whose STREAMINFO does not parse stays Other.
+        match crate::flacparse::parse_streaminfo(&packet[9..]) {
+            Some(si) => OggStreamInfo {
+                codec: OggCodec::Flac,
+                channels: si.channels,
+                sample_rate: si.sample_rate,
+                pre_skip: 0,
+            },
+            None => OggStreamInfo {
+                codec: OggCodec::Other,
+                channels: 0,
+                sample_rate: 0,
+                pre_skip: 0,
+            },
         }
     } else if packet.starts_with(b"\x01vorbis") {
         OggStreamInfo {
@@ -446,6 +486,57 @@ mod tests {
             "reassembly buffer stays bounded, got {}",
             d.partial.len()
         );
+    }
+
+    /// The Ogg-FLAC mapping's first packet: `\x7fFLAC`, version 1.0, a BE u16
+    /// count of following header packets, then the native `fLaC` marker +
+    /// STREAMINFO block carrying `channels` / `sample_rate`.
+    fn flac_first_packet(channels: u8, sample_rate: u32, headers: u16) -> Vec<u8> {
+        let mut p = alloc::vec![0x7F];
+        p.extend_from_slice(b"FLAC");
+        p.extend_from_slice(&[1, 0]);
+        p.extend_from_slice(&headers.to_be_bytes());
+        p.extend_from_slice(b"fLaC");
+        p.extend_from_slice(&[0x00, 0, 0, 34]);
+        let mut body = [0u8; 34];
+        body[10] = (sample_rate >> 12) as u8;
+        body[11] = (sample_rate >> 4) as u8;
+        body[12] = (((sample_rate & 0xF) as u8) << 4) | ((channels - 1) << 1);
+        p.extend_from_slice(&body);
+        p
+    }
+
+    #[test]
+    fn detects_ogg_flac_and_classifies_headers() {
+        let serial = 3;
+        let mut d = OggDemuxer::new();
+        d.push_data(&page(0x02, serial, 0, &[&flac_first_packet(2, 44_100, 1)]));
+        // A VorbisComment metadata block (type 4, last-flag set) is a header.
+        let comment = [&[0x84u8, 0, 0, 4][..], &[0u8; 4]].concat();
+        d.push_data(&page(0x00, serial, 1, &[&comment]));
+        // An audio frame leads with the 0xFF sync byte.
+        let audio = [0xFFu8, 0xF8, 0x69, 0x18, 0x00, 0xBF];
+        d.push_data(&page(0x00, serial, 2, &[&audio]));
+
+        let info = d.info().unwrap();
+        assert_eq!(info.codec, OggCodec::Flac);
+        assert_eq!(info.channels, 2);
+        assert_eq!(info.sample_rate, 44_100);
+        assert!(d.head_header().unwrap().starts_with(b"\x7fFLAC"));
+        assert_eq!(d.comment_header(), Some(comment.as_slice()));
+        assert_eq!(d.take_packets(), vec![audio.to_vec()], "audio packets only");
+    }
+
+    #[test]
+    fn malformed_flac_first_packet_is_other() {
+        // Right magic, but the embedded native header is absent.
+        let mut d = OggDemuxer::new();
+        d.push_data(&page(0x02, 4, 0, &[b"\x7fFLAC\x01\x00\x00\x01fLa_"]));
+        assert_eq!(d.info().unwrap().codec, OggCodec::Other);
+        // Truncated STREAMINFO: detected magic but unparseable parameters.
+        let mut d = OggDemuxer::new();
+        d.push_data(&page(0x02, 5, 0, &[b"\x7fFLAC\x01\x00\x00\x01fLaC\x00"]));
+        assert_eq!(d.info().unwrap().codec, OggCodec::Other);
     }
 
     #[test]

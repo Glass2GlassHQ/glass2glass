@@ -1082,6 +1082,98 @@ pub fn mkv_primary_stream(location: &str, caps: &Caps) -> Option<PrimaryStream> 
     })
 }
 
+/// The `playbin uri=X` hook for a lone-audio-stream file (M775): an elementary
+/// audio file (`.flac`) or an Ogg logical stream, which the container hooks
+/// decline and the single-stream `file://` fallback (a self-demuxing MP4 video
+/// source) cannot play. Probes the content: an Ogg stream builds `FileSrc ->
+/// OggDemux(stream=<codec>) -> {decode branch}`; an elementary-audio-typed file
+/// wires the decode branch straight off the file source (the parser provider
+/// splices `flacparse`). Declines non-`file://` URIs and everything else.
+#[cfg(feature = "std")]
+pub fn audio_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>, ParseError> {
+    let Some((path, prefix)) = open_file_prefix(uri) else {
+        return Ok(None);
+    };
+    let mut graph: Graph<GraphNode> = Graph::new();
+    if prefix.starts_with(b"OggS") {
+        let mut demux = crate::ogg::OggDemuxer::new();
+        demux.push_data(&prefix);
+        let Some(info) = demux.info() else {
+            return Ok(None);
+        };
+        let (stream, format) = match info.codec {
+            crate::ogg::OggCodec::Opus => ("opus", g2g_core::AudioFormat::Opus),
+            crate::ogg::OggCodec::Flac => ("flac", g2g_core::AudioFormat::Flac),
+            _ => return Ok(None), // Vorbis output is still open: decline
+        };
+        let source = crate::filesrc::FileSrc::new(
+            &path,
+            Caps::ByteStream {
+                encoding: ByteStreamEncoding::Ogg,
+            },
+        );
+        let src = graph.add_source(GraphNodeRef::Source(Box::new(source)));
+        use g2g_core::AsyncElement as _;
+        let mut ogg = crate::oggdemux::OggDemux::new();
+        ogg.set_property("stream", g2g_core::PropValue::Str(stream.into()))
+            .expect("oggdemux stream property");
+        let demux = graph.add_transform(GraphNodeRef::element(ogg));
+        graph.link(src, demux).map_err(ParseError::Graph)?;
+        let caps = Caps::Audio {
+            format,
+            channels: 0,
+            sample_rate: 0,
+        };
+        wire_audio_branch(reg, &mut graph, demux, &caps)?;
+        return Ok(Some(graph));
+    }
+    // An elementary audio type by content (`fLaC`, M774): decode off the source.
+    let caps = match crate::typefind::sniff_caps(&prefix) {
+        Some(caps @ Caps::Audio { .. }) => caps,
+        _ => return Ok(None),
+    };
+    let source = crate::filesrc::FileSrc::new(&path, caps.clone());
+    let src = graph.add_source(GraphNodeRef::Source(Box::new(source)));
+    wire_audio_branch(reg, &mut graph, src, &caps)?;
+    Ok(Some(graph))
+}
+
+/// Bare-`decodebin` primary-stream hook for Ogg (M775): the Ogg sibling of
+/// [`ts_primary_stream`]. [`OggDemux`](crate::oggdemux::OggDemux) defaults to its
+/// Opus port, so `filesrc location=X.oga ! decodebin` on an Ogg-FLAC file would
+/// plug an Opus decoder. Sniff the first packet; a `\x7fFLAC` stream selects
+/// `oggdemux stream=flac` with the STREAMINFO caps for the decoder search.
+/// Declines a non-Ogg file or any other codec (the default Opus port is right).
+#[cfg(feature = "std")]
+pub fn ogg_primary_stream(location: &str, caps: &Caps) -> Option<PrimaryStream> {
+    if !matches!(
+        caps,
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::Ogg
+        }
+    ) {
+        return None;
+    }
+    let prefix = read_prefix(location)?;
+    let mut demux = crate::ogg::OggDemuxer::new();
+    demux.push_data(&prefix);
+    let info = demux.info()?;
+    if info.codec != crate::ogg::OggCodec::Flac || info.sample_rate == 0 {
+        return None;
+    }
+    Some(PrimaryStream {
+        demux: "oggdemux",
+        props: alloc::vec![("stream".to_string(), "flac".to_string())],
+        // Sentinel channels/rate for the decoder search (the demux refines the
+        // concrete STREAMINFO values via CapsChanged at runtime).
+        caps: Caps::Audio {
+            format: g2g_core::AudioFormat::Flac,
+            channels: 0,
+            sample_rate: 0,
+        },
+    })
+}
+
 /// Probe an MP4 file and build an [`Mp4DemuxN`](crate::mp4demuxn::Mp4DemuxN) with
 /// the requested tracks + their caps (M482). Shared by `qtdemux` demux-select and
 /// `decodebin` fan-out. Declines a non-MP4 file (or a `moov` past the probe window).

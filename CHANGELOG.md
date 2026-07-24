@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M775: Ogg-FLAC: `oggdemux stream=flac` demuxes the `\x7fFLAC` mapping (bit-exact decode vs ffmpeg), `decodebin`/`playbin` sniff the codec and auto-insert `flacparse`, and lone audio files (`.flac` / `.oga` / `.opus`) play via a `playbin` hook.
+
 - M774: native `.flac` support: `filesrc` types the file (extension + `fLaC` sniff) and the new `flacparse` splits CRC-validated frames with STREAMINFO caps, framing oracled against ffprobe.
 
 - M773: AV1 in the fan-in muxers: `mkvmuxn` writes `V_AV1` + av1C `CodecPrivate` and `mp4mux` an `av01` sample entry, the record byte-identical to ffmpeg's for the same stream.

@@ -179,8 +179,9 @@ use crate::{opusdec::OpusDec, opusenc::OpusEnc};
 /// `parse_launch` shares this mapping; both launch registrations construct the
 /// re-framing form). Returns `None` for codecs without a re-framing parser (the
 /// input decodes directly). H.264 (M421) and H.265 (M425) re-frame to one access
-/// unit per packet; audio still decodes directly.
-fn video_parser_provider(input: &Caps) -> Option<&'static str> {
+/// unit per packet; FLAC frame-aligns via `flacparse` (M775, a bare `.flac` byte
+/// stream carries no frame lengths); other audio decodes directly.
+fn decode_parser_provider(input: &Caps) -> Option<&'static str> {
     match input {
         Caps::CompressedVideo {
             codec: g2g_core::VideoCodec::H264,
@@ -190,6 +191,10 @@ fn video_parser_provider(input: &Caps) -> Option<&'static str> {
             codec: g2g_core::VideoCodec::H265,
             ..
         } => Some("h265parse"),
+        Caps::Audio {
+            format: AudioFormat::Flac,
+            ..
+        } => Some("flacparse"),
         _ => None,
     }
 }
@@ -199,7 +204,7 @@ pub fn default_registry() -> Registry {
     // Auto-plugged decode chains splice a re-framing parser before the decoder
     // (M421), so a decoder fed un-access-unit-aligned input (e.g. one MPEG-TS PES
     // that is not one coded picture) does not mis-parse.
-    reg.set_parser_provider(video_parser_provider);
+    reg.set_parser_provider(decode_parser_provider);
 
     // Sources. The output caps are the autoplug `decodebin` input; the parser
     // only calls the constructor and applies properties.
@@ -663,6 +668,9 @@ fn register_uri_handlers(reg: &mut Registry) {
     reg.register_playbin(crate::uridecodebin::mkv_playbin);
     reg.register_playbin(crate::uridecodebin::ts_playbin);
     reg.register_playbin(crate::uridecodebin::mp4_playbin);
+    // Lone-audio-stream files the container hooks decline: Ogg (Opus / FLAC)
+    // and elementary audio (`.flac`), M775.
+    reg.register_playbin(crate::uridecodebin::audio_playbin);
     // Explicit-demux fan-out (M476): a named `matroskademux` / `tsdemux` / `qtdemux`
     // fed by a file source, with several output-pad refs (`d.video_0`, `d.audio_0`),
     // probes its file and builds the multi-output demuxer honoring the selection.
@@ -681,6 +689,7 @@ fn register_uri_handlers(reg: &mut Registry) {
     reg.register_primary_stream(crate::uridecodebin::ts_primary_stream);
     reg.register_primary_stream(crate::uridecodebin::mp4_primary_stream);
     reg.register_primary_stream(crate::uridecodebin::mkv_primary_stream);
+    reg.register_primary_stream(crate::uridecodebin::ogg_primary_stream);
     // hls:// fan-out (M395): probe the master playlist, fan its variant's muxed TS
     // streams out; the hls_handler is the single-stream fallback it declines to.
     #[cfg(feature = "hls")]
