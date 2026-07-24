@@ -6,6 +6,16 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M782: MPEG-TS PES carries DTS for reordered video (round-trips through mux/demux) and clocks the PCR on DTS.
+
+- M781: `tsdemux` parses every PAT program and demuxes the one chosen by the `program-number` property (default the first).
+
+- M780: the MPEG-TS muxers insert a PCR (100 ms ahead of the PTS) on the first stream's PID at the `pcr-interval` cadence (default 3600 ticks).
+
+- M779: AV1 demux: the MP4 demuxers read the `av01` sample entry (av1C config, pass-through OBU samples), so M773's muxes round-trip byte-identical both ways and ffmpeg-muxed AV1 MP4s demux.
+
+- M778: Ogg granule timing: Vorbis packets get sample-accurate pts/durations from the setup header's mode tables (ffmpeg's backward-scan technique), anchored to the first page's granule and clamped to the end granule, so decode length matches ffmpeg exactly.
+
 - M777: Vorbis decode: `oggdemux stream=vorbis` + the pure-Rust `vorbisdec` (symphonia, `vorbis` feature), auto-plugged by `decodebin`/`playbin`; PCM within 1 LSB of ffmpeg's decode.
 
 - M776: a mid-stream caps re-solve that defers no longer misfeeds the element's input caps to `configure_output`; Ogg-Opus files now play through `run_graph` / `playbin`.

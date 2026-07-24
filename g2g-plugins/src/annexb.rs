@@ -361,8 +361,12 @@ pub(crate) fn parse_avcc(avcc: &[u8]) -> Result<(Vec<u8>, Vec<u8>), G2gError> {
 }
 
 /// Whether the access unit already opens with a parameter-set NAL (so the
-/// config-record sets need not be prepended): H.264 SPS(7), H.265 VPS(32).
+/// config-record sets need not be prepended): H.264 SPS(7), H.265 VPS(32),
+/// AV1 a sequence-header OBU anywhere in the temporal unit.
 pub(crate) fn starts_with_param_set(annexb: &[u8], codec: VideoCodec) -> bool {
+    if codec == VideoCodec::Av1 {
+        return crate::av1parse::has_sequence_header(annexb);
+    }
     if codec == VideoCodec::Mpeg4Part2 {
         // MPEG-4 Visual uses 3-byte start codes; its config opens with the visual
         // object sequence start code (0xB0) or a video object layer (0x20..=0x2F).
@@ -382,9 +386,10 @@ pub(crate) fn starts_with_param_set(annexb: &[u8], codec: VideoCodec) -> bool {
 
 /// Prepend the out-of-band config-record parameter sets to `annexb` (the first
 /// access unit). H.264/H.265 sets are raw NAL bodies, so each gets a 4-byte
-/// Annex-B start code; MPEG-4 Part 2's single set is the esds VOL header, which
-/// already carries its own 3-byte start codes and is prepended verbatim. Shared
-/// by the progressive and fragmented MP4 demuxers and the FLV demuxer.
+/// Annex-B start code; MPEG-4 Part 2's single set (the esds VOL header, which
+/// carries its own 3-byte start codes) and AV1's (the `av1C` configOBUs, whole
+/// size-delimited OBUs) are prepended verbatim. Shared by the progressive and
+/// fragmented MP4 demuxers and the FLV demuxer.
 pub(crate) fn prepend_param_sets(
     annexb: &[u8],
     param_sets: &[Vec<u8>],
@@ -392,7 +397,7 @@ pub(crate) fn prepend_param_sets(
 ) -> Vec<u8> {
     let mut out = Vec::new();
     for set in param_sets {
-        if codec != VideoCodec::Mpeg4Part2 {
+        if !matches!(codec, VideoCodec::Mpeg4Part2 | VideoCodec::Av1) {
             out.extend_from_slice(&[0, 0, 0, 1]);
         }
         out.extend_from_slice(set);

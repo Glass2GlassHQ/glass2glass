@@ -3,10 +3,9 @@
 //! (symphonia) stashes ident + setup, decodes, and stamps PCM from decoded
 //! sample counts. Oracles: ffprobe's packet list for the demux framing, and
 //! ffmpeg's own decode for the PCM (lossy codec, same bitstream: samples must
-//! agree within 1 LSB of int16 rounding; g2g does not yet trim the final
-//! block to the end granule, so a bounded tail beyond ffmpeg's length is
-//! allowed). Auto paths: bare `decodebin` sniffs the codec, `playbin uri=`
-//! plays a `.ogg` end to end.
+//! agree within 1 LSB of int16 rounding, and M778's end-granule clamp makes
+//! the lengths equal exactly). Auto paths: bare `decodebin` sniffs the codec,
+//! `playbin uri=` plays a `.ogg` end to end.
 #![cfg(all(feature = "std", feature = "vorbis"))]
 
 use core::future::Future;
@@ -152,20 +151,14 @@ fn ffmpeg_pcm(path: &std::path::Path) -> Option<Vec<u8>> {
     out.status.success().then_some(out.stdout)
 }
 
-/// Assert `pcm` matches the ffmpeg reference: every overlapping sample within
-/// 1 LSB (independent float->int rounding), at least as long as the reference,
-/// and any untrimmed tail bounded by one max Vorbis block (8192 frames).
-fn assert_pcm_matches(pcm: &[u8], reference: &[u8], channels: usize) {
-    assert!(
-        pcm.len() >= reference.len(),
-        "g2g decode at least as long as ffmpeg's ({} vs {})",
+/// Assert `pcm` matches the ffmpeg reference: the same length (M778 clamps the
+/// timeline to the end granule and the decoder trims to it) and every sample
+/// within 1 LSB (independent float->int rounding).
+fn assert_pcm_matches(pcm: &[u8], reference: &[u8], _channels: usize) {
+    assert_eq!(
         pcm.len(),
-        reference.len()
-    );
-    assert!(
-        pcm.len() - reference.len() <= 8192 * channels * 2,
-        "untrimmed tail bounded by one max block ({} extra bytes)",
-        pcm.len() - reference.len()
+        reference.len(),
+        "g2g decode length equals ffmpeg's"
     );
     let mut max_diff = 0i32;
     for (a, b) in pcm.chunks_exact(2).zip(reference.chunks_exact(2)) {

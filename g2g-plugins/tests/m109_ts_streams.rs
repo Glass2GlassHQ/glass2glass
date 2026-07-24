@@ -135,6 +135,68 @@ fn synthetic_av_ts() -> Vec<u8> {
     s
 }
 
+/// PAT naming two programs (1 -> PMT 0x1000, 2 -> PMT 0x1001), each a single-ES
+/// H.264 PMT, then `p1_aus` video AUs for program 1 and `p2_aus` for program 2.
+/// Both programs carry H.264 so `TsStream::H264` matches either; only the
+/// selected program's AUs must reach the sink.
+fn two_program_ts(p1_aus: u8, p2_aus: u8) -> Vec<u8> {
+    let pmt1 = 0x1000u16;
+    let pmt2 = 0x1001u16;
+    let es1 = 0x0100u16;
+    let es2 = 0x0200u16;
+    let mut s = Vec::new();
+    s.extend_from_slice(&psi(
+        0x0000,
+        0x00,
+        &[
+            0,
+            1,
+            0xC1,
+            0,
+            0,
+            0,
+            1,
+            0xE0 | (pmt1 >> 8) as u8 & 0x1F,
+            pmt1 as u8,
+            0,
+            2,
+            0xE0 | (pmt2 >> 8) as u8 & 0x1F,
+            pmt2 as u8,
+        ],
+    ));
+    let pmt = |pmt_pid: u16, es_pid: u16| {
+        psi(
+            pmt_pid,
+            0x02,
+            &[
+                0x00,
+                0x01,
+                0xC1,
+                0x00,
+                0x00,
+                0xE0 | (es_pid >> 8) as u8 & 0x1F,
+                es_pid as u8,
+                0xF0,
+                0x00,
+                STREAM_TYPE_H264,
+                0xE0 | (es_pid >> 8) as u8 & 0x1F,
+                es_pid as u8,
+                0xF0,
+                0x00,
+            ],
+        )
+    };
+    s.extend_from_slice(&pmt(pmt1, es1));
+    s.extend_from_slice(&pmt(pmt2, es2));
+    for n in 0..p1_aus {
+        s.extend_from_slice(&ts_packet(es1, true, &pes(0xE0, &[0, 0, 0, 1, 0x65, n])));
+    }
+    for n in 0..p2_aus {
+        s.extend_from_slice(&ts_packet(es2, true, &pes(0xE0, &[0, 0, 0, 1, 0x65, n])));
+    }
+    s
+}
+
 /// Emits the whole synthetic multiplex as one `ByteStream{MpegTs}` frame.
 struct TsSource {
     bytes: Option<Vec<u8>>,
@@ -191,6 +253,40 @@ async fn run_selected(stream: TsStream) -> u64 {
         .await
         .expect("multiplex runs")
         .frames_consumed
+}
+
+/// Run a two-program TS through a `TsDemux` with the given `program-number`
+/// selection, returning how many AUs reached the sink. Program 1 carries 3 AUs,
+/// program 2 carries 2.
+async fn run_program(select: Option<u16>) -> u64 {
+    let mut graph: Graph<GraphNode> = Graph::new();
+    let src = graph.add_source(GraphNodeRef::Source(Box::new(TsSource {
+        bytes: Some(two_program_ts(3, 2)),
+    })));
+    let demux = graph.add_transform(GraphNodeRef::element(
+        TsDemux::new().with_program_number(select),
+    ));
+    let sink = graph.add_sink(GraphNodeRef::element(FakeSink::new()));
+    graph.link(src, demux).unwrap();
+    graph.link(demux, sink).unwrap();
+    run_graph(graph, &ZeroClock, 4)
+        .await
+        .expect("multiplex runs")
+        .frames_consumed
+}
+
+#[tokio::test]
+async fn tsdemux_selects_by_program_number() {
+    // Default (None = first program) picks program 1's three AUs.
+    assert_eq!(
+        run_program(None).await,
+        3,
+        "default selects the first program"
+    );
+    // program-number 2 picks program 2's two AUs.
+    assert_eq!(run_program(Some(2)).await, 2, "program 2 selected");
+    // An unknown program routes nothing.
+    assert_eq!(run_program(Some(99)).await, 0, "unknown program is empty");
 }
 
 #[tokio::test]
