@@ -422,12 +422,7 @@ Phased plan:
 
 ## Containers
 
-- **MKV / WebM:** a front `SeekHead` so the muxer's own output is seekable from
-  byte 0 without reading past the Clusters (a two-pass / seekable-output finalize
-  mode; the streaming muxer writes `Cues` at EOS, M375, but cannot place a front
-  `SeekHead`); `Targets`-scoped (per-track) tags. (Multi-track A/V muxing landed:
-  `mkvmuxn`, M294; `Cues` parsing + indexed demuxer seek, M373; `SeekHead`-driven
-  `Cues` prefetch, M374; muxer-written `Cues`, M375.)
+- **MKV / WebM:** `Targets`-scoped (per-track) tags.
   Single-track `MkvMux` also lacks unknown-size Clusters (live read).
 - **MPEG-TS:** multi-stream / multi-program muxing + selection; PCR-based timing.
 - **OGG:** granule-position timing; Vorbis output; multi-stream; `oggmux`.

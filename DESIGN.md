@@ -1719,7 +1719,12 @@ Segment data start, which the parser tracks.) The MKV muxer (`matroskamux`: `Mat
 `MkvMux` element) is the inverse path, writing the EBML header, an
 unknown-size Segment, Tracks, and one Cluster per frame, with the `webm` DocType
 for the WebM codec subset. Scope is one Segment / one track with definite-size
-Clusters (multi-track A/V muxing is the sibling `mkvmuxn`).
+Clusters (multi-track A/V muxing is the sibling `mkvmuxn`). Both muxers also
+have a `seekable` (two-pass) mode (M770): the element buffers the file and
+finalizes it at EOS with a front `SeekHead` (fixed-layout entries indexing
+Info / Tracks / Tags / Cues, the Cues position patched in place once known), so
+the file seeks from byte 0 without reading past the Clusters; mutually
+exclusive with `streamable`, and the default streaming output is unchanged.
 
 The Ogg demuxer is the third, the same parser + element split on
 `Caps::ByteStream{Ogg}`. `g2g-plugins::ogg::OggDemuxer` parses RFC 3533 pages

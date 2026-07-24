@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M770: `matroskamux` / `mkvmuxn` gain a `seekable` two-pass mode that finalizes the file with a front `SeekHead`, so it seeks from byte 0.
+
 - M769: `FfmpegAacEnc` end-to-end encode test (ADTS framing checked field-by-field, tone decoded back by ffmpeg and verified at 440 Hz).
 
 - M768: the FLV muxers stamp tags with DTS and write the signed composition-time offset (`pts - dts`), so B-frame presentation times survive the mux.

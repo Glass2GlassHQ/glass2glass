@@ -101,6 +101,12 @@ pub struct MkvMuxN {
     /// [`crate::mkvmux::MkvMux`]. A live sink cannot hold cluster positions to the
     /// end, so `streamable` drops the index.
     streamable: bool,
+    /// Two-pass / seekable-finalize mode (M770): buffer the whole file and emit
+    /// it once at EOS with a front `SeekHead` (see [`crate::mkvmux::MkvMux`]).
+    /// Mutually exclusive with `streamable`.
+    seekable: bool,
+    /// The buffered file bytes in `seekable` mode.
+    pending: Vec<u8>,
 }
 
 impl MkvMuxN {
@@ -116,12 +122,21 @@ impl MkvMuxN {
             emitted: 0,
             cues_emitted: false,
             streamable: false,
+            seekable: false,
+            pending: Vec::new(),
         }
     }
 
     /// Live mode: suppress the EOS `Cues` index (see [`streamable`](Self::streamable)).
     pub fn with_streamable(mut self, streamable: bool) -> Self {
         self.streamable = streamable;
+        self
+    }
+
+    /// Two-pass mode: buffer the file and finalize it at EOS with a front
+    /// `SeekHead` (see the field note).
+    pub fn with_seekable(mut self, seekable: bool) -> Self {
+        self.seekable = seekable;
         self
     }
 
@@ -265,6 +280,11 @@ impl MkvMuxN {
         let mux = self.mux.as_mut().ok_or(G2gError::NotConfigured)?;
         let bytes = mux.push_frame_on(input, &sample, pts_ns, is_key);
 
+        // Seekable (two-pass) mode: hold the whole file until every input drains.
+        if self.seekable {
+            self.pending.extend_from_slice(&bytes);
+            return Ok(());
+        }
         let out_frame = Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
             FrameTiming {
@@ -410,19 +430,41 @@ impl MultiInputElement for MkvMuxN {
     }
 
     fn properties(&self) -> &'static [PropertySpec] {
-        const PROPS: &[PropertySpec] = &[PropertySpec::new(
-            "streamable",
-            PropKind::Bool,
-            "live mode: omit the seekable Cues index written at EOS",
-        )
-        .with_default("false")];
+        const PROPS: &[PropertySpec] = &[
+            PropertySpec::new(
+                "streamable",
+                PropKind::Bool,
+                "live mode: omit the seekable Cues index written at EOS",
+            )
+            .with_default("false"),
+            PropertySpec::new(
+                "seekable",
+                PropKind::Bool,
+                "two-pass mode: buffer the file and finalize with a front SeekHead",
+            )
+            .with_default("false"),
+        ];
         PROPS
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
         match name {
+            // streamable (pure forward stream) and seekable (whole-file buffer)
+            // are opposites; setting both is a configuration error.
             "streamable" => {
-                self.streamable = value.as_bool().ok_or(PropError::Type)?;
+                let v = value.as_bool().ok_or(PropError::Type)?;
+                if v && self.seekable {
+                    return Err(PropError::Type);
+                }
+                self.streamable = v;
+                Ok(())
+            }
+            "seekable" => {
+                let v = value.as_bool().ok_or(PropError::Type)?;
+                if v && self.streamable {
+                    return Err(PropError::Type);
+                }
+                self.seekable = v;
                 Ok(())
             }
             _ => Err(PropError::Unknown),
@@ -432,6 +474,7 @@ impl MultiInputElement for MkvMuxN {
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
             "streamable" => Some(PropValue::Bool(self.streamable)),
+            "seekable" => Some(PropValue::Bool(self.seekable)),
             _ => None,
         }
     }
@@ -472,7 +515,11 @@ impl MultiInputElement for MkvMuxN {
                     .iter()
                     .map(|i| track_config(i.as_ref().expect("ready")))
                     .collect();
-                self.mux = Some(MatroskaMuxer::new_multi(configs));
+                let mut mux = MatroskaMuxer::new_multi(configs);
+                if self.seekable {
+                    mux = mux.with_seek_head();
+                }
+                self.mux = Some(mux);
             }
             // Release AUs now safe to emit, in global PTS order.
             while let Some((track, frame)) = self.agg.take_earliest_by(|f| f.timing.pts_ns) {
@@ -480,9 +527,32 @@ impl MultiInputElement for MkvMuxN {
             }
             // Once every track has ended and drained, flush the Cues index after
             // the last Cluster so the stream is seekable on a read-to-end (M375).
-            // In `streamable` (live) mode the index is suppressed.
+            // In `streamable` (live) mode the index is suppressed. Seekable
+            // (two-pass) mode instead finalizes the buffered file: the Cues are
+            // appended and the front SeekHead's placeholder patched to their
+            // position (M770), then the whole file emits at once.
             if self.agg.is_drained() && !self.cues_emitted {
-                if let Some(mux) = self.mux.as_ref().filter(|_| !self.streamable) {
+                if self.seekable {
+                    if let Some(mux) = self.mux.as_ref() {
+                        let cues = mux.finish();
+                        if !cues.is_empty() {
+                            if let Some((off, pos)) = mux.seek_head_patch() {
+                                self.pending[off..off + 8].copy_from_slice(&pos.to_be_bytes());
+                            }
+                            self.pending.extend_from_slice(&cues);
+                        }
+                    }
+                    if !self.pending.is_empty() {
+                        let file = core::mem::take(&mut self.pending);
+                        let out_frame = Frame::new(
+                            MemoryDomain::System(SystemSlice::from_boxed(file.into_boxed_slice())),
+                            FrameTiming::default(),
+                            self.emitted,
+                        );
+                        self.emitted += 1;
+                        out.push(PipelinePacket::DataFrame(out_frame)).await?;
+                    }
+                } else if let Some(mux) = self.mux.as_ref().filter(|_| !self.streamable) {
                     let cues = mux.finish();
                     if !cues.is_empty() {
                         let out_frame = Frame::new(
