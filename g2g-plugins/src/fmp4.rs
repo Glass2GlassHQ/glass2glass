@@ -364,13 +364,41 @@ fn parse_video_entry(
     ))
 }
 
-/// Read an AAC audio sample entry (`mp4a`/`esds`, or the encrypted `enca`) into a
-/// [`TrackKind::Audio`] plus the cbcs `cenc` defaults for an encrypted track. The
-/// sample rate is the media timescale (matching `Mp4AudioSrc`).
+/// Read an audio sample entry into a [`TrackKind::Audio`] plus the cbcs `cenc`
+/// defaults for an encrypted track: AAC (`mp4a`/`esds`, or the encrypted
+/// `enca`) or Opus (`Opus`/`dOps`, M767). The sample rate is the media
+/// timescale (matching `Mp4AudioSrc`).
 fn parse_audio_entry(
     entries: &[u8],
     timescale: u32,
 ) -> Result<(TrackKind, Option<CencDefaults>), G2gError> {
+    // Opus: raw self-delimited packets, nothing to forward out-of-band (the
+    // caps carry channels / rate), so `asc` stays empty. The `dOps`
+    // OutputChannelCount is authoritative over the sample-entry channelcount.
+    if let Some(opus) = find_box(entries, b"Opus") {
+        let entry_channels = u16::from_be_bytes(
+            opus.get(16..18)
+                .ok_or(G2gError::CapsMismatch)?
+                .try_into()
+                .expect("2 bytes"),
+        ) as u8;
+        let channels = find_box(opus.get(28..).unwrap_or(&[]), b"dOps")
+            .and_then(|d| d.get(1).copied())
+            .filter(|&c| c != 0)
+            .unwrap_or(entry_channels);
+        if channels == 0 {
+            return Err(G2gError::CapsMismatch);
+        }
+        return Ok((
+            TrackKind::Audio {
+                format: AudioFormat::Opus,
+                channels,
+                sample_rate: timescale,
+                asc: Vec::new(),
+            },
+            None,
+        ));
+    }
     let (entry, cenc) = match find_box(entries, b"mp4a") {
         Some(mp4a) => (mp4a, None),
         None => {

@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M767: the MP4 demuxers read the `Opus` sample entry (`dOps`), so an Opus track surfaces as `Caps::Audio { Opus }` with raw packets, validated against an ffmpeg-authored file.
+
 - M766: the Matroska demuxers convert AVCC / HVCC H.264 / H.265 tracks to Annex-B (parameter sets prepended on keyframes), so `decodebin` on an `.mkv` NAL-splits cleanly.
 
 - M765: the IMA ADPCM decoder reconstructs with the spec's bit-serial arithmetic (matching ffmpeg >= 8.1); the m639 oracle classifies a legacy ffmpeg by output and skips its decode-exactness asserts.
