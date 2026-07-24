@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M769: `FfmpegAacEnc` end-to-end encode test (ADTS framing checked field-by-field, tone decoded back by ffmpeg and verified at 440 Hz).
+
 - M768: the FLV muxers stamp tags with DTS and write the signed composition-time offset (`pts - dts`), so B-frame presentation times survive the mux.
 
 - M767: the MP4 demuxers read the `Opus` sample entry (`dOps`), so an Opus track surfaces as `Caps::Audio { Opus }` with raw packets, validated against an ffmpeg-authored file.

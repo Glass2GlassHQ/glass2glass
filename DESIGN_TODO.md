@@ -450,8 +450,6 @@ Phased plan:
   concealment; bitrate / complexity tuning.
 - **MJPEG / JPEG:** a `mozjpeg` fast path under a feature flag; a direct
   YCbCr -> I420 path (skip the RGBA intermediate); a single-still image sink.
-- **`FfmpegAacEnc`: end-to-end encode test** (needs a Linux ffmpeg build to run);
-  the AAC encode core is otherwise untested.
 
 ## Parsers
 
