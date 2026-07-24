@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M764: `VulkanVideoDec` rebuilds the session on a same-geometry parameter-set content change and sizes its reorder buffer from the stream's declared depth (H.264 VUI / H.265 SPS) instead of the DPB size.
+
 - M763: sites that hand-rolled a `MemoryDomain::System` match to read CPU bytes now call `MemoryDomain::as_system_slice()`.
 
 - M762: the browser runs a real ONNX model over decoded video via onnxruntime-web (`WebSocketSrc -> WebCodecsDecode -> WebOrtDetect -> CanvasSink`, CPU tensors, plain static HTTPS, no COOP/COEP), validated headless against a committed model fixture.

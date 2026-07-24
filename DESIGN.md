@@ -791,7 +791,11 @@ probe feeding `intercept_caps`, a `VkVideoSessionKHR` /
 the parsed SPS/PPS/VPS (the correctness-critical part, one mapping module per
 codec, re-emitted on mid-stream change via `CapsChanged`), DPB reference-slot
 management, and the `vkCmdDecodeVideoKHR` recording, output pipelined through the
-YCbCr pass with an in-flight ring. Output caps are
+YCbCr pass with an in-flight ring. The session + DPB rebuild mid-stream on *any*
+in-band parameter-set change, keyed by a byte fingerprint of the AU's parameter
+sets (M519 geometry / M764 same-geometry content, e.g. a profile or entropy-mode
+switch; byte-identical keyframe re-sends keep the session), flushing the outgoing
+decoder's pipelined tail first so no frame is lost. Output caps are
 `Caps::RawVideo { format: Rgba8, .. }` in `MemoryDomain::WgpuTexture`
 (optionally `VulkanTexture` / multiplanar NV12); negotiation and the frame
 keep-alive follow the `NvDec` multi-domain pattern (§4.11.3).
@@ -896,8 +900,11 @@ driver retains the `pStdSequenceHeader` / `pColorConfig` pointers handed to
 `Av1DecodeSession` now owns a stable boxed copy for its lifetime (dropping the
 Std block after creation yielded small, nondeterministic pixel corruption). It releases the whole
 previous coded video sequence at each keyframe (where POC resets) and bumps the
-lowest-POC held frame once a sequence exceeds the DPB depth (a safe reorder-depth
-bound, so a long GOP does not buffer unbounded); `Eos` and a resolution-reconfig
+lowest-POC held frame once a sequence exceeds the stream's own declared reorder
+depth (H.264 VUI `bitstream_restriction` `max_num_reorder_frames` / H.265
+`sps_max_num_reorder_pics`, M764; the DPB slot count is the fallback bound when
+the stream declares none), so an I/P stream emits without hold and a long GOP
+does not buffer unbounded; `Eos` and a reconfig
 boundary drain it in display order, a `Flush` (seek) discards it (M586, H.264 /
 H.265). AV1 stays in coding order there (its display order comes from
 `show_existing_frame` / `order_hint`, handled whole-stream by `decode_all`). Verified
@@ -915,7 +922,7 @@ decoded against a flushed DPB - `h265_is_rasl` + a `skip_rasl` flag set from eac
 IRAP's `NoRaslOutputFlag`, checked before POC derivation so a dropped RASL leaves
 no trace. The CRA's trailing pictures and the following GOPs decode bit-exact vs a
 full decode. The same flag is 0 in continuous decoding, so full-stream open-GOP is
-unchanged. Long-term references are the remaining H.265 gap.
+unchanged. Long-term references are handled too (M743, above).
 
 **Colour space.** Decoded YUV is converted to RGB with the stream's actual colour
 space, not a fixed matrix. A `VideoColorSpace` (colour matrix + quantization range)

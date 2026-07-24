@@ -16,16 +16,11 @@ leverage first:
    Mac.
 2. **Egress / transports.** Real-peer FlexFEC interop when a peer
    implementation is available (GStreamer here lacks `rtpflexfecenc`).
-3. **Depth.** Codec decode to cut reliance on the ffmpeg FFI: AV1 landed both as
-   libdav1d (`Dav1dDec`, `dav1d` feature, C FFI) and pure Rust (`Rav1dDec`,
-   `rav1d` feature, via `re_rav1d`). VP8 / VP9 decode is covered by `FfmpegVideoDec`
-   (a dedicated libvpx `VpxDec` is deferred: no pure-Rust decoder exists, and a
-   libvpx-FFI element would only duplicate the ffmpeg path). The headline open
-   item is **`VulkanVideoDec`** (see "Receive / decode"): vendor-neutral,
-   GPU-resident hardware decode straight into a `wgpu::Texture`, the cross-vendor
-   generalization of the CUDA-locked `NvDec` path and the wedge that gives a
-   wgpu-based consumer (game engine / visualization viewer) hardware decode on its
-   own render device.
+3. **Depth.** Pure-Rust codec paths to cut the remaining ffmpeg FFI reliance:
+   VP8 / VP9 decode (a dedicated libvpx `VpxDec` is deferred: no pure-Rust
+   decoder exists, and a libvpx-FFI element would only duplicate the ffmpeg
+   path) and a pure-Rust Opus path. `VulkanVideoDec` residuals: AMD / Intel
+   validation runs and runtime properties (see "Receive / decode").
 4. **Browser demo (speculative product path).** A deployed reference app for the
    in-browser `ort-web` ONNX chain, plus a native sibling running the same graph.
    The GPU-resident in-browser chain is not achievable from idiomatic Rust (wgpu
@@ -279,178 +274,12 @@ Phased plan:
 - Upstream `Reconfigure` driven by `VaapiH264Dec` `FormatChanged`.
 - 10-bit pixel formats in `FfmpegH264Dec` (`YUV420P10` / `P010`).
 
-- **`VulkanVideoDec` (vendor-neutral GPU-resident hardware decode).** Decode
-  H.264/H.265/AV1 with `VK_KHR_video_queue` + `VK_KHR_video_decode_*` on the same
-  Vulkan device wgpu already runs, emitting a `MemoryDomain::WgpuTexture` (RGBA)
-  frame with no PCIe download, the vendor-neutral analog of the CUDA-locked
-  `NvDec -> CudaToWgpu` path. AMD (RADV), NVIDIA and Intel (ANV) all expose the
-  extensions, so one element covers all three (validated per vendor as hardware
-  is available; NVIDIA on the RTX 3060 first, AMD/Intel stay `VERIFY:` until run).
-  New feature `vulkan-video = ["std", "dep:wgpu", "dep:wgpu-hal", "dep:ash"]`;
-  `AsyncElement` transform, `Caps::CompressedVideo{H264|H265|AV1}` Annex-B in ->
-  `Caps::RawVideo{Rgba8}` `WgpuTexture` out; `output_domains = {WgpuTexture}`
-  (optionally `VulkanTexture` / multiplanar NV12). Properties: `codec`,
-  `output-format`, `num-dpb-slots`, `low-latency` (bounded DPB / no reorder for
-  streaming), `device-index`.
-  The expensive interop half is already in-tree and reused: the VkImage -> wgpu
-  import seam (`cudawgpu.rs` / `dmabufwgpu.rs` `texture_from_raw` +
-  `TextureMemory::External`), custom Vulkan device creation with extra extensions
-  (the `cuda-wgpu` device path), the multiplanar NV12 -> RGBA `VkSamplerYcbcrConversion`
-  compute pass (`mediacodec_wgpu.rs`), the Annex-B + SPS/PPS front-end
-  (`h264parse.rs` / h265parse), and domain auto-plug (M351-M354).
-  DONE (M486, `vulkanvideo::probe_decode_caps`, validated on the 3060): the
-  capability probe -> the decode-capable queue family + coded-extent range + DPB
-  slot / active-ref budget + `DPB_AND_OUTPUT_COINCIDE` that `intercept_caps` and
-  DPB sizing negotiate against (survives fixate, never advertises `Dim::Any`),
-  and the driver wrinkle that the caps query needs the codec-specific output caps
-  struct chained (else `ERROR_INITIALIZATION_FAILED`).
-  DONE (M487): the H.264 SPS/PPS parse (`parse_h264_sps`/`_pps`) + `Std*` mapping
-  (`to_std_sps`/`to_std_pps`), the tedious correctness-critical half, with GPU-free
-  unit tests. DONE (M488, validated on the 3060): the decode device
-  (`open_h264_decode_device`, decode queue added via wgpu-hal `open_with_callback`,
-  no hand-built `VkDevice`) and `VkVideoSessionKHR` + `VkVideoSessionParametersKHR`
-  (`create_h264_session`), whose parameter creation makes the driver validate the
-  M487 mapping. DONE (M489, validated on the 3060): `decode_idr_luma` decodes a
-  single IDR frame end to end (NV12 DPB/output image, host-visible bitstream
-  buffer, `vkCmdBeginVideoCodingKHR` + `RESET` + `vkCmdDecodeVideoKHR` + end, with
-  `synchronization2` image barriers) and reads back a non-uniform luma plane, the
-  first real Vulkan Video decode in the tree. What is left:
-  DONE (M490, validated on the 3060): `decode_idr_to_rgba_texture` lands a decoded
-  frame in an `Rgba8Unorm` `wgpu::Texture` on the decode device (the wedge
-  payload), via a full-NV12 readback + CPU BT.601 conversion; `m490` reads the
-  texture back through wgpu and asserts real content.
-  DONE (M491, validated on the 3060): zero-copy GPU-resident NV12 -> RGBA.
-  `decode_idr_to_rgba_texture_gpu` decodes into a CONCURRENT NV12 image; a compute
-  pass on a dedicated compute queue converts it through a `VkSamplerYcbcrConversion`
-  (reusing the `mediacodec_wgpu` shader) to an RGBA `VkImage` imported into wgpu via
-  `texture_from_raw`, no CPU round-trip; read-back matches the M490 CPU convert. The
-  vendor-neutral hardware-decode-into-wgpu-texture path now works end to end.
-  DONE (M492, validated on the 3060): full DPB reference management. `H264DpbDecoder`
-  (`create_h264_dpb_decoder` + `decode_all`) parses each slice header (`frame_num`,
-  POC types 0/2, `idr_pic_id`, `slice_type`, `nal_ref_idc`), splits access units on
-  `first_mb_in_slice == 0`, computes picture-order-count, and runs H.264
-  sliding-window reference marking, handing the driver the active reference slots
-  (with their `StdVideoDecodeH264ReferenceInfo`) per picture, so P frames after the
-  IDR decode against their references. The whole 640x480 fixture (2 GOPs of IDR + 4
-  P frames) decodes **bit-exact** against the ffmpeg software decoder (SAD/px 0).
-  This exposed and fixed a latent one-bit bug that had been silently corrupting
-  M489-M491: `parse_h264_pps` read the trailing optional block without an
-  `more_rbsp_data()` check, so a baseline PPS's `rbsp_stop_one_bit` was misread as
-  `transform_8x8_mode_flag = 1`, desyncing the driver's CAVLC coefficient parse
-  (every decoded frame was flat mid-grey; the old tests only checked non-uniformity,
-  not correctness). `BitReader::more_rbsp_data()` added; m489 now also asserts bright
-  content is present.
-  DONE (M493, validated on the 3060): the `VulkanVideoDec` `AsyncElement` wrapper.
-  `Caps::CompressedVideo{H264}` in -> `Caps::RawVideo{Nv12}` system memory out
-  (the decoder's native layout, no colour convert); `intercept_caps` +
-  `caps_constraint_as_transform` (H.264 -> NV12 same geometry) so the solver gives
-  each link real caps; `configure_pipeline` opens the device, the session + DPB
-  build lazily on the first SPS/PPS-bearing AU (in-band, not in caps); `process`
-  decodes each AU (DPB state carries across calls) and emits one NV12 frame per
-  picture with a leading `CapsChanged`. Registered `vulkanvideodec` (launch-only).
-  `m493_vulkan_video_element` feeds the fixture one AU per `process` call and
-  asserts 10 real NV12 frames. `examples/vulkan_video_smoke` dumps PPM frames you
-  can open.
-  DONE (M494/M495, validated on the 3060): zero-copy GPU-resident output end to
-  end. `H264DpbDecoder::decode_all_to_textures` (via `create_h264_dpb_decoder_gpu`)
-  decodes every picture and converts each DPB slot in place through the ycbcr
-  compute pass (shared free fn `nv12_to_wgpu_texture` with a `restore_to_dpb`
-  barrier, so a slot stays a valid reference) into an RGBA `wgpu::Texture`; DPB
-  slot images are `SAMPLED` + `CONCURRENT` in GPU mode. `VulkanVideoDec` is now a
-  multi-domain producer (`output_memory` = `WgpuTexture` preferred,
-  `output_domains = {WgpuTexture, System}`, `configure_allocation` settles it;
-  falls back to NV12 if no compute queue). `VulkanVideoDevice::gpu_context` /
-  `VulkanVideoDec::gpu_context` expose the decode device as a `GpuContext` so a
-  `WgpuSink` shares it; the `gpu` module is built for `vulkan-video`.
-  `m494_vulkan_video_dpb_texture` decodes to 10 GPU textures; `m495` runs the full
-  `VulkanVideoDec -> WgpuSink::offscreen` wedge with no GPU->CPU readback.
-  DONE (M496): auto-plug. `vulkanvideodec` is registered in
-  `register_autoplug_candidates` tagged `produces(WgpuTexture)` + `hardware()`, so
-  a WgpuTexture-preferring `decodebin`/`playbin` search picks it (domain match
-  dominates), while System auto-plug is unchanged (domain mismatch, like NvDec's
-  Cuda); a valid System fallback when it is the only H.264 decoder. Its source pad
-  template advertises `Nv12` + `Rgba8`. `m496_vulkan_video_autoplug` (GPU-free)
-  covers the selection. Left:
-  3. Mid-stream resolution reconfig is done (M519, validated on the 3060): a
-     keyframe whose parameter sets carry a new coded geometry rebuilds the session
-     + DPB and re-emits `CapsChanged`, flushing the outgoing decoder's pipelined
-     tail first so no frame is lost. Remaining: a same-geometry SPS/PPS *content*
-     change (a new profile / ref config at the same dimensions), which keeps the
-     session today.
-  4. H.265 full-DPB decode is done (M501-M503, bit-exact vs ffmpeg on the 3060,
-     see DESIGN.md 4.11.6): parse + `Std*` mapping + session + `H265DpbDecoder`
-     (system NV12 + GPU texture). `VulkanVideoDec` element + auto-plug wiring is
-     done for all three codecs (M504 element decode to NV12, M496 auto-plug
-     selection), and the GPU-texture wedge (decode -> `WgpuTexture` -> `WgpuSink`,
-     no readback) is validated for H.264 / H.265 / AV1 on the 3060 (M535).
-     B-frame streams decode bit-exact and are emitted in display order by the
-     whole-stream `decode_all` / `decode_all_to_textures` (M569, `index_pictures` +
-     `reorder_to_display_order`, keyed by (coded-video-sequence, POC); verified for
-     H.264 and closed-GOP H.265 on the 3060). Full-stream H.265 open-GOP (CRA with
-     RASL leading pictures) decodes bit-exact too (M577; flush the DPB only on an
-     IRAP with `NoRaslOutputFlag == 1`, else keep the RPS-listed pre-CRA refs).
-     Mid-stream random-access tune-in at a CRA is done too (M587, validated on the
-     3060): after a `reset` (seek) to a CRA, the CRA is the first picture, so its
-     `NoRaslOutputFlag == 1` and its RASL leading pictures (which reference absent
-     pre-CRA frames) are discarded (`h265_is_rasl` + a `skip_rasl` flag set per
-     IRAP); the CRA's trailing pictures and following GOPs decode bit-exact vs a
-     full decode. Streaming B-frame reorder in the
-     `VulkanVideoDec` element is done (M586, validated on the 3060): its system
-     (NV12) path feeds retired `decode_push` frames through a `ReorderBuffer` keyed
-     by (coded-video-sequence, POC), so an AU-by-AU stream with B-frames emits in
-     display order (byte-exact vs the `decode_all` oracle for H.264 / H.265). The
-     low-level `decode_push` / the streaming adapter stay in coding order by design
-     (a viewer consumer reorders by PTS itself). Still open: a VUI-derived tighter
-     reorder-depth bound (the element uses the DPB size, a safe over-approximation).
-  5. AV1: DONE (M504) the OBU framing + sequence-header parse + `StdVideoAV1SequenceHeader`
-     mapping + a top-level frame-header classifier (`parse_av1_sequence_header`,
-     `to_std_av1_seq_header`, `av1_frame_infos`), the parse half, with GPU-free unit
-     tests over a real libaom 640x480 fixture (`av1_640x480.obu`). DONE (M505,
-     validated on the 3060) the decode session: `open_av1_decode_device` + `av1_profile`
-     + `create_av1_session` (`VkVideoDecodeAV1SessionParametersCreateInfoKHR` carrying
-     the Std sequence header), the M488/M502 analog, which driver-validates the M504
-     mapping. DONE (M506a) the full uncompressed frame-header parse
-     (`parse_av1_frame_header` + all sub-parses), validated field-by-field vs ffmpeg
-     `trace_headers`. DONE (M506b/M506c, on the 3060) the `Std*` picture-info mapping
-     (`to_std_av1_picture_info`) and `Av1DpbDecoder` (8-slot reference model, per-tile
-     offsets, `vkCmdDecodeVideoKHR`): the whole fixture (1 key + 9 inter, including the
-     compound / temporal-MV frames) decodes **bit-exact** vs ffmpeg (SAD/px 0 every
-     frame). M506c fix: the `setup_past_independence` loop-filter ref-deltas default
-     ALTREF2 / ALTREF to -1, not 0 (else deblocking is mis-configured for compound
-     blocks referencing the alt frames). The `VulkanVideoDec` element + auto-plug +
-     GPU-texture wedge wiring for AV1 is done (M504 / M496 / M535, validated on the
-     3060). Multi-tile decode is done too (M564, `av1_tile_layout` parses the
-     OBU_FRAME tile-group size prefixes; 2x2 + 4x4 clips bit-exact on the 3060).
-     Alt-ref + show_existing_frame (decode order != display order) is done too
-     (M565, `scan_ops` reorder-aware path; bit-exact on the 3060). Film grain is
-     synthesized on the decoded NV12 (M566, `apply_film_grain_nv12`, full spec
-     7.18.3 ported from re_rav1d; bit-exact luma+chroma vs dav1d on the 3060; the
-     3060 can't do driver grain, COINCIDE-only), and on the GPU-texture path too
-     (M568, `grained_slot_to_texture` reads the slot back, synthesizes on the CPU,
-     and uploads; grain is output-only so the DPB reference stays untouched;
-     bit-exact vs dav1d on the 3060). Loop restoration is fixed (M567,
-     `LoopRestorationSize` is the `1 + lr_unit_shift` encoding, not the pixel size).
-  6. Colour / HDR: the YUV -> RGB conversion is colour-space aware (M570,
-     `VideoColorSpace` from the H.264/H.265 VUI or AV1 color_config; BT.601/709/2020
-     matrix + studio/full range, on both the CPU and GPU converters). 10-bit HEVC
-     (Main 10, M571) and 10-bit AV1 (Main, M572, `av1_profile(bit_depth)` from
-     `color_config.BitDepth`) decode are done on the system path (SPS/seq-derived bit
-     depth -> `G10X6` format + 2-byte-per-sample readback; `Nv12Frame.bit_depth`;
-     bit-exact on the 3060). The GPU-texture path carries 10-bit too (M573,
-     `YcbcrConverter` formats chosen from bit depth: `G10X6` -> `R16G16B16A16_SFLOAT`
-     via an `rgba16f` compute shader, imported as a `Rgba16Float` `wgpu::Texture`).
-     PQ / HLG HDR -> SDR tone-mapping is done (M574, opt-in
-     `create_*_dpb_decoder_gpu_tonemap`: EOTF -> BT.2390 EETF -> BT.2020->709 gamut
-     -> BT.709 OETF in the shader, keyed off `VideoColorSpace::transfer` from CICP).
-     HDR swapchain present is done (M575, `vulkanhdrsink`/`hdr-present`:
-     `VulkanHdrSink` owns a raw `VK_KHR_swapchain` on the decode device negotiating
-     `HDR10_ST2084`/scRGB/SDR + `VkHdrMetadataEXT`, presents the passthrough PQ
-     texture by `vkCmdBlitImage`; on-screen validated live via the example). The HDR
-     track is complete.
-  Strategic note: this is the path that turns the wgpu-resident decode story from
-  NVIDIA-only into genuinely cross-vendor (a wgpu-based consumer such as a game
-  engine or a visualization viewer gets hardware decode straight into its own
-  render device, matching what a browser gets from WebCodecs).
+- **`VulkanVideoDec` residuals.** AMD (RADV) and Intel (ANV) validation runs of
+  the `vulkanvideo` GPU tests (the element is vendor-neutral; hardware-gated,
+  `VERIFY:` markers in-tree). Runtime properties per the conventions
+  (`low-latency` bounded-DPB / no-reorder mode, `device-index`, `num-dpb-slots`;
+  codec and output format come from negotiation, so they are not properties).
+  Optional extra output domains (multiplanar NV12 / `VulkanTexture`).
 
 ## CUDA / display
 
