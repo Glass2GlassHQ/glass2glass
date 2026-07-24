@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M768: the FLV muxers stamp tags with DTS and write the signed composition-time offset (`pts - dts`), so B-frame presentation times survive the mux.
+
 - M767: the MP4 demuxers read the `Opus` sample entry (`dOps`), so an Opus track surfaces as `Caps::Audio { Opus }` with raw packets, validated against an ffmpeg-authored file.
 
 - M766: the Matroska demuxers convert AVCC / HVCC H.264 / H.265 tracks to Annex-B (parameter sets prepended on keyframes), so `decodebin` on an `.mkv` NAL-splits cleanly.

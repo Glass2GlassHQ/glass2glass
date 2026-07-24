@@ -432,8 +432,7 @@ Phased plan:
 - **MPEG-TS:** multi-stream / multi-program muxing + selection; PCR-based timing.
 - **OGG:** granule-position timing; Vorbis output; multi-stream; `oggmux`.
 - **FLV:** VP6 / H.263 / MP3 / Speex codecs (only H.264 + AAC ride the tag
-  stream today); B-frame composition-time write on the mux side (the demuxer
-  reads CTS, the muxers write 0).
+  stream today).
 - **CMAF / fMP4:** the CMAF-specific signalling layer on `Mp4Sink` / `Mp4Src`.
 
 ## Codecs

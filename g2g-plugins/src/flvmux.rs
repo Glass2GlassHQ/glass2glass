@@ -186,7 +186,8 @@ impl AsyncElement for FlvMux {
                             }
                             let keyframe =
                                 nalus.iter().any(|n| is_keyframe_nal(VideoCodec::H264, n));
-                            mux.push_video(&avcc_sample(&nalus), pts_ms, keyframe)
+                            let (dts_ms, cts_ms) = FlvMuxer::video_tag_timing(&frame.timing);
+                            mux.push_video(&avcc_sample(&nalus), dts_ms, cts_ms, keyframe)
                         }
                         FlvTrack::Audio => {
                             if !self.init_captured {
