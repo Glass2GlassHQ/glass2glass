@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M771: `OpusEnc` accepts F32 PCM input and `OpusDec` emits F32 when negotiated, via libopus' float APIs.
+
 - M770: `matroskamux` / `mkvmuxn` gain a `seekable` two-pass mode that finalizes the file with a front `SeekHead`, so it seeks from byte 0.
 
 - M769: `FfmpegAacEnc` end-to-end encode test (ADTS framing checked field-by-field, tone decoded back by ffmpeg and verified at 440 Hz).

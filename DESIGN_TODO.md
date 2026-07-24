@@ -441,8 +441,7 @@ Phased plan:
 - **Pure-Rust / wasm decode** to drop the ffmpeg FFI: AV1 done (`Rav1dDec`, emits
   4:2:0 / 4:2:2 / 4:4:4 at 8/10/12-bit, round-trip tested end to end); still
   VP8 / VP9 decode and a pure-Rust Opus path.
-- **Opus:** float (F32) PCM in/out; other frame durations; packet-loss
-  concealment; bitrate / complexity tuning.
+- **Opus:** other frame durations; packet-loss concealment; complexity tuning.
 - **MJPEG / JPEG:** a `mozjpeg` fast path under a feature flag; a direct
   YCbCr -> I420 path (skip the RGBA intermediate); a single-still image sink.
 

@@ -16,7 +16,8 @@ use g2g_core::runtime::is_raw_video;
         feature = "vaapi",
         feature = "nvdec",
         feature = "mediacodec",
-        feature = "vulkan-video"
+        feature = "vulkan-video",
+        feature = "opus"
     ))
 ))]
 use g2g_core::runtime::parse_launch;
@@ -55,16 +56,17 @@ fn demuxers_route_containers_to_an_elementary_stream() {
     }
 }
 
-// Only meaningful without an H.264 decoder (the MPEG-TS default stream is H.264);
-// any of `ffmpegdec`, `vaapidec`, `nvdec` (Linux), `mediacodecdec` (Android) or
-// `vulkanvideodec` (its NV12 System fallback) would provide the route to raw this
-// asserts is absent.
+// Only meaningful without a decoder: any of `ffmpegdec`, `vaapidec`, `nvdec`
+// (Linux), `mediacodecdec` (Android) or `vulkanvideodec` (its NV12 System
+// fallback) provides the video route to raw this asserts is absent, and
+// `opusdec` an audio one (decodebin expands through any decoder).
 #[cfg(not(any(
     feature = "ffmpeg",
     feature = "vaapi",
     feature = "nvdec",
     feature = "mediacodec",
-    feature = "vulkan-video"
+    feature = "vulkan-video",
+    feature = "opus"
 )))]
 #[test]
 fn container_without_a_decoder_does_not_reach_raw() {
