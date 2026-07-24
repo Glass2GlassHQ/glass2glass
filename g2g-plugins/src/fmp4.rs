@@ -132,6 +132,8 @@ pub(crate) fn parse_header(data: &[u8]) -> Result<Header, G2gError> {
             Vec::from([dsi])
         };
         (VideoCodec::Mpeg4Part2, sets, None)
+    } else if let Some(av01) = find_box(entries, b"av01") {
+        (VideoCodec::Av1, parse_av1c_config(av01)?, None)
     } else if let Some(encv) = find_box(entries, b"encv") {
         let children = encv.get(78..).ok_or(G2gError::CapsMismatch)?;
         let sinf = find_box(children, b"sinf").ok_or(G2gError::CapsMismatch)?;
@@ -297,6 +299,23 @@ fn parse_trak(trak: &[u8]) -> Result<Option<TrackHeader>, G2gError> {
     }))
 }
 
+/// The out-of-band config from an `av01` sample entry's `av1C` record (M779):
+/// the trailing configOBUs (typically the sequence header), verbatim, as the
+/// one "parameter set". Samples are plain low-overhead OBUs, so an empty
+/// configOBUs just means the sequence header rides in-band.
+fn parse_av1c_config(av01: &[u8]) -> Result<Vec<Vec<u8>>, G2gError> {
+    let children = av01.get(78..).ok_or(G2gError::CapsMismatch)?;
+    let av1c = find_box(children, b"av1C").ok_or(G2gError::CapsMismatch)?;
+    // marker/version, profile/level, tier/depth flags, delay byte: 4 fixed
+    // bytes, then configOBUs.
+    let config = av1c.get(4..).unwrap_or_default();
+    Ok(if config.is_empty() {
+        Vec::new()
+    } else {
+        Vec::from([config.to_vec()])
+    })
+}
+
 /// Read a video sample entry (`avc1` / `hvc1` / `hev1`, or the encrypted `encv`)
 /// into a [`TrackKind::Video`] plus the cbcs `cenc` defaults for an encrypted
 /// track. An `encv` carries the original codec config (`avcC` / `hvcC`) alongside
@@ -332,6 +351,8 @@ fn parse_video_entry(
             Vec::from([dsi])
         };
         (VideoCodec::Mpeg4Part2, sets, None)
+    } else if let Some(av01) = find_box(entries, b"av01") {
+        (VideoCodec::Av1, parse_av1c_config(av01)?, None)
     } else if let Some(encv) = find_box(entries, b"encv") {
         let children = encv.get(78..).ok_or(G2gError::CapsMismatch)?;
         let sinf = find_box(children, b"sinf").ok_or(G2gError::CapsMismatch)?;
@@ -801,6 +822,10 @@ pub(crate) fn parse_fragments(
                         let subs = pending_subs.get(i).map(Vec::as_slice).unwrap_or(&[]);
                         decrypt(&mut buf, subs);
                         avcc_to_annexb(&buf)?
+                    } else if matches!(codec, VideoCodec::Mpeg4Part2 | VideoCodec::Av1) {
+                        // Raw elementary samples (start codes / low-overhead
+                        // OBUs): no length-prefix de-framing.
+                        raw.to_vec()
                     } else {
                         avcc_to_annexb(raw)?
                     };
@@ -842,11 +867,14 @@ pub(crate) fn parse_progressive(data: &[u8], timescale: u32) -> Result<Vec<Sampl
     let stbl = find_path(mdia, &[b"minf", b"stbl"]).ok_or(G2gError::CapsMismatch)?;
     // Single video track. H.264/H.265 samples are AVCC length-prefixed and
     // de-frame to Annex-B; MPEG-4 Part 2 (`mp4v`) samples are already raw
-    // elementary stream (start codes), so they pass through verbatim. Absent an
-    // stsd, default to Annex-B de-framing (the H.264/H.265 case).
+    // elementary stream (start codes) and AV1 (`av01`) samples plain
+    // low-overhead OBUs, so those pass through verbatim. Absent an stsd,
+    // default to Annex-B de-framing (the H.264/H.265 case).
     let framing = find_path(mdia, &[b"minf", b"stbl", b"stsd"])
         .and_then(|stsd| stsd.get(8..))
-        .filter(|entries| find_box(entries, b"mp4v").is_some())
+        .filter(|entries| {
+            find_box(entries, b"mp4v").is_some() || find_box(entries, b"av01").is_some()
+        })
         .map_or(SampleFraming::Video, |_| SampleFraming::PassThrough);
     parse_progressive_track(data, stbl, timescale, framing)
 }
@@ -867,10 +895,11 @@ impl SampleFraming {
     /// The de-framing a track's [`TrackKind`] selects.
     fn of(kind: &TrackKind) -> Self {
         match kind {
-            // MPEG-4 Part 2 samples are raw elementary stream (start codes), like
-            // the single-track case in [`parse_progressive`]; H.264/H.265 are AVCC.
+            // MPEG-4 Part 2 samples are raw elementary stream (start codes) and
+            // AV1 samples plain low-overhead OBUs, like the single-track case in
+            // [`parse_progressive`]; H.264/H.265 are AVCC.
             TrackKind::Video {
-                codec: VideoCodec::Mpeg4Part2,
+                codec: VideoCodec::Mpeg4Part2 | VideoCodec::Av1,
                 ..
             } => SampleFraming::PassThrough,
             TrackKind::Video { .. } => SampleFraming::Video,
@@ -1164,6 +1193,10 @@ fn avcc_to_annexb(avcc: &[u8]) -> Result<Vec<u8>, G2gError> {
 /// snaps to). NAL boundaries are 4-byte start codes. H.264 IDR is NAL type 5;
 /// H.265 IDR is 19/20.
 pub(crate) fn contains_keyframe(annexb: &[u8], codec: VideoCodec) -> bool {
+    // AV1 units are OBU streams, not start-coded NALs: the frame headers say.
+    if codec == VideoCodec::Av1 {
+        return crate::av1parse::av1_keyframe(annexb);
+    }
     annexb
         .windows(4)
         .enumerate()

@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M779: AV1 demux: the MP4 demuxers read the `av01` sample entry (av1C config, pass-through OBU samples), so M773's muxes round-trip byte-identical both ways and ffmpeg-muxed AV1 MP4s demux.
+
 - M778: Ogg granule timing: Vorbis packets get sample-accurate pts/durations from the setup header's mode tables (ffmpeg's backward-scan technique), anchored to the first page's granule and clamped to the end granule, so decode length matches ffmpeg exactly.
 
 - M777: Vorbis decode: `oggdemux stream=vorbis` + the pure-Rust `vorbisdec` (symphonia, `vorbis` feature), auto-plugged by `decodebin`/`playbin`; PCM within 1 LSB of ffmpeg's decode.

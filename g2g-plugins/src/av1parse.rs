@@ -251,6 +251,13 @@ fn obu_ranges(data: &[u8]) -> Option<Vec<ObuRange>> {
     Some(out)
 }
 
+/// Whether a temporal unit carries a sequence-header OBU. The MP4 demuxers use
+/// it to decide if the `av1C` configOBUs need prepending to the first sample
+/// (M779).
+pub(crate) fn has_sequence_header(data: &[u8]) -> bool {
+    obu_ranges(data).is_some_and(|obus| obus.iter().any(|o| o.obu_type == OBU_SEQUENCE_HEADER))
+}
+
 /// Walk the OBUs of one temporal unit and parse the first sequence-header OBU.
 /// `None` if none is present or the framing is malformed.
 fn extract_seq_header(data: &[u8]) -> Option<Av1SeqHeader> {
