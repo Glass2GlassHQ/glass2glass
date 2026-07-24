@@ -85,7 +85,7 @@ jobs:
       - name: check g2g-plugins (linux feature set)
         run: >
           cargo check -p g2g-plugins --locked --all-targets --features
-          rtsp,onvif,srt,udp-egress,udp-ingress,rtmp,http-src,hls,dash,av1-encode,dav1d,rav1d,mjpeg,mjpeg-encode,opus,alsa-sink,pulse-sink,wayland-sink,kms-sink,v4l2,analytics,vello-overlay,wgpu-sink,plugin-loader,declarative-yaml,script-rhai
+          rtsp,onvif,srt,udp-egress,udp-ingress,rtmp,http-src,hls,dash,av1-encode,dav1d,rav1d,mjpeg,mjpeg-encode,opus,vorbis,alsa-sink,pulse-sink,wayland-sink,kms-sink,v4l2,analytics,vello-overlay,wgpu-sink,plugin-loader,declarative-yaml,script-rhai
       - name: check g2g-ml (wgpu + burn)
         run: cargo check -p g2g-ml --locked --all-targets --features wgpu,burn
       # Embedded / no_std path: the embassy-sync stack channel, the no-alloc
@@ -362,6 +362,10 @@ jobs:
       # standalone by ffmpeg; flvmux's native FLV probed + decoded by ffmpeg.
       - name: FLV oracles (flvmux + flvdemux vs ffmpeg)
         run: cargo test -p g2g-plugins --locked --features std --test m662_flv_config_interop -- --nocapture
+      # Vorbis (M777): oggdemux framing vs ffprobe's packet list, the pure-Rust
+      # vorbisdec PCM vs ffmpeg's own decode (pure Rust, no libav linkage).
+      - name: Vorbis oracles (oggdemux + vorbisdec vs ffmpeg)
+        run: cargo test -p g2g-plugins --locked --features std,vorbis --test m777_vorbis -- --nocapture
       # MCU-fit codec oracles (M638 G.711 + M639 IMA ADPCM): the g2g-mcu
       # fixed-point codecs checked bit-exact against ffmpeg (G.711: the full
       # domain, 65536 encoder inputs + 256 decoder codes, both laws; ADPCM:

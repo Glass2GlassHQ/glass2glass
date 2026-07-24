@@ -653,6 +653,9 @@ pub mod mjpegenc;
 pub mod opusdec;
 #[cfg(feature = "opus")]
 pub mod opusenc;
+// Vorbis decode, pure Rust via symphonia. Gated behind the `vorbis` feature.
+#[cfg(feature = "vorbis")]
+pub mod vorbisdec;
 
 // HTTP(S) byte-stream source via reqwest (the fetch layer under HLS/DASH).
 #[cfg(feature = "http-src")]

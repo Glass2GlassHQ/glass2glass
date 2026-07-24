@@ -1104,7 +1104,8 @@ pub fn audio_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode
         let (stream, format) = match info.codec {
             crate::ogg::OggCodec::Opus => ("opus", g2g_core::AudioFormat::Opus),
             crate::ogg::OggCodec::Flac => ("flac", g2g_core::AudioFormat::Flac),
-            _ => return Ok(None), // Vorbis output is still open: decline
+            crate::ogg::OggCodec::Vorbis => ("vorbis", g2g_core::AudioFormat::Vorbis),
+            _ => return Ok(None),
         };
         let source = crate::filesrc::FileSrc::new(
             &path,
@@ -1140,10 +1141,10 @@ pub fn audio_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode
 
 /// Bare-`decodebin` primary-stream hook for Ogg (M775): the Ogg sibling of
 /// [`ts_primary_stream`]. [`OggDemux`](crate::oggdemux::OggDemux) defaults to its
-/// Opus port, so `filesrc location=X.oga ! decodebin` on an Ogg-FLAC file would
-/// plug an Opus decoder. Sniff the first packet; a `\x7fFLAC` stream selects
-/// `oggdemux stream=flac` with the STREAMINFO caps for the decoder search.
-/// Declines a non-Ogg file or any other codec (the default Opus port is right).
+/// Opus port, so `filesrc location=X.oga ! decodebin` on an Ogg-FLAC / Vorbis
+/// file would plug an Opus decoder. Sniff the first packet and select the
+/// matching `oggdemux stream=` for the decoder search. Declines a non-Ogg file
+/// and Opus (the default port is already right).
 #[cfg(feature = "std")]
 pub fn ogg_primary_stream(location: &str, caps: &Caps) -> Option<PrimaryStream> {
     if !matches!(
@@ -1158,16 +1159,21 @@ pub fn ogg_primary_stream(location: &str, caps: &Caps) -> Option<PrimaryStream> 
     let mut demux = crate::ogg::OggDemuxer::new();
     demux.push_data(&prefix);
     let info = demux.info()?;
-    if info.codec != crate::ogg::OggCodec::Flac || info.sample_rate == 0 {
+    if info.sample_rate == 0 {
         return None;
     }
+    let (stream, format) = match info.codec {
+        crate::ogg::OggCodec::Flac => ("flac", g2g_core::AudioFormat::Flac),
+        crate::ogg::OggCodec::Vorbis => ("vorbis", g2g_core::AudioFormat::Vorbis),
+        _ => return None,
+    };
     Some(PrimaryStream {
         demux: "oggdemux",
-        props: alloc::vec![("stream".to_string(), "flac".to_string())],
+        props: alloc::vec![("stream".to_string(), stream.to_string())],
         // Sentinel channels/rate for the decoder search (the demux refines the
-        // concrete STREAMINFO values via CapsChanged at runtime).
+        // concrete header values via CapsChanged at runtime).
         caps: Caps::Audio {
-            format: g2g_core::AudioFormat::Flac,
+            format,
             channels: 0,
             sample_rate: 0,
         },

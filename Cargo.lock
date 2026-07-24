@@ -3628,6 +3628,8 @@ dependencies = [
  "smithay-client-toolkit 0.20.0",
  "spin 0.9.8",
  "str0m",
+ "symphonia-codec-vorbis",
+ "symphonia-core",
  "tokio",
  "tokio-native-tls",
  "tokio-tungstenite",
@@ -7067,6 +7069,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "regex-lite"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cab834c73d247e67f4fae452806d17d3c7501756d98c8808d7c9c7aa7d18f973"
+
+[[package]]
 name = "regex-syntax"
 version = "0.8.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7991,6 +7999,55 @@ name = "svg_fmt"
 version = "0.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0193cc4331cfd2f3d2011ef287590868599a2f33c3e69bc22c1a3d3acf9e02fb"
+
+[[package]]
+name = "symphonia-codec-vorbis"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "45b07b4423cd8e0fc472575909a5554b12c2f58e3c190b38c24f042e732fd8de"
+dependencies = [
+ "log",
+ "symphonia-common",
+ "symphonia-core",
+]
+
+[[package]]
+name = "symphonia-common"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8257891ffa7f05e02b58f4761e2abf7e5278c8744fd59e981559e050f86eef55"
+dependencies = [
+ "log",
+ "symphonia-core",
+ "symphonia-metadata",
+]
+
+[[package]]
+name = "symphonia-core"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "95ec293b5f288383b72a7bffcade6b2860b642cf66f28b3bd5967349a49938b1"
+dependencies = [
+ "bitflags 2.13.0",
+ "bytemuck",
+ "lazy_static",
+ "log",
+ "num-complex",
+ "smallvec",
+]
+
+[[package]]
+name = "symphonia-metadata"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a31acf5cd623398a6208e2225d18f4b20f761c55098a796a5247ad516a4a8681"
+dependencies = [
+ "lazy_static",
+ "log",
+ "regex-lite",
+ "smallvec",
+ "symphonia-core",
+]
 
 [[package]]
 name = "syn"

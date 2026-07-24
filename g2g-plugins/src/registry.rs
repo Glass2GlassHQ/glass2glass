@@ -153,6 +153,8 @@ use crate::udpsrc::UdpSrc;
 use crate::v4l2src::V4l2Src;
 #[cfg(all(target_os = "linux", feature = "vaapi"))]
 use crate::vaapidec::VaapiH264Dec;
+#[cfg(feature = "vorbis")]
+use crate::vorbisdec::VorbisDec;
 #[cfg(feature = "vpx")]
 use crate::vpxenc::VpxEnc;
 #[cfg(all(target_os = "linux", feature = "wayland-sink"))]
@@ -832,6 +834,10 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     reg.register(ElementFactory::of::<OpusDec>("opusdec", |_| {
         Box::new(OpusDec::new())
     }));
+    #[cfg(feature = "vorbis")]
+    reg.register(ElementFactory::of::<VorbisDec>("vorbisdec", |_| {
+        Box::new(VorbisDec::new())
+    }));
     #[cfg(feature = "mjpeg")]
     reg.register(ElementFactory::of::<MjpegDec>("mjpegdec", |_| {
         Box::new(MjpegDec::new())
@@ -1132,6 +1138,10 @@ fn register_feature_gated(reg: &mut Registry) {
             Box::new(OpusDec::new())
         }));
     }
+    #[cfg(feature = "vorbis")]
+    reg.register_launch(LaunchFactory::of::<VorbisDec>("vorbisdec", || {
+        Box::new(VorbisDec::new())
+    }));
     #[cfg(feature = "av1-encode")]
     reg.register_launch(LaunchFactory::of::<Av1Enc>("av1enc", || {
         Box::new(Av1Enc::new())

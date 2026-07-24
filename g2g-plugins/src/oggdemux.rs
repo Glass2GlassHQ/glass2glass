@@ -1,6 +1,6 @@
 //! Ogg demuxer element (M116): `Caps::ByteStream{Ogg}` in, the selected audio
 //! elementary stream out (`Caps::Audio{Opus}` default, `stream=flac` for the
-//! Ogg-FLAC mapping, M775).
+//! Ogg-FLAC mapping (M775), `stream=vorbis` for Vorbis (M777)).
 //!
 //! Wraps the pure [`crate::ogg::OggDemuxer`], the Ogg sibling of
 //! [`crate::mkvdemux::MkvDemux`]: it reassembles the logical bitstream's packets,
@@ -17,7 +17,7 @@
 //! ```
 //!
 //! Scope: one logical bitstream; a stream not matching the `stream` selection is
-//! parsed but not forwarded. Vorbis output is a follow-up.
+//! parsed but not forwarded.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -97,7 +97,8 @@ pub struct OggDemux {
     /// re-read stream re-sends it.
     head_forwarded: bool,
     /// The logical stream to emit (`stream` property): Opus by default, Flac
-    /// for the Ogg-FLAC mapping. A stream of any other codec is dropped.
+    /// for the Ogg-FLAC mapping, or Vorbis. A stream of any other codec is
+    /// dropped.
     stream: OggCodec,
     /// Seek support (M362): app time seeks drive an upstream byte-seek and a
     /// re-sync. Inert unless `with_seek` wired the controllers.
@@ -171,6 +172,7 @@ impl OggDemux {
         Caps::Audio {
             format: match stream {
                 OggCodec::Flac => AudioFormat::Flac,
+                OggCodec::Vorbis => AudioFormat::Vorbis,
                 _ => AudioFormat::Opus,
             },
             channels: 0,
@@ -188,6 +190,7 @@ impl OggDemux {
         let format = match info.codec {
             OggCodec::Opus => AudioFormat::Opus,
             OggCodec::Flac => AudioFormat::Flac,
+            OggCodec::Vorbis => AudioFormat::Vorbis,
             _ => return None,
         };
         Some(Caps::Audio {
@@ -220,72 +223,102 @@ impl OggDemux {
             }
         }
         let selected = self.demux.info().map(|i| i.codec) == Some(self.stream);
-        // Forward the codec header in-band once, before the first audio packet:
-        // OpusHead as-is (the decoder reads its pre-skip from it), or for FLAC
-        // the native `fLaC` STREAMINFO the mapping's first packet embeds at
-        // offset 9, with the last-metadata-block flag set so the standalone
-        // header terminates (detect() already validated the layout). It is codec
-        // config, not audio, so the decoder consumes it without emitting PCM.
+        // Forward the codec config in-band once, before the first audio packet:
+        // OpusHead as-is (the decoder reads its pre-skip from it); for FLAC the
+        // native `fLaC` STREAMINFO the mapping's first packet embeds at offset 9,
+        // with the last-metadata-block flag set so the standalone header
+        // terminates (detect() already validated the layout); for Vorbis all
+        // three headers (ident / comment / setup, each with its unambiguous
+        // `\x0Nvorbis` prefix; the decoder needs ident + setup). Codec config,
+        // not audio, so the decoder consumes it without emitting PCM.
         if selected && !self.head_forwarded {
-            if let Some(head) = self.demux.head_header() {
-                let head = match self.stream {
-                    OggCodec::Flac => {
+            let mut heads: Vec<Vec<u8>> = Vec::new();
+            match self.stream {
+                OggCodec::Vorbis => {
+                    if let (Some(h), Some(c), Some(s)) = (
+                        self.demux.head_header(),
+                        self.demux.comment_header(),
+                        self.demux.setup_header(),
+                    ) {
+                        heads.extend([h.to_vec(), c.to_vec(), s.to_vec()]);
+                    }
+                }
+                OggCodec::Flac => {
+                    if let Some(head) = self.demux.head_header() {
                         let mut native = head[9..].to_vec();
                         native[4] |= 0x80;
-                        native
+                        heads.push(native);
                     }
-                    _ => head.to_vec(),
-                };
+                }
+                _ => {
+                    if let Some(head) = self.demux.head_header() {
+                        heads.push(head.to_vec());
+                    }
+                }
+            }
+            if !heads.is_empty() {
                 self.head_forwarded = true;
-                let frame = Frame::new(
-                    MemoryDomain::System(SystemSlice::from_boxed(head.into_boxed_slice())),
-                    FrameTiming::default(),
-                    self.emitted,
-                );
-                self.emitted += 1;
-                out.push(PipelinePacket::DataFrame(frame)).await?;
+                for head in heads {
+                    let frame = Frame::new(
+                        MemoryDomain::System(SystemSlice::from_boxed(head.into_boxed_slice())),
+                        FrameTiming::default(),
+                        self.emitted,
+                    );
+                    self.emitted += 1;
+                    out.push(PipelinePacket::DataFrame(frame)).await?;
+                }
             }
         }
         // Total decodable samples (incl. pre-skip); the tail beyond it is padding.
         let end_granule = self.demux.end_granule();
         let sample_rate = self.demux.info().map(|i| i.sample_rate).unwrap_or(0);
-        let is_flac = self.stream == OggCodec::Flac;
         for packet in self.demux.take_packets() {
             if !selected {
                 continue;
             }
-            let pkt_samples = if is_flac {
+            let pkt_samples = match self.stream {
                 // Each Ogg-FLAC audio packet is one whole frame; its header
                 // carries the block size.
-                crate::flacparse::parse_frame_header(&packet)
+                OggCodec::Flac => crate::flacparse::parse_frame_header(&packet)
                     .map(|h| u64::from(h.block_size))
-                    .unwrap_or(0)
-            } else {
-                opus_packet_samples(&packet) as u64
+                    .unwrap_or(0),
+                OggCodec::Opus => opus_packet_samples(&packet) as u64,
+                // Vorbis packet duration needs the setup header's mode /
+                // blocksize tables; the decoder stamps its PCM from decoded
+                // sample counts instead.
+                _ => 0,
             };
             let decoded_before = self.decoded_samples;
             self.decoded_samples = decoded_before.saturating_add(pkt_samples);
-            // End-of-stream trim (Opus only, FLAC carries no padding): keep only
-            // the samples up to the final granule position. A packet wholly past
-            // it is pure padding, so drop it; a straddling packet is kept but
-            // marked short via `duration_ns`, which the decoder honors. Without a
-            // known end granule keep the packet whole.
+            // End-of-stream trim (Opus only, FLAC / Vorbis carry no padding
+            // convention here): keep only the samples up to the final granule
+            // position. A packet wholly past it is pure padding, so drop it; a
+            // straddling packet is kept but marked short via `duration_ns`,
+            // which the decoder honors. Without a known end granule keep the
+            // packet whole.
             let keep = match end_granule {
-                Some(gp) if !is_flac => gp.saturating_sub(decoded_before).min(pkt_samples),
+                Some(gp) if self.stream == OggCodec::Opus => {
+                    gp.saturating_sub(decoded_before).min(pkt_samples)
+                }
                 _ => pkt_samples,
             };
-            let (pts_ns, duration_ns) = if is_flac {
-                // Sample-accurate at the STREAMINFO rate (per-packet rounding
-                // would drift at non-48 kHz rates).
-                let ns = |s: u64| (s as u128 * 1_000_000_000 / sample_rate.max(1) as u128) as u64;
-                let pts = ns(decoded_before);
-                (pts, ns(self.decoded_samples).saturating_sub(pts))
-            } else {
-                let pts = self.pts_ns;
-                self.pts_ns = pts.saturating_add(opus_samples_to_ns(pkt_samples));
-                (pts, opus_samples_to_ns(keep))
+            let (pts_ns, duration_ns) = match self.stream {
+                OggCodec::Flac => {
+                    // Sample-accurate at the STREAMINFO rate (per-packet rounding
+                    // would drift at non-48 kHz rates).
+                    let ns =
+                        |s: u64| (s as u128 * 1_000_000_000 / sample_rate.max(1) as u128) as u64;
+                    let pts = ns(decoded_before);
+                    (pts, ns(self.decoded_samples).saturating_sub(pts))
+                }
+                OggCodec::Opus => {
+                    let pts = self.pts_ns;
+                    self.pts_ns = pts.saturating_add(opus_samples_to_ns(pkt_samples));
+                    (pts, opus_samples_to_ns(keep))
+                }
+                _ => (0, 0),
             };
-            if keep == 0 && !is_flac {
+            if keep == 0 && self.stream == OggCodec::Opus {
                 continue;
             }
             // M362 seek: every audio packet is a resync point, so drop until the
@@ -401,6 +434,7 @@ impl AsyncElement for OggDemux {
                 self.stream = match value.as_str().ok_or(PropError::Type)? {
                     "opus" => OggCodec::Opus,
                     "flac" => OggCodec::Flac,
+                    "vorbis" => OggCodec::Vorbis,
                     _ => return Err(PropError::Value),
                 };
                 Ok(())
@@ -414,6 +448,7 @@ impl AsyncElement for OggDemux {
             "stream" => Some(PropValue::Str(
                 match self.stream {
                     OggCodec::Flac => "flac",
+                    OggCodec::Vorbis => "vorbis",
                     _ => "opus",
                 }
                 .into(),
@@ -427,7 +462,7 @@ impl AsyncElement for OggDemux {
 static OGGDEMUX_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "stream",
     PropKind::Str,
-    "logical stream to emit: opus | flac",
+    "logical stream to emit: opus | flac | vorbis",
 )];
 
 impl PadTemplates for OggDemux {
@@ -437,6 +472,7 @@ impl PadTemplates for OggDemux {
             PadTemplate::source(CapsSet::from_alternatives(Vec::from([
                 Self::output_caps(OggCodec::Opus),
                 Self::output_caps(OggCodec::Flac),
+                Self::output_caps(OggCodec::Vorbis),
             ]))),
         ])
     }

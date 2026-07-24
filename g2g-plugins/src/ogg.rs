@@ -62,6 +62,10 @@ pub struct OggDemuxer {
     /// element can forward it in-band to the decoder (which reads its pre-skip).
     /// `None` until parsed.
     head_header: Option<Vec<u8>>,
+    /// The Vorbis setup header (packet index 2: `\x05vorbis`, the codebooks),
+    /// kept so the element can forward it in-band to the decoder. `None` until
+    /// parsed / for other codecs.
+    setup_header: Option<Vec<u8>>,
     /// Granule position of the stream's final page (the one flagged end-of-stream,
     /// header bit `0x04`). For Opus this is the total 48 kHz sample count including
     /// pre-skip; samples decoded beyond it are encoder padding. `None` until the
@@ -95,6 +99,12 @@ impl OggDemuxer {
     /// pre-skip from it.
     pub fn head_header(&self) -> Option<&[u8]> {
         self.head_header.as_deref()
+    }
+
+    /// The Vorbis setup header (`\x05vorbis`), once parsed. The decoder builds
+    /// its codebooks from it.
+    pub fn setup_header(&self) -> Option<&[u8]> {
+        self.setup_header.as_deref()
     }
 
     /// The final page's granule position (total 48 kHz samples incl. pre-skip),
@@ -236,11 +246,14 @@ impl OggDemuxer {
         };
         if self.packets_seen < header_count {
             // Packet index 0 is the identification header (OpusHead), index 1 the
-            // comment header (OpusTags / Vorbis comment).
+            // comment header (OpusTags / Vorbis comment), index 2 the Vorbis
+            // setup header (codebooks).
             if self.packets_seen == 0 {
                 self.head_header = Some(packet);
             } else if self.packets_seen == 1 {
                 self.comment_header = Some(packet);
+            } else if self.packets_seen == 2 {
+                self.setup_header = Some(packet);
             }
             self.packets_seen += 1;
             return;
@@ -280,11 +293,13 @@ fn detect(packet: &[u8]) -> OggStreamInfo {
                 pre_skip: 0,
             },
         }
-    } else if packet.starts_with(b"\x01vorbis") {
+    } else if packet.starts_with(b"\x01vorbis") && packet.len() >= 16 {
+        // Vorbis identification header: magic(7), version(4), channels at
+        // offset 11, sample rate (LE u32) at offset 12.
         OggStreamInfo {
             codec: OggCodec::Vorbis,
-            channels: 0,
-            sample_rate: 0,
+            channels: packet[11],
+            sample_rate: u32::from_le_bytes([packet[12], packet[13], packet[14], packet[15]]),
             pre_skip: 0,
         }
     } else {
