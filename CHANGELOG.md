@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M776: a mid-stream caps re-solve that defers no longer misfeeds the element's input caps to `configure_output`; Ogg-Opus files now play through `run_graph` / `playbin`.
+
 - M775: Ogg-FLAC: `oggdemux stream=flac` demuxes the `\x7fFLAC` mapping (bit-exact decode vs ffmpeg), `decodebin`/`playbin` sniff the codec and auto-insert `flacparse`, and lone audio files (`.flac` / `.oga` / `.opus`) play via a `playbin` hook.
 
 - M774: native `.flac` support: `filesrc` types the file (extension + `fLaC` sniff) and the new `flacparse` splits CRC-validated frames with STREAMINFO caps, framing oracled against ffprobe.

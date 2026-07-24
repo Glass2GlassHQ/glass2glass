@@ -2427,15 +2427,15 @@ async fn transform_arm<'a>(
                 // constraint steered by the downstream feasibility snapshot.
                 // `Defer` keeps the prior behavior (forward the incoming caps);
                 // `Infeasible` fails the run loud (no producer renegotiates).
-                let forward_caps = {
+                let (forward_caps, output_resolved) = {
                     let constraint = elem.caps_constraint_as_transform();
                     match resolve_forward_output(
                         &constraint,
                         &new_caps,
                         downstream_feasible.as_ref(),
                     ) {
-                        ForwardResolve::Fixed(caps) => caps,
-                        ForwardResolve::Defer => new_caps.clone(),
+                        ForwardResolve::Fixed(caps) => (caps, true),
+                        ForwardResolve::Defer => (new_caps.clone(), false),
                         ForwardResolve::Infeasible(failure) => {
                             // A genuinely infeasible re-solve: the refined caps
                             // have no solution against the downstream chain, and
@@ -2464,8 +2464,14 @@ async fn transform_arm<'a>(
                         // M188: re-resolve a caps-driven transform's output target
                         // on the mid-stream change too (matches startup, line ~421
                         // / the linear coordinator arm). No-op for property-driven
-                        // or passthrough elements.
-                        elem.configure_output(&forward_caps)?;
+                        // or passthrough elements. Skipped on a Defer: there
+                        // `forward_caps` is the incoming INPUT caps, not this
+                        // element's output, and `configure_output`'s contract is
+                        // output caps only (a strict transform rightly rejects
+                        // an input-shaped set, e.g. OpusDec fed `audio/x-opus`).
+                        if output_resolved {
+                            elem.configure_output(&forward_caps)?;
+                        }
                         realloc_local_dyn(&mut *elem, &forward_caps);
                         out_caps = forward_caps.clone();
                         elem.process(PipelinePacket::CapsChanged(forward_caps), &mut adapter)
