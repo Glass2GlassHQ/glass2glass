@@ -10,8 +10,9 @@
 //! three in-band ahead of the audio; the prefixes are unambiguous (an audio
 //! packet's first byte always has bit 0 clear), so the decoder stashes ident +
 //! setup, ignores the comment header, and builds once setup arrives. Output PCM
-//! is stamped from the decoded sample count (the demuxer sends no per-packet
-//! duration: computing one needs these same setup tables).
+//! carries the demuxer's packet timing when present (M778: durations from the
+//! setup-header mode tables, end-granule clamped, so the decoded PCM is trimmed
+//! to match), else it is stamped from the decoded sample count.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -231,15 +232,34 @@ impl AsyncElement for VorbisDec {
                             .await?;
                         self.last_out = Some(new_caps);
                     }
-                    let frames = pcm.len() as u64 / u64::from(self.channels.max(1));
+                    let channels = usize::from(self.channels.max(1));
+                    let decoded = pcm.len() / channels;
                     let ns = |s: u64| {
                         (s as u128 * 1_000_000_000 / self.sample_rate.max(1) as u128) as u64
                     };
-                    let pts_ns = ns(self.samples);
-                    let duration_ns = ns(self.samples + frames).saturating_sub(pts_ns);
-                    self.samples += frames;
-                    let mut bytes = Vec::with_capacity(pcm.len() * 2);
-                    for s in &pcm {
+                    // Demux-provided timing (M778): the packet's timeline
+                    // duration arrives end-granule clamped, so trim the decoded
+                    // PCM to it (the final block's encoder padding drops here).
+                    // Untimed input (duration 0) self-stamps from the decoded
+                    // sample count.
+                    let (pts_ns, duration_ns, keep) = if frame.timing.duration_ns > 0 {
+                        let k = ((frame.timing.duration_ns as u128
+                            * u128::from(self.sample_rate.max(1))
+                            + 500_000_000)
+                            / 1_000_000_000) as usize;
+                        (
+                            frame.timing.pts_ns,
+                            frame.timing.duration_ns,
+                            k.min(decoded),
+                        )
+                    } else {
+                        let pts = ns(self.samples);
+                        let dur = ns(self.samples + decoded as u64).saturating_sub(pts);
+                        (pts, dur, decoded)
+                    };
+                    self.samples += keep as u64;
+                    let mut bytes = Vec::with_capacity(keep * channels * 2);
+                    for s in &pcm[..keep * channels] {
                         bytes.extend_from_slice(&s.to_le_bytes());
                     }
                     let decoded = Frame::new(

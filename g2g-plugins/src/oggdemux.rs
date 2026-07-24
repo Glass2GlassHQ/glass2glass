@@ -100,6 +100,19 @@ pub struct OggDemux {
     /// for the Ogg-FLAC mapping, or Vorbis. A stream of any other codec is
     /// dropped.
     stream: OggCodec,
+    /// Vorbis packet-duration tables (M778), parsed from the ident + setup
+    /// headers once both land. `None` until then / for other codecs / when the
+    /// setup scan fails (packets then ride untimed and untrimmed).
+    vorbis: Option<crate::ogg::VorbisTiming>,
+    /// The previous Vorbis audio packet's block size (`None` before the first,
+    /// whose window has no predecessor: it primes the overlap and decodes to
+    /// nothing, counting `blocksize / 2` on the timeline).
+    prev_blocksize: Option<u32>,
+    /// Vorbis timeline anchor (M778): the excess of the natural packet
+    /// durations over the first audio page's granule position, clipped off the
+    /// front of the emitted timeline (initial encoder priming). `Some(0)` when
+    /// the first page is the EOS page (an end clamp, not an anchor).
+    anchor_offset: Option<u64>,
     /// Seek support (M362): app time seeks drive an upstream byte-seek and a
     /// re-sync. Inert unless `with_seek` wired the controllers.
     seek: DemuxSeek,
@@ -124,6 +137,9 @@ impl OggDemux {
             decoded_samples: 0,
             head_forwarded: false,
             stream: OggCodec::Opus,
+            vorbis: None,
+            prev_blocksize: None,
+            anchor_offset: None,
             seek: DemuxSeek::default(),
         }
     }
@@ -146,6 +162,9 @@ impl OggDemux {
         self.pts_ns = 0;
         self.decoded_samples = 0;
         self.head_forwarded = false;
+        self.vorbis = None;
+        self.prev_blocksize = None;
+        self.anchor_offset = None;
     }
 
     /// Attach the pipeline bus so the stream's VorbisComment metadata posts as a
@@ -269,10 +288,43 @@ impl OggDemux {
                 }
             }
         }
+        // Vorbis timing tables (M778): parse once ident + setup have landed.
+        if self.stream == OggCodec::Vorbis && self.vorbis.is_none() {
+            if let (Some(h), Some(s)) = (self.demux.head_header(), self.demux.setup_header()) {
+                self.vorbis = crate::ogg::VorbisTiming::parse(h, s);
+            }
+        }
         // Total decodable samples (incl. pre-skip); the tail beyond it is padding.
         let end_granule = self.demux.end_granule();
         let sample_rate = self.demux.info().map(|i| i.sample_rate).unwrap_or(0);
-        for packet in self.demux.take_packets() {
+        let packets = self.demux.take_packets();
+        // Vorbis timeline anchor (M778): the first audio page's granule names
+        // the timeline position after its last packet, so the excess of the
+        // natural durations over it is initial priming, clipped off the front
+        // (ffmpeg anchors the same way, as a negative first pts). An EOS first
+        // page is an end clamp instead: anchor at zero.
+        if self.stream == OggCodec::Vorbis && self.anchor_offset.is_none() {
+            if let (Some(t), Some((gp, n, eos))) =
+                (self.vorbis.as_ref(), self.demux.first_data_granule())
+            {
+                self.anchor_offset = if eos || self.decoded_samples > 0 {
+                    // Already streaming (a headerless mid-join): no anchor.
+                    Some(0)
+                } else {
+                    // Lapped natural durations over the first page's packets.
+                    let mut prev: Option<u32> = None;
+                    let mut cum = 0u64;
+                    for p in packets.iter().take(n as usize) {
+                        if let Some(c) = t.packet_blocksize(p) {
+                            cum = cum.saturating_add(u64::from((prev.unwrap_or(c) + c) / 4));
+                            prev = Some(c);
+                        }
+                    }
+                    Some(cum.saturating_sub(gp))
+                };
+            }
+        }
+        for packet in packets {
             if !selected {
                 continue;
             }
@@ -283,33 +335,56 @@ impl OggDemux {
                     .map(|h| u64::from(h.block_size))
                     .unwrap_or(0),
                 OggCodec::Opus => opus_packet_samples(&packet) as u64,
-                // Vorbis packet duration needs the setup header's mode /
-                // blocksize tables; the decoder stamps its PCM from decoded
-                // sample counts instead.
+                // Vorbis (M778): the lapped `(prev + cur) / 4` from the mode
+                // tables (the stream's first packet gets its nominal `bs / 2`
+                // while decoding to nothing; the anchor clips it off the front).
+                OggCodec::Vorbis => match self
+                    .vorbis
+                    .as_ref()
+                    .and_then(|t| t.packet_blocksize(&packet))
+                {
+                    Some(c) => {
+                        let s = u64::from((self.prev_blocksize.unwrap_or(c) + c) / 4);
+                        self.prev_blocksize = Some(c);
+                        s
+                    }
+                    None => 0,
+                },
                 _ => 0,
             };
             let decoded_before = self.decoded_samples;
             self.decoded_samples = decoded_before.saturating_add(pkt_samples);
-            // End-of-stream trim (Opus only, FLAC / Vorbis carry no padding
-            // convention here): keep only the samples up to the final granule
+            // Anchored timeline position (M778): the Vorbis initial-priming
+            // offset is clipped off the front; Opus / FLAC anchor at zero.
+            let off = self.anchor_offset.unwrap_or(0);
+            let anchored_before = decoded_before.saturating_sub(off);
+            let anchored_after = decoded_before
+                .saturating_add(pkt_samples)
+                .saturating_sub(off);
+            // End-of-stream trim (Opus + Vorbis; FLAC carries no padding
+            // convention): keep only the samples up to the final granule
             // position. A packet wholly past it is pure padding, so drop it; a
             // straddling packet is kept but marked short via `duration_ns`,
             // which the decoder honors. Without a known end granule keep the
             // packet whole.
+            let span = anchored_after.saturating_sub(anchored_before);
             let keep = match end_granule {
-                Some(gp) if self.stream == OggCodec::Opus => {
-                    gp.saturating_sub(decoded_before).min(pkt_samples)
+                Some(gp) if matches!(self.stream, OggCodec::Opus | OggCodec::Vorbis) => {
+                    gp.saturating_sub(anchored_before).min(span)
                 }
-                _ => pkt_samples,
+                _ => span,
             };
             let (pts_ns, duration_ns) = match self.stream {
-                OggCodec::Flac => {
-                    // Sample-accurate at the STREAMINFO rate (per-packet rounding
+                OggCodec::Flac | OggCodec::Vorbis => {
+                    // Sample-accurate at the header rate (per-packet rounding
                     // would drift at non-48 kHz rates).
                     let ns =
                         |s: u64| (s as u128 * 1_000_000_000 / sample_rate.max(1) as u128) as u64;
-                    let pts = ns(decoded_before);
-                    (pts, ns(self.decoded_samples).saturating_sub(pts))
+                    let pts = ns(anchored_before);
+                    (
+                        pts,
+                        ns(anchored_before.saturating_add(keep)).saturating_sub(pts),
+                    )
                 }
                 OggCodec::Opus => {
                     let pts = self.pts_ns;
@@ -318,7 +393,12 @@ impl OggDemux {
                 }
                 _ => (0, 0),
             };
-            if keep == 0 && self.stream == OggCodec::Opus {
+            // Drop a timed packet wholly past the end granule (Opus padding /
+            // Vorbis tail). A head-clipped packet (anchored position still 0,
+            // e.g. the Vorbis priming packet) and an untimed one (pkt_samples
+            // 0: a Vorbis stream whose setup scan failed) always flow, since
+            // the decoder needs them to prime its window.
+            if keep == 0 && anchored_before > 0 && pkt_samples > 0 {
                 continue;
             }
             // M362 seek: every audio packet is a resync point, so drop until the

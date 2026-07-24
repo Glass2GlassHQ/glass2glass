@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M778: Ogg granule timing: Vorbis packets get sample-accurate pts/durations from the setup header's mode tables (ffmpeg's backward-scan technique), anchored to the first page's granule and clamped to the end granule, so decode length matches ffmpeg exactly.
+
 - M777: Vorbis decode: `oggdemux stream=vorbis` + the pure-Rust `vorbisdec` (symphonia, `vorbis` feature), auto-plugged by `decodebin`/`playbin`; PCM within 1 LSB of ffmpeg's decode.
 
 - M776: a mid-stream caps re-solve that defers no longer misfeeds the element's input caps to `configure_output`; Ogg-Opus files now play through `run_graph` / `playbin`.

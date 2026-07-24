@@ -71,6 +71,14 @@ pub struct OggDemuxer {
     /// pre-skip; samples decoded beyond it are encoder padding. `None` until the
     /// EOS page is parsed, or if it carried the -1 "no packet completed" sentinel.
     end_granulepos: Option<u64>,
+    /// The first audio-bearing page's granule position, the count of audio
+    /// packets completed through it, and whether that page is also the EOS
+    /// page (M778). Anchors the Vorbis timeline: the granule names the
+    /// position after the page's last packet, so any excess of the natural
+    /// packet durations over it is initial priming.
+    first_data: Option<(u64, u32, bool)>,
+    /// Running count of audio (non-header) packets finalized.
+    audio_finalized: u32,
     completed: Vec<Vec<u8>>,
 }
 
@@ -112,6 +120,12 @@ impl OggDemuxer {
     /// trim: decoded samples beyond it are encoder padding.
     pub fn end_granule(&self) -> Option<u64> {
         self.end_granulepos
+    }
+
+    /// The first audio-bearing page's `(granulepos, audio packets completed
+    /// through it, is-EOS-page)`, once parsed (M778). See `first_data`.
+    pub fn first_data_granule(&self) -> Option<(u64, u32, bool)> {
+        self.first_data
     }
 
     /// Feed Ogg bytes. Complete pages are parsed as they arrive; a partial
@@ -176,17 +190,15 @@ impl OggDemuxer {
             None => self.serial = Some(serial),
             _ => {}
         }
-        // End-of-stream page (bit 0x04): its granule position (offset 6, LE u64)
-        // is the stream's total sample count. Ignore the -1 sentinel (a page that
-        // completes no packet). Attacker-controlled, so only stored, bounded when
-        // used against the running decoded count.
-        if header_type & 0x04 != 0 {
-            let gp = u64::from_le_bytes([
-                page[6], page[7], page[8], page[9], page[10], page[11], page[12], page[13],
-            ]);
-            if gp != u64::MAX {
-                self.end_granulepos = Some(gp);
-            }
+        // Page granule position (offset 6, LE u64; -1 = no packet completed).
+        // On the EOS page (bit 0x04) it is the stream's total sample count.
+        // Attacker-controlled, so only stored, bounded when used against the
+        // running decoded count.
+        let gp = u64::from_le_bytes([
+            page[6], page[7], page[8], page[9], page[10], page[11], page[12], page[13],
+        ]);
+        if header_type & 0x04 != 0 && gp != u64::MAX {
+            self.end_granulepos = Some(gp);
         }
         // A page not flagged "continued" abandons any half-built packet (a lost
         // page upstream); otherwise the first packet continues `partial`.
@@ -211,6 +223,10 @@ impl OggDemuxer {
             acc.clear();
         }
         self.partial = acc;
+        // The first page that completed audio packets anchors the timeline.
+        if self.first_data.is_none() && self.audio_finalized > 0 && gp != u64::MAX {
+            self.first_data = Some((gp, self.audio_finalized, header_type & 0x04 != 0));
+        }
     }
 
     fn finalize(&mut self, packet: Vec<u8>) {
@@ -233,6 +249,7 @@ impl OggDemuxer {
                 }
             } else {
                 self.packets_seen += 1;
+                self.audio_finalized += 1;
                 self.completed.push(packet);
                 return;
             }
@@ -259,8 +276,103 @@ impl OggDemuxer {
             return;
         }
         self.packets_seen += 1;
+        self.audio_finalized += 1;
         self.completed.push(packet);
     }
+}
+
+/// Vorbis per-packet timing tables (M778), recovered from the identification
+/// and setup headers without a codebook parse: the two block sizes (ident
+/// byte 28) and each mode's blockflag, located by a validated backward scan
+/// of the setup header's mode section (the ffmpeg `vorbis_parser` technique).
+/// Drives demux-side packet durations; see [`Self::packet_samples`].
+#[derive(Debug, Clone)]
+pub struct VorbisTiming {
+    bs0: u32,
+    bs1: u32,
+    /// Per-mode blockflag: `false` = short (`bs0`), `true` = long (`bs1`).
+    mode_blockflag: Vec<bool>,
+}
+
+impl VorbisTiming {
+    /// Recover the tables from the `\x01vorbis` ident and `\x05vorbis` setup
+    /// headers. `None` on any layout mismatch (timing then stays unknown).
+    pub fn parse(ident: &[u8], setup: &[u8]) -> Option<Self> {
+        if !ident.starts_with(b"\x01vorbis") || ident.len() < 30 {
+            return None;
+        }
+        // Byte 28: blocksize_0 exponent in the low nibble, blocksize_1 high.
+        let bs0 = 1u32.checked_shl(u32::from(ident[28] & 0x0F))?;
+        let bs1 = 1u32.checked_shl(u32::from(ident[28] >> 4))?;
+        if !(64..=8192).contains(&bs0) || !(64..=8192).contains(&bs1) || bs0 > bs1 {
+            return None;
+        }
+        Some(Self {
+            bs0,
+            bs1,
+            mode_blockflag: mode_blockflags(setup)?,
+        })
+    }
+
+    /// The block size of an audio packet (from the mode number in its first
+    /// byte), or `None` for a header packet. Packet `n`'s true PCM output is
+    /// the lapped `(blocksize(n-1) + blocksize(n)) / 4` (the first packet
+    /// counts `blocksize / 2` on the timeline while decoding to nothing);
+    /// ffmpeg's pts follow the same lapped model, though its reported
+    /// per-packet duration field approximates short blocks as `bs0 / 2`.
+    pub fn packet_blocksize(&self, packet: &[u8]) -> Option<u32> {
+        let b0 = *packet.first()?;
+        if b0 & 1 != 0 {
+            return None; // header packet (audio packets have bit 0 clear)
+        }
+        // The mode number is the ilog(mode_count - 1) bits after the type bit;
+        // modes are capped at 64, so it always fits the first byte.
+        let bits = 32 - (self.mode_blockflag.len() as u32 - 1).leading_zeros();
+        let mode = (u32::from(b0) >> 1) & ((1u32 << bits) - 1);
+        let long = *self.mode_blockflag.get(mode as usize)?;
+        Some(if long { self.bs1 } else { self.bs0 })
+    }
+}
+
+/// Extract each mode's blockflag from a `\x05vorbis` setup header by scanning
+/// the mode section backwards from the framing bit, without parsing the
+/// variable-length codebooks before it (ffmpeg's `vorbis_parser` technique).
+/// Vorbis packs bits LSB-first and pads the final byte's high bits with zeros,
+/// so the framing bit (always 1) is the highest set bit of the last non-zero
+/// byte. Each mode entry is 41 bits: blockflag, then 16-bit window / transform
+/// types (reserved zero in Vorbis I) and an 8-bit mapping number (<= 63),
+/// preceded by a 6-bit count. Walk entries backwards while they validate and
+/// keep the LARGEST count whose 6-bit field matches: a mode's zero mapping
+/// field can mimic the count field, so the first match may be short (the
+/// false positive ffmpeg's walk also defends against). A malformed header
+/// yields `None`.
+fn mode_blockflags(setup: &[u8]) -> Option<Vec<bool>> {
+    if !setup.starts_with(b"\x05vorbis") {
+        return None;
+    }
+    let last = setup.iter().rposition(|&b| b != 0)?;
+    let framing = last as u64 * 8 + u64::from(7 - setup[last].leading_zeros() as u8);
+    let bit = |i: u64| (setup[(i / 8) as usize] >> (i % 8)) & 1;
+    // A k-bit LSB-first field whose final bit sits at index `end`.
+    let field = |end: u64, k: u64| -> u64 {
+        (0..k).fold(0u64, |v, j| v | (u64::from(bit(end - k + 1 + j)) << j))
+    };
+    let mut best: Option<u64> = None;
+    for m in 1..=64u64 {
+        // The candidate count field must still sit past the 7-byte magic.
+        if framing < m * 41 + 6 + 7 * 8 + 1 {
+            break;
+        }
+        let e = framing - m * 41; // start bit of the m-th entry from the end
+        if field(e + 40, 8) > 63 || field(e + 16, 16) != 0 || field(e + 32, 16) != 0 {
+            break; // ran into codebook bits: no more mode entries
+        }
+        if field(e - 1, 6) == m - 1 {
+            best = Some(m);
+        }
+    }
+    let start = framing - best? * 41;
+    Some((0..best?).map(|i| bit(start + i * 41) == 1).collect())
 }
 
 /// Identify the logical stream from its first packet's magic.

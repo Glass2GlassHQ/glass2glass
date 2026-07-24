@@ -425,8 +425,7 @@ Phased plan:
 - **MKV / WebM:** `Targets`-scoped (per-track) tags.
   Single-track `MkvMux` also lacks unknown-size Clusters (live read).
 - **MPEG-TS:** multi-stream / multi-program muxing + selection; PCR-based timing.
-- **OGG:** granule-position timing (incl. trimming the final Vorbis block to
-  the end granule); multi-stream; `oggmux`.
+- **OGG:** multi-stream; `oggmux`.
 - **FLV:** VP6 / H.263 / MP3 / Speex codecs (only H.264 + AAC ride the tag
   stream today).
 - **CMAF / fMP4:** the CMAF-specific signalling layer on `Mp4Sink` / `Mp4Src`.
