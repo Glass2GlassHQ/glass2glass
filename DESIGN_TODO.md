@@ -517,8 +517,9 @@ _(No open parser items.)_
   Remaining playback follow-ups:
   - **Audio breadth.** The layout-agnostic downmix in `audioconvert` folds
     channels round-robin rather than applying ITU/speaker-position coefficients
-    (no channel-position metadata is carried yet). FLAC rides Matroska only:
-    Ogg-FLAC detection and a native `.flac` parse layer are open. The audio sink needs the `pulse-sink` (or
+    (no channel-position metadata is carried yet). Ogg-FLAC detection (the
+    `\x7fFLAC` first-packet mapping in `oggdemux`) is open, as is auto-inserting
+    `flacparse` on the `decodebin`/`playbin` path (the launch line works). The audio sink needs the `pulse-sink` (or
     `alsa-sink`) feature built in, else `autoaudiosink` falls back to `fakesink`.
   Parsing SSA / TTML placement into `CueSettings` (only
   WebVTT populates it today, though all three now ride the frame-meta). Glyph

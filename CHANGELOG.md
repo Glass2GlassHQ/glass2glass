@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M774: native `.flac` support: `filesrc` types the file (extension + `fLaC` sniff) and the new `flacparse` splits CRC-validated frames with STREAMINFO caps, framing oracled against ffprobe.
+
 - M773: AV1 in the fan-in muxers: `mkvmuxn` writes `V_AV1` + av1C `CodecPrivate` and `mp4mux` an `av01` sample entry, the record byte-identical to ffmpeg's for the same stream.
 
 - M772: `G2G_DEBUG` category names take `*` / `?` globs (`*sink*:5`); an exact override wins over a glob.

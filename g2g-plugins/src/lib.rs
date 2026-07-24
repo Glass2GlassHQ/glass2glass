@@ -33,6 +33,10 @@ pub(crate) fn fuzz_block_on<F: core::future::Future>(f: F) -> F::Output {
 }
 
 pub mod aacparse;
+// Native FLAC stream parser (M774): frame-splits a `.flac` byte stream (the
+// re-framing `h264parse` analog for audio) and refines caps from STREAMINFO.
+pub mod flacparse;
+
 pub mod appsink;
 pub mod appsrc;
 pub mod audioamplify;

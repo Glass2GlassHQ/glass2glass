@@ -369,6 +369,7 @@ fn caps_from_extension(path: &std::path::Path) -> Option<Caps> {
         "flv" => ByteStreamEncoding::Flv,
         "mp4" | "m4v" | "m4a" | "mov" | "qt" => ByteStreamEncoding::Mp4,
         "ivf" => ByteStreamEncoding::Ivf,
+        "flac" => return Some(crate::typefind::elementary_flac_caps()),
         "h264" | "264" | "avc" => {
             return Some(crate::typefind::elementary_video_caps(VideoCodec::H264))
         }

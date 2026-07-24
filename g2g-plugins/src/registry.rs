@@ -37,6 +37,7 @@ use crate::capsfilter::CapsFilter;
 use crate::fakesink::FakeSink;
 use crate::filesink::FileSink;
 use crate::filesrc::FileSrc;
+use crate::flacparse::FlacParse;
 use crate::flvdemux::FlvDemux;
 use crate::flvmux::FlvMux;
 use crate::h264parse::H264Parse;
@@ -474,6 +475,9 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::of::<AacParse>("aacparse", || {
         Box::new(AacParse::new())
     }));
+    reg.register_launch(LaunchFactory::of::<FlacParse>("flacparse", || {
+        Box::new(FlacParse::new())
+    }));
     reg.register_launch(LaunchFactory::of::<OpusParse>("opusparse", || {
         Box::new(OpusParse::new())
     }));
@@ -762,6 +766,9 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     }));
     reg.register(ElementFactory::of::<H265Parse>("h265parse", |_| {
         Box::new(H265Parse::new())
+    }));
+    reg.register(ElementFactory::of::<FlacParse>("flacparse", |_| {
+        Box::new(FlacParse::new())
     }));
     reg.register(ElementFactory::of::<AacParse>("aacparse", |_| {
         Box::new(AacParse::new())
