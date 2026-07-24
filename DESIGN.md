@@ -1456,7 +1456,8 @@ so a disabled `g2g_trace!` in a hot loop costs one atomic load. The macros
 `Target` for logging about a named element) then a `format_args!` message,
 checked against the threshold before formatting. Records route to an installed
 `LogSink`; the `std` feature provides a stderr sink and `init_from_env`, which
-reads `G2G_DEBUG` (a `GST_DEBUG`-style `*:warning,VideoFlip:trace` spec). The DAG
+reads `G2G_DEBUG` (a `GST_DEBUG`-style `*:warning,VideoFlip:trace` spec; category
+names take `*` / `?` globs, e.g. `*sink*:5`, with an exact override winning). The DAG
 runner assigns each element a `<category>N` instance name before negotiation (the
 `videotestsrc0` convention) via `set_instance_name`, logs each element's
 addition, and an element that logs about itself (it implements `LogSource` with a

@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M772: `G2G_DEBUG` category names take `*` / `?` globs (`*sink*:5`); an exact override wins over a glob.
+
 - M771: `OpusEnc` accepts F32 PCM input and `OpusDec` emits F32 when negotiated, via libopus' float APIs.
 
 - M770: `matroskamux` / `mkvmuxn` gain a `seekable` two-pass mode that finalizes the file with a front `SeekHead`, so it seeks from byte 0.

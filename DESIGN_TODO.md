@@ -643,9 +643,9 @@ _(No open parser items.)_
   late-drop / `Qos` post from the display sinks.
 - Logging: instance naming + lifecycle logging in the bespoke linear runners and
   the muxer path (not just `run_graph`); `set_instance_name` self-logging on more
-  elements; explicit names from `gst-launch` `name=`; glob category matching
-  (`*sink*:5`); a structured-fields / timestamped record format + ring-buffer
-  sink; a custom (non-type-name) category override per element.
+  elements; explicit names from `gst-launch` `name=`; a structured-fields /
+  timestamped record format + ring-buffer sink; a custom (non-type-name)
+  category override per element.
 
 ## Properties / introspection / DSL
 
