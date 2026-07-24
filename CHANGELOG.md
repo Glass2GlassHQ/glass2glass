@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M773: AV1 in the fan-in muxers: `mkvmuxn` writes `V_AV1` + av1C `CodecPrivate` and `mp4mux` an `av01` sample entry, the record byte-identical to ffmpeg's for the same stream.
+
 - M772: `G2G_DEBUG` category names take `*` / `?` globs (`*sink*:5`); an exact override wins over a glob.
 
 - M771: `OpusEnc` accepts F32 PCM input and `OpusDec` emits F32 when negotiated, via libopus' float APIs.

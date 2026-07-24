@@ -22,10 +22,11 @@
 //! Reachable from the `gst-launch` fan-in syntax: registered as the `matroskamux`
 //! muxer in `default_registry`, so >1 input link builds this element (a single
 //! input builds the single-track [`crate::mkvmux::MkvMux`]), the way gst's request
-//! sink pads do. Video is H.264/H.265 (avcC/hvcC + AVCC samples) or VP8/VP9 (raw
-//! frames, no CodecPrivate); audio is AAC (ASC) or Opus (synthesised `OpusHead`),
-//! so VP9 + Opus muxes a WebM. Every input pad must carry a stream (a pad that
-//! ends without an access unit stalls the build).
+//! sink pads do. Video is H.264/H.265 (avcC/hvcC + AVCC samples), VP8/VP9 (raw
+//! frames, no CodecPrivate) or AV1 (`V_AV1`, av1C `CodecPrivate` from the
+//! sequence header, temporal delimiters stripped, M773); audio is AAC (ASC) or
+//! Opus (synthesised `OpusHead`), so VP9 + Opus muxes a WebM. Every input pad
+//! must carry a stream (a pad that ends without an access unit stalls the build).
 
 use core::future::Future;
 use core::pin::Pin;
@@ -153,7 +154,12 @@ impl MkvMuxN {
     fn pad_kind_for(caps: &Caps) -> Option<PadKind> {
         match caps {
             Caps::CompressedVideo {
-                codec: c @ (VideoCodec::H264 | VideoCodec::H265 | VideoCodec::Vp8 | VideoCodec::Vp9),
+                codec:
+                    c @ (VideoCodec::H264
+                    | VideoCodec::H265
+                    | VideoCodec::Vp8
+                    | VideoCodec::Vp9
+                    | VideoCodec::Av1),
                 ..
             } => Some(PadKind::Video(*c)),
             Caps::Audio {
@@ -196,6 +202,18 @@ impl MkvMuxN {
                                 width: w,
                                 height: h,
                                 param_sets: owned,
+                            });
+                        }
+                    }
+                    // AV1's config record needs the sequence-header OBU; wait
+                    // for the temporal unit that carries it (keyframes do).
+                    VideoCodec::Av1 => {
+                        if let Some((_, obu)) = crate::av1parse::seq_header_obu(au) {
+                            self.inits[input] = Some(TrackInit::Video {
+                                codec,
+                                width: w,
+                                height: h,
+                                param_sets: alloc::vec![obu.to_vec()],
                             });
                         }
                     }
@@ -254,6 +272,10 @@ impl MkvMuxN {
                     (avcc_sample(&nalus), is_key)
                 }
                 VideoCodec::Vp8 => (au.to_vec(), vp8_keyframe(au)),
+                VideoCodec::Av1 => (
+                    crate::av1parse::strip_temporal_delimiters(au),
+                    crate::av1parse::av1_keyframe(au),
+                ),
                 _ => (au.to_vec(), vp9_keyframe(au)),
             },
             Some(PadKind::Audio {
@@ -315,6 +337,15 @@ fn track_config(init: &TrackInit) -> MkvTrackConfig {
                 VideoCodec::H265 => (MkvCodec::H265, hvcc_record(&refs)),
                 VideoCodec::Vp8 => (MkvCodec::Vp8, Vec::new()),
                 VideoCodec::Vp9 => (MkvCodec::Vp9, Vec::new()),
+                // The captured init is the sequence-header OBU; its parse
+                // succeeded at capture, so the re-parse here cannot fail.
+                VideoCodec::Av1 => {
+                    let obu = refs.first().copied().unwrap_or(&[]);
+                    let record = crate::av1parse::seq_header_obu(obu)
+                        .map(|(seq, _)| crate::fmp4mux::av1c_record(&seq, obu))
+                        .unwrap_or_default();
+                    (MkvCodec::Av1, record)
+                }
                 _ => (MkvCodec::H264, avcc_record(&refs)),
             };
             MkvTrackConfig {

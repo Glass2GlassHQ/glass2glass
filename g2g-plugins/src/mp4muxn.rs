@@ -22,7 +22,9 @@
 //! Reachable from the `gst-launch` fan-in syntax: registered as the `mp4mux`
 //! muxer in `default_registry`, so >1 input link builds this element (a single
 //! input builds the single-track [`crate::mp4mux::Mp4Mux`]), the way gst's
-//! request sink pads do. Scope (v1): H.264/H.265 + AAC, sync-sample audio.
+//! request sink pads do. Video is H.264/H.265 (avc1/hvc1), VP8/VP9
+//! (vp08/vp09 + vpcC) or AV1 (av01 + av1C from the sequence header, M773);
+//! audio is AAC (mp4a/esds) or Opus (Opus/dOps), sync-sample audio.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -39,8 +41,8 @@ use g2g_core::{
 };
 
 use crate::fmp4mux::{
-    avcc_sample, is_keyframe_nal, parameter_sets, split_annexb, visual_sample_entry, vp8_keyframe,
-    vp9_keyframe,
+    av1c_record, avcc_sample, is_keyframe_nal, parameter_sets, split_annexb, visual_sample_entry,
+    vp8_keyframe, vp9_keyframe,
 };
 use crate::mp4audiosink::esds;
 use crate::mp4box::{ftyp, full_box, mp4_box, MATRIX};
@@ -176,7 +178,12 @@ impl Mp4MuxN {
     fn pad_kind_for(caps: &Caps) -> Option<PadKind> {
         match caps {
             Caps::CompressedVideo {
-                codec: c @ (VideoCodec::H264 | VideoCodec::H265 | VideoCodec::Vp8 | VideoCodec::Vp9),
+                codec:
+                    c @ (VideoCodec::H264
+                    | VideoCodec::H265
+                    | VideoCodec::Vp8
+                    | VideoCodec::Vp9
+                    | VideoCodec::Av1),
                 ..
             } => Some(PadKind::Video(*c)),
             Caps::Audio {
@@ -219,6 +226,18 @@ impl Mp4MuxN {
                                 width: w,
                                 height: h,
                                 param_sets: owned,
+                            });
+                        }
+                    }
+                    // AV1's `av1C` needs the sequence-header OBU; wait for the
+                    // temporal unit that carries it (keyframes do).
+                    VideoCodec::Av1 => {
+                        if let Some((_, obu)) = crate::av1parse::seq_header_obu(au) {
+                            self.inits[input] = Some(TrackInit::Video {
+                                codec,
+                                width: w,
+                                height: h,
+                                param_sets: alloc::vec![obu.to_vec()],
                             });
                         }
                     }
@@ -276,6 +295,10 @@ impl Mp4MuxN {
                 }
                 // VP8/VP9 frames are stored verbatim; keyframe from the frame header.
                 VideoCodec::Vp8 => (au.to_vec(), vp8_keyframe(au)),
+                VideoCodec::Av1 => (
+                    crate::av1parse::strip_temporal_delimiters(au),
+                    crate::av1parse::av1_keyframe(au),
+                ),
                 _ => (au.to_vec(), vp9_keyframe(au)),
             },
             // Audio access units are always sync samples. AAC strips its ADTS
@@ -628,6 +651,15 @@ fn trak_media(init: &TrackInit) -> TrakMedia {
         } => {
             let sample_entry = match codec {
                 VideoCodec::Vp8 | VideoCodec::Vp9 => vp_sample_entry(*codec, *width, *height),
+                VideoCodec::Av1 => {
+                    // The captured init is the sequence-header OBU (see
+                    // `capture_init`); its parse succeeded at capture.
+                    let obu: &[u8] = param_sets.first().map(|v| v.as_slice()).unwrap_or(&[]);
+                    let record = crate::av1parse::seq_header_obu(obu)
+                        .map(|(seq, _)| av1c_record(&seq, obu))
+                        .unwrap_or_default();
+                    av1_sample_entry(*width, *height, &record)
+                }
                 _ => {
                     let refs: Vec<&[u8]> = param_sets.iter().map(|v| v.as_slice()).collect();
                     visual_sample_entry(*codec, *width, *height, &refs)
@@ -690,6 +722,27 @@ fn vp_sample_entry(codec: VideoCodec, width: u32, height: u32) -> Vec<u8> {
     p.extend_from_slice(&0xFFFFu16.to_be_bytes()); // pre_defined -1
     p.extend_from_slice(&vpcc());
     mp4_box(fourcc, &p)
+}
+
+/// The AV1 `VisualSampleEntry` (`av01`) with its `av1C`
+/// AV1CodecConfigurationBox (the AV1-in-ISOBMFF binding). Geometry comes from
+/// the caps; the record is built from the stream's own sequence header.
+fn av1_sample_entry(width: u32, height: u32, av1c: &[u8]) -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(&[0u8; 6]); // reserved
+    p.extend_from_slice(&1u16.to_be_bytes()); // data reference index
+    p.extend_from_slice(&[0u8; 16]); // pre_defined / reserved
+    p.extend_from_slice(&(width as u16).to_be_bytes());
+    p.extend_from_slice(&(height as u16).to_be_bytes());
+    p.extend_from_slice(&0x00480000u32.to_be_bytes()); // 72 dpi horiz
+    p.extend_from_slice(&0x00480000u32.to_be_bytes()); // 72 dpi vert
+    p.extend_from_slice(&[0u8; 4]); // reserved
+    p.extend_from_slice(&1u16.to_be_bytes()); // frame count
+    p.extend_from_slice(&[0u8; 32]); // compressor name
+    p.extend_from_slice(&0x0018u16.to_be_bytes()); // depth 24
+    p.extend_from_slice(&0xFFFFu16.to_be_bytes()); // pre_defined -1
+    p.extend_from_slice(&mp4_box(b"av1C", av1c));
+    mp4_box(b"av01", &p)
 }
 
 /// The `vpcC` VPCodecConfigurationBox (fullbox v1): profile 0, level unset, 8-bit

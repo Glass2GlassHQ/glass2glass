@@ -158,14 +158,27 @@ impl PadTemplates for Av1Parse {
     }
 }
 
-/// The dimensions (and profile) decoded from an AV1 sequence header.
+/// The fields decoded from an AV1 sequence header: the geometry the caps need
+/// plus the first operating point's level/tier and the `color_config`, which
+/// together are exactly the `AV1CodecConfigurationRecord` (`av1C`) header a
+/// muxer writes (M773).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Av1SeqHeader {
     pub width: u32,
     pub height: u32,
-    /// `seq_profile` (0..=2): bit depth + chroma support. Not in `Caps`,
-    /// surfaced for completeness.
+    /// `seq_profile` (0..=2): bit depth + chroma support.
     pub profile: u8,
+    /// `seq_level_idx[0]` (the first operating point, what `av1C` carries).
+    pub level: u8,
+    /// `seq_tier[0]` (0 unless the level has a tier bit).
+    pub tier: u8,
+    pub high_bitdepth: bool,
+    pub twelve_bit: bool,
+    pub monochrome: bool,
+    pub subsampling_x: bool,
+    pub subsampling_y: bool,
+    /// `chroma_sample_position` (2 bits; 0 = unknown).
+    pub chroma_sample_position: u8,
 }
 
 /// LEB128 (unsigned, little-endian 7-bit groups) read at `*pos`, advancing it.
@@ -183,12 +196,26 @@ fn read_leb128(data: &[u8], pos: &mut usize) -> Option<u64> {
     None
 }
 
-/// Walk the OBUs of one temporal unit (low-overhead format: size-delimited) and
-/// parse the first sequence-header OBU. `None` if none is present or the framing
-/// is malformed.
-fn extract_seq_header(data: &[u8]) -> Option<Av1SeqHeader> {
+/// One OBU located in a temporal unit: its type, the whole-OBU byte range
+/// (header through payload), and the payload's start offset.
+struct ObuRange {
+    obu_type: u8,
+    // whole-OBU start: only the std-gated muxer helpers slice from it.
+    #[cfg_attr(not(feature = "std"), allow(dead_code))]
+    start: usize,
+    payload: usize,
+    end: usize,
+}
+
+/// Walk the OBUs of one temporal unit (low-overhead format: size-delimited).
+/// `None` on malformed framing (a forbidden bit, a truncated size). Shared by
+/// the caps parse, the muxers' `av1C` extraction, and temporal-delimiter
+/// stripping.
+fn obu_ranges(data: &[u8]) -> Option<Vec<ObuRange>> {
+    let mut out = Vec::new();
     let mut pos = 0;
     while pos < data.len() {
+        let start = pos;
         let header = data[pos];
         pos += 1;
         if header & 0x80 != 0 {
@@ -208,30 +235,118 @@ fn extract_seq_header(data: &[u8]) -> Option<Av1SeqHeader> {
         } else {
             data.len().checked_sub(pos)? // no size: OBU runs to the end
         };
+        let payload = pos;
         let end = pos.checked_add(size)?;
         if end > data.len() {
             return None;
         }
-        if obu_type == OBU_SEQUENCE_HEADER {
-            if let Some(info) = parse_sequence_header(&data[pos..end]) {
-                return Some(info);
-            }
-        }
+        out.push(ObuRange {
+            obu_type,
+            start,
+            payload,
+            end,
+        });
         pos = end;
     }
-    None
+    Some(out)
 }
 
-/// Parse a sequence-header OBU payload up to `max_frame_width/height`. `None` on
-/// truncation.
+/// Walk the OBUs of one temporal unit and parse the first sequence-header OBU.
+/// `None` if none is present or the framing is malformed.
+fn extract_seq_header(data: &[u8]) -> Option<Av1SeqHeader> {
+    let obus = obu_ranges(data)?;
+    obus.iter()
+        .filter(|o| o.obu_type == OBU_SEQUENCE_HEADER)
+        .find_map(|o| parse_sequence_header(&data[o.payload..o.end]))
+}
+
+/// The first sequence-header OBU of a temporal unit, whole (header byte through
+/// payload), as a muxer's `av1C` `configOBUs` carries it verbatim. Paired with
+/// its parse, so a caller gets consistent record fields and config bytes.
+#[cfg(feature = "std")]
+pub(crate) fn seq_header_obu(data: &[u8]) -> Option<(Av1SeqHeader, &[u8])> {
+    let obus = obu_ranges(data)?;
+    obus.iter()
+        .filter(|o| o.obu_type == OBU_SEQUENCE_HEADER)
+        .find_map(|o| {
+            // Strict: the muxer's av1C must carry real color_config fields.
+            parse_sequence_header_at(&data[o.payload..o.end], true)
+                .map(|h| (h, &data[o.start..o.end]))
+        })
+}
+
+/// `OBU_TEMPORAL_DELIMITER` type.
+#[cfg(feature = "std")]
+const OBU_TEMPORAL_DELIMITER: u8 = 2;
+/// `OBU_FRAME_HEADER` / `OBU_FRAME` types (the ones opening a coded frame).
+#[cfg(feature = "std")]
+const OBU_FRAME_HEADER: u8 = 3;
+#[cfg(feature = "std")]
+const OBU_FRAME: u8 = 6;
+
+/// A temporal unit with its temporal-delimiter OBUs stripped, as the ISOBMFF /
+/// Matroska AV1 mappings store samples (the container frames the units, so the
+/// delimiter is redundant). Unparseable framing passes through unchanged.
+#[cfg(feature = "std")]
+pub(crate) fn strip_temporal_delimiters(data: &[u8]) -> Vec<u8> {
+    let Some(obus) = obu_ranges(data) else {
+        return data.to_vec();
+    };
+    let mut out = Vec::with_capacity(data.len());
+    for o in &obus {
+        if o.obu_type != OBU_TEMPORAL_DELIMITER {
+            out.extend_from_slice(&data[o.start..o.end]);
+        }
+    }
+    out
+}
+
+/// Whether a temporal unit is a random-access (sync) sample for a muxer's
+/// keyframe flag: it carries a sequence header (encoders re-send it on key
+/// frames), or its first frame OBU codes `frame_type == KEY` with
+/// `show_existing_frame == 0`. Malformed framing is not a sync point.
+#[cfg(feature = "std")]
+pub(crate) fn av1_keyframe(data: &[u8]) -> bool {
+    let Some(obus) = obu_ranges(data) else {
+        return false;
+    };
+    if obus.iter().any(|o| o.obu_type == OBU_SEQUENCE_HEADER) {
+        return true;
+    }
+    for o in &obus {
+        if o.obu_type == OBU_FRAME || o.obu_type == OBU_FRAME_HEADER {
+            // show_existing_frame(1), frame_type(2): KEY = 0. (A
+            // reduced-still-picture stream omits these bits, but such a stream
+            // is a single still whose unit carries the sequence header above.)
+            let Some(&b0) = data.get(o.payload) else {
+                return false;
+            };
+            let show_existing = b0 >> 7 == 1;
+            let frame_type = (b0 >> 5) & 3;
+            return !show_existing && frame_type == 0;
+        }
+    }
+    false
+}
+
+/// Parse a sequence-header OBU payload. The geometry / level prefix is
+/// required; the tail through `color_config` is best-effort for the caps parse
+/// (a truncated header keeps the 8-bit 4:2:0 defaults) and required when
+/// `strict` (the muxer's `av1C` needs real fields).
 fn parse_sequence_header(payload: &[u8]) -> Option<Av1SeqHeader> {
+    parse_sequence_header_at(payload, false)
+}
+
+fn parse_sequence_header_at(payload: &[u8], strict: bool) -> Option<Av1SeqHeader> {
     let mut br = BitReader::new(payload);
     let seq_profile = br.read_bits(3)? as u8;
     let _still_picture = br.read_bit()?;
     let reduced_still_picture_header = br.read_bit()?;
 
+    let mut level = 0u8;
+    let mut tier = 0u8;
     if reduced_still_picture_header == 1 {
-        let _seq_level_idx = br.read_bits(5)?;
+        level = br.read_bits(5)? as u8;
     } else {
         let timing_info_present = br.read_bit()?;
         let mut decoder_model_info_present = 0u32;
@@ -252,11 +367,18 @@ fn parse_sequence_header(payload: &[u8]) -> Option<Av1SeqHeader> {
         }
         let initial_display_delay_present = br.read_bit()?;
         let operating_points_cnt_minus_1 = br.read_bits(5)?;
-        for _ in 0..=operating_points_cnt_minus_1 {
+        for i in 0..=operating_points_cnt_minus_1 {
             br.read_bits(12)?; // operating_point_idc[i]
             let seq_level_idx = br.read_bits(5)?;
-            if seq_level_idx > 7 {
-                br.read_bit()?; // seq_tier[i]
+            let seq_tier = if seq_level_idx > 7 {
+                br.read_bit()? // seq_tier[i]
+            } else {
+                0
+            };
+            if i == 0 {
+                // The first operating point is what `av1C` describes.
+                level = seq_level_idx as u8;
+                tier = seq_tier as u8;
             }
             if decoder_model_info_present == 1 && br.read_bit()? == 1 {
                 // operating_parameters_info(i): two f(n) delays + a flag.
@@ -274,11 +396,134 @@ fn parse_sequence_header(payload: &[u8]) -> Option<Av1SeqHeader> {
     let frame_height_bits = br.read_bits(4)? + 1;
     let max_frame_width = br.read_bits(frame_width_bits)? + 1;
     let max_frame_height = br.read_bits(frame_height_bits)? + 1;
-    Some(Av1SeqHeader {
+
+    let mut header = Av1SeqHeader {
         width: max_frame_width,
         height: max_frame_height,
         profile: seq_profile,
-    })
+        level,
+        tier,
+        // 8-bit 4:2:0 defaults; overwritten from color_config below.
+        high_bitdepth: false,
+        twelve_bit: false,
+        monochrome: false,
+        subsampling_x: true,
+        subsampling_y: true,
+        chroma_sample_position: 0,
+    };
+    match parse_color_config(&mut br, reduced_still_picture_header, seq_profile) {
+        Some(color) => {
+            (
+                header.high_bitdepth,
+                header.twelve_bit,
+                header.monochrome,
+                header.subsampling_x,
+                header.subsampling_y,
+                header.chroma_sample_position,
+            ) = color;
+        }
+        None if strict => return None,
+        // Truncated tail: the caps parse only needs the geometry.
+        None => {}
+    }
+    Some(header)
+}
+
+/// Skip the flag block between the geometry and `color_config` (spec 5.5.1) and
+/// parse `color_config` (5.5.2): `(high_bitdepth, twelve_bit, monochrome,
+/// subsampling_x, subsampling_y, chroma_sample_position)`. `None` on truncation.
+#[allow(clippy::type_complexity)]
+fn parse_color_config(
+    br: &mut BitReader,
+    reduced_still_picture_header: u32,
+    seq_profile: u8,
+) -> Option<(bool, bool, bool, bool, bool, u8)> {
+    if reduced_still_picture_header == 0 && br.read_bit()? == 1 {
+        // frame_id_numbers_present_flag
+        br.read_bits(4)?; // delta_frame_id_length_minus_2
+        br.read_bits(3)?; // additional_frame_id_length_minus_1
+    }
+    br.read_bit()?; // use_128x128_superblock
+    br.read_bit()?; // enable_filter_intra
+    br.read_bit()?; // enable_intra_edge_filter
+    if reduced_still_picture_header == 0 {
+        br.read_bit()?; // enable_interintra_compound
+        br.read_bit()?; // enable_masked_compound
+        br.read_bit()?; // enable_warped_motion
+        br.read_bit()?; // enable_dual_filter
+        let enable_order_hint = br.read_bit()?;
+        if enable_order_hint == 1 {
+            br.read_bit()?; // enable_jnt_comp
+            br.read_bit()?; // enable_ref_frame_mvs
+        }
+        // seq_choose_screen_content_tools -> SELECT (2), else an explicit bit.
+        let force_sct = if br.read_bit()? == 1 {
+            2
+        } else {
+            br.read_bit()?
+        };
+        if force_sct > 0 {
+            // seq_choose_integer_mv -> SELECT, else an explicit bit.
+            if br.read_bit()? == 0 {
+                br.read_bit()?; // seq_force_integer_mv
+            }
+        }
+        if enable_order_hint == 1 {
+            br.read_bits(3)?; // order_hint_bits_minus_1
+        }
+    }
+    br.read_bit()?; // enable_superres
+    br.read_bit()?; // enable_cdef
+    br.read_bit()?; // enable_restoration
+
+    // color_config (spec 5.5.2).
+    let high_bitdepth = br.read_bit()? == 1;
+    let twelve_bit = if seq_profile == 2 && high_bitdepth {
+        br.read_bit()? == 1
+    } else {
+        false
+    };
+    let monochrome = if seq_profile == 1 {
+        false
+    } else {
+        br.read_bit()? == 1
+    };
+    let mut identity_matrix = false;
+    if br.read_bit()? == 1 {
+        // color_description_present: primaries / transfer / matrix.
+        let primaries = br.read_bits(8)?;
+        let transfer = br.read_bits(8)?;
+        let matrix = br.read_bits(8)?;
+        // CP_BT_709 / TC_SRGB / MC_IDENTITY: the RGB case with no subsampling.
+        identity_matrix = matrix == 0 && primaries == 1 && transfer == 13;
+    }
+    if monochrome {
+        br.read_bit()?; // color_range
+        return Some((high_bitdepth, twelve_bit, monochrome, true, true, 0));
+    }
+    if identity_matrix {
+        return Some((high_bitdepth, twelve_bit, monochrome, false, false, 0));
+    }
+    br.read_bit()?; // color_range
+    let (ssx, ssy) = match seq_profile {
+        0 => (true, true),
+        1 => (false, false),
+        _ => {
+            if twelve_bit {
+                let ssx = br.read_bit()? == 1;
+                let ssy = if ssx { br.read_bit()? == 1 } else { false };
+                (ssx, ssy)
+            } else {
+                (true, false)
+            }
+        }
+    };
+    let csp = if ssx && ssy {
+        br.read_bits(2)? as u8
+    } else {
+        0
+    };
+    Some((high_bitdepth, twelve_bit, monochrome, ssx, ssy, csp))
 }
 
 /// AV1 unsigned variable-length code (spec `uvlc()`): count leading zeros, then
