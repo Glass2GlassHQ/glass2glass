@@ -3,9 +3,12 @@
 //! full-range signal is byte-identical to ffmpeg's `adpcm_ima_wav` encoder,
 //! our decode of ffmpeg's stream matches ffmpeg's own decode exactly, and
 //! ffmpeg decodes *our* stream to exactly what we decode. Persisted as
-//! `Oracle` conformance evidence. The block functions and ring-lend elements
-//! are exercised on host rings like the G.711 ones (`m638_g711.rs`); the
-//! no-alloc claim is compile-time (see there).
+//! `Oracle` conformance evidence. A pre-8.1 ffmpeg decodes 4-bit IMA-WAV
+//! with the superseded multiplicative arithmetic; the oracle test classifies
+//! that by output and skips the decode-exactness asserts against it (M765).
+//! The block functions and ring-lend elements are exercised on host rings
+//! like the G.711 ones (`m638_g711.rs`); the no-alloc claim is compile-time
+//! (see there).
 
 mod util;
 
@@ -87,6 +90,38 @@ fn wav_of(data: &[u8], block_bytes: u16, rate: u32) -> Vec<u8> {
     let mut wav = h;
     wav.extend_from_slice(data);
     wav
+}
+
+/// The legacy (pre-8.1 ffmpeg) multiplicative IMA reconstruction
+/// (`diff = (2n+1)*step >> 3`), kept only to classify an old oracle's decode
+/// output; the codec under test implements the IMA spec's bit-serial form the
+/// modern decoder uses. An independent reference, not a copy of the unit.
+fn decode_stream_multiplicative(bytes: &[u8], block_bytes: usize) -> Vec<u8> {
+    const STEPS: [u16; 89] = [
+        7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 25, 28, 31, 34, 37, 41, 45, 50, 55, 60,
+        66, 73, 80, 88, 97, 107, 118, 130, 143, 157, 173, 190, 209, 230, 253, 279, 307, 337, 371,
+        408, 449, 494, 544, 598, 658, 724, 796, 876, 963, 1060, 1166, 1282, 1411, 1552, 1707, 1878,
+        2066, 2272, 2499, 2749, 3024, 3327, 3660, 4026, 4428, 4871, 5358, 5894, 6484, 7132, 7845,
+        8630, 9493, 10442, 11487, 12635, 13899, 15289, 16818, 18500, 20350, 22385, 24623, 27086,
+        29794, 32767,
+    ];
+    const INDEX: [i8; 8] = [-1, -1, -1, -1, 2, 4, 6, 8];
+    let mut out = Vec::with_capacity(bytes.len());
+    for blk in bytes.chunks_exact(block_bytes) {
+        let mut pred = i16::from_le_bytes([blk[0], blk[1]]) as i32;
+        let mut idx = (blk[2] as usize).min(88);
+        out.extend_from_slice(&(pred as i16).to_le_bytes());
+        for byte in &blk[BLOCK_HEADER..] {
+            for nib in [byte & 0xF, byte >> 4] {
+                let step = STEPS[idx] as i32;
+                let diff = ((2 * (nib & 7) as i32 + 1) * step) >> 3;
+                pred = (pred + if nib & 8 != 0 { -diff } else { diff }).clamp(-32768, 32767);
+                idx = (idx as i32 + INDEX[(nib & 7) as usize] as i32).clamp(0, 88) as usize;
+                out.extend_from_slice(&(pred as i16).to_le_bytes());
+            }
+        }
+    }
+    out
 }
 
 /// The `data` chunk of a WAV file.
@@ -208,6 +243,11 @@ fn ffmpeg_oracle_bit_exact_three_ways() {
     assert_eq!(ours_enc, theirs_enc, "encoded stream differs from ffmpeg");
 
     // 2. Decode of the reference stream: must match ffmpeg's own s16 output.
+    //    ffmpeg >= 8.1 decodes 4-bit IMA-WAV with the IMA spec's bit-serial
+    //    expansion (which the codec under test implements); older ffmpeg used
+    //    the multiplicative form. Classify the installed oracle by its own
+    //    output: a legacy decoder skips the decode-exactness asserts (its
+    //    arithmetic is the superseded one), anything else must match us.
     let status = Command::new("ffmpeg")
         .args(["-y", "-loglevel", "error", "-i"])
         .arg(f("theirs.wav"))
@@ -216,27 +256,37 @@ fn ffmpeg_oracle_bit_exact_three_ways() {
         .status()
         .expect("run ffmpeg");
     assert!(status.success(), "ffmpeg decode");
-    assert_eq!(
-        decode_stream(&theirs_enc, BLOCK),
-        std::fs::read(f("theirs.s16")).unwrap(),
-        "decode of ffmpeg's stream differs from ffmpeg's decode"
-    );
+    let ffmpeg_dec = std::fs::read(f("theirs.s16")).unwrap();
+    let strict = decode_stream(&theirs_enc, BLOCK) == ffmpeg_dec;
+    if !strict {
+        assert_eq!(
+            decode_stream_multiplicative(&theirs_enc, BLOCK),
+            ffmpeg_dec,
+            "ffmpeg's decode matches neither the bit-serial nor the legacy multiplicative arithmetic"
+        );
+        eprintln!(
+            "legacy (pre-8.1) ffmpeg IMA decoder detected; skipping decode-exactness asserts"
+        );
+    }
 
-    // 3. The reference decodes *our* stream to exactly our reconstruction.
-    std::fs::write(f("ours.wav"), wav_of(&ours_enc, BLOCK as u16, 8000)).unwrap();
-    let status = Command::new("ffmpeg")
-        .args(["-y", "-loglevel", "error", "-i"])
-        .arg(f("ours.wav"))
-        .args(["-f", "s16le"])
-        .arg(f("ffdec.s16"))
-        .status()
-        .expect("run ffmpeg");
-    assert!(status.success(), "ffmpeg decodes our wav");
-    assert_eq!(
-        std::fs::read(f("ffdec.s16")).unwrap(),
-        decode_stream(&ours_enc, BLOCK),
-        "ffmpeg reconstructs our stream differently"
-    );
+    // 3. The reference decodes *our* stream to exactly our reconstruction
+    //    (bit-serial both sides, so only meaningful against a modern oracle).
+    if strict {
+        std::fs::write(f("ours.wav"), wav_of(&ours_enc, BLOCK as u16, 8000)).unwrap();
+        let status = Command::new("ffmpeg")
+            .args(["-y", "-loglevel", "error", "-i"])
+            .arg(f("ours.wav"))
+            .args(["-f", "s16le"])
+            .arg(f("ffdec.s16"))
+            .status()
+            .expect("run ffmpeg");
+        assert!(status.success(), "ffmpeg decodes our wav");
+        assert_eq!(
+            std::fs::read(f("ffdec.s16")).unwrap(),
+            decode_stream(&ours_enc, BLOCK),
+            "ffmpeg reconstructs our stream differently"
+        );
+    }
 
     for name in [
         "sig.s16",
@@ -248,16 +298,22 @@ fn ffmpeg_oracle_bit_exact_three_ways() {
         let _ = std::fs::remove_file(f(name));
     }
 
-    // Three-way full-signal bit-exactness against a named external
-    // implementation: Oracle-tier evidence.
+    // Full-signal bit-exactness against a named external implementation:
+    // Oracle-tier evidence. Honest about what ran: a legacy oracle only
+    // verified the encode direction.
     use g2g_core::conformance::{ConformanceDimension, Evidence};
+    let detail = if strict {
+        "bit-exact encode + decode + cross-decode"
+    } else {
+        "bit-exact encode (legacy ffmpeg decoder, decode asserts skipped)"
+    };
     for element in ["adpcmenc", "adpcmdec"] {
         g2g_plugins::conformance::persist::record_evidence(
             element,
             &Evidence::new(ConformanceDimension::Oracle)
                 .peer("ffmpeg")
                 .codec("adpcm-ima-wav")
-                .detail("bit-exact encode + decode + cross-decode"),
+                .detail(detail),
         )
         .expect("persist oracle evidence");
     }
