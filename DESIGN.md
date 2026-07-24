@@ -1697,7 +1697,14 @@ carried on the frame, the `BlockGroup`'s `BlockDuration` scaled onto
 (§4.18). Unlike `TsDemux`,
 Matroska's Tracks element carries concrete geometry and audio parameters, so the
 demuxer refines the output caps itself via `CapsChanged` once Tracks is parsed,
-without a downstream bitstream parser. WebM (the VP8/VP9/AV1 + Opus subset) is the browser-delivery motivator. Block
+without a downstream bitstream parser. An H.264 / H.265 track's blocks are
+converted from the container-native AVCC / HVCC length-prefixed framing
+(declared by the `avcC` / `hvcC` `CodecPrivate`, whose `lengthSizeMinusOne`
+sets the prefix width) to the Annex-B framing the pipeline assumes, with the
+config record's parameter sets prepended on keyframes (M766, ffmpeg's
+`h264_mp4toannexb` discipline); the whole-block length walk is validated
+exactly, so a nonstandard Annex-B block passes through unchanged instead of
+being mis-framed. WebM (the VP8/VP9/AV1 + Opus subset) is the browser-delivery motivator. Block
 lacing (Xiph / EBML / fixed) is split, so multi-frame audio blocks demux.
 The `Cues` index is parsed into a time -> Cluster-byte-position map
 (`cue_seek_offset`), and `MkvDemux` seeks through it in three tiers

@@ -698,41 +698,8 @@ pub(crate) fn parse_senc(
     Ok(out)
 }
 
-/// Parameter-set NALUs out of an `hvcC` payload, in array order (VPS, SPS,
-/// PPS). Fixed 22-byte prefix (config version + 12-byte general PTL +
-/// descriptive fields), then `numOfArrays`, then per-array NAL lists.
-pub(crate) fn parse_hvcc(hvcc: &[u8]) -> Result<Vec<Vec<u8>>, G2gError> {
-    let num_arrays = *hvcc.get(22).ok_or(G2gError::CapsMismatch)?;
-    let mut at = 23usize;
-    let mut sets = Vec::new();
-    for _ in 0..num_arrays {
-        // array header byte: array_completeness | reserved | NAL_unit_type.
-        at += 1;
-        let num_nalus = u16::from_be_bytes(
-            hvcc.get(at..at + 2)
-                .ok_or(G2gError::CapsMismatch)?
-                .try_into()
-                .expect("2 bytes"),
-        );
-        at += 2;
-        for _ in 0..num_nalus {
-            let len = u16::from_be_bytes(
-                hvcc.get(at..at + 2)
-                    .ok_or(G2gError::CapsMismatch)?
-                    .try_into()
-                    .expect("2 bytes"),
-            ) as usize;
-            at += 2;
-            let nalu = hvcc.get(at..at + len).ok_or(G2gError::CapsMismatch)?;
-            sets.push(nalu.to_vec());
-            at += len;
-        }
-    }
-    if sets.is_empty() {
-        return Err(G2gError::CapsMismatch);
-    }
-    Ok(sets)
-}
+// `parse_hvcc` moved to `annexb` (shared with the no_std Matroska demuxer).
+pub(crate) use crate::annexb::parse_hvcc;
 
 // The avcC / parameter-set helpers moved to the ungated `annexb` module (M662,
 // the no_std FLV demuxer shares them); re-exported so this module's users keep

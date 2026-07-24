@@ -530,9 +530,6 @@ _(No open parser items.)_
     demuxed yet. FLAC rides Matroska only: Ogg-FLAC detection and a native
     `.flac` parse layer are open. The audio sink needs the `pulse-sink` (or
     `alsa-sink`) feature built in, else `autoaudiosink` falls back to `fakesink`.
-  - **H.264 in Matroska.** A bare `decodebin` on an `.mkv` with an AVCC-framed
-    H.264 track fails NAL splitting: the demux forwards length-prefixed samples
-    and never converts to Annex-B from the `avcC` CodecPrivate.
   Parsing SSA / TTML placement into `CueSettings` (only
   WebVTT populates it today, though all three now ride the frame-meta). Glyph
   rendering (incl. `vertical:rl` / `lr` layout) is the `truetype-overlay` feature
