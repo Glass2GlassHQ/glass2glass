@@ -554,16 +554,17 @@ impl MkvDemux {
                     out.push(PipelinePacket::DataFrame(header)).await?;
                 }
             }
+            let timing = FrameTiming {
+                pts_ns: f.pts_ns,
+                dts_ns: f.pts_ns,
+                duration_ns: f.duration_ns,
+                ..FrameTiming::default()
+            };
             let frame = Frame::new(
                 MemoryDomain::System(SystemSlice::from_boxed(
-                    deframe_block(f.codec, f.data).into_boxed_slice(),
+                    deframe_block(&self.demux, f).into_boxed_slice(),
                 )),
-                FrameTiming {
-                    pts_ns: f.pts_ns,
-                    dts_ns: f.pts_ns,
-                    duration_ns: f.duration_ns,
-                    ..FrameTiming::default()
-                },
+                timing,
                 self.emitted,
             );
             self.emitted += 1;
@@ -746,16 +747,72 @@ fn codec_to_stream(codec: MkvCodec) -> Option<MkvStream> {
 /// De-frame a demuxed frame's bytes for forwarding: a subtitle block is reduced to
 /// its plain UTF-8 cue text (the source-format framing stripped, see
 /// [`crate::subparse::deframe_subtitle_block`]) so every subtitle stream forwards
-/// as `Text { Utf8 }`; every other codec passes through unchanged. The cue timing
-/// rides the frame (block PTS + `BlockDuration`), so only the text is extracted.
-fn deframe_block(codec: MkvCodec, data: Vec<u8>) -> Vec<u8> {
-    match codec {
+/// as `Text { Utf8 }`; an H.264 / H.265 block converts from the container's
+/// length-prefixed framing to Annex-B (see [`video_block_to_annexb`]); every
+/// other codec passes through unchanged. The cue timing rides the frame (block
+/// PTS + `BlockDuration`), so only the text is extracted.
+fn deframe_block(demux: &MatroskaDemuxer, f: crate::matroska::MkvFrame) -> Vec<u8> {
+    match f.codec {
         MkvCodec::Subtitle(format) => {
-            let text = alloc::string::String::from_utf8_lossy(&data);
+            let text = alloc::string::String::from_utf8_lossy(&f.data);
             crate::subparse::deframe_subtitle_block(&text, format).into_bytes()
         }
-        _ => data,
+        MkvCodec::H264 | MkvCodec::H265 => {
+            let private = demux.codec_private(f.track);
+            video_block_to_annexb(f.codec, f.keyframe, private, f.data)
+        }
+        _ => f.data,
     }
+}
+
+/// Convert a length-prefixed (AVCC / HVCC, the Matroska-native H.26x framing
+/// declared by the track's `avcC` / `hvcC` `CodecPrivate`) block to the Annex-B
+/// framing the g2g pipeline assumes, prepending the config record's parameter
+/// sets on keyframes so a decoder can tune in (ffmpeg's `h264_mp4toannexb`
+/// discipline). Blocks pass through unchanged when the track carries no
+/// parseable config record or the length walk does not consume the block
+/// exactly (already-Annex-B data fails it), so a nonstandard stream is
+/// forwarded as-is rather than mis-framed.
+fn video_block_to_annexb(
+    codec: MkvCodec,
+    keyframe: bool,
+    private: Option<&[u8]>,
+    data: Vec<u8>,
+) -> Vec<u8> {
+    use crate::annexb::{
+        checked_length_prefixed_to_annexb, parse_avcc, prepend_param_sets, starts_with_param_set,
+    };
+    let Some(private) = private else {
+        return data;
+    };
+    // Config-record parameter sets + NAL length size: avcC keeps
+    // lengthSizeMinusOne at byte 4, hvcC at byte 21 (low 2 bits both).
+    let (vcodec, len_size_at, param_sets) = match codec {
+        MkvCodec::H264 => {
+            let Ok((sps, pps)) = parse_avcc(private) else {
+                return data;
+            };
+            (VideoCodec::H264, 4, alloc::vec![sps, pps])
+        }
+        MkvCodec::H265 => {
+            let Ok(sets) = crate::annexb::parse_hvcc(private) else {
+                return data;
+            };
+            (VideoCodec::H265, 21, sets)
+        }
+        _ => return data,
+    };
+    let Some(&len_byte) = private.get(len_size_at) else {
+        return data;
+    };
+    let len_size = ((len_byte & 3) + 1) as usize;
+    let Some(annexb) = checked_length_prefixed_to_annexb(&data, len_size) else {
+        return data;
+    };
+    if keyframe && !starts_with_param_set(&annexb, vcodec) {
+        return prepend_param_sets(&annexb, &param_sets, vcodec);
+    }
+    annexb
 }
 
 /// One forwardable elementary stream discovered in a parsed Matroska container
@@ -1125,16 +1182,17 @@ impl MultiOutputElement for MkvDemuxN {
                             out.push_to(port, PipelinePacket::CapsChanged(caps)).await?;
                             self.announced[port] = true;
                         }
+                        let timing = FrameTiming {
+                            pts_ns: f.pts_ns,
+                            dts_ns: f.pts_ns,
+                            duration_ns: f.duration_ns,
+                            ..FrameTiming::default()
+                        };
                         let out_frame = Frame::new(
                             MemoryDomain::System(SystemSlice::from_boxed(
-                                deframe_block(f.codec, f.data).into_boxed_slice(),
+                                deframe_block(&self.demux, f).into_boxed_slice(),
                             )),
-                            FrameTiming {
-                                pts_ns: f.pts_ns,
-                                dts_ns: f.pts_ns,
-                                duration_ns: f.duration_ns,
-                                ..FrameTiming::default()
-                            },
+                            timing,
                             self.emitted,
                         );
                         self.emitted += 1;

@@ -1824,15 +1824,15 @@ where
                     // `Infeasible` means the sink positively rejects every
                     // output the transform can produce: surface it loud as a
                     // reverse reconfigure into this boundary.
-                    let forward_caps = {
+                    let (forward_caps, output_resolved) = {
                         let constraint = transform.caps_constraint_as_transform();
                         match resolve_forward_output(
                             &constraint,
                             &new_caps,
                             downstream_feasible.as_ref(),
                         ) {
-                            ForwardResolve::Fixed(caps) => caps,
-                            ForwardResolve::Defer => new_caps.clone(),
+                            ForwardResolve::Fixed(caps) => (caps, true),
+                            ForwardResolve::Defer => (new_caps.clone(), false),
                             ForwardResolve::Infeasible(failure) => {
                                 report_nego_failure(bus_for_transform.as_ref(), failure);
                                 link1_rx.request_reconfigure(Reconfigure::Renegotiate);
@@ -1847,7 +1847,12 @@ where
                             // startup, so a videoscale/videoconvert fed by a
                             // downstream capsfilter retargets when caps shift.
                             // No-op for property-driven / passthrough elements.
-                            AsyncElement::configure_output(transform, &forward_caps)?;
+                            // Skipped on a Defer, where `forward_caps` is the
+                            // incoming INPUT caps, not this element's output
+                            // (the contract is output caps only).
+                            if output_resolved {
+                                AsyncElement::configure_output(transform, &forward_caps)?;
+                            }
                             // M18 α: element-local re-allocation under the
                             // re-fixated output caps before forwarding.
                             realloc_local(transform, &forward_caps);

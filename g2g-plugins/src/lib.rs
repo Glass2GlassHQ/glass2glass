@@ -33,6 +33,10 @@ pub(crate) fn fuzz_block_on<F: core::future::Future>(f: F) -> F::Output {
 }
 
 pub mod aacparse;
+// Native FLAC stream parser (M774): frame-splits a `.flac` byte stream (the
+// re-framing `h264parse` analog for audio) and refines caps from STREAMINFO.
+pub mod flacparse;
+
 pub mod appsink;
 pub mod appsrc;
 pub mod audioamplify;
@@ -649,6 +653,9 @@ pub mod mjpegenc;
 pub mod opusdec;
 #[cfg(feature = "opus")]
 pub mod opusenc;
+// Vorbis decode, pure Rust via symphonia. Gated behind the `vorbis` feature.
+#[cfg(feature = "vorbis")]
+pub mod vorbisdec;
 
 // HTTP(S) byte-stream source via reqwest (the fetch layer under HLS/DASH).
 #[cfg(feature = "http-src")]

@@ -25,7 +25,7 @@ linux-full = [
     "rtsp", "rtsp-server", "srt", "udp-egress", "udp-ingress", "rtmp", "webrtc", "remote", "remote-ws",
     "http-src", "hls", "dash",
     "ffmpeg", "vaapi", "v4l2",
-    "opus", "vpx", "av1-encode", "mjpeg", "mjpeg-encode",
+    "opus", "vorbis", "vpx", "av1-encode", "mjpeg", "mjpeg-encode",
     "alsa-sink", "pulse-sink", "pipewire",
     "wayland-sink", "kms-sink", "wgpu-sink", "vello-overlay", "analytics",
     "declarative-yaml", "script-rhai", "observe",
@@ -563,6 +563,9 @@ mjpeg-encode = ["std", "dep:jpeg-encoder"]
 # so it is gated and excluded from pure-Rust / no_std builds. Implies std. v1 is
 # 48 kHz mono/stereo S16LE <-> Opus, the rate Opus always decodes at.
 opus = ["std", "dep:audiopus"]
+# Vorbis audio decode (VorbisDec) via symphonia's pure-Rust decoder: the Ogg /
+# WebM audio codec preceding Opus. No system deps. Implies std.
+vorbis = ["std", "dep:symphonia-core", "dep:symphonia-codec-vorbis"]
 # HTTP(S) byte-stream source (HttpSrc) via the `reqwest` async client: a single
 # GET streamed downstream as a `Caps::ByteStream` (or declared codec), the
 # souphttpsrc analog and the fetch layer under HLS/DASH. Implies std + tokio.
@@ -677,6 +680,11 @@ jpeg-encoder = { version = "0.7", optional = true }
 # mis-locates the lib on multiarch lib64 layouts, so the dev package is the
 # supported path. Gated + std-only, excluded from no_std builds.
 audiopus = { version = "0.3.0-rc.0", optional = true }
+# Pure-Rust Vorbis decoder (vorbis feature) for VorbisDec. symphonia is the
+# maintained pure-Rust codec suite (lewton is dormant); only the vorbis codec
+# crate + core are pulled, not the demuxers.
+symphonia-core = { version = "0.6", optional = true }
+symphonia-codec-vorbis = { version = "0.6", optional = true }
 # Async HTTP client for HttpSrc (http-src feature). Default features keep
 # default-tls (platform-native TLS) and http1/http2; only `chunk()` streaming is
 # used. Runs on the caller's tokio runtime.

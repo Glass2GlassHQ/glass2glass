@@ -14,11 +14,16 @@
 //! Validated bit-exact against ffmpeg in *all three* directions
 //! (`m639_adpcm.rs`): our encode of a full-range signal matches ffmpeg's
 //! encoder byte-for-byte, our decode of ffmpeg's stream matches ffmpeg's own
-//! decode, and ffmpeg decodes our stream to exactly what we decode. The
-//! reconstruction arithmetic is the multiplicative form ffmpeg uses
-//! (`diff = (2 * delta + 1) * step >> 3`), not the bit-serial approximation
-//! some references show; the two differ in truncation and would break
-//! bit-exactness.
+//! decode, and ffmpeg decodes our stream to exactly what we decode. The two
+//! directions deliberately use *different* reconstruction arithmetic,
+//! mirroring ffmpeg's own pair: the encoder tracks its predictor with the
+//! multiplicative form (`diff = (2 * delta + 1) * step >> 3`, ffmpeg's
+//! `adpcm_ima_compress_sample`), while the decoder reconstructs with the IMA
+//! spec's bit-serial form (`step>>3` plus per-bit terms, ffmpeg >= 8.1's
+//! `ff_adpcm_ima_qt_expand_nibble`; older ffmpeg decoded 4-bit IMA-WAV with
+//! the multiplicative form). The two differ by a few LSBs of truncation, so
+//! matching each direction's reference exactly is what keeps the byte-level
+//! interop asserts green.
 //!
 //! [`AdpcmEnc`] / [`AdpcmDec`] wrap the block conversions as heap-free
 //! [`StaticTransform`]s over the shared [`StaticLendRing`] lend model. They
@@ -46,8 +51,8 @@ const STEP_TABLE: [u16; 89] = [
 const INDEX_TABLE: [i8; 8] = [-1, -1, -1, -1, 2, 4, 6, 8];
 
 /// One channel's ADPCM predictor state. The same state type drives both
-/// directions; encode and decode stay in lockstep because the encoder
-/// reconstructs exactly what the decoder will.
+/// directions; each direction tracks its own reference implementation's
+/// arithmetic (see the module note on the encode/decode split).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ImaState {
     /// Last reconstructed sample.
@@ -83,11 +88,22 @@ impl ImaState {
         nibble
     }
 
-    /// Reconstruct one sample from a 4-bit code (ffmpeg's
-    /// `adpcm_ima_expand_nibble`, shift 3).
+    /// Reconstruct one sample from a 4-bit code, using the IMA spec's
+    /// bit-serial expansion (ffmpeg >= 8.1's `ff_adpcm_ima_qt_expand_nibble`;
+    /// summing the truncated per-bit terms differs from the encoder's single
+    /// truncated multiply by a few LSBs).
     pub fn decode_sample(&mut self, nibble: u8) -> i16 {
         let step = self.step();
-        let diff = ((2 * (nibble & 7) as i32 + 1) * step) >> 3;
+        let mut diff = step >> 3;
+        if nibble & 4 != 0 {
+            diff += step;
+        }
+        if nibble & 2 != 0 {
+            diff += step >> 1;
+        }
+        if nibble & 1 != 0 {
+            diff += step >> 2;
+        }
         let p = self.predictor as i32 + if nibble & 8 != 0 { -diff } else { diff };
         self.predictor = p.clamp(-32768, 32767) as i16;
         self.adapt(nibble);

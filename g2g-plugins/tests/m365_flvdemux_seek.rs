@@ -30,7 +30,7 @@ fn make_flv(tags: &[(u32, bool, Vec<u8>)]) -> Vec<u8> {
     let mut mux = FlvMuxer::new(FlvTrack::Video);
     let mut out = Vec::new();
     for (pts, kf, au) in tags {
-        out.extend_from_slice(&mux.push_video(au, *pts, *kf));
+        out.extend_from_slice(&mux.push_video(au, *pts, 0, *kf));
     }
     out
 }

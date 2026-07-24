@@ -15,7 +15,9 @@
 //!
 //! **Filtering.** [`configure`] parses a `GST_DEBUG`-style spec
 //! (`"*:warning,opusenc:debug"`): `*:LEVEL` (or a bare `LEVEL`) sets the default
-//! threshold, `name:LEVEL` overrides one category. A message at `level` is emitted
+//! threshold, `name:LEVEL` overrides one category, and a `name` with `*` / `?`
+//! wildcards overrides every matching category (`*sink*:5`; an exact override
+//! wins over a glob). A message at `level` is emitted
 //! when `level <= threshold`. The common no-override case is checked against an
 //! atomic without locking, so a disabled `g2g_trace!` in a hot loop is cheap.
 //!
@@ -238,10 +240,17 @@ impl LogConfig {
         }
     }
 
-    /// The effective threshold for `category`: its override, else the default.
+    /// The effective threshold for `category`: an exact override, else the first
+    /// matching glob override (`*` / `?` wildcards, e.g. `G2G_DEBUG=*sink*:5`),
+    /// else the default. Exact wins over glob regardless of spec order.
     pub fn level_for(&self, category: &str) -> LogLevel {
         for (k, v) in &self.overrides {
             if k == category {
+                return *v;
+            }
+        }
+        for (k, v) in &self.overrides {
+            if k.contains(['*', '?']) && glob_match(k, category) {
                 return *v;
             }
         }
@@ -298,6 +307,35 @@ impl LogConfig {
     fn has_overrides(&self) -> bool {
         !self.overrides.is_empty()
     }
+}
+
+/// Minimal glob over ASCII category names: `*` matches any run (including
+/// empty), `?` exactly one byte. Iterative with single-star backtracking, so a
+/// pathological pattern cannot recurse.
+fn glob_match(pattern: &str, s: &str) -> bool {
+    let (p, t) = (pattern.as_bytes(), s.as_bytes());
+    let (mut pi, mut ti) = (0usize, 0usize);
+    let mut star: Option<(usize, usize)> = None;
+    while ti < t.len() {
+        if pi < p.len() && (p[pi] == b'?' || p[pi] == t[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < p.len() && p[pi] == b'*' {
+            star = Some((pi, ti));
+            pi += 1;
+        } else if let Some((sp, sm)) = star {
+            // Backtrack: let the last `*` consume one more byte.
+            star = Some((sp, sm + 1));
+            pi = sp + 1;
+            ti = sm + 1;
+        } else {
+            return false;
+        }
+    }
+    while pi < p.len() && p[pi] == b'*' {
+        pi += 1;
+    }
+    pi == p.len()
 }
 
 // Process-global filter + sink. `DEFAULT_LEVEL` / `HAS_OVERRIDES` mirror `CONFIG`
@@ -631,6 +669,33 @@ mod tests {
         let mut c2 = LogConfig::new();
         c2.parse_spec("info");
         assert_eq!(c2.level_for("x"), LogLevel::Info);
+    }
+
+    #[test]
+    fn glob_overrides_match_categories() {
+        let mut cfg = LogConfig::new();
+        cfg.parse_spec("*:warning,*sink*:5,opus?nc:debug,waylandsink:error");
+        // Glob hits every matching category...
+        assert_eq!(cfg.level_for("filesink"), LogLevel::Debug);
+        assert_eq!(cfg.level_for("sinkpad"), LogLevel::Debug);
+        // ...`?` matches exactly one byte...
+        assert_eq!(cfg.level_for("opusenc"), LogLevel::Debug);
+        assert_eq!(cfg.level_for("opusnc"), LogLevel::Warn);
+        // ...an exact override wins over a matching glob, in either spec order...
+        assert_eq!(cfg.level_for("waylandsink"), LogLevel::Error);
+        // ...and non-matches keep the default.
+        assert_eq!(cfg.level_for("videoscale"), LogLevel::Warn);
+    }
+
+    #[test]
+    fn glob_match_handles_edges() {
+        assert!(glob_match("*", "anything"));
+        assert!(glob_match("*", ""));
+        assert!(glob_match("a*b*c", "a-long-b-run-c"));
+        assert!(!glob_match("a*b*c", "a-long-b-run"));
+        assert!(glob_match("??", "ab"));
+        assert!(!glob_match("??", "a"));
+        assert!(!glob_match("abc", "abd"));
     }
 
     /// One captured log record (level, category, instance, formatted message).

@@ -1,5 +1,5 @@
 //! Opus audio decoder element (OpusDec, `opus` feature): `Audio{Opus}` in,
-//! `Audio{PcmS16Le}` out, via libopus through the `audiopus` crate. The decode
+//! `Audio{PcmS16Le}` (or negotiated `PcmF32Le`) out, via libopus through the `audiopus` crate. The decode
 //! sibling of [`crate::opusenc::OpusEnc`]; it consumes the packets
 //! [`crate::opusparse::OpusParse`] frames.
 //!
@@ -20,8 +20,8 @@
 //! matches ffmpeg / gstreamer sample-for-sample. Streams with no `OpusHead` and
 //! no per-frame duration (RTP) decode untrimmed, as before.
 //!
-//! Scope (v1): 48 kHz mono/stereo, S16LE output. Float output and packet-loss
-//! concealment (decode of a `None` packet) are follow-ups.
+//! Scope: 48 kHz mono/stereo, S16LE (default) or F32LE output. Packet-loss
+//! concealment (decode of a `None` packet) is a follow-up.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -50,6 +50,10 @@ const MAX_FRAME_SAMPLES: usize = (OPUS_RATE_HZ as usize * 120) / 1000;
 /// Decodes an Opus elementary stream into raw interleaved S16LE PCM.
 pub struct OpusDec {
     channels: u8,
+    /// Negotiated output sample format: `PcmS16Le` (default) or `PcmF32Le`
+    /// (libopus' float API, no i16 quantize). Settled by the solver via
+    /// `configure_output` / the runner's pre-fixed output `CapsChanged`.
+    out_format: AudioFormat,
     dec: Option<Decoder>,
     /// Last emitted output caps, to suppress re-emitting an unchanged
     /// `CapsChanged` and to detect a channel-count change.
@@ -85,6 +89,7 @@ impl OpusDec {
     pub fn new() -> Self {
         Self {
             channels: 0,
+            out_format: AudioFormat::PcmS16Le,
             dec: None,
             last_out: None,
             sequence: 0,
@@ -124,7 +129,7 @@ impl OpusDec {
 
     fn output_caps(&self) -> Caps {
         Caps::Audio {
-            format: AudioFormat::PcmS16Le,
+            format: self.out_format,
             channels: self.channels,
             sample_rate: OPUS_RATE_HZ,
         }
@@ -146,13 +151,28 @@ impl OpusDec {
         Ok((pcm, per_channel))
     }
 
-    /// Decode `opus` and serialize only the valid window to little-endian bytes.
-    /// The window drops the pre-skip lookahead at the stream head and any padding
-    /// past `keep` (per-channel valid count for this frame, from `duration_ns`;
-    /// `None` keeps the whole frame). Returns the trimmed S16LE bytes.
-    fn decode_trimmed(&mut self, opus: &[u8], keep: Option<u64>) -> Result<Vec<u8>, G2gError> {
+    /// The float twin of [`decode`](Self::decode) (libopus' `opus_decode_float`,
+    /// used when `PcmF32Le` output is negotiated: no i16 quantize).
+    fn decode_f32(&mut self, opus: &[u8]) -> Result<(Vec<f32>, usize), G2gError> {
         let channels = self.channels as usize;
-        let (pcm, per_channel) = self.decode(opus)?;
+        let dec = self.dec.as_mut().ok_or(G2gError::NotConfigured)?;
+        let packet = Packet::try_from(opus).map_err(|_| G2gError::CapsMismatch)?;
+        let mut pcm = alloc::vec![0f32; MAX_FRAME_SAMPLES * channels];
+        let per_channel = {
+            let signals = MutSignals::try_from(&mut pcm[..]).map_err(|_| G2gError::CapsMismatch)?;
+            dec.decode_float(Some(packet), signals, false)
+                .map_err(|_| G2gError::CapsMismatch)?
+        };
+        pcm.truncate(per_channel * channels);
+        Ok((pcm, per_channel))
+    }
+
+    /// The interleaved-sample window of a decoded frame: drops the pre-skip
+    /// lookahead at the stream head and any padding past `keep` (per-channel
+    /// valid count from `duration_ns`; `None` keeps the whole frame). Returns
+    /// `(start, end)` interleaved-sample indices and advances the accounting.
+    fn valid_window(&mut self, per_channel: usize, keep: Option<u64>) -> (usize, usize) {
+        let channels = self.channels as usize;
         let n = per_channel as u64;
         // Head drop: pre-skip samples still ahead of this frame's start.
         let head = self
@@ -163,8 +183,24 @@ impl OpusDec {
         // Tail cap: keep at most `keep` per-channel samples from the frame start.
         let end = keep.map_or(n, |k| k.min(n)).max(head);
         self.decoded_samples = self.decoded_samples.saturating_add(n);
-        let start_i = head as usize * channels;
-        let end_i = end as usize * channels;
+        (head as usize * channels, end as usize * channels)
+    }
+
+    /// Decode `opus` and serialize only the valid window (see
+    /// [`valid_window`](Self::valid_window)) to little-endian bytes of the
+    /// negotiated output format.
+    fn decode_trimmed(&mut self, opus: &[u8], keep: Option<u64>) -> Result<Vec<u8>, G2gError> {
+        if self.out_format == AudioFormat::PcmF32Le {
+            let (pcm, per_channel) = self.decode_f32(opus)?;
+            let (start_i, end_i) = self.valid_window(per_channel, keep);
+            let mut bytes = Vec::with_capacity((end_i - start_i) * 4);
+            for &s in &pcm[start_i..end_i] {
+                bytes.extend_from_slice(&s.to_le_bytes());
+            }
+            return Ok(bytes);
+        }
+        let (pcm, per_channel) = self.decode(opus)?;
+        let (start_i, end_i) = self.valid_window(per_channel, keep);
         let mut bytes = Vec::with_capacity((end_i - start_i) * 2);
         for &s in &pcm[start_i..end_i] {
             bytes.extend_from_slice(&s.to_le_bytes());
@@ -217,7 +253,8 @@ impl AsyncElement for OpusDec {
         }
     }
 
-    /// Native `DerivedOutput`: Opus in -> interleaved `PcmS16Le` out at 48 kHz.
+    /// Native `DerivedOutput`: Opus in -> interleaved `PcmS16Le` (preferred) or
+    /// `PcmF32Le` out at 48 kHz.
     /// The output channel count is the `ANY_CHANNELS` placeholder, not the input
     /// count: a demuxer only knows the real count once it parses `OpusHead`, so
     /// the negotiated input can be `ANY_CHANNELS`. `fixate` collapses the output
@@ -228,13 +265,35 @@ impl AsyncElement for OpusDec {
             Caps::Audio {
                 format: AudioFormat::Opus,
                 ..
-            } => CapsSet::one(Caps::Audio {
-                format: AudioFormat::PcmS16Le,
-                channels: ANY_CHANNELS,
-                sample_rate: OPUS_RATE_HZ,
-            }),
+            } => CapsSet::from_alternatives(Vec::from([
+                Caps::Audio {
+                    format: AudioFormat::PcmS16Le,
+                    channels: ANY_CHANNELS,
+                    sample_rate: OPUS_RATE_HZ,
+                },
+                Caps::Audio {
+                    format: AudioFormat::PcmF32Le,
+                    channels: ANY_CHANNELS,
+                    sample_rate: OPUS_RATE_HZ,
+                },
+            ])),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
+    }
+
+    /// The solver's chosen output format (S16 by default, F32 when a
+    /// float-consuming downstream negotiated it).
+    fn configure_output(&mut self, output_caps: &Caps) -> Result<(), G2gError> {
+        match output_caps {
+            Caps::Audio {
+                format: format @ (AudioFormat::PcmS16Le | AudioFormat::PcmF32Le),
+                ..
+            } => {
+                self.out_format = *format;
+                Ok(())
+            }
+            _ => Err(G2gError::CapsMismatch),
+        }
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -259,7 +318,7 @@ impl AsyncElement for OpusDec {
         ElementMetadata::new(
             "Opus audio decoder",
             "Codec/Decoder/Audio",
-            "Decodes Opus to raw S16LE PCM",
+            "Decodes Opus to raw S16LE / F32LE PCM",
             "g2g",
         )
     }
@@ -328,11 +387,13 @@ impl AsyncElement for OpusDec {
                     } => {
                         self.build_decoder(*channels)?;
                     }
-                    // The runner's pre-fixed forward output caps: forward on.
+                    // The runner's pre-fixed forward output caps: adopt the
+                    // chosen sample format and forward on.
                     Caps::Audio {
-                        format: AudioFormat::PcmS16Le,
+                        format: format @ (AudioFormat::PcmS16Le | AudioFormat::PcmF32Le),
                         ..
                     } => {
+                        self.out_format = *format;
                         out.push(PipelinePacket::CapsChanged(c.clone())).await?;
                         self.last_out = Some(c);
                     }
@@ -349,14 +410,17 @@ impl AsyncElement for OpusDec {
 
 impl PadTemplates for OpusDec {
     fn pad_templates() -> Vec<PadTemplate> {
-        let out = Caps::Audio {
-            format: AudioFormat::PcmS16Le,
+        let out = |format| Caps::Audio {
+            format,
             channels: 2,
             sample_rate: OPUS_RATE_HZ,
         };
         Vec::from([
             PadTemplate::sink(CapsSet::one(Self::input_template())),
-            PadTemplate::source(CapsSet::one(out)),
+            PadTemplate::source(CapsSet::from_alternatives(Vec::from([
+                out(AudioFormat::PcmS16Le),
+                out(AudioFormat::PcmF32Le),
+            ]))),
         ])
     }
 }

@@ -35,10 +35,25 @@ pub fn sniff_caps(header: &[u8]) -> Option<Caps> {
     if let Some(encoding) = sniff(header) {
         return Some(Caps::ByteStream { encoding });
     }
+    // Native FLAC: the `fLaC` stream marker (M774); `flacparse` frames it.
+    if header.starts_with(b"fLaC") {
+        return Some(elementary_flac_caps());
+    }
     if let Some(codec) = sniff_annexb_video(header) {
         return Some(elementary_video_caps(codec));
     }
     sniff_text(header).map(|format| Caps::Text { format })
+}
+
+/// Caps for a native FLAC byte stream at the channels/rate placeholders
+/// (`flacparse` refines them from STREAMINFO). Shared by content sniffing and
+/// `FileSrc`'s extension typing so the two never drift.
+pub fn elementary_flac_caps() -> Caps {
+    Caps::Audio {
+        format: g2g_core::AudioFormat::Flac,
+        channels: 0,
+        sample_rate: 0,
+    }
 }
 
 /// Caps for a raw Annex-B video elementary stream at a fixable `Range` placeholder

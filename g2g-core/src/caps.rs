@@ -450,6 +450,7 @@ fn audio_gst_media_type(f: AudioFormat) -> (&'static str, Option<&'static str>) 
         AudioFormat::Mp2 => ("audio/mpeg", None),
         AudioFormat::Ac3 => ("audio/x-ac3", None),
         AudioFormat::Flac => ("audio/x-flac", None),
+        AudioFormat::Vorbis => ("audio/x-vorbis", None),
         AudioFormat::PcmS16Le => ("audio/x-raw", Some("S16LE")),
         AudioFormat::PcmF32Le => ("audio/x-raw", Some("F32LE")),
         AudioFormat::PcmS24Le => ("audio/x-raw", Some("S24LE")),
@@ -1004,6 +1005,12 @@ pub enum AudioFormat {
     /// header rides in-band as a leading `fLaC` frame the decoder takes as extradata.
     /// Decoded via libavcodec.
     Flac,
+    /// Vorbis (GStreamer `audio/x-vorbis`), the Ogg / WebM audio codec that
+    /// preceded Opus. Encoded like `Aac` / `Opus` (nominal channels/rate, not
+    /// the PCM wildcards); container-framed (one packet per Ogg packet /
+    /// Matroska block), with the identification + setup headers riding in-band
+    /// ahead of the audio. Decoded in pure Rust (symphonia).
+    Vorbis,
     PcmS16Le,
     PcmF32Le,
     /// 24-bit signed integer PCM, little-endian, 3 bytes packed (GStreamer `S24LE`).

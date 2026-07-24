@@ -289,24 +289,49 @@ impl FlvMuxer {
     /// the legacy single-track entry point (video frames are flagged keyframes).
     pub fn push_au(&mut self, data: &[u8], pts_ms: u32) -> Vec<u8> {
         if self.has_video {
-            self.push_video(data, pts_ms, true)
+            self.push_video(data, pts_ms, 0, true)
         } else {
             self.push_audio(data, pts_ms)
         }
     }
 
+    /// The FLV video-tag timing of a pipeline frame: `(dts_ms, cts_ms)`. FLV tag
+    /// timestamps are decode time; a producer that leaves `dts_ns` unset (0 with
+    /// a nonzero pts) gets the legacy `dts = pts` behavior, so only a real
+    /// reordering producer yields a nonzero composition offset.
+    pub fn video_tag_timing(timing: &g2g_core::FrameTiming) -> (u32, i32) {
+        let dts_ns = if timing.dts_ns == 0 && timing.pts_ns != 0 {
+            timing.pts_ns
+        } else {
+            timing.dts_ns
+        };
+        let dts_ms = (dts_ns / 1_000_000) as u32;
+        let cts_ms = ((timing.pts_ns as i64 - dts_ns as i64) / 1_000_000) as i32;
+        (dts_ms, cts_ms)
+    }
+
     /// Wrap one AVCC video access unit into the FLV bytes to emit (`keyframe` sets
     /// the FLV frame type), prepending the header + sequence headers on the first
-    /// call.
-    pub fn push_video(&mut self, au: &[u8], pts_ms: u32, keyframe: bool) -> Vec<u8> {
+    /// call. `dts_ms` is the tag timestamp (FLV timestamps are decode time) and
+    /// `cts_ms` the signed composition-time offset (`pts - dts`), so a B-frame
+    /// stream's presentation times survive the mux (the demuxer's `pts = dts +
+    /// cts` inverse); an I/P stream passes 0.
+    pub fn push_video(&mut self, au: &[u8], dts_ms: u32, cts_ms: i32, keyframe: bool) -> Vec<u8> {
         let mut out = Vec::new();
         self.write_header(&mut out);
         // frame type (1 keyframe, 2 interframe) | AVC, AVC packet type 1 (NALU),
-        // composition time 0.
+        // then the two's-complement 24-bit composition-time offset.
         let frame_type = if keyframe { 1u8 } else { 2u8 };
-        let mut body = alloc::vec![(frame_type << 4) | VIDEO_CODEC_AVC, 0x01, 0x00, 0x00, 0x00];
+        let cts = (cts_ms.clamp(-(1 << 23), (1 << 23) - 1) as u32) & 0x00FF_FFFF;
+        let mut body = alloc::vec![
+            (frame_type << 4) | VIDEO_CODEC_AVC,
+            0x01,
+            (cts >> 16) as u8,
+            (cts >> 8) as u8,
+            cts as u8
+        ];
         body.extend_from_slice(au);
-        self.emit_tag(&mut out, TAG_VIDEO, pts_ms, &body);
+        self.emit_tag(&mut out, TAG_VIDEO, dts_ms, &body);
         out
     }
 
@@ -746,6 +771,36 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn mux_writes_composition_offset() {
+        // A reordered (B-frame) stream: dts 100 with pts 133 writes cts +33,
+        // and the demuxer's `pts = dts + cts` inverse recovers both times.
+        let mut mux = FlvMuxer::new(FlvTrack::Video);
+        let mut stream = mux.push_video(&[0x65, 0xAA], 100, 33, true);
+        stream.extend_from_slice(&mux.push_video(&[0x41, 0xBB], 133, 0, false));
+
+        let mut d = FlvDemuxer::new();
+        d.push_data(&stream);
+        let units = d.take_units();
+        assert_eq!((units[0].dts_ms, units[0].pts_ms), (100, 133), "cts +33");
+        assert_eq!((units[1].dts_ms, units[1].pts_ms), (133, 133), "cts 0");
+
+        // The pipeline timing mapping: an unset dts (0) keeps pts == dts; a
+        // real dts yields the offset.
+        use g2g_core::FrameTiming;
+        let legacy = FrameTiming {
+            pts_ns: 133_000_000,
+            ..Default::default()
+        };
+        assert_eq!(FlvMuxer::video_tag_timing(&legacy), (133, 0));
+        let reordered = FrameTiming {
+            pts_ns: 133_000_000,
+            dts_ns: 100_000_000,
+            ..Default::default()
+        };
+        assert_eq!(FlvMuxer::video_tag_timing(&reordered), (100, 33));
     }
 
     #[test]

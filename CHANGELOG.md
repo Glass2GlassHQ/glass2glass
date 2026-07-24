@@ -6,6 +6,34 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M777: Vorbis decode: `oggdemux stream=vorbis` + the pure-Rust `vorbisdec` (symphonia, `vorbis` feature), auto-plugged by `decodebin`/`playbin`; PCM within 1 LSB of ffmpeg's decode.
+
+- M776: a mid-stream caps re-solve that defers no longer misfeeds the element's input caps to `configure_output`; Ogg-Opus files now play through `run_graph` / `playbin`.
+
+- M775: Ogg-FLAC: `oggdemux stream=flac` demuxes the `\x7fFLAC` mapping (bit-exact decode vs ffmpeg), `decodebin`/`playbin` sniff the codec and auto-insert `flacparse`, and lone audio files (`.flac` / `.oga` / `.opus`) play via a `playbin` hook.
+
+- M774: native `.flac` support: `filesrc` types the file (extension + `fLaC` sniff) and the new `flacparse` splits CRC-validated frames with STREAMINFO caps, framing oracled against ffprobe.
+
+- M773: AV1 in the fan-in muxers: `mkvmuxn` writes `V_AV1` + av1C `CodecPrivate` and `mp4mux` an `av01` sample entry, the record byte-identical to ffmpeg's for the same stream.
+
+- M772: `G2G_DEBUG` category names take `*` / `?` globs (`*sink*:5`); an exact override wins over a glob.
+
+- M771: `OpusEnc` accepts F32 PCM input and `OpusDec` emits F32 when negotiated, via libopus' float APIs.
+
+- M770: `matroskamux` / `mkvmuxn` gain a `seekable` two-pass mode that finalizes the file with a front `SeekHead`, so it seeks from byte 0.
+
+- M769: `FfmpegAacEnc` end-to-end encode test (ADTS framing checked field-by-field, tone decoded back by ffmpeg and verified at 440 Hz).
+
+- M768: the FLV muxers stamp tags with DTS and write the signed composition-time offset (`pts - dts`), so B-frame presentation times survive the mux.
+
+- M767: the MP4 demuxers read the `Opus` sample entry (`dOps`), so an Opus track surfaces as `Caps::Audio { Opus }` with raw packets, validated against an ffmpeg-authored file.
+
+- M766: the Matroska demuxers convert AVCC / HVCC H.264 / H.265 tracks to Annex-B (parameter sets prepended on keyframes), so `decodebin` on an `.mkv` NAL-splits cleanly.
+
+- M765: the IMA ADPCM decoder reconstructs with the spec's bit-serial arithmetic (matching ffmpeg >= 8.1); the m639 oracle classifies a legacy ffmpeg by output and skips its decode-exactness asserts.
+
+- M764: `VulkanVideoDec` rebuilds the session on a same-geometry parameter-set content change and sizes its reorder buffer from the stream's declared depth (H.264 VUI / H.265 SPS) instead of the DPB size.
+
 - M763: sites that hand-rolled a `MemoryDomain::System` match to read CPU bytes now call `MemoryDomain::as_system_slice()`.
 
 - M762: the browser runs a real ONNX model over decoded video via onnxruntime-web (`WebSocketSrc -> WebCodecsDecode -> WebOrtDetect -> CanvasSink`, CPU tensors, plain static HTTPS, no COOP/COEP), validated headless against a committed model fixture.

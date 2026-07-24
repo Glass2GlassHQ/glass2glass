@@ -1079,6 +1079,16 @@ pub struct MatroskaMuxer {
     /// The Cluster position of the last recorded cue, so at most one cue is kept
     /// per Cluster (the first keyframe in it), bounding the index size.
     last_cued_cluster_pos: Option<u64>,
+    /// Write a front `SeekHead` (first element of the Segment data) indexing
+    /// Info / Tracks / Tags / Cues, so the finished file seeks from byte 0
+    /// without reading past the Clusters. The Cues entry is a placeholder the
+    /// caller patches at EOS (see [`seek_head_patch`](Self::seek_head_patch)),
+    /// which needs the whole output in hand, so this is for a buffering
+    /// (two-pass) caller, not the streaming path.
+    write_seek_head: bool,
+    /// Byte offset (in the muxed output, from byte 0) of the front SeekHead's
+    /// 8-byte Cues `SeekPosition` payload; set when the header is written.
+    cues_patch_offset: Option<usize>,
 }
 
 impl MatroskaMuxer {
@@ -1111,7 +1121,17 @@ impl MatroskaMuxer {
             current_cluster_pos: 0,
             cues: Vec::new(),
             last_cued_cluster_pos: None,
+            write_seek_head: false,
+            cues_patch_offset: None,
         }
+    }
+
+    /// Write a front `SeekHead` (see the field note): the two-pass / seekable
+    /// finalize mode. The caller must patch the Cues position at EOS via
+    /// [`seek_head_patch`](Self::seek_head_patch).
+    pub fn with_seek_head(mut self) -> Self {
+        self.write_seek_head = true;
+        self
     }
 
     /// Attach stream metadata, written as a `Tags` element after Tracks on the
@@ -1155,11 +1175,35 @@ impl MatroskaMuxer {
             out.extend_from_slice(&[0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
             // Segment data starts here; track positions are anchored to it.
             let seg_data_start = out.len();
-            out.extend_from_slice(&info_element());
-            out.extend_from_slice(&tracks_element(&self.tracks));
-            if !self.tags.is_empty() {
-                out.extend_from_slice(&tags_element(&self.tags));
+            let info = info_element();
+            let tracks = tracks_element(&self.tracks);
+            let tags = if self.tags.is_empty() {
+                Vec::new()
+            } else {
+                tags_element(&self.tags)
+            };
+            if self.write_seek_head {
+                // Front SeekHead with fixed-layout entries (21 bytes each), so
+                // the Cues position (unknown until EOS) is patchable in place.
+                let entries = 3 + usize::from(!tags.is_empty());
+                let sh_len = (5 + entries * SEEK_ENTRY_LEN) as u64;
+                id_bytes(ID_SEEK_HEAD, &mut out);
+                out.push(0x80 | (entries * SEEK_ENTRY_LEN) as u8);
+                let mut pos = sh_len;
+                seek_entry(ID_INFO, pos, &mut out);
+                pos += info.len() as u64;
+                seek_entry(ID_TRACKS, pos, &mut out);
+                pos += tracks.len() as u64;
+                if !tags.is_empty() {
+                    seek_entry(ID_TAGS, pos, &mut out);
+                }
+                // Cues placeholder: the payload is the last 8 bytes of the entry.
+                seek_entry(ID_CUES, 0, &mut out);
+                self.cues_patch_offset = Some(out.len() - 8);
             }
+            out.extend_from_slice(&info);
+            out.extend_from_slice(&tracks);
+            out.extend_from_slice(&tags);
             self.segment_pos = (out.len() - seg_data_start) as u64;
             self.header_written = true;
         }
@@ -1221,6 +1265,33 @@ impl MatroskaMuxer {
         }
         elem_vec(ID_CUES, &body)
     }
+
+    /// The EOS patch a front SeekHead needs: `(byte offset of the Cues
+    /// `SeekPosition` payload in the muxed output, the position value to write
+    /// as an 8-byte big-endian uint)`. The Cues land where the stream ended, so
+    /// call this at EOS, before appending [`finish`](Self::finish)'s bytes.
+    /// `None` without [`with_seek_head`](Self::with_seek_head) (or before the
+    /// header was written).
+    pub fn seek_head_patch(&self) -> Option<(usize, u64)> {
+        self.cues_patch_offset.map(|off| (off, self.segment_pos))
+    }
+}
+
+/// Byte length of one fixed-layout `Seek` entry written by [`seek_entry`].
+const SEEK_ENTRY_LEN: usize = 21;
+
+/// One fixed-layout `Seek` entry: a `SeekID` carrying the target's 4-byte
+/// element id and a `SeekPosition` as a fixed 8-byte uint (minimal encoding
+/// would vary with the value, and the Cues entry must be patchable in place).
+fn seek_entry(target_id: u32, pos: u64, out: &mut Vec<u8>) {
+    id_bytes(ID_SEEK, out);
+    out.push(0x80 | 18);
+    id_bytes(ID_SEEK_ID, out);
+    out.push(0x80 | 4);
+    out.extend_from_slice(&target_id.to_be_bytes());
+    id_bytes(ID_SEEK_POSITION, out);
+    out.push(0x80 | 8);
+    out.extend_from_slice(&pos.to_be_bytes());
 }
 
 /// A minimal but valid EBML header naming the DocType (`matroska` / `webm`).

@@ -444,6 +444,28 @@ pub(crate) fn hvcc_record(param_sets: &[&[u8]]) -> Vec<u8> {
     p
 }
 
+/// The `AV1CodecConfigurationRecord` body (no box header): the `av1C` box
+/// payload and the Matroska `CodecPrivate` for `V_AV1`. Header fields come
+/// from the parsed sequence header; `seq_obu` (the whole sequence-header OBU)
+/// rides as `configOBUs` verbatim, so a player re-parses authoritative values.
+pub(crate) fn av1c_record(seq: &crate::av1parse::Av1SeqHeader, seq_obu: &[u8]) -> Vec<u8> {
+    let mut p = Vec::with_capacity(4 + seq_obu.len());
+    p.push(0x81); // marker(1)=1 | version(7)=1
+    p.push((seq.profile << 5) | (seq.level & 0x1F));
+    p.push(
+        ((seq.tier & 1) << 7)
+            | ((seq.high_bitdepth as u8) << 6)
+            | ((seq.twelve_bit as u8) << 5)
+            | ((seq.monochrome as u8) << 4)
+            | ((seq.subsampling_x as u8) << 3)
+            | ((seq.subsampling_y as u8) << 2)
+            | (seq.chroma_sample_position & 3),
+    );
+    p.push(0); // reserved + no initial_presentation_delay
+    p.extend_from_slice(seq_obu);
+    p
+}
+
 /// One `moof`+`mdat` fragment holding `samples` (one or many): a `trun` with a
 /// per-sample (duration, size, flags) entry and a single `mdat` of the samples
 /// concatenated in order. A one-element slice is the per-AU fragment.

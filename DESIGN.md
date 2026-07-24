@@ -791,7 +791,11 @@ probe feeding `intercept_caps`, a `VkVideoSessionKHR` /
 the parsed SPS/PPS/VPS (the correctness-critical part, one mapping module per
 codec, re-emitted on mid-stream change via `CapsChanged`), DPB reference-slot
 management, and the `vkCmdDecodeVideoKHR` recording, output pipelined through the
-YCbCr pass with an in-flight ring. Output caps are
+YCbCr pass with an in-flight ring. The session + DPB rebuild mid-stream on *any*
+in-band parameter-set change, keyed by a byte fingerprint of the AU's parameter
+sets (M519 geometry / M764 same-geometry content, e.g. a profile or entropy-mode
+switch; byte-identical keyframe re-sends keep the session), flushing the outgoing
+decoder's pipelined tail first so no frame is lost. Output caps are
 `Caps::RawVideo { format: Rgba8, .. }` in `MemoryDomain::WgpuTexture`
 (optionally `VulkanTexture` / multiplanar NV12); negotiation and the frame
 keep-alive follow the `NvDec` multi-domain pattern (§4.11.3).
@@ -896,8 +900,11 @@ driver retains the `pStdSequenceHeader` / `pColorConfig` pointers handed to
 `Av1DecodeSession` now owns a stable boxed copy for its lifetime (dropping the
 Std block after creation yielded small, nondeterministic pixel corruption). It releases the whole
 previous coded video sequence at each keyframe (where POC resets) and bumps the
-lowest-POC held frame once a sequence exceeds the DPB depth (a safe reorder-depth
-bound, so a long GOP does not buffer unbounded); `Eos` and a resolution-reconfig
+lowest-POC held frame once a sequence exceeds the stream's own declared reorder
+depth (H.264 VUI `bitstream_restriction` `max_num_reorder_frames` / H.265
+`sps_max_num_reorder_pics`, M764; the DPB slot count is the fallback bound when
+the stream declares none), so an I/P stream emits without hold and a long GOP
+does not buffer unbounded; `Eos` and a reconfig
 boundary drain it in display order, a `Flush` (seek) discards it (M586, H.264 /
 H.265). AV1 stays in coding order there (its display order comes from
 `show_existing_frame` / `order_hint`, handled whole-stream by `decode_all`). Verified
@@ -915,7 +922,7 @@ decoded against a flushed DPB - `h265_is_rasl` + a `skip_rasl` flag set from eac
 IRAP's `NoRaslOutputFlag`, checked before POC derivation so a dropped RASL leaves
 no trace. The CRA's trailing pictures and the following GOPs decode bit-exact vs a
 full decode. The same flag is 0 in continuous decoding, so full-stream open-GOP is
-unchanged. Long-term references are the remaining H.265 gap.
+unchanged. Long-term references are handled too (M743, above).
 
 **Colour space.** Decoded YUV is converted to RGB with the stream's actual colour
 space, not a fixed matrix. A `VideoColorSpace` (colour matrix + quantization range)
@@ -1449,7 +1456,8 @@ so a disabled `g2g_trace!` in a hot loop costs one atomic load. The macros
 `Target` for logging about a named element) then a `format_args!` message,
 checked against the threshold before formatting. Records route to an installed
 `LogSink`; the `std` feature provides a stderr sink and `init_from_env`, which
-reads `G2G_DEBUG` (a `GST_DEBUG`-style `*:warning,VideoFlip:trace` spec). The DAG
+reads `G2G_DEBUG` (a `GST_DEBUG`-style `*:warning,VideoFlip:trace` spec; category
+names take `*` / `?` globs, e.g. `*sink*:5`, with an exact override winning). The DAG
 runner assigns each element a `<category>N` instance name before negotiation (the
 `videotestsrc0` convention) via `set_instance_name`, logs each element's
 addition, and an element that logs about itself (it implements `LogSource` with a
@@ -1690,7 +1698,14 @@ carried on the frame, the `BlockGroup`'s `BlockDuration` scaled onto
 (§4.18). Unlike `TsDemux`,
 Matroska's Tracks element carries concrete geometry and audio parameters, so the
 demuxer refines the output caps itself via `CapsChanged` once Tracks is parsed,
-without a downstream bitstream parser. WebM (the VP8/VP9/AV1 + Opus subset) is the browser-delivery motivator. Block
+without a downstream bitstream parser. An H.264 / H.265 track's blocks are
+converted from the container-native AVCC / HVCC length-prefixed framing
+(declared by the `avcC` / `hvcC` `CodecPrivate`, whose `lengthSizeMinusOne`
+sets the prefix width) to the Annex-B framing the pipeline assumes, with the
+config record's parameter sets prepended on keyframes (M766, ffmpeg's
+`h264_mp4toannexb` discipline); the whole-block length walk is validated
+exactly, so a nonstandard Annex-B block passes through unchanged instead of
+being mis-framed. WebM (the VP8/VP9/AV1 + Opus subset) is the browser-delivery motivator. Block
 lacing (Xiph / EBML / fixed) is split, so multi-frame audio blocks demux.
 The `Cues` index is parsed into a time -> Cluster-byte-position map
 (`cue_seek_offset`), and `MkvDemux` seeks through it in three tiers
@@ -1705,7 +1720,12 @@ Segment data start, which the parser tracks.) The MKV muxer (`matroskamux`: `Mat
 `MkvMux` element) is the inverse path, writing the EBML header, an
 unknown-size Segment, Tracks, and one Cluster per frame, with the `webm` DocType
 for the WebM codec subset. Scope is one Segment / one track with definite-size
-Clusters (multi-track A/V muxing is the sibling `mkvmuxn`).
+Clusters (multi-track A/V muxing is the sibling `mkvmuxn`). Both muxers also
+have a `seekable` (two-pass) mode (M770): the element buffers the file and
+finalizes it at EOS with a front `SeekHead` (fixed-layout entries indexing
+Info / Tracks / Tags / Cues, the Cues position patched in place once known), so
+the file seeks from byte 0 without reading past the Clusters; mutually
+exclusive with `streamable`, and the default streaming output is unchanged.
 
 The Ogg demuxer is the third, the same parser + element split on
 `Caps::ByteStream{Ogg}`. `g2g-plugins::ogg::OggDemuxer` parses RFC 3533 pages

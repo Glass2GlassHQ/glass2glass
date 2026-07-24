@@ -389,6 +389,10 @@ pub struct H264Sps {
     pub transfer_characteristics: u8,
     pub matrix_coefficients: u8,
     pub video_full_range_flag: bool,
+    /// VUI `bitstream_restriction` `max_num_reorder_frames`: the stream's own
+    /// bound on how many frames decode ahead of display. `None` when the VUI
+    /// carries no restriction block (callers fall back to the DPB size).
+    pub max_num_reorder_frames: Option<u8>,
 }
 
 /// Parsed H.264 picture parameter set, the fields the `Std*` PPS needs.
@@ -464,6 +468,74 @@ fn parse_vui_color(br: &mut BitReader) -> Option<(u8, u8, u8, bool)> {
     Some((primaries, transfer, matrix, full_range))
 }
 
+/// Skip an H.264 `hrd_parameters()` block (E.1.2). `None` on truncation or a
+/// bogus CPB count.
+fn skip_h264_hrd(br: &mut BitReader) -> Option<()> {
+    let cpb_cnt_minus1 = br.read_ue()?;
+    // cpb_cnt_minus1 is 0..31 by spec; a larger value means a desynced parse.
+    if cpb_cnt_minus1 > 31 {
+        return None;
+    }
+    br.read_bits(4)?; // bit_rate_scale
+    br.read_bits(4)?; // cpb_size_scale
+    for _ in 0..=cpb_cnt_minus1 {
+        br.read_ue()?; // bit_rate_value_minus1
+        br.read_ue()?; // cpb_size_value_minus1
+        br.read_bit()?; // cbr_flag
+    }
+    br.read_bits(5)?; // initial_cpb_removal_delay_length_minus1
+    br.read_bits(5)?; // cpb_removal_delay_length_minus1
+    br.read_bits(5)?; // dpb_output_delay_length_minus1
+    br.read_bits(5)?; // time_offset_length
+    Some(())
+}
+
+/// Continue an H.264 VUI from just past the colour prefix ([`parse_vui_color`]'s
+/// end position) to the `bitstream_restriction` block and return its
+/// `max_num_reorder_frames`. `None` when the block is absent or the VUI is
+/// truncated (callers fall back to the DPB size).
+fn parse_h264_vui_reorder(br: &mut BitReader) -> Option<u8> {
+    // chroma_loc_info_present_flag
+    if br.read_bit()? == 1 {
+        br.read_ue()?; // chroma_sample_loc_type_top_field
+        br.read_ue()?; // chroma_sample_loc_type_bottom_field
+    }
+    // timing_info_present_flag
+    if br.read_bit()? == 1 {
+        br.read_bits(32)?; // num_units_in_tick
+        br.read_bits(32)?; // time_scale
+        br.read_bit()?; // fixed_frame_rate_flag
+    }
+    let nal_hrd = br.read_bit()? == 1;
+    if nal_hrd {
+        skip_h264_hrd(br)?;
+    }
+    let vcl_hrd = br.read_bit()? == 1;
+    if vcl_hrd {
+        skip_h264_hrd(br)?;
+    }
+    if nal_hrd || vcl_hrd {
+        br.read_bit()?; // low_delay_hrd_flag
+    }
+    br.read_bit()?; // pic_struct_present_flag
+                    // bitstream_restriction_flag
+    if br.read_bit()? != 1 {
+        return None;
+    }
+    br.read_bit()?; // motion_vectors_over_pic_boundaries_flag
+    br.read_ue()?; // max_bytes_per_pic_denom
+    br.read_ue()?; // max_bits_per_mb_denom
+    br.read_ue()?; // log2_max_mv_length_horizontal
+    br.read_ue()?; // log2_max_mv_length_vertical
+    let reorder = br.read_ue()?;
+    // max_dec_frame_buffering follows; the reorder bound is all we need. A value
+    // past the 16-frame DPB ceiling means a desynced parse: discard it.
+    if reorder > 16 {
+        return None;
+    }
+    Some(reorder as u8)
+}
+
 /// Parse an SPS RBSP (the bytes after the NAL header, emulation-prevention
 /// already stripped). `None` on truncation or an unsupported feature.
 pub fn parse_h264_sps(rbsp: &[u8]) -> Option<H264Sps> {
@@ -531,11 +603,19 @@ pub fn parse_h264_sps(rbsp: &[u8]) -> Option<H264Sps> {
         (0, 0, 0, 0)
     };
 
-    // VUI (optional): read only the colour prefix, for the YUV -> RGB conversion.
-    // Best-effort: a truncated / absent VUI leaves the colour unspecified.
+    // VUI (optional): read the colour prefix for the YUV -> RGB conversion, then
+    // continue to the bitstream-restriction reorder bound. Best-effort: a
+    // truncated / absent VUI leaves the colour unspecified and the bound `None`.
+    let mut max_num_reorder_frames = None;
     let (color_primaries, transfer_characteristics, matrix_coefficients, video_full_range_flag) =
         if br.read_bit().unwrap_or(0) == 1 {
-            parse_vui_color(&mut br).unwrap_or((2, 2, 2, false))
+            match parse_vui_color(&mut br) {
+                Some(color) => {
+                    max_num_reorder_frames = parse_h264_vui_reorder(&mut br);
+                    color
+                }
+                None => (2, 2, 2, false),
+            }
         } else {
             (2, 2, 2, false)
         };
@@ -566,6 +646,7 @@ pub fn parse_h264_sps(rbsp: &[u8]) -> Option<H264Sps> {
         transfer_characteristics,
         matrix_coefficients,
         video_full_range_flag,
+        max_num_reorder_frames,
     })
 }
 
@@ -12910,6 +12991,54 @@ impl<T> ReorderBuffer<T> {
     }
 }
 
+/// The raw bytes of the parameter sets in an access unit, length-delimited: the
+/// first H.264 SPS + PPS, H.265 VPS + SPS + PPS, or AV1 sequence-header OBU
+/// (mirroring the first-of-each-type selection the `extract_*` parsers use).
+/// A byte comparison, not a semantic one: a re-sent identical set keeps the
+/// session, any changed byte rebuilds it (a spurious rebuild at a keyframe is
+/// safe; a kept stale session mis-decodes). Empty when the AU carries none.
+fn parameter_set_fingerprint(codec: VideoCodec, au: &[u8]) -> alloc::vec::Vec<u8> {
+    let mut fp = alloc::vec::Vec::new();
+    let add = |fp: &mut alloc::vec::Vec<u8>, bytes: &[u8]| {
+        fp.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+        fp.extend_from_slice(bytes);
+    };
+    if codec == VideoCodec::Av1 {
+        if let Some(obu) = av1_obus(au)
+            .into_iter()
+            .find(|o| o.obu_type == OBU_SEQUENCE_HEADER)
+        {
+            add(&mut fp, obu.payload);
+        }
+        return fp;
+    }
+    // H.264 (NAL types 7/8) / H.265 (32/33/34): the first NAL of each type.
+    let mut seen = [false; 3];
+    for nal in nal_units_any(au) {
+        if nal.is_empty() {
+            continue;
+        }
+        let idx = match codec {
+            VideoCodec::H264 => match nal[0] & 0x1F {
+                7 => 0,
+                8 => 1,
+                _ => continue,
+            },
+            _ => match (nal[0] >> 1) & 0x3F {
+                32 => 0,
+                33 => 1,
+                34 => 2,
+                _ => continue,
+            },
+        };
+        if !seen[idx] {
+            seen[idx] = true;
+            add(&mut fp, nal);
+        }
+    }
+    fp
+}
+
 pub struct VulkanVideoDec {
     decoder: Option<DpbDecoderKind>,
     session: Option<DecodeSessionKind>,
@@ -12918,9 +13047,14 @@ pub struct VulkanVideoDec {
     /// which session / decoder / parameter-set path `ensure_decoder` builds.
     codec: VideoCodec,
     /// Coded geometry `(width, height)` the current session / DPB was built for.
-    /// A keyframe whose parameter sets carry a different geometry triggers a
-    /// mid-stream rebuild (resolution change); `None` before the first build.
+    /// `None` before the first build.
     coded_geometry: Option<(u32, u32)>,
+    /// Byte fingerprint ([`parameter_set_fingerprint`]) of the parameter sets the
+    /// current session was built from. A keyframe whose sets differ, in geometry
+    /// (a resolution switch) or in content at the same dimensions (a new profile /
+    /// ref config), triggers a mid-stream rebuild; byte-identical re-sends keep
+    /// the session. Empty before the first build.
+    ps_fingerprint: alloc::vec::Vec<u8>,
     last_caps: Option<Caps>,
     framerate: Rate,
     emitted: u64,
@@ -12989,6 +13123,7 @@ impl VulkanVideoDec {
             device: None,
             codec: VideoCodec::H264,
             coded_geometry: None,
+            ps_fingerprint: alloc::vec::Vec::new(),
             last_caps: None,
             framerate: Rate::Any,
             emitted: 0,
@@ -13039,19 +13174,22 @@ impl VulkanVideoDec {
     /// AV1 sequence header). Returns `Ok(false)` when there is no decoder yet and
     /// this AU carries no parameter sets (skip and wait for the keyframe AU that
     /// does), `Ok(true)` once a decoder is ready. Handles mid-stream reconfig: a
-    /// keyframe whose parameter sets carry a different coded geometry rebuilds the
-    /// session + DPB for the new resolution (the old ones free when replaced). An
-    /// unchanged geometry keeps the existing session (also swallowing the
-    /// parameter sets repeated on every keyframe). Picks the GPU-texture or
-    /// system-NV12 decoder from the resolved `out_domain`, falling back to NV12 if
-    /// the device exposes no compute queue.
+    /// keyframe whose parameter sets changed, in geometry (a resolution switch) or
+    /// in content at the same dimensions (a new profile / ref config), rebuilds
+    /// the session + DPB (the old ones free when replaced). Byte-identical
+    /// parameter sets keep the existing session (swallowing the sets repeated on
+    /// every keyframe). Picks the GPU-texture or system-NV12 decoder from the
+    /// resolved `out_domain`, falling back to NV12 if the device exposes no
+    /// compute queue.
     fn ensure_decoder(&mut self, au: &[u8]) -> Result<bool, G2gError> {
         let device = self.device.as_ref().ok_or(G2gError::CapsMismatch)?;
         let want_gpu = self.out_domain == MemoryDomainKind::WgpuTexture;
         let built = self.decoder.is_some();
-        let cur_geom = self.coded_geometry;
+        // Byte fingerprint of this AU's parameter sets; unchanged bytes (the same
+        // sets re-sent on a keyframe) keep the session, any change rebuilds.
+        let fp = parameter_set_fingerprint(self.codec, au);
 
-        let (session, decoder, emit_wgpu, geometry) = match self.codec {
+        let (session, decoder, emit_wgpu, geometry, reorder_bound) = match self.codec {
             VideoCodec::H264 => {
                 let Some(ps) = extract_h264_parameter_sets(au) else {
                     // No parameter sets here: keep decoding if already built (a
@@ -13060,7 +13198,7 @@ impl VulkanVideoDec {
                 };
                 let width = (ps.sps.pic_width_in_mbs_minus1 + 1) * 16;
                 let height = (ps.sps.pic_height_in_map_units_minus1 + 1) * 16;
-                if built && cur_geom == Some((width, height)) {
+                if built && self.ps_fingerprint == fp {
                     return Ok(true);
                 }
                 let session = device
@@ -13076,6 +13214,7 @@ impl VulkanVideoDec {
                     DpbDecoderKind::H264(decoder),
                     emit_wgpu,
                     (width, height),
+                    ps.sps.max_num_reorder_frames.map(usize::from),
                 )
             }
             VideoCodec::H265 => {
@@ -13084,9 +13223,14 @@ impl VulkanVideoDec {
                 };
                 let width = ps.sps.pic_width_in_luma_samples;
                 let height = ps.sps.pic_height_in_luma_samples;
-                if built && cur_geom == Some((width, height)) {
+                if built && self.ps_fingerprint == fp {
                     return Ok(true);
                 }
+                // The SPS's own reorder bound for the stream's top temporal layer
+                // (the sub-layer ordering parse fills at least that entry).
+                let reorder_bound = Some(usize::from(
+                    ps.sps.max_num_reorder_pics[usize::from(ps.sps.sps_max_sub_layers_minus1)],
+                ));
                 let std = to_std_h265_params(&ps);
                 let session = device
                     .create_h265_session(&std, width, height)
@@ -13101,6 +13245,7 @@ impl VulkanVideoDec {
                     DpbDecoderKind::H265(decoder),
                     emit_wgpu,
                     (width, height),
+                    reorder_bound,
                 )
             }
             VideoCodec::Av1 => {
@@ -13109,7 +13254,7 @@ impl VulkanVideoDec {
                 };
                 let width = seq.max_frame_width_minus_1 + 1;
                 let height = seq.max_frame_height_minus_1 + 1;
-                if built && cur_geom == Some((width, height)) {
+                if built && self.ps_fingerprint == fp {
                     return Ok(true);
                 }
                 let std = to_std_av1_seq_header(&seq);
@@ -13126,6 +13271,8 @@ impl VulkanVideoDec {
                     DpbDecoderKind::Av1(decoder),
                     emit_wgpu,
                     (width, height),
+                    // AV1 output order is the op order, no reorder buffer.
+                    None,
                 )
             }
             _ => return Err(G2gError::CapsMismatch),
@@ -13148,13 +13295,19 @@ impl VulkanVideoDec {
         // The next emitted frame carries the new dimensions, so `process` emits a
         // fresh `CapsChanged` for the resolution change on its own.
         self.emit_wgpu = emit_wgpu;
-        // Size the reorder window to this decoder's DPB (a safe upper bound on the
-        // reorder depth), so a long GOP releases frames without buffering unbounded.
-        self.reorder.max_hold = decoder.dpb_slots();
-        self.reorder_tex.max_hold = decoder.dpb_slots();
+        // Size the reorder window to the stream's own bound (H.264 VUI
+        // `max_num_reorder_frames` / H.265 `sps_max_num_reorder_pics`) when it
+        // declares one; frames release as early as the stream allows. Fall back
+        // to the DPB slot count (a safe over-approximation) when it does not.
+        let hold = reorder_bound
+            .unwrap_or_else(|| decoder.dpb_slots())
+            .min(decoder.dpb_slots());
+        self.reorder.max_hold = hold;
+        self.reorder_tex.max_hold = hold;
         self.decoder = Some(decoder);
         self.session = Some(session);
         self.coded_geometry = Some(geometry);
+        self.ps_fingerprint = fp;
         Ok(true)
     }
 
@@ -13748,6 +13901,73 @@ mod tests {
             .find(|n| !n.is_empty() && n[0] & 0x1F == 7)
             .expect("SPS NAL");
         assert!(parse_h264_slice_header(sps_nal, &ps.sps, &ps.pps).is_none());
+    }
+
+    // ------------------------------------------------------------------------
+    // M764: VUI reorder bound + parameter-set change fingerprint. GPU-free.
+    // ------------------------------------------------------------------------
+
+    #[test]
+    fn sps_vui_reorder_bound_parses_from_real_clips() {
+        // Baseline (no B-frames): x264 writes a bitstream restriction with 0.
+        let ps = extract_h264_parameter_sets(CLIP).expect("SPS+PPS parse");
+        assert_eq!(ps.sps.max_num_reorder_frames, Some(0), "P-only stream");
+        // B-frame clip: the stream declares a real reorder depth.
+        let bframes: &[u8] = include_bytes!("../tests/fixtures/h264_640x480_bframes.h264");
+        let ps = extract_h264_parameter_sets(bframes).expect("SPS+PPS parse");
+        let depth = ps.sps.max_num_reorder_frames.expect("restriction present");
+        assert!(
+            (1..=16).contains(&depth),
+            "B-frame stream must declare a non-zero reorder depth, got {depth}"
+        );
+    }
+
+    #[test]
+    fn parameter_set_fingerprint_tracks_content() {
+        // Stable across identical input, for all three codecs.
+        for (codec, clip) in [
+            (VideoCodec::H264, CLIP),
+            (VideoCodec::H265, H265_CLIP),
+            (VideoCodec::Av1, AV1_CLIP),
+        ] {
+            let fp = parameter_set_fingerprint(codec, clip);
+            assert!(!fp.is_empty(), "{codec:?}: parameter sets present");
+            assert_eq!(fp, parameter_set_fingerprint(codec, clip));
+        }
+
+        // Rebuild an SPS+PPS-only AU from the clip's own NALs; a single changed
+        // SPS byte must change the fingerprint (same geometry, new content).
+        let sps = nal_units_any(CLIP)
+            .find(|n| !n.is_empty() && n[0] & 0x1F == 7)
+            .expect("SPS NAL")
+            .to_vec();
+        let pps = nal_units_any(CLIP)
+            .find(|n| !n.is_empty() && n[0] & 0x1F == 8)
+            .expect("PPS NAL")
+            .to_vec();
+        let build = |sps: &[u8], pps: &[u8]| {
+            let mut au = alloc::vec::Vec::from([0u8, 0, 0, 1]);
+            au.extend_from_slice(sps);
+            au.extend_from_slice(&[0, 0, 0, 1]);
+            au.extend_from_slice(pps);
+            au
+        };
+        let original = build(&sps, &pps);
+        let mut changed_sps = sps.clone();
+        *changed_sps.last_mut().unwrap() ^= 0x40;
+        let changed = build(&changed_sps, &pps);
+        assert_ne!(
+            parameter_set_fingerprint(VideoCodec::H264, &original),
+            parameter_set_fingerprint(VideoCodec::H264, &changed),
+        );
+
+        // A slice-only AU (no parameter sets) fingerprints empty.
+        let slice_nal = nal_units_any(CLIP)
+            .find(|n| !n.is_empty() && matches!(n[0] & 0x1F, 1 | 5))
+            .expect("VCL NAL");
+        let mut slice_au = alloc::vec::Vec::from([0u8, 0, 0, 1]);
+        slice_au.extend_from_slice(slice_nal);
+        assert!(parameter_set_fingerprint(VideoCodec::H264, &slice_au).is_empty());
     }
 
     // ------------------------------------------------------------------------

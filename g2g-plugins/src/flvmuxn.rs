@@ -168,7 +168,8 @@ impl FlvMuxN {
             Some(PadKind::Video) => {
                 let nalus = split_annexb(slice);
                 let keyframe = nalus.iter().any(|n| is_keyframe_nal(VideoCodec::H264, n));
-                mux.push_video(&avcc_sample(&nalus), pts_ms, keyframe)
+                let (dts_ms, cts_ms) = FlvMuxer::video_tag_timing(&frame.timing);
+                mux.push_video(&avcc_sample(&nalus), dts_ms, cts_ms, keyframe)
             }
             // Audio access units are raw AAC frames once the ADTS header is stripped.
             _ => mux.push_audio(strip_adts(slice), pts_ms),

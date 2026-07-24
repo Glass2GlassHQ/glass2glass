@@ -255,6 +255,71 @@ pub(crate) fn avcc_to_annexb(avcc: &[u8]) -> Vec<u8> {
     out
 }
 
+/// [`avcc_to_annexb`] with an explicit prefix width and whole-buffer validation:
+/// `None` unless the length walk consumes `data` exactly (a truncated length, a
+/// zero-length NAL, or trailing bytes fail), so a caller can fall back to
+/// forwarding the original bytes instead of emitting a mis-framed stream. The
+/// lengths come from the container, so they are validated, not trusted.
+pub(crate) fn checked_length_prefixed_to_annexb(data: &[u8], len_size: usize) -> Option<Vec<u8>> {
+    if !(1..=4).contains(&len_size) || data.is_empty() {
+        return None;
+    }
+    let mut out = Vec::with_capacity(data.len() + 8);
+    let mut i = 0usize;
+    while i < data.len() {
+        let prefix = data.get(i..i.checked_add(len_size)?)?;
+        let mut len = 0usize;
+        for &b in prefix {
+            len = (len << 8) | b as usize;
+        }
+        i = i.checked_add(len_size)?;
+        let nal = data.get(i..i.checked_add(len)?)?;
+        if nal.is_empty() {
+            return None;
+        }
+        out.extend_from_slice(&[0, 0, 0, 1]);
+        out.extend_from_slice(nal);
+        i += len;
+    }
+    Some(out)
+}
+
+/// Parameter-set NALUs out of an `hvcC` payload, in array order (VPS, SPS,
+/// PPS). Fixed 22-byte prefix (config version + 12-byte general PTL +
+/// descriptive fields), then `numOfArrays`, then per-array NAL lists.
+pub(crate) fn parse_hvcc(hvcc: &[u8]) -> Result<Vec<Vec<u8>>, G2gError> {
+    let num_arrays = *hvcc.get(22).ok_or(G2gError::CapsMismatch)?;
+    let mut at = 23usize;
+    let mut sets = Vec::new();
+    for _ in 0..num_arrays {
+        // array header byte: array_completeness | reserved | NAL_unit_type.
+        at += 1;
+        let num_nalus = u16::from_be_bytes(
+            hvcc.get(at..at + 2)
+                .ok_or(G2gError::CapsMismatch)?
+                .try_into()
+                .expect("2 bytes"),
+        );
+        at += 2;
+        for _ in 0..num_nalus {
+            let len = u16::from_be_bytes(
+                hvcc.get(at..at + 2)
+                    .ok_or(G2gError::CapsMismatch)?
+                    .try_into()
+                    .expect("2 bytes"),
+            ) as usize;
+            at += 2;
+            let nalu = hvcc.get(at..at + len).ok_or(G2gError::CapsMismatch)?;
+            sets.push(nalu.to_vec());
+            at += len;
+        }
+    }
+    if sets.is_empty() {
+        return Err(G2gError::CapsMismatch);
+    }
+    Ok(sets)
+}
+
 /// First SPS and PPS out of an `avcC` payload.
 pub(crate) fn parse_avcc(avcc: &[u8]) -> Result<(Vec<u8>, Vec<u8>), G2gError> {
     // 5 fixed bytes, then SPS count (low 5 bits).
@@ -692,6 +757,35 @@ mod tests {
         assert_eq!(nals, vec![sps, idr], "the same NALs, now start-code framed");
         // Every NAL is preceded by a 4-byte start code.
         assert_eq!(&annexb[..4], &[0, 0, 0, 1]);
+    }
+
+    #[test]
+    fn checked_length_prefixed_conversion_validates_the_whole_buffer() {
+        let sps: &[u8] = &[0x67, 0x42, 0xC0, 0x1E];
+        let idr: &[u8] = &[0x65, 0x88, 0x84, 0x21, 0x0A];
+        // 2-byte prefixes (a non-default lengthSizeMinusOne).
+        let mut avcc = Vec::new();
+        avcc.extend_from_slice(&(sps.len() as u16).to_be_bytes());
+        avcc.extend_from_slice(sps);
+        avcc.extend_from_slice(&(idr.len() as u16).to_be_bytes());
+        avcc.extend_from_slice(idr);
+
+        let annexb = checked_length_prefixed_to_annexb(&avcc, 2).expect("valid walk");
+        let nals: Vec<&[u8]> = nal_units(&annexb).collect();
+        assert_eq!(nals, vec![sps, idr]);
+
+        // Truncated length, trailing garbage, a zero-length NAL, and data that
+        // is really Annex-B all fail the exact-consumption walk (the caller
+        // forwards the original bytes instead of mis-framing).
+        assert!(checked_length_prefixed_to_annexb(&avcc[..avcc.len() - 1], 2).is_none());
+        let mut trailing = avcc.clone();
+        trailing.push(0);
+        assert!(checked_length_prefixed_to_annexb(&trailing, 2).is_none());
+        assert!(checked_length_prefixed_to_annexb(&[0, 0], 2).is_none());
+        let mut real_annexb = Vec::new();
+        real_annexb.extend_from_slice(&[0, 0, 0, 1]);
+        real_annexb.extend_from_slice(idr);
+        assert!(checked_length_prefixed_to_annexb(&real_annexb, 4).is_none());
     }
 
     #[test]

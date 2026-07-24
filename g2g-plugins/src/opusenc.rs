@@ -1,6 +1,7 @@
-//! Opus audio encoder element (OpusEnc, `opus` feature): `Audio{PcmS16Le}` in,
-//! `Audio{Opus}` out, via libopus through the `audiopus` crate. The encode
-//! sibling of [`crate::opusdec::OpusDec`] and the producer that
+//! Opus audio encoder element (OpusEnc, `opus` feature): `Audio{PcmS16Le}` or
+//! `Audio{PcmF32Le}` in (the float path uses libopus' `opus_encode_float`, no
+//! S16 quantize), `Audio{Opus}` out, via libopus through the `audiopus` crate.
+//! The encode sibling of [`crate::opusdec::OpusDec`] and the producer that
 //! [`crate::opusparse::OpusParse`] reads.
 //!
 //! Opus only encodes whole frames of one of a fixed set of durations (2.5..60
@@ -56,8 +57,13 @@ pub struct OpusEnc {
     /// glitch-free, but the ctl still need not run per packet).
     applied_bps: Option<i32>,
     enc: Option<Encoder>,
+    /// Float (`PcmF32Le`) input: encode through libopus' float API instead of
+    /// quantizing to S16 first. Set from the negotiated input caps.
+    in_f32: bool,
     /// Interleaved S16 samples not yet packed into a full Opus frame.
     buf: Vec<i16>,
+    /// The float twin of `buf` (only one is in use, per `in_f32`).
+    buf_f32: Vec<f32>,
     /// PTS for the next packet, anchored to the first input frame's PTS and
     /// advanced one frame duration per emitted packet.
     next_pts_ns: Option<u64>,
@@ -91,7 +97,9 @@ impl OpusEnc {
             bitrate: Bitrate::Auto,
             applied_bps: None,
             enc: None,
+            in_f32: false,
             buf: Vec::new(),
+            buf_f32: Vec::new(),
             next_pts_ns: None,
             caps_sent: false,
             emitted: 0,
@@ -111,12 +119,27 @@ impl OpusEnc {
         self.emitted
     }
 
-    fn input_template() -> Caps {
-        // Audio caps carry no `Any`; pin the supported shape (48 kHz stereo).
-        Caps::Audio {
-            format: AudioFormat::PcmS16Le,
+    fn input_templates() -> Vec<Caps> {
+        // Audio caps carry no `Any`; pin the supported shapes (48 kHz stereo).
+        let pcm = |format| Caps::Audio {
+            format,
             channels: 2,
             sample_rate: OPUS_RATE_HZ,
+        };
+        Vec::from([pcm(AudioFormat::PcmS16Le), pcm(AudioFormat::PcmF32Le)])
+    }
+
+    /// Whether `caps` is an encodable PCM shape: `(float input, channels)`.
+    fn pcm_shape(caps: &Caps) -> Option<(bool, u8)> {
+        match caps {
+            Caps::Audio {
+                format: format @ (AudioFormat::PcmS16Le | AudioFormat::PcmF32Le),
+                channels,
+                sample_rate,
+            } if (*channels == 1 || *channels == 2) && *sample_rate == OPUS_RATE_HZ => {
+                Some((*format == AudioFormat::PcmF32Le, *channels))
+            }
+            _ => None,
         }
     }
 
@@ -140,14 +163,42 @@ impl OpusEnc {
         Ok(out)
     }
 
-    /// Drain as many full frames as `buf` holds, returning `(packet, pts)` for
-    /// each. PTS advances one frame duration per packet from the anchor.
-    fn drain_frames(&mut self) -> Result<Vec<(Vec<u8>, u64)>, G2gError> {
+    /// The float twin of [`encode_frame`](Self::encode_frame) (libopus'
+    /// `opus_encode_float`).
+    fn encode_frame_f32(&self, frame: &[f32]) -> Result<Vec<u8>, G2gError> {
+        let enc = self.enc.as_ref().ok_or(G2gError::NotConfigured)?;
+        let mut out = alloc::vec![0u8; MAX_PACKET];
+        let len = enc
+            .encode_float(frame, &mut out)
+            .map_err(|_| G2gError::CapsMismatch)?;
+        out.truncate(len);
+        Ok(out)
+    }
+
+    /// Encode the next full frame from the active buffer, or `None` when less
+    /// than a frame is buffered.
+    fn encode_next(&mut self) -> Result<Option<Vec<u8>>, G2gError> {
         let frame_len = FRAME_SAMPLES * self.channels as usize;
-        let mut packets = Vec::new();
-        while self.buf.len() >= frame_len {
+        if self.in_f32 {
+            if self.buf_f32.len() < frame_len {
+                return Ok(None);
+            }
+            let frame: Vec<f32> = self.buf_f32.drain(..frame_len).collect();
+            self.encode_frame_f32(&frame).map(Some)
+        } else {
+            if self.buf.len() < frame_len {
+                return Ok(None);
+            }
             let frame: Vec<i16> = self.buf.drain(..frame_len).collect();
-            let packet = self.encode_frame(&frame)?;
+            self.encode_frame(&frame).map(Some)
+        }
+    }
+
+    /// Drain as many full frames as the buffer holds, returning `(packet, pts)`
+    /// for each. PTS advances one frame duration per packet from the anchor.
+    fn drain_frames(&mut self) -> Result<Vec<(Vec<u8>, u64)>, G2gError> {
+        let mut packets = Vec::new();
+        while let Some(packet) = self.encode_next()? {
             let pts = self.next_pts_ns.unwrap_or(0);
             self.next_pts_ns = Some(pts + FRAME_NS);
             packets.push((packet, pts));
@@ -158,13 +209,17 @@ impl OpusEnc {
     /// At EOS, zero-pad a partial tail to one full frame and encode it, so the
     /// final samples are not dropped. Returns the flushed packet, if any.
     fn flush(&mut self) -> Result<Option<(Vec<u8>, u64)>, G2gError> {
-        if self.buf.is_empty() {
+        if self.buf.is_empty() && self.buf_f32.is_empty() {
             return Ok(None);
         }
         let frame_len = FRAME_SAMPLES * self.channels as usize;
-        self.buf.resize(frame_len, 0); // pad with silence to a whole frame
-        let frame: Vec<i16> = self.buf.drain(..frame_len).collect();
-        let packet = self.encode_frame(&frame)?;
+        // pad with silence to a whole frame
+        if self.in_f32 {
+            self.buf_f32.resize(frame_len, 0.0);
+        } else {
+            self.buf.resize(frame_len, 0);
+        }
+        let packet = self.encode_next()?.expect("padded to a full frame");
         let pts = self.next_pts_ns.unwrap_or(0);
         self.next_pts_ns = Some(pts + FRAME_NS);
         Ok(Some((packet, pts)))
@@ -215,16 +270,9 @@ impl AsyncElement for OpusEnc {
         Self: 'a;
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        match upstream_caps {
-            Caps::Audio {
-                format: AudioFormat::PcmS16Le,
-                channels,
-                sample_rate,
-            } if (*channels == 1 || *channels == 2) && *sample_rate == OPUS_RATE_HZ => {
-                Ok(upstream_caps.clone())
-            }
-            _ => Err(G2gError::CapsMismatch),
-        }
+        Self::pcm_shape(upstream_caps)
+            .map(|_| upstream_caps.clone())
+            .ok_or(G2gError::CapsMismatch)
     }
 
     fn handles_bitrate_requests(&self) -> bool {
@@ -232,34 +280,19 @@ impl AsyncElement for OpusEnc {
     }
 
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
-            Caps::Audio {
-                format: AudioFormat::PcmS16Le,
+        CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match Self::pcm_shape(input) {
+            Some((_, channels)) => CapsSet::one(Caps::Audio {
+                format: AudioFormat::Opus,
                 channels,
-                sample_rate,
-            } if (*channels == 1 || *channels == 2) && *sample_rate == OPUS_RATE_HZ => {
-                CapsSet::one(Caps::Audio {
-                    format: AudioFormat::Opus,
-                    channels: *channels,
-                    sample_rate: OPUS_RATE_HZ,
-                })
-            }
-            _ => CapsSet::from_alternatives(Vec::new()),
+                sample_rate: OPUS_RATE_HZ,
+            }),
+            None => CapsSet::from_alternatives(Vec::new()),
         }))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        let Caps::Audio {
-            format: AudioFormat::PcmS16Le,
-            channels,
-            sample_rate,
-        } = absolute_caps
-        else {
-            return Err(G2gError::CapsMismatch);
-        };
-        if *sample_rate != OPUS_RATE_HZ {
-            return Err(G2gError::CapsMismatch);
-        }
+        let (in_f32, channels) = Self::pcm_shape(absolute_caps).ok_or(G2gError::CapsMismatch)?;
+        self.in_f32 = in_f32;
         let ch = match channels {
             1 => Channels::Mono,
             2 => Channels::Stereo,
@@ -270,8 +303,9 @@ impl AsyncElement for OpusEnc {
         enc.set_bitrate(self.bitrate)
             .map_err(|_| G2gError::CapsMismatch)?;
         self.enc = Some(enc);
-        self.channels = *channels;
+        self.channels = channels;
         self.buf.clear();
+        self.buf_f32.clear();
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
     }
@@ -280,7 +314,7 @@ impl AsyncElement for OpusEnc {
         ElementMetadata::new(
             "Opus audio encoder",
             "Codec/Encoder/Audio",
-            "Encodes raw S16LE PCM to Opus",
+            "Encodes raw S16LE / F32LE PCM to Opus",
             "g2g",
         )
     }
@@ -339,13 +373,22 @@ impl AsyncElement for OpusEnc {
                     if self.next_pts_ns.is_none() {
                         self.next_pts_ns = Some(frame.timing.pts_ns);
                     }
-                    // Append interleaved S16LE samples to the pending buffer.
+                    // Append interleaved samples (in the negotiated width) to
+                    // the pending buffer.
                     let bytes = slice;
-                    self.buf.extend(
-                        bytes
-                            .chunks_exact(2)
-                            .map(|c| i16::from_le_bytes([c[0], c[1]])),
-                    );
+                    if self.in_f32 {
+                        self.buf_f32.extend(
+                            bytes
+                                .chunks_exact(4)
+                                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])),
+                        );
+                    } else {
+                        self.buf.extend(
+                            bytes
+                                .chunks_exact(2)
+                                .map(|c| i16::from_le_bytes([c[0], c[1]])),
+                        );
+                    }
                     let packets = self.drain_frames()?;
                     self.emit(packets, out).await?;
                 }
@@ -358,6 +401,7 @@ impl AsyncElement for OpusEnc {
                 PipelinePacket::Flush => {
                     // Drop buffered samples and re-anchor on the next frame.
                     self.buf.clear();
+                    self.buf_f32.clear();
                     self.next_pts_ns = None;
                     out.push(PipelinePacket::Flush).await?;
                 }
@@ -379,7 +423,7 @@ impl PadTemplates for OpusEnc {
             sample_rate: OPUS_RATE_HZ,
         };
         Vec::from([
-            PadTemplate::sink(CapsSet::one(Self::input_template())),
+            PadTemplate::sink(CapsSet::from_alternatives(Self::input_templates())),
             PadTemplate::source(CapsSet::one(out)),
         ])
     }

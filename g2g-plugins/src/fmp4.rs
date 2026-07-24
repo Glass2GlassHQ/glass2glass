@@ -364,13 +364,41 @@ fn parse_video_entry(
     ))
 }
 
-/// Read an AAC audio sample entry (`mp4a`/`esds`, or the encrypted `enca`) into a
-/// [`TrackKind::Audio`] plus the cbcs `cenc` defaults for an encrypted track. The
-/// sample rate is the media timescale (matching `Mp4AudioSrc`).
+/// Read an audio sample entry into a [`TrackKind::Audio`] plus the cbcs `cenc`
+/// defaults for an encrypted track: AAC (`mp4a`/`esds`, or the encrypted
+/// `enca`) or Opus (`Opus`/`dOps`, M767). The sample rate is the media
+/// timescale (matching `Mp4AudioSrc`).
 fn parse_audio_entry(
     entries: &[u8],
     timescale: u32,
 ) -> Result<(TrackKind, Option<CencDefaults>), G2gError> {
+    // Opus: raw self-delimited packets, nothing to forward out-of-band (the
+    // caps carry channels / rate), so `asc` stays empty. The `dOps`
+    // OutputChannelCount is authoritative over the sample-entry channelcount.
+    if let Some(opus) = find_box(entries, b"Opus") {
+        let entry_channels = u16::from_be_bytes(
+            opus.get(16..18)
+                .ok_or(G2gError::CapsMismatch)?
+                .try_into()
+                .expect("2 bytes"),
+        ) as u8;
+        let channels = find_box(opus.get(28..).unwrap_or(&[]), b"dOps")
+            .and_then(|d| d.get(1).copied())
+            .filter(|&c| c != 0)
+            .unwrap_or(entry_channels);
+        if channels == 0 {
+            return Err(G2gError::CapsMismatch);
+        }
+        return Ok((
+            TrackKind::Audio {
+                format: AudioFormat::Opus,
+                channels,
+                sample_rate: timescale,
+                asc: Vec::new(),
+            },
+            None,
+        ));
+    }
     let (entry, cenc) = match find_box(entries, b"mp4a") {
         Some(mp4a) => (mp4a, None),
         None => {
@@ -698,41 +726,8 @@ pub(crate) fn parse_senc(
     Ok(out)
 }
 
-/// Parameter-set NALUs out of an `hvcC` payload, in array order (VPS, SPS,
-/// PPS). Fixed 22-byte prefix (config version + 12-byte general PTL +
-/// descriptive fields), then `numOfArrays`, then per-array NAL lists.
-pub(crate) fn parse_hvcc(hvcc: &[u8]) -> Result<Vec<Vec<u8>>, G2gError> {
-    let num_arrays = *hvcc.get(22).ok_or(G2gError::CapsMismatch)?;
-    let mut at = 23usize;
-    let mut sets = Vec::new();
-    for _ in 0..num_arrays {
-        // array header byte: array_completeness | reserved | NAL_unit_type.
-        at += 1;
-        let num_nalus = u16::from_be_bytes(
-            hvcc.get(at..at + 2)
-                .ok_or(G2gError::CapsMismatch)?
-                .try_into()
-                .expect("2 bytes"),
-        );
-        at += 2;
-        for _ in 0..num_nalus {
-            let len = u16::from_be_bytes(
-                hvcc.get(at..at + 2)
-                    .ok_or(G2gError::CapsMismatch)?
-                    .try_into()
-                    .expect("2 bytes"),
-            ) as usize;
-            at += 2;
-            let nalu = hvcc.get(at..at + len).ok_or(G2gError::CapsMismatch)?;
-            sets.push(nalu.to_vec());
-            at += len;
-        }
-    }
-    if sets.is_empty() {
-        return Err(G2gError::CapsMismatch);
-    }
-    Ok(sets)
-}
+// `parse_hvcc` moved to `annexb` (shared with the no_std Matroska demuxer).
+pub(crate) use crate::annexb::parse_hvcc;
 
 // The avcC / parameter-set helpers moved to the ungated `annexb` module (M662,
 // the no_std FLV demuxer shares them); re-exported so this module's users keep
