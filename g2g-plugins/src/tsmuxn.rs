@@ -12,7 +12,8 @@
 //! queued), so the muxed TS is monotonic across streams the way a decoder
 //! expects. The PMT (built once all inputs are configured) names every stream.
 //!
-//! Scope: one program, no PCR (see [`crate::mpegts::TsMuxer`]). Reachable from
+//! Scope: one program; a PCR rides the first stream's PID on the `pcr-interval`
+//! cadence (see [`crate::mpegts::TsMuxer`]). Reachable from
 //! the `gst-launch` fan-in syntax (M208): registered as the `mpegtsmux` muxer in
 //! [`default_registry`](crate::registry::default_registry), so
 //! `v.! m.  a.! m.  mpegtsmux name=m ! sink` builds this element when more than
@@ -54,6 +55,9 @@ pub struct TsMux {
     /// together, so `pat-interval` and `pmt-interval` share this cadence, matching
     /// the single-input [`crate::tsmux::TsMux`].
     table_interval_ms: u64,
+    /// PCR insertion cadence in 90 kHz ticks (default 3600), applied to the inner
+    /// `TsMuxer` when it is built.
+    pcr_interval_90khz: u64,
 }
 
 impl TsMux {
@@ -69,12 +73,19 @@ impl TsMux {
             agg: InputAggregator::new(inputs),
             emitted: 0,
             table_interval_ms: 0,
+            pcr_interval_90khz: 3600,
         }
     }
 
     /// Set the PAT/PMT re-emission interval in milliseconds (`0` = once up front).
     pub fn with_table_interval_ms(mut self, ms: u64) -> Self {
         self.table_interval_ms = ms;
+        self
+    }
+
+    /// Set the PCR insertion interval in 90 kHz ticks (default 3600).
+    pub fn with_pcr_interval(mut self, ticks: u64) -> Self {
+        self.pcr_interval_90khz = ticks;
         self
     }
 
@@ -163,6 +174,12 @@ impl MultiInputElement for TsMux {
                 "alias of pat-interval (the tables are emitted together)",
             )
             .with_default("0"),
+            PropertySpec::new(
+                "pcr-interval",
+                PropKind::Uint,
+                "PCR insertion interval, ticks of the 90kHz clock",
+            )
+            .with_default("3600"),
         ];
         PROPS
     }
@@ -178,6 +195,13 @@ impl MultiInputElement for TsMux {
                 }
                 Ok(())
             }
+            "pcr-interval" => {
+                self.pcr_interval_90khz = value.as_uint().ok_or(PropError::Type)?;
+                if let Some(mux) = self.mux.as_mut() {
+                    mux.set_pcr_interval_90khz(self.pcr_interval_90khz);
+                }
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -185,6 +209,7 @@ impl MultiInputElement for TsMux {
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
             "pat-interval" | "pmt-interval" => Some(PropValue::Uint(self.table_interval_ms)),
+            "pcr-interval" => Some(PropValue::Uint(self.pcr_interval_90khz)),
             _ => None,
         }
     }
@@ -226,6 +251,7 @@ impl MultiInputElement for TsMux {
                 let mut mux = TsMuxer::with_streams(&types);
                 // 90 kHz clock: 90 ticks per millisecond (matches the single-input path).
                 mux.set_table_interval_90khz(self.table_interval_ms.saturating_mul(90));
+                mux.set_pcr_interval_90khz(self.pcr_interval_90khz);
                 self.mux = Some(mux);
             }
 
@@ -236,10 +262,16 @@ impl MultiInputElement for TsMux {
                     return Err(G2gError::UnsupportedDomain);
                 };
                 let pts_90khz = (frame.timing.pts_ns as u128 * 90_000 / 1_000_000_000) as u64;
+                // A DTS rides the PES only for reordered video (dts_ns set and
+                // distinct from the PTS); 0 is the unset sentinel, equal adds nothing.
+                let dts_90khz = (frame.timing.dts_ns != 0
+                    && frame.timing.dts_ns != frame.timing.pts_ns)
+                    .then(|| (frame.timing.dts_ns as u128 * 90_000 / 1_000_000_000) as u64);
                 let ts = self.mux.as_mut().expect("built above").push_au_on(
                     stream,
                     slice,
                     Some(pts_90khz),
+                    dts_90khz,
                 );
                 let out_frame = Frame::new(
                     MemoryDomain::System(SystemSlice::from_boxed(ts.into_boxed_slice())),

@@ -12,8 +12,8 @@
 //! ```
 //!
 //! Scope (v1): one program / one stream (a single input pad), mirroring the
-//! single-stream `TsDemux`; multi-stream (A+V) muxing, PCR, and periodic PSI
-//! re-insertion are follow-ups (DESIGN.md §4.17).
+//! single-stream `TsDemux`. A PCR rides the stream's PID on the `pcr-interval`
+//! cadence; multi-stream (A+V) muxing is the sibling `tsmuxn::TsMux`.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -63,6 +63,9 @@ pub struct TsMux {
     /// to the inner `TsMuxer` when it is built at configure. The PAT and PMT are
     /// emitted together, so `pat-interval` and `pmt-interval` share this cadence.
     table_interval_ms: u64,
+    /// PCR insertion cadence in 90 kHz ticks (default 3600). Applied to the inner
+    /// `TsMuxer` when it is built at configure.
+    pcr_interval_90khz: u64,
 }
 
 impl Default for TsMux {
@@ -78,12 +81,19 @@ impl TsMux {
             configured: false,
             emitted: 0,
             table_interval_ms: 0,
+            pcr_interval_90khz: 3600,
         }
     }
 
     /// Set the PAT/PMT re-emission interval in milliseconds (`0` = once up front).
     pub fn with_table_interval_ms(mut self, ms: u64) -> Self {
         self.table_interval_ms = ms;
+        self
+    }
+
+    /// Set the PCR insertion interval in 90 kHz ticks (default 3600).
+    pub fn with_pcr_interval(mut self, ticks: u64) -> Self {
+        self.pcr_interval_90khz = ticks;
         self
     }
 
@@ -149,6 +159,7 @@ impl AsyncElement for TsMux {
         let mut mux = TsMuxer::new(stream_type);
         // 90 kHz clock: 90 ticks per millisecond.
         mux.set_table_interval_90khz(self.table_interval_ms.saturating_mul(90));
+        mux.set_pcr_interval_90khz(self.pcr_interval_90khz);
         self.mux = Some(mux);
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
@@ -169,6 +180,12 @@ impl AsyncElement for TsMux {
                 "alias of pat-interval (the tables are emitted together)",
             )
             .with_default("0"),
+            PropertySpec::new(
+                "pcr-interval",
+                PropKind::Uint,
+                "PCR insertion interval, ticks of the 90kHz clock",
+            )
+            .with_default("3600"),
         ];
         PROPS
     }
@@ -182,6 +199,13 @@ impl AsyncElement for TsMux {
                 }
                 Ok(())
             }
+            "pcr-interval" => {
+                self.pcr_interval_90khz = value.as_uint().ok_or(PropError::Type)?;
+                if let Some(mux) = self.mux.as_mut() {
+                    mux.set_pcr_interval_90khz(self.pcr_interval_90khz);
+                }
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -189,6 +213,7 @@ impl AsyncElement for TsMux {
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
             "pat-interval" | "pmt-interval" => Some(PropValue::Uint(self.table_interval_ms)),
+            "pcr-interval" => Some(PropValue::Uint(self.pcr_interval_90khz)),
             _ => None,
         }
     }
@@ -209,7 +234,12 @@ impl AsyncElement for TsMux {
                     };
                     let mux = self.mux.as_mut().ok_or(G2gError::NotConfigured)?;
                     let pts_90khz = (frame.timing.pts_ns as u128 * 90_000 / 1_000_000_000) as u64;
-                    let ts = mux.push_au(slice, Some(pts_90khz));
+                    // A DTS rides the PES only for reordered video (dts_ns set and
+                    // distinct from the PTS); 0 is the unset sentinel, equal adds nothing.
+                    let dts_90khz = (frame.timing.dts_ns != 0
+                        && frame.timing.dts_ns != frame.timing.pts_ns)
+                        .then(|| (frame.timing.dts_ns as u128 * 90_000 / 1_000_000_000) as u64);
+                    let ts = mux.push_au(slice, Some(pts_90khz), dts_90khz);
                     let out_frame = Frame::new(
                         MemoryDomain::System(SystemSlice::from_boxed(ts.into_boxed_slice())),
                         FrameTiming {

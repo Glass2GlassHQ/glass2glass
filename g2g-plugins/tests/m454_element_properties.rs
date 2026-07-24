@@ -268,6 +268,40 @@ fn tsmux_pat_pmt_interval() {
 }
 
 #[test]
+fn tsmux_pcr_interval() {
+    // pcr-interval on both the single-input and fan-in muxers: declared, default
+    // 3600 (matching GStreamer mpegtsmux), and round-trips through set/get.
+    let mut single = g2g_plugins::tsmux::TsMux::new();
+    assert!(declares(single.properties(), "pcr-interval"));
+    assert_eq!(
+        single.get_property("pcr-interval"),
+        Some(PropValue::Uint(3600))
+    );
+    single
+        .set_property("pcr-interval", PropValue::Uint(1800))
+        .unwrap();
+    assert_eq!(
+        single.get_property("pcr-interval"),
+        Some(PropValue::Uint(1800))
+    );
+
+    use g2g_core::MultiInputElement;
+    let mut fanin = g2g_plugins::tsmuxn::TsMux::new(2);
+    assert!(declares(fanin.properties(), "pcr-interval"));
+    assert_eq!(
+        fanin.get_property("pcr-interval"),
+        Some(PropValue::Uint(3600))
+    );
+    fanin
+        .set_property("pcr-interval", PropValue::Uint(9000))
+        .unwrap();
+    assert_eq!(
+        fanin.get_property("pcr-interval"),
+        Some(PropValue::Uint(9000))
+    );
+}
+
+#[test]
 fn mkvmux_streamable() {
     use g2g_plugins::mkvmux::MkvMux;
     let mut e = MkvMux::new();

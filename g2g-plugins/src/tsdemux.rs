@@ -18,8 +18,8 @@
 //! second `tsdemux` selecting another stream demuxes the rest of the multiplex.
 //! The choice is by codec, not a runtime-discovered "first video", because the
 //! output caps are fixed at negotiation before any packet is parsed (M109).
-//! Scope (v1): the first stream of the selected codec; multi-program selection
-//! and a muxer are follow-ups (DESIGN.md §4.17).
+//! Scope: the first stream of the selected codec within the active PAT program
+//! (`program-number`, default the first program; M781).
 
 use core::future::Future;
 use core::pin::Pin;
@@ -81,6 +81,9 @@ pub struct TsDemux {
     demux: TsDemuxer,
     /// The elementary stream this instance forwards (the single output pad).
     stream: TsStream,
+    /// The PAT program to demux (`None` = the first program in PAT order),
+    /// preserved across a parser reset so a seek keeps the selection.
+    program_number: Option<u16>,
     /// Bytes not yet consumed as whole TS packets (packet realignment across
     /// input frames).
     buf: Vec<u8>,
@@ -111,6 +114,7 @@ impl TsDemux {
         Self {
             demux: TsDemuxer::new(),
             stream: TsStream::H264,
+            program_number: None,
             buf: Vec::new(),
             configured: false,
             emitted: 0,
@@ -127,6 +131,15 @@ impl TsDemux {
         self
     }
 
+    /// Select which PAT program to demux by `program_number` (`None` = the first
+    /// program in PAT order, the default). Matches GStreamer `tsdemux`'s
+    /// `program-number` (its `-1` is this `None`).
+    pub fn with_program_number(mut self, n: Option<u16>) -> Self {
+        self.program_number = n;
+        self.demux.set_program_number(n);
+        self
+    }
+
     /// Attach the pipeline bus so the program's `StreamCollection` (M386) is
     /// announced once the PMT is parsed, the MPEG-TS sibling of
     /// [`MkvDemux::with_bus`](crate::mkvdemux::MkvDemux::with_bus).
@@ -135,11 +148,11 @@ impl TsDemux {
         self
     }
 
-    /// Announce every elementary stream the PMT declares as a
-    /// [`BusMessage::StreamCollection`] (M386), once, when the PMT has parsed.
-    /// Lists all programs' streams regardless of which one this instance forwards
-    /// (the discovery half of the multi-stream model). A no-op without a bus,
-    /// before the PMT, or once already posted.
+    /// Announce the active program's elementary streams as a
+    /// [`BusMessage::StreamCollection`] (M386), once, when that program's PMT has
+    /// parsed. The collection is the selected program's streams (GStreamer's
+    /// collection is per-program too). A no-op without a bus, before the PMT, or
+    /// once already posted.
     fn post_stream_collection(&mut self) {
         if self.collection_posted {
             return;
@@ -214,6 +227,7 @@ impl TsDemux {
     fn reset_parser(&mut self) {
         self.buf.clear();
         self.demux = TsDemuxer::new();
+        self.demux.set_program_number(self.program_number);
         self.opus_caps_emitted = false;
     }
 
@@ -364,6 +378,12 @@ impl TsDemux {
                 .pts_90khz
                 .map(|p| (p as u128 * 1_000_000_000 / 90_000) as u64)
                 .unwrap_or(0);
+            // Reordered video carries a separate DTS; fall back to the PTS when the
+            // PES had none (the no-DTS convention shared with the fmp4 / mkv demux).
+            let dts_ns = u
+                .dts_90khz
+                .map(|d| (d as u128 * 1_000_000_000 / 90_000) as u64)
+                .unwrap_or(pts_ns);
             // M362 seek: an audio frame is always a resync point; a video AU is
             // one only if it carries an IDR/IRAP. Drop until the target keyframe.
             let keyframe = match self.stream {
@@ -390,7 +410,7 @@ impl TsDemux {
                 MemoryDomain::System(SystemSlice::from_boxed(u.data.into_boxed_slice())),
                 FrameTiming {
                     pts_ns,
-                    dts_ns: pts_ns,
+                    dts_ns,
                     ..FrameTiming::default()
                 },
                 self.emitted,
@@ -537,6 +557,12 @@ impl AsyncElement for TsDemux {
                 self.stream = ts_stream_from_str(s).ok_or(PropError::Value)?;
                 Ok(())
             }
+            "program-number" => {
+                let n = program_number_from_int(value.as_int().ok_or(PropError::Type)?)?;
+                self.program_number = n;
+                self.demux.set_program_number(n);
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -544,17 +570,42 @@ impl AsyncElement for TsDemux {
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
             "stream" => Some(PropValue::Str(ts_stream_to_str(self.stream).into())),
+            "program-number" => Some(PropValue::Int(program_number_to_int(self.program_number))),
             _ => None,
         }
     }
 }
 
-/// `TsDemux`'s settable properties (M109).
-static TSDEMUX_PROPS: &[PropertySpec] = &[PropertySpec::new(
-    "stream",
-    PropKind::Str,
-    "elementary stream to emit: h264 | h265 | aac | mp2 | opus | ac3",
-)];
+/// `TsDemux`'s settable properties (M109, M781).
+static TSDEMUX_PROPS: &[PropertySpec] = &[
+    PropertySpec::new(
+        "stream",
+        PropKind::Str,
+        "elementary stream to emit: h264 | h265 | aac | mp2 | opus | ac3",
+    ),
+    PropertySpec::new(
+        "program-number",
+        PropKind::Int,
+        "PAT program to demux (-1 = the first program)",
+    ),
+];
+
+/// Map the `program-number` property (`-1` = first program) to the demuxer's
+/// selection.
+fn program_number_to_int(n: Option<u16>) -> i64 {
+    n.map_or(-1, i64::from)
+}
+
+/// Parse the `program-number` property: `-1` is "first program" (`None`), any
+/// other non-negative value in `u16` range is that program; other negatives (and
+/// out-of-range values) are rejected.
+fn program_number_from_int(v: i64) -> Result<Option<u16>, PropError> {
+    match v {
+        -1 => Ok(None),
+        0..=0xFFFF => Ok(Some(v as u16)),
+        _ => Err(PropError::Value),
+    }
+}
 
 /// Parse a `stream` property string to a [`TsStream`].
 fn ts_stream_from_str(s: &str) -> Option<TsStream> {
@@ -616,8 +667,9 @@ pub struct TsStreamInfo {
 }
 
 /// The forwardable elementary streams a parsed transport stream carries, in PMT
-/// order (M389): one [`TsStreamInfo`] per PMT entry whose `stream_type` maps to a
-/// [`TsStream`]. `demux` must have parsed its PMT (feed a file prefix first);
+/// order within the active program (M389, M781): one [`TsStreamInfo`] per PMT
+/// entry whose `stream_type` maps to a [`TsStream`]. `demux` must have parsed its
+/// PMT (feed a file prefix first);
 /// returns empty for a non-MPEG-TS or not-yet-parsed input, which the `playbin`
 /// hook reads as "decline, fall through".
 pub fn forwardable_streams(demux: &TsDemuxer) -> Vec<TsStreamInfo> {
@@ -687,6 +739,9 @@ pub struct TsDemuxN {
     /// Inert unless `with_stream_select` wired it. The MPEG-TS sibling of
     /// [`MkvDemuxN::with_stream_select`](crate::mkvdemux::MkvDemuxN::with_stream_select).
     stream_select: Option<StreamSelectController>,
+    /// The PAT program to demux (`None` = the first program in PAT order),
+    /// preserved across a parser reset so a seek keeps the selection.
+    program_number: Option<u16>,
     emitted: u64,
 }
 
@@ -704,6 +759,7 @@ impl TsDemuxN {
             bus: None,
             collection_posted: false,
             stream_select: None,
+            program_number: None,
             emitted: 0,
         }
     }
@@ -712,6 +768,15 @@ impl TsDemuxN {
     /// once the PMT is parsed, the way [`TsDemux::with_bus`] does.
     pub fn with_bus(mut self, bus: BusHandle) -> Self {
         self.bus = Some(bus);
+        self
+    }
+
+    /// Select which PAT program to demux by `program_number` (`None` = the first
+    /// program in PAT order, the default), the multi-output sibling of
+    /// [`TsDemux::with_program_number`].
+    pub fn with_program_number(mut self, n: Option<u16>) -> Self {
+        self.program_number = n;
+        self.demux.set_program_number(n);
         self
     }
 
@@ -802,9 +867,9 @@ impl TsDemuxN {
         }
     }
 
-    /// Announce every PMT elementary stream as a `StreamCollection` (M386), once.
-    /// Reuses [`TsDemux::es_to_stream`]. A no-op without a bus, before the PMT, or
-    /// once posted.
+    /// Announce the active program's PMT elementary streams as a
+    /// `StreamCollection` (M386), once. Reuses [`TsDemux::es_to_stream`]. A no-op
+    /// without a bus, before the PMT, or once posted.
     fn post_stream_collection(&mut self) {
         if self.collection_posted {
             return;
@@ -845,11 +910,17 @@ impl TsDemuxN {
                 .pts_90khz
                 .map(|p| (p as u128 * 1_000_000_000 / 90_000) as u64)
                 .unwrap_or(0);
+            // Reordered video carries a separate DTS; fall back to the PTS when
+            // absent (the no-DTS convention shared with the fmp4 / mkv demux).
+            let dts_ns = u
+                .dts_90khz
+                .map(|d| (d as u128 * 1_000_000_000 / 90_000) as u64)
+                .unwrap_or(pts_ns);
             let frame = Frame::new(
                 MemoryDomain::System(SystemSlice::from_boxed(u.data.into_boxed_slice())),
                 FrameTiming {
                     pts_ns,
-                    dts_ns: pts_ns,
+                    dts_ns,
                     ..FrameTiming::default()
                 },
                 self.emitted,
@@ -927,6 +998,7 @@ impl MultiOutputElement for TsDemuxN {
                 PipelinePacket::Flush => {
                     self.buf.clear();
                     self.demux = TsDemuxer::new();
+                    self.demux.set_program_number(self.program_number);
                     for port in 0..self.ports.len() {
                         out.push_to(port, PipelinePacket::Flush).await?;
                     }
@@ -951,7 +1023,37 @@ impl MultiOutputElement for TsDemuxN {
             Ok(())
         })
     }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        TSDEMUXN_PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "program-number" => {
+                let n = program_number_from_int(value.as_int().ok_or(PropError::Type)?)?;
+                self.program_number = n;
+                self.demux.set_program_number(n);
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "program-number" => Some(PropValue::Int(program_number_to_int(self.program_number))),
+            _ => None,
+        }
+    }
 }
+
+/// `TsDemuxN`'s settable properties (M781).
+static TSDEMUXN_PROPS: &[PropertySpec] = &[PropertySpec::new(
+    "program-number",
+    PropKind::Int,
+    "PAT program to demux (-1 = the first program)",
+)];
 
 #[cfg(test)]
 mod tests {
@@ -1259,6 +1361,28 @@ mod tests {
             alloc::vec![a0.to_vec(), a1.to_vec()],
             "audio only"
         );
+    }
+
+    #[test]
+    fn program_number_property_round_trips() {
+        let mut d = TsDemux::new();
+        // The default is -1: the first program in PAT order.
+        assert_eq!(d.get_property("program-number"), Some(PropValue::Int(-1)));
+        d.set_property("program-number", PropValue::Int(2)).unwrap();
+        assert_eq!(d.get_property("program-number"), Some(PropValue::Int(2)));
+        // -1 resets to the first-program default.
+        d.set_property("program-number", PropValue::Int(-1))
+            .unwrap();
+        assert_eq!(d.get_property("program-number"), Some(PropValue::Int(-1)));
+        // A negative other than -1 is rejected (leaving the value unchanged).
+        assert_eq!(
+            d.set_property("program-number", PropValue::Int(-2)),
+            Err(PropError::Value)
+        );
+        assert_eq!(d.get_property("program-number"), Some(PropValue::Int(-1)));
+        // The builder round-trips too.
+        let d2 = TsDemux::new().with_program_number(Some(5));
+        assert_eq!(d2.get_property("program-number"), Some(PropValue::Int(5)));
     }
 
     #[test]
