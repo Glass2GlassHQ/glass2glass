@@ -53,6 +53,8 @@ use crate::opusparse::{
 
 /// Video tracks use a 90 kHz media timescale; audio tracks use the sample rate.
 const VIDEO_TIMESCALE: u32 = 90_000;
+/// The `mvhd` timescale, so movie-level durations are milliseconds.
+const MOVIE_TIMESCALE: u32 = 1000;
 const DEFAULT_VIDEO_DURATION_NS: u64 = 33_333_333;
 
 /// What an input pad carries, learned from its negotiated caps at configure.
@@ -123,6 +125,30 @@ pub struct Mp4MuxN {
     fragment_duration_ms: u64,
     /// Per-track fragment being accumulated in batched mode (empty in per-AU mode).
     pending: Vec<PendingFragment>,
+    /// Whether to write the fragmented layout (`moof`+`mdat` per fragment, the
+    /// default and the only streamable one). `false` selects the progressive
+    /// layout: see [`with_fragmented`](Self::with_fragmented).
+    fragmented: bool,
+    /// Progressive mode's buffered samples, in the global PTS-merged order they
+    /// were released (which is also the `mdat` byte order). Empty in the
+    /// fragmented default.
+    samples: Vec<ProgSample>,
+}
+
+/// One buffered sample of the progressive (moov-at-end) layout: its `mdat`
+/// bytes plus everything the sample tables need. Times are in the track's own
+/// media timescale.
+#[derive(Debug, Clone)]
+struct ProgSample {
+    input: usize,
+    bytes: Vec<u8>,
+    duration: u32,
+    is_sync: bool,
+    dts: u64,
+    /// `pts - dts`, converted from the nanosecond difference rather than from
+    /// two independently rounded tick values, so a constant reorder delay stays
+    /// constant instead of dithering by a tick.
+    composition_offset: u32,
 }
 
 /// One buffered sample of an in-progress fragment (batched mode).
@@ -162,6 +188,8 @@ impl Mp4MuxN {
             emitted: 0,
             fragment_duration_ms: 0,
             pending: alloc::vec![PendingFragment::default(); inputs],
+            fragmented: true,
+            samples: Vec::new(),
         }
     }
 
@@ -169,6 +197,24 @@ impl Mp4MuxN {
     /// one fragment per AU); see [`fragment_duration_ms`](Self::fragment_duration_ms).
     pub fn with_fragment_duration_ms(mut self, ms: u64) -> Self {
         self.fragment_duration_ms = ms;
+        self
+    }
+
+    /// Choose the output layout (M793). `true` (the default) is the fragmented
+    /// one: `ftyp`+`moov` up front, then a `moof`+`mdat` per fragment, which
+    /// streams and survives truncation. `false` is the progressive one: `ftyp`,
+    /// one `mdat` holding every sample, then a `moov` with real sample tables
+    /// (`stts` / `stsz` / `stsc` / `stco` / `stss` / `ctts`) and real
+    /// `mvhd`/`tkhd`/`mdhd` durations, which is what a reader needs to report an
+    /// exact duration (`ffprobe` derives a fragmented file's from the sample
+    /// durations it sums, so an edit list's trim never shows there).
+    ///
+    /// Progressive is a two-pass mode like `matroskamux`'s `seekable`: the
+    /// `moov` cannot be written until every sample's size is known, so the whole
+    /// file is held in memory and emitted at EOS. Memory grows with the
+    /// recording; a live or long capture wants the fragmented default.
+    pub fn with_fragmented(mut self, fragmented: bool) -> Self {
+        self.fragmented = fragmented;
         self
     }
 
@@ -203,6 +249,41 @@ impl Mp4MuxN {
                 rate: *sample_rate,
             }),
             _ => None,
+        }
+    }
+
+    /// Adopt a concrete channel count / sample rate from a runtime
+    /// `CapsChanged`, which is how a demuxer delivers them (its negotiation caps
+    /// carry the `0/0` sentinel, so without this the audio `trak` would declare
+    /// a zero `mdhd` timescale and no reader could time the track). Only fills
+    /// in a field the pad does not have yet, and only while the `moov` is still
+    /// unwritten; a mid-stream format change cannot be expressed in a `moov`
+    /// already on the wire.
+    fn refine_audio_caps(&mut self, input: usize, caps: &Caps) {
+        let Some(PadKind::Audio {
+            channels: new_channels,
+            rate: new_rate,
+            ..
+        }) = Self::pad_kind_for(caps)
+        else {
+            return;
+        };
+        if self.header_written {
+            return;
+        }
+        let fill = |channels: &mut u8, rate: &mut u32| {
+            if *channels == 0 {
+                *channels = new_channels;
+            }
+            if *rate == 0 {
+                *rate = new_rate;
+            }
+        };
+        if let Some(PadKind::Audio { channels, rate, .. }) = &mut self.kinds[input] {
+            fill(channels, rate);
+        }
+        if let Some(TrackInit::Audio { channels, rate, .. }) = &mut self.inits[input] {
+            fill(channels, rate);
         }
     }
 
@@ -382,6 +463,26 @@ impl Mp4MuxN {
         self.prev_pts_ns[input] = Some(pts_ns);
         let duration = ns_to_ts(dur_ns, timescale) as u32;
 
+        // Progressive mode: hold every sample until EOS, where the `mdat` and the
+        // sample tables are written together. A frame with no decode timestamp of
+        // its own (or one past its PTS, which `ctts` version 0 cannot express)
+        // decodes when it presents, the common no-reorder case.
+        if !self.fragmented {
+            let dts_ns = match frame.timing.dts_ns {
+                d if d > 0 && d <= pts_ns => d,
+                _ => pts_ns,
+            };
+            self.samples.push(ProgSample {
+                input,
+                bytes: sample,
+                duration,
+                is_sync,
+                dts: ns_to_ts(dts_ns, timescale),
+                composition_offset: ns_to_ts(pts_ns - dts_ns, timescale) as u32,
+            });
+            return Ok(());
+        }
+
         // Batched mode closes the open fragment before starting a new one at a sync
         // sample once the target duration is reached, so every fragment begins on a
         // keyframe (audio access units are all sync, so they close on the target).
@@ -441,7 +542,7 @@ impl Mp4MuxN {
         let mut bytes = Vec::new();
         if !self.header_written {
             bytes.extend_from_slice(&ftyp());
-            bytes.extend_from_slice(&av_moov(&self.inits));
+            bytes.extend_from_slice(&av_moov(&self.inits, None));
             self.header_written = true;
         }
 
@@ -473,6 +574,60 @@ impl Mp4MuxN {
         for input in 0..self.inputs {
             self.flush_track(input, out).await?;
         }
+        Ok(())
+    }
+
+    /// Progressive mode's finalize (M793): write `ftyp` + one `mdat` holding
+    /// every buffered sample + a `moov` whose sample tables index them, and emit
+    /// the whole file as one frame. A no-op when nothing was buffered.
+    async fn finish_progressive(&mut self, out: &mut dyn OutputSink) -> Result<(), G2gError> {
+        if self.samples.is_empty() {
+            return Ok(());
+        }
+        let samples = core::mem::take(&mut self.samples);
+        let head = ftyp();
+
+        // The mdat payload is the samples in the order they were released, so
+        // each sample's file offset is known once the mdat header size is.
+        let payload: usize = samples.iter().map(|s| s.bytes.len()).sum();
+        // 32-bit box size unless the payload needs the 64-bit `largesize` form.
+        let mdat_header = if payload.saturating_add(8) > u32::MAX as usize {
+            16
+        } else {
+            8
+        };
+        let mut file = Vec::with_capacity(head.len() + mdat_header + payload + 4096);
+        file.extend_from_slice(&head);
+        if mdat_header == 16 {
+            file.extend_from_slice(&1u32.to_be_bytes()); // size 1: largesize follows
+            file.extend_from_slice(b"mdat");
+            file.extend_from_slice(&((payload + 16) as u64).to_be_bytes());
+        } else {
+            file.extend_from_slice(&((payload + 8) as u32).to_be_bytes());
+            file.extend_from_slice(b"mdat");
+        }
+        let mut offsets = Vec::with_capacity(samples.len());
+        for s in &samples {
+            offsets.push(file.len() as u64);
+            file.extend_from_slice(&s.bytes);
+        }
+
+        let tables: Vec<Option<TrackTables>> = (0..self.inputs)
+            .map(|input| {
+                self.inits[input]
+                    .as_ref()
+                    .map(|init| track_tables(input, init, &samples, &offsets))
+            })
+            .collect();
+        file.extend_from_slice(&av_moov(&self.inits, Some(&tables)));
+
+        let out_frame = Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(file.into_boxed_slice())),
+            FrameTiming::default(),
+            self.emitted,
+        );
+        self.emitted += 1;
+        out.push(PipelinePacket::DataFrame(out_frame)).await?;
         Ok(())
     }
 }
@@ -540,12 +695,24 @@ impl MultiInputElement for Mp4MuxN {
     }
 
     fn properties(&self) -> &'static [PropertySpec] {
-        const PROPS: &[PropertySpec] = &[PropertySpec::new(
-            "fragment-duration",
-            PropKind::Uint,
-            "target fragment duration, milliseconds (0 = one fragment per access unit)",
-        )
-        .with_default("0")];
+        // `fragmented` has no GStreamer counterpart: `mp4mux` switches layout
+        // with `fragment-duration = 0`, which g2g already spends on "one
+        // fragment per access unit" (the streaming default). Reusing it would
+        // flip the default output, so the layout gets its own boolean.
+        const PROPS: &[PropertySpec] = &[
+            PropertySpec::new(
+                "fragment-duration",
+                PropKind::Uint,
+                "target fragment duration, milliseconds (0 = one fragment per access unit)",
+            )
+            .with_default("0"),
+            PropertySpec::new(
+                "fragmented",
+                PropKind::Bool,
+                "moof/mdat fragments (streamable); false buffers the file and writes one mdat + a moov with real sample tables at EOS",
+            )
+            .with_default("true"),
+        ];
         PROPS
     }
 
@@ -555,6 +722,10 @@ impl MultiInputElement for Mp4MuxN {
                 self.fragment_duration_ms = value.as_uint().ok_or(PropError::Type)?;
                 Ok(())
             }
+            "fragmented" => {
+                self.fragmented = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -562,6 +733,7 @@ impl MultiInputElement for Mp4MuxN {
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
             "fragment-duration" => Some(PropValue::Uint(self.fragment_duration_ms)),
+            "fragmented" => Some(PropValue::Bool(self.fragmented)),
             _ => None,
         }
     }
@@ -587,9 +759,15 @@ impl MultiInputElement for Mp4MuxN {
                     self.agg.push(input, frame);
                 }
                 PipelinePacket::Eos => self.agg.mark_ended(input),
-                // CapsChanged is consumed by the runner's muxer arm; the moov is
-                // fixed from the first AU's in-band init.
-                PipelinePacket::CapsChanged(_) => return Ok(()),
+                // A demuxer negotiates compressed audio with the `0/0` "unknown
+                // until parsed" caps and refines them at runtime, so the real
+                // channel count / rate arrive here. Take them while the `moov`
+                // can still change; otherwise the packet is the runner's to
+                // consume (the moov is fixed from the first AU's in-band init).
+                PipelinePacket::CapsChanged(caps) => {
+                    self.refine_audio_caps(input, &caps);
+                    return Ok(());
+                }
                 other => {
                     out.push(other).await?;
                     return Ok(());
@@ -606,8 +784,14 @@ impl MultiInputElement for Mp4MuxN {
             }
             // At EOS (every input ended and drained), close any open batched
             // fragments so the last AUs are written; a no-op in per-AU mode.
+            // Progressive mode instead writes the whole file now, since the
+            // sample tables need every sample's size and offset.
             if self.agg.is_drained() {
-                self.flush_all(out).await?;
+                if self.fragmented {
+                    self.flush_all(out).await?;
+                } else {
+                    self.finish_progressive(out).await?;
+                }
             }
             Ok(())
         })
@@ -626,13 +810,24 @@ fn ns_to_ts(ns: u64, timescale: u32) -> u64 {
 /// Build a multi-track `moov`: `mvhd` + one `trak` per track + `mvex` (one
 /// `trex` per track). `track_ID` is the 1-based pad slot, so it matches the
 /// `track_ID` each fragment carries even when a pad slot is empty (no AU yet).
-fn av_moov(tracks: &[Option<TrackInit>]) -> Vec<u8> {
+///
+/// `tables` is `None` for the fragmented layout (empty sample tables, zero
+/// durations, `mvex` declares the movie extends into fragments) and `Some` for
+/// the progressive one (real tables and durations, no `mvex`), one entry per
+/// pad slot in the same order as `tracks`.
+fn av_moov(tracks: &[Option<TrackInit>], tables: Option<&[Option<TrackTables>]>) -> Vec<u8> {
+    let table_of = |i: usize| tables.and_then(|t| t.get(i)).and_then(Option::as_ref);
     let next_track_id = (tracks.len() + 1) as u32;
+    // The movie lasts as long as its longest track's presentation.
+    let movie_duration = (0..tracks.len())
+        .filter_map(|i| table_of(i).map(|t| t.track_duration))
+        .max()
+        .unwrap_or(0);
     let mvhd = {
         let mut p = Vec::new();
         p.extend_from_slice(&[0u8; 8]);
-        p.extend_from_slice(&1000u32.to_be_bytes()); // movie timescale
-        p.extend_from_slice(&0u32.to_be_bytes()); // duration (fragmented)
+        p.extend_from_slice(&MOVIE_TIMESCALE.to_be_bytes());
+        p.extend_from_slice(&(movie_duration as u32).to_be_bytes()); // 0 when fragmented
         p.extend_from_slice(&0x00010000u32.to_be_bytes()); // rate 1.0
         p.extend_from_slice(&0x0100u16.to_be_bytes()); // volume 1.0
         p.extend_from_slice(&[0u8; 10]);
@@ -647,9 +842,10 @@ fn av_moov(tracks: &[Option<TrackInit>]) -> Vec<u8> {
     let mut body = mvhd;
     for (i, track) in tracks.iter().enumerate() {
         let Some(track) = track else { continue };
-        body.extend_from_slice(&trak(i as u32 + 1, track));
+        body.extend_from_slice(&trak(i as u32 + 1, track, table_of(i)));
     }
-    let mvex = {
+    // A progressive file has no fragments, so no `mvex` to announce them.
+    if tables.is_none() {
         let mut p = Vec::new();
         for (i, track) in tracks.iter().enumerate() {
             if track.is_none() {
@@ -661,10 +857,152 @@ fn av_moov(tracks: &[Option<TrackInit>]) -> Vec<u8> {
             t.extend_from_slice(&[0u8; 12]); // default duration/size/flags
             p.extend_from_slice(&full_box(b"trex", 0, 0, &t));
         }
-        mp4_box(b"mvex", &p)
-    };
-    body.extend_from_slice(&mvex);
+        body.extend_from_slice(&mp4_box(b"mvex", &p));
+    }
     mp4_box(b"moov", &body)
+}
+
+/// One progressive track's finished sample tables and the durations its headers
+/// declare. Built by [`track_tables`] once every sample is buffered.
+#[derive(Debug)]
+struct TrackTables {
+    /// `stts` + optional `ctts` + optional `stss` + `stsc` + `stsz` +
+    /// `stco`/`co64`, in the order they go into the `stbl` after the `stsd`.
+    tables: Vec<u8>,
+    /// Total decode duration in the track's media timescale (`mdhd`).
+    media_duration: u64,
+    /// Presentation duration in the movie timescale (`tkhd`, and the edit list's
+    /// `segment_duration`): the media duration less any codec delay trimmed by
+    /// the edit.
+    track_duration: u64,
+}
+
+/// Build one progressive track's sample tables from the muxer's buffered
+/// samples and their `mdat` file offsets (`offsets[i]` locates `samples[i]`).
+///
+/// Each sample is its own chunk, so `stsc` is a single entry and `stco` has one
+/// offset per sample: the samples of the tracks interleave in the `mdat`, so
+/// larger chunks would need a chunking policy, and the 4 bytes per sample are
+/// nothing next to the sample bytes already held in memory. Tables are ordered
+/// by decode timestamp (a stable sort, so a stream with no reorder keeps the
+/// order it arrived in), and `ctts` carries `pts - dts` where they differ.
+fn track_tables(
+    input: usize,
+    init: &TrackInit,
+    samples: &[ProgSample],
+    offsets: &[u64],
+) -> TrackTables {
+    let mut idx: Vec<usize> = (0..samples.len())
+        .filter(|&i| samples[i].input == input)
+        .collect();
+    idx.sort_by_key(|&i| samples[i].dts);
+
+    // stts: (count, delta) runs over the decode durations.
+    let mut stts_runs: Vec<(u32, u32)> = Vec::new();
+    let mut media_duration = 0u64;
+    for &i in &idx {
+        let d = samples[i].duration;
+        media_duration += u64::from(d);
+        match stts_runs.last_mut() {
+            Some((n, delta)) if *delta == d => *n += 1,
+            _ => stts_runs.push((1, d)),
+        }
+    }
+    let mut stts = Vec::new();
+    stts.extend_from_slice(&(stts_runs.len() as u32).to_be_bytes());
+    for (n, delta) in &stts_runs {
+        stts.extend_from_slice(&n.to_be_bytes());
+        stts.extend_from_slice(&delta.to_be_bytes());
+    }
+
+    // ctts: composition offsets, run-length encoded, omitted when every sample
+    // presents when it decodes (version 0, unsigned, which is what ffmpeg
+    // writes unless asked for negative offsets).
+    let mut ctts_runs: Vec<(u32, u32)> = Vec::new();
+    for &i in &idx {
+        let off = samples[i].composition_offset;
+        match ctts_runs.last_mut() {
+            Some((n, o)) if *o == off => *n += 1,
+            _ => ctts_runs.push((1, off)),
+        }
+    }
+    let ctts = if ctts_runs.iter().all(|(_, o)| *o == 0) {
+        Vec::new()
+    } else {
+        let mut p = Vec::new();
+        p.extend_from_slice(&(ctts_runs.len() as u32).to_be_bytes());
+        for (n, off) in &ctts_runs {
+            p.extend_from_slice(&n.to_be_bytes());
+            p.extend_from_slice(&off.to_be_bytes());
+        }
+        full_box(b"ctts", 0, 0, &p)
+    };
+
+    // stss: 1-based sync sample numbers, omitted when every sample is one
+    // (audio, and video with no inter-coded frames), which is what its absence
+    // means.
+    let syncs: Vec<u32> = idx
+        .iter()
+        .enumerate()
+        .filter(|(_, &i)| samples[i].is_sync)
+        .map(|(n, _)| n as u32 + 1)
+        .collect();
+    let stss = if syncs.len() == idx.len() {
+        Vec::new()
+    } else {
+        let mut p = Vec::new();
+        p.extend_from_slice(&(syncs.len() as u32).to_be_bytes());
+        for n in &syncs {
+            p.extend_from_slice(&n.to_be_bytes());
+        }
+        full_box(b"stss", 0, 0, &p)
+    };
+
+    // stsc: one sample per chunk, so one entry covers the whole track.
+    let mut stsc = Vec::new();
+    stsc.extend_from_slice(&1u32.to_be_bytes()); // entry count
+    stsc.extend_from_slice(&1u32.to_be_bytes()); // first chunk
+    stsc.extend_from_slice(&1u32.to_be_bytes()); // samples per chunk
+    stsc.extend_from_slice(&1u32.to_be_bytes()); // sample description index
+
+    // stsz: explicit per-sample sizes (default_size 0).
+    let mut stsz = Vec::new();
+    stsz.extend_from_slice(&0u32.to_be_bytes()); // default sample size
+    stsz.extend_from_slice(&(idx.len() as u32).to_be_bytes());
+    for &i in &idx {
+        stsz.extend_from_slice(&(samples[i].bytes.len() as u32).to_be_bytes());
+    }
+
+    // stco / co64: the chunk (= sample) file offsets, 64-bit only if one does
+    // not fit in 32.
+    let needs_co64 = idx.iter().any(|&i| offsets[i] > u64::from(u32::MAX));
+    let mut chunks = Vec::new();
+    chunks.extend_from_slice(&(idx.len() as u32).to_be_bytes());
+    for &i in &idx {
+        if needs_co64 {
+            chunks.extend_from_slice(&offsets[i].to_be_bytes());
+        } else {
+            chunks.extend_from_slice(&(offsets[i] as u32).to_be_bytes());
+        }
+    }
+    let chunk_box = full_box(if needs_co64 { b"co64" } else { b"stco" }, 0, 0, &chunks);
+
+    let media_time = u64::from(track_pre_skip(init));
+    let timescale = init.timescale();
+    let presentation = media_duration.saturating_sub(media_time);
+    TrackTables {
+        tables: [
+            full_box(b"stts", 0, 0, &stts),
+            ctts,
+            stss,
+            full_box(b"stsc", 0, 0, &stsc),
+            full_box(b"stsz", 0, 0, &stsz),
+            chunk_box,
+        ]
+        .concat(),
+        media_duration,
+        track_duration: presentation * u64::from(MOVIE_TIMESCALE) / u64::from(timescale.max(1)),
+    }
 }
 
 /// The media-specific boxes of a track (the part that differs between video and
@@ -848,24 +1186,26 @@ fn track_pre_skip(init: &TrackInit) -> u32 {
 /// The `edts`/`elst` that trims a track's codec delay off the presentation
 /// timeline (Opus-in-ISOBMFF): `media_time` is the pre-skip in media timescale
 /// units, so playback starts at the first real sample instead of the decoder's
-/// pre-roll. `segment_duration` is `0` ("to the end of the media"): this muxer
-/// is fragmented, so the moov is written before the total is known. Empty for a
-/// track with no delay to trim.
-fn edts(init: &TrackInit) -> Vec<u8> {
+/// pre-roll. `segment_duration` (movie timescale) is the presentation length,
+/// or `0` ("to the end of the media") in the fragmented layout, whose `moov` is
+/// written before the total is known. Empty for a track with no delay to trim.
+fn edts(init: &TrackInit, segment_duration: u64) -> Vec<u8> {
     let media_time = track_pre_skip(init);
     if media_time == 0 {
         return Vec::new();
     }
     let mut p = Vec::new();
     p.extend_from_slice(&1u32.to_be_bytes()); // entry count
-    p.extend_from_slice(&0u32.to_be_bytes()); // segment duration
+    p.extend_from_slice(&(segment_duration as u32).to_be_bytes());
     p.extend_from_slice(&media_time.to_be_bytes());
     p.extend_from_slice(&0x0001_0000u32.to_be_bytes()); // media rate 1.0
     mp4_box(b"edts", &full_box(b"elst", 0, 0, &p))
 }
 
-/// One `trak` for a track (`track_ID` 1-based).
-fn trak(track_id: u32, init: &TrackInit) -> Vec<u8> {
+/// One `trak` for a track (`track_ID` 1-based). `tables` carries the
+/// progressive layout's sample tables and durations; `None` writes the
+/// fragmented form (empty tables, zero durations, the fragments carry timing).
+fn trak(track_id: u32, init: &TrackInit, tables: Option<&TrackTables>) -> Vec<u8> {
     let TrakMedia {
         handler,
         media_header: header,
@@ -879,7 +1219,8 @@ fn trak(track_id: u32, init: &TrackInit) -> Vec<u8> {
         p.extend_from_slice(&[0u8; 8]); // times
         p.extend_from_slice(&track_id.to_be_bytes());
         p.extend_from_slice(&[0u8; 4]); // reserved
-        p.extend_from_slice(&0u32.to_be_bytes()); // duration
+        let track_duration = tables.map(|t| t.track_duration).unwrap_or(0);
+        p.extend_from_slice(&(track_duration as u32).to_be_bytes()); // movie timescale
         p.extend_from_slice(&[0u8; 8]); // reserved
         p.extend_from_slice(&0u16.to_be_bytes()); // layer
         p.extend_from_slice(&0u16.to_be_bytes()); // alternate group
@@ -898,7 +1239,8 @@ fn trak(track_id: u32, init: &TrackInit) -> Vec<u8> {
         let mut p = Vec::new();
         p.extend_from_slice(&[0u8; 8]);
         p.extend_from_slice(&timescale.to_be_bytes());
-        p.extend_from_slice(&0u32.to_be_bytes()); // duration
+        let media_duration = tables.map(|t| t.media_duration).unwrap_or(0);
+        p.extend_from_slice(&(media_duration as u32).to_be_bytes());
         p.extend_from_slice(&0x55C4u16.to_be_bytes()); // language "und"
         p.extend_from_slice(&[0u8; 2]);
         full_box(b"mdhd", 0, 0, &p)
@@ -918,12 +1260,22 @@ fn trak(track_id: u32, init: &TrackInit) -> Vec<u8> {
             p.extend_from_slice(&sample_entry);
             full_box(b"stsd", 0, 0, &p)
         };
-        let empty4 = 0u32.to_be_bytes();
-        let stts = full_box(b"stts", 0, 0, &empty4);
-        let stsc = full_box(b"stsc", 0, 0, &empty4);
-        let stsz = full_box(b"stsz", 0, 0, &[0u8; 8]);
-        let stco = full_box(b"stco", 0, 0, &empty4);
-        mp4_box(b"stbl", &[stsd, stts, stsc, stsz, stco].concat())
+        // A fragmented file's tables are empty (the `trun`s carry the samples);
+        // a progressive one indexes every sample.
+        let sample_tables = match tables {
+            Some(t) => t.tables.clone(),
+            None => {
+                let empty4 = 0u32.to_be_bytes();
+                [
+                    full_box(b"stts", 0, 0, &empty4),
+                    full_box(b"stsc", 0, 0, &empty4),
+                    full_box(b"stsz", 0, 0, &[0u8; 8]),
+                    full_box(b"stco", 0, 0, &empty4),
+                ]
+                .concat()
+            }
+        };
+        mp4_box(b"stbl", &[stsd, sample_tables].concat())
     };
     let dinf = {
         let url = full_box(b"url ", 0, 1, &[]);
@@ -935,7 +1287,11 @@ fn trak(track_id: u32, init: &TrackInit) -> Vec<u8> {
     };
     let minf = mp4_box(b"minf", &[header, dinf, stbl].concat());
     let mdia = mp4_box(b"mdia", &[mdhd, hdlr, minf].concat());
-    mp4_box(b"trak", &[tkhd, edts(init), mdia].concat())
+    let segment_duration = tables.map(|t| t.track_duration).unwrap_or(0);
+    mp4_box(
+        b"trak",
+        &[tkhd, edts(init, segment_duration), mdia].concat(),
+    )
 }
 
 /// One `moof`+`mdat` fragment holding `samples` for `track_id`, with a
@@ -1145,7 +1501,7 @@ mod tests {
                 config: alloc::vec![0x11, 0x90],
             }),
         ];
-        let moov = av_moov(&tracks);
+        let moov = av_moov(&tracks, None);
         let count = |needle: &[u8]| moov.windows(4).filter(|w| *w == needle).count();
         assert_eq!(count(b"trak"), 2, "one trak per track");
         assert_eq!(count(b"trex"), 2, "one trex per track");
@@ -1168,7 +1524,7 @@ mod tests {
                 config: alloc::vec![0x11, 0x90],
             }),
         ];
-        let moov = av_moov(&tracks);
+        let moov = av_moov(&tracks, None);
         let count = |needle: &[u8]| moov.windows(4).filter(|w| *w == needle).count();
         assert_eq!(count(b"trak"), 1, "only the non-empty pad gets a trak");
         assert_eq!(count(b"trex"), 1);
@@ -1188,7 +1544,7 @@ mod tests {
             rate: 48000,
             config: Vec::new(),
         })];
-        let moov = av_moov(&tracks);
+        let moov = av_moov(&tracks, None);
         let count = |needle: &[u8]| moov.windows(needle.len()).filter(|w| *w == needle).count();
         assert_eq!(count(b"Opus"), 1, "Opus sample entry");
         assert_eq!(count(b"dOps"), 1, "OpusSpecificBox");
@@ -1226,7 +1582,7 @@ mod tests {
             rate: 48000,
             config: head,
         })];
-        let moov = av_moov(&tracks);
+        let moov = av_moov(&tracks, None);
         let dops = moov.windows(4).position(|w| w == b"dOps").unwrap();
         assert_eq!(
             u16::from_be_bytes([moov[dops + 6], moov[dops + 7]]),
@@ -1249,11 +1605,213 @@ mod tests {
             height: 240,
             param_sets: Vec::new(),
         })];
-        let moov = av_moov(&tracks);
+        let moov = av_moov(&tracks, None);
         let count = |needle: &[u8]| moov.windows(needle.len()).filter(|w| *w == needle).count();
         assert_eq!(count(b"vp09"), 1, "VP9 sample entry");
         assert_eq!(count(b"vpcC"), 1, "VPCodecConfigurationBox");
         assert_eq!(count(b"avcC"), 0, "no avcC for a VP9 track");
         assert_eq!(count(b"vide"), 1, "video handler");
+    }
+
+    /// The top-level 4ccs of `file`, in order.
+    fn top_level_boxes(file: &[u8]) -> Vec<[u8; 4]> {
+        let mut out = Vec::new();
+        let mut at = 0usize;
+        while at + 8 <= file.len() {
+            let size = u32::from_be_bytes(file[at..at + 4].try_into().unwrap()) as usize;
+            if size < 8 || at + size > file.len() {
+                break;
+            }
+            out.push(file[at + 4..at + 8].try_into().unwrap());
+            at += size;
+        }
+        out
+    }
+
+    /// The payload of the first box named `fourcc`, or `None`.
+    fn box_payload<'a>(file: &'a [u8], fourcc: &[u8; 4]) -> Option<&'a [u8]> {
+        let at = file.windows(4).position(|w| w == fourcc)?;
+        let size = u32::from_be_bytes(file[at - 4..at].try_into().unwrap()) as usize;
+        file.get(at + 4..at - 4 + size)
+    }
+
+    /// Six H.264 access units (two IDRs, four inter frames) through the muxer in
+    /// the given layout.
+    async fn mux_six_aus(fragmented: bool) -> Vec<u8> {
+        let sps = [0x67u8, 0x42, 0x00, 0x1e, 0x88];
+        let pps = [0x68u8, 0xce, 0x3c, 0x80];
+        let idr = [0x65u8, 0x88, 0x84, 0x00];
+        let key = annexb(&[&sps, &pps, &idr]);
+        let inter = || annexb(&[&[0x41u8, 0x9a, 0x00]]);
+        let aus = [key.clone(), inter(), inter(), inter(), inter(), key];
+
+        let mut mux = Mp4MuxN::new(1).with_fragmented(fragmented);
+        mux.configure_pipeline(0, &h264_caps(320, 240)).unwrap();
+        let mut sink = CaptureSink::default();
+        for (i, au) in aus.iter().enumerate() {
+            mux.process(0, frame(au.clone(), i as u64 * 33_333_333), &mut sink)
+                .await
+                .unwrap();
+        }
+        mux.process(0, PipelinePacket::Eos, &mut sink)
+            .await
+            .unwrap();
+        sink.bytes
+    }
+
+    /// The progressive layout is `ftyp` + one `mdat` + a `moov` with real sample
+    /// tables and no `mvex`; the fragmented default is unchanged.
+    #[tokio::test]
+    async fn progressive_writes_ftyp_mdat_moov_with_real_sample_tables() {
+        let file = mux_six_aus(false).await;
+        let boxes = top_level_boxes(&file);
+        assert_eq!(
+            boxes,
+            alloc::vec![*b"ftyp", *b"mdat", *b"moov"],
+            "one mdat between the brands and the index"
+        );
+        let count = |needle: &[u8]| file.windows(needle.len()).filter(|w| *w == needle).count();
+        assert_eq!(count(b"moof"), 0, "no fragments");
+        assert_eq!(count(b"mvex"), 0, "and nothing announcing any");
+        for table in [b"stts", b"stsc", b"stsz", b"stco", b"stss"] {
+            assert_eq!(
+                count(table),
+                1,
+                "one {} table",
+                core::str::from_utf8(table).unwrap()
+            );
+        }
+        assert_eq!(count(b"ctts"), 0, "pts == dts, so no composition offsets");
+
+        // stsz: six samples, none empty.
+        let stsz = box_payload(&file, b"stsz").expect("stsz");
+        assert_eq!(
+            u32::from_be_bytes(stsz[8..12].try_into().unwrap()),
+            6,
+            "every access unit is indexed"
+        );
+        // stss: the two IDRs are the sync samples (1-based).
+        let stss = box_payload(&file, b"stss").expect("stss");
+        assert_eq!(u32::from_be_bytes(stss[4..8].try_into().unwrap()), 2);
+        assert_eq!(u32::from_be_bytes(stss[8..12].try_into().unwrap()), 1);
+        assert_eq!(u32::from_be_bytes(stss[12..16].try_into().unwrap()), 6);
+        // The movie lasts six 33.3 ms frames: 2999 ticks each at 90 kHz, so
+        // 199 ms in the 1 kHz movie timescale.
+        let mvhd = box_payload(&file, b"mvhd").expect("mvhd");
+        assert_eq!(u32::from_be_bytes(mvhd[16..20].try_into().unwrap()), 199);
+
+        // Sample bytes really live where stco says they do: the first chunk
+        // offset lands on the first sample's AVCC length prefix.
+        let stco = box_payload(&file, b"stco").expect("stco");
+        let first = u32::from_be_bytes(stco[8..12].try_into().unwrap()) as usize;
+        let first_len = u32::from_be_bytes(stsz[12..16].try_into().unwrap()) as usize;
+        assert_eq!(
+            u32::from_be_bytes(file[first..first + 4].try_into().unwrap()) as usize,
+            5,
+            "the first sample starts with its SPS's 4-byte AVCC length"
+        );
+        assert!(first + first_len <= file.len(), "the sample is in the file");
+
+        // The default is untouched.
+        let frag = mux_six_aus(true).await;
+        assert!(
+            frag.windows(4).any(|w| w == b"moof"),
+            "the fragmented default still writes fragments"
+        );
+        assert_eq!(
+            top_level_boxes(&frag)[..2],
+            [*b"ftyp", *b"moov"],
+            "and still leads with the init segment"
+        );
+    }
+
+    /// A stream whose frames decode before they present gets a `ctts`, one
+    /// run-length entry for the constant offset.
+    #[tokio::test]
+    async fn progressive_writes_ctts_when_decode_leads_presentation() {
+        let idr = annexb(&[
+            &[0x67u8, 0x42, 0x00, 0x1e, 0x88],
+            &[0x68u8, 0xce],
+            &[0x65u8, 0x88],
+        ]);
+        let mut mux = Mp4MuxN::new(1).with_fragmented(false);
+        mux.configure_pipeline(0, &h264_caps(320, 240)).unwrap();
+        let mut sink = CaptureSink::default();
+        for i in 0..3u64 {
+            let pts = 100_000_000 + i * 33_333_333;
+            let packet = PipelinePacket::DataFrame(Frame::new(
+                MemoryDomain::System(SystemSlice::from_boxed(idr.clone().into_boxed_slice())),
+                FrameTiming {
+                    pts_ns: pts,
+                    // Two frames of reorder delay.
+                    dts_ns: pts - 66_666_666,
+                    ..FrameTiming::default()
+                },
+                0,
+            ));
+            mux.process(0, packet, &mut sink).await.unwrap();
+        }
+        mux.process(0, PipelinePacket::Eos, &mut sink)
+            .await
+            .unwrap();
+
+        let ctts = box_payload(&sink.bytes, b"ctts").expect("ctts written");
+        assert_eq!(ctts.first(), Some(&0), "version 0, unsigned offsets");
+        assert_eq!(
+            u32::from_be_bytes(ctts[4..8].try_into().unwrap()),
+            1,
+            "one run covers the constant offset"
+        );
+        assert_eq!(u32::from_be_bytes(ctts[8..12].try_into().unwrap()), 3);
+        assert_eq!(
+            u32::from_be_bytes(ctts[12..16].try_into().unwrap()),
+            ns_to_ts(66_666_666, VIDEO_TIMESCALE) as u32,
+            "pts - dts in the video timescale"
+        );
+    }
+
+    /// A demuxer negotiates compressed audio as `0/0` and refines at runtime;
+    /// the muxer must take the refinement or write a zero `mdhd` timescale.
+    #[tokio::test]
+    async fn runtime_caps_refinement_sizes_the_audio_track() {
+        let sentinel = Caps::Audio {
+            format: AudioFormat::Opus,
+            channels: 0,
+            sample_rate: 0,
+        };
+        let refined = Caps::Audio {
+            format: AudioFormat::Opus,
+            channels: 2,
+            sample_rate: 48_000,
+        };
+        let mut mux = Mp4MuxN::new(1).with_fragmented(false);
+        mux.configure_pipeline(0, &sentinel).unwrap();
+        let mut sink = CaptureSink::default();
+        mux.process(0, PipelinePacket::CapsChanged(refined), &mut sink)
+            .await
+            .unwrap();
+        for i in 0..3u64 {
+            mux.process(
+                0,
+                frame(alloc::vec![0xFC, i as u8, 1, 2], i * 20_000_000),
+                &mut sink,
+            )
+            .await
+            .unwrap();
+        }
+        mux.process(0, PipelinePacket::Eos, &mut sink)
+            .await
+            .unwrap();
+
+        let mdhd = box_payload(&sink.bytes, b"mdhd").expect("mdhd");
+        assert_eq!(
+            u32::from_be_bytes(mdhd[12..16].try_into().unwrap()),
+            48_000,
+            "the refined sample rate is the media timescale"
+        );
+        assert!(
+            u32::from_be_bytes(mdhd[16..20].try_into().unwrap()) > 0,
+            "and the track has a duration"
+        );
     }
 }

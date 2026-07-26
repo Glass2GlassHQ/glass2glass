@@ -1799,11 +1799,30 @@ keeps the source's pre-skip, output gain and channel mapping byte for byte,
 while a freshly encoded stream (`OpusEnc` emits raw packets, no header, so its
 RTP consumers are unaffected) falls back to libopus' 312-sample lookahead. The
 Opus `trak` also carries the `edts`/`elst` the Opus-in-ISOBMFF binding requires,
-`media_time` = pre-skip. Because the muxer is fragmented, `segment_duration` is
-`0` (the total is unknown when the `moov` is written) and ffmpeg reports the
-media span with a negative `start_time` rather than the trimmed duration: an
-exactly reported duration needs a real sample table, i.e. a non-fragmented
-muxer mode.
+`media_time` = pre-skip.
+
+Which duration a reader then reports depends on the layout, so `Mp4MuxN` writes
+both (M793, the `fragmented` property, default `true`). Fragmented is the
+streamable one: `ftyp`+`moov` up front, a `moof`+`mdat` per fragment, empty
+sample tables and zero header durations. ffmpeg derives such a file's duration
+by summing the `trun` sample durations and applies an edit list only as a
+timestamp shift, so an Opus track reports the media span with a negative
+`start_time` and `segment_duration` is written `0` (the total is unknown when
+the `moov` goes out). Progressive is the two-pass one, the shape `matroskamux`'s
+`seekable` mode has: every sample is buffered, then `ftyp` + a single `mdat` +
+a `moov` are emitted together at EOS, with real `stts` / `ctts` / `stss` /
+`stsc` / `stsz` / `stco` tables (one sample per chunk, ordered by decode
+timestamp) and real `mvhd`/`tkhd`/`mdhd` durations. That is enough for ffmpeg to
+apply the edit, so the reported duration is the trimmed presentation length
+exactly. The cost is holding the movie in memory, so a live or long capture
+wants the fragmented default. GStreamer spells this choice `fragment-duration =
+0`, which g2g already spends on "one fragment per access unit", so the layout
+gets its own boolean rather than a silently redefined property.
+
+Compressed audio negotiates with the `0/0` "unknown until parsed" caps, so
+`Mp4MuxN` adopts the concrete channel count and rate from the runtime
+`CapsChanged` a demuxer emits, while the `moov` is still unwritten; without it a
+remuxed audio track would declare a zero `mdhd` timescale.
 
 Matroska is the third spelling of the same two facts, and converts to the same
 in-band convention (M792). The pre-skip is the `CodecPrivate` `OpusHead` itself,
