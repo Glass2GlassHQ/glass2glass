@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M788: a Matroska track's title and language ride its `TrackEntry` `Name` / `Language` in both directions, merged into the same per-stream tag view.
+
 - M787: Matroska per-track tags: the muxer writes `Targets`-scoped `Tag`s and the demuxer posts them as `BusMessage::StreamTag` per stream, with nested SimpleTags flattened.
 
 - M786: the WHIP simulcast session is validated against Broadcast Box: a three-layer publish is ingested as three rids with growing packet counts.

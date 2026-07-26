@@ -419,8 +419,6 @@ Phased plan:
 ## Containers
 
 - **MKV / WebM:** single-track `MkvMux` lacks unknown-size Clusters (live read).
-  The `TrackEntry` `Language` / `Name` elements (where ffmpeg puts a track's
-  language and title) do not surface as per-track tags.
 - **OGG:** multi-stream; `oggmux`.
 - **FLV:** VP6 / H.263 / MP3 / Speex codecs (only H.264 + AAC ride the tag
   stream today).

@@ -47,6 +47,9 @@ const ID_TRACKS: u32 = 0x1654_AE6B;
 const ID_TRACK_ENTRY: u32 = 0x00AE;
 const ID_TRACK_NUMBER: u32 = 0x00D7;
 const ID_TRACK_UID: u32 = 0x73C5;
+const ID_TRACK_NAME: u32 = 0x536E;
+const ID_LANGUAGE: u32 = 0x0022_B59C;
+const ID_LANGUAGE_BCP47: u32 = 0x0022_B59D;
 const ID_TRACK_TYPE: u32 = 0x0083;
 const ID_CODEC_ID: u32 = 0x0086;
 const ID_DEFAULT_DURATION: u32 = 0x0023_E383;
@@ -258,6 +261,9 @@ pub struct MatroskaDemuxer {
     /// appended as they parse (never merged), so a consumer can post the newly
     /// parsed ones by count.
     track_tags: Vec<(u64, TagList)>,
+    /// Metadata a `TrackEntry` declares itself (`Name` / `Language`, M788), keyed
+    /// by **track number**, not the `TagTrackUID` `track_tags` uses.
+    track_entry_tags: Vec<(u64, TagList)>,
     /// The current Timestamp of an open unknown-size Cluster (the live shape).
     /// `Some` while its children are being parsed at the top level, `None`
     /// otherwise. A definite-size Cluster never sets this (it is consumed whole).
@@ -295,6 +301,7 @@ impl MatroskaDemuxer {
             codec_privates: Vec::new(),
             tags: TagList::new(),
             track_tags: Vec::new(),
+            track_entry_tags: Vec::new(),
             open_cluster_ts: None,
             consumed: 0,
             segment_data_pos: None,
@@ -380,6 +387,16 @@ impl MatroskaDemuxer {
     /// unresolved. Accumulates across pushes, in parse order.
     pub fn track_tags(&self) -> &[(u64, TagList)] {
         &self.track_tags
+    }
+
+    /// The metadata each `TrackEntry` declares itself, `Name` as [`Tag::Title`]
+    /// and `Language` / `LanguageBCP47` as [`Tag::Language`] (M788), keyed by
+    /// track number. This is where ffmpeg puts a stream's title and language, so
+    /// a consumer merges it with [`track_tags`](Self::track_tags) to get one view
+    /// per track. Empty until `Tracks` is parsed; a track declaring neither has
+    /// no entry.
+    pub fn track_entry_tags(&self) -> &[(u64, TagList)] {
+        &self.track_entry_tags
     }
 
     /// Drain the frames demuxed so far.
@@ -504,10 +521,15 @@ impl MatroskaDemuxer {
                         }
                     }
                     ID_TRACKS => {
-                        for (track, private) in parse_tracks(&self.buf[header..total]) {
-                            self.tracks.push(track);
-                            if !private.is_empty() {
-                                self.codec_privates.push((track.number, private));
+                        for parsed in parse_tracks(&self.buf[header..total]) {
+                            self.tracks.push(parsed.track);
+                            if !parsed.codec_private.is_empty() {
+                                self.codec_privates
+                                    .push((parsed.track.number, parsed.codec_private));
+                            }
+                            if !parsed.tags.is_empty() {
+                                self.track_entry_tags
+                                    .push((parsed.track.number, parsed.tags));
                             }
                         }
                     }
@@ -763,7 +785,17 @@ fn collect_simple_tag(body: &[u8], prefix: &str, depth: u32, out: &mut Vec<Tag>)
     }
 }
 
-fn parse_tracks(body: &[u8]) -> Vec<(MkvTrack, Vec<u8>)> {
+/// One parsed `TrackEntry`: the track, its `CodecPrivate` decoder-init bytes
+/// (empty for codecs that carry none), and the metadata the entry itself
+/// declares (`Name` / `Language`, M788).
+#[derive(Debug)]
+struct ParsedTrack {
+    track: MkvTrack,
+    codec_private: Vec<u8>,
+    tags: TagList,
+}
+
+fn parse_tracks(body: &[u8]) -> Vec<ParsedTrack> {
     let mut tracks = Vec::new();
     for (id, entry) in children(body) {
         if id == ID_TRACK_ENTRY {
@@ -775,9 +807,25 @@ fn parse_tracks(body: &[u8]) -> Vec<(MkvTrack, Vec<u8>)> {
     tracks
 }
 
-fn parse_track_entry(body: &[u8]) -> Option<(MkvTrack, Vec<u8>)> {
+/// Cap on a `TrackEntry` string surfaced as a tag (`Name` / `Language`). The
+/// length is the file's claim, so an absurd one is ignored rather than copied.
+const MAX_TRACK_STRING_LEN: usize = 4096;
+
+/// A `TrackEntry` string element as a tag value: UTF-8 and within the length cap,
+/// else nothing.
+fn track_string(data: &[u8]) -> Option<&str> {
+    if data.len() > MAX_TRACK_STRING_LEN {
+        return None;
+    }
+    core::str::from_utf8(data).ok()
+}
+
+fn parse_track_entry(body: &[u8]) -> Option<ParsedTrack> {
     let mut number = 0u64;
     let mut uid = 0u64;
+    let mut name: Option<&str> = None;
+    let mut language: Option<&str> = None;
+    let mut language_bcp47: Option<&str> = None;
     let mut codec_id: &[u8] = &[];
     let mut codec_private: &[u8] = &[];
     let mut width = 0u32;
@@ -790,6 +838,11 @@ fn parse_track_entry(body: &[u8]) -> Option<(MkvTrack, Vec<u8>)> {
             ID_TRACK_NUMBER => number = read_uint(data),
             // The id a Tags `Targets` scopes a per-track tag to.
             ID_TRACK_UID => uid = read_uint(data),
+            // The track's own metadata: where ffmpeg puts a stream's title and
+            // language (a `Tags` element carries the rest).
+            ID_TRACK_NAME => name = track_string(data),
+            ID_LANGUAGE => language = track_string(data),
+            ID_LANGUAGE_BCP47 => language_bcp47 = track_string(data),
             ID_CODEC_ID => codec_id = data,
             // decoder-init bytes (FLAC's fLaC STREAMINFO); kept per track number.
             ID_CODEC_PRIVATE => codec_private = data,
@@ -818,8 +871,17 @@ fn parse_track_entry(body: &[u8]) -> Option<(MkvTrack, Vec<u8>)> {
     if number == 0 {
         return None;
     }
-    Some((
-        MkvTrack {
+    let mut tags = TagList::new();
+    if let Some(name) = name {
+        tags.push(Tag::Title(String::from(name)));
+    }
+    // Only an element that is actually there becomes a tag: the spec's implicit
+    // "eng" default for a missing Language is not metadata the file stated.
+    if let Some(lang) = language_bcp47.or(language) {
+        tags.push(Tag::Language(String::from(lang)));
+    }
+    Some(ParsedTrack {
+        track: MkvTrack {
             number,
             uid,
             codec: MkvCodec::from_codec_id(codec_id),
@@ -829,8 +891,9 @@ fn parse_track_entry(body: &[u8]) -> Option<(MkvTrack, Vec<u8>)> {
             sample_rate,
             default_duration_ns,
         },
-        codec_private.to_vec(),
-    ))
+        codec_private: codec_private.to_vec(),
+        tags,
+    })
 }
 
 /// Parse one Cluster's body, appending its frames. The Cluster `Timestamp`
@@ -1296,13 +1359,9 @@ impl MatroskaMuxer {
             // Segment data starts here; track positions are anchored to it.
             let seg_data_start = out.len();
             let info = info_element();
-            let tracks = tracks_element(&self.tracks);
-            let has_track_tags = self.track_tags.iter().any(|(_, t)| !t.is_empty());
-            let tags = if self.tags.is_empty() && !has_track_tags {
-                Vec::new()
-            } else {
-                tags_element(&self.tags, &self.track_tags)
-            };
+            let tracks = tracks_element(&self.tracks, &self.track_tags);
+            // Empty when every per-track tag went into its TrackEntry instead.
+            let tags = tags_element(&self.tags, &self.track_tags);
             if self.write_seek_head {
                 // Front SeekHead with fixed-layout entries (21 bytes each), so
                 // the Cues position (unknown until EOS) is patchable in place.
@@ -1438,8 +1497,10 @@ fn info_element() -> Vec<u8> {
 /// with a `TrackUID` equal to its number (any stable nonzero value is valid, and
 /// it is what a `Tags` `Targets` scopes a per-track tag to). A non-empty
 /// `CodecPrivate` (avcC / hvcC record, AAC AudioSpecificConfig) is written after
-/// the CodecID.
-fn tracks_element(tracks: &[MkvTrackConfig]) -> Vec<u8> {
+/// the CodecID. A track's [`Tag::Title`] / [`Tag::Language`] ride the entry's own
+/// `Name` / `Language` elements (M788), where ffmpeg and every player look for
+/// them; the rest of its tags go to the `Tags` element.
+fn tracks_element(tracks: &[MkvTrackConfig], track_tags: &[(usize, TagList)]) -> Vec<u8> {
     let mut entries = Vec::new();
     for (i, track) in tracks.iter().enumerate() {
         let spec = &track.spec;
@@ -1450,6 +1511,20 @@ fn tracks_element(tracks: &[MkvTrackConfig]) -> Vec<u8> {
             ID_TRACK_TYPE,
             &uint_bytes(spec.codec.track_type() as u64),
         ));
+        if let Some(name) = track_entry_string(track_tags, i, |t| match t {
+            Tag::Title(v) => Some(v),
+            _ => None,
+        }) {
+            entry.extend_from_slice(&elem_vec(ID_TRACK_NAME, name.as_bytes()));
+        }
+        // Matroska's Language is ISO 639-2; the value is written as given, the
+        // caller owns its form.
+        if let Some(lang) = track_entry_string(track_tags, i, |t| match t {
+            Tag::Language(v) => Some(v),
+            _ => None,
+        }) {
+            entry.extend_from_slice(&elem_vec(ID_LANGUAGE, lang.as_bytes()));
+        }
         entry.extend_from_slice(&elem_vec(ID_CODEC_ID, codec_id));
         if !track.codec_private.is_empty() {
             entry.extend_from_slice(&elem_vec(ID_CODEC_PRIVATE, &track.codec_private));
@@ -1477,41 +1552,71 @@ fn track_uid(index: usize) -> u64 {
     index as u64 + 1
 }
 
+/// The first value `pick` matches among track `index`'s tags: the `Name` /
+/// `Language` a `TrackEntry` carries instead of a `SimpleTag` (M788).
+fn track_entry_string(
+    track_tags: &[(usize, TagList)],
+    index: usize,
+    pick: fn(&Tag) -> Option<&String>,
+) -> Option<&str> {
+    track_tags
+        .iter()
+        .filter(|(i, _)| *i == index)
+        .flat_map(|(_, list)| list.tags())
+        .find_map(pick)
+        .map(String::as_str)
+}
+
+/// True for a tag the `TrackEntry` carries itself, so the `Tags` element skips it
+/// (no double-write).
+fn is_track_entry_tag(tag: &Tag) -> bool {
+    matches!(tag, Tag::Title(_) | Tag::Language(_))
+}
+
 /// The `Tags` element: the whole-stream tags as one `Tag` with an empty
 /// `Targets`, then one `Tag` per tagged track whose `Targets` carries that
 /// track's `TagTrackUID` (M787). The inverse of [`parse_tags`]; the typed keys
-/// write their conventional uppercase Matroska names.
+/// write their conventional uppercase Matroska names. A track's title / language
+/// are skipped here, the `TrackEntry` carries them (M788).
 fn tags_element(tags: &TagList, track_tags: &[(usize, TagList)]) -> Vec<u8> {
     let mut body = Vec::new();
     if !tags.is_empty() {
-        body.extend_from_slice(&elem_vec(ID_TAG, &tag_element_body(&[], tags)));
+        let mut whole = elem_vec(ID_TARGETS, &[]);
+        for t in tags.tags() {
+            whole.extend_from_slice(&simple_tag(t));
+        }
+        body.extend_from_slice(&elem_vec(ID_TAG, &whole));
     }
     for (index, list) in track_tags {
-        if list.is_empty() {
+        let scoped: Vec<&Tag> = list
+            .tags()
+            .iter()
+            .filter(|t| !is_track_entry_tag(t))
+            .collect();
+        if scoped.is_empty() {
             continue;
         }
         let uid = uint_bytes(track_uid(*index));
-        body.extend_from_slice(&elem_vec(ID_TAG, &tag_element_body(&uid, list)));
+        let mut simple = Vec::new();
+        for t in scoped {
+            simple.extend_from_slice(&simple_tag(t));
+        }
+        let mut tag = elem_vec(ID_TARGETS, &elem_vec(ID_TAG_TRACK_UID, &uid));
+        tag.extend_from_slice(&simple);
+        body.extend_from_slice(&elem_vec(ID_TAG, &tag));
+    }
+    if body.is_empty() {
+        return Vec::new();
     }
     elem_vec(ID_TAGS, &body)
 }
 
-/// One `Tag` element body: its `Targets` (carrying `track_uid` when non-empty,
-/// else the whole-stream empty one) followed by a `SimpleTag` per entry.
-fn tag_element_body(track_uid: &[u8], tags: &TagList) -> Vec<u8> {
-    let targets = if track_uid.is_empty() {
-        Vec::new()
-    } else {
-        elem_vec(ID_TAG_TRACK_UID, track_uid)
-    };
-    let mut out = elem_vec(ID_TARGETS, &targets);
-    for t in tags.tags() {
-        let (name, value) = tag_name_value(t);
-        let mut simple = elem_vec(ID_TAG_NAME, name.as_bytes());
-        simple.extend_from_slice(&elem_vec(ID_TAG_STRING, value.as_bytes()));
-        out.extend_from_slice(&elem_vec(ID_SIMPLE_TAG, &simple));
-    }
-    out
+/// One `SimpleTag`: the tag's Matroska `TagName` and its `TagString`.
+fn simple_tag(tag: &Tag) -> Vec<u8> {
+    let (name, value) = tag_name_value(tag);
+    let mut simple = elem_vec(ID_TAG_NAME, name.as_bytes());
+    simple.extend_from_slice(&elem_vec(ID_TAG_STRING, value.as_bytes()));
+    elem_vec(ID_SIMPLE_TAG, &simple)
 }
 
 /// A tag's Matroska `TagName` / `TagString` pair. Typed keys use the conventional
@@ -2471,10 +2576,16 @@ mod tests {
             codec_private: Vec::new(),
         };
         let global: TagList = [Tag::Title("Whole file".into())].into_iter().collect();
-        let vid_tags: TagList = [Tag::Language("eng".into())].into_iter().collect();
-        let aud_tags: TagList = [Tag::Language("fra".into()), Tag::Title("VO".into())]
-            .into_iter()
-            .collect();
+        let vid_tags: TagList = [Tag::Artist("Camera A".into())].into_iter().collect();
+        let aud_tags: TagList = [
+            Tag::Artist("Commentary".into()),
+            Tag::Other {
+                key: "TAKE".into(),
+                value: "2".into(),
+            },
+        ]
+        .into_iter()
+        .collect();
         let mut mux = MatroskaMuxer::new_multi(vec![video, audio])
             .with_tags(global.clone())
             .with_track_tags(0, vid_tags.clone())
@@ -2497,6 +2608,146 @@ mod tests {
             "each track's tags come back scoped to its TrackUID"
         );
         assert_eq!(d.tracks()[1].uid, 2, "the Tracks element carries TrackUIDs");
+    }
+
+    /// A one-track segment whose `TrackEntry` carries the given extra elements
+    /// (`Name` / `Language` / `LanguageBCP47`) after the TrackNumber.
+    fn segment_with_track_entry(extra: &[u8]) -> Vec<u8> {
+        let mut body = elem(&[0xD7], &uint_body(1));
+        body.extend_from_slice(&elem(&[0x73, 0xC5], &uint_body(7)));
+        body.extend_from_slice(extra);
+        body.extend_from_slice(&elem(&[0x86], b"V_VP9"));
+        let tracks = elem(&[0x16, 0x54, 0xAE, 0x6B], &elem(&[0xAE], &body));
+        let segment = elem(&[0x18, 0x53, 0x80, 0x67], &tracks);
+        [elem(&[0x1A, 0x45, 0xDF, 0xA3], &[]), segment].concat()
+    }
+
+    #[test]
+    fn track_entry_name_and_language_become_per_track_tags() {
+        let extra = [
+            elem(&[0x53, 0x6E], b"Camera A"),  // Name
+            elem(&[0x22, 0xB5, 0x9C], b"eng"), // Language
+        ]
+        .concat();
+        let mut d = MatroskaDemuxer::new();
+        d.push_data(&segment_with_track_entry(&extra));
+        assert_eq!(
+            d.track_entry_tags(),
+            &[(
+                1u64,
+                [Tag::Title("Camera A".into()), Tag::Language("eng".into())]
+                    .into_iter()
+                    .collect::<TagList>()
+            )],
+            "keyed by track number, Name first"
+        );
+        assert!(d.tags().is_empty(), "these are the track's, not the file's");
+    }
+
+    #[test]
+    fn language_bcp47_wins_over_language() {
+        let extra = [
+            elem(&[0x22, 0xB5, 0x9C], b"fre"),
+            elem(&[0x22, 0xB5, 0x9D], b"fr-CA"),
+        ]
+        .concat();
+        let mut d = MatroskaDemuxer::new();
+        d.push_data(&segment_with_track_entry(&extra));
+        assert_eq!(
+            d.track_entry_tags()[0].1.tags(),
+            &[Tag::Language("fr-CA".into())],
+            "the BCP-47 form is the more precise one"
+        );
+    }
+
+    #[test]
+    fn absent_language_yields_no_tag_and_bad_strings_fail_soft() {
+        // No Name / Language at all: the spec's implicit "eng" default is not
+        // metadata the file stated, so nothing is surfaced.
+        let mut d = MatroskaDemuxer::new();
+        d.push_data(&segment_with_track_entry(&[]));
+        assert!(d.track_entry_tags().is_empty());
+        assert_eq!(d.tracks().len(), 1, "the track itself still parses");
+
+        // Non-UTF-8 Name and an oversized Language: both skipped, the track parses.
+        let oversized = vec![b'x'; MAX_TRACK_STRING_LEN + 1];
+        let extra = [
+            elem(&[0x53, 0x6E], &[0xFF, 0xFE]),
+            elem(&[0x22, 0xB5, 0x9C], &oversized),
+        ]
+        .concat();
+        let mut d = MatroskaDemuxer::new();
+        d.push_data(&segment_with_track_entry(&extra));
+        assert!(d.track_entry_tags().is_empty());
+        assert_eq!(d.tracks()[0].number, 1);
+    }
+
+    #[test]
+    fn mux_writes_language_and_name_in_the_track_entry_not_the_tags() {
+        let spec = MkvTrackSpec {
+            codec: MkvCodec::Vp9,
+            width: 16,
+            height: 16,
+            channels: 0,
+            sample_rate: 0,
+        };
+        let track: TagList = [
+            Tag::Title("Camera A".into()),
+            Tag::Language("eng".into()),
+            Tag::Artist("Ada".into()),
+        ]
+        .into_iter()
+        .collect();
+        let mut mux = MatroskaMuxer::new(spec).with_track_tags(0, track);
+        let bytes = mux.push_frame(&[1, 2, 3], 0, true);
+
+        let mut d = MatroskaDemuxer::new();
+        d.push_data(&bytes);
+        assert_eq!(
+            d.track_entry_tags(),
+            &[(
+                1u64,
+                [Tag::Title("Camera A".into()), Tag::Language("eng".into())]
+                    .into_iter()
+                    .collect::<TagList>()
+            )],
+            "title and language ride the TrackEntry"
+        );
+        assert_eq!(
+            d.track_tags(),
+            &[(1u64, [Tag::Artist("Ada".into())].into_iter().collect())],
+            "everything else stays a Targets-scoped Tag"
+        );
+        // No double-write: the Tags element names ARTIST and nothing else.
+        assert!(!contains(&bytes, b"LANGUAGE") && !contains(&bytes, b"TITLE"));
+        assert!(contains(&bytes, b"ARTIST"));
+    }
+
+    #[test]
+    fn mux_writes_no_tags_element_when_only_track_entry_tags_are_set() {
+        let spec = MkvTrackSpec {
+            codec: MkvCodec::Vp9,
+            width: 16,
+            height: 16,
+            channels: 0,
+            sample_rate: 0,
+        };
+        let track: TagList = [Tag::Language("deu".into())].into_iter().collect();
+        let bytes = MatroskaMuxer::new(spec)
+            .with_track_tags(0, track)
+            .push_frame(&[0], 0, true);
+        // 0x1254C367 is the Tags element id: nothing left for it to carry.
+        assert!(!contains(&bytes, &[0x12, 0x54, 0xC3, 0x67]));
+        let mut d = MatroskaDemuxer::new();
+        d.push_data(&bytes);
+        assert_eq!(
+            d.track_entry_tags()[0].1.tags(),
+            &[Tag::Language("deu".into())]
+        );
+    }
+
+    fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack.windows(needle.len()).any(|w| w == needle)
     }
 
     #[test]

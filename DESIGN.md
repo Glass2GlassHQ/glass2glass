@@ -1741,7 +1741,13 @@ and a nested `SimpleTag` flattens to a `parent/child` key. The muxers take
 per-track metadata from `with_track_tags` and write each track's `TrackUID` in
 its `TrackEntry`; the demuxers map a parsed UID back to its track and post the
 tags as `BusMessage::StreamTag` on that stream's collection id, leaving
-untargeted tags on `BusMessage::Tag`.
+untargeted tags on `BusMessage::Tag`. A track's title and language are the
+exception: they live in the `TrackEntry` itself as `Name` / `Language`
+(`LanguageBCP47` preferred when both are present), which is where ffmpeg writes
+them and where a player reads them, so the muxers route `Tag::Title` /
+`Tag::Language` there instead of writing a `SimpleTag`, and the demuxers merge
+both sources into one `StreamTag` per stream (M788). A missing `Language` stays
+absent rather than becoming the spec's implicit `eng`.
 
 The Ogg demuxer is the third, the same parser + element split on
 `Caps::ByteStream{Ogg}`. `g2g-plugins::ogg::OggDemuxer` parses RFC 3533 pages

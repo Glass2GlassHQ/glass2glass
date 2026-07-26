@@ -919,16 +919,20 @@ fn stream_id(number: u64) -> alloc::string::String {
 }
 
 /// Posts a container's tags on the bus once each: the whole-stream ones as
-/// [`BusMessage::Tag`], the `Targets`-scoped ones as [`BusMessage::StreamTag`] on
-/// the stream id of the track their `TagTrackUID` names (M787). Shared by the
-/// single- and multi-output demuxers, which both parse with one
-/// [`MatroskaDemuxer`]; both counts survive a mid-segment seek (same file, so
-/// nothing re-posts).
+/// [`BusMessage::Tag`], the per-track ones as [`BusMessage::StreamTag`] on that
+/// track's stream id. A track's metadata reaches the file two ways, its
+/// `TrackEntry` (`Name` / `Language`, M788) and a `Targets`-scoped `Tag` (M787);
+/// both merge into one message per stream, so the application sees one view
+/// however the file stored it. Shared by the single- and multi-output demuxers,
+/// which both parse with one [`MatroskaDemuxer`]; the counts survive a
+/// mid-segment seek (same file, so nothing re-posts).
 #[derive(Debug, Default)]
 struct TagPoster {
     /// Tags already posted, so a `Tags` element trailing the `Info` `Title` posts
     /// only its own entries.
     posted: usize,
+    /// `TrackEntry` tag groups already posted (one per track that declares any).
+    entry_posted: usize,
     /// Track-scoped tag groups already posted (one per scoped `Tag` element).
     track_posted: usize,
 }
@@ -948,26 +952,52 @@ impl TagPoster {
         // A track-scoped group needs `Tracks` to map its UID to a stream id; hold
         // it until they parse rather than dropping it (element order is the
         // file's choice).
-        let total = demux.track_tags().len();
-        if total <= self.track_posted || demux.tracks().is_empty() {
+        if demux.tracks().is_empty() {
             return;
         }
-        let fresh: Vec<(alloc::string::String, TagList)> = demux.track_tags()[self.track_posted..]
-            .iter()
-            .filter_map(|(uid, tags)| {
-                let track = demux
-                    .tracks()
-                    .iter()
-                    .find(|t| t.uid == *uid && t.uid != 0)?;
-                Some((stream_id(track.number), tags.clone()))
-            })
-            .collect();
-        self.track_posted = total;
+        let mut fresh: Vec<(alloc::string::String, TagList)> = Vec::new();
+        // TrackEntry metadata first: it is declared with the track itself, so it
+        // leads the stream's tag list.
+        let entries = demux.track_entry_tags();
+        if entries.len() > self.entry_posted {
+            for (number, tags) in &entries[self.entry_posted..] {
+                merge_stream_tags(&mut fresh, stream_id(*number), tags);
+            }
+            self.entry_posted = entries.len();
+        }
+        let scoped = demux.track_tags();
+        if scoped.len() > self.track_posted {
+            for (uid, tags) in &scoped[self.track_posted..] {
+                if let Some(track) = demux.tracks().iter().find(|t| t.uid == *uid && t.uid != 0) {
+                    merge_stream_tags(&mut fresh, stream_id(track.number), tags);
+                }
+            }
+            self.track_posted = scoped.len();
+        }
         if let Some(bus) = bus {
             for (stream_id, tags) in fresh {
                 bus.try_post(BusMessage::StreamTag { stream_id, tags });
             }
         }
+    }
+}
+
+/// Append `tags` to `out`'s entry for `id`, or add one, so a stream's tags from
+/// both sources post as a single message.
+fn merge_stream_tags(
+    out: &mut Vec<(alloc::string::String, TagList)>,
+    id: alloc::string::String,
+    tags: &TagList,
+) {
+    let slot = match out.iter_mut().find(|(existing, _)| *existing == id) {
+        Some((_, list)) => list,
+        None => {
+            out.push((id, TagList::new()));
+            &mut out.last_mut().expect("just pushed").1
+        }
+    };
+    for tag in tags.tags() {
+        slot.push(tag.clone());
     }
 }
 
