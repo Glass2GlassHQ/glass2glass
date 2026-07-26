@@ -1734,7 +1734,14 @@ have a `seekable` (two-pass) mode (M770): the element buffers the file and
 finalizes it at EOS with a front `SeekHead` (fixed-layout entries indexing
 Info / Tracks / Tags / Cues, the Cues position patched in place once known), so
 the file seeks from byte 0 without reading past the Clusters; mutually
-exclusive with `streamable`, and the default streaming output is unchanged.
+exclusive with `streamable`, and the default streaming output is unchanged. The
+same finalize fills an `Info` `Duration` reserved beside them (M794): the value
+is the highest block end across tracks, each block's timestamp plus its own
+duration rounded to a `TimestampScale` tick, which is how ffmpeg arrives at the
+number it writes, so a remux reports the length ffmpeg's own file does. Only
+this mode can carry a duration at all, since a streaming caller has emitted its
+header long before the total is known, and a live stream has no length to
+declare.
 The Segment `Tags` element carries metadata in both directions, per file and per
 track (M787): a `Tag` whose `Targets` names a `TagTrackUID` scopes to that track,
 and a nested `SimpleTag` flattens to a `parent/child` key. The muxers take

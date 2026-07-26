@@ -35,6 +35,7 @@ const ID_EBML: u32 = 0x1A45_DFA3;
 const ID_SEGMENT: u32 = 0x1853_8067;
 const ID_INFO: u32 = 0x1549_A966;
 const ID_TIMESTAMP_SCALE: u32 = 0x002A_D7B1;
+const ID_DURATION: u32 = 0x4489;
 const ID_TITLE: u32 = 0x7BA9;
 const ID_TAGS: u32 = 0x1254_C367;
 const ID_TAG: u32 = 0x7373;
@@ -1303,15 +1304,28 @@ pub struct MatroskaMuxer {
     /// per Cluster (the first keyframe in it), bounding the index size.
     last_cued_cluster_pos: Option<u64>,
     /// Write a front `SeekHead` (first element of the Segment data) indexing
-    /// Info / Tracks / Tags / Cues, so the finished file seeks from byte 0
-    /// without reading past the Clusters. The Cues entry is a placeholder the
-    /// caller patches at EOS (see [`seek_head_patch`](Self::seek_head_patch)),
-    /// which needs the whole output in hand, so this is for a buffering
-    /// (two-pass) caller, not the streaming path.
+    /// Info / Tracks / Tags / Cues, and reserve the `Info` `Duration`. Both are
+    /// placeholders the caller patches at EOS ([`finalize_seekable`]), which
+    /// needs the whole output in hand, so this is for a buffering (two-pass)
+    /// caller, not the streaming path: the finished file then seeks from byte 0
+    /// without reading past the Clusters and declares its length.
     write_seek_head: bool,
     /// Byte offset (in the muxed output, from byte 0) of the front SeekHead's
     /// 8-byte Cues `SeekPosition` payload; set when the header is written.
     cues_patch_offset: Option<usize>,
+    /// Byte offset of the `Info` `Duration` payload (8 bytes, a float), written
+    /// as a placeholder in the two-pass mode and patched at EOS by
+    /// [`duration_patch`](Self::duration_patch). `None` in the streaming mode,
+    /// which never learns a duration.
+    duration_patch_offset: Option<usize>,
+    /// Highest block end seen, in TimestampScale ticks: the presentation
+    /// duration. Per track, the last block's timestamp plus its own duration,
+    /// each rounded to a tick the way the block timestamps are, which is how
+    /// ffmpeg arrives at the value it writes.
+    max_end_ticks: u64,
+    /// The previous block's timestamp per track (ticks), so a frame that
+    /// declares no duration can borrow the last inter-frame gap.
+    prev_ts_ticks: Vec<Option<u64>>,
 }
 
 impl MatroskaMuxer {
@@ -1333,6 +1347,7 @@ impl MatroskaMuxer {
             .iter()
             .position(|t| t.spec.codec.track_type() == 1)
             .unwrap_or(0);
+        let track_count = tracks.len();
         Self {
             tracks,
             tags: TagList::new(),
@@ -1347,12 +1362,15 @@ impl MatroskaMuxer {
             last_cued_cluster_pos: None,
             write_seek_head: false,
             cues_patch_offset: None,
+            duration_patch_offset: None,
+            max_end_ticks: 0,
+            prev_ts_ticks: alloc::vec![None; track_count],
         }
     }
 
-    /// Write a front `SeekHead` (see the field note): the two-pass / seekable
-    /// finalize mode. The caller must patch the Cues position at EOS via
-    /// [`seek_head_patch`](Self::seek_head_patch).
+    /// Write a front `SeekHead` and reserve the `Info` `Duration` (see the field
+    /// note): the two-pass / seekable finalize mode. The caller must finish the
+    /// buffered file with [`finalize_seekable`], which fills both in.
     pub fn with_seek_head(mut self) -> Self {
         self.write_seek_head = true;
         self
@@ -1420,7 +1438,9 @@ impl MatroskaMuxer {
             out.extend_from_slice(&[0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
             // Segment data starts here; track positions are anchored to it.
             let seg_data_start = out.len();
-            let info = info_element();
+            // Only the two-pass mode can fill a Duration in: it is not known
+            // until EOS, and a streaming caller has already emitted the header.
+            let (info, duration_at) = info_element(self.write_seek_head);
             let tracks = tracks_element(&self.tracks, &self.track_tags);
             // Empty when every per-track tag went into its TrackEntry instead.
             let tags = tags_element(&self.tags, &self.track_tags);
@@ -1443,6 +1463,7 @@ impl MatroskaMuxer {
                 seek_entry(ID_CUES, 0, &mut out);
                 self.cues_patch_offset = Some(out.len() - 8);
             }
+            self.duration_patch_offset = duration_at.map(|rel| out.len() + rel);
             out.extend_from_slice(&info);
             out.extend_from_slice(&tracks);
             out.extend_from_slice(&tags);
@@ -1450,6 +1471,7 @@ impl MatroskaMuxer {
             self.header_written = true;
         }
         let ts = pts_ns / DEFAULT_TIMESTAMP_SCALE;
+        self.record_track_end(track, ts, duration_ns);
         let need_new_cluster = match self.cluster_base_ms {
             None => true,
             Some(base) => ts < base || ts - base > self.max_cluster_span_ms,
@@ -1500,6 +1522,35 @@ impl MatroskaMuxer {
             self.last_cued_cluster_pos = Some(self.current_cluster_pos);
         }
         out
+    }
+
+    /// Fold a block into the presentation duration: its timestamp plus how long
+    /// it lasts, in ticks, keeping the highest end across tracks. The frame's own
+    /// duration when upstream timed it (a demuxer knows the container's trim),
+    /// else the gap from this track's previous block, which is what a steady
+    /// stream's last frame lasts. Both are rounded to a tick, so the value lands
+    /// where ffmpeg's does: the millisecond grid is the container's, not ours.
+    fn record_track_end(&mut self, track: usize, ts: u64, duration_ns: u64) {
+        let prev = self.prev_ts_ticks.get(track).copied().flatten();
+        if let Some(slot) = self.prev_ts_ticks.get_mut(track) {
+            *slot = Some(ts);
+        }
+        let ticks = if duration_ns > 0 {
+            (duration_ns + DEFAULT_TIMESTAMP_SCALE / 2) / DEFAULT_TIMESTAMP_SCALE
+        } else {
+            prev.map_or(0, |p| ts.saturating_sub(p))
+        };
+        self.max_end_ticks = self.max_end_ticks.max(ts.saturating_add(ticks));
+    }
+
+    /// The EOS patch the `Info` `Duration` placeholder needs: `(byte offset of
+    /// its 8-byte payload in the muxed output, the big-endian float to write)`.
+    /// The value is the presentation duration in TimestampScale ticks. `None`
+    /// without [`with_seek_head`](Self::with_seek_head) (the streaming mode
+    /// writes no placeholder) or before the header was written.
+    pub fn duration_patch(&self) -> Option<(usize, [u8; 8])> {
+        let offset = self.duration_patch_offset?;
+        Some((offset, (self.max_end_ticks as f64).to_be_bytes()))
     }
 
     /// The `(BlockDuration in TimestampScale ticks, DiscardPadding in ns)` a
@@ -1559,6 +1610,26 @@ impl MatroskaMuxer {
     }
 }
 
+/// Finalize a buffered two-pass file in place: fill the `Info` `Duration`
+/// placeholder with the presentation length (M794), then append the `Cues` and
+/// point the front `SeekHead` at where they landed (M770). The buffered-output
+/// half of [`MatroskaMuxer::with_seek_head`], shared by the single- and
+/// multi-track muxer elements; `file` must be everything the muxer emitted, from
+/// byte 0, since both patch offsets are absolute.
+pub fn finalize_seekable(mux: &MatroskaMuxer, file: &mut Vec<u8>) {
+    if let Some((off, value)) = mux.duration_patch() {
+        file[off..off + 8].copy_from_slice(&value);
+    }
+    let cues = mux.finish();
+    if cues.is_empty() {
+        return;
+    }
+    if let Some((off, pos)) = mux.seek_head_patch() {
+        file[off..off + 8].copy_from_slice(&pos.to_be_bytes());
+    }
+    file.extend_from_slice(&cues);
+}
+
 /// Byte length of one fixed-layout `Seek` entry written by [`seek_entry`].
 const SEEK_ENTRY_LEN: usize = 21;
 
@@ -1588,11 +1659,22 @@ fn ebml_header(doctype: &[u8]) -> Vec<u8> {
     elem_vec(ID_EBML, &h)
 }
 
-fn info_element() -> Vec<u8> {
-    elem_vec(
-        ID_INFO,
-        &elem_vec(ID_TIMESTAMP_SCALE, &uint_bytes(DEFAULT_TIMESTAMP_SCALE)),
-    )
+/// The `Info` element, and the offset of its `Duration` payload within it when
+/// one was reserved. The `Duration` is an 8-byte float in TimestampScale units,
+/// written as a zero placeholder because the total is only known at EOS; a
+/// two-pass caller patches it through
+/// [`MatroskaMuxer::duration_patch`](MatroskaMuxer::duration_patch).
+fn info_element(with_duration: bool) -> (Vec<u8>, Option<usize>) {
+    let mut body = elem_vec(ID_TIMESTAMP_SCALE, &uint_bytes(DEFAULT_TIMESTAMP_SCALE));
+    let mut payload_at = None;
+    if with_duration {
+        body.extend_from_slice(&elem_vec(ID_DURATION, &0f64.to_be_bytes()));
+        payload_at = Some(body.len() - 8);
+    }
+    let info = elem_vec(ID_INFO, &body);
+    // The element's own header sits ahead of the body inside `info`.
+    let header = info.len() - body.len();
+    (info, payload_at.map(|at| at + header))
 }
 
 /// The `Tracks` element: one `TrackEntry` per track, numbered 1.. in order, each
@@ -3006,6 +3088,50 @@ mod tests {
         );
         let segment = elem(&[0x18, 0x53, 0x80, 0x67], &[tracks, cluster].concat());
         [elem(&[0x1A, 0x45, 0xDF, 0xA3], &[]), segment].concat()
+    }
+
+    #[test]
+    fn the_two_pass_duration_is_the_highest_block_end() {
+        let spec = MkvTrackSpec {
+            codec: MkvCodec::Vp9,
+            width: 16,
+            height: 16,
+            channels: 0,
+            sample_rate: 0,
+        };
+        let mut mux = MatroskaMuxer::new(spec).with_seek_head();
+        let mut file = mux.push_frame(&[1], 0, true);
+        file.extend_from_slice(&mux.push_frame(&[2], 40_000_000, false));
+        // The last frame declares no duration, so it lasts the previous gap:
+        // 80 ms + 40 ms.
+        file.extend_from_slice(&mux.push_frame(&[3], 80_000_000, false));
+        finalize_seekable(&mux, &mut file);
+
+        let (off, value) = mux
+            .duration_patch()
+            .expect("the two-pass mode reserves one");
+        assert_eq!(f64::from_be_bytes(value), 120.0, "in TimestampScale ticks");
+        assert_eq!(
+            &file[off..off + 8],
+            &value,
+            "and the placeholder in Info was patched with it"
+        );
+    }
+
+    #[test]
+    fn a_declared_duration_beats_the_frame_gap_and_streaming_reserves_nothing() {
+        let mut mux = MatroskaMuxer::new_multi(vec![opus_track()]);
+        // Streaming: no placeholder to patch, whatever the frames say.
+        mux.push_frame_on(0, &opus_packet(1), 0, true, 20_000_000);
+        assert!(mux.duration_patch().is_none());
+
+        // Two-pass: the trimmed final packet's own 6.5 ms rounds to 7 ticks, so
+        // the file ends at 20 + 7, not at a whole packet past the last block.
+        let mut mux = MatroskaMuxer::new_multi(vec![opus_track()]).with_seek_head();
+        mux.push_frame_on(0, &opus_packet(1), 0, true, 20_000_000);
+        mux.push_frame_on(0, &opus_packet(2), 20_000_000, true, 6_500_000);
+        let (_, value) = mux.duration_patch().expect("reserved");
+        assert_eq!(f64::from_be_bytes(value), 27.0);
     }
 
     #[test]

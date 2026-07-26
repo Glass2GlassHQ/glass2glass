@@ -48,7 +48,7 @@ use crate::fmp4mux::{
     avcc_record, avcc_sample, hvcc_record, is_keyframe_nal, parameter_sets, split_annexb,
     vp8_keyframe, vp9_keyframe,
 };
-use crate::matroska::{MatroskaMuxer, MkvCodec, MkvTrackConfig, MkvTrackSpec};
+use crate::matroska::{finalize_seekable, MatroskaMuxer, MkvCodec, MkvTrackConfig, MkvTrackSpec};
 use crate::mp4muxn::{asc_from_adts, strip_adts};
 use crate::opusparse::{is_opus_config, parse_opus_head, synth_opus_head};
 
@@ -106,8 +106,8 @@ pub struct MkvMuxN {
     /// end, so `streamable` drops the index.
     streamable: bool,
     /// Two-pass / seekable-finalize mode (M770): buffer the whole file and emit
-    /// it once at EOS with a front `SeekHead` (see [`crate::mkvmux::MkvMux`]).
-    /// Mutually exclusive with `streamable`.
+    /// it once at EOS with a front `SeekHead` and an `Info` `Duration` (M794,
+    /// see [`crate::mkvmux::MkvMux`]). Mutually exclusive with `streamable`.
     seekable: bool,
     /// The buffered file bytes in `seekable` mode.
     pending: Vec<u8>,
@@ -610,13 +610,7 @@ impl MultiInputElement for MkvMuxN {
             if self.agg.is_drained() && !self.cues_emitted {
                 if self.seekable {
                     if let Some(mux) = self.mux.as_ref() {
-                        let cues = mux.finish();
-                        if !cues.is_empty() {
-                            if let Some((off, pos)) = mux.seek_head_patch() {
-                                self.pending[off..off + 8].copy_from_slice(&pos.to_be_bytes());
-                            }
-                            self.pending.extend_from_slice(&cues);
-                        }
+                        finalize_seekable(mux, &mut self.pending);
                     }
                     if !self.pending.is_empty() {
                         let file = core::mem::take(&mut self.pending);

@@ -24,10 +24,11 @@
 //! * ffprobe: `initial_padding=312`, `start_time=0.000000`.
 //!
 //! One difference from ffmpeg's file, stated rather than hidden: ffprobe reports
-//! `duration=N/A` for a g2g file, because the muxer streams into an unknown-size
-//! Segment and never learns the total, so no `Duration` element is written
-//! (ffmpeg's reports 1.008). Everything ffprobe derives from the Opus mapping
-//! itself matches exactly.
+//! `duration=N/A` for the files here, because they are muxed in the streaming
+//! mode, which writes into an unknown-size Segment and never learns the total
+//! (ffmpeg's reports 1.008). The two-pass `seekable` mode does declare a
+//! duration, which is M794's subject. Everything ffprobe derives from the Opus
+//! mapping itself matches exactly.
 #![cfg(feature = "std")]
 
 use core::future::Future;

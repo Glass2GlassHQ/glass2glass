@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M794: the Matroska two-pass mode writes a real `Info` `Duration`, so a finished file reports its length instead of `N/A`.
+
 - M793: `mp4mux` gains a progressive (non-fragmented) mode writing one `mdat` plus a `moov` with real sample tables at EOS, so a reader reports the exact trimmed duration.
 
 - M792: Opus pre-skip and end trim survive Matroska both ways: the `CodecPrivate` demuxes into an in-band `OpusHead`, an in-band header builds it back, and the track carries `CodecDelay` / `SeekPreRoll` with the tail trim in a `DiscardPadding`.
