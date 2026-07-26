@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M785: `DuplexControl::remove_track` stops a duplex track's m-line, freeing its pads on both peers for the next track to claim.
+
 - M784: `WebRtcDuplexSession` adds tracks mid-session on spare pads reserved by `with_spare_tracks`, offering the peer a new m-line on the pad's first frame.
 
 - M783: the MPEG-TS muxers write several programs, one per `prog-map` entry on `mpegtsmux`, each with its own PMT and PCR.

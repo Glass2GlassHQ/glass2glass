@@ -2104,7 +2104,15 @@ claims the first free pad of that kind on both sides. A pad bound mid-session
 emits its `CapsChanged` before its first frame; the active pads are announced at
 session start. A track whose kind has no free pad left is rejected (it stays
 unbound and its media is skipped), since the pad count is fixed at graph build
-time.
+time. `DuplexControl::remove_track` is the inverse (M785): it `stop_media`s the
+m-line (port 0, out of the BUNDLE group), batched into the same re-offer as the
+direction toggles. Both peers then drop that binding by walking their media
+after each SDP application (a stopped m-line stays in the session with
+`Media::stopped()` set, so this also retracts an ADD that lost a glare race),
+which frees its pads with no `Eos` on the output pad, since a later track may
+claim it and the end of the run EOSes every pad anyway. Reuse always negotiates
+a NEW m-line, a stopped one cannot be reactivated, and the freed output pad
+re-announces its caps before the new track's first frame.
 The two roles discover their m-line `Mid`s differently and this asymmetry is
 load-bearing: the **offerer** captures its `Mid`s from `SdpApi::add_media`'s
 return, while the **answerer** learns them from `Event::MediaAdded` after

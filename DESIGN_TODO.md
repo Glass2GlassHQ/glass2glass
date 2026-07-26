@@ -381,10 +381,7 @@ Phased plan:
     is the known candidate). FEC is blocked upstream (str0m has no FEC payload;
     loss recovery is NACK/RTX). Full renegotiation: a track arriving with no
     spare pad of its kind left on the duplex session is refused, so growing the
-    pad count on a live graph (or recycling the pad of a track that ended) is
-    still open; likewise removing an m-line, and retrying a track ADD that both
-    peers raced (the yielding peer drops its own offer and waits for the pad's
-    next frame). Data-channel loose ends
+    pad count on a live graph is still open. Data-channel loose ends
     (str0m surfaces no remote-close event, so EOS rides an explicit marker
     message; a WHIP/SFU-signalled data channel vs the P2P `SdpChannel` seam).
   Recommended order: T1 remainders -> T2 -> T4 -> T5.

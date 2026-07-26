@@ -27,8 +27,12 @@
 //! behind the `webrtc` feature. Mid-session tracks (M784) ride on spare pads
 //! declared up front by [`WebRtcDuplexSession::with_spare_tracks`]: a spare
 //! carries no m-line at the handshake and binds later, when its send pad gets a
-//! frame (which re-offers a new m-line) or when the peer adds one. STUN / TURN
-//! NAT traversal and a pluggable real-SFU signaller are follow-ups.
+//! frame (which re-offers a new m-line) or when the peer adds one.
+//! [`DuplexControl::remove_track`] is the inverse (M785): it stops the m-line,
+//! freeing both of its pads on both peers. A freed pad is claimable again by the
+//! same two paths, and its next track always negotiates a NEW m-line, since a
+//! stopped one cannot be reactivated. STUN / TURN NAT traversal and a pluggable
+//! real-SFU signaller are follow-ups.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -126,11 +130,13 @@ impl SdpChannel {
 /// Bidirectional sendrecv WebRTC session. See the module docs.
 /// Cloneable mid-session control for a [`WebRtcDuplexSession`] (M729): toggle
 /// a track on/off, which renegotiates that m-line's direction with the peer
-/// (SendRecv <-> Inactive) over the session's `SdpChannel`. The handle can be
-/// used from any task; the session applies pending toggles in its loop.
+/// (SendRecv <-> Inactive) over the session's `SdpChannel`, or remove it
+/// outright (M785). The handle can be used from any task; the session applies
+/// pending toggles and removes in its loop.
 #[derive(Debug, Clone, Default)]
 pub struct DuplexControl {
     toggles: Arc<std::sync::Mutex<Vec<(usize, bool)>>>,
+    removes: Arc<std::sync::Mutex<Vec<usize>>>,
 }
 
 impl DuplexControl {
@@ -139,8 +145,22 @@ impl DuplexControl {
         self.toggles.lock().unwrap().push((input, enabled));
     }
 
+    /// Remove track `input` (M785): its m-line is stopped (port 0, out of the
+    /// BUNDLE group) in the next re-offer, which frees both of its pads for a
+    /// later track. Unlike a disable this cannot be undone, since a stopped
+    /// m-line never reactivates: reusing the pad negotiates a NEW m-line. The
+    /// freed output pad gets no `Eos` (it may be recycled; the session's own
+    /// end-of-run EOS covers every pad).
+    pub fn remove_track(&self, input: usize) {
+        self.removes.lock().unwrap().push(input);
+    }
+
     fn drain(&self) -> Vec<(usize, bool)> {
         core::mem::take(&mut *self.toggles.lock().unwrap())
+    }
+
+    fn drain_removes(&self) -> Vec<usize> {
+        core::mem::take(&mut *self.removes.lock().unwrap())
     }
 }
 
@@ -521,13 +541,34 @@ impl MultiDuplexSession for WebRtcDuplexSession {
             let mut send_done = false;
             // Set when the local send side ends; the loop finishes after it.
             let mut drain_deadline: Option<Instant> = None;
-            // Mid-session renegotiation: pending toggles come in via the control
-            // handle (M729) and spare pads add m-lines (M784); one exchange in
-            // flight at a time (its answer clears `renego_pending`). On glare (a
-            // peer re-offer arriving while ours is pending) the ANSWERER role
-            // yields: it drops its pending exchange and answers the peer's offer.
+            // Mid-session renegotiation: pending toggles and removes come in via
+            // the control handle (M729 / M785) and spare pads add m-lines (M784);
+            // one exchange in flight at a time (its answer clears
+            // `renego_pending`). On glare (a peer re-offer arriving while ours is
+            // pending) the ANSWERER role yields: it drops its pending exchange and
+            // answers the peer's offer.
             let control = control_handle;
             let mut renego_pending: Option<str0m::change::SdpPendingOffer> = None;
+
+            // Run after every SDP application: drop the bindings whose m-line
+            // str0m no longer has (a retracted ADD, e.g. one this side yielded on
+            // glare) or which either peer stopped (M785). Their pads go back to
+            // spare, free for a later track, and the output pad re-announces its
+            // caps when one claims it. No `Eos` on a freed pad: it may be
+            // recycled, and the end of the run EOSes every pad anyway.
+            macro_rules! prune_bindings {
+                () => {
+                    bindings.retain(|b| {
+                        let live = rtc.media(b.mid).is_some_and(|m| !m.stopped());
+                        if !live {
+                            if let Some(o) = b.out_pad {
+                                announced[o] = false;
+                            }
+                        }
+                        live
+                    });
+                };
+            }
 
             macro_rules! finish {
                 () => {{
@@ -662,11 +703,12 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                     }
                 }
 
-                // Apply pending track toggles as ONE renegotiation exchange
-                // (all direction changes batched into a single re-offer).
+                // Apply pending track toggles and removes as ONE renegotiation
+                // exchange (batched into a single re-offer).
                 if renego_pending.is_none() {
                     let toggles = control.drain();
-                    if !toggles.is_empty() {
+                    let removes = control.drain_removes();
+                    if !toggles.is_empty() || !removes.is_empty() {
                         let mut api = rtc.sdp_api();
                         let mut changed = false;
                         for (idx, enabled) in toggles {
@@ -684,6 +726,19 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                                 changed = true;
                             }
                         }
+                        // A removed track stops its m-line (M785): str0m marks it
+                        // stopped straight away, so the prune below frees its pads
+                        // whether or not the exchange reaches the peer.
+                        for idx in removes {
+                            let mid = bindings
+                                .iter()
+                                .find(|b| b.in_pad == Some(idx))
+                                .map(|b| b.mid);
+                            if let Some(mid) = mid {
+                                api.stop_media(mid);
+                                changed = true;
+                            }
+                        }
                         if changed {
                             if let Some((offer, pending)) = api.apply() {
                                 let msg = alloc::format!("{RENEGO_OFFER}{}", offer.to_sdp_string());
@@ -691,6 +746,7 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                                     renego_pending = Some(pending);
                                 }
                             }
+                            prune_bindings!();
                         }
                     }
                 }
@@ -709,18 +765,19 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                                         SdpAnswer::from_sdp_string(sdp),
                                     ) {
                                         let _ = rtc.sdp_api().accept_answer(pending, answer);
+                                        prune_bindings!();
                                     }
                                 } else if let Some(sdp) = m.strip_prefix(RENEGO_OFFER) {
                                     // Glare rule: the answerer role yields its
                                     // own pending exchange to the peer's offer.
-                                    // Its unanswered ADD is retracted (str0m
-                                    // never created that media), so a later frame
-                                    // on the pad re-offers it.
+                                    // Its unanswered ADD is retracted by the
+                                    // prune (str0m never created that media), so
+                                    // a later frame on the pad re-offers it.
                                     if renego_pending.is_some()
                                         && matches!(role, SignalRole::Answerer)
                                     {
                                         renego_pending = None;
-                                        bindings.retain(|b| rtc.media(b.mid).is_some());
+                                        prune_bindings!();
                                     }
                                     if renego_pending.is_none() {
                                         if let Ok(offer) =
@@ -732,6 +789,9 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                                                     answer.to_sdp_string()
                                                 );
                                                 let _ = sig.tx.send(msg).await;
+                                                // The peer may have stopped an
+                                                // m-line: free its pads (M785).
+                                                prune_bindings!();
                                             }
                                         }
                                     }
@@ -937,6 +997,19 @@ mod tests {
             framerate: Rate::Any,
         };
         assert_eq!(s.intercept_caps(0, &raw), Err(G2gError::CapsMismatch));
+    }
+
+    #[test]
+    fn control_queues_toggles_and_removes_separately() {
+        let control = DuplexControl::default();
+        control.set_track_enabled(1, false);
+        control.remove_track(0);
+        control.remove_track(2);
+        assert_eq!(control.drain(), alloc::vec![(1, false)]);
+        assert_eq!(control.drain_removes(), alloc::vec![0, 2]);
+        // Draining takes the queue.
+        assert!(control.drain().is_empty());
+        assert!(control.drain_removes().is_empty());
     }
 
     #[test]
