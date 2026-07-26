@@ -56,8 +56,8 @@ use crate::webrtc_simulcast::{
     rids_high_to_low, send_simulcast, track_of, KeyframeRoutes, LayerAllocator, SimulcastPads,
 };
 use crate::webrtc_util::{
-    add_host_candidate, delete_resource, drain_pacer, feed_datagram, ice_restart, post_sdp,
-    select_host_ip, send_transmit, trickle_candidates, TricklePatch, TurnConfig,
+    add_host_candidate, drain_pacer, feed_datagram, ice_restart, post_sdp, select_host_ip,
+    send_transmit, trickle_candidates, ResourceHandle, TricklePatch, TurnConfig,
     ICE_RESTART_TIMEOUT,
 };
 use crate::webrtcsink::Track;
@@ -96,8 +96,9 @@ pub struct WebRtcSessionSink {
     tx: Option<mpsc::Sender<MediaUnit>>,
     /// WHIP resource URL, so the element DELETEs it synchronously on EOS (RFC
     /// 9725 teardown); the detached task cannot reliably finish a DELETE on clean
-    /// end. See `WebRtcSink`.
-    resource: Option<String>,
+    /// end. Shared with the task, which tears down instead when the session ends
+    /// first, so exactly one DELETE goes out. See `WebRtcSink`.
+    resource: ResourceHandle,
     frames_sent: u64,
 }
 
@@ -132,7 +133,7 @@ impl WebRtcSessionSink {
             pads,
             pad_wire: alloc::vec![None; n],
             tx: None,
-            resource: None,
+            resource: ResourceHandle::default(),
             frames_sent: 0,
         }
     }
@@ -310,7 +311,9 @@ impl WebRtcSessionSink {
         }
         let allocator = simulcast.then(|| LayerAllocator::new(&layers, self.max_send_bitrate));
 
-        self.resource = session.resource.clone();
+        // One handle for the resource, shared by the element (clean-EOS DELETE)
+        // and the session task (disconnect / error teardown).
+        self.resource = ResourceHandle::new(session.resource);
         let (tx, rx) = mpsc::channel::<MediaUnit>(self.queue_depth);
         tokio::spawn(run_session(SessionArgs {
             rtc,
@@ -322,7 +325,7 @@ impl WebRtcSessionSink {
             layer_reverse,
             allocator,
             turn,
-            resource: session.resource,
+            resource: self.resource.clone(),
             etag: session.etag,
             bearer: self.bearer.clone(),
             rx,
@@ -487,9 +490,7 @@ impl MultiInputElement for WebRtcSessionSink {
                 // the element so it completes before the runtime tears the session
                 // task down (as for `WebRtcSink`).
                 PipelinePacket::Eos => {
-                    if let Some(res) = self.resource.take() {
-                        delete_resource(&res, self.bearer.as_deref()).await;
-                    }
+                    self.resource.delete_once(self.bearer.as_deref()).await;
                 }
                 PipelinePacket::CapsChanged(_) => {}
                 PipelinePacket::Flush => {}
@@ -570,7 +571,7 @@ struct SessionArgs {
     /// Simulcast layer allocator (`None` for a single video stream).
     allocator: Option<LayerAllocator>,
     turn: TurnSet,
-    resource: Option<String>,
+    resource: ResourceHandle,
     etag: Option<String>,
     bearer: Option<String>,
     rx: mpsc::Receiver<MediaUnit>,
@@ -637,7 +638,7 @@ async fn run_session(mut a: SessionArgs) {
                 }
                 Ok(Output::Event(_)) => {}
                 Err(_) => {
-                    teardown(a.resource.as_deref(), a.bearer.as_deref()).await;
+                    a.resource.delete_once(a.bearer.as_deref()).await;
                     return;
                 }
             }
@@ -646,13 +647,13 @@ async fn run_session(mut a: SessionArgs) {
         // Sustained ICE disconnect: attempt an ICE restart against the resource.
         if disconnected_since.is_some_and(|t| t.elapsed() >= ICE_RESTART_TIMEOUT) {
             disconnected_since = None;
-            match a.resource.as_deref() {
+            match a.resource.url().as_deref() {
                 Some(res) => {
                     if !matches!(
                         ice_restart(&mut a.rtc, res, a.bearer.as_deref(), a.etag.as_deref()).await,
                         TricklePatch::Accepted
                     ) {
-                        teardown(a.resource.as_deref(), a.bearer.as_deref()).await;
+                        a.resource.delete_once(a.bearer.as_deref()).await;
                         return;
                     }
                 }
@@ -664,20 +665,22 @@ async fn run_session(mut a: SessionArgs) {
         tokio::select! {
             r = a.socket.recv_from(&mut buf) => {
                 let Ok((n, source)) = r else {
-                    teardown(a.resource.as_deref(), a.bearer.as_deref()).await;
+                    a.resource.delete_once(a.bearer.as_deref()).await;
                     return;
                 };
                 if !feed_datagram(&mut a.rtc, &mut a.turn, a.local, &buf[..n], source) {
-                    teardown(a.resource.as_deref(), a.bearer.as_deref()).await;
+                    a.resource.delete_once(a.bearer.as_deref()).await;
                     return;
                 }
             }
-            // A closed channel = element drop. Clean-EOS teardown is done by the
-            // element (`process`); just exit here.
+            // A closed channel = element drop. Normally the element already
+            // deleted the resource on `Eos`, which makes the call below a no-op;
+            // it still covers an element dropped without one.
             unit = a.rx.recv() => {
                 let Some(unit) = unit else {
                     // Clean end: flush the pacer tail before dropping the socket.
                     drain_pacer(&mut a.rtc, &a.socket, &mut a.turn).await;
+                    a.resource.delete_once(a.bearer.as_deref()).await;
                     return;
                 };
                 // Pick this unit's track writer (by mid), discovering the codec's
@@ -730,7 +733,7 @@ async fn run_session(mut a: SessionArgs) {
             }
             _ = tokio::time::sleep(timeout) => {
                 if a.rtc.handle_input(Input::Timeout(Instant::now())).is_err() {
-                    teardown(a.resource.as_deref(), a.bearer.as_deref()).await;
+                    a.resource.delete_once(a.bearer.as_deref()).await;
                     return;
                 }
             }
@@ -791,14 +794,6 @@ mod simulcast_tests {
             MultiInputElement::get_property(&s, "max-send-bitrate"),
             Some(PropValue::Uint(400_000))
         );
-    }
-}
-
-/// Best-effort WHIP resource teardown (RFC 9725 `DELETE`) before the session
-/// task exits.
-async fn teardown(resource: Option<&str>, bearer: Option<&str>) {
-    if let Some(res) = resource {
-        delete_resource(res, bearer).await;
     }
 }
 

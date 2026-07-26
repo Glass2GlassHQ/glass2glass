@@ -61,8 +61,8 @@ use g2g_core::{
 use crate::filesink::io_err;
 use crate::turn::{self, TurnSet};
 use crate::webrtc_util::{
-    add_host_candidate, delete_resource, drain_pacer, feed_datagram, ice_restart, post_sdp,
-    select_host_ip, send_transmit, trickle_candidates, TricklePatch, TurnConfig,
+    add_host_candidate, drain_pacer, feed_datagram, ice_restart, post_sdp, select_host_ip,
+    send_transmit, trickle_candidates, ResourceHandle, TricklePatch, TurnConfig,
     ICE_RESTART_TIMEOUT,
 };
 
@@ -152,8 +152,10 @@ pub struct WebRtcSink {
     /// The WHIP resource URL (from the handshake), so the element can DELETE it
     /// synchronously on EOS (RFC 9725 teardown). The detached session task cannot
     /// reliably complete a DELETE on clean end, since the runtime may tear it down
-    /// first; the element owns the clean-EOS teardown.
-    resource: Option<String>,
+    /// first; the element owns the clean-EOS teardown. Shared with the task, which
+    /// tears down instead when the session ends first, so exactly one DELETE goes
+    /// out either way.
+    resource: ResourceHandle,
     /// Set by the session task when the remote sends a PLI (keyframe request);
     /// read + cleared by `take_reconfigure`, which forwards a
     /// `Reconfigure::ForceKeyframe` up the reverse channel to the encoder. Shared
@@ -194,7 +196,7 @@ impl WebRtcSink {
             configured: false,
             track: Track::Video,
             tx: None,
-            resource: None,
+            resource: ResourceHandle::default(),
             keyframe_requested: Arc::new(AtomicBool::new(false)),
             bitrate_estimate: Arc::new(AtomicU64::new(0)),
             last_bitrate_sent: 0,
@@ -325,8 +327,9 @@ impl WebRtcSink {
         )
         .await;
 
-        // Keep the resource for the element's own clean-EOS DELETE.
-        self.resource = session.resource.clone();
+        // One handle for the resource, shared by the element (clean-EOS DELETE)
+        // and the session task (disconnect / error teardown).
+        self.resource = ResourceHandle::new(session.resource);
         let (tx, rx) = mpsc::channel::<MediaUnit>(self.queue_depth);
         let keyframe_requested = Arc::clone(&self.keyframe_requested);
         let bitrate_estimate = Arc::clone(&self.bitrate_estimate);
@@ -337,7 +340,7 @@ impl WebRtcSink {
             mid,
             self.track,
             turn,
-            session.resource,
+            self.resource.clone(),
             session.etag,
             self.bearer.clone(),
             keyframe_requested,
@@ -573,9 +576,7 @@ impl AsyncElement for WebRtcSink {
                 // channel closes on element drop. Done in the element (not the
                 // task) so it completes before the runtime tears the task down.
                 PipelinePacket::Eos => {
-                    if let Some(res) = self.resource.take() {
-                        delete_resource(&res, self.bearer.as_deref()).await;
-                    }
+                    self.resource.delete_once(self.bearer.as_deref()).await;
                 }
                 // Geometry refinement lives in the in-band SPS, not the m-line.
                 PipelinePacket::CapsChanged(_) => {}
@@ -600,7 +601,7 @@ async fn run_session(
     mid: Mid,
     track: Track,
     mut turn: TurnSet,
-    resource: Option<String>,
+    resource: ResourceHandle,
     etag: Option<String>,
     bearer: Option<String>,
     keyframe_requested: Arc<AtomicBool>,
@@ -652,7 +653,7 @@ async fn run_session(
                 }
                 Ok(Output::Event(_)) => {}
                 Err(_) => {
-                    teardown(resource.as_deref(), bearer.as_deref()).await;
+                    resource.delete_once(bearer.as_deref()).await;
                     return;
                 }
             }
@@ -663,13 +664,13 @@ async fn run_session(
         // re-POST reconnect is owned by the element restarting the pipeline).
         if disconnected_since.is_some_and(|t| t.elapsed() >= ICE_RESTART_TIMEOUT) {
             disconnected_since = None;
-            match resource.as_deref() {
+            match resource.url().as_deref() {
                 Some(res) => {
                     if !matches!(
                         ice_restart(&mut rtc, res, bearer.as_deref(), etag.as_deref()).await,
                         TricklePatch::Accepted
                     ) {
-                        teardown(resource.as_deref(), bearer.as_deref()).await;
+                        resource.delete_once(bearer.as_deref()).await;
                         return;
                     }
                 }
@@ -684,11 +685,11 @@ async fn run_session(
             // traffic from the relay server).
             r = socket.recv_from(&mut buf) => {
                 let Ok((n, source)) = r else {
-                    teardown(resource.as_deref(), bearer.as_deref()).await;
+                    resource.delete_once(bearer.as_deref()).await;
                     return;
                 };
                 if !feed_datagram(&mut rtc, &mut turn, local, &buf[..n], source) {
-                    teardown(resource.as_deref(), bearer.as_deref()).await;
+                    resource.delete_once(bearer.as_deref()).await;
                     return;
                 }
             }
@@ -697,12 +698,14 @@ async fn run_session(
                 turn.refresh_all(&socket).await;
                 refresh_at = Instant::now() + turn::REFRESH_INTERVAL;
             }
-            // A closed channel = element drop. Clean-EOS teardown is done by the
-            // element (`process`); just exit here.
+            // A closed channel = element drop. Normally the element already
+            // deleted the resource on `Eos`, which makes the call below a no-op;
+            // it still covers an element dropped without one.
             unit = rx.recv() => {
                 let Some(unit) = unit else {
                     // Clean end: flush the pacer tail before dropping the socket.
                     drain_pacer(&mut rtc, &socket, &mut turn).await;
+                    resource.delete_once(bearer.as_deref()).await;
                     return;
                 };
                 if pt.is_none() {
@@ -723,19 +726,11 @@ async fn run_session(
             // str0m's timer fired.
             _ = tokio::time::sleep(timeout) => {
                 if rtc.handle_input(Input::Timeout(Instant::now())).is_err() {
-                    teardown(resource.as_deref(), bearer.as_deref()).await;
+                    resource.delete_once(bearer.as_deref()).await;
                     return;
                 }
             }
         }
-    }
-}
-
-/// Best-effort WHIP resource teardown (RFC 9725 `DELETE`) before the session
-/// task exits. No-op when the server returned no resource URL.
-async fn teardown(resource: Option<&str>, bearer: Option<&str>) {
-    if let Some(res) = resource {
-        delete_resource(res, bearer).await;
     }
 }
 
