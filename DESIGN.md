@@ -1673,7 +1673,13 @@ advertises a fixatable placeholder `Range` refined downstream via `CapsChanged`
 `Mp4Src` / `Mp4Sink`. The TS muxer (`g2g-plugins::mpegts::TsMuxer`) is the
 inverse path, wrapping access units back into PES + 188-byte packets with
 a real PSI CRC. It is multi-stream: `with_streams` builds one program
-carrying N elementary streams, each on its own PID and named in one PMT. The
+carrying N elementary streams, each on its own PID and named in one PMT, and
+multi-program: `with_programs` takes a `(program_number, stream_type)` per
+stream, so the PAT names each program, each program gets its own PMT (naming
+only its own streams) and its own PCR on its first stream's PID. The fan-in
+element exposes that layout as `prog-map`, one program number per input pad in
+pad order (`prog-map=1,1,2`); GStreamer's `mpegtsmux` takes a pad-name structure
+there, g2g a comma list because its properties are scalar. The
 single-input `tsmux::TsMux` element wraps a one-stream muxer (`! mpegtsmux !`);
 the multi-input `tsmuxn::TsMux` (a `MultiInputElement`) muxes A+V, interleaving
 access units across inputs by PTS via the `take_earliest_by` merge so the

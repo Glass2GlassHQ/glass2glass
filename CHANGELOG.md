@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M783: the MPEG-TS muxers write several programs, one per `prog-map` entry on `mpegtsmux`, each with its own PMT and PCR.
+
 - M782: MPEG-TS PES carries DTS for reordered video (round-trips through mux/demux) and clocks the PCR on DTS.
 
 - M781: `tsdemux` parses every PAT program and demuxes the one chosen by the `program-number` property (default the first).

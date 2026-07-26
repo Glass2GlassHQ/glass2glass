@@ -5,15 +5,18 @@
 //!
 //! A [`MultiInputElement`]: each input pad accepts one elementary stream
 //! (`Caps::CompressedVideo{H264|H265}` or `Caps::Audio{Aac}`), and the access
-//! units are interleaved into one program by presentation timestamp before being
-//! written to their per-stream PIDs. Time-ordering reuses the M204
+//! units are interleaved into one multiplex by presentation timestamp before
+//! being written to their per-stream PIDs. Time-ordering reuses the M204
 //! [`InputAggregator::take_earliest_by`](g2g_core::InputAggregator::take_earliest_by)
 //! merge (release the globally earliest AU once every contributing input has one
 //! queued), so the muxed TS is monotonic across streams the way a decoder
-//! expects. The PMT (built once all inputs are configured) names every stream.
+//! expects. The PMT (built once all inputs are configured) names every stream of
+//! its program.
 //!
-//! Scope: one program; a PCR rides the first stream's PID on the `pcr-interval`
-//! cadence (see [`crate::mpegts::TsMuxer`]). Reachable from
+//! Scope: one program by default, several via `prog-map` (M783), which assigns a
+//! program number per input pad; each program gets its own PMT and its own PCR on
+//! its first stream's PID, on the `pcr-interval` cadence (see
+//! [`crate::mpegts::TsMuxer`]). Reachable from
 //! the `gst-launch` fan-in syntax (M208): registered as the `mpegtsmux` muxer in
 //! [`default_registry`](crate::registry::default_registry), so
 //! `v.! m.  a.! m.  mpegtsmux name=m ! sink` builds this element when more than
@@ -25,6 +28,7 @@ use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
@@ -58,6 +62,9 @@ pub struct TsMux {
     /// PCR insertion cadence in 90 kHz ticks (default 3600), applied to the inner
     /// `TsMuxer` when it is built.
     pcr_interval_90khz: u64,
+    /// Program number per input pad, in pad order (default: every input in
+    /// program 1). Zipped with the learned stream types to build the muxer.
+    program_numbers: Vec<u16>,
 }
 
 impl TsMux {
@@ -74,7 +81,20 @@ impl TsMux {
             emitted: 0,
             table_interval_ms: 0,
             pcr_interval_90khz: 3600,
+            program_numbers: alloc::vec![1; inputs],
         }
+    }
+
+    /// Assign a program number to each input pad, in pad order (M783): inputs
+    /// sharing a number land in one program, and each program gets its own PMT and
+    /// PCR. `numbers` must have one entry per input.
+    pub fn with_program_numbers(mut self, numbers: &[u16]) -> Self {
+        assert!(
+            numbers.len() == self.inputs,
+            "TsMux needs one program number per input"
+        );
+        self.program_numbers = numbers.to_vec();
+        self
     }
 
     /// Set the PAT/PMT re-emission interval in milliseconds (`0` = once up front).
@@ -94,11 +114,31 @@ impl TsMux {
         self.emitted
     }
 
+    /// The canonical `prog-map` value: the per-input program numbers joined by
+    /// commas in pad order.
+    fn prog_map_string(&self) -> String {
+        let mut s = String::new();
+        for (i, n) in self.program_numbers.iter().enumerate() {
+            if i > 0 {
+                s.push(',');
+            }
+            s.push_str(&alloc::format!("{n}"));
+        }
+        s
+    }
+
     fn output_caps_value() -> Caps {
         Caps::ByteStream {
             encoding: ByteStreamEncoding::MpegTs,
         }
     }
+}
+
+/// Parse a `prog-map` value: comma-separated program numbers, one per input in
+/// pad order. `None` on an empty list or an entry that is not a `u16`.
+fn parse_prog_map(s: &str) -> Option<Vec<u16>> {
+    let numbers: Option<Vec<u16>> = s.split(',').map(|n| n.trim().parse::<u16>().ok()).collect();
+    numbers.filter(|n| !n.is_empty())
 }
 
 impl MultiInputElement for TsMux {
@@ -180,12 +220,31 @@ impl MultiInputElement for TsMux {
                 "PCR insertion interval, ticks of the 90kHz clock",
             )
             .with_default("3600"),
+            // GStreamer mpegtsmux takes a pad-name -> program structure here; g2g
+            // properties are scalar, so this is one number per input in pad order.
+            PropertySpec::new(
+                "prog-map",
+                PropKind::Str,
+                "program number per input, comma separated in pad order (e.g. 1,1,2; default all in program 1)",
+            )
+            .with_default("1"),
         ];
         PROPS
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
         match name {
+            "prog-map" => {
+                // The program layout is baked into the PSI when the muxer is built,
+                // so it can only be set before the first frame.
+                if self.mux.is_some() {
+                    return Err(PropError::ReadOnly);
+                }
+                self.program_numbers = parse_prog_map(value.as_str().ok_or(PropError::Type)?)
+                    .filter(|n| n.len() == self.inputs)
+                    .ok_or(PropError::Value)?;
+                Ok(())
+            }
             "pat-interval" | "pmt-interval" => {
                 self.table_interval_ms = value.as_uint().ok_or(PropError::Type)?;
                 // If the muxer is already built, update it in place; otherwise the
@@ -210,6 +269,7 @@ impl MultiInputElement for TsMux {
         match name {
             "pat-interval" | "pmt-interval" => Some(PropValue::Uint(self.table_interval_ms)),
             "pcr-interval" => Some(PropValue::Uint(self.pcr_interval_90khz)),
+            "prog-map" => Some(PropValue::Str(self.prog_map_string())),
             _ => None,
         }
     }
@@ -243,12 +303,13 @@ impl MultiInputElement for TsMux {
                 if self.stream_types.iter().any(|s| s.is_none()) {
                     return Ok(());
                 }
-                let types: Vec<u8> = self
-                    .stream_types
+                let streams: Vec<(u16, u8)> = self
+                    .program_numbers
                     .iter()
-                    .map(|s| s.expect("all set"))
+                    .zip(&self.stream_types)
+                    .map(|(&program, s)| (program, s.expect("all set")))
                     .collect();
-                let mut mux = TsMuxer::with_streams(&types);
+                let mut mux = TsMuxer::with_programs(&streams);
                 // 90 kHz clock: 90 ticks per millisecond (matches the single-input path).
                 mux.set_table_interval_90khz(self.table_interval_ms.saturating_mul(90));
                 mux.set_pcr_interval_90khz(self.pcr_interval_90khz);
