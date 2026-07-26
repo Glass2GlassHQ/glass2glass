@@ -24,8 +24,11 @@
 //! send packets and the network, so the send and recv halves share state with no
 //! task hop. Status: on-network validated (M249) by in-process P2P loopbacks
 //! (`webrtc_duplex_p2p_loopback` video, `webrtc_duplex_p2p_av_loopback` A/V),
-//! behind the `webrtc` feature. STUN / TURN NAT traversal and a pluggable
-//! real-SFU signaller are follow-ups.
+//! behind the `webrtc` feature. Mid-session tracks (M784) ride on spare pads
+//! declared up front by [`WebRtcDuplexSession::with_spare_tracks`]: a spare
+//! carries no m-line at the handshake and binds later, when its send pad gets a
+//! frame (which re-offers a new m-line) or when the peer adds one. STUN / TURN
+//! NAT traversal and a pluggable real-SFU signaller are follow-ups.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -62,8 +65,10 @@ use crate::turn::TurnSet;
 use crate::webrtc_util::{add_ice_candidates, feed_datagram, select_host_ip, send_transmit};
 use crate::webrtcsink::Track;
 
-/// The two tracks a duplex session can carry, in pad order: video on pad 0, audio
-/// on pad 1. `track_count` selects how many are active (1 = video only).
+/// The two tracks a duplex session offers at the handshake, in pad order: video
+/// on pad 0, audio on pad 1. `track_count` selects how many are active (1 = video
+/// only); [`WebRtcDuplexSession::with_spare_tracks`] appends spare pads after
+/// them.
 const KINDS: [Track; 2] = [Track::Video, Track::Audio];
 
 /// Which peer originates the SDP offer in the sendrecv handshake.
@@ -149,9 +154,13 @@ const RENEGO_ANSWER: &str = "answer\n";
 pub struct WebRtcDuplexSession {
     role: SignalRole,
     sig: Option<SdpChannel>,
-    /// Number of sendrecv m-lines: 1 (video) or 2 (video + audio). Equal to both
-    /// `input_count` and `output_count` (input i and output i share m-line i).
+    /// Number of sendrecv m-lines offered at the handshake: 1 (video) or 2
+    /// (video + audio).
     track_count: usize,
+    /// Track kind per pad: the `track_count` active pads first, then any spares
+    /// reserved by [`Self::with_spare_tracks`]. Its length is both `input_count`
+    /// and `output_count` (input i and output i share m-line i).
+    pad_kinds: Vec<Track>,
     stun_server: Option<String>,
     turn_server: Option<String>,
     turn_user: String,
@@ -179,6 +188,7 @@ impl core::fmt::Debug for WebRtcDuplexSession {
         f.debug_struct("WebRtcDuplexSession")
             .field("role", &self.role)
             .field("track_count", &self.track_count)
+            .field("pad_kinds", &self.pad_kinds)
             .field("inputs", &self.inputs)
             .finish()
     }
@@ -196,6 +206,7 @@ impl WebRtcDuplexSession {
             role,
             sig: Some(sig),
             track_count,
+            pad_kinds: KINDS[..track_count].to_vec(),
             stun_server: None,
             turn_server: None,
             turn_user: String::new(),
@@ -206,6 +217,23 @@ impl WebRtcDuplexSession {
             nacks_seen: Arc::new(AtomicU64::new(0)),
             control: DuplexControl::default(),
         }
+    }
+
+    /// Reserve `video` + `audio` extra pads beyond the active tracks (M784).
+    /// A spare pad carries no m-line at the handshake: it binds mid-session,
+    /// either when its send pad gets its first frame (the session offers the
+    /// peer a new m-line) or when the peer adds an m-line of that kind. Tracks
+    /// beyond the reserve are rejected, since the pad count is fixed at graph
+    /// build time.
+    pub fn with_spare_tracks(mut self, video: usize, audio: usize) -> Self {
+        self.pad_kinds
+            .extend(core::iter::repeat_n(Track::Video, video));
+        self.pad_kinds
+            .extend(core::iter::repeat_n(Track::Audio, audio));
+        let pads = self.pad_kinds.len();
+        self.inputs.resize(pads, None);
+        self.reverse.resize_with(pads, ReverseChannel::new);
+        self
     }
 
     /// A cloneable mid-session control handle (M729): toggling a track
@@ -283,6 +311,37 @@ fn caps_for(kind: Track) -> Caps {
     }
 }
 
+/// One negotiated m-line and the pads it serves: `out_pad` emits the peer's
+/// media, `in_pad` feeds the send direction (either may be missing when no pad
+/// of that kind is free). A spare pad has no binding until it activates.
+#[derive(Debug)]
+struct Binding {
+    mid: Mid,
+    kind: Track,
+    /// Negotiated payload type, discovered from the writer on the first frame.
+    pt: Option<Pt>,
+    in_pad: Option<usize>,
+    out_pad: Option<usize>,
+}
+
+fn binding_of_mid(bindings: &[Binding], mid: Mid) -> Option<usize> {
+    bindings.iter().position(|b| b.mid == mid)
+}
+
+/// The lowest output pad of `kind` no binding has claimed (a spare once the
+/// active pads are taken).
+fn free_out_pad(bindings: &[Binding], pad_kinds: &[Track], kind: Track) -> Option<usize> {
+    (0..pad_kinds.len())
+        .find(|o| pad_kinds[*o] == kind && !bindings.iter().any(|b| b.out_pad == Some(*o)))
+}
+
+/// The same on the send side: the lowest input pad configured for `kind` that no
+/// binding has claimed (the send pads may be wired in either order).
+fn free_in_pad(bindings: &[Binding], inputs: &[Option<Track>], kind: Track) -> Option<usize> {
+    (0..inputs.len())
+        .find(|i| inputs[*i] == Some(kind) && !bindings.iter().any(|b| b.in_pad == Some(*i)))
+}
+
 /// The track kind an input's caps select (H.264 video or Opus audio).
 fn track_of(caps: &Caps) -> Option<Track> {
     match caps {
@@ -302,11 +361,11 @@ impl MultiDuplexSession for WebRtcDuplexSession {
     type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>;
 
     fn input_count(&self) -> usize {
-        self.track_count
+        self.pad_kinds.len()
     }
 
     fn output_count(&self) -> usize {
-        self.track_count
+        self.pad_kinds.len()
     }
 
     fn intercept_caps(&self, _input: usize, upstream_caps: &Caps) -> Result<Caps, G2gError> {
@@ -331,7 +390,11 @@ impl MultiDuplexSession for WebRtcDuplexSession {
     }
 
     fn output_caps(&self, output: usize) -> Result<Caps, G2gError> {
-        let kind = KINDS.get(output).copied().ok_or(G2gError::CapsMismatch)?;
+        let kind = self
+            .pad_kinds
+            .get(output)
+            .copied()
+            .ok_or(G2gError::CapsMismatch)?;
         Ok(caps_for(kind))
     }
 
@@ -346,6 +409,7 @@ impl MultiDuplexSession for WebRtcDuplexSession {
     ) -> Self::RunFuture<'a> {
         let role = self.role;
         let track_count = self.track_count;
+        let pad_kinds = self.pad_kinds.clone();
         let inputs = self.inputs.clone();
         let stun = self.stun_server.clone();
         let turn_server = self.turn_server.clone();
@@ -354,17 +418,9 @@ impl MultiDuplexSession for WebRtcDuplexSession {
         let linger = self.linger;
         let sig = self.sig.take();
         let control_handle = self.control.clone();
-        // The reverse channel of the input pad carrying each track kind, so a
-        // remote PLI / BWE naming that track's m-line routes back to the source
-        // feeding it (the send pads may be wired in either order).
-        let reverse_for = |kind: Track| {
-            self.inputs
-                .iter()
-                .position(|t| *t == Some(kind))
-                .and_then(|i| self.reverse.get(i).cloned())
-        };
-        let video_reverse = reverse_for(Track::Video);
-        let audio_reverse = reverse_for(Track::Audio);
+        // Per-input reverse channels, so a remote PLI / BWE naming a track's
+        // m-line routes back to the source feeding that m-line's send pad.
+        let reverse = self.reverse.clone();
         let nacks_seen = self.nacks_seen.clone();
         Box::pin(async move {
             let hw = || G2gError::Hardware(HardwareError::Other);
@@ -398,23 +454,20 @@ impl MultiDuplexSession for WebRtcDuplexSession {
             };
             let mut refresh_at = Instant::now() + crate::turn::REFRESH_INTERVAL;
 
-            // Per-kind `Mid` and negotiated payload type, for both directions.
+            // One binding per negotiated m-line, holding the pads it serves.
             // The offerer learns its `Mid`s from `add_media` (str0m does not emit
             // `MediaAdded` for media the local side added); the answerer learns
             // them from `MediaAdded` when it accepts the offer.
-            let mut video_mid: Option<Mid> = None;
-            let mut audio_mid: Option<Mid> = None;
-            let mut video_pt: Option<Pt> = None;
-            let mut audio_pt: Option<Pt> = None;
+            let mut bindings: Vec<Binding> = Vec::new();
 
-            // SDP handshake: each m-line is sendrecv. The offerer adds the media
-            // and creates the offer; the answerer accepts the offer (whose m-lines
-            // it inherits).
+            // SDP handshake: each ACTIVE pad gets one sendrecv m-line (spares get
+            // none). The offerer adds the media and creates the offer; the
+            // answerer accepts the offer (whose m-lines it inherits).
             match role {
                 SignalRole::Offerer => {
                     let (offer_sdp, pending) = {
                         let mut api = rtc.sdp_api();
-                        for kind in KINDS.iter().take(track_count) {
+                        for (o, kind) in pad_kinds.iter().enumerate().take(track_count) {
                             let mid = api.add_media(
                                 kind.media_kind(),
                                 Direction::SendRecv,
@@ -422,10 +475,14 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                                 None,
                                 None,
                             );
-                            match kind {
-                                Track::Video => video_mid = Some(mid),
-                                Track::Audio => audio_mid = Some(mid),
-                            }
+                            let in_pad = free_in_pad(&bindings, &inputs, *kind);
+                            bindings.push(Binding {
+                                mid,
+                                kind: *kind,
+                                pt: None,
+                                in_pad,
+                                out_pad: Some(o),
+                            });
                         }
                         let (offer, pending) = api.apply().ok_or_else(hw)?;
                         (offer.to_sdp_string(), pending)
@@ -448,10 +505,14 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                 }
             }
 
-            // Announce each output's caps before its first frame.
-            for (o, kind) in KINDS.iter().enumerate().take(track_count) {
+            // Announce each ACTIVE output's caps before its first frame; a spare
+            // pad is announced when it binds mid-session.
+            let pad_count = pad_kinds.len();
+            let mut announced = alloc::vec![false; pad_count];
+            for (o, kind) in pad_kinds.iter().enumerate().take(track_count) {
                 out.push_to(o, PipelinePacket::CapsChanged(caps_for(*kind)))
                     .await?;
+                announced[o] = true;
             }
 
             let mut buf = alloc::vec![0u8; 2000];
@@ -460,17 +521,17 @@ impl MultiDuplexSession for WebRtcDuplexSession {
             let mut send_done = false;
             // Set when the local send side ends; the loop finishes after it.
             let mut drain_deadline: Option<Instant> = None;
-            // Mid-session renegotiation (M729): pending toggles come in via the
-            // control handle; one exchange in flight at a time (its answer
-            // clears `renego_pending`). On glare (a peer re-offer arriving
-            // while ours is pending) the ANSWERER role yields: it drops its
-            // pending exchange and answers the peer's offer.
+            // Mid-session renegotiation: pending toggles come in via the control
+            // handle (M729) and spare pads add m-lines (M784); one exchange in
+            // flight at a time (its answer clears `renego_pending`). On glare (a
+            // peer re-offer arriving while ours is pending) the ANSWERER role
+            // yields: it drops its pending exchange and answers the peer's offer.
             let control = control_handle;
             let mut renego_pending: Option<str0m::change::SdpPendingOffer> = None;
 
             macro_rules! finish {
                 () => {{
-                    for o in 0..track_count {
+                    for o in 0..pad_count {
                         out.push_to(o, PipelinePacket::Eos).await?;
                     }
                     return Ok(received);
@@ -484,12 +545,30 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                     match rtc.poll_output() {
                         Ok(Output::Timeout(t)) => break t,
                         Ok(Output::Transmit(t)) => send_transmit(&socket, &mut turn, &t).await,
-                        // The answerer learns its m-line `Mid`s here (the offerer
-                        // captured them from `add_media`); harmless to set again.
-                        Ok(Output::Event(Event::MediaAdded(m))) => match m.kind {
-                            MediaKind::Video => video_mid = Some(m.mid),
-                            MediaKind::Audio => audio_mid = Some(m.mid),
-                        },
+                        // A remote-created m-line: the answerer learns its initial
+                        // `Mid`s here (the offerer captured them from `add_media`),
+                        // and either side learns a mid-session ADD by the peer
+                        // (M784). Bind it to the first free pad of its kind; with
+                        // no free output pad it stays unbound and its media is
+                        // skipped by the unknown-mid path below.
+                        Ok(Output::Event(Event::MediaAdded(m))) => {
+                            if binding_of_mid(&bindings, m.mid).is_none() {
+                                let kind = match m.kind {
+                                    MediaKind::Video => Track::Video,
+                                    MediaKind::Audio => Track::Audio,
+                                };
+                                if let Some(out_pad) = free_out_pad(&bindings, &pad_kinds, kind) {
+                                    let in_pad = free_in_pad(&bindings, &inputs, kind);
+                                    bindings.push(Binding {
+                                        mid: m.mid,
+                                        kind,
+                                        pt: None,
+                                        in_pad,
+                                        out_pad: Some(out_pad),
+                                    });
+                                }
+                            }
+                        }
                         Ok(Output::Event(Event::IceConnectionStateChange(
                             IceConnectionState::Disconnected,
                         ))) => finish!(),
@@ -497,42 +576,41 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                         // feeding the track whose m-line it names (by mid), so only
                         // that encoder emits an IDR.
                         Ok(Output::Event(Event::KeyframeRequest(req))) => {
-                            let rc = if Some(req.mid) == video_mid {
-                                video_reverse.as_ref()
-                            } else if Some(req.mid) == audio_mid {
-                                audio_reverse.as_ref()
-                            } else {
-                                None
-                            };
-                            if let Some(rc) = rc {
+                            if let Some(rc) = binding_of_mid(&bindings, req.mid)
+                                .and_then(|b| bindings[b].in_pad)
+                                .and_then(|i| reverse.get(i))
+                            {
                                 rc.request_keyframe();
                             }
                         }
                         // Congestion-control estimate (whole-connection): relay it to
-                        // the video track, the bitrate-adaptive one (Opus bitrate
-                        // adaptation is a separate follow-up), as the fan-in session does.
+                        // the first bound video track, the bitrate-adaptive one
+                        // (Opus bitrate adaptation is a separate follow-up), as the
+                        // fan-in session does.
                         Ok(Output::Event(Event::EgressBitrateEstimate(kind))) => {
                             let bps = match kind {
                                 BweKind::Twcc(b) | BweKind::Remb(_, b) => Some(b.as_u64()),
                                 _ => None,
                             };
-                            if let (Some(bps), Some(rc)) = (bps, video_reverse.as_ref()) {
+                            let rc = bindings
+                                .iter()
+                                .find(|b| b.kind == Track::Video)
+                                .and_then(|b| b.in_pad)
+                                .and_then(|i| reverse.get(i));
+                            if let (Some(bps), Some(rc)) = (bps, rc) {
                                 rc.set_bitrate(bps.min(u32::MAX as u64) as u32);
                             }
                         }
                         Ok(Output::Event(Event::MediaData(d))) => {
                             let denom = d.time.denom().max(1) as u128;
                             let pts_ns = (d.time.numer() as u128 * 1_000_000_000 / denom) as u64;
-                            let port = if Some(d.mid) == video_mid {
-                                0
-                            } else if Some(d.mid) == audio_mid {
-                                1
-                            } else {
+                            // Unknown mid, or an m-line with no output pad: skip.
+                            let Some(port) =
+                                binding_of_mid(&bindings, d.mid).and_then(|b| bindings[b].out_pad)
+                            else {
                                 continue;
                             };
-                            if port < track_count {
-                                frames.push((port, pts_ns, d.data.to_vec()));
-                            }
+                            frames.push((port, pts_ns, d.data.to_vec()));
                         }
                         // Loss-recovery feedback counters (cumulative): nacks sent
                         // as a receiver (ingress) and nacks received as a sender
@@ -550,7 +628,14 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                 };
 
                 for (port, pts_ns, data) in frames {
-                    let keyframe = port == 0 && h264_au_is_keyframe(&data);
+                    // A pad bound mid-session announces its caps before its first
+                    // frame (the active pads were announced at session start).
+                    if !announced[port] {
+                        out.push_to(port, PipelinePacket::CapsChanged(caps_for(pad_kinds[port])))
+                            .await?;
+                        announced[port] = true;
+                    }
+                    let keyframe = pad_kinds[port] == Track::Video && h264_au_is_keyframe(&data);
                     let frame = Frame {
                         domain: MemoryDomain::System(SystemSlice::from_boxed(
                             data.into_boxed_slice(),
@@ -585,11 +670,10 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                         let mut api = rtc.sdp_api();
                         let mut changed = false;
                         for (idx, enabled) in toggles {
-                            let mid = match inputs.get(idx).copied().flatten() {
-                                Some(Track::Video) => video_mid,
-                                Some(Track::Audio) => audio_mid,
-                                None => None,
-                            };
+                            let mid = bindings
+                                .iter()
+                                .find(|b| b.in_pad == Some(idx))
+                                .map(|b| b.mid);
                             if let Some(mid) = mid {
                                 let dir = if enabled {
                                     Direction::SendRecv
@@ -629,10 +713,14 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                                 } else if let Some(sdp) = m.strip_prefix(RENEGO_OFFER) {
                                     // Glare rule: the answerer role yields its
                                     // own pending exchange to the peer's offer.
+                                    // Its unanswered ADD is retracted (str0m
+                                    // never created that media), so a later frame
+                                    // on the pad re-offers it.
                                     if renego_pending.is_some()
                                         && matches!(role, SignalRole::Answerer)
                                     {
                                         renego_pending = None;
+                                        bindings.retain(|b| rtc.media(b.mid).is_some());
                                     }
                                     if renego_pending.is_none() {
                                         if let Ok(offer) =
@@ -670,36 +758,86 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                                 drain_deadline = Some(Instant::now() + linger);
                             }
                             Some((idx, PipelinePacket::DataFrame(frame))) => {
-                                // Route by the track configured for this send pad,
-                                // not the fixed KINDS position (a pipeline may wire
-                                // audio to pad 0 and video to pad 1).
-                                let kind = inputs
-                                    .get(idx)
-                                    .copied()
-                                    .flatten()
-                                    .unwrap_or(KINDS[idx.min(track_count - 1)]);
-                                let (mid, pt_slot) = match kind {
-                                    Track::Video => (video_mid, &mut video_pt),
-                                    Track::Audio => (audio_mid, &mut audio_pt),
-                                };
-                                // Drop send frames until the m-line is negotiated
-                                // (its `Mid` arrives via `MediaAdded`).
-                                if let (Some(mid), MemoryDomain::System(slice)) =
-                                    (mid, &frame.domain)
-                                {
-                                    if pt_slot.is_none() {
-                                        if let Some(w) = rtc.writer(mid) {
-                                            *pt_slot = w
-                                                .payload_params()
-                                                .find(|p| p.spec().codec == kind.codec())
-                                                .map(|p| p.pt());
+                                // Route by the m-line this send pad feeds, not the
+                                // fixed KINDS position (a pipeline may wire audio to
+                                // pad 0 and video to pad 1). Falls back to a kind
+                                // match for an initial track whose binding claimed
+                                // no input pad.
+                                let kind = inputs.get(idx).copied().flatten();
+                                let bound = bindings
+                                    .iter()
+                                    .position(|b| b.in_pad == Some(idx))
+                                    .or_else(|| {
+                                        kind.and_then(|k| {
+                                            bindings.iter().position(|b| {
+                                                b.kind == k && b.in_pad.is_none()
+                                            })
+                                        })
+                                    });
+                                match bound {
+                                    Some(b) => {
+                                        let b = &mut bindings[b];
+                                        let kind = b.kind;
+                                        // Drop send frames until the m-line is
+                                        // negotiated (no writer before that).
+                                        if let MemoryDomain::System(slice) = &frame.domain {
+                                            if b.pt.is_none() {
+                                                if let Some(w) = rtc.writer(b.mid) {
+                                                    b.pt = w
+                                                        .payload_params()
+                                                        .find(|p| p.spec().codec == kind.codec())
+                                                        .map(|p| p.pt());
+                                                }
+                                            }
+                                            if let Some(p) = b.pt {
+                                                let rtp_time =
+                                                    kind.media_time(frame.timing.pts_ns);
+                                                if let Some(w) = rtc.writer(b.mid) {
+                                                    let _ = w.write(p, Instant::now(), rtp_time,
+                                                        slice.as_slice().to_vec());
+                                                }
+                                            }
                                         }
                                     }
-                                    if let Some(p) = *pt_slot {
-                                        let rtp_time = kind.media_time(frame.timing.pts_ns);
-                                        if let Some(w) = rtc.writer(mid) {
-                                            let _ = w.write(p, Instant::now(), rtp_time,
-                                                slice.as_slice().to_vec());
+                                    // A spare send pad with no m-line yet (M784):
+                                    // offer the peer a new sendrecv m-line and claim
+                                    // a free output pad of the same kind. This frame
+                                    // is dropped (nothing can be written before the
+                                    // answer lands); a later one starts the stream.
+                                    // With another exchange in flight, retry later.
+                                    None => {
+                                        let add = kind.filter(|_| {
+                                            idx >= track_count && renego_pending.is_none()
+                                        });
+                                        if let Some(kind) = add {
+                                            let out_pad =
+                                                free_out_pad(&bindings, &pad_kinds, kind);
+                                            if let Some(out_pad) = out_pad {
+                                                let mut api = rtc.sdp_api();
+                                                let mid = api.add_media(
+                                                    kind.media_kind(),
+                                                    Direction::SendRecv,
+                                                    None,
+                                                    None,
+                                                    None,
+                                                );
+                                                if let Some((offer, pending)) = api.apply() {
+                                                    let msg = alloc::format!(
+                                                        "{RENEGO_OFFER}{}",
+                                                        offer.to_sdp_string()
+                                                    );
+                                                    if sig.tx.send(msg).await.is_ok() {
+                                                        renego_pending = Some(pending);
+                                                        bindings.push(Binding {
+                                                            mid,
+                                                            kind,
+                                                            pt: None,
+                                                            in_pad: Some(idx),
+                                                            out_pad: Some(out_pad),
+                                                        });
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -754,6 +892,31 @@ mod tests {
             })
         ));
         assert!(s.output_caps(2).is_err());
+    }
+
+    #[test]
+    fn spare_tracks_add_pads_beyond_the_active_ones() {
+        let (a, _b) = SdpChannel::pair();
+        let s = WebRtcDuplexSession::new(SignalRole::Offerer, a, 2).with_spare_tracks(1, 1);
+        assert_eq!(s.input_count(), 4);
+        assert_eq!(s.output_count(), 4);
+        // Spares follow the active pads: video on 2, audio on 3.
+        assert!(matches!(
+            s.output_caps(2),
+            Ok(Caps::CompressedVideo {
+                codec: VideoCodec::H264,
+                ..
+            })
+        ));
+        assert!(matches!(
+            s.output_caps(3),
+            Ok(Caps::Audio {
+                format: AudioFormat::Opus,
+                ..
+            })
+        ));
+        assert!(s.output_caps(4).is_err());
+        assert_eq!(s.reverse.len(), 4);
     }
 
     #[test]

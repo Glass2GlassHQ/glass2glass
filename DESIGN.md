@@ -2088,9 +2088,23 @@ P2P loopback; a real SFU signaller — LiveKit, etc. — plugs into the same sea
 Mid-session renegotiation (M729): a cloneable `DuplexControl` toggles a track,
 batching direction changes (SendRecv <-> Inactive) into one re-offer over the
 `SdpChannel`; the peer answers it in its loop (typed `offer\n` / `answer\n`
-prefixes distinguish the exchange; on glare the answerer role yields). A
-genuinely NEW track has no target pad under the fixed-arity model and stays a
-design question.
+prefixes distinguish the exchange; on glare the answerer role yields).
+
+**Mid-session NEW tracks: spare pads (M784).** The fixed-arity pad model has no
+pad to grow into, so a session reserves them up front:
+`with_spare_tracks(video, audio)` appends declared-but-inactive pads after the
+active ones, and they carry no m-line at the handshake. Each negotiated m-line is
+a *binding* holding its `Mid`, kind, and the input / output pads it serves, which
+replaces the per-kind mid slots: recv routing, PLI, BWE, and the direction
+toggles all resolve through it. A spare binds either when its **send** pad gets
+its first frame (the session offers the peer a new sendrecv m-line, one exchange
+at a time, the frame itself dropped like any frame before its m-line exists) or
+when the peer's re-offer lands and `MediaAdded` fires for an unknown mid, which
+claims the first free pad of that kind on both sides. A pad bound mid-session
+emits its `CapsChanged` before its first frame; the active pads are announced at
+session start. A track whose kind has no free pad left is rejected (it stays
+unbound and its media is skipped), since the pad count is fixed at graph build
+time.
 The two roles discover their m-line `Mid`s differently and this asymmetry is
 load-bearing: the **offerer** captures its `Mid`s from `SdpApi::add_media`'s
 return, while the **answerer** learns them from `Event::MediaAdded` after
