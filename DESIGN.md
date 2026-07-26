@@ -1757,6 +1757,22 @@ headers), and `OggDemux` emits the Opus audio packets as `Caps::Audio{Opus}` wit
 the channel count refined from `OpusHead`. The container is auto-detectable
 (`typefind` "OggS", `filesrc bytestream-format=auto`).
 
+Grouped multi-stream Ogg is handled per serial (M790). A file opens with one
+beginning-of-stream page per logical bitstream before any other page (RFC 3533
+§4), and the parser keeps an `OggLogicalStream` for each: its own codec mapping,
+headers, packets and granule anchors. A serial joins only from a page in that
+opening block (or as the first stream seen when the file was joined mid-stream,
+which a byte-seek does), so a beginning-of-stream page arriving later, meaning a
+**chained** physical stream, is ignored rather than misparsed; the concurrent
+stream count is capped, since the serials come from the file. `OggDemux`
+forwards the first bitstream whose codec matches its `stream` selection and
+drains the rest; `OggDemuxN` is the multi-output form, one port per `OggPort`
+naming the bitstream it carries. Routing is positional rather than codec-keyed
+because two streams of one codec in a file is ordinary. The per-stream caps,
+in-band codec config and packet timing are one shared `StreamEmitter` both
+elements drive, and `OggDemuxN` announces the file's `StreamCollection` and
+posts each stream's VorbisComment as a `StreamTag` under the same ids.
+
 Opus decode applies the two container trims so the PCM sample count matches
 ffmpeg / gstreamer (RFC 7845). Pre-skip is codec config the decoder owns:
 `OggDemux` forwards the `OpusHead` in-band (the g2g parameter-set convention) and
@@ -1787,6 +1803,16 @@ tables, the inverse of the demux-side durations), held to the total `duration_ns
 the input declared when every packet is timed. That last bound is what carries a
 source's end-of-stream trim through a remux, so ffmpeg decodes a remuxed Opus /
 Vorbis / FLAC stream to the source's samples bit for bit.
+
+`oggmuxn` is the fan-in form (M790): one `OggStreamMux` per input pad, each its
+own logical bitstream with its own serial, packets interleaved by PTS through
+the same `InputAggregator` merge the other multi-track muxers use. Grouping
+forces the page order, which is why the per-stream header writing is split in
+two: every stream's beginning-of-stream page is written first, in pad order,
+then each stream's remaining header pages, then the data pages. That block goes
+out when the merge first releases a packet, the first moment every pad's in-band
+codec config is known to have arrived. Like `mpegtsmux`, the one name `oggmux`
+covers both shapes, the parser picking by link degree.
 
 An audio decoder fixates its output caps even when a demuxer only knows the
 channel count once it parses the stream: it advertises `PcmS16Le` at a concrete

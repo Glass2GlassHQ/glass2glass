@@ -29,8 +29,10 @@
 //! sample count caps that packet's granule contribution, so a remux reproduces
 //! the source's end-of-stream trim exactly.
 //!
-//! Scope (v1): one logical bitstream (a single input pad), mirroring the
-//! single-stream `OggDemux`. Multi-stream (grouped) Ogg is a follow-up.
+//! One logical bitstream (a single input pad), mirroring the single-stream
+//! `OggDemux`. The grouped multi-stream case is the fan-in sibling
+//! [`crate::oggmuxn::OggMuxN`], which reuses this module's [`OggStreamMux`] once
+//! per input pad.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -52,7 +54,7 @@ use crate::opusparse::{packet_samples as opus_packet_samples, OPUS_RATE_HZ};
 /// Default logical-bitstream serial number, overridable via the `serial`
 /// property. Any value identifies the stream as long as it is unique within the
 /// file, and this muxer writes one stream.
-const DEFAULT_SERIAL: u32 = 0x6732_6732; // "g2g2"
+pub(crate) const DEFAULT_SERIAL: u32 = 0x6732_6732; // "g2g2"
 
 /// Pre-skip written into a synthesized `OpusHead`: libopus' encoder lookahead at
 /// 48 kHz, which is what [`crate::opusenc::OpusEnc`] (and ffmpeg's libopus
@@ -63,22 +65,55 @@ const OPUS_ENCODER_PRE_SKIP: u16 = 312;
 /// The vendor string written into synthesized comment headers.
 const VENDOR: &[u8] = b"g2g";
 
-/// Muxes one audio elementary stream into an Ogg byte stream.
+/// The Ogg byte stream both muxers produce.
+pub(crate) fn ogg_caps() -> Caps {
+    Caps::ByteStream {
+        encoding: ByteStreamEncoding::Ogg,
+    }
+}
+
+/// The elementary streams an Ogg muxer accepts on a sink pad.
+pub(crate) fn input_alternatives() -> Vec<Caps> {
+    Vec::from(
+        [AudioFormat::Opus, AudioFormat::Vorbis, AudioFormat::Flac].map(|format| Caps::Audio {
+            format,
+            channels: 0,
+            sample_rate: 0,
+        }),
+    )
+}
+
+/// The codec of `caps`, or `None` for a stream Ogg cannot carry here.
+pub(crate) fn format_of(caps: &Caps) -> Option<AudioFormat> {
+    match caps {
+        Caps::Audio {
+            format: f @ (AudioFormat::Opus | AudioFormat::Vorbis | AudioFormat::Flac),
+            ..
+        } => Some(*f),
+        _ => None,
+    }
+}
+
+/// One logical bitstream being written: its page writer, codec mapping, in-band
+/// headers and granule accounting. The single-input [`OggMux`] owns one; the
+/// grouped [`crate::oggmuxn::OggMuxN`] owns one per input pad, which is why the
+/// header writing is split into [`write_bos`](Self::write_bos) and
+/// [`write_rest`](Self::write_rest): RFC 3533 grouping puts every stream's
+/// beginning-of-stream page ahead of every other page.
 #[derive(Debug)]
-pub struct OggMux {
+pub(crate) struct OggStreamMux {
     writer: OggPageWriter,
-    serial: u32,
     /// The input codec, set at configure.
     format: Option<AudioFormat>,
     channels: u8,
     sample_rate: u32,
-    configured: bool,
-    emitted: u64,
     /// Header packets collected in-band, in arrival order.
     headers: Vec<Vec<u8>>,
     /// Whether the header pages have been written (done lazily, so every in-band
     /// header has landed first).
     headers_written: bool,
+    /// Header packets `write_bos` held back for `write_rest`.
+    pending_rest: Vec<Vec<u8>>,
     /// Cumulative samples the audio packets decode to, per the codec mapping.
     natural_samples: u64,
     /// Cumulative `duration_ns` the input frames declared.
@@ -93,24 +128,16 @@ pub struct OggMux {
     prev_blocksize: Option<u32>,
 }
 
-impl Default for OggMux {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl OggMux {
-    pub fn new() -> Self {
+impl OggStreamMux {
+    pub(crate) fn new(serial: u32) -> Self {
         Self {
-            writer: OggPageWriter::new(DEFAULT_SERIAL),
-            serial: DEFAULT_SERIAL,
+            writer: OggPageWriter::new(serial),
             format: None,
             channels: 0,
             sample_rate: 0,
-            configured: false,
-            emitted: 0,
             headers: Vec::new(),
             headers_written: false,
+            pending_rest: Vec::new(),
             natural_samples: 0,
             declared_ns: 0,
             untimed: false,
@@ -119,50 +146,99 @@ impl OggMux {
         }
     }
 
-    /// Set the logical bitstream's serial number.
-    pub fn with_serial(mut self, serial: u32) -> Self {
-        self.serial = serial;
+    /// Re-key the bitstream. Only meaningful before its first page, which
+    /// identifies the stream by the serial then in force.
+    pub(crate) fn set_serial(&mut self, serial: u32) {
         self.writer = OggPageWriter::new(serial);
-        self
     }
 
-    /// Count of Ogg byte frames forwarded.
-    pub fn emitted(&self) -> u64 {
-        self.emitted
+    pub(crate) fn serial(&self) -> u32 {
+        self.writer.serial()
     }
 
-    /// The output it produces: an Ogg byte stream.
-    fn output_caps() -> Caps {
-        Caps::ByteStream {
-            encoding: ByteStreamEncoding::Ogg,
+    /// Pin the codec mapping from negotiated caps.
+    pub(crate) fn configure(&mut self, caps: &Caps) -> Result<(), G2gError> {
+        let Caps::Audio {
+            channels,
+            sample_rate,
+            ..
+        } = caps
+        else {
+            return Err(G2gError::CapsMismatch);
+        };
+        self.format = Some(format_of(caps).ok_or(G2gError::CapsMismatch)?);
+        self.channels = *channels;
+        self.sample_rate = *sample_rate;
+        Ok(())
+    }
+
+    /// Refine the channel count / rate a synthesized header will carry. Ignored
+    /// once the headers are on the wire.
+    pub(crate) fn refine_caps(&mut self, caps: &Caps) {
+        if self.headers_written {
+            return;
+        }
+        if let Caps::Audio {
+            channels,
+            sample_rate,
+            ..
+        } = caps
+        {
+            self.channels = *channels;
+            self.sample_rate = *sample_rate;
         }
     }
 
-    /// The elementary streams this muxer accepts on its sink pad.
-    fn input_alternatives() -> Vec<Caps> {
-        Vec::from(
-            [AudioFormat::Opus, AudioFormat::Vorbis, AudioFormat::Flac].map(|format| Caps::Audio {
-                format,
-                channels: 0,
-                sample_rate: 0,
-            }),
-        )
+    pub(crate) fn headers_written(&self) -> bool {
+        self.headers_written
     }
 
-    /// The codec of `caps`, or `None` for a stream Ogg cannot carry here.
-    fn format_of(caps: &Caps) -> Option<AudioFormat> {
-        match caps {
-            Caps::Audio {
-                format: f @ (AudioFormat::Opus | AudioFormat::Vorbis | AudioFormat::Flac),
-                ..
-            } => Some(*f),
-            _ => None,
+    /// Collect an in-band codec-config packet, to be written as a header page.
+    pub(crate) fn push_header(&mut self, packet: &[u8]) {
+        self.headers.push(packet.to_vec());
+    }
+
+    /// Write this stream's beginning-of-stream page (the mapping's first packet
+    /// alone, granule 0), stashing the remaining header packets for
+    /// [`write_rest`](Self::write_rest).
+    pub(crate) fn write_bos(&mut self) -> Result<Vec<u8>, G2gError> {
+        let (bos, rest) = self.header_packets().ok_or(G2gError::NotConfigured)?;
+        // Vorbis timing needs the mode tables from ident + setup.
+        if self.format == Some(AudioFormat::Vorbis) {
+            self.vorbis = match (self.vorbis_header(1), self.vorbis_header(5)) {
+                (Some(i), Some(s)) => VorbisTiming::parse(i, s),
+                _ => None,
+            };
         }
+        self.pending_rest = rest;
+        self.writer.push_packet(bos, 0);
+        Ok(self.writer.flush(false))
+    }
+
+    /// Write the header packets after the beginning-of-stream one, on their own
+    /// page at granule 0 (the mappings require audio to start on a fresh page).
+    pub(crate) fn write_rest(&mut self) -> Vec<u8> {
+        for packet in core::mem::take(&mut self.pending_rest) {
+            self.writer.push_packet(packet, 0);
+        }
+        self.headers_written = true;
+        self.writer.flush(false)
+    }
+
+    /// Queue one audio packet, returning whatever pages completed.
+    pub(crate) fn push_audio(&mut self, packet: &[u8], duration_ns: u64) -> Vec<u8> {
+        let granule = self.advance_granule(packet, duration_ns);
+        self.writer.push_packet(packet.to_vec(), granule)
+    }
+
+    /// Flush the queued packets; `eos` closes the logical bitstream.
+    pub(crate) fn flush(&mut self, eos: bool) -> Vec<u8> {
+        self.writer.flush(eos)
     }
 
     /// Whether `packet` is codec config rather than audio, for the configured
     /// codec's in-band convention.
-    fn is_header(&self, packet: &[u8]) -> bool {
+    pub(crate) fn is_header(&self, packet: &[u8]) -> bool {
         match self.format {
             // `OpusHead` / `OpusTags` (RFC 7845); audio packets start with a TOC.
             Some(AudioFormat::Opus) => {
@@ -225,29 +301,6 @@ impl OggMux {
         }
     }
 
-    /// Write the header pages: the beginning-of-stream packet alone on the first
-    /// page, the remaining headers on the next, both at granule 0 (the mappings
-    /// require audio to start on a fresh page).
-    fn write_headers(&mut self) -> Result<Vec<u8>, G2gError> {
-        let (bos, rest) = self.header_packets().ok_or(G2gError::NotConfigured)?;
-        // Vorbis timing needs the mode tables from ident + setup.
-        if self.format == Some(AudioFormat::Vorbis) {
-            self.vorbis = match (self.vorbis_header(1), self.vorbis_header(5)) {
-                (Some(i), Some(s)) => VorbisTiming::parse(i, s),
-                _ => None,
-            };
-        }
-        let mut out = Vec::new();
-        self.writer.push_packet(bos, 0);
-        out.extend_from_slice(&self.writer.flush(false));
-        for packet in rest {
-            self.writer.push_packet(packet, 0);
-        }
-        out.extend_from_slice(&self.writer.flush(false));
-        self.headers_written = true;
-        Ok(out)
-    }
-
     /// Advance the granule position by `packet`, returning where the stream now
     /// stands. The natural sample count comes from the codec mapping; when
     /// upstream times every packet, the position is also held to the total
@@ -302,6 +355,52 @@ impl OggMux {
             Some(AudioFormat::Opus) => OPUS_RATE_HZ,
             _ => self.sample_rate,
         }
+    }
+}
+
+/// Muxes one audio elementary stream into an Ogg byte stream.
+#[derive(Debug)]
+pub struct OggMux {
+    stream: OggStreamMux,
+    serial: u32,
+    configured: bool,
+    emitted: u64,
+}
+
+impl Default for OggMux {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl OggMux {
+    pub fn new() -> Self {
+        Self {
+            stream: OggStreamMux::new(DEFAULT_SERIAL),
+            serial: DEFAULT_SERIAL,
+            configured: false,
+            emitted: 0,
+        }
+    }
+
+    /// Set the logical bitstream's serial number.
+    pub fn with_serial(mut self, serial: u32) -> Self {
+        self.serial = serial;
+        self.stream.set_serial(serial);
+        self
+    }
+
+    /// Count of Ogg byte frames forwarded.
+    pub fn emitted(&self) -> u64 {
+        self.emitted
+    }
+
+    /// Write the header pages: the beginning-of-stream packet alone on the first
+    /// page, the remaining headers on the next.
+    fn write_headers(&mut self) -> Result<Vec<u8>, G2gError> {
+        let mut out = self.stream.write_bos()?;
+        out.extend_from_slice(&self.stream.write_rest());
+        Ok(out)
     }
 
     /// Wrap muxed bytes as an output frame, or `None` when nothing was produced.
@@ -417,7 +516,7 @@ impl AsyncElement for OggMux {
         Self: 'a;
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        if Self::format_of(upstream_caps).is_some() {
+        if format_of(upstream_caps).is_some() {
             Ok(upstream_caps.clone())
         } else {
             Err(G2gError::CapsMismatch)
@@ -426,8 +525,8 @@ impl AsyncElement for OggMux {
 
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         CapsConstraint::DerivedOutput(Box::new(|input: &Caps| {
-            if Self::format_of(input).is_some() {
-                CapsSet::one(Self::output_caps())
+            if format_of(input).is_some() {
+                CapsSet::one(ogg_caps())
             } else {
                 CapsSet::from_alternatives(Vec::new())
             }
@@ -435,17 +534,7 @@ impl AsyncElement for OggMux {
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        let Caps::Audio {
-            channels,
-            sample_rate,
-            ..
-        } = absolute_caps
-        else {
-            return Err(G2gError::CapsMismatch);
-        };
-        self.format = Some(Self::format_of(absolute_caps).ok_or(G2gError::CapsMismatch)?);
-        self.channels = *channels;
-        self.sample_rate = *sample_rate;
+        self.stream.configure(absolute_caps)?;
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
     }
@@ -467,7 +556,7 @@ impl AsyncElement for OggMux {
                 self.serial = serial;
                 // Only meaningful before the first page; afterwards the stream is
                 // already identified by the old serial.
-                self.writer = OggPageWriter::new(serial);
+                self.stream.set_serial(serial);
                 Ok(())
             }
             _ => Err(PropError::Unknown),
@@ -497,17 +586,18 @@ impl AsyncElement for OggMux {
                     };
                     // Codec config arrives in-band ahead of the audio; hold it
                     // until the first audio packet, then write the header pages.
-                    if !self.headers_written && self.is_header(slice) {
-                        self.headers.push(slice.to_vec());
+                    if !self.stream.headers_written() && self.stream.is_header(slice) {
+                        self.stream.push_header(slice);
                         return Ok(());
                     }
-                    let mut bytes = if self.headers_written {
+                    let mut bytes = if self.stream.headers_written() {
                         Vec::new()
                     } else {
                         self.write_headers()?
                     };
-                    let granule = self.advance_granule(slice, frame.timing.duration_ns);
-                    bytes.extend_from_slice(&self.writer.push_packet(slice.to_vec(), granule));
+                    bytes.extend_from_slice(
+                        &self.stream.push_audio(slice, frame.timing.duration_ns),
+                    );
                     if let Some(p) = self.byte_frame(bytes) {
                         out.push(p).await?;
                     }
@@ -515,8 +605,8 @@ impl AsyncElement for OggMux {
                 // Flush the queued packets and close the logical bitstream; the
                 // runner's transform arm forwards EOS after this.
                 PipelinePacket::Eos => {
-                    if self.headers_written {
-                        let bytes = self.writer.flush(true);
+                    if self.stream.headers_written() {
+                        let bytes = self.stream.flush(true);
                         if let Some(p) = self.byte_frame(bytes) {
                             out.push(p).await?;
                         }
@@ -524,19 +614,7 @@ impl AsyncElement for OggMux {
                 }
                 // Channels / rate only feed the synthesized headers, which are
                 // written before any audio flows.
-                PipelinePacket::CapsChanged(caps) => {
-                    if !self.headers_written {
-                        if let Caps::Audio {
-                            channels,
-                            sample_rate,
-                            ..
-                        } = &caps
-                        {
-                            self.channels = *channels;
-                            self.sample_rate = *sample_rate;
-                        }
-                    }
-                }
+                PipelinePacket::CapsChanged(caps) => self.stream.refine_caps(&caps),
                 other => {
                     out.push(other).await?;
                 }
@@ -549,8 +627,8 @@ impl AsyncElement for OggMux {
 impl PadTemplates for OggMux {
     fn pad_templates() -> Vec<PadTemplate> {
         Vec::from([
-            PadTemplate::sink(CapsSet::from_alternatives(Self::input_alternatives())),
-            PadTemplate::source(CapsSet::one(Self::output_caps())),
+            PadTemplate::sink(CapsSet::from_alternatives(input_alternatives())),
+            PadTemplate::source(CapsSet::one(ogg_caps())),
         ])
     }
 }

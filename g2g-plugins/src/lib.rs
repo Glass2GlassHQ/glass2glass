@@ -298,6 +298,9 @@ pub mod oggdemux;
 // Ogg muxer element (no_std): one Opus / Vorbis / FLAC stream ->
 // Caps::ByteStream{Ogg}, the inverse of oggdemux.
 pub mod oggmux;
+// Multi-stream Ogg muxer element (no_std): N audio streams -> one grouped
+// Caps::ByteStream{Ogg}, the fan-in analog of oggmux.
+pub mod oggmuxn;
 // FLV demuxer parsing core (no_std): FLV tags -> elementary access units.
 pub mod flv;
 // FLV demuxer element (no_std): Caps::ByteStream{Flv} -> H.264 / AAC, wrapping

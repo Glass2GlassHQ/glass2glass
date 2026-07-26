@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M790: grouped multi-stream Ogg both ways: `OggDemuxN` splits each logical bitstream onto its own port and `oggmuxn` writes several back into one file.
+
 - M789: `oggmux` writes Opus, Vorbis and Ogg-FLAC logical bitstreams, the mux direction of the Ogg container.
 
 - M788: a Matroska track's title and language ride its `TrackEntry` `Name` / `Language` in both directions, merged into the same per-stream tag view.

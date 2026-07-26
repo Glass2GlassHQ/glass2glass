@@ -915,6 +915,73 @@ pub fn mkv_decodebin_select(
     mkv_select(location, pads)
 }
 
+/// Probe an Ogg file and build an [`OggDemuxN`](crate::oggdemux::OggDemuxN) with
+/// one port per pad request (M790). Every Ogg mapping g2g reads is audio, so
+/// `audio_k` (or a bare `d.`) picks the k-th logical bitstream of the grouped
+/// file. Declines a non-Ogg file or an unsatisfiable request.
+#[cfg(feature = "std")]
+fn ogg_select(
+    location: &str,
+    pads: &[PadRequest],
+) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)> {
+    use crate::oggdemux::{OggDemuxN, OggPort};
+    let prefix = read_prefix(location)?;
+    let mut demux = crate::ogg::OggDemuxer::new();
+    demux.push_data(&prefix);
+    // Only streams whose mapping g2g reads are selectable; a port on anything
+    // else would negotiate caps no decoder can take.
+    let infos: Vec<(usize, crate::ogg::OggStreamInfo)> = demux
+        .streams()
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| {
+            let info = s.info()?;
+            matches!(
+                info.codec,
+                crate::ogg::OggCodec::Opus
+                    | crate::ogg::OggCodec::Vorbis
+                    | crate::ogg::OggCodec::Flac
+            )
+            .then_some((i, info))
+        })
+        .collect();
+    if infos.is_empty() {
+        return None;
+    }
+    let kinds = alloc::vec![PadKind::Audio; infos.len()];
+    let sel = resolve_pads(&kinds, pads)?;
+    let ports: Vec<OggPort> = sel
+        .iter()
+        .map(|&k| OggPort::new(infos[k].0, infos[k].1.codec))
+        .collect();
+    let caps: Vec<Caps> = sel
+        .iter()
+        .map(|&k| Caps::Audio {
+            format: match infos[k].1.codec {
+                crate::ogg::OggCodec::Flac => g2g_core::AudioFormat::Flac,
+                crate::ogg::OggCodec::Vorbis => g2g_core::AudioFormat::Vorbis,
+                _ => g2g_core::AudioFormat::Opus,
+            },
+            channels: infos[k].1.channels.max(1),
+            sample_rate: infos[k].1.sample_rate,
+        })
+        .collect();
+    Some((Box::new(OggDemuxN::new(ports)), caps))
+}
+
+/// `oggdemux` explicit fan-out (M790): build the multi-output demuxer, dropping
+/// the per-port caps (each branch names its own decode chain).
+#[cfg(feature = "std")]
+pub fn ogg_demux_select(
+    name: &str,
+    location: &str,
+    pads: &[PadRequest],
+) -> Option<Box<dyn DynMultiOutputElement>> {
+    (name == "oggdemux")
+        .then(|| ogg_select(location, pads).map(|(d, _)| d))
+        .flatten()
+}
+
 /// Probe an MPEG-TS file and build a [`TsDemuxN`](crate::tsdemux::TsDemuxN) with
 /// the requested streams + their caps (M482). Shared by `tsdemux` demux-select and
 /// `decodebin` fan-out. Declines a non-MPEG-TS file.

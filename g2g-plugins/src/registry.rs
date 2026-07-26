@@ -600,6 +600,15 @@ pub fn default_registry() -> Registry {
     reg.register_muxer(MuxerFactory::new("matroskamux", |inputs| {
         Box::new(crate::mkvmuxn::MkvMuxN::new(inputs))
     }));
+    // Multi-stream Ogg fan-in (M790): the grouped-bitstream case. Like
+    // `mpegtsmux`, `oggmux` is both a single-input launch element
+    // (`oggmux::OggMux` above) and this fan-in muxer (`oggmuxn::OggMuxN`); the
+    // parser picks by link degree, so one name covers `! oggmux !` and
+    // `a.! m.  b.! m.  oggmux name=m`. Each pad becomes its own logical
+    // bitstream; packets interleave by PTS (M204).
+    reg.register_muxer(MuxerFactory::new("oggmux", |inputs| {
+        Box::new(crate::oggmuxn::OggMuxN::new(inputs))
+    }));
     // Multi-track FLV fan-in (M296): the A/V container case, FLV's one-video +
     // one-audio model. Like the others, `flvmux` is both a single-input launch
     // element (`flvmux::FlvMux` above) and this fan-in muxer (`flvmuxn::FlvMuxN`);
@@ -683,6 +692,7 @@ fn register_uri_handlers(reg: &mut Registry) {
     reg.register_demux_select(crate::uridecodebin::mkv_demux_select);
     reg.register_demux_select(crate::uridecodebin::ts_demux_select);
     reg.register_demux_select(crate::uridecodebin::mp4_demux_select);
+    reg.register_demux_select(crate::uridecodebin::ogg_demux_select);
     // `decodebin` fan-out (M482): `filesrc location=x ! decodebin name=d  d.video_0
     // ! ...  d.audio_0 ! ...` probes the file, builds the multi-output demuxer, and
     // auto-plugs a decoder onto each port (the decode-per-port sibling of the above).
