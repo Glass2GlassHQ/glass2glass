@@ -95,6 +95,18 @@ pub enum BusMessage {
     /// demuxer with a tag source (e.g. `oggdemux` parsing VorbisComment) posts
     /// it once the metadata header is parsed.
     Tag(TagList),
+    /// Metadata scoped to one elementary stream of a container, the stream-scoped
+    /// sibling of [`Tag`](BusMessage::Tag) (which stays whole-container). Posted
+    /// by a demuxer whose container tags name a track (a Matroska `Tag` whose
+    /// `Targets` carries a `TagTrackUID`, M787); `stream_id` is the id that track
+    /// has in the posted [`StreamCollection`](BusMessage::StreamCollection), so
+    /// the application attaches the tags to the stream it already knows.
+    StreamTag {
+        /// The tagged stream's id, as announced in the `StreamCollection`.
+        stream_id: alloc::string::String,
+        /// The tags scoped to that stream.
+        tags: TagList,
+    },
     /// The elementary streams a demuxer found in the container (the GStreamer
     /// `GST_MESSAGE_STREAM_COLLECTION` analog, M376, the data model playbin is
     /// built on). Posted out of band once the demuxer has parsed its track list,

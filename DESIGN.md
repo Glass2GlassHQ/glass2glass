@@ -1427,6 +1427,9 @@ application reacts to:
   by the source arm from `SourceLoop::query_duration` (`GST_MESSAGE_DURATION_CHANGED`).
 - `Tag(TagList)` — container / stream metadata, posted out of band
   (`GST_MESSAGE_TAG`).
+- `StreamTag { stream_id, tags }` — the same, scoped to one elementary stream
+  (a Matroska `Tag` whose `Targets` names a `TagTrackUID`). `stream_id` is the
+  id that stream has in the posted `StreamCollection`.
 - `NegotiationFailed(NegotiationFailure)` — structured caps conflict naming the
   responsible element pair (§4.13), posted by the coordinator on a startup or
   mid-stream negotiation failure.
@@ -1732,6 +1735,13 @@ finalizes it at EOS with a front `SeekHead` (fixed-layout entries indexing
 Info / Tracks / Tags / Cues, the Cues position patched in place once known), so
 the file seeks from byte 0 without reading past the Clusters; mutually
 exclusive with `streamable`, and the default streaming output is unchanged.
+The Segment `Tags` element carries metadata in both directions, per file and per
+track (M787): a `Tag` whose `Targets` names a `TagTrackUID` scopes to that track,
+and a nested `SimpleTag` flattens to a `parent/child` key. The muxers take
+per-track metadata from `with_track_tags` and write each track's `TrackUID` in
+its `TrackEntry`; the demuxers map a parsed UID back to its track and post the
+tags as `BusMessage::StreamTag` on that stream's collection id, leaving
+untargeted tags on `BusMessage::Tag`.
 
 The Ogg demuxer is the third, the same parser + element split on
 `Caps::ByteStream{Ogg}`. `g2g-plugins::ogg::OggDemuxer` parses RFC 3533 pages

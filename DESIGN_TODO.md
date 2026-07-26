@@ -418,8 +418,9 @@ Phased plan:
 
 ## Containers
 
-- **MKV / WebM:** `Targets`-scoped (per-track) tags.
-  Single-track `MkvMux` also lacks unknown-size Clusters (live read).
+- **MKV / WebM:** single-track `MkvMux` lacks unknown-size Clusters (live read).
+  The `TrackEntry` `Language` / `Name` elements (where ffmpeg puts a track's
+  language and title) do not surface as per-track tags.
 - **OGG:** multi-stream; `oggmux`.
 - **FLV:** VP6 / H.263 / MP3 / Speex codecs (only H.264 + AAC ride the tag
   stream today).
@@ -652,7 +653,6 @@ _(No open parser items.)_
 
 ## Tag system
 
-- Matroska `Targets`-scoped (per-track) tags + nested SimpleTags.
 - MP4 freeform (`----`) and integer atoms (track / disc number).
 - A per-stream tag merge policy for multi-stream containers.
 

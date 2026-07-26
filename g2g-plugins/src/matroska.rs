@@ -39,12 +39,14 @@ const ID_TITLE: u32 = 0x7BA9;
 const ID_TAGS: u32 = 0x1254_C367;
 const ID_TAG: u32 = 0x7373;
 const ID_TARGETS: u32 = 0x63C0;
+const ID_TAG_TRACK_UID: u32 = 0x63C5;
 const ID_SIMPLE_TAG: u32 = 0x67C8;
 const ID_TAG_NAME: u32 = 0x45A3;
 const ID_TAG_STRING: u32 = 0x4487;
 const ID_TRACKS: u32 = 0x1654_AE6B;
 const ID_TRACK_ENTRY: u32 = 0x00AE;
 const ID_TRACK_NUMBER: u32 = 0x00D7;
+const ID_TRACK_UID: u32 = 0x73C5;
 const ID_TRACK_TYPE: u32 = 0x0083;
 const ID_CODEC_ID: u32 = 0x0086;
 const ID_DEFAULT_DURATION: u32 = 0x0023_E383;
@@ -198,6 +200,9 @@ impl MkvCodec {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MkvTrack {
     pub number: u64,
+    /// The track's `TrackUID`, the id a `Tags` element's `Targets` scopes a tag
+    /// to. `0` when the track omits it (then no tag can name this track).
+    pub uid: u64,
     pub codec: MkvCodec,
     pub width: u32,
     pub height: u32,
@@ -248,6 +253,11 @@ pub struct MatroskaDemuxer {
     /// beside `tracks` so `MkvTrack` stays `Copy`. Empty entries are not stored.
     codec_privates: Vec<(u64, Vec<u8>)>,
     tags: TagList,
+    /// Per-track tags from `Targets`-scoped `Tag` elements: the `TagTrackUID`
+    /// each names and that element's tags. One entry per scoped `Tag` element,
+    /// appended as they parse (never merged), so a consumer can post the newly
+    /// parsed ones by count.
+    track_tags: Vec<(u64, TagList)>,
     /// The current Timestamp of an open unknown-size Cluster (the live shape).
     /// `Some` while its children are being parsed at the top level, `None`
     /// otherwise. A definite-size Cluster never sets this (it is consumed whole).
@@ -284,6 +294,7 @@ impl MatroskaDemuxer {
             tracks: Vec::new(),
             codec_privates: Vec::new(),
             tags: TagList::new(),
+            track_tags: Vec::new(),
             open_cluster_ts: None,
             consumed: 0,
             segment_data_pos: None,
@@ -361,6 +372,14 @@ impl MatroskaDemuxer {
     /// `Title` (empty until either is seen). Accumulates across pushes.
     pub fn tags(&self) -> &TagList {
         &self.tags
+    }
+
+    /// The `Targets`-scoped tags: one entry per track-scoped `Tag` element, the
+    /// `TagTrackUID` it names paired with its tags (M787). The UID maps to a
+    /// track through [`MkvTrack::uid`]; a UID no track carries stays here
+    /// unresolved. Accumulates across pushes, in parse order.
+    pub fn track_tags(&self) -> &[(u64, TagList)] {
+        &self.track_tags
     }
 
     /// Drain the frames demuxed so far.
@@ -493,8 +512,12 @@ impl MatroskaDemuxer {
                         }
                     }
                     ID_TAGS => {
-                        for tag in parse_tags(&self.buf[header..total]) {
+                        let scopes = parse_tags(&self.buf[header..total]);
+                        for tag in scopes.global {
                             self.tags.push(tag);
+                        }
+                        for (uid, tags) in scopes.per_track {
+                            self.track_tags.push((uid, tags.into_iter().collect()));
                         }
                     }
                     ID_CLUSTER => {
@@ -626,31 +649,90 @@ fn parse_info_title(info: &[u8]) -> Option<String> {
     core::str::from_utf8(data).ok().map(String::from)
 }
 
-/// Parse the Segment `Tags` element into a flat list of [`Tag`]s. Each `Tag`'s
-/// `SimpleTag` children carry a `TagName` / `TagString` pair; the conventional
-/// uppercase Matroska names (`TITLE`, `ARTIST`, ...) map through
-/// [`Tag::from_key_value`]. Targets and nested SimpleTags are ignored (v1: the
-/// whole-stream tags, no per-track scoping).
-fn parse_tags(body: &[u8]) -> Vec<Tag> {
-    let mut out = Vec::new();
+/// How deep nested `SimpleTag`s are followed. The nesting comes from the stream,
+/// so the walk is bounded instead of recursing to whatever depth a file claims.
+const MAX_SIMPLE_TAG_DEPTH: u32 = 4;
+
+/// A parsed Segment `Tags` element, split by what each `Tag`'s `Targets` scoped
+/// it to.
+#[derive(Debug, Default)]
+struct MkvTagScopes {
+    /// Tags of the whole stream: a `Tag` with no `Targets`, an empty one, or one
+    /// naming `TagTrackUID` 0 (the spec's "all tracks").
+    global: Vec<Tag>,
+    /// One entry per track-scoped `Tag` element: the `TagTrackUID` it targets and
+    /// that element's tags. A `Tag` targeting several tracks yields one entry per
+    /// UID; two elements targeting one track stay two entries.
+    per_track: Vec<(u64, Vec<Tag>)>,
+}
+
+/// Parse the Segment `Tags` element. Each `Tag`'s `SimpleTag` children carry a
+/// `TagName` / `TagString` pair; the conventional uppercase Matroska names
+/// (`TITLE`, `ARTIST`, ...) map through [`Tag::from_key_value`]. A nested
+/// `SimpleTag` flattens to a `parent/child` key. The `Targets` child scopes the
+/// whole `Tag`: a `TagTrackUID` sends its tags to that track, anything else
+/// (absent, empty, UID 0) keeps them whole-stream.
+fn parse_tags(body: &[u8]) -> MkvTagScopes {
+    let mut out = MkvTagScopes::default();
     for (tag_id, tag) in children(body) {
         if tag_id != ID_TAG {
             continue;
         }
+        let mut tags = Vec::new();
         for (sid, simple) in children(tag) {
             if sid == ID_SIMPLE_TAG {
-                if let Some(t) = parse_simple_tag(simple) {
-                    out.push(t);
-                }
+                collect_simple_tag(simple, "", 0, &mut tags);
+            }
+        }
+        if tags.is_empty() {
+            continue;
+        }
+        let uids = target_track_uids(tag);
+        if uids.is_empty() {
+            out.global.extend(tags);
+        } else {
+            for uid in uids {
+                out.per_track.push((uid, tags.clone()));
             }
         }
     }
     out
 }
 
-/// One `SimpleTag`: a `TagName` keyed `TagString` value (both UTF-8). A
-/// `TagBinary` value or a missing name/string yields nothing.
-fn parse_simple_tag(body: &[u8]) -> Option<Tag> {
+/// Cap on the tracks one `Tag` may target. The count comes from the stream and
+/// each target duplicates the `Tag`'s tags, so it is bounded rather than trusted.
+const MAX_TAG_TARGETS: usize = 64;
+
+/// The `TagTrackUID`s a `Tag`'s `Targets` names, ignoring UID 0 (the spec's "all
+/// tracks", i.e. no scoping). Empty when the `Tag` is not track-scoped: no
+/// `Targets`, none naming a track, or only the all-tracks UID.
+fn target_track_uids(tag: &[u8]) -> Vec<u64> {
+    let mut uids = Vec::new();
+    for (id, targets) in children(tag) {
+        if id != ID_TARGETS {
+            continue;
+        }
+        for (tid, data) in children(targets) {
+            if tid == ID_TAG_TRACK_UID {
+                let uid = read_uint(data);
+                if uid != 0 && !uids.contains(&uid) {
+                    uids.push(uid);
+                    if uids.len() == MAX_TAG_TARGETS {
+                        return uids;
+                    }
+                }
+            }
+        }
+    }
+    uids
+}
+
+/// Flatten one `SimpleTag` (and its nested `SimpleTag` children) into `out`. A
+/// `TagName` keyed `TagString` value (both UTF-8) becomes one [`Tag`]; a nested
+/// child's key is `parent/child`, so `ORIGINAL/TITLE` keeps both levels. A
+/// `SimpleTag` with no name scopes nothing and is skipped whole; one with a name
+/// but no (UTF-8) string still scopes its children, e.g. a `TagBinary` value.
+fn collect_simple_tag(body: &[u8], prefix: &str, depth: u32, out: &mut Vec<Tag>) {
     let mut name: Option<&str> = None;
     let mut value: Option<&str> = None;
     for (id, data) in children(body) {
@@ -660,7 +742,25 @@ fn parse_simple_tag(body: &[u8]) -> Option<Tag> {
             _ => {}
         }
     }
-    Some(Tag::from_key_value(name?, value?))
+    let Some(name) = name else {
+        return;
+    };
+    let key = if prefix.is_empty() {
+        String::from(name)
+    } else {
+        alloc::format!("{prefix}/{name}")
+    };
+    if let Some(value) = value {
+        out.push(Tag::from_key_value(&key, value));
+    }
+    if depth >= MAX_SIMPLE_TAG_DEPTH {
+        return;
+    }
+    for (id, nested) in children(body) {
+        if id == ID_SIMPLE_TAG {
+            collect_simple_tag(nested, &key, depth + 1, out);
+        }
+    }
 }
 
 fn parse_tracks(body: &[u8]) -> Vec<(MkvTrack, Vec<u8>)> {
@@ -677,6 +777,7 @@ fn parse_tracks(body: &[u8]) -> Vec<(MkvTrack, Vec<u8>)> {
 
 fn parse_track_entry(body: &[u8]) -> Option<(MkvTrack, Vec<u8>)> {
     let mut number = 0u64;
+    let mut uid = 0u64;
     let mut codec_id: &[u8] = &[];
     let mut codec_private: &[u8] = &[];
     let mut width = 0u32;
@@ -687,6 +788,8 @@ fn parse_track_entry(body: &[u8]) -> Option<(MkvTrack, Vec<u8>)> {
     for (id, data) in children(body) {
         match id {
             ID_TRACK_NUMBER => number = read_uint(data),
+            // The id a Tags `Targets` scopes a per-track tag to.
+            ID_TRACK_UID => uid = read_uint(data),
             ID_CODEC_ID => codec_id = data,
             // decoder-init bytes (FLAC's fLaC STREAMINFO); kept per track number.
             ID_CODEC_PRIVATE => codec_private = data,
@@ -718,6 +821,7 @@ fn parse_track_entry(body: &[u8]) -> Option<(MkvTrack, Vec<u8>)> {
     Some((
         MkvTrack {
             number,
+            uid,
             codec: MkvCodec::from_codec_id(codec_id),
             width,
             height,
@@ -1059,6 +1163,9 @@ pub struct MatroskaMuxer {
     /// One or more tracks; the Nth (0-based) writes Matroska TrackNumber N+1.
     tracks: Vec<MkvTrackConfig>,
     tags: TagList,
+    /// Per-track tags (track index, tags), each written as a `Targets`-scoped
+    /// `Tag` inside the same `Tags` element.
+    track_tags: Vec<(usize, TagList)>,
     max_cluster_span_ms: u64,
     header_written: bool,
     /// The open Cluster's base Timestamp (ms), or `None` before the first frame.
@@ -1113,6 +1220,7 @@ impl MatroskaMuxer {
         Self {
             tracks,
             tags: TagList::new(),
+            track_tags: Vec::new(),
             max_cluster_span_ms: DEFAULT_MAX_CLUSTER_SPAN_MS,
             header_written: false,
             cluster_base_ms: None,
@@ -1138,6 +1246,18 @@ impl MatroskaMuxer {
     /// first frame (the inverse of [`MatroskaDemuxer::tags`]).
     pub fn with_tags(mut self, tags: TagList) -> Self {
         self.tags = tags;
+        self
+    }
+
+    /// Attach metadata scoped to one track (0-based, the same index
+    /// [`push_frame_on`](Self::push_frame_on) takes): written in the same `Tags`
+    /// element as a `Tag` whose `Targets` carries that track's `TagTrackUID`, so
+    /// a reader attaches it to that elementary stream (M787). Ignored for an
+    /// out-of-range index; calling it twice for a track writes both `Tag`s.
+    pub fn with_track_tags(mut self, track: usize, tags: TagList) -> Self {
+        if track < self.tracks.len() {
+            self.track_tags.push((track, tags));
+        }
         self
     }
 
@@ -1177,10 +1297,11 @@ impl MatroskaMuxer {
             let seg_data_start = out.len();
             let info = info_element();
             let tracks = tracks_element(&self.tracks);
-            let tags = if self.tags.is_empty() {
+            let has_track_tags = self.track_tags.iter().any(|(_, t)| !t.is_empty());
+            let tags = if self.tags.is_empty() && !has_track_tags {
                 Vec::new()
             } else {
-                tags_element(&self.tags)
+                tags_element(&self.tags, &self.track_tags)
             };
             if self.write_seek_head {
                 // Front SeekHead with fixed-layout entries (21 bytes each), so
@@ -1313,15 +1434,18 @@ fn info_element() -> Vec<u8> {
     )
 }
 
-/// The `Tracks` element: one `TrackEntry` per track, numbered 1.. in order. A
-/// non-empty `CodecPrivate` (avcC / hvcC record, AAC AudioSpecificConfig) is
-/// written after the CodecID.
+/// The `Tracks` element: one `TrackEntry` per track, numbered 1.. in order, each
+/// with a `TrackUID` equal to its number (any stable nonzero value is valid, and
+/// it is what a `Tags` `Targets` scopes a per-track tag to). A non-empty
+/// `CodecPrivate` (avcC / hvcC record, AAC AudioSpecificConfig) is written after
+/// the CodecID.
 fn tracks_element(tracks: &[MkvTrackConfig]) -> Vec<u8> {
     let mut entries = Vec::new();
     for (i, track) in tracks.iter().enumerate() {
         let spec = &track.spec;
         let codec_id = spec.codec.codec_id().unwrap_or(b"");
         let mut entry = elem_vec(ID_TRACK_NUMBER, &uint_bytes(i as u64 + 1));
+        entry.extend_from_slice(&elem_vec(ID_TRACK_UID, &uint_bytes(track_uid(i))));
         entry.extend_from_slice(&elem_vec(
             ID_TRACK_TYPE,
             &uint_bytes(spec.codec.track_type() as u64),
@@ -1347,18 +1471,47 @@ fn tracks_element(tracks: &[MkvTrackConfig]) -> Vec<u8> {
     elem_vec(ID_TRACKS, &entries)
 }
 
-/// A whole-stream `Tags` element: one `Tag` with an empty `Targets` and a
-/// `SimpleTag` (TagName + TagString) per entry. The inverse of [`parse_tags`];
-/// the typed keys write their conventional uppercase Matroska names.
-fn tags_element(tags: &TagList) -> Vec<u8> {
-    let mut tag = elem_vec(ID_TARGETS, &[]);
+/// The `TrackUID` the muxer writes for the `i`-th track: its track number, so a
+/// `Targets` referring to it needs nothing but the pad index.
+fn track_uid(index: usize) -> u64 {
+    index as u64 + 1
+}
+
+/// The `Tags` element: the whole-stream tags as one `Tag` with an empty
+/// `Targets`, then one `Tag` per tagged track whose `Targets` carries that
+/// track's `TagTrackUID` (M787). The inverse of [`parse_tags`]; the typed keys
+/// write their conventional uppercase Matroska names.
+fn tags_element(tags: &TagList, track_tags: &[(usize, TagList)]) -> Vec<u8> {
+    let mut body = Vec::new();
+    if !tags.is_empty() {
+        body.extend_from_slice(&elem_vec(ID_TAG, &tag_element_body(&[], tags)));
+    }
+    for (index, list) in track_tags {
+        if list.is_empty() {
+            continue;
+        }
+        let uid = uint_bytes(track_uid(*index));
+        body.extend_from_slice(&elem_vec(ID_TAG, &tag_element_body(&uid, list)));
+    }
+    elem_vec(ID_TAGS, &body)
+}
+
+/// One `Tag` element body: its `Targets` (carrying `track_uid` when non-empty,
+/// else the whole-stream empty one) followed by a `SimpleTag` per entry.
+fn tag_element_body(track_uid: &[u8], tags: &TagList) -> Vec<u8> {
+    let targets = if track_uid.is_empty() {
+        Vec::new()
+    } else {
+        elem_vec(ID_TAG_TRACK_UID, track_uid)
+    };
+    let mut out = elem_vec(ID_TARGETS, &targets);
     for t in tags.tags() {
         let (name, value) = tag_name_value(t);
         let mut simple = elem_vec(ID_TAG_NAME, name.as_bytes());
         simple.extend_from_slice(&elem_vec(ID_TAG_STRING, value.as_bytes()));
-        tag.extend_from_slice(&elem_vec(ID_SIMPLE_TAG, &simple));
+        out.extend_from_slice(&elem_vec(ID_SIMPLE_TAG, &simple));
     }
-    elem_vec(ID_TAGS, &elem_vec(ID_TAG, &tag))
+    out
 }
 
 /// A tag's Matroska `TagName` / `TagString` pair. Typed keys use the conventional
@@ -1646,6 +1799,7 @@ mod tests {
             &[
                 MkvTrack {
                     number: 1,
+                    uid: 0,
                     codec: MkvCodec::Vp9,
                     width: 640,
                     height: 480,
@@ -1655,6 +1809,7 @@ mod tests {
                 },
                 MkvTrack {
                     number: 2,
+                    uid: 0,
                     codec: MkvCodec::Opus,
                     width: 0,
                     height: 0,
@@ -1973,6 +2128,7 @@ mod tests {
             d.tracks(),
             &[MkvTrack {
                 number: 1,
+                uid: 1,
                 codec: MkvCodec::Vp9,
                 width: 320,
                 height: 240,
@@ -2063,6 +2219,284 @@ mod tests {
             1,
             "the frame still muxes alongside the tags"
         );
+    }
+
+    /// One `Tag` element: a `Targets` naming `track_uid` (0 writes an empty
+    /// `Targets`, the whole-stream scope) plus one `SimpleTag` per pair.
+    fn scoped_tag(track_uid: u64, simple: &[(&str, &str)]) -> Vec<u8> {
+        let targets = if track_uid == 0 {
+            Vec::new()
+        } else {
+            elem(&[0x63, 0xC5], &uint_body(track_uid))
+        };
+        let mut tag = elem(&[0x63, 0xC0], &targets);
+        for (name, value) in simple {
+            let body = [
+                elem(&[0x45, 0xA3], name.as_bytes()),
+                elem(&[0x44, 0x87], value.as_bytes()),
+            ]
+            .concat();
+            tag.extend_from_slice(&elem(&[0x67, 0xC8], &body));
+        }
+        elem(&[0x73, 0x73], &tag)
+    }
+
+    /// A two-track (VP9 + Opus) segment whose `Tags` body is `tags`.
+    fn segment_with_tags(tags: &[u8]) -> Vec<u8> {
+        let tracks = elem(
+            &[0x16, 0x54, 0xAE, 0x6B],
+            &[
+                [
+                    elem(&[0xD7], &uint_body(1)),
+                    elem(&[0x73, 0xC5], &uint_body(11)), // TrackUID
+                    elem(&[0x86], b"V_VP9"),
+                ]
+                .concat(),
+                [
+                    elem(&[0xD7], &uint_body(2)),
+                    elem(&[0x73, 0xC5], &uint_body(22)),
+                    elem(&[0x86], b"A_OPUS"),
+                ]
+                .concat(),
+            ]
+            .map(|b| elem(&[0xAE], &b))
+            .concat(),
+        );
+        let segment = elem(
+            &[0x18, 0x53, 0x80, 0x67],
+            &[tracks, elem(&[0x12, 0x54, 0xC3, 0x67], tags)].concat(),
+        );
+        [elem(&[0x1A, 0x45, 0xDF, 0xA3], &[]), segment].concat()
+    }
+
+    #[test]
+    fn targets_scope_tags_to_their_track() {
+        let tags = [
+            scoped_tag(0, &[("ARTIST", "Band")]),
+            scoped_tag(11, &[("TITLE", "Camera A"), ("LANGUAGE", "eng")]),
+            scoped_tag(22, &[("TITLE", "Commentary")]),
+        ]
+        .concat();
+        let mut d = MatroskaDemuxer::new();
+        d.push_data(&segment_with_tags(&tags));
+
+        assert_eq!(
+            d.tags().tags(),
+            &[Tag::Artist("Band".into())],
+            "an empty Targets keeps the whole-stream scope"
+        );
+        assert_eq!(d.tracks()[0].uid, 11);
+        assert_eq!(
+            d.track_tags(),
+            &[
+                (
+                    11,
+                    [Tag::Title("Camera A".into()), Tag::Language("eng".into())]
+                        .into_iter()
+                        .collect::<TagList>()
+                ),
+                (
+                    22,
+                    [Tag::Title("Commentary".into())]
+                        .into_iter()
+                        .collect::<TagList>()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_tag_targeting_two_tracks_scopes_to_both() {
+        let two = elem(
+            &[0x73, 0x73],
+            &[
+                elem(
+                    &[0x63, 0xC0],
+                    &[
+                        elem(&[0x63, 0xC5], &uint_body(11)),
+                        elem(&[0x63, 0xC5], &uint_body(22)),
+                    ]
+                    .concat(),
+                ),
+                elem(
+                    &[0x67, 0xC8],
+                    &[elem(&[0x45, 0xA3], b"ARTIST"), elem(&[0x44, 0x87], b"Duo")].concat(),
+                ),
+            ]
+            .concat(),
+        );
+        let mut d = MatroskaDemuxer::new();
+        d.push_data(&segment_with_tags(&two));
+        let uids: Vec<u64> = d.track_tags().iter().map(|(uid, _)| *uid).collect();
+        assert_eq!(uids, vec![11, 22]);
+        assert!(d
+            .track_tags()
+            .iter()
+            .all(|(_, t)| t.tags() == [Tag::Artist("Duo".into())]));
+    }
+
+    #[test]
+    fn track_uid_zero_is_whole_stream() {
+        // TagTrackUID 0 is the spec's "all tracks": not a per-track scope.
+        let uid_zero = elem(
+            &[0x73, 0x73],
+            &[
+                elem(&[0x63, 0xC0], &elem(&[0x63, 0xC5], &uint_body(0))),
+                elem(
+                    &[0x67, 0xC8],
+                    &[
+                        elem(&[0x45, 0xA3], b"ALBUM"),
+                        elem(&[0x44, 0x87], b"Everything"),
+                    ]
+                    .concat(),
+                ),
+            ]
+            .concat(),
+        );
+        let mut d = MatroskaDemuxer::new();
+        d.push_data(&segment_with_tags(&uid_zero));
+        assert_eq!(d.tags().tags(), &[Tag::Album("Everything".into())]);
+        assert!(d.track_tags().is_empty());
+    }
+
+    #[test]
+    fn nested_simple_tags_flatten_to_slash_keys() {
+        // A SimpleTag inside a SimpleTag: the child key carries the parent's.
+        let inner = elem(
+            &[0x67, 0xC8],
+            &[
+                elem(&[0x45, 0xA3], b"SORT_WITH"),
+                elem(&[0x44, 0x87], b"Ada"),
+            ]
+            .concat(),
+        );
+        let outer = elem(
+            &[0x67, 0xC8],
+            &[
+                elem(&[0x45, 0xA3], b"ARTIST"),
+                elem(&[0x44, 0x87], b"Lovelace"),
+                inner,
+            ]
+            .concat(),
+        );
+        let tag = elem(
+            &[0x73, 0x73],
+            &[elem(&[0x63, 0xC0], &[]), outer].concat().to_vec(),
+        );
+        let mut d = MatroskaDemuxer::new();
+        d.push_data(&segment_with_tags(&tag));
+        assert_eq!(
+            d.tags().tags(),
+            &[
+                Tag::Artist("Lovelace".into()),
+                Tag::Other {
+                    key: "ARTIST/SORT_WITH".into(),
+                    value: "Ada".into()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn nesting_is_bounded_and_malformed_tags_fail_soft() {
+        // Nest deeper than the walk follows: it stops, it does not recurse away.
+        let mut nested = elem(
+            &[0x67, 0xC8],
+            &[elem(&[0x45, 0xA3], b"L9"), elem(&[0x44, 0x87], b"deep")].concat(),
+        );
+        for _ in 0..64 {
+            nested = elem(&[0x67, 0xC8], &[elem(&[0x45, 0xA3], b"N"), nested].concat());
+        }
+        let mut d = MatroskaDemuxer::new();
+        d.push_data(&segment_with_tags(&elem(
+            &[0x73, 0x73],
+            &[elem(&[0x63, 0xC0], &[]), nested].concat(),
+        )));
+        assert!(
+            d.tags().is_empty(),
+            "the deep leaf is past the depth bound, and nothing above it has a value"
+        );
+
+        // A Targets whose TagTrackUID body is truncated to nothing, and a
+        // SimpleTag with a name but no string: neither panics, neither invents a
+        // tag, and the well-formed sibling still parses.
+        let odd = [
+            elem(
+                &[0x73, 0x73],
+                &[
+                    elem(&[0x63, 0xC0], &elem(&[0x63, 0xC5], &[])),
+                    elem(&[0x67, 0xC8], &elem(&[0x45, 0xA3], b"NAMEONLY")),
+                ]
+                .concat(),
+            ),
+            scoped_tag(22, &[("TITLE", "Commentary")]),
+        ]
+        .concat();
+        let mut d = MatroskaDemuxer::new();
+        d.push_data(&segment_with_tags(&odd));
+        assert!(d.tags().is_empty());
+        assert_eq!(d.track_tags().len(), 1, "the valid track-scoped Tag parses");
+        assert_eq!(d.track_tags()[0].0, 22);
+
+        // A Tags element truncated mid-child yields nothing rather than panicking.
+        let truncated = {
+            let full = segment_with_tags(&scoped_tag(11, &[("TITLE", "x")]));
+            full[..full.len() - 3].to_vec()
+        };
+        let mut d = MatroskaDemuxer::new();
+        d.push_data(&truncated);
+        assert!(d.tags().is_empty() && d.track_tags().is_empty());
+    }
+
+    #[test]
+    fn mux_writes_targets_scoped_tags_that_demux_recovers() {
+        let video = MkvTrackConfig {
+            spec: MkvTrackSpec {
+                codec: MkvCodec::Vp9,
+                width: 16,
+                height: 16,
+                channels: 0,
+                sample_rate: 0,
+            },
+            codec_private: Vec::new(),
+        };
+        let audio = MkvTrackConfig {
+            spec: MkvTrackSpec {
+                codec: MkvCodec::Opus,
+                width: 0,
+                height: 0,
+                channels: 2,
+                sample_rate: 48_000,
+            },
+            codec_private: Vec::new(),
+        };
+        let global: TagList = [Tag::Title("Whole file".into())].into_iter().collect();
+        let vid_tags: TagList = [Tag::Language("eng".into())].into_iter().collect();
+        let aud_tags: TagList = [Tag::Language("fra".into()), Tag::Title("VO".into())]
+            .into_iter()
+            .collect();
+        let mut mux = MatroskaMuxer::new_multi(vec![video, audio])
+            .with_tags(global.clone())
+            .with_track_tags(0, vid_tags.clone())
+            .with_track_tags(1, aud_tags.clone())
+            // Out of range: no track to scope it to.
+            .with_track_tags(9, aud_tags.clone());
+        let bytes = mux.push_frame_on(0, &[1, 2, 3], 0, true);
+
+        let mut d = MatroskaDemuxer::new();
+        d.push_data(&bytes);
+        assert_eq!(
+            d.tags().tags(),
+            global.tags(),
+            "the whole-file Tag survives"
+        );
+        // The muxer's TrackUIDs are the track numbers, so track 0 is UID 1.
+        assert_eq!(
+            d.track_tags(),
+            &[(1u64, vid_tags), (2u64, aud_tags)],
+            "each track's tags come back scoped to its TrackUID"
+        );
+        assert_eq!(d.tracks()[1].uid, 2, "the Tracks element carries TrackUIDs");
     }
 
     #[test]

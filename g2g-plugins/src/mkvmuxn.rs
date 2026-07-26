@@ -39,7 +39,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
     FrameTiming, G2gError, InputAggregator, MemoryDomain, MultiInputElement, OutputSink,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, VideoCodec,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, TagList, VideoCodec,
 };
 
 use crate::fmp4mux::{
@@ -108,6 +108,11 @@ pub struct MkvMuxN {
     seekable: bool,
     /// The buffered file bytes in `seekable` mode.
     pending: Vec<u8>,
+    /// Whole-file metadata, written as an untargeted `Tag`.
+    tags: TagList,
+    /// Per-input metadata (input pad index, tags), written as `Targets`-scoped
+    /// `Tag`s in the same `Tags` element (M787).
+    track_tags: Vec<(usize, TagList)>,
 }
 
 impl MkvMuxN {
@@ -125,7 +130,27 @@ impl MkvMuxN {
             streamable: false,
             seekable: false,
             pending: Vec::new(),
+            tags: TagList::new(),
+            track_tags: Vec::new(),
         }
+    }
+
+    /// Attach whole-file metadata, written as a `Tags` element in the header (the
+    /// [`crate::mkvmux::MkvMux`] builder for the multi-track muxer).
+    pub fn with_tags(mut self, tags: TagList) -> Self {
+        self.tags = tags;
+        self
+    }
+
+    /// Attach metadata scoped to one input pad's track: written as a `Tag` whose
+    /// `Targets` names that track's `TagTrackUID`, so a reader (ffmpeg, the g2g
+    /// demuxer) reports it on that elementary stream rather than the file. Out-of
+    /// range inputs are ignored.
+    pub fn with_track_tags(mut self, input: usize, tags: TagList) -> Self {
+        if input < self.inputs {
+            self.track_tags.push((input, tags));
+        }
+        self
     }
 
     /// Live mode: suppress the EOS `Cues` index (see [`streamable`](Self::streamable)).
@@ -546,7 +571,10 @@ impl MultiInputElement for MkvMuxN {
                     .iter()
                     .map(|i| track_config(i.as_ref().expect("ready")))
                     .collect();
-                let mut mux = MatroskaMuxer::new_multi(configs);
+                let mut mux = MatroskaMuxer::new_multi(configs).with_tags(self.tags.clone());
+                for (input, tags) in &self.track_tags {
+                    mux = mux.with_track_tags(*input, tags.clone());
+                }
                 if self.seekable {
                     mux = mux.with_seek_head();
                 }

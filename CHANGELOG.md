@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M787: Matroska per-track tags: the muxer writes `Targets`-scoped `Tag`s and the demuxer posts them as `BusMessage::StreamTag` per stream, with nested SimpleTags flattened.
+
 - M786: the WHIP simulcast session is validated against Broadcast Box: a three-layer publish is ingested as three rids with growing packet counts.
 
 - M785: `DuplexControl::remove_track` stops a duplex track's m-line, freeing its pads on both peers for the next track to claim.

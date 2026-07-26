@@ -96,9 +96,8 @@ pub struct MkvDemux {
     emitted: u64,
     last_caps: Option<Caps>,
     bus: Option<BusHandle>,
-    /// Count of tags already posted, so newly parsed tags (the `Tags` element
-    /// can trail the `Info` `Title`) post once each.
-    tags_posted: usize,
+    /// Bus posting of the container's whole-stream and per-track tags, once each.
+    tags: TagPoster,
     /// Set once the `StreamCollection` has been announced (M376), so the demuxer
     /// posts the available-streams list once, when the `Tracks` element parses.
     collection_posted: bool,
@@ -137,7 +136,7 @@ impl MkvDemux {
             emitted: 0,
             last_caps: None,
             bus: None,
-            tags_posted: 0,
+            tags: TagPoster::default(),
             collection_posted: false,
             stream_select: None,
             seek: DemuxSeek::default(),
@@ -197,7 +196,7 @@ impl MkvDemux {
     /// Reset the parser for a discontinuity (a `Flush` / seek): drop the
     /// demuxer's EBML/Cluster state, which the re-read stream re-establishes from
     /// its EBML header. The codec / caps and posted tags are unchanged (same
-    /// file), so `last_caps` / `tags_posted` are kept (no redundant re-emit).
+    /// file), so `last_caps` / `tags` are kept (no redundant re-emit).
     fn reset_parser(&mut self) {
         self.demux = MatroskaDemuxer::new();
     }
@@ -209,7 +208,8 @@ impl MkvDemux {
     }
 
     /// Attach the pipeline bus so the Segment's `Tags` / `Info` `Title` metadata
-    /// posts as a [`BusMessage::Tag`] once parsed.
+    /// posts as a [`BusMessage::Tag`] once parsed, and a `Targets`-scoped tag as
+    /// a [`BusMessage::StreamTag`] on its track's stream id.
     pub fn with_bus(mut self, bus: BusHandle) -> Self {
         self.bus = Some(bus);
         self
@@ -372,21 +372,11 @@ impl MkvDemux {
         }
     }
 
-    /// Post any tags parsed since the last call as a [`BusMessage::Tag`]. A
-    /// no-op without a bus attached or when nothing new has been parsed.
+    /// Post any tags parsed since the last call: whole-stream ones as a
+    /// [`BusMessage::Tag`], `Targets`-scoped ones as a [`BusMessage::StreamTag`].
+    /// A no-op without a bus attached or when nothing new has been parsed.
     fn post_tags(&mut self) {
-        let total = self.demux.tags().len();
-        if total <= self.tags_posted {
-            return;
-        }
-        let fresh: TagList = self.demux.tags().tags()[self.tags_posted..]
-            .iter()
-            .cloned()
-            .collect();
-        self.tags_posted = total;
-        if let Some(bus) = &self.bus {
-            bus.try_post(BusMessage::Tag(fresh));
-        }
+        self.tags.post(&self.demux, self.bus.as_ref());
     }
 
     /// Announce every elementary stream the container declares as a
@@ -421,7 +411,7 @@ impl MkvDemux {
     /// (video / audio) and the [`Caps`] it carries, with concrete geometry / audio
     /// parameters when the track declared them. `None` for an unmappable codec.
     fn track_to_stream(track: &crate::matroska::MkvTrack) -> Option<Stream> {
-        let id = alloc::format!("matroska-track-{}", track.number);
+        let id = stream_id(track.number);
         let video = |codec| Caps::CompressedVideo {
             codec,
             width: if track.width > 0 {
@@ -504,8 +494,9 @@ impl MkvDemux {
     /// then forward each demuxed frame of that stream.
     async fn emit_ready(&mut self, out: &mut dyn OutputSink) -> Result<(), G2gError> {
         if self.bus.is_some() {
-            self.post_tags();
+            // Collection first: a per-track tag names a stream id from it.
             self.post_stream_collection();
+            self.post_tags();
         }
         // Honor an app stream selection before computing this batch's caps, so the
         // switch (and its CapsChanged) takes effect for the frames forwarded now.
@@ -914,9 +905,70 @@ pub fn subtitle_streams(demux: &MatroskaDemuxer) -> Vec<MkvStreamInfo> {
 /// demuxer forwards for it, given the parsed tracks (`None` if the id is unknown or
 /// its codec is unforwardable). Needs `Tracks` parsed (the ids come from it).
 fn resolve_stream_id(demux: &MatroskaDemuxer, id: &str) -> Option<MkvStream> {
-    let num: u64 = id.strip_prefix("matroska-track-")?.parse().ok()?;
+    let num: u64 = id.strip_prefix(STREAM_ID_PREFIX)?.parse().ok()?;
     let track = demux.tracks().iter().find(|t| t.number == num)?;
     codec_to_stream(track.codec)
+}
+
+/// Prefix of the published stream ids (`matroska-track-N`, N the track number).
+const STREAM_ID_PREFIX: &str = "matroska-track-";
+
+/// The published stream id of a track number.
+fn stream_id(number: u64) -> alloc::string::String {
+    alloc::format!("{STREAM_ID_PREFIX}{number}")
+}
+
+/// Posts a container's tags on the bus once each: the whole-stream ones as
+/// [`BusMessage::Tag`], the `Targets`-scoped ones as [`BusMessage::StreamTag`] on
+/// the stream id of the track their `TagTrackUID` names (M787). Shared by the
+/// single- and multi-output demuxers, which both parse with one
+/// [`MatroskaDemuxer`]; both counts survive a mid-segment seek (same file, so
+/// nothing re-posts).
+#[derive(Debug, Default)]
+struct TagPoster {
+    /// Tags already posted, so a `Tags` element trailing the `Info` `Title` posts
+    /// only its own entries.
+    posted: usize,
+    /// Track-scoped tag groups already posted (one per scoped `Tag` element).
+    track_posted: usize,
+}
+
+impl TagPoster {
+    /// Post whatever the demuxer has parsed since the last call; a no-op when
+    /// nothing is new.
+    fn post(&mut self, demux: &MatroskaDemuxer, bus: Option<&BusHandle>) {
+        let total = demux.tags().len();
+        if total > self.posted {
+            let fresh: TagList = demux.tags().tags()[self.posted..].iter().cloned().collect();
+            self.posted = total;
+            if let Some(bus) = bus {
+                bus.try_post(BusMessage::Tag(fresh));
+            }
+        }
+        // A track-scoped group needs `Tracks` to map its UID to a stream id; hold
+        // it until they parse rather than dropping it (element order is the
+        // file's choice).
+        let total = demux.track_tags().len();
+        if total <= self.track_posted || demux.tracks().is_empty() {
+            return;
+        }
+        let fresh: Vec<(alloc::string::String, TagList)> = demux.track_tags()[self.track_posted..]
+            .iter()
+            .filter_map(|(uid, tags)| {
+                let track = demux
+                    .tracks()
+                    .iter()
+                    .find(|t| t.uid == *uid && t.uid != 0)?;
+                Some((stream_id(track.number), tags.clone()))
+            })
+            .collect();
+        self.track_posted = total;
+        if let Some(bus) = bus {
+            for (stream_id, tags) in fresh {
+                bus.try_post(BusMessage::StreamTag { stream_id, tags });
+            }
+        }
+    }
 }
 
 fn mkv_stream_from_str(s: &str) -> Option<MkvStream> {
@@ -1005,6 +1057,8 @@ pub struct MkvDemuxN {
     /// Whether port `i` has emitted its opening `CapsChanged` yet.
     announced: Vec<bool>,
     bus: Option<BusHandle>,
+    /// Bus posting of the container's whole-stream and per-track tags, once each.
+    tags: TagPoster,
     /// Set once the `StreamCollection` has been announced (M376), so it posts once.
     collection_posted: bool,
     /// App-driven stream selection (M381): the app names the stream id each port
@@ -1028,6 +1082,7 @@ impl MkvDemuxN {
             ports,
             announced,
             bus: None,
+            tags: TagPoster::default(),
             collection_posted: false,
             stream_select: None,
             emitted: 0,
@@ -1124,6 +1179,13 @@ impl MkvDemuxN {
             )));
         }
     }
+
+    /// Post the container's tags the way [`MkvDemux::post_tags`] does: the
+    /// whole-stream ones as [`BusMessage::Tag`], the `Targets`-scoped ones as
+    /// [`BusMessage::StreamTag`] per track.
+    fn post_tags(&mut self) {
+        self.tags.post(&self.demux, self.bus.as_ref());
+    }
 }
 
 impl MultiOutputElement for MkvDemuxN {
@@ -1168,6 +1230,7 @@ impl MultiOutputElement for MkvDemuxN {
                     self.demux.push_data(slice);
                     if self.bus.is_some() {
                         self.post_stream_collection();
+                        self.post_tags();
                     }
                     // Honor an app selection before routing this batch, so a re-map
                     // (and its re-armed CapsChanged) takes effect for the frames now.

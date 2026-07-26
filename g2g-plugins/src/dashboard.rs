@@ -184,7 +184,9 @@ pub fn event_json(msg: &BusMessage) -> Option<String> {
         BusMessage::StreamsSelected { ids } => json!({"kind": "streams-selected", "ids": ids}),
         BusMessage::Custom(code) => json!({"kind": "custom", "code": code}),
         // Skip the large structured payloads the dashboard has no view for.
-        BusMessage::Tag(_) | BusMessage::StreamCollection(_) => return None,
+        BusMessage::Tag(_) | BusMessage::StreamTag { .. } | BusMessage::StreamCollection(_) => {
+            return None
+        }
     };
     let mut obj = v;
     obj["type"] = json!("event");
