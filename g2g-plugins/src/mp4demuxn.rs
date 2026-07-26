@@ -34,9 +34,9 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::StreamSelectController;
 use g2g_core::{
-    BusHandle, BusMessage, ByteStreamEncoding, Caps, ConfigureOutcome, Dim, FrameTiming, G2gError,
-    MemoryDomain, MultiOutputElement, MultiOutputSink, PipelinePacket, Rate, Stream,
-    StreamCollection, StreamType,
+    AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps, ConfigureOutcome, Dim,
+    FrameTiming, G2gError, MemoryDomain, MultiOutputElement, MultiOutputSink, PipelinePacket, Rate,
+    Stream, StreamCollection, StreamType,
 };
 
 use crate::fmp4::{
@@ -64,9 +64,10 @@ pub struct Mp4StreamInfo {
     pub track_id: u32,
     pub caps: Caps,
     pub video: bool,
-    /// The AAC AudioSpecificConfig for an audio track (empty for video), which an
-    /// AAC decode branch needs out-of-band (the muxed access units are raw AAC).
-    pub asc: Vec<u8>,
+    /// An audio track's out-of-band codec config (empty for video): the AAC
+    /// AudioSpecificConfig, which an AAC decode branch needs because the muxed
+    /// access units are raw AAC, or an Opus `OpusHead` rebuilt from the `dOps`.
+    pub config: Vec<u8>,
 }
 
 /// The track's **negotiation** caps (and video flag): what the decode branch
@@ -149,11 +150,11 @@ pub fn forwardable_streams(data: &[u8]) -> Vec<Mp4StreamInfo> {
                 .filter(|t| !matches!(t.kind, TrackKind::Text { .. }))
                 .map(|t| {
                     let (caps, video) = nego_caps(&t.kind);
-                    let asc = match &t.kind {
-                        TrackKind::Audio { asc, .. } => asc.clone(),
+                    let config = match &t.kind {
+                        TrackKind::Audio { config, .. } => config.clone(),
                         TrackKind::Video { .. } | TrackKind::Text { .. } => Vec::new(),
                     };
-                    Mp4StreamInfo { track_id: t.track_id, caps, video, asc }
+                    Mp4StreamInfo { track_id: t.track_id, caps, video, config }
                 })
                 .collect()
         })
@@ -165,7 +166,7 @@ pub fn forwardable_streams(data: &[u8]) -> Vec<Mp4StreamInfo> {
 /// [`forwardable_streams`] (which is A/V-only, because the `playbin` fan-out has no
 /// text branch): the subtitle-overlay `playbin` builder pairs these with the A/V
 /// streams to plug a `TextOverlayN` onto the video branch. `video` is always
-/// `false` and `asc` empty for a text track.
+/// `false` and `config` empty for a text track.
 pub fn subtitle_streams(data: &[u8]) -> Vec<Mp4StreamInfo> {
     parse_all_tracks(data)
         .map(|tracks| {
@@ -178,7 +179,7 @@ pub fn subtitle_streams(data: &[u8]) -> Vec<Mp4StreamInfo> {
                         track_id: t.track_id,
                         caps,
                         video,
-                        asc: Vec::new(),
+                        config: Vec::new(),
                     }
                 })
                 .collect()
@@ -208,11 +209,12 @@ pub struct Mp4DemuxN {
     ports: Vec<Mp4Port>,
     /// Whether port `i` has emitted its opening `CapsChanged` yet.
     announced: Vec<bool>,
-    /// Whether port `i` still owes the `moov`'s out-of-band parameter sets on its
-    /// next video frame (the first frame of a track that carries none in band).
-    /// Persists across the incremental fragment emits, so only the first frame is
-    /// prepended.
-    need_param_sets: Vec<bool>,
+    /// Whether port `i` still owes the `moov`'s out-of-band codec config: a video
+    /// track's parameter sets, prepended to its next frame when it carries none
+    /// in band, or an Opus track's `OpusHead`, pushed ahead of it as its own
+    /// frame. Persists across the incremental fragment emits, so only the first
+    /// frame pays it.
+    need_config: Vec<bool>,
     bus: Option<BusHandle>,
     /// Set once the `StreamCollection` (M386) has been announced, so it posts once.
     collection_posted: bool,
@@ -239,14 +241,14 @@ impl Mp4DemuxN {
             "Mp4DemuxN needs at least one output port"
         );
         let announced = alloc::vec![false; ports.len()];
-        let need_param_sets = alloc::vec![true; ports.len()];
+        let need_config = alloc::vec![true; ports.len()];
         Self {
             buf: Vec::new(),
             tracks: None,
             fragmented: None,
             ports,
             announced,
-            need_param_sets,
+            need_config,
             bus: None,
             collection_posted: false,
             stream_select: None,
@@ -306,7 +308,7 @@ impl Mp4DemuxN {
             if self.ports[port].track_id != track_id {
                 self.ports[port] = Mp4Port { track_id, caps };
                 self.announced[port] = false; // re-emit caps for the new track
-                self.need_param_sets[port] = true; // the new video track owes its sets
+                self.need_config[port] = true; // the new track owes its codec config
             }
         }
         if !active.is_empty() {
@@ -513,7 +515,7 @@ impl Mp4DemuxN {
     /// `moov`'s sets prepended to their first frame, so a decoder can start
     /// (matching [`Mp4Src`](crate::mp4src::Mp4Src)). Shared by the progressive
     /// [`advance`](Self::advance) and the `Eos` [`parse_and_emit_whole`](Self::parse_and_emit_whole),
-    /// so `announced` / `need_param_sets` persist across the incremental fragments.
+    /// so `announced` / `need_config` persist across the incremental fragments.
     async fn emit_samples(
         &mut self,
         tracks: &[TrackHeader],
@@ -539,13 +541,16 @@ impl Mp4DemuxN {
             }
 
             let mut data = sample.annexb;
+            // An Opus track's config goes downstream as its own frame ahead of
+            // the audio, so it is built here and pushed below.
+            let mut lead_config = None;
             match kind {
                 // Prepend out-of-band parameter sets to the first video frame if
                 // it carries none (our own muxer keeps them in-band; CMAF may not).
                 Some(TrackKind::Video {
                     codec, param_sets, ..
                 }) => {
-                    if self.need_param_sets[port] && !starts_with_param_set(&data, *codec) {
+                    if self.need_config[port] && !starts_with_param_set(&data, *codec) {
                         let mut with = Vec::new();
                         for set in param_sets {
                             with.extend_from_slice(&[0, 0, 0, 1]);
@@ -555,12 +560,24 @@ impl Mp4DemuxN {
                         data = with;
                     }
                 }
+                // Opus packets are stored raw; the `dOps`-derived `OpusHead`
+                // (M791) leads them in-band, the convention `OggDemux` uses, so
+                // `OpusDec` trims the pre-skip and a remux writes the real value.
+                Some(TrackKind::Audio {
+                    format: AudioFormat::Opus,
+                    config,
+                    ..
+                }) => {
+                    if self.need_config[port] && !config.is_empty() {
+                        lead_config = Some(config.clone());
+                    }
+                }
                 // ADTS-frame every AAC access unit from the track's ASC, so the
                 // audio elementary stream is self-describing (carries its profile
                 // / rate / channels per frame) and a decoder can start without the
                 // out-of-band config, symmetric with the in-band video param sets.
-                Some(TrackKind::Audio { asc, .. }) => {
-                    if let Some(framed) = adts_from_asc(asc, &data) {
+                Some(TrackKind::Audio { config, .. }) => {
+                    if let Some(framed) = adts_from_asc(config, &data) {
                         data = framed;
                     }
                 }
@@ -568,11 +585,15 @@ impl Mp4DemuxN {
                 // stripped in the sample parse); forward the UTF-8 payload as is.
                 Some(TrackKind::Text { .. }) | None => {}
             }
-            self.need_param_sets[port] = false;
+            self.need_config[port] = false;
 
-            let frame = Frame {
-                domain: MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-                timing: FrameTiming {
+            if let Some(head) = lead_config {
+                let frame = self.next_frame(head, FrameTiming::default());
+                out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
+            }
+            let frame = self.next_frame(
+                data,
+                FrameTiming {
                     pts_ns: sample.pts_ns,
                     dts_ns: sample.pts_ns,
                     duration_ns: sample.duration_ns,
@@ -580,13 +601,22 @@ impl Mp4DemuxN {
                     arrival_ns: g2g_core::metrics::monotonic_ns(),
                     keyframe: sample.keyframe,
                 },
-                sequence: self.emitted,
-                meta: Default::default(),
-            };
-            self.emitted += 1;
+            );
             out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
         }
         Ok(())
+    }
+
+    /// Wrap `data` as the next outgoing frame, taking the running sequence number.
+    fn next_frame(&mut self, data: Vec<u8>, timing: FrameTiming) -> Frame {
+        let frame = Frame {
+            domain: MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
+            timing,
+            sequence: self.emitted,
+            meta: Default::default(),
+        };
+        self.emitted += 1;
+        frame
     }
 }
 
@@ -666,7 +696,7 @@ impl MultiOutputElement for Mp4DemuxN {
                     self.buf.clear();
                     self.tracks = None;
                     self.fragmented = None;
-                    for owed in self.need_param_sets.iter_mut() {
+                    for owed in self.need_config.iter_mut() {
                         *owed = true;
                     }
                     for port in 0..self.ports.len() {

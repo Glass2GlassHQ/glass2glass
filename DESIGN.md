@@ -1786,6 +1786,25 @@ oversized pre-skip trims a frame to nothing, an underflowing granule drops it).
 A stream with no `OpusHead` and no per-frame duration (the RTP path) decodes
 untrimmed, matching gstreamer's SDP-less default.
 
+MP4 carries the same two facts in its own spelling, and both directions convert
+to the in-band convention (M791). The `dOps` OpusSpecificBox holds an
+`OpusHead`'s fields big-endian, so the demuxers rebuild one from it and forward
+it ahead of the audio (`opusparse::opus_head_from_dops`, validated field by
+field: unknown version, zero channel count or truncated channel-mapping table
+leave the track configless rather than failing the file); the end trim is the
+final sample's short `stts` / `trun` duration, which arrives as `duration_ns`
+like the Ogg granule trim does. `Mp4MuxN` is the inverse: an in-band `OpusHead`
+is consumed as config and becomes the `dOps` (`dops_from_opus_head`), so a remux
+keeps the source's pre-skip, output gain and channel mapping byte for byte,
+while a freshly encoded stream (`OpusEnc` emits raw packets, no header, so its
+RTP consumers are unaffected) falls back to libopus' 312-sample lookahead. The
+Opus `trak` also carries the `edts`/`elst` the Opus-in-ISOBMFF binding requires,
+`media_time` = pre-skip. Because the muxer is fragmented, `segment_duration` is
+`0` (the total is unknown when the `moov` is written) and ffmpeg reports the
+media span with a negative `start_time` rather than the trimmed duration: an
+exactly reported duration needs a real sample table, i.e. a non-fragmented
+muxer mode.
+
 The Ogg muxer (`oggmux`: `g2g-plugins::ogg::OggPageWriter` + the `OggMux`
 element) is the inverse path, on the same three mappings (M789). The writer
 laces packets into pages (255-byte segments, continuation pages past the

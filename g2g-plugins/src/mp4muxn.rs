@@ -14,8 +14,9 @@
 //! timestamp via the M204 [`InputAggregator`] merge before being written to their
 //! track. The `moov` (one `trak` per stream) is built once every track has its
 //! init data, which arrives in-band: a video track's parameter sets ride the
-//! first IDR, an audio track's AudioSpecificConfig is synthesised from the first
-//! ADTS header (the AAC bytes are written de-ADTS'd into the `mdat`). After the
+//! first IDR, an AAC track's AudioSpecificConfig is synthesised from the first
+//! ADTS header (the AAC bytes are written de-ADTS'd into the `mdat`), an Opus
+//! track's `dOps` comes from a leading `OpusHead` when one arrives. After the
 //! init segment, one `moof`+`mdat` fragment per access unit, each `traf`
 //! referencing its track with a per-track `tfdt` in that track's timescale.
 //!
@@ -46,6 +47,9 @@ use crate::fmp4mux::{
 };
 use crate::mp4audiosink::esds;
 use crate::mp4box::{ftyp, full_box, mp4_box, MATRIX};
+use crate::opusparse::{
+    dops_from_opus_head, is_opus_config, parse_opus_head, OPUS_ENCODER_PRE_SKIP,
+};
 
 /// Video tracks use a 90 kHz media timescale; audio tracks use the sample rate.
 const VIDEO_TIMESCALE: u32 = 90_000;
@@ -62,8 +66,7 @@ enum PadKind {
     },
 }
 
-/// A track's `moov` init data, captured from its first access unit. `asc` is the
-/// AAC AudioSpecificConfig (empty for Opus, whose `dOps` is built from the caps).
+/// A track's `moov` init data, captured from its first access unit.
 #[derive(Debug, Clone)]
 enum TrackInit {
     Video {
@@ -76,7 +79,11 @@ enum TrackInit {
         format: AudioFormat,
         channels: u8,
         rate: u32,
-        asc: Vec<u8>,
+        /// The elementary stream's out-of-band config: the AAC
+        /// AudioSpecificConfig synthesised from the first ADTS header, or an
+        /// in-band Opus `OpusHead` (M791). Empty when the stream carried none,
+        /// in which case the sample entry falls back to the caps.
+        config: Vec<u8>,
     },
 }
 
@@ -96,7 +103,7 @@ pub struct Mp4MuxN {
     /// Per-pad stream kind, learned at configure (the moov needs every track).
     kinds: Vec<Option<PadKind>>,
     /// Per-pad track init, captured from the first AU. Geometry comes from the
-    /// caps; video parameter sets / audio ASC come in-band from the first AU.
+    /// caps; the codec config comes in-band from the first AU.
     inits: Vec<Option<TrackInit>>,
     /// Per-pad caps geometry (video width/height), recorded at configure.
     dims: Vec<(u32, u32)>,
@@ -199,6 +206,18 @@ impl Mp4MuxN {
         }
     }
 
+    /// Whether the pad carries Opus, whose in-band headers are dropped rather
+    /// than muxed as samples.
+    fn is_opus_pad(&self, input: usize) -> bool {
+        matches!(
+            self.kinds[input],
+            Some(PadKind::Audio {
+                format: AudioFormat::Opus,
+                ..
+            })
+        )
+    }
+
     /// True once every pad that will produce data has its init captured. A pad
     /// that ended without an AU is excluded (its track is simply absent).
     fn all_inits_ready(&self) -> bool {
@@ -265,17 +284,27 @@ impl Mp4MuxN {
                             format,
                             channels,
                             rate,
-                            asc: asc.to_vec(),
+                            config: asc.to_vec(),
                         });
                     }
                 }
-                // Opus needs no in-band init; its `dOps` comes from the caps.
+                // An Opus stream leads with its `OpusHead` when it came from a
+                // container (M791), and the `dOps` is built from it; a freshly
+                // encoded one has none, so the track is ready at the first packet
+                // and the `dOps` falls back to the caps + libopus' lookahead.
                 _ => {
+                    let config = match parse_opus_head(au) {
+                        Some(_) => au.to_vec(),
+                        // An `OpusTags` ahead of the identification header is not
+                        // the config: wait rather than fix an empty one.
+                        None if is_opus_config(au) => return,
+                        None => Vec::new(),
+                    };
                     self.inits[input] = Some(TrackInit::Audio {
                         format,
                         channels,
                         rate,
-                        asc: Vec::new(),
+                        config,
                     });
                 }
             },
@@ -342,8 +371,12 @@ impl Mp4MuxN {
             Some(PadKind::Audio { rate, .. }) => 1024 * 1_000_000_000 / rate.max(1) as u64,
             _ => DEFAULT_VIDEO_DURATION_NS,
         };
-        let dur_ns = match self.prev_pts_ns[input] {
-            Some(prev) if pts_ns > prev => pts_ns - prev,
+        // The frame's own duration when upstream timed it (a demuxer knows the
+        // container's end-of-stream trim, which no PTS delta shows), else the
+        // delta from the previous sample, else the codec's nominal frame length.
+        let dur_ns = match (frame.timing.duration_ns, self.prev_pts_ns[input]) {
+            (d, _) if d > 0 => d,
+            (_, Some(prev)) if pts_ns > prev => pts_ns - prev,
             _ => default_dur_ns,
         };
         self.prev_pts_ns[input] = Some(pts_ns);
@@ -545,6 +578,11 @@ impl MultiInputElement for Mp4MuxN {
                     // Capture this track's init from its first AU before queueing.
                     if let Some(s) = frame.domain.as_system_slice() {
                         self.capture_init(input, s);
+                        // An in-band Opus header is codec config, not audio: it
+                        // built the `dOps` above and must never reach the `mdat`.
+                        if self.is_opus_pad(input) && is_opus_config(s) {
+                            return Ok(());
+                        }
                     }
                     self.agg.push(input, frame);
                 }
@@ -678,13 +716,13 @@ fn trak_media(init: &TrackInit) -> TrakMedia {
             format,
             channels,
             rate,
-            asc,
+            config,
         } => {
             let sample_entry = match format {
                 AudioFormat::Opus => {
-                    audio_sample_entry(b"Opus", *channels, *rate, &dops(*channels, *rate))
+                    audio_sample_entry(b"Opus", *channels, *rate, &dops(*channels, *rate, config))
                 }
-                _ => audio_sample_entry(b"mp4a", *channels, *rate, &esds(asc)),
+                _ => audio_sample_entry(b"mp4a", *channels, *rate, &esds(config)),
             };
             TrakMedia {
                 handler: b"soun",
@@ -775,17 +813,55 @@ fn audio_sample_entry(fourcc: &[u8; 4], channels: u8, rate: u32, config: &[u8]) 
 
 /// The `dOps` OpusSpecificBox (RFC 8316): the Opus init data in an MP4 audio
 /// sample entry. Fields are big-endian (unlike the little-endian Ogg/WebM
-/// `OpusHead`); channel mapping family 0 (mono/stereo), a conventional 80 ms
-/// pre-skip (the exact encoder delay is not surfaced in caps).
-fn dops(channels: u8, rate: u32) -> Vec<u8> {
-    let mut b = Vec::new();
-    b.push(0); // Version
-    b.push(channels.max(1)); // OutputChannelCount
-    b.extend_from_slice(&3840u16.to_be_bytes()); // PreSkip
-    b.extend_from_slice(&rate.to_be_bytes()); // InputSampleRate
-    b.extend_from_slice(&0i16.to_be_bytes()); // OutputGain
-    b.push(0); // ChannelMappingFamily
-    mp4_box(b"dOps", &b)
+/// `OpusHead`). Built from the stream's own `OpusHead` when one arrived in band,
+/// so a remux keeps the source's pre-skip, output gain and channel mapping;
+/// otherwise the caps plus libopus' encoder lookahead, mapping family 0.
+fn dops(channels: u8, rate: u32, head: &[u8]) -> Vec<u8> {
+    let body = dops_from_opus_head(head).unwrap_or_else(|| {
+        let mut b = Vec::new();
+        b.push(0); // Version
+        b.push(channels.max(1)); // OutputChannelCount
+        b.extend_from_slice(&OPUS_ENCODER_PRE_SKIP.to_be_bytes()); // PreSkip
+        b.extend_from_slice(&rate.to_be_bytes()); // InputSampleRate
+        b.extend_from_slice(&0i16.to_be_bytes()); // OutputGain
+        b.push(0); // ChannelMappingFamily
+        b
+    });
+    mp4_box(b"dOps", &body)
+}
+
+/// The pre-skip a track's `dOps` declares, which its edit list must skip. `0`
+/// for a non-Opus track.
+fn track_pre_skip(init: &TrackInit) -> u32 {
+    match init {
+        TrackInit::Audio {
+            format: AudioFormat::Opus,
+            config,
+            ..
+        } => parse_opus_head(config)
+            .map(|(_, pre_skip)| u32::from(pre_skip))
+            .unwrap_or(u32::from(OPUS_ENCODER_PRE_SKIP)),
+        _ => 0,
+    }
+}
+
+/// The `edts`/`elst` that trims a track's codec delay off the presentation
+/// timeline (Opus-in-ISOBMFF): `media_time` is the pre-skip in media timescale
+/// units, so playback starts at the first real sample instead of the decoder's
+/// pre-roll. `segment_duration` is `0` ("to the end of the media"): this muxer
+/// is fragmented, so the moov is written before the total is known. Empty for a
+/// track with no delay to trim.
+fn edts(init: &TrackInit) -> Vec<u8> {
+    let media_time = track_pre_skip(init);
+    if media_time == 0 {
+        return Vec::new();
+    }
+    let mut p = Vec::new();
+    p.extend_from_slice(&1u32.to_be_bytes()); // entry count
+    p.extend_from_slice(&0u32.to_be_bytes()); // segment duration
+    p.extend_from_slice(&media_time.to_be_bytes());
+    p.extend_from_slice(&0x0001_0000u32.to_be_bytes()); // media rate 1.0
+    mp4_box(b"edts", &full_box(b"elst", 0, 0, &p))
 }
 
 /// One `trak` for a track (`track_ID` 1-based).
@@ -859,7 +935,7 @@ fn trak(track_id: u32, init: &TrackInit) -> Vec<u8> {
     };
     let minf = mp4_box(b"minf", &[header, dinf, stbl].concat());
     let mdia = mp4_box(b"mdia", &[mdhd, hdlr, minf].concat());
-    mp4_box(b"trak", &[tkhd, mdia].concat())
+    mp4_box(b"trak", &[tkhd, edts(init), mdia].concat())
 }
 
 /// One `moof`+`mdat` fragment holding `samples` for `track_id`, with a
@@ -1066,7 +1142,7 @@ mod tests {
                 format: AudioFormat::Aac,
                 channels: 2,
                 rate: 48000,
-                asc: alloc::vec![0x11, 0x90],
+                config: alloc::vec![0x11, 0x90],
             }),
         ];
         let moov = av_moov(&tracks);
@@ -1089,7 +1165,7 @@ mod tests {
                 format: AudioFormat::Aac,
                 channels: 2,
                 rate: 48000,
-                asc: alloc::vec![0x11, 0x90],
+                config: alloc::vec![0x11, 0x90],
             }),
         ];
         let moov = av_moov(&tracks);
@@ -1110,7 +1186,7 @@ mod tests {
             format: AudioFormat::Opus,
             channels: 2,
             rate: 48000,
-            asc: Vec::new(),
+            config: Vec::new(),
         })];
         let moov = av_moov(&tracks);
         let count = |needle: &[u8]| moov.windows(needle.len()).filter(|w| *w == needle).count();
@@ -1118,6 +1194,51 @@ mod tests {
         assert_eq!(count(b"dOps"), 1, "OpusSpecificBox");
         assert_eq!(count(b"esds"), 0, "no AAC descriptor for an Opus track");
         assert_eq!(count(b"soun"), 1, "sound handler");
+        // With no in-band header the dOps declares libopus' lookahead, and the
+        // edit list skips exactly that much media.
+        let dops = moov.windows(4).position(|w| w == b"dOps").unwrap();
+        assert_eq!(
+            u16::from_be_bytes([moov[dops + 6], moov[dops + 7]]),
+            OPUS_ENCODER_PRE_SKIP,
+            "synthesized PreSkip"
+        );
+        assert_eq!(count(b"elst"), 1, "edit list on the Opus track");
+        let elst = moov.windows(4).position(|w| w == b"elst").unwrap();
+        assert_eq!(
+            u32::from_be_bytes(moov[elst + 16..elst + 20].try_into().unwrap()),
+            u32::from(OPUS_ENCODER_PRE_SKIP),
+            "elst media_time is the pre-skip"
+        );
+    }
+
+    /// An in-band `OpusHead` is the authority: its pre-skip reaches the `dOps`
+    /// and the edit list instead of the synthesized fallback.
+    #[test]
+    fn an_in_band_opus_head_sets_the_dops_pre_skip() {
+        let mut head = Vec::from(*b"OpusHead");
+        head.extend_from_slice(&[1, 2]); // version, channels
+        head.extend_from_slice(&666u16.to_le_bytes()); // pre-skip
+        head.extend_from_slice(&48_000u32.to_le_bytes());
+        head.extend_from_slice(&[0, 0, 0]); // output gain, mapping family
+        let tracks = [Some(TrackInit::Audio {
+            format: AudioFormat::Opus,
+            channels: 2,
+            rate: 48000,
+            config: head,
+        })];
+        let moov = av_moov(&tracks);
+        let dops = moov.windows(4).position(|w| w == b"dOps").unwrap();
+        assert_eq!(
+            u16::from_be_bytes([moov[dops + 6], moov[dops + 7]]),
+            666,
+            "the header's pre-skip, not the fallback"
+        );
+        let elst = moov.windows(4).position(|w| w == b"elst").unwrap();
+        assert_eq!(
+            u32::from_be_bytes(moov[elst + 16..elst + 20].try_into().unwrap()),
+            666,
+            "the elst follows the header"
+        );
     }
 
     #[test]

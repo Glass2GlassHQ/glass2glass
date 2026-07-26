@@ -523,15 +523,13 @@ fn mode_blockflags(setup: &[u8]) -> Option<Vec<bool>> {
 
 /// Identify the logical stream from its first packet's magic.
 fn detect(packet: &[u8]) -> OggStreamInfo {
-    if packet.starts_with(b"OpusHead") && packet.len() >= 12 {
-        // OpusHead: magic(8), version(1), channel_count(1) at offset 9, pre-skip
-        // (LE u16) at offset 10. Opus always decodes at 48 kHz regardless of the
-        // original input rate.
+    if let Some((channels, pre_skip)) = crate::opusparse::parse_opus_head(packet) {
+        // Opus always decodes at 48 kHz regardless of the original input rate.
         OggStreamInfo {
             codec: OggCodec::Opus,
-            channels: packet[9],
+            channels,
             sample_rate: 48_000,
-            pre_skip: u16::from_le_bytes([packet[10], packet[11]]),
+            pre_skip,
         }
     } else if packet.starts_with(b"\x7fFLAC") && packet.len() >= 13 && &packet[9..13] == b"fLaC" {
         // Ogg-FLAC mapping: 0x7F "FLAC" major(1) minor(1) header-count(2 BE),

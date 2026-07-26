@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M791: Opus pre-skip survives MP4 both ways: the `dOps` demuxes into an in-band `OpusHead`, an in-band header builds the `dOps`, and the Opus `trak` carries the `edts`/`elst`.
+
 - M790: grouped multi-stream Ogg both ways: `OggDemuxN` splits each logical bitstream onto its own port and `oggmuxn` writes several back into one file.
 
 - M789: `oggmux` writes Opus, Vorbis and Ogg-FLAC logical bitstreams, the mux direction of the Ogg container.

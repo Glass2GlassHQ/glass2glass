@@ -49,18 +49,14 @@ use g2g_core::{
 };
 
 use crate::ogg::{OggPageWriter, VorbisTiming};
-use crate::opusparse::{packet_samples as opus_packet_samples, OPUS_RATE_HZ};
+use crate::opusparse::{
+    is_opus_config, packet_samples as opus_packet_samples, OPUS_ENCODER_PRE_SKIP, OPUS_RATE_HZ,
+};
 
 /// Default logical-bitstream serial number, overridable via the `serial`
 /// property. Any value identifies the stream as long as it is unique within the
 /// file, and this muxer writes one stream.
 pub(crate) const DEFAULT_SERIAL: u32 = 0x6732_6732; // "g2g2"
-
-/// Pre-skip written into a synthesized `OpusHead`: libopus' encoder lookahead at
-/// 48 kHz, which is what [`crate::opusenc::OpusEnc`] (and ffmpeg's libopus
-/// wrapper) actually delays its output by. A remuxed stream carries the source
-/// header instead, so this only applies to a freshly encoded one.
-const OPUS_ENCODER_PRE_SKIP: u16 = 312;
 
 /// The vendor string written into synthesized comment headers.
 const VENDOR: &[u8] = b"g2g";
@@ -241,9 +237,7 @@ impl OggStreamMux {
     pub(crate) fn is_header(&self, packet: &[u8]) -> bool {
         match self.format {
             // `OpusHead` / `OpusTags` (RFC 7845); audio packets start with a TOC.
-            Some(AudioFormat::Opus) => {
-                packet.starts_with(b"OpusHead") || packet.starts_with(b"OpusTags")
-            }
+            Some(AudioFormat::Opus) => is_opus_config(packet),
             // Vorbis header packets have bit 0 of the packet type set and carry
             // the "vorbis" magic; audio packets have it clear.
             Some(AudioFormat::Vorbis) => {
