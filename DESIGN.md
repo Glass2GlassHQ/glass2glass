@@ -1770,6 +1770,24 @@ oversized pre-skip trims a frame to nothing, an underflowing granule drops it).
 A stream with no `OpusHead` and no per-frame duration (the RTP path) decodes
 untrimmed, matching gstreamer's SDP-less default.
 
+The Ogg muxer (`oggmux`: `g2g-plugins::ogg::OggPageWriter` + the `OggMux`
+element) is the inverse path, on the same three mappings (M789). The writer
+laces packets into pages (255-byte segments, continuation pages past the
+255-segment limit, the RFC 3533 CRC-32 with polynomial `0x04c11db7` and no
+reflection), holding the last packet back so the end-of-stream flag always has a
+page to ride. Codec config arrives in-band, the same convention the demuxers
+emit: an `OpusHead` / the three Vorbis headers / the native `fLaC` block are held
+until the first audio packet, then written as the beginning-of-stream page plus
+one following page at granule 0, so audio starts on a fresh page as the mappings
+require. Vorbis is remux-only (no encoder), and the Ogg-FLAC first packet is
+rebuilt around the source STREAMINFO with the mandatory VorbisComment appended.
+Granule positions come from each mapping's own sample count (Opus TOC durations,
+FLAC block sizes, the lapped `(prev + cur) / 4` from the `VorbisTiming` mode
+tables, the inverse of the demux-side durations), held to the total `duration_ns`
+the input declared when every packet is timed. That last bound is what carries a
+source's end-of-stream trim through a remux, so ffmpeg decodes a remuxed Opus /
+Vorbis / FLAC stream to the source's samples bit for bit.
+
 An audio decoder fixates its output caps even when a demuxer only knows the
 channel count once it parses the stream: it advertises `PcmS16Le` at a concrete
 rate with the `ANY_CHANNELS` placeholder (fixated to stereo for the negotiated

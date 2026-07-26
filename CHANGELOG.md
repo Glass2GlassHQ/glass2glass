@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M789: `oggmux` writes Opus, Vorbis and Ogg-FLAC logical bitstreams, the mux direction of the Ogg container.
+
 - M788: a Matroska track's title and language ride its `TrackEntry` `Name` / `Language` in both directions, merged into the same per-stream tag view.
 
 - M787: Matroska per-track tags: the muxer writes `Targets`-scoped `Tag`s and the demuxer posts them as `BusMessage::StreamTag` per stream, with nested SimpleTags flattened.

@@ -368,6 +368,10 @@ jobs:
       # vorbisdec PCM vs ffmpeg's own decode (pure Rust, no libav linkage).
       - name: Vorbis oracles (oggdemux + vorbisdec vs ffmpeg)
         run: cargo test -p g2g-plugins --locked --features std,vorbis --test m777_vorbis -- --nocapture
+      # Ogg mux (M789): ffmpeg decodes a g2g-muxed Opus / Vorbis / Ogg-FLAC
+      # stream to the source's samples bit for bit.
+      - name: Ogg muxer oracle (oggmux vs ffmpeg)
+        run: cargo test -p g2g-plugins --locked --features std --test m789_oggmux -- --nocapture
       # MCU-fit codec oracles (M638 G.711 + M639 IMA ADPCM): the g2g-mcu
       # fixed-point codecs checked bit-exact against ffmpeg (G.711: the full
       # domain, 65536 encoder inputs + 256 decoder codes, both laws; ADPCM:

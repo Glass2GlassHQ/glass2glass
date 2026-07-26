@@ -350,3 +350,33 @@ fn parse_launch_sets_encoder_property() {
         "an undeclared property is rejected"
     );
 }
+
+#[test]
+fn oggmux_serial() {
+    use g2g_plugins::oggmux::OggMux;
+    let mut e = OggMux::new();
+    assert!(declares(e.properties(), "serial"));
+    e.set_property("serial", PropValue::Uint(0xDEAD_BEEF))
+        .unwrap();
+    assert_eq!(e.get_property("serial"), Some(PropValue::Uint(0xDEAD_BEEF)));
+    assert!(
+        e.set_property("serial", PropValue::Uint(1 << 40)).is_err(),
+        "a serial number is 32 bits"
+    );
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn oggmux_is_a_launch_element() {
+    use g2g_core::runtime::parse_launch;
+    use g2g_plugins::registry::default_registry;
+    let reg = default_registry();
+    assert!(
+        parse_launch(
+            &reg,
+            "filesrc location=in.ogg ! oggdemux ! oggmux serial=7 ! fakesink"
+        )
+        .is_ok(),
+        "oggmux is registered as a launch element"
+    );
+}

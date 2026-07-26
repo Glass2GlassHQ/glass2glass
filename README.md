@@ -374,7 +374,7 @@ OS-coupled elements live behind cargo features:
 | Browser elements | `web`, `web-codecs` | `wasm32-unknown-unknown` |
 
 The container parsers and muxers (`mp4src` / `mp4sink`, `tsdemux` / `mpegtsmux`,
-`matroskademux` / `matroskamux`, `flvdemux` / `flvmux`, `oggdemux`,
+`matroskademux` / `matroskamux`, `flvdemux` / `flvmux`, `oggdemux` / `oggmux`,
 `fmp4demux`), the bitstream parsers (`h264parse`, `h265parse`, `aacparse`,
 `opusparse`, `vp8parse`, `vp9parse`, `av1parse`), the software video/audio
 transforms (`videoscale` / `videorate` / `videocrop` / `videoflip` /
@@ -554,7 +554,7 @@ run_graph(graph, &clock, LatencyProfile::Live).await?;
 
 Registered launch elements include `videotestsrc` / `audiotestsrc`, the SW
 transforms, the demuxers (`tsdemux`, `matroskademux`, `flvdemux`, `oggdemux`)
-and muxers (`mpegtsmux`, `matroskamux`, `flvmux`, `funnel`, `audiomixer`),
+and muxers (`mpegtsmux`, `matroskamux`, `flvmux`, `oggmux`, `funnel`, `audiomixer`),
 `filesrc` / `filesink`, and `fakesink`. Feature-gated capture / decode / display
 elements still need explicit Rust construction.
 

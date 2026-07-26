@@ -419,7 +419,7 @@ Phased plan:
 ## Containers
 
 - **MKV / WebM:** single-track `MkvMux` lacks unknown-size Clusters (live read).
-- **OGG:** multi-stream; `oggmux`.
+- **OGG:** multi-stream (grouped bitstreams) demux + mux.
 - **FLV:** VP6 / H.263 / MP3 / Speex codecs (only H.264 + AAC ride the tag
   stream today).
 - **CMAF / fMP4:** the CMAF-specific signalling layer on `Mp4Sink` / `Mp4Src`.

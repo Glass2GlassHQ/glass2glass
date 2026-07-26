@@ -39,6 +39,38 @@ use g2g_core::{
 /// always report this rate; the bandwidth only bounds the audio content.
 pub const OPUS_RATE_HZ: u32 = 48_000;
 
+/// Number of 48 kHz samples an Opus packet decodes to, from its TOC byte
+/// (RFC 6716 §3.1): config (top 5 bits) gives the per-frame duration, the frame
+/// count code (low 2 bits) the frame count. Opus is always 48 kHz, so this maps
+/// directly to a duration. `0` for an empty packet. Shared by
+/// [`crate::oggdemux`] (packet timing) and [`crate::oggmux`] (granule positions).
+pub(crate) fn packet_samples(pkt: &[u8]) -> u32 {
+    let Some(&toc) = pkt.first() else {
+        return 0;
+    };
+    let frame_samples: u32 = match toc >> 3 {
+        // SILK NB/MB/WB and Hybrid SWB/FB: 10 / 20 / 40 / 60 ms.
+        0 | 4 | 8 => 480,
+        1 | 5 | 9 => 960,
+        2 | 6 | 10 => 1920,
+        3 | 7 | 11 => 2880,
+        12 | 14 => 480,
+        13 | 15 => 960,
+        // CELT NB/WB/SWB/FB: 2.5 / 5 / 10 / 20 ms.
+        16 | 20 | 24 | 28 => 120,
+        17 | 21 | 25 | 29 => 240,
+        18 | 22 | 26 | 30 => 480,
+        _ => 960,
+    };
+    let frames: u32 = match toc & 0x3 {
+        0 => 1,
+        1 | 2 => 2,
+        // Code 3: the frame count is the low 6 bits of the following byte.
+        _ => pkt.get(1).map(|b| (b & 0x3F) as u32).unwrap_or(1).max(1),
+    };
+    frame_samples.saturating_mul(frames)
+}
+
 #[derive(Debug, Default)]
 pub struct OpusParse {
     configured: bool,

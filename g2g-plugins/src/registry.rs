@@ -50,6 +50,7 @@ use crate::mkvmux::MkvMux;
 use crate::mp4mux::Mp4Mux;
 use crate::mux::InterleaveMux;
 use crate::oggdemux::OggDemux;
+use crate::oggmux::OggMux;
 use crate::opusparse::OpusParse;
 use crate::record::{RecordSink, ReplaySrc};
 use crate::tensorconvert::TensorConvert;
@@ -452,6 +453,9 @@ pub fn default_registry() -> Registry {
     }));
     reg.register_launch(LaunchFactory::of::<OggDemux>("oggdemux", || {
         Box::new(OggDemux::new())
+    }));
+    reg.register_launch(LaunchFactory::of::<OggMux>("oggmux", || {
+        Box::new(OggMux::new())
     }));
     reg.register_launch(LaunchFactory::of::<Fmp4Demux>("fmp4demux", || {
         Box::new(Fmp4Demux::new())
