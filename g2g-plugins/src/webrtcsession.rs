@@ -341,7 +341,7 @@ static WEBRTCSESSION_PROPS: &[PropertySpec] = &[
         "WHIP endpoint URL to publish A/V to",
     ),
     PropertySpec::new(
-        "bearer",
+        "auth-token",
         PropKind::Str,
         "optional Authorization: Bearer token",
     ),
@@ -511,7 +511,7 @@ impl MultiInputElement for WebRtcSessionSink {
                 self.whip_url = value.as_str().ok_or(PropError::Type)?.into();
                 Ok(())
             }
-            "bearer" => {
+            "auth-token" => {
                 let t = value.as_str().ok_or(PropError::Type)?;
                 self.bearer = if t.is_empty() { None } else { Some(t.into()) };
                 Ok(())
@@ -545,7 +545,7 @@ impl MultiInputElement for WebRtcSessionSink {
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
             "location" | "whip-url" => Some(PropValue::Str(self.whip_url.clone())),
-            "bearer" => Some(PropValue::Str(self.bearer.clone().unwrap_or_default())),
+            "auth-token" => Some(PropValue::Str(self.bearer.clone().unwrap_or_default())),
             "stun-server" => Some(PropValue::Str(self.stun_server.clone().unwrap_or_default())),
             "turn-server" => Some(PropValue::Str(self.turn_server.clone().unwrap_or_default())),
             "turn-user" => Some(PropValue::Str(self.turn_user.clone())),

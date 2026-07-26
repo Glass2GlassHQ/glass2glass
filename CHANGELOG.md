@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M786: the WHIP simulcast session is validated against Broadcast Box: a three-layer publish is ingested as three rids with growing packet counts.
+
 - M785: `DuplexControl::remove_track` stops a duplex track's m-line, freeing its pads on both peers for the next track to claim.
 
 - M784: `WebRtcDuplexSession` adds tracks mid-session on spare pads reserved by `with_spare_tracks`, offering the peer a new m-line on the pad's first frame.

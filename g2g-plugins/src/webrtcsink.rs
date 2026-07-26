@@ -354,7 +354,7 @@ impl WebRtcSink {
 static WEBRTCSINK_PROPS: &[PropertySpec] = &[
     PropertySpec::new("location", PropKind::Str, "WHIP endpoint URL to publish to"),
     PropertySpec::new(
-        "bearer",
+        "auth-token",
         PropKind::Str,
         "optional Authorization: Bearer token for the WHIP POST",
     ),
@@ -474,7 +474,7 @@ impl AsyncElement for WebRtcSink {
                 self.whip_url = value.as_str().ok_or(PropError::Type)?.into();
                 Ok(())
             }
-            "bearer" => {
+            "auth-token" => {
                 let token = value.as_str().ok_or(PropError::Type)?;
                 self.bearer = if token.is_empty() {
                     None
@@ -508,7 +508,7 @@ impl AsyncElement for WebRtcSink {
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
             "location" | "whip-url" => Some(PropValue::Str(self.whip_url.clone())),
-            "bearer" => Some(PropValue::Str(self.bearer.clone().unwrap_or_default())),
+            "auth-token" => Some(PropValue::Str(self.bearer.clone().unwrap_or_default())),
             "stun-server" => Some(PropValue::Str(self.stun_server.clone().unwrap_or_default())),
             "turn-server" => Some(PropValue::Str(self.turn_server.clone().unwrap_or_default())),
             "turn-user" => Some(PropValue::Str(self.turn_user.clone())),
@@ -801,7 +801,7 @@ mod tests {
         sink.set_property("whip-url", PropValue::Str("http://x/whip".into()))
             .unwrap();
         assert_eq!(sink.whip_url, "http://x/whip");
-        sink.set_property("bearer", PropValue::Str("secret".into()))
+        sink.set_property("auth-token", PropValue::Str("secret".into()))
             .unwrap();
         assert_eq!(sink.bearer.as_deref(), Some("secret"));
         sink.set_property(
@@ -826,7 +826,7 @@ mod tests {
             .unwrap();
         assert_eq!(sink.turn_server, None);
         // Empty bearer clears it; unknown name and wrong type are distinct errors.
-        sink.set_property("bearer", PropValue::Str(String::new()))
+        sink.set_property("auth-token", PropValue::Str(String::new()))
             .unwrap();
         assert_eq!(sink.bearer, None);
         assert_eq!(

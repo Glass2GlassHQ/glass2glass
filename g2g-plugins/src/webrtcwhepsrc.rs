@@ -255,7 +255,7 @@ impl SourceLoop for WebRtcWhepSrc {
                 self.whep_url = value.as_str().ok_or(PropError::Type)?.into();
                 Ok(())
             }
-            "bearer" => {
+            "auth-token" => {
                 let token = value.as_str().ok_or(PropError::Type)?;
                 self.bearer = if token.is_empty() {
                     None
@@ -298,7 +298,7 @@ impl SourceLoop for WebRtcWhepSrc {
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
             "location" | "whep-url" => Some(PropValue::Str(self.whep_url.clone())),
-            "bearer" => Some(PropValue::Str(self.bearer.clone().unwrap_or_default())),
+            "auth-token" => Some(PropValue::Str(self.bearer.clone().unwrap_or_default())),
             "stun-server" => Some(PropValue::Str(self.stun_server.clone().unwrap_or_default())),
             "turn-server" => Some(PropValue::Str(self.turn_server.clone().unwrap_or_default())),
             "turn-user" => Some(PropValue::Str(self.turn_user.clone())),
@@ -521,7 +521,7 @@ static WEBRTCSRC_PROPS: &[PropertySpec] = &[
         "WHEP endpoint URL to subscribe to",
     ),
     PropertySpec::new(
-        "bearer",
+        "auth-token",
         PropKind::Str,
         "optional Authorization: Bearer token for the WHEP POST",
     ),
@@ -579,7 +579,7 @@ mod tests {
             src.get_property("location"),
             Some(PropValue::Str("http://srv/whep".into()))
         );
-        src.set_property("bearer", PropValue::Str("tok".into()))
+        src.set_property("auth-token", PropValue::Str("tok".into()))
             .unwrap();
         assert_eq!(src.bearer.as_deref(), Some("tok"));
         src.set_property(

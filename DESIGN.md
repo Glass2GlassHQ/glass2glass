@@ -2037,9 +2037,10 @@ video-layer + audio pad model, pad 0 = highest resolution), rid assignment
 (`f`/`h`/`q` high-to-low), the one-m-line `a=rid`/`a=simulcast` offer,
 per-(mid,rid) `KeyframeRoutes`, and the BWE `LayerAllocator` (whole-layer
 on/off with time hysteresis; per-layer targets, M722). The LiveKit path is
-browser-validated end to end; the WHIP path shares the machinery but its live
-multi-rid ingest validation is owed (no local WHIP server ingests client
-simulcast).
+browser-validated end to end; the WHIP path is validated against Broadcast Box
+(M786), the reference peer for client-simulcast ingest (mediamtx cannot ingest
+it, LiveKit's WHIP ingress transcodes one layer): a three-layer publish shows up
+server-side as three rids with independently growing packet counts.
 
 **Session sources as DAG nodes (M727).** The receive-side mirror:
 `NodeKind::FanoutSrc(n)` via `Graph::add_fanout_src` runs a terminal

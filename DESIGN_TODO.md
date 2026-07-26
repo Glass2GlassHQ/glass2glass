@@ -375,10 +375,7 @@ Phased plan:
     their master) ships in a release, or str0m#1014 lands; a real LiveKit Cloud
     run (genuine remote NAT + STUN/TURN on the LiveKit elements); then Janus /
     Kinesis as wanted.
-  - **T5: advanced.** Live multi-rid validation of the WHIP simulcast session
-    (needs a WHIP server that ingests client simulcast: mediamtx cannot, and
-    LiveKit's WHIP ingress transcodes a single layer; Janus + a WHIP front end
-    is the known candidate). FEC is blocked upstream (str0m has no FEC payload;
+  - **T5: advanced.** FEC is blocked upstream (str0m has no FEC payload;
     loss recovery is NACK/RTX). Full renegotiation: a track arriving with no
     spare pad of its kind left on the duplex session is refused, so growing the
     pad count on a live graph is still open. Data-channel loose ends
