@@ -48,6 +48,8 @@ const ID_TRACK_ENTRY: u32 = 0x00AE;
 const ID_TRACK_NUMBER: u32 = 0x00D7;
 const ID_TRACK_UID: u32 = 0x73C5;
 const ID_TRACK_NAME: u32 = 0x536E;
+const ID_CODEC_DELAY: u32 = 0x56AA;
+const ID_SEEK_PRE_ROLL: u32 = 0x56BB;
 const ID_LANGUAGE: u32 = 0x0022_B59C;
 const ID_LANGUAGE_BCP47: u32 = 0x0022_B59D;
 const ID_TRACK_TYPE: u32 = 0x0083;
@@ -65,6 +67,7 @@ const ID_SIMPLE_BLOCK: u32 = 0x00A3;
 const ID_BLOCK_GROUP: u32 = 0x00A0;
 const ID_BLOCK: u32 = 0x00A1;
 const ID_BLOCK_DURATION: u32 = 0x009B;
+const ID_DISCARD_PADDING: u32 = 0x75A2;
 const ID_SEEK_HEAD: u32 = 0x114D_9B74;
 const ID_SEEK: u32 = 0x4DBB;
 const ID_SEEK_ID: u32 = 0x53AB;
@@ -914,9 +917,9 @@ fn parse_cluster(body: &[u8], tracks: &[MkvTrack], scale: u64) -> Vec<MkvFrame> 
 
 /// Parse a `BlockGroup`'s frames, carrying its `BlockDuration` (the cue display
 /// window, essential for a subtitle track) onto them. Scans the children for the
-/// `Block` and the optional `BlockDuration` (either order), then de-frames the
-/// block with the scaled duration. The block-element analog used by both Cluster
-/// paths (definite- and unknown-size).
+/// `Block`, the optional `BlockDuration` and the optional `DiscardPadding` (any
+/// order), then de-frames the block with the resulting duration. The
+/// block-element analog used by both Cluster paths (definite- and unknown-size).
 fn parse_block_group(
     group: &[u8],
     cluster_ts: u64,
@@ -926,18 +929,54 @@ fn parse_block_group(
 ) {
     let mut block: Option<&[u8]> = None;
     let mut duration_raw = 0u64;
+    let mut discard_ns = 0i64;
     for (bid, bdata) in children(group) {
         match bid {
             ID_BLOCK => block = Some(bdata),
             ID_BLOCK_DURATION => duration_raw = read_uint(bdata),
+            ID_DISCARD_PADDING => discard_ns = read_int(bdata),
             _ => {}
         }
     }
-    if let Some(b) = block {
-        // BlockDuration is in TimestampScale ticks, like the block timestamp.
-        let duration_ns = duration_raw.saturating_mul(scale);
-        parse_block(b, cluster_ts, scale, tracks, duration_ns, out);
+    let Some(b) = block else {
+        return;
+    };
+    // BlockDuration is in TimestampScale ticks, like the block timestamp.
+    let duration_ns = duration_raw.saturating_mul(scale);
+    let first = out.len();
+    parse_block(b, cluster_ts, scale, tracks, duration_ns, out);
+    apply_discard_padding(&mut out[first..], discard_ns);
+}
+
+/// Apply a `DiscardPadding` to the block's last frame: the ns of decoded audio
+/// to drop from its tail, which is how Matroska spells the end-of-stream trim an
+/// Ogg granule carries (the whole point of the element, RFC 7845 §4.4 in
+/// Matroska's binding). Unlike `BlockDuration` it is nanoseconds, so it survives
+/// the millisecond `TimestampScale` grid exactly, and it wins where both are
+/// present, as in every ffmpeg-written file.
+///
+/// Only Opus is converted: the packet's own length has to be known to turn a
+/// tail discard into the kept duration, and the Opus TOC byte is the only one
+/// this parser can read. Everything about the value is the file's claim, so a
+/// negative discard (the spec's leading-padding form, which a kept-samples
+/// count cannot express), one no shorter than the packet, or a packet whose
+/// length does not parse leaves the frame's duration untouched.
+fn apply_discard_padding(frames: &mut [MkvFrame], discard_ns: i64) {
+    if discard_ns <= 0 {
+        return;
     }
+    let Some(frame) = frames.last_mut() else {
+        return;
+    };
+    if frame.codec != MkvCodec::Opus {
+        return;
+    }
+    let samples = u64::from(crate::opusparse::packet_samples(&frame.data));
+    let packet_ns = samples * 1_000_000_000 / u64::from(crate::opusparse::OPUS_RATE_HZ);
+    if packet_ns == 0 || packet_ns <= discard_ns as u64 {
+        return;
+    }
+    frame.duration_ns = packet_ns - discard_ns as u64;
 }
 
 /// Parse a single Cluster child block element (a `SimpleBlock` or `BlockGroup`)
@@ -1156,6 +1195,20 @@ fn read_uint(data: &[u8]) -> u64 {
     v
 }
 
+/// Read a signed integer element body (big-endian two's complement, 1..8 bytes;
+/// `0` for an empty or oversized one). The width is the file's, so the value is
+/// sign-extended from whatever it gave.
+fn read_int(data: &[u8]) -> i64 {
+    if data.is_empty() || data.len() > 8 {
+        return 0;
+    }
+    let mut v = if data[0] & 0x80 != 0 { -1i64 } else { 0 };
+    for &b in data {
+        v = (v << 8) | i64::from(b);
+    }
+    v
+}
+
 /// Read an IEEE-754 float element body (4 or 8 bytes; 0 otherwise).
 fn read_float(data: &[u8]) -> f64 {
     match data.len() {
@@ -1331,21 +1384,30 @@ impl MatroskaMuxer {
         self
     }
 
-    /// Mux one frame on the first (or only) track. The single-track entry point.
+    /// Mux one frame on the first (or only) track, with no declared duration.
+    /// The single-track entry point.
     pub fn push_frame(&mut self, data: &[u8], pts_ns: u64, keyframe: bool) -> Vec<u8> {
-        self.push_frame_on(0, data, pts_ns, keyframe)
+        self.push_frame_on(0, data, pts_ns, keyframe, 0)
     }
 
     /// Mux one frame on track `track` (0-based pad index). The first call writes
     /// the EBML header, Segment, Info, and Tracks (plus Tags when present); then a
     /// SimpleBlock for that track, opening a new (unknown-size) Cluster first when
     /// the shared time window is exceeded.
+    ///
+    /// `duration_ns` is the frame's presentation duration when upstream knows it
+    /// (`0` when it does not). It only changes the output when it is *shorter*
+    /// than the packet itself, the end-of-stream trim a container like Ogg
+    /// carries in its granule: then the block is written as a `BlockGroup` with a
+    /// `BlockDuration`, the only way Matroska can say "this packet ends early"
+    /// (M792). Every other frame stays a bare SimpleBlock.
     pub fn push_frame_on(
         &mut self,
         track: usize,
         data: &[u8],
         pts_ns: u64,
         keyframe: bool,
+        duration_ns: u64,
     ) -> Vec<u8> {
         let mut out = Vec::new();
         if !self.header_written {
@@ -1408,9 +1470,25 @@ impl MatroskaMuxer {
         let base = self.cluster_base_ms.expect("set above");
         let rel = (ts as i64 - base as i64) as i16;
         let track_number = (track + 1) as u64;
-        let block = build_simple_block(track_number, rel, keyframe, data);
         let before = out.len();
-        out.extend_from_slice(&elem_vec(ID_SIMPLE_BLOCK, &block));
+        match self.trimmed_block(track, data, duration_ns) {
+            // A trimmed packet needs a BlockGroup to carry its trim; the Block's
+            // flags stay 0 (the keyframe bit is a SimpleBlock field). Both
+            // elements are written, as ffmpeg does: `BlockDuration` is what a
+            // generic reader understands, `DiscardPadding` what carries the ns
+            // the millisecond grid would round away.
+            Some((duration, discard_ns)) => {
+                let block = build_simple_block(track_number, rel, false, data);
+                let mut group = elem_vec(ID_BLOCK, &block);
+                group.extend_from_slice(&elem_vec(ID_BLOCK_DURATION, &uint_bytes(duration)));
+                group.extend_from_slice(&elem_vec(ID_DISCARD_PADDING, &int_bytes(discard_ns)));
+                out.extend_from_slice(&elem_vec(ID_BLOCK_GROUP, &group));
+            }
+            None => {
+                let block = build_simple_block(track_number, rel, keyframe, data);
+                out.extend_from_slice(&elem_vec(ID_SIMPLE_BLOCK, &block));
+            }
+        }
         self.segment_pos += (out.len() - before) as u64;
         // Index this Cluster in the Cues if it holds a keyframe on the cue track,
         // at most once per Cluster (the first such keyframe), to bound the index.
@@ -1422,6 +1500,30 @@ impl MatroskaMuxer {
             self.last_cued_cluster_pos = Some(self.current_cluster_pos);
         }
         out
+    }
+
+    /// The `(BlockDuration in TimestampScale ticks, DiscardPadding in ns)` a
+    /// frame needs because its presentation duration is shorter than the packet
+    /// it carries, or `None` when the block says nothing the next timestamp does
+    /// not. Only Opus is judged: its packet length is readable from the TOC byte,
+    /// so a trimmed tail is recognizable, which is exactly the end-of-stream trim
+    /// an Ogg granule or an MP4 sample table carries (M792). The shortfall must
+    /// reach a whole tick, since a `BlockDuration` that rounds back to the packet
+    /// length is noise.
+    fn trimmed_block(&self, track: usize, data: &[u8], duration_ns: u64) -> Option<(u64, i64)> {
+        if duration_ns == 0 || self.tracks.get(track)?.spec.codec != MkvCodec::Opus {
+            return None;
+        }
+        let samples = u64::from(crate::opusparse::packet_samples(data));
+        let packet_ns = samples * 1_000_000_000 / u64::from(crate::opusparse::OPUS_RATE_HZ);
+        let discard_ns = packet_ns.checked_sub(duration_ns)?;
+        if discard_ns < DEFAULT_TIMESTAMP_SCALE {
+            return None;
+        }
+        // BlockDuration rounds to the nearest tick, as ffmpeg does (a 6.5 ms tail
+        // writes 7); DiscardPadding keeps the exact ns beside it.
+        let ticks = (duration_ns + DEFAULT_TIMESTAMP_SCALE / 2) / DEFAULT_TIMESTAMP_SCALE;
+        Some((ticks, discard_ns as i64))
     }
 
     /// The `Cues` element for the keyframes muxed so far, to write once at EOS
@@ -1529,6 +1631,19 @@ fn tracks_element(tracks: &[MkvTrackConfig], track_tags: &[(usize, TagList)]) ->
         if !track.codec_private.is_empty() {
             entry.extend_from_slice(&elem_vec(ID_CODEC_PRIVATE, &track.codec_private));
         }
+        if spec.codec == MkvCodec::Opus {
+            // The encoder delay the decoder must discard, as ns rather than the
+            // header's 48 kHz samples, plus the seek pre-roll the Matroska Opus
+            // mapping mandates (M792).
+            entry.extend_from_slice(&elem_vec(
+                ID_CODEC_DELAY,
+                &uint_bytes(opus_codec_delay_ns(&track.codec_private)),
+            ));
+            entry.extend_from_slice(&elem_vec(
+                ID_SEEK_PRE_ROLL,
+                &uint_bytes(OPUS_SEEK_PRE_ROLL_NS),
+            ));
+        }
         if spec.codec.track_type() == 1 {
             let mut v = elem_vec(ID_PIXEL_WIDTH, &uint_bytes(spec.width as u64));
             v.extend_from_slice(&elem_vec(ID_PIXEL_HEIGHT, &uint_bytes(spec.height as u64)));
@@ -1544,6 +1659,21 @@ fn tracks_element(tracks: &[MkvTrackConfig], track_tags: &[(usize, TagList)]) ->
         entries.extend_from_slice(&elem_vec(ID_TRACK_ENTRY, &entry));
     }
     elem_vec(ID_TRACKS, &entries)
+}
+
+/// `SeekPreRoll` for an Opus track: the 80 ms the Matroska Opus mapping fixes as
+/// the audio a decoder must run through before a seek target to be at full
+/// quality. Every writer (ffmpeg included) uses this exact value.
+const OPUS_SEEK_PRE_ROLL_NS: u64 = 80_000_000;
+
+/// `CodecDelay` for an Opus track: the `CodecPrivate` `OpusHead`'s pre-skip in
+/// ns (the header counts 48 kHz samples). `0` when the header is missing or
+/// malformed, which is what a reader assumes anyway.
+fn opus_codec_delay_ns(codec_private: &[u8]) -> u64 {
+    let Some((_, pre_skip)) = crate::opusparse::parse_opus_head(codec_private) else {
+        return 0;
+    };
+    u64::from(pre_skip) * 1_000_000_000 / u64::from(crate::opusparse::OPUS_RATE_HZ)
 }
 
 /// The `TrackUID` the muxer writes for the `i`-th track: its track number, so a
@@ -1684,6 +1814,19 @@ fn encode_vint(value: u64) -> Vec<u8> {
     }
     out[0] |= 1 << (8 - len);
     out
+}
+
+/// Minimal big-endian two's-complement signed integer element body, the inverse
+/// of [`read_int`]. A leading byte is kept when the value would otherwise change
+/// sign (13500000 writes as four bytes, not three).
+fn int_bytes(v: i64) -> Vec<u8> {
+    let bytes = v.to_be_bytes();
+    let pad = if v < 0 { 0xFF } else { 0x00 };
+    let mut start = 0;
+    while start < 7 && bytes[start] == pad && (bytes[start + 1] & 0x80 == pad & 0x80) {
+        start += 1;
+    }
+    bytes[start..].to_vec()
 }
 
 /// Minimal big-endian unsigned integer element body (`0` is one zero byte).
@@ -2592,7 +2735,7 @@ mod tests {
             .with_track_tags(1, aud_tags.clone())
             // Out of range: no track to scope it to.
             .with_track_tags(9, aud_tags.clone());
-        let bytes = mux.push_frame_on(0, &[1, 2, 3], 0, true);
+        let bytes = mux.push_frame_on(0, &[1, 2, 3], 0, true, 0);
 
         let mut d = MatroskaDemuxer::new();
         d.push_data(&bytes);
@@ -2721,6 +2864,169 @@ mod tests {
         // No double-write: the Tags element names ARTIST and nothing else.
         assert!(!contains(&bytes, b"LANGUAGE") && !contains(&bytes, b"TITLE"));
         assert!(contains(&bytes, b"ARTIST"));
+    }
+
+    /// A 20 ms stereo Opus packet: the TOC byte alone fixes the length, which is
+    /// all the trim arithmetic reads.
+    fn opus_packet(payload: u8) -> Vec<u8> {
+        vec![0xFC, payload, payload]
+    }
+
+    fn opus_track() -> MkvTrackConfig {
+        MkvTrackConfig {
+            spec: MkvTrackSpec {
+                codec: MkvCodec::Opus,
+                width: 0,
+                height: 0,
+                channels: 2,
+                sample_rate: 48_000,
+            },
+            codec_private: crate::opusparse::synth_opus_head(2, 48_000),
+        }
+    }
+
+    #[test]
+    fn opus_track_entry_carries_codec_delay_and_seek_pre_roll() {
+        let mut mux = MatroskaMuxer::new_multi(vec![opus_track()]);
+        let bytes = mux.push_frame_on(0, &opus_packet(1), 0, true, 0);
+        let mut d = MatroskaDemuxer::new();
+        d.push_data(&bytes);
+
+        // The synthesized header's 312-sample lookahead, in ns.
+        let head = d
+            .codec_private(1)
+            .expect("the Opus track has a CodecPrivate");
+        assert_eq!(
+            opus_codec_delay_ns(head),
+            6_500_000,
+            "312 samples at 48 kHz is 6.5 ms"
+        );
+        // Written on the wire, as the elements a player reads.
+        assert!(contains(&bytes, &[0x56, 0xAA, 0x83, 0x63, 0x2E, 0xA0]));
+        assert!(contains(
+            &bytes,
+            &[0x56, 0xBB, 0x84, 0x04, 0xC4, 0xB4, 0x00]
+        ));
+    }
+
+    #[test]
+    fn a_trimmed_opus_packet_writes_a_block_group_with_its_discard() {
+        let mut mux = MatroskaMuxer::new_multi(vec![opus_track()]);
+        // A full packet stays a SimpleBlock; a short final one becomes a
+        // BlockGroup carrying the trim.
+        let mut bytes = mux.push_frame_on(0, &opus_packet(1), 0, true, 20_000_000);
+        assert!(
+            !contains(&bytes, &[0xA0]) || !contains(&bytes, &[0x75, 0xA2]),
+            "an untrimmed packet needs no BlockGroup"
+        );
+        bytes.extend_from_slice(&mux.push_frame_on(
+            0,
+            &opus_packet(2),
+            20_000_000,
+            true,
+            6_500_000,
+        ));
+
+        let mut d = MatroskaDemuxer::new();
+        d.push_data(&bytes);
+        let frames = d.take_frames();
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].duration_ns, 0, "a SimpleBlock declares nothing");
+        assert_eq!(
+            frames[1].duration_ns, 6_500_000,
+            "the trim survives the round trip in ns, not rounded to the 1 ms grid"
+        );
+        // DiscardPadding is the ns spelling: 20 ms packet - 6.5 ms kept.
+        assert!(contains(
+            &bytes,
+            &[0x75, 0xA2, 0x84, 0x00, 0xCD, 0xFE, 0x60]
+        ));
+    }
+
+    #[test]
+    fn discard_padding_beats_block_duration_and_bad_values_fail_soft() {
+        // A BlockGroup naming both: the ns element wins over the ms one.
+        let group = |extra: Vec<u8>| {
+            let mut g = elem(&[0xA1], &block_body(1, 0, true, &opus_packet(3)));
+            g.extend_from_slice(&extra);
+            elem(&[0xA0], &g)
+        };
+        let both = [
+            elem(&[0x9B], &uint_body(7)),                   // BlockDuration 7 ms
+            elem(&[0x75, 0xA2], &[0x00, 0xCD, 0xFE, 0x60]), // DiscardPadding 13.5 ms
+        ]
+        .concat();
+        let mut d = MatroskaDemuxer::new();
+        d.push_data(&opus_segment(&group(both)));
+        assert_eq!(
+            d.take_frames()[0].duration_ns,
+            6_500_000,
+            "20 ms packet less a 13.5 ms discard, not the rounded 7 ms"
+        );
+
+        // A negative discard (the spec's leading-padding form), one longer than
+        // the packet, and an oversized body: none of them invent a duration, and
+        // the BlockDuration underneath still stands.
+        for bad in [
+            alloc::vec![0xFF, 0xFF],             // -1 ns
+            alloc::vec![0x7F, 0xFF, 0xFF, 0xFF], // 2.1 s > packet
+            alloc::vec![0u8; 9],                 // wider than i64
+        ] {
+            let extra = [elem(&[0x9B], &uint_body(20)), elem(&[0x75, 0xA2], &bad)].concat();
+            let mut d = MatroskaDemuxer::new();
+            d.push_data(&opus_segment(&group(extra)));
+            let frames = d.take_frames();
+            assert_eq!(frames.len(), 1, "the block still parses: {bad:?}");
+            assert_eq!(
+                frames[0].duration_ns, 20_000_000,
+                "the BlockDuration stands, the bogus discard is ignored: {bad:?}"
+            );
+        }
+    }
+
+    /// A one-Opus-track segment whose single Cluster holds `block`.
+    fn opus_segment(block: &[u8]) -> Vec<u8> {
+        let track = [
+            elem(&[0xD7], &uint_body(1)),
+            elem(&[0x86], b"A_OPUS"),
+            elem(
+                &[0xE1],
+                &[
+                    elem(&[0x9F], &uint_body(2)),
+                    elem(&[0xB5], &(48_000f32).to_be_bytes()),
+                ]
+                .concat(),
+            ),
+        ]
+        .concat();
+        let tracks = elem(&[0x16, 0x54, 0xAE, 0x6B], &elem(&[0xAE], &track));
+        let cluster = elem(
+            &[0x1F, 0x43, 0xB6, 0x75],
+            &[elem(&[0xE7], &uint_body(0)), block.to_vec()].concat(),
+        );
+        let segment = elem(&[0x18, 0x53, 0x80, 0x67], &[tracks, cluster].concat());
+        [elem(&[0x1A, 0x45, 0xDF, 0xA3], &[]), segment].concat()
+    }
+
+    #[test]
+    fn signed_element_bodies_round_trip() {
+        for v in [
+            0i64,
+            1,
+            -1,
+            127,
+            128,
+            -128,
+            -129,
+            13_500_000,
+            i64::MAX,
+            i64::MIN,
+        ] {
+            assert_eq!(read_int(&int_bytes(v)), v, "{v}");
+        }
+        assert_eq!(int_bytes(13_500_000), alloc::vec![0x00, 0xCD, 0xFE, 0x60]);
+        assert_eq!(read_int(&[]), 0, "an empty body is no value");
+        assert_eq!(read_int(&[0u8; 9]), 0, "wider than i64 is no value");
     }
 
     #[test]

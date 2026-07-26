@@ -25,8 +25,10 @@
 //! sink pads do. Video is H.264/H.265 (avcC/hvcC + AVCC samples), VP8/VP9 (raw
 //! frames, no CodecPrivate) or AV1 (`V_AV1`, av1C `CodecPrivate` from the
 //! sequence header, temporal delimiters stripped, M773); audio is AAC (ASC) or
-//! Opus (synthesised `OpusHead`), so VP9 + Opus muxes a WebM. Every input pad
-//! must carry a stream (a pad that ends without an access unit stalls the build).
+//! Opus (an in-band `OpusHead` verbatim, else a synthesised one, plus the
+//! `CodecDelay` / `SeekPreRoll` its mapping needs, M792), so VP9 + Opus muxes a
+//! WebM. Every input pad must carry a stream (a pad that ends without an access
+//! unit stalls the build).
 
 use core::future::Future;
 use core::pin::Pin;
@@ -48,6 +50,7 @@ use crate::fmp4mux::{
 };
 use crate::matroska::{MatroskaMuxer, MkvCodec, MkvTrackConfig, MkvTrackSpec};
 use crate::mp4muxn::{asc_from_adts, strip_adts};
+use crate::opusparse::{is_opus_config, parse_opus_head, synth_opus_head};
 
 /// What an input pad carries, learned from its negotiated caps at configure.
 #[derive(Debug, Clone, Copy)]
@@ -200,6 +203,18 @@ impl MkvMuxN {
         }
     }
 
+    /// Whether the pad carries Opus, whose in-band headers are config rather
+    /// than audio and so are dropped instead of muxed.
+    fn is_opus_pad(&self, input: usize) -> bool {
+        matches!(
+            self.kinds[input],
+            Some(PadKind::Audio {
+                format: AudioFormat::Opus,
+                ..
+            })
+        )
+    }
+
     /// True once every pad has its init captured (the Tracks element, and so the
     /// track numbering, needs every track present).
     fn all_inits_ready(&self) -> bool {
@@ -270,13 +285,24 @@ impl MkvMuxN {
                         });
                     }
                 }
-                // Opus carries its config (OpusHead) out of band, built from the caps.
+                // An Opus stream out of a container leads with its `OpusHead`
+                // (M791's in-band convention), which becomes the `CodecPrivate`
+                // verbatim so the source's real pre-skip survives; a freshly
+                // encoded one has none, so the header is synthesized with
+                // libopus' lookahead (M792).
                 _ => {
+                    let config = match parse_opus_head(au) {
+                        Some(_) => au.to_vec(),
+                        // An `OpusTags` before the identification header is not
+                        // the config: wait for it rather than fix a synthesized one.
+                        None if is_opus_config(au) => return,
+                        None => synth_opus_head(channels, rate),
+                    };
                     self.inits[input] = Some(TrackInit::Audio {
                         format,
                         channels,
                         rate,
-                        config: opus_head(channels, rate),
+                        config,
                     });
                 }
             },
@@ -325,7 +351,7 @@ impl MkvMuxN {
         let pts_ns = frame.timing.pts_ns;
         let (sample, is_key) = self.sample_for(input, slice);
         let mux = self.mux.as_mut().ok_or(G2gError::NotConfigured)?;
-        let bytes = mux.push_frame_on(input, &sample, pts_ns, is_key);
+        let bytes = mux.push_frame_on(input, &sample, pts_ns, is_key, frame.timing.duration_ns);
 
         // Seekable (two-pass) mode: hold the whole file until every input drains.
         if self.seekable {
@@ -406,21 +432,6 @@ fn track_config(init: &TrackInit) -> MkvTrackConfig {
             }
         }
     }
-}
-
-/// The 19-byte Opus `OpusHead` identification header for an N-channel stream, the
-/// Matroska `CodecPrivate` for `A_OPUS`. Channel mapping family 0 (mono/stereo); a
-/// conventional 80 ms pre-skip (the exact encoder delay is not surfaced in caps).
-fn opus_head(channels: u8, sample_rate: u32) -> Vec<u8> {
-    let mut h = Vec::with_capacity(19);
-    h.extend_from_slice(b"OpusHead");
-    h.push(1); // version
-    h.push(channels.max(1));
-    h.extend_from_slice(&3840u16.to_le_bytes()); // pre-skip
-    h.extend_from_slice(&sample_rate.to_le_bytes()); // input sample rate
-    h.extend_from_slice(&0i16.to_le_bytes()); // output gain
-    h.push(0); // channel mapping family 0
-    h
 }
 
 impl MultiInputElement for MkvMuxN {
@@ -547,6 +558,12 @@ impl MultiInputElement for MkvMuxN {
                     // Capture this track's init from its first AU before queueing.
                     if let Some(s) = frame.domain.as_system_slice() {
                         self.capture_init(input, s);
+                        // An in-band Opus header is codec config, not audio: it
+                        // became the `CodecPrivate` above and must never be
+                        // written as a Block (M792).
+                        if self.is_opus_pad(input) && is_opus_config(s) {
+                            return Ok(());
+                        }
                     }
                     self.agg.push(input, frame);
                 }

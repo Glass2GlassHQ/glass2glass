@@ -81,6 +81,21 @@ pub(crate) const OPUS_ENCODER_PRE_SKIP: u16 = 312;
 /// pre-skip, input sample rate, output gain, channel mapping family.
 const OPUS_HEAD_FIXED: usize = 19;
 
+/// A synthesized `OpusHead` (RFC 7845 §5.1) for a stream that carried none: a
+/// freshly encoded one, where the pre-skip is the encoder's lookahead. Channel
+/// mapping family 0, which is defined for mono and stereo only, so the count is
+/// clamped to that. Used by every muxer that has to invent a header.
+pub(crate) fn synth_opus_head(channels: u8, sample_rate: u32) -> Vec<u8> {
+    let mut h = Vec::from(*b"OpusHead");
+    h.push(1); // version
+    h.push(channels.clamp(1, 2));
+    h.extend_from_slice(&OPUS_ENCODER_PRE_SKIP.to_le_bytes());
+    h.extend_from_slice(&sample_rate.max(1).to_le_bytes()); // original input rate
+    h.extend_from_slice(&0i16.to_le_bytes()); // output gain
+    h.push(0); // channel mapping family
+    h
+}
+
 /// Fixed part of an RFC 8316 `dOps` payload: the same fields big-endian, with
 /// the magic and version byte replaced by a single version byte. Only the MP4
 /// elements speak `dOps`, and those are `std`-gated, hence the cfg on this and

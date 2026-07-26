@@ -1805,6 +1805,21 @@ media span with a negative `start_time` rather than the trimmed duration: an
 exactly reported duration needs a real sample table, i.e. a non-fragmented
 muxer mode.
 
+Matroska is the third spelling of the same two facts, and converts to the same
+in-band convention (M792). The pre-skip is the `CodecPrivate` `OpusHead` itself,
+which the demuxers forward ahead of the audio (validated as a real header first),
+plus a `CodecDelay` on the TrackEntry, the ns form of the same count, which
+`MkvMuxN` derives from the header it is about to write and pairs with the
+mapping's fixed 80 ms `SeekPreRoll`. Block timestamps are not shifted: the first
+Opus block sits at 0 and `CodecDelay` tells the decoder what to discard, so a
+Matroska file starts at zero where the MP4 edit list makes `start_time` negative.
+The end trim, with no granule to carry it, is the final block's `DiscardPadding`,
+which is nanoseconds and so survives the millisecond `TimestampScale` grid that
+`BlockDuration` alone would round away (a 6.5 ms tail becomes 7); the muxer
+writes both, as ffmpeg does, and the demuxer lets the ns element win. Because the
+packet's own length is needed to turn a tail discard into a kept duration, the
+conversion reads the Opus TOC byte and applies to Opus only.
+
 The Ogg muxer (`oggmux`: `g2g-plugins::ogg::OggPageWriter` + the `OggMux`
 element) is the inverse path, on the same three mappings (M789). The writer
 laces packets into pages (255-byte segments, continuation pages past the

@@ -108,10 +108,9 @@ pub struct MkvDemux {
     /// Seek support (M362): app time seeks drive an upstream byte-seek and a
     /// re-sync. Inert unless `with_seek` wired the controllers.
     seek: DemuxSeek,
-    /// FLAC only: whether the track's `CodecPrivate` (the native `fLaC`
-    /// STREAMINFO header) has been forwarded in-band, once, before the first
-    /// frame (the decoder takes it as extradata). Re-armed on a flush.
-    flac_header_sent: bool,
+    /// Whether the selected track's `CodecPrivate` has been forwarded in-band,
+    /// once, before its first frame (see [`config_header`]). Re-armed on a flush.
+    config_sent: bool,
     /// Clones of the seek controllers (M374): the `Cues` prefetch consumes the app
     /// seek and drives the two-hop upstream byte-seek directly, so it needs the
     /// same channels `seek` holds. `None` unless `with_seek` wired them.
@@ -140,7 +139,7 @@ impl MkvDemux {
             collection_posted: false,
             stream_select: None,
             seek: DemuxSeek::default(),
-            flac_header_sent: false,
+            config_sent: false,
             app: None,
             upstream: None,
             prefetch: CuePrefetch::Idle,
@@ -525,15 +524,13 @@ impl MkvDemux {
                 }
                 Admit::Emit => {}
             }
-            // FLAC: the decoder needs the track's `fLaC` STREAMINFO (CodecPrivate)
-            // as extradata; forward it in-band once, ahead of the first frame.
-            if self.stream == MkvStream::Flac && !self.flac_header_sent {
-                self.flac_header_sent = true;
-                if let Some(private) = self.demux.codec_private(f.track) {
-                    let header = Frame::new(
-                        MemoryDomain::System(SystemSlice::from_boxed(
-                            private.to_vec().into_boxed_slice(),
-                        )),
+            // The track's decoder-init bytes go in band once, ahead of its first
+            // frame (FLAC STREAMINFO, Opus `OpusHead`).
+            if !self.config_sent {
+                self.config_sent = true;
+                if let Some(header) = config_header(&self.demux, f.codec, f.track) {
+                    let frame = Frame::new(
+                        MemoryDomain::System(SystemSlice::from_boxed(header.into_boxed_slice())),
                         FrameTiming {
                             pts_ns: f.pts_ns,
                             dts_ns: f.pts_ns,
@@ -542,7 +539,7 @@ impl MkvDemux {
                         self.emitted,
                     );
                     self.emitted += 1;
-                    out.push(PipelinePacket::DataFrame(header)).await?;
+                    out.push(PipelinePacket::DataFrame(frame)).await?;
                 }
             }
             let timing = FrameTiming {
@@ -670,7 +667,7 @@ impl AsyncElement for MkvDemux {
                         self.reset_parser();
                     }
                     // a fresh decoder after the flush needs the header again.
-                    self.flac_header_sent = false;
+                    self.config_sent = false;
                     out.push(PipelinePacket::Flush).await?;
                 }
                 PipelinePacket::Eos => {
@@ -910,6 +907,22 @@ fn resolve_stream_id(demux: &MatroskaDemuxer, id: &str) -> Option<MkvStream> {
     codec_to_stream(track.codec)
 }
 
+/// The decoder-init bytes to forward in band ahead of a track's first frame, or
+/// `None` for a codec that carries its config in the stream. FLAC needs the
+/// native `fLaC` STREAMINFO as extradata; an Opus track's `CodecPrivate` is its
+/// RFC 7845 `OpusHead`, and forwarding it is how the pre-skip reaches `OpusDec`
+/// and a remuxer (M792, the convention `OggDemux` / `Mp4DemuxN` already use).
+/// The `OpusHead` is validated rather than trusted: a `CodecPrivate` that is not
+/// one is dropped, since a decoder would read garbage from it.
+fn config_header(demux: &MatroskaDemuxer, codec: MkvCodec, track: u64) -> Option<Vec<u8>> {
+    let private = demux.codec_private(track)?;
+    match codec {
+        MkvCodec::Flac => Some(private.to_vec()),
+        MkvCodec::Opus => crate::opusparse::parse_opus_head(private).map(|_| private.to_vec()),
+        _ => None,
+    }
+}
+
 /// Prefix of the published stream ids (`matroska-track-N`, N the track number).
 const STREAM_ID_PREFIX: &str = "matroska-track-";
 
@@ -1086,6 +1099,9 @@ pub struct MkvDemuxN {
     ports: Vec<MkvStream>,
     /// Whether port `i` has emitted its opening `CapsChanged` yet.
     announced: Vec<bool>,
+    /// Whether port `i` has forwarded its track's `CodecPrivate` in band yet
+    /// (see [`config_header`]). Re-armed on a flush, like the caps.
+    config_sent: Vec<bool>,
     bus: Option<BusHandle>,
     /// Bus posting of the container's whole-stream and per-track tags, once each.
     tags: TagPoster,
@@ -1107,10 +1123,12 @@ impl MkvDemuxN {
             "MkvDemuxN needs at least one output port"
         );
         let announced = alloc::vec![false; ports.len()];
+        let config_sent = alloc::vec![false; ports.len()];
         Self {
             demux: MatroskaDemuxer::new(),
             ports,
             announced,
+            config_sent,
             bus: None,
             tags: TagPoster::default(),
             collection_posted: false,
@@ -1157,6 +1175,7 @@ impl MkvDemuxN {
             if self.ports[port] != stream {
                 self.ports[port] = stream;
                 self.announced[port] = false; // re-emit caps for the new stream
+                self.config_sent[port] = false; // and the new track's config
             }
             active.push(id.clone());
         }
@@ -1275,6 +1294,26 @@ impl MultiOutputElement for MkvDemuxN {
                             out.push_to(port, PipelinePacket::CapsChanged(caps)).await?;
                             self.announced[port] = true;
                         }
+                        // The track's decoder-init bytes lead its audio on this
+                        // port, once (FLAC STREAMINFO, Opus `OpusHead`).
+                        if !self.config_sent[port] {
+                            self.config_sent[port] = true;
+                            if let Some(header) = config_header(&self.demux, f.codec, f.track) {
+                                let lead = Frame::new(
+                                    MemoryDomain::System(SystemSlice::from_boxed(
+                                        header.into_boxed_slice(),
+                                    )),
+                                    FrameTiming {
+                                        pts_ns: f.pts_ns,
+                                        dts_ns: f.pts_ns,
+                                        ..FrameTiming::default()
+                                    },
+                                    self.emitted,
+                                );
+                                self.emitted += 1;
+                                out.push_to(port, PipelinePacket::DataFrame(lead)).await?;
+                            }
+                        }
                         let timing = FrameTiming {
                             pts_ns: f.pts_ns,
                             dts_ns: f.pts_ns,
@@ -1298,6 +1337,9 @@ impl MultiOutputElement for MkvDemuxN {
                 PipelinePacket::Flush => {
                     self.demux.reset_keeping_tracks();
                     for port in 0..self.ports.len() {
+                        // The decoder is reset by the flush, so it needs the
+                        // track's config again before the resumed audio.
+                        self.config_sent[port] = false;
                         out.push_to(port, PipelinePacket::Flush).await?;
                     }
                 }

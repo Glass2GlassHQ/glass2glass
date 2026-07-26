@@ -269,7 +269,13 @@ impl AsyncElement for MkvMux {
                     }
                     let mux = self.mux.as_mut().ok_or(G2gError::NotConfigured)?;
                     // No upstream delta-frame signal yet: flag every frame a keyframe.
-                    let bytes = mux.push_frame(slice, frame.timing.pts_ns, true);
+                    let bytes = mux.push_frame_on(
+                        0,
+                        slice,
+                        frame.timing.pts_ns,
+                        true,
+                        frame.timing.duration_ns,
+                    );
                     // Seekable (two-pass) mode: hold the whole file until EOS.
                     if self.seekable {
                         self.pending.extend_from_slice(&bytes);

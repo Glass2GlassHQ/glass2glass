@@ -50,7 +50,7 @@ use g2g_core::{
 
 use crate::ogg::{OggPageWriter, VorbisTiming};
 use crate::opusparse::{
-    is_opus_config, packet_samples as opus_packet_samples, OPUS_ENCODER_PRE_SKIP, OPUS_RATE_HZ,
+    is_opus_config, packet_samples as opus_packet_samples, synth_opus_head, OPUS_RATE_HZ,
 };
 
 /// Default logical-bitstream serial number, overridable via the `serial`
@@ -270,7 +270,7 @@ impl OggStreamMux {
                     .iter()
                     .find(|h| h.starts_with(b"OpusHead"))
                     .cloned()
-                    .unwrap_or_else(|| opus_head(self.channels, self.sample_rate));
+                    .unwrap_or_else(|| synth_opus_head(self.channels, self.sample_rate));
                 let tags = self
                     .headers
                     .iter()
@@ -421,19 +421,6 @@ fn declared_samples(duration_ns: u64, rate: u32) -> Option<u64> {
     }
     let ns = u128::from(duration_ns) * u128::from(rate) + 500_000_000;
     Some((ns / 1_000_000_000) as u64)
-}
-
-/// A synthesized `OpusHead` (RFC 7845 §5.1): version 1, channel mapping family
-/// 0 (mono / stereo), the encoder-lookahead pre-skip. All fields little-endian.
-fn opus_head(channels: u8, sample_rate: u32) -> Vec<u8> {
-    let mut h = Vec::from(*b"OpusHead");
-    h.push(1); // version
-    h.push(channels.clamp(1, 2));
-    h.extend_from_slice(&OPUS_ENCODER_PRE_SKIP.to_le_bytes());
-    h.extend_from_slice(&sample_rate.max(1).to_le_bytes()); // original input rate
-    h.extend_from_slice(&0i16.to_le_bytes()); // output gain
-    h.push(0); // channel mapping family
-    h
 }
 
 /// A minimal VorbisComment header behind `magic`: the vendor string and an empty
@@ -713,7 +700,7 @@ mod tests {
         let info = d.info().expect("identification header parsed");
         assert_eq!(info.codec, OggCodec::Opus);
         assert_eq!(info.channels, 2);
-        assert_eq!(info.pre_skip, OPUS_ENCODER_PRE_SKIP);
+        assert_eq!(info.pre_skip, crate::opusparse::OPUS_ENCODER_PRE_SKIP);
         assert_eq!(d.take_packets(), packets, "audio packets survive the mux");
         // Five 20 ms packets at 48 kHz.
         assert_eq!(d.end_granule(), Some(5 * 960));
