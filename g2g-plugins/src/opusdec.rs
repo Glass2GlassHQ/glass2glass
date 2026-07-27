@@ -41,7 +41,7 @@ use audiopus::coder::Decoder;
 use audiopus::packet::Packet;
 use audiopus::{Channels, MutSignals, SampleRate};
 
-use crate::opusparse::OPUS_RATE_HZ;
+use crate::opusparse::{parse_opus_head, OPUS_RATE_HZ};
 
 /// Largest Opus frame is 120 ms; at 48 kHz that is 5760 samples per channel. The
 /// decode output buffer is sized for it so any single packet fits.
@@ -222,19 +222,6 @@ fn duration_to_samples(duration_ns: u64) -> Option<u64> {
             .saturating_add(500_000_000))
             / 1_000_000_000,
     )
-}
-
-/// Channel count and pre-skip from an in-band `OpusHead` (RFC 7845), or `None`
-/// if `packet` is not one. Offset 9 is the channel count, offset 10 the LE u16
-/// pre-skip. A full family-0 header is 19 bytes; only the fixed prefix is read.
-fn parse_opus_head(packet: &[u8]) -> Option<(u8, u16)> {
-    if packet.len() >= 12 && packet.starts_with(b"OpusHead") {
-        let channels = packet[9];
-        let pre_skip = u16::from_le_bytes([packet[10], packet[11]]);
-        (channels >= 1).then_some((channels, pre_skip))
-    } else {
-        None
-    }
 }
 
 impl AsyncElement for OpusDec {

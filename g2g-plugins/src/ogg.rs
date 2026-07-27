@@ -1,5 +1,6 @@
-//! Ogg demuxer (M116): parse an Ogg byte stream into the packets of its logical
-//! bitstream (RFC 3533), the Opus / Vorbis carrier.
+//! Ogg demuxer (M116) + page writer (M789): parse an Ogg byte stream into the
+//! packets of its logical bitstream (RFC 3533), the Opus / Vorbis carrier, and
+//! frame packets back into pages.
 //!
 //! Pure `no_std + alloc` parsing, the [`crate::mpegts`] / [`crate::matroska`]
 //! precedent for Ogg: sync to "OggS" pages, read the segment-table lacing to
@@ -7,10 +8,20 @@
 //! 0..254), reassemble packets that span pages, and skip the codec setup headers.
 //! The [`crate::oggdemux::OggDemux`] element wraps it.
 //!
-//! Scope (v1): one logical bitstream (the first serial); Opus fully (codec +
-//! channel count from `OpusHead`, the two setup headers skipped), other codecs
-//! best-effort (tagged, all packets emitted). Granule-position timing and
-//! multi-stream Ogg are follow-ups (packets carry no PTS yet).
+//! Grouped multi-stream Ogg (M790) is handled: a file opens with one BOS page
+//! per logical bitstream before any other page (RFC 3533 §4), and each serial's
+//! codec mapping, headers, packets and granule timing are tracked independently
+//! ([`OggLogicalStream`]). Codec support per stream: Opus fully (codec + channel
+//! count from `OpusHead`, the two setup headers skipped), Vorbis and Ogg-FLAC
+//! likewise, other codecs best-effort (tagged, all packets emitted).
+//!
+//! Not handled: **chained** Ogg, where a second physical stream (a fresh BOS
+//! page) follows the first one's end-of-stream page. A BOS page arriving after
+//! the opening group is ignored rather than misparsed, so a chained file
+//! demuxes as its first physical stream.
+//!
+//! The [`OggPageWriter`] is the inverse framing side, wrapped by the
+//! [`crate::oggmux::OggMux`] and [`crate::oggmuxn::OggMuxN`] elements.
 
 use alloc::vec::Vec;
 
@@ -20,6 +31,11 @@ const HEADER_LEN: usize = 27; // fixed header before the segment table
                               // bound just stops a never-terminating run of continued pages from growing the
                               // partial packet without limit.
 const MAX_PACKET_BYTES: usize = 8 * 1024 * 1024;
+/// Cap on concurrent logical bitstreams. Serial numbers come from the file, so
+/// a crafted opening block could otherwise name unboundedly many streams and
+/// make the demuxer allocate per-serial state for each. Real grouped files carry
+/// a handful.
+const MAX_STREAMS: usize = 16;
 
 /// The codec of an Ogg logical bitstream, sniffed from its first packet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,11 +61,12 @@ pub struct OggStreamInfo {
     pub pre_skip: u16,
 }
 
-/// Incremental Ogg demuxer: feed bytes, drain elementary-stream packets.
-#[derive(Debug, Default)]
-pub struct OggDemuxer {
-    buf: Vec<u8>,
-    serial: Option<u32>,
+/// One logical bitstream of an Ogg file: its serial number, codec mapping,
+/// headers, granule anchors and demuxed packets. A grouped file carries several,
+/// interleaved page by page; [`OggDemuxer`] keeps one of these per serial.
+#[derive(Debug)]
+pub struct OggLogicalStream {
+    serial: u32,
     /// Bytes of a packet still being reassembled across pages.
     partial: Vec<u8>,
     info: Option<OggStreamInfo>,
@@ -82,12 +99,29 @@ pub struct OggDemuxer {
     completed: Vec<Vec<u8>>,
 }
 
-impl OggDemuxer {
-    pub fn new() -> Self {
-        Self::default()
+impl OggLogicalStream {
+    fn new(serial: u32) -> Self {
+        Self {
+            serial,
+            partial: Vec::new(),
+            info: None,
+            packets_seen: 0,
+            comment_header: None,
+            head_header: None,
+            setup_header: None,
+            end_granulepos: None,
+            first_data: None,
+            audio_finalized: 0,
+            completed: Vec::new(),
+        }
     }
 
-    /// The logical stream's parameters (set once the first packet is parsed).
+    /// The serial number identifying this bitstream in the file.
+    pub fn serial(&self) -> u32 {
+        self.serial
+    }
+
+    /// The stream's parameters (set once its first packet is parsed).
     pub fn info(&self) -> Option<OggStreamInfo> {
         self.info
     }
@@ -126,6 +160,93 @@ impl OggDemuxer {
     /// through it, is-EOS-page)`, once parsed (M778). See `first_data`.
     pub fn first_data_granule(&self) -> Option<(u64, u32, bool)> {
         self.first_data
+    }
+}
+
+/// Incremental Ogg demuxer: feed bytes, drain elementary-stream packets. Tracks
+/// every logical bitstream of a grouped file ([`OggLogicalStream`] per serial);
+/// the single-stream accessors below read the first one.
+#[derive(Debug, Default)]
+pub struct OggDemuxer {
+    buf: Vec<u8>,
+    streams: Vec<OggLogicalStream>,
+    /// Set by the first page that is not flagged beginning-of-stream. Grouped
+    /// Ogg puts every stream's BOS page in the opening block, so after that a
+    /// BOS page belongs to a chained physical stream, which is not handled.
+    grouping_done: bool,
+}
+
+impl OggDemuxer {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Every logical bitstream seen so far, in the order their BOS pages arrived.
+    pub fn streams(&self) -> &[OggLogicalStream] {
+        &self.streams
+    }
+
+    /// Mutable access to the `index`-th logical bitstream, to drain its packets.
+    pub fn stream_mut(&mut self, index: usize) -> Option<&mut OggLogicalStream> {
+        self.streams.get_mut(index)
+    }
+
+    /// Whether the opening beginning-of-stream block is over, so every logical
+    /// bitstream of the file is now known.
+    pub fn grouping_done(&self) -> bool {
+        self.grouping_done
+    }
+
+    /// The index of the first logical bitstream of `codec`, or `None`.
+    pub fn stream_of(&self, codec: OggCodec) -> Option<usize> {
+        self.streams
+            .iter()
+            .position(|s| s.info.map(|i| i.codec) == Some(codec))
+    }
+
+    /// The first logical bitstream's parameters (set once its first packet is
+    /// parsed).
+    pub fn info(&self) -> Option<OggStreamInfo> {
+        self.streams.first()?.info()
+    }
+
+    /// Drain the first logical bitstream's elementary-stream packets.
+    pub fn take_packets(&mut self) -> Vec<Vec<u8>> {
+        match self.streams.first_mut() {
+            Some(s) => s.take_packets(),
+            None => Vec::new(),
+        }
+    }
+
+    /// The first stream's codec comment header (`OpusTags` for Opus), once
+    /// parsed. Carries its VorbisComment metadata.
+    pub fn comment_header(&self) -> Option<&[u8]> {
+        self.streams.first()?.comment_header()
+    }
+
+    /// The first stream's identification header (`OpusHead`), once parsed. The
+    /// decoder reads its pre-skip from it.
+    pub fn head_header(&self) -> Option<&[u8]> {
+        self.streams.first()?.head_header()
+    }
+
+    /// The first stream's Vorbis setup header (`\x05vorbis`), once parsed. The
+    /// decoder builds its codebooks from it.
+    pub fn setup_header(&self) -> Option<&[u8]> {
+        self.streams.first()?.setup_header()
+    }
+
+    /// The first stream's final page granule position (total 48 kHz samples incl.
+    /// pre-skip), once its end-of-stream page is parsed. Drives the
+    /// end-of-stream padding trim: decoded samples beyond it are encoder padding.
+    pub fn end_granule(&self) -> Option<u64> {
+        self.streams.first()?.end_granule()
+    }
+
+    /// The first stream's first audio-bearing page granule (M778). See
+    /// [`OggLogicalStream::first_data_granule`].
+    pub fn first_data_granule(&self) -> Option<(u64, u32, bool)> {
+        self.streams.first()?.first_data_granule()
     }
 
     /// Feed Ogg bytes. Complete pages are parsed as they arrive; a partial
@@ -182,14 +303,39 @@ impl OggDemuxer {
         }
     }
 
+    /// Route a complete page to its logical bitstream, starting one for a serial
+    /// first seen in the opening beginning-of-stream block.
     fn parse_page(&mut self, page: &[u8], table_end: usize) {
         let header_type = page[5];
         let serial = u32::from_le_bytes([page[14], page[15], page[16], page[17]]);
-        match self.serial {
-            Some(s) if s != serial => return, // a different logical stream (v1: first only)
-            None => self.serial = Some(serial),
-            _ => {}
+        let bos = header_type & 0x02 != 0;
+        if !bos {
+            self.grouping_done = true;
         }
+        let index = match self.streams.iter().position(|s| s.serial == serial) {
+            Some(i) => i,
+            None => {
+                // A serial joins either from a BOS page in the opening group, or
+                // as the very first stream seen when the file was joined
+                // mid-stream (a byte-seek / network tune-in, which has no BOS
+                // page to read). A BOS page after the group is a chained
+                // physical stream and a later headerless serial is a stray page:
+                // ignore both rather than misparse. The count cap keeps a
+                // crafted opening block from allocating without end.
+                let opens_group = bos && !self.grouping_done;
+                if !(opens_group || self.streams.is_empty()) || self.streams.len() >= MAX_STREAMS {
+                    return;
+                }
+                self.streams.push(OggLogicalStream::new(serial));
+                self.streams.len() - 1
+            }
+        };
+        self.streams[index].parse_page(page, table_end, header_type);
+    }
+}
+
+impl OggLogicalStream {
+    fn parse_page(&mut self, page: &[u8], table_end: usize, header_type: u8) {
         // Page granule position (offset 6, LE u64; -1 = no packet completed).
         // On the EOS page (bit 0x04) it is the stream's total sample count.
         // Attacker-controlled, so only stored, bounded when used against the
@@ -377,15 +523,13 @@ fn mode_blockflags(setup: &[u8]) -> Option<Vec<bool>> {
 
 /// Identify the logical stream from its first packet's magic.
 fn detect(packet: &[u8]) -> OggStreamInfo {
-    if packet.starts_with(b"OpusHead") && packet.len() >= 12 {
-        // OpusHead: magic(8), version(1), channel_count(1) at offset 9, pre-skip
-        // (LE u16) at offset 10. Opus always decodes at 48 kHz regardless of the
-        // original input rate.
+    if let Some((channels, pre_skip)) = crate::opusparse::parse_opus_head(packet) {
+        // Opus always decodes at 48 kHz regardless of the original input rate.
         OggStreamInfo {
             codec: OggCodec::Opus,
-            channels: packet[9],
+            channels,
             sample_rate: 48_000,
-            pre_skip: u16::from_le_bytes([packet[10], packet[11]]),
+            pre_skip,
         }
     } else if packet.starts_with(b"\x7fFLAC") && packet.len() >= 13 && &packet[9..13] == b"fLaC" {
         // Ogg-FLAC mapping: 0x7F "FLAC" major(1) minor(1) header-count(2 BE),
@@ -421,6 +565,202 @@ fn detect(packet: &[u8]) -> OggStreamInfo {
             sample_rate: 0,
             pre_skip: 0,
         }
+    }
+}
+
+/// The Ogg page checksum table: CRC-32 with polynomial `0x04c11db7`, zero
+/// initial value, no reflection and no final inversion (RFC 3533 §6, *not* the
+/// zlib CRC). Built at compile time.
+const CRC_TABLE: [u32; 256] = {
+    let mut table = [0u32; 256];
+    let mut i = 0usize;
+    while i < 256 {
+        let mut r = (i as u32) << 24;
+        let mut bit = 0;
+        while bit < 8 {
+            r = if r & 0x8000_0000 != 0 {
+                (r << 1) ^ 0x04c1_1db7
+            } else {
+                r << 1
+            };
+            bit += 1;
+        }
+        table[i] = r;
+        i += 1;
+    }
+    table
+};
+
+/// The Ogg page checksum of `page`, whose CRC field must already be zeroed.
+fn page_crc(page: &[u8]) -> u32 {
+    page.iter().fold(0u32, |crc, &b| {
+        (crc << 8) ^ CRC_TABLE[((crc >> 24) as u8 ^ b) as usize]
+    })
+}
+
+/// Body bytes buffered before a page is flushed. Ogg allows 255 segments of up
+/// to 255 bytes per page; libogg flushes around 4 kB, which keeps the 27-byte
+/// header overhead under a percent without adding latency worth noticing.
+const PAGE_FLUSH_BYTES: usize = 4096;
+
+/// Frames elementary-stream packets into Ogg pages (RFC 3533), the inverse of
+/// [`OggDemuxer`]. Packets are buffered and flushed a page at a time, so the
+/// per-page header cost is amortized; the caller supplies each packet's granule
+/// position (the codec mapping's unit, e.g. 48 kHz samples for Opus).
+///
+/// One logical bitstream: the first page emitted carries the beginning-of-stream
+/// flag, the last carries end-of-stream. A packet longer than one page's worth
+/// of segments spills onto continuation pages, whose granule is the -1 "no
+/// packet completed here" sentinel.
+#[derive(Debug)]
+pub struct OggPageWriter {
+    serial: u32,
+    seq: u32,
+    /// Queued packets with the granule position reached after each.
+    pending: Vec<(Vec<u8>, u64)>,
+    pending_bytes: usize,
+    bos_done: bool,
+    /// Granule of the last packet flushed, so a zero-packet end-of-stream page
+    /// still names the stream's length.
+    last_granule: u64,
+}
+
+impl OggPageWriter {
+    pub fn new(serial: u32) -> Self {
+        Self {
+            serial,
+            seq: 0,
+            pending: Vec::new(),
+            pending_bytes: 0,
+            bos_done: false,
+            last_granule: 0,
+        }
+    }
+
+    /// The logical bitstream's serial number.
+    pub fn serial(&self) -> u32 {
+        self.serial
+    }
+
+    /// Queue `packet`, reaching `granule` once it is decoded. Returns whatever
+    /// pages that completed (empty until a page's worth has accumulated). The
+    /// most recent packet is always held back so the end-of-stream flag has a
+    /// page to ride on.
+    pub fn push_packet(&mut self, packet: Vec<u8>, granule: u64) -> Vec<u8> {
+        self.pending_bytes = self.pending_bytes.saturating_add(packet.len());
+        self.pending.push((packet, granule));
+        if self.pending_bytes < PAGE_FLUSH_BYTES || self.pending.len() < 2 {
+            return Vec::new();
+        }
+        let held = self.pending.pop().expect("pending is non-empty");
+        let pages = self.emit(false);
+        self.pending_bytes = held.0.len();
+        self.pending.push(held);
+        pages
+    }
+
+    /// Flush every queued packet. `eos` flags the final page end-of-stream,
+    /// which closes the logical bitstream.
+    pub fn flush(&mut self, eos: bool) -> Vec<u8> {
+        self.emit(eos)
+    }
+
+    /// Build pages for the queued packets, splitting on the 255-segment page
+    /// limit. `eos` flags the last page of this batch.
+    fn emit(&mut self, eos: bool) -> Vec<u8> {
+        // Lacing: each packet is `len / 255` full segments plus a terminator of
+        // `len % 255` (so a packet whose length is a multiple of 255 ends on an
+        // explicit 0 segment). Only the terminator completes the packet.
+        let mut lacing: Vec<(u8, Option<u64>)> = Vec::new();
+        for (packet, granule) in &self.pending {
+            let mut left = packet.len();
+            while left >= 255 {
+                lacing.push((255, None));
+                left -= 255;
+            }
+            lacing.push((left as u8, Some(*granule)));
+        }
+        let mut body = Vec::with_capacity(self.pending_bytes);
+        for (packet, _) in &self.pending {
+            body.extend_from_slice(packet);
+        }
+        self.pending.clear();
+        self.pending_bytes = 0;
+
+        let mut out = Vec::new();
+        if lacing.is_empty() {
+            // Nothing queued: an end-of-stream flush still needs a page to carry
+            // the flag, so emit a zero-segment one at the last known granule.
+            if eos {
+                self.write_page(&mut out, &[], &[], self.last_granule, false, true);
+            }
+            return out;
+        }
+        let mut at = 0usize; // body offset of the current page
+        let mut continued = false;
+        let mut first = 0usize; // index of this page's first lacing entry
+        while first < lacing.len() {
+            let last = (first + 255).min(lacing.len());
+            let group = &lacing[first..last];
+            let len: usize = group.iter().map(|(s, _)| *s as usize).sum();
+            let segments: Vec<u8> = group.iter().map(|(s, _)| *s).collect();
+            // The page's granule names the last packet completing on it; a page
+            // that completes none carries the -1 sentinel.
+            let granule = group.iter().rev().find_map(|(_, g)| *g).unwrap_or(u64::MAX);
+            if granule != u64::MAX {
+                self.last_granule = granule;
+            }
+            let is_last = last == lacing.len();
+            self.write_page(
+                &mut out,
+                &segments,
+                &body[at..at + len],
+                granule,
+                continued,
+                eos && is_last,
+            );
+            at += len;
+            // A page ending on a 255 segment leaves its packet unterminated.
+            continued = group.last().map(|(_, g)| g.is_none()).unwrap_or(false);
+            first = last;
+        }
+        out
+    }
+
+    fn write_page(
+        &mut self,
+        out: &mut Vec<u8>,
+        segments: &[u8],
+        body: &[u8],
+        granule: u64,
+        continued: bool,
+        eos: bool,
+    ) {
+        let start = out.len();
+        let mut header_type = 0u8;
+        if continued {
+            header_type |= 0x01;
+        }
+        if !self.bos_done {
+            header_type |= 0x02;
+            self.bos_done = true;
+        }
+        if eos {
+            header_type |= 0x04;
+        }
+        out.extend_from_slice(&CAPTURE_PATTERN);
+        out.push(0); // stream structure version
+        out.push(header_type);
+        out.extend_from_slice(&granule.to_le_bytes());
+        out.extend_from_slice(&self.serial.to_le_bytes());
+        out.extend_from_slice(&self.seq.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes()); // CRC, filled in below
+        out.push(segments.len() as u8);
+        out.extend_from_slice(segments);
+        out.extend_from_slice(body);
+        self.seq = self.seq.wrapping_add(1);
+        let crc = page_crc(&out[start..]);
+        out[start + 22..start + 26].copy_from_slice(&crc.to_le_bytes());
     }
 }
 
@@ -608,10 +948,11 @@ mod tests {
         for seq in 1..=pages as u32 {
             d.push_data(&full_continued_page(0x01, serial, seq));
         }
+        let partial = &d.streams[0].partial;
         assert!(
-            d.partial.len() <= MAX_PACKET_BYTES,
+            partial.len() <= MAX_PACKET_BYTES,
             "reassembly buffer stays bounded, got {}",
-            d.partial.len()
+            partial.len()
         );
     }
 
@@ -666,17 +1007,218 @@ mod tests {
         assert_eq!(d.info().unwrap().codec, OggCodec::Other);
     }
 
+    /// A real beginning-of-stream page from an ffmpeg-authored `.opus` file
+    /// (`ffmpeg -f lavfi -i sine -c:a libopus`): 27-byte header, one 19-byte
+    /// segment carrying `OpusHead`. Its stored checksum is the CRC oracle.
+    const FFMPEG_BOS_PAGE: [u8; 47] = [
+        0x4F, 0x67, 0x67, 0x53, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x75,
+        0x9A, 0xD7, 0x87, 0x00, 0x00, 0x00, 0x00, 0x70, 0x0B, 0x30, 0x2A, 0x01, 0x13, 0x4F, 0x70,
+        0x75, 0x73, 0x48, 0x65, 0x61, 0x64, 0x01, 0x02, 0x38, 0x01, 0x80, 0xBB, 0x00, 0x00, 0x00,
+        0x00, 0x00,
+    ];
+
     #[test]
-    fn ignores_a_second_logical_stream() {
+    fn page_crc_matches_an_ffmpeg_authored_page() {
+        let mut page = FFMPEG_BOS_PAGE;
+        let stored = u32::from_le_bytes([page[22], page[23], page[24], page[25]]);
+        page[22..26].copy_from_slice(&0u32.to_le_bytes());
+        assert_eq!(
+            page_crc(&page),
+            stored,
+            "Ogg CRC-32 (poly 0x04c11db7, init 0)"
+        );
+        // The writer reproduces the same page byte for byte from the same
+        // packet, serial and flags.
+        let serial = u32::from_le_bytes([
+            FFMPEG_BOS_PAGE[14],
+            FFMPEG_BOS_PAGE[15],
+            FFMPEG_BOS_PAGE[16],
+            FFMPEG_BOS_PAGE[17],
+        ]);
+        let mut w = OggPageWriter::new(serial);
+        w.push_packet(FFMPEG_BOS_PAGE[28..].to_vec(), 0);
+        assert_eq!(w.flush(false), FFMPEG_BOS_PAGE.to_vec());
+    }
+
+    /// Read a page's `(header_type, granule, sequence, segment table, body)`.
+    fn read_page(data: &[u8], at: usize) -> (u8, u64, u32, Vec<u8>, Vec<u8>, usize) {
+        assert_eq!(&data[at..at + 4], &CAPTURE_PATTERN, "page at {at}");
+        let n = data[at + 26] as usize;
+        let table = data[at + HEADER_LEN..at + HEADER_LEN + n].to_vec();
+        let body_len: usize = table.iter().map(|&s| s as usize).sum();
+        let start = at + HEADER_LEN + n;
+        let gp = u64::from_le_bytes(data[at + 6..at + 14].try_into().unwrap());
+        let seq = u32::from_le_bytes(data[at + 18..at + 22].try_into().unwrap());
+        (
+            data[at + 5],
+            gp,
+            seq,
+            table,
+            data[start..start + body_len].to_vec(),
+            start + body_len,
+        )
+    }
+
+    /// Every page in `data` has a valid checksum.
+    fn assert_crcs_valid(data: &[u8]) {
+        let mut at = 0;
+        while at < data.len() {
+            let (_, _, _, table, body, end) = read_page(data, at);
+            let mut page = data[at..end].to_vec();
+            let stored = u32::from_le_bytes([page[22], page[23], page[24], page[25]]);
+            page[22..26].copy_from_slice(&0u32.to_le_bytes());
+            assert_eq!(page_crc(&page), stored, "page at {at}");
+            assert_eq!(table.len(), page[26] as usize);
+            assert_eq!(body.len(), end - at - HEADER_LEN - table.len());
+            at = end;
+        }
+    }
+
+    #[test]
+    fn laces_a_255_multiple_with_a_terminating_zero_segment() {
+        let mut w = OggPageWriter::new(1);
+        w.push_packet(vec![7u8; 510], 100);
+        let pages = w.flush(true);
+        let (ht, gp, seq, table, body, end) = read_page(&pages, 0);
+        assert_eq!(end, pages.len(), "one page");
+        assert_eq!(ht, 0x02 | 0x04, "first and last page of the stream");
+        assert_eq!((gp, seq), (100, 0));
+        assert_eq!(
+            table,
+            vec![255, 255, 0],
+            "a 255-multiple needs an explicit terminator"
+        );
+        assert_eq!(body.len(), 510);
+        assert_crcs_valid(&pages);
+        // The demuxer recovers exactly one packet.
+        let mut d = OggDemuxer::new();
+        d.push_data(&pages);
+        assert_eq!(d.take_packets(), vec![vec![7u8; 510]]);
+    }
+
+    #[test]
+    fn a_packet_past_64k_spills_onto_continuation_pages() {
+        // 255 * 255 = 65025 bytes fill one page's segment table exactly, so a
+        // longer packet must continue onto a second page.
+        let big: Vec<u8> = (0..70_000u32).map(|x| x as u8).collect();
+        let mut w = OggPageWriter::new(9);
+        w.push_packet(big.clone(), 4242);
+        let pages = w.flush(true);
+        assert_crcs_valid(&pages);
+
+        let (ht0, gp0, seq0, table0, _, end0) = read_page(&pages, 0);
+        assert_eq!(ht0, 0x02, "beginning of stream, not yet the end");
+        assert_eq!(gp0, u64::MAX, "no packet completes on the first page");
+        assert_eq!((seq0, table0.len()), (0, 255));
+        let (ht1, gp1, seq1, _, _, end1) = read_page(&pages, end0);
+        assert_eq!(ht1, 0x01 | 0x04, "continued, and the end of the stream");
+        assert_eq!((gp1, seq1), (4242, 1));
+        assert_eq!(end1, pages.len(), "two pages");
+
+        let mut d = OggDemuxer::new();
+        d.push_data(&pages);
+        assert_eq!(d.take_packets(), vec![big], "reassembled across the split");
+    }
+
+    #[test]
+    fn header_pages_are_flagged_and_sequenced() {
+        let mut w = OggPageWriter::new(3);
+        w.push_packet(b"ident".to_vec(), 0);
+        let mut out = w.flush(false); // beginning-of-stream page, ident alone
+        w.push_packet(b"comment".to_vec(), 0);
+        w.push_packet(b"setup".to_vec(), 0);
+        out.extend_from_slice(&w.flush(false));
+        w.push_packet(b"audio".to_vec(), 1024);
+        out.extend_from_slice(&w.flush(true));
+        assert_crcs_valid(&out);
+
+        let (ht0, gp0, _, t0, b0, e0) = read_page(&out, 0);
+        assert_eq!((ht0, gp0, t0.len()), (0x02, 0, 1));
+        assert_eq!(b0, b"ident".to_vec());
+        let (ht1, gp1, seq1, t1, _, e1) = read_page(&out, e0);
+        assert_eq!(
+            (ht1, gp1, seq1, t1.len()),
+            (0x00, 0, 1, 2),
+            "comment + setup share the second page at granule 0"
+        );
+        let (ht2, gp2, seq2, _, b2, e2) = read_page(&out, e1);
+        assert_eq!((ht2, gp2, seq2), (0x04, 1024, 2));
+        assert_eq!(b2, b"audio".to_vec());
+        assert_eq!(e2, out.len());
+    }
+
+    #[test]
+    fn ignores_a_serial_that_never_opened_a_stream() {
         let mut d = OggDemuxer::new();
         d.push_data(&page(0x02, 1, 0, &[&opus_head(2)]));
         d.push_data(&page(0x00, 1, 1, &[b"OpusTags"]));
-        d.push_data(&page(0x00, 2, 0, &[b"other-stream-packet"])); // different serial
+        // A serial with no BOS page in the opening group is a stray page.
+        d.push_data(&page(0x00, 2, 0, &[b"other-stream-packet"]));
         d.push_data(&page(0x00, 1, 2, &[&[0x01, 0x02]]));
+        assert_eq!(d.streams().len(), 1);
         assert_eq!(
             d.take_packets(),
             vec![vec![0x01, 0x02]],
-            "only the first serial"
+            "only the opened serial"
         );
+    }
+
+    #[test]
+    fn grouped_streams_demux_independently() {
+        let (a, b) = (0x1111u32, 0x2222u32);
+        let mut d = OggDemuxer::new();
+        // RFC 3533 grouping: every stream's BOS page first, then the rest.
+        d.push_data(&page(0x02, a, 0, &[&opus_head(2)]));
+        d.push_data(&page(0x02, b, 0, &[&flac_first_packet(1, 44_100, 1)]));
+        d.push_data(&page(0x00, a, 1, &[b"OpusTags"]));
+        let comment = [&[0x84u8, 0, 0, 4][..], &[0u8; 4]].concat();
+        d.push_data(&page(0x00, b, 1, &[&comment]));
+        // Interleaved data pages, each ending its own stream.
+        d.push_data(&page_g(0x00, a, 2, 960, &[&[0xAA, 0xBB]]));
+        let flac_frame = [0xFFu8, 0xF8, 0x69, 0x18, 0x00, 0x8A];
+        d.push_data(&page_g(0x04, b, 2, 4096, &[&flac_frame]));
+        d.push_data(&page_g(0x04, a, 3, 1920, &[&[0xCC]]));
+
+        assert_eq!(d.streams().len(), 2, "both logical bitstreams tracked");
+        assert_eq!(d.streams()[0].serial(), a);
+        assert_eq!(d.streams()[1].serial(), b);
+        assert_eq!(d.streams()[0].info().unwrap().codec, OggCodec::Opus);
+        assert_eq!(d.streams()[1].info().unwrap().codec, OggCodec::Flac);
+        assert_eq!(d.streams()[1].info().unwrap().sample_rate, 44_100);
+        assert_eq!(d.stream_of(OggCodec::Flac), Some(1));
+        // Per-stream granules, not a shared one.
+        assert_eq!(d.streams()[0].end_granule(), Some(1920));
+        assert_eq!(d.streams()[1].end_granule(), Some(4096));
+        assert_eq!(
+            d.stream_mut(0).unwrap().take_packets(),
+            vec![vec![0xAA, 0xBB], vec![0xCC]]
+        );
+        assert_eq!(
+            d.stream_mut(1).unwrap().take_packets(),
+            vec![flac_frame.to_vec()]
+        );
+    }
+
+    #[test]
+    fn a_chained_beginning_of_stream_page_is_ignored() {
+        let mut d = OggDemuxer::new();
+        d.push_data(&page(0x02, 1, 0, &[&opus_head(2)]));
+        d.push_data(&page(0x00, 1, 1, &[b"OpusTags"]));
+        d.push_data(&page_g(0x04, 1, 2, 960, &[&[0x01]]));
+        // A fresh BOS after the first stream ended: a chained physical stream.
+        d.push_data(&page(0x02, 9, 0, &[&opus_head(1)]));
+        d.push_data(&page(0x00, 9, 1, &[b"OpusTags"]));
+        d.push_data(&page(0x00, 9, 2, &[&[0x02]]));
+        assert_eq!(d.streams().len(), 1, "chained streams are not demuxed");
+        assert_eq!(d.take_packets(), vec![vec![0x01]]);
+    }
+
+    #[test]
+    fn the_logical_stream_count_is_capped() {
+        let mut d = OggDemuxer::new();
+        for serial in 0..(MAX_STREAMS as u32 + 8) {
+            d.push_data(&page(0x02, serial, 0, &[&opus_head(1)]));
+        }
+        assert_eq!(d.streams().len(), MAX_STREAMS);
     }
 }

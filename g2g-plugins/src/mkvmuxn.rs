@@ -25,8 +25,10 @@
 //! sink pads do. Video is H.264/H.265 (avcC/hvcC + AVCC samples), VP8/VP9 (raw
 //! frames, no CodecPrivate) or AV1 (`V_AV1`, av1C `CodecPrivate` from the
 //! sequence header, temporal delimiters stripped, M773); audio is AAC (ASC) or
-//! Opus (synthesised `OpusHead`), so VP9 + Opus muxes a WebM. Every input pad
-//! must carry a stream (a pad that ends without an access unit stalls the build).
+//! Opus (an in-band `OpusHead` verbatim, else a synthesised one, plus the
+//! `CodecDelay` / `SeekPreRoll` its mapping needs, M792), so VP9 + Opus muxes a
+//! WebM. Every input pad must carry a stream (a pad that ends without an access
+//! unit stalls the build).
 
 use core::future::Future;
 use core::pin::Pin;
@@ -39,15 +41,16 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
     FrameTiming, G2gError, InputAggregator, MemoryDomain, MultiInputElement, OutputSink,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, VideoCodec,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, TagList, VideoCodec,
 };
 
 use crate::fmp4mux::{
     avcc_record, avcc_sample, hvcc_record, is_keyframe_nal, parameter_sets, split_annexb,
     vp8_keyframe, vp9_keyframe,
 };
-use crate::matroska::{MatroskaMuxer, MkvCodec, MkvTrackConfig, MkvTrackSpec};
+use crate::matroska::{finalize_seekable, MatroskaMuxer, MkvCodec, MkvTrackConfig, MkvTrackSpec};
 use crate::mp4muxn::{asc_from_adts, strip_adts};
+use crate::opusparse::{is_opus_config, parse_opus_head, synth_opus_head};
 
 /// What an input pad carries, learned from its negotiated caps at configure.
 #[derive(Debug, Clone, Copy)]
@@ -103,11 +106,16 @@ pub struct MkvMuxN {
     /// end, so `streamable` drops the index.
     streamable: bool,
     /// Two-pass / seekable-finalize mode (M770): buffer the whole file and emit
-    /// it once at EOS with a front `SeekHead` (see [`crate::mkvmux::MkvMux`]).
-    /// Mutually exclusive with `streamable`.
+    /// it once at EOS with a front `SeekHead` and an `Info` `Duration` (M794,
+    /// see [`crate::mkvmux::MkvMux`]). Mutually exclusive with `streamable`.
     seekable: bool,
     /// The buffered file bytes in `seekable` mode.
     pending: Vec<u8>,
+    /// Whole-file metadata, written as an untargeted `Tag`.
+    tags: TagList,
+    /// Per-input metadata (input pad index, tags), written as `Targets`-scoped
+    /// `Tag`s in the same `Tags` element (M787).
+    track_tags: Vec<(usize, TagList)>,
 }
 
 impl MkvMuxN {
@@ -125,7 +133,27 @@ impl MkvMuxN {
             streamable: false,
             seekable: false,
             pending: Vec::new(),
+            tags: TagList::new(),
+            track_tags: Vec::new(),
         }
+    }
+
+    /// Attach whole-file metadata, written as a `Tags` element in the header (the
+    /// [`crate::mkvmux::MkvMux`] builder for the multi-track muxer).
+    pub fn with_tags(mut self, tags: TagList) -> Self {
+        self.tags = tags;
+        self
+    }
+
+    /// Attach metadata scoped to one input pad's track: written as a `Tag` whose
+    /// `Targets` names that track's `TagTrackUID`, so a reader (ffmpeg, the g2g
+    /// demuxer) reports it on that elementary stream rather than the file. Out-of
+    /// range inputs are ignored.
+    pub fn with_track_tags(mut self, input: usize, tags: TagList) -> Self {
+        if input < self.inputs {
+            self.track_tags.push((input, tags));
+        }
+        self
     }
 
     /// Live mode: suppress the EOS `Cues` index (see [`streamable`](Self::streamable)).
@@ -173,6 +201,18 @@ impl MkvMuxN {
             }),
             _ => None,
         }
+    }
+
+    /// Whether the pad carries Opus, whose in-band headers are config rather
+    /// than audio and so are dropped instead of muxed.
+    fn is_opus_pad(&self, input: usize) -> bool {
+        matches!(
+            self.kinds[input],
+            Some(PadKind::Audio {
+                format: AudioFormat::Opus,
+                ..
+            })
+        )
     }
 
     /// True once every pad has its init captured (the Tracks element, and so the
@@ -245,13 +285,24 @@ impl MkvMuxN {
                         });
                     }
                 }
-                // Opus carries its config (OpusHead) out of band, built from the caps.
+                // An Opus stream out of a container leads with its `OpusHead`
+                // (M791's in-band convention), which becomes the `CodecPrivate`
+                // verbatim so the source's real pre-skip survives; a freshly
+                // encoded one has none, so the header is synthesized with
+                // libopus' lookahead (M792).
                 _ => {
+                    let config = match parse_opus_head(au) {
+                        Some(_) => au.to_vec(),
+                        // An `OpusTags` before the identification header is not
+                        // the config: wait for it rather than fix a synthesized one.
+                        None if is_opus_config(au) => return,
+                        None => synth_opus_head(channels, rate),
+                    };
                     self.inits[input] = Some(TrackInit::Audio {
                         format,
                         channels,
                         rate,
-                        config: opus_head(channels, rate),
+                        config,
                     });
                 }
             },
@@ -300,7 +351,7 @@ impl MkvMuxN {
         let pts_ns = frame.timing.pts_ns;
         let (sample, is_key) = self.sample_for(input, slice);
         let mux = self.mux.as_mut().ok_or(G2gError::NotConfigured)?;
-        let bytes = mux.push_frame_on(input, &sample, pts_ns, is_key);
+        let bytes = mux.push_frame_on(input, &sample, pts_ns, is_key, frame.timing.duration_ns);
 
         // Seekable (two-pass) mode: hold the whole file until every input drains.
         if self.seekable {
@@ -381,21 +432,6 @@ fn track_config(init: &TrackInit) -> MkvTrackConfig {
             }
         }
     }
-}
-
-/// The 19-byte Opus `OpusHead` identification header for an N-channel stream, the
-/// Matroska `CodecPrivate` for `A_OPUS`. Channel mapping family 0 (mono/stereo); a
-/// conventional 80 ms pre-skip (the exact encoder delay is not surfaced in caps).
-fn opus_head(channels: u8, sample_rate: u32) -> Vec<u8> {
-    let mut h = Vec::with_capacity(19);
-    h.extend_from_slice(b"OpusHead");
-    h.push(1); // version
-    h.push(channels.max(1));
-    h.extend_from_slice(&3840u16.to_le_bytes()); // pre-skip
-    h.extend_from_slice(&sample_rate.to_le_bytes()); // input sample rate
-    h.extend_from_slice(&0i16.to_le_bytes()); // output gain
-    h.push(0); // channel mapping family 0
-    h
 }
 
 impl MultiInputElement for MkvMuxN {
@@ -522,6 +558,12 @@ impl MultiInputElement for MkvMuxN {
                     // Capture this track's init from its first AU before queueing.
                     if let Some(s) = frame.domain.as_system_slice() {
                         self.capture_init(input, s);
+                        // An in-band Opus header is codec config, not audio: it
+                        // became the `CodecPrivate` above and must never be
+                        // written as a Block (M792).
+                        if self.is_opus_pad(input) && is_opus_config(s) {
+                            return Ok(());
+                        }
                     }
                     self.agg.push(input, frame);
                 }
@@ -546,7 +588,10 @@ impl MultiInputElement for MkvMuxN {
                     .iter()
                     .map(|i| track_config(i.as_ref().expect("ready")))
                     .collect();
-                let mut mux = MatroskaMuxer::new_multi(configs);
+                let mut mux = MatroskaMuxer::new_multi(configs).with_tags(self.tags.clone());
+                for (input, tags) in &self.track_tags {
+                    mux = mux.with_track_tags(*input, tags.clone());
+                }
                 if self.seekable {
                     mux = mux.with_seek_head();
                 }
@@ -565,13 +610,7 @@ impl MultiInputElement for MkvMuxN {
             if self.agg.is_drained() && !self.cues_emitted {
                 if self.seekable {
                     if let Some(mux) = self.mux.as_ref() {
-                        let cues = mux.finish();
-                        if !cues.is_empty() {
-                            if let Some((off, pos)) = mux.seek_head_patch() {
-                                self.pending[off..off + 8].copy_from_slice(&pos.to_be_bytes());
-                            }
-                            self.pending.extend_from_slice(&cues);
-                        }
+                        finalize_seekable(mux, &mut self.pending);
                     }
                     if !self.pending.is_empty() {
                         let file = core::mem::take(&mut self.pending);

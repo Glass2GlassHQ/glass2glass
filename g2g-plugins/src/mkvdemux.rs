@@ -96,9 +96,8 @@ pub struct MkvDemux {
     emitted: u64,
     last_caps: Option<Caps>,
     bus: Option<BusHandle>,
-    /// Count of tags already posted, so newly parsed tags (the `Tags` element
-    /// can trail the `Info` `Title`) post once each.
-    tags_posted: usize,
+    /// Bus posting of the container's whole-stream and per-track tags, once each.
+    tags: TagPoster,
     /// Set once the `StreamCollection` has been announced (M376), so the demuxer
     /// posts the available-streams list once, when the `Tracks` element parses.
     collection_posted: bool,
@@ -109,10 +108,9 @@ pub struct MkvDemux {
     /// Seek support (M362): app time seeks drive an upstream byte-seek and a
     /// re-sync. Inert unless `with_seek` wired the controllers.
     seek: DemuxSeek,
-    /// FLAC only: whether the track's `CodecPrivate` (the native `fLaC`
-    /// STREAMINFO header) has been forwarded in-band, once, before the first
-    /// frame (the decoder takes it as extradata). Re-armed on a flush.
-    flac_header_sent: bool,
+    /// Whether the selected track's `CodecPrivate` has been forwarded in-band,
+    /// once, before its first frame (see [`config_header`]). Re-armed on a flush.
+    config_sent: bool,
     /// Clones of the seek controllers (M374): the `Cues` prefetch consumes the app
     /// seek and drives the two-hop upstream byte-seek directly, so it needs the
     /// same channels `seek` holds. `None` unless `with_seek` wired them.
@@ -137,11 +135,11 @@ impl MkvDemux {
             emitted: 0,
             last_caps: None,
             bus: None,
-            tags_posted: 0,
+            tags: TagPoster::default(),
             collection_posted: false,
             stream_select: None,
             seek: DemuxSeek::default(),
-            flac_header_sent: false,
+            config_sent: false,
             app: None,
             upstream: None,
             prefetch: CuePrefetch::Idle,
@@ -197,7 +195,7 @@ impl MkvDemux {
     /// Reset the parser for a discontinuity (a `Flush` / seek): drop the
     /// demuxer's EBML/Cluster state, which the re-read stream re-establishes from
     /// its EBML header. The codec / caps and posted tags are unchanged (same
-    /// file), so `last_caps` / `tags_posted` are kept (no redundant re-emit).
+    /// file), so `last_caps` / `tags` are kept (no redundant re-emit).
     fn reset_parser(&mut self) {
         self.demux = MatroskaDemuxer::new();
     }
@@ -209,7 +207,8 @@ impl MkvDemux {
     }
 
     /// Attach the pipeline bus so the Segment's `Tags` / `Info` `Title` metadata
-    /// posts as a [`BusMessage::Tag`] once parsed.
+    /// posts as a [`BusMessage::Tag`] once parsed, and a `Targets`-scoped tag as
+    /// a [`BusMessage::StreamTag`] on its track's stream id.
     pub fn with_bus(mut self, bus: BusHandle) -> Self {
         self.bus = Some(bus);
         self
@@ -372,21 +371,11 @@ impl MkvDemux {
         }
     }
 
-    /// Post any tags parsed since the last call as a [`BusMessage::Tag`]. A
-    /// no-op without a bus attached or when nothing new has been parsed.
+    /// Post any tags parsed since the last call: whole-stream ones as a
+    /// [`BusMessage::Tag`], `Targets`-scoped ones as a [`BusMessage::StreamTag`].
+    /// A no-op without a bus attached or when nothing new has been parsed.
     fn post_tags(&mut self) {
-        let total = self.demux.tags().len();
-        if total <= self.tags_posted {
-            return;
-        }
-        let fresh: TagList = self.demux.tags().tags()[self.tags_posted..]
-            .iter()
-            .cloned()
-            .collect();
-        self.tags_posted = total;
-        if let Some(bus) = &self.bus {
-            bus.try_post(BusMessage::Tag(fresh));
-        }
+        self.tags.post(&self.demux, self.bus.as_ref());
     }
 
     /// Announce every elementary stream the container declares as a
@@ -421,7 +410,7 @@ impl MkvDemux {
     /// (video / audio) and the [`Caps`] it carries, with concrete geometry / audio
     /// parameters when the track declared them. `None` for an unmappable codec.
     fn track_to_stream(track: &crate::matroska::MkvTrack) -> Option<Stream> {
-        let id = alloc::format!("matroska-track-{}", track.number);
+        let id = stream_id(track.number);
         let video = |codec| Caps::CompressedVideo {
             codec,
             width: if track.width > 0 {
@@ -504,8 +493,9 @@ impl MkvDemux {
     /// then forward each demuxed frame of that stream.
     async fn emit_ready(&mut self, out: &mut dyn OutputSink) -> Result<(), G2gError> {
         if self.bus.is_some() {
-            self.post_tags();
+            // Collection first: a per-track tag names a stream id from it.
             self.post_stream_collection();
+            self.post_tags();
         }
         // Honor an app stream selection before computing this batch's caps, so the
         // switch (and its CapsChanged) takes effect for the frames forwarded now.
@@ -534,15 +524,13 @@ impl MkvDemux {
                 }
                 Admit::Emit => {}
             }
-            // FLAC: the decoder needs the track's `fLaC` STREAMINFO (CodecPrivate)
-            // as extradata; forward it in-band once, ahead of the first frame.
-            if self.stream == MkvStream::Flac && !self.flac_header_sent {
-                self.flac_header_sent = true;
-                if let Some(private) = self.demux.codec_private(f.track) {
-                    let header = Frame::new(
-                        MemoryDomain::System(SystemSlice::from_boxed(
-                            private.to_vec().into_boxed_slice(),
-                        )),
+            // The track's decoder-init bytes go in band once, ahead of its first
+            // frame (FLAC STREAMINFO, Opus `OpusHead`).
+            if !self.config_sent {
+                self.config_sent = true;
+                if let Some(header) = config_header(&self.demux, f.codec, f.track) {
+                    let frame = Frame::new(
+                        MemoryDomain::System(SystemSlice::from_boxed(header.into_boxed_slice())),
                         FrameTiming {
                             pts_ns: f.pts_ns,
                             dts_ns: f.pts_ns,
@@ -551,7 +539,7 @@ impl MkvDemux {
                         self.emitted,
                     );
                     self.emitted += 1;
-                    out.push(PipelinePacket::DataFrame(header)).await?;
+                    out.push(PipelinePacket::DataFrame(frame)).await?;
                 }
             }
             let timing = FrameTiming {
@@ -679,7 +667,7 @@ impl AsyncElement for MkvDemux {
                         self.reset_parser();
                     }
                     // a fresh decoder after the flush needs the header again.
-                    self.flac_header_sent = false;
+                    self.config_sent = false;
                     out.push(PipelinePacket::Flush).await?;
                 }
                 PipelinePacket::Eos => {
@@ -914,9 +902,116 @@ pub fn subtitle_streams(demux: &MatroskaDemuxer) -> Vec<MkvStreamInfo> {
 /// demuxer forwards for it, given the parsed tracks (`None` if the id is unknown or
 /// its codec is unforwardable). Needs `Tracks` parsed (the ids come from it).
 fn resolve_stream_id(demux: &MatroskaDemuxer, id: &str) -> Option<MkvStream> {
-    let num: u64 = id.strip_prefix("matroska-track-")?.parse().ok()?;
+    let num: u64 = id.strip_prefix(STREAM_ID_PREFIX)?.parse().ok()?;
     let track = demux.tracks().iter().find(|t| t.number == num)?;
     codec_to_stream(track.codec)
+}
+
+/// The decoder-init bytes to forward in band ahead of a track's first frame, or
+/// `None` for a codec that carries its config in the stream. FLAC needs the
+/// native `fLaC` STREAMINFO as extradata; an Opus track's `CodecPrivate` is its
+/// RFC 7845 `OpusHead`, and forwarding it is how the pre-skip reaches `OpusDec`
+/// and a remuxer (M792, the convention `OggDemux` / `Mp4DemuxN` already use).
+/// The `OpusHead` is validated rather than trusted: a `CodecPrivate` that is not
+/// one is dropped, since a decoder would read garbage from it.
+fn config_header(demux: &MatroskaDemuxer, codec: MkvCodec, track: u64) -> Option<Vec<u8>> {
+    let private = demux.codec_private(track)?;
+    match codec {
+        MkvCodec::Flac => Some(private.to_vec()),
+        MkvCodec::Opus => crate::opusparse::parse_opus_head(private).map(|_| private.to_vec()),
+        _ => None,
+    }
+}
+
+/// Prefix of the published stream ids (`matroska-track-N`, N the track number).
+const STREAM_ID_PREFIX: &str = "matroska-track-";
+
+/// The published stream id of a track number.
+fn stream_id(number: u64) -> alloc::string::String {
+    alloc::format!("{STREAM_ID_PREFIX}{number}")
+}
+
+/// Posts a container's tags on the bus once each: the whole-stream ones as
+/// [`BusMessage::Tag`], the per-track ones as [`BusMessage::StreamTag`] on that
+/// track's stream id. A track's metadata reaches the file two ways, its
+/// `TrackEntry` (`Name` / `Language`, M788) and a `Targets`-scoped `Tag` (M787);
+/// both merge into one message per stream, so the application sees one view
+/// however the file stored it. Shared by the single- and multi-output demuxers,
+/// which both parse with one [`MatroskaDemuxer`]; the counts survive a
+/// mid-segment seek (same file, so nothing re-posts).
+#[derive(Debug, Default)]
+struct TagPoster {
+    /// Tags already posted, so a `Tags` element trailing the `Info` `Title` posts
+    /// only its own entries.
+    posted: usize,
+    /// `TrackEntry` tag groups already posted (one per track that declares any).
+    entry_posted: usize,
+    /// Track-scoped tag groups already posted (one per scoped `Tag` element).
+    track_posted: usize,
+}
+
+impl TagPoster {
+    /// Post whatever the demuxer has parsed since the last call; a no-op when
+    /// nothing is new.
+    fn post(&mut self, demux: &MatroskaDemuxer, bus: Option<&BusHandle>) {
+        let total = demux.tags().len();
+        if total > self.posted {
+            let fresh: TagList = demux.tags().tags()[self.posted..].iter().cloned().collect();
+            self.posted = total;
+            if let Some(bus) = bus {
+                bus.try_post(BusMessage::Tag(fresh));
+            }
+        }
+        // A track-scoped group needs `Tracks` to map its UID to a stream id; hold
+        // it until they parse rather than dropping it (element order is the
+        // file's choice).
+        if demux.tracks().is_empty() {
+            return;
+        }
+        let mut fresh: Vec<(alloc::string::String, TagList)> = Vec::new();
+        // TrackEntry metadata first: it is declared with the track itself, so it
+        // leads the stream's tag list.
+        let entries = demux.track_entry_tags();
+        if entries.len() > self.entry_posted {
+            for (number, tags) in &entries[self.entry_posted..] {
+                merge_stream_tags(&mut fresh, stream_id(*number), tags);
+            }
+            self.entry_posted = entries.len();
+        }
+        let scoped = demux.track_tags();
+        if scoped.len() > self.track_posted {
+            for (uid, tags) in &scoped[self.track_posted..] {
+                if let Some(track) = demux.tracks().iter().find(|t| t.uid == *uid && t.uid != 0) {
+                    merge_stream_tags(&mut fresh, stream_id(track.number), tags);
+                }
+            }
+            self.track_posted = scoped.len();
+        }
+        if let Some(bus) = bus {
+            for (stream_id, tags) in fresh {
+                bus.try_post(BusMessage::StreamTag { stream_id, tags });
+            }
+        }
+    }
+}
+
+/// Append `tags` to `out`'s entry for `id`, or add one, so a stream's tags from
+/// both sources post as a single message.
+fn merge_stream_tags(
+    out: &mut Vec<(alloc::string::String, TagList)>,
+    id: alloc::string::String,
+    tags: &TagList,
+) {
+    let slot = match out.iter_mut().find(|(existing, _)| *existing == id) {
+        Some((_, list)) => list,
+        None => {
+            out.push((id, TagList::new()));
+            &mut out.last_mut().expect("just pushed").1
+        }
+    };
+    for tag in tags.tags() {
+        slot.push(tag.clone());
+    }
 }
 
 fn mkv_stream_from_str(s: &str) -> Option<MkvStream> {
@@ -1004,7 +1099,12 @@ pub struct MkvDemuxN {
     ports: Vec<MkvStream>,
     /// Whether port `i` has emitted its opening `CapsChanged` yet.
     announced: Vec<bool>,
+    /// Whether port `i` has forwarded its track's `CodecPrivate` in band yet
+    /// (see [`config_header`]). Re-armed on a flush, like the caps.
+    config_sent: Vec<bool>,
     bus: Option<BusHandle>,
+    /// Bus posting of the container's whole-stream and per-track tags, once each.
+    tags: TagPoster,
     /// Set once the `StreamCollection` has been announced (M376), so it posts once.
     collection_posted: bool,
     /// App-driven stream selection (M381): the app names the stream id each port
@@ -1023,11 +1123,14 @@ impl MkvDemuxN {
             "MkvDemuxN needs at least one output port"
         );
         let announced = alloc::vec![false; ports.len()];
+        let config_sent = alloc::vec![false; ports.len()];
         Self {
             demux: MatroskaDemuxer::new(),
             ports,
             announced,
+            config_sent,
             bus: None,
+            tags: TagPoster::default(),
             collection_posted: false,
             stream_select: None,
             emitted: 0,
@@ -1072,6 +1175,7 @@ impl MkvDemuxN {
             if self.ports[port] != stream {
                 self.ports[port] = stream;
                 self.announced[port] = false; // re-emit caps for the new stream
+                self.config_sent[port] = false; // and the new track's config
             }
             active.push(id.clone());
         }
@@ -1124,6 +1228,13 @@ impl MkvDemuxN {
             )));
         }
     }
+
+    /// Post the container's tags the way [`MkvDemux::post_tags`] does: the
+    /// whole-stream ones as [`BusMessage::Tag`], the `Targets`-scoped ones as
+    /// [`BusMessage::StreamTag`] per track.
+    fn post_tags(&mut self) {
+        self.tags.post(&self.demux, self.bus.as_ref());
+    }
 }
 
 impl MultiOutputElement for MkvDemuxN {
@@ -1168,6 +1279,7 @@ impl MultiOutputElement for MkvDemuxN {
                     self.demux.push_data(slice);
                     if self.bus.is_some() {
                         self.post_stream_collection();
+                        self.post_tags();
                     }
                     // Honor an app selection before routing this batch, so a re-map
                     // (and its re-armed CapsChanged) takes effect for the frames now.
@@ -1181,6 +1293,26 @@ impl MultiOutputElement for MkvDemuxN {
                                 .unwrap_or_else(|| MkvDemux::output_caps(self.ports[port]));
                             out.push_to(port, PipelinePacket::CapsChanged(caps)).await?;
                             self.announced[port] = true;
+                        }
+                        // The track's decoder-init bytes lead its audio on this
+                        // port, once (FLAC STREAMINFO, Opus `OpusHead`).
+                        if !self.config_sent[port] {
+                            self.config_sent[port] = true;
+                            if let Some(header) = config_header(&self.demux, f.codec, f.track) {
+                                let lead = Frame::new(
+                                    MemoryDomain::System(SystemSlice::from_boxed(
+                                        header.into_boxed_slice(),
+                                    )),
+                                    FrameTiming {
+                                        pts_ns: f.pts_ns,
+                                        dts_ns: f.pts_ns,
+                                        ..FrameTiming::default()
+                                    },
+                                    self.emitted,
+                                );
+                                self.emitted += 1;
+                                out.push_to(port, PipelinePacket::DataFrame(lead)).await?;
+                            }
                         }
                         let timing = FrameTiming {
                             pts_ns: f.pts_ns,
@@ -1205,6 +1337,9 @@ impl MultiOutputElement for MkvDemuxN {
                 PipelinePacket::Flush => {
                     self.demux.reset_keeping_tracks();
                     for port in 0..self.ports.len() {
+                        // The decoder is reset by the flush, so it needs the
+                        // track's config again before the resumed audio.
+                        self.config_sent[port] = false;
                         out.push_to(port, PipelinePacket::Flush).await?;
                     }
                 }

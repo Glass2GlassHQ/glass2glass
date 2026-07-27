@@ -205,6 +205,8 @@ jobs:
           cargo test -p g2g-plugins --locked --features webrtc --test m249_duplex_session
           cargo test -p g2g-plugins --locked --features webrtc --test webrtc_loss_resilience
           cargo test -p g2g-plugins --locked --features webrtc --test webrtc_data_channel
+          cargo test -p g2g-plugins --locked --features webrtc --test m784_duplex_new_track
+          cargo test -p g2g-plugins --locked --features webrtc --test m785_duplex_track_remove
 
   # Windows platform build: Media Foundation decode/encode/AAC, WASAPI audio,
   # Direct3D11 present, MF camera. The `windows` crate bundles its bindings, so no
@@ -366,6 +368,15 @@ jobs:
       # vorbisdec PCM vs ffmpeg's own decode (pure Rust, no libav linkage).
       - name: Vorbis oracles (oggdemux + vorbisdec vs ffmpeg)
         run: cargo test -p g2g-plugins --locked --features std,vorbis --test m777_vorbis -- --nocapture
+      # Ogg mux (M789): ffmpeg decodes a g2g-muxed Opus / Vorbis / Ogg-FLAC
+      # stream to the source's samples bit for bit.
+      - name: Ogg muxer oracle (oggmux vs ffmpeg)
+        run: cargo test -p g2g-plugins --locked --features std --test m789_oggmux -- --nocapture
+      # Grouped multi-stream Ogg (M790): each stream of an ffmpeg-authored pair
+      # demuxes to ffprobe's own packet list, and ffmpeg decodes both streams of
+      # a g2g-muxed pair to the source's samples.
+      - name: Ogg multi-stream oracle (oggdemuxn + oggmuxn vs ffmpeg)
+        run: cargo test -p g2g-plugins --locked --features std --test m790_ogg_multistream -- --nocapture
       # MCU-fit codec oracles (M638 G.711 + M639 IMA ADPCM): the g2g-mcu
       # fixed-point codecs checked bit-exact against ffmpeg (G.711: the full
       # domain, 65536 encoder inputs + 256 decoder codes, both laws; ADPCM:

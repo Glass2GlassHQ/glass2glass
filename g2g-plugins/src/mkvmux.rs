@@ -31,7 +31,7 @@ use g2g_core::{
     PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, TagList, VideoCodec,
 };
 
-use crate::matroska::{MatroskaMuxer, MkvCodec, MkvTrackSpec};
+use crate::matroska::{finalize_seekable, MatroskaMuxer, MkvCodec, MkvTrackSpec};
 
 /// Muxes one elementary stream into a Matroska / WebM byte stream.
 #[derive(Debug)]
@@ -51,8 +51,10 @@ pub struct MkvMux {
     streamable: bool,
     /// Two-pass / seekable-finalize mode (M770): buffer the whole file and emit
     /// it once at EOS with a front `SeekHead` indexing Info / Tracks / Cues, so
-    /// the file seeks from byte 0 without reading past the Clusters. Costs one
-    /// file-sized buffer; mutually exclusive with `streamable`.
+    /// the file seeks from byte 0 without reading past the Clusters, and with a
+    /// real `Info` `Duration` (M794), which only a caller holding the whole file
+    /// can fill in. Costs one file-sized buffer; mutually exclusive with
+    /// `streamable`, whose live stream has no length to declare.
     seekable: bool,
     /// The buffered file bytes in `seekable` mode.
     pending: Vec<u8>,
@@ -269,7 +271,13 @@ impl AsyncElement for MkvMux {
                     }
                     let mux = self.mux.as_mut().ok_or(G2gError::NotConfigured)?;
                     // No upstream delta-frame signal yet: flag every frame a keyframe.
-                    let bytes = mux.push_frame(slice, frame.timing.pts_ns, true);
+                    let bytes = mux.push_frame_on(
+                        0,
+                        slice,
+                        frame.timing.pts_ns,
+                        true,
+                        frame.timing.duration_ns,
+                    );
                     // Seekable (two-pass) mode: hold the whole file until EOS.
                     if self.seekable {
                         self.pending.extend_from_slice(&bytes);
@@ -300,13 +308,7 @@ impl AsyncElement for MkvMux {
                 PipelinePacket::Eos => {
                     if self.seekable {
                         if let Some(mux) = self.mux.as_ref() {
-                            let cues = mux.finish();
-                            if !cues.is_empty() {
-                                if let Some((off, pos)) = mux.seek_head_patch() {
-                                    self.pending[off..off + 8].copy_from_slice(&pos.to_be_bytes());
-                                }
-                                self.pending.extend_from_slice(&cues);
-                            }
+                            finalize_seekable(mux, &mut self.pending);
                         }
                         if !self.pending.is_empty() {
                             let file = core::mem::take(&mut self.pending);

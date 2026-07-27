@@ -154,7 +154,7 @@ impl Mp4Demux {
             format,
             channels,
             sample_rate,
-            asc,
+            config,
         } = &audio.kind
         else {
             return Err(G2gError::CapsMismatch);
@@ -168,6 +168,17 @@ impl Mp4Demux {
             .await?;
             self.caps_sent = true;
         }
+        // Opus config leads the audio in-band (M791), the `OggDemux` convention,
+        // so the decoder trims the pre-skip; AAC is self-describing once ADTS-framed.
+        if *format == AudioFormat::Opus && !config.is_empty() {
+            out.push(PipelinePacket::DataFrame(Frame::new(
+                MemoryDomain::System(SystemSlice::from_boxed(config.clone().into_boxed_slice())),
+                FrameTiming::default(),
+                self.sequence,
+            )))
+            .await?;
+            self.sequence += 1;
+        }
         let track_id = audio.track_id;
         for (tid, sample) in parse_progressive_multi(&self.buffer, &tracks)? {
             if tid != track_id {
@@ -176,7 +187,7 @@ impl Mp4Demux {
             // ADTS-frame the raw AAC access unit from the track's ASC, so a decoder
             // starts without the out-of-band config (like the in-band video param
             // sets); a malformed ASC leaves the raw bytes.
-            let data = adts_from_asc(asc, &sample.annexb).unwrap_or(sample.annexb);
+            let data = adts_from_asc(config, &sample.annexb).unwrap_or(sample.annexb);
             let frame = Frame {
                 domain: MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
                 timing: FrameTiming {

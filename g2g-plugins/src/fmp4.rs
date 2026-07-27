@@ -13,6 +13,7 @@ use alloc::vec::Vec;
 use g2g_core::{AudioFormat, G2gError, TextFormat, VideoCodec};
 
 use crate::mp4box::{be32, be64, boxes, find_box, find_path, parse_esds, parse_esds_video};
+use crate::opusparse::{opus_head_from_dops, parse_opus_head};
 
 #[derive(Debug)]
 pub(crate) struct Header {
@@ -168,10 +169,10 @@ pub(crate) fn parse_header(data: &[u8]) -> Result<Header, G2gError> {
 }
 
 /// What one track carries: a video elementary stream (codec + geometry +
-/// parameter sets), an audio elementary stream (format + channel layout +
-/// AudioSpecificConfig), or a timed-text stream (subtitle format). The
-/// multi-track read-side analog of `TrackInit` in the muxer; clear tracks only
-/// (encryption stays single-track via [`parse_header`]).
+/// parameter sets), an audio elementary stream (format + channel layout + codec
+/// config), or a timed-text stream (subtitle format). The multi-track read-side
+/// analog of `TrackInit` in the muxer; clear tracks only (encryption stays
+/// single-track via [`parse_header`]).
 #[derive(Debug, Clone)]
 pub(crate) enum TrackKind {
     Video {
@@ -184,7 +185,10 @@ pub(crate) enum TrackKind {
         format: AudioFormat,
         channels: u8,
         sample_rate: u32,
-        asc: Vec<u8>,
+        /// The track's out-of-band codec config, in the form the elementary
+        /// stream carries it: AAC's AudioSpecificConfig (`esds`), or an Opus
+        /// `OpusHead` rebuilt from the `dOps` (M791). Empty when there is none.
+        config: Vec<u8>,
     },
     /// A timed-text subtitle track. The container carries the per-cue timing
     /// (sample PTS + duration); `format` names the elementary cue payload's syntax
@@ -393,9 +397,12 @@ fn parse_audio_entry(
     entries: &[u8],
     timescale: u32,
 ) -> Result<(TrackKind, Option<CencDefaults>), G2gError> {
-    // Opus: raw self-delimited packets, nothing to forward out-of-band (the
-    // caps carry channels / rate), so `asc` stays empty. The `dOps`
-    // OutputChannelCount is authoritative over the sample-entry channelcount.
+    // Opus: the `dOps` carries the same fields as an `OpusHead`, so it is
+    // rebuilt into one and forwarded in-band (M791), the convention `OggDemux`
+    // already uses, so the decoder trims the pre-skip and a remux keeps it. The
+    // `dOps` OutputChannelCount is authoritative over the sample-entry
+    // channelcount. A `dOps` that does not parse leaves the track without config
+    // (playable, untrimmed) rather than failing the whole file.
     if let Some(opus) = find_box(entries, b"Opus") {
         let entry_channels = u16::from_be_bytes(
             opus.get(16..18)
@@ -403,9 +410,11 @@ fn parse_audio_entry(
                 .try_into()
                 .expect("2 bytes"),
         ) as u8;
-        let channels = find_box(opus.get(28..).unwrap_or(&[]), b"dOps")
-            .and_then(|d| d.get(1).copied())
-            .filter(|&c| c != 0)
+        let config = find_box(opus.get(28..).unwrap_or(&[]), b"dOps")
+            .and_then(opus_head_from_dops)
+            .unwrap_or_default();
+        let channels = parse_opus_head(&config)
+            .map(|(c, _)| c)
             .unwrap_or(entry_channels);
         if channels == 0 {
             return Err(G2gError::CapsMismatch);
@@ -415,7 +424,7 @@ fn parse_audio_entry(
                 format: AudioFormat::Opus,
                 channels,
                 sample_rate: timescale,
-                asc: Vec::new(),
+                config,
             },
             None,
         ));
@@ -442,13 +451,13 @@ fn parse_audio_entry(
     }
     let esds = find_box(entry.get(28..).ok_or(G2gError::CapsMismatch)?, b"esds")
         .ok_or(G2gError::CapsMismatch)?;
-    let asc = parse_esds(esds)?;
+    let config = parse_esds(esds)?;
     Ok((
         TrackKind::Audio {
             format: AudioFormat::Aac,
             channels,
             sample_rate: timescale,
-            asc,
+            config,
         },
         cenc,
     ))
@@ -1646,7 +1655,7 @@ mod tests {
                 format,
                 channels,
                 sample_rate,
-                asc: got,
+                config: got,
             } => {
                 assert_eq!(*format, AudioFormat::Aac);
                 assert_eq!(*channels, 2);

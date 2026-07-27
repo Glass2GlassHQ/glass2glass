@@ -119,6 +119,13 @@ impl OpusEnc {
         self.emitted
     }
 
+    /// The live encoder's lookahead in 48 kHz samples: how far its output lags
+    /// its input, which is the pre-skip a container must declare for this
+    /// stream. `None` before `configure_pipeline` builds the encoder.
+    pub fn lookahead(&self) -> Option<u32> {
+        self.enc.as_ref().and_then(|e| e.lookahead().ok())
+    }
+
     fn input_templates() -> Vec<Caps> {
         // Audio caps carry no `Any`; pin the supported shapes (48 kHz stereo).
         let pcm = |format| Caps::Audio {

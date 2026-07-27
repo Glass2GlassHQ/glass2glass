@@ -361,10 +361,7 @@ Phased plan:
     send and fan-out recv, expressing an element that is at once sink and source)
     + `WebRtcDuplexSession` (one `Rtc`, sendrecv m-lines; WHIP/WHEP can't carry
     sendrecv, so peers exchange SDP directly over an `SdpChannel`). Validated by
-    in-process P2P loopbacks (video + full A/V, localhost, no server). Remaining:
-    mid-session transceiver ADD (a new m-line on a live session; direction
-    renegotiation landed M729, and the fixed-arity pad model has no target pad
-    for a genuinely new track, so this needs a design call).
+    in-process P2P loopbacks (video + full A/V, localhost, no server).
   - **T2 (mostly wiring): RTCP feedback.** PLI / keyframe-request DONE (M243):
     `Reconfigure::ForceKeyframe` + `take_reconfigure`; `WebRtcSink` maps a remote
     `Event::KeyframeRequest` to it, `Av1Enc` forces an IDR, `WebRtcWhepSrc`
@@ -378,11 +375,10 @@ Phased plan:
     their master) ships in a release, or str0m#1014 lands; a real LiveKit Cloud
     run (genuine remote NAT + STUN/TURN on the LiveKit elements); then Janus /
     Kinesis as wanted.
-  - **T5: advanced.** Live multi-rid validation of the WHIP simulcast session
-    (needs a WHIP server that ingests client simulcast: mediamtx cannot, and
-    LiveKit's WHIP ingress transcodes a single layer; Janus + a WHIP front end
-    is the known candidate). FEC is blocked upstream (str0m has no FEC payload;
-    loss recovery is NACK/RTX). Full renegotiation; data-channel loose ends
+  - **T5: advanced.** FEC is blocked upstream (str0m has no FEC payload;
+    loss recovery is NACK/RTX). Full renegotiation: a track arriving with no
+    spare pad of its kind left on the duplex session is refused, so growing the
+    pad count on a live graph is still open. Data-channel loose ends
     (str0m surfaces no remote-close event, so EOS rides an explicit marker
     message; a WHIP/SFU-signalled data channel vs the P2P `SdpChannel` seam).
   Recommended order: T1 remainders -> T2 -> T4 -> T5.
@@ -422,13 +418,13 @@ Phased plan:
 
 ## Containers
 
-- **MKV / WebM:** `Targets`-scoped (per-track) tags.
-  Single-track `MkvMux` also lacks unknown-size Clusters (live read).
-- **MPEG-TS:** multi-stream / multi-program muxing + selection; PCR-based timing.
-- **OGG:** multi-stream; `oggmux`.
+- **MKV / WebM:** single-track `MkvMux` lacks unknown-size Clusters (live read).
+- **OGG:** chained streams (a second physical stream after the first one's end-of-stream page).
 - **FLV:** VP6 / H.263 / MP3 / Speex codecs (only H.264 + AAC ride the tag
   stream today).
 - **CMAF / fMP4:** the CMAF-specific signalling layer on `Mp4Sink` / `Mp4Src`.
+- **MP4 faststart:** relocate a progressive file's `moov` ahead of its `mdat`, as
+  its own opt-in (progressive writes it at the end).
 
 ## Codecs
 
@@ -657,7 +653,6 @@ _(No open parser items.)_
 
 ## Tag system
 
-- Matroska `Targets`-scoped (per-track) tags + nested SimpleTags.
 - MP4 freeform (`----`) and integer atoms (track / disc number).
 - A per-stream tag merge policy for multi-stream containers.
 

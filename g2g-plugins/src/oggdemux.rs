@@ -30,44 +30,14 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SeekController;
 use g2g_core::{
     AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps, CapsConstraint,
-    CapsSet, ConfigureOutcome, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate,
-    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Seek, Segment, Tag,
-    TagList,
+    CapsSet, ConfigureOutcome, FrameTiming, G2gError, MemoryDomain, MultiOutputElement,
+    MultiOutputSink, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec, Seek, Segment, Stream, StreamCollection, StreamType, Tag, TagList,
 };
 
 use crate::demuxseek::{Admit, DemuxSeek};
-use crate::ogg::{OggCodec, OggDemuxer};
-
-/// Number of 48 kHz samples an Opus packet decodes to, from its TOC byte
-/// (RFC 6716 §3.1): config (top 5 bits) gives the per-frame duration, the frame
-/// count code (low 2 bits) the frame count. Opus is always 48 kHz, so this maps
-/// directly to a duration. `0` for an empty packet.
-fn opus_packet_samples(pkt: &[u8]) -> u32 {
-    let Some(&toc) = pkt.first() else {
-        return 0;
-    };
-    let frame_samples: u32 = match toc >> 3 {
-        // SILK NB/MB/WB and Hybrid SWB/FB: 10 / 20 / 40 / 60 ms.
-        0 | 4 | 8 => 480,
-        1 | 5 | 9 => 960,
-        2 | 6 | 10 => 1920,
-        3 | 7 | 11 => 2880,
-        12 | 14 => 480,
-        13 | 15 => 960,
-        // CELT NB/WB/SWB/FB: 2.5 / 5 / 10 / 20 ms.
-        16 | 20 | 24 | 28 => 120,
-        17 | 21 | 25 | 29 => 240,
-        18 | 22 | 26 | 30 => 480,
-        _ => 960,
-    };
-    let frames: u32 = match toc & 0x3 {
-        0 => 1,
-        1 | 2 => 2,
-        // Code 3: the frame count is the low 6 bits of the following byte.
-        _ => pkt.get(1).map(|b| (b & 0x3F) as u32).unwrap_or(1).max(1),
-    };
-    frame_samples.saturating_mul(frames)
-}
+use crate::ogg::{OggCodec, OggDemuxer, OggLogicalStream};
+use crate::opusparse::packet_samples as opus_packet_samples;
 
 /// Convert a 48 kHz sample count to nanoseconds.
 fn opus_samples_to_ns(samples: u64) -> u64 {
@@ -80,39 +50,14 @@ pub struct OggDemux {
     demux: OggDemuxer,
     configured: bool,
     emitted: u64,
-    last_caps: Option<Caps>,
     bus: Option<BusHandle>,
     tags_posted: bool,
-    /// Running stream-time (ns) of the next audio packet, accumulated from each
-    /// Opus packet's decoded duration (the demuxer carries no per-packet PTS).
-    /// FLAC times from `decoded_samples` instead.
-    pts_ns: u64,
-    /// Running count of decoded samples (per channel; 48 kHz incl. pre-skip for
-    /// Opus, the STREAMINFO rate for FLAC) over the audio packets seen so far.
-    /// For Opus, compared against the end-of-stream granule position to trim
-    /// the encoder padding off the final packet(s).
-    decoded_samples: u64,
-    /// Whether the in-band codec header (`OpusHead` / the native `fLaC`
-    /// STREAMINFO) was forwarded to the decoder. Reset on a flush so the
-    /// re-read stream re-sends it.
-    head_forwarded: bool,
     /// The logical stream to emit (`stream` property): Opus by default, Flac
-    /// for the Ogg-FLAC mapping, or Vorbis. A stream of any other codec is
-    /// dropped.
+    /// for the Ogg-FLAC mapping, or Vorbis. A file with no stream of that codec
+    /// forwards nothing.
     stream: OggCodec,
-    /// Vorbis packet-duration tables (M778), parsed from the ident + setup
-    /// headers once both land. `None` until then / for other codecs / when the
-    /// setup scan fails (packets then ride untimed and untrimmed).
-    vorbis: Option<crate::ogg::VorbisTiming>,
-    /// The previous Vorbis audio packet's block size (`None` before the first,
-    /// whose window has no predecessor: it primes the overlap and decodes to
-    /// nothing, counting `blocksize / 2` on the timeline).
-    prev_blocksize: Option<u32>,
-    /// Vorbis timeline anchor (M778): the excess of the natural packet
-    /// durations over the first audio page's granule position, clipped off the
-    /// front of the emitted timeline (initial encoder priming). `Some(0)` when
-    /// the first page is the EOS page (an end clamp, not an anchor).
-    anchor_offset: Option<u64>,
+    /// Caps, in-band config and packet timing for the selected bitstream.
+    emitter: StreamEmitter,
     /// Seek support (M362): app time seeks drive an upstream byte-seek and a
     /// re-sync. Inert unless `with_seek` wired the controllers.
     seek: DemuxSeek,
@@ -130,16 +75,10 @@ impl OggDemux {
             demux: OggDemuxer::new(),
             configured: false,
             emitted: 0,
-            last_caps: None,
             bus: None,
             tags_posted: false,
-            pts_ns: 0,
-            decoded_samples: 0,
-            head_forwarded: false,
             stream: OggCodec::Opus,
-            vorbis: None,
-            prev_blocksize: None,
-            anchor_offset: None,
+            emitter: StreamEmitter::default(),
             seek: DemuxSeek::default(),
         }
     }
@@ -155,16 +94,10 @@ impl OggDemux {
 
     /// Reset the parser for a discontinuity (a `Flush` / seek): drop the Ogg
     /// page/packet state and the running PTS, which the re-read stream
-    /// re-establishes from its first page. The caps are unchanged (same file), so
-    /// `last_caps` is kept (no redundant `CapsChanged`).
+    /// re-establishes from its first page.
     fn reset_parser(&mut self) {
         self.demux = OggDemuxer::new();
-        self.pts_ns = 0;
-        self.decoded_samples = 0;
-        self.head_forwarded = false;
-        self.vorbis = None;
-        self.prev_blocksize = None;
-        self.anchor_offset = None;
+        self.emitter.reset();
     }
 
     /// Attach the pipeline bus so the stream's VorbisComment metadata posts as a
@@ -199,33 +132,23 @@ impl OggDemux {
         }
     }
 
-    /// The concrete caps once the identification header is parsed, or `None`
-    /// until then / when the stream's codec is not the selected one.
-    fn concrete_caps(&self) -> Option<Caps> {
-        let info = self.demux.info()?;
-        if info.codec != self.stream || info.sample_rate == 0 {
-            return None;
-        }
-        let format = match info.codec {
-            OggCodec::Opus => AudioFormat::Opus,
-            OggCodec::Flac => AudioFormat::Flac,
-            OggCodec::Vorbis => AudioFormat::Vorbis,
-            _ => return None,
-        };
-        Some(Caps::Audio {
-            format,
-            channels: info.channels.max(1),
-            sample_rate: info.sample_rate,
-        })
+    /// The logical bitstream this element forwards: the first one whose codec is
+    /// the `stream` selection. A grouped file (M790) carries several, so the
+    /// selection picks among them; a single-stream file has only one candidate.
+    fn selected(&self) -> Option<usize> {
+        self.demux.stream_of(self.stream)
     }
 
     /// Emit a `CapsChanged` once the stream parameters are known, then forward
-    /// each audio packet. A stream whose codec is not the `stream` selection is
-    /// drained and dropped (the output pad is typed by the selection).
+    /// each audio packet. A file with no stream of the selected codec is drained
+    /// and dropped (the output pad is typed by the selection).
     async fn emit_ready(&mut self, out: &mut dyn OutputSink) -> Result<(), G2gError> {
         // Surface the stream's metadata once, as soon as the comment header lands.
         if !self.tags_posted && self.bus.is_some() {
-            if let Some(comment) = self.demux.comment_header() {
+            let comment = self
+                .selected()
+                .and_then(|i| self.demux.streams()[i].comment_header());
+            if let Some(comment) = comment {
                 let tags = parse_vorbis_comment(comment);
                 self.tags_posted = true;
                 if !tags.is_empty() {
@@ -235,77 +158,151 @@ impl OggDemux {
                 }
             }
         }
-        if let Some(caps) = self.concrete_caps() {
-            if self.last_caps.as_ref() != Some(&caps) {
-                out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
-                self.last_caps = Some(caps);
+        // Drain every logical bitstream (an unselected one must not accumulate
+        // packets for the length of the file), keeping the selected one's.
+        let chosen = self.selected();
+        let mut packets = Vec::new();
+        for index in 0..self.demux.streams().len() {
+            let taken = self
+                .demux
+                .stream_mut(index)
+                .map(|s| s.take_packets())
+                .unwrap_or_default();
+            if Some(index) == chosen {
+                packets = taken;
             }
         }
-        let selected = self.demux.info().map(|i| i.codec) == Some(self.stream);
-        // Forward the codec config in-band once, before the first audio packet:
-        // OpusHead as-is (the decoder reads its pre-skip from it); for FLAC the
-        // native `fLaC` STREAMINFO the mapping's first packet embeds at offset 9,
-        // with the last-metadata-block flag set so the standalone header
-        // terminates (detect() already validated the layout); for Vorbis all
-        // three headers (ident / comment / setup, each with its unambiguous
-        // `\x0Nvorbis` prefix; the decoder needs ident + setup). Codec config,
-        // not audio, so the decoder consumes it without emitting PCM.
-        if selected && !self.head_forwarded {
-            let mut heads: Vec<Vec<u8>> = Vec::new();
-            match self.stream {
-                OggCodec::Vorbis => {
-                    if let (Some(h), Some(c), Some(s)) = (
-                        self.demux.head_header(),
-                        self.demux.comment_header(),
-                        self.demux.setup_header(),
-                    ) {
-                        heads.extend([h.to_vec(), c.to_vec(), s.to_vec()]);
+        let Some(index) = chosen else {
+            return Ok(());
+        };
+        let ready = self.emitter.step(&self.demux.streams()[index], packets);
+        if let Some(caps) = ready.caps {
+            out.push(PipelinePacket::CapsChanged(caps)).await?;
+        }
+        for (payload, timing) in ready.frames {
+            // M362 seek: every audio packet is a resync point, so drop until the
+            // first packet at/after the target, which emits a fresh segment. The
+            // in-band codec config (duration 0 at time 0) always flows: the
+            // decoder needs it whatever the seek target.
+            if timing.duration_ns != 0 || timing.pts_ns != 0 {
+                match self.seek.admit(timing.pts_ns, true) {
+                    Admit::Drop => continue,
+                    Admit::Resume(start) => {
+                        let seg = Segment::for_flush_seek(&Seek::flush_to(start), None);
+                        out.push(PipelinePacket::Segment(seg)).await?;
                     }
-                }
-                OggCodec::Flac => {
-                    if let Some(head) = self.demux.head_header() {
-                        let mut native = head[9..].to_vec();
-                        native[4] |= 0x80;
-                        heads.push(native);
-                    }
-                }
-                _ => {
-                    if let Some(head) = self.demux.head_header() {
-                        heads.push(head.to_vec());
-                    }
+                    Admit::Emit => {}
                 }
             }
+            let frame = Frame::new(
+                MemoryDomain::System(SystemSlice::from_boxed(payload.into_boxed_slice())),
+                timing,
+                self.emitted,
+            );
+            self.emitted += 1;
+            out.push(PipelinePacket::DataFrame(frame)).await?;
+        }
+        Ok(())
+    }
+}
+
+/// What one demux step produced for a logical bitstream: the refined caps (when
+/// they changed) and the frames to forward, the in-band codec config first.
+#[derive(Debug, Default)]
+struct StreamReady {
+    caps: Option<Caps>,
+    frames: Vec<(Vec<u8>, FrameTiming)>,
+}
+
+/// The per-logical-bitstream half of the demux elements: caps announcement,
+/// in-band codec-config forwarding, and packet timing for each of the three
+/// mappings. [`OggDemux`] owns one for its selected stream, [`OggDemuxN`] one
+/// per output port, so this mapping logic is written once.
+#[derive(Debug, Default)]
+struct StreamEmitter {
+    /// Last caps announced, so an unchanged refinement is not re-emitted.
+    last_caps: Option<Caps>,
+    /// Running stream-time (ns) of the next audio packet, accumulated from each
+    /// Opus packet's decoded duration (the demuxer carries no per-packet PTS).
+    /// FLAC and Vorbis time from `decoded_samples` instead.
+    pts_ns: u64,
+    /// Running count of decoded samples (per channel; 48 kHz incl. pre-skip for
+    /// Opus, the header rate otherwise) over the audio packets seen so far.
+    /// Compared against the end-of-stream granule position to trim the encoder
+    /// padding off the final packet(s).
+    decoded_samples: u64,
+    /// Whether the in-band codec header (`OpusHead` / the native `fLaC`
+    /// STREAMINFO / the three Vorbis headers) was forwarded to the decoder.
+    /// Reset on a flush so the re-read stream re-sends it.
+    head_forwarded: bool,
+    /// Vorbis packet-duration tables (M778), parsed from the ident + setup
+    /// headers once both land. `None` until then / for other codecs / when the
+    /// setup scan fails (packets then ride untimed and untrimmed).
+    vorbis: Option<crate::ogg::VorbisTiming>,
+    /// The previous Vorbis audio packet's block size (`None` before the first,
+    /// whose window has no predecessor: it primes the overlap and decodes to
+    /// nothing, counting `blocksize / 2` on the timeline).
+    prev_blocksize: Option<u32>,
+    /// Vorbis timeline anchor (M778): the excess of the natural packet
+    /// durations over the first audio page's granule position, clipped off the
+    /// front of the emitted timeline (initial encoder priming). `Some(0)` when
+    /// the first page is the EOS page (an end clamp, not an anchor).
+    anchor_offset: Option<u64>,
+}
+
+impl StreamEmitter {
+    /// Drop the timing state for a discontinuity (a `Flush` / seek), which the
+    /// re-read stream re-establishes from its first page. The caps are unchanged
+    /// (same file), so `last_caps` is kept (no redundant `CapsChanged`).
+    fn reset(&mut self) {
+        let caps = self.last_caps.take();
+        *self = Self::default();
+        self.last_caps = caps;
+    }
+
+    /// Turn this batch of `packets` from `stream` into the caps + frames to
+    /// forward.
+    fn step(&mut self, stream: &OggLogicalStream, packets: Vec<Vec<u8>>) -> StreamReady {
+        let mut ready = StreamReady::default();
+        let Some(info) = stream.info() else {
+            return ready;
+        };
+        let codec = info.codec;
+        if let Some(caps) = concrete_caps(info) {
+            if self.last_caps.as_ref() != Some(&caps) {
+                self.last_caps = Some(caps.clone());
+                ready.caps = Some(caps);
+            }
+        }
+        // Forward the codec config in-band once, before the first audio packet.
+        // Codec config, not audio, so the decoder consumes it without emitting
+        // PCM.
+        if !self.head_forwarded {
+            let heads = in_band_headers(codec, stream);
             if !heads.is_empty() {
                 self.head_forwarded = true;
-                for head in heads {
-                    let frame = Frame::new(
-                        MemoryDomain::System(SystemSlice::from_boxed(head.into_boxed_slice())),
-                        FrameTiming::default(),
-                        self.emitted,
-                    );
-                    self.emitted += 1;
-                    out.push(PipelinePacket::DataFrame(frame)).await?;
-                }
+                ready
+                    .frames
+                    .extend(heads.into_iter().map(|h| (h, FrameTiming::default())));
             }
         }
         // Vorbis timing tables (M778): parse once ident + setup have landed.
-        if self.stream == OggCodec::Vorbis && self.vorbis.is_none() {
-            if let (Some(h), Some(s)) = (self.demux.head_header(), self.demux.setup_header()) {
+        if codec == OggCodec::Vorbis && self.vorbis.is_none() {
+            if let (Some(h), Some(s)) = (stream.head_header(), stream.setup_header()) {
                 self.vorbis = crate::ogg::VorbisTiming::parse(h, s);
             }
         }
         // Total decodable samples (incl. pre-skip); the tail beyond it is padding.
-        let end_granule = self.demux.end_granule();
-        let sample_rate = self.demux.info().map(|i| i.sample_rate).unwrap_or(0);
-        let packets = self.demux.take_packets();
+        let end_granule = stream.end_granule();
+        let sample_rate = info.sample_rate;
         // Vorbis timeline anchor (M778): the first audio page's granule names
         // the timeline position after its last packet, so the excess of the
         // natural durations over it is initial priming, clipped off the front
         // (ffmpeg anchors the same way, as a negative first pts). An EOS first
         // page is an end clamp instead: anchor at zero.
-        if self.stream == OggCodec::Vorbis && self.anchor_offset.is_none() {
+        if codec == OggCodec::Vorbis && self.anchor_offset.is_none() {
             if let (Some(t), Some((gp, n, eos))) =
-                (self.vorbis.as_ref(), self.demux.first_data_granule())
+                (self.vorbis.as_ref(), stream.first_data_granule())
             {
                 self.anchor_offset = if eos || self.decoded_samples > 0 {
                     // Already streaming (a headerless mid-join): no anchor.
@@ -325,10 +322,7 @@ impl OggDemux {
             }
         }
         for packet in packets {
-            if !selected {
-                continue;
-            }
-            let pkt_samples = match self.stream {
+            let pkt_samples = match codec {
                 // Each Ogg-FLAC audio packet is one whole frame; its header
                 // carries the block size.
                 OggCodec::Flac => crate::flacparse::parse_frame_header(&packet)
@@ -369,12 +363,12 @@ impl OggDemux {
             // packet whole.
             let span = anchored_after.saturating_sub(anchored_before);
             let keep = match end_granule {
-                Some(gp) if matches!(self.stream, OggCodec::Opus | OggCodec::Vorbis) => {
+                Some(gp) if matches!(codec, OggCodec::Opus | OggCodec::Vorbis) => {
                     gp.saturating_sub(anchored_before).min(span)
                 }
                 _ => span,
             };
-            let (pts_ns, duration_ns) = match self.stream {
+            let (pts_ns, duration_ns) = match codec {
                 OggCodec::Flac | OggCodec::Vorbis => {
                     // Sample-accurate at the header rate (per-packet rounding
                     // would drift at non-48 kHz rates).
@@ -401,31 +395,71 @@ impl OggDemux {
             if keep == 0 && anchored_before > 0 && pkt_samples > 0 {
                 continue;
             }
-            // M362 seek: every audio packet is a resync point, so drop until the
-            // first packet at/after the target, which emits a fresh segment.
-            match self.seek.admit(pts_ns, true) {
-                Admit::Drop => continue,
-                Admit::Resume(start) => {
-                    let seg = Segment::for_flush_seek(&Seek::flush_to(start), None);
-                    out.push(PipelinePacket::Segment(seg)).await?;
-                }
-                Admit::Emit => {}
-            }
-            let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(packet.into_boxed_slice())),
+            ready.frames.push((
+                packet,
                 FrameTiming {
                     pts_ns,
                     dts_ns: pts_ns,
                     duration_ns,
                     ..FrameTiming::default()
                 },
-                self.emitted,
-            );
-            self.emitted += 1;
-            out.push(PipelinePacket::DataFrame(frame)).await?;
+            ));
         }
-        Ok(())
+        ready
     }
+}
+
+/// The concrete caps of a parsed stream, or `None` for a codec with no g2g
+/// mapping / before the identification header lands.
+fn concrete_caps(info: crate::ogg::OggStreamInfo) -> Option<Caps> {
+    if info.sample_rate == 0 {
+        return None;
+    }
+    Some(Caps::Audio {
+        format: match info.codec {
+            OggCodec::Opus => AudioFormat::Opus,
+            OggCodec::Flac => AudioFormat::Flac,
+            OggCodec::Vorbis => AudioFormat::Vorbis,
+            _ => return None,
+        },
+        channels: info.channels.max(1),
+        sample_rate: info.sample_rate,
+    })
+}
+
+/// The codec config to forward in-band ahead of the audio packets: `OpusHead`
+/// as-is (the decoder reads its pre-skip from it); for FLAC the native `fLaC`
+/// STREAMINFO the mapping's first packet embeds at offset 9, with the
+/// last-metadata-block flag set so the standalone header terminates (`detect()`
+/// already validated the layout); for Vorbis all three headers (ident / comment
+/// / setup, each with its unambiguous `\x0Nvorbis` prefix; the decoder needs
+/// ident + setup). Empty until the headers have parsed.
+fn in_band_headers(codec: OggCodec, stream: &OggLogicalStream) -> Vec<Vec<u8>> {
+    let mut heads: Vec<Vec<u8>> = Vec::new();
+    match codec {
+        OggCodec::Vorbis => {
+            if let (Some(h), Some(c), Some(s)) = (
+                stream.head_header(),
+                stream.comment_header(),
+                stream.setup_header(),
+            ) {
+                heads.extend([h.to_vec(), c.to_vec(), s.to_vec()]);
+            }
+        }
+        OggCodec::Flac => {
+            if let Some(head) = stream.head_header() {
+                let mut native = head[9..].to_vec();
+                native[4] |= 0x80;
+                heads.push(native);
+            }
+        }
+        _ => {
+            if let Some(head) = stream.head_header() {
+                heads.push(head.to_vec());
+            }
+        }
+    }
+    heads
 }
 
 impl AsyncElement for OggDemux {
@@ -544,6 +578,234 @@ static OGGDEMUX_PROPS: &[PropertySpec] = &[PropertySpec::new(
     PropKind::Str,
     "logical stream to emit: opus | flac | vorbis",
 )];
+
+/// The published stream id of the `index`-th logical bitstream. Positional,
+/// matching the output-port order of [`OggDemuxN`].
+fn stream_id(index: usize) -> alloc::string::String {
+    alloc::format!("ogg-stream-{index}")
+}
+
+/// One output port of [`OggDemuxN`]: which logical bitstream it carries and the
+/// codec that types it at negotiation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OggPort {
+    /// Index of the file's logical bitstream, in beginning-of-stream order.
+    pub stream: usize,
+    /// Expected codec, from the file probe. The port's runtime `CapsChanged`
+    /// carries the concrete channels / rate.
+    pub codec: OggCodec,
+}
+
+impl OggPort {
+    pub fn new(stream: usize, codec: OggCodec) -> Self {
+        Self { stream, codec }
+    }
+}
+
+/// Multi-output Ogg demuxer (M790): one grouped Ogg byte stream in, N audio
+/// elementary streams out, one per output port. The multi-output counterpart of
+/// [`OggDemux`] (which forwards a single selected stream); the read-side analog
+/// of [`crate::oggmuxn::OggMuxN`].
+///
+/// A [`MultiOutputElement`] driven by
+/// [`run_source_fanout`](g2g_core::runtime::run_source_fanout). Routing is
+/// **positional**: each [`OggPort`] names the file's logical bitstream it
+/// carries, in beginning-of-stream order. Ogg groups streams rather than typing
+/// them, and a file with two streams of the same codec is ordinary, so there is
+/// no codec-keyed selection to route by; a port's codec is only the
+/// negotiation-time expectation from the file probe, which its runtime
+/// `CapsChanged` then refines. A stream no port names is drained and dropped.
+///
+/// The container's per-stream metadata posts as
+/// [`BusMessage::StreamTag`] under the same ids as the announced
+/// [`StreamCollection`](BusMessage::StreamCollection).
+#[derive(Debug)]
+pub struct OggDemuxN {
+    demux: OggDemuxer,
+    /// The logical bitstream each output port carries, in port order.
+    ports: Vec<OggPort>,
+    /// Caps, in-band config and packet timing per port.
+    emitters: Vec<StreamEmitter>,
+    bus: Option<BusHandle>,
+    /// Set once the `StreamCollection` has been announced, so it posts once.
+    collection_posted: bool,
+    /// Whether the `index`-th logical bitstream's tags have been posted.
+    tags_posted: Vec<bool>,
+    emitted: u64,
+}
+
+impl OggDemuxN {
+    /// A demuxer with one output port per entry of `ports`. Panics if `ports` is
+    /// empty (a fan-out needs a port).
+    pub fn new(ports: Vec<OggPort>) -> Self {
+        assert!(
+            !ports.is_empty(),
+            "OggDemuxN needs at least one output port"
+        );
+        let emitters = (0..ports.len()).map(|_| StreamEmitter::default()).collect();
+        Self {
+            demux: OggDemuxer::new(),
+            ports,
+            emitters,
+            bus: None,
+            collection_posted: false,
+            tags_posted: Vec::new(),
+            emitted: 0,
+        }
+    }
+
+    /// Attach the pipeline bus so the file's `StreamCollection` and per-stream
+    /// VorbisComment tags post once parsed.
+    pub fn with_bus(mut self, bus: BusHandle) -> Self {
+        self.bus = Some(bus);
+        self
+    }
+
+    /// Number of output ports.
+    pub fn port_count(&self) -> usize {
+        self.ports.len()
+    }
+
+    /// Count of frames forwarded across all ports.
+    pub fn emitted(&self) -> u64 {
+        self.emitted
+    }
+
+    /// Announce every logical bitstream as a [`BusMessage::StreamCollection`],
+    /// once the opening beginning-of-stream block has parsed (so the list is
+    /// complete). Lists all streams, not just the ported ones.
+    fn post_stream_collection(&mut self) {
+        if self.collection_posted || !self.demux.grouping_done() {
+            return;
+        }
+        let streams: Vec<Stream> = self
+            .demux
+            .streams()
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| {
+                Some(Stream::new(
+                    stream_id(i),
+                    StreamType::Audio,
+                    concrete_caps(s.info()?)?,
+                ))
+            })
+            .collect();
+        if streams.is_empty() {
+            return;
+        }
+        self.collection_posted = true;
+        if let Some(bus) = &self.bus {
+            bus.try_post(BusMessage::StreamCollection(StreamCollection::new(
+                "ogg-0", streams,
+            )));
+        }
+    }
+
+    /// Post each stream's VorbisComment metadata as a [`BusMessage::StreamTag`],
+    /// once, as its comment header lands.
+    fn post_tags(&mut self) {
+        self.tags_posted.resize(self.demux.streams().len(), false);
+        let mut fresh: Vec<(alloc::string::String, TagList)> = Vec::new();
+        for (index, stream) in self.demux.streams().iter().enumerate() {
+            if self.tags_posted[index] {
+                continue;
+            }
+            let Some(comment) = stream.comment_header() else {
+                continue;
+            };
+            self.tags_posted[index] = true;
+            let tags = parse_vorbis_comment(comment);
+            if !tags.is_empty() {
+                fresh.push((stream_id(index), tags));
+            }
+        }
+        if let Some(bus) = &self.bus {
+            for (stream_id, tags) in fresh {
+                bus.try_post(BusMessage::StreamTag { stream_id, tags });
+            }
+        }
+    }
+}
+
+impl MultiOutputElement for OggDemuxN {
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
+
+    fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
+        upstream_caps.intersect(&OggDemux::input_caps())
+    }
+
+    /// Declare each port's elementary-stream caps, so the solver negotiates each
+    /// branch against its codec at startup; the concrete channels / rate arrive
+    /// at runtime via the port's `CapsChanged`.
+    fn port_output_caps(&self, port: usize) -> Option<Caps> {
+        self.ports.get(port).map(|p| OggDemux::output_caps(p.codec))
+    }
+
+    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        absolute_caps
+            .intersect(&OggDemux::input_caps())
+            .map(|_| ConfigureOutcome::Accepted)
+    }
+
+    fn process<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+        out: &'a mut dyn MultiOutputSink,
+    ) -> Self::ProcessFuture<'a> {
+        Box::pin(async move {
+            match packet {
+                PipelinePacket::DataFrame(frame) => {
+                    let Some(slice) = frame.domain.as_system_slice() else {
+                        return Err(G2gError::UnsupportedDomain);
+                    };
+                    self.demux.push_data(slice);
+                }
+                // Emit any final packets; the runner forwards EOS to every port.
+                PipelinePacket::Eos => {}
+                PipelinePacket::CapsChanged(_) => return Ok(()),
+                _ => return Ok(()),
+            }
+            if self.bus.is_some() {
+                self.post_stream_collection();
+                self.post_tags();
+            }
+            // Drain every logical bitstream first: one no port carries must not
+            // accumulate packets for the length of the file.
+            let mut drained: Vec<Vec<Vec<u8>>> = (0..self.demux.streams().len())
+                .map(|i| {
+                    self.demux
+                        .stream_mut(i)
+                        .map(|s| s.take_packets())
+                        .unwrap_or_default()
+                })
+                .collect();
+            let ports = self.ports.clone();
+            for (port, spec) in ports.iter().enumerate() {
+                let Some(packets) = drained.get_mut(spec.stream).map(core::mem::take) else {
+                    continue;
+                };
+                let ready = self.emitters[port].step(&self.demux.streams()[spec.stream], packets);
+                if let Some(caps) = ready.caps {
+                    out.push_to(port, PipelinePacket::CapsChanged(caps)).await?;
+                }
+                for (payload, timing) in ready.frames {
+                    let frame = Frame::new(
+                        MemoryDomain::System(SystemSlice::from_boxed(payload.into_boxed_slice())),
+                        timing,
+                        self.emitted,
+                    );
+                    self.emitted += 1;
+                    out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
+                }
+            }
+            Ok(())
+        })
+    }
+}
 
 impl PadTemplates for OggDemux {
     fn pad_templates() -> Vec<PadTemplate> {

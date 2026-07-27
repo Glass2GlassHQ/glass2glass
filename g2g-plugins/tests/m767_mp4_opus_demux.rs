@@ -1,9 +1,12 @@
 //! M767: Opus in MP4 demuxes. The muxer already wrote the `Opus` sample entry
 //! and `dOps`; now the demux side recognizes it, so an Opus track surfaces as
 //! `Caps::Audio { Opus }` with the raw packets forwarded verbatim (no ADTS
-//! framing, Opus needs no out-of-band config). Round-trips our own muxer and
-//! demuxes an ffmpeg-authored file, comparing per-packet sizes against
-//! ffprobe's sample table read.
+//! framing). Round-trips our own muxer and demuxes an ffmpeg-authored file,
+//! comparing per-packet sizes against ffprobe's sample table read.
+//!
+//! Since M791 the `dOps` is rebuilt into an `OpusHead` and leads the audio
+//! in-band (the `OggDemux` convention), so the packet assertions skip that
+//! first frame; `m791_mp4_opus_preskip` covers what it carries.
 #![cfg(feature = "std")]
 
 use core::future::Future;
@@ -127,6 +130,19 @@ async fn demux_opus(file: &[u8]) -> (Vec<Caps>, Vec<Vec<u8>>) {
     (tap.caps, tap.frames)
 }
 
+/// The audio packets of a demuxed Opus track: the leading in-band `OpusHead`
+/// (codec config, not audio) split off from the frames that follow it.
+fn split_config(frames: Vec<Vec<u8>>) -> (Vec<u8>, Vec<Vec<u8>>) {
+    let mut it = frames.into_iter();
+    let head = it.next().expect("the demuxer emitted at least the config");
+    assert!(
+        head.starts_with(b"OpusHead"),
+        "the dOps is forwarded in-band as an OpusHead, got {:?}",
+        &head[..head.len().min(8)]
+    );
+    (head, it.collect())
+}
+
 #[tokio::test]
 async fn opus_round_trips_through_mp4() {
     // Three fake Opus packets (a real TOC byte, then arbitrary payload); the
@@ -163,7 +179,8 @@ async fn opus_round_trips_through_mp4() {
         )),
         "concrete Opus caps announced, got {caps:?}"
     );
-    assert_eq!(frames, packets, "packets recovered verbatim");
+    let (_, audio) = split_config(frames);
+    assert_eq!(audio, packets, "packets recovered verbatim");
 }
 
 #[tokio::test]
@@ -232,7 +249,8 @@ async fn ffmpeg_authored_opus_mp4_demuxes() {
         )),
         "Opus caps at 48 kHz announced, got {caps:?}"
     );
-    let sizes: Vec<usize> = frames.iter().map(Vec::len).collect();
+    let (_, audio) = split_config(frames);
+    let sizes: Vec<usize> = audio.iter().map(Vec::len).collect();
     assert_eq!(
         sizes, expected_sizes,
         "per-packet sizes match ffprobe's sample-table read"

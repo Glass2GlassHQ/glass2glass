@@ -1427,6 +1427,9 @@ application reacts to:
   by the source arm from `SourceLoop::query_duration` (`GST_MESSAGE_DURATION_CHANGED`).
 - `Tag(TagList)` — container / stream metadata, posted out of band
   (`GST_MESSAGE_TAG`).
+- `StreamTag { stream_id, tags }` — the same, scoped to one elementary stream
+  (a Matroska `Tag` whose `Targets` names a `TagTrackUID`). `stream_id` is the
+  id that stream has in the posted `StreamCollection`.
 - `NegotiationFailed(NegotiationFailure)` — structured caps conflict naming the
   responsible element pair (§4.13), posted by the coordinator on a startup or
   mid-stream negotiation failure.
@@ -1673,7 +1676,13 @@ advertises a fixatable placeholder `Range` refined downstream via `CapsChanged`
 `Mp4Src` / `Mp4Sink`. The TS muxer (`g2g-plugins::mpegts::TsMuxer`) is the
 inverse path, wrapping access units back into PES + 188-byte packets with
 a real PSI CRC. It is multi-stream: `with_streams` builds one program
-carrying N elementary streams, each on its own PID and named in one PMT. The
+carrying N elementary streams, each on its own PID and named in one PMT, and
+multi-program: `with_programs` takes a `(program_number, stream_type)` per
+stream, so the PAT names each program, each program gets its own PMT (naming
+only its own streams) and its own PCR on its first stream's PID. The fan-in
+element exposes that layout as `prog-map`, one program number per input pad in
+pad order (`prog-map=1,1,2`); GStreamer's `mpegtsmux` takes a pad-name structure
+there, g2g a comma list because its properties are scalar. The
 single-input `tsmux::TsMux` element wraps a one-stream muxer (`! mpegtsmux !`);
 the multi-input `tsmuxn::TsMux` (a `MultiInputElement`) muxes A+V, interleaving
 access units across inputs by PTS via the `take_earliest_by` merge so the
@@ -1725,7 +1734,27 @@ have a `seekable` (two-pass) mode (M770): the element buffers the file and
 finalizes it at EOS with a front `SeekHead` (fixed-layout entries indexing
 Info / Tracks / Tags / Cues, the Cues position patched in place once known), so
 the file seeks from byte 0 without reading past the Clusters; mutually
-exclusive with `streamable`, and the default streaming output is unchanged.
+exclusive with `streamable`, and the default streaming output is unchanged. The
+same finalize fills an `Info` `Duration` reserved beside them (M794): the value
+is the highest block end across tracks, each block's timestamp plus its own
+duration rounded to a `TimestampScale` tick, which is how ffmpeg arrives at the
+number it writes, so a remux reports the length ffmpeg's own file does. Only
+this mode can carry a duration at all, since a streaming caller has emitted its
+header long before the total is known, and a live stream has no length to
+declare.
+The Segment `Tags` element carries metadata in both directions, per file and per
+track (M787): a `Tag` whose `Targets` names a `TagTrackUID` scopes to that track,
+and a nested `SimpleTag` flattens to a `parent/child` key. The muxers take
+per-track metadata from `with_track_tags` and write each track's `TrackUID` in
+its `TrackEntry`; the demuxers map a parsed UID back to its track and post the
+tags as `BusMessage::StreamTag` on that stream's collection id, leaving
+untargeted tags on `BusMessage::Tag`. A track's title and language are the
+exception: they live in the `TrackEntry` itself as `Name` / `Language`
+(`LanguageBCP47` preferred when both are present), which is where ffmpeg writes
+them and where a player reads them, so the muxers route `Tag::Title` /
+`Tag::Language` there instead of writing a `SimpleTag`, and the demuxers merge
+both sources into one `StreamTag` per stream (M788). A missing `Language` stays
+absent rather than becoming the spec's implicit `eng`.
 
 The Ogg demuxer is the third, the same parser + element split on
 `Caps::ByteStream{Ogg}`. `g2g-plugins::ogg::OggDemuxer` parses RFC 3533 pages
@@ -1734,6 +1763,22 @@ reassembly, sniff the codec from the first packet's `OpusHead`, skip the setup
 headers), and `OggDemux` emits the Opus audio packets as `Caps::Audio{Opus}` with
 the channel count refined from `OpusHead`. The container is auto-detectable
 (`typefind` "OggS", `filesrc bytestream-format=auto`).
+
+Grouped multi-stream Ogg is handled per serial (M790). A file opens with one
+beginning-of-stream page per logical bitstream before any other page (RFC 3533
+§4), and the parser keeps an `OggLogicalStream` for each: its own codec mapping,
+headers, packets and granule anchors. A serial joins only from a page in that
+opening block (or as the first stream seen when the file was joined mid-stream,
+which a byte-seek does), so a beginning-of-stream page arriving later, meaning a
+**chained** physical stream, is ignored rather than misparsed; the concurrent
+stream count is capped, since the serials come from the file. `OggDemux`
+forwards the first bitstream whose codec matches its `stream` selection and
+drains the rest; `OggDemuxN` is the multi-output form, one port per `OggPort`
+naming the bitstream it carries. Routing is positional rather than codec-keyed
+because two streams of one codec in a file is ordinary. The per-stream caps,
+in-band codec config and packet timing are one shared `StreamEmitter` both
+elements drive, and `OggDemuxN` announces the file's `StreamCollection` and
+posts each stream's VorbisComment as a `StreamTag` under the same ids.
 
 Opus decode applies the two container trims so the PCM sample count matches
 ffmpeg / gstreamer (RFC 7845). Pre-skip is codec config the decoder owns:
@@ -1747,6 +1792,87 @@ Both trims are attacker-controlled inputs, folded with saturating math (an
 oversized pre-skip trims a frame to nothing, an underflowing granule drops it).
 A stream with no `OpusHead` and no per-frame duration (the RTP path) decodes
 untrimmed, matching gstreamer's SDP-less default.
+
+MP4 carries the same two facts in its own spelling, and both directions convert
+to the in-band convention (M791). The `dOps` OpusSpecificBox holds an
+`OpusHead`'s fields big-endian, so the demuxers rebuild one from it and forward
+it ahead of the audio (`opusparse::opus_head_from_dops`, validated field by
+field: unknown version, zero channel count or truncated channel-mapping table
+leave the track configless rather than failing the file); the end trim is the
+final sample's short `stts` / `trun` duration, which arrives as `duration_ns`
+like the Ogg granule trim does. `Mp4MuxN` is the inverse: an in-band `OpusHead`
+is consumed as config and becomes the `dOps` (`dops_from_opus_head`), so a remux
+keeps the source's pre-skip, output gain and channel mapping byte for byte,
+while a freshly encoded stream (`OpusEnc` emits raw packets, no header, so its
+RTP consumers are unaffected) falls back to libopus' 312-sample lookahead. The
+Opus `trak` also carries the `edts`/`elst` the Opus-in-ISOBMFF binding requires,
+`media_time` = pre-skip.
+
+Which duration a reader then reports depends on the layout, so `Mp4MuxN` writes
+both (M793, the `fragmented` property, default `true`). Fragmented is the
+streamable one: `ftyp`+`moov` up front, a `moof`+`mdat` per fragment, empty
+sample tables and zero header durations. ffmpeg derives such a file's duration
+by summing the `trun` sample durations and applies an edit list only as a
+timestamp shift, so an Opus track reports the media span with a negative
+`start_time` and `segment_duration` is written `0` (the total is unknown when
+the `moov` goes out). Progressive is the two-pass one, the shape `matroskamux`'s
+`seekable` mode has: every sample is buffered, then `ftyp` + a single `mdat` +
+a `moov` are emitted together at EOS, with real `stts` / `ctts` / `stss` /
+`stsc` / `stsz` / `stco` tables (one sample per chunk, ordered by decode
+timestamp) and real `mvhd`/`tkhd`/`mdhd` durations. That is enough for ffmpeg to
+apply the edit, so the reported duration is the trimmed presentation length
+exactly. The cost is holding the movie in memory, so a live or long capture
+wants the fragmented default. GStreamer spells this choice `fragment-duration =
+0`, which g2g already spends on "one fragment per access unit", so the layout
+gets its own boolean rather than a silently redefined property.
+
+Compressed audio negotiates with the `0/0` "unknown until parsed" caps, so
+`Mp4MuxN` adopts the concrete channel count and rate from the runtime
+`CapsChanged` a demuxer emits, while the `moov` is still unwritten; without it a
+remuxed audio track would declare a zero `mdhd` timescale.
+
+Matroska is the third spelling of the same two facts, and converts to the same
+in-band convention (M792). The pre-skip is the `CodecPrivate` `OpusHead` itself,
+which the demuxers forward ahead of the audio (validated as a real header first),
+plus a `CodecDelay` on the TrackEntry, the ns form of the same count, which
+`MkvMuxN` derives from the header it is about to write and pairs with the
+mapping's fixed 80 ms `SeekPreRoll`. Block timestamps are not shifted: the first
+Opus block sits at 0 and `CodecDelay` tells the decoder what to discard, so a
+Matroska file starts at zero where the MP4 edit list makes `start_time` negative.
+The end trim, with no granule to carry it, is the final block's `DiscardPadding`,
+which is nanoseconds and so survives the millisecond `TimestampScale` grid that
+`BlockDuration` alone would round away (a 6.5 ms tail becomes 7); the muxer
+writes both, as ffmpeg does, and the demuxer lets the ns element win. Because the
+packet's own length is needed to turn a tail discard into a kept duration, the
+conversion reads the Opus TOC byte and applies to Opus only.
+
+The Ogg muxer (`oggmux`: `g2g-plugins::ogg::OggPageWriter` + the `OggMux`
+element) is the inverse path, on the same three mappings (M789). The writer
+laces packets into pages (255-byte segments, continuation pages past the
+255-segment limit, the RFC 3533 CRC-32 with polynomial `0x04c11db7` and no
+reflection), holding the last packet back so the end-of-stream flag always has a
+page to ride. Codec config arrives in-band, the same convention the demuxers
+emit: an `OpusHead` / the three Vorbis headers / the native `fLaC` block are held
+until the first audio packet, then written as the beginning-of-stream page plus
+one following page at granule 0, so audio starts on a fresh page as the mappings
+require. Vorbis is remux-only (no encoder), and the Ogg-FLAC first packet is
+rebuilt around the source STREAMINFO with the mandatory VorbisComment appended.
+Granule positions come from each mapping's own sample count (Opus TOC durations,
+FLAC block sizes, the lapped `(prev + cur) / 4` from the `VorbisTiming` mode
+tables, the inverse of the demux-side durations), held to the total `duration_ns`
+the input declared when every packet is timed. That last bound is what carries a
+source's end-of-stream trim through a remux, so ffmpeg decodes a remuxed Opus /
+Vorbis / FLAC stream to the source's samples bit for bit.
+
+`oggmuxn` is the fan-in form (M790): one `OggStreamMux` per input pad, each its
+own logical bitstream with its own serial, packets interleaved by PTS through
+the same `InputAggregator` merge the other multi-track muxers use. Grouping
+forces the page order, which is why the per-stream header writing is split in
+two: every stream's beginning-of-stream page is written first, in pad order,
+then each stream's remaining header pages, then the data pages. That block goes
+out when the merge first releases a packet, the first moment every pad's in-band
+codec config is known to have arrived. Like `mpegtsmux`, the one name `oggmux`
+covers both shapes, the parser picking by link degree.
 
 An audio decoder fixates its output caps even when a demuxer only knows the
 channel count once it parses the stream: it advertises `PcmS16Le` at a concrete
@@ -2031,9 +2157,10 @@ video-layer + audio pad model, pad 0 = highest resolution), rid assignment
 (`f`/`h`/`q` high-to-low), the one-m-line `a=rid`/`a=simulcast` offer,
 per-(mid,rid) `KeyframeRoutes`, and the BWE `LayerAllocator` (whole-layer
 on/off with time hysteresis; per-layer targets, M722). The LiveKit path is
-browser-validated end to end; the WHIP path shares the machinery but its live
-multi-rid ingest validation is owed (no local WHIP server ingests client
-simulcast).
+browser-validated end to end; the WHIP path is validated against Broadcast Box
+(M786), the reference peer for client-simulcast ingest (mediamtx cannot ingest
+it, LiveKit's WHIP ingress transcodes one layer): a three-layer publish shows up
+server-side as three rids with independently growing packet counts.
 
 **Session sources as DAG nodes (M727).** The receive-side mirror:
 `NodeKind::FanoutSrc(n)` via `Graph::add_fanout_src` runs a terminal
@@ -2082,9 +2209,31 @@ P2P loopback; a real SFU signaller — LiveKit, etc. — plugs into the same sea
 Mid-session renegotiation (M729): a cloneable `DuplexControl` toggles a track,
 batching direction changes (SendRecv <-> Inactive) into one re-offer over the
 `SdpChannel`; the peer answers it in its loop (typed `offer\n` / `answer\n`
-prefixes distinguish the exchange; on glare the answerer role yields). A
-genuinely NEW track has no target pad under the fixed-arity model and stays a
-design question.
+prefixes distinguish the exchange; on glare the answerer role yields).
+
+**Mid-session NEW tracks: spare pads (M784).** The fixed-arity pad model has no
+pad to grow into, so a session reserves them up front:
+`with_spare_tracks(video, audio)` appends declared-but-inactive pads after the
+active ones, and they carry no m-line at the handshake. Each negotiated m-line is
+a *binding* holding its `Mid`, kind, and the input / output pads it serves, which
+replaces the per-kind mid slots: recv routing, PLI, BWE, and the direction
+toggles all resolve through it. A spare binds either when its **send** pad gets
+its first frame (the session offers the peer a new sendrecv m-line, one exchange
+at a time, the frame itself dropped like any frame before its m-line exists) or
+when the peer's re-offer lands and `MediaAdded` fires for an unknown mid, which
+claims the first free pad of that kind on both sides. A pad bound mid-session
+emits its `CapsChanged` before its first frame; the active pads are announced at
+session start. A track whose kind has no free pad left is rejected (it stays
+unbound and its media is skipped), since the pad count is fixed at graph build
+time. `DuplexControl::remove_track` is the inverse (M785): it `stop_media`s the
+m-line (port 0, out of the BUNDLE group), batched into the same re-offer as the
+direction toggles. Both peers then drop that binding by walking their media
+after each SDP application (a stopped m-line stays in the session with
+`Media::stopped()` set, so this also retracts an ADD that lost a glare race),
+which frees its pads with no `Eos` on the output pad, since a later track may
+claim it and the end of the run EOSes every pad anyway. Reuse always negotiates
+a NEW m-line, a stopped one cannot be reactivated, and the freed output pad
+re-announces its caps before the new track's first frame.
 The two roles discover their m-line `Mid`s differently and this asymmetry is
 load-bearing: the **offerer** captures its `Mid`s from `SdpApi::add_media`'s
 return, while the **answerer** learns them from `Event::MediaAdded` after

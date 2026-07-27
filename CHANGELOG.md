@@ -6,6 +6,30 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M794: the Matroska two-pass mode writes a real `Info` `Duration`, so a finished file reports its length instead of `N/A`.
+
+- M793: `mp4mux` gains a progressive (non-fragmented) mode writing one `mdat` plus a `moov` with real sample tables at EOS, so a reader reports the exact trimmed duration.
+
+- M792: Opus pre-skip and end trim survive Matroska both ways: the `CodecPrivate` demuxes into an in-band `OpusHead`, an in-band header builds it back, and the track carries `CodecDelay` / `SeekPreRoll` with the tail trim in a `DiscardPadding`.
+
+- M791: Opus pre-skip survives MP4 both ways: the `dOps` demuxes into an in-band `OpusHead`, an in-band header builds the `dOps`, and the Opus `trak` carries the `edts`/`elst`.
+
+- M790: grouped multi-stream Ogg both ways: `OggDemuxN` splits each logical bitstream onto its own port and `oggmuxn` writes several back into one file.
+
+- M789: `oggmux` writes Opus, Vorbis and Ogg-FLAC logical bitstreams, the mux direction of the Ogg container.
+
+- M788: a Matroska track's title and language ride its `TrackEntry` `Name` / `Language` in both directions, merged into the same per-stream tag view.
+
+- M787: Matroska per-track tags: the muxer writes `Targets`-scoped `Tag`s and the demuxer posts them as `BusMessage::StreamTag` per stream, with nested SimpleTags flattened.
+
+- M786: the WHIP simulcast session is validated against Broadcast Box: a three-layer publish is ingested as three rids with growing packet counts.
+
+- M785: `DuplexControl::remove_track` stops a duplex track's m-line, freeing its pads on both peers for the next track to claim.
+
+- M784: `WebRtcDuplexSession` adds tracks mid-session on spare pads reserved by `with_spare_tracks`, offering the peer a new m-line on the pad's first frame.
+
+- M783: the MPEG-TS muxers write several programs, one per `prog-map` entry on `mpegtsmux`, each with its own PMT and PCR.
+
 - M782: MPEG-TS PES carries DTS for reordered video (round-trips through mux/demux) and clocks the PCR on DTS.
 
 - M781: `tsdemux` parses every PAT program and demuxes the one chosen by the `program-number` property (default the first).

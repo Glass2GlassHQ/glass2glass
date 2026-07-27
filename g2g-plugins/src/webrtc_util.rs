@@ -299,6 +299,36 @@ pub(crate) async fn delete_resource(resource: &str, bearer: Option<&str>) {
     }
 }
 
+/// The resource URL shared by a publishing element and its session task, so the
+/// RFC 9725 `DELETE` happens exactly once whichever side ends first: the element
+/// on a clean `Eos`, the task on a peer disconnect or an error exit. Taking the
+/// URL and deleting it are one step, so the loser of the race sends nothing (a
+/// second `DELETE` on a torn-down session is a 400 from the server).
+#[derive(Debug, Default, Clone)]
+pub(crate) struct ResourceHandle(alloc::sync::Arc<std::sync::Mutex<Option<String>>>);
+
+impl ResourceHandle {
+    pub(crate) fn new(url: Option<String>) -> Self {
+        Self(alloc::sync::Arc::new(std::sync::Mutex::new(url)))
+    }
+
+    /// The URL a `PATCH` (trickle / ICE restart) targets, `None` once torn down.
+    pub(crate) fn url(&self) -> Option<String> {
+        self.0.lock().unwrap().clone()
+    }
+
+    /// DELETE the resource unless some other holder already did. No-op when the
+    /// server returned no resource URL.
+    pub(crate) async fn delete_once(&self, bearer: Option<&str>) {
+        // Guard dropped before the await: the lock is std, and the take is what
+        // makes this run at most once.
+        let url = self.0.lock().unwrap().take();
+        if let Some(url) = url {
+            delete_resource(&url, bearer).await;
+        }
+    }
+}
+
 /// Add just the ICE host candidate to `rtc`, before the offer is built, so the
 /// initial offer already carries a directly reachable candidate (trickle sends
 /// the reflexive / relay ones after the POST).
@@ -869,5 +899,64 @@ mod tests {
         );
         assert_eq!(session.etag.as_deref(), Some("\"etag-xyz\""));
         assert_eq!(session.answer, "v=0\r\no=- 2 2 IN IP4 0.0.0.0\r\n");
+    }
+
+    /// The element and its session task both hold the resource handle and both
+    /// tear down; only the first `delete_once` may reach the server (a second
+    /// DELETE on a gone session is a 400). The same one-shot TCP responder counts
+    /// the requests that actually arrive.
+    #[tokio::test]
+    async fn resource_handle_deletes_exactly_once() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = alloc::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let server = {
+            let seen = seen.clone();
+            tokio::spawn(async move {
+                loop {
+                    let Ok((mut stream, _)) = listener.accept().await else {
+                        return;
+                    };
+                    let mut buf = [0u8; 1024];
+                    let n = stream.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]).into_owned();
+                    let line = req.lines().next().unwrap_or_default().to_string();
+                    seen.lock().unwrap().push(line);
+                    let _ = stream
+                        .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+                        .await;
+                    let _ = stream.flush().await;
+                }
+            })
+        };
+
+        let handle = ResourceHandle::new(Some(alloc::format!(
+            "http://127.0.0.1:{port}/whip/resource/abc"
+        )));
+        handle.delete_once(None).await;
+        // Whoever loses the race sends nothing, and the URL is gone for good.
+        assert_eq!(handle.url(), None);
+        handle.delete_once(None).await;
+        handle.delete_once(Some("token")).await;
+        server.abort();
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(
+            &*seen,
+            &["DELETE /whip/resource/abc HTTP/1.1".to_string()],
+            "exactly one DELETE should reach the server"
+        );
+    }
+
+    /// No resource URL (a minimal server that omits `Location`): teardown is a
+    /// no-op rather than a request to nowhere.
+    #[tokio::test]
+    async fn resource_handle_without_a_url_is_a_no_op() {
+        let handle = ResourceHandle::default();
+        assert_eq!(handle.url(), None);
+        handle.delete_once(None).await;
     }
 }

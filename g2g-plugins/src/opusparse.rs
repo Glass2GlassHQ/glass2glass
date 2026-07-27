@@ -39,6 +39,167 @@ use g2g_core::{
 /// always report this rate; the bandwidth only bounds the audio content.
 pub const OPUS_RATE_HZ: u32 = 48_000;
 
+/// Number of 48 kHz samples an Opus packet decodes to, from its TOC byte
+/// (RFC 6716 §3.1): config (top 5 bits) gives the per-frame duration, the frame
+/// count code (low 2 bits) the frame count. Opus is always 48 kHz, so this maps
+/// directly to a duration. `0` for an empty packet. Shared by
+/// [`crate::oggdemux`] (packet timing) and [`crate::oggmux`] (granule positions).
+pub(crate) fn packet_samples(pkt: &[u8]) -> u32 {
+    let Some(&toc) = pkt.first() else {
+        return 0;
+    };
+    let frame_samples: u32 = match toc >> 3 {
+        // SILK NB/MB/WB and Hybrid SWB/FB: 10 / 20 / 40 / 60 ms.
+        0 | 4 | 8 => 480,
+        1 | 5 | 9 => 960,
+        2 | 6 | 10 => 1920,
+        3 | 7 | 11 => 2880,
+        12 | 14 => 480,
+        13 | 15 => 960,
+        // CELT NB/WB/SWB/FB: 2.5 / 5 / 10 / 20 ms.
+        16 | 20 | 24 | 28 => 120,
+        17 | 21 | 25 | 29 => 240,
+        18 | 22 | 26 | 30 => 480,
+        _ => 960,
+    };
+    let frames: u32 = match toc & 0x3 {
+        0 => 1,
+        1 | 2 => 2,
+        // Code 3: the frame count is the low 6 bits of the following byte.
+        _ => pkt.get(1).map(|b| (b & 0x3F) as u32).unwrap_or(1).max(1),
+    };
+    frame_samples.saturating_mul(frames)
+}
+
+/// Pre-skip written into a synthesized Opus header: libopus' encoder lookahead
+/// at 48 kHz, which is what [`crate::opusenc::OpusEnc`] (and ffmpeg's libopus
+/// wrapper) actually delays its output by. A remuxed stream carries the source
+/// header instead, so this only applies to a freshly encoded one.
+pub(crate) const OPUS_ENCODER_PRE_SKIP: u16 = 312;
+
+/// Fixed part of an RFC 7845 `OpusHead`: 8-byte magic, version, channel count,
+/// pre-skip, input sample rate, output gain, channel mapping family.
+const OPUS_HEAD_FIXED: usize = 19;
+
+/// A synthesized `OpusHead` (RFC 7845 §5.1) for a stream that carried none: a
+/// freshly encoded one, where the pre-skip is the encoder's lookahead. Channel
+/// mapping family 0, which is defined for mono and stereo only, so the count is
+/// clamped to that. Used by every muxer that has to invent a header.
+pub(crate) fn synth_opus_head(channels: u8, sample_rate: u32) -> Vec<u8> {
+    let mut h = Vec::from(*b"OpusHead");
+    h.push(1); // version
+    h.push(channels.clamp(1, 2));
+    h.extend_from_slice(&OPUS_ENCODER_PRE_SKIP.to_le_bytes());
+    h.extend_from_slice(&sample_rate.max(1).to_le_bytes()); // original input rate
+    h.extend_from_slice(&0i16.to_le_bytes()); // output gain
+    h.push(0); // channel mapping family
+    h
+}
+
+/// Fixed part of an RFC 8316 `dOps` payload: the same fields big-endian, with
+/// the magic and version byte replaced by a single version byte. Only the MP4
+/// elements speak `dOps`, and those are `std`-gated, hence the cfg on this and
+/// the two converters below.
+#[cfg(feature = "std")]
+const DOPS_FIXED: usize = 11;
+
+/// Whether `packet` is Opus codec config rather than audio: the RFC 7845
+/// identification (`OpusHead`) or comment (`OpusTags`) header. Audio packets
+/// start with a TOC byte, so the 8-byte magic separates them.
+pub(crate) fn is_opus_config(packet: &[u8]) -> bool {
+    packet.starts_with(b"OpusHead") || packet.starts_with(b"OpusTags")
+}
+
+/// Channel count and pre-skip from an in-band `OpusHead` (RFC 7845), or `None`
+/// if `packet` is not one. Offset 9 is the total channel count for every mapping
+/// family (family 1 multichannel included, which the per-packet TOC cannot
+/// recover), offset 10 the LE u16 pre-skip. Family != 0 appends a channel
+/// mapping table past the fixed part, which this does not read.
+pub(crate) fn parse_opus_head(packet: &[u8]) -> Option<(u8, u16)> {
+    let fixed = packet.get(..OPUS_HEAD_FIXED)?;
+    if !fixed.starts_with(b"OpusHead") {
+        return None;
+    }
+    let channels = fixed[9];
+    let pre_skip = u16::from_le_bytes([fixed[10], fixed[11]]);
+    (channels >= 1).then_some((channels, pre_skip))
+}
+
+/// Length of a channel mapping table for `channels` channels: stream count,
+/// coupled count, then one output-channel index per channel (RFC 7845 §5.1.1).
+/// Zero for mapping family 0, which has no table.
+#[cfg(feature = "std")]
+fn mapping_len(family: u8, channels: u8) -> usize {
+    if family == 0 {
+        0
+    } else {
+        2 + channels as usize
+    }
+}
+
+/// Build an RFC 7845 `OpusHead` from an RFC 8316 `dOps` payload (the
+/// OpusSpecificBox body, version byte first). The two carry the same fields;
+/// `dOps` is big-endian and drops the magic, `OpusHead` is little-endian.
+/// `None` for an unknown version, a zero channel count, or a truncated
+/// channel-mapping table: every field is attacker-controlled.
+#[cfg(feature = "std")]
+pub(crate) fn opus_head_from_dops(dops: &[u8]) -> Option<Vec<u8>> {
+    let fixed = dops.get(..DOPS_FIXED)?;
+    if fixed[0] != 0 {
+        return None; // OpusSpecificBox Version
+    }
+    let channels = fixed[1];
+    if channels == 0 {
+        return None;
+    }
+    let pre_skip = u16::from_be_bytes([fixed[2], fixed[3]]);
+    let input_rate = u32::from_be_bytes([fixed[4], fixed[5], fixed[6], fixed[7]]);
+    let output_gain = i16::from_be_bytes([fixed[8], fixed[9]]);
+    let family = fixed[10];
+    let mapping = dops.get(DOPS_FIXED..DOPS_FIXED + mapping_len(family, channels))?;
+
+    let mut head = Vec::from(*b"OpusHead");
+    head.push(1); // OpusHead version
+    head.push(channels);
+    head.extend_from_slice(&pre_skip.to_le_bytes());
+    head.extend_from_slice(&input_rate.to_le_bytes());
+    head.extend_from_slice(&output_gain.to_le_bytes());
+    head.push(family);
+    head.extend_from_slice(mapping);
+    Some(head)
+}
+
+/// The inverse of [`opus_head_from_dops`]: the `dOps` payload carrying an in-band
+/// `OpusHead`'s fields, so a remux into MP4 writes the source's real pre-skip,
+/// output gain and channel mapping. `None` for anything that is not a complete
+/// `OpusHead`.
+#[cfg(feature = "std")]
+pub(crate) fn dops_from_opus_head(head: &[u8]) -> Option<Vec<u8>> {
+    let fixed = head.get(..OPUS_HEAD_FIXED)?;
+    if !fixed.starts_with(b"OpusHead") {
+        return None;
+    }
+    let channels = fixed[9];
+    if channels == 0 {
+        return None;
+    }
+    let pre_skip = u16::from_le_bytes([fixed[10], fixed[11]]);
+    let input_rate = u32::from_le_bytes([fixed[12], fixed[13], fixed[14], fixed[15]]);
+    let output_gain = i16::from_le_bytes([fixed[16], fixed[17]]);
+    let family = fixed[18];
+    let mapping = head.get(OPUS_HEAD_FIXED..OPUS_HEAD_FIXED + mapping_len(family, channels))?;
+
+    let mut dops = Vec::new();
+    dops.push(0); // OpusSpecificBox Version
+    dops.push(channels);
+    dops.extend_from_slice(&pre_skip.to_be_bytes());
+    dops.extend_from_slice(&input_rate.to_be_bytes());
+    dops.extend_from_slice(&output_gain.to_be_bytes());
+    dops.push(family);
+    dops.extend_from_slice(mapping);
+    Some(dops)
+}
+
 #[derive(Debug, Default)]
 pub struct OpusParse {
     configured: bool,
@@ -141,7 +302,7 @@ impl AsyncElement for OpusParse {
                         // An in-band OpusHead is codec config, not audio: parse the
                         // authoritative channel count from it, emit caps, and
                         // consume it (do not forward as a DataFrame).
-                        if let Some(ch) = parse_opus_head(bytes) {
+                        if let Some((ch, _)) = parse_opus_head(bytes) {
                             self.header_channels = Some(ch);
                             if let Some(caps) = self.caps_update(ch) {
                                 out.push(PipelinePacket::CapsChanged(caps)).await?;
@@ -225,20 +386,6 @@ pub struct OpusToc {
     pub frame_duration_us: u32,
 }
 
-/// Total output channel count from an in-band Opus identification header
-/// (RFC 7845 `OpusHead`), or `None` if `packet` is not one. Byte 9 is the total
-/// channel count for every mapping family (family 1 multichannel included),
-/// which the per-packet TOC cannot recover. The header is at least 19 bytes
-/// (family 0); family != 0 appends the channel-mapping table.
-fn parse_opus_head(packet: &[u8]) -> Option<u8> {
-    if packet.len() >= 19 && packet.starts_with(b"OpusHead") {
-        let channels = packet[9];
-        (channels >= 1).then_some(channels)
-    } else {
-        None
-    }
-}
-
 /// Decode the TOC byte of an Opus packet (RFC 6716 §3.1). `None` only for an
 /// empty packet: every TOC byte value is structurally valid, so a non-empty
 /// packet always yields a `OpusToc`.
@@ -287,6 +434,11 @@ fn decode_config(config: u8) -> (OpusMode, OpusBandwidth, u32) {
 pub fn fuzz_parse(data: &[u8]) {
     let _ = parse_opus_head(data);
     let _ = parse_toc(data);
+    #[cfg(feature = "std")]
+    {
+        let _ = opus_head_from_dops(data);
+        let _ = dops_from_opus_head(data);
+    }
 }
 
 #[cfg(test)]
@@ -563,13 +715,70 @@ mod tests {
 
     #[test]
     fn parse_opus_head_needs_magic_and_length() {
-        assert_eq!(parse_opus_head(&opus_head(8, 1)), Some(8));
+        assert_eq!(parse_opus_head(&opus_head(8, 1)), Some((8, 0)));
         assert_eq!(parse_opus_head(b"OpusHeadtooshort"), None, "under 19 bytes");
         assert_eq!(
             parse_opus_head(&opus_packet(31, true, 12)),
             None,
             "a TOC packet is not a header"
         );
+    }
+
+    /// `OpusHead` <-> `dOps` is the same field set in the other byte order, so a
+    /// round trip must be the identity, channel-mapping table included.
+    #[cfg(feature = "std")]
+    #[test]
+    fn opus_head_and_dops_round_trip_including_the_mapping_table() {
+        for head in [opus_head(2, 0), opus_head(6, 1)] {
+            let dops = dops_from_opus_head(&head).expect("a header converts");
+            assert_eq!(dops[0], 0, "OpusSpecificBox version");
+            assert_eq!(dops[1], head[9], "channel count");
+            assert_eq!(
+                u16::from_be_bytes([dops[2], dops[3]]),
+                u16::from_le_bytes([head[10], head[11]]),
+                "pre-skip flips endianness"
+            );
+            assert_eq!(
+                opus_head_from_dops(&dops).as_deref(),
+                Some(&head[..]),
+                "the round trip is the identity"
+            );
+        }
+    }
+
+    /// Every `dOps` field is attacker-controlled: a bad version, a zero channel
+    /// count, a truncated fixed part or a truncated mapping table must all
+    /// decline rather than read past the box.
+    #[cfg(feature = "std")]
+    #[test]
+    fn malformed_dops_declines() {
+        let good = dops_from_opus_head(&opus_head(6, 1)).unwrap();
+        assert!(opus_head_from_dops(&good).is_some(), "the baseline parses");
+
+        let mut bad_version = good.clone();
+        bad_version[0] = 1;
+        assert_eq!(opus_head_from_dops(&bad_version), None, "unknown version");
+
+        let mut no_channels = good.clone();
+        no_channels[1] = 0;
+        assert_eq!(opus_head_from_dops(&no_channels), None, "zero channels");
+
+        for len in 0..good.len() {
+            assert_eq!(
+                opus_head_from_dops(&good[..len]),
+                None,
+                "a {len}-byte dOps is truncated"
+            );
+        }
+        // The same truncation discipline the other way.
+        let head = opus_head(6, 1);
+        for len in 0..head.len() {
+            assert_eq!(
+                dops_from_opus_head(&head[..len]),
+                None,
+                "a {len}-byte OpusHead is truncated"
+            );
+        }
     }
 
     #[tokio::test]
