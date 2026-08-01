@@ -531,7 +531,7 @@
 
 <!-- ═══ TRUST BAR ═══ -->
 <div class="trust-bar">
-    <p>Open source &middot; LGPL v2.1+ &middot; one core, portable across</p>
+    <p>Open source &middot; MPL-2.0 &middot; one core, portable across</p>
     <div class="trust-logos">
         <span>MCU</span>
         <span>RTOS</span>
@@ -592,22 +592,22 @@
             <div class="crate-card">
                 <div class="crate-name">g2g-core</div>
                 <div class="crate-tag">no_std, alloc optional</div>
-                <p>Traits (<code>AsyncElement</code>, <code>SourceLoop</code>), the static element model, <code>Frame</code>/<code>PipelinePacket</code>, <code>Caps</code> algebra, buffer pools, the pipeline clock, the CSP solver, and the runner. <code>alloc</code> (with the dynamic graph + solver + tooling) is an optional feature. LGPL v2.1+.</p>
+                <p>Traits (<code>AsyncElement</code>, <code>SourceLoop</code>), the static element model, <code>Frame</code>/<code>PipelinePacket</code>, <code>Caps</code> algebra, buffer pools, the pipeline clock, the CSP solver, and the runner. <code>alloc</code> (with the dynamic graph + solver + tooling) is an optional feature. MPL-2.0.</p>
             </div>
             <div class="crate-card">
                 <div class="crate-name">g2g-mcu</div>
                 <div class="crate-tag">no_std, no alloc</div>
-                <p>Heap-free MCU peripheral elements over <code>embedded-hal</code> trait seams (host-tested against the datasheet with mocks): <code>SpiDisplaySink</code> (ST7789 / ILI9341, whole-frame or banded streaming for large panels), <code>GrabberSrc</code> (DCMI/CSI camera), <code>PcmSink</code> (I2S/SAI), the fixed-point G.711 / IMA ADPCM codecs, the hardware <code>HwJpegDec</code> / <code>HwH264Enc</code> codec seams, <code>YuyvToI420</code> (camera-4:2:2 &rarr; encoder-4:2:0 convert), and <code>RtpSink</code>. LGPL v2.1+.</p>
+                <p>Heap-free MCU peripheral elements over <code>embedded-hal</code> trait seams (host-tested against the datasheet with mocks): <code>SpiDisplaySink</code> (ST7789 / ILI9341, whole-frame or banded streaming for large panels), <code>GrabberSrc</code> (DCMI/CSI camera), <code>PcmSink</code> (I2S/SAI), the fixed-point G.711 / IMA ADPCM codecs, the hardware <code>HwJpegDec</code> / <code>HwH264Enc</code> codec seams, <code>YuyvToI420</code> (camera-4:2:2 &rarr; encoder-4:2:0 convert), and <code>RtpSink</code>. MPL-2.0.</p>
             </div>
             <div class="crate-card">
                 <div class="crate-name">g2g-mcugen</div>
                 <div class="crate-tag">std, host tool</div>
-                <p>Host graph compiler: a declarative MCU graph (YAML/JSON, audio or video/display) compiles to a monomorphized static pipeline (heap-free Rust) with every ring sized from the graph's frame geometry. Develop on Linux, ship a bounded static build to the MCU. LGPL v2.1+.</p>
+                <p>Host graph compiler: a declarative MCU graph (YAML/JSON, audio or video/display) compiles to a monomorphized static pipeline (heap-free Rust) with every ring sized from the graph's frame geometry. Develop on Linux, ship a bounded static build to the MCU. MPL-2.0.</p>
             </div>
             <div class="crate-card">
                 <div class="crate-name">g2g-plugin</div>
                 <div class="crate-tag">no_std + alloc</div>
-                <p>SDK for dynamically loadable plugins: the <code>declare_plugin!</code> macro + an ABI version tag, loaded at runtime via <code>--plugin</code> / <code>$G2G_PLUGIN_PATH</code>. LGPL v2.1+.</p>
+                <p>SDK for dynamically loadable plugins: the <code>declare_plugin!</code> macro + an ABI version tag, loaded at runtime via <code>--plugin</code> / <code>$G2G_PLUGIN_PATH</code>. MPL-2.0.</p>
             </div>
             <div class="crate-card">
                 <div class="crate-name">g2g-plugins</div>
@@ -625,32 +625,32 @@
                     <span class="chip-label">Mux / sink / more</span>
                     <div class="chip-row"><span class="chip">MP4 / TS / MKV</span><span class="chip">Wayland / KMS</span><span class="chip">wgpu</span><span class="chip">Opus</span><span class="chip">gst-launch</span><span class="chip">scripting</span></div>
                 </div>
-                <p class="f-lead" style="margin-top: 10px;">LGPL v2.1+.</p>
+                <p class="f-lead" style="margin-top: 10px;">MPL-2.0.</p>
             </div>
             <div class="crate-card">
                 <div class="crate-name">g2g-ml</div>
                 <div class="crate-tag">std</div>
-                <p>ONNX Runtime inference (<code>OrtInference</code>) with CUDA + DirectML EPs, pure-Rust Burn inference (<code>BurnInference</code>) on wgpu, the keep-on-GPU wgpu branch (<code>WgpuPreprocess</code> + <code>WgpuInference</code>, GPU-resident tensors end to end), classification head, and the lock-free multi-stream <code>TensorBatcher</code> (fans N streams into one GPU tensor array). LGPL v2.1+.</p>
+                <p>ONNX Runtime inference (<code>OrtInference</code>) with CUDA + DirectML EPs, pure-Rust Burn inference (<code>BurnInference</code>) on wgpu, the keep-on-GPU wgpu branch (<code>WgpuPreprocess</code> + <code>WgpuInference</code>, GPU-resident tensors end to end), classification head, and the lock-free multi-stream <code>TensorBatcher</code> (fans N streams into one GPU tensor array). MPL-2.0.</p>
             </div>
             <div class="crate-card">
                 <div class="crate-name">g2g-bridge</div>
                 <div class="crate-tag">std, cdylib</div>
-                <p>C-FFI dynamic library to embed g2g sub-graphs inside legacy GStreamer pipelines. <code>libgstglass2glass.so</code>. LGPL v2.1+.</p>
+                <p>C-FFI dynamic library to embed g2g sub-graphs inside legacy GStreamer pipelines. <code>libgstglass2glass.so</code>. MPL-2.0.</p>
             </div>
             <div class="crate-card">
                 <div class="crate-name">g2g-python</div>
                 <div class="crate-tag">std</div>
-                <p>Hosts <code>gst-python-ml</code> elements as first-class g2g elements via embedded CPython (pyo3): transform / source / aggregator, zero-copy frames, GIL offload, analytics metadata. LGPL v2.1+.</p>
+                <p>Hosts <code>gst-python-ml</code> elements as first-class g2g elements via embedded CPython (pyo3): transform / source / aggregator, zero-copy frames, GIL offload, analytics metadata. MPL-2.0.</p>
             </div>
             <div class="crate-card">
                 <div class="crate-name">g2g-capi</div>
                 <div class="crate-tag">std, cdylib</div>
-                <p>C ABI (<code>include/g2g.h</code>) to drive whole pipelines from any language: <code>parse_launch</code> + run + bus poll, plus <code>appsrc</code> / <code>appsink</code> buffer I/O with a zero-copy lend. LGPL v2.1+.</p>
+                <p>C ABI (<code>include/g2g.h</code>) to drive whole pipelines from any language: <code>parse_launch</code> + run + bus poll, plus <code>appsrc</code> / <code>appsink</code> buffer I/O with a zero-copy lend. MPL-2.0.</p>
             </div>
             <div class="crate-card">
                 <div class="crate-name">g2g-pyapi</div>
                 <div class="crate-tag">std, pyo3</div>
-                <p>Python bindings (the inverse of g2g-python): <code>g2g.Pipeline(desc)</code> runs a graph on a background thread, <code>AppSrc.push</code> / <code>AppSink.pull</code> feed and drain it, <code>bus_poll</code> watches it. LGPL v2.1+.</p>
+                <p>Python bindings (the inverse of g2g-python): <code>g2g.Pipeline(desc)</code> runs a graph on a background thread, <code>AppSrc.push</code> / <code>AppSink.pull</code> feed and drain it, <code>bus_poll</code> watches it. MPL-2.0.</p>
             </div>
             <div class="crate-card" style="background: linear-gradient(135deg, var(--bg-secondary), var(--bg-card)); border-color: var(--accent);">
                 <div class="crate-name" style="color: var(--text-primary);">typed by construction</div>
@@ -1175,7 +1175,7 @@ g2g-launch videotestsrc num-buffers=8 ! \
 <!-- ═══ FOOTER ═══ -->
 <footer>
     <div class="footer-inner">
-        <p>&copy; 2026 Aaron Boxer &middot; glass2glass &middot; LGPL v2.1+</p>
+        <p>&copy; 2026 Aaron Boxer &middot; glass2glass &middot; MPL-2.0</p>
         <div class="footer-links">
             <a href="https://github.com/Glass2GlassHQ/glass2glass">GitHub</a>
             <a href="https://github.com/Glass2GlassHQ/glass2glass/blob/master/DESIGN.md">Spec</a>

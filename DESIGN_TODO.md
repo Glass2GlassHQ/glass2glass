@@ -235,8 +235,6 @@ Phased plan:
      an SoC + partner): QNX Screen display sink + vendor VPU via the M650 C-seam
      + GPU, as `target_os = "nto"` elements. Free to test (non-commercial SDP);
      commercial use is license-gated (confirm the open-source-interop clause).
-   (Licensing was considered and decided: the whole workspace stays
-   LGPL v2.1+, like ffmpeg and GStreamer.)
 
 ## Negotiation
 

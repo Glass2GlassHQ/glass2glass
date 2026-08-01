@@ -1,7 +1,7 @@
 [package]
 name = "g2g-python"
 description = "Host gst-python-ml elements as first-class glass2glass elements (embedded CPython via pyo3)."
-license = "LGPL-2.1-or-later"
+license = "MPL-2.0"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
