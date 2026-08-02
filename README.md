@@ -819,6 +819,6 @@ docs/            # GitHub Pages site
 
 ## License
 
-All crates are LGPL v2.1+.
+All crates are MPL-2.0.
 
 See [LICENSE](LICENSE).

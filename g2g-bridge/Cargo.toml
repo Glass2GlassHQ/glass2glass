@@ -1,7 +1,7 @@
 [package]
 name = "g2g-bridge"
 description = "C-FFI bridge that embeds glass2glass sub-graphs inside legacy GStreamer pipelines."
-license = "LGPL-2.1-or-later"
+license = "MPL-2.0"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

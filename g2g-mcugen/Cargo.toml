@@ -1,7 +1,7 @@
 [package]
 name = "g2g-mcugen"
 description = "Host graph compiler: a declarative MCU graph (YAML/JSON, audio or video/display) to a monomorphized static pipeline (heap-free Rust) plus its ring-memory budget."
-license = "LGPL-2.1-or-later"
+license = "MPL-2.0"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

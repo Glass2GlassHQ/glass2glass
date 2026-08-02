@@ -1,7 +1,7 @@
 [package]
 name = "g2g-capi"
 description = "C ABI for driving glass2glass pipelines from any language (parse_launch + run + bus)."
-license = "LGPL-2.1-or-later"
+license = "MPL-2.0"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

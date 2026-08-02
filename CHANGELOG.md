@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M795: relicensed the whole workspace from LGPL v2.1+ to MPL-2.0.
+
 - M794: the Matroska two-pass mode writes a real `Info` `Duration`, so a finished file reports its length instead of `N/A`.
 
 - M793: `mp4mux` gains a progressive (non-fragmented) mode writing one `mdat` plus a `moov` with real sample tables at EOS, so a reader reports the exact trimmed duration.

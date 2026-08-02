@@ -6,7 +6,7 @@
 [package]
 name = "g2g-mcu"
 description = "MCU peripheral elements (SPI display, capture seams) for the glass2glass multimedia framework."
-license = "LGPL-2.1-or-later"
+license = "MPL-2.0"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
