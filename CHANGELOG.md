@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M796: `bevy-g2g` integration crate: drop-in Bevy plugins for streaming a headless render over WHIP/WebRTC and for playing video on a mesh, replacing the two demo crates.
+
 - M795: relicensed the whole workspace from LGPL v2.1+ to MPL-2.0.
 
 - M794: the Matroska two-pass mode writes a real `Info` `Duration`, so a finished file reports its length instead of `N/A`.

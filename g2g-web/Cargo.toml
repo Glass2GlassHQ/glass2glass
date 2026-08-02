@@ -1,6 +1,6 @@
 # g2g-web: the deployable WebAssembly cdylib for the browser pipeline.
 #
-# EXCLUDED from the workspace (like `examples/bevy-g2g-stream` and the plugin
+# EXCLUDED from the workspace (like `bevy-g2g` and the plugin
 # example) so its cdylib crate-type, `std`, and wasm-bindgen deps never enter a
 # native `--workspace` build or perturb the no_std baseline's feature resolution.
 # Built only for wasm32, via `tools/wasm-demo/build.sh` (wasm-pack) or:

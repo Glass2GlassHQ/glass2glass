@@ -19,12 +19,10 @@ members = [
 # with its own target dir and feature resolution.
 exclude = [
     "g2g-plugins/tests/fixtures/example-plugin",
-    # Bevy server-side render-and-stream demo (M267): a heavy `bevy` dependency
-    # that must stay out of the normal build / CI. Standalone (its own
-    # Cargo.lock), built against g2g as path packages. See its README.
-    "examples/bevy-g2g-stream",
-    # Bevy bring-your-own-device decode demo (M741): same standalone setup.
-    "examples/bevy-g2g-decode",
+    # Bevy integration crate (M796): a heavy `bevy` dependency that must stay
+    # out of the normal build / CI. Standalone (its own Cargo.lock), built
+    # against g2g as path packages. See its README.
+    "bevy-g2g",
     # Android NativeActivity present harness (M742): NDK-built cdylib APK,
     # packaged by tools/android-apk-present-smoke.sh, never in the host build.
     "examples/g2g-android-present",
