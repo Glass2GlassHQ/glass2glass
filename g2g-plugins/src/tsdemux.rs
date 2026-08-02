@@ -39,12 +39,23 @@ use g2g_core::{
 
 use crate::demuxseek::{Admit, DemuxSeek};
 use crate::mpegts::{
-    EsUnit, TsDemuxer, STREAM_TYPE_AAC, STREAM_TYPE_AC3, STREAM_TYPE_H264, STREAM_TYPE_H265,
-    STREAM_TYPE_METADATA_PES, STREAM_TYPE_MPEG1_AUDIO, STREAM_TYPE_MPEG2_AUDIO,
-    STREAM_TYPE_MPEG4P2, STREAM_TYPE_PRIVATE_PES, TS_PACKET_LEN,
+    unwrap_metadata_au_cells, EsUnit, TsDemuxer, STREAM_TYPE_AAC, STREAM_TYPE_AC3,
+    STREAM_TYPE_H264, STREAM_TYPE_H265, STREAM_TYPE_METADATA_PES, STREAM_TYPE_MPEG1_AUDIO,
+    STREAM_TYPE_MPEG2_AUDIO, STREAM_TYPE_MPEG4P2, STREAM_TYPE_PRIVATE_PES, TS_PACKET_LEN,
 };
 
 const TS_SYNC: u8 = 0x47;
+
+/// The bytes to forward for one access unit: a metadata-in-PES (0x15) payload
+/// has its ISO 13818-1 AU cells unwrapped when it carries them (a spec-strict
+/// synchronous KLV writer), and is forwarded unchanged otherwise. Every other
+/// stream type passes through.
+fn unwrap_sync_klv(stream_type: u8, data: Vec<u8>) -> Vec<u8> {
+    if stream_type != STREAM_TYPE_METADATA_PES {
+        return data;
+    }
+    unwrap_metadata_au_cells(&data).unwrap_or(data)
+}
 
 /// Which elementary stream a [`TsDemux`] instance forwards. A TS multiplex
 /// carries several (video + audio); this element has one output pad, so it emits
@@ -431,8 +442,9 @@ impl TsDemux {
                 self.emit_opus(u, pts_ns, out).await?;
                 continue;
             }
+            let data = unwrap_sync_klv(u.stream_type, u.data);
             let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(u.data.into_boxed_slice())),
+                MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
                 FrameTiming {
                     pts_ns,
                     dts_ns,
@@ -955,8 +967,9 @@ impl TsDemuxN {
                 .dts_90khz
                 .map(|d| (d as u128 * 1_000_000_000 / 90_000) as u64)
                 .unwrap_or(pts_ns);
+            let data = unwrap_sync_klv(u.stream_type, u.data);
             let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(u.data.into_boxed_slice())),
+                MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
                 FrameTiming {
                     pts_ns,
                     dts_ns,

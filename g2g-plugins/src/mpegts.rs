@@ -53,7 +53,31 @@ pub const STREAM_TYPE_AC3: u8 = 0x81;
 /// PMT `stream_type` for metadata carried in PES packets (0x15), the synchronous
 /// KLV carriage of MISB ST 1402 / STANAG 4609. Asynchronous KLV instead rides a
 /// private PES (0x06) with a 'KLVA' registration descriptor.
+///
+/// The mux wraps each KLV access unit in one ISO 13818-1 metadata AU cell, which
+/// is both what ST 1402 calls for and what ffmpeg's demuxer assumes: it skips 5
+/// bytes off every 0x15 PES payload on the metadata stream_id. The demux accepts
+/// a bare payload too (see [`unwrap_metadata_au_cells`]).
 pub const STREAM_TYPE_METADATA_PES: u8 = 0x15;
+
+/// PMT ES-info for a synchronous-KLV (0x15) stream: a `metadata_descriptor`
+/// (tag 0x26) naming 'KLVA' as both the application format and the metadata
+/// format, then metadata_service_id 0 and a decoder_config_flags / DSM-CC_flag
+/// byte of zero (reserved bits set). This is what identifies the stream as KLV:
+/// a bare 0x15 with no descriptor reads as an unknown data stream (ffmpeg maps
+/// 0x15 to KLV only through this descriptor's format identifier).
+const KLV_METADATA_DESCRIPTOR: &[u8] = &[
+    0x26, 13, // tag, length
+    0xFF, 0xFF, // metadata_application_format = 0xFFFF (identifier follows)
+    b'K', b'L', b'V', b'A', // metadata_application_format_identifier
+    0xFF, // metadata_format = 0xFF (identifier follows)
+    b'K', b'L', b'V', b'A', // metadata_format_identifier
+    0x00, // metadata_service_id
+    0x0F, // decoder_config_flags '000', DSM-CC_flag 0, reserved
+];
+
+/// The first 4 bytes of every SMPTE ST 336 KLV key (the SMPTE UL designator).
+const KLV_UL_PREFIX: [u8; 4] = [0x06, 0x0E, 0x2B, 0x34];
 
 /// One elementary stream announced by the PMT.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -503,6 +527,41 @@ fn has_klv_registration(mut desc: &[u8]) -> bool {
     false
 }
 
+/// Unwrap the ISO 13818-1 metadata access-unit cells of one metadata-in-PES
+/// (0x15) payload, returning the concatenated cell payloads, or `None` to say
+/// "forward the payload unchanged". A cell is a 5-byte header
+/// (metadata_service_id, sequence_number, flags, then a big-endian 16-bit
+/// AU_cell_data_length) followed by that many bytes.
+///
+/// The unwrap is validation-gated because the flags-field semantics (which bits
+/// mark a cell that starts / ends an AU) are unverified here: a payload that
+/// already starts with a KLV key is forwarded raw (ffmpeg-authored streams look
+/// like this), and a cell walk is only believed when the cells tile the payload
+/// exactly and every cell payload starts with a KLV key. Anything else forwards
+/// raw, so a wrong guess cannot corrupt the output. Every length is
+/// bounds-checked against the (attacker-controlled) payload before slicing.
+pub(crate) fn unwrap_metadata_au_cells(payload: &[u8]) -> Option<Vec<u8>> {
+    if payload.starts_with(&KLV_UL_PREFIX) {
+        return None;
+    }
+    let mut out = Vec::new();
+    let mut pos = 0usize;
+    while pos < payload.len() {
+        let header = payload.get(pos..pos.checked_add(5)?)?;
+        let len = ((header[3] as usize) << 8) | header[4] as usize;
+        let start = pos.checked_add(5)?;
+        let end = start.checked_add(len)?;
+        // A cell running past the payload end fails the walk (no exact tiling).
+        let cell = payload.get(start..end)?;
+        if !cell.starts_with(&KLV_UL_PREFIX) {
+            return None;
+        }
+        out.extend_from_slice(cell);
+        pos = end;
+    }
+    (!out.is_empty()).then_some(out)
+}
+
 /// Unwrap the Opus-in-MPEG-TS control-header access units in one PES payload into
 /// the raw Opus packets (Opus-in-TS spec / ETSI TS 103 420): each is prefixed by
 /// an 11-bit `0x3FF` sync (`hdr & 0xFFE0 == 0x7FE0`), a flags byte
@@ -587,8 +646,11 @@ struct MuxStream {
     stream_id: u8,
     es_cc: u8,
     program: usize,
+    /// Running metadata AU cell sequence_number (metadata-in-PES streams only).
+    meta_seq: u8,
     /// ES-info descriptor bytes for this stream's PMT entry (the 'KLVA'
-    /// registration for a KLV stream; empty otherwise).
+    /// registration for asynchronous KLV, the metadata descriptor for
+    /// synchronous KLV; empty otherwise).
     es_info: &'static [u8],
 }
 
@@ -689,8 +751,12 @@ impl TsMuxer {
             // The mux's only private-PES (0x06) use is asynchronous KLV metadata
             // (MISB ST 1402): it rides private_stream_1 (0xBD) and its PMT entry
             // carries the 'KLVA' registration descriptor the demux side keys on.
+            // Synchronous KLV rides metadata-in-PES (0x15) with the 13818-1
+            // metadata stream_id (0xFC) and a metadata_descriptor instead.
             let stream_id = if stream_type == STREAM_TYPE_PRIVATE_PES {
                 0xBD
+            } else if stream_type == STREAM_TYPE_METADATA_PES {
+                0xFC
             } else if stream_type == STREAM_TYPE_AAC {
                 let id = 0xC0 + *audio_n;
                 *audio_n += 1;
@@ -700,10 +766,10 @@ impl TsMuxer {
                 *video_n += 1;
                 id
             };
-            let es_info: &'static [u8] = if stream_type == STREAM_TYPE_PRIVATE_PES {
-                &[0x05, 4, b'K', b'L', b'V', b'A'] // registration_descriptor
-            } else {
-                &[]
+            let es_info: &'static [u8] = match stream_type {
+                STREAM_TYPE_PRIVATE_PES => &[0x05, 4, b'K', b'L', b'V', b'A'], // registration
+                STREAM_TYPE_METADATA_PES => KLV_METADATA_DESCRIPTOR,
+                _ => &[],
             };
             mux_streams.push(MuxStream {
                 stream_type,
@@ -711,6 +777,7 @@ impl TsMuxer {
                 stream_id,
                 es_cc: 0,
                 program,
+                meta_seq: 0,
                 es_info,
             });
         }
@@ -809,7 +876,20 @@ impl TsMuxer {
             None
         };
         let s = &mut self.streams[stream_index];
-        let pes = build_pes(s.stream_id, au, pts_90khz, dts_90khz);
+        // Synchronous KLV rides one metadata AU cell per access unit. An AU too
+        // big for the cell's 16-bit length goes out bare (no ST 0601 local set
+        // comes near 64 KiB, and a wrong length would be worse than a bare one).
+        let cell = (s.stream_type == STREAM_TYPE_METADATA_PES && au.len() <= 0xFFFF).then(|| {
+            let c = metadata_au_cell(s.meta_seq, au);
+            s.meta_seq = s.meta_seq.wrapping_add(1);
+            c
+        });
+        let pes = build_pes(
+            s.stream_id,
+            cell.as_deref().unwrap_or(au),
+            pts_90khz,
+            dts_90khz,
+        );
         let mut off = 0;
         let mut pusi = true;
         let mut first = true;
@@ -892,6 +972,23 @@ impl TsMuxer {
         self.programs[prog_idx].pmt_cc =
             psi_packet(pmt_pid, 0x02, &body, self.programs[prog_idx].pmt_cc, out);
     }
+}
+
+/// Wrap one metadata access unit in a single ISO 13818-1 metadata AU cell
+/// (section 2.12.4): metadata_service_id, sequence_number, a flags byte, then a
+/// big-endian 16-bit AU_cell_data_length. The flags say the cell holds a complete
+/// AU (cell_fragmentation_indication '11'), carries no decoder config and is a
+/// random access point; both known readers (ffmpeg, [`unwrap_metadata_au_cells`])
+/// skip the byte rather than interpret it.
+fn metadata_au_cell(sequence_number: u8, au: &[u8]) -> Vec<u8> {
+    let mut cell = Vec::with_capacity(5 + au.len());
+    cell.push(0x00); // metadata_service_id
+    cell.push(sequence_number);
+    cell.push(0xDF); // '11' complete AU, config 0, random access 1, reserved
+    cell.push((au.len() >> 8) as u8);
+    cell.push(au.len() as u8);
+    cell.extend_from_slice(au);
+    cell
 }
 
 /// Build a PES packet for one access unit (start code + stream_id + length + an
@@ -1772,6 +1869,112 @@ mod tests {
             pcrs.windows(2)
                 .all(|w| w[1] - w[0] <= interval + frame_period),
             "consecutive PCR gap stays within interval + one frame period"
+        );
+    }
+
+    /// A synthetic KLV packet: a 16-byte SMPTE UL key, a 1-byte BER length and
+    /// `n` body bytes.
+    fn klv_packet(n: u8, fill: u8) -> Vec<u8> {
+        let mut p = alloc::vec![
+            0x06, 0x0E, 0x2B, 0x34, 0x02, 0x0B, 0x01, 0x01, 0x0E, 0x01, 0x03, 0x01, 0x01, 0x00,
+            0x00, 0x00,
+        ];
+        p.push(n);
+        p.extend(core::iter::repeat_n(fill, n as usize));
+        p
+    }
+
+    /// Wrap each packet in a metadata AU cell (5-byte header, big-endian length).
+    fn au_cell(seq: u8, payload: &[u8]) -> Vec<u8> {
+        let mut c = alloc::vec![0x01, seq, 0x00];
+        c.push((payload.len() >> 8) as u8);
+        c.push(payload.len() as u8);
+        c.extend_from_slice(payload);
+        c
+    }
+
+    #[test]
+    fn metadata_cells_unwrap_only_when_they_tile_and_carry_klv() {
+        let a = klv_packet(4, 0xAA);
+        let b = klv_packet(3, 0xBB);
+
+        // Bare KLV (what ffmpeg writes) is forwarded unchanged.
+        assert_eq!(unwrap_metadata_au_cells(&a), None);
+
+        // Two cells tiling the payload unwrap to the packets they carry.
+        let mut wrapped = au_cell(0, &a);
+        wrapped.extend_from_slice(&au_cell(1, &b));
+        let mut want = a.clone();
+        want.extend_from_slice(&b);
+        assert_eq!(unwrap_metadata_au_cells(&wrapped), Some(want));
+
+        // A trailing byte past the last cell breaks the tiling: forward raw.
+        let mut ragged = wrapped.clone();
+        ragged.push(0x00);
+        assert_eq!(unwrap_metadata_au_cells(&ragged), None);
+
+        // A cell whose declared length runs past the payload: forward raw.
+        let mut truncated = au_cell(0, &a);
+        truncated.truncate(truncated.len() - 1);
+        assert_eq!(unwrap_metadata_au_cells(&truncated), None);
+
+        // Cells that tile but do not carry KLV: forward raw.
+        let junk = au_cell(0, &[0x11, 0x22, 0x33]);
+        assert_eq!(unwrap_metadata_au_cells(&junk), None);
+
+        // Degenerate inputs stay raw rather than panicking.
+        assert_eq!(unwrap_metadata_au_cells(&[]), None);
+        assert_eq!(unwrap_metadata_au_cells(&[0xFF; 3]), None);
+        assert_eq!(
+            unwrap_metadata_au_cells(&[0x01, 0x00, 0x00, 0xFF, 0xFF]),
+            None
+        );
+    }
+
+    #[test]
+    fn sync_klv_stream_gets_the_metadata_stream_id_and_descriptor() {
+        let mut m = TsMuxer::with_streams(&[STREAM_TYPE_METADATA_PES]);
+        let klv = klv_packet(2, 0xCD);
+        let bytes = m.push_au(&klv, Some(9000), None);
+        // PES start code + stream_id in the first payload byte run of the ES PID.
+        assert!(
+            bytes.windows(4).any(|w| w == [0x00, 0x00, 0x01, 0xFC]),
+            "metadata PES uses stream_id 0xFC"
+        );
+        assert!(
+            !bytes
+                .windows(6)
+                .any(|w| w == [0x05, 4, b'K', b'L', b'V', b'A']),
+            "the KLVA registration descriptor stays on the async 0x06 path"
+        );
+        assert!(
+            bytes
+                .windows(KLV_METADATA_DESCRIPTOR.len())
+                .any(|w| w == KLV_METADATA_DESCRIPTOR),
+            "the PMT entry carries the metadata_descriptor"
+        );
+        let mut d = TsDemuxer::new();
+        for pkt in bytes.chunks(TS_PACKET_LEN) {
+            d.push_packet(pkt);
+        }
+        d.flush();
+        let units = d.take_units();
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].stream_type, STREAM_TYPE_METADATA_PES);
+        assert_eq!(
+            units[0].pts_90khz,
+            Some(9000),
+            "sync KLV always carries a PTS"
+        );
+        assert_eq!(
+            &units[0].data[..5],
+            &[0x00, 0x00, 0xDF, 0x00, klv.len() as u8],
+            "the KLV rides one metadata AU cell"
+        );
+        assert_eq!(
+            unwrap_metadata_au_cells(&units[0].data),
+            Some(klv),
+            "and unwraps back to the packet"
         );
     }
 }

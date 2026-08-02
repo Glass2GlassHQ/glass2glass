@@ -65,6 +65,9 @@ pub struct TsMux {
     /// Program number per input pad, in pad order (default: every input in
     /// program 1). Zipped with the learned stream types to build the muxer.
     program_numbers: Vec<u16>,
+    /// Carry a `Caps::Klv` input as synchronous KLV (metadata-in-PES 0x15)
+    /// instead of the default asynchronous private PES (0x06 + 'KLVA').
+    klv_sync: bool,
 }
 
 impl TsMux {
@@ -82,6 +85,7 @@ impl TsMux {
             table_interval_ms: 0,
             pcr_interval_90khz: 3600,
             program_numbers: alloc::vec![1; inputs],
+            klv_sync: false,
         }
     }
 
@@ -106,6 +110,13 @@ impl TsMux {
     /// Set the PCR insertion interval in 90 kHz ticks (default 3600).
     pub fn with_pcr_interval(mut self, ticks: u64) -> Self {
         self.pcr_interval_90khz = ticks;
+        self
+    }
+
+    /// Carry a `Caps::Klv` input as synchronous KLV: metadata-in-PES
+    /// (`stream_type` 0x15) rather than the default asynchronous private PES.
+    pub fn with_klv_sync(mut self, sync: bool) -> Self {
+        self.klv_sync = sync;
         self
     }
 
@@ -164,7 +175,7 @@ impl MultiInputElement for TsMux {
     }
 
     fn intercept_caps(&self, _input: usize, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        if stream_type_for(upstream_caps).is_some() {
+        if stream_type_for(upstream_caps, self.klv_sync).is_some() {
             Ok(upstream_caps.clone())
         } else {
             Err(G2gError::CapsMismatch)
@@ -190,7 +201,8 @@ impl MultiInputElement for TsMux {
         input: usize,
         absolute_caps: &Caps,
     ) -> Result<ConfigureOutcome, G2gError> {
-        let stream_type = stream_type_for(absolute_caps).ok_or(G2gError::CapsMismatch)?;
+        let stream_type =
+            stream_type_for(absolute_caps, self.klv_sync).ok_or(G2gError::CapsMismatch)?;
         self.stream_types[input] = Some(stream_type);
         Ok(ConfigureOutcome::Accepted)
     }
@@ -228,6 +240,12 @@ impl MultiInputElement for TsMux {
                 "program number per input, comma separated in pad order (e.g. 1,1,2; default all in program 1)",
             )
             .with_default("1"),
+            PropertySpec::new(
+                "klv-sync",
+                PropKind::Bool,
+                "carry KLV metadata as synchronous metadata-in-PES (stream_type 0x15) instead of asynchronous private PES",
+            )
+            .with_default("false"),
         ];
         PROPS
     }
@@ -261,6 +279,15 @@ impl MultiInputElement for TsMux {
                 }
                 Ok(())
             }
+            "klv-sync" => {
+                // Like prog-map: the stream types are baked into the PMT when the
+                // muxer is built, so this only takes effect before the first frame.
+                if self.mux.is_some() {
+                    return Err(PropError::ReadOnly);
+                }
+                self.klv_sync = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -270,6 +297,7 @@ impl MultiInputElement for TsMux {
             "pat-interval" | "pmt-interval" => Some(PropValue::Uint(self.table_interval_ms)),
             "pcr-interval" => Some(PropValue::Uint(self.pcr_interval_90khz)),
             "prog-map" => Some(PropValue::Str(self.prog_map_string())),
+            "klv-sync" => Some(PropValue::Bool(self.klv_sync)),
             _ => None,
         }
     }
