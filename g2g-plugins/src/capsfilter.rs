@@ -417,6 +417,7 @@ pub fn parse_caps_set(desc: &str) -> Option<CapsSet> {
         "audio/x-flac" => audio_set(&[AudioFormat::Flac]),
         // gst names AAC `audio/mpeg` (with mpegversion=4, which we don't require).
         "audio/mpeg" => audio_set(&[AudioFormat::Aac]),
+        "meta/x-klv" => Some(CapsSet::one(Caps::Klv)),
         _ => None,
     }
 }

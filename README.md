@@ -381,7 +381,8 @@ transforms (`videoscale` / `videorate` / `videocrop` / `videoflip` /
 `videobalance` / `videobox` / `alpha` / `gamma` / `deinterlace` / `timeoverlay`,
 `audioconvert` / `audioresample` / `audiomixer` / `volume` / `audiopanorama` /
 `audioamplify` / `audioecho` / `level` / `cutter` / `equalizer-3bands` /
-`spectrum`), the flow-control elements (`concat` / `input-selector` /
+`spectrum`), the KLV telemetry codec (`klvdecode`, MISB ST 0601 / STANAG 4609),
+the flow-control elements (`concat` / `input-selector` /
 `output-selector` / `progressreport`), the `compositor`, the tag system, and the
 `gst-launch` text DSL (`parse_launch` / `gst-inspect`) are all in the pure
 `no_std + alloc` default build. The std build adds `clockoverlay`, the
@@ -519,6 +520,21 @@ run_linear_chain(src, vec![&mut demux, &mut parse, &mut dec], sink,
 ```
 
 Features: `ffmpeg wayland-sink`.
+
+### STANAG 4609 (drone / ISR): KLV telemetry alongside the video
+
+`tsdemux stream=klv` splits the MISB metadata stream out of the same multiplex
+(private PES with the `KLVA` registration, or metadata-in-PES 0x15), and
+`klvdecode` parses each ST 0601 UAS Datalink Local Set into a timed
+`key=value` text line, ready for `textoverlay` or an app sink. The mux
+direction takes `Caps::Klv` packets (built with `UasDatalink::encode`) on a
+`mpegtsmux` input. ffmpeg-validated bit-exact both ways.
+
+```rust
+let src   = FileSrc::new("uav.ts", Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs });
+let demux = TsDemux::new().with_stream(TsStream::Klv);
+let dec   = KlvDecode::new();   // -> "ts=.. lat=.. lon=.. alt=.. heading=.." lines
+```
 
 ### Adaptive streaming: HLS / DASH → decode → display
 

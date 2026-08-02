@@ -1691,6 +1691,28 @@ single-input launch element and as a fan-in muxer, so the text parser
 picks `tsmux::TsMux` for one input and `tsmuxn::TsMux` for several by link degree
 (`v.! m.  a.! m.  mpegtsmux name=m`), mirroring gst's request sink pads.
 
+The TS stack also carries KLV metadata (STANAG 4609, the airborne-ISR profile of
+MPEG-TS): `Caps::Klv` is the metadata elementary-stream caps (GStreamer
+`meta/x-klv`), each frame one SMPTE ST 336 key-length-value packet. On the mux
+side a `Caps::Klv` input becomes a private PES (stream_type 0x06, PES
+`private_stream_1`) whose PMT entry carries the `KLVA` registration descriptor,
+the MISB ST 1402 asynchronous carriage ffmpeg keys on; the demux side accepts
+both that and metadata-in-PES (stream_type 0x15, the synchronous carriage) via
+`TsStream::Klv` (`tsdemux stream=klv`), filtering generic 0x06 PIDs by the
+registration the way Opus / DVB AC-3 selection does. Above carriage,
+`g2g-plugins::klv` is a pure `no_std` MISB ST 0601 UAS Datalink Local Set codec:
+`UasDatalink` decodes / encodes the core telemetry tags (precision timestamp,
+platform attitude, sensor position / FOV / relative angles, frame center) with
+the standard's fixed-point scalings, BER lengths and BER-OID tags
+bounds-checked, and the 16-bit sum checksum (tag 1) required on parse, so a
+corrupted set is rejected whole. The `klvdecode` element turns each set into a
+timed `Text{Utf8}` `key=value` line (`tsdemux stream=klv ! klvdecode !
+textoverlay` overlays live telemetry); the encode direction is the
+`UasDatalink::encode` API through an app source. Interop is validated against
+ffmpeg both ways: ffprobe identifies the g2g mux's stream as `klv` and extracts
+its bytes bit-exact, and a TS re-authored by ffmpeg's muxer demuxes back
+bit-exact.
+
 The Matroska / WebM demuxer is the second, the same parser + element split
 keyed on `Caps::ByteStream{Matroska}`. `g2g-plugins::matroska::MatroskaDemuxer` is
 a pure EBML parser (variable-length element IDs / sizes, descend into the Segment,

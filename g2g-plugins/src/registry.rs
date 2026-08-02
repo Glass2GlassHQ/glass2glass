@@ -369,6 +369,13 @@ pub fn default_registry() -> Registry {
         "ccextract",
         || Box::new(crate::ccextract::CcExtract::new()),
     ));
+    // KLV telemetry decoder (M800): a demuxed STANAG 4609 metadata stream's ST
+    // 0601 local sets become timed text lines,
+    // e.g. `tsdemux stream=klv ! klvdecode ! textoverlay name=o`.
+    reg.register_launch(LaunchFactory::of::<crate::klv::KlvDecode>(
+        "klvdecode",
+        || Box::new(crate::klv::KlvDecode::new()),
+    ));
     // Detection-box overlay (M102): draws the frame's `AnalyticsMeta` bounding
     // boxes onto the RGBA frame, so a detector's output is visible downstream
     // (e.g. `... ! analyticsoverlay ! videoconvert ! autovideosink`). No pad

@@ -29,10 +29,14 @@ use g2g_core::{
     PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, VideoCodec,
 };
 
-use crate::mpegts::{TsMuxer, STREAM_TYPE_AAC, STREAM_TYPE_H264, STREAM_TYPE_H265};
+use crate::mpegts::{
+    TsMuxer, STREAM_TYPE_AAC, STREAM_TYPE_H264, STREAM_TYPE_H265, STREAM_TYPE_PRIVATE_PES,
+};
 
 /// The PMT `stream_type` for an input caps, or `None` if unsupported. Shared by
-/// the single-input [`TsMux`] and the multi-input `tsmuxn::TsMux`.
+/// the single-input [`TsMux`] and the multi-input `tsmuxn::TsMux`. KLV metadata
+/// rides a private PES (0x06); the muxer adds the 'KLVA' registration descriptor
+/// (asynchronous KLV, MISB ST 1402 / STANAG 4609).
 pub(crate) fn stream_type_for(caps: &Caps) -> Option<u8> {
     match caps {
         Caps::CompressedVideo {
@@ -47,6 +51,7 @@ pub(crate) fn stream_type_for(caps: &Caps) -> Option<u8> {
             format: AudioFormat::Aac,
             ..
         } => Some(STREAM_TYPE_AAC),
+        Caps::Klv => Some(STREAM_TYPE_PRIVATE_PES),
         _ => None,
     }
 }
@@ -125,6 +130,7 @@ impl TsMux {
                 channels: 0,
                 sample_rate: 0,
             },
+            Caps::Klv,
         ])
     }
 }

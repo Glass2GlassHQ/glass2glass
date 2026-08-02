@@ -472,6 +472,7 @@ fn put_caps(w: &mut Writer, c: &Caps) {
             w.u8(5);
             w.u8(text_format_to_u8(*format));
         }
+        Caps::Klv => w.u8(6),
     }
 }
 
@@ -519,6 +520,7 @@ fn get_caps(r: &mut Reader) -> Result<Caps, WireError> {
         5 => Caps::Text {
             format: text_format_from_u8(r.u8()?)?,
         },
+        6 => Caps::Klv,
         _ => return Err(WireError::BadTag),
     })
 }

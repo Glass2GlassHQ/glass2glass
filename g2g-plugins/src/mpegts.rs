@@ -50,6 +50,10 @@ pub const STREAM_TYPE_PRIVATE_PES: u8 = 0x06;
 /// PMT `stream_type` for ATSC AC-3 audio (A/52). The ATSC carriage of Dolby
 /// Digital; DVB instead uses a private PES (0x06) with an AC-3 descriptor.
 pub const STREAM_TYPE_AC3: u8 = 0x81;
+/// PMT `stream_type` for metadata carried in PES packets (0x15), the synchronous
+/// KLV carriage of MISB ST 1402 / STANAG 4609. Asynchronous KLV instead rides a
+/// private PES (0x06) with a 'KLVA' registration descriptor.
+pub const STREAM_TYPE_METADATA_PES: u8 = 0x15;
 
 /// One elementary stream announced by the PMT.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +68,10 @@ pub struct ElementaryStream {
     /// DVB carriage of AC-3 (disambiguating the generic 0x06). ATSC AC-3 rides its
     /// own `stream_type` 0x81 and does not set this.
     pub ac3: bool,
+    /// True for a KLV metadata stream (STANAG 4609 / MISB ST 1402): a private
+    /// (0x06) stream carrying a 'KLVA' registration descriptor (asynchronous
+    /// KLV), or any metadata-in-PES (0x15) stream (synchronous KLV).
+    pub klv: bool,
 }
 
 /// A reassembled PES payload: one access unit of an elementary stream.
@@ -163,6 +171,15 @@ impl TsDemuxer {
             .iter()
             .find(|s| s.pid == pid)
             .is_some_and(|s| s.ac3)
+    }
+
+    /// Whether `pid` is a KLV metadata stream (a private 0x06 stream with a 'KLVA'
+    /// registration, or a metadata-in-PES 0x15 stream); `false` for any other.
+    pub fn is_klv(&self, pid: u16) -> bool {
+        self.streams()
+            .iter()
+            .find(|s| s.pid == pid)
+            .is_some_and(|s| s.klv)
     }
 
     /// The PID of the first video elementary stream (H.264 or H.265), if any.
@@ -310,17 +327,22 @@ impl TsDemuxer {
             // Bounds-check the descriptor slice: a bogus es_info_length must not
             // read past the section body (the count is attacker-controlled). Only a
             // private (0x06) stream needs its descriptors inspected to tell Opus /
-            // AC-3 apart from an unidentified private stream.
+            // AC-3 / KLV apart from an unidentified private stream.
             let descriptors = body
                 .get(i + 5..i + 5 + es_info_length)
                 .filter(|_| stream_type == STREAM_TYPE_PRIVATE_PES);
             let opus_channels = descriptors.and_then(parse_opus_descriptors);
             let ac3 = descriptors.is_some_and(has_ac3_descriptor);
+            // A metadata-in-PES (0x15) stream is KLV without needing a descriptor
+            // (the ffmpeg convention); a private 0x06 needs the 'KLVA' registration.
+            let klv = stream_type == STREAM_TYPE_METADATA_PES
+                || descriptors.is_some_and(has_klv_registration);
             self.programs[prog_idx].streams.push(ElementaryStream {
                 pid,
                 stream_type,
                 opus_channels,
                 ac3,
+                klv,
             });
             i = i.saturating_add(5).saturating_add(es_info_length);
         }
@@ -462,6 +484,25 @@ fn has_ac3_descriptor(mut desc: &[u8]) -> bool {
     false
 }
 
+/// Whether a PMT ES-info descriptor list carries a 'KLVA' registration descriptor
+/// (tag 0x05), the MISB ST 1402 marker for asynchronous KLV metadata on a private
+/// (0x06) stream. Every field is bounds-checked so a malformed loop returns
+/// `false`, never panics.
+fn has_klv_registration(mut desc: &[u8]) -> bool {
+    while desc.len() >= 2 {
+        let tag = desc[0];
+        let len = desc[1] as usize;
+        let Some(body) = desc.get(2..2 + len) else {
+            return false;
+        };
+        if tag == 0x05 && body.len() >= 4 && &body[..4] == b"KLVA" {
+            return true;
+        }
+        desc = &desc[2 + len..];
+    }
+    false
+}
+
 /// Unwrap the Opus-in-MPEG-TS control-header access units in one PES payload into
 /// the raw Opus packets (Opus-in-TS spec / ETSI TS 103 420): each is prefixed by
 /// an 11-bit `0x3FF` sync (`hdr & 0xFFE0 == 0x7FE0`), a flags byte
@@ -546,6 +587,9 @@ struct MuxStream {
     stream_id: u8,
     es_cc: u8,
     program: usize,
+    /// ES-info descriptor bytes for this stream's PMT entry (the 'KLVA'
+    /// registration for a KLV stream; empty otherwise).
+    es_info: &'static [u8],
 }
 
 /// One program in a [`TsMuxer`]: its `program_number`, the PID its PMT rides on
@@ -642,7 +686,12 @@ impl TsMuxer {
                 }
             };
             let (video_n, audio_n) = &mut ids[program];
-            let stream_id = if stream_type == STREAM_TYPE_AAC {
+            // The mux's only private-PES (0x06) use is asynchronous KLV metadata
+            // (MISB ST 1402): it rides private_stream_1 (0xBD) and its PMT entry
+            // carries the 'KLVA' registration descriptor the demux side keys on.
+            let stream_id = if stream_type == STREAM_TYPE_PRIVATE_PES {
+                0xBD
+            } else if stream_type == STREAM_TYPE_AAC {
                 let id = 0xC0 + *audio_n;
                 *audio_n += 1;
                 id
@@ -651,12 +700,18 @@ impl TsMuxer {
                 *video_n += 1;
                 id
             };
+            let es_info: &'static [u8] = if stream_type == STREAM_TYPE_PRIVATE_PES {
+                &[0x05, 4, b'K', b'L', b'V', b'A'] // registration_descriptor
+            } else {
+                &[]
+            };
             mux_streams.push(MuxStream {
                 stream_type,
                 pid: MUX_ES_PID + i as u16,
                 stream_id,
                 es_cc: 0,
                 program,
+                es_info,
             });
         }
         Self {
@@ -823,15 +878,16 @@ impl TsMuxer {
             0x00, // program_info_length = 0
         ]);
         // One ES loop entry per stream of this program: stream_type,
-        // elementary_PID, ES_info_len.
+        // elementary_PID, ES_info_len, then any ES-info descriptors.
         for s in self.streams.iter().filter(|s| s.program == prog_idx) {
             body.extend_from_slice(&[
                 s.stream_type,
                 0xE0 | (s.pid >> 8) as u8 & 0x1F,
                 s.pid as u8,
-                0xF0,
-                0x00, // ES_info_length = 0
+                0xF0 | (s.es_info.len() >> 8) as u8 & 0x0F,
+                s.es_info.len() as u8,
             ]);
+            body.extend_from_slice(s.es_info);
         }
         self.programs[prog_idx].pmt_cc =
             psi_packet(pmt_pid, 0x02, &body, self.programs[prog_idx].pmt_cc, out);
@@ -1124,7 +1180,8 @@ mod tests {
                 pid: es_pid,
                 stream_type: STREAM_TYPE_H264,
                 opus_channels: None,
-                ac3: false
+                ac3: false,
+                klv: false
             }]
         );
         assert_eq!(d.video_pid(), Some(es_pid));

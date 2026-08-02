@@ -6,6 +6,10 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M800: MISB ST 0601 UAS Datalink Local Set codec (`g2g-plugins::klv`) and the `klvdecode` element turning telemetry sets into timed text lines.
+
+- M799: KLV metadata in MPEG-TS (STANAG 4609): `Caps::Klv`, mux with the `KLVA` registration descriptor, and `tsdemux stream=klv`, ffmpeg-validated both directions.
+
 - M798: `bevy-g2g` windowed streaming: `RemoteRenderPlugins::windowed` keeps the app's window (a fullscreen mirror of the stream texture) while streaming, on both encode paths.
 
 - M797: `bevy-g2g` input backchannel: a WebSocket serves viewer keyboard/mouse input into ordinary Bevy input messages, with a WHEP viewer page that captures input.
