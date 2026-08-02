@@ -86,6 +86,29 @@ G2G_INPUT_PORT=8877 G2G_FRAMES=0 cargo run --release --example stream &
 cargo run --release --example input_probe   # logs: cube moving
 ```
 
+### Launching MediaMTX
+
+The WHIP endpoint the app publishes to is a media server; viewers play the
+same stream back from it over WHEP. [MediaMTX](https://github.com/bluenviron/mediamtx)
+serves both with zero configuration. Container:
+
+```sh
+docker run --rm -it --network host bluenviron/mediamtx:1
+# Podman: podman run --rm -it --network host docker.io/bluenviron/mediamtx:1
+```
+
+Or the standalone binary: it is a single static executable, so download the
+release for your platform from
+<https://github.com/bluenviron/mediamtx/releases>, unpack, and run
+`./mediamtx`.
+
+Either way it listens immediately: publish to
+`http://<mediamtx-machine>:8889/<name>/whip`, watch at
+`http://<mediamtx-machine>:8889/<name>/whep`, any stream name (`127.0.0.1`
+when everything runs on one box). The game and MediaMTX can share a machine
+or not; only MediaMTX needs to be reachable by viewers. The bundled
+`mediamtx.yml` is only needed for extras like auth or recording.
+
 ### Try it
 
 ```sh
@@ -94,8 +117,7 @@ cargo run --release --example stream                    # readback + libx264
 ffplay bevy_g2g.h264
 ```
 
-Stream live over WebRTC: run [MediaMTX](https://github.com/bluenviron/mediamtx)
-(`docker run --rm -it --network host bluenviron/mediamtx:1`), then
+Stream live over WebRTC: launch MediaMTX (above), then
 
 ```sh
 G2G_WHIP_URL=http://127.0.0.1:8889/g2gbevy/whip G2G_FRAMES=0 \
