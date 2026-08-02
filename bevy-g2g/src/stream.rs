@@ -102,7 +102,7 @@ impl Default for StreamSettings {
 
 impl StreamSettings {
     /// The demo-run environment convention: `G2G_WHIP_URL` selects WHIP egress
-    /// (else a file), `G2G_FRAMES` caps the run (default 240, `0` = forever),
+    /// (else a file), `G2G_FRAMES` caps the run (default 900, a 15 s clip; `0` = forever),
     /// `G2G_INPUT_PORT` enables the viewer-input backchannel.
     pub fn from_env() -> Self {
         let mut s = Self::default();
@@ -112,7 +112,7 @@ impl StreamSettings {
         s.max_frames = std::env::var("G2G_FRAMES")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(240);
+            .unwrap_or(900);
         s.input_port = std::env::var("G2G_INPUT_PORT")
             .ok()
             .and_then(|v| v.parse().ok());

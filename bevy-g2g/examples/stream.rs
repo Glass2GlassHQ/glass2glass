@@ -4,7 +4,7 @@
 //! GPU; otherwise they are read back and encoded with libx264.
 //!
 //! `G2G_WHIP_URL` streams to a WHIP endpoint (e.g. MediaMTX); unset, the
-//! H.264 goes to `bevy_g2g.h264`. `G2G_FRAMES` caps the run (default 240,
+//! H.264 goes to `bevy_g2g.h264`. `G2G_FRAMES` caps the run (default 900 (15 s),
 //! `0` = forever).
 
 use bevy::prelude::*;
