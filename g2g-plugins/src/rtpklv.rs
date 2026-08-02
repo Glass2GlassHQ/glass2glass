@@ -33,7 +33,10 @@ const MAX_UNIT_BYTES: usize = 16 * 1024 * 1024;
 /// A 90 kHz RTP timestamp for a frame presented at `pts_ns`, truncated into the
 /// 32-bit RTP field (the wrap is what the wire carries).
 pub fn rtp_timestamp_from_pts(pts_ns: u64) -> u32 {
-    (pts_ns.wrapping_mul(RTP_CLOCK_HZ) / 1_000_000_000) as u32
+    // u128 keeps the product exact for any pts (u64 ns * 90k overflows at ~2.4
+    // days), matching the mpegts conversions; the cast wraps into the 32-bit
+    // RTP field as the wire requires.
+    (pts_ns as u128 * RTP_CLOCK_HZ as u128 / 1_000_000_000) as u32
 }
 
 /// The nanosecond presentation time a 90 kHz RTP timestamp names, relative to
