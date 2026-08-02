@@ -369,6 +369,18 @@ pub fn default_registry() -> Registry {
         "ccextract",
         || Box::new(crate::ccextract::CcExtract::new()),
     ));
+    // MISP time stamp elements (M809): the video-side half of STANAG 4609 time
+    // correlation. `misptimeinsert` writes an ST 0604 microsecond time SEI into
+    // each access unit; `misptimeextract` mines it back out as `ts=` text on a
+    // teed branch, e.g. `... ! h264parse ! misptimeextract ! textoverlay ...`.
+    reg.register_launch(LaunchFactory::of::<crate::misptime::MispTimeInsert>(
+        "misptimeinsert",
+        || Box::new(crate::misptime::MispTimeInsert::new()),
+    ));
+    reg.register_launch(LaunchFactory::of::<crate::misptime::MispTimeExtract>(
+        "misptimeextract",
+        || Box::new(crate::misptime::MispTimeExtract::new()),
+    ));
     // KLV telemetry decoder (M800): a demuxed STANAG 4609 metadata stream's ST
     // 0601 local sets become timed text lines,
     // e.g. `tsdemux stream=klv ! klvdecode ! textoverlay name=o`.

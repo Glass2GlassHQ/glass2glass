@@ -140,6 +140,9 @@ pub mod klv;
 pub mod ccextract;
 // Closed-caption insertion element: compressed video + cues in, SEI'd video out.
 pub mod ccinsert;
+// MISB ST 0604 MISP time stamps in H.264 / H.265 SEI (STANAG 4609): codec +
+// misptimeinsert / misptimeextract elements (no_std).
+pub mod misptime;
 // Shared pixel-format helpers for the packed-RGBA elements (videobalance, alpha).
 mod pixel;
 // Sans-IO H.264 RTP packetizer (RFC 3550 + 6184), the live-egress foundation.
