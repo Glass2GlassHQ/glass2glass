@@ -6,6 +6,16 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M811: `cotsink` bridges ST 0601 telemetry to Cursor-on-Target XML events over UDP or TCP, so a drone track appears on a TAK / ATAK network.
+
+- M810: SMPTE 2022-1 (Pro-MPEG COP3) FEC for TS over RTP, with the row / column repair streams built on the XOR core now shared with `ulpfec` and `flexfec`.
+
+- M809: MISB ST 0604 MISP timestamps in H.264 / H.265 SEI: `misptimeinsert` stamps each access unit, `misptimeextract` mines it back out.
+
+- M808: MISB ST 0903 VMTI moving-target reports (ST 0601 tag 74) both directions, plus a bridge turning a frame's detections and tracking ids into VTargets.
+
+- M807: MISB ST 1204 MIIS core identifier (ST 0601 tag 94) decodes and re-encodes.
+
 - M806: KLV validated against a real UAS capture (the public "Day Flight" STANAG 4609 sample), strict-parse clean and bit-exact with ffmpeg; local test via `G2G_STANAG_SAMPLE`.
 
 - M805: KLV over RTP (RFC 6597): sans-IO `RtpKlvPacketizer` / `RtpKlvDepayloader` with KLVunit fragmentation and whole-unit loss discard.

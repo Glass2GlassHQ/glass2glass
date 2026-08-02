@@ -211,6 +211,11 @@ content in-tree:
 | KLV over RTP (RFC 6597) | `rtpklvpay` / `rtpklvdepay` | `rtpklv` packetizer / depayloader |
 | Decode ST 0601 telemetry + ST 0102 security set | app code or commercial addon | `klvdecode` / `UasDatalink` |
 | Build ST 0601 sets | app code or commercial addon | `UasDatalink::encode` |
+| ST 0903 VMTI moving targets, ST 1204 MIIS id | — | `vmti`, `UasDatalink::miis_core_id` |
+| Detector output as VMTI targets | — | `vmti_from_analytics` |
+| ST 0604 MISP timestamps in SEI | — | `misptimeinsert` / `misptimeextract` |
+| SMPTE 2022-1 FEC for TS over RTP | `rtpst2022-1-fecenc` / `fecdec` | `st2022fec` |
+| Telemetry to a TAK / ATAK network (CoT) | — | `cotsink` |
 
 The codec is validated against ffmpeg (bit-exact both directions), the
 independent klvdata implementation, the published MISMMS reference packet, and
