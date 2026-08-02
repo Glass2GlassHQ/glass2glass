@@ -23,8 +23,10 @@
 //! keeps its own device; g2g decodes a clip onto it and any mesh tagged
 //! [`VideoScreen`] plays the video, zero-copy.
 
+mod input;
 mod stream;
 
+pub use input::RemoteInputPlugin;
 pub use stream::{run, RemoteRenderPlugins, StreamOutput, StreamSettings, StreamTarget};
 
 #[cfg(feature = "decode")]

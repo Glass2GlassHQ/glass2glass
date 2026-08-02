@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>bevy-g2g remote viewer</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #0a0e14; color: #e2e8f0; margin: 24px; }
+    video { width: 100%; max-width: 960px; background: #000; border-radius: 8px; outline: none; }
+    video.captured { box-shadow: 0 0 0 2px #22d3ee; }
+    input { width: 24rem; padding: 6px; }
+    button { padding: 6px 14px; cursor: pointer; }
+    pre { color: #94a3b8; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h1>bevy-g2g remote viewer</h1>
+  <p>
+    Plays the Bevy stream from a WHEP endpoint and sends keyboard / mouse input
+    back to the app over the <code>RemoteInputPlugin</code> WebSocket. Click the
+    video to capture input (Escape releases it); WASD / arrows move the demo
+    cube.
+  </p>
+  <video id="video" autoplay muted playsinline tabindex="0"></video>
+  <p>
+    WHEP URL: <input id="whep" value="http://127.0.0.1:8889/g2gbevy/whep">
+    Input WS: <input id="ws" value="ws://127.0.0.1:8877" style="width: 14rem">
+    <button onclick="connect()">Connect</button>
+  </p>
+  <pre id="log"></pre>
+  <script>
+    function log(m) { document.getElementById('log').textContent += m + '\n'; }
+    let ws = null;
+    function send(obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
+
+    async function connect() {
+      // Input backchannel.
+      ws = new WebSocket(document.getElementById('ws').value);
+      ws.onopen = () => log('input WebSocket connected');
+      ws.onclose = () => log('input WebSocket closed');
+
+      // WHEP: the player offers recvonly; the server answers and sends.
+      const url = document.getElementById('whep').value;
+      const pc = new RTCPeerConnection();
+      pc.addTransceiver('video', { direction: 'recvonly' });
+      pc.ontrack = (e) => { document.getElementById('video').srcObject = e.streams[0]; };
+      pc.oniceconnectionstatechange = () => log('ICE: ' + pc.iceConnectionState);
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/sdp' },
+        body: offer.sdp,
+      });
+      if (!resp.ok) { log('WHEP POST failed: ' + resp.status); return; }
+      await pc.setRemoteDescription({ type: 'answer', sdp: await resp.text() });
+      log('playing; click the video to capture input');
+    }
+
+    const video = document.getElementById('video');
+    let captured = false;
+    video.addEventListener('click', () => {
+      captured = true;
+      video.classList.add('captured');
+      video.focus();
+      video.requestPointerLock?.();
+    });
+    document.addEventListener('pointerlockchange', () => {
+      captured = document.pointerLockElement === video;
+      video.classList.toggle('captured', captured);
+    });
+    document.addEventListener('keydown', (e) => {
+      if (!captured || e.repeat) return;
+      e.preventDefault();
+      send({ type: 'key', code: e.code, down: true });
+    });
+    document.addEventListener('keyup', (e) => {
+      if (!captured) return;
+      e.preventDefault();
+      send({ type: 'key', code: e.code, down: false });
+    });
+    video.addEventListener('mousemove', (e) => {
+      if (!captured) return;
+      send({ type: 'mouse_move', dx: e.movementX, dy: e.movementY });
+    });
+    video.addEventListener('mousedown', (e) => {
+      if (!captured) return;
+      const names = ['left', 'middle', 'right', 'back', 'forward'];
+      send({ type: 'mouse_button', button: names[e.button] || 'left', down: true });
+    });
+    video.addEventListener('mouseup', (e) => {
+      if (!captured) return;
+      const names = ['left', 'middle', 'right', 'back', 'forward'];
+      send({ type: 'mouse_button', button: names[e.button] || 'left', down: false });
+    });
+    video.addEventListener('wheel', (e) => {
+      if (!captured) return;
+      e.preventDefault();
+      send({ type: 'wheel', dx: Math.sign(e.deltaX), dy: -Math.sign(e.deltaY) });
+    }, { passive: false });
+  </script>
+</body>
+</html>

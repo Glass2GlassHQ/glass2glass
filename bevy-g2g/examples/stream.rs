@@ -10,12 +10,52 @@
 use bevy::prelude::*;
 
 fn main() {
+    // G2G_WINDOW=1 streams from a normal windowed run (the window mirrors the
+    // stream); default is headless.
+    let plugins = if std::env::var("G2G_WINDOW").is_ok() {
+        bevy_g2g::RemoteRenderPlugins::windowed(bevy_g2g::StreamSettings::from_env())
+    } else {
+        bevy_g2g::RemoteRenderPlugins::from_env()
+    };
     let mut app = App::new();
-    app.add_plugins(bevy_g2g::RemoteRenderPlugins::from_env())
+    app.add_plugins(plugins)
         .insert_resource(ClearColor(Color::srgb(0.05, 0.05, 0.1)))
         .add_systems(Startup, setup)
-        .add_systems(Update, spin);
+        .add_systems(Update, (spin, drive));
     bevy_g2g::run(app);
+}
+
+/// Viewer input drives the cube (WASD / arrows via the `G2G_INPUT_PORT`
+/// backchannel): ordinary `ButtonInput<KeyCode>` code, nothing
+/// backchannel-specific.
+fn drive(
+    keys: Res<ButtonInput<KeyCode>>,
+    time: Res<Time>,
+    mut q: Query<&mut Transform, With<Spin>>,
+) {
+    let mut dir = Vec3::ZERO;
+    if keys.pressed(KeyCode::KeyW) || keys.pressed(KeyCode::ArrowUp) {
+        dir.z -= 1.0;
+    }
+    if keys.pressed(KeyCode::KeyS) || keys.pressed(KeyCode::ArrowDown) {
+        dir.z += 1.0;
+    }
+    if keys.pressed(KeyCode::KeyA) || keys.pressed(KeyCode::ArrowLeft) {
+        dir.x -= 1.0;
+    }
+    if keys.pressed(KeyCode::KeyD) || keys.pressed(KeyCode::ArrowRight) {
+        dir.x += 1.0;
+    }
+    if dir == Vec3::ZERO {
+        return;
+    }
+    let announce = keys.get_just_pressed().next().is_some();
+    for mut t in &mut q {
+        t.translation += dir * time.delta_secs() * 3.0;
+        if announce {
+            info!("cube moving, now at {:?}", t.translation);
+        }
+    }
 }
 
 #[derive(Component)]

@@ -6,6 +6,10 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M798: `bevy-g2g` windowed streaming: `RemoteRenderPlugins::windowed` keeps the app's window (a fullscreen mirror of the stream texture) while streaming, on both encode paths.
+
+- M797: `bevy-g2g` input backchannel: a WebSocket serves viewer keyboard/mouse input into ordinary Bevy input messages, with a WHEP viewer page that captures input.
+
 - M796: `bevy-g2g` integration crate: drop-in Bevy plugins for streaming a headless render over WHIP/WebRTC and for playing video on a mesh, replacing the two demo crates.
 
 - M795: relicensed the whole workspace from LGPL v2.1+ to MPL-2.0.

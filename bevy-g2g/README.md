@@ -49,6 +49,43 @@ Two encode paths, chosen automatically:
 NVENC session on Bevy's device, and their drop order races Bevy's own device
 teardown in the driver.
 
+### Windowed streaming
+
+`RemoteRenderPlugins::windowed(settings)` keeps a normal window (winit event
+loop) and streams at the same time: the scene camera renders into the stream
+texture and the window shows that texture through a fullscreen mirror, so the
+desktop view and the stream are the same pixels. Both encode paths work; the
+pacing follows the window loop rather than `fps`. In the example:
+`G2G_WINDOW=1 cargo run --release --example stream`.
+
+### Input backchannel
+
+Set `StreamSettings::input_port` (env: `G2G_INPUT_PORT`) and the plugin group
+serves a WebSocket that injects viewer input as ordinary Bevy input messages,
+so `ButtonInput<KeyCode>`, `AccumulatedMouseMotion`, etc. work unchanged. A
+WebRTC data channel cannot reach the publisher through a WHIP/WHEP media
+server (the viewer is a separate peer connection), which is why the
+backchannel is a WebSocket, the standard pixel-streaming shape.
+
+One JSON object per text frame; `code` is the W3C `KeyboardEvent.code`
+string, which is also the Bevy `KeyCode` variant name:
+
+```json
+{"type":"key","code":"KeyW","down":true}
+{"type":"mouse_move","dx":3.5,"dy":-1.0}
+{"type":"mouse_button","button":"left","down":true}
+{"type":"wheel","dx":0.0,"dy":-1.0}
+```
+
+`examples/remote-viewer.html` is a WHEP player with input capture (click the
+video, WASD/arrows move the demo cube); `examples/input_probe.rs` is a tiny
+CLI client used for automated validation:
+
+```sh
+G2G_INPUT_PORT=8877 G2G_FRAMES=0 cargo run --release --example stream &
+cargo run --release --example input_probe   # logs: cube moving
+```
+
 ### Try it
 
 ```sh

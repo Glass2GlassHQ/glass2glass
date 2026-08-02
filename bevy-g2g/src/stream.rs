@@ -72,6 +72,9 @@ pub struct StreamSettings {
     pub output: StreamOutput,
     /// Frames to render before exiting; `0` = run until the app exits.
     pub max_frames: u32,
+    /// Serve the viewer-input WebSocket backchannel on this port (see
+    /// `RemoteInputPlugin`). `None` = no input backchannel.
+    pub input_port: Option<u16>,
 }
 
 #[derive(Clone, Debug)]
@@ -92,13 +95,15 @@ impl Default for StreamSettings {
             keyframe_interval: 60,
             output: StreamOutput::File("bevy_g2g.h264".into()),
             max_frames: 0,
+            input_port: None,
         }
     }
 }
 
 impl StreamSettings {
     /// The demo-run environment convention: `G2G_WHIP_URL` selects WHIP egress
-    /// (else a file), `G2G_FRAMES` caps the run (default 240, `0` = forever).
+    /// (else a file), `G2G_FRAMES` caps the run (default 240, `0` = forever),
+    /// `G2G_INPUT_PORT` enables the viewer-input backchannel.
     pub fn from_env() -> Self {
         let mut s = Self::default();
         if let Ok(url) = std::env::var("G2G_WHIP_URL") {
@@ -108,6 +113,9 @@ impl StreamSettings {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(240);
+        s.input_port = std::env::var("G2G_INPUT_PORT")
+            .ok()
+            .and_then(|v| v.parse().ok());
         s
     }
 }
@@ -121,15 +129,31 @@ impl StreamSettings {
 #[derive(Debug)]
 pub struct RemoteRenderPlugins {
     settings: StreamSettings,
+    windowed: bool,
 }
 
 impl RemoteRenderPlugins {
     pub fn new(settings: StreamSettings) -> Self {
-        Self { settings }
+        Self {
+            settings,
+            windowed: false,
+        }
     }
 
     pub fn from_env() -> Self {
         Self::new(StreamSettings::from_env())
+    }
+
+    /// Windowed variant: the app keeps its normal window (winit event loop,
+    /// vsync pacing) and streams at the same time. The scene camera still
+    /// renders into the stream texture; the window shows that texture through
+    /// a fullscreen mirror, so the desktop view and the stream are the same
+    /// pixels.
+    pub fn windowed(settings: StreamSettings) -> Self {
+        Self {
+            settings,
+            windowed: true,
+        }
     }
 }
 
@@ -137,33 +161,50 @@ impl PluginGroup for RemoteRenderPlugins {
     fn build(self) -> PluginGroupBuilder {
         let settings = self.settings;
         let (render_creation, zero_copy) = pick_render_creation();
-        DefaultPlugins
-            .build()
-            .set(RenderPlugin {
-                render_creation,
-                // Compile pipelines synchronously on the render thread. Bevy's
-                // default async compilation runs Vulkan pipeline creation on a
-                // background task that, on the NVIDIA driver, faults when it
-                // overlaps the CUDA encode work on the same device. Harmless
-                // (a little startup latency) on the readback path.
-                synchronous_pipeline_compilation: true,
+        let mut group = DefaultPlugins.build().set(RenderPlugin {
+            render_creation,
+            // Compile pipelines synchronously on the render thread. Bevy's
+            // default async compilation runs Vulkan pipeline creation on a
+            // background task that, on the NVIDIA driver, faults when it
+            // overlaps the CUDA encode work on the same device. Harmless
+            // (a little startup latency) on the readback path.
+            synchronous_pipeline_compilation: true,
+            ..default()
+        });
+        group = if self.windowed {
+            // Normal window, sized to the stream so the mirror is 1:1. The
+            // winit loop paces the app (vsync), so the stream rate follows
+            // the display rate rather than `fps`.
+            group.set(WindowPlugin {
+                primary_window: Some(Window {
+                    resolution: (settings.width, settings.height).into(),
+                    title: "bevy-g2g stream".into(),
+                    ..default()
+                }),
                 ..default()
             })
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: ExitCondition::DontExit,
-                ..default()
-            })
-            // No display: the ScheduleRunnerPlugin drives the loop, so a
-            // window is never created and winit would only panic here.
-            .disable::<WinitPlugin>()
-            .add(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(
-                1.0 / settings.fps as f64,
-            )))
-            .add(StreamPlugin {
-                settings,
-                zero_copy,
-            })
+        } else {
+            group
+                .set(WindowPlugin {
+                    primary_window: None,
+                    exit_condition: ExitCondition::DontExit,
+                    ..default()
+                })
+                // No display: the ScheduleRunnerPlugin drives the loop, so a
+                // window is never created and winit would only panic here.
+                .disable::<WinitPlugin>()
+                .add(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(
+                    1.0 / settings.fps as f64,
+                )))
+        };
+        if let Some(port) = settings.input_port {
+            group = group.add(crate::input::RemoteInputPlugin { port });
+        }
+        group.add(StreamPlugin {
+            settings,
+            zero_copy,
+            windowed: self.windowed,
+        })
     }
 }
 
@@ -276,7 +317,13 @@ enum PathState {
 struct StreamPlugin {
     settings: StreamSettings,
     zero_copy: bool,
+    windowed: bool,
 }
+
+/// The window-mirror 2D camera (windowed mode): shows the stream texture in
+/// the app's window. Excluded from camera retargeting by construction.
+#[derive(Component)]
+struct MirrorCamera;
 
 impl Plugin for StreamPlugin {
     fn build(&self, app: &mut App) {
@@ -303,6 +350,13 @@ impl Plugin for StreamPlugin {
             .add_plugins(ExtractResourcePlugin::<StreamTarget>::default())
             .add_systems(Startup, create_target)
             .add_systems(PreUpdate, retarget_cameras)
+            .add_systems(
+                Startup,
+                spawn_mirror.after(create_target).run_if({
+                    let windowed = self.windowed;
+                    move || windowed
+                }),
+            )
             .add_systems(Update, drain_frames)
             // Last: runs after user systems, so an AppExit written anywhere
             // this frame still gets an EOS before the runner stops the loop.
@@ -342,10 +396,12 @@ fn create_target(
 /// Point every camera that still targets the (nonexistent) primary window at
 /// the stream texture, so a stock scene-with-a-camera app streams with no
 /// app-side render-target code. Cameras aimed at another image are left alone.
+type UntargetedCamera = (With<Camera>, Without<RenderTarget>, Without<MirrorCamera>);
+
 fn retarget_cameras(
     target: Res<StreamTarget>,
-    mut with_target: Query<&mut RenderTarget, With<Camera>>,
-    without_target: Query<Entity, (With<Camera>, Without<RenderTarget>)>,
+    mut with_target: Query<&mut RenderTarget, (With<Camera>, Without<MirrorCamera>)>,
+    without_target: Query<Entity, UntargetedCamera>,
     mut commands: Commands,
 ) {
     for mut rt in &mut with_target {
@@ -358,6 +414,35 @@ fn retarget_cameras(
             .entity(entity)
             .insert(RenderTarget::Image(target.0.clone().into()));
     }
+}
+
+/// Windowed mode: a 2D mirror camera shows the stream texture fullscreen in
+/// the window, so the desktop view and the stream are the same pixels. The
+/// mirror is the default UI camera; UI meant for the stream itself goes on
+/// the scene camera via `UiTargetCamera`.
+fn spawn_mirror(mut commands: Commands, target: Res<StreamTarget>) {
+    let camera = commands
+        .spawn((
+            Camera2d,
+            // Above the scene camera's order so same-target warnings cannot
+            // arise if an app camera ever ends up on the window too.
+            Camera {
+                order: 100,
+                ..default()
+            },
+            MirrorCamera,
+            IsDefaultUiCamera,
+        ))
+        .id();
+    commands.spawn((
+        ImageNode::new(target.0.clone()),
+        Node {
+            width: Val::Percent(100.0),
+            height: Val::Percent(100.0),
+            ..default()
+        },
+        UiTargetCamera(camera),
+    ));
 }
 
 /// Drain produced frames in the main world: push them into the g2g sink
