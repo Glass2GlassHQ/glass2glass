@@ -1,8 +1,10 @@
 //! MISB ST 0601 UAS Datalink Local Set (M800): the KLV (SMPTE ST 336) metadata
 //! a STANAG 4609 stream carries alongside its video, encoding platform / sensor
 //! telemetry (position, attitude, field of view, frame center), the mission /
-//! sensor identity strings, target geometry, and the nested MISB ST 0102
-//! [`SecurityLocalSet`] classification markings (tag 48).
+//! sensor identity strings, target geometry, the nested MISB ST 0102
+//! [`SecurityLocalSet`] classification markings (tag 48), the nested MISB ST
+//! 0903 [`VmtiLocalSet`] moving-target reports (tag 74), and the MISB ST 1204
+//! [`MiisCoreId`] stream identity (tag 94).
 //!
 //! Pure `no_std + alloc` codec plus the [`KlvDecode`] element (`klvdecode`):
 //! `Caps::Klv` packets in, timed `Caps::Text{Utf8}` telemetry lines out, so a
@@ -31,6 +33,8 @@ use g2g_core::{
     PropertySpec, TextFormat,
 };
 
+use crate::vmti::VmtiLocalSet;
+
 /// The 16-byte universal label of the ST 0601 UAS Datalink Local Set.
 pub const UAS_LOCAL_SET_KEY: [u8; 16] = [
     0x06, 0x0E, 0x2B, 0x34, 0x02, 0x0B, 0x01, 0x01, 0x0E, 0x01, 0x03, 0x01, 0x01, 0x00, 0x00, 0x00,
@@ -40,7 +44,7 @@ pub const UAS_LOCAL_SET_KEY: [u8; 16] = [
 /// (0x81..=0x84, that many big-endian bytes). Returns `(length, bytes_consumed)`.
 /// The indefinite form (0x80) and lengths over 4 bytes are rejected, as is any
 /// truncation, so a bogus length fails the parse instead of over-reading.
-fn ber_length(buf: &[u8], pos: usize) -> Option<(usize, usize)> {
+pub(crate) fn ber_length(buf: &[u8], pos: usize) -> Option<(usize, usize)> {
     let first = *buf.get(pos)?;
     if first < 0x80 {
         return Some((first as usize, 1));
@@ -59,7 +63,7 @@ fn ber_length(buf: &[u8], pos: usize) -> Option<(usize, usize)> {
 /// Write a BER length: short form when it fits, else the minimal long form.
 /// Capped at the 4 length bytes [`ber_length`] accepts back, which is also the
 /// largest KLV value this codec can build (a tag value cannot reach 4 GiB).
-fn push_ber_length(out: &mut Vec<u8>, len: usize) {
+pub(crate) fn push_ber_length(out: &mut Vec<u8>, len: usize) {
     if len < 0x80 {
         out.push(len as u8);
         return;
@@ -72,7 +76,7 @@ fn push_ber_length(out: &mut Vec<u8>, len: usize) {
 
 /// Read a BER-OID tag at `buf[pos]` (7 bits per byte, high bit continues).
 /// Returns `(tag, bytes_consumed)`; bounded to 4 bytes (ST 0601 tags are small).
-fn ber_oid_tag(buf: &[u8], pos: usize) -> Option<(u32, usize)> {
+pub(crate) fn ber_oid_tag(buf: &[u8], pos: usize) -> Option<(u32, usize)> {
     let mut tag: u32 = 0;
     for i in 0..4 {
         let b = *buf.get(pos + i)?;
@@ -84,9 +88,33 @@ fn ber_oid_tag(buf: &[u8], pos: usize) -> Option<(u32, usize)> {
     None
 }
 
+/// Write a BER-OID value, the inverse of [`ber_oid_tag`]. Used for the ST 0903
+/// VTarget id; local set tags are all small enough that the single-byte form
+/// falls out of the same encoder.
+pub(crate) fn push_ber_oid(out: &mut Vec<u8>, value: u32) {
+    let mut septets = [0u8; 4];
+    let mut n = 0;
+    let mut left = value & BER_OID_MAX;
+    loop {
+        septets[n] = (left & 0x7F) as u8;
+        n += 1;
+        left >>= 7;
+        if left == 0 {
+            break;
+        }
+    }
+    for i in (0..n).rev() {
+        out.push(septets[i] | if i == 0 { 0 } else { 0x80 });
+    }
+}
+
+/// The largest value [`ber_oid_tag`] reads back, so [`push_ber_oid`] never
+/// writes a fifth byte the parser would reject.
+pub(crate) const BER_OID_MAX: u32 = 0x0FFF_FFFF;
+
 /// The ST 0601 running 16-bit checksum over `buf`: byte `i` is added into the
 /// high half when `i` is even, the low half when odd (the standard's `bcc_16`).
-fn checksum_16(buf: &[u8]) -> u16 {
+pub(crate) fn checksum_16(buf: &[u8]) -> u16 {
     let mut bcc: u16 = 0;
     for (i, &b) in buf.iter().enumerate() {
         bcc = bcc.wrapping_add((b as u16) << (8 * ((i + 1) % 2)));
@@ -117,7 +145,7 @@ pub fn split_klv_packets(mut buf: &[u8]) -> Vec<&[u8]> {
 }
 
 /// Round-to-nearest for the scaled-integer encodes (`f64::round` is std-only).
-fn round(x: f64) -> f64 {
+pub(crate) fn round(x: f64) -> f64 {
     if x >= 0.0 {
         (x + 0.5) as i64 as f64
     } else {
@@ -200,6 +228,10 @@ pub struct UasDatalink {
     pub security: Option<SecurityLocalSet>,
     /// Tag 65: UAS Datalink LS version number.
     pub version: Option<u8>,
+    /// Tag 74: nested ST 0903 VMTI local set (moving target reports).
+    pub vmti: Option<VmtiLocalSet>,
+    /// Tag 94: ST 1204 MIIS core identifier (binary form, no ST 1204 key).
+    pub miis_core_id: Option<MiisCoreId>,
 }
 
 // Fixed-point scale factors from ST 0601: a mapped integer spans the tag's
@@ -225,14 +257,14 @@ fn u32_at(v: &[u8]) -> Option<u32> {
     Some(u32::from_be_bytes(v.try_into().ok()?))
 }
 /// A one-byte tag value; a wrong-sized value is skipped, never truncated.
-fn u8_one(v: &[u8]) -> Option<u8> {
+pub(crate) fn u8_one(v: &[u8]) -> Option<u8> {
     match v {
         [b] => Some(*b),
         _ => None,
     }
 }
 /// A text tag value; invalid UTF-8 skips the tag (no lossy replacement).
-fn utf8_string(v: &[u8]) -> Option<String> {
+pub(crate) fn utf8_string(v: &[u8]) -> Option<String> {
     core::str::from_utf8(v).ok().map(String::from)
 }
 /// ST 0102 writes the object country codes UTF-16BE (jmisb encodes them that
@@ -388,6 +420,143 @@ impl SecurityLocalSet {
     }
 }
 
+/// How an ST 1204 identifier component was generated, the 2-bit code the usage
+/// byte carries for the sensor and the platform slot (ST 1204 Table 5), ordered
+/// by identifier quality. Code 0 (absent) is the `None` of the enclosing
+/// `Option`, so a present component always names its type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MiisIdType {
+    /// Code 1: held by the control station.
+    Managed,
+    /// Code 2: held by a host on the platform (e.g. the flight computer).
+    Virtual,
+    /// Code 3: held inside the device itself, so it is frame accurate.
+    Physical,
+}
+
+impl MiisIdType {
+    fn from_code(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(Self::Managed),
+            2 => Some(Self::Virtual),
+            3 => Some(Self::Physical),
+            _ => None,
+        }
+    }
+
+    /// The 2-bit usage code this type encodes as.
+    pub fn code(self) -> u8 {
+        match self {
+            Self::Managed => 1,
+            Self::Virtual => 2,
+            Self::Physical => 3,
+        }
+    }
+}
+
+/// Read the 16-byte UUID at `pos`, advancing it. `None` on truncation.
+fn take_uuid(value: &[u8], pos: &mut usize) -> Option<[u8; 16]> {
+    let end = pos.checked_add(16)?;
+    let uuid: [u8; 16] = value.get(*pos..end)?.try_into().ok()?;
+    *pos = end;
+    Some(uuid)
+}
+
+/// One MIIS identifier component: the 16-byte UUID plus how it was generated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MiisId {
+    pub id_type: MiisIdType,
+    pub uuid: [u8; 16],
+}
+
+/// The MISB ST 1204 MIIS Core Identifier that ST 0601 tag 94 carries in its
+/// binary form (no ST 1204 key or length, only the value).
+///
+/// A version byte, a usage byte, then the present UUIDs back to back in the
+/// order sensor, platform, window, minor. The usage byte says which are there:
+/// bits 6-5 the sensor type, bits 4-3 the platform type, bit 2 a window id,
+/// bit 1 a minor id, bits 7 and 0 reserved zero. ST 1204's grammar makes the
+/// minor id exclusive with the other three (a foundational identifier names
+/// devices, a minor one is a bare UUID inserted downstream), but parse and
+/// encode here are a plain inverse pair, so a set that carries both still
+/// round-trips byte for byte.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MiisCoreId {
+    /// The ST 1204 revision the sender wrote (1 for ST 1204.1).
+    pub version: u8,
+    pub sensor: Option<MiisId>,
+    pub platform: Option<MiisId>,
+    /// A window id, for one of several views cut from a sensor.
+    pub window: Option<[u8; 16]>,
+    /// A minor id, generated downstream of the platform.
+    pub minor: Option<[u8; 16]>,
+}
+
+impl MiisCoreId {
+    /// Parse the binary core identifier ST 0601 tag 94 carries. `None` for a
+    /// truncated value, a version that would not survive the re-encode (the
+    /// one-byte BER-OID form is the only one written), or trailing bytes the
+    /// usage byte did not account for: an identifier we cannot reproduce
+    /// exactly is worse than none at all.
+    pub fn parse(value: &[u8]) -> Option<Self> {
+        let (version, version_bytes) = ber_oid_tag(value, 0)?;
+        if version_bytes != 1 {
+            return None;
+        }
+        let usage = *value.get(1)?;
+        let mut pos = 2;
+        let component = |pos: &mut usize, code: u8| -> Option<Option<MiisId>> {
+            let Some(id_type) = MiisIdType::from_code(code) else {
+                return Some(None);
+            };
+            Some(Some(MiisId {
+                id_type,
+                uuid: take_uuid(value, pos)?,
+            }))
+        };
+        let sensor = component(&mut pos, (usage >> 5) & 0x03)?;
+        let platform = component(&mut pos, (usage >> 3) & 0x03)?;
+        let window = if usage & 0x04 != 0 {
+            Some(take_uuid(value, &mut pos)?)
+        } else {
+            None
+        };
+        let minor = if usage & 0x02 != 0 {
+            Some(take_uuid(value, &mut pos)?)
+        } else {
+            None
+        };
+        (pos == value.len()).then_some(Self {
+            version: version as u8,
+            sensor,
+            platform,
+            window,
+            minor,
+        })
+    }
+
+    /// The binary core identifier, the value of ST 0601 tag 94.
+    pub fn encode(&self) -> Vec<u8> {
+        let usage = self.sensor.map_or(0, |id| id.id_type.code() << 5)
+            | self.platform.map_or(0, |id| id.id_type.code() << 3)
+            | if self.window.is_some() { 0x04 } else { 0x00 }
+            | if self.minor.is_some() { 0x02 } else { 0x00 };
+        let mut out = Vec::with_capacity(2 + 4 * 16);
+        out.push(self.version);
+        out.push(usage);
+        let components = [
+            self.sensor.map(|id| id.uuid),
+            self.platform.map(|id| id.uuid),
+            self.window,
+            self.minor,
+        ];
+        for uuid in components.iter().flatten() {
+            out.extend_from_slice(uuid);
+        }
+        out
+    }
+}
+
 impl UasDatalink {
     /// Parse one complete KLV packet (16-byte UAS LS key, BER length, TLV body).
     /// `None` for a wrong key, a malformed / truncated structure, or a checksum
@@ -477,6 +646,8 @@ impl UasDatalink {
                 42 => ls.target_alt_m = u16_at(value).map(|v| v as f64 * ALT_SCALE + ALT_OFFSET),
                 48 => ls.security = SecurityLocalSet::parse(value),
                 65 => ls.version = value.first().copied(),
+                74 => ls.vmti = VmtiLocalSet::parse(value),
+                94 => ls.miis_core_id = MiisCoreId::parse(value),
                 _ => {}
             }
             pos = v_start + len;
@@ -594,6 +765,12 @@ impl UasDatalink {
         }
         if let Some(v) = self.version {
             put(65, &[v]);
+        }
+        if let Some(v) = &self.vmti {
+            put(74, &v.encode_body());
+        }
+        if let Some(v) = &self.miis_core_id {
+            put(94, &v.encode());
         }
         // Trailing checksum: tag + length enter the sum, then the value is the
         // sum over everything before it (key + BER length included).
@@ -909,6 +1086,44 @@ mod tests {
                 version: Some(10),
             }),
             version: Some(19),
+            // Integer-valued target fields only, so the whole nested set
+            // compares exactly after the round trip.
+            vmti: Some(VmtiLocalSet {
+                version: Some(5),
+                total_targets: Some(7),
+                reported_targets: Some(2),
+                frame_width: Some(1920),
+                frame_height: Some(1080),
+                source_sensor: Some(String::from("EO Nose")),
+                targets: alloc::vec![
+                    crate::vmti::VTarget {
+                        id: 1,
+                        centroid_pixel: Some(409_601),
+                        confidence_pct: Some(87),
+                        ..Default::default()
+                    },
+                    crate::vmti::VTarget {
+                        id: 900,
+                        boundary_top_left_pixel: Some(12),
+                        boundary_bottom_right_pixel: Some(4_004),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }),
+            miis_core_id: Some(MiisCoreId {
+                version: 1,
+                sensor: Some(MiisId {
+                    id_type: MiisIdType::Physical,
+                    uuid: [0x11; 16],
+                }),
+                platform: Some(MiisId {
+                    id_type: MiisIdType::Virtual,
+                    uuid: [0x22; 16],
+                }),
+                window: None,
+                minor: None,
+            }),
         }
     }
 
@@ -929,6 +1144,8 @@ mod tests {
         assert_eq!(got.image_source_sensor, ls.image_source_sensor);
         assert_eq!(got.image_coordinate_system, ls.image_coordinate_system);
         assert_eq!(got.security, ls.security);
+        assert_eq!(got.vmti, ls.vmti);
+        assert_eq!(got.miis_core_id, ls.miis_core_id);
         close(got.heading_deg, ls.heading_deg, HEADING_SCALE);
         close(got.pitch_deg, ls.pitch_deg, PITCH_SCALE);
         close(got.roll_deg, ls.roll_deg, ROLL_SCALE);
@@ -1079,6 +1296,56 @@ mod tests {
             "an unnamed marking must not decode as absent"
         );
         assert_eq!(sec.encode_body(), alloc::vec![1, 1, 9]);
+    }
+
+    /// A core identifier the usage byte does not fully account for is refused
+    /// rather than half-read: trailing bytes, a missing UUID, and a version
+    /// this codec could not write back all fail.
+    #[test]
+    fn miis_core_id_rejects_what_it_cannot_reproduce() {
+        let mut value = alloc::vec![0x01, 0x70];
+        value.extend_from_slice(&[0xAA; 32]);
+        assert!(MiisCoreId::parse(&value).is_some());
+        for cut in 0..value.len() {
+            assert_eq!(MiisCoreId::parse(&value[..cut]), None, "truncated at {cut}");
+        }
+        let mut trailing = value.clone();
+        trailing.push(0x00);
+        assert_eq!(MiisCoreId::parse(&trailing), None, "trailing byte");
+        // A multi-byte BER-OID version: the encode side writes one byte.
+        let mut long_version = alloc::vec![0x81, 0x00, 0x00];
+        long_version.extend_from_slice(&[0xAA; 32]);
+        assert_eq!(MiisCoreId::parse(&long_version), None);
+    }
+
+    /// The window and minor id slots round-trip through the usage byte.
+    #[test]
+    fn miis_core_id_window_and_minor_round_trip() {
+        let with_window = MiisCoreId {
+            version: 1,
+            sensor: Some(MiisId {
+                id_type: MiisIdType::Managed,
+                uuid: [0x33; 16],
+            }),
+            platform: None,
+            window: Some([0x44; 16]),
+            minor: None,
+        };
+        let bytes = with_window.encode();
+        assert_eq!(bytes[1], 0b0010_0100, "managed sensor + window bit");
+        assert_eq!(MiisCoreId::parse(&bytes), Some(with_window));
+
+        let minor_only = MiisCoreId {
+            version: 1,
+            sensor: None,
+            platform: None,
+            window: None,
+            minor: Some([0x55; 16]),
+        };
+        let bytes = minor_only.encode();
+        assert_eq!(bytes.len(), 18);
+        assert_eq!(bytes[1], 0b0000_0010, "minor bit alone");
+        assert_eq!(MiisCoreId::parse(&bytes), Some(minor_only));
     }
 
     /// Object country codes decode from either the UTF-16BE form ST 0102 asks
