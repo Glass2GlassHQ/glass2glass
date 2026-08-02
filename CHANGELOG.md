@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M801: ST 0601 parse validated against the published MISMMS reference packet (klvdata as oracle), with a lenient no-checksum parse and a `verify-checksum` knob on `klvdecode`.
+
 - M800: MISB ST 0601 UAS Datalink Local Set codec (`g2g-plugins::klv`) and the `klvdecode` element turning telemetry sets into timed text lines.
 
 - M799: KLV metadata in MPEG-TS (STANAG 4609): `Caps::Klv`, mux with the `KLVA` registration descriptor, and `tsdemux stream=klv`, ffmpeg-validated both directions.

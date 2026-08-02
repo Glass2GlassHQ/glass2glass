@@ -24,7 +24,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, G2gError, MemoryDomain,
-    OutputSink, PadTemplate, PadTemplates, PipelinePacket, TextFormat,
+    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec, TextFormat,
 };
 
 /// The 16-byte universal label of the ST 0601 UAS Datalink Local Set.
@@ -197,6 +198,19 @@ impl UasDatalink {
     /// whole rather than half-read. Unknown tags and wrong-sized values are
     /// skipped (the set stays forward-compatible).
     pub fn parse(packet: &[u8]) -> Option<Self> {
+        Self::parse_inner(packet, true)
+    }
+
+    /// [`parse`](Self::parse) without requiring the checksum to be present or
+    /// match. Structure is still fully bounds-checked. For streams whose
+    /// encoder writes a wrong checksum: even the published MISMMS reference
+    /// packet declares 0xAA43 where the ST 0601 sum is 0x3E1E (klvdata computes
+    /// the same), so field tooling tolerates this.
+    pub fn parse_lenient(packet: &[u8]) -> Option<Self> {
+        Self::parse_inner(packet, false)
+    }
+
+    fn parse_inner(packet: &[u8], require_checksum: bool) -> Option<Self> {
         if packet.get(..16)? != UAS_LOCAL_SET_KEY {
             return None;
         }
@@ -245,7 +259,7 @@ impl UasDatalink {
             }
             pos = v_start + len;
         }
-        checksum_ok.then_some(ls)
+        (checksum_ok || !require_checksum).then_some(ls)
     }
 
     /// Encode as one KLV packet: the UAS LS key, a BER length, the present tags
@@ -385,16 +399,36 @@ impl UasDatalink {
 /// KLV telemetry decoder element (`klvdecode`): `Caps::Klv` frames in (each one
 /// or more ST 336 packets, as a TS demux emits them), one timed
 /// `Caps::Text{Utf8}` line per parsed ST 0601 local set out. A packet that is
-/// not a valid ST 0601 set (wrong UL, bad checksum) is dropped, not forwarded.
-#[derive(Debug, Default)]
+/// not a valid ST 0601 set (wrong UL, bad checksum) is dropped, not forwarded;
+/// `verify-checksum=false` tolerates a wrong checksum (encoders get it wrong,
+/// see [`UasDatalink::parse_lenient`]).
+#[derive(Debug)]
 pub struct KlvDecode {
     configured: bool,
     emitted: u64,
+    /// Whether a set with a missing / wrong checksum is dropped (the default).
+    verify_checksum: bool,
+}
+
+impl Default for KlvDecode {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl KlvDecode {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            configured: false,
+            emitted: 0,
+            verify_checksum: true,
+        }
+    }
+
+    /// Tolerate a missing / wrong checksum (default requires it to match).
+    pub fn with_verify_checksum(mut self, verify: bool) -> Self {
+        self.verify_checksum = verify;
+        self
     }
 
     /// Count of text lines emitted.
@@ -449,7 +483,12 @@ impl AsyncElement for KlvDecode {
                         return Err(G2gError::UnsupportedDomain);
                     };
                     for pkt in split_klv_packets(slice) {
-                        let Some(ls) = UasDatalink::parse(pkt) else {
+                        let parsed = if self.verify_checksum {
+                            UasDatalink::parse(pkt)
+                        } else {
+                            UasDatalink::parse_lenient(pkt)
+                        };
+                        let Some(ls) = parsed else {
                             continue;
                         };
                         let line = ls.to_line();
@@ -471,6 +510,33 @@ impl AsyncElement for KlvDecode {
             }
             Ok(())
         })
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        const PROPS: &[PropertySpec] = &[PropertySpec::new(
+            "verify-checksum",
+            PropKind::Bool,
+            "drop a local set whose checksum is missing or wrong",
+        )
+        .with_default("true")];
+        PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "verify-checksum" => {
+                self.verify_checksum = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "verify-checksum" => Some(PropValue::Bool(self.verify_checksum)),
+            _ => None,
+        }
     }
 }
 
