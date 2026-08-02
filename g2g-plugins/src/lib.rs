@@ -236,6 +236,9 @@ pub mod ulpfec;
 // variable-length mask, protecting more than ULPFEC's 16 packets and enabling
 // 2-D (row + column) recovery of bursts.
 pub mod flexfec;
+// Sans-IO SMPTE ST 2022-1 (Pro-MPEG COP3) FEC: the 2-D row/column XOR repair
+// streams professional MPEG-TS-over-RTP contribution links expect.
+pub mod st2022fec;
 // uridecodebin front door: URI-scheme handlers for Registry::build_uridecodebin
 // (file:// -> Mp4Src, udp:// -> UdpSrc, rtsp:// -> RtspSrc, v4l2:// -> V4l2Src),
 // each gated to its source's feature.
