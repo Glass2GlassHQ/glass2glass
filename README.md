@@ -526,9 +526,13 @@ Features: `ffmpeg wayland-sink`.
 `tsdemux stream=klv` splits the MISB metadata stream out of the same multiplex
 (private PES with the `KLVA` registration, or metadata-in-PES 0x15), and
 `klvdecode` parses each ST 0601 UAS Datalink Local Set into a timed
-`key=value` text line, ready for `textoverlay` or an app sink. The mux
+`key=value` text line, ready for `textoverlay` or an app sink. The tag table
+covers the telemetry core plus identity strings, target geometry, and the
+nested ST 0102 security local set; the parser is validated against the
+published MISMMS reference packet with klvdata as the oracle. The mux
 direction takes `Caps::Klv` packets (built with `UasDatalink::encode`) on a
-`mpegtsmux` input. ffmpeg-validated bit-exact both ways.
+`mpegtsmux` input, and `rtpklv` carries KLV over RTP (RFC 6597) for
+low-latency links. ffmpeg-validated bit-exact both ways.
 
 ```rust
 let src   = FileSrc::new("uav.ts", Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs });

@@ -1713,6 +1713,24 @@ ffmpeg both ways: ffprobe identifies the g2g mux's stream as `klv` and extracts
 its bytes bit-exact, and a TS re-authored by ffmpeg's muxer demuxes back
 bit-exact.
 
+The tag table covers the practical ST 0601 core: telemetry angles and
+positions, the identity strings (mission id, platform designation, image
+source sensor, coordinate system), slant range / target width, the four offset
+corner points, target location, and the nested MISB ST 0102 security local set
+(tag 48) as a typed `SecurityLocalSet` (classification enum preserved even for
+unknown codes, country coding methods, classifying / object countries), every
+scale factor cross-checked against the independent klvdata implementation and
+the whole parser validated against the published MISMMS reference packet.
+That packet's declared checksum is provably wrong (0xAA43 declared, 0x3E1E
+actual, klvdata's own sum agrees), which is why `parse` (strict, the
+`klvdecode` default) is paired with `parse_lenient` and a `verify-checksum`
+property: real encoders get checksums wrong, and the caller chooses whether
+that drops the set. KLV also rides RTP directly (RFC 6597, `rtpklv`): a
+sans-IO `RtpKlvPacketizer` / `RtpKlvDepayloader` pair mirroring the H.264
+`rtppay` / `rtpdepay` shape, 90 kHz timestamps, MTU fragmentation with the
+marker bit closing each KLVunit, and whole-unit discard on any lost fragment
+(a fragment carries no unit header, so resync waits for the next marker).
+
 The Matroska / WebM demuxer is the second, the same parser + element split
 keyed on `Caps::ByteStream{Matroska}`. `g2g-plugins::matroska::MatroskaDemuxer` is
 a pure EBML parser (variable-length element IDs / sizes, descend into the Segment,

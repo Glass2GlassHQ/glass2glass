@@ -6,6 +6,12 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M805: KLV over RTP (RFC 6597): sans-IO `RtpKlvPacketizer` / `RtpKlvDepayloader` with KLVunit fragmentation and whole-unit loss discard.
+
+- M803: MISB ST 0102 security local set (tag 48) decodes and re-encodes: classification, country coding, classifying / object countries, version.
+
+- M802: extended ST 0601 tag coverage: mission / platform / sensor identity strings, slant range, target width, offset corner points, and target location.
+
 - M801: ST 0601 parse validated against the published MISMMS reference packet (klvdata as oracle), with a lenient no-checksum parse and a `verify-checksum` knob on `klvdecode`.
 
 - M800: MISB ST 0601 UAS Datalink Local Set codec (`g2g-plugins::klv`) and the `klvdecode` element turning telemetry sets into timed text lines.
