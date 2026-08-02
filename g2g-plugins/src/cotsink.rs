@@ -16,6 +16,7 @@ use alloc::format;
 use alloc::string::String;
 
 use crate::klv::UasDatalink;
+use crate::xmlutil::{iso8601_utc_us, xml_escape};
 
 /// The CoT `<point>` "value unknown" sentinel: `ce` / `le` always (ST 0601
 /// carries no error estimate), and `hae` when the set has no altitude.
@@ -84,7 +85,7 @@ pub fn cot_event(ls: &UasDatalink, opts: CotOptions<'_>) -> Option<String> {
     let time_us = ls.timestamp_us?;
     let (lat, lon) = (ls.sensor_lat_deg?, ls.sensor_lon_deg?);
     let stale_us = time_us.saturating_add((opts.stale_secs as u64).saturating_mul(1_000_000));
-    let time = iso8601_utc(time_us);
+    let time = iso8601_utc_us(time_us);
 
     // ST 0601 tag 15 is altitude above mean sea level, CoT hae is above the
     // WGS-84 ellipsoid: they differ by the local geoid undulation (tens of
@@ -120,8 +121,56 @@ pub fn cot_event(ls: &UasDatalink, opts: CotOptions<'_>) -> Option<String> {
          <detail>{detail}</detail></event>",
         uid = xml_escape(opts.uid),
         cot_type = xml_escape(opts.cot_type),
-        stale = iso8601_utc(stale_us),
+        stale = iso8601_utc_us(stale_us),
     ))
+}
+
+/// Build the ST 0805.1 Sensor Point of Interest event for one local set: a
+/// second event (`b-m-p-s-p-i`) at the point the sensor looks at, tied to the
+/// platform track by a `<link relation="p-p">`. The conventions are jmisb's
+/// `KlvToCot` (the only ST 0805 implementation verified against): the point is
+/// the target location when the set carries one complete (lat, lon, alt),
+/// else the frame center; the SPI uid is the platform uid plus the sensor
+/// name; `how` is `m-p`; ce / le are the unknown sentinel (ST 0601 error
+/// estimates are not decoded, and jmisb writes the same default without them).
+///
+/// `None` when the set has no timestamp or neither point is complete.
+pub fn cot_spi_event(ls: &UasDatalink, opts: CotOptions<'_>) -> Option<String> {
+    let time_us = ls.timestamp_us?;
+    let (lat, lon, alt) = match (ls.target_lat_deg, ls.target_lon_deg, ls.target_alt_m) {
+        (Some(lat), Some(lon), Some(alt)) => (lat, lon, alt),
+        _ => (
+            ls.frame_center_lat_deg?,
+            ls.frame_center_lon_deg?,
+            ls.frame_center_alt_m?,
+        ),
+    };
+    let stale_us = time_us.saturating_add((opts.stale_secs as u64).saturating_mul(1_000_000));
+    let time = iso8601_utc_us(time_us);
+
+    let platform_uid = platform_uid(ls, opts.uid);
+    let sensor = ls.image_source_sensor.as_deref().unwrap_or("UNKNOWN");
+
+    Some(format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n\
+         <event version=\"{COT_VERSION}\" uid=\"{uid}_{sensor}\" type=\"b-m-p-s-p-i\" \
+         time=\"{time}\" start=\"{time}\" stale=\"{stale}\" how=\"m-p\">\
+         <point lat=\"{lat:.6}\" lon=\"{lon:.6}\" hae=\"{alt:.1}\" ce=\"{UNKNOWN}\" le=\"{UNKNOWN}\"/>\
+         <detail><link relation=\"p-p\" type=\"{cot_type}\" uid=\"{uid}\"/></detail></event>",
+        uid = xml_escape(&platform_uid),
+        sensor = xml_escape(sensor),
+        cot_type = xml_escape(opts.cot_type),
+        stale = iso8601_utc_us(stale_us),
+    ))
+}
+
+/// The platform uid ST 0805 derives: platform designation and mission id
+/// joined by `_` when the set has both, else the sink's configured uid.
+fn platform_uid(ls: &UasDatalink, fallback: &str) -> String {
+    match (&ls.platform_designation, &ls.mission_id) {
+        (Some(platform), Some(mission)) => format!("{platform}_{mission}"),
+        _ => String::from(fallback),
+    }
 }
 
 /// The `<sensor>` cone: where the sensor points and how wide it sees, i.e. the
@@ -199,56 +248,9 @@ fn remarks(ls: &UasDatalink) -> String {
     parts
 }
 
-/// Format microseconds since the Unix epoch as the CoT `time` / `start` /
-/// `stale` timestamp: `CCYY-MM-DDThh:mm:ss.ssssssZ`, the W3C XML `xs:dateTime`
-/// profile pytak writes (`W3C_XML_DATETIME = "%Y-%m-%dT%H:%M:%S.%fZ"`, Python
-/// `%f` being 6 digits, always UTC with a literal `Z`). Six digits is also the
-/// exact resolution of ST 0601 tag 2, so no precision is lost.
-///
-/// Uses Howard Hinnant's `civil_from_days` so it needs no chrono dependency.
-fn iso8601_utc(unix_us: u64) -> String {
-    let secs = unix_us / 1_000_000;
-    let us = unix_us % 1_000_000;
-    let days = (secs / 86_400) as i64;
-    let tod = secs % 86_400;
-    let (hh, mm, ss) = (tod / 3_600, (tod % 3_600) / 60, tod % 60);
-
-    // civil_from_days: days since 1970-01-01 -> (year, month, day).
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097; // [0, 146096]
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
-    let mp = (5 * doy + 2) / 153; // [0, 11]
-    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
-    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
-    let year = if m <= 2 { y + 1 } else { y };
-
-    format!("{year:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}.{us:06}Z")
-}
-
-/// XML-escape a bitstream string for an attribute value or element text, and
-/// drop the C0 control characters XML 1.0 does not admit in either form.
-fn xml_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&apos;"),
-            c if (c as u32) < 0x20 => {}
-            c => out.push(c),
-        }
-    }
-    out
-}
-
 #[cfg(feature = "udp-egress")]
 mod element {
-    use super::{cot_event, CotOptions};
+    use super::{cot_event, cot_spi_event, CotOptions};
 
     use core::future::Future;
     use core::pin::Pin;
@@ -285,6 +287,7 @@ mod element {
         stale_secs: u32,
         multicast_ttl: u32,
         verify_checksum: bool,
+        spi: bool,
         // Bound synchronously in `configure_pipeline` (no runtime needed) and
         // wrapped into the tokio socket on first `process`, where a runtime
         // context is guaranteed (`UdpSocket::from_std` requires one). The TCP
@@ -306,6 +309,7 @@ mod element {
                 stale_secs: super::DEFAULT_STALE_SECS,
                 multicast_ttl: 1,
                 verify_checksum: true,
+                spi: false,
                 std_socket: None,
                 socket: None,
                 stream: None,
@@ -350,6 +354,12 @@ mod element {
             self
         }
 
+        /// Also emit an ST 0805.1 Sensor Point of Interest event per local set.
+        pub fn with_spi(mut self, spi: bool) -> Self {
+            self.spi = spi;
+            self
+        }
+
         /// CoT events written so far.
         pub fn events_sent(&self) -> u64 {
             self.events_sent
@@ -368,13 +378,20 @@ mod element {
             };
             split_klv_packets(buf)
                 .into_iter()
-                .filter_map(|pkt| {
+                .flat_map(|pkt| {
                     let ls = if self.verify_checksum {
                         UasDatalink::parse(pkt)
                     } else {
                         UasDatalink::parse_lenient(pkt)
-                    }?;
-                    cot_event(&ls, opts)
+                    };
+                    let mut events = Vec::new();
+                    if let Some(ls) = ls {
+                        events.extend(cot_event(&ls, opts));
+                        if self.spi {
+                            events.extend(cot_spi_event(&ls, opts));
+                        }
+                    }
+                    events
                 })
                 .collect()
         }
@@ -493,6 +510,12 @@ mod element {
                     "drop a local set whose checksum is missing or wrong",
                 )
                 .with_default("true"),
+                PropertySpec::new(
+                    "spi",
+                    PropKind::Bool,
+                    "also emit an ST 0805.1 sensor point of interest event per local set",
+                )
+                .with_default("false"),
             ];
             PROPS
         }
@@ -538,6 +561,10 @@ mod element {
                     self.verify_checksum = value.as_bool().ok_or(PropError::Type)?;
                     Ok(())
                 }
+                "spi" => {
+                    self.spi = value.as_bool().ok_or(PropError::Type)?;
+                    Ok(())
+                }
                 _ => Err(PropError::Unknown),
             }
         }
@@ -559,6 +586,7 @@ mod element {
                 "stale-seconds" => Some(PropValue::Uint(self.stale_secs as u64)),
                 "ttl-mc" => Some(PropValue::Uint(self.multicast_ttl as u64)),
                 "verify-checksum" => Some(PropValue::Bool(self.verify_checksum)),
+                "spi" => Some(PropValue::Bool(self.spi)),
                 _ => None,
             }
         }
@@ -617,11 +645,11 @@ mod tests {
 
     #[test]
     fn iso8601_is_the_w3c_profile_with_microseconds() {
-        assert_eq!(iso8601_utc(T), "2023-11-14T22:13:20.123456Z");
+        assert_eq!(iso8601_utc_us(T), "2023-11-14T22:13:20.123456Z");
         // Epoch and a leap-year date, to exercise the civil-date arithmetic.
-        assert_eq!(iso8601_utc(0), "1970-01-01T00:00:00.000000Z");
+        assert_eq!(iso8601_utc_us(0), "1970-01-01T00:00:00.000000Z");
         assert_eq!(
-            iso8601_utc(1_709_164_800_000_000),
+            iso8601_utc_us(1_709_164_800_000_000),
             "2024-02-29T00:00:00.000000Z"
         );
     }

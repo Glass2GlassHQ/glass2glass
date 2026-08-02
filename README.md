@@ -537,12 +537,14 @@ a real UAS capture (the public "Day Flight" sample from samples.ffmpeg.org:
 point `G2G_STANAG_SAMPLE` at it to run the local `klv_stanag_sample` test).
 
 The rest of the ISR stack sits on the same codec: `vmti` for ST 0903
-moving-target reports (including `vmti_from_analytics`, which turns an
-in-pipeline detector's output into VTargets), ST 1204 MIIS identifiers,
+moving-target reports with their nested mask / ontology / tracker / chip sets
+(including `vmti_from_analytics`, which turns an in-pipeline detector's output
+into VTargets), ST 1204 MIIS identifiers (standard text form included),
 `misptimeinsert` / `misptimeextract` for ST 0604 timestamps in H.264 / H.265
 SEI, `st2022fec` for SMPTE 2022-1 loss recovery on a contribution link, and
 `cotsink` to put a drone track on a TAK / ATAK network as Cursor-on-Target
-events. SRT carries it encrypted (`passphrase=` on `srtsink` / `srtsrc`).
+events, optionally with the ST 0805.1 sensor point of interest alongside. SRT
+carries it encrypted (`passphrase=` on `srtsink` / `srtsrc`).
 
 ```rust
 let src   = FileSrc::new("uav.ts", Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs });

@@ -44,8 +44,8 @@ use g2g_core::{
 };
 
 use crate::annexb::{
-    add_emulation_prevention, h264_nal_type, h265_nal_type, nal_units_any, next_start_code,
-    strip_emulation_prevention,
+    add_emulation_prevention, h264_nal_type, h265_nal_type, nal_units_any, read_ff_extended,
+    strip_emulation_prevention, vcl_start,
 };
 use crate::subparse::{Cue, CueSettings};
 
@@ -211,21 +211,6 @@ fn misp_time_in_sei_rbsp(rbsp: &[u8]) -> Option<MispTime> {
     None
 }
 
-/// Read an SEI `0xFF`-extended value (`payloadType` / `payloadSize`): a run of
-/// `0xFF` bytes each adding 255, then a final byte. Returns the value and the
-/// index past it, or `None` if the buffer ends mid-value.
-fn read_ff_extended(data: &[u8], mut i: usize) -> Option<(usize, usize)> {
-    let mut value: usize = 0;
-    loop {
-        let b = *data.get(i)?;
-        i += 1;
-        value = value.checked_add(b as usize)?;
-        if b != 0xFF {
-            return Some((value, i));
-        }
-    }
-}
-
 /// Parse a `user_data_unregistered` payload as a MISP time, or `None` when it is
 /// some other vendor's user data or is not well formed.
 fn parse_misp_payload(payload: &[u8]) -> Option<MispTime> {
@@ -251,25 +236,6 @@ fn parse_misp_payload(payload: &[u8]) -> Option<MispTime> {
         value: u64::from_be_bytes([b[1], b[2], b[4], b[5], b[7], b[8], b[10], b[11]]),
         unit,
     })
-}
-
-/// Byte offset of the start code of the first VCL slice NAL in an Annex-B access
-/// unit, or `None` if there is none. H.264 VCL NAL types are 1..=5; H.265 VCL
-/// types are 0..=31.
-fn vcl_start(au: &[u8], codec: VideoCodec) -> Option<usize> {
-    let mut pos = 0usize;
-    while let Some((sc, begin)) = next_start_code(au, pos) {
-        let hdr = *au.get(begin)?;
-        let is_vcl = match codec {
-            VideoCodec::H265 => ((hdr >> 1) & 0x3F) < 32,
-            _ => (1..=5).contains(&(hdr & 0x1F)),
-        };
-        if is_vcl {
-            return Some(sc);
-        }
-        pos = begin;
-    }
-    None
 }
 
 /// The compressed-video codecs whose SEI these elements read / write.

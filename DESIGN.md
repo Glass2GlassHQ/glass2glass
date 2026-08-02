@@ -1743,17 +1743,24 @@ marker bit closing each KLVunit, and whole-unit discard on any lost fragment
 Around that core sit the rest of the STANAG 4609 pieces. `vmti` is the MISB ST
 0903 moving-target set (ST 0601 tag 74, nested with no UL or checksum;
 standalone it carries both), decoding the VTarget series with ST 1201 IMAPB
-scaling, and `vmti_from_analytics` turns a frame's `AnalyticsMeta` detections
-into VTargets (a tracked detection carries its `object_id` as the target id),
-so an in-pipeline detector emits standards-compliant VMTI. The ST 1204 MIIS
-core identifier (tag 94) round-trips exactly, refusing rather than half-reading
-an identifier it cannot reproduce. `misptime` puts MISB ST 0604 microsecond
+scaling along with each target's nested VMask (pixel polygon / run-length
+mask), VObject (ontology class), VTracker (track id, life cycle, velocity and
+acceleration packs) and VChip (image chip) sets, and `vmti_from_analytics`
+turns a frame's `AnalyticsMeta` detections into VTargets (a tracked detection
+carries its `object_id` as the target id), so an in-pipeline detector emits
+standards-compliant VMTI. The ST 1204 MIIS core identifier (tag 94)
+round-trips exactly, refusing rather than half-reading an identifier it cannot
+reproduce, and renders the standard text form (grouped hex UUIDs with the
+Appendix B permutation check value). `misptime` puts MISB ST 0604 microsecond
 timestamps in an H.264 / H.265 SEI so video frames and KLV correlate after a
 remux; extraction emits text cues rather than restamping PTS, since an absolute
 epoch time on a frame would read as decades of lateness to every sink.
 `cotsink` maps decoded telemetry to Cursor-on-Target XML for TAK / ATAK, one
 event per local set with the platform as the point and the frame center as a
-`<sensor>` cone. `st2022fec` is SMPTE 2022-1 (Pro-MPEG COP3) FEC for TS over
+`<sensor>` cone; with `spi=true` it also emits the ST 0805.1 Sensor Point of
+Interest event (`b-m-p-s-p-i` at the target location or frame center, linked
+to the platform track by `<link relation="p-p">`, jmisb's `KlvToCot`
+conventions). `st2022fec` is SMPTE 2022-1 (Pro-MPEG COP3) FEC for TS over
 RTP: the wire format only, since the 2D row / column XOR algebra and the
 receiver bookkeeping now live once in `ulpfec` and serve `flexfec` and this
 alike. It derives each repair's protected set from that repair's own
@@ -1762,10 +1769,10 @@ geometry change still decodes, and it refuses a repair whose type field is not
 XOR instead of applying the wrong algorithm to it.
 
 Every wire format here was verified against a primary implementation rather
-than prose: jmisb for ST 0903 / ST 1204, GStreamer's `video-sei` parser plus a
-real capture vector for ST 0604, FFmpeg's `prompeg` and GStreamer's
-`rtpst2022-1-fecenc` (which agree field for field) for ST 2022-1, and MITRE's
-CoT schema with pytak's constants for CoT. Where a field could not be
+than prose: jmisb for ST 0903 / ST 1204 / ST 0805, GStreamer's `video-sei`
+parser plus a real capture vector for ST 0604, FFmpeg's `prompeg` and
+GStreamer's `rtpst2022-1-fecenc` (which agree field for field) for ST 2022-1,
+and MITRE's CoT schema with pytak's constants for CoT. Where a field could not be
 confirmed, the codec preserves the raw bytes or declines to emit rather than
 guessing: the VTarget location pack's accuracy tail is kept verbatim, and the
 unconfirmed CoT detail elements are simply not written.

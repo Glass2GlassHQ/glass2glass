@@ -6,6 +6,12 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M814: `cotsink` can also emit the ST 0805.1 sensor point of interest event per local set, linked to the platform track.
+
+- M813: VTargets decode and re-encode their nested ST 0903 VMask / VObject / VTracker / VChip sets.
+
+- M812: the ST 1204 MIIS core identifier renders its standard text form, Appendix B check value included.
+
 - M811: `cotsink` bridges ST 0601 telemetry to Cursor-on-Target XML events over UDP or TCP, so a drone track appears on a TAK / ATAK network.
 
 - M810: SMPTE 2022-1 (Pro-MPEG COP3) FEC for TS over RTP, with the row / column repair streams built on the XOR core now shared with `ulpfec` and `flexfec`.

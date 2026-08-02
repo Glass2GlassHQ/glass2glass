@@ -74,6 +74,7 @@ pub mod vp9parse;
 // Shared integer source-over blend used by the compositor and CPU overlays.
 mod mathf;
 mod paint;
+mod xmlutil;
 
 // Software RGBA8 compositor (fan-in pixel mixer): PiP / grids / overlays.
 pub mod compositor;

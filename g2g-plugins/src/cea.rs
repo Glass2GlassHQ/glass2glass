@@ -26,7 +26,7 @@ use alloc::vec::Vec;
 use g2g_core::VideoCodec;
 
 use crate::annexb::{
-    add_emulation_prevention, h264_nal_type, h265_nal_type, nal_units_any,
+    add_emulation_prevention, h264_nal_type, h265_nal_type, nal_units_any, read_ff_extended,
     strip_emulation_prevention,
 };
 use crate::subparse::{Cue, CueSettings, TextAlign};
@@ -155,21 +155,6 @@ fn parse_sei_messages(rbsp: &[u8], out: &mut Vec<CcTriple>) {
             parse_user_data_registered(&rbsp[i..end], out);
         }
         i = end;
-    }
-}
-
-/// Read an SEI `0xFF`-extended value (`payloadType` / `payloadSize`): a run of
-/// `0xFF` bytes each adding 255, then a final byte. Returns the value and the
-/// index past it, or `None` if the buffer ends mid-value.
-fn read_ff_extended(data: &[u8], mut i: usize) -> Option<(usize, usize)> {
-    let mut value: usize = 0;
-    loop {
-        let b = *data.get(i)?;
-        i += 1;
-        value = value.checked_add(b as usize)?;
-        if b != 0xFF {
-            return Some((value, i));
-        }
     }
 }
 

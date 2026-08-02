@@ -25,8 +25,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::klv::{
-    ber_length, ber_oid_tag, checksum_16, push_ber_length, push_ber_oid, u8_one, utf8_string,
-    MiisCoreId, BER_OID_MAX,
+    ber_length, ber_oid_tag, checksum_16, push_ber_length, push_ber_oid, push_tlv, u8_one,
+    utf8_string, walk_tlv, MiisCoreId, BER_OID_MAX,
 };
 
 /// The 16-byte universal label of the ST 0903 VMTI Local Set, for the
@@ -225,10 +225,355 @@ impl TargetLocation {
     }
 }
 
+/// VTracker tags 10 / 11 components: velocity / acceleration, +-900 m/s or
+/// m/s^2 (jmisb uses the same range for both).
+fn enu_imap() -> Imapb {
+    Imapb::new(-900.0, 900.0, 2)
+}
+/// VObject tag 4: classification confidence, 0..100 percent.
+fn confidence_imap() -> Imapb {
+    Imapb::new(0.0, 100.0, 2)
+}
+
+/// A series of length-prefixed location packs (VTracker tags 5 and 9).
+fn parse_location_series(value: &[u8]) -> Option<Vec<TargetLocation>> {
+    let mut out = Vec::new();
+    let mut pos = 0usize;
+    while pos < value.len() {
+        let (len, l_bytes) = ber_length(value, pos)?;
+        let start = pos + l_bytes;
+        out.push(TargetLocation::parse(
+            value.get(start..start.checked_add(len)?)?,
+        )?);
+        pos = start + len;
+    }
+    Some(out)
+}
+
+fn encode_location_series(locations: &[TargetLocation]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for location in locations {
+        let bytes = location.encode();
+        push_ber_length(&mut out, bytes.len());
+        out.extend_from_slice(&bytes);
+    }
+    out
+}
+
+/// The nested VMask local set (VTarget tag 101): which frame pixels belong to
+/// the target, as a polygon of pixel-number vertices and / or a run-length bit
+/// mask. Both use ST 0903 pixel numbering (1 at the top left, row major).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct VMask {
+    /// Tag 1: polygon vertices as pixel numbers (at least three when present).
+    pub polygon: Vec<u64>,
+    /// Tag 2: (starting pixel number, run length) pairs.
+    pub bitmask: Vec<(u64, u32)>,
+}
+
+impl VMask {
+    /// Parse the nested VMask body. `None` fails just this set, not the target.
+    pub fn parse(body: &[u8]) -> Option<Self> {
+        let mut set = Self::default();
+        walk_tlv(body, |tag, value| {
+            match tag {
+                // Each vertex is a BER length then that many pixel-number bytes.
+                1 => {
+                    let mut points = Vec::new();
+                    let mut pos = 0usize;
+                    while pos < value.len() {
+                        let (len, l_bytes) = ber_length(value, pos)?;
+                        let start = pos + l_bytes;
+                        points.push(var_uint(value.get(start..start.checked_add(len)?)?, 6)?);
+                        pos = start + len;
+                    }
+                    set.polygon = points;
+                }
+                // Each run is BER(item len), then BER(pixel len) + pixel bytes,
+                // then the run length itself BER encoded (jmisb's layout).
+                2 => {
+                    let mut runs = Vec::new();
+                    let mut pos = 0usize;
+                    while pos < value.len() {
+                        let (item_len, l_bytes) = ber_length(value, pos)?;
+                        let start = pos + l_bytes;
+                        let item = value.get(start..start.checked_add(item_len)?)?;
+                        let (px_len, pl) = ber_length(item, 0)?;
+                        let pixel = var_uint(item.get(pl..pl.checked_add(px_len)?)?, 6)?;
+                        let (run, run_bytes) = ber_length(item, pl + px_len)?;
+                        // The run must end the item exactly.
+                        (pl + px_len + run_bytes == item.len()).then_some(())?;
+                        runs.push((pixel, u32::try_from(run).ok()?));
+                        pos = start + item_len;
+                    }
+                    set.bitmask = runs;
+                }
+                _ => {}
+            }
+            Some(())
+        })?;
+        Some(set)
+    }
+
+    /// The nested body VTarget tag 101 carries.
+    pub fn encode_body(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if !self.polygon.is_empty() {
+            let mut v = Vec::new();
+            for &point in &self.polygon {
+                let bytes = var_uint_bytes(point);
+                push_ber_length(&mut v, bytes.len());
+                v.extend_from_slice(&bytes);
+            }
+            push_tlv(&mut out, 1, &v);
+        }
+        if !self.bitmask.is_empty() {
+            let mut v = Vec::new();
+            for &(pixel, run) in &self.bitmask {
+                let pixel_bytes = var_uint_bytes(pixel);
+                let mut item = Vec::new();
+                push_ber_length(&mut item, pixel_bytes.len());
+                item.extend_from_slice(&pixel_bytes);
+                push_ber_length(&mut item, run as usize);
+                push_ber_length(&mut v, item.len());
+                v.extend_from_slice(&item);
+            }
+            push_tlv(&mut out, 2, &v);
+        }
+        out
+    }
+}
+
+/// The nested VObject local set (VTarget tag 102): what the target is, as a
+/// class in a named ontology.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct VObject {
+    /// Tag 1: URI of the ontology the class comes from.
+    pub ontology: Option<String>,
+    /// Tag 2: the target's class in that ontology.
+    pub ontology_class: Option<String>,
+    /// Tag 3: id of an ontology in the enclosing VMTI LS ontology series.
+    pub ontology_id: Option<u32>,
+    /// Tag 4: confidence in the classification, 0..100 percent.
+    pub confidence_pct: Option<f64>,
+}
+
+impl VObject {
+    /// Parse the nested VObject body. `None` fails just this set.
+    pub fn parse(body: &[u8]) -> Option<Self> {
+        let mut set = Self::default();
+        walk_tlv(body, |tag, value| {
+            match tag {
+                1 => set.ontology = utf8_string(value),
+                2 => set.ontology_class = utf8_string(value),
+                3 => set.ontology_id = var_uint(value, 3).map(|v| v as u32),
+                4 => set.confidence_pct = confidence_imap().decode(value),
+                _ => {}
+            }
+            Some(())
+        })?;
+        Some(set)
+    }
+
+    /// The nested body VTarget tag 102 carries.
+    pub fn encode_body(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if let Some(v) = &self.ontology {
+            push_tlv(&mut out, 1, v.as_bytes());
+        }
+        if let Some(v) = &self.ontology_class {
+            push_tlv(&mut out, 2, v.as_bytes());
+        }
+        if let Some(v) = self.ontology_id {
+            push_tlv(&mut out, 3, &var_uint_bytes(v as u64));
+        }
+        if let Some(v) = self.confidence_pct {
+            push_tlv(&mut out, 4, &confidence_imap().encode(v));
+        }
+        out
+    }
+}
+
+/// A VTracker velocity or acceleration pack: east / north / up components,
+/// with the optional standard-deviation and correlation groups kept as raw
+/// bytes like [`TargetLocation::accuracy`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnuVector {
+    pub east: f64,
+    pub north: f64,
+    pub up: f64,
+    pub accuracy: Vec<u8>,
+}
+
+impl EnuVector {
+    fn parse(v: &[u8]) -> Option<Self> {
+        // The components alone, plus the sigma group, or plus sigma and rho.
+        if !matches!(v.len(), 6 | 12 | 18) {
+            return None;
+        }
+        Some(Self {
+            east: enu_imap().decode(&v[..2])?,
+            north: enu_imap().decode(&v[2..4])?,
+            up: enu_imap().decode(&v[4..6])?,
+            accuracy: Vec::from(&v[6..]),
+        })
+    }
+
+    fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(6 + self.accuracy.len());
+        out.extend_from_slice(&enu_imap().encode(self.east));
+        out.extend_from_slice(&enu_imap().encode(self.north));
+        out.extend_from_slice(&enu_imap().encode(self.up));
+        out.extend_from_slice(&self.accuracy);
+        out
+    }
+}
+
+/// The nested VTracker local set (VTarget tag 104): the track this target
+/// belongs to, its life cycle, and its motion.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct VTracker {
+    /// Tag 1: 16-byte UUID of the track.
+    pub track_id: Option<[u8; 16]>,
+    /// Tag 2: detection status: 0 inactive, 1 active, 2 dropped, 3 stopped.
+    pub detection_status: Option<u8>,
+    /// Tag 3: first observation time, microseconds since the Unix epoch.
+    pub start_time_us: Option<u64>,
+    /// Tag 4: latest observation time, microseconds since the Unix epoch.
+    pub end_time_us: Option<u64>,
+    /// Tag 5: area the track covers, as location packs.
+    pub boundary: Vec<TargetLocation>,
+    /// Tag 6: tracking algorithm name, free text.
+    pub algorithm: Option<String>,
+    /// Tag 7: track confidence, 0 to 100 percent.
+    pub confidence_pct: Option<u8>,
+    /// Tag 8: number of points in the track, 1..65535.
+    pub num_track_points: Option<u32>,
+    /// Tag 9: the track's past locations, as location packs.
+    pub track_history: Vec<TargetLocation>,
+    /// Tag 10: velocity, m/s east / north / up.
+    pub velocity: Option<EnuVector>,
+    /// Tag 11: acceleration, m/s^2 east / north / up.
+    pub acceleration: Option<EnuVector>,
+    /// Tag 12: id of an algorithm in the enclosing VMTI LS algorithm series.
+    pub algorithm_id: Option<u32>,
+}
+
+impl VTracker {
+    /// Parse the nested VTracker body. `None` fails just this set.
+    pub fn parse(body: &[u8]) -> Option<Self> {
+        let mut set = Self::default();
+        walk_tlv(body, |tag, value| {
+            match tag {
+                1 => set.track_id = value.try_into().ok(),
+                2 => set.detection_status = u8_one(value),
+                3 => set.start_time_us = value.try_into().ok().map(u64::from_be_bytes),
+                4 => set.end_time_us = value.try_into().ok().map(u64::from_be_bytes),
+                5 => set.boundary = parse_location_series(value)?,
+                6 => set.algorithm = utf8_string(value),
+                7 => set.confidence_pct = u8_one(value),
+                8 => set.num_track_points = var_uint(value, 2).map(|v| v as u32),
+                9 => set.track_history = parse_location_series(value)?,
+                10 => set.velocity = EnuVector::parse(value),
+                11 => set.acceleration = EnuVector::parse(value),
+                12 => set.algorithm_id = var_uint(value, 3).map(|v| v as u32),
+                _ => {}
+            }
+            Some(())
+        })?;
+        Some(set)
+    }
+
+    /// The nested body VTarget tag 104 carries.
+    pub fn encode_body(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if let Some(v) = &self.track_id {
+            push_tlv(&mut out, 1, v);
+        }
+        if let Some(v) = self.detection_status {
+            push_tlv(&mut out, 2, &[v]);
+        }
+        if let Some(v) = self.start_time_us {
+            push_tlv(&mut out, 3, &v.to_be_bytes());
+        }
+        if let Some(v) = self.end_time_us {
+            push_tlv(&mut out, 4, &v.to_be_bytes());
+        }
+        if !self.boundary.is_empty() {
+            push_tlv(&mut out, 5, &encode_location_series(&self.boundary));
+        }
+        if let Some(v) = &self.algorithm {
+            push_tlv(&mut out, 6, v.as_bytes());
+        }
+        if let Some(v) = self.confidence_pct {
+            push_tlv(&mut out, 7, &[v]);
+        }
+        if let Some(v) = self.num_track_points {
+            push_tlv(&mut out, 8, &var_uint_bytes(v as u64));
+        }
+        if !self.track_history.is_empty() {
+            push_tlv(&mut out, 9, &encode_location_series(&self.track_history));
+        }
+        if let Some(v) = &self.velocity {
+            push_tlv(&mut out, 10, &v.encode());
+        }
+        if let Some(v) = &self.acceleration {
+            push_tlv(&mut out, 11, &v.encode());
+        }
+        if let Some(v) = self.algorithm_id {
+            push_tlv(&mut out, 12, &var_uint_bytes(v as u64));
+        }
+        out
+    }
+}
+
+/// The nested VChip local set (VTarget tag 105): a still image chip of the
+/// target, embedded or by URI.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct VChip {
+    /// Tag 1: image type, an IANA media subtype ("jpeg", "png").
+    pub image_type: Option<String>,
+    /// Tag 2: URI the chip can be fetched from.
+    pub image_uri: Option<String>,
+    /// Tag 3: the embedded image bytes.
+    pub embedded_image: Option<Vec<u8>>,
+}
+
+impl VChip {
+    /// Parse the nested VChip body. `None` fails just this set.
+    pub fn parse(body: &[u8]) -> Option<Self> {
+        let mut set = Self::default();
+        walk_tlv(body, |tag, value| {
+            match tag {
+                1 => set.image_type = utf8_string(value),
+                2 => set.image_uri = utf8_string(value),
+                3 => set.embedded_image = Some(Vec::from(value)),
+                _ => {}
+            }
+            Some(())
+        })?;
+        Some(set)
+    }
+
+    /// The nested body VTarget tag 105 carries.
+    pub fn encode_body(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if let Some(v) = &self.image_type {
+            push_tlv(&mut out, 1, v.as_bytes());
+        }
+        if let Some(v) = &self.image_uri {
+            push_tlv(&mut out, 2, v.as_bytes());
+        }
+        if let Some(v) = &self.embedded_image {
+            push_tlv(&mut out, 3, v);
+        }
+        out
+    }
+}
+
 /// One reported target: a VTarget pack from the VTarget series (VMTI LS tag
 /// 101). The id leads the pack BER-OID encoded; everything after it is
-/// optional, and a set carries only what its detector produced. Unknown tags
-/// (the nested VMask / VObject / VTracker sets among them) are skipped.
+/// optional, and a set carries only what its detector produced.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct VTarget {
     /// The target id, unique within the frame and stable across frames when the
@@ -256,6 +601,14 @@ pub struct VTarget {
     pub centroid_row: Option<u32>,
     /// Tag 20: centroid column, 1-based.
     pub centroid_col: Option<u32>,
+    /// Tag 101: the target's pixels, a nested VMask set.
+    pub vmask: Option<VMask>,
+    /// Tag 102: the target's ontology class, a nested VObject set.
+    pub vobject: Option<VObject>,
+    /// Tag 104: the target's track, a nested VTracker set.
+    pub vtracker: Option<VTracker>,
+    /// Tag 105: an image chip of the target, a nested VChip set.
+    pub vchip: Option<VChip>,
 }
 
 impl VTarget {
@@ -268,12 +621,7 @@ impl VTarget {
             id,
             ..Default::default()
         };
-        let mut pos = id_bytes;
-        while pos < pack.len() {
-            let (tag, tag_bytes) = ber_oid_tag(pack, pos)?;
-            let (len, l_bytes) = ber_length(pack, pos.checked_add(tag_bytes)?)?;
-            let v_start = pos + tag_bytes + l_bytes;
-            let value = pack.get(v_start..v_start.checked_add(len)?)?;
+        walk_tlv(&pack[id_bytes..], |tag, value| {
             match tag {
                 1 => target.centroid_pixel = var_uint(value, 6),
                 2 => target.boundary_top_left_pixel = var_uint(value, 6),
@@ -286,10 +634,14 @@ impl VTarget {
                 17 => target.location = TargetLocation::parse(value),
                 19 => target.centroid_row = var_uint(value, 4).map(|v| v as u32),
                 20 => target.centroid_col = var_uint(value, 4).map(|v| v as u32),
+                101 => target.vmask = VMask::parse(value),
+                102 => target.vobject = VObject::parse(value),
+                104 => target.vtracker = VTracker::parse(value),
+                105 => target.vchip = VChip::parse(value),
                 _ => {}
             }
-            pos = v_start + len;
-        }
+            Some(())
+        })?;
         Some(target)
     }
 
@@ -297,11 +649,7 @@ impl VTarget {
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
         push_ber_oid(&mut out, self.id.min(MAX_TARGET_ID));
-        let mut put = |tag: u8, value: &[u8]| {
-            out.push(tag);
-            push_ber_length(&mut out, value.len());
-            out.extend_from_slice(value);
-        };
+        let mut put = |tag: u8, value: &[u8]| push_tlv(&mut out, tag, value);
         if let Some(v) = self.centroid_pixel {
             put(1, &var_uint_bytes(v));
         }
@@ -334,6 +682,18 @@ impl VTarget {
         }
         if let Some(v) = self.centroid_col {
             put(20, &var_uint_bytes(v as u64));
+        }
+        if let Some(v) = &self.vmask {
+            put(101, &v.encode_body());
+        }
+        if let Some(v) = &self.vobject {
+            put(102, &v.encode_body());
+        }
+        if let Some(v) = &self.vtracker {
+            put(104, &v.encode_body());
+        }
+        if let Some(v) = &self.vchip {
+            put(105, &v.encode_body());
         }
         out
     }
@@ -382,12 +742,7 @@ impl VmtiLocalSet {
     /// here: it only means something on the standalone packet.
     pub fn parse(body: &[u8]) -> Option<Self> {
         let mut ls = Self::default();
-        let mut pos = 0;
-        while pos < body.len() {
-            let (tag, tag_bytes) = ber_oid_tag(body, pos)?;
-            let (len, l_bytes) = ber_length(body, pos.checked_add(tag_bytes)?)?;
-            let v_start = pos + tag_bytes + l_bytes;
-            let value = body.get(v_start..v_start.checked_add(len)?)?;
+        walk_tlv(body, |tag, value| {
             match tag {
                 2 => ls.timestamp_us = value.try_into().ok().map(u64::from_be_bytes),
                 3 => ls.system_name = utf8_string(value),
@@ -404,8 +759,8 @@ impl VmtiLocalSet {
                 101 => ls.targets = parse_target_series(value)?,
                 _ => {}
             }
-            pos = v_start + len;
-        }
+            Some(())
+        })?;
         Some(ls)
     }
 
@@ -413,11 +768,7 @@ impl VmtiLocalSet {
     /// order, no checksum.
     pub fn encode_body(&self) -> Vec<u8> {
         let mut out = Vec::new();
-        let mut put = |tag: u8, value: &[u8]| {
-            out.push(tag);
-            push_ber_length(&mut out, value.len());
-            out.extend_from_slice(value);
-        };
+        let mut put = |tag: u8, value: &[u8]| push_tlv(&mut out, tag, value);
         if let Some(v) = self.timestamp_us {
             put(2, &v.to_be_bytes());
         }
@@ -655,6 +1006,7 @@ mod tests {
                     location: None,
                     centroid_row: Some(214),
                     centroid_col: Some(641),
+                    ..Default::default()
                 },
                 VTarget {
                     id: 4_211,

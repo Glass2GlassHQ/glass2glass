@@ -300,3 +300,31 @@ fn analytics_meta_becomes_vmti_targets() {
     assert_eq!(parsed.targets.len(), 3);
     assert_eq!(parsed.targets[1].id, 4_096);
 }
+
+/// The ST 1204 text representation against jmisb: the published worked
+/// example, then jmisb's sensor-only, minor-only, three-UUID, and physical
+/// example vectors round-tripped from their binary form.
+#[test]
+fn miis_text_representation_matches_jmisb() {
+    assert_eq!(
+        reference_core_id().text_representation(),
+        "0170:F592-F023-7336-4AF8-AA91-62C0-0F2E-B2DA/16B7-4341-0008-41A0-BE36-5B5A-B96A-3645:D3"
+    );
+
+    for text in [
+        "0110:1AB8-231E-17E8-4748-A133-CE93-89A7-A060:25",
+        "0102:03DD-9DEE-FB48-477B-8204-B050-6F6B-2A33:25",
+        "0154:C7D1-6253-98A2-41C2-BA6E-90F8-FCC7-3914/E047-AB3E-81BE-41ED-9664-09B0-2F44-5FAB/5E71-B0DC-20FE-4920-8216-26D6-4F61-D863:C8",
+        "0178:865E-FD9C-EF8A-41C3-8244-B885-AFCC-40BF/ED8A-9AB8-72E2-4165-9979-7E5A-F54A-5B9A:25",
+    ] {
+        // The binary form is every hex digit before the check value.
+        let body = &text[..text.rfind(':').unwrap()];
+        let hex: String = body.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+        let bytes: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect();
+        let id = MiisCoreId::parse(&bytes).expect("jmisb vector parses");
+        assert_eq!(id.text_representation(), text);
+    }
+}

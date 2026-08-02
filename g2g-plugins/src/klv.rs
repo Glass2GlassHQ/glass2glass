@@ -74,6 +74,29 @@ pub(crate) fn push_ber_length(out: &mut Vec<u8>, len: usize) {
     out.extend_from_slice(&bytes[skip..]);
 }
 
+/// Write one TLV item: a one-byte tag, BER length, value.
+pub(crate) fn push_tlv(out: &mut Vec<u8>, tag: u8, value: &[u8]) {
+    out.push(tag);
+    push_ber_length(out, value.len());
+    out.extend_from_slice(value);
+}
+
+/// Walk a local set body of BER-OID tag / BER length / value items, calling
+/// `f` on each. `None` when the structure is not walkable (a bogus length, a
+/// value running past the end) or when `f` fails.
+pub(crate) fn walk_tlv(body: &[u8], mut f: impl FnMut(u32, &[u8]) -> Option<()>) -> Option<()> {
+    let mut pos = 0usize;
+    while pos < body.len() {
+        let (tag, tag_bytes) = ber_oid_tag(body, pos)?;
+        let (len, l_bytes) = ber_length(body, pos.checked_add(tag_bytes)?)?;
+        let v_start = pos + tag_bytes + l_bytes;
+        let value = body.get(v_start..v_start.checked_add(len)?)?;
+        f(tag, value)?;
+        pos = v_start + len;
+    }
+    Some(())
+}
+
 /// Read a BER-OID tag at `buf[pos]` (7 bits per byte, high bit continues).
 /// Returns `(tag, bytes_consumed)`; bounded to 4 bytes (ST 0601 tags are small).
 pub(crate) fn ber_oid_tag(buf: &[u8], pos: usize) -> Option<(u32, usize)> {
@@ -393,11 +416,7 @@ impl SecurityLocalSet {
     /// The nested TLV body tag 48 carries, present tags in ascending order.
     fn encode_body(&self) -> Vec<u8> {
         let mut out = Vec::new();
-        let mut put = |tag: u8, value: &[u8]| {
-            out.push(tag);
-            push_ber_length(&mut out, value.len());
-            out.extend_from_slice(value);
-        };
+        let mut put = |tag: u8, value: &[u8]| push_tlv(&mut out, tag, value);
         if let Some(v) = self.classification {
             put(1, &[v.code()]);
         }
@@ -535,15 +554,18 @@ impl MiisCoreId {
         })
     }
 
-    /// The binary core identifier, the value of ST 0601 tag 94.
-    pub fn encode(&self) -> Vec<u8> {
-        let usage = self.sensor.map_or(0, |id| id.id_type.code() << 5)
+    fn usage_byte(&self) -> u8 {
+        self.sensor.map_or(0, |id| id.id_type.code() << 5)
             | self.platform.map_or(0, |id| id.id_type.code() << 3)
             | if self.window.is_some() { 0x04 } else { 0x00 }
-            | if self.minor.is_some() { 0x02 } else { 0x00 };
+            | if self.minor.is_some() { 0x02 } else { 0x00 }
+    }
+
+    /// The binary core identifier, the value of ST 0601 tag 94.
+    pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(2 + 4 * 16);
         out.push(self.version);
-        out.push(usage);
+        out.push(self.usage_byte());
         let components = [
             self.sensor.map(|id| id.uuid),
             self.platform.map(|id| id.uuid),
@@ -555,6 +577,79 @@ impl MiisCoreId {
         }
         out
     }
+
+    /// The ST 1204 text representation (the form MISP tooling displays and
+    /// logs): version and usage as two hex bytes, the present UUIDs as 8
+    /// groups of 4 hex digits separated by `/`, then the Appendix B check
+    /// value. A minor id follows the others with no separator (the grammar
+    /// makes it exclusive with them), matching jmisb.
+    pub fn text_representation(&self) -> String {
+        use core::fmt::Write;
+
+        let mut s = String::with_capacity(96);
+        let _ = write!(s, "{:02X}{:02X}:", self.version, self.usage_byte());
+        let push_uuid = |s: &mut String, uuid: &[u8; 16]| {
+            for (i, pair) in uuid.chunks(2).enumerate() {
+                if i > 0 {
+                    s.push('-');
+                }
+                let _ = write!(s, "{:02X}{:02X}", pair[0], pair[1]);
+            }
+        };
+        let named = [
+            self.sensor.map(|id| id.uuid),
+            self.platform.map(|id| id.uuid),
+            self.window,
+        ];
+        for (i, uuid) in named.iter().flatten().enumerate() {
+            if i > 0 {
+                s.push('/');
+            }
+            push_uuid(&mut s, uuid);
+        }
+        if let Some(minor) = &self.minor {
+            push_uuid(&mut s, minor);
+        }
+        s.push(':');
+        let cv = st1204_check_value(&s);
+        let _ = write!(s, "{cv:02X}");
+        s
+    }
+}
+
+/// ST 1204 Appendix B check value: two 4-bit XOR accumulators over the text's
+/// hex digits (separators skipped), each digit first mapped through a
+/// permutation iterated from the digit's 1-based position mod 15.
+fn st1204_check_value(text: &str) -> u8 {
+    fn pmap(v: u8) -> u8 {
+        let (a, b, c, d) = (v >> 3 & 1, v >> 2 & 1, v >> 1 & 1, v & 1);
+        a | (d << 1) | (c << 2) | ((a ^ b) << 3)
+    }
+    fn qmap(v: u8) -> u8 {
+        let (a, b, c, d) = (v >> 3 & 1, v >> 2 & 1, v >> 1 & 1, v & 1);
+        c | (b << 1) | ((a ^ d) << 2) | (d << 3)
+    }
+    let mut p = [[0u8; 16]; 15];
+    let mut q = [[0u8; 16]; 15];
+    for j in 0..16u8 {
+        p[0][j as usize] = j;
+        q[0][j as usize] = j;
+    }
+    for i in 1..15 {
+        for j in 0..16 {
+            p[i][j] = pmap(p[i - 1][j]);
+            q[i][j] = qmap(q[i - 1][j]);
+        }
+    }
+    let (mut pc, mut qc) = (0u8, 0u8);
+    let mut i = 0usize;
+    for ch in text.chars() {
+        let Some(v) = ch.to_digit(16) else { continue };
+        i += 1;
+        pc ^= p[i % 15][v as usize];
+        qc ^= q[i % 15][v as usize];
+    }
+    (pc << 4) | qc
 }
 
 impl UasDatalink {
@@ -674,11 +769,7 @@ impl UasDatalink {
     /// (timestamp first, as ST 0601 mandates), and the trailing checksum (tag 1).
     pub fn encode(&self) -> Vec<u8> {
         let mut body = Vec::new();
-        let mut put = |tag: u8, value: &[u8]| {
-            body.push(tag);
-            push_ber_length(&mut body, value.len());
-            body.extend_from_slice(value);
-        };
+        let mut put = |tag: u8, value: &[u8]| push_tlv(&mut body, tag, value);
         if let Some(v) = self.timestamp_us {
             put(2, &v.to_be_bytes());
         }
