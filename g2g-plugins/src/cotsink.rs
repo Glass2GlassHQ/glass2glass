@@ -135,7 +135,12 @@ fn sensor_detail(ls: &UasDatalink) -> String {
     // Schema azimuth is with respect to true north; ST 0601 tag 18 is relative
     // to the platform nose, so it only becomes a true bearing with tag 5.
     if let (Some(heading), Some(rel_az)) = (ls.heading_deg, ls.rel_azimuth_deg) {
-        let az = (heading + rel_az).rem_euclid(360.0);
+        // `%` keeps the sign of the dividend and `f64::rem_euclid` is std-only,
+        // so fold the negative case by hand to stay on the no_std baseline.
+        let az = match (heading + rel_az) % 360.0 {
+            r if r < 0.0 => r + 360.0,
+            r => r,
+        };
         attrs.push_str(&format!(" azimuth=\"{az:.1}\""));
     }
     if let Some(fov) = ls.hfov_deg {
