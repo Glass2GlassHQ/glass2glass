@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M806: KLV validated against a real UAS capture (the public "Day Flight" STANAG 4609 sample), strict-parse clean and bit-exact with ffmpeg; local test via `G2G_STANAG_SAMPLE`.
+
 - M805: KLV over RTP (RFC 6597): sans-IO `RtpKlvPacketizer` / `RtpKlvDepayloader` with KLVunit fragmentation and whole-unit loss discard.
 
 - M804: synchronous KLV carriage (`klv-sync` on `mpegtsmux`): metadata-in-PES 0x15 with ST 1402 metadata AU cells and a PMT metadata descriptor, unwrapped on demux, ffmpeg-validated.

@@ -532,7 +532,9 @@ nested ST 0102 security local set; the parser is validated against the
 published MISMMS reference packet with klvdata as the oracle. The mux
 direction takes `Caps::Klv` packets (built with `UasDatalink::encode`) on a
 `mpegtsmux` input, and `rtpklv` carries KLV over RTP (RFC 6597) for
-low-latency links. ffmpeg-validated bit-exact both ways.
+low-latency links. ffmpeg-validated bit-exact both ways, and validated against
+a real UAS capture (the public "Day Flight" sample from samples.ffmpeg.org:
+point `G2G_STANAG_SAMPLE` at it to run the local `klv_stanag_sample` test).
 
 ```rust
 let src   = FileSrc::new("uav.ts", Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs });
