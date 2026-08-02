@@ -146,6 +146,8 @@ mod pixel;
 pub mod rtppay;
 // Sans-IO H.264 RTP depayloader, the receive-side inverse of rtppay.
 pub mod rtpdepay;
+// Sans-IO KLV metadata RTP payloader / depayloader (RFC 6597, SMPTE ST 336).
+pub mod rtpklv;
 
 // ST 2110-30 PCM audio over RTP (M595): sans-IO packetizer / depacketizer for
 // uncompressed L16 / L24, RTP timestamps from the PTP media clock. no_std+alloc.
