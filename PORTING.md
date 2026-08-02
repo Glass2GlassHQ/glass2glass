@@ -194,6 +194,29 @@ as programmatic graph nodes, or via the Python host (`pysrc`/`pyelement`). The
 table lives in [g2g-plugins/src/gst_compat.rs](g2g-plugins/src/gst_compat.rs)
 and is easy to extend.
 
+### STANAG 4609 / KLV metadata: beyond parity
+
+GStreamer carries KLV as opaque `meta/x-klv` buffers: `tsdemux` exposes the
+pad, `mpegtsmux` writes the asynchronous form only (0x06 + `KLVA`
+registration), `rtpklvpay`/`rtpklvdepay` move it over RTP, and everything about
+the *content* (MISB ST 0601 telemetry, ST 0102 security markings, checksums) is
+left to the application or to commercial third-party plugins. g2g handles the
+content in-tree:
+
+| Need | GStreamer | g2g |
+| :--- | :--- | :--- |
+| Demux KLV from a TS | `tsdemux` (opaque pad) | `tsdemux stream=klv` (`Caps::Klv`) |
+| Mux KLV, async | `mpegtsmux` | `mpegtsmux` |
+| Mux KLV, strict sync (ST 1402: 0x15, AU cells, metadata descriptor) | — | `mpegtsmux klv-sync=true` |
+| KLV over RTP (RFC 6597) | `rtpklvpay` / `rtpklvdepay` | `rtpklv` packetizer / depayloader |
+| Decode ST 0601 telemetry + ST 0102 security set | app code or commercial addon | `klvdecode` / `UasDatalink` |
+| Build ST 0601 sets | app code or commercial addon | `UasDatalink::encode` |
+
+The codec is validated against ffmpeg (bit-exact both directions), the
+independent klvdata implementation, the published MISMMS reference packet, and
+a real UAS capture, so a STANAG pipeline that needs a commercial GStreamer
+addon ports to stock g2g.
+
 ---
 
 ## 4. Caps
