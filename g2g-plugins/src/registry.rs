@@ -1255,6 +1255,18 @@ fn register_feature_gated(reg: &mut Registry) {
     reg.register_launch(LaunchFactory::of::<UdpSink>("udpsink", || {
         Box::new(UdpSink::new("127.0.0.1:5004".parse().unwrap()))
     }));
+    // Cursor-on-Target bridge (M811): a demuxed STANAG 4609 metadata stream's ST
+    // 0601 local sets become CoT events on a TAK network, e.g.
+    // `tsdemux stream=klv ! cotsink host=239.2.3.1 port=6969`.
+    #[cfg(feature = "udp-egress")]
+    reg.register_launch(LaunchFactory::of::<crate::cotsink::CotSink>(
+        "cotsink",
+        || {
+            Box::new(crate::cotsink::CotSink::new(
+                "239.2.3.1:6969".parse().unwrap(),
+            ))
+        },
+    ));
     #[cfg(feature = "rtsp-server")]
     reg.register_launch(LaunchFactory::of::<RtspServerSink>(
         "rtspserversink",

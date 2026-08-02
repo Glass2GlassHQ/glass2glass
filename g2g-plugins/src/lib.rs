@@ -136,6 +136,9 @@ pub mod textoverlay;
 pub mod cea;
 // MISB ST 0601 KLV telemetry (STANAG 4609): codec + klvdecode element (no_std).
 pub mod klv;
+// Cursor-on-Target bridge (M811): the ST 0601 -> CoT XML event builder (no_std)
+// plus the `cotsink` TAK egress element, which needs `udp-egress`.
+pub mod cotsink;
 // Closed-caption extraction element: compressed video in, timed text cues out.
 pub mod ccextract;
 // Closed-caption insertion element: compressed video + cues in, SEI'd video out.
