@@ -1699,7 +1699,16 @@ side a `Caps::Klv` input becomes a private PES (stream_type 0x06, PES
 the MISB ST 1402 asynchronous carriage ffmpeg keys on; the demux side accepts
 both that and metadata-in-PES (stream_type 0x15, the synchronous carriage) via
 `TsStream::Klv` (`tsdemux stream=klv`), filtering generic 0x06 PIDs by the
-registration the way Opus / DVB AC-3 selection does. Above carriage,
+registration the way Opus / DVB AC-3 selection does. `klv-sync` on the mux
+elements selects the strict synchronous form instead: stream_type 0x15 on PES
+`stream_id` 0xFC, each local set wrapped in one ISO 13818-1 metadata AU cell
+(the 5-byte header ffmpeg's demuxer skips per ST 1402; layout cross-checked
+against mediacommon's table 2-97 implementation), and a `metadata_descriptor`
+(tag 0x26, 'KLVA') in the PMT entry, which measurement showed ffmpeg requires
+to identify a 0x15 stream at all. The demux unwraps AU cells behind a
+validation gate (cells must tile the payload exactly and each must open with
+the ST 336 prefix) and forwards anything else raw, so both the strict and the
+bare-payload sync forms decode. Above carriage,
 `g2g-plugins::klv` is a pure `no_std` MISB ST 0601 UAS Datalink Local Set codec:
 `UasDatalink` decodes / encodes the core telemetry tags (precision timestamp,
 platform attitude, sensor position / FOV / relative angles, frame center) with

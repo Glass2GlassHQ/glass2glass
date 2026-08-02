@@ -8,6 +8,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 - M805: KLV over RTP (RFC 6597): sans-IO `RtpKlvPacketizer` / `RtpKlvDepayloader` with KLVunit fragmentation and whole-unit loss discard.
 
+- M804: synchronous KLV carriage (`klv-sync` on `mpegtsmux`): metadata-in-PES 0x15 with ST 1402 metadata AU cells and a PMT metadata descriptor, unwrapped on demux, ffmpeg-validated.
+
 - M803: MISB ST 0102 security local set (tag 48) decodes and re-encodes: classification, country coding, classifying / object countries, version.
 
 - M802: extended ST 0601 tag coverage: mission / platform / sensor identity strings, slant range, target width, offset corner points, and target location.
