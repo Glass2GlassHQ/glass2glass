@@ -645,10 +645,16 @@ _(No open parser items.)_
 - Property-set the remaining feature-gated sources from text (`location=` /
   `uri=` on rtsp / v4l2, default placeholders today; http / hls / dash now carry
   `location`).
-- Runtime properties for the g2g-ml elements (`OrtInference` tensor-input /
-  model geometry, `WgpuInference` / `WgpuPreprocess` gpu-output,
-  `DetectionPostprocess` thresholds + input size). Needs the property plumbing
-  in g2g-ml first; only worth it alongside launch-registering those elements.
+- **Milestone: g2g-ml elements from a launch line.** One package: a
+  `g2g_ml::register(&mut Registry)` helper (the stock registry is assembled in
+  g2g-plugins, which stays independent of g2g-ml, so apps opt in after building
+  it); `OrtInference` deferred model load so a `model=` property can construct
+  it (today `from_file` loads the session and reads geometry eagerly); runtime
+  properties (`ortinfer` model / tensor-input, `wgpupreprocess` gpu-output,
+  `detectionpostprocess` conf-threshold / iou-threshold / input size). Target:
+  `ortinfer model=yolov8n.onnx tensor-input=true ! detectionpostprocess
+  conf-threshold=0.3` parses and runs. `WgpuInference` is excluded: it is
+  constructed from weight tensors / shapes, which a text line cannot express.
 - A value grammar for spaces / enums-as-named-flags.
 - A GUI / tooling introspection surface beyond the text dump.
 
