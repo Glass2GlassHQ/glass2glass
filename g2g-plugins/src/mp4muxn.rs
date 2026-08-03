@@ -129,6 +129,9 @@ pub struct Mp4MuxN {
     /// default and the only streamable one). `false` selects the progressive
     /// layout: see [`with_fragmented`](Self::with_fragmented).
     fragmented: bool,
+    /// Whether the progressive layout puts its `moov` ahead of the `mdat`
+    /// (M824); see [`with_faststart`](Self::with_faststart).
+    faststart: bool,
     /// Progressive mode's buffered samples, in the global PTS-merged order they
     /// were released (which is also the `mdat` byte order). Empty in the
     /// fragmented default.
@@ -189,6 +192,7 @@ impl Mp4MuxN {
             fragment_duration_ms: 0,
             pending: alloc::vec![PendingFragment::default(); inputs],
             fragmented: true,
+            faststart: false,
             samples: Vec::new(),
         }
     }
@@ -215,6 +219,20 @@ impl Mp4MuxN {
     /// recording; a live or long capture wants the fragmented default.
     pub fn with_fragmented(mut self, fragmented: bool) -> Self {
         self.fragmented = fragmented;
+        self
+    }
+
+    /// Put the `moov` ahead of the media data (M824), the `qtmux faststart`
+    /// layout: a reader has the whole index before it has read a byte of `mdat`,
+    /// so playback over a network starts without seeking to the end of the file.
+    ///
+    /// Only the progressive layout has anything to move: a fragmented file
+    /// already writes its `moov` before the first fragment. It costs no extra
+    /// buffering either, since progressive already holds the movie until EOS;
+    /// the `moov` is simply written first, with the chunk offsets shifted by its
+    /// own size.
+    pub fn with_faststart(mut self, faststart: bool) -> Self {
+        self.faststart = faststart;
         self
     }
 
@@ -579,7 +597,9 @@ impl Mp4MuxN {
 
     /// Progressive mode's finalize (M793): write `ftyp` + one `mdat` holding
     /// every buffered sample + a `moov` whose sample tables index them, and emit
-    /// the whole file as one frame. A no-op when nothing was buffered.
+    /// the whole file as one frame. With `faststart` (M824) the `moov` goes
+    /// between the `ftyp` and the `mdat` instead. A no-op when nothing was
+    /// buffered.
     async fn finish_progressive(&mut self, out: &mut dyn OutputSink) -> Result<(), G2gError> {
         if self.samples.is_empty() {
             return Ok(());
@@ -588,7 +608,7 @@ impl Mp4MuxN {
         let head = ftyp();
 
         // The mdat payload is the samples in the order they were released, so
-        // each sample's file offset is known once the mdat header size is.
+        // each sample's offset inside the mdat is known once its header size is.
         let payload: usize = samples.iter().map(|s| s.bytes.len()).sum();
         // 32-bit box size unless the payload needs the 64-bit `largesize` form.
         let mdat_header = if payload.saturating_add(8) > u32::MAX as usize {
@@ -596,8 +616,59 @@ impl Mp4MuxN {
         } else {
             8
         };
-        let mut file = Vec::with_capacity(head.len() + mdat_header + payload + 4096);
+        let mut within = Vec::with_capacity(samples.len());
+        let mut mdat_len = mdat_header as u64;
+        for s in &samples {
+            within.push(mdat_len);
+            mdat_len = mdat_len.saturating_add(s.bytes.len() as u64);
+        }
+
+        // The sample tables address the mdat by absolute file offset, so the
+        // moov's contents depend on where the mdat lands. `force_co64` pins the
+        // chunk-offset entry width, which is the only thing that can change the
+        // moov's own size once the sample count is fixed.
+        let moov_at = |mdat_start: u64, force_co64: bool| -> Vec<u8> {
+            let offsets: Vec<u64> = within
+                .iter()
+                .map(|w| mdat_start.saturating_add(*w))
+                .collect();
+            let tables: Vec<Option<TrackTables>> = (0..self.inputs)
+                .map(|input| {
+                    self.inits[input]
+                        .as_ref()
+                        .map(|init| track_tables(input, init, &samples, &offsets, force_co64))
+                })
+                .collect();
+            av_moov(&self.inits, Some(&tables))
+        };
+
+        let head_len = head.len() as u64;
+        let (moov, mdat_start) = if self.faststart {
+            // moov first: its size shifts the mdat, which changes the offsets the
+            // moov itself stores. Pin the entry width from an upper bound on the
+            // final offsets (the moov measured with the wider `co64` form is at
+            // least as long as the real one), after which the moov built against
+            // any mdat start has the size the real one will have.
+            let widest = moov_at(0, true).len() as u64;
+            let last_offset = head_len.saturating_add(widest).saturating_add(mdat_len);
+            let force_co64 = last_offset > u64::from(u32::MAX);
+            let moov_len = moov_at(0, force_co64).len() as u64;
+            let start = head_len.saturating_add(moov_len);
+            (moov_at(start, force_co64), start)
+        } else {
+            (moov_at(head_len, false), head_len)
+        };
+
+        let mut file = Vec::with_capacity(head.len() + moov.len() + mdat_len as usize);
         file.extend_from_slice(&head);
+        if self.faststart {
+            file.extend_from_slice(&moov);
+        }
+        debug_assert_eq!(
+            file.len() as u64,
+            mdat_start,
+            "the mdat lands where the sample tables address it"
+        );
         if mdat_header == 16 {
             file.extend_from_slice(&1u32.to_be_bytes()); // size 1: largesize follows
             file.extend_from_slice(b"mdat");
@@ -606,20 +677,12 @@ impl Mp4MuxN {
             file.extend_from_slice(&((payload + 8) as u32).to_be_bytes());
             file.extend_from_slice(b"mdat");
         }
-        let mut offsets = Vec::with_capacity(samples.len());
         for s in &samples {
-            offsets.push(file.len() as u64);
             file.extend_from_slice(&s.bytes);
         }
-
-        let tables: Vec<Option<TrackTables>> = (0..self.inputs)
-            .map(|input| {
-                self.inits[input]
-                    .as_ref()
-                    .map(|init| track_tables(input, init, &samples, &offsets))
-            })
-            .collect();
-        file.extend_from_slice(&av_moov(&self.inits, Some(&tables)));
+        if !self.faststart {
+            file.extend_from_slice(&moov);
+        }
 
         let out_frame = Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(file.into_boxed_slice())),
@@ -712,6 +775,12 @@ impl MultiInputElement for Mp4MuxN {
                 "moof/mdat fragments (streamable); false buffers the file and writes one mdat + a moov with real sample tables at EOS",
             )
             .with_default("true"),
+            PropertySpec::new(
+                "faststart",
+                PropKind::Bool,
+                "write the moov ahead of the mdat (progressive layout; a fragmented file's moov already leads)",
+            )
+            .with_default("false"),
         ];
         PROPS
     }
@@ -726,6 +795,10 @@ impl MultiInputElement for Mp4MuxN {
                 self.fragmented = value.as_bool().ok_or(PropError::Type)?;
                 Ok(())
             }
+            "faststart" => {
+                self.faststart = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -734,6 +807,7 @@ impl MultiInputElement for Mp4MuxN {
         match name {
             "fragment-duration" => Some(PropValue::Uint(self.fragment_duration_ms)),
             "fragmented" => Some(PropValue::Bool(self.fragmented)),
+            "faststart" => Some(PropValue::Bool(self.faststart)),
             _ => None,
         }
     }
@@ -886,11 +960,16 @@ struct TrackTables {
 /// nothing next to the sample bytes already held in memory. Tables are ordered
 /// by decode timestamp (a stable sort, so a stream with no reorder keeps the
 /// order it arrived in), and `ctts` carries `pts - dts` where they differ.
+///
+/// `force_co64` writes 64-bit chunk offsets even when the current ones fit in
+/// 32 bits: the faststart layout sizes the `moov` before it knows the offsets it
+/// will hold, so it needs the width pinned rather than derived.
 fn track_tables(
     input: usize,
     init: &TrackInit,
     samples: &[ProgSample],
     offsets: &[u64],
+    force_co64: bool,
 ) -> TrackTables {
     let mut idx: Vec<usize> = (0..samples.len())
         .filter(|&i| samples[i].input == input)
@@ -974,8 +1053,8 @@ fn track_tables(
     }
 
     // stco / co64: the chunk (= sample) file offsets, 64-bit only if one does
-    // not fit in 32.
-    let needs_co64 = idx.iter().any(|&i| offsets[i] > u64::from(u32::MAX));
+    // not fit in 32 or the caller pinned the width.
+    let needs_co64 = force_co64 || idx.iter().any(|&i| offsets[i] > u64::from(u32::MAX));
     let mut chunks = Vec::new();
     chunks.extend_from_slice(&(idx.len() as u32).to_be_bytes());
     for &i in &idx {
@@ -1638,6 +1717,10 @@ mod tests {
     /// Six H.264 access units (two IDRs, four inter frames) through the muxer in
     /// the given layout.
     async fn mux_six_aus(fragmented: bool) -> Vec<u8> {
+        mux_six_aus_faststart(fragmented, false).await
+    }
+
+    async fn mux_six_aus_faststart(fragmented: bool, faststart: bool) -> Vec<u8> {
         let sps = [0x67u8, 0x42, 0x00, 0x1e, 0x88];
         let pps = [0x68u8, 0xce, 0x3c, 0x80];
         let idr = [0x65u8, 0x88, 0x84, 0x00];
@@ -1645,7 +1728,9 @@ mod tests {
         let inter = || annexb(&[&[0x41u8, 0x9a, 0x00]]);
         let aus = [key.clone(), inter(), inter(), inter(), inter(), key];
 
-        let mut mux = Mp4MuxN::new(1).with_fragmented(fragmented);
+        let mut mux = Mp4MuxN::new(1)
+            .with_fragmented(fragmented)
+            .with_faststart(faststart);
         mux.configure_pipeline(0, &h264_caps(320, 240)).unwrap();
         let mut sink = CaptureSink::default();
         for (i, au) in aus.iter().enumerate() {
@@ -1722,6 +1807,59 @@ mod tests {
             top_level_boxes(&frag)[..2],
             [*b"ftyp", *b"moov"],
             "and still leads with the init segment"
+        );
+    }
+
+    /// M824 faststart: the same progressive file with its `moov` ahead of the
+    /// `mdat`, every chunk offset shifted by the `moov`'s own size so the sample
+    /// bytes are still where `stco` points.
+    #[tokio::test]
+    async fn faststart_moves_the_moov_ahead_of_the_mdat() {
+        let file = mux_six_aus_faststart(false, true).await;
+        assert_eq!(
+            top_level_boxes(&file),
+            alloc::vec![*b"ftyp", *b"moov", *b"mdat"],
+            "the index precedes the media"
+        );
+
+        let plain = mux_six_aus_faststart(false, false).await;
+        assert_eq!(file.len(), plain.len(), "the same boxes, reordered");
+
+        // Every sample really lives at its stco offset: the first one starts
+        // with its SPS's 4-byte AVCC length, and the last ends the file.
+        let stco = box_payload(&file, b"stco").expect("stco");
+        let stsz = box_payload(&file, b"stsz").expect("stsz");
+        let count = u32::from_be_bytes(stsz[8..12].try_into().unwrap()) as usize;
+        assert_eq!(count, 6);
+        let mut end = 0usize;
+        for i in 0..count {
+            let off = u32::from_be_bytes(stco[8 + i * 4..12 + i * 4].try_into().unwrap()) as usize;
+            let len = u32::from_be_bytes(stsz[12 + i * 4..16 + i * 4].try_into().unwrap()) as usize;
+            if i > 0 {
+                assert_eq!(off, end, "samples are packed in mdat order");
+            }
+            end = off + len;
+        }
+        assert_eq!(end, file.len(), "the last sample ends the file");
+
+        // The shift is exactly the moov's size: the moov-at-end file's first
+        // offset plus the moov length is the faststart file's first offset.
+        let first = u32::from_be_bytes(stco[8..12].try_into().unwrap());
+        let plain_stco = box_payload(&plain, b"stco").expect("plain stco");
+        let plain_first = u32::from_be_bytes(plain_stco[8..12].try_into().unwrap());
+        let moov_len = box_payload(&file, b"moov").expect("moov").len() as u32 + 8;
+        assert_eq!(first, plain_first + moov_len);
+        assert_eq!(
+            u32::from_be_bytes(file[first as usize..first as usize + 4].try_into().unwrap()),
+            5,
+            "the first sample starts with its SPS's 4-byte AVCC length"
+        );
+
+        // A fragmented file's moov already leads, so faststart changes nothing.
+        assert_eq!(
+            mux_six_aus_faststart(true, true).await,
+            mux_six_aus_faststart(true, false).await,
+            "the fragmented layout is untouched"
         );
     }
 
