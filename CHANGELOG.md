@@ -8,6 +8,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 - M829: `plc` packet-loss concealment on `opusdec` (TOC-cadence gap fill, 200 ms cap).
 
+- M827: chained Ogg demux (sequential chains, offset-continued timeline, per-chain caps/tags), validated vs ffmpeg and GStreamer.
+
 - M826: `frame-size` (2.5-60 ms) and `complexity` on `opusenc`, sample-exact across sizes; mp4mux reads Opus durations from the TOC.
 
 - M825: `quantizer` constant-quality mode on `av1enc` (exclusive with `bitrate`), and bitrate mode no longer capped at qi 100.

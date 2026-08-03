@@ -415,7 +415,8 @@ Phased plan:
 ## Containers
 
 - **MKV / WebM:** single-track `MkvMux` lacks unknown-size Clusters (live read).
-- **OGG:** chained streams (a second physical stream after the first one's end-of-stream page).
+- **OGG:** chained-stream writing (`OggMux` has no chain-boundary trigger or
+  serial policy; demux-side chains are handled).
 - **FLV:** VP6 / H.263 / MP3 / Speex codecs (only H.264 + AAC ride the tag
   stream today).
 - **CMAF / fMP4:** the CMAF-specific signalling layer on `Mp4Sink` / `Mp4Src`.

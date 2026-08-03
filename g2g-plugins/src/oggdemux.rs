@@ -16,8 +16,25 @@
 //! filesrc(location=x.oga) ! oggdemux stream=flac ! <flac decoder>
 //! ```
 //!
-//! Scope: one logical bitstream; a stream not matching the `stream` selection is
-//! parsed but not forwarded.
+//! Scope: one logical bitstream per physical stream; a stream not matching the
+//! `stream` selection is parsed but not forwarded.
+//!
+//! **Chained files (M827).** A chain (a second physical stream after the first
+//! one's end-of-stream page, the radio-stream form) is *sequential*: the same
+//! output pad continues with the next chain's stream of the selected codec,
+//! distinct from the *concurrent* grouped streams (M790) that
+//! [`OggDemuxN`] splits onto separate pads. Each chain is announced with a
+//! [`PipelinePacket::Segment`] whose `start` / `base` is the summed **playable**
+//! duration of the chains before it (the end-granule-clamped decode position,
+//! less the Opus pre-skip the decoder discards), so the chains concatenate
+//! sample-exactly: a chain plays exactly as it would alone, shifted by what
+//! came before, and ffmpeg / GStreamer report the same total. Stream time
+//! restarts at zero per chain, running time carries on. The chain's own codec
+//! headers go downstream in-band ahead of its audio (so a decoder re-inits on
+//! the new pre-skip / codebooks) and its parameters re-announce via
+//! `CapsChanged`. A chain that carries no stream of the selected codec fails
+//! loud with [`G2gError::CapsMismatch`]: one output pad names one codec, so a
+//! cross-codec chain has nowhere to go.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -26,13 +43,15 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
+use g2g_core::log::Target;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SeekController;
 use g2g_core::{
-    AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps, CapsConstraint,
-    CapsSet, ConfigureOutcome, FrameTiming, G2gError, MemoryDomain, MultiOutputElement,
-    MultiOutputSink, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, Seek, Segment, Stream, StreamCollection, StreamType, Tag, TagList,
+    g2g_error, AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps,
+    CapsConstraint, CapsSet, ConfigureOutcome, FrameTiming, G2gError, MemoryDomain,
+    MultiOutputElement, MultiOutputSink, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    PropError, PropKind, PropValue, PropertySpec, Seek, Segment, Stream, StreamCollection,
+    StreamType, Tag, TagList,
 };
 
 use crate::demuxseek::{Admit, DemuxSeek};
@@ -51,7 +70,9 @@ pub struct OggDemux {
     configured: bool,
     emitted: u64,
     bus: Option<BusHandle>,
-    tags_posted: bool,
+    /// The chain whose VorbisComment tags have been posted, so each physical
+    /// stream's metadata posts once.
+    tags_posted: Option<u32>,
     /// The logical stream to emit (`stream` property): Opus by default, Flac
     /// for the Ogg-FLAC mapping, or Vorbis. A file with no stream of that codec
     /// forwards nothing.
@@ -76,7 +97,7 @@ impl OggDemux {
             configured: false,
             emitted: 0,
             bus: None,
-            tags_posted: false,
+            tags_posted: None,
             stream: OggCodec::Opus,
             emitter: StreamEmitter::default(),
             seek: DemuxSeek::default(),
@@ -132,25 +153,71 @@ impl OggDemux {
         }
     }
 
-    /// The logical bitstream this element forwards: the first one whose codec is
-    /// the `stream` selection. A grouped file (M790) carries several, so the
-    /// selection picks among them; a single-stream file has only one candidate.
+    /// The logical bitstream this element forwards out of the chain being
+    /// parsed: the first one whose codec is the `stream` selection. A grouped
+    /// file (M790) carries several, so the selection picks among them; a
+    /// single-stream file has only one candidate.
     fn selected(&self) -> Option<usize> {
         self.demux.stream_of(self.stream)
+    }
+
+    /// The selected bitstream of every retained chain, in play order (M827): a
+    /// chained file continues on this pad with the next physical stream's
+    /// stream of the same codec.
+    fn selected_streams(&self) -> Vec<usize> {
+        let mut picked: Option<u32> = None;
+        let mut out = Vec::new();
+        for (index, stream) in self.demux.streams().iter().enumerate() {
+            if picked == Some(stream.chain()) {
+                continue;
+            }
+            if stream.info().map(|i| i.codec) == Some(self.stream) {
+                picked = Some(stream.chain());
+                out.push(index);
+            }
+        }
+        out
+    }
+
+    /// A chained physical stream carries the selected codec, or this pad cannot
+    /// present it: the output caps name one codec, so a chain that switches
+    /// codecs (or carries only mappings g2g does not read) fails loud instead of
+    /// silently going quiet for the rest of the file. Waits while the chain's
+    /// opening group is still arriving.
+    fn check_chain_codec(&self) -> Result<(), G2gError> {
+        let chain = self.demux.chain();
+        if chain == 0 || !self.demux.grouping_done() {
+            return Ok(());
+        }
+        let group = || self.demux.streams().iter().filter(|s| s.chain() == chain);
+        // Still arriving: an identification packet of the group is unparsed.
+        if group().next().is_none() || group().any(|s| s.info().is_none()) {
+            return Ok(());
+        }
+        if group().any(|s| s.info().map(|i| i.codec) == Some(self.stream)) {
+            return Ok(());
+        }
+        g2g_error!(
+            &Target::category("oggdemux"),
+            "chained physical stream {chain} carries no {:?} bitstream: a chain that changes codec cannot ride one output pad",
+            self.stream
+        );
+        Err(G2gError::CapsMismatch)
     }
 
     /// Emit a `CapsChanged` once the stream parameters are known, then forward
     /// each audio packet. A file with no stream of the selected codec is drained
     /// and dropped (the output pad is typed by the selection).
     async fn emit_ready(&mut self, out: &mut dyn OutputSink) -> Result<(), G2gError> {
-        // Surface the stream's metadata once, as soon as the comment header lands.
-        if !self.tags_posted && self.bus.is_some() {
+        // Surface the stream's metadata once per chain, as soon as its comment
+        // header lands (a chained file's next physical stream has its own).
+        if self.tags_posted != Some(self.demux.chain()) && self.bus.is_some() {
             let comment = self
                 .selected()
                 .and_then(|i| self.demux.streams()[i].comment_header());
             if let Some(comment) = comment {
                 let tags = parse_vorbis_comment(comment);
-                self.tags_posted = true;
+                self.tags_posted = Some(self.demux.chain());
                 if !tags.is_empty() {
                     if let Some(bus) = &self.bus {
                         bus.try_post(BusMessage::Tag(tags));
@@ -159,58 +226,70 @@ impl OggDemux {
             }
         }
         // Drain every logical bitstream (an unselected one must not accumulate
-        // packets for the length of the file), keeping the selected one's.
-        let chosen = self.selected();
-        let mut packets = Vec::new();
+        // packets for the length of the file), keeping the selected one of each
+        // chain: a chained file's physical streams play back to back on this
+        // pad, in order.
+        let chosen = self.selected_streams();
+        let mut batches: Vec<(usize, Vec<Vec<u8>>)> = Vec::new();
         for index in 0..self.demux.streams().len() {
             let taken = self
                 .demux
                 .stream_mut(index)
                 .map(|s| s.take_packets())
                 .unwrap_or_default();
-            if Some(index) == chosen {
-                packets = taken;
+            if chosen.contains(&index) {
+                batches.push((index, taken));
             }
         }
-        let Some(index) = chosen else {
-            return Ok(());
-        };
-        let ready = self.emitter.step(&self.demux.streams()[index], packets);
-        if let Some(caps) = ready.caps {
-            out.push(PipelinePacket::CapsChanged(caps)).await?;
-        }
-        for (payload, timing) in ready.frames {
-            // M362 seek: every audio packet is a resync point, so drop until the
-            // first packet at/after the target, which emits a fresh segment. The
-            // in-band codec config (duration 0 at time 0) always flows: the
-            // decoder needs it whatever the seek target.
-            if timing.duration_ns != 0 || timing.pts_ns != 0 {
-                match self.seek.admit(timing.pts_ns, true) {
-                    Admit::Drop => continue,
-                    Admit::Resume(start) => {
-                        let seg = Segment::for_flush_seek(&Seek::flush_to(start), None);
-                        out.push(PipelinePacket::Segment(seg)).await?;
+        for (index, packets) in batches {
+            let stream = &self.demux.streams()[index];
+            // A finished chain's leftovers are drained above; only its own or a
+            // later chain drives the timeline forward.
+            if stream.chain() < self.emitter.chain() {
+                continue;
+            }
+            let ready = self.emitter.step(stream, packets);
+            if let Some(caps) = ready.caps {
+                out.push(PipelinePacket::CapsChanged(caps)).await?;
+            }
+            if let Some(seg) = ready.segment {
+                out.push(PipelinePacket::Segment(seg)).await?;
+            }
+            for (payload, timing) in ready.frames {
+                // M362 seek: every audio packet is a resync point, so drop until
+                // the first packet at/after the target, which emits a fresh
+                // segment. The in-band codec config (duration 0 at time 0)
+                // always flows: the decoder needs it whatever the seek target.
+                if timing.duration_ns != 0 || timing.pts_ns != 0 {
+                    match self.seek.admit(timing.pts_ns, true) {
+                        Admit::Drop => continue,
+                        Admit::Resume(start) => {
+                            let seg = Segment::for_flush_seek(&Seek::flush_to(start), None);
+                            out.push(PipelinePacket::Segment(seg)).await?;
+                        }
+                        Admit::Emit => {}
                     }
-                    Admit::Emit => {}
                 }
+                let frame = Frame::new(
+                    MemoryDomain::System(SystemSlice::from_boxed(payload.into_boxed_slice())),
+                    timing,
+                    self.emitted,
+                );
+                self.emitted += 1;
+                out.push(PipelinePacket::DataFrame(frame)).await?;
             }
-            let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(payload.into_boxed_slice())),
-                timing,
-                self.emitted,
-            );
-            self.emitted += 1;
-            out.push(PipelinePacket::DataFrame(frame)).await?;
         }
-        Ok(())
+        self.check_chain_codec()
     }
 }
 
 /// What one demux step produced for a logical bitstream: the refined caps (when
-/// they changed) and the frames to forward, the in-band codec config first.
+/// they changed), the segment opening a chained physical stream (M827), and the
+/// frames to forward, the in-band codec config first.
 #[derive(Debug, Default)]
 struct StreamReady {
     caps: Option<Caps>,
+    segment: Option<Segment>,
     frames: Vec<(Vec<u8>, FrameTiming)>,
 }
 
@@ -248,6 +327,16 @@ struct StreamEmitter {
     /// front of the emitted timeline (initial encoder priming). `Some(0)` when
     /// the first page is the EOS page (an end clamp, not an anchor).
     anchor_offset: Option<u64>,
+    /// The chain (physical stream, M827) this timing state belongs to. A chained
+    /// file's next chain restarts the state on top of `chain_offset_ns`.
+    chain: u32,
+    /// Where the current chain starts on the output timeline (ns): the summed
+    /// playable duration of the chains before it.
+    chain_offset_ns: u64,
+    /// Playable end reached in the current chain (ns, on its own timeline): the
+    /// end-granule-clamped decode position, less the Opus pre-skip the decoder
+    /// discards. Fixes where the next chain starts.
+    playable_end_ns: u64,
 }
 
 impl StreamEmitter {
@@ -260,6 +349,35 @@ impl StreamEmitter {
         self.last_caps = caps;
     }
 
+    /// The chain (physical stream) this emitter is timing.
+    fn chain(&self) -> u32 {
+        self.chain
+    }
+
+    /// Rebase onto a chained physical stream (M827): the previous chain's
+    /// playable end becomes the new chain's zero and the per-chain timing state
+    /// restarts. The returned segment carries that offset as both `start` (the
+    /// new chain's earliest stream timestamp) and `base` (its running time), so
+    /// running time stays continuous while stream time restarts at zero. The
+    /// caps are kept, so an identically-parameterized chain re-announces
+    /// nothing.
+    fn begin_chain(&mut self, chain: u32) -> Segment {
+        let offset = self.chain_offset_ns.saturating_add(self.playable_end_ns);
+        let caps = self.last_caps.take();
+        *self = Self {
+            last_caps: caps,
+            chain,
+            chain_offset_ns: offset,
+            ..Self::default()
+        };
+        Segment {
+            start: offset,
+            base: offset,
+            position: offset,
+            ..Segment::new()
+        }
+    }
+
     /// Turn this batch of `packets` from `stream` into the caps + frames to
     /// forward.
     fn step(&mut self, stream: &OggLogicalStream, packets: Vec<Vec<u8>>) -> StreamReady {
@@ -267,6 +385,9 @@ impl StreamEmitter {
         let Some(info) = stream.info() else {
             return ready;
         };
+        if stream.chain() != self.chain {
+            ready.segment = Some(self.begin_chain(stream.chain()));
+        }
         let codec = info.codec;
         if let Some(caps) = concrete_caps(info) {
             if self.last_caps.as_ref() != Some(&caps) {
@@ -368,12 +489,11 @@ impl StreamEmitter {
                 }
                 _ => span,
             };
+            // Sample-accurate at the header rate (per-packet rounding would
+            // drift at non-48 kHz rates).
+            let ns = |s: u64| (s as u128 * 1_000_000_000 / sample_rate.max(1) as u128) as u64;
             let (pts_ns, duration_ns) = match codec {
                 OggCodec::Flac | OggCodec::Vorbis => {
-                    // Sample-accurate at the header rate (per-packet rounding
-                    // would drift at non-48 kHz rates).
-                    let ns =
-                        |s: u64| (s as u128 * 1_000_000_000 / sample_rate.max(1) as u128) as u64;
                     let pts = ns(anchored_before);
                     (
                         pts,
@@ -387,6 +507,19 @@ impl StreamEmitter {
                 }
                 _ => (0, 0),
             };
+            // Where this chain's playable content ends on its own timeline: the
+            // clamped decode position, less the pre-skip the decoder discards.
+            // The next chain of a chained file starts there (M827).
+            let playable = anchored_before
+                .saturating_add(keep)
+                .saturating_sub(u64::from(info.pre_skip));
+            self.playable_end_ns = match codec {
+                OggCodec::Opus => opus_samples_to_ns(playable),
+                _ => ns(playable),
+            };
+            // Chained physical streams share the output pad, so each chain's
+            // timeline rides on the summed playable duration before it.
+            let pts_ns = pts_ns.saturating_add(self.chain_offset_ns);
             // Drop a timed packet wholly past the end granule (Opus padding /
             // Vorbis tail). A head-clipped packet (anchored position still 0,
             // e.g. the Vorbis priming packet) and an untimed one (pkt_samples
@@ -579,17 +712,19 @@ static OGGDEMUX_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "logical stream to emit: opus | flac | vorbis",
 )];
 
-/// The published stream id of the `index`-th logical bitstream. Positional,
+/// The published stream id of the bitstream in slot `slot`. Positional,
 /// matching the output-port order of [`OggDemuxN`].
-fn stream_id(index: usize) -> alloc::string::String {
-    alloc::format!("ogg-stream-{index}")
+fn stream_id(slot: usize) -> alloc::string::String {
+    alloc::format!("ogg-stream-{slot}")
 }
 
 /// One output port of [`OggDemuxN`]: which logical bitstream it carries and the
 /// codec that types it at negotiation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OggPort {
-    /// Index of the file's logical bitstream, in beginning-of-stream order.
+    /// Slot of the logical bitstream within its physical stream, in
+    /// beginning-of-stream order. A chained file's next chain continues on the
+    /// same port through the same slot (M827).
     pub stream: usize,
     /// Expected codec, from the file probe. The port's runtime `CapsChanged`
     /// carries the concrete channels / rate.
@@ -609,12 +744,16 @@ impl OggPort {
 ///
 /// A [`MultiOutputElement`] driven by
 /// [`run_source_fanout`](g2g_core::runtime::run_source_fanout). Routing is
-/// **positional**: each [`OggPort`] names the file's logical bitstream it
+/// **positional**: each [`OggPort`] names the slot of the logical bitstream it
 /// carries, in beginning-of-stream order. Ogg groups streams rather than typing
 /// them, and a file with two streams of the same codec is ordinary, so there is
 /// no codec-keyed selection to route by; a port's codec is only the
 /// negotiation-time expectation from the file probe, which its runtime
 /// `CapsChanged` then refines. A stream no port names is drained and dropped.
+///
+/// A chained file (M827) continues each port with the same slot of the next
+/// physical stream, on the rebased timeline [`OggDemux`] documents, and
+/// re-announces the collection and tags per chain.
 ///
 /// The container's per-stream metadata posts as
 /// [`BusMessage::StreamTag`] under the same ids as the announced
@@ -627,9 +766,13 @@ pub struct OggDemuxN {
     /// Caps, in-band config and packet timing per port.
     emitters: Vec<StreamEmitter>,
     bus: Option<BusHandle>,
-    /// Set once the `StreamCollection` has been announced, so it posts once.
-    collection_posted: bool,
-    /// Whether the `index`-th logical bitstream's tags have been posted.
+    /// The chain whose `StreamCollection` has been announced, so each physical
+    /// stream's collection posts once.
+    collection_posted: Option<u32>,
+    /// The chain whose tags `tags_posted` tracks.
+    tags_chain: Option<u32>,
+    /// Whether the tags of the bitstream in each slot of that chain have been
+    /// posted.
     tags_posted: Vec<bool>,
     emitted: u64,
 }
@@ -648,7 +791,8 @@ impl OggDemuxN {
             ports,
             emitters,
             bus: None,
-            collection_posted: false,
+            collection_posted: None,
+            tags_chain: None,
             tags_posted: Vec::new(),
             emitted: 0,
         }
@@ -671,21 +815,24 @@ impl OggDemuxN {
         self.emitted
     }
 
-    /// Announce every logical bitstream as a [`BusMessage::StreamCollection`],
-    /// once the opening beginning-of-stream block has parsed (so the list is
-    /// complete). Lists all streams, not just the ported ones.
+    /// Announce the chain's logical bitstreams as a
+    /// [`BusMessage::StreamCollection`], once its beginning-of-stream block has
+    /// parsed (so the list is complete). Lists all of them, not just the ported
+    /// ones; a chained file announces one collection per physical stream, under
+    /// the id `ogg-<chain>`.
     fn post_stream_collection(&mut self) {
-        if self.collection_posted || !self.demux.grouping_done() {
+        let chain = self.demux.chain();
+        if self.collection_posted == Some(chain) || !self.demux.grouping_done() {
             return;
         }
         let streams: Vec<Stream> = self
             .demux
             .streams()
             .iter()
-            .enumerate()
-            .filter_map(|(i, s)| {
+            .filter(|s| s.chain() == chain)
+            .filter_map(|s| {
                 Some(Stream::new(
-                    stream_id(i),
+                    stream_id(s.slot()),
                     StreamType::Audio,
                     concrete_caps(s.info()?)?,
                 ))
@@ -694,30 +841,39 @@ impl OggDemuxN {
         if streams.is_empty() {
             return;
         }
-        self.collection_posted = true;
+        self.collection_posted = Some(chain);
         if let Some(bus) = &self.bus {
             bus.try_post(BusMessage::StreamCollection(StreamCollection::new(
-                "ogg-0", streams,
+                alloc::format!("ogg-{chain}"),
+                streams,
             )));
         }
     }
 
     /// Post each stream's VorbisComment metadata as a [`BusMessage::StreamTag`],
-    /// once, as its comment header lands.
+    /// once per chain, as its comment header lands.
     fn post_tags(&mut self) {
-        self.tags_posted.resize(self.demux.streams().len(), false);
+        let chain = self.demux.chain();
+        if self.tags_chain != Some(chain) {
+            self.tags_chain = Some(chain);
+            self.tags_posted.clear();
+        }
         let mut fresh: Vec<(alloc::string::String, TagList)> = Vec::new();
-        for (index, stream) in self.demux.streams().iter().enumerate() {
-            if self.tags_posted[index] {
+        for stream in self.demux.streams().iter().filter(|s| s.chain() == chain) {
+            let slot = stream.slot();
+            if self.tags_posted.len() <= slot {
+                self.tags_posted.resize(slot + 1, false);
+            }
+            if self.tags_posted[slot] {
                 continue;
             }
             let Some(comment) = stream.comment_header() else {
                 continue;
             };
-            self.tags_posted[index] = true;
+            self.tags_posted[slot] = true;
             let tags = parse_vorbis_comment(comment);
             if !tags.is_empty() {
-                fresh.push((stream_id(index), tags));
+                fresh.push((stream_id(slot), tags));
             }
         }
         if let Some(bus) = &self.bus {
@@ -775,22 +931,36 @@ impl MultiOutputElement for OggDemuxN {
             }
             // Drain every logical bitstream first: one no port carries must not
             // accumulate packets for the length of the file.
-            let mut drained: Vec<Vec<Vec<u8>>> = (0..self.demux.streams().len())
+            let drained: Vec<(usize, Vec<Vec<u8>>)> = (0..self.demux.streams().len())
                 .map(|i| {
-                    self.demux
+                    let packets = self
+                        .demux
                         .stream_mut(i)
                         .map(|s| s.take_packets())
-                        .unwrap_or_default()
+                        .unwrap_or_default();
+                    (i, packets)
                 })
                 .collect();
-            let ports = self.ports.clone();
-            for (port, spec) in ports.iter().enumerate() {
-                let Some(packets) = drained.get_mut(spec.stream).map(core::mem::take) else {
+            // Route by slot, so a chained file's next physical stream continues
+            // on the same ports (M827); a finished chain's leftovers are drained
+            // above but no longer drive a port's timeline.
+            for (index, packets) in drained {
+                let (chain, slot) = {
+                    let stream = &self.demux.streams()[index];
+                    (stream.chain(), stream.slot())
+                };
+                let Some(port) = self.ports.iter().position(|p| p.stream == slot) else {
                     continue;
                 };
-                let ready = self.emitters[port].step(&self.demux.streams()[spec.stream], packets);
+                if chain < self.emitters[port].chain() {
+                    continue;
+                }
+                let ready = self.emitters[port].step(&self.demux.streams()[index], packets);
                 if let Some(caps) = ready.caps {
                     out.push_to(port, PipelinePacket::CapsChanged(caps)).await?;
+                }
+                if let Some(seg) = ready.segment {
+                    out.push_to(port, PipelinePacket::Segment(seg)).await?;
                 }
                 for (payload, timing) in ready.frames {
                     let frame = Frame::new(

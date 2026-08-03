@@ -15,10 +15,13 @@
 //! count from `OpusHead`, the two setup headers skipped), Vorbis and Ogg-FLAC
 //! likewise, other codecs best-effort (tagged, all packets emitted).
 //!
-//! Not handled: **chained** Ogg, where a second physical stream (a fresh BOS
-//! page) follows the first one's end-of-stream page. A BOS page arriving after
-//! the opening group is ignored rather than misparsed, so a chained file
-//! demuxes as its first physical stream.
+//! **Chained** Ogg (M827) is handled too: a fresh BOS page after the current
+//! group's end opens the next physical stream (a *chain*), sequential rather
+//! than concurrent. Each chain gets its own group of [`OggLogicalStream`]s,
+//! tagged with the chain index and their slot within it; a chain's k-th stream
+//! continues the previous chain's k-th one downstream. Bitstreams of a finished
+//! chain are retired once their packets have been drained, so a radio-style
+//! stream of unbounded chains stays bounded.
 //!
 //! The [`OggPageWriter`] is the inverse framing side, wrapped by the
 //! [`crate::oggmux::OggMux`] and [`crate::oggmuxn::OggMuxN`] elements.
@@ -31,11 +34,16 @@ const HEADER_LEN: usize = 27; // fixed header before the segment table
                               // bound just stops a never-terminating run of continued pages from growing the
                               // partial packet without limit.
 const MAX_PACKET_BYTES: usize = 8 * 1024 * 1024;
-/// Cap on concurrent logical bitstreams. Serial numbers come from the file, so
-/// a crafted opening block could otherwise name unboundedly many streams and
-/// make the demuxer allocate per-serial state for each. Real grouped files carry
-/// a handful.
+/// Cap on concurrent logical bitstreams in one chain. Serial numbers come from
+/// the file, so a crafted opening block could otherwise name unboundedly many
+/// streams and make the demuxer allocate per-serial state for each. Real grouped
+/// files carry a handful.
 const MAX_STREAMS: usize = 16;
+/// Cap on bitstreams retained across chains. A finished chain's streams are
+/// retired as soon as their packets are drained, so this only bites when the
+/// consumer never drains: the oldest then go, packets and all, rather than
+/// growing for the length of a chained radio stream.
+const MAX_RETAINED: usize = 32;
 
 /// The codec of an Ogg logical bitstream, sniffed from its first packet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,6 +75,13 @@ pub struct OggStreamInfo {
 #[derive(Debug)]
 pub struct OggLogicalStream {
     serial: u32,
+    /// The physical stream (chain) this bitstream belongs to: `0` for the
+    /// file's first, bumped by each chained beginning-of-stream block.
+    chain: u32,
+    /// Position within its chain, in beginning-of-stream order. Downstream
+    /// routing is by slot, so a chain's k-th stream continues the previous
+    /// chain's k-th.
+    slot: usize,
     /// Bytes of a packet still being reassembled across pages.
     partial: Vec<u8>,
     info: Option<OggStreamInfo>,
@@ -100,9 +115,11 @@ pub struct OggLogicalStream {
 }
 
 impl OggLogicalStream {
-    fn new(serial: u32) -> Self {
+    fn new(serial: u32, chain: u32, slot: usize) -> Self {
         Self {
             serial,
+            chain,
+            slot,
             partial: Vec::new(),
             info: None,
             packets_seen: 0,
@@ -119,6 +136,17 @@ impl OggLogicalStream {
     /// The serial number identifying this bitstream in the file.
     pub fn serial(&self) -> u32 {
         self.serial
+    }
+
+    /// The physical stream (chain) this bitstream belongs to (M827): `0` for the
+    /// file's first, one more per chained beginning-of-stream block.
+    pub fn chain(&self) -> u32 {
+        self.chain
+    }
+
+    /// Position within its chain, in beginning-of-stream order.
+    pub fn slot(&self) -> usize {
+        self.slot
     }
 
     /// The stream's parameters (set once its first packet is parsed).
@@ -170,10 +198,12 @@ impl OggLogicalStream {
 pub struct OggDemuxer {
     buf: Vec<u8>,
     streams: Vec<OggLogicalStream>,
-    /// Set by the first page that is not flagged beginning-of-stream. Grouped
-    /// Ogg puts every stream's BOS page in the opening block, so after that a
-    /// BOS page belongs to a chained physical stream, which is not handled.
+    /// Set by the first page of the current chain that is not flagged
+    /// beginning-of-stream. Grouped Ogg puts every stream's BOS page in the
+    /// opening block, so after that a BOS page opens the next chain.
     grouping_done: bool,
+    /// The physical stream (chain) being parsed, counting from `0`.
+    chain: u32,
 }
 
 impl OggDemuxer {
@@ -191,17 +221,29 @@ impl OggDemuxer {
         self.streams.get_mut(index)
     }
 
-    /// Whether the opening beginning-of-stream block is over, so every logical
-    /// bitstream of the file is now known.
+    /// Whether the current chain's opening beginning-of-stream block is over, so
+    /// every logical bitstream of that physical stream is now known.
     pub fn grouping_done(&self) -> bool {
         self.grouping_done
     }
 
-    /// The index of the first logical bitstream of `codec`, or `None`.
+    /// The physical stream (chain) being parsed (M827): `0` until a chained
+    /// second stream's beginning-of-stream page arrives.
+    pub fn chain(&self) -> u32 {
+        self.chain
+    }
+
+    /// The index of the first logical bitstream of `codec` in the current chain,
+    /// or `None`.
     pub fn stream_of(&self, codec: OggCodec) -> Option<usize> {
+        self.stream_of_in_chain(self.chain, codec)
+    }
+
+    /// The index of the first logical bitstream of `codec` in `chain`, or `None`.
+    pub fn stream_of_in_chain(&self, chain: u32, codec: OggCodec) -> Option<usize> {
         self.streams
             .iter()
-            .position(|s| s.info.map(|i| i.codec) == Some(codec))
+            .position(|s| s.chain == chain && s.info.map(|i| i.codec) == Some(codec))
     }
 
     /// The first logical bitstream's parameters (set once its first packet is
@@ -304,33 +346,57 @@ impl OggDemuxer {
     }
 
     /// Route a complete page to its logical bitstream, starting one for a serial
-    /// first seen in the opening beginning-of-stream block.
+    /// first seen in the current chain's opening beginning-of-stream block.
     fn parse_page(&mut self, page: &[u8], table_end: usize) {
         let header_type = page[5];
         let serial = u32::from_le_bytes([page[14], page[15], page[16], page[17]]);
         let bos = header_type & 0x02 != 0;
         if !bos {
             self.grouping_done = true;
+        } else if self.grouping_done {
+            // A BOS page past the current group opens a chained physical stream
+            // (M827): the previous chain has ended.
+            self.start_chain();
         }
-        let index = match self.streams.iter().position(|s| s.serial == serial) {
+        let chain = self.chain;
+        let index = match self
+            .streams
+            .iter()
+            .position(|s| s.chain == chain && s.serial == serial)
+        {
             Some(i) => i,
             None => {
-                // A serial joins either from a BOS page in the opening group, or
-                // as the very first stream seen when the file was joined
-                // mid-stream (a byte-seek / network tune-in, which has no BOS
-                // page to read). A BOS page after the group is a chained
-                // physical stream and a later headerless serial is a stray page:
-                // ignore both rather than misparse. The count cap keeps a
+                // A serial joins either from a BOS page in the chain's opening
+                // group, or as the very first stream seen when the file was
+                // joined mid-stream (a byte-seek / network tune-in, which has no
+                // BOS page to read). A later headerless serial is a stray page:
+                // ignore it rather than misparse. The per-chain count cap keeps a
                 // crafted opening block from allocating without end.
                 let opens_group = bos && !self.grouping_done;
-                if !(opens_group || self.streams.is_empty()) || self.streams.len() >= MAX_STREAMS {
+                let slot = self.streams.iter().filter(|s| s.chain == chain).count();
+                if !(opens_group || self.streams.is_empty()) || slot >= MAX_STREAMS {
                     return;
                 }
-                self.streams.push(OggLogicalStream::new(serial));
+                self.streams
+                    .push(OggLogicalStream::new(serial, chain, slot));
                 self.streams.len() - 1
             }
         };
         self.streams[index].parse_page(page, table_end, header_type);
+    }
+
+    /// Open the next physical stream (chain): the previous one ended, so its
+    /// drained bitstreams are retired and the next beginning-of-stream block
+    /// opens a fresh group. A bitstream still holding packets stays until the
+    /// consumer has taken them.
+    fn start_chain(&mut self) {
+        self.chain = self.chain.saturating_add(1);
+        self.grouping_done = false;
+        self.streams
+            .retain(|s| !s.completed.is_empty() || !s.partial.is_empty());
+        while self.streams.len() > MAX_RETAINED {
+            self.streams.remove(0);
+        }
     }
 }
 
@@ -1200,7 +1266,7 @@ mod tests {
     }
 
     #[test]
-    fn a_chained_beginning_of_stream_page_is_ignored() {
+    fn a_chained_beginning_of_stream_page_opens_the_next_chain() {
         let mut d = OggDemuxer::new();
         d.push_data(&page(0x02, 1, 0, &[&opus_head(2)]));
         d.push_data(&page(0x00, 1, 1, &[b"OpusTags"]));
@@ -1208,9 +1274,48 @@ mod tests {
         // A fresh BOS after the first stream ended: a chained physical stream.
         d.push_data(&page(0x02, 9, 0, &[&opus_head(1)]));
         d.push_data(&page(0x00, 9, 1, &[b"OpusTags"]));
-        d.push_data(&page(0x00, 9, 2, &[&[0x02]]));
-        assert_eq!(d.streams().len(), 1, "chained streams are not demuxed");
-        assert_eq!(d.take_packets(), vec![vec![0x01]]);
+        d.push_data(&page_g(0x04, 9, 2, 1920, &[&[0x02]]));
+
+        assert_eq!(d.chain(), 1, "second physical stream");
+        assert_eq!(d.streams().len(), 2, "chain 0 held its undrained packet");
+        assert_eq!(d.streams()[0].chain(), 0);
+        assert_eq!(d.streams()[1].chain(), 1);
+        assert_eq!(d.streams()[1].slot(), 0, "each chain slots from zero");
+        assert_eq!(d.streams()[1].info().unwrap().channels, 1);
+        assert_eq!(d.streams()[0].end_granule(), Some(960));
+        assert_eq!(d.streams()[1].end_granule(), Some(1920));
+        assert_eq!(d.stream_mut(0).unwrap().take_packets(), vec![vec![0x01]]);
+        assert_eq!(d.stream_mut(1).unwrap().take_packets(), vec![vec![0x02]]);
+    }
+
+    #[test]
+    fn a_drained_chain_is_retired() {
+        let mut d = OggDemuxer::new();
+        for chain in 0..40u32 {
+            let serial = 100 + chain;
+            d.push_data(&page(0x02, serial, 0, &[&opus_head(1)]));
+            d.push_data(&page(0x00, serial, 1, &[b"OpusTags"]));
+            d.push_data(&page_g(0x04, serial, 2, 960, &[&[chain as u8]]));
+            // The consumer drains each chain as it plays, so nothing accumulates.
+            let last = d.streams().len() - 1;
+            assert_eq!(
+                d.stream_mut(last).unwrap().take_packets(),
+                vec![vec![chain as u8]]
+            );
+        }
+        assert_eq!(d.chain(), 39);
+        assert_eq!(d.streams().len(), 1, "only the live chain is retained");
+    }
+
+    #[test]
+    fn an_undrained_chained_stream_stays_bounded() {
+        let mut d = OggDemuxer::new();
+        for chain in 0..(MAX_RETAINED as u32 + 8) {
+            let serial = 100 + chain;
+            d.push_data(&page(0x02, serial, 0, &[&opus_head(1)]));
+            d.push_data(&page_g(0x04, serial, 1, 960, &[&[chain as u8]]));
+        }
+        assert!(d.streams().len() <= MAX_RETAINED + 1);
     }
 
     #[test]
