@@ -13,6 +13,12 @@
 //! channel count arrives via a `CapsChanged`. A `CapsChanged` carries the output
 //! format before the first frame.
 //!
+//! A chained file (M827) hands the decoder a fresh `OpusHead` per physical
+//! stream, behind the `Segment` that opens the chain. That header rebuilds the
+//! decoder, so each chain decodes exactly as it would on its own instead of
+//! carrying the previous stream's state across the boundary (M830). A header
+//! merely re-stated mid-stream, identical bytes and no segment, does not.
+//!
 //! Pre-skip / end-trim: Opus streams carry encoder lookahead (pre-skip) at the
 //! head and codec padding at the tail. `OggDemux` forwards the `OpusHead` in-band
 //! (its pre-skip drops the leading output samples) and marks the final packet(s)
@@ -99,6 +105,11 @@ pub struct OpusDec {
     /// Coded duration (per-channel samples) of the last packet, the step
     /// concealment is synthesized in.
     prev_samples: u64,
+    /// A `Segment` arrived and nothing has been decoded since. The next in-band
+    /// `OpusHead` then opens a new logical stream (a chained file's next
+    /// physical stream, M830) rather than re-stating the current one, so the
+    /// decoder is rebuilt even when the header is identical.
+    new_segment: bool,
 }
 
 impl core::fmt::Debug for OpusDec {
@@ -133,6 +144,7 @@ impl OpusDec {
             plc: false,
             next_pts_ns: None,
             prev_samples: 0,
+            new_segment: false,
         }
     }
 
@@ -504,15 +516,24 @@ impl AsyncElement for OpusDec {
                     // channel count + pre-skip, (re)build the decoder, and consume
                     // it (no PCM out). The demuxer forwards it before the audio.
                     if let Some((channels, pre_skip)) = parse_opus_head(slice) {
-                        if self.channels != channels {
+                        // A header opening a new logical stream (a channel-count
+                        // change, or a chained physical stream, which a `Segment`
+                        // announces, M830) needs a decoder that has not carried
+                        // the previous stream's state into it: that stream's
+                        // encoder started cold, so the decoder must too. A header
+                        // merely re-stated mid-stream keeps the running decoder.
+                        if self.channels != channels || self.new_segment {
                             self.build_decoder(channels)?;
                         }
+                        // Fresh stream, fresh pre-skip window and PLC cadence.
                         self.pre_skip = pre_skip as u32;
                         self.decoded_samples = 0;
                         self.next_pts_ns = None;
                         self.prev_samples = 0;
+                        self.new_segment = false;
                         return Ok(());
                     }
+                    self.new_segment = false;
                     // Fill any hole this packet's PTS opens up before decoding
                     // it, so the concealed audio keeps the output contiguous and
                     // the real packet still lands at its own PTS.
@@ -583,6 +604,12 @@ impl AsyncElement for OpusDec {
                     }
                     _ => return Err(G2gError::CapsMismatch),
                 },
+                // A new segment marks a stream boundary (a chained file's next
+                // physical stream): remember it for the header that follows.
+                PipelinePacket::Segment(seg) => {
+                    self.new_segment = true;
+                    out.push(PipelinePacket::Segment(seg)).await?;
+                }
                 other => {
                     out.push(other).await?;
                 }

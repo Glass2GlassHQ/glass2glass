@@ -488,11 +488,12 @@ async fn the_fanout_demuxer_continues_a_chain_on_its_port() {
     );
 }
 
-/// Decoding a chained file runs both parts back to back, sample for sample as
-/// ffmpeg's own decode of the same file does, and lasts exactly as long as the
-/// two parts decoded on their own. (Neither decoder is torn down at the
-/// boundary, so the first frames of the second chain carry over a little
-/// decoder state; that is what the ffmpeg oracle does too.)
+/// Decoding a chained file is bit for bit the two parts decoded on their own,
+/// back to back: the segment opening the second chain makes its `OpusHead`
+/// rebuild the decoder (M830), so no state crosses the boundary. ffmpeg does
+/// carry that state (its chained decode drifts from its own decode of the
+/// parts for ~40 ms after the boundary), so it is the oracle for the length and
+/// for the audio either side, not for the transient.
 #[cfg(feature = "opus")]
 #[tokio::test]
 async fn chained_opus_decodes_to_the_concatenated_pcm() {
@@ -500,25 +501,131 @@ async fn chained_opus_decodes_to_the_concatenated_pcm() {
         eprintln!("skipping: no ffmpeg");
         return;
     };
-    let reference = ffmpeg_pcm(&vector.chained);
-    assert_eq!(
-        reference.len(),
-        ffmpeg_pcm(&vector.first).len() + ffmpeg_pcm(&vector.second).len(),
-        "the chained decode lasts exactly as long as the two parts"
-    );
+    let tail = "audioconvert ! audio/x-raw,format=S16LE,rate=48000,channels=1";
+    let decode = |src: &Path, tag: &str| {
+        let out = temp_path(tag, "raw");
+        let _ = std::fs::remove_file(&out);
+        let line = format!(
+            "filesrc location={} ! oggdemux ! opusdec ! {tail} ! filesink location={}",
+            src.display(),
+            out.display()
+        );
+        (line, out)
+    };
 
-    let out = temp_path("opus-decode-out", "raw");
-    let _ = std::fs::remove_file(&out);
-    let line = format!(
-        "filesrc location={} ! oggdemux ! opusdec ! audioconvert ! \
-         audio/x-raw,format=S16LE,rate=48000,channels=1 ! filesink location={}",
-        vector.chained.display(),
-        out.display()
-    );
+    let (line, out) = decode(&vector.chained, "opus-decode-out");
     assert!(run_line(&line).await > 0, "{line}");
     let pcm = std::fs::read(&out).expect("pcm written");
     let _ = std::fs::remove_file(&out);
-    assert_pcm_matches(&pcm, &reference);
+
+    let mut parts = Vec::new();
+    for (i, src) in [&vector.first, &vector.second].into_iter().enumerate() {
+        let (line, out) = decode(src, &format!("opus-part-{i}"));
+        assert!(run_line(&line).await > 0, "{line}");
+        parts.extend_from_slice(&std::fs::read(&out).expect("pcm written"));
+        let _ = std::fs::remove_file(&out);
+    }
+    assert_eq!(pcm, parts, "chained decode is the two parts, bit for bit");
+    assert_eq!(
+        pcm.len(),
+        ffmpeg_pcm(&vector.chained).len(),
+        "and lasts exactly as long as ffmpeg's decode of the chained file"
+    );
+    assert_pcm_matches(&pcm[..48_000 * 2], &ffmpeg_pcm(&vector.first));
+}
+
+/// A `Segment` is what tells the decoder a re-stated `OpusHead` opens a new
+/// logical stream (M830). The same header bytes without one are a re-statement
+/// of the running stream and must leave the decode untouched, which is how the
+/// container paths that re-transport codec config in band stay unaffected.
+#[cfg(feature = "opus")]
+#[tokio::test]
+async fn only_a_segment_makes_a_repeated_opus_head_rebuild_the_decoder() {
+    use g2g_plugins::opusdec::OpusDec;
+
+    let Some(vector) = chained_vector("head-repeat", "libopus", 1, 48_000) else {
+        eprintln!("skipping: no ffmpeg");
+        return;
+    };
+    let frames = demux(&vector.first_bytes, "opus").await.audio();
+    assert!(frames.len() > 20, "the fixture has packets to decode");
+
+    /// An `OpusHead` claiming no encoder delay, so re-stating it mid-stream
+    /// discards nothing and only a rebuild could change the output.
+    fn head(channels: u8) -> Vec<u8> {
+        let mut h = b"OpusHead".to_vec();
+        h.extend_from_slice(&[1, channels, 0, 0]);
+        h.extend_from_slice(&48_000u32.to_le_bytes());
+        h.extend_from_slice(&[0, 0, 0]);
+        h
+    }
+
+    async fn decode(
+        frames: &[(Vec<u8>, FrameTiming)],
+        restate_at: usize,
+        segment: bool,
+    ) -> Vec<u8> {
+        let mut d = OpusDec::new();
+        d.configure_pipeline(&Caps::Audio {
+            format: AudioFormat::Opus,
+            channels: 1,
+            sample_rate: 0,
+        })
+        .expect("configure");
+        let mut sink = CaptureSink::default();
+        let head_packet = || {
+            PipelinePacket::DataFrame(Frame::new(
+                MemoryDomain::System(SystemSlice::from_boxed(head(1).into_boxed_slice())),
+                FrameTiming::default(),
+                0,
+            ))
+        };
+        AsyncElement::process(&mut d, head_packet(), &mut sink)
+            .await
+            .expect("head");
+        for (i, (payload, timing)) in frames.iter().enumerate() {
+            if i == restate_at {
+                if segment {
+                    AsyncElement::process(
+                        &mut d,
+                        PipelinePacket::Segment(Segment::new()),
+                        &mut sink,
+                    )
+                    .await
+                    .expect("segment");
+                }
+                AsyncElement::process(&mut d, head_packet(), &mut sink)
+                    .await
+                    .expect("restated head");
+            }
+            let frame = PipelinePacket::DataFrame(Frame::new(
+                MemoryDomain::System(SystemSlice::from_boxed(payload.clone().into_boxed_slice())),
+                *timing,
+                i as u64,
+            ));
+            AsyncElement::process(&mut d, frame, &mut sink)
+                .await
+                .expect("packet");
+        }
+        sink.frames.into_iter().flat_map(|(p, _)| p).collect()
+    }
+
+    let plain = decode(&frames, usize::MAX, false).await;
+    let restated = decode(&frames, 10, false).await;
+    let chained = decode(&frames, 10, true).await;
+    assert_eq!(
+        restated, plain,
+        "a re-stated header alone leaves the running decoder alone"
+    );
+    assert_eq!(
+        chained.len(),
+        plain.len(),
+        "the rebuild discards nothing extra"
+    );
+    assert_ne!(
+        chained, plain,
+        "a header behind a segment decodes the rest with a fresh decoder"
+    );
 }
 
 /// The Vorbis chain likewise, and exactly: the second chain's ident + setup

@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M830: `opusdec` rebuilds at a chain boundary (`Segment` + `OpusHead`), chained Opus decodes bit-exact to the parts.
+
 - M829: `plc` packet-loss concealment on `opusdec` (TOC-cadence gap fill, 200 ms cap).
 
 - M827: chained Ogg demux (sequential chains, offset-continued timeline, per-chain caps/tags), validated vs ffmpeg and GStreamer.
