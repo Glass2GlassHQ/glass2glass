@@ -72,6 +72,10 @@ pub mod time;
 // ---- dynamic / build-time / tooling layer (needs the heap) ----
 #[cfg(feature = "alloc")]
 pub mod aggregator;
+// Declarative field-wise caps derivation (M837): the data form of a transform's
+// forward derivation, from which the solver reads its backward-coupling mask.
+#[cfg(feature = "alloc")]
+pub mod caps_transform;
 // Conformance vocabulary + derived maturity (M614): a maturity level computed from
 // evidence produced by passing conformance cases, never hand-authored. Pure.
 #[cfg(feature = "alloc")]
@@ -133,6 +137,8 @@ pub use channels::{ChannelLayout, ChannelPosition};
 // fixed-rank inline (M636) and part of the no-alloc subset above.
 #[cfg(feature = "alloc")]
 pub use caps::CapsSet;
+#[cfg(feature = "alloc")]
+pub use caps_transform::{AudioShape, CapsTransform, FieldTransform, RawVideoShape};
 #[cfg(feature = "runtime")]
 pub use clock::DriftClock;
 #[cfg(feature = "std")]
@@ -213,7 +219,7 @@ pub use supervise::{
     RunOutcome, SkipBounded, Supervised, SupervisorReport, Watchdog, MAX_ATTEMPTS,
 };
 #[cfg(feature = "alloc")]
-pub use tag::{Tag, TagList};
+pub use tag::{resolve_tags, split_tags, Tag, TagList};
 pub use tensor::{TensorView, MAX_TENSOR_RANK};
 pub use time::{RefNs, RtpTs, TaiNs};
 #[cfg(feature = "alloc")]

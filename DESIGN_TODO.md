@@ -240,8 +240,6 @@ Phased plan:
 
 - **Preference algebra.** `CapsPreferences` is a placeholder (sum-of-indices);
   needs a real competing-constraint scenario to drive it.
-- **Closure-free `FieldTransform`** so forward derivation is declarative too
-  (removing the mask/closure duplication `DerivedCoupled` carries).
 - **β allocation re-cascade across a muxer** (per-input-pad re-cascade); the
   node-keyed coordinator walk terminates at muxers today.
 - **Hardware `tee -> {decode, mux}` integration test** on real Linux

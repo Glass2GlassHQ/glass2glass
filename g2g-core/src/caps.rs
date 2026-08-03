@@ -654,13 +654,13 @@ pub(crate) fn intersect_channels(a: u8, b: u8) -> Option<u8> {
 }
 
 /// Which caps fields a transform passes through unchanged (output field ==
-/// input field), declared alongside a
-/// [`CapsConstraint::DerivedCoupled`](crate::format_element::CapsConstraint)
-/// closure. The solver uses the declared passthrough fields to couple input and
+/// input field). Read off a
+/// [`CapsTransform`](crate::caps_transform::CapsTransform) declaration (the
+/// fields every output shape derives with `Identity`), or probed from a
+/// `DerivedOutput` closure. The solver uses them to couple input and
 /// output *field by field* in both directions, so a downstream pin on a
 /// passthrough field narrows the corresponding input field (`Range ∩ Fixed =
-/// Fixed`) instead of only dropping whole alternatives. The closure stays the
-/// source of truth for the *retargeted* (non-passthrough) fields.
+/// Fixed`) instead of only dropping whole alternatives.
 ///
 /// `format` covers the variant's scalar media identity:
 /// [`Caps::RawVideo`]'s `format`, [`Caps::CompressedVideo`]'s `codec`, and

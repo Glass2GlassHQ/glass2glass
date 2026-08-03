@@ -27,10 +27,10 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ChannelLayout, ChannelPosition,
-    ConfigureOutcome, ElementMetadata, G2gError, MemoryDomain, OutputSink, PadTemplate,
-    PadTemplates, PassthroughFields, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
-    ANY_CHANNELS,
+    AsyncElement, AudioFormat, AudioShape, Caps, CapsConstraint, CapsSet, CapsTransform,
+    ChannelLayout, ChannelPosition, ConfigureOutcome, ElementMetadata, FieldTransform, G2gError,
+    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec, ANY_CHANNELS,
 };
 
 /// The PCM sample formats this element reads and writes.
@@ -156,62 +156,52 @@ impl AsyncElement for AudioConvert {
         Ok(upstream_caps.clone())
     }
 
-    /// Native `DerivedCoupled`: a supported PCM input maps to the target format +
+    /// Native `DerivedFields`: a supported PCM input maps to the target format +
     /// channel count at the same sample rate (rate is the one passthrough field).
     /// A fixed target emits that single output; a caps-driven (`auto`) target
     /// advertises the passthrough as the preferred alternative plus the retarget
     /// options (the other PCM format, and an `ANY_CHANNELS` wildcard) so a
     /// downstream capsfilter pins the real format / channel count.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        let target_format = self.target_format;
-        let target_channels = self.target_channels;
-        // Only sample_rate is preserved; format + channels are retargeted.
-        let passthrough = PassthroughFields::NONE.with_sample_rate();
-        let derive = Box::new(move |input: &Caps| match input {
-            Caps::Audio {
-                format,
-                channels,
-                sample_rate,
-            } if FORMATS.contains(format) => {
-                // Candidate output formats: the fixed target, or (auto) the input
-                // format first (passthrough) then the other PCM format.
-                let formats: Vec<AudioFormat> = match target_format {
-                    Some(f) => alloc::vec![f],
-                    None => {
-                        let mut v = alloc::vec![*format];
-                        v.extend(FORMATS.iter().copied().filter(|f| f != format));
-                        v
-                    }
-                };
-                // Candidate channel counts: the fixed target, or (auto) the input
-                // count (passthrough) then the `ANY_CHANNELS` wildcard. A `0`
-                // (ANY_CHANNELS) input is the decoder's pre-decode placeholder:
-                // advertise only the wildcard so a downstream capsfilter pins it
-                // (else it fixates to stereo) and the real count flows in a
-                // runtime `CapsChanged`.
-                let chans: Vec<u8> = match (target_channels, *channels) {
-                    (Some(c), _) => alloc::vec![c],
-                    (None, ANY_CHANNELS) => alloc::vec![ANY_CHANNELS],
-                    (None, c) => alloc::vec![c, ANY_CHANNELS],
-                };
-                let mut alts = Vec::new();
-                for f in &formats {
-                    for c in &chans {
-                        alts.push(Caps::Audio {
-                            format: *f,
-                            channels: *c,
-                            sample_rate: *sample_rate,
-                        });
-                    }
-                }
-                CapsSet::from_alternatives(alts)
+        // Candidate output formats: the fixed target, or (auto) the input format
+        // first (passthrough) then every PCM format, the duplicate collapsing into
+        // the passthrough.
+        let formats: Vec<FieldTransform<AudioFormat>> = match self.target_format {
+            Some(f) => alloc::vec![FieldTransform::Fixed(f)],
+            None => {
+                let mut v = alloc::vec![FieldTransform::Identity];
+                v.extend(FORMATS.iter().copied().map(FieldTransform::Fixed));
+                v
             }
-            _ => CapsSet::from_alternatives(Vec::new()),
-        });
-        CapsConstraint::DerivedCoupled {
-            derive,
-            passthrough,
+        };
+        // Candidate channel counts: the fixed target, or (auto) the input count
+        // (passthrough) then the `ANY_CHANNELS` wildcard. A `0` (ANY_CHANNELS)
+        // input is the decoder's pre-decode placeholder, where the two coincide:
+        // only the wildcard is advertised, so a downstream capsfilter pins it
+        // (else it fixates to stereo) and the real count flows in a runtime
+        // `CapsChanged`.
+        let chans: Vec<FieldTransform<u8>> = match self.target_channels {
+            Some(c) => alloc::vec![FieldTransform::Fixed(c)],
+            None => alloc::vec![
+                FieldTransform::Identity,
+                FieldTransform::Fixed(ANY_CHANNELS)
+            ],
+        };
+        let mut shapes = Vec::with_capacity(formats.len() * chans.len());
+        for f in &formats {
+            for c in &chans {
+                shapes.push(
+                    AudioShape::PASSTHROUGH
+                        .with_format(f.clone())
+                        .with_channels(c.clone()),
+                );
+            }
         }
+        CapsConstraint::DerivedFields(CapsTransform::Audio {
+            accept: FORMATS.to_vec(),
+            produce: Vec::new(),
+            shapes,
+        })
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -599,6 +589,7 @@ pub(crate) fn write_sample(dst: &mut Vec<u8>, v: f32, format: AudioFormat) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use g2g_core::PassthroughFields;
 
     fn audio(format: AudioFormat, channels: u8, rate: u32) -> Caps {
         Caps::Audio {
@@ -630,15 +621,12 @@ mod tests {
     #[test]
     fn fixed_target_maps_pcm_to_target() {
         let conv = AudioConvert::new(AudioFormat::PcmS16Le, 2);
-        let CapsConstraint::DerivedCoupled {
-            derive: f,
-            passthrough,
-        } = conv.caps_constraint_as_transform()
-        else {
-            panic!("expected DerivedCoupled");
+        let CapsConstraint::DerivedFields(t) = conv.caps_constraint_as_transform() else {
+            panic!("expected DerivedFields");
         };
         // only sample_rate is preserved; format + channels are retargeted.
-        assert_eq!(passthrough, PassthroughFields::NONE.with_sample_rate());
+        assert_eq!(t.passthrough(), PassthroughFields::NONE.with_sample_rate());
+        let f = |c: &Caps| t.derive(c);
         let out = f(&audio(AudioFormat::PcmF32Le, 2, 44_100));
         assert_eq!(
             out.alternatives(),
@@ -659,10 +647,10 @@ mod tests {
         // format and any channel count, so the derive advertises the passthrough
         // (input) shape first plus the retarget alternatives.
         let conv = AudioConvert::auto();
-        let CapsConstraint::DerivedCoupled { derive: f, .. } = conv.caps_constraint_as_transform()
-        else {
-            panic!("expected DerivedCoupled");
+        let CapsConstraint::DerivedFields(t) = conv.caps_constraint_as_transform() else {
+            panic!("expected DerivedFields");
         };
+        let f = |c: &Caps| t.derive(c);
         let out = f(&audio(AudioFormat::PcmS16Le, 2, 48_000));
         let alts = out.alternatives();
         // passthrough (S16, 2) is the preferred first alternative.

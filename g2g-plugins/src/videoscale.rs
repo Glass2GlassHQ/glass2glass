@@ -28,9 +28,10 @@ use crate::pixel::{even_dims_required, frame_byte_size, planar_planes};
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
-    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PassthroughFields, PipelinePacket,
-    PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
+    AsyncElement, Caps, CapsConstraint, CapsSet, CapsTransform, ConfigureOutcome, Dim,
+    ElementMetadata, FieldTransform, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
+    RawVideoShape,
 };
 
 const FORMATS: [RawVideoFormat; 12] = [
@@ -173,67 +174,50 @@ impl AsyncElement for VideoScale {
         Err(G2gError::CapsMismatch)
     }
 
-    /// Native `DerivedOutput`: any supported raw input maps to the same
-    /// format at the configured target dims, framerate preserved. A 4:2:0
-    /// format with an odd target collapses to the empty set so the solve
-    /// fails loud rather than fixating impossible caps.
+    /// Native `DerivedFields`: any supported raw input maps to the same
+    /// format at the configured target dims, framerate preserved (so format +
+    /// framerate are the coupled fields). A 4:2:0 format with an odd target is
+    /// not accepted, so the solve fails loud rather than fixating impossible
+    /// caps.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         let (tw, th) = (self.target_w, self.target_h);
-        // Passthrough format + framerate (retarget width/height), so a downstream
-        // geometry pin behind a format-only transform couples back to the scaler.
-        let passthrough = PassthroughFields::NONE.with_format().with_framerate();
-        let derive = Box::new(move |input: &Caps| match input {
-            Caps::RawVideo {
-                format,
-                width,
-                height,
-                framerate,
-            } if FORMATS.contains(format) => {
-                if tw > 0 && th > 0 {
-                    // Property-driven: fixed target geometry.
-                    if bad_even_dims(*format, tw, th) {
-                        return CapsSet::from_alternatives(Vec::new());
-                    }
-                    CapsSet::one(Caps::RawVideo {
-                        format: *format,
-                        width: Dim::Fixed(tw),
-                        height: Dim::Fixed(th),
-                        framerate: framerate.clone(),
-                    })
-                } else {
-                    // Caps-driven (auto): default to passthrough (the input
-                    // geometry), but advertise we can scale to any geometry so a
-                    // downstream capsfilter pins the target. Passthrough is the
-                    // preferred (first) alternative, so with no downstream
-                    // constraint the output is the input size (identity scale).
-                    CapsSet::from_alternatives(vec![
-                        Caps::RawVideo {
-                            format: *format,
-                            width: width.clone(),
-                            height: height.clone(),
-                            framerate: framerate.clone(),
-                        },
-                        Caps::RawVideo {
-                            format: *format,
-                            width: Dim::Range {
-                                min: 1,
-                                max: MAX_DIM,
-                            },
-                            height: Dim::Range {
-                                min: 1,
-                                max: MAX_DIM,
-                            },
-                            framerate: framerate.clone(),
-                        },
-                    ])
-                }
-            }
-            _ => CapsSet::from_alternatives(Vec::new()),
-        });
-        CapsConstraint::DerivedCoupled {
-            derive,
-            passthrough,
-        }
+        let (accept, shapes) = if tw > 0 && th > 0 {
+            // Property-driven: fixed target geometry.
+            (
+                FORMATS
+                    .iter()
+                    .copied()
+                    .filter(|f| !bad_even_dims(*f, tw, th))
+                    .collect(),
+                vec![RawVideoShape::PASSTHROUGH
+                    .with_width(FieldTransform::Fixed(Dim::Fixed(tw)))
+                    .with_height(FieldTransform::Fixed(Dim::Fixed(th)))],
+            )
+        } else {
+            // Caps-driven (auto): default to passthrough (the input geometry),
+            // but advertise we can scale to any geometry so a downstream
+            // capsfilter pins the target. Passthrough is the preferred (first)
+            // alternative, so with no downstream constraint the output is the
+            // input size (identity scale).
+            let range = Dim::Range {
+                min: 1,
+                max: MAX_DIM,
+            };
+            (
+                FORMATS.to_vec(),
+                vec![
+                    RawVideoShape::PASSTHROUGH,
+                    RawVideoShape::PASSTHROUGH
+                        .with_width(FieldTransform::Fixed(range.clone()))
+                        .with_height(FieldTransform::Fixed(range)),
+                ],
+            )
+        };
+        CapsConstraint::DerivedFields(CapsTransform::RawVideo {
+            accept,
+            produce: Vec::new(),
+            shapes,
+        })
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -578,6 +562,7 @@ fn resample_plane16(src: &[u8], src_w: usize, src_h: usize, dst_w: usize, dst_h:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use g2g_core::PassthroughFields;
 
     fn rgba_caps(w: u32, h: u32) -> Caps {
         Caps::RawVideo {
@@ -665,17 +650,14 @@ mod tests {
     #[test]
     fn derived_output_maps_to_target_dims() {
         let scaler = VideoScale::new(64, 32);
-        let CapsConstraint::DerivedCoupled {
-            derive: f,
-            passthrough,
-        } = scaler.caps_constraint_as_transform()
-        else {
-            panic!("expected DerivedCoupled");
+        let CapsConstraint::DerivedFields(t) = scaler.caps_constraint_as_transform() else {
+            panic!("expected DerivedFields");
         };
         assert_eq!(
-            passthrough,
+            t.passthrough(),
             PassthroughFields::NONE.with_format().with_framerate()
         );
+        let f = |c: &Caps| t.derive(c);
         let out = f(&rgba_caps(320, 240));
         assert_eq!(
             out.alternatives(),
@@ -699,17 +681,14 @@ mod tests {
     #[test]
     fn derived_output_rejects_odd_target_for_yuv420() {
         let scaler = VideoScale::new(63, 32);
-        let CapsConstraint::DerivedCoupled {
-            derive: f,
-            passthrough,
-        } = scaler.caps_constraint_as_transform()
-        else {
-            panic!("expected DerivedCoupled");
+        let CapsConstraint::DerivedFields(t) = scaler.caps_constraint_as_transform() else {
+            panic!("expected DerivedFields");
         };
         assert_eq!(
-            passthrough,
+            t.passthrough(),
             PassthroughFields::NONE.with_format().with_framerate()
         );
+        let f = |c: &Caps| t.derive(c);
         let nv12_in = Caps::RawVideo {
             format: RawVideoFormat::Nv12,
             width: Dim::Fixed(320),

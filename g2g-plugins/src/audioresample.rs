@@ -27,9 +27,10 @@ use alloc::vec::Vec;
 use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
-    G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PassthroughFields,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, ANY_SAMPLE_RATE,
+    AsyncElement, AudioFormat, AudioShape, Caps, CapsConstraint, CapsSet, CapsTransform,
+    ConfigureOutcome, ElementMetadata, FieldTransform, G2gError, MemoryDomain, OutputSink,
+    PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    ANY_SAMPLE_RATE,
 };
 
 use crate::audioconvert::{read_sample, sample_bytes, write_sample, PCM_FORMATS};
@@ -166,8 +167,8 @@ impl AsyncElement for AudioResample {
         Ok(upstream_caps.clone())
     }
 
-    /// Native `DerivedOutput`: a supported PCM input maps to the same format +
-    /// channels at the target sample rate.
+    /// Native `DerivedFields`: a supported PCM input maps to the same format +
+    /// channels (the coupled fields) at the target sample rate.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         // Property, or the caps-resolved target from startup (M755). Reflecting the
         // resolved rate (not just the property) lets a mid-stream input-rate change
@@ -177,44 +178,30 @@ impl AsyncElement for AudioResample {
         // converter retargets `format`, a scalar with no wildcard, so the backward
         // feasibility projection is empty). Auto + unresolved (startup) stays the
         // passthrough+wildcard set, so startup negotiation is unchanged.
-        let out_rate = self.out_rate();
-        // Passthrough format + channels (retarget sample_rate only).
-        let passthrough = PassthroughFields::NONE.with_format().with_channels();
-        let derive = Box::new(move |input: &Caps| match input {
-            // `channels` passes through untouched, so an `ANY_CHANNELS` (0)
-            // placeholder input derives an `ANY_CHANNELS` output (a downstream
-            // capsfilter pins it); do not require a concrete count here, else a
-            // decoder's pre-decode placeholder collapses the derived set to empty
-            // and the solver reads it as an unsatisfiable link.
-            Caps::Audio {
-                format,
-                channels,
-                sample_rate,
-            } if PCM_FORMATS.contains(format) => {
-                let mk = |rate| Caps::Audio {
-                    format: *format,
-                    channels: *channels,
-                    sample_rate: rate,
-                };
-                match out_rate {
-                    // Property-driven, or a caps-resolved target: the fixed rate.
-                    Some(rate) => CapsSet::one(mk(rate)),
-                    // Caps-driven (auto), not yet resolved: default to passthrough
-                    // (the input rate, no resampling), but advertise "any rate" so a
-                    // downstream capsfilter pins the target. Passthrough is the
-                    // preferred (first) alternative.
-                    None => CapsSet::from_alternatives(alloc::vec![
-                        mk(*sample_rate),
-                        mk(ANY_SAMPLE_RATE)
-                    ]),
-                }
+        // `channels` passes through untouched, so an `ANY_CHANNELS` (0)
+        // placeholder input derives an `ANY_CHANNELS` output (a downstream
+        // capsfilter pins it); the shapes never require a concrete count, else a
+        // decoder's pre-decode placeholder would collapse the derived set to empty
+        // and the solver would read it as an unsatisfiable link.
+        let shapes = match self.out_rate() {
+            // Property-driven, or a caps-resolved target: the fixed rate.
+            Some(rate) => {
+                alloc::vec![AudioShape::PASSTHROUGH.with_sample_rate(FieldTransform::Fixed(rate))]
             }
-            _ => CapsSet::from_alternatives(Vec::new()),
-        });
-        CapsConstraint::DerivedCoupled {
-            derive,
-            passthrough,
-        }
+            // Caps-driven (auto), not yet resolved: default to passthrough (the
+            // input rate, no resampling), but advertise "any rate" so a downstream
+            // capsfilter pins the target. Passthrough is the preferred (first)
+            // alternative.
+            None => alloc::vec![
+                AudioShape::PASSTHROUGH,
+                AudioShape::PASSTHROUGH.with_sample_rate(FieldTransform::Fixed(ANY_SAMPLE_RATE)),
+            ],
+        };
+        CapsConstraint::DerivedFields(CapsTransform::Audio {
+            accept: PCM_FORMATS.to_vec(),
+            produce: Vec::new(),
+            shapes,
+        })
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -520,6 +507,7 @@ impl PadTemplates for AudioResample {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use g2g_core::PassthroughFields;
 
     fn audio(format: AudioFormat, channels: u8, rate: u32) -> Caps {
         Caps::Audio {
@@ -551,17 +539,14 @@ mod tests {
     #[test]
     fn derived_output_retargets_rate_only() {
         let r = AudioResample::new(48_000);
-        let CapsConstraint::DerivedCoupled {
-            derive: f,
-            passthrough,
-        } = r.caps_constraint_as_transform()
-        else {
-            panic!("expected DerivedCoupled");
+        let CapsConstraint::DerivedFields(t) = r.caps_constraint_as_transform() else {
+            panic!("expected DerivedFields");
         };
         assert_eq!(
-            passthrough,
+            t.passthrough(),
             PassthroughFields::NONE.with_format().with_channels()
         );
+        let f = |c: &Caps| t.derive(c);
         // format + channels preserved, rate retargeted.
         let out = f(&audio(AudioFormat::PcmS16Le, 2, 44_100));
         assert_eq!(

@@ -387,31 +387,8 @@ fn forward_propagate(
             }
             Ok(out)
         }
-        CapsConstraint::DerivedOutput(f) | CapsConstraint::DerivedCoupled { derive: f, .. } => {
-            let fixed = upstream.fixate().ok_or(NegotiationFailure::Unfixable {
-                upstream: i - 1,
-                downstream: i,
-            })?;
-            // A `DerivedCoupled`'s passthrough mask and its derive closure are two
-            // sources of truth for the same fact; verify they agree on the
-            // concrete input so a mask claiming a field the closure retargets is
-            // caught here (debug builds), not as a silent mis-narrowing of the
-            // input. `DerivedOutput` carries no mask, so nothing to check.
-            if let CapsConstraint::DerivedCoupled { passthrough, .. } = c {
-                debug_assert!(
-                    crate::runtime::passthrough::verify_passthrough_sound(f.as_ref(), *passthrough, &fixed),
-                    "DerivedCoupled passthrough mask claims a field its derive closure does not pass through"
-                );
-            }
-            let r = f(&fixed);
-            if r.is_empty() {
-                return Err(NegotiationFailure::EmptyLink {
-                    upstream: i,
-                    downstream: i + 1,
-                });
-            }
-            Ok(r)
-        }
+        CapsConstraint::DerivedOutput(f) => derived_forward(f.as_ref(), upstream, i),
+        CapsConstraint::DerivedFields(t) => derived_forward(&|c: &Caps| t.derive(c), upstream, i),
         CapsConstraint::LegacyTransform {
             intercept,
             propose_output,
@@ -438,6 +415,28 @@ fn forward_propagate(
             Err(NegotiationFailure::EndpointShapeMismatch { index: i })
         }
     }
+}
+
+/// One forward hop of the single-caps cascade for a derived transform
+/// (`DerivedOutput` closure or `DerivedFields` declaration): the output is a
+/// function of one concrete input, so the upstream link must fixate first.
+fn derived_forward(
+    f: &dyn Fn(&Caps) -> CapsSet,
+    upstream: &CapsSet,
+    i: usize,
+) -> Result<CapsSet, NegotiationFailure> {
+    let fixed = upstream.fixate().ok_or(NegotiationFailure::Unfixable {
+        upstream: i - 1,
+        downstream: i,
+    })?;
+    let r = f(&fixed);
+    if r.is_empty() {
+        return Err(NegotiationFailure::EmptyLink {
+            upstream: i,
+            downstream: i + 1,
+        });
+    }
+    Ok(r)
 }
 
 /// Caps-α mid-stream re-fixation outcome for one interior element
@@ -525,17 +524,18 @@ fn backward_feasible(
             }
             Some(acc)
         }
-        // A `DerivedCoupled` transform inverts on its passthrough fields: the
+        // A `DerivedFields` transform inverts on its passthrough fields: the
         // input feasibility is the downstream set with retargeted fields widened
         // to anything the transform accepts (Dim/Rate -> Any, sample_rate ->
         // ANY). `project_passthrough` returns `None` for a retargeted scalar with
         // no wildcard (e.g. videoconvert's format), in which case the input
         // feasibility isn't expressible as a single `Caps` and we impose none.
-        CapsConstraint::DerivedCoupled { passthrough, .. } => {
+        CapsConstraint::DerivedFields(t) => {
             let d = down?;
+            let mask = t.passthrough();
             let mut alts = Vec::with_capacity(d.alternatives().len());
             for o in d.alternatives() {
-                alts.push(project_passthrough(o, *passthrough)?);
+                alts.push(project_passthrough(o, mask)?);
             }
             Some(CapsSet::from_alternatives(alts))
         }
@@ -735,17 +735,15 @@ fn apply_constraint(
                 }
             }
         }
-        CapsConstraint::DerivedCoupled {
-            derive,
-            passthrough,
-        } => {
+        CapsConstraint::DerivedFields(t) => {
             let (Some(ii), Some(oi)) = (in_idx, out_idx) else {
                 return Err(NegotiationFailure::EndpointShapeMismatch { index: i });
             };
-            // Forward: identical to `DerivedOutput` (the closure is the source of
-            // truth for forward derivation).
+            let derive = |c: &Caps| t.derive(c);
+            // Forward: identical to `DerivedOutput` (the declaration is the source
+            // of truth for forward derivation).
             if let Some(input_set) = &links[ii] {
-                let derived = forward_derived_union(derive.as_ref(), input_set);
+                let derived = forward_derived_union(&derive, input_set);
                 if derived.is_empty() {
                     return Err(NegotiationFailure::EmptyLink {
                         upstream: i,
@@ -757,7 +755,7 @@ fn apply_constraint(
             // Backward: field-level coupling, narrowing passthrough fields *within*
             // an alternative (the unblock over `DerivedOutput`'s alternative-drop).
             if let (Some(in_set), Some(out_set)) = (links[ii].clone(), links[oi].clone()) {
-                match backward_field_narrow(derive.as_ref(), *passthrough, &in_set, &out_set) {
+                match backward_field_narrow(&derive, t.passthrough(), &in_set, &out_set) {
                     Ok(Some(narrowed)) => links[ii] = Some(narrowed),
                     Ok(None) => {}
                     Err(()) => {
@@ -1140,7 +1138,7 @@ fn transform_pair_consistent(c: &CapsConstraint<'_>, inp: &Caps, outp: &Caps) ->
             pairs.iter().any(|(i, o)| i.accepts(inp) && o.accepts(outp))
         }
         CapsConstraint::DerivedOutput(f) => f(inp).accepts(outp),
-        CapsConstraint::DerivedCoupled { derive, .. } => derive(inp).accepts(outp),
+        CapsConstraint::DerivedFields(t) => t.derive(inp).accepts(outp),
         // Produce / accept shapes on a transform slot, or legacy bridges: not a
         // cross-edge relation re-checked here (arc consistency handled the forward
         // cascade; the legacy bridge stays permissive through the migration).
@@ -1221,7 +1219,7 @@ fn fmt_caps_constraint(c: &CapsConstraint<'_>) -> String {
         CapsConstraint::IdentityAny => "identity ANY".to_string(),
         CapsConstraint::Mapping(pairs) => alloc::format!("maps {} pair(s)", pairs.len()),
         CapsConstraint::DerivedOutput(_) => "derives output".to_string(),
-        CapsConstraint::DerivedCoupled { .. } => "derives output (coupled)".to_string(),
+        CapsConstraint::DerivedFields(_) => "derives output (coupled)".to_string(),
         CapsConstraint::LegacySource(c) => alloc::format!("legacy source {}", c.to_gst_string()),
         CapsConstraint::LegacyTransform { .. } => "legacy transform".to_string(),
         CapsConstraint::LegacySink(_) => "legacy sink".to_string(),
@@ -1536,14 +1534,12 @@ fn apply_transform_node<E>(
             }
             Ok(())
         }
-        CapsConstraint::DerivedCoupled {
-            derive,
-            passthrough,
-        } => {
+        CapsConstraint::DerivedFields(t) => {
             // Mirror of the linear `apply_constraint` arm on graph edges:
-            // forward via the closure, backward via field-level coupling.
+            // forward via the declaration, backward via field-level coupling.
+            let derive = |c: &Caps| t.derive(c);
             if let Some(in_set) = edges[in_e].clone() {
-                let derived = forward_derived_union(derive.as_ref(), &in_set);
+                let derived = forward_derived_union(&derive, &in_set);
                 if derived.is_empty() {
                     let (up, down) = edge_endpoints(graph, out_e);
                     return Err(NegotiationFailure::EmptyLink {
@@ -1554,7 +1550,7 @@ fn apply_transform_node<E>(
                 narrow_edge(graph, edges, out_e, &derived)?;
             }
             if let (Some(in_set), Some(out_set)) = (edges[in_e].clone(), edges[out_e].clone()) {
-                match backward_field_narrow(derive.as_ref(), *passthrough, &in_set, &out_set) {
+                match backward_field_narrow(&derive, t.passthrough(), &in_set, &out_set) {
                     Ok(Some(narrowed)) => edges[in_e] = Some(narrowed),
                     Ok(None) => {}
                     Err(()) => {
@@ -1649,7 +1645,7 @@ fn backward_filter_derived(
 /// Backward narrowing for a `DerivedOutput` transform. The closure is not
 /// declared with a passthrough mask, so [`discover_passthrough`] probes it for
 /// its invertible fields; when any is found the input is narrowed field-by-field
-/// exactly as a declared `DerivedCoupled` mask would
+/// exactly as a declared `DerivedFields` mask would
 /// ([`backward_field_narrow`]), so a downstream geometry / framerate pin couples
 /// back through a decoder or a rescaling convert instead of failing loud. With no
 /// passthrough field discovered it falls back to the alternative-drop walk
@@ -1672,7 +1668,7 @@ fn derived_backward(
     }
 }
 
-/// Backward field-coupling for a `DerivedCoupled` transform: the primitive the
+/// Backward field-coupling for a `DerivedFields` transform: the primitive the
 /// alternative-dropping [`backward_filter_derived`] cannot express. For each
 /// input alternative, intersect its forward image `derive(a)` with the
 /// constrained output `out_set`; drop the alternative when nothing survives (the
@@ -1703,7 +1699,7 @@ fn backward_field_narrow(
         // Couple each reachable output's passthrough fields back into `a`. Uses
         // the variant-tolerant coupling so a `DerivedOutput` decoder / encoder
         // (which changes variant) couples its shared geometry / rate fields;
-        // a same-variant `DerivedCoupled` transform gets the exact coupling.
+        // a same-variant `DerivedFields` transform gets the exact coupling.
         let mut any = false;
         for out_alt in reach.alternatives() {
             if let Some(c) = couple_passthrough_derived(a, out_alt, passthrough) {
@@ -1858,6 +1854,7 @@ fn apply_muxer_node<E>(
 mod tests {
     use super::*;
     use crate::caps::{Dim, Rate, RawVideoFormat, VideoCodec};
+    use crate::caps_transform::{CapsTransform, FieldTransform, RawVideoShape};
     use crate::runtime::passthrough::couple_passthrough;
     use alloc::boxed::Box;
     use alloc::vec;
@@ -3245,62 +3242,34 @@ mod tests {
 
     // --- M227 field-level bidirectional caps coupling ---
 
-    /// A scale-like `DerivedCoupled`: passthrough format + framerate, retarget
+    /// A scale-like `DerivedFields`: passthrough format + framerate, retarget
     /// geometry to [passthrough-input, Range 1..32768].
     fn scale_like<'a>() -> CapsConstraint<'a> {
-        CapsConstraint::DerivedCoupled {
-            derive: Box::new(|input: &Caps| match input {
-                Caps::RawVideo {
-                    format,
-                    width,
-                    height,
-                    framerate,
-                } => CapsSet::from_alternatives(vec![
-                    video(*format, width.clone(), height.clone(), framerate.clone()),
-                    video(
-                        *format,
-                        Dim::Range { min: 1, max: 32768 },
-                        Dim::Range { min: 1, max: 32768 },
-                        framerate.clone(),
-                    ),
-                ]),
-                _ => CapsSet::from_alternatives(vec![]),
-            }),
-            passthrough: PassthroughFields::NONE.with_format().with_framerate(),
-        }
+        let range = Dim::Range { min: 1, max: 32768 };
+        CapsConstraint::DerivedFields(CapsTransform::RawVideo {
+            accept: Vec::new(),
+            produce: Vec::new(),
+            shapes: vec![
+                RawVideoShape::PASSTHROUGH,
+                RawVideoShape::PASSTHROUGH
+                    .with_width(FieldTransform::Fixed(range.clone()))
+                    .with_height(FieldTransform::Fixed(range)),
+            ],
+        })
     }
 
-    /// A convert-like `DerivedCoupled`: passthrough geometry + framerate,
+    /// A convert-like `DerivedFields`: passthrough geometry + framerate,
     /// retarget format to [Rgba8, Nv12] (Rgba8 preferred).
     fn convert_like<'a>() -> CapsConstraint<'a> {
-        CapsConstraint::DerivedCoupled {
-            derive: Box::new(|input: &Caps| match input {
-                Caps::RawVideo {
-                    width,
-                    height,
-                    framerate,
-                    ..
-                } => CapsSet::from_alternatives(vec![
-                    video(
-                        RawVideoFormat::Rgba8,
-                        width.clone(),
-                        height.clone(),
-                        framerate.clone(),
-                    ),
-                    video(
-                        RawVideoFormat::Nv12,
-                        width.clone(),
-                        height.clone(),
-                        framerate.clone(),
-                    ),
-                ]),
-                _ => CapsSet::from_alternatives(vec![]),
-            }),
-            passthrough: PassthroughFields::NONE
-                .with_width()
-                .with_height()
-                .with_framerate(),
-        }
+        CapsConstraint::DerivedFields(CapsTransform::RawVideo {
+            accept: Vec::new(),
+            produce: Vec::new(),
+            shapes: vec![
+                RawVideoShape::PASSTHROUGH
+                    .with_format(FieldTransform::Fixed(RawVideoFormat::Rgba8)),
+                RawVideoShape::PASSTHROUGH.with_format(FieldTransform::Fixed(RawVideoFormat::Nv12)),
+            ],
+        })
     }
 
     #[test]

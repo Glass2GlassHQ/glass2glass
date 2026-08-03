@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M837: declarative `DerivedFields(CapsTransform)` replaces `DerivedCoupled`'s closure + mask pair, making passthrough drift unrepresentable.
+
 - M836: DASH dynamic `@duration` live profile (edge start, `presentation-delay-ms`, time-shift clamp) and multi-period playthrough with boundary `Segment`.
 
 - M835: CENC depth on the fMP4/HLS path (`saiz`/`saio`, `seig`, cbcs audio, `cenc` CTR, offset-bound key rotation), ffmpeg-vector-validated.

@@ -22,9 +22,10 @@ use crate::pixel::{even_dims_required, frame_byte_size, planar_planes};
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
-    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PassthroughFields, PipelinePacket,
-    PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
+    AsyncElement, Caps, CapsConstraint, CapsSet, CapsTransform, ConfigureOutcome, Dim,
+    ElementMetadata, FieldTransform, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
+    RawVideoShape,
 };
 
 /// Formats this element can both consume and produce. The convert `target`
@@ -184,58 +185,33 @@ impl AsyncElement for VideoConvert {
         Some(g2g_core::meta::Transform::Copy)
     }
 
-    /// Native `DerivedOutput`: any supported raw input maps to the target
-    /// format at the same dims/framerate.
+    /// Native `DerivedFields`: any supported raw input maps to the target
+    /// format at the same dims/framerate, so geometry + framerate are the
+    /// coupled fields and a downstream geometry pin couples back through this
+    /// format-only converter (M188's scale_then_convert case).
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        let target = self.target;
-        // Passthrough geometry + framerate (retarget format only), so a downstream
-        // geometry pin couples back through this format-only converter (M188's
-        // scale_then_convert case).
-        let passthrough = PassthroughFields::NONE
-            .with_width()
-            .with_height()
-            .with_framerate();
-        let derive = Box::new(move |input: &Caps| match input {
-            Caps::RawVideo {
-                format,
-                width,
-                height,
-                framerate,
-            } if INPUT_FORMATS.contains(format) => {
-                let mk = |f: RawVideoFormat| Caps::RawVideo {
-                    format: f,
-                    width: width.clone(),
-                    height: height.clone(),
-                    framerate: framerate.clone(),
-                };
-                match target {
-                    // Property-driven: the fixed target format.
-                    Some(t) => CapsSet::one(mk(t)),
-                    // Caps-driven (auto): any producible format at this geometry,
-                    // preferring passthrough (the input format, no conversion)
-                    // when it is itself producible. Yuyv is input-only, so a
-                    // Yuyv input must convert and lists the producible set.
-                    None => {
-                        let prefer_passthrough = FORMATS.contains(format);
-                        let mut alts = Vec::new();
-                        if prefer_passthrough {
-                            alts.push(mk(*format));
-                        }
-                        for f in FORMATS {
-                            if !(prefer_passthrough && f == *format) {
-                                alts.push(mk(f));
-                            }
-                        }
-                        CapsSet::from_alternatives(alts)
-                    }
+        let shapes =
+            match self.target {
+                // Property-driven: the fixed target format.
+                Some(t) => vec![RawVideoShape::PASSTHROUGH.with_format(FieldTransform::Fixed(t))],
+                // Caps-driven (auto): any producible format at this geometry,
+                // preferring passthrough (the input format, no conversion) when it is
+                // itself producible. The `produce` gate drops the passthrough for an
+                // input-only format (Yuyv), so such an input lists the producible set;
+                // for a producible one it collapses into the preferred passthrough.
+                None => {
+                    let mut shapes = vec![RawVideoShape::PASSTHROUGH];
+                    shapes.extend(FORMATS.iter().map(|f| {
+                        RawVideoShape::PASSTHROUGH.with_format(FieldTransform::Fixed(*f))
+                    }));
+                    shapes
                 }
-            }
-            _ => CapsSet::from_alternatives(Vec::new()),
-        });
-        CapsConstraint::DerivedCoupled {
-            derive,
-            passthrough,
-        }
+            };
+        CapsConstraint::DerivedFields(CapsTransform::RawVideo {
+            accept: INPUT_FORMATS.to_vec(),
+            produce: FORMATS.to_vec(),
+            shapes,
+        })
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -933,6 +909,7 @@ fn yuv420_to_rgb(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use g2g_core::PassthroughFields;
 
     fn rgba_caps(w: u32, h: u32) -> Caps {
         Caps::RawVideo {
@@ -946,20 +923,17 @@ mod tests {
     #[test]
     fn derived_output_maps_any_supported_raw_to_target() {
         let conv = VideoConvert::new(RawVideoFormat::Nv12);
-        let CapsConstraint::DerivedCoupled {
-            derive: f,
-            passthrough,
-        } = conv.caps_constraint_as_transform()
-        else {
-            panic!("expected DerivedCoupled");
+        let CapsConstraint::DerivedFields(t) = conv.caps_constraint_as_transform() else {
+            panic!("expected DerivedFields");
         };
         assert_eq!(
-            passthrough,
+            t.passthrough(),
             PassthroughFields::NONE
                 .with_width()
                 .with_height()
                 .with_framerate()
         );
+        let f = |c: &Caps| t.derive(c);
         let out = f(&rgba_caps(64, 48));
         assert_eq!(
             out.alternatives(),
