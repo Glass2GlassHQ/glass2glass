@@ -224,11 +224,16 @@ pub struct Mp4DemuxN {
     /// [`TsDemuxN`](crate::tsdemux::TsDemuxN) / [`MkvDemuxN`](crate::mkvdemux::MkvDemuxN),
     /// MP4 routes by `track_ID`, so two same-codec tracks are distinguishable.
     stream_select: Option<StreamSelectController>,
-    /// Clear-key cbcs decryption key (M398), supplied by the app for an encrypted
-    /// file; the constant IV + crypt/skip pattern come from each track's `tenc`.
-    /// Without it an encrypted track fails loud.
+    /// Content keys for an encrypted file (M398): a clear key the app supplies,
+    /// or the store an [`HlsSrc`](crate::hlssrc) publishes its `#EXT-X-KEY`
+    /// material into. The scheme, IV and pattern come from the file's own
+    /// protection metadata. Without a key an encrypted track fails loud.
     #[cfg(feature = "mp4-cenc")]
-    cenc_key: Option<[u8; 16]>,
+    cenc_keys: Option<crate::cenc::CencKeyHandle>,
+    /// Bytes already drained from `buf`, so a fragment's offset in the source
+    /// stream survives the incremental parse (it selects the key in force when a
+    /// playlist rotates keys mid-stream).
+    drained: u64,
     emitted: u64,
 }
 
@@ -253,7 +258,8 @@ impl Mp4DemuxN {
             collection_posted: false,
             stream_select: None,
             #[cfg(feature = "mp4-cenc")]
-            cenc_key: None,
+            cenc_keys: None,
+            drained: 0,
             emitted: 0,
         }
     }
@@ -318,12 +324,44 @@ impl Mp4DemuxN {
         }
     }
 
-    /// Supply the clear-key cbcs decryption key (M398) for an encrypted file. The
-    /// constant IV and crypt/skip pattern come from each track's `tenc`; this is
-    /// the 16-byte content key. Without it an encrypted track fails loud.
+    /// Supply the clear-key content key (M398) for an encrypted file: the scheme,
+    /// IV and pattern come from the file's own protection metadata. Without a key
+    /// an encrypted track fails loud.
     #[cfg(feature = "mp4-cenc")]
     pub fn with_cenc_key(mut self, key: [u8; 16]) -> Self {
-        self.cenc_key = Some(key);
+        let handle = crate::cenc::new_key_handle();
+        handle
+            .lock()
+            .expect("fresh key handle")
+            .set_current(crate::cenc::ContentKey { key, iv: [0; 16] });
+        self.cenc_keys = Some(handle);
+        self
+    }
+
+    /// Supply a content key per key identifier (clear key): the `tenc` default
+    /// KID, or a `seig` sample group's KID, selects which one a sample uses. This
+    /// is how content that re-keys mid-stream is decrypted.
+    #[cfg(feature = "mp4-cenc")]
+    pub fn with_cenc_keys(mut self, keys: &[([u8; 16], [u8; 16])]) -> Self {
+        let handle = crate::cenc::new_key_handle();
+        {
+            let mut store = handle.lock().expect("fresh key handle");
+            for (kid, key) in keys {
+                store.insert_kid(*kid, *key);
+            }
+        }
+        self.cenc_keys = Some(handle);
+        self
+    }
+
+    /// Share the key store an [`HlsSrc`](crate::hlssrc) publishes the playlist's
+    /// `#EXT-X-KEY` material into, for an encrypted HLS fMP4 rendition (the audio
+    /// or video branch of the CMAF fan-out). Keys published for later segments
+    /// never overtake the fragments the previous key governs: each fragment
+    /// resolves the key covering its own byte position in the stream.
+    #[cfg(feature = "mp4-cenc")]
+    pub fn with_cenc_key_handle(mut self, keys: crate::cenc::CencKeyHandle) -> Self {
+        self.cenc_keys = Some(keys);
         self
     }
 
@@ -394,28 +432,22 @@ impl Mp4DemuxN {
         &self,
         data: &[u8],
         tracks: &[TrackHeader],
+        base_offset: u64,
     ) -> Result<Vec<(u32, Sample)>, G2gError> {
         #[cfg(feature = "mp4-cenc")]
-        if let Some(key) = self.cenc_key {
-            let mut decrypt = move |cenc: &crate::fmp4::CencDefaults,
-                                    buf: &mut [u8],
-                                    subs: &[crate::fmp4::Subsample]| {
-                // cbcs constant IV (per-sample IV size 0); a malformed IV leaves
-                // the sample untouched rather than panicking on the slice convert.
-                if let Ok(iv) = <[u8; 16]>::try_from(cenc.constant_iv.as_slice()) {
-                    crate::cenc::cbcs_decrypt_sample(
-                        buf,
-                        subs,
-                        &key,
-                        &iv,
-                        cenc.crypt_byte_block,
-                        cenc.skip_byte_block,
-                    );
-                }
+        if let Some(keys) = self.cenc_keys.clone() {
+            let mut decrypt = move |sc: &crate::cenc::SampleCrypt, at: u64, buf: &mut [u8]| {
+                let key = keys
+                    .lock()
+                    .expect("key handle poisoned")
+                    .resolve(&sc.kid, at)
+                    .ok_or(G2gError::CapsMismatch)?;
+                crate::cenc::decrypt_sample(buf, sc, &key);
+                Ok(())
             };
-            return parse_fragments_multi(data, tracks, Some(&mut decrypt));
+            return parse_fragments_multi(data, tracks, base_offset, Some(&mut decrypt));
         }
-        parse_fragments_multi(data, tracks, None)
+        parse_fragments_multi(data, tracks, base_offset, None)
     }
 
     /// Make progress on the buffered bytes (M437): learn the layout from the `moov`,
@@ -468,7 +500,11 @@ impl Mp4DemuxN {
                         break;
                     };
                     let end = off + size;
-                    let samples = self.parse_fragments_in(&self.buf[start..end], &tracks)?;
+                    let samples = self.parse_fragments_in(
+                        &self.buf[start..end],
+                        &tracks,
+                        self.drained.saturating_add(start as u64),
+                    )?;
                     self.emit_samples(&tracks, samples, out).await?;
                     off = end;
                     consumed = off;
@@ -483,6 +519,7 @@ impl Mp4DemuxN {
         self.tracks = Some(tracks);
         if consumed > 0 {
             self.buf.drain(..consumed);
+            self.drained = self.drained.saturating_add(consumed as u64);
         }
         Ok(())
     }
@@ -503,7 +540,7 @@ impl Mp4DemuxN {
         // A `moof` marks a fragmented / CMAF file; its absence is the classic
         // progressive `moov`+`mdat` layout, walked from the sample tables instead.
         let samples = if find_box(&self.buf, b"moof").is_some() {
-            self.parse_fragments_in(&self.buf, &tracks)?
+            self.parse_fragments_in(&self.buf, &tracks, self.drained)?
         } else {
             parse_progressive_multi(&self.buf, &tracks)?
         };
@@ -696,6 +733,9 @@ impl MultiOutputElement for Mp4DemuxN {
                     self.buf.clear();
                     self.tracks = None;
                     self.fragmented = None;
+                    // The byte coordinate restarts with the re-read stream, the
+                    // same reset the key publisher does at this flush.
+                    self.drained = 0;
                     for owed in self.need_config.iter_mut() {
                         *owed = true;
                     }

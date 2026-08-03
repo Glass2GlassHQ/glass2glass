@@ -738,9 +738,10 @@ pub mod fmp4demux;
 // sibling of fmp4demux, for a bare `filesrc location=X.mp4 ! decodebin`.
 #[cfg(feature = "std")]
 pub mod mp4demux;
-// Shared cbcs (MPEG-CENC) sample decryption for the HLS fMP4 and MP4 demux paths.
-#[cfg(any(feature = "hls", feature = "mp4-cenc"))]
-mod cenc;
+// MPEG Common Encryption: protection metadata parsing plus the shared key store
+// and (behind `hls` / `mp4-cenc`) sample decryption for the fMP4 demux paths.
+#[cfg(feature = "std")]
+pub mod cenc;
 
 // Worker-readiness latch shared by the platform display sinks below.
 #[cfg(any(

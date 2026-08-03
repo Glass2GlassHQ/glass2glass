@@ -16,11 +16,20 @@
 //! is fetched from the key URI (cached per run) and each segment is AES-128-CBC
 //! decrypted with the explicit `IV` or, absent one, the segment media-sequence
 //! number as a 128-bit big-endian IV. For `METHOD=SAMPLE-AES` (per-sample, not
-//! whole-segment) the fetched key/IV is published to a shared handle
+//! whole-segment) the fetched key/IV is published to a shared key store
 //! ([`with_sample_aes_key_handle`](HlsSrc::with_sample_aes_key_handle)) for a
-//! downstream [`SampleAesDecrypt`](crate::sampleaesdecrypt) and the bytes are
-//! forwarded undecrypted; without a handle a SAMPLE-AES playlist is rejected. The
-//! init segment (`#EXT-X-MAP`) is assumed unencrypted.
+//! downstream [`SampleAesDecrypt`](crate::sampleaesdecrypt) (TS) or fMP4 demuxer
+//! (CENC), and the bytes are forwarded undecrypted; without a handle a
+//! SAMPLE-AES playlist is rejected. The init segment (`#EXT-X-MAP`) is assumed
+//! unencrypted.
+//!
+//! A key is published against the byte offset at which its segment enters the
+//! emitted stream, not when it is fetched, so a mid-playlist key rotation (a new
+//! `#EXT-X-KEY`, including back-to-back rotations and ones that appear on a live
+//! reload) takes effect at exactly that segment even though fetching runs ahead
+//! of emission. A `KEYID` attribute additionally registers the key under its
+//! CENC key identifier, which the fMP4 path matches against the `tenc` / `seig`
+//! KID.
 //!
 //! Single-file CMAF is supported via `#EXT-X-BYTERANGE` (and `#EXT-X-MAP`'s
 //! `BYTERANGE`): a segment that carries one fetches only its sub-range with an
@@ -581,6 +590,12 @@ impl SourceLoop for HlsSrc {
                 crate::segprebuf::SegmentPrebuffer::new(self.prebuffer_ms, self.bus.clone());
             // AES-128 keys fetched once per URI and reused across segments.
             let mut keys: Vec<(String, [u8; 16])> = Vec::new();
+            // Sample-encryption key per queued segment, in emit order (`None` for
+            // an init segment or a clear one), and the running byte offset of the
+            // emitted stream that a published key is keyed by.
+            let mut pending_keys: alloc::collections::VecDeque<Option<SampleAesKey>> =
+                alloc::collections::VecDeque::new();
+            let mut emitted_bytes = 0u64;
             // Next HLS media-sequence number to play; segments below it on a live
             // reload were already delivered. A live playlist starts near the live
             // edge (skipping the stale front of the window) instead of its start, so
@@ -610,6 +625,14 @@ impl SourceLoop for HlsSrc {
                             // Queued lookahead is pre-seek media: drop it (and
                             // re-arm the prebuffer fill) before flushing.
                             window.clear();
+                            pending_keys.clear();
+                            // The byte coordinate a published key is keyed by
+                            // restarts with the re-read stream, matching the
+                            // demuxer's reset on this same flush.
+                            emitted_bytes = 0;
+                            if let Some(handle) = &self.sample_aes_key {
+                                handle.lock().expect("key handle poisoned").reset_timeline();
+                            }
                             out.push(PipelinePacket::Flush).await?;
                             idx = target_idx;
                             next_seq = media.media_sequence + target_idx as u64;
@@ -642,6 +665,7 @@ impl SourceLoop for HlsSrc {
                                 None => get_bytes(&client, &init_url, MAX_SEGMENT_BYTES).await?,
                             };
                             if !bytes.is_empty() {
+                                pending_keys.push_back(None);
                                 window.admit(bytes, 0);
                             }
                         }
@@ -678,6 +702,10 @@ impl SourceLoop for HlsSrc {
                                 bytes.len(),
                                 g2g_core::metrics::monotonic_ns().saturating_sub(t0),
                             ));
+                            // The sample-encryption key travels with its segment
+                            // through the window, so it is published when those
+                            // bytes are emitted, not now: fetching runs ahead.
+                            let mut sample_key = None;
                             let bytes = match &segment.key {
                                 None => bytes,
                                 Some(key) => {
@@ -689,15 +717,24 @@ impl SourceLoop for HlsSrc {
                                         KeyMethod::Aes128 => {
                                             decrypt_aes128_cbc(&key_bytes, &iv, bytes)?
                                         }
-                                        // Per-sample: publish the key for a downstream
-                                        // SampleAesDecrypt and forward the bytes as-is.
+                                        // Per-sample: hand the key to the decryptor
+                                        // (TS) / demuxer (fMP4) and forward as-is.
                                         KeyMethod::SampleAes => {
                                             let handle = self
                                                 .sample_aes_key
                                                 .as_ref()
                                                 .ok_or(G2gError::CapsMismatch)?;
-                                            *handle.lock().expect("key handle poisoned") =
-                                                Some(SampleAesKey { key: key_bytes, iv });
+                                            // A KEYID binds the key to the CENC key
+                                            // identifier the segments name, which is
+                                            // position-independent, so register it
+                                            // as soon as it is known.
+                                            if let Some(kid) = key.key_id {
+                                                handle
+                                                    .lock()
+                                                    .expect("key handle poisoned")
+                                                    .insert_kid(kid, key_bytes);
+                                            }
+                                            sample_key = Some(SampleAesKey { key: key_bytes, iv });
                                             bytes
                                         }
                                     }
@@ -711,6 +748,7 @@ impl SourceLoop for HlsSrc {
                                 } else {
                                     bytes
                                 };
+                                pending_keys.push_back(sample_key);
                                 window.admit(bytes, duration_ns);
                             }
                             next_seq = seg_seq + 1;
@@ -753,6 +791,18 @@ impl SourceLoop for HlsSrc {
                     // window with nothing left to fetch ends this pass (live
                     // reload or end of playlist).
                     if let Some(bytes) = window.pop() {
+                        // Publish this segment's key against the offset its bytes
+                        // start at, so a downstream demuxer decrypts each fragment
+                        // with the key its own segment carried.
+                        if let Some(key) = pending_keys.pop_front().flatten() {
+                            if let Some(handle) = &self.sample_aes_key {
+                                handle
+                                    .lock()
+                                    .expect("key handle poisoned")
+                                    .publish_at(emitted_bytes, key);
+                            }
+                        }
+                        emitted_bytes = emitted_bytes.saturating_add(bytes.len() as u64);
                         out.push(PipelinePacket::DataFrame(byte_frame(bytes, sequence)))
                             .await?;
                         sequence += 1;

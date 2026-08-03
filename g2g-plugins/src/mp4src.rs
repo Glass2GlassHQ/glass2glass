@@ -188,6 +188,7 @@ impl SourceLoop for Mp4Src {
                     header.timescale,
                     header.codec,
                     header.cenc.as_ref(),
+                    0,
                     None,
                 )?
             } else {

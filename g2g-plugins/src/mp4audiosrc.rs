@@ -143,7 +143,7 @@ struct Sample {
 }
 
 // box read primitives are shared across the MP4 elements.
-use crate::fmp4::{parse_trun, tfhd_default_duration};
+use crate::fmp4::{parse_trun, tfhd_defaults};
 use crate::mp4box::{be32, be64, boxes, find_box, find_path, parse_esds};
 
 fn parse_header(data: &[u8]) -> Result<Header, G2gError> {
@@ -203,11 +203,11 @@ fn parse_fragments(data: &[u8], timescale: u32) -> Result<Vec<Sample>, G2gError>
                     _ => return Err(G2gError::CapsMismatch),
                 };
                 let trun = find_box(traf, b"trun").ok_or(G2gError::CapsMismatch)?;
-                let default_duration = match find_box(traf, b"tfhd") {
-                    Some(tfhd) => tfhd_default_duration(tfhd)?,
-                    None => 0,
+                let (default_duration, default_size) = match find_box(traf, b"tfhd") {
+                    Some(tfhd) => tfhd_defaults(tfhd)?,
+                    None => (0, 0),
                 };
-                let (sizes, durs) = parse_trun(trun, default_duration)?;
+                let (sizes, durs) = parse_trun(trun, default_duration, default_size, data.len())?;
                 let mut t = base_time;
                 let mut tagged = Vec::with_capacity(sizes.len());
                 durations.clear();

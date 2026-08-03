@@ -8,6 +8,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 - M836: DASH dynamic `@duration` live profile (edge start, `presentation-delay-ms`, time-shift clamp) and multi-period playthrough with boundary `Segment`.
 
+- M835: CENC depth on the fMP4/HLS path (`saiz`/`saio`, `seig`, cbcs audio, `cenc` CTR, offset-bound key rotation), ffmpeg-vector-validated.
+
 - M834: `rtspserversrc` serves publishers sequentially (`max-sessions`, `timeout`, 503 on concurrent), disconnect no longer stalls the graph; `docs/elements.html` regenerated.
 
 - M833: `udpsrc` discovers caps from an `sdp` property or in-band SPS (shared `sdp` scanner extracted from st2110), ffmpeg-validated.

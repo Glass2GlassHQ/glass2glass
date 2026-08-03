@@ -82,6 +82,12 @@ pub(crate) fn be64(data: &[u8], at: usize) -> Result<u64, G2gError> {
 
 /// Iterate the child boxes of `data`, yielding `(fourcc, payload)`.
 pub(crate) fn boxes(data: &[u8]) -> impl Iterator<Item = (&[u8; 4], &[u8])> {
+    boxes_at(data).map(|(kind, payload, _)| (kind, payload))
+}
+
+/// [`boxes`] plus each box's start offset in `data`, for the box whose contents
+/// are addressed by offsets relative to its own header (`saio` inside a `moof`).
+pub(crate) fn boxes_at(data: &[u8]) -> impl Iterator<Item = (&[u8; 4], &[u8], usize)> {
     let mut i = 0usize;
     core::iter::from_fn(move || {
         if i + 8 > data.len() {
@@ -93,8 +99,9 @@ pub(crate) fn boxes(data: &[u8]) -> impl Iterator<Item = (&[u8; 4], &[u8])> {
         }
         let kind: &[u8; 4] = data[i + 4..i + 8].try_into().expect("4 bytes");
         let payload = &data[i + 8..i + size];
+        let start = i;
         i += size;
-        Some((kind, payload))
+        Some((kind, payload, start))
     })
 }
 

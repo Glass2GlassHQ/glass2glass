@@ -378,11 +378,8 @@ Phased plan:
 
 ## Adaptive streaming (HLS / DASH)
 
-- **HLS:** SAMPLE-AES key rotation mid-stream; cbcs audio (AAC) + per-sample IV
-  (cenc/cbc1); `saiz`/`saio` aux-info + `seig` sample groups. (Encrypted fMP4 cbcs
-  *video* init segments are done, M164; `#EXT-X-BYTERANGE` single-file CMAF is
-  done, M368; throughput-driven ABR with mid-stream variant switching is done,
-  M371; live-edge start is done, M438.)
+- **HLS / CENC:** the declined-fail-loud protection shapes: `cens` scheme,
+  `senc` v1/v2, movie-level and multi-key `seig` tables.
 - **DASH:** `@availabilityTimeOffset` (low-latency chunked availability) and
   `@presentationTimeOffset` are not modelled.
 

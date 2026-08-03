@@ -92,6 +92,12 @@ pub struct SegmentKey {
     /// Explicit `IV` (16 bytes) from the tag, or `None` to derive it from the
     /// segment's media-sequence number.
     pub iv: Option<[u8; 16]>,
+    /// The key identifier this key decrypts, from the de-facto `KEYID=0x<32 hex>`
+    /// attribute packagers emit for CENC content (RFC 8216 defines no such
+    /// attribute; hls.js reads the same one). It binds the playlist key to the
+    /// `tenc` / `seig` KID an fMP4 segment names, which is what lets a re-keyed
+    /// stream pick the right key per sample.
+    pub key_id: Option<[u8; 16]>,
 }
 
 /// A byte sub-range of a resource (`#EXT-X-BYTERANGE` / `#EXT-X-MAP:BYTERANGE`):
@@ -405,7 +411,13 @@ fn parse_key(attrs: &str) -> Option<SegmentKey> {
     };
     let uri = String::from(find("URI")?.trim_matches('"'));
     let iv = find("IV").and_then(parse_iv);
-    Some(SegmentKey { method, uri, iv })
+    let key_id = find("KEYID").and_then(parse_iv);
+    Some(SegmentKey {
+        method,
+        uri,
+        iv,
+        key_id,
+    })
 }
 
 /// `IV=0x<32 hex digits>` -> 16 bytes. Anything else is rejected.
@@ -746,7 +758,8 @@ mod tests {
             Some(SegmentKey {
                 method: KeyMethod::Aes128,
                 uri: "k1.key".into(),
-                iv: Some(iv1)
+                iv: Some(iv1),
+                key_id: None
             }),
         );
         // The key carries forward to the next segment unchanged.
@@ -759,7 +772,8 @@ mod tests {
             Some(SegmentKey {
                 method: KeyMethod::Aes128,
                 uri: "k2.key".into(),
-                iv: None
+                iv: None,
+                key_id: None
             }),
         );
     }

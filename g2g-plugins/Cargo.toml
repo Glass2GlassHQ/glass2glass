@@ -576,12 +576,13 @@ http-src = ["std", "dep:reqwest", "tokio/time"]
 # and streams its MPEG-TS media segments downstream as a `Caps::ByteStream` for
 # `tsdemux`. Builds on the http-src fetch layer. The playlist parser (`hls`) is
 # pure no_std and always compiled; only the fetching element needs this feature.
-# aes/cbc decrypt AES-128 `#EXT-X-KEY` segments.
-hls = ["http-src", "dep:aes", "dep:cbc"]
-# MPEG-CENC (cbcs) decryption for the multi-track MP4 demuxer (Mp4DemuxN): decrypt
-# clear-key encrypted fragmented MP4 with an app-supplied key. Shares the cbcs
-# primitive with `hls`; standalone so a plain MP4 build need not pull HLS.
-mp4-cenc = ["std", "dep:aes", "dep:cbc"]
+# aes/cbc/ctr decrypt AES-128 `#EXT-X-KEY` segments and the Common Encryption
+# schemes (cbcs / cbc1 / cenc) of a SAMPLE-AES fMP4 rendition.
+hls = ["http-src", "dep:aes", "dep:cbc", "dep:ctr"]
+# MPEG-CENC decryption for the multi-track MP4 demuxer (Mp4DemuxN): decrypt
+# clear-key encrypted fragmented MP4 with an app-supplied key. Shares the cipher
+# primitives with `hls`; standalone so a plain MP4 build need not pull HLS.
+mp4-cenc = ["std", "dep:aes", "dep:cbc", "dep:ctr"]
 # DASH source (DashSrc): parses an MPD manifest (roxmltree), selects a
 # Representation (simple ABR), and streams its fMP4 init + media segments as a
 # `Caps::ByteStream{IsoBmff}` for `fmp4demux`. Builds on the http-src fetch layer.
@@ -1034,6 +1035,8 @@ embassy-futures = "0.1.2"
 # test (the integration crate can't reach g2g-plugins's optional aes/cbc deps).
 aes = "0.8"
 cbc = { version = "0.1", features = ["alloc"] }
+# AES-CTR encrypt oracle for the m835 Common Encryption (`cenc` scheme) test.
+ctr = "0.9"
 # critical-section impl for host tests of embassy-sync (embassy-link): it calls
 # critical_section::with, which needs an impl at link. The std impl suffices.
 critical-section = { version = "1", features = ["std"] }
