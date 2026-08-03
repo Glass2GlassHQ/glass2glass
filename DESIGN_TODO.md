@@ -656,14 +656,6 @@ _(No open parser items.)_
 - Verify GIL offload on a free-threaded (PEP 703) interpreter (none installed)
   + a `link_capacity` note for the GIL-serialized case.
 
-## Aggregation helper adoption (M199+)
-
-- Migrate the remaining hand-rolled per-input collectors onto
-  `g2g-core::InputAggregator<T>` (`mux` is migrated): enterprise `batcher`
-  (closest fit), `audiomixer`, and `compositor` (compositor needs a second
-  latest-wins `SyncPolicy` variant first). Behaviour-preserving, each guarded by
-  existing tests.
-
 ## Dynamic plugin loading (M201+)
 
 - An `abi_stable` / `stabby` facade over the element traits for cross-toolchain

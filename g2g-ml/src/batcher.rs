@@ -22,13 +22,12 @@
 
 use core::future::Future;
 use core::pin::Pin;
-use std::collections::VecDeque;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    Caps, CapsConstraint, CapsSet, ConfigureOutcome, G2gError, MemoryDomain, MultiInputElement,
-    OutputSink, PipelinePacket, TensorDType,
+    Caps, CapsConstraint, CapsSet, ConfigureOutcome, G2gError, InputAggregator, MemoryDomain,
+    MultiInputElement, OutputSink, PipelinePacket, TensorDType,
 };
 
 #[derive(Debug)]
@@ -36,8 +35,8 @@ pub struct TensorBatcher {
     /// Per-input caps: a tensor with leading batch dim 1.
     slot: Caps,
     slot_bytes: usize,
-    queues: Vec<VecDeque<Frame>>,
-    ended: Vec<bool>,
+    /// Per-input frames; a gather round is one synchronized release.
+    agg: InputAggregator<Frame>,
     configured: Vec<Option<Caps>>,
     /// Batch caps last advertised downstream. Seeded with the full-batch
     /// startup caps on first emit, so only a shrink emits `CapsChanged`.
@@ -55,8 +54,7 @@ impl TensorBatcher {
         Ok(Self {
             slot,
             slot_bytes,
-            queues: (0..inputs).map(|_| VecDeque::new()).collect(),
-            ended: vec![false; inputs],
+            agg: InputAggregator::new(inputs),
             configured: vec![None; inputs],
             last_caps: None,
             emitted: 0,
@@ -93,34 +91,20 @@ impl TensorBatcher {
         }
     }
 
-    /// Inputs that still gate or feed a gather round: everything except an
-    /// ended input whose queue has drained.
-    fn contributors(&self) -> Vec<usize> {
-        (0..self.queues.len())
-            .filter(|&i| !(self.ended[i] && self.queues[i].is_empty()))
-            .collect()
-    }
-
     /// Emit every gather round that is currently complete.
     async fn drain(&mut self, out: &mut dyn OutputSink) -> Result<(), G2gError> {
-        loop {
-            let contributors = self.contributors();
-            if contributors.is_empty() || contributors.iter().any(|&i| self.queues[i].is_empty()) {
-                return Ok(());
-            }
+        // A round holds one frame from every still-contributing input: an
+        // ended input drains first, then drops out and the batch shrinks.
+        while let Some(round) = self.agg.take_round() {
+            let parts: Vec<Frame> = round.into_iter().map(|(_, frame)| frame).collect();
 
-            let parts: Vec<Frame> = contributors
-                .iter()
-                .map(|&i| self.queues[i].pop_front().expect("checked non-empty"))
-                .collect();
-
-            let new_caps = self.batched_caps(contributors.len() as u32);
+            let new_caps = self.batched_caps(parts.len() as u32);
             match &self.last_caps {
                 // first batch: the startup-negotiated output is the full
                 // batch, so emit CapsChanged only if this round already
                 // shrank below it.
                 None => {
-                    let startup = self.batched_caps(self.queues.len() as u32);
+                    let startup = self.batched_caps(self.agg.input_count() as u32);
                     if new_caps != startup {
                         out.push(PipelinePacket::CapsChanged(new_caps.clone()))
                             .await?;
@@ -163,6 +147,7 @@ impl TensorBatcher {
             self.emitted += 1;
             out.push(PipelinePacket::DataFrame(frame)).await?;
         }
+        Ok(())
     }
 }
 
@@ -173,7 +158,7 @@ impl MultiInputElement for TensorBatcher {
         Self: 'a;
 
     fn input_count(&self) -> usize {
-        self.queues.len()
+        self.agg.input_count()
     }
 
     fn intercept_caps(&self, _input: usize, upstream_caps: &Caps) -> Result<Caps, G2gError> {
@@ -188,7 +173,7 @@ impl MultiInputElement for TensorBatcher {
 
     fn caps_constraint_for_output(&self) -> Result<CapsConstraint<'_>, G2gError> {
         Ok(CapsConstraint::Produces(CapsSet::one(
-            self.batched_caps(self.queues.len() as u32),
+            self.batched_caps(self.agg.input_count() as u32),
         )))
     }
 
@@ -203,7 +188,7 @@ impl MultiInputElement for TensorBatcher {
     }
 
     fn output_caps(&self) -> Result<Caps, G2gError> {
-        Ok(self.batched_caps(self.queues.len() as u32))
+        Ok(self.batched_caps(self.agg.input_count() as u32))
     }
 
     fn process<'a>(
@@ -221,14 +206,14 @@ impl MultiInputElement for TensorBatcher {
                     if slice.len() != self.slot_bytes {
                         return Err(G2gError::CapsMismatch);
                     }
-                    self.queues[input].push_back(frame);
+                    self.agg.push(input, frame);
                     self.drain(out).await?;
                 }
                 PipelinePacket::Eos => {
                     // per-input end (M22 contract): stop gating on this
                     // input; its queued frames still drain. The runner owns
                     // the merged downstream Eos.
-                    self.ended[input] = true;
+                    self.agg.mark_ended(input);
                     self.drain(out).await?;
                 }
                 PipelinePacket::CapsChanged(c) => {
@@ -237,8 +222,8 @@ impl MultiInputElement for TensorBatcher {
                     c.intersect(&self.slot)?;
                 }
                 PipelinePacket::Flush => {
-                    for q in &mut self.queues {
-                        q.clear();
+                    for i in 0..self.agg.input_count() {
+                        self.agg.clear(i);
                     }
                     out.push(PipelinePacket::Flush).await?;
                 }
