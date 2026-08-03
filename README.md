@@ -31,7 +31,7 @@ hardware elements) changes.
 | **MCU** | a heap-free static pipeline on bare-metal Cortex-M | `alloc` is optional: the no-alloc build links **no allocator at all**, is proven panic-free, and has a budgeted ~KB-scale footprint. `g2g-mcu` peripheral elements (SPI display, camera / PCM capture, G.711 / ADPCM codecs, RTP egress + ingress, jitter buffer) over `embedded-hal` seams, plus interrupt/DMA capture and a bounded fault-recovery supervisor (retry / degrade / reset / watchdog). See [the embedded wedge](#embedded-heap-free-pipelines-on-a-bare-metal-mcu). |
 | **RTOS** | the same static pipeline under a real RTOS task | one graph runs bit-exact under **bare-metal, Embassy, FreeRTOS, and Zephyr**; `embassy-sync` stack channels (`embassy` / `embassy-link` features) |
 | **CPU** | the full media + protocol stack | Tokio, multi-thread on servers or current-thread on edge; the whole element library |
-| **GPU** | zero-copy hardware pipelines | frames stay in Vulkan / CUDA / wgpu / DMABUF domains: Vulkan Video decode → `wgpu::Texture`, NVDEC / NVENC, CUDA ↔ wgpu bridge, no PCIe round-trip; embeddable in an app's own wgpu device (`GpuContext::from_wgpu`, Bevy demos in `examples/bevy-g2g-decode` and `-stream`) |
+| **GPU** | zero-copy hardware pipelines | frames stay in Vulkan / CUDA / wgpu / DMABUF domains: Vulkan Video decode → `wgpu::Texture`, NVDEC / NVENC, CUDA ↔ wgpu bridge, no PCIe round-trip; embeddable in an app's own wgpu device (`GpuContext::from_wgpu`, packaged for Bevy as the `bevy-g2g` crate) |
 | **WASM** | the same graph in the browser | `wasm32`, single-threaded (no cross-origin isolation): WebCodecs decode, WebGPU present, in-browser or server-offloaded ML |
 
 Same `AsyncElement`, same `Caps`, same runner on all five. This is proven, not
@@ -381,7 +381,8 @@ transforms (`videoscale` / `videorate` / `videocrop` / `videoflip` /
 `videobalance` / `videobox` / `alpha` / `gamma` / `deinterlace` / `timeoverlay`,
 `audioconvert` / `audioresample` / `audiomixer` / `volume` / `audiopanorama` /
 `audioamplify` / `audioecho` / `level` / `cutter` / `equalizer-3bands` /
-`spectrum`), the flow-control elements (`concat` / `input-selector` /
+`spectrum`), the KLV telemetry codec (`klvdecode`, MISB ST 0601 / STANAG 4609),
+the flow-control elements (`concat` / `input-selector` /
 `output-selector` / `progressreport`), the `compositor`, the tag system, and the
 `gst-launch` text DSL (`parse_launch` / `gst-inspect`) are all in the pure
 `no_std + alloc` default build. The std build adds `clockoverlay`, the
@@ -520,6 +521,37 @@ run_linear_chain(src, vec![&mut demux, &mut parse, &mut dec], sink,
 
 Features: `ffmpeg wayland-sink`.
 
+### STANAG 4609 (drone / ISR): KLV telemetry alongside the video
+
+`tsdemux stream=klv` splits the MISB metadata stream out of the same multiplex
+(private PES with the `KLVA` registration, or metadata-in-PES 0x15), and
+`klvdecode` parses each ST 0601 UAS Datalink Local Set into a timed
+`key=value` text line, ready for `textoverlay` or an app sink. The tag table
+covers the telemetry core plus identity strings, target geometry, and the
+nested ST 0102 security local set; the parser is validated against the
+published MISMMS reference packet with klvdata as the oracle. The mux
+direction takes `Caps::Klv` packets (built with `UasDatalink::encode`) on a
+`mpegtsmux` input, and `rtpklv` carries KLV over RTP (RFC 6597) for
+low-latency links. ffmpeg-validated bit-exact both ways, and validated against
+a real UAS capture (the public "Day Flight" sample from samples.ffmpeg.org:
+point `G2G_STANAG_SAMPLE` at it to run the local `klv_stanag_sample` test).
+
+The rest of the ISR stack sits on the same codec: `vmti` for ST 0903
+moving-target reports with their nested mask / ontology / tracker / chip sets
+(including `vmti_from_analytics`, which turns an in-pipeline detector's output
+into VTargets), ST 1204 MIIS identifiers (standard text form included),
+`misptimeinsert` / `misptimeextract` for ST 0604 timestamps in H.264 / H.265
+SEI, `st2022fec` for SMPTE 2022-1 loss recovery on a contribution link, and
+`cotsink` to put a drone track on a TAK / ATAK network as Cursor-on-Target
+events, optionally with the ST 0805.1 sensor point of interest alongside. SRT
+carries it encrypted (`passphrase=` on `srtsink` / `srtsrc`).
+
+```rust
+let src   = FileSrc::new("uav.ts", Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs });
+let demux = TsDemux::new().with_stream(TsStream::Klv);
+let dec   = KlvDecode::new();   // -> "ts=.. lat=.. lon=.. alt=.. heading=.." lines
+```
+
 ### Adaptive streaming: HLS / DASH → decode → display
 
 ```rust
@@ -536,6 +568,8 @@ run_linear_chain(src, vec![&mut demux, &mut parse, &mut dec], sink,
 Features: `hls ffmpeg wayland-sink` (`dash` for the DASH front end). `HlsSrc`
 follows live playlist reloads and decrypts AES-128 / SAMPLE-AES segments;
 `DashSrc` handles `SegmentTemplate` / `SegmentTimeline` and dynamic (live) MPDs.
+Both prebuffer ahead by duration (`prebuffer-ms`), posting `Buffering` bus
+levels while they fill, like `HttpSrc`'s byte window (`prebuffer-bytes`).
 
 ### `gst-launch` text pipeline
 

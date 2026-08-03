@@ -74,6 +74,7 @@ pub mod vp9parse;
 // Shared integer source-over blend used by the compositor and CPU overlays.
 mod mathf;
 mod paint;
+mod xmlutil;
 
 // Software RGBA8 compositor (fan-in pixel mixer): PiP / grids / overlays.
 pub mod compositor;
@@ -134,16 +135,28 @@ pub mod subparse;
 pub mod textoverlay;
 // CEA-608/708 closed captions carried in-band in H.264/H.265 SEI (no_std).
 pub mod cea;
+// MISB ST 0601 KLV telemetry (STANAG 4609): codec + klvdecode element (no_std).
+pub mod klv;
+// MISB ST 0903 VMTI moving-target reports, nested in ST 0601 tag 74 (no_std).
+pub mod vmti;
+// Cursor-on-Target bridge (M811): the ST 0601 -> CoT XML event builder (no_std)
+// plus the `cotsink` TAK egress element, which needs `udp-egress`.
+pub mod cotsink;
 // Closed-caption extraction element: compressed video in, timed text cues out.
 pub mod ccextract;
 // Closed-caption insertion element: compressed video + cues in, SEI'd video out.
 pub mod ccinsert;
+// MISB ST 0604 MISP time stamps in H.264 / H.265 SEI (STANAG 4609): codec +
+// misptimeinsert / misptimeextract elements (no_std).
+pub mod misptime;
 // Shared pixel-format helpers for the packed-RGBA elements (videobalance, alpha).
 mod pixel;
 // Sans-IO H.264 RTP packetizer (RFC 3550 + 6184), the live-egress foundation.
 pub mod rtppay;
 // Sans-IO H.264 RTP depayloader, the receive-side inverse of rtppay.
 pub mod rtpdepay;
+// Sans-IO KLV metadata RTP payloader / depayloader (RFC 6597, SMPTE ST 336).
+pub mod rtpklv;
 
 // ST 2110-30 PCM audio over RTP (M595): sans-IO packetizer / depacketizer for
 // uncompressed L16 / L24, RTP timestamps from the PTP media clock. no_std+alloc.
@@ -226,6 +239,9 @@ pub mod ulpfec;
 // variable-length mask, protecting more than ULPFEC's 16 packets and enabling
 // 2-D (row + column) recovery of bursts.
 pub mod flexfec;
+// Sans-IO SMPTE ST 2022-1 (Pro-MPEG COP3) FEC: the 2-D row/column XOR repair
+// streams professional MPEG-TS-over-RTP contribution links expect.
+pub mod st2022fec;
 // uridecodebin front door: URI-scheme handlers for Registry::build_uridecodebin
 // (file:// -> Mp4Src, udp:// -> UdpSrc, rtsp:// -> RtspSrc, v4l2:// -> V4l2Src),
 // each gated to its source's feature.
@@ -501,6 +517,7 @@ pub mod remoteclient;
     feature = "remote",
     feature = "remote-ws",
     feature = "rtmp",
+    feature = "rtsp-server",
     feature = "srt",
     feature = "udp-ingress",
     feature = "udp-egress",
@@ -667,13 +684,18 @@ pub mod vorbisdec;
 #[cfg(feature = "http-src")]
 pub mod httpsrc;
 
-// Shared HTTP fetch + URL helpers for the adaptive-streaming sources.
-#[cfg(feature = "http-src")]
+// Shared HTTP fetch + URL helpers for the adaptive-streaming sources (not
+// HttpSrc itself, which streams its response body directly).
+#[cfg(any(feature = "hls", feature = "dash"))]
 mod fetch;
 
 // Shared throughput-driven ABR estimator for the adaptive-streaming sources.
 #[cfg(any(feature = "hls", feature = "dash"))]
 mod abr;
+
+// Shared duration-keyed prebuffer window for the adaptive segment loops.
+#[cfg(any(feature = "hls", feature = "dash"))]
+mod segprebuf;
 
 // HLS playlist parser (pure, no_std baseline) and the HlsSrc segment source.
 pub mod hls;

@@ -590,7 +590,9 @@ impl SenderSink {
     /// Stash the propagated metadata set to attach to outgoing meta-empty
     /// `DataFrame`s (M759). The transform arm replaces it on each new input
     /// frame, passing `None` to clear it (a Drop verdict, so no stale set leaks).
-    #[cfg(feature = "metadata")]
+    // Only the graph runner's transform arm sets this, and that runner is std,
+    // so without std the setter would be dead code (which the workspace denies).
+    #[cfg(all(feature = "metadata", feature = "std"))]
     pub(crate) fn set_meta_stash(&mut self, meta: Option<crate::meta::FrameMetaSet>) {
         self.meta_stash = meta;
     }

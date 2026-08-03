@@ -44,6 +44,7 @@ use g2g_core::{
 };
 
 use crate::rtspsrc::RtspSrc;
+use crate::xmlutil::{iso8601_utc, xml_escape};
 
 /// IANA WS-Discovery multicast group + port (SOAP-over-UDP).
 const WS_DISCOVERY_ADDR: &str = "239.255.255.250:3702";
@@ -482,29 +483,6 @@ fn now_unix_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// Format a UNIX timestamp as an ISO-8601 UTC `xsd:dateTime` (no fractional
-/// seconds, `Z` zone), the form ONVIF expects for `Created`. Uses Howard
-/// Hinnant's `civil_from_days` so it needs no chrono dependency.
-fn iso8601_utc(secs: u64) -> String {
-    let days = (secs / 86_400) as i64;
-    let tod = secs % 86_400;
-    let (hh, mm, ss) = (tod / 3_600, (tod % 3_600) / 60, tod % 60);
-
-    // civil_from_days: days since 1970-01-01 -> (year, month, day).
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097; // [0, 146096]
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
-    let mp = (5 * doy + 2) / 153; // [0, 11]
-    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
-    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
-    let year = if m <= 2 { y + 1 } else { y };
-
-    format!("{year:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z")
-}
-
 /// Random UUID v4 (lowercase, hyphenated) for the WS-Discovery `MessageID`.
 fn random_uuid() -> String {
     let mut b = [0u8; 16];
@@ -516,24 +494,6 @@ fn random_uuid() -> String {
         b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13],
         b[14], b[15]
     )
-}
-
-/// Minimal XML text/attribute escaping for the few values we interpolate
-/// (username, profile token). ONVIF credentials rarely contain these, but a
-/// password or token with `&`/`<` must not break the envelope.
-fn xml_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&apos;"),
-            _ => out.push(c),
-        }
-    }
-    out
 }
 
 #[cfg(test)]

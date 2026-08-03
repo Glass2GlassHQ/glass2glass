@@ -29,11 +29,17 @@ use g2g_core::{
     PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, VideoCodec,
 };
 
-use crate::mpegts::{TsMuxer, STREAM_TYPE_AAC, STREAM_TYPE_H264, STREAM_TYPE_H265};
+use crate::mpegts::{
+    TsMuxer, STREAM_TYPE_AAC, STREAM_TYPE_H264, STREAM_TYPE_H265, STREAM_TYPE_METADATA_PES,
+    STREAM_TYPE_PRIVATE_PES,
+};
 
 /// The PMT `stream_type` for an input caps, or `None` if unsupported. Shared by
-/// the single-input [`TsMux`] and the multi-input `tsmuxn::TsMux`.
-pub(crate) fn stream_type_for(caps: &Caps) -> Option<u8> {
+/// the single-input [`TsMux`] and the multi-input `tsmuxn::TsMux`. KLV metadata
+/// rides a private PES (0x06) with the 'KLVA' registration descriptor
+/// (asynchronous KLV, MISB ST 1402 / STANAG 4609), or, with `klv_sync`,
+/// metadata-in-PES (0x15) with a metadata descriptor (synchronous KLV).
+pub(crate) fn stream_type_for(caps: &Caps, klv_sync: bool) -> Option<u8> {
     match caps {
         Caps::CompressedVideo {
             codec: VideoCodec::H264,
@@ -47,6 +53,11 @@ pub(crate) fn stream_type_for(caps: &Caps) -> Option<u8> {
             format: AudioFormat::Aac,
             ..
         } => Some(STREAM_TYPE_AAC),
+        Caps::Klv => Some(if klv_sync {
+            STREAM_TYPE_METADATA_PES
+        } else {
+            STREAM_TYPE_PRIVATE_PES
+        }),
         _ => None,
     }
 }
@@ -66,6 +77,9 @@ pub struct TsMux {
     /// PCR insertion cadence in 90 kHz ticks (default 3600). Applied to the inner
     /// `TsMuxer` when it is built at configure.
     pcr_interval_90khz: u64,
+    /// Carry a `Caps::Klv` input as synchronous KLV (metadata-in-PES 0x15)
+    /// instead of the default asynchronous private PES (0x06 + 'KLVA').
+    klv_sync: bool,
 }
 
 impl Default for TsMux {
@@ -82,6 +96,7 @@ impl TsMux {
             emitted: 0,
             table_interval_ms: 0,
             pcr_interval_90khz: 3600,
+            klv_sync: false,
         }
     }
 
@@ -94,6 +109,13 @@ impl TsMux {
     /// Set the PCR insertion interval in 90 kHz ticks (default 3600).
     pub fn with_pcr_interval(mut self, ticks: u64) -> Self {
         self.pcr_interval_90khz = ticks;
+        self
+    }
+
+    /// Carry a `Caps::Klv` input as synchronous KLV: metadata-in-PES
+    /// (`stream_type` 0x15) rather than the default asynchronous private PES.
+    pub fn with_klv_sync(mut self, sync: bool) -> Self {
+        self.klv_sync = sync;
         self
     }
 
@@ -125,6 +147,7 @@ impl TsMux {
                 channels: 0,
                 sample_rate: 0,
             },
+            Caps::Klv,
         ])
     }
 }
@@ -136,7 +159,7 @@ impl AsyncElement for TsMux {
         Self: 'a;
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        if stream_type_for(upstream_caps).is_some() {
+        if stream_type_for(upstream_caps, self.klv_sync).is_some() {
             Ok(upstream_caps.clone())
         } else {
             Err(G2gError::CapsMismatch)
@@ -145,8 +168,9 @@ impl AsyncElement for TsMux {
 
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         // Any supported elementary stream maps to one MPEG-TS byte stream.
-        CapsConstraint::DerivedOutput(Box::new(|input: &Caps| {
-            if stream_type_for(input).is_some() {
+        let klv_sync = self.klv_sync;
+        CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| {
+            if stream_type_for(input, klv_sync).is_some() {
                 CapsSet::one(Self::output_caps())
             } else {
                 CapsSet::from_alternatives(Vec::new())
@@ -155,7 +179,8 @@ impl AsyncElement for TsMux {
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        let stream_type = stream_type_for(absolute_caps).ok_or(G2gError::CapsMismatch)?;
+        let stream_type =
+            stream_type_for(absolute_caps, self.klv_sync).ok_or(G2gError::CapsMismatch)?;
         let mut mux = TsMuxer::new(stream_type);
         // 90 kHz clock: 90 ticks per millisecond.
         mux.set_table_interval_90khz(self.table_interval_ms.saturating_mul(90));
@@ -186,6 +211,12 @@ impl AsyncElement for TsMux {
                 "PCR insertion interval, ticks of the 90kHz clock",
             )
             .with_default("3600"),
+            PropertySpec::new(
+                "klv-sync",
+                PropKind::Bool,
+                "carry KLV metadata as synchronous metadata-in-PES (stream_type 0x15) instead of asynchronous private PES",
+            )
+            .with_default("false"),
         ];
         PROPS
     }
@@ -206,6 +237,15 @@ impl AsyncElement for TsMux {
                 }
                 Ok(())
             }
+            "klv-sync" => {
+                // The stream type is baked into the PMT when the muxer is built at
+                // configure, so this only takes effect before that.
+                if self.mux.is_some() {
+                    return Err(PropError::ReadOnly);
+                }
+                self.klv_sync = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -214,6 +254,7 @@ impl AsyncElement for TsMux {
         match name {
             "pat-interval" | "pmt-interval" => Some(PropValue::Uint(self.table_interval_ms)),
             "pcr-interval" => Some(PropValue::Uint(self.pcr_interval_90khz)),
+            "klv-sync" => Some(PropValue::Bool(self.klv_sync)),
             _ => None,
         }
     }

@@ -6,6 +6,51 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M819: duration-keyed prebuffer window (`prebuffer-ms`) on `hlssrc` / `dashsrc`, posting `Buffering` bus levels during the fill; `abr` exposed as a property.
+
+- M818: runtime properties for the drifted builder knobs (`rtspserversrc` full set, `udpsrc`/`udpsink` RTP tuning, `rtspsrc` reconnect/dims, `srtsrc`/`filesrc`/`ffmpegdec`), plus bare `http-src` / `rtsp-server` feature builds fixed.
+
+- M817: `httpsrc` prebuffer window (`prebuffer-bytes`) posting `Buffering` bus levels, refilled on mid-stream underrun.
+- M816: position-aware multichannel down/upmix in `audioconvert` (BS.775 coefficients on the per-count `ChannelLayout` convention, matching ffmpeg's default rematrix).
+- M815: `RtspServerSink` sends RTCP sender reports and a BYE during PLAY on both transports, reaps players silent past the advertised session timeout, and gains runtime properties.
+- M814: `cotsink` can also emit the ST 0805.1 sensor point of interest event per local set, linked to the platform track.
+
+- M813: VTargets decode and re-encode their nested ST 0903 VMask / VObject / VTracker / VChip sets.
+
+- M812: the ST 1204 MIIS core identifier renders its standard text form, Appendix B check value included.
+
+- M811: `cotsink` bridges ST 0601 telemetry to Cursor-on-Target XML events over UDP or TCP, so a drone track appears on a TAK / ATAK network.
+
+- M810: SMPTE 2022-1 (Pro-MPEG COP3) FEC for TS over RTP, with the row / column repair streams built on the XOR core now shared with `ulpfec` and `flexfec`.
+
+- M809: MISB ST 0604 MISP timestamps in H.264 / H.265 SEI: `misptimeinsert` stamps each access unit, `misptimeextract` mines it back out.
+
+- M808: MISB ST 0903 VMTI moving-target reports (ST 0601 tag 74) both directions, plus a bridge turning a frame's detections and tracking ids into VTargets.
+
+- M807: MISB ST 1204 MIIS core identifier (ST 0601 tag 94) decodes and re-encodes.
+
+- M806: KLV validated against a real UAS capture (the public "Day Flight" STANAG 4609 sample), strict-parse clean and bit-exact with ffmpeg; local test via `G2G_STANAG_SAMPLE`.
+
+- M805: KLV over RTP (RFC 6597): sans-IO `RtpKlvPacketizer` / `RtpKlvDepayloader` with KLVunit fragmentation and whole-unit loss discard.
+
+- M804: synchronous KLV carriage (`klv-sync` on `mpegtsmux`): metadata-in-PES 0x15 with ST 1402 metadata AU cells and a PMT metadata descriptor, unwrapped on demux, ffmpeg-validated.
+
+- M803: MISB ST 0102 security local set (tag 48) decodes and re-encodes: classification, country coding, classifying / object countries, version.
+
+- M802: extended ST 0601 tag coverage: mission / platform / sensor identity strings, slant range, target width, offset corner points, and target location.
+
+- M801: ST 0601 parse validated against the published MISMMS reference packet (klvdata as oracle), with a lenient no-checksum parse and a `verify-checksum` knob on `klvdecode`.
+
+- M800: MISB ST 0601 UAS Datalink Local Set codec (`g2g-plugins::klv`) and the `klvdecode` element turning telemetry sets into timed text lines.
+
+- M799: KLV metadata in MPEG-TS (STANAG 4609): `Caps::Klv`, mux with the `KLVA` registration descriptor, and `tsdemux stream=klv`, ffmpeg-validated both directions.
+
+- M798: `bevy-g2g` windowed streaming: `RemoteRenderPlugins::windowed` keeps the app's window (a fullscreen mirror of the stream texture) while streaming, on both encode paths.
+
+- M797: `bevy-g2g` input backchannel: a WebSocket serves viewer keyboard/mouse input into ordinary Bevy input messages, with a WHEP viewer page that captures input.
+
+- M796: `bevy-g2g` integration crate: drop-in Bevy plugins for streaming a headless render over WHIP/WebRTC and for playing video on a mesh, replacing the two demo crates.
+
 - M795: relicensed the whole workspace from LGPL v2.1+ to MPL-2.0.
 
 - M794: the Matroska two-pass mode writes a real `Info` `Duration`, so a finished file reports its length instead of `N/A`.

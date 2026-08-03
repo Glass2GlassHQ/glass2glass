@@ -18,12 +18,10 @@
 //! math (the XORed RTP fields) matches ULPFEC; only the header / mask differ.
 //! Real-peer interop is unverified here (sandbox); validated g2g <-> g2g.
 
-use alloc::collections::{BTreeMap, VecDeque};
-use alloc::vec;
 use alloc::vec::Vec;
 
-/// Fixed RTP header length (we generate / protect packets with no CSRC list).
-const RTP_HEADER: usize = 12;
+use crate::ulpfec::{split_group, XorFecBuffer, XorFields, RTP_HEADER};
+
 /// FlexFEC fixed header before the per-SSRC block: R/F/P/X/CC (1) + M/PT (1) +
 /// length recovery (2) + TS recovery (4) + SSRCCount (1) + reserved (3).
 const FLEX_FIXED: usize = 12;
@@ -153,27 +151,9 @@ pub fn build_flexfec_packet(
     let mask = encode_mask(&offsets)?;
 
     // XOR-recover the protected RTP fields and payloads (same scheme as ULPFEC).
-    let mut pxcc = 0u8; // P|X|CC (low 6 bits of byte 0)
-    let mut mpt = 0u8; // M|PT (byte 1)
-    let mut ts = 0u32;
-    let mut len_recovery = 0u16;
-    let protection_len = media
-        .iter()
-        .map(|p| p.len() - RTP_HEADER)
-        .max()
-        .unwrap_or(0);
-    let mut payload = vec![0u8; protection_len];
-    for p in media {
-        pxcc ^= p[0] & 0x3F;
-        mpt ^= p[1];
-        ts ^= u32::from_be_bytes([p[4], p[5], p[6], p[7]]);
-        len_recovery ^= (p.len() - RTP_HEADER) as u16;
-        for (dst, src) in payload.iter_mut().zip(&p[RTP_HEADER..]) {
-            *dst ^= *src;
-        }
-    }
+    let f = XorFields::fold(media)?;
 
-    let mut out = Vec::with_capacity(MASK_OFF + mask.len() + protection_len);
+    let mut out = Vec::with_capacity(MASK_OFF + mask.len() + f.payload.len());
     // Repair packet's own RTP header: V=2, FEC PT, on the FEC SSRC.
     out.push(0x80);
     out.push(fec_pt & 0x7F);
@@ -181,16 +161,16 @@ pub fn build_flexfec_packet(
     out.extend_from_slice(&0u32.to_be_bytes()); // repair packet's own timestamp
     out.extend_from_slice(&fec_ssrc.to_be_bytes());
     // FlexFEC header (R=0, F=0: flexible bitmask form).
-    out.push(pxcc & 0x3F);
-    out.push(mpt);
-    out.extend_from_slice(&len_recovery.to_be_bytes());
-    out.extend_from_slice(&ts.to_be_bytes());
+    out.push(f.pxcc & 0x3F);
+    out.push(f.mpt);
+    out.extend_from_slice(&f.len.to_be_bytes());
+    out.extend_from_slice(&f.ts.to_be_bytes());
     out.push(1); // SSRCCount: a single protected media stream
     out.extend_from_slice(&[0u8; 3]); // reserved
     out.extend_from_slice(&media_ssrc.to_be_bytes());
     out.extend_from_slice(&sn_base.to_be_bytes());
     out.extend_from_slice(&mask);
-    out.extend_from_slice(&payload);
+    out.extend_from_slice(&f.payload);
     Some(out)
 }
 
@@ -219,23 +199,7 @@ fn protected_seqs(fec: &[u8]) -> Option<Vec<u16>> {
 /// sequence is absent.
 pub fn recover_packet(fec: &[u8], present: &[(u16, &[u8])]) -> Option<Vec<u8>> {
     let (_, seqs, payload_off) = flex_header(fec)?;
-    let missing: Vec<u16> = seqs
-        .iter()
-        .copied()
-        .filter(|s| !present.iter().any(|(p, _)| p == s))
-        .collect();
-    if missing.len() != 1 {
-        return None; // a single repair recovers exactly one loss per group
-    }
-    let missing_seq = missing[0];
-    let group: Vec<&[u8]> = present
-        .iter()
-        .filter(|(s, _)| seqs.contains(s))
-        .map(|(_, p)| *p)
-        .collect();
-    if group.iter().any(|p| p.len() < RTP_HEADER) {
-        return None;
-    }
+    let (missing_seq, group) = split_group(&seqs, present)?;
 
     let pxcc_r = fec[RTP_HEADER] & 0x3F;
     let mpt_r = fec[RTP_HEADER + 1];
@@ -243,35 +207,11 @@ pub fn recover_packet(fec: &[u8], present: &[(u16, &[u8])]) -> Option<Vec<u8>> {
     let ts_r = u32::from_be_bytes(fec[RTP_HEADER + 4..RTP_HEADER + 8].try_into().ok()?);
     let fec_payload = fec.get(payload_off..)?;
 
-    let mut pxcc = pxcc_r;
-    let mut mpt = mpt_r;
-    let mut ts = ts_r;
-    let mut len = len_r;
-    let mut payload = fec_payload.to_vec();
-    let mut ssrc = [0u8; 4];
+    let mut f = XorFields::from_repair(pxcc_r, mpt_r, ts_r, len_r, fec_payload.to_vec());
     for p in &group {
-        pxcc ^= p[0] & 0x3F;
-        mpt ^= p[1];
-        ts ^= u32::from_be_bytes([p[4], p[5], p[6], p[7]]);
-        len ^= (p.len() - RTP_HEADER) as u16;
-        for (dst, src) in payload.iter_mut().zip(&p[RTP_HEADER..]) {
-            *dst ^= *src;
-        }
-        ssrc.copy_from_slice(&p[8..12]); // all group members share the media SSRC
+        f.xor_in(p)?;
     }
-    let recovered_len = len as usize;
-    if recovered_len > payload.len() {
-        return None; // inconsistent length recovery
-    }
-
-    let mut out = Vec::with_capacity(RTP_HEADER + recovered_len);
-    out.push(0x80 | (pxcc & 0x3F)); // V=2 + recovered P/X/CC
-    out.push(mpt); // recovered M/PT
-    out.extend_from_slice(&missing_seq.to_be_bytes());
-    out.extend_from_slice(&ts.to_be_bytes());
-    out.extend_from_slice(&ssrc);
-    out.extend_from_slice(&payload[..recovered_len]);
-    Some(out)
+    f.to_rtp(missing_seq)
 }
 
 /// Emits FlexFEC repairs over groups of `group` media packets (up to 109).
@@ -366,10 +306,7 @@ impl FlexFecEncoder {
 /// chaining recoveries (a recovered packet can complete another group).
 #[derive(Debug)]
 pub struct FlexFecDecoder {
-    media: BTreeMap<u16, Vec<u8>>,
-    fecs: VecDeque<Vec<u8>>,
-    recovered: Vec<Vec<u8>>,
-    capacity: usize,
+    inner: XorFecBuffer,
 }
 
 impl Default for FlexFecDecoder {
@@ -381,74 +318,23 @@ impl Default for FlexFecDecoder {
 impl FlexFecDecoder {
     pub fn new(capacity: usize) -> Self {
         Self {
-            media: BTreeMap::new(),
-            fecs: VecDeque::new(),
-            recovered: Vec::new(),
-            capacity: capacity.max(16),
+            inner: XorFecBuffer::new(capacity, protected_seqs, recover_packet),
         }
     }
 
     /// Record a received media packet and attempt recovery of any open group.
     pub fn push_media(&mut self, seq: u16, packet: &[u8]) {
-        self.media.insert(seq, packet.to_vec());
-        self.trim();
-        self.try_recover();
+        self.inner.push_media(seq, packet);
     }
 
     /// Record a received repair packet and attempt recovery.
     pub fn push_fec(&mut self, packet: &[u8]) {
-        if self.fecs.len() >= self.capacity {
-            self.fecs.pop_front();
-        }
-        self.fecs.push_back(packet.to_vec());
-        self.try_recover();
+        self.inner.push_fec(packet);
     }
 
     /// Take the media packets recovered so far (to inject into the jitter buffer).
     pub fn take_recovered(&mut self) -> Vec<Vec<u8>> {
-        core::mem::take(&mut self.recovered)
-    }
-
-    fn trim(&mut self) {
-        while self.media.len() > self.capacity {
-            let first = *self.media.keys().next().expect("non-empty");
-            self.media.remove(&first);
-        }
-    }
-
-    fn try_recover(&mut self) {
-        let mut progressed = true;
-        while progressed {
-            progressed = false;
-            let mut spent = None;
-            for (idx, fec) in self.fecs.iter().enumerate() {
-                let Some(seqs) = protected_seqs(fec) else {
-                    continue;
-                };
-                let present: Vec<(u16, &[u8])> = seqs
-                    .iter()
-                    .filter_map(|s| self.media.get(s).map(|p| (*s, p.as_slice())))
-                    .collect();
-                let missing = seqs.len().saturating_sub(present.len());
-                if missing == 1 {
-                    if let Some(rec) = recover_packet(fec, &present) {
-                        let seq = u16::from_be_bytes([rec[2], rec[3]]);
-                        self.media.insert(seq, rec.clone());
-                        self.recovered.push(rec);
-                        spent = Some(idx);
-                        progressed = true;
-                        break;
-                    }
-                } else if missing == 0 {
-                    spent = Some(idx); // fully received, no longer useful
-                    progressed = true;
-                    break;
-                }
-            }
-            if let Some(idx) = spent {
-                self.fecs.remove(idx);
-            }
-        }
+        self.inner.take_recovered()
     }
 }
 
@@ -456,6 +342,7 @@ impl FlexFecDecoder {
 mod tests {
     use super::*;
     use crate::rtppay::RtpH264Packetizer;
+    use alloc::vec;
 
     /// `n` consecutive RTP packets (distinct payloads, one NAL each).
     fn media_run(n: u16) -> Vec<Vec<u8>> {

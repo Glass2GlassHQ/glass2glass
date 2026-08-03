@@ -25,6 +25,7 @@ use g2g_core::{
     MultiInputElement, OutputSink, PipelinePacket, Rate, VideoCodec,
 };
 
+use crate::annexb::vcl_start;
 use crate::cea::{build_cc_sei, Cc608Enc, Cc708Enc, CcTriple};
 use crate::subparse::Cue;
 
@@ -207,33 +208,6 @@ impl CcInsert {
         );
         out.push(PipelinePacket::DataFrame(new)).await.map(|_| ())
     }
-}
-
-/// Byte offset of the start code of the first VCL slice NAL in an Annex-B access
-/// unit, or `None` if there is none. H.264 VCL NAL types are 1..=5; H.265 VCL types
-/// are 0..=31.
-fn vcl_start(au: &[u8], codec: VideoCodec) -> Option<usize> {
-    let mut i = 0usize;
-    while i + 3 < au.len() {
-        let sc = if au[i] == 0 && au[i + 1] == 0 && au[i + 2] == 1 {
-            3
-        } else if au[i] == 0 && au[i + 1] == 0 && au[i + 2] == 0 && au[i + 3] == 1 {
-            4
-        } else {
-            i += 1;
-            continue;
-        };
-        let hdr = *au.get(i + sc)?;
-        let is_vcl = match codec {
-            VideoCodec::H265 => ((hdr >> 1) & 0x3F) < 32,
-            _ => (1..=5).contains(&(hdr & 0x1F)),
-        };
-        if is_vcl {
-            return Some(i);
-        }
-        i += sc + 1;
-    }
-    None
 }
 
 impl MultiInputElement for CcInsert {

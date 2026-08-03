@@ -40,8 +40,8 @@ use alloc::vec::Vec;
 
 use g2g_core::runtime::{SeekController, SourceLoop};
 use g2g_core::{
-    AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
-    ElementMetadata, G2gError, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
+    AudioFormat, BusHandle, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
+    Dim, ElementMetadata, G2gError, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
     PropertySpec, Rate, Seek, Segment, StreamType, TextFormat, VideoCodec,
 };
 
@@ -237,6 +237,10 @@ pub struct HlsSrc {
     /// follows what is being published. Opt in for a from-the-beginning replay of
     /// the available window. No effect on VOD (always from the front).
     full_replay: bool,
+    /// Duration-keyed prebuffer target in ms (0 = off): fetch this much media
+    /// ahead before emitting, posting `Buffering` on the attached bus.
+    prebuffer_ms: u64,
+    bus: Option<BusHandle>,
     configured: bool,
 }
 
@@ -253,8 +257,25 @@ impl HlsSrc {
             abr: false,
             text: false,
             full_replay: false,
+            prebuffer_ms: 0,
+            bus: None,
             configured: false,
         }
+    }
+
+    /// Buffer this many milliseconds of media (summed `#EXTINF` durations)
+    /// before emitting, and again after a flushing seek. `0` disables
+    /// prebuffering. The duration-keyed sibling of `HttpSrc::prebuffer-bytes`.
+    pub fn with_prebuffer_ms(mut self, ms: u64) -> Self {
+        self.prebuffer_ms = ms;
+        self
+    }
+
+    /// Attach the pipeline bus so prebuffering posts
+    /// [`g2g_core::BusMessage::Buffering`] level reports.
+    pub fn with_bus(mut self, bus: BusHandle) -> Self {
+        self.bus = Some(bus);
+        self
     }
 
     /// Start a live playlist from the front of its sliding window (full DVR
@@ -554,6 +575,10 @@ impl SourceLoop for HlsSrc {
             };
 
             let mut sequence = 0u64;
+            // Duration-keyed prebuffer window (0 = pass-through); init segments
+            // ride it with duration 0 so ordering survives an ABR re-init.
+            let mut window =
+                crate::segprebuf::SegmentPrebuffer::new(self.prebuffer_ms, self.bus.clone());
             // AES-128 keys fetched once per URI and reused across segments.
             let mut keys: Vec<(String, [u8; 16])> = Vec::new();
             // Next HLS media-sequence number to play; segments below it on a live
@@ -582,6 +607,9 @@ impl SourceLoop for HlsSrc {
                     if let Some(seek) = self.seek.as_ref().and_then(|c| c.take_pending()) {
                         if seek.is_flush() {
                             let (target_idx, seg_start_ns) = segment_for_time(&media, seek.start);
+                            // Queued lookahead is pre-seek media: drop it (and
+                            // re-arm the prebuffer fill) before flushing.
+                            window.clear();
                             out.push(PipelinePacket::Flush).await?;
                             idx = target_idx;
                             next_seq = media.media_sequence + target_idx as u64;
@@ -614,111 +642,123 @@ impl SourceLoop for HlsSrc {
                                 None => get_bytes(&client, &init_url, MAX_SEGMENT_BYTES).await?,
                             };
                             if !bytes.is_empty() {
-                                out.push(PipelinePacket::DataFrame(byte_frame(bytes, sequence)))
-                                    .await?;
-                                sequence += 1;
+                                window.admit(bytes, 0);
                             }
                         }
                         init_emitted = true;
                     }
 
-                    if idx >= media.segments.len() {
-                        break;
-                    }
-                    let seg_seq = media.media_sequence + idx as u64;
-                    // Bytes + elapsed of the segment just fetched, for the ABR
-                    // estimator (None when this index was skipped on a live reload).
-                    let mut measured: Option<(usize, u64)> = None;
-                    let segment = &media.segments[idx];
-                    if seg_seq >= next_seq {
-                        let seg_url = resolve_url(&media_url, &segment.uri);
-                        let t0 = g2g_core::metrics::monotonic_ns();
-                        let bytes = match segment.byte_range {
-                            Some(r) => {
-                                get_range_bytes(
-                                    &client,
-                                    &seg_url,
-                                    r.offset,
-                                    r.length,
-                                    MAX_SEGMENT_BYTES,
-                                )
-                                .await?
-                            }
-                            None => get_bytes(&client, &seg_url, MAX_SEGMENT_BYTES).await?,
-                        };
-                        // Measure the downloaded (pre-decrypt) size against wall time.
-                        measured = Some((
-                            bytes.len(),
-                            g2g_core::metrics::monotonic_ns().saturating_sub(t0),
-                        ));
-                        let bytes = match &segment.key {
-                            None => bytes,
-                            Some(key) => {
-                                let key_url = resolve_url(&media_url, &key.uri);
-                                let key_bytes = fetch_key(&client, &mut keys, &key_url).await?;
-                                let iv = key.iv.unwrap_or_else(|| iv_from_sequence(seg_seq));
-                                match key.method {
-                                    // Whole-segment: decrypt before the demuxer.
-                                    KeyMethod::Aes128 => {
-                                        decrypt_aes128_cbc(&key_bytes, &iv, bytes)?
-                                    }
-                                    // Per-sample: publish the key for a downstream
-                                    // SampleAesDecrypt and forward the bytes as-is.
-                                    KeyMethod::SampleAes => {
-                                        let handle = self
-                                            .sample_aes_key
-                                            .as_ref()
-                                            .ok_or(G2gError::CapsMismatch)?;
-                                        *handle.lock().expect("key handle poisoned") =
-                                            Some(SampleAesKey { key: key_bytes, iv });
-                                        bytes
-                                    }
+                    // Fetch phase: pull segments into the window while it is
+                    // below its duration target (or empty) and segments remain.
+                    if idx < media.segments.len() && window.wants_fetch() {
+                        let seg_seq = media.media_sequence + idx as u64;
+                        // Bytes + elapsed of the segment just fetched, for the ABR
+                        // estimator (None when this index was skipped on a live reload).
+                        let mut measured: Option<(usize, u64)> = None;
+                        let segment = &media.segments[idx];
+                        let duration_ns = (segment.duration_ms as u64).saturating_mul(1_000_000);
+                        if seg_seq >= next_seq {
+                            let seg_url = resolve_url(&media_url, &segment.uri);
+                            let t0 = g2g_core::metrics::monotonic_ns();
+                            let bytes = match segment.byte_range {
+                                Some(r) => {
+                                    get_range_bytes(
+                                        &client,
+                                        &seg_url,
+                                        r.offset,
+                                        r.length,
+                                        MAX_SEGMENT_BYTES,
+                                    )
+                                    .await?
                                 }
-                            }
-                        };
-                        if !bytes.is_empty() {
-                            let bytes = if text_mode {
-                                let mut b = bytes;
-                                b.extend_from_slice(b"\n\n");
-                                b
-                            } else {
-                                bytes
+                                None => get_bytes(&client, &seg_url, MAX_SEGMENT_BYTES).await?,
                             };
-                            out.push(PipelinePacket::DataFrame(byte_frame(bytes, sequence)))
-                                .await?;
-                            sequence += 1;
+                            // Measure the downloaded (pre-decrypt) size against wall time.
+                            measured = Some((
+                                bytes.len(),
+                                g2g_core::metrics::monotonic_ns().saturating_sub(t0),
+                            ));
+                            let bytes = match &segment.key {
+                                None => bytes,
+                                Some(key) => {
+                                    let key_url = resolve_url(&media_url, &key.uri);
+                                    let key_bytes = fetch_key(&client, &mut keys, &key_url).await?;
+                                    let iv = key.iv.unwrap_or_else(|| iv_from_sequence(seg_seq));
+                                    match key.method {
+                                        // Whole-segment: decrypt before the demuxer.
+                                        KeyMethod::Aes128 => {
+                                            decrypt_aes128_cbc(&key_bytes, &iv, bytes)?
+                                        }
+                                        // Per-sample: publish the key for a downstream
+                                        // SampleAesDecrypt and forward the bytes as-is.
+                                        KeyMethod::SampleAes => {
+                                            let handle = self
+                                                .sample_aes_key
+                                                .as_ref()
+                                                .ok_or(G2gError::CapsMismatch)?;
+                                            *handle.lock().expect("key handle poisoned") =
+                                                Some(SampleAesKey { key: key_bytes, iv });
+                                            bytes
+                                        }
+                                    }
+                                }
+                            };
+                            if !bytes.is_empty() {
+                                let bytes = if text_mode {
+                                    let mut b = bytes;
+                                    b.extend_from_slice(b"\n\n");
+                                    b
+                                } else {
+                                    bytes
+                                };
+                                window.admit(bytes, duration_ns);
+                            }
+                            next_seq = seg_seq + 1;
                         }
-                        next_seq = seg_seq + 1;
-                    }
-                    idx += 1;
+                        idx += 1;
 
-                    // ABR: feed the measured throughput and, if the best-fitting
-                    // variant changed, switch to it (its media playlist), keeping
-                    // the aligned index and re-emitting the new variant's init. The
-                    // segment borrow above has ended, so reassigning `media` is safe.
-                    if let (Some((len, elapsed)), Some((mst, master_url))) =
-                        (measured, master.as_ref())
-                    {
-                        estimator.sample(len, elapsed);
-                        if let Some(best) = mst.select(estimator.effective_cap(self.max_bandwidth))
+                        // ABR: feed the measured throughput and, if the best-fitting
+                        // variant changed, switch to it (its media playlist), keeping
+                        // the aligned index and re-emitting the new variant's init. The
+                        // segment borrow above has ended, so reassigning `media` is safe.
+                        if let (Some((len, elapsed)), Some((mst, master_url))) =
+                            (measured, master.as_ref())
                         {
-                            if current_variant.as_deref() != Some(best.uri.as_str()) {
-                                let new_uri = best.uri.clone();
-                                let new_url = resolve_url(master_url, &new_uri);
-                                let text = get_text(&client, &new_url, MAX_MANIFEST_BYTES).await?;
-                                if let Playlist::Media(m) =
-                                    parse(&text).map_err(|_| G2gError::CapsMismatch)?
-                                {
-                                    // Variants are time-aligned by media sequence, so
-                                    // `idx` / `next_seq` carry over; re-emit the init.
-                                    media = m;
-                                    media_url = new_url;
-                                    current_variant = Some(new_uri);
-                                    init_emitted = false;
+                            estimator.sample(len, elapsed);
+                            if let Some(best) =
+                                mst.select(estimator.effective_cap(self.max_bandwidth))
+                            {
+                                if current_variant.as_deref() != Some(best.uri.as_str()) {
+                                    let new_uri = best.uri.clone();
+                                    let new_url = resolve_url(master_url, &new_uri);
+                                    let text =
+                                        get_text(&client, &new_url, MAX_MANIFEST_BYTES).await?;
+                                    if let Playlist::Media(m) =
+                                        parse(&text).map_err(|_| G2gError::CapsMismatch)?
+                                    {
+                                        // Variants are time-aligned by media sequence, so
+                                        // `idx` / `next_seq` carry over; re-emit the init.
+                                        media = m;
+                                        media_url = new_url;
+                                        current_variant = Some(new_uri);
+                                        init_emitted = false;
+                                    }
                                 }
                             }
                         }
+                        continue;
                     }
+
+                    // Emit phase: push the window front downstream. An empty
+                    // window with nothing left to fetch ends this pass (live
+                    // reload or end of playlist).
+                    if let Some(bytes) = window.pop() {
+                        out.push(PipelinePacket::DataFrame(byte_frame(bytes, sequence)))
+                            .await?;
+                        sequence += 1;
+                        continue;
+                    }
+                    break;
                 }
 
                 if media.end_list {
@@ -783,6 +823,20 @@ impl SourceLoop for HlsSrc {
                 }
                 _ => Err(PropError::Type),
             },
+            "abr" => match value {
+                PropValue::Bool(v) => {
+                    self.abr = v;
+                    Ok(())
+                }
+                _ => Err(PropError::Type),
+            },
+            "prebuffer-ms" => match value {
+                PropValue::Uint(v) => {
+                    self.prebuffer_ms = v;
+                    Ok(())
+                }
+                _ => Err(PropError::Type),
+            },
             _ => Err(PropError::Unknown),
         }
     }
@@ -793,6 +847,8 @@ impl SourceLoop for HlsSrc {
             "max-bandwidth" => Some(PropValue::Uint(self.max_bandwidth)),
             "reload-interval-ms" => Some(PropValue::Uint(self.reload_interval_ms)),
             "full-replay" => Some(PropValue::Bool(self.full_replay)),
+            "abr" => Some(PropValue::Bool(self.abr)),
+            "prebuffer-ms" => Some(PropValue::Uint(self.prebuffer_ms)),
             _ => None,
         }
     }
@@ -815,6 +871,18 @@ static HLSSRC_PROPS: &[PropertySpec] = &[
         PropKind::Bool,
         "start a live playlist from the window front (full DVR replay) instead of near the live edge",
     ),
+    PropertySpec::new(
+        "abr",
+        PropKind::Bool,
+        "throughput-driven variant switching (measure downloads, re-select mid-stream)",
+    )
+    .with_default("false"),
+    PropertySpec::new(
+        "prebuffer-ms",
+        PropKind::Uint,
+        "media to buffer ahead before emitting, ms; posts Buffering bus messages (0 = off)",
+    )
+    .with_default("0"),
 ];
 
 #[cfg(test)]

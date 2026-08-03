@@ -767,10 +767,10 @@
             <div class="feature-card">
                 <span class="f-icon">&#128230;</span>
                 <h3>Containers</h3>
-                <p class="f-lead">Pure-Rust demux + mux on the typed <code>Caps::ByteStream</code> link, with <code>typefind</code> sniffing.</p>
+                <p class="f-lead">Pure-Rust demux + mux on the typed <code>Caps::ByteStream</code> link, with <code>typefind</code> sniffing. KLV telemetry (STANAG 4609 / MISB ST 0601) rides the TS both ways.</p>
                 <div class="chip-group">
                     <span class="chip-label">Demux</span>
-                    <div class="chip-row"><span class="chip">mp4src</span><span class="chip">fmp4demux</span><span class="chip">tsdemux</span><span class="chip">matroskademux</span><span class="chip">flvdemux</span><span class="chip">oggdemux</span></div>
+                    <div class="chip-row"><span class="chip">mp4src</span><span class="chip">fmp4demux</span><span class="chip">tsdemux</span><span class="chip">matroskademux</span><span class="chip">flvdemux</span><span class="chip">oggdemux</span><span class="chip">klvdecode</span></div>
                 </div>
                 <div class="chip-group">
                     <span class="chip-label">Mux</span>
@@ -781,7 +781,7 @@
             <div class="feature-card">
                 <span class="f-icon">&#128250;</span>
                 <h3>Adaptive streaming</h3>
-                <p class="f-lead">HLS (TS + CMAF, live reload, AES-128 + SAMPLE-AES), DASH (SegmentTemplate / Timeline, dynamic MPDs), RTMP publisher ingest.</p>
+                <p class="f-lead">HLS (TS + CMAF, live reload, AES-128 + SAMPLE-AES), DASH (SegmentTemplate / Timeline, dynamic MPDs), duration-keyed prebuffering with Buffering reports, RTMP publisher ingest.</p>
                 <div class="chip-group">
                     <span class="chip-label">Sources</span>
                     <div class="chip-row"><span class="chip">HlsSrc</span><span class="chip">DashSrc</span><span class="chip">RtmpSrc</span><span class="chip">HttpSrc</span></div>
@@ -1023,7 +1023,7 @@ g2g-launch <span class="flag">--script</span> build.rhai</div>
             <div class="target-card">
                 <div class="t-icon">&#9889;</div>
                 <h3>GPU (zero-copy)</h3>
-                <p>Frames stay in Vulkan / CUDA / wgpu / DMABUF domains: Vulkan Video decode &rarr; <code>wgpu::Texture</code>, native NVDEC / NVENC, a CUDA &harr; wgpu bridge &mdash; no PCIe round-trip. Embeds in an app's own wgpu device (<code>GpuContext::from_wgpu</code>; Bevy decode + encode demos).</p>
+                <p>Frames stay in Vulkan / CUDA / wgpu / DMABUF domains: Vulkan Video decode &rarr; <code>wgpu::Texture</code>, native NVDEC / NVENC, a CUDA &harr; wgpu bridge &mdash; no PCIe round-trip. Embeds in an app's own wgpu device (<code>GpuContext::from_wgpu</code>; packaged for Bevy as the <code>bevy-g2g</code> crate: remote rendering over WebRTC + zero-copy video playback).</p>
             </div>
             <div class="target-card">
                 <div class="t-icon">&#127760;</div>

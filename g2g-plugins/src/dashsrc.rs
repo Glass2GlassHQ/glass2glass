@@ -28,8 +28,9 @@ use alloc::vec::Vec;
 
 use g2g_core::runtime::{SeekController, SourceLoop};
 use g2g_core::{
-    ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, G2gError,
-    OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Seek, Segment,
+    BusHandle, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
+    ElementMetadata, G2gError, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec, Seek, Segment,
 };
 
 use crate::abr::BandwidthEstimator;
@@ -112,6 +113,10 @@ pub struct DashSrc {
     /// estimate (under `max_bandwidth`), switching mid-stream (new init re-emitted,
     /// aligned index kept). Off by default (a fixed up-front Representation).
     abr: bool,
+    /// Duration-keyed prebuffer target in ms (0 = off): fetch this much media
+    /// ahead before emitting, posting `Buffering` on the attached bus.
+    prebuffer_ms: u64,
+    bus: Option<BusHandle>,
     configured: bool,
 }
 
@@ -123,8 +128,25 @@ impl DashSrc {
             reload_interval_ms: 0,
             seek: None,
             abr: false,
+            prebuffer_ms: 0,
+            bus: None,
             configured: false,
         }
+    }
+
+    /// Buffer this many milliseconds of media (summed segment durations)
+    /// before emitting, and again after a flushing seek. `0` disables
+    /// prebuffering. The duration-keyed sibling of `HttpSrc::prebuffer-bytes`.
+    pub fn with_prebuffer_ms(mut self, ms: u64) -> Self {
+        self.prebuffer_ms = ms;
+        self
+    }
+
+    /// Attach the pipeline bus so prebuffering posts
+    /// [`g2g_core::BusMessage::Buffering`] level reports.
+    pub fn with_bus(mut self, bus: BusHandle) -> Self {
+        self.bus = Some(bus);
+        self
     }
 
     /// Enable throughput-driven ABR (M372): measure each segment's download and
@@ -230,6 +252,13 @@ impl SourceLoop for DashSrc {
             };
 
             let mut sequence = 0u64;
+            // Duration-keyed prebuffer window (0 = pass-through); init segments
+            // ride it with duration 0 so ordering survives an ABR re-init.
+            let mut window =
+                crate::segprebuf::SegmentPrebuffer::new(self.prebuffer_ms, self.bus.clone());
+            // Fallback duration for the last segment of a list (no successor to
+            // diff against): the previous segment's duration.
+            let mut last_dur_ns = 0u64;
             let mut init_emitted = false;
             // Largest segment start time already played; on a live reload only
             // segments past it are new (SegmentTimeline times are monotonic).
@@ -273,6 +302,9 @@ impl SourceLoop for DashSrc {
                         if seek.is_flush() {
                             let (target_idx, start_ns) =
                                 segment_for_time(&segs, timescale, seek.start);
+                            // Queued lookahead is pre-seek media: drop it (and
+                            // re-arm the prebuffer fill) before flushing.
+                            window.clear();
                             out.push(PipelinePacket::Flush).await?;
                             idx = target_idx;
                             // Jumped by index; clear the reload-dedup watermark so
@@ -293,60 +325,82 @@ impl SourceLoop for DashSrc {
                             let url = seg_url(&base, init_url);
                             let bytes = fetch_segment(&client, &url, *init_range).await?;
                             if !bytes.is_empty() {
-                                out.push(PipelinePacket::DataFrame(byte_frame(bytes, sequence)))
-                                    .await?;
-                                sequence += 1;
+                                window.admit(bytes, 0);
                             }
                         }
                         init_emitted = true;
                     }
 
-                    if idx >= segs.len() {
-                        break;
-                    }
-                    // Bytes + elapsed of the segment just fetched, for the ABR
-                    // estimator (None when this index was skipped on a live reload).
-                    let mut measured: Option<(usize, u64)> = None;
-                    {
-                        let seg = &segs[idx];
-                        if !last_time.is_some_and(|lt| seg.time <= lt) {
-                            let url = seg_url(&base, &seg.url);
-                            let t0 = g2g_core::metrics::monotonic_ns();
-                            let bytes = fetch_segment(&client, &url, seg.byte_range).await?;
-                            measured = Some((
-                                bytes.len(),
-                                g2g_core::metrics::monotonic_ns().saturating_sub(t0),
-                            ));
-                            if !bytes.is_empty() {
-                                out.push(PipelinePacket::DataFrame(byte_frame(bytes, sequence)))
-                                    .await?;
-                                sequence += 1;
+                    // Fetch phase: pull segments into the window while it is
+                    // below its duration target (or empty) and segments remain.
+                    if idx < segs.len() && window.wants_fetch() {
+                        // Bytes + elapsed of the segment just fetched, for the ABR
+                        // estimator (None when this index was skipped on a live reload).
+                        let mut measured: Option<(usize, u64)> = None;
+                        {
+                            let seg = &segs[idx];
+                            if !last_time.is_some_and(|lt| seg.time <= lt) {
+                                // Play time of this segment: the start-time delta to
+                                // its successor; the last segment reuses the previous
+                                // duration (no successor to diff against).
+                                let duration_ns = match segs.get(idx + 1) {
+                                    Some(n) if n.time > seg.time => {
+                                        ((n.time - seg.time) as u128 * 1_000_000_000
+                                            / timescale.max(1) as u128)
+                                            as u64
+                                    }
+                                    _ => last_dur_ns,
+                                };
+                                last_dur_ns = duration_ns;
+                                let url = seg_url(&base, &seg.url);
+                                let t0 = g2g_core::metrics::monotonic_ns();
+                                let bytes = fetch_segment(&client, &url, seg.byte_range).await?;
+                                measured = Some((
+                                    bytes.len(),
+                                    g2g_core::metrics::monotonic_ns().saturating_sub(t0),
+                                ));
+                                if !bytes.is_empty() {
+                                    window.admit(bytes, duration_ns);
+                                }
+                                last_time = Some(seg.time);
                             }
-                            last_time = Some(seg.time);
                         }
-                    }
-                    idx += 1;
+                        idx += 1;
 
-                    // ABR: feed the measured throughput and, if the best-fitting
-                    // Representation changed, switch to it (re-resolve its segments
-                    // / init, re-emit the init), keeping the time-aligned index.
-                    // The `seg` borrow above has ended, so reassigning is safe.
-                    if self.abr {
-                        if let Some((len, elapsed)) = measured {
-                            estimator.sample(len, elapsed);
-                            if let Some(best) = mpd.select(sel_cap(&estimator)) {
-                                if best.id != cur_rep_id {
-                                    cur_rep_id = best.id.clone();
-                                    let (s, ts, ini) =
-                                        load_rep(&client, &base, best, mpd.duration_secs).await?;
-                                    segs = s;
-                                    timescale = ts;
-                                    init = ini;
-                                    init_emitted = false;
+                        // ABR: feed the measured throughput and, if the best-fitting
+                        // Representation changed, switch to it (re-resolve its segments
+                        // / init, re-emit the init), keeping the time-aligned index.
+                        // The `seg` borrow above has ended, so reassigning is safe.
+                        if self.abr {
+                            if let Some((len, elapsed)) = measured {
+                                estimator.sample(len, elapsed);
+                                if let Some(best) = mpd.select(sel_cap(&estimator)) {
+                                    if best.id != cur_rep_id {
+                                        cur_rep_id = best.id.clone();
+                                        let (s, ts, ini) =
+                                            load_rep(&client, &base, best, mpd.duration_secs)
+                                                .await?;
+                                        segs = s;
+                                        timescale = ts;
+                                        init = ini;
+                                        init_emitted = false;
+                                    }
                                 }
                             }
                         }
+                        continue;
                     }
+
+                    // Emit phase: push the window front downstream. An empty
+                    // window with nothing left to fetch ends this pass (live
+                    // reload or end of manifest).
+                    if let Some(bytes) = window.pop() {
+                        out.push(PipelinePacket::DataFrame(byte_frame(bytes, sequence)))
+                            .await?;
+                        sequence += 1;
+                        continue;
+                    }
+                    break;
                 }
 
                 if !mpd.dynamic {
@@ -401,6 +455,20 @@ impl SourceLoop for DashSrc {
                 }
                 _ => Err(PropError::Type),
             },
+            "abr" => match value {
+                PropValue::Bool(v) => {
+                    self.abr = v;
+                    Ok(())
+                }
+                _ => Err(PropError::Type),
+            },
+            "prebuffer-ms" => match value {
+                PropValue::Uint(v) => {
+                    self.prebuffer_ms = v;
+                    Ok(())
+                }
+                _ => Err(PropError::Type),
+            },
             _ => Err(PropError::Unknown),
         }
     }
@@ -410,6 +478,8 @@ impl SourceLoop for DashSrc {
             "location" => Some(PropValue::Str(self.url.clone())),
             "max-bandwidth" => Some(PropValue::Uint(self.max_bandwidth)),
             "reload-interval-ms" => Some(PropValue::Uint(self.reload_interval_ms)),
+            "abr" => Some(PropValue::Bool(self.abr)),
+            "prebuffer-ms" => Some(PropValue::Uint(self.prebuffer_ms)),
             _ => None,
         }
     }
@@ -427,4 +497,16 @@ static DASHSRC_PROPS: &[PropertySpec] = &[
         PropKind::Uint,
         "live-MPD reload interval in ms; 0 derives it from minimumUpdatePeriod",
     ),
+    PropertySpec::new(
+        "abr",
+        PropKind::Bool,
+        "throughput-driven Representation switching (measure downloads, re-select mid-stream)",
+    )
+    .with_default("false"),
+    PropertySpec::new(
+        "prebuffer-ms",
+        PropKind::Uint,
+        "media to buffer ahead before emitting, ms; posts Buffering bus messages (0 = off)",
+    )
+    .with_default("0"),
 ];

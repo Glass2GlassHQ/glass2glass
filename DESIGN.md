@@ -1265,10 +1265,20 @@ player's negotiated UDP port as RTP, reusing the `RtpH264Packetizer`. The
 protocol is Sans-IO (`rtspserver.rs`, `RtspResponder` + `RtspRequest::parse` +
 `sdp_h264`): a per-session state machine answering each method and returning an
 `RtspEvent` (`Setup{client_rtp_port}` / `Play` / `Record` / `Teardown`) that the
-element acts on. It also speaks the publisher path (ANNOUNCE / RECORD) for a
-future receive-side source. Validated end-to-end over loopback (an in-test player
-handshakes and recovers every streamed access unit). Scope is one client / one
-session / unicast UDP / the PLAY direction.
+element acts on. It also speaks the publisher path (ANNOUNCE / RECORD), served by
+the receive-side `RtspServerSrc`. The sink is multi-client (each player gets its
+own RTP session, broadcast per frame) on either transport: unicast UDP or
+TCP-interleaved (`$`-framed on the control connection, validated against
+`ffmpeg -rtsp_transport tcp`). During PLAY the sink runs RTCP and keepalive:
+periodic RFC 3550 sender reports per player (UDP from the socket adjacent to the
+RTP one, so the advertised `server_port` pair is real, or `$`-framed on the RTCP
+channel), a BYE at EOS, and a session timeout advertised as
+`Session: id;timeout=N` at SETUP, with a player reaped when it is silent past
+the timeout on both the control channel (GET_PARAMETER / OPTIONS) and RTCP
+(receiver reports, which arrive `$`-framed mid-stream on an interleaved
+control connection and are consumed there). Validated end-to-end over loopback
+(handshake, RTP recovery, SR delivery on both transports, RR-extended lifetime,
+silent-client reap).
 
 **SRT (Secure Reliable Transport).** `SrtSink` (caller, egress) and `SrtSrc`
 (listener, ingress, `srt` feature) carry an MPEG-TS byte stream over UDP with
@@ -1691,6 +1701,92 @@ single-input launch element and as a fan-in muxer, so the text parser
 picks `tsmux::TsMux` for one input and `tsmuxn::TsMux` for several by link degree
 (`v.! m.  a.! m.  mpegtsmux name=m`), mirroring gst's request sink pads.
 
+The TS stack also carries KLV metadata (STANAG 4609, the airborne-ISR profile of
+MPEG-TS): `Caps::Klv` is the metadata elementary-stream caps (GStreamer
+`meta/x-klv`), each frame one SMPTE ST 336 key-length-value packet. On the mux
+side a `Caps::Klv` input becomes a private PES (stream_type 0x06, PES
+`private_stream_1`) whose PMT entry carries the `KLVA` registration descriptor,
+the MISB ST 1402 asynchronous carriage ffmpeg keys on; the demux side accepts
+both that and metadata-in-PES (stream_type 0x15, the synchronous carriage) via
+`TsStream::Klv` (`tsdemux stream=klv`), filtering generic 0x06 PIDs by the
+registration the way Opus / DVB AC-3 selection does. `klv-sync` on the mux
+elements selects the strict synchronous form instead: stream_type 0x15 on PES
+`stream_id` 0xFC, each local set wrapped in one ISO 13818-1 metadata AU cell
+(the 5-byte header ffmpeg's demuxer skips per ST 1402; layout cross-checked
+against mediacommon's table 2-97 implementation), and a `metadata_descriptor`
+(tag 0x26, 'KLVA') in the PMT entry, which measurement showed ffmpeg requires
+to identify a 0x15 stream at all. The demux unwraps AU cells behind a
+validation gate (cells must tile the payload exactly and each must open with
+the ST 336 prefix) and forwards anything else raw, so both the strict and the
+bare-payload sync forms decode. Above carriage,
+`g2g-plugins::klv` is a pure `no_std` MISB ST 0601 UAS Datalink Local Set codec:
+`UasDatalink` decodes / encodes the core telemetry tags (precision timestamp,
+platform attitude, sensor position / FOV / relative angles, frame center) with
+the standard's fixed-point scalings, BER lengths and BER-OID tags
+bounds-checked, and the 16-bit sum checksum (tag 1) required on parse, so a
+corrupted set is rejected whole. The `klvdecode` element turns each set into a
+timed `Text{Utf8}` `key=value` line (`tsdemux stream=klv ! klvdecode !
+textoverlay` overlays live telemetry); the encode direction is the
+`UasDatalink::encode` API through an app source. Interop is validated against
+ffmpeg both ways: ffprobe identifies the g2g mux's stream as `klv` and extracts
+its bytes bit-exact, and a TS re-authored by ffmpeg's muxer demuxes back
+bit-exact.
+
+The tag table covers the practical ST 0601 core: telemetry angles and
+positions, the identity strings (mission id, platform designation, image
+source sensor, coordinate system), slant range / target width, the four offset
+corner points, target location, and the nested MISB ST 0102 security local set
+(tag 48) as a typed `SecurityLocalSet` (classification enum preserved even for
+unknown codes, country coding methods, classifying / object countries), every
+scale factor cross-checked against the independent klvdata implementation and
+the whole parser validated against the published MISMMS reference packet.
+That packet's declared checksum is provably wrong (0xAA43 declared, 0x3E1E
+actual, klvdata's own sum agrees), which is why `parse` (strict, the
+`klvdecode` default) is paired with `parse_lenient` and a `verify-checksum`
+property: real encoders get checksums wrong, and the caller chooses whether
+that drops the set. KLV also rides RTP directly (RFC 6597, `rtpklv`): a
+sans-IO `RtpKlvPacketizer` / `RtpKlvDepayloader` pair mirroring the H.264
+`rtppay` / `rtpdepay` shape, 90 kHz timestamps, MTU fragmentation with the
+marker bit closing each KLVunit, and whole-unit discard on any lost fragment
+(a fragment carries no unit header, so resync waits for the next marker).
+
+Around that core sit the rest of the STANAG 4609 pieces. `vmti` is the MISB ST
+0903 moving-target set (ST 0601 tag 74, nested with no UL or checksum;
+standalone it carries both), decoding the VTarget series with ST 1201 IMAPB
+scaling along with each target's nested VMask (pixel polygon / run-length
+mask), VObject (ontology class), VTracker (track id, life cycle, velocity and
+acceleration packs) and VChip (image chip) sets, and `vmti_from_analytics`
+turns a frame's `AnalyticsMeta` detections into VTargets (a tracked detection
+carries its `object_id` as the target id), so an in-pipeline detector emits
+standards-compliant VMTI. The ST 1204 MIIS core identifier (tag 94)
+round-trips exactly, refusing rather than half-reading an identifier it cannot
+reproduce, and renders the standard text form (grouped hex UUIDs with the
+Appendix B permutation check value). `misptime` puts MISB ST 0604 microsecond
+timestamps in an H.264 / H.265 SEI so video frames and KLV correlate after a
+remux; extraction emits text cues rather than restamping PTS, since an absolute
+epoch time on a frame would read as decades of lateness to every sink.
+`cotsink` maps decoded telemetry to Cursor-on-Target XML for TAK / ATAK, one
+event per local set with the platform as the point and the frame center as a
+`<sensor>` cone; with `spi=true` it also emits the ST 0805.1 Sensor Point of
+Interest event (`b-m-p-s-p-i` at the target location or frame center, linked
+to the platform track by `<link relation="p-p">`, jmisb's `KlvToCot`
+conventions). `st2022fec` is SMPTE 2022-1 (Pro-MPEG COP3) FEC for TS over
+RTP: the wire format only, since the 2D row / column XOR algebra and the
+receiver bookkeeping now live once in `ulpfec` and serve `flexfec` and this
+alike. It derives each repair's protected set from that repair's own
+SNBase / offset / NA rather than learning global L / D, so a mid-stream
+geometry change still decodes, and it refuses a repair whose type field is not
+XOR instead of applying the wrong algorithm to it.
+
+Every wire format here was verified against a primary implementation rather
+than prose: jmisb for ST 0903 / ST 1204 / ST 0805, GStreamer's `video-sei`
+parser plus a real capture vector for ST 0604, FFmpeg's `prompeg` and
+GStreamer's `rtpst2022-1-fecenc` (which agree field for field) for ST 2022-1,
+and MITRE's CoT schema with pytak's constants for CoT. Where a field could not be
+confirmed, the codec preserves the raw bytes or declines to emit rather than
+guessing: the VTarget location pack's accuracy tail is kept verbatim, and the
+unconfirmed CoT detail elements are simply not written.
+
 The Matroska / WebM demuxer is the second, the same parser + element split
 keyed on `Caps::ByteStream{Matroska}`. `g2g-plugins::matroska::MatroskaDemuxer` is
 a pure EBML parser (variable-length element IDs / sizes, descend into the Segment,
@@ -1882,7 +1978,16 @@ libopus for it, since the decoder is per-channel-count). So a decode-to-PCM line
 negotiates before the count is known. `AudioConvert` is caps-driven like
 `AudioResample`: a bare `audioconvert` takes its output format / channel count
 from a downstream capsfilter (a mono `channels=1` pin) and otherwise passes the
-input through.
+input through. Its channel mixing is position-aware for multichannel (either
+side > 2): speaker positions come from `g2g_core::ChannelLayout::default_for`,
+the per-count layout convention (the ffmpeg default-layout table, which is the
+order the decode path interleaves), and the mix matrix applies the ITU
+BS.775-style coefficients (center and surrounds fold at 1/sqrt(2), back center
+at 0.5 into each front, LFE dropped, normalized against clipping), verified
+coefficient-for-coefficient against ffmpeg's default rematrix; upmix places
+each input at its own speaker and leaves the rest silent. Counts past the
+layout table (> 8) fall back to the layout-agnostic round-robin fold so no
+channel is silently dropped.
 
 The FLV demuxer is the fourth, on `Caps::ByteStream{Flv}`.
 `g2g-plugins::flv::FlvDemuxer` parses the flat FLV tag stream (the "FLV" header,
@@ -1914,7 +2019,22 @@ Adaptive streaming sits one layer above these demuxers: an HTTP byte source feed
 a playlist/manifest-driven source that fetches media segments and hands them to
 the matching byte-stream demuxer. `g2g-plugins::httpsrc::HttpSrc` (the `http-src`
 feature, `reqwest`) GETs a URL and streams the body as `Caps::ByteStream` chunks,
-the fetch layer the others share. Because a manifest/segment URL is
+the fetch layer the others share. It owns the network-buffering story
+(`prebuffer-bytes` + `with_bus`, the queue2 analog since g2g has no queue
+element): when set, `run` fills a bounded byte window before pushing downstream,
+posting `BusMessage::Buffering` percent on quartile transitions, streams through
+while topping the window up without waiting, and re-enters buffering on a
+mid-stream underrun (window empty, network not ready), so an application can
+pause until `100` and show a buffering indicator on a stall. The window never
+grows past the target, and `0` (the default) streams straight through. The
+segment loops (`hlssrc` / `dashsrc`) carry the duration-keyed sibling
+(`prebuffer-ms` + `with_bus`, M819): a `segprebuf::SegmentPrebuffer` window the
+loop fetches into while below its duration target (summed `#EXTINF` / MPD
+segment durations) and emits from otherwise, posting the same quartile
+`Buffering` levels during the startup / post-seek fill and staying silent in
+steady state; init segments ride the window with duration 0 so an ABR re-init
+stays ordered behind queued media, and a flushing seek clears the window and
+re-arms the fill. Because a manifest/segment URL is
 attacker-controlled, the shared `fetch::get_bytes`/`get_text` never buffer an
 unbounded body: each accumulates the response chunk-by-chunk against a cap
 (`MAX_MANIFEST_BYTES` 16 MiB for playlists/MPDs/keys, `MAX_SEGMENT_BYTES` 256 MiB
@@ -2859,7 +2979,7 @@ The ML element sits in the same memory domain context as the hardware decoder. W
 2. An inline compute shader converts color spaces (e.g. NV12 → planar RGB) and performs normalization scales directly in graphics memory.
 3. The resulting tensor handle is emitted as a `Frame { domain: VulkanTexture(...), caps: Caps::Tensor { .. }, .. }`, submitted straight to the inference backend.
 
-`WgpuPreprocess` (`g2g-ml/src/wgpupreprocess.rs`, `wgpu` feature) is the compute-shader half: an NV12 frame is converted and normalized in a wgpu compute shader to a `Caps::Tensor { F32, [1,3,H,W], Nchw }`, the same contract `OrtInference` builds on the CPU. The default system-memory variant uploads NV12 to a storage buffer and reads the f32 tensor back to `MemoryDomain::System`. **GPU-output mode (`with_gpu_output`)** instead leaves the tensor in a `wgpu::Buffer` and emits `MemoryDomain::WgpuBuffer` (an on-device GPU->GPU copy into a fresh per-frame buffer, no map / read-back in the element), so a downstream GPU consumer reads it on-device; a CPU consumer pays the deferred read-back via the buffer owner. This removes the output-side GPU->CPU copy; `WgpuInference` (§5.2) is the consumer that binds the resulting buffer on-device, so `preprocess -> infer` keeps the tensor on the GPU. **Surface-import input** closes the other end: when the NV12 frame arrives already GPU-resident as a `MemoryDomain::WgpuTexture` (a `WgpuNv12Texture` keep-alive wrapping an R8Uint texture of `width x height*3/2` in standard NV12 byte layout), the element adopts that texture's device and samples it with `textureLoad` straight into the compute pass, with no CPU upload, bit-identical to the storage-buffer path. With both ends GPU-resident, `surface -> WgpuPreprocess -> WgpuInference` runs with the pixels never touching the CPU. **CUDA<->wgpu interop (`CudaToWgpu`, `g2g-plugins/src/cudawgpu.rs`)** joins the NVDEC decode side to this surface-import path: there is no portable "share this CUDA pointer with wgpu" call, so the bridge allocates an exportable Vulkan image (`VK_KHR_external_memory_fd`, wrapped as a `wgpu::Texture` via wgpu-hal), CUDA imports the same memory by FD (`cuImportExternalMemory`) and copies the NVDEC NV12 planes into it device->device, and the wgpu device travels on the frame's keep-alive so `WgpuPreprocess` adopts it (the device-identity pattern). The whole `NVDEC -> CudaToWgpu -> WgpuPreprocess -> WgpuInference` chain is validated on an RTX 3060, matching a CPU reference with no PCIe download. Shared images are recycled from a reuse pool: the Vulkan image, its CUDA import, and the `wgpu::Texture` are allocated once and returned to a free list when the downstream frame is released (a drop guard on the emitted keep-alive), so per frame only the two device->device plane copies and a sync run; a recycled entry is drained (`Device::poll`) before reuse since a wgpu submission may still sample it. The pool cut the bridge step ~2.6x at 1080p (p50 0.38 ms pooled vs 0.98 ms per-frame-allocated). **The reverse direction (`WgpuToCuda`)** closes the *encode* side: a renderer writes a packed-RGBA `wgpu::Texture` on FD-exportable Vulkan memory (`export_rgba_image` / `wrap_rgba_as_texture`, the `R8G8B8A8` mirror), CUDA imports it as a 4-channel array, and `to_cuda_frame` copies it device->device into a linear `CUdeviceptr` emitted as a `MemoryDomain::Cuda` `Rgba8` frame that `NvEnc` registers as `ABGR` (§4.11.3). So a GPU render reaches the H.264 encoder with no device->host read-back, validated on an RTX 3060 (`wgpu_to_cuda` test). This is the zero-copy egress for server-side rendering / cloud-gaming, and `examples/bevy-g2g-stream` is the runnable Bevy proof: Bevy renders on the interop device, g2g copies the target through `WgpuToCuda`, and `NvEnc` emits H.264 without a full-frame download. The bridge retains its own CUDA primary context (the GPU the interop device selects) and owns the exportable render-target texture.
+`WgpuPreprocess` (`g2g-ml/src/wgpupreprocess.rs`, `wgpu` feature) is the compute-shader half: an NV12 frame is converted and normalized in a wgpu compute shader to a `Caps::Tensor { F32, [1,3,H,W], Nchw }`, the same contract `OrtInference` builds on the CPU. The default system-memory variant uploads NV12 to a storage buffer and reads the f32 tensor back to `MemoryDomain::System`. **GPU-output mode (`with_gpu_output`)** instead leaves the tensor in a `wgpu::Buffer` and emits `MemoryDomain::WgpuBuffer` (an on-device GPU->GPU copy into a fresh per-frame buffer, no map / read-back in the element), so a downstream GPU consumer reads it on-device; a CPU consumer pays the deferred read-back via the buffer owner. This removes the output-side GPU->CPU copy; `WgpuInference` (§5.2) is the consumer that binds the resulting buffer on-device, so `preprocess -> infer` keeps the tensor on the GPU. **Surface-import input** closes the other end: when the NV12 frame arrives already GPU-resident as a `MemoryDomain::WgpuTexture` (a `WgpuNv12Texture` keep-alive wrapping an R8Uint texture of `width x height*3/2` in standard NV12 byte layout), the element adopts that texture's device and samples it with `textureLoad` straight into the compute pass, with no CPU upload, bit-identical to the storage-buffer path. With both ends GPU-resident, `surface -> WgpuPreprocess -> WgpuInference` runs with the pixels never touching the CPU. **CUDA<->wgpu interop (`CudaToWgpu`, `g2g-plugins/src/cudawgpu.rs`)** joins the NVDEC decode side to this surface-import path: there is no portable "share this CUDA pointer with wgpu" call, so the bridge allocates an exportable Vulkan image (`VK_KHR_external_memory_fd`, wrapped as a `wgpu::Texture` via wgpu-hal), CUDA imports the same memory by FD (`cuImportExternalMemory`) and copies the NVDEC NV12 planes into it device->device, and the wgpu device travels on the frame's keep-alive so `WgpuPreprocess` adopts it (the device-identity pattern). The whole `NVDEC -> CudaToWgpu -> WgpuPreprocess -> WgpuInference` chain is validated on an RTX 3060, matching a CPU reference with no PCIe download. Shared images are recycled from a reuse pool: the Vulkan image, its CUDA import, and the `wgpu::Texture` are allocated once and returned to a free list when the downstream frame is released (a drop guard on the emitted keep-alive), so per frame only the two device->device plane copies and a sync run; a recycled entry is drained (`Device::poll`) before reuse since a wgpu submission may still sample it. The pool cut the bridge step ~2.6x at 1080p (p50 0.38 ms pooled vs 0.98 ms per-frame-allocated). **The reverse direction (`WgpuToCuda`)** closes the *encode* side: a renderer writes a packed-RGBA `wgpu::Texture` on FD-exportable Vulkan memory (`export_rgba_image` / `wrap_rgba_as_texture`, the `R8G8B8A8` mirror), CUDA imports it as a 4-channel array, and `to_cuda_frame` copies it device->device into a linear `CUdeviceptr` emitted as a `MemoryDomain::Cuda` `Rgba8` frame that `NvEnc` registers as `ABGR` (§4.11.3). So a GPU render reaches the H.264 encoder with no device->host read-back, validated on an RTX 3060 (`wgpu_to_cuda` test). This is the zero-copy egress for server-side rendering / cloud-gaming, and the `bevy-g2g` crate's `RemoteRenderPlugins` is the packaged Bevy proof (M796): Bevy renders on the interop device, g2g copies the target through `WgpuToCuda`, and `NvEnc` emits H.264 without a full-frame download, egressing to WHIP/WebRTC or a file; without an NVIDIA GPU the plugin falls back to a GPU->CPU readback + libx264 encode so the same app streams on any adapter. The crate completes the remote-rendering loop with a WebSocket input backchannel (M797: viewer keyboard/mouse injected as ordinary Bevy input messages; a WebRTC data channel cannot reach the publisher through a WHIP/WHEP server, the viewer being a separate peer connection) and a windowed mode (M798: the scene camera renders to the stream texture and the window shows it through a fullscreen UI mirror, so desktop view and stream are the same pixels). The bridge retains its own CUDA primary context (the GPU the interop device selects) and owns the exportable render-target texture.
 
 ### 5.2 Unified Pure-Rust Inference Backends
 `g2g` avoids bundling heavy, unsafe proprietary C++ engines. The `g2g-ml` crate provides wrapper elements targeting two execution paradigms:
@@ -2970,14 +3090,16 @@ picture. Two pieces, both `no_std`-friendly:
   texture produced through a `from_wgpu` context reads back correctly on the
   embedder's own device handles). The frame still flows to the app through any
   sink, including the `appsink` pull channel, which carries a GPU-domain `Frame`
-  unchanged. `examples/bevy-g2g-decode` (M741) is the runnable proof: a stock
-  Bevy app adopts its own render device into `from_wgpu`, a
+  unchanged. The `bevy-g2g` crate's `VideoPlayerPlugin` (M741 -> M796) is the
+  packaged proof: a stock Bevy app's render device is adopted into `from_wgpu`
+  in the plugin's `finish`, a
   `filesrc -> h264parse -> ffmpegdec -> videoconvert -> vello overlay -> appsink`
   pipeline lands each decoded frame in a `wgpu::Texture` on Bevy's device, and
-  the app registers it as a render-world `GpuImage` and samples it on a spinning
-  cube (through an sRGB view; the overlay's texture lists `Rgba8UnormSrgb` in
-  `view_formats` for exactly this). The mirror of `bevy-g2g-stream` (§4.11.3),
-  which renders in Bevy and encodes in g2g.
+  the plugin registers it as a render-world `GpuImage` and binds it to the
+  material of every `VideoScreen`-tagged mesh (through an sRGB view; the
+  overlay's texture lists `Rgba8UnormSrgb` in `view_formats` for exactly this).
+  The mirror of the crate's streaming side (§4.11.3), which renders in Bevy and
+  encodes in g2g.
 
 ---
 

@@ -1,0 +1,58 @@
+# Bevy integration crate (M796): NOT a workspace member (see root Cargo.toml
+# `exclude`). It builds against g2g as path packages and pins its own deps in a
+# local Cargo.lock, so the heavy Bevy dependency never enters the workspace
+# build / CI.
+[package]
+name = "bevy-g2g"
+version = "0.1.0"
+edition = "2021"
+license = "MPL-2.0"
+publish = false
+
+# An empty [workspace] table makes this crate its own workspace root, so cargo
+# does not try to fold it into the parent workspace (it is excluded there too).
+[workspace]
+
+[features]
+default = []
+# Zero-copy render -> CUDA -> NVENC encode (NVIDIA only). Without it (or when
+# the interop device cannot be created at runtime) streaming falls back to a
+# GPU -> CPU readback + libx264 software encode that works on any adapter.
+nvenc = ["g2g-plugins/cuda-wgpu", "g2g-plugins/nvenc"]
+# VideoPlayerPlugin: g2g decodes video onto Bevy's own wgpu device.
+decode = ["g2g-plugins/vello-overlay"]
+
+[dependencies]
+# Bevy 0.19 pins wgpu 29.0.3, the exact version g2g uses, so the two share one
+# wgpu in this crate's lockfile and a `wgpu::Texture`/`Device` crosses between
+# them with no type mismatch, the prerequisite for `GpuContext::from_wgpu`.
+bevy = "0.19"
+wgpu = "29"
+
+g2g-core = { path = "../g2g-core", features = ["std", "runtime"] }
+# webrtc: WebRtcSink (WHIP egress). ffmpeg: the software H.264 encoder for the
+# readback fallback path and the decoder for the `decode` feature.
+g2g-plugins = { path = "../g2g-plugins", features = ["std", "webrtc", "ffmpeg"] }
+
+# block_on for the render-world encode (no tokio reactor needed there).
+pollster = "0.4"
+# WebRtcSink does reqwest + tokio::spawn for the WHIP handshake / session, so
+# the sink pipeline runs inside a tokio runtime.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net"] }
+# Render-world -> main-world frame hand-off (the pattern Bevy's
+# headless_renderer example uses).
+crossbeam-channel = "0.5"
+
+# Input backchannel: WebSocket server (0.24 matches g2g's remote-ws) + JSON
+# input protocol.
+tokio-tungstenite = "0.24"
+futures-util = { version = "0.3", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[[example]]
+name = "stream"
+
+[[example]]
+name = "decode"
+required-features = ["decode"]

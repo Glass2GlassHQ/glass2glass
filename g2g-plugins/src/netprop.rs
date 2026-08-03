@@ -44,6 +44,33 @@ pub(crate) fn get_addr_prop(addr: &SocketAddr, addr_key: &str, name: &str) -> Op
     None
 }
 
+/// Set a `frame_limit: u64` field (0 = unlimited) from a GStreamer-style
+/// `num-buffers` value: -1 selects unlimited, positive n a bounded run. 0 is
+/// rejected, since the internal sentinel cannot express "emit none".
+#[cfg(any(feature = "rtsp-server", feature = "srt", feature = "udp-ingress"))]
+pub(crate) fn set_frame_limit(limit: &mut u64, value: &PropValue) -> Result<(), PropError> {
+    match value.as_int().ok_or(PropError::Type)? {
+        n if n < 0 => {
+            *limit = 0;
+            Ok(())
+        }
+        0 => Err(PropError::Value),
+        n => {
+            *limit = n as u64;
+            Ok(())
+        }
+    }
+}
+
+/// The read half of [`set_frame_limit`]: unlimited reads back as -1.
+#[cfg(any(feature = "rtsp-server", feature = "srt", feature = "udp-ingress"))]
+pub(crate) fn get_frame_limit(limit: u64) -> PropValue {
+    PropValue::Int(match limit {
+        0 => -1,
+        n => n as i64,
+    })
+}
+
 fn set_ip(addr: &mut SocketAddr, value: &PropValue) -> Result<(), PropError> {
     let ip = value
         .as_str()

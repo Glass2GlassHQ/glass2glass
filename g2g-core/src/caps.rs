@@ -95,6 +95,11 @@ pub enum Caps {
     /// per-use-case variant, so an overlay, a caption sink, and a text analytics
     /// element all negotiate the same caps.
     Text { format: TextFormat },
+    /// A KLV (SMPTE ST 336 key-length-value) metadata stream, each frame one KLV
+    /// packet (for STANAG 4609 UAS streams, a MISB ST 0601 local set). The
+    /// elementary metadata stream a transport demuxer splits out alongside video,
+    /// timed by the frame's PTS (GStreamer `meta/x-klv`).
+    Klv,
 }
 
 impl Caps {
@@ -110,7 +115,10 @@ impl Caps {
             Caps::RawVideo { .. } => true,
             Caps::Tensor { .. } => true,
             Caps::Audio { format, .. } => is_pcm(*format),
-            Caps::CompressedVideo { .. } | Caps::ByteStream { .. } | Caps::Text { .. } => false,
+            Caps::CompressedVideo { .. }
+            | Caps::ByteStream { .. }
+            | Caps::Text { .. }
+            | Caps::Klv => false,
         }
     }
 
@@ -214,6 +222,7 @@ impl Caps {
                 Ok(self.clone())
             }
             (Caps::Text { format: fa }, Caps::Text { format: fb }) if fa == fb => Ok(self.clone()),
+            (Caps::Klv, Caps::Klv) => Ok(Caps::Klv),
             _ => Err(G2gError::CapsMismatch),
         }
     }
@@ -291,7 +300,9 @@ impl Caps {
                 channels: FIXATE_CHANNELS_PLACEHOLDER,
                 sample_rate: *sample_rate,
             }),
-            Caps::Audio { .. } | Caps::ByteStream { .. } | Caps::Text { .. } => Ok(self.clone()),
+            Caps::Audio { .. } | Caps::ByteStream { .. } | Caps::Text { .. } | Caps::Klv => {
+                Ok(self.clone())
+            }
             Caps::Tensor { .. } => Ok(self.clone()),
         }
     }
@@ -314,7 +325,7 @@ impl Caps {
                 framerate,
                 ..
             } => Some((width, height, framerate)),
-            Caps::Audio { .. } | Caps::ByteStream { .. } | Caps::Text { .. } => None,
+            Caps::Audio { .. } | Caps::ByteStream { .. } | Caps::Text { .. } | Caps::Klv => None,
             Caps::Tensor { .. } => None,
         }
     }
@@ -379,6 +390,7 @@ impl Caps {
             }
             Caps::ByteStream { encoding } => String::from(bytestream_gst_media_type(*encoding)),
             Caps::Text { format } => String::from(text_format_gst_media_type(*format)),
+            Caps::Klv => String::from("meta/x-klv"),
         }
     }
 }

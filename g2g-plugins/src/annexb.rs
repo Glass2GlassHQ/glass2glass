@@ -542,6 +542,40 @@ pub(crate) fn add_emulation_prevention(rbsp: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Read an SEI `0xFF`-extended value (`payloadType` / `payloadSize`): a run of
+/// `0xFF` bytes each adding 255, then a final byte. Returns the value and the
+/// index past it, or `None` if the buffer ends mid-value.
+pub(crate) fn read_ff_extended(data: &[u8], mut i: usize) -> Option<(usize, usize)> {
+    let mut value: usize = 0;
+    loop {
+        let b = *data.get(i)?;
+        i += 1;
+        value = value.checked_add(b as usize)?;
+        if b != 0xFF {
+            return Some((value, i));
+        }
+    }
+}
+
+/// Byte offset of the start code of the first VCL slice NAL in an Annex-B access
+/// unit, or `None` if there is none. H.264 VCL NAL types are 1..=5; H.265 VCL
+/// types are 0..=31.
+pub(crate) fn vcl_start(au: &[u8], codec: VideoCodec) -> Option<usize> {
+    let mut pos = 0usize;
+    while let Some((sc, begin)) = next_start_code(au, pos) {
+        let hdr = *au.get(begin)?;
+        let is_vcl = match codec {
+            VideoCodec::H265 => ((hdr >> 1) & 0x3F) < 32,
+            _ => (1..=5).contains(&(hdr & 0x1F)),
+        };
+        if is_vcl {
+            return Some(sc);
+        }
+        pos = begin;
+    }
+    None
+}
+
 /// MSB-first bit reader over a byte slice, the shared bitstream cursor for the
 /// H.264 / H.265 SPS parsers. All readers return `None` on EOF rather than
 /// panicking, so a partial / malformed header propagates as "field unknown"

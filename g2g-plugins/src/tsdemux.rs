@@ -39,12 +39,23 @@ use g2g_core::{
 
 use crate::demuxseek::{Admit, DemuxSeek};
 use crate::mpegts::{
-    EsUnit, TsDemuxer, STREAM_TYPE_AAC, STREAM_TYPE_AC3, STREAM_TYPE_H264, STREAM_TYPE_H265,
-    STREAM_TYPE_MPEG1_AUDIO, STREAM_TYPE_MPEG2_AUDIO, STREAM_TYPE_MPEG4P2, STREAM_TYPE_PRIVATE_PES,
-    TS_PACKET_LEN,
+    unwrap_metadata_au_cells, EsUnit, TsDemuxer, STREAM_TYPE_AAC, STREAM_TYPE_AC3,
+    STREAM_TYPE_H264, STREAM_TYPE_H265, STREAM_TYPE_METADATA_PES, STREAM_TYPE_MPEG1_AUDIO,
+    STREAM_TYPE_MPEG2_AUDIO, STREAM_TYPE_MPEG4P2, STREAM_TYPE_PRIVATE_PES, TS_PACKET_LEN,
 };
 
 const TS_SYNC: u8 = 0x47;
+
+/// The bytes to forward for one access unit: a metadata-in-PES (0x15) payload
+/// has its ISO 13818-1 AU cells unwrapped when it carries them (a spec-strict
+/// synchronous KLV writer), and is forwarded unchanged otherwise. Every other
+/// stream type passes through.
+fn unwrap_sync_klv(stream_type: u8, data: Vec<u8>) -> Vec<u8> {
+    if stream_type != STREAM_TYPE_METADATA_PES {
+        return data;
+    }
+    unwrap_metadata_au_cells(&data).unwrap_or(data)
+}
 
 /// Which elementary stream a [`TsDemux`] instance forwards. A TS multiplex
 /// carries several (video + audio); this element has one output pad, so it emits
@@ -73,6 +84,12 @@ pub enum TsStream {
     /// private PES (0x06) carrying an AC-3 descriptor. Self-syncing frames are
     /// forwarded raw.
     Ac3,
+    /// The first KLV metadata elementary stream (STANAG 4609 / MISB ST 1402):
+    /// a private PES (0x06) carrying a 'KLVA' registration descriptor
+    /// (asynchronous KLV), or a metadata-in-PES (0x15) stream (synchronous KLV).
+    /// Each PES payload (one or more SMPTE ST 336 KLV packets) is forwarded raw
+    /// as one `Caps::Klv` frame.
+    Klv,
 }
 
 /// Demuxes an MPEG-TS byte stream into one selected elementary stream.
@@ -207,6 +224,8 @@ impl TsDemux {
             STREAM_TYPE_PRIVATE_PES if es.opus_channels.is_some() => audio(AudioFormat::Opus),
             STREAM_TYPE_AC3 => audio(AudioFormat::Ac3),
             STREAM_TYPE_PRIVATE_PES if es.ac3 => audio(AudioFormat::Ac3),
+            // KLV metadata: no dedicated StreamType kind, the caps classify it.
+            _ if es.klv => (StreamType::Unknown, Caps::Klv),
             _ => return None,
         };
         Some(Stream::new(id, stream_type, caps))
@@ -264,6 +283,7 @@ impl TsDemux {
             TsStream::Mp2 => Self::compressed_audio(AudioFormat::Mp2),
             TsStream::Opus => Self::compressed_audio(AudioFormat::Opus),
             TsStream::Ac3 => Self::compressed_audio(AudioFormat::Ac3),
+            TsStream::Klv => Caps::Klv,
         }
     }
 
@@ -305,16 +325,22 @@ impl TsDemux {
             TsStream::Mp2 => STREAM_TYPE_MPEG1_AUDIO,
             TsStream::Opus => STREAM_TYPE_PRIVATE_PES,
             TsStream::Ac3 => STREAM_TYPE_AC3,
+            TsStream::Klv => STREAM_TYPE_PRIVATE_PES,
         }
     }
 
     /// Whether a selection carries a PMT `stream_type`. Mp2 accepts both MPEG-1
     /// (0x03) and MPEG-2 (0x04) audio; Opus accepts the private PES 0x06 (the
-    /// 'Opus' registration is checked separately, at PMT parse).
+    /// 'Opus' registration is checked separately, at PMT parse); Klv accepts the
+    /// private PES 0x06 (the 'KLVA' registration likewise) and metadata-in-PES
+    /// 0x15.
     fn accepts_stream_type(stream: TsStream, stream_type: u8) -> bool {
         match stream {
             TsStream::Mp2 => {
                 stream_type == STREAM_TYPE_MPEG1_AUDIO || stream_type == STREAM_TYPE_MPEG2_AUDIO
+            }
+            TsStream::Klv => {
+                stream_type == STREAM_TYPE_PRIVATE_PES || stream_type == STREAM_TYPE_METADATA_PES
             }
             other => Self::selected_stream_type(other) == stream_type,
         }
@@ -374,6 +400,14 @@ impl TsDemux {
             {
                 continue;
             }
+            // And for KLV on a private PES: only a PID whose descriptors carried
+            // the 'KLVA' registration is KLV (metadata-in-PES 0x15 needs none).
+            if self.stream == TsStream::Klv
+                && u.stream_type == STREAM_TYPE_PRIVATE_PES
+                && !self.demux.is_klv(u.pid)
+            {
+                continue;
+            }
             let pts_ns = u
                 .pts_90khz
                 .map(|p| (p as u128 * 1_000_000_000 / 90_000) as u64)
@@ -392,7 +426,9 @@ impl TsDemux {
                 TsStream::Mpeg4Part2 => {
                     crate::annexb::au_is_keyframe(VideoCodec::Mpeg4Part2, &u.data)
                 }
-                TsStream::Aac | TsStream::Mp2 | TsStream::Opus | TsStream::Ac3 => true,
+                TsStream::Aac | TsStream::Mp2 | TsStream::Opus | TsStream::Ac3 | TsStream::Klv => {
+                    true
+                }
             };
             match self.seek.admit(pts_ns, keyframe) {
                 Admit::Drop => continue,
@@ -406,8 +442,9 @@ impl TsDemux {
                 self.emit_opus(u, pts_ns, out).await?;
                 continue;
             }
+            let data = unwrap_sync_klv(u.stream_type, u.data);
             let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(u.data.into_boxed_slice())),
+                MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
                 FrameTiming {
                     pts_ns,
                     dts_ns,
@@ -581,7 +618,7 @@ static TSDEMUX_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "stream",
         PropKind::Str,
-        "elementary stream to emit: h264 | h265 | aac | mp2 | opus | ac3",
+        "elementary stream to emit: h264 | h265 | aac | mp2 | opus | ac3 | klv",
     ),
     PropertySpec::new(
         "program-number",
@@ -617,6 +654,7 @@ fn ts_stream_from_str(s: &str) -> Option<TsStream> {
         "mp2" => Some(TsStream::Mp2),
         "opus" => Some(TsStream::Opus),
         "ac3" => Some(TsStream::Ac3),
+        "klv" => Some(TsStream::Klv),
         _ => None,
     }
 }
@@ -631,6 +669,7 @@ pub(crate) fn ts_stream_to_str(stream: TsStream) -> &'static str {
         TsStream::Mp2 => "mp2",
         TsStream::Opus => "opus",
         TsStream::Ac3 => "ac3",
+        TsStream::Klv => "klv",
     }
 }
 
@@ -647,6 +686,8 @@ fn es_to_ts_stream(es: &crate::mpegts::ElementaryStream) -> Option<TsStream> {
         STREAM_TYPE_PRIVATE_PES if es.opus_channels.is_some() => Some(TsStream::Opus),
         STREAM_TYPE_AC3 => Some(TsStream::Ac3),
         STREAM_TYPE_PRIVATE_PES if es.ac3 => Some(TsStream::Ac3),
+        // KLV stays out: this feeds the playbin fan-out, which builds A/V decode
+        // branches only (a klv port is selected explicitly on TsDemux / TsDemuxN).
         _ => None,
     }
 }
@@ -699,6 +740,7 @@ impl PadTemplates for TsDemux {
             Self::output_caps(TsStream::Mp2),
             Self::output_caps(TsStream::Opus),
             Self::output_caps(TsStream::Ac3),
+            Self::output_caps(TsStream::Klv),
         ]));
         Vec::from([
             PadTemplate::sink(CapsSet::one(Self::input_caps())),
@@ -898,6 +940,15 @@ impl TsDemuxN {
             let Some(port) = self.port_for_stream_type(u.stream_type) else {
                 continue; // a stream no selected port carries
             };
+            // A private (0x06) PES routed to a klv port is only KLV when its PMT
+            // descriptors carried the 'KLVA' registration (the single-output
+            // demuxer applies the same filter in emit_units).
+            if self.ports[port] == TsStream::Klv
+                && u.stream_type == STREAM_TYPE_PRIVATE_PES
+                && !self.demux.is_klv(u.pid)
+            {
+                continue;
+            }
             if !self.announced[port] {
                 out.push_to(
                     port,
@@ -916,8 +967,9 @@ impl TsDemuxN {
                 .dts_90khz
                 .map(|d| (d as u128 * 1_000_000_000 / 90_000) as u64)
                 .unwrap_or(pts_ns);
+            let data = unwrap_sync_klv(u.stream_type, u.data);
             let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(u.data.into_boxed_slice())),
+                MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
                 FrameTiming {
                     pts_ns,
                     dts_ns,
@@ -1070,6 +1122,7 @@ mod tests {
             stream_type: STREAM_TYPE_MPEG4P2,
             opus_channels: None,
             ac3: false,
+            klv: false,
         };
         let stream = TsDemux::es_to_stream(&es).expect("0x10 is forwarded");
         assert_eq!(stream.stream_type, StreamType::Video);
@@ -1090,6 +1143,7 @@ mod tests {
                 stream_type: STREAM_TYPE_MPEG4P2,
                 opus_channels: None,
                 ac3: false,
+                klv: false,
             }),
             Some(TsStream::Mpeg4Part2)
         );

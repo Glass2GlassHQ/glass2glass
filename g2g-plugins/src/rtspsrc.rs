@@ -218,8 +218,10 @@ impl SourceLoop for RtspSrc {
             // Fast path: caller-supplied geometry skips the probe.
             // Framerate stays as a fixable Range (Any would be rejected
             // by `Caps::fixate`); the real value lands as a mid-stream
-            // `CapsChanged` if the SDP carries one.
-            if let Some((w, h)) = self.expected_dims {
+            // `CapsChanged` if the SDP carries one. Both dims must be set:
+            // a half-set property pair (only `width=` in a launch line)
+            // falls through to the probe instead of advertising a 0 dim.
+            if let Some((w, h)) = self.expected_dims.filter(|(w, h)| *w > 0 && *h > 0) {
                 return Ok(Caps::CompressedVideo {
                     codec: VideoCodec::H264,
                     width: Dim::Fixed(w),
@@ -286,6 +288,43 @@ impl SourceLoop for RtspSrc {
             .with_default("glass2glass/0.1"),
             PropertySpec::new("user-id", PropKind::Str, "RTSP auth username"),
             PropertySpec::new("user-pw", PropKind::Str, "RTSP auth password"),
+            PropertySpec::new(
+                "num-buffers",
+                PropKind::Int,
+                "frames to emit then EOS (-1 = until the server disconnects)",
+            )
+            .with_default("-1")
+            .with_range("-1", "9223372036854775807"),
+            PropertySpec::new(
+                "width",
+                PropKind::Uint,
+                "expected frame width; with height, skips the negotiation probe (0 = probe)",
+            )
+            .with_default("0"),
+            PropertySpec::new(
+                "height",
+                PropKind::Uint,
+                "expected frame height; with width, skips the negotiation probe (0 = probe)",
+            )
+            .with_default("0"),
+            PropertySpec::new(
+                "reconnect",
+                PropKind::Uint,
+                "max reconnect attempts after a session failure (0 = no reconnect)",
+            )
+            .with_default("0"),
+            PropertySpec::new(
+                "reconnect-backoff",
+                PropKind::Uint,
+                "wait before the first reconnect attempt, milliseconds (doubles per retry)",
+            )
+            .with_default("250"),
+            PropertySpec::new(
+                "reconnect-backoff-max",
+                PropKind::Uint,
+                "cap on the doubling reconnect backoff, milliseconds",
+            )
+            .with_default("5000"),
         ];
         PROPS
     }
@@ -322,6 +361,46 @@ impl SourceLoop for RtspSrc {
                 self.creds = Some(retina::client::Credentials { username, password });
                 Ok(())
             }
+            "num-buffers" => {
+                let n = value.as_int().ok_or(PropError::Type)?;
+                self.target_frames = (n >= 0).then_some(n as u64);
+                Ok(())
+            }
+            // width / height fill the expected-dims pair one leg at a time; the
+            // pair only takes effect once both are nonzero (see intercept_caps).
+            "width" => {
+                let w = value.as_uint().ok_or(PropError::Type)? as u32;
+                let h = self.expected_dims.map(|(_, h)| h).unwrap_or(0);
+                self.expected_dims = Some((w, h));
+                Ok(())
+            }
+            "height" => {
+                let h = value.as_uint().ok_or(PropError::Type)? as u32;
+                let w = self.expected_dims.map(|(w, _)| w).unwrap_or(0);
+                self.expected_dims = Some((w, h));
+                Ok(())
+            }
+            "reconnect" => {
+                let n = value.as_uint().ok_or(PropError::Type)?;
+                self.reconnect.max_attempts = n.min(u32::MAX as u64) as u32;
+                // Fill the backoff defaults like with_reconnect, so a bare
+                // `reconnect=3` retries sensibly.
+                if self.reconnect.initial_backoff_ms == 0 {
+                    self.reconnect.initial_backoff_ms = 250;
+                }
+                if self.reconnect.max_backoff_ms == 0 {
+                    self.reconnect.max_backoff_ms = 5_000;
+                }
+                Ok(())
+            }
+            "reconnect-backoff" => {
+                self.reconnect.initial_backoff_ms = value.as_uint().ok_or(PropError::Type)?;
+                Ok(())
+            }
+            "reconnect-backoff-max" => {
+                self.reconnect.max_backoff_ms = value.as_uint().ok_or(PropError::Type)?;
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -342,6 +421,18 @@ impl SourceLoop for RtspSrc {
                     .map(|c| c.password.clone())
                     .unwrap_or_default(),
             )),
+            "num-buffers" => Some(PropValue::Int(
+                self.target_frames.map(|n| n as i64).unwrap_or(-1),
+            )),
+            "width" => Some(PropValue::Uint(
+                self.expected_dims.map(|(w, _)| w).unwrap_or(0) as u64,
+            )),
+            "height" => Some(PropValue::Uint(
+                self.expected_dims.map(|(_, h)| h).unwrap_or(0) as u64,
+            )),
+            "reconnect" => Some(PropValue::Uint(self.reconnect.max_attempts as u64)),
+            "reconnect-backoff" => Some(PropValue::Uint(self.reconnect.initial_backoff_ms)),
+            "reconnect-backoff-max" => Some(PropValue::Uint(self.reconnect.max_backoff_ms)),
             _ => None,
         }
     }

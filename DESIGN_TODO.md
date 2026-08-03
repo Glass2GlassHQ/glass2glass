@@ -312,11 +312,11 @@ Phased plan:
   `rtmp_ffmpeg_interop` has ffmpeg publish into `RtmpSrc`, ffprobe decoding the
   demuxed FLV; ingest interoperates out of the box. Egress to a real CDN stays
   user-side.)
-- **RTSP server:** RTCP / keepalive during PLAY; ingest multi-client (serving
-  multi-client is done, `RtspServerSink`). The serving *sink*'s TCP-interleaved
-  transport is done (M672: `$`-framed RTP on the control connection, RFC 2326
-  §10.12, validated against `ffmpeg -rtsp_transport tcp` playing from the sink),
-  as is the *ingest* source's (M532).
+- **RTSP server:** ingest multi-client (serving multi-client is done,
+  `RtspServerSink`). The serving *sink*'s TCP-interleaved transport is done
+  (M672: `$`-framed RTP on the control connection, RFC 2326 §10.12, validated
+  against `ffmpeg -rtsp_transport tcp` playing from the sink), as is the
+  *ingest* source's (M532).
 - **`UdpSrc` SDP/SPS-driven caps discovery** (reports a declared hint today).
 - **WebRTC.** On the sans-IO `str0m` stack (ICE / DTLS / SRTP, pure-Rust
   crypto), behind the `webrtc` feature: `WebRtcSink` (WHIP egress, H.264 *or*
@@ -409,9 +409,9 @@ Phased plan:
 - Linux audio sinks (`alsasink` / `pulsesink` / `pipewiresink`): host smoke test
   done (M589, all three validated on Fedora / PipeWire playing a real tone across
   S16 + F32, stereo + mono; `m589_audio_sink_smoke`, skips with no device). Still
-  open: more sample formats (S24 / S32 / U8) and multichannel speaker-position
-  layouts (>2ch, position-aware down/upmix, needs channel-position metadata);
-  DMABUF / zero-copy.
+  open: more sample formats (S24 / S32 / U8); opening a > 2-channel device layout
+  from the sinks (the converter side of speaker positions is done); DMABUF /
+  zero-copy.
 - Generic `GlSink` over EGL (vendor-neutral NV12 / RGBA present, no CUDA).
 
 ## Containers
@@ -509,11 +509,10 @@ _(No open parser items.)_
   the audio branch (M425: `mkvdemux::forwardable_streams` surfaces concrete channels,
   `OpusDec` sink template relaxed to match). The overlay graph runs end to end.
   Remaining playback follow-ups:
-  - **Audio breadth.** The layout-agnostic downmix in `audioconvert` folds
-    channels round-robin rather than applying ITU/speaker-position coefficients
-    (no channel-position metadata is carried yet). The audio sink needs the
-    `pulse-sink` (or `alsa-sink`) feature built in, else `autoaudiosink` falls
-    back to `fakesink`.
+  - **Audio breadth.** The audio sink needs the `pulse-sink` (or `alsa-sink`)
+    feature built in, else `autoaudiosink` falls back to `fakesink`. A carrier
+    for non-default channel orders (a stream whose interleave order differs from
+    the per-count `ChannelLayout` convention) once a real source needs one.
   Parsing SSA / TTML placement into `CueSettings` (only
   WebVTT populates it today, though all three now ride the frame-meta). Glyph
   rendering (incl. `vertical:rl` / `lr` layout) is the `truetype-overlay` feature
@@ -646,6 +645,16 @@ _(No open parser items.)_
 - Property-set the remaining feature-gated sources from text (`location=` /
   `uri=` on rtsp / v4l2, default placeholders today; http / hls / dash now carry
   `location`).
+- **Milestone: g2g-ml elements from a launch line.** One package: a
+  `g2g_ml::register(&mut Registry)` helper (the stock registry is assembled in
+  g2g-plugins, which stays independent of g2g-ml, so apps opt in after building
+  it); `OrtInference` deferred model load so a `model=` property can construct
+  it (today `from_file` loads the session and reads geometry eagerly); runtime
+  properties (`ortinfer` model / tensor-input, `wgpupreprocess` gpu-output,
+  `detectionpostprocess` conf-threshold / iou-threshold / input size). Target:
+  `ortinfer model=yolov8n.onnx tensor-input=true ! detectionpostprocess
+  conf-threshold=0.3` parses and runs. `WgpuInference` is excluded: it is
+  constructed from weight tensors / shapes, which a text line cannot express.
 - A value grammar for spaces / enums-as-named-flags.
 - A GUI / tooling introspection surface beyond the text dump.
 

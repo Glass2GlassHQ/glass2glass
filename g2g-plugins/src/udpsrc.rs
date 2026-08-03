@@ -26,7 +26,7 @@ use g2g_core::{
 
 use crate::filesink::io_err;
 use crate::rtpjitter::JitterConfig;
-use crate::rtprecv::{RtpRecvConfig, DEFAULT_RR_INTERVAL_MS};
+use crate::rtprecv::RtpRecvConfig;
 
 const DEFAULT_WIDTH: u32 = 1280;
 const DEFAULT_HEIGHT: u32 = 720;
@@ -41,22 +41,9 @@ pub struct UdpSrc {
     /// 0 means run until error / downstream shutdown; otherwise stop after this
     /// many access units and emit EOS (the test / bounded path).
     frame_limit: u64,
-    /// Reorder/loss-resilience policy for the receive path.
-    jitter: JitterConfig,
-    /// RTCP receiver-report cadence in ms (0 disables RTCP feedback entirely).
-    rtcp_rr_interval_ms: u64,
-    /// Emit RTPFB Generic NACK for detected gaps (requests retransmission).
-    nack_enabled: bool,
-    /// RFC 4588 RTX: when set, packets on this `(rtx payload type, apt)` are
-    /// reconstructed to the original stream before reordering. `apt` is the
-    /// associated (original) payload type the rebuilt packet is restamped with.
-    rtx: Option<(u8, u8)>,
-    /// RFC 5109 ULPFEC: when set, packets on this payload type are repair packets
-    /// fed to the ULPFEC decoder, which recovers single per-group media losses.
-    fec_pt: Option<u8>,
-    /// RFC 8627 FlexFEC: when set, packets on this payload type are FlexFEC repair
-    /// packets fed to the FlexFEC decoder (the wide-mask sibling of `fec_pt`).
-    flexfec_pt: Option<u8>,
+    /// Receive-path tuning (jitter reorder, RTCP RR/NACK, RTX, ULPFEC/FlexFEC),
+    /// the shared-path config handed to [`crate::rtprecv::receive_rtp_h264`].
+    recv: RtpRecvConfig,
     /// Bound synchronously in `configure_pipeline` (or supplied pre-bound via
     /// `from_socket`); promoted to a tokio socket in `run`, where a runtime
     /// context is guaranteed.
@@ -73,12 +60,7 @@ impl UdpSrc {
             height: DEFAULT_HEIGHT,
             fps: DEFAULT_FPS,
             frame_limit: 0,
-            jitter: JitterConfig::default(),
-            rtcp_rr_interval_ms: DEFAULT_RR_INTERVAL_MS,
-            nack_enabled: true,
-            rtx: None,
-            fec_pt: None,
-            flexfec_pt: None,
+            recv: RtpRecvConfig::default(),
             std_socket: None,
             configured: false,
         }
@@ -120,7 +102,7 @@ impl UdpSrc {
     /// `max_depth` of 0 disables reordering (in-order passthrough). Default is
     /// [`JitterConfig::default`] (50 ms / 64 packets).
     pub fn with_jitter(mut self, max_hold_ms: u64, max_depth: usize) -> Self {
-        self.jitter = JitterConfig::new(max_hold_ms, max_depth);
+        self.recv.jitter = JitterConfig::new(max_hold_ms, max_depth);
         self
     }
 
@@ -129,8 +111,8 @@ impl UdpSrc {
     /// a Generic NACK for each detected gap when `nack` is set. Default is on
     /// (1 s reports, NACK enabled).
     pub fn with_rtcp(mut self, rr_interval_ms: u64, nack: bool) -> Self {
-        self.rtcp_rr_interval_ms = rr_interval_ms;
-        self.nack_enabled = nack;
+        self.recv.rtcp_rr_interval_ms = rr_interval_ms;
+        self.recv.nack_enabled = nack;
         self
     }
 
@@ -139,7 +121,7 @@ impl UdpSrc {
     /// payload type `apt`. The rebuilt original is fed to the jitter buffer like
     /// any other packet, so a retransmission fills its gap.
     pub fn with_rtx(mut self, rtx_payload_type: u8, apt: u8) -> Self {
-        self.rtx = Some((rtx_payload_type & 0x7F, apt & 0x7F));
+        self.recv.rtx = Some((rtx_payload_type & 0x7F, apt & 0x7F));
         self
     }
 
@@ -147,7 +129,7 @@ impl UdpSrc {
     /// recovered media into the jitter buffer, filling a single per-group loss
     /// with no retransmission round trip.
     pub fn with_fec(mut self, fec_payload_type: u8) -> Self {
-        self.fec_pt = Some(fec_payload_type & 0x7F);
+        self.recv.fec_pt = Some(fec_payload_type & 0x7F);
         self
     }
 
@@ -155,7 +137,7 @@ impl UdpSrc {
     /// recovered media into the jitter buffer. FlexFEC's wide mask protects more
     /// than ULPFEC's 16 packets per repair (the sender's `with_flexfec`).
     pub fn with_flexfec(mut self, fec_payload_type: u8) -> Self {
-        self.flexfec_pt = Some(fec_payload_type & 0x7F);
+        self.recv.flexfec_pt = Some(fec_payload_type & 0x7F);
         self
     }
 
@@ -230,17 +212,122 @@ impl SourceLoop for UdpSrc {
             .with_default("0.0.0.0"),
             PropertySpec::new("port", PropKind::Uint, "local UDP port to receive on")
                 .with_range("0", "65535"),
+            PropertySpec::new(
+                "width",
+                PropKind::Uint,
+                "declared frame width hint (the in-band SPS corrects it)",
+            )
+            .with_default("1280"),
+            PropertySpec::new(
+                "height",
+                PropKind::Uint,
+                "declared frame height hint (the in-band SPS corrects it)",
+            )
+            .with_default("720"),
+            PropertySpec::new("framerate", PropKind::Uint, "declared frame rate hint, fps")
+                .with_default("30"),
+            PropertySpec::new(
+                "num-buffers",
+                PropKind::Int,
+                "access units to emit then EOS (-1 = until error/shutdown)",
+            )
+            .with_default("-1")
+            .with_range("-1", "9223372036854775807"),
+            PropertySpec::new(
+                "jitter-latency",
+                PropKind::Uint,
+                "max time to hold a sequence gap before declaring it lost, milliseconds",
+            )
+            .with_default("50"),
+            PropertySpec::new(
+                "jitter-depth",
+                PropKind::Uint,
+                "max packets buffered for reorder (0 = in-order passthrough)",
+            )
+            .with_default("64"),
+            PropertySpec::new(
+                "rtcp-rr-interval",
+                PropKind::Uint,
+                "RTCP receiver-report interval in milliseconds (0 = RTCP off)",
+            )
+            .with_default("1000"),
+            PropertySpec::new(
+                "nack",
+                PropKind::Bool,
+                "request retransmission of detected gaps via RTPFB Generic NACK",
+            )
+            .with_default("true"),
+            PropertySpec::new(
+                "rtx-payload-type",
+                PropKind::Uint,
+                "RFC 4588 RTX stream payload type (0 = off; set rtx-apt too)",
+            )
+            .with_default("0")
+            .with_range("0", "127"),
+            PropertySpec::new(
+                "rtx-apt",
+                PropKind::Uint,
+                "original (associated) payload type RTX packets rebuild to",
+            )
+            .with_default("0")
+            .with_range("0", "127"),
+            PropertySpec::new(
+                "fec-payload-type",
+                PropKind::Uint,
+                "RFC 5109 ULPFEC repair-stream payload type (0 = off)",
+            )
+            .with_default("0")
+            .with_range("0", "127"),
+            PropertySpec::new(
+                "flexfec-payload-type",
+                PropKind::Uint,
+                "RFC 8627 FlexFEC repair-stream payload type (0 = off)",
+            )
+            .with_default("0")
+            .with_range("0", "127"),
         ];
         PROPS
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
-        crate::netprop::set_addr_prop(&mut self.bind, "address", name, &value)
-            .unwrap_or(Err(PropError::Unknown))
+        if let Some(r) = crate::netprop::set_addr_prop(&mut self.bind, "address", name, &value) {
+            return r;
+        }
+        if let Some(r) = crate::rtprecv::set_recv_prop(&mut self.recv, name, &value) {
+            return r;
+        }
+        match name {
+            "width" => {
+                self.width = value.as_uint().ok_or(PropError::Type)? as u32;
+                Ok(())
+            }
+            "height" => {
+                self.height = value.as_uint().ok_or(PropError::Type)? as u32;
+                Ok(())
+            }
+            "framerate" => {
+                self.fps = value.as_uint().ok_or(PropError::Type)? as u32;
+                Ok(())
+            }
+            "num-buffers" => crate::netprop::set_frame_limit(&mut self.frame_limit, &value),
+            _ => Err(PropError::Unknown),
+        }
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
-        crate::netprop::get_addr_prop(&self.bind, "address", name)
+        if let Some(v) = crate::netprop::get_addr_prop(&self.bind, "address", name) {
+            return Some(v);
+        }
+        if let Some(v) = crate::rtprecv::get_recv_prop(&self.recv, name) {
+            return Some(v);
+        }
+        match name {
+            "width" => Some(PropValue::Uint(self.width as u64)),
+            "height" => Some(PropValue::Uint(self.height as u64)),
+            "framerate" => Some(PropValue::Uint(self.fps as u64)),
+            "num-buffers" => Some(crate::netprop::get_frame_limit(self.frame_limit)),
+            _ => None,
+        }
     }
 
     /// Live source: contributes one frame period so the sink keeps a frame in
@@ -263,16 +350,8 @@ impl SourceLoop for UdpSrc {
             let socket = tokio::net::UdpSocket::from_std(std).map_err(io_err)?;
 
             // The jitter + RTCP RR/NACK + FEC/RTX + depayload receive path is
-            // shared with RtspServerSrc; assemble our tuning and drive it.
-            let cfg = RtpRecvConfig {
-                jitter: self.jitter,
-                rtcp_rr_interval_ms: self.rtcp_rr_interval_ms,
-                nack_enabled: self.nack_enabled,
-                rtx: self.rtx,
-                fec_pt: self.fec_pt,
-                flexfec_pt: self.flexfec_pt,
-            };
-            crate::rtprecv::receive_rtp_h264(&socket, &cfg, self.frame_limit, 0, out).await
+            // shared with RtspServerSrc.
+            crate::rtprecv::receive_rtp_h264(&socket, &self.recv, self.frame_limit, 0, out).await
         })
     }
 }

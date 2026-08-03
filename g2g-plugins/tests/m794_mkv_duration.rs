@@ -135,7 +135,10 @@ fn h264_caps() -> Caps {
 /// ffmpeg-authored fixtures: a 1 s Opus-only Matroska (stream-copied out of Ogg,
 /// so the Opus timing is the encoder's own) and a 1 s H.264 + Opus one.
 fn author_opus_mkv(path: &PathBuf) -> Vec<u8> {
-    let ogg = temp_path("author.opus");
+    // Derive the intermediate from the destination: tests run concurrently in
+    // one process, and a shared intermediate name races (one test deletes it
+    // while another's ffmpeg reads it).
+    let ogg = path.with_extension("author.opus");
     let status = Command::new("ffmpeg")
         .args(["-y", "-loglevel", "error", "-f", "lavfi", "-i"])
         .arg("sine=frequency=440:duration=1.0:sample_rate=48000")
