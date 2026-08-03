@@ -20,8 +20,16 @@
 //! matches ffmpeg / gstreamer sample-for-sample. Streams with no `OpusHead` and
 //! no per-frame duration (RTP) decode untrimmed, as before.
 //!
-//! Scope: 48 kHz mono/stereo, S16LE (default) or F32LE output. Packet-loss
-//! concealment (decode of a `None` packet) is a follow-up.
+//! Packet-loss concealment (`plc`, off by default like GStreamer's opusdec):
+//! nothing upstream signals loss (no depayloader or demuxer marks a gap), so a
+//! loss is inferred from the timeline. Each packet's TOC gives its duration, so
+//! the decoder knows where the next one is due; a packet arriving later than
+//! that leaves a hole, which libopus fills by decoding a `None` packet for the
+//! missing duration. Runs longer than [`MAX_PLC_SAMPLES`] are a seek or a
+//! stream restart rather than loss, and re-anchor the timeline with no fill.
+//!
+//! Scope: 48 kHz mono/stereo, S16LE (default) or F32LE output. In-band FEC
+//! (decoding the redundant copy carried by the *next* packet) is a follow-up.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -33,19 +41,35 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
-    G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, ANY_CHANNELS,
-    ANY_SAMPLE_RATE,
+    FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    PropError, PropKind, PropValue, PropertySpec, ANY_CHANNELS, ANY_SAMPLE_RATE,
 };
 
 use audiopus::coder::Decoder;
 use audiopus::packet::Packet;
 use audiopus::{Channels, MutSignals, SampleRate};
 
-use crate::opusparse::{parse_opus_head, OPUS_RATE_HZ};
+use crate::opusparse::{packet_samples, parse_opus_head, OPUS_RATE_HZ};
 
 /// Largest Opus frame is 120 ms; at 48 kHz that is 5760 samples per channel. The
 /// decode output buffer is sized for it so any single packet fits.
 const MAX_FRAME_SAMPLES: usize = (OPUS_RATE_HZ as usize * 120) / 1000;
+
+/// Concealment granularity: libopus fills whole 2.5 ms steps and cannot conceal
+/// anything shorter, so a gap is rounded to a multiple of this (120 samples at
+/// 48 kHz) before it is filled.
+const PLC_STEP_SAMPLES: u64 = OPUS_RATE_HZ as u64 / 400;
+
+/// Longest concealment run synthesized for one gap, 200 ms. libopus' PLC fades
+/// to silence within a handful of frames, so a longer fill adds nothing, and a
+/// timeline jump that large is a seek or a stream restart rather than packet
+/// loss. GStreamer's opusdec has no equivalent bound because it is told where
+/// the gaps are; inferring them from timestamps needs one.
+const MAX_PLC_SAMPLES: u64 = (OPUS_RATE_HZ as u64 * 200) / 1000;
+
+/// Concealment step used until a packet has been seen, 20 ms (GStreamer
+/// opusdec's assumption for an unknown duration).
+const DEFAULT_PLC_CHUNK_SAMPLES: u64 = (OPUS_RATE_HZ as u64 * 20) / 1000;
 
 /// Decodes an Opus elementary stream into raw interleaved S16LE PCM.
 pub struct OpusDec {
@@ -66,6 +90,15 @@ pub struct OpusDec {
     /// Running count of decoded samples (per channel) across all frames, to place
     /// the pre-skip window against the stream, not each frame in isolation.
     decoded_samples: u64,
+    /// Packet-loss concealment, off by default (GStreamer opusdec's default).
+    plc: bool,
+    /// PTS the next packet is due at: the last packet's PTS plus its coded
+    /// duration. A packet arriving later than this left a gap. `None` until a
+    /// packet has been seen, and reset by a flush or a fresh `OpusHead`.
+    next_pts_ns: Option<u64>,
+    /// Coded duration (per-channel samples) of the last packet, the step
+    /// concealment is synthesized in.
+    prev_samples: u64,
 }
 
 impl core::fmt::Debug for OpusDec {
@@ -75,6 +108,7 @@ impl core::fmt::Debug for OpusDec {
             .field("channels", &self.channels)
             .field("sequence", &self.sequence)
             .field("configured", &self.configured)
+            .field("plc", &self.plc)
             .finish()
     }
 }
@@ -96,7 +130,22 @@ impl OpusDec {
             configured: false,
             pre_skip: 0,
             decoded_samples: 0,
+            plc: false,
+            next_pts_ns: None,
+            prev_samples: 0,
         }
+    }
+
+    /// Enable packet-loss concealment: a gap in the packet timeline is filled
+    /// with audio libopus synthesizes from the decoder state rather than left as
+    /// a jump. Off by default.
+    pub fn with_plc(mut self, plc: bool) -> Self {
+        self.plc = plc;
+        self
+    }
+
+    pub fn plc(&self) -> bool {
+        self.plc
     }
 
     /// (Re)create the libopus decoder for a concrete channel count. Called from
@@ -136,15 +185,23 @@ impl OpusDec {
     }
 
     /// Decode one Opus packet, returning interleaved i16 samples and the
-    /// per-channel sample count.
-    fn decode(&mut self, opus: &[u8]) -> Result<(Vec<i16>, usize), G2gError> {
+    /// per-channel sample count. `opus = None` is a lost packet: libopus
+    /// conceals it, and then `capacity` is not a bound but the exact duration to
+    /// synthesize, so it must be a whole number of 2.5 ms steps.
+    fn decode(
+        &mut self,
+        opus: Option<&[u8]>,
+        capacity: usize,
+    ) -> Result<(Vec<i16>, usize), G2gError> {
         let channels = self.channels as usize;
         let dec = self.dec.as_mut().ok_or(G2gError::NotConfigured)?;
-        let packet = Packet::try_from(opus).map_err(|_| G2gError::CapsMismatch)?;
-        let mut pcm = alloc::vec![0i16; MAX_FRAME_SAMPLES * channels];
+        let packet = opus
+            .map(|o| Packet::try_from(o).map_err(|_| G2gError::CapsMismatch))
+            .transpose()?;
+        let mut pcm = alloc::vec![0i16; capacity * channels];
         let per_channel = {
             let signals = MutSignals::try_from(&mut pcm[..]).map_err(|_| G2gError::CapsMismatch)?;
-            dec.decode(Some(packet), signals, false)
+            dec.decode(packet, signals, false)
                 .map_err(|_| G2gError::CapsMismatch)?
         };
         pcm.truncate(per_channel * channels);
@@ -153,14 +210,20 @@ impl OpusDec {
 
     /// The float twin of [`decode`](Self::decode) (libopus' `opus_decode_float`,
     /// used when `PcmF32Le` output is negotiated: no i16 quantize).
-    fn decode_f32(&mut self, opus: &[u8]) -> Result<(Vec<f32>, usize), G2gError> {
+    fn decode_f32(
+        &mut self,
+        opus: Option<&[u8]>,
+        capacity: usize,
+    ) -> Result<(Vec<f32>, usize), G2gError> {
         let channels = self.channels as usize;
         let dec = self.dec.as_mut().ok_or(G2gError::NotConfigured)?;
-        let packet = Packet::try_from(opus).map_err(|_| G2gError::CapsMismatch)?;
-        let mut pcm = alloc::vec![0f32; MAX_FRAME_SAMPLES * channels];
+        let packet = opus
+            .map(|o| Packet::try_from(o).map_err(|_| G2gError::CapsMismatch))
+            .transpose()?;
+        let mut pcm = alloc::vec![0f32; capacity * channels];
         let per_channel = {
             let signals = MutSignals::try_from(&mut pcm[..]).map_err(|_| G2gError::CapsMismatch)?;
-            dec.decode_float(Some(packet), signals, false)
+            dec.decode_float(packet, signals, false)
                 .map_err(|_| G2gError::CapsMismatch)?
         };
         pcm.truncate(per_channel * channels);
@@ -186,12 +249,18 @@ impl OpusDec {
         (head as usize * channels, end as usize * channels)
     }
 
-    /// Decode `opus` and serialize only the valid window (see
+    /// Decode `opus` (or conceal a lost packet, see [`decode`](Self::decode))
+    /// and serialize only the valid window (see
     /// [`valid_window`](Self::valid_window)) to little-endian bytes of the
     /// negotiated output format.
-    fn decode_trimmed(&mut self, opus: &[u8], keep: Option<u64>) -> Result<Vec<u8>, G2gError> {
+    fn decode_trimmed(
+        &mut self,
+        opus: Option<&[u8]>,
+        capacity: usize,
+        keep: Option<u64>,
+    ) -> Result<Vec<u8>, G2gError> {
         if self.out_format == AudioFormat::PcmF32Le {
-            let (pcm, per_channel) = self.decode_f32(opus)?;
+            let (pcm, per_channel) = self.decode_f32(opus, capacity)?;
             let (start_i, end_i) = self.valid_window(per_channel, keep);
             let mut bytes = Vec::with_capacity((end_i - start_i) * 4);
             for &s in &pcm[start_i..end_i] {
@@ -199,7 +268,7 @@ impl OpusDec {
             }
             return Ok(bytes);
         }
-        let (pcm, per_channel) = self.decode(opus)?;
+        let (pcm, per_channel) = self.decode(opus, capacity)?;
         let (start_i, end_i) = self.valid_window(per_channel, keep);
         let mut bytes = Vec::with_capacity((end_i - start_i) * 2);
         for &s in &pcm[start_i..end_i] {
@@ -207,6 +276,91 @@ impl OpusDec {
         }
         Ok(bytes)
     }
+
+    /// Bytes one interleaved sample of every channel occupies in the output.
+    fn bytes_per_sample(&self) -> usize {
+        self.channels as usize
+            * if self.out_format == AudioFormat::PcmF32Le {
+                4
+            } else {
+                2
+            }
+    }
+
+    /// Concealment PCM for the hole in front of a packet arriving at `pts_ns`,
+    /// and the PTS it starts at. `None` when there is nothing to conceal: no
+    /// timeline yet, `plc` off, the packet on time, or a jump past
+    /// [`MAX_PLC_SAMPLES`] (a seek, which re-anchors instead).
+    ///
+    /// The gap is rounded to the nearest whole 2.5 ms, which is what libopus
+    /// conceals in, then synthesized in steps of the last packet's own duration:
+    /// one `opus_decode` call cannot exceed the 120 ms decode buffer.
+    fn conceal_gap(&mut self, pts_ns: u64) -> Result<Option<(u64, Vec<u8>)>, G2gError> {
+        let Some(expected) = self.next_pts_ns else {
+            return Ok(None);
+        };
+        if !self.plc {
+            return Ok(None);
+        }
+        let missing = ns_to_samples(pts_ns.saturating_sub(expected));
+        let gap = ((missing + PLC_STEP_SAMPLES / 2) / PLC_STEP_SAMPLES) * PLC_STEP_SAMPLES;
+        if gap == 0 || gap > MAX_PLC_SAMPLES {
+            return Ok(None);
+        }
+        // The step comes from a packet's TOC, so clamp it into the decode buffer
+        // and onto the 2.5 ms grid rather than trusting the stream's frame count.
+        let chunk = match self.prev_samples {
+            0 => DEFAULT_PLC_CHUNK_SAMPLES,
+            n => n.min(MAX_FRAME_SAMPLES as u64),
+        };
+        let chunk = (chunk / PLC_STEP_SAMPLES).max(1) * PLC_STEP_SAMPLES;
+
+        let mut pcm = Vec::with_capacity(gap as usize * self.bytes_per_sample());
+        let mut done = 0;
+        while done < gap {
+            let want = chunk.min(gap - done);
+            pcm.extend_from_slice(&self.decode_trimmed(None, want as usize, None)?);
+            done += want;
+        }
+        Ok(Some((expected, pcm)))
+    }
+
+    /// Push `pcm` as one output frame, preceded by a `CapsChanged` whenever the
+    /// output caps changed since the last one.
+    async fn emit(
+        &mut self,
+        pcm: Vec<u8>,
+        timing: FrameTiming,
+        out: &mut dyn OutputSink,
+    ) -> Result<(), G2gError> {
+        let new_caps = self.output_caps();
+        if self.last_out.as_ref() != Some(&new_caps) {
+            out.push(PipelinePacket::CapsChanged(new_caps.clone()))
+                .await?;
+            self.last_out = Some(new_caps);
+        }
+        let decoded = Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(pcm.into_boxed_slice())),
+            timing,
+            self.sequence,
+        );
+        self.sequence += 1;
+        out.push(PipelinePacket::DataFrame(decoded)).await?;
+        Ok(())
+    }
+}
+
+/// Per-channel 48 kHz sample count for a duration in nanoseconds, rounded to the
+/// nearest sample.
+fn ns_to_samples(ns: u64) -> u64 {
+    (ns.saturating_mul(OPUS_RATE_HZ as u64)
+        .saturating_add(500_000_000))
+        / 1_000_000_000
+}
+
+/// The exact inverse for whole samples: 48 kHz divides a second evenly.
+fn samples_to_ns(samples: u64) -> u64 {
+    samples.saturating_mul(1_000_000_000) / OPUS_RATE_HZ as u64
 }
 
 /// Per-channel valid sample count encoded in a frame's `duration_ns` (48 kHz),
@@ -216,12 +370,7 @@ fn duration_to_samples(duration_ns: u64) -> Option<u64> {
     if duration_ns == 0 {
         return None;
     }
-    Some(
-        (duration_ns
-            .saturating_mul(48_000)
-            .saturating_add(500_000_000))
-            / 1_000_000_000,
-    )
+    Some(ns_to_samples(duration_ns))
 }
 
 impl AsyncElement for OpusDec {
@@ -310,6 +459,33 @@ impl AsyncElement for OpusDec {
         )
     }
 
+    fn properties(&self) -> &'static [PropertySpec] {
+        const PROPS: &[PropertySpec] = &[PropertySpec::new(
+            "plc",
+            PropKind::Bool,
+            "conceal lost packets with audio synthesized from the decoder state",
+        )
+        .with_default("false")];
+        PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "plc" => {
+                self.plc = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "plc" => Some(PropValue::Bool(self.plc)),
+            _ => None,
+        }
+    }
+
     fn process<'a>(
         &'a mut self,
         packet: PipelinePacket,
@@ -333,34 +509,55 @@ impl AsyncElement for OpusDec {
                         }
                         self.pre_skip = pre_skip as u32;
                         self.decoded_samples = 0;
+                        self.next_pts_ns = None;
+                        self.prev_samples = 0;
                         return Ok(());
                     }
+                    // Fill any hole this packet's PTS opens up before decoding
+                    // it, so the concealed audio keeps the output contiguous and
+                    // the real packet still lands at its own PTS.
+                    if let Some((pts_ns, pcm)) = self.conceal_gap(frame.timing.pts_ns)? {
+                        if !pcm.is_empty() {
+                            let samples = (pcm.len() / self.bytes_per_sample()) as u64;
+                            self.emit(
+                                pcm,
+                                FrameTiming {
+                                    pts_ns,
+                                    dts_ns: pts_ns,
+                                    duration_ns: samples_to_ns(samples),
+                                    ..FrameTiming::default()
+                                },
+                                out,
+                            )
+                            .await?;
+                        }
+                    }
+                    // The coded duration, not the trimmed one: a container
+                    // advances the next packet's PTS by the whole frame.
+                    self.prev_samples = u64::from(packet_samples(slice));
+                    self.next_pts_ns = Some(
+                        frame
+                            .timing
+                            .pts_ns
+                            .saturating_add(samples_to_ns(self.prev_samples)),
+                    );
+
                     let keep = duration_to_samples(frame.timing.duration_ns);
-                    let pcm = self.decode_trimmed(slice, keep)?;
+                    let pcm = self.decode_trimmed(Some(slice), MAX_FRAME_SAMPLES, keep)?;
                     // A frame fully inside the pre-skip window trims to nothing;
                     // consume it without emitting an empty PCM frame.
                     if pcm.is_empty() {
                         return Ok(());
                     }
-                    let new_caps = self.output_caps();
-                    if self.last_out.as_ref() != Some(&new_caps) {
-                        out.push(PipelinePacket::CapsChanged(new_caps.clone()))
-                            .await?;
-                        self.last_out = Some(new_caps);
-                    }
-                    let decoded = Frame::new(
-                        MemoryDomain::System(SystemSlice::from_boxed(pcm.into_boxed_slice())),
-                        frame.timing,
-                        self.sequence,
-                    );
-                    self.sequence += 1;
-                    out.push(PipelinePacket::DataFrame(decoded)).await?;
+                    self.emit(pcm, frame.timing, out).await?;
                 }
                 PipelinePacket::Flush => {
                     // A seek/flush restarts sample accounting; the re-read stream
                     // re-sends its OpusHead, which resets pre-skip again.
                     self.pre_skip = 0;
                     self.decoded_samples = 0;
+                    self.next_pts_ns = None;
+                    self.prev_samples = 0;
                     out.push(PipelinePacket::Flush).await?;
                 }
                 PipelinePacket::CapsChanged(c) => match &c {

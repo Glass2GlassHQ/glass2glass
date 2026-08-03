@@ -14,7 +14,7 @@
 //! 48 kHz ([`crate::opusparse::OPUS_RATE_HZ`]), so the whole pipeline stays at
 //! that rate without a resample; other input rates need an upstream
 //! `AudioResample`. Bitrate, frame size and complexity are builder-set and
-//! runtime properties. Packet-loss concealment is a follow-up.
+//! runtime properties.
 
 use core::future::Future;
 use core::pin::Pin;
