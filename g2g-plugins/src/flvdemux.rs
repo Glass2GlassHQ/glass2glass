@@ -19,7 +19,10 @@
 //! One output pad carries one elementary stream; the [`FlvStream`] selection picks
 //! which, so a second `flvdemux stream=aac` demuxes the audio. The choice is by
 //! codec because the output caps are fixed at negotiation, before any tag is
-//! parsed. Scope (v1): the H.264 video and AAC audio tracks (DESIGN.md §4.17).
+//! parsed. Besides H.264 and AAC the legacy Flash codecs are carried too
+//! (`stream=sorenson | vp6 | vp6a | mp3 | speex`), their frames forwarded as the
+//! codec's own bitstream with the layout the tag flags declare announced via
+//! `CapsChanged` (DESIGN.md §4.17).
 
 use core::future::Future;
 use core::pin::Pin;
@@ -44,7 +47,7 @@ use crate::annexb::{
     is_annex_b, length_prefixed_nal_units, parse_avcc, prepend_param_sets, starts_with_param_set,
 };
 use crate::demuxseek::{Admit, DemuxSeek};
-use crate::flv::{FlvDemuxer, FlvTrack, FlvUnit};
+use crate::flv::{FlvCodec, FlvDemuxer, FlvUnit};
 
 /// Which elementary stream an [`FlvDemux`] instance forwards. An FLV stream
 /// interleaves one video and one audio track; this element has one output pad, so
@@ -54,8 +57,18 @@ pub enum FlvStream {
     /// The H.264 (AVC) video track. The default.
     #[default]
     H264,
+    /// The Sorenson Spark video track (FLV codec id 2).
+    SorensonH263,
+    /// The VP6 video track (FLV codec id 4).
+    Vp6,
+    /// The VP6-with-alpha video track (FLV codec id 5).
+    Vp6Alpha,
     /// The AAC audio track.
     Aac,
+    /// The MP3 audio track.
+    Mp3,
+    /// The Speex audio track.
+    Speex,
 }
 
 /// The video track's decoder config, parsed from the `avcC` side channel (M662).
@@ -206,35 +219,49 @@ impl FlvDemux {
     /// pre-header; the concrete layout is announced at runtime from the ASC
     /// (M662).
     fn output_caps(stream: FlvStream) -> Caps {
+        let video = |codec| Caps::CompressedVideo {
+            codec,
+            width: Dim::Range {
+                min: 16,
+                max: 65_535,
+            },
+            height: Dim::Range {
+                min: 16,
+                max: 65_535,
+            },
+            framerate: Rate::Range {
+                min_q16: 1 << 16,
+                max_q16: 240 << 16,
+            },
+        };
+        // The audio layout is refined at runtime, from the AAC AudioSpecificConfig
+        // or the tag flags of the other codecs.
+        let audio = |format| Caps::Audio {
+            format,
+            channels: 0,
+            sample_rate: 0,
+        };
         match stream {
-            FlvStream::H264 => Caps::CompressedVideo {
-                codec: VideoCodec::H264,
-                width: Dim::Range {
-                    min: 16,
-                    max: 65_535,
-                },
-                height: Dim::Range {
-                    min: 16,
-                    max: 65_535,
-                },
-                framerate: Rate::Range {
-                    min_q16: 1 << 16,
-                    max_q16: 240 << 16,
-                },
-            },
-            FlvStream::Aac => Caps::Audio {
-                format: AudioFormat::Aac,
-                channels: 0,
-                sample_rate: 0,
-            },
+            FlvStream::H264 => video(VideoCodec::H264),
+            FlvStream::SorensonH263 => video(VideoCodec::SorensonH263),
+            FlvStream::Vp6 => video(VideoCodec::Vp6 { alpha: false }),
+            FlvStream::Vp6Alpha => video(VideoCodec::Vp6 { alpha: true }),
+            FlvStream::Aac => audio(AudioFormat::Aac),
+            FlvStream::Mp3 => audio(AudioFormat::Mp3),
+            FlvStream::Speex => audio(AudioFormat::Speex),
         }
     }
 
-    /// The track this instance's selected stream corresponds to.
-    fn selected_track(stream: FlvStream) -> FlvTrack {
+    /// The FLV codec this instance's selected stream corresponds to.
+    fn selected_codec(stream: FlvStream) -> FlvCodec {
         match stream {
-            FlvStream::H264 => FlvTrack::Video,
-            FlvStream::Aac => FlvTrack::Audio,
+            FlvStream::H264 => FlvCodec::H264,
+            FlvStream::SorensonH263 => FlvCodec::SorensonH263,
+            FlvStream::Vp6 => FlvCodec::Vp6,
+            FlvStream::Vp6Alpha => FlvCodec::Vp6Alpha,
+            FlvStream::Aac => FlvCodec::Aac,
+            FlvStream::Mp3 => FlvCodec::Mp3,
+            FlvStream::Speex => FlvCodec::Speex,
         }
     }
 
@@ -276,9 +303,9 @@ impl FlvDemux {
         units: Vec<FlvUnit>,
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
-        let want = Self::selected_track(self.stream);
+        let want = Self::selected_codec(self.stream);
         for u in units {
-            if u.track != want {
+            if u.codec != want {
                 continue;
             }
             let pts_ns = u.pts_ms as u64 * 1_000_000;
@@ -293,40 +320,52 @@ impl FlvDemux {
                 }
                 Admit::Emit => {}
             }
-            let data = match u.track {
-                FlvTrack::Video => {
+            let data = match u.codec {
+                FlvCodec::H264 => {
                     let annexb = self.video_annexb(u.data);
                     if annexb.is_empty() {
                         continue; // malformed AVCC lengths: nothing decodable
                     }
                     annexb
                 }
-                FlvTrack::Audio => {
-                    // Announce the concrete channel layout / sample rate from
-                    // the ASC once, refining the sentinel negotiation caps,
-                    // before the first audio frame (the MP4-demuxer pattern).
+                // Sorenson and VP6 frames are already the codec's own bitstream.
+                FlvCodec::SorensonH263 | FlvCodec::Vp6 | FlvCodec::Vp6Alpha => u.data,
+                FlvCodec::Aac | FlvCodec::Mp3 | FlvCodec::Speex => {
+                    // Announce the concrete channel layout / sample rate once,
+                    // refining the sentinel negotiation caps, before the first
+                    // audio frame (the MP4-demuxer pattern). AAC's real layout is
+                    // in the ASC, the others' in the audio tag flags.
                     if !self.audio_caps_announced {
                         self.audio_caps_announced = true;
-                        if let Some((channels, sample_rate)) =
+                        let params = if u.codec == FlvCodec::Aac {
                             self.audio_asc.as_deref().and_then(asc_audio_params)
+                        } else {
+                            self.demux.audio_params()
+                        };
+                        if let (Caps::Audio { format, .. }, Some((channels, sample_rate))) =
+                            (Self::output_caps(self.stream), params)
                         {
                             let caps = Caps::Audio {
-                                format: AudioFormat::Aac,
+                                format,
                                 channels,
                                 sample_rate,
                             };
                             out.push(PipelinePacket::CapsChanged(caps)).await?;
                         }
                     }
-                    // ADTS-frame each raw AAC access unit so the elementary
-                    // stream is self-describing; forwarded raw without an ASC.
-                    match self
-                        .audio_asc
-                        .as_deref()
-                        .and_then(|asc| adts_from_asc(asc, &u.data))
-                    {
-                        Some(framed) => framed,
-                        None => u.data,
+                    if u.codec != FlvCodec::Aac {
+                        u.data
+                    } else {
+                        // ADTS-frame each raw AAC access unit so the elementary
+                        // stream is self-describing; forwarded raw without an ASC.
+                        match self
+                            .audio_asc
+                            .as_deref()
+                            .and_then(|asc| adts_from_asc(asc, &u.data))
+                        {
+                            Some(framed) => framed,
+                            None => u.data,
+                        }
                     }
                 }
             };
@@ -459,14 +498,19 @@ impl AsyncElement for FlvDemux {
 static FLVDEMUX_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "stream",
     PropKind::Str,
-    "elementary stream to emit: h264 | aac",
+    "elementary stream to emit: h264 | sorenson | vp6 | vp6a | aac | mp3 | speex",
 )];
 
 /// Parse a `stream` property string to an [`FlvStream`].
 fn flv_stream_from_str(s: &str) -> Option<FlvStream> {
     match s {
         "h264" => Some(FlvStream::H264),
+        "sorenson" => Some(FlvStream::SorensonH263),
+        "vp6" => Some(FlvStream::Vp6),
+        "vp6a" => Some(FlvStream::Vp6Alpha),
         "aac" => Some(FlvStream::Aac),
+        "mp3" => Some(FlvStream::Mp3),
+        "speex" => Some(FlvStream::Speex),
         _ => None,
     }
 }
@@ -475,7 +519,12 @@ fn flv_stream_from_str(s: &str) -> Option<FlvStream> {
 fn flv_stream_to_str(stream: FlvStream) -> &'static str {
     match stream {
         FlvStream::H264 => "h264",
+        FlvStream::SorensonH263 => "sorenson",
+        FlvStream::Vp6 => "vp6",
+        FlvStream::Vp6Alpha => "vp6a",
         FlvStream::Aac => "aac",
+        FlvStream::Mp3 => "mp3",
+        FlvStream::Speex => "speex",
     }
 }
 
@@ -494,10 +543,22 @@ fn asc_audio_params(asc: &[u8]) -> Option<(u8, u32)> {
 
 impl PadTemplates for FlvDemux {
     fn pad_templates() -> Vec<PadTemplate> {
-        let source = CapsSet::from_alternatives(Vec::from([
-            Self::output_caps(FlvStream::H264),
-            Self::output_caps(FlvStream::Aac),
-        ]));
+        // H.264 first: the auto-plugger prefers the leading alternative, and it is
+        // the codec a modern FLV carries.
+        let source = CapsSet::from_alternatives(
+            [
+                FlvStream::H264,
+                FlvStream::Aac,
+                FlvStream::SorensonH263,
+                FlvStream::Vp6,
+                FlvStream::Vp6Alpha,
+                FlvStream::Mp3,
+                FlvStream::Speex,
+            ]
+            .into_iter()
+            .map(Self::output_caps)
+            .collect(),
+        );
         Vec::from([
             PadTemplate::sink(CapsSet::one(Self::input_caps())),
             PadTemplate::source(source),

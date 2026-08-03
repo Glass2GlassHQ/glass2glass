@@ -190,6 +190,9 @@ fn video_codec_to_u8(c: VideoCodec) -> u8 {
         VideoCodec::Mjpeg => 5,
         VideoCodec::Mpeg4Part2 => 6,
         VideoCodec::JpegXs => 7,
+        VideoCodec::SorensonH263 => 8,
+        VideoCodec::Vp6 { alpha: false } => 9,
+        VideoCodec::Vp6 { alpha: true } => 10,
     }
 }
 fn video_codec_from_u8(v: u8) -> Result<VideoCodec, WireError> {
@@ -202,6 +205,9 @@ fn video_codec_from_u8(v: u8) -> Result<VideoCodec, WireError> {
         5 => VideoCodec::Mjpeg,
         6 => VideoCodec::Mpeg4Part2,
         7 => VideoCodec::JpegXs,
+        8 => VideoCodec::SorensonH263,
+        9 => VideoCodec::Vp6 { alpha: false },
+        10 => VideoCodec::Vp6 { alpha: true },
         _ => return Err(WireError::BadTag),
     })
 }
@@ -261,6 +267,8 @@ fn audio_format_to_u8(f: AudioFormat) -> u8 {
         AudioFormat::Ac3 => 9,
         AudioFormat::Flac => 10,
         AudioFormat::Vorbis => 11,
+        AudioFormat::Mp3 => 12,
+        AudioFormat::Speex => 13,
     }
 }
 fn audio_format_from_u8(v: u8) -> Result<AudioFormat, WireError> {
@@ -277,6 +285,8 @@ fn audio_format_from_u8(v: u8) -> Result<AudioFormat, WireError> {
         9 => AudioFormat::Ac3,
         10 => AudioFormat::Flac,
         11 => AudioFormat::Vorbis,
+        12 => AudioFormat::Mp3,
+        13 => AudioFormat::Speex,
         _ => return Err(WireError::BadTag),
     })
 }
@@ -847,6 +857,47 @@ mod tests {
     fn roundtrip(p: &PipelinePacket) -> PipelinePacket {
         let bytes = encode_packet(p).expect("encode");
         decode_packet(&bytes).expect("decode")
+    }
+
+    #[test]
+    fn every_codec_tag_round_trips() {
+        // A wrong tag would silently retarget a remote stream's codec. A shared
+        // tag fails here too: only one variant can come back out of the byte.
+        let video = [
+            VideoCodec::H264,
+            VideoCodec::H265,
+            VideoCodec::Av1,
+            VideoCodec::Vp8,
+            VideoCodec::Vp9,
+            VideoCodec::Mjpeg,
+            VideoCodec::Mpeg4Part2,
+            VideoCodec::JpegXs,
+            VideoCodec::SorensonH263,
+            VideoCodec::Vp6 { alpha: false },
+            VideoCodec::Vp6 { alpha: true },
+        ];
+        for c in video {
+            assert_eq!(video_codec_from_u8(video_codec_to_u8(c)), Ok(c));
+        }
+        let audio = [
+            AudioFormat::Aac,
+            AudioFormat::Opus,
+            AudioFormat::Mp2,
+            AudioFormat::Mp3,
+            AudioFormat::Speex,
+            AudioFormat::Ac3,
+            AudioFormat::Flac,
+            AudioFormat::Vorbis,
+            AudioFormat::PcmS16Le,
+            AudioFormat::PcmF32Le,
+            AudioFormat::PcmS24Le,
+            AudioFormat::Mulaw,
+            AudioFormat::Alaw,
+            AudioFormat::ImaAdpcm,
+        ];
+        for f in audio {
+            assert_eq!(audio_format_from_u8(audio_format_to_u8(f)), Ok(f));
+        }
     }
 
     #[test]

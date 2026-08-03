@@ -4,18 +4,23 @@
 //! FLV is a flat tag stream: a 9-byte header, then `PreviousTagSize` (UI32) /
 //! tag pairs. Each tag is an 11-byte header (type, 24-bit data size, 24+8-bit
 //! millisecond timestamp, stream id) followed by its body. The body's first byte
-//! identifies the codec; for the two modern RTMP/FLV codecs this parser forwards
-//! the elementary access units: H.264 (video codec id 7, AVCC length-prefixed
-//! NALUs) and AAC (audio sound format 10, raw frames).
+//! identifies the codec, and each codec puts a different number of bytes between
+//! it and the access unit; [`FlvCodec`] names the ones this parser carries and
+//! [`payload_offset`] holds the widths.
 //!
-//! Scope (v1): H.264 video + AAC audio media frames. The sequence-header tags
-//! (the `AVCDecoderConfigurationRecord` / `AudioSpecificConfig`) are retained as
-//! the codec-config side channel ([`FlvDemuxer::video_config`] /
-//! [`FlvDemuxer::audio_config`], M662) rather than emitted as units, so the
-//! element can convert the AVCC media frames to a self-describing elementary
-//! stream. The `onMetaData` script tag's body is retained
-//! ([`FlvDemuxer::metadata`]) so the element can surface its AMF0 metadata via
-//! the tag system. Other codecs (VP6, H.263, MP3, Speex) are ignored.
+//! Video: H.264 (id 7, AVCC length-prefixed NALUs), Sorenson Spark (id 2),
+//! VP6 (id 4) and VP6 with alpha (id 5). Audio: AAC (sound format 10, raw
+//! frames), MP3 (format 2, and format 14 for MP3 at 8 kHz) and Speex (format 11,
+//! always 16 kHz mono).
+//!
+//! The sequence-header tags (the `AVCDecoderConfigurationRecord` /
+//! `AudioSpecificConfig`) are retained as the codec-config side channel
+//! ([`FlvDemuxer::video_config`] / [`FlvDemuxer::audio_config`], M662) rather
+//! than emitted as units, so the element can convert the AVCC media frames to a
+//! self-describing elementary stream; VP6's one-byte dimension adjustment rides
+//! the same channel (it is what libavcodec wants as extradata). The `onMetaData`
+//! script tag's body is retained ([`FlvDemuxer::metadata`]) so the element can
+//! surface its AMF0 metadata via the tag system.
 
 use alloc::vec::Vec;
 
@@ -33,6 +38,131 @@ const TAG_SCRIPT: u8 = 18;
 const VIDEO_CODEC_AVC: u8 = 7;
 /// FLV audio sound format for AAC (the high nibble of an audio tag's first byte).
 const SOUND_FORMAT_AAC: u8 = 10;
+
+/// A codec an FLV tag can carry, in the form the tag's first byte identifies it:
+/// a video codec id (low nibble of a video tag) or an audio sound format (high
+/// nibble of an audio tag).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlvCodec {
+    /// Sorenson Spark (video codec id 2).
+    SorensonH263,
+    /// On2 VP6, Flash variant (video codec id 4).
+    Vp6,
+    /// On2 VP6 with an alpha plane (video codec id 5).
+    Vp6Alpha,
+    /// H.264 / AVC (video codec id 7).
+    H264,
+    /// MP3 (audio sound format 2, or 14 for the 8 kHz variant).
+    Mp3,
+    /// AAC (audio sound format 10).
+    Aac,
+    /// Speex (audio sound format 11), fixed at 16 kHz mono.
+    Speex,
+}
+
+impl FlvCodec {
+    /// Which of FLV's two elementary streams this codec belongs to.
+    pub fn track(self) -> FlvTrack {
+        match self {
+            FlvCodec::SorensonH263 | FlvCodec::Vp6 | FlvCodec::Vp6Alpha | FlvCodec::H264 => {
+                FlvTrack::Video
+            }
+            FlvCodec::Mp3 | FlvCodec::Aac | FlvCodec::Speex => FlvTrack::Audio,
+        }
+    }
+
+    /// The video codec id / audio sound format written into a tag's first byte.
+    /// MP3 always writes format 2: format 14 (MP3 at 8 kHz) is readable but not
+    /// written, since libavcodec's FLV demuxer does not recognize it.
+    fn tag_id(self) -> u8 {
+        match self {
+            FlvCodec::SorensonH263 => 2,
+            FlvCodec::Vp6 => 4,
+            FlvCodec::Vp6Alpha => 5,
+            FlvCodec::H264 => VIDEO_CODEC_AVC,
+            FlvCodec::Mp3 => 2,
+            FlvCodec::Aac => SOUND_FORMAT_AAC,
+            FlvCodec::Speex => 11,
+        }
+    }
+
+    /// The video codec for a video tag's codec id, or `None` for one this parser
+    /// does not carry (screen video, MPEG-4 part 2, the enhanced-FLV fourccs).
+    fn from_video_id(id: u8) -> Option<Self> {
+        match id {
+            2 => Some(FlvCodec::SorensonH263),
+            4 => Some(FlvCodec::Vp6),
+            5 => Some(FlvCodec::Vp6Alpha),
+            VIDEO_CODEC_AVC => Some(FlvCodec::H264),
+            _ => None,
+        }
+    }
+
+    /// The audio codec for an audio tag's sound format, or `None` for one this
+    /// parser does not carry (PCM, ADPCM, Nellymoser, G.711).
+    fn from_sound_format(format: u8) -> Option<Self> {
+        match format {
+            // 14 is MP3 at 8 kHz: the same bitstream, a rate the 2-bit rate field
+            // cannot express.
+            2 | 14 => Some(FlvCodec::Mp3),
+            SOUND_FORMAT_AAC => Some(FlvCodec::Aac),
+            11 => Some(FlvCodec::Speex),
+            _ => None,
+        }
+    }
+}
+
+/// Bytes between a tag's first byte and the access unit, per codec. H.264 spends
+/// 4 (packet type + 24-bit composition offset); VP6 and VP6-alpha spend 1 (the
+/// dimension adjustment nibbles, which libavcodec takes as extradata; VP6-alpha's
+/// 24-bit offset to the alpha plane stays in the payload, where its decoder reads
+/// it); AAC spends 1 (the packet type); the rest none.
+fn payload_offset(codec: FlvCodec) -> usize {
+    match codec {
+        FlvCodec::H264 => 4,
+        FlvCodec::Vp6 | FlvCodec::Vp6Alpha => 1,
+        FlvCodec::Aac => 1,
+        FlvCodec::SorensonH263 | FlvCodec::Mp3 | FlvCodec::Speex => 0,
+    }
+}
+
+/// Channel count and sample rate an audio tag's first byte declares, for the
+/// codecs whose rate is not carried in a decoder config. The 2-bit rate field
+/// counts 5512 / 11025 / 22050 / 44100 Hz; sound format 14 overrides it with
+/// 8 kHz and Speex is always 16 kHz mono, matching libavcodec's FLV demuxer.
+/// `None` for AAC, whose real layout comes from the `AudioSpecificConfig`.
+fn audio_tag_params(codec: FlvCodec, first: u8) -> Option<(u8, u32)> {
+    let channels = if first & 0x01 == 1 { 2 } else { 1 };
+    let rate = 44_100u32 >> (3 - ((first >> 2) & 0x03));
+    match codec {
+        FlvCodec::Mp3 if first >> 4 == 14 => Some((channels, 8_000)),
+        FlvCodec::Mp3 => Some((channels, rate)),
+        FlvCodec::Speex => Some((1, 16_000)),
+        FlvCodec::Aac => None,
+        _ => None,
+    }
+}
+
+/// The first byte of an audio tag: sound format, then the rate / sample-size /
+/// channel flags. AAC pins the flags at 44 kHz 16-bit stereo (the FLV spec's
+/// requirement, the real layout being in the `AudioSpecificConfig`) and Speex at
+/// 11 kHz 16-bit mono (what libavcodec writes, its real rate being fixed at
+/// 16 kHz); MP3 declares the nearest expressible rate at or below its own.
+fn audio_tag_flags(codec: FlvCodec, channels: u8, sample_rate: u32) -> u8 {
+    let (rate_bits, stereo) = match codec {
+        FlvCodec::Aac => (3, 1),
+        FlvCodec::Speex => (1, 0),
+        _ => {
+            // 44100 >> (3 - bits): the largest declared rate not above the real one.
+            let bits = (0..=3u8)
+                .rev()
+                .find(|&b| 44_100u32 >> (3 - b) <= sample_rate)
+                .unwrap_or(0);
+            (bits, u8::from(channels >= 2))
+        }
+    };
+    (codec.tag_id() << 4) | (rate_bits << 2) | 0x02 | stereo
+}
 
 /// The FLV header (`FLV` signature + version + flags) plus the first
 /// `PreviousTagSize0`; `data_offset` (header bytes) is read from the header.
@@ -57,14 +187,14 @@ pub enum FlvTrack {
     Audio,
 }
 
-/// One demuxed access unit: the elementary stream it belongs to, its payload
-/// (AVCC NALUs for H.264, a raw AAC frame for audio), and its millisecond
-/// timestamps. The FLV tag timestamp is the decode time; a video tag's signed
+/// One demuxed access unit: the codec it came from, its payload (AVCC NALUs for
+/// H.264, a raw frame for every other codec), and its millisecond timestamps.
+/// The FLV tag timestamp is the decode time; a video tag's signed
 /// composition-time offset yields the presentation time (`pts = dts + cts`,
 /// M662), so B-frame streams carry both.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FlvUnit {
-    pub track: FlvTrack,
+    pub codec: FlvCodec,
     pub data: Vec<u8>,
     pub pts_ms: u32,
     pub dts_ms: u32,
@@ -72,6 +202,13 @@ pub struct FlvUnit {
     /// audio frame. Used by the demuxer seek path (M362) to snap to a decodable
     /// resume point.
     pub keyframe: bool,
+}
+
+impl FlvUnit {
+    /// Which elementary stream this unit belongs to.
+    pub fn track(&self) -> FlvTrack {
+        self.codec.track()
+    }
 }
 
 /// Incremental FLV demuxer: feed bytes with [`push_data`](Self::push_data), drain
@@ -89,6 +226,9 @@ pub struct FlvDemuxer {
     video_config: Option<Vec<u8>>,
     /// The audio sequence-header body (the AAC `AudioSpecificConfig`).
     audio_config: Option<Vec<u8>>,
+    /// Channels / sample rate the first audio tag's flags declared, for the
+    /// codecs that carry no decoder config (M831).
+    audio_params: Option<(u8, u32)>,
 }
 
 impl FlvDemuxer {
@@ -124,6 +264,13 @@ impl FlvDemuxer {
         self.audio_config.as_deref()
     }
 
+    /// Channels and sample rate the audio tags declare, for the codecs whose
+    /// layout is not in a decoder config (MP3, Speex). `None` before the first
+    /// audio tag, and for AAC (whose layout is in the `AudioSpecificConfig`).
+    pub fn audio_params(&self) -> Option<(u8, u32)> {
+        self.audio_params
+    }
+
     /// Consume the header (once) and every complete `PreviousTagSize` + tag
     /// record from the buffer, appending the access units of supported codecs.
     fn parse(&mut self) {
@@ -156,6 +303,7 @@ impl FlvDemuxer {
         let mut metadata: Option<Vec<u8>> = None;
         let mut video_config: Option<Vec<u8>> = None;
         let mut audio_config: Option<Vec<u8>> = None;
+        let mut audio_params: Option<(u8, u32)> = None;
         loop {
             let header = pos + PREV_TAG_SIZE_LEN;
             if header + TAG_HEADER_LEN > self.buf.len() {
@@ -184,6 +332,19 @@ impl FlvDemuxer {
                     FlvTrack::Audio => audio_config = Some(config.to_vec()),
                 }
             } else if let Some(unit) = parse_tag(tag_type, timestamp, body) {
+                let first = body.first().copied().unwrap_or(0);
+                // VP6's dimension-adjustment byte is the codec config libavcodec
+                // wants as extradata, so it rides the same side channel as the
+                // avcC record rather than the payload.
+                if matches!(unit.codec, FlvCodec::Vp6 | FlvCodec::Vp6Alpha)
+                    && self.video_config.is_none()
+                    && video_config.is_none()
+                {
+                    video_config = body.get(1..2).map(<[u8]>::to_vec);
+                }
+                if audio_params.is_none() && self.audio_params.is_none() {
+                    audio_params = audio_tag_params(unit.codec, first);
+                }
                 units.push(unit);
             }
             pos = body_end;
@@ -198,6 +359,9 @@ impl FlvDemuxer {
         }
         if let Some(c) = audio_config {
             self.audio_config = Some(c);
+        }
+        if self.audio_params.is_none() {
+            self.audio_params = audio_params;
         }
     }
 }
@@ -226,26 +390,36 @@ fn write_u24(out: &mut Vec<u8>, v: u32) {
 #[derive(Debug)]
 pub struct FlvMuxer {
     tags: TagList,
-    has_video: bool,
-    has_audio: bool,
-    /// H.264 `avcC` decoder configuration record; empty writes no video
-    /// sequence-header tag (the single-track / media-only profile).
+    /// The video track's codec, `None` for an audio-only muxer.
+    video: Option<FlvCodec>,
+    /// The audio track's codec, `None` for a video-only muxer.
+    audio: Option<FlvCodec>,
+    /// H.264 `avcC` decoder configuration record, or VP6's one-byte dimension
+    /// adjustment. Empty writes no video sequence-header tag (the single-track /
+    /// media-only profile) and a zero VP6 adjustment.
     video_config: Vec<u8>,
     /// AAC `AudioSpecificConfig`; empty writes no audio sequence-header tag.
     audio_config: Vec<u8>,
+    /// First byte of every audio tag: sound format + rate / size / channel flags.
+    audio_flags: u8,
     header_written: bool,
     prev_tag_size: u32,
 }
 
 impl FlvMuxer {
-    /// A single-track muxer (media frames only, no sequence header).
-    pub fn new(track: FlvTrack) -> Self {
+    /// A single-track muxer for one codec (media frames only, no sequence
+    /// header). The audio flags default to the codec's usual layout: use
+    /// [`set_audio_params`](Self::set_audio_params) for a real MP3 rate.
+    pub fn new(codec: FlvCodec) -> Self {
+        let video = (codec.track() == FlvTrack::Video).then_some(codec);
+        let audio = (codec.track() == FlvTrack::Audio).then_some(codec);
         Self {
             tags: TagList::new(),
-            has_video: track == FlvTrack::Video,
-            has_audio: track == FlvTrack::Audio,
+            video,
+            audio,
             video_config: Vec::new(),
             audio_config: Vec::new(),
+            audio_flags: audio_tag_flags(codec, 2, 44_100),
             header_written: false,
             prev_tag_size: 0,
         }
@@ -253,16 +427,32 @@ impl FlvMuxer {
 
     /// An A/V muxer carrying a video + audio track, each with its decoder config
     /// (the H.264 `avcC` record and AAC `AudioSpecificConfig`) written as an FLV
-    /// sequence-header tag ahead of the media frames.
-    pub fn new_av(video_config: Vec<u8>, audio_config: Vec<u8>) -> Self {
+    /// sequence-header tag ahead of the media frames. A codec with no sequence
+    /// header (Sorenson, VP6, MP3, Speex) passes an empty config.
+    pub fn new_av(
+        video: FlvCodec,
+        video_config: Vec<u8>,
+        audio: FlvCodec,
+        audio_config: Vec<u8>,
+    ) -> Self {
         Self {
             tags: TagList::new(),
-            has_video: true,
-            has_audio: true,
+            video: Some(video),
+            audio: Some(audio),
             video_config,
             audio_config,
+            audio_flags: audio_tag_flags(audio, 2, 44_100),
             header_written: false,
             prev_tag_size: 0,
+        }
+    }
+
+    /// Declare the audio track's channel count and sample rate in the tag flags.
+    /// Only MP3 varies (AAC and Speex have a fixed flag encoding), and only
+    /// before the first tag is emitted.
+    pub fn set_audio_params(&mut self, channels: u8, sample_rate: u32) {
+        if let Some(codec) = self.audio {
+            self.audio_flags = audio_tag_flags(codec, channels, sample_rate);
         }
     }
 
@@ -273,10 +463,11 @@ impl FlvMuxer {
         self
     }
 
-    /// Set the video decoder config (the `avcC` record), written as the video
-    /// sequence-header tag; effective before the first tag is emitted (M662).
-    pub fn set_video_config(&mut self, avcc: Vec<u8>) {
-        self.video_config = avcc;
+    /// Set the video decoder config: the `avcC` record written as the video
+    /// sequence-header tag (M662), or VP6's one-byte dimension adjustment
+    /// written into every video tag. Effective before the first tag is emitted.
+    pub fn set_video_config(&mut self, config: Vec<u8>) {
+        self.video_config = config;
     }
 
     /// Set the audio decoder config (the AAC `AudioSpecificConfig`), written as
@@ -288,7 +479,7 @@ impl FlvMuxer {
     /// Wrap one access unit into FLV bytes, routed to the muxer's single track:
     /// the legacy single-track entry point (video frames are flagged keyframes).
     pub fn push_au(&mut self, data: &[u8], pts_ms: u32) -> Vec<u8> {
-        if self.has_video {
+        if self.video.is_some() {
             self.push_video(data, pts_ms, 0, true)
         } else {
             self.push_audio(data, pts_ms)
@@ -310,38 +501,50 @@ impl FlvMuxer {
         (dts_ms, cts_ms)
     }
 
-    /// Wrap one AVCC video access unit into the FLV bytes to emit (`keyframe` sets
-    /// the FLV frame type), prepending the header + sequence headers on the first
+    /// Wrap one video access unit into the FLV bytes to emit (`keyframe` sets the
+    /// FLV frame type), prepending the header + sequence headers on the first
     /// call. `dts_ms` is the tag timestamp (FLV timestamps are decode time) and
     /// `cts_ms` the signed composition-time offset (`pts - dts`), so a B-frame
-    /// stream's presentation times survive the mux (the demuxer's `pts = dts +
-    /// cts` inverse); an I/P stream passes 0.
+    /// H.264 stream's presentation times survive the mux (the demuxer's `pts =
+    /// dts + cts` inverse); an I/P stream passes 0. H.264 takes an AVCC access
+    /// unit, the other codecs their own bitstream frame.
     pub fn push_video(&mut self, au: &[u8], dts_ms: u32, cts_ms: i32, keyframe: bool) -> Vec<u8> {
         let mut out = Vec::new();
         self.write_header(&mut out);
-        // frame type (1 keyframe, 2 interframe) | AVC, AVC packet type 1 (NALU),
-        // then the two's-complement 24-bit composition-time offset.
+        let codec = self.video.unwrap_or(FlvCodec::H264);
+        // frame type (1 keyframe, 2 interframe) | codec id.
         let frame_type = if keyframe { 1u8 } else { 2u8 };
-        let cts = (cts_ms.clamp(-(1 << 23), (1 << 23) - 1) as u32) & 0x00FF_FFFF;
-        let mut body = alloc::vec![
-            (frame_type << 4) | VIDEO_CODEC_AVC,
-            0x01,
-            (cts >> 16) as u8,
-            (cts >> 8) as u8,
-            cts as u8
-        ];
+        let mut body = alloc::vec![(frame_type << 4) | codec.tag_id()];
+        match codec {
+            FlvCodec::H264 => {
+                // AVC packet type 1 (NALU), then the two's-complement 24-bit
+                // composition-time offset.
+                let cts = (cts_ms.clamp(-(1 << 23), (1 << 23) - 1) as u32) & 0x00FF_FFFF;
+                body.push(0x01);
+                body.extend_from_slice(&[(cts >> 16) as u8, (cts >> 8) as u8, cts as u8]);
+            }
+            // The dimension-adjustment byte the VP6 decoder takes as extradata.
+            FlvCodec::Vp6 | FlvCodec::Vp6Alpha => {
+                body.push(self.video_config.first().copied().unwrap_or(0))
+            }
+            _ => {}
+        }
         body.extend_from_slice(au);
         self.emit_tag(&mut out, TAG_VIDEO, dts_ms, &body);
         out
     }
 
-    /// Wrap one raw AAC frame into the FLV bytes to emit, prepending the header +
-    /// sequence headers on the first call.
+    /// Wrap one audio access unit into the FLV bytes to emit, prepending the
+    /// header + sequence headers on the first call. AAC takes a raw (de-ADTS'd)
+    /// frame, MP3 and Speex their own bitstream frame.
     pub fn push_audio(&mut self, au: &[u8], pts_ms: u32) -> Vec<u8> {
         let mut out = Vec::new();
         self.write_header(&mut out);
-        // AAC | 44k | 16-bit | stereo, AAC packet type 1 (raw frame).
-        let mut body = alloc::vec![0xAFu8, 0x01];
+        let mut body = alloc::vec![self.audio_flags];
+        // AAC packet type 1 (a raw frame, as opposed to the config).
+        if self.audio == Some(FlvCodec::Aac) {
+            body.push(0x01);
+        }
         body.extend_from_slice(au);
         self.emit_tag(&mut out, TAG_AUDIO, pts_ms, &body);
         out
@@ -358,10 +561,10 @@ impl FlvMuxer {
         out.push(1); // version
                      // Flags: bit 0 video present, bit 2 audio present.
         let mut flags = 0u8;
-        if self.has_video {
+        if self.video.is_some() {
             flags |= 0x01;
         }
-        if self.has_audio {
+        if self.audio.is_some() {
             flags |= 0x04;
         }
         out.push(flags);
@@ -373,14 +576,15 @@ impl FlvMuxer {
             self.emit_tag(out, TAG_SCRIPT, 0, &script);
         }
         // Sequence headers (AVC packet type 0 / AAC packet type 0) carry the
-        // decoder config a player needs before the media frames.
-        if !self.video_config.is_empty() {
+        // decoder config a player needs before the media frames. Only H.264 and
+        // AAC have one: VP6's config byte rides each media tag instead.
+        if self.video == Some(FlvCodec::H264) && !self.video_config.is_empty() {
             let mut body = alloc::vec![0x17u8, 0x00, 0x00, 0x00, 0x00];
             body.extend_from_slice(&self.video_config);
             self.emit_tag(out, TAG_VIDEO, 0, &body);
         }
-        if !self.audio_config.is_empty() {
-            let mut body = alloc::vec![0xAFu8, 0x00];
+        if self.audio == Some(FlvCodec::Aac) && !self.audio_config.is_empty() {
+            let mut body = alloc::vec![self.audio_flags, 0x00];
             body.extend_from_slice(&self.audio_config);
             self.emit_tag(out, TAG_AUDIO, 0, &body);
         }
@@ -469,57 +673,41 @@ fn sequence_header(tag_type: u8, body: &[u8]) -> Option<(FlvTrack, &[u8])> {
 /// Map one FLV tag to an access unit, or `None` for a tag this parser skips
 /// (a sequence header, an unsupported codec, or a script/metadata tag).
 fn parse_tag(tag_type: u8, timestamp: u32, body: &[u8]) -> Option<FlvUnit> {
-    match tag_type {
-        TAG_VIDEO => {
-            // body[0] = frame type (high nibble) | codec id (low nibble).
-            let first = *body.first()?;
-            if first & 0x0F != VIDEO_CODEC_AVC {
-                return None;
-            }
-            // AVC: body[1] = packet type (0 config, 1 NALU, 2 end), body[2..5] =
-            // composition time offset, body[5..] = the AVCC access unit.
-            if *body.get(1)? != 1 {
-                return None;
-            }
-            // The tag timestamp is the decode time; the signed 24-bit composition
-            // offset gives the presentation time (negative clamps to 0).
-            let cts =
-                ((*body.get(2)? as i32) << 16 | (*body.get(3)? as i32) << 8 | *body.get(4)? as i32)
-                    << 8
-                    >> 8;
-            let pts_ms = (timestamp as i64 + cts as i64).clamp(0, u32::MAX as i64) as u32;
-            // Frame type 1 is a keyframe (2 interframe, 3..5 disposable/generated).
-            let keyframe = first >> 4 == 1;
-            Some(FlvUnit {
-                track: FlvTrack::Video,
-                data: body.get(5..)?.to_vec(),
-                pts_ms,
-                dts_ms: timestamp,
-                keyframe,
-            })
-        }
-        TAG_AUDIO => {
-            // body[0] = sound format (high nibble) | rate/size/type (low nibble).
-            let sound_format = body.first()? >> 4;
-            if sound_format != SOUND_FORMAT_AAC {
-                return None;
-            }
-            // AAC: body[1] = packet type (0 AudioSpecificConfig, 1 raw frame),
-            // body[2..] = the raw AAC frame.
-            if *body.get(1)? != 1 {
-                return None;
-            }
-            // Every audio frame is a resync point.
-            Some(FlvUnit {
-                track: FlvTrack::Audio,
-                data: body.get(2..)?.to_vec(),
-                pts_ms: timestamp,
-                dts_ms: timestamp,
-                keyframe: true,
-            })
-        }
-        _ => None,
+    let first = *body.first()?;
+    let (codec, keyframe) = match tag_type {
+        // body[0] = frame type (high nibble) | codec id (low nibble). Frame type
+        // 1 is a keyframe (2 interframe, 3..5 disposable/generated).
+        TAG_VIDEO => (FlvCodec::from_video_id(first & 0x0F)?, first >> 4 == 1),
+        // body[0] = sound format (high nibble) | rate/size/type (low nibble).
+        // Every audio frame is a resync point.
+        TAG_AUDIO => (FlvCodec::from_sound_format(first >> 4)?, true),
+        _ => return None,
+    };
+    // H.264 and AAC prefix the payload with a packet type: 0 is the decoder
+    // config, kept as the side channel by `sequence_header`, 2 an end-of-sequence
+    // marker, and only 1 is a media frame.
+    if matches!(codec, FlvCodec::H264 | FlvCodec::Aac) && *body.get(1)? != 1 {
+        return None;
     }
+    // The tag timestamp is the decode time; H.264's signed 24-bit composition
+    // offset gives the presentation time (negative clamps to 0). No other FLV
+    // video codec reorders, so their pts is the tag timestamp.
+    let pts_ms = if codec == FlvCodec::H264 {
+        let cts =
+            ((*body.get(2)? as i32) << 16 | (*body.get(3)? as i32) << 8 | *body.get(4)? as i32)
+                << 8
+                >> 8;
+        (timestamp as i64 + cts as i64).clamp(0, u32::MAX as i64) as u32
+    } else {
+        timestamp
+    };
+    Some(FlvUnit {
+        codec,
+        data: body.get(1 + payload_offset(codec)..)?.to_vec(),
+        pts_ms,
+        dts_ms: timestamp,
+        keyframe,
+    })
 }
 
 #[cfg(test)]
@@ -614,7 +802,7 @@ mod tests {
         assert_eq!(
             units[0],
             FlvUnit {
-                track: FlvTrack::Video,
+                codec: FlvCodec::H264,
                 data: v0.to_vec(),
                 pts_ms: 0,
                 dts_ms: 0,
@@ -624,7 +812,7 @@ mod tests {
         assert_eq!(
             units[1],
             FlvUnit {
-                track: FlvTrack::Audio,
+                codec: FlvCodec::Aac,
                 data: a0.to_vec(),
                 pts_ms: 0,
                 dts_ms: 0,
@@ -634,7 +822,7 @@ mod tests {
         assert_eq!(
             units[2],
             FlvUnit {
-                track: FlvTrack::Video,
+                codec: FlvCodec::H264,
                 data: v1.to_vec(),
                 pts_ms: 33,
                 dts_ms: 33,
@@ -685,7 +873,7 @@ mod tests {
         let tags: TagList = [Tag::Title("Clip".into()), Tag::Encoder("g2g".into())]
             .into_iter()
             .collect();
-        let mut mux = FlvMuxer::new(FlvTrack::Video).with_tags(tags);
+        let mut mux = FlvMuxer::new(FlvCodec::H264).with_tags(tags);
         let bytes = mux.push_au(&[0x65, 0xAA], 0);
 
         // The demuxer retains the first script tag's body; it round-trips to the
@@ -708,7 +896,7 @@ mod tests {
 
     #[test]
     fn mux_without_tags_writes_no_script_tag() {
-        let mut mux = FlvMuxer::new(FlvTrack::Video);
+        let mut mux = FlvMuxer::new(FlvCodec::H264);
         let bytes = mux.push_au(&[0x65, 0xAA], 0);
         let mut d = FlvDemuxer::new();
         d.push_data(&bytes);
@@ -735,7 +923,7 @@ mod tests {
 
         assert_eq!(units.len(), 2);
         assert_eq!(units[0].data, vec![0x65, 0x11, 0x22]);
-        assert_eq!(units[1].track, FlvTrack::Audio);
+        assert_eq!(units[1].track(), FlvTrack::Audio);
         assert_eq!(units[1].pts_ms, 10);
     }
 
@@ -744,7 +932,7 @@ mod tests {
         // The muxer's FLV bytes feed straight back through the demuxer, recovering
         // the access units, their order, and their timestamps.
         let aus: [&[u8]; 2] = [&[0x65, 0xAA, 0xBB], &[0x41, 0xCC]];
-        let mut mux = FlvMuxer::new(FlvTrack::Video);
+        let mut mux = FlvMuxer::new(FlvCodec::H264);
         let mut stream = Vec::new();
         stream.extend_from_slice(&mux.push_au(aus[0], 0));
         stream.extend_from_slice(&mux.push_au(aus[1], 33));
@@ -756,14 +944,14 @@ mod tests {
             units,
             vec![
                 FlvUnit {
-                    track: FlvTrack::Video,
+                    codec: FlvCodec::H264,
                     data: aus[0].to_vec(),
                     pts_ms: 0,
                     dts_ms: 0,
                     keyframe: true
                 },
                 FlvUnit {
-                    track: FlvTrack::Video,
+                    codec: FlvCodec::H264,
                     data: aus[1].to_vec(),
                     pts_ms: 33,
                     dts_ms: 33,
@@ -777,7 +965,7 @@ mod tests {
     fn mux_writes_composition_offset() {
         // A reordered (B-frame) stream: dts 100 with pts 133 writes cts +33,
         // and the demuxer's `pts = dts + cts` inverse recovers both times.
-        let mut mux = FlvMuxer::new(FlvTrack::Video);
+        let mut mux = FlvMuxer::new(FlvCodec::H264);
         let mut stream = mux.push_video(&[0x65, 0xAA], 100, 33, true);
         stream.extend_from_slice(&mux.push_video(&[0x41, 0xBB], 133, 0, false));
 
@@ -805,7 +993,7 @@ mod tests {
 
     #[test]
     fn mux_writes_audio_tags() {
-        let mut mux = FlvMuxer::new(FlvTrack::Audio);
+        let mut mux = FlvMuxer::new(FlvCodec::Aac);
         let bytes = mux.push_au(&[0x11, 0x22], 10);
         // "FLV" header, then a demuxer recovers the AAC frame.
         assert_eq!(&bytes[0..3], b"FLV");
@@ -815,7 +1003,7 @@ mod tests {
         assert_eq!(
             units,
             vec![FlvUnit {
-                track: FlvTrack::Audio,
+                codec: FlvCodec::Aac,
                 data: vec![0x11, 0x22],
                 pts_ms: 10,
                 dts_ms: 10,
@@ -882,14 +1070,120 @@ mod tests {
     }
 
     #[test]
-    fn ignores_non_aac_non_avc_codecs() {
-        // An MP3 audio tag (sound format 2) and an H.263 video tag (codec id 2).
-        let mp3 = vec![0x2Fu8, 0xAA, 0xBB];
-        let h263 = vec![0x12u8, 0xCC, 0xDD];
-        let stream = flv_stream(&[tag(TAG_AUDIO, 0, &mp3), tag(TAG_VIDEO, 0, &h263)]);
+    fn ignores_codecs_outside_the_carried_set() {
+        // A Nellymoser audio tag (sound format 6) and a screen-video tag (codec
+        // id 3): neither is carried, so neither yields a unit.
+        let nellymoser = vec![0x62u8, 0xAA, 0xBB];
+        let screen = vec![0x13u8, 0xCC, 0xDD];
+        let stream = flv_stream(&[tag(TAG_AUDIO, 0, &nellymoser), tag(TAG_VIDEO, 0, &screen)]);
 
         let mut d = FlvDemuxer::new();
         d.push_data(&stream);
         assert!(d.take_units().is_empty());
+    }
+
+    #[test]
+    fn demuxes_the_legacy_codecs_at_their_payload_offsets() {
+        // Sorenson (id 2) and MP3 (format 2) start their payload right after the
+        // first byte; VP6 (id 4) and VP6-alpha (id 5) spend one more on the
+        // dimension adjustment, and Speex (format 11) none.
+        let sorenson = vec![0x12u8, 0xAA, 0xBB];
+        let vp6 = vec![0x14u8, 0x22, 0xCC, 0xDD];
+        let vp6a = vec![0x25u8, 0x22, 0x00, 0x00, 0x02, 0xEE];
+        let mp3 = vec![0x2Fu8, 0x11, 0x22]; // 44.1 kHz stereo
+        let speex = vec![0xB6u8, 0x33];
+        let stream = flv_stream(&[
+            tag(TAG_VIDEO, 0, &sorenson),
+            tag(TAG_VIDEO, 10, &vp6),
+            tag(TAG_VIDEO, 20, &vp6a),
+            tag(TAG_AUDIO, 0, &mp3),
+            tag(TAG_AUDIO, 10, &speex),
+        ]);
+
+        let mut d = FlvDemuxer::new();
+        d.push_data(&stream);
+        let units = d.take_units();
+        let got: Vec<_> = units.iter().map(|u| (u.codec, u.data.clone())).collect();
+        assert_eq!(
+            got,
+            vec![
+                (FlvCodec::SorensonH263, vec![0xAA, 0xBB]),
+                (FlvCodec::Vp6, vec![0xCC, 0xDD]),
+                // The 24-bit alpha offset stays in the payload: its decoder reads it.
+                (FlvCodec::Vp6Alpha, vec![0x00, 0x00, 0x02, 0xEE]),
+                (FlvCodec::Mp3, vec![0x11, 0x22]),
+                (FlvCodec::Speex, vec![0x33]),
+            ]
+        );
+        assert!(units[0].keyframe, "frame type 1 is a keyframe");
+        assert!(!units[2].keyframe, "frame type 2 is an interframe");
+        assert_eq!(units[3].track(), FlvTrack::Audio);
+        assert_eq!(
+            d.video_config(),
+            Some(&[0x22u8][..]),
+            "the VP6 adjustment byte is the video config side channel"
+        );
+        assert_eq!(
+            d.audio_params(),
+            Some((2, 44_100)),
+            "the MP3 tag flags declare the layout"
+        );
+    }
+
+    #[test]
+    fn mp3_at_8khz_uses_sound_format_14() {
+        // Sound format 14 is MP3 whose rate the 2-bit field cannot express.
+        let stream = flv_stream(&[tag(TAG_AUDIO, 0, &[0xE2u8, 0x77])]);
+        let mut d = FlvDemuxer::new();
+        d.push_data(&stream);
+        let units = d.take_units();
+        assert_eq!(units[0].codec, FlvCodec::Mp3);
+        assert_eq!(units[0].data, vec![0x77]);
+        assert_eq!(d.audio_params(), Some((1, 8_000)));
+    }
+
+    #[test]
+    fn legacy_codecs_round_trip_through_the_muxer() {
+        // Each codec's mux -> demux recovers the payload byte for byte, and the
+        // VP6 adjustment travels via the config side channel.
+        for (codec, config) in [
+            (FlvCodec::SorensonH263, Vec::new()),
+            (FlvCodec::Vp6, vec![0x22u8]),
+            (FlvCodec::Vp6Alpha, vec![0x22u8]),
+        ] {
+            let mut mux = FlvMuxer::new(codec);
+            mux.set_video_config(config.clone());
+            let mut stream = mux.push_video(&[0xAA, 0xBB], 0, 0, true);
+            stream.extend_from_slice(&mux.push_video(&[0xCC], 40, 0, false));
+
+            let mut d = FlvDemuxer::new();
+            d.push_data(&stream);
+            let units = d.take_units();
+            assert_eq!(units.len(), 2, "{codec:?}");
+            assert_eq!(units[0].codec, codec);
+            assert_eq!(units[0].data, vec![0xAA, 0xBB], "{codec:?}");
+            assert!(units[0].keyframe);
+            assert_eq!((units[1].data.clone(), units[1].dts_ms), (vec![0xCC], 40));
+            assert!(!units[1].keyframe);
+            assert_eq!(d.video_config().unwrap_or_default(), &config[..]);
+        }
+
+        for (codec, channels, rate) in [
+            (FlvCodec::Mp3, 2, 44_100),
+            (FlvCodec::Mp3, 1, 22_050),
+            (FlvCodec::Speex, 1, 16_000),
+        ] {
+            let mut mux = FlvMuxer::new(codec);
+            mux.set_audio_params(channels, rate);
+            let stream = mux.push_audio(&[0x11, 0x22], 10);
+
+            let mut d = FlvDemuxer::new();
+            d.push_data(&stream);
+            let units = d.take_units();
+            assert_eq!(units[0].codec, codec);
+            assert_eq!(units[0].data, vec![0x11, 0x22], "{codec:?}");
+            assert_eq!(units[0].pts_ms, 10);
+            assert_eq!(d.audio_params(), Some((channels, rate)), "{codec:?}");
+        }
     }
 }

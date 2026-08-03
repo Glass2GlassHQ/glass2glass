@@ -447,6 +447,9 @@ fn codec_gst_media_type(c: VideoCodec) -> &'static str {
         VideoCodec::Mpeg4Part2 => "video/mpeg",
         // JPEG XS codestream (GStreamer's `jpegxsdec` / `jpegxsenc` caps).
         VideoCodec::JpegXs => "image/x-jxsc",
+        VideoCodec::SorensonH263 => "video/x-flash-video",
+        VideoCodec::Vp6 { alpha: false } => "video/x-vp6-flash",
+        VideoCodec::Vp6 { alpha: true } => "video/x-vp6-alpha",
     }
 }
 
@@ -460,6 +463,9 @@ fn audio_gst_media_type(f: AudioFormat) -> (&'static str, Option<&'static str>) 
         // bare media type is the same. This helper carries no version field, so
         // mp2 shares the AAC media type here (the codec split lives in the caps).
         AudioFormat::Mp2 => ("audio/mpeg", None),
+        // Same story as mp2: gst separates mp3 by mpegversion/layer fields.
+        AudioFormat::Mp3 => ("audio/mpeg", None),
+        AudioFormat::Speex => ("audio/x-speex", None),
         AudioFormat::Ac3 => ("audio/x-ac3", None),
         AudioFormat::Flac => ("audio/x-flac", None),
         AudioFormat::Vorbis => ("audio/x-vorbis", None),
@@ -829,6 +835,20 @@ pub enum VideoCodec {
     /// `FfmpegVideoDec`. Carried in MP4 as an `mp4v` sample entry (esds
     /// objectTypeIndication `0x20`) and in MPEG-TS as stream_type `0x10`.
     Mpeg4Part2,
+    /// Sorenson Spark (Sorenson H.263), the original Flash video codec, carried
+    /// as FLV video codec id 2 (GStreamer `video/x-flash-video`, libavcodec
+    /// `flv1`). An H.263 derivative with Flash's own picture header, so it is a
+    /// distinct codec from ITU H.263. Decoded in software via `FfmpegVideoDec`.
+    SorensonH263,
+    /// On2 VP6 in its Flash variant: FLV video codec id 4, or id 5 when a second
+    /// (alpha) plane rides in the same packet. `alpha` picks between them, since
+    /// libavcodec decodes them with different decoders (`vp6f` / `vp6a`) and a
+    /// consumer must know whether the stream carries transparency (GStreamer
+    /// `video/x-vp6-flash` / `video/x-vp6-alpha`). The container's one-byte
+    /// dimension adjustment travels as the codec-config side channel.
+    Vp6 {
+        alpha: bool,
+    },
     /// JPEG XS (ISO/IEC 21122): a low-latency, visually lossless intra-frame
     /// mezzanine codec, each frame an independent codestream. The compressed
     /// essence of SMPTE ST 2110-22 (carried over RTP per RFC 9134), so a
@@ -1011,6 +1031,17 @@ pub enum AudioFormat {
     /// (0x06) with an AC-3 descriptor (DVB), Matroska as `A_AC3`. Decoded via
     /// libavcodec.
     Ac3,
+    /// MPEG-1/2/2.5 Audio Layer III (`mp3`), GStreamer
+    /// `audio/mpeg,mpegversion=1,layer=3`. Self-syncing frames like `Mp2` (the
+    /// same 4-byte header, a Layer III frame length), the legacy FLV / RTMP audio
+    /// codec. Decoded via libavcodec.
+    Mp3,
+    /// Speex (RFC 5574), GStreamer `audio/x-speex`: the pre-Opus low-bitrate
+    /// speech codec, carried by FLV at a fixed 16 kHz mono. Container-framed (one
+    /// packet per FLV tag / Ogg packet). Carriage only, g2g registers no Speex
+    /// decoder, so an autoplugged decode chain fails to build rather than
+    /// pretending.
+    Speex,
     /// Free Lossless Audio Codec (`flac`), GStreamer `audio/x-flac`. Frame headers
     /// are self-describing but not cheaply self-syncing, so g2g relies on the
     /// container framing (one frame per Matroska block / Ogg packet); the STREAMINFO

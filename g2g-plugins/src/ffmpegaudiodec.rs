@@ -1,14 +1,14 @@
 //! Linux audio decode element using ffmpeg / libavcodec (M422).
 //!
 //! Consumes compressed audio access units (`Caps::Audio { format: Aac | Mp2 |
-//! Ac3 | Flac, .. }`; AAC ADTS-framed as MPEG-TS / HLS carry it, MPEG audio and
-//! AC-3 as self-syncing frames, FLAC container-framed one frame per packet) and
+//! Mp3 | Ac3 | Flac, .. }`; AAC ADTS-framed as MPEG-TS / HLS carry it, MPEG audio
+//! and AC-3 as self-syncing frames, FLAC container-framed one frame per packet) and
 //! emits interleaved little-endian `PcmS16Le`. The audio sibling of
 //! [`FfmpegVideoDec`](crate::ffmpegdec): it wraps a libavcodec decoder, sends
 //! each access unit, and drains decoded frames, converting libavcodec's native
 //! sample layout (AAC / AC-3 decode to planar float `FLTP`, FLAC to S16 / S32)
 //! to interleaved S16. Linux + the `ffmpeg` feature; libavcodec must include the
-//! AAC / MP2 / AC-3 / FLAC decoders (it does in every standard build).
+//! AAC / MP2 / MP3 / AC-3 / FLAC decoders (it does in every standard build).
 //!
 //! FLAC is the one format that needs setup data: the decoder takes the stream's
 //! STREAMINFO as extradata. The containers hand it over as the native `fLaC`
@@ -104,7 +104,11 @@ impl FfmpegAudioDec {
     fn decodes(format: AudioFormat) -> bool {
         matches!(
             format,
-            AudioFormat::Aac | AudioFormat::Mp2 | AudioFormat::Ac3 | AudioFormat::Flac
+            AudioFormat::Aac
+                | AudioFormat::Mp2
+                | AudioFormat::Mp3
+                | AudioFormat::Ac3
+                | AudioFormat::Flac
         )
     }
 
@@ -113,6 +117,7 @@ impl FfmpegAudioDec {
         match format {
             // MP2 = libavcodec's layer I/II decoder, matching what `-c:a mp2` writes.
             AudioFormat::Mp2 => Id::MP2,
+            AudioFormat::Mp3 => Id::MP3,
             AudioFormat::Ac3 => Id::AC3,
             AudioFormat::Flac => Id::FLAC,
             _ => Id::AAC,
@@ -251,7 +256,7 @@ impl AsyncElement for FfmpegAudioDec {
         ElementMetadata::new(
             "ffmpeg audio decoder",
             "Codec/Decoder/Audio",
-            "Decodes AAC / MPEG audio / AC-3 / FLAC (libavcodec) to interleaved PcmS16Le",
+            "Decodes AAC / MPEG audio (mp2, mp3) / AC-3 / FLAC (libavcodec) to interleaved PcmS16Le",
             "g2g",
         )
     }
@@ -302,7 +307,7 @@ impl AsyncElement for FfmpegAudioDec {
                         // AAC, MPEG audio header for mp2, `0x0B77` sync for AC-3) and
                         // send each, the audio analog of access-unit framing for video.
                         let aus = match self.format {
-                            AudioFormat::Mp2 => mpa_frames(buf),
+                            AudioFormat::Mp2 | AudioFormat::Mp3 => mpa_frames(buf),
                             AudioFormat::Ac3 => ac3_frames(buf),
                             _ => adts_frames(buf),
                         };
@@ -399,6 +404,7 @@ impl PadTemplates for FfmpegAudioDec {
             PadTemplate::sink(CapsSet::from_alternatives(Vec::from([
                 compressed(AudioFormat::Aac),
                 compressed(AudioFormat::Mp2),
+                compressed(AudioFormat::Mp3),
                 compressed(AudioFormat::Ac3),
                 compressed(AudioFormat::Flac),
             ]))),
@@ -434,46 +440,65 @@ fn adts_frames(buf: &[u8]) -> Vec<&[u8]> {
     frames
 }
 
-/// Bitrates (kbit/s) for MPEG-1 Layer II, indexed by the header's 4-bit field.
-/// Index 0 ("free format") and 15 are invalid here and fail the parse.
+/// Bitrates (kbit/s) indexed by the header's 4-bit field, per version and layer:
+/// MPEG-1 Layer II, MPEG-1 Layer III, and MPEG-2 / 2.5 Layer III (whose low-rate
+/// extension has its own table). Index 0 ("free format") and 15 are invalid here
+/// and fail the parse.
 const MP2_BITRATES_KBPS: [u32; 16] = [
     0, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 0,
 ];
-/// Sample rates for MPEG-1 (index 3 is reserved). MPEG-2 halves these.
+const MP3_V1_BITRATES_KBPS: [u32; 16] = [
+    0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0,
+];
+const MP3_V2_BITRATES_KBPS: [u32; 16] = [
+    0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0,
+];
+/// Sample rates for MPEG-1 (index 3 is reserved). MPEG-2 halves these, MPEG-2.5
+/// quarters them.
 const MPA_RATES_HZ: [u32; 4] = [44_100, 48_000, 32_000, 0];
 
-/// Split a buffer of back-to-back MPEG audio (Layer II, `mp2`) frames into
-/// individual frames, the MPEG-audio sibling of [`adts_frames`]. Each frame's
-/// 4-byte header carries an 11-bit sync (`0xFFE`), version, layer, bitrate and
-/// sample-rate indices, and a padding bit; Layer II frame length =
-/// `144 * bitrate / rate + padding` (MPEG-2's low-rate extension halves the
-/// rate, same formula). Walking stops at the first invalid header or a length
-/// overrunning the buffer, so a truncated tail is dropped rather than mis-fed.
+/// Split a buffer of back-to-back MPEG audio (Layer II `mp2` or Layer III `mp3`)
+/// frames into individual frames, the MPEG-audio sibling of [`adts_frames`]. Each
+/// frame's 4-byte header carries an 11-bit sync (`0xFFE`), version, layer,
+/// bitrate and sample-rate indices, and a padding bit; the frame length is
+/// `samples_per_frame / 8 * bitrate / rate + padding`, where a frame is 1152
+/// samples except MPEG-2 / 2.5 Layer III's 576. Walking stops at the first
+/// invalid header or a length overrunning the buffer, so a truncated tail is
+/// dropped rather than mis-fed.
 fn mpa_frames(buf: &[u8]) -> Vec<&[u8]> {
     let mut frames = Vec::new();
     let mut pos = 0;
     while pos + 4 <= buf.len() {
         let h = &buf[pos..pos + 4];
         // Sync: 11 set bits. Version: bits 4..3 of byte1 (3 = MPEG-1, 2 = MPEG-2,
-        // 0 = MPEG-2.5, 1 reserved). Layer: bits 2..1 (2 = Layer II).
+        // 0 = MPEG-2.5, 1 reserved). Layer: bits 2..1 (2 = Layer II, 1 = III).
         if h[0] != 0xFF || (h[1] & 0xE0) != 0xE0 {
             break;
         }
         let version = (h[1] >> 3) & 0x03;
         let layer = (h[1] >> 1) & 0x03;
-        if version == 1 || layer != 2 {
-            break; // reserved version, or not Layer II
-        }
-        let bitrate = MP2_BITRATES_KBPS[((h[2] >> 4) & 0x0F) as usize].saturating_mul(1_000);
+        let bitrate_index = ((h[2] >> 4) & 0x0F) as usize;
+        let (bitrates, bytes_per_frame_num) = match (version, layer) {
+            (1, _) => break,                        // reserved version
+            (3, 2) => (&MP2_BITRATES_KBPS, 144),    // MPEG-1 Layer II
+            (_, 2) => (&MP2_BITRATES_KBPS, 144),    // MPEG-2 / 2.5 Layer II
+            (3, 1) => (&MP3_V1_BITRATES_KBPS, 144), // MPEG-1 Layer III
+            (_, 1) => (&MP3_V2_BITRATES_KBPS, 72),  // MPEG-2 / 2.5 Layer III
+            _ => break,                             // Layer I or reserved
+        };
+        let bitrate = bitrates[bitrate_index].saturating_mul(1_000);
         let mut rate = MPA_RATES_HZ[((h[2] >> 2) & 0x03) as usize];
-        if version != 3 {
-            rate /= 2; // MPEG-2 / MPEG-2.5 low-sample-rate extension
-        }
+        // The low-sample-rate extensions: MPEG-2 halves, MPEG-2.5 quarters.
+        rate >>= match version {
+            3 => 0,
+            2 => 1,
+            _ => 2,
+        };
         if bitrate == 0 || rate == 0 {
             break; // free-format / reserved: cannot compute a frame length
         }
         let padding = ((h[2] >> 1) & 1) as usize;
-        let len = (144 * bitrate / rate) as usize + padding;
+        let len = (bytes_per_frame_num * bitrate / rate) as usize + padding;
         if len < 4 || pos + len > buf.len() {
             break;
         }
@@ -704,6 +729,35 @@ mod tests {
         let frames = super::mpa_frames(&buf);
         assert_eq!(frames.len(), 2, "two back-to-back mp2 frames split apart");
         assert!(frames.iter().all(|f| f.len() == 1152));
+    }
+
+    /// A minimal Layer III frame, zero-padded to its computed length.
+    /// MPEG-1: 128 kbit/s at 44.1 kHz = 144 * 128000 / 44100 = 417 bytes.
+    /// MPEG-2.5: 32 kbit/s at 8 kHz = 72 * 32000 / 8000 = 288 bytes.
+    fn mp3(mpeg1: bool) -> Vec<u8> {
+        let (len, version_layer, bitrate_rate) = if mpeg1 {
+            (417, 0xFBu8, 0x90u8) // MPEG-1 Layer III, bitrate index 9, rate index 0
+        } else {
+            (288, 0xE3, 0x48) // MPEG-2.5 Layer III, bitrate index 4, rate index 2
+        };
+        let mut f = vec![0u8; len];
+        f[0] = 0xFF;
+        f[1] = version_layer;
+        f[2] = bitrate_rate;
+        f
+    }
+
+    #[test]
+    fn splits_concatenated_mp3_frames() {
+        // Layer III uses its own bitrate table and, on MPEG-2.5, a half-size
+        // frame: getting either wrong mis-splits the stream.
+        for (mpeg1, len) in [(true, 417), (false, 288)] {
+            let mut buf = mp3(mpeg1);
+            buf.extend_from_slice(&mp3(mpeg1));
+            let frames = super::mpa_frames(&buf);
+            assert_eq!(frames.len(), 2, "mpeg1={mpeg1}");
+            assert!(frames.iter().all(|f| f.len() == len), "mpeg1={mpeg1}");
+        }
     }
 
     #[test]

@@ -8,6 +8,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 - M832: opt-in `cmaf` mode on the fMP4 muxers (brands, `styp`, sync-aligned fragments, explicit `tfhd`), and the demuxers honor `tfhd` default sample durations.
 
+- M831: FLV carries Sorenson H.263, VP6(-alpha), MP3 and Speex (decode wired for the first three), ffmpeg/gst-oracle-validated.
+
 - M830: `opusdec` rebuilds at a chain boundary (`Segment` + `OpusHead`), chained Opus decodes bit-exact to the parts.
 
 - M829: `plc` packet-loss concealment on `opusdec` (TOC-cadence gap fill, 200 ms cap).

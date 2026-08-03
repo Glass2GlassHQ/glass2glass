@@ -134,7 +134,7 @@ async fn rtmp_publish_demuxes_to_access_units() {
         1,
         "the published video tag demuxes to one access unit"
     );
-    assert_eq!(units[0].track, FlvTrack::Video);
+    assert_eq!(units[0].track(), FlvTrack::Video);
     assert_eq!(
         units[0].data, au,
         "RtmpSrc -> flvdemux recovers the AVCC access unit"

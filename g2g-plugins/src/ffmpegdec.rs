@@ -1384,13 +1384,17 @@ impl AsyncElement for FfmpegH264Dec {
 /// negotiation failure; the runtime mid-stream check refuses
 /// `CapsMismatch` before it ever reaches here.
 /// The compressed codecs this element can open via libavcodec.
-const SUPPORTED_CODECS: [VideoCodec; 6] = [
+const SUPPORTED_CODECS: [VideoCodec; 9] = [
     VideoCodec::H264,
     VideoCodec::H265,
     VideoCodec::Vp8,
     VideoCodec::Vp9,
     VideoCodec::Av1,
     VideoCodec::Mpeg4Part2,
+    // The legacy Flash codecs an FLV carries (M831), decoded in software.
+    VideoCodec::SorensonH263,
+    VideoCodec::Vp6 { alpha: false },
+    VideoCodec::Vp6 { alpha: true },
 ];
 
 /// `FfmpegVideoDec`'s settable properties: the VAAPI render node (for the
@@ -1458,6 +1462,10 @@ fn codec_id(codec: VideoCodec) -> Id {
         VideoCodec::Av1 => Id::AV1,
         VideoCodec::Mjpeg => Id::MJPEG,
         VideoCodec::Mpeg4Part2 => Id::MPEG4,
+        // Sorenson Spark is libavcodec's `flv1`, and VP6 its Flash variants.
+        VideoCodec::SorensonH263 => Id::FLV1,
+        VideoCodec::Vp6 { alpha: false } => Id::VP6F,
+        VideoCodec::Vp6 { alpha: true } => Id::VP6A,
         _ => unreachable!("ffmpegdec negotiates only known VideoCodec variants"),
     }
 }

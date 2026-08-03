@@ -418,8 +418,9 @@ Phased plan:
   conformance oracle runs there today).
 - **OGG:** chained-stream writing (`OggMux` has no chain-boundary trigger or
   serial policy; demux-side chains are handled).
-- **FLV:** VP6 / H.263 / MP3 / Speex codecs (only H.264 + AAC ride the tag
-  stream today).
+- **FLV:** Speex decode (carriage lands M831; no Speex encoder exists anywhere
+  to build a validated decode vector, and gst's header-in-tag layout is
+  rejected by libavcodec, so wiring a decoder would be an unvalidated claim).
 - **CMAF / fMP4:** low-latency chunking (sub-fragment chunks + `prft`; the
   fragmented muxer has no sub-fragment model).
 

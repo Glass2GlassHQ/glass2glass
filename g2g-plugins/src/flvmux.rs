@@ -1,6 +1,7 @@
 //! FLV multiplexer element (M120): one elementary stream in
-//! (`Caps::CompressedVideo{H264}` Annex-B, or `Caps::Audio{Aac}` ADTS), an FLV
-//! byte stream out (`Caps::ByteStream{Flv}`).
+//! (`Caps::CompressedVideo{H264}` Annex-B, or `Caps::Audio{Aac}` ADTS, or one of
+//! the legacy Flash codecs: Sorenson, VP6, VP6-alpha, MP3, Speex), an FLV byte
+//! stream out (`Caps::ByteStream{Flv}`).
 //!
 //! Wraps the pure [`crate::flv::FlvMuxer`], the inverse of
 //! [`crate::flvdemux::FlvDemux`]: each input access unit becomes an FLV tag, with
@@ -37,15 +38,15 @@ use g2g_core::{
 
 use crate::aacparse::{asc_from_adts, strip_adts};
 use crate::annexb::{avcc_record, avcc_sample, is_keyframe_nal, parameter_sets, split_annexb};
-use crate::flv::{FlvMuxer, FlvTrack};
+use crate::flv::{FlvCodec, FlvMuxer};
 
 /// Muxes one elementary stream into an FLV byte stream.
 #[derive(Debug)]
 pub struct FlvMux {
     /// Built at configure, once the input track is known.
     mux: Option<FlvMuxer>,
-    /// The track the negotiated input carries, set at configure.
-    track: Option<FlvTrack>,
+    /// The codec the negotiated input carries, set at configure.
+    codec: Option<FlvCodec>,
     /// Whether the sequence-header config was captured from an access unit.
     init_captured: bool,
     tags: TagList,
@@ -63,7 +64,7 @@ impl FlvMux {
     pub fn new() -> Self {
         Self {
             mux: None,
-            track: None,
+            codec: None,
             init_captured: false,
             tags: TagList::new(),
             configured: false,
@@ -89,35 +90,47 @@ impl FlvMux {
         }
     }
 
-    /// The FLV track for an input caps, or `None` if the codec is unsupported.
-    fn track_for(caps: &Caps) -> Option<FlvTrack> {
+    /// The FLV codec for an input caps, or `None` if FLV cannot carry it.
+    pub(crate) fn codec_for(caps: &Caps) -> Option<FlvCodec> {
         match caps {
-            Caps::CompressedVideo {
-                codec: VideoCodec::H264,
-                ..
-            } => Some(FlvTrack::Video),
-            Caps::Audio {
-                format: AudioFormat::Aac,
-                ..
-            } => Some(FlvTrack::Audio),
+            Caps::CompressedVideo { codec, .. } => match codec {
+                VideoCodec::H264 => Some(FlvCodec::H264),
+                VideoCodec::SorensonH263 => Some(FlvCodec::SorensonH263),
+                VideoCodec::Vp6 { alpha: false } => Some(FlvCodec::Vp6),
+                VideoCodec::Vp6 { alpha: true } => Some(FlvCodec::Vp6Alpha),
+                _ => None,
+            },
+            Caps::Audio { format, .. } => match format {
+                AudioFormat::Aac => Some(FlvCodec::Aac),
+                AudioFormat::Mp3 => Some(FlvCodec::Mp3),
+                AudioFormat::Speex => Some(FlvCodec::Speex),
+                _ => None,
+            },
             _ => None,
         }
     }
 
     /// The elementary streams this muxer accepts on its sink pad.
-    fn input_alternatives() -> Vec<Caps> {
+    pub(crate) fn input_alternatives() -> Vec<Caps> {
+        let video = |codec| Caps::CompressedVideo {
+            codec,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        };
+        let audio = |format| Caps::Audio {
+            format,
+            channels: 0,
+            sample_rate: 0,
+        };
         Vec::from([
-            Caps::CompressedVideo {
-                codec: VideoCodec::H264,
-                width: Dim::Any,
-                height: Dim::Any,
-                framerate: Rate::Any,
-            },
-            Caps::Audio {
-                format: AudioFormat::Aac,
-                channels: 0,
-                sample_rate: 0,
-            },
+            video(VideoCodec::H264),
+            video(VideoCodec::SorensonH263),
+            video(VideoCodec::Vp6 { alpha: false }),
+            video(VideoCodec::Vp6 { alpha: true }),
+            audio(AudioFormat::Aac),
+            audio(AudioFormat::Mp3),
+            audio(AudioFormat::Speex),
         ])
     }
 }
@@ -129,7 +142,7 @@ impl AsyncElement for FlvMux {
         Self: 'a;
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        if Self::track_for(upstream_caps).is_some() {
+        if Self::codec_for(upstream_caps).is_some() {
             Ok(upstream_caps.clone())
         } else {
             Err(G2gError::CapsMismatch)
@@ -138,7 +151,7 @@ impl AsyncElement for FlvMux {
 
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         CapsConstraint::DerivedOutput(Box::new(|input: &Caps| {
-            if Self::track_for(input).is_some() {
+            if Self::codec_for(input).is_some() {
                 CapsSet::one(Self::output_caps())
             } else {
                 CapsSet::from_alternatives(Vec::new())
@@ -147,9 +160,20 @@ impl AsyncElement for FlvMux {
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        let track = Self::track_for(absolute_caps).ok_or(G2gError::CapsMismatch)?;
-        self.mux = Some(FlvMuxer::new(track).with_tags(self.tags.clone()));
-        self.track = Some(track);
+        let codec = Self::codec_for(absolute_caps).ok_or(G2gError::CapsMismatch)?;
+        let mut mux = FlvMuxer::new(codec).with_tags(self.tags.clone());
+        // MP3's tag flags declare the layout; the negotiated caps are where it
+        // comes from (AAC and Speex have a fixed encoding).
+        if let Caps::Audio {
+            channels,
+            sample_rate,
+            ..
+        } = absolute_caps
+        {
+            mux.set_audio_params(*channels, *sample_rate);
+        }
+        self.mux = Some(mux);
+        self.codec = Some(codec);
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
     }
@@ -168,15 +192,17 @@ impl AsyncElement for FlvMux {
                     let Some(au) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    let track = self.track.ok_or(G2gError::NotConfigured)?;
+                    let codec = self.codec.ok_or(G2gError::NotConfigured)?;
                     let mux = self.mux.as_mut().ok_or(G2gError::NotConfigured)?;
                     let pts_ms = (frame.timing.pts_ns / 1_000_000) as u32;
                     // Capture the decoder config from the first access unit that
                     // carries it, so the sequence header precedes the media tags
                     // (M662, the FlvMuxN pattern): video parameter sets only ride
-                    // the IDR, audio config is in every ADTS header.
-                    let flv = match track {
-                        FlvTrack::Video => {
+                    // the IDR, audio config is in every ADTS header. The legacy
+                    // Flash codecs have no sequence header, so their frames go
+                    // into a tag as they arrive.
+                    let flv = match codec {
+                        FlvCodec::H264 => {
                             let nalus = split_annexb(au);
                             if !self.init_captured {
                                 if let Ok(sets) = parameter_sets(VideoCodec::H264, &nalus) {
@@ -189,7 +215,11 @@ impl AsyncElement for FlvMux {
                             let (dts_ms, cts_ms) = FlvMuxer::video_tag_timing(&frame.timing);
                             mux.push_video(&avcc_sample(&nalus), dts_ms, cts_ms, keyframe)
                         }
-                        FlvTrack::Audio => {
+                        FlvCodec::SorensonH263 | FlvCodec::Vp6 | FlvCodec::Vp6Alpha => {
+                            let (dts_ms, cts_ms) = FlvMuxer::video_tag_timing(&frame.timing);
+                            mux.push_video(au, dts_ms, cts_ms, frame.timing.keyframe)
+                        }
+                        FlvCodec::Aac => {
                             if !self.init_captured {
                                 if let Some(asc) = asc_from_adts(au) {
                                     mux.set_audio_config(asc.to_vec());
@@ -198,6 +228,7 @@ impl AsyncElement for FlvMux {
                             }
                             mux.push_audio(strip_adts(au), pts_ms)
                         }
+                        FlvCodec::Mp3 | FlvCodec::Speex => mux.push_audio(au, pts_ms),
                     };
                     let out_frame = Frame::new(
                         MemoryDomain::System(SystemSlice::from_boxed(flv.into_boxed_slice())),

@@ -412,6 +412,11 @@ pub fn parse_caps_set(desc: &str) -> Option<CapsSet> {
         "video/x-vp9" => compressed_set(VideoCodec::Vp9),
         "video/x-av1" => compressed_set(VideoCodec::Av1),
         "image/jpeg" => compressed_set(VideoCodec::Mjpeg),
+        // The legacy Flash codecs, under the names gst's flvdemux emits.
+        "video/x-flash-video" => compressed_set(VideoCodec::SorensonH263),
+        "video/x-vp6-flash" => compressed_set(VideoCodec::Vp6 { alpha: false }),
+        "video/x-vp6-alpha" => compressed_set(VideoCodec::Vp6 { alpha: true }),
+        "audio/x-speex" => audio_set(&[AudioFormat::Speex]),
         "audio/x-opus" => audio_set(&[AudioFormat::Opus]),
         "audio/x-ac3" => audio_set(&[AudioFormat::Ac3]),
         "audio/x-flac" => audio_set(&[AudioFormat::Flac]),

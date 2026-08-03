@@ -176,6 +176,9 @@ fn codec_name(codec: VideoCodec) -> &'static str {
         VideoCodec::Mjpeg => "mjpeg",
         VideoCodec::Mpeg4Part2 => "mpeg4",
         VideoCodec::JpegXs => "jpegxs",
+        VideoCodec::SorensonH263 => "sorenson",
+        VideoCodec::Vp6 { alpha: false } => "vp6",
+        VideoCodec::Vp6 { alpha: true } => "vp6a",
         _ => "compressed",
     }
 }

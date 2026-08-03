@@ -1085,7 +1085,7 @@ const _: u8 = AMF0_BOOLEAN;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::flv::{FlvDemuxer, FlvTrack};
+    use crate::flv::{FlvCodec, FlvDemuxer, FlvTrack};
     use alloc::vec;
 
     fn push_u24(out: &mut Vec<u8>, v: u32) {
@@ -1300,7 +1300,7 @@ mod tests {
 
         // Publish one keyframe access unit as an FLV stream; recover it server-side.
         let au = [0u8, 0, 0, 3, 0x65, 0x11, 0x22]; // 4-byte length=3 + NAL
-        let mut mux = FlvMuxer::new(FlvTrack::Video);
+        let mut mux = FlvMuxer::new(FlvCodec::H264);
         let flv = mux.push_au(&au, 40);
         publisher.push_flv(&flv);
         server.push(&publisher.take_outbound());
@@ -1386,7 +1386,7 @@ mod tests {
         let nal: Vec<u8> = (0..9000u32).map(|i| (i as u8).wrapping_mul(31)).collect();
         let mut au = (nal.len() as u32).to_be_bytes().to_vec();
         au.extend_from_slice(&nal);
-        let mut mux = FlvMuxer::new(FlvTrack::Video);
+        let mut mux = FlvMuxer::new(FlvCodec::H264);
         let flv = mux.push_au(&au, 100);
         publisher.push_flv(&flv);
         server.push(&publisher.take_outbound());
@@ -1428,7 +1428,7 @@ mod tests {
     /// the session's Acknowledgement clears the throttle (back-pressure release).
     #[test]
     fn publisher_throttles_until_the_server_acknowledges() {
-        use crate::flv::{FlvMuxer, FlvTrack};
+        use crate::flv::{FlvCodec, FlvMuxer};
 
         // A 4 KB window so a couple of small tags trip it.
         let mut server = RtmpSession::new().with_window_ack_size(4096);
@@ -1443,7 +1443,7 @@ mod tests {
 
         // Push media well past the window without delivering the bytes to the
         // server (so no acknowledgement comes back): the publisher must throttle.
-        let mut mux = FlvMuxer::new(FlvTrack::Video);
+        let mut mux = FlvMuxer::new(FlvCodec::H264);
         let big: Vec<u8> = (0..6000u32).map(|i| i as u8).collect();
         let mut au = (big.len() as u32).to_be_bytes().to_vec();
         au.extend_from_slice(&big);
@@ -1491,7 +1491,7 @@ mod tests {
     struct FlvUnitView(FlvTrack, Vec<u8>, u32);
     impl PartialEq<FlvUnitView> for crate::flv::FlvUnit {
         fn eq(&self, o: &FlvUnitView) -> bool {
-            self.track == o.0 && self.data == o.1 && self.pts_ms == o.2
+            self.track() == o.0 && self.data == o.1 && self.pts_ms == o.2
         }
     }
 }
