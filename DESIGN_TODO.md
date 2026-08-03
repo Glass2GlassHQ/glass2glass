@@ -414,7 +414,8 @@ Phased plan:
 
 ## Containers
 
-- **MKV / WebM:** single-track `MkvMux` lacks unknown-size Clusters (live read).
+- **MKV / WebM:** wire the std-gated mkv test suites into CI (only the m828
+  conformance oracle runs there today).
 - **OGG:** chained-stream writing (`OggMux` has no chain-boundary trigger or
   serial policy; demux-side chains are handled).
 - **FLV:** VP6 / H.263 / MP3 / Speex codecs (only H.264 + AAC ride the tag

@@ -103,7 +103,7 @@ pub struct MkvMuxN {
     /// Live / streamable mode (the gst `streamable` property): suppress the `Cues`
     /// seek index normally appended at EOS, matching the single-input
     /// [`crate::mkvmux::MkvMux`]. A live sink cannot hold cluster positions to the
-    /// end, so `streamable` drops the index.
+    /// end, so `streamable` drops the index and the positions it would collect.
     streamable: bool,
     /// Two-pass / seekable-finalize mode (M770): buffer the whole file and emit
     /// it once at EOS with a front `SeekHead` and an `Info` `Duration` (M794,
@@ -593,7 +593,10 @@ impl MultiInputElement for MkvMuxN {
                     mux = mux.with_track_tags(*input, tags.clone());
                 }
                 if self.seekable {
-                    mux = mux.with_seek_head();
+                    mux = mux.with_two_pass();
+                }
+                if self.streamable {
+                    mux = mux.without_cues();
                 }
                 self.mux = Some(mux);
             }

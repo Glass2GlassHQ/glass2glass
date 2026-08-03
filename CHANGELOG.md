@@ -10,6 +10,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 - M829: `plc` packet-loss concealment on `opusdec` (TOC-cadence gap fill, 200 ms cap).
 
+- M828: mkv two-pass mode writes definite-size Segment/Clusters; streamable mode stops accumulating an unemitted Cues index.
+
 - M827: chained Ogg demux (sequential chains, offset-continued timeline, per-chain caps/tags), validated vs ffmpeg and GStreamer.
 
 - M826: `frame-size` (2.5-60 ms) and `complexity` on `opusenc`, sample-exact across sizes; mp4mux reads Opus durations from the TOC.

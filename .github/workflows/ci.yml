@@ -377,6 +377,11 @@ jobs:
       # a g2g-muxed pair to the source's samples.
       - name: Ogg multi-stream oracle (oggdemuxn + oggmuxn vs ffmpeg)
         run: cargo test -p g2g-plugins --locked --features std --test m790_ogg_multistream -- --nocapture
+      # Live Matroska (M828): ffmpeg decodes the streamable (unknown-size
+      # Segment / Cluster) output from a pipe it cannot seek, to the same pixels
+      # as the two-pass file.
+      - name: Matroska live oracle (matroskamux streamable vs ffmpeg)
+        run: cargo test -p g2g-plugins --locked --features std --test m828_mkv_streamable_clusters -- --nocapture
       # MCU-fit codec oracles (M638 G.711 + M639 IMA ADPCM): the g2g-mcu
       # fixed-point codecs checked bit-exact against ffmpeg (G.711: the full
       # domain, 65536 encoder inputs + 256 decoder codes, both laws; ADPCM:

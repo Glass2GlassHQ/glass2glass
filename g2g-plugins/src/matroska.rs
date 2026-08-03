@@ -1253,24 +1253,42 @@ pub struct MkvTrackConfig {
 /// this far past the current Cluster's base timestamp.
 const DEFAULT_MAX_CLUSTER_SPAN_MS: u64 = 1_000;
 
+/// The reserved EBML size a two-pass element is written with and its finalize
+/// fills in: eight bytes, which is also the all-ones "unknown size" a streaming
+/// Segment keeps. Eight is the widest form, so any length fits without moving a
+/// byte of what follows.
+const UNKNOWN_SIZE_8: [u8; 8] = [0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
+
+/// A reserved size field waiting on its element's length: where the 8 bytes sit
+/// in the muxed output, and where the element's data begins (the length is the
+/// distance from there to the element's end).
+#[derive(Debug, Clone, Copy)]
+pub struct SizePatch {
+    pub size_at: usize,
+    pub data_at: usize,
+}
+
 /// Matroska / WebM multiplexer for a single track (M115): writes the EBML header,
-/// an unknown-size Segment, Info + Tracks, then time-windowed Clusters of frames.
-/// The inverse of [`MatroskaDemuxer`]; the [`crate::mkvmux::MkvMux`] element wraps
-/// it.
+/// the Segment, Info + Tracks, then time-windowed Clusters of frames. The inverse
+/// of [`MatroskaDemuxer`]; the [`crate::mkvmux::MkvMux`] element wraps it.
 ///
-/// Clusters are written with an unknown size (the live shape, M143): a new Cluster
-/// header opens the window and the next one ends it, so frames stream out
-/// incrementally without buffering a whole Cluster to learn its size. Frames batch
-/// into one Cluster until one is more than the span cap past its base timestamp
-/// (or time runs backward), amortizing the per-Cluster overhead.
+/// Frames batch into one Cluster until one is more than the span cap past its
+/// base timestamp (or time runs backward), amortizing the per-Cluster overhead.
 ///
-/// While streaming, the muxer records a `Cues` index (one entry per Cluster that
-/// holds a keyframe on the cue track) and emits it from [`finish`](Self::finish)
-/// at EOS, so the written stream is seekable once read past the Clusters (M375).
-/// A front `SeekHead` pointing at this end-of-stream `Cues` cannot be written by a
-/// streaming muxer (the front is already emitted before the `Cues` position is
-/// known); seeking the muxer's own output without reading to the end (the M374
-/// `SeekHead` prefetch) would need a two-pass / seekable-output finalize mode.
+/// Streaming (the default), the Segment and each Cluster carry the unknown-size
+/// marker (the live shape, M143): a Cluster header opens the window and the next
+/// one ends it, so frames go out incrementally with nothing held back to learn a
+/// length and nothing patched afterwards. The muxer still records a `Cues` index
+/// (one entry per Cluster holding a keyframe on the cue track) and emits it from
+/// [`finish`](Self::finish) at EOS, so the stream is seekable once read to the
+/// end (M375).
+///
+/// [`with_two_pass`](Self::with_two_pass) is for a caller buffering the whole
+/// file: the Segment and every Cluster reserve an 8-byte size, and a front
+/// `SeekHead` and the `Info` `Duration` are reserved too, all filled in by
+/// [`finalize_seekable`]. The file then declares its bounds and seeks from byte 0
+/// without reading past the Clusters (the M374 `SeekHead` prefetch), which is the
+/// shape ffmpeg and GStreamer write.
 ///
 /// Scope: default TimestampScale (1 ms). One or more tracks (see
 /// [`MatroskaMuxer::new_multi`], the A/V case driven by
@@ -1303,13 +1321,21 @@ pub struct MatroskaMuxer {
     /// The Cluster position of the last recorded cue, so at most one cue is kept
     /// per Cluster (the first keyframe in it), bounding the index size.
     last_cued_cluster_pos: Option<u64>,
-    /// Write a front `SeekHead` (first element of the Segment data) indexing
-    /// Info / Tracks / Tags / Cues, and reserve the `Info` `Duration`. Both are
-    /// placeholders the caller patches at EOS ([`finalize_seekable`]), which
-    /// needs the whole output in hand, so this is for a buffering (two-pass)
-    /// caller, not the streaming path: the finished file then seeks from byte 0
-    /// without reading past the Clusters and declares its length.
-    write_seek_head: bool,
+    /// Whether to collect the `Cues` entries at all. A live caller never calls
+    /// [`finish`](Self::finish), so recording them would grow without bound for
+    /// as long as the stream runs; [`without_cues`](Self::without_cues) turns it
+    /// off. Does not change a byte of the output either way.
+    record_cues: bool,
+    /// The two-pass (buffering) mode. It writes a front `SeekHead` (first
+    /// element of the Segment data) indexing Info / Tracks / Tags / Cues,
+    /// reserves the `Info` `Duration`, and gives the Segment and every Cluster a
+    /// reserved 8-byte size field instead of the streaming unknown-size marker.
+    /// All of them are placeholders the caller patches at EOS
+    /// ([`finalize_seekable`]) with the whole output in hand, which the streaming
+    /// path never has: the finished file then seeks from byte 0 without reading
+    /// past the Clusters, declares its length, and bounds every element the way
+    /// ffmpeg and GStreamer write one.
+    two_pass: bool,
     /// Byte offset (in the muxed output, from byte 0) of the front SeekHead's
     /// 8-byte Cues `SeekPosition` payload; set when the header is written.
     cues_patch_offset: Option<usize>,
@@ -1318,6 +1344,13 @@ pub struct MatroskaMuxer {
     /// [`duration_patch`](Self::duration_patch). `None` in the streaming mode,
     /// which never learns a duration.
     duration_patch_offset: Option<usize>,
+    /// Byte offset of the Segment's data start in the muxed output, the absolute
+    /// anchor the `segment_pos` positions are relative to. Its own 8-byte size
+    /// field is the 8 bytes ahead of it. Meaningful once the header is written.
+    segment_data_start: usize,
+    /// The reserved size field of each Cluster, in write order, for
+    /// [`finalize_seekable`] to fill in. Empty in the streaming mode.
+    cluster_size_patches: Vec<SizePatch>,
     /// Highest block end seen, in TimestampScale ticks: the presentation
     /// duration. Per track, the last block's timestamp plus its own duration,
     /// each rounded to a tick the way the block timestamps are, which is how
@@ -1360,19 +1393,32 @@ impl MatroskaMuxer {
             current_cluster_pos: 0,
             cues: Vec::new(),
             last_cued_cluster_pos: None,
-            write_seek_head: false,
+            record_cues: true,
+            two_pass: false,
             cues_patch_offset: None,
             duration_patch_offset: None,
+            segment_data_start: 0,
+            cluster_size_patches: Vec::new(),
             max_end_ticks: 0,
             prev_ts_ticks: alloc::vec![None; track_count],
         }
     }
 
-    /// Write a front `SeekHead` and reserve the `Info` `Duration` (see the field
-    /// note): the two-pass / seekable finalize mode. The caller must finish the
-    /// buffered file with [`finalize_seekable`], which fills both in.
-    pub fn with_seek_head(mut self) -> Self {
-        self.write_seek_head = true;
+    /// The two-pass / seekable mode: a front `SeekHead`, a reserved `Duration`,
+    /// and definite-size Segment and Clusters (see the field note). The caller
+    /// must finish the buffered file with [`finalize_seekable`], which fills all
+    /// of them in.
+    pub fn with_two_pass(mut self) -> Self {
+        self.two_pass = true;
+        self
+    }
+
+    /// Live mode: do not collect the `Cues` entries, for a caller that never
+    /// writes the index ([`finish`](Self::finish) then returns nothing). The
+    /// output bytes are the same; what changes is that the muxer keeps no
+    /// per-Cluster state for a stream with no end.
+    pub fn without_cues(mut self) -> Self {
+        self.record_cues = false;
         self
     }
 
@@ -1433,18 +1479,21 @@ impl MatroskaMuxer {
             let all_webm = self.tracks.iter().all(|t| t.spec.codec.is_webm());
             let doctype: &[u8] = if all_webm { b"webm" } else { b"matroska" };
             out.extend_from_slice(&ebml_header(doctype));
-            // Segment with unknown size: its children run to end of stream.
+            // The Segment size is 8 bytes either way: all-ones (unknown) for a
+            // stream that runs to end of input, a reserved placeholder the
+            // two-pass finalize fills in for a file that declares its bounds.
             id_bytes(ID_SEGMENT, &mut out);
-            out.extend_from_slice(&[0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
+            out.extend_from_slice(&UNKNOWN_SIZE_8);
             // Segment data starts here; track positions are anchored to it.
             let seg_data_start = out.len();
+            self.segment_data_start = seg_data_start;
             // Only the two-pass mode can fill a Duration in: it is not known
             // until EOS, and a streaming caller has already emitted the header.
-            let (info, duration_at) = info_element(self.write_seek_head);
+            let (info, duration_at) = info_element(self.two_pass);
             let tracks = tracks_element(&self.tracks, &self.track_tags);
             // Empty when every per-track tag went into its TrackEntry instead.
             let tags = tags_element(&self.tags, &self.track_tags);
-            if self.write_seek_head {
+            if self.two_pass {
                 // Front SeekHead with fixed-layout entries (21 bytes each), so
                 // the Cues position (unknown until EOS) is patchable in place.
                 let entries = 3 + usize::from(!tags.is_empty());
@@ -1477,14 +1526,30 @@ impl MatroskaMuxer {
             Some(base) => ts < base || ts - base > self.max_cluster_span_ms,
         };
         if need_new_cluster {
-            // Open an unknown-size Cluster: its id + a one-byte unknown-size marker,
-            // then the base Timestamp. The next Cluster header (or EOF) ends it. The
-            // Cluster element starts at the current Segment-data position, which a
-            // keyframe in it records as its CueClusterPosition.
+            // Open a Cluster: its id, then a size, then the base Timestamp. The
+            // streaming shape is a one-byte unknown-size marker, so the next
+            // Cluster header (or EOF) ends it and nothing has to be known ahead
+            // of the content; the two-pass shape reserves 8 bytes for the
+            // finalize to fill in. The Cluster element starts at the current
+            // Segment-data position, which a keyframe in it records as its
+            // CueClusterPosition, so the wider header is already accounted for.
             self.current_cluster_pos = self.segment_pos;
+            // Where this Cluster lands in the muxed output as a whole, which the
+            // patch offsets are absolute in: the Segment data start plus how far
+            // past it the stream has run.
+            let cluster_at = self.segment_data_start + self.segment_pos as usize;
             let before = out.len();
             id_bytes(ID_CLUSTER, &mut out);
-            out.push(0xFF);
+            let size_at = cluster_at + (out.len() - before);
+            if self.two_pass {
+                out.extend_from_slice(&UNKNOWN_SIZE_8);
+                self.cluster_size_patches.push(SizePatch {
+                    size_at,
+                    data_at: size_at + UNKNOWN_SIZE_8.len(),
+                });
+            } else {
+                out.push(0xFF);
+            }
             out.extend_from_slice(&elem_vec(ID_TIMESTAMP, &uint_bytes(ts)));
             self.segment_pos += (out.len() - before) as u64;
             self.cluster_base_ms = Some(ts);
@@ -1514,7 +1579,8 @@ impl MatroskaMuxer {
         self.segment_pos += (out.len() - before) as u64;
         // Index this Cluster in the Cues if it holds a keyframe on the cue track,
         // at most once per Cluster (the first such keyframe), to bound the index.
-        if keyframe
+        if self.record_cues
+            && keyframe
             && track == self.cue_track
             && self.last_cued_cluster_pos != Some(self.current_cluster_pos)
         {
@@ -1546,7 +1612,7 @@ impl MatroskaMuxer {
     /// The EOS patch the `Info` `Duration` placeholder needs: `(byte offset of
     /// its 8-byte payload in the muxed output, the big-endian float to write)`.
     /// The value is the presentation duration in TimestampScale ticks. `None`
-    /// without [`with_seek_head`](Self::with_seek_head) (the streaming mode
+    /// without [`with_two_pass`](Self::with_two_pass) (the streaming mode
     /// writes no placeholder) or before the header was written.
     pub fn duration_patch(&self) -> Option<(usize, [u8; 8])> {
         let offset = self.duration_patch_offset?;
@@ -1603,31 +1669,71 @@ impl MatroskaMuxer {
     /// `SeekPosition` payload in the muxed output, the position value to write
     /// as an 8-byte big-endian uint)`. The Cues land where the stream ended, so
     /// call this at EOS, before appending [`finish`](Self::finish)'s bytes.
-    /// `None` without [`with_seek_head`](Self::with_seek_head) (or before the
+    /// `None` without [`with_two_pass`](Self::with_two_pass) (or before the
     /// header was written).
     pub fn seek_head_patch(&self) -> Option<(usize, u64)> {
         self.cues_patch_offset.map(|off| (off, self.segment_pos))
     }
+
+    /// The reserved size field of each Cluster, in write order. A Cluster runs to
+    /// the next one's header, the last to the end of what was muxed. Empty in the
+    /// streaming mode, whose Clusters declare no size.
+    pub fn cluster_size_patches(&self) -> &[SizePatch] {
+        &self.cluster_size_patches
+    }
+
+    /// The reserved Segment size field, which holds everything after the Segment
+    /// header, the trailing `Cues` included. `None` in the streaming mode (the
+    /// Segment runs to end of stream) or before the header was written.
+    pub fn segment_size_patch(&self) -> Option<SizePatch> {
+        (self.two_pass && self.header_written).then(|| SizePatch {
+            size_at: self.segment_data_start - UNKNOWN_SIZE_8.len(),
+            data_at: self.segment_data_start,
+        })
+    }
+}
+
+/// Fill a reserved 8-byte size field with the length its element turned out to
+/// have: the widest EBML size form, so the value is written in place.
+fn write_size_patch(file: &mut [u8], patch: SizePatch, end: usize) {
+    let len = (end - patch.data_at) as u64;
+    let mut field = [0x01u8; 8];
+    field[1..].copy_from_slice(&len.to_be_bytes()[1..]);
+    file[patch.size_at..patch.size_at + 8].copy_from_slice(&field);
 }
 
 /// Finalize a buffered two-pass file in place: fill the `Info` `Duration`
-/// placeholder with the presentation length (M794), then append the `Cues` and
-/// point the front `SeekHead` at where they landed (M770). The buffered-output
-/// half of [`MatroskaMuxer::with_seek_head`], shared by the single- and
-/// multi-track muxer elements; `file` must be everything the muxer emitted, from
-/// byte 0, since both patch offsets are absolute.
+/// placeholder with the presentation length (M794) and each Cluster's reserved
+/// size with what it turned out to hold (M828), then append the `Cues`, point the
+/// front `SeekHead` at where they landed (M770), and close the Segment over the
+/// lot. The buffered-output half of [`MatroskaMuxer::with_two_pass`], shared by
+/// the single- and multi-track muxer elements; `file` must be everything the muxer
+/// emitted, from byte 0, since every patch offset is absolute.
 pub fn finalize_seekable(mux: &MatroskaMuxer, file: &mut Vec<u8>) {
     if let Some((off, value)) = mux.duration_patch() {
         file[off..off + 8].copy_from_slice(&value);
     }
+    // Each Cluster ends where the next one's id begins (the 4 bytes ahead of its
+    // size field), the last where the muxed bytes end: the Cues appended below
+    // are the Segment's next child, not part of any Cluster.
+    let clusters = mux.cluster_size_patches();
+    for (i, patch) in clusters.iter().enumerate() {
+        let end = clusters
+            .get(i + 1)
+            .map_or(file.len(), |next| next.size_at - 4);
+        write_size_patch(file, *patch, end);
+    }
     let cues = mux.finish();
-    if cues.is_empty() {
-        return;
+    if !cues.is_empty() {
+        if let Some((off, pos)) = mux.seek_head_patch() {
+            file[off..off + 8].copy_from_slice(&pos.to_be_bytes());
+        }
+        file.extend_from_slice(&cues);
     }
-    if let Some((off, pos)) = mux.seek_head_patch() {
-        file[off..off + 8].copy_from_slice(&pos.to_be_bytes());
+    if let Some(patch) = mux.segment_size_patch() {
+        let end = file.len();
+        write_size_patch(file, patch, end);
     }
-    file.extend_from_slice(&cues);
 }
 
 /// Byte length of one fixed-layout `Seek` entry written by [`seek_entry`].
@@ -3099,7 +3205,7 @@ mod tests {
             channels: 0,
             sample_rate: 0,
         };
-        let mut mux = MatroskaMuxer::new(spec).with_seek_head();
+        let mut mux = MatroskaMuxer::new(spec).with_two_pass();
         let mut file = mux.push_frame(&[1], 0, true);
         file.extend_from_slice(&mux.push_frame(&[2], 40_000_000, false));
         // The last frame declares no duration, so it lasts the previous gap:
@@ -3127,7 +3233,7 @@ mod tests {
 
         // Two-pass: the trimmed final packet's own 6.5 ms rounds to 7 ticks, so
         // the file ends at 20 + 7, not at a whole packet past the last block.
-        let mut mux = MatroskaMuxer::new_multi(vec![opus_track()]).with_seek_head();
+        let mut mux = MatroskaMuxer::new_multi(vec![opus_track()]).with_two_pass();
         mux.push_frame_on(0, &opus_packet(1), 0, true, 20_000_000);
         mux.push_frame_on(0, &opus_packet(2), 20_000_000, true, 6_500_000);
         let (_, value) = mux.duration_patch().expect("reserved");
@@ -3260,6 +3366,35 @@ mod tests {
         assert_eq!(
             frames[1].pts_ns, 600_000_000,
             "second Cluster carries its own base"
+        );
+    }
+
+    /// M828: a live muxer keeps no Cues state. The bytes it writes are the same
+    /// as a recording muxer's, so only the index the caller would append at EOS
+    /// differs, and there is nothing to append.
+    #[test]
+    fn without_cues_writes_the_same_bytes_and_no_index() {
+        let spec = MkvTrackSpec {
+            codec: MkvCodec::Vp9,
+            width: 16,
+            height: 16,
+            channels: 0,
+            sample_rate: 0,
+        };
+        let push = |mux: &mut MatroskaMuxer| {
+            let mut out = mux.push_frame(&[1], 0, true);
+            out.extend_from_slice(&mux.push_frame(&[2], 600_000_000, true));
+            out
+        };
+        let mut recording = MatroskaMuxer::new(spec).with_max_cluster_span_ms(500);
+        let mut live = MatroskaMuxer::new(spec)
+            .with_max_cluster_span_ms(500)
+            .without_cues();
+        assert_eq!(push(&mut recording), push(&mut live), "identical output");
+        assert!(!recording.finish().is_empty(), "the recording indexes both");
+        assert!(
+            live.finish().is_empty(),
+            "the live muxer collected no cue points to index"
         );
     }
 

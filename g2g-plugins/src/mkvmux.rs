@@ -46,8 +46,10 @@ pub struct MkvMux {
     /// Live / streamable mode (the gst `streamable` property): suppress the `Cues`
     /// seek index normally appended at EOS. The Cues let a read-to-end file seek,
     /// but a live consumer (a pipe, an HTTP push) cannot seek and the muxer would
-    /// have to hold the cluster positions to the end; `streamable` drops it so the
-    /// output is a pure forward stream. Off by default (a recording stays seekable).
+    /// have to hold the cluster positions to the end; `streamable` drops it (and
+    /// the positions it would have collected) so the output is a pure forward
+    /// stream: an unknown-size Segment and unknown-size Clusters, nothing patched
+    /// at EOS. Off by default (a recording stays seekable).
     streamable: bool,
     /// Two-pass / seekable-finalize mode (M770): buffer the whole file and emit
     /// it once at EOS with a front `SeekHead` indexing Info / Tracks / Cues, so
@@ -265,7 +267,10 @@ impl AsyncElement for MkvMux {
                         let spec = Self::track_spec(caps).ok_or(G2gError::CapsMismatch)?;
                         let mut mux = MatroskaMuxer::new(spec).with_tags(self.tags.clone());
                         if self.seekable {
-                            mux = mux.with_seek_head();
+                            mux = mux.with_two_pass();
+                        }
+                        if self.streamable {
+                            mux = mux.without_cues();
                         }
                         self.mux = Some(mux);
                     }
