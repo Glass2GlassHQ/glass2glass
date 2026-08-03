@@ -151,6 +151,11 @@ pub mod ccinsert;
 pub mod misptime;
 // Shared pixel-format helpers for the packed-RGBA elements (videobalance, alpha).
 mod pixel;
+// Sans-IO RFC 4566 SDP: the shared media-section scanner plus the RTP/AVP
+// mapping from a media description to Caps (payload type, codec, clock rate,
+// fmtp parameter-set geometry), so an RTP receiver configures from the SDP a
+// sender publishes instead of a declared hint. no_std+alloc.
+pub mod sdp;
 // Sans-IO H.264 RTP packetizer (RFC 3550 + 6184), the live-egress foundation.
 pub mod rtppay;
 // Sans-IO H.264 RTP depayloader, the receive-side inverse of rtppay.
@@ -458,7 +463,7 @@ pub mod livekitsrc;
 
 // UDP ingress source (M91): receives RTP on a tokio UdpSocket and depayloads
 // H.264 (rtpdepay) into Annex-B access units, the receive-side inverse of
-// UdpSink. Raw RTP (no RTSP/SDP); see module docs.
+// UdpSink. Caps come from a published SDP or the stream's SPS; see module docs.
 #[cfg(feature = "udp-ingress")]
 pub mod udpsrc;
 

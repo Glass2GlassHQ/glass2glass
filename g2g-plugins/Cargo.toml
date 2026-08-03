@@ -62,7 +62,7 @@ rtsp = ["std", "dep:retina", "dep:futures-util", "dep:url", "dep:bytes"]
 # RTSP server sink (RtspServerSink): hosts a pipeline's H.264 as an RTSP endpoint,
 # serving RTP over UDP to a connecting player. The sans-IO `rtspserver` responder
 # is always compiled; only the tokio TCP/UDP element needs this. Implies std + tokio.
-rtsp-server = ["std", "tokio/net", "tokio/io-util"]
+rtsp-server = ["std", "tokio/net", "tokio/io-util", "tokio/macros"]
 # SRT transport: SrtSink (caller, egress) + SrtSrc (listener, ingress) carrying an
 # MPEG-TS byte stream over UDP, with the HSv5 handshake + NAK-based ARQ. The sans-IO
 # `srt` wire/handshake/reliability layer is always compiled; only the tokio UDP
@@ -78,8 +78,8 @@ udp-egress = ["std", "tokio/net"]
 # needs this feature. Implies std + tokio net/io-util.
 rtmp = ["std", "tokio/net", "tokio/io-util", "dep:sha2", "dep:hmac", "dep:getrandom"]
 # UDP ingress source (M91): UdpSrc receives RTP on a tokio UdpSocket and
-# depayloads H.264 to Annex-B access units. Raw RTP (no RTSP/SDP); implies std
-# and adds tokio's net feature. Receive-side jitter buffer / RTCP are owed.
+# depayloads H.264 to Annex-B access units, with caps taken from a published SDP
+# or the stream's SPS. Implies std and adds tokio's net feature.
 udp-ingress = ["std", "tokio/net"]
 # Distributed-graph transport pair (M551): RemoteSink (TCP client, egress) +
 # RemoteSrc (TCP listener, ingress) serialize the whole PipelinePacket stream

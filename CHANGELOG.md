@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M833: `udpsrc` discovers caps from an `sdp` property or in-band SPS (shared `sdp` scanner extracted from st2110), ffmpeg-validated.
+
 - M832: opt-in `cmaf` mode on the fMP4 muxers (brands, `styp`, sync-aligned fragments, explicit `tfhd`), and the demuxers honor `tfhd` default sample durations.
 
 - M831: FLV carries Sorenson H.263, VP6(-alpha), MP3 and Speex (decode wired for the first three), ffmpeg/gst-oracle-validated.

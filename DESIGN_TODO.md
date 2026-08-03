@@ -315,7 +315,6 @@ Phased plan:
   (M672: `$`-framed RTP on the control connection, RFC 2326 §10.12, validated
   against `ffmpeg -rtsp_transport tcp` playing from the sink), as is the
   *ingest* source's (M532).
-- **`UdpSrc` SDP/SPS-driven caps discovery** (reports a declared hint today).
 - **WebRTC.** On the sans-IO `str0m` stack (ICE / DTLS / SRTP, pure-Rust
   crypto), behind the `webrtc` feature: `WebRtcSink` (WHIP egress, H.264 *or*
   Opus) and `WebRtcWhepSrc` (WHEP ingest, H.264 *or* Opus via `media=audio`) —

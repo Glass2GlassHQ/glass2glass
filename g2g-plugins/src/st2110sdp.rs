@@ -8,14 +8,16 @@
 //!
 //! Sans-IO string work (pure `no_std` + alloc), CI round-trip testable, so the
 //! network elements build an [`St2110Sdp`] to advertise and configure a source
-//! from a parsed one. Generation emits the SMPTE-required attributes; parsing is
-//! lenient about attribute order and unknown lines (never trust the stream: an
-//! `m=` / `rtpmap` it cannot map, or a missing field, yields `None` rather than a
-//! wrong guess).
+//! from a parsed one. Generation emits the SMPTE-required attributes; parsing
+//! maps the sections [`crate::sdp::scan_sections`] scans onto SMPTE essences and
+//! is lenient about attribute order and unknown lines (never trust the stream:
+//! an `m=` / `rtpmap` it cannot map, or a missing field, yields `None` rather
+//! than a wrong guess).
 
 use alloc::format;
 use alloc::string::{String, ToString};
 
+use crate::sdp::{scan_sections, SdpSection};
 use crate::st2110audio::SampleDepth;
 use crate::st2110video::Sampling;
 
@@ -180,48 +182,15 @@ impl St2110Sdp {
     /// is no `m=` line, the `rtpmap` encoding is not an ST 2110 essence, or a
     /// required parameter is missing / unmappable.
     pub fn parse(text: &str) -> Option<Self> {
-        let mut port = None;
-        let mut media_kind = None; // "video" / "audio"
-        let mut payload_type = None;
-        let mut address = None;
-        let mut rtpmap = None; // the encoding string after "<pt> "
-        let mut fmtp = None; // the params string after "<pt> "
-        let mut ptime_us = None;
-        let mut ptp = None;
+        Self::from_section(scan_sections(text).first()?)
+    }
 
-        for raw in text.lines() {
-            let line = raw.trim_end_matches('\r');
-            if let Some(m) = line.strip_prefix("m=") {
-                // "video <port> RTP/AVP <pt>"; only the first media section.
-                if media_kind.is_some() {
-                    break;
-                }
-                let mut it = m.split_whitespace();
-                media_kind = Some(it.next()?.to_string());
-                port = Some(it.next()?.parse::<u16>().ok()?);
-                let _proto = it.next()?; // RTP/AVP
-                payload_type = Some(it.next()?.parse::<u8>().ok()?);
-            } else if let Some(c) = line.strip_prefix("c=IN IP4 ") {
-                // "<addr>/<ttl>" or "<addr>".
-                address = Some(c.split('/').next()?.to_string());
-            } else if let Some(a) = line.strip_prefix("a=rtpmap:") {
-                rtpmap = Some(after_pt(a)?.to_string());
-            } else if let Some(a) = line.strip_prefix("a=fmtp:") {
-                fmtp = Some(after_pt(a)?.to_string());
-            } else if let Some(a) = line.strip_prefix("a=ptime:") {
-                // Milliseconds (possibly fractional) -> microseconds.
-                ptime_us = parse_ptime_us(a);
-            } else if let Some(a) = line.strip_prefix("a=ts-refclk:ptp=") {
-                // "IEEE1588-2008:<gmid>:<domain>".
-                let rest = a.split_once(':')?.1; // drop the profile
-                let (gmid, domain) = rest.rsplit_once(':')?;
-                ptp = Some((gmid.to_string(), domain.parse::<u8>().ok()?));
-            }
-        }
-
-        let essence = match (media_kind.as_deref(), rtpmap.as_deref()) {
-            (Some("video"), Some(enc)) if enc.starts_with("raw/") => {
-                let (sampling, width, height, exact_fps) = parse_video_fmtp(fmtp.as_deref()?)?;
+    /// Map one scanned SDP media section onto an ST 2110 essence.
+    fn from_section(s: &SdpSection) -> Option<Self> {
+        let rtpmap = s.rtpmap.as_deref();
+        let essence = match (s.kind.as_str(), rtpmap) {
+            ("video", Some(enc)) if enc.starts_with("raw/") => {
+                let (sampling, width, height, exact_fps) = parse_video_fmtp(s.fmtp.as_deref()?)?;
                 St2110Essence::Video {
                     sampling,
                     width,
@@ -229,8 +198,8 @@ impl St2110Sdp {
                     exact_fps,
                 }
             }
-            (Some("video"), Some(enc)) if enc.starts_with("jxsv/") => {
-                let (sampling, width, height, exact_fps) = parse_video_fmtp(fmtp.as_deref()?)?;
+            ("video", Some(enc)) if enc.starts_with("jxsv/") => {
+                let (sampling, width, height, exact_fps) = parse_video_fmtp(s.fmtp.as_deref()?)?;
                 St2110Essence::JpegXs {
                     sampling,
                     width,
@@ -238,16 +207,16 @@ impl St2110Sdp {
                     exact_fps,
                 }
             }
-            (Some("video"), Some(enc)) if enc.starts_with("smpte291/") => St2110Essence::Ancillary,
-            (Some("audio"), Some(enc)) => parse_audio_rtpmap(enc, ptime_us.unwrap_or(1000))?,
+            ("video", Some(enc)) if enc.starts_with("smpte291/") => St2110Essence::Ancillary,
+            ("audio", Some(enc)) => parse_audio_rtpmap(enc, s.ptime_us.unwrap_or(1000))?,
             _ => return None,
         };
         Some(St2110Sdp {
             essence,
-            payload_type: payload_type?,
-            address: address.unwrap_or_else(|| "0.0.0.0".to_string()),
-            port: port?,
-            ptp,
+            payload_type: s.payload_type,
+            address: s.address.clone().unwrap_or_else(|| "0.0.0.0".to_string()),
+            port: s.port,
+            ptp: s.ptp.clone(),
         })
     }
 }
@@ -304,23 +273,15 @@ impl St2110Session {
     /// media section. Unmappable sections are skipped (never trust the stream).
     pub fn parse(text: &str) -> Option<Self> {
         let lines: alloc::vec::Vec<&str> = text.lines().map(|l| l.trim_end_matches('\r')).collect();
-        let m_idx: alloc::vec::Vec<usize> = lines
-            .iter()
-            .enumerate()
-            .filter(|(_, l)| l.starts_with("m="))
-            .map(|(i, _)| i)
-            .collect();
-        let first_m = *m_idx.first()?;
+        let first_m = lines.iter().position(|l| l.starts_with("m="))?;
 
-        // Session-level origin address, default reference clock, and -7 groups.
+        // Session-level origin address and -7 groups (the shared scanner handles
+        // the reference-clock inheritance).
         let mut address = None;
-        let mut session_refclk = None;
         let mut dup_groups = alloc::vec::Vec::new();
         for l in &lines[..first_m] {
             if let Some(o) = l.strip_prefix("o=") {
                 address = o.rsplit(' ').next().map(|a| a.to_string());
-            } else if l.starts_with("a=ts-refclk:") {
-                session_refclk = Some(*l);
             } else if let Some(g) = l.strip_prefix("a=group:DUP ") {
                 let mids: alloc::vec::Vec<usize> = g
                     .split_whitespace()
@@ -332,22 +293,10 @@ impl St2110Session {
             }
         }
 
-        let mut media = alloc::vec::Vec::new();
-        for (k, &start) in m_idx.iter().enumerate() {
-            let end = m_idx.get(k + 1).copied().unwrap_or(lines.len());
-            let section = &lines[start..end];
-            let mut chunk = section.join("\r\n");
-            // Inherit the session reference clock when the section has none of its own.
-            if let Some(refclk) = session_refclk {
-                if !section.iter().any(|l| l.starts_with("a=ts-refclk:")) {
-                    chunk.push_str("\r\n");
-                    chunk.push_str(refclk);
-                }
-            }
-            if let Some(sdp) = St2110Sdp::parse(&chunk) {
-                media.push(sdp);
-            }
-        }
+        let media: alloc::vec::Vec<St2110Sdp> = scan_sections(text)
+            .iter()
+            .filter_map(St2110Sdp::from_section)
+            .collect();
         if media.is_empty() {
             return None;
         }
@@ -368,29 +317,6 @@ fn fps_str((num, den): (u32, u32)) -> String {
         num.to_string()
     } else {
         format!("{num}/{den}")
-    }
-}
-
-/// Drop the leading `<pt> ` from an `a=rtpmap:` / `a=fmtp:` value, returning the rest.
-fn after_pt(s: &str) -> Option<&str> {
-    s.split_once(' ').map(|(_, rest)| rest)
-}
-
-/// Parse an `a=ptime:` value in (fractional) milliseconds to microseconds.
-fn parse_ptime_us(s: &str) -> Option<u32> {
-    let s = s.trim();
-    match s.split_once('.') {
-        Some((ms, frac)) => {
-            // Take up to 3 fractional digits (millisecond -> microsecond).
-            let mut micros = ms.parse::<u32>().ok()?.checked_mul(1000)?;
-            let mut scale = 100u32;
-            for c in frac.chars().take(3) {
-                micros = micros.checked_add(c.to_digit(10)? * scale)?;
-                scale /= 10;
-            }
-            Some(micros)
-        }
-        None => s.parse::<u32>().ok()?.checked_mul(1000),
     }
 }
 
