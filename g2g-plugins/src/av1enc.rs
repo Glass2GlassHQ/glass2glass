@@ -13,7 +13,17 @@
 //! type, so the encoder holds either a `Context<u8>` (8-bit) or a `Context<u16>`
 //! (10/12-bit, samples little-endian) selected from the input format; one generic
 //! `encode_frame` drives both. The speed preset is builder-configurable
-//! (`with_speed`, 0..=10); rate control uses the rav1e quantizer default.
+//! (`with_speed`, 0..=10).
+//!
+//! Rate control is one of two mutually exclusive modes, since rav1e turns its
+//! rate controller off exactly when `bitrate <= 0` and reads `quantizer` only
+//! then: a target bitrate (`bitrate`, from a property or downstream congestion
+//! control) or a fixed quantizer (`with_quantizer` / the `quantizer` property,
+//! 1 best .. 255 worst) for constant quality. An explicit set of either one
+//! clears the other, and a downstream bitrate estimate is ignored while an
+//! explicit quantizer is in force. rav1e fixes both at `Context` construction,
+//! so a change rebuilds the context (the next frame is a keyframe) after
+//! flushing the running one.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -45,6 +55,10 @@ enum RavCtx {
 /// real-time-ish software encode.
 const DEFAULT_SPEED: u8 = 9;
 
+/// rav1e's own default base quantizer, used when neither an explicit quantizer
+/// nor a bitrate target is set.
+const DEFAULT_QUANTIZER: usize = 100;
+
 /// Encodes raw planar-YUV video into an AV1 elementary stream.
 pub struct Av1Enc {
     speed: u8,
@@ -66,9 +80,19 @@ pub struct Av1Enc {
     /// A downstream element (e.g. a WebRTC sink on a remote PLI) asked for a
     /// keyframe; the next `encode` overrides the frame type to Key and clears it.
     force_keyframe: bool,
-    /// Target bitrate (bits/second) from downstream congestion control, or `None`
-    /// for rav1e's default quantizer mode. A change rebuilds the rav1e context.
+    /// Target bitrate (bits/second) from a property or downstream congestion
+    /// control, or `None` when not rate-targeted. A change rebuilds the rav1e
+    /// context. Mutually exclusive with `quantizer`.
     bitrate_bps: Option<u32>,
+    /// Explicit base quantizer (1 best .. 255 worst) for constant-quality
+    /// encoding, or `None` for rav1e's default. Mutually exclusive with
+    /// `bitrate_bps`.
+    quantizer: Option<u8>,
+    /// Packets flushed out of the previous context by a property-driven rebuild.
+    /// They are older than anything the new context produces, so the next `emit`
+    /// leads with them rather than dropping them (a property set has no sink to
+    /// push to).
+    pending: Vec<(Vec<u8>, u64)>,
     configured: bool,
 }
 
@@ -106,6 +130,8 @@ impl Av1Enc {
             caps_sent: false,
             force_keyframe: false,
             bitrate_bps: None,
+            quantizer: None,
+            pending: Vec::new(),
             configured: false,
         }
     }
@@ -113,6 +139,14 @@ impl Av1Enc {
     /// Set the rav1e speed preset (0 slowest/best quality .. 10 fastest).
     pub fn with_speed(mut self, speed: u8) -> Self {
         self.speed = speed.min(10);
+        self
+    }
+
+    /// Encode at a fixed base quantizer (1 highest quality .. 255 lowest) for
+    /// constant quality instead of a bitrate target. 0 is lossless, which rav1e
+    /// does not implement, so it is raised to 1.
+    pub fn with_quantizer(mut self, quantizer: u8) -> Self {
+        self.apply_rate_control(Some(quantizer.max(1)), None);
         self
     }
 
@@ -132,17 +166,25 @@ impl Av1Enc {
 
     fn build_context(&mut self) -> Result<(), G2gError> {
         let depth = self.format.bit_depth() as usize;
+        // rav1e reads these two together: rate control runs only while
+        // `bitrate > 0`, and in that mode `quantizer` is reinterpreted as the
+        // worst quantizer index the controller may pick (255 = unconstrained,
+        // what rav1e's own CLI passes with a bitrate). Outside it, `quantizer`
+        // is the flat base quantizer for every frame.
+        let (bitrate, quantizer) = match (self.quantizer, self.bitrate_bps) {
+            (Some(q), _) => (0, q as usize),
+            (None, Some(bps)) => (bps.min(i32::MAX as u32) as i32, 255),
+            (None, None) => (0, DEFAULT_QUANTIZER),
+        };
         let enc = EncoderConfig {
             width: self.width as usize,
             height: self.height as usize,
             bit_depth: depth,
             chroma_sampling: chroma_for(self.format).ok_or(G2gError::CapsMismatch)?,
             speed_settings: SpeedSettings::from_preset(self.speed),
-            // 0 = rav1e's default quantizer mode; a downstream BWE target switches
-            // to rate control (rav1e's `bitrate` is bits/second).
-            bitrate: self
-                .bitrate_bps
-                .map_or(0, |b| b.min(i32::MAX as u32) as i32),
+            // rav1e's `bitrate` is bits/second.
+            bitrate,
+            quantizer,
             ..Default::default()
         };
         let cfg = Config::new().with_encoder_config(enc);
@@ -215,10 +257,14 @@ impl Av1Enc {
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
         let caps = self.output_caps();
+        // Anything a property-driven rebuild flushed out of the previous context
+        // leads the batch: it is older than every packet the new one produced.
+        let mut batch = core::mem::take(&mut self.pending);
+        batch.extend(packets);
         let feedback = crate::encoder_base::emit_packets(
             &mut self.caps_sent,
             &mut self.emitted,
-            packets,
+            batch,
             &caps,
             out,
         )
@@ -252,10 +298,14 @@ impl Av1Enc {
     /// `encoder_base::bitrate_change_is_significant`), so a
     /// jittery estimate near the frame rate does not thrash the encoder (each
     /// rebuild costs a keyframe). A bitrate drop is exactly when a fresh keyframe
-    /// is wanted anyway. Rebuild failure leaves the current context running.
+    /// is wanted anyway. An explicit quantizer outranks the estimate: constant
+    /// quality was asked for deliberately, congestion control only guesses.
     /// Returns the packets flushed from the old context so the caller can emit
     /// them; empty when no rebuild happened.
     fn set_target_bitrate(&mut self, bps: u32) -> Vec<(Vec<u8>, u64)> {
+        if self.quantizer.is_some() {
+            return Vec::new();
+        }
         let bps = bps.max(1);
         let changed = match self.bitrate_bps {
             None => true,
@@ -265,13 +315,33 @@ impl Av1Enc {
             return Vec::new();
         }
         self.bitrate_bps = Some(bps);
-        // Not running yet: the next `build_context` (at configure) picks up the
-        // target, nothing to flush.
+        self.rebuild()
+    }
+
+    /// Install a rate-control setting explicitly (a builder or a property, not a
+    /// downstream estimate), so it is applied ungated by the bitrate hysteresis:
+    /// an explicit set is intent. At most one of the two is ever live. Packets
+    /// flushed out of the old context are held for the next emit, there being no
+    /// sink at hand.
+    fn apply_rate_control(&mut self, quantizer: Option<u8>, bitrate_bps: Option<u32>) {
+        if (self.quantizer, self.bitrate_bps) == (quantizer, bitrate_bps) {
+            return;
+        }
+        self.quantizer = quantizer;
+        self.bitrate_bps = bitrate_bps;
+        let drained = self.rebuild();
+        self.pending.extend(drained);
+    }
+
+    /// Rebuild the rav1e context onto the current rate-control setting, flushing
+    /// the running one first so its in-flight lookahead is emitted rather than
+    /// dropped, and returning those packets. Before configure there is nothing to
+    /// flush: the first `build_context` picks the setting up. Rebuild failure
+    /// leaves the current context running.
+    fn rebuild(&mut self) -> Vec<(Vec<u8>, u64)> {
         if self.ctx.is_none() {
             return Vec::new();
         }
-        // Flush the running context's in-flight lookahead before the new-rate
-        // context replaces it, so those frames are emitted instead of dropped.
         let drained = self.flush().unwrap_or_default();
         let _ = self.build_context();
         drained
@@ -445,8 +515,15 @@ impl AsyncElement for Av1Enc {
             PropertySpec::new(
                 "bitrate",
                 PropKind::Uint,
-                "target bitrate, bits/second (0 = quantizer default)",
+                "target bitrate, bits/second (0 = none); clears quantizer",
             )
+            .with_default("0"),
+            PropertySpec::new(
+                "quantizer",
+                PropKind::Uint,
+                "constant-quality quantizer, 1 best .. 255 worst (0 = unset); clears bitrate",
+            )
+            .with_range("0", "255")
             .with_default("0"),
             PropertySpec::new(
                 "speed",
@@ -461,10 +538,28 @@ impl AsyncElement for Av1Enc {
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
         match name {
-            // bits/second; 0 selects rav1e's quantizer default (no rate target).
+            // bits/second; 0 drops the rate target. A real target switches back
+            // to rate control, dropping an explicit quantizer.
             "bitrate" => {
                 let bps = value.as_uint().ok_or(PropError::Type)?;
-                self.bitrate_bps = (bps != 0).then(|| (bps as u32).max(1));
+                if bps > u32::MAX as u64 {
+                    return Err(PropError::Value);
+                }
+                let bitrate = (bps != 0).then(|| (bps as u32).max(1));
+                let quantizer = self.quantizer.filter(|_| bitrate.is_none());
+                self.apply_rate_control(quantizer, bitrate);
+                Ok(())
+            }
+            // 0 = unset (rav1e's default / whatever the bitrate target implies);
+            // 1..=255 selects constant quality and drops the bitrate target.
+            "quantizer" => {
+                let q = value.as_uint().ok_or(PropError::Type)?;
+                if q > 255 {
+                    return Err(PropError::Value);
+                }
+                let quantizer = (q != 0).then_some(q as u8);
+                let bitrate = self.bitrate_bps.filter(|_| quantizer.is_none());
+                self.apply_rate_control(quantizer, bitrate);
                 Ok(())
             }
             "speed" => {
@@ -478,6 +573,7 @@ impl AsyncElement for Av1Enc {
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
             "bitrate" => Some(PropValue::Uint(self.bitrate_bps.unwrap_or(0) as u64)),
+            "quantizer" => Some(PropValue::Uint(self.quantizer.unwrap_or(0) as u64)),
             "speed" => Some(PropValue::Uint(self.speed as u64)),
             _ => None,
         }
@@ -555,6 +651,21 @@ mod tests {
         v.extend(alloc::vec![128u8; cw * ch]); // U
         v.extend(alloc::vec![128u8; cw * ch]); // V
         v
+    }
+
+    /// Deterministic pseudo-random (xorshift32) I420 frame. Detail the encoder
+    /// cannot code for free is what makes the quantizer observable: a flat frame
+    /// is a handful of bytes at any quality.
+    fn i420_noise(w: usize, h: usize, seed: u32) -> Vec<u8> {
+        let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
+        let mut s = seed | 1;
+        let mut next = move || {
+            s ^= s << 13;
+            s ^= s >> 17;
+            s ^= s << 5;
+            (s >> 8) as u8
+        };
+        (0..w * h + 2 * cw * ch).map(|_| next()).collect()
     }
 
     fn i420_caps(w: u32, h: u32) -> Caps {
@@ -809,5 +920,130 @@ mod tests {
             emitted, 12,
             "every source frame is emitted across the rebuild"
         );
+    }
+
+    #[test]
+    fn quantizer_property_round_trips_and_rejects_invalid() {
+        let mut enc = Av1Enc::new();
+        assert_eq!(
+            enc.get_property("quantizer"),
+            Some(PropValue::Uint(0)),
+            "unset by default"
+        );
+        enc.set_property("quantizer", PropValue::Uint(60)).unwrap();
+        assert_eq!(enc.get_property("quantizer"), Some(PropValue::Uint(60)));
+        assert_eq!(enc.quantizer, Some(60), "onto the field the encoder reads");
+
+        // rav1e's quantizer is 8-bit; anything above it is out of range.
+        assert_eq!(
+            enc.set_property("quantizer", PropValue::Uint(256)),
+            Err(PropError::Value)
+        );
+        assert_eq!(
+            enc.set_property("quantizer", PropValue::Str("high".into())),
+            Err(PropError::Type)
+        );
+        assert_eq!(
+            enc.get_property("quantizer"),
+            Some(PropValue::Uint(60)),
+            "a rejected set leaves the quantizer alone"
+        );
+
+        // 0 clears it, back to rav1e's default.
+        enc.set_property("quantizer", PropValue::Uint(0)).unwrap();
+        assert_eq!(enc.quantizer, None);
+    }
+
+    #[test]
+    fn low_quantizer_encodes_more_bytes_than_high_quantizer() {
+        // Constant quality is observable as size: the same frames at a low
+        // quantizer (high quality) code to materially more bytes than at a high
+        // one, which a bitrate-targeted or fixed-default encode would not show.
+        fn encoded_bytes(quantizer: u8) -> usize {
+            let mut enc = Av1Enc::new().with_speed(10).with_quantizer(quantizer);
+            enc.configure_pipeline(&i420_caps(128, 128)).unwrap();
+            let size = |packets: Vec<(Vec<u8>, u64)>| -> usize {
+                packets.iter().map(|(data, _)| data.len()).sum()
+            };
+            let mut total = 0;
+            for i in 0..6u64 {
+                let frame = i420_noise(128, 128, i as u32 + 1);
+                total += size(enc.encode(&frame, i * 33_000_000).unwrap());
+            }
+            total + size(enc.flush().unwrap())
+        }
+        let best = encoded_bytes(30);
+        let worst = encoded_bytes(220);
+        assert!(
+            best > worst * 2,
+            "quantizer 30 ({best} bytes) codes far more than quantizer 220 ({worst} bytes)"
+        );
+    }
+
+    #[tokio::test]
+    async fn mid_stream_quantizer_change_restarts_on_a_keyframe() {
+        let mut enc = Av1Enc::new().with_speed(10).with_quantizer(60);
+        enc.configure_pipeline(&i420_caps(64, 64)).unwrap();
+        let mut sink = CaptureSink::default();
+        async fn push(enc: &mut Av1Enc, sink: &mut CaptureSink, i: u64) {
+            let frame = Frame::new(
+                MemoryDomain::System(SystemSlice::from_boxed(
+                    i420_noise(64, 64, i as u32 + 1).into_boxed_slice(),
+                )),
+                FrameTiming {
+                    pts_ns: i * 33_000_000,
+                    ..FrameTiming::default()
+                },
+                i,
+            );
+            enc.process(PipelinePacket::DataFrame(frame), sink)
+                .await
+                .unwrap();
+        }
+        for i in 0..4u64 {
+            push(&mut enc, &mut sink, i).await;
+        }
+        enc.set_property("quantizer", PropValue::Uint(200)).unwrap();
+        assert_eq!(enc.quantizer, Some(200));
+        for i in 4..8u64 {
+            push(&mut enc, &mut sink, i).await;
+        }
+        enc.process(PipelinePacket::Eos, &mut sink).await.unwrap();
+
+        // rav1e emits one packet per input frame, so the four frames the old
+        // context held (flushed by the rebuild, not dropped) are packets 0..4 and
+        // the new context's first packet is 4.
+        assert_eq!(sink.frames.len(), 8, "no frame lost across the rebuild");
+        assert!(
+            crate::av1parse::av1_keyframe(&sink.frames[4]),
+            "the new-quantizer context starts on a keyframe"
+        );
+    }
+
+    #[test]
+    fn quantizer_and_bitrate_are_mutually_exclusive() {
+        let mut enc = Av1Enc::new().with_speed(10);
+        enc.configure_pipeline(&i420_caps(64, 64)).unwrap();
+        enc.set_property("bitrate", PropValue::Uint(1_000_000))
+            .unwrap();
+        assert_eq!(enc.bitrate_bps, Some(1_000_000));
+
+        // An explicit quantizer wins: rav1e runs rate control or a flat
+        // quantizer, never both.
+        enc.set_property("quantizer", PropValue::Uint(80)).unwrap();
+        assert_eq!(enc.quantizer, Some(80));
+        assert_eq!(enc.bitrate_bps, None, "the rate target is dropped");
+
+        // A downstream BWE estimate does not override that.
+        assert!(enc.set_target_bitrate(400_000).is_empty());
+        assert_eq!(enc.bitrate_bps, None);
+        assert_eq!(enc.quantizer, Some(80));
+
+        // An explicit bitrate switches back to rate control.
+        enc.set_property("bitrate", PropValue::Uint(2_000_000))
+            .unwrap();
+        assert_eq!(enc.bitrate_bps, Some(2_000_000));
+        assert_eq!(enc.quantizer, None, "constant quality is dropped");
+        assert!(enc.ctx.is_some(), "each switch left a live context");
     }
 }
