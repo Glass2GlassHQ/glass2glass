@@ -12,6 +12,7 @@
 //! `ValidatedGraph`'s topological order and adjacency. This module is data and
 //! computation only, no I/O.
 
+use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -287,6 +288,9 @@ struct Node<E> {
     /// Fan-out rejection policy; only meaningful on a `Tee` node, `FailLoud`
     /// elsewhere.
     fanout: FanOutPolicy,
+    /// Explicit instance name (a launch line's `name=`); `None` leaves the
+    /// runner's auto `<category>N` naming in charge.
+    name: Option<String>,
 }
 
 /// Builder for a multimedia DAG. Add nodes, link their pads, then `finish()`
@@ -376,8 +380,22 @@ impl<E> Graph<E> {
             kind,
             element,
             fanout: FanOutPolicy::FailLoud,
+            name: None,
         });
         id
+    }
+
+    /// Give a node an explicit instance name, the runner's `<category>N` naming
+    /// otherwise. The launch parser sets it from a `name=`.
+    pub fn set_node_name(&mut self, node: NodeId, name: String) {
+        self.nodes[node.0 as usize].name = Some(name);
+    }
+
+    /// A node's explicit instance name, if one was set.
+    pub fn node_name(&self, node: NodeId) -> Option<&str> {
+        self.nodes
+            .get(node.0 as usize)
+            .and_then(|n| n.name.as_deref())
     }
 
     /// Link an output pad to an input pad with the default `Block` policy.
@@ -767,6 +785,12 @@ impl<E> ValidatedGraph<E> {
     /// This node's fan-out rejection policy (meaningful only on a `Tee`).
     pub fn fanout_policy(&self, node: NodeId) -> FanOutPolicy {
         self.nodes[node.0 as usize].fanout
+    }
+
+    /// This node's explicit instance name (a launch line's `name=`), if any. The
+    /// runner uses it instead of the auto `<category>N`.
+    pub fn node_name(&self, node: NodeId) -> Option<&str> {
+        self.nodes[node.0 as usize].name.as_deref()
     }
 
     pub fn edge(&self, id: usize) -> &Edge {

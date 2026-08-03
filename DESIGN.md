@@ -1470,11 +1470,14 @@ so a disabled `g2g_trace!` in a hot loop costs one atomic load. The macros
 checked against the threshold before formatting. Records route to an installed
 `LogSink`; the `std` feature provides a stderr sink and `init_from_env`, which
 reads `G2G_DEBUG` (a `GST_DEBUG`-style `*:warning,VideoFlip:trace` spec; category
-names take `*` / `?` globs, e.g. `*sink*:5`, with an exact override winning). The DAG
-runner assigns each element a `<category>N` instance name before negotiation (the
-`videotestsrc0` convention) via `set_instance_name`, logs each element's
-addition, and an element that logs about itself (it implements `LogSource` with a
-stored name) carries that name in its lines. Pulls no external logging crate, so
+names take `*` / `?` globs, e.g. `*sink*:5`, with an exact override winning). The
+runners (DAG, bespoke linear, fan-in) assign each element an instance name before
+negotiation through a shared `InstanceNamer`: an explicit `gst-launch` `name=`
+(carried on the graph node, duplicates rejected at parse) or else `<category>N`
+(the `videotestsrc0` convention) via `set_instance_name`, logging each element's
+addition; the name also keys the element's latency probe. An element that logs
+about itself (it implements `LogSource` with a stored name) carries that name in
+its lines. Pulls no external logging crate, so
 it holds on the `no_std` baseline; the sink is the RTOS plug-in point (UART /
 RTT). The `tracing` feature adds a `LogSink` that forwards records to the
 `tracing` crate (the `g2g` target, `category` / `instance` as fields), so a host

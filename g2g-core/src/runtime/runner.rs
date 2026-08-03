@@ -568,6 +568,14 @@ where
     Clk: PipelineClock,
 {
     let link_capacity: usize = link_capacity.into().get();
+    // M842: name and log the instances the way `run_graph` does, before
+    // negotiation, so an element driven by this runner logs under `<category>N`
+    // too. The sink's name also keys its measured-latency probe below.
+    let mut namer = crate::log::InstanceNamer::new();
+    let source_name = namer.add(crate::log::short_type_name::<Src>(), None);
+    SourceLoop::set_instance_name(source, source_name);
+    let sink_name = namer.add(crate::log::short_type_name::<Snk>(), None);
+    AsyncElement::set_instance_name(sink, sink_name.clone());
     // M16 step 5f: startup negotiation honors `SourceLoop::caps_constraint`
     // so migrated native sources (e.g. `VideoTestSrc::Produces(...)`)
     // take the native solver path. `ReFixate` retry falls back to
@@ -663,9 +671,7 @@ where
 
     // M399: measured per-element telemetry for the sink (the linear runner's one
     // interior element with a `process()`); the source's cost surfaces as fill.
-    let sink_probe = ElementProbe::new(alloc::string::String::from(crate::log::short_type_name::<
-        Snk,
-    >()));
+    let sink_probe = ElementProbe::new(sink_name);
     let probe_for_sink = sink_probe.clone();
 
     let bus_for_sink = bus.cloned();
@@ -1667,6 +1673,15 @@ where
     Clk: PipelineClock,
 {
     let link_capacity: usize = link_capacity.into().get();
+    // M842: instance naming + lifecycle logging, as in `run_graph`; the two
+    // interior names key the probes below.
+    let mut namer = crate::log::InstanceNamer::new();
+    let source_name = namer.add(crate::log::short_type_name::<Src>(), None);
+    SourceLoop::set_instance_name(source, source_name);
+    let transform_name = namer.add(crate::log::short_type_name::<Tx>(), None);
+    AsyncElement::set_instance_name(transform, transform_name.clone());
+    let sink_name = namer.add(crate::log::short_type_name::<Snk>(), None);
+    AsyncElement::set_instance_name(sink, sink_name.clone());
     // M18 Session C: the startup negotiation loop (solver + per-link
     // configure cascade with bounded `ReFixate` retry) is owned by the
     // coordinator module now, since β reuses the same machinery for the
@@ -1733,12 +1748,8 @@ where
 
     // M399: measured per-element telemetry for the two interior elements; each
     // arm writes its own probe, the runner snapshots them once both have joined.
-    let transform_probe = ElementProbe::new(alloc::string::String::from(
-        crate::log::short_type_name::<Tx>(),
-    ));
-    let sink_probe = ElementProbe::new(alloc::string::String::from(crate::log::short_type_name::<
-        Snk,
-    >()));
+    let transform_probe = ElementProbe::new(transform_name);
+    let sink_probe = ElementProbe::new(sink_name);
     let probe_for_transform = transform_probe.clone();
     let probe_for_sink = sink_probe.clone();
 

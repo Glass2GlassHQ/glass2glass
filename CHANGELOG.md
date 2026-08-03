@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M842: launch `name=` sets the element's instance name, and the bespoke linear / fan-in runners now name and log elements like the graph runner.
+
 - M841: `enum_values` declared on the `alpha` / `deinterlace` / `audioamplify` method properties, so their nicks validate at parse time.
 
 - M840: launch value grammar: backslash escapes, mid-value quoting, `enum_values` validated at parse time with named choices, `PropKind::Flags` (`protocols=udp+tcp` on `rtspsrc`).

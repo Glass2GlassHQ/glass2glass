@@ -178,6 +178,47 @@ impl LogSource for Target<'_> {
     }
 }
 
+/// Per-category instance counter, shared by every runner so an element is named
+/// and logged the same way whichever one drives it (M842). Hands out
+/// `<category>N` names (the GStreamer `videotestsrc0` convention) and emits the
+/// "added to pipeline" lifecycle line.
+#[derive(Debug, Default)]
+pub struct InstanceNamer {
+    counts: Vec<(&'static str, u32)>,
+}
+
+impl InstanceNamer {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Name an element instance and log its addition, returning the name.
+    /// `explicit` is a launch line's `name=`: it is taken verbatim and, as in
+    /// gst-launch, does not consume a number, so auto-named siblings of the same
+    /// category keep counting from 0.
+    pub fn add(&mut self, category: &'static str, explicit: Option<&str>) -> String {
+        let name = match explicit {
+            Some(n) => String::from(n),
+            None => {
+                let n = match self.counts.iter_mut().find(|(c, _)| *c == category) {
+                    Some(e) => {
+                        let v = e.1;
+                        e.1 += 1;
+                        v
+                    }
+                    None => {
+                        self.counts.push((category, 1));
+                        0
+                    }
+                };
+                alloc::format!("{category}{n}")
+            }
+        };
+        crate::g2g_info!(Target::named(category, &name), "added to pipeline");
+        name
+    }
+}
+
 // Forward through references so the logging macros accept `self` (a `&Self` or
 // `&mut Self` inside a method) and `&target` uniformly: the macro passes `&$src`
 // and type inference picks the right blanket.

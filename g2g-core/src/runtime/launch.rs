@@ -1272,6 +1272,11 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
             apply_props(&mut el, &spec.name, &spec.props)?;
             graph.add_transform(GraphNodeRef::Element(el))
         };
+        // M842: a `name=` is the element's instance name at run time, not just
+        // the handle pad references resolve against.
+        if let Some(inst) = &spec.instance {
+            graph.set_node_name(node, inst.clone());
+        }
         node_of.push(Some(node));
     }
 

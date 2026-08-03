@@ -538,11 +538,22 @@ where
         "merger input count must match the number of sources"
     );
 
+    let mut sources = sources;
+    // M842: instance naming + lifecycle logging, as in `run_graph`. The `Merger`
+    // carries no element payload (it selects, like a structural tee), so it is
+    // not named, matching the tee case there.
+    let mut namer = crate::log::InstanceNamer::new();
+    for source in sources.iter_mut() {
+        let name = namer.add(source.log_category(), None);
+        source.set_instance_name(name);
+    }
+    let sink_name = namer.add(crate::log::short_type_name::<Snk>(), None);
+    AsyncElement::set_instance_name(sink, sink_name);
+
     // Phase 1 + 2: fixate each source's caps and configure it; the sink is
     // configured against input 0's fixated caps (the merged-output caps).
     // This is not routed through `solve_linear` because each source
     // self-fixates with no peer narrowing — there's no chain to solve.
-    let mut sources = sources;
     let mut merged_caps: Option<Caps> = None;
     for (i, source) in sources.iter_mut().enumerate() {
         let proposal = source.intercept_caps().await?;

@@ -171,8 +171,10 @@ async fn linear_runner_attributes_latency_to_the_slow_transform() {
     assert_eq!(stats.per_element.len(), 2, "transform + sink rows");
     let tx_row = &stats.per_element[0];
     let sink_row = &stats.per_element[1];
-    assert_eq!(tx_row.name, "SlowTransform");
-    assert_eq!(sink_row.name, "CountingSink");
+    // M842: the bespoke runners name instances `<category>N` like the graph
+    // runner, and the probe rows are keyed by that name.
+    assert_eq!(tx_row.name, "SlowTransform0");
+    assert_eq!(sink_row.name, "CountingSink0");
 
     // Every data frame was timed at both elements.
     assert_eq!(tx_row.proc.count, 6, "transform timed each frame");
@@ -214,7 +216,7 @@ async fn simple_pipeline_records_the_sink_probe() {
 
     // The source has no `process()`; only the sink is instrumented.
     assert_eq!(stats.per_element.len(), 1);
-    assert_eq!(stats.per_element[0].name, "CountingSink");
+    assert_eq!(stats.per_element[0].name, "CountingSink0");
     assert_eq!(
         stats.per_element[0].proc.count, 4,
         "each frame timed at the sink"

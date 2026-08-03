@@ -846,11 +846,12 @@ async fn prepare_graph<'a>(
         sc.expect_prerolls(sinks);
     }
 
-    // M179: give each source / element instance a `<category>N` log name (per
-    // category, the GStreamer `videotestsrc0` convention) and log its addition.
-    // Done before negotiation so an element's own log lines (e.g. at
-    // `configure_pipeline`) already carry the instance name. Naming runs whether
-    // or not a sink is installed (it is cheap; the `g2g_info!` is threshold-gated).
+    // M179: give each source / element instance a log name and log its addition,
+    // the launch line's `name=` when it set one (M842), else `<category>N` per
+    // category (the GStreamer `videotestsrc0` convention). Done before negotiation
+    // so an element's own log lines (e.g. at `configure_pipeline`) already carry
+    // the instance name. Naming runs whether or not a sink is installed (it is
+    // cheap; the `g2g_info!` is threshold-gated).
     // M399: while naming, mint a measured-latency probe for each interior element
     // (Transform / Sink: the nodes with a `process()`), keyed by its instance name.
     let mut probes: Vec<Probe> = (0..n).map(|_| None).collect();
@@ -858,7 +859,7 @@ async fn prepare_graph<'a>(
     // structural tee / muxer nodes). Indexed by `NodeId`, like `probes`.
     let mut names: Vec<alloc::string::String> = alloc::vec![alloc::string::String::new(); n];
     {
-        let mut counts: Vec<(&'static str, u32)> = Vec::new();
+        let mut namer = crate::log::InstanceNamer::new();
         for &node in topo {
             // M694: fan-in / fan-out nodes carry a `process()` too, so name and
             // probe them alongside transforms / sinks (a plain broadcast tee has
@@ -878,18 +879,7 @@ async fn prepare_graph<'a>(
                     None => continue, // plain broadcast tee: no element to name
                 },
             };
-            let n = match counts.iter_mut().find(|(c, _)| *c == category) {
-                Some(e) => {
-                    let v = e.1;
-                    e.1 += 1;
-                    v
-                }
-                None => {
-                    counts.push((category, 1));
-                    0
-                }
-            };
-            let name = alloc::format!("{category}{n}");
+            let name = namer.add(category, vg.node_name(node));
             names[node.0 as usize] = name.clone();
             match vg.element_mut(node) {
                 Some(GraphNodeRef::Source(src)) => src.set_instance_name(name.clone()),
@@ -904,12 +894,8 @@ async fn prepare_graph<'a>(
                 NodeKind::Transform | NodeKind::Sink | NodeKind::Muxer(_) | NodeKind::FaninSink(_)
             ) || matches!(vg.element(node), Some(GraphNodeRef::Demux(_)));
             if has_process {
-                probes[node.0 as usize] = Some(ElementProbe::new(name.clone()));
+                probes[node.0 as usize] = Some(ElementProbe::new(name));
             }
-            crate::g2g_info!(
-                crate::log::Target::named(category, &name),
-                "added to pipeline"
-            );
         }
     }
 
