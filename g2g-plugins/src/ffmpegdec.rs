@@ -450,6 +450,12 @@ impl FfmpegH264Dec {
     /// [`Self::with_cuvid_surfaces`] or [`Self::with_low_delay`] *after*
     /// `with_backend`.
     pub fn with_backend(mut self, backend: Backend) -> Self {
+        self.apply_backend(backend);
+        self
+    }
+
+    /// The shared body of [`Self::with_backend`] and the `backend` property.
+    fn apply_backend(&mut self, backend: Backend) {
         self.backend = backend;
         match backend {
             Backend::Software => {
@@ -481,7 +487,6 @@ impl FfmpegH264Dec {
                 self.low_delay = false;
             }
         }
-        self
     }
 
     pub fn backend(&self) -> Backend {
@@ -1092,6 +1097,29 @@ impl AsyncElement for FfmpegH264Dec {
                 };
                 Ok(())
             }
+            "backend" => {
+                let backend = match value.as_str().ok_or(PropError::Type)? {
+                    "software" => Backend::Software,
+                    "nvdec-cuvid" | "cuvid" | "h264_cuvid" => Backend::NvdecCuvid,
+                    "nvdec-cuda" | "cuda" => Backend::NvdecCuda,
+                    "vaapi" => Backend::Vaapi,
+                    _ => return Err(PropError::Value),
+                };
+                self.apply_backend(backend);
+                Ok(())
+            }
+            "cuvid-surfaces" => {
+                let n = value.as_uint().ok_or(PropError::Type)?;
+                if n > 64 {
+                    return Err(PropError::Value);
+                }
+                self.cuvid_surfaces = (n != 0).then_some(n as u32);
+                Ok(())
+            }
+            "low-delay" => {
+                self.low_delay = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -1119,6 +1147,17 @@ impl AsyncElement for FfmpegH264Dec {
                 }
                 .into(),
             )),
+            "backend" => Some(PropValue::Str(
+                match self.backend {
+                    Backend::Software => "software",
+                    Backend::NvdecCuvid => "nvdec-cuvid",
+                    Backend::NvdecCuda => "nvdec-cuda",
+                    Backend::Vaapi => "vaapi",
+                }
+                .into(),
+            )),
+            "cuvid-surfaces" => Some(PropValue::Uint(self.cuvid_surfaces.unwrap_or(0) as u64)),
+            "low-delay" => Some(PropValue::Bool(self.low_delay)),
             _ => None,
         }
     }
@@ -1368,6 +1407,26 @@ static FFMPEGDEC_PROPS: &[PropertySpec] = &[
         PropKind::Str,
         "decoded pixel layout: i420 | nv12",
     ),
+    PropertySpec::new(
+        "backend",
+        PropKind::Str,
+        "decode backend; resets cuvid-surfaces / low-delay to its defaults, so set it first",
+    )
+    .with_enum_values("software | nvdec-cuvid | nvdec-cuda | vaapi")
+    .with_default("software"),
+    PropertySpec::new(
+        "cuvid-surfaces",
+        PropKind::Uint,
+        "h264_cuvid surfaces AVOption; more = throughput, fewer = latency (0 = cuvid default)",
+    )
+    .with_default("0")
+    .with_range("0", "64"),
+    PropertySpec::new(
+        "low-delay",
+        PropKind::Bool,
+        "set AV_CODEC_FLAG_LOW_DELAY (release each picture as soon as decoded)",
+    )
+    .with_default("false"),
 ];
 
 /// The libavcodec `AVCodecID` for a g2g codec (generic + CUDA-hwaccel path).

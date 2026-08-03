@@ -405,7 +405,9 @@ impl UdpSink {
         for pkt in &to_resend {
             // RFC 4588: wrap the resend in an RTX packet (own sequence space),
             // else resend the original packet verbatim.
-            if let Some((rtx_pt, rtx_ssrc)) = self.rtx {
+            // PT 0 means "not configured" (the property half-set state), never
+            // a real RTX stream.
+            if let Some((rtx_pt, rtx_ssrc)) = self.rtx.filter(|(pt, _)| *pt != 0) {
                 if let Some(wrapped) = rtx::build_rtx_packet(pkt, rtx_pt, rtx_ssrc, self.rtx_seq) {
                     self.rtx_seq = self.rtx_seq.wrapping_add(1);
                     socket.send(&wrapped).await.map_err(io_err)?;
@@ -497,6 +499,40 @@ impl AsyncElement for UdpSink {
             )
             .with_range("0", "127"),
             PropertySpec::new("fec-ssrc", PropKind::Uint, "SSRC of the FEC repair stream"),
+            PropertySpec::new(
+                "max-payload",
+                PropKind::Uint,
+                "max RTP payload bytes per packet; larger NALs fragment into FU-A",
+            )
+            .with_default("1400")
+            .with_range("1", "65507"),
+            PropertySpec::new(
+                "retransmit",
+                PropKind::Bool,
+                "honor RTPFB Generic NACK by resending from the packet history",
+            )
+            .with_default("true"),
+            PropertySpec::new(
+                "retx-capacity",
+                PropKind::Uint,
+                "recently sent packets kept for NACK resend",
+            )
+            .with_default("1024")
+            .with_range("1", "1048576"),
+            PropertySpec::new(
+                "rtcp-sr-interval",
+                PropKind::Uint,
+                "RTCP sender-report interval in milliseconds (0 = off)",
+            )
+            .with_default("0"),
+            PropertySpec::new(
+                "rtx-payload-type",
+                PropKind::Uint,
+                "RFC 4588 RTX stream payload type for NACK resends (0 = plain resend)",
+            )
+            .with_default("0")
+            .with_range("0", "127"),
+            PropertySpec::new("rtx-ssrc", PropKind::Uint, "SSRC of the RTX stream"),
         ];
         PROPS
     }
@@ -556,6 +592,50 @@ impl AsyncElement for UdpSink {
                 self.fec_config.ssrc = value.as_uint().ok_or(PropError::Type)? as u32;
                 Ok(())
             }
+            "max-payload" => {
+                let bytes = value.as_uint().ok_or(PropError::Type)?;
+                if !(1..=65_507).contains(&bytes) {
+                    return Err(PropError::Value);
+                }
+                self.max_payload = bytes as usize;
+                Ok(())
+            }
+            "retransmit" => {
+                self.retransmit = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
+            "retx-capacity" => {
+                let cap = value.as_uint().ok_or(PropError::Type)?;
+                if cap == 0 {
+                    return Err(PropError::Value);
+                }
+                self.retx_cap = cap.min(1 << 20) as usize;
+                Ok(())
+            }
+            "rtcp-sr-interval" => {
+                let ms = value.as_uint().ok_or(PropError::Type)?;
+                self.rtcp_sr_interval_ns = (ms != 0).then(|| ms * 1_000_000);
+                Ok(())
+            }
+            // rtx needs both legs; either may be set first (the other leg keeps
+            // its current value), and rtx-payload-type=0 disables RTX.
+            "rtx-payload-type" => {
+                let pt = value.as_uint().ok_or(PropError::Type)?;
+                if pt > 127 {
+                    return Err(PropError::Value);
+                }
+                self.rtx = match pt {
+                    0 => None,
+                    _ => Some((pt as u8, self.rtx.map(|(_, s)| s).unwrap_or(0))),
+                };
+                Ok(())
+            }
+            "rtx-ssrc" => {
+                let ssrc = value.as_uint().ok_or(PropError::Type)? as u32;
+                let pt = self.rtx.map(|(p, _)| p).unwrap_or(0);
+                self.rtx = Some((pt, ssrc));
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -572,6 +652,16 @@ impl AsyncElement for UdpSink {
             "fec-rows" => Some(PropValue::Uint(self.fec_config.rows as u64)),
             "fec-payload-type" => Some(PropValue::Uint(self.fec_config.pt as u64)),
             "fec-ssrc" => Some(PropValue::Uint(self.fec_config.ssrc as u64)),
+            "max-payload" => Some(PropValue::Uint(self.max_payload as u64)),
+            "retransmit" => Some(PropValue::Bool(self.retransmit)),
+            "retx-capacity" => Some(PropValue::Uint(self.retx_cap as u64)),
+            "rtcp-sr-interval" => Some(PropValue::Uint(
+                self.rtcp_sr_interval_ns.unwrap_or(0) / 1_000_000,
+            )),
+            "rtx-payload-type" => {
+                Some(PropValue::Uint(self.rtx.map(|(p, _)| p).unwrap_or(0) as u64))
+            }
+            "rtx-ssrc" => Some(PropValue::Uint(self.rtx.map(|(_, s)| s).unwrap_or(0) as u64)),
             _ => None,
         }
     }

@@ -33,7 +33,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError, LatencyReport,
-    OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate, VideoCodec,
+    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec, Rate, VideoCodec,
 };
 
 use crate::filesink::io_err;
@@ -423,6 +424,158 @@ impl SourceLoop for RtspServerSrc {
             "Hosts an RTSP endpoint a publisher pushes H.264 into (ANNOUNCE/RECORD)",
             "g2g",
         )
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        const PROPS: &[PropertySpec] = &[
+            PropertySpec::new(
+                "address",
+                PropKind::Str,
+                "IP to listen for an RTSP publisher on",
+            )
+            .with_default("0.0.0.0"),
+            PropertySpec::new("port", PropKind::Uint, "RTSP TCP port to listen on")
+                .with_default("8554")
+                .with_range("0", "65535"),
+            PropertySpec::new(
+                "payload-type",
+                PropKind::Uint,
+                "RTP payload type advertised in the SDP (96..=127)",
+            )
+            .with_default("96")
+            .with_range("0", "127"),
+            PropertySpec::new("ssrc", PropKind::Uint, "RTP synchronization source id"),
+            PropertySpec::new(
+                "width",
+                PropKind::Uint,
+                "declared frame width hint (the in-band SPS corrects it)",
+            )
+            .with_default("1280"),
+            PropertySpec::new(
+                "height",
+                PropKind::Uint,
+                "declared frame height hint (the in-band SPS corrects it)",
+            )
+            .with_default("720"),
+            PropertySpec::new("framerate", PropKind::Uint, "declared frame rate hint, fps")
+                .with_default("30"),
+            PropertySpec::new(
+                "num-buffers",
+                PropKind::Int,
+                "access units to emit then EOS (-1 = until the publisher disconnects)",
+            )
+            .with_default("-1")
+            .with_range("-1", "9223372036854775807"),
+            PropertySpec::new(
+                "jitter-latency",
+                PropKind::Uint,
+                "max time to hold a sequence gap before declaring it lost, milliseconds",
+            )
+            .with_default("50"),
+            PropertySpec::new(
+                "jitter-depth",
+                PropKind::Uint,
+                "max packets buffered for reorder (0 = in-order passthrough)",
+            )
+            .with_default("64"),
+            PropertySpec::new(
+                "rtcp-rr-interval",
+                PropKind::Uint,
+                "RTCP receiver-report interval in milliseconds (0 = off; needs rtcp-mux)",
+            )
+            .with_default("0"),
+            PropertySpec::new(
+                "nack",
+                PropKind::Bool,
+                "request retransmission of detected gaps via RTPFB Generic NACK",
+            )
+            .with_default("false"),
+            PropertySpec::new(
+                "rtx-payload-type",
+                PropKind::Uint,
+                "RFC 4588 RTX stream payload type (0 = off; set rtx-apt too)",
+            )
+            .with_default("0")
+            .with_range("0", "127"),
+            PropertySpec::new(
+                "rtx-apt",
+                PropKind::Uint,
+                "original (associated) payload type RTX packets rebuild to",
+            )
+            .with_default("0")
+            .with_range("0", "127"),
+            PropertySpec::new(
+                "fec-payload-type",
+                PropKind::Uint,
+                "RFC 5109 ULPFEC repair-stream payload type (0 = off)",
+            )
+            .with_default("0")
+            .with_range("0", "127"),
+            PropertySpec::new(
+                "flexfec-payload-type",
+                PropKind::Uint,
+                "RFC 8627 FlexFEC repair-stream payload type (0 = off)",
+            )
+            .with_default("0")
+            .with_range("0", "127"),
+        ];
+        PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        if let Some(r) = crate::netprop::set_addr_prop(&mut self.rtsp_addr, "address", name, &value)
+        {
+            return r;
+        }
+        if let Some(r) = crate::rtprecv::set_recv_prop(&mut self.recv, name, &value) {
+            return r;
+        }
+        match name {
+            "payload-type" => {
+                let pt = value.as_uint().ok_or(PropError::Type)?;
+                if pt > 127 {
+                    return Err(PropError::Value);
+                }
+                self.payload_type = pt as u8;
+                Ok(())
+            }
+            "ssrc" => {
+                self.ssrc = value.as_uint().ok_or(PropError::Type)? as u32;
+                Ok(())
+            }
+            "width" => {
+                self.width = value.as_uint().ok_or(PropError::Type)? as u32;
+                Ok(())
+            }
+            "height" => {
+                self.height = value.as_uint().ok_or(PropError::Type)? as u32;
+                Ok(())
+            }
+            "framerate" => {
+                self.fps = value.as_uint().ok_or(PropError::Type)? as u32;
+                Ok(())
+            }
+            "num-buffers" => crate::netprop::set_frame_limit(&mut self.frame_limit, &value),
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        if let Some(v) = crate::netprop::get_addr_prop(&self.rtsp_addr, "address", name) {
+            return Some(v);
+        }
+        if let Some(v) = crate::rtprecv::get_recv_prop(&self.recv, name) {
+            return Some(v);
+        }
+        match name {
+            "payload-type" => Some(PropValue::Uint(self.payload_type as u64)),
+            "ssrc" => Some(PropValue::Uint(self.ssrc as u64)),
+            "width" => Some(PropValue::Uint(self.width as u64)),
+            "height" => Some(PropValue::Uint(self.height as u64)),
+            "framerate" => Some(PropValue::Uint(self.fps as u64)),
+            "num-buffers" => Some(crate::netprop::get_frame_limit(self.frame_limit)),
+            _ => None,
+        }
     }
 
     /// Live source: contributes one frame period so the sink keeps a frame in

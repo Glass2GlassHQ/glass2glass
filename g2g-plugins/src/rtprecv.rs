@@ -17,7 +17,9 @@ use std::net::SocketAddr;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
-use g2g_core::{FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket};
+use g2g_core::{
+    FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket, PropError, PropValue,
+};
 
 use crate::filesink::io_err;
 use crate::flexfec::FlexFecDecoder;
@@ -70,6 +72,75 @@ impl Default for RtpRecvConfig {
             flexfec_pt: None,
         }
     }
+}
+
+/// Handle the receive-tuning half of an RTP ingest source's `set_property`
+/// (`jitter-latency`, `jitter-depth`, `rtcp-rr-interval`, `nack`,
+/// `rtx-payload-type`, `rtx-apt`, `fec-payload-type`, `flexfec-payload-type`),
+/// the [`crate::netprop`] pattern applied to [`RtpRecvConfig`]. Returns
+/// `Some(result)` when `name` is one of these, `None` otherwise. A payload type
+/// of 0 disables the corresponding recovery stream (dynamic PTs are 96..=127,
+/// so 0 is never a real repair stream).
+pub(crate) fn set_recv_prop(
+    cfg: &mut RtpRecvConfig,
+    name: &str,
+    value: &PropValue,
+) -> Option<Result<(), PropError>> {
+    fn uint(value: &PropValue) -> Result<u64, PropError> {
+        value.as_uint().ok_or(PropError::Type)
+    }
+    fn pt(value: &PropValue) -> Result<u8, PropError> {
+        let v = uint(value)?;
+        if v > 127 {
+            return Err(PropError::Value);
+        }
+        Ok(v as u8)
+    }
+    Some(match name {
+        "jitter-latency" => uint(value).map(|ms| {
+            cfg.jitter.max_hold_ns = ms.saturating_mul(1_000_000);
+        }),
+        "jitter-depth" => uint(value).map(|d| {
+            cfg.jitter.max_depth = d.min(usize::MAX as u64) as usize;
+        }),
+        "rtcp-rr-interval" => uint(value).map(|ms| {
+            cfg.rtcp_rr_interval_ms = ms;
+        }),
+        "nack" => value
+            .as_bool()
+            .ok_or(PropError::Type)
+            .map(|b| cfg.nack_enabled = b),
+        // rtx needs both legs; either may be set first (the other leg keeps its
+        // current value), and rtx-payload-type=0 disables RTX.
+        "rtx-payload-type" => pt(value).map(|v| {
+            cfg.rtx = match v {
+                0 => None,
+                _ => Some((v, cfg.rtx.map(|(_, apt)| apt).unwrap_or(0))),
+            };
+        }),
+        "rtx-apt" => pt(value).map(|apt| {
+            let rtx_pt = cfg.rtx.map(|(p, _)| p).unwrap_or(0);
+            cfg.rtx = Some((rtx_pt, apt));
+        }),
+        "fec-payload-type" => pt(value).map(|v| cfg.fec_pt = (v != 0).then_some(v)),
+        "flexfec-payload-type" => pt(value).map(|v| cfg.flexfec_pt = (v != 0).then_some(v)),
+        _ => return None,
+    })
+}
+
+/// The read half of [`set_recv_prop`]. Disabled optional streams read as 0.
+pub(crate) fn get_recv_prop(cfg: &RtpRecvConfig, name: &str) -> Option<PropValue> {
+    Some(match name {
+        "jitter-latency" => PropValue::Uint(cfg.jitter.max_hold_ns / 1_000_000),
+        "jitter-depth" => PropValue::Uint(cfg.jitter.max_depth as u64),
+        "rtcp-rr-interval" => PropValue::Uint(cfg.rtcp_rr_interval_ms),
+        "nack" => PropValue::Bool(cfg.nack_enabled),
+        "rtx-payload-type" => PropValue::Uint(cfg.rtx.map(|(p, _)| p).unwrap_or(0) as u64),
+        "rtx-apt" => PropValue::Uint(cfg.rtx.map(|(_, apt)| apt).unwrap_or(0) as u64),
+        "fec-payload-type" => PropValue::Uint(cfg.fec_pt.unwrap_or(0) as u64),
+        "flexfec-payload-type" => PropValue::Uint(cfg.flexfec_pt.unwrap_or(0) as u64),
+        _ => return None,
+    })
 }
 
 /// Turn one depayloaded access unit into a downstream H.264 frame and push it,
@@ -247,7 +318,11 @@ pub async fn receive_rtp_h264(
             // packet (sequence prepended); rebuild it onto the media stream's
             // SSRC before reordering, so the resend simply fills its gap. Drop it
             // if no original SSRC is known yet.
-            let is_rtx = cfg.rtx.is_some_and(|(rtx_pt, _)| pt == rtx_pt);
+            // PT 0 means "not configured" (the property half-set state, see
+            // `set_recv_prop`), never a real RTX stream.
+            let is_rtx = cfg
+                .rtx
+                .is_some_and(|(rtx_pt, _)| rtx_pt != 0 && pt == rtx_pt);
             let reconstructed = match (is_rtx, cfg.rtx, media_ssrc_seen) {
                 (true, Some((_, apt)), Some(ssrc)) => rtx::parse_rtx_packet(&buf[..n], apt, ssrc),
                 _ => None,

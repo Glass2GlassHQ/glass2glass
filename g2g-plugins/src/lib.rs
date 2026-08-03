@@ -517,6 +517,7 @@ pub mod remoteclient;
     feature = "remote",
     feature = "remote-ws",
     feature = "rtmp",
+    feature = "rtsp-server",
     feature = "srt",
     feature = "udp-ingress",
     feature = "udp-egress",
@@ -683,8 +684,9 @@ pub mod vorbisdec;
 #[cfg(feature = "http-src")]
 pub mod httpsrc;
 
-// Shared HTTP fetch + URL helpers for the adaptive-streaming sources.
-#[cfg(feature = "http-src")]
+// Shared HTTP fetch + URL helpers for the adaptive-streaming sources (not
+// HttpSrc itself, which streams its response body directly).
+#[cfg(any(feature = "hls", feature = "dash"))]
 mod fetch;
 
 // Shared throughput-driven ABR estimator for the adaptive-streaming sources.

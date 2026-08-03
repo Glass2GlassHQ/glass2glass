@@ -320,6 +320,14 @@ impl SourceLoop for FileSrc {
                 }
                 Ok(())
             }
+            "blocksize" => {
+                let bytes = value.as_uint().ok_or(PropError::Type)?;
+                if bytes == 0 {
+                    return Err(PropError::Value);
+                }
+                self.chunk_size = bytes.min(1 << 30) as usize;
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -327,6 +335,7 @@ impl SourceLoop for FileSrc {
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
             "location" => Some(PropValue::Str(self.path.to_string_lossy().into_owned())),
+            "blocksize" => Some(PropValue::Uint(self.chunk_size as u64)),
             "bytestream-format" => {
                 if self.auto_detect {
                     Some(PropValue::Str("auto".into()))
@@ -350,6 +359,13 @@ static FILESRC_PROPS: &[PropertySpec] = &[
         PropKind::Str,
         "container of a raw byte stream: mpegts | matroska | ogg | flv | auto (sniff the header)",
     ),
+    PropertySpec::new(
+        "blocksize",
+        PropKind::Uint,
+        "bytes per emitted DataFrame chunk",
+    )
+    .with_default("65536")
+    .with_range("1", "1073741824"),
 ];
 
 /// Derive the media type from a file extension (M478), so a bare launch
