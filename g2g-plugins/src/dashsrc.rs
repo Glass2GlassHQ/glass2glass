@@ -339,7 +339,7 @@ impl SourceLoop for DashSrc {
                         let mut measured: Option<(usize, u64)> = None;
                         {
                             let seg = &segs[idx];
-                            if !last_time.is_some_and(|lt| seg.time <= lt) {
+                            if last_time.is_none_or(|lt| seg.time > lt) {
                                 // Play time of this segment: the start-time delta to
                                 // its successor; the last segment reuses the previous
                                 // duration (no successor to diff against).
