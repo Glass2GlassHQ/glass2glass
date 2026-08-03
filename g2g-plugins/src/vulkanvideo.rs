@@ -29,7 +29,7 @@ use g2g_core::runtime::block_on;
 use g2g_core::{
     AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
     ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, Rate, RawVideoFormat, VideoCodec,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, VideoCodec,
 };
 
 /// Compiled SPIR-V for the YCbCr -> RGBA compute shader, shared with the Android
@@ -126,6 +126,9 @@ pub enum VulkanVideoError {
     ExtensionUnsupported,
     /// No queue family advertises decode for this codec.
     NoDecodeQueue,
+    /// A requested device index is past the number of adapters that support this
+    /// codec's hardware decode (the `device-index` property).
+    NoSuchDevice,
     /// The access unit carried no decodable slice (no IDR slice NAL).
     NoDecodableSlice,
     /// The stream uses an H.264 coding tool this decoder does not implement
@@ -6487,6 +6490,9 @@ pub struct VulkanVideoDevice {
     present_capable: bool,
     /// `VK_EXT_hdr_metadata` was enabled (mastering metadata can be set).
     hdr_metadata_supported: bool,
+    /// Requested DPB image count (the element's `num-dpb-slots` property), or
+    /// `None` to size the DPB from the stream alone. See [`Self::dpb_slot_count`].
+    dpb_slots_request: Option<u32>,
 }
 
 /// Raw Vulkan handles an HDR swapchain sink needs to present on the decode
@@ -6523,6 +6529,26 @@ impl VulkanVideoDevice {
     /// attached to the swapchain).
     pub fn hdr_metadata_supported(&self) -> bool {
         self.hdr_metadata_supported
+    }
+
+    /// Request a DPB image count for decoders built from this device afterwards,
+    /// or `None` to size the DPB from the stream. Applied by
+    /// [`dpb_slot_count`](Self::dpb_slot_count), so a decoder already built keeps
+    /// the pool it was created with.
+    pub fn set_dpb_slots(&mut self, slots: Option<u32>) {
+        self.dpb_slots_request = slots;
+    }
+
+    /// The DPB image count for a decoder whose stream needs `needed` slots (its
+    /// references plus the picture being decoded). A `set_dpb_slots` request
+    /// raises the count; it never drops below what the stream needs (fewer slots
+    /// would evict a live reference and mis-decode) and is capped at the device's
+    /// `maxDpbSlots`.
+    fn dpb_slot_count(&self, needed: usize) -> usize {
+        let ceiling = self.caps.max_dpb_slots.max(2) as usize;
+        self.dpb_slots_request
+            .map_or(needed, |n| (n as usize).max(needed))
+            .clamp(2, ceiling)
     }
 
     /// The raw handles for an HDR present sink, or `None` if not present-capable.
@@ -6573,6 +6599,17 @@ pub async fn open_av1_decode_device() -> Result<VulkanVideoDevice, VulkanVideoEr
 /// picture format is chosen later per profile at session creation.
 pub async fn open_decode_device(
     codec: VulkanVideoCodec,
+) -> Result<VulkanVideoDevice, VulkanVideoError> {
+    open_decode_device_at(codec, None).await
+}
+
+/// [`open_decode_device`] on a chosen GPU: `device_index` indexes the adapters
+/// that support this codec's hardware decode, in Vulkan enumeration order (the
+/// `device-index` property), and `Err(NoSuchDevice)` if it is past the last one.
+/// `None` keeps the default pick (a discrete GPU when there is one).
+pub async fn open_decode_device_at(
+    codec: VulkanVideoCodec,
+    device_index: Option<u32>,
 ) -> Result<VulkanVideoDevice, VulkanVideoError> {
     // Pick a Vulkan adapter that actually supports this codec's hardware decode.
     // `request_adapter(HighPerformance)` is not codec-aware: on a multi-GPU host
@@ -6642,7 +6679,13 @@ pub async fn open_decode_device(
             }
         }
         if !candidates.is_empty() {
-            let idx = candidates.iter().position(|c| c.3).unwrap_or(0);
+            let idx = match device_index {
+                Some(i) if (i as usize) < candidates.len() => i as usize,
+                // A named device that does not exist is an error, not a silent
+                // fall back to another GPU.
+                Some(_) => return Err(VulkanVideoError::NoSuchDevice),
+                None => candidates.iter().position(|c| c.3).unwrap_or(0),
+            };
             let (adapter, caps, compute_family, _) = candidates.swap_remove(idx);
             break (instance, adapter, caps, compute_family);
         }
@@ -6823,6 +6866,7 @@ pub async fn open_decode_device(
         graphics_queue,
         present_capable: want_swapchain,
         hdr_metadata_supported: want_hdr_metadata,
+        dpb_slots_request: None,
     })
 }
 
@@ -8640,8 +8684,8 @@ impl VulkanVideoDevice {
         let (w, h) = session.coded_extent;
         let max_num_ref_frames = ps.sps.max_num_ref_frames as usize;
         // One slot per possible short-term reference plus one for the picture
-        // being decoded, clamped to the device DPB ceiling (at least two).
-        let num_slots = (max_num_ref_frames + 1).clamp(2, self.caps.max_dpb_slots.max(2) as usize);
+        // being decoded (raised by a `set_dpb_slots` request, capped by the device).
+        let num_slots = self.dpb_slot_count(max_num_ref_frames + 1);
 
         let profile = h264_profile();
         let color = VideoColorSpace::from_cicp(
@@ -8765,9 +8809,9 @@ impl VulkanVideoDevice {
     ) -> Result<H265DpbDecoder, VulkanVideoError> {
         let (w, h) = session.coded_extent;
         // DPB size: the SPS max buffering (sub-layer 0) plus the picture in
-        // flight, clamped to the device DPB ceiling (at least two).
+        // flight (raised by a `set_dpb_slots` request, capped by the device).
         let max_dpb = ps.sps.max_dec_pic_buffering_minus1[0] as usize + 1;
-        let num_slots = (max_dpb + 1).clamp(2, self.caps.max_dpb_slots.max(2) as usize);
+        let num_slots = self.dpb_slot_count(max_dpb + 1);
 
         let profile = h265_profile(ps.sps.bit_depth_luma_minus8 + 8);
         let color = VideoColorSpace::from_cicp(
@@ -8851,8 +8895,9 @@ impl VulkanVideoDevice {
         let (w, h) = session.coded_extent;
         // AV1 keeps up to NUM_REF_FRAMES (8) reference frames; one more physical
         // image gives a free target to decode into, so a fresh frame never
-        // aliases a live reference. Clamp to the device DPB ceiling.
-        let num_slots = (AV1_NUM_REF_FRAMES + 1).clamp(2, self.caps.max_dpb_slots.max(2) as usize);
+        // aliases a live reference. A `set_dpb_slots` request raises it; the
+        // device DPB ceiling caps it.
+        let num_slots = self.dpb_slot_count(AV1_NUM_REF_FRAMES + 1);
         let profile = av1_profile(seq.color.bit_depth);
         // AV1 carries the colour matrix + transfer in color_config; an absent
         // description is unspecified (CICP 2), which `from_cicp` resolves by
@@ -13098,6 +13143,20 @@ pub struct VulkanVideoDec {
     /// synchronously by `decode_push_to_textures` (metas pair 1:1, no FIFO).
     /// AV1's texture path needs none: its display order is the op order.
     reorder_tex: ReorderBuffer<(FrameTiming, wgpu::Texture)>,
+    /// The reorder depth the current stream asks for (`ensure_decoder` derives it
+    /// from the parameter sets). `low_latency` overrides the buffers' `max_hold`
+    /// to 0; this keeps the stream's own value so turning it back off restores it.
+    reorder_hold: usize,
+    /// `low-latency` property: emit each picture as soon as it is decoded, in
+    /// coding order, instead of holding it for display-order reordering. Also
+    /// drains the decode ring per access unit, so a frame in is a frame out.
+    low_latency: bool,
+    /// `device-index` property: which decode-capable Vulkan adapter to open, or
+    /// `None` for the default pick. Read once, at `configure_pipeline`.
+    device_index: Option<u32>,
+    /// `num-dpb-slots` property: a DPB image count for the decoder built at the
+    /// first keyframe, or `None` to size it from the stream.
+    dpb_slots: Option<u32>,
 }
 
 impl core::fmt::Debug for VulkanVideoDec {
@@ -13137,7 +13196,25 @@ impl VulkanVideoDec {
             pending_meta: alloc::collections::VecDeque::new(),
             reorder: ReorderBuffer::new(),
             reorder_tex: ReorderBuffer::new(),
+            reorder_hold: 0,
+            low_latency: false,
+            device_index: None,
+            dpb_slots: None,
         }
+    }
+
+    /// Point both display-order buffers at the current hold depth: the stream's
+    /// own reorder bound, or 0 under `low-latency` (every picture releases as it
+    /// arrives, in coding order). Cheap enough to re-apply whenever either input
+    /// changes, including mid-stream.
+    fn apply_reorder_hold(&mut self) {
+        let hold = if self.low_latency {
+            0
+        } else {
+            self.reorder_hold
+        };
+        self.reorder.max_hold = hold;
+        self.reorder_tex.max_hold = hold;
     }
 
     /// The domains this decoder can emit: the zero-copy `WgpuTexture` (preferred)
@@ -13182,6 +13259,11 @@ impl VulkanVideoDec {
     /// resolved `out_domain`, falling back to NV12 if the device exposes no
     /// compute queue.
     fn ensure_decoder(&mut self, au: &[u8]) -> Result<bool, G2gError> {
+        // The `num-dpb-slots` request applies to the DPB built below.
+        let dpb_slots = self.dpb_slots;
+        if let Some(dev) = self.device.as_mut() {
+            dev.set_dpb_slots(dpb_slots);
+        }
         let device = self.device.as_ref().ok_or(G2gError::CapsMismatch)?;
         let want_gpu = self.out_domain == MemoryDomainKind::WgpuTexture;
         let built = self.decoder.is_some();
@@ -13299,11 +13381,10 @@ impl VulkanVideoDec {
         // `max_num_reorder_frames` / H.265 `sps_max_num_reorder_pics`) when it
         // declares one; frames release as early as the stream allows. Fall back
         // to the DPB slot count (a safe over-approximation) when it does not.
-        let hold = reorder_bound
+        self.reorder_hold = reorder_bound
             .unwrap_or_else(|| decoder.dpb_slots())
             .min(decoder.dpb_slots());
-        self.reorder.max_hold = hold;
-        self.reorder_tex.max_hold = hold;
+        self.apply_reorder_hold();
         self.decoder = Some(decoder);
         self.session = Some(session);
         self.coded_geometry = Some(geometry);
@@ -13584,14 +13665,11 @@ impl AsyncElement for VulkanVideoDec {
         self.reorder_enabled = matches!(codec, VideoCodec::H264 | VideoCodec::H265);
         // Open the decode device for this codec now (independent of the stream's
         // parameter sets, which arrive in-band and build the session lazily on
-        // the first keyframe AU). Each codec enables its own decode profile.
-        let device = match codec {
-            VideoCodec::H264 => block_on(open_h264_decode_device()),
-            VideoCodec::H265 => block_on(open_h265_decode_device()),
-            VideoCodec::Av1 => block_on(open_av1_decode_device()),
-            _ => return Err(G2gError::CapsMismatch),
-        }
-        .map_err(|_| G2gError::CapsMismatch)?;
+        // the first keyframe AU). Each codec enables its own decode profile; the
+        // `device-index` property picks the GPU among those that support it.
+        let vk_codec = VulkanVideoCodec::from_video_codec(codec).ok_or(G2gError::CapsMismatch)?;
+        let device = block_on(open_decode_device_at(vk_codec, self.device_index))
+            .map_err(|_| G2gError::CapsMismatch)?;
         self.device = Some(device);
         Ok(ConfigureOutcome::Accepted)
     }
@@ -13603,6 +13681,58 @@ impl AsyncElement for VulkanVideoDec {
             "Vendor-neutral GPU hardware H.264 / H.265 / AV1 decode via VK_KHR_video_queue",
             "g2g",
         )
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        VULKANVIDEODEC_PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "low-latency" => {
+                self.low_latency = value.as_bool().ok_or(PropError::Type)?;
+                // Takes effect immediately: the buffers hold nothing more from
+                // here on (or resume the stream's own depth when turned off).
+                self.apply_reorder_hold();
+                Ok(())
+            }
+            "device-index" => {
+                // The device is opened at configure; after that this GPU is the
+                // one the session and DPB live on.
+                if self.device.is_some() {
+                    return Err(PropError::ReadOnly);
+                }
+                let i = value.as_uint().ok_or(PropError::Type)?;
+                self.device_index = Some(u32::try_from(i).map_err(|_| PropError::Value)?);
+                Ok(())
+            }
+            "num-dpb-slots" => {
+                // The DPB is allocated with the decoder, at the first keyframe.
+                if self.decoder.is_some() {
+                    return Err(PropError::ReadOnly);
+                }
+                let n = value.as_uint().ok_or(PropError::Type)?;
+                self.dpb_slots = match n {
+                    0 => None,
+                    // Vulkan Video maxDpbSlots is per-device; 32 is past every
+                    // codec's reference count, so a larger request is a mistake.
+                    1..=32 => Some(n as u32),
+                    _ => return Err(PropError::Value),
+                };
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "low-latency" => Some(PropValue::Bool(self.low_latency)),
+            // Unset means "the default pick"; there is no index that says that.
+            "device-index" => self.device_index.map(|i| PropValue::Uint(i as u64)),
+            "num-dpb-slots" => Some(PropValue::Uint(self.dpb_slots.unwrap_or(0) as u64)),
+            _ => None,
+        }
     }
 
     fn process<'a>(
@@ -13696,7 +13826,7 @@ impl AsyncElement for VulkanVideoDec {
                     // is queued so the retired frame (which belongs to an earlier
                     // AU) is re-paired with its own and placed in display order.
                     if self.reorder_enabled {
-                        let (metas, decoded) = self
+                        let (metas, mut decoded) = self
                             .decoder
                             .as_mut()
                             .expect("decoder built")
@@ -13704,6 +13834,17 @@ impl AsyncElement for VulkanVideoDec {
                             .map_err(|_| G2gError::CapsMismatch)?;
                         for meta in metas {
                             self.pending_meta.push_back((src_timing, meta));
+                        }
+                        if self.low_latency {
+                            // Retire this AU's own picture now instead of letting
+                            // it sit in the decode ring: one AU in, its frame out.
+                            let tail = self
+                                .decoder
+                                .as_mut()
+                                .expect("decoder built")
+                                .decode_flush()
+                                .map_err(|_| G2gError::CapsMismatch)?;
+                            decoded.extend(tail);
                         }
                         self.emit_reordered(decoded, out).await?;
                     } else {
@@ -13787,6 +13928,27 @@ impl AsyncElement for VulkanVideoDec {
         })
     }
 }
+
+/// Settable properties, so a `gst-launch` line can pick the GPU, size the DPB and
+/// choose the latency mode. The codec and the output format are not properties:
+/// both come from negotiation (the sink caps and the resolved memory domain).
+static VULKANVIDEODEC_PROPS: &[PropertySpec] = &[
+    PropertySpec::new(
+        "low-latency",
+        PropKind::Bool,
+        "emit each picture as it decodes, in coding order (no display reorder)",
+    ),
+    PropertySpec::new(
+        "device-index",
+        PropKind::Uint,
+        "which decode-capable Vulkan GPU to open, in enumeration order",
+    ),
+    PropertySpec::new(
+        "num-dpb-slots",
+        PropKind::Uint,
+        "DPB image count, 0 to size it from the stream",
+    ),
+];
 
 #[cfg(test)]
 mod tests {

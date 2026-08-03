@@ -8,6 +8,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 - M822: runtime properties on `webrtcwhepsessionsrc` (`location`, `auth-token`, STUN/TURN, `num-buffers`), the last placeholder-registered source.
 
+- M821: runtime properties on `vulkanvideodec` (`low-latency` coding-order mode, `device-index`, `num-dpb-slots`).
+
 - M820: `g2g_ml::register` puts `ortinfer` / `wgpupreprocess` / `detectionpostprocess` in a launch line, with runtime properties and a deferred `model=` load on `ortinfer`.
 
 - M819: duration-keyed prebuffer window (`prebuffer-ms`) on `hlssrc` / `dashsrc`, posting `Buffering` bus levels during the fill; `abr` exposed as a property.

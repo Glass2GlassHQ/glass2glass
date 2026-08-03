@@ -274,10 +274,8 @@ Phased plan:
 
 - **`VulkanVideoDec` residuals.** AMD (RADV) and Intel (ANV) validation runs of
   the `vulkanvideo` GPU tests (the element is vendor-neutral; hardware-gated,
-  `VERIFY:` markers in-tree). Runtime properties per the conventions
-  (`low-latency` bounded-DPB / no-reorder mode, `device-index`, `num-dpb-slots`;
-  codec and output format come from negotiation, so they are not properties).
-  Optional extra output domains (multiplanar NV12 / `VulkanTexture`).
+  `VERIFY:` markers in-tree). Optional extra output domains (multiplanar NV12 /
+  `VulkanTexture`).
 
 ## CUDA / display
 
