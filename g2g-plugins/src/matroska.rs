@@ -23,6 +23,7 @@
 //! (M373). BlockGroup reference tracking and per-frame timestamp interpolation
 //! from DefaultDuration are follow-ups.
 
+use alloc::borrow::Cow;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -1939,17 +1940,20 @@ fn simple_tag(tag: &Tag) -> Vec<u8> {
 
 /// A tag's Matroska `TagName` / `TagString` pair. Typed keys use the conventional
 /// uppercase names so they round-trip back to the same variant through
-/// [`Tag::from_key_value`]; [`Tag::Other`] keeps its stored key.
-fn tag_name_value(tag: &Tag) -> (&str, &str) {
-    match tag {
-        Tag::Title(v) => ("TITLE", v),
-        Tag::Artist(v) => ("ARTIST", v),
-        Tag::Album(v) => ("ALBUM", v),
-        Tag::Encoder(v) => ("ENCODER", v),
-        Tag::Language(v) => ("LANGUAGE", v),
-        Tag::Comment(v) => ("COMMENT", v),
-        Tag::Other { key, value } => (key, value),
-    }
+/// [`Tag::from_key_value`]; [`Tag::Other`] keeps its stored key, and the integer
+/// / freeform variants flatten to the key and decimal value Matroska's
+/// string-only `SimpleTag` can carry.
+fn tag_name_value(tag: &Tag) -> (Cow<'_, str>, Cow<'_, str>) {
+    let name = match tag {
+        Tag::Title(_) => Cow::Borrowed("TITLE"),
+        Tag::Artist(_) => Cow::Borrowed("ARTIST"),
+        Tag::Album(_) => Cow::Borrowed("ALBUM"),
+        Tag::Encoder(_) => Cow::Borrowed("ENCODER"),
+        Tag::Language(_) => Cow::Borrowed("LANGUAGE"),
+        Tag::Comment(_) => Cow::Borrowed("COMMENT"),
+        Tag::Number { .. } | Tag::Freeform { .. } | Tag::Other { .. } => tag.key(),
+    };
+    (name, tag.value_string())
 }
 
 /// A SimpleBlock body: track-number VINT, signed relative timestamp, flags, data.

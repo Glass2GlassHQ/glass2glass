@@ -43,7 +43,12 @@ use crate::fmp4::{
     parse_all_tracks, parse_fragments_multi, parse_progressive_multi, starts_with_param_set,
     Sample, TrackHeader, TrackKind,
 };
-use crate::mp4box::find_box;
+use crate::mp4box::{find_box, parse_ilst_tags};
+
+/// The id a track carries in the `StreamCollection` and on its `StreamTag`s.
+fn stream_id(track_id: u32) -> alloc::string::String {
+    alloc::format!("mp4-track-{track_id}")
+}
 
 /// One output port: the `track_ID` it forwards and the elementary [`Caps`] the
 /// downstream decode branch plugs from (parsed from the file's `moov` when the
@@ -218,6 +223,8 @@ pub struct Mp4DemuxN {
     bus: Option<BusHandle>,
     /// Set once the `StreamCollection` (M386) has been announced, so it posts once.
     collection_posted: bool,
+    /// Set once the container's tags have been posted, so they post once (M838).
+    tags_posted: bool,
     /// App-driven stream selection (M475): the app names the track id each port
     /// should carry (port `i` <- selection id `i`); the demuxer re-maps its ports.
     /// Inert unless `with_stream_select` wired it. Unlike the codec-routed
@@ -256,6 +263,7 @@ impl Mp4DemuxN {
             need_config,
             bus: None,
             collection_posted: false,
+            tags_posted: false,
             stream_select: None,
             #[cfg(feature = "mp4-cenc")]
             cenc_keys: None,
@@ -394,6 +402,13 @@ impl Mp4DemuxN {
         )
     }
 
+    /// Announce the file's streams and metadata on the bus, once: the
+    /// `StreamCollection` first, since the per-stream tags name ids from it.
+    fn post_metadata(&mut self, tracks: &[TrackHeader]) {
+        self.post_stream_collection(tracks);
+        self.post_tags(tracks);
+    }
+
     /// Announce every forwardable track as a `StreamCollection` (M386), once. A
     /// no-op without a bus or once posted.
     fn post_stream_collection(&mut self, tracks: &[TrackHeader]) {
@@ -408,8 +423,7 @@ impl Mp4DemuxN {
                     TrackKind::Audio { .. } => StreamType::Audio,
                     TrackKind::Text { .. } => StreamType::Text,
                 };
-                let name = alloc::format!("mp4-track-{}", t.track_id);
-                Stream::new(name, ty, real_caps(&t.kind))
+                Stream::new(stream_id(t.track_id), ty, real_caps(&t.kind))
             })
             .collect();
         if streams.is_empty() {
@@ -420,6 +434,34 @@ impl Mp4DemuxN {
             bus.try_post(BusMessage::StreamCollection(StreamCollection::new(
                 "mp4-0", streams,
             )));
+        }
+    }
+
+    /// Post the file's metadata, once: the `moov`'s own `udta/meta/ilst` as a
+    /// [`BusMessage::Tag`] and each `trak`'s as a [`BusMessage::StreamTag`] on
+    /// that track's stream id (M838). The two scopes stay separate, so an
+    /// application applies the conflict rule (`g2g_core::resolve_tags`: the
+    /// stream's tag wins on its own pad) itself.
+    fn post_tags(&mut self, tracks: &[TrackHeader]) {
+        if self.tags_posted {
+            return;
+        }
+        let Some(bus) = &self.bus else { return };
+        self.tags_posted = true;
+        if let Some(moov) = find_box(&self.buf, b"moov") {
+            let global = parse_ilst_tags(moov);
+            if !global.is_empty() {
+                bus.try_post(BusMessage::Tag(global));
+            }
+        }
+        for t in tracks {
+            if t.tags.is_empty() {
+                continue;
+            }
+            bus.try_post(BusMessage::StreamTag {
+                stream_id: stream_id(t.track_id),
+                tags: t.tags.clone(),
+            });
         }
     }
 
@@ -466,7 +508,7 @@ impl Mp4DemuxN {
             let fragmented = find_box(moov, b"mvex").is_some();
             let tracks = parse_all_tracks(&self.buf)?;
             if self.bus.is_some() {
-                self.post_stream_collection(&tracks);
+                self.post_metadata(&tracks);
             }
             self.fragmented = Some(fragmented);
             self.tracks = Some(tracks);
@@ -535,7 +577,7 @@ impl Mp4DemuxN {
     ) -> Result<(), G2gError> {
         let tracks = parse_all_tracks(&self.buf)?;
         if self.bus.is_some() {
-            self.post_stream_collection(&tracks);
+            self.post_metadata(&tracks);
         }
         // A `moof` marks a fragmented / CMAF file; its absence is the classic
         // progressive `moov`+`mdat` layout, walked from the sample tables instead.

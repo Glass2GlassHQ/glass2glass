@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M838: MP4 `----` freeform + integer tag atoms, and a shared global-vs-per-stream tag merge policy (`resolve_tags` / `split_tags`) across mp4/mkv.
+
 - M837: declarative `DerivedFields(CapsTransform)` replaces `DerivedCoupled`'s closure + mask pair, making passthrough drift unrepresentable.
 
 - M836: DASH dynamic `@duration` live profile (edge start, `presentation-delay-ms`, time-shift clamp) and multi-period playthrough with boundary `Segment`.

@@ -646,8 +646,7 @@ _(No open parser items.)_
 
 ## Tag system
 
-- MP4 freeform (`----`) and integer atoms (track / disc number).
-- A per-stream tag merge policy for multi-stream containers.
+- MPEG-TS tag carriage (no `TagList` rides `tsmux`/`tsdemux` at all).
 
 ## Python-element host (M198+)
 

@@ -39,8 +39,8 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
-    FrameTiming, G2gError, InputAggregator, MemoryDomain, MultiInputElement, OutputSink,
+    split_tags, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
+    Dim, FrameTiming, G2gError, InputAggregator, MemoryDomain, MultiInputElement, OutputSink,
     PipelinePacket, PropError, PropKind, PropValue, PropertySpec, TagList, VideoCodec,
 };
 
@@ -113,9 +113,9 @@ pub struct MkvMuxN {
     pending: Vec<u8>,
     /// Whole-file metadata, written as an untargeted `Tag`.
     tags: TagList,
-    /// Per-input metadata (input pad index, tags), written as `Targets`-scoped
-    /// `Tag`s in the same `Tags` element (M787).
-    track_tags: Vec<(usize, TagList)>,
+    /// Per-input metadata, written as `Targets`-scoped `Tag`s in the same `Tags`
+    /// element (M787). One (possibly empty) list per input pad.
+    track_tags: Vec<TagList>,
 }
 
 impl MkvMuxN {
@@ -134,7 +134,7 @@ impl MkvMuxN {
             seekable: false,
             pending: Vec::new(),
             tags: TagList::new(),
-            track_tags: Vec::new(),
+            track_tags: alloc::vec![TagList::new(); inputs],
         }
     }
 
@@ -149,9 +149,14 @@ impl MkvMuxN {
     /// `Targets` names that track's `TagTrackUID`, so a reader (ffmpeg, the g2g
     /// demuxer) reports it on that elementary stream rather than the file. Out-of
     /// range inputs are ignored.
+    ///
+    /// A tag every input carries identically moves up to the untargeted
+    /// whole-file `Tag` instead (`g2g_core::split_tags`), and a tag also set by
+    /// [`with_tags`](Self::with_tags) is not repeated per track unless the value
+    /// differs, in which case the track's value stands for that track.
     pub fn with_track_tags(mut self, input: usize, tags: TagList) -> Self {
         if input < self.inputs {
-            self.track_tags.push((input, tags));
+            self.track_tags[input] = tags;
         }
         self
     }
@@ -588,9 +593,12 @@ impl MultiInputElement for MkvMuxN {
                     .iter()
                     .map(|i| track_config(i.as_ref().expect("ready")))
                     .collect();
-                let mut mux = MatroskaMuxer::new_multi(configs).with_tags(self.tags.clone());
-                for (input, tags) in &self.track_tags {
-                    mux = mux.with_track_tags(*input, tags.clone());
+                let (global, per_track) = split_tags(&self.tags, &self.track_tags);
+                let mut mux = MatroskaMuxer::new_multi(configs).with_tags(global);
+                for (input, tags) in per_track.into_iter().enumerate() {
+                    if !tags.is_empty() {
+                        mux = mux.with_track_tags(input, tags);
+                    }
                 }
                 if self.seekable {
                     mux = mux.with_two_pass();

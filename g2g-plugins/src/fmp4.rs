@@ -10,11 +10,11 @@
 
 use alloc::vec::Vec;
 
-use g2g_core::{AudioFormat, G2gError, TextFormat, VideoCodec};
+use g2g_core::{AudioFormat, G2gError, TagList, TextFormat, VideoCodec};
 
 use crate::cenc::{fragment_sample_crypt, parse_sinf, CencDefaults, SampleCrypt};
 use crate::mp4box::{
-    be32, be64, boxes, boxes_at, find_box, find_path, parse_esds, parse_esds_video,
+    be32, be64, boxes, boxes_at, find_box, find_path, parse_esds, parse_esds_video, parse_ilst_tags,
 };
 use crate::opusparse::{opus_head_from_dops, parse_opus_head};
 
@@ -203,14 +203,16 @@ pub(crate) enum TextSampleFormat {
 
 /// One track's init data parsed from a `moov/trak`: the `track_ID` (which keys
 /// the fragments in [`parse_fragments_multi`]), the media timescale, the
-/// elementary-stream kind, and the cbcs `cenc` defaults for an encrypted track
-/// (`None` for a clear one).
+/// elementary-stream kind, the cbcs `cenc` defaults for an encrypted track
+/// (`None` for a clear one), and the track's own `udta/meta/ilst` metadata
+/// (empty when it carries none).
 #[derive(Debug, Clone)]
 pub(crate) struct TrackHeader {
     pub(crate) track_id: u32,
     pub(crate) timescale: u32,
     pub(crate) kind: TrackKind,
     pub(crate) cenc: Option<CencDefaults>,
+    pub(crate) tags: TagList,
 }
 
 /// Parse every forwardable (`vide` / `soun` / timed-text) track out of a `moov`
@@ -286,6 +288,7 @@ fn parse_trak(trak: &[u8]) -> Result<Option<TrackHeader>, G2gError> {
         timescale,
         kind,
         cenc,
+        tags: parse_ilst_tags(trak),
     }))
 }
 

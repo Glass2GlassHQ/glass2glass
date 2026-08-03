@@ -386,6 +386,11 @@ jobs:
       # ffmpeg's own `-movflags cmaf` output sample-exact, timing included.
       - name: CMAF oracle (mp4mux cmaf + mp4demux vs ffmpeg)
         run: cargo test -p g2g-plugins --locked --features std --test m832_cmaf -- --nocapture
+      # MP4 metadata atoms (M838): ffprobe reads the freeform `----` and the
+      # integer `trkn` / `disk` / `cpil` atoms g2g writes, per file and per track,
+      # and g2g reads the same atoms out of an ffmpeg-authored file.
+      - name: MP4 tag oracle (mp4mux + mp4demux vs ffmpeg)
+        run: cargo test -p g2g-plugins --locked --features std --test m838_mp4_tags -- --nocapture
       # Legacy FLV codecs (M831): the Sorenson / MP3 payloads g2g demuxes match
       # libavcodec's own FLV demuxer, and ffprobe reads each codec back out of a
       # g2g-muxed FLV (VP6 and Speex, which no ffmpeg build encodes).

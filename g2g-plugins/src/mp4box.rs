@@ -186,15 +186,18 @@ pub(crate) fn find_descriptor(data: &[u8], tag: u8) -> Option<&[u8]> {
     None
 }
 
-/// iTunes-style metadata from `moov/udta/meta/ilst`, mapped to a [`TagList`]
-/// (empty when the file has none). `meta` is a FullBox (a 4-byte version/flags
-/// before its children), so its body is tried both with and without that prefix
-/// for writers that omit it. Each `ilst` child is an item box named by a 4cc
-/// (`©nam`, `©ART`, ...) holding a `data` box; UTF-8 text items become tags, the
-/// 4cc mapped to a common key or kept verbatim in [`Tag::Other`].
-pub(crate) fn parse_ilst_tags(moov: &[u8]) -> TagList {
+/// iTunes-style metadata from a container's `udta/meta/ilst`, mapped to a
+/// [`TagList`] (empty when it has none). The container is a `moov` for the
+/// file's own tags or a `trak` for one track's (M838). `meta` is a FullBox (a
+/// 4-byte version/flags before its children), so its body is tried both with and
+/// without that prefix for writers that omit it. Each `ilst` child is an item
+/// box named by a 4cc (`©nam`, `©ART`, ...) holding a `data` box: UTF-8 text
+/// items become tags with the 4cc mapped to a common key or kept verbatim in
+/// [`Tag::Other`], the integer atoms become [`Tag::Number`]s, and a `----` item
+/// becomes a [`Tag::Freeform`] under its `mean` namespace.
+pub(crate) fn parse_ilst_tags(container: &[u8]) -> TagList {
     let mut list = TagList::new();
-    let Some(udta) = find_box(moov, b"udta") else {
+    let Some(udta) = find_box(container, b"udta") else {
         return list;
     };
     let Some(meta) = find_box(udta, b"meta") else {
@@ -205,23 +208,104 @@ pub(crate) fn parse_ilst_tags(moov: &[u8]) -> TagList {
         return list;
     };
     for (kind, item) in boxes(ilst) {
-        if let Some(value) = ilst_text(item) {
+        if kind == b"----" {
+            if let Some(tag) = freeform_tag(item) {
+                list.push(tag);
+            }
+        } else if let Some(numbers) = ilst_numbers(kind, item) {
+            for tag in numbers {
+                list.push(tag);
+            }
+        } else if let Some(value) = ilst_text(item) {
             list.push(itunes_tag(kind, &value));
         }
     }
     list
 }
 
-/// The UTF-8 text out of an item's `data` box. The data box body is
-/// `[u32 type][u32 locale][value]`; well-known type 1 is UTF-8 text. `None` for a
+/// An item's `data` box as `(well-known type, value bytes)`. The body is
+/// `[u32 type][u32 locale][value]`.
+fn ilst_data(item: &[u8]) -> Option<(u32, &[u8])> {
+    let data = find_box(item, b"data")?;
+    Some((be32(data, 0).ok()?, data.get(8..)?))
+}
+
+/// The UTF-8 text out of an item's `data` box (well-known type 1). `None` for a
 /// non-text or malformed item.
 fn ilst_text(item: &[u8]) -> Option<String> {
-    let data = find_box(item, b"data")?;
-    if be32(data, 0).ok()? != 1 {
+    let (kind, value) = ilst_data(item)?;
+    if kind != 1 {
         return None;
     }
-    core::str::from_utf8(data.get(8..)?).ok().map(String::from)
+    core::str::from_utf8(value).ok().map(String::from)
 }
+
+/// The integer iTunes atoms, as [`Tag::Number`]s. `trkn` / `disk` carry an
+/// index and a total in one implicit-type (0) payload
+/// `[u16 reserved][u16 index][u16 total][u16 reserved]`, so they yield up to two
+/// tags (a zero total means "unknown", and is dropped). `tmpo` / `cpil` carry
+/// one big-endian integer (well-known type 21). `None` for any other atom, so
+/// the caller falls through to the text path.
+fn ilst_numbers(kind: &[u8; 4], item: &[u8]) -> Option<Vec<Tag>> {
+    let (_data_type, value) = ilst_data(item)?;
+    let number = |key: &str, v: u64| Tag::Number {
+        key: String::from(key),
+        value: v,
+    };
+    if let Some((_, index_key, count_key)) =
+        INT_PAIR_ATOMS.iter().find(|(atom, _, _)| kind == *atom)
+    {
+        let be16 = |at: usize| -> Option<u64> {
+            let b = value.get(at..at + 2)?;
+            Some(u64::from(u16::from_be_bytes([b[0], b[1]])))
+        };
+        let mut out = Vec::new();
+        out.push(number(index_key, be16(2)?));
+        match be16(4) {
+            Some(total) if total != 0 => out.push(number(count_key, total)),
+            _ => {}
+        }
+        return Some(out);
+    }
+    let (_, key, _) = INT_ATOMS.iter().find(|(atom, _, _)| kind == *atom)?;
+    Some(alloc::vec![number(key, be_int(value)?)])
+}
+
+/// A big-endian integer of 1 to 8 bytes (what a well-known-type-21 `data` box
+/// holds). `None` for an empty or over-wide payload.
+fn be_int(value: &[u8]) -> Option<u64> {
+    if value.is_empty() || value.len() > 8 {
+        return None;
+    }
+    Some(value.iter().fold(0u64, |acc, b| (acc << 8) | u64::from(*b)))
+}
+
+/// A freeform (`----`) item as a [`Tag::Freeform`]: a `mean` full box (the
+/// reverse-DNS namespace, e.g. `com.apple.iTunes`), a `name` full box (the key)
+/// and a UTF-8 `data` box. `None` when any part is missing or not UTF-8.
+fn freeform_tag(item: &[u8]) -> Option<Tag> {
+    let text = |b: &[u8]| core::str::from_utf8(b.get(4..)?).ok().map(String::from);
+    let namespace = text(find_box(item, b"mean")?)?;
+    let key = text(find_box(item, b"name")?)?;
+    Some(Tag::Freeform {
+        namespace,
+        key,
+        value: ilst_text(item)?,
+    })
+}
+
+/// The index/total integer atoms and the tag keys the two halves carry.
+const INT_PAIR_ATOMS: &[(&[u8; 4], &str, &str)] = &[
+    (b"trkn", Tag::TRACK_NUMBER, Tag::TRACK_COUNT),
+    (b"disk", Tag::DISC_NUMBER, Tag::DISC_COUNT),
+];
+
+/// The single-value integer atoms: their tag key and the payload width iTunes
+/// writes (`tmpo` a u16, `cpil` a u8 flag).
+const INT_ATOMS: &[(&[u8; 4], &str, usize)] = &[
+    (b"tmpo", Tag::BEATS_PER_MINUTE, 2),
+    (b"cpil", Tag::COMPILATION, 1),
+];
 
 /// Map an iTunes metadata 4cc to a tag. The `©`-prefixed (0xA9) atoms are the
 /// common text keys; an unrecognized 4cc keeps its readable name in
@@ -251,15 +335,12 @@ fn itunes_tag(kind: &[u8; 4], value: &str) -> Tag {
 
 /// Build a `udta/meta/ilst` box carrying `tags` (the inverse of
 /// [`parse_ilst_tags`]), or `None` when none of them map to an iTunes atom. The
-/// `meta` box names the `mdir` handler; each mappable tag writes its `©`-prefixed
-/// text atom. `Tag::Language` / `Tag::Other` are skipped (no portable atom).
+/// `meta` box names the `mdir` handler; a typed tag writes its `©`-prefixed text
+/// atom, a [`Tag::Number`] its integer atom, and a [`Tag::Freeform`] a `----`
+/// item. `Tag::Language` (an MP4 track field) and `Tag::Other` (no namespace to
+/// write a `----` under) are skipped.
 pub(crate) fn udta_with_tags(tags: &TagList) -> Option<Vec<u8>> {
-    let mut ilst = Vec::new();
-    for t in tags.tags() {
-        if let Some((atom, value)) = itunes_atom(t) {
-            ilst.extend_from_slice(&ilst_text_item(atom, value));
-        }
-    }
+    let ilst = ilst_items(tags);
     if ilst.is_empty() {
         return None;
     }
@@ -267,11 +348,103 @@ pub(crate) fn udta_with_tags(tags: &TagList) -> Option<Vec<u8>> {
     Some(mp4_box(b"udta", &full_box(b"meta", 0, 0, &meta_body)))
 }
 
+/// The `ilst` children for `tags`, in tag order. The two halves of an index/total
+/// atom (`track-number` + `track-count`) collapse into the one atom that carries
+/// both, written where the first of them appears.
+fn ilst_items(tags: &TagList) -> Vec<u8> {
+    let number_of = |wanted: &str| {
+        tags.tags().iter().find_map(|t| match t {
+            Tag::Number { key, value } if key == wanted => Some(*value),
+            _ => None,
+        })
+    };
+    let mut out = Vec::new();
+    let mut pairs_written: Vec<&[u8; 4]> = Vec::new();
+    for t in tags.tags() {
+        match t {
+            Tag::Freeform {
+                namespace,
+                key,
+                value,
+            } => out.extend_from_slice(&freeform_item(namespace, key, value)),
+            Tag::Number { key, value } => {
+                if let Some((atom, index_key, count_key)) = INT_PAIR_ATOMS
+                    .iter()
+                    .find(|(_, index, count)| key == index || key == count)
+                {
+                    if !pairs_written.contains(atom) {
+                        pairs_written.push(atom);
+                        out.extend_from_slice(&int_pair_item(
+                            atom,
+                            number_of(index_key).unwrap_or(0),
+                            number_of(count_key).unwrap_or(0),
+                        ));
+                    }
+                } else if let Some((atom, _, width)) = INT_ATOMS.iter().find(|(_, k, _)| key == k) {
+                    out.extend_from_slice(&int_item(atom, *value, *width));
+                }
+                // any other integer key has no atom: dropped, like `Tag::Other`.
+            }
+            _ => {
+                if let Some((atom, value)) = itunes_atom(t) {
+                    out.extend_from_slice(&ilst_text_item(atom, value));
+                }
+            }
+        }
+    }
+    out
+}
+
 /// An iTunes item box: a `©`-prefixed atom wrapping a UTF-8 (`type 1`) `data` box.
 fn ilst_text_item(atom: &[u8; 4], value: &str) -> Vec<u8> {
-    let mut data = 1u32.to_be_bytes().to_vec(); // well-known type 1 = UTF-8 text
+    mp4_box(atom, &text_data_box(value))
+}
+
+/// A UTF-8 (well-known type 1) `data` box: `[u32 type][u32 locale][value]`.
+fn text_data_box(value: &str) -> Vec<u8> {
+    let mut data = 1u32.to_be_bytes().to_vec();
     data.extend_from_slice(&0u32.to_be_bytes()); // locale
     data.extend_from_slice(value.as_bytes());
+    mp4_box(b"data", &data)
+}
+
+/// A freeform item: `----` wrapping `mean` (the namespace), `name` (the key) and
+/// a UTF-8 `data` box.
+fn freeform_item(namespace: &str, key: &str, value: &str) -> Vec<u8> {
+    let body = [
+        full_box(b"mean", 0, 0, namespace.as_bytes()),
+        full_box(b"name", 0, 0, key.as_bytes()),
+        text_data_box(value),
+    ]
+    .concat();
+    mp4_box(b"----", &body)
+}
+
+/// A `trkn` / `disk` item: the implicit-type (0) index+total payload iTunes and
+/// ffmpeg write. Values wider than the 16-bit fields saturate.
+fn int_pair_item(atom: &[u8; 4], index: u64, total: u64) -> Vec<u8> {
+    let half = |v: u64| (v.min(u64::from(u16::MAX)) as u16).to_be_bytes();
+    let mut data = 0u32.to_be_bytes().to_vec(); // well-known type 0 = implicit
+    data.extend_from_slice(&0u32.to_be_bytes()); // locale
+    data.extend_from_slice(&0u16.to_be_bytes()); // reserved
+    data.extend_from_slice(&half(index));
+    data.extend_from_slice(&half(total));
+    data.extend_from_slice(&0u16.to_be_bytes()); // reserved
+    mp4_box(atom, &mp4_box(b"data", &data))
+}
+
+/// A single-value integer item (`tmpo` / `cpil`): well-known type 21, the value
+/// big-endian in `width` bytes (saturating).
+fn int_item(atom: &[u8; 4], value: u64, width: usize) -> Vec<u8> {
+    let max = if width >= 8 {
+        u64::MAX
+    } else {
+        (1u64 << (width * 8)) - 1
+    };
+    let bytes = value.min(max).to_be_bytes();
+    let mut data = 21u32.to_be_bytes().to_vec(); // well-known type 21 = BE integer
+    data.extend_from_slice(&0u32.to_be_bytes()); // locale
+    data.extend_from_slice(&bytes[8 - width..]);
     mp4_box(atom, &mp4_box(b"data", &data))
 }
 
@@ -286,8 +459,9 @@ fn meta_hdlr() -> Vec<u8> {
     full_box(b"hdlr", 0, 0, &p)
 }
 
-/// The iTunes `©`-prefixed atom and value for a tag, or `None` when the tag has no
-/// portable atom (`Language` is an MP4 track field; `Other` is freeform `----`).
+/// The iTunes `©`-prefixed atom and value for a text tag, or `None` when the tag
+/// has no such atom (`Language` is an MP4 track field; `Other` has no namespace
+/// to write a `----` under; `Number` / `Freeform` have their own item forms).
 fn itunes_atom(tag: &Tag) -> Option<(&'static [u8; 4], &str)> {
     let pair: (&'static [u8; 4], &str) = match tag {
         Tag::Title(v) => (b"\xA9nam", v),
@@ -295,7 +469,9 @@ fn itunes_atom(tag: &Tag) -> Option<(&'static [u8; 4], &str)> {
         Tag::Album(v) => (b"\xA9alb", v),
         Tag::Encoder(v) => (b"\xA9too", v),
         Tag::Comment(v) => (b"\xA9cmt", v),
-        Tag::Language(_) | Tag::Other { .. } => return None,
+        Tag::Language(_) | Tag::Other { .. } | Tag::Number { .. } | Tag::Freeform { .. } => {
+            return None
+        }
     };
     Some(pair)
 }
@@ -416,6 +592,98 @@ mod tests {
                 value: "rust".into()
             }]
         );
+    }
+
+    /// The freeform (`----`) and integer atoms, in the byte layout ffmpeg writes:
+    /// `trkn` / `disk` as an implicit-type index+total pair, `cpil` as a
+    /// well-known-type-21 flag.
+    #[test]
+    fn reads_freeform_and_integer_atoms() {
+        let data = |dtype: u32, body: &[u8]| {
+            let mut d = dtype.to_be_bytes().to_vec();
+            d.extend_from_slice(&0u32.to_be_bytes());
+            d.extend_from_slice(body);
+            mp4_box(b"data", &d)
+        };
+        let freeform = {
+            let body = [
+                full_box(b"mean", 0, 0, b"com.apple.iTunes"),
+                full_box(b"name", 0, 0, b"MOOD"),
+                data(1, b"calm"),
+            ]
+            .concat();
+            mp4_box(b"----", &body)
+        };
+        let trkn = mp4_box(b"trkn", &data(0, &[0, 0, 0, 3, 0, 12, 0, 0]));
+        // a zero total is "unknown": only the index becomes a tag.
+        let disk = mp4_box(b"disk", &data(0, &[0, 0, 0, 1, 0, 0, 0, 0]));
+        let cpil = mp4_box(b"cpil", &data(21, &[1]));
+        let tmpo = mp4_box(b"tmpo", &data(21, &[0, 128]));
+        let moov = moov_with_tags(&[freeform, trkn, disk, cpil, tmpo]);
+
+        let tags = parse_ilst_tags(find_box(&moov, b"moov").unwrap());
+        let number = |key: &str, value: u64| Tag::Number {
+            key: key.into(),
+            value,
+        };
+        assert_eq!(
+            tags.tags(),
+            &[
+                Tag::Freeform {
+                    namespace: "com.apple.iTunes".into(),
+                    key: "MOOD".into(),
+                    value: "calm".into()
+                },
+                number(Tag::TRACK_NUMBER, 3),
+                number(Tag::TRACK_COUNT, 12),
+                number(Tag::DISC_NUMBER, 1),
+                number(Tag::COMPILATION, 1),
+                number(Tag::BEATS_PER_MINUTE, 128),
+            ]
+        );
+    }
+
+    #[test]
+    fn writer_round_trips_freeform_and_integer_atoms() {
+        let tags: TagList = [
+            Tag::Freeform {
+                namespace: "com.g2g".into(),
+                key: "SCENE".into(),
+                value: "42".into(),
+            },
+            Tag::Number {
+                key: Tag::TRACK_NUMBER.into(),
+                value: 3,
+            },
+            Tag::Number {
+                key: Tag::TRACK_COUNT.into(),
+                value: 12,
+            },
+            Tag::Number {
+                key: Tag::COMPILATION.into(),
+                value: 1,
+            },
+        ]
+        .into_iter()
+        .collect();
+        let moov = mp4_box(b"moov", &udta_with_tags(&tags).expect("mappable tags"));
+        let read = parse_ilst_tags(find_box(&moov, b"moov").unwrap());
+        assert_eq!(
+            read.tags(),
+            tags.tags(),
+            "both halves of the pair ride one trkn atom and come back in order"
+        );
+        // The index/total pair is one atom, not one per half.
+        let ilst = find_path(
+            find_box(&moov, b"moov").unwrap(),
+            &[b"udta", b"meta", b"ilst"],
+        );
+        let ilst = ilst.or_else(|| {
+            let meta = find_path(find_box(&moov, b"moov").unwrap(), &[b"udta", b"meta"])?;
+            find_box(&meta[4..], b"ilst")
+        });
+        let kinds: Vec<[u8; 4]> = boxes(ilst.expect("ilst")).map(|(k, _)| *k).collect();
+        assert_eq!(kinds, &[*b"----", *b"trkn", *b"cpil"]);
     }
 
     #[test]

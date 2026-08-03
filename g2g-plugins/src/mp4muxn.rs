@@ -36,9 +36,9 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
-    FrameTiming, G2gError, InputAggregator, MemoryDomain, MultiInputElement, OutputSink,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, VideoCodec,
+    split_tags, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
+    Dim, FrameTiming, G2gError, InputAggregator, MemoryDomain, MultiInputElement, OutputSink,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, TagList, VideoCodec,
 };
 
 use crate::fmp4mux::{
@@ -46,7 +46,7 @@ use crate::fmp4mux::{
     visual_sample_entry, vp8_keyframe, vp9_keyframe,
 };
 use crate::mp4audiosink::esds;
-use crate::mp4box::{ftyp, ftyp_cmaf, full_box, mp4_box, styp_cmaf, MATRIX};
+use crate::mp4box::{ftyp, ftyp_cmaf, full_box, mp4_box, styp_cmaf, udta_with_tags, MATRIX};
 use crate::opusparse::{
     dops_from_opus_head, is_opus_config, parse_opus_head, OPUS_ENCODER_PRE_SKIP,
 };
@@ -138,6 +138,11 @@ pub struct Mp4MuxN {
     /// were released (which is also the `mdat` byte order). Empty in the
     /// fragmented default.
     samples: Vec<ProgSample>,
+    /// Whole-file metadata, written as the `moov`'s `udta/meta/ilst`.
+    tags: TagList,
+    /// Per-input metadata, written as that `trak`'s own `udta/meta/ilst` (M838).
+    /// One (possibly empty) list per input pad.
+    track_tags: Vec<TagList>,
 }
 
 /// One buffered sample of the progressive (moov-at-end) layout: its `mdat`
@@ -197,7 +202,39 @@ impl Mp4MuxN {
             faststart: false,
             cmaf: false,
             samples: Vec::new(),
+            tags: TagList::new(),
+            track_tags: alloc::vec![TagList::new(); inputs],
         }
+    }
+
+    /// Attach whole-file metadata, written as the `moov`'s own
+    /// `udta/meta/ilst` (the [`crate::mp4mux::Mp4Mux`] builder for the
+    /// multi-track muxer).
+    pub fn with_tags(mut self, tags: TagList) -> Self {
+        self.tags = tags;
+        self
+    }
+
+    /// Attach metadata scoped to one input pad's track, written as that `trak`'s
+    /// own `udta/meta/ilst`, which ffmpeg and the g2g demuxer report on the
+    /// elementary stream rather than the file. Out-of-range inputs are ignored.
+    ///
+    /// A tag every input carries identically moves up to the file level instead
+    /// (`g2g_core::split_tags`), and a tag also set by [`with_tags`](Self::with_tags)
+    /// is not repeated per track unless the value differs, in which case the
+    /// track's value stands for that track.
+    pub fn with_track_tags(mut self, input: usize, tags: TagList) -> Self {
+        if input < self.inputs {
+            self.track_tags[input] = tags;
+        }
+        self
+    }
+
+    /// The tags the `moov` writes, split by the shared global / per-stream merge
+    /// policy into the file's own list and one list per pad slot.
+    fn moov_tags(&self) -> MoovTags {
+        let (global, per_track) = split_tags(&self.tags, &self.track_tags);
+        MoovTags { global, per_track }
     }
 
     /// Batch access units into fragments of at least `ms` milliseconds (`0` keeps
@@ -584,7 +621,7 @@ impl Mp4MuxN {
         let mut bytes = Vec::new();
         if !self.header_written {
             bytes.extend_from_slice(&if self.cmaf { ftyp_cmaf() } else { ftyp() });
-            bytes.extend_from_slice(&av_moov(&self.inits, None));
+            bytes.extend_from_slice(&av_moov(&self.inits, None, &self.moov_tags()));
             self.header_written = true;
         }
         if self.cmaf {
@@ -651,6 +688,7 @@ impl Mp4MuxN {
             mdat_len = mdat_len.saturating_add(s.bytes.len() as u64);
         }
 
+        let tags = self.moov_tags();
         // The sample tables address the mdat by absolute file offset, so the
         // moov's contents depend on where the mdat lands. `force_co64` pins the
         // chunk-offset entry width, which is the only thing that can change the
@@ -667,7 +705,7 @@ impl Mp4MuxN {
                         .map(|init| track_tables(input, init, &samples, &offsets, force_co64))
                 })
                 .collect();
-            av_moov(&self.inits, Some(&tables))
+            av_moov(&self.inits, Some(&tables), &tags)
         };
 
         let head_len = head.len() as u64;
@@ -931,15 +969,28 @@ fn ns_to_ts(ns: u64, timescale: u32) -> u64 {
     (ns as u128 * timescale as u128 / 1_000_000_000) as u64
 }
 
+/// The metadata a `moov` carries, already split by the global / per-stream merge
+/// policy: the file's own tags and one list per pad slot (M838).
+#[derive(Debug, Default)]
+struct MoovTags {
+    global: TagList,
+    per_track: Vec<TagList>,
+}
+
 /// Build a multi-track `moov`: `mvhd` + one `trak` per track + `mvex` (one
-/// `trex` per track). `track_ID` is the 1-based pad slot, so it matches the
-/// `track_ID` each fragment carries even when a pad slot is empty (no AU yet).
+/// `trex` per track) + the file's `udta` metadata. `track_ID` is the 1-based pad
+/// slot, so it matches the `track_ID` each fragment carries even when a pad slot
+/// is empty (no AU yet).
 ///
 /// `tables` is `None` for the fragmented layout (empty sample tables, zero
 /// durations, `mvex` declares the movie extends into fragments) and `Some` for
 /// the progressive one (real tables and durations, no `mvex`), one entry per
 /// pad slot in the same order as `tracks`.
-fn av_moov(tracks: &[Option<TrackInit>], tables: Option<&[Option<TrackTables>]>) -> Vec<u8> {
+fn av_moov(
+    tracks: &[Option<TrackInit>],
+    tables: Option<&[Option<TrackTables>]>,
+    tags: &MoovTags,
+) -> Vec<u8> {
     let table_of = |i: usize| tables.and_then(|t| t.get(i)).and_then(Option::as_ref);
     let next_track_id = (tracks.len() + 1) as u32;
     // The movie lasts as long as its longest track's presentation.
@@ -966,7 +1017,8 @@ fn av_moov(tracks: &[Option<TrackInit>], tables: Option<&[Option<TrackTables>]>)
     let mut body = mvhd;
     for (i, track) in tracks.iter().enumerate() {
         let Some(track) = track else { continue };
-        body.extend_from_slice(&trak(i as u32 + 1, track, table_of(i)));
+        let track_tags = tags.per_track.get(i);
+        body.extend_from_slice(&trak(i as u32 + 1, track, table_of(i), track_tags));
     }
     // A progressive file has no fragments, so no `mvex` to announce them.
     if tables.is_none() {
@@ -982,6 +1034,9 @@ fn av_moov(tracks: &[Option<TrackInit>], tables: Option<&[Option<TrackTables>]>)
             p.extend_from_slice(&full_box(b"trex", 0, 0, &t));
         }
         body.extend_from_slice(&mp4_box(b"mvex", &p));
+    }
+    if let Some(udta) = udta_with_tags(&tags.global) {
+        body.extend_from_slice(&udta);
     }
     mp4_box(b"moov", &body)
 }
@@ -1334,7 +1389,12 @@ fn edts(init: &TrackInit, segment_duration: u64) -> Vec<u8> {
 /// One `trak` for a track (`track_ID` 1-based). `tables` carries the
 /// progressive layout's sample tables and durations; `None` writes the
 /// fragmented form (empty tables, zero durations, the fragments carry timing).
-fn trak(track_id: u32, init: &TrackInit, tables: Option<&TrackTables>) -> Vec<u8> {
+fn trak(
+    track_id: u32,
+    init: &TrackInit,
+    tables: Option<&TrackTables>,
+    tags: Option<&TagList>,
+) -> Vec<u8> {
     let TrakMedia {
         handler,
         media_header: header,
@@ -1417,9 +1477,12 @@ fn trak(track_id: u32, init: &TrackInit, tables: Option<&TrackTables>) -> Vec<u8
     let minf = mp4_box(b"minf", &[header, dinf, stbl].concat());
     let mdia = mp4_box(b"mdia", &[mdhd, hdlr, minf].concat());
     let segment_duration = tables.map(|t| t.track_duration).unwrap_or(0);
+    // This track's own metadata, which a reader reports on the elementary stream
+    // rather than the file (M838).
+    let udta = tags.and_then(udta_with_tags).unwrap_or_default();
     mp4_box(
         b"trak",
-        &[tkhd, edts(init, segment_duration), mdia].concat(),
+        &[tkhd, edts(init, segment_duration), mdia, udta].concat(),
     )
 }
 
@@ -1631,7 +1694,7 @@ mod tests {
                 config: alloc::vec![0x11, 0x90],
             }),
         ];
-        let moov = av_moov(&tracks, None);
+        let moov = av_moov(&tracks, None, &MoovTags::default());
         let count = |needle: &[u8]| moov.windows(4).filter(|w| *w == needle).count();
         assert_eq!(count(b"trak"), 2, "one trak per track");
         assert_eq!(count(b"trex"), 2, "one trex per track");
@@ -1654,7 +1717,7 @@ mod tests {
                 config: alloc::vec![0x11, 0x90],
             }),
         ];
-        let moov = av_moov(&tracks, None);
+        let moov = av_moov(&tracks, None, &MoovTags::default());
         let count = |needle: &[u8]| moov.windows(4).filter(|w| *w == needle).count();
         assert_eq!(count(b"trak"), 1, "only the non-empty pad gets a trak");
         assert_eq!(count(b"trex"), 1);
@@ -1674,7 +1737,7 @@ mod tests {
             rate: 48000,
             config: Vec::new(),
         })];
-        let moov = av_moov(&tracks, None);
+        let moov = av_moov(&tracks, None, &MoovTags::default());
         let count = |needle: &[u8]| moov.windows(needle.len()).filter(|w| *w == needle).count();
         assert_eq!(count(b"Opus"), 1, "Opus sample entry");
         assert_eq!(count(b"dOps"), 1, "OpusSpecificBox");
@@ -1712,7 +1775,7 @@ mod tests {
             rate: 48000,
             config: head,
         })];
-        let moov = av_moov(&tracks, None);
+        let moov = av_moov(&tracks, None, &MoovTags::default());
         let dops = moov.windows(4).position(|w| w == b"dOps").unwrap();
         assert_eq!(
             u16::from_be_bytes([moov[dops + 6], moov[dops + 7]]),
@@ -1735,7 +1798,7 @@ mod tests {
             height: 240,
             param_sets: Vec::new(),
         })];
-        let moov = av_moov(&tracks, None);
+        let moov = av_moov(&tracks, None, &MoovTags::default());
         let count = |needle: &[u8]| moov.windows(needle.len()).filter(|w| *w == needle).count();
         assert_eq!(count(b"vp09"), 1, "VP9 sample entry");
         assert_eq!(count(b"vpcC"), 1, "VPCodecConfigurationBox");

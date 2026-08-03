@@ -24,7 +24,7 @@
 
 use alloc::vec::Vec;
 
-use g2g_core::{Tag, TagList};
+use g2g_core::TagList;
 
 /// FLV tag type: an audio tag (codec-tagged audio data).
 const TAG_AUDIO: u8 = 8;
@@ -615,18 +615,20 @@ fn flv_tag(tag_type: u8, pts_ms: u32, body: &[u8]) -> Vec<u8> {
 /// Serialize a [`TagList`] as an `onMetaData` script body (AMF0): the event-name
 /// string then an ECMA array of `key`/string-value properties. The typed keys
 /// write their conventional FLV names so they decode back to the same [`Tag`]
-/// variant; [`Tag::Other`] keeps its stored key.
+/// variant; anything else uses `Tag::key` / `Tag::value_string`, which keeps
+/// [`Tag::Other`]'s stored key and flattens the integer / freeform variants FLV
+/// has no form for.
 fn on_metadata_body(tags: &TagList) -> Vec<u8> {
     let mut b = Vec::new();
     write_amf0_string(&mut b, "onMetaData");
     b.push(AMF0_ECMA_ARRAY);
     b.extend_from_slice(&(tags.tags().len() as u32).to_be_bytes());
     for t in tags.tags() {
-        let (key, value) = tag_key_value(t);
+        let (key, value) = (t.key(), t.value_string());
         // an object/array key is a raw (unmarked) length-prefixed string.
         b.extend_from_slice(&(key.len() as u16).to_be_bytes());
         b.extend_from_slice(key.as_bytes());
-        write_amf0_string(&mut b, value);
+        write_amf0_string(&mut b, &value);
     }
     b.extend_from_slice(&0u16.to_be_bytes()); // empty key precedes the end marker
     b.push(AMF0_OBJECT_END);
@@ -638,21 +640,6 @@ fn write_amf0_string(out: &mut Vec<u8>, s: &str) {
     out.push(AMF0_STRING);
     out.extend_from_slice(&(s.len() as u16).to_be_bytes());
     out.extend_from_slice(s.as_bytes());
-}
-
-/// A tag's FLV `onMetaData` key / value. Typed keys use the conventional
-/// lowercase names so they round-trip through `Tag::from_key_value`;
-/// [`Tag::Other`] keeps its stored key.
-fn tag_key_value(tag: &Tag) -> (&str, &str) {
-    match tag {
-        Tag::Title(v) => ("title", v),
-        Tag::Artist(v) => ("artist", v),
-        Tag::Album(v) => ("album", v),
-        Tag::Encoder(v) => ("encoder", v),
-        Tag::Language(v) => ("language", v),
-        Tag::Comment(v) => ("comment", v),
-        Tag::Other { key, value } => (key, value),
-    }
 }
 
 /// A sequence-header tag's decoder config, or `None` for any other tag: the
@@ -714,6 +701,7 @@ fn parse_tag(tag_type: u8, timestamp: u32, body: &[u8]) -> Option<FlvUnit> {
 mod tests {
     use super::*;
     use alloc::vec;
+    use g2g_core::Tag;
 
     /// Append a 3-byte big-endian length.
     fn push_u24(out: &mut Vec<u8>, v: u32) {
