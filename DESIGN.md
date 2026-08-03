@@ -2019,7 +2019,14 @@ Adaptive streaming sits one layer above these demuxers: an HTTP byte source feed
 a playlist/manifest-driven source that fetches media segments and hands them to
 the matching byte-stream demuxer. `g2g-plugins::httpsrc::HttpSrc` (the `http-src`
 feature, `reqwest`) GETs a URL and streams the body as `Caps::ByteStream` chunks,
-the fetch layer the others share. Because a manifest/segment URL is
+the fetch layer the others share. It owns the network-buffering story
+(`prebuffer-bytes` + `with_bus`, the queue2 analog since g2g has no queue
+element): when set, `run` fills a bounded byte window before pushing downstream,
+posting `BusMessage::Buffering` percent on quartile transitions, streams through
+while topping the window up without waiting, and re-enters buffering on a
+mid-stream underrun (window empty, network not ready), so an application can
+pause until `100` and show a buffering indicator on a stall. The window never
+grows past the target, and `0` (the default) streams straight through. Because a manifest/segment URL is
 attacker-controlled, the shared `fetch::get_bytes`/`get_text` never buffer an
 unbounded body: each accumulates the response chunk-by-chunk against a cap
 (`MAX_MANIFEST_BYTES` 16 MiB for playlists/MPDs/keys, `MAX_SEGMENT_BYTES` 256 MiB

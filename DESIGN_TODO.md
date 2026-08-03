@@ -388,6 +388,8 @@ Phased plan:
   *video* init segments are done, M164; `#EXT-X-BYTERANGE` single-file CMAF is
   done, M368; throughput-driven ABR with mid-stream variant switching is done,
   M371; live-edge start is done, M438.)
+- A prebuffer window on the HLS / DASH segment loops (posting `Buffering` like
+  `httpsrc`'s byte window), keyed by segment duration rather than bytes.
 - **DASH:** wall-clock `@duration` live profile; multi-period; discontinuity /
   multi-period boundary `SEGMENT` emission. (`SegmentList`
   byte-range is done, M369; `SegmentBase` `sidx`-indexed single-file CMAF is done,

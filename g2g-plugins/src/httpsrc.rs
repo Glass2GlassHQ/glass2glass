@@ -12,26 +12,41 @@
 //!
 //! Runs on the caller's tokio runtime (reqwest is async); chunks carry no PTS
 //! (timing is recovered by the downstream parser/decoder), matching `FileSrc`.
+//!
+//! Prebuffering (`prebuffer-bytes`, the queue2-buffering analog: g2g has no
+//! queue element, so the network source owns its own window): when set, `run`
+//! fills a byte window before pushing downstream, posting
+//! [`BusMessage::Buffering`] percent on the attached bus as it fills; after
+//! that it streams through, keeping the window topped up without waiting, and
+//! a mid-stream underrun (window empty with the network not ready) re-enters
+//! buffering, so an application can pause until it sees `100` and show a
+//! "buffering..." indicator on a stall. `0` (the default) streams each chunk
+//! straight through.
 
 use core::future::Future;
 use core::pin::Pin;
+use core::time::Duration;
 
 use alloc::boxed::Box;
+use alloc::collections::VecDeque;
 use alloc::string::String;
+use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
-    FrameTiming, G2gError, HardwareError, MemoryDomain, OutputSink, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec,
+    BusHandle, BusMessage, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
+    ElementMetadata, FrameTiming, G2gError, HardwareError, MemoryDomain, OutputSink,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
 #[derive(Debug)]
 pub struct HttpSrc {
     url: String,
     caps: Caps,
+    prebuffer_bytes: usize,
+    bus: Option<BusHandle>,
     configured: bool,
 }
 
@@ -43,8 +58,44 @@ impl HttpSrc {
         Self {
             url: url.into(),
             caps,
+            prebuffer_bytes: 0,
+            bus: None,
             configured: false,
         }
+    }
+
+    /// Buffer this many bytes before pushing downstream (and again after an
+    /// underrun). `0` disables prebuffering.
+    pub fn with_prebuffer_bytes(mut self, bytes: usize) -> Self {
+        self.prebuffer_bytes = bytes;
+        self
+    }
+
+    /// Attach the pipeline bus so prebuffering posts
+    /// [`BusMessage::Buffering`] level reports.
+    pub fn with_bus(mut self, bus: BusHandle) -> Self {
+        self.bus = Some(bus);
+        self
+    }
+
+    /// Push one body chunk downstream as a `DataFrame`.
+    async fn push_chunk(
+        out: &mut dyn OutputSink,
+        bytes: Vec<u8>,
+        sequence: &mut u64,
+    ) -> Result<(), G2gError> {
+        let frame = Frame {
+            domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
+            timing: FrameTiming {
+                arrival_ns: g2g_core::metrics::monotonic_ns(),
+                ..FrameTiming::default()
+            },
+            sequence: *sequence,
+            meta: Default::default(),
+        };
+        *sequence += 1;
+        out.push(PipelinePacket::DataFrame(frame)).await?;
+        Ok(())
     }
 }
 
@@ -87,7 +138,7 @@ impl SourceLoop for HttpSrc {
             if !self.configured {
                 return Err(G2gError::NotConfigured);
             }
-            let response = reqwest::Client::new()
+            let mut response = reqwest::Client::new()
                 .get(&self.url)
                 .send()
                 .await
@@ -95,25 +146,86 @@ impl SourceLoop for HttpSrc {
                 .error_for_status()
                 .map_err(http_err)?;
 
-            let mut response = response;
             let mut sequence = 0u64;
-            while let Some(bytes) = response.chunk().await.map_err(http_err)? {
-                if bytes.is_empty() {
-                    continue;
+            if self.prebuffer_bytes == 0 {
+                // Plain streaming: each chunk straight through.
+                while let Some(bytes) = response.chunk().await.map_err(http_err)? {
+                    if bytes.is_empty() {
+                        continue;
+                    }
+                    Self::push_chunk(out, bytes.to_vec(), &mut sequence).await?;
                 }
-                let frame = Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(
-                        bytes.to_vec().into_boxed_slice(),
-                    )),
-                    timing: FrameTiming {
-                        arrival_ns: g2g_core::metrics::monotonic_ns(),
-                        ..FrameTiming::default()
-                    },
-                    sequence,
-                    meta: Default::default(),
-                };
-                sequence += 1;
-                out.push(PipelinePacket::DataFrame(frame)).await?;
+                out.push(PipelinePacket::Eos).await?;
+                return Ok(sequence);
+            }
+
+            // Prebuffered mode. The window is bounded: it never grows past the
+            // target (plus one in-flight chunk), so a fast network cannot
+            // balloon memory; a slow consumer backpressures via `out.push`.
+            let target = self.prebuffer_bytes;
+            let mut window: VecDeque<Vec<u8>> = VecDeque::new();
+            let mut buffered = 0usize;
+            let mut ended = false;
+            let mut last_bucket: Option<u8> = None;
+            // Post on quartile-band transitions only (like the runner's sink
+            // report), so a fill is a handful of messages, not one per chunk.
+            let post = |bus: &Option<BusHandle>, pct: u8, last: &mut Option<u8>| {
+                if let Some(b) = bus {
+                    let bucket = (pct / 25).min(4);
+                    if *last != Some(bucket) {
+                        *last = Some(bucket);
+                        b.try_post(BusMessage::Buffering { percent: pct });
+                    }
+                }
+            };
+            let percent = |buffered: usize| ((buffered * 100 / target) as u8).min(100);
+
+            loop {
+                // Buffering phase: fill the window to the target, reporting the
+                // level as it rises. Entered at start and after an underrun.
+                post(&self.bus, percent(buffered), &mut last_bucket);
+                while buffered < target && !ended {
+                    match response.chunk().await.map_err(http_err)? {
+                        Some(b) => {
+                            if !b.is_empty() {
+                                buffered += b.len();
+                                window.push_back(b.to_vec());
+                                post(&self.bus, percent(buffered), &mut last_bucket);
+                            }
+                        }
+                        None => ended = true,
+                    }
+                }
+                // The stream ending early also completes buffering: there is
+                // nothing left to wait for, so the application resumes.
+                post(&self.bus, 100, &mut last_bucket);
+
+                // Drain phase: push the window down while topping it up with
+                // whatever the network has ready now (never waiting, never past
+                // the target).
+                while let Some(chunk) = window.pop_front() {
+                    buffered -= chunk.len();
+                    Self::push_chunk(out, chunk, &mut sequence).await?;
+                    while !ended && buffered < target {
+                        match tokio::time::timeout(Duration::ZERO, response.chunk()).await {
+                            Ok(r) => match r.map_err(http_err)? {
+                                Some(b) => {
+                                    if !b.is_empty() {
+                                        buffered += b.len();
+                                        window.push_back(b.to_vec());
+                                    }
+                                }
+                                None => ended = true,
+                            },
+                            Err(_) => break, // nothing immediately ready
+                        }
+                    }
+                }
+                if ended {
+                    break;
+                }
+                // Window drained with the stream still live: underrun. Loop
+                // back into the buffering phase to refill before resuming.
             }
 
             out.push(PipelinePacket::Eos).await?;
@@ -146,6 +258,14 @@ impl SourceLoop for HttpSrc {
                 self.caps = Caps::ByteStream { encoding };
                 Ok(())
             }
+            "prebuffer-bytes" => {
+                let bytes = value.as_uint().ok_or(PropError::Type)?;
+                if bytes > 1 << 30 {
+                    return Err(PropError::Value);
+                }
+                self.prebuffer_bytes = bytes as usize;
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -159,6 +279,7 @@ impl SourceLoop for HttpSrc {
                 }
                 _ => None,
             },
+            "prebuffer-bytes" => Some(PropValue::Uint(self.prebuffer_bytes as u64)),
             _ => None,
         }
     }
@@ -175,6 +296,13 @@ static HTTPSRC_PROPS: &[PropertySpec] = &[
         PropKind::Str,
         "container of the fetched byte stream: mpegts | matroska | ogg | flv",
     ),
+    PropertySpec::new(
+        "prebuffer-bytes",
+        PropKind::Uint,
+        "bytes to buffer before pushing downstream, reported as Buffering bus messages (0 = stream straight through)",
+    )
+    .with_default("0")
+    .with_range("0", "1073741824"),
 ];
 
 fn encoding_from_str(s: &str) -> Option<ByteStreamEncoding> {

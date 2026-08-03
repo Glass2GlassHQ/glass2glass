@@ -172,6 +172,31 @@ fn udpsink_host_port_payload() {
     );
 }
 
+#[cfg(feature = "http-src")]
+#[test]
+fn httpsrc_prebuffer_bytes() {
+    use g2g_core::runtime::SourceLoop;
+    use g2g_plugins::httpsrc::HttpSrc;
+    let mut s = HttpSrc::new(
+        "http://127.0.0.1/x.ts",
+        g2g_core::Caps::ByteStream {
+            encoding: g2g_core::ByteStreamEncoding::MpegTs,
+        },
+    );
+    assert!(declares(s.properties(), "prebuffer-bytes"));
+    s.set_property("prebuffer-bytes", PropValue::Uint(65536))
+        .unwrap();
+    assert_eq!(
+        s.get_property("prebuffer-bytes"),
+        Some(PropValue::Uint(65536))
+    );
+    assert!(
+        s.set_property("prebuffer-bytes", PropValue::Uint(u64::MAX))
+            .is_err(),
+        "rejects an absurd window"
+    );
+}
+
 #[cfg(feature = "rtsp-server")]
 #[test]
 fn rtspserversink_bind_rtp_and_session_knobs() {

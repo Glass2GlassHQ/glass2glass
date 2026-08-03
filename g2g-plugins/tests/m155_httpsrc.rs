@@ -116,6 +116,123 @@ async fn fetches_and_streams_the_body_then_eos() {
 }
 
 #[tokio::test]
+async fn prebuffer_posts_buffering_levels_then_streams_intact() {
+    // 200 KB payload, 64 KB prebuffer: the fill posts rising Buffering levels
+    // ending at 100, and the delivered body is bit-identical.
+    let payload: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+    let url = serve_once(payload.clone());
+
+    let (bus, handle) = g2g_core::bus::Bus::new(64);
+    let mut src = HttpSrc::new(
+        url,
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::MpegTs,
+        },
+    )
+    .with_prebuffer_bytes(64 * 1024)
+    .with_bus(handle);
+    src.configure_pipeline(&Caps::ByteStream {
+        encoding: ByteStreamEncoding::MpegTs,
+    })
+    .unwrap();
+
+    let mut sink = CaptureSink::default();
+    src.run(&mut sink).await.unwrap();
+    assert!(sink.eos);
+    assert_eq!(sink.body, payload, "prebuffering reorders nothing");
+
+    let mut levels = Vec::new();
+    while let Some(msg) = bus.try_recv() {
+        if let g2g_core::BusMessage::Buffering { percent } = msg {
+            levels.push(percent);
+        }
+    }
+    assert!(!levels.is_empty(), "the fill posted Buffering reports");
+    assert!(
+        levels.iter().any(|&p| p < 100),
+        "a below-100 level was reported while filling: {levels:?}"
+    );
+    assert_eq!(*levels.last().unwrap(), 100, "buffering completes at 100");
+}
+
+/// Serve `payload` in two halves with a pause between them, so the source's
+/// window underruns mid-stream; returns the URL.
+fn serve_stalled(payload: Vec<u8>, stall: std::time::Duration) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut req = Vec::new();
+        let mut byte = [0u8; 1];
+        while stream.read(&mut byte).unwrap_or(0) == 1 {
+            req.push(byte[0]);
+            if req.ends_with(b"\r\n\r\n") {
+                break;
+            }
+        }
+        let header = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            payload.len()
+        );
+        stream.write_all(header.as_bytes()).unwrap();
+        let half = payload.len() / 2;
+        stream.write_all(&payload[..half]).unwrap();
+        stream.flush().unwrap();
+        thread::sleep(stall);
+        stream.write_all(&payload[half..]).unwrap();
+        stream.flush().unwrap();
+    });
+    format!("http://127.0.0.1:{port}/stream.ts")
+}
+
+#[tokio::test]
+async fn mid_stream_stall_rebuffers_and_reports_it() {
+    // A small window drains during the server's stall: the source re-enters
+    // buffering (a below-100 report after a 100) and still delivers every byte.
+    let payload: Vec<u8> = (0..200_000u32).map(|i| (i % 241) as u8).collect();
+    let url = serve_stalled(payload.clone(), std::time::Duration::from_millis(300));
+
+    let (bus, handle) = g2g_core::bus::Bus::new(64);
+    let mut src = HttpSrc::new(
+        url,
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::MpegTs,
+        },
+    )
+    .with_prebuffer_bytes(8 * 1024)
+    .with_bus(handle);
+    src.configure_pipeline(&Caps::ByteStream {
+        encoding: ByteStreamEncoding::MpegTs,
+    })
+    .unwrap();
+
+    let mut sink = CaptureSink::default();
+    src.run(&mut sink).await.unwrap();
+    assert!(sink.eos);
+    assert_eq!(sink.body, payload, "the stall loses nothing");
+
+    let mut levels = Vec::new();
+    while let Some(msg) = bus.try_recv() {
+        if let g2g_core::BusMessage::Buffering { percent } = msg {
+            levels.push(percent);
+        }
+    }
+    let first_full = levels
+        .iter()
+        .position(|&p| p == 100)
+        .expect("initial fill reached 100");
+    assert!(
+        levels[first_full..].iter().any(|&p| p < 100),
+        "the stall re-entered buffering (below-100 after 100): {levels:?}"
+    );
+    assert_eq!(
+        *levels.last().unwrap(),
+        100,
+        "re-buffering completes at 100 again"
+    );
+}
+
+#[tokio::test]
 async fn errors_loud_on_http_404() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();

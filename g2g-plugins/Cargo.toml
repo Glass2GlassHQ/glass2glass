@@ -571,7 +571,7 @@ vorbis = ["std", "dep:symphonia-core", "dep:symphonia-codec-vorbis"]
 # souphttpsrc analog and the fetch layer under HLS/DASH. Implies std + tokio.
 # Uses reqwest default-tls (SChannel on Windows, SecureTransport on macOS; Linux
 # needs system OpenSSL dev headers, like the other native-backed features).
-http-src = ["std", "dep:reqwest"]
+http-src = ["std", "dep:reqwest", "tokio/time"]
 # HLS source (HlsSrc): fetches an .m3u8 playlist, selects a variant (simple ABR),
 # and streams its MPEG-TS media segments downstream as a `Caps::ByteStream` for
 # `tsdemux`. Builds on the http-src fetch layer. The playlist parser (`hls`) is
