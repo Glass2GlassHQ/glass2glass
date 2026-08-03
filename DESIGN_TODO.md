@@ -420,6 +420,15 @@ Phased plan:
   rejected by libavcodec, so wiring a decoder would be an unvalidated claim).
 - **CMAF / fMP4:** low-latency chunking (sub-fragment chunks + `prft`; the
   fragmented muxer has no sub-fragment model).
+- **Spill-to-storage buffer (`downloadbuffer` analog).** An element that absorbs
+  a pushed non-seekable byte stream (HTTP, pipe) into a temp file and exposes a
+  seekable byte source, so a moov-at-end MP4 over a non-seekable transport
+  plays. `faststart` (M824) only fixes files g2g authors.
+- **Ogg seek is O(file).** The demuxer's time seek rewinds the byte source and
+  scans forward, so a seek near the end of a long file re-reads it. A
+  granulepos-proportional first byte-offset guess through the existing paired
+  `SeekController` (seek, then scan to sync) would approximate bisection with
+  one upstream seek.
 
 ## Codecs
 
@@ -767,6 +776,11 @@ Outstanding developer-tooling tasks, highest leverage first.
   output (checksum, PSNR for lossy). Calliope already does differential output
   QA in its own repo, so decide first whether this lives there (adding the
   caps / topology diff) or in-repo; don't build both.
+- **Push-tax benchmark vs GStreamer pull.** Batch-demux throughput of
+  `filesrc ! tsdemux ! h264parse ! fakesink` against the same gst-launch line
+  (which runs it in pull mode), to put a number on the per-chunk channel /
+  wakeup / boxed-future cost. Decides whether a pull mode is ever worth its
+  second per-demuxer code path.
 - **MCP server follow-ups.** `g2g-mcp` exposes list_elements / inspect /
   validate / launch. Add a tool to run a declarative graph file, and stream
   `launch` telemetry (via the `Observer`) rather than only final stats.
