@@ -382,6 +382,15 @@ jobs:
       # as the two-pass file.
       - name: Matroska live oracle (matroskamux streamable vs ffmpeg)
         run: cargo test -p g2g-plugins --locked --features std --test m828_mkv_streamable_clusters -- --nocapture
+      # CMAF (M832): ffmpeg reads a g2g `cmaf=true` track file, and g2g demuxes
+      # ffmpeg's own `-movflags cmaf` output sample-exact, timing included.
+      - name: CMAF oracle (mp4mux cmaf + mp4demux vs ffmpeg)
+        run: cargo test -p g2g-plugins --locked --features std --test m832_cmaf -- --nocapture
+      # Legacy FLV codecs (M831): the Sorenson / MP3 payloads g2g demuxes match
+      # libavcodec's own FLV demuxer, and ffprobe reads each codec back out of a
+      # g2g-muxed FLV (VP6 and Speex, which no ffmpeg build encodes).
+      - name: FLV legacy codec oracles (flvdemux + flvmux vs ffmpeg)
+        run: cargo test -p g2g-plugins --locked --features std --test m831_flv_codecs -- --nocapture
       # MCU-fit codec oracles (M638 G.711 + M639 IMA ADPCM): the g2g-mcu
       # fixed-point codecs checked bit-exact against ffmpeg (G.711: the full
       # domain, 65536 encoder inputs + 256 decoder codes, both laws; ADPCM:

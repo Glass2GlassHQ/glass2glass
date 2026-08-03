@@ -586,7 +586,7 @@ pub(crate) fn parse_fragments_multi(
                     _ => return Err(G2gError::CapsMismatch),
                 };
                 let trun = find_box(traf, b"trun").ok_or(G2gError::CapsMismatch)?;
-                let (sizes, durs) = parse_trun(trun)?;
+                let (sizes, durs) = parse_trun(trun, tfhd_default_duration(tfhd)?)?;
                 // An encrypted track carries a `senc` (per-sample subsample maps).
                 let subs = match &track.cenc {
                     Some(c) => match find_box(traf, b"senc") {
@@ -795,7 +795,13 @@ pub(crate) fn parse_fragments(
                     _ => return Err(G2gError::CapsMismatch),
                 };
                 let trun = find_box(traf, b"trun").ok_or(G2gError::CapsMismatch)?;
-                let (sizes, durs) = parse_trun(trun)?;
+                // The `tfhd` is where a CMAF fragment declares the sample duration
+                // its `trun` then omits.
+                let default_duration = match find_box(traf, b"tfhd") {
+                    Some(tfhd) => tfhd_default_duration(tfhd)?,
+                    None => 0,
+                };
+                let (sizes, durs) = parse_trun(trun, default_duration)?;
                 let mut t = base_time;
                 let mut tagged = Vec::with_capacity(sizes.len());
                 durations.clear();
@@ -1130,12 +1136,37 @@ fn find_trak_by_id(moov: &[u8], track_id: u32) -> Option<&[u8]> {
         })
 }
 
-/// `trun` (v0 or v1) with explicit sample sizes; returns (sizes, durations) with
-/// a zero duration when the stream omits it. v0 and v1 differ only in the sign of
+/// A `traf`'s `tfhd` `default_sample_duration` (ISO 14496-12 8.8.7), or `0` when
+/// the box does not declare one. A `trun` may lean on it instead of repeating the
+/// duration per sample, which is what ffmpeg's fragmented and CMAF output does:
+/// a reader that ignores it times every sample of a fragment at the fragment's
+/// own `tfdt`.
+pub(crate) fn tfhd_default_duration(tfhd: &[u8]) -> Result<u32, G2gError> {
+    let flags = be32(tfhd, 0)? & 0x00FF_FFFF;
+    if flags & 0x08 == 0 {
+        return Ok(0);
+    }
+    // version/flags + track_ID, then the optional fields that precede it.
+    let mut at = 8usize;
+    if flags & 0x01 != 0 {
+        at += 8; // base_data_offset
+    }
+    if flags & 0x02 != 0 {
+        at += 4; // sample_description_index
+    }
+    be32(tfhd, at)
+}
+
+/// `trun` (v0 or v1) with explicit sample sizes; returns (sizes, durations).
+/// A `trun` that omits the per-sample duration takes `default_duration` from its
+/// `tfhd`, and `0` when neither carries one. v0 and v1 differ only in the sign of
 /// the per-sample composition-time-offset field, which this skips (PTS is taken
 /// from `tfdt` + decode-order durations and the decoder reorders), so both parse
 /// identically. Real-world muxers (ffmpeg) emit v1 whenever B-frames are present.
-pub(crate) fn parse_trun(trun: &[u8]) -> Result<(Vec<u32>, Vec<u32>), G2gError> {
+pub(crate) fn parse_trun(
+    trun: &[u8],
+    default_duration: u32,
+) -> Result<(Vec<u32>, Vec<u32>), G2gError> {
     match trun.first() {
         Some(0) | Some(1) => {}
         _ => return Err(G2gError::CapsMismatch), // unknown trun version
@@ -1165,7 +1196,7 @@ pub(crate) fn parse_trun(trun: &[u8]) -> Result<(Vec<u32>, Vec<u32>), G2gError> 
     let mut sizes = Vec::with_capacity(count);
     let mut durations = Vec::with_capacity(count);
     for _ in 0..count {
-        let mut duration = 0u32;
+        let mut duration = default_duration;
         if flags & 0x100 != 0 {
             duration = be32(trun, at)?;
             at += 4;
@@ -1245,7 +1276,7 @@ mod tests {
         p.extend_from_slice(&3000u32.to_be_bytes()); // duration
         p.extend_from_slice(&77u32.to_be_bytes()); // size
         p.extend_from_slice(&0x0200_0000u32.to_be_bytes()); // sample flags
-        let (sizes, durs) = parse_trun(&p).unwrap();
+        let (sizes, durs) = parse_trun(&p, 0).unwrap();
         assert_eq!(sizes, vec![77]);
         assert_eq!(durs, vec![3000]);
     }
@@ -1310,8 +1341,8 @@ mod tests {
             }
             t
         };
-        let v0 = parse_trun(&build(0)).expect("v0 parses");
-        let v1 = parse_trun(&build(1)).expect("v1 parses");
+        let v0 = parse_trun(&build(0), 0).expect("v0 parses");
+        let v1 = parse_trun(&build(1), 0).expect("v1 parses");
         assert_eq!(v0, (alloc::vec![1000, 1200], alloc::vec![33, 33]));
         assert_eq!(v0, v1, "v0 and v1 parse identically (cts field is skipped)");
     }
@@ -1324,7 +1355,7 @@ mod tests {
         t.extend_from_slice(&u32::MAX.to_be_bytes()); // count
         t.extend_from_slice(&0u32.to_be_bytes()); // data offset
         t.extend_from_slice(&16u32.to_be_bytes()); // a single sample size
-        assert!(parse_trun(&t).is_err());
+        assert!(parse_trun(&t, 0).is_err());
     }
 
     /// A minimal progressive (`moov` + `mdat`, no `moof`) file with two AVCC

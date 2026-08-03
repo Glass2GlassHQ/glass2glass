@@ -30,14 +30,40 @@ pub(crate) fn full_box(kind: &[u8; 4], version: u8, flags: u32, payload: &[u8]) 
     mp4_box(kind, &p)
 }
 
+/// A brand box (`ftyp` / `styp`): major brand, minor version, compatible brands.
+fn brand_box(kind: &[u8; 4], major: &[u8; 4], minor: u32, compatible: &[&[u8; 4]]) -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(major);
+    p.extend_from_slice(&minor.to_be_bytes());
+    for b in compatible {
+        p.extend_from_slice(*b);
+    }
+    mp4_box(kind, &p)
+}
+
 /// The `ftyp` box (iso5/isom brands), identical for the video and audio muxers.
 pub(crate) fn ftyp() -> Vec<u8> {
-    let mut p = Vec::new();
-    p.extend_from_slice(b"iso5"); // major brand
-    p.extend_from_slice(&512u32.to_be_bytes()); // minor version
-    p.extend_from_slice(b"iso5");
-    p.extend_from_slice(b"isom");
-    mp4_box(b"ftyp", &p)
+    brand_box(b"ftyp", b"iso5", 512, &[b"iso5", b"isom"])
+}
+
+/// The `ftyp` of a CMAF track file (M832). `cmfc` is CMAF's structural brand: one
+/// media track, `mvex`/`trex`, a `tfdt` in every `traf`, `default-base-is-moof`,
+/// and every fragment starting at a stream access point. The stricter `cmf2` is
+/// deliberately not claimed: its "sample defaults repeated in each track
+/// fragment" rule is not something this writer's per-sample `trun` demonstrably
+/// satisfies, and ffmpeg / shaka-packager declare only `cmfc` too. `iso6` covers
+/// the `tfdt` a plain ISO-BMFF reader needs to know about.
+pub(crate) fn ftyp_cmaf() -> Vec<u8> {
+    brand_box(b"ftyp", b"cmfc", 0, &[b"cmfc", b"iso6", b"isom", b"mp41"])
+}
+
+/// The `styp` that opens each CMAF segment (M832), so one fragment of a track
+/// file is separately addressable by an HLS `#EXT-X-BYTERANGE` or a DASH
+/// `SegmentBase` range. Each unit this muxer emits is one CMAF fragment which is
+/// also one CMAF segment, hence both `cmfs` and `cmff`; `msdh` marks it a generic
+/// DASH media segment.
+pub(crate) fn styp_cmaf() -> Vec<u8> {
+    brand_box(b"styp", b"cmfs", 0, &[b"cmfs", b"cmff", b"msdh"])
 }
 
 // --- readers ---------------------------------------------------------------

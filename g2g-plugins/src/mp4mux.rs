@@ -50,6 +50,8 @@ pub struct Mp4Mux {
     /// unit, the default). Batches access units into multi-sample CMAF / DASH
     /// fragments closed at the next keyframe once the target is reached.
     fragment_duration_ms: u64,
+    /// CMAF conformance mode; see [`with_cmaf`](Self::with_cmaf).
+    cmaf: bool,
 }
 
 impl Default for Mp4Mux {
@@ -69,6 +71,7 @@ impl Mp4Mux {
             configured: false,
             emitted: 0,
             fragment_duration_ms: 0,
+            cmaf: false,
         }
     }
 
@@ -83,6 +86,16 @@ impl Mp4Mux {
     /// one fragment per AU); see [`fragment_duration_ms`](Self::fragment_duration_ms).
     pub fn with_fragment_duration_ms(mut self, ms: u64) -> Self {
         self.fragment_duration_ms = ms;
+        self
+    }
+
+    /// Write a CMAF (ISO/IEC 23000-19) track file (M832): CMAF brands on the
+    /// `ftyp`, a `styp` opening each segment, and fragments that start only at a
+    /// sync sample. Because a CMAF fragment may not start mid-GOP,
+    /// `fragment-duration = 0` means one fragment per GOP here rather than one per
+    /// access unit; a longer target still closes at the first keyframe past it.
+    pub fn with_cmaf(mut self, cmaf: bool) -> Self {
+        self.cmaf = cmaf;
         self
     }
 
@@ -167,12 +180,20 @@ impl AsyncElement for Mp4Mux {
     }
 
     fn properties(&self) -> &'static [PropertySpec] {
-        const PROPS: &[PropertySpec] = &[PropertySpec::new(
-            "fragment-duration",
-            PropKind::Uint,
-            "target fragment duration, milliseconds (0 = one fragment per access unit)",
-        )
-        .with_default("0")];
+        const PROPS: &[PropertySpec] = &[
+            PropertySpec::new(
+                "fragment-duration",
+                PropKind::Uint,
+                "target fragment duration, milliseconds (0 = one fragment per access unit)",
+            )
+            .with_default("0"),
+            PropertySpec::new(
+                "cmaf",
+                PropKind::Bool,
+                "write a CMAF track file: cmfc brands, a styp per segment, and fragments starting only at a sync sample",
+            )
+            .with_default("false"),
+        ];
         PROPS
     }
 
@@ -182,6 +203,10 @@ impl AsyncElement for Mp4Mux {
                 self.fragment_duration_ms = value.as_uint().ok_or(PropError::Type)?;
                 Ok(())
             }
+            "cmaf" => {
+                self.cmaf = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -189,6 +214,7 @@ impl AsyncElement for Mp4Mux {
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
             "fragment-duration" => Some(PropValue::Uint(self.fragment_duration_ms)),
+            "cmaf" => Some(PropValue::Bool(self.cmaf)),
             _ => None,
         }
     }
@@ -210,9 +236,11 @@ impl AsyncElement for Mp4Mux {
                     // Build the box writer on the first AU (its moov needs the
                     // in-band parameter sets the first access unit carries).
                     let frag_ns = self.fragment_duration_ms.saturating_mul(1_000_000);
+                    let cmaf = self.cmaf;
                     let mux = self.mux.get_or_insert_with(|| {
                         Fmp4Muxer::new(self.codec, self.width, self.height, self.tags.clone())
                             .with_fragment_duration_ns(frag_ns)
+                            .with_cmaf(cmaf)
                     });
                     let bytes =
                         mux.push_au(slice, frame.timing.pts_ns, frame.timing.duration_ns)?;

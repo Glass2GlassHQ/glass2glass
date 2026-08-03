@@ -42,11 +42,11 @@ use g2g_core::{
 };
 
 use crate::fmp4mux::{
-    av1c_record, avcc_sample, is_keyframe_nal, parameter_sets, split_annexb, visual_sample_entry,
-    vp8_keyframe, vp9_keyframe,
+    av1c_record, avcc_sample, is_keyframe_nal, parameter_sets, split_annexb, tfhd,
+    visual_sample_entry, vp8_keyframe, vp9_keyframe,
 };
 use crate::mp4audiosink::esds;
-use crate::mp4box::{ftyp, full_box, mp4_box, MATRIX};
+use crate::mp4box::{ftyp, ftyp_cmaf, full_box, mp4_box, styp_cmaf, MATRIX};
 use crate::opusparse::{
     dops_from_opus_head, is_opus_config, parse_opus_head, OPUS_ENCODER_PRE_SKIP,
 };
@@ -132,6 +132,8 @@ pub struct Mp4MuxN {
     /// Whether the progressive layout puts its `moov` ahead of the `mdat`
     /// (M824); see [`with_faststart`](Self::with_faststart).
     faststart: bool,
+    /// CMAF conformance mode (M832); see [`with_cmaf`](Self::with_cmaf).
+    cmaf: bool,
     /// Progressive mode's buffered samples, in the global PTS-merged order they
     /// were released (which is also the `mdat` byte order). Empty in the
     /// fragmented default.
@@ -193,6 +195,7 @@ impl Mp4MuxN {
             pending: alloc::vec![PendingFragment::default(); inputs],
             fragmented: true,
             faststart: false,
+            cmaf: false,
             samples: Vec::new(),
         }
     }
@@ -233,6 +236,21 @@ impl Mp4MuxN {
     /// own size.
     pub fn with_faststart(mut self, faststart: bool) -> Self {
         self.faststart = faststart;
+        self
+    }
+
+    /// Write a CMAF (ISO/IEC 23000-19) track file (M832): the `ftyp` carries the
+    /// `cmfc` structural brand, each fragment opens a CMAF segment with its own
+    /// `styp`, its `tfhd` states the sample description rather than inheriting it,
+    /// and a fragment starts only at a sync sample, so `fragment-duration = 0`
+    /// means one fragment per GOP rather than one per access unit.
+    ///
+    /// CMAF puts one media stream in a track file, so this muxer only accepts it
+    /// with a single input pad, and only in the fragmented layout; either
+    /// combination fails at `configure_pipeline` rather than writing a file that
+    /// claims a conformance it does not have.
+    pub fn with_cmaf(mut self, cmaf: bool) -> Self {
+        self.cmaf = cmaf;
         self
     }
 
@@ -508,8 +526,10 @@ impl Mp4MuxN {
         // Batched mode closes the open fragment before starting a new one at a sync
         // sample once the target duration is reached, so every fragment begins on a
         // keyframe (audio access units are all sync, so they close on the target).
+        // CMAF mode batches even with no target, because a fragment there may only
+        // start at a sync sample.
         let target = self.frag_target_ticks(input, timescale);
-        if target > 0
+        if (target > 0 || self.cmaf)
             && is_sync
             && !self.pending[input].samples.is_empty()
             && self.pending[input].accum_ticks >= target
@@ -531,7 +551,7 @@ impl Mp4MuxN {
         self.decode_time[input] += duration as u64;
 
         // Per-AU mode (target 0): flush immediately, one fragment per access unit.
-        if target == 0 {
+        if target == 0 && !self.cmaf {
             self.flush_track(input, out).await?;
         }
         Ok(())
@@ -563,9 +583,12 @@ impl Mp4MuxN {
 
         let mut bytes = Vec::new();
         if !self.header_written {
-            bytes.extend_from_slice(&ftyp());
+            bytes.extend_from_slice(&if self.cmaf { ftyp_cmaf() } else { ftyp() });
             bytes.extend_from_slice(&av_moov(&self.inits, None));
             self.header_written = true;
+        }
+        if self.cmaf {
+            bytes.extend_from_slice(&styp_cmaf()); // this fragment is a CMAF segment
         }
 
         // track_ID is the 1-based pad index; PTS of the first buffered sample.
@@ -575,6 +598,7 @@ impl Mp4MuxN {
             track_id,
             self.sequence,
             pend.base_decode_time,
+            self.cmaf,
             &pend.samples,
         ));
 
@@ -744,6 +768,11 @@ impl MultiInputElement for Mp4MuxN {
         input: usize,
         absolute_caps: &Caps,
     ) -> Result<ConfigureOutcome, G2gError> {
+        // CMAF puts exactly one media stream in a track file, in the fragmented
+        // layout. Refuse rather than write a file that claims a brand it breaks.
+        if self.cmaf && (self.inputs > 1 || !self.fragmented) {
+            return Err(G2gError::CapsMismatch);
+        }
         let kind = Self::pad_kind_for(absolute_caps).ok_or(G2gError::CapsMismatch)?;
         if let Caps::CompressedVideo {
             width: Dim::Fixed(w),
@@ -785,6 +814,12 @@ impl MultiInputElement for Mp4MuxN {
                 "write the moov ahead of the mdat (progressive layout; a fragmented file's moov already leads)",
             )
             .with_default("false"),
+            PropertySpec::new(
+                "cmaf",
+                PropKind::Bool,
+                "write a CMAF track file: cmfc brands, a styp per segment, and fragments starting only at a sync sample (one input pad, fragmented layout)",
+            )
+            .with_default("false"),
         ];
         PROPS
     }
@@ -803,6 +838,16 @@ impl MultiInputElement for Mp4MuxN {
                 self.faststart = value.as_bool().ok_or(PropError::Type)?;
                 Ok(())
             }
+            // A CMAF track file holds one media stream, so refuse the mode on a
+            // fan-in muxer at the point it is asked for.
+            "cmaf" => {
+                let on = value.as_bool().ok_or(PropError::Type)?;
+                if on && self.inputs > 1 {
+                    return Err(PropError::Value);
+                }
+                self.cmaf = on;
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -812,6 +857,7 @@ impl MultiInputElement for Mp4MuxN {
             "fragment-duration" => Some(PropValue::Uint(self.fragment_duration_ms)),
             "fragmented" => Some(PropValue::Bool(self.fragmented)),
             "faststart" => Some(PropValue::Bool(self.faststart)),
+            "cmaf" => Some(PropValue::Bool(self.cmaf)),
             _ => None,
         }
     }
@@ -1384,11 +1430,12 @@ fn av_fragment(
     track_id: u32,
     sequence: u64,
     base_decode_time: u64,
+    cmaf: bool,
     samples: &[PendingSample],
 ) -> Vec<u8> {
     let build_moof = |data_offset: u32| -> Vec<u8> {
         let mfhd = full_box(b"mfhd", 0, 0, &(sequence as u32).to_be_bytes());
-        let tfhd = full_box(b"tfhd", 0, 0x020000, &track_id.to_be_bytes()); // default-base-is-moof
+        let tfhd = tfhd(track_id, cmaf);
         let tfdt = full_box(b"tfdt", 1, 0, &base_decode_time.to_be_bytes());
         let trun = {
             let mut p = Vec::new();

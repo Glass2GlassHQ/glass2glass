@@ -50,6 +50,11 @@ pub(crate) struct Fmp4Muxer {
     /// CMAF / DASH segment shape). Cuts per-AU box overhead for low-fps or
     /// high-bitrate streams.
     fragment_duration_ns: u64,
+    /// CMAF conformance mode (M832): CMAF brands on the `ftyp`, a `styp` opening
+    /// every segment, and fragments that only ever start on a sync sample (so a
+    /// `fragment_duration_ns` of 0 means one fragment per GOP, not per access
+    /// unit). See [`with_cmaf`](Self::with_cmaf).
+    cmaf: bool,
     /// Samples buffered for the open fragment (batched mode).
     pending: Vec<PendingSample>,
     /// `decode_time` at the start of the open fragment (its `tfdt`).
@@ -78,6 +83,7 @@ impl Fmp4Muxer {
             decode_time: 0,
             prev_pts_ns: None,
             fragment_duration_ns: 0,
+            cmaf: false,
             pending: Vec::new(),
             pending_decode_time: 0,
             pending_dur_ns: 0,
@@ -88,6 +94,17 @@ impl Fmp4Muxer {
     /// sample); `0` keeps one fragment per AU. See [`fragment_duration_ns`](Self::fragment_duration_ns).
     pub(crate) fn with_fragment_duration_ns(mut self, ns: u64) -> Self {
         self.fragment_duration_ns = ns;
+        self
+    }
+
+    /// Write a CMAF (ISO/IEC 23000-19) track file: the `ftyp` carries the `cmfc`
+    /// structural brand, every fragment opens a CMAF segment with its own `styp`,
+    /// and a fragment never starts mid-GOP (a CMAF fragment must begin at a stream
+    /// access point). The rest of the layout already conforms: one track, `mvex` /
+    /// `trex`, a `tfdt` in every `traf`, `default-base-is-moof`, and no `mdat`
+    /// outside a fragment.
+    pub(crate) fn with_cmaf(mut self, cmaf: bool) -> Self {
+        self.cmaf = cmaf;
         self
     }
 
@@ -129,7 +146,7 @@ impl Fmp4Muxer {
         let mut out = Vec::new();
         if !self.header_written {
             let param_sets = parameter_sets(self.codec, &nalus)?;
-            out.extend_from_slice(&ftyp());
+            out.extend_from_slice(&if self.cmaf { ftyp_cmaf() } else { ftyp() });
             out.extend_from_slice(&moov(
                 self.codec,
                 self.width,
@@ -153,11 +170,13 @@ impl Fmp4Muxer {
         let sample = avcc_sample(&nalus);
         let is_sync = nalus.iter().any(|n| is_keyframe_nal(self.codec, n));
 
-        if self.fragment_duration_ns == 0 {
-            // Default: one access unit per fragment.
+        // Default: one access unit per fragment. CMAF mode always batches instead,
+        // because a fragment there may only start at a sync sample.
+        if self.fragment_duration_ns == 0 && !self.cmaf {
             let frag = fragment(
                 self.fragments + 1,
                 self.decode_time,
+                false,
                 &[(duration, &sample, is_sync)],
             );
             out.extend_from_slice(&frag);
@@ -194,7 +213,16 @@ impl Fmp4Muxer {
             .iter()
             .map(|s| (s.duration, s.data.as_slice(), s.is_sync))
             .collect();
-        let frag = fragment(self.fragments + 1, self.pending_decode_time, &samples);
+        let mut frag = Vec::new();
+        if self.cmaf {
+            frag.extend_from_slice(&styp_cmaf()); // this fragment is a CMAF segment
+        }
+        frag.extend_from_slice(&fragment(
+            self.fragments + 1,
+            self.pending_decode_time,
+            self.cmaf,
+            &samples,
+        ));
         let total: u64 = self.pending.iter().map(|s| s.duration as u64).sum();
         self.fragments += 1;
         self.decode_time += total;
@@ -223,7 +251,7 @@ pub(crate) use crate::annexb::{
 };
 
 // box primitives (mp4_box/full_box/ftyp/MATRIX) shared across the MP4 elements.
-use crate::mp4box::{ftyp, full_box, mp4_box, udta_with_tags, MATRIX};
+use crate::mp4box::{ftyp, ftyp_cmaf, full_box, mp4_box, styp_cmaf, udta_with_tags, MATRIX};
 
 // --- box writers ----------------------------------------------------------
 
@@ -466,16 +494,31 @@ pub(crate) fn av1c_record(seq: &crate::av1parse::Av1SeqHeader, seq_obu: &[u8]) -
     p
 }
 
+/// A fragment's `tfhd`. Sample data always follows the `moof`
+/// (`default-base-is-moof`, base_data_offset absent), which is what CMAF requires
+/// of every track fragment. In CMAF mode the sample description index is stated
+/// rather than inherited from the `trex`, so a fragment describes itself.
+pub(crate) fn tfhd(track_id: u32, cmaf: bool) -> Vec<u8> {
+    let mut p = track_id.to_be_bytes().to_vec();
+    if !cmaf {
+        return full_box(b"tfhd", 0, 0x020000, &p);
+    }
+    p.extend_from_slice(&1u32.to_be_bytes()); // sample_description_index
+    full_box(b"tfhd", 0, 0x020002, &p)
+}
+
 /// One `moof`+`mdat` fragment holding `samples` (one or many): a `trun` with a
 /// per-sample (duration, size, flags) entry and a single `mdat` of the samples
 /// concatenated in order. A one-element slice is the per-AU fragment.
-fn fragment(sequence: u64, decode_time: u64, samples: &[(u32, &[u8], bool)]) -> Vec<u8> {
+fn fragment(
+    sequence: u64,
+    decode_time: u64,
+    cmaf: bool,
+    samples: &[(u32, &[u8], bool)],
+) -> Vec<u8> {
     let build_moof = |data_offset: u32| -> Vec<u8> {
         let mfhd = full_box(b"mfhd", 0, 0, &(sequence as u32).to_be_bytes());
-        let tfhd = {
-            let p = 1u32.to_be_bytes(); // track id
-            full_box(b"tfhd", 0, 0x020000, &p) // default-base-is-moof
-        };
+        let tfhd = tfhd(1, cmaf);
         let tfdt = full_box(b"tfdt", 1, 0, &decode_time.to_be_bytes());
         let trun = {
             let mut p = Vec::new();
@@ -592,7 +635,7 @@ mod tests {
 
     #[test]
     fn trun_data_offset_points_at_the_mdat_payload() {
-        let frag = fragment(1, 0, &[(3000, &[9, 9, 9, 9], true)]);
+        let frag = fragment(1, 0, false, &[(3000, &[9, 9, 9, 9], true)]);
         // moof size from its own header
         let moof_len = u32::from_be_bytes(frag[..4].try_into().unwrap()) as usize;
         // mdat payload begins after the mdat 8-byte header
