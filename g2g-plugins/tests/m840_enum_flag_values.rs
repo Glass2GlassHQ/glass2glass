@@ -47,6 +47,44 @@ fn declared_nicks_and_their_aliases_all_parse() {
         ))
         .unwrap_or_else(|e| panic!("pattern={pattern}: {e}"));
     }
+    for method in ["set", "green", "blue"] {
+        parse(&format!(
+            "videotestsrc num-buffers=1 ! alpha method={method} ! fakesink"
+        ))
+        .unwrap_or_else(|e| panic!("alpha method={method}: {e}"));
+    }
+    for method in ["linear", "blend"] {
+        parse(&format!(
+            "videotestsrc num-buffers=1 ! deinterlace method={method} ! fakesink"
+        ))
+        .unwrap_or_else(|e| panic!("deinterlace method={method}: {e}"));
+    }
+    for method in ["clip", "wrap-negative", "wrap-positive"] {
+        parse(&format!(
+            "audiotestsrc num-buffers=1 ! audioamplify amplification-method={method} ! fakesink"
+        ))
+        .unwrap_or_else(|e| panic!("audioamplify amplification-method={method}: {e}"));
+    }
+}
+
+#[test]
+fn unknown_deinterlace_method_names_the_choices() {
+    let err =
+        parse("videotestsrc num-buffers=1 ! deinterlace method=yadif ! fakesink").unwrap_err();
+    let ParseError::BadEnumValue {
+        element,
+        key,
+        value,
+        values,
+    } = &err
+    else {
+        panic!("expected an enum-value error, got {err:?}");
+    };
+    assert_eq!(
+        (element.as_str(), key.as_str(), value.as_str()),
+        ("deinterlace", "method", "yadif")
+    );
+    assert!(values.contains("blend"), "declared choices: {values}");
 }
 
 #[test]

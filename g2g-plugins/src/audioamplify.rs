@@ -230,7 +230,8 @@ static AUDIOAMPLIFY_PROPS: &[PropertySpec] = &[
         "amplification-method",
         PropKind::Str,
         "overflow handling: clip | wrap-negative | wrap-positive",
-    ),
+    )
+    .with_enum_values("clip | wrap-negative | wrap-positive"),
 ];
 
 impl PadTemplates for AudioAmplify {

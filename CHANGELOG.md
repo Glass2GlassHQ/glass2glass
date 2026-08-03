@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M841: `enum_values` declared on the `alpha` / `deinterlace` / `audioamplify` method properties, so their nicks validate at parse time.
+
 - M840: launch value grammar: backslash escapes, mid-value quoting, `enum_values` validated at parse time with named choices, `PropKind::Flags` (`protocols=udp+tcp` on `rtspsrc`).
 
 - M839: the β allocation re-cascade continues through muxers both directions (per-pad re-query, output pool re-derivation, bounded convergence).
