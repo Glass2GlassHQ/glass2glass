@@ -526,3 +526,68 @@ async fn live_overlay_animates_and_background_never_collapses() {
         "inset froze: only {distinct} distinct over {N} frames"
     );
 }
+
+/// Regression: input-0 frames buffered during startup are dropped when input
+/// 0's geometry changes; composing them at the new (larger) dims would index
+/// past their smaller buffers and panic.
+#[tokio::test]
+async fn geometry_change_drops_stale_startup_frames() {
+    use g2g_core::element::{BoxFuture, PushOutcome};
+    use g2g_core::frame::FrameTiming;
+    use g2g_core::MultiInputElement;
+
+    #[derive(Default)]
+    struct Collect {
+        sizes: Vec<usize>,
+    }
+    impl OutputSink for Collect {
+        fn push<'a>(
+            &'a mut self,
+            packet: PipelinePacket,
+        ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
+            Box::pin(async move {
+                if let PipelinePacket::DataFrame(f) = packet {
+                    self.sizes
+                        .push(f.domain.as_system_slice().map_or(0, |s| s.len()));
+                }
+                Ok(PushOutcome::Accepted)
+            })
+        }
+    }
+    fn solid_frame(w: usize, h: usize) -> PipelinePacket {
+        PipelinePacket::DataFrame(Frame {
+            domain: MemoryDomain::System(SystemSlice::from_boxed(
+                vec![0xFFu8; w * h * 4].into_boxed_slice(),
+            )),
+            timing: FrameTiming::default(),
+            sequence: 0,
+            meta: Default::default(),
+        })
+    }
+
+    let mut comp = Compositor::new(
+        4,
+        4,
+        vec![
+            CompositorPad::at(0, 0),
+            CompositorPad::at(0, 0).with_zorder(1),
+        ],
+    );
+    comp.configure_pipeline(0, &rgba(2, 2)).unwrap();
+    comp.configure_pipeline(1, &rgba(2, 2)).unwrap();
+    let mut sink = Collect::default();
+
+    // a base frame buffers during startup (no overlay yet), then the base
+    // geometry grows: the buffered 2x2 frame is stale
+    comp.process(0, solid_frame(2, 2), &mut sink).await.unwrap();
+    comp.process(0, PipelinePacket::CapsChanged(rgba(4, 4)), &mut sink)
+        .await
+        .unwrap();
+    // the first overlay frame primes and flushes the startup buffer; the
+    // stale base must have been dropped, not composed at 4x4
+    comp.process(1, solid_frame(2, 2), &mut sink).await.unwrap();
+    assert!(sink.sizes.is_empty(), "stale startup frame was composed");
+    // a base frame at the new size flows through
+    comp.process(0, solid_frame(4, 4), &mut sink).await.unwrap();
+    assert_eq!(sink.sizes, vec![4 * 4 * 4]);
+}

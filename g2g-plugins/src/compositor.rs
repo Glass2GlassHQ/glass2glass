@@ -755,11 +755,12 @@ impl MultiInputElement for Compositor {
                     height: Dim::Fixed(h),
                     ..
                 }) if format == self.format => {
-                    // A geometry change invalidates an overlay's cached frame:
+                    // A geometry change invalidates that input's queued frames:
                     // compose() would otherwise read the old (smaller) bytes
-                    // at the new dims and panic out of bounds. The fresh frame
-                    // at the new size repopulates the cache.
-                    if input != 0 && self.inputs[input] != Some((w, h)) {
+                    // at the new dims and panic out of bounds. For an overlay
+                    // the fresh frame repopulates the cache; for input 0 any
+                    // startup-buffered frames are dropped too.
+                    if self.inputs[input] != Some((w, h)) {
                         self.agg.clear(input);
                     }
                     self.inputs[input] = Some((w, h));
