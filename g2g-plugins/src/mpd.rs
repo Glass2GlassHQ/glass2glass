@@ -1,12 +1,19 @@
 //! DASH MPD manifest parser (a subset of ISO/IEC 23009-1), driven by
-//! [`DashSrc`](crate::dashsrc). Pure (no I/O), so it is fully unit-testable.
+//! [`DashSrc`](crate::dashsrc). Pure (no I/O), so it is fully unit-testable:
+//! the wall-clock live math takes "now" as an argument.
 //!
-//! Scope: static (VOD) manifests using `SegmentTemplate`, both the `@duration`
-//! profile and `SegmentTimeline`, with `$Number$` or `$Time$` addressing.
-//! `SegmentList`, `SegmentBase` byte-ranges, and dynamic (live) manifests are
-//! follow-ups. Attribute inheritance (geometry / codecs /
-//! the `SegmentTemplate` itself declared on the `AdaptationSet` and shared by its
+//! Scope: `SegmentTemplate` (both the `@duration` profile and `SegmentTimeline`,
+//! with `$Number$` or `$Time$` addressing), `SegmentList`, and `SegmentBase`
+//! byte ranges, over one or more `Period`s. Dynamic (live) manifests carry the
+//! wall-clock attributes (`availabilityStartTime`, `timeShiftBufferDepth`,
+//! `suggestedPresentationDelay`) that [`LiveEdge`] turns into an available
+//! segment window. Attribute inheritance (geometry / codecs / the
+//! `SegmentTemplate` itself declared on the `AdaptationSet` and shared by its
 //! `Representation`s) is resolved by walking ancestors.
+//!
+//! Not modelled: `@presentationTimeOffset` (segment `$Time$` is period-relative
+//! and starts at zero) and `@availabilityTimeOffset` (the low-latency chunked
+//! early-availability knob, which only makes the window more conservative here).
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -158,6 +165,7 @@ pub struct SegmentRef {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Mpd {
+    /// `BaseURL` declared directly on `MPD` (a Period declares its own).
     pub base_url: Option<String>,
     /// `mediaPresentationDuration` in seconds (for the VOD segment count).
     pub duration_secs: f64,
@@ -165,7 +173,51 @@ pub struct Mpd {
     pub dynamic: bool,
     /// `@minimumUpdatePeriod` in seconds: how often a live manifest is reloaded.
     pub minimum_update_period_secs: Option<f64>,
+    /// `@availabilityStartTime` as unix seconds: wall-clock zero of a dynamic
+    /// presentation, the anchor the live segment window is computed from.
+    pub availability_start_unix: Option<f64>,
+    /// `@timeShiftBufferDepth` in seconds: how far back of the live edge media
+    /// stays available (`None` = unbounded).
+    pub time_shift_buffer_depth_secs: Option<f64>,
+    /// `@suggestedPresentationDelay` in seconds: how far behind the live edge
+    /// the packager wants playback to sit.
+    pub suggested_presentation_delay_secs: Option<f64>,
+    /// The presentation's Periods, in order. Always non-empty.
+    pub periods: Vec<Period>,
+}
+
+/// One `Period`: a self-contained stretch of the presentation with its own
+/// Representations, base URL and segment addressing. Consecutive Periods play
+/// through back to back; each one's segment times restart at zero, so the
+/// running-time offset of a Period is its `start_secs` (or the media played
+/// before it).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Period {
+    pub id: Option<String>,
+    /// `@start` in seconds. Absent `@start`s accumulate from the previous
+    /// Period's start + duration, so this is always resolved.
+    pub start_secs: f64,
+    /// `@duration` in seconds, when declared.
+    pub duration_secs: Option<f64>,
+    /// The nearest `BaseURL` inside this Period (Period / AdaptationSet /
+    /// Representation level), resolved against the MPD base by the source.
+    pub base_url: Option<String>,
     pub representations: Vec<Representation>,
+}
+
+/// The wall-clock parameters of a dynamic presentation, resolved for one Period.
+/// Turns "now" into the window of segments a live `@duration` `SegmentTemplate`
+/// currently offers, and the index playback should start at.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LiveEdge {
+    /// Unix seconds at which this Period's presentation time zero became
+    /// available: `availabilityStartTime` + `Period@start`.
+    pub anchor_unix: f64,
+    /// `timeShiftBufferDepth` in seconds (`None` = the whole presentation stays
+    /// available).
+    pub time_shift_secs: Option<f64>,
+    /// How far behind the live edge to start playback, in seconds.
+    pub presentation_delay_secs: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,6 +250,59 @@ impl SegmentTemplate {
     /// `$Number$` / `$Time$`.
     pub fn media_url(&self, rep_id: &str, seg: SegmentRef) -> String {
         expand(&self.media, rep_id, Some(seg.number), Some(seg.time))
+    }
+
+    /// Nominal segment duration in seconds: `@duration` for that profile, else
+    /// the first `SegmentTimeline` entry's `d`. `None` when neither is usable.
+    pub fn nominal_segment_secs(&self) -> Option<f64> {
+        let ts = self.timescale.max(1) as f64;
+        let d = if self.duration != 0 {
+            self.duration
+        } else {
+            self.timeline.first()?.d
+        };
+        (d != 0).then(|| d as f64 / ts)
+    }
+
+    /// The `@duration` live profile's currently available segment indices
+    /// (0-based from `start_number`) at wall-clock `now_unix`: the earliest one
+    /// still inside `timeShiftBufferDepth` and the newest complete one. Segment
+    /// `i` covers presentation time `[i*d, (i+1)*d)` and is complete `(i+1)*d`
+    /// after the Period anchor. `None` before the first complete segment exists,
+    /// or for a `SegmentTimeline` (which lists its own window).
+    pub fn live_available(&self, edge: &LiveEdge, now_unix: f64) -> Option<(u64, u64)> {
+        if !self.timeline.is_empty() {
+            return None;
+        }
+        let d = self.nominal_segment_secs()?;
+        let elapsed = now_unix - edge.anchor_unix;
+        // `as u64` saturates at 0 for a negative / NaN elapsed, and the checked
+        // decrement then reports "no complete segment yet" instead of wrapping.
+        let last = ((elapsed / d) as u64).checked_sub(1)?;
+        let first = match edge.time_shift_secs {
+            // Fully inside the window: the segment starts no earlier than the
+            // depth allows, so round the boundary up.
+            Some(depth) => (((elapsed - depth) / d).ceil()) as u64,
+            None => 0,
+        };
+        Some((first.min(last), last))
+    }
+
+    /// The `@duration` live profile's available segments at `now_unix`, newest
+    /// window last, each carrying its `$Number$` and its period-relative
+    /// `$Time$`. Bounded by [`MAX_SEGMENTS`] so an ancient
+    /// `availabilityStartTime` cannot force an unbounded allocation.
+    pub fn live_segments(&self, edge: &LiveEdge, now_unix: f64) -> Vec<SegmentRef> {
+        let Some((first, last)) = self.live_available(edge, now_unix) else {
+            return Vec::new();
+        };
+        let count = (last - first).saturating_add(1).min(MAX_SEGMENTS);
+        (first..first.saturating_add(count))
+            .map(|i| SegmentRef {
+                number: self.start_number.saturating_add(i),
+                time: i.saturating_mul(self.duration),
+            })
+            .collect()
     }
 
     /// The ordered media segments for a VOD presentation of `total_secs`. Driven
@@ -321,6 +426,23 @@ impl Representation {
         }
     }
 
+    /// The media segments a dynamic `@duration` Representation offers at
+    /// wall-clock `now_unix` (the live profile). Empty for any other addressing,
+    /// or before this Period's first segment is complete.
+    pub fn live_segments(&self, edge: &LiveEdge, now_unix: f64) -> Vec<ResolvedSegment> {
+        let SegmentSource::Template(t) = &self.source else {
+            return Vec::new();
+        };
+        t.live_segments(edge, now_unix)
+            .into_iter()
+            .map(|s| ResolvedSegment {
+                url: t.media_url(&self.id, s),
+                byte_range: None,
+                time: s.time,
+            })
+            .collect()
+    }
+
     /// The `SegmentBase` when this Representation is `sidx`-indexed single-file;
     /// the source loop fetches `index_range`, parses the `sidx`, and builds the
     /// subsegment list. `None` for Template / List addressing.
@@ -339,6 +461,37 @@ impl Representation {
             _ => None,
         }
     }
+}
+
+/// Where a fresh player starts inside a live window: the earliest segment of
+/// `segs` that still leaves `delay_ns` of media ahead of it, so playback follows
+/// the live edge instead of replaying the whole window. Clamps to the window
+/// front when the window is shorter than the delay. Works off segment start-time
+/// deltas, so it serves both the `@duration` window and a `SegmentTimeline`.
+pub fn live_start_offset(segs: &[ResolvedSegment], timescale: u64, delay_ns: u64) -> usize {
+    let ts = timescale.max(1) as u128;
+    // Duration of segment `i`: the delta to its successor, or (for the last
+    // one) the delta from its predecessor.
+    let dur_ns = |i: usize| -> u64 {
+        let (a, b) = if i + 1 < segs.len() {
+            (segs[i].time, segs[i + 1].time)
+        } else if i > 0 {
+            (segs[i - 1].time, segs[i].time)
+        } else {
+            return 0;
+        };
+        ((b.saturating_sub(a) as u128 * 1_000_000_000) / ts) as u64
+    };
+    let mut ahead_ns = 0u64;
+    let mut start = 0usize;
+    for i in (0..segs.len()).rev() {
+        ahead_ns = ahead_ns.saturating_add(dur_ns(i));
+        start = i;
+        if ahead_ns >= delay_ns {
+            break;
+        }
+    }
+    start
 }
 
 /// Parse a `sidx` (Segment Index) box (ISO/IEC 14496-12). Untrusted input: every
@@ -403,7 +556,7 @@ fn read_u64(d: &[u8], p: &mut usize) -> Option<u64> {
     Some(v)
 }
 
-impl Mpd {
+impl Period {
     /// Pick the highest-bandwidth Representation at or below `max_bandwidth`
     /// (or the overall highest when `None` / nothing fits).
     pub fn select(&self, max_bandwidth: Option<u64>) -> Option<&Representation> {
@@ -413,6 +566,23 @@ impl Mpd {
             .filter(under)
             .max_by_key(|r| r.bandwidth)
             .or_else(|| self.representations.iter().min_by_key(|r| r.bandwidth))
+    }
+}
+
+impl Mpd {
+    /// The wall-clock live parameters for `period`, or `None` for a static
+    /// manifest / one without an `availabilityStartTime`. `presentation_delay`
+    /// is resolved by the caller (`suggestedPresentationDelay`, an override, or
+    /// a segment-duration default).
+    pub fn live_edge(&self, period: &Period, presentation_delay_secs: f64) -> Option<LiveEdge> {
+        if !self.dynamic {
+            return None;
+        }
+        Some(LiveEdge {
+            anchor_unix: self.availability_start_unix? + period.start_secs,
+            time_shift_secs: self.time_shift_buffer_depth_secs,
+            presentation_delay_secs,
+        })
     }
 }
 
@@ -430,13 +600,52 @@ pub fn parse(xml: &str) -> Result<Mpd, MpdError> {
         .attribute("minimumUpdatePeriod")
         .and_then(parse_iso_duration);
     let base_url = root
-        .descendants()
-        .find(|n| n.has_tag_name("BaseURL"))
+        .children()
+        .find(|n| n.is_element() && n.has_tag_name("BaseURL"))
         .and_then(|n| n.text())
         .map(|s| String::from(s.trim()));
 
+    // Periods with no usable Representation (nothing addressable) are skipped
+    // rather than failing the manifest; `@start` accumulates when absent.
+    let mut periods: Vec<Period> = Vec::new();
+    let mut next_start = 0.0f64;
+    for node in root
+        .children()
+        .filter(|n| n.is_element() && n.has_tag_name("Period"))
+    {
+        let period = parse_period(node, next_start);
+        next_start = period.start_secs + period.duration_secs.unwrap_or(0.0);
+        if !period.representations.is_empty() {
+            periods.push(period);
+        }
+    }
+
+    if periods.is_empty() {
+        return Err(MpdError::Invalid);
+    }
+    Ok(Mpd {
+        base_url,
+        duration_secs,
+        dynamic,
+        minimum_update_period_secs,
+        availability_start_unix: root
+            .attribute("availabilityStartTime")
+            .and_then(parse_xs_datetime),
+        time_shift_buffer_depth_secs: root
+            .attribute("timeShiftBufferDepth")
+            .and_then(parse_iso_duration),
+        suggested_presentation_delay_secs: root
+            .attribute("suggestedPresentationDelay")
+            .and_then(parse_iso_duration),
+        periods,
+    })
+}
+
+/// Parse one `Period` and its Representations. `default_start` is the previous
+/// Period's end, used when `@start` is absent.
+fn parse_period(node: Node, default_start: f64) -> Period {
     let mut representations = Vec::new();
-    for rep in root
+    for rep in node
         .descendants()
         .filter(|n| n.has_tag_name("Representation"))
     {
@@ -458,17 +667,20 @@ pub fn parse(xml: &str) -> Result<Mpd, MpdError> {
             source,
         });
     }
-
-    if representations.is_empty() {
-        return Err(MpdError::Invalid);
-    }
-    Ok(Mpd {
-        base_url,
-        duration_secs,
-        dynamic,
-        minimum_update_period_secs,
+    Period {
+        id: node.attribute("id").map(String::from),
+        start_secs: node
+            .attribute("start")
+            .and_then(parse_iso_duration)
+            .unwrap_or(default_start),
+        duration_secs: node.attribute("duration").and_then(parse_iso_duration),
+        base_url: node
+            .descendants()
+            .find(|n| n.has_tag_name("BaseURL"))
+            .and_then(|n| n.text())
+            .map(|s| String::from(s.trim())),
         representations,
-    })
+    }
 }
 
 /// The addressing for a Representation: its nearest `SegmentList` (preferred when
@@ -674,6 +886,66 @@ fn parse_iso_duration(s: &str) -> Option<f64> {
     Some(secs)
 }
 
+/// Parse an `xs:dateTime` (`2026-08-03T20:45:39.541Z`, or with a `+HH:MM` /
+/// `-HH:MM` zone offset, or naive = UTC) to unix seconds. Manifest input, so
+/// every field is range-checked and anything malformed yields `None` rather
+/// than a bogus live-edge anchor.
+fn parse_xs_datetime(s: &str) -> Option<f64> {
+    let (date, rest) = s.trim().split_once('T')?;
+    let mut ymd = date.split('-');
+    let year: i64 = ymd.next()?.parse().ok()?;
+    let month: u32 = ymd.next()?.parse().ok()?;
+    let day: u32 = ymd.next()?.parse().ok()?;
+    if ymd.next().is_some() || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+
+    // Split the zone designator off the time: 'Z', or a sign that is not the
+    // first character (the time itself never starts with one).
+    let (time, zone_secs) = match rest.strip_suffix('Z') {
+        Some(t) => (t, 0.0),
+        None => match rest.rfind(['+', '-']).filter(|&i| i > 0) {
+            Some(i) => (&rest[..i], parse_zone_offset(&rest[i..])?),
+            None => (rest, 0.0),
+        },
+    };
+    let mut hms = time.split(':');
+    let hour: u32 = hms.next()?.parse().ok()?;
+    let minute: u32 = hms.next()?.parse().ok()?;
+    let second: f64 = hms.next()?.parse().ok()?;
+    if hms.next().is_some() || hour > 23 || minute > 59 || !(0.0..61.0).contains(&second) {
+        return None;
+    }
+
+    let days = days_from_civil(year, month, day);
+    Some(days as f64 * 86_400.0 + hour as f64 * 3600.0 + minute as f64 * 60.0 + second - zone_secs)
+}
+
+/// Parse a `+HH:MM` / `-HH:MM` zone designator to seconds east of UTC.
+fn parse_zone_offset(s: &str) -> Option<f64> {
+    let sign = if s.starts_with('-') { -1.0 } else { 1.0 };
+    let (h, m) = s[1..].split_once(':')?;
+    let h: u32 = h.parse().ok()?;
+    let m: u32 = m.parse().ok()?;
+    if h > 23 || m > 59 {
+        return None;
+    }
+    Some(sign * (h as f64 * 3600.0 + m as f64 * 60.0))
+}
+
+/// Days from the unix epoch to a proleptic-Gregorian civil date (Howard
+/// Hinnant's `days_from_civil`). Shifts the year to start in March so the leap
+/// day lands at the end of the era.
+fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400; // [0, 399]
+    let mp = if month > 2 { month - 3 } else { month + 9 } as i64; // March = 0
+    let doy = (153 * mp + 2) / 5 + day as i64 - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    era * 146_097 + doe - 719_468
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -695,8 +967,8 @@ mod tests {
     fn parses_representations_with_inherited_template_and_geometry() {
         let mpd = parse(MPD).unwrap();
         assert!((mpd.duration_secs - 12.0).abs() < 1e-6);
-        assert_eq!(mpd.representations.len(), 2);
-        let high = mpd.select(None).unwrap();
+        assert_eq!(mpd.periods[0].representations.len(), 2);
+        let high = mpd.periods[0].select(None).unwrap();
         assert_eq!(high.id, "high");
         assert_eq!(high.bandwidth, 2_400_000);
         assert_eq!(high.width, Some(1280));
@@ -709,14 +981,14 @@ mod tests {
     #[test]
     fn abr_caps_selection() {
         let mpd = parse(MPD).unwrap();
-        assert_eq!(mpd.select(Some(1_000_000)).unwrap().id, "low");
-        assert_eq!(mpd.select(Some(1)).unwrap().id, "low"); // fallback to lowest
+        assert_eq!(mpd.periods[0].select(Some(1_000_000)).unwrap().id, "low");
+        assert_eq!(mpd.periods[0].select(Some(1)).unwrap().id, "low"); // fallback to lowest
     }
 
     #[test]
     fn segment_count_and_url_templating() {
         let mpd = parse(MPD).unwrap();
-        let rep = mpd.select(None).unwrap();
+        let rep = mpd.periods[0].select(None).unwrap();
         let template = rep.template().unwrap();
         // 12s / 4s = 3 segments.
         assert_eq!(template.segment_count(mpd.duration_secs), 3);
@@ -796,7 +1068,7 @@ mod tests {
     #[test]
     fn segment_timeline_expands_repeats_with_time_addressing() {
         let mpd = parse(TIMELINE_MPD).unwrap();
-        let rep = mpd.select(None).unwrap();
+        let rep = mpd.periods[0].select(None).unwrap();
         // <S r="2"> = 3 segments of d=180000, then one of d=90000.
         let segs = rep.template().unwrap().segments(mpd.duration_secs);
         assert_eq!(segs.len(), 4);
@@ -838,7 +1110,10 @@ mod tests {
           <Representation id="r" bandwidth="1"/>
         </AdaptationSet></Period></MPD>"#;
         let mpd = parse(xml).unwrap();
-        let segs = mpd.representations[0].template().unwrap().segments(0.0);
+        let segs = mpd.periods[0].representations[0]
+            .template()
+            .unwrap()
+            .segments(0.0);
         // A gap: the second <S t="5000"> jumps the running time past 1000.
         assert_eq!(
             segs,
@@ -871,7 +1146,7 @@ mod tests {
           <Representation id="v0" bandwidth="1000000" width="64" height="48"/>
         </AdaptationSet></Period></MPD>"#;
         let mpd = parse(xml).unwrap();
-        let rep = mpd.select(None).unwrap();
+        let rep = mpd.periods[0].select(None).unwrap();
         assert_eq!(rep.timescale(), 1000);
 
         // Init is a byte range of the BaseURL (empty URL, range present).
@@ -931,7 +1206,7 @@ mod tests {
           <Representation id="v0" bandwidth="1"/>
         </AdaptationSet></Period></MPD>"#;
         let mpd = parse(xml).unwrap();
-        let rep = mpd.select(None).unwrap();
+        let rep = mpd.periods[0].select(None).unwrap();
         assert_eq!(rep.init(), Some((String::from("init.mp4"), None)));
         let segs = rep.resolved_segments(mpd.duration_secs);
         assert_eq!(segs.len(), 2);
@@ -1036,7 +1311,7 @@ mod tests {
           </Representation>
         </AdaptationSet></Period></MPD>"#;
         let mpd = parse(xml).unwrap();
-        let rep = mpd.select(None).unwrap();
+        let rep = mpd.periods[0].select(None).unwrap();
         let sb = rep.segment_base().expect("SegmentBase addressing");
         assert_eq!(
             sb.index_range,
@@ -1110,5 +1385,200 @@ mod tests {
     #[test]
     fn rejects_non_mpd() {
         assert_eq!(parse("not xml at all <<<"), Err(MpdError::Invalid));
+    }
+
+    // --- wall-clock live profile + multi-period (M836) -------------------
+
+    /// A dynamic `@duration` MPD as ffmpeg's dash muxer writes one mid-stream
+    /// (`-f dash -streaming 1 -window_size 3 -use_template 1 -use_timeline 0`),
+    /// with the availabilityStartTime pinned so the window math is exact.
+    const FFMPEG_LIVE_MPD: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" profiles="urn:mpeg:dash:profile:isoff-live:2011"
+     type="dynamic" minimumUpdatePeriod="PT500S" suggestedPresentationDelay="PT1S"
+     availabilityStartTime="2026-08-03T00:00:00Z" publishTime="2026-08-03T00:00:07Z"
+     timeShiftBufferDepth="PT3.0S" maxSegmentDuration="PT1.0S" minBufferTime="PT2.0S">
+  <Period id="0" start="PT0.0S">
+    <AdaptationSet id="0" contentType="video" frameRate="30/1">
+      <Representation id="0" mimeType="video/mp4" codecs="avc1.f4000a" bandwidth="47600" width="64" height="48">
+        <SegmentTemplate timescale="1000000" duration="1000000" availabilityTimeOffset="0.967"
+                         initialization="init-stream$RepresentationID$.m4s"
+                         media="chunk-stream$RepresentationID$-$Number%05d$.m4s" startNumber="1"/>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+
+    /// Unix seconds of `2026-08-03T00:00:00Z`.
+    const AST_UNIX: f64 = 1_785_715_200.0;
+
+    #[test]
+    fn parses_dynamic_wall_clock_attributes() {
+        let mpd = parse(FFMPEG_LIVE_MPD).unwrap();
+        assert!(mpd.dynamic);
+        assert_eq!(mpd.availability_start_unix, Some(AST_UNIX));
+        assert_eq!(mpd.time_shift_buffer_depth_secs, Some(3.0));
+        assert_eq!(mpd.suggested_presentation_delay_secs, Some(1.0));
+        assert_eq!(mpd.periods.len(), 1);
+        assert_eq!(mpd.periods[0].start_secs, 0.0);
+        let edge = mpd.live_edge(&mpd.periods[0], 1.0).unwrap();
+        assert_eq!(edge.anchor_unix, AST_UNIX);
+        assert_eq!(edge.time_shift_secs, Some(3.0));
+    }
+
+    #[test]
+    fn live_window_is_the_complete_segments_inside_the_time_shift_depth() {
+        let mpd = parse(FFMPEG_LIVE_MPD).unwrap();
+        let rep = &mpd.periods[0].representations[0];
+        let tmpl = rep.template().unwrap();
+        let edge = mpd.live_edge(&mpd.periods[0], 1.0).unwrap();
+
+        // 7s in: segments 0..=6 (0-based) are complete (segment i finishes at
+        // (i+1)s); the 3s depth keeps the last three of them.
+        assert_eq!(tmpl.live_available(&edge, AST_UNIX + 7.0), Some((4, 6)));
+        let segs = rep.live_segments(&edge, AST_UNIX + 7.0);
+        let urls: Vec<&str> = segs.iter().map(|s| s.url.as_str()).collect();
+        assert_eq!(
+            urls,
+            [
+                "chunk-stream0-00005.m4s",
+                "chunk-stream0-00006.m4s",
+                "chunk-stream0-00007.m4s"
+            ],
+            "$Number$ = startNumber + index, zero-padded"
+        );
+        // $Time$ stays period-relative in timescale units.
+        assert_eq!(segs[0].time, 4_000_000);
+
+        // Nothing is complete before one segment duration has passed.
+        assert_eq!(tmpl.live_available(&edge, AST_UNIX + 0.5), None);
+        assert!(rep.live_segments(&edge, AST_UNIX + 0.5).is_empty());
+        // Nor before the presentation starts at all.
+        assert_eq!(tmpl.live_available(&edge, AST_UNIX - 60.0), None);
+        // Exactly one segment complete at 1.5s in.
+        assert_eq!(tmpl.live_available(&edge, AST_UNIX + 1.5), Some((0, 0)));
+    }
+
+    #[test]
+    fn live_window_without_time_shift_depth_runs_back_to_the_period_start() {
+        let mpd = parse(FFMPEG_LIVE_MPD).unwrap();
+        let tmpl = mpd.periods[0].representations[0].template().unwrap();
+        let edge = LiveEdge {
+            anchor_unix: AST_UNIX,
+            time_shift_secs: None,
+            presentation_delay_secs: 1.0,
+        };
+        assert_eq!(tmpl.live_available(&edge, AST_UNIX + 7.0), Some((0, 6)));
+    }
+
+    #[test]
+    fn a_period_start_offsets_the_live_anchor() {
+        let mpd = parse(FFMPEG_LIVE_MPD).unwrap();
+        let tmpl = mpd.periods[0].representations[0].template().unwrap();
+        // The same wall clock, but a Period starting 5s into the presentation:
+        // only 2s of it exist, so one segment is complete.
+        let edge = LiveEdge {
+            anchor_unix: AST_UNIX + 5.0,
+            time_shift_secs: Some(3.0),
+            presentation_delay_secs: 1.0,
+        };
+        assert_eq!(tmpl.live_available(&edge, AST_UNIX + 7.0), Some((0, 1)));
+    }
+
+    #[test]
+    fn live_start_offset_sits_a_presentation_delay_behind_the_edge() {
+        let mpd = parse(FFMPEG_LIVE_MPD).unwrap();
+        let rep = &mpd.periods[0].representations[0];
+        let edge = mpd.live_edge(&mpd.periods[0], 1.0).unwrap();
+        let segs = rep.live_segments(&edge, AST_UNIX + 7.0); // indices 4..=6
+        let ts = rep.timescale();
+
+        // 1s of delay = the newest complete segment only.
+        assert_eq!(live_start_offset(&segs, ts, 1_000_000_000), 2);
+        assert_eq!(live_start_offset(&segs, ts, 2_000_000_000), 1);
+        // A delay deeper than the window clamps to its front rather than
+        // requesting media that has already aged out.
+        assert_eq!(live_start_offset(&segs, ts, 3_000_000_000), 0);
+        assert_eq!(live_start_offset(&segs, ts, 60_000_000_000), 0);
+        assert_eq!(live_start_offset(&[], ts, 1_000_000_000), 0);
+    }
+
+    #[test]
+    fn xs_datetime_forms_and_rejects() {
+        assert_eq!(
+            parse_xs_datetime("2026-08-03T20:45:39.541Z"),
+            Some(1_785_789_939.541)
+        );
+        assert_eq!(parse_xs_datetime("1970-01-01T00:00:00Z"), Some(0.0));
+        assert_eq!(
+            parse_xs_datetime("1999-12-31T23:59:59Z"),
+            Some(946_684_799.0)
+        );
+        // A zone offset is east of UTC, so it comes off the unix value.
+        assert_eq!(
+            parse_xs_datetime("2026-08-03T20:45:39+02:00"),
+            Some(1_785_782_739.0)
+        );
+        // Naive (no designator) is read as UTC.
+        assert_eq!(parse_xs_datetime("2026-08-03T00:00:00"), Some(AST_UNIX));
+        for bad in [
+            "2026-08-03",
+            "2026-13-03T00:00:00Z",
+            "2026-08-32T00:00:00Z",
+            "2026-08-03T24:00:00Z",
+            "2026-08-03T00:60:00Z",
+            "2026-08-03T00:00Z",
+            "not-a-date",
+        ] {
+            assert_eq!(parse_xs_datetime(bad), None, "{bad} rejected");
+        }
+    }
+
+    /// Two Periods stitched into one presentation, the canonical multi-period
+    /// form: each Period carries its own BaseURL + template.
+    const MULTI_PERIOD_MPD: &str = r#"<MPD type="static" mediaPresentationDuration="PT6S">
+      <Period id="a" start="PT0S" duration="PT3S">
+        <BaseURL>one/</BaseURL>
+        <AdaptationSet mimeType="video/mp4">
+          <SegmentTemplate initialization="init.mp4" media="seg$Number$.m4s"
+                           startNumber="0" duration="1000" timescale="1000"/>
+          <Representation id="v0" bandwidth="1000000"/>
+        </AdaptationSet>
+      </Period>
+      <Period id="b">
+        <BaseURL>two/</BaseURL>
+        <AdaptationSet mimeType="video/mp4">
+          <SegmentTemplate initialization="init.mp4" media="seg$Number$.m4s"
+                           startNumber="0" duration="1000" timescale="1000"/>
+          <Representation id="v0" bandwidth="1000000"/>
+        </AdaptationSet>
+      </Period>
+    </MPD>"#;
+
+    #[test]
+    fn parses_consecutive_periods_with_their_own_base_urls() {
+        let mpd = parse(MULTI_PERIOD_MPD).unwrap();
+        assert_eq!(mpd.periods.len(), 2);
+        assert_eq!(mpd.periods[0].id.as_deref(), Some("a"));
+        assert_eq!(mpd.periods[0].base_url.as_deref(), Some("one/"));
+        assert_eq!(mpd.periods[0].duration_secs, Some(3.0));
+        // The second Period declares no @start, so it accumulates from the
+        // first one's start + duration.
+        assert_eq!(mpd.periods[1].start_secs, 3.0);
+        assert_eq!(mpd.periods[1].base_url.as_deref(), Some("two/"));
+        // An MPD-level BaseURL is not confused with a Period's.
+        assert_eq!(mpd.base_url, None);
+        // Each Period selects within its own Representations.
+        assert_eq!(mpd.periods[1].select(None).unwrap().id, "v0");
+    }
+
+    #[test]
+    fn periods_without_a_usable_representation_are_skipped() {
+        let xml = r#"<MPD type="static"><Period id="ad"/><Period id="main"><AdaptationSet>
+          <SegmentTemplate media="$Number$.m4s" duration="1000" timescale="1000"/>
+          <Representation id="v0" bandwidth="1"/>
+        </AdaptationSet></Period></MPD>"#;
+        let mpd = parse(xml).unwrap();
+        assert_eq!(mpd.periods.len(), 1);
+        assert_eq!(mpd.periods[0].id.as_deref(), Some("main"));
     }
 }

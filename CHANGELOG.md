@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M836: DASH dynamic `@duration` live profile (edge start, `presentation-delay-ms`, time-shift clamp) and multi-period playthrough with boundary `Segment`.
+
 - M834: `rtspserversrc` serves publishers sequentially (`max-sessions`, `timeout`, 503 on concurrent), disconnect no longer stalls the graph; `docs/elements.html` regenerated.
 
 - M833: `udpsrc` discovers caps from an `sdp` property or in-band SPS (shared `sdp` scanner extracted from st2110), ffmpeg-validated.

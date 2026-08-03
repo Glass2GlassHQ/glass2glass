@@ -383,10 +383,8 @@ Phased plan:
   *video* init segments are done, M164; `#EXT-X-BYTERANGE` single-file CMAF is
   done, M368; throughput-driven ABR with mid-stream variant switching is done,
   M371; live-edge start is done, M438.)
-- **DASH:** wall-clock `@duration` live profile; multi-period; discontinuity /
-  multi-period boundary `SEGMENT` emission. (`SegmentList`
-  byte-range is done, M369; `SegmentBase` `sidx`-indexed single-file CMAF is done,
-  M370; throughput-driven ABR is done, M372.)
+- **DASH:** `@availabilityTimeOffset` (low-latency chunked availability) and
+  `@presentationTimeOffset` are not modelled.
 
 ## Capture sources
 

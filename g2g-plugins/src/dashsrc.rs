@@ -12,12 +12,21 @@
 //! the DASH analog of HLS `#EXT-X-BYTERANGE`, so a single-file CMAF DASH stream
 //! plays.
 //!
-//! Scope: `SegmentTemplate` (`@duration` profile or `SegmentTimeline`) and
-//! `SegmentList`, one `DataFrame` per segment, a fixed Representation. Dynamic
-//! (live) manifests are handled by reloading on the MPD's refresh period. The
-//! wall-clock `availabilityStartTime` live profile, `SegmentBase` (`sidx`-indexed
-//! single resource), multi-period, and mid-stream switching are follow-ups
-//! (DESIGN_TODO).
+//! Live (`type="dynamic"`, M836): the MPD is reloaded on its refresh period, and
+//! a `@duration` `SegmentTemplate` gets its available segment window from the
+//! wall clock against `availabilityStartTime` + `Period@start`, bounded by
+//! `timeShiftBufferDepth`. Playback starts `suggestedPresentationDelay` behind
+//! the live edge (see [`presentation_delay_secs`]) rather than replaying the
+//! whole window, which a `SegmentTimeline` window gets too.
+//!
+//! Multi-period (M836): the Periods play through back to back, each with its own
+//! `BaseURL` / template / Representation choice. Crossing a boundary emits a
+//! [`PipelinePacket::Segment`] whose `base` is the media played before it and
+//! whose `time` is 0: running time continues across the boundary while stream
+//! time restarts with the new Period's own timeline.
+//!
+//! Scope: one `DataFrame` per segment; `SegmentBase` (`sidx`-indexed single
+//! resource), `SegmentList` and both `SegmentTemplate` profiles.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -38,7 +47,29 @@ use crate::fetch::{
     byte_frame, get_bytes, get_range_bytes, get_text, resolve_url, MAX_MANIFEST_BYTES,
     MAX_SEGMENT_BYTES,
 };
-use crate::mpd::{parse, parse_sidx, ByteRange, Representation, ResolvedSegment};
+use crate::mpd::{
+    live_start_offset, parse, parse_sidx, ByteRange, LiveEdge, Mpd, Representation, ResolvedSegment,
+};
+
+/// Fallback distance behind the live edge when the MPD suggests none, in ms.
+/// DASH has no equivalent of the HLS three-target-duration rule (RFC 8216
+/// §6.3.3): DASH-IF leaves the choice to the client and says only that
+/// `suggestedPresentationDelay` wins when present. GStreamer `dashdemux`
+/// defaults its `presentation-delay` property to 10s, so match that.
+const DEFAULT_PRESENTATION_DELAY_MS: u64 = 10_000;
+
+/// Wall clock as unix seconds, the reference the MPD's `availabilityStartTime`
+/// is expressed against.
+fn now_unix() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map_or(0.0, |d| d.as_secs_f64())
+}
+
+/// Convert a time in `timescale` units to nanoseconds.
+fn to_ns(time: u64, timescale: u64) -> u64 {
+    (time as u128 * 1_000_000_000 / timescale.max(1) as u128) as u64
+}
 
 /// Resolve a segment / init URL against the base. An empty URL means the piece
 /// is a byte range of the `BaseURL` resource itself (a pure byte-range
@@ -69,11 +100,17 @@ async fn fetch_segment(
 /// representation fetches + parses its `sidx` here (the only async case); the
 /// `sidx` carries the authoritative timescale. Used for the initial pick and on
 /// every ABR switch.
+///
+/// A live `@duration` Representation instead takes its segments from the
+/// wall-clock window (`live`), falling back to the static resolution when the
+/// window is empty (a `SegmentTimeline`, which lists its own window, or a Period
+/// whose first segment is not complete yet).
 async fn load_rep(
     client: &reqwest::Client,
     base: &str,
     rep: &Representation,
     total_secs: f64,
+    live: Option<&LiveEdge>,
 ) -> Result<
     (
         Vec<ResolvedSegment>,
@@ -92,7 +129,44 @@ async fn load_rep(
             init,
         ));
     }
+    if let Some(edge) = live {
+        let segs = rep.live_segments(edge, now_unix());
+        if !segs.is_empty() {
+            return Ok((segs, rep.timescale(), init));
+        }
+    }
     Ok((rep.resolved_segments(total_secs), rep.timescale(), init))
+}
+
+/// The declared presentation span of Period `idx` in seconds: its `@duration`,
+/// else the gap to the next Period's `@start`, else what remains of
+/// `mediaPresentationDuration` after its `@start`. A Period's `@duration`
+/// template covers only its own span, so this (not the whole presentation) is
+/// what its segment count is computed from.
+fn period_span_secs(mpd: &Mpd, idx: usize) -> f64 {
+    let period = &mpd.periods[idx];
+    if let Some(d) = period.duration_secs {
+        return d.max(0.0);
+    }
+    if let Some(next) = mpd.periods.get(idx + 1) {
+        let gap = next.start_secs - period.start_secs;
+        if gap > 0.0 {
+            return gap;
+        }
+    }
+    (mpd.duration_secs - period.start_secs).max(0.0)
+}
+
+/// The running-time span of Period `idx`: its declared span, else the media
+/// actually played from it. The running-time offset the next Period's boundary
+/// `Segment` carries.
+fn period_span_ns(mpd: &Mpd, idx: usize, played_ns: u64) -> u64 {
+    let declared = period_span_secs(mpd, idx);
+    if declared > 0.0 {
+        (declared * 1_000_000_000.0) as u64
+    } else {
+        played_ns
+    }
 }
 
 #[derive(Debug)]
@@ -103,6 +177,9 @@ pub struct DashSrc {
     max_bandwidth: u64,
     /// Live-MPD reload interval in ms (0 = derive from `minimumUpdatePeriod`).
     reload_interval_ms: u64,
+    /// How far behind the live edge a dynamic manifest starts, in ms
+    /// (0 = derive; see [`presentation_delay_secs`]).
+    presentation_delay_ms: u64,
     /// Optional time-seek channel (M367): resolves a TIME seek to the media
     /// segment whose start time precedes the target (the `SegmentRef.time` is
     /// already a stream-time in `timescale` units), flushes, re-emits the init
@@ -126,6 +203,7 @@ impl DashSrc {
             url: url.into(),
             max_bandwidth: 0,
             reload_interval_ms: 0,
+            presentation_delay_ms: 0,
             seek: None,
             abr: false,
             prebuffer_ms: 0,
@@ -180,6 +258,28 @@ impl DashSrc {
     pub fn with_reload_interval_ms(mut self, ms: u64) -> Self {
         self.reload_interval_ms = ms;
         self
+    }
+
+    /// Override how far behind the live edge a dynamic manifest starts (ms);
+    /// 0 derives it (see [`presentation_delay_secs`]). Larger is more robust
+    /// against download stalls, smaller is lower latency.
+    pub fn with_presentation_delay_ms(mut self, ms: u64) -> Self {
+        self.presentation_delay_ms = ms;
+        self
+    }
+
+    /// How far behind the live edge to start a dynamic manifest, in seconds:
+    /// the `presentation-delay-ms` override when set, else the MPD's
+    /// `suggestedPresentationDelay` (which DASH-IF says a client should prefer
+    /// over any value of its own), else [`DEFAULT_PRESENTATION_DELAY_MS`]. The
+    /// available window bounds it, so a delay past the start of the
+    /// `timeShiftBufferDepth` window starts at the window front.
+    fn presentation_delay_secs(&self, mpd: &Mpd) -> f64 {
+        if self.presentation_delay_ms != 0 {
+            return self.presentation_delay_ms as f64 / 1000.0;
+        }
+        mpd.suggested_presentation_delay_secs
+            .unwrap_or(DEFAULT_PRESENTATION_DELAY_MS as f64 / 1000.0)
     }
 
     fn output_caps() -> Caps {
@@ -274,25 +374,67 @@ impl SourceLoop for DashSrc {
                     cap
                 }
             };
-            loop {
-                // Segment URIs resolve against the MPD BaseURL (if any) resolved
-                // against the manifest URL, else the manifest URL's directory.
-                let base = match &mpd.base_url {
+            // Multi-period state. `period_base_ns` is the running time already
+            // played when the current Period starts; `period_played_ns` is what
+            // this Period has contributed so far (the span fallback for a
+            // manifest that declares neither @duration nor the next @start).
+            let mut period_idx = 0usize;
+            let mut period_base_ns = 0u64;
+            let mut period_played_ns = 0u64;
+            // A boundary was crossed: the next Period's first media is preceded
+            // by a `Segment` carrying the running-time offset.
+            let mut boundary_pending = false;
+            // Live playback positions itself once per Period, not on every
+            // manifest reload (a reload continues from `last_time`).
+            let mut positioned = false;
+            'manifest: loop {
+                let period = &mpd.periods[period_idx];
+                // Segment URIs resolve against the Period's BaseURL, itself
+                // resolved against the MPD BaseURL / the manifest URL.
+                let mut base = match &mpd.base_url {
                     Some(b) => resolve_url(&self.url, b),
                     None => self.url.clone(),
                 };
+                if let Some(b) = &period.base_url {
+                    base = resolve_url(&base, b);
+                }
+                let delay_secs = self.presentation_delay_secs(&mpd);
+                let edge = mpd.live_edge(period, delay_secs);
                 // `SegmentTemplate` ($Number$/$Time$, SegmentTimeline or @duration),
                 // an explicit `SegmentList`, or a `sidx`-indexed `SegmentBase` all
                 // resolve to one ordered segment list (see `load_rep`). Pick the
                 // Representation fitting the current estimate (or the user cap).
-                let rep = mpd
+                let rep = period
                     .select(sel_cap(&estimator))
                     .ok_or(G2gError::CapsMismatch)?;
                 let mut cur_rep_id = rep.id.clone();
+                let span_secs = period_span_secs(&mpd, period_idx);
                 let (mut segs, mut timescale, mut init) =
-                    load_rep(&client, &base, rep, mpd.duration_secs).await?;
+                    load_rep(&client, &base, rep, span_secs, edge.as_ref()).await?;
 
+                // A new Period restarts stream time at its own first segment
+                // while running time carries on where the previous one ended.
+                if boundary_pending && !segs.is_empty() {
+                    let start_ns = to_ns(segs[0].time, timescale);
+                    out.push(PipelinePacket::Segment(Segment {
+                        base: period_base_ns,
+                        start: start_ns,
+                        position: start_ns,
+                        time: 0,
+                        ..Segment::new()
+                    }))
+                    .await?;
+                    boundary_pending = false;
+                }
+
+                // Live: start near the live edge rather than replaying the whole
+                // available window (the wall-clock window for @duration, the
+                // SegmentTimeline's own entries otherwise).
                 let mut idx = 0usize;
+                if mpd.dynamic && !positioned && !segs.is_empty() {
+                    idx = live_start_offset(&segs, timescale, (delay_secs * 1e9) as u64);
+                    positioned = true;
+                }
                 loop {
                     // Apply a pending flushing time seek before the next fetch:
                     // jump to the segment containing the target, flush, and re-emit
@@ -363,6 +505,7 @@ impl SourceLoop for DashSrc {
                                     window.admit(bytes, duration_ns);
                                 }
                                 last_time = Some(seg.time);
+                                period_played_ns = period_played_ns.saturating_add(duration_ns);
                             }
                         }
                         idx += 1;
@@ -374,12 +517,19 @@ impl SourceLoop for DashSrc {
                         if self.abr {
                             if let Some((len, elapsed)) = measured {
                                 estimator.sample(len, elapsed);
-                                if let Some(best) = mpd.select(sel_cap(&estimator)) {
+                                if let Some(best) =
+                                    mpd.periods[period_idx].select(sel_cap(&estimator))
+                                {
                                     if best.id != cur_rep_id {
                                         cur_rep_id = best.id.clone();
-                                        let (s, ts, ini) =
-                                            load_rep(&client, &base, best, mpd.duration_secs)
-                                                .await?;
+                                        let (s, ts, ini) = load_rep(
+                                            &client,
+                                            &base,
+                                            best,
+                                            span_secs,
+                                            edge.as_ref(),
+                                        )
+                                        .await?;
                                         segs = s;
                                         timescale = ts;
                                         init = ini;
@@ -403,6 +553,25 @@ impl SourceLoop for DashSrc {
                     break;
                 }
 
+                // This Period is played out. A following Period continues the
+                // presentation: carry the running time over, restart the
+                // per-Period state, and re-enter with the boundary pending.
+                if period_idx + 1 < mpd.periods.len() {
+                    period_base_ns = period_base_ns.saturating_add(period_span_ns(
+                        &mpd,
+                        period_idx,
+                        period_played_ns,
+                    ));
+                    period_idx += 1;
+                    period_played_ns = 0;
+                    last_time = None;
+                    last_dur_ns = 0;
+                    init_emitted = false;
+                    positioned = false;
+                    boundary_pending = true;
+                    continue 'manifest;
+                }
+
                 if !mpd.dynamic {
                     break; // static (VOD, or the final live update) ends the stream
                 }
@@ -415,6 +584,9 @@ impl SourceLoop for DashSrc {
                 tokio::time::sleep(core::time::Duration::from_millis(interval_ms.max(1))).await;
                 let text = get_text(&client, &self.url, MAX_MANIFEST_BYTES).await?;
                 mpd = parse(&text).map_err(|_| G2gError::CapsMismatch)?;
+                // The update may carry fewer Periods than the one we were
+                // playing (a Period aged out of the window).
+                period_idx = period_idx.min(mpd.periods.len() - 1);
             }
 
             out.push(PipelinePacket::Eos).await?;
@@ -455,6 +627,13 @@ impl SourceLoop for DashSrc {
                 }
                 _ => Err(PropError::Type),
             },
+            "presentation-delay-ms" => match value {
+                PropValue::Uint(v) => {
+                    self.presentation_delay_ms = v;
+                    Ok(())
+                }
+                _ => Err(PropError::Type),
+            },
             "abr" => match value {
                 PropValue::Bool(v) => {
                     self.abr = v;
@@ -478,6 +657,7 @@ impl SourceLoop for DashSrc {
             "location" => Some(PropValue::Str(self.url.clone())),
             "max-bandwidth" => Some(PropValue::Uint(self.max_bandwidth)),
             "reload-interval-ms" => Some(PropValue::Uint(self.reload_interval_ms)),
+            "presentation-delay-ms" => Some(PropValue::Uint(self.presentation_delay_ms)),
             "abr" => Some(PropValue::Bool(self.abr)),
             "prebuffer-ms" => Some(PropValue::Uint(self.prebuffer_ms)),
             _ => None,
@@ -497,6 +677,12 @@ static DASHSRC_PROPS: &[PropertySpec] = &[
         PropKind::Uint,
         "live-MPD reload interval in ms; 0 derives it from minimumUpdatePeriod",
     ),
+    PropertySpec::new(
+        "presentation-delay-ms",
+        PropKind::Uint,
+        "how far behind the live edge a dynamic MPD starts, ms; 0 uses suggestedPresentationDelay",
+    )
+    .with_default("0"),
     PropertySpec::new(
         "abr",
         PropKind::Bool,
