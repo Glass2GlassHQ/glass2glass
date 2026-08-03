@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M816: position-aware multichannel down/upmix in `audioconvert` (BS.775 coefficients on the per-count `ChannelLayout` convention, matching ffmpeg's default rematrix).
 - M815: `RtspServerSink` sends RTCP sender reports and a BYE during PLAY on both transports, reaps players silent past the advertised session timeout, and gains runtime properties.
 - M814: `cotsink` can also emit the ST 0805.1 sensor point of interest event per local set, linked to the platform track.
 

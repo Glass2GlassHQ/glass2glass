@@ -34,6 +34,9 @@ pub const ABI_VERSION: &str = env!("G2G_ABI_VERSION");
 
 // ---- heap-free data-plane subset (compiles with `--no-default-features`) ----
 pub mod caps;
+// Speaker channel positions / layouts for multichannel PCM (M816): the layout
+// convention behind a `Caps::Audio` channel count.
+pub mod channels;
 pub mod error;
 pub mod frame;
 pub mod link;
@@ -125,6 +128,7 @@ pub use caps::{
     AudioFormat, ByteStreamEncoding, Caps, Dim, PassthroughFields, Rate, RawVideoFormat,
     TensorDType, TensorLayout, TensorShape, TextFormat, VideoCodec, ANY_CHANNELS, ANY_SAMPLE_RATE,
 };
+pub use channels::{ChannelLayout, ChannelPosition};
 // `CapsSet` (negotiation-time alternatives) needs alloc; `TensorShape` is
 // fixed-rank inline (M636) and part of the no-alloc subset above.
 #[cfg(feature = "alloc")]

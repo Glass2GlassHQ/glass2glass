@@ -5,13 +5,18 @@
 //! AudioConvert -> WavSink (S16)`, or feeding an encoder that wants a specific
 //! layout.
 //!
-//! Channel conversion handles any count to any count: identity, mono fan-out to
-//! N channels (replicate), downmix to mono (average), and a layout-agnostic
-//! round-robin fold/replicate for the mixed multi-channel cases (e.g. 5.1 ->
-//! stereo). The fold is position-unaware (we don't track speaker layout), so it
-//! never silently drops a channel rather than applying ITU downmix coefficients.
-//! Sample rate is preserved (no resampler). CPU-only and `no_std`: this element
-//! lives in the crate baseline.
+//! Channel conversion handles any count to any count: identity, mono <-> stereo
+//! (replicate / average), and position-aware matrix mixing for multichannel
+//! (either side > 2 channels). Speaker positions come from the per-count
+//! default layout convention ([`ChannelLayout::default_for`], what the ffmpeg
+//! decode path emits): downmix applies the ITU BS.775-style coefficients
+//! (surrounds and center at 1/sqrt(2), back center at 0.5 into each front, LFE
+//! dropped, matrix normalized against clipping, matching ffmpeg's default
+//! rematrix), and upmix places each input at its own speaker, leaving the rest
+//! silent. Counts past the layout table (> 8) fall back to a layout-agnostic
+//! round-robin fold/replicate so no channel is silently dropped. Sample rate is
+//! preserved (no resampler). CPU-only and `no_std`: this element lives in the
+//! crate baseline.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -22,9 +27,10 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
-    G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PassthroughFields,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, ANY_CHANNELS,
+    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ChannelLayout, ChannelPosition,
+    ConfigureOutcome, ElementMetadata, G2gError, MemoryDomain, OutputSink, PadTemplate,
+    PadTemplates, PassthroughFields, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    ANY_CHANNELS,
 };
 
 /// The PCM sample formats this element reads and writes.
@@ -414,6 +420,14 @@ fn convert_pcm(
     }
     let frames = src.len() / in_frame;
 
+    // Position-aware mixing whenever either side is true multichannel and both
+    // counts have a conventional layout; None keeps the layout-agnostic paths.
+    let matrix = if in_ch != out_ch && in_ch.max(out_ch) > 2 {
+        mix_matrix(in_ch, out_ch)
+    } else {
+        None
+    };
+
     let mut dst = Vec::with_capacity(frames * out_bytes * out_ch);
     let mut in_samples = alloc::vec![0f32; in_ch];
     for f in 0..frames {
@@ -422,19 +436,111 @@ fn convert_pcm(
             *slot = read_sample(&src[base + c * in_bytes..], in_format);
         }
         for oc in 0..out_ch {
-            let v = map_channel(&in_samples, oc, out_ch);
+            let v = match &matrix {
+                Some(m) => m[oc * in_ch..][..in_ch]
+                    .iter()
+                    .zip(&in_samples)
+                    .map(|(coef, s)| coef * s)
+                    .sum(),
+                None => map_channel(&in_samples, oc, out_ch),
+            };
             write_sample(&mut dst, v, out_format);
         }
     }
     Ok(dst.into_boxed_slice())
 }
 
-/// Output sample for channel `oc`, given the interleaved input frame. Covers the
-/// full N -> M space, position-unaware: identity when counts match; mono fan-out
-/// (replicate the one input); downmix to mono (average all inputs); a round-robin
-/// fold for a general downmix (`out_ch` < `in_ch`, `out_ch` >= 2: output `oc`
-/// averages inputs `oc, oc+out_ch, oc+2*out_ch, ...`, so no channel is dropped);
-/// and a round-robin replicate for upmix (`out_ch` > `in_ch`, `in_ch` >= 2).
+/// ITU BS.775-style surround coefficient: center and surrounds mix into the
+/// fronts at 1/sqrt(2).
+const SURROUND_MIX: f32 = core::f32::consts::FRAC_1_SQRT_2;
+
+/// Build the position-aware mixing matrix (flattened `out_ch` rows of `in_ch`
+/// coefficients) between the conventional layouts of two channel counts, or
+/// `None` when either count has no conventional layout (> 8 channels).
+///
+/// Each input position routes to the output: itself at 1.0 when present; a
+/// side <-> back counterpart at 1.0; otherwise folded frontward (center and
+/// surrounds at 1/sqrt(2), back center at 0.5 into each front, surrounds at 0.5
+/// into a mono center). LFE is dropped unless the output has one. The matrix is
+/// then normalized by its largest output-row sum so a full-scale input cannot
+/// clip. Coefficients match ffmpeg's default rematrix (verified against
+/// `swr_build_matrix` output for 5.1 / 6.1 / 7.1 to stereo and mono).
+fn mix_matrix(in_ch: usize, out_ch: usize) -> Option<Vec<f32>> {
+    use ChannelPosition::*;
+    let in_layout = ChannelLayout::default_for(in_ch as u8)?;
+    let out_layout = ChannelLayout::default_for(out_ch as u8)?;
+    let mut m = alloc::vec![0f32; in_ch * out_ch];
+
+    // Add `gain` of input index `ii` into output position `pos`, if present.
+    let add = |m: &mut Vec<f32>, pos: ChannelPosition, ii: usize, gain: f32| -> bool {
+        match out_layout.index_of(pos) {
+            Some(oi) => {
+                m[oi * in_ch + ii] += gain;
+                true
+            }
+            None => false,
+        }
+    };
+
+    for (ii, pos) in in_layout.positions().enumerate() {
+        if add(&mut m, pos, ii, 1.0) {
+            continue;
+        }
+        match pos {
+            Fl | Flc => {
+                let _ = add(&mut m, Fc, ii, SURROUND_MIX);
+            }
+            Fr | Frc => {
+                let _ = add(&mut m, Fc, ii, SURROUND_MIX);
+            }
+            Fc => {
+                let _ = add(&mut m, Fl, ii, SURROUND_MIX);
+                let _ = add(&mut m, Fr, ii, SURROUND_MIX);
+            }
+            Lfe => {} // dropped: BS.775 / ffmpeg default LFE mix level 0
+            Bl | Sl => {
+                let side_back = if pos == Bl { Sl } else { Bl };
+                if !add(&mut m, side_back, ii, 1.0) && !add(&mut m, Fl, ii, SURROUND_MIX) {
+                    let _ = add(&mut m, Fc, ii, SURROUND_MIX * SURROUND_MIX);
+                }
+            }
+            Br | Sr => {
+                let side_back = if pos == Br { Sr } else { Br };
+                if !add(&mut m, side_back, ii, 1.0) && !add(&mut m, Fr, ii, SURROUND_MIX) {
+                    let _ = add(&mut m, Fc, ii, SURROUND_MIX * SURROUND_MIX);
+                }
+            }
+            Bc => {
+                if !(add(&mut m, Bl, ii, SURROUND_MIX) | add(&mut m, Br, ii, SURROUND_MIX))
+                    && !(add(&mut m, Sl, ii, SURROUND_MIX) | add(&mut m, Sr, ii, SURROUND_MIX))
+                    && !(add(&mut m, Fl, ii, 0.5) | add(&mut m, Fr, ii, 0.5))
+                {
+                    let _ = add(&mut m, Fc, ii, SURROUND_MIX);
+                }
+            }
+        }
+    }
+
+    // Normalize against clipping: scale so the loudest output row sums to 1.
+    let max_sum = (0..out_ch)
+        .map(|oc| m[oc * in_ch..][..in_ch].iter().map(|c| c.abs()).sum())
+        .fold(1.0f32, f32::max);
+    if max_sum > 1.0 {
+        for coef in &mut m {
+            *coef /= max_sum;
+        }
+    }
+    Some(m)
+}
+
+/// Output sample for channel `oc`, given the interleaved input frame: the
+/// position-unaware path, used for the mono / stereo cases and as the fallback
+/// when a count has no conventional layout (`mix_matrix` returned `None`).
+/// Identity when counts match; mono fan-out (replicate the one input); downmix
+/// to mono (average all inputs); a round-robin fold for a general downmix
+/// (`out_ch` < `in_ch`, `out_ch` >= 2: output `oc` averages inputs
+/// `oc, oc+out_ch, oc+2*out_ch, ...`, so no channel is dropped); and a
+/// round-robin replicate for upmix (`out_ch` > `in_ch`, `in_ch` >= 2).
 fn map_channel(in_samples: &[f32], oc: usize, out_ch: usize) -> f32 {
     let in_ch = in_samples.len();
     if in_ch == out_ch {
@@ -665,33 +771,98 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn six_channel_downmixes_to_stereo_round_robin() {
-        // 5.1 frame ch0..ch5 = 0,100,200,300,400,500 (s16). Round-robin fold:
-        // L = avg(ch0, ch2, ch4) = 200; R = avg(ch1, ch3, ch5) = 300.
-        let mut six = Vec::new();
-        for v in [0i16, 100, 200, 300, 400, 500] {
-            six.extend_from_slice(&v.to_le_bytes());
+    /// One interleaved f32 frame in, one out, through `convert_pcm`.
+    fn mix_f32(input: &[f32], out_ch: u8) -> Vec<f32> {
+        let mut bytes = Vec::new();
+        for v in input {
+            bytes.extend_from_slice(&v.to_le_bytes());
         }
-        let stereo = convert_pcm(&six, AudioFormat::PcmS16Le, 6, AudioFormat::PcmS16Le, 2).unwrap();
-        assert_eq!(stereo.len(), 4);
-        let l = i16::from_le_bytes([stereo[0], stereo[1]]);
-        let r = i16::from_le_bytes([stereo[2], stereo[3]]);
-        assert!((l - 200).abs() <= 1, "L={l}");
-        assert!((r - 300).abs() <= 1, "R={r}");
+        let out = convert_pcm(
+            &bytes,
+            AudioFormat::PcmF32Le,
+            input.len() as u8,
+            AudioFormat::PcmF32Le,
+            out_ch,
+        )
+        .unwrap();
+        out.chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect()
+    }
+
+    fn assert_close(got: &[f32], want: &[f32]) {
+        assert_eq!(got.len(), want.len());
+        for (i, (g, w)) in got.iter().zip(want).enumerate() {
+            assert!((g - w).abs() < 1e-4, "ch{i}: got {g}, want {w}");
+        }
+    }
+
+    // The downmix expectations below are ffmpeg's default rematrix coefficients
+    // (swresample `Matrix coefficients` debug dump), the BS.775-derived
+    // reference this matrix reproduces.
+
+    #[test]
+    fn five_one_downmixes_to_stereo_with_itu_coefficients() {
+        // 5.1 order FL FR FC LFE BL BR.
+        // L = 0.414214 FL + 0.292893 FC + 0.292893 BL, R symmetric, LFE dropped.
+        let out = mix_f32(&[0.2, 0.1, 0.4, 0.9, 0.3, 0.05], 2);
+        let l = 0.414214 * 0.2 + 0.292893 * 0.4 + 0.292893 * 0.3;
+        let r = 0.414214 * 0.1 + 0.292893 * 0.4 + 0.292893 * 0.05;
+        assert_close(&out, &[l, r]);
     }
 
     #[test]
-    fn stereo_upmixes_to_six_round_robin() {
-        // L=1000, R=2000 -> six channels replicate round-robin: 1000,2000,1000,...
-        let mut stereo = Vec::new();
-        stereo.extend_from_slice(&1000i16.to_le_bytes());
-        stereo.extend_from_slice(&2000i16.to_le_bytes());
-        let six = convert_pcm(&stereo, AudioFormat::PcmS16Le, 2, AudioFormat::PcmS16Le, 6).unwrap();
-        assert_eq!(six.len(), 12);
-        for (i, chunk) in six.chunks_exact(2).enumerate() {
-            let want = if i % 2 == 0 { 1000 } else { 2000 };
-            assert_eq!(i16::from_le_bytes([chunk[0], chunk[1]]), want, "ch{i}");
-        }
+    fn five_one_downmixes_to_mono() {
+        // M = 0.207107 (FL+FR) + 0.292893 FC + 0.146447 (BL+BR).
+        let out = mix_f32(&[0.2, 0.1, 0.4, 0.9, 0.3, 0.05], 1);
+        let m = 0.207107 * (0.2 + 0.1) + 0.292893 * 0.4 + 0.146447 * (0.3 + 0.05);
+        assert_close(&out, &[m]);
+    }
+
+    #[test]
+    fn seven_one_downmixes_to_stereo() {
+        // 7.1 order FL FR FC LFE BL BR SL SR.
+        // L = 0.320377 FL + 0.226541 (FC + BL + SL).
+        let out = mix_f32(&[0.2, 0.1, 0.4, 0.9, 0.3, 0.05, 0.25, 0.15], 2);
+        let l = 0.320377 * 0.2 + 0.226541 * (0.4 + 0.3 + 0.25);
+        let r = 0.320377 * 0.1 + 0.226541 * (0.4 + 0.05 + 0.15);
+        assert_close(&out, &[l, r]);
+    }
+
+    #[test]
+    fn six_one_back_center_splits_into_both_fronts() {
+        // 6.1 order FL FR FC LFE BC SL SR.
+        // L = 0.343146 FL + 0.242641 (FC + SL) + 0.171573 BC.
+        let out = mix_f32(&[0.2, 0.1, 0.4, 0.9, 0.3, 0.25, 0.15], 2);
+        let l = 0.343146 * 0.2 + 0.242641 * (0.4 + 0.25) + 0.171573 * 0.3;
+        let r = 0.343146 * 0.1 + 0.242641 * (0.4 + 0.15) + 0.171573 * 0.3;
+        assert_close(&out, &[l, r]);
+    }
+
+    #[test]
+    fn upmix_places_positions_and_leaves_the_rest_silent() {
+        // Stereo -> 5.1: FL/FR at their own speakers, everything else silent.
+        let out = mix_f32(&[0.5, -0.25], 6);
+        assert_close(&out, &[0.5, -0.25, 0.0, 0.0, 0.0, 0.0]);
+        // Mono (FC) -> 5.1 goes to the center speaker only.
+        let out = mix_f32(&[0.5], 6);
+        assert_close(&out, &[0.0, 0.0, 0.5, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn lfe_is_dropped_on_downmix() {
+        let out = mix_f32(&[0.0, 0.0, 0.0, 0.9, 0.0, 0.0], 2);
+        assert_close(&out, &[0.0, 0.0]);
+    }
+
+    #[test]
+    fn counts_past_the_layout_table_fall_back_to_round_robin() {
+        // 9 channels have no conventional layout: the layout-agnostic fold
+        // applies (L = avg of ch 0,2,4,6,8; R = avg of ch 1,3,5,7).
+        let input: Vec<f32> = (0..9).map(|c| c as f32 / 10.0).collect();
+        let out = mix_f32(&input, 2);
+        let l = (0.0 + 0.2 + 0.4 + 0.6 + 0.8) / 5.0;
+        let r = (0.1 + 0.3 + 0.5 + 0.7) / 4.0;
+        assert_close(&out, &[l, r]);
     }
 }

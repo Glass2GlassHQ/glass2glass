@@ -1978,7 +1978,16 @@ libopus for it, since the decoder is per-channel-count). So a decode-to-PCM line
 negotiates before the count is known. `AudioConvert` is caps-driven like
 `AudioResample`: a bare `audioconvert` takes its output format / channel count
 from a downstream capsfilter (a mono `channels=1` pin) and otherwise passes the
-input through.
+input through. Its channel mixing is position-aware for multichannel (either
+side > 2): speaker positions come from `g2g_core::ChannelLayout::default_for`,
+the per-count layout convention (the ffmpeg default-layout table, which is the
+order the decode path interleaves), and the mix matrix applies the ITU
+BS.775-style coefficients (center and surrounds fold at 1/sqrt(2), back center
+at 0.5 into each front, LFE dropped, normalized against clipping), verified
+coefficient-for-coefficient against ffmpeg's default rematrix; upmix places
+each input at its own speaker and leaves the rest silent. Counts past the
+layout table (> 8) fall back to the layout-agnostic round-robin fold so no
+channel is silently dropped.
 
 The FLV demuxer is the fourth, on `Caps::ByteStream{Flv}`.
 `g2g-plugins::flv::FlvDemuxer` parses the flat FLV tag stream (the "FLV" header,

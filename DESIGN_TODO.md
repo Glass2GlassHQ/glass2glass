@@ -409,9 +409,9 @@ Phased plan:
 - Linux audio sinks (`alsasink` / `pulsesink` / `pipewiresink`): host smoke test
   done (M589, all three validated on Fedora / PipeWire playing a real tone across
   S16 + F32, stereo + mono; `m589_audio_sink_smoke`, skips with no device). Still
-  open: more sample formats (S24 / S32 / U8) and multichannel speaker-position
-  layouts (>2ch, position-aware down/upmix, needs channel-position metadata);
-  DMABUF / zero-copy.
+  open: more sample formats (S24 / S32 / U8); opening a > 2-channel device layout
+  from the sinks (the converter side of speaker positions is done); DMABUF /
+  zero-copy.
 - Generic `GlSink` over EGL (vendor-neutral NV12 / RGBA present, no CUDA).
 
 ## Containers
@@ -509,11 +509,10 @@ _(No open parser items.)_
   the audio branch (M425: `mkvdemux::forwardable_streams` surfaces concrete channels,
   `OpusDec` sink template relaxed to match). The overlay graph runs end to end.
   Remaining playback follow-ups:
-  - **Audio breadth.** The layout-agnostic downmix in `audioconvert` folds
-    channels round-robin rather than applying ITU/speaker-position coefficients
-    (no channel-position metadata is carried yet). The audio sink needs the
-    `pulse-sink` (or `alsa-sink`) feature built in, else `autoaudiosink` falls
-    back to `fakesink`.
+  - **Audio breadth.** The audio sink needs the `pulse-sink` (or `alsa-sink`)
+    feature built in, else `autoaudiosink` falls back to `fakesink`. A carrier
+    for non-default channel orders (a stream whose interleave order differs from
+    the per-count `ChannelLayout` convention) once a real source needs one.
   Parsing SSA / TTML placement into `CueSettings` (only
   WebVTT populates it today, though all three now ride the frame-meta). Glyph
   rendering (incl. `vertical:rl` / `lr` layout) is the `truetype-overlay` feature
