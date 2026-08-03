@@ -645,6 +645,10 @@ _(No open parser items.)_
 - Property-set the remaining feature-gated sources from text (`location=` /
   `uri=` on rtsp / v4l2, default placeholders today; http / hls / dash now carry
   `location`).
+- Runtime properties for the g2g-ml elements (`OrtInference` tensor-input /
+  model geometry, `WgpuInference` / `WgpuPreprocess` gpu-output,
+  `DetectionPostprocess` thresholds + input size). Needs the property plumbing
+  in g2g-ml first; only worth it alongside launch-registering those elements.
 - A value grammar for spaces / enums-as-named-flags.
 - A GUI / tooling introspection surface beyond the text dump.
 
