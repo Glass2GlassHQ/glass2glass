@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M840: launch value grammar: backslash escapes, mid-value quoting, `enum_values` validated at parse time with named choices, `PropKind::Flags` (`protocols=udp+tcp` on `rtspsrc`).
+
 - M838: MP4 `----` freeform + integer tag atoms, and a shared global-vs-per-stream tag merge policy (`resolve_tags` / `split_tags`) across mp4/mkv.
 
 - M837: declarative `DerivedFields(CapsTransform)` replaces `DerivedCoupled`'s closure + mask pair, making passthrough drift unrepresentable.

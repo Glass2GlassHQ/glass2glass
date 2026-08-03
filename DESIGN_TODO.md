@@ -641,7 +641,9 @@ _(No open parser items.)_
   `coreaudiosrc` / `avfvideosrc` / `avfaudiosrc` / `screencapturesrc`): their
   constructor knobs (samplerate, channels, geometry, num-buffers) are
   unreachable from a launch line today. Platform-gated (Android / macOS).
-- A value grammar for spaces / enums-as-named-flags.
+- Declare `enum_values` on the remaining enum-shaped properties (`alpha
+  method`, `deinterlace method`, `audioamplify amplification-method`), so their
+  nicks validate at parse time like the M840-migrated set.
 - A GUI / tooling introspection surface beyond the text dump.
 
 ## Tag system

@@ -1416,7 +1416,7 @@ static FFMPEGDEC_PROPS: &[PropertySpec] = &[
         PropKind::Str,
         "decode backend; resets cuvid-surfaces / low-delay to its defaults, so set it first",
     )
-    .with_enum_values("software | nvdec-cuvid | nvdec-cuda | vaapi")
+    .with_enum_values("software | nvdec-cuvid | cuvid | h264_cuvid | nvdec-cuda | cuda | vaapi")
     .with_default("software"),
     PropertySpec::new(
         "cuvid-surfaces",

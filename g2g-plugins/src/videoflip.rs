@@ -366,7 +366,8 @@ static VIDEOFLIP_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "flip / rotate method",
 )
 .with_enum_values(
-    "none | clockwise | rotate-180 | counterclockwise | horizontal-flip | vertical-flip",
+    "none | identity | clockwise | rotate-90cw | rotate-180 | counterclockwise | rotate-90ccw \
+     | horizontal-flip | horizontal-mirror | vertical-flip | vertical-mirror",
 )
 .with_default("none")];
 

@@ -362,7 +362,9 @@ impl SourceLoop for VideoTestSrc {
 /// `VideoTestSrc`'s settable properties (M104).
 static VIDEOTESTSRC_PROPS: &[PropertySpec] = &[
     PropertySpec::new("pattern", PropKind::Str, "drawn pattern")
-        .with_enum_values("gradient | snow | bar | smpte | checkers-8 | ball | zone-plate")
+        .with_enum_values(
+            "gradient | snow | bar | moving-bar | smpte | checkers-8 | checker | ball | zone-plate",
+        )
         .with_default("smpte"),
     PropertySpec::new(
         "num-buffers",

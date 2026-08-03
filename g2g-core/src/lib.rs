@@ -181,7 +181,9 @@ pub use meta::{
     Propagation, Relation, RelationKind, Tracking, Transform,
 };
 #[cfg(feature = "alloc")]
-pub use property::{ElementMetadata, PropError, PropFlags, PropKind, PropValue, PropertySpec};
+pub use property::{
+    ElementMetadata, PropError, PropFlags, PropKind, PropValue, PropertySpec, ValueError,
+};
 #[cfg(feature = "runtime")]
 pub use ptp::{
     ExchangeResult, PtpClock, PtpHeader, PtpMessageType, PtpServo, PtpSlave, PtpState, SlaveAction,

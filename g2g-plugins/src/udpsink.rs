@@ -477,7 +477,7 @@ impl AsyncElement for UdpSink {
             PropertySpec::new("ssrc", PropKind::Uint, "RTP synchronization source id"),
             PropertySpec::new("fec-mode", PropKind::Str, "forward error correction scheme")
                 .with_default("none")
-                .with_enum_values("none | ulpfec | ulpfec-interleaved | flexfec"),
+                .with_enum_values("none | off | ulpfec | ulpfec-interleaved | flexfec"),
             PropertySpec::new(
                 "fec-columns",
                 PropKind::Uint,

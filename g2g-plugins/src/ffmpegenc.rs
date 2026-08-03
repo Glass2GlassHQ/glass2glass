@@ -689,7 +689,11 @@ static FFMPEGENC_PROPS: &[PropertySpec] = &[
         "backend",
         PropKind::Str,
         "h264 encoder: nvenc | software (libx264)",
-    ),
+    )
+    // Every spelling `set_property` accepts, so the launch parser can reject an
+    // unknown one by name and list these.
+    .with_enum_values("nvenc | nvenc-h264 | h264_nvenc | software | libx264 | x264")
+    .with_default("nvenc"),
     PropertySpec::new(
         "bitrate",
         PropKind::Uint,
