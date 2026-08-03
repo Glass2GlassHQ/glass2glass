@@ -461,12 +461,16 @@ impl Mp4MuxN {
             .map(TrackInit::timescale)
             .unwrap_or(VIDEO_TIMESCALE);
         let default_dur_ns = match self.kinds[input] {
-            // Opus frames are 20 ms (960 samples @ 48 kHz); AAC frames 1024 samples.
+            // An Opus packet's TOC states its own duration (2.5..60 ms), so read
+            // it rather than assuming the 20 ms default; AAC frames 1024 samples.
             Some(PadKind::Audio {
                 format: AudioFormat::Opus,
                 rate,
                 ..
-            }) => 960 * 1_000_000_000 / rate.max(1) as u64,
+            }) => {
+                let samples = u64::from(crate::opusparse::packet_samples(au)).max(1);
+                samples * 1_000_000_000 / rate.max(1) as u64
+            }
             Some(PadKind::Audio { rate, .. }) => 1024 * 1_000_000_000 / rate.max(1) as u64,
             _ => DEFAULT_VIDEO_DURATION_NS,
         };

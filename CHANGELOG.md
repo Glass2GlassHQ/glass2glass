@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M826: `frame-size` (2.5-60 ms) and `complexity` on `opusenc`, sample-exact across sizes; mp4mux reads Opus durations from the TOC.
+
 - M825: `quantizer` constant-quality mode on `av1enc` (exclusive with `bitrate`), and bitrate mode no longer capped at qi 100.
 
 - M824: opt-in `faststart` on `mp4mux` (progressive `moov` ahead of `mdat`), ffmpeg-oracle-validated.
