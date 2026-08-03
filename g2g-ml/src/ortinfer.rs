@@ -12,6 +12,11 @@
 //! already-normalized f32 NCHW `[1, 3, H, W]`, e.g. from `WgpuPreprocess` /
 //! `WebGPUPreprocess`), fed straight to the session with no CPU normalize.
 //!
+//! The model can also be loaded after construction, through the `model` property
+//! (a file path) or [`load_model`](OrtInference::load_model), which is what lets
+//! a launch line say `ortinfer model=yolov8n.onnx tensor-input=true`. Until a
+//! model is loaded, negotiation and `process` fail with `NotConfigured`.
+//!
 //! v1 model contract (checked at construction, fails loud):
 //! - exactly one input and one output, both f32 tensors
 //! - input is rank-4 `[N, 3, H, W]` with `N` 1 (or dynamic, treated as 1)
@@ -38,12 +43,15 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, HardwareError,
-    MemoryDomain, OutputSink, PipelinePacket, Rate, RawVideoFormat, TensorDType, TensorLayout,
-    TensorShape,
+    MemoryDomain, OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate,
+    RawVideoFormat, TensorDType, TensorLayout, TensorShape,
 };
 
+/// A loaded session plus the geometry read off it, the state every graph method
+/// needs. Separate from the element so the element exists before a model does:
+/// a launch line builds `ortinfer` bare and the `model` property loads this.
 #[derive(Debug)]
-pub struct OrtInference {
+struct Model {
     session: Session,
     input_name: String,
     output_name: String,
@@ -52,19 +60,49 @@ pub struct OrtInference {
     height: u32,
     /// Static output shape (a dynamic leading batch dim coerced to 1).
     out_shape: TensorShape,
-    /// When set, the input pad is a preprocessed NCHW `Caps::Tensor` fed straight
-    /// to the session, not RGBA normalized on the CPU.
-    tensor_input: bool,
     /// The model's input element type: `F32` (the RGBA / f32-tensor path) or `U8`
     /// / `I8` (a quantized model, fed an integer tensor straight through, M442 the
     /// `TensorConvert::quantize` output). RGBA mode requires `F32`.
     input_dtype: TensorDType,
+}
+
+#[derive(Debug)]
+pub struct OrtInference {
+    /// `None` until a model is loaded; negotiation and `process` fail with
+    /// `NotConfigured` while it is.
+    model: Option<Model>,
+    /// Path the `model` property loaded from, for read-back.
+    model_path: Option<String>,
+    /// When set, the input pad is a preprocessed NCHW `Caps::Tensor` fed straight
+    /// to the session, not RGBA normalized on the CPU.
+    tensor_input: bool,
     configured: bool,
     last_caps: Option<Caps>,
     emitted: u64,
 }
 
+impl Default for OrtInference {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl OrtInference {
+    /// A model-less element, the text-construction path: `ortinfer
+    /// model=yolov8n.onnx` builds this and then loads the model through the
+    /// `model` property. Until one is loaded, negotiation and `process` fail with
+    /// [`G2gError::NotConfigured`].
+    pub fn new() -> Self {
+        Self {
+            model: None,
+            model_path: None,
+            tensor_input: false,
+            configured: false,
+            last_caps: None,
+            emitted: 0,
+        }
+    }
+
     /// Build a session from in-memory ONNX model bytes and validate the v1
     /// model contract (see module docs).
     pub fn from_memory(model_bytes: &[u8]) -> Result<Self, G2gError> {
@@ -75,9 +113,20 @@ impl OrtInference {
 
     /// As [`from_memory`], reading the model from a file.
     pub fn from_file(path: &str) -> Result<Self, G2gError> {
+        let mut element = Self::new();
+        element.load_model(path)?;
+        Ok(element)
+    }
+
+    /// Load (or replace) the model from a file, validating the same v1 contract
+    /// the constructors do. The tensor-input mode is preserved, so `tensor-input`
+    /// and `model` can be set in either order.
+    pub fn load_model(&mut self, path: &str) -> Result<(), G2gError> {
         let mut builder = Session::builder().map_err(ort_err)?;
         let session = builder.commit_from_file(path).map_err(ort_err)?;
-        Self::from_session(session)
+        self.model = Some(Model::load(session)?);
+        self.model_path = Some(path.to_owned());
+        Ok(())
     }
 
     /// As [`from_memory`], with the DirectML execution provider (D3D12 GPU,
@@ -194,6 +243,69 @@ impl OrtInference {
     }
 
     fn from_session(session: Session) -> Result<Self, G2gError> {
+        let mut element = Self::new();
+        element.model = Some(Model::load(session)?);
+        Ok(element)
+    }
+
+    /// The model's expected input geometry, `(width, height)`; `(0, 0)` before a
+    /// model is loaded.
+    pub fn input_dims(&self) -> (u32, u32) {
+        self.model.as_ref().map_or((0, 0), |m| (m.width, m.height))
+    }
+
+    /// The model's static output tensor dims; empty before a model is loaded.
+    pub fn output_shape(&self) -> &[u32] {
+        self.model.as_ref().map_or(&[][..], |m| m.out_shape.dims())
+    }
+
+    /// Count of tensor `DataFrame`s pushed downstream. Useful in tests.
+    pub fn inferred_count(&self) -> u64 {
+        self.emitted
+    }
+
+    /// Accept an already-normalized f32 NCHW `[1, 3, H, W]` tensor input
+    /// (e.g. from `WgpuPreprocess` / `WebGPUPreprocess`) instead of RGBA,
+    /// feeding it straight to the session with no CPU normalize. The model
+    /// geometry is unchanged.
+    pub fn with_tensor_input(mut self) -> Self {
+        self.tensor_input = true;
+        self
+    }
+
+    fn supported_input(&self) -> Option<Caps> {
+        let m = self.model.as_ref()?;
+        Some(if self.tensor_input {
+            Caps::Tensor {
+                // The model's own input dtype: f32, or u8 / i8 for a quantized
+                // model fed an already-quantized tensor (M442).
+                dtype: m.input_dtype,
+                shape: TensorShape::new([1, 3, m.height, m.width]),
+                layout: TensorLayout::Nchw,
+            }
+        } else {
+            Caps::RawVideo {
+                format: RawVideoFormat::Rgba8,
+                width: Dim::Fixed(m.width),
+                height: Dim::Fixed(m.height),
+                framerate: Rate::Any,
+            }
+        })
+    }
+
+    fn output_caps(&self) -> Option<Caps> {
+        Some(Caps::Tensor {
+            dtype: TensorDType::F32,
+            shape: self.model.as_ref()?.out_shape,
+            // rank-4 outputs are channel-first by the input convention;
+            // for other ranks the layout tag is nominal.
+            layout: TensorLayout::Nchw,
+        })
+    }
+}
+
+impl Model {
+    fn load(session: Session) -> Result<Self, G2gError> {
         let [input] = session.inputs() else {
             return Err(G2gError::CapsMismatch);
         };
@@ -224,65 +336,8 @@ impl OrtInference {
             width: w as u32,
             height: h as u32,
             out_shape,
-            tensor_input: false,
             input_dtype,
-            configured: false,
-            last_caps: None,
-            emitted: 0,
         })
-    }
-
-    /// The model's expected input geometry, `(width, height)`.
-    pub fn input_dims(&self) -> (u32, u32) {
-        (self.width, self.height)
-    }
-
-    /// The model's static output tensor dims.
-    pub fn output_shape(&self) -> &[u32] {
-        self.out_shape.dims()
-    }
-
-    /// Count of tensor `DataFrame`s pushed downstream. Useful in tests.
-    pub fn inferred_count(&self) -> u64 {
-        self.emitted
-    }
-
-    /// Accept an already-normalized f32 NCHW `[1, 3, H, W]` tensor input
-    /// (e.g. from `WgpuPreprocess` / `WebGPUPreprocess`) instead of RGBA,
-    /// feeding it straight to the session with no CPU normalize. The model
-    /// geometry is unchanged.
-    pub fn with_tensor_input(mut self) -> Self {
-        self.tensor_input = true;
-        self
-    }
-
-    fn supported_input(&self) -> Caps {
-        if self.tensor_input {
-            Caps::Tensor {
-                // The model's own input dtype: f32, or u8 / i8 for a quantized
-                // model fed an already-quantized tensor (M442).
-                dtype: self.input_dtype,
-                shape: TensorShape::new([1, 3, self.height, self.width]),
-                layout: TensorLayout::Nchw,
-            }
-        } else {
-            Caps::RawVideo {
-                format: RawVideoFormat::Rgba8,
-                width: Dim::Fixed(self.width),
-                height: Dim::Fixed(self.height),
-                framerate: Rate::Any,
-            }
-        }
-    }
-
-    fn output_caps(&self) -> Caps {
-        Caps::Tensor {
-            dtype: TensorDType::F32,
-            shape: self.out_shape,
-            // rank-4 outputs are channel-first by the input convention;
-            // for other ranks the layout tag is nominal.
-            layout: TensorLayout::Nchw,
-        }
     }
 
     /// RGBA8 -> normalized f32 NCHW RGB, then run the session.
@@ -396,33 +451,63 @@ impl AsyncElement for OrtInference {
         Self: 'a;
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        upstream_caps.intersect(&self.supported_input())
+        let supported = self.supported_input().ok_or(G2gError::NotConfigured)?;
+        upstream_caps.intersect(&supported)
     }
 
     /// Native `DerivedOutput`: RGBA at the model's geometry in, the model's
     /// static tensor caps out. Non-matching input yields an empty set, so
-    /// the solver rejects it at negotiation time.
+    /// the solver rejects it at negotiation time. With no model loaded the set
+    /// is empty for every input, so negotiation fails instead of guessing caps.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        let supported = self.supported_input();
-        let out = self.output_caps();
-        CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| {
-            if input.intersect(&supported).is_ok() {
+        let loaded = self.supported_input().zip(self.output_caps());
+        CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| match &loaded {
+            Some((supported, out)) if input.intersect(supported).is_ok() => {
                 CapsSet::one(out.clone())
-            } else {
-                CapsSet::from_alternatives(Vec::new())
             }
+            _ => CapsSet::from_alternatives(Vec::new()),
         }))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        let model = self.model.as_ref().ok_or(G2gError::NotConfigured)?;
         // RGBA mode normalizes to f32, so it only feeds an f32 model; a quantized
         // (u8 / i8) model must take a pre-quantized tensor via `with_tensor_input`.
-        if !self.tensor_input && self.input_dtype != TensorDType::F32 {
+        if !self.tensor_input && model.input_dtype != TensorDType::F32 {
             return Err(G2gError::CapsMismatch);
         }
-        absolute_caps.intersect(&self.supported_input())?;
+        let supported = self.supported_input().ok_or(G2gError::NotConfigured)?;
+        absolute_caps.intersect(&supported)?;
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        ORT_INFER_PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "model" => {
+                let path = value.as_str().ok_or(PropError::Type)?;
+                // A path that does not load (missing, not ONNX, or violating the
+                // v1 contract) is a bad value, so the launch line fails loud.
+                self.load_model(path).map_err(|_| PropError::Value)
+            }
+            "tensor-input" => {
+                self.tensor_input = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "model" => Some(PropValue::Str(self.model_path.clone().unwrap_or_default())),
+            "tensor-input" => Some(PropValue::Bool(self.tensor_input)),
+            _ => None,
+        }
     }
 
     fn process<'a>(
@@ -439,14 +524,16 @@ impl AsyncElement for OrtInference {
                     let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    let (bytes, dims) = if self.tensor_input {
-                        if self.input_dtype == TensorDType::F32 {
-                            self.infer_tensor(slice)?
+                    let tensor_input = self.tensor_input;
+                    let model = self.model.as_mut().ok_or(G2gError::NotConfigured)?;
+                    let (bytes, dims) = if tensor_input {
+                        if model.input_dtype == TensorDType::F32 {
+                            model.infer_tensor(slice)?
                         } else {
-                            self.infer_tensor_int(slice)?
+                            model.infer_tensor_int(slice)?
                         }
                     } else {
-                        self.infer(slice)?
+                        model.infer(slice)?
                     };
                     let new_caps = Caps::Tensor {
                         dtype: TensorDType::F32,
@@ -501,6 +588,32 @@ impl AsyncElement for OrtInference {
             }
             Ok(())
         })
+    }
+}
+
+/// Settable properties: the model file to load and the input-pad mode, so a
+/// `gst-launch` line can build the element without the Rust constructors.
+static ORT_INFER_PROPS: &[PropertySpec] = &[
+    PropertySpec::new("model", PropKind::Str, "path to the ONNX model file"),
+    PropertySpec::new(
+        "tensor-input",
+        PropKind::Bool,
+        "take a preprocessed f32 NCHW tensor instead of RGBA video",
+    ),
+];
+
+/// The RGBA input pad is the static superset (the model's geometry narrows it at
+/// instance time). No source template: the output tensor's shape is the loaded
+/// model's, so there is nothing static to advertise.
+#[cfg(feature = "launch")]
+impl g2g_core::PadTemplates for OrtInference {
+    fn pad_templates() -> Vec<g2g_core::PadTemplate> {
+        Vec::from([g2g_core::PadTemplate::sink(CapsSet::one(Caps::RawVideo {
+            format: RawVideoFormat::Rgba8,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        }))])
     }
 }
 

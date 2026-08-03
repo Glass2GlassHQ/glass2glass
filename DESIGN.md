@@ -1549,6 +1549,19 @@ the last:
   (`gstwrap element="x264enc bitrate=4000"`, `filesrc location="/my file.ts"`);
   the surrounding quotes are stripped from the value.
 
+- **ML elements by name (`g2g_ml::register`, `launch` feature, M820).** The
+  stock registry is assembled in `g2g-plugins`, which does not depend on
+  `g2g-ml`, so an app that wants the ML elements in a launch line calls
+  `g2g_ml::register(&mut reg)` on the registry it built. That adds `ortinfer`
+  (`ort`), `wgpupreprocess` (`wgpu`), and `detectionpostprocess` (`analytics`),
+  each only when its feature builds the element, so `... ! ortinfer
+  model=yolov8n.onnx tensor-input=true ! detectionpostprocess
+  conf-threshold=0.3 ! ...` parses. `OrtInference` is constructible without a
+  model for this: the `model` property loads the session through the same v1
+  contract check, `tensor-input` survives the load either side of it, and until
+  a model is loaded negotiation and `process` fail with `NotConfigured`.
+  `WgpuInference` stays out: it is built from weight tensors and shapes, which a
+  text line cannot express.
 - **Declarative graph documents (`g2g_plugins::declarative`, `declarative` /
   `declarative-yaml` features, M578).** A launch string is the ergonomic
   one-liner; a JSON / YAML document is the version-controllable, tool-generated,

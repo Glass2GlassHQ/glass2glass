@@ -592,6 +592,12 @@ and muxers (`mpegtsmux`, `matroskamux`, `flvmux`, `oggmux`, `funnel`, `audiomixe
 `filesrc` / `filesink`, and `fakesink`. Feature-gated capture / decode / display
 elements still need explicit Rust construction.
 
+The ML elements live in a separate crate, so an app opts them in after building
+the registry: `g2g_ml::register(&mut reg)` (the `launch` feature) adds
+`ortinfer`, `wgpupreprocess`, and `detectionpostprocess`, making
+`... ! ortinfer model=yolov8n.onnx ! detectionpostprocess conf-threshold=0.3 !
+...` parse.
+
 ### Camera → encode → RTP egress over UDP
 
 ```rust

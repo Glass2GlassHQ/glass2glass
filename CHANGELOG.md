@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M820: `g2g_ml::register` puts `ortinfer` / `wgpupreprocess` / `detectionpostprocess` in a launch line, with runtime properties and a deferred `model=` load on `ortinfer`.
+
 - M819: duration-keyed prebuffer window (`prebuffer-ms`) on `hlssrc` / `dashsrc`, posting `Buffering` bus levels during the fill; `abr` exposed as a property.
 
 - M818: runtime properties for the drifted builder knobs (`rtspserversrc` full set, `udpsrc`/`udpsink` RTP tuning, `rtspsrc` reconnect/dims, `srtsrc`/`filesrc`/`ffmpegdec`), plus bare `http-src` / `rtsp-server` feature builds fixed.

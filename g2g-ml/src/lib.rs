@@ -12,6 +12,14 @@
 #[cfg(feature = "ort")]
 pub mod ortinfer;
 
+// Launch-line registration of the ML elements into a g2g-core Registry, so
+// `ortinfer model=... ! detectionpostprocess` parses. Behind `launch`, which
+// pulls g2g-core's runtime layer.
+#[cfg(feature = "launch")]
+pub mod registry;
+#[cfg(feature = "launch")]
+pub use registry::register;
+
 // Bounded multi-stream tensor batcher (DESIGN.md §5.3, M22; moved from the
 // dissolved g2g-enterprise crate, M635): gathers one tensor frame per input
 // stream into a single batched frame for dynamic-batch inference.
