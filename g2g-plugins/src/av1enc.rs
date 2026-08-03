@@ -45,11 +45,6 @@ enum RavCtx {
 /// real-time-ish software encode.
 const DEFAULT_SPEED: u8 = 9;
 
-/// Minimum percent change in target bitrate before the rav1e context is rebuilt.
-/// rav1e cannot retarget at runtime, so each change costs a context rebuild (and
-/// a keyframe); this damps a jittery BWE estimate.
-const BITRATE_HYSTERESIS_PCT: u64 = 20;
-
 /// Encodes raw planar-YUV video into an AV1 elementary stream.
 pub struct Av1Enc {
     speed: u8,
@@ -253,8 +248,8 @@ impl Av1Enc {
 
     /// Apply a target bitrate (bits/second) from downstream congestion control.
     /// rav1e fixes the rate at `Context` construction, so a change rebuilds the
-    /// context (the next frame is then a keyframe). Hysteresis-gated: only act on
-    /// a change of at least `BITRATE_HYSTERESIS` from the active target, so a
+    /// context (the next frame is then a keyframe). Hysteresis-gated (see
+    /// `encoder_base::bitrate_change_is_significant`), so a
     /// jittery estimate near the frame rate does not thrash the encoder (each
     /// rebuild costs a keyframe). A bitrate drop is exactly when a fresh keyframe
     /// is wanted anyway. Rebuild failure leaves the current context running.
@@ -264,10 +259,7 @@ impl Av1Enc {
         let bps = bps.max(1);
         let changed = match self.bitrate_bps {
             None => true,
-            Some(cur) => {
-                let (lo, hi) = (cur.min(bps), cur.max(bps));
-                (hi - lo) as u64 * 100 >= cur as u64 * BITRATE_HYSTERESIS_PCT
-            }
+            Some(cur) => crate::encoder_base::bitrate_change_is_significant(cur as u64, bps as u64),
         };
         if !changed {
             return Vec::new();

@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M823: `FfmpegH264Enc` mid-stream bitrate retarget (property + BWE, flush-then-reopen), NV12 and 10-bit (High 10) input.
+
 - M822: runtime properties on `webrtcwhepsessionsrc` (`location`, `auth-token`, STUN/TURN, `num-buffers`), the last placeholder-registered source.
 
 - M821: runtime properties on `vulkanvideodec` (`low-latency` coding-order mode, `device-index`, `num-dpb-slots`).

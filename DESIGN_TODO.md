@@ -424,8 +424,6 @@ Phased plan:
 
 ## Codecs
 
-- **`FfmpegH264Enc`:** runtime bitrate retarget (fixed at open, like `Av1Enc`'s
-  rebuild), NV12 input, 10-bit.
 - **VP8 / VP9 encode** (`VpxEnc`): validate on a libvpx host (compile-unverified).
 - **AV1 encode** (`Av1Enc`): explicit quantizer rate control. (Target-bitrate
   rate control with hysteresis is done; 8/10/12-bit in 4:2:0 / 4:2:2 / 4:4:4
