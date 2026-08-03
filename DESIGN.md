@@ -1265,10 +1265,20 @@ player's negotiated UDP port as RTP, reusing the `RtpH264Packetizer`. The
 protocol is Sans-IO (`rtspserver.rs`, `RtspResponder` + `RtspRequest::parse` +
 `sdp_h264`): a per-session state machine answering each method and returning an
 `RtspEvent` (`Setup{client_rtp_port}` / `Play` / `Record` / `Teardown`) that the
-element acts on. It also speaks the publisher path (ANNOUNCE / RECORD) for a
-future receive-side source. Validated end-to-end over loopback (an in-test player
-handshakes and recovers every streamed access unit). Scope is one client / one
-session / unicast UDP / the PLAY direction.
+element acts on. It also speaks the publisher path (ANNOUNCE / RECORD), served by
+the receive-side `RtspServerSrc`. The sink is multi-client (each player gets its
+own RTP session, broadcast per frame) on either transport: unicast UDP or
+TCP-interleaved (`$`-framed on the control connection, validated against
+`ffmpeg -rtsp_transport tcp`). During PLAY the sink runs RTCP and keepalive:
+periodic RFC 3550 sender reports per player (UDP from the socket adjacent to the
+RTP one, so the advertised `server_port` pair is real, or `$`-framed on the RTCP
+channel), a BYE at EOS, and a session timeout advertised as
+`Session: id;timeout=N` at SETUP, with a player reaped when it is silent past
+the timeout on both the control channel (GET_PARAMETER / OPTIONS) and RTCP
+(receiver reports, which arrive `$`-framed mid-stream on an interleaved
+control connection and are consumed there). Validated end-to-end over loopback
+(handshake, RTP recovery, SR delivery on both transports, RR-extended lifetime,
+silent-client reap).
 
 **SRT (Secure Reliable Transport).** `SrtSink` (caller, egress) and `SrtSrc`
 (listener, ingress, `srt` feature) carry an MPEG-TS byte stream over UDP with

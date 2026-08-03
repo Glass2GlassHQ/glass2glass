@@ -365,20 +365,6 @@ impl UdpSink {
         ((pts_ns as u128 * RTP_CLOCK_HZ as u128) / 1_000_000_000) as u32
     }
 
-    /// The current time as a 64-bit NTP timestamp (seconds since 1900 in the high
-    /// 32 bits, fraction in the low 32), for the RTCP sender report.
-    fn ntp_now() -> u64 {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        // NTP epoch (1900) precedes the Unix epoch (1970) by this many seconds.
-        const NTP_UNIX_OFFSET: u64 = 2_208_988_800;
-        let d = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default();
-        let secs = d.as_secs().wrapping_add(NTP_UNIX_OFFSET);
-        let frac = ((d.subsec_nanos() as u64) << 32) / 1_000_000_000;
-        (secs << 32) | frac
-    }
-
     fn ensure_socket(&mut self) -> Result<(), G2gError> {
         if self.socket.is_none() {
             let std = self.std_socket.take().ok_or(G2gError::NotConfigured)?;
@@ -686,7 +672,7 @@ impl AsyncElement for UdpSink {
                         if now.saturating_sub(self.last_sr_ns) >= interval {
                             let sr = rtcp::build_sender_report(
                                 self.ssrc,
-                                Self::ntp_now(),
+                                rtcp::ntp_now(),
                                 self.last_rtp_ts,
                                 self.rtp_packets,
                                 self.rtp_octets,

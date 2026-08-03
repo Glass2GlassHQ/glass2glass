@@ -145,6 +145,21 @@ pub fn build_sender_report(
     out
 }
 
+/// The current time as a 64-bit NTP timestamp (seconds since 1900 in the high
+/// 32 bits, fraction in the low 32), for the sender-report NTP field.
+#[cfg(feature = "std")]
+pub fn ntp_now() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    // NTP epoch (1900) precedes the Unix epoch (1970) by this many seconds.
+    const NTP_UNIX_OFFSET: u64 = 2_208_988_800;
+    let d = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = d.as_secs().wrapping_add(NTP_UNIX_OFFSET);
+    let frac = ((d.subsec_nanos() as u64) << 32) / 1_000_000_000;
+    (secs << 32) | frac
+}
+
 /// Build a BYE (PT 203) for one source.
 pub fn build_bye(ssrc: u32) -> Vec<u8> {
     let mut out = Vec::new();

@@ -172,6 +172,57 @@ fn udpsink_host_port_payload() {
     );
 }
 
+#[cfg(feature = "rtsp-server")]
+#[test]
+fn rtspserversink_bind_rtp_and_session_knobs() {
+    use g2g_plugins::rtspserversink::RtspServerSink;
+    let mut e = RtspServerSink::new("0.0.0.0:8554".parse().unwrap());
+    for name in [
+        "address",
+        "port",
+        "payload-type",
+        "ssrc",
+        "rtcp-sr-interval",
+        "timeout",
+    ] {
+        assert!(declares(e.properties(), name), "declares {name}");
+    }
+    e.set_property("address", PropValue::Str("127.0.0.1".into()))
+        .unwrap();
+    e.set_property("port", PropValue::Uint(9554)).unwrap();
+    e.set_property("payload-type", PropValue::Uint(97)).unwrap();
+    e.set_property("ssrc", PropValue::Uint(0xABCD_0001))
+        .unwrap();
+    e.set_property("rtcp-sr-interval", PropValue::Uint(2000))
+        .unwrap();
+    e.set_property("timeout", PropValue::Uint(30)).unwrap();
+    assert_eq!(
+        e.get_property("address"),
+        Some(PropValue::Str("127.0.0.1".into()))
+    );
+    assert_eq!(e.get_property("port"), Some(PropValue::Uint(9554)));
+    assert_eq!(e.get_property("payload-type"), Some(PropValue::Uint(97)));
+    assert_eq!(e.get_property("ssrc"), Some(PropValue::Uint(0xABCD_0001)));
+    assert_eq!(
+        e.get_property("rtcp-sr-interval"),
+        Some(PropValue::Uint(2000))
+    );
+    assert_eq!(e.get_property("timeout"), Some(PropValue::Uint(30)));
+    // 0 disables reaping and reads back as 0.
+    e.set_property("timeout", PropValue::Uint(0)).unwrap();
+    assert_eq!(e.get_property("timeout"), Some(PropValue::Uint(0)));
+    assert!(
+        e.set_property("payload-type", PropValue::Uint(200))
+            .is_err(),
+        "PT must be <= 127"
+    );
+    assert!(
+        e.set_property("rtcp-sr-interval", PropValue::Uint(0))
+            .is_err(),
+        "a zero SR interval is rejected"
+    );
+}
+
 #[cfg(feature = "udp-egress")]
 #[test]
 fn udpsink_fec_knobs() {

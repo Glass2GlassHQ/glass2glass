@@ -137,7 +137,13 @@ pub struct RtspResponder {
     client_rtp_port: Option<u16>,
     /// `(rtp_channel, rtcp_channel)` once a TCP-interleaved SETUP has been handled.
     interleaved: Option<(u8, u8)>,
+    /// Session timeout advertised at SETUP (RFC 2326 §12.37); the I/O layer reaps
+    /// a client silent (no request, no RTCP) past it.
+    timeout_secs: u32,
 }
+
+/// Default RTSP session timeout (RFC 2326 §12.37's default).
+pub const DEFAULT_SESSION_TIMEOUT_SECS: u32 = 60;
 
 impl RtspResponder {
     /// `sdp` is served in `DESCRIBE`; `server_rtp_port` is the UDP port this
@@ -152,7 +158,14 @@ impl RtspResponder {
             ssrc,
             client_rtp_port: None,
             interleaved: None,
+            timeout_secs: DEFAULT_SESSION_TIMEOUT_SECS,
         }
+    }
+
+    /// Advertise a non-default session timeout in the SETUP response.
+    pub fn with_session_timeout_secs(mut self, secs: u32) -> Self {
+        self.timeout_secs = secs.max(1);
+        self
     }
 
     /// The negotiated client RTP port, once a UDP `SETUP` has been handled.
@@ -211,7 +224,9 @@ impl RtspResponder {
             }
             "SETUP" => {
                 self.state = State::Ready;
-                let session = self.session_id.clone();
+                // RFC 2326 §12.37: the timeout param tells the client how often to
+                // keepalive (GET_PARAMETER / OPTIONS / RTCP) before it is reaped.
+                let session = format!("{};timeout={}", self.session_id, self.timeout_secs);
                 // TCP-interleaved transport (RFC 2326 §10.12): RTP / RTCP ride the
                 // control connection on the negotiated channels; no UDP ports.
                 if let Some((rtp_ch, rtcp_ch)) =
@@ -452,7 +467,7 @@ mod tests {
             "advertises the server RTP port pair"
         );
         assert!(text.contains("client_port=5000-5001"));
-        assert!(text.contains("Session: 12345678\r\n"));
+        assert!(text.contains("Session: 12345678;timeout=60\r\n"));
         assert_eq!(
             ev,
             RtspEvent::Setup {
@@ -552,6 +567,16 @@ mod tests {
             parse_interleaved_channels("RTP/AVP/TCP;unicast;interleaved=4-5"),
             Some((4, 5))
         );
+    }
+
+    #[test]
+    fn setup_advertises_a_custom_session_timeout() {
+        let mut s = responder().with_session_timeout_secs(30);
+        let (resp, _) = s.handle_request(&request(
+            "SETUP rtsp://h/s RTSP/1.0\r\nCSeq: 2\r\nTransport: RTP/AVP;unicast;client_port=5000-5001\r\n\r\n",
+        ));
+        let text = core::str::from_utf8(&resp).unwrap();
+        assert!(text.contains("Session: 12345678;timeout=30\r\n"), "{text}");
     }
 
     #[test]
