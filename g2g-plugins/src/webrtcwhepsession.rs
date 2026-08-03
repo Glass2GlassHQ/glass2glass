@@ -38,7 +38,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AudioFormat, Caps, Dim, FrameTiming, G2gError, HardwareError, MemoryDomain, MultiOutputSink,
-    MultiOutputSource, PipelinePacket, Rate, VideoCodec,
+    MultiOutputSource, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate,
+    VideoCodec,
 };
 
 use crate::filesink::io_err;
@@ -121,6 +122,37 @@ impl WebRtcWhepSessionSrc {
     }
 }
 
+static WHEPSESSION_PROPS: &[PropertySpec] = &[
+    PropertySpec::new(
+        "location",
+        PropKind::Str,
+        "WHEP endpoint URL to subscribe to",
+    ),
+    PropertySpec::new(
+        "auth-token",
+        PropKind::Str,
+        "optional Authorization: Bearer token for the WHEP POST",
+    ),
+    PropertySpec::new(
+        "stun-server",
+        PropKind::Str,
+        "STUN server host:port for ICE NAT traversal",
+    ),
+    PropertySpec::new(
+        "turn-server",
+        PropKind::Str,
+        "TURN relay host:port for ICE NAT traversal",
+    ),
+    PropertySpec::new("turn-user", PropKind::Str, "TURN long-term username"),
+    PropertySpec::new("turn-pass", PropKind::Str, "TURN long-term password"),
+    PropertySpec::new(
+        "num-buffers",
+        PropKind::Uint,
+        "access units across both tracks then EOS (0 = unbounded)",
+    )
+    .with_default("0"),
+];
+
 fn video_caps() -> Caps {
     // Geometry is unknown until the in-band SPS, so advertise a `Range`
     // placeholder (a downstream parser recovers the real dimensions): negotiation
@@ -159,6 +191,44 @@ impl MultiOutputSource for WebRtcWhepSessionSrc {
             VIDEO_PORT => Ok(video_caps()),
             AUDIO_PORT => Ok(audio_caps()),
             _ => Err(G2gError::CapsMismatch),
+        }
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        WHEPSESSION_PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        if name == "num-buffers" {
+            self.frame_limit = value.as_uint().ok_or(PropError::Type)?;
+            return Ok(());
+        }
+        let v = value.as_str().ok_or(PropError::Type)?;
+        // The optional fields take an empty string as "unset", so a launch line
+        // can clear one without a separate property.
+        let opt = || (!v.is_empty()).then(|| v.into());
+        match name {
+            "location" => self.whep_url = v.into(),
+            "auth-token" => self.bearer = opt(),
+            "stun-server" => self.stun_server = opt(),
+            "turn-server" => self.turn_server = opt(),
+            "turn-user" => self.turn_user = v.into(),
+            "turn-pass" => self.turn_pass = v.into(),
+            _ => return Err(PropError::Unknown),
+        }
+        Ok(())
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "location" => Some(PropValue::Str(self.whep_url.clone())),
+            "auth-token" => Some(PropValue::Str(self.bearer.clone().unwrap_or_default())),
+            "stun-server" => Some(PropValue::Str(self.stun_server.clone().unwrap_or_default())),
+            "turn-server" => Some(PropValue::Str(self.turn_server.clone().unwrap_or_default())),
+            "turn-user" => Some(PropValue::Str(self.turn_user.clone())),
+            "turn-pass" => Some(PropValue::Str(self.turn_pass.clone())),
+            "num-buffers" => Some(PropValue::Uint(self.frame_limit)),
+            _ => None,
         }
     }
 

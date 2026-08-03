@@ -642,9 +642,10 @@ _(No open parser items.)_
 
 ## Properties / introspection / DSL
 
-- Property-set the remaining feature-gated sources from text (`location=` /
-  `uri=` on rtsp / v4l2, default placeholders today; http / hls / dash now carry
-  `location`).
+- Properties on the platform capture sources (`aaudiosrc` / `camera2src` /
+  `coreaudiosrc` / `avfvideosrc` / `avfaudiosrc` / `screencapturesrc`): their
+  constructor knobs (samplerate, channels, geometry, num-buffers) are
+  unreachable from a launch line today. Platform-gated (Android / macOS).
 - A value grammar for spaces / enums-as-named-flags.
 - A GUI / tooling introspection surface beyond the text dump.
 

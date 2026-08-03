@@ -1556,6 +1556,8 @@ fn register_feature_gated(reg: &mut Registry) {
         "livekitsrc",
         |_n| Box::new(crate::livekitsrc::LiveKitSrc::new("", "", "g2g-sub")),
     ));
+    // Same shape for the multi-track WHEP subscriber; `location` targets the
+    // endpoint (`webrtcwhepsessionsrc name=s location=...`).
     #[cfg(feature = "webrtc")]
     reg.register_fanout_src(g2g_core::runtime::FanoutSrcFactory::new(
         "webrtcwhepsessionsrc",
