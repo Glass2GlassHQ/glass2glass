@@ -304,6 +304,10 @@ pub trait DynMultiInputElement: ElementBound {
     fn caps_constraint_for_output(&self) -> Result<CapsConstraint<'_>, G2gError>;
     /// Dyn-safe mirror of [`MultiInputElement::propose_allocation_for_input`].
     fn propose_allocation_for_input(&self, input: usize, caps: &Caps) -> Option<AllocationParams>;
+    /// Dyn-safe mirror of [`MultiInputElement::propose_allocation_for_output`].
+    fn propose_allocation_for_output(&self, caps: &Caps) -> Option<AllocationParams>;
+    /// Dyn-safe mirror of [`MultiInputElement::configure_allocation_for_output`].
+    fn configure_allocation_for_output(&mut self, params: &AllocationParams);
     /// Dyn-safe mirror of [`MultiInputElement::output_caps`].
     fn output_caps(&self) -> Result<Caps, G2gError>;
     fn configure_pipeline(
@@ -364,6 +368,14 @@ impl<T: MultiInputElement> DynMultiInputElement for T {
 
     fn propose_allocation_for_input(&self, input: usize, caps: &Caps) -> Option<AllocationParams> {
         MultiInputElement::propose_allocation_for_input(self, input, caps)
+    }
+
+    fn propose_allocation_for_output(&self, caps: &Caps) -> Option<AllocationParams> {
+        MultiInputElement::propose_allocation_for_output(self, caps)
+    }
+
+    fn configure_allocation_for_output(&mut self, params: &AllocationParams) {
+        MultiInputElement::configure_allocation_for_output(self, params)
     }
 
     fn output_caps(&self) -> Result<Caps, G2gError> {
@@ -443,6 +455,14 @@ impl<'b> DynMultiInputElement for &'b mut (dyn DynMultiInputElement + 'b) {
 
     fn propose_allocation_for_input(&self, input: usize, caps: &Caps) -> Option<AllocationParams> {
         (**self).propose_allocation_for_input(input, caps)
+    }
+
+    fn propose_allocation_for_output(&self, caps: &Caps) -> Option<AllocationParams> {
+        (**self).propose_allocation_for_output(caps)
+    }
+
+    fn configure_allocation_for_output(&mut self, params: &AllocationParams) {
+        (**self).configure_allocation_for_output(params)
     }
 
     fn output_caps(&self) -> Result<Caps, G2gError> {

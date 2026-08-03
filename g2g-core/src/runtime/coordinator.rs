@@ -106,6 +106,27 @@ pub(crate) enum ArmDirective {
     /// Apply this downstream-derived proposal to the element's own pool:
     /// the upstream half of the cascade (`transform.configure_allocation`).
     Recascade(AllocationParams),
+
+    /// The pool a *producer* settled on for this arm's input link, pushed
+    /// downstream when a muxer re-derives its merged-output allocation (M839).
+    /// The arm absorbs it (`configure_allocation`) and does **not** re-propose:
+    /// it is being told what it will receive, not asked what it wants, and a
+    /// reply would bounce straight back into the muxer it came from. Only the
+    /// DAG runner's coordinator sends it, so it exists only where that does.
+    #[cfg(feature = "std")]
+    ProducerAllocation(AllocationParams),
+}
+
+impl ArmDirective {
+    /// The allocation this directive carries, for the arms that absorb it the
+    /// same way whichever direction it came from.
+    pub(crate) fn params(&self) -> &AllocationParams {
+        match self {
+            ArmDirective::Recascade(p) => p,
+            #[cfg(feature = "std")]
+            ArmDirective::ProducerAllocation(p) => p,
+        }
+    }
 }
 
 /// Producer end of the control channel, handed (by clone) to a runner
@@ -511,7 +532,7 @@ mod tests {
     }
 
     fn taken_size(rx: &Receiver<ArmDirective>) -> Option<usize> {
-        rx.try_recv().map(|ArmDirective::Recascade(p)| p.size_bytes)
+        rx.try_recv().map(|d| d.params().size_bytes)
     }
 
     #[test]

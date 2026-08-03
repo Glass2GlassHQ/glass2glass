@@ -19,7 +19,7 @@ use crate::runtime::channel::{link, SenderSink};
 use crate::runtime::coordinator::realloc_local_dyn;
 use crate::runtime::coordinator::{
     coordinator_with_recascade, negotiate_source_transform_sink, realloc_local,
-    report_nego_failure, solve_last_link, ArmDirective, CoordinatorEvent, MAX_FIXATION_ATTEMPTS,
+    report_nego_failure, solve_last_link, CoordinatorEvent, MAX_FIXATION_ATTEMPTS,
 };
 use crate::runtime::instrument::ElementProbe;
 use crate::runtime::join::{select2, Either, Join2};
@@ -1781,10 +1781,10 @@ where
         loop {
             let packet = if control_open {
                 match select2(ctrl_rx.recv(), link1_rx.recv()).await {
-                    Either::Left(Some(ArmDirective::Recascade(params))) => {
+                    Either::Left(Some(directive)) => {
                         // β: apply the sink's downstream-derived proposal to
                         // our own output pool, then keep waiting for data.
-                        transform.configure_allocation(&params);
+                        transform.configure_allocation(directive.params());
                         continue;
                     }
                     Either::Left(None) => {
@@ -1808,8 +1808,8 @@ where
                     // covers the directive still in flight at shutdown).
                     while control_open {
                         match ctrl_rx.recv().await {
-                            Some(ArmDirective::Recascade(params)) => {
-                                transform.configure_allocation(&params);
+                            Some(directive) => {
+                                transform.configure_allocation(directive.params());
                             }
                             None => control_open = false,
                         }

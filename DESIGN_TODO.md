@@ -240,8 +240,6 @@ Phased plan:
 
 - **Preference algebra.** `CapsPreferences` is a placeholder (sum-of-indices);
   needs a real competing-constraint scenario to drive it.
-- **β allocation re-cascade across a muxer** (per-input-pad re-cascade); the
-  node-keyed coordinator walk terminates at muxers today.
 - **Hardware `tee -> {decode, mux}` integration test** on real Linux
   (`rtsp ffmpeg wayland-sink`); only fake-element coverage today.
 
