@@ -310,11 +310,9 @@ Phased plan:
   `rtmp_ffmpeg_interop` has ffmpeg publish into `RtmpSrc`, ffprobe decoding the
   demuxed FLV; ingest interoperates out of the box. Egress to a real CDN stays
   user-side.)
-- **RTSP server:** ingest multi-client (serving multi-client is done,
-  `RtspServerSink`). The serving *sink*'s TCP-interleaved transport is done
-  (M672: `$`-framed RTP on the control connection, RFC 2326 §10.12, validated
-  against `ffmpeg -rtsp_transport tcp` playing from the sink), as is the
-  *ingest* source's (M532).
+- **RTSP server:** concurrent multi-publisher ingest, N sessions on N output
+  pads (needs a `MultiOutputSource`-based element with detached per-session
+  receive tasks; the single-pad source serves publishers sequentially).
 - **WebRTC.** On the sans-IO `str0m` stack (ICE / DTLS / SRTP, pure-Rust
   crypto), behind the `webrtc` feature: `WebRtcSink` (WHIP egress, H.264 *or*
   Opus) and `WebRtcWhepSrc` (WHEP ingest, H.264 *or* Opus via `media=audio`) —
