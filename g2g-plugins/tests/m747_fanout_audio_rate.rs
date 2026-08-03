@@ -73,15 +73,15 @@ fn wav_rate(bytes: &[u8]) -> u32 {
 #[test]
 fn audioresample_derives_output_for_any_channels_placeholder() {
     let r = AudioResample::auto();
-    let CapsConstraint::DerivedCoupled { derive, .. } = r.caps_constraint_as_transform() else {
-        panic!("audioresample exposes a DerivedCoupled transform constraint");
+    let CapsConstraint::DerivedFields(transform) = r.caps_constraint_as_transform() else {
+        panic!("audioresample exposes a DerivedFields transform constraint");
     };
     let placeholder = Caps::Audio {
         format: AudioFormat::PcmS16Le,
         channels: ANY_CHANNELS,
         sample_rate: 44_100,
     };
-    let out = derive(&placeholder);
+    let out = transform.derive(&placeholder);
     assert!(
         !out.is_empty(),
         "an ANY_CHANNELS placeholder input must still derive an output"

@@ -11,6 +11,7 @@ use crate::element::{BoxFuture, OutputSink, PushOutcome, QosMessage, Reconfigure
 use crate::error::G2gError;
 use crate::frame::PipelinePacket;
 use crate::link::LinkPolicy;
+use crate::runtime::instrument::EdgeCounters;
 
 pub fn bounded<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
     assert!(capacity > 0, "channel capacity must be > 0");
@@ -297,6 +298,10 @@ pub struct LinkSender {
     /// `DataFrame`, popped at the consumer to measure queue residency. `None`
     /// (zero cost) unless the runner enabled instrumentation on this edge.
     pub(crate) transit: Option<TransitRing>,
+    /// Per-edge packet / byte / drop counters (dev tooling), shared with the
+    /// observer tap so a live consumer reads this edge's traffic mid-run.
+    /// `None` (zero cost) unless the runner installed them.
+    pub(crate) counters: Option<Arc<EdgeCounters>>,
 }
 
 /// Send-time stamps for the packets queued on one link, shared between its
@@ -333,11 +338,47 @@ impl LinkSender {
         self.dropped = Some(counter);
     }
 
+    /// Install this edge's live traffic counters (dev tooling), so a mid-run
+    /// observer snapshot sees the packets / bytes / drops crossing here.
+    #[cfg(feature = "std")]
+    pub(crate) fn set_counters(&mut self, counters: Arc<EdgeCounters>) {
+        self.counters = Some(counters);
+    }
+
     /// Record one dropped frame, if a counter is installed.
     fn record_drop(&self) {
         if let Some(c) = &self.dropped {
             *c.lock() += 1;
         }
+        if let Some(c) = &self.counters {
+            c.record_drop();
+        }
+    }
+
+    /// Record one packet that entered the link, if counters are installed.
+    /// `blocked_since` is the stamp taken before a blocking send, so the time
+    /// the producer spent awaiting capacity is folded in.
+    fn record_sent(&self, bytes: u64, blocked_since: Option<u64>) {
+        if let Some(c) = &self.counters {
+            let blocked = blocked_since.map_or(0, |t0| stamp_now_ns().saturating_sub(t0));
+            c.record_packet(bytes, blocked);
+        }
+    }
+}
+
+/// Payload bytes of a packet as they cross a link: the CPU-resident buffer's
+/// length. A device-domain frame (a CUDA / texture handle) carries no bytes
+/// here, and a control packet none at all, so both count 0.
+pub(crate) fn packet_bytes(packet: &PipelinePacket) -> u64 {
+    match packet {
+        PipelinePacket::DataFrame(f) => match &f.domain {
+            crate::memory::MemoryDomain::System(s) => s.as_slice().len() as u64,
+            #[cfg(feature = "alloc")]
+            crate::memory::MemoryDomain::SystemView(v) => v.backing().len() as u64,
+            #[cfg(feature = "alloc")]
+            _ => 0,
+        },
+        _ => 0,
     }
 }
 
@@ -462,6 +503,7 @@ fn build_link(capacity: usize, transit: Option<TransitRing>) -> (LinkSender, Lin
             dropped: None,
             probe: ProbeSlot::default(),
             transit: transit.clone(),
+            counters: None,
         },
         LinkReceiver {
             data: data_rx,
@@ -515,7 +557,10 @@ impl ProbeSlot {
         *self.inner.lock() = None;
     }
 
-    fn action(&self, packet: &PipelinePacket) -> ProbeAction {
+    /// The verdict for `packet`: `Pass` when no interceptor is installed. Also
+    /// consulted by the fan-in session adapter, which shares the tagged channel
+    /// and so carries its own per-input slot.
+    pub(crate) fn action(&self, packet: &PipelinePacket) -> ProbeAction {
         match self.inner.lock().as_ref() {
             Some(probe) => probe.on_packet(packet),
             None => ProbeAction::Pass,
@@ -699,16 +744,18 @@ impl OutputSink for SenderSink {
             // eos) are never dropped, they always block so the stream stays
             // correct. A non-leaky link (the default) always blocks.
             let is_data = matches!(packet, PipelinePacket::DataFrame(_));
+            // Measured before the send moves the packet into the link.
+            let bytes = packet_bytes(&packet);
             if is_data && self.link.policy != LinkPolicy::Block {
                 match self.link.policy {
                     LinkPolicy::DropNewest => match self.link.data.try_send(packet) {
-                        Ok(()) => {}
+                        Ok(()) => self.link.record_sent(bytes, None),
                         // Channel full: drop the incoming frame.
                         Err((_dropped, SendError::Full)) => self.link.record_drop(),
                         Err((_v, SendError::Closed)) => return Err(G2gError::Shutdown),
                     },
                     LinkPolicy::DropOldest => match self.link.data.try_send(packet) {
-                        Ok(()) => {}
+                        Ok(()) => self.link.record_sent(bytes, None),
                         Err((returned, SendError::Full)) => {
                             // Evict the oldest queued data frame to make room.
                             // If only control packets are queued, fall back to
@@ -721,18 +768,20 @@ impl OutputSink for SenderSink {
                             {
                                 self.link.record_drop();
                                 match self.link.data.try_send(returned) {
-                                    Ok(()) => {}
+                                    Ok(()) => self.link.record_sent(bytes, None),
                                     Err((_v, SendError::Closed)) => return Err(G2gError::Shutdown),
                                     Err((_v, SendError::Full)) => {
                                         unreachable!("a slot was just freed by eviction")
                                     }
                                 }
                             } else {
+                                let t0 = self.link.counters.as_ref().map(|_| stamp_now_ns());
                                 self.link
                                     .data
                                     .send(returned)
                                     .await
                                     .map_err(|_| G2gError::Shutdown)?;
+                                self.link.record_sent(bytes, t0);
                             }
                         }
                         Err((_v, SendError::Closed)) => return Err(G2gError::Shutdown),
@@ -749,11 +798,17 @@ impl OutputSink for SenderSink {
                     ring.lock().push_back(stamp_now_ns());
                 }
             }
+            // Stamp before the blocking send so the counters carry how long the
+            // producer was held up by a full link (M846).
+            let blocked_since = self.link.counters.as_ref().map(|_| stamp_now_ns());
             match self.link.data.send(packet).await {
                 // Post-send check covers the "request fired while we were
                 // awaiting capacity" window; the packet is already in the link
                 // under old caps.
-                Ok(()) => Ok(self.post_send_outcome()),
+                Ok(()) => {
+                    self.link.record_sent(bytes, blocked_since);
+                    Ok(self.post_send_outcome())
+                }
                 Err(SendError::Closed) => {
                     if is_data {
                         if let Some(ring) = &self.link.transit {

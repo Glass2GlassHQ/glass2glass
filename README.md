@@ -343,8 +343,8 @@ OS-coupled elements live behind cargo features:
 | `KmsSink` | `kms-sink` | Linux + libdrm; needs DRM master / tty |
 | `D3D11Sink` | `d3d11-sink` | Windows |
 | `MetalVideoSink` (zero-copy from `CVPixelBuffer`, validated on the CI Mac) | `metal-sink` | macOS + Metal |
-| `NvDec` (native NVDEC H.264/H.265 → CUDA NV12, NVCUVID) | `nvdec` | Linux + NVIDIA driver (libnvcuvid) |
-| `NvEnc` (native NVENC CUDA NV12 → H.264/H.265) | `nvenc` | Linux + NVIDIA driver (libnvidia-encode) |
+| `NvDec` (native NVDEC H.264/H.265/AV1 → CUDA NV12 or 10-bit P010, NVCUVID) | `nvdec` | Linux + NVIDIA driver (libnvcuvid) |
+| `NvEnc` (native NVENC CUDA NV12/P010 → H.264/H.265, incl. HEVC Main 10) | `nvenc` | Linux + NVIDIA driver (libnvidia-encode) |
 | `CudaDownload` (CUDA → System), `CudaUpload` (System → CUDA) | `cuda` | Linux + NVIDIA driver (libcuda) |
 | `CudaGlSink` (CUDA-GL present), `CudaKmsSink` (CUDA-GL on KMS) | `cuda-gl`, `cuda-kms` | Linux + NVIDIA + EGL + GL (+ libdrm for KMS) |
 | `CudaToWgpu` / `WgpuToCuda` (CUDA ↔ wgpu zero-copy bridge) | `cuda-wgpu` | Linux + NVIDIA + Vulkan |
@@ -446,7 +446,11 @@ run_graph(g, &clock, LatencyProfile::Live).await?;
 
 Features: `nvenc` (`nvdec` for the decoder). Linux + NVIDIA only. `NvDec`
 itself is multi-domain: driven by downstream demand it keeps frames on the GPU
-(zero-copy) or downloads to System.
+(zero-copy) or downloads to System. It decodes H.264 / H.265 / AV1, emits P010
+for a 10-bit stream, reconfigures in place on a mid-stream resolution change, and
+takes `max-display-delay` to trade latency for decode/display pipelining. `NvEnc`
+encodes P010 as HEVC Main 10 and takes `gop-size` / `repeat-sequence-header` for
+periodic IDRs carrying their own SPS/PPS.
 
 ### RTSP → decode → KMS (tty / no compositor)
 
@@ -591,6 +595,12 @@ transforms, the demuxers (`tsdemux`, `matroskademux`, `flvdemux`, `oggdemux`)
 and muxers (`mpegtsmux`, `matroskamux`, `flvmux`, `oggmux`, `funnel`, `audiomixer`),
 `filesrc` / `filesink`, and `fakesink`. Feature-gated capture / decode / display
 elements still need explicit Rust construction.
+
+The ML elements live in a separate crate, so an app opts them in after building
+the registry: `g2g_ml::register(&mut reg)` (the `launch` feature) adds
+`ortinfer`, `wgpupreprocess`, and `detectionpostprocess`, making
+`... ! ortinfer model=yolov8n.onnx ! detectionpostprocess conf-threshold=0.3 !
+...` parse.
 
 ### Camera → encode → RTP egress over UDP
 

@@ -28,6 +28,7 @@ pub fn format_to_py(fmt: RawVideoFormat) -> &'static str {
         RawVideoFormat::I444 => "Y444",
         RawVideoFormat::I444p10 => "Y444_10LE",
         RawVideoFormat::I444p12 => "Y444_12LE",
+        RawVideoFormat::P010 => "P010_10LE",
         // A g2g format this binding does not model (or one added since): return
         // a marker the gst-python-ml `FrameIO` will reject, rather than guess.
         _ => "UNKNOWN",
@@ -52,6 +53,7 @@ pub fn format_from_py(s: &str) -> Option<RawVideoFormat> {
         "Y444" => RawVideoFormat::I444,
         "Y444_10LE" => RawVideoFormat::I444p10,
         "Y444_12LE" => RawVideoFormat::I444p12,
+        "P010_10LE" => RawVideoFormat::P010,
         _ => return None,
     })
 }
@@ -72,6 +74,8 @@ pub fn frame_bytes(fmt: RawVideoFormat, width: u32, height: u32) -> usize {
         RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 => w * h * 4,
         RawVideoFormat::Yuyv => w * h * 2,
         RawVideoFormat::Nv12 => w * h * 3 / 2,
+        // Semi-planar 10-bit: NV12's sample counts at 2 bytes each.
+        RawVideoFormat::P010 => w * h * 3,
         // The fully-planar formats are handled above via `chroma_shift`.
         RawVideoFormat::I420
         | RawVideoFormat::I420p10

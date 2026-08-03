@@ -66,8 +66,14 @@ fn nv12_frame(bytes: Vec<u8>, pts_ns: u64, sequence: u64) -> Frame {
     }
 }
 
+// parallel per-test device creation intermittently segfaults in the NVIDIA
+// driver (the recorded wgpu gotcha), so the GPU tests take one lock for their
+// whole body.
+static GPU_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[tokio::test]
 async fn gpu_nv12_to_rgb_tensor_matches_cpu_reference() {
+    let _gpu = GPU_LOCK.lock().await;
     if !gpu_available().await {
         eprintln!("skipping: no wgpu adapter on this host");
         return;
@@ -156,6 +162,7 @@ async fn gpu_nv12_to_rgb_tensor_matches_cpu_reference() {
 /// off-element yields the same values as the system-memory variant.
 #[tokio::test]
 async fn gpu_output_keeps_tensor_on_device_and_matches_reference() {
+    let _gpu = GPU_LOCK.lock().await;
     if !gpu_available().await {
         eprintln!("skipping: no wgpu adapter on this host");
         return;
@@ -227,6 +234,7 @@ async fn gpu_output_keeps_tensor_on_device_and_matches_reference() {
 /// two paths are proven to produce identical output.
 #[tokio::test]
 async fn surface_import_samples_gpu_texture_and_matches_reference() {
+    let _gpu = GPU_LOCK.lock().await;
     if !gpu_available().await {
         eprintln!("skipping: no wgpu adapter on this host");
         return;
@@ -302,6 +310,7 @@ async fn surface_import_samples_gpu_texture_and_matches_reference() {
 /// the end and compare to the CPU reference.
 #[tokio::test]
 async fn surface_import_with_gpu_output_stays_resident() {
+    let _gpu = GPU_LOCK.lock().await;
     if !gpu_available().await {
         eprintln!("skipping: no wgpu adapter on this host");
         return;

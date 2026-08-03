@@ -27,9 +27,9 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError,
-    MemoryDomain, OutputSink, PassthroughFields, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec, Rate, RawVideoFormat,
+    AsyncElement, Caps, CapsConstraint, CapsTransform, ConfigureOutcome, Dim, FieldTransform,
+    FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec, Rate, RawVideoFormat, RawVideoShape,
 };
 
 #[derive(Debug)]
@@ -216,52 +216,33 @@ impl AsyncElement for VideoRate {
         }
     }
 
-    /// Native `DerivedOutput`: any raw input maps to the same format and
-    /// geometry at the configured target framerate. An invalid target
-    /// (non-positive fps) collapses to the empty set so the solve fails
-    /// loud.
+    /// Native `DerivedFields`: any raw input maps to the same format and
+    /// geometry at the configured target framerate, so format + geometry are
+    /// the coupled fields and a downstream geometry pin still couples back
+    /// through this rate-only element. An invalid target (non-positive fps)
+    /// declares no output shape at all, so the solve fails loud.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        let rate = self.rate_q16;
-        let auto = self.auto;
-        // Passthrough format + geometry (retarget framerate only), so a
-        // downstream geometry pin still couples back through this rate-only
-        // element. Framerate is the changed field.
-        let passthrough = PassthroughFields::NONE
-            .with_format()
-            .with_width()
-            .with_height();
-        let derive = Box::new(move |input: &Caps| match input {
-            Caps::RawVideo {
-                format,
-                width,
-                height,
-                framerate,
-            } => {
-                let mk = |fr: Rate| Caps::RawVideo {
-                    format: *format,
-                    width: width.clone(),
-                    height: height.clone(),
-                    framerate: fr,
-                };
-                if auto {
-                    // Caps-driven: default to passthrough (the input rate, no
-                    // retiming), but advertise "any rate" so a downstream
-                    // capsfilter pins the target. Passthrough is preferred (first).
-                    CapsSet::from_alternatives(vec![mk(framerate.clone()), mk(Rate::Any)])
-                } else if rate > 0 {
-                    // Property-driven: the fixed target framerate.
-                    CapsSet::one(mk(Rate::Fixed(rate)))
-                } else {
-                    // Invalid (non-positive property, not auto): fail loud.
-                    CapsSet::from_alternatives(Vec::new())
-                }
-            }
-            _ => CapsSet::from_alternatives(Vec::new()),
-        });
-        CapsConstraint::DerivedCoupled {
-            derive,
-            passthrough,
-        }
+        let shapes = if self.auto {
+            // Caps-driven: default to passthrough (the input rate, no retiming),
+            // but advertise "any rate" so a downstream capsfilter pins the
+            // target. Passthrough is preferred (first).
+            vec![
+                RawVideoShape::PASSTHROUGH,
+                RawVideoShape::PASSTHROUGH.with_framerate(FieldTransform::Fixed(Rate::Any)),
+            ]
+        } else if self.rate_q16 > 0 {
+            // Property-driven: the fixed target framerate.
+            vec![RawVideoShape::PASSTHROUGH
+                .with_framerate(FieldTransform::Fixed(Rate::Fixed(self.rate_q16)))]
+        } else {
+            Vec::new()
+        };
+        CapsConstraint::DerivedFields(CapsTransform::RawVideo {
+            // Every raw format retimes; the element never inspects pixels.
+            accept: Vec::new(),
+            produce: Vec::new(),
+            shapes,
+        })
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -452,6 +433,7 @@ static VIDEORATE_PROPS: &[PropertySpec] = &[PropertySpec::new(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use g2g_core::PassthroughFields;
 
     // 30 fps grid (ns) and the target intervals used below.
     const STEP_30: u64 = 1_000_000_000 / 30;
@@ -587,16 +569,13 @@ mod tests {
     #[test]
     fn derived_output_replaces_framerate_only() {
         let r = VideoRate::new(10.0);
-        let CapsConstraint::DerivedCoupled {
-            derive,
-            passthrough,
-        } = r.caps_constraint_as_transform()
-        else {
-            panic!("expected DerivedCoupled");
+        let CapsConstraint::DerivedFields(t) = r.caps_constraint_as_transform() else {
+            panic!("expected DerivedFields");
         };
+        let derive = |c: &Caps| t.derive(c);
         // format + geometry pass through; framerate is the retargeted field.
         assert_eq!(
-            passthrough,
+            t.passthrough(),
             PassthroughFields::NONE
                 .with_format()
                 .with_width()
@@ -613,10 +592,10 @@ mod tests {
         // framerate pin couples back.
         let mut r = VideoRate::auto();
         {
-            let CapsConstraint::DerivedCoupled { derive, .. } = r.caps_constraint_as_transform()
-            else {
-                panic!("expected DerivedCoupled");
+            let CapsConstraint::DerivedFields(t) = r.caps_constraint_as_transform() else {
+                panic!("expected DerivedFields");
             };
+            let derive = |c: &Caps| t.derive(c);
             let out = derive(&nv12_320x240(Rate::Fixed(30 << 16)));
             assert_eq!(
                 out.alternatives(),

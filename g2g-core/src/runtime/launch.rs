@@ -30,10 +30,21 @@
 //! previous element's property); the muxer chain is last. A muxer has one output
 //! pad, so it must feed a downstream consumer.
 //!
-//! Scope: `key=value` with no spaces in the value (double quotes around a value
-//! are stripped). Muxer `key=value` properties are not applied (the in-tree
-//! muxers have none; `name=` is still the handle). A pad-name suffix on a
-//! reference (`t.src_0`) is accepted but ignored (pads are positional).
+//! Value grammar (M840): a value may carry spaces by quoting (`"..."` or
+//! `'...'`, either anywhere in the fragment: `location=/tmp/"my dir"/a.ts`) or by
+//! escaping (`\ `). A `\` escapes a quote, another `\`, a `!`, a `#`, or
+//! whitespace; before anything else it stays literal, so a Windows path
+//! (`C:\videos\a.ts`) survives unescaped. An enum property's value is checked
+//! against its [`PropertySpec::enum_values`](crate::PropertySpec) before the
+//! element sees it, and a [`Flags`](crate::PropKind::Flags) property takes a
+//! `+`-joined set (`protocols=udp+tcp`), so a bad name names the valid ones.
+//! A pad-name suffix on a reference (`t.src_0`) is accepted but ignored (pads are
+//! positional).
+//!
+//! Two `key=value` pairs are launch keywords rather than properties: `name=` is
+//! the instance name (and the handle pad references resolve against), and
+//! `log-category=` (M847) replaces that instance's `G2G_DEBUG` category, leaving
+//! the auto `<type>N` naming alone.
 
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
@@ -43,7 +54,7 @@ use crate::caps::Caps;
 use crate::element::DynAsyncElement;
 use crate::graph::{Graph, GraphError, NodeId, PadId};
 use crate::link::LinkPolicy;
-use crate::property::PropValue;
+use crate::property::{PropError, PropValue, PropertySpec, ValueError};
 use crate::runtime::autoplug::{
     is_raw_audio, is_raw_video, PadKind, PadRequest, Registry, UriError,
 };
@@ -72,6 +83,15 @@ pub enum ParseError {
         element: String,
         key: String,
         value: String,
+    },
+    /// The value names no declared choice of an enum / flag property. `value` is
+    /// the offending nick (one entry of a `+`-joined set), or the whole value when
+    /// the set was malformed; `values` is the property's declared list.
+    BadEnumValue {
+        element: String,
+        key: String,
+        value: String,
+        values: &'static str,
     },
     /// A `name.` reference names no element declared with that `name=`.
     UnknownReference(String),
@@ -156,6 +176,21 @@ impl core::fmt::Display for ParseError {
                 }
                 Ok(())
             }
+            ParseError::BadEnumValue {
+                element,
+                key,
+                value,
+                values,
+            } => {
+                write!(f, "{element}: invalid value '{value}' for property '{key}'")?;
+                if !values.is_empty() {
+                    write!(f, " (valid: {values})")?;
+                }
+                if value.contains('+') {
+                    write!(f, " (a flag set joins nicks with '+', e.g. video+audio)")?;
+                }
+                Ok(())
+            }
             ParseError::UnknownReference(n) => {
                 write!(f, "reference to undeclared element name: {n}")
             }
@@ -202,11 +237,13 @@ impl core::fmt::Display for ParseError {
 
 /// One parsed element: factory name plus its `key=value` properties (all owned so
 /// errors can name them), and the optional `name=` handle that pad references
-/// resolve against. `name` is special-cased here, never applied as a property.
+/// resolve against. `name` and `log-category` are special-cased here (launch
+/// keywords, not properties), never applied as properties.
 struct ElementSpec {
     name: String,
     props: Vec<(String, String)>,
     instance: Option<String>,
+    log_category: Option<String>,
 }
 
 /// An item in a chain: an element to build, a `t.` reference to a named element
@@ -305,6 +342,7 @@ fn consume_element<'a, I: Iterator<Item = &'a str>>(
         name: name.to_string(),
         props: Vec::new(),
         instance: None,
+        log_category: None,
     };
     while let Some(&tok) = tokens.peek() {
         if tok == "!" || is_caps_token(tok) || as_ref_name(tok).is_some() {
@@ -317,50 +355,95 @@ fn consume_element<'a, I: Iterator<Item = &'a str>>(
                 token: tok.to_string(),
             })?;
         tokens.next();
-        // Strip a single layer of surrounding quotes (double or single) from the value.
-        let value = strip_quotes(value);
+        let value = unquote_value(value);
         if key == "name" {
-            spec.instance = Some(value.to_string());
+            spec.instance = Some(value);
+        } else if key == "log-category" {
+            // M847: a launch keyword like `name=`, not a property: it renames this
+            // instance's `G2G_DEBUG` filter key rather than configuring it.
+            spec.log_category = Some(value);
         } else {
-            spec.props.push((key.to_string(), value.to_string()));
+            spec.props.push((key.to_string(), value));
         }
     }
     Ok(spec)
 }
 
-/// Strip a single matching pair of surrounding quotes (double or single) from a
-/// property value. gst-launch accepts both `location="a b"` and `location='a b'`.
-fn strip_quotes(v: &str) -> &str {
-    let b = v.as_bytes();
-    // Quotes are ASCII, so byte-slicing at these bounds stays on char boundaries.
-    if b.len() >= 2 && (b[0] == b'"' || b[0] == b'\'') && b[b.len() - 1] == b[0] {
-        &v[1..v.len() - 1]
-    } else {
-        v
+/// The characters a `\` may escape in a launch line: the quote characters, a `\`
+/// itself, the `!` separator, the `#` comment marker, and whitespace. A `\`
+/// before anything else is literal, so an unescaped Windows path
+/// (`location=C:\videos\a.ts`) survives.
+fn is_escapable(c: char) -> bool {
+    matches!(c, '"' | '\'' | '\\' | '!' | '#') || c.is_whitespace()
+}
+
+/// Resolve a token's quoting into the literal property value: drop the quote
+/// characters that open / close a quoted region and resolve `\x` escapes. A value
+/// may open and close a quoted region more than once
+/// (`location=/tmp/"my dir"/a.ts`), so this walks the whole token rather than
+/// stripping one surrounding pair. Both quote characters work; gst-launch quotes
+/// only with `"` (a `'` is literal there), so this accepts a superset.
+fn unquote_value(v: &str) -> String {
+    let mut out = String::with_capacity(v.len());
+    let mut quote: Option<char> = None;
+    let mut chars = v.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => match chars.next() {
+                Some(n) if is_escapable(n) => out.push(n),
+                Some(n) => {
+                    out.push('\\');
+                    out.push(n);
+                }
+                None => out.push('\\'),
+            },
+            '"' | '\'' if quote.is_none() => quote = Some(c),
+            _ if Some(c) == quote => quote = None,
+            _ => out.push(c),
+        }
     }
+    out
 }
 
 /// Split a pipeline string into tokens, honoring quoted property values and
 /// `#` comments. Outside quotes, whitespace separates tokens and `!` is a
 /// standalone token; inside a `"..."` or `'...'` region both are literal, so a
 /// value may contain spaces (and even `!`), e.g. `element="x264enc bitrate=4000"`
-/// or `location='/my file.ts'`. A `#` outside quotes starts a comment that runs
-/// to end of line (a pasted multi-line pipeline may carry them). The surrounding
-/// quotes are kept on the token; [`consume_element`] strips them from the value.
-/// An unterminated quote runs to end of input (best-effort; the property parse
-/// then reports any resulting malformed token).
+/// or `location='/my file.ts'`. A `\` escapes the next character when it is one
+/// of the launch-special ones ([`is_escapable`]), so `location=/my\ file.ts` and
+/// a `\"` inside a quoted region are literal. A `#` outside quotes starts a
+/// comment that runs to end of line (a pasted multi-line pipeline may carry
+/// them). Quotes and escapes are kept on the token; [`unquote_value`] resolves
+/// them once the `key=` split is known. An unterminated quote runs to end of
+/// input (best-effort; the property parse then reports any resulting malformed
+/// token).
 fn tokenize(s: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut cur = String::new();
     // The open quote char (`"` or `'`), or `None` outside a quoted region.
     let mut quote: Option<char> = None;
     let mut in_comment = false;
-    for c in s.chars() {
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
         if in_comment {
             // A comment runs to end of line; the newline (whitespace) ends it.
             if c == '\n' {
                 in_comment = false;
             }
+            continue;
+        }
+        // An escape pair stays whole (and inert) through tokenization: neither
+        // char can close a quote, split a token, or start a comment.
+        if c == '\\' {
+            if let Some(&next) = chars.peek() {
+                if is_escapable(next) {
+                    chars.next();
+                    cur.push('\\');
+                    cur.push(next);
+                    continue;
+                }
+            }
+            cur.push('\\');
             continue;
         }
         match c {
@@ -439,6 +522,7 @@ fn parse_chains(pipeline: &str) -> Result<Vec<Chain>, ParseError> {
                         name: "capsfilter".to_string(),
                         props: alloc::vec![("caps".to_string(), tok.to_string())],
                         instance: None,
+                        log_category: None,
                     }));
                     st = St::AfterNode;
                 } else if let Some((name, pad)) = split_pad_ref(tok) {
@@ -482,166 +566,67 @@ fn parse_chains(pipeline: &str) -> Result<Vec<Chain>, ParseError> {
     Ok(chains)
 }
 
-/// Apply parsed `key=value` props to a source, parsing each value for its
-/// declared [`PropKind`](crate::PropKind).
-/// Apply launch-line properties to a terminal fan-out source (M727), the
-/// fanout-source analog of [`apply_source_props`].
-fn apply_fanout_src_props(
-    src: &mut alloc::boxed::Box<dyn crate::fanout::DynMultiOutputSource>,
+/// The property surface a launch node exposes, so one applier serves every node
+/// shape (source, transform / sink, muxer, demuxer, fan-out source) instead of a
+/// copy of the parse-and-set loop per shape.
+trait PropTarget {
+    fn specs(&self) -> &'static [PropertySpec];
+    fn set(&mut self, name: &str, value: PropValue) -> Result<(), PropError>;
+}
+
+macro_rules! impl_prop_target {
+    ($($t:ty),* $(,)?) => {
+        $(impl PropTarget for Box<$t> {
+            fn specs(&self) -> &'static [PropertySpec] {
+                (**self).properties()
+            }
+            fn set(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+                (**self).set_property(name, value)
+            }
+        })*
+    };
+}
+
+impl_prop_target!(
+    dyn DynSourceLoop,
+    dyn DynAsyncElement,
+    dyn crate::runtime::DynMultiInputElement,
+    dyn crate::runtime::DynMultiOutputElement,
+    dyn crate::fanout::DynMultiOutputSource,
+);
+
+/// Apply parsed `key=value` props to a node: look each name up in the element's
+/// declared [`PropertySpec`]s, parse the text for that spec (which validates an
+/// enum nick / flag set against its declared values), then set it.
+fn apply_props<T: PropTarget>(
+    target: &mut T,
     name: &str,
     props: &[(String, String)],
 ) -> Result<(), ParseError> {
     for (key, raw) in props {
-        if key == "name" {
-            continue;
-        }
-        let spec = src
-            .properties()
-            .iter()
-            .find(|p| p.name == key)
-            .ok_or_else(|| ParseError::UnknownProperty {
-                element: name.to_string(),
-                key: key.clone(),
-            })?;
-        let value = crate::property::PropValue::parse(spec.kind, raw).map_err(|_| {
-            ParseError::BadValue {
-                element: name.to_string(),
-                key: key.clone(),
-                value: raw.clone(),
-            }
-        })?;
-        src.set_property(key, value)
-            .map_err(|_| ParseError::BadValue {
-                element: name.to_string(),
-                key: key.clone(),
-                value: raw.clone(),
-            })?;
-    }
-    Ok(())
-}
-
-fn apply_source_props(
-    el: &mut Box<dyn DynSourceLoop>,
-    name: &str,
-    props: &[(String, String)],
-) -> Result<(), ParseError> {
-    for (key, value) in props {
-        let kind = el
-            .properties()
+        let spec = *target
+            .specs()
             .iter()
             .find(|s| s.name == key)
             .ok_or_else(|| ParseError::UnknownProperty {
                 element: name.into(),
                 key: key.clone(),
-            })?
-            .kind;
-        let parsed = PropValue::parse(kind, value).map_err(|_| ParseError::BadValue {
+            })?;
+        let bad_value = || ParseError::BadValue {
             element: name.into(),
             key: key.clone(),
-            value: value.clone(),
+            value: raw.clone(),
+        };
+        let value = spec.parse_value(raw).map_err(|e| match e {
+            ValueError::Kind(_) => bad_value(),
+            ValueError::Nick(nick) => ParseError::BadEnumValue {
+                element: name.into(),
+                key: key.clone(),
+                value: nick,
+                values: spec.enum_values.unwrap_or(""),
+            },
         })?;
-        el.set_property(key, parsed)
-            .map_err(|_| ParseError::BadValue {
-                element: name.into(),
-                key: key.clone(),
-                value: value.clone(),
-            })?;
-    }
-    Ok(())
-}
-
-/// Apply parsed `key=value` props to a transform / sink element.
-fn apply_element_props(
-    el: &mut Box<dyn DynAsyncElement>,
-    name: &str,
-    props: &[(String, String)],
-) -> Result<(), ParseError> {
-    for (key, value) in props {
-        let kind = el
-            .properties()
-            .iter()
-            .find(|s| s.name == key)
-            .ok_or_else(|| ParseError::UnknownProperty {
-                element: name.into(),
-                key: key.clone(),
-            })?
-            .kind;
-        let parsed = PropValue::parse(kind, value).map_err(|_| ParseError::BadValue {
-            element: name.into(),
-            key: key.clone(),
-            value: value.clone(),
-        })?;
-        el.set_property(key, parsed)
-            .map_err(|_| ParseError::BadValue {
-                element: name.into(),
-                key: key.clone(),
-                value: value.clone(),
-            })?;
-    }
-    Ok(())
-}
-
-/// Apply `key=value` properties to a muxer node, the same as
-/// [`apply_element_props`] but over the [`DynMultiInputElement`] surface (M199:
-/// muxers gained a property surface, so `pyaggregator module=... class=...` and
-/// the like parse). `name=` is already consumed as the node handle.
-fn apply_muxer_props(
-    mux: &mut Box<dyn crate::runtime::DynMultiInputElement>,
-    name: &str,
-    props: &[(String, String)],
-) -> Result<(), ParseError> {
-    for (key, value) in props {
-        let kind = mux
-            .properties()
-            .iter()
-            .find(|s| s.name == key)
-            .ok_or_else(|| ParseError::UnknownProperty {
-                element: name.into(),
-                key: key.clone(),
-            })?
-            .kind;
-        let parsed = PropValue::parse(kind, value).map_err(|_| ParseError::BadValue {
-            element: name.into(),
-            key: key.clone(),
-            value: value.clone(),
-        })?;
-        mux.set_property(key, parsed)
-            .map_err(|_| ParseError::BadValue {
-                element: name.into(),
-                key: key.clone(),
-                value: value.clone(),
-            })?;
-    }
-    Ok(())
-}
-
-fn apply_demux_props(
-    demux: &mut Box<dyn crate::runtime::DynMultiOutputElement>,
-    name: &str,
-    props: &[(String, String)],
-) -> Result<(), ParseError> {
-    for (key, value) in props {
-        let kind = demux
-            .properties()
-            .iter()
-            .find(|s| s.name == key)
-            .ok_or_else(|| ParseError::UnknownProperty {
-                element: name.into(),
-                key: key.clone(),
-            })?
-            .kind;
-        let parsed = PropValue::parse(kind, value).map_err(|_| ParseError::BadValue {
-            element: name.into(),
-            key: key.clone(),
-            value: value.clone(),
-        })?;
-        demux
-            .set_property(key, parsed)
-            .map_err(|_| ParseError::BadValue {
-                element: name.into(),
-                key: key.clone(),
-                value: value.clone(),
-            })?;
+        target.set(key, value).map_err(|_| bad_value())?;
     }
     Ok(())
 }
@@ -729,6 +714,7 @@ fn expand_decodebin(registry: &Registry, chains: Vec<Chain>) -> Result<Vec<Chain
                                     name: primary.demux.to_string(),
                                     props: primary.props.clone(),
                                     instance: None,
+                                    log_category: None,
                                 }));
                                 upstream = Some((primary.demux.to_string(), primary.props));
                                 primary.caps
@@ -755,6 +741,7 @@ fn expand_decodebin(registry: &Registry, chains: Vec<Chain>) -> Result<Vec<Chain
                             name: name.to_string(),
                             props: Vec::new(),
                             instance: None,
+                            log_category: None,
                         }));
                         upstream = Some((name.to_string(), Vec::new()));
                     }
@@ -797,7 +784,7 @@ fn resolve_upstream_caps(
     props: &[(String, String)],
 ) -> Result<Caps, ParseError> {
     if let Some(mut src) = registry.make_source(name) {
-        apply_source_props(&mut src, name, props)?;
+        apply_props(&mut src, name, props)?;
         // `probe_output_caps` may sniff the header (a `bytestream-format=auto`
         // source), so `decodebin` picks the demuxer from the real content, not a
         // mislabeled extension; it falls back to the no-I/O caps otherwise.
@@ -868,6 +855,7 @@ fn expand_uri_sources(registry: &Registry, chains: Vec<Chain>) -> Result<Vec<Cha
                     name: sink,
                     props: Vec::new(),
                     instance: None,
+                    log_category: None,
                 }));
             }
         }
@@ -926,6 +914,7 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
                         name: name.to_string(),
                         props: Vec::new(),
                         instance: None,
+                        log_category: None,
                     });
                     prebuilt.push(Some(node));
                     eps.push(Endpoint::Element(ei));
@@ -1204,7 +1193,7 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
             if src.output_count() != out_deg[ei] {
                 return Err(ParseError::UnknownInputPad(spec.name.clone()));
             }
-            apply_fanout_src_props(&mut src, &spec.name, &spec.props)?;
+            apply_props(&mut src, &spec.name, &spec.props)?;
             graph
                 .add_fanout_src(GraphNodeRef::FanoutSource(src), out_deg[ei] as u8)
                 .node()
@@ -1212,13 +1201,13 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
             let mut src = registry
                 .make_source(&spec.name)
                 .ok_or_else(|| ParseError::UnknownSource(spec.name.clone()))?;
-            apply_source_props(&mut src, &spec.name, &spec.props)?;
+            apply_props(&mut src, &spec.name, &spec.props)?;
             graph.add_source(GraphNodeRef::Source(src))
         } else if is_muxer(ei) {
             let mut mux = registry
                 .make_muxer(&spec.name, in_deg[ei])
                 .ok_or_else(|| ParseError::NotAMuxer(spec.name.clone()))?;
-            apply_muxer_props(&mut mux, &spec.name, &spec.props)?;
+            apply_props(&mut mux, &spec.name, &spec.props)?;
             // Resolve named input-pad refs (M481) to concrete indices via the
             // muxer's own scheme, so `... ! mux.audio_0  ... ! mux.video_0` routes
             // by name regardless of order. Named refs claim their index first;
@@ -1283,7 +1272,7 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
             let mut demux = registry
                 .make_demux(&spec.name, out_deg[ei])
                 .ok_or_else(|| ParseError::UnknownElement(spec.name.clone()))?;
-            apply_demux_props(&mut demux, &spec.name, &spec.props)?;
+            apply_props(&mut demux, &spec.name, &spec.props)?;
             graph
                 .add_demux(GraphNodeRef::Demux(demux), out_deg[ei] as u8)
                 .node()
@@ -1291,15 +1280,25 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
             let mut el = registry
                 .make_element(&spec.name)
                 .ok_or_else(|| ParseError::UnknownElement(spec.name.clone()))?;
-            apply_element_props(&mut el, &spec.name, &spec.props)?;
+            apply_props(&mut el, &spec.name, &spec.props)?;
             graph.add_sink(GraphNodeRef::Element(el))
         } else {
             let mut el = registry
                 .make_element(&spec.name)
                 .ok_or_else(|| ParseError::UnknownElement(spec.name.clone()))?;
-            apply_element_props(&mut el, &spec.name, &spec.props)?;
+            apply_props(&mut el, &spec.name, &spec.props)?;
             graph.add_transform(GraphNodeRef::Element(el))
         };
+        // M842: a `name=` is the element's instance name at run time, not just
+        // the handle pad references resolve against.
+        if let Some(inst) = &spec.instance {
+            graph.set_node_name(node, inst.clone());
+        }
+        // M847: `log-category=` renames this instance's log category, which the
+        // runner hands to the element before naming it.
+        if let Some(cat) = &spec.log_category {
+            graph.set_node_log_category(node, cat.clone());
+        }
         node_of.push(Some(node));
     }
 
@@ -1572,6 +1571,62 @@ mod tests {
     }
 
     #[test]
+    fn escaped_space_keeps_a_value_whole() {
+        // gst-launch 1.26 does the same: `\ ` is a literal space, not a token
+        // break (verified against `filesink location=`).
+        assert_eq!(
+            tokenize(r"filesink location=/my\ file.ts ! sink"),
+            ["filesink", r"location=/my\ file.ts", "!", "sink"]
+        );
+        let chains = parse_chains(r"videotestsrc ! filesink location=/my\ file.ts").unwrap();
+        let Item::Element(fs) = &chains[0][1] else {
+            panic!("element")
+        };
+        assert_eq!(fs.props, [("location".to_string(), "/my file.ts".into())]);
+    }
+
+    #[test]
+    fn escaped_quote_does_not_close_the_region() {
+        // `"a\"b"` is one token holding `a"b`, as in gst-launch.
+        assert_eq!(
+            tokenize(r#"identity note="a\" b" ! sink"#),
+            ["identity", r#"note="a\" b""#, "!", "sink"]
+        );
+        let chains = parse_chains(r#"videotestsrc ! identity note="a\" b""#).unwrap();
+        let Item::Element(id) = &chains[0][1] else {
+            panic!("element")
+        };
+        assert_eq!(id.props, [("note".to_string(), "a\" b".into())]);
+    }
+
+    #[test]
+    fn quoted_region_may_sit_mid_value() {
+        // gst-launch rejects this ("no element ..."): its lexer only quotes a
+        // whole value. g2g accepts the superset, so a path with one spaced
+        // component needs no quoting of the rest.
+        let chains =
+            parse_chains(r#"videotestsrc ! filesink location=/tmp/"my dir"/a.ts"#).unwrap();
+        let Item::Element(fs) = &chains[0][1] else {
+            panic!("element")
+        };
+        assert_eq!(
+            fs.props,
+            [("location".to_string(), "/tmp/my dir/a.ts".into())]
+        );
+    }
+
+    #[test]
+    fn unescaped_backslash_stays_literal() {
+        // A Windows path survives unescaped. gst-launch would drop these
+        // backslashes (`videos\a.ts` opens a file called `videosa.ts`), so this
+        // is a deliberate deviation: `\` escapes only the launch-special
+        // characters.
+        assert_eq!(unquote_value(r"C:\videos\a.ts"), r"C:\videos\a.ts");
+        assert_eq!(unquote_value(r"a\ b"), "a b");
+        assert_eq!(unquote_value(r"a\\b"), r"a\b");
+    }
+
+    #[test]
     fn hash_starts_a_comment_to_end_of_line() {
         // Trailing comment on one line, and a comment mid-pipeline across lines.
         let chains = parse_chains("videotestsrc ! fakesink # trailing note").unwrap();
@@ -1611,6 +1666,30 @@ mod tests {
             value: "abc".to_string(),
         };
         assert!(!alloc::format!("{plain}").contains("ranges"));
+    }
+
+    #[test]
+    fn enum_value_error_lists_the_valid_nicks() {
+        let e = ParseError::BadEnumValue {
+            element: "videoflip".to_string(),
+            key: "method".to_string(),
+            value: "sideways".to_string(),
+            values: "none | clockwise",
+        };
+        let msg = alloc::format!("{e}");
+        assert!(msg.contains("videoflip"), "{msg}");
+        assert!(msg.contains("'method'"), "{msg}");
+        assert!(msg.contains("valid: none | clockwise"), "{msg}");
+        assert!(!msg.contains("flag set"), "no flag hint for a plain enum");
+        // A malformed flag set (the whole value is reported) also hints at the
+        // `+` syntax.
+        let flags = ParseError::BadEnumValue {
+            element: "rtspsrc".to_string(),
+            key: "protocols".to_string(),
+            value: "udp+".to_string(),
+            values: "udp | tcp",
+        };
+        assert!(alloc::format!("{flags}").contains("flag set"));
     }
 
     #[test]

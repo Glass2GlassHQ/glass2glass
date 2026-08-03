@@ -1,7 +1,7 @@
 // Pure export helpers over React Flow's node/edge shape (node.id,
-// node.data.element, node.data.props; edge.source, edge.target). Both outputs
-// load back into g2g: the gst-launch line via the text parser, the JSON via the
-// declarative graph loader.
+// node.data.element, node.data.props; edge.source, edge.target). Every output
+// loads back into g2g: the gst-launch line via the text parser, the JSON and the
+// YAML via the declarative graph loader (one schema, two spellings).
 
 // Shared node-shape helpers, used by both the palette (App.jsx) and the
 // importers (import.js), so the two build identical node data.
@@ -80,17 +80,46 @@ export function toLaunch(nodes, edges) {
   return out.join("\n");
 }
 
+// The declarative document behind both structured exports: nodes in topological
+// order with their props, then the edges.
+function graphDoc(nodes, edges) {
+  return {
+    nodes: topoOrder(nodes, edges).map((n) => ({
+      id: n.id,
+      element: n.data.element,
+      ...(Object.keys(n.data.props || {}).length ? { props: n.data.props } : {}),
+    })),
+    edges: edges.map((e) => ({ from: e.source, to: e.target })),
+  };
+}
+
 export function toJSON(nodes, edges) {
-  return JSON.stringify(
-    {
-      nodes: topoOrder(nodes, edges).map((n) => ({
-        id: n.id,
-        element: n.data.element,
-        ...(Object.keys(n.data.props || {}).length ? { props: n.data.props } : {}),
-      })),
-      edges: edges.map((e) => ({ from: e.source, to: e.target })),
-    },
-    null,
-    2,
-  );
+  return JSON.stringify(graphDoc(nodes, edges), null, 2);
+}
+
+// Every scalar is emitted double-quoted: props hold UI strings, and the loader
+// types them from the element's PropertySpec, so "3" and 3 mean the same thing.
+// Quoting also keeps a caps value (commas, slashes) from needing flow-style rules.
+function yamlStr(v) {
+  return `"${String(v).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
+export function toYAML(nodes, edges) {
+  const doc = graphDoc(nodes, edges);
+  const out = [];
+  out.push(doc.nodes.length ? "nodes:" : "nodes: []");
+  doc.nodes.forEach((n) => {
+    out.push(`  - id: ${yamlStr(n.id)}`);
+    out.push(`    element: ${yamlStr(n.element)}`);
+    if (n.props) {
+      out.push("    props:");
+      Object.entries(n.props).forEach(([k, v]) => out.push(`      ${k}: ${yamlStr(v)}`));
+    }
+  });
+  out.push(doc.edges.length ? "edges:" : "edges: []");
+  doc.edges.forEach((e) => {
+    out.push(`  - from: ${yamlStr(e.from)}`);
+    out.push(`    to: ${yamlStr(e.to)}`);
+  });
+  return out.join("\n") + "\n";
 }

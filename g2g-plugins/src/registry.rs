@@ -34,6 +34,7 @@ use crate::audioresample::AudioResample;
 use crate::audiotestsrc::AudioTestSrc;
 use crate::av1parse::Av1Parse;
 use crate::capsfilter::CapsFilter;
+use crate::downloadbuffer::DownloadBuffer;
 use crate::fakesink::FakeSink;
 use crate::filesink::FileSink;
 use crate::filesrc::FileSrc;
@@ -523,6 +524,14 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::new("identity", Vec::new(), || {
         Box::new(IdentityTransform::new())
     }));
+    // Spill-to-storage buffer (M861): absorbs a pushed byte stream into a temp
+    // file and serves it seekably, so `httpsrc bytestream-format=mp4 !
+    // downloadbuffer ! qtdemux` plays a moov-at-end MP4 that the pushed stream
+    // alone cannot (its output is the whole-file `ByteStream{Mp4}`).
+    reg.register_launch(LaunchFactory::of::<DownloadBuffer>(
+        "downloadbuffer",
+        || Box::new(DownloadBuffer::new()),
+    ));
     // Progress report passthrough: counts frames / bytes, logs periodically.
     reg.register_launch(LaunchFactory::new("progressreport", Vec::new(), || {
         Box::new(crate::progressreport::ProgressReport::new())
@@ -1556,6 +1565,8 @@ fn register_feature_gated(reg: &mut Registry) {
         "livekitsrc",
         |_n| Box::new(crate::livekitsrc::LiveKitSrc::new("", "", "g2g-sub")),
     ));
+    // Same shape for the multi-track WHEP subscriber; `location` targets the
+    // endpoint (`webrtcwhepsessionsrc name=s location=...`).
     #[cfg(feature = "webrtc")]
     reg.register_fanout_src(g2g_core::runtime::FanoutSrcFactory::new(
         "webrtcwhepsessionsrc",

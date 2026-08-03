@@ -32,8 +32,9 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, HardwareError,
-    MemoryDomain, OutputSink, OwnedWgpuBuffer, OwnedWgpuTexture, PipelinePacket, Rate,
-    RawVideoFormat, TensorDType, TensorLayout, TensorShape, WgpuBufferKeepAlive, WgpuKeepAlive,
+    MemoryDomain, OutputSink, OwnedWgpuBuffer, OwnedWgpuTexture, PipelinePacket, PropError,
+    PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, TensorDType, TensorLayout,
+    TensorShape, WgpuBufferKeepAlive, WgpuKeepAlive,
 };
 
 /// 8x8 invocations per workgroup; the dispatch covers ceil(W/8) x ceil(H/8).
@@ -886,6 +887,27 @@ impl AsyncElement for WgpuPreprocess {
         }
     }
 
+    fn properties(&self) -> &'static [PropertySpec] {
+        WGPU_PREPROCESS_PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "gpu-output" => {
+                self.gpu_output = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "gpu-output" => Some(PropValue::Bool(self.gpu_output)),
+            _ => None,
+        }
+    }
+
     fn process<'a>(
         &'a mut self,
         packet: PipelinePacket,
@@ -966,6 +988,28 @@ impl AsyncElement for WgpuPreprocess {
             }
             Ok(())
         })
+    }
+}
+
+/// Settable properties: whether the tensor stays GPU-resident, so a
+/// `gst-launch` line can pick the keep-on-GPU path without the builder.
+static WGPU_PREPROCESS_PROPS: &[PropertySpec] = &[PropertySpec::new(
+    "gpu-output",
+    PropKind::Bool,
+    "emit the tensor as a GPU buffer instead of reading it back to system memory",
+)];
+
+/// NV12 at any geometry in; no source template, because the output tensor's
+/// shape follows the negotiated input geometry.
+#[cfg(feature = "launch")]
+impl g2g_core::PadTemplates for WgpuPreprocess {
+    fn pad_templates() -> Vec<g2g_core::PadTemplate> {
+        Vec::from([g2g_core::PadTemplate::sink(CapsSet::one(Caps::RawVideo {
+            format: RawVideoFormat::Nv12,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        }))])
     }
 }
 

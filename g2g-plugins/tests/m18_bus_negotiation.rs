@@ -152,6 +152,7 @@ async fn startup_negotiation_failure_posts_structured_message_to_bus() {
         Some(BusMessage::NegotiationFailed(NegotiationFailure::EmptyLink {
             upstream,
             downstream,
+            ..
         })) => {
             assert!(
                 downstream == upstream + 1,

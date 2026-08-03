@@ -6,15 +6,17 @@
 //!
 //! Opus only encodes whole frames of one of a fixed set of durations (2.5..60
 //! ms). PCM `DataFrame`s arrive at arbitrary sizes, so the element *buffers*
-//! interleaved samples and emits one Opus packet per fixed frame
-//! ([`FRAME_MS`], 20 ms = 960 samples/channel at 48 kHz, the common default).
-//! At EOS a partial tail is zero-padded to one full frame so no audio is lost.
+//! interleaved samples and emits one Opus packet per [`OpusFrameSize`]
+//! (default 20 ms = 960 samples/channel at 48 kHz). At EOS a partial tail is
+//! zero-padded to one full frame so no audio is lost.
 //!
 //! Scope (v1): 48 kHz mono/stereo S16LE. 48 kHz because Opus always *decodes* at
 //! 48 kHz ([`crate::opusparse::OPUS_RATE_HZ`]), so the whole pipeline stays at
 //! that rate without a resample; other input rates need an upstream
-//! `AudioResample`. Bitrate is builder-set (`with_bitrate`), default libopus
-//! auto. Float input + other frame durations are follow-ups.
+//! `AudioResample`. Bitrate, frame size, complexity and the in-band FEC pair
+//! (`inband-fec` / `packet-loss-percentage`, which make each packet carry a
+//! redundant copy of the previous frame for [`crate::opusdec`] to recover a lost
+//! one from) are builder-set and runtime properties.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -33,25 +35,123 @@ use audiopus::{Application, Bitrate, Channels, SampleRate};
 
 use crate::opusparse::OPUS_RATE_HZ;
 
-/// Opus frame duration this encoder emits, in milliseconds. 20 ms is the Opus
-/// default and a good latency/efficiency balance; at 48 kHz it is 960
-/// samples/channel.
-pub const FRAME_MS: u32 = 20;
-
-/// Samples per channel in one emitted frame (48 kHz * 20 ms / 1000).
-const FRAME_SAMPLES: usize = (OPUS_RATE_HZ as usize * FRAME_MS as usize) / 1000;
-
-/// One frame's duration in nanoseconds, the PTS step between emitted packets.
-const FRAME_NS: u64 = (FRAME_MS as u64) * 1_000_000;
-
-/// Maximum Opus packet size for a 20 ms stereo frame; the libopus-recommended
+/// Maximum Opus packet size for a 60 ms stereo frame; the libopus-recommended
 /// output scratch (`1275 * 3 + 7`).
 const MAX_PACKET: usize = 4_000;
+
+/// Highest accepted value of the `complexity` property (libopus' maximum).
+const MAX_COMPLEXITY: u8 = 10;
+
+/// Highest accepted value of the `packet-loss-percentage` property.
+const MAX_PACKET_LOSS_PERC: u8 = 100;
+
+/// libopus' own default computational complexity, applied when nothing sets the
+/// `complexity` property.
+const DEFAULT_COMPLEXITY: u8 = 9;
+
+/// The Opus frame durations libopus can encode (RFC 6716 §2.1.4).
+///
+/// The `frame-size` property carries these as GStreamer `opusenc`'s enum
+/// integers, which are whole milliseconds except that `2` means 2.5 ms (the
+/// only fractional duration, and the reason the property is not simply a
+/// duration in ms).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OpusFrameSize {
+    /// 2.5 ms, `frame-size=2`. 120 samples/channel at 48 kHz.
+    Ms2_5,
+    /// 5 ms, `frame-size=5`. 240 samples/channel at 48 kHz.
+    Ms5,
+    /// 10 ms, `frame-size=10`. 480 samples/channel at 48 kHz.
+    Ms10,
+    /// 20 ms, `frame-size=20`. 960 samples/channel at 48 kHz. The Opus default
+    /// and a good latency/efficiency balance.
+    #[default]
+    Ms20,
+    /// 40 ms, `frame-size=40`. 1920 samples/channel at 48 kHz.
+    Ms40,
+    /// 60 ms, `frame-size=60`. 2880 samples/channel at 48 kHz.
+    Ms60,
+}
+
+impl OpusFrameSize {
+    /// Every supported duration, shortest first.
+    pub const ALL: [OpusFrameSize; 6] = [
+        OpusFrameSize::Ms2_5,
+        OpusFrameSize::Ms5,
+        OpusFrameSize::Ms10,
+        OpusFrameSize::Ms20,
+        OpusFrameSize::Ms40,
+        OpusFrameSize::Ms60,
+    ];
+
+    /// This duration in microseconds. Microseconds because 2.5 ms is not a whole
+    /// number of milliseconds; every duration divides the 48 kHz clock exactly.
+    pub const fn micros(self) -> u32 {
+        match self {
+            OpusFrameSize::Ms2_5 => 2_500,
+            OpusFrameSize::Ms5 => 5_000,
+            OpusFrameSize::Ms10 => 10_000,
+            OpusFrameSize::Ms20 => 20_000,
+            OpusFrameSize::Ms40 => 40_000,
+            OpusFrameSize::Ms60 => 60_000,
+        }
+    }
+
+    /// Samples per channel in one frame at 48 kHz, exact for every duration.
+    pub const fn samples(self) -> usize {
+        (self.micros() as usize * OPUS_RATE_HZ as usize) / 1_000_000
+    }
+
+    /// One frame's duration in nanoseconds, the PTS step between packets.
+    pub const fn nanos(self) -> u64 {
+        self.micros() as u64 * 1_000
+    }
+
+    /// The `frame-size` property value for this duration.
+    pub const fn property_value(self) -> u64 {
+        match self {
+            OpusFrameSize::Ms2_5 => 2,
+            OpusFrameSize::Ms5 => 5,
+            OpusFrameSize::Ms10 => 10,
+            OpusFrameSize::Ms20 => 20,
+            OpusFrameSize::Ms40 => 40,
+            OpusFrameSize::Ms60 => 60,
+        }
+    }
+
+    /// The duration a `frame-size` property value selects, or `None` for a value
+    /// Opus has no frame of.
+    pub const fn from_property_value(value: u64) -> Option<Self> {
+        Some(match value {
+            2 => OpusFrameSize::Ms2_5,
+            5 => OpusFrameSize::Ms5,
+            10 => OpusFrameSize::Ms10,
+            20 => OpusFrameSize::Ms20,
+            40 => OpusFrameSize::Ms40,
+            60 => OpusFrameSize::Ms60,
+            _ => return None,
+        })
+    }
+}
 
 /// Encodes raw interleaved S16LE PCM into an Opus elementary stream.
 pub struct OpusEnc {
     channels: u8,
     bitrate: Bitrate,
+    /// Duration of the frames fed to libopus: it sets the accumulation size, the
+    /// PTS step, and (through the sample count passed to `opus_encode`) the
+    /// packet duration libopus codes into the TOC.
+    frame_size: OpusFrameSize,
+    /// libopus computational complexity, 0..=10.
+    complexity: u8,
+    /// Code a redundant (LBRR) copy of each frame into the next packet, so a
+    /// decoder that lost one packet can rebuild it (see [`crate::opusdec`]).
+    inband_fec: bool,
+    /// Expected packet loss, 0..=100 %. libopus needs it above 0 to spend bits
+    /// on the FEC copy at all, and it also steers the mode choice: FEC only
+    /// exists in the SILK layer, so a high enough loss keeps the encoder out of
+    /// CELT-only mode.
+    packet_loss_perc: u8,
     /// The bitrate actually applied to the live encoder, so a repeated BWE
     /// estimate is not re-applied every batch (`OPUS_SET_BITRATE` is cheap and
     /// glitch-free, but the ctl still need not run per packet).
@@ -77,6 +177,10 @@ impl core::fmt::Debug for OpusEnc {
         // audiopus' Encoder is not Debug; report the configuration instead.
         f.debug_struct("OpusEnc")
             .field("channels", &self.channels)
+            .field("frame_size", &self.frame_size)
+            .field("complexity", &self.complexity)
+            .field("inband_fec", &self.inband_fec)
+            .field("packet_loss_perc", &self.packet_loss_perc)
             .field("buffered_samples", &self.buf.len())
             .field("emitted", &self.emitted)
             .field("configured", &self.configured)
@@ -95,6 +199,10 @@ impl OpusEnc {
         Self {
             channels: 0,
             bitrate: Bitrate::Auto,
+            frame_size: OpusFrameSize::default(),
+            complexity: DEFAULT_COMPLEXITY,
+            inband_fec: false,
+            packet_loss_perc: 0,
             applied_bps: None,
             enc: None,
             in_f32: false,
@@ -112,6 +220,69 @@ impl OpusEnc {
     pub fn with_bitrate(mut self, bits_per_second: i32) -> Self {
         self.bitrate = Bitrate::BitsPerSecond(bits_per_second);
         self
+    }
+
+    /// Set the duration of the emitted Opus frames. Default 20 ms. Shorter
+    /// frames cut latency and cost bitrate; longer ones the reverse.
+    pub fn with_frame_size(mut self, frame_size: OpusFrameSize) -> Self {
+        self.frame_size = frame_size;
+        self
+    }
+
+    /// The frame duration this encoder emits.
+    pub fn frame_size(&self) -> OpusFrameSize {
+        self.frame_size
+    }
+
+    /// Set libopus' computational complexity, 0 (cheapest) to 10 (best quality).
+    /// Values above 10 clamp to 10; the `complexity` property rejects them
+    /// instead. Default 9, libopus' own.
+    pub fn with_complexity(mut self, complexity: u8) -> Self {
+        self.complexity = complexity.min(MAX_COMPLEXITY);
+        self
+    }
+
+    /// The complexity the live encoder is running at, read back from libopus.
+    /// Falls back to the configured value before `configure_pipeline`.
+    pub fn complexity(&self) -> u8 {
+        self.enc
+            .as_ref()
+            .and_then(|e| e.complexity().ok())
+            .unwrap_or(self.complexity)
+    }
+
+    /// Carry a redundant copy of each frame in the next packet, so one lost
+    /// packet is recoverable downstream (`opusdec use-inband-fec=true`). Costs
+    /// bitrate and only takes effect together with a non-zero
+    /// [`with_packet_loss_percentage`](Self::with_packet_loss_percentage).
+    /// Off by default, as in GStreamer's opusenc.
+    pub fn with_inband_fec(mut self, enabled: bool) -> Self {
+        self.inband_fec = enabled;
+        self
+    }
+
+    /// The FEC setting the live encoder is running with, read back from libopus.
+    pub fn inband_fec(&self) -> bool {
+        self.enc
+            .as_ref()
+            .and_then(|e| e.inband_fec().ok())
+            .unwrap_or(self.inband_fec)
+    }
+
+    /// Tell libopus how much loss to encode for, 0..=100 %. Values above 100
+    /// clamp; the `packet-loss-percentage` property rejects them instead.
+    pub fn with_packet_loss_percentage(mut self, percent: u8) -> Self {
+        self.packet_loss_perc = percent.min(MAX_PACKET_LOSS_PERC);
+        self
+    }
+
+    /// The loss percentage the live encoder is running with, read back from
+    /// libopus.
+    pub fn packet_loss_percentage(&self) -> u8 {
+        self.enc
+            .as_ref()
+            .and_then(|e| e.packet_loss_perc().ok())
+            .unwrap_or(self.packet_loss_perc)
     }
 
     /// Count of Opus packets emitted.
@@ -158,8 +329,14 @@ impl OpusEnc {
         }
     }
 
-    /// Encode one full interleaved frame (`FRAME_SAMPLES * channels` samples)
-    /// into an owned Opus packet.
+    /// Interleaved sample count of one whole frame at the current frame size.
+    fn frame_len(&self) -> usize {
+        self.frame_size.samples() * self.channels as usize
+    }
+
+    /// Encode one full interleaved frame (`frame_len` samples) into an owned
+    /// Opus packet. libopus reads the frame duration from the sample count, so
+    /// the TOC of the packet carries whatever `frame_size` selected.
     fn encode_frame(&self, frame: &[i16]) -> Result<Vec<u8>, G2gError> {
         let enc = self.enc.as_ref().ok_or(G2gError::NotConfigured)?;
         let mut out = alloc::vec![0u8; MAX_PACKET];
@@ -185,7 +362,7 @@ impl OpusEnc {
     /// Encode the next full frame from the active buffer, or `None` when less
     /// than a frame is buffered.
     fn encode_next(&mut self) -> Result<Option<Vec<u8>>, G2gError> {
-        let frame_len = FRAME_SAMPLES * self.channels as usize;
+        let frame_len = self.frame_len();
         if self.in_f32 {
             if self.buf_f32.len() < frame_len {
                 return Ok(None);
@@ -207,7 +384,7 @@ impl OpusEnc {
         let mut packets = Vec::new();
         while let Some(packet) = self.encode_next()? {
             let pts = self.next_pts_ns.unwrap_or(0);
-            self.next_pts_ns = Some(pts + FRAME_NS);
+            self.next_pts_ns = Some(pts + self.frame_size.nanos());
             packets.push((packet, pts));
         }
         Ok(packets)
@@ -219,7 +396,7 @@ impl OpusEnc {
         if self.buf.is_empty() && self.buf_f32.is_empty() {
             return Ok(None);
         }
-        let frame_len = FRAME_SAMPLES * self.channels as usize;
+        let frame_len = self.frame_len();
         // pad with silence to a whole frame
         if self.in_f32 {
             self.buf_f32.resize(frame_len, 0.0);
@@ -228,7 +405,7 @@ impl OpusEnc {
         }
         let packet = self.encode_next()?.expect("padded to a full frame");
         let pts = self.next_pts_ns.unwrap_or(0);
-        self.next_pts_ns = Some(pts + FRAME_NS);
+        self.next_pts_ns = Some(pts + self.frame_size.nanos());
         Ok(Some((packet, pts)))
     }
 
@@ -309,6 +486,12 @@ impl AsyncElement for OpusEnc {
             .map_err(|_| G2gError::CapsMismatch)?;
         enc.set_bitrate(self.bitrate)
             .map_err(|_| G2gError::CapsMismatch)?;
+        enc.set_complexity(self.complexity)
+            .map_err(|_| G2gError::CapsMismatch)?;
+        enc.set_inband_fec(self.inband_fec)
+            .map_err(|_| G2gError::CapsMismatch)?;
+        enc.set_packet_loss_perc(self.packet_loss_perc)
+            .map_err(|_| G2gError::CapsMismatch)?;
         self.enc = Some(enc);
         self.channels = channels;
         self.buf.clear();
@@ -327,12 +510,41 @@ impl AsyncElement for OpusEnc {
     }
 
     fn properties(&self) -> &'static [PropertySpec] {
-        const PROPS: &[PropertySpec] = &[PropertySpec::new(
-            "bitrate",
-            PropKind::Uint,
-            "target bitrate, bits/second (0 = libopus auto)",
-        )
-        .with_default("0")];
+        const PROPS: &[PropertySpec] = &[
+            PropertySpec::new(
+                "bitrate",
+                PropKind::Uint,
+                "target bitrate, bits/second (0 = libopus auto)",
+            )
+            .with_default("0"),
+            PropertySpec::new(
+                "frame-size",
+                PropKind::Uint,
+                "duration of one Opus frame, in ms (2 means 2.5)",
+            )
+            .with_default("20")
+            .with_enum_values("2 (2.5 ms) | 5 | 10 | 20 | 40 | 60"),
+            PropertySpec::new(
+                "complexity",
+                PropKind::Uint,
+                "libopus computational complexity, 0 (cheapest) to 10 (best)",
+            )
+            .with_default("9")
+            .with_range("0", "10"),
+            PropertySpec::new(
+                "inband-fec",
+                PropKind::Bool,
+                "carry a redundant copy of each frame in the next packet",
+            )
+            .with_default("false"),
+            PropertySpec::new(
+                "packet-loss-percentage",
+                PropKind::Uint,
+                "loss the encoder codes for, 0-100 % (0 spends no bits on FEC)",
+            )
+            .with_default("0")
+            .with_range("0", "100"),
+        ];
         PROPS
     }
 
@@ -348,6 +560,49 @@ impl AsyncElement for OpusEnc {
                 };
                 Ok(())
             }
+            // GStreamer opusenc's enum integers: whole ms, except 2 = 2.5 ms.
+            "frame-size" => {
+                let value = value.as_uint().ok_or(PropError::Type)?;
+                self.frame_size =
+                    OpusFrameSize::from_property_value(value).ok_or(PropError::Value)?;
+                Ok(())
+            }
+            // OPUS_SET_COMPLEXITY is a live ctl, so a running encoder retargets
+            // without a rebuild.
+            "complexity" => {
+                let value = value.as_uint().ok_or(PropError::Type)?;
+                if value > MAX_COMPLEXITY as u64 {
+                    return Err(PropError::Value);
+                }
+                self.complexity = value as u8;
+                if let Some(enc) = self.enc.as_mut() {
+                    enc.set_complexity(self.complexity)
+                        .map_err(|_| PropError::Value)?;
+                }
+                Ok(())
+            }
+            // Both FEC ctls are live, like complexity: a running encoder starts
+            // (or stops) coding the redundant copy without a rebuild.
+            "inband-fec" => {
+                self.inband_fec = value.as_bool().ok_or(PropError::Type)?;
+                if let Some(enc) = self.enc.as_mut() {
+                    enc.set_inband_fec(self.inband_fec)
+                        .map_err(|_| PropError::Value)?;
+                }
+                Ok(())
+            }
+            "packet-loss-percentage" => {
+                let value = value.as_uint().ok_or(PropError::Type)?;
+                if value > MAX_PACKET_LOSS_PERC as u64 {
+                    return Err(PropError::Value);
+                }
+                self.packet_loss_perc = value as u8;
+                if let Some(enc) = self.enc.as_mut() {
+                    enc.set_packet_loss_perc(self.packet_loss_perc)
+                        .map_err(|_| PropError::Value)?;
+                }
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -358,6 +613,10 @@ impl AsyncElement for OpusEnc {
                 Bitrate::BitsPerSecond(b) => b.max(0) as u64,
                 _ => 0,
             })),
+            "frame-size" => Some(PropValue::Uint(self.frame_size.property_value())),
+            "complexity" => Some(PropValue::Uint(self.complexity() as u64)),
+            "inband-fec" => Some(PropValue::Bool(self.inband_fec())),
+            "packet-loss-percentage" => Some(PropValue::Uint(self.packet_loss_percentage() as u64)),
             _ => None,
         }
     }

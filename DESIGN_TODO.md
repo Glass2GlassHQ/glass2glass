@@ -240,10 +240,6 @@ Phased plan:
 
 - **Preference algebra.** `CapsPreferences` is a placeholder (sum-of-indices);
   needs a real competing-constraint scenario to drive it.
-- **Closure-free `FieldTransform`** so forward derivation is declarative too
-  (removing the mask/closure duplication `DerivedCoupled` carries).
-- **β allocation re-cascade across a muxer** (per-input-pad re-cascade); the
-  node-keyed coordinator walk terminates at muxers today.
 - **Hardware `tee -> {decode, mux}` integration test** on real Linux
   (`rtsp ffmpeg wayland-sink`); only fake-element coverage today.
 
@@ -274,10 +270,8 @@ Phased plan:
 
 - **`VulkanVideoDec` residuals.** AMD (RADV) and Intel (ANV) validation runs of
   the `vulkanvideo` GPU tests (the element is vendor-neutral; hardware-gated,
-  `VERIFY:` markers in-tree). Runtime properties per the conventions
-  (`low-latency` bounded-DPB / no-reorder mode, `device-index`, `num-dpb-slots`;
-  codec and output format come from negotiation, so they are not properties).
-  Optional extra output domains (multiplanar NV12 / `VulkanTexture`).
+  `VERIFY:` markers in-tree). Optional extra output domains (multiplanar NV12 /
+  `VulkanTexture`).
 
 ## CUDA / display
 
@@ -312,12 +306,9 @@ Phased plan:
   `rtmp_ffmpeg_interop` has ffmpeg publish into `RtmpSrc`, ffprobe decoding the
   demuxed FLV; ingest interoperates out of the box. Egress to a real CDN stays
   user-side.)
-- **RTSP server:** ingest multi-client (serving multi-client is done,
-  `RtspServerSink`). The serving *sink*'s TCP-interleaved transport is done
-  (M672: `$`-framed RTP on the control connection, RFC 2326 §10.12, validated
-  against `ffmpeg -rtsp_transport tcp` playing from the sink), as is the
-  *ingest* source's (M532).
-- **`UdpSrc` SDP/SPS-driven caps discovery** (reports a declared hint today).
+- **RTSP server:** concurrent multi-publisher ingest, N sessions on N output
+  pads (needs a `MultiOutputSource`-based element with detached per-session
+  receive tasks; the single-pad source serves publishers sequentially).
 - **WebRTC.** On the sans-IO `str0m` stack (ICE / DTLS / SRTP, pure-Rust
   crypto), behind the `webrtc` feature: `WebRtcSink` (WHIP egress, H.264 *or*
   Opus) and `WebRtcWhepSrc` (WHEP ingest, H.264 *or* Opus via `media=audio`) —
@@ -383,15 +374,10 @@ Phased plan:
 
 ## Adaptive streaming (HLS / DASH)
 
-- **HLS:** SAMPLE-AES key rotation mid-stream; cbcs audio (AAC) + per-sample IV
-  (cenc/cbc1); `saiz`/`saio` aux-info + `seig` sample groups. (Encrypted fMP4 cbcs
-  *video* init segments are done, M164; `#EXT-X-BYTERANGE` single-file CMAF is
-  done, M368; throughput-driven ABR with mid-stream variant switching is done,
-  M371; live-edge start is done, M438.)
-- **DASH:** wall-clock `@duration` live profile; multi-period; discontinuity /
-  multi-period boundary `SEGMENT` emission. (`SegmentList`
-  byte-range is done, M369; `SegmentBase` `sidx`-indexed single-file CMAF is done,
-  M370; throughput-driven ABR is done, M372.)
+- **HLS / CENC:** the declined-fail-loud protection shapes: `cens` scheme,
+  `senc` v1/v2, movie-level and multi-key `seig` tables.
+- **DASH:** `@availabilityTimeOffset` (low-latency chunked availability) and
+  `@presentationTimeOffset` are not modelled.
 
 ## Capture sources
 
@@ -406,36 +392,33 @@ Phased plan:
 
 ## Sinks
 
-- Linux audio sinks (`alsasink` / `pulsesink` / `pipewiresink`): host smoke test
-  done (M589, all three validated on Fedora / PipeWire playing a real tone across
-  S16 + F32, stereo + mono; `m589_audio_sink_smoke`, skips with no device). Still
-  open: more sample formats (S24 / S32 / U8); opening a > 2-channel device layout
-  from the sinks (the converter side of speaker positions is done); DMABUF /
-  zero-copy.
+- Linux audio sinks (`alsasink` / `pulsesink` / `pipewiresink`): DMABUF /
+  zero-copy. `wavsink` / `wasapisink` still accept only S16/F32 (WAV can carry
+  U8/S24/S32; WASAPI is Windows-gated).
 - Generic `GlSink` over EGL (vendor-neutral NV12 / RGBA present, no CUDA).
 
 ## Containers
 
-- **MKV / WebM:** single-track `MkvMux` lacks unknown-size Clusters (live read).
-- **OGG:** chained streams (a second physical stream after the first one's end-of-stream page).
-- **FLV:** VP6 / H.263 / MP3 / Speex codecs (only H.264 + AAC ride the tag
-  stream today).
-- **CMAF / fMP4:** the CMAF-specific signalling layer on `Mp4Sink` / `Mp4Src`.
-- **MP4 faststart:** relocate a progressive file's `moov` ahead of its `mdat`, as
-  its own opt-in (progressive writes it at the end).
+- **FLV:** Speex decode (carriage lands M831; no Speex encoder exists anywhere
+  to build a validated decode vector, and gst's header-in-tag layout is
+  rejected by libavcodec, so wiring a decoder would be an unvalidated claim).
+- **CMAF / fMP4:** a multi-pad chunked `Mp4MuxN` test (chunk state is per-track,
+  only single-pad is exercised); client-side `@availabilityTimeOffset` early
+  availability in `DashSrc`.
+- **Ogg seek is O(file).** The demuxer's time seek rewinds the byte source and
+  scans forward, so a seek near the end of a long file re-reads it. A
+  granulepos-proportional first byte-offset guess through the existing paired
+  `SeekController` (seek, then scan to sync) would approximate bisection with
+  one upstream seek.
 
 ## Codecs
 
-- **`FfmpegH264Enc`:** runtime bitrate retarget (fixed at open, like `Av1Enc`'s
-  rebuild), NV12 input, 10-bit.
 - **VP8 / VP9 encode** (`VpxEnc`): validate on a libvpx host (compile-unverified).
-- **AV1 encode** (`Av1Enc`): explicit quantizer rate control. (Target-bitrate
-  rate control with hysteresis is done; 8/10/12-bit in 4:2:0 / 4:2:2 / 4:4:4
-  all done.)
 - **Pure-Rust / wasm decode** to drop the ffmpeg FFI: AV1 done (`Rav1dDec`, emits
   4:2:0 / 4:2:2 / 4:4:4 at 8/10/12-bit, round-trip tested end to end); still
   VP8 / VP9 decode and a pure-Rust Opus path.
-- **Opus:** other frame durations; packet-loss concealment; complexity tuning.
+- **Opus:** an `audio-type` property on `opusenc` (libopus application mode,
+  voice vs audio; hardcoded to `Audio` today).
 - **MJPEG / JPEG:** a `mozjpeg` fast path under a feature flag; a direct
   YCbCr -> I420 path (skip the RGBA intermediate); a single-still image sink.
 
@@ -448,9 +431,8 @@ _(No open parser items.)_
 - **`textoverlay` font backend:** the `truetype-overlay` feature (M409, `ab_glyph`
   since M668) renders both glyf and CFF/CFF2 outlines (CJK / accented / mixed-case,
   horizontal + vertical) with an explicit Latin+CJK fallback chain, so OpenType-CFF
-  `.otf` fonts render, not only glyf `.ttf`s. Still open: variable-font axis
-  selection (a non-default instance of a variable Noto Sans CJK), real shaping +
-  bidi, and automatic system-font discovery / fallback, all of which point at the
+  `.otf` fonts render, not only glyf `.ttf`s. Still open: real shaping + bidi
+  and automatic system-font discovery / fallback, both of which point at the
   `cosmic-text` upgrade; plus a `vello` GPU backend and the `clockoverlay` /
   `timeoverlay` siblings.
 - **Text / subtitle pipeline depth.** The foundation is in: `Caps::Text` +
@@ -513,12 +495,12 @@ _(No open parser items.)_
     feature built in, else `autoaudiosink` falls back to `fakesink`. A carrier
     for non-default channel orders (a stream whose interleave order differs from
     the per-count `ChannelLayout` convention) once a real source needs one.
-  Parsing SSA / TTML placement into `CueSettings` (only
-  WebVTT populates it today, though all three now ride the frame-meta). Glyph
+  Glyph
   rendering (incl. `vertical:rl` / `lr` layout) is the `truetype-overlay` feature
-  above. WebVTT `::cue` / `::cue(#id)` `color` / `background-color` are applied
-  (M410); still open: `::cue(.class)` span selectors and other CSS (font-size,
-  text-shadow, etc.).
+  above. Still open in cue CSS: true span-scoped styling (a class rule colours
+  the whole cue today), compound `::cue(.a.b)` selectors, and other properties
+  (font-size, text-shadow, etc.); SSA pixel placement (`{\pos}`, margins) needs
+  `PlayResX/Y` mapping.
 - **Closed captions: remaining carriers + authoring.** The H.264 / H.265 SEI
   decode path (`cea` decoders + `CcExtract` + file- and HLS-`playbin` auto-plug)
   and the CEA-608 encode path (`Cc608Enc` + `CcInsert`) are done (DESIGN.md
@@ -540,7 +522,9 @@ _(No open parser items.)_
 
 ## Compositor
 
-- A wgpu compute variant for HD / many-input scale.
+- `wgpucompositor`: zero-copy `WgpuTexture` input (the latest-wins aggregator
+  caches byte payloads today); share the aggregator cadence with the CPU
+  element (a `CompositorState` holding agg/primed/inputs/emitted); planar YUV.
 - Timer-driven output (emit at the output rate even when inputs stall, a
   zero-order-hold aggregator tick). Needs the runner to deadline-tick the
   compositor without an input packet; constant-rate resampling of a flowing
@@ -553,20 +537,9 @@ _(No open parser items.)_
 - `pull`-based metadata propagation across transforms (push is auto-applied).
 - A turnkey windowed runner for `WgpuSink` (a winit/SCTK example that opens a
   window and drives the overlay -> sink graph; validate on a real display).
-- The native gst-`nvcodec`-style pair is done: `NvEnc` (zero-copy CUDA NV12 ->
-  H.264, M269) and `NvDec` (H.264 -> CUDA NV12 via NVCUVID, M270). Remaining
-  extensions on both:
-  - `NvEnc`: 10-bit (P010 / Main10) and finite-GOP periodic IDRs with
-    `repeatSPSPPS`. (RGBA input + the wgpu->CUDA `WgpuToCuda` bridge are done,
-    M271; HEVC is done, M273; the output-bitstream pool + runtime bitrate retarget
-    are done, M277; system-memory NV12 input is done via the `CudaUpload`
-    converter + domain auto-plug, M353/M354. NVENC AV1 needs RTX 40-series.)
-- `NvDec` depth: mid-stream resolution change (decoder reconfigure), AV1 / other
-  codecs via the codec enum, 10-bit output, and a configurable display delay
-  (fixed at a low-latency 1 today). (HEVC is done, M273; registry + domain-aware
-  auto-plug are done, M272 / M276: `decodebin_preferring(.., Cuda)` prefers
-  `NvDec`. The remaining piece is deriving that preference automatically from a
-  downstream consumer's accepted input memory.)
+- `NvEnc` AV1 encode (needs RTX 40-series hardware).
+- Derive the `decodebin_preferring(.., Cuda)` preference automatically from a
+  downstream consumer's accepted input memory.
 - A blob header registry (decode known `BlobMeta` headers into typed structures).
 
 ## Clock-synchronised presentation
@@ -632,36 +605,23 @@ _(No open parser items.)_
 
 - Remaining bus messages, each gated on a subsystem not present: `segment-done`
   (segment seeks), `stream-status` (thread pool), `clock-lost` (clock
-  re-election). Plus buffering on interior links; periodic QoS; the QoS
-  late-drop / `Qos` post from the display sinks.
-- Logging: instance naming + lifecycle logging in the bespoke linear runners and
-  the muxer path (not just `run_graph`); `set_instance_name` self-logging on more
-  elements; explicit names from `gst-launch` `name=`; a structured-fields /
-  timestamped record format + ring-buffer sink; a custom (non-type-name)
-  category override per element.
+  re-election).
+- PTS pacing (a `ClockSync` deadline) on the display sinks other than
+  `waylandsink` (kms / wgpu / vulkanhdr / metal / d3d11 / cuda / canvas), so
+  their late-drop `Qos` reporting has a decision to report; `QosTracker` is the
+  seam. Relay `waylandsink`'s drop upstream via `take_qos`.
 
 ## Properties / introspection / DSL
 
-- Property-set the remaining feature-gated sources from text (`location=` /
-  `uri=` on rtsp / v4l2, default placeholders today; http / hls / dash now carry
-  `location`).
-- **Milestone: g2g-ml elements from a launch line.** One package: a
-  `g2g_ml::register(&mut Registry)` helper (the stock registry is assembled in
-  g2g-plugins, which stays independent of g2g-ml, so apps opt in after building
-  it); `OrtInference` deferred model load so a `model=` property can construct
-  it (today `from_file` loads the session and reads geometry eagerly); runtime
-  properties (`ortinfer` model / tensor-input, `wgpupreprocess` gpu-output,
-  `detectionpostprocess` conf-threshold / iou-threshold / input size). Target:
-  `ortinfer model=yolov8n.onnx tensor-input=true ! detectionpostprocess
-  conf-threshold=0.3` parses and runs. `WgpuInference` is excluded: it is
-  constructed from weight tensors / shapes, which a text line cannot express.
-- A value grammar for spaces / enums-as-named-flags.
+- Properties on the platform capture sources (`aaudiosrc` / `camera2src` /
+  `coreaudiosrc` / `avfvideosrc` / `avfaudiosrc` / `screencapturesrc`): their
+  constructor knobs (samplerate, channels, geometry, num-buffers) are
+  unreachable from a launch line today. Platform-gated (Android / macOS).
 - A GUI / tooling introspection surface beyond the text dump.
 
 ## Tag system
 
-- MP4 freeform (`----`) and integer atoms (track / disc number).
-- A per-stream tag merge policy for multi-stream containers.
+- MPEG-TS tag carriage (no `TagList` rides `tsmux`/`tsdemux` at all).
 
 ## Python-element host (M198+)
 
@@ -675,14 +635,6 @@ _(No open parser items.)_
   presenting the layout as working.
 - Verify GIL offload on a free-threaded (PEP 703) interpreter (none installed)
   + a `link_capacity` note for the GIL-serialized case.
-
-## Aggregation helper adoption (M199+)
-
-- Migrate the remaining hand-rolled per-input collectors onto
-  `g2g-core::InputAggregator<T>` (`mux` is migrated): enterprise `batcher`
-  (closest fit), `audiomixer`, and `compositor` (compositor needs a second
-  latest-wins `SyncPolicy` variant first). Behaviour-preserving, each guarded by
-  existing tests.
 
 ## Dynamic plugin loading (M201+)
 
@@ -736,8 +688,9 @@ _(No open parser items.)_
   elementwise-add GPU op (`WgpuInference::add`, `add_reference`), validated
   GPU-resident on a `y = conv(relu(conv(x))) + x` block bit-matching the CPU
   reference (3060). The safetensors loader dequantizes F16 / BF16 to f32 on the
-  fly (M531), so real half-precision checkpoints load. Remaining: attention (for
-  transformer stacks).
+  fly (M531), so real half-precision checkpoints load. Remaining: masked /
+  causal attention + KV cache, if an autoregressive use case ever appears
+  (unmasked full attention is in).
 - ONNX import via `burn-import` (build-time codegen) for the Burn backend, the
   graph-topology counterpart (safetensors carries weights, not the architecture).
 - A trained-weight `Module` path for `BurnInference` (conv, attention) once the
@@ -750,42 +703,22 @@ _(No open parser items.)_
 
 Outstanding developer-tooling tasks, highest leverage first.
 
-- **Per-element / per-link telemetry gaps.** Extend the `Observer` tap
-  (`g2g-core/src/runtime/observe.rs`) and the M399 `ElementProbe` coverage:
-  - Per-edge packet / byte counters + drops in the live tap (drops surface only
-    in end-of-run `RunStats`).
-  - The standalone fan-in / fan-out / session runners (`fanin.rs` / `runner.rs`
-    hand-built API, not reachable from `run_graph_observed`) leave `per_element`
-    empty: give them observed entry points and wire probes if that API needs to
-    be observable.
-  - Source-side timing: a source runs one long `run()` loop, so its cost only
-    shows as its downstream's input fill.
+- **Per-element / per-link telemetry gaps.** Remaining `Observer` coverage:
+  - The dynamic runners (`run_aggregator_dynamic`, `run_muxer_sink_dynamic`,
+    `run_source_tee_dynamic`, `run_source_router_dynamic`) leave `per_element`
+    empty: their arms attach at runtime, so the observer needs incremental node
+    registration rather than the one-shot `register`.
   - Validate the dashboard live against an RTSP source.
-- **Visual builder follow-ups.** For `tools/builder/` (React Flow):
-  - YAML export (the JSON export already covers the graph model; schema shared).
-- **Edge preview follow-ups.** Remaining: per-edge tap on the fan-in / muxer arms
-  (the slot is shared via `SenderSink`, so those arms already carry it, but they
-  are not exercised).
-- **Negotiation explainer follow-ups.** `validate` (MCP / `toolingjson`) returns
-  per-edge negotiated caps and, on a solve conflict, the structured failure
-  (kind + node indices). Remaining: carry the *both caps sets* at the point of
-  failure in the structured `NegotiationFailure` (the by-default log narration
-  already prints them, but the error type still hands programmatic consumers only
-  the node indices), which needs the solver to surface the candidate sets.
-- **Per-frame latency waterfall.** The dashboard renders an aggregate stacked
-  wait+work p50 per stage. The remaining piece is a single frame's path: a
-  source-stamped sequence id carried through so one frame's queue-residency +
-  `process()` at each stage can be assembled end to end (the aggregate uses
-  per-stage distributions, not one frame's journey), plus the measured total
-  against the `2 * capacity * frame_period` floor.
 - **gst-parity differ.** Same launch line through real GStreamer and g2g;
   diff the negotiated caps per edge, the element set after autoplug, and the
   output (checksum, PSNR for lossy). Calliope already does differential output
   QA in its own repo, so decide first whether this lives there (adding the
   caps / topology diff) or in-repo; don't build both.
-- **MCP server follow-ups.** `g2g-mcp` exposes list_elements / inspect /
-  validate / launch. Add a tool to run a declarative graph file, and stream
-  `launch` telemetry (via the `Observer`) rather than only final stats.
+- **Push-tax benchmark vs GStreamer pull.** Batch-demux throughput of
+  `filesrc ! tsdemux ! h264parse ! fakesink` against the same gst-launch line
+  (which runs it in pull mode), to put a number on the per-chunk channel /
+  wakeup / boxed-future cost. Decides whether a pull mode is ever worth its
+  second per-demuxer code path.
 - Longer tail: a live pipeline TUI (a ratatui consumer of the same telemetry
   tap); a codec golden-fixture / PSNR conformance harness.
 

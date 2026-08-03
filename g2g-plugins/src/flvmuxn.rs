@@ -10,7 +10,7 @@
 //! ```
 //!
 //! A [`MultiInputElement`]: each pad takes one elementary stream (FLV implies the
-//! track by tag type, so the muxer routes by pad kind, not pad index), and access
+//! track by tag type, so the muxer routes by pad codec, not pad index), and access
 //! units interleave by presentation timestamp via the M204 [`InputAggregator`]
 //! merge before being written as FLV tags. Unlike the single-track muxer, the
 //! sequence-header tags a player needs are written up front, captured in-band from
@@ -21,7 +21,9 @@
 //! Reachable from the `gst-launch` fan-in syntax: registered as the `flvmux` muxer
 //! in `default_registry`, so >1 input link builds this element (a single input
 //! builds the single-track [`crate::flvmux::FlvMux`]). Scope: FLV's one-video +
-//! one-audio model (H.264 + AAC); a second pad of either kind is rejected.
+//! one-audio model over the codecs [`crate::flvmux::FlvMux`] accepts; a second pad
+//! of either kind is rejected. The legacy Flash codecs have no sequence header, so
+//! their tracks are ready to write from the first access unit.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -32,36 +34,38 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, FrameTiming,
-    G2gError, InputAggregator, MemoryDomain, MultiInputElement, OutputSink, PipelinePacket,
-    VideoCodec,
+    ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, FrameTiming, G2gError,
+    InputAggregator, MemoryDomain, MultiInputElement, OutputSink, PipelinePacket, VideoCodec,
 };
 
-use crate::flv::FlvMuxer;
+use crate::flv::{FlvCodec, FlvMuxer, FlvTrack};
 use crate::fmp4mux::{avcc_record, avcc_sample, is_keyframe_nal, parameter_sets, split_annexb};
 use crate::mp4muxn::{asc_from_adts, strip_adts};
 
-/// What an input pad carries, learned from its negotiated caps at configure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PadKind {
-    Video,
-    Audio,
-}
-
 /// A track's init, captured from its first access unit: the parameter sets
-/// (video) or AudioSpecificConfig (audio) the FLV sequence header needs.
+/// (video) or AudioSpecificConfig (audio) the FLV sequence header needs. The
+/// legacy Flash codecs have no sequence header, so theirs is empty and ready
+/// immediately.
 #[derive(Debug, Clone)]
 enum TrackInit {
-    Video { param_sets: Vec<Vec<u8>> },
-    Audio { asc: Vec<u8> },
+    Video {
+        param_sets: Vec<Vec<u8>>,
+    },
+    Audio {
+        asc: Vec<u8>,
+    },
+    /// A codec with no sequence header to wait for.
+    None,
 }
 
 /// Muxes a video + audio stream into one FLV byte stream, PTS-ordered.
 #[derive(Debug)]
 pub struct FlvMuxN {
     inputs: usize,
-    /// Per-pad stream kind, learned at configure.
-    kinds: Vec<Option<PadKind>>,
+    /// Per-pad codec, learned at configure.
+    kinds: Vec<Option<FlvCodec>>,
+    /// The audio pad's negotiated layout, which MP3's tag flags declare.
+    audio_params: Option<(u8, u32)>,
     /// Per-pad track init, captured from the first AU.
     inits: Vec<Option<TrackInit>>,
     agg: InputAggregator<Frame>,
@@ -76,6 +80,7 @@ impl FlvMuxN {
         Self {
             inputs,
             kinds: alloc::vec![None; inputs],
+            audio_params: None,
             inits: alloc::vec![None; inputs],
             agg: InputAggregator::new(inputs),
             mux: None,
@@ -93,19 +98,10 @@ impl FlvMuxN {
         }
     }
 
-    /// FLV carries H.264 video and AAC audio only.
-    fn pad_kind_for(caps: &Caps) -> Option<PadKind> {
-        match caps {
-            Caps::CompressedVideo {
-                codec: VideoCodec::H264,
-                ..
-            } => Some(PadKind::Video),
-            Caps::Audio {
-                format: AudioFormat::Aac,
-                ..
-            } => Some(PadKind::Audio),
-            _ => None,
-        }
+    /// The FLV codec an input pad's caps carries, or `None` if FLV cannot carry
+    /// it (the same set the single-track muxer accepts).
+    fn pad_kind_for(caps: &Caps) -> Option<FlvCodec> {
+        crate::flvmux::FlvMux::codec_for(caps)
     }
 
     /// True once every pad has its init captured (the sequence headers need them).
@@ -119,7 +115,7 @@ impl FlvMuxN {
             return;
         }
         match self.kinds[input] {
-            Some(PadKind::Video) => {
+            Some(FlvCodec::H264) => {
                 let nalus = split_annexb(au);
                 // Parameter sets only ride the IDR; wait for the keyframe.
                 if let Ok(param_sets) = parameter_sets(VideoCodec::H264, &nalus) {
@@ -127,11 +123,12 @@ impl FlvMuxN {
                     self.inits[input] = Some(TrackInit::Video { param_sets: owned });
                 }
             }
-            Some(PadKind::Audio) => {
+            Some(FlvCodec::Aac) => {
                 if let Some(asc) = asc_from_adts(au) {
                     self.inits[input] = Some(TrackInit::Audio { asc: asc.to_vec() });
                 }
             }
+            Some(_) => self.inits[input] = Some(TrackInit::None),
             None => {}
         }
     }
@@ -147,9 +144,26 @@ impl FlvMuxN {
                     video_config = avcc_record(&refs);
                 }
                 TrackInit::Audio { asc } => audio_config = asc.clone(),
+                TrackInit::None => {}
             }
         }
-        FlvMuxer::new_av(video_config, audio_config)
+        let of_track = |t| {
+            self.kinds
+                .iter()
+                .flatten()
+                .copied()
+                .find(|c| c.track() == t)
+        };
+        let mut mux = FlvMuxer::new_av(
+            of_track(FlvTrack::Video).unwrap_or(FlvCodec::H264),
+            video_config,
+            of_track(FlvTrack::Audio).unwrap_or(FlvCodec::Aac),
+            audio_config,
+        );
+        if let Some((channels, sample_rate)) = self.audio_params {
+            mux.set_audio_params(channels, sample_rate);
+        }
+        mux
     }
 
     /// Emit one access unit as its track's FLV tag.
@@ -165,14 +179,22 @@ impl FlvMuxN {
         let pts_ms = (frame.timing.pts_ns / 1_000_000) as u32;
         let mux = self.mux.as_mut().ok_or(G2gError::NotConfigured)?;
         let bytes = match self.kinds[input] {
-            Some(PadKind::Video) => {
+            Some(FlvCodec::H264) => {
                 let nalus = split_annexb(slice);
                 let keyframe = nalus.iter().any(|n| is_keyframe_nal(VideoCodec::H264, n));
                 let (dts_ms, cts_ms) = FlvMuxer::video_tag_timing(&frame.timing);
                 mux.push_video(&avcc_sample(&nalus), dts_ms, cts_ms, keyframe)
             }
-            // Audio access units are raw AAC frames once the ADTS header is stripped.
-            _ => mux.push_audio(strip_adts(slice), pts_ms),
+            // The legacy Flash video codecs go into a tag as they arrive, their
+            // keyframe flag coming from the producer rather than the bitstream.
+            Some(c) if c.track() == FlvTrack::Video => {
+                let (dts_ms, cts_ms) = FlvMuxer::video_tag_timing(&frame.timing);
+                mux.push_video(slice, dts_ms, cts_ms, frame.timing.keyframe)
+            }
+            // AAC access units are raw frames once the ADTS header is stripped;
+            // MP3 and Speex frames need no unwrapping.
+            Some(FlvCodec::Aac) => mux.push_audio(strip_adts(slice), pts_ms),
+            _ => mux.push_audio(slice, pts_ms),
         };
 
         let out_frame = Frame::new(
@@ -240,9 +262,17 @@ impl MultiInputElement for FlvMuxN {
             .kinds
             .iter()
             .enumerate()
-            .any(|(i, k)| i != input && *k == Some(kind))
+            .any(|(i, k)| i != input && k.is_some_and(|k| k.track() == kind.track()))
         {
             return Err(G2gError::CapsMismatch);
+        }
+        if let Caps::Audio {
+            channels,
+            sample_rate,
+            ..
+        } = absolute_caps
+        {
+            self.audio_params = Some((*channels, *sample_rate));
         }
         self.kinds[input] = Some(kind);
         Ok(ConfigureOutcome::Accepted)
@@ -296,7 +326,7 @@ impl MultiInputElement for FlvMuxN {
 mod tests {
     use super::*;
     use crate::flv::{FlvDemuxer, FlvTrack as DemuxTrack};
-    use g2g_core::Dim;
+    use g2g_core::{AudioFormat, Dim};
 
     fn h264_idr() -> Vec<u8> {
         let mut au = Vec::new();
@@ -401,11 +431,11 @@ mod tests {
         let units = d.take_units();
         let video: Vec<_> = units
             .iter()
-            .filter(|u| u.track == DemuxTrack::Video)
+            .filter(|u| u.track() == DemuxTrack::Video)
             .collect();
         let audio: Vec<_> = units
             .iter()
-            .filter(|u| u.track == DemuxTrack::Audio)
+            .filter(|u| u.track() == DemuxTrack::Audio)
             .collect();
         assert_eq!(
             video.len(),

@@ -32,12 +32,20 @@
 //! straight to `cuvidDecodePicture`).
 //!
 //! Each mapped output frame carries a [`CudaKeepAlive`] that `cuvidUnmapVideoFrame64`s
-//! on drop, and an `Arc` to the decoder so the decoder / context outlive any frame
-//! still in flight. The element owns its own CUDA context (created at configure).
+//! on drop, and an `Arc` to the decoder so the decoder outlives any frame still in
+//! flight. The CUDA context and the NVCUVID context lock are a separate `Arc`
+//! ([`CuvidContext`]) shared by every decoder the element builds, so a mid-stream
+//! rebuild cannot tear them out from under an older decoder's frames.
 //!
-//! Deferred (v1): mid-stream resolution change (decoder reconfigure), HEVC / other
-//! codecs via the codec enum, 10-bit output, and a `display_delay` knob (fixed at
-//! a low-latency 1 today).
+//! A mid-stream format change re-enters the sequence callback: a new coded size
+//! that still fits the live decoder's ceiling (and keeps its surface format) is
+//! applied in place with `cuvidReconfigureDecoder`, anything else (a bigger
+//! picture, a bit-depth change) builds a fresh decoder. Either way the next
+//! emitted frame carries a new `CapsChanged`.
+//!
+//! Bit depth follows the stream: 8-bit decodes to NV12, 10-/12-bit to NVDEC's
+//! `P016` surface, announced as [`RawVideoFormat::P010`] (16-bit samples, value in
+//! the top bits).
 
 use core::future::Future;
 use core::pin::Pin;
@@ -50,7 +58,8 @@ use g2g_core::memory::{CudaKeepAlive, DomainSet, MemoryDomainKind, OwnedCudaBuff
 use g2g_core::{
     AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
     ElementMetadata, G2gError, HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, Rate, RawVideoFormat, SystemSlice, VideoCodec,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
+    SystemSlice, VideoCodec,
 };
 
 /// Number of decode surfaces the parser cycles through. Also the cap on the
@@ -59,6 +68,10 @@ use g2g_core::{
 const NUM_DECODE_SURFACES: u32 = 20;
 /// Max output surfaces mapped at once (frames held downstream before release).
 const NUM_OUTPUT_SURFACES: u32 = 8;
+/// Default parser display delay, in frames: one, the low-latency setting.
+const DEFAULT_MAX_DISPLAY_DELAY: u32 = 1;
+/// Upper bound the `max-display-delay` property accepts, as gst-nvcodec's.
+const MAX_DISPLAY_DELAY_LIMIT: u32 = 16;
 
 /// Native NVDEC H.264 decoder. Annex-B in, CUDA NV12 out. See the module docs.
 pub struct NvDec {
@@ -74,7 +87,14 @@ pub struct NvDec {
     /// the element; the parser holds a raw pointer to it as user-data.
     state: Box<DecoderState>,
     emitted: u64,
-    caps_sent: bool,
+    /// Caps of the last frame emitted; a decoded frame whose format / geometry
+    /// differs (a mid-stream resolution or bit-depth change) re-announces.
+    last_caps: Option<Caps>,
+    /// Frames the parser holds back before displaying (`CUVIDPARSERPARAMS::
+    /// ulMaxDisplayDelay`): 1 keeps glass-to-glass tight, higher values pipeline
+    /// decode against display at the cost of latency. Applied when the parser
+    /// opens at configure.
+    max_display_delay: u32,
     configured: bool,
     /// The memory domain the negotiation settled this decoder's output on (M352).
     /// `Cuda` keeps frames device-resident (zero-copy, the default); `System`
@@ -88,30 +108,51 @@ pub struct NvDec {
 /// queue, the first error). Lives in a `Box` owned by [`NvDec`]; the parser is
 /// given a raw pointer to it.
 struct DecoderState {
-    context: u64,
-    ctx_lock: *mut core::ffi::c_void,
-    /// The `cudaVideoCodec` the parser / decoder were created for (H.264 or HEVC),
-    /// from the negotiated input caps.
+    /// CUDA context + NVCUVID context lock, shared by every decoder this element
+    /// builds (see [`CuvidContext`]). `None` until `open`.
+    cuda: Option<Arc<CuvidContext>>,
+    /// The `cudaVideoCodec` the parser / decoder were created for (H.264, HEVC or
+    /// AV1), from the negotiated input caps.
     codec_cuvid: i32,
     /// `CUvideodecoder`, created in the sequence callback. Raw copy for the decode
     /// / display callbacks; ownership / destruction is the `Arc`'s.
     decoder: *mut core::ffi::c_void,
-    /// Shared decoder owner; cloned into each frame keep-alive so the decoder and
-    /// context outlive frames still referenced downstream.
+    /// Shared decoder owner; cloned into each frame keep-alive so the decoder
+    /// outlives frames still referenced downstream.
     decoder_owner: Option<Arc<CuvidDecoder>>,
+    /// Coded dimensions the live decoder was created for: its reconfigure
+    /// ceiling, a bigger picture needs a fresh decoder.
+    max_width: u32,
+    max_height: u32,
+    /// Coded dimensions the decoder is currently set to (moves with each
+    /// reconfigure, unlike the ceiling above).
+    coded_width: u32,
+    coded_height: u32,
     /// Display geometry (the cropped output dims). Chroma offset uses `target_height`.
     target_width: u32,
     target_height: u32,
+    /// Decode-surface count the live decoder was created with; a reconfigure must
+    /// stay within it, and the sequence callback keeps reporting it to the parser.
+    num_decode_surfaces: u32,
+    /// Decoders built so far: 1 for a stream whose format changes stayed within
+    /// what `cuvidReconfigureDecoder` can apply in place.
+    decoders_created: u32,
+    /// The live decoder's `cudaVideoSurfaceFormat` and the caps format it maps to
+    /// (NV12 for 8-bit, P010 for 10-/12-bit).
+    surface_format: i32,
+    out_format: RawVideoFormat,
     /// Frames mapped and ready to emit (drained by `process` after each parse).
     ready: Vec<ReadyFrame>,
     /// First error raised inside a callback, surfaced after the parse returns.
     error: Option<G2gError>,
 }
 
-/// A decoded, mapped NV12 surface ready to hand downstream.
+/// A decoded, mapped surface ready to hand downstream, with the pixel format the
+/// decoder produced it in (the frame's own geometry lives in `buffer`).
 struct ReadyFrame {
     buffer: OwnedCudaBuffer,
     pts_ns: u64,
+    format: RawVideoFormat,
 }
 
 // SAFETY: `NvDec` holds raw NVCUVID/CUDA handles and a `Box<DecoderState>` with
@@ -147,21 +188,38 @@ impl NvDec {
             context: 0,
             parser: core::ptr::null_mut(),
             state: Box::new(DecoderState {
-                context: 0,
-                ctx_lock: core::ptr::null_mut(),
+                cuda: None,
                 codec_cuvid: ffi::CUDA_VIDEO_CODEC_H264,
                 decoder: core::ptr::null_mut(),
                 decoder_owner: None,
+                max_width: 0,
+                max_height: 0,
+                coded_width: 0,
+                coded_height: 0,
                 target_width: 0,
                 target_height: 0,
+                num_decode_surfaces: 0,
+                decoders_created: 0,
+                surface_format: ffi::CUDA_VIDEO_SURFACE_FORMAT_NV12,
+                out_format: RawVideoFormat::Nv12,
                 ready: Vec::new(),
                 error: None,
             }),
             emitted: 0,
-            caps_sent: false,
+            last_caps: None,
+            max_display_delay: DEFAULT_MAX_DISPLAY_DELAY,
             configured: false,
             out_domain: MemoryDomainKind::Cuda,
         }
+    }
+
+    /// Frames the parser holds back before displaying (0..=16, default 1). Higher
+    /// values pipeline decode against display (NVIDIA recommends 2..4 for
+    /// throughput) at the cost of latency. Also the `max-display-delay` property;
+    /// applied when the parser opens at configure.
+    pub fn with_max_display_delay(mut self, frames: u32) -> Self {
+        self.max_display_delay = frames.min(MAX_DISPLAY_DELAY_LIMIT);
+        self
     }
 
     /// Domains this decoder can emit (M352): `Cuda` (device-resident, zero-copy)
@@ -175,10 +233,16 @@ impl NvDec {
         self.emitted
     }
 
-    /// Accepted input codecs: H.264 and HEVC (NVCUVID decodes both; AV1 needs an
-    /// Ampere+ NVDEC and is a follow-up).
-    fn input_codecs() -> [VideoCodec; 2] {
-        [VideoCodec::H264, VideoCodec::H265]
+    /// NVDEC decoders built for this stream: one, unless a mid-stream format
+    /// change went beyond what an in-place reconfigure can apply.
+    pub fn decoders_created(&self) -> u32 {
+        self.state.decoders_created
+    }
+
+    /// Accepted input codecs. AV1 needs an Ampere+ NVDEC; an older GPU fails
+    /// decoder creation at the first sequence rather than at negotiation.
+    fn input_codecs() -> [VideoCodec; 3] {
+        [VideoCodec::H264, VideoCodec::H265, VideoCodec::Av1]
     }
 
     /// Open-geometry input caps, one alternative per accepted codec.
@@ -201,19 +265,15 @@ impl NvDec {
         match codec {
             VideoCodec::H264 => Some(ffi::CUDA_VIDEO_CODEC_H264),
             VideoCodec::H265 => Some(ffi::CUDA_VIDEO_CODEC_HEVC),
+            VideoCodec::Av1 => Some(ffi::CUDA_VIDEO_CODEC_AV1),
             _ => None,
         }
     }
 
-    fn output_caps(&self) -> Caps {
-        // Actual decoded display geometry once known, else the negotiated dims.
-        let (w, h) = if self.state.target_width != 0 {
-            (self.state.target_width, self.state.target_height)
-        } else {
-            (self.width, self.height)
-        };
+    /// The output caps for one decoded frame's format and geometry.
+    fn frame_caps(&self, format: RawVideoFormat, w: u32, h: u32) -> Caps {
         Caps::RawVideo {
-            format: RawVideoFormat::Nv12,
+            format,
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),
             framerate: self.framerate.clone(),
@@ -238,7 +298,6 @@ impl NvDec {
             ctx as u64
         };
         self.context = context;
-        self.state.context = context;
 
         let _ctx = ContextGuard::push(context)?;
         // SAFETY: valid context; on success `ctx_lock` receives the lock handle.
@@ -250,7 +309,7 @@ impl NvDec {
             ))?;
             lock
         };
-        self.state.ctx_lock = ctx_lock;
+        self.state.cuda = Some(Arc::new(CuvidContext { ctx_lock, context }));
 
         // Create the parser, pointing it at the heap `DecoderState` as user-data.
         let user = self.state.as_mut() as *mut DecoderState as *mut core::ffi::c_void;
@@ -259,9 +318,7 @@ impl NvDec {
         let mut params: ffi::ParserParams = unsafe { core::mem::zeroed() };
         params.codec_type = self.state.codec_cuvid;
         params.max_num_decode_surfaces = NUM_DECODE_SURFACES;
-        // Low latency: a single-frame display delay (recommended 2..4 for higher
-        // throughput / heavier reorder; 1 keeps glass-to-glass tight).
-        params.max_display_delay = 1;
+        params.max_display_delay = self.max_display_delay;
         params.user_data = user;
         params.pfn_sequence_callback = Some(handle_sequence);
         params.pfn_decode_picture = Some(handle_decode);
@@ -316,12 +373,14 @@ impl NvDec {
         if frames.is_empty() {
             return Ok(());
         }
-        if !self.caps_sent {
-            out.push(PipelinePacket::CapsChanged(self.output_caps()))
-                .await?;
-            self.caps_sent = true;
-        }
         for f in frames {
+            // Announce the frame's own format / geometry, so a mid-stream
+            // resolution or bit-depth change re-announces before its first frame.
+            let caps = self.frame_caps(f.format, f.buffer.width, f.buffer.height);
+            if self.last_caps.as_ref() != Some(&caps) {
+                out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
+                self.last_caps = Some(caps);
+            }
             // M352: keep the surface on the GPU (zero-copy) unless negotiation
             // settled this decoder's output on System, in which case download it
             // device->host before emitting.
@@ -329,7 +388,8 @@ impl NvDec {
                 // SAFETY: `f.buffer`'s plane pointers are valid CUDA device memory
                 // in its context, pinned by the buffer's keep-alive owner for the
                 // duration of this copy.
-                let bytes = unsafe { crate::cuda::download_nv12(&f.buffer)? };
+                let bytes =
+                    unsafe { crate::cuda::download_nv12(&f.buffer, f.format.bytes_per_sample())? };
                 MemoryDomain::System(SystemSlice::from_boxed(bytes))
             } else {
                 MemoryDomain::Cuda(f.buffer)
@@ -353,8 +413,8 @@ impl NvDec {
 impl Drop for NvDec {
     fn drop(&mut self) {
         // Destroy the parser first so no further callback can fire, then let the
-        // boxed state drop (releasing the decoder `Arc`; the decoder / ctx-lock /
-        // context are torn down when the last frame referencing them is gone).
+        // boxed state drop (releasing the decoder / context `Arc`s; each is torn
+        // down once the last frame referencing it is gone).
         if !self.parser.is_null() {
             // SAFETY: `parser` was created in `open` and is destroyed once.
             unsafe {
@@ -362,37 +422,53 @@ impl Drop for NvDec {
             }
             self.parser = core::ptr::null_mut();
         }
-        // The ctx-lock and context are owned by `CuvidDecoder`, which frees them
-        // (via the `Arc`) once the last frame referencing it drops. But the
-        // decoder is created lazily on the first decoded sequence: if we were
-        // configured but never decoded a picture, `decoder_owner` is `None` and
-        // nothing else owns them. With the parser already destroyed no callback
-        // can still create one, so free them here, mirroring `CuvidDecoder::drop`.
-        if self.state.decoder_owner.is_none() {
-            // SAFETY: created together in `open`; destroyed once, here, only when
-            // no `CuvidDecoder` took ownership. Best-effort; failures unactionable.
-            unsafe {
-                if !self.state.ctx_lock.is_null() {
-                    let _ = ffi::cuvid_ctx_lock_destroy(self.state.ctx_lock);
-                    self.state.ctx_lock = core::ptr::null_mut();
-                }
-                if self.state.context != 0 {
-                    let _ = ffi::cu_ctx_destroy(self.state.context as *mut core::ffi::c_void);
-                    self.state.context = 0;
-                }
+    }
+}
+
+/// Owns the CUDA context and the NVCUVID context lock, destroying them (lock
+/// first) when the last reference drops. Held by the element and by every
+/// decoder it builds, so a mid-stream decoder rebuild leaves the older decoder's
+/// context intact for as long as its frames live.
+struct CuvidContext {
+    ctx_lock: *mut core::ffi::c_void,
+    context: u64,
+}
+
+// SAFETY: the handles are owned and inert; see `CuvidDecoder` below for the
+// shared-access contract they are used under.
+unsafe impl Send for CuvidContext {}
+// SAFETY: as for `Send` above.
+unsafe impl Sync for CuvidContext {}
+
+impl core::fmt::Debug for CuvidContext {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("CuvidContext(<CUcontext>)")
+    }
+}
+
+impl Drop for CuvidContext {
+    fn drop(&mut self) {
+        // SAFETY: both handles were created together in `open` and are destroyed
+        // once, here, after every decoder built on them has been destroyed (each
+        // holds an `Arc` to this). Best-effort; failures are unactionable.
+        unsafe {
+            if !self.ctx_lock.is_null() {
+                let _ = ffi::cuvid_ctx_lock_destroy(self.ctx_lock);
+            }
+            if self.context != 0 {
+                let _ = ffi::cu_ctx_destroy(self.context as *mut core::ffi::c_void);
             }
         }
     }
 }
 
-/// Owns the `CUvideodecoder`, its context lock, and the CUDA context, tearing
-/// them down (in that order) when the last reference, the decoder itself or any
-/// frame keep-alive still in flight, drops. Boxed as the [`CudaKeepAlive`] of
-/// every emitted frame.
+/// Owns one `CUvideodecoder` and pins the context it lives in, tearing the
+/// decoder down when the last reference, the element itself or any frame
+/// keep-alive still in flight, drops. Boxed as the [`CudaKeepAlive`] of every
+/// emitted frame.
 struct CuvidDecoder {
     decoder: *mut core::ffi::c_void,
-    ctx_lock: *mut core::ffi::c_void,
-    context: u64,
+    ctx: Arc<CuvidContext>,
 }
 
 // SAFETY: the handles are owned and inert. `Send` + `Sync` let an output frame
@@ -413,19 +489,12 @@ impl core::fmt::Debug for CuvidDecoder {
 
 impl Drop for CuvidDecoder {
     fn drop(&mut self) {
-        // SAFETY: all three handles were created together and are destroyed once,
-        // here, after every mapped frame has been unmapped (frames hold an `Arc`
-        // to this, so this drop runs only once none remain). Context destroyed
-        // last. Best-effort; failures are unactionable.
+        // SAFETY: `decoder` is destroyed once, here, after every mapped frame has
+        // been unmapped (frames hold an `Arc` to this, so this drop runs only once
+        // none remain). The context outlives it via `ctx`. Best-effort.
         unsafe {
             if !self.decoder.is_null() {
                 let _ = ffi::cuvid_destroy_decoder(self.decoder);
-            }
-            if !self.ctx_lock.is_null() {
-                let _ = ffi::cuvid_ctx_lock_destroy(self.ctx_lock);
-            }
-            if self.context != 0 {
-                let _ = ffi::cu_ctx_destroy(self.context as *mut core::ffi::c_void);
             }
         }
     }
@@ -459,7 +528,7 @@ impl Drop for CuvidMappedFrame {
         // `owner.decoder` and is unmapped once. Push the context first so the
         // unmap runs in it; best-effort.
         unsafe {
-            let _ = ffi::cu_ctx_push_current(self.owner.context as *mut core::ffi::c_void);
+            let _ = ffi::cu_ctx_push_current(self.owner.ctx.context as *mut core::ffi::c_void);
             let _ = ffi::cuvid_unmap_video_frame(self.owner.decoder, self.dev_ptr);
             let mut popped = core::ptr::null_mut();
             let _ = ffi::cu_ctx_pop_current(&mut popped);
@@ -479,7 +548,8 @@ fn fail(state: &mut DecoderState, err: G2gError) -> i32 {
 }
 
 /// Sequence callback: the parser hands us the decoded stream format. Create the
-/// decoder (once) and report the surface count back to the parser.
+/// decoder, or bring the live one to the new format (in place where NVDEC allows
+/// it), and report the surface count back to the parser.
 extern "C" fn handle_sequence(user: *mut core::ffi::c_void, fmt: *mut ffi::VideoFormat) -> i32 {
     // SAFETY: `user` is the boxed `DecoderState` pointer set in `open`; `fmt` is a
     // valid format struct for the duration of the callback.
@@ -488,22 +558,68 @@ extern "C" fn handle_sequence(user: *mut core::ffi::c_void, fmt: *mut ffi::Video
     let f = unsafe { &*fmt };
 
     let num_surfaces = (f.min_num_decode_surfaces as u32).clamp(1, NUM_DECODE_SURFACES);
-    // Display (cropped) geometry, rounded up to even for NV12.
+    // Display (cropped) geometry, rounded up to even for 4:2:0 chroma.
     let disp_w = (f.display_area.right - f.display_area.left).max(0) as u32;
     let disp_h = (f.display_area.bottom - f.display_area.top).max(0) as u32;
     let target_w = if disp_w != 0 { disp_w } else { f.coded_width };
     let target_h = if disp_h != 0 { disp_h } else { f.coded_height };
     let target_w = (target_w + 1) & !1;
     let target_h = (target_h + 1) & !1;
+    // 8-bit decodes to NV12; anything deeper to the 16-bit semi-planar surface,
+    // which g2g calls P010 (samples in the top bits of each 16-bit word).
+    let (surface_format, out_format) = if f.bit_depth_luma_minus8 > 0 {
+        (ffi::CUDA_VIDEO_SURFACE_FORMAT_P016, RawVideoFormat::P010)
+    } else {
+        (ffi::CUDA_VIDEO_SURFACE_FORMAT_NV12, RawVideoFormat::Nv12)
+    };
 
-    if !state.decoder.is_null() {
-        // Mid-stream format change: reconfigure is deferred (v1). Keep the
-        // existing decoder if the geometry matches, else fail loud.
-        if state.target_width == target_w && state.target_height == target_h {
-            return num_surfaces as i32;
+    if state.decoder_owner.is_some() {
+        let fits = f.coded_width <= state.max_width
+            && f.coded_height <= state.max_height
+            && num_surfaces <= state.num_decode_surfaces
+            && surface_format == state.surface_format;
+        if fits {
+            if state.coded_width == f.coded_width
+                && state.coded_height == f.coded_height
+                && state.target_width == target_w
+                && state.target_height == target_h
+            {
+                // Same geometry and format: nothing to do.
+                return state.num_decode_surfaces as i32;
+            }
+            // SAFETY: the NVCUVID param structs are plain old data (ints,
+            // reserved arrays); all-zero is a valid initial state we then fill.
+            let mut re: ffi::ReconfigureDecoderInfo = unsafe { core::mem::zeroed() };
+            re.width = f.coded_width;
+            re.height = f.coded_height;
+            re.target_width = target_w;
+            re.target_height = target_h;
+            // Must stay at the count the decoder was created with.
+            re.num_decode_surfaces = state.num_decode_surfaces;
+            re.display_area_left = f.display_area.left as i16;
+            re.display_area_top = f.display_area.top as i16;
+            re.display_area_right = f.display_area.right as i16;
+            re.display_area_bottom = f.display_area.bottom as i16;
+            // SAFETY: valid decoder; `re` is fully initialized and only read for
+            // the duration of the call.
+            let rc = unsafe { ffi::cuvid_reconfigure_decoder(state.decoder, &mut re) };
+            if rc != 0 {
+                return fail(state, G2gError::Hardware(HardwareError::Cuda(rc)));
+            }
+            state.coded_width = f.coded_width;
+            state.coded_height = f.coded_height;
+            state.target_width = target_w;
+            state.target_height = target_h;
+            return state.num_decode_surfaces as i32;
         }
-        return fail(state, hw());
+        // Beyond what the live decoder can be reconfigured to (a bigger picture,
+        // a deeper bit depth, more surfaces): build a fresh one. The old decoder
+        // lives on in any frame still downstream and dies with the last of them.
     }
+
+    let Some(cuda) = state.cuda.clone() else {
+        return fail(state, hw());
+    };
 
     // SAFETY: the NVCUVID param structs are plain old data (ints, pointers,
     // reserved arrays); all-zero is a valid initial state we then fill.
@@ -521,12 +637,12 @@ extern "C" fn handle_sequence(user: *mut core::ffi::c_void, fmt: *mut ffi::Video
     info.display_area_top = f.display_area.top as i16;
     info.display_area_right = f.display_area.right as i16;
     info.display_area_bottom = f.display_area.bottom as i16;
-    info.output_format = ffi::CUDA_VIDEO_SURFACE_FORMAT_NV12;
+    info.output_format = surface_format;
     info.deinterlace_mode = ffi::CUDA_VIDEO_DEINTERLACE_WEAVE;
     info.target_width = target_w as u64;
     info.target_height = target_h as u64;
     info.num_output_surfaces = NUM_OUTPUT_SURFACES as u64;
-    info.vid_lock = state.ctx_lock;
+    info.vid_lock = cuda.ctx_lock;
 
     let mut decoder: *mut core::ffi::c_void = core::ptr::null_mut();
     // SAFETY: `info` is fully initialized; on success `decoder` is a valid handle.
@@ -535,13 +651,17 @@ extern "C" fn handle_sequence(user: *mut core::ffi::c_void, fmt: *mut ffi::Video
         return fail(state, G2gError::Hardware(HardwareError::Cuda(rc)));
     }
     state.decoder = decoder;
+    state.max_width = f.coded_width;
+    state.max_height = f.coded_height;
+    state.coded_width = f.coded_width;
+    state.coded_height = f.coded_height;
     state.target_width = target_w;
     state.target_height = target_h;
-    state.decoder_owner = Some(Arc::new(CuvidDecoder {
-        decoder,
-        ctx_lock: state.ctx_lock,
-        context: state.context,
-    }));
+    state.num_decode_surfaces = num_surfaces;
+    state.decoders_created += 1;
+    state.surface_format = surface_format;
+    state.out_format = out_format;
+    state.decoder_owner = Some(Arc::new(CuvidDecoder { decoder, ctx: cuda }));
     num_surfaces as i32
 }
 
@@ -597,8 +717,10 @@ extern "C" fn handle_display(user: *mut core::ffi::c_void, disp: *mut ffi::Parse
         return fail(state, G2gError::Hardware(HardwareError::Cuda(rc)));
     }
 
-    // NV12: chroma plane follows luma at pitch * target_height.
+    // Semi-planar: the chroma plane follows luma at pitch * target_height bytes,
+    // at 8 or 16 bits per sample.
     let chroma_ptr = dev_ptr + (pitch as u64) * (state.target_height as u64);
+    let context = owner.ctx.context;
     let buffer = OwnedCudaBuffer::new(
         dev_ptr,
         chroma_ptr,
@@ -606,12 +728,13 @@ extern "C" fn handle_display(user: *mut core::ffi::c_void, disp: *mut ffi::Parse
         pitch,
         state.target_width,
         state.target_height,
-        state.context,
+        context,
         Arc::new(CuvidMappedFrame { owner, dev_ptr }),
     );
     state.ready.push(ReadyFrame {
         buffer,
         pts_ns: d.timestamp as u64,
+        format: state.out_format,
     });
     1
 }
@@ -670,22 +793,28 @@ impl AsyncElement for NvDec {
         Err(G2gError::CapsMismatch)
     }
 
-    /// Native `DerivedOutput`: H.264 or HEVC (any geometry) in, NV12 at the same
-    /// dims and framerate out. Any other input yields an empty set, rejected at
-    /// solve. The runtime `CapsChanged` carries the actual decoded (cropped) dims.
+    /// Native `DerivedOutput`: a supported codec (any geometry) in, NV12 or (for a
+    /// 10-/12-bit stream) P010 at the same dims and framerate out. Any other input
+    /// yields an empty set, rejected at solve. The runtime `CapsChanged` carries
+    /// the actual decoded (cropped) dims and the depth the stream turned out to be.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
             Caps::CompressedVideo {
-                codec: VideoCodec::H264 | VideoCodec::H265,
+                codec: VideoCodec::H264 | VideoCodec::H265 | VideoCodec::Av1,
                 width,
                 height,
                 framerate,
-            } => CapsSet::one(Caps::RawVideo {
-                format: RawVideoFormat::Nv12,
-                width: width.clone(),
-                height: height.clone(),
-                framerate: framerate.clone(),
-            }),
+            } => CapsSet::from_alternatives(
+                [RawVideoFormat::Nv12, RawVideoFormat::P010]
+                    .into_iter()
+                    .map(|format| Caps::RawVideo {
+                        format,
+                        width: width.clone(),
+                        height: height.clone(),
+                        framerate: framerate.clone(),
+                    })
+                    .collect(),
+            ),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
     }
@@ -745,11 +874,36 @@ impl AsyncElement for NvDec {
 
     fn metadata(&self) -> ElementMetadata {
         ElementMetadata::new(
-            "NVDEC H.264 / HEVC decoder",
+            "NVDEC H.264 / HEVC / AV1 decoder",
             "Codec/Decoder/Video/Hardware",
-            "Zero-copy H.264 / HEVC decode to CUDA NV12 surfaces via the NVIDIA Video Codec SDK (NVCUVID)",
+            "Zero-copy H.264 / HEVC / AV1 decode to CUDA NV12 / P010 surfaces via the NVIDIA Video Codec SDK (NVCUVID)",
             "g2g",
         )
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        NVDEC_PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "max-display-delay" => {
+                let frames = value.as_uint().ok_or(PropError::Type)?;
+                if frames > MAX_DISPLAY_DELAY_LIMIT as u64 {
+                    return Err(PropError::Value);
+                }
+                self.max_display_delay = frames as u32;
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "max-display-delay" => Some(PropValue::Uint(self.max_display_delay as u64)),
+            _ => None,
+        }
     }
 
     fn process<'a>(
@@ -786,18 +940,32 @@ impl AsyncElement for NvDec {
 
 impl PadTemplates for NvDec {
     fn pad_templates() -> Vec<PadTemplate> {
-        let out = Caps::RawVideo {
-            format: RawVideoFormat::Nv12,
-            width: Dim::Any,
-            height: Dim::Any,
-            framerate: Rate::Any,
-        };
+        let out = CapsSet::from_alternatives(
+            [RawVideoFormat::Nv12, RawVideoFormat::P010]
+                .into_iter()
+                .map(|format| Caps::RawVideo {
+                    format,
+                    width: Dim::Any,
+                    height: Dim::Any,
+                    framerate: Rate::Any,
+                })
+                .collect(),
+        );
         Vec::from([
             PadTemplate::sink(Self::input_caps_set()),
-            PadTemplate::source(CapsSet::one(out)),
+            PadTemplate::source(out),
         ])
     }
 }
+
+/// Settable properties: the parser's display delay, so a `gst-launch` line can
+/// trade latency for decode/display pipelining without the builder. Named as
+/// gst-nvcodec's decoders name it.
+static NVDEC_PROPS: &[PropertySpec] = &[PropertySpec::new(
+    "max-display-delay",
+    PropKind::Uint,
+    "frames the parser holds back before display, 0..16 (default 1, low latency)",
+)];
 
 /// Thin hand-rolled FFI for the NVCUVID decode API (`cuviddec.h` / `nvcuvid.h`)
 /// plus the `libcuda` context calls. Only the surface this element uses is
@@ -815,7 +983,10 @@ mod ffi {
     // Codec / format enum values (cuviddec.h).
     pub const CUDA_VIDEO_CODEC_H264: i32 = 4;
     pub const CUDA_VIDEO_CODEC_HEVC: i32 = 8;
+    pub const CUDA_VIDEO_CODEC_AV1: i32 = 11;
     pub const CUDA_VIDEO_SURFACE_FORMAT_NV12: i32 = 0;
+    /// 16-bit semi-planar YUV, the 10-/12-bit output surface (g2g `P010`).
+    pub const CUDA_VIDEO_SURFACE_FORMAT_P016: i32 = 1;
     pub const CUDA_VIDEO_DEINTERLACE_WEAVE: i32 = 0;
     pub const CUDA_VIDEO_CREATE_PREFER_CUVID: u64 = 0x04;
     // Packet flags (nvcuvid.h).
@@ -934,6 +1105,29 @@ mod ffi {
     }
     const _: () = assert!(core::mem::size_of::<DecodeCreateInfo>() == 176);
 
+    /// `CUVIDRECONFIGUREDECODERINFO` (128 bytes), the in-place decoder reset for a
+    /// mid-stream resolution change. The two `short` rectangles are flattened into
+    /// named `i16` fields, as in [`DecodeCreateInfo`].
+    #[repr(C)]
+    pub struct ReconfigureDecoderInfo {
+        pub width: u32,
+        pub height: u32,
+        pub target_width: u32,
+        pub target_height: u32,
+        pub num_decode_surfaces: u32,
+        pub reserved1: [u32; 12],
+        pub display_area_left: i16,
+        pub display_area_top: i16,
+        pub display_area_right: i16,
+        pub display_area_bottom: i16,
+        pub target_rect_left: i16,
+        pub target_rect_top: i16,
+        pub target_rect_right: i16,
+        pub target_rect_bottom: i16,
+        pub reserved2: [u32; 11],
+    }
+    const _: () = assert!(core::mem::size_of::<ReconfigureDecoderInfo>() == 128);
+
     /// `CUVIDPROCPARAMS` (264 bytes). We set the field/progressive flags; the rest
     /// (raw-YUV I/O, stream, reserved) stays zero.
     #[repr(C)]
@@ -973,6 +1167,11 @@ mod ffi {
         pub fn cuvid_create_decoder(decoder: *mut *mut c_void, info: *mut DecodeCreateInfo) -> i32;
         #[link_name = "cuvidDestroyDecoder"]
         pub fn cuvid_destroy_decoder(decoder: *mut c_void) -> i32;
+        #[link_name = "cuvidReconfigureDecoder"]
+        pub fn cuvid_reconfigure_decoder(
+            decoder: *mut c_void,
+            info: *mut ReconfigureDecoderInfo,
+        ) -> i32;
         #[link_name = "cuvidDecodePicture"]
         pub fn cuvid_decode_picture(decoder: *mut c_void, pic: *mut c_void) -> i32;
         #[link_name = "cuvidMapVideoFrame64"]
@@ -1024,54 +1223,468 @@ mod tests {
     // --- Pure-logic coverage (no GPU): caps + struct layout ---
 
     #[test]
-    fn caps_constraint_is_h264_to_nv12() {
+    fn caps_constraint_covers_the_decodable_codecs_and_depths() {
         let d = NvDec::new();
         let CapsConstraint::DerivedOutput(derive) = d.caps_constraint_as_transform() else {
             panic!("expected DerivedOutput");
         };
         let out = derive(&h264(1920, 1080));
-        assert!(out.accepts(&Caps::RawVideo {
-            format: RawVideoFormat::Nv12,
-            width: Dim::Fixed(1920),
-            height: Dim::Fixed(1080),
-            framerate: Rate::Fixed(30 << 16),
-        }));
-        // Non-H.264 (e.g. AV1) yields an empty set, rejected at solve.
+        // Both depths are offered; the runtime CapsChanged says which it is.
+        for format in [RawVideoFormat::Nv12, RawVideoFormat::P010] {
+            assert!(out.accepts(&Caps::RawVideo {
+                format,
+                width: Dim::Fixed(1920),
+                height: Dim::Fixed(1080),
+                framerate: Rate::Fixed(30 << 16),
+            }));
+        }
+        // AV1 decodes too (Ampere+).
         let av1 = Caps::CompressedVideo {
             codec: VideoCodec::Av1,
             width: Dim::Fixed(640),
             height: Dim::Fixed(480),
             framerate: Rate::Any,
         };
-        assert!(derive(&av1).alternatives().is_empty());
+        assert!(!derive(&av1).alternatives().is_empty());
+        // A codec NVDEC has no decoder for yields an empty set, rejected at solve.
+        let vp9 = Caps::CompressedVideo {
+            codec: VideoCodec::Vp9,
+            width: Dim::Fixed(640),
+            height: Dim::Fixed(480),
+            framerate: Rate::Any,
+        };
+        assert!(derive(&vp9).alternatives().is_empty());
     }
 
     #[test]
-    fn output_caps_use_decoded_dims_when_known() {
+    fn frame_caps_track_the_decoded_format_and_dims() {
         let mut d = NvDec::new();
-        d.width = 1920;
-        d.height = 1080;
         d.framerate = Rate::Fixed(30 << 16);
-        // Before decode: negotiated dims.
-        assert!(matches!(
-            d.output_caps(),
+        assert_eq!(
+            d.frame_caps(RawVideoFormat::Nv12, 1280, 720),
             Caps::RawVideo {
-                width: Dim::Fixed(1920),
-                height: Dim::Fixed(1080),
-                ..
-            }
-        ));
-        // After the sequence callback learns the real (cropped) display dims.
-        d.state.target_width = 1280;
-        d.state.target_height = 720;
-        assert!(matches!(
-            d.output_caps(),
-            Caps::RawVideo {
+                format: RawVideoFormat::Nv12,
                 width: Dim::Fixed(1280),
                 height: Dim::Fixed(720),
+                framerate: Rate::Fixed(30 << 16),
+            }
+        );
+        // A 10-bit stream announces the semi-planar 16-bit surface instead.
+        assert!(matches!(
+            d.frame_caps(RawVideoFormat::P010, 640, 480),
+            Caps::RawVideo {
+                format: RawVideoFormat::P010,
+                width: Dim::Fixed(640),
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn max_display_delay_property_round_trips() {
+        let mut d = NvDec::new();
+        assert_eq!(
+            d.get_property("max-display-delay"),
+            Some(PropValue::Uint(DEFAULT_MAX_DISPLAY_DELAY as u64))
+        );
+        d.set_property("max-display-delay", PropValue::Uint(4))
+            .unwrap();
+        assert_eq!(d.max_display_delay, 4);
+        assert_eq!(
+            d.get_property("max-display-delay"),
+            Some(PropValue::Uint(4))
+        );
+        // Out of the 0..=16 range NVCUVID accepts.
+        assert_eq!(
+            d.set_property("max-display-delay", PropValue::Uint(64)),
+            Err(PropError::Value)
+        );
+        assert!(d.properties().iter().any(|s| s.name == "max-display-delay"));
+        assert_eq!(NvDec::new().with_max_display_delay(3).max_display_delay, 3);
+    }
+
+    // --- On-hardware fixture decodes (RTX 3060): mid-stream resolution change,
+    // 10-bit (P010) output, AV1, and the display-delay knob. Each skips cleanly
+    // when NVDEC is unavailable. ---
+
+    /// 6 frames at 640x480 then 6 at 320x240, concatenated Annex-B.
+    const H264_RECONFIG: &[u8] =
+        include_bytes!("../tests/fixtures/h264_reconfig_640x480_to_320x240.h264");
+    /// 640x480 Main 10 (10-bit) HEVC.
+    const HEVC_MAIN10: &[u8] = include_bytes!("../tests/fixtures/h265_640x480_main10.hevc");
+    /// 640x480 AV1, a raw low-overhead OBU stream.
+    const AV1_CLIP: &[u8] = include_bytes!("../tests/fixtures/av1_640x480.obu");
+    /// 640x480 H.264, single resolution.
+    const H264_CLIP: &[u8] = include_bytes!("../tests/fixtures/h264_640x480.h264");
+
+    /// Records what reached the sink: announced caps, per-frame geometry, and the
+    /// first 64 bytes of the first frame's luma plane (a real decode is not flat).
+    #[derive(Default)]
+    struct RecordSink {
+        caps: Vec<Caps>,
+        dims: Vec<(u32, u32)>,
+        luma_head: Option<Vec<u8>>,
+    }
+
+    impl OutputSink for RecordSink {
+        fn push<'a>(
+            &'a mut self,
+            packet: PipelinePacket,
+        ) -> core::pin::Pin<
+            Box<dyn core::future::Future<Output = Result<g2g_core::PushOutcome, G2gError>> + 'a>,
+        > {
+            Box::pin(async move {
+                match packet {
+                    PipelinePacket::CapsChanged(c) => self.caps.push(c),
+                    PipelinePacket::DataFrame(f) => {
+                        if let MemoryDomain::Cuda(buf) = &f.domain {
+                            self.dims.push((buf.width, buf.height));
+                            if self.luma_head.is_none() {
+                                let mut row = alloc::vec![0u8; 64];
+                                // SAFETY: `buf.luma_ptr` is valid device memory in
+                                // `buf.context`; copy a small prefix out of it.
+                                unsafe {
+                                    let _ = cu::cu_ctx_push_current(
+                                        buf.context as *mut core::ffi::c_void,
+                                    );
+                                    let _ = cu::cu_memcpy_dtoh(
+                                        row.as_mut_ptr() as *mut core::ffi::c_void,
+                                        buf.luma_ptr,
+                                        row.len(),
+                                    );
+                                    let mut popped = core::ptr::null_mut();
+                                    let _ = cu::cu_ctx_pop_current(&mut popped);
+                                }
+                                self.luma_head = Some(row);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                Ok(g2g_core::PushOutcome::Accepted)
+            })
+        }
+    }
+
+    /// Byte offsets of each Annex-B NAL payload (just past its start code).
+    fn start_code_offsets(data: &[u8]) -> Vec<usize> {
+        let mut offs = Vec::new();
+        let mut i = 0;
+        while i + 3 <= data.len() {
+            if data[i] == 0 && data[i + 1] == 0 {
+                if data[i + 2] == 1 {
+                    offs.push(i + 3);
+                    i += 3;
+                    continue;
+                }
+                if i + 4 <= data.len() && data[i + 2] == 0 && data[i + 3] == 1 {
+                    offs.push(i + 4);
+                    i += 4;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+        offs
+    }
+
+    /// Split an Annex-B stream into access units, one per picture: `is_vcl`
+    /// decides which NAL types close a unit (the fixtures are single-slice).
+    fn split_access_units(stream: &[u8], is_vcl: fn(&[u8]) -> bool) -> Vec<Vec<u8>> {
+        let mut units = Vec::new();
+        let mut cur: Vec<u8> = Vec::new();
+        let starts = start_code_offsets(stream);
+        for (k, &begin) in starts.iter().enumerate() {
+            let end = starts.get(k + 1).copied().unwrap_or(stream.len());
+            let nal = &stream[begin..end];
+            cur.extend_from_slice(&[0, 0, 0, 1]);
+            cur.extend_from_slice(nal);
+            if is_vcl(nal) {
+                units.push(core::mem::take(&mut cur));
+            }
+        }
+        if !cur.is_empty() {
+            if let Some(last) = units.last_mut() {
+                last.extend_from_slice(&cur);
+            }
+        }
+        units
+    }
+
+    fn h264_units(stream: &[u8]) -> Vec<Vec<u8>> {
+        split_access_units(stream, |nal| {
+            matches!(nal.first().map(|b| b & 0x1F), Some(1) | Some(5))
+        })
+    }
+
+    fn h265_units(stream: &[u8]) -> Vec<Vec<u8>> {
+        // HEVC NAL header is two bytes; VCL types are 0..=31.
+        split_access_units(stream, |nal| {
+            nal.first().map(|b| (b >> 1) & 0x3F).unwrap_or(63) <= 31
+        })
+    }
+
+    /// Split a low-overhead AV1 OBU stream into temporal units (each starts at a
+    /// temporal delimiter, OBU type 2). Sizes are leb128 after the header byte.
+    fn av1_temporal_units(stream: &[u8]) -> Vec<Vec<u8>> {
+        let mut units: Vec<Vec<u8>> = Vec::new();
+        let mut cur: Vec<u8> = Vec::new();
+        let mut i = 0usize;
+        while i < stream.len() {
+            let header = stream[i];
+            let obu_type = (header >> 3) & 0xF;
+            let has_extension = header & 0x04 != 0;
+            let has_size = header & 0x02 != 0;
+            let mut p = i + 1 + usize::from(has_extension);
+            if !has_size || p >= stream.len() {
+                break;
+            }
+            // leb128 payload size.
+            let mut size = 0usize;
+            let mut shift = 0;
+            loop {
+                if p >= stream.len() || shift > 56 {
+                    return units;
+                }
+                let b = stream[p];
+                p += 1;
+                size |= ((b & 0x7f) as usize) << shift;
+                shift += 7;
+                if b & 0x80 == 0 {
+                    break;
+                }
+            }
+            let end = match p.checked_add(size) {
+                Some(e) if e <= stream.len() => e,
+                _ => return units,
+            };
+            if obu_type == 2 && !cur.is_empty() {
+                units.push(core::mem::take(&mut cur));
+            }
+            cur.extend_from_slice(&stream[i..end]);
+            i = end;
+        }
+        if !cur.is_empty() {
+            units.push(cur);
+        }
+        units
+    }
+
+    /// A system-memory frame carrying one access unit.
+    fn au_frame(au: &[u8], pts_ns: u64) -> g2g_core::frame::Frame {
+        g2g_core::frame::Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(au.to_vec().into_boxed_slice())),
+            g2g_core::FrameTiming {
+                pts_ns,
+                ..Default::default()
+            },
+            0,
+        )
+    }
+
+    /// Configure a decoder for `codec` at `w`x`h`, or `None` if NVDEC is
+    /// unavailable on this host (the test then skips).
+    fn open_dec(codec: VideoCodec, w: u32, h: u32, display_delay: u32) -> Option<NvDec> {
+        let mut dec = NvDec::new().with_max_display_delay(display_delay);
+        let caps = Caps::CompressedVideo {
+            codec,
+            width: Dim::Fixed(w),
+            height: Dim::Fixed(h),
+            framerate: Rate::Fixed(30 << 16),
+        };
+        match dec.configure_pipeline(&caps) {
+            Ok(_) => Some(dec),
+            Err(_) => {
+                std::eprintln!("skipping: NVDEC unavailable on this host");
+                None
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn mid_stream_resolution_change_reconfigures_the_decoder() {
+        let Some(mut dec) = open_dec(VideoCodec::H264, 640, 480, 1) else {
+            return;
+        };
+        let units = h264_units(H264_RECONFIG);
+        assert!(units.len() > 6, "fixture split into per-picture AUs");
+        let mut sink = RecordSink::default();
+        for (i, au) in units.iter().enumerate() {
+            dec.process(
+                PipelinePacket::DataFrame(au_frame(au, i as u64 * 33_000_000)),
+                &mut sink,
+            )
+            .await
+            .expect("decode AU");
+        }
+        dec.process(PipelinePacket::Eos, &mut sink)
+            .await
+            .expect("flush");
+
+        assert!(
+            sink.dims.contains(&(640, 480)) && sink.dims.contains(&(320, 240)),
+            "both resolutions decoded, got {:?}",
+            sink.dims
+        );
+        let announced: Vec<(RawVideoFormat, u32, u32)> = sink
+            .caps
+            .iter()
+            .filter_map(|c| match c {
+                Caps::RawVideo {
+                    format,
+                    width: Dim::Fixed(w),
+                    height: Dim::Fixed(h),
+                    ..
+                } => Some((*format, *w, *h)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            announced,
+            std::vec![
+                (RawVideoFormat::Nv12, 640, 480),
+                (RawVideoFormat::Nv12, 320, 240)
+            ],
+            "one CapsChanged per resolution, in stream order"
+        );
+        assert_eq!(
+            dec.decoders_created(),
+            1,
+            "a shrink within the decoder's ceiling reconfigures in place"
+        );
+    }
+
+    #[tokio::test]
+    async fn hevc_main10_decodes_to_p010_surfaces() {
+        let Some(mut dec) = open_dec(VideoCodec::H265, 640, 480, 1) else {
+            return;
+        };
+        let units = h265_units(HEVC_MAIN10);
+        assert!(!units.is_empty(), "fixture split into AUs");
+        let mut sink = RecordSink::default();
+        for (i, au) in units.iter().enumerate() {
+            dec.process(
+                PipelinePacket::DataFrame(au_frame(au, i as u64 * 33_000_000)),
+                &mut sink,
+            )
+            .await
+            .expect("decode AU");
+        }
+        dec.process(PipelinePacket::Eos, &mut sink)
+            .await
+            .expect("flush");
+
+        assert!(!sink.dims.is_empty(), "10-bit stream produced frames");
+        assert_eq!(
+            sink.caps,
+            std::vec![Caps::RawVideo {
+                format: RawVideoFormat::P010,
+                width: Dim::Fixed(640),
+                height: Dim::Fixed(480),
+                framerate: Rate::Fixed(30 << 16),
+            }],
+            "a 10-bit stream announces the P010 surface"
+        );
+        assert!(sink.dims.iter().all(|&d| d == (640, 480)));
+        // 16-bit samples with the value in the top 10 bits: the low 6 bits of
+        // each little-endian word are zero, and the picture is not flat.
+        let head = sink.luma_head.expect("luma read back");
+        assert!(
+            head.chunks_exact(2).all(|w| w[0] & 0x3f == 0),
+            "P010 samples sit in the top 10 bits, got {:?}",
+            &head[..8]
+        );
+        let samples: Vec<u16> = head
+            .chunks_exact(2)
+            .map(|w| u16::from_le_bytes([w[0], w[1]]) >> 6)
+            .collect();
+        assert!(
+            samples.iter().any(|&s| s != samples[0]),
+            "decoded luma is uniform; decode likely failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn av1_decodes_on_gpu() {
+        let Some(mut dec) = open_dec(VideoCodec::Av1, 640, 480, 1) else {
+            return;
+        };
+        let units = av1_temporal_units(AV1_CLIP);
+        assert!(units.len() > 1, "fixture split into temporal units");
+        let mut sink = RecordSink::default();
+        for (i, tu) in units.iter().enumerate() {
+            if dec
+                .process(
+                    PipelinePacket::DataFrame(au_frame(tu, i as u64 * 33_000_000)),
+                    &mut sink,
+                )
+                .await
+                .is_err()
+            {
+                // Pre-Ampere NVDEC has no AV1 decoder: the first sequence fails.
+                std::eprintln!("skipping: no AV1 decode on this GPU");
+                return;
+            }
+        }
+        dec.process(PipelinePacket::Eos, &mut sink)
+            .await
+            .expect("flush");
+
+        assert!(sink.dims.len() > 1, "AV1 clip decoded to several frames");
+        assert!(sink.dims.iter().all(|&d| d == (640, 480)));
+        assert_eq!(
+            sink.caps,
+            std::vec![Caps::RawVideo {
+                format: RawVideoFormat::Nv12,
+                width: Dim::Fixed(640),
+                height: Dim::Fixed(480),
+                framerate: Rate::Fixed(30 << 16),
+            }]
+        );
+        let head = sink.luma_head.expect("luma read back");
+        assert!(
+            head.iter().any(|&b| b != head[0]),
+            "decoded AV1 luma is uniform; decode likely failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn display_delay_lags_output_by_the_configured_frames() {
+        // Same stream, two display delays: the deeper one holds frames back in
+        // the parser, so fewer have been emitted by the time the input ends.
+        async fn decode(delay: u32) -> Option<(usize, usize)> {
+            let mut dec = open_dec(VideoCodec::H264, 640, 480, delay)?;
+            let units = h264_units(H264_CLIP);
+            let mut sink = RecordSink::default();
+            for (i, au) in units.iter().enumerate() {
+                dec.process(
+                    PipelinePacket::DataFrame(au_frame(au, i as u64 * 33_000_000)),
+                    &mut sink,
+                )
+                .await
+                .expect("decode AU");
+            }
+            let before_flush = sink.dims.len();
+            dec.process(PipelinePacket::Eos, &mut sink)
+                .await
+                .expect("flush");
+            Some((before_flush, sink.dims.len()))
+        }
+
+        let Some((low_before, low_total)) = decode(1).await else {
+            return;
+        };
+        let (deep_before, deep_total) = decode(8).await.expect("second decoder");
+        assert!(
+            low_total > 0 && low_total == deep_total,
+            "same frame count either way, got {low_total} vs {deep_total}"
+        );
+        // The parser holds frames back before displaying; how many it can hold is
+        // also bounded by the decode-surface pool, so assert the lag, not a count.
+        assert!(
+            low_before > deep_before,
+            "a deeper display delay must lag: {low_before} of {low_total} emitted at delay 1 vs {deep_before} at delay 8"
+        );
     }
 
     // --- On-hardware round trip (RTX 3060): encode an NV12 CUDA surface with the
@@ -1092,9 +1705,9 @@ mod tests {
     }
 
     /// CUDA driver FFI to synthesize an NV12 surface for the encode leg and to
-    /// read a decoded luma plane back for verification.
-    #[cfg(feature = "nvenc")]
-    #[allow(unreachable_pub)]
+    /// read a decoded luma plane back for verification. The allocate / upload
+    /// half is only used by the `nvenc` round trips.
+    #[allow(unreachable_pub, dead_code)]
     mod cu {
         use core::ffi::c_void;
         #[link(name = "cuda")]
@@ -1146,6 +1759,8 @@ mod tests {
     #[cfg(feature = "nvenc")]
     async fn gpu_round_trip(codec: VideoCodec) {
         use crate::nvenc::NvEnc;
+        // One NVENC session at a time across this binary's test threads.
+        let _lock = crate::nvenc::tests::encode_session_lock().await;
         use core::future::Future;
         use core::pin::Pin;
         use g2g_core::frame::Frame;

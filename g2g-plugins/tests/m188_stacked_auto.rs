@@ -43,7 +43,7 @@ async fn scale_then_convert_before_one_caps() {
     // M227 (field-level coupling): the other order, videoscale(auto) !
     // videoconvert(auto) ! caps, now resolves too. The geometry pin (160x120)
     // sits behind a geometry-passthrough transform (videoconvert); the
-    // `DerivedCoupled` backward sweep intersects the pin *into* videoconvert's
+    // `DerivedFields` backward sweep intersects the pin *into* videoconvert's
     // input width/height fields (`Range ∩ Fixed = Fixed`) rather than only
     // dropping alternatives, so videoscale receives a pinned 160x120 output and
     // resizes. Was the documented M188 KNOWN-LIMIT; closed by M227.

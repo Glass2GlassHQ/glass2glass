@@ -18,11 +18,13 @@ use std::net::SocketAddr;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket, PropError, PropValue,
+    Caps, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket, PropError,
+    PropValue, Rate,
 };
 
 use crate::filesink::io_err;
 use crate::flexfec::FlexFecDecoder;
+use crate::nalparse::NalCodec;
 use crate::rtcp::{self, ReceptionStats, RtcpPacket};
 use crate::rtpdepay::{AccessUnit, RtpH264Depayloader};
 use crate::rtpjitter::{JitterConfig, RtpJitterBuffer};
@@ -59,6 +61,10 @@ pub struct RtpRecvConfig {
     pub fec_pt: Option<u8>,
     /// RFC 8627 FlexFEC repair-packet payload type, if enabled.
     pub flexfec_pt: Option<u8>,
+    /// The caps the source negotiated. When set, each depayloaded access unit's
+    /// SPS refines them and a `CapsChanged` precedes the frame that carries the
+    /// new geometry ([`SpsCapsRefiner`]). `None` leaves the stream unrefined.
+    pub declared_caps: Option<Caps>,
 }
 
 impl Default for RtpRecvConfig {
@@ -70,7 +76,61 @@ impl Default for RtpRecvConfig {
             rtx: None,
             fec_pt: None,
             flexfec_pt: None,
+            declared_caps: None,
         }
+    }
+}
+
+/// Runtime caps refinement from the bitstream: an RTP receiver has no in-band
+/// stream description, so the geometry it negotiated with is whatever the SDP
+/// declared or the element was told. The H.264 SPS in the stream is
+/// authoritative, so each access unit is checked against the caps in force and a
+/// mismatch (the first SPS, or a mid-stream resolution change) yields the
+/// corrected caps for the caller to emit as `CapsChanged`.
+#[derive(Debug)]
+pub struct SpsCapsRefiner {
+    current: Caps,
+}
+
+impl SpsCapsRefiner {
+    pub fn new(declared: Caps) -> Self {
+        Self { current: declared }
+    }
+
+    /// The caps in force right now (the declared ones until an SPS refines them).
+    pub fn caps(&self) -> &Caps {
+        &self.current
+    }
+
+    /// Refine from the SPS in one Annex-B access unit. Returns the new caps the
+    /// first time they differ from the ones in force (and on any later change),
+    /// `None` when the unit carries no SPS or nothing changed.
+    pub fn refine(&mut self, au: &[u8]) -> Option<Caps> {
+        let Caps::CompressedVideo {
+            codec, framerate, ..
+        } = &self.current
+        else {
+            return None;
+        };
+        let (codec, framerate) = (*codec, framerate.clone());
+        let sps = match codec {
+            g2g_core::VideoCodec::H264 => crate::h264parse::H264Codec::extract_sps_info(au)?,
+            g2g_core::VideoCodec::H265 => crate::h265parse::H265Codec::extract_sps_info(au)?,
+            _ => return None,
+        };
+        let refined = Caps::CompressedVideo {
+            codec,
+            width: Dim::Fixed(sps.width),
+            height: Dim::Fixed(sps.height),
+            // Keep the declared rate when the SPS has no VUI timing: a live
+            // source must never hand downstream a wildcard rate.
+            framerate: sps.framerate.map_or(framerate, Rate::Fixed),
+        };
+        if refined == self.current {
+            return None;
+        }
+        self.current = refined.clone();
+        Some(refined)
     }
 }
 
@@ -212,6 +272,8 @@ pub async fn receive_rtp_h264(
     // FEC decoders; each consulted only when its payload type is set.
     let mut fec_decoder = FecDecoder::default();
     let mut flexfec_decoder = FlexFecDecoder::default();
+    // In-band caps discovery: correct the declared geometry from the stream's SPS.
+    let mut refiner = cfg.declared_caps.clone().map(SpsCapsRefiner::new);
 
     // RTCP feedback state (RTP/RTCP-muxed on this socket): the peer to report to
     // (learned from the first datagram) and report timers.
@@ -228,6 +290,9 @@ pub async fn receive_rtp_h264(
             let Some(au) = depay.depacketize(&packet) else {
                 continue;
             };
+            if let Some(caps) = refiner.as_mut().and_then(|r| r.refine(&au.data)) {
+                out.push(PipelinePacket::CapsChanged(caps)).await?;
+            }
             if push_access_unit(au, &mut ts_base, &mut seq, seq_base, frame_limit, out).await? {
                 return Ok(seq - seq_base);
             }

@@ -16,7 +16,7 @@ use g2g_core::memory::MemoryDomain;
 use g2g_core::runtime::{SeekController, SourceLoop};
 use g2g_core::{ByteStreamEncoding, Caps, G2gError, Seek};
 use g2g_plugins::filesrc::FileSrc;
-use g2g_plugins::flv::{FlvMuxer, FlvTrack};
+use g2g_plugins::flv::{FlvCodec, FlvMuxer};
 use g2g_plugins::flvdemux::{FlvDemux, FlvStream};
 
 use std::path::PathBuf;
@@ -27,7 +27,7 @@ fn temp_path(name: &str) -> PathBuf {
 
 /// Build an FLV byte stream: video tags `(pts_ms, keyframe, au)`.
 fn make_flv(tags: &[(u32, bool, Vec<u8>)]) -> Vec<u8> {
-    let mut mux = FlvMuxer::new(FlvTrack::Video);
+    let mut mux = FlvMuxer::new(FlvCodec::H264);
     let mut out = Vec::new();
     for (pts, kf, au) in tags {
         out.extend_from_slice(&mux.push_video(au, *pts, 0, *kf));

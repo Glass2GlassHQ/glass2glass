@@ -358,6 +358,13 @@ pub trait AsyncElement: ElementBound {
     /// lines carry the instance name.
     fn set_instance_name(&mut self, _name: alloc::string::String) {}
 
+    /// Override this instance's log category (M845), which is otherwise the
+    /// element type name. Default: ignore. An element that logs about itself
+    /// stores it (in a [`LogName`](crate::log::LogName)) and returns it from
+    /// `LogSource::log_category_override`, so `G2G_DEBUG` filtering keys off the
+    /// override for this instance while its siblings keep the type category.
+    fn set_log_category(&mut self, _category: alloc::string::String) {}
+
     /// Set a property by name (M104). Default: every name is
     /// [`PropError::Unknown`] (no properties). An overriding element validates
     /// the value kind against its [`properties`](Self::properties) spec and
@@ -504,6 +511,9 @@ pub trait DynAsyncElement: ElementBound {
     /// name an erased element instance for logging.
     fn set_instance_name(&mut self, _name: alloc::string::String) {}
 
+    /// Dyn-safe mirror of [`AsyncElement::set_log_category`].
+    fn set_log_category(&mut self, _category: alloc::string::String) {}
+
     /// Dyn-safe mirror of [`AsyncElement::set_property`]. Defaults to "no
     /// properties" so a hand-written `DynAsyncElement` need not implement it; the
     /// blanket `impl<T: AsyncElement>` overrides it to forward to the element.
@@ -626,6 +636,10 @@ impl<T: AsyncElement> DynAsyncElement for T {
         AsyncElement::set_instance_name(self, name)
     }
 
+    fn set_log_category(&mut self, category: alloc::string::String) {
+        AsyncElement::set_log_category(self, category)
+    }
+
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
         AsyncElement::set_property(self, name, value)
     }
@@ -741,6 +755,10 @@ impl<'b> DynAsyncElement for &'b mut (dyn DynAsyncElement + 'b) {
 
     fn set_instance_name(&mut self, name: alloc::string::String) {
         (**self).set_instance_name(name)
+    }
+
+    fn set_log_category(&mut self, category: alloc::string::String) {
+        (**self).set_log_category(category)
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {

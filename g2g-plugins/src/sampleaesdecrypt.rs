@@ -6,9 +6,11 @@
 //!
 //! Scope: MPEG-2 TS H.264 (Annex-B) and AAC (ADTS), per the Apple "MPEG-2 Stream
 //! Encryption Format for HTTP Live Streaming" spec, cross-checked against hls.js
-//! and FFmpeg. The key and IV are configured on the element. Auto-wiring the
-//! playlist `#EXT-X-KEY` material from `HlsSrc` through the demuxer, fMP4 `cbcs`,
-//! and AC-3 are follow-ups (DESIGN_TODO).
+//! and FFmpeg. The key and IV are either configured on the element or read from
+//! the shared store [`HlsSrc`](crate::hlssrc) publishes the playlist's
+//! `#EXT-X-KEY` material into. This element reads the key in force; the fMP4
+//! path resolves a rotating key per fragment instead (see [`crate::cenc`]).
+//! AC-3 sample encryption is a follow-up (DESIGN_TODO).
 //!
 //! H.264: for each slice NAL (type 1 / 5) longer than 48 bytes, the
 //! emulation-prevention bytes are stripped, the first 32 bytes stay clear, then a
@@ -22,7 +24,6 @@ use core::pin::Pin;
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use std::sync::{Arc, Mutex};
 
 use aes::cipher::{block_padding::NoPadding, BlockDecryptMut, KeyIvInit};
 use g2g_core::frame::Frame;
@@ -52,30 +53,15 @@ enum Codec {
 }
 
 /// SAMPLE-AES key material: the 16-byte AES key (the one `#EXT-X-KEY` names) and
-/// the constant segment IV, reset at each NAL unit / audio frame.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct SampleAesKey {
-    pub key: [u8; 16],
-    pub iv: [u8; 16],
-}
+/// the constant segment IV, reset at each NAL unit / audio frame. The same key
+/// type the fMP4 CENC path uses, so one store serves both.
+pub use crate::cenc::ContentKey as SampleAesKey;
 
-// Redact the key/IV from Debug so secrets don't leak into logs.
-impl core::fmt::Debug for SampleAesKey {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("SampleAesKey").finish_non_exhaustive()
-    }
-}
-
-/// Shared slot a key publisher ([`HlsSrc`](crate::hlssrc)) writes once it has
-/// fetched the playlist `#EXT-X-KEY` material, and the decryptor reads. `None`
+/// Shared key store a publisher ([`HlsSrc`](crate::hlssrc)) fills once it has
+/// fetched the playlist `#EXT-X-KEY` material, and the decryptor reads. Empty
 /// until the publisher fills it; this is the auto-wiring path that spares the
 /// caller from configuring the key by hand.
-pub type SampleAesKeyHandle = Arc<Mutex<Option<SampleAesKey>>>;
-
-/// A fresh, empty key handle to wire a publisher and a decryptor together.
-pub fn new_key_handle() -> SampleAesKeyHandle {
-    Arc::new(Mutex::new(None))
-}
+pub use crate::cenc::{new_key_handle, CencKeyHandle as SampleAesKeyHandle};
 
 pub struct SampleAesDecrypt {
     /// Directly configured key (the [`new`](Self::new) path).
@@ -123,7 +109,10 @@ impl SampleAesDecrypt {
     /// The key in effect: the shared handle if wired, else the direct key.
     fn current_key(&self) -> Option<SampleAesKey> {
         match &self.key_handle {
-            Some(handle) => *handle.lock().expect("sample-aes key handle poisoned"),
+            Some(handle) => handle
+                .lock()
+                .expect("sample-aes key handle poisoned")
+                .current(),
             None => self.key,
         }
     }
@@ -585,7 +574,10 @@ mod tests {
 
         // Publisher fills the handle (as HlsSrc would) before the frame flows.
         let handle = new_key_handle();
-        *handle.lock().unwrap() = Some(SampleAesKey { key: KEY, iv: IV });
+        handle
+            .lock()
+            .unwrap()
+            .set_current(SampleAesKey { key: KEY, iv: IV });
 
         let mut elem = SampleAesDecrypt::from_key_handle(handle);
         elem.configure_pipeline(&Caps::CompressedVideo {

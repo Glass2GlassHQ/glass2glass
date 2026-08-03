@@ -233,7 +233,8 @@ static DEINTERLACE_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "method",
     PropKind::Str,
     "deinterlace method: linear | blend",
-)];
+)
+.with_enum_values("linear | blend")];
 
 impl PadTemplates for Deinterlace {
     fn pad_templates() -> Vec<PadTemplate> {

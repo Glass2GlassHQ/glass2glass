@@ -10,9 +10,19 @@
 //!
 //! Wire protocol (each WS frame is one JSON object, discriminated by `type`):
 //! - `{"type":"telemetry","uptime_ns":N,"nodes":[..],"edges":[{"from":i,"to":j,
-//!   "caps":"<gst-string>"|null}]}` where each node is `{"id","name","role",
-//!   "proc":{..}|null,"transit":{..}|null,"fill_mean_pct","fill_max_pct"}` and
-//!   `caps` is the edge's negotiated caps.
+//!   "caps":"<gst-string>"|null,"packets":N,"bytes":N,"drops":N,"blocked_ns":N}]}`
+//!   where each node is `{"id","name","role","proc":{..}|null,
+//!   "transit":{..}|null,"fill_mean_pct","fill_max_pct"}`, `caps` is the edge's
+//!   negotiated caps, and the counters are that edge's live traffic (packets and
+//!   payload bytes that crossed, frames dropped by a leaky link, and nanoseconds
+//!   the producer spent blocked on a full link).
+//!   The same message carries `"journey"`: one frame's measured path, or `null`
+//!   when none assembles. Its shape is `{"sequence":N,"total_ns":N,
+//!   "frame_period_ns":N,"capacity":N,"floor_ns":N,"truncated":bool,
+//!   "stages":[{"node":i,"name":"...","wait_ns":N,"work_ns":N}]}`, where the
+//!   stages are upstream-first for that one sequence id, `total_ns` is the
+//!   measured end to end, and `floor_ns` is `2 * capacity * frame_period_ns`,
+//!   the queueing floor to compare it against.
 //! - `{"type":"event","kind":"eos"|"error"|...,...}` (see [`event_json`]).
 
 use std::collections::HashMap;
@@ -23,7 +33,6 @@ use std::time::Duration;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;
-use alloc::vec::Vec;
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
@@ -32,9 +41,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
 use tokio_tungstenite::tungstenite::Message;
 
-use g2g_core::runtime::{
-    LinkInterceptor, NodeRole, Observer, ProbeAction, ProbeSlot, TelemetrySnapshot,
-};
+use g2g_core::runtime::{LinkInterceptor, Observer, ProbeAction, ProbeSlot, TelemetrySnapshot};
 use g2g_core::{BusMessage, Caps, PipelinePacket};
 
 use crate::preview::packet_preview;
@@ -83,70 +90,12 @@ pub const INDEX_HTML: &str = include_str!("../../tools/dashboard/index.html");
 /// Telemetry push cadence.
 const TICK: Duration = Duration::from_millis(250);
 
-fn role_str(role: NodeRole) -> &'static str {
-    match role {
-        NodeRole::Source => "source",
-        NodeRole::Transform => "transform",
-        NodeRole::Sink => "sink",
-        NodeRole::Tee => "tee",
-        NodeRole::Muxer => "muxer",
-    }
-}
-
-/// Serialize a telemetry snapshot to the wire JSON string.
+/// Serialize a telemetry snapshot to the wire JSON string: the shared
+/// [`toolingjson::telemetry_json`] shape plus the dashboard's `type` tag.
 pub fn snapshot_json(snap: &TelemetrySnapshot) -> String {
-    let nodes: Vec<Value> = snap
-        .nodes
-        .iter()
-        .map(|n| {
-            let proc = n.latency.as_ref().map(|l| {
-                json!({
-                    "count": l.proc.count,
-                    "mean_ns": l.proc.mean_ns,
-                    "p50_ns": l.proc.p50_ns,
-                    "p95_ns": l.proc.p95_ns,
-                    "p99_ns": l.proc.p99_ns,
-                    "max_ns": l.proc.max_ns,
-                })
-            });
-            // Input-link queue-residency (the "wait" half of the latency
-            // waterfall). Null when the node's input edge is not instrumented.
-            let transit = n.latency.as_ref().filter(|l| l.transit.count > 0).map(|l| {
-                json!({
-                    "count": l.transit.count,
-                    "p50_ns": l.transit.p50_ns,
-                    "p99_ns": l.transit.p99_ns,
-                    "max_ns": l.transit.max_ns,
-                })
-            });
-            let (fill_mean, fill_max) = n
-                .latency
-                .as_ref()
-                .map(|l| (l.fill_mean_pct, l.fill_max_pct))
-                .unwrap_or((0, 0));
-            json!({
-                "id": n.id,
-                "name": n.name,
-                "role": role_str(n.role),
-                "proc": proc,
-                "transit": transit,
-                "fill_mean_pct": fill_mean,
-                "fill_max_pct": fill_max,
-            })
-        })
-        .collect();
-    let edges: Vec<Value> = snap
-        .edges
-        .iter()
-        .map(|e| json!({ "from": e.from, "to": e.to, "caps": e.caps }))
-        .collect();
-    json!({
-        "type": "telemetry",
-        "uptime_ns": snap.uptime_ns,
-        "nodes": nodes,
-        "edges": edges,
-    })
-    .to_string()
+    let mut v = crate::toolingjson::telemetry_json(snap);
+    v["type"] = Value::from("telemetry");
+    v.to_string()
 }
 
 /// Serialize a bus message to the wire JSON string, or `None` for messages the
@@ -177,7 +126,9 @@ pub fn event_json(msg: &BusMessage) -> Option<String> {
             "processed": processed,
             "dropped": dropped,
         }),
-        BusMessage::Buffering { percent } => json!({"kind": "buffering", "percent": percent}),
+        BusMessage::Buffering { percent, element } => {
+            json!({"kind": "buffering", "percent": percent, "element": element})
+        }
         BusMessage::DurationChanged { duration_ns } => {
             json!({"kind": "duration-changed", "duration_ns": duration_ns})
         }
@@ -368,8 +319,13 @@ fn handle_client_msg(text: &str, observer: &Observer, subs: &mut EdgeSubs) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec::Vec;
     use g2g_core::metrics::LatencySnapshot;
-    use g2g_core::runtime::{EdgeInfo, ElementLatency, NodeTelemetry, TelemetrySnapshot};
+    use g2g_core::runtime::NodeRole;
+    use g2g_core::runtime::{
+        EdgeCounts, EdgeInfo, ElementLatency, FrameJourney, JourneyStage, NodeTelemetry,
+        TelemetrySnapshot,
+    };
 
     #[test]
     fn snapshot_json_shape() {
@@ -416,7 +372,14 @@ mod tests {
                 from: 0,
                 to: 1,
                 caps: None,
+                counts: EdgeCounts {
+                    packets: 12,
+                    bytes: 480,
+                    drops: 2,
+                    blocked_ns: 5_000,
+                },
             }],
+            journey: None,
         };
         let json = snapshot_json(&snap);
         let v: Value = serde_json::from_str(&json).unwrap();
@@ -431,6 +394,58 @@ mod tests {
         assert_eq!(v["nodes"][1]["fill_max_pct"], 50);
         assert_eq!(v["edges"][0]["from"], 0);
         assert_eq!(v["edges"][0]["to"], 1);
+        // Live per-edge counters ride the same message.
+        assert_eq!(v["edges"][0]["packets"], 12);
+        assert_eq!(v["edges"][0]["bytes"], 480);
+        assert_eq!(v["edges"][0]["drops"], 2);
+        assert_eq!(v["edges"][0]["blocked_ns"], 5_000);
+        // No frame journey assembled yet -> the field is present but null.
+        assert!(v["journey"].is_null());
+    }
+
+    #[test]
+    fn snapshot_json_carries_the_frame_journey() {
+        let snap = TelemetrySnapshot {
+            uptime_ns: 1_000,
+            nodes: vec![],
+            edges: vec![],
+            journey: Some(FrameJourney {
+                sequence: 42,
+                stages: vec![
+                    JourneyStage {
+                        node: 1,
+                        name: String::from("videoscale0"),
+                        wait_ns: 300,
+                        work_ns: 1_200,
+                    },
+                    JourneyStage {
+                        node: 2,
+                        name: String::from("fakesink0"),
+                        wait_ns: 100,
+                        work_ns: 400,
+                    },
+                ],
+                total_ns: 2_000,
+                frame_period_ns: 33_000_000,
+                capacity: 2,
+                floor_ns: 132_000_000,
+                truncated: false,
+            }),
+        };
+        let v: Value = serde_json::from_str(&snapshot_json(&snap)).unwrap();
+        let j = &v["journey"];
+        assert_eq!(j["sequence"], 42);
+        assert_eq!(j["total_ns"], 2_000);
+        assert_eq!(j["frame_period_ns"], 33_000_000);
+        assert_eq!(j["capacity"], 2);
+        assert_eq!(j["floor_ns"], 132_000_000);
+        assert_eq!(j["truncated"], false);
+        let stages = j["stages"].as_array().unwrap();
+        assert_eq!(stages.len(), 2);
+        assert_eq!(stages[0]["node"], 1);
+        assert_eq!(stages[0]["name"], "videoscale0");
+        assert_eq!(stages[0]["wait_ns"], 300);
+        assert_eq!(stages[1]["work_ns"], 400);
     }
 
     #[test]
@@ -440,10 +455,15 @@ mod tests {
         assert_eq!(v["type"], "event");
         assert_eq!(v["kind"], "eos");
 
-        let buf = event_json(&BusMessage::Buffering { percent: 75 }).unwrap();
+        let buf = event_json(&BusMessage::Buffering {
+            percent: 75,
+            element: Some("videoconvert0".into()),
+        })
+        .unwrap();
         let v: Value = serde_json::from_str(&buf).unwrap();
         assert_eq!(v["kind"], "buffering");
         assert_eq!(v["percent"], 75);
+        assert_eq!(v["element"], "videoconvert0");
 
         // Heavy payloads are skipped.
         assert!(event_json(&BusMessage::Tag(Default::default())).is_none());
@@ -555,6 +575,89 @@ mod tests {
                 let preview = preview.expect("preview within deadline");
                 assert_eq!(preview["edge"], 0);
                 // videotestsrc emits packed RGBA, so the tap yields a thumbnail.
+                assert_eq!(preview["preview"]["kind"], "video");
+                assert!(preview["preview"]["rgba"].as_array().unwrap().len() >= 4);
+            }
+        }
+    }
+
+    /// A fan-in arm is tappable like any other edge (M849): subscribing to an
+    /// edge whose destination is the muxer streams previews of the frames that
+    /// input contributes, even when the muxer forwards a different input.
+    #[tokio::test]
+    async fn muxer_input_edge_subscribe_streams_a_preview() {
+        use crate::registry::default_registry;
+        use futures_util::StreamExt;
+        use g2g_core::runtime::{parse_launch, run_graph_observed};
+        use g2g_core::PipelineClock;
+
+        struct ZeroClock;
+        impl PipelineClock for ZeroClock {
+            fn now_ns(&self) -> u64 {
+                0
+            }
+        }
+
+        let reg = default_registry();
+        // input-selector forwards input 0 only, so the sink's sequence check
+        // stays happy while both arms keep pushing into the fan-in node.
+        let graph = parse_launch(
+            &reg,
+            "videotestsrc ! m.   videotestsrc ! m.   input-selector name=m ! fakesink",
+        )
+        .expect("parses");
+        let observer = Observer::new();
+        let (ev_tx, _) = broadcast::channel::<String>(16);
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(serve_on(listener, observer.clone(), ev_tx));
+
+        let clock = ZeroClock;
+        let client = async {
+            let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/"))
+                .await
+                .unwrap();
+            let mut target: Option<u64> = None;
+            loop {
+                let Some(Ok(Message::Text(t))) = ws.next().await else {
+                    continue;
+                };
+                let v: Value = serde_json::from_str(&t).unwrap();
+                // Pick the second arm into the fan-in node: the input the muxer
+                // does NOT forward, so only the edge tap can see its frames.
+                if target.is_none() && v["type"] == "telemetry" {
+                    let nodes = v["nodes"].as_array().unwrap();
+                    let mux = nodes.iter().find(|n| n["role"] == "muxer");
+                    let (Some(mux), edges) = (mux, v["edges"].as_array().unwrap()) else {
+                        continue;
+                    };
+                    let into_mux: Vec<u64> = edges
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, e)| e["to"] == mux["id"])
+                        .map(|(i, _)| i as u64)
+                        .collect();
+                    let Some(&edge) = into_mux.get(1) else {
+                        continue;
+                    };
+                    ws.send(Message::Text(
+                        json!({"type": "subscribe", "edge": edge}).to_string(),
+                    ))
+                    .await
+                    .unwrap();
+                    target = Some(edge);
+                }
+                if v["type"] == "preview" {
+                    return v;
+                }
+            }
+        };
+
+        let run = run_graph_observed(graph, &clock, 2, &observer, None);
+        tokio::select! {
+            _ = run => panic!("run ended before a preview arrived"),
+            preview = tokio::time::timeout(Duration::from_secs(15), client) => {
+                let preview = preview.expect("preview within deadline");
                 assert_eq!(preview["preview"]["kind"], "video");
                 assert!(preview["preview"]["rgba"].as_array().unwrap().len() >= 4);
             }

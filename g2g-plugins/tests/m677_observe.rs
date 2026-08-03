@@ -6,7 +6,7 @@
 //! `cargo test -p g2g-plugins --features std`.
 #![cfg(feature = "std")]
 
-use g2g_core::runtime::{parse_launch, run_graph_observed, NodeRole, Observer};
+use g2g_core::runtime::{parse_launch, run_graph, run_graph_observed, NodeRole, Observer};
 use g2g_core::PipelineClock;
 use g2g_plugins::registry::default_registry;
 
@@ -65,6 +65,79 @@ async fn observed_run_captures_topology_and_per_element() {
     assert_eq!(snap.nodes[2].role, NodeRole::Sink);
     let sink = snap.nodes[2].latency.as_ref().expect("sink probed");
     assert_eq!(sink.proc.count, 8, "sink timed every frame");
+}
+
+/// M851: beside the per-stage distributions, one frame's own path. The probes
+/// key each visit by `Frame::sequence`, and the snapshot joins the stages on it.
+#[tokio::test]
+async fn observed_run_assembles_one_frames_journey() {
+    let reg = default_registry();
+    let graph = parse_launch(
+        &reg,
+        "videotestsrc num-buffers=16 ! videoscale width=160 height=120 ! fakesink",
+    )
+    .expect("pipeline parses");
+
+    let obs = Observer::new();
+    let stats = run_graph_observed(graph, &ZeroClock, 4, &obs, None)
+        .await
+        .expect("observed run");
+    assert_eq!(stats.frames_consumed, 16);
+
+    let j = obs.snapshot().journey.expect("a frame crossed every stage");
+    assert!(
+        j.sequence < 16,
+        "a real source-stamped id, got {}",
+        j.sequence
+    );
+    assert!(!j.truncated, "the chain is linear all the way to the sink");
+    assert_eq!(
+        j.stages
+            .iter()
+            .map(|s| (s.node, s.name.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(1, "VideoScale0"), (2, "FakeSink0")],
+        "stages are the probed nodes, upstream first"
+    );
+    assert!(j.stages.iter().all(|s| s.work_ns > 0), "each stage worked");
+    // The measured span covers every stage's own window, so it is at least the
+    // largest of them. (It is not the plain sum: for one frame a downstream
+    // stage's queue wait starts inside the upstream stage's `process`.)
+    let widest = j
+        .stages
+        .iter()
+        .map(|s| s.wait_ns + s.work_ns)
+        .max()
+        .unwrap();
+    assert!(
+        j.total_ns >= widest,
+        "end to end {} >= widest stage {}",
+        j.total_ns,
+        widest
+    );
+    // The queueing floor the run is measured against.
+    assert_eq!(j.capacity, 4, "the link depth the run was built with");
+    assert_eq!(j.floor_ns, 2 * 4 * j.frame_period_ns);
+    assert!(j.frame_period_ns > 0, "inter-frame spacing was measured");
+}
+
+/// An untapped run mints probes without the journey ring, so nothing per-frame
+/// is recorded and an observer that never rode the run has nothing to assemble.
+#[tokio::test]
+async fn unobserved_run_records_no_journey() {
+    let reg = default_registry();
+    let graph = parse_launch(
+        &reg,
+        "videotestsrc num-buffers=16 ! videoscale width=160 height=120 ! fakesink",
+    )
+    .expect("pipeline parses");
+
+    let obs = Observer::new();
+    let stats = run_graph(graph, &ZeroClock, 4).await.expect("plain run");
+    assert_eq!(stats.frames_consumed, 16);
+    // The aggregate rows are still collected, but no journey exists to read.
+    assert!(stats.per_element.iter().any(|e| e.proc.count > 0));
+    assert!(obs.snapshot().journey.is_none());
 }
 
 #[tokio::test]

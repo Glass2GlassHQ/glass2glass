@@ -1,7 +1,16 @@
 //! Linux ALSA render sink. The audible-output end of the audio path on Linux,
 //! the analog of the Windows-only [`WasapiSink`](crate::wasapisink::WasapiSink).
-//! Consumes interleaved PCM (`PcmS16Le` / `PcmF32Le`) `DataFrame`s and plays
-//! them on an ALSA PCM device (`default` by default) via libasound.
+//! Consumes interleaved PCM (`PcmU8` / `PcmS16Le` / `PcmS24Le` / `PcmS32Le` /
+//! `PcmF32Le`) `DataFrame`s and plays them on an ALSA PCM device (`default` by
+//! default) via libasound.
+//!
+//! ## Channel order
+//!
+//! Pipeline PCM is interleaved in the WAV / ffmpeg order
+//! ([`ChannelLayout::default_for`]), but ALSA reports its own per-device map:
+//! a 5.1 device is typically `FL FR RL RR FC LFE`, not our `FL FR FC LFE BL BR`.
+//! The worker reads the device map after `hw_params` and permutes each buffer
+//! into it, so surround content lands on the right speakers.
 //!
 //! ## Threading
 //!
@@ -31,19 +40,44 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use alsa::pcm::{Access, Format, HwParams, PCM};
+use alsa::pcm::{Access, ChmapPosition, Format, HwParams, PCM};
 use alsa::{Direction, ValueOr};
 
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority,
-    ConfigureOutcome, DriftClock, ElementMetadata, G2gError, HardwareError, MonotonicClock,
-    OutputSink, PadTemplate, PadTemplates, PipelineClock, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec,
+    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ChannelLayout, ChannelPosition,
+    ClockCandidate, ClockPriority, ConfigureOutcome, DriftClock, ElementMetadata, G2gError,
+    HardwareError, MonotonicClock, OutputSink, PadTemplate, PadTemplates, PipelineClock,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
-/// Negotiated PCM parameters: (ALSA sample format, channels, rate). Compressed
-/// audio (AAC / Opus) is rejected structurally, as in `WasapiSink`.
-fn alsa_params(caps: &Caps) -> Result<(Format, u32, u32), G2gError> {
+use crate::audioconvert::sample_bytes;
+
+/// The PCM sample formats this sink opens a device with, and the ALSA format
+/// each maps to. `PcmS24Le` is our 3-byte packed layout, ALSA's `S24_3LE`
+/// (not `S24LE`, which is 24 bits inside a 32-bit container).
+const FORMATS: [(AudioFormat, Format); 5] = [
+    (AudioFormat::PcmU8, Format::U8),
+    (AudioFormat::PcmS16Le, Format::S16LE),
+    (AudioFormat::PcmS24Le, Format::S243LE),
+    (AudioFormat::PcmS32Le, Format::S32LE),
+    (AudioFormat::PcmF32Le, Format::FloatLE),
+];
+
+/// Negotiated PCM device parameters passed to the worker as one unit (keeps the
+/// worker signature under clippy's argument cap).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PcmConfig {
+    /// Pipeline sample format: drives the byte-level frame arithmetic.
+    format: AudioFormat,
+    /// The ALSA format the device is opened with.
+    fmt: Format,
+    channels: u32,
+    rate: u32,
+}
+
+/// Negotiated PCM parameters. Compressed audio (AAC / Opus) is rejected
+/// structurally, as in `WasapiSink`.
+fn alsa_params(caps: &Caps) -> Result<PcmConfig, G2gError> {
     let Caps::Audio {
         format,
         channels,
@@ -52,13 +86,16 @@ fn alsa_params(caps: &Caps) -> Result<(Format, u32, u32), G2gError> {
     else {
         return Err(G2gError::CapsMismatch);
     };
-    let fmt = match format {
-        AudioFormat::PcmS16Le => Format::S16LE,
-        AudioFormat::PcmF32Le => Format::FloatLE,
-        AudioFormat::Aac | AudioFormat::Opus => return Err(G2gError::CapsMismatch),
-        _ => return Err(G2gError::CapsMismatch),
-    };
-    Ok((fmt, u32::from(*channels), *sample_rate))
+    let (_, fmt) = FORMATS
+        .iter()
+        .find(|(f, _)| f == format)
+        .ok_or(G2gError::CapsMismatch)?;
+    Ok(PcmConfig {
+        format: *format,
+        fmt: *fmt,
+        channels: u32::from(*channels),
+        rate: *sample_rate,
+    })
 }
 
 /// Worker command. `Samples` carries one buffer of interleaved PCM bytes in the
@@ -66,15 +103,6 @@ fn alsa_params(caps: &Caps) -> Result<(Format, u32, u32), G2gError> {
 enum WorkerCmd {
     Samples(Vec<u8>),
     Shutdown,
-}
-
-/// Negotiated PCM device parameters passed to the worker as one unit (keeps the
-/// worker signature under clippy's argument cap).
-#[derive(Clone, Copy, Debug)]
-struct PcmConfig {
-    fmt: Format,
-    channels: u32,
-    rate: u32,
 }
 
 pub struct AlsaSink {
@@ -179,7 +207,7 @@ impl AsyncElement for AlsaSink {
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        let (fmt, channels, rate) = alsa_params(absolute_caps)?;
+        let cfg = alsa_params(absolute_caps)?;
 
         if self.worker.is_some() {
             if self.caps.as_ref() == Some(absolute_caps) {
@@ -195,11 +223,6 @@ impl AsyncElement for AlsaSink {
         // Only discipline the clock when we actually offer it; otherwise the
         // per-buffer `delay()` probe is wasted work no one reads.
         let clock = self.provide_clock.then(|| Arc::clone(&self.clock));
-        let cfg = PcmConfig {
-            fmt,
-            channels,
-            rate,
-        };
 
         let join = thread::Builder::new()
             .name(String::from("g2g-alsasink"))
@@ -326,15 +349,14 @@ impl PadTemplates for AlsaSink {
     /// Terminal PCM sink pad. `Caps::Audio` has no open dims, so the template
     /// pins the common shapes per PCM format, as in `WasapiSink`.
     fn pad_templates() -> Vec<PadTemplate> {
-        let pcm = |format| Caps::Audio {
+        let pcm = |(format, _)| Caps::Audio {
             format,
             channels: 2,
             sample_rate: 48_000,
         };
-        Vec::from([PadTemplate::sink(CapsSet::from_alternatives(Vec::from([
-            pcm(AudioFormat::PcmS16Le),
-            pcm(AudioFormat::PcmF32Le),
-        ])))])
+        Vec::from([PadTemplate::sink(CapsSet::from_alternatives(
+            FORMATS.map(pcm).to_vec(),
+        ))])
     }
 }
 
@@ -350,12 +372,7 @@ fn worker_main(
     clock: Option<Arc<DriftClock>>,
     ready: SyncSender<Result<(), i32>>,
 ) {
-    let PcmConfig {
-        fmt,
-        channels,
-        rate,
-    } = cfg;
-    let pcm = match open_pcm(device, fmt, channels, rate) {
+    let pcm = match open_pcm(device, cfg) {
         Ok(pcm) => {
             let _ = ready.send(Ok(()));
             pcm
@@ -365,19 +382,19 @@ fn worker_main(
             return;
         }
     };
+    let perm = device_permutation(&pcm, cfg.channels);
 
-    let ch = channels as usize;
     let mut closing = false;
     while !closing {
         match rx.recv() {
             Ok(WorkerCmd::Samples(bytes)) => {
-                if write_all(&pcm, fmt, ch, &bytes, &rendered).is_err() {
+                if write_all(&pcm, cfg, perm.as_deref(), &bytes, &rendered).is_err() {
                     break;
                 }
                 // After the blocking write returns (at ~the device rate), feed
                 // the drift clock one playout observation.
                 if let Some(clock) = clock.as_deref() {
-                    discipline_clock(&pcm, rate, &rendered, clock);
+                    discipline_clock(&pcm, cfg.rate, &rendered, clock);
                 }
             }
             Ok(WorkerCmd::Shutdown) | Err(_) => closing = true,
@@ -408,14 +425,14 @@ fn discipline_clock(pcm: &PCM, rate: u32, rendered: &AtomicU64, clock: &DriftClo
 
 /// Open and configure the PCM device for blocking interleaved playback.
 /// Returns the ALSA errno on failure.
-fn open_pcm(device: &str, fmt: Format, channels: u32, rate: u32) -> Result<PCM, i32> {
+fn open_pcm(device: &str, cfg: PcmConfig) -> Result<PCM, i32> {
     let pcm = PCM::new(device, Direction::Playback, false).map_err(|e| e.errno())?;
     {
         let hwp = HwParams::any(&pcm).map_err(|e| e.errno())?;
-        hwp.set_channels(channels).map_err(|e| e.errno())?;
-        hwp.set_rate(rate, ValueOr::Nearest)
+        hwp.set_channels(cfg.channels).map_err(|e| e.errno())?;
+        hwp.set_rate(cfg.rate, ValueOr::Nearest)
             .map_err(|e| e.errno())?;
-        hwp.set_format(fmt).map_err(|e| e.errno())?;
+        hwp.set_format(cfg.fmt).map_err(|e| e.errno())?;
         hwp.set_access(Access::RWInterleaved)
             .map_err(|e| e.errno())?;
         // Bound the ring so `writei` blocks (paces) at the device rate. Without
@@ -435,52 +452,94 @@ fn open_pcm(device: &str, fmt: Format, channels: u32, rate: u32) -> Result<PCM, 
     Ok(pcm)
 }
 
+/// Our speaker position for an ALSA channel-map position. `None` for one
+/// outside the [`ChannelLayout`] table (or an unpositioned channel), which
+/// makes the caller fall back to writing the buffer straight through.
+fn our_position(p: ChmapPosition) -> Option<ChannelPosition> {
+    Some(match p {
+        ChmapPosition::FL => ChannelPosition::Fl,
+        ChmapPosition::FR => ChannelPosition::Fr,
+        ChmapPosition::FC | ChmapPosition::Mono => ChannelPosition::Fc,
+        ChmapPosition::LFE => ChannelPosition::Lfe,
+        ChmapPosition::RL => ChannelPosition::Bl,
+        ChmapPosition::RR => ChannelPosition::Br,
+        ChmapPosition::SL => ChannelPosition::Sl,
+        ChmapPosition::SR => ChannelPosition::Sr,
+        ChmapPosition::RC => ChannelPosition::Bc,
+        ChmapPosition::FLC => ChannelPosition::Flc,
+        ChmapPosition::FRC => ChannelPosition::Frc,
+        _ => return None,
+    })
+}
+
+/// The permutation from our interleave order (the default layout for
+/// `channels`) into the device's reported channel map: `perm[d]` is the source
+/// channel that feeds device channel `d`. `None` when the two orders already
+/// agree, the device reports no map, or a device position falls outside our
+/// layout: the buffer then goes out unpermuted. Must be called after
+/// `hw_params`, which is when ALSA fixes the map.
+fn device_permutation(pcm: &PCM, channels: u32) -> Option<Vec<usize>> {
+    let layout = ChannelLayout::default_for(u8::try_from(channels).ok()?)?;
+    let positions: Vec<ChmapPosition> = (&pcm.get_chmap().ok()?).into();
+    if positions.len() != channels as usize {
+        return None;
+    }
+    let mut perm = Vec::with_capacity(positions.len());
+    for p in positions {
+        perm.push(layout.index_of(our_position(p)?)?);
+    }
+    if perm.iter().enumerate().all(|(d, s)| d == *s) {
+        return None;
+    }
+    Some(perm)
+}
+
+/// Reorder interleaved frames into the device's channel order: output channel
+/// `d` of each frame takes source channel `perm[d]`. A ragged trailing partial
+/// frame is dropped (it cannot be written as a frame anyway).
+fn permute(bytes: &[u8], perm: &[usize], sample: usize) -> Vec<u8> {
+    let frame = sample * perm.len();
+    let mut out = Vec::with_capacity(bytes.len());
+    for f in bytes.chunks_exact(frame) {
+        for &s in perm {
+            out.extend_from_slice(&f[s * sample..][..sample]);
+        }
+    }
+    out
+}
+
 /// Write a whole interleaved buffer, looping over partial writes and recovering
-/// from underruns (`-EPIPE`). The byte buffer is reinterpreted into the typed
-/// samples ALSA's `writei` expects, endian-safe via `from_le_bytes`.
+/// from underruns (`-EPIPE`). The bytes go to `writei` as-is: the device was
+/// opened with the matching little-endian ALSA format, so no per-format
+/// reinterpretation is needed and 3-byte S24 works like the rest.
 fn write_all(
     pcm: &PCM,
-    fmt: Format,
-    channels: usize,
+    cfg: PcmConfig,
+    perm: Option<&[usize]>,
     bytes: &[u8],
     rendered: &AtomicU64,
 ) -> Result<(), G2gError> {
-    match fmt {
-        Format::S16LE => {
-            let samples: Vec<i16> = bytes
-                .chunks_exact(2)
-                .map(|c| i16::from_le_bytes([c[0], c[1]]))
-                .collect();
-            let io = pcm.io_i16().map_err(|e| alsa_err(e.errno()))?;
-            write_typed(pcm, |buf| io.writei(buf), &samples, channels, rendered)
-        }
-        Format::FloatLE => {
-            let samples: Vec<f32> = bytes
-                .chunks_exact(4)
-                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                .collect();
-            let io = pcm.io_f32().map_err(|e| alsa_err(e.errno()))?;
-            write_typed(pcm, |buf| io.writei(buf), &samples, channels, rendered)
-        }
-        _ => Err(G2gError::CapsMismatch),
+    let sample = sample_bytes(cfg.format);
+    let frame = sample * cfg.channels as usize;
+    if frame == 0 {
+        return Err(G2gError::CapsMismatch);
     }
-}
+    let permuted;
+    let buf = match perm {
+        Some(p) => {
+            permuted = permute(bytes, p, sample);
+            &permuted[..]
+        }
+        None => &bytes[..bytes.len() / frame * frame],
+    };
 
-/// Drive one typed `writei` to completion. `write` is the format-specific
-/// closure; `samples` is interleaved (items, not frames).
-fn write_typed<S>(
-    pcm: &PCM,
-    mut write: impl FnMut(&[S]) -> Result<usize, alsa::Error>,
-    samples: &[S],
-    channels: usize,
-    rendered: &AtomicU64,
-) -> Result<(), G2gError> {
+    let io = pcm.io_bytes();
     let mut off = 0usize;
-    while off < samples.len() {
-        match write(&samples[off..]) {
+    while off < buf.len() {
+        match io.writei(&buf[off..]) {
             Ok(frames) => {
                 rendered.fetch_add(frames as u64, Ordering::Relaxed);
-                off += frames * channels;
+                off += frames * frame;
             }
             Err(e) => {
                 // Underrun / suspend: recover and retry the remainder.
@@ -499,26 +558,70 @@ fn alsa_err(code: i32) -> G2gError {
 mod tests {
     use super::*;
 
+    fn caps(format: AudioFormat, channels: u8, rate: u32) -> Caps {
+        Caps::Audio {
+            format,
+            channels,
+            sample_rate: rate,
+        }
+    }
+
     #[test]
     fn alsa_params_maps_formats_and_rejects_compressed() {
-        let s16 = Caps::Audio {
-            format: AudioFormat::PcmS16Le,
-            channels: 2,
-            sample_rate: 48_000,
-        };
-        assert_eq!(alsa_params(&s16), Ok((Format::S16LE, 2, 48_000)));
-        let f32 = Caps::Audio {
-            format: AudioFormat::PcmF32Le,
-            channels: 1,
-            sample_rate: 44_100,
-        };
-        assert_eq!(alsa_params(&f32), Ok((Format::FloatLE, 1, 44_100)));
-        let aac = Caps::Audio {
-            format: AudioFormat::Aac,
-            channels: 2,
-            sample_rate: 48_000,
-        };
-        assert_eq!(alsa_params(&aac), Err(G2gError::CapsMismatch));
+        let p = alsa_params(&caps(AudioFormat::PcmS16Le, 2, 48_000)).unwrap();
+        assert_eq!((p.fmt, p.channels, p.rate), (Format::S16LE, 2, 48_000));
+        let p = alsa_params(&caps(AudioFormat::PcmF32Le, 1, 44_100)).unwrap();
+        assert_eq!((p.fmt, p.channels, p.rate), (Format::FloatLE, 1, 44_100));
+        // 24-bit is the 3-byte packed ALSA format, not the 32-bit container.
+        assert_eq!(
+            alsa_params(&caps(AudioFormat::PcmS24Le, 6, 48_000))
+                .unwrap()
+                .fmt,
+            Format::S243LE
+        );
+        assert_eq!(
+            alsa_params(&caps(AudioFormat::PcmS32Le, 2, 48_000))
+                .unwrap()
+                .fmt,
+            Format::S32LE
+        );
+        assert_eq!(
+            alsa_params(&caps(AudioFormat::PcmU8, 2, 8_000))
+                .unwrap()
+                .fmt,
+            Format::U8
+        );
+        assert_eq!(
+            alsa_params(&caps(AudioFormat::Aac, 2, 48_000)),
+            Err(G2gError::CapsMismatch)
+        );
+        // a raw format the sink does not open a device with is rejected too.
+        assert_eq!(
+            alsa_params(&caps(AudioFormat::Mulaw, 1, 8_000)),
+            Err(G2gError::CapsMismatch)
+        );
+    }
+
+    #[test]
+    fn permute_reorders_frames_into_the_device_map() {
+        // 5.1: our FL FR FC LFE BL BR -> the usual ALSA FL FR RL RR FC LFE.
+        let perm = [0usize, 1, 4, 5, 2, 3];
+        // one frame of s16 channel markers 0..5.
+        let src: Vec<u8> = (0i16..6).flat_map(|c| c.to_le_bytes()).collect();
+        let out = permute(&src, &perm, 2);
+        let got: Vec<i16> = out
+            .chunks_exact(2)
+            .map(|c| i16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        assert_eq!(got, [0, 1, 4, 5, 2, 3]);
+    }
+
+    #[test]
+    fn permute_handles_three_byte_samples_and_drops_a_ragged_tail() {
+        // S24 is 3 bytes: a swap of a stereo frame moves 3 bytes at a time.
+        let src = [1u8, 2, 3, 4, 5, 6, 7, 8];
+        let out = permute(&src, &[1, 0], 3);
+        assert_eq!(out, [4, 5, 6, 1, 2, 3]);
     }
 
     #[test]

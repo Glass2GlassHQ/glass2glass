@@ -11,7 +11,8 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use crate::caps::{Caps, CapsSet, PassthroughFields};
+use crate::caps::{Caps, CapsSet};
+use crate::caps_transform::CapsTransform;
 use crate::element::{AsyncElement, ElementBound};
 use crate::error::G2gError;
 
@@ -34,6 +35,7 @@ type ProposeFn<'a> = Box<dyn Fn(&Caps) -> Caps + 'a>;
 /// | Sink `intercept_caps` narrows upstream               | `Accepts(set)`                    |
 /// | Identity transform                                   | `Identity(set)`                   |
 /// | Decoder reading dims from input SPS                  | `DerivedOutput(\|in\| out_set)`   |
+/// | Caps-driven transform (scale / convert / rate)       | `DerivedFields(transform)`        |
 /// | Pre-enumerated input/output pairs (codecs, scalers)  | `Mapping(pairs)`                  |
 pub enum CapsConstraint<'a> {
     /// Sink shape: only the input side is constrained. Output is
@@ -64,22 +66,18 @@ pub enum CapsConstraint<'a> {
     /// but before the output link is solved.
     DerivedOutput(Box<dyn Fn(&Caps) -> CapsSet + Send + Sync + 'a>),
 
-    /// Like [`DerivedOutput`](Self::DerivedOutput), but additionally declares
-    /// which caps fields the transform passes through unchanged (output field
-    /// == input field). The `derive` closure stays the source of truth for
-    /// forward derivation (the retargeted fields); the `passthrough` mask lets
-    /// the solver couple the passthrough fields *bidirectionally and per field*
-    /// so a downstream pin on a passthrough field narrows the corresponding
-    /// input field (`Range ∩ Fixed = Fixed`), not just drops whole input
-    /// alternatives. This is what lets a geometry pin flow back through a
-    /// geometry-passthrough transform (`videoscale ! videoconvert ! caps`).
-    /// Used by the caps-driven transforms (videoscale / videoconvert /
-    /// audioresample); decoders that genuinely can't invert stay on
-    /// `DerivedOutput`.
-    DerivedCoupled {
-        derive: Box<dyn Fn(&Caps) -> CapsSet + Send + Sync + 'a>,
-        passthrough: PassthroughFields,
-    },
+    /// Declarative form of [`DerivedOutput`](Self::DerivedOutput) (M837): the
+    /// forward derivation stated field by field as data the solver can inspect.
+    /// Because it knows which fields are passed through unchanged, it can
+    /// couple those *bidirectionally and per field*, so a downstream pin on a
+    /// passthrough field narrows the corresponding input field (`Range ∩ Fixed
+    /// = Fixed`) rather than only dropping whole input alternatives. That is
+    /// what lets a geometry pin flow back through a geometry-passthrough
+    /// transform (`videoscale ! videoconvert ! caps`). Used by the caps-driven
+    /// transforms (videoscale / videoconvert / videorate / audioconvert /
+    /// audioresample); decoders whose output isn't a per-field function of
+    /// their input stay on `DerivedOutput`.
+    DerivedFields(CapsTransform),
 
     /// **Migration bridge.** Source whose
     /// [`SourceLoop::intercept_caps`](crate::runtime::SourceLoop::intercept_caps)
@@ -128,11 +126,7 @@ impl core::fmt::Debug for CapsConstraint<'_> {
             Self::Identity(s) => f.debug_tuple("Identity").field(s).finish(),
             Self::Mapping(v) => f.debug_tuple("Mapping").field(v).finish(),
             Self::DerivedOutput(_) => f.debug_tuple("DerivedOutput").field(&"<fn>").finish(),
-            Self::DerivedCoupled { passthrough, .. } => f
-                .debug_struct("DerivedCoupled")
-                .field("derive", &"<fn>")
-                .field("passthrough", passthrough)
-                .finish(),
+            Self::DerivedFields(t) => f.debug_tuple("DerivedFields").field(t).finish(),
             Self::LegacySource(c) => f.debug_tuple("LegacySource").field(c).finish(),
             Self::LegacyTransform { .. } => f
                 .debug_struct("LegacyTransform")
@@ -158,7 +152,7 @@ impl CapsConstraint<'_> {
             Self::Accepts(set) | Self::Produces(set) | Self::Identity(set) => set.accepts(caps),
             Self::Mapping(pairs) => pairs.iter().any(|(input, _)| input.accepts(caps)),
             Self::DerivedOutput(f) => !f(caps).is_empty(),
-            Self::DerivedCoupled { derive, .. } => !derive(caps).is_empty(),
+            Self::DerivedFields(t) => !t.derive(caps).is_empty(),
             Self::AcceptsAny | Self::IdentityAny => true,
             Self::LegacySource(produced) => produced.intersect(caps).is_ok(),
             Self::LegacyTransform { intercept, .. } => intercept(caps).is_ok(),

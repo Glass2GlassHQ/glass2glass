@@ -1,5 +1,5 @@
 //! M227: field-level bidirectional caps coupling. A transform declared
-//! `DerivedCoupled` passes some caps fields through unchanged; the solver
+//! `DerivedFields` passes some caps fields through unchanged; the solver
 //! couples those fields in both directions, so a downstream pin on a
 //! passthrough field narrows the corresponding input field *within* an
 //! alternative (`Range ∩ Fixed = Fixed`), not just drops whole alternatives.

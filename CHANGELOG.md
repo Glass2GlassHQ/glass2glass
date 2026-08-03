@@ -6,6 +6,90 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M861: `downloadbuffer` spills a pushed byte stream to a temp file and serves it seekable, so a moov-at-end MP4 plays over HTTP.
+
+- M860: the mkv suites, mkv ffmpeg metadata oracles, dashboard/preview/MCP tooling tests now run in CI.
+
+- M859: CMAF low-latency chunking (`chunk-duration` sub-fragment `moof`+`mdat`s, `cmfl` brand) and per-fragment `prft` (`write-prft`) on both fMP4 muxers.
+
+- M858: oggmux writes chained streams, a new link per changed `Segment`, round-tripping oggdemux's chain boundary and validated against ffmpeg.
+
+- M856: multi-head attention, matmul, layernorm, and softmax GPU ops in `WgpuInference`; a safetensors transformer block runs GPU-resident.
+
+- M857: opusdec decodes in-band FEC from the next packet across a loss (`use-inband-fec`), and opusenc gains `inband-fec` / `packet-loss-percentage`.
+
+- M854: NvDec mid-stream reconfigure, AV1, P010 10-bit, and `max-display-delay`; NvEnc Main10 10-bit encode plus `gop-size` / `repeat-sequence-header`.
+
+- M855: `font-variations` axis selection on textoverlay, WebVTT `::cue(.class)` styling, and SSA / TTML placement mapped into cue settings.
+
+- M852: S24/S32/U8 through convert, resample, and all three Linux audio sinks, which now open >2-channel layouts with device-order channel mapping.
+
+- M853: `wgpucompositor`, a one-dispatch wgpu compute compositor bit-exact with the CPU element, System or GPU-texture output.
+
+- M850: `g2g-mcp` gains a declarative `run_graph` tool, and both run tools stream live telemetry as MCP progress notifications.
+
+- M851: single-frame latency waterfall in the dashboard: per-stage wait/work joined on the frame's sequence id, with the measured total against the `2 * capacity * frame_period` floor.
+
+- M849: builder YAML export round-tripping through the declarative loader, and edge preview taps on the fan-in session arms.
+
+- M848: a solve conflict now carries both candidate caps sets (`CapsConflict`), rendered by `validate` as gst caps strings.
+
+- M847: launch-line `log-category=`, log-category setters on sources and fan payloads, and the runner now names muxer / demux / fan-out elements too.
+
+- M846: live per-edge packet/byte/drop/blocked-time counters in the observer tap and dashboard, and observed entry points with per-element stats for the standalone fan-in / fan-out / session runners.
+
+- M845: structured log fields + timestamps, a ring-buffer flight-recorder sink, per-instance category override, and self-log names on the remaining logging elements.
+
+- M843: buffering posts on interior links (named per element), and a shared `QosTracker` gives synchronizing sinks periodic QoS stats plus the late-drop post.
+
+- M844: `batcher` and `compositor` migrated onto `InputAggregator`, which gains a latest-wins release path for the compositor's overlay inputs.
+
+- M842: launch `name=` sets the element's instance name, and the bespoke linear / fan-in runners now name and log elements like the graph runner.
+
+- M841: `enum_values` declared on the `alpha` / `deinterlace` / `audioamplify` method properties, so their nicks validate at parse time.
+
+- M840: launch value grammar: backslash escapes, mid-value quoting, `enum_values` validated at parse time with named choices, `PropKind::Flags` (`protocols=udp+tcp` on `rtspsrc`).
+
+- M839: the β allocation re-cascade continues through muxers both directions (per-pad re-query, output pool re-derivation, bounded convergence).
+
+- M838: MP4 `----` freeform + integer tag atoms, and a shared global-vs-per-stream tag merge policy (`resolve_tags` / `split_tags`) across mp4/mkv.
+
+- M837: declarative `DerivedFields(CapsTransform)` replaces `DerivedCoupled`'s closure + mask pair, making passthrough drift unrepresentable.
+
+- M836: DASH dynamic `@duration` live profile (edge start, `presentation-delay-ms`, time-shift clamp) and multi-period playthrough with boundary `Segment`.
+
+- M835: CENC depth on the fMP4/HLS path (`saiz`/`saio`, `seig`, cbcs audio, `cenc` CTR, offset-bound key rotation), ffmpeg-vector-validated.
+
+- M834: `rtspserversrc` serves publishers sequentially (`max-sessions`, `timeout`, 503 on concurrent), disconnect no longer stalls the graph; `docs/elements.html` regenerated.
+
+- M833: `udpsrc` discovers caps from an `sdp` property or in-band SPS (shared `sdp` scanner extracted from st2110), ffmpeg-validated.
+
+- M832: opt-in `cmaf` mode on the fMP4 muxers (brands, `styp`, sync-aligned fragments, explicit `tfhd`), and the demuxers honor `tfhd` default sample durations.
+
+- M831: FLV carries Sorenson H.263, VP6(-alpha), MP3 and Speex (decode wired for the first three), ffmpeg/gst-oracle-validated.
+
+- M830: `opusdec` rebuilds at a chain boundary (`Segment` + `OpusHead`), chained Opus decodes bit-exact to the parts.
+
+- M829: `plc` packet-loss concealment on `opusdec` (TOC-cadence gap fill, 200 ms cap).
+
+- M828: mkv two-pass mode writes definite-size Segment/Clusters; streamable mode stops accumulating an unemitted Cues index.
+
+- M827: chained Ogg demux (sequential chains, offset-continued timeline, per-chain caps/tags), validated vs ffmpeg and GStreamer.
+
+- M826: `frame-size` (2.5-60 ms) and `complexity` on `opusenc`, sample-exact across sizes; mp4mux reads Opus durations from the TOC.
+
+- M825: `quantizer` constant-quality mode on `av1enc` (exclusive with `bitrate`), and bitrate mode no longer capped at qi 100.
+
+- M824: opt-in `faststart` on `mp4mux` (progressive `moov` ahead of `mdat`), ffmpeg-oracle-validated.
+
+- M823: `FfmpegH264Enc` mid-stream bitrate retarget (property + BWE, flush-then-reopen), NV12 and 10-bit (High 10) input.
+
+- M822: runtime properties on `webrtcwhepsessionsrc` (`location`, `auth-token`, STUN/TURN, `num-buffers`), the last placeholder-registered source.
+
+- M821: runtime properties on `vulkanvideodec` (`low-latency` coding-order mode, `device-index`, `num-dpb-slots`).
+
+- M820: `g2g_ml::register` puts `ortinfer` / `wgpupreprocess` / `detectionpostprocess` in a launch line, with runtime properties and a deferred `model=` load on `ortinfer`.
+
 - M819: duration-keyed prebuffer window (`prebuffer-ms`) on `hlssrc` / `dashsrc`, posting `Buffering` bus levels during the fill; `abr` exposed as a property.
 
 - M818: runtime properties for the drifted builder knobs (`rtspserversrc` full set, `udpsrc`/`udpsink` RTP tuning, `rtspsrc` reconnect/dims, `srtsrc`/`filesrc`/`ffmpegdec`), plus bare `http-src` / `rtsp-server` feature builds fixed.

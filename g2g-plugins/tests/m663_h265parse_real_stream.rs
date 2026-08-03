@@ -48,7 +48,7 @@ async fn recovers_geometry_and_vui_framerate_from_a_libx265_stream() {
         eprintln!("ffmpeg not present; skipping the H.265 real-stream test");
         return;
     }
-    let path = std::env::temp_dir().join("g2g_m663.h265");
+    let path = std::env::temp_dir().join(format!("g2g_m663_{}.h265", std::process::id()));
     let out = Command::new("ffmpeg")
         .args([
             "-y",

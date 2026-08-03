@@ -1,7 +1,14 @@
-//! Linux PulseAudio render sink. Plays interleaved PCM (`PcmS16Le` /
-//! `PcmF32Le`) on the default PulseAudio (or PipeWire-pulse) server, the
-//! higher-level sibling of [`AlsaSink`](crate::alsasink::AlsaSink) and the
-//! Linux analog of the Windows-only [`WasapiSink`](crate::wasapisink::WasapiSink).
+//! Linux PulseAudio render sink. Plays interleaved PCM (`PcmU8` / `PcmS16Le` /
+//! `PcmS24Le` / `PcmS32Le` / `PcmF32Le`) on the default PulseAudio (or
+//! PipeWire-pulse) server, the higher-level sibling of
+//! [`AlsaSink`](crate::alsasink::AlsaSink) and the Linux analog of the
+//! Windows-only [`WasapiSink`](crate::wasapisink::WasapiSink).
+//!
+//! ## Channel order
+//!
+//! The stream carries an explicit channel map built from our interleave order
+//! ([`ChannelLayout::default_for`]), so the server routes a 5.1 / 7.1 stream by
+//! speaker instead of falling back to its own positional guess.
 //!
 //! ## Threading and pacing
 //!
@@ -24,14 +31,27 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use libpulse_binding::channelmap::{Map, Position};
 use libpulse_binding::sample::{Format as PaFormat, Spec};
 use libpulse_binding::stream::Direction;
 use libpulse_simple_binding::Simple;
 
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
-    G2gError, HardwareError, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ChannelLayout, ChannelPosition,
+    ConfigureOutcome, ElementMetadata, G2gError, HardwareError, OutputSink, PadTemplate,
+    PadTemplates, PipelinePacket,
 };
+
+/// The PCM sample formats this sink opens a stream with, and the PulseAudio
+/// format each maps to. `PcmS24Le` is our 3-byte packed layout, pulse's packed
+/// `S24le` (not `S24_32le`, which pads to 32 bits).
+const FORMATS: [(AudioFormat, PaFormat); 5] = [
+    (AudioFormat::PcmU8, PaFormat::U8),
+    (AudioFormat::PcmS16Le, PaFormat::S16le),
+    (AudioFormat::PcmS24Le, PaFormat::S24le),
+    (AudioFormat::PcmS32Le, PaFormat::S32le),
+    (AudioFormat::PcmF32Le, PaFormat::F32le),
+];
 
 /// Negotiated PCM parameters as a PulseAudio `Spec`. Compressed audio
 /// (AAC / Opus) is rejected structurally, as in `WasapiSink`.
@@ -44,14 +64,12 @@ fn pulse_spec(caps: &Caps) -> Result<Spec, G2gError> {
     else {
         return Err(G2gError::CapsMismatch);
     };
-    let format = match format {
-        AudioFormat::PcmS16Le => PaFormat::S16le,
-        AudioFormat::PcmF32Le => PaFormat::F32le,
-        AudioFormat::Aac | AudioFormat::Opus => return Err(G2gError::CapsMismatch),
-        _ => return Err(G2gError::CapsMismatch),
-    };
+    let (_, format) = FORMATS
+        .iter()
+        .find(|(f, _)| f == format)
+        .ok_or(G2gError::CapsMismatch)?;
     let spec = Spec {
-        format,
+        format: *format,
         channels: *channels,
         rate: *sample_rate,
     };
@@ -59,6 +77,41 @@ fn pulse_spec(caps: &Caps) -> Result<Spec, G2gError> {
         return Err(G2gError::CapsMismatch);
     }
     Ok(spec)
+}
+
+fn pulse_position(p: ChannelPosition) -> Position {
+    match p {
+        ChannelPosition::Fl => Position::FrontLeft,
+        ChannelPosition::Fr => Position::FrontRight,
+        ChannelPosition::Fc => Position::FrontCenter,
+        ChannelPosition::Lfe => Position::Lfe,
+        ChannelPosition::Bl => Position::RearLeft,
+        ChannelPosition::Br => Position::RearRight,
+        ChannelPosition::Flc => Position::FrontLeftOfCenter,
+        ChannelPosition::Frc => Position::FrontRightOfCenter,
+        ChannelPosition::Bc => Position::RearCenter,
+        ChannelPosition::Sl => Position::SideLeft,
+        ChannelPosition::Sr => Position::SideRight,
+    }
+}
+
+/// The channel map for our interleave order, so the server routes by speaker.
+/// `None` past the layout table (> 8 channels), where the stream falls back to
+/// the server's default map.
+fn pulse_map(channels: u8) -> Option<Map> {
+    let mut map = Map::default();
+    // pulse spells a lone channel `mono`, not front-center.
+    if channels == 1 {
+        map.init_mono();
+        return Some(map);
+    }
+    let layout = ChannelLayout::default_for(channels)?;
+    map.init();
+    map.set_len(channels);
+    for (slot, pos) in map.get_mut().iter_mut().zip(layout.positions()) {
+        *slot = pulse_position(pos);
+    }
+    map.is_valid().then_some(map)
 }
 
 /// Worker command. `Samples` carries one buffer of interleaved PCM bytes in the
@@ -239,15 +292,14 @@ impl PadTemplates for PulseSink {
     /// Terminal PCM sink pad. `Caps::Audio` has no open dims, so the template
     /// pins the common shapes per PCM format, as in `WasapiSink`.
     fn pad_templates() -> Vec<PadTemplate> {
-        let pcm = |format| Caps::Audio {
+        let pcm = |(format, _)| Caps::Audio {
             format,
             channels: 2,
             sample_rate: 48_000,
         };
-        Vec::from([PadTemplate::sink(CapsSet::from_alternatives(Vec::from([
-            pcm(AudioFormat::PcmS16Le),
-            pcm(AudioFormat::PcmF32Le),
-        ])))])
+        Vec::from([PadTemplate::sink(CapsSet::from_alternatives(
+            FORMATS.map(pcm).to_vec(),
+        ))])
     }
 }
 
@@ -262,6 +314,7 @@ fn worker_main(
     written: Arc<AtomicU64>,
     ready: SyncSender<Result<(), i32>>,
 ) {
+    let map = pulse_map(spec.channels);
     let simple = match Simple::new(
         None,     // default server
         app_name, // application name
@@ -269,7 +322,7 @@ fn worker_main(
         None,       // default device
         "playback", // stream description
         &spec,
-        None, // default channel map
+        map.as_ref(),
         None, // default buffering attributes
     ) {
         Ok(s) => {
@@ -327,6 +380,51 @@ mod tests {
             sample_rate: 48_000,
         };
         assert_eq!(pulse_spec(&aac), Err(G2gError::CapsMismatch));
+    }
+
+    #[test]
+    fn pulse_spec_maps_the_wide_sample_formats() {
+        let spec = |format, channels| {
+            pulse_spec(&Caps::Audio {
+                format,
+                channels,
+                sample_rate: 48_000,
+            })
+        };
+        // 24-bit maps to the packed pulse format, not the 32-bit-padded one.
+        assert_eq!(
+            spec(AudioFormat::PcmS24Le, 6).unwrap().format,
+            PaFormat::S24le
+        );
+        assert_eq!(
+            spec(AudioFormat::PcmS32Le, 2).unwrap().format,
+            PaFormat::S32le
+        );
+        assert_eq!(spec(AudioFormat::PcmU8, 2).unwrap().format, PaFormat::U8);
+        // a raw format the sink does not open a stream with is rejected.
+        assert_eq!(spec(AudioFormat::Alaw, 1), Err(G2gError::CapsMismatch));
+    }
+
+    #[test]
+    fn channel_map_follows_our_interleave_order() {
+        let map = pulse_map(6).expect("5.1 has a layout");
+        assert_eq!(
+            map.get(),
+            [
+                Position::FrontLeft,
+                Position::FrontRight,
+                Position::FrontCenter,
+                Position::Lfe,
+                Position::RearLeft,
+                Position::RearRight,
+            ]
+        );
+        assert!(map.is_valid());
+        let map = pulse_map(8).expect("7.1 has a layout");
+        assert_eq!(map.get()[6..], [Position::SideLeft, Position::SideRight]);
+        assert_eq!(pulse_map(1).unwrap().get(), [Position::Mono]);
+        // past the layout table the server's default map applies.
+        assert!(pulse_map(9).is_none());
     }
 
     #[test]

@@ -212,7 +212,7 @@ async fn fmp4_cbcs_decrypts_with_key_handle() {
     let fragment = make_fragment(&nals);
 
     let handle = new_key_handle();
-    *handle.lock().unwrap() = Some(SampleAesKey {
+    handle.lock().unwrap().set_current(SampleAesKey {
         key: KEY,
         iv: [0; 16],
     }); // IV unused (tenc constant IV)

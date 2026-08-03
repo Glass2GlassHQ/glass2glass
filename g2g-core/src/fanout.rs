@@ -185,6 +185,17 @@ pub trait MultiOutputSource: ElementBound {
     fn get_property(&self, _name: &str) -> Option<PropValue> {
         None
     }
+
+    /// Receive this instance's log name and a per-instance log category
+    /// override, mirroring
+    /// [`AsyncElement::set_instance_name`](crate::AsyncElement::set_instance_name)
+    /// / [`set_log_category`](crate::AsyncElement::set_log_category). Default:
+    /// ignore. A session source that logs about itself stores them in a
+    /// [`LogName`](crate::log::LogName).
+    fn set_instance_name(&mut self, _name: alloc::string::String) {}
+
+    /// See [`set_instance_name`](Self::set_instance_name).
+    fn set_log_category(&mut self, _category: alloc::string::String) {}
 }
 
 /// Dyn-safe mirror of [`MultiOutputSource`] (boxed-future `run`), so a terminal
@@ -206,6 +217,10 @@ pub trait DynMultiOutputSource: ElementBound {
     fn get_property(&self, _name: &str) -> Option<PropValue> {
         None
     }
+    /// Dyn-safe mirror of [`MultiOutputSource::set_instance_name`].
+    fn set_instance_name(&mut self, _name: alloc::string::String) {}
+    /// Dyn-safe mirror of [`MultiOutputSource::set_log_category`].
+    fn set_log_category(&mut self, _category: alloc::string::String) {}
 }
 
 impl<T: MultiOutputSource> DynMultiOutputSource for T {
@@ -230,6 +245,12 @@ impl<T: MultiOutputSource> DynMultiOutputSource for T {
     fn get_property(&self, name: &str) -> Option<PropValue> {
         MultiOutputSource::get_property(self, name)
     }
+    fn set_instance_name(&mut self, name: alloc::string::String) {
+        MultiOutputSource::set_instance_name(self, name)
+    }
+    fn set_log_category(&mut self, category: alloc::string::String) {
+        MultiOutputSource::set_log_category(self, category)
+    }
 }
 
 /// Forwarding impl so a borrowed `&mut dyn DynMultiOutputSource` can be boxed
@@ -246,6 +267,12 @@ impl<'b> DynMultiOutputSource for &'b mut (dyn DynMultiOutputSource + 'b) {
         out: &'a mut dyn MultiOutputSink,
     ) -> BoxFuture<'a, Result<u64, G2gError>> {
         (**self).run(out)
+    }
+    fn set_instance_name(&mut self, name: alloc::string::String) {
+        (**self).set_instance_name(name)
+    }
+    fn set_log_category(&mut self, category: alloc::string::String) {
+        (**self).set_log_category(category)
     }
 }
 
@@ -389,6 +416,17 @@ pub trait MultiOutputElement: ElementBound {
     fn port_output_caps(&self, _port: usize) -> Option<Caps> {
         None
     }
+
+    /// Receive this instance's log name and a per-instance log category
+    /// override, mirroring
+    /// [`AsyncElement::set_instance_name`](crate::AsyncElement::set_instance_name)
+    /// / [`set_log_category`](crate::AsyncElement::set_log_category). Default:
+    /// ignore. A demux that logs about itself stores them in a
+    /// [`LogName`](crate::log::LogName).
+    fn set_instance_name(&mut self, _name: alloc::string::String) {}
+
+    /// See [`set_instance_name`](Self::set_instance_name).
+    fn set_log_category(&mut self, _category: alloc::string::String) {}
 
     /// Runtime properties this demux exposes (M104), mirroring
     /// [`AsyncElement::properties`](crate::AsyncElement::properties). Default:
@@ -569,6 +607,47 @@ pub trait MultiInputElement: ElementBound {
     ) -> Option<crate::query::AllocationParams> {
         None
     }
+
+    /// The allocation this muxer's merged output needs, given the output's
+    /// negotiated caps. Default `None`: a container muxer's byte output has no
+    /// memory-domain tie to its inputs, so it imposes nothing downstream. A muxer
+    /// whose output pool is derived from its inputs overrides it (a device-resident
+    /// interleave writing into a surface sized by its video pads).
+    ///
+    /// The DAG runner re-queries this whenever an allocation change re-cascades
+    /// into any input pad, so the answer must fold in the current per-pad state
+    /// *and* whatever the element last absorbed through
+    /// [`configure_allocation_for_output`](Self::configure_allocation_for_output).
+    /// The runner walks to a fixed point of that pair, so an override that never
+    /// stops changing fails the run with `AllocationConflict` rather than looping.
+    fn propose_allocation_for_output(
+        &self,
+        _caps: &Caps,
+    ) -> Option<crate::query::AllocationParams> {
+        None
+    }
+
+    /// Absorb the allocation now in force on the merged output: this muxer's own
+    /// re-derived proposal, or a downstream consumer's demand that re-cascaded
+    /// into the output boundary. Default: ignore.
+    ///
+    /// A muxer whose output pool constrains its inputs overrides it and folds the
+    /// params into its state, so the following
+    /// [`propose_allocation_for_input`](Self::propose_allocation_for_input) answers
+    /// carry the constraint and the runner re-cascades it up the pads whose demand
+    /// actually moved.
+    fn configure_allocation_for_output(&mut self, _params: &crate::query::AllocationParams) {}
+
+    /// Receive this instance's log name and a per-instance log category
+    /// override, mirroring
+    /// [`AsyncElement::set_instance_name`](crate::AsyncElement::set_instance_name)
+    /// / [`set_log_category`](crate::AsyncElement::set_log_category). Default:
+    /// ignore. A muxer that logs about itself stores them in a
+    /// [`LogName`](crate::log::LogName).
+    fn set_instance_name(&mut self, _name: alloc::string::String) {}
+
+    /// See [`set_instance_name`](Self::set_instance_name).
+    fn set_log_category(&mut self, _category: alloc::string::String) {}
 
     /// Runtime properties this muxer exposes (M104), mirroring
     /// [`AsyncElement::properties`](crate::AsyncElement::properties). Default:

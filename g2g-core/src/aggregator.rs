@@ -2,19 +2,28 @@
 //!
 //! Every N-in-1-out element (muxer, compositor, tensor batcher, the Python
 //! aggregator host) needs the same bookkeeping: buffer items arriving per input
-//! pad and release a synchronized *round* (one item from each still-contributing
-//! input) once every contributor has one queued. The trait
-//! ([`MultiInputElement`](crate::MultiInputElement)) and the fan-in runner
-//! (per-input negotiation + EOS aggregation) already exist; this is the middle
-//! layer they otherwise each hand-roll (compositor, mux, audiomixer, the
-//! enterprise batcher all carry their own `Vec<VecDeque<_>>` + ended tracking).
+//! pad, track which inputs have ended, and release them under a sync policy.
+//! The trait ([`MultiInputElement`](crate::MultiInputElement)) and the fan-in
+//! runner (per-input negotiation + EOS aggregation) already exist; this is the
+//! middle layer between them, owned by the muxers, the compositor and the
+//! tensor batcher.
 //!
 //! It is the composable, typed analog of GStreamer's `GstAggregator` pad
 //! collection: a helper an element *owns*, not a base class it inherits, so it
 //! stays generic over the queued item `T` and free of the trait's caps / async
-//! surface. The release rule matches the enterprise batcher's: an input keeps
-//! contributing while its queue drains, then drops out of future rounds once it
-//! has ended and emptied, so the round shrinks as sources end.
+//! surface.
+//!
+//! Two release policies:
+//!
+//! - Synchronized rounds ([`take_round`](InputAggregator::take_round), and the
+//!   time-ordered [`take_earliest_by`](InputAggregator::take_earliest_by) a
+//!   muxer merges with): an input keeps contributing while its queue drains,
+//!   then drops out of future rounds once it has ended and emptied, so the
+//!   round shrinks as sources end.
+//! - Latest-wins ([`take_round_latest`](InputAggregator::take_round_latest)):
+//!   one input drives the cadence and the others contribute the newest item
+//!   they delivered, read in place rather than consumed, so a faster or slower
+//!   contributor neither gates nor multiplies output.
 
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
@@ -62,6 +71,34 @@ impl<T> InputAggregator<T> {
             q.pop_front();
             self.dropped += 1;
         }
+    }
+
+    /// Queue `item` for `input` as its *latest*, discarding whatever it held.
+    /// The latest-wins counterpart to [`push`](Self::push), for an input whose
+    /// items are read in place ([`latest`](Self::latest)) rather than consumed.
+    /// A superseded item is not counted in [`dropped`](Self::dropped): the
+    /// policy replaced it, no depth cap evicted it.
+    pub fn push_latest(&mut self, input: usize, item: T) {
+        let q = &mut self.queues[input];
+        q.clear();
+        q.push_back(item);
+    }
+
+    /// Newest item held for `input`, left in place: later rounds see it again
+    /// until a newer one replaces it.
+    pub fn latest(&self, input: usize) -> Option<&T> {
+        self.queues[input].back()
+    }
+
+    /// Items currently queued for `input`.
+    pub fn queued(&self, input: usize) -> usize {
+        self.queues[input].len()
+    }
+
+    /// Drop everything queued for `input`, keeping its ended flag: a flush, or
+    /// a caps change that invalidates what it holds.
+    pub fn clear(&mut self, input: usize) {
+        self.queues[input].clear();
     }
 
     /// Mark `input` as ended (its source-pad EOS). It keeps contributing while
@@ -138,6 +175,26 @@ impl<T> InputAggregator<T> {
             winner,
             self.queues[winner].pop_front().expect("checked non-empty"),
         ))
+    }
+
+    /// True once every input other than `timing` holds an item: the startup
+    /// gate for a latest-wins element that wants each contributor's first item
+    /// before it starts releasing (a compositor waiting on its overlays).
+    pub fn latest_ready(&self, timing: usize) -> bool {
+        (0..self.queues.len()).all(|i| i == timing || !self.queues[i].is_empty())
+    }
+
+    /// Latest-wins release: pop the oldest item queued for the `timing` input,
+    /// the one driving the output cadence (one release per item it delivers).
+    /// The other inputs contribute through [`latest`](Self::latest) instead,
+    /// which leaves their item queued across releases; one that has yet to
+    /// deliver contributes nothing, so gate startup on
+    /// [`latest_ready`](Self::latest_ready) to wait for it.
+    ///
+    /// Contrast [`take_round`](Self::take_round), which consumes one item from
+    /// *every* input per call (synchronized rounds, for a batcher).
+    pub fn take_round_latest(&mut self, timing: usize) -> Option<T> {
+        self.queues[timing].pop_front()
     }
 
     /// True once every input has ended and all queues have drained: no further
@@ -248,6 +305,44 @@ mod tests {
         assert_eq!(agg.take_earliest_by(|&(p, _)| p), Some((1, (30, "b30"))));
         assert_eq!(agg.take_earliest_by(|&(p, _)| p), None);
         assert!(agg.is_drained());
+    }
+
+    #[test]
+    fn latest_wins_releases_once_per_timing_item_and_keeps_the_rest() {
+        let mut agg = InputAggregator::new(2);
+        // input 1 has not delivered: not ready, but a queued timing item still
+        // releases (the caller decides whether to gate on readiness).
+        agg.push(0, "base0");
+        assert!(!agg.latest_ready(0));
+        assert_eq!(agg.latest(1), None);
+
+        agg.push_latest(1, "overlay0");
+        agg.push_latest(1, "overlay1"); // supersedes, not a depth-cap drop
+        assert!(agg.latest_ready(0));
+        assert_eq!(agg.latest(1), Some(&"overlay1"));
+        assert_eq!(agg.queued(1), 1);
+        assert_eq!(agg.dropped(), 0);
+
+        // Two timing items, two releases; the overlay stays for both.
+        agg.push(0, "base1");
+        assert_eq!(agg.take_round_latest(0), Some("base0"));
+        assert_eq!(agg.latest(1), Some(&"overlay1"));
+        assert_eq!(agg.take_round_latest(0), Some("base1"));
+        assert_eq!(agg.take_round_latest(0), None);
+        assert_eq!(agg.latest(1), Some(&"overlay1"));
+    }
+
+    #[test]
+    fn clear_drops_one_inputs_queue_only() {
+        let mut agg = InputAggregator::new(2);
+        agg.push(0, 1);
+        agg.push(0, 2);
+        agg.push_latest(1, 10);
+        agg.mark_ended(0);
+        agg.clear(0);
+        assert_eq!(agg.queued(0), 0);
+        assert!(agg.is_ended(0), "clearing keeps the ended flag");
+        assert_eq!(agg.latest(1), Some(&10));
     }
 
     #[test]

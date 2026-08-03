@@ -66,7 +66,10 @@ pub enum BusMessage {
     /// GStreamer `GST_MESSAGE_QOS` analog. Posted by a synchronizing sink
     /// (e.g. [`SyncSink`](../../g2g_plugins/syncsink/struct.SyncSink.html)) when
     /// it drops a late frame, so the application can react (lower the source
-    /// rate, simplify the pipeline) instead of silently falling behind.
+    /// rate, simplify the pipeline) instead of silently falling behind. A sink
+    /// given a report interval ([`QosTracker::set_report_interval_ns`](crate::QosTracker::set_report_interval_ns))
+    /// also posts the same running stats periodically while frames flow, so the
+    /// trend is visible before anything is dropped.
     Qos {
         /// Running time (PTS) of the frame this report concerns.
         running_time_ns: u64,
@@ -79,15 +82,20 @@ pub enum BusMessage {
         dropped: u64,
     },
     /// Buffering level report (M87): the fill percent (0-100) of a monitored
-    /// link feeding a sink. The GStreamer `GST_MESSAGE_BUFFERING` analog. g2g
-    /// has no `queue` element (per-edge `LinkPolicy` is the leaky-queue analog),
-    /// so this reports the bounded link channel's own occupancy, posted by the
-    /// runner's sink arm when the level crosses a quartile band. An application
-    /// can pause until it sees `100`, or surface a "buffering..." indicator
-    /// while it is low.
+    /// link. The GStreamer `GST_MESSAGE_BUFFERING` analog. g2g has no `queue`
+    /// element (per-edge `LinkPolicy` is the leaky-queue analog), so this
+    /// reports the bounded link channel's own occupancy, posted by the runner's
+    /// transform and sink arms for their input link when the level crosses a
+    /// quartile band. An application can pause until it sees `100`, surface a
+    /// "buffering..." indicator while it is low, or find which interior link
+    /// starves by watching `element`.
     Buffering {
-        /// Fill of the sink's input link, 0 (empty / underrun) to 100 (full).
+        /// Fill of the reported input link, 0 (empty / underrun) to 100 (full).
         percent: u8,
+        /// Instance name of the element the reported link feeds (`<category>N`,
+        /// or a launch line's `name=`). `None` when the level is a source's own
+        /// prebuffer rather than a runner link.
+        element: Option<alloc::string::String>,
     },
     /// Stream metadata a demuxer recovered from the container (the GStreamer
     /// `GST_MESSAGE_TAG` analog). Posted out of band so the application can read

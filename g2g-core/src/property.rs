@@ -35,6 +35,11 @@ pub enum PropKind {
     Fraction,
     /// UTF-8 string.
     Str,
+    /// A set of named flags, written `a+b+c` (gst's flags-property syntax, e.g.
+    /// `flags=video+audio`). The accepted nicks are the property's
+    /// [`enum_values`](PropertySpec::enum_values); the element receives them as a
+    /// [`PropValue::Flags`] list, so it never splits the text itself.
+    Flags,
 }
 
 impl PropKind {
@@ -49,6 +54,7 @@ impl PropKind {
             PropKind::Double => "Double",
             PropKind::Fraction => "Fraction",
             PropKind::Str => "String",
+            PropKind::Flags => "Flags",
         }
     }
 }
@@ -64,6 +70,8 @@ pub enum PropValue {
     /// `(numerator, denominator)`.
     Fraction(i32, i32),
     Str(String),
+    /// The nicks of a set-valued property, in the order they were written.
+    Flags(Vec<String>),
 }
 
 impl PropValue {
@@ -76,6 +84,7 @@ impl PropValue {
             PropValue::Double(_) => PropKind::Double,
             PropValue::Fraction(_, _) => PropKind::Fraction,
             PropValue::Str(_) => PropKind::Str,
+            PropValue::Flags(_) => PropKind::Flags,
         }
     }
 
@@ -118,6 +127,17 @@ impl PropValue {
                 }
             },
             PropKind::Str => Ok(PropValue::Str(t.to_string())),
+            PropKind::Flags => {
+                let mut set = Vec::new();
+                for nick in t.split('+') {
+                    let nick = nick.trim();
+                    if nick.is_empty() {
+                        return Err(PropError::Value);
+                    }
+                    set.push(nick.to_string());
+                }
+                Ok(PropValue::Flags(set))
+            }
         }
     }
 
@@ -167,6 +187,23 @@ impl PropValue {
             PropValue::Str(s) => Some(s),
             _ => None,
         }
+    }
+
+    /// Borrow the value as the nicks of a [`Flags`](PropValue::Flags) set. The
+    /// parser has already split the `a+b` text and (when the property declares
+    /// `enum_values`) checked every nick, so an element only matches them.
+    pub fn as_flags(&self) -> Option<&[String]> {
+        match self {
+            PropValue::Flags(set) => Some(set),
+            _ => None,
+        }
+    }
+
+    /// Whether a [`Flags`](PropValue::Flags) set contains `nick`. `false` for any
+    /// other kind.
+    pub fn has_flag(&self, nick: &str) -> bool {
+        self.as_flags()
+            .is_some_and(|set| set.iter().any(|n| n == nick))
     }
 }
 
@@ -223,7 +260,12 @@ pub struct PropertySpec {
     /// Accepted `(min, max)` range as text, for a numeric property.
     pub range: Option<(&'static str, &'static str)>,
     /// The named choices of an enum-like string property
-    /// (e.g. `"horizontal-mirror | vertical-mirror | rotate-180"`).
+    /// (e.g. `"horizontal-mirror | vertical-mirror | rotate-180"`), `|`
+    /// separated. For a [`Str`](PropKind::Str) or [`Flags`](PropKind::Flags)
+    /// property this is the *closed* set [`parse_value`](Self::parse_value)
+    /// validates against, so every nick the element accepts (aliases included)
+    /// must be listed. On a numeric property it stays a documentation list (the
+    /// entries may carry a note, `"2 (2.5 ms) | 5"`) and is not enforced.
     pub enum_values: Option<&'static str>,
     /// Read/write access.
     pub flags: PropFlags,
@@ -266,6 +308,68 @@ impl PropertySpec {
     pub const fn read_only(mut self) -> Self {
         self.flags = PropFlags::READ_ONLY;
         self
+    }
+
+    /// The declared nicks of an enum / flag property: [`enum_values`](Self::enum_values)
+    /// split on `|`, each entry's leading word (an entry may carry a trailing
+    /// note, `"2 (2.5 ms)"`). Empty when the property declares none.
+    pub fn enum_nicks(&self) -> impl Iterator<Item = &'static str> {
+        self.enum_values
+            .unwrap_or("")
+            .split('|')
+            .filter_map(|entry| entry.split_whitespace().next())
+    }
+
+    /// Parse a textual value (a `gst-launch` `key=value`) for this property:
+    /// [`PropValue::parse`] for the kind, plus nick validation against
+    /// [`enum_values`](Self::enum_values) for a string / flag set. Validating here
+    /// means a launch parser can name the valid choices in its error instead of
+    /// surfacing a bare [`PropError::Value`] from the element.
+    pub fn parse_value(&self, text: &str) -> Result<PropValue, ValueError> {
+        let value = PropValue::parse(self.kind, text).map_err(|e| {
+            // A flag set parses unless an entry is empty (`a++b`, a trailing
+            // `+`); report the whole text so the error can list the nicks.
+            if self.kind == PropKind::Flags {
+                ValueError::Nick(text.trim().to_string())
+            } else {
+                ValueError::Kind(e)
+            }
+        })?;
+        if self.enum_values.is_none() {
+            return Ok(value);
+        }
+        let nicks: &[String] = match &value {
+            PropValue::Str(s) => core::slice::from_ref(s),
+            PropValue::Flags(set) => set,
+            // A numeric property's enum_values is documentation, not a closed set.
+            _ => return Ok(value),
+        };
+        for nick in nicks {
+            if !self.enum_nicks().any(|d| d == nick) {
+                return Err(ValueError::Nick(nick.clone()));
+            }
+        }
+        Ok(value)
+    }
+}
+
+/// Why [`PropertySpec::parse_value`] rejected a textual property value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ValueError {
+    /// The text did not parse for the property's [`PropKind`].
+    Kind(PropError),
+    /// A name that is not one of the property's declared choices. The string is
+    /// the offending nick (one entry of a `+`-joined flag set), or the whole
+    /// value when a flag set was malformed.
+    Nick(String),
+}
+
+impl core::fmt::Display for ValueError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            ValueError::Kind(e) => write!(f, "{e}"),
+            ValueError::Nick(n) => write!(f, "unknown value '{n}'"),
+        }
     }
 }
 
@@ -453,6 +557,84 @@ mod tests {
         assert_eq!(
             PropValue::parse(PropKind::Bool, "maybe"),
             Err(PropError::Value)
+        );
+    }
+
+    #[test]
+    fn flag_set_parses_into_nicks() {
+        assert_eq!(
+            PropValue::parse(PropKind::Flags, "video+audio").unwrap(),
+            PropValue::Flags(alloc::vec!["video".into(), "audio".into()])
+        );
+        // Whitespace around a nick is trimmed (a quoted `"video + audio"`).
+        assert_eq!(
+            PropValue::parse(PropKind::Flags, "video + audio").unwrap(),
+            PropValue::Flags(alloc::vec!["video".into(), "audio".into()])
+        );
+        let v = PropValue::parse(PropKind::Flags, "video+audio").unwrap();
+        assert!(v.has_flag("audio") && !v.has_flag("text"));
+        assert_eq!(v.as_flags().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn malformed_flag_set_is_rejected() {
+        for bad in ["video+", "+video", "video++audio", ""] {
+            assert_eq!(
+                PropValue::parse(PropKind::Flags, bad),
+                Err(PropError::Value),
+                "{bad} must not parse"
+            );
+        }
+    }
+
+    #[test]
+    fn spec_validates_enum_nicks() {
+        let spec = PropertySpec::new("backend", PropKind::Str, "encoder")
+            .with_enum_values("nvenc | software");
+        assert_eq!(
+            spec.parse_value("software").unwrap(),
+            PropValue::Str("software".into())
+        );
+        assert_eq!(
+            spec.parse_value("nvidia"),
+            Err(ValueError::Nick("nvidia".into()))
+        );
+        // No declared values: any string goes through.
+        let free = PropertySpec::new("location", PropKind::Str, "path");
+        assert!(free.parse_value("anything").is_ok());
+    }
+
+    #[test]
+    fn spec_validates_each_flag_nick() {
+        let spec = PropertySpec::new("protocols", PropKind::Flags, "transports")
+            .with_enum_values("udp | tcp");
+        assert_eq!(
+            spec.parse_value("udp+tcp").unwrap(),
+            PropValue::Flags(alloc::vec!["udp".into(), "tcp".into()])
+        );
+        // The offending nick is named, not the whole value.
+        assert_eq!(
+            spec.parse_value("udp+quic"),
+            Err(ValueError::Nick("quic".into()))
+        );
+        // A malformed set reports the whole text (there is no one bad nick).
+        assert_eq!(
+            spec.parse_value("udp+"),
+            Err(ValueError::Nick("udp+".into()))
+        );
+        assert_eq!(spec.enum_nicks().collect::<Vec<_>>(), ["udp", "tcp"]);
+    }
+
+    #[test]
+    fn numeric_enum_values_stay_documentation() {
+        // `opusenc frame-size` lists annotated numbers; the list documents the
+        // choices but the kind (not the list) decides what parses.
+        let spec = PropertySpec::new("frame-size", PropKind::Uint, "ms")
+            .with_enum_values("2 (2.5 ms) | 5 | 10");
+        assert_eq!(spec.parse_value("20").unwrap(), PropValue::Uint(20));
+        assert_eq!(
+            spec.parse_value("x"),
+            Err(ValueError::Kind(PropError::Value))
         );
     }
 

@@ -33,6 +33,7 @@ use core::pin::Pin;
 use core::time::Duration;
 use std::string::{String, ToString};
 use std::sync::Arc;
+use std::vec::Vec;
 
 use alloc::boxed::Box;
 
@@ -115,7 +116,39 @@ pub struct RtspSrc {
     /// on the first session attempt and skips straight to PLAY, saving
     /// a redundant DESCRIBE + SETUP round-trip at startup.
     stashed_session: Option<StashedSession>,
+    /// Lower transports to request at SETUP, in the order they are tried
+    /// (the `protocols` flag set). A transport whose SETUP fails falls through
+    /// to the next, as gst's `rtspsrc protocols=` does.
+    transports: Vec<LowerTransport>,
     configured: bool,
+}
+
+/// An RTP lower transport a SETUP may request, the subset of gst's
+/// `GstRTSPLowerTrans` retina implements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LowerTransport {
+    Udp,
+    Tcp,
+}
+
+impl LowerTransport {
+    fn nick(self) -> &'static str {
+        match self {
+            LowerTransport::Udp => "udp",
+            LowerTransport::Tcp => "tcp",
+        }
+    }
+
+    fn retina(self) -> retina::client::Transport {
+        match self {
+            LowerTransport::Udp => {
+                retina::client::Transport::Udp(retina::client::UdpTransportOptions::default())
+            }
+            LowerTransport::Tcp => {
+                retina::client::Transport::Tcp(retina::client::TcpTransportOptions::default())
+            }
+        }
+    }
 }
 
 impl RtspSrc {
@@ -129,6 +162,7 @@ impl RtspSrc {
             expected_dims: None,
             discovered_caps: None,
             stashed_session: None,
+            transports: Vec::from([LowerTransport::Tcp]),
             configured: false,
         }
     }
@@ -241,6 +275,7 @@ impl SourceLoop for RtspSrc {
                 &self.user_agent,
                 self.creds.as_ref(),
                 &self.reconnect,
+                &self.transports,
             )
             .await?;
             let caps = stashed.caps.clone();
@@ -325,6 +360,13 @@ impl SourceLoop for RtspSrc {
                 "cap on the doubling reconnect backoff, milliseconds",
             )
             .with_default("5000"),
+            PropertySpec::new(
+                "protocols",
+                PropKind::Flags,
+                "lower transports to request at SETUP, tried in the order written",
+            )
+            .with_enum_values("udp | tcp")
+            .with_default("tcp"),
         ];
         PROPS
     }
@@ -401,6 +443,24 @@ impl SourceLoop for RtspSrc {
                 self.reconnect.max_backoff_ms = value.as_uint().ok_or(PropError::Type)?;
                 Ok(())
             }
+            "protocols" => {
+                let mut order = Vec::new();
+                for nick in value.as_flags().ok_or(PropError::Type)? {
+                    let t = match nick.as_str() {
+                        "udp" => LowerTransport::Udp,
+                        "tcp" => LowerTransport::Tcp,
+                        _ => return Err(PropError::Value),
+                    };
+                    if !order.contains(&t) {
+                        order.push(t);
+                    }
+                }
+                if order.is_empty() {
+                    return Err(PropError::Value);
+                }
+                self.transports = order;
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -433,6 +493,12 @@ impl SourceLoop for RtspSrc {
             "reconnect" => Some(PropValue::Uint(self.reconnect.max_attempts as u64)),
             "reconnect-backoff" => Some(PropValue::Uint(self.reconnect.initial_backoff_ms)),
             "reconnect-backoff-max" => Some(PropValue::Uint(self.reconnect.max_backoff_ms)),
+            "protocols" => Some(PropValue::Flags(
+                self.transports
+                    .iter()
+                    .map(|t| t.nick().to_string())
+                    .collect(),
+            )),
             _ => None,
         }
     }
@@ -560,7 +626,14 @@ async fn run_session(
     // `None` for any later session.
     let (session, video_idx, current_caps) = match src.stashed_session.take() {
         Some(stashed) => (stashed.session, stashed.video_idx, Some(stashed.caps)),
-        None => match connect_describe_setup(&src.url, &src.user_agent, src.creds.as_ref()).await {
+        None => match connect_describe_setup(
+            &src.url,
+            &src.user_agent,
+            src.creds.as_ref(),
+            &src.transports,
+        )
+        .await
+        {
             Ok((s, idx)) => {
                 let caps = caps_from_video_params(video_params_for(s.streams(), idx));
                 (s, idx, caps)
@@ -685,12 +758,13 @@ async fn probe_session_with_reconnect(
     user_agent: &str,
     creds: Option<&retina::client::Credentials>,
     policy: &ReconnectPolicy,
+    transports: &[LowerTransport],
 ) -> Result<StashedSession, G2gError> {
     let mut attempt: u32 = 0;
     let mut backoff_ms = policy.initial_backoff_ms.max(1);
     let max_attempts = policy.max_attempts;
     loop {
-        match probe_session(url, user_agent, creds).await {
+        match probe_session(url, user_agent, creds, transports).await {
             Ok(stashed) => return Ok(stashed),
             // `CapsMismatch` is a structural problem (bad URL, no H.264
             // stream): retrying won't help, surface immediately.
@@ -723,8 +797,9 @@ async fn probe_session(
     url: &str,
     user_agent: &str,
     creds: Option<&retina::client::Credentials>,
+    transports: &[LowerTransport],
 ) -> Result<StashedSession, G2gError> {
-    let (session, video_idx) = connect_describe_setup(url, user_agent, creds).await?;
+    let (session, video_idx) = connect_describe_setup(url, user_agent, creds, transports).await?;
     let caps = caps_from_video_params(video_params_for(session.streams(), video_idx))
         .ok_or(G2gError::CapsMismatch)?;
     Ok(StashedSession {
@@ -742,6 +817,7 @@ async fn connect_describe_setup(
     url: &str,
     user_agent: &str,
     creds: Option<&retina::client::Credentials>,
+    transports: &[LowerTransport],
 ) -> Result<(Session<Described>, usize), G2gError> {
     let url = url::Url::parse(url).map_err(|_| G2gError::CapsMismatch)?;
     let session_group = Arc::new(SessionGroup::default());
@@ -757,14 +833,28 @@ async fn connect_describe_setup(
         .iter()
         .position(|s| s.media() == "video" && matches!(s.encoding_name(), "h264" | "h265"))
         .ok_or(G2gError::CapsMismatch)?;
-    session
-        .setup(
-            video_idx,
-            SetupOptions::default().frame_format(FrameFormat::SIMPLE),
-        )
-        .await
-        .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
-    Ok((session, video_idx))
+    // Try each requested lower transport in order, keeping the last failure if
+    // none is accepted (a server may refuse UDP but allow interleaved TCP).
+    let mut setup_err = None;
+    for transport in transports {
+        match session
+            .setup(
+                video_idx,
+                SetupOptions::default()
+                    .frame_format(FrameFormat::SIMPLE)
+                    .transport(transport.retina()),
+            )
+            .await
+        {
+            Ok(()) => return Ok((session, video_idx)),
+            Err(e) => setup_err = Some(e),
+        }
+    }
+    Err(match setup_err {
+        Some(_) => G2gError::Hardware(HardwareError::Other),
+        // An empty transport list cannot happen: `protocols` rejects an empty set.
+        None => G2gError::CapsMismatch,
+    })
 }
 
 fn video_params_for(streams: &[retina::client::Stream], idx: usize) -> Option<&VideoParameters> {

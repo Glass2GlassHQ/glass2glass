@@ -118,7 +118,7 @@ async fn publishes_key_and_forwards_sample_aes_segment_undecrypted() {
         "SAMPLE-AES bytes forwarded undecrypted to the demuxer"
     );
     assert_eq!(
-        *handle.lock().unwrap(),
+        handle.lock().unwrap().current(),
         Some(SampleAesKey { key: KEY, iv: IV }),
         "HlsSrc published the fetched key and explicit IV for the downstream decryptor",
     );

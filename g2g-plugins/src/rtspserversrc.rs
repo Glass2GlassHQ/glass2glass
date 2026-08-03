@@ -8,7 +8,7 @@
 //!
 //! Shape: a contribution endpoint (e.g. an encoder/camera that publishes to an
 //! RTSP server with `ffmpeg -f rtsp -rtsp_transport udp ...`). The TCP listener
-//! is bound in `configure_pipeline`; `run` accepts one publisher, drives the
+//! is bound in `configure_pipeline`; `run` accepts a publisher, drives the
 //! handshake to RECORD, then depayloads the RTP it receives into H.264 access
 //! units emitted downstream.
 //!
@@ -18,12 +18,24 @@
 //! binary, in order, so no jitter buffer is needed), chosen by what the publisher
 //! negotiates in SETUP. What `ffmpeg -rtsp_transport tcp` uses.
 //!
-//! Scope: one publisher / one session. Multi-client is a follow-up.
+//! Multi-client (M834): the element has one output pad, so one publisher records
+//! at a time and sessions are *sequential*. When a publisher disconnects, tears
+//! down, or falls silent past `timeout`, its session state (control connection,
+//! RTP port, interleaved channel, depayloader) is dropped and the element goes
+//! back to listening, so a reconnecting encoder resumes on the same pad without
+//! restarting the graph; downstream PTS continues forward across the handover
+//! rather than jumping back to zero. A publisher that connects while another is
+//! recording is refused with `503 Service Unavailable` instead of being queued in
+//! the accept backlog. `max-sessions` bounds how many publishers are served
+//! before EOS (the default, 0, keeps serving).
 
+use core::cell::Cell;
 use core::future::Future;
 use core::pin::Pin;
+use core::time::Duration;
 
 use alloc::boxed::Box;
+use alloc::format;
 use alloc::vec::Vec;
 
 use std::net::{SocketAddr, TcpListener as StdTcpListener};
@@ -34,14 +46,16 @@ use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError, LatencyReport,
     OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec, Rate, VideoCodec,
+    PropertySpec, PushOutcome, Rate, VideoCodec,
 };
 
 use crate::filesink::io_err;
 use crate::rtpdepay::RtpH264Depayloader;
 use crate::rtpjitter::JitterConfig;
 use crate::rtprecv::{push_access_unit, RtpRecvConfig};
-use crate::rtspserver::{sdp_h264, RtspEvent, RtspRequest, RtspResponder};
+use crate::rtspserver::{
+    sdp_h264, RtspEvent, RtspRequest, RtspResponder, DEFAULT_SESSION_TIMEOUT_SECS,
+};
 
 /// Default dynamic RTP payload type for H.264.
 const DEFAULT_PAYLOAD_TYPE: u8 = 96;
@@ -51,6 +65,12 @@ const DEFAULT_HEIGHT: u32 = 720;
 const DEFAULT_FPS: u32 = 30;
 /// TCP read buffer for RTSP control requests.
 const CTRL_BUF: usize = 8192;
+/// Cap on buffered-but-unparsed control bytes, as in the serving sink: a client
+/// dripping a never-terminating request (or an oversized Content-Length) is
+/// dropped instead of growing the buffer without bound.
+const MAX_PENDING: usize = 64 * 1024;
+/// How long a refused publisher is given to send the request its 503 answers.
+const REFUSE_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
 pub struct RtspServerSrc {
@@ -69,8 +89,19 @@ pub struct RtspServerSrc {
     /// RTP socket), so receiver-report / NACK feedback needs `with_rtcp` plus a
     /// negotiated `rtcp-mux` (a follow-up) to actually reach the sender.
     recv: RtpRecvConfig,
+    /// Publishers to serve (sequentially) before emitting EOS and stopping.
+    /// 0 keeps listening for the next publisher forever.
+    max_sessions: u64,
+    /// Per-session inactivity budget: a publisher that sends neither media nor a
+    /// control request within it is torn down and the element goes back to
+    /// listening. `u64::MAX` disables reaping.
+    session_timeout_ns: u64,
     listener: Option<StdTcpListener>,
     configured: bool,
+    /// Publishers that reached RECORD, and connections refused (503) because one
+    /// was already recording. Readable once `run` returns.
+    sessions_served: u64,
+    sessions_refused: u64,
 }
 
 impl RtspServerSrc {
@@ -92,9 +123,14 @@ impl RtspServerSrc {
                 rtx: None,
                 fec_pt: None,
                 flexfec_pt: None,
+                declared_caps: None,
             },
+            max_sessions: 0,
+            session_timeout_ns: DEFAULT_SESSION_TIMEOUT_SECS as u64 * 1_000_000_000,
             listener: None,
             configured: false,
+            sessions_served: 0,
+            sessions_refused: 0,
         }
     }
 
@@ -155,6 +191,27 @@ impl RtspServerSrc {
         self
     }
 
+    /// Serve `n` publishers (one at a time, in sequence) then emit EOS and stop.
+    /// 0 (the default) keeps listening for the next publisher forever, the live
+    /// contribution-endpoint shape; 1 is the one-shot "record until the publisher
+    /// leaves" behaviour a file-writing graph wants.
+    pub fn with_max_sessions(mut self, n: u64) -> Self {
+        self.max_sessions = n;
+        self
+    }
+
+    /// Per-session inactivity timeout: a publisher that sends neither media nor a
+    /// control request within it is torn down and the element returns to
+    /// listening, so a peer that vanishes without closing its TCP connection
+    /// cannot stall the graph. A zero duration disables reaping.
+    pub fn with_session_timeout(mut self, timeout: Duration) -> Self {
+        self.session_timeout_ns = match timeout.as_nanos() as u64 {
+            0 => u64::MAX,
+            ns => ns,
+        };
+        self
+    }
+
     /// The TCP control port actually bound, once a listener exists (ephemeral
     /// lookup for tests).
     pub fn local_port(&self) -> Option<u16> {
@@ -162,6 +219,26 @@ impl RtspServerSrc {
             .as_ref()
             .and_then(|l| l.local_addr().ok())
             .map(|a| a.port())
+    }
+
+    /// Publishers that reached RECORD during the last `run`.
+    pub fn sessions_served(&self) -> u64 {
+        self.sessions_served
+    }
+
+    /// Publishers refused with 503 because another was already recording.
+    pub fn sessions_refused(&self) -> u64 {
+        self.sessions_refused
+    }
+
+    /// The timeout to advertise in `Session: id;timeout=N`, in whole seconds.
+    /// With reaping disabled the RFC default is advertised, so a publisher keeps
+    /// a standard keepalive cadence.
+    fn session_timeout_secs(&self) -> u32 {
+        if self.session_timeout_ns == u64::MAX {
+            return DEFAULT_SESSION_TIMEOUT_SECS;
+        }
+        self.session_timeout_ns.div_ceil(1_000_000_000).max(1) as u32
     }
 
     fn caps(&self) -> Caps {
@@ -173,96 +250,288 @@ impl RtspServerSrc {
         }
     }
 
-    /// Accept one publisher and drive the RTSP handshake to RECORD: bind the RTP
-    /// UDP receive socket (its port is advertised in a UDP SETUP), run
-    /// OPTIONS/ANNOUNCE/SETUP/RECORD over the TCP control channel, and return the
-    /// negotiated [`RecordTransport`] once the publisher has issued RECORD. Either
-    /// way the control stream is handed back (never dropped): a real RTSP
-    /// publisher (ffmpeg) holds the control connection open while it records and
-    /// treats the server closing it as a fatal "broken pipe", so dropping it would
-    /// abort the publish. For TCP-interleaved, that same stream *is* the RTP
-    /// transport, and any bytes already buffered past RECORD are handed on as
-    /// `leftover` so a pipelined first frame is not lost.
-    async fn accept_and_handshake(&mut self) -> Result<RecordTransport, G2gError> {
-        let std_listener = self.listener.take().ok_or(G2gError::NotConfigured)?;
-        std_listener.set_nonblocking(true).map_err(io_err)?;
-        let listener = tokio::net::TcpListener::from_std(std_listener).map_err(io_err)?;
-        let (mut control, _peer) = listener.accept().await.map_err(io_err)?;
+    fn responder(&self, server_rtp_port: u16) -> RtspResponder {
+        RtspResponder::new(sdp_h264(self.payload_type), server_rtp_port, self.ssrc)
+            .with_session_timeout_secs(self.session_timeout_secs())
+    }
+}
 
-        // The UDP socket the publisher will push RTP to (UDP transport); its local
-        // port is advertised in the SETUP response (server_port). Unused, but
-        // still bound, if the publisher instead picks TCP-interleaved.
-        let rtp_socket = tokio::net::UdpSocket::bind(("0.0.0.0", 0))
-            .await
-            .map_err(io_err)?;
-        let server_rtp_port = rtp_socket.local_addr().map_err(io_err)?.port();
+/// Drive one accepted publisher's RTSP handshake to RECORD: bind this session's
+/// RTP UDP receive socket (its port is advertised in a UDP SETUP), run
+/// OPTIONS/ANNOUNCE/SETUP/RECORD over the TCP control channel, and return the
+/// negotiated [`RecordTransport`] once the publisher has issued RECORD. Either
+/// way the control stream is kept (never dropped): a real RTSP publisher (ffmpeg)
+/// holds the control connection open while it records and treats the server
+/// closing it as a fatal "broken pipe", so dropping it would abort the publish.
+/// For TCP-interleaved, that same stream *is* the RTP transport, and any bytes
+/// already buffered past RECORD are handed on as `leftover` so a pipelined first
+/// frame is not lost.
+///
+/// `Ok(None)` means this publisher went away before RECORD (closed, tore down, or
+/// overflowed the control buffer): the caller drops it and listens for the next
+/// one rather than failing the graph.
+async fn handshake(
+    mut control: tokio::net::TcpStream,
+    mut responder: RtspResponder,
+    rtp_socket: tokio::net::UdpSocket,
+    activity: &Cell<u64>,
+) -> Result<Option<RecordTransport>, G2gError> {
+    // Set when SETUP negotiated TCP-interleaved: the RTP channel to demux the
+    // `$`-framed control-connection binary on.
+    let mut interleaved_rtp_channel: Option<u8> = None;
+    let mut pending: Vec<u8> = Vec::new();
+    let mut buf = [0u8; CTRL_BUF];
 
-        let mut responder =
-            RtspResponder::new(sdp_h264(self.payload_type), server_rtp_port, self.ssrc);
-        // Set when SETUP negotiated TCP-interleaved: the RTP channel to demux the
-        // `$`-framed control-connection binary on.
-        let mut interleaved_rtp_channel: Option<u8> = None;
-        let mut pending: Vec<u8> = Vec::new();
-        let mut buf = [0u8; CTRL_BUF];
+    loop {
+        let Ok(n) = control.read(&mut buf).await else {
+            return Ok(None);
+        };
+        if n == 0 {
+            return Ok(None); // publisher closed before RECORD
+        }
+        activity.set(g2g_core::metrics::monotonic_ns());
+        pending.extend_from_slice(&buf[..n]);
 
-        loop {
-            let n = control.read(&mut buf).await.map_err(io_err)?;
-            if n == 0 {
-                // Publisher closed before RECORD.
-                return Err(G2gError::Hardware(g2g_core::HardwareError::Other));
+        while let Some((req, consumed)) = RtspRequest::parse(&pending) {
+            pending.drain(..consumed);
+            let (response, event) = responder.handle_request(&req);
+            if control.write_all(&response).await.is_err() {
+                return Ok(None);
             }
-            pending.extend_from_slice(&buf[..n]);
-
-            while let Some((req, consumed)) = RtspRequest::parse(&pending) {
-                pending.drain(..consumed);
-                let (response, event) = responder.handle_request(&req);
-                control.write_all(&response).await.map_err(io_err)?;
-                match event {
-                    RtspEvent::SetupInterleaved { rtp_channel, .. } => {
-                        interleaved_rtp_channel = Some(rtp_channel);
-                    }
-                    RtspEvent::Record => {
-                        // Media now flows; hand the control stream back so the
-                        // caller keeps it open for the session (interleaved also
-                        // receives its RTP on it). `pending` holds any bytes read
-                        // past RECORD (a pipelined first interleaved frame).
-                        return Ok(match interleaved_rtp_channel {
-                            Some(rtp_channel) => RecordTransport::Interleaved {
-                                control,
-                                rtp_channel,
-                                leftover: pending,
-                            },
-                            None => RecordTransport::Udp {
-                                rtp_socket,
-                                control,
-                            },
-                        });
-                    }
-                    RtspEvent::Teardown => return Err(G2gError::Shutdown),
-                    _ => {}
+            match event {
+                RtspEvent::SetupInterleaved { rtp_channel, .. } => {
+                    interleaved_rtp_channel = Some(rtp_channel);
                 }
+                RtspEvent::Record => {
+                    // Media now flows; hand the control stream back so the caller
+                    // keeps it open for the session (interleaved also receives its
+                    // RTP on it). `pending` holds any bytes read past RECORD (a
+                    // pipelined first interleaved frame).
+                    return Ok(Some(match interleaved_rtp_channel {
+                        Some(rtp_channel) => RecordTransport::Interleaved {
+                            control,
+                            responder,
+                            rtp_channel,
+                            leftover: pending,
+                        },
+                        None => RecordTransport::Udp {
+                            rtp_socket,
+                            control,
+                            responder,
+                        },
+                    }));
+                }
+                RtspEvent::Teardown => return Ok(None),
+                _ => {}
             }
+        }
+        if pending.len() > MAX_PENDING {
+            return Ok(None);
         }
     }
 }
 
 /// The transport a publisher negotiated by RECORD time. Both keep the control
 /// `TcpStream` (a UDP publisher needs it open; an interleaved one receives its RTP
-/// on it).
+/// on it) and the session's responder, so keepalives and a mid-RECORD TEARDOWN
+/// are answered from the same protocol state.
 #[derive(Debug)]
 enum RecordTransport {
     /// Unicast UDP: RTP arrives on `rtp_socket`; `control` is held open.
     Udp {
         rtp_socket: tokio::net::UdpSocket,
         control: tokio::net::TcpStream,
+        responder: RtspResponder,
     },
     /// TCP-interleaved (RFC 2326 §10.12): RTP arrives on `control` as `$`-framed
     /// binary on `rtp_channel`; `leftover` is any binary already buffered.
     Interleaved {
         control: tokio::net::TcpStream,
+        responder: RtspResponder,
         rtp_channel: u8,
         leftover: Vec<u8>,
     },
+}
+
+/// Why a publisher's session stopped.
+#[derive(Debug, PartialEq, Eq)]
+enum SessionEnd {
+    /// `num-buffers` access units were emitted (EOS is already pushed).
+    Limit,
+    /// The publisher disconnected, tore down, or fell silent past the timeout.
+    PeerGone,
+}
+
+/// Downstream wrapper for the whole run, spanning every publisher session: it
+/// counts the access units emitted so far (so the next session continues the
+/// sequence numbering), stamps liveness for the inactivity watchdog, and shifts
+/// each session's timestamps past the previous one, so a re-publish continues
+/// forward instead of restarting downstream time at zero.
+struct SessionTap<'a> {
+    out: &'a mut dyn OutputSink,
+    activity: &'a Cell<u64>,
+    frames: u64,
+    pts_offset_ns: u64,
+    last_pts_ns: u64,
+    frame_period_ns: u64,
+}
+
+impl core::fmt::Debug for SessionTap<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("SessionTap")
+            .field("frames", &self.frames)
+            .field("pts_offset_ns", &self.pts_offset_ns)
+            .finish()
+    }
+}
+
+impl<'a> SessionTap<'a> {
+    fn new(out: &'a mut dyn OutputSink, activity: &'a Cell<u64>, frame_period_ns: u64) -> Self {
+        Self {
+            out,
+            activity,
+            frames: 0,
+            pts_offset_ns: 0,
+            last_pts_ns: 0,
+            frame_period_ns,
+        }
+    }
+
+    /// Access units pushed downstream so far, across every session.
+    fn frames(&self) -> u64 {
+        self.frames
+    }
+
+    /// Note liveness on a session that is receiving bytes but has not completed
+    /// an access unit yet, so the inactivity watchdog does not reap it.
+    fn mark_activity(&self) {
+        self.activity.set(g2g_core::metrics::monotonic_ns());
+    }
+
+    /// Close out a session: the next publisher's timestamps start one frame past
+    /// the last one emitted.
+    fn end_session(&mut self) {
+        self.pts_offset_ns = self.last_pts_ns.saturating_add(self.frame_period_ns);
+    }
+}
+
+impl OutputSink for SessionTap<'_> {
+    fn push<'b>(
+        &'b mut self,
+        packet: PipelinePacket,
+    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'b>> {
+        let mut packet = packet;
+        if let PipelinePacket::DataFrame(frame) = &mut packet {
+            let t = &mut frame.timing;
+            t.pts_ns = t.pts_ns.saturating_add(self.pts_offset_ns);
+            t.dts_ns = t.dts_ns.saturating_add(self.pts_offset_ns);
+            t.capture_ns = t.capture_ns.saturating_add(self.pts_offset_ns);
+            self.last_pts_ns = t.pts_ns;
+            self.frames += 1;
+            self.activity.set(g2g_core::metrics::monotonic_ns());
+        }
+        self.out.push(packet)
+    }
+}
+
+/// Wait until the session has been silent for `timeout_ns`. Never completes when
+/// reaping is disabled (`u64::MAX`), so it can sit in a `select!` unconditionally.
+async fn inactive_for(activity: &Cell<u64>, timeout_ns: u64) {
+    if timeout_ns == u64::MAX {
+        core::future::pending::<()>().await;
+    }
+    loop {
+        let idle = g2g_core::metrics::monotonic_ns().saturating_sub(activity.get());
+        let Some(remaining) = timeout_ns.checked_sub(idle) else {
+            return;
+        };
+        tokio::time::sleep(Duration::from_nanos(remaining.max(1))).await;
+    }
+}
+
+/// Refuse every publisher that connects while another is recording: answer its
+/// first request with `503 Service Unavailable` (RFC 2326 §7.1.1) and close, so a
+/// second ffmpeg fails fast instead of sitting in the accept backlog. Loops
+/// forever; the caller runs it as a `select!` arm alongside the live session.
+async fn refuse_extras(listener: &tokio::net::TcpListener, refused: &Cell<u64>) {
+    loop {
+        let Ok((sock, _peer)) = listener.accept().await else {
+            // A listener that cannot accept right now must not spin the task.
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            continue;
+        };
+        refused.set(refused.get().saturating_add(1));
+        // Answer on a detached task: this loop is cancelled the instant the live
+        // session ends, and a publisher that connected in that same instant must
+        // still get its 503 instead of a silently closed connection.
+        tokio::spawn(refuse_one(sock));
+    }
+}
+
+/// Answer one refused publisher: echo the `CSeq` it asked with in a 503, then
+/// close.
+async fn refuse_one(mut sock: tokio::net::TcpStream) {
+    let cseq = tokio::time::timeout(REFUSE_READ_TIMEOUT, first_request_cseq(&mut sock))
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(0);
+    let busy = format!("RTSP/1.0 503 Service Unavailable\r\nCSeq: {cseq}\r\nServer: g2g\r\n\r\n");
+    let _ = sock.write_all(busy.as_bytes()).await;
+}
+
+/// Read until one complete RTSP request has arrived and report its `CSeq`, so a
+/// refusal echoes the sequence number the client expects.
+async fn first_request_cseq(sock: &mut tokio::net::TcpStream) -> Option<u32> {
+    let mut pending: Vec<u8> = Vec::new();
+    let mut buf = [0u8; CTRL_BUF];
+    loop {
+        let n = sock.read(&mut buf).await.ok()?;
+        if n == 0 {
+            return None;
+        }
+        pending.extend_from_slice(&buf[..n]);
+        if let Some((req, _)) = RtspRequest::parse(&pending) {
+            return Some(req.cseq);
+        }
+        if pending.len() > MAX_PENDING {
+            return None;
+        }
+    }
+}
+
+/// Watch a UDP publisher's control channel for the length of its session:
+/// answer keepalives (OPTIONS / GET_PARAMETER) and return once the publisher
+/// tears down or closes the connection. Without this the UDP receive loop, which
+/// only ever sees datagrams, would keep waiting for RTP from a publisher that has
+/// already left.
+async fn watch_control(
+    control: &mut tokio::net::TcpStream,
+    responder: &mut RtspResponder,
+    activity: &Cell<u64>,
+) {
+    let mut pending: Vec<u8> = Vec::new();
+    let mut buf = [0u8; CTRL_BUF];
+    loop {
+        let Ok(n) = control.read(&mut buf).await else {
+            return;
+        };
+        if n == 0 {
+            return;
+        }
+        activity.set(g2g_core::metrics::monotonic_ns());
+        pending.extend_from_slice(&buf[..n]);
+        while let Some((req, consumed)) = RtspRequest::parse(&pending) {
+            pending.drain(..consumed);
+            let (response, event) = responder.handle_request(&req);
+            if control.write_all(&response).await.is_err() || event == RtspEvent::Teardown {
+                return;
+            }
+        }
+        if pending.len() > MAX_PENDING {
+            return;
+        }
+    }
 }
 
 /// One parsed item from an interleaved control stream (RFC 2326 §10.12).
@@ -276,9 +545,9 @@ enum Interleaved {
         end: usize,
         consumed: usize,
     },
-    /// An embedded RTSP request occupying `consumed` bytes (`teardown` if it was a
-    /// TEARDOWN), interleaved between binary frames.
-    Rtsp { teardown: bool, consumed: usize },
+    /// An embedded RTSP request occupying `consumed` bytes, interleaved between
+    /// binary frames.
+    Rtsp { consumed: usize },
     /// Not enough bytes buffered yet for a complete item.
     NeedMore,
 }
@@ -308,29 +577,28 @@ fn next_interleaved(buf: &[u8]) -> Interleaved {
         }
         // Not a binary frame: an interleaved RTSP request (e.g. TEARDOWN).
         Some(_) => match RtspRequest::parse(buf) {
-            Some((req, consumed)) => Interleaved::Rtsp {
-                teardown: req.method == "TEARDOWN",
-                consumed,
-            },
+            Some((_req, consumed)) => Interleaved::Rtsp { consumed },
             None => Interleaved::NeedMore,
         },
     }
 }
 
 /// Receive H.264 over a TCP-interleaved control stream (RFC 2326 §10.12): demux
-/// `$`-framed RTP on `rtp_channel` and depayload it into access units. TCP is
-/// ordered and lossless, so no jitter buffer / RTCP / FEC is needed (unlike the
-/// UDP path); packets depayload straight through. Ends on the publisher closing
-/// the connection, a TEARDOWN, or `frame_limit` access units. `leftover` is any
+/// `$`-framed RTP on `rtp_channel` and depayload it into access units, answering
+/// any RTSP request interleaved between the binary frames. TCP is ordered and
+/// lossless, so no jitter buffer / RTCP / FEC is needed (unlike the UDP path);
+/// packets depayload straight through. Ends on the publisher closing the
+/// connection, a TEARDOWN, or `frame_limit` access units. `leftover` is any
 /// binary already buffered past RECORD.
 async fn receive_interleaved(
-    mut control: tokio::net::TcpStream,
+    control: &mut tokio::net::TcpStream,
+    responder: &mut RtspResponder,
     rtp_channel: u8,
     mut pending: Vec<u8>,
     frame_limit: u64,
     seq_base: u64,
-    out: &mut dyn OutputSink,
-) -> Result<u64, G2gError> {
+    out: &mut SessionTap<'_>,
+) -> Result<SessionEnd, G2gError> {
     let mut depay = RtpH264Depayloader::new();
     let mut seq = seq_base;
     let mut ts_base: Option<u32> = None;
@@ -358,29 +626,38 @@ async fn receive_interleaved(
                             )
                             .await?
                             {
-                                return Ok(seq - seq_base);
+                                return Ok(SessionEnd::Limit);
                             }
                         }
                     }
                     pending.drain(..consumed);
                 }
-                Interleaved::Rtsp { teardown, consumed } => {
+                Interleaved::Rtsp { consumed } => {
+                    let teardown = match RtspRequest::parse(&pending) {
+                        Some((req, _)) => {
+                            let (response, event) = responder.handle_request(&req);
+                            control.write_all(&response).await.is_err()
+                                || event == RtspEvent::Teardown
+                        }
+                        None => false,
+                    };
                     pending.drain(..consumed);
                     if teardown {
-                        out.push(PipelinePacket::Eos).await?;
-                        return Ok(seq - seq_base);
+                        return Ok(SessionEnd::PeerGone);
                     }
                 }
                 Interleaved::NeedMore => break,
             }
         }
-        let n = control.read(&mut buf).await.map_err(io_err)?;
+        let Ok(n) = control.read(&mut buf).await else {
+            return Ok(SessionEnd::PeerGone);
+        };
         if n == 0 {
-            // Publisher closed the connection: end the stream (RTP has no in-band
-            // end marker, so the close is the EOS signal).
-            out.push(PipelinePacket::Eos).await?;
-            return Ok(seq - seq_base);
+            // Publisher closed the connection: RTP has no in-band end marker, so
+            // the close is what ends the session.
+            return Ok(SessionEnd::PeerGone);
         }
+        out.mark_activity();
         pending.extend_from_slice(&buf[..n]);
     }
 }
@@ -466,6 +743,19 @@ impl SourceLoop for RtspServerSrc {
             )
             .with_default("-1")
             .with_range("-1", "9223372036854775807"),
+            PropertySpec::new(
+                "max-sessions",
+                PropKind::Uint,
+                "publishers to serve in sequence then EOS (0 = keep listening)",
+            )
+            .with_default("0"),
+            PropertySpec::new(
+                "timeout",
+                PropKind::Uint,
+                "session timeout in seconds (a silent publisher is torn down; 0 = never)",
+            )
+            .with_default("60")
+            .with_range("0", "604800"),
             PropertySpec::new(
                 "jitter-latency",
                 PropKind::Uint,
@@ -556,6 +846,21 @@ impl SourceLoop for RtspServerSrc {
                 Ok(())
             }
             "num-buffers" => crate::netprop::set_frame_limit(&mut self.frame_limit, &value),
+            "max-sessions" => {
+                self.max_sessions = value.as_uint().ok_or(PropError::Type)?;
+                Ok(())
+            }
+            "timeout" => {
+                let secs = value.as_uint().ok_or(PropError::Type)?;
+                if secs > 604_800 {
+                    return Err(PropError::Value);
+                }
+                self.session_timeout_ns = match secs {
+                    0 => u64::MAX, // never reap
+                    s => s * 1_000_000_000,
+                };
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -574,6 +879,11 @@ impl SourceLoop for RtspServerSrc {
             "height" => Some(PropValue::Uint(self.height as u64)),
             "framerate" => Some(PropValue::Uint(self.fps as u64)),
             "num-buffers" => Some(crate::netprop::get_frame_limit(self.frame_limit)),
+            "max-sessions" => Some(PropValue::Uint(self.max_sessions)),
+            "timeout" => Some(PropValue::Uint(match self.session_timeout_ns {
+                u64::MAX => 0,
+                _ => self.session_timeout_secs() as u64,
+            })),
             _ => None,
         }
     }
@@ -589,38 +899,113 @@ impl SourceLoop for RtspServerSrc {
         LatencyReport::live(period_ns, None)
     }
 
+    /// Serve publishers one at a time until `max-sessions` of them have recorded
+    /// (0 = forever) or `num-buffers` access units have been emitted. Each session
+    /// owns its own RTP socket / interleaved channel and responder, dropped when
+    /// it ends, and anyone who connects mid-session is refused with a 503.
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
         Box::pin(async move {
             if !self.configured {
                 return Err(G2gError::NotConfigured);
             }
-            match self.accept_and_handshake().await? {
-                // UDP: `_control` is held for the whole receive loop (a real RTSP
-                // publisher aborts if the server closes it); the jitter + (optional)
-                // RTCP + depayload path is shared with UdpSrc.
-                RecordTransport::Udp {
-                    rtp_socket,
-                    control: _control,
-                } => {
-                    crate::rtprecv::receive_rtp_h264(
-                        &rtp_socket,
-                        &self.recv,
-                        self.frame_limit,
-                        0,
-                        out,
-                    )
-                    .await
-                }
-                // TCP-interleaved: the control stream itself carries `$`-framed RTP.
-                RecordTransport::Interleaved {
-                    control,
-                    rtp_channel,
-                    leftover,
-                } => {
-                    receive_interleaved(control, rtp_channel, leftover, self.frame_limit, 0, out)
+            let std_listener = self.listener.take().ok_or(G2gError::NotConfigured)?;
+            std_listener.set_nonblocking(true).map_err(io_err)?;
+            let listener = tokio::net::TcpListener::from_std(std_listener).map_err(io_err)?;
+
+            let recv = self.recv.clone();
+            let frame_limit = self.frame_limit;
+            let max_sessions = self.max_sessions;
+            let timeout_ns = self.session_timeout_ns;
+            let frame_period_ns = match self.fps {
+                0 => 0,
+                fps => 1_000_000_000 / fps as u64,
+            };
+
+            let activity = Cell::new(g2g_core::metrics::monotonic_ns());
+            let refused = Cell::new(0u64);
+            let served = Cell::new(0u64);
+            let mut tap = SessionTap::new(out, &activity, frame_period_ns);
+
+            let result: Result<u64, G2gError> = async {
+                loop {
+                    let (control, _peer) = listener.accept().await.map_err(io_err)?;
+                    activity.set(g2g_core::metrics::monotonic_ns());
+                    // This session's RTP socket: its port is advertised in a UDP
+                    // SETUP, and it is released with the session (bound even for an
+                    // interleaved publisher, which then simply drops it).
+                    let rtp_socket = tokio::net::UdpSocket::bind(("0.0.0.0", 0))
                         .await
+                        .map_err(io_err)?;
+                    let server_rtp_port = rtp_socket.local_addr().map_err(io_err)?.port();
+                    let responder = self.responder(server_rtp_port);
+
+                    // Anyone connecting during the handshake is refused too, so a
+                    // second publisher never waits in the backlog.
+                    let session = tokio::select! {
+                        r = handshake(control, responder, rtp_socket, &activity) => r?,
+                        _ = inactive_for(&activity, timeout_ns) => None,
+                        _ = refuse_extras(&listener, &refused) => unreachable!("refusal never ends"),
+                    };
+                    let Some(session) = session else {
+                        continue; // gone before RECORD: listen for the next one
+                    };
+
+                    // Remaining budget, so `num-buffers` counts across sessions and
+                    // the sequence numbering continues over a re-publish.
+                    let seq_base = tap.frames();
+                    let remaining = match frame_limit {
+                        0 => 0,
+                        limit => limit.saturating_sub(seq_base),
+                    };
+                    let end = match session {
+                        // UDP: the jitter + (optional) RTCP + depayload path shared
+                        // with UdpSrc, while the control channel is watched for the
+                        // publisher leaving (datagrams alone never reveal that).
+                        RecordTransport::Udp {
+                            rtp_socket,
+                            mut control,
+                            mut responder,
+                        } => tokio::select! {
+                            r = crate::rtprecv::receive_rtp_h264(&rtp_socket, &recv, remaining, seq_base, &mut tap) => {
+                                r?;
+                                SessionEnd::Limit
+                            }
+                            _ = watch_control(&mut control, &mut responder, &activity) => SessionEnd::PeerGone,
+                            _ = inactive_for(&activity, timeout_ns) => SessionEnd::PeerGone,
+                            _ = refuse_extras(&listener, &refused) => unreachable!("refusal never ends"),
+                        },
+                        // TCP-interleaved: the control stream itself carries the
+                        // `$`-framed RTP, so its close ends the session.
+                        RecordTransport::Interleaved {
+                            mut control,
+                            mut responder,
+                            rtp_channel,
+                            leftover,
+                        } => tokio::select! {
+                            r = receive_interleaved(&mut control, &mut responder, rtp_channel, leftover, remaining, seq_base, &mut tap) => r?,
+                            _ = inactive_for(&activity, timeout_ns) => SessionEnd::PeerGone,
+                            _ = refuse_extras(&listener, &refused) => unreachable!("refusal never ends"),
+                        },
+                    };
+                    served.set(served.get().saturating_add(1));
+                    match end {
+                        // `push_access_unit` already emitted the EOS.
+                        SessionEnd::Limit => return Ok(tap.frames()),
+                        SessionEnd::PeerGone => {
+                            tap.end_session();
+                            if max_sessions != 0 && served.get() >= max_sessions {
+                                tap.push(PipelinePacket::Eos).await?;
+                                return Ok(tap.frames());
+                            }
+                        }
+                    }
                 }
             }
+            .await;
+
+            self.sessions_served = served.get();
+            self.sessions_refused = refused.get();
+            result
         })
     }
 }

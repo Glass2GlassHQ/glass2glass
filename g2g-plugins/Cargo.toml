@@ -62,7 +62,7 @@ rtsp = ["std", "dep:retina", "dep:futures-util", "dep:url", "dep:bytes"]
 # RTSP server sink (RtspServerSink): hosts a pipeline's H.264 as an RTSP endpoint,
 # serving RTP over UDP to a connecting player. The sans-IO `rtspserver` responder
 # is always compiled; only the tokio TCP/UDP element needs this. Implies std + tokio.
-rtsp-server = ["std", "tokio/net", "tokio/io-util"]
+rtsp-server = ["std", "tokio/net", "tokio/io-util", "tokio/macros"]
 # SRT transport: SrtSink (caller, egress) + SrtSrc (listener, ingress) carrying an
 # MPEG-TS byte stream over UDP, with the HSv5 handshake + NAK-based ARQ. The sans-IO
 # `srt` wire/handshake/reliability layer is always compiled; only the tokio UDP
@@ -78,8 +78,8 @@ udp-egress = ["std", "tokio/net"]
 # needs this feature. Implies std + tokio net/io-util.
 rtmp = ["std", "tokio/net", "tokio/io-util", "dep:sha2", "dep:hmac", "dep:getrandom"]
 # UDP ingress source (M91): UdpSrc receives RTP on a tokio UdpSocket and
-# depayloads H.264 to Annex-B access units. Raw RTP (no RTSP/SDP); implies std
-# and adds tokio's net feature. Receive-side jitter buffer / RTCP are owed.
+# depayloads H.264 to Annex-B access units, with caps taken from a published SDP
+# or the stream's SPS. Implies std and adds tokio's net feature.
 udp-ingress = ["std", "tokio/net"]
 # Distributed-graph transport pair (M551): RemoteSink (TCP client, egress) +
 # RemoteSrc (TCP listener, ingress) serialize the whole PipelinePacket stream
@@ -576,12 +576,13 @@ http-src = ["std", "dep:reqwest", "tokio/time"]
 # and streams its MPEG-TS media segments downstream as a `Caps::ByteStream` for
 # `tsdemux`. Builds on the http-src fetch layer. The playlist parser (`hls`) is
 # pure no_std and always compiled; only the fetching element needs this feature.
-# aes/cbc decrypt AES-128 `#EXT-X-KEY` segments.
-hls = ["http-src", "dep:aes", "dep:cbc"]
-# MPEG-CENC (cbcs) decryption for the multi-track MP4 demuxer (Mp4DemuxN): decrypt
-# clear-key encrypted fragmented MP4 with an app-supplied key. Shares the cbcs
-# primitive with `hls`; standalone so a plain MP4 build need not pull HLS.
-mp4-cenc = ["std", "dep:aes", "dep:cbc"]
+# aes/cbc/ctr decrypt AES-128 `#EXT-X-KEY` segments and the Common Encryption
+# schemes (cbcs / cbc1 / cenc) of a SAMPLE-AES fMP4 rendition.
+hls = ["http-src", "dep:aes", "dep:cbc", "dep:ctr"]
+# MPEG-CENC decryption for the multi-track MP4 demuxer (Mp4DemuxN): decrypt
+# clear-key encrypted fragmented MP4 with an app-supplied key. Shares the cipher
+# primitives with `hls`; standalone so a plain MP4 build need not pull HLS.
+mp4-cenc = ["std", "dep:aes", "dep:cbc", "dep:ctr"]
 # DASH source (DashSrc): parses an MPD manifest (roxmltree), selects a
 # Representation (simple ABR), and streams its fMP4 init + media segments as a
 # `Caps::ByteStream{IsoBmff}` for `fmp4demux`. Builds on the http-src fetch layer.
@@ -983,7 +984,7 @@ wayland-egl = { version = "0.32", optional = true }
 # Linux audio output / capture backends. All link system libraries via
 # pkg-config and are Linux-only.
 # ALSA render sink (alsa-sink): the `alsa` crate over libasound.
-alsa = { version = "0.9", optional = true }
+alsa = { version = "0.12", optional = true }
 # PulseAudio render sink (pulse-sink): the blocking "simple" API + the binding.
 libpulse-binding = { version = "2", optional = true, default-features = false }
 libpulse-simple-binding = { version = "2", optional = true, default-features = false }
@@ -1034,6 +1035,8 @@ embassy-futures = "0.1.2"
 # test (the integration crate can't reach g2g-plugins's optional aes/cbc deps).
 aes = "0.8"
 cbc = { version = "0.1", features = ["alloc"] }
+# AES-CTR encrypt oracle for the m835 Common Encryption (`cenc` scheme) test.
+ctr = "0.9"
 # critical-section impl for host tests of embassy-sync (embassy-link): it calls
 # critical_section::with, which needs an impl at link. The std impl suffices.
 critical-section = { version = "1", features = ["std"] }
@@ -1158,6 +1161,12 @@ required-features = ["vulkan-video", "wgpu-sink"]
 [[test]]
 name = "m578_scripting"
 required-features = ["script-rhai", "declarative-yaml"]
+
+# M849: the visual builder's YAML export, inlined verbatim and loaded through the
+# declarative YAML front-end.
+[[test]]
+name = "m849_builder_yaml_export"
+required-features = ["declarative-yaml"]
 
 # M201: builds the out-of-tree example plugin cdylib and dlopens it. Needs the
 # loader, so it is gated on `plugin-loader` (skipped by a default `cargo test`).

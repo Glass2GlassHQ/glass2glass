@@ -19,7 +19,8 @@ use core::pin::Pin;
 
 use g2g_core::{
     AnalyticsMeta, AsyncElement, BBox, Caps, CapsConstraint, CapsSet, ConfigureOutcome, G2gError,
-    ObjectDetection, OutputSink, PipelinePacket, TensorDType,
+    ObjectDetection, OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    TensorDType,
 };
 
 /// Default model input resolution used to normalize box coordinates.
@@ -193,6 +194,53 @@ impl AsyncElement for DetectionPostprocess {
         Ok(ConfigureOutcome::Accepted)
     }
 
+    fn properties(&self) -> &'static [PropertySpec] {
+        DETECT_PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "conf-threshold" | "iou-threshold" => {
+                let v = value.as_double().ok_or(PropError::Type)?;
+                // Both are scores in [0, 1]; anything else would silently suppress
+                // every detection or none.
+                if !(0.0..=1.0).contains(&v) {
+                    return Err(PropError::Value);
+                }
+                if name == "conf-threshold" {
+                    self.conf_threshold = v as f32;
+                } else {
+                    self.iou_threshold = v as f32;
+                }
+                Ok(())
+            }
+            "input-width" | "input-height" => {
+                let v = value.as_uint().ok_or(PropError::Type)?;
+                // The size divides the box coordinates, so zero has no meaning.
+                if v == 0 || v > u32::MAX as u64 {
+                    return Err(PropError::Value);
+                }
+                if name == "input-width" {
+                    self.input_w = v as f32;
+                } else {
+                    self.input_h = v as f32;
+                }
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "conf-threshold" => Some(PropValue::Double(self.conf_threshold as f64)),
+            "iou-threshold" => Some(PropValue::Double(self.iou_threshold as f64)),
+            "input-width" => Some(PropValue::Uint(self.input_w as u64)),
+            "input-height" => Some(PropValue::Uint(self.input_h as u64)),
+            _ => None,
+        }
+    }
+
     fn process<'a>(
         &'a mut self,
         packet: PipelinePacket,
@@ -265,6 +313,42 @@ impl AsyncElement for DetectionPostprocess {
             }
             Ok(())
         })
+    }
+}
+
+/// Settable properties: the two thresholds and the model input size box
+/// coordinates are normalized against, so a `gst-launch` line can tune the
+/// decoder without the builder.
+static DETECT_PROPS: &[PropertySpec] = &[
+    PropertySpec::new(
+        "conf-threshold",
+        PropKind::Double,
+        "minimum class score to emit a detection, 0..1",
+    ),
+    PropertySpec::new(
+        "iou-threshold",
+        PropKind::Double,
+        "IoU above which a lower-scoring same-class box is suppressed, 0..1",
+    ),
+    PropertySpec::new(
+        "input-width",
+        PropKind::Uint,
+        "model input width used to normalize box coordinates",
+    ),
+    PropertySpec::new(
+        "input-height",
+        PropKind::Uint,
+        "model input height used to normalize box coordinates",
+    ),
+];
+
+/// A tensor caps carries a concrete shape (the model's `[1, 4 + C, A]`), so
+/// there is no static superset to advertise; the element negotiates through
+/// `caps_constraint` instead, like the other tensor elements.
+#[cfg(feature = "launch")]
+impl g2g_core::PadTemplates for DetectionPostprocess {
+    fn pad_templates() -> Vec<g2g_core::PadTemplate> {
+        Vec::new()
     }
 }
 

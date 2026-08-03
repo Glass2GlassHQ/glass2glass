@@ -148,9 +148,10 @@ pub fn parse_srt(input: &str) -> Vec<Cue> {
 
 /// Parse WebVTT (`.vtt`) text into cues, in file order. The `WEBVTT` header and
 /// `NOTE` / `REGION` blocks are skipped and inline markup is removed; `STYLE`
-/// blocks are read for `::cue` / `::cue(#id)` `color` / `background-color` rules,
-/// which are resolved onto each cue's [`CueSettings`] (the subset the overlay can
-/// apply; other CSS properties and `::cue(.class)` span selectors are ignored).
+/// blocks are read for `::cue`, `::cue(#id)` and `::cue(.class)`
+/// `color` / `background-color` rules, which are resolved onto each cue's
+/// [`CueSettings`] (the subset the overlay can apply; other CSS properties are
+/// ignored).
 pub fn parse_webvtt(input: &str) -> Vec<Cue> {
     let input = input.strip_prefix('\u{feff}').unwrap_or(input);
 
@@ -187,7 +188,12 @@ pub fn parse_webvtt(input: &str) -> Vec<Cue> {
     for b in &blocks {
         if let Some(mut cue) = block_to_cue(b, true) {
             if !sheet.is_empty() {
-                apply_cue_style(&sheet, block_cue_id(b), &mut cue.settings);
+                apply_cue_style(
+                    &sheet,
+                    block_cue_id(b),
+                    &block_cue_classes(b),
+                    &mut cue.settings,
+                );
             }
             cues.push(cue);
         }
@@ -202,12 +208,61 @@ fn block_cue_id<'a>(block: &[&'a str]) -> Option<&'a str> {
     (timing_idx > 0).then(|| block[timing_idx - 1].trim())
 }
 
-/// A `::cue` selector we apply: all cues (`::cue`) or one identifier
-/// (`::cue(#id)`). `::cue(.class)` / element selectors are not supported.
+/// The classes named on a cue's inline span tags (`<c.loud.narrator>text</c>`,
+/// `<v.loud Bob>`), in first-seen order. WebVTT `::cue(.class)` selects those
+/// spans; since the renderer styles a whole cue at a time, a matching rule
+/// applies to the whole cue.
+fn block_cue_classes(block: &[&str]) -> Vec<String> {
+    let Some(timing_idx) = block.iter().position(|l| l.contains("-->")) else {
+        return Vec::new();
+    };
+    let mut classes: Vec<String> = Vec::new();
+    for line in &block[timing_idx + 1..] {
+        for class in line_span_classes(line) {
+            if !classes.iter().any(|c| c == &class) {
+                classes.push(class);
+            }
+        }
+    }
+    classes
+}
+
+/// The `.class` parts of every open span tag on one cue-text line. A tag is
+/// `<name.class1.class2 annotation>`; close tags (`</c>`) and cue timestamps
+/// (`<00:00:01.000>`, no `.`-separated name) contribute nothing.
+fn line_span_classes(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = line;
+    while let Some(lt) = rest.find('<') {
+        let after = &rest[lt + 1..];
+        let Some(gt) = after.find('>') else { break };
+        let tag = &after[..gt];
+        rest = &after[gt + 1..];
+        if tag.starts_with('/') {
+            continue;
+        }
+        // Only the part before the annotation (`<v.loud Bob>`) carries classes,
+        // and the first `.`-separated token is the tag name.
+        let head = tag.split_whitespace().next().unwrap_or("");
+        let mut parts = head.split('.');
+        let name = parts.next().unwrap_or("");
+        // A timestamp tag (`00:00:01.000`) is not a span; it has no tag name.
+        if name.is_empty() || name.contains(':') {
+            continue;
+        }
+        out.extend(parts.filter(|p| !p.is_empty()).map(String::from));
+    }
+    out
+}
+
+/// A `::cue` selector we apply: all cues (`::cue`), one identifier
+/// (`::cue(#id)`), or a span class (`::cue(.class)`). Element / compound
+/// selectors are not supported.
 #[derive(Debug)]
 enum CueSelector {
     All,
     Id(String),
+    Class(String),
 }
 
 /// One parsed `::cue` rule: its selectors and the `color` / `background-color`
@@ -220,7 +275,7 @@ struct CueStyleRule {
 }
 
 /// Parse the WebVTT `STYLE` CSS into the supported `::cue` rules. Comments are
-/// stripped; rules with no understood selector (a class / element rule) are
+/// stripped; rules with no understood selector (an element or compound rule) are
 /// dropped. Hand-rolled (no CSS dep, stays on the `no_std` baseline).
 fn parse_cue_styles(css: &str) -> Vec<CueStyleRule> {
     let css = strip_css_comments(css);
@@ -261,46 +316,64 @@ fn parse_cue_styles(css: &str) -> Vec<CueStyleRule> {
     rules
 }
 
-/// A `::cue` or `::cue(#id)` selector, or `None` for anything else.
+/// A `::cue`, `::cue(#id)` or `::cue(.class)` selector, or `None` for anything
+/// else.
 fn parse_cue_selector(sel: &str) -> Option<CueSelector> {
     if sel == "::cue" {
         return Some(CueSelector::All);
     }
     let inner = sel.strip_prefix("::cue(")?.strip_suffix(')')?.trim();
-    let id = inner.strip_prefix('#')?;
-    // Only a bare `#id` is supported (no compound / descendant selectors).
-    (!id.is_empty() && !id.contains(|c: char| c.is_whitespace()))
-        .then(|| CueSelector::Id(id.into()))
+    // Only a bare `#id` / `.class` is supported (no compound / descendant
+    // selectors), so a name must be non-empty and unbroken.
+    let named = |n: &str| !n.is_empty() && !n.contains(|c: char| c.is_whitespace());
+    if let Some(id) = inner.strip_prefix('#') {
+        return named(id).then(|| CueSelector::Id(id.into()));
+    }
+    let class = inner.strip_prefix('.')?;
+    // A compound `.a.b` is a single selector requiring both; not supported.
+    (named(class) && !class.contains('.')).then(|| CueSelector::Class(class.into()))
 }
 
-/// Resolve a cue's `color` / `background` from the sheet: global `::cue` rules
-/// first, then `::cue(#id)` so an id rule overrides the global one.
-fn apply_cue_style(sheet: &[CueStyleRule], id: Option<&str>, settings: &mut CueSettings) {
-    let apply = |rule: &CueStyleRule, s: &mut CueSettings| {
-        if rule.color.is_some() {
-            s.color = rule.color;
-        }
-        if rule.background.is_some() {
-            s.background = rule.background;
-        }
-    };
-    for rule in sheet {
-        if rule
-            .selectors
-            .iter()
-            .any(|sel| matches!(sel, CueSelector::All))
-        {
-            apply(rule, settings);
-        }
+/// Resolve a cue's `color` / `background` from the sheet, in increasing
+/// specificity: global `::cue` rules, then `::cue(.class)` for each class the
+/// cue's spans carry, then `::cue(#id)`.
+fn apply_cue_style(
+    sheet: &[CueStyleRule],
+    id: Option<&str>,
+    classes: &[String],
+    settings: &mut CueSettings,
+) {
+    apply_matching(sheet, settings, |sel| matches!(sel, CueSelector::All));
+    for class in classes {
+        apply_matching(
+            sheet,
+            settings,
+            |sel| matches!(sel, CueSelector::Class(c) if c == class),
+        );
     }
     if let Some(id) = id {
-        for rule in sheet {
-            if rule
-                .selectors
-                .iter()
-                .any(|sel| matches!(sel, CueSelector::Id(rid) if rid == id))
-            {
-                apply(rule, settings);
+        apply_matching(
+            sheet,
+            settings,
+            |sel| matches!(sel, CueSelector::Id(rid) if rid == id),
+        );
+    }
+}
+
+/// Fold the `color` / `background` of every rule with a selector satisfying
+/// `pred` onto `settings`, in sheet order (a later rule wins).
+fn apply_matching(
+    sheet: &[CueStyleRule],
+    settings: &mut CueSettings,
+    pred: impl Fn(&CueSelector) -> bool,
+) {
+    for rule in sheet {
+        if rule.selectors.iter().any(&pred) {
+            if rule.color.is_some() {
+                settings.color = rule.color;
+            }
+            if rule.background.is_some() {
+                settings.background = rule.background;
             }
         }
     }
@@ -412,11 +485,17 @@ pub fn parse_auto(input: &str) -> Vec<Cue> {
 }
 
 /// Parse SubStation Alpha / Advanced SSA (`.ssa` / `.ass`) into cues, in file
-/// order. Only the `[Events]` section is read: its `Format:` line gives the
+/// order. The `[Events]` section carries the cues: its `Format:` line gives the
 /// column order, and each `Dialogue:` line is split accordingly (the `Text`
 /// column is last and may itself contain commas). Inline override blocks
 /// (`{\i1}`...) are stripped and `\N` / `\n` line breaks become real newlines,
 /// like the SRT / WebVTT tag handling. Malformed dialogue lines are skipped.
+///
+/// Placement comes from the `Alignment` of the dialogue's style (read from the
+/// `[V4 Styles]` / `[V4+ Styles]` section), overridden by an inline `{\an8}` /
+/// legacy `{\a6}` tag, mapped onto the same [`CueSettings`] the WebVTT path
+/// fills. Pixel-space placement (`{\pos(x,y)}` and the margin columns) needs the
+/// script's `PlayResX` / `PlayResY` and is not mapped.
 pub fn parse_ssa(input: &str) -> Vec<Cue> {
     let input = input.strip_prefix('\u{feff}').unwrap_or(input);
     let mut state = SsaState::default();
@@ -430,16 +509,28 @@ pub fn parse_ssa(input: &str) -> Vec<Cue> {
 }
 
 /// Per-line SSA parse state, shared by the whole-document [`parse_ssa`] and the
-/// streaming `SubParse` element: whether the scan is inside the `[Events]`
-/// section and the resolved Start / End / Text column indices. Held across
-/// chunks so a `Dialogue:` line in a later chunk parses with the column order
-/// declared by an earlier one.
+/// streaming `SubParse` element: which section the scan is in, the resolved
+/// `[Events]` column indices, and the style table (name -> alignment) collected
+/// from the styles section. Held across chunks so a `Dialogue:` line in a later
+/// chunk parses with the column order and styles declared by an earlier one.
 #[derive(Debug, Clone)]
 struct SsaState {
     in_events: bool,
+    /// Inside `[V4 Styles]` / `[V4+ Styles]`, whose `Style:` lines are read.
+    in_styles: bool,
+    /// The styles section is legacy `[V4 Styles]`, whose `Alignment` column uses
+    /// the old `\a` numbering rather than the `\an` numpad one.
+    styles_legacy: bool,
     i_start: usize,
     i_end: usize,
     i_text: usize,
+    i_style: usize,
+    /// `Name` / `Alignment` columns of the styles `Format:` line; alignment is
+    /// read only once a `Format:` names it.
+    i_style_name: usize,
+    i_style_align: Option<usize>,
+    /// Style name -> `\an` alignment (1-9), in declaration order.
+    styles: Vec<(String, u8)>,
 }
 
 impl Default for SsaState {
@@ -449,20 +540,36 @@ impl Default for SsaState {
         // MarginV, Effect, Text.
         Self {
             in_events: false,
+            in_styles: false,
+            styles_legacy: false,
             i_start: 1,
             i_end: 2,
             i_text: 9,
+            i_style: 3,
+            i_style_name: 0,
+            i_style_align: None,
+            styles: Vec::new(),
         }
     }
 }
 
 impl SsaState {
     /// Feed one SSA line, returning a cue if it is a `Dialogue:` line in the
-    /// `[Events]` section. Section headers and `Format:` lines update the state.
+    /// `[Events]` section. Section headers, `Format:` and `Style:` lines update
+    /// the state.
     fn feed_line(&mut self, line: &str) -> Option<Cue> {
         let line = line.trim();
         if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+            let name = name.trim();
             self.in_events = name.eq_ignore_ascii_case("Events");
+            // Both `[V4 Styles]` and `[V4+ Styles]` (and the `[V4+ Styles]`
+            // localizations that keep the suffix) carry the style table.
+            self.in_styles = name.to_ascii_lowercase().ends_with("styles");
+            self.styles_legacy = self.in_styles && !name.contains('+');
+            return None;
+        }
+        if self.in_styles {
+            self.feed_style_line(line);
             return None;
         }
         if !self.in_events {
@@ -472,15 +579,156 @@ impl SsaState {
             let cols: Vec<&str> = rest.split(',').map(str::trim).collect();
             self.i_start = col_index(&cols, "Start").unwrap_or(self.i_start);
             self.i_end = col_index(&cols, "End").unwrap_or(self.i_end);
+            self.i_style = col_index(&cols, "Style").unwrap_or(self.i_style);
             // Text is the last column by spec; fall back to that if unnamed.
             self.i_text = col_index(&cols, "Text").unwrap_or(cols.len().saturating_sub(1));
             None
         } else if let Some(rest) = strip_prefix_ci(line, "Dialogue:") {
-            parse_ass_dialogue(rest, self.i_start, self.i_end, self.i_text)
+            self.parse_dialogue(rest)
         } else {
             None
         }
     }
+
+    /// Read a `Format:` / `Style:` line of the styles section into the table.
+    fn feed_style_line(&mut self, line: &str) {
+        if let Some(rest) = strip_prefix_ci(line, "Format:") {
+            let cols: Vec<&str> = rest.split(',').map(str::trim).collect();
+            self.i_style_name = col_index(&cols, "Name").unwrap_or(0);
+            self.i_style_align = col_index(&cols, "Alignment");
+            return;
+        }
+        let Some(rest) = strip_prefix_ci(line, "Style:") else {
+            return;
+        };
+        let Some(i_align) = self.i_style_align else {
+            return;
+        };
+        let cols: Vec<&str> = rest.split(',').map(str::trim).collect();
+        let (Some(name), Some(align)) = (cols.get(self.i_style_name), cols.get(i_align)) else {
+            return;
+        };
+        let Some(an) = align.parse::<u8>().ok().and_then(|a| {
+            if self.styles_legacy {
+                legacy_alignment(a)
+            } else {
+                (1..=9).contains(&a).then_some(a)
+            }
+        }) else {
+            return;
+        };
+        self.styles.push((String::from(*name), an));
+    }
+
+    /// Parse one `Dialogue:` body into a cue using the resolved column indices.
+    /// The `Text` column is last, so we split on only the leading commas and keep
+    /// its remainder (commas and all) intact. Placement is the inline `{\an}`
+    /// override if present, else the dialogue style's alignment.
+    fn parse_dialogue(&self, body: &str) -> Option<Cue> {
+        // splitn keeps everything after the i_text-th comma as the final field.
+        let fields: Vec<&str> = body.splitn(self.i_text + 1, ',').collect();
+        if fields.len() <= self.i_text {
+            return None;
+        }
+        let start_ns = parse_timestamp(fields.get(self.i_start)?.trim())?;
+        let end_ns = parse_timestamp(fields.get(self.i_end)?.trim())?;
+        let raw = fields[self.i_text];
+        let text = strip_ass_markup(raw);
+        if text.trim().is_empty() {
+            return None;
+        }
+        let style_align = fields
+            .get(self.i_style)
+            .map(|s| s.trim())
+            .and_then(|name| {
+                self.styles
+                    .iter()
+                    .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            })
+            .map(|(_, an)| *an);
+        let settings = ass_inline_alignment(raw)
+            .or(style_align)
+            .map(ass_alignment_settings)
+            .unwrap_or_default();
+        Some(Cue {
+            start_ns,
+            end_ns,
+            text,
+            settings,
+        })
+    }
+}
+
+/// Map an ASS `\an` alignment (numpad 1-9) onto the cue placement model: the
+/// column picks `align` and the horizontal anchor, the row picks `line`. The
+/// bottom row stays auto (`None`) so bottom cues stack like any default cue.
+fn ass_alignment_settings(an: u8) -> CueSettings {
+    let (align, position) = match an % 3 {
+        1 => (TextAlign::Start, Some(0)),
+        2 => (TextAlign::Center, None),
+        _ => (TextAlign::End, Some(100)),
+    };
+    let line = match (an - 1) / 3 {
+        0 => None,
+        1 => Some(50),
+        _ => Some(0),
+    };
+    CueSettings {
+        position,
+        line,
+        align,
+        ..CueSettings::default()
+    }
+}
+
+/// Map a legacy SSA `\a` alignment code to the ASS numpad `\an` value: the low
+/// two bits pick the column, bit 2 the top row and bit 3 the middle row.
+fn legacy_alignment(a: u8) -> Option<u8> {
+    let col = match a & 3 {
+        1 => 1,
+        2 => 2,
+        3 => 3,
+        _ => return None,
+    };
+    Some(if a & 8 != 0 {
+        col + 3
+    } else if a & 4 != 0 {
+        col + 6
+    } else {
+        col
+    })
+}
+
+/// The alignment override in an ASS text field's `{...}` blocks: `\an<1-9>` or
+/// the legacy `\a<code>`. The last one wins, matching the order a renderer
+/// applies overrides in.
+fn ass_inline_alignment(raw: &str) -> Option<u8> {
+    let mut out = None;
+    let mut rest = raw;
+    while let Some(open) = rest.find('{') {
+        let after = &rest[open + 1..];
+        let end = after.find('}').unwrap_or(after.len());
+        let mut block = &after[..end];
+        while let Some(at) = block.find("\\a") {
+            let tail = &block[at + 2..];
+            let (digits, numpad) = match tail.strip_prefix('n') {
+                Some(d) => (d, true),
+                None => (tail, false),
+            };
+            let n: String = digits.chars().take_while(char::is_ascii_digit).collect();
+            if let Ok(v) = n.parse::<u8>() {
+                let an = if numpad {
+                    (1..=9).contains(&v).then_some(v)
+                } else {
+                    legacy_alignment(v)
+                };
+                out = an.or(out);
+            }
+            block = tail;
+        }
+        rest = &after[end..];
+    }
+    out
 }
 
 /// Case-insensitive `name -> column index` lookup in a `Format:` column list.
@@ -495,29 +743,6 @@ fn strip_prefix_ci<'a>(line: &'a str, prefix: &str) -> Option<&'a str> {
     let head = line.get(..prefix.len())?;
     head.eq_ignore_ascii_case(prefix)
         .then(|| &line[prefix.len()..])
-}
-
-/// Parse one `Dialogue:` body into a cue using the resolved column indices. The
-/// `Text` column is last, so we split on only the leading commas and keep its
-/// remainder (commas and all) intact.
-fn parse_ass_dialogue(body: &str, i_start: usize, i_end: usize, i_text: usize) -> Option<Cue> {
-    // splitn keeps everything after the i_text-th comma as the final field.
-    let fields: Vec<&str> = body.splitn(i_text + 1, ',').collect();
-    if fields.len() <= i_text {
-        return None;
-    }
-    let start_ns = parse_timestamp(fields.get(i_start)?.trim())?;
-    let end_ns = parse_timestamp(fields.get(i_end)?.trim())?;
-    let text = strip_ass_markup(fields[i_text]);
-    if text.trim().is_empty() {
-        return None;
-    }
-    Some(Cue {
-        start_ns,
-        end_ns,
-        text,
-        settings: CueSettings::default(),
-    })
 }
 
 /// Strip ASS override blocks (`{...}`) and turn the `\N` / `\n` line breaks and
@@ -596,13 +821,17 @@ pub fn deframe_subtitle_block(payload: &str, format: TextFormat) -> String {
 /// frame / tick offsets (need a frame / tick rate) are not supported. Malformed
 /// paragraphs are skipped, and the scan never indexes off a char boundary, so
 /// untrusted markup fails safe rather than panicking.
+///
+/// Placement comes from the paragraph's `tts:textAlign` and the `<region>` it
+/// uses (its own or the one inherited from the enclosing `<div>` / `<body>`),
+/// whose percentage `tts:origin` / `tts:extent` / `tts:displayAlign` map onto the
+/// same [`CueSettings`] the WebVTT path fills. Non-percentage region lengths
+/// (pixels, cells) are not mapped; such a paragraph keeps the default placement.
 pub fn parse_ttml(input: &str) -> Vec<Cue> {
+    let regions = parse_ttml_regions(input);
     let mut cues = Vec::new();
-    let mut rest = input;
-    // Walk `<p ...> ... </p>` spans. `<p>` does not nest in TTML, so the next
-    // close tag terminates the current paragraph.
-    while let Some((attrs, body, after)) = next_paragraph(rest) {
-        rest = after;
+    let mut paragraphs = TtmlParagraphs::new(input);
+    while let Some((attrs, body, inherited)) = paragraphs.next() {
         let (Some(begin), Some(end)) = (xml_attr(attrs, "begin"), xml_attr(attrs, "end")) else {
             continue;
         };
@@ -615,45 +844,199 @@ pub fn parse_ttml(input: &str) -> Vec<Cue> {
                 start_ns,
                 end_ns,
                 text,
-                settings: CueSettings::default(),
+                settings: ttml_settings(attrs, inherited, &regions),
             });
         }
     }
     cues
 }
 
-/// Find the next `<p ...>` paragraph: returns its attribute string, its inner
-/// content (up to the matching `</p>`), and the remainder after the close tag.
-/// Matches the `p` local name under any namespace prefix; skips self-closing
-/// `<p/>` (no content) and any non-`p` tag.
-fn next_paragraph(input: &str) -> Option<(&str, &str, &str)> {
-    let mut scan = input;
-    loop {
-        let lt = scan.find('<')?;
-        let after_lt = &scan[lt + 1..];
-        let gt = after_lt.find('>')?;
-        let tag = &after_lt[..gt]; // between '<' and '>'
-        let after_tag = &after_lt[gt + 1..];
-        // Tag name is up to the first whitespace / '/' ; strip a namespace prefix.
-        let name = tag.trim_start_matches('/');
-        let name = name
-            .split([' ', '\t', '\r', '\n', '/'])
-            .next()
-            .unwrap_or("");
-        let local = name.rsplit(':').next().unwrap_or(name);
-        if local.eq_ignore_ascii_case("p") && !tag.starts_with('/') {
-            // Open <p ...>. Self-closing (`<p/>`) has no body.
-            if tag.ends_with('/') {
-                scan = after_tag;
-                continue;
-            }
-            let attrs = &tag[name.len()..];
-            let close = find_paragraph_close(after_tag)?;
-            let body = &after_tag[..close.0];
-            return Some((attrs, body, &after_tag[close.1..]));
+/// Split a tag body (what sits between `<` and `>`) into its local element name
+/// (leading `/` and any namespace prefix removed) and the attribute remainder.
+fn split_tag(tag: &str) -> (&str, &str) {
+    let body = tag.trim_start_matches('/');
+    let skipped = tag.len() - body.len();
+    let name = body
+        .split([' ', '\t', '\r', '\n', '/'])
+        .next()
+        .unwrap_or("");
+    let local = name.rsplit(':').next().unwrap_or(name);
+    (local, &tag[skipped + name.len()..])
+}
+
+/// Walks a TTML document's `<p ...> ... </p>` paragraphs, carrying the region
+/// inherited from the enclosing `<div>` / `<body>` (TTML lets either hold the
+/// `region` attribute). `<p>` does not nest, so the next close tag terminates the
+/// current paragraph; self-closing `<p/>` has no content and is skipped.
+#[derive(Debug)]
+struct TtmlParagraphs<'a> {
+    rest: &'a str,
+    inherited: Option<&'a str>,
+}
+
+impl<'a> TtmlParagraphs<'a> {
+    fn new(input: &'a str) -> Self {
+        Self {
+            rest: input,
+            inherited: None,
         }
-        scan = after_tag;
     }
+
+    /// The next paragraph's attribute string, inner content, and inherited
+    /// region id.
+    fn next(&mut self) -> Option<(&'a str, &'a str, Option<&'a str>)> {
+        loop {
+            let lt = self.rest.find('<')?;
+            let after_lt = &self.rest[lt + 1..];
+            let gt = after_lt.find('>')?;
+            let tag = &after_lt[..gt];
+            let after_tag = &after_lt[gt + 1..];
+            self.rest = after_tag;
+            let (local, attrs) = split_tag(tag);
+            let closing = tag.starts_with('/');
+            if local.eq_ignore_ascii_case("p") && !closing {
+                if tag.ends_with('/') {
+                    continue;
+                }
+                let (content_end, after_close) = find_paragraph_close(after_tag)?;
+                self.rest = &after_tag[after_close..];
+                return Some((attrs, &after_tag[..content_end], self.inherited));
+            }
+            if local.eq_ignore_ascii_case("div") || local.eq_ignore_ascii_case("body") {
+                self.inherited = if closing {
+                    None
+                } else {
+                    xml_attr(attrs, "region").or(self.inherited)
+                };
+            }
+        }
+    }
+}
+
+/// Where a region's content sits inside it vertically (`tts:displayAlign`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum DisplayAlign {
+    /// Top of the region, the TTML default.
+    #[default]
+    Before,
+    Center,
+    /// Bottom of the region, the usual subtitle setting.
+    After,
+}
+
+/// A TTML `<region>`'s placement: percentage `tts:origin` / `tts:extent` plus the
+/// alignment defaults it gives the paragraphs that use it.
+#[derive(Debug)]
+struct TtmlRegion {
+    id: String,
+    origin: Option<(u8, u8)>,
+    extent: Option<(u8, u8)>,
+    display_align: DisplayAlign,
+    text_align: Option<TextAlign>,
+}
+
+/// Collect the document's `<region>` definitions (they live in `<head><layout>`,
+/// but any `region` element is read; a region with no `xml:id` is unusable).
+fn parse_ttml_regions(input: &str) -> Vec<TtmlRegion> {
+    let mut regions = Vec::new();
+    let mut rest = input;
+    while let Some(lt) = rest.find('<') {
+        let after_lt = &rest[lt + 1..];
+        let Some(gt) = after_lt.find('>') else { break };
+        let tag = &after_lt[..gt];
+        rest = &after_lt[gt + 1..];
+        let (local, attrs) = split_tag(tag);
+        if !local.eq_ignore_ascii_case("region") || tag.starts_with('/') {
+            continue;
+        }
+        let Some(id) = xml_attr(attrs, "id") else {
+            continue;
+        };
+        regions.push(TtmlRegion {
+            id: id.into(),
+            origin: percent_pair(xml_attr(attrs, "origin")),
+            extent: percent_pair(xml_attr(attrs, "extent")),
+            display_align: match xml_attr(attrs, "displayAlign").map(str::trim) {
+                Some("center") => DisplayAlign::Center,
+                Some("after") => DisplayAlign::After,
+                _ => DisplayAlign::Before,
+            },
+            text_align: xml_attr(attrs, "textAlign").and_then(parse_ttml_align),
+        });
+    }
+    regions
+}
+
+/// Map a paragraph's `tts:textAlign` plus the region it uses onto the cue
+/// placement model. A paragraph with neither keeps the default (auto placement,
+/// centred), so an unpositioned document renders exactly as before.
+fn ttml_settings(attrs: &str, inherited: Option<&str>, regions: &[TtmlRegion]) -> CueSettings {
+    let own_align = xml_attr(attrs, "textAlign").and_then(parse_ttml_align);
+    let region = xml_attr(attrs, "region")
+        .or(inherited)
+        .and_then(|id| regions.iter().find(|r| r.id == id))
+        // A region with no percentage geometry (pixel lengths, or none at all)
+        // says nothing this model can use; leave the cue at the default.
+        .filter(|r| r.origin.is_some() || r.extent.is_some());
+    let Some(region) = region else {
+        return CueSettings {
+            align: own_align.unwrap_or_default(),
+            ..CueSettings::default()
+        };
+    };
+    let align = own_align.or(region.text_align).unwrap_or_default();
+    let (x, y) = region.origin.unwrap_or((0, 0));
+    let (w, h) = region
+        .extent
+        .unwrap_or((100u8.saturating_sub(x), 100u8.saturating_sub(y)));
+    let bottom = y.saturating_add(h).min(100);
+    let position = match align {
+        TextAlign::Start => x,
+        TextAlign::Center => x.saturating_add(w / 2).min(100),
+        TextAlign::End => x.saturating_add(w).min(100),
+    };
+    let line = match region.display_align {
+        DisplayAlign::Before => Some(y),
+        DisplayAlign::Center => Some(y.saturating_add(h / 2).min(100)),
+        // `after` anchors the block's bottom to the region's, which this model
+        // expresses only as the auto bottom stack; a region stopping short of the
+        // frame bottom falls back to placing the block at its lower edge.
+        DisplayAlign::After if bottom >= 100 => None,
+        DisplayAlign::After => Some(bottom),
+    };
+    CueSettings {
+        position: Some(position),
+        line,
+        align,
+        ..CueSettings::default()
+    }
+}
+
+/// Parse a `tts:textAlign` value. `justify` has no analog in the cue model and
+/// falls back to the default.
+fn parse_ttml_align(v: &str) -> Option<TextAlign> {
+    match v.trim() {
+        "left" | "start" => Some(TextAlign::Start),
+        "center" => Some(TextAlign::Center),
+        "right" | "end" => Some(TextAlign::End),
+        _ => None,
+    }
+}
+
+/// Parse a two-length TTML attribute (`tts:origin="10% 80%"`) to a percentage
+/// pair. `None` unless both lengths are percentages, since the cue model is
+/// frame-relative.
+fn percent_pair(v: Option<&str>) -> Option<(u8, u8)> {
+    let mut parts = v?.split_whitespace();
+    let x = percent_len(parts.next()?)?;
+    let y = percent_len(parts.next()?)?;
+    Some((x, y))
+}
+
+/// Parse one `<n>%` length to `0..=100`, accepting a fractional value.
+fn percent_len(v: &str) -> Option<u8> {
+    let n: f32 = v.trim().strip_suffix('%')?.parse().ok()?;
+    Some(n.clamp(0.0, 100.0) as u8)
 }
 
 /// Find the next `</p>` close tag (any namespace prefix) in `s`; returns
@@ -674,7 +1057,9 @@ fn find_paragraph_close(s: &str) -> Option<(usize, usize)> {
 }
 
 /// Read an XML attribute value (`name="..."` or `name='...'`) from a tag's
-/// attribute string. `None` if the attribute is absent or unquoted.
+/// attribute string. The name is matched on its local part, so any namespace
+/// prefix binding is accepted (`tts:origin` for `origin`, `xml:id` for `id`).
+/// `None` if the attribute is absent or unquoted.
 fn xml_attr<'a>(attrs: &'a str, name: &str) -> Option<&'a str> {
     let mut from = 0;
     while let Some(pos) = attrs[from..].find(name) {
@@ -683,7 +1068,7 @@ fn xml_attr<'a>(attrs: &'a str, name: &str) -> Option<&'a str> {
             || attrs[..at]
                 .chars()
                 .next_back()
-                .map(|c| c.is_whitespace())
+                .map(|c| c.is_whitespace() || c == ':')
                 .unwrap_or(true);
         let after = attrs[at + name.len()..].trim_start();
         if before_ok {
@@ -712,12 +1097,7 @@ fn ttml_text(body: &str) -> String {
         let after = &rest[lt + 1..];
         let Some(gt) = after.find('>') else { break };
         let tag = &after[..gt];
-        let name = tag.trim_start_matches('/');
-        let name = name
-            .split([' ', '\t', '\r', '\n', '/'])
-            .next()
-            .unwrap_or("");
-        let local = name.rsplit(':').next().unwrap_or(name);
+        let (local, _) = split_tag(tag);
         if local.eq_ignore_ascii_case("br") {
             // A hard line break: drop a trailing collapse-space first.
             while out.ends_with(' ') {
@@ -1495,6 +1875,48 @@ mod tests {
     }
 
     #[test]
+    fn webvtt_cue_class_selector_styles_the_cue() {
+        // `::cue(.class)` matches the classes on the cue's span tags: `<c.loud>`
+        // and the voice form `<v.narrator Bob>`. Class beats the global rule, id
+        // beats class.
+        let input = "WEBVTT\n\n\
+            STYLE\n\
+            ::cue { color: white; }\n\
+            ::cue(.loud) { color: red; background-color: black; }\n\
+            ::cue(.narrator) { color: cyan; }\n\
+            ::cue(#tagged) { color: lime; }\n\n\
+            00:00:00.000 --> 00:00:01.000\n<c.loud>SHOUT</c>\n\n\
+            00:00:01.000 --> 00:00:02.000\n<v.narrator Bob>calm\n\n\
+            tagged\n00:00:02.000 --> 00:00:03.000\n<c.loud>id wins</c>\n\n\
+            00:00:03.000 --> 00:00:04.000\nplain\n";
+        let cues = parse_webvtt(input);
+        assert_eq!(cues.len(), 4);
+        // .loud: red on an opaque black box, text still stripped of the tags.
+        assert_eq!(cues[0].text, "SHOUT");
+        assert_eq!(cues[0].settings.color, Some([255, 0, 0, 255]));
+        assert_eq!(cues[0].settings.background, Some([0, 0, 0, 255]));
+        // A voice span carries classes too.
+        assert_eq!(cues[1].settings.color, Some([0, 255, 255, 255]));
+        // The id rule is applied after the class rule.
+        assert_eq!(cues[2].settings.color, Some([0, 255, 0, 255]));
+        // No class on the cue -> only the global rule.
+        assert_eq!(cues[3].settings.color, Some([255, 255, 255, 255]));
+        assert_eq!(cues[3].settings.background, None);
+    }
+
+    #[test]
+    fn webvtt_cue_timestamp_tag_is_not_a_class() {
+        // An inline cue timestamp (`<00:00:01.000>`) must not be mistaken for a
+        // span whose "class" is the millisecond part.
+        let input = "WEBVTT\n\n\
+            STYLE\n::cue(.000) { color: red; }\n\n\
+            00:00:00.000 --> 00:00:02.000\nkara<00:00:01.000>oke\n";
+        let cues = parse_webvtt(input);
+        assert_eq!(cues[0].text, "karaoke");
+        assert_eq!(cues[0].settings.color, None);
+    }
+
+    #[test]
     fn webvtt_without_style_has_no_cue_colors() {
         let cues = parse_webvtt("WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nplain\n");
         assert_eq!(cues[0].settings.color, None);
@@ -1610,6 +2032,75 @@ mod tests {
     }
 
     #[test]
+    fn ssa_style_alignment_becomes_cue_placement() {
+        let doc = "[Script Info]\n\
+            Title: demo\n\
+            \n\
+            [V4+ Styles]\n\
+            Format: Name, Fontname, Alignment, MarginL\n\
+            Style: Top,Arial,7,0\n\
+            Style: Default,Arial,2,0\n\
+            \n\
+            [Events]\n\
+            Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n\
+            Dialogue: 0,0:00:00.00,0:00:01.00,Top,,0,0,0,,top left\n\
+            Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,bottom centre\n\
+            Dialogue: 0,0:00:02.00,0:00:03.00,Default,,0,0,0,,{\\i1}{\\an9}top right\n";
+        let cues = parse_ssa(doc);
+        assert_eq!(cues.len(), 3);
+        // \an7: top row, left column.
+        assert_eq!(
+            cues[0].settings,
+            CueSettings {
+                position: Some(0),
+                line: Some(0),
+                align: TextAlign::Start,
+                ..CueSettings::default()
+            }
+        );
+        // \an2 is the renderer default: auto placement, centred.
+        assert_eq!(cues[1].settings, CueSettings::default());
+        // The inline override beats the style's \an2.
+        assert_eq!(
+            cues[2].settings,
+            CueSettings {
+                position: Some(100),
+                line: Some(0),
+                align: TextAlign::End,
+                ..CueSettings::default()
+            }
+        );
+        assert_eq!(cues[2].text, "top right", "override tags still stripped");
+    }
+
+    #[test]
+    fn ssa_legacy_alignment_codes() {
+        // `[V4 Styles]` numbers Alignment the old way: 6 = 2 (centre) | 4 (top).
+        let doc = "[V4 Styles]\n\
+            Format: Name, Fontname, Alignment\n\
+            Style: Legacy,Arial,6\n\
+            \n\
+            [Events]\n\
+            Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n\
+            Dialogue: 0,0:00:00.00,0:00:01.00,Legacy,,0,0,0,,top centre\n\
+            Dialogue: 0,0:00:01.00,0:00:02.00,Legacy,,0,0,0,,{\\a1}bottom left\n";
+        let cues = parse_ssa(doc);
+        assert_eq!(cues.len(), 2);
+        assert_eq!(cues[0].settings.line, Some(0), "bit 2 is the top row");
+        assert_eq!(cues[0].settings.align, TextAlign::Center);
+        // Legacy \a1: bottom row (auto), left column.
+        assert_eq!(
+            cues[1].settings,
+            CueSettings {
+                position: Some(0),
+                line: None,
+                align: TextAlign::Start,
+                ..CueSettings::default()
+            }
+        );
+    }
+
+    #[test]
     fn ssa_ignores_lines_outside_events() {
         // A `Format:` outside [Events] (the styles block) must not be mistaken
         // for the dialogue column order, and there are no dialogue lines.
@@ -1664,6 +2155,75 @@ mod tests {
         let cues = parse_ttml(doc);
         assert_eq!(cues.len(), 1);
         assert_eq!(cues[0].text, "hi\nthere");
+    }
+
+    const TTML_REGIONS: &str = r#"<tt xmlns="http://www.w3.org/ns/ttml" xmlns:tts="http://www.w3.org/ns/ttml#styling">
+  <head><layout>
+    <region xml:id="top" tts:origin="0% 0%" tts:extent="50% 20%" tts:displayAlign="before" tts:textAlign="left"/>
+    <region xml:id="bottom" tts:origin="10% 80%" tts:extent="80% 20%" tts:displayAlign="after"/>
+    <region xml:id="pixels" tts:origin="16px 16px" tts:extent="320px 40px"/>
+  </layout></head>
+  <body>
+    <div region="bottom">
+      <p begin="0s" end="1s">inherited region</p>
+      <p begin="1s" end="2s" region="top">own region</p>
+      <p begin="2s" end="3s" tts:textAlign="right">aligned in the div region</p>
+      <p begin="3s" end="4s" region="pixels">pixel region</p>
+    </div>
+  </body>
+</tt>"#;
+
+    #[test]
+    fn ttml_region_placement_becomes_cue_settings() {
+        let cues = parse_ttml(TTML_REGIONS);
+        assert_eq!(cues.len(), 4);
+        // The div's region: bottom-anchored and reaching the frame edge, so the
+        // cue keeps the auto bottom stack; centred within 10%..90%.
+        assert_eq!(
+            cues[0].settings,
+            CueSettings {
+                position: Some(50),
+                line: None,
+                align: TextAlign::Center,
+                ..CueSettings::default()
+            }
+        );
+        // The paragraph's own region wins over the div's: top-left, left-aligned
+        // from the region's tts:textAlign.
+        assert_eq!(
+            cues[1].settings,
+            CueSettings {
+                position: Some(0),
+                line: Some(0),
+                align: TextAlign::Start,
+                ..CueSettings::default()
+            }
+        );
+        // Paragraph textAlign wins over the region's, and moves the anchor to the
+        // region's right edge.
+        assert_eq!(
+            cues[2].settings,
+            CueSettings {
+                position: Some(90),
+                line: None,
+                align: TextAlign::End,
+                ..CueSettings::default()
+            }
+        );
+        // Pixel lengths are not frame-relative, so that region places nothing.
+        assert_eq!(
+            cues[3].settings,
+            CueSettings::default(),
+            "a pixel region leaves the cue at the default placement"
+        );
+    }
+
+    #[test]
+    fn ttml_without_regions_keeps_default_placement() {
+        // The unpositioned document (no region, no textAlign) is unchanged.
+        assert!(parse_ttml(TTML)
+            .iter()
+            .all(|c| c.settings == CueSettings::default()));
     }
 
     #[test]

@@ -27,20 +27,21 @@ use g2g_core::{
     PipelinePacket, Rate, Seek, Segment, VideoCodec,
 };
 
-use crate::demuxseek::{Admit, DemuxSeek};
+use crate::cenc::CencDefaults;
 #[cfg(feature = "hls")]
-use crate::fmp4::Subsample;
+use crate::cenc::SampleCrypt;
+use crate::demuxseek::{Admit, DemuxSeek};
 use crate::fmp4::{
-    parse_fragments, parse_header, prepend_param_sets, starts_with_param_set, CencDefaults, Header,
-    Sample,
+    parse_fragments, parse_header, prepend_param_sets, starts_with_param_set, Header, Sample,
 };
 
 #[derive(Debug)]
 pub struct Fmp4Demux {
     buffer: Vec<u8>,
     header: Option<Header>,
-    /// A `moof` box awaiting its following `mdat` to form a complete fragment.
-    pending_moof: Option<Vec<u8>>,
+    /// A `moof` box awaiting its following `mdat` to form a complete fragment,
+    /// with its byte offset in the stream (which keys the content key in force).
+    pending_moof: Option<(u64, Vec<u8>)>,
     /// Negotiation-time output codec (refined from the `moov` at runtime).
     out_codec: VideoCodec,
     /// Prepend the config-record parameter sets to the first access unit.
@@ -50,6 +51,11 @@ pub struct Fmp4Demux {
     #[cfg(feature = "hls")]
     cbcs_key: Option<crate::sampleaesdecrypt::SampleAesKeyHandle>,
     caps_sent: bool,
+    /// Byte offset of the next box to leave `buffer`, in the stream as received.
+    /// A rotating `#EXT-X-KEY` publishes its key against this coordinate, so a
+    /// fragment decrypts with the key its own segment carried even when the
+    /// source has already fetched (and published) later segments.
+    stream_pos: u64,
     sequence: u64,
     configured: bool,
     /// Seek support (M362): app time seeks drive an upstream byte-seek and a
@@ -74,6 +80,7 @@ impl Fmp4Demux {
             #[cfg(feature = "hls")]
             cbcs_key: None,
             caps_sent: false,
+            stream_pos: 0,
             sequence: 0,
             configured: false,
             seek: DemuxSeek::default(),
@@ -94,6 +101,9 @@ impl Fmp4Demux {
     /// next emitted access unit. The codec / caps are unchanged (same file), so
     /// `header` / `caps_sent` are kept (no redundant `CapsChanged`).
     fn reset_parser(&mut self) {
+        // The byte coordinate restarts with the re-read stream: the source zeroes
+        // its own counter at the same flush, so published keys stay aligned.
+        self.stream_pos = 0;
         self.buffer.clear();
         self.pending_moof = None;
         self.need_param_sets = true;
@@ -111,35 +121,35 @@ impl Fmp4Demux {
         self
     }
 
-    /// Parse a fragment's samples, decrypting in place when the track is cbcs
-    /// (the key from the shared handle, the constant IV + pattern from `tenc`).
+    /// Parse a fragment's samples, decrypting in place when the track is
+    /// encrypted: each sample's key comes from the shared store, selected by the
+    /// KID the container names and by the fragment's position in the stream (so a
+    /// mid-stream key rotation switches at the right segment). The scheme, IV and
+    /// pattern come from the sample's own crypto (`tenc` defaults folded with the
+    /// fragment's aux info and `seig` groups).
     #[cfg(feature = "hls")]
     fn parse_fragment_samples(
         &self,
         frag: &[u8],
+        frag_at: u64,
         timescale: u32,
         codec: VideoCodec,
         cenc: Option<&CencDefaults>,
     ) -> Result<Vec<Sample>, G2gError> {
         let Some(c) = cenc else {
-            return parse_fragments(frag, timescale, codec, None, None);
+            return parse_fragments(frag, timescale, codec, None, frag_at, None);
         };
-        let key = self
-            .cbcs_key
-            .as_ref()
-            .and_then(|h| *h.lock().expect("key handle poisoned"))
-            .map(|k| k.key)
-            .ok_or(G2gError::CapsMismatch)?;
-        let iv: [u8; 16] = c
-            .constant_iv
-            .as_slice()
-            .try_into()
-            .map_err(|_| G2gError::CapsMismatch)?;
-        let (crypt, skip) = (c.crypt_byte_block, c.skip_byte_block);
-        let mut decrypt = move |buf: &mut [u8], subs: &[Subsample]| {
-            crate::cenc::cbcs_decrypt_sample(buf, subs, &key, &iv, crypt, skip);
+        let keys = self.cbcs_key.as_ref().ok_or(G2gError::CapsMismatch)?;
+        let mut decrypt = move |sc: &SampleCrypt, at: u64, buf: &mut [u8]| {
+            let key = keys
+                .lock()
+                .expect("key handle poisoned")
+                .resolve(&sc.kid, at)
+                .ok_or(G2gError::CapsMismatch)?;
+            crate::cenc::decrypt_sample(buf, sc, &key);
+            Ok(())
         };
-        parse_fragments(frag, timescale, codec, Some(c), Some(&mut decrypt))
+        parse_fragments(frag, timescale, codec, Some(c), frag_at, Some(&mut decrypt))
     }
 
     /// Without the `hls` feature there is no AES: an encrypted track fails loud.
@@ -147,11 +157,12 @@ impl Fmp4Demux {
     fn parse_fragment_samples(
         &self,
         frag: &[u8],
+        frag_at: u64,
         timescale: u32,
         codec: VideoCodec,
         cenc: Option<&CencDefaults>,
     ) -> Result<Vec<Sample>, G2gError> {
-        parse_fragments(frag, timescale, codec, cenc, None)
+        parse_fragments(frag, timescale, codec, cenc, frag_at, None)
     }
 
     fn input_caps() -> Caps {
@@ -176,6 +187,8 @@ impl Fmp4Demux {
                 break; // wait for the rest of this box
             }
             let box_bytes: Vec<u8> = self.buffer.drain(..total).collect();
+            let box_at = self.stream_pos;
+            self.stream_pos = self.stream_pos.saturating_add(total as u64);
             let kind: [u8; 4] = box_bytes[4..8].try_into().expect("8-byte box header");
             match &kind {
                 b"moov" => {
@@ -195,9 +208,9 @@ impl Fmp4Demux {
                     }
                     self.header = Some(header);
                 }
-                b"moof" => self.pending_moof = Some(box_bytes),
+                b"moof" => self.pending_moof = Some((box_at, box_bytes)),
                 b"mdat" => {
-                    let Some(mut frag) = self.pending_moof.take() else {
+                    let Some((frag_at, mut frag)) = self.pending_moof.take() else {
                         return Err(G2gError::CapsMismatch); // mdat without moof
                     };
                     // header must exist (moov precedes the first fragment)
@@ -209,8 +222,13 @@ impl Fmp4Demux {
                     let cenc = header.cenc.clone();
 
                     frag.extend_from_slice(&box_bytes);
-                    let samples =
-                        self.parse_fragment_samples(&frag, timescale, codec, cenc.as_ref())?;
+                    let samples = self.parse_fragment_samples(
+                        &frag,
+                        frag_at,
+                        timescale,
+                        codec,
+                        cenc.as_ref(),
+                    )?;
                     for s in samples {
                         // M362 seek: drop samples until the keyframe at/after the
                         // target; the resuming keyframe emits a fresh segment.

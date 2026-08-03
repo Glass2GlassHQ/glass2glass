@@ -143,6 +143,7 @@ struct Sample {
 }
 
 // box read primitives are shared across the MP4 elements.
+use crate::fmp4::{parse_trun, tfhd_defaults};
 use crate::mp4box::{be32, be64, boxes, find_box, find_path, parse_esds};
 
 fn parse_header(data: &[u8]) -> Result<Header, G2gError> {
@@ -202,7 +203,11 @@ fn parse_fragments(data: &[u8], timescale: u32) -> Result<Vec<Sample>, G2gError>
                     _ => return Err(G2gError::CapsMismatch),
                 };
                 let trun = find_box(traf, b"trun").ok_or(G2gError::CapsMismatch)?;
-                let (sizes, durs) = parse_trun(trun)?;
+                let (default_duration, default_size) = match find_box(traf, b"tfhd") {
+                    Some(tfhd) => tfhd_defaults(tfhd)?,
+                    None => (0, 0),
+                };
+                let (sizes, durs) = parse_trun(trun, default_duration, default_size, data.len())?;
                 let mut t = base_time;
                 let mut tagged = Vec::with_capacity(sizes.len());
                 durations.clear();
@@ -238,43 +243,6 @@ fn parse_fragments(data: &[u8], timescale: u32) -> Result<Vec<Sample>, G2gError>
         return Err(G2gError::CapsMismatch);
     }
     Ok(samples)
-}
-
-fn parse_trun(trun: &[u8]) -> Result<(Vec<u32>, Vec<u32>), G2gError> {
-    if trun.first() != Some(&0) {
-        return Err(G2gError::CapsMismatch);
-    }
-    let flags = be32(trun, 0)? & 0x00FF_FFFF;
-    if flags & 0x200 == 0 {
-        return Err(G2gError::CapsMismatch); // sizes must be explicit
-    }
-    let count = be32(trun, 4)? as usize;
-    let mut at = 8usize;
-    if flags & 0x1 != 0 {
-        at += 4; // data offset
-    }
-    if flags & 0x4 != 0 {
-        at += 4; // first sample flags
-    }
-    let mut sizes = Vec::with_capacity(count);
-    let mut durations = Vec::with_capacity(count);
-    for _ in 0..count {
-        let mut duration = 0u32;
-        if flags & 0x100 != 0 {
-            duration = be32(trun, at)?;
-            at += 4;
-        }
-        sizes.push(be32(trun, at)?);
-        at += 4;
-        if flags & 0x400 != 0 {
-            at += 4; // per-sample flags
-        }
-        if flags & 0x800 != 0 {
-            at += 4; // composition time offset
-        }
-        durations.push(duration);
-    }
-    Ok((sizes, durations))
 }
 
 fn timescale_to_ns(t: u64, timescale: u32) -> u64 {

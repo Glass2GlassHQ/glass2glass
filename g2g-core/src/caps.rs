@@ -428,6 +428,7 @@ fn raw_format_gst_name(f: RawVideoFormat) -> &'static str {
         RawVideoFormat::I444 => "Y444",
         RawVideoFormat::I444p10 => "Y444_10LE",
         RawVideoFormat::I444p12 => "Y444_12LE",
+        RawVideoFormat::P010 => "P010_10LE",
     }
 }
 
@@ -447,6 +448,9 @@ fn codec_gst_media_type(c: VideoCodec) -> &'static str {
         VideoCodec::Mpeg4Part2 => "video/mpeg",
         // JPEG XS codestream (GStreamer's `jpegxsdec` / `jpegxsenc` caps).
         VideoCodec::JpegXs => "image/x-jxsc",
+        VideoCodec::SorensonH263 => "video/x-flash-video",
+        VideoCodec::Vp6 { alpha: false } => "video/x-vp6-flash",
+        VideoCodec::Vp6 { alpha: true } => "video/x-vp6-alpha",
     }
 }
 
@@ -460,12 +464,17 @@ fn audio_gst_media_type(f: AudioFormat) -> (&'static str, Option<&'static str>) 
         // bare media type is the same. This helper carries no version field, so
         // mp2 shares the AAC media type here (the codec split lives in the caps).
         AudioFormat::Mp2 => ("audio/mpeg", None),
+        // Same story as mp2: gst separates mp3 by mpegversion/layer fields.
+        AudioFormat::Mp3 => ("audio/mpeg", None),
+        AudioFormat::Speex => ("audio/x-speex", None),
         AudioFormat::Ac3 => ("audio/x-ac3", None),
         AudioFormat::Flac => ("audio/x-flac", None),
         AudioFormat::Vorbis => ("audio/x-vorbis", None),
         AudioFormat::PcmS16Le => ("audio/x-raw", Some("S16LE")),
         AudioFormat::PcmF32Le => ("audio/x-raw", Some("F32LE")),
         AudioFormat::PcmS24Le => ("audio/x-raw", Some("S24LE")),
+        AudioFormat::PcmS32Le => ("audio/x-raw", Some("S32LE")),
+        AudioFormat::PcmU8 => ("audio/x-raw", Some("U8")),
         AudioFormat::Mulaw => ("audio/x-mulaw", None),
         AudioFormat::Alaw => ("audio/x-alaw", None),
         AudioFormat::ImaAdpcm => ("audio/x-adpcm", None),
@@ -619,7 +628,11 @@ impl Rate {
 fn is_pcm(f: AudioFormat) -> bool {
     matches!(
         f,
-        AudioFormat::PcmS16Le | AudioFormat::PcmF32Le | AudioFormat::PcmS24Le
+        AudioFormat::PcmS16Le
+            | AudioFormat::PcmF32Le
+            | AudioFormat::PcmS24Le
+            | AudioFormat::PcmS32Le
+            | AudioFormat::PcmU8
     )
 }
 
@@ -648,13 +661,13 @@ pub(crate) fn intersect_channels(a: u8, b: u8) -> Option<u8> {
 }
 
 /// Which caps fields a transform passes through unchanged (output field ==
-/// input field), declared alongside a
-/// [`CapsConstraint::DerivedCoupled`](crate::format_element::CapsConstraint)
-/// closure. The solver uses the declared passthrough fields to couple input and
+/// input field). Read off a
+/// [`CapsTransform`](crate::caps_transform::CapsTransform) declaration (the
+/// fields every output shape derives with `Identity`), or probed from a
+/// `DerivedOutput` closure. The solver uses them to couple input and
 /// output *field by field* in both directions, so a downstream pin on a
 /// passthrough field narrows the corresponding input field (`Range ∩ Fixed =
-/// Fixed`) instead of only dropping whole alternatives. The closure stays the
-/// source of truth for the *retargeted* (non-passthrough) fields.
+/// Fixed`) instead of only dropping whole alternatives.
 ///
 /// `format` covers the variant's scalar media identity:
 /// [`Caps::RawVideo`]'s `format`, [`Caps::CompressedVideo`]'s `codec`, and
@@ -829,6 +842,20 @@ pub enum VideoCodec {
     /// `FfmpegVideoDec`. Carried in MP4 as an `mp4v` sample entry (esds
     /// objectTypeIndication `0x20`) and in MPEG-TS as stream_type `0x10`.
     Mpeg4Part2,
+    /// Sorenson Spark (Sorenson H.263), the original Flash video codec, carried
+    /// as FLV video codec id 2 (GStreamer `video/x-flash-video`, libavcodec
+    /// `flv1`). An H.263 derivative with Flash's own picture header, so it is a
+    /// distinct codec from ITU H.263. Decoded in software via `FfmpegVideoDec`.
+    SorensonH263,
+    /// On2 VP6 in its Flash variant: FLV video codec id 4, or id 5 when a second
+    /// (alpha) plane rides in the same packet. `alpha` picks between them, since
+    /// libavcodec decodes them with different decoders (`vp6f` / `vp6a`) and a
+    /// consumer must know whether the stream carries transparency (GStreamer
+    /// `video/x-vp6-flash` / `video/x-vp6-alpha`). The container's one-byte
+    /// dimension adjustment travels as the codec-config side channel.
+    Vp6 {
+        alpha: bool,
+    },
     /// JPEG XS (ISO/IEC 21122): a low-latency, visually lossless intra-frame
     /// mezzanine codec, each frame an independent codestream. The compressed
     /// essence of SMPTE ST 2110-22 (carried over RTP per RFC 9134), so a
@@ -944,15 +971,24 @@ pub enum RawVideoFormat {
     I444p10,
     /// Planar 4:4:4, 12-bit (LE).
     I444p12,
+    /// Semi-planar 4:2:0, 10-bit: NV12's layout (Y plane then interleaved UV) with
+    /// 16-bit little-endian samples carrying the value in the *top* 10 bits (the
+    /// GStreamer `P010_10LE` format, NVDEC's `P016` surface). The hardware 10-bit
+    /// decode / encode surface format.
+    P010,
 }
 
 impl RawVideoFormat {
-    /// Bits per sample of a fully-planar YUV format: 8, 10, or 12. The 10- and
-    /// 12-bit formats store each sample little-endian in a 2-byte word. The
-    /// non-planar / RGBA formats report 8.
+    /// Bits per sample of a YUV format: 8, 10, or 12. The 10- and 12-bit formats
+    /// store each sample little-endian in a 2-byte word (P010 in the word's top
+    /// bits, the planar family in the low bits). The RGBA / packed formats
+    /// report 8.
     pub const fn bit_depth(self) -> u8 {
         match self {
-            RawVideoFormat::I420p10 | RawVideoFormat::I422p10 | RawVideoFormat::I444p10 => 10,
+            RawVideoFormat::I420p10
+            | RawVideoFormat::I422p10
+            | RawVideoFormat::I444p10
+            | RawVideoFormat::P010 => 10,
             RawVideoFormat::I420p12 | RawVideoFormat::I422p12 | RawVideoFormat::I444p12 => 12,
             _ => 8,
         }
@@ -1011,6 +1047,17 @@ pub enum AudioFormat {
     /// (0x06) with an AC-3 descriptor (DVB), Matroska as `A_AC3`. Decoded via
     /// libavcodec.
     Ac3,
+    /// MPEG-1/2/2.5 Audio Layer III (`mp3`), GStreamer
+    /// `audio/mpeg,mpegversion=1,layer=3`. Self-syncing frames like `Mp2` (the
+    /// same 4-byte header, a Layer III frame length), the legacy FLV / RTMP audio
+    /// codec. Decoded via libavcodec.
+    Mp3,
+    /// Speex (RFC 5574), GStreamer `audio/x-speex`: the pre-Opus low-bitrate
+    /// speech codec, carried by FLV at a fixed 16 kHz mono. Container-framed (one
+    /// packet per FLV tag / Ogg packet). Carriage only, g2g registers no Speex
+    /// decoder, so an autoplugged decode chain fails to build rather than
+    /// pretending.
+    Speex,
     /// Free Lossless Audio Codec (`flac`), GStreamer `audio/x-flac`. Frame headers
     /// are self-describing but not cheaply self-syncing, so g2g relies on the
     /// container framing (one frame per Matroska block / Ogg packet); the STREAMINFO
@@ -1029,6 +1076,13 @@ pub enum AudioFormat {
     /// The integer sibling of `PcmF32Le` for the ST 2110-30 / AES67 L24 wire: a
     /// professional 24-bit source rides L24 without a detour through float.
     PcmS24Le,
+    /// 32-bit signed integer PCM, little-endian (GStreamer `S32LE`). The native
+    /// container width of most modern DACs, so a 24-bit source reaches the
+    /// device without the 3-byte packing.
+    PcmS32Le,
+    /// 8-bit unsigned integer PCM, one byte per sample, silence at 0x80
+    /// (GStreamer `U8`). The legacy WAV / telephony sample width.
+    PcmU8,
     /// G.711 mu-law companded audio, one byte per sample (GStreamer
     /// `audio/x-mulaw`, RTP payload type 0 / PCMU). Encoded, not raw PCM: like
     /// `Aac` / `Opus` it keeps a nominal rate/channels rather than the PCM
@@ -1590,6 +1644,10 @@ mod tests {
             assert_eq!(f.chroma_shift(), None);
         }
         assert!(I444p10.is_planar_yuv());
+        // Semi-planar 10-bit: 2-byte samples, outside the fully-planar family.
+        assert_eq!(P010.bit_depth(), 10);
+        assert_eq!(P010.bytes_per_sample(), 2);
+        assert!(!P010.is_planar_yuv());
     }
 
     #[test]
@@ -1597,7 +1655,7 @@ mod tests {
         use RawVideoFormat::*;
         let all = [
             Nv12, I420, Rgba8, Bgra8, Yuyv, I420p10, I420p12, I422, I422p10, I422p12, I444,
-            I444p10, I444p12,
+            I444p10, I444p12, P010,
         ];
         let mut names: Vec<&str> = all.iter().map(|f| raw_format_gst_name(*f)).collect();
         let n = names.len();

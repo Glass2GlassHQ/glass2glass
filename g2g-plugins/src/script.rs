@@ -38,7 +38,7 @@ use std::string::{String, ToString};
 use std::sync::{Arc, Mutex};
 use std::vec::Vec;
 
-use g2g_core::log::LogSource;
+use g2g_core::log::{LogName, LogSource};
 use g2g_core::runtime::{GraphNode, Registry};
 use g2g_core::{
     g2g_error, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata,
@@ -250,6 +250,7 @@ pub struct ScriptElement {
     engine: Option<Engine>,
     ast: Option<AST>,
     scope: Scope<'static>,
+    log_name: LogName,
 }
 
 impl Default for ScriptElement {
@@ -278,6 +279,7 @@ impl ScriptElement {
             engine: None,
             ast: None,
             scope: Scope::new(),
+            log_name: LogName::new(),
         }
     }
 
@@ -495,14 +497,14 @@ impl FrameBuf {
 /// Load a script (inline `script` wins, else the `location` file) and compile it,
 /// running the top level once so the script can set up persistent state. `register`
 /// installs the element's custom-type API on the engine before compilation. Shared
-/// by `scriptelement` and `scriptrouter`; `category` names the element in logs.
+/// by `scriptelement` and `scriptrouter`; `log` is the calling element, so the
+/// lines carry its instance name.
 fn build_engine(
-    category: &'static str,
+    log: &dyn LogSource,
     script: &str,
     location: &str,
     register: impl FnOnce(&mut Engine),
 ) -> Result<(Engine, AST, Scope<'static>), G2gError> {
-    let log = g2g_core::log::Target::category(category);
     let source = if !script.is_empty() {
         script.to_string()
     } else if !location.is_empty() {
@@ -565,6 +567,12 @@ impl LogSource for ScriptElement {
     fn log_category(&self) -> &'static str {
         "scriptelement"
     }
+    fn log_instance(&self) -> Option<&str> {
+        self.log_name.instance()
+    }
+    fn log_category_override(&self) -> Option<&str> {
+        self.log_name.category()
+    }
 }
 
 impl AsyncElement for ScriptElement {
@@ -593,12 +601,8 @@ impl AsyncElement for ScriptElement {
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         absolute_caps.intersect(&self.accept)?;
         self.fixed = Some(absolute_caps.clone());
-        let (engine, ast, scope) = build_engine(
-            "scriptelement",
-            &self.script,
-            &self.location,
-            register_frame_api,
-        )?;
+        let (engine, ast, scope) =
+            build_engine(&*self, &self.script, &self.location, register_frame_api)?;
         self.engine = Some(engine);
         self.ast = Some(ast);
         self.scope = scope;
@@ -650,6 +654,14 @@ impl AsyncElement for ScriptElement {
 
     fn properties(&self) -> &'static [PropertySpec] {
         SCRIPTELEMENT_PROPS
+    }
+
+    fn set_instance_name(&mut self, name: String) {
+        self.log_name.set_instance(name);
+    }
+
+    fn set_log_category(&mut self, category: String) {
+        self.log_name.set_category(category);
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
@@ -805,6 +817,7 @@ pub struct ScriptRouter {
     engine: Option<Engine>,
     ast: Option<AST>,
     scope: Scope<'static>,
+    log_name: LogName,
 }
 
 impl ScriptRouter {
@@ -820,6 +833,7 @@ impl ScriptRouter {
             engine: None,
             ast: None,
             scope: Scope::new(),
+            log_name: LogName::new(),
         }
     }
 
@@ -944,6 +958,12 @@ impl LogSource for ScriptRouter {
     fn log_category(&self) -> &'static str {
         "scriptrouter"
     }
+    fn log_instance(&self) -> Option<&str> {
+        self.log_name.instance()
+    }
+    fn log_category_override(&self) -> Option<&str> {
+        self.log_name.category()
+    }
 }
 
 impl MultiOutputElement for ScriptRouter {
@@ -963,12 +983,8 @@ impl MultiOutputElement for ScriptRouter {
     }
 
     fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        let (engine, ast, scope) = build_engine(
-            "scriptrouter",
-            &self.script,
-            &self.location,
-            register_route_api,
-        )?;
+        let (engine, ast, scope) =
+            build_engine(&*self, &self.script, &self.location, register_route_api)?;
         self.engine = Some(engine);
         self.ast = Some(ast);
         self.scope = scope;
@@ -1031,6 +1047,14 @@ impl MultiOutputElement for ScriptRouter {
 
     fn properties(&self) -> &'static [PropertySpec] {
         SCRIPTROUTER_PROPS
+    }
+
+    fn set_instance_name(&mut self, name: String) {
+        self.log_name.set_instance(name);
+    }
+
+    fn set_log_category(&mut self, category: String) {
+        self.log_name.set_category(category);
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {

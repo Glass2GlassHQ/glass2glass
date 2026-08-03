@@ -42,6 +42,16 @@
   #waterfall .wait { background: var(--warn); }
   #waterfall .work { background: var(--xform); }
   #waterfall .total { color: var(--muted); font-size: 11px; margin-top: 4px; }
+  #journey { padding: 8px 12px; border-bottom: 1px solid var(--edge); }
+  #journey .row { margin: 4px 0; }
+  #journey .lbl { color: var(--muted); font-size: 11px; display: flex; justify-content: space-between; }
+  #journey .bar { height: 12px; display: flex; border-radius: 3px; overflow: hidden; background: #10131a; }
+  #journey .wait { background: var(--warn); }
+  #journey .work { background: var(--xform); }
+  #journey .total { color: var(--text); font-size: 11px; margin-top: 6px; }
+  #journey .floor { color: var(--muted); font-size: 11px; }
+  #journey .over { color: var(--err); }
+  #journey .hint { color: var(--muted); }
   #preview { padding: 8px 12px; border-bottom: 1px solid var(--edge); min-height: 60px; }
   #preview .hint { color: var(--muted); }
   #preview canvas { image-rendering: pixelated; width: 100%; max-width: 260px;
@@ -83,6 +93,8 @@
   <div id="side">
     <h2>latency waterfall (p50)</h2>
     <div id="waterfall"><span class="hint" style="color:var(--muted)">waiting for frames…</span></div>
+    <h2>frame journey</h2>
+    <div id="journey"><span class="hint">waiting for a frame to cross every stage…</span></div>
     <h2>edge preview</h2>
     <div id="preview"><span class="hint">click an edge to tap its content</span></div>
     <h2>events</h2>
@@ -102,6 +114,7 @@ const uptimeEl = document.getElementById("uptime");
 const eventsEl = document.getElementById("events");
 const previewEl = document.getElementById("preview");
 const waterfallEl = document.getElementById("waterfall");
+const journeyEl = document.getElementById("journey");
 
 let socket = null;             // live WebSocket, for edge subscribe/unsubscribe
 const tapped = new Set();      // edge indices currently subscribed
@@ -213,6 +226,20 @@ function render(msg) {
       lbl.appendChild(title);
       vp.appendChild(lbl);
     }
+    // Live traffic on this edge, under the caps label.
+    if (e.packets) {
+      const counts = document.createElementNS(SVG_NS, "text");
+      counts.setAttribute("class", "edge-lbl");
+      counts.setAttribute("x", mx);
+      counts.setAttribute("y", (y1 + y2) / 2 + 9);
+      counts.setAttribute("text-anchor", "middle");
+      const drops = e.drops ? `  ${e.drops} dropped` : "";
+      counts.textContent = `${e.packets} pkt  ${fmtBytes(e.bytes)}${drops}`;
+      const ctitle = document.createElementNS(SVG_NS, "title");
+      ctitle.textContent = `producer blocked ${fmtNs(e.blocked_ns)} on this link`;
+      counts.appendChild(ctitle);
+      vp.appendChild(counts);
+    }
   });
 
   nodes.forEach(n => {
@@ -292,6 +319,46 @@ function renderWaterfall(nodes) {
   legend.innerHTML = `<span style="color:var(--warn)">■</span> input wait ` +
     `<span style="color:var(--xform)">■</span> process`;
   waterfallEl.appendChild(legend);
+}
+
+// One frame's actual path, in contrast to the p50 waterfall above: the same
+// stacked wait+work bars but for a single sequence id, with the measured total
+// against the 2*capacity*frame_period queueing floor.
+function renderJourney(j) {
+  if (!j) return;
+  const max = Math.max(...j.stages.map(s => s.wait_ns + s.work_ns), 1);
+  journeyEl.innerHTML = "";
+  const head = document.createElement("div");
+  head.className = "lbl";
+  head.innerHTML = `<span>frame #${j.sequence}</span>` +
+    `<span>${j.truncated ? "partial path" : "src → sink"}</span>`;
+  journeyEl.appendChild(head);
+  j.stages.forEach(s => {
+    const row = document.createElement("div");
+    row.className = "row";
+    row.innerHTML =
+      `<div class="lbl"><span>${s.name}</span><span>${fmtNs(s.wait_ns + s.work_ns)}</span></div>` +
+      `<div class="bar">` +
+        `<div class="wait" style="width:${(s.wait_ns / max * 100).toFixed(1)}%"></div>` +
+        `<div class="work" style="width:${(s.work_ns / max * 100).toFixed(1)}%"></div>` +
+      `</div>`;
+    journeyEl.appendChild(row);
+  });
+  const total = document.createElement("div");
+  total.className = "total";
+  total.textContent = `end to end ${fmtNs(j.total_ns)}`;
+  journeyEl.appendChild(total);
+  const floor = document.createElement("div");
+  floor.className = "floor";
+  if (j.floor_ns > 0) {
+    const ratio = (j.total_ns / j.floor_ns).toFixed(2);
+    floor.innerHTML = `floor ${fmtNs(j.floor_ns)} ` +
+      `(2 × cap ${j.capacity} × ${fmtNs(j.frame_period_ns)}) · ` +
+      `<span class="${j.total_ns > j.floor_ns ? "over" : ""}">${ratio}× floor</span>`;
+  } else {
+    floor.textContent = `capacity ${j.capacity}, frame period not yet measured`;
+  }
+  journeyEl.appendChild(floor);
 }
 
 function addEvent(msg) {
@@ -441,6 +508,7 @@ function connect() {
     if (msg.type === "telemetry") {
       render(msg);
       renderWaterfall(msg.nodes);
+      renderJourney(msg.journey);
       uptimeEl.textContent = "t=" + (msg.uptime_ns / 1e9).toFixed(1) + "s";
     } else if (msg.type === "event") {
       addEvent(msg);

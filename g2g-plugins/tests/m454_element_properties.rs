@@ -14,16 +14,22 @@ fn declares(specs: &[PropertySpec], name: &str) -> bool {
 
 #[cfg(feature = "av1-encode")]
 #[test]
-fn av1enc_bitrate_and_speed() {
+fn av1enc_bitrate_speed_and_quantizer() {
     use g2g_plugins::av1enc::Av1Enc;
     let mut e = Av1Enc::new();
     assert!(declares(e.properties(), "bitrate"));
     assert!(declares(e.properties(), "speed"));
+    assert!(declares(e.properties(), "quantizer"));
     e.set_property("bitrate", PropValue::Uint(2_000_000))
         .unwrap();
     assert_eq!(e.get_property("bitrate"), Some(PropValue::Uint(2_000_000)));
     e.set_property("speed", PropValue::Uint(6)).unwrap();
     assert_eq!(e.get_property("speed"), Some(PropValue::Uint(6)));
+    // Constant quality and a rate target are exclusive: setting one clears the
+    // other (rav1e reads only one of them).
+    e.set_property("quantizer", PropValue::Uint(90)).unwrap();
+    assert_eq!(e.get_property("quantizer"), Some(PropValue::Uint(90)));
+    assert_eq!(e.get_property("bitrate"), Some(PropValue::Uint(0)));
 }
 
 #[cfg(feature = "vpx")]
@@ -56,6 +62,28 @@ fn opusenc_bitrate() {
     // 0 selects libopus auto.
     e.set_property("bitrate", PropValue::Uint(0)).unwrap();
     assert_eq!(e.get_property("bitrate"), Some(PropValue::Uint(0)));
+}
+
+#[cfg(feature = "opus")]
+#[test]
+fn opusenc_frame_size_and_complexity() {
+    use g2g_plugins::opusenc::OpusEnc;
+    let mut e = OpusEnc::new();
+    assert!(declares(e.properties(), "frame-size"));
+    assert!(declares(e.properties(), "complexity"));
+    // gst's enum integers: whole ms, except 2 = 2.5 ms.
+    e.set_property("frame-size", PropValue::Uint(2)).unwrap();
+    assert_eq!(e.get_property("frame-size"), Some(PropValue::Uint(2)));
+    assert!(
+        e.set_property("frame-size", PropValue::Uint(30)).is_err(),
+        "rejects a duration Opus has no frame of"
+    );
+    e.set_property("complexity", PropValue::Uint(4)).unwrap();
+    assert_eq!(e.get_property("complexity"), Some(PropValue::Uint(4)));
+    assert!(
+        e.set_property("complexity", PropValue::Uint(11)).is_err(),
+        "rejects complexity above 10"
+    );
 }
 
 #[cfg(feature = "mjpeg-encode")]

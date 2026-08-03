@@ -50,7 +50,9 @@ pub use channel::{
     QosSlot, Receiver, ReconfigureSlot, RecvFuture, SendError, SendFuture, Sender, SenderSink,
 };
 pub use coordinator::{coordinator, Coordinator, CoordinatorEvent, CoordinatorHandle};
-pub use instrument::{snapshot_all, ElementLatency, ElementProbe, Probe};
+pub use instrument::{
+    snapshot_all, EdgeCounters, EdgeCounts, ElementLatency, ElementProbe, Probe, StageVisit,
+};
 pub use join::{join_all, select2, Either, Join2, JoinAll, Select2};
 pub use progress::PipelineProgress;
 pub use runner::{
@@ -59,7 +61,7 @@ pub use runner::{
     RunStats, SourceLoop,
 };
 pub use seek::{SeekController, WaitEvent};
-pub use solver::NegotiationFailure;
+pub use solver::{CapsConflict, NegotiationFailure};
 pub use state::{Flow, FlowGate, PrerollGate, StateController};
 pub use stream_select::StreamSelectController;
 
@@ -68,14 +70,15 @@ pub use blocking::block_on;
 
 #[cfg(feature = "std")]
 pub use runner::{
-    run_fanout_session, run_linear_chain, run_linear_chain_with_bus, run_source_fanout,
-    run_source_fanout_with_bus, run_source_router_dynamic, run_source_tee_dynamic,
-    DynamicFanoutHandle,
+    run_fanout_session, run_fanout_session_observed, run_linear_chain, run_linear_chain_with_bus,
+    run_source_fanout, run_source_fanout_observed, run_source_fanout_with_bus,
+    run_source_router_dynamic, run_source_tee_dynamic, DynamicFanoutHandle,
 };
 
 #[cfg(feature = "std")]
 pub use fanin::{
-    run_aggregator_dynamic, run_duplex_session, run_fanin_session, run_fanin_sink, run_muxer_sink,
+    run_aggregator_dynamic, run_duplex_session, run_duplex_session_observed, run_fanin_session,
+    run_fanin_session_observed, run_fanin_sink, run_fanin_sink_observed, run_muxer_sink,
     run_muxer_sink_dynamic, run_muxer_sink_with_bus, DynMultiInputElement, DynSourceLoop,
     DynamicFaninHandle,
 };
@@ -92,7 +95,9 @@ pub use graph_runner::{
 };
 
 #[cfg(feature = "std")]
-pub use observe::{EdgeInfo, NodeRole, NodeTelemetry, Observer, TelemetrySnapshot};
+pub use observe::{
+    EdgeInfo, FrameJourney, JourneyStage, NodeRole, NodeTelemetry, Observer, TelemetrySnapshot,
+};
 
 // Thread-per-arm (opt-in multicore) runner. Needs `multi-thread` so the graph's
 // elements + channels are `Send` to cross onto worker threads (the `!Send` arm

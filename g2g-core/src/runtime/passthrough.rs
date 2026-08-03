@@ -2,8 +2,8 @@
 //! (DESIGN.md 4.13.4). A transform declares which caps fields it forwards
 //! unchanged (`PassthroughFields`); these functions couple those fields across a
 //! link (`couple_*`), project a feasible input from an output (`project_*`), and
-//! discover / verify a mask by probing an element's caps closure (`discover_*`,
-//! `verify_*`). Solver-only, so they live under the runtime tree rather than in
+//! discover a mask by probing an element's caps closure (`discover_*`) where the
+//! element declares none. Solver-only, so they live under the runtime tree rather than in
 //! the data-plane `caps.rs`; the two `project_*` functions serve the std graph
 //! runner's backward-feasibility sweep and stay `std`-gated.
 
@@ -21,7 +21,7 @@ use crate::caps::ANY_SAMPLE_RATE;
 /// are left as `input` carries them, since the transform sets them
 /// independently of its input. Same media variant required; `None` if a
 /// passthrough field has no overlap (the alternative dies) or the variants
-/// differ. Used by the solver's `DerivedCoupled` backward sweep.
+/// differ. Used by the solver's `DerivedFields` backward sweep.
 pub(crate) fn couple_passthrough(
     input: &Caps,
     pin: &Caps,
@@ -216,7 +216,7 @@ pub(crate) fn couple_passthrough_derived(
 }
 
 /// Project an output-side feasible `out` onto the *input* side of a
-/// `DerivedCoupled` transform: keep passthrough fields, widen each retargeted
+/// `DerivedFields` transform: keep passthrough fields, widen each retargeted
 /// field to "anything the transform can take" (`Dim`/`Rate` -> `Any`,
 /// `sample_rate` -> [`ANY_SAMPLE_RATE`]). Returns `None` when a retargeted field
 /// is a non-rangeable scalar (`format` / `codec` / `channels`) with no wildcard,
@@ -366,7 +366,7 @@ enum ProbeField {
 /// Probe a `DerivedOutput`-style closure to discover which caps fields it passes
 /// through unchanged (output field tracks input field), so the solver can couple
 /// those fields backward the same way a declared
-/// [`DerivedCoupled`](crate::format_element::CapsConstraint::DerivedCoupled) mask
+/// [`DerivedFields`](crate::format_element::CapsConstraint::DerivedFields) mask
 /// does, the "invertible fields of a `DerivedOutput`". `f` is not analytically
 /// invertible, but it is evaluable, so a field's behaviour is read off two
 /// concrete probes.
@@ -402,51 +402,6 @@ pub(crate) fn discover_passthrough(
         channels: probe_field(f, &base, ProbeField::Channels),
         sample_rate: probe_field(f, &base, ProbeField::SampleRate),
     }
-}
-
-/// Soundness check for a [`DerivedCoupled`](crate::format_element::CapsConstraint::DerivedCoupled)
-/// transform: every field its `passthrough` mask declares must genuinely be
-/// passed through by its `derive` closure, i.e. for the concrete input `sample`
-/// *every* output alternative repeats that field unchanged. The mask and the
-/// closure are two sources of truth for the same fact (which fields couple
-/// backward), and a mask that claims a field the closure actually retargets is
-/// unsound: the solver would narrow the input on a field the transform rewrites.
-/// This catches that drift (driven from a `debug_assert!` on the solver's
-/// forward-derivation path), and unlike [`discover_passthrough`] it stays correct
-/// for the multi-valued closures `DerivedCoupled` exists for (it checks the
-/// declared fields across *all* alternatives rather than requiring a single
-/// output). A closure that rejects `sample` (empty output) has nothing to verify
-/// and passes; only the unsound direction (declared-but-not-honoured) fails. The
-/// conservative reverse (a field the closure passes through but the mask omits)
-/// is sound, just a missed coupling, so it is not flagged.
-pub(crate) fn verify_passthrough_sound(
-    f: &dyn Fn(&Caps) -> CapsSet,
-    passthrough: PassthroughFields,
-    sample: &Caps,
-) -> bool {
-    let out = f(sample);
-    if out.alternatives().is_empty() {
-        return true;
-    }
-    let declared = [
-        (passthrough.format, ProbeField::Format),
-        (passthrough.width, ProbeField::Width),
-        (passthrough.height, ProbeField::Height),
-        (passthrough.framerate, ProbeField::Framerate),
-        (passthrough.channels, ProbeField::Channels),
-        (passthrough.sample_rate, ProbeField::SampleRate),
-    ];
-    for (claimed, field) in declared {
-        if claimed
-            && !out
-                .alternatives()
-                .iter()
-                .all(|alt| field_eq(alt, sample, field))
-        {
-            return false;
-        }
-    }
-    true
 }
 
 /// Concretise `sample`'s ranged geometry/rate to fixed sentinels so the closure
@@ -738,84 +693,5 @@ mod tests {
             discover_passthrough(&conv, &sample),
             PassthroughFields::NONE
         );
-    }
-
-    #[test]
-    fn verify_passthrough_sound_accepts_honoured_mask() {
-        // A scaler keeps format + framerate, retargets geometry. A mask declaring
-        // exactly the honoured fields is sound, even though the closure is
-        // multi-valued (passthrough + scalable range), which `discover_passthrough`
-        // could not verify.
-        let scale = |input: &Caps| match input {
-            Caps::RawVideo {
-                format,
-                width,
-                height,
-                framerate,
-            } => CapsSet::from_alternatives(vec![
-                Caps::RawVideo {
-                    format: *format,
-                    width: width.clone(),
-                    height: height.clone(),
-                    framerate: framerate.clone(),
-                },
-                Caps::RawVideo {
-                    format: *format,
-                    width: Dim::Range { min: 1, max: 8192 },
-                    height: Dim::Range { min: 1, max: 8192 },
-                    framerate: framerate.clone(),
-                },
-            ]),
-            _ => CapsSet::from_alternatives(Vec::new()),
-        };
-        let sample = video(Dim::Fixed(640), Dim::Fixed(480), Rate::Fixed(30 << 16));
-        let honoured = PassthroughFields::NONE.with_format().with_framerate();
-        assert!(
-            verify_passthrough_sound(&scale, honoured, &sample),
-            "format + framerate are genuinely passed through in every alternative"
-        );
-    }
-
-    #[test]
-    fn verify_passthrough_sound_rejects_overclaiming_mask() {
-        // The same scaler, but a mask that also claims `width` passthrough: the
-        // closure retargets width (one alternative is a Range, not the input's
-        // Fixed), so the mask is unsound and the guard catches it.
-        let scale = |input: &Caps| match input {
-            Caps::RawVideo {
-                format, framerate, ..
-            } => CapsSet::from_alternatives(vec![Caps::RawVideo {
-                format: *format,
-                width: Dim::Range { min: 1, max: 8192 },
-                height: Dim::Range { min: 1, max: 8192 },
-                framerate: framerate.clone(),
-            }]),
-            _ => CapsSet::from_alternatives(Vec::new()),
-        };
-        let sample = video(Dim::Fixed(640), Dim::Fixed(480), Rate::Fixed(30 << 16));
-        let overclaim = PassthroughFields::NONE
-            .with_format()
-            .with_framerate()
-            .with_width();
-        assert!(
-            !verify_passthrough_sound(&scale, overclaim, &sample),
-            "claiming width passthrough when the closure retargets it is unsound"
-        );
-    }
-
-    #[test]
-    fn verify_passthrough_sound_passes_when_closure_rejects_input() {
-        // A closure that rejects the sample (empty output) has nothing to verify,
-        // so any mask is vacuously sound (the solve fails loud elsewhere).
-        let reject = |_: &Caps| CapsSet::from_alternatives(Vec::new());
-        let sample = video(Dim::Fixed(640), Dim::Fixed(480), Rate::Fixed(30 << 16));
-        let all = PassthroughFields::NONE
-            .with_format()
-            .with_width()
-            .with_height()
-            .with_framerate()
-            .with_channels()
-            .with_sample_rate();
-        assert!(verify_passthrough_sound(&reject, all, &sample));
     }
 }

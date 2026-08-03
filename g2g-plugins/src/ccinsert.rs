@@ -18,7 +18,7 @@ use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
 use g2g_core::g2g_warn;
-use g2g_core::log::{short_type_name, LogSource};
+use g2g_core::log::{short_type_name, LogName, LogSource};
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, MemoryDomain,
@@ -99,8 +99,8 @@ pub struct CcInsert {
     cues_received: u64,
     caption_emitted: bool,
     warned: bool,
-    /// Runner-assigned instance name for logging.
-    instance: Option<alloc::string::String>,
+    /// Runner-assigned instance name plus any category override, for logging.
+    log_name: LogName,
 }
 
 impl Default for CcInsert {
@@ -133,7 +133,7 @@ impl CcInsert {
             cues_received: 0,
             caption_emitted: false,
             warned: false,
-            instance: None,
+            log_name: LogName::new(),
         }
     }
 
@@ -367,6 +367,14 @@ impl MultiInputElement for CcInsert {
             }
         })
     }
+
+    fn set_instance_name(&mut self, name: String) {
+        self.log_name.set_instance(name);
+    }
+
+    fn set_log_category(&mut self, category: String) {
+        self.log_name.set_category(category);
+    }
 }
 
 impl LogSource for CcInsert {
@@ -374,7 +382,10 @@ impl LogSource for CcInsert {
         short_type_name::<Self>()
     }
     fn log_instance(&self) -> Option<&str> {
-        self.instance.as_deref()
+        self.log_name.instance()
+    }
+    fn log_category_override(&self) -> Option<&str> {
+        self.log_name.category()
     }
 }
 

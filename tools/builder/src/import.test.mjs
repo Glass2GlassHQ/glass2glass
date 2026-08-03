@@ -9,7 +9,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
-import { toLaunch, toJSON } from "./export.js";
+import { toLaunch, toJSON, toYAML } from "./export.js";
 import { fromLaunch, fromJSON, capsCompat } from "./import.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -123,6 +123,87 @@ check("json pipeline escape hatch defers to gst importer", () => {
   const g = fromJSON('{ "pipeline": "videotestsrc ! fakesink" }', elements);
   assert.strictEqual(g.nodes.length, 2);
   assert.strictEqual(g.edges.length, 1);
+});
+
+// The two YAML fixtures below are inlined verbatim in
+// g2g-plugins/tests/m849_builder_yaml_export.rs, which runs them through the real
+// declarative loader. Keep the two copies identical.
+check("yaml linear export matches the loader fixture", () => {
+  const nodes = [
+    node("videotestsrc0", "videotestsrc", { "num-buffers": "3" }),
+    node("videoconvert0", "videoconvert"),
+    node("fakesink0", "fakesink"),
+  ];
+  const edges = [edge("videotestsrc0", "videoconvert0"), edge("videoconvert0", "fakesink0")];
+  assert.strictEqual(
+    toYAML(nodes, edges),
+    `nodes:
+  - id: "videotestsrc0"
+    element: "videotestsrc"
+    props:
+      num-buffers: "3"
+  - id: "videoconvert0"
+    element: "videoconvert"
+  - id: "fakesink0"
+    element: "fakesink"
+edges:
+  - from: "videotestsrc0"
+    to: "videoconvert0"
+  - from: "videoconvert0"
+    to: "fakesink0"
+`,
+  );
+});
+
+check("yaml fan-in export matches the loader fixture", () => {
+  const nodes = [
+    node("videotestsrc0", "videotestsrc", { "num-buffers": "2" }),
+    node("videotestsrc1", "videotestsrc", { "num-buffers": "2" }),
+    node("funnel0", "funnel"),
+    node("fakesink0", "fakesink"),
+  ];
+  const edges = [
+    edge("videotestsrc0", "funnel0"),
+    edge("videotestsrc1", "funnel0"),
+    edge("funnel0", "fakesink0"),
+  ];
+  assert.strictEqual(
+    toYAML(nodes, edges),
+    `nodes:
+  - id: "videotestsrc0"
+    element: "videotestsrc"
+    props:
+      num-buffers: "2"
+  - id: "videotestsrc1"
+    element: "videotestsrc"
+    props:
+      num-buffers: "2"
+  - id: "funnel0"
+    element: "funnel"
+  - id: "fakesink0"
+    element: "fakesink"
+edges:
+  - from: "videotestsrc0"
+    to: "funnel0"
+  - from: "videotestsrc1"
+    to: "funnel0"
+  - from: "funnel0"
+    to: "fakesink0"
+`,
+  );
+});
+
+check("yaml quotes a caps value verbatim", () => {
+  const nodes = [
+    node("videotestsrc0", "videotestsrc"),
+    node("capsfilter0", "capsfilter", { caps: "video/x-raw,format=NV12" }),
+  ];
+  const yaml = toYAML(nodes, [edge("videotestsrc0", "capsfilter0")]);
+  assert.ok(yaml.includes('      caps: "video/x-raw,format=NV12"'), yaml);
+});
+
+check("yaml empty graph is still a valid document", () => {
+  assert.strictEqual(toYAML([], []), "nodes: []\nedges: []\n");
 });
 
 check("unknown element becomes an unresolved placeholder", () => {

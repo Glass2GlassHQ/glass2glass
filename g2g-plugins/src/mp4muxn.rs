@@ -36,20 +36,21 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
-    FrameTiming, G2gError, InputAggregator, MemoryDomain, MultiInputElement, OutputSink,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, VideoCodec,
+    split_tags, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
+    Dim, FrameTiming, G2gError, InputAggregator, MemoryDomain, MultiInputElement, OutputSink,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, TagList, VideoCodec,
 };
 
 use crate::fmp4mux::{
-    av1c_record, avcc_sample, is_keyframe_nal, parameter_sets, split_annexb, visual_sample_entry,
-    vp8_keyframe, vp9_keyframe,
+    av1c_record, avcc_sample, is_keyframe_nal, parameter_sets, split_annexb, tfhd,
+    visual_sample_entry, vp8_keyframe, vp9_keyframe,
 };
 use crate::mp4audiosink::esds;
-use crate::mp4box::{ftyp, full_box, mp4_box, MATRIX};
+use crate::mp4box::{ftyp, ftyp_cmaf, full_box, mp4_box, prft, styp_cmaf, udta_with_tags, MATRIX};
 use crate::opusparse::{
     dops_from_opus_head, is_opus_config, parse_opus_head, OPUS_ENCODER_PRE_SKIP,
 };
+use crate::rtcp;
 
 /// Video tracks use a 90 kHz media timescale; audio tracks use the sample rate.
 const VIDEO_TIMESCALE: u32 = 90_000;
@@ -129,10 +130,26 @@ pub struct Mp4MuxN {
     /// default and the only streamable one). `false` selects the progressive
     /// layout: see [`with_fragmented`](Self::with_fragmented).
     fragmented: bool,
+    /// Whether the progressive layout puts its `moov` ahead of the `mdat`
+    /// (M824); see [`with_faststart`](Self::with_faststart).
+    faststart: bool,
+    /// CMAF conformance mode (M832); see [`with_cmaf`](Self::with_cmaf).
+    cmaf: bool,
+    /// Target CMAF chunk duration in milliseconds (`0` = no chunking); see
+    /// [`with_chunk_duration_ms`](Self::with_chunk_duration_ms).
+    chunk_duration_ms: u64,
+    /// Whether each fragment is preceded by a `prft`; see
+    /// [`with_prft`](Self::with_prft).
+    write_prft: bool,
     /// Progressive mode's buffered samples, in the global PTS-merged order they
     /// were released (which is also the `mdat` byte order). Empty in the
     /// fragmented default.
     samples: Vec<ProgSample>,
+    /// Whole-file metadata, written as the `moov`'s `udta/meta/ilst`.
+    tags: TagList,
+    /// Per-input metadata, written as that `trak`'s own `udta/meta/ilst` (M838).
+    /// One (possibly empty) list per input pad.
+    track_tags: Vec<TagList>,
 }
 
 /// One buffered sample of the progressive (moov-at-end) layout: its `mdat`
@@ -163,6 +180,8 @@ struct PendingSample {
 /// A track's in-progress `moof`+`mdat` fragment: the samples buffered so far, the
 /// decode time at the fragment's first sample (its `tfdt`), and the accumulated
 /// media duration (track timescale) used to decide when the target is reached.
+/// With chunking on (M859) the buffered samples and the `tfdt` are the open
+/// chunk's, while `accum_ticks` still measures the whole fragment.
 #[derive(Debug, Clone, Default)]
 struct PendingFragment {
     samples: Vec<PendingSample>,
@@ -170,6 +189,14 @@ struct PendingFragment {
     /// PTS (ns) of the fragment's first sample, carried on the emitted byte frame.
     base_pts_ns: u64,
     accum_ticks: u64,
+    /// Media duration of the open chunk only (track timescale).
+    chunk_ticks: u64,
+    /// Whether a chunk of this fragment has already been emitted, i.e. its `styp`
+    /// and `prft` are written and the next chunk continues it.
+    started: bool,
+    /// Producer wall clock (NTP) sampled at the fragment's first sample, written
+    /// in its `prft`.
+    ntp: u64,
 }
 
 impl Mp4MuxN {
@@ -189,14 +216,70 @@ impl Mp4MuxN {
             fragment_duration_ms: 0,
             pending: alloc::vec![PendingFragment::default(); inputs],
             fragmented: true,
+            faststart: false,
+            cmaf: false,
+            chunk_duration_ms: 0,
+            write_prft: false,
             samples: Vec::new(),
+            tags: TagList::new(),
+            track_tags: alloc::vec![TagList::new(); inputs],
         }
+    }
+
+    /// Attach whole-file metadata, written as the `moov`'s own
+    /// `udta/meta/ilst` (the [`crate::mp4mux::Mp4Mux`] builder for the
+    /// multi-track muxer).
+    pub fn with_tags(mut self, tags: TagList) -> Self {
+        self.tags = tags;
+        self
+    }
+
+    /// Attach metadata scoped to one input pad's track, written as that `trak`'s
+    /// own `udta/meta/ilst`, which ffmpeg and the g2g demuxer report on the
+    /// elementary stream rather than the file. Out-of-range inputs are ignored.
+    ///
+    /// A tag every input carries identically moves up to the file level instead
+    /// (`g2g_core::split_tags`), and a tag also set by [`with_tags`](Self::with_tags)
+    /// is not repeated per track unless the value differs, in which case the
+    /// track's value stands for that track.
+    pub fn with_track_tags(mut self, input: usize, tags: TagList) -> Self {
+        if input < self.inputs {
+            self.track_tags[input] = tags;
+        }
+        self
+    }
+
+    /// The tags the `moov` writes, split by the shared global / per-stream merge
+    /// policy into the file's own list and one list per pad slot.
+    fn moov_tags(&self) -> MoovTags {
+        let (global, per_track) = split_tags(&self.tags, &self.track_tags);
+        MoovTags { global, per_track }
     }
 
     /// Batch access units into fragments of at least `ms` milliseconds (`0` keeps
     /// one fragment per AU); see [`fragment_duration_ms`](Self::fragment_duration_ms).
     pub fn with_fragment_duration_ms(mut self, ms: u64) -> Self {
         self.fragment_duration_ms = ms;
+        self
+    }
+
+    /// Split each fragment into CMAF chunks of at least `ms` milliseconds (M859),
+    /// each its own `moof`+`mdat` emitted the moment it fills, so a low-latency
+    /// player receives part of a fragment before the fragment is complete. `0`
+    /// (the default) writes one `moof`+`mdat` per fragment. Inert unless the
+    /// muxer batches (`fragment-duration` set, or `cmaf`), since per-AU mode has
+    /// no fragment to subdivide.
+    pub fn with_chunk_duration_ms(mut self, ms: u64) -> Self {
+        self.chunk_duration_ms = ms;
+        self
+    }
+
+    /// Write a `prft` ahead of each fragment (M859) mapping the fragment's first
+    /// decode time to the producer's wall clock (NTP), which is what lets a
+    /// player measure its end-to-end latency against a chunked live stream. The
+    /// box names the fragment's own track.
+    pub fn with_prft(mut self, write_prft: bool) -> Self {
+        self.write_prft = write_prft;
         self
     }
 
@@ -215,6 +298,35 @@ impl Mp4MuxN {
     /// recording; a live or long capture wants the fragmented default.
     pub fn with_fragmented(mut self, fragmented: bool) -> Self {
         self.fragmented = fragmented;
+        self
+    }
+
+    /// Put the `moov` ahead of the media data (M824), the `qtmux faststart`
+    /// layout: a reader has the whole index before it has read a byte of `mdat`,
+    /// so playback over a network starts without seeking to the end of the file.
+    ///
+    /// Only the progressive layout has anything to move: a fragmented file
+    /// already writes its `moov` before the first fragment. It costs no extra
+    /// buffering either, since progressive already holds the movie until EOS;
+    /// the `moov` is simply written first, with the chunk offsets shifted by its
+    /// own size.
+    pub fn with_faststart(mut self, faststart: bool) -> Self {
+        self.faststart = faststart;
+        self
+    }
+
+    /// Write a CMAF (ISO/IEC 23000-19) track file (M832): the `ftyp` carries the
+    /// `cmfc` structural brand, each fragment opens a CMAF segment with its own
+    /// `styp`, its `tfhd` states the sample description rather than inheriting it,
+    /// and a fragment starts only at a sync sample, so `fragment-duration = 0`
+    /// means one fragment per GOP rather than one per access unit.
+    ///
+    /// CMAF puts one media stream in a track file, so this muxer only accepts it
+    /// with a single input pad, and only in the fragmented layout; either
+    /// combination fails at `configure_pipeline` rather than writing a file that
+    /// claims a conformance it does not have.
+    pub fn with_cmaf(mut self, cmaf: bool) -> Self {
+        self.cmaf = cmaf;
         self
     }
 
@@ -443,12 +555,16 @@ impl Mp4MuxN {
             .map(TrackInit::timescale)
             .unwrap_or(VIDEO_TIMESCALE);
         let default_dur_ns = match self.kinds[input] {
-            // Opus frames are 20 ms (960 samples @ 48 kHz); AAC frames 1024 samples.
+            // An Opus packet's TOC states its own duration (2.5..60 ms), so read
+            // it rather than assuming the 20 ms default; AAC frames 1024 samples.
             Some(PadKind::Audio {
                 format: AudioFormat::Opus,
                 rate,
                 ..
-            }) => 960 * 1_000_000_000 / rate.max(1) as u64,
+            }) => {
+                let samples = u64::from(crate::opusparse::packet_samples(au)).max(1);
+                samples * 1_000_000_000 / rate.max(1) as u64
+            }
             Some(PadKind::Audio { rate, .. }) => 1024 * 1_000_000_000 / rate.max(1) as u64,
             _ => DEFAULT_VIDEO_DURATION_NS,
         };
@@ -486,19 +602,29 @@ impl Mp4MuxN {
         // Batched mode closes the open fragment before starting a new one at a sync
         // sample once the target duration is reached, so every fragment begins on a
         // keyframe (audio access units are all sync, so they close on the target).
+        // CMAF mode batches even with no target, because a fragment there may only
+        // start at a sync sample.
         let target = self.frag_target_ticks(input, timescale);
-        if target > 0
-            && is_sync
-            && !self.pending[input].samples.is_empty()
-            && self.pending[input].accum_ticks >= target
+        // With chunking on the buffered samples are only the open chunk, so a
+        // fragment is open while any of its chunks has been emitted too.
+        let open = self.pending[input].started || !self.pending[input].samples.is_empty();
+        if (target > 0 || self.cmaf) && is_sync && open && self.pending[input].accum_ticks >= target
         {
             self.flush_track(input, out).await?;
+            self.close_fragment(input);
         }
 
+        let write_prft = self.write_prft;
+        let decode_time = self.decode_time[input];
         let pend = &mut self.pending[input];
         if pend.samples.is_empty() {
-            pend.base_decode_time = self.decode_time[input];
+            pend.base_decode_time = decode_time;
             pend.base_pts_ns = pts_ns;
+            if !pend.started {
+                // the producer's wall clock at the fragment's first sample is what
+                // its prft maps to that sample's decode time.
+                pend.ntp = if write_prft { rtcp::ntp_now() } else { 0 };
+            }
         }
         pend.samples.push(PendingSample {
             bytes: sample,
@@ -506,10 +632,19 @@ impl Mp4MuxN {
             is_sync,
         });
         pend.accum_ticks += duration as u64;
+        pend.chunk_ticks += duration as u64;
         self.decode_time[input] += duration as u64;
 
         // Per-AU mode (target 0): flush immediately, one fragment per access unit.
-        if target == 0 {
+        if target == 0 && !self.cmaf {
+            self.flush_track(input, out).await?;
+            self.close_fragment(input);
+            return Ok(());
+        }
+        // Close the chunk as soon as it reaches its target: the point of chunking
+        // is that these bytes leave now rather than at the end of the fragment.
+        let chunk_target = self.chunk_target_ticks(timescale);
+        if chunk_target > 0 && self.pending[input].chunk_ticks >= chunk_target {
             self.flush_track(input, out).await?;
         }
         Ok(())
@@ -526,9 +661,27 @@ impl Mp4MuxN {
         )
     }
 
-    /// Write a track's pending fragment as one `moof`+`mdat` (a multi-sample
-    /// `trun`), prepending the `ftyp`+`moov` init segment on the first fragment. A
-    /// no-op when the track has no buffered samples.
+    /// The chunk-duration target in a track's timescale (`0` = no chunking).
+    fn chunk_target_ticks(&self, timescale: u32) -> u64 {
+        if self.chunk_duration_ms == 0 {
+            return 0;
+        }
+        ns_to_ts(self.chunk_duration_ms.saturating_mul(1_000_000), timescale)
+    }
+
+    /// End the open fragment on a track: the next chunk written there opens a new
+    /// one, with its own `styp` and `prft`.
+    fn close_fragment(&mut self, input: usize) {
+        let pend = &mut self.pending[input];
+        pend.accum_ticks = 0;
+        pend.started = false;
+    }
+
+    /// Write a track's buffered samples as one `moof`+`mdat` (a multi-sample
+    /// `trun`), prepending the `ftyp`+`moov` init segment on the first fragment.
+    /// That is the whole fragment unless chunking is on, in which case it is the
+    /// open chunk and only the one that opens a fragment carries its `styp` and
+    /// `prft`. A no-op when the track has no buffered samples.
     async fn flush_track(
         &mut self,
         input: usize,
@@ -537,29 +690,48 @@ impl Mp4MuxN {
         if self.pending[input].samples.is_empty() {
             return Ok(());
         }
-        let pend = core::mem::take(&mut self.pending[input]);
-
-        let mut bytes = Vec::new();
-        if !self.header_written {
-            bytes.extend_from_slice(&ftyp());
-            bytes.extend_from_slice(&av_moov(&self.inits, None));
-            self.header_written = true;
-        }
+        let samples = core::mem::take(&mut self.pending[input].samples);
+        let pend = &mut self.pending[input];
+        let (base_decode_time, base_pts_ns, opens_fragment, ntp) = (
+            pend.base_decode_time,
+            pend.base_pts_ns,
+            !pend.started,
+            pend.ntp,
+        );
+        pend.chunk_ticks = 0;
+        pend.started = true;
 
         // track_ID is the 1-based pad index; PTS of the first buffered sample.
         let track_id = (input + 1) as u32;
+        let mut bytes = Vec::new();
+        if !self.header_written {
+            bytes.extend_from_slice(&if self.cmaf { ftyp_cmaf() } else { ftyp() });
+            bytes.extend_from_slice(&av_moov(&self.inits, None, &self.moov_tags()));
+            self.header_written = true;
+        }
+        if opens_fragment {
+            if self.cmaf {
+                // this fragment is a CMAF segment, of chunks when chunking is on
+                bytes.extend_from_slice(&styp_cmaf(self.chunk_duration_ms > 0));
+            }
+            if self.write_prft {
+                bytes.extend_from_slice(&prft(track_id, ntp, base_decode_time));
+            }
+        }
+
         self.sequence += 1;
         bytes.extend_from_slice(&av_fragment(
             track_id,
             self.sequence,
-            pend.base_decode_time,
-            &pend.samples,
+            base_decode_time,
+            self.cmaf,
+            &samples,
         ));
 
         let out_frame = Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
             FrameTiming {
-                pts_ns: pend.base_pts_ns,
+                pts_ns: base_pts_ns,
                 ..FrameTiming::default()
             },
             self.emitted,
@@ -573,13 +745,16 @@ impl Mp4MuxN {
     async fn flush_all(&mut self, out: &mut dyn OutputSink) -> Result<(), G2gError> {
         for input in 0..self.inputs {
             self.flush_track(input, out).await?;
+            self.close_fragment(input);
         }
         Ok(())
     }
 
     /// Progressive mode's finalize (M793): write `ftyp` + one `mdat` holding
     /// every buffered sample + a `moov` whose sample tables index them, and emit
-    /// the whole file as one frame. A no-op when nothing was buffered.
+    /// the whole file as one frame. With `faststart` (M824) the `moov` goes
+    /// between the `ftyp` and the `mdat` instead. A no-op when nothing was
+    /// buffered.
     async fn finish_progressive(&mut self, out: &mut dyn OutputSink) -> Result<(), G2gError> {
         if self.samples.is_empty() {
             return Ok(());
@@ -588,7 +763,7 @@ impl Mp4MuxN {
         let head = ftyp();
 
         // The mdat payload is the samples in the order they were released, so
-        // each sample's file offset is known once the mdat header size is.
+        // each sample's offset inside the mdat is known once its header size is.
         let payload: usize = samples.iter().map(|s| s.bytes.len()).sum();
         // 32-bit box size unless the payload needs the 64-bit `largesize` form.
         let mdat_header = if payload.saturating_add(8) > u32::MAX as usize {
@@ -596,8 +771,60 @@ impl Mp4MuxN {
         } else {
             8
         };
-        let mut file = Vec::with_capacity(head.len() + mdat_header + payload + 4096);
+        let mut within = Vec::with_capacity(samples.len());
+        let mut mdat_len = mdat_header as u64;
+        for s in &samples {
+            within.push(mdat_len);
+            mdat_len = mdat_len.saturating_add(s.bytes.len() as u64);
+        }
+
+        let tags = self.moov_tags();
+        // The sample tables address the mdat by absolute file offset, so the
+        // moov's contents depend on where the mdat lands. `force_co64` pins the
+        // chunk-offset entry width, which is the only thing that can change the
+        // moov's own size once the sample count is fixed.
+        let moov_at = |mdat_start: u64, force_co64: bool| -> Vec<u8> {
+            let offsets: Vec<u64> = within
+                .iter()
+                .map(|w| mdat_start.saturating_add(*w))
+                .collect();
+            let tables: Vec<Option<TrackTables>> = (0..self.inputs)
+                .map(|input| {
+                    self.inits[input]
+                        .as_ref()
+                        .map(|init| track_tables(input, init, &samples, &offsets, force_co64))
+                })
+                .collect();
+            av_moov(&self.inits, Some(&tables), &tags)
+        };
+
+        let head_len = head.len() as u64;
+        let (moov, mdat_start) = if self.faststart {
+            // moov first: its size shifts the mdat, which changes the offsets the
+            // moov itself stores. Pin the entry width from an upper bound on the
+            // final offsets (the moov measured with the wider `co64` form is at
+            // least as long as the real one), after which the moov built against
+            // any mdat start has the size the real one will have.
+            let widest = moov_at(0, true).len() as u64;
+            let last_offset = head_len.saturating_add(widest).saturating_add(mdat_len);
+            let force_co64 = last_offset > u64::from(u32::MAX);
+            let moov_len = moov_at(0, force_co64).len() as u64;
+            let start = head_len.saturating_add(moov_len);
+            (moov_at(start, force_co64), start)
+        } else {
+            (moov_at(head_len, false), head_len)
+        };
+
+        let mut file = Vec::with_capacity(head.len() + moov.len() + mdat_len as usize);
         file.extend_from_slice(&head);
+        if self.faststart {
+            file.extend_from_slice(&moov);
+        }
+        debug_assert_eq!(
+            file.len() as u64,
+            mdat_start,
+            "the mdat lands where the sample tables address it"
+        );
         if mdat_header == 16 {
             file.extend_from_slice(&1u32.to_be_bytes()); // size 1: largesize follows
             file.extend_from_slice(b"mdat");
@@ -606,20 +833,12 @@ impl Mp4MuxN {
             file.extend_from_slice(&((payload + 8) as u32).to_be_bytes());
             file.extend_from_slice(b"mdat");
         }
-        let mut offsets = Vec::with_capacity(samples.len());
         for s in &samples {
-            offsets.push(file.len() as u64);
             file.extend_from_slice(&s.bytes);
         }
-
-        let tables: Vec<Option<TrackTables>> = (0..self.inputs)
-            .map(|input| {
-                self.inits[input]
-                    .as_ref()
-                    .map(|init| track_tables(input, init, &samples, &offsets))
-            })
-            .collect();
-        file.extend_from_slice(&av_moov(&self.inits, Some(&tables)));
+        if !self.faststart {
+            file.extend_from_slice(&moov);
+        }
 
         let out_frame = Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(file.into_boxed_slice())),
@@ -677,6 +896,11 @@ impl MultiInputElement for Mp4MuxN {
         input: usize,
         absolute_caps: &Caps,
     ) -> Result<ConfigureOutcome, G2gError> {
+        // CMAF puts exactly one media stream in a track file, in the fragmented
+        // layout. Refuse rather than write a file that claims a brand it breaks.
+        if self.cmaf && (self.inputs > 1 || !self.fragmented) {
+            return Err(G2gError::CapsMismatch);
+        }
         let kind = Self::pad_kind_for(absolute_caps).ok_or(G2gError::CapsMismatch)?;
         if let Caps::CompressedVideo {
             width: Dim::Fixed(w),
@@ -712,6 +936,30 @@ impl MultiInputElement for Mp4MuxN {
                 "moof/mdat fragments (streamable); false buffers the file and writes one mdat + a moov with real sample tables at EOS",
             )
             .with_default("true"),
+            PropertySpec::new(
+                "faststart",
+                PropKind::Bool,
+                "write the moov ahead of the mdat (progressive layout; a fragmented file's moov already leads)",
+            )
+            .with_default("false"),
+            PropertySpec::new(
+                "cmaf",
+                PropKind::Bool,
+                "write a CMAF track file: cmfc brands, a styp per segment, and fragments starting only at a sync sample (one input pad, fragmented layout)",
+            )
+            .with_default("false"),
+            PropertySpec::new(
+                "chunk-duration",
+                PropKind::Uint,
+                "target CMAF chunk duration, milliseconds (0 = one moof+mdat per fragment); a chunk is emitted as soon as it fills",
+            )
+            .with_default("0"),
+            PropertySpec::new(
+                "write-prft",
+                PropKind::Bool,
+                "write a producer reference time box (prft) ahead of each fragment, mapping its decode time to the wall clock",
+            )
+            .with_default("false"),
         ];
         PROPS
     }
@@ -726,6 +974,28 @@ impl MultiInputElement for Mp4MuxN {
                 self.fragmented = value.as_bool().ok_or(PropError::Type)?;
                 Ok(())
             }
+            "faststart" => {
+                self.faststart = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
+            // A CMAF track file holds one media stream, so refuse the mode on a
+            // fan-in muxer at the point it is asked for.
+            "cmaf" => {
+                let on = value.as_bool().ok_or(PropError::Type)?;
+                if on && self.inputs > 1 {
+                    return Err(PropError::Value);
+                }
+                self.cmaf = on;
+                Ok(())
+            }
+            "chunk-duration" => {
+                self.chunk_duration_ms = value.as_uint().ok_or(PropError::Type)?;
+                Ok(())
+            }
+            "write-prft" => {
+                self.write_prft = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -734,6 +1004,10 @@ impl MultiInputElement for Mp4MuxN {
         match name {
             "fragment-duration" => Some(PropValue::Uint(self.fragment_duration_ms)),
             "fragmented" => Some(PropValue::Bool(self.fragmented)),
+            "faststart" => Some(PropValue::Bool(self.faststart)),
+            "cmaf" => Some(PropValue::Bool(self.cmaf)),
+            "chunk-duration" => Some(PropValue::Uint(self.chunk_duration_ms)),
+            "write-prft" => Some(PropValue::Bool(self.write_prft)),
             _ => None,
         }
     }
@@ -807,15 +1081,28 @@ fn ns_to_ts(ns: u64, timescale: u32) -> u64 {
     (ns as u128 * timescale as u128 / 1_000_000_000) as u64
 }
 
+/// The metadata a `moov` carries, already split by the global / per-stream merge
+/// policy: the file's own tags and one list per pad slot (M838).
+#[derive(Debug, Default)]
+struct MoovTags {
+    global: TagList,
+    per_track: Vec<TagList>,
+}
+
 /// Build a multi-track `moov`: `mvhd` + one `trak` per track + `mvex` (one
-/// `trex` per track). `track_ID` is the 1-based pad slot, so it matches the
-/// `track_ID` each fragment carries even when a pad slot is empty (no AU yet).
+/// `trex` per track) + the file's `udta` metadata. `track_ID` is the 1-based pad
+/// slot, so it matches the `track_ID` each fragment carries even when a pad slot
+/// is empty (no AU yet).
 ///
 /// `tables` is `None` for the fragmented layout (empty sample tables, zero
 /// durations, `mvex` declares the movie extends into fragments) and `Some` for
 /// the progressive one (real tables and durations, no `mvex`), one entry per
 /// pad slot in the same order as `tracks`.
-fn av_moov(tracks: &[Option<TrackInit>], tables: Option<&[Option<TrackTables>]>) -> Vec<u8> {
+fn av_moov(
+    tracks: &[Option<TrackInit>],
+    tables: Option<&[Option<TrackTables>]>,
+    tags: &MoovTags,
+) -> Vec<u8> {
     let table_of = |i: usize| tables.and_then(|t| t.get(i)).and_then(Option::as_ref);
     let next_track_id = (tracks.len() + 1) as u32;
     // The movie lasts as long as its longest track's presentation.
@@ -842,7 +1129,8 @@ fn av_moov(tracks: &[Option<TrackInit>], tables: Option<&[Option<TrackTables>]>)
     let mut body = mvhd;
     for (i, track) in tracks.iter().enumerate() {
         let Some(track) = track else { continue };
-        body.extend_from_slice(&trak(i as u32 + 1, track, table_of(i)));
+        let track_tags = tags.per_track.get(i);
+        body.extend_from_slice(&trak(i as u32 + 1, track, table_of(i), track_tags));
     }
     // A progressive file has no fragments, so no `mvex` to announce them.
     if tables.is_none() {
@@ -858,6 +1146,9 @@ fn av_moov(tracks: &[Option<TrackInit>], tables: Option<&[Option<TrackTables>]>)
             p.extend_from_slice(&full_box(b"trex", 0, 0, &t));
         }
         body.extend_from_slice(&mp4_box(b"mvex", &p));
+    }
+    if let Some(udta) = udta_with_tags(&tags.global) {
+        body.extend_from_slice(&udta);
     }
     mp4_box(b"moov", &body)
 }
@@ -886,11 +1177,16 @@ struct TrackTables {
 /// nothing next to the sample bytes already held in memory. Tables are ordered
 /// by decode timestamp (a stable sort, so a stream with no reorder keeps the
 /// order it arrived in), and `ctts` carries `pts - dts` where they differ.
+///
+/// `force_co64` writes 64-bit chunk offsets even when the current ones fit in
+/// 32 bits: the faststart layout sizes the `moov` before it knows the offsets it
+/// will hold, so it needs the width pinned rather than derived.
 fn track_tables(
     input: usize,
     init: &TrackInit,
     samples: &[ProgSample],
     offsets: &[u64],
+    force_co64: bool,
 ) -> TrackTables {
     let mut idx: Vec<usize> = (0..samples.len())
         .filter(|&i| samples[i].input == input)
@@ -974,8 +1270,8 @@ fn track_tables(
     }
 
     // stco / co64: the chunk (= sample) file offsets, 64-bit only if one does
-    // not fit in 32.
-    let needs_co64 = idx.iter().any(|&i| offsets[i] > u64::from(u32::MAX));
+    // not fit in 32 or the caller pinned the width.
+    let needs_co64 = force_co64 || idx.iter().any(|&i| offsets[i] > u64::from(u32::MAX));
     let mut chunks = Vec::new();
     chunks.extend_from_slice(&(idx.len() as u32).to_be_bytes());
     for &i in &idx {
@@ -1205,7 +1501,12 @@ fn edts(init: &TrackInit, segment_duration: u64) -> Vec<u8> {
 /// One `trak` for a track (`track_ID` 1-based). `tables` carries the
 /// progressive layout's sample tables and durations; `None` writes the
 /// fragmented form (empty tables, zero durations, the fragments carry timing).
-fn trak(track_id: u32, init: &TrackInit, tables: Option<&TrackTables>) -> Vec<u8> {
+fn trak(
+    track_id: u32,
+    init: &TrackInit,
+    tables: Option<&TrackTables>,
+    tags: Option<&TagList>,
+) -> Vec<u8> {
     let TrakMedia {
         handler,
         media_header: header,
@@ -1288,9 +1589,12 @@ fn trak(track_id: u32, init: &TrackInit, tables: Option<&TrackTables>) -> Vec<u8
     let minf = mp4_box(b"minf", &[header, dinf, stbl].concat());
     let mdia = mp4_box(b"mdia", &[mdhd, hdlr, minf].concat());
     let segment_duration = tables.map(|t| t.track_duration).unwrap_or(0);
+    // This track's own metadata, which a reader reports on the elementary stream
+    // rather than the file (M838).
+    let udta = tags.and_then(udta_with_tags).unwrap_or_default();
     mp4_box(
         b"trak",
-        &[tkhd, edts(init, segment_duration), mdia].concat(),
+        &[tkhd, edts(init, segment_duration), mdia, udta].concat(),
     )
 }
 
@@ -1301,11 +1605,12 @@ fn av_fragment(
     track_id: u32,
     sequence: u64,
     base_decode_time: u64,
+    cmaf: bool,
     samples: &[PendingSample],
 ) -> Vec<u8> {
     let build_moof = |data_offset: u32| -> Vec<u8> {
         let mfhd = full_box(b"mfhd", 0, 0, &(sequence as u32).to_be_bytes());
-        let tfhd = full_box(b"tfhd", 0, 0x020000, &track_id.to_be_bytes()); // default-base-is-moof
+        let tfhd = tfhd(track_id, cmaf);
         let tfdt = full_box(b"tfdt", 1, 0, &base_decode_time.to_be_bytes());
         let trun = {
             let mut p = Vec::new();
@@ -1501,7 +1806,7 @@ mod tests {
                 config: alloc::vec![0x11, 0x90],
             }),
         ];
-        let moov = av_moov(&tracks, None);
+        let moov = av_moov(&tracks, None, &MoovTags::default());
         let count = |needle: &[u8]| moov.windows(4).filter(|w| *w == needle).count();
         assert_eq!(count(b"trak"), 2, "one trak per track");
         assert_eq!(count(b"trex"), 2, "one trex per track");
@@ -1524,7 +1829,7 @@ mod tests {
                 config: alloc::vec![0x11, 0x90],
             }),
         ];
-        let moov = av_moov(&tracks, None);
+        let moov = av_moov(&tracks, None, &MoovTags::default());
         let count = |needle: &[u8]| moov.windows(4).filter(|w| *w == needle).count();
         assert_eq!(count(b"trak"), 1, "only the non-empty pad gets a trak");
         assert_eq!(count(b"trex"), 1);
@@ -1544,7 +1849,7 @@ mod tests {
             rate: 48000,
             config: Vec::new(),
         })];
-        let moov = av_moov(&tracks, None);
+        let moov = av_moov(&tracks, None, &MoovTags::default());
         let count = |needle: &[u8]| moov.windows(needle.len()).filter(|w| *w == needle).count();
         assert_eq!(count(b"Opus"), 1, "Opus sample entry");
         assert_eq!(count(b"dOps"), 1, "OpusSpecificBox");
@@ -1582,7 +1887,7 @@ mod tests {
             rate: 48000,
             config: head,
         })];
-        let moov = av_moov(&tracks, None);
+        let moov = av_moov(&tracks, None, &MoovTags::default());
         let dops = moov.windows(4).position(|w| w == b"dOps").unwrap();
         assert_eq!(
             u16::from_be_bytes([moov[dops + 6], moov[dops + 7]]),
@@ -1605,7 +1910,7 @@ mod tests {
             height: 240,
             param_sets: Vec::new(),
         })];
-        let moov = av_moov(&tracks, None);
+        let moov = av_moov(&tracks, None, &MoovTags::default());
         let count = |needle: &[u8]| moov.windows(needle.len()).filter(|w| *w == needle).count();
         assert_eq!(count(b"vp09"), 1, "VP9 sample entry");
         assert_eq!(count(b"vpcC"), 1, "VPCodecConfigurationBox");
@@ -1638,6 +1943,10 @@ mod tests {
     /// Six H.264 access units (two IDRs, four inter frames) through the muxer in
     /// the given layout.
     async fn mux_six_aus(fragmented: bool) -> Vec<u8> {
+        mux_six_aus_faststart(fragmented, false).await
+    }
+
+    async fn mux_six_aus_faststart(fragmented: bool, faststart: bool) -> Vec<u8> {
         let sps = [0x67u8, 0x42, 0x00, 0x1e, 0x88];
         let pps = [0x68u8, 0xce, 0x3c, 0x80];
         let idr = [0x65u8, 0x88, 0x84, 0x00];
@@ -1645,7 +1954,9 @@ mod tests {
         let inter = || annexb(&[&[0x41u8, 0x9a, 0x00]]);
         let aus = [key.clone(), inter(), inter(), inter(), inter(), key];
 
-        let mut mux = Mp4MuxN::new(1).with_fragmented(fragmented);
+        let mut mux = Mp4MuxN::new(1)
+            .with_fragmented(fragmented)
+            .with_faststart(faststart);
         mux.configure_pipeline(0, &h264_caps(320, 240)).unwrap();
         let mut sink = CaptureSink::default();
         for (i, au) in aus.iter().enumerate() {
@@ -1722,6 +2033,59 @@ mod tests {
             top_level_boxes(&frag)[..2],
             [*b"ftyp", *b"moov"],
             "and still leads with the init segment"
+        );
+    }
+
+    /// M824 faststart: the same progressive file with its `moov` ahead of the
+    /// `mdat`, every chunk offset shifted by the `moov`'s own size so the sample
+    /// bytes are still where `stco` points.
+    #[tokio::test]
+    async fn faststart_moves_the_moov_ahead_of_the_mdat() {
+        let file = mux_six_aus_faststart(false, true).await;
+        assert_eq!(
+            top_level_boxes(&file),
+            alloc::vec![*b"ftyp", *b"moov", *b"mdat"],
+            "the index precedes the media"
+        );
+
+        let plain = mux_six_aus_faststart(false, false).await;
+        assert_eq!(file.len(), plain.len(), "the same boxes, reordered");
+
+        // Every sample really lives at its stco offset: the first one starts
+        // with its SPS's 4-byte AVCC length, and the last ends the file.
+        let stco = box_payload(&file, b"stco").expect("stco");
+        let stsz = box_payload(&file, b"stsz").expect("stsz");
+        let count = u32::from_be_bytes(stsz[8..12].try_into().unwrap()) as usize;
+        assert_eq!(count, 6);
+        let mut end = 0usize;
+        for i in 0..count {
+            let off = u32::from_be_bytes(stco[8 + i * 4..12 + i * 4].try_into().unwrap()) as usize;
+            let len = u32::from_be_bytes(stsz[12 + i * 4..16 + i * 4].try_into().unwrap()) as usize;
+            if i > 0 {
+                assert_eq!(off, end, "samples are packed in mdat order");
+            }
+            end = off + len;
+        }
+        assert_eq!(end, file.len(), "the last sample ends the file");
+
+        // The shift is exactly the moov's size: the moov-at-end file's first
+        // offset plus the moov length is the faststart file's first offset.
+        let first = u32::from_be_bytes(stco[8..12].try_into().unwrap());
+        let plain_stco = box_payload(&plain, b"stco").expect("plain stco");
+        let plain_first = u32::from_be_bytes(plain_stco[8..12].try_into().unwrap());
+        let moov_len = box_payload(&file, b"moov").expect("moov").len() as u32 + 8;
+        assert_eq!(first, plain_first + moov_len);
+        assert_eq!(
+            u32::from_be_bytes(file[first as usize..first as usize + 4].try_into().unwrap()),
+            5,
+            "the first sample starts with its SPS's 4-byte AVCC length"
+        );
+
+        // A fragmented file's moov already leads, so faststart changes nothing.
+        assert_eq!(
+            mux_six_aus_faststart(true, true).await,
+            mux_six_aus_faststart(true, false).await,
+            "the fragmented layout is untouched"
         );
     }
 

@@ -15,8 +15,10 @@ use g2g_core::{
 };
 use g2g_ml::safetensors::{serialize, SafeTensors};
 use g2g_ml::wgpuinfer::{
-    add_reference, avgpool2d_reference, batch_norm_reference, conv2d_reference, linear_reference,
-    maxpool2d_reference, relu_reference, sigmoid_reference, StackLayer, WgpuInference,
+    add_reference, attention_reference, avgpool2d_reference, batch_norm_reference,
+    conv2d_reference, layer_norm_reference, linear_reference, matmul_reference,
+    maxpool2d_reference, relu_reference, sigmoid_reference, softmax_reference, StackLayer,
+    WgpuInference,
 };
 use g2g_ml::wgpupreprocess::{
     gpu_available, nv12_to_gpu_texture, nv12_to_rgb_tensor, WgpuBufferOwner, WgpuPreprocess,
@@ -1034,6 +1036,400 @@ fn add_reference_is_elementwise() {
         add_reference(&[1.0, 2.0, 3.0], &[0.5, -1.0, 10.0]),
         vec![1.5, 1.0, 13.0]
     );
+}
+
+// ---------------------------------------------------------------------------
+// M856: transformer ops. The `[1, 3, 2, 4]` tensor the GPU preprocess leaves on
+// the device is 24 f32s; the transformer layers read the same buffer as a
+// `[1, 1, S, D]` token matrix (S = 4 tokens of D = 6 features). Same bytes, same
+// order, so the CPU reference starts from the identical `nv12_to_rgb_tensor`
+// values. The references walk the reductions in the shaders' order, but the GPU
+// still contracts multiply-adds and evaluates `exp` its own way, so these check
+// to ~1e-5 (measured worst case on a 3060: 4e-7) rather than bit-equality.
+// ---------------------------------------------------------------------------
+
+/// Sequence length and model dim the token tests read out of the 24-value
+/// preprocess tensor.
+const S: u32 = 4;
+const D: u32 = 6;
+
+fn token_caps() -> Caps {
+    nchw_caps(&[1, 1, S, D])
+}
+
+/// Deterministic `[K, N]` input-major matrix and `[N]` bias, non-symmetric so a
+/// transposed or collapsed index is caught.
+fn matrix(k: u32, n: u32, phase: f32) -> (Vec<f32>, Vec<f32>) {
+    let w = (0..k * n)
+        .map(|i| (i as f32 * 0.37 + phase).sin() * 0.6)
+        .collect();
+    let b = (0..n).map(|i| i as f32 * 0.11 - 0.2 + phase).collect();
+    (w, b)
+}
+
+/// The per-token matmul: `[S, D] . [D, N] + [N]`, the projection every
+/// transformer layer is built from. Run on the GPU-resident preprocess tensor
+/// read as a token matrix, checked against the CPU reference.
+#[tokio::test]
+async fn matmul_on_gpu_resident_tokens_matches_cpu_reference() {
+    if !gpu_available().await {
+        eprintln!("skipping: no wgpu adapter on this host");
+        return;
+    }
+    let _gpu = gpu_guard().lock().await;
+    const N: u32 = 5;
+    let (weights, bias) = matrix(D, N, 0.3);
+
+    let nv12 = sample_nv12();
+    let tensor_frame = preprocess_to_gpu_tensor(nv12.clone()).await;
+    let op = WgpuInference::matmul(S, D, N, weights.clone(), bias.clone()).expect("valid matmul");
+    let out = run_op(op, token_caps(), tensor_frame).await;
+    let got = logits_from_system(&out);
+
+    let x = nv12_to_rgb_tensor(&nv12, W as usize, H as usize);
+    let expected = matmul_reference(&x, S as usize, D as usize, N as usize, &weights, &bias);
+    assert_eq!(got.len(), (S * N) as usize, "[S, N] token matrix");
+    for (i, (g, e)) in got.iter().zip(&expected).enumerate() {
+        assert!(
+            (g - e).abs() < 1e-5,
+            "matmul {i}: gpu {g} vs cpu reference {e}"
+        );
+    }
+    // Every row must differ: a matmul that ignored the row index would repeat.
+    assert!(
+        got[..N as usize] != got[N as usize..2 * N as usize],
+        "each token must get its own projection"
+    );
+}
+
+/// LayerNorm over the last dim: each token normalized by its own mean and
+/// variance, then the learned affine. Rows must come out zero-mean / unit-var
+/// before the affine, which the reference encodes and the assertion below
+/// double-checks with an identity gamma/beta run.
+#[tokio::test]
+async fn layer_norm_on_gpu_matches_cpu_reference() {
+    if !gpu_available().await {
+        eprintln!("skipping: no wgpu adapter on this host");
+        return;
+    }
+    let _gpu = gpu_guard().lock().await;
+    const EPS: f32 = 1e-5;
+    let gamma = vec![1.3f32, 0.7, 1.0, 0.4, 2.0, -0.5];
+    let beta = vec![0.1f32, -0.2, 0.0, 0.3, -0.1, 0.05];
+
+    let nv12 = sample_nv12();
+    let tensor_frame = preprocess_to_gpu_tensor(nv12.clone()).await;
+    let op = WgpuInference::layer_norm(S, D, gamma.clone(), beta.clone(), EPS).expect("valid ln");
+    let out = run_op(op, token_caps(), tensor_frame).await;
+    let got = logits_from_system(&out);
+
+    let x = nv12_to_rgb_tensor(&nv12, W as usize, H as usize);
+    let expected = layer_norm_reference(&x, S as usize, D as usize, &gamma, &beta, EPS);
+    assert_eq!(got.len(), (S * D) as usize, "shape-preserving");
+    for (i, (g, e)) in got.iter().zip(&expected).enumerate() {
+        assert!(
+            (g - e).abs() < 1e-5,
+            "layernorm {i}: gpu {g} vs cpu reference {e}"
+        );
+    }
+    // With the affine removed each row is zero-mean and unit-variance: proves the
+    // per-row statistics were used, not a global or per-column normalization.
+    let plain = layer_norm_reference(&x, S as usize, D as usize, &[1.0; 6], &[0.0; 6], EPS);
+    for row in plain.chunks_exact(D as usize) {
+        let mean: f32 = row.iter().sum::<f32>() / D as f32;
+        let var: f32 = row.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / D as f32;
+        assert!(mean.abs() < 1e-4, "row mean {mean} must be ~0");
+        assert!((var - 1.0).abs() < 1e-3, "row variance {var} must be ~1");
+    }
+}
+
+/// Softmax over the last dim, standalone: each row sums to 1 and matches the
+/// max-subtracted CPU reference.
+#[tokio::test]
+async fn softmax_on_gpu_matches_cpu_reference() {
+    if !gpu_available().await {
+        eprintln!("skipping: no wgpu adapter on this host");
+        return;
+    }
+    let _gpu = gpu_guard().lock().await;
+    let nv12 = sample_nv12();
+    let tensor_frame = preprocess_to_gpu_tensor(nv12.clone()).await;
+    let op = WgpuInference::softmax(S, D).expect("valid softmax");
+    let out = run_op(op, token_caps(), tensor_frame).await;
+    let got = logits_from_system(&out);
+
+    let x = nv12_to_rgb_tensor(&nv12, W as usize, H as usize);
+    let expected = softmax_reference(&x, S as usize, D as usize);
+    assert_eq!(got.len(), (S * D) as usize, "shape-preserving");
+    for (i, (g, e)) in got.iter().zip(&expected).enumerate() {
+        assert!(
+            (g - e).abs() < 1e-6,
+            "softmax {i}: gpu {g} vs cpu reference {e}"
+        );
+    }
+    for (r, row) in got.chunks_exact(D as usize).enumerate() {
+        let sum: f32 = row.iter().sum();
+        assert!((sum - 1.0).abs() < 1e-5, "row {r} sums to {sum}, not 1");
+    }
+}
+
+/// Self-attention on the GPU for 1, 2 and 3 heads: the QKV projection runs as a
+/// GPU-resident matmul (`[S, D] -> [S, 3D]`, the packed layout the attention op
+/// indexes) and the attention pass reads it in place. Each head count is checked
+/// against the CPU reference over the same projected values, so a head-stride or
+/// softmax-axis error shows up as a mismatch rather than a plausible number.
+#[tokio::test]
+async fn attention_on_gpu_matches_cpu_reference_for_each_head_count() {
+    if !gpu_available().await {
+        eprintln!("skipping: no wgpu adapter on this host");
+        return;
+    }
+    let _gpu = gpu_guard().lock().await;
+    let nv12 = sample_nv12();
+    let x = nv12_to_rgb_tensor(&nv12, W as usize, H as usize);
+    let (qkv_w, qkv_b) = matrix(D, 3 * D, 0.9);
+
+    for heads in [1u32, 2, 3] {
+        let tensor_frame = preprocess_to_gpu_tensor(nv12.clone()).await;
+        let proj = WgpuInference::matmul(S, D, 3 * D, qkv_w.clone(), qkv_b.clone())
+            .expect("valid qkv projection")
+            .with_gpu_output();
+        let projected = run_op(proj, token_caps(), tensor_frame).await;
+        assert!(
+            matches!(projected.domain, MemoryDomain::WgpuBuffer(_)),
+            "the packed QKV stays on the GPU for the attention pass"
+        );
+
+        let attn = WgpuInference::attention(S, D, heads).expect("valid attention");
+        let out = run_op(attn, nchw_caps(&[1, 1, S, 3 * D]), projected).await;
+        let got = logits_from_system(&out);
+
+        let qkv = matmul_reference(&x, S as usize, D as usize, 3 * D as usize, &qkv_w, &qkv_b);
+        let expected = attention_reference(&qkv, S as usize, D as usize, heads as usize);
+        assert_eq!(got.len(), (S * D) as usize, "[S, D] context, {heads} heads");
+        for (i, (g, e)) in got.iter().zip(&expected).enumerate() {
+            assert!(
+                (g - e).abs() < 1e-5,
+                "attention ({heads} heads) elem {i}: gpu {g} vs cpu reference {e}"
+            );
+        }
+        // The context must be a genuine mix: with a non-degenerate input no two
+        // tokens attend identically.
+        assert!(
+            got[..D as usize] != got[D as usize..2 * D as usize],
+            "{heads} heads: tokens must get distinct contexts"
+        );
+    }
+}
+
+/// Head counts that do not divide the model dim (and zero dims) are rejected at
+/// construction rather than reading past a head's slice at dispatch.
+#[test]
+fn attention_validates_head_split() {
+    for heads in [1u32, 2, 3, 6] {
+        assert!(WgpuInference::attention(4, 6, heads).is_ok());
+    }
+    for bad in [0u32, 4, 5, 7] {
+        assert_eq!(
+            WgpuInference::attention(4, 6, bad).err(),
+            Some(G2gError::CapsMismatch),
+            "{bad} heads must not split a 6-dim model"
+        );
+    }
+    assert!(WgpuInference::attention(0, 6, 2).is_err());
+    assert!(WgpuInference::attention(4, 0, 2).is_err());
+    assert!(WgpuInference::layer_norm(4, 6, vec![1.0; 5], vec![0.0; 6], 1e-5).is_err());
+    assert!(WgpuInference::matmul(4, 6, 2, vec![0.0; 11], vec![0.0; 2]).is_err());
+}
+
+/// A whole pre-norm transformer block imported from one safetensors file and run
+/// GPU-resident through `ResidualStack`:
+/// `x + attn(ln1(x))` then `+ mlp(ln2(.))`, with 2-head attention. The four
+/// projections load under the torch names (`attn.q_proj.weight`, ...) and the
+/// output projection is deliberately exported without a bias, so the
+/// missing-bias path is exercised too. The read-back matches a CPU reference
+/// that projects Q, K and V as three separate matmuls and interleaves them,
+/// which is a different code path from the packed `[D, 3D]` matrix the importer
+/// builds: a mis-packed projection would not agree.
+#[tokio::test]
+async fn transformer_block_from_safetensors_matches_cpu_reference() {
+    if !gpu_available().await {
+        eprintln!("skipping: no wgpu adapter on this host");
+        return;
+    }
+    let _gpu = gpu_guard().lock().await;
+    const EPS: f32 = 1e-5;
+    const HEADS: usize = 2;
+    const HIDDEN: u32 = 12;
+
+    let ln1_g = vec![1.2f32, 0.8, 1.0, 0.9, 1.1, 0.7];
+    let ln1_b = vec![0.0f32, 0.05, -0.05, 0.1, 0.0, -0.1];
+    let ln2_g = vec![0.9f32, 1.0, 1.3, 0.6, 1.0, 1.1];
+    let ln2_b = vec![0.02f32, 0.0, -0.03, 0.0, 0.07, 0.0];
+    let (qw, qb) = matrix(D, D, 0.1);
+    let (kw, kb) = matrix(D, D, 1.7);
+    let (vw, vb) = matrix(D, D, 2.9);
+    let (ow, _) = matrix(D, D, 3.3);
+    let ob = vec![0f32; D as usize]; // o_proj.bias is absent from the file
+    let (fc1_w, fc1_b) = matrix(D, HIDDEN, 0.5);
+    let (fc2_w, fc2_b) = matrix(HIDDEN, D, 1.1);
+
+    let d = D as usize;
+    let blob = serialize(&[
+        ("ln1.weight", &[d], &ln1_g),
+        ("ln1.bias", &[d], &ln1_b),
+        ("attn.q_proj.weight", &[d, d], &qw),
+        ("attn.q_proj.bias", &[d], &qb),
+        ("attn.k_proj.weight", &[d, d], &kw),
+        ("attn.k_proj.bias", &[d], &kb),
+        ("attn.v_proj.weight", &[d, d], &vw),
+        ("attn.v_proj.bias", &[d], &vb),
+        ("attn.o_proj.weight", &[d, d], &ow),
+        ("ln2.weight", &[d], &ln2_g),
+        ("ln2.bias", &[d], &ln2_b),
+        ("mlp.fc1.weight", &[d, HIDDEN as usize], &fc1_w),
+        ("mlp.fc1.bias", &[HIDDEN as usize], &fc1_b),
+        ("mlp.fc2.weight", &[HIDDEN as usize, d], &fc2_w),
+        ("mlp.fc2.bias", &[d], &fc2_b),
+    ]);
+    let st = SafeTensors::parse(&blob).expect("parse transformer weights");
+
+    let specs = vec![
+        StackLayer::SaveSkip {
+            slot: "attn_in".into(),
+        },
+        StackLayer::LayerNorm {
+            name: "ln1".into(),
+            eps: EPS,
+        },
+        StackLayer::Attention {
+            name: "attn".into(),
+            heads: HEADS as u32,
+        },
+        StackLayer::AddSkip {
+            slot: "attn_in".into(),
+        },
+        StackLayer::SaveSkip {
+            slot: "mlp_in".into(),
+        },
+        StackLayer::LayerNorm {
+            name: "ln2".into(),
+            eps: EPS,
+        },
+        StackLayer::Matmul {
+            name: "mlp.fc1".into(),
+        },
+        StackLayer::Relu,
+        StackLayer::Matmul {
+            name: "mlp.fc2".into(),
+        },
+        StackLayer::AddSkip {
+            slot: "mlp_in".into(),
+        },
+    ];
+    let mut stack = WgpuInference::residual_stack_from_safetensors(&specs, &st, 1, S, D)
+        .expect("import the transformer block from one file");
+
+    let nv12 = sample_nv12();
+    let frame = preprocess_to_gpu_tensor(nv12.clone()).await;
+    let out = stack.run(frame).expect("run the block on the GPU");
+    let got = logits_from_system(&out);
+
+    // CPU reference over the same 24 values, read as [S, D] tokens.
+    let (s, d) = (S as usize, D as usize);
+    let x = nv12_to_rgb_tensor(&nv12, W as usize, H as usize);
+    let n1 = layer_norm_reference(&x, s, d, &ln1_g, &ln1_b, EPS);
+    let q = matmul_reference(&n1, s, d, d, &qw, &qb);
+    let k = matmul_reference(&n1, s, d, d, &kw, &kb);
+    let v = matmul_reference(&n1, s, d, d, &vw, &vb);
+    // Interleave Q, K, V per token into the packed [S, 3D] layout.
+    let mut qkv = Vec::with_capacity(s * 3 * d);
+    for t in 0..s {
+        for m in [&q, &k, &v] {
+            qkv.extend_from_slice(&m[t * d..(t + 1) * d]);
+        }
+    }
+    let ctx = attention_reference(&qkv, s, d, HEADS);
+    let attn_out = matmul_reference(&ctx, s, d, d, &ow, &ob);
+    let after_attn = add_reference(&attn_out, &x);
+    let n2 = layer_norm_reference(&after_attn, s, d, &ln2_g, &ln2_b, EPS);
+    let h1 = relu_reference(&matmul_reference(
+        &n2,
+        s,
+        d,
+        HIDDEN as usize,
+        &fc1_w,
+        &fc1_b,
+    ));
+    let h2 = matmul_reference(&h1, s, HIDDEN as usize, d, &fc2_w, &fc2_b);
+    let expected = add_reference(&h2, &after_attn);
+
+    assert_eq!(got.len(), s * d, "the block preserves the [S, D] shape");
+    for (i, (g, e)) in got.iter().zip(&expected).enumerate() {
+        assert!(
+            (g - e).abs() < 1e-5,
+            "block elem {i}: gpu {g} vs cpu reference {e}"
+        );
+    }
+    // Both residuals must have been added: the output cannot equal the MLP branch
+    // alone, nor the attention branch alone.
+    assert!(
+        got.iter().zip(&h2).any(|(g, b)| (g - b).abs() > 1e-4),
+        "the MLP skip must be added"
+    );
+    assert!(
+        got.iter().zip(&attn_out).any(|(g, b)| (g - b).abs() > 1e-4),
+        "the attention skip must be added"
+    );
+}
+
+/// The transformer layers read the running tensor as `[1, 1, S, D]` tokens, so a
+/// multi-channel feature map is rejected at import instead of being silently
+/// reinterpreted, and a missing / mis-shaped projection fails loud.
+#[test]
+fn transformer_import_validates_shape_and_tensors() {
+    let d = D as usize;
+    let (qw, qb) = matrix(D, D, 0.1);
+    let blob = serialize(&[
+        ("attn.q_proj.weight", &[d, d], &qw),
+        ("attn.q_proj.bias", &[d], &qb),
+        ("attn.k_proj.weight", &[d, d], &qw),
+        ("attn.v_proj.weight", &[d, d], &qw),
+        ("attn.o_proj.weight", &[d, d], &qw),
+        ("ln1.weight", &[d], &qb),
+        ("ln1.bias", &[d], &qb),
+    ]);
+    let st = SafeTensors::parse(&blob).unwrap();
+
+    let attn = vec![StackLayer::Attention {
+        name: "attn".into(),
+        heads: 2,
+    }];
+    assert!(WgpuInference::stack_from_safetensors(&attn, &st, 1, S, D).is_ok());
+    // C != 1: not a token matrix.
+    assert_eq!(
+        WgpuInference::stack_from_safetensors(&attn, &st, 3, S, D).err(),
+        Some(G2gError::CapsMismatch),
+        "a [1, C, H, W] feature map is not a token matrix"
+    );
+    let ln = vec![StackLayer::LayerNorm {
+        name: "ln1".into(),
+        eps: 1e-5,
+    }];
+    assert!(WgpuInference::stack_from_safetensors(&ln, &st, 1, S, D).is_ok());
+    assert!(WgpuInference::stack_from_safetensors(&ln, &st, 2, S, D).is_err());
+    // A projection the file does not carry.
+    let missing = vec![StackLayer::Attention {
+        name: "other".into(),
+        heads: 2,
+    }];
+    assert!(WgpuInference::stack_from_safetensors(&missing, &st, 1, S, D).is_err());
+    // A matmul whose K does not match the running feature count.
+    let mm = vec![StackLayer::Matmul {
+        name: "attn.q_proj".into(),
+    }];
+    assert!(WgpuInference::stack_from_safetensors(&mm, &st, 1, S, D).is_ok());
+    assert!(WgpuInference::stack_from_safetensors(&mm, &st, 1, S, D + 1).is_err());
 }
 
 #[test]

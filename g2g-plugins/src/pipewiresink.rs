@@ -1,7 +1,14 @@
-//! Linux PipeWire audio render sink. Plays interleaved PCM (`PcmS16Le` /
-//! `PcmF32Le`) through the PipeWire graph, the modern Linux media layer and the
-//! third Linux audio output alongside [`AlsaSink`](crate::alsasink::AlsaSink)
-//! and [`PulseSink`](crate::pulsesink::PulseSink).
+//! Linux PipeWire audio render sink. Plays interleaved PCM (`PcmU8` /
+//! `PcmS16Le` / `PcmS24Le` / `PcmS32Le` / `PcmF32Le`) through the PipeWire
+//! graph, the modern Linux media layer and the third Linux audio output
+//! alongside [`AlsaSink`](crate::alsasink::AlsaSink) and
+//! [`PulseSink`](crate::pulsesink::PulseSink).
+//!
+//! ## Channel order
+//!
+//! The connected format carries an explicit SPA position array built from our
+//! interleave order, so a 5.1 / 7.1 stream is routed by speaker rather than
+//! connected unpositioned.
 //!
 //! ## Threading
 //!
@@ -249,7 +256,10 @@ impl PadTemplates for PipeWireSink {
             sample_rate: 48_000,
         };
         Vec::from([PadTemplate::sink(CapsSet::from_alternatives(Vec::from([
+            pcm(AudioFormat::PcmU8),
             pcm(AudioFormat::PcmS16Le),
+            pcm(AudioFormat::PcmS24Le),
+            pcm(AudioFormat::PcmS32Le),
             pcm(AudioFormat::PcmF32Le),
         ])))])
     }

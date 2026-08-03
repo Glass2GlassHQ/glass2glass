@@ -37,10 +37,15 @@ use crate::graph::Graph;
 use crate::memory::{DomainSet, MemoryDomainKind};
 use crate::property::{ElementMetadata, PropError, PropValue, PropertySpec};
 use crate::query::{AllocationParams, LatencyReport};
-use crate::runtime::channel::{bounded, link, Receiver, SendError, Sender, SenderSink};
+use crate::runtime::channel::{
+    bounded, link, packet_bytes, ProbeAction, ProbeSlot, Receiver, SendError, Sender, SenderSink,
+};
 use crate::runtime::graph_runner::{run_graph_inner, GraphNodeRef};
+use crate::runtime::instrument::{EdgeCounters, ElementProbe};
 use crate::runtime::join::{dynamic_join, join_all, select2, Either};
+use crate::runtime::observe::{link_tapped, register_runner_tap, EdgeTap, TapEdge, TapNode};
 use crate::runtime::runner::{LinkCapacity, NullSink, RunStats, SourceLoop};
+use crate::runtime::{NodeRole, Observer};
 
 /// Dyn-safe mirror of [`SourceLoop`] for heterogeneous fan-in branches, the
 /// source-side analog of [`DynAsyncElement`](crate::element::DynAsyncElement).
@@ -117,6 +122,9 @@ pub trait DynSourceLoop: ElementBound {
 
     /// Dyn-safe mirror of [`SourceLoop::set_instance_name`].
     fn set_instance_name(&mut self, _name: alloc::string::String) {}
+
+    /// Dyn-safe mirror of [`SourceLoop::set_log_category`].
+    fn set_log_category(&mut self, _category: alloc::string::String) {}
 
     /// Dyn-safe mirror of [`SourceLoop::set_property`]. Defaults to "no
     /// properties"; the blanket `impl<T: SourceLoop>` overrides it to forward.
@@ -200,6 +208,10 @@ impl<T: SourceLoop> DynSourceLoop for T {
         SourceLoop::set_instance_name(self, name)
     }
 
+    fn set_log_category(&mut self, category: alloc::string::String) {
+        SourceLoop::set_log_category(self, category)
+    }
+
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
         SourceLoop::set_property(self, name, value)
     }
@@ -274,6 +286,10 @@ impl<'b> DynSourceLoop for &'b mut (dyn DynSourceLoop + 'b) {
         (**self).set_instance_name(name)
     }
 
+    fn set_log_category(&mut self, category: alloc::string::String) {
+        (**self).set_log_category(category)
+    }
+
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
         (**self).set_property(name, value)
     }
@@ -304,6 +320,10 @@ pub trait DynMultiInputElement: ElementBound {
     fn caps_constraint_for_output(&self) -> Result<CapsConstraint<'_>, G2gError>;
     /// Dyn-safe mirror of [`MultiInputElement::propose_allocation_for_input`].
     fn propose_allocation_for_input(&self, input: usize, caps: &Caps) -> Option<AllocationParams>;
+    /// Dyn-safe mirror of [`MultiInputElement::propose_allocation_for_output`].
+    fn propose_allocation_for_output(&self, caps: &Caps) -> Option<AllocationParams>;
+    /// Dyn-safe mirror of [`MultiInputElement::configure_allocation_for_output`].
+    fn configure_allocation_for_output(&mut self, params: &AllocationParams);
     /// Dyn-safe mirror of [`MultiInputElement::output_caps`].
     fn output_caps(&self) -> Result<Caps, G2gError>;
     fn configure_pipeline(
@@ -335,6 +355,13 @@ pub trait DynMultiInputElement: ElementBound {
     fn is_terminal(&self) -> bool {
         false
     }
+
+    /// Dyn-safe mirror of [`MultiInputElement::set_instance_name`], so the runner
+    /// can name an erased muxer instance for logging.
+    fn set_instance_name(&mut self, _name: alloc::string::String) {}
+
+    /// Dyn-safe mirror of [`MultiInputElement::set_log_category`].
+    fn set_log_category(&mut self, _category: alloc::string::String) {}
 }
 
 impl<T: MultiInputElement> DynMultiInputElement for T {
@@ -364,6 +391,14 @@ impl<T: MultiInputElement> DynMultiInputElement for T {
 
     fn propose_allocation_for_input(&self, input: usize, caps: &Caps) -> Option<AllocationParams> {
         MultiInputElement::propose_allocation_for_input(self, input, caps)
+    }
+
+    fn propose_allocation_for_output(&self, caps: &Caps) -> Option<AllocationParams> {
+        MultiInputElement::propose_allocation_for_output(self, caps)
+    }
+
+    fn configure_allocation_for_output(&mut self, params: &AllocationParams) {
+        MultiInputElement::configure_allocation_for_output(self, params)
     }
 
     fn output_caps(&self) -> Result<Caps, G2gError> {
@@ -410,6 +445,14 @@ impl<T: MultiInputElement> DynMultiInputElement for T {
     fn is_terminal(&self) -> bool {
         MultiInputElement::is_terminal(self)
     }
+
+    fn set_instance_name(&mut self, name: alloc::string::String) {
+        MultiInputElement::set_instance_name(self, name)
+    }
+
+    fn set_log_category(&mut self, category: alloc::string::String) {
+        MultiInputElement::set_log_category(self, category)
+    }
 }
 
 /// Forwarding impl so a borrowed `&mut dyn DynMultiInputElement` can be boxed
@@ -443,6 +486,14 @@ impl<'b> DynMultiInputElement for &'b mut (dyn DynMultiInputElement + 'b) {
 
     fn propose_allocation_for_input(&self, input: usize, caps: &Caps) -> Option<AllocationParams> {
         (**self).propose_allocation_for_input(input, caps)
+    }
+
+    fn propose_allocation_for_output(&self, caps: &Caps) -> Option<AllocationParams> {
+        (**self).propose_allocation_for_output(caps)
+    }
+
+    fn configure_allocation_for_output(&mut self, params: &AllocationParams) {
+        (**self).configure_allocation_for_output(params)
     }
 
     fn output_caps(&self) -> Result<Caps, G2gError> {
@@ -489,6 +540,14 @@ impl<'b> DynMultiInputElement for &'b mut (dyn DynMultiInputElement + 'b) {
     fn is_terminal(&self) -> bool {
         (**self).is_terminal()
     }
+
+    fn set_instance_name(&mut self, name: alloc::string::String) {
+        (**self).set_instance_name(name)
+    }
+
+    fn set_log_category(&mut self, category: alloc::string::String) {
+        (**self).set_log_category(category)
+    }
 }
 
 /// Drives `N sources → Merger → 1 sink` (M9 fan-in). The `Merger` selects
@@ -503,8 +562,43 @@ pub async fn run_fanin_sink<Snk, Clk>(
     sources: Vec<&mut dyn DynSourceLoop>,
     merger: &mut Merger,
     sink: &mut Snk,
+    clock: &Clk,
+    link_capacity: impl Into<LinkCapacity>,
+) -> Result<RunStats, G2gError>
+where
+    Snk: AsyncElement,
+    Clk: PipelineClock,
+{
+    run_fanin_sink_inner(sources, merger, sink, clock, link_capacity, None).await
+}
+
+/// As [`run_fanin_sink`], but taps live telemetry into `observer` (M846), the
+/// hand-built analog of [`run_graph_observed`](crate::runtime::run_graph_observed):
+/// the topology is the N sources, the merger, and the sink, and a concurrent task
+/// reads the sink's measured `process()` latency plus each link's packet / byte /
+/// drop counters mid-run via [`Observer::snapshot`].
+pub async fn run_fanin_sink_observed<Snk, Clk>(
+    sources: Vec<&mut dyn DynSourceLoop>,
+    merger: &mut Merger,
+    sink: &mut Snk,
+    clock: &Clk,
+    link_capacity: impl Into<LinkCapacity>,
+    observer: &Observer,
+) -> Result<RunStats, G2gError>
+where
+    Snk: AsyncElement,
+    Clk: PipelineClock,
+{
+    run_fanin_sink_inner(sources, merger, sink, clock, link_capacity, Some(observer)).await
+}
+
+async fn run_fanin_sink_inner<Snk, Clk>(
+    sources: Vec<&mut dyn DynSourceLoop>,
+    merger: &mut Merger,
+    sink: &mut Snk,
     _clock: &Clk,
     link_capacity: impl Into<LinkCapacity>,
+    observer: Option<&Observer>,
 ) -> Result<RunStats, G2gError>
 where
     Snk: AsyncElement,
@@ -518,33 +612,80 @@ where
         "merger input count must match the number of sources"
     );
 
+    let mut sources = sources;
+    // M842: instance naming + lifecycle logging, as in `run_graph`. The `Merger`
+    // carries no element payload (it selects, like a structural tee), so it is
+    // not named, matching the tee case there.
+    let mut namer = crate::log::InstanceNamer::new();
+    let mut source_names: Vec<alloc::string::String> = Vec::with_capacity(input_count);
+    for source in sources.iter_mut() {
+        let name = namer.add(source.log_category(), None);
+        source.set_instance_name(name.clone());
+        source_names.push(name);
+    }
+    let sink_name = namer.add(crate::log::short_type_name::<Snk>(), None);
+    AsyncElement::set_instance_name(sink, sink_name.clone());
+    // M846: the sink is the only node here with a `process()`, so it carries the
+    // run's measured-latency probe (as in the linear runners).
+    let sink_probe = ElementProbe::new(sink_name);
+
     // Phase 1 + 2: fixate each source's caps and configure it; the sink is
     // configured against input 0's fixated caps (the merged-output caps).
     // This is not routed through `solve_linear` because each source
     // self-fixates with no peer narrowing — there's no chain to solve.
-    let mut sources = sources;
-    let mut merged_caps: Option<Caps> = None;
-    for (i, source) in sources.iter_mut().enumerate() {
+    let mut fixated_caps: Vec<Caps> = Vec::with_capacity(input_count);
+    for source in sources.iter_mut() {
         let proposal = source.intercept_caps().await?;
         let fixated = proposal.fixate()?;
         source.configure_pipeline(&fixated)?.reject_refixate()?;
-        if i == 0 {
-            merged_caps = Some(fixated);
-        }
+        fixated_caps.push(fixated);
     }
-    let merged_caps = merged_caps.expect("input_count > 0");
+    let merged_caps = fixated_caps[0].clone();
     sink.configure_pipeline(&merged_caps)?.reject_refixate()?;
 
     // One input link per source, one shared output link to the sink.
+    let tap = observer.is_some();
     let mut input_senders = Vec::with_capacity(input_count);
     let mut input_receivers = Vec::with_capacity(input_count);
+    let mut taps = Vec::with_capacity(input_count + 1);
     for _ in 0..input_count {
-        let (tx, rx) = link(link_capacity);
+        let (tx, rx, edge) = link_tapped(link_capacity, tap);
         input_senders.push(tx);
         input_receivers.push(rx);
+        taps.push(edge);
     }
-    let (out_tx, out_rx) = link(link_capacity);
+    let (out_tx, out_rx, out_tap) = link_tapped(link_capacity, tap);
+    taps.push(out_tap);
     let live_inputs = Arc::new(AtomicUsize::new(input_count));
+
+    // Dev-tooling tap: sources 0..N, then the merger (structural, unnamed, like a
+    // tee in `run_graph`), then the sink.
+    if let Some(obs) = observer {
+        let merger_id = input_count;
+        let sink_id = input_count + 1;
+        let mut nodes: Vec<TapNode> = source_names
+            .iter()
+            .map(|n| (n.clone(), NodeRole::Source, None))
+            .collect();
+        nodes.push((alloc::string::String::new(), NodeRole::Muxer, None));
+        nodes.push((
+            alloc::string::String::from(sink_probe.name()),
+            NodeRole::Sink,
+            Some(sink_probe.clone()),
+        ));
+        let mut edges: Vec<TapEdge> = Vec::with_capacity(input_count + 1);
+        let mut taps = taps.into_iter();
+        for (i, caps) in fixated_caps.iter().enumerate() {
+            edges.push((i, merger_id, caps.clone(), taps.next().expect("input tap")));
+        }
+        edges.push((
+            merger_id,
+            sink_id,
+            merged_caps.clone(),
+            taps.next().expect("output tap"),
+        ));
+        register_runner_tap(obs, nodes, edges);
+    }
 
     let mut source_arms: Vec<BoxFuture<'_, Result<u64, G2gError>>> =
         Vec::with_capacity(input_count);
@@ -587,6 +728,7 @@ where
     // output link open.
     drop(out_tx);
 
+    let probe_for_sink = sink_probe.clone();
     let sink_arm: BoxFuture<'_, Result<u64, G2gError>> = Box::pin(async move {
         let mut null = NullSink;
         let mut consumed: u64 = 0;
@@ -608,10 +750,16 @@ where
                     }
                 }
                 Some(packet) => {
-                    if matches!(packet, PipelinePacket::DataFrame(_)) {
+                    let is_data = matches!(packet, PipelinePacket::DataFrame(_));
+                    if is_data {
                         consumed += 1;
+                        probe_for_sink.record_fill(out_rx.fill_percent());
                     }
+                    let t0 = is_data.then(ElementProbe::mark).flatten();
                     sink.process(packet, &mut null).await?;
+                    if is_data {
+                        probe_for_sink.record_proc_since(t0);
+                    }
                 }
                 None => return Ok(consumed),
             }
@@ -643,7 +791,7 @@ where
         clock_priority: ClockPriority::SystemFallback,
         base_time_ns: 0,
         coordinator_events: 0,
-        per_element: alloc::vec::Vec::new(),
+        per_element: alloc::vec![sink_probe.snapshot()],
     })
 }
 
@@ -657,6 +805,15 @@ struct TaggingSink {
     /// each packet we surface any pending PLI / BWE for this track to the source
     /// as the push outcome, so a reverse signal reaches the matching upstream.
     reverse: Option<crate::fanout::ReverseChannel>,
+    /// Live traffic counters for this input's edge (M846). The tagged channel is
+    /// shared by every input, so the per-edge count is kept here rather than on
+    /// the channel. `None` unless an observer is attached.
+    counters: Option<Arc<EdgeCounters>>,
+    /// Content-inspection slot for this input's edge (M849), the analog of the
+    /// one [`SenderSink`] shares with its link: the tagged channel is shared, so
+    /// each input carries its own slot here. `None` unless an observer is
+    /// attached, and empty (pass-through) until a tool installs an interceptor.
+    probe: Option<ProbeSlot>,
 }
 
 impl OutputSink for TaggingSink {
@@ -665,12 +822,25 @@ impl OutputSink for TaggingSink {
         packet: PipelinePacket,
     ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
         Box::pin(async move {
+            // A probe may drop the packet before it enters the channel, as on a
+            // `SenderSink` link.
+            if let Some(p) = &self.probe {
+                if p.action(&packet) == ProbeAction::Drop {
+                    return Ok(PushOutcome::Accepted);
+                }
+            }
+            let bytes = packet_bytes(&packet);
             match self.tx.send((self.idx, packet)).await {
-                Ok(()) => Ok(self
-                    .reverse
-                    .as_ref()
-                    .and_then(|rc| rc.take())
-                    .unwrap_or(PushOutcome::Accepted)),
+                Ok(()) => {
+                    if let Some(c) = &self.counters {
+                        c.record_packet(bytes, 0);
+                    }
+                    Ok(self
+                        .reverse
+                        .as_ref()
+                        .and_then(|rc| rc.take())
+                        .unwrap_or(PushOutcome::Accepted))
+                }
                 Err(_) => Err(G2gError::Shutdown),
             }
         })
@@ -696,8 +866,40 @@ impl OutputSink for TaggingSink {
 pub async fn run_fanin_session<Sess, Clk>(
     sources: Vec<&mut dyn DynSourceLoop>,
     session: &mut Sess,
+    clock: &Clk,
+    link_capacity: impl Into<LinkCapacity>,
+) -> Result<RunStats, G2gError>
+where
+    Sess: MultiInputElement,
+    Clk: PipelineClock,
+{
+    run_fanin_session_inner(sources, session, clock, link_capacity, None).await
+}
+
+/// As [`run_fanin_session`], but taps live telemetry into `observer` (M846): the
+/// topology is the N sources feeding the session, whose measured `process()`
+/// latency and per-input packet / byte counts a concurrent task reads mid-run via
+/// [`Observer::snapshot`].
+pub async fn run_fanin_session_observed<Sess, Clk>(
+    sources: Vec<&mut dyn DynSourceLoop>,
+    session: &mut Sess,
+    clock: &Clk,
+    link_capacity: impl Into<LinkCapacity>,
+    observer: &Observer,
+) -> Result<RunStats, G2gError>
+where
+    Sess: MultiInputElement,
+    Clk: PipelineClock,
+{
+    run_fanin_session_inner(sources, session, clock, link_capacity, Some(observer)).await
+}
+
+async fn run_fanin_session_inner<Sess, Clk>(
+    sources: Vec<&mut dyn DynSourceLoop>,
+    session: &mut Sess,
     _clock: &Clk,
     link_capacity: impl Into<LinkCapacity>,
+    observer: Option<&Observer>,
 ) -> Result<RunStats, G2gError>
 where
     Sess: MultiInputElement,
@@ -711,20 +913,73 @@ where
         "session input count must match the number of sources"
     );
 
+    // M846: instance naming, as in `run_fanin_sink`. The session is the only node
+    // with a `process()`, so it carries the run's measured-latency probe.
+    let mut sources = sources;
+    let mut namer = crate::log::InstanceNamer::new();
+    let mut source_names: Vec<alloc::string::String> = Vec::with_capacity(input_count);
+    for source in sources.iter_mut() {
+        let name = namer.add(source.log_category(), None);
+        source.set_instance_name(name.clone());
+        source_names.push(name);
+    }
+    let session_probe = ElementProbe::new(namer.add(crate::log::short_type_name::<Sess>(), None));
+
     // Phase 1 + 2 per input: each source self-fixates; the fixated caps configure
     // both the source and the matching session input pad (the session decides the
     // track kind, e.g. H.264 video vs Opus audio, from these caps).
-    let mut sources = sources;
+    let mut fixated_caps: Vec<Caps> = Vec::with_capacity(input_count);
     for (i, source) in sources.iter_mut().enumerate() {
         let proposal = source.intercept_caps().await?;
         let fixated = proposal.fixate()?;
         source.configure_pipeline(&fixated)?.reject_refixate()?;
         MultiInputElement::configure_pipeline(session, i, &fixated)?.reject_refixate()?;
+        fixated_caps.push(fixated);
     }
 
     // One shared tagged channel: every source pushes `(its index, packet)`.
     let (tx, rx) = bounded::<(usize, PipelinePacket)>(link_capacity);
     let live_inputs = Arc::new(AtomicUsize::new(input_count));
+    // Per-input edge counters and content-inspection slots, kept on each
+    // `TaggingSink` (the tagged channel is shared, so it cannot carry per-edge
+    // state itself).
+    let counters: Vec<Option<Arc<EdgeCounters>>> = (0..input_count)
+        .map(|_| observer.map(|_| Arc::new(EdgeCounters::default())))
+        .collect();
+    let probes: Vec<Option<ProbeSlot>> = (0..input_count)
+        .map(|_| observer.map(|_| ProbeSlot::default()))
+        .collect();
+
+    if let Some(obs) = observer {
+        let session_id = input_count;
+        let mut nodes: Vec<TapNode> = source_names
+            .iter()
+            .map(|n| (n.clone(), NodeRole::Source, None))
+            .collect();
+        nodes.push((
+            alloc::string::String::from(session_probe.name()),
+            NodeRole::Muxer,
+            Some(session_probe.clone()),
+        ));
+        let edges: Vec<TapEdge> = fixated_caps
+            .iter()
+            .zip(counters.iter())
+            .zip(probes.iter())
+            .enumerate()
+            .map(|(i, ((caps, c), p))| {
+                (
+                    i,
+                    session_id,
+                    caps.clone(),
+                    EdgeTap {
+                        probe: p.clone().unwrap_or_default(),
+                        counters: c.clone(),
+                    },
+                )
+            })
+            .collect();
+        register_runner_tap(obs, nodes, edges);
+    }
 
     // Per-input reverse-signal handles (WebRTC PLI / BWE), cloned before the
     // session moves into its arm so a signal for track i reaches source i.
@@ -737,11 +992,15 @@ where
     for (i, source) in sources.into_iter().enumerate() {
         let tx_i = tx.clone();
         let reverse_i = reverse[i].clone();
+        let counters_i = counters[i].clone();
+        let probe_i = probes[i].clone();
         source_arms.push(Box::pin(async move {
             let mut adapter = TaggingSink {
                 idx: i,
                 tx: tx_i,
                 reverse: reverse_i,
+                counters: counters_i,
+                probe: probe_i,
             };
             source.run(&mut adapter).await
         }));
@@ -749,6 +1008,7 @@ where
     // Drop the runner's own sender so the channel closes once all sources end.
     drop(tx);
 
+    let probe_for_session = session_probe.clone();
     let session_arm: BoxFuture<'_, Result<u64, G2gError>> = Box::pin(async move {
         let mut null = NullSink;
         let mut consumed: u64 = 0;
@@ -774,10 +1034,16 @@ where
                         .await?;
                 }
                 Some((idx, packet)) => {
-                    if matches!(packet, PipelinePacket::DataFrame(_)) {
+                    let is_data = matches!(packet, PipelinePacket::DataFrame(_));
+                    if is_data {
                         consumed += 1;
+                        probe_for_session.record_fill(rx.fill_percent());
                     }
+                    let t0 = is_data.then(ElementProbe::mark).flatten();
                     session.process(idx, packet, &mut null).await?;
+                    if is_data {
+                        probe_for_session.record_proc_since(t0);
+                    }
                 }
                 None => return Ok(consumed),
             }
@@ -804,7 +1070,7 @@ where
         clock_priority: ClockPriority::SystemFallback,
         base_time_ns: 0,
         coordinator_events: 0,
-        per_element: alloc::vec::Vec::new(),
+        per_element: alloc::vec![session_probe.snapshot()],
     })
 }
 
@@ -849,8 +1115,51 @@ pub async fn run_duplex_session<Sess, Clk>(
     sources: Vec<&mut dyn DynSourceLoop>,
     session: &mut Sess,
     sinks: Vec<&mut dyn DynAsyncElement>,
+    clock: &Clk,
+    link_capacity: impl Into<LinkCapacity>,
+) -> Result<RunStats, G2gError>
+where
+    Sess: MultiDuplexSession,
+    Clk: PipelineClock,
+{
+    run_duplex_session_inner(sources, session, sinks, clock, link_capacity, None).await
+}
+
+/// As [`run_duplex_session`], but taps live telemetry into `observer` (M846):
+/// the send sources, the session, and the recv sinks, with each sink's measured
+/// `process()` latency and every link's packet / byte counts readable mid-run via
+/// [`Observer::snapshot`].
+pub async fn run_duplex_session_observed<Sess, Clk>(
+    sources: Vec<&mut dyn DynSourceLoop>,
+    session: &mut Sess,
+    sinks: Vec<&mut dyn DynAsyncElement>,
+    clock: &Clk,
+    link_capacity: impl Into<LinkCapacity>,
+    observer: &Observer,
+) -> Result<RunStats, G2gError>
+where
+    Sess: MultiDuplexSession,
+    Clk: PipelineClock,
+{
+    run_duplex_session_inner(
+        sources,
+        session,
+        sinks,
+        clock,
+        link_capacity,
+        Some(observer),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_duplex_session_inner<Sess, Clk>(
+    sources: Vec<&mut dyn DynSourceLoop>,
+    session: &mut Sess,
+    sinks: Vec<&mut dyn DynAsyncElement>,
     _clock: &Clk,
     link_capacity: impl Into<LinkCapacity>,
+    observer: Option<&Observer>,
 ) -> Result<RunStats, G2gError>
 where
     Sess: MultiDuplexSession,
@@ -876,32 +1185,105 @@ where
         "session output count must match the number of recv sinks"
     );
 
+    // M846: instance naming + one measured-latency probe per recv sink (the
+    // session drives itself through `run`, so it has no `process()` to time).
+    let mut sources = sources;
+    let mut sinks = sinks;
+    let mut namer = crate::log::InstanceNamer::new();
+    let mut source_names: Vec<alloc::string::String> = Vec::with_capacity(input_count);
+    for source in sources.iter_mut() {
+        let name = namer.add(source.log_category(), None);
+        source.set_instance_name(name.clone());
+        source_names.push(name);
+    }
+    let session_name = namer.add(crate::log::short_type_name::<Sess>(), None);
+    let mut sink_probes = Vec::with_capacity(output_count);
+    for sink in sinks.iter_mut() {
+        let name = namer.add(sink.log_category(), None);
+        sink.set_instance_name(name.clone());
+        sink_probes.push(ElementProbe::new(name));
+    }
+
     // Negotiate the send inputs (like run_fanin_session): each source self-fixates
     // and the fixated caps configure both the source and its session input pad.
-    let mut sources = sources;
+    let mut input_caps: Vec<Caps> = Vec::with_capacity(input_count);
     for (i, source) in sources.iter_mut().enumerate() {
         let proposal = source.intercept_caps().await?;
         let fixated = proposal.fixate()?;
         source.configure_pipeline(&fixated)?.reject_refixate()?;
         session.configure_input(i, &fixated)?.reject_refixate()?;
+        input_caps.push(fixated);
     }
     // Negotiate the recv outputs (like run_fanout_session): the session self-
     // fixates each output's caps and configures the matching sink.
-    let mut sinks = sinks;
+    let mut output_caps: Vec<Caps> = Vec::with_capacity(output_count);
     for (o, sink) in sinks.iter_mut().enumerate() {
         let fixated = session.output_caps(o)?.fixate()?;
         sink.configure_pipeline(&fixated)?.reject_refixate()?;
+        output_caps.push(fixated);
     }
 
     // Inbound: one shared tagged channel; every send source pushes (its index, packet).
     let (in_tx, in_rx) = bounded::<(usize, PipelinePacket)>(link_capacity);
+    // Per-input edge counters and content-inspection slots ride the
+    // `TaggingSink`s, the shared channel carries no per-edge state itself.
+    let in_counters: Vec<Option<Arc<EdgeCounters>>> = (0..input_count)
+        .map(|_| observer.map(|_| Arc::new(EdgeCounters::default())))
+        .collect();
+    let in_probes: Vec<Option<ProbeSlot>> = (0..input_count)
+        .map(|_| observer.map(|_| ProbeSlot::default()))
+        .collect();
     // Outbound: one branch link per recv output.
+    let tap = observer.is_some();
     let mut branch_senders = Vec::with_capacity(output_count);
     let mut branch_receivers = Vec::with_capacity(output_count);
+    let mut branch_taps = Vec::with_capacity(output_count);
     for _ in 0..output_count {
-        let (tx, rx) = link(link_capacity);
+        let (tx, rx, edge) = link_tapped(link_capacity, tap);
         branch_senders.push(SenderSink::new(tx));
         branch_receivers.push(rx);
+        branch_taps.push(edge);
+    }
+
+    if let Some(obs) = observer {
+        let session_id = input_count;
+        let mut nodes: Vec<TapNode> = source_names
+            .iter()
+            .map(|n| (n.clone(), NodeRole::Source, None))
+            .collect();
+        nodes.push((session_name, NodeRole::Muxer, None));
+        for probe in &sink_probes {
+            nodes.push((
+                alloc::string::String::from(probe.name()),
+                NodeRole::Sink,
+                Some(probe.clone()),
+            ));
+        }
+        let mut edges: Vec<TapEdge> = Vec::with_capacity(input_count + output_count);
+        for (i, ((caps, c), p)) in input_caps
+            .iter()
+            .zip(in_counters.iter())
+            .zip(in_probes.iter())
+            .enumerate()
+        {
+            edges.push((
+                i,
+                session_id,
+                caps.clone(),
+                EdgeTap {
+                    probe: p.clone().unwrap_or_default(),
+                    counters: c.clone(),
+                },
+            ));
+        }
+        for (o, (caps, edge)) in output_caps
+            .iter()
+            .zip(core::mem::take(&mut branch_taps))
+            .enumerate()
+        {
+            edges.push((session_id, session_id + 1 + o, caps.clone(), edge));
+        }
+        register_runner_tap(obs, nodes, edges);
     }
 
     // Per-input reverse-signal handles (WebRTC PLI / BWE), cloned before the
@@ -917,11 +1299,15 @@ where
     for (i, source) in sources.into_iter().enumerate() {
         let tx_i = in_tx.clone();
         let reverse_i = reverse[i].clone();
+        let counters_i = in_counters[i].clone();
+        let probe_i = in_probes[i].clone();
         source_arms.push(Box::pin(async move {
             let mut adapter = TaggingSink {
                 idx: i,
                 tx: tx_i,
                 reverse: reverse_i,
+                counters: counters_i,
+                probe: probe_i,
             };
             source.run(&mut adapter).await
         }));
@@ -937,7 +1323,11 @@ where
     });
 
     let mut sink_arms: Vec<BoxFuture<'_, Result<u64, G2gError>>> = Vec::with_capacity(output_count);
-    for (sink, rx) in sinks.into_iter().zip(branch_receivers) {
+    for ((sink, rx), probe) in sinks
+        .into_iter()
+        .zip(branch_receivers)
+        .zip(sink_probes.iter().cloned())
+    {
         sink_arms.push(Box::pin(async move {
             let mut null = NullSink;
             let mut consumed: u64 = 0;
@@ -959,10 +1349,16 @@ where
                         }
                     }
                     Some(packet) => {
-                        if matches!(packet, PipelinePacket::DataFrame(_)) {
+                        let is_data = matches!(packet, PipelinePacket::DataFrame(_));
+                        if is_data {
                             consumed += 1;
+                            probe.record_fill(rx.fill_percent());
                         }
+                        let t0 = is_data.then(ElementProbe::mark).flatten();
                         sink.process(packet, &mut null).await?;
+                        if is_data {
+                            probe.record_proc_since(t0);
+                        }
                     }
                     None => return Ok(consumed),
                 }
@@ -992,7 +1388,9 @@ where
         clock_priority: ClockPriority::SystemFallback,
         base_time_ns: 0,
         coordinator_events: 0,
-        per_element: alloc::vec::Vec::new(),
+        per_element: crate::runtime::snapshot_all(
+            &sink_probes.into_iter().map(Some).collect::<Vec<_>>(),
+        ),
     })
 }
 
@@ -1497,6 +1895,8 @@ async fn attach_input<'a>(
             idx: pad,
             tx,
             reverse: None,
+            counters: None,
+            probe: None,
         };
         let mut source = source;
         source.run(&mut sink).await.map(FaninArmOut::Source)

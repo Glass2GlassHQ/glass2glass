@@ -3,17 +3,20 @@
 //! and depayloads them (via [`rtpdepay`](crate::rtpdepay)) into Annex-B access
 //! units pushed downstream as `CompressedVideo` H.264, ready for a decoder.
 //!
-//! This is **raw RTP** (no RTSP/SDP). There is no out-of-band stream
-//! description, so the output geometry is a declared hint (`with_video_size` /
-//! `with_framerate`, default 1280x720@30): H.264 carries its real dimensions
-//! in-band in the SPS, and a downstream decoder re-derives and corrects them.
-//! A receive-side jitter buffer (reorder / loss concealment / RTCP) and
-//! SDP/SPS-driven caps discovery are the larger follow-ups (DESIGN_TODO).
+//! Caps come from three places. The `sdp` property takes the description a
+//! sender publishes (`ffmpeg -sdp_file`, an RTSP `DESCRIBE` body) and sets the
+//! codec, geometry, frame rate and receive port from it ([`crate::sdp`]), so
+//! negotiation runs on real values. The stream's own SPS then corrects whatever
+//! is in force, as a `CapsChanged` before the frame it describes: it is
+//! authoritative and covers the no-SDP case. The declared hint
+//! (`with_video_size` / `with_framerate`, default 1280x720@30) is the fallback
+//! until one of those lands, and stays in force for the fields neither supplies.
 
 use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
+use alloc::string::{String, ToString};
 
 use std::net::{SocketAddr, UdpSocket as StdUdpSocket};
 
@@ -27,6 +30,17 @@ use g2g_core::{
 use crate::filesink::io_err;
 use crate::rtpjitter::JitterConfig;
 use crate::rtprecv::RtpRecvConfig;
+use crate::sdp::SdpMedia;
+
+/// Resolve an `sdp` value: a document starts with its RFC 4566 `v=` version
+/// line, anything else is a path to read it from.
+fn read_sdp(value: &str) -> Result<String, G2gError> {
+    let trimmed = value.trim_start();
+    if trimmed.starts_with("v=") {
+        return Ok(trimmed.to_string());
+    }
+    std::fs::read_to_string(value).map_err(io_err)
+}
 
 const DEFAULT_WIDTH: u32 = 1280;
 const DEFAULT_HEIGHT: u32 = 720;
@@ -44,6 +58,9 @@ pub struct UdpSrc {
     /// Receive-path tuning (jitter reorder, RTCP RR/NACK, RTX, ULPFEC/FlexFEC),
     /// the shared-path config handed to [`crate::rtprecv::receive_rtp_h264`].
     recv: RtpRecvConfig,
+    /// The `sdp` property as set (inline text or a file path), kept only so the
+    /// property reads back; its effect is already folded into the fields above.
+    sdp: Option<String>,
     /// Bound synchronously in `configure_pipeline` (or supplied pre-bound via
     /// `from_socket`); promoted to a tokio socket in `run`, where a runtime
     /// context is guaranteed.
@@ -61,6 +78,7 @@ impl UdpSrc {
             fps: DEFAULT_FPS,
             frame_limit: 0,
             recv: RtpRecvConfig::default(),
+            sdp: None,
             std_socket: None,
             configured: false,
         }
@@ -88,6 +106,47 @@ impl UdpSrc {
     pub fn with_framerate(mut self, fps: u32) -> Self {
         self.fps = fps;
         self
+    }
+
+    /// Configure from an SDP: either the document text or the path to a `.sdp`
+    /// file. The first H.264 media section sets the output geometry / frame rate
+    /// (from its `fmtp` parameter sets and `a=framerate`) and the receive port,
+    /// so a published description is all a receiver needs. Fields the SDP leaves
+    /// out keep their declared values.
+    pub fn with_sdp(mut self, sdp: &str) -> Result<Self, G2gError> {
+        let text = read_sdp(sdp)?;
+        let media = SdpMedia::parse(&text).ok_or(G2gError::CapsMismatch)?;
+        if !self.apply_sdp(&media) {
+            return Err(G2gError::CapsMismatch);
+        }
+        self.sdp = Some(sdp.to_string());
+        Ok(self)
+    }
+
+    /// Apply one parsed media description. Returns `false` (changing nothing)
+    /// for a description this source cannot receive: it depayloads H.264 only.
+    pub fn apply_sdp(&mut self, media: &SdpMedia) -> bool {
+        let Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            width,
+            height,
+            framerate,
+        } = &media.caps
+        else {
+            return false;
+        };
+        if let (Dim::Fixed(w), Dim::Fixed(h)) = (width, height) {
+            self.width = *w;
+            self.height = *h;
+        }
+        if let Rate::Fixed(q16) = framerate {
+            self.fps = (q16 >> 16).max(1);
+        }
+        // The m= port is where the sender is sending; 0 means the SDP pins none.
+        if media.port != 0 {
+            self.bind.set_port(media.port);
+        }
+        true
     }
 
     /// Stop after `n` access units and emit EOS. Without this the source runs
@@ -197,7 +256,7 @@ impl SourceLoop for UdpSrc {
         ElementMetadata::new(
             "UDP RTP source",
             "Source/Network",
-            "Receives raw RTP H.264 over UDP with a jitter buffer",
+            "Receives raw RTP H.264 over UDP with a jitter buffer, caps from an SDP or the stream's SPS",
             "g2g",
         )
     }
@@ -226,6 +285,11 @@ impl SourceLoop for UdpSrc {
             .with_default("720"),
             PropertySpec::new("framerate", PropKind::Uint, "declared frame rate hint, fps")
                 .with_default("30"),
+            PropertySpec::new(
+                "sdp",
+                PropKind::Str,
+                "SDP describing the stream (document text or a .sdp file path): sets geometry, frame rate, and port",
+            ),
             PropertySpec::new(
                 "num-buffers",
                 PropKind::Int,
@@ -309,6 +373,16 @@ impl SourceLoop for UdpSrc {
                 self.fps = value.as_uint().ok_or(PropError::Type)? as u32;
                 Ok(())
             }
+            "sdp" => {
+                let raw = value.as_str().ok_or(PropError::Type)?;
+                let text = read_sdp(raw).map_err(|_| PropError::Value)?;
+                let media = SdpMedia::parse(&text).ok_or(PropError::Value)?;
+                if !self.apply_sdp(&media) {
+                    return Err(PropError::Value);
+                }
+                self.sdp = Some(raw.to_string());
+                Ok(())
+            }
             "num-buffers" => crate::netprop::set_frame_limit(&mut self.frame_limit, &value),
             _ => Err(PropError::Unknown),
         }
@@ -325,6 +399,7 @@ impl SourceLoop for UdpSrc {
             "width" => Some(PropValue::Uint(self.width as u64)),
             "height" => Some(PropValue::Uint(self.height as u64)),
             "framerate" => Some(PropValue::Uint(self.fps as u64)),
+            "sdp" => Some(PropValue::Str(self.sdp.clone().unwrap_or_default())),
             "num-buffers" => Some(crate::netprop::get_frame_limit(self.frame_limit)),
             _ => None,
         }
@@ -350,8 +425,11 @@ impl SourceLoop for UdpSrc {
             let socket = tokio::net::UdpSocket::from_std(std).map_err(io_err)?;
 
             // The jitter + RTCP RR/NACK + FEC/RTX + depayload receive path is
-            // shared with RtspServerSrc.
-            crate::rtprecv::receive_rtp_h264(&socket, &self.recv, self.frame_limit, 0, out).await
+            // shared with RtspServerSrc; the caps in force ride along so the
+            // stream's SPS can refine them mid-flight.
+            let mut recv = self.recv.clone();
+            recv.declared_caps = Some(self.caps());
+            crate::rtprecv::receive_rtp_h264(&socket, &recv, self.frame_limit, 0, out).await
         })
     }
 }

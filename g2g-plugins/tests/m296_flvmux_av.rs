@@ -162,11 +162,11 @@ async fn muxes_two_tracks_into_one_flv_stream() {
     let units = d.take_units();
     let video: Vec<_> = units
         .iter()
-        .filter(|u| u.track == FlvTrack::Video)
+        .filter(|u| u.track() == FlvTrack::Video)
         .collect();
     let audio: Vec<_> = units
         .iter()
-        .filter(|u| u.track == FlvTrack::Audio)
+        .filter(|u| u.track() == FlvTrack::Audio)
         .collect();
     assert_eq!(video.len(), 2, "two video media frames");
     assert_eq!(audio.len(), 3, "three audio media frames");

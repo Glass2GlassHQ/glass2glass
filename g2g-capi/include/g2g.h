@@ -38,7 +38,8 @@ enum {
  * `text` is borrowed from the pipeline and valid only until the next
  * g2g_pipeline_bus_poll() or g2g_pipeline_free() on the same handle; copy it if
  * you need to keep it. `a` / `b` are kind-specific:
- *   G2G_BUS_BUFFERING        -> a = fill percent (0..100)
+ *   G2G_BUS_BUFFERING        -> a = fill percent (0..100), text = the element
+ *                               whose input link this is (NULL if unnamed)
  *   G2G_BUS_STATE_CHANGED    -> a = new state, b = old state
  *                               (0 Null, 1 Ready, 2 Paused, 3 Playing)
  *   G2G_BUS_DURATION_CHANGED -> a = duration in nanoseconds

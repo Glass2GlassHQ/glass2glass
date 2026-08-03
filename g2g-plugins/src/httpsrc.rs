@@ -174,7 +174,10 @@ impl SourceLoop for HttpSrc {
                     let bucket = (pct / 25).min(4);
                     if *last != Some(bucket) {
                         *last = Some(bucket);
-                        b.try_post(BusMessage::Buffering { percent: pct });
+                        b.try_post(BusMessage::Buffering {
+                            percent: pct,
+                            element: None,
+                        });
                     }
                 }
             };

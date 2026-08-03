@@ -130,7 +130,7 @@ impl AsyncElement for CudaDownload {
                             // in `buf.context` for the life of the frame (the
                             // keep-alive owner pins them); `frame` outlives
                             // this copy.
-                            let bytes = unsafe { download_nv12(buf)? };
+                            let bytes = unsafe { download_nv12(buf, 1)? };
                             self.downloaded += 1;
                             Frame {
                                 domain: MemoryDomain::System(SystemSlice::from_boxed(bytes)),
@@ -541,21 +541,24 @@ struct PlaneCopy {
 /// allocation proposal.
 pub fn nv12_byte_size(width: u32, height: u32) -> usize {
     // The pitches do not affect the packed size; pass width as a tight pitch.
-    let (_, _, total) = nv12_plane_copies(width, height, width, width);
+    let (_, _, total) = nv12_plane_copies(width, height, width, width, 1);
     total
 }
 
+/// `bytes_per_sample` is 1 for NV12, 2 for the 16-bit semi-planar P010 surface;
+/// it scales every byte-denominated row width.
 fn nv12_plane_copies(
     width: u32,
     height: u32,
     luma_pitch: u32,
     chroma_pitch: u32,
+    bytes_per_sample: usize,
 ) -> (PlaneCopy, PlaneCopy, usize) {
-    let w = width as usize;
+    let w = width as usize * bytes_per_sample;
     let h = height as usize;
     // ceil division so odd dimensions still cover the last partial chroma
     // column / row.
-    let chroma_w_bytes = 2 * w.div_ceil(2);
+    let chroma_w_bytes = 2 * (width as usize).div_ceil(2) * bytes_per_sample;
     let chroma_h = h.div_ceil(2);
 
     let luma = PlaneCopy {
@@ -576,8 +579,9 @@ fn nv12_plane_copies(
     (luma, chroma, total)
 }
 
-/// Copy both NV12 planes of `buf` from CUDA device memory into a freshly
-/// allocated packed system buffer (device->host). `pub(crate)` so `NvDec`'s
+/// Copy both semi-planar planes of `buf` from CUDA device memory into a freshly
+/// allocated packed system buffer (device->host). `bytes_per_sample` is 1 for
+/// NV12, 2 for a 10-bit P010 surface. `pub(crate)` so `NvDec`'s
 /// download-on-demand path (M352) reuses the same copy when negotiation settles
 /// its output on `System`.
 ///
@@ -585,9 +589,17 @@ fn nv12_plane_copies(
 /// `buf`'s plane pointers must be valid device memory in `buf.context`, and
 /// the backing allocation must stay alive for the duration of the call (its
 /// keep-alive owner guarantees this while the [`OwnedCudaBuffer`] is held).
-pub(crate) unsafe fn download_nv12(buf: &OwnedCudaBuffer) -> Result<Box<[u8]>, G2gError> {
-    let (luma, chroma, total) =
-        nv12_plane_copies(buf.width, buf.height, buf.luma_pitch, buf.chroma_pitch);
+pub(crate) unsafe fn download_nv12(
+    buf: &OwnedCudaBuffer,
+    bytes_per_sample: usize,
+) -> Result<Box<[u8]>, G2gError> {
+    let (luma, chroma, total) = nv12_plane_copies(
+        buf.width,
+        buf.height,
+        buf.luma_pitch,
+        buf.chroma_pitch,
+        bytes_per_sample,
+    );
     let mut dst = vec![0u8; total].into_boxed_slice();
     let dst_base = dst.as_mut_ptr();
 
@@ -1095,7 +1107,7 @@ mod tests {
     #[test]
     fn plane_copies_even_dims_pack_to_3_2() {
         // 1920x1080 with the decoder aligning the device pitch up to 2048.
-        let (luma, chroma, total) = nv12_plane_copies(1920, 1080, 2048, 2048);
+        let (luma, chroma, total) = nv12_plane_copies(1920, 1080, 2048, 2048, 1);
         assert_eq!(
             luma,
             PlaneCopy {
@@ -1123,7 +1135,7 @@ mod tests {
     #[test]
     fn plane_copies_odd_dims_round_chroma_up() {
         // Odd dims: chroma must cover the partial last column and row.
-        let (luma, chroma, total) = nv12_plane_copies(3, 3, 256, 256);
+        let (luma, chroma, total) = nv12_plane_copies(3, 3, 256, 256, 1);
         assert_eq!(luma.width_bytes, 3);
         assert_eq!(luma.height, 3);
         assert_eq!(luma.dst_pitch, 3);
@@ -1132,6 +1144,18 @@ mod tests {
         assert_eq!(chroma.height, 2);
         assert_eq!(chroma.dst_offset, 9);
         assert_eq!(total, 9 + 8);
+    }
+
+    #[test]
+    fn plane_copies_scale_for_ten_bit_samples() {
+        // P010: the same sample counts at 2 bytes each (NVDEC pitch in bytes).
+        let (luma, chroma, total) = nv12_plane_copies(640, 480, 1536, 1536, 2);
+        assert_eq!(luma.width_bytes, 1280);
+        assert_eq!(luma.dst_pitch, 1280);
+        assert_eq!(chroma.width_bytes, 1280);
+        assert_eq!(chroma.height, 240);
+        assert_eq!(chroma.dst_offset, 640 * 480 * 2);
+        assert_eq!(total, 640 * 480 * 3);
     }
 
     #[test]

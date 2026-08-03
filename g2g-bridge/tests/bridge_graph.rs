@@ -132,7 +132,9 @@ fn imports_a_dmabuf_frame_zero_copy() {
 /// thread. This is the feedback an app developer gets while porting.
 #[test]
 fn unknown_element_fails_to_build() {
-    let err = BridgeGraph::new("x264enc", CAPS).expect_err("no SW H.264 encoder in g2g");
+    // A name no feature ever registers ("x264enc" is a real alias under the
+    // ffmpeg feature).
+    let err = BridgeGraph::new("nosuchelement", CAPS).expect_err("element unknown to g2g");
     assert!(
         matches!(err, BridgeError::Parse(_)),
         "surfaced as a parse error: {err}"

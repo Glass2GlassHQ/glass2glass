@@ -126,6 +126,11 @@ pub mod videocrop;
 pub mod videoflip;
 pub mod videorate;
 pub mod videoscale;
+// wgpu compute companion to `compositor` (M853): RGBA8 fan-in blending in one
+// compute dispatch, System or MemoryDomain::WgpuTexture out. Shares the wgpu
+// GPU feature with the sink that consumes its textures.
+#[cfg(feature = "wgpu-sink")]
+pub mod wgpucompositor;
 #[cfg(feature = "wgpu-sink")]
 pub mod wgpusink;
 // Subtitle cue parsing (SRT / WebVTT) and the embedded bitmap font, both no_std,
@@ -151,6 +156,11 @@ pub mod ccinsert;
 pub mod misptime;
 // Shared pixel-format helpers for the packed-RGBA elements (videobalance, alpha).
 mod pixel;
+// Sans-IO RFC 4566 SDP: the shared media-section scanner plus the RTP/AVP
+// mapping from a media description to Caps (payload type, codec, clock rate,
+// fmtp parameter-set geometry), so an RTP receiver configures from the SDP a
+// sender publishes instead of a declared hint. no_std+alloc.
+pub mod sdp;
 // Sans-IO H.264 RTP packetizer (RFC 3550 + 6184), the live-egress foundation.
 pub mod rtppay;
 // Sans-IO H.264 RTP depayloader, the receive-side inverse of rtppay.
@@ -346,6 +356,10 @@ pub mod clock;
 pub mod filesink;
 #[cfg(feature = "std")]
 pub mod filesrc;
+// Spill-to-storage byte buffer (M861): turns a pushed, non-seekable byte stream
+// into a seekable one by absorbing it into a temp file.
+#[cfg(feature = "std")]
+pub mod downloadbuffer;
 // Record / replay: dump the packet stream to a file and play it back, for
 // deterministic repro of bugs that need a live source.
 #[cfg(feature = "std")]
@@ -458,7 +472,7 @@ pub mod livekitsrc;
 
 // UDP ingress source (M91): receives RTP on a tokio UdpSocket and depayloads
 // H.264 (rtpdepay) into Annex-B access units, the receive-side inverse of
-// UdpSink. Raw RTP (no RTSP/SDP); see module docs.
+// UdpSink. Caps come from a published SDP or the stream's SPS; see module docs.
 #[cfg(feature = "udp-ingress")]
 pub mod udpsrc;
 
@@ -733,9 +747,10 @@ pub mod fmp4demux;
 // sibling of fmp4demux, for a bare `filesrc location=X.mp4 ! decodebin`.
 #[cfg(feature = "std")]
 pub mod mp4demux;
-// Shared cbcs (MPEG-CENC) sample decryption for the HLS fMP4 and MP4 demux paths.
-#[cfg(any(feature = "hls", feature = "mp4-cenc"))]
-mod cenc;
+// MPEG Common Encryption: protection metadata parsing plus the shared key store
+// and (behind `hls` / `mp4-cenc`) sample decryption for the fMP4 demux paths.
+#[cfg(feature = "std")]
+pub mod cenc;
 
 // Worker-readiness latch shared by the platform display sinks below.
 #[cfg(any(

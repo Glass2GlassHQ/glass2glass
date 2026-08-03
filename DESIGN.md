@@ -655,7 +655,7 @@ A sibling `MfEncode` (feature `mf-encode`) wraps `CLSID_MSH264EncoderMFT` with `
 - **Bindings: hand-rolled FFI.** Like the `cuda` module (`g2g-plugins/src/cuda.rs`), `cudarc` is not used; the element links `libnvidia-encode` + `libcuda` directly. The SDK's giant version-tagged structs are transcribed `#[repr(C)]` with **compile-time size assertions** (`const _: () = assert!(size_of::<T>() == N)`) checked against the installed `nvEncodeAPI.h` (SDK 13.0; field offsets verified with `offsetof`), so a mismatched SDK fails the build rather than corrupting the wire layout. The one field-heavy codec-config union is left opaque (a correctly-sized `[u32; N]`): the driver fills it via `nvEncGetEncodePresetConfigEx`, and we overwrite only rate control / GOP.
 - **Lifecycle:** the encode session opens lazily on the first frame, on that frame's `CUcontext` (the NVDEC source's context). Per frame: `nvEncRegisterResource` (`CUDADEVICEPTR`, NV12) -> `nvEncMapInputResource` -> `nvEncEncodePicture` -> `nvEncLockBitstream` (copy out Annex-B) -> unlock / unmap / unregister.
 - **Low latency:** preset P4 + the LOW_LATENCY tuning info, CBR, no B-frames (`frameIntervalP = 1`), and an *infinite GOP* (`NVENC_INFINITE_GOPLENGTH`) so IDRs are emitted only on demand: the first frame, and on a downstream PLI (`Reconfigure::ForceKeyframe`). Each forced IDR sets `OUTPUT_SPSPPS` so in-band parameter sets ride it (the Annex-B a network sink expects). The NV12 nanosecond PTS round-trips through NVENC's `inputTimeStamp`.
-- **Validation:** an on-hardware round-trip on the RTX 3060 synthesizes a CUDA-resident NV12 surface (CUDA driver alloc + upload), encodes through `NvEnc`, and decodes the Annex-B back through `FfmpegVideoDec` to the original geometry; it skips cleanly with no NVIDIA GPU. The `nvenc` feature is CI-excluded (no NVENC runtime in CI). **HEVC (H.265)** is supported alongside H.264: `with_codec(VideoCodec::H265)` / the `codec` property switches the encode GUID to `NV_ENC_CODEC_HEVC_GUID` and the output caps to `CompressedVideo{H265}`, the path otherwise identical (the round-trip test covers both). `NvEnc` declares `input_domains = {Cuda}`, so a CPU-side NV12 source feeding it gets a `CudaUpload` spliced in automatically by the converter auto-plug (§4.13.5); the encoder itself stays Cuda-only. The output-bitstream-buffer pool and runtime bitrate retarget are in place. The matching native `NvDec` is the other half of the gst-`nvcodec`-style pair.
+- **Validation:** an on-hardware round-trip on the RTX 3060 synthesizes a CUDA-resident NV12 surface (CUDA driver alloc + upload), encodes through `NvEnc`, and decodes the Annex-B back through `FfmpegVideoDec` to the original geometry; it skips cleanly with no NVIDIA GPU. The `nvenc` feature is CI-excluded (no NVENC runtime in CI). **HEVC (H.265)** is supported alongside H.264: `with_codec(VideoCodec::H265)` / the `codec` property switches the encode GUID to `NV_ENC_CODEC_HEVC_GUID` and the output caps to `CompressedVideo{H265}`, the path otherwise identical (the round-trip test covers both). `NvEnc` declares `input_domains = {Cuda}`, so a CPU-side NV12 source feeding it gets a `CudaUpload` spliced in automatically by the converter auto-plug (§4.13.5); the encoder itself stays Cuda-only. The output-bitstream-buffer pool and runtime bitrate retarget are in place. **10-bit** encode: P010 input maps to the 10-bit buffer format and the HEVC Main10 profile (P010 with `codec=h264` is rejected, NVENC has no 10-bit H.264). `gop-size` (-1 = infinite, the low-latency default) and `repeat-sequence-header` write `gopLength` / `idrPeriod` / `repeatSPSPPS`, re-applied live through `nvEncReconfigureEncoder`. The matching native `NvDec` is the other half of the gst-`nvcodec`-style pair.
 - **Thread safety:** the session is a raw NVENC handle + CUDA context driven through `&mut self` only; `unsafe impl Send` rests on the same ownership-transfer argument as `FfmpegH264Enc`.
 
 `NvDec` (`g2g-plugins/src/nvdec.rs`, feature `nvdec` which implies `cuda`, `cfg(target_os = "linux")`) is the **decode half of the gst-`nvcodec`-style pair**, the mirror of `NvEnc`. It promotes NVIDIA hardware decode from the `FfmpegH264Dec` `Backend::NvdecCuda` flag (which reaches NVDEC *through* libavcodec's cuvid hwaccel) to a first-class element driving the NVCUVID parser+decoder API directly. With `NvDec -> ... -> NvEnc` both native, the whole H.264 transcode loop stays on the GPU and out of libavcodec.
@@ -665,7 +665,7 @@ A sibling `MfEncode` (feature `mf-encode`) wraps `CLSID_MSH264EncoderMFT` with `
 - **Callback model:** NVCUVID is callback-driven. A parser (`cuvidCreateVideoParser`) is fed the elementary stream and synchronously invokes three callbacks from inside `cuvidParseVideoData`: a *sequence* callback (creates the `CUvideodecoder` once the SPS geometry is known), a *decode* callback (`cuvidDecodePicture`), and a *display* callback (a frame is ready in display order). The display callback cannot `await`, so it maps the surface (`cuvidMapVideoFrame64`) and pushes a ready frame onto a queue that `process` drains and emits after the parse returns. The callbacks reach element state through a `*mut DecoderState` passed as the parser user-data; that pointer targets a heap `Box` so it survives the runner moving the element between worker threads.
 - **Bindings: hand-rolled FFI.** Links `libnvcuvid` + `libcuda` directly (no `cudarc`). NVCUVID exports real symbols (no `CreateInstance` dispatch table, unlike NVENC), so the calls are plain `extern "C"`; the structs are transcribed `#[repr(C)]` with compile-time size assertions against the installed `cuviddec.h` / `nvcuvid.h`, and the per-picture `CUVIDPICPARAMS` is opaque (the parser fills it, we pass the pointer straight to `cuvidDecodePicture`).
 - **Frame lifetime:** each output frame carries a `CudaKeepAlive` that `cuvidUnmapVideoFrame64`s on drop plus an `Arc` to the decoder, so the decoder and its CUDA context outlive any frame still in flight; the decoder, context lock, and context are destroyed (in that order) only once the last frame is released. The element owns its own CUDA context (created at configure).
-- **Validation:** an on-hardware test on the RTX 3060 runs the full native loop, a synthesized CUDA NV12 surface encoded by `NvEnc` to Annex-B and decoded by `NvDec` back to CUDA NV12, asserting geometry and (via a small device->host copy) that the decoded luma holds real content; it skips with no NVIDIA GPU. The `nvdec` feature is CI-excluded. **HEVC (H.265)** is supported alongside H.264: the input caps accept `CompressedVideo{H264|H265}`, the codec is inferred and mapped to the `cudaVideoCodec` the NVCUVID parser + decoder are created for. The display delay is fixed at a low-latency 1.
+- **Validation:** an on-hardware test on the RTX 3060 runs the full native loop, a synthesized CUDA NV12 surface encoded by `NvEnc` to Annex-B and decoded by `NvDec` back to CUDA NV12, asserting geometry and (via a small device->host copy) that the decoded luma holds real content; it skips with no NVIDIA GPU. The `nvdec` feature is CI-excluded. **HEVC (H.265) and AV1** are supported alongside H.264: the input caps accept `CompressedVideo{H264|H265|Av1}`, the codec is inferred and mapped to the `cudaVideoCodec` the NVCUVID parser + decoder are created for. A 10-bit stream decodes to a `P016` surface announced as `RawVideoFormat::P010`; a mid-stream resolution change reconfigures the live decoder in place (`cuvidReconfigureDecoder`) when the new size fits, else rebuilds it (the CUDA context rides a separate `Arc` so in-flight frames survive the rebuild). The display delay defaults to a low-latency 1, settable via `max-display-delay` (0..=16).
 
 #### 4.11.4 End-to-End RTSP Pipeline
 
@@ -1447,12 +1447,17 @@ application reacts to:
   transition, and the completion of an async `PAUSED` once preroll aggregates
   (§4.14).
 - `Qos { running_time_ns, jitter_ns, processed, dropped }` — a synchronizing
-  sink (`SyncSink`) that has fallen behind the clock drops a late frame
-  (`with_max_lateness_ns`) and reports it, the `GST_MESSAGE_QOS` analog.
-- `Buffering { percent }` — a sink's input link fill (0 = underrun, 100 = full),
-  posted by the sink arm on a quartile crossing via `run_graph_with_bus`. Since
-  g2g has no `queue` element, this reports the bounded link channel's own
-  occupancy (`fill_percent`), the `GST_MESSAGE_BUFFERING` analog.
+  sink (`SyncSink`, `WaylandSink`) that has fallen behind the clock drops a late
+  frame and reports it, the `GST_MESSAGE_QOS` analog. The drop decision, count,
+  and post live in a shared `QosTracker` (`g2g-core::qos`), which also posts the
+  running stats periodically (`with_qos_interval_ns`, pipeline-clock cadence),
+  so an app sees sink health without waiting for a drop.
+- `Buffering { percent, element }` — a link's fill (0 = underrun, 100 = full),
+  posted on a quartile crossing via `run_graph_with_bus` by the sink *and*
+  transform arms, tagged with the instance name of the element the link feeds
+  (self-posting prebuffer sources leave it `None`). Since g2g has no `queue`
+  element, this reports the bounded link channel's own occupancy
+  (`fill_percent`), the `GST_MESSAGE_BUFFERING` analog.
 
 Posting is non-blocking (`try_post`): a control message never stalls the data
 path; a full bus drops the report rather than applying backpressure.
@@ -1460,8 +1465,15 @@ path; a full bus drops the report rather than applying backpressure.
 **Element-granular logging (`g2g-core::log`)** is the complementary
 diagnostic channel, the `GST_DEBUG` analog, for developer tracing rather than
 application-facing events. A record carries a `category` (the element *type*,
-e.g. `"VideoFlip"`, the filtering key) and an optional `instance` name (the
-element *instance*, e.g. `"VideoFlip0"`). `LogLevel` runs `Error` (most severe)
+e.g. `"VideoFlip"`, the filtering key), an optional `instance` name (the
+element *instance*, e.g. `"VideoFlip0"`), an optional `timestamp_ns` (from a
+host-installed `set_time_source`; core reads no clock), and typed structured
+`fields` a sink renders or ships without parsing the message
+(`g2g_log_fields!`). An element may override its category per instance
+(`set_log_category` / `LogSource::log_category_override`, or `log-category=` on
+a launch line, the second launch keyword beside `name=`), and the override is
+what the filter matches; the auto instance name stays type-based, so a filter
+knob never renumbers probes or `t.` handles. `LogLevel` runs `Error` (most severe)
 through `Trace`, matching GStreamer's numeric levels; a per-category threshold
 table (a default plus overrides) decides what is emitted, mirrored into an atomic
 so a disabled `g2g_trace!` in a hot loop costs one atomic load. The macros
@@ -1470,13 +1482,18 @@ so a disabled `g2g_trace!` in a hot loop costs one atomic load. The macros
 checked against the threshold before formatting. Records route to an installed
 `LogSink`; the `std` feature provides a stderr sink and `init_from_env`, which
 reads `G2G_DEBUG` (a `GST_DEBUG`-style `*:warning,VideoFlip:trace` spec; category
-names take `*` / `?` globs, e.g. `*sink*:5`, with an exact override winning). The DAG
-runner assigns each element a `<category>N` instance name before negotiation (the
-`videotestsrc0` convention) via `set_instance_name`, logs each element's
-addition, and an element that logs about itself (it implements `LogSource` with a
-stored name) carries that name in its lines. Pulls no external logging crate, so
+names take `*` / `?` globs, e.g. `*sink*:5`, with an exact override winning). The
+runners (DAG, bespoke linear, fan-in) assign each element, including muxer /
+demux / fan-out payloads, an instance name before
+negotiation through a shared `InstanceNamer`: an explicit `gst-launch` `name=`
+(carried on the graph node, duplicates rejected at parse) or else `<category>N`
+(the `videotestsrc0` convention) via `set_instance_name`, logging each element's
+addition; the name also keys the element's latency probe. An element that logs
+about itself (it implements `LogSource` with a stored name) carries that name in
+its lines. Pulls no external logging crate, so
 it holds on the `no_std` baseline; the sink is the RTOS plug-in point (UART /
-RTT). The `tracing` feature adds a `LogSink` that forwards records to the
+RTT), and the built-in `RingSink` (bounded, overwrites oldest, drain/snapshot)
+is the flight-recorder variant for postmortem dumps there. The `tracing` feature adds a `LogSink` that forwards records to the
 `tracing` crate (the `g2g` target, `category` / `instance` as fields), so a host
 on `tracing-subscriber` / OTLP / tokio-console receives g2g's logs in its
 existing pipeline; `log::init_tracing()` installs it and defers filtering to the
@@ -1549,6 +1566,19 @@ the last:
   (`gstwrap element="x264enc bitrate=4000"`, `filesrc location="/my file.ts"`);
   the surrounding quotes are stripped from the value.
 
+- **ML elements by name (`g2g_ml::register`, `launch` feature, M820).** The
+  stock registry is assembled in `g2g-plugins`, which does not depend on
+  `g2g-ml`, so an app that wants the ML elements in a launch line calls
+  `g2g_ml::register(&mut reg)` on the registry it built. That adds `ortinfer`
+  (`ort`), `wgpupreprocess` (`wgpu`), and `detectionpostprocess` (`analytics`),
+  each only when its feature builds the element, so `... ! ortinfer
+  model=yolov8n.onnx tensor-input=true ! detectionpostprocess
+  conf-threshold=0.3 ! ...` parses. `OrtInference` is constructible without a
+  model for this: the `model` property loads the session through the same v1
+  contract check, `tensor-input` survives the load either side of it, and until
+  a model is loaded negotiation and `process` fail with `NotConfigured`.
+  `WgpuInference` stays out: it is built from weight tensors and shapes, which a
+  text line cannot express.
 - **Declarative graph documents (`g2g_plugins::declarative`, `declarative` /
   `declarative-yaml` features, M578).** A launch string is the ergonomic
   one-liner; a JSON / YAML document is the version-controllable, tool-generated,
@@ -2617,16 +2647,27 @@ answers a plain `GET /` with a self-contained dashboard page
 (`tools/dashboard/`) and a WebSocket upgrade with a JSON `telemetry` snapshot
 every 250 ms plus one `event` per `BusMessage` (fanned out to all clients via a
 broadcast channel drained off the `Bus`). Each telemetry edge carries its
-negotiated caps (from the `Observer`'s per-edge solution), which the page labels
-on the link; the page pans / zooms so a large graph stays navigable. It binds loopback by default;
+negotiated caps (from the `Observer`'s per-edge solution) and live counters
+(packets, CPU-payload bytes, drops, and `blocked_ns`, the time producers spent
+awaiting link capacity, from a wait-free `EdgeCounters` block the data-plane
+sink writes), which the page labels on the link; the page pans / zooms so a
+large graph stays navigable. Beside the aggregate per-stage waterfall the page
+assembles a single frame's journey: observed probes keep a bounded ring of
+`{sequence, wait, enter, exit}` visits, joined at snapshot time along the
+linear prefix on the newest sequence id consistent with one frame moving
+downstream (restamping elements fail the join rather than fabricate one; fan
+nodes truncate it), shown as stacked wait/work bars with the end-to-end total
+against the `2 * capacity * frame_period` floor. It binds loopback by default;
 `--observe-host <addr>` (e.g. `0.0.0.0`) exposes it to other hosts, gated behind a
 no-auth warning since telemetry + edge previews carry frame content. The JSON is
 built in the transport, so `g2g-core` stays serde-free, consistent with the
 portability-core principle. The
 observer rides the cooperative graph runner and, via `run_graph_threaded_observed`,
 the threaded runner; both cover the muxer / demux fan nodes. The standalone
-hand-built fan-in / fan-out / session runners (`fanin.rs` / `runner.rs`, not
-reachable from `run_graph_observed`) are the remaining follow-up.
+hand-built fan-in / fan-out / session runners (`fanin.rs` / `runner.rs`) have
+their own `*_observed` entry points, name and probe their nodes like the graph
+runner, and fill `RunStats::per_element` even unobserved; the dynamic runners
+(arms attach at runtime) still report no per-element rows.
 
 `g2g-inspect --json [element]` (the `tooling-json` feature) emits the registry as
 JSON, the machine-readable sibling of the text dump: per element the identity,
@@ -2638,8 +2679,8 @@ pipeline builder (`tools/builder/`), a React Flow app (Vite + pnpm) that loads a
 `registry.json` snapshot, offers a typed drag-drop canvas with pan / zoom and
 either-direction linking, imports and live-exports a `gst-launch` line (the `!`
 form for linear chains, named definitions + `elem.` references for branched
-graphs) and declarative JSON (`declarative.rs` schema), all of which load back
-into g2g; and the MCP server. Links are validated live: with `g2g-validate-wasm`
+graphs) and declarative JSON and YAML (`declarative.rs` schema), all of which
+load back into g2g; and the MCP server. Links are validated live: with `g2g-validate-wasm`
 built (g2g's real caps solver wrapping `toolingjson::validate_json`, compiled to
 wasm and loaded client-side) each edge shows its negotiated caps and a failing
 link is flagged; without the blob (the strict-CSP single-file artifact) it falls
@@ -2665,9 +2706,14 @@ dropped on replay rather than failing.
 `g2g-mcp` (the `tooling-json` feature) is a Model Context Protocol server so an
 agent can drive g2g development. It speaks newline-delimited JSON-RPC 2.0 over
 stdio with no MCP framework dependency (the envelope is hand-rolled with
-serde_json), and exposes four tools: `list_elements`, `inspect(element)`,
-`validate(pipeline)` (parse + negotiate, no run), and `launch(pipeline,
-duration_secs)` (run with a deadline, report `RunStats`). The tool bodies live in
+serde_json), and exposes five tools: `list_elements`, `inspect(element)`,
+`validate(pipeline)` (parse + negotiate, no run), `launch(pipeline,
+duration_secs)` (run with a deadline, report `RunStats`), and `run_graph`
+(a declarative JSON / YAML document by path or inline, advertised only in
+`declarative` builds, same run conventions). Both run tools stream live
+telemetry while running when the client supplies a `progressToken`: periodic
+`notifications/progress` carrying the dashboard's snapshot shape
+(`toolingjson::telemetry_json`, the single serializer both consumers share). The tool bodies live in
 `g2g-plugins::toolingjson`, shared with `g2g-inspect --json` so the registry-dump
 and run shapes have one definition; the async tools drive a current-thread tokio
 runtime via `block_on` while the stdio loop stays synchronous.
@@ -2680,9 +2726,11 @@ from a solve conflict (`Solve(NegotiationFailure)`, the structured detail naming
 the offending link). `toolingjson::validate_json` reports, on success, the
 negotiated caps per edge with the edge's endpoint node indices, and on a solve
 conflict the failure kind (`empty-link`, `unfixable`, ...) plus those indices, so
-a caller can highlight the failing link. Carrying the two candidate caps sets at
-the point of failure (upstream produce vs downstream accept) is a follow-up
-needing the solver to surface its per-edge domains.
+a caller can highlight the failing link. On an `empty-link` the solver also
+captures both candidate sets at the failing intersection (`CapsConflict`,
+upstream produce vs downstream accept, `Option`al since some sites hold only
+one side), and `validate_json` renders them as gst caps strings
+(`upstream_caps` / `downstream_caps`).
 
 ### 4.20c Developer Tooling: Conformance and Derived Maturity
 

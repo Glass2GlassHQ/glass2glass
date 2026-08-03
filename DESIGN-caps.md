@@ -375,10 +375,25 @@ Two fan structures have non-trivial joins:
   branch independently (a device-resident interleave muxer asking each video pad
   for GPU buffers). Mid-stream the same crossing holds: a `CapsChanged` on one
   pad re-derives that pad's proposal and re-cascades it up *that pad's branch
-  alone* via the `Recascade::target` override (the node-keyed walk would hit
-  every input), leaving the other inputs untouched. The muxer's byte output has
-  no memory-domain tie to its inputs, so its output-edge proposal is not
-  absorbed.
+  alone* via the `RecascadeRoute::Pad` override (the node-keyed walk would hit
+  every input).
+- **Walking through the muxer.** A change on one pad does not stop there. The
+  merged-output pool is re-derived from every pad
+  (`propose_allocation_for_output`, default `None` so a container muxer imposes
+  nothing), pushed to the arms reading that output as an
+  `ArmDirective::ProducerAllocation` (absorbed, never re-proposed, so it cannot
+  bounce back), and absorbed by the element itself
+  (`configure_allocation_for_output`); the pads are then re-queried and only
+  those whose demand actually moved re-cascade up their own branch. A consumer's
+  own demand crosses the same boundary the other way: the muxer is an
+  interruptible arm, so the node-keyed walk continues into it and out onto every
+  input pad instead of terminating. The walk runs to a fixed point of
+  `configure_allocation_for_output` composed with `propose_allocation_for_output`,
+  bounded per stimulus by `MAX_RECASCADE_ROUNDS`: a mutually-constraining pair of
+  pads that keeps flipping the output fails loud with `AllocationConflict` rather
+  than re-cascading forever. Startup is unchanged: the muxer's output-edge
+  proposal is not absorbed there, since a container muxer's byte output has no
+  memory-domain tie to its inputs.
 
 #### 4.13.6 Fan-out and fan-in
 

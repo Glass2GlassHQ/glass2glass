@@ -250,7 +250,9 @@ async fn midstream_change_with_no_acceptable_output_fails_loud_to_bus() {
         caps_log: Arc::clone(&caps_log),
     };
     let clock = ZeroClock;
-    let (bus, handle) = Bus::new(4);
+    // Roomy: the interior link's `Buffering` levels share this bus, and a full
+    // bus drops posts, so a tight backlog could hide the failure under them.
+    let (bus, handle) = Bus::new(64);
 
     let transforms: Vec<&mut dyn DynAsyncElement> = std::vec![&mut conv];
     let result =
