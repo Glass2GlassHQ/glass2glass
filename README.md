@@ -568,6 +568,8 @@ run_linear_chain(src, vec![&mut demux, &mut parse, &mut dec], sink,
 Features: `hls ffmpeg wayland-sink` (`dash` for the DASH front end). `HlsSrc`
 follows live playlist reloads and decrypts AES-128 / SAMPLE-AES segments;
 `DashSrc` handles `SegmentTemplate` / `SegmentTimeline` and dynamic (live) MPDs.
+Both prebuffer ahead by duration (`prebuffer-ms`), posting `Buffering` bus
+levels while they fill, like `HttpSrc`'s byte window (`prebuffer-bytes`).
 
 ### `gst-launch` text pipeline
 

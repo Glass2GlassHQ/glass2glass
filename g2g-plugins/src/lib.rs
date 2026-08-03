@@ -693,6 +693,10 @@ mod fetch;
 #[cfg(any(feature = "hls", feature = "dash"))]
 mod abr;
 
+// Shared duration-keyed prebuffer window for the adaptive segment loops.
+#[cfg(any(feature = "hls", feature = "dash"))]
+mod segprebuf;
+
 // HLS playlist parser (pure, no_std baseline) and the HlsSrc segment source.
 pub mod hls;
 #[cfg(feature = "hls")]

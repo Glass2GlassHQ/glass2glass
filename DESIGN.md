@@ -2026,7 +2026,15 @@ posting `BusMessage::Buffering` percent on quartile transitions, streams through
 while topping the window up without waiting, and re-enters buffering on a
 mid-stream underrun (window empty, network not ready), so an application can
 pause until `100` and show a buffering indicator on a stall. The window never
-grows past the target, and `0` (the default) streams straight through. Because a manifest/segment URL is
+grows past the target, and `0` (the default) streams straight through. The
+segment loops (`hlssrc` / `dashsrc`) carry the duration-keyed sibling
+(`prebuffer-ms` + `with_bus`, M819): a `segprebuf::SegmentPrebuffer` window the
+loop fetches into while below its duration target (summed `#EXTINF` / MPD
+segment durations) and emits from otherwise, posting the same quartile
+`Buffering` levels during the startup / post-seek fill and staying silent in
+steady state; init segments ride the window with duration 0 so an ABR re-init
+stays ordered behind queued media, and a flushing seek clears the window and
+re-arms the fill. Because a manifest/segment URL is
 attacker-controlled, the shared `fetch::get_bytes`/`get_text` never buffer an
 unbounded body: each accumulates the response chunk-by-chunk against a cap
 (`MAX_MANIFEST_BYTES` 16 MiB for playlists/MPDs/keys, `MAX_SEGMENT_BYTES` 256 MiB

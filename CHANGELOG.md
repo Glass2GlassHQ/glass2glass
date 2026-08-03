@@ -6,6 +6,10 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M819: duration-keyed prebuffer window (`prebuffer-ms`) on `hlssrc` / `dashsrc`, posting `Buffering` bus levels during the fill; `abr` exposed as a property.
+
+- M818: runtime properties for the drifted builder knobs (`rtspserversrc` full set, `udpsrc`/`udpsink` RTP tuning, `rtspsrc` reconnect/dims, `srtsrc`/`filesrc`/`ffmpegdec`), plus bare `http-src` / `rtsp-server` feature builds fixed.
+
 - M817: `httpsrc` prebuffer window (`prebuffer-bytes`) posting `Buffering` bus levels, refilled on mid-stream underrun.
 - M816: position-aware multichannel down/upmix in `audioconvert` (BS.775 coefficients on the per-count `ChannelLayout` convention, matching ffmpeg's default rematrix).
 - M815: `RtspServerSink` sends RTCP sender reports and a BYE during PLAY on both transports, reaps players silent past the advertised session timeout, and gains runtime properties.
