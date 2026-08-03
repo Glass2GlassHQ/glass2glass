@@ -350,7 +350,9 @@ mod pymod {
             BusMessage::Info(m) => ("info".into(), Some(m.clone()), 0, 0),
             BusMessage::Error(e) => ("error".into(), Some(format!("{e:?}")), 0, 0),
             BusMessage::Warning(e) => ("warning".into(), Some(format!("{e:?}")), 0, 0),
-            BusMessage::Buffering { percent } => ("buffering".into(), None, u64::from(*percent), 0),
+            BusMessage::Buffering { percent, element } => {
+                ("buffering".into(), element.clone(), u64::from(*percent), 0)
+            }
             BusMessage::DurationChanged { duration_ns } => {
                 ("duration-changed".into(), None, *duration_ns, 0)
             }

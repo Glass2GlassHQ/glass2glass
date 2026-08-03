@@ -111,7 +111,7 @@ fn serve(routes: Vec<(String, Vec<u8>)>, counted: fn(&str) -> bool) -> (u16, Arc
 fn buffering_levels(bus: &g2g_core::bus::Bus) -> Vec<u8> {
     let mut levels = Vec::new();
     while let Some(msg) = bus.try_recv() {
-        if let g2g_core::BusMessage::Buffering { percent } = msg {
+        if let g2g_core::BusMessage::Buffering { percent, .. } = msg {
             levels.push(percent);
         }
     }

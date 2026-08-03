@@ -177,7 +177,9 @@ pub fn event_json(msg: &BusMessage) -> Option<String> {
             "processed": processed,
             "dropped": dropped,
         }),
-        BusMessage::Buffering { percent } => json!({"kind": "buffering", "percent": percent}),
+        BusMessage::Buffering { percent, element } => {
+            json!({"kind": "buffering", "percent": percent, "element": element})
+        }
         BusMessage::DurationChanged { duration_ns } => {
             json!({"kind": "duration-changed", "duration_ns": duration_ns})
         }
@@ -440,10 +442,15 @@ mod tests {
         assert_eq!(v["type"], "event");
         assert_eq!(v["kind"], "eos");
 
-        let buf = event_json(&BusMessage::Buffering { percent: 75 }).unwrap();
+        let buf = event_json(&BusMessage::Buffering {
+            percent: 75,
+            element: Some("videoconvert0".into()),
+        })
+        .unwrap();
         let v: Value = serde_json::from_str(&buf).unwrap();
         assert_eq!(v["kind"], "buffering");
         assert_eq!(v["percent"], 75);
+        assert_eq!(v["element"], "videoconvert0");
 
         // Heavy payloads are skipped.
         assert!(event_json(&BusMessage::Tag(Default::default())).is_none());

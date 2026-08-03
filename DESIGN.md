@@ -1447,12 +1447,17 @@ application reacts to:
   transition, and the completion of an async `PAUSED` once preroll aggregates
   (§4.14).
 - `Qos { running_time_ns, jitter_ns, processed, dropped }` — a synchronizing
-  sink (`SyncSink`) that has fallen behind the clock drops a late frame
-  (`with_max_lateness_ns`) and reports it, the `GST_MESSAGE_QOS` analog.
-- `Buffering { percent }` — a sink's input link fill (0 = underrun, 100 = full),
-  posted by the sink arm on a quartile crossing via `run_graph_with_bus`. Since
-  g2g has no `queue` element, this reports the bounded link channel's own
-  occupancy (`fill_percent`), the `GST_MESSAGE_BUFFERING` analog.
+  sink (`SyncSink`, `WaylandSink`) that has fallen behind the clock drops a late
+  frame and reports it, the `GST_MESSAGE_QOS` analog. The drop decision, count,
+  and post live in a shared `QosTracker` (`g2g-core::qos`), which also posts the
+  running stats periodically (`with_qos_interval_ns`, pipeline-clock cadence),
+  so an app sees sink health without waiting for a drop.
+- `Buffering { percent, element }` — a link's fill (0 = underrun, 100 = full),
+  posted on a quartile crossing via `run_graph_with_bus` by the sink *and*
+  transform arms, tagged with the instance name of the element the link feeds
+  (self-posting prebuffer sources leave it `None`). Since g2g has no `queue`
+  element, this reports the bounded link channel's own occupancy
+  (`fill_percent`), the `GST_MESSAGE_BUFFERING` analog.
 
 Posting is non-blocking (`try_post`): a control message never stalls the data
 path; a full bus drops the report rather than applying backpressure.

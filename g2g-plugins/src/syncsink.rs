@@ -17,10 +17,12 @@
 //!
 //! QoS (M85): when given a max-lateness bound, a frame whose deadline is
 //! already past by more than that bound is dropped rather than presented late,
-//! so the sink catches up instead of compounding the lag. Each drop posts a
-//! [`BusMessage::Qos`] to the pipeline bus if one was attached, the GStreamer
-//! `GST_MESSAGE_QOS` analog. Default behaviour is unchanged (no bound, no bus):
-//! every frame is presented after its deadline.
+//! so the sink catches up instead of compounding the lag. The decision and its
+//! reporting live in the shared [`QosTracker`]: each drop posts a
+//! [`BusMessage::Qos`] to the pipeline bus if one was attached (the GStreamer
+//! `GST_MESSAGE_QOS` analog), and a report interval adds the same running stats
+//! periodically. Default behaviour is unchanged (no bound, no bus): every frame
+//! is presented after its deadline.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -28,8 +30,8 @@ use core::pin::Pin;
 use alloc::boxed::Box;
 
 use g2g_core::{
-    AsyncClock, AsyncElement, BusHandle, BusMessage, Caps, CapsConstraint, ConfigureOutcome,
-    ElementBound, G2gError, OutputSink, PipelinePacket, QosMessage, Segment,
+    AsyncClock, AsyncElement, BusHandle, Caps, CapsConstraint, ConfigureOutcome, ElementBound,
+    G2gError, OutputSink, PipelinePacket, QosMessage, QosTracker, Segment,
 };
 
 #[derive(Debug)]
@@ -41,11 +43,10 @@ pub struct SyncSink<C: AsyncClock> {
     configured: bool,
     max_drift_ns: u64,
     total_drift_ns: u128,
-    /// QoS: drop a frame whose deadline is already past by more than this many
-    /// ns. `u64::MAX` (the default) never drops, so the sink presents every
-    /// frame however late, preserving the pre-QoS behaviour.
-    max_lateness_ns: u64,
-    dropped: u64,
+    /// QoS: the lateness bound, the drop count, and the bus reporting. The
+    /// default bound never drops, so the sink presents every frame however late,
+    /// preserving the pre-QoS behaviour.
+    qos: QosTracker,
     /// The current playback segment, set from `PipelinePacket::Segment`. Maps a
     /// frame's PTS to running time and clips frames outside it (the
     /// decode-to-target frames after an accurate seek). `None` before any segment
@@ -55,7 +56,6 @@ pub struct SyncSink<C: AsyncClock> {
     clipped: u64,
     /// Non-keyframe frames dropped under a trick-mode (`key_units_only`) segment.
     trick_dropped: u64,
-    bus: Option<BusHandle>,
     /// QoS signal pending delivery upstream (M174): set when a late frame is
     /// dropped, consumed by the runner via [`take_qos`](AsyncElement::take_qos)
     /// and forwarded onto the incoming link so the source can shed load.
@@ -72,12 +72,10 @@ impl<C: AsyncClock> SyncSink<C> {
             configured: false,
             max_drift_ns: 0,
             total_drift_ns: 0,
-            max_lateness_ns: u64::MAX,
-            dropped: 0,
+            qos: QosTracker::new(),
             segment: None,
             clipped: 0,
             trick_dropped: 0,
-            bus: None,
             pending_qos: None,
         }
     }
@@ -86,13 +84,21 @@ impl<C: AsyncClock> SyncSink<C> {
     /// `ns` is dropped instead of presented late. `0` drops any frame that
     /// arrives after its deadline.
     pub fn with_max_lateness_ns(mut self, ns: u64) -> Self {
-        self.max_lateness_ns = ns;
+        self.qos.set_max_lateness_ns(ns);
         self
     }
 
-    /// Attach the pipeline bus so QoS drops post a [`BusMessage::Qos`].
+    /// Post a running-stats `Qos` report every `ns` of clock time while frames
+    /// flow, on top of the per-drop reports. `0` (the default) reports only
+    /// drops.
+    pub fn with_qos_interval_ns(mut self, ns: u64) -> Self {
+        self.qos.set_report_interval_ns(ns);
+        self
+    }
+
+    /// Attach the pipeline bus so QoS reports reach the application.
     pub fn with_bus(mut self, bus: BusHandle) -> Self {
-        self.bus = Some(bus);
+        self.qos.set_bus(bus);
         self
     }
 
@@ -102,7 +108,7 @@ impl<C: AsyncClock> SyncSink<C> {
 
     /// Frames dropped because they arrived too late under the QoS bound.
     pub fn dropped(&self) -> u64 {
-        self.dropped
+        self.qos.dropped()
     }
 
     /// Non-keyframe frames dropped under a trick-mode (`key_units_only`) segment.
@@ -200,29 +206,14 @@ where
                     };
                     // QoS: a frame already past its deadline by more than the
                     // bound is dropped, not presented late, so the sink catches
-                    // up. `now > deadline + bound` (saturating, so the u64::MAX
-                    // default never fires).
+                    // up. The same call posts the periodic running-stats report
+                    // when a frame is on time and the interval has elapsed.
                     let now = self.clock.now_ns();
-                    if now > deadline.saturating_add(self.max_lateness_ns) {
-                        self.dropped += 1;
-                        let jitter = i64::try_from(now - deadline).unwrap_or(i64::MAX);
-                        if let Some(bus) = &self.bus {
-                            // Control message: non-blocking, never stalls the
-                            // sink (a full bus drops the report).
-                            bus.try_post(BusMessage::Qos {
-                                running_time_ns: deadline,
-                                jitter_ns: jitter,
-                                processed: self.received,
-                                dropped: self.dropped,
-                            });
-                        }
+                    if let Some(q) = self.qos.judge_frame(deadline, now, self.received) {
                         // M174: signal the same lateness upstream so the source /
                         // decoder sheds load. The runner picks this up via
                         // `take_qos` after `process` and forwards it.
-                        self.pending_qos = Some(QosMessage {
-                            jitter_ns: jitter,
-                            running_time_ns: deadline,
-                        });
+                        self.pending_qos = Some(q);
                         return Ok(());
                     }
                     self.clock.sleep_until_ns(deadline).await;

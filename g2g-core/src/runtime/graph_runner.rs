@@ -696,10 +696,11 @@ fn traced_output_domains<'a>(graph: &Graph<GraphNodeRef<'a>>, node: NodeId) -> D
 }
 
 /// As [`run_graph`], but posts pipeline [`BusMessage`](crate::BusMessage)s to
-/// `bus`: a startup `NegotiationFailed`, per sink a `Buffering` level report
-/// each time the sink's input link crosses a fill quartile (M87), and a
-/// `DurationChanged` when a source first reports its duration (M203), so the app
-/// can show a buffering indicator, wait for a full buffer, or size a seek bar.
+/// `bus`: a startup `NegotiationFailed`, per transform / sink a `Buffering`
+/// level report each time that element's input link crosses a fill quartile
+/// (M87, interior links M843), and a `DurationChanged` when a source first
+/// reports its duration (M203), so the app can show a buffering indicator, wait
+/// for a full buffer, or size a seek bar.
 pub async fn run_graph_with_bus<'a, Clk: PipelineClock>(
     graph: Graph<GraphNodeRef<'a>>,
     clock: &Clk,
@@ -772,11 +773,35 @@ pub async fn run_graph_with_progress<'a, Clk: PipelineClock>(
     .await
 }
 
-/// Coarsen a link fill percent into a 0..=4 quartile band, so a sink posts a
+/// Coarsen a link fill percent into a 0..=4 quartile band, so an arm posts a
 /// `Buffering` message on a meaningful level transition (underrun, quarter
 /// steps, full) rather than on every packet.
 fn buffering_bucket(percent: u8) -> u8 {
     (percent / 25).min(4)
+}
+
+/// Sample an arm's input-link fill and post a `Buffering` level when it crosses
+/// a quartile band, naming the element the link feeds so an application can tell
+/// an interior link from the one feeding a sink. `last` carries the band across
+/// loop iterations.
+fn report_buffering(
+    bus: Option<&BusHandle>,
+    probe: &Probe,
+    in_rx: &LinkReceiver,
+    last: &mut Option<u8>,
+) {
+    let Some(b) = bus else { return };
+    let pct = in_rx.fill_percent();
+    let bucket = buffering_bucket(pct);
+    if *last != Some(bucket) {
+        *last = Some(bucket);
+        b.try_post(BusMessage::Buffering {
+            percent: pct,
+            element: probe
+                .as_deref()
+                .map(|p| alloc::string::String::from(p.name())),
+        });
+    }
 }
 
 /// As [`run_graph`], but driven by a [`StateController`] (M78): every `Sink`
@@ -2429,7 +2454,11 @@ async fn transform_arm<'a>(
         adapter.relay_bitrate_to(in_rx.bitrate_slot());
     }
     let mut control_open = true;
+    let mut last_buffer_bucket: Option<u8> = None;
     loop {
+        // M843: interior links report their fill too, so an application can see
+        // *where* a pipeline is starved or backed up, not just at the sink.
+        report_buffering(bus.as_ref(), &probe, &in_rx, &mut last_buffer_bucket);
         let packet = if control_open {
             match select2(arm_rx.recv(), in_rx.recv()).await {
                 Either::Left(Some(ArmDirective::Recascade(params))) => {
@@ -2635,14 +2664,7 @@ async fn sink_arm<'a>(
         // M87 buffering: sample the input link's fill and post a `Buffering`
         // report when it crosses a quartile band. The first iteration samples
         // an as-yet-unfilled link, so a `bus` always sees at least one report.
-        if let Some(b) = &bus {
-            let pct = in_rx.fill_percent();
-            let bucket = buffering_bucket(pct);
-            if last_buffer_bucket != Some(bucket) {
-                last_buffer_bucket = Some(bucket);
-                b.try_post(BusMessage::Buffering { percent: pct });
-            }
-        }
+        report_buffering(bus.as_ref(), &probe, &in_rx, &mut last_buffer_bucket);
         let packet = if control_open {
             match select2(arm_rx.recv(), in_rx.recv()).await {
                 // M839: a producer upstream (a muxer) settled a new pool on this

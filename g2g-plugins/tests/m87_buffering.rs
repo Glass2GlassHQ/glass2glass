@@ -1,6 +1,6 @@
 //! M87: `Buffering` bus messages from link occupancy. With a bus attached via
 //! `run_graph_with_bus`, the sink arm samples its input link fill and posts a
-//! `BusMessage::Buffering { percent }` on each quartile crossing. g2g has no
+//! `BusMessage::Buffering` level on each quartile crossing. g2g has no
 //! `queue` element, so this reports the bounded link channel's own occupancy.
 //!
 //! Exact percents are timing-dependent under the runtime, so we assert the
@@ -37,7 +37,7 @@ async fn sink_posts_buffering_levels_to_the_bus() {
 
     let mut levels = Vec::new();
     while let Some(m) = bus.try_recv() {
-        if let BusMessage::Buffering { percent } = m {
+        if let BusMessage::Buffering { percent, .. } = m {
             assert!(percent <= 100, "fill percent in range");
             levels.push(percent);
         }

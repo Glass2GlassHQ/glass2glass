@@ -53,6 +53,11 @@ impl ElementProbe {
         })
     }
 
+    /// The instance name of the element this probe measures.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
     /// A monotonic start stamp for the about-to-run `process()`, or `None` under
     /// `no_std` (no clock). Pair with [`record_proc_since`](Self::record_proc_since).
     #[inline]

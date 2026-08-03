@@ -143,7 +143,7 @@ async fn prebuffer_posts_buffering_levels_then_streams_intact() {
 
     let mut levels = Vec::new();
     while let Some(msg) = bus.try_recv() {
-        if let g2g_core::BusMessage::Buffering { percent } = msg {
+        if let g2g_core::BusMessage::Buffering { percent, .. } = msg {
             levels.push(percent);
         }
     }
@@ -213,7 +213,7 @@ async fn mid_stream_stall_rebuffers_and_reports_it() {
 
     let mut levels = Vec::new();
     while let Some(msg) = bus.try_recv() {
-        if let g2g_core::BusMessage::Buffering { percent } = msg {
+        if let g2g_core::BusMessage::Buffering { percent, .. } = msg {
             levels.push(percent);
         }
     }

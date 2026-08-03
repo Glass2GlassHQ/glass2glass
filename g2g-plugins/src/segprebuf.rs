@@ -99,7 +99,10 @@ impl SegmentPrebuffer {
             let bucket = (pct / 25).min(4);
             if self.last_bucket != Some(bucket) {
                 self.last_bucket = Some(bucket);
-                b.try_post(BusMessage::Buffering { percent: pct });
+                b.try_post(BusMessage::Buffering {
+                    percent: pct,
+                    element: None,
+                });
             }
         }
     }

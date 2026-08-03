@@ -625,8 +625,11 @@ _(No open parser items.)_
 
 - Remaining bus messages, each gated on a subsystem not present: `segment-done`
   (segment seeks), `stream-status` (thread pool), `clock-lost` (clock
-  re-election). Plus buffering on interior links; periodic QoS; the QoS
-  late-drop / `Qos` post from the display sinks.
+  re-election).
+- PTS pacing (a `ClockSync` deadline) on the display sinks other than
+  `waylandsink` (kms / wgpu / vulkanhdr / metal / d3d11 / cuda / canvas), so
+  their late-drop `Qos` reporting has a decision to report; `QosTracker` is the
+  seam. Relay `waylandsink`'s drop upstream via `take_qos`.
 - Logging: `set_instance_name` self-logging on more elements; a structured-fields /
   timestamped record format + ring-buffer sink; a custom (non-type-name)
   category override per element.

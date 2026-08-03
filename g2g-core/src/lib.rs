@@ -115,6 +115,9 @@ pub mod ptp;
 pub mod bus;
 
 #[cfg(feature = "runtime")]
+pub mod qos;
+
+#[cfg(feature = "runtime")]
 pub mod fanout;
 
 #[cfg(feature = "runtime")]
@@ -234,6 +237,9 @@ pub use pool::{BufferPool, PooledBuffer};
 
 #[cfg(feature = "runtime")]
 pub use bus::{Bus, BusHandle, BusMessage};
+
+#[cfg(feature = "runtime")]
+pub use qos::QosTracker;
 
 #[cfg(feature = "runtime")]
 pub use runtime::{LinkInterceptor, NegotiationFailure, ProbeAction, ProbeSlot};

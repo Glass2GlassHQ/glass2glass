@@ -80,7 +80,8 @@ pub enum G2gBusKind {
 /// A flattened pipeline bus message. `text` is borrowed from the pipeline and
 /// valid only until the next [`g2g_pipeline_bus_poll`] / [`g2g_pipeline_free`];
 /// copy it if you need to keep it. The `a` / `b` fields are kind-specific:
-/// `Buffering` -> `a` = percent; `StateChanged` -> `a` = new state, `b` = old
+/// `Buffering` -> `a` = percent, `text` = the element whose input link this is;
+/// `StateChanged` -> `a` = new state, `b` = old
 /// state (0 Null, 1 Ready, 2 Paused, 3 Playing); `DurationChanged` -> `a` = ns.
 #[repr(C)]
 #[derive(Debug)]
@@ -631,7 +632,12 @@ fn project(msg: &BusMessage) -> (G2gBusKind, Option<String>, u64, u64) {
             state_code(*new),
             state_code(*old),
         ),
-        BusMessage::Buffering { percent } => (G2gBusKind::Buffering, None, u64::from(*percent), 0),
+        BusMessage::Buffering { percent, element } => (
+            G2gBusKind::Buffering,
+            element.clone(),
+            u64::from(*percent),
+            0,
+        ),
         BusMessage::DurationChanged { duration_ns } => {
             (G2gBusKind::DurationChanged, None, *duration_ns, 0)
         }

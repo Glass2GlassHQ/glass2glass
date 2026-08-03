@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M843: buffering posts on interior links (named per element), and a shared `QosTracker` gives synchronizing sinks periodic QoS stats plus the late-drop post.
+
 - M844: `batcher` and `compositor` migrated onto `InputAggregator`, which gains a latest-wins release path for the compositor's overlay inputs.
 
 - M842: launch `name=` sets the element's instance name, and the bespoke linear / fan-in runners now name and log elements like the graph runner.
