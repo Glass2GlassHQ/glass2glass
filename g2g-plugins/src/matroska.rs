@@ -61,6 +61,9 @@ const ID_VIDEO: u32 = 0x00E0;
 const ID_PIXEL_WIDTH: u32 = 0x00B0;
 const ID_PIXEL_HEIGHT: u32 = 0x00BA;
 const ID_AUDIO: u32 = 0x00E1;
+const ID_CONTENT_ENCODINGS: u32 = 0x6D80;
+const ID_CONTENT_ENCODING: u32 = 0x6240;
+const ID_CONTENT_COMPRESSION: u32 = 0x5034;
 const ID_CHANNELS: u32 = 0x009F;
 const ID_SAMPLING_FREQ: u32 = 0x00B5;
 const ID_CLUSTER: u32 = 0x1F43_B675;
@@ -126,9 +129,18 @@ pub enum MkvCodec {
     /// `S_TEXT/UTF8` -> [`TextFormat::Utf8`] (verbatim), `S_TEXT/ASS` / `S_TEXT/SSA`
     /// -> [`TextFormat::Ssa`] (the `Text` field of the comma-separated block, tags
     /// stripped), `S_TEXT/WEBVTT` -> [`TextFormat::WebVtt`] (cue text, inline tags
-    /// stripped). Bitmap subtitle codecs (`S_DVBSUB` / `S_HDMV/PGS`) stay
-    /// [`MkvCodec::Other`] (a `SubPicture` track, not text).
+    /// stripped). The bitmap subtitle codecs are not text: `S_VOBSUB` and
+    /// `S_DVBSUB` have their own variants, and `S_HDMV/PGS` stays
+    /// [`MkvCodec::Other`].
     Subtitle(TextFormat),
+    /// A DVD subpicture (bitmap) subtitle track (`S_VOBSUB`). Each block is one
+    /// SPU packet; the track's `CodecPrivate` is the `.idx` text carrying the
+    /// palette and display size the decoder needs.
+    VobSub,
+    /// A DVB subtitle (bitmap) track (`S_DVBSUB`). Each block is one display
+    /// set's segments, without the PES data-field header; the track's
+    /// `CodecPrivate` carries the composition and ancillary page ids.
+    DvbSub,
     /// A `CodecID` this demuxer does not map to a g2g caps type.
     Other,
 }
@@ -161,6 +173,10 @@ impl MkvCodec {
             MkvCodec::Subtitle(TextFormat::Ssa)
         } else if id == b"S_TEXT/WEBVTT" {
             MkvCodec::Subtitle(TextFormat::WebVtt)
+        } else if id == b"S_VOBSUB" {
+            MkvCodec::VobSub
+        } else if id == b"S_DVBSUB" {
+            MkvCodec::DvbSub
         } else {
             MkvCodec::Other
         }
@@ -180,6 +196,13 @@ impl MkvCodec {
             MkvCodec::Ac3 => b"A_AC3",
             MkvCodec::Flac => b"A_FLAC",
             MkvCodec::Subtitle(TextFormat::Utf8) => b"S_TEXT/UTF8",
+            MkvCodec::Subtitle(TextFormat::Ssa) => b"S_TEXT/ASS",
+            // No `S_TEXT/WEBVTT`: it is a read-side mapping only. ffmpeg writes and
+            // reads the WebM `D_WEBVTT/*` ids instead, whose block payload leads
+            // with the cue identifier and settings, so writing WebVTT here would be
+            // a carriage no reference peer reads back.
+            MkvCodec::VobSub => b"S_VOBSUB",
+            MkvCodec::DvbSub => b"S_DVBSUB",
             MkvCodec::Subtitle(_) | MkvCodec::Other => return None,
         })
     }
@@ -196,7 +219,7 @@ impl MkvCodec {
     fn track_type(self) -> u8 {
         match self {
             MkvCodec::Aac | MkvCodec::Opus | MkvCodec::Ac3 | MkvCodec::Flac => 2,
-            MkvCodec::Subtitle(_) => 0x11,
+            MkvCodec::Subtitle(_) | MkvCodec::VobSub | MkvCodec::DvbSub => 0x11,
             _ => 1,
         }
     }
@@ -220,6 +243,10 @@ pub struct MkvTrack {
     /// Spaces the frames of a laced block; an unscaled value, unlike block
     /// timestamps.
     pub default_duration_ns: u64,
+    /// Whether the track declares a `ContentCompression` (zlib, lzo, or header
+    /// stripping). None of those is applied here, so a consumer of a flagged
+    /// track's blocks would be reading compressed bytes as a bitstream.
+    pub compressed: bool,
 }
 
 /// One `CuePoint` from the Segment `Cues` index: a seekable time and the byte
@@ -838,6 +865,7 @@ fn parse_track_entry(body: &[u8]) -> Option<ParsedTrack> {
     let mut channels = 0u8;
     let mut sample_rate = 0u32;
     let mut default_duration_ns = 0u64;
+    let mut compressed = false;
     for (id, data) in children(body) {
         match id {
             ID_TRACK_NUMBER => number = read_uint(data),
@@ -870,6 +898,13 @@ fn parse_track_entry(body: &[u8]) -> Option<ParsedTrack> {
                     }
                 }
             }
+            // Only noted, never applied: a flagged track's blocks are not the
+            // bitstream they claim to be, so the demuxer refuses them.
+            ID_CONTENT_ENCODINGS => {
+                compressed = children(data)
+                    .filter(|(eid, _)| *eid == ID_CONTENT_ENCODING)
+                    .any(|(_, enc)| children(enc).any(|(cid, _)| cid == ID_CONTENT_COMPRESSION));
+            }
             _ => {} // TrackType is implied by the CodecID prefix; FlagLacing etc. ignored
         }
     }
@@ -895,6 +930,7 @@ fn parse_track_entry(body: &[u8]) -> Option<ParsedTrack> {
             channels,
             sample_rate,
             default_duration_ns,
+            compressed,
         },
         codec_private: codec_private.to_vec(),
         tags,
@@ -1572,6 +1608,20 @@ impl MatroskaMuxer {
                 group.extend_from_slice(&elem_vec(ID_DISCARD_PADDING, &int_bytes(discard_ns)));
                 out.extend_from_slice(&elem_vec(ID_BLOCK_GROUP, &group));
             }
+            // A subtitle cue lasts as long as its `BlockDuration` says, and a
+            // SimpleBlock has nowhere to put one, so a text block is always a
+            // BlockGroup (M898). The Block's flags stay 0: the keyframe bit is a
+            // SimpleBlock field.
+            None if self.is_subtitle_track(track) => {
+                let block = build_simple_block(track_number, rel, false, data);
+                let mut group = elem_vec(ID_BLOCK, &block);
+                if duration_ns > 0 {
+                    let ticks =
+                        (duration_ns + DEFAULT_TIMESTAMP_SCALE / 2) / DEFAULT_TIMESTAMP_SCALE;
+                    group.extend_from_slice(&elem_vec(ID_BLOCK_DURATION, &uint_bytes(ticks)));
+                }
+                out.extend_from_slice(&elem_vec(ID_BLOCK_GROUP, &group));
+            }
             None => {
                 let block = build_simple_block(track_number, rel, keyframe, data);
                 out.extend_from_slice(&elem_vec(ID_SIMPLE_BLOCK, &block));
@@ -1618,6 +1668,15 @@ impl MatroskaMuxer {
     pub fn duration_patch(&self) -> Option<(usize, [u8; 8])> {
         let offset = self.duration_patch_offset?;
         Some((offset, (self.max_end_ticks as f64).to_be_bytes()))
+    }
+
+    /// Whether track `track` carries timed text, whose blocks need the
+    /// `BlockDuration` only a `BlockGroup` can hold.
+    fn is_subtitle_track(&self, track: usize) -> bool {
+        matches!(
+            self.tracks.get(track).map(|t| t.spec.codec),
+            Some(MkvCodec::Subtitle(_))
+        )
     }
 
     /// The `(BlockDuration in TimestampScale ticks, DiscardPadding in ns)` a
@@ -1833,17 +1892,24 @@ fn tracks_element(tracks: &[MkvTrackConfig], track_tags: &[(usize, TagList)]) ->
                 &uint_bytes(OPUS_SEEK_PRE_ROLL_NS),
             ));
         }
-        if spec.codec.track_type() == 1 {
-            let mut v = elem_vec(ID_PIXEL_WIDTH, &uint_bytes(spec.width as u64));
-            v.extend_from_slice(&elem_vec(ID_PIXEL_HEIGHT, &uint_bytes(spec.height as u64)));
-            entry.extend_from_slice(&elem_vec(ID_VIDEO, &v));
-        } else {
-            let mut a = elem_vec(ID_CHANNELS, &uint_bytes(spec.channels.max(1) as u64));
-            a.extend_from_slice(&elem_vec(
-                ID_SAMPLING_FREQ,
-                &(spec.sample_rate as f64).to_be_bytes(),
-            ));
-            entry.extend_from_slice(&elem_vec(ID_AUDIO, &a));
+        // A subtitle TrackEntry has neither child: `Video` / `Audio` describe
+        // settings a text track has none of, and a reader rejects the ones it
+        // does not expect for the TrackType.
+        match spec.codec.track_type() {
+            1 => {
+                let mut v = elem_vec(ID_PIXEL_WIDTH, &uint_bytes(spec.width as u64));
+                v.extend_from_slice(&elem_vec(ID_PIXEL_HEIGHT, &uint_bytes(spec.height as u64)));
+                entry.extend_from_slice(&elem_vec(ID_VIDEO, &v));
+            }
+            2 => {
+                let mut a = elem_vec(ID_CHANNELS, &uint_bytes(spec.channels.max(1) as u64));
+                a.extend_from_slice(&elem_vec(
+                    ID_SAMPLING_FREQ,
+                    &(spec.sample_rate as f64).to_be_bytes(),
+                ));
+                entry.extend_from_slice(&elem_vec(ID_AUDIO, &a));
+            }
+            _ => {}
         }
         entries.extend_from_slice(&elem_vec(ID_TRACK_ENTRY, &entry));
     }
@@ -2245,7 +2311,8 @@ mod tests {
                     height: 480,
                     channels: 0,
                     sample_rate: 0,
-                    default_duration_ns: 0
+                    default_duration_ns: 0,
+                    compressed: false,
                 },
                 MkvTrack {
                     number: 2,
@@ -2255,7 +2322,8 @@ mod tests {
                     height: 0,
                     channels: 2,
                     sample_rate: 48_000,
-                    default_duration_ns: 0
+                    default_duration_ns: 0,
+                    compressed: false,
                 },
             ]
         );
@@ -2574,7 +2642,8 @@ mod tests {
                 height: 240,
                 channels: 0,
                 sample_rate: 0,
-                default_duration_ns: 0
+                default_duration_ns: 0,
+                compressed: false,
             }]
         );
         let frames = d.take_frames();

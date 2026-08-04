@@ -4,3 +4,6 @@
 .vscode/
 .idea/
 *.swp
+
+# Node deps for tools/moqt-demo (the browser MoQ player + its headless run).
+node_modules/

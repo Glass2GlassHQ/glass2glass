@@ -39,11 +39,15 @@ use objc2_metal::{
 };
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 
+use g2g_core::element::QosMessage;
 use g2g_core::{
-    AsyncElement, Caps, CapsSet, ConfigureOutcome, Dim, DomainSet, G2gError, HardwareError,
-    MemoryDomain, MemoryDomainKind, OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate,
-    RawVideoFormat,
+    AsyncElement, BusHandle, Caps, CapsSet, ClockSync, ConfigureOutcome, Dim, DomainSet, G2gError,
+    HardwareError, MemoryDomain, MemoryDomainKind, OutputSink, PadTemplate, PadTemplates,
+    PipelinePacket, PresentationPacer, PropError, PropValue, PropertySpec, Rate, RawVideoFormat,
+    PACING_PROPERTIES,
 };
+
+use crate::clock::wait_to_present;
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -109,6 +113,9 @@ pub struct MetalVideoSink {
     readback: bool,
     last_rgba: Option<Vec<u8>>,
     presented: u64,
+    /// PTS pacing + QoS late-drop: idle until the runner hands over a clock, and
+    /// the default lateness bound never drops.
+    pacer: PresentationPacer,
 }
 
 // SAFETY: the Metal / CoreAnimation objects are used single-threaded on the
@@ -132,6 +139,7 @@ impl MetalVideoSink {
             readback: false,
             last_rgba: None,
             presented: 0,
+            pacer: PresentationPacer::new(),
         }
     }
 
@@ -154,6 +162,33 @@ impl MetalVideoSink {
     pub fn with_readback(mut self) -> Self {
         self.readback = true;
         self
+    }
+
+    /// QoS late-drop bound: once PTS pacing is engaged, a frame past its
+    /// deadline by more than `ns` is dropped instead of presented late, so the
+    /// sink catches up. The default (`u64::MAX`) never drops.
+    pub fn with_max_lateness_ns(mut self, ns: u64) -> Self {
+        self.pacer.set_max_lateness_ns(ns);
+        self
+    }
+
+    /// Post a running-stats `Qos` report every `ns` of clock time while frames
+    /// present, on top of the per-drop reports. `0` (the default) reports only
+    /// drops.
+    pub fn with_qos_interval_ns(mut self, ns: u64) -> Self {
+        self.pacer.set_report_interval_ns(ns);
+        self
+    }
+
+    /// Attach the pipeline bus so QoS reports reach the application.
+    pub fn with_bus(mut self, bus: BusHandle) -> Self {
+        self.pacer.set_bus(bus);
+        self
+    }
+
+    /// Frames dropped by QoS late-drop (past their deadline beyond the bound).
+    pub fn late_dropped(&self) -> u64 {
+        self.pacer.late_dropped()
     }
 
     /// Whether a Metal device exists (tests skip without one, like the
@@ -451,6 +486,32 @@ impl AsyncElement for MetalVideoSink {
         DomainSet::only(MemoryDomainKind::System).with(MemoryDomainKind::CvPixelBuffer)
     }
 
+    /// Adopt the elected clock + base time so drawables present at their PTS
+    /// deadline rather than as fast as the producer pushes them.
+    fn set_clock_sync(&mut self, sync: ClockSync) {
+        self.pacer.set_clock_sync(sync);
+    }
+
+    /// Relay a late drop upstream (M174): the runner forwards it onto the
+    /// incoming link, where the producer can shed load.
+    fn take_qos(&mut self) -> Option<QosMessage> {
+        self.pacer.take_qos()
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        PACING_PROPERTIES
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        self.pacer
+            .set_property(name, &value)
+            .unwrap_or(Err(PropError::Unknown))
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        self.pacer.get_property(name)
+    }
+
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         let (w, h) = match absolute_caps {
             Caps::RawVideo {
@@ -476,11 +537,21 @@ impl AsyncElement for MetalVideoSink {
                 return Err(G2gError::NotConfigured);
             }
             match packet {
-                PipelinePacket::DataFrame(frame) => match &frame.domain {
-                    MemoryDomain::System(slice) => self.present_system(slice.as_slice())?,
-                    MemoryDomain::CvPixelBuffer(buf) => self.present_cv(buf)?,
-                    _ => return Err(G2gError::UnsupportedDomain),
-                },
+                PipelinePacket::DataFrame(frame) => {
+                    // PTS pacing: hold the frame until its deadline on the elected
+                    // clock, or drop it when it is already too late (the QoS bound)
+                    // or outside the segment. Unpaced without a clock: present as
+                    // fast as the producer pushes.
+                    let paced = self.pacer.judge(frame.timing.pts_ns, self.presented);
+                    if !wait_to_present(paced).await {
+                        return Ok(());
+                    }
+                    match &frame.domain {
+                        MemoryDomain::System(slice) => self.present_system(slice.as_slice())?,
+                        MemoryDomain::CvPixelBuffer(buf) => self.present_cv(buf)?,
+                        _ => return Err(G2gError::UnsupportedDomain),
+                    }
+                }
                 PipelinePacket::CapsChanged(c) => {
                     // A geometry change rebuilds the layer + textures; anything
                     // that is not our NV12 input shape is rejected loud. (A
@@ -504,7 +575,11 @@ impl AsyncElement for MetalVideoSink {
                         _ => return Err(G2gError::CapsMismatch),
                     }
                 }
-                PipelinePacket::Eos | PipelinePacket::Flush => {}
+                PipelinePacket::Eos => {}
+                // Track the playback segment so PTS maps to running time (correct
+                // across a seek), and re-anchor after a seek flush.
+                PipelinePacket::Segment(seg) => self.pacer.set_segment(seg),
+                PipelinePacket::Flush => self.pacer.flush(),
                 other => {
                     out.push(other).await?;
                 }

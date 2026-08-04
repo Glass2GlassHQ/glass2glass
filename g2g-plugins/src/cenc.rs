@@ -6,9 +6,11 @@
 //! metadata: the init segment's `sinf`/`schm`/`tenc` track defaults, and per
 //! fragment the sample auxiliary information (`senc`, or `saiz`+`saio` when the
 //! aux data is located out of line) plus the `seig` sample-group overrides that
-//! can switch KID, IV size, pattern or protection on a run of samples. The
+//! can switch KID, IV size, pattern or protection on a run of samples (described
+//! either in the `traf` or by the track's movie-level table). The
 //! cipher half (behind `hls` / `mp4-cenc`) applies the scheme: `cbcs` (pattern
-//! AES-CBC), `cbc1` (full AES-CBC) and `cenc` (AES-CTR).
+//! AES-CBC), `cbc1` (full AES-CBC), `cenc` (AES-CTR) and `cens` (pattern
+//! AES-CTR).
 //!
 //! Everything here reads attacker-controlled bytes: counts, sizes and offsets
 //! are bounds-checked with checked arithmetic and a malformed box fails the
@@ -21,16 +23,30 @@ use g2g_core::G2gError;
 
 use crate::mp4box::{be32, be64, find_box};
 
-/// The Common Encryption scheme a track's `schm` names. `cens` (pattern AES-CTR)
-/// is not implemented and is rejected at parse time.
+/// The Common Encryption scheme a track's `schm` names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CencScheme {
     /// AES-CTR, per-sample IV, keystream continuous over the protected bytes.
     Cenc,
+    /// AES-CTR over a crypt:skip block pattern, per-sample IV. The keystream is
+    /// continuous over the encrypted blocks only: a skipped block consumes none
+    /// of it (ISO/IEC 23001-7 §9.6, §10.3).
+    Cens,
     /// AES-CBC over whole blocks, IV reset per protected range, no pattern.
     Cbc1,
     /// AES-CBC over a crypt:skip block pattern, IV reset per protected range.
     Cbcs,
+}
+
+/// A track's protection metadata from the init segment: the `tenc` defaults plus
+/// the movie-level `seig` table (the `sgpd` in the track's `stbl`), which a
+/// fragment's `sbgp` addresses with a group description index below 0x10000.
+#[derive(Debug, Clone)]
+pub(crate) struct CencTrack {
+    pub(crate) defaults: CencDefaults,
+    /// Movie-level `seig` group entries in `sgpd` order, empty when the track
+    /// carries no such table.
+    pub(crate) movie_seig: Vec<CencDefaults>,
 }
 
 /// Protection defaults for a track (`tenc`) or for a `seig` sample group. The IV
@@ -232,6 +248,7 @@ pub(crate) fn parse_sinf(sinf: &[u8]) -> Result<CencDefaults, G2gError> {
         Some(b"cbcs") => CencScheme::Cbcs,
         Some(b"cbc1") => CencScheme::Cbc1,
         Some(b"cenc") => CencScheme::Cenc,
+        Some(b"cens") => CencScheme::Cens,
         _ => return Err(G2gError::CapsMismatch),
     };
     let schi = find_box(sinf, b"schi").ok_or(G2gError::CapsMismatch)?;
@@ -252,10 +269,13 @@ pub(crate) fn parse_sinf(sinf: &[u8]) -> Result<CencDefaults, G2gError> {
 /// `seig` sample group entry: reserved, crypt/skip pattern, isProtected,
 /// Per_Sample_IV_Size, KID, and the constant IV when the IV is not per-sample.
 fn parse_protection_fields(b: &[u8], scheme: CencScheme) -> Result<CencDefaults, G2gError> {
-    // Bit 7 of the first byte is `multi_key_flag` in a `seig` entry (reserved 0 in
-    // a `tenc`): the multi-key layout that follows is different, so reject it
-    // rather than read the following fields at the wrong offsets.
-    if *b.first().ok_or(G2gError::CapsMismatch)? & 0x80 != 0 {
+    // The first byte is reserved (0) in both boxes except that a multi-key `seig`
+    // entry signals itself there, and the two descriptions of the multi-key layout
+    // put the flag in different bits (the 2016 MPEG proposal in bit 7, GPAC's
+    // on-disk key-info blob in bit 0). The record that follows a set flag is a
+    // different shape, so any nonzero value is declined rather than read at what
+    // would be the wrong offsets.
+    if *b.first().ok_or(G2gError::CapsMismatch)? != 0 {
         return Err(G2gError::CapsMismatch);
     }
     let packed = *b.get(1).ok_or(G2gError::CapsMismatch)?;
@@ -289,6 +309,19 @@ fn parse_protection_fields(b: &[u8], scheme: CencScheme) -> Result<CencDefaults,
     })
 }
 
+/// Read the track's movie-level `seig` table out of its `stbl`: the `sgpd` whose
+/// grouping type is `seig`, parsed with the track's scheme. A track without one
+/// yields an empty table (only fragment-local groups can then apply).
+pub(crate) fn parse_movie_seig(
+    stbl: &[u8],
+    scheme: CencScheme,
+) -> Result<Vec<CencDefaults>, G2gError> {
+    match find_grouping(stbl, b"sgpd", b"seig") {
+        Some(sgpd) => parse_sgpd_entries(sgpd, scheme),
+        None => Ok(Vec::new()),
+    }
+}
+
 /// Resolve the per-sample crypto for one fragment's `sample_count` samples.
 ///
 /// `from_moof` is the fragment bytes starting at the enclosing `moof` box header
@@ -304,10 +337,11 @@ fn parse_protection_fields(b: &[u8], scheme: CencScheme) -> Result<CencDefaults,
 pub(crate) fn fragment_sample_crypt(
     traf: &[u8],
     from_moof: &[u8],
-    defaults: &CencDefaults,
+    track: &CencTrack,
     sample_count: usize,
 ) -> Result<Vec<SampleCrypt>, G2gError> {
-    let groups = parse_seig(traf, defaults.scheme, sample_count)?;
+    let defaults = &track.defaults;
+    let groups = parse_seig(traf, track, sample_count)?;
     // Per-sample protection settings before the aux info is folded in.
     let settings: Vec<&CencDefaults> = (0..sample_count)
         .map(|i| match groups.get(i) {
@@ -506,8 +540,11 @@ fn aux_from_senc<'a>(
     senc: &'a [u8],
     settings: &[&CencDefaults],
 ) -> Result<Vec<&'a [u8]>, G2gError> {
-    // Version 1 / 2 carry the multi-key record layout instead; reading them as
-    // version 0 would mis-slice every sample, so decline.
+    // A nonzero version carries the multi-key record layout (per-sample key
+    // indices, an IV whose length comes from a key list in the `seig` entry, and
+    // wider subsample counts). Only one implementation writes it and the `seig`
+    // half of the layout could not be established, so reading it as version 0
+    // would mis-slice every sample: decline.
     if senc.first() != Some(&0) {
         return Err(G2gError::CapsMismatch);
     }
@@ -548,21 +585,24 @@ fn aux_from_senc<'a>(
 /// `None` for a sample means "use the track defaults". Absent boxes yield an
 /// empty map.
 ///
-/// Fragment-local group description indices are offset by 0x10000 (the
-/// `traf`-level `sgpd`); index 0 means the sample is in no group.
+/// Index 0 means the sample is in no group. Per ISO/IEC 14496-12 a
+/// `group_description_index` of 0x10000 or more names an entry of the `traf`'s own
+/// `sgpd` (local index = index - 0x10000), and a smaller one an entry of the
+/// movie-level table in the track's `stbl`. An index whose table is absent fails
+/// the parse: falling back to the other table, or to the track defaults, could
+/// decrypt a sample the group left clear or key it wrongly.
 fn parse_seig(
     traf: &[u8],
-    scheme: CencScheme,
+    track: &CencTrack,
     sample_count: usize,
 ) -> Result<Vec<Option<CencDefaults>>, G2gError> {
     let Some(sbgp) = find_grouping(traf, b"sbgp", b"seig") else {
         return Ok(Vec::new());
     };
-    // The groups a `sbgp` names must be described in the same `traf`: a
-    // movie-level `seig` table is out of scope, and guessing the track defaults
-    // instead would decrypt samples the group may have re-keyed or left clear.
-    let sgpd = find_grouping(traf, b"sgpd", b"seig").ok_or(G2gError::CapsMismatch)?;
-    let entries = parse_sgpd_entries(sgpd, scheme)?;
+    let local = match find_grouping(traf, b"sgpd", b"seig") {
+        Some(sgpd) => parse_sgpd_entries(sgpd, track.defaults.scheme)?,
+        None => Vec::new(),
+    };
 
     let version = *sbgp.first().ok_or(G2gError::CapsMismatch)?;
     // payload: version/flags(4), grouping_type(4), grouping_type_parameter(4, v1),
@@ -590,13 +630,13 @@ fn parse_seig(
         let entry = match index {
             0 => None,
             i => {
-                let local = if i >= 0x1_0000 { i - 0x1_0000 } else { i };
-                let e = entries
-                    .get(
-                        (local as usize)
-                            .checked_sub(1)
-                            .ok_or(G2gError::CapsMismatch)?,
-                    )
+                let (table, at) = if i >= 0x1_0000 {
+                    (&local, i - 0x1_0000)
+                } else {
+                    (&track.movie_seig, i)
+                };
+                let e = table
+                    .get((at as usize).checked_sub(1).ok_or(G2gError::CapsMismatch)?)
                     .ok_or(G2gError::CapsMismatch)?;
                 Some(e.clone())
             }
@@ -607,9 +647,9 @@ fn parse_seig(
 }
 
 /// Find a sample-group box (`sbgp` / `sgpd`) whose `grouping_type` matches; a
-/// `traf` can carry several for different grouping types.
-fn find_grouping<'a>(traf: &'a [u8], kind: &[u8; 4], grouping: &[u8; 4]) -> Option<&'a [u8]> {
-    crate::mp4box::boxes(traf)
+/// `traf` (or `stbl`) can carry several for different grouping types.
+fn find_grouping<'a>(container: &'a [u8], kind: &[u8; 4], grouping: &[u8; 4]) -> Option<&'a [u8]> {
+    crate::mp4box::boxes(container)
         .filter(|(k, _)| *k == kind)
         .find(|(_, b)| b.get(4..8) == Some(&grouping[..]))
         .map(|(_, b)| b)
@@ -622,8 +662,11 @@ fn find_grouping<'a>(traf: &'a [u8], kind: &[u8; 4], grouping: &[u8; 4]) -> Opti
 fn parse_sgpd_entries(sgpd: &[u8], scheme: CencScheme) -> Result<Vec<CencDefaults>, G2gError> {
     let version = *sgpd.first().ok_or(G2gError::CapsMismatch)?;
     if version > 1 {
-        // v2+ inserts a default_sample_description_index and drops the entry
-        // lengths; not seen in CENC content, so decline rather than mis-read.
+        // v2 inserts a default sample description index, but the editions of
+        // 14496-12 disagree on whether `default_length` and the per-entry lengths
+        // survive alongside it (2015 has them only at v1, 2022 from v1 up), so the
+        // two layouts differ in where the entries start. Decline rather than
+        // mis-read: v1 is what CENC packagers write.
         return Err(G2gError::CapsMismatch);
     }
     let mut at = 8usize;
@@ -667,22 +710,41 @@ fn parse_sgpd_entries(sgpd: &[u8], scheme: CencScheme) -> Result<Vec<CencDefault
 /// [`SampleCrypt`]: an empty subsample map protects the whole sample, otherwise
 /// each subsample's `protected` run is decrypted and its `clear` run passes
 /// through. A clear sample is left untouched.
+///
+/// Errors when the subsample map describes more bytes than the sample holds: the
+/// map then does not belong to this sample, and decrypting the part that fits
+/// would emit the rest as if it were plaintext.
 #[cfg(any(feature = "hls", feature = "mp4-cenc"))]
-pub(crate) fn decrypt_sample(buf: &mut [u8], crypt: &SampleCrypt, key: &[u8; 16]) {
+pub(crate) fn decrypt_sample(
+    buf: &mut [u8],
+    crypt: &SampleCrypt,
+    key: &[u8; 16],
+) -> Result<(), G2gError> {
     if !crypt.protected {
-        return;
+        return Ok(());
     }
     // `cenc` (AES-CTR) and `cbc1` (AES-CBC) both run one continuous cipher over
     // the sample's protected bytes, skipping the clear runs, so those gather the
-    // ranges first. `cbcs` restarts from the IV at each protected range, so it
-    // works range by range.
-    let ranges = protected_ranges(buf.len(), &crypt.subsamples);
+    // ranges first. `cens` gathers too, but only the pattern's encrypted blocks:
+    // its counter advances over those alone. `cbcs` restarts from the IV at each
+    // protected range, so it works range by range.
+    let ranges = protected_ranges(buf.len(), &crypt.subsamples).ok_or(G2gError::CapsMismatch)?;
+    let pattern = (crypt.crypt_byte_block, crypt.skip_byte_block);
     match crypt.scheme {
         CencScheme::Cenc => gathered(buf, &ranges, |g| {
-            use aes::cipher::{KeyIvInit, StreamCipher};
-            type Ctr = ctr::Ctr128BE<aes::Aes128>;
-            Ctr::new(&(*key).into(), &crypt.iv.into()).apply_keystream(g);
+            ctr_decrypt(g, key, &crypt.iv);
         }),
+        CencScheme::Cens => {
+            // With no pattern `cens` is `cenc`: the whole protected range, trailing
+            // partial block included.
+            let blocks = match pattern {
+                (0, _) | (_, 0) => ranges.clone(),
+                (c, s) => pattern_blocks(&ranges, c, s),
+            };
+            gathered(buf, &blocks, |g| {
+                ctr_decrypt(g, key, &crypt.iv);
+            });
+        }
         CencScheme::Cbc1 => gathered(buf, &ranges, |g| {
             cbc_decrypt_blocks(g, key, &crypt.iv, 0, 0);
         }),
@@ -698,6 +760,45 @@ pub(crate) fn decrypt_sample(buf: &mut [u8], crypt: &SampleCrypt, key: &[u8; 16]
             }
         }
     }
+    Ok(())
+}
+
+/// AES-CTR over `g` from `iv` as the initial counter block. A short per-sample IV
+/// has already been zero-extended into the low half, which is the block counter.
+#[cfg(any(feature = "hls", feature = "mp4-cenc"))]
+fn ctr_decrypt(g: &mut [u8], key: &[u8; 16], iv: &[u8; 16]) {
+    use aes::cipher::{KeyIvInit, StreamCipher};
+    type Ctr = ctr::Ctr128BE<aes::Aes128>;
+    Ctr::new(&(*key).into(), &(*iv).into()).apply_keystream(g);
+}
+
+/// The extents a crypt:skip block pattern encrypts within each protected range,
+/// as absolute `(start, end)` pairs (one per pattern cycle's crypt span).
+///
+/// The pattern restarts at the head of every protected range, per ISO/IEC 23001-7
+/// §9.6.1: only whole 16-byte blocks are encrypted, so a range's trailing partial
+/// block stays clear even when the pattern would cover it. A final crypt span the
+/// range truncates keeps the whole blocks it does hold (what GPAC and Shaka
+/// Packager do; ffmpeg drops that span instead, a divergence conformant content
+/// avoids because 23001-7 §10.3 requires 16-byte-aligned protected ranges).
+#[cfg(any(feature = "hls", feature = "mp4-cenc"))]
+fn pattern_blocks(ranges: &[(usize, usize)], crypt: u8, skip: u8) -> Vec<(usize, usize)> {
+    let span = (crypt as usize + skip as usize) * 16;
+    let crypt_len = crypt as usize * 16;
+    let mut out = Vec::new();
+    for &(start, end) in ranges {
+        let mut at = start;
+        while at < end {
+            // Whole blocks only: truncate the crypt span to what the range holds.
+            let take = crypt_len.min((end - at) / 16 * 16);
+            if take == 0 {
+                break;
+            }
+            out.push((at, at + take));
+            at = at.saturating_add(span);
+        }
+    }
+    out
 }
 
 /// Run `cipher` over the sample's protected bytes as one contiguous buffer, then
@@ -721,24 +822,29 @@ fn gathered(buf: &mut [u8], ranges: &[(usize, usize)], cipher: impl FnOnce(&mut 
     }
 }
 
-/// The protected byte ranges of a sample, clamped to its length. An empty
-/// subsample map means the whole sample is protected.
+/// The protected byte ranges of a sample. An empty subsample map means the whole
+/// sample is protected. `None` when the map runs past the end of the sample: it
+/// describes a different sample than the one in hand, so no part of this one can
+/// be trusted to be where the map says.
 #[cfg(any(feature = "hls", feature = "mp4-cenc"))]
-fn protected_ranges(len: usize, subsamples: &[Subsample]) -> Vec<(usize, usize)> {
+fn protected_ranges(len: usize, subsamples: &[Subsample]) -> Option<Vec<(usize, usize)>> {
     if subsamples.is_empty() {
-        return Vec::from([(0, len)]);
+        return Some(Vec::from([(0, len)]));
     }
     let mut out = Vec::with_capacity(subsamples.len());
     let mut pos = 0usize;
     for s in subsamples {
-        pos = pos.saturating_add(s.clear as usize).min(len);
-        let end = pos.saturating_add(s.protected as usize).min(len);
+        pos = pos.checked_add(s.clear as usize)?;
+        let end = pos.checked_add(s.protected as usize)?;
+        if end > len {
+            return None;
+        }
         if pos < end {
             out.push((pos, end));
         }
         pos = end;
     }
-    out
+    Some(out)
 }
 
 /// AES-CBC over a protected run: with a `crypt`:`skip` pattern only the crypt

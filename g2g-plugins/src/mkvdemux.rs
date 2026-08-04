@@ -37,14 +37,15 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
+use g2g_core::log::Target;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{SeekController, StreamSelectController};
 use g2g_core::{
-    AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps, CapsConstraint,
-    CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError, MemoryDomain, MultiOutputElement,
-    MultiOutputSink, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, Rate, Seek, Segment, Stream, StreamCollection, StreamType, TagList,
-    TextFormat, VideoCodec,
+    g2g_error, AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps,
+    CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError, MemoryDomain,
+    MultiOutputElement, MultiOutputSink, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    PropError, PropKind, PropValue, PropertySpec, Rate, Seek, Segment, Stream, StreamCollection,
+    StreamType, SubPictureFormat, TagList, TextFormat, VideoCodec,
 };
 
 use crate::demuxseek::{Admit, DemuxSeek};
@@ -71,6 +72,15 @@ pub enum MkvStream {
     Flac,
     /// A timed-text subtitle stream (`S_TEXT/UTF8` -> `Caps::Text { format }`).
     Subtitle(TextFormat),
+    /// A DVD subpicture (bitmap) subtitle stream (`S_VOBSUB` ->
+    /// `Caps::SubPicture { VobSub }`). The track's `CodecPrivate` (the `.idx`
+    /// text with the palette and display size) is forwarded in band before the
+    /// first cue, the way the FLAC / Opus headers are.
+    VobSub,
+    /// A DVB subtitle (bitmap) stream (`S_DVBSUB` -> `Caps::SubPicture
+    /// { DvbSub }`). Its `CodecPrivate` (the composition / ancillary page ids)
+    /// is forwarded in band the same way.
+    DvbSub,
 }
 
 /// A Matroska `Cues` prefetch in flight (M374): an end-of-file `Cues` index
@@ -278,6 +288,12 @@ impl MkvDemux {
             MkvStream::Subtitle(_) => Caps::Text {
                 format: TextFormat::Utf8,
             },
+            MkvStream::VobSub => Caps::SubPicture {
+                format: SubPictureFormat::VobSub,
+            },
+            MkvStream::DvbSub => Caps::SubPicture {
+                format: SubPictureFormat::DvbSub,
+            },
         }
     }
 
@@ -312,6 +328,8 @@ impl MkvDemux {
             MkvStream::Ac3 => MkvCodec::Ac3,
             MkvStream::Flac => MkvCodec::Flac,
             MkvStream::Subtitle(format) => MkvCodec::Subtitle(format),
+            MkvStream::VobSub => MkvCodec::VobSub,
+            MkvStream::DvbSub => MkvCodec::DvbSub,
         }
     }
 
@@ -342,8 +360,10 @@ impl MkvDemux {
                 channels: track.channels.max(1),
                 sample_rate: track.sample_rate,
             }),
-            // A text track carries no geometry / rate to refine; its caps is final.
-            text @ Caps::Text { .. } => Some(text),
+            // A text / subpicture track carries no geometry or rate to refine
+            // here (a subpicture's display size rides its `CodecPrivate`), so
+            // the caps is already final.
+            final_caps @ (Caps::Text { .. } | Caps::SubPicture { .. }) => Some(final_caps),
             _ => None,
         }
     }
@@ -447,6 +467,18 @@ impl MkvDemux {
                     format: TextFormat::Utf8,
                 },
             ),
+            MkvCodec::VobSub => (
+                StreamType::Text,
+                Caps::SubPicture {
+                    format: SubPictureFormat::VobSub,
+                },
+            ),
+            MkvCodec::DvbSub => (
+                StreamType::Text,
+                Caps::SubPicture {
+                    format: SubPictureFormat::DvbSub,
+                },
+            ),
             MkvCodec::Other => return None,
         };
         Some(Stream::new(id, stream_type, caps))
@@ -489,6 +521,32 @@ impl MkvDemux {
         resolve_stream_id(&self.demux, id)
     }
 
+    /// Refuse a `ContentEncoding`-compressed bitmap-subtitle track: its blocks
+    /// are zlib (or header-stripped) bytes rather than SPU packets or DVB
+    /// segments and nothing here inflates them, so forwarding them would feed
+    /// the decoder garbage. Only the subpicture selections are checked; the
+    /// other codecs' compressed-block handling is unchanged.
+    fn reject_compressed_subpicture(&self) -> Result<(), G2gError> {
+        let codec = match self.stream {
+            MkvStream::VobSub => MkvCodec::VobSub,
+            MkvStream::DvbSub => MkvCodec::DvbSub,
+            _ => return Ok(()),
+        };
+        if !self
+            .demux
+            .tracks()
+            .iter()
+            .any(|t| t.codec == codec && t.compressed)
+        {
+            return Ok(());
+        }
+        g2g_error!(
+            Target::category("mkvdemux"),
+            "bitmap subtitle track declares a ContentEncoding compression, which this demuxer does not inflate"
+        );
+        Err(G2gError::CapsMismatch)
+    }
+
     /// Emit a `CapsChanged` once the selected track's concrete caps are known,
     /// then forward each demuxed frame of that stream.
     async fn emit_ready(&mut self, out: &mut dyn OutputSink) -> Result<(), G2gError> {
@@ -503,6 +561,7 @@ impl MkvDemux {
         // Fall back to the file's actual video track when the default (Vp9)
         // selection is absent, so autoplug of a VP8 / AV1 / H.264 WebM works.
         self.auto_select_video_track();
+        self.reject_compressed_subpicture()?;
         if let Some(caps) = self.concrete_caps() {
             if self.last_caps.as_ref() != Some(&caps) {
                 out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
@@ -643,10 +702,12 @@ impl AsyncElement for MkvDemux {
                 }
                 // The upstream byte-seek's flush. The internal Cues-prefetch flush
                 // is consumed (not forwarded): downstream sees a flush only on the
-                // real seek. The real seek's flush resets the parser, keeping the
+                // real seek. Our own seek's flush resets the parser, keeping the
                 // Tracks / TimestampScale / Cues a mid-segment (indexed) landing
                 // does not re-send (a from-start re-scan fully resets, re-reading
-                // the EBML header), then forwards the flush.
+                // the EBML header), then forwards the flush. A flush we did not
+                // ask for is an upstream discontinuity: reset outright, since the
+                // new bytes may be anything.
                 PipelinePacket::Flush => {
                     if let CuePrefetch::Fetching {
                         target_ns,
@@ -660,8 +721,9 @@ impl AsyncElement for MkvDemux {
                         self.demux.reset_keeping_tracks();
                         return Ok(());
                     }
+                    let ours = self.seek.dropping_input();
                     self.seek.on_flush();
-                    if self.seek.keeps_state() {
+                    if ours && self.seek.keeps_state() {
                         self.demux.reset_keeping_tracks();
                     } else {
                         self.reset_parser();
@@ -711,7 +773,7 @@ impl AsyncElement for MkvDemux {
 static MKVDEMUX_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "stream",
     PropKind::Str,
-    "elementary stream to emit: h264 | h265 | vp8 | vp9 | av1 | aac | opus",
+    "elementary stream to emit: h264 | h265 | vp8 | vp9 | av1 | aac | opus | ac3 | flac | vobsub | dvbsub",
 )];
 
 /// The [`MkvStream`] a demuxer forwards for a parsed track's codec, or `None` for
@@ -728,6 +790,8 @@ fn codec_to_stream(codec: MkvCodec) -> Option<MkvStream> {
         MkvCodec::Ac3 => Some(MkvStream::Ac3),
         MkvCodec::Flac => Some(MkvStream::Flac),
         MkvCodec::Subtitle(format) => Some(MkvStream::Subtitle(format)),
+        MkvCodec::VobSub => Some(MkvStream::VobSub),
+        MkvCodec::DvbSub => Some(MkvStream::DvbSub),
         MkvCodec::Other => None,
     }
 }
@@ -919,6 +983,10 @@ fn config_header(demux: &MatroskaDemuxer, codec: MkvCodec, track: u64) -> Option
     match codec {
         MkvCodec::Flac => Some(private.to_vec()),
         MkvCodec::Opus => crate::opusparse::parse_opus_head(private).map(|_| private.to_vec()),
+        // the `.idx` text carrying the palette and display size
+        MkvCodec::VobSub => crate::vobsub::parse_idx(private).map(|_| private.to_vec()),
+        // the composition / ancillary page ids the display sets compose under
+        MkvCodec::DvbSub => crate::dvbsub::parse_page_ids(private).map(|_| private.to_vec()),
         _ => None,
     }
 }
@@ -959,7 +1027,10 @@ impl TagPoster {
             let fresh: TagList = demux.tags().tags()[self.posted..].iter().cloned().collect();
             self.posted = total;
             if let Some(bus) = bus {
-                bus.try_post(BusMessage::Tag(fresh));
+                bus.try_post(BusMessage::Tag {
+                    tags: fresh,
+                    program: None,
+                });
             }
         }
         // A track-scoped group needs `Tracks` to map its UID to a stream id; hold
@@ -1025,6 +1096,8 @@ fn mkv_stream_from_str(s: &str) -> Option<MkvStream> {
         "opus" => Some(MkvStream::Opus),
         "ac3" => Some(MkvStream::Ac3),
         "flac" => Some(MkvStream::Flac),
+        "vobsub" | "dvdsub" => Some(MkvStream::VobSub),
+        "dvbsub" => Some(MkvStream::DvbSub),
         _ => None,
     }
 }
@@ -1046,6 +1119,8 @@ fn mkv_stream_to_str(stream: MkvStream) -> &'static str {
         MkvStream::Ac3 => "ac3",
         MkvStream::Flac => "flac",
         MkvStream::Subtitle(_) => "text",
+        MkvStream::VobSub => "vobsub",
+        MkvStream::DvbSub => "dvbsub",
     }
 }
 
@@ -1064,6 +1139,8 @@ impl PadTemplates for MkvDemux {
             Self::output_caps(MkvStream::Ac3),
             Self::output_caps(MkvStream::Flac),
             Self::output_caps(MkvStream::Subtitle(TextFormat::Utf8)),
+            Self::output_caps(MkvStream::VobSub),
+            Self::output_caps(MkvStream::DvbSub),
         ]));
         Vec::from([
             PadTemplate::sink(CapsSet::one(Self::input_caps())),
@@ -1654,7 +1731,7 @@ mod tests {
 
         let mut posted = TagList::new();
         while let Some(m) = bus.try_recv() {
-            if let BusMessage::Tag(t) = m {
+            if let BusMessage::Tag { tags: t, .. } = m {
                 for tag in t.tags() {
                     posted.push(tag.clone());
                 }

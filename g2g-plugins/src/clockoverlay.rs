@@ -1,8 +1,16 @@
-//! Wall-clock overlay (`clockoverlay`). Burns the current wall-clock time of day
-//! (UTC, `HH:MM:SS`) into the top-left of a packed RGBA / BGRA frame, the g2g
-//! analog of GStreamer's `clockoverlay`. Reuses the 8x8 glyph renderer from
-//! [`timeoverlay`]. std-gated: it needs a system clock, unlike `timeoverlay`
-//! (buffer PTS), which is `no_std`. UTC because the baseline has no timezone db.
+//! Wall-clock overlay (`clockoverlay`). Burns the current time of day into a
+//! packed RGBA / BGRA frame, the g2g analog of GStreamer's `clockoverlay`. The
+//! text is a strftime-style `time-format` (default `%H:%M:%S`), and the box
+//! rendering, placement and styling come from [`timeoverlay`], its
+//! buffer-timestamp sibling. std-gated: it needs a system clock, unlike
+//! `timeoverlay` (buffer PTS), which is `no_std`.
+//!
+//! Two deliberate differences from GStreamer: the time is UTC, because the
+//! baseline carries no timezone database, and it is read through an injectable
+//! [`PipelineClock`] whose `now_ns` is nanoseconds since the UNIX epoch
+//! ([`UnixEpochClock`](crate::clock::UnixEpochClock) by default), so a test can
+//! pin the rendered text to a fixed instant. Only the strftime fields listed on
+//! [`strftime_utc`] are substituted; anything else is drawn literally.
 //!
 //! [`timeoverlay`]: crate::timeoverlay
 
@@ -10,42 +18,41 @@ use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
-use alloc::format;
-use alloc::string::String;
-use alloc::vec;
+use alloc::string::{String, ToString};
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
-use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
-    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, Rate, RawVideoFormat,
+    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError, OutputSink,
+    PadTemplate, PadTemplates, PipelineClock, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec,
 };
 
-use crate::timeoverlay::draw_text;
+use crate::clock::UnixEpochClock;
+// The strftime formatter lives with the other shared overlay machinery, since
+// `timeoverlay` renders dates with it too and is not std-gated.
+pub use crate::timeoverlay::strftime_utc;
+use crate::timeoverlay::{
+    OverlayCore, OverlayStyle, COLOR_PROP, HALIGN_PROP, SCALE_PROP, SHADED_PROP, VALIGN_PROP,
+    XPAD_PROP, YPAD_PROP,
+};
 
-const FORMATS: [RawVideoFormat; 2] = [RawVideoFormat::Rgba8, RawVideoFormat::Bgra8];
+const DEFAULT_TIME_FORMAT: &str = "%H:%M:%S";
 
-/// Current UTC time of day as `HH:MM:SS`.
-fn wall_clock_utc() -> String {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let tod = secs % 86_400;
-    format!("{:02}:{:02}:{:02}", tod / 3600, (tod % 3600) / 60, tod % 60)
+pub struct ClockOverlay {
+    core: OverlayCore,
+    time_format: String,
+    /// Time-of-day source: `now_ns` is nanoseconds since the UNIX epoch.
+    clock: Arc<dyn PipelineClock + Send + Sync>,
 }
 
-#[derive(Debug)]
-pub struct ClockOverlay {
-    scale: u32,
-    input: Option<(RawVideoFormat, u32, u32, Rate)>,
-    configured: bool,
-    last_caps: Option<Caps>,
-    emitted: u64,
+impl core::fmt::Debug for ClockOverlay {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ClockOverlay")
+            .field("time_format", &self.time_format)
+            .field("now_ns", &self.clock.now_ns())
+            .finish()
+    }
 }
 
 impl Default for ClockOverlay {
@@ -57,33 +64,34 @@ impl Default for ClockOverlay {
 impl ClockOverlay {
     pub fn new() -> Self {
         Self {
-            scale: 2,
-            input: None,
-            configured: false,
-            last_caps: None,
-            emitted: 0,
+            core: OverlayCore::default(),
+            time_format: DEFAULT_TIME_FORMAT.to_string(),
+            clock: Arc::new(UnixEpochClock),
         }
     }
 
     pub fn with_scale(mut self, scale: u32) -> Self {
-        self.scale = scale.max(1);
+        self.core.style_mut().scale = scale.max(1);
         self
     }
 
-    fn accept_input(&self, caps: &Caps) -> Result<(RawVideoFormat, u32, u32, Rate), G2gError> {
-        let Caps::RawVideo {
-            format,
-            width: Dim::Fixed(w),
-            height: Dim::Fixed(h),
-            framerate,
-        } = caps
-        else {
-            return Err(G2gError::CapsMismatch);
-        };
-        if !FORMATS.contains(format) || *w == 0 || *h == 0 {
-            return Err(G2gError::CapsMismatch);
-        }
-        Ok((*format, *w, *h, framerate.clone()))
+    /// Placement and styling of the text box.
+    pub fn with_style(mut self, style: OverlayStyle) -> Self {
+        *self.core.style_mut() = style;
+        self
+    }
+
+    /// The strftime format drawn (the `time-format` property).
+    pub fn with_time_format(mut self, format: &str) -> Self {
+        self.time_format = format.to_string();
+        self
+    }
+
+    /// Read the time of day from `clock` instead of the system clock. `now_ns`
+    /// must be nanoseconds since the UNIX epoch.
+    pub fn with_clock(mut self, clock: Arc<dyn PipelineClock + Send + Sync>) -> Self {
+        self.clock = clock;
+        self
     }
 }
 
@@ -94,33 +102,15 @@ impl AsyncElement for ClockOverlay {
         Self: 'a;
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        for format in FORMATS {
-            let candidate = Caps::RawVideo {
-                format,
-                width: Dim::Any,
-                height: Dim::Any,
-                framerate: Rate::Any,
-            };
-            if let Ok(narrowed) = upstream_caps.intersect(&candidate) {
-                return Ok(narrowed);
-            }
-        }
-        Err(G2gError::CapsMismatch)
+        OverlayCore::intercept_caps(upstream_caps)
     }
 
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
-            Caps::RawVideo { format, .. } if FORMATS.contains(format) => {
-                CapsSet::one(input.clone())
-            }
-            _ => CapsSet::from_alternatives(Vec::new()),
-        }))
+        OverlayCore::constraint()
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        self.input = Some(self.accept_input(absolute_caps)?);
-        self.configured = true;
-        Ok(ConfigureOutcome::Accepted)
+        self.core.configure(absolute_caps)
     }
 
     fn process<'a>(
@@ -129,66 +119,12 @@ impl AsyncElement for ClockOverlay {
         out: &'a mut dyn OutputSink,
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
-            if !self.configured {
-                return Err(G2gError::NotConfigured);
-            }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let (format, w, h, rate) = match &self.input {
-                        Some((f, w, h, r)) => (*f, *w, *h, r.clone()),
-                        None => return Err(G2gError::NotConfigured),
-                    };
-                    let Some(src) = frame.domain.as_system_slice() else {
-                        return Err(G2gError::UnsupportedDomain);
-                    };
-                    let bytes = (w as usize) * (h as usize) * 4;
-                    if src.len() < bytes {
-                        return Err(G2gError::CapsMismatch);
-                    }
-                    let mut dst = vec![0u8; bytes].into_boxed_slice();
-                    dst.copy_from_slice(&src[..bytes]);
-                    draw_text(
-                        &mut dst,
-                        w as usize,
-                        h as usize,
-                        &wall_clock_utc(),
-                        self.scale.max(1),
-                    );
-
-                    let new_caps = Caps::RawVideo {
-                        format,
-                        width: Dim::Fixed(w),
-                        height: Dim::Fixed(h),
-                        framerate: rate,
-                    };
-                    if self.last_caps.as_ref() != Some(&new_caps) {
-                        out.push(PipelinePacket::CapsChanged(new_caps.clone()))
-                            .await?;
-                        self.last_caps = Some(new_caps);
-                    }
-                    let out_frame = Frame {
-                        domain: MemoryDomain::System(SystemSlice::from_boxed(dst)),
-                        timing: frame.timing,
-                        sequence: self.emitted,
-                        meta: Default::default(),
-                    };
-                    self.emitted += 1;
-                    out.push(PipelinePacket::DataFrame(out_frame)).await?;
+                    let text = strftime_utc(self.clock.now_ns(), &self.time_format);
+                    self.core.render(frame, &text, out).await?;
                 }
-                PipelinePacket::CapsChanged(c) => {
-                    self.input = Some(self.accept_input(&c)?);
-                }
-                PipelinePacket::Flush => {
-                    self.last_caps = None;
-                    out.push(PipelinePacket::Flush).await?;
-                }
-                PipelinePacket::Segment(seg) => {
-                    out.push(PipelinePacket::Segment(seg)).await?;
-                }
-                PipelinePacket::Eos => {}
-                other => {
-                    out.push(other).await?;
-                }
+                other => self.core.control(other, out).await?,
             }
             Ok(())
         })
@@ -209,60 +145,159 @@ impl AsyncElement for ClockOverlay {
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
         match name {
-            "scale" => {
-                let s = value.as_uint().ok_or(PropError::Type)?;
-                if s == 0 {
-                    return Err(PropError::Value);
-                }
-                self.scale = s as u32;
+            "time-format" => {
+                self.time_format = value.as_str().ok_or(PropError::Type)?.to_string();
+                Ok(())
             }
-            _ => return Err(PropError::Unknown),
+            _ => self.core.set_style_property(name, value),
         }
-        Ok(())
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
-            "scale" => Some(PropValue::Uint(self.scale as u64)),
-            _ => None,
+            "time-format" => Some(PropValue::Str(self.time_format.clone())),
+            _ => self.core.get_style_property(name),
         }
     }
 }
 
-static CLOCKOVERLAY_PROPS: &[PropertySpec] = &[PropertySpec::new(
-    "scale",
-    PropKind::Uint,
-    "integer font magnification (>= 1)",
-)];
+static CLOCKOVERLAY_PROPS: &[PropertySpec] = &[
+    PropertySpec::new(
+        "time-format",
+        PropKind::Str,
+        "strftime format for the UTC time of day, e.g. \"%F %T\"",
+    )
+    .with_default(DEFAULT_TIME_FORMAT),
+    SCALE_PROP,
+    HALIGN_PROP,
+    VALIGN_PROP,
+    XPAD_PROP,
+    YPAD_PROP,
+    COLOR_PROP,
+    SHADED_PROP,
+];
 
 impl PadTemplates for ClockOverlay {
     fn pad_templates() -> Vec<PadTemplate> {
-        let any_geometry = |format| Caps::RawVideo {
-            format,
-            width: Dim::Any,
-            height: Dim::Any,
-            framerate: Rate::Any,
-        };
-        let set = CapsSet::from_alternatives(FORMATS.map(any_geometry).to_vec());
-        Vec::from([PadTemplate::sink(set.clone()), PadTemplate::source(set)])
+        OverlayCore::pad_templates()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
+    use g2g_core::frame::Frame;
+    use g2g_core::memory::{MemoryDomain, SystemSlice};
+    use g2g_core::{Dim, FrameTiming, PushOutcome, Rate, RawVideoFormat};
+
+    /// 2026-08-04T13:45:07Z, a Tuesday, day 216 of the year.
+    const FIXED_NS: u64 = 1_785_851_107 * 1_000_000_000;
+
+    #[derive(Debug)]
+    struct FixedClock(u64);
+
+    impl PipelineClock for FixedClock {
+        fn now_ns(&self) -> u64 {
+            self.0
+        }
+    }
 
     #[test]
-    fn formats_time_of_day() {
-        // The helper is time-dependent; assert its shape is HH:MM:SS.
-        let t = wall_clock_utc();
-        assert_eq!(t.len(), 8);
-        let parts: Vec<&str> = t.split(':').collect();
-        assert_eq!(parts.len(), 3);
-        for p in parts {
-            assert_eq!(p.len(), 2);
-            assert!(p.chars().all(|c| c.is_ascii_digit()));
+    fn strftime_substitutes_the_supported_fields() {
+        assert_eq!(strftime_utc(FIXED_NS, "%H:%M:%S"), "13:45:07");
+        assert_eq!(strftime_utc(FIXED_NS, "%F %T"), "2026-08-04 13:45:07");
+        assert_eq!(strftime_utc(FIXED_NS, "%Y-%m-%d"), "2026-08-04");
+        assert_eq!(strftime_utc(FIXED_NS, "%I:%M %p"), "01:45 PM");
+        assert_eq!(strftime_utc(FIXED_NS, "%a %b %e"), "Tue Aug  4");
+        assert_eq!(strftime_utc(FIXED_NS, "%A %B"), "Tuesday August");
+        assert_eq!(strftime_utc(FIXED_NS, "%D %R"), "08/04/26 13:45");
+        assert_eq!(strftime_utc(FIXED_NS, "%y %C %j"), "26 20 216");
+        assert_eq!(strftime_utc(FIXED_NS, "%s"), "1785851107");
+        assert_eq!(strftime_utc(FIXED_NS, "100%% done"), "100% done");
+        // Unsupported fields and a trailing percent are drawn as written.
+        assert_eq!(strftime_utc(FIXED_NS, "%Q at %H%"), "%Q at 13%");
+    }
+
+    #[test]
+    fn day_of_year_counts_the_leap_day() {
+        // 2024-03-01 (leap year) is day 61; 2023-03-01 is day 60.
+        assert_eq!(
+            strftime_utc(1_709_251_200 * 1_000_000_000, "%F %j"),
+            "2024-03-01 061"
+        );
+        assert_eq!(
+            strftime_utc(1_677_628_800 * 1_000_000_000, "%F %j"),
+            "2023-03-01 060"
+        );
+    }
+
+    fn rgba_caps(w: u32, h: u32) -> Caps {
+        Caps::RawVideo {
+            format: RawVideoFormat::Rgba8,
+            width: Dim::Fixed(w),
+            height: Dim::Fixed(h),
+            framerate: Rate::Fixed(30 << 16),
         }
+    }
+
+    #[derive(Default)]
+    struct PixelSink {
+        last: Option<Vec<u8>>,
+    }
+
+    impl OutputSink for PixelSink {
+        fn push<'a>(
+            &'a mut self,
+            packet: PipelinePacket,
+        ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
+            Box::pin(async move {
+                if let PipelinePacket::DataFrame(frame) = packet {
+                    if let Some(slice) = frame.domain.as_system_slice() {
+                        self.last = Some(slice.to_vec());
+                    }
+                }
+                Ok(PushOutcome::Accepted)
+            })
+        }
+    }
+
+    /// A pinned clock makes the burnt-in text deterministic: the element's output
+    /// must equal the same text drawn straight onto a white canvas.
+    #[tokio::test]
+    async fn burns_the_pinned_clock_time() {
+        let (w, h) = (96u32, 24u32);
+        let style = OverlayStyle {
+            scale: 1,
+            ..Default::default()
+        };
+        let mut ov = ClockOverlay::new()
+            .with_style(style.clone())
+            .with_time_format("%F %T")
+            .with_clock(Arc::new(FixedClock(FIXED_NS)));
+        ov.configure_pipeline(&rgba_caps(w, h)).unwrap();
+
+        let buf = vec![255u8; (w * h * 4) as usize].into_boxed_slice();
+        let frame = Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(buf)),
+            FrameTiming::default(),
+            0,
+        );
+        let mut sink = PixelSink::default();
+        ov.process(PipelinePacket::DataFrame(frame), &mut sink)
+            .await
+            .unwrap();
+        let out = sink.last.take().expect("frame forwarded");
+
+        let mut expected = vec![255u8; (w * h * 4) as usize];
+        crate::timeoverlay::draw_text(
+            &mut expected,
+            w as usize,
+            h as usize,
+            "2026-08-04 13:45:07",
+            &style,
+        );
+        assert_eq!(out, expected);
     }
 
     #[test]
@@ -276,6 +311,21 @@ mod tests {
         assert_eq!(
             c.configure_pipeline(&bad).unwrap_err(),
             G2gError::CapsMismatch
+        );
+    }
+
+    #[test]
+    fn properties_round_trip() {
+        let mut c = ClockOverlay::new();
+        assert_eq!(
+            c.get_property("time-format"),
+            Some(PropValue::Str("%H:%M:%S".into()))
+        );
+        c.set_property("time-format", PropValue::Str("%F".into()))
+            .unwrap();
+        assert_eq!(
+            c.get_property("time-format"),
+            Some(PropValue::Str("%F".into()))
         );
     }
 }

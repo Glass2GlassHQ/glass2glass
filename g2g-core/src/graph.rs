@@ -294,6 +294,9 @@ struct Node<E> {
     /// Per-instance log category (a launch line's `log-category=`); `None` keeps
     /// the element type as the category.
     log_category: Option<String>,
+    /// Animated properties (M882); `None` when nothing on this node is animated.
+    #[cfg(feature = "runtime")]
+    control: Option<crate::controller::ControlProgram>,
 }
 
 /// Builder for a multimedia DAG. Add nodes, link their pads, then `finish()`
@@ -385,6 +388,8 @@ impl<E> Graph<E> {
             fanout: FanOutPolicy::FailLoud,
             name: None,
             log_category: None,
+            #[cfg(feature = "runtime")]
+            control: None,
         });
         id
     }
@@ -414,6 +419,27 @@ impl<E> Graph<E> {
         self.nodes
             .get(node.0 as usize)
             .and_then(|n| n.log_category.as_deref())
+    }
+
+    /// The node carrying this instance name, for attaching to a graph someone
+    /// else built (a `parse_launch` line's `name=`).
+    pub fn node_by_name(&self, name: &str) -> Option<NodeId> {
+        self.nodes
+            .iter()
+            .position(|n| n.name.as_deref() == Some(name))
+            .map(|i| NodeId(i as u32))
+    }
+
+    /// Animate this node's properties over stream time (M882): the runner samples
+    /// `program` at each frame's PTS and sets the bound properties on the element
+    /// before it processes that frame. Replaces any program already attached.
+    ///
+    /// Validated when the run starts, against the element's own declared
+    /// properties, so an unknown or non-animatable property name fails the run
+    /// before any frame flows.
+    #[cfg(feature = "runtime")]
+    pub fn set_node_control(&mut self, node: NodeId, program: crate::controller::ControlProgram) {
+        self.nodes[node.0 as usize].control = Some(program);
     }
 
     /// Link an output pad to an input pad with the default `Block` policy.
@@ -841,6 +867,14 @@ impl<E> ValidatedGraph<E> {
     /// into its spawned arm). `None` for tee/muxer nodes or after a prior take.
     pub fn take_element(&mut self, node: NodeId) -> Option<E> {
         self.nodes[node.0 as usize].element.take()
+    }
+
+    /// Take this node's animated-property program (M882), which the runner
+    /// resolves against the element and hands to the arm that owns it. `None`
+    /// when nothing on the node is animated.
+    #[cfg(feature = "runtime")]
+    pub fn take_node_control(&mut self, node: NodeId) -> Option<crate::controller::ControlProgram> {
+        self.nodes[node.0 as usize].control.take()
     }
 
     /// Borrow a node's element payload, for building its negotiation

@@ -117,8 +117,19 @@ pub mod bus;
 #[cfg(feature = "runtime")]
 pub mod qos;
 
+// Sink-side presentation pacing (M881): the PTS -> clock deadline, the anchor,
+// and the QoS late-drop verdict every display sink shares.
+#[cfg(feature = "runtime")]
+pub mod pacing;
+
 #[cfg(feature = "runtime")]
 pub mod fanout;
+
+// Animated properties (M882): keyframed control sources the runner samples per
+// frame, the gst-controller analog. Dynamic layer (heap + the dyn element
+// traits), so `runtime` like the graph runner that applies it.
+#[cfg(feature = "runtime")]
+pub mod controller;
 
 #[cfg(feature = "runtime")]
 pub mod runtime;
@@ -132,8 +143,9 @@ pub mod slot;
 #[cfg(feature = "alloc")]
 pub use aggregator::InputAggregator;
 pub use caps::{
-    AudioFormat, ByteStreamEncoding, Caps, Dim, PassthroughFields, Rate, RawVideoFormat,
-    TensorDType, TensorLayout, TensorShape, TextFormat, VideoCodec, ANY_CHANNELS, ANY_SAMPLE_RATE,
+    AudioFormat, ByteStreamEncoding, Caps, ClosedCaptionFormat, Dim, PassthroughFields, Rate,
+    RawVideoFormat, SubPictureFormat, TensorDType, TensorLayout, TensorShape, TextFormat,
+    VideoCodec, ANY_CHANNELS, ANY_SAMPLE_RATE,
 };
 pub use channels::{ChannelLayout, ChannelPosition};
 // `CapsSet` (negotiation-time alternatives) needs alloc; `TensorShape` is
@@ -147,10 +159,16 @@ pub use clock::DriftClock;
 #[cfg(feature = "std")]
 pub use clock::MonotonicClock;
 #[cfg(feature = "alloc")]
-pub use clock::{elect_clock, AsyncClock, ClockCandidate, ClockPriority, ClockSync, PipelineClock};
+pub use clock::{
+    elect_clock, AsyncClock, ClockCandidate, ClockPriority, ClockSync, DynAsyncClock, PipelineClock,
+};
 #[cfg(feature = "alloc")]
 pub use conformance::{
     ConformanceDimension, ConformanceReport, Evidence, MaturityLevel, MaturityRecord,
+};
+#[cfg(feature = "runtime")]
+pub use controller::{
+    ArmController, ControlFault, ControlProgram, ControlReason, ControlSource, ControlTarget,
 };
 #[cfg(feature = "alloc")]
 pub use copyplan::{
@@ -240,6 +258,11 @@ pub use bus::{Bus, BusHandle, BusMessage};
 
 #[cfg(feature = "runtime")]
 pub use qos::QosTracker;
+
+#[cfg(feature = "runtime")]
+pub use pacing::{
+    Pace, PresentationPacer, MAX_LATENESS_PROPERTY, PACING_PROPERTIES, QOS_INTERVAL_PROPERTY,
+};
 
 #[cfg(feature = "runtime")]
 pub use runtime::{CapsConflict, LinkInterceptor, NegotiationFailure, ProbeAction, ProbeSlot};

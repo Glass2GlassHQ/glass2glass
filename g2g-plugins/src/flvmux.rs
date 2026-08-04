@@ -382,7 +382,7 @@ mod tests {
 
         let mut posted = None;
         while let Some(m) = bus.try_recv() {
-            if let BusMessage::Tag(t) = m {
+            if let BusMessage::Tag { tags: t, .. } = m {
                 posted = Some(t);
             }
         }

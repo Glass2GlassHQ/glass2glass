@@ -16,28 +16,27 @@
 //! this file supplies only the TCP transport (`TcpTransport`).
 
 use alloc::boxed::Box;
-use alloc::vec;
-use alloc::vec::Vec;
 
-use tokio::io::AsyncReadExt;
+use std::net::{SocketAddr, TcpListener as StdTcpListener};
 
-use g2g_core::wire::decode_packet;
-use g2g_core::{Caps, G2gError, HardwareError, PipelinePacket, PropKind, PropertySpec};
+use g2g_core::{Caps, PipelinePacket, PropKind, PropertySpec};
 
-use crate::filesink::io_err;
-use crate::remotesource::{PacketTransport, RemoteSource, TransportFuture};
-use crate::remotewire::map_wire;
+use crate::remotesource::{
+    leading_caps, listen_tcp, PacketTransport, RemoteSource, TransportFuture,
+};
+use crate::remotewire::recv_framed;
 
 /// TCP `RemoteSrc`: a length-framed [`g2g_core::wire`] stream over a plain TCP
 /// connection, dialed by [`RemoteSink`](crate::remotesink).
 pub type RemoteSrc = RemoteSource<TcpTransport>;
 
 /// TCP transport for [`RemoteSource`].
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct TcpTransport;
 
 impl PacketTransport for TcpTransport {
     type Conn = tokio::net::TcpStream;
+    type Listener = tokio::net::TcpListener;
     const NAME: &'static str = "Remote source";
     const DESCRIPTION: &'static str =
         "Receives a serialized PipelinePacket stream over TCP from a remote RemoteSink";
@@ -58,42 +57,27 @@ impl PacketTransport for TcpTransport {
         .with_default("false"),
     ];
 
-    fn accept(listener: &tokio::net::TcpListener) -> TransportFuture<'_, (Self::Conn, Caps)> {
+    fn listen(
+        &mut self,
+        bind: SocketAddr,
+        adopt: Option<StdTcpListener>,
+    ) -> TransportFuture<'_, Self::Listener> {
+        Box::pin(async move { listen_tcp(bind, adopt).await })
+    }
+
+    fn listen_addr(listener: &Self::Listener) -> Option<SocketAddr> {
+        listener.local_addr().ok()
+    }
+
+    fn accept(listener: &mut Self::Listener) -> TransportFuture<'_, (Self::Conn, Caps)> {
         Box::pin(async move {
-            let (mut stream, _peer) = listener.accept().await.map_err(io_err)?;
-            let body = read_frame(&mut stream)
-                .await?
-                .ok_or(G2gError::NotConfigured)?;
-            let caps = match decode_packet(&body).map_err(map_wire)? {
-                PipelinePacket::CapsChanged(caps) => caps,
-                // Any other first packet violates the protocol.
-                _ => return Err(G2gError::Hardware(HardwareError::Other)),
-            };
+            let (mut stream, _peer) = listener.accept().await.map_err(crate::filesink::io_err)?;
+            let caps = leading_caps(recv_framed(&mut stream).await?)?;
             Ok((stream, caps))
         })
     }
 
     fn recv(conn: &mut Self::Conn) -> TransportFuture<'_, Option<PipelinePacket>> {
-        Box::pin(async move {
-            match read_frame(conn).await? {
-                Some(body) => Ok(Some(decode_packet(&body).map_err(map_wire)?)),
-                None => Ok(None),
-            }
-        })
+        Box::pin(async move { recv_framed(conn).await })
     }
-}
-
-/// Read one length-framed wire message. `Ok(None)` on a clean connection close at
-/// a frame boundary (the stream's natural end).
-async fn read_frame(sock: &mut tokio::net::TcpStream) -> Result<Option<Vec<u8>>, G2gError> {
-    let mut len = [0u8; 4];
-    match sock.read_exact(&mut len).await {
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-        Err(e) => return Err(io_err(e)),
-    }
-    let n = u32::from_le_bytes(len) as usize;
-    let mut body = vec![0u8; n];
-    sock.read_exact(&mut body).await.map_err(io_err)?;
-    Ok(Some(body))
 }

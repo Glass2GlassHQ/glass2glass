@@ -21,6 +21,18 @@ pub enum PipelinePacket {
     /// one after the `Flush`. Elements forward it downstream unchanged unless
     /// they remap time.
     Segment(Segment),
+    /// Deadline tick: the runner's fan-in arm reached the tick deadline the
+    /// element declared via
+    /// [`MultiInputElement::tick_interval_ns`](crate::fanout::MultiInputElement::tick_interval_ns),
+    /// delivered as `process(0, Tick)`. It lets a fan-in element emit output when
+    /// its inputs stall (a compositor holding the last frame of a stalled pad,
+    /// zero-order-hold) instead of waiting for a packet that may never come.
+    ///
+    /// It may fire spuriously: the deadline says "time passed", not "output is
+    /// due", so the element decides whether to emit. It is only ever delivered to
+    /// an element that declared an interval, and it never crosses a link: the arm
+    /// originates and consumes it, so no encoder, queue, or transport sees one.
+    Tick,
 }
 
 #[derive(Debug)]

@@ -33,16 +33,17 @@ fn body_too_large() -> G2gError {
     G2gError::Hardware(HardwareError::Other)
 }
 
-/// Fetch `url`, accumulating the body but never allocating past `max` bytes.
-/// The `Content-Length` header (when present) is an early-out, but it is
-/// advisory: a server can omit or lie about it, so the running total over the
-/// streamed chunks is the real bound.
-pub(crate) async fn get_bytes(
+/// GET `url` and hand back the checked response, whose body the caller reads
+/// chunk by chunk (what [`get_bytes`] does, and what the DASH low-latency path
+/// consumes progressively). The `Content-Length` header (when present) is an
+/// early-out against `max`, but it is advisory: a server can omit or lie about
+/// it, so the caller still bounds what it accumulates.
+pub(crate) async fn get_response(
     client: &reqwest::Client,
     url: &str,
     max: usize,
-) -> Result<Vec<u8>, G2gError> {
-    let mut resp = client
+) -> Result<reqwest::Response, G2gError> {
+    let resp = client
         .get(url)
         .send()
         .await
@@ -54,6 +55,18 @@ pub(crate) async fn get_bytes(
             return Err(body_too_large());
         }
     }
+    Ok(resp)
+}
+
+/// Fetch `url`, accumulating the body but never allocating past `max` bytes.
+/// The running total over the streamed chunks is the real bound (see
+/// [`get_response`] for the advisory header check).
+pub(crate) async fn get_bytes(
+    client: &reqwest::Client,
+    url: &str,
+    max: usize,
+) -> Result<Vec<u8>, G2gError> {
+    let mut resp = get_response(client, url, max).await?;
     let mut body = Vec::new();
     while let Some(chunk) = resp.chunk().await.map_err(net_err)? {
         if body.len().saturating_add(chunk.len()) > max {

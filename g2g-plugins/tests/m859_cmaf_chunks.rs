@@ -27,8 +27,9 @@ use g2g_core::conformance::{ConformanceDimension, Evidence};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
-    AsyncElement, ByteStreamEncoding, Caps, Dim, G2gError, MultiInputElement, MultiOutputElement,
-    MultiOutputSink, OutputSink, PropError, PropValue, PushOutcome, Rate, VideoCodec,
+    AsyncElement, AudioFormat, ByteStreamEncoding, Caps, Dim, G2gError, MultiInputElement,
+    MultiOutputElement, MultiOutputSink, OutputSink, PropError, PropValue, PushOutcome, Rate,
+    VideoCodec,
 };
 use g2g_plugins::conformance::persist;
 use g2g_plugins::mp4demuxn::{forwardable_streams, Mp4DemuxN, Mp4Port};
@@ -42,6 +43,12 @@ const HEIGHT: usize = 240;
 const FRAME_25FPS_NS: u64 = 40_000_000;
 /// That frame in the muxers' 90 kHz video timescale.
 const FRAME_25FPS_TICKS: u64 = 3_600;
+/// The audio track's sample rate, which is also its media timescale.
+const AUDIO_RATE: u32 = 48_000;
+/// One AAC access unit, in samples and in nanoseconds. The nanosecond figure is
+/// rounded up so it converts back to a whole 1024 ticks rather than 1023.
+const AAC_AU_SAMPLES: u64 = 1_024;
+const AAC_AU_NS: u64 = 21_333_334;
 
 // --- box walking ----------------------------------------------------------
 
@@ -126,6 +133,66 @@ fn moofs(file: &[u8]) -> Vec<&[u8]> {
         .filter(|(k, _)| k == b"moof")
         .map(|(_, p)| p)
         .collect()
+}
+
+/// One chunk of a multi-track file: which track its `traf` names, plus the same
+/// fields `moof_fields` reads and the sum of its `trun` sample durations, which is
+/// what the next chunk's `tfdt` must continue from.
+#[derive(Debug, Clone, Copy)]
+struct Chunk {
+    track_id: u32,
+    sequence: u32,
+    tfdt: u64,
+    samples: u32,
+    ticks: u64,
+    /// Whether the fragment's `prft` sits immediately ahead of this `moof`, i.e.
+    /// the chunk opens a fragment instead of continuing one.
+    opens_fragment: bool,
+}
+
+fn chunk_fields(moof: &[u8], opens_fragment: bool) -> Chunk {
+    let (sequence, tfdt, samples) = moof_fields(moof);
+    let tfhd = path(moof, &[b"traf", b"tfhd"]).expect("tfhd");
+    let trun = path(moof, &[b"traf", b"trun"]).expect("trun");
+    // trun payload: version/flags, sample_count, data_offset, then a
+    // (duration, size, flags) triple per sample.
+    let ticks = (0..samples as usize)
+        .map(|i| be32(trun, 12 + i * 12) as u64)
+        .sum();
+    Chunk {
+        track_id: be32(tfhd, 4),
+        sequence,
+        tfdt,
+        samples,
+        ticks,
+        opens_fragment,
+    }
+}
+
+/// Every chunk of a file in written order, each flagged with whether a `prft`
+/// opens its fragment.
+fn chunks(file: &[u8]) -> Vec<Chunk> {
+    let boxes = top_level(file);
+    let mut out = Vec::new();
+    for (i, (kind, payload)) in boxes.iter().enumerate() {
+        if kind == b"moof" {
+            out.push(chunk_fields(payload, i > 0 && &boxes[i - 1].0 == b"prft"));
+        }
+    }
+    out
+}
+
+/// A track's chunks split into fragments, each fragment the chunk that opens it
+/// and the chunks continuing it.
+fn fragments_of_track(file: &[u8], track_id: u32) -> Vec<Vec<Chunk>> {
+    let mut out: Vec<Vec<Chunk>> = Vec::new();
+    for c in chunks(file).into_iter().filter(|c| c.track_id == track_id) {
+        if c.opens_fragment || out.is_empty() {
+            out.push(Vec::new());
+        }
+        out.last_mut().expect("a fragment is open").push(c);
+    }
+    out
 }
 
 /// A `prft` payload as (version, reference_track_ID, ntp_timestamp, media_time).
@@ -294,6 +361,97 @@ async fn mux_n_single(aus: &[(Vec<u8>, FrameTiming)], m: Mp4MuxN) -> (Vec<u8>, u
     m.process(0, PipelinePacket::Eos, &mut sink)
         .await
         .expect("mux eos");
+    (sink.bytes, sink.frames)
+}
+
+/// A minimal ADTS AAC access unit (7-byte header + payload) at 48 kHz stereo, the
+/// synthetic audio the fan-in muxer is driven with (`m293_mp4mux_av`).
+fn adts_au(payload: &[u8]) -> Vec<u8> {
+    let frame_len = payload.len() + 7;
+    let sr_index = 3u8; // 48000
+    let channels = 2u8;
+    let mut au = vec![
+        0xFF,
+        0xF1,
+        (1 << 6) | (sr_index << 2) | ((channels >> 2) & 1),
+        ((channels & 3) << 6) | ((frame_len >> 11) & 3) as u8,
+        ((frame_len >> 3) & 0xFF) as u8,
+        (((frame_len & 7) << 5) as u8) | 0x1F,
+        0xFC,
+    ];
+    au.extend_from_slice(payload);
+    au
+}
+
+/// The raw AAC an ADTS access unit carries. The muxer stores audio de-ADTS'd and
+/// the demuxer re-frames it from the track's `esds`, so only the payload survives
+/// the remux byte for byte.
+fn aac_payload(au: &[u8]) -> &[u8] {
+    &au[7..]
+}
+
+fn aac_caps() -> Caps {
+    Caps::Audio {
+        format: AudioFormat::Aac,
+        channels: 2,
+        sample_rate: AUDIO_RATE,
+    }
+}
+
+/// `count` AAC access units of 1024 samples at 48 kHz, each with its own payload
+/// so a round-trip cannot pass by returning the wrong one. The stated duration is
+/// the one that converts to exactly 1024 ticks, so decode times stay exact.
+fn synthetic_aac_aus(count: usize) -> Vec<(Vec<u8>, FrameTiming)> {
+    (0..count)
+        .map(|i| {
+            let payload = [i as u8, 0xAA, (i as u8) ^ 0x5A, 0x11, 0x22];
+            (
+                adts_au(&payload),
+                FrameTiming {
+                    pts_ns: aac_pts_ns(i),
+                    duration_ns: AAC_AU_NS,
+                    ..FrameTiming::default()
+                },
+            )
+        })
+        .collect()
+}
+
+/// The presentation time of AAC access unit `i`, written the way the demuxer
+/// derives it (whole sample ticks converted to nanoseconds), so the fed and
+/// recovered timestamps are comparable without a tolerance.
+fn aac_pts_ns(i: usize) -> u64 {
+    i as u64 * AAC_AU_SAMPLES * 1_000_000_000 / AUDIO_RATE as u64
+}
+
+/// One pad's feed: its caps and the access units (payload, timing) to deliver.
+type PadFeed = (Caps, Vec<(Vec<u8>, FrameTiming)>);
+
+/// Drive `m` with one access-unit list per pad, released in ascending PTS order
+/// across pads (what an upstream A/V graph delivers), then end every pad.
+async fn mux_n_interleaved(m: Mp4MuxN, pads: &[PadFeed]) -> (Vec<u8>, usize) {
+    let mut m = m;
+    for (pad, (caps, _)) in pads.iter().enumerate() {
+        m.configure_pipeline(pad, caps).expect("configure");
+    }
+    let mut sink = CaptureSink::default();
+    let mut at = vec![0usize; pads.len()];
+    loop {
+        let next = (0..pads.len())
+            .filter(|p| at[*p] < pads[*p].1.len())
+            .min_by_key(|p| pads[*p].1[at[*p]].1.pts_ns);
+        let Some(pad) = next else { break };
+        let (au, timing) = &pads[pad].1[at[pad]];
+        at[pad] += 1;
+        m.process(pad, frame(au.clone(), *timing), &mut sink)
+            .await
+            .expect("mux");
+    }
+    for pad in 0..pads.len() {
+        m.process(pad, PipelinePacket::Eos, &mut sink)
+            .await
+            .expect("mux eos");
+    }
     (sink.bytes, sink.frames)
 }
 
@@ -830,4 +988,171 @@ async fn chunk_layout_matches_ffmpegs_low_latency_dash_segments() {
         .all(|c| c == ["moof".to_string(), "mdat".to_string()]));
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Chunk state is per track (M865): with two pads the muxer keeps a separate open
+/// chunk, `tfdt` and fragment for each, so a video and an audio track chunk on
+/// their own timescales and neither track's chunk boundary disturbs the other's.
+///
+/// A two-pad mux cannot be CMAF (a CMAF track file holds one media stream, which
+/// `configure_pipeline` enforces below), so the fragments here come from
+/// `fragment-duration` and it is the `prft` that marks where each one opens.
+#[tokio::test]
+async fn chunked_two_pads_keep_per_track_chunk_state() {
+    // Video: two 12-frame GOPs at 25 fps, 480 ms each. Audio: 45 AAC access units
+    // of 1024 samples at 48 kHz, the same 960 ms. Fragments target 480 ms, chunks
+    // 120 ms, so a video chunk is 3 frames and an audio chunk 6 access units,
+    // several of each per fragment.
+    let video = timed_aus(&synthetic_aus(2, 12));
+    let audio = synthetic_aac_aus(45);
+    assert_eq!(
+        aac_pts_ns(audio.len()),
+        video.len() as u64 * FRAME_25FPS_NS,
+        "both pads cover the same span"
+    );
+    let (file, frames) = mux_n_interleaved(
+        Mp4MuxN::new(2)
+            .with_fragment_duration_ms(480)
+            .with_chunk_duration_ms(120)
+            .with_prft(true),
+        &[(h264_caps(), video.clone()), (aac_caps(), audio.clone())],
+    )
+    .await;
+
+    // The init segment declares both tracks.
+    let kinds = layout(&file);
+    assert_eq!(&kinds[..2], &["ftyp".to_string(), "moov".to_string()]);
+    let moov = top_level(&file)[1].1;
+    assert_eq!(
+        top_level(moov).iter().filter(|(k, _)| k == b"trak").count(),
+        2,
+        "one trak per pad: {kinds:?}"
+    );
+    assert!(
+        !kinds[2..].iter().any(|k| k == "styp"),
+        "a two-pad mux is not CMAF, so no segment types: {kinds:?}"
+    );
+    let all = chunks(&file);
+    // The init segment rides the first chunk's frame, so the count matches exactly.
+    assert_eq!(all.len(), frames, "one byte-stream frame per chunk");
+
+    let counts: Vec<Vec<Vec<u32>>> = [1u32, 2]
+        .iter()
+        .map(|track| {
+            fragments_of_track(&file, *track)
+                .iter()
+                .map(|f| f.iter().map(|c| c.samples).collect())
+                .collect()
+        })
+        .collect();
+    println!("chunk sample counts per fragment, per track: {counts:?}");
+    assert_eq!(
+        counts[0],
+        vec![vec![3, 3, 3, 3], vec![3, 3, 3, 3]],
+        "the video track chunks 3 frames at a time inside each 12-frame fragment"
+    );
+    assert_eq!(
+        counts[1],
+        vec![vec![6, 6, 6, 5], vec![6, 6, 6, 4]],
+        "the audio track chunks 6 access units at a time on its own 48 kHz clock"
+    );
+    for (track, fragments) in counts.iter().enumerate() {
+        for (i, chunks) in fragments.iter().enumerate() {
+            assert!(
+                chunks.len() > 1,
+                "track {} fragment {i} is subdivided: {chunks:?}",
+                track + 1
+            );
+        }
+    }
+
+    // One sequence number space over both tracks, counting every chunk.
+    let sequences: Vec<u32> = all.iter().map(|c| c.sequence).collect();
+    assert!(
+        sequences.windows(2).all(|w| w[1] > w[0]),
+        "mfhd counts chunks across tracks: {sequences:?}"
+    );
+
+    // Each track's own decode timeline: the chunks continue it exactly, and the
+    // fragment openers are the ones the prft anchors.
+    for (track, aus) in [(1u32, video.len()), (2, audio.len())] {
+        let track_chunks: Vec<Chunk> = all
+            .iter()
+            .copied()
+            .filter(|c| c.track_id == track)
+            .collect();
+        let mut expect = 0u64;
+        for (i, c) in track_chunks.iter().enumerate() {
+            assert_eq!(
+                c.tfdt, expect,
+                "track {track} chunk {i} continues its own decode time"
+            );
+            expect += c.ticks;
+        }
+        assert!(
+            track_chunks.windows(2).all(|w| w[1].tfdt > w[0].tfdt),
+            "track {track} decode times advance"
+        );
+        let samples: u32 = track_chunks.iter().map(|c| c.samples).sum();
+        assert_eq!(samples as usize, aus, "every access unit on track {track}");
+    }
+
+    // A prft per fragment per track, naming its own track and its own base time.
+    let boxes = top_level(&file);
+    let mut anchored = Vec::new();
+    for (i, (kind, payload)) in boxes.iter().enumerate() {
+        if kind == b"prft" {
+            let (_, track_id, _, media_time) = prft_fields(payload);
+            let opener = chunk_fields(boxes[i + 1].1, true);
+            assert_eq!(
+                boxes[i + 1].0,
+                *b"moof",
+                "the prft precedes the fragment it times"
+            );
+            assert_eq!(track_id, opener.track_id, "and names that fragment's track");
+            assert_eq!(media_time, opener.tfdt, "at that fragment's base time");
+            anchored.push(track_id);
+        }
+    }
+    assert_eq!(
+        anchored,
+        vec![1, 2, 1, 2],
+        "two fragments per track, each anchored once"
+    );
+
+    // Both tracks read back, in order, with the bytes and times they were fed.
+    let back = demux_mp4(&file).await;
+    assert_eq!(back.ports.len(), 2, "the demuxer finds both tracks");
+    let out_video: Vec<&Vec<u8>> = back.ports[0].iter().map(|(b, _)| b).collect();
+    let in_video: Vec<&Vec<u8>> = video.iter().map(|(b, _)| b).collect();
+    assert_eq!(
+        out_video, in_video,
+        "video access units survive the chunking"
+    );
+    let video_pts: Vec<u64> = back.ports[0].iter().map(|(_, t)| t.pts_ns).collect();
+    assert_eq!(
+        video_pts,
+        video.iter().map(|(_, t)| t.pts_ns).collect::<Vec<_>>(),
+        "and keep their presentation times across chunk boundaries"
+    );
+    let out_audio: Vec<&[u8]> = back.ports[1].iter().map(|(b, _)| aac_payload(b)).collect();
+    let in_audio: Vec<&[u8]> = audio.iter().map(|(b, _)| aac_payload(b)).collect();
+    assert_eq!(out_audio, in_audio, "audio access units too");
+    let audio_pts: Vec<u64> = back.ports[1].iter().map(|(_, t)| t.pts_ns).collect();
+    assert_eq!(
+        audio_pts,
+        audio.iter().map(|(_, t)| t.pts_ns).collect::<Vec<_>>(),
+        "on the audio track's own timescale"
+    );
+
+    // Why the fragments above are not CMAF segments: a CMAF track file carries one
+    // media stream, so the second pad is refused rather than mislabelled.
+    let mut cmaf = Mp4MuxN::new(2).with_cmaf(true).with_chunk_duration_ms(120);
+    assert!(
+        matches!(
+            cmaf.configure_pipeline(0, &h264_caps()),
+            Err(G2gError::CapsMismatch)
+        ),
+        "CMAF is single-stream, so a two-pad CMAF mux never negotiates"
+    );
 }

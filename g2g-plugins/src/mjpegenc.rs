@@ -8,6 +8,9 @@
 //! fixed at configure. Packed RGBA/BGRA encodes directly; planar I420 (even dims,
 //! BT.601 limited range) converts to RGBA first via the shared `VideoConvert`
 //! path, so a decoder can feed it without an intervening `VideoConvert`.
+//!
+//! With the `mozjpeg` feature the `encoder=mozjpeg` property swaps `jpeg-encoder`
+//! for libjpeg-turbo / mozjpeg; the default stays `jpeg-encoder` (pure Rust, no C).
 
 use core::future::Future;
 use core::pin::Pin;
@@ -28,10 +31,23 @@ use jpeg_encoder::{ColorType, Encoder};
 /// Default JPEG quality (0..=100); 85 is a good size/quality default.
 const DEFAULT_QUALITY: u8 = 85;
 
+/// Which JPEG encoder does the work (`mozjpeg` feature).
+#[cfg(feature = "mozjpeg")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum JpegEncodeBackend {
+    /// Pure-Rust `jpeg-encoder`, the default.
+    #[default]
+    JpegEncoder,
+    /// libjpeg-turbo / mozjpeg through FFI.
+    Mozjpeg,
+}
+
 /// Encodes packed RGBA/BGRA raw video into a Motion-JPEG stream.
 #[derive(Debug)]
 pub struct MjpegEnc {
     quality: u8,
+    #[cfg(feature = "mozjpeg")]
+    backend: JpegEncodeBackend,
     format: RawVideoFormat,
     width: u32,
     height: u32,
@@ -51,6 +67,8 @@ impl MjpegEnc {
     pub fn new() -> Self {
         Self {
             quality: DEFAULT_QUALITY,
+            #[cfg(feature = "mozjpeg")]
+            backend: JpegEncodeBackend::JpegEncoder,
             format: RawVideoFormat::Rgba8,
             width: 0,
             height: 0,
@@ -64,6 +82,13 @@ impl MjpegEnc {
     /// Set the JPEG quality (0..=100).
     pub fn with_quality(mut self, quality: u8) -> Self {
         self.quality = quality.min(100);
+        self
+    }
+
+    /// Choose the encoder implementation (`mozjpeg` feature).
+    #[cfg(feature = "mozjpeg")]
+    pub fn with_backend(mut self, backend: JpegEncodeBackend) -> Self {
+        self.backend = backend;
         self
     }
 
@@ -91,6 +116,25 @@ impl MjpegEnc {
     }
 
     fn encode(&self, pixels: &[u8]) -> Result<Vec<u8>, G2gError> {
+        let (data, color) = self.packed_input(pixels)?;
+        #[cfg(feature = "mozjpeg")]
+        if self.backend == JpegEncodeBackend::Mozjpeg {
+            return self.encode_mozjpeg(&data, color);
+        }
+        let mut out = Vec::new();
+        let encoder = Encoder::new(&mut out, self.quality);
+        encoder
+            .encode(&data, self.width as u16, self.height as u16, color)
+            .map_err(|_| G2gError::CapsMismatch)?;
+        Ok(out)
+    }
+
+    /// Validate the input frame and hand back packed 4-byte pixels plus their
+    /// channel order, the form both encoders take.
+    fn packed_input<'p>(
+        &self,
+        pixels: &'p [u8],
+    ) -> Result<(alloc::borrow::Cow<'p, [u8]>, ColorType), G2gError> {
         let (w, h) = (self.width as usize, self.height as usize);
         // I420 converts to packed RGBA first (shared BT.601 path); packed inputs
         // map straight to a jpeg-encoder ColorType.
@@ -121,12 +165,35 @@ impl MjpegEnc {
                 (alloc::borrow::Cow::Borrowed(pixels), ColorType::Rgba)
             }
         };
-        let mut out = Vec::new();
-        let encoder = Encoder::new(&mut out, self.quality);
-        encoder
-            .encode(&data, self.width as u16, self.height as u16, color)
-            .map_err(|_| G2gError::CapsMismatch)?;
-        Ok(out)
+        Ok((data, color))
+    }
+
+    /// libjpeg-turbo / mozjpeg encode. Like its decode side, libjpeg signals
+    /// fatal errors by unwinding out of the C call, so that is caught here.
+    #[cfg(feature = "mozjpeg")]
+    fn encode_mozjpeg(&self, pixels: &[u8], color: ColorType) -> Result<Vec<u8>, G2gError> {
+        use mozjpeg::{ColorSpace, Compress};
+
+        let in_color = match color {
+            ColorType::Bgra => ColorSpace::JCS_EXT_BGRA,
+            _ => ColorSpace::JCS_EXT_RGBA,
+        };
+        let compress = || -> Result<Vec<u8>, G2gError> {
+            let mut comp = Compress::new(in_color);
+            comp.set_size(self.width as usize, self.height as usize);
+            comp.set_quality(self.quality as f32);
+            let mut started = comp
+                .start_compress(Vec::new())
+                .map_err(|_| G2gError::CapsMismatch)?;
+            started
+                .write_scanlines(pixels)
+                .map_err(|_| G2gError::CapsMismatch)?;
+            started.finish().map_err(|_| G2gError::CapsMismatch)
+        };
+        match std::panic::catch_unwind(compress) {
+            Ok(result) => result,
+            Err(_) => Err(G2gError::CapsMismatch),
+        }
     }
 }
 
@@ -210,12 +277,19 @@ impl AsyncElement for MjpegEnc {
     }
 
     fn properties(&self) -> &'static [PropertySpec] {
-        const PROPS: &[PropertySpec] =
-            &[
-                PropertySpec::new("quality", PropKind::Uint, "JPEG quality, 0..=100")
-                    .with_range("0", "100")
-                    .with_default("85"),
-            ];
+        const QUALITY: PropertySpec =
+            PropertySpec::new("quality", PropKind::Uint, "JPEG quality, 0..=100")
+                .with_range("0", "100")
+                .with_default("85");
+        #[cfg(feature = "mozjpeg")]
+        const ENCODER: PropertySpec =
+            PropertySpec::new("encoder", PropKind::Str, "JPEG encoder implementation")
+                .with_enum_values("jpeg-encoder | mozjpeg")
+                .with_default("jpeg-encoder");
+        #[cfg(not(feature = "mozjpeg"))]
+        const PROPS: &[PropertySpec] = &[QUALITY];
+        #[cfg(feature = "mozjpeg")]
+        const PROPS: &[PropertySpec] = &[QUALITY, ENCODER];
         PROPS
     }
 
@@ -225,6 +299,15 @@ impl AsyncElement for MjpegEnc {
                 self.quality = (value.as_uint().ok_or(PropError::Type)? as u8).min(100);
                 Ok(())
             }
+            #[cfg(feature = "mozjpeg")]
+            "encoder" => {
+                self.backend = match value.as_str().ok_or(PropError::Type)? {
+                    "jpeg-encoder" => JpegEncodeBackend::JpegEncoder,
+                    "mozjpeg" => JpegEncodeBackend::Mozjpeg,
+                    _ => return Err(PropError::Value),
+                };
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -232,6 +315,14 @@ impl AsyncElement for MjpegEnc {
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
             "quality" => Some(PropValue::Uint(self.quality as u64)),
+            #[cfg(feature = "mozjpeg")]
+            "encoder" => Some(PropValue::Str(
+                match self.backend {
+                    JpegEncodeBackend::JpegEncoder => "jpeg-encoder",
+                    JpegEncodeBackend::Mozjpeg => "mozjpeg",
+                }
+                .into(),
+            )),
             _ => None,
         }
     }

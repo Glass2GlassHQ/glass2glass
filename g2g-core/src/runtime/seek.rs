@@ -64,6 +64,9 @@ struct SeekInner {
     /// App -> source stop request: ends a segment-looping source idling between
     /// loop seeks. Latches once set (a run is torn down, not resumed).
     shutdown: AtomicBool,
+    /// Total length of the stream the seek positions address, once the source
+    /// knows it. Latest-set wins.
+    stream_len: Mutex<Option<u64>>,
     /// Waker a source parked in [`SeekController::wait_event`] registered, woken
     /// by `seek` / `shutdown` so an idle segment-looping source resumes without
     /// busy-polling. `None` when no source is parked.
@@ -98,6 +101,21 @@ impl SeekController {
     /// Whether a seek is currently pending (not yet taken).
     pub fn has_pending(&self) -> bool {
         self.inner.pending.lock().is_some()
+    }
+
+    /// Source side: publish the total length of the stream, in the same unit as
+    /// the seek positions on this controller (bytes for a demuxer-to-byte-source
+    /// controller), when the source knows it (e.g. the file size). Latest-set
+    /// wins.
+    pub fn set_stream_len(&self, len: u64) {
+        *self.inner.stream_len.lock() = Some(len);
+    }
+
+    /// Consumer side: the total stream length the source published, or `None`
+    /// when it has not (or cannot). A seeking consumer bounds a guessed offset
+    /// with it so a guess cannot land past the end.
+    pub fn stream_len(&self) -> Option<u64> {
+        *self.inner.stream_len.lock()
     }
 
     /// Source side: report that a `SEGMENT` segment finished at stream-time
@@ -235,6 +253,18 @@ mod tests {
         // The source-side clone observes the app-side request.
         assert_eq!(src.take_pending().map(|s| s.start), Some(42));
         assert!(!app.has_pending());
+    }
+
+    #[test]
+    fn stream_len_is_published_source_side() {
+        let app = SeekController::new();
+        let src = app.clone();
+        assert_eq!(app.stream_len(), None, "unknown until the source says");
+        src.set_stream_len(1_234);
+        assert_eq!(app.stream_len(), Some(1_234));
+        // Latest-set wins (a re-opened / grown stream).
+        src.set_stream_len(2_000);
+        assert_eq!(app.stream_len(), Some(2_000));
     }
 
     #[test]

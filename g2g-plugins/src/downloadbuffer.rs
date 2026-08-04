@@ -464,9 +464,16 @@ impl AsyncElement for DownloadBuffer {
                     self.post_level();
                     self.serve(out).await?;
                 }
-                // Upstream ended: serve the tail (and any seek that lands as it
-                // drains), then the runner forwards the EOS.
-                PipelinePacket::Eos => self.serve(out).await?,
+                // Upstream ended: the spill is now the whole stream, so publish
+                // its length (a seeking demuxer bounds its guesses with it), then
+                // serve the tail (and any seek that lands as it drains). The
+                // runner forwards the EOS.
+                PipelinePacket::Eos => {
+                    if let Some(ctl) = self.seek.as_ref() {
+                        ctl.set_stream_len(self.write_pos);
+                    }
+                    self.serve(out).await?
+                }
                 // The runner already mapped this through our constraint.
                 other => {
                     out.push(other).await?;

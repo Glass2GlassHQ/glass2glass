@@ -76,7 +76,10 @@ impl Mp4Src {
     /// at the boundary, reports segment-done (`notify_segment_done`) and parks for
     /// the next loop seek or `shutdown` instead of running to `Eos`, so the app can
     /// loop a clip gaplessly. The application keeps a clone of the controller to
-    /// drive scrubbing / editing / looping.
+    /// drive scrubbing / editing / looping. A reverse seek (`rate < 0`, M897)
+    /// walks the sync samples backward from the segment `stop`, emitting each GOP
+    /// forward so a decoder can decode it; [`GopReverse`](crate::gopreverse)
+    /// restores presentation order downstream of the decoder.
     pub fn with_seek(mut self, controller: SeekController) -> Self {
         self.seek = Some(controller);
         self
@@ -156,7 +159,10 @@ impl SourceLoop for Mp4Src {
                 if let Some(moov) = find_box(&data, b"moov") {
                     let tags = parse_ilst_tags(moov);
                     if !tags.is_empty() {
-                        bus.try_post(BusMessage::Tag(tags));
+                        bus.try_post(BusMessage::Tag {
+                            tags,
+                            program: None,
+                        });
                     }
                 }
                 // Announce the (single) video track as a StreamCollection (M386),
@@ -209,6 +215,13 @@ impl SourceLoop for Mp4Src {
             // Stream-time playback has reached (last emitted PTS), so a
             // non-flushing `accumulate_seek` anchors its running-time base.
             let mut position = 0u64;
+            // Reverse playback (M897): a `rate < 0` seek walks the sync samples
+            // backward, emitting each GOP forward (decode order) so a forward-only
+            // decoder can decode it; `gopreverse` restores presentation order after
+            // the decoder. `[gop_start, gop_end)` is the GOP being emitted.
+            let mut reverse = false;
+            let mut gop_start = 0usize;
+            let mut gop_end = 0usize;
             loop {
                 // Apply a pending seek before the next frame (GStreamer-style:
                 // upstream to the source, latest-wins). A flushing seek emits
@@ -228,18 +241,48 @@ impl SourceLoop for Mp4Src {
                     segment = new_seg;
                     segment_mode = seek.flags.contains(SeekFlags::SEGMENT);
                     position = new_seg.start;
-                    i = keyframe_index_for(&samples, seek.start);
+                    reverse = seek.is_reverse();
+                    if reverse {
+                        // Reverse plays from the segment's `stop` downward, so it
+                        // opens on the GOP holding `stop` (an open-ended segment
+                        // starts at the last one). The whole GOP is emitted:
+                        // samples above `stop` are decode references, and the sink
+                        // clips them out of the segment.
+                        gop_start = keyframe_index_for(&samples, new_seg.stop.unwrap_or(u64::MAX));
+                        gop_end = gop_end_after(&samples, gop_start);
+                        i = gop_start;
+                    } else {
+                        i = keyframe_index_for(&samples, seek.start);
+                    }
                     need_param_sets = true;
                     out.push(PipelinePacket::Segment(new_seg)).await?;
                     continue; // re-evaluate from the repositioned index
                 }
 
+                // Reverse: at the end of a GOP, step back to the previous one
+                // until the GOP holding the segment start has been emitted.
+                if reverse && i >= gop_end {
+                    if gop_start == 0 || samples[gop_start].pts_ns <= segment.start {
+                        out.push(PipelinePacket::Eos).await?;
+                        return Ok(sequence);
+                    }
+                    gop_end = gop_start;
+                    gop_start = prev_keyframe_before(&samples, gop_start);
+                    i = gop_start;
+                    // The GOP restarts decoding, so its keyframe needs the
+                    // out-of-band parameter sets again.
+                    need_param_sets = true;
+                    continue;
+                }
+
                 // End of the stream, or past the active segment's stop: a SEGMENT
                 // segment reports segment-done and parks for the next loop seek;
-                // anything else ends with Eos.
-                let at_end = i >= samples.len();
-                let past_stop =
-                    !at_end && segment.stop.is_some_and(|stop| samples[i].pts_ns > stop);
+                // anything else ends with Eos. Reverse ends on its own GOP walk
+                // above, and deliberately emits past `stop` (decode references).
+                let at_end = !reverse && i >= samples.len();
+                let past_stop = !reverse
+                    && !at_end
+                    && segment.stop.is_some_and(|stop| samples[i].pts_ns > stop);
                 if at_end || past_stop {
                     if segment_mode {
                         if let Some(ctl) = self.seek.as_ref() {
@@ -312,5 +355,28 @@ fn keyframe_index_for(samples: &[Sample], target_ns: u64) -> usize {
         .enumerate()
         .rfind(|(_, s)| s.keyframe && s.pts_ns <= target_ns)
         .map(|(i, _)| i)
+        .unwrap_or(0)
+}
+
+/// Exclusive end of the GOP opened by the sync sample at `gop_start`: the next
+/// sync sample, or the end of the stream (M897, reverse playback).
+fn gop_end_after(samples: &[Sample], gop_start: usize) -> usize {
+    samples
+        .iter()
+        .enumerate()
+        .skip(gop_start.saturating_add(1))
+        .find(|(_, s)| s.keyframe)
+        .map(|(i, _)| i)
+        .unwrap_or(samples.len())
+}
+
+/// The sync sample opening the GOP before the one at `gop_start`; `0` when none
+/// precedes it (a stream whose first sample is not a sync sample).
+fn prev_keyframe_before(samples: &[Sample], gop_start: usize) -> usize {
+    samples
+        .get(..gop_start)
+        .unwrap_or(&[])
+        .iter()
+        .rposition(|s| s.keyframe)
         .unwrap_or(0)
 }

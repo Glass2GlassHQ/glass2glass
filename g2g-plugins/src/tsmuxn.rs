@@ -34,13 +34,13 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, FrameTiming, G2gError,
-    InputAggregator, MemoryDomain, MultiInputElement, OutputSink, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec,
+    resolve_tags, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, FrameTiming,
+    G2gError, InputAggregator, MemoryDomain, MultiInputElement, OutputSink, PipelinePacket,
+    PropError, PropKind, PropValue, PropertySpec, TagList,
 };
 
 use crate::mpegts::TsMuxer;
-use crate::tsmux::stream_type_for;
+use crate::tsmux::{language_from_tags, service_from_tags, stream_type_for};
 
 /// Muxes N elementary streams into one MPEG-TS byte stream, PTS-ordered.
 #[derive(Debug)]
@@ -68,6 +68,15 @@ pub struct TsMux {
     /// Carry a `Caps::Klv` input as synchronous KLV (metadata-in-PES 0x15)
     /// instead of the default asynchronous private PES (0x06 + 'KLVA').
     klv_sync: bool,
+    /// Whole-service metadata (M872), written to the SDT: the service every
+    /// program without its own is named with.
+    tags: TagList,
+    /// Per-program service metadata (M878), keyed by program number: that
+    /// program's own SDT entry text.
+    program_tags: Vec<(u16, TagList)>,
+    /// Per-input metadata: its `Tag::Language` becomes that stream's
+    /// `ISO_639_language_descriptor`. One (possibly empty) list per input pad.
+    track_tags: Vec<TagList>,
 }
 
 impl TsMux {
@@ -86,7 +95,59 @@ impl TsMux {
             pcr_interval_90khz: 3600,
             program_numbers: alloc::vec![1; inputs],
             klv_sync: false,
+            tags: TagList::new(),
+            program_tags: Vec::new(),
+            track_tags: alloc::vec![TagList::new(); inputs],
         }
+    }
+
+    /// Attach whole-service metadata (M872): the service name ([`g2g_core::Tag::Title`]
+    /// or a `service_name` key) and provider (a `service_provider` key) written to
+    /// the SDT, naming every program that has no service of its own
+    /// ([`with_program_tags`](Self::with_program_tags)). TS defines no free-form tag
+    /// carrier, so any other tag here is dropped.
+    pub fn with_tags(mut self, tags: TagList) -> Self {
+        self.tags = tags;
+        self
+    }
+
+    /// Attach metadata scoped to one program of a multi-program mux (M878): its
+    /// service name / provider become that program's own SDT entry, so each program
+    /// carries distinct service text instead of repeating the
+    /// [`with_tags`](Self::with_tags) default. The program is named by its number in
+    /// the [`with_program_numbers`](Self::with_program_numbers) / `prog-map` layout.
+    /// A [`g2g_core::Tag::Language`] here is the default for that program's streams,
+    /// between the global list and a stream's own
+    /// [`with_track_tags`](Self::with_track_tags); TS carries nothing else, so the
+    /// rest of the list is dropped.
+    ///
+    /// Panics when no input is in `program`: the SDT would silently omit the service
+    /// otherwise. Set the program map first (every input is in program 1 by
+    /// default).
+    pub fn with_program_tags(mut self, program: u16, tags: TagList) -> Self {
+        assert!(
+            self.program_numbers.contains(&program),
+            "TsMux has no input in program {program}"
+        );
+        self.program_tags.retain(|(n, _)| *n != program);
+        self.program_tags.push((program, tags));
+        self
+    }
+
+    /// Attach metadata scoped to one input pad's elementary stream: its
+    /// [`g2g_core::Tag::Language`] becomes an `ISO_639_language_descriptor` in that
+    /// stream's PMT entry, so a reader reports the language on that stream. Nothing
+    /// else rides a TS elementary stream, so the rest of the list is dropped.
+    /// Out-of-range inputs are ignored.
+    ///
+    /// A language set on the stream's program ([`with_program_tags`](Self::with_program_tags))
+    /// or globally by [`with_tags`](Self::with_tags) applies to every stream that
+    /// does not name its own (`g2g_core::resolve_tags`).
+    pub fn with_track_tags(mut self, input: usize, tags: TagList) -> Self {
+        if input < self.inputs {
+            self.track_tags[input] = tags;
+        }
+        self
     }
 
     /// Assign a program number to each input pad, in pad order (M783): inputs
@@ -96,6 +157,10 @@ impl TsMux {
         assert!(
             numbers.len() == self.inputs,
             "TsMux needs one program number per input"
+        );
+        assert!(
+            self.program_tags.iter().all(|(n, _)| numbers.contains(n)),
+            "a program with per-program tags is missing from the new program map"
         );
         self.program_numbers = numbers.to_vec();
         self
@@ -123,6 +188,14 @@ impl TsMux {
     /// Count of TS byte frames emitted.
     pub fn emitted(&self) -> u64 {
         self.emitted
+    }
+
+    /// The tags attached to input `i`'s program, if that program has any.
+    fn tags_of_program(&self, i: usize) -> Option<&TagList> {
+        self.program_tags
+            .iter()
+            .find(|(n, _)| *n == self.program_numbers[i])
+            .map(|(_, t)| t)
     }
 
     /// The canonical `prog-map` value: the per-input program numbers joined by
@@ -260,6 +333,9 @@ impl MultiInputElement for TsMux {
                 }
                 self.program_numbers = parse_prog_map(value.as_str().ok_or(PropError::Type)?)
                     .filter(|n| n.len() == self.inputs)
+                    // A map that drops a program whose service was set would write
+                    // an SDT without that service; refuse it instead.
+                    .filter(|n| self.program_tags.iter().all(|(p, _)| n.contains(p)))
                     .ok_or(PropError::Value)?;
                 Ok(())
             }
@@ -341,6 +417,27 @@ impl MultiInputElement for TsMux {
                 // 90 kHz clock: 90 ticks per millisecond (matches the single-input path).
                 mux.set_table_interval_90khz(self.table_interval_ms.saturating_mul(90));
                 mux.set_pcr_interval_90khz(self.pcr_interval_90khz);
+                if let Some((name, provider)) = service_from_tags(&self.tags) {
+                    mux.set_service(&name, &provider);
+                }
+                for (program, tags) in &self.program_tags {
+                    if let Some((name, provider)) = service_from_tags(tags) {
+                        // The builder / property setter keep the map and these
+                        // programs in step, so the program is always found.
+                        let applied = mux.set_program_service(*program, &name, &provider);
+                        debug_assert!(applied, "program {program} is in the program map");
+                    }
+                }
+                for (i, track) in self.track_tags.iter().enumerate() {
+                    let above = match self.tags_of_program(i) {
+                        Some(program) => resolve_tags(&self.tags, program),
+                        None => self.tags.clone(),
+                    };
+                    let effective = resolve_tags(&above, track);
+                    if let Some(language) = language_from_tags(&effective) {
+                        mux.set_stream_language(i, language);
+                    }
+                }
                 self.mux = Some(mux);
             }
 

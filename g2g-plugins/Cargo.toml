@@ -22,11 +22,12 @@ default = []
 # explicitly), and the no_std `embassy*` RTOS backends.
 linux-full = [
     "multi-thread", "plugin-loader",
-    "rtsp", "rtsp-server", "srt", "udp-egress", "udp-ingress", "rtmp", "webrtc", "remote", "remote-ws",
+    "rtsp", "rtsp-server", "srt", "udp-egress", "udp-ingress", "rtmp", "webrtc",
+    "remote", "remote-ws", "webtransport", "moqt",
     "http-src", "hls", "dash",
     "ffmpeg", "vaapi", "v4l2",
     "opus", "vorbis", "vpx", "av1-encode", "mjpeg", "mjpeg-encode",
-    "alsa-sink", "pulse-sink", "pipewire",
+    "alsa-sink", "alsa-src", "pulse-sink", "pulse-src", "pipewire",
     "wayland-sink", "kms-sink", "wgpu-sink", "vello-overlay", "analytics",
     "declarative-yaml", "script-rhai", "observe",
 ]
@@ -98,6 +99,23 @@ remote = ["std", "tokio/net", "tokio/io-util"]
 # tokio-tungstenite (0.24, the version the detect-server demo already uses) +
 # futures-util's Sink/Stream adapters; implies std + tokio net/io-util.
 remote-ws = ["std", "tokio/net", "tokio/io-util", "dep:tokio-tungstenite", "futures-util/sink"]
+# Distributed-graph transport over WebTransport (M901): the third carrier of the
+# same wire-codec stream, over one reliable bidirectional QUIC stream per
+# connection (HTTP/3 CONNECT). RemoteWtSink (client) + RemoteWtSrc (server) +
+# RemoteWtTransform mirror the WebSocket family; the stream is a byte stream, so
+# the framing is the `remote` pair's u32 length prefix. QUIC is always TLS, so
+# the server takes a certificate / private-key PEM pair. Pulls
+# web-transport-quinn; implies std + tokio net/io-util.
+webtransport = ["std", "tokio/net", "tokio/io-util", "tokio/time", "dep:web-transport-quinn", "dep:url"]
+# Native IETF MoQ Transport draft-16 (M902 / M903): the `moqt` protocol modules
+# (wire codec + session driver), the `moqtsink` publisher and the `moqtsrc`
+# subscriber, layered on the M901 WebTransport carrier. The dialect is the IETF
+# draft (version 0xff000010, the WebTransport subprotocol `moqt-16`), which is
+# what Cloudflare's `moq-relay-ietf` runs; no crate implements it on this
+# workspace's MSRV, so the wire layer is in-tree. Adds no dependency beyond the
+# carrier's, plus tokio's `rt` for the reader tasks and `macros` for the
+# subscriber's control/data select. Implies std + `webtransport`.
+moqt = ["webtransport", "tokio/rt", "tokio/sync", "tokio/macros"]
 # Live pipeline dashboard: `g2g-launch --observe <port>` runs the pipeline while
 # streaming its `Observer` telemetry + bus events as JSON over a WebSocket, served
 # alongside the static dashboard page on one port. Reuses the remote-ws WS stack
@@ -390,6 +408,12 @@ kms-sink = ["std", "dep:drm", "dep:drm-fourcc"]
 # This is the desktop-dev convenience sink; KmsSink is the production
 # low-latency path.
 wayland-sink = ["std", "dep:smithay-client-toolkit"]
+# Vendor-neutral OpenGL ES display sink (`GlSink`, M891): system-memory NV12 or
+# RGBA presented through EGL on a Wayland `xdg_toplevel`, with the NV12->RGB
+# convert on the GPU. No CUDA anywhere in its path, so it runs on any Mesa /
+# proprietary EGL driver. Same GL/EGL deps as cuda-gl minus the CUDA stack:
+# khronos-egl, glow, wayland-egl, SCTK. Linux-only, implies std.
+gl-sink = ["std", "dep:khronos-egl", "dep:glow", "dep:wayland-egl", "dep:smithay-client-toolkit"]
 # Browser / WebAssembly target (DESIGN.md §6.3). Wasm-gated elements: WasmClock
 # (performance.now + setTimeout sleep), WebSocketSrc ingest, and a spawn_local
 # browser entry. Pulls wasm-bindgen/js-sys/web-sys/wasm-bindgen-futures
@@ -501,6 +525,13 @@ metadata = ["g2g-core/metadata"]
 # so OpenType-CFF fonts render (the M668 gap fontdue could not). std (file
 # loading); the no_std baseline keeps the bitmap font.
 truetype-overlay = ["std", "dep:ab_glyph"]
+# Real text shaping + bidi + system-font discovery for the overlay (M892):
+# horizontal cues go through cosmic-text (harfrust shaping, unicode-bidi
+# reordering, per-codepoint fallback across the fontdb-discovered system fonts),
+# so Arabic joins, Hebrew runs read right-to-left, and text renders with no
+# `font=` set at all. Extends `truetype-overlay`, whose `ab_glyph` column
+# renderer stays for `vertical:rl` / `lr` cues (cosmic-text is horizontal-only).
+text-shaping = ["truetype-overlay", "dep:cosmic-text"]
 # Analytics overlay (M101): AnalyticsOverlay draws AnalyticsMeta detection boxes
 # onto a raw RGBA8 frame (the detector -> overlay visible end). Pulls in the
 # `metadata` container so frames carry the typed graph. CPU, no_std baseline; the
@@ -557,6 +588,13 @@ mjpeg = ["std", "dep:zune-jpeg"]
 # RawVideo{Rgba8|I420} -> CompressedVideo{Mjpeg}). The jpegenc analog: intra-only
 # JPEG per frame for snapshot / thumbnail / low-latency capture. No system deps.
 mjpeg-encode = ["std", "dep:jpeg-encoder"]
+# libjpeg-turbo / mozjpeg backend for MjpegDec + MjpegEnc, selected at runtime by
+# `decoder=mozjpeg` / `encoder=mozjpeg` (the pure-Rust crates stay the default, so
+# the feature alone changes no behavior). NOT pure Rust: `mozjpeg-sys` builds the
+# vendored C library with cmake + nasm at build time, so it is gated here and
+# excluded from pure-Rust / no_std builds. Implies the two pure-Rust MJPEG
+# features, since it only adds a second backend to those elements.
+mozjpeg = ["mjpeg", "mjpeg-encode", "dep:mozjpeg"]
 # Opus audio encode + decode (OpusEnc / OpusDec) via libopus through the
 # `audiopus` crate. The WebRTC default audio codec; pairs with `opusparse` (M133).
 # NOT pure Rust: links libopus (system or the bundled source built with cmake),
@@ -593,6 +631,11 @@ dash = ["http-src", "dep:roxmltree"]
 # crate (links system libasound: alsa-lib-devel / libasound2-dev). Linux-only,
 # implies std.
 alsa-sink = ["std", "dep:alsa"]
+# Linux ALSA capture source (AlsaSrc): reads interleaved PCM from an ALSA capture
+# device via libasound, the input mirror of AlsaSink and the non-PipeWire mic
+# path. Blocking reads run on a dedicated worker thread. Same `alsa` crate /
+# system libasound as `alsa-sink`. Linux-only, implies std.
+alsa-src = ["std", "dep:alsa"]
 # ST 2110 network elements (M597): AsyncElement sink / SourceLoop source wrapping
 # the sans-IO ST 2110-30 / -40 cores over UDP, RTP timestamps off the PTP media
 # clock. std (UdpSocket). The sans-IO cores themselves are always compiled.
@@ -613,6 +656,11 @@ ptp = ["std", "dep:libc"]
 # worker thread. Pulls libpulse-binding + libpulse-simple-binding (link libpulse).
 # Linux-only, implies std.
 pulse-sink = ["std", "dep:libpulse-binding", "dep:libpulse-simple-binding"]
+# Linux PulseAudio capture source (PulseSrc): records interleaved PCM from a
+# PulseAudio / PipeWire-pulse source via the blocking libpulse "simple" API on a
+# worker thread, the input mirror of PulseSink. Same bindings as `pulse-sink`.
+# Linux-only, implies std.
+pulse-src = ["std", "dep:libpulse-binding", "dep:libpulse-simple-binding"]
 # Linux PipeWire audio render sink + capture source (PipeWireSink / PipeWireSrc):
 # the modern Linux media layer. Drives a pw::stream on a pw::main_loop worker,
 # negotiating an SPA audio format pod. Pulls the `pipewire` crate (libpipewire-0.3
@@ -730,6 +778,11 @@ futures-util = { version = "0.3", optional = true, default-features = false, fea
 # tungstenite version. Default features (connect + handshake, no TLS) suffice: the
 # pair speaks plain ws:// (wrap in a TLS terminator for wss://).
 tokio-tungstenite = { version = "0.24", optional = true }
+# WebTransport (HTTP/3 over QUIC) transport for the distributed-graph primitive
+# (webtransport feature). Pinned exactly: 0.11.13 pulls `kio`, whose MSRV is 1.91,
+# above this workspace's 1.85. `ring` rather than the default aws-lc-rs backend:
+# rustls already resolves on ring here, and aws-lc-sys needs cmake at build time.
+web-transport-quinn = { version = "=0.11.12", optional = true, default-features = false, features = ["ring"] }
 # TLS for TURN-over-TLS (`turns:`) and the LiveKit `wss://` signalling: the same
 # native-tls stack reqwest's default-tls already links.
 tokio-native-tls = { version = "0.3", optional = true }
@@ -739,6 +792,15 @@ bytes = { version = "1", optional = true }
 # Pure-Rust (over ttf-parser); loads .ttf / .otf / .ttc and rasterizes both glyf
 # and CFF/CFF2 outlines to coverage, so OpenType-CFF fonts render (M668).
 ab_glyph = { version = "0.2", optional = true }
+# Shaping / bidi / font-fallback text layout (text-shaping feature, M892).
+# Pure-Rust (harfrust shaping, unicode-bidi, fontdb discovery, swash raster).
+# Pinned exactly: 0.17.1 and later raise rust-version to 1.89, above the
+# workspace MSRV. Default features minus `fontconfig`: fontdb's own directory
+# scan finds the system faces, so the fontconfig parser is dead weight.
+cosmic-text = { version = "=0.17.0", optional = true, default-features = false, features = [
+    "std",
+    "swash",
+] }
 # Vello GPU 2D renderer (vello-overlay feature, M102). Renders detection boxes
 # into a wgpu texture; re-exports wgpu 29 (matching g2g-ml) as `vello::wgpu`.
 vello = { version = "0.9", optional = true }
@@ -762,6 +824,10 @@ raw-window-handle = { version = "0.6", optional = true }
 embassy-time = { version = "0.5", optional = true, default-features = false }
 # Embassy zero-alloc packet channel (embassy-link feature, M45). no_std.
 embassy-sync = { version = "0.8", optional = true }
+# libjpeg-turbo / mozjpeg wrapper (mozjpeg feature). mozjpeg-sys compiles the
+# vendored C library (cmake + nasm needed at build time); with_simd + nasm_simd
+# keep the SIMD kernels that make it worth having.
+mozjpeg = { version = "0.10.13", optional = true, features = ["with_simd", "nasm_simd"] }
 
 # Media Foundation bindings are Windows-only; target-gate so other platforms
 # never attempt to resolve or build the windows crate.
@@ -1054,6 +1120,11 @@ embassy-executor = { version = "0.10", features = ["platform-std", "executor-thr
 # needs it is (its required-features gate it), so the default test build skips it.
 [target.'cfg(not(target_os = "android"))'.dev-dependencies]
 winit = "0.30"
+# Self-signed certificate for the m901 WebTransport tests: QUIC is always TLS, so
+# both the loopback server and the aioquic peer need a throwaway cert + key. Off
+# Android for the same reason as winit: it pulls `ring`, whose C build needs an
+# NDK cross-compiler the android CI check does not have.
+rcgen = "0.14"
 
 # gst-launch / gst-inspect analogs over the standard registry (M107). Both need
 # the std-only registry + wall clock, so they are gated on `std`; the no_std
@@ -1185,6 +1256,19 @@ required-features = ["vello-overlay", "wgpu-sink"]
 [[test]]
 name = "gstwrap"
 required-features = ["gstreamer"]
+
+# M890: PipeWireVideoSrc captures from a node published by GStreamer's
+# pipewiresink. Needs a running PipeWire daemon + host GStreamer; run locally,
+# not in CI (the pipewire feature is not built there).
+[[test]]
+name = "m890_pipewire_video_capture"
+required-features = ["pipewire"]
+
+# M636: asserts a process-global allocation counter stays flat, so it must be
+# the only thread in its process (libtest's harness threads allocate mid-test).
+[[test]]
+name = "m636_fixed_rank_tensor_caps"
+harness = false
 
 [lints]
 workspace = true

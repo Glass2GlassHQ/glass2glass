@@ -11,7 +11,10 @@
 use core::future::{ready, Future, Ready};
 use core::pin::Pin;
 
-use g2g_core::runtime::{run_aggregator_dynamic, DynSourceLoop, SourceLoop};
+use g2g_core::runtime::{
+    run_aggregator_dynamic, run_aggregator_dynamic_observed, DynSourceLoop, NodeRole, Observer,
+    SourceLoop,
+};
 use g2g_core::{
     Caps, CapsConstraint, ConfigureOutcome, Dim, G2gError, MultiInputElement, OutputSink,
     PipelinePacket, Rate, RawVideoFormat,
@@ -155,6 +158,101 @@ async fn runtime_inputs_attach_to_distinct_pads_and_end_on_all_eos() {
         stats.frames_emitted, 8,
         "both runtime inputs' frames summed"
     );
+}
+
+/// M869: the dual of the observed dynamic fan-out. The aggregator is registered
+/// with its measured-latency probe up front; each runtime input appends its own
+/// node and per-input link, so an input attached mid-run is visible in a snapshot
+/// with its traffic counters, and the run reports the aggregator's row.
+#[tokio::test]
+async fn observed_dynamic_fanin_reports_late_input_telemetry() {
+    const N: u64 = 200;
+    let mut agg = RecordingAggregator::new(3);
+    let obs = Observer::new();
+    // Depth 2 so the sources back-pressure and the run spans many polls.
+    let (handle, run) = run_aggregator_dynamic_observed(&mut agg, 2, &obs);
+    handle
+        .add_input(Box::new(CountedSource { n: N }) as Box<dyn DynSourceLoop>)
+        .expect("add input 0");
+
+    // Attach the second input once the first is in the topology, i.e. after the
+    // aggregator has started draining.
+    let late = {
+        let obs = obs.clone();
+        async move {
+            let mut before = 0usize;
+            for _ in 0..1_000_000 {
+                before = obs.snapshot().nodes.len();
+                if before == 2 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            let added = handle
+                .add_input(Box::new(CountedSource { n: N }) as Box<dyn DynSourceLoop>)
+                .is_ok();
+            drop(handle);
+            (before, added)
+        }
+    };
+
+    let (stats, (nodes_before, added)) = tokio::join!(run, late);
+    let stats = stats.expect("observed dynamic fan-in run");
+    assert_eq!(
+        nodes_before, 2,
+        "aggregator + first input were visible mid-run"
+    );
+    assert!(
+        added,
+        "the second input attached while the run was in flight"
+    );
+
+    let snap = obs.snapshot();
+    assert_eq!(
+        snap.nodes
+            .iter()
+            .map(|n| (n.name.as_str(), n.role))
+            .collect::<Vec<_>>(),
+        vec![
+            ("RecordingAggregator0", NodeRole::Muxer),
+            ("CountedSource0", NodeRole::Source),
+            ("CountedSource1", NodeRole::Source),
+        ],
+        "the late input grew the node list, named like a built-in one"
+    );
+    // Each input's link points at the aggregator and carries caps + counts.
+    assert_eq!(
+        snap.edges
+            .iter()
+            .map(|e| (e.from, e.to))
+            .collect::<Vec<_>>(),
+        vec![(1, 0), (2, 0)],
+    );
+    assert!(
+        snap.edges.iter().all(|e| e.caps.is_some()),
+        "both input edges carry their fixated caps"
+    );
+    assert!(
+        snap.edges[1].counts.packets > 0,
+        "the late input's link counted traffic: {:?}",
+        snap.edges[1].counts
+    );
+
+    // The aggregator reports a measured row, no longer an empty `per_element`.
+    assert_eq!(stats.per_element.len(), 1);
+    let row = &stats.per_element[0];
+    assert_eq!(row.name, "RecordingAggregator0");
+    assert_eq!(
+        row.proc.count,
+        2 * N,
+        "every aggregated frame was timed at the aggregator"
+    );
+    assert!(
+        row.fill_max_pct > 0,
+        "the aggregator sampled its input fill, max={}",
+        row.fill_max_pct
+    );
+    assert_eq!(agg.frames, std::vec![N, N, 0]);
 }
 
 #[tokio::test]

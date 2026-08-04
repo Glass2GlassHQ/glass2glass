@@ -6,6 +6,94 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M905: `moqtsink` can carry media objects in QUIC datagrams (`datagrams=true`) and spread a group across several subgroup streams (`subgroups=N`), which `moqtsrc` reorders through the same bounded reassembly.
+
+- M904: a browser plays a g2g MoQ Transport broadcast through a relay (`tools/moqt-demo`), decoded by the third-party MOQtail client and asserted headlessly on the decoded frames.
+
+- M903: `moqtsrc` subscribes to a MoQ Transport broadcast, reordering concurrent subgroup streams into an fMP4 byte stream under a fixed memory bound, validated against `moq-pub` and against `moqtsink`.
+
+- M902: `moqtsink` publishes an fMP4 stream as IETF MoQ Transport draft-16 groups and objects over WebTransport, validated through Cloudflare's `moq-relay-ietf` to `moq-sub`.
+
+- M901: `remotewtsink` / `remotewtsrc` / `remotewttransform` carry the distributed-graph wire stream over WebTransport (HTTP/3 over QUIC), validated both directions against an independent aioquic peer.
+
+- M900: `dvbsubdec` decodes DVB subtitles (EN 300 743) from TS `subtitling_descriptor` streams and mkv `S_DVBSUB` tracks, pixel-exact against ffmpeg.
+
+- M899: `vobsubdec` decodes DVD VobSub bitmap subtitles (`Caps::SubPicture`, mkv `S_VOBSUB`) into RGBA cue canvases for the compositor, pixel-validated against ffmpeg.
+
+- M898: subtitle track muxing: `mkvmuxn` writes `S_TEXT/UTF8`/`S_TEXT/ASS` and `mp4muxn` writes `tx3g` from a `Caps::Text` pad, ffmpeg-validated both directions.
+
+- M897: reverse playback (`rate < 0`) through `mp4src`: backward GOP walk plus a `gopreverse` element after the decoder, bit-exact against forward decode.
+
+- M896: `hlssink` HLS packager: segments a `tsmux`/`mp4mux` byte stream into files plus a rolling m3u8 playlist, validated against ffmpeg and `hlsdemux2`.
+
+- M895: `timeoverlay` renders stream times as dates (`show-times-as-dates` / `datetime-format` / `datetime-epoch`), on one strftime formatter shared with `clockoverlay`.
+
+- M894: runtime properties for the PipeWire audio elements (`target-object`, `format`, `samplerate`, `channels`, `num-buffers`) and a pinned capture `format` on `pipewirevideosrc`.
+
+- M893: `textoverlay` gains a `font-size` property (pixels, 0 = canvas-derived), honoured by all render paths.
+
+- M892: `textoverlay` shapes horizontal cues through cosmic-text (`text-shaping` feature): real shaping, bidi reordering, and automatic system-font discovery.
+
+- M891: `glimagesink` is a real vendor-neutral EGL / GL ES display sink (`GlSink`, NV12 + RGBA, no CUDA), with the GL conversion verified headlessly against a CPU reference.
+
+- M890: `pipewirevideosrc` captures video from a PipeWire node, and the audio PipeWire elements are launch-registered.
+
+- M889: the Vulkan HDR swapchain present is a paced display-sink element (`VulkanHdrPresentSink`), holding and dropping frames by PTS like the other display sinks.
+
+- M888: `dashsrc low-latency=true` consumes a CMAF segment chunk by chunk as the packager writes it.
+
+- M887: `ffmpegdec` emits the semi-planar 10-bit `P010` layout, and the 10-/12-bit formats are selectable by property and reachable by auto-plug.
+
+- M886: `alsasrc` / `pulsesrc` Linux audio capture elements, with the PCM format tables shared with the sinks.
+
+- M885: `timeoverlay` gains the standard time modes and `clockoverlay` a `time-format` wall-clock renderer, both on shared placement/styling properties.
+
+- M884: `pulsesink` provides the audio-master clock like `alsasink`, disciplined from the server latency query.
+
+- M883: MP4 `c608`/`c708` raw closed-caption tracks demux, decode, and mux via `Caps::ClosedCaption`.
+
+- M881: every display sink paces PTS through a shared `PresentationPacer` and reports late drops as `Qos`, on the bus and upstream.
+
+- M882: a graph node's properties can be animated over stream time, from keyframed control sources the runner samples at each frame's PTS.
+
+- M880: the cooperative runner takes a fan-in element's deadline tick from the pipeline clock itself, so `compositor timed-output=true` ticks from a `parse_launch` line.
+
+- M879: `run_graph_threaded_ticked` gives every fan-in arm its deadline tick under the thread-per-arm runner.
+
+- M878: each program of a multi-program TS carries its own SDT service text, and `BusMessage::Tag` names the program it describes.
+
+- M877: the deadline tick also reaches fan-in elements through the DAG runner and the PTS-ordered muxer arm.
+
+- M876: both compositors are `gst-launch` elements (`compositor` / `wgpucompositor`) with runtime properties for the canvas and per-pad placement.
+
+- M875: a fan-in element can declare a deadline tick, and both compositors use it to hold their output rate (`with_timed_output`) when input 0 stalls.
+
+- M874: `wgpucompositor` composites `WgpuTexture` input frames in place, binding each as a sampled texture instead of copying it through system memory.
+
+- M873: the CPU and GPU compositors share one `CompositorState` for their latest-wins input cadence.
+
+- M872: TS carries tags: the muxers write the SDT service name/provider and per-stream ISO-639 language descriptors, the demuxers post them as bus tags.
+
+- M871: `mjpegdec` decodes straight to I420 without the RGBA intermediate, and a `mozjpeg` feature adds the libjpeg-turbo backend to both jpeg elements.
+
+- M870: `tools/pushtax-bench.sh` benchmarks push-model batch demux against gst-launch pull; the gap is element CPU, not transport.
+
+- M867: CENC decrypt gains the `cens` pattern-CTR scheme and movie-level `seig` tables; oversized subsample maps now fail loud instead of clamping.
+
+- M869: the dynamic fan-out / fan-in / muxer-sink runners report per-element telemetry, registering arms on the observer as they attach.
+
+- M868: `opusenc` gains the `audio-type` application-mode property and `wavsink` writes U8/S24/S32 PCM.
+
+- M866: DASH honours `@presentationTimeOffset` (media time mapped onto the Period timeline) and `@availabilityTimeOffset` (segments published before they complete).
+
+- M865: a two-pad chunked `Mp4MuxN` test pins per-track chunk state (CMAF output itself stays single-pad by design).
+
+- M864: ogg seek guesses clamp to the byte length the source reports, and an idle upstream flush resets the mkv demuxer's parser fully.
+
+- M862: ogg time seeks land near the target via anchored proportional byte guesses instead of re-reading the file.
+
+- M863: `rtspserversrcn` ingests N concurrent RTSP publishers, one session per output pad, sharing the session machinery with the single-pad element.
+
 - M861: `downloadbuffer` spills a pushed byte stream to a temp file and serves it seekable, so a moov-at-end MP4 plays over HTTP.
 
 - M860: the mkv suites, mkv ffmpeg metadata oracles, dashboard/preview/MCP tooling tests now run in CI.

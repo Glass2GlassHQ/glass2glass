@@ -41,7 +41,7 @@ The handful of types you meet everywhere (all in `g2g-core`):
 | Type | Role |
 | :--- | :--- |
 | `Frame` | one media buffer: a `MemoryDomain` payload + `FrameTiming` + a sequence number + optional metadata. Caps live on the *link*, not the frame (§3.1). |
-| `PipelinePacket` | what actually crosses a link: `CapsChanged` / `DataFrame` / `Segment` / `Flush` / `Eos` (§3.1). |
+| `PipelinePacket` | what actually crosses a link: `CapsChanged` / `DataFrame` / `Segment` / `Flush` / `Eos`, plus the arm-local `Tick` (§3.1). |
 | `Caps` | the typed capability algebra (`RawVideo` / `CompressedVideo` / `Audio` / `Tensor` / `Text` / `ByteStream`), negotiated per link (§4.1). |
 | `AsyncElement` / `SourceLoop` | the two element traits (transform-or-sink vs source). Pads are implicit in the trait shape, not a runtime object (§4.3, §4.7). |
 | `MemoryDomain` | where a frame's bytes live: System, DMABUF, CUDA, Vulkan / WebGPU texture, … the basis for zero-copy (§3.2). |
@@ -102,6 +102,11 @@ pub enum PipelinePacket {
     /// Seek flush: discard in-flight and buffered data and reset position
     /// state. Unlike `Eos`, the stream resumes after a flush.
     Flush,
+    /// Deadline tick: a fan-in element declaring `tick_interval_ns` gets one
+    /// per period even while its inputs stall, so it can emit on its own
+    /// cadence (the compositors' zero-order-hold). May fire spuriously, and
+    /// never crosses a link: the runner's arm originates and consumes it.
+    Tick,
 }
 
 pub struct Frame {
@@ -633,7 +638,7 @@ A sibling `MfEncode` (feature `mf-encode`) wraps `CLSID_MSH264EncoderMFT` with `
 | `Vaapi` | `h264` + `AV_HWDEVICE_TYPE_VAAPI` | `System` | GPU decode, surface downloaded to system memory (`av_hwframe_transfer_data`). The Linux AMD / Intel hardware path; works on Mesa `radeonsi` where cros-codecs `VaapiH264Dec` cannot. Pin the render node with `with_vaapi_device` (or the `device` property; launch name `ffmpegvaapidec`). |
 
 - **Input caps:** `Caps::CompressedVideo { codec: H264, .. }`.
-- **Output caps:** `Caps::RawVideo { format: I420 | Nv12, .. }`. `I420` is the libavcodec native 8-bit 4:2:0 format; `Nv12` is selectable via `FfmpegH264Dec::with_output_format(OutputFormat::Nv12)`, produced by a U/V interleave with no swscale. `YUVJ420P` is accepted with the same plane layout; `YUV444P` / `YUVJ444P` are accepted with the chroma planes box-averaged down to 4:2:0. Other pixel formats are rejected with `CapsMismatch`.
+- **Output caps:** `Caps::RawVideo`, layout chosen by `with_output_format` / the `output-format` property (all also pad-template alternatives, so a downstream that pins one auto-plugs a decoder built for it). `I420` (the default, libavcodec's native 8-bit 4:2:0) and `Nv12` (a U/V interleave, no swscale); `I422` / `I444` preserve a High 4:2:2 / 4:4:4 source's chroma, and a 4:4:4 source feeding an `I420` / `Nv12` request is box-averaged down. 10-/12-bit sources (High 10 / Main10) keep their depth: `I420p10` .. `I444p12` are a lossless 2-byte-per-sample plane copy, and `P010` is the semi-planar 10-bit layout (NV12's shape, value in each 16-bit word's top bits) that 10-bit samplers and overlay planes take, packed from a planar 10-bit software decode or verbatim from a `P010LE` hardware frame. `OutputFormat::Auto` emits the source's own chroma and depth, advertising the whole set at negotiation and fixing the concrete format per frame via `CapsChanged`. `YUVJ*P` is accepted with the same plane layout as its studio-range sibling. Mismatches that would need a real conversion (chroma upsampling, an 8-bit request from a 10-bit source) are rejected with `CapsMismatch`, not silently converted: put a `videoconvert` downstream, which takes the planar 10-/12-bit family. Validated bit-exact against ffmpeg's own raw decode of a High 10 clip for both `I420p10` and `P010`.
 - **Feed loop:** one access unit per `Packet::copy`; PTS is forwarded verbatim (libavcodec echoes it back on the decoded frame); `send_packet()` then `receive_frame()` drained until `EAGAIN`.
 - **Flush / EOS:** `decoder.flush()` on `PipelinePacket::Flush`; `send_eof()` + final drain before forwarding `Eos`.
 - **Thread safety:** `ffmpeg::decoder::Video` wraps a raw `*mut AVCodecContext` and is `!Send` by default; `unsafe impl Send` is justified by the same ownership-transfer argument as `MfDecode` and `VaapiH264Dec`.
@@ -1365,6 +1370,16 @@ over `[start, stop]`, and `SyncSink` schedules each by `Segment::to_running_time
 (which measures reverse from `stop`) and clips via `contains`, so descending PTS
 maps to ascending running time and presents in the correct visual order, the
 `Segment` abstraction generalizing the sink to negative rate transparently.
+The producing half is GOP-batched, since a decoder only runs forward: on a
+`rate < 0` seek `Mp4Src` walks the container's sync samples backward from the
+segment `stop` (the `stss` index `parse_progressive` recovers, or the `trun`
+keyframe flags of a fragmented file) and emits one whole GOP at a time in decode
+order, newest GOP first, including the samples above `stop` that later frames
+reference (the sink clips them). `GopReverse` (`gopreverse`) closes the loop
+after the decoder: it buffers a decoded GOP, detects its end by the PTS jumping
+backward into the next (earlier) GOP, and re-emits each batch in descending PTS,
+so the sink receives reverse presentation order. A forward segment passes
+straight through it, so it can sit in any graph that may seek backward.
 **Trick-mode KEY_UNIT** frame selection (present only keyframes for fast scrub)
 is done: `FrameTiming::keyframe` carries a per-frame flag (set by
 `h264parse` from `h264_au_is_keyframe`, and by `mp4src` / `fmp4demux` from the
@@ -1410,7 +1425,12 @@ index-derived offset a later optimization). All five carry it
 (`fmp4demux` / `tsdemux` / `mkvdemux` / `flvdemux` / `oggdemux`), each using its
 own keyframe signal (the container flag, or `annexb::au_is_keyframe` for TS whose
 units have none; every audio packet is a resync point, and `oggdemux` now
-accumulates an Opus PTS from the TOC byte). **Adaptive segment seek.** The
+accumulates an Opus PTS from the TOC byte). Where the container has no index at
+all, `oggdemux` guesses the landing byte offset by interpolating through observed
+`(byte offset, stream time)` anchors, clamped a page-max below the byte length
+the source publishes on the seek controller (`SeekController::set_stream_len`,
+`FileSrc` from the file size and `DownloadBuffer` once the spill is complete), so
+a guess through a front-dense file cannot land at EOF. **Adaptive segment seek.** The
 adaptive sources `HlsSrc` / `DashSrc` are TIME-seekable (`with_seek`): unlike the
 BYTES-format `FileSrc`, an app time seek resolves to the media segment containing
 the target (HLS walks cumulative `#EXTINF` durations; DASH maps the target onto
@@ -1435,8 +1455,10 @@ application reacts to:
 - `DurationChanged { duration_ns }` — the total stream duration became known
   (§4.15's query handle is the pull side; this is the push notification), posted
   by the source arm from `SourceLoop::query_duration` (`GST_MESSAGE_DURATION_CHANGED`).
-- `Tag(TagList)` — container / stream metadata, posted out of band
-  (`GST_MESSAGE_TAG`).
+- `Tag { tags, program }` — container / stream metadata, posted out of band
+  (`GST_MESSAGE_TAG`). `program` scopes the tags to one MPEG-TS `program_number`
+  (an SDT service entry, so a multi-program multiplex reports each service
+  separately) and is `None` for a container with a single metadata scope.
 - `StreamTag { stream_id, tags }` — the same, scoped to one elementary stream
   (a Matroska `Tag` whose `Targets` names a `TagTrackUID`). `stream_id` is the
   id that stream has in the posted `StreamCollection`.
@@ -1609,6 +1631,29 @@ the last:
   fixed graph in Rust). `g2g-launch --script <file>` runs one. These are
   construction-time scripts (run once to emit a graph); the per-frame
   `scriptelement` (§4.16, below) is the runtime complement.
+- **Animated properties (`g2g-core::controller`, `runtime` feature, M882).** The
+  layers above set a property once, at build time; a controller makes it a
+  function of stream time, the `gst-controller` analog. A `ControlSource` is a
+  keyframed curve over `(pts_ns, value)` pairs, either `Step` (hold each keyframe)
+  or `Linear` (interpolate), clamped to its end values outside the keyframe range;
+  a `ControlProgram` binds curves to one node's property names and attaches with
+  `Graph::set_node_control(node, program)` (so a `parse_launch` line's `name=` node
+  can be animated, via `Graph::node_by_name`). When the run starts, before
+  negotiation and before any frame flows, each program is resolved against its
+  element's own `PropertySpec` table: an unknown name, a kind with no number to
+  animate (`Fraction` / `Str` / `Flags`), an empty curve, or a node whose arm has
+  no per-frame hook (a source drives itself; a tee carries no element) fails the
+  run with `G2gError::ControlBinding` rather than animating nothing. At runtime the
+  arm that owns the element samples every binding at each `DataFrame`'s PTS and
+  sets it before handing that frame over, so a frame is always processed under the
+  values its own timestamp calls for; the sample is rounded and clamped into the
+  property's kind (a negative sample cannot wrap a `Uint`), and a value the element
+  refuses fails the run loud. Transform, sink, and fan-in nodes carry controllers,
+  under both the cooperative and the thread-per-arm runner (a resolved controller
+  is owned data, so it rides the arm's builder closure onto its thread). Two
+  deliberate limits: a zero-order-hold `Tick` frame samples nothing (the held
+  frame's advanced timestamp lives inside the element, not in the runner), and
+  samples use the raw PTS, not segment-mapped running time.
 
 **Dynamic plugin loading.** Beyond build-time registration (a crate that
 calls `Registry::register_*`, the primary extension path), a third party can ship
@@ -1731,6 +1776,21 @@ single-input launch element and as a fan-in muxer, so the text parser
 picks `tsmux::TsMux` for one input and `tsmuxn::TsMux` for several by link degree
 (`v.! m.  a.! m.  mpegtsmux name=m`), mirroring gst's request sink pads.
 
+Tags ride TS through its standard carriers (M872): the muxers' `with_tags` /
+`with_track_tags` write the SDT `service_descriptor` (service name from
+`Tag::Title`, provider from the ffprobe-spelled `service_provider` key) and a
+per-stream ISO-639 language descriptor in the PMT; the demuxers CRC-check and
+parse both and post `BusMessage::Tag` / `StreamTag` on the `mpegts-pid-{pid}`
+ids, ffmpeg-validated both directions. Nothing else rides TS: it has no
+free-form tag element.
+
+Service text is per program (M878): `with_program_tags(program, tags)` on the
+fan-in muxer gives a `prog-map` program its own SDT entry, `with_tags` names
+whichever programs do not, and a program's `Tag::Language` is the default for its
+streams (global, then program, then track). The SDT describes the whole
+multiplex, so a demuxer posts one `BusMessage::Tag` per service it names, each
+carrying that service's `program_number`, whichever program the element routes.
+
 The TS stack also carries KLV metadata (STANAG 4609, the airborne-ISR profile of
 MPEG-TS): `Caps::Klv` is the metadata elementary-stream caps (GStreamer
 `meta/x-klv`), each frame one SMPTE ST 336 key-length-value packet. On the mux
@@ -1830,7 +1890,10 @@ carried on the frame, the `BlockGroup`'s `BlockDuration` scaled onto
 `MkvFrame.duration_ns` (a `SimpleBlock` leaves it `0`); `S_TEXT/ASS` and
 `S_TEXT/WEBVTT` are likewise de-framed to plain `Text{Utf8}` cue text (via the
 `CodecPrivate` header), and `mkv_playbin` auto-plugs the subtitle overlay
-(§4.18). Unlike `TsDemux`,
+(§4.18). `S_VOBSUB` is the bitmap case: `MkvCodec::VobSub` ->
+`Caps::SubPicture { VobSub }` (`MkvStream::VobSub`), whose blocks are forwarded
+verbatim as subpicture units after the track's `.idx` `CodecPrivate` goes out in
+band ahead of them (§4.18). Unlike `TsDemux`,
 Matroska's Tracks element carries concrete geometry and audio parameters, so the
 demuxer refines the output caps itself via `CapsChanged` once Tracks is parsed,
 without a downstream bitstream parser. An H.264 / H.265 track's blocks are
@@ -2110,8 +2173,32 @@ For fMP4/CMAF, SAMPLE-AES maps to the `cbcs` Common Encryption scheme
 `tenc` give the crypt:skip pattern (1:9 for video) and constant IV, each fragment's
 `senc` gives the per-sample clear/protected subsample ranges, and the protected
 ranges are AES-128-CBC decrypted (IV reset per subsample, chaining over the
-encrypted blocks only) using the same shared key handle `HlsSrc` fills. A clear
+encrypted blocks only) using the same shared key handle `HlsSrc` fills. The
+sibling schemes decrypt through the same machinery: `cenc` (whole-range AES-CTR),
+`cbc1`, and `cens` (M867: pattern AES-CTR, one IV per sample with the counter
+advancing only over encrypted blocks, pattern restarting per protected range).
+Sample groups can re-key mid-fragment: a `traf` `sbgp`/`sgpd` (`seig`) overrides
+the `tenc` defaults per sample run, and M867 added the movie-level `seig` table
+(indices below 0x10001 resolve against the track's `stbl` table, fragment-local
+ones above it, per 14496-12, strictly scoped). A subsample map that overruns its
+sample is an error, never a partial decrypt. A clear
 track stays a normal demux; an encrypted track with no key fails loud.
+`hlssink::HlsSink` (`std`) is the publishing side (M896): it cuts the byte stream
+a muxer feeds it into media segment files and writes an `.m3u8` media playlist
+beside them, rendered by the `hls` parser's `write_media` twin. The muxer stays a
+separate element (`... ! tsmux ! hlssink`, `... ! mp4mux ! hlssink`), so one sink
+packages either carrier. A segment may only start at a keyframe and closes at the
+first one at or past `target-duration` (`0` cuts at every keyframe): for MPEG-TS
+one input frame is one access unit, so `FrameTiming::keyframe` marks the
+candidates and the frame PTSs give the durations; for fMP4 the stream is walked as
+boxes, a `moof` whose first sample is a sync sample opens a fragment and is a
+candidate, and the `trun` durations in the track timescale give the exact segment
+length, with `ftyp`+`moov` split off once into the `#EXT-X-MAP` init segment.
+Nothing is added or dropped, so the init segment plus the media segments
+concatenate back to the muxer's own byte stream. `playlist-length` bounds the
+listed window (advancing `#EXT-X-MEDIA-SEQUENCE` as segments roll off) and
+`max-files` deletes the files that leave it, which is the live case; EOS appends
+`#EXT-X-ENDLIST` for VOD.
 `dashsrc::DashSrc` (`dash`)
 is the MPEG-DASH analog: it parses a static MPD (the `mpd` parser, via
 `roxmltree`), selects a Representation, and streams its fMP4 init + media segments
@@ -2126,15 +2213,35 @@ run time via `parse_sidx` + `Sidx::subsegments`, the index bytes never pushed
 downstream). All three resolve to one `ResolvedSegment { url, byte_range, time }`
 list, so a range-carrying entry fetches just its sub-range with an HTTP `Range`
 request, the DASH analog of HLS `#EXT-X-BYTERANGE`, letting a single-file CMAF
-DASH stream play. A dynamic (live) MPD is reloaded on its `minimumUpdatePeriod`,
+DASH stream play. A `SegmentTemplate`'s `@presentationTimeOffset` is the media
+instant that lines up with the start of the Period, so `$Time$` URLs keep the
+media value while every `ResolvedSegment.time` (and with it seek matching and the
+Period-boundary `Segment`) is period-relative presentation time. A dynamic (live)
+MPD is reloaded on its `minimumUpdatePeriod`,
 each new segment played once (tracked by start time), ending when the manifest
-turns static, the same shape as the HLS live reload. `with_abr()` makes it
+turns static, the same shape as the HLS live reload. Its wall-clock window comes
+from `availabilityStartTime` + `Period@start` bounded by `timeShiftBufferDepth`,
+with `@availabilityTimeOffset` publishing each segment that many seconds before
+its nominal completion (clamped to one segment duration, so a chunked packager's
+in-progress segment is reachable but nothing beyond it). `with_abr()` makes it
 throughput-adaptive on the same shared `abr::BandwidthEstimator` as `HlsSrc`: a
 `load_rep` helper resolves any Representation (Template / List / `sidx`-fetched
 SegmentBase) into the run loop's segment/timescale/init working set, and the
 estimate-derived cap drives both the per-reload pick and a per-segment
 re-selection (so a static VOD adapts within one pass), re-emitting the init on a
 switch.
+
+`low-latency=true` changes how such a segment is *consumed*, not when it is
+fetched: the response body is read as a stream and each complete CMAF chunk
+(`styp` / `moof`+`mdat`) is pushed downstream as it arrives, so a segment the
+packager is still writing flows at chunk latency instead of segment latency. The
+split is `fmp4::CmafChunker`, an incremental box framer over the arriving bytes
+(sharing `mp4box::next_box_len` with `fmp4demux`) that cuts after every `mdat` and
+bounds both a declared box size and its pending run by the segment cap, so a
+hostile length fails the fetch instead of buffering on it. Every byte comes out
+exactly once in order, so the demuxer sees the same byte stream a whole-response
+fetch delivers. Byte-range segments and a set `prebuffer-ms` (which owns emission
+order) stay on the whole-response path.
 
 ### 4.18 Subtitle Overlay (`textoverlay`)
 
@@ -2208,6 +2315,24 @@ travels as a `TextCueMeta` frame-meta (the `metadata` feature) that `SubParse`
 attaches and `TextOverlayN` reads, recovering WebVTT / SSA positioning; on the
 ZST baseline (no meta) streamed cues draw at the renderer default.
 
+Cue streams also go back into a container. A `Caps::Text{Utf8}` pad on `MkvMuxN`
+or `Mp4MuxN` adds a subtitle track beside the A/V ones, taking one cue per frame
+with the window on the frame's PTS + duration, and the track's init needs nothing
+from the stream, so it is fixed at configure rather than at the first cue (which
+may be many seconds in, and every other track waits on the header). The two
+containers time a cue differently. Matroska states the window per block, so a text
+block is always a `BlockGroup` carrying a `BlockDuration` (a `SimpleBlock` has
+nowhere to put one); the `subtitle-format` property picks the storage syntax,
+`S_TEXT/UTF8` (the default, `subrip` to ffmpeg) or `S_TEXT/ASS`, where each cue is
+framed as the mapping's `ReadOrder,Layer,Style,Name,MarginL,MarginR,MarginV,Effect,Text`
+event with `\N` line breaks, behind a script-header `CodecPrivate`. MP4 has no
+per-sample timestamp: a `tx3g` sample (2-byte big-endian text length + UTF-8, what
+ffmpeg calls `mov_text`) presents where the durations before it end, so the run
+before the first cue and each run between cues is filled with an empty sample,
+which is also what "no subtitle on screen" means in the format. Either muxer's
+per-track metadata reaches a text track unchanged, so a subtitle track's language
+and title ride the Matroska `TrackEntry` the way an audio track's do.
+
 Closed captions (CEA-608 / CEA-708) feed the same renderer, but their bytes ride
 *inside* the compressed video bitstream rather than in a container text track, so
 the path is a track, not a `SubParse`-style drop-in. The `cea` module (`no_std`)
@@ -2268,6 +2393,65 @@ is the head of the authoring pipeline, so `subtitlesrc -> subparse -> ccinsert -
 tsmux` (the `examples/cc_author.rs` flow) embeds captions from a subtitle file; the
 whole `subparse -> ccinsert -> ... -> ccextract -> textoverlay` round trip is pure
 in-graph.
+
+**Bitmap subtitles** are the one subtitle family that is not text, so they get
+their own coded media kind: `Caps::SubPicture { format: SubPictureFormat }`, a
+stream of coded bitmap cues (`VobSub`, the DVD subpicture format, and `DvbSub`,
+ETSI EN 300 743; PGS is the same shape). It sits beside `Caps::Text` rather than
+inside it,
+because nothing downstream of a `Text` link can render a palette-indexed run-length
+bitmap, and `Caps::ClosedCaption` is the model: a coded carriage variant whose
+decoder produces something the rest of the graph already understands. Here that
+is raw pixels. `VobSubDec` (`vobsubdec`, gst's `dvdsubdec`) and `DvbSubDec`
+(`dvbsubdec`; no gst alias, since gst's `dvbsuboverlay` is a video-overlay
+element rather than a bare decoder) both emit one full-frame transparent
+`Caps::RawVideo{Rgba8}` canvas per cue at the subpicture display geometry,
+stamped with the cue's PTS and duration, so the consumer is the ordinary
+`compositor` and there is no bitmap-cue overlay element to build. A cue ends with a
+second, fully transparent canvas at its hide time: the compositor holds an overlay
+pad's last frame between output frames, and a zero-alpha source-over is a no-op,
+so the clear canvas is exactly what makes a cue disappear on time. One more empty
+canvas opens the stream, so the compositor is not waiting on this input for
+however long it is until the first cue.
+
+The VobSub bitstream itself (`vobsub.rs`, `no_std`) is one subpicture unit per
+cue: a packet size and a control-sequence offset, 2-bits-per-pixel run-length data
+in two interlaced fields (even rows then odd, each row byte-aligned), then control
+sequences carrying the display rectangle, four palette indices and four alpha
+nibbles, the two field offsets, and the show / hide dates in 1024/90000 s units.
+The 16-entry RGB palette and the display size are *not* in the bitstream: they ride
+the `.idx` text a Matroska `S_VOBSUB` track carries as its `CodecPrivate`, which
+`MkvDemux` forwards in band ahead of the first cue the way it forwards the FLAC
+and Opus headers, and which the decoder tells apart from a cue by parsing it as
+`.idx` first. Every size, offset and coordinate off the wire is range-checked and
+the parse returns `None` rather than allocating on a bogus rectangle; the pixel
+data is bounded by the control-sequence offset, so a truncated packet fails
+instead of decoding the control table as run lengths. A track that declares a
+Matroska `ContentCompression` is refused outright, since its blocks are not SPU
+packets and nothing here inflates them.
+
+DVB subtitles (`dvbsub.rs`, `no_std`) are the broadcast sibling, and a different
+shape: not one packet per cue but a *segment stream*, with decoder state carried
+across display sets. Each data field holds segments sharing a `page_id`: a
+display definition (the display geometry, 720x576 without one), a page
+composition (the `page_time_out`, the page state, and where each region sits), a
+region composition (a region's size, 2- / 4- / 8-bit depth, CLUT and background,
+and which objects are drawn into it where), CLUT definitions (Y / Cr / Cb plus a
+transparency, at full or packed precision, converted through the same BT.601
+fixed-point path a reference decoder uses so the rendered colours are identical),
+and object data (run-length coded pixels in two interlaced fields, with map
+tables lifting a shallower code into the region's depth). A page composition
+listing no region is how a cue ends; a page whose timeout expires before the next
+display set gets the same clear canvas at its deadline. The composition and
+ancillary page ids are the out-of-band part: a Matroska `S_DVBSUB` track's
+`CodecPrivate` carries them, and `TsDemux` synthesizes the identical five-byte
+blob from the PMT `subtitling_descriptor` (tag 0x59) that marks a private (0x06)
+stream as DVB subtitles, so both carriages reach the decoder the same way. The
+decoder takes a data field with or without its PES `data_identifier` header,
+since a Matroska block carries the bare segments. Every segment length, region
+dimension, CLUT entry id and object position is bounds-checked: a display set
+whose segment layer does not hold together is dropped whole, and a region past
+`MAX_REGION_PIXELS` is never allocated.
 
 ### 4.19 Native WebRTC (`str0m`)
 
@@ -2579,6 +2763,18 @@ guard the latency moat's hot paths: the caps algebra + linear / DAG solvers
 paces to PTS so it is unsuitable for a microbench). `cargo xtask bench` drives
 them by manifest path, passing criterion args through (e.g. `--save-baseline`).
 
+`tools/pushtax-bench.sh` (M870) prices the push model against GStreamer's pull
+on batch demux: the same `filesrc ! tsdemux ! h264parse ! fakesink` line through
+`g2g-launch` (release) and `gst-launch-1.0` over an ffmpeg-authored 60 s 1080p30
+TS, five interleaved timed runs each, results appended per iteration. Measured
+on the dev host: 176 vs 1175 MB/s (6.7x). The script prints the g2g per-element
+attribution under the ratio because the gap is element CPU, not transport:
+`TsDemux` (0.26 ms p50 x 1414 chunks) and `NalParse` (0.13 ms p50 x 1800 AUs)
+account for essentially the whole wall clock on the single-thread executor, so
+the per-chunk channel / wakeup / boxed-future residual is small and a pull mode
+would not close the gap; demux/parse throughput would. `benches/runner.rs`
+already prices the bare channel.
+
 A dedicated `bench` workflow (separate from the main CI, so criterion never
 slows the check / test / clippy jobs) runs on PRs that touch the benched crates:
 it benches the PR head and its base and fails if any benchmark's mean regressed
@@ -2602,8 +2798,11 @@ report, and `report()` prints a per-element `proc p50 / p99 (n) + in-fill
 avg/max` table, the by-hand glass-to-glass analyses (the NVDEC-to-system-memory
 floor, `link_capacity` dominance) turned into a number the runner emits. The
 graph runner and the two linear runners (`run_simple_pipeline`,
-`run_source_transform_sink`) collect it; fan-in / fan-out / session / muxer
-runners leave it empty, like their declared latency. It is `std`-gated where it
+`run_source_transform_sink`) collect it, and the dynamic fan-out / fan-in /
+muxer-sink runners do too (M869: `_observed` entry points register each arm's
+node and edge on the observer incrementally as it attaches, so a late arm
+reports like an initial one); the static session runners leave it empty, like
+their declared latency. It is `std`-gated where it
 needs a clock: the histogram is `no_std`, but with no `monotonic_ns` the timing
 compiles out (the table is then empty) so the `no_std` baseline pays nothing.
 Sources have no `process()` and so do not appear, their cost surfaces as the
@@ -2854,14 +3053,40 @@ whole frame both ways (the honest cost of a generic packet-in / packet-out
 stage), fine on a LAN; a `metadata`-only return for the pixels-unchanged case is
 a future optimization.
 
-Reconnection (M558) makes the edge resilient across both transports.
-`RemoteSink` / `RemoteWsSink` gain `with_reconnect(attempts)` (and a
+**WebTransport transport (`webtransport`).** `RemoteWtSink` / `RemoteWtSrc` /
+`RemoteWtTransform` (M901) are the third carrier of the same wire codec, over one
+reliable bidirectional WebTransport stream per connection (HTTP/3 CONNECT over
+QUIC, via `web-transport-quinn`). A WebTransport stream is a QUIC stream, so it is
+a byte stream with no message boundaries: the framing is the TCP pair's `u32`
+length prefix, shared with it verbatim, not the WebSocket pair's
+one-message-per-packet. The protocol above that is identical (caps as the first
+message, discovered by the server in `intercept_caps`; the transform's FIFO
+frame-out / processed-frame-back round trip), and reconnection behaves as below.
+What it adds over the WebSocket carrier is the QUIC connection under it:
+head-of-line blocking is per stream, the handshake is 1-RTT, and a browser peer
+reaches it with `new WebTransport(url)` and no TLS-terminating proxy in front.
+QUIC is always TLS, so unlike the other two servers this one cannot start without
+a `certificate` / `private-key` PEM pair, and a client that will not trust a
+system root names the certificate by SHA-256 digest in
+`server-certificate-hashes` (the browser API's `serverCertificateHashes`).
+Datagram mode (unreliable, MTU-bounded) is a separate carrier and is not used:
+this milestone is reliable-stream only.
+
+The three carriers share their machinery rather than repeating it: `RemoteClient`
+(send side) and `RemoteSource` (receive side) are generic over a transport, and
+`RemoteTransform<T>` (the remote stage) is generic over a `PacketDuplex`
+transport, so each carrier file supplies only what is transport-specific (how a
+connection is dialed or a listener bound, how one packet is written and read) plus
+its element identity and properties.
+
+Reconnection (M558) makes the edge resilient across the transports.
+`RemoteSink` / `RemoteWsSink` / `RemoteWtSink` gain `with_reconnect(attempts)` (and a
 `reconnect-attempts` property): the initial connect is deferred and retried with a
 short backoff, and a mid-stream send failure drops the dead socket, reconnects,
 and re-sends the current caps (the far side's required first packet) before
 retrying, so a peer that starts late or restarts is transparently tolerated up to
-the attempt budget. Symmetrically, `RemoteSrc` / `RemoteWsSrc` gain
-`with_reconnect()` (a `keep-listening` property): a client that drops *without* a
+the attempt budget. Symmetrically, `RemoteSrc` / `RemoteWsSrc` / `RemoteWtSrc`
+gain `with_reconnect()` (a `keep-listening` property): a client that drops *without* a
 clean `Eos` is not the stream's end; the source keeps its listener open, accepts a
 replacement client (which re-sends its leading caps, forwarded downstream so it
 re-negotiates if changed), and continues. Only an explicit `Eos` (or a frame
@@ -2871,8 +3096,188 @@ stream across a sender that drops and is replaced).
 
 Remaining follow-ups: a native WebSocket server that *pushes* an unsolicited
 stream to a browser `WsWireSrc` client (a receive-only browser edge, as opposed to
-the transform's request/response), and a subgraph-as-a-unit wrapper (remoting a
-whole `Bin` rather than a single edge).
+the transform's request/response), a subgraph-as-a-unit wrapper (remoting a whole
+`Bin` rather than a single edge), and a WebTransport datagram carrier for the
+drop-tolerant case.
+
+### 4.20a MoQ Transport (`moqt` / `moqtsink` / `moqtsrc`)
+
+The distributed-graph carriers above move g2g's *own* packet stream between g2g
+peers. **MoQ Transport** is the other use of the same WebTransport carrier: a
+published IETF media protocol, so the peer on the far side is a relay and a
+player that know nothing about g2g. `moqt` (M902 / M903) implements it in-tree,
+both directions.
+
+**Dialect and version.** The dialect is the IETF draft, not moq-lite: moq-lite
+is a single-vendor dialect with its own ALPN and cannot talk to IETF endpoints.
+The target version is **draft-16, `0xff000010`**, which is what Cloudflare's
+`moq-relay-ietf` runs in production. Nothing on crates.io implements the IETF
+draft within this workspace's MSRV (`moq-net` needs rustc 1.91; cloudflare's
+`moq-transport` fails to build on 1.85), so the wire layer is written here, the
+way the SRT and ST 2110 stacks were: read the draft, read the reference
+implementation (`cloudflare/moq-rs`), and validate against the reference peer.
+From draft-16 the version is *not* negotiated in the SETUP payload; the QUIC
+ALPN for WebTransport is always `h3`, so the version rides the HTTP/3 CONNECT
+request as the WebTransport subprotocol `moqt-16`, and CLIENT_SETUP /
+SERVER_SETUP carry parameters only.
+
+**Layering.** `moqt::coding` (varints, byte strings, track namespaces and names,
+the delta-coded Key-Value-Pair sequences), `moqt::message` (the control message
+set and its `type / 16-bit length / payload` framing), `moqt::data` (the
+subgroup stream header and per-object header), `moqt::datagram` (the datagram
+object), `moqt::reassembly` (decoding a subgroup stream, and the ordering policy
+below) and `moqt::catalog` (the JSON
+track list, written and read in one place so the two cannot drift) are pure
+`alloc` with no I/O, so the wire layer is unit-testable on byte vectors; the
+layouts are asserted against the byte sequences the reference implementation
+asserts for itself, because a round trip alone cannot catch two fields swapped
+with each other. `moqt::session` adds the live session over the M901 carrier: it
+reuses that carrier's dial (`remotewtio::dial`, which grew a subprotocol
+argument rather than a second copy of the certificate-hash handling), opens the
+control stream as the session's first bidirectional stream, and runs the control
+stream's read half in its own task, so a SUBSCRIBE is decoded as it arrives
+instead of when the element next has a frame to push. A subscriber additionally
+starts a data reader: one task accepting unidirectional streams, one task per
+stream decoding it, all funnelling whole objects into a single channel.
+Everything a peer sends is bounded before use: counts and lengths are checked
+against the draft's limits, the KVP running key is a checked add, nothing is
+preallocated from a peer-supplied count, a single object is capped
+(`max-object-size`) so one stream cannot allocate without limit, and a message
+that does not consume exactly its declared length is a protocol violation.
+
+**`moqtsink`.** The publisher takes an ISO-BMFF byte stream
+(`... ! mp4mux ! moqtsink location=https://relay:4443/ namespace=live/cam`), so
+the muxer stays a separate element and the sink carries no second fragmenter; it
+walks the boxes with the same helpers the HLS segmenter uses
+(`fmp4::trun_first_sample_is_sync` is shared between them). The object mapping:
+
+- `ftyp`+`moov` is one object in group 0 on the init track (`0.mp4`), which is
+  what a subscriber fetches first.
+- each `moof`+`mdat` pair, with the `styp` / `prft` that open its segment, is one
+  object on the media track `{track_id}.m4s`. CMAF requires an object to hold at
+  least one whole chunk, and a `moof`+`mdat` pair is exactly that.
+- a fragment whose first sample is a sync sample starts a new **group**, so a
+  group is a GOP and each group is one subgroup on its own unidirectional
+  stream. A subscriber that joins mid-group is served from the next keyframe,
+  which is the only point it could start decoding anyway.
+- a `.catalog` track carries the JSON track list a player reads to learn the
+  track names and codec parameters.
+
+Subgroup streams carry the header type `0x15` (explicit subgroup id plus an
+extension-header block) and objects whose id delta is measured per stream (the
+first object of a stream takes the delta as its absolute id), which is
+byte-identical to what the reference publisher emits when one stream carries the
+whole group. `subgroups` spreads a group's objects across that many concurrent
+subgroup streams round-robin, so one object's loss no longer holds up the next
+inside a GOP. The reference relay cannot carry that: it renumbers each subgroup's
+objects from zero, discarding the delta, so the subgroups collide on one set of
+ids and all but one are dropped as duplicates, so a publisher aimed at that relay
+leaves `subgroups` at 1. `SUBSCRIBE_OK` reuses the request id as the track alias
+(§10.1 only asks for uniqueness within the session), and a stream is opened only
+after that acknowledgement, so the subscriber can resolve the alias in the
+stream header. A subscriber-side request the publisher does not serve (FETCH,
+TRACK_STATUS, REQUEST_UPDATE) gets an explicit `REQUEST_ERROR NOT_SUPPORTED`
+rather than silence. Draft-16 SUBSCRIBE carries neither a group order nor a
+filter field, so `priority` (the publisher-priority byte in every subgroup
+header) is the only delivery knob and there is no group-order property to
+expose.
+
+**Datagram objects.** `datagrams=true` carries each media object in a QUIC
+datagram instead of on a subgroup stream: unreliable, bounded by the path MTU,
+and free of head-of-line blocking, which is what a live path wants for droppable
+media. It is off by default because it changes the delivery guarantee. The
+layout (`moqt::datagram`, from `moq-transport/src/data/datagram.rs`) is a type
+table like the stream header, saying which of the object id, the extension
+block and the object status are present, whether a payload follows, and whether
+the object ends its group; the payload has no length prefix, since the datagram
+boundary ends it. A datagram is a whole message that will never be continued, so
+a short one is a protocol violation rather than something to wait for, and a
+datagram that does not decode is dropped rather than failing the session: an
+unreliable carriage already loses objects, and killing the session over one bad
+datagram would lose the rest.
+
+Three consequences shape the publisher. An object larger than the path MTU
+cannot be a datagram, so it falls back to a subgroup stream rather than being
+dropped, which the delta coding above already handles (a stream opened mid-group
+starts from an absolute object id). The init and catalog tracks always ride
+streams: losing either loses the whole broadcast. And a group carried only by
+datagrams has no stream whose close says it is finished, so the publisher sends
+an end-of-group status datagram at each group boundary; without it the
+subscriber would hold the group until a buffering bound moved it on. The
+subscriber feeds datagram objects into the same `Reassembler` as stream objects,
+so ordering, the bounds and the never-stall policy are one implementation and
+not two.
+
+**`moqtsrc`.** The subscriber is the inverse and emits a
+`ByteStream{IsoBmff}` a demuxer takes unchanged
+(`moqtsrc location=... namespace=live/cam ! fmp4demux ! ...`). It reads the
+`.catalog` track to learn the media tracks and their init track (falling back to
+the reference defaults, `0.mp4` and `{track_id}.m4s`, when the publisher
+publishes none), emits the init object as the first frame, then each media
+object as it comes into order. `track-name` picks a track other than the
+catalog's first.
+
+**Reassembly** is the substance of the receive side. A subgroup is its own
+unidirectional QUIC stream, so a track's streams arrive concurrently and its
+objects are ordered by (group id, object id) *across* streams, not by arrival.
+Object ids are delta-coded per stream (the first object's delta is its absolute
+id, each later one is `previous + delta + 1`). `Reassembler` holds a cursor and
+a fixed memory budget:
+
+- playback starts at the first group whose object 0 arrives, so joining
+  mid-group skips to the next group rather than emitting a partial one;
+- objects are emitted strictly in cursor order, and anything below the cursor (a
+  late stream, a duplicate) is dropped and counted;
+- a group is done when every stream that carried it has finished, or an
+  `EndOfGroup` object closed it; then the cursor moves to the next group id;
+- a hole in a group that is already done can never be filled, so the cursor
+  jumps to the lowest object still buffered in it;
+- **a group that never completes is bounded**, not waited on: past `max-groups`
+  or `max-buffer-bytes` the oldest group is dropped whole and the cursor moves
+  past it, so buffering never grows and the stream resumes at the next group
+  boundary instead of stalling. Objects for a group already left behind are
+  refused rather than reordered backwards.
+
+Because a data stream can outrun the control stream that names its track alias,
+events for an alias no subscription claims yet are held (under the same byte
+budget) and replayed when SUBSCRIBE_OK arrives.
+
+Validation is against the reference peers rather than a loopback, in both
+directions: `moqtsink` publishes through a locally spawned `moq-relay-ietf` and
+the bytes `moq-sub` writes on the far side are compared to the bytes that went
+in; `moq-pub` publishes through the same relay into `moqtsrc`; and the g2g round
+trip `mp4mux ! moqtsink` -> relay -> `moqtsrc` is compared byte for byte, over a
+run long enough to span a group boundary.
+
+**The browser leg** (M904, `tools/moqt-demo/`) is the independent one: everything
+above validates against Cloudflare's Rust or our own, and a JS client is neither.
+The page subscribes with [MOQtail](https://github.com/moqtail/moqtail), a
+third-party draft-16 implementation, reads the `.catalog`, fetches the init track
+and appends the `moof`+`mdat` objects to one MSE `SourceBuffer` unchanged, so the
+browser's own demuxer and H.264 decoder consume the exact bytes `moqtsink` wrote.
+`headless/run-moqt-play.mjs` drives it in headless Chromium against a locally
+spawned relay and asserts on what the decoder produced: frame count, decoded
+size, and the seven SMPTE bars sampled off a canvas. `watch-live.mjs` is the same
+plumbing with `libcamerasrc` as the source and a real browser window.
+
+Two constraints shape it. A browser accepts a self-signed relay only through
+`serverCertificateHashes`, which requires an ECDSA P-256 certificate valid at most
+14 days, and a certificate that signs itself cannot be the leaf
+(`CaUsedAsEndEntity`), so the harness mints a CA and a leaf under it. And the
+catalog and init tracks each hold one object published before any subscriber
+exists, so they must be subscribed with an absolute start at group 0: a
+latest-object filter delivers nothing.
+
+The datagram and multi-subgroup paths cannot be validated that way, because
+`moq-relay-ietf` has no datagram code at all and drops all but one subgroup of a
+group. They are validated `moqtsink` -> `moqtsrc` directly over a real QUIC
+connection, through a test peer that answers each side's CLIENT_SETUP and then
+copies control messages, streams and datagrams byte for byte with no track state
+of its own, so what the subscriber decodes is what the publisher encoded; the
+datagram byte layouts are asserted against vectors the reference implementation's
+own encoder produced. The relay is still exercised on those settings, for what it
+proves: that a subscriber keeps playing, in order and a whole fragment at a time,
+when a peer delivers only part of every group.
 
 ### 4.21 Local Zero-Copy IPC (CUDA)
 

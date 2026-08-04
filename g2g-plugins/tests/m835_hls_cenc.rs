@@ -1,12 +1,14 @@
 //! M835 HLS / CMAF Common Encryption: mid-stream `#EXT-X-KEY` rotation, `cbcs`
-//! audio, per-sample IVs (`cenc`), `saiz`/`saio`-located sample auxiliary
-//! information and `seig` sample groups.
+//! audio, per-sample IVs (`cenc`), `cens` pattern AES-CTR (M867),
+//! `saiz`/`saio`-located sample auxiliary information and `seig` sample groups at
+//! both fragment and movie level.
 //!
 //! Two kinds of vector. The `cenc` (AES-CTR) fixtures are authored by ffmpeg
 //! (`-encryption_scheme cenc-aes-ctr`), the strongest reference available: this
-//! host's ffmpeg cannot author `cbcs` or SAMPLE-AES HLS at all, so those are
-//! hand-built box by box with an encrypt oracle that mirrors the spec, and the
-//! decrypted output is checked against the clear source bytes either way.
+//! host's ffmpeg cannot author `cbcs`, `cens` or SAMPLE-AES HLS at all (its mp4
+//! muxer offers only `none` and `cenc-aes-ctr`), so those are hand-built box by
+//! box with an encrypt oracle that mirrors the spec, and the decrypted output is
+//! checked against the clear source bytes either way.
 //!
 //! Network-free: the rotation tests serve their playlists and segments from an
 //! in-process `TcpListener`, like the other HLS suites.
@@ -238,31 +240,41 @@ fn cbcs_encrypt_whole(sample: &[u8], key: &[u8; 16], iv: &[u8; 16]) -> Vec<u8> {
     out
 }
 
-/// A `tenc` for a constant-IV (`cbcs`-style) track with the given pattern.
-fn tenc(kid: [u8; 16], crypt: u8, skip: u8) -> Vec<u8> {
-    let mut p = vec![0u8, (crypt << 4) | skip, 1, 0];
+/// A `tenc` with the given pattern: either constant-IV (the `cbcs` shape) or
+/// per-sample-IV (`cenc` / `cens`, where each `senc` record carries a 16-byte IV).
+fn tenc(kid: [u8; 16], crypt: u8, skip: u8, per_sample_iv: bool) -> Vec<u8> {
+    let iv_size = if per_sample_iv { 16 } else { 0 };
+    let mut p = vec![0u8, (crypt << 4) | skip, 1, iv_size];
     p.extend_from_slice(&kid);
-    p.push(16);
-    p.extend_from_slice(&CBCS_IV);
+    if !per_sample_iv {
+        p.push(16);
+        p.extend_from_slice(&CBCS_IV);
+    }
     full_box(b"tenc", 1, 0, &p)
 }
 
-fn sinf(original: &[u8; 4], kid: [u8; 16], crypt: u8, skip: u8) -> Vec<u8> {
+fn sinf(original: &[u8; 4], scheme: &[u8; 4], kid: [u8; 16], crypt: u8, skip: u8) -> Vec<u8> {
     let schm = full_box(
         b"schm",
         0,
         0,
-        &[&b"cbcs"[..], &0x0001_0000u32.to_be_bytes()].concat(),
+        &[&scheme[..], &0x0001_0000u32.to_be_bytes()].concat(),
     );
     mp4_box(
         b"sinf",
         &[
             mp4_box(b"frma", original),
             schm,
-            mp4_box(b"schi", &tenc(kid, crypt, skip)),
+            mp4_box(b"schi", &tenc(kid, crypt, skip, per_sample_iv(scheme))),
         ]
         .concat(),
     )
+}
+
+/// The counter-mode schemes carry a per-sample IV; the CBC ones in this file use
+/// the `tenc` constant IV.
+fn per_sample_iv(scheme: &[u8; 4]) -> bool {
+    matches!(scheme, b"cenc" | b"cens")
 }
 
 /// An `esds` carrying a 2-byte AAC-LC AudioSpecificConfig.
@@ -277,9 +289,35 @@ fn esds(config: &[u8]) -> Vec<u8> {
     full_box(b"esds", 0, 0, &es)
 }
 
+/// A `sgpd` for grouping type `seig` (version 1, per-entry lengths) over
+/// `entries`.
+fn seig_sgpd(entries: &[Vec<u8>]) -> Vec<u8> {
+    let mut p = b"seig".to_vec();
+    p.extend_from_slice(&0u32.to_be_bytes()); // default_length: variable
+    p.extend_from_slice(&(entries.len() as u32).to_be_bytes());
+    for e in entries {
+        p.extend_from_slice(&(e.len() as u32).to_be_bytes());
+        p.extend_from_slice(e);
+    }
+    full_box(b"sgpd", 1, 0, &p)
+}
+
 /// An encrypted AAC init segment: `moov` with an `enca` sample entry whose `sinf`
 /// declares `cbcs` whole-sample protection (pattern 0:0) under `kid`.
 fn aac_init(kid: [u8; 16]) -> Vec<u8> {
+    aac_init_full(kid, b"cbcs", 0, 0, &[])
+}
+
+/// The same init segment with an explicit scheme and crypt:skip pattern, plus an
+/// optional movie-level `seig` table in the track's `stbl` (what a fragment's
+/// `sbgp` addresses with a group description index below 0x10000).
+fn aac_init_full(
+    kid: [u8; 16],
+    scheme: &[u8; 4],
+    crypt: u8,
+    skip: u8,
+    movie_seig: &[Vec<u8>],
+) -> Vec<u8> {
     let mut tkhd_p = vec![0u8; 80];
     tkhd_p[8..12].copy_from_slice(&1u32.to_be_bytes()); // track_ID
     let tkhd = full_box(b"tkhd", 0, 0, &tkhd_p);
@@ -294,7 +332,7 @@ fn aac_init(kid: [u8; 16]) -> Vec<u8> {
         let mut p = vec![0u8; 28];
         p[16..18].copy_from_slice(&2u16.to_be_bytes()); // channelcount
         p.extend_from_slice(&esds(&[0x11, 0x90]));
-        p.extend_from_slice(&sinf(b"mp4a", kid, 0, 0));
+        p.extend_from_slice(&sinf(b"mp4a", scheme, kid, crypt, skip));
         mp4_box(b"enca", &p)
     };
     let stsd = {
@@ -302,7 +340,11 @@ fn aac_init(kid: [u8; 16]) -> Vec<u8> {
         p.extend_from_slice(&enca);
         full_box(b"stsd", 0, 0, &p)
     };
-    let minf = mp4_box(b"minf", &mp4_box(b"stbl", &stsd));
+    let mut stbl = stsd;
+    if !movie_seig.is_empty() {
+        stbl.extend_from_slice(&seig_sgpd(movie_seig));
+    }
+    let minf = mp4_box(b"minf", &mp4_box(b"stbl", &stbl));
     let mdia = mp4_box(b"mdia", &[mdhd, hdlr, minf].concat());
     let trak = mp4_box(b"trak", &[tkhd, mdia].concat());
     let mvex = mp4_box(b"mvex", &full_box(b"trex", 0, 0, &[0u8; 20]));
@@ -313,6 +355,9 @@ fn aac_init(kid: [u8; 16]) -> Vec<u8> {
 enum Aux {
     /// A `senc` box, the common layout.
     Senc,
+    /// A `senc` whose records lead with a 16-byte per-sample IV (the counter-mode
+    /// shape), one per sample in order.
+    SencWithIvs(Vec<[u8; 16]>),
     /// `saiz` + `saio` with one offset per sample, the blobs deliberately stored
     /// out of order with padding between them (a non-contiguous layout `senc`
     /// alone cannot express).
@@ -322,7 +367,8 @@ enum Aux {
 }
 
 /// A `seig` mapping: `(run length, group_description_index)` pairs plus the group
-/// description entries they index.
+/// description entries they index. An empty entry list emits the `sbgp` with no
+/// `traf`-local `sgpd`, so the indices address the movie-level table.
 type SeigGroups = (Vec<(u32, u32)>, Vec<Vec<u8>>);
 
 /// One encrypted fragment for track 1 (`moof` + `mdat`). `samples` are the
@@ -355,6 +401,9 @@ fn fragment(
     let blobs: Vec<Vec<u8>> = (0..samples.len())
         .map(|i| {
             let mut b = Vec::new();
+            if let Aux::SencWithIvs(ivs) = &aux {
+                b.extend_from_slice(&ivs[i]);
+            }
             if let Some(map) = subsamples.get(i) {
                 if !map.is_empty() {
                     b.extend_from_slice(&(map.len() as u16).to_be_bytes());
@@ -367,7 +416,7 @@ fn fragment(
             b
         })
         .collect();
-    let has_subsamples = blobs.iter().any(|b| !b.is_empty());
+    let has_subsamples = subsamples.iter().any(|m| !m.is_empty());
 
     let mut group_boxes = Vec::new();
     if let Some((runs, entries)) = &groups {
@@ -378,14 +427,9 @@ fn fragment(
             sbgp_p.extend_from_slice(&index.to_be_bytes());
         }
         group_boxes.extend_from_slice(&full_box(b"sbgp", 0, 0, &sbgp_p));
-        let mut sgpd_p = b"seig".to_vec();
-        sgpd_p.extend_from_slice(&0u32.to_be_bytes()); // default_length: variable
-        sgpd_p.extend_from_slice(&(entries.len() as u32).to_be_bytes());
-        for e in entries {
-            sgpd_p.extend_from_slice(&(e.len() as u32).to_be_bytes());
-            sgpd_p.extend_from_slice(e);
+        if !entries.is_empty() {
+            group_boxes.extend_from_slice(&seig_sgpd(entries));
         }
-        group_boxes.extend_from_slice(&full_box(b"sgpd", 1, 0, &sgpd_p));
     }
 
     // The aux boxes' sizes are fixed, so the moof layout (and the saio offsets
@@ -393,7 +437,7 @@ fn fragment(
     let head = [tfhd, tfdt, trun].concat();
     let (aux_boxes, tail) = match aux {
         Aux::None => (Vec::new(), Vec::new()),
-        Aux::Senc => {
+        Aux::Senc | Aux::SencWithIvs(_) => {
             let mut p = (samples.len() as u32).to_be_bytes().to_vec();
             for b in &blobs {
                 p.extend_from_slice(b);
@@ -592,6 +636,317 @@ async fn seig_group_marks_samples_clear_and_rekeys_the_rest() {
     );
 }
 
+/// The same override carried by the movie-level `seig` table instead: the `sgpd`
+/// sits in the track's `stbl` and the fragment's `sbgp` names its entries with
+/// plain indices (below 0x10000), with no `traf`-local `sgpd` to fall back on.
+#[tokio::test]
+async fn movie_level_seig_table_resolves_fragment_groups() {
+    const KID2: [u8; 16] = [0x66; 16];
+    const KEY2: [u8; 16] = *b"m867-movie-seig!";
+
+    let clear = aac_samples(4);
+    let mut stored = clear.clone();
+    stored[2] = cbcs_encrypt_whole(&clear[2], &KEY2, &CBCS_IV);
+    stored[3] = cbcs_encrypt_whole(&clear[3], &KEY2, &CBCS_IV);
+
+    let movie_seig = vec![
+        seig_entry([0; 16], false, 0, 0), // entry 1: clear samples
+        seig_entry(KID2, true, 0, 0),     // entry 2: re-keyed samples
+    ];
+    let mut file = aac_init_full(CBCS_KID, b"cbcs", 0, 0, &movie_seig);
+    file.extend_from_slice(&fragment(
+        0,
+        &stored,
+        &[],
+        Aux::Senc,
+        // Movie-level indices: 1-based into the `stbl` table, no 0x10000 offset,
+        // and the fragment carries no `sgpd` of its own.
+        Some((vec![(2u32, 1u32), (2, 2)], Vec::new())),
+    ));
+
+    // Only the group's key is registered: the track default KID has none, so a
+    // reader that ignored the movie-level table could not produce this output.
+    let keys = store_for_kid(KID2, KEY2);
+    let got = demux_all(file, Some(keys)).await.expect("demux");
+    assert_eq!(
+        adts_payloads(&got[0]),
+        clear,
+        "movie-level seig entries drive the per-sample crypto"
+    );
+}
+
+/// A movie-level index with no movie-level table, and one past the end of the
+/// table that is there: both must decline rather than silently fall back to the
+/// track defaults (which would decrypt a sample the group left clear).
+#[tokio::test]
+async fn movie_level_seig_index_without_a_table_fails_loud() {
+    let clear = aac_samples(2);
+    let cipher: Vec<Vec<u8>> = clear
+        .iter()
+        .map(|s| cbcs_encrypt_whole(s, &CBCS_KEY, &CBCS_IV))
+        .collect();
+    let frag =
+        |runs: Vec<(u32, u32)>| fragment(0, &cipher, &[], Aux::Senc, Some((runs, Vec::new())));
+
+    let mut no_table = aac_init(CBCS_KID);
+    no_table.extend_from_slice(&frag(vec![(2, 1)]));
+
+    let mut past_end = aac_init_full(CBCS_KID, b"cbcs", 0, 0, &[seig_entry(CBCS_KID, true, 0, 0)]);
+    past_end.extend_from_slice(&frag(vec![(2, 2)]));
+
+    for (name, file) in [
+        ("movie-level index with no stbl sgpd", no_table),
+        ("movie-level index past the table", past_end),
+    ] {
+        assert_eq!(
+            demux_all(file, Some(store_for_kid(CBCS_KID, CBCS_KEY))).await,
+            Err(G2gError::CapsMismatch),
+            "{name}: must fail the parse",
+        );
+    }
+}
+
+// --- hand-built `cens` (pattern AES-CTR) vectors ----------------------------
+//
+// Nothing on this host authors `cens`, so these vectors come from an oracle built
+// on the raw block cipher (not the `ctr` crate the decryptor uses), following
+// ISO/IEC 23001-7 §9.6 / §10.3: only the pattern's crypt blocks are encrypted, the
+// counter advances once per encrypted block (a skipped block consumes none of the
+// keystream), the IV applies once per sample so the keystream runs continuously
+// across that sample's protected ranges, and the pattern restarts at each range.
+
+const CENS_KEY: [u8; 16] = *b"m867-cens-key!!!";
+const CENS_KID: [u8; 16] = [0x2C; 16];
+
+/// The keystream block for counter offset `n`: the IV's low 64 bits are the block
+/// counter, incremented big-endian, and AES-128 encrypts the counter block.
+fn keystream_block(key: &[u8; 16], iv: &[u8; 16], n: u64) -> [u8; 16] {
+    use aes::cipher::{BlockEncrypt, KeyInit};
+    let mut counter_block = *iv;
+    let base = u64::from_be_bytes(iv[8..].try_into().unwrap());
+    counter_block[8..].copy_from_slice(&base.wrapping_add(n).to_be_bytes());
+    let mut block = aes::cipher::generic_array::GenericArray::clone_from_slice(&counter_block);
+    aes::Aes128::new(&aes::cipher::generic_array::GenericArray::clone_from_slice(
+        key,
+    ))
+    .encrypt_block(&mut block);
+    let mut out = [0u8; 16];
+    out.copy_from_slice(&block);
+    out
+}
+
+/// Encrypt `ranges` of `sample` in place under `cens`. `crypt`/`skip` of 0 means
+/// no pattern, so the whole range (trailing partial block included) is encrypted,
+/// which is plain `cenc`.
+fn cens_encrypt(sample: &mut [u8], ranges: &[(usize, usize)], iv: &[u8; 16], crypt: u8, skip: u8) {
+    let mut xor = |at: usize, len: usize, counter: &mut u64| {
+        for off in (0..len).step_by(16) {
+            let ks = keystream_block(&CENS_KEY, iv, *counter);
+            for (i, b) in sample[at + off..(at + off + 16).min(at + len)]
+                .iter_mut()
+                .enumerate()
+            {
+                *b ^= ks[i];
+            }
+            *counter += 1;
+        }
+    };
+    let mut counter = 0u64;
+    for &(start, end) in ranges {
+        if crypt == 0 || skip == 0 {
+            xor(start, end - start, &mut counter);
+            continue;
+        }
+        let cycle = (crypt as usize + skip as usize) * 16;
+        let mut at = start;
+        while at < end {
+            // Whole blocks only: a partial block at the end of a range stays clear.
+            let take = (crypt as usize * 16).min((end - at) / 16 * 16);
+            if take == 0 {
+                break;
+            }
+            xor(at, take, &mut counter);
+            at += cycle;
+        }
+    }
+}
+
+/// A distinct per-sample IV, as a `cens` track carries in its `senc`.
+fn cens_ivs(n: usize) -> Vec<[u8; 16]> {
+    (0..n)
+        .map(|i| {
+            let mut iv = [0u8; 16];
+            iv[..8].copy_from_slice(&(0xC0DE_0000_0000_0000u64 + i as u64).to_be_bytes());
+            iv
+        })
+        .collect()
+}
+
+/// `cens` with a 1:9 crypt:skip pattern and two protected ranges per sample: the
+/// pattern restarts at each range while the counter runs on, so a decryptor that
+/// restarted the keystream per range, or advanced it over skipped blocks, produces
+/// different bytes from the second range on.
+#[tokio::test]
+async fn cens_pattern_ctr_decrypts_across_subsample_ranges() {
+    // Two subsamples per sample, each a clear leader plus a 16-multiple protected
+    // range (what 23001-7 §10.3 requires of `cens` content).
+    let clear: Vec<Vec<u8>> = (0..3usize)
+        .map(|i| {
+            (0..(8 + 176) * 2)
+                .map(|b| ((b * 37 + i * 11) % 251) as u8)
+                .collect()
+        })
+        .collect();
+    let maps: Vec<Vec<(u16, u32)>> = clear.iter().map(|_| vec![(8, 176), (8, 176)]).collect();
+    let ranges = [(8usize, 184usize), (192, 368)];
+    let ivs = cens_ivs(clear.len());
+    let cipher: Vec<Vec<u8>> = clear
+        .iter()
+        .zip(&ivs)
+        .map(|(s, iv)| {
+            let mut out = s.clone();
+            cens_encrypt(&mut out, &ranges, iv, 1, 9);
+            out
+        })
+        .collect();
+    assert_ne!(cipher, clear, "the oracle must actually encrypt");
+    // The pattern's skipped blocks are untouched: block 1 of the first range
+    // (bytes 24..40) is clear data, block 0 (8..24) is not.
+    assert_eq!(
+        cipher[0][24..40],
+        clear[0][24..40],
+        "skipped block stays clear"
+    );
+    assert_ne!(
+        cipher[0][8..24],
+        clear[0][8..24],
+        "crypt block is encrypted"
+    );
+
+    let mut file = aac_init_full(CENS_KID, b"cens", 1, 9, &[]);
+    file.extend_from_slice(&fragment(0, &cipher, &maps, Aux::SencWithIvs(ivs), None));
+
+    let keys = store_for_kid(CENS_KID, CENS_KEY);
+    let got = demux_all(file, Some(keys)).await.expect("demux");
+    assert_eq!(
+        adts_payloads(&got[0]),
+        clear,
+        "cens pattern AES-CTR decrypt reproduces the clear samples"
+    );
+}
+
+/// A whole-sample `cens` range that is not a block multiple: the pattern covers
+/// what whole blocks it reaches and the trailing partial block stays clear.
+#[tokio::test]
+async fn cens_leaves_a_trailing_partial_block_clear() {
+    let clear = aac_samples(3); // lengths 100, 107, 114: none a multiple of 16
+    let ivs = cens_ivs(clear.len());
+    let cipher: Vec<Vec<u8>> = clear
+        .iter()
+        .zip(&ivs)
+        .map(|(s, iv)| {
+            let mut out = s.clone();
+            cens_encrypt(&mut out, &[(0, s.len())], iv, 1, 9);
+            out
+        })
+        .collect();
+    let tail = clear[0].len() / 16 * 16;
+    assert_eq!(
+        cipher[0][tail..],
+        clear[0][tail..],
+        "the trailing partial block stays clear"
+    );
+
+    let mut file = aac_init_full(CENS_KID, b"cens", 1, 9, &[]);
+    file.extend_from_slice(&fragment(0, &cipher, &[], Aux::SencWithIvs(ivs), None));
+
+    let keys = store_for_kid(CENS_KID, CENS_KEY);
+    let got = demux_all(file, Some(keys)).await.expect("demux");
+    assert_eq!(adts_payloads(&got[0]), clear, "cens whole-sample decrypt");
+}
+
+/// A `cens` track whose pattern is 0:0 is not an error: per §9.6.1 pattern
+/// encryption applies only when both fields are non-zero, so the whole protected
+/// range is encrypted exactly as `cenc` would, trailing partial block included.
+#[tokio::test]
+async fn cens_without_a_pattern_encrypts_the_whole_range() {
+    let clear = aac_samples(2);
+    let ivs = cens_ivs(clear.len());
+    let cipher: Vec<Vec<u8>> = clear
+        .iter()
+        .zip(&ivs)
+        .map(|(s, iv)| {
+            let mut out = s.clone();
+            cens_encrypt(&mut out, &[(0, s.len())], iv, 0, 0);
+            out
+        })
+        .collect();
+    // Unlike the patterned case the short tail is encrypted too, under the counter
+    // that follows the last whole block.
+    let tail = clear[0].len() / 16 * 16;
+    let ks = keystream_block(&CENS_KEY, &ivs[0], (tail / 16) as u64);
+    let expect: Vec<u8> = clear[0][tail..]
+        .iter()
+        .zip(&ks)
+        .map(|(p, k)| p ^ k)
+        .collect();
+    assert_eq!(
+        cipher[0][tail..],
+        expect[..],
+        "a 0:0 pattern encrypts the trailing partial block too"
+    );
+
+    let mut file = aac_init_full(CENS_KID, b"cens", 0, 0, &[]);
+    file.extend_from_slice(&fragment(0, &cipher, &[], Aux::SencWithIvs(ivs), None));
+
+    let keys = store_for_kid(CENS_KID, CENS_KEY);
+    let got = demux_all(file, Some(keys)).await.expect("demux");
+    assert_eq!(adts_payloads(&got[0]), clear, "unpatterned cens decrypt");
+}
+
+/// The `cens` shapes must fail as loudly as the others: no key for the KID, and a
+/// subsample map whose protected run runs past the end of the sample.
+#[tokio::test]
+async fn cens_failures_are_loud() {
+    let clear = aac_samples(2);
+    let ivs = cens_ivs(clear.len());
+    let cipher: Vec<Vec<u8>> = clear
+        .iter()
+        .zip(&ivs)
+        .map(|(s, iv)| {
+            let mut out = s.clone();
+            cens_encrypt(&mut out, &[(0, s.len())], iv, 1, 9);
+            out
+        })
+        .collect();
+    let build = |maps: &[Vec<(u16, u32)>]| {
+        let mut file = aac_init_full(CENS_KID, b"cens", 1, 9, &[]);
+        file.extend_from_slice(&fragment(
+            0,
+            &cipher,
+            maps,
+            Aux::SencWithIvs(ivs.clone()),
+            None,
+        ));
+        file
+    };
+
+    assert_eq!(
+        demux_all(build(&[]), Some(store_for_kid([0x99; 16], CENS_KEY))).await,
+        Err(G2gError::CapsMismatch),
+        "no key for the cens KID: fail, never emit ciphertext",
+    );
+
+    // A subsample map claiming more bytes than the sample holds must fail, not
+    // decrypt the part that fits and pass the rest off as plaintext.
+    let long: Vec<Vec<(u16, u32)>> = clear.iter().map(|_| vec![(4, 0xFFFF_0000)]).collect();
+    assert_eq!(
+        demux_all(build(&long), Some(store_for_kid(CENS_KID, CENS_KEY))).await,
+        Err(G2gError::CapsMismatch),
+        "a subsample map past the end of the sample must fail the parse",
+    );
+}
+
 // --- malformed protection metadata -----------------------------------------
 
 /// Overwrite `len` bytes at `at` bytes past the start of the first `kind` box's
@@ -625,6 +980,25 @@ fn mapped_file(aux: Aux) -> Vec<u8> {
     file
 }
 
+/// The same file with a `traf`-local `seig` group over its samples, as the base
+/// for corrupting the sample-group boxes.
+fn mapped_seig_file() -> Vec<u8> {
+    let clear = aac_samples(2);
+    let cipher: Vec<Vec<u8>> = clear
+        .iter()
+        .map(|s| cbcs_encrypt_whole(s, &CBCS_KEY, &CBCS_IV))
+        .collect();
+    let mut file = aac_init(CBCS_KID);
+    file.extend_from_slice(&fragment(
+        0,
+        &cipher,
+        &[],
+        Aux::Senc,
+        Some((vec![(2, 0x1_0001)], vec![seig_entry(CBCS_KID, true, 0, 0)])),
+    ));
+    file
+}
+
 /// Every one of these lies about the size, count or position of something the
 /// parser would otherwise trust. Each must surface an error, never panic and
 /// never emit ciphertext as media.
@@ -653,22 +1027,31 @@ async fn malformed_protection_metadata_fails_without_panicking() {
     let mut senc_count = mapped_file(Aux::Senc);
     patch_box(&mut senc_count, b"senc", 4, &0x00FF_FFFFu32.to_be_bytes());
 
-    // A `senc` version the multi-key layout uses, which this parser declines
-    // rather than mis-slicing every record.
-    let mut senc_version = mapped_file(Aux::Senc);
-    patch_box(&mut senc_version, b"senc", 0, &[2]);
+    // The `senc` versions the multi-key layout uses (1 is what the one packager
+    // that writes it emits, 2 has no established layout at all): both are declined
+    // rather than mis-sliced as version 0.
+    let mut senc_v1 = mapped_file(Aux::Senc);
+    patch_box(&mut senc_v1, b"senc", 0, &[1]);
+    let mut senc_v2 = mapped_file(Aux::Senc);
+    patch_box(&mut senc_v2, b"senc", 0, &[2]);
 
     // A `tenc` per-sample IV size no scheme defines.
     let mut bad_iv_size = mapped_file(Aux::Senc);
     patch_box(&mut bad_iv_size, b"tenc", 7, &[7]);
+
+    // A `sgpd` version whose entry offsets differ between editions of 14496-12.
+    let mut sgpd_v2 = mapped_seig_file();
+    patch_box(&mut sgpd_v2, b"sgpd", 0, &[2]);
 
     for (name, file) in [
         ("saio offset past the fragment", saio_past_end),
         ("saiz count beyond the box", saiz_count),
         ("senc subsample count beyond the box", senc_subs),
         ("senc sample count beyond the fragment", senc_count),
-        ("senc multi-key version", senc_version),
+        ("senc multi-key version 1", senc_v1),
+        ("senc multi-key version 2", senc_v2),
         ("undefined per-sample IV size", bad_iv_size),
+        ("sgpd version 2", sgpd_v2),
     ] {
         assert_eq!(
             demux_all(file, keys()).await,
@@ -696,13 +1079,18 @@ async fn malformed_sample_groups_fail_without_panicking() {
         file
     };
     let dangling = build(vec![(2, 0x1_0009)], vec![seig_entry(CBCS_KID, true, 0, 0)]);
-    let mut multi_key = seig_entry(CBCS_KID, true, 0, 0);
-    multi_key[0] = 0x80; // multi_key_flag
-    let multi = build(vec![(2, 0x1_0001)], vec![multi_key]);
+    // The two descriptions of the multi-key entry put its flag in different bits of
+    // the reserved byte, so both encodings must decline.
+    let flagged = |bit: u8| {
+        let mut e = seig_entry(CBCS_KID, true, 0, 0);
+        e[0] = bit;
+        build(vec![(2, 0x1_0001)], vec![e])
+    };
 
     for (name, file) in [
         ("group index with no description", dangling),
-        ("multi-key group entry", multi),
+        ("multi-key group entry (bit 7)", flagged(0x80)),
+        ("multi-key group entry (bit 0)", flagged(0x01)),
     ] {
         assert_eq!(
             demux_all(file, Some(store_for_kid(CBCS_KID, CBCS_KEY))).await,

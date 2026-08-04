@@ -10,9 +10,14 @@
 
 use alloc::vec::Vec;
 
-use g2g_core::{AudioFormat, G2gError, TagList, TextFormat, VideoCodec};
+use g2g_core::{AudioFormat, ClosedCaptionFormat, G2gError, TagList, TextFormat, VideoCodec};
 
-use crate::cenc::{fragment_sample_crypt, parse_sinf, CencDefaults, SampleCrypt};
+use crate::cea::{parse_cdp, write_cc_data, CcTriple};
+use crate::cenc::{
+    fragment_sample_crypt, parse_movie_seig, parse_sinf, CencDefaults, CencTrack, SampleCrypt,
+};
+#[cfg(any(test, feature = "dash"))]
+use crate::mp4box::next_box_len;
 use crate::mp4box::{
     be32, be64, boxes, boxes_at, find_box, find_path, parse_esds, parse_esds_video, parse_ilst_tags,
 };
@@ -31,8 +36,9 @@ pub(crate) struct Header {
     /// Parameter-set NALUs in container order (SPS,PPS for H.264; VPS,SPS,PPS
     /// for H.265), prepended to the first sample if it carries none in-band.
     pub(crate) param_sets: Vec<Vec<u8>>,
-    /// Common-encryption defaults from the init's `tenc`, `None` for a clear track.
-    pub(crate) cenc: Option<CencDefaults>,
+    /// Common-encryption metadata from the init's `tenc` (plus any movie-level
+    /// `seig` table), `None` for a clear track.
+    pub(crate) cenc: Option<CencTrack>,
 }
 
 /// In-place sample decryptor: given the crypto resolved for a sample (scheme, IV,
@@ -88,7 +94,8 @@ pub(crate) fn parse_header(data: &[u8]) -> Result<Header, G2gError> {
 
     // stsd's first entry is the visual sample entry: avc1/avcC (H.264) or
     // hvc1/hev1 with hvcC (H.265). Its config record carries the parameter sets.
-    let stsd = find_path(mdia, &[b"minf", b"stbl", b"stsd"]).ok_or(G2gError::CapsMismatch)?;
+    let stbl = find_path(mdia, &[b"minf", b"stbl"]).ok_or(G2gError::CapsMismatch)?;
+    let stsd = find_box(stbl, b"stsd").ok_or(G2gError::CapsMismatch)?;
     // full box: version/flags + entry count, then the first sample entry.
     let entries = stsd.get(8..).ok_or(G2gError::CapsMismatch)?;
     // visual sample entry: 78 bytes of fixed fields before the nested boxes. An
@@ -150,8 +157,23 @@ pub(crate) fn parse_header(data: &[u8]) -> Result<Header, G2gError> {
         timescale,
         duration_ns,
         param_sets,
-        cenc,
+        cenc: cenc_track(cenc, stbl)?,
     })
+}
+
+/// Pair a track's `tenc` defaults with the movie-level `seig` table its `stbl`
+/// carries, which a fragment's `sbgp` can index instead of a `traf`-local one.
+fn cenc_track(defaults: Option<CencDefaults>, stbl: &[u8]) -> Result<Option<CencTrack>, G2gError> {
+    match defaults {
+        Some(defaults) => {
+            let movie_seig = parse_movie_seig(stbl, defaults.scheme)?;
+            Ok(Some(CencTrack {
+                defaults,
+                movie_seig,
+            }))
+        }
+        None => Ok(None),
+    }
 }
 
 /// What one track carries: a video elementary stream (codec + geometry +
@@ -185,6 +207,11 @@ pub(crate) enum TrackKind {
         format: TextFormat,
         sample: TextSampleFormat,
     },
+    /// A raw closed-caption track (`c608` / `c708`): the caption data is its own
+    /// elementary stream rather than SEI inside the video. Samples de-frame from
+    /// their container atoms to the `cc_data` triple stream
+    /// [`Caps::ClosedCaption`](g2g_core::Caps::ClosedCaption) carries.
+    ClosedCaption { format: ClosedCaptionFormat },
 }
 
 /// The on-disk timed-text sample format an MP4 text `trak` stores. Distinct from
@@ -203,7 +230,7 @@ pub(crate) enum TextSampleFormat {
 
 /// One track's init data parsed from a `moov/trak`: the `track_ID` (which keys
 /// the fragments in [`parse_fragments_multi`]), the media timescale, the
-/// elementary-stream kind, the cbcs `cenc` defaults for an encrypted track
+/// elementary-stream kind, the common-encryption metadata for an encrypted track
 /// (`None` for a clear one), and the track's own `udta/meta/ilst` metadata
 /// (empty when it carries none).
 #[derive(Debug, Clone)]
@@ -211,15 +238,16 @@ pub(crate) struct TrackHeader {
     pub(crate) track_id: u32,
     pub(crate) timescale: u32,
     pub(crate) kind: TrackKind,
-    pub(crate) cenc: Option<CencDefaults>,
+    pub(crate) cenc: Option<CencTrack>,
     pub(crate) tags: TagList,
 }
 
 /// Parse every forwardable (`vide` / `soun` / timed-text) track out of a `moov`
 /// into a [`TrackHeader`]. The single-track [`parse_header`] reads only the first
 /// `trak`; this walks them all (what an A/V `.mp4` carries). Tracks with an
-/// unrecognized handler (or a text handler whose sample entry is not one we
-/// de-frame: `tx3g` / `wvtt` / `stpp` are read, others decline) are skipped, not
+/// unrecognized handler, or whose sample entry names a codec we do not read
+/// (`tx3g` / `wvtt` / `stpp` text, `c608` / `c708` captions, and the video codecs
+/// [`parse_video_entry`] handles are read, others decline) are skipped, not
 /// errors; a malformed video / audio track fails the parse. Errors if no track is
 /// forwardable.
 pub(crate) fn parse_all_tracks(data: &[u8]) -> Result<Vec<TrackHeader>, G2gError> {
@@ -268,16 +296,28 @@ fn parse_trak(trak: &[u8]) -> Result<Option<TrackHeader>, G2gError> {
     let hdlr = find_box(mdia, b"hdlr").ok_or(G2gError::CapsMismatch)?;
     let handler = hdlr.get(8..12).ok_or(G2gError::CapsMismatch)?;
 
-    let stsd = find_path(mdia, &[b"minf", b"stbl", b"stsd"]).ok_or(G2gError::CapsMismatch)?;
+    let stbl = find_path(mdia, &[b"minf", b"stbl"]).ok_or(G2gError::CapsMismatch)?;
+    let stsd = find_box(stbl, b"stsd").ok_or(G2gError::CapsMismatch)?;
     let entries = stsd.get(8..).ok_or(G2gError::CapsMismatch)?;
 
     let (kind, cenc) = match handler {
-        b"vide" => parse_video_entry(entries, width, height)?,
+        // A video sample entry we have no reader for is skipped like an unknown
+        // handler: one unsupported track must not fail the whole file.
+        b"vide" => match parse_video_entry(entries, width, height)? {
+            Some(entry) => entry,
+            None => return Ok(None),
+        },
         b"soun" => parse_audio_entry(entries, timescale)?,
         // A subtitle / timed-text handler (`text` = 3GPP/QuickTime timed text,
         // `sbtl` / `subt` = MP4 / ISO subtitle). Forwarded only when its sample
         // entry is one we de-frame (`tx3g`); an unrecognized text codec is skipped.
         b"text" | b"sbtl" | b"subt" => match parse_text_entry(entries) {
+            Some(kind) => (kind, None),
+            None => return Ok(None),
+        },
+        // A closed-caption handler (`clcp`), whose sample entry names the caption
+        // carriage: `c608` / `c708` are read, anything else is skipped.
+        b"clcp" => match parse_cc_entry(entries) {
             Some(kind) => (kind, None),
             None => return Ok(None),
         },
@@ -287,7 +327,7 @@ fn parse_trak(trak: &[u8]) -> Result<Option<TrackHeader>, G2gError> {
         track_id,
         timescale,
         kind,
-        cenc,
+        cenc: cenc_track(cenc, stbl)?,
         tags: parse_ilst_tags(trak),
     }))
 }
@@ -313,12 +353,14 @@ fn parse_av1c_config(av01: &[u8]) -> Result<Vec<Vec<u8>>, G2gError> {
 /// into a [`TrackKind::Video`] plus the cbcs `cenc` defaults for an encrypted
 /// track. An `encv` carries the original codec config (`avcC` / `hvcC`) alongside
 /// a `sinf` (original format + `cbcs` scheme + `tenc`), the same shape
-/// [`parse_header`] reads.
+/// [`parse_header`] reads. Returns `None` for an entry that is well-formed but
+/// names a codec with no reader here (MJPEG in MP4, say), so that track is
+/// skipped; malformed entry data is still an error.
 fn parse_video_entry(
     entries: &[u8],
     width: u32,
     height: u32,
-) -> Result<(TrackKind, Option<CencDefaults>), G2gError> {
+) -> Result<Option<(TrackKind, Option<CencDefaults>)>, G2gError> {
     let (codec, param_sets, cenc) = if let Some(avc1) = find_box(entries, b"avc1") {
         let children = avc1.get(78..).ok_or(G2gError::CapsMismatch)?;
         let (sps, pps) = parse_avcc(find_box(children, b"avcC").ok_or(G2gError::CapsMismatch)?)?;
@@ -330,12 +372,14 @@ fn parse_video_entry(
     } else if let Some(mp4v) = find_box(entries, b"mp4v") {
         // MPEG-4 Part 2: the mp4v visual sample entry nests an esds carrying the
         // VOL header as its DecoderSpecificInfo. Confirm objectTypeIndication
-        // 0x20 (Visual ISO/IEC 14496-2) so another mp4v-boxed codec is rejected.
+        // 0x20 (Visual ISO/IEC 14496-2) so another mp4v-boxed codec is declined.
         let children = mp4v.get(78..).ok_or(G2gError::CapsMismatch)?;
         let esds = find_box(children, b"esds").ok_or(G2gError::CapsMismatch)?;
         let (oti, dsi) = parse_esds_video(esds)?;
         if oti != 0x20 {
-            return Err(G2gError::CapsMismatch);
+            // Another codec in an mp4v box (ffmpeg writes MJPEG-in-MP4 this way,
+            // objectTypeIndication 0x6C): a valid entry we have no reader for.
+            return Ok(None);
         }
         // The VOL header is the single config blob (empty if carried in-band).
         let sets = if dsi.is_empty() {
@@ -364,10 +408,14 @@ fn parse_video_entry(
             _ => return Err(G2gError::CapsMismatch),
         };
         (codec, param_sets, Some(cenc))
+    } else if visual_sample_entry(entries) {
+        // A well-formed VisualSampleEntry naming a codec we do not read: decline
+        // so the rest of the file still demuxes.
+        return Ok(None);
     } else {
         return Err(G2gError::CapsMismatch);
     };
-    Ok((
+    Ok(Some((
         TrackKind::Video {
             codec,
             width,
@@ -375,7 +423,15 @@ fn parse_video_entry(
             param_sets,
         },
         cenc,
-    ))
+    )))
+}
+
+/// Whether `entries` (an `stsd`'s sample-entry list) holds at least one entry
+/// well-formed enough to be a VisualSampleEntry: a parseable box carrying its 78
+/// fixed bytes. Truncated or garbage entry data is not, and fails the parse
+/// rather than being silently skipped.
+fn visual_sample_entry(entries: &[u8]) -> bool {
+    boxes(entries).any(|(_, payload)| payload.len() >= 78)
 }
 
 /// Read an audio sample entry into a [`TrackKind::Audio`] plus the cbcs `cenc`
@@ -475,6 +531,99 @@ fn parse_text_entry(entries: &[u8]) -> Option<TrackKind> {
     } else {
         None
     }
+}
+
+/// Recognize a closed-caption sample entry (QuickTime `c608` / `c708`, under a
+/// `clcp` handler) and map it to the [`TrackKind::ClosedCaption`] carriage. An
+/// unrecognized caption codec declines (the track is skipped, not an error).
+fn parse_cc_entry(entries: &[u8]) -> Option<TrackKind> {
+    if find_box(entries, b"c608").is_some() {
+        Some(TrackKind::ClosedCaption {
+            format: ClosedCaptionFormat::Cea608,
+        })
+    } else if find_box(entries, b"c708").is_some() {
+        Some(TrackKind::ClosedCaption {
+            format: ClosedCaptionFormat::Cea708,
+        })
+    } else {
+        None
+    }
+}
+
+/// De-frame one raw-caption sample to the `cc_data` triple stream a
+/// [`Caps::ClosedCaption`](g2g_core::Caps::ClosedCaption) link carries, so a
+/// container caption track and an SEI caption block feed the same decoder.
+fn deframe_cc(raw: &[u8], format: ClosedCaptionFormat) -> Vec<u8> {
+    match format {
+        ClosedCaptionFormat::Cea608 => deframe_c608(raw),
+        ClosedCaptionFormat::Cea708 => deframe_c708(raw),
+        // Only the two carriages above are ever surfaced as a track, so a future
+        // third yields no caption data rather than a guessed framing.
+        _ => Vec::new(),
+    }
+}
+
+/// De-frame a `c608` sample: a sequence of `cdat` (line-21 field 1) / `cdt2`
+/// (field 2) atoms whose payloads are raw CEA-608 byte pairs, re-tagged as
+/// `cc_data` triples (`cc_type` 0 for field 1, 1 for field 2). Atom sizes are
+/// untrusted: a size below the 8-byte header, past the sample end, or an odd
+/// payload length stops the scan, and an atom that is neither `cdat` nor `cdt2` is
+/// skipped, so a malformed sample yields the pairs read so far rather than
+/// panicking.
+fn deframe_c608(raw: &[u8]) -> Vec<u8> {
+    let mut triples: Vec<CcTriple> = Vec::new();
+    let mut off = 0usize;
+    while off.saturating_add(8) <= raw.len() {
+        let size =
+            u32::from_be_bytes([raw[off], raw[off + 1], raw[off + 2], raw[off + 3]]) as usize;
+        if size < 8 || off.saturating_add(size) > raw.len() {
+            break;
+        }
+        let cc_type = match &raw[off + 4..off + 8] {
+            b"cdat" => Some(0u8),
+            b"cdt2" => Some(1u8),
+            _ => None,
+        };
+        let body = &raw[off + 8..off + size];
+        if let Some(cc_type) = cc_type {
+            if body.len() % 2 != 0 {
+                break;
+            }
+            for pair in body.chunks_exact(2) {
+                triples.push(CcTriple {
+                    cc_type,
+                    b0: pair[0],
+                    b1: pair[1],
+                });
+            }
+        }
+        off += size;
+    }
+    write_cc_data(&triples)
+}
+
+/// De-frame a `c708` sample: `ccdp` atoms each holding a SMPTE ST 334-2 caption
+/// distribution packet, unwrapped to the `cc_data` triples the CDP's ccdata
+/// section carries. A CDP that fails to parse (bad identifier, length, or
+/// checksum) contributes nothing; atom sizes are untrusted, so a bad one stops the
+/// scan.
+fn deframe_c708(raw: &[u8]) -> Vec<u8> {
+    let mut triples: Vec<CcTriple> = Vec::new();
+    let mut off = 0usize;
+    while off.saturating_add(8) <= raw.len() {
+        let size =
+            u32::from_be_bytes([raw[off], raw[off + 1], raw[off + 2], raw[off + 3]]) as usize;
+        if size < 8 || off.saturating_add(size) > raw.len() {
+            break;
+        }
+        if &raw[off + 4..off + 8] == b"ccdp" {
+            if let Some(mut got) = parse_cdp(&raw[off + 8..off + size]) {
+                triples.append(&mut got);
+            }
+        }
+        off += size;
+    }
+    write_cc_data(&triples)
 }
 
 /// Strip a 3GPP timed-text (`tx3g`) sample to its UTF-8 cue bytes: a 2-byte
@@ -642,6 +791,8 @@ pub(crate) fn parse_fragments_multi(
                         }
                         // Audio access units are stored verbatim; each is a sync point.
                         TrackKind::Audio { .. } => (bytes.to_vec(), true),
+                        // A caption sample de-frames to the cc_data triple stream.
+                        TrackKind::ClosedCaption { format } => (deframe_cc(bytes, *format), true),
                         // A timed-text cue is independent; strip its sample framing
                         // (tx3g / wvtt) or pass the whole TTML document (stpp).
                         TrackKind::Text { sample, .. } => {
@@ -693,7 +844,7 @@ pub(crate) fn parse_fragments(
     data: &[u8],
     timescale: u32,
     codec: VideoCodec,
-    cenc: Option<&CencDefaults>,
+    cenc: Option<&CencTrack>,
     base_offset: u64,
     mut decrypt: Option<SampleDecrypt<'_>>,
 ) -> Result<Vec<Sample>, G2gError> {
@@ -829,6 +980,7 @@ enum SampleFraming {
     PassThrough,
     Tx3gText,
     WvttText,
+    ClosedCaption(ClosedCaptionFormat),
 }
 
 impl SampleFraming {
@@ -845,6 +997,7 @@ impl SampleFraming {
             TrackKind::Video { .. } => SampleFraming::Video,
             TrackKind::Audio { .. } => SampleFraming::PassThrough,
             TrackKind::Text { sample, .. } => Self::of_text(*sample),
+            TrackKind::ClosedCaption { format } => SampleFraming::ClosedCaption(*format),
         }
     }
 
@@ -1010,6 +1163,7 @@ fn parse_progressive_track(
             SampleFraming::PassThrough => raw.to_vec(),
             SampleFraming::Tx3gText => deframe_tx3g(raw),
             SampleFraming::WvttText => deframe_wvtt(raw),
+            SampleFraming::ClosedCaption(format) => deframe_cc(raw, format),
         };
         samples.push(Sample {
             annexb,
@@ -1089,6 +1243,36 @@ pub(crate) fn tfhd_defaults(tfhd: &[u8]) -> Result<(u32, u32), G2gError> {
         0
     };
     Ok((duration, size))
+}
+
+/// `sample_flags` bit 16: the sample is *not* a sync sample (ISO/IEC 14496-12).
+const NON_SYNC: u32 = 0x0001_0000;
+
+/// Whether the first sample a `trun` describes is a sync sample, i.e. whether
+/// the fragment it belongs to opens at a random access point. A `trun` that
+/// states no flags at all (neither the first-sample override nor per-sample
+/// flags) is taken to open at one, which is what a fragment without sample
+/// dependency information implies.
+pub(crate) fn trun_first_sample_is_sync(trun: &[u8]) -> Result<bool, G2gError> {
+    let flags = be32(trun, 0)? & 0x00FF_FFFF;
+    // version/flags + sample_count, then the optional fields in declaration order.
+    let mut at = 8usize;
+    if flags & 0x001 != 0 {
+        at += 4; // data_offset
+    }
+    if flags & 0x004 != 0 {
+        return Ok(be32(trun, at)? & NON_SYNC == 0); // first_sample_flags
+    }
+    if flags & 0x400 != 0 {
+        if flags & 0x100 != 0 {
+            at += 4; // sample_duration
+        }
+        if flags & 0x200 != 0 {
+            at += 4; // sample_size
+        }
+        return Ok(be32(trun, at)? & NON_SYNC == 0);
+    }
+    Ok(true)
 }
 
 /// `trun` (v0 or v1); returns (sizes, durations). A `trun` that omits the
@@ -1202,10 +1386,144 @@ fn timescale_to_ns(t: u64, timescale: u32) -> u64 {
     t.saturating_mul(1_000_000_000) / timescale as u64
 }
 
+/// Incremental CMAF chunk splitter for a segment still being written (M888): fed
+/// a segment response as its bytes arrive, it yields each complete chunk (the run
+/// of boxes up to and including an `mdat`), so a low-latency packager's
+/// `styp`+`moof`+`mdat` chunks flow downstream while the rest of the segment is
+/// still on the wire. Every fed byte comes back out exactly once and in order
+/// ([`CmafChunker::next_chunk`], then the [`CmafChunker::finish`] remainder), so
+/// chunked and whole-response consumption hand a demuxer the same byte stream.
+///
+/// `max` bounds what may be held for one chunk: a box declaring more than that,
+/// or a pending run growing past it, fails loud instead of buffering on an
+/// attacker-chosen length.
+#[cfg(any(test, feature = "dash"))]
+#[derive(Debug)]
+pub(crate) struct CmafChunker {
+    /// Fed bytes not yet yielded.
+    buf: Vec<u8>,
+    /// How much of `buf`'s front is already framed as whole boxes (none of them
+    /// an `mdat`), so a rescan resumes at the box still arriving.
+    framed: usize,
+    max: usize,
+}
+
+#[cfg(any(test, feature = "dash"))]
+impl CmafChunker {
+    pub(crate) fn new(max: usize) -> Self {
+        Self {
+            buf: Vec::new(),
+            framed: 0,
+            max,
+        }
+    }
+
+    /// Take newly arrived body bytes.
+    pub(crate) fn feed(&mut self, bytes: &[u8]) -> Result<(), G2gError> {
+        if self.buf.len().saturating_add(bytes.len()) > self.max {
+            return Err(G2gError::CapsMismatch);
+        }
+        self.buf.extend_from_slice(bytes);
+        Ok(())
+    }
+
+    /// The next complete chunk, or `None` while it is still arriving. Call until
+    /// it yields `None` after every [`CmafChunker::feed`].
+    pub(crate) fn next_chunk(&mut self) -> Result<Option<Vec<u8>>, G2gError> {
+        loop {
+            let Some(total) = next_box_len(&self.buf[self.framed..])? else {
+                return Ok(None);
+            };
+            if total > self.max {
+                return Err(G2gError::CapsMismatch);
+            }
+            let end = self.framed.saturating_add(total);
+            if self.buf.len() < end {
+                return Ok(None); // the rest of this box is still in flight
+            }
+            let mdat = &self.buf[self.framed + 4..self.framed + 8] == b"mdat";
+            self.framed = end;
+            if mdat {
+                let chunk: Vec<u8> = self.buf.drain(..self.framed).collect();
+                self.framed = 0;
+                return Ok(Some(chunk));
+            }
+        }
+    }
+
+    /// Whatever is left when the body ends: a chunkless response (an init
+    /// segment's `ftyp`+`moov`), a trailing box after the last `mdat`, or the tail
+    /// of a truncated transfer. Verbatim, so what reaches the demuxer is the
+    /// response body either way.
+    pub(crate) fn finish(&mut self) -> Option<Vec<u8>> {
+        self.framed = 0;
+        (!self.buf.is_empty()).then(|| core::mem::take(&mut self.buf))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use alloc::vec;
+
+    /// The chunk splitter cuts a CMAF segment after every `mdat` whatever the
+    /// arrival boundaries (fed one byte at a time here, the worst case), hands
+    /// every fed byte back exactly once and in order, and leaves a trailing box
+    /// for `finish`.
+    #[test]
+    fn cmaf_chunker_splits_after_every_mdat() {
+        use crate::mp4box::mp4_box;
+        let styp = mp4_box(b"styp", b"cmfscmff");
+        let chunk = |n: u8| [mp4_box(b"moof", &[n; 12]), mp4_box(b"mdat", &[n; 20])].concat();
+        let mfra = mp4_box(b"mfra", &[0u8; 8]);
+        let segment = [styp.clone(), chunk(1), chunk(2), chunk(3), mfra.clone()].concat();
+
+        let mut chunker = CmafChunker::new(1024);
+        let mut got = Vec::new();
+        for byte in &segment {
+            chunker.feed(&[*byte]).expect("under the cap");
+            while let Some(c) = chunker.next_chunk().expect("well-formed boxes") {
+                got.push(c);
+            }
+        }
+        assert_eq!(
+            got,
+            vec![[styp, chunk(1)].concat(), chunk(2), chunk(3)],
+            "the leading styp rides the first chunk, then one chunk per moof+mdat"
+        );
+        assert_eq!(
+            chunker.finish(),
+            Some(mfra),
+            "the trailing box comes out last"
+        );
+        assert_eq!(chunker.finish(), None, "and only once");
+        assert_eq!(
+            got.concat().len() + 16,
+            segment.len(),
+            "no byte was dropped"
+        );
+    }
+
+    /// The cap is the splitter's DoS bound: a box declaring more than it fails
+    /// before the bytes are waited on, and so does a pending run growing past it.
+    #[test]
+    fn cmaf_chunker_bounds_declared_and_pending_sizes() {
+        let mut chunker = CmafChunker::new(64);
+        // An mdat claiming 1 MiB: rejected on the header, not buffered toward.
+        chunker
+            .feed(&[0x00, 0x10, 0x00, 0x00, b'm', b'd', b'a', b't'])
+            .expect("8 bytes fit");
+        assert!(
+            chunker.next_chunk().is_err(),
+            "over-cap box size fails loud"
+        );
+
+        let mut chunker = CmafChunker::new(64);
+        assert!(
+            chunker.feed(&[0u8; 65]).is_err(),
+            "over-cap pending run fails"
+        );
+    }
 
     #[test]
     fn avcc_to_annexb_round_trips_length_prefixes() {
@@ -1859,8 +2177,109 @@ mod tests {
                 sample: TextSampleFormat::Stpp
             })
         ));
-        // An unrecognized text codec declines (the track is skipped).
+        // A caption codec is not a text codec (it goes through parse_cc_entry).
         assert!(parse_text_entry(&mp4_box(b"c608", &[0u8; 8])).is_none());
+    }
+
+    #[test]
+    fn parse_cc_entry_recognizes_c608_and_c708() {
+        use crate::mp4box::mp4_box;
+        assert!(matches!(
+            parse_cc_entry(&mp4_box(b"c608", &[0u8; 8])),
+            Some(TrackKind::ClosedCaption {
+                format: ClosedCaptionFormat::Cea608
+            })
+        ));
+        assert!(matches!(
+            parse_cc_entry(&mp4_box(b"c708", &[0u8; 8])),
+            Some(TrackKind::ClosedCaption {
+                format: ClosedCaptionFormat::Cea708
+            })
+        ));
+        // Another codec under the same handler declines (the track is skipped).
+        assert!(parse_cc_entry(&mp4_box(b"tx3g", &[0u8; 8])).is_none());
+    }
+
+    #[test]
+    fn deframe_c608_tags_cdat_and_cdt2_pairs() {
+        use crate::mp4box::mp4_box;
+        // cdat pairs are field 1 (cc_type 0), cdt2 pairs field 2 (cc_type 1); the
+        // pairs keep their order within each atom, atoms in sample order.
+        let mut sample = mp4_box(b"cdat", &[0x94, 0x20, b'H', b'I']);
+        sample.extend_from_slice(&mp4_box(b"cdt2", &[0x15, 0x2C]));
+        assert_eq!(
+            crate::cea::parse_cc_data(&deframe_c608(&sample)),
+            alloc::vec![
+                CcTriple {
+                    cc_type: 0,
+                    b0: 0x94,
+                    b1: 0x20
+                },
+                CcTriple {
+                    cc_type: 0,
+                    b0: b'H',
+                    b1: b'I'
+                },
+                CcTriple {
+                    cc_type: 1,
+                    b0: 0x15,
+                    b1: 0x2C
+                },
+            ]
+        );
+        // An unknown atom is skipped, not fatal.
+        let mut mixed = mp4_box(b"junk", &[1, 2, 3, 4]);
+        mixed.extend_from_slice(&mp4_box(b"cdat", b"OK"));
+        assert_eq!(deframe_c608(&mixed).len(), 3);
+    }
+
+    #[test]
+    fn deframe_c608_survives_a_lying_atom_size() {
+        // A size past the sample end, a size below the 8-byte header, an odd
+        // payload length, and a truncated header all yield no caption data.
+        let mut lying = Vec::from(0x7FFF_FFFFu32.to_be_bytes());
+        lying.extend_from_slice(b"cdat");
+        lying.extend_from_slice(&[0x94, 0x20]);
+        assert!(deframe_c608(&lying).is_empty());
+        let mut tiny = Vec::from(4u32.to_be_bytes());
+        tiny.extend_from_slice(b"cdat");
+        assert!(deframe_c608(&tiny).is_empty());
+        let mut odd = Vec::from(11u32.to_be_bytes());
+        odd.extend_from_slice(b"cdat");
+        odd.extend_from_slice(&[0x94, 0x20, 0x00]);
+        assert!(deframe_c608(&odd).is_empty());
+        assert!(deframe_c608(&[0, 0, 0]).is_empty());
+    }
+
+    #[test]
+    fn deframe_c708_unwraps_a_ccdp_packet() {
+        use crate::mp4box::mp4_box;
+        let triples = alloc::vec![
+            CcTriple {
+                cc_type: 3,
+                b0: 0x21,
+                b1: 0x40
+            },
+            CcTriple {
+                cc_type: 2,
+                b0: 0x41,
+                b1: 0x42
+            },
+        ];
+        let sample = mp4_box(b"ccdp", &crate::cea::build_cdp(&triples, 4, 7));
+        assert_eq!(
+            crate::cea::parse_cc_data(&deframe_c708(&sample)),
+            triples,
+            "the CDP's ccdata triples come back out"
+        );
+        // A CDP whose checksum is wrong contributes nothing, and a lying atom size
+        // stops the scan rather than reading past the sample.
+        let mut bad = mp4_box(b"ccdp", &crate::cea::build_cdp(&triples, 4, 7));
+        *bad.last_mut().expect("checksum byte") ^= 0xFF;
+        assert!(deframe_c708(&bad).is_empty());
+        let mut lying = Vec::from(0x7FFF_FFFFu32.to_be_bytes());
+        lying.extend_from_slice(b"ccdp");
+        assert!(deframe_c708(&lying).is_empty());
     }
 
     #[test]

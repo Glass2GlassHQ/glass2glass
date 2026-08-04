@@ -47,10 +47,11 @@
 //!   stays there. If the compositor's `configure` event resizes us we
 //!   ignore the new bounds (the video keeps drawing at its native
 //!   resolution and the compositor letterboxes / clips).
-//! - No audio sync, no PTS pacing in the wall-clock sense. Backpressure
-//!   is compositor-driven: `process()` blocks until the compositor's
-//!   `frame` callback for the previously committed buffer arrives, so
-//!   the producer is naturally throttled to refresh.
+//! - Once the runner elects a clock, each frame is held until its PTS
+//!   deadline and dropped if it is late beyond the QoS bound. On top of
+//!   that, backpressure is compositor-driven: `process()` blocks until
+//!   the compositor's `frame` callback for the previously committed
+//!   buffer arrives, so the producer is throttled to refresh.
 //! - Window decorations are server-side if the compositor offers them
 //!   (KDE, GNOME with the right protocol), otherwise the window is
 //!   borderless. v1 doesn't carry CSD.
@@ -96,14 +97,16 @@ use smithay_client_toolkit::{
     },
 };
 
+use crate::clock::wait_to_present;
 use crate::worker_ready::Handshake;
+use g2g_core::element::QosMessage;
 use g2g_core::frame::Frame;
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
     AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority,
     ClockSync, ConfigureOutcome, Dim, ElementMetadata, G2gError, HardwareError, OutputSink,
-    PipelineClock, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, QosTracker, Rate,
-    RawVideoFormat, Segment,
+    PipelineClock, PipelinePacket, PresentationPacer, PropError, PropKind, PropValue, PropertySpec,
+    Rate, RawVideoFormat, MAX_LATENESS_PROPERTY, QOS_INTERVAL_PROPERTY,
 };
 
 /// Worker-thread message. `Frame` carries the pre-converted XRGB8888
@@ -157,35 +160,12 @@ pub struct WaylandSink {
     latency: Arc<LatencyHistogram>,
     frames_dropped: Arc<AtomicU64>,
     pacing: PacingPolicy,
-    /// Elected clock + base time from the runner (M-sync). `Some` enables PTS
-    /// pacing: each frame is held until its running-time deadline on the clock.
-    /// `None` (no clock elected) keeps the pre-sync "present ASAP" behaviour.
-    clock_sync: Option<ClockSync>,
-    /// Active playback segment, from `PipelinePacket::Segment`, used to map a
-    /// frame's PTS to running time (correct across a seek). `None` before any
-    /// segment arrives, where PTS is the running time directly.
-    segment: Option<Segment>,
-    /// Clock time latched against the first frame's running time:
-    /// `clock.now_ns() - running_time(first)`. Subsequent deadlines are
-    /// `anchor + running_time(frame)`, so the stream paces by PTS deltas
-    /// regardless of how long the source took to produce the first frame
-    /// (the robust startup/live anchor). When the runner armed a
-    /// `Playing`-transition anchor (M176), the anchor is instead the play-edge
-    /// base time, so a long `Paused` before play doesn't make the stream rush.
-    anchor_ns: Option<u64>,
-    /// M176: `anchor_ns` was set provisionally from a preroll frame consumed
-    /// during `Paused`, before `Playing` stamped the base time. The next frame
-    /// once `Playing` is anchored re-bases onto the play edge and clears this.
-    anchor_pre_play: bool,
-    /// M176: a seek `Flush` asks the next frame to first-frame-anchor (present
-    /// the seek target immediately) rather than reuse the stale play-edge base
-    /// time. Cleared once that frame re-anchors.
-    seek_reanchor: bool,
-    /// QoS (M173): the lateness bound, the late-drop count, and the bus
-    /// reporting, shared with the other synchronizing sinks. Only consulted when
-    /// a `clock_sync` is set (PTS pacing engaged); the default bound never
-    /// drops, presenting every frame however late.
-    qos: QosTracker,
+    /// PTS pacing + QoS late-drop (M173 / M176), shared with the other
+    /// synchronizing sinks: the elected clock, the segment mapping, the
+    /// presentation anchor, and the lateness bound. Idle until the runner hands
+    /// over a clock; the default bound never drops, presenting every frame
+    /// however late.
+    pacer: PresentationPacer,
 }
 
 impl core::fmt::Debug for WaylandSink {
@@ -222,22 +202,7 @@ impl WaylandSink {
             latency: Arc::new(LatencyHistogram::new()),
             frames_dropped: Arc::new(AtomicU64::new(0)),
             pacing: PacingPolicy::default(),
-            clock_sync: None,
-            segment: None,
-            anchor_ns: None,
-            anchor_pre_play: false,
-            seek_reanchor: false,
-            qos: QosTracker::new(),
-        }
-    }
-
-    /// Running-time presentation deadline for a frame PTS, mapped through the
-    /// active segment (PTS directly when none). `None` means the frame is
-    /// outside the segment and should be clipped (accurate-seek pre-target).
-    fn running_time(&self, pts_ns: u64) -> Option<u64> {
-        match &self.segment {
-            Some(seg) => seg.to_running_time(pts_ns),
-            None => Some(pts_ns),
+            pacer: PresentationPacer::new(),
         }
     }
 
@@ -251,7 +216,7 @@ impl WaylandSink {
     /// so the sink catches up rather than accumulating lag. `0` drops any frame
     /// that arrives after its deadline; the default (`u64::MAX`) never drops.
     pub fn with_max_lateness_ns(mut self, ns: u64) -> Self {
-        self.qos.set_max_lateness_ns(ns);
+        self.pacer.set_max_lateness_ns(ns);
         self
     }
 
@@ -259,13 +224,13 @@ impl WaylandSink {
     /// present, on top of the per-drop reports. `0` (the default) reports only
     /// drops.
     pub fn with_qos_interval_ns(mut self, ns: u64) -> Self {
-        self.qos.set_report_interval_ns(ns);
+        self.pacer.set_report_interval_ns(ns);
         self
     }
 
     /// Attach the pipeline bus so QoS reports reach the application.
     pub fn with_bus(mut self, bus: BusHandle) -> Self {
-        self.qos.set_bus(bus);
+        self.pacer.set_bus(bus);
         self
     }
 
@@ -277,45 +242,7 @@ impl WaylandSink {
     /// bound). Distinct from [`frames_dropped`](Self::frames_dropped), the
     /// compositor-side `DropOldest` count.
     pub fn late_dropped(&self) -> u64 {
-        self.qos.dropped()
-    }
-
-    /// The clock-time anchor a frame's deadline is measured from: `deadline =
-    /// anchor + running_time`. Three cases (M176):
-    ///
-    /// - **`Playing` anchor armed and stamped** (a state-driven run): anchor on
-    ///   the play-edge base time, so the first played frame presents when
-    ///   streaming began, not at runner startup. A preroll frame consumed during
-    ///   `Paused` (before the stamp) re-bases onto the play edge here once
-    ///   `Playing` arrives.
-    /// - **Seek flush pending**: first-frame-anchor (`now - running_time`) so the
-    ///   seek target presents immediately, ignoring the stale play-edge base.
-    /// - **Otherwise** (slow start, live, or pre-`Playing` preroll): first-frame
-    ///   anchor, then pace by PTS deltas.
-    fn presentation_anchor(&mut self, sync: &ClockSync, rt: u64) -> u64 {
-        // Re-base a provisional preroll anchor onto the play edge once `Playing`
-        // has stamped the base time.
-        if self.anchor_pre_play && sync.play_anchored() && !self.seek_reanchor {
-            self.anchor_ns = Some(sync.base_time());
-            self.anchor_pre_play = false;
-        }
-        if let Some(a) = self.anchor_ns {
-            return a;
-        }
-        // No anchor yet: establish one. Prefer the stamped play-edge base time
-        // unless a seek just flushed (then present the target now).
-        let use_play = sync.play_anchored() && !self.seek_reanchor;
-        let anchor = if use_play {
-            sync.base_time()
-        } else {
-            sync.now_ns().saturating_sub(rt)
-        };
-        self.anchor_ns = Some(anchor);
-        // Mark provisional only if anchored before `Playing` stamped, so it
-        // re-bases later; a post-seek first-frame anchor is final.
-        self.anchor_pre_play = !use_play && !sync.play_anchored();
-        self.seek_reanchor = false;
-        anchor
+        self.pacer.late_dropped()
     }
 
     pub fn with_title<S: Into<String>>(mut self, title: S) -> Self {
@@ -393,7 +320,14 @@ impl AsyncElement for WaylandSink {
     /// deadline. When the elected clock is our own `WaylandClock` (the common
     /// audio-less case) its `now_ns()` shares the monotonic domain we sleep on.
     fn set_clock_sync(&mut self, sync: ClockSync) {
-        self.clock_sync = Some(sync);
+        self.pacer.set_clock_sync(sync);
+    }
+
+    /// Relay a late drop upstream (M174): the runner forwards this onto the
+    /// incoming link, where the producer observes it as `PushOutcome::Qos` and
+    /// can shed load so the sink stops running behind.
+    fn take_qos(&mut self) -> Option<QosMessage> {
+        self.pacer.take_qos()
     }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
@@ -514,16 +448,8 @@ impl AsyncElement for WaylandSink {
             PropertySpec::new("title", PropKind::Str, "window title").with_default("glass2glass"),
             PropertySpec::new("app-id", PropKind::Str, "Wayland xdg app id")
                 .with_default("io.glass2glass.WaylandSink"),
-            PropertySpec::new(
-                "max-lateness",
-                PropKind::Uint,
-                "QoS drop threshold, nanoseconds past the deadline",
-            ),
-            PropertySpec::new(
-                "qos-interval",
-                PropKind::Uint,
-                "periodic QoS report interval in nanoseconds, 0 to report drops only",
-            ),
+            MAX_LATENESS_PROPERTY,
+            QOS_INTERVAL_PROPERTY,
         ];
         PROPS
     }
@@ -538,17 +464,10 @@ impl AsyncElement for WaylandSink {
                 self.app_id = value.as_str().ok_or(PropError::Type)?.into();
                 Ok(())
             }
-            "max-lateness" => {
-                self.qos
-                    .set_max_lateness_ns(value.as_uint().ok_or(PropError::Type)?);
-                Ok(())
-            }
-            "qos-interval" => {
-                self.qos
-                    .set_report_interval_ns(value.as_uint().ok_or(PropError::Type)?);
-                Ok(())
-            }
-            _ => Err(PropError::Unknown),
+            _ => self
+                .pacer
+                .set_property(name, &value)
+                .unwrap_or(Err(PropError::Unknown)),
         }
     }
 
@@ -556,9 +475,7 @@ impl AsyncElement for WaylandSink {
         match name {
             "title" => Some(PropValue::Str(self.title.clone())),
             "app-id" => Some(PropValue::Str(self.app_id.clone())),
-            "max-lateness" => Some(PropValue::Uint(self.qos.max_lateness_ns())),
-            "qos-interval" => Some(PropValue::Uint(self.qos.report_interval_ns())),
-            _ => None,
+            _ => self.pacer.get_property(name),
         }
     }
 
@@ -575,33 +492,12 @@ impl AsyncElement for WaylandSink {
                     };
 
                     // PTS pacing: hold the frame until its running-time deadline
-                    // on the elected clock. The deadline is anchored against the
-                    // play edge (M176) when the runner armed a `Playing` anchor,
-                    // else against the first frame (`now - running_time`), so a
-                    // slow source start doesn't dump the backlog and the stream
-                    // then paces by PTS deltas. Without a clock_sync, present
-                    // immediately (pre-sync).
-                    if let Some(sync) = self.clock_sync.clone() {
-                        let rt = match self.running_time(timing.pts_ns) {
-                            Some(rt) => rt,
-                            // Outside the segment: clip (accurate-seek pre-target).
-                            None => return Ok(()),
-                        };
-                        let anchor = self.presentation_anchor(&sync, rt);
-                        let deadline = anchor.saturating_add(rt);
-                        let now = sync.now_ns();
-                        // QoS: a frame already late beyond the bound is dropped,
-                        // not presented late, so the sink catches up instead of
-                        // accumulating lag. The same call posts the periodic
-                        // running-stats report when the frame is on time and the
-                        // interval has elapsed.
-                        let presented = self.frames_presented.load(Ordering::Relaxed);
-                        if self.qos.judge_frame(deadline, now, presented).is_some() {
-                            return Ok(());
-                        }
-                        if deadline > now {
-                            tokio::time::sleep(Duration::from_nanos(deadline - now)).await;
-                        }
+                    // on the elected clock, or drop it if it is already too late
+                    // (the QoS bound) or outside the segment. Unpaced without a
+                    // clock: present immediately (pre-sync).
+                    let presented = self.frames_presented.load(Ordering::Relaxed);
+                    if !wait_to_present(self.pacer.judge(timing.pts_ns, presented)).await {
+                        return Ok(());
                     }
 
                     // M760: offload the NV12 -> XRGB8888 convert (pure CPU pixel
@@ -647,7 +543,7 @@ impl AsyncElement for WaylandSink {
                 PipelinePacket::Segment(seg) => {
                     // Track the playback segment so PTS maps to running time
                     // (correct across a seek).
-                    self.segment = Some(seg);
+                    self.pacer.set_segment(seg);
                     Ok(())
                 }
                 PipelinePacket::Flush => {
@@ -655,9 +551,7 @@ impl AsyncElement for WaylandSink {
                     // timeline; the following Segment installs the new mapping.
                     // The next frame first-frame-anchors (present the seek target
                     // now), not at the stale play-edge base time (M176).
-                    self.anchor_ns = None;
-                    self.anchor_pre_play = false;
-                    self.seek_reanchor = true;
+                    self.pacer.flush();
                     Ok(())
                 }
                 PipelinePacket::CapsChanged(_) => Ok(()),
@@ -1091,13 +985,10 @@ mod tests {
         // Without a clock the sink presents ASAP (pre-sync); after the runner
         // hands it the elected clock, PTS pacing engages.
         let mut sink = WaylandSink::new();
-        assert!(sink.clock_sync.is_none());
+        assert!(!sink.pacer.is_paced());
         let sync = ClockSync::new(Arc::new(WaylandClock), 0);
         AsyncElement::set_clock_sync(&mut sink, sync);
-        assert!(
-            sink.clock_sync.is_some(),
-            "clock sync stored, PTS pacing on"
-        );
+        assert!(sink.pacer.is_paced(), "clock sync stored, PTS pacing on");
     }
 
     #[test]
@@ -1105,22 +996,22 @@ mod tests {
         // Default: never too late (u64::MAX bound).
         let sink = WaylandSink::new();
         assert!(
-            !sink.qos.is_too_late(0, u64::MAX),
+            !sink.pacer.is_too_late(0, u64::MAX),
             "default bound never drops"
         );
 
         // Bound 0: any frame past its deadline is too late.
         let strict = WaylandSink::new().with_max_lateness_ns(0);
-        assert!(!strict.qos.is_too_late(100, 100), "on time is not late");
+        assert!(!strict.pacer.is_too_late(100, 100), "on time is not late");
         assert!(
-            strict.qos.is_too_late(100, 101),
+            strict.pacer.is_too_late(100, 101),
             "1ns past the deadline is late"
         );
 
         // Bound N: late only once past the deadline by more than N.
         let tol = WaylandSink::new().with_max_lateness_ns(10);
-        assert!(!tol.qos.is_too_late(100, 110), "within tolerance");
-        assert!(tol.qos.is_too_late(100, 111), "beyond tolerance");
+        assert!(!tol.pacer.is_too_late(100, 110), "within tolerance");
+        assert!(tol.pacer.is_too_late(100, 111), "beyond tolerance");
     }
 
     /// A clock whose `now_ns` the test drives by hand.
@@ -1156,63 +1047,38 @@ mod tests {
         }
     }
 
-    #[test]
-    fn presentation_anchor_uses_play_edge_and_rebases_preroll() {
-        use g2g_core::clock::PlayAnchor;
-        let clock = Arc::new(AtomicU64::new(1_000));
-        let mut sink = WaylandSink::new();
-        let anchor = PlayAnchor::new();
-        let sync =
-            ClockSync::with_play_anchor(Arc::new(ManualClock(clock.clone())), 0, anchor.clone());
-
-        // Preroll frame consumed during `Paused` (anchor not yet stamped): the
-        // sink first-frame-anchors so it presents immediately, provisionally.
-        let a0 = sink.presentation_anchor(&sync, 0);
-        assert_eq!(a0, 1_000, "preroll first-frame anchor = now - rt");
-        assert!(sink.anchor_pre_play, "marked provisional, awaiting Playing");
-
-        // Playing stamps the base time at 5_000. The next frame re-bases onto the
-        // play edge, discarding the preroll-time anchor.
-        anchor.stamp(5_000);
-        let a1 = sink.presentation_anchor(&sync, 100);
-        assert_eq!(a1, 5_000, "re-anchored to the play-edge base time");
-        assert!(!sink.anchor_pre_play, "re-base is final");
-        // Deadline for this frame is base + running_time.
-        assert_eq!(a1.saturating_add(100), 5_100);
-
-        // A seek flush forces a first-frame re-anchor (present the target now),
-        // ignoring the stale play-edge base.
-        clock.store(8_000, Ordering::Relaxed);
-        sink.anchor_ns = None;
-        sink.seek_reanchor = true;
-        let a2 = sink.presentation_anchor(&sync, 200);
-        assert_eq!(a2, 7_800, "post-seek first-frame anchor = now - rt");
-        assert!(!sink.seek_reanchor, "seek re-anchor consumed");
-    }
-
     #[tokio::test]
     async fn qos_drops_a_late_frame_and_posts_to_the_bus() {
         // A late frame is dropped before any compositor I/O, so this exercises
-        // the QoS path without a real Wayland window. With the anchor pre-set and
-        // the clock advanced past the deadline, the frame is too late.
+        // the QoS path without a real Wayland window. The play anchor is stamped
+        // at clock 0, so a PTS-0 frame is due at 0 and the clock is already past
+        // it.
+        use g2g_core::clock::PlayAnchor;
         let (bus, handle) = g2g_core::Bus::new(4);
-        let clock = Arc::new(AtomicU64::new(0));
+        let clock = Arc::new(AtomicU64::new(1_000_000));
+        let anchor = PlayAnchor::new();
+        anchor.stamp(0);
         let mut sink = WaylandSink::new().with_max_lateness_ns(0).with_bus(handle);
         AsyncElement::set_clock_sync(
             &mut sink,
-            ClockSync::new(Arc::new(ManualClock(clock.clone())), 0),
+            ClockSync::with_play_anchor(Arc::new(ManualClock(clock)), 0, anchor),
         );
-        // Pretend the first frame already anchored presentation at clock 0.
-        sink.anchor_ns = Some(0);
 
-        // Clock is now 1 ms; a frame with deadline 0 is 1 ms late (> 0 bound).
-        clock.store(1_000_000, Ordering::Relaxed);
+        // Clock is 1 ms; a frame with deadline 0 is 1 ms late (> 0 bound).
         let mut out = NullOut;
         sink.process(PipelinePacket::DataFrame(nv12_frame(0)), &mut out)
             .await
             .unwrap();
 
         assert_eq!(sink.late_dropped(), 1, "the late frame was dropped");
+        // M174 relay: the runner reads this and pushes it upstream, where the
+        // producer sees `PushOutcome::Qos`.
+        let upstream = AsyncElement::take_qos(&mut sink).expect("upstream QoS report");
+        assert_eq!(upstream.jitter_ns, 1_000_000);
+        assert!(
+            AsyncElement::take_qos(&mut sink).is_none(),
+            "the report is consumed once"
+        );
         match bus.try_recv() {
             Some(BusMessage::Qos {
                 running_time_ns,
@@ -1238,7 +1104,7 @@ mod tests {
         AsyncElement::set_clock_sync(&mut sink, ClockSync::new(Arc::new(ManualClock(clock)), 0));
         // First frame anchors at now, so it is never late under any bound.
         assert!(
-            !sink.qos.is_too_late(0, 5_000_000),
+            !sink.pacer.is_too_late(0, 5_000_000),
             "anchored first frame on time"
         );
         assert_eq!(sink.late_dropped(), 0);
@@ -1248,7 +1114,7 @@ mod tests {
     fn running_time_uses_pts_without_segment() {
         // No segment: PTS is the running time directly.
         let sink = WaylandSink::new();
-        assert_eq!(sink.running_time(50_000_000), Some(50_000_000));
+        assert_eq!(sink.pacer.running_time(50_000_000), Some(50_000_000));
     }
 
     #[test]
@@ -1256,15 +1122,15 @@ mod tests {
         // Accurate seek to 70 ms: a frame before the target is clipped (None);
         // an at/after-target frame maps to running time. Mirrors SyncSink (M149).
         let mut sink = WaylandSink::new();
-        let seg = Segment::for_flush_seek(&g2g_core::Seek::flush_to(70_000_000), None);
-        sink.segment = Some(seg);
+        let seg = g2g_core::Segment::for_flush_seek(&g2g_core::Seek::flush_to(70_000_000), None);
+        sink.pacer.set_segment(seg);
         assert_eq!(
-            sink.running_time(66_000_000),
+            sink.pacer.running_time(66_000_000),
             None,
             "pre-target frame clips"
         );
         assert_eq!(
-            sink.running_time(70_000_000),
+            sink.pacer.running_time(70_000_000),
             Some(0),
             "the target frame is running-time zero after a flushing seek"
         );

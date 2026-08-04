@@ -353,10 +353,12 @@ OS-coupled elements live behind cargo features:
 | `RtmpSrc` (RTMP publisher ingest) | `rtmp` | — |
 | `WebRtcSink` (WHIP egress, H.264 + Opus) / `WebRtcWhepSrc` (WHEP ingest, H.264), via str0m: ICE/DTLS/SRTP, trickle ICE + ICE restart, NACK/RTX | `webrtc` | str0m (rust-crypto) + reqwest |
 | `WebRtcDataSrc` / `WebRtcDataSink` (P2P data channels on SCTP) | `webrtc` | str0m |
+| `MoqtSink` (IETF MoQ Transport draft-16 publisher: fMP4 → groups / objects over WebTransport, on subgroup streams or datagrams) | `moqt` | web-transport-quinn |
+| `MoqtSrc` (IETF MoQ Transport draft-16 subscriber: catalog read, stream + datagram reassembly → fMP4) | `moqt` | web-transport-quinn |
 | `LiveKitSink` (publish into a LiveKit room: JWT + protobuf signalling) | `webrtc-livekit` | + tokio-tungstenite |
 | `HttpSrc` (HTTP(S) byte-stream source) | `http-src` | reqwest |
 | `HlsSrc` (HLS: TS + fMP4/CMAF, live, AES-128 / SAMPLE-AES) | `hls` | reqwest + aes |
-| `DashSrc` (DASH: SegmentTemplate / SegmentTimeline, live) | `dash` | reqwest + roxmltree |
+| `DashSrc` (DASH: SegmentTemplate / SegmentTimeline, live, CMAF chunked low latency) | `dash` | reqwest + roxmltree |
 | `V4l2Src` | `v4l2` | Linux + V4L2 (`/dev/videoN`) |
 | `WasapiSink` / `WasapiSrc` | `wasapi-sink`, `wasapi-src` | Windows |
 | `AlsaSink` | `alsa-sink` | Linux + libasound |
@@ -382,12 +384,14 @@ transforms (`videoscale` / `videorate` / `videocrop` / `videoflip` /
 `audioconvert` / `audioresample` / `audiomixer` / `volume` / `audiopanorama` /
 `audioamplify` / `audioecho` / `level` / `cutter` / `equalizer-3bands` /
 `spectrum`), the KLV telemetry codec (`klvdecode`, MISB ST 0601 / STANAG 4609),
+the bitmap-subtitle decoders (`vobsubdec`, alias `dvdsubdec`, and `dvbsubdec`),
 the flow-control elements (`concat` / `input-selector` /
 `output-selector` / `progressreport`), the `compositor`, the tag system, and the
 `gst-launch` text DSL (`parse_launch` / `gst-inspect`) are all in the pure
 `no_std + alloc` default build. The std build adds `clockoverlay`, the
-`multifilesink` / `multifilesrc` image-sequence pair, and `splitmuxsink`
-(segmented recording, `muxer=mp4|matroska|mpegts`).
+`multifilesink` / `multifilesrc` image-sequence pair, `splitmuxsink`
+(segmented recording, `muxer=mp4|matroska|mpegts`), and `hlssink` (HLS
+packaging: segment files plus an `.m3u8` playlist, fed by `tsmux` or `mp4mux`).
 
 ## Sample pipelines
 
@@ -571,9 +575,10 @@ run_linear_chain(src, vec![&mut demux, &mut parse, &mut dec], sink,
 
 Features: `hls ffmpeg wayland-sink` (`dash` for the DASH front end). `HlsSrc`
 follows live playlist reloads and decrypts AES-128 / SAMPLE-AES segments;
-`DashSrc` handles `SegmentTemplate` / `SegmentTimeline` and dynamic (live) MPDs.
-Both prebuffer ahead by duration (`prebuffer-ms`), posting `Buffering` bus
-levels while they fill, like `HttpSrc`'s byte window (`prebuffer-bytes`).
+`DashSrc` handles `SegmentTemplate` / `SegmentTimeline` and dynamic (live) MPDs,
+and with `low-latency=true` consumes a CMAF segment chunk by chunk as the packager
+writes it. Both prebuffer ahead by duration (`prebuffer-ms`), posting `Buffering`
+bus levels while they fill, like `HttpSrc`'s byte window (`prebuffer-bytes`).
 
 ### `gst-launch` text pipeline
 
@@ -646,8 +651,33 @@ let comp = Compositor::new(1280, 720, vec![
 // bg -> comp.input(0); cam -> rgba -> scale -> comp.input(1); comp -> sink (see tests).
 ```
 
+Or as a launch line (M876), placement via the flattened pad properties:
+
+```text
+videotestsrc ! c.  v4l2src device=/dev/video0 ! videoconvert ! videoscale ! c. \
+  compositor name=c width=1280 height=720 sink1-xpos=940 sink1-ypos=460 sink1-zorder=1 ! waylandsink
+```
+
 Features: `v4l2 wayland-sink`. Full graph in
 [`g2g-plugins/tests/pip_smoke.rs`](g2g-plugins/tests/pip_smoke.rs).
+`WgpuCompositor` is the bit-exact GPU sibling (composites `WgpuTexture` frames
+in place, zero-copy); `with_timed_output()` (`timed-output=true`) holds the output
+rate over a stalled input whenever the pipeline clock can sleep on a deadline.
+
+### Camera → MoQ Transport → a browser
+
+```text
+libcamerasrc width=640 height=480 framerate=30 ! videoconvert ! x264enc ! mp4mux \
+  ! moqtsink location=https://127.0.0.1:4443/ namespace=live
+```
+
+[`tools/moqt-demo/`](tools/moqt-demo/) runs that end to end: `node watch-live.mjs`
+starts a local `moq-relay-ietf`, publishes the camera into it and opens a browser
+that subscribes and plays. The page's MoQT client is the third-party
+[MOQtail](https://github.com/moqtail/moqtail) draft-16 implementation, so the
+browser decodes our bytes with nothing shared from the Rust side.
+`node headless/run-moqt-play.mjs` is the same path in headless Chromium with
+assertions on the decoded frames. Features: `libcamera moqt ffmpeg`.
 
 ## Running smoke tests
 

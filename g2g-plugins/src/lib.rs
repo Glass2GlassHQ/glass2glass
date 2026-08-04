@@ -53,6 +53,8 @@ pub mod concat;
 pub mod cutter;
 pub mod equalizer;
 pub mod fakesink;
+// Decoded-GOP reverser (M897): the presentation half of reverse playback.
+pub mod gopreverse;
 pub mod h264parse;
 pub mod h265parse;
 pub mod identity;
@@ -138,12 +140,23 @@ pub mod wgpusink;
 pub mod bitmapfont;
 pub mod subparse;
 pub mod textoverlay;
+// Shaping / bidi / system-font discovery behind the overlay's horizontal path.
+#[cfg(feature = "text-shaping")]
+pub mod textshape;
 // CEA-608/708 closed captions carried in-band in H.264/H.265 SEI (no_std).
 pub mod cea;
 // MISB ST 0601 KLV telemetry (STANAG 4609): codec + klvdecode element (no_std).
 pub mod klv;
 // MISB ST 0903 VMTI moving-target reports, nested in ST 0601 tag 74 (no_std).
 pub mod vmti;
+// VobSub (DVD subpicture) bitmap subtitles: the SPU / .idx codec (no_std) plus
+// the `vobsubdec` element that renders cues to RGBA canvases.
+pub mod vobsub;
+pub mod vobsubdec;
+// DVB subtitles (ETSI EN 300 743): the segment-stream codec (no_std) plus the
+// `dvbsubdec` element that renders display sets to RGBA canvases.
+pub mod dvbsub;
+pub mod dvbsubdec;
 // Cursor-on-Target bridge (M811): the ST 0601 -> CoT XML event builder (no_std)
 // plus the `cotsink` TAK egress element, which needs `udp-egress`.
 pub mod cotsink;
@@ -370,6 +383,10 @@ pub mod multifilesrc;
 pub mod record;
 #[cfg(feature = "std")]
 pub mod splitmuxsink;
+// HLS packager: cuts a muxed byte stream into segment files plus a rolling
+// m3u8 media playlist (M896).
+#[cfg(feature = "std")]
+pub mod hlssink;
 // Subtitle/text file source: a .srt/.vtt/.ssa/.ttml file as a Text stream.
 #[cfg(feature = "std")]
 mod audio;
@@ -409,10 +426,15 @@ pub mod onvif;
 // Sans-IO RTSP 1.0 server responder (always compiled) and the tokio TCP serving
 // sink (egress: hosts a pipeline's H.264 as an RTSP endpoint).
 pub mod rtspserver;
+// Per-publisher ingest session machinery shared by the two ingest elements.
+#[cfg(feature = "rtsp-server")]
+mod rtspingest;
 #[cfg(feature = "rtsp-server")]
 pub mod rtspserversink;
 #[cfg(feature = "rtsp-server")]
 pub mod rtspserversrc;
+#[cfg(feature = "rtsp-server")]
+pub mod rtspserversrcn;
 
 // Sans-IO SRT (Secure Reliable Transport) wire layer + handshake + ARQ (always
 // compiled); the tokio caller sink / listener source sit behind the `srt` feature.
@@ -509,19 +531,28 @@ pub mod remotesrc;
 #[cfg(any(
     feature = "remote",
     feature = "remote-ws",
+    feature = "webtransport",
     all(target_arch = "wasm32", feature = "web")
 ))]
 mod remotewire;
 
 // Shared receive-side core for the distributed-graph source elements (TCP
-// RemoteSrc + WebSocket RemoteWsSrc), parameterized over the transport.
-#[cfg(any(feature = "remote", feature = "remote-ws"))]
+// RemoteSrc + WebSocket RemoteWsSrc + WebTransport RemoteWtSrc), parameterized
+// over the transport.
+#[cfg(any(feature = "remote", feature = "remote-ws", feature = "webtransport"))]
 pub mod remotesource;
 
 // Shared send-side core for the distributed-graph sink elements (TCP RemoteSink
-// + WebSocket RemoteWsSink), parameterized over the transport.
-#[cfg(any(feature = "remote", feature = "remote-ws"))]
+// + WebSocket RemoteWsSink + WebTransport RemoteWtSink), parameterized over the
+// transport.
+#[cfg(any(feature = "remote", feature = "remote-ws", feature = "webtransport"))]
 pub mod remoteclient;
+
+// Shared core for the distributed-graph remote-transform elements (WebSocket
+// RemoteWsTransform + WebTransport RemoteWtTransform): the FIFO frame-out /
+// processed-frame-back round trip, parameterized over the transport.
+#[cfg(any(feature = "remote-ws", feature = "webtransport"))]
+pub mod remotetransform;
 
 // Shared `host`/`address` + `port` property get/set for the network source/sink
 // elements (SocketAddr-backed). Collapses the identical string->IpAddr and
@@ -530,6 +561,7 @@ pub mod remoteclient;
 #[cfg(any(
     feature = "remote",
     feature = "remote-ws",
+    feature = "webtransport",
     feature = "rtmp",
     feature = "rtsp-server",
     feature = "srt",
@@ -554,6 +586,31 @@ pub mod remotewssrc;
 // bidirectional, round-trip generalization of the browser WebRemoteDetect shim.
 #[cfg(feature = "remote-ws")]
 pub mod remotewstransform;
+
+// WebTransport sibling of the same family (M901): RemoteWtSink (client) +
+// RemoteWtSrc (server) + RemoteWtTransform carry the identical wire-codec stream
+// over one reliable bidirectional QUIC stream (HTTP/3 CONNECT), so a peer that
+// speaks WebTransport (a browser, or a native QUIC client) joins the same
+// distributed primitive. Behind `webtransport`.
+#[cfg(feature = "webtransport")]
+pub mod remotewtio;
+#[cfg(feature = "webtransport")]
+pub mod remotewtsink;
+#[cfg(feature = "webtransport")]
+pub mod remotewtsrc;
+#[cfg(feature = "webtransport")]
+pub mod remotewttransform;
+
+// Native IETF MoQ Transport draft-16 (M902 / M903): the wire codec plus the
+// session driver over the M901 carrier, the `moqtsink` publisher that maps a
+// fragmented-MP4 stream onto MOQT groups and objects, and the `moqtsrc`
+// subscriber that puts the objects back in order. Behind `moqt`.
+#[cfg(feature = "moqt")]
+pub mod moqt;
+#[cfg(feature = "moqt")]
+pub mod moqtsink;
+#[cfg(feature = "moqt")]
+pub mod moqtsrc;
 
 // Media Foundation decode is Windows-only. The `windows` dependency is
 // target-gated, so the module only exists when building for Windows with the
@@ -757,6 +814,7 @@ pub mod cenc;
     all(target_os = "windows", feature = "d3d11-sink"),
     all(target_os = "linux", feature = "wayland-sink"),
     all(target_os = "linux", feature = "cuda-gl"),
+    all(target_os = "linux", feature = "gl-sink"),
 ))]
 mod worker_ready;
 
@@ -900,24 +958,42 @@ pub mod gstwrap;
 #[cfg(all(target_os = "linux", feature = "wayland-sink"))]
 pub mod waylandsink;
 
-// Linux audio render sinks: the audible-output end of the audio path, the
-// analogs of the Windows-only WasapiSink. Each links a different system audio
-// stack and is target-gated to Linux behind its own feature.
+// Linux audio render sinks and capture sources: the two ends of the audio path,
+// the analogs of the Windows-only WasapiSink / WasapiSrc. Each links a different
+// system audio stack and is target-gated to Linux behind its own feature; the
+// sink and source of one stack share a helper module for the format / channel
+// mapping they both need.
 // ALSA (libasound), the lowest-level path.
+#[cfg(all(target_os = "linux", any(feature = "alsa-sink", feature = "alsa-src")))]
+mod alsapcm;
 #[cfg(all(target_os = "linux", feature = "alsa-sink"))]
 pub mod alsasink;
+#[cfg(all(target_os = "linux", feature = "alsa-src"))]
+pub mod alsasrc;
 // PulseAudio / PipeWire-pulse via the blocking libpulse "simple" API.
+#[cfg(all(
+    target_os = "linux",
+    any(feature = "pulse-sink", feature = "pulse-src")
+))]
+mod pulsepcm;
 #[cfg(all(target_os = "linux", feature = "pulse-sink"))]
 pub mod pulsesink;
-// PipeWire audio render sink + capture source (the modern Linux media layer).
-// Both elements share the `pipewire` feature, the pipewire-rs crate, and the
-// pwaudio SPA-format helper.
+#[cfg(all(target_os = "linux", feature = "pulse-src"))]
+pub mod pulsesrc;
+// PipeWire audio render sink + capture source and the video capture source (the
+// modern Linux media layer). The elements share the `pipewire` feature and the
+// pipewire-rs crate; the SPA pod helpers split per media type (pwaudio /
+// pwvideo).
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
 pub mod pipewiresink;
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
 pub mod pipewiresrc;
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
+pub mod pipewirevideosrc;
+#[cfg(all(target_os = "linux", feature = "pipewire"))]
 mod pwaudio;
+#[cfg(all(target_os = "linux", feature = "pipewire"))]
+mod pwvideo;
 
 // CUDA device-memory consumers (C3 Phase 3). `CudaDownload` copies a
 // `MemoryDomain::Cuda` NV12 frame back to system memory so a `NvdecCuda`
@@ -975,10 +1051,23 @@ pub mod nvdec;
 #[cfg(all(target_os = "linux", feature = "jpegxs"))]
 pub mod svtjpegxs;
 
-// Shared NV12 GL ES render state for the CUDA-GL sinks (program + textures +
-// per-frame CUDA upload + draw); the platform present stays in each sink.
-#[cfg(all(target_os = "linux", any(feature = "cuda-gl", feature = "cuda-kms")))]
+// Shared GL ES render state for the EGL display sinks (program + textures +
+// per-frame upload + draw); the platform present stays in each sink.
+#[cfg(all(
+    target_os = "linux",
+    any(feature = "cuda-gl", feature = "cuda-kms", feature = "gl-sink")
+))]
 pub(crate) mod glnv12;
+
+// Shared Wayland window + EGL context + present loop for the GL sinks that draw
+// on a compositor surface; each sink supplies only its per-frame upload.
+#[cfg(all(target_os = "linux", any(feature = "cuda-gl", feature = "gl-sink")))]
+pub(crate) mod glwindow;
+
+// Vendor-neutral GL ES display sink: system-memory NV12 / RGBA presented through
+// EGL on Wayland, NV12->RGB converted on the GPU. Linux-only, no CUDA.
+#[cfg(all(target_os = "linux", feature = "gl-sink"))]
+pub mod glsink;
 
 // CUDA-GL zero-copy-ish display sink: keeps decoded NV12 on the GPU and
 // presents it via CUDA-GL interop on a Wayland EGL surface. Linux + NVIDIA.

@@ -25,6 +25,8 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    # a hung test otherwise burns the 360-minute default (10x-billed on macOS)
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -81,15 +83,58 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             pkg-config libssl-dev libasound2-dev libpulse-dev \
-            libopus-dev libwayland-dev libxkbcommon-dev libdav1d-dev
+            libopus-dev libwayland-dev libxkbcommon-dev libdav1d-dev nasm
       - name: check g2g-plugins (linux feature set)
         run: >
           cargo check -p g2g-plugins --locked --all-targets --features
-          rtsp,onvif,srt,udp-egress,udp-ingress,rtmp,http-src,hls,dash,av1-encode,dav1d,rav1d,mjpeg,mjpeg-encode,opus,vorbis,alsa-sink,pulse-sink,wayland-sink,kms-sink,v4l2,analytics,vello-overlay,wgpu-sink,plugin-loader,declarative-yaml,script-rhai
+          rtsp,onvif,srt,udp-egress,udp-ingress,rtmp,http-src,hls,dash,av1-encode,dav1d,rav1d,mjpeg,mjpeg-encode,opus,vorbis,alsa-sink,pulse-sink,alsa-src,pulse-src,wayland-sink,kms-sink,v4l2,analytics,vello-overlay,wgpu-sink,plugin-loader,declarative-yaml,script-rhai,webtransport,moqt
+      # MoQ Transport draft-16 (M902 / M903 / M905): control-message and datagram
+      # layouts against the reference implementation, malformed peer input,
+      # subgroup reassembly, and the property surface. The legs that need the
+      # reference relay skip without its binaries.
+      - name: test g2g-plugins (moqt)
+        run: >
+          cargo test -p g2g-plugins --locked --features moqt
+          --test m902_moqt --test m903_moqt_subscribe --test m905_moqt_datagram
+      # WebTransport carrier (M901): loopback, reconnect, transform round trip and
+      # the property/registry surface. The two aioquic legs skip without `uv`.
+      - name: test g2g-plugins (webtransport)
+        run: cargo test -p g2g-plugins --locked --features webtransport --test m901_webtransport
       # downloadbuffer acceptance (M861): a moov-at-end MP4 pushed over local
       # HTTP spills to disk and demuxes identically to a direct file read.
       - name: test g2g-plugins (downloadbuffer)
         run: cargo test -p g2g-plugins --locked --features http-src --test m861_downloadbuffer
+      # Opus encode properties + codec round-trip (M177 / M454 / M868): the
+      # feature set above is only checked, so the opus-gated tests run here.
+      - name: test g2g-plugins (opus codec + properties)
+        run: cargo test -p g2g-plugins --locked --features std,opus --test m454_element_properties --test m177_opus_codec
+      # CENC decrypt shapes (M164 / M835 / M867): hand-built fixtures run
+      # everywhere; the ffmpeg-authored oracle cases skip without ffmpeg.
+      - name: test g2g-plugins (cenc decrypt)
+        run: cargo test -p g2g-plugins --locked --features std,hls,mp4-cenc --test m835_hls_cenc --test m164_fmp4_cbcs
+      # MJPEG codec paths (M152 / M153 / M871), incl. the mozjpeg FFI backend
+      # (needs nasm above) so the feature-gated C path cannot rot silently.
+      - name: test g2g-plugins (mjpeg codecs)
+        run: cargo test -p g2g-plugins --locked --features std,mozjpeg --test m152_mjpegdec --test m153_mjpegenc
+      # Compositor properties + launch registration (M876): the wgpu-gated
+      # property table and launch tests are adapter-free, so they run here.
+      - name: test g2g-plugins (compositor launch + properties)
+        run: cargo test -p g2g-plugins --locked --features wgpu-sink --test m454_element_properties --test m876_compositor_launch
+      # Linux audio capture (M886): the device tests self-skip headless; the
+      # property / launch / bad-device tests need no server.
+      - name: test g2g-plugins (audio capture)
+        run: cargo test -p g2g-plugins --locked --features alsa-src,pulse-src --test m886_linux_audio_capture
+      # Display-sink QoS (M881): the kmssink late-drop verdict precedes any DRM
+      # I/O, so this runs headless.
+      - name: test g2g-plugins (kmssink qos)
+        run: cargo test -p g2g-plugins --locked --features kms-sink --lib kmssink
+      # MP4 raw-caption tracks (M883): ffmpeg oracle legs self-skip if absent.
+      - name: test g2g-plugins (mp4 closed captions)
+        run: cargo test -p g2g-plugins --locked --features std,metadata --test m883_mp4_closed_caption
+      # CMAF chunked consumption (M888): the dash feature set above is only
+      # checked, so the DASH tests run here.
+      - name: test g2g-plugins (dash)
+        run: cargo test -p g2g-plugins --locked --features dash --test m888_dash_cmaf_chunked --test m160_dashsrc --test m836_dash_live_multiperiod
       - name: check g2g-ml (wgpu + burn)
         run: cargo check -p g2g-ml --locked --all-targets --features wgpu,burn
       # Embedded / no_std path: the embassy-sync stack channel, the no-alloc
@@ -388,6 +433,13 @@ jobs:
       # absent, so a green run here means real interop evidence was produced.
       - name: native-muxer oracles (mp4mux + mpegtsmux vs ffprobe)
         run: cargo test -p g2g-plugins --locked --features std --test m615_conformance_oracle --test m619_conformance_ts_oracle -- --nocapture
+      # MPEG-TS PSI metadata (M783/M872/M878): ffprobe reads the multi-program PAT
+      # / PMT layout, the SDT service text (one entry per program) and the
+      # per-stream ISO-639 languages g2g writes, and g2g demuxes an ffmpeg-authored
+      # transport stream back to the same tags. std-gated, so a default
+      # `cargo test` skips them.
+      - name: MPEG-TS metadata oracles (mpegtsmux + tsdemux vs ffmpeg)
+        run: cargo test -p g2g-plugins --locked --features std --test m783_ts_multiprogram --test m872_ts_tags --test m878_ts_program_tags -- --nocapture
       # FLV both ways (M662): flvdemux's extracted elementary streams decoded
       # standalone by ffmpeg; flvmux's native FLV probed + decoded by ffmpeg.
       - name: FLV oracles (flvmux + flvdemux vs ffmpeg)
@@ -430,6 +482,19 @@ jobs:
       # and g2g reads the same atoms out of an ffmpeg-authored file.
       - name: MP4 tag oracle (mp4mux + mp4demux vs ffmpeg)
         run: cargo test -p g2g-plugins --locked --features std --test m838_mp4_tags -- --nocapture
+      # VobSub bitmap subtitles (M899): ffmpeg muxes the authored cues into an
+      # `S_VOBSUB` Matroska track g2g demuxes and decodes to their rectangles and
+      # times, and compositing those canvases matches ffmpeg's own dvdsub
+      # `overlay` burn-in pixel for pixel.
+      - name: VobSub oracle (mkvdemux + vobsubdec vs ffmpeg)
+        run: cargo test -p g2g-plugins --locked --features std --test m899_vobsub -- --nocapture
+      # DVB subtitles (M900): ffmpeg transcodes the same authored cues to
+      # `dvbsub` in an MPEG-TS with a real subtitling descriptor and in an
+      # `S_DVBSUB` Matroska track, both of which g2g selects, decodes to their
+      # region rectangles, and composites pixel-identically to ffmpeg's own
+      # dvbsub `overlay` burn-in.
+      - name: DVB subtitle oracle (tsdemux + mkvdemux + dvbsubdec vs ffmpeg)
+        run: cargo test -p g2g-plugins --locked --features std --test m900_dvbsub -- --nocapture
       # Legacy FLV codecs (M831): the Sorenson / MP3 payloads g2g demuxes match
       # libavcodec's own FLV demuxer, and ffprobe reads each codec back out of a
       # g2g-muxed FLV (VP6 and Speex, which no ffmpeg build encodes).

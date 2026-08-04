@@ -9,7 +9,7 @@
 
 use embassy_time::{Duration, Instant, Timer};
 
-use g2g_core::{AsyncClock, PipelineClock};
+use g2g_core::{AsyncClock, DynAsyncClock, PipelineClock};
 
 #[derive(Debug, Clone, Copy)]
 pub struct EmbassyClock {
@@ -39,6 +39,10 @@ impl PipelineClock for EmbassyClock {
         (Instant::now() - self.epoch)
             .as_micros()
             .saturating_mul(1000)
+    }
+
+    fn as_ticker(&self) -> Option<&dyn DynAsyncClock> {
+        Some(self)
     }
 }
 

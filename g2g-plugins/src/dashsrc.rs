@@ -17,7 +17,15 @@
 //! wall clock against `availabilityStartTime` + `Period@start`, bounded by
 //! `timeShiftBufferDepth`. Playback starts `suggestedPresentationDelay` behind
 //! the live edge (see [`presentation_delay_secs`]) rather than replaying the
-//! whole window, which a `SegmentTimeline` window gets too.
+//! whole window, which a `SegmentTimeline` window gets too. A template's
+//! `@availabilityTimeOffset` moves each segment's availability that many seconds
+//! ahead of its nominal completion, so a chunked low-latency packager's newest
+//! segment is fetched while it is still being written.
+//!
+//! Segment times are period-relative presentation times: a template's
+//! `@presentationTimeOffset` is already off them (`$Time$` URLs keep the media
+//! value), so seek targets and the boundary `Segment` are on the same timeline
+//! whatever media timestamps the Period uses.
 //!
 //! Multi-period (M836): the Periods play through back to back, each with its own
 //! `BaseURL` / template / Representation choice. Crossing a boundary emits a
@@ -25,8 +33,15 @@
 //! whose `time` is 0: running time continues across the boundary while stream
 //! time restarts with the new Period's own timeline.
 //!
-//! Scope: one `DataFrame` per segment; `SegmentBase` (`sidx`-indexed single
-//! resource), `SegmentList` and both `SegmentTemplate` profiles.
+//! CMAF chunked consumption (`low-latency`, M888): a segment response is read as
+//! a stream and each complete chunk (`styp` / `moof`+`mdat`) is pushed downstream
+//! as it arrives, so the media of a segment the packager is still writing flows at
+//! chunk latency instead of segment latency. `@availabilityTimeOffset` decides
+//! *when* such a segment is fetched, this decides how it is consumed.
+//!
+//! Scope: one `DataFrame` per segment (per chunk under `low-latency`);
+//! `SegmentBase` (`sidx`-indexed single resource), `SegmentList` and both
+//! `SegmentTemplate` profiles.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -44,9 +59,10 @@ use g2g_core::{
 
 use crate::abr::BandwidthEstimator;
 use crate::fetch::{
-    byte_frame, get_bytes, get_range_bytes, get_text, resolve_url, MAX_MANIFEST_BYTES,
-    MAX_SEGMENT_BYTES,
+    byte_frame, get_bytes, get_range_bytes, get_response, get_text, net_err, resolve_url,
+    MAX_MANIFEST_BYTES, MAX_SEGMENT_BYTES,
 };
+use crate::fmp4::CmafChunker;
 use crate::mpd::{
     live_start_offset, parse, parse_sidx, ByteRange, LiveEdge, Mpd, Representation, ResolvedSegment,
 };
@@ -93,6 +109,40 @@ async fn fetch_segment(
         Some(r) => get_range_bytes(client, url, r.offset, r.length, MAX_SEGMENT_BYTES).await,
         None => get_bytes(client, url, MAX_SEGMENT_BYTES).await,
     }
+}
+
+/// Consume a segment response chunk by chunk (M888), pushing each complete CMAF
+/// chunk (`styp` / `moof`+`mdat`) downstream as it arrives instead of waiting for
+/// the whole body, which is what a low-latency packager writing an open segment
+/// serves. Returns the total body length (what the ABR estimator measures). The
+/// frames pushed concatenate to exactly the response body, so the demuxer sees
+/// the same byte stream the whole-response path hands it.
+async fn stream_segment_chunks(
+    client: &reqwest::Client,
+    url: &str,
+    out: &mut dyn OutputSink,
+    sequence: &mut u64,
+) -> Result<usize, G2gError> {
+    let mut resp = get_response(client, url, MAX_SEGMENT_BYTES).await?;
+    let mut chunker = CmafChunker::new(MAX_SEGMENT_BYTES);
+    let mut total = 0usize;
+    while let Some(bytes) = resp.chunk().await.map_err(net_err)? {
+        total = total.saturating_add(bytes.len());
+        chunker.feed(&bytes)?;
+        while let Some(chunk) = chunker.next_chunk()? {
+            out.push(PipelinePacket::DataFrame(byte_frame(chunk, *sequence)))
+                .await?;
+            *sequence += 1;
+        }
+    }
+    // A response that ends mid-chunk (or carries no `mdat` at all) still forwards
+    // its bytes: the demuxer, not the fetch loop, judges the box structure.
+    if let Some(tail) = chunker.finish() {
+        out.push(PipelinePacket::DataFrame(byte_frame(tail, *sequence)))
+            .await?;
+        *sequence += 1;
+    }
+    Ok(total)
 }
 
 /// Resolve a Representation's addressing into the run loop's working set: the
@@ -193,6 +243,9 @@ pub struct DashSrc {
     /// Duration-keyed prebuffer target in ms (0 = off): fetch this much media
     /// ahead before emitting, posting `Buffering` on the attached bus.
     prebuffer_ms: u64,
+    /// Consume a segment chunk by chunk as the packager writes it (M888) instead
+    /// of once its whole response has arrived. Off by default.
+    low_latency: bool,
     bus: Option<BusHandle>,
     configured: bool,
 }
@@ -207,9 +260,25 @@ impl DashSrc {
             seek: None,
             abr: false,
             prebuffer_ms: 0,
+            low_latency: false,
             bus: None,
             configured: false,
         }
+    }
+
+    /// Consume each segment chunk by chunk as it arrives (M888): the response
+    /// body is read as a stream and every complete CMAF chunk
+    /// (`styp` / `moof`+`mdat`) is pushed downstream immediately, so a segment a
+    /// low-latency packager is still writing plays from its first chunk instead of
+    /// its last. The byte stream downstream is unchanged, only its timing.
+    ///
+    /// Ignored for a byte-range segment (single-file `SegmentList` / `SegmentBase`,
+    /// where a server may answer a `Range` with the whole resource) and while
+    /// `prebuffer-ms` is set (prebuffering deliberately trades latency for
+    /// robustness and owns emission order); those fetch whole responses.
+    pub fn with_low_latency(mut self) -> Self {
+        self.low_latency = true;
+        self
     }
 
     /// Buffer this many milliseconds of media (summed segment durations)
@@ -496,14 +565,28 @@ impl SourceLoop for DashSrc {
                                 last_dur_ns = duration_ns;
                                 let url = seg_url(&base, &seg.url);
                                 let t0 = g2g_core::metrics::monotonic_ns();
-                                let bytes = fetch_segment(&client, &url, seg.byte_range).await?;
+                                // Low latency: read the body as a stream and push
+                                // each CMAF chunk as it lands. The prebuffer window
+                                // is empty here whenever it is disabled, so pushing
+                                // from inside the fetch keeps emission ordered.
+                                let len = if self.low_latency
+                                    && self.prebuffer_ms == 0
+                                    && seg.byte_range.is_none()
+                                {
+                                    stream_segment_chunks(&client, &url, out, &mut sequence).await?
+                                } else {
+                                    let bytes =
+                                        fetch_segment(&client, &url, seg.byte_range).await?;
+                                    let len = bytes.len();
+                                    if !bytes.is_empty() {
+                                        window.admit(bytes, duration_ns);
+                                    }
+                                    len
+                                };
                                 measured = Some((
-                                    bytes.len(),
+                                    len,
                                     g2g_core::metrics::monotonic_ns().saturating_sub(t0),
                                 ));
-                                if !bytes.is_empty() {
-                                    window.admit(bytes, duration_ns);
-                                }
                                 last_time = Some(seg.time);
                                 period_played_ns = period_played_ns.saturating_add(duration_ns);
                             }
@@ -648,6 +731,13 @@ impl SourceLoop for DashSrc {
                 }
                 _ => Err(PropError::Type),
             },
+            "low-latency" => match value {
+                PropValue::Bool(v) => {
+                    self.low_latency = v;
+                    Ok(())
+                }
+                _ => Err(PropError::Type),
+            },
             _ => Err(PropError::Unknown),
         }
     }
@@ -660,6 +750,7 @@ impl SourceLoop for DashSrc {
             "presentation-delay-ms" => Some(PropValue::Uint(self.presentation_delay_ms)),
             "abr" => Some(PropValue::Bool(self.abr)),
             "prebuffer-ms" => Some(PropValue::Uint(self.prebuffer_ms)),
+            "low-latency" => Some(PropValue::Bool(self.low_latency)),
             _ => None,
         }
     }
@@ -695,4 +786,10 @@ static DASHSRC_PROPS: &[PropertySpec] = &[
         "media to buffer ahead before emitting, ms; posts Buffering bus messages (0 = off)",
     )
     .with_default("0"),
+    PropertySpec::new(
+        "low-latency",
+        PropKind::Bool,
+        "consume a segment chunk by chunk as the packager writes it (CMAF chunked transfer)",
+    )
+    .with_default("false"),
 ];

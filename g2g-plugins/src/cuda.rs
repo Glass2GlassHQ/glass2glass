@@ -876,40 +876,6 @@ pub fn nv12_gl_uploads(width: u32, height: u32) -> (GlUpload, GlUpload) {
     (luma, chroma)
 }
 
-/// GLSL ES 1.00 vertex shader: pass the texcoords through and position a
-/// fullscreen quad. Paired with [`FRAGMENT_SHADER_NV12`].
-pub const VERTEX_SHADER: &str = "\
-attribute vec2 a_pos;
-attribute vec2 a_uv;
-varying vec2 v_uv;
-void main() {
-    v_uv = a_uv;
-    gl_Position = vec4(a_pos, 0.0, 1.0);
-}
-";
-
-/// GLSL ES 1.00 fragment shader: sample the NV12 luma (`R8`) and interleaved
-/// chroma (`RG8`) textures and convert BT.601 limited-range YCbCr -> RGB.
-/// Verbatim from DESIGN-C3-cuda.md Appendix A (swap the matrix for BT.709 on
-/// HD sources once a colour-metadata field exists on `Caps`).
-pub const FRAGMENT_SHADER_NV12: &str = "\
-precision mediump float;
-varying vec2 v_uv;
-uniform sampler2D y_tex;
-uniform sampler2D uv_tex;
-void main() {
-    float y = texture2D(y_tex, v_uv).r;
-    vec2  c = texture2D(uv_tex, v_uv).rg;
-    y = 1.1643 * (y - 0.0625);
-    float cb = c.x - 0.5;
-    float cr = c.y - 0.5;
-    float r = y + 1.5958 * cr;
-    float g = y - 0.3917 * cb - 0.8129 * cr;
-    float b = y + 2.0170 * cb;
-    gl_FragColor = vec4(r, g, b, 1.0);
-}
-";
-
 /// CUDA side of the NV12 -> GL-texture presentation (`CudaGlSink`). Registers
 /// the two GL textures (full-res `R8` luma, half-res `RG8` chroma) with CUDA
 /// once, then per frame maps them, copies each decoded NV12 plane
@@ -1194,16 +1160,5 @@ mod tests {
         // ceil(3/2)=2 texels -> 4 bytes wide (RG8), 2 rows tall.
         assert_eq!(chroma.width_bytes, 4);
         assert_eq!(chroma.height, 2);
-    }
-
-    #[test]
-    fn shaders_declare_the_nv12_sampler_pair() {
-        // Lock the Appendix A contract the CUDA upload side relies on: a
-        // full-res luma sampler and a half-res interleaved chroma sampler.
-        assert!(FRAGMENT_SHADER_NV12.contains("uniform sampler2D y_tex"));
-        assert!(FRAGMENT_SHADER_NV12.contains("uniform sampler2D uv_tex"));
-        // Vertex shader feeds the fragment shader's texcoord varying.
-        assert!(VERTEX_SHADER.contains("varying vec2 v_uv"));
-        assert!(FRAGMENT_SHADER_NV12.contains("varying vec2 v_uv"));
     }
 }

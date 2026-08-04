@@ -205,7 +205,35 @@ per-stage thread handoff adds wakeup latency: cooperative single-thread is the
 lower-latency default, and it is the only path for the `no_std` / wasm / embassy
 executors, which the `run_graph_threaded` gate (`std + multi-thread`) excludes.
 `run_graph_threaded` requires an owning `Graph<GraphNode>` (`'static`) so each arm
-can move its element onto a worker thread.
+can move its element onto a worker thread. The same rule shapes the fan-in
+deadline tick (§3.1): the cooperative arms borrow their clock, but a builder
+closure owns everything it carries, so `run_graph_threaded_ticked` takes the clock
+as an `Arc<dyn DynAsyncClock + Send + Sync>` and each muxer arm is wrapped in a
+future that owns its handle and lends it to the shared arm code.
+
+**The fan-in deadline tick comes from the pipeline clock.** A fan-in element that
+declares a `tick_interval_ns` receives `PipelinePacket::Tick` on that period even
+while its inputs are silent (§3.1), which is how a compositor holds its output rate
+over a stalled pad. The timer is not a separate runner input: `PipelineClock::as_ticker`
+returns the clock itself when it can sleep on a deadline (every `AsyncClock`
+overrides it; the default is `None`), and every cooperative entry point derives the
+arm's timer from the clock it was already given. So a `parse_launch` line with
+`compositor timed-output=true` ticks under `g2g-launch` with no ticked entry point,
+and a pipeline whose clock only tells time runs untimed. Only the thread-per-arm
+runner keeps a separate entry, because its arms need an owned clock handle rather
+than the borrow `as_ticker` yields.
+
+**Animated properties ride the arms.** A node can carry a `ControlProgram`
+(§ properties, M882): keyframed curves bound to its property names, which the arm
+that owns the element samples at each `DataFrame`'s PTS and applies before handing
+that frame over, so a frame is processed under the values its own timestamp calls
+for. The program is resolved against the element's declared properties before
+negotiation, so a bad binding fails the run before any device opens. The arms that
+carry one are the ones the runner feeds packet by packet (transform, sink, both
+fan-in arms); a source drives itself and a tee holds no element, so attaching there
+is a startup error, not a no-op. Both runners take the same path: a resolved
+controller is owned data, so unlike the borrowed deadline ticker it crosses onto a
+worker thread with the element.
 
 **Element-level cooperative offload.** A separate, opt-in path lets the
 cooperative default runner overlap one heavy synchronous stage without a

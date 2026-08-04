@@ -53,7 +53,10 @@ extern crate std;
 use crate::aggregator::InputAggregator;
 use crate::bus::{BusHandle, BusMessage};
 use crate::caps::{Caps, CapsSet};
-use crate::clock::{elect_clock, ClockCandidate, ClockPriority, ClockSync, PipelineClock};
+use crate::clock::{
+    elect_clock, ClockCandidate, ClockPriority, ClockSync, DynAsyncClock, PipelineClock,
+};
+use crate::controller::{ArmController, ControlTarget, CONTROL_CATEGORY};
 use crate::element::{
     AsyncElement, BoxFuture, ConfigureOutcome, DynAsyncElement, ElementBound, OutputSink,
     PushOutcome, Reconfigure,
@@ -211,6 +214,19 @@ impl<'a> GraphNodeRef<'a> {
             GraphNodeRef::Muxer(_) | GraphNodeRef::FanoutSource(_) | GraphNodeRef::Demux(_) => {
                 crate::memory::DomainSet::only(crate::memory::MemoryDomainKind::System)
             }
+        }
+    }
+
+    /// The runtime properties this node's element declares, whatever its shape.
+    /// The animated-property check (M882) reads it to validate a
+    /// [`ControlProgram`](crate::ControlProgram) against the element it targets.
+    pub fn properties(&self) -> &'static [PropertySpec] {
+        match self {
+            GraphNodeRef::Source(s) => s.properties(),
+            GraphNodeRef::Element(e) => e.properties(),
+            GraphNodeRef::Muxer(m) => m.properties(),
+            GraphNodeRef::FanoutSource(s) => s.properties(),
+            GraphNodeRef::Demux(d) => d.properties(),
         }
     }
 
@@ -573,6 +589,94 @@ fn report_runtime_caps_conflict(rejected: &Caps) {
     );
 }
 
+/// Resolve every node's animated-property program (M882) against the element it
+/// targets, before negotiation and before any frame flows: an unknown property, a
+/// non-numeric one, an empty curve, or a node whose arm has no per-frame hook
+/// fails the run here rather than animating nothing. Returns the resolved
+/// controllers indexed by node id, for the arm loop to take.
+fn resolve_controllers(
+    vg: &mut ValidatedGraph<GraphNodeRef<'_>>,
+    topo: &[NodeId],
+) -> Result<Vec<Option<ArmController>>, G2gError> {
+    let mut resolved: Vec<Option<ArmController>> = (0..vg.node_count()).map(|_| None).collect();
+    for &node in topo {
+        let Some(program) = vg.take_node_control(node) else {
+            continue;
+        };
+        if program.is_empty() {
+            continue;
+        }
+        let name = vg.node_name(node).unwrap_or("<unnamed>");
+        let kind = vg.kind(node);
+        // Only an arm that hands packets to its element one at a time can sample
+        // between frames. A source drives itself (it has no per-frame runner
+        // hook), and a tee carries no element at all.
+        if !matches!(
+            kind,
+            NodeKind::Transform | NodeKind::Sink | NodeKind::Muxer(_)
+        ) {
+            crate::g2g_error!(
+                crate::log::Target::category(CONTROL_CATEGORY),
+                "node {} ({name}) is a {kind:?} and cannot carry animated properties (transform, sink, and fan-in nodes can)",
+                node.0
+            );
+            return Err(G2gError::ControlBinding);
+        }
+        let specs = vg.element(node).map(|e| e.properties()).unwrap_or(&[]);
+        match program.resolve(specs) {
+            Ok(controller) => resolved[node.0 as usize] = Some(controller),
+            Err(fault) => {
+                crate::g2g_error!(
+                    crate::log::Target::category(CONTROL_CATEGORY),
+                    "node {} ({name}): {fault}",
+                    node.0
+                );
+                return Err(G2gError::ControlBinding);
+            }
+        }
+    }
+    Ok(resolved)
+}
+
+/// Sample a controlled element's animated properties at `pts_ns` and set them,
+/// before the element sees the frame that carries that timestamp (M882). A
+/// rejected value fails the run loud, naming the element and the property.
+fn apply_control_at<T: ControlTarget + ?Sized>(
+    control: Option<&ArmController>,
+    target: &mut T,
+    pts_ns: u64,
+    probe: &Probe,
+) -> Result<(), G2gError> {
+    let Some(controller) = control else {
+        return Ok(());
+    };
+    controller.apply(target, pts_ns).map_err(|fault| {
+        let element = probe.as_deref().map(|p| p.name()).unwrap_or("element");
+        crate::g2g_error!(
+            crate::log::Target::category(CONTROL_CATEGORY),
+            "{element} at pts {pts_ns}: {fault}"
+        );
+        G2gError::ControlBinding
+    })
+}
+
+/// [`apply_control_at`] for a packet: a `DataFrame`'s PTS is the sampling time,
+/// and a control packet (caps / segment / flush / tick) carries none, so it
+/// samples nothing.
+fn apply_control<T: ControlTarget + ?Sized>(
+    control: Option<&ArmController>,
+    target: &mut T,
+    packet: &PipelinePacket,
+    probe: &Probe,
+) -> Result<(), G2gError> {
+    match packet {
+        PipelinePacket::DataFrame(frame) => {
+            apply_control_at(control, target, frame.timing.pts_ns, probe)
+        }
+        _ => Ok(()),
+    }
+}
+
 /// A reusable recipe for an owned graph: a builder closure that produces a fresh
 /// [`Graph<GraphNode>`](Graph) each time it is [`instantiate`](Self::instantiate)d.
 ///
@@ -620,12 +724,33 @@ impl core::fmt::Debug for GraphTemplate {
 /// ([`GraphNode`]) or borrow them ([`GraphNodeRef<'a>`], what the convenience
 /// wrappers build). A non-`System` frame in a tee or a negotiation conflict
 /// fails loud.
+///
+/// When `clock` can sleep on a deadline
+/// ([`PipelineClock::as_ticker`](crate::PipelineClock::as_ticker), which every
+/// [`AsyncClock`](crate::AsyncClock) answers), each fan-in arm also gets a
+/// **deadline tick** (M880): a fan-in element declaring a
+/// [`tick_interval_ns`](crate::MultiInputElement::tick_interval_ns) receives
+/// [`PipelinePacket::Tick`] on that period even while its inputs are silent, so a
+/// compositor can hold its output rate over a stalled pad (zero-order-hold on
+/// that pad's last frame) instead of freezing with it. A clock that only tells
+/// time, or an element that declares no interval, runs untimed.
 pub async fn run_graph<'a, Clk: PipelineClock>(
     graph: Graph<GraphNodeRef<'a>>,
     clock: &Clk,
     link_capacity: impl Into<LinkCapacity>,
 ) -> Result<RunStats, G2gError> {
-    run_graph_inner(graph, clock, link_capacity, None, None, None, None, None).await
+    run_graph_inner(
+        graph,
+        clock,
+        link_capacity,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
 }
 
 /// As [`run_graph`], but enforces a memory-domain [`CopyPolicy`](crate::copyplan::CopyPolicy)
@@ -651,6 +776,7 @@ pub async fn run_graph_with_copy_policy<'a, Clk: PipelineClock>(
         None,
         None,
         Some(policy),
+        None,
         None,
     )
     .await
@@ -739,6 +865,7 @@ pub async fn run_graph_with_bus<'a, Clk: PipelineClock>(
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -766,6 +893,7 @@ pub async fn run_graph_observed<'a, Clk: PipelineClock>(
         None,
         None,
         Some(observer),
+        None,
     )
     .await
 }
@@ -790,6 +918,7 @@ pub async fn run_graph_with_progress<'a, Clk: PipelineClock>(
         None,
         None,
         Some(progress),
+        None,
         None,
         None,
     )
@@ -844,6 +973,7 @@ pub async fn run_graph_stateful<'a, Clk: PipelineClock>(
         link_capacity,
         None,
         Some(state.clone()),
+        None,
         None,
         None,
         None,
@@ -1361,14 +1491,19 @@ fn register_edge_taps(
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
     graph: Graph<GraphNodeRef<'a>>,
-    clock: &Clk,
+    clock: &'a Clk,
     link_capacity: impl Into<LinkCapacity>,
     bus: Option<&BusHandle>,
     state: Option<StateController>,
     progress: Option<&PipelineProgress>,
     copy_policy: Option<crate::copyplan::CopyPolicy>,
     observer: Option<&Observer>,
+    ticker: Option<&'a dyn DynAsyncClock>,
 ) -> Result<RunStats, G2gError> {
+    // A pipeline clock that can sleep on a deadline is the fan-in tick timer
+    // (M880), so every entry point ticks without one of its own. An explicit
+    // `ticker` still wins.
+    let ticker = ticker.or_else(|| clock.as_ticker());
     let link_capacity: usize = link_capacity.into().get();
     let mut vg = graph.finish().map_err(|_| G2gError::CapsMismatch)?;
     let n = vg.node_count();
@@ -1376,6 +1511,9 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
         return Err(G2gError::CapsMismatch);
     }
     let topo = vg.topo().to_vec();
+    // M882: animated properties are checked against their elements before
+    // negotiation, so a bad binding fails before configure opens any device.
+    let mut controllers = resolve_controllers(&mut vg, &topo)?;
 
     let (
         probes,
@@ -1482,6 +1620,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
             // merges its inputs by DataFrame PTS); the default drains round-robin
             // in arrival order.
             let mux_probe = probes[node.0 as usize].clone();
+            let mux_control = controllers[node.0 as usize].take();
             let arm: BoxFuture<'a, Result<u64, G2gError>> = if mux.input_pts_ordered() {
                 Box::pin(muxer_arm_pts(
                     mux,
@@ -1492,6 +1631,8 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                     beta,
                     mux_ctrl,
                     mux_probe,
+                    ticker,
+                    mux_control,
                 ))
             } else {
                 Box::pin(muxer_arm(
@@ -1503,6 +1644,8 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                     beta,
                     mux_ctrl,
                     mux_probe,
+                    ticker,
+                    mux_control,
                 ))
             };
             arms.push(arm);
@@ -1542,6 +1685,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                     branch_mode(&vg, node),
                     bus.cloned(),
                     probes[node.0 as usize].clone(),
+                    controllers[node.0 as usize].take(),
                 ))
             }
             NodeKind::Sink => {
@@ -1561,6 +1705,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                     state.clone(),
                     progress.cloned(),
                     probes[node.0 as usize].clone(),
+                    controllers[node.0 as usize].take(),
                 ))
             }
             NodeKind::Tee(_) => {
@@ -1726,6 +1871,9 @@ pub trait GraphSpawner {
 /// element onto a worker thread. All `vg`-borrowing / reference-typed inputs are
 /// resolved to owned values *before* each arm's builder closure, since the
 /// closure runs on another thread and may not borrow `vg`, `bus`, or `progress`.
+/// `ticker` follows that rule too: the fan-in arm's deadline clock is a shared
+/// [`Arc`](alloc::sync::Arc), not a borrow, so each muxer builder can carry it
+/// onto its thread.
 #[cfg(all(feature = "std", feature = "multi-thread"))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
@@ -1736,6 +1884,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
     state: Option<StateController>,
     progress: Option<&PipelineProgress>,
     observer: Option<&Observer>,
+    ticker: Option<alloc::sync::Arc<dyn DynAsyncClock + Send + Sync>>,
     spawner: &S,
 ) -> Result<RunStats, G2gError> {
     let link_capacity: usize = link_capacity.into().get();
@@ -1745,6 +1894,10 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
         return Err(G2gError::CapsMismatch);
     }
     let topo = vg.topo().to_vec();
+    // M882: same pre-negotiation check as the cooperative runner; a resolved
+    // controller is owned data, so it rides each arm's builder closure onto its
+    // worker thread like the element itself.
+    let mut controllers = resolve_controllers(&mut vg, &topo)?;
 
     let (
         probes,
@@ -1818,9 +1971,12 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
             }
             let pts_ordered = mux.input_pts_ordered();
             let mux_probe = probes[node.0 as usize].clone();
-            let build: alloc::boxed::Box<dyn FnOnce() -> LocalArmFuture + Send> = if pts_ordered {
+            let mux_ticker = ticker.clone();
+            let mux_control = controllers[node.0 as usize].take();
+            let build: alloc::boxed::Box<dyn FnOnce() -> LocalArmFuture + Send> =
                 alloc::boxed::Box::new(move || -> LocalArmFuture {
-                    Box::pin(muxer_arm_pts(
+                    Box::pin(muxer_arm_owned_tick(
+                        pts_ordered,
                         mux,
                         pad_rxs,
                         out_tx,
@@ -1829,22 +1985,10 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                         beta,
                         mux_ctrl,
                         mux_probe,
+                        mux_ticker,
+                        mux_control,
                     ))
-                })
-            } else {
-                alloc::boxed::Box::new(move || -> LocalArmFuture {
-                    Box::pin(muxer_arm(
-                        mux,
-                        pad_rxs,
-                        out_tx,
-                        input_count,
-                        mux_out_caps,
-                        beta,
-                        mux_ctrl,
-                        mux_probe,
-                    ))
-                })
-            };
+                });
             handles.push(spawner.spawn_arm(build));
             arm_kinds.push(kind);
             continue;
@@ -1878,6 +2022,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                 let bus_c = bus.cloned();
                 let probe = probes[node.0 as usize].clone();
                 let ch = coord_handle.clone();
+                let control = controllers[node.0 as usize].take();
                 alloc::boxed::Box::new(move || -> LocalArmFuture {
                     Box::pin(transform_arm(
                         elem,
@@ -1891,6 +2036,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                         bm,
                         bus_c,
                         probe,
+                        control,
                     ))
                 })
             }
@@ -1906,9 +2052,10 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                 let probe = probes[node.0 as usize].clone();
                 let ch = coord_handle.clone();
                 let arm_rx = arm_ctrl_rx[node.0 as usize].take().expect("sink ctrl rx");
+                let control = controllers[node.0 as usize].take();
                 alloc::boxed::Box::new(move || -> LocalArmFuture {
                     Box::pin(sink_arm(
-                        elem, in_rx, arm_rx, ch, node, bm, bus_c, state_c, prog_c, probe,
+                        elem, in_rx, arm_rx, ch, node, bm, bus_c, state_c, prog_c, probe, control,
                     ))
                 })
             }
@@ -1987,7 +2134,52 @@ pub async fn run_graph_threaded<Clk: PipelineClock, S: GraphSpawner>(
     link_capacity: impl Into<LinkCapacity>,
     spawner: &S,
 ) -> Result<RunStats, G2gError> {
-    run_graph_threaded_inner(graph, clock, link_capacity, None, None, None, None, spawner).await
+    run_graph_threaded_inner(
+        graph,
+        clock,
+        link_capacity,
+        None,
+        None,
+        None,
+        None,
+        None,
+        spawner,
+    )
+    .await
+}
+
+/// As [`run_graph_threaded`], but every fan-in arm also gets a **deadline tick**
+/// (M879): `clock` is both the pipeline clock and the timer the arms sleep on, so a
+/// fan-in element declaring a
+/// [`tick_interval_ns`](crate::MultiInputElement::tick_interval_ns) receives
+/// [`PipelinePacket::Tick`] on that period even while its inputs are silent.
+///
+/// The clock arrives as a shared handle rather than a borrow because each arm's
+/// builder closure moves onto its own OS thread: `Arc::new(my_clock)` (any
+/// [`AsyncClock`](crate::AsyncClock) that is `Send + Sync`) coerces to it. That
+/// ownership is also why this entry exists at all: the cooperative runners derive
+/// the timer from the clock they already hold
+/// ([`PipelineClock::as_ticker`](crate::PipelineClock::as_ticker) yields a borrow,
+/// M880), and a borrow cannot cross onto the arm threads.
+#[cfg(all(feature = "std", feature = "multi-thread"))]
+pub async fn run_graph_threaded_ticked<S: GraphSpawner>(
+    graph: Graph<GraphNode>,
+    clock: alloc::sync::Arc<dyn DynAsyncClock + Send + Sync>,
+    link_capacity: impl Into<LinkCapacity>,
+    spawner: &S,
+) -> Result<RunStats, G2gError> {
+    run_graph_threaded_inner(
+        graph,
+        &clock,
+        link_capacity,
+        None,
+        None,
+        None,
+        None,
+        Some(clock.clone()),
+        spawner,
+    )
+    .await
 }
 
 /// As [`run_graph_threaded`], but publishes playback progress (the thread-per-arm
@@ -2007,6 +2199,7 @@ pub async fn run_graph_threaded_with_progress<Clk: PipelineClock, S: GraphSpawne
         None,
         None,
         Some(progress),
+        None,
         None,
         spawner,
     )
@@ -2034,6 +2227,7 @@ pub async fn run_graph_threaded_observed<Clk: PipelineClock, S: GraphSpawner>(
         None,
         None,
         Some(observer),
+        None,
         spawner,
     )
     .await
@@ -2495,6 +2689,7 @@ async fn transform_arm<'a>(
     mode: BranchMode,
     bus: Option<BusHandle>,
     probe: Probe,
+    control: Option<ArmController>,
 ) -> Result<u64, G2gError> {
     let mut adapter = SenderSink::new(out_tx);
     // M175: relay a downstream QoS report (seen on this transform's output link)
@@ -2662,6 +2857,10 @@ async fn transform_arm<'a>(
                         wait_ns = t;
                     }
                 }
+                // M882: animated properties are sampled at this frame's PTS, so
+                // the element processes it under the values that frame's time
+                // calls for.
+                apply_control(control.as_ref(), &mut *elem, &packet, &probe)?;
                 let t0 = ElementProbe::mark();
                 elem.process(packet, &mut adapter).await?;
                 if let (Some(p), Some(seq)) = (timed, seq) {
@@ -2694,6 +2893,7 @@ async fn sink_arm<'a>(
     state: Option<StateController>,
     progress: Option<PipelineProgress>,
     probe: Probe,
+    control: Option<ArmController>,
 ) -> Result<u64, G2gError> {
     let mut null = NullSink;
     let mut consumed = 0u64;
@@ -2850,6 +3050,8 @@ async fn sink_arm<'a>(
                         wait_ns = t;
                     }
                 }
+                // M882: sample the animated properties at this frame's PTS.
+                apply_control(control.as_ref(), &mut *elem, &packet, &probe)?;
                 let t0 = ElementProbe::mark();
                 elem.process(packet, &mut null).await?;
                 if let (Some(p), Some(seq)) = (timed, seq) {
@@ -3428,12 +3630,98 @@ async fn apply_mux_directive<'m>(
     }
 }
 
+/// A fan-in arm's deadline tick (M875): the clock to sleep on, the period the
+/// element declared via
+/// [`tick_interval_ns`](DynMultiInputElement::tick_interval_ns), and the next
+/// deadline. Both [`muxer_arm`] and [`muxer_arm_pts`] drive it the same way, so
+/// they share it: [`fire_if_due`](Self::fire_if_due) once per loop iteration for
+/// the busy case, [`park_or_tick`] for the parked one.
+struct ArmTick<'a> {
+    clock: &'a dyn DynAsyncClock,
+    period_ns: u64,
+    next_ns: u64,
+}
+
+impl<'a> ArmTick<'a> {
+    /// Ticking needs both halves: a clock to sleep on and an element that asked.
+    fn new(
+        ticker: Option<&'a dyn DynAsyncClock>,
+        mux: &(dyn DynMultiInputElement + '_),
+    ) -> Option<Self> {
+        let (clock, period_ns) = ticker.zip(mux.tick_interval_ns())?;
+        Some(Self {
+            clock,
+            period_ns,
+            next_ns: clock.now_ns().saturating_add(period_ns),
+        })
+    }
+
+    /// Deliver one tick, then snap the next deadline forward from now rather than
+    /// adding a period to a deadline already in the past, so a slow element does
+    /// not build up a backlog of ticks to fire.
+    async fn fire(
+        &mut self,
+        mux: &mut (dyn DynMultiInputElement + '_),
+        out: &mut dyn OutputSink,
+    ) -> Result<(), G2gError> {
+        mux.process(0, PipelinePacket::Tick, out).await?;
+        self.next_ns = self.clock.now_ns().saturating_add(self.period_ns);
+        Ok(())
+    }
+
+    /// The busy path: a live pad can spin an arm's drain loop forever without
+    /// ever parking below, so the deadline is checked per iteration too.
+    async fn fire_if_due(
+        &mut self,
+        mux: &mut (dyn DynMultiInputElement + '_),
+        out: &mut dyn OutputSink,
+    ) -> Result<(), G2gError> {
+        if self.clock.now_ns() >= self.next_ns {
+            self.fire(mux, out).await?;
+        }
+        Ok(())
+    }
+}
+
+/// Race an arm's parked wait (data + β control) against its tick deadline, so a
+/// fan-in whose inputs have all gone quiet still gets its tick. `None` means the
+/// deadline won and a tick fired, so the caller loops. Data and control stay
+/// biased ahead of the tick: a packet already waiting is handled first.
+async fn park_or_tick<T>(
+    park: impl core::future::Future<Output = T>,
+    tick: Option<&mut ArmTick<'_>>,
+    mux: &mut (dyn DynMultiInputElement + '_),
+    out: &mut dyn OutputSink,
+) -> Result<Option<T>, G2gError> {
+    let Some(tick) = tick else {
+        return Ok(Some(park.await));
+    };
+    // The sleep rides the copied clock reference, not a borrow of `tick`, so
+    // `fire` can still take it mutably below.
+    let sleep = tick.clock.sleep_until_ns(tick.next_ns);
+    match select2(park, sleep).await {
+        Either::Left(v) => Ok(Some(v)),
+        Either::Right(()) => {
+            tick.fire(mux, out).await?;
+            Ok(None)
+        }
+    }
+}
+
 /// The muxer arm: drain the per-input channels round-robin, combine each input's
 /// packets via `process(pad, ..)`, and emit a single `Eos` once every input has
 /// ended. Round-robin draining keeps a fast input from starving a slow one (a
 /// frozen overlay and a hung EOS aggregation). The per-input `Eos` is delivered
 /// to the element first (so a stateful muxer can flush) but the element must not
 /// forward it; the runner owns the merged one.
+///
+/// M875: when `ticker` is set and the element declares a
+/// [`tick_interval_ns`](DynMultiInputElement::tick_interval_ns), the arm also
+/// delivers [`PipelinePacket::Tick`] on that period, so a fan-in element whose
+/// output cadence is its own (zero-order-hold over a stalled pad) emits without a
+/// packet arriving. The deadline is checked on both paths: once per loop iteration
+/// for the busy case (packets flowing on one pad while another is stalled never
+/// park the arm), and raced against the parked `recv` otherwise.
 #[allow(clippy::too_many_arguments)]
 async fn muxer_arm<'a>(
     mut mux: Box<dyn DynMultiInputElement + 'a>,
@@ -3444,6 +3732,8 @@ async fn muxer_arm<'a>(
     mut beta: MuxBeta,
     arm_rx: Receiver<ArmDirective>,
     probe: Probe,
+    ticker: Option<&'a dyn DynAsyncClock>,
+    control: Option<ArmController>,
 ) -> Result<u64, G2gError> {
     let mut adapter = SenderSink::new(out_tx);
     let mut open = alloc::vec![true; input_count];
@@ -3451,12 +3741,18 @@ async fn muxer_arm<'a>(
     // Cursor for round-robin fairness across both the try-drain and block paths.
     let mut next = 0usize;
     let mut control_open = true;
+    let mut tick = ArmTick::new(ticker, &*mux);
     beta.seed(&*mux, &current_output);
     loop {
         // M839: a consumer's demand on the merged output arrives here. Checked
         // before the data drain so a busy muxer still applies it promptly.
         while let Some(directive) = arm_rx.try_recv() {
             apply_mux_directive(&mut *mux, &mut beta, directive, &current_output).await?;
+        }
+        // Deadline reached while packets keep this arm busy (a live overlay pad
+        // spinning the drain loop below without ever parking).
+        if let Some(t) = tick.as_mut() {
+            t.fire_if_due(&mut *mux, &mut adapter).await?;
         }
         // Take one buffered packet, scanning round-robin from `next`, so no
         // single input can monopolize the muxer while others have data waiting.
@@ -3480,21 +3776,30 @@ async fn muxer_arm<'a>(
                 }
                 // Race the β control channel against the pads, so a directive
                 // reaches this arm while it is parked waiting for data.
-                let (slot, maybe) = if control_open {
-                    match select2(arm_rx.recv(), muxer_recv_any(&pad_rxs, &open, next)).await {
-                        Either::Left(Some(directive)) => {
-                            apply_mux_directive(&mut *mux, &mut beta, directive, &current_output)
-                                .await?;
-                            continue;
-                        }
-                        Either::Left(None) => {
-                            control_open = false;
-                            continue;
-                        }
-                        Either::Right(v) => v,
+                let park = async {
+                    if control_open {
+                        select2(arm_rx.recv(), muxer_recv_any(&pad_rxs, &open, next)).await
+                    } else {
+                        Either::Right(muxer_recv_any(&pad_rxs, &open, next).await)
                     }
-                } else {
-                    muxer_recv_any(&pad_rxs, &open, next).await
+                };
+                // M875: the tick deadline joins the race; a fired tick loops.
+                let Some(parked) =
+                    park_or_tick(park, tick.as_mut(), &mut *mux, &mut adapter).await?
+                else {
+                    continue;
+                };
+                let (slot, maybe) = match parked {
+                    Either::Left(Some(directive)) => {
+                        apply_mux_directive(&mut *mux, &mut beta, directive, &current_output)
+                            .await?;
+                        continue;
+                    }
+                    Either::Left(None) => {
+                        control_open = false;
+                        continue;
+                    }
+                    Either::Right(v) => v,
                 };
                 next = (slot + 1) % input_count;
                 // A closed channel with no `Eos` is an upstream end; fold it into
@@ -3543,6 +3848,8 @@ async fn muxer_arm<'a>(
                 if let Some(p) = timed {
                     p.record_fill(pad_rxs[slot].1.fill_percent());
                 }
+                // M882: sample the animated properties at this frame's PTS.
+                apply_control(control.as_ref(), &mut *mux, &packet, &probe)?;
                 let t0 = ElementProbe::mark();
                 mux.process(pad, packet, &mut adapter).await?;
                 if let Some(p) = timed {
@@ -3562,6 +3869,12 @@ async fn muxer_arm<'a>(
 /// would otherwise hand-roll. `Eos` (per-input flush + aggregation) and
 /// `CapsChanged` (MX-1 / MX-2) are handled as in [`muxer_arm`]; only `DataFrame`s
 /// are reordered.
+///
+/// The deadline tick works as in [`muxer_arm`] (busy check per iteration plus the
+/// parked race, via [`ArmTick`]), except that it comes after the merged-`Eos`
+/// exit and after the aggregator's release round: an arm on its way out ticks no
+/// more, and a tick never jumps ahead of a frame already safe to emit in PTS
+/// order.
 #[allow(clippy::too_many_arguments)]
 async fn muxer_arm_pts<'a>(
     mut mux: Box<dyn DynMultiInputElement + 'a>,
@@ -3572,6 +3885,8 @@ async fn muxer_arm_pts<'a>(
     mut beta: MuxBeta,
     arm_rx: Receiver<ArmDirective>,
     probe: Probe,
+    ticker: Option<&'a dyn DynAsyncClock>,
+    control: Option<ArmController>,
 ) -> Result<u64, G2gError> {
     let mut adapter = SenderSink::new(out_tx);
     let mut open = alloc::vec![true; input_count];
@@ -3579,6 +3894,7 @@ async fn muxer_arm_pts<'a>(
     // Round-robin wake cursor, so a fast input does not bias the block path.
     let mut next = 0usize;
     let mut control_open = true;
+    let mut tick = ArmTick::new(ticker, &*mux);
     beta.seed(&*mux, &current_output);
     loop {
         // Release every frame now safe to emit, in global PTS order: the
@@ -3591,6 +3907,9 @@ async fn muxer_arm_pts<'a>(
             if let Some(p) = probe.as_deref() {
                 p.record_fill(pad_rxs[slot].1.fill_percent());
             }
+            // M882: sampled in release (PTS) order, so the animation follows the
+            // ordered stream rather than pad arrival.
+            apply_control_at(control.as_ref(), &mut *mux, frame.timing.pts_ns, &probe)?;
             let t0 = ElementProbe::mark();
             mux.process(pad, PipelinePacket::DataFrame(frame), &mut adapter)
                 .await?;
@@ -3604,23 +3923,35 @@ async fn muxer_arm_pts<'a>(
             adapter.push(PipelinePacket::Eos).await?;
             return Ok(0);
         }
+        // Deadline reached while frames keep arriving on one pad (the arm never
+        // parks below).
+        if let Some(t) = tick.as_mut() {
+            t.fire_if_due(&mut *mux, &mut adapter).await?;
+        }
         // Make progress: block for the next packet from any still-open input,
         // racing the β control channel (M839) so a consumer's demand on the
-        // merged output reaches this arm while it waits.
-        let (slot, maybe) = if control_open {
-            match select2(arm_rx.recv(), muxer_recv_any(&pad_rxs, &open, next)).await {
-                Either::Left(Some(directive)) => {
-                    apply_mux_directive(&mut *mux, &mut beta, directive, &current_output).await?;
-                    continue;
-                }
-                Either::Left(None) => {
-                    control_open = false;
-                    continue;
-                }
-                Either::Right(v) => v,
+        // merged output reaches this arm while it waits, and the tick deadline so
+        // a quiet fan-in still gets its tick.
+        let park = async {
+            if control_open {
+                select2(arm_rx.recv(), muxer_recv_any(&pad_rxs, &open, next)).await
+            } else {
+                Either::Right(muxer_recv_any(&pad_rxs, &open, next).await)
             }
-        } else {
-            muxer_recv_any(&pad_rxs, &open, next).await
+        };
+        let Some(parked) = park_or_tick(park, tick.as_mut(), &mut *mux, &mut adapter).await? else {
+            continue;
+        };
+        let (slot, maybe) = match parked {
+            Either::Left(Some(directive)) => {
+                apply_mux_directive(&mut *mux, &mut beta, directive, &current_output).await?;
+                continue;
+            }
+            Either::Left(None) => {
+                control_open = false;
+                continue;
+            }
+            Either::Right(v) => v,
         };
         next = (slot + 1) % input_count;
         let pad = pad_rxs[slot].0;
@@ -3656,6 +3987,59 @@ async fn muxer_arm_pts<'a>(
     }
 }
 
+/// Owning-ticker shim for the thread-per-arm runner (M879): both fan-in arms take
+/// their ticker as a borrow, but a builder closure that crosses onto a worker
+/// thread must own everything it carries. This future owns the shared clock for its
+/// whole life and lends it to the arm it drives, so the arms' signatures stay as
+/// the cooperative runner needs them. `pts_ordered` picks the arm, the same choice
+/// the cooperative path makes at the call site.
+#[cfg(all(feature = "std", feature = "multi-thread"))]
+#[allow(clippy::too_many_arguments)]
+async fn muxer_arm_owned_tick(
+    pts_ordered: bool,
+    mux: Box<dyn DynMultiInputElement>,
+    pad_rxs: Vec<(usize, Receiver<PipelinePacket>)>,
+    out_tx: LinkSender,
+    input_count: usize,
+    current_output: Caps,
+    beta: MuxBeta,
+    arm_rx: Receiver<ArmDirective>,
+    probe: Probe,
+    ticker: Option<alloc::sync::Arc<dyn DynAsyncClock + Send + Sync>>,
+    control: Option<ArmController>,
+) -> Result<u64, G2gError> {
+    let tick: Option<&dyn DynAsyncClock> = ticker.as_deref().map(|c| c as &dyn DynAsyncClock);
+    if pts_ordered {
+        muxer_arm_pts(
+            mux,
+            pad_rxs,
+            out_tx,
+            input_count,
+            current_output,
+            beta,
+            arm_rx,
+            probe,
+            tick,
+            control,
+        )
+        .await
+    } else {
+        muxer_arm(
+            mux,
+            pad_rxs,
+            out_tx,
+            input_count,
+            current_output,
+            beta,
+            arm_rx,
+            probe,
+            tick,
+            control,
+        )
+        .await
+    }
+}
+
 /// Clone a packet for a tee branch (M213, M250). Control packets clone trivially;
 /// a data frame's memory is shared via [`MemoryDomain::share`]: a zero-copy
 /// refcount bump for the GPU domains, the shared-CPU `SystemView`, and (once
@@ -3675,6 +4059,9 @@ pub(crate) fn try_clone_packet(packet: &PipelinePacket) -> Result<PipelinePacket
         // detector branch and a video branch carry the same AnalyticsMeta without
         // aliasing. The frame-level fan-out primitive.
         PipelinePacket::DataFrame(frame) => PipelinePacket::DataFrame(frame.share()),
+        // Runner-internal (a fan-in arm's deadline), so it is never on a link to
+        // begin with; trivially cloneable all the same.
+        PipelinePacket::Tick => PipelinePacket::Tick,
     })
 }
 

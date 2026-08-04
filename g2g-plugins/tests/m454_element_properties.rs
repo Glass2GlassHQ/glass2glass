@@ -12,6 +12,19 @@ fn declares(specs: &[PropertySpec], name: &str) -> bool {
     specs.iter().any(|s| s.name == name)
 }
 
+/// M888: the CMAF chunked-consumption switch is settable from a launch line.
+#[cfg(feature = "dash")]
+#[test]
+fn dashsrc_low_latency() {
+    use g2g_core::runtime::SourceLoop;
+    use g2g_plugins::dashsrc::DashSrc;
+    let mut e = DashSrc::new("http://h/manifest.mpd");
+    assert!(declares(e.properties(), "low-latency"));
+    e.set_property("low-latency", PropValue::Bool(true))
+        .unwrap();
+    assert_eq!(e.get_property("low-latency"), Some(PropValue::Bool(true)));
+}
+
 #[cfg(feature = "av1-encode")]
 #[test]
 fn av1enc_bitrate_speed_and_quantizer() {
@@ -86,6 +99,52 @@ fn opusenc_frame_size_and_complexity() {
     );
 }
 
+#[cfg(feature = "opus")]
+#[test]
+fn opusenc_audio_type() {
+    use g2g_plugins::opusenc::{OpusAudioType, OpusEnc};
+    let mut e = OpusEnc::new();
+    assert!(declares(e.properties(), "audio-type"));
+    assert_eq!(
+        e.get_property("audio-type"),
+        Some(PropValue::Str("generic".into())),
+        "gst opusenc's default"
+    );
+    e.set_property("audio-type", PropValue::Str("voice".into()))
+        .unwrap();
+    assert_eq!(
+        e.get_property("audio-type"),
+        Some(PropValue::Str("voice".into()))
+    );
+    assert!(
+        e.set_property("audio-type", PropValue::Str("music".into()))
+            .is_err(),
+        "rejects a mode libopus has no application for"
+    );
+    // the mode has to reach libopus: a voice encoder builds, and the low-delay
+    // one builds with a shorter lookahead than the default mode's.
+    let caps = g2g_core::Caps::Audio {
+        format: g2g_core::AudioFormat::PcmS16Le,
+        channels: 1,
+        sample_rate: 48_000,
+    };
+    e.configure_pipeline(&caps)
+        .expect("voice encoder initializes");
+    let voice_lookahead = e.lookahead().expect("live encoder built");
+
+    let mut low = OpusEnc::new().with_audio_type(OpusAudioType::RestrictedLowDelay);
+    assert_eq!(
+        low.get_property("audio-type"),
+        Some(PropValue::Str("restricted-lowdelay".into())),
+        "builder and property agree"
+    );
+    low.configure_pipeline(&caps).unwrap();
+    assert!(
+        low.lookahead().unwrap() < voice_lookahead,
+        "restricted-lowdelay drops the SILK lookahead"
+    );
+}
+
 #[cfg(feature = "mjpeg-encode")]
 #[test]
 fn mjpegenc_quality() {
@@ -138,6 +197,98 @@ fn textoverlay_color_packs_argb() {
     e.set_property("color", PropValue::Uint(0xFFFF_0000))
         .unwrap();
     assert_eq!(e.get_property("color"), Some(PropValue::Uint(0xFFFF_0000)));
+}
+
+/// The shared placement / styling half of both timestamp overlays, plus
+/// `timeoverlay`'s own `time-mode`.
+#[test]
+fn timeoverlay_time_mode_and_placement() {
+    use g2g_plugins::timeoverlay::TimeOverlay;
+    let mut e = TimeOverlay::new();
+    for name in [
+        "time-mode",
+        "scale",
+        "halignment",
+        "valignment",
+        "xpad",
+        "ypad",
+        "color",
+        "shaded-background",
+    ] {
+        assert!(declares(e.properties(), name), "{name} is declared");
+    }
+
+    e.set_property("time-mode", PropValue::Str("elapsed-running-time".into()))
+        .unwrap();
+    assert_eq!(
+        e.get_property("time-mode"),
+        Some(PropValue::Str("elapsed-running-time".into()))
+    );
+    // `time-code` / `reference-timestamp` need frame-meta g2g has no producer
+    // for, so they are not accepted rather than silently drawing something else.
+    assert!(e
+        .set_property("time-mode", PropValue::Str("time-code".into()))
+        .is_err());
+
+    e.set_property("halignment", PropValue::Str("right".into()))
+        .unwrap();
+    e.set_property("valignment", PropValue::Str("bottom".into()))
+        .unwrap();
+    e.set_property("xpad", PropValue::Uint(12)).unwrap();
+    e.set_property("ypad", PropValue::Uint(4)).unwrap();
+    e.set_property("shaded-background", PropValue::Bool(false))
+        .unwrap();
+    // 0xAARRGGBB, the textoverlay `color` packing: opaque green.
+    e.set_property("color", PropValue::Uint(0xFF00_FF00))
+        .unwrap();
+    assert_eq!(
+        e.get_property("halignment"),
+        Some(PropValue::Str("right".into()))
+    );
+    assert_eq!(
+        e.get_property("valignment"),
+        Some(PropValue::Str("bottom".into()))
+    );
+    assert_eq!(e.get_property("xpad"), Some(PropValue::Uint(12)));
+    assert_eq!(e.get_property("ypad"), Some(PropValue::Uint(4)));
+    assert_eq!(
+        e.get_property("shaded-background"),
+        Some(PropValue::Bool(false))
+    );
+    assert_eq!(e.get_property("color"), Some(PropValue::Uint(0xFF00_FF00)));
+
+    // Alignments g2g does not implement, and a zero magnification, are rejected.
+    assert!(e
+        .set_property("valignment", PropValue::Str("baseline".into()))
+        .is_err());
+    assert!(e.set_property("scale", PropValue::Uint(0)).is_err());
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn clockoverlay_time_format() {
+    use g2g_plugins::clockoverlay::ClockOverlay;
+    let mut e = ClockOverlay::new();
+    assert!(declares(e.properties(), "time-format"));
+    assert_eq!(
+        e.get_property("time-format"),
+        Some(PropValue::Str("%H:%M:%S".into())),
+        "gst's default clock format"
+    );
+    e.set_property("time-format", PropValue::Str("%F %T".into()))
+        .unwrap();
+    assert_eq!(
+        e.get_property("time-format"),
+        Some(PropValue::Str("%F %T".into()))
+    );
+    // The styling half is shared with timeoverlay.
+    assert!(declares(e.properties(), "halignment"));
+    e.set_property("halignment", PropValue::Str("center".into()))
+        .unwrap();
+    assert_eq!(
+        e.get_property("halignment"),
+        Some(PropValue::Str("center".into()))
+    );
 }
 
 #[cfg(feature = "udp-ingress")]
@@ -482,5 +633,165 @@ fn oggmux_is_a_launch_element() {
         )
         .is_ok(),
         "oggmux is registered as a launch element"
+    );
+}
+
+#[test]
+fn compositor_canvas_and_flattened_pad_placement() {
+    use g2g_core::{MultiInputElement, PropError};
+    use g2g_plugins::compositor::{Compositor, CompositorPad};
+    let mut e = Compositor::new(
+        320,
+        240,
+        Vec::from([CompositorPad::at(0, 0), CompositorPad::at(0, 0)]),
+    );
+    for name in [
+        "width",
+        "height",
+        "framerate",
+        "background-color",
+        "timed-output",
+        "format",
+        "sink0-xpos",
+        "sink1-ypos",
+        "sink7-height",
+    ] {
+        assert!(declares(e.properties(), name), "{name} is declared");
+    }
+    assert!(
+        !declares(e.properties(), "sink8-xpos"),
+        "the flattened pad names are bounded"
+    );
+
+    e.set_property("width", PropValue::Uint(640)).unwrap();
+    e.set_property("height", PropValue::Uint(480)).unwrap();
+    assert_eq!(e.get_property("width"), Some(PropValue::Uint(640)));
+    assert_eq!(e.get_property("height"), Some(PropValue::Uint(480)));
+    e.set_property("framerate", PropValue::Fraction(60, 1))
+        .unwrap();
+    assert_eq!(
+        e.get_property("framerate"),
+        Some(PropValue::Fraction(60, 1))
+    );
+    // 0xAARRGGBB, the textoverlay `color` packing: opaque green.
+    e.set_property("background-color", PropValue::Uint(0xFF00FF00))
+        .unwrap();
+    assert_eq!(
+        e.get_property("background-color"),
+        Some(PropValue::Uint(0xFF00FF00))
+    );
+    e.set_property("format", PropValue::Str("nv12".into()))
+        .unwrap();
+    assert_eq!(
+        e.get_property("format"),
+        Some(PropValue::Str("nv12".into()))
+    );
+    // Timed output drives the declared tick interval off the framerate above.
+    assert_eq!(e.tick_interval_ns(), None);
+    e.set_property("timed-output", PropValue::Bool(true))
+        .unwrap();
+    assert_eq!(e.get_property("timed-output"), Some(PropValue::Bool(true)));
+    assert_eq!(
+        e.tick_interval_ns(),
+        Some(1_000_000_000 * 65536 / (60 << 16))
+    );
+    e.set_property("timed-output", PropValue::Bool(false))
+        .unwrap();
+    assert_eq!(e.tick_interval_ns(), None);
+
+    // Per-pad placement, gst's `sink_1::xpos` request-pad properties flattened.
+    for (name, value) in [
+        ("sink1-xpos", PropValue::Int(-8)),
+        ("sink1-ypos", PropValue::Int(12)),
+        ("sink1-zorder", PropValue::Uint(3)),
+        ("sink1-alpha", PropValue::Uint(128)),
+        ("sink1-width", PropValue::Uint(64)),
+        ("sink1-height", PropValue::Uint(48)),
+    ] {
+        e.set_property(name, value.clone()).unwrap();
+        assert_eq!(e.get_property(name), Some(value), "{name} round-trips");
+    }
+
+    assert_eq!(
+        e.set_property("width", PropValue::Str("640".into())),
+        Err(PropError::Type),
+        "a canvas dimension is not a string"
+    );
+    assert_eq!(
+        e.set_property("sink1-xpos", PropValue::Uint(4)),
+        Err(PropError::Type),
+        "a pad position is signed"
+    );
+    assert_eq!(
+        e.set_property("sink1-alpha", PropValue::Uint(300)),
+        Err(PropError::Value),
+        "alpha is a byte"
+    );
+    assert_eq!(
+        e.set_property("format", PropValue::Str("bgrx".into())),
+        Err(PropError::Value),
+        "only the formats the element composites"
+    );
+    // Declared for eight pads, but this instance has two: a placement that would
+    // silently vanish is an error instead.
+    assert_eq!(
+        e.set_property("sink5-xpos", PropValue::Int(4)),
+        Err(PropError::Value)
+    );
+    assert_eq!(e.get_property("sink5-xpos"), None);
+    assert_eq!(
+        e.set_property("bogus", PropValue::Int(0)),
+        Err(PropError::Unknown)
+    );
+}
+
+#[cfg(feature = "wgpu-sink")]
+#[test]
+fn wgpucompositor_shares_the_compositor_properties() {
+    use g2g_core::{MultiInputElement, PropError};
+    use g2g_plugins::compositor::CompositorPad;
+    use g2g_plugins::wgpucompositor::WgpuCompositor;
+    let mut e = WgpuCompositor::new(
+        320,
+        240,
+        Vec::from([CompositorPad::at(0, 0), CompositorPad::at(0, 0)]),
+    );
+    for name in [
+        "width",
+        "height",
+        "framerate",
+        "background-color",
+        "timed-output",
+        "sink1-xpos",
+        "sink7-height",
+    ] {
+        assert!(declares(e.properties(), name), "{name} is declared");
+    }
+    // RGBA8 only, so it declares no output format at all rather than a knob it
+    // would have to reject every value of.
+    assert!(!declares(e.properties(), "format"));
+    assert_eq!(
+        e.set_property("format", PropValue::Str("nv12".into())),
+        Err(PropError::Unknown)
+    );
+
+    e.set_property("width", PropValue::Uint(1280)).unwrap();
+    e.set_property("height", PropValue::Uint(720)).unwrap();
+    assert_eq!(e.get_property("width"), Some(PropValue::Uint(1280)));
+    assert_eq!(e.get_property("height"), Some(PropValue::Uint(720)));
+    e.set_property("background-color", PropValue::Uint(0xFF102030))
+        .unwrap();
+    assert_eq!(
+        e.get_property("background-color"),
+        Some(PropValue::Uint(0xFF102030))
+    );
+    e.set_property("sink1-zorder", PropValue::Uint(2)).unwrap();
+    e.set_property("sink1-alpha", PropValue::Uint(64)).unwrap();
+    assert_eq!(e.get_property("sink1-zorder"), Some(PropValue::Uint(2)));
+    assert_eq!(e.get_property("sink1-alpha"), Some(PropValue::Uint(64)));
+    assert_eq!(
+        e.set_property("sink3-xpos", PropValue::Int(0)),
+        Err(PropError::Value),
+        "two pads, so pad 3 does not exist"
     );
 }

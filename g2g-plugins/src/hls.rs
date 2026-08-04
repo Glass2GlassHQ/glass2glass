@@ -7,9 +7,13 @@
 //! A playlist is one form or the other: presence of any `#EXT-X-STREAM-INF`
 //! makes it a master, otherwise it is a media playlist. URIs are kept verbatim
 //! (absolute or relative); the caller resolves them against the playlist URL.
+//!
+//! [`write_media`] is the other direction, rendering a [`MediaPlaylist`] back to
+//! `.m3u8` text for [`HlsSink`](crate::hlssink) to publish.
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::fmt::Write as _;
 
 /// One variant stream in a master playlist.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -490,6 +494,83 @@ fn parse_extinf_ms(rest: &str) -> u32 {
     }
 }
 
+/// Render a media playlist as `.m3u8` text, the inverse of [`parse`]: the tags a
+/// player needs to fetch the segments, in RFC 8216 order. `#EXT-X-VERSION` is
+/// derived from the features used (6 for an `#EXT-X-MAP`, 4 for byte ranges,
+/// else 3 for the fractional `#EXTINF` durations), and `#EXT-X-KEY` is written
+/// only where the key in effect changes, including a `METHOD=NONE` to clear it.
+pub fn write_media(playlist: &MediaPlaylist) -> String {
+    let mut out = String::from("#EXTM3U\n");
+    let version = if playlist.map_uri.is_some() {
+        6
+    } else if playlist.segments.iter().any(|s| s.byte_range.is_some()) {
+        4
+    } else {
+        3
+    };
+    let _ = writeln!(out, "#EXT-X-VERSION:{version}");
+    let _ = writeln!(
+        out,
+        "#EXT-X-TARGETDURATION:{}",
+        playlist.target_duration_secs
+    );
+    let _ = writeln!(out, "#EXT-X-MEDIA-SEQUENCE:{}", playlist.media_sequence);
+    if let Some(uri) = &playlist.map_uri {
+        let _ = write!(out, "#EXT-X-MAP:URI=\"{uri}\"");
+        if let Some(r) = playlist.map_byte_range {
+            let _ = write!(out, ",BYTERANGE=\"{}@{}\"", r.length, r.offset);
+        }
+        out.push('\n');
+    }
+    let mut key_in_effect: Option<&SegmentKey> = None;
+    for segment in &playlist.segments {
+        if segment.key.as_ref() != key_in_effect {
+            out.push_str(&key_tag(segment.key.as_ref()));
+            key_in_effect = segment.key.as_ref();
+        }
+        let (secs, millis) = (segment.duration_ms / 1000, segment.duration_ms % 1000);
+        let _ = writeln!(out, "#EXTINF:{secs}.{millis:03},");
+        if let Some(r) = segment.byte_range {
+            let _ = writeln!(out, "#EXT-X-BYTERANGE:{}@{}", r.length, r.offset);
+        }
+        let _ = writeln!(out, "{}", segment.uri);
+    }
+    if playlist.end_list {
+        out.push_str("#EXT-X-ENDLIST\n");
+    }
+    out
+}
+
+/// The `#EXT-X-KEY` line putting `key` in effect (`METHOD=NONE` for `None`).
+fn key_tag(key: Option<&SegmentKey>) -> String {
+    let Some(key) = key else {
+        return String::from("#EXT-X-KEY:METHOD=NONE\n");
+    };
+    let method = match key.method {
+        KeyMethod::Aes128 => "AES-128",
+        KeyMethod::SampleAes => "SAMPLE-AES",
+    };
+    let mut line = String::new();
+    let _ = write!(line, "#EXT-X-KEY:METHOD={method},URI=\"{}\"", key.uri);
+    if let Some(iv) = key.iv {
+        let _ = write!(line, ",IV={}", hex16(&iv));
+    }
+    if let Some(kid) = key.key_id {
+        let _ = write!(line, ",KEYID={}", hex16(&kid));
+    }
+    line.push('\n');
+    line
+}
+
+/// 16 bytes as the `0x<32 hex digits>` form [`parse_iv`] reads back.
+fn hex16(bytes: &[u8; 16]) -> String {
+    let mut s = String::from("0x");
+    for b in bytes {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -776,6 +857,63 @@ mod tests {
                 key_id: None
             }),
         );
+    }
+
+    #[test]
+    fn written_media_playlist_parses_back_identically() {
+        // Every media-playlist feature the writer emits: an fMP4 init map, a
+        // rotating key, byte ranges, and a closing ENDLIST.
+        let mut iv = [0u8; 16];
+        iv[15] = 0x2a;
+        let key = SegmentKey {
+            method: KeyMethod::Aes128,
+            uri: "k.key".into(),
+            iv: Some(iv),
+            key_id: None,
+        };
+        let original = MediaPlaylist {
+            target_duration_secs: 4,
+            media_sequence: 12,
+            segments: alloc::vec![
+                Segment {
+                    uri: "seg0.m4s".into(),
+                    duration_ms: 4000,
+                    key: None,
+                    byte_range: None,
+                },
+                Segment {
+                    uri: "seg1.m4s".into(),
+                    duration_ms: 3960,
+                    key: Some(key.clone()),
+                    byte_range: Some(ByteRange {
+                        offset: 900,
+                        length: 250,
+                    }),
+                },
+                Segment {
+                    uri: "seg2.m4s".into(),
+                    duration_ms: 120,
+                    key: Some(key),
+                    byte_range: None,
+                },
+            ],
+            map_uri: Some("init.mp4".into()),
+            map_byte_range: None,
+            end_list: true,
+        };
+        let text = write_media(&original);
+        assert!(
+            text.starts_with("#EXTM3U\n#EXT-X-VERSION:6\n"),
+            "an EXT-X-MAP playlist declares version 6: {text}"
+        );
+        assert!(
+            text.contains("#EXTINF:3.960,\n"),
+            "fractional EXTINF: {text}"
+        );
+        let Playlist::Media(back) = parse(&text).unwrap() else {
+            panic!("expected media playlist");
+        };
+        assert_eq!(back, original);
     }
 
     #[test]

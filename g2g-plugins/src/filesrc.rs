@@ -220,6 +220,11 @@ impl SourceLoop for FileSrc {
             }
 
             let mut file = File::open(&self.path).map_err(io_err)?;
+            // The file size bounds a downstream demuxer's byte-offset guesses; an
+            // unreadable metadata just leaves the length unknown.
+            if let (Some(ctl), Ok(meta)) = (self.seek.as_ref(), file.metadata()) {
+                ctl.set_stream_len(meta.len());
+            }
             let mut sequence = 0u64;
             loop {
                 // A flushing byte-seek repositions the read before the next chunk

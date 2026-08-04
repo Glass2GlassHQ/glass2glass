@@ -83,6 +83,43 @@ async fn silence_is_all_zero_samples() {
 }
 
 #[tokio::test]
+async fn s24_records_as_24_bit_pcm() {
+    use g2g_core::runtime::run_source_transform_sink;
+    use g2g_plugins::audioconvert::AudioConvert;
+
+    let path = temp_path("s24");
+    // 10 buffers x 10 ms = 100 ms of 1 kHz stereo at 48 kHz, widened to 24-bit.
+    let mut src = AudioTestSrc::new(48_000, 2, 1_000, 10);
+    let mut conv = AudioConvert::new(AudioFormat::PcmS24Le, 2);
+    let mut sink = WavSink::new(&path);
+
+    run_source_transform_sink(&mut src, &mut conv, &mut sink, &NullClock, 4)
+        .await
+        .expect("s16 -> convert(s24) -> wav negotiates and flows");
+    assert!(sink.eos_seen());
+
+    let data = std::fs::read(&path).expect("wav exists");
+    // canonical 44-byte PCM header, 3-byte packed samples.
+    assert_eq!(
+        u16::from_le_bytes(data[20..22].try_into().unwrap()),
+        1,
+        "tag"
+    );
+    assert_eq!(u16::from_le_bytes(data[22..24].try_into().unwrap()), 2);
+    assert_eq!(u16::from_le_bytes(data[34..36].try_into().unwrap()), 24);
+    assert_eq!(
+        u16::from_le_bytes(data[32..34].try_into().unwrap()),
+        6,
+        "block align"
+    );
+    let expected = (48_000f64 * 0.1) as usize * 2 * 3;
+    let data_size = u32::from_le_bytes(data[40..44].try_into().unwrap());
+    assert_eq!(data_size as usize, expected, "24-bit track length");
+    assert_eq!(data.len(), 44 + expected);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
 async fn wavsink_rejects_compressed_audio() {
     use g2g_core::element::AsyncElement;
     let mut sink = WavSink::new(temp_path("reject"));

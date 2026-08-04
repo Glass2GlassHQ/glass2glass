@@ -68,16 +68,19 @@ use gbm::{
 };
 use khronos_egl as egl;
 
+use g2g_core::element::QosMessage;
 use g2g_core::memory::OwnedCudaBuffer;
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
-    AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority,
-    ConfigureOutcome, Dim, Frame, G2gError, HardwareError, MemoryDomain, OutputSink, PipelineClock,
-    PipelinePacket, Rate, RawVideoFormat,
+    AllocationParams, AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockCandidate,
+    ClockPriority, ClockSync, ConfigureOutcome, Dim, Frame, G2gError, HardwareError, MemoryDomain,
+    OutputSink, PipelineClock, PipelinePacket, PresentationPacer, PropError, PropKind, PropValue,
+    PropertySpec, Rate, RawVideoFormat, MAX_LATENESS_PROPERTY, QOS_INTERVAL_PROPERTY,
 };
 
+use crate::clock::wait_to_present;
 use crate::cuda::nv12_byte_size;
-use crate::glnv12::GlState;
+use crate::glnv12::{GlMode, GlState};
 
 /// `EGL_PLATFORM_GBM_KHR` (khronos-egl 6 has no named constant for it).
 const EGL_PLATFORM_GBM_KHR: egl::Enum = 0x31D7;
@@ -158,6 +161,10 @@ pub struct CudaKmsSink {
     height: u32,
     frames_presented: Arc<AtomicU64>,
     latency: Arc<LatencyHistogram>,
+    /// PTS pacing + QoS late-drop, on top of the worker's flip-paced ack: idle
+    /// until the runner hands over a clock, and the default lateness bound never
+    /// drops.
+    pacer: PresentationPacer,
 }
 
 impl core::fmt::Debug for CudaKmsSink {
@@ -190,6 +197,7 @@ impl CudaKmsSink {
             height: 0,
             frames_presented: Arc::new(AtomicU64::new(0)),
             latency: Arc::new(LatencyHistogram::new()),
+            pacer: PresentationPacer::new(),
         }
     }
 
@@ -197,6 +205,33 @@ impl CudaKmsSink {
     pub fn with_device<P: Into<PathBuf>>(mut self, path: P) -> Self {
         self.device_path = path.into();
         self
+    }
+
+    /// QoS late-drop bound: once PTS pacing is engaged, a frame past its
+    /// deadline by more than `ns` is dropped instead of presented late, so the
+    /// sink catches up. The default (`u64::MAX`) never drops.
+    pub fn with_max_lateness_ns(mut self, ns: u64) -> Self {
+        self.pacer.set_max_lateness_ns(ns);
+        self
+    }
+
+    /// Post a running-stats `Qos` report every `ns` of clock time while frames
+    /// present, on top of the per-drop reports. `0` (the default) reports only
+    /// drops.
+    pub fn with_qos_interval_ns(mut self, ns: u64) -> Self {
+        self.pacer.set_report_interval_ns(ns);
+        self
+    }
+
+    /// Attach the pipeline bus so QoS reports reach the application.
+    pub fn with_bus(mut self, bus: BusHandle) -> Self {
+        self.pacer.set_bus(bus);
+        self
+    }
+
+    /// Frames dropped by QoS late-drop (past their deadline beyond the bound).
+    pub fn late_dropped(&self) -> u64 {
+        self.pacer.late_dropped()
     }
 
     pub fn frames_presented(&self) -> u64 {
@@ -263,6 +298,54 @@ impl AsyncElement for CudaKmsSink {
             height: Dim::Any,
             framerate: Rate::Any,
         }))
+    }
+
+    /// Adopt the elected clock + base time so frames scan out at their PTS
+    /// deadline rather than as fast as the flip cadence allows.
+    fn set_clock_sync(&mut self, sync: ClockSync) {
+        self.pacer.set_clock_sync(sync);
+    }
+
+    /// Relay a late drop upstream (M174): the runner forwards it onto the
+    /// incoming link, where the producer can shed load.
+    fn take_qos(&mut self) -> Option<QosMessage> {
+        self.pacer.take_qos()
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        const PROPS: &[PropertySpec] = &[
+            PropertySpec::new(
+                "device",
+                PropKind::Str,
+                "DRM device node (e.g. /dev/dri/card0)",
+            )
+            .with_default("/dev/dri/card0"),
+            MAX_LATENESS_PROPERTY,
+            QOS_INTERVAL_PROPERTY,
+        ];
+        PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "device" => {
+                self.device_path = PathBuf::from(value.as_str().ok_or(PropError::Type)?);
+                Ok(())
+            }
+            _ => self
+                .pacer
+                .set_property(name, &value)
+                .unwrap_or(Err(PropError::Unknown)),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "device" => Some(PropValue::Str(
+                self.device_path.to_string_lossy().into_owned(),
+            )),
+            _ => self.pacer.get_property(name),
+        }
     }
 
     /// Presents from CUDA device memory only; declared for the M354 converter
@@ -353,6 +436,14 @@ impl AsyncElement for CudaKmsSink {
                     let MemoryDomain::Cuda(buf) = domain else {
                         return Err(G2gError::UnsupportedDomain);
                     };
+                    // PTS pacing: hold the frame until its deadline on the
+                    // elected clock, or drop it when it is already too late (the
+                    // QoS bound) or outside the segment. Unpaced without a clock:
+                    // scan out as fast as the flip cadence allows.
+                    let presented = self.frames_presented.load(Ordering::Relaxed);
+                    if !wait_to_present(self.pacer.judge(timing.pts_ns, presented)).await {
+                        return Ok(());
+                    }
                     let tx = self.cmd_tx.as_ref().ok_or(G2gError::NotConfigured)?;
                     let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
                     tx.send(WorkerCmd::Frame {
@@ -367,9 +458,17 @@ impl AsyncElement for CudaKmsSink {
                         .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
                     Ok(())
                 }
-                PipelinePacket::CapsChanged(_)
-                | PipelinePacket::Flush
-                | PipelinePacket::Segment(_) => Ok(()),
+                PipelinePacket::CapsChanged(_) => Ok(()),
+                // Track the playback segment so PTS maps to running time
+                // (correct across a seek), and re-anchor after a seek flush.
+                PipelinePacket::Segment(seg) => {
+                    self.pacer.set_segment(seg);
+                    Ok(())
+                }
+                PipelinePacket::Flush => {
+                    self.pacer.flush();
+                    Ok(())
+                }
                 PipelinePacket::Eos => {
                     self.shutdown();
                     Ok(())
@@ -555,7 +654,7 @@ impl WorkerState {
             })
         };
         // SAFETY: `gl` wraps the GL ES 3 context made current above.
-        let gl_state = unsafe { GlState::build(gl, width, height) }?;
+        let gl_state = unsafe { GlState::build(gl, width, height, GlMode::Nv12) }?;
 
         Ok(WorkerState {
             gl: gl_state,

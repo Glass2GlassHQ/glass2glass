@@ -5,6 +5,12 @@
 //! best HDR colour space the surface offers (`HDR10_ST2084` PQ, falling back to
 //! scRGB linear, then SDR) plus BT.2020 mastering metadata.
 //!
+//! The raw sink is driven as a pipeline element ([`VulkanHdrPresentSink`]): each
+//! texture goes in as a `DataFrame` with a PTS, so the present runs through the
+//! shared presentation pacer. This demo elects no clock, so the pacer answers
+//! "present now" and the redraw loop's cadence still drives the screen; in a graph
+//! with a clock the same element holds each frame to its PTS and drops late ones.
+//!
 //! wgpu 29 cannot express a swapchain colour space, so the sink owns a raw
 //! `VK_KHR_swapchain` on the decode device (window + event loop belong to the app,
 //! which is why this is an example, not a self-checking test). Whether the picture
@@ -27,8 +33,15 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use g2g_core::frame::Frame;
+use g2g_core::memory::OwnedWgpuTexture;
 use g2g_core::runtime::block_on;
-use g2g_plugins::vulkanhdrsink::{HdrMasteringDisplay, VulkanHdrSink};
+use g2g_core::{
+    AsyncElement, Caps, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket,
+    PushOutcome, Rate, RawVideoFormat, Segment,
+};
+use g2g_plugins::gpu::WgpuTextureKeepAlive;
+use g2g_plugins::vulkanhdrsink::{HdrMasteringDisplay, VulkanHdrPresentSink, VulkanHdrSink};
 use g2g_plugins::vulkanvideo::{
     extract_h265_parameter_sets, open_h265_decode_device, to_std_h265_params, VulkanVideoError,
 };
@@ -53,7 +66,7 @@ struct App {
     device: g2g_plugins::vulkanvideo::VulkanVideoDevice,
     textures: Vec<wgpu::Texture>,
     window: Option<Arc<Window>>,
-    sink: Option<VulkanHdrSink>,
+    sink: Option<VulkanHdrPresentSink>,
     idx: usize,
     last_advance: Instant,
 }
@@ -78,12 +91,26 @@ impl App {
                 HdrMasteringDisplay::default(),
             )
         } {
-            Ok(sink) => {
+            Ok(raw) => {
+                // SAFETY: every frame fed below carries one of `self.textures`,
+                // live decode-device textures in SHADER_READ_ONLY layout whose
+                // decode completed before the window opened; nothing else submits
+                // work on that device.
+                let mut sink = unsafe { VulkanHdrPresentSink::new(raw) };
                 eprintln!(
                     "HDR present: colour space = {:?}, format = {:?}",
                     sink.color_space(),
                     sink.format()
                 );
+                sink.configure_pipeline(&Caps::RawVideo {
+                    format: RawVideoFormat::Rgba8,
+                    width: Dim::Fixed(W),
+                    height: Dim::Fixed(H),
+                    framerate: Rate::Fixed(15 << 16),
+                })
+                .expect("sink configure");
+                block_on(sink.process(PipelinePacket::Segment(Segment::new()), &mut NullSink))
+                    .expect("segment");
                 self.sink = Some(sink);
             }
             Err(e) => eprintln!("could not build HDR present sink: {e:?}"),
@@ -97,9 +124,21 @@ impl App {
         if self.textures.is_empty() {
             return;
         }
-        // SAFETY: the texture is a live decode-device texture in SHADER_READ_ONLY
-        // layout (the decoder's GPU-texture output); no other GPU work runs now.
-        if let Err(e) = unsafe { sink.present(&self.textures[self.idx]) } {
+        // The current texture as a paced DataFrame; its PTS is where the clip's
+        // 15 fps playback would put it, which is what a clocked graph paces to.
+        let frame = Frame::new(
+            MemoryDomain::WgpuTexture(OwnedWgpuTexture::new(
+                W,
+                H,
+                Arc::new(WgpuTextureKeepAlive(self.textures[self.idx].clone())),
+            )),
+            FrameTiming {
+                pts_ns: self.idx as u64 * FRAME_INTERVAL.as_nanos() as u64,
+                ..FrameTiming::default()
+            },
+            self.idx as u64,
+        );
+        if let Err(e) = block_on(sink.process(PipelinePacket::DataFrame(frame), &mut NullSink)) {
             eprintln!("present error: {e:?}");
         }
         let n = sink.presented_count();
@@ -214,4 +253,16 @@ fn main() {
         last_advance: Instant::now(),
     };
     event_loop.run_app(&mut app).expect("run app");
+}
+
+/// A discarding sink for the terminal HDR present element (it forwards nothing).
+struct NullSink;
+impl OutputSink for NullSink {
+    fn push<'a>(
+        &'a mut self,
+        _packet: PipelinePacket,
+    ) -> core::pin::Pin<Box<dyn core::future::Future<Output = Result<PushOutcome, G2gError>> + 'a>>
+    {
+        Box::pin(async { Ok(PushOutcome::Accepted) })
+    }
 }

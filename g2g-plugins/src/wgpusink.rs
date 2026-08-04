@@ -28,11 +28,14 @@ use core::pin::Pin;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
+use g2g_core::element::QosMessage;
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, G2gError, MemoryDomain, OutputSink,
-    PipelinePacket,
+    AsyncElement, BusHandle, Caps, CapsConstraint, ClockSync, ConfigureOutcome, G2gError,
+    MemoryDomain, OutputSink, PipelinePacket, PresentationPacer, PropError, PropValue,
+    PropertySpec, PACING_PROPERTIES,
 };
 
+use crate::clock::wait_to_present;
 use crate::gpu::{gpu_err, texture_of, GpuContext};
 
 /// Fullscreen-triangle blit: sample the source texture and write the target. The
@@ -91,6 +94,9 @@ pub struct WgpuSink {
     target: Target,
     configured: bool,
     presented: u64,
+    /// PTS pacing + QoS late-drop: idle until the runner hands over a clock, and
+    /// the default lateness bound never drops.
+    pacer: PresentationPacer,
 }
 
 impl core::fmt::Debug for WgpuSink {
@@ -226,12 +232,40 @@ impl WgpuSink {
             target,
             configured: false,
             presented: 0,
+            pacer: PresentationPacer::new(),
         }
     }
 
     /// Count of frames presented.
     pub fn presented_count(&self) -> u64 {
         self.presented
+    }
+
+    /// QoS late-drop bound: once PTS pacing is engaged, a frame past its
+    /// deadline by more than `ns` is dropped instead of presented late, so the
+    /// sink catches up. The default (`u64::MAX`) never drops.
+    pub fn with_max_lateness_ns(mut self, ns: u64) -> Self {
+        self.pacer.set_max_lateness_ns(ns);
+        self
+    }
+
+    /// Post a running-stats `Qos` report every `ns` of clock time while frames
+    /// present, on top of the per-drop reports. `0` (the default) reports only
+    /// drops.
+    pub fn with_qos_interval_ns(mut self, ns: u64) -> Self {
+        self.pacer.set_report_interval_ns(ns);
+        self
+    }
+
+    /// Attach the pipeline bus so QoS reports reach the application.
+    pub fn with_bus(mut self, bus: BusHandle) -> Self {
+        self.pacer.set_bus(bus);
+        self
+    }
+
+    /// Frames dropped by QoS late-drop (past their deadline beyond the bound).
+    pub fn late_dropped(&self) -> u64 {
+        self.pacer.late_dropped()
     }
 
     /// Blit `src` onto the target. For a surface target, acquires and presents
@@ -415,6 +449,32 @@ impl AsyncElement for WgpuSink {
         Ok(ConfigureOutcome::Accepted)
     }
 
+    /// Adopt the elected clock + base time so textures are blitted at their PTS
+    /// deadline rather than as fast as the producer pushes them.
+    fn set_clock_sync(&mut self, sync: ClockSync) {
+        self.pacer.set_clock_sync(sync);
+    }
+
+    /// Relay a late drop upstream (M174): the runner forwards it onto the
+    /// incoming link, where the producer can shed load.
+    fn take_qos(&mut self) -> Option<QosMessage> {
+        self.pacer.take_qos()
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        PACING_PROPERTIES
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        self.pacer
+            .set_property(name, &value)
+            .unwrap_or(Err(PropError::Unknown))
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        self.pacer.get_property(name)
+    }
+
     fn process<'a>(
         &'a mut self,
         packet: PipelinePacket,
@@ -424,16 +484,32 @@ impl AsyncElement for WgpuSink {
             if !self.configured {
                 return Err(G2gError::NotConfigured);
             }
-            if let PipelinePacket::DataFrame(frame) = packet {
-                let MemoryDomain::WgpuTexture(owned) = &frame.domain else {
-                    return Err(G2gError::UnsupportedDomain);
-                };
-                // A frame from a different GPU producer (foreign keep-alive type)
-                // is not presentable by this sink.
-                let texture = texture_of(owned).ok_or(G2gError::UnsupportedDomain)?;
-                self.present(texture)?;
+            match packet {
+                PipelinePacket::DataFrame(frame) => {
+                    // PTS pacing: hold the texture until its deadline on the
+                    // elected clock, or drop it when it is already too late (the
+                    // QoS bound) or outside the segment. Unpaced without a clock:
+                    // blit as fast as the producer pushes.
+                    let paced = self.pacer.judge(frame.timing.pts_ns, self.presented);
+                    if !wait_to_present(paced).await {
+                        return Ok(());
+                    }
+                    let MemoryDomain::WgpuTexture(owned) = &frame.domain else {
+                        return Err(G2gError::UnsupportedDomain);
+                    };
+                    // A frame from a different GPU producer (foreign keep-alive type)
+                    // is not presentable by this sink.
+                    let texture = texture_of(owned).ok_or(G2gError::UnsupportedDomain)?;
+                    self.present(texture)?;
+                }
+                // Track the playback segment so PTS maps to running time (correct
+                // across a seek), and re-anchor after a seek flush.
+                PipelinePacket::Segment(seg) => self.pacer.set_segment(seg),
+                PipelinePacket::Flush => self.pacer.flush(),
+                // Terminal sink: other control packets are consumed, nothing is
+                // forwarded.
+                _ => {}
             }
-            // Terminal sink: control packets are consumed, nothing is forwarded.
             Ok(())
         })
     }
@@ -492,7 +568,7 @@ mod tests {
         texture
     }
 
-    fn wgpu_frame(ctx: &GpuContext, w: u32, h: u32, texture: wgpu::Texture) -> Frame {
+    fn wgpu_frame(ctx: &GpuContext, w: u32, h: u32, texture: wgpu::Texture, pts_ns: u64) -> Frame {
         use crate::gpu::WgpuTextureKeepAlive;
         let _ = ctx;
         Frame::new(
@@ -501,7 +577,10 @@ mod tests {
                 h,
                 alloc::sync::Arc::new(WgpuTextureKeepAlive(texture)),
             )),
-            FrameTiming::default(),
+            FrameTiming {
+                pts_ns,
+                ..FrameTiming::default()
+            },
             0,
         )
     }
@@ -545,7 +624,7 @@ mod tests {
             framerate: g2g_core::Rate::Any,
         })
         .unwrap();
-        let frame = wgpu_frame(&ctx, w, h, src);
+        let frame = wgpu_frame(&ctx, w, h, src, 0);
         sink.process(PipelinePacket::DataFrame(frame), &mut NullSink)
             .await
             .unwrap();
@@ -567,6 +646,97 @@ mod tests {
             px(0, 3)
         );
         assert_eq!(sink.presented_count(), 1);
+    }
+
+    /// A clock whose `now_ns` the test drives by hand.
+    #[derive(Debug)]
+    struct ManualClock(alloc::sync::Arc<core::sync::atomic::AtomicU64>);
+    impl g2g_core::PipelineClock for ManualClock {
+        fn now_ns(&self) -> u64 {
+            self.0.load(core::sync::atomic::Ordering::Relaxed)
+        }
+    }
+
+    /// PTS pacing on a real GPU: an on-time frame is blitted, one held until its
+    /// deadline is blitted after waiting that long, and a frame past the lateness
+    /// bound is dropped, reported on the bus, and offered upstream via `take_qos`.
+    #[tokio::test]
+    async fn pts_pacing_presents_on_time_and_drops_late_frames() {
+        use core::sync::atomic::{AtomicU64, Ordering};
+        use g2g_core::clock::PlayAnchor;
+        use std::time::Instant;
+
+        if !gpu_available().await {
+            std::eprintln!("no wgpu adapter; skipping WgpuSink pacing test");
+            return;
+        }
+        let ctx = GpuContext::headless().await.unwrap();
+        let (w, h) = (4u32, 4u32);
+        let pixels = alloc::vec![255u8; (w * h * 4) as usize];
+        let rgba = Caps::RawVideo {
+            format: g2g_core::RawVideoFormat::Rgba8,
+            width: g2g_core::Dim::Fixed(w),
+            height: g2g_core::Dim::Fixed(h),
+            framerate: g2g_core::Rate::Any,
+        };
+
+        // The play anchor stamped at clock 0 makes each frame's deadline its PTS.
+        let (bus, handle) = g2g_core::Bus::new(4);
+        let clock = alloc::sync::Arc::new(AtomicU64::new(0));
+        let anchor = PlayAnchor::new();
+        anchor.stamp(0);
+        let mut sink = WgpuSink::offscreen(ctx.clone(), w, h)
+            .with_max_lateness_ns(0)
+            .with_bus(handle);
+        sink.configure_pipeline(&rgba).unwrap();
+        AsyncElement::set_clock_sync(
+            &mut sink,
+            g2g_core::ClockSync::with_play_anchor(
+                alloc::sync::Arc::new(ManualClock(clock.clone())),
+                0,
+                anchor,
+            ),
+        );
+
+        // Due now: presented, nothing reported.
+        let f = wgpu_frame(&ctx, w, h, source_texture(&ctx, w, h, &pixels), 0);
+        sink.process(PipelinePacket::DataFrame(f), &mut NullSink)
+            .await
+            .unwrap();
+        assert_eq!(sink.presented_count(), 1, "on-time frame presented");
+        assert!(sink.late_dropped() == 0 && AsyncElement::take_qos(&mut sink).is_none());
+        assert_eq!(bus.try_recv(), None, "no report for an on-time frame");
+
+        // Due in 5 ms: held that long, then presented.
+        let f = wgpu_frame(&ctx, w, h, source_texture(&ctx, w, h, &pixels), 5_000_000);
+        let started = Instant::now();
+        sink.process(PipelinePacket::DataFrame(f), &mut NullSink)
+            .await
+            .unwrap();
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(5),
+            "held until its deadline, waited {:?}",
+            started.elapsed()
+        );
+        assert_eq!(sink.presented_count(), 2);
+
+        // Clock jumps to 100 ms: a frame due at 10 ms is 90 ms late.
+        clock.store(100_000_000, Ordering::Relaxed);
+        let f = wgpu_frame(&ctx, w, h, source_texture(&ctx, w, h, &pixels), 10_000_000);
+        sink.process(PipelinePacket::DataFrame(f), &mut NullSink)
+            .await
+            .expect("a dropped frame is not an error");
+        assert_eq!(sink.presented_count(), 2, "the late frame was not blitted");
+        assert_eq!(sink.late_dropped(), 1);
+        let upstream = AsyncElement::take_qos(&mut sink).expect("upstream QoS report");
+        assert_eq!(upstream.jitter_ns, 90_000_000);
+        assert_eq!(upstream.running_time_ns, 10_000_000);
+        match bus.try_recv() {
+            Some(g2g_core::BusMessage::Qos {
+                processed, dropped, ..
+            }) => assert_eq!((processed, dropped), (2, 1)),
+            other => panic!("expected a Qos message, got {other:?}"),
+        }
     }
 
     #[cfg(feature = "vello-overlay")]

@@ -27,8 +27,10 @@
 //! sequence header, temporal delimiters stripped, M773); audio is AAC (ASC) or
 //! Opus (an in-band `OpusHead` verbatim, else a synthesised one, plus the
 //! `CodecDelay` / `SeekPreRoll` its mapping needs, M792), so VP9 + Opus muxes a
-//! WebM. Every input pad must carry a stream (a pad that ends without an access
-//! unit stalls the build).
+//! WebM. A `Caps::Text{Utf8}` pad adds a subtitle track (M898): one cue per frame,
+//! written as a `BlockGroup` whose `BlockDuration` is the cue's display window, in
+//! the `S_TEXT/*` syntax the `subtitle-format` property picks. Every A/V input pad
+//! must carry a stream (a pad that ends without an access unit stalls the build).
 
 use core::future::Future;
 use core::pin::Pin;
@@ -41,7 +43,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::{
     split_tags, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
     Dim, FrameTiming, G2gError, InputAggregator, MemoryDomain, MultiInputElement, OutputSink,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, TagList, VideoCodec,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, TagList, TextFormat, VideoCodec,
 };
 
 use crate::fmp4mux::{
@@ -51,6 +53,7 @@ use crate::fmp4mux::{
 use crate::matroska::{finalize_seekable, MatroskaMuxer, MkvCodec, MkvTrackConfig, MkvTrackSpec};
 use crate::mp4muxn::{asc_from_adts, strip_adts};
 use crate::opusparse::{is_opus_config, parse_opus_head, synth_opus_head};
+use crate::subparse::{frame_subtitle_block, ASS_SCRIPT_HEADER};
 
 /// What an input pad carries, learned from its negotiated caps at configure.
 #[derive(Debug, Clone, Copy)]
@@ -61,6 +64,10 @@ enum PadKind {
         channels: u8,
         rate: u32,
     },
+    /// A timed-text subtitle pad (M898): the pad carries one plain-UTF-8 cue per
+    /// frame, timed by the frame's PTS + duration. The on-disk `S_TEXT/*` syntax
+    /// is the muxer's `subtitle-format`, not the pad's.
+    Text,
 }
 
 /// A track's init data, captured from its first access unit. `param_sets` is the
@@ -81,6 +88,9 @@ enum TrackInit {
         rate: u32,
         config: Vec<u8>,
     },
+    /// A subtitle track: it needs nothing from the stream, so it is ready at
+    /// configure. The on-disk syntax comes from the muxer's `subtitle-format`.
+    Text,
 }
 
 /// Muxes N elementary streams into one Matroska byte stream, PTS-ordered.
@@ -116,6 +126,11 @@ pub struct MkvMuxN {
     /// Per-input metadata, written as `Targets`-scoped `Tag`s in the same `Tags`
     /// element (M787). One (possibly empty) list per input pad.
     track_tags: Vec<TagList>,
+    /// The on-disk syntax a text pad's cues are written in (M898): the `S_TEXT/*`
+    /// CodecID and the block framing that goes with it.
+    subtitle_format: TextFormat,
+    /// Per-pad ASS event counter: the `ReadOrder` field leading each block.
+    text_seq: Vec<u64>,
 }
 
 impl MkvMuxN {
@@ -135,6 +150,8 @@ impl MkvMuxN {
             pending: Vec::new(),
             tags: TagList::new(),
             track_tags: alloc::vec![TagList::new(); inputs],
+            subtitle_format: TextFormat::Utf8,
+            text_seq: alloc::vec![0; inputs],
         }
     }
 
@@ -174,6 +191,18 @@ impl MkvMuxN {
         self
     }
 
+    /// The `S_TEXT/*` syntax a text pad's cues are written in: [`TextFormat::Utf8`]
+    /// (the default, `S_TEXT/UTF8`, which ffmpeg reports as `subrip`) or
+    /// [`TextFormat::Ssa`] (`S_TEXT/ASS`, cues framed as `Dialogue` fields behind
+    /// an ASS script header `CodecPrivate`). Any other value leaves the default:
+    /// the pad always carries plain cue text, this only picks how it is stored.
+    pub fn with_subtitle_format(mut self, format: TextFormat) -> Self {
+        if subtitle_format_str(format).is_some() {
+            self.subtitle_format = format;
+        }
+        self
+    }
+
     pub fn emitted(&self) -> u64 {
         self.emitted
     }
@@ -204,6 +233,11 @@ impl MkvMuxN {
                 channels: *channels,
                 rate: *sample_rate,
             }),
+            // Only the elementary cue form: a `Text` pad of a document format
+            // (`Srt` / `Ssa` / `Ttml`) carries whole-file bytes, not timed cues.
+            Caps::Text {
+                format: TextFormat::Utf8,
+            } => Some(PadKind::Text),
             _ => None,
         }
     }
@@ -311,7 +345,9 @@ impl MkvMuxN {
                     });
                 }
             },
-            None => {}
+            // A text track's init is fixed at configure (nothing rides the cues),
+            // so nothing to capture here.
+            Some(PadKind::Text) | None => {}
         }
     }
 
@@ -319,7 +355,8 @@ impl MkvMuxN {
     /// AVCC length-prefixed (keyframe from the NAL types); VP8/VP9 frames are
     /// stored verbatim (keyframe from the frame header). AAC strips its ADTS
     /// header; Opus packets are stored raw. Audio frames are always sync samples.
-    fn sample_for(&self, input: usize, au: &[u8]) -> (Vec<u8>, bool) {
+    /// A text cue is framed in the track's `S_TEXT/*` syntax (M898).
+    fn sample_for(&mut self, input: usize, au: &[u8]) -> (Vec<u8>, bool) {
         match self.kinds[input] {
             Some(PadKind::Video(codec)) => match codec {
                 VideoCodec::H264 | VideoCodec::H265 => {
@@ -338,6 +375,13 @@ impl MkvMuxN {
                 format: AudioFormat::Aac,
                 ..
             }) => (strip_adts(au).to_vec(), true),
+            Some(PadKind::Text) => {
+                let seq = self.text_seq[input];
+                self.text_seq[input] = seq.saturating_add(1);
+                let text = alloc::string::String::from_utf8_lossy(au);
+                let block = frame_subtitle_block(&text, self.subtitle_format, seq);
+                (block.into_bytes(), true)
+            }
             _ => (au.to_vec(), true),
         }
     }
@@ -379,8 +423,9 @@ impl MkvMuxN {
 
 /// The muxer track config (spec + `CodecPrivate`) for a captured init: the avcC /
 /// hvcC record for H.26x video (none for VP8/VP9), the AudioSpecificConfig for AAC
-/// or the `OpusHead` for Opus.
-fn track_config(init: &TrackInit) -> MkvTrackConfig {
+/// or the `OpusHead` for Opus. A text track's `CodecPrivate` is the ASS script
+/// header when it is stored as `S_TEXT/ASS`, and nothing otherwise.
+fn track_config(init: &TrackInit, subtitle_format: TextFormat) -> MkvTrackConfig {
     match init {
         TrackInit::Video {
             codec,
@@ -436,6 +481,29 @@ fn track_config(init: &TrackInit) -> MkvTrackConfig {
                 codec_private: config.clone(),
             }
         }
+        TrackInit::Text => MkvTrackConfig {
+            spec: MkvTrackSpec {
+                codec: MkvCodec::Subtitle(subtitle_format),
+                width: 0,
+                height: 0,
+                channels: 0,
+                sample_rate: 0,
+            },
+            codec_private: match subtitle_format {
+                TextFormat::Ssa => Vec::from(ASS_SCRIPT_HEADER.as_bytes()),
+                _ => Vec::new(),
+            },
+        },
+    }
+}
+
+/// The `subtitle-format` property value naming a storage syntax, or `None` for a
+/// format no `S_TEXT/*` mapping covers.
+fn subtitle_format_str(format: TextFormat) -> Option<&'static str> {
+    match format {
+        TextFormat::Utf8 => Some("utf8"),
+        TextFormat::Ssa => Some("ass"),
+        _ => None,
     }
 }
 
@@ -493,6 +561,12 @@ impl MultiInputElement for MkvMuxN {
         {
             self.dims[input] = (*w, *h);
         }
+        // A text track's `TrackEntry` needs nothing from the stream, so it is
+        // ready now: the first cue can be many seconds in, and the Tracks element
+        // (which waits on every track) would hold the A/V until then.
+        if matches!(kind, PadKind::Text) {
+            self.inits[input] = Some(TrackInit::Text);
+        }
         self.kinds[input] = Some(kind);
         Ok(ConfigureOutcome::Accepted)
     }
@@ -515,6 +589,12 @@ impl MultiInputElement for MkvMuxN {
                 "two-pass mode: buffer the file and finalize with a front SeekHead",
             )
             .with_default("false"),
+            PropertySpec::new(
+                "subtitle-format",
+                PropKind::Str,
+                "storage syntax for a text input: utf8 (S_TEXT/UTF8) | ass (S_TEXT/ASS)",
+            )
+            .with_default("utf8"),
         ];
         PROPS
     }
@@ -539,6 +619,15 @@ impl MultiInputElement for MkvMuxN {
                 self.seekable = v;
                 Ok(())
             }
+            "subtitle-format" => {
+                let v = value.as_str().ok_or(PropError::Type)?;
+                self.subtitle_format = match v {
+                    "utf8" => TextFormat::Utf8,
+                    "ass" | "ssa" => TextFormat::Ssa,
+                    _ => return Err(PropError::Value),
+                };
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -547,6 +636,11 @@ impl MultiInputElement for MkvMuxN {
         match name {
             "streamable" => Some(PropValue::Bool(self.streamable)),
             "seekable" => Some(PropValue::Bool(self.seekable)),
+            "subtitle-format" => Some(PropValue::Str(
+                subtitle_format_str(self.subtitle_format)
+                    .unwrap_or("utf8")
+                    .into(),
+            )),
             _ => None,
         }
     }
@@ -588,10 +682,11 @@ impl MultiInputElement for MkvMuxN {
                 return Ok(());
             }
             if self.mux.is_none() {
+                let subtitle_format = self.subtitle_format;
                 let configs: Vec<MkvTrackConfig> = self
                     .inits
                     .iter()
-                    .map(|i| track_config(i.as_ref().expect("ready")))
+                    .map(|i| track_config(i.as_ref().expect("ready"), subtitle_format))
                     .collect();
                 let (global, per_track) = split_tags(&self.tags, &self.track_tags);
                 let mut mux = MatroskaMuxer::new_multi(configs).with_tags(global);

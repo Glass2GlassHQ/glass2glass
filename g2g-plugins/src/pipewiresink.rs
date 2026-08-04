@@ -45,8 +45,9 @@ use pipewire as pw;
 use pw::spa;
 
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, G2gError,
-    HardwareError, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
+    G2gError, HardwareError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
+    PropKind, PropValue, PropertySpec,
 };
 
 use crate::pwaudio::{format_pod_bytes, frame_bytes, pw_params};
@@ -60,6 +61,9 @@ enum Ctrl {
 type SharedQueue = Arc<Mutex<VecDeque<u8>>>;
 
 pub struct PipeWireSink {
+    /// Node to play to (`node.name` or object serial); empty = the default sink
+    /// the session manager picks.
+    target: String,
     ctrl_tx: Option<pw::channel::Sender<Ctrl>>,
     worker: Option<JoinHandle<()>>,
     queue: SharedQueue,
@@ -68,9 +72,19 @@ pub struct PipeWireSink {
     bytes_queued: Arc<AtomicU64>,
 }
 
+/// What the loop thread needs to open the playback stream.
+struct StreamCfg {
+    format: spa::param::audio::AudioFormat,
+    channels: u32,
+    rate: u32,
+    stride: usize,
+    target: String,
+}
+
 impl core::fmt::Debug for PipeWireSink {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("PipeWireSink")
+            .field("target", &self.target)
             .field("caps", &self.caps)
             .field("high_water", &self.high_water)
             .field("bytes_queued", &self.bytes_queued.load(Ordering::Relaxed))
@@ -87,6 +101,7 @@ impl Default for PipeWireSink {
 impl PipeWireSink {
     pub fn new() -> Self {
         Self {
+            target: String::new(),
             ctrl_tx: None,
             worker: None,
             queue: Arc::new(Mutex::new(VecDeque::new())),
@@ -94,6 +109,12 @@ impl PipeWireSink {
             caps: None,
             bytes_queued: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Play to a specific node: its `node.name` or its object serial.
+    pub fn with_target(mut self, target: impl Into<String>) -> Self {
+        self.target = target.into();
+        self
     }
 
     /// Total PCM bytes accepted from the pipeline (before any leaky drop).
@@ -175,10 +196,17 @@ impl AsyncElement for PipeWireSink {
             q.clear();
         }
 
+        let cfg = StreamCfg {
+            format,
+            channels,
+            rate,
+            stride,
+            target: self.target.clone(),
+        };
         let join = thread::Builder::new()
             .name(String::from("g2g-pipewiresink"))
             .spawn(move || {
-                worker_main(format, channels, rate, stride, queue, ctrl_rx, ready_tx);
+                worker_main(cfg, queue, ctrl_rx, ready_tx);
             })
             .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
 
@@ -198,6 +226,42 @@ impl AsyncElement for PipeWireSink {
         self.worker = Some(join);
         self.caps = Some(absolute_caps.clone());
         Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "PipeWire audio sink",
+            "Sink/Audio",
+            "Plays interleaved PCM through a PipeWire node",
+            "g2g",
+        )
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        const PROPS: &[PropertySpec] = &[PropertySpec::new(
+            "target-object",
+            PropKind::Str,
+            "node name or object serial to play to (empty = default)",
+        )
+        .with_default("")];
+        PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "target-object" => {
+                self.target = value.as_str().ok_or(PropError::Type)?.into();
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "target-object" => Some(PropValue::Str(self.target.clone())),
+            _ => None,
+        }
     }
 
     fn process<'a>(
@@ -270,15 +334,12 @@ impl PadTemplates for PipeWireSink {
 // =================================================================
 
 fn worker_main(
-    format: spa::param::audio::AudioFormat,
-    channels: u32,
-    rate: u32,
-    stride: usize,
+    cfg: StreamCfg,
     queue: SharedQueue,
     ctrl_rx: pw::channel::Receiver<Ctrl>,
     ready: std::sync::mpsc::SyncSender<Result<(), i32>>,
 ) {
-    match build_and_run(format, channels, rate, stride, queue, ctrl_rx, &ready) {
+    match build_and_run(&cfg, queue, ctrl_rx, &ready) {
         Ok(()) => {}
         Err(code) => {
             // If setup failed before `ready` was sent, report it; if it was
@@ -290,29 +351,28 @@ fn worker_main(
 }
 
 fn build_and_run(
-    format: spa::param::audio::AudioFormat,
-    channels: u32,
-    rate: u32,
-    stride: usize,
+    cfg: &StreamCfg,
     queue: SharedQueue,
     ctrl_rx: pw::channel::Receiver<Ctrl>,
     ready: &std::sync::mpsc::SyncSender<Result<(), i32>>,
 ) -> Result<(), i32> {
+    let stride = cfg.stride;
     pw::init();
     let mainloop = pw::main_loop::MainLoop::new(None).map_err(|_| -1)?;
     let context = pw::context::Context::new(&mainloop).map_err(|_| -1)?;
     let core = context.connect(None).map_err(|_| -1)?;
 
-    let stream = pw::stream::Stream::new(
-        &core,
-        "g2g-pipewiresink",
-        pw::properties::properties! {
-            *pw::keys::MEDIA_TYPE => "Audio",
-            *pw::keys::MEDIA_ROLE => "Music",
-            *pw::keys::MEDIA_CATEGORY => "Playback",
-        },
-    )
-    .map_err(|_| -1)?;
+    let mut props = pw::properties::properties! {
+        *pw::keys::MEDIA_TYPE => "Audio",
+        *pw::keys::MEDIA_ROLE => "Music",
+        *pw::keys::MEDIA_CATEGORY => "Playback",
+    };
+    if !cfg.target.is_empty() {
+        // spelled out because pipewire-rs gates its TARGET_OBJECT constant
+        // behind a crate feature this build does not enable
+        props.insert("target.object", cfg.target.as_str());
+    }
+    let stream = pw::stream::Stream::new(&core, "g2g-pipewiresink", props).map_err(|_| -1)?;
 
     let q = Arc::clone(&queue);
     let _listener = stream
@@ -353,7 +413,7 @@ fn build_and_run(
         .register()
         .map_err(|_| -1)?;
 
-    let values = format_pod_bytes(format, channels, rate);
+    let values = format_pod_bytes(cfg.format, cfg.channels, cfg.rate);
     let mut params = [spa::pod::Pod::from_bytes(&values).ok_or(-1)?];
     stream
         .connect(
@@ -399,6 +459,40 @@ mod tests {
             sample_rate: 48_000,
         };
         assert_eq!(sink.intercept_caps(&aac), Err(G2gError::CapsMismatch));
+    }
+
+    #[test]
+    fn properties_round_trip_through_the_launch_path() {
+        let mut sink = PipeWireSink::new();
+        assert_eq!(
+            sink.get_property("target-object"),
+            Some(PropValue::Str(String::new()))
+        );
+        sink.set_property("target-object", PropValue::Str(String::from("spk0")))
+            .expect("known prop");
+        assert_eq!(sink.target, "spk0");
+        assert_eq!(
+            sink.get_property("target-object"),
+            Some(PropValue::Str(String::from("spk0")))
+        );
+        assert_eq!(
+            sink.set_property("target-object", PropValue::Uint(1)),
+            Err(PropError::Type)
+        );
+        assert_eq!(
+            sink.set_property("nope", PropValue::Uint(1)),
+            Err(PropError::Unknown)
+        );
+        // the builder is the same knob
+        assert_eq!(PipeWireSink::new().with_target("spk1").target, "spk1");
+        // every declared property is handled by both halves
+        for spec in sink.properties() {
+            assert!(
+                sink.get_property(spec.name).is_some(),
+                "unhandled property {}",
+                spec.name
+            );
+        }
     }
 
     #[test]

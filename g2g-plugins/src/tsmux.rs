@@ -19,6 +19,7 @@ use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
@@ -26,12 +27,12 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
     Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, VideoCodec,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, Tag, TagList, VideoCodec,
 };
 
 use crate::mpegts::{
     TsMuxer, STREAM_TYPE_AAC, STREAM_TYPE_H264, STREAM_TYPE_H265, STREAM_TYPE_METADATA_PES,
-    STREAM_TYPE_PRIVATE_PES,
+    STREAM_TYPE_PRIVATE_PES, TAG_KEY_SERVICE_NAME, TAG_KEY_SERVICE_PROVIDER,
 };
 
 /// The PMT `stream_type` for an input caps, or `None` if unsupported. Shared by
@@ -62,6 +63,47 @@ pub(crate) fn stream_type_for(caps: &Caps, klv_sync: bool) -> Option<u8> {
     }
 }
 
+/// The SDT service text a tag list names (M872): the service name from
+/// [`Tag::Title`] or a `service_name` key, the provider from a `service_provider`
+/// key (ffprobe's names for the two `service_descriptor` fields). `None` when the
+/// list names neither, in which case no SDT is written. Shared by the single-input
+/// [`TsMux`] and `tsmuxn::TsMux`.
+///
+/// TS standardizes only these two whole-service strings and a per-stream language,
+/// with no free-form tag carrier, so every other tag is dropped rather than
+/// smuggled into a private descriptor.
+pub(crate) fn service_from_tags(tags: &TagList) -> Option<(String, String)> {
+    let mut name: Option<&str> = None;
+    let mut provider: Option<&str> = None;
+    for tag in tags.tags() {
+        match tag {
+            Tag::Title(v) => name = Some(v),
+            Tag::Other { key, value } if key.eq_ignore_ascii_case(TAG_KEY_SERVICE_NAME) => {
+                name = Some(value)
+            }
+            Tag::Other { key, value } if key.eq_ignore_ascii_case(TAG_KEY_SERVICE_PROVIDER) => {
+                provider = Some(value)
+            }
+            _ => {}
+        }
+    }
+    (name.is_some() || provider.is_some()).then(|| {
+        (
+            String::from(name.unwrap_or_default()),
+            String::from(provider.unwrap_or_default()),
+        )
+    })
+}
+
+/// The language a tag list declares, for a stream's
+/// `ISO_639_language_descriptor`. The only per-stream tag TS carries.
+pub(crate) fn language_from_tags(tags: &TagList) -> Option<&str> {
+    tags.tags().iter().find_map(|tag| match tag {
+        Tag::Language(v) => Some(v.as_str()),
+        _ => None,
+    })
+}
+
 /// Muxes one elementary stream into an MPEG-TS byte stream.
 #[derive(Debug)]
 pub struct TsMux {
@@ -80,6 +122,9 @@ pub struct TsMux {
     /// Carry a `Caps::Klv` input as synchronous KLV (metadata-in-PES 0x15)
     /// instead of the default asynchronous private PES (0x06 + 'KLVA').
     klv_sync: bool,
+    /// Metadata for the one service this muxer writes (M872): the service name /
+    /// provider go to the SDT, a `Tag::Language` to the single stream's PMT entry.
+    tags: TagList,
 }
 
 impl Default for TsMux {
@@ -97,7 +142,20 @@ impl TsMux {
             table_interval_ms: 0,
             pcr_interval_90khz: 3600,
             klv_sync: false,
+            tags: TagList::new(),
         }
+    }
+
+    /// Attach metadata (M872). A transport stream carries two kinds: the service
+    /// name / provider, written to the SDT ([`Tag::Title`] or a `service_name` key,
+    /// and a `service_provider` key), and this stream's language
+    /// ([`Tag::Language`]), written as an `ISO_639_language_descriptor` in its PMT
+    /// entry. TS defines no free-form tag carrier, so any other tag is dropped.
+    /// The multi-input sibling splits the two scopes across
+    /// `with_tags` / `with_track_tags`; a single stream needs only one list.
+    pub fn with_tags(mut self, tags: TagList) -> Self {
+        self.tags = tags;
+        self
     }
 
     /// Set the PAT/PMT re-emission interval in milliseconds (`0` = once up front).
@@ -185,6 +243,12 @@ impl AsyncElement for TsMux {
         // 90 kHz clock: 90 ticks per millisecond.
         mux.set_table_interval_90khz(self.table_interval_ms.saturating_mul(90));
         mux.set_pcr_interval_90khz(self.pcr_interval_90khz);
+        if let Some((name, provider)) = service_from_tags(&self.tags) {
+            mux.set_service(&name, &provider);
+        }
+        if let Some(language) = language_from_tags(&self.tags) {
+            mux.set_stream_language(0, language);
+        }
         self.mux = Some(mux);
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
@@ -285,6 +349,10 @@ impl AsyncElement for TsMux {
                         MemoryDomain::System(SystemSlice::from_boxed(ts.into_boxed_slice())),
                         FrameTiming {
                             pts_ns: frame.timing.pts_ns,
+                            // one output frame is one access unit's packets, so
+                            // the AU's sync flag still describes it: a downstream
+                            // segmenter cuts on it.
+                            keyframe: frame.timing.keyframe,
                             ..FrameTiming::default()
                         },
                         self.emitted,

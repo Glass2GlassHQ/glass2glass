@@ -34,6 +34,7 @@ use crate::audioresample::AudioResample;
 use crate::audiotestsrc::AudioTestSrc;
 use crate::av1parse::Av1Parse;
 use crate::capsfilter::CapsFilter;
+use crate::compositor::{Compositor, CompositorPad};
 use crate::downloadbuffer::DownloadBuffer;
 use crate::fakesink::FakeSink;
 use crate::filesink::FileSink;
@@ -77,6 +78,8 @@ use crate::vp9parse::Vp9Parse;
 use crate::aaudio::{AAudioSink, AAudioSrc};
 #[cfg(all(target_os = "linux", feature = "alsa-sink"))]
 use crate::alsasink::AlsaSink;
+#[cfg(all(target_os = "linux", feature = "alsa-src"))]
+use crate::alsasrc::AlsaSrc;
 #[cfg(feature = "av1-encode")]
 use crate::av1enc::Av1Enc;
 #[cfg(all(target_os = "android", feature = "camera2"))]
@@ -110,6 +113,10 @@ use crate::mediacodecenc::MediaCodecEnc;
 use crate::mjpegdec::MjpegDec;
 #[cfg(feature = "mjpeg-encode")]
 use crate::mjpegenc::MjpegEnc;
+#[cfg(feature = "moqt")]
+use crate::moqtsink::MoqtSink;
+#[cfg(feature = "moqt")]
+use crate::moqtsrc::MoqtSrc;
 use crate::mp4demux::Mp4Demux;
 #[cfg(all(target_os = "linux", feature = "nvdec"))]
 use crate::nvdec::NvDec;
@@ -117,8 +124,16 @@ use crate::nvdec::NvDec;
 use crate::nvenc::NvEnc;
 #[cfg(feature = "onvif")]
 use crate::onvif::OnvifSrc;
+#[cfg(all(target_os = "linux", feature = "pipewire"))]
+use crate::pipewiresink::PipeWireSink;
+#[cfg(all(target_os = "linux", feature = "pipewire"))]
+use crate::pipewiresrc::PipeWireSrc;
+#[cfg(all(target_os = "linux", feature = "pipewire"))]
+use crate::pipewirevideosrc::PipeWireVideoSrc;
 #[cfg(all(target_os = "linux", feature = "pulse-sink"))]
 use crate::pulsesink::PulseSink;
+#[cfg(all(target_os = "linux", feature = "pulse-src"))]
+use crate::pulsesrc::PulseSrc;
 #[cfg(feature = "rav1d")]
 use crate::rav1ddec::Rav1dDec;
 #[cfg(feature = "remote")]
@@ -131,6 +146,12 @@ use crate::remotewssink::RemoteWsSink;
 use crate::remotewssrc::RemoteWsSrc;
 #[cfg(feature = "remote-ws")]
 use crate::remotewstransform::RemoteWsTransform;
+#[cfg(feature = "webtransport")]
+use crate::remotewtsink::RemoteWtSink;
+#[cfg(feature = "webtransport")]
+use crate::remotewtsrc::RemoteWtSrc;
+#[cfg(feature = "webtransport")]
+use crate::remotewttransform::RemoteWtTransform;
 #[cfg(feature = "rtmp")]
 use crate::rtmpsink::RtmpSink;
 #[cfg(feature = "rtmp")]
@@ -389,6 +410,20 @@ pub fn default_registry() -> Registry {
         "klvdecode",
         || Box::new(crate::klv::KlvDecode::new()),
     ));
+    // VobSub (DVD subpicture) decoder (M899): bitmap cues become full-frame
+    // transparent RGBA canvases a compositor paints over the video,
+    // e.g. `mkvdemux stream=vobsub ! vobsubdec ! c.` .
+    reg.register_launch(LaunchFactory::of::<crate::vobsubdec::VobSubDec>(
+        "vobsubdec",
+        || Box::new(crate::vobsubdec::VobSubDec::new()),
+    ));
+    // DVB subtitle decoder (M900): the broadcast bitmap-subtitle sibling of
+    // `vobsubdec`, e.g. `tsdemux stream=dvbsub ! dvbsubdec ! c.` . No gst alias:
+    // gst's `dvbsuboverlay` is a video-overlay element, not a bare decoder.
+    reg.register_launch(LaunchFactory::of::<crate::dvbsubdec::DvbSubDec>(
+        "dvbsubdec",
+        || Box::new(crate::dvbsubdec::DvbSubDec::new()),
+    ));
     // Detection-box overlay (M102): draws the frame's `AnalyticsMeta` bounding
     // boxes onto the RGBA frame, so a detector's output is visible downstream
     // (e.g. `... ! analyticsoverlay ! videoconvert ! autovideosink`). No pad
@@ -524,6 +559,11 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::new("identity", Vec::new(), || {
         Box::new(IdentityTransform::new())
     }));
+    // Reverse playback (M897): re-emits each decoded GOP in descending PTS, so a
+    // `rate < 0` seek plays backwards through a forward-only decoder.
+    reg.register_launch(LaunchFactory::new("gopreverse", Vec::new(), || {
+        Box::new(crate::gopreverse::GopReverse::new())
+    }));
     // Spill-to-storage buffer (M861): absorbs a pushed byte stream into a temp
     // file and serves it seekably, so `httpsrc bytestream-format=mp4 !
     // downloadbuffer ! qtdemux` plays a moov-at-end MP4 that the pushed stream
@@ -585,6 +625,30 @@ pub fn default_registry() -> Registry {
     // link exactly the video and text branches.
     reg.register_muxer(MuxerFactory::new("textoverlay", |_inputs| {
         Box::new(crate::textoverlay::TextOverlayN::new())
+    }));
+    // Picture-in-picture / grid video fan-in (M876): the gst `compositor` analog,
+    // built by link degree like the muxers above (one pad per branch linked in,
+    // input 0 the timing driver and backmost layer). The canvas is a nominal
+    // default matching `videotestsrc`; `width` / `height` / `framerate` /
+    // `background-color` / `format` retarget it, and gst's request-pad placement
+    // (`sink_1::xpos`) is flattened to `sinkN-xpos` and friends:
+    // `videotestsrc ! c.  videotestsrc ! c.  compositor name=c width=640
+    // height=480 sink1-xpos=320 sink1-zorder=1 ! videoconvert ! autovideosink`.
+    reg.register_muxer(MuxerFactory::new("compositor", |inputs| {
+        Box::new(Compositor::new(
+            320,
+            240,
+            (0..inputs).map(|_| CompositorPad::at(0, 0)).collect(),
+        ))
+    }));
+    // The GPU sibling, same property surface (RGBA8 only, no `format`).
+    #[cfg(feature = "wgpu-sink")]
+    reg.register_muxer(MuxerFactory::new("wgpucompositor", |inputs| {
+        Box::new(crate::wgpucompositor::WgpuCompositor::new(
+            320,
+            240,
+            (0..inputs).map(|_| CompositorPad::at(0, 0)).collect(),
+        ))
     }));
     // Summing audio fan-in (M130): sums N S16LE inputs on a PTS-aligned timeline
     // (M664). The output caps are a nominal default matching `audiotestsrc`; its
@@ -684,6 +748,11 @@ pub fn default_registry() -> Registry {
         "splitmuxsink",
         || Box::new(crate::splitmuxsink::SplitMuxSink::new("")),
     ));
+    // HLS packager, fed by a muxer: `... ! tsmux ! hlssink location=seg%05d.ts`.
+    reg.register_launch(LaunchFactory::of::<crate::hlssink::HlsSink>(
+        "hlssink",
+        || Box::new(crate::hlssink::HlsSink::default()),
+    ));
     #[cfg(feature = "rtmp")]
     reg.register_launch(LaunchFactory::of::<RtmpSink>("rtmpsink", || {
         Box::new(RtmpSink::new(""))
@@ -764,27 +833,10 @@ fn register_uri_handlers(reg: &mut Registry) {
 /// decoder when its backend is compiled in.
 #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
 fn ffmpegdec_output_format(out: &Caps) -> crate::ffmpegdec::OutputFormat {
-    use crate::ffmpegdec::OutputFormat;
     // The source pad template lists NV12 before I420, so a `is_raw_video` target
     // settles on NV12 (the layout KMS / waylandsink want); an I420-only sink drives
     // I420. Anything that is not raw video falls back to I420.
-    match out {
-        Caps::RawVideo {
-            format: RawVideoFormat::Nv12,
-            ..
-        } => OutputFormat::Nv12,
-        // A downstream that pins 4:2:2 / 4:4:4 gets the source chroma preserved
-        // (software backend); otherwise default to I420.
-        Caps::RawVideo {
-            format: RawVideoFormat::I422,
-            ..
-        } => OutputFormat::I422,
-        Caps::RawVideo {
-            format: RawVideoFormat::I444,
-            ..
-        } => OutputFormat::I444,
-        _ => OutputFormat::I420,
-    }
+    ffmpegdec_pinned_output_format(out).unwrap_or(crate::ffmpegdec::OutputFormat::I420)
 }
 
 /// Autoplug output format for the **software** `ffmpegdec` (M685/M686): default
@@ -794,22 +846,32 @@ fn ffmpegdec_output_format(out: &Caps) -> crate::ffmpegdec::OutputFormat {
 /// which the fixed-format hwaccel path (`ffmpegvaapidec`) keeps using.
 #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
 fn ffmpegdec_sw_output_format(out: &Caps) -> crate::ffmpegdec::OutputFormat {
+    ffmpegdec_pinned_output_format(out).unwrap_or(crate::ffmpegdec::OutputFormat::Auto)
+}
+
+/// The decoder output layout a *pinned* raw-video target demands: a downstream
+/// that fixes NV12, a non-4:2:0 chroma, or a 10-/12-bit format (M887) must get a
+/// decoder built for exactly that, or its `CapsChanged` is rejected at startup.
+/// `None` for an I420 / non-raw target, whose fallback differs per backend.
+#[cfg(all(target_os = "linux", feature = "ffmpeg"))]
+fn ffmpegdec_pinned_output_format(out: &Caps) -> Option<crate::ffmpegdec::OutputFormat> {
     use crate::ffmpegdec::OutputFormat;
-    match out {
-        Caps::RawVideo {
-            format: RawVideoFormat::Nv12,
-            ..
-        } => OutputFormat::Nv12,
-        Caps::RawVideo {
-            format: RawVideoFormat::I422,
-            ..
-        } => OutputFormat::I422,
-        Caps::RawVideo {
-            format: RawVideoFormat::I444,
-            ..
-        } => OutputFormat::I444,
-        _ => OutputFormat::Auto,
-    }
+    let Caps::RawVideo { format, .. } = out else {
+        return None;
+    };
+    Some(match format {
+        RawVideoFormat::Nv12 => OutputFormat::Nv12,
+        RawVideoFormat::I422 => OutputFormat::I422,
+        RawVideoFormat::I444 => OutputFormat::I444,
+        RawVideoFormat::I420p10 => OutputFormat::I420p10,
+        RawVideoFormat::I420p12 => OutputFormat::I420p12,
+        RawVideoFormat::I422p10 => OutputFormat::I422p10,
+        RawVideoFormat::I422p12 => OutputFormat::I422p12,
+        RawVideoFormat::I444p10 => OutputFormat::I444p10,
+        RawVideoFormat::I444p12 => OutputFormat::I444p12,
+        RawVideoFormat::P010 => OutputFormat::P010,
+        _ => return None,
+    })
 }
 
 fn register_autoplug_candidates(reg: &mut Registry) {
@@ -1109,13 +1171,23 @@ fn register_aliases(reg: &mut Registry) {
         "autoaudiosink",
         &["alsasink", "pulsesink", "coreaudiosink", "fakesink"],
     );
+    // gst's name for the DVD subpicture decoder.
+    reg.register_alias("dvdsubdec", &["vobsubdec"]);
     // gst's macOS audio element names.
     reg.register_alias("osxaudiosink", &["coreaudiosink", "fakesink"]);
     reg.register_alias("osxaudiosrc", &["coreaudiosrc"]);
     // Common desktop video-sink names map onto whatever display sink we have.
-    for name in ["xvimagesink", "ximagesink", "glimagesink"] {
+    for name in ["xvimagesink", "ximagesink"] {
         reg.register_alias(name, &["waylandsink", "kmssink", "fakesink"]);
     }
+    // `glimagesink` is the real EGL / GL ES `GlSink` when the `gl-sink` feature
+    // is built; without it the name falls back like the X names above.
+    #[cfg(not(all(target_os = "linux", feature = "gl-sink")))]
+    reg.register_alias("glimagesink", &["waylandsink", "kmssink", "fakesink"]);
+    reg.register_alias(
+        "glsink",
+        &["glimagesink", "waylandsink", "kmssink", "fakesink"],
+    );
     // Decoders: GStreamer's libav / VA-API names -> the g2g decoders. The VA-API
     // names prefer the ffmpeg VAAPI hwaccel (`ffmpegvaapidec`, works on Mesa
     // radeonsi) and fall back to the cros-codecs `vaapidec` when only that
@@ -1137,6 +1209,11 @@ fn register_aliases(reg: &mut Registry) {
     reg.register_alias("avenc_h264", &["x264enc", "ffmpegenc"]);
     // QuickTime / MP4 muxer names -> the one fMP4 muxer (inert without std).
     reg.register_alias("qtmux", &["mp4mux"]);
+    // gst's HLS sinks bundle their own muxer; g2g's takes one upstream, so the
+    // names map to the single packager (the launch line keeps its `tsmux !`).
+    for name in ["hlssink2", "hlssink3", "hlscmafsink"] {
+        reg.register_alias(name, &["hlssink"]);
+    }
     // gst's short AAC encoder name -> the libavcodec AAC encoder.
     reg.register_alias("aacenc", &["avenc_aac"]);
     // GStreamer's nvcodec names -> the native g2g NVENC / NVDEC elements. Resolve
@@ -1292,6 +1369,18 @@ fn register_feature_gated(reg: &mut Registry) {
         },
         || Box::new(RtspServerSrc::new("0.0.0.0:8554".parse().unwrap())),
     ));
+    // Concurrent multi-publisher ingest (M863): one endpoint, one recording
+    // publisher per linked pad (`rtspserversrcn name=s  s. ! ...  s. ! ...`).
+    #[cfg(feature = "rtsp-server")]
+    reg.register_fanout_src(g2g_core::runtime::FanoutSrcFactory::new(
+        "rtspserversrcn",
+        |n| {
+            Box::new(crate::rtspserversrcn::RtspServerSrcN::new(
+                "0.0.0.0:8554".parse().unwrap(),
+                n,
+            ))
+        },
+    ));
     #[cfg(feature = "srt")]
     reg.register_source(SourceFactory::new(
         "srtsrc",
@@ -1345,6 +1434,45 @@ fn register_feature_gated(reg: &mut Registry) {
     reg.register_launch(LaunchFactory::of::<RemoteWsTransform>(
         "remotewstransform",
         || Box::new(RemoteWsTransform::new("ws://127.0.0.1:9602")),
+    ));
+    // WebTransport sibling of the same family (M901): the same wire codec over one
+    // reliable bidirectional QUIC stream. `remotewtsrc` also discovers its caps
+    // from the wire on connect, so the declared caps here are a nominal catalog
+    // default; it needs `certificate` / `private-key` to start.
+    #[cfg(feature = "webtransport")]
+    reg.register_source(SourceFactory::new(
+        "remotewtsrc",
+        Caps::RawVideo {
+            format: RawVideoFormat::Rgba8,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        },
+        || Box::new(RemoteWtSrc::new("0.0.0.0:9603".parse().unwrap())),
+    ));
+    #[cfg(feature = "webtransport")]
+    reg.register_launch(LaunchFactory::of::<RemoteWtSink>("remotewtsink", || {
+        Box::new(RemoteWtSink::new("https://127.0.0.1:9603"))
+    }));
+    #[cfg(feature = "webtransport")]
+    reg.register_launch(LaunchFactory::of::<RemoteWtTransform>(
+        "remotewttransform",
+        || Box::new(RemoteWtTransform::new("https://127.0.0.1:9604")),
+    ));
+    // MoQ Transport publisher (M902) and subscriber (M903): fMP4 in, MOQT groups
+    // and objects out to an IETF relay over the same WebTransport carrier, and
+    // back the other way.
+    #[cfg(feature = "moqt")]
+    reg.register_launch(LaunchFactory::of::<MoqtSink>("moqtsink", || {
+        Box::new(MoqtSink::new("https://127.0.0.1:4443/", "g2g"))
+    }));
+    #[cfg(feature = "moqt")]
+    reg.register_source(SourceFactory::new(
+        "moqtsrc",
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::IsoBmff,
+        },
+        || Box::new(MoqtSrc::new("https://127.0.0.1:4443/", "g2g")),
     ));
     // Local zero-copy transports (M556 / M557): same-machine GPU-resident (CUDA
     // IPC) and vendor-neutral (DMABUF over SCM_RIGHTS) sink/src pairs. Like the
@@ -1538,6 +1666,13 @@ fn register_feature_gated(reg: &mut Registry) {
     reg.register_launch(LaunchFactory::new("waylandsink", Vec::new(), || {
         Box::new(WaylandSink::new())
     }));
+    // Vendor-neutral EGL / GL ES display sink under its gst name; it declares
+    // NV12 + RGBA pad templates, so decodebin can auto-plug onto it.
+    #[cfg(all(target_os = "linux", feature = "gl-sink"))]
+    reg.register_launch(LaunchFactory::of::<crate::glsink::GlSink>(
+        "glimagesink",
+        || Box::new(crate::glsink::GlSink::new()),
+    ));
     // WebRTC WHIP egress; the `location` property targets the endpoint. The URL
     // defaults empty (set it via `webrtcsink location=...`); publishing starts
     // on the first frame.
@@ -1584,6 +1719,56 @@ fn register_feature_gated(reg: &mut Registry) {
     reg.register_launch(LaunchFactory::of::<PulseSink>("pulsesink", || {
         Box::new(PulseSink::new())
     }));
+    // Linux audio capture (M886), the non-PipeWire mic paths.
+    #[cfg(all(target_os = "linux", feature = "alsa-src"))]
+    reg.register_source(SourceFactory::new(
+        "alsasrc",
+        Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            channels: 2,
+            sample_rate: 48_000,
+        },
+        || Box::new(AlsaSrc::new()),
+    ));
+    #[cfg(all(target_os = "linux", feature = "pulse-src"))]
+    reg.register_source(SourceFactory::new(
+        "pulsesrc",
+        Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            channels: 2,
+            sample_rate: 48_000,
+        },
+        || Box::new(PulseSrc::new()),
+    ));
+    // PipeWire: audio render / capture plus video capture (M890). The audio
+    // capture element opens S16LE stereo at 48 kHz.
+    #[cfg(all(target_os = "linux", feature = "pipewire"))]
+    reg.register_launch(LaunchFactory::of::<PipeWireSink>("pipewiresink", || {
+        Box::new(PipeWireSink::new())
+    }));
+    #[cfg(all(target_os = "linux", feature = "pipewire"))]
+    reg.register_source(SourceFactory::new(
+        "pipewiresrc",
+        Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            channels: 2,
+            sample_rate: 48_000,
+        },
+        || Box::new(PipeWireSrc::new()),
+    ));
+    // Geometry and format are negotiated with the node at startup, so the
+    // declared caps stay open (like v4l2src / libcamerasrc).
+    #[cfg(all(target_os = "linux", feature = "pipewire"))]
+    reg.register_source(SourceFactory::new(
+        "pipewirevideosrc",
+        Caps::RawVideo {
+            format: RawVideoFormat::I420,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        },
+        || Box::new(PipeWireVideoSrc::new()),
+    ));
     // Android AAudio PCM render (M307); the gst analog is `aaudiosink`.
     #[cfg(all(target_os = "android", feature = "aaudio"))]
     reg.register_launch(LaunchFactory::of::<AAudioSink>("aaudiosink", || {

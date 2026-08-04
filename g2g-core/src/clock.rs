@@ -16,6 +16,20 @@ use portable_atomic::AtomicU64;
 /// their hardware capture clock onto this domain at `configure_pipeline` time.
 pub trait PipelineClock {
     fn now_ns(&self) -> u64;
+
+    /// This clock as a deadline sleeper, when it is one. The cooperative runner
+    /// reads it to derive a fan-in element's tick timer
+    /// ([`PipelinePacket::Tick`](crate::PipelinePacket::Tick), M880) from the
+    /// pipeline clock itself, so a `parse_launch` line running against any
+    /// sleepable clock ticks without a separate entry point.
+    ///
+    /// Every [`AsyncClock`] implementor should override this with `Some(self)`;
+    /// a blanket impl cannot, since `AsyncClock: PipelineClock` means it would
+    /// collide with this default. `None` (the default) means the clock only
+    /// tells time, so fan-in arms run untimed.
+    fn as_ticker(&self) -> Option<&dyn DynAsyncClock> {
+        None
+    }
 }
 
 /// Pipeline clock with async sleep capability. Used by elements that
@@ -29,6 +43,37 @@ pub trait AsyncClock: PipelineClock {
         Self: 'a;
 
     fn sleep_until_ns<'a>(&'a self, deadline_ns: u64) -> Self::SleepFuture<'a>;
+}
+
+/// Object-safe companion to [`AsyncClock`]: the same absolute-deadline sleep, but
+/// returning a [`BoxFuture`](crate::element::BoxFuture) instead of a GAT, so it
+/// can be held as `&dyn DynAsyncClock` (the same reason
+/// [`DynAsyncElement`](crate::element::DynAsyncElement) mirrors `AsyncElement`).
+/// The runner's fan-in arm needs an erased clock to sleep on its tick deadline.
+///
+/// Blanket-implemented for every `AsyncClock`, so no clock implements it directly.
+pub trait DynAsyncClock: PipelineClock {
+    fn sleep_until_ns<'a>(&'a self, deadline_ns: u64) -> crate::element::BoxFuture<'a, ()>;
+}
+
+impl<T: AsyncClock> DynAsyncClock for T {
+    fn sleep_until_ns<'a>(&'a self, deadline_ns: u64) -> crate::element::BoxFuture<'a, ()> {
+        alloc::boxed::Box::pin(AsyncClock::sleep_until_ns(self, deadline_ns))
+    }
+}
+
+/// A shared clock is a clock, so an `Arc<dyn DynAsyncClock + Send + Sync>` can also
+/// be handed to an API taking `&dyn PipelineClock` (the threaded runner's ticked
+/// entry does exactly that). Upcasting one trait object to its supertrait needs a
+/// newer compiler than the MSRV, so the shared handle carries the supertrait itself.
+impl<T: PipelineClock + ?Sized> PipelineClock for Arc<T> {
+    fn now_ns(&self) -> u64 {
+        (**self).now_ns()
+    }
+
+    fn as_ticker(&self) -> Option<&dyn DynAsyncClock> {
+        (**self).as_ticker()
+    }
 }
 
 /// The process-wide monotonic wall clock ([`monotonic_ns`](crate::metrics::monotonic_ns)),

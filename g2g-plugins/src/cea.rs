@@ -97,11 +97,7 @@ pub fn build_cc_sei(triples: &[CcTriple], codec: VideoCodec) -> Vec<u8> {
     payload.push(USER_DATA_TYPE_CC); // user_data_type_code: cc_data
     payload.push(0xC0 | cc_count as u8); // reserved | process_cc_data_flag | cc_count
     payload.push(0xFF); // em_data
-    for t in &triples[..cc_count] {
-        payload.push(0xF8 | 0x04 | (t.cc_type & 0x03)); // marker | cc_valid | cc_type
-        payload.push(t.b0);
-        payload.push(t.b1);
-    }
+    payload.extend_from_slice(&write_cc_data(&triples[..cc_count]));
     payload.push(0xFF); // marker_bits trailer
 
     // SEI message: payloadType 4 (0xFF-extended), payloadSize (0xFF-extended), payload.
@@ -120,6 +116,35 @@ pub fn build_cc_sei(triples: &[CcTriple], codec: VideoCodec) -> Vec<u8> {
     }
     nal.extend_from_slice(&add_emulation_prevention(&rbsp));
     nal
+}
+
+/// Serialize `triples` into the ATSC `cc_data` byte layout: three bytes each,
+/// `(marker bits | cc_valid | cc_type, cc_data_1, cc_data_2)`. The form a caption
+/// SEI carries, and the payload of a
+/// [`Caps::ClosedCaption`](g2g_core::Caps::ClosedCaption) frame, so a container
+/// raw-caption track and an in-band SEI feed one decoder.
+pub fn write_cc_data(triples: &[CcTriple]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(triples.len() * 3);
+    for t in triples {
+        out.push(0xF8 | 0x04 | (t.cc_type & 0x03)); // marker | cc_valid | cc_type
+        out.push(t.b0);
+        out.push(t.b1);
+    }
+    out
+}
+
+/// Parse a packed `cc_data` triple stream (the inverse of [`write_cc_data`]),
+/// keeping the triples whose `cc_valid` bit is set. A trailing partial triple is
+/// ignored, so a truncated payload yields the complete triples it held.
+pub fn parse_cc_data(data: &[u8]) -> Vec<CcTriple> {
+    data.chunks_exact(3)
+        .filter(|t| t[0] & 0x04 != 0)
+        .map(|t| CcTriple {
+            cc_type: t[0] & 0x03,
+            b0: t[1],
+            b1: t[2],
+        })
+        .collect()
 }
 
 /// Write an SEI `0xFF`-extended value (the inverse of [`read_ff_extended`]): a run

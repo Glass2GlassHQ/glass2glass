@@ -733,7 +733,7 @@
             <div class="feature-card">
                 <span class="f-icon">&#128226;</span>
                 <h3>Egress</h3>
-                <p class="f-lead">Sans-IO RTP with 90 kHz PTS and receive-side NACK; WHIP publish over <code>str0m</code> (ICE / DTLS / SRTP, pure-Rust crypto).</p>
+                <p class="f-lead">Sans-IO RTP with 90 kHz PTS and receive-side NACK; WHIP publish over <code>str0m</code> (ICE / DTLS / SRTP, pure-Rust crypto); IETF MoQ Transport draft-16 publish and subscribe over WebTransport, implemented in-tree, on reliable subgroup streams or unreliable datagram objects, and played back in a browser by a third-party draft-16 client.</p>
                 <div class="chip-group">
                     <span class="chip-label">RTP / UDP</span>
                     <div class="chip-row"><span class="chip">RtpH264Packetizer</span><span class="chip">UdpSink</span></div>
@@ -741,6 +741,10 @@
                 <div class="chip-group">
                     <span class="chip-label">WebRTC</span>
                     <div class="chip-row"><span class="chip">WebRtcSink</span></div>
+                </div>
+                <div class="chip-group">
+                    <span class="chip-label">MoQ Transport</span>
+                    <div class="chip-row"><span class="chip">MoqtSink</span><span class="chip">MoqtSrc</span></div>
                 </div>
                 <span class="feature-tag tag-core">Core</span>
             </div>
@@ -757,17 +761,17 @@
             <div class="feature-card">
                 <span class="f-icon">&#127916;</span>
                 <h3>Compositor</h3>
-                <p class="f-lead">Overlays N RGBA8 inputs onto one canvas &mdash; position, z-order, per-pad alpha, bilinear scale &mdash; for picture-in-picture, camera grids, and sub-window UIs. CPU / <code>no_std</code> baseline.</p>
+                <p class="f-lead">Overlays N inputs onto one canvas &mdash; position, z-order, per-pad alpha, bilinear scale &mdash; for picture-in-picture, camera grids, and sub-window UIs. CPU / <code>no_std</code> baseline plus a bit-exact wgpu compute sibling that binds <code>WgpuTexture</code> frames in place (zero-copy in, GPU-resident out). Timed output holds the rate over a stalled input (zero-order-hold on a runner deadline tick), and both are <code>gst-launch</code> elements with per-pad placement properties.</p>
                 <div class="chip-group">
-                    <span class="chip-label">Element</span>
-                    <div class="chip-row"><span class="chip">Compositor</span></div>
+                    <span class="chip-label">Elements</span>
+                    <div class="chip-row"><span class="chip">compositor</span><span class="chip">wgpucompositor</span></div>
                 </div>
                 <span class="feature-tag tag-core">Core</span>
             </div>
             <div class="feature-card">
                 <span class="f-icon">&#128230;</span>
                 <h3>Containers</h3>
-                <p class="f-lead">Pure-Rust demux + mux on the typed <code>Caps::ByteStream</code> link, with <code>typefind</code> sniffing. KLV telemetry (STANAG 4609 / MISB ST 0601) rides the TS both ways.</p>
+                <p class="f-lead">Pure-Rust demux + mux on the typed <code>Caps::ByteStream</code> link, with <code>typefind</code> sniffing. KLV telemetry (STANAG 4609 / MISB ST 0601) and per-program SDT service text + ISO-639 language tags ride the TS both ways.</p>
                 <div class="chip-group">
                     <span class="chip-label">Demux</span>
                     <div class="chip-row"><span class="chip">mp4src</span><span class="chip">fmp4demux</span><span class="chip">tsdemux</span><span class="chip">matroskademux</span><span class="chip">flvdemux</span><span class="chip">oggdemux</span><span class="chip">klvdecode</span></div>
@@ -781,7 +785,7 @@
             <div class="feature-card">
                 <span class="f-icon">&#128250;</span>
                 <h3>Adaptive streaming</h3>
-                <p class="f-lead">HLS (TS + CMAF, live reload, AES-128 + SAMPLE-AES), DASH (SegmentTemplate / Timeline, dynamic MPDs), duration-keyed prebuffering with Buffering reports, RTMP publisher ingest.</p>
+                <p class="f-lead">HLS (TS + CMAF, live reload, AES-128 + SAMPLE-AES), DASH (SegmentTemplate / Timeline, dynamic MPDs, CMAF chunked low-latency consumption), duration-keyed prebuffering with Buffering reports, RTMP publisher ingest.</p>
                 <div class="chip-group">
                     <span class="chip-label">Sources</span>
                     <div class="chip-row"><span class="chip">HlsSrc</span><span class="chip">DashSrc</span><span class="chip">RtmpSrc</span><span class="chip">HttpSrc</span></div>

@@ -19,6 +19,18 @@
 //! Scope: one logical bitstream per physical stream; a stream not matching the
 //! `stream` selection is parsed but not forwarded.
 //!
+//! **Seeking (M362, M862).** Ogg carries no index, so a time seek guesses the
+//! byte offset to land at: the page granules seen while playing give
+//! `(byte offset, stream time)` anchors, the target interpolates through them,
+//! and the landing is backed off so it sits before the target and, when the
+//! source reports a byte length, short of the end of the stream. The parser
+//! re-syncs there keeping what it knows of the bitstream (codec, headers), and
+//! re-times from the granule of the first page it lands on, so the packets from
+//! the target on are exactly the ones a re-scan from the file start delivers.
+//! A landing past the target, in another physical stream (a chained file), or
+//! in an unparseable region falls back: one corrected guess, then the plain
+//! re-scan from offset `0`.
+//!
 //! **Chained files (M827).** A chain (a second physical stream after the first
 //! one's end-of-stream page, the radio-stream form) is *sequential*: the same
 //! output pad continues with the next chain's stream of the selected codec,
@@ -47,8 +59,8 @@ use g2g_core::log::{short_type_name, LogName, LogSource};
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SeekController;
 use g2g_core::{
-    g2g_error, AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps,
-    CapsConstraint, CapsSet, ConfigureOutcome, FrameTiming, G2gError, MemoryDomain,
+    g2g_debug, g2g_error, AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding,
+    Caps, CapsConstraint, CapsSet, ConfigureOutcome, FrameTiming, G2gError, MemoryDomain,
     MultiOutputElement, MultiOutputSink, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
     PropError, PropKind, PropValue, PropertySpec, Seek, Segment, Stream, StreamCollection,
     StreamType, Tag, TagList,
@@ -61,6 +73,82 @@ use crate::opusparse::packet_samples as opus_packet_samples;
 /// Convert a 48 kHz sample count to nanoseconds.
 fn opus_samples_to_ns(samples: u64) -> u64 {
     samples.saturating_mul(1_000_000_000) / 48_000
+}
+
+/// Convert a sample count at `sample_rate` to nanoseconds. Sample-accurate at
+/// the header rate (per-packet rounding would drift at non-48 kHz rates).
+fn samples_to_ns(samples: u64, sample_rate: u32) -> u64 {
+    (samples as u128 * 1_000_000_000 / sample_rate.max(1) as u128) as u64
+}
+
+/// Fraction of a proportional seek guess to land early, plus a fixed slack: a
+/// stretch of the file denser than the observed average would otherwise land
+/// past the target, which costs a second seek (M862).
+const GUESS_BACKOFF_DIV: u64 = 8;
+const GUESS_SLACK_BYTES: u64 = 8 * 1024;
+/// Below this a re-scan from the start reads about as much, so it is not worth
+/// a guess.
+const MIN_GUESS_BYTES: u64 = 64 * 1024;
+/// Bytes a landing stays clear of the end of the stream: it must still have a
+/// granule-bearing page ahead of it (an Ogg page is at most ~64 kB), and landing
+/// early only costs a scan.
+const GUESS_EOF_MARGIN: u64 = 64 * 1024;
+/// Span the two interpolation anchors must cover before a guess extrapolates
+/// from them.
+const MIN_ANCHOR_NS: u64 = 1_000_000_000;
+const MIN_ANCHOR_BYTES: u64 = 32 * 1024;
+/// Bytes read past a landing without reaching a granule-bearing page before the
+/// landing is abandoned (a garbage / unparseable region).
+const RESUME_SCAN_LIMIT: u64 = 4 * 1024 * 1024;
+/// Byte-offset guesses per app seek: the proportional one plus one correction
+/// from the time the landing turned out to be at.
+const MAX_GUESSES: u8 = 2;
+
+/// The byte offset to land at for `target_ns`, interpolated through two
+/// observed `(byte offset, stream time ns)` points and backed off so a denser
+/// stretch still lands before the target. Two points rather than a ratio
+/// against the origin, so the header pages' fixed cost cancels. `stream_len`,
+/// when the source published one, keeps the landing inside the stream: a guess
+/// past the end reaches EOF instead of the target. `None` when the pair is too
+/// short to extrapolate from, the target is behind it, or the landing would not
+/// save a useful number of bytes.
+fn guess_offset(
+    first: (u64, u64),
+    last: (u64, u64),
+    target_ns: u64,
+    stream_len: Option<u64>,
+) -> Option<u64> {
+    let (b1, t1) = first;
+    let (b2, t2) = last;
+    let bytes = b2.checked_sub(b1)?;
+    let span = t2.checked_sub(t1)?;
+    if span < MIN_ANCHOR_NS || bytes < MIN_ANCHOR_BYTES || target_ns <= t1 {
+        return None;
+    }
+    // The anchors come from the file, so fold the extrapolation in u128.
+    let ahead = u128::from(target_ns - t1) * u128::from(bytes) / u128::from(span);
+    let raw = (u128::from(b1) + ahead).min(u128::from(u64::MAX)) as u64;
+    let mut off = raw
+        .saturating_sub(raw / GUESS_BACKOFF_DIV)
+        .saturating_sub(GUESS_SLACK_BYTES);
+    if let Some(len) = stream_len {
+        off = off.min(len.saturating_sub(GUESS_EOF_MARGIN));
+    }
+    (off >= MIN_GUESS_BYTES).then_some(off)
+}
+
+/// A byte-offset guess in flight (M862).
+#[derive(Debug, Default, Clone, Copy)]
+struct GuessedSeek {
+    /// Offset of the landing, `None` when the seek in flight is a plain re-scan
+    /// from the file start.
+    landing: Option<u64>,
+    /// Guesses issued for the current app seek, capped at [`MAX_GUESSES`].
+    attempts: u8,
+    target_ns: u64,
+    /// Chain the guess was planned in. A landing in another one is a chained
+    /// file, which a single global proportion cannot describe.
+    chain: u32,
 }
 
 /// Demuxes an Ogg byte stream into its Opus audio elementary stream.
@@ -82,6 +170,15 @@ pub struct OggDemux {
     /// Seek support (M362): app time seeks drive an upstream byte-seek and a
     /// re-sync. Inert unless `with_seek` wired the controllers.
     seek: DemuxSeek,
+    /// Byte offset of the next source byte (M862): the seek guess is
+    /// proportional in bytes, so the element tracks where in the file it reads.
+    read_offset: u64,
+    /// Earliest and latest observed `(parsed byte offset, stream time ns)`, the
+    /// pair a seek guess interpolates through.
+    anchor_first: Option<(u64, u64)>,
+    anchor_last: Option<(u64, u64)>,
+    /// The byte-offset guess in flight, if any.
+    guess: GuessedSeek,
     /// Runner-assigned instance name plus any category override, for logging.
     log_name: LogName,
 }
@@ -103,17 +200,144 @@ impl OggDemux {
             stream: OggCodec::Opus,
             emitter: StreamEmitter::default(),
             seek: DemuxSeek::default(),
+            read_offset: 0,
+            anchor_first: None,
+            anchor_last: None,
+            guess: GuessedSeek::default(),
             log_name: LogName::new(),
         }
     }
 
     /// Make the demuxer seekable (M362): `app` carries app time seeks; `upstream`
     /// is the byte source's ([`FileSrc`](crate::filesrc)) byte-seek controller.
-    /// On a time seek the demuxer rewinds the source and re-syncs from the packet
-    /// at/after the target (every audio packet is a resync point).
+    /// On a time seek the demuxer repositions the source and re-syncs from the
+    /// packet at/after the target (every audio packet is a resync point).
     pub fn with_seek(mut self, app: SeekController, upstream: SeekController) -> Self {
         self.seek.with(app, upstream);
         self
+    }
+
+    /// Service a pending app time seek (M862). Ogg carries no index, so the
+    /// byte offset to land at is guessed proportionally: the granule positions
+    /// seen so far give `(byte offset, stream time)` anchors, and the target
+    /// interpolates through them. The landing is deliberately early, and the
+    /// scan from it to the first packet at/after the target delivers exactly
+    /// what a re-scan from the file start would. Without usable anchors (too
+    /// little played, a chained file, headers not yet in hand) it re-scans from
+    /// offset `0`, the M362 path.
+    fn poll_seek(&mut self) {
+        if self.seek.is_seeking() {
+            return;
+        }
+        // Planned before the request is taken: `poll_request_indexed` borrows
+        // the seek state, so its closure cannot look at the rest of the element.
+        let anchors = self.guess_anchors();
+        let stream_len = self.seek.upstream_len();
+        let chain = self.demux.chain();
+        let mut chosen: Option<(u64, u64)> = None;
+        let started = self.seek.poll_request_indexed(|target_ns| {
+            let (first, last) = anchors?;
+            let offset = guess_offset(first, last, target_ns, stream_len)?;
+            chosen = Some((target_ns, offset));
+            Some(offset)
+        });
+        if !started {
+            return;
+        }
+        self.guess = match chosen {
+            Some((target_ns, offset)) => GuessedSeek {
+                landing: Some(offset),
+                attempts: 1,
+                target_ns,
+                chain,
+            },
+            None => GuessedSeek::default(),
+        };
+    }
+
+    /// The two anchors a seek guess interpolates through, or `None` when this
+    /// file cannot take one: a chained file (a chain boundary breaks a single
+    /// global proportion, so it re-scans), a stream whose codec headers are not
+    /// in hand (a mid-file landing has no beginning-of-stream page to re-read
+    /// them from), or nothing played yet.
+    fn guess_anchors(&self) -> Option<((u64, u64), (u64, u64))> {
+        if self.demux.chain() != 0 {
+            return None;
+        }
+        let stream = &self.demux.streams()[self.selected()?];
+        let codec = stream.info()?.codec;
+        if in_band_headers(codec, stream).is_empty() || !self.emitter.can_resume(codec) {
+            return None;
+        }
+        Some((self.anchor_first?, self.anchor_last?))
+    }
+
+    /// Note where the parse has reached, as the `(byte offset, stream time)`
+    /// pair a later seek guess interpolates through. Only while playing
+    /// normally: mid-seek the two are not the same position.
+    fn note_anchor(&mut self) {
+        if self.seek.is_seeking() || self.demux.chain() != 0 {
+            return;
+        }
+        let time_ns = self.emitter.position_ns();
+        let offset = self
+            .read_offset
+            .saturating_sub(self.demux.buffered() as u64);
+        if time_ns == 0 || offset == 0 {
+            return;
+        }
+        if self.anchor_first.is_none() {
+            self.anchor_first = Some((offset, time_ns));
+        }
+        self.anchor_last = Some((offset, time_ns));
+    }
+
+    /// Whether a landing that cannot serve the seek has been reached: it left
+    /// the physical stream that was resumed (a chained file), or it is scanning
+    /// through a region with no parseable page.
+    fn landing_lost(&self) -> bool {
+        if !self.seek.is_seeking() || self.guess.landing.is_none() {
+            return false;
+        }
+        if self.demux.foreign_page() || self.demux.chain() != self.guess.chain {
+            return true;
+        }
+        let scanned = self
+            .read_offset
+            .saturating_sub(self.guess.landing.unwrap_or(0));
+        self.emitter.awaiting_anchor() && scanned > RESUME_SCAN_LIMIT
+    }
+
+    /// Re-seek after a landing that cannot serve the target. `landed` is the
+    /// stream time the landing turned out to be at, when known: it makes one
+    /// corrected guess possible (the same interpolation against a true point
+    /// this time). Otherwise, and after the correction, re-scan from the file
+    /// start, which always works.
+    fn reseek(&mut self, landed: Option<u64>) {
+        let target_ns = self.guess.target_ns;
+        let corrected = match (self.guess.landing, landed, self.anchor_first) {
+            (Some(landing), Some(at), Some(first)) if self.guess.attempts < MAX_GUESSES => {
+                guess_offset(first, (landing, at), target_ns, self.seek.upstream_len())
+                    .filter(|off| *off < landing)
+            }
+            _ => None,
+        };
+        match corrected {
+            Some(offset) => {
+                g2g_debug!(
+                    self,
+                    "seek guess landed past {target_ns} ns, retrying at {offset}"
+                );
+                self.guess.landing = Some(offset);
+                self.guess.attempts = self.guess.attempts.saturating_add(1);
+                self.seek.begin_seek_at(target_ns, offset, true);
+            }
+            None => {
+                g2g_debug!(self, "seek guess abandoned, re-scanning from the start");
+                self.guess = GuessedSeek::default();
+                self.seek.begin_seek_at(target_ns, 0, false);
+            }
+        }
     }
 
     /// Reset the parser for a discontinuity (a `Flush` / seek): drop the Ogg
@@ -223,7 +447,10 @@ impl OggDemux {
                 self.tags_posted = Some(self.demux.chain());
                 if !tags.is_empty() {
                     if let Some(bus) = &self.bus {
-                        bus.try_post(BusMessage::Tag(tags));
+                        bus.try_post(BusMessage::Tag {
+                            tags,
+                            program: None,
+                        });
                     }
                 }
             }
@@ -252,18 +479,28 @@ impl OggDemux {
                 continue;
             }
             let ready = self.emitter.step(stream, packets);
+            // M862: a landing past the target cannot deliver the packets a
+            // re-scan would, so nothing of this batch goes out (the codec
+            // headers included: the re-seek sends them again) and the seek
+            // starts over closer to the target.
+            if let Some(at) = ready.resumed_at {
+                if self.guess.landing.is_some() && at > self.guess.target_ns {
+                    self.reseek(Some(at));
+                    return Ok(());
+                }
+            }
             if let Some(caps) = ready.caps {
                 out.push(PipelinePacket::CapsChanged(caps)).await?;
             }
             if let Some(seg) = ready.segment {
                 out.push(PipelinePacket::Segment(seg)).await?;
             }
-            for (payload, timing) in ready.frames {
+            for (payload, timing, config) in ready.frames {
                 // M362 seek: every audio packet is a resync point, so drop until
                 // the first packet at/after the target, which emits a fresh
-                // segment. The in-band codec config (duration 0 at time 0)
-                // always flows: the decoder needs it whatever the seek target.
-                if timing.duration_ns != 0 || timing.pts_ns != 0 {
+                // segment. The in-band codec config always flows: the decoder
+                // needs it whatever the seek target.
+                if !config {
                     match self.seek.admit(timing.pts_ns, true) {
                         Admit::Drop => continue,
                         Admit::Resume(start) => {
@@ -293,7 +530,12 @@ impl OggDemux {
 struct StreamReady {
     caps: Option<Caps>,
     segment: Option<Segment>,
-    frames: Vec<(Vec<u8>, FrameTiming)>,
+    /// The frames to forward, each flagged when it is codec config rather than
+    /// audio (config rides the same pad and flows whatever a seek is doing).
+    frames: Vec<(Vec<u8>, FrameTiming, bool)>,
+    /// Stream time a mid-file landing anchored at, in the batch that anchored it
+    /// (M862). The caller compares it against the seek target.
+    resumed_at: Option<u64>,
 }
 
 /// The per-logical-bitstream half of the demux elements: caps announcement,
@@ -340,6 +582,13 @@ struct StreamEmitter {
     /// end-granule-clamped decode position, less the Opus pre-skip the decoder
     /// discards. Fixes where the next chain starts.
     playable_end_ns: u64,
+    /// Timeline position (ns) after the last packet emitted, the time axis of
+    /// the proportional seek guess (M862).
+    position_ns: u64,
+    /// Waiting for a mid-file landing's granule anchor (M862): packets are not
+    /// timed from the file start any more, so nothing is emitted until the
+    /// landing's first granule-bearing page says where it is.
+    awaiting_anchor: bool,
 }
 
 impl StreamEmitter {
@@ -355,6 +604,36 @@ impl StreamEmitter {
     /// The chain (physical stream) this emitter is timing.
     fn chain(&self) -> u32 {
         self.chain
+    }
+
+    /// Timeline position (ns) after the last packet emitted.
+    fn position_ns(&self) -> u64 {
+        self.position_ns
+    }
+
+    /// Whether a mid-file landing is still waiting for its granule anchor.
+    fn awaiting_anchor(&self) -> bool {
+        self.awaiting_anchor
+    }
+
+    /// Whether this emitter can time packets from a mid-file landing (M862).
+    /// Vorbis also needs its block-size tables and the priming anchor, both
+    /// learned from the start of the stream the landing skips past.
+    fn can_resume(&self, codec: OggCodec) -> bool {
+        codec != OggCodec::Vorbis || (self.vorbis.is_some() && self.anchor_offset.is_some())
+    }
+
+    /// Arm a mid-file landing (M862): the position state is re-established from
+    /// the landing's page granule, while the caps, the codec headers to re-send,
+    /// the Vorbis tables and the priming anchor carry over (same stream, same
+    /// file).
+    fn begin_resume(&mut self) {
+        self.pts_ns = 0;
+        self.decoded_samples = 0;
+        self.position_ns = 0;
+        self.head_forwarded = false;
+        self.prev_blocksize = None;
+        self.awaiting_anchor = true;
     }
 
     /// Rebase onto a chained physical stream (M827): the previous chain's
@@ -392,6 +671,30 @@ impl StreamEmitter {
             ready.segment = Some(self.begin_chain(stream.chain()));
         }
         let codec = info.codec;
+        // Mid-file landing (M862): the granule position of the page the parser
+        // resumed on is the decode position the packets after it start from, so
+        // the timeline continues exactly where a scan from the file start would
+        // have it. Nothing is emitted before that anchor lands.
+        if self.awaiting_anchor {
+            let Some((granule, prev)) = stream.resume_anchor() else {
+                return ready;
+            };
+            let at = match codec {
+                OggCodec::Opus => opus_samples_to_ns(granule),
+                _ => samples_to_ns(granule, info.sample_rate),
+            };
+            // The Vorbis timeline is the natural decode count less the initial
+            // priming the anchor clips off the front, so add it back to get the
+            // count the granule stands for.
+            self.decoded_samples = granule.saturating_add(self.anchor_offset.unwrap_or(0));
+            self.pts_ns = at;
+            self.position_ns = at.saturating_add(self.chain_offset_ns);
+            // The first emitted packet laps against the packet the anchor page
+            // ended on.
+            self.prev_blocksize = self.vorbis.as_ref().and_then(|t| t.packet_blocksize(prev));
+            self.awaiting_anchor = false;
+            ready.resumed_at = Some(self.position_ns);
+        }
         if let Some(caps) = concrete_caps(info) {
             if self.last_caps.as_ref() != Some(&caps) {
                 self.last_caps = Some(caps.clone());
@@ -407,7 +710,7 @@ impl StreamEmitter {
                 self.head_forwarded = true;
                 ready
                     .frames
-                    .extend(heads.into_iter().map(|h| (h, FrameTiming::default())));
+                    .extend(heads.into_iter().map(|h| (h, FrameTiming::default(), true)));
             }
         }
         // Vorbis timing tables (M778): parse once ident + setup have landed.
@@ -494,7 +797,7 @@ impl StreamEmitter {
             };
             // Sample-accurate at the header rate (per-packet rounding would
             // drift at non-48 kHz rates).
-            let ns = |s: u64| (s as u128 * 1_000_000_000 / sample_rate.max(1) as u128) as u64;
+            let ns = |s: u64| samples_to_ns(s, sample_rate);
             let (pts_ns, duration_ns) = match codec {
                 OggCodec::Flac | OggCodec::Vorbis => {
                     let pts = ns(anchored_before);
@@ -531,6 +834,7 @@ impl StreamEmitter {
             if keep == 0 && anchored_before > 0 && pkt_samples > 0 {
                 continue;
             }
+            self.position_ns = pts_ns.saturating_add(duration_ns);
             ready.frames.push((
                 packet,
                 FrameTiming {
@@ -539,6 +843,7 @@ impl StreamEmitter {
                     duration_ns,
                     ..FrameTiming::default()
                 },
+                false,
             ));
         }
         ready
@@ -642,7 +947,7 @@ impl AsyncElement for OggDemux {
             }
             // M362: a pending app seek triggers an upstream byte-seek; until its
             // `Flush` returns, drop input so no stale pre-seek packets are emitted.
-            self.seek.poll_request();
+            self.poll_seek();
             match packet {
                 PipelinePacket::DataFrame(frame) => {
                     if self.seek.dropping_input() {
@@ -651,14 +956,37 @@ impl AsyncElement for OggDemux {
                     let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
+                    self.read_offset = self.read_offset.saturating_add(slice.len() as u64);
                     self.demux.push_data(slice);
                     self.emit_ready(out).await?;
+                    if self.landing_lost() {
+                        self.reseek(None);
+                    } else {
+                        self.note_anchor();
+                    }
                 }
-                // The upstream byte-seek's flush: reset the parser, then re-sync
-                // from the re-read stream. Forward it downstream.
+                // The upstream byte-seek's flush: re-sync from the repositioned
+                // stream. A mid-file landing keeps what is known about the
+                // bitstream (M862); a re-scan from the start resets outright.
+                // Forward it downstream.
                 PipelinePacket::Flush => {
+                    let ours = self.seek.dropping_input();
                     self.seek.on_flush();
-                    self.reset_parser();
+                    if ours {
+                        self.read_offset = self.guess.landing.unwrap_or(0);
+                    } else {
+                        // An upstream discontinuity we did not ask for: the byte
+                        // position is no longer known, so the anchors go too.
+                        self.read_offset = 0;
+                        self.anchor_first = None;
+                        self.anchor_last = None;
+                    }
+                    if ours && self.seek.keeps_state() {
+                        self.demux.resume_mid_stream();
+                        self.emitter.begin_resume();
+                    } else {
+                        self.reset_parser();
+                    }
                     out.push(PipelinePacket::Flush).await?;
                 }
                 PipelinePacket::Eos => {
@@ -987,7 +1315,7 @@ impl MultiOutputElement for OggDemuxN {
                 if let Some(seg) = ready.segment {
                     out.push_to(port, PipelinePacket::Segment(seg)).await?;
                 }
-                for (payload, timing) in ready.frames {
+                for (payload, timing, _) in ready.frames {
                     let frame = Frame::new(
                         MemoryDomain::System(SystemSlice::from_boxed(payload.into_boxed_slice())),
                         timing,
@@ -1218,6 +1546,47 @@ mod tests {
     }
 
     #[test]
+    fn guess_offset_interpolates_and_lands_early() {
+        // 10 kB per second from 2 s on, with 4 kB of headers ahead of it: the
+        // two anchors cancel the fixed cost, so 20 s sits at 204 kB, and the
+        // guess lands short of it.
+        let first = (24_000, 2_000_000_000);
+        let last = (124_000, 12_000_000_000);
+        let off = guess_offset(first, last, 20_000_000_000, None).expect("a guess");
+        assert!(off < 204_000, "the landing is early, got {off}");
+        assert!(off > 170_000, "but not by much, got {off}");
+        // Behind the pair, too short a span, and too small a saving: no guess.
+        assert_eq!(guess_offset(first, last, 1_000_000_000, None), None);
+        assert_eq!(
+            guess_offset(first, (24_500, 2_500_000_000), 20_000_000_000, None),
+            None
+        );
+        assert_eq!(
+            guess_offset((0, 0), (40_000, 4_000_000_000), 5_000_000_000, None),
+            None,
+            "a landing under 64 kB saves nothing worth a seek"
+        );
+    }
+
+    #[test]
+    fn guess_offset_clamps_to_the_stream_length() {
+        // The same front-measured proportion, but the file ends at 200 kB: the
+        // landing sits a page-max short of the end rather than past it.
+        let first = (24_000, 2_000_000_000);
+        let last = (124_000, 12_000_000_000);
+        assert_eq!(
+            guess_offset(first, last, 20_000_000_000, Some(200_000)),
+            Some(200_000 - GUESS_EOF_MARGIN)
+        );
+        // Clamped below the minimum saving: fall back to the plain re-scan.
+        assert_eq!(
+            guess_offset(first, last, 20_000_000_000, Some(100_000)),
+            None,
+            "no runway left between the clamp and the file start"
+        );
+    }
+
+    #[test]
     fn parse_vorbis_comment_reads_fields_and_rejects_non_comment() {
         let tags = parse_vorbis_comment(&opus_tags(&[("TITLE", "Song"), ("ENCODER", "libopus")]));
         assert_eq!(
@@ -1257,7 +1626,7 @@ mod tests {
 
         let mut posted = None;
         while let Some(m) = bus.try_recv() {
-            if let BusMessage::Tag(t) = m {
+            if let BusMessage::Tag { tags: t, .. } = m {
                 posted = Some(t);
             }
         }

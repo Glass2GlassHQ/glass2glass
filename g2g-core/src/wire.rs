@@ -42,8 +42,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::caps::{
-    AudioFormat, ByteStreamEncoding, Caps, Dim, Rate, RawVideoFormat, TensorDType, TensorLayout,
-    TensorShape, TextFormat, VideoCodec,
+    AudioFormat, ByteStreamEncoding, Caps, ClosedCaptionFormat, Dim, Rate, RawVideoFormat,
+    SubPictureFormat, TensorDType, TensorLayout, TensorShape, TextFormat, VideoCodec,
 };
 use crate::frame::{Frame, FrameTiming, PipelinePacket};
 use crate::memory::{MemoryDomain, SystemSlice};
@@ -62,7 +62,8 @@ pub enum WireError {
     /// The buffer ended mid-field (a truncated or corrupt message).
     Truncated,
     /// An unknown version byte, packet tag, enum discriminant, or invalid UTF-8
-    /// in a string field.
+    /// in a string field. Also reported for a packet with no wire tag at all (a
+    /// runner-internal [`PipelinePacket::Tick`]).
     BadTag,
     /// A device-resident / foreign memory domain that cannot be serialized over
     /// a byte transport (only [`MemoryDomain::System`] / `SystemView` can).
@@ -343,6 +344,34 @@ fn text_format_from_u8(v: u8) -> Result<TextFormat, WireError> {
     })
 }
 
+fn cc_format_to_u8(f: ClosedCaptionFormat) -> u8 {
+    match f {
+        ClosedCaptionFormat::Cea608 => 0,
+        ClosedCaptionFormat::Cea708 => 1,
+    }
+}
+fn cc_format_from_u8(v: u8) -> Result<ClosedCaptionFormat, WireError> {
+    Ok(match v {
+        0 => ClosedCaptionFormat::Cea608,
+        1 => ClosedCaptionFormat::Cea708,
+        _ => return Err(WireError::BadTag),
+    })
+}
+
+fn subpicture_format_to_u8(f: SubPictureFormat) -> u8 {
+    match f {
+        SubPictureFormat::VobSub => 0,
+        SubPictureFormat::DvbSub => 1,
+    }
+}
+fn subpicture_format_from_u8(v: u8) -> Result<SubPictureFormat, WireError> {
+    Ok(match v {
+        0 => SubPictureFormat::VobSub,
+        1 => SubPictureFormat::DvbSub,
+        _ => return Err(WireError::BadTag),
+    })
+}
+
 fn dtype_to_u8(d: TensorDType) -> u8 {
     match d {
         TensorDType::F16 => 0,
@@ -489,6 +518,14 @@ fn put_caps(w: &mut Writer, c: &Caps) {
             w.u8(text_format_to_u8(*format));
         }
         Caps::Klv => w.u8(6),
+        Caps::ClosedCaption { format } => {
+            w.u8(7);
+            w.u8(cc_format_to_u8(*format));
+        }
+        Caps::SubPicture { format } => {
+            w.u8(8);
+            w.u8(subpicture_format_to_u8(*format));
+        }
     }
 }
 
@@ -537,6 +574,12 @@ fn get_caps(r: &mut Reader) -> Result<Caps, WireError> {
             format: text_format_from_u8(r.u8()?)?,
         },
         6 => Caps::Klv,
+        7 => Caps::ClosedCaption {
+            format: cc_format_from_u8(r.u8()?)?,
+        },
+        8 => Caps::SubPicture {
+            format: subpicture_format_from_u8(r.u8()?)?,
+        },
         _ => return Err(WireError::BadTag),
     })
 }
@@ -820,6 +863,11 @@ pub fn encode_packet(packet: &PipelinePacket) -> Result<Vec<u8>, WireError> {
             w.u8(PKT_SEGMENT);
             put_segment(&mut w, seg);
         }
+        // A `Tick` is runner-internal (a fan-in arm's deadline, consumed at the
+        // arm), so it has no wire tag and cannot reach a transport. There is no
+        // skip convention here (every packet encodes to a body), so encoding one
+        // is a bug, reported rather than silently dropped.
+        PipelinePacket::Tick => return Err(WireError::BadTag),
     }
     Ok(w.buf)
 }
@@ -941,6 +989,9 @@ mod tests {
             },
             Caps::Text {
                 format: TextFormat::WebVtt,
+            },
+            Caps::ClosedCaption {
+                format: ClosedCaptionFormat::Cea708,
             },
         ];
         for caps in cases {

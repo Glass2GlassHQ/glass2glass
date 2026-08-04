@@ -2,11 +2,12 @@
 //! `Caps::Tensor` is part of the no-alloc MCU subset like every other caps
 //! kind (closing the carve-out the M623 `alloc` feature seam left open).
 //!
-//! One test fn, not several: the zero-alloc section reads a process-global
-//! allocation counter, so nothing else in this binary may allocate
-//! concurrently. The link-time complement is `examples/g2g-noalloc`, whose
-//! pipeline now negotiates tensor caps on its transform link and still links
-//! for bare Cortex-M with no allocator and no panic machinery.
+//! `harness = false` (a plain `main`, no libtest): the zero-alloc section
+//! reads a process-global allocation counter, so nothing else in this binary
+//! may allocate concurrently, and libtest's own harness threads allocate
+//! while a test runs. The link-time complement is `examples/g2g-noalloc`,
+//! whose pipeline now negotiates tensor caps on its transform link and still
+//! links for bare Cortex-M with no allocator and no panic machinery.
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -49,8 +50,7 @@ fn tensor(dtype: TensorDType, shape: TensorShape) -> Caps {
     }
 }
 
-#[test]
-fn fixed_rank_tensor_caps() {
+fn main() {
     // -- shape API --
     let s = TensorShape::new([1, 3, 224, 224]);
     assert_eq!(s.dims(), &[1, 3, 224, 224]);

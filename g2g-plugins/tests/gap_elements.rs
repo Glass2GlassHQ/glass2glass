@@ -107,6 +107,26 @@ async fn clockoverlay_chain_runs() {
     assert_eq!(stats.frames_consumed, 3, "all frames reached the sink");
 }
 
+/// M885: the timestamp overlays' modes and placement parse and run from text,
+/// including a quoted strftime `time-format` with a space in it.
+#[tokio::test]
+async fn timestamp_overlay_properties_run_from_a_launch_line() {
+    let reg = default_registry();
+    let graph = parse_launch(
+        &reg,
+        "videotestsrc num-buffers=3 \
+         ! timeoverlay time-mode=elapsed-running-time halignment=right valignment=bottom \
+           xpad=8 ypad=4 scale=1 shaded-background=false \
+         ! clockoverlay time-format=\"%F %T\" valignment=center color=4278255360 \
+         ! fakesink",
+    )
+    .expect("timestamp overlay pipeline parses");
+    let stats = run_graph(graph, &ZeroClock, 4)
+        .await
+        .expect("timestamp overlay pipeline runs");
+    assert_eq!(stats.frames_consumed, 3, "all frames reached the sink");
+}
+
 #[tokio::test]
 async fn video_utility_chain_runs() {
     let reg = default_registry();

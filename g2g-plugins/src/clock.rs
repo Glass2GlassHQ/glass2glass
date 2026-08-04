@@ -1,5 +1,7 @@
 //! Wall-clock implementation of [`PipelineClock`] / [`AsyncClock`] for std
-//! targets. Backed by `std::time::Instant` and `tokio::time::sleep`.
+//! targets. Backed by `std::time::Instant` and `tokio::time::sleep`, which is
+//! also the timer the display sinks hold a frame on until its PTS deadline
+//! ([`wait_to_present`]).
 
 use core::future::Future;
 use core::pin::Pin;
@@ -7,7 +9,22 @@ use std::time::{Duration, Instant};
 
 use alloc::boxed::Box;
 
-use g2g_core::{AsyncClock, PipelineClock};
+use g2g_core::{AsyncClock, DynAsyncClock, Pace, PipelineClock};
+
+/// Act on a sink's [`Pace`] verdict using tokio's timer: hold the frame until
+/// its deadline and return `true` to present it, or `false` if it is not to be
+/// presented (too late, or clipped outside the segment). Every std display sink
+/// paces through this, and an out-of-tree one should too.
+pub async fn wait_to_present(pace: Pace) -> bool {
+    match pace {
+        Pace::Now => true,
+        Pace::Wait(ns) => {
+            tokio::time::sleep(Duration::from_nanos(ns)).await;
+            true
+        }
+        Pace::Drop => false,
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct WallClock {
@@ -38,6 +55,10 @@ impl PipelineClock for WallClock {
             .try_into()
             .unwrap_or(u64::MAX)
     }
+
+    fn as_ticker(&self) -> Option<&dyn DynAsyncClock> {
+        Some(self)
+    }
 }
 
 impl AsyncClock for WallClock {
@@ -50,5 +71,36 @@ impl AsyncClock for WallClock {
                 tokio::time::sleep(Duration::from_nanos(deadline_ns - now)).await;
             }
         })
+    }
+}
+
+/// Time of day as a [`PipelineClock`]: `now_ns` is nanoseconds since the UNIX
+/// epoch, not a pipeline-relative timeline. Only for elements that display or
+/// stamp civil time (`clockoverlay`); never hand it to the runner as the
+/// pipeline clock, which needs a monotonic source ([`WallClock`]).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct UnixEpochClock;
+
+impl PipelineClock for UnixEpochClock {
+    fn now_ns(&self) -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos().try_into().unwrap_or(u64::MAX))
+            .unwrap_or(0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The cooperative runner derives a fan-in element's deadline tick from the
+    /// pipeline clock (M880), so the clock every `g2g-launch` pipeline runs against
+    /// has to offer itself as that timer, on the same timeline it reports.
+    #[test]
+    fn the_wall_clock_offers_itself_as_a_ticker() {
+        let clock = WallClock::new();
+        let ticker = PipelineClock::as_ticker(&clock).expect("WallClock can sleep on a deadline");
+        assert!(ticker.now_ns() <= clock.now_ns(), "same timeline");
     }
 }

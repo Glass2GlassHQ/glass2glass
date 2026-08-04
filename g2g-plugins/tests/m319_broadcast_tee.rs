@@ -16,7 +16,9 @@ use std::sync::Arc;
 use g2g_core::element::DynAsyncElement;
 use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::memory::SystemSlice;
-use g2g_core::runtime::{run_source_tee_dynamic, SourceLoop};
+use g2g_core::runtime::{
+    run_source_tee_dynamic, run_source_tee_dynamic_observed, NodeRole, Observer, SourceLoop,
+};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, MemoryDomain,
     OutputSink, PipelinePacket, Rate, RawVideoFormat,
@@ -176,6 +178,66 @@ async fn tee_broadcasts_every_frame_to_every_branch() {
         1,
         "branch 1 saw the sticky caps once"
     );
+}
+
+/// M869: the observed tee. Every attached branch is a node with its own probe
+/// and link, so a broadcast fan-out reports per-branch telemetry the same way the
+/// router does (the mid-run attach itself is covered in M310).
+#[tokio::test]
+async fn observed_tee_reports_per_branch_telemetry() {
+    const N: u64 = 6;
+    let mut source = CountingSource { n: N };
+    let f0 = Arc::new(AtomicUsize::new(0));
+    let f1 = Arc::new(AtomicUsize::new(0));
+
+    let obs = Observer::new();
+    let (handle, run) = run_source_tee_dynamic_observed(&mut source, 8, &obs);
+    for frames in [f0.clone(), f1.clone()] {
+        handle
+            .add_branch(Box::new(RecordSink {
+                frames,
+                caps_changes: Arc::new(AtomicUsize::new(0)),
+            }) as Box<dyn DynAsyncElement>)
+            .expect("add branch");
+    }
+    drop(handle);
+
+    let stats = run.await.expect("observed dynamic tee run");
+
+    let snap = obs.snapshot();
+    assert_eq!(
+        snap.nodes
+            .iter()
+            .map(|n| (n.name.as_str(), n.role))
+            .collect::<Vec<_>>(),
+        vec![
+            ("CountingSource0", NodeRole::Source),
+            ("tee0", NodeRole::Tee),
+            ("RecordSink0", NodeRole::Sink),
+            ("RecordSink1", NodeRole::Sink),
+        ],
+        "the routing stage is named for the broadcast mode"
+    );
+    // Broadcast: every branch link carried the whole stream.
+    for e in snap.edges.iter().filter(|e| e.from == 1) {
+        assert!(
+            e.counts.packets >= N,
+            "branch link {:?} carried the stream: {:?}",
+            (e.from, e.to),
+            e.counts
+        );
+    }
+    assert_eq!(
+        stats
+            .per_element
+            .iter()
+            .map(|r| (r.name.as_str(), r.proc.count))
+            .collect::<Vec<_>>(),
+        vec![("RecordSink0", N), ("RecordSink1", N)],
+        "each branch timed every frame it received"
+    );
+    assert_eq!(f0.load(Ordering::Relaxed), N as usize);
+    assert_eq!(f1.load(Ordering::Relaxed), N as usize);
 }
 
 #[tokio::test]
