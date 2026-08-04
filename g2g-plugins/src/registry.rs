@@ -719,6 +719,11 @@ pub fn default_registry() -> Registry {
         "splitmuxsink",
         || Box::new(crate::splitmuxsink::SplitMuxSink::new("")),
     ));
+    // HLS packager, fed by a muxer: `... ! tsmux ! hlssink location=seg%05d.ts`.
+    reg.register_launch(LaunchFactory::of::<crate::hlssink::HlsSink>(
+        "hlssink",
+        || Box::new(crate::hlssink::HlsSink::default()),
+    ));
     #[cfg(feature = "rtmp")]
     reg.register_launch(LaunchFactory::of::<RtmpSink>("rtmpsink", || {
         Box::new(RtmpSink::new(""))
@@ -1173,6 +1178,11 @@ fn register_aliases(reg: &mut Registry) {
     reg.register_alias("avenc_h264", &["x264enc", "ffmpegenc"]);
     // QuickTime / MP4 muxer names -> the one fMP4 muxer (inert without std).
     reg.register_alias("qtmux", &["mp4mux"]);
+    // gst's HLS sinks bundle their own muxer; g2g's takes one upstream, so the
+    // names map to the single packager (the launch line keeps its `tsmux !`).
+    for name in ["hlssink2", "hlssink3", "hlscmafsink"] {
+        reg.register_alias(name, &["hlssink"]);
+    }
     // gst's short AAC encoder name -> the libavcodec AAC encoder.
     reg.register_alias("aacenc", &["avenc_aac"]);
     // GStreamer's nvcodec names -> the native g2g NVENC / NVDEC elements. Resolve

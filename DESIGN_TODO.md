@@ -376,6 +376,10 @@ Phased plan:
   other on the flag position and field widths, so a decode would be an
   unvalidated claim. Revisit with the published spec text or a second
   independent implementation.
+- **`tsmuxn` keyframe flag for segmenting:** the multi-track A/V TS muxer
+  drops `FrameTiming::keyframe` on its output frames, so `tsmuxn ! hlssink`
+  writes one giant segment. The output flag should carry the sync flag of the
+  video pad only.
 
 ## Capture sources
 

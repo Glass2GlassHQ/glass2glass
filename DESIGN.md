@@ -2170,6 +2170,22 @@ the `tenc` defaults per sample run, and M867 added the movie-level `seig` table
 ones above it, per 14496-12, strictly scoped). A subsample map that overruns its
 sample is an error, never a partial decrypt. A clear
 track stays a normal demux; an encrypted track with no key fails loud.
+`hlssink::HlsSink` (`std`) is the publishing side (M896): it cuts the byte stream
+a muxer feeds it into media segment files and writes an `.m3u8` media playlist
+beside them, rendered by the `hls` parser's `write_media` twin. The muxer stays a
+separate element (`... ! tsmux ! hlssink`, `... ! mp4mux ! hlssink`), so one sink
+packages either carrier. A segment may only start at a keyframe and closes at the
+first one at or past `target-duration` (`0` cuts at every keyframe): for MPEG-TS
+one input frame is one access unit, so `FrameTiming::keyframe` marks the
+candidates and the frame PTSs give the durations; for fMP4 the stream is walked as
+boxes, a `moof` whose first sample is a sync sample opens a fragment and is a
+candidate, and the `trun` durations in the track timescale give the exact segment
+length, with `ftyp`+`moov` split off once into the `#EXT-X-MAP` init segment.
+Nothing is added or dropped, so the init segment plus the media segments
+concatenate back to the muxer's own byte stream. `playlist-length` bounds the
+listed window (advancing `#EXT-X-MEDIA-SEQUENCE` as segments roll off) and
+`max-files` deletes the files that leave it, which is the live case; EOS appends
+`#EXT-X-ENDLIST` for VOD.
 `dashsrc::DashSrc` (`dash`)
 is the MPEG-DASH analog: it parses a static MPD (the `mpd` parser, via
 `roxmltree`), selects a Representation, and streams its fMP4 init + media segments

@@ -373,6 +373,10 @@ pub mod multifilesrc;
 pub mod record;
 #[cfg(feature = "std")]
 pub mod splitmuxsink;
+// HLS packager: cuts a muxed byte stream into segment files plus a rolling
+// m3u8 media playlist (M896).
+#[cfg(feature = "std")]
+pub mod hlssink;
 // Subtitle/text file source: a .srt/.vtt/.ssa/.ttml file as a Text stream.
 #[cfg(feature = "std")]
 mod audio;

@@ -386,8 +386,9 @@ the flow-control elements (`concat` / `input-selector` /
 `output-selector` / `progressreport`), the `compositor`, the tag system, and the
 `gst-launch` text DSL (`parse_launch` / `gst-inspect`) are all in the pure
 `no_std + alloc` default build. The std build adds `clockoverlay`, the
-`multifilesink` / `multifilesrc` image-sequence pair, and `splitmuxsink`
-(segmented recording, `muxer=mp4|matroska|mpegts`).
+`multifilesink` / `multifilesrc` image-sequence pair, `splitmuxsink`
+(segmented recording, `muxer=mp4|matroska|mpegts`), and `hlssink` (HLS
+packaging: segment files plus an `.m3u8` playlist, fed by `tsmux` or `mp4mux`).
 
 ## Sample pipelines
 

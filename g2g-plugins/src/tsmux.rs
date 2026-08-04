@@ -349,6 +349,10 @@ impl AsyncElement for TsMux {
                         MemoryDomain::System(SystemSlice::from_boxed(ts.into_boxed_slice())),
                         FrameTiming {
                             pts_ns: frame.timing.pts_ns,
+                            // one output frame is one access unit's packets, so
+                            // the AU's sync flag still describes it: a downstream
+                            // segmenter cuts on it.
+                            keyframe: frame.timing.keyframe,
                             ..FrameTiming::default()
                         },
                         self.emitted,
