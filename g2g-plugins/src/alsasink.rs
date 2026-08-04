@@ -6,11 +6,9 @@
 //!
 //! ## Channel order
 //!
-//! Pipeline PCM is interleaved in the WAV / ffmpeg order
-//! ([`ChannelLayout::default_for`]), but ALSA reports its own per-device map:
-//! a 5.1 device is typically `FL FR RL RR FC LFE`, not our `FL FR FC LFE BL BR`.
-//! The worker reads the device map after `hw_params` and permutes each buffer
-//! into it, so surround content lands on the right speakers.
+//! The worker reads the device channel map after `hw_params` and permutes each
+//! buffer into it (see `alsapcm`), so surround content lands on the right
+//! speakers.
 //!
 //! ## Threading
 //!
@@ -40,62 +38,20 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use alsa::pcm::{Access, ChmapPosition, Format, HwParams, PCM};
+use alsa::pcm::{Access, HwParams, PCM};
 use alsa::{Direction, ValueOr};
 
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ChannelLayout, ChannelPosition,
-    ClockCandidate, ClockPriority, ConfigureOutcome, DriftClock, ElementMetadata, G2gError,
-    HardwareError, MonotonicClock, OutputSink, PadTemplate, PadTemplates, PipelineClock,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority, ConfigureOutcome,
+    DriftClock, ElementMetadata, G2gError, HardwareError, MonotonicClock, OutputSink, PadTemplate,
+    PadTemplates, PipelineClock, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
+use crate::alsapcm::{alsa_params, device_permutation, permute, PcmConfig, FORMATS};
 use crate::audioconvert::sample_bytes;
 
-/// The PCM sample formats this sink opens a device with, and the ALSA format
-/// each maps to. `PcmS24Le` is our 3-byte packed layout, ALSA's `S24_3LE`
-/// (not `S24LE`, which is 24 bits inside a 32-bit container).
-const FORMATS: [(AudioFormat, Format); 5] = [
-    (AudioFormat::PcmU8, Format::U8),
-    (AudioFormat::PcmS16Le, Format::S16LE),
-    (AudioFormat::PcmS24Le, Format::S243LE),
-    (AudioFormat::PcmS32Le, Format::S32LE),
-    (AudioFormat::PcmF32Le, Format::FloatLE),
-];
-
-/// Negotiated PCM device parameters passed to the worker as one unit (keeps the
-/// worker signature under clippy's argument cap).
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct PcmConfig {
-    /// Pipeline sample format: drives the byte-level frame arithmetic.
-    format: AudioFormat,
-    /// The ALSA format the device is opened with.
-    fmt: Format,
-    channels: u32,
-    rate: u32,
-}
-
-/// Negotiated PCM parameters. Compressed audio (AAC / Opus) is rejected
-/// structurally, as in `WasapiSink`.
-fn alsa_params(caps: &Caps) -> Result<PcmConfig, G2gError> {
-    let Caps::Audio {
-        format,
-        channels,
-        sample_rate,
-    } = caps
-    else {
-        return Err(G2gError::CapsMismatch);
-    };
-    let (_, fmt) = FORMATS
-        .iter()
-        .find(|(f, _)| f == format)
-        .ok_or(G2gError::CapsMismatch)?;
-    Ok(PcmConfig {
-        format: *format,
-        fmt: *fmt,
-        channels: u32::from(*channels),
-        rate: *sample_rate,
-    })
+fn alsa_err(code: i32) -> G2gError {
+    G2gError::Hardware(HardwareError::Alsa(code))
 }
 
 /// Worker command. `Samples` carries one buffer of interleaved PCM bytes in the
@@ -452,62 +408,6 @@ fn open_pcm(device: &str, cfg: PcmConfig) -> Result<PCM, i32> {
     Ok(pcm)
 }
 
-/// Our speaker position for an ALSA channel-map position. `None` for one
-/// outside the [`ChannelLayout`] table (or an unpositioned channel), which
-/// makes the caller fall back to writing the buffer straight through.
-fn our_position(p: ChmapPosition) -> Option<ChannelPosition> {
-    Some(match p {
-        ChmapPosition::FL => ChannelPosition::Fl,
-        ChmapPosition::FR => ChannelPosition::Fr,
-        ChmapPosition::FC | ChmapPosition::Mono => ChannelPosition::Fc,
-        ChmapPosition::LFE => ChannelPosition::Lfe,
-        ChmapPosition::RL => ChannelPosition::Bl,
-        ChmapPosition::RR => ChannelPosition::Br,
-        ChmapPosition::SL => ChannelPosition::Sl,
-        ChmapPosition::SR => ChannelPosition::Sr,
-        ChmapPosition::RC => ChannelPosition::Bc,
-        ChmapPosition::FLC => ChannelPosition::Flc,
-        ChmapPosition::FRC => ChannelPosition::Frc,
-        _ => return None,
-    })
-}
-
-/// The permutation from our interleave order (the default layout for
-/// `channels`) into the device's reported channel map: `perm[d]` is the source
-/// channel that feeds device channel `d`. `None` when the two orders already
-/// agree, the device reports no map, or a device position falls outside our
-/// layout: the buffer then goes out unpermuted. Must be called after
-/// `hw_params`, which is when ALSA fixes the map.
-fn device_permutation(pcm: &PCM, channels: u32) -> Option<Vec<usize>> {
-    let layout = ChannelLayout::default_for(u8::try_from(channels).ok()?)?;
-    let positions: Vec<ChmapPosition> = (&pcm.get_chmap().ok()?).into();
-    if positions.len() != channels as usize {
-        return None;
-    }
-    let mut perm = Vec::with_capacity(positions.len());
-    for p in positions {
-        perm.push(layout.index_of(our_position(p)?)?);
-    }
-    if perm.iter().enumerate().all(|(d, s)| d == *s) {
-        return None;
-    }
-    Some(perm)
-}
-
-/// Reorder interleaved frames into the device's channel order: output channel
-/// `d` of each frame takes source channel `perm[d]`. A ragged trailing partial
-/// frame is dropped (it cannot be written as a frame anyway).
-fn permute(bytes: &[u8], perm: &[usize], sample: usize) -> Vec<u8> {
-    let frame = sample * perm.len();
-    let mut out = Vec::with_capacity(bytes.len());
-    for f in bytes.chunks_exact(frame) {
-        for &s in perm {
-            out.extend_from_slice(&f[s * sample..][..sample]);
-        }
-    }
-    out
-}
-
 /// Write a whole interleaved buffer, looping over partial writes and recovering
 /// from underruns (`-EPIPE`). The bytes go to `writei` as-is: the device was
 /// opened with the matching little-endian ALSA format, so no per-format
@@ -550,79 +450,11 @@ fn write_all(
     Ok(())
 }
 
-fn alsa_err(code: i32) -> G2gError {
-    G2gError::Hardware(HardwareError::Alsa(code))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn caps(format: AudioFormat, channels: u8, rate: u32) -> Caps {
-        Caps::Audio {
-            format,
-            channels,
-            sample_rate: rate,
-        }
-    }
-
-    #[test]
-    fn alsa_params_maps_formats_and_rejects_compressed() {
-        let p = alsa_params(&caps(AudioFormat::PcmS16Le, 2, 48_000)).unwrap();
-        assert_eq!((p.fmt, p.channels, p.rate), (Format::S16LE, 2, 48_000));
-        let p = alsa_params(&caps(AudioFormat::PcmF32Le, 1, 44_100)).unwrap();
-        assert_eq!((p.fmt, p.channels, p.rate), (Format::FloatLE, 1, 44_100));
-        // 24-bit is the 3-byte packed ALSA format, not the 32-bit container.
-        assert_eq!(
-            alsa_params(&caps(AudioFormat::PcmS24Le, 6, 48_000))
-                .unwrap()
-                .fmt,
-            Format::S243LE
-        );
-        assert_eq!(
-            alsa_params(&caps(AudioFormat::PcmS32Le, 2, 48_000))
-                .unwrap()
-                .fmt,
-            Format::S32LE
-        );
-        assert_eq!(
-            alsa_params(&caps(AudioFormat::PcmU8, 2, 8_000))
-                .unwrap()
-                .fmt,
-            Format::U8
-        );
-        assert_eq!(
-            alsa_params(&caps(AudioFormat::Aac, 2, 48_000)),
-            Err(G2gError::CapsMismatch)
-        );
-        // a raw format the sink does not open a device with is rejected too.
-        assert_eq!(
-            alsa_params(&caps(AudioFormat::Mulaw, 1, 8_000)),
-            Err(G2gError::CapsMismatch)
-        );
-    }
-
-    #[test]
-    fn permute_reorders_frames_into_the_device_map() {
-        // 5.1: our FL FR FC LFE BL BR -> the usual ALSA FL FR RL RR FC LFE.
-        let perm = [0usize, 1, 4, 5, 2, 3];
-        // one frame of s16 channel markers 0..5.
-        let src: Vec<u8> = (0i16..6).flat_map(|c| c.to_le_bytes()).collect();
-        let out = permute(&src, &perm, 2);
-        let got: Vec<i16> = out
-            .chunks_exact(2)
-            .map(|c| i16::from_le_bytes([c[0], c[1]]))
-            .collect();
-        assert_eq!(got, [0, 1, 4, 5, 2, 3]);
-    }
-
-    #[test]
-    fn permute_handles_three_byte_samples_and_drops_a_ragged_tail() {
-        // S24 is 3 bytes: a swap of a stereo frame moves 3 bytes at a time.
-        let src = [1u8, 2, 3, 4, 5, 6, 7, 8];
-        let out = permute(&src, &[1, 0], 3);
-        assert_eq!(out, [4, 5, 6, 1, 2, 3]);
-    }
+    use g2g_core::AudioFormat;
 
     #[test]
     fn intercept_accepts_pcm_rejects_compressed() {

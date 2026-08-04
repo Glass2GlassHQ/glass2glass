@@ -905,15 +905,28 @@ pub mod gstwrap;
 #[cfg(all(target_os = "linux", feature = "wayland-sink"))]
 pub mod waylandsink;
 
-// Linux audio render sinks: the audible-output end of the audio path, the
-// analogs of the Windows-only WasapiSink. Each links a different system audio
-// stack and is target-gated to Linux behind its own feature.
+// Linux audio render sinks and capture sources: the two ends of the audio path,
+// the analogs of the Windows-only WasapiSink / WasapiSrc. Each links a different
+// system audio stack and is target-gated to Linux behind its own feature; the
+// sink and source of one stack share a helper module for the format / channel
+// mapping they both need.
 // ALSA (libasound), the lowest-level path.
+#[cfg(all(target_os = "linux", any(feature = "alsa-sink", feature = "alsa-src")))]
+mod alsapcm;
 #[cfg(all(target_os = "linux", feature = "alsa-sink"))]
 pub mod alsasink;
+#[cfg(all(target_os = "linux", feature = "alsa-src"))]
+pub mod alsasrc;
 // PulseAudio / PipeWire-pulse via the blocking libpulse "simple" API.
+#[cfg(all(
+    target_os = "linux",
+    any(feature = "pulse-sink", feature = "pulse-src")
+))]
+mod pulsepcm;
 #[cfg(all(target_os = "linux", feature = "pulse-sink"))]
 pub mod pulsesink;
+#[cfg(all(target_os = "linux", feature = "pulse-src"))]
+pub mod pulsesrc;
 // PipeWire audio render sink + capture source (the modern Linux media layer).
 // Both elements share the `pipewire` feature, the pipewire-rs crate, and the
 // pwaudio SPA-format helper.

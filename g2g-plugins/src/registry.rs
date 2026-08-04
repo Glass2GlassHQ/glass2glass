@@ -78,6 +78,8 @@ use crate::vp9parse::Vp9Parse;
 use crate::aaudio::{AAudioSink, AAudioSrc};
 #[cfg(all(target_os = "linux", feature = "alsa-sink"))]
 use crate::alsasink::AlsaSink;
+#[cfg(all(target_os = "linux", feature = "alsa-src"))]
+use crate::alsasrc::AlsaSrc;
 #[cfg(feature = "av1-encode")]
 use crate::av1enc::Av1Enc;
 #[cfg(all(target_os = "android", feature = "camera2"))]
@@ -120,6 +122,8 @@ use crate::nvenc::NvEnc;
 use crate::onvif::OnvifSrc;
 #[cfg(all(target_os = "linux", feature = "pulse-sink"))]
 use crate::pulsesink::PulseSink;
+#[cfg(all(target_os = "linux", feature = "pulse-src"))]
+use crate::pulsesrc::PulseSrc;
 #[cfg(feature = "rav1d")]
 use crate::rav1ddec::Rav1dDec;
 #[cfg(feature = "remote")]
@@ -1621,6 +1625,27 @@ fn register_feature_gated(reg: &mut Registry) {
     reg.register_launch(LaunchFactory::of::<PulseSink>("pulsesink", || {
         Box::new(PulseSink::new())
     }));
+    // Linux audio capture (M886), the non-PipeWire mic paths.
+    #[cfg(all(target_os = "linux", feature = "alsa-src"))]
+    reg.register_source(SourceFactory::new(
+        "alsasrc",
+        Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            channels: 2,
+            sample_rate: 48_000,
+        },
+        || Box::new(AlsaSrc::new()),
+    ));
+    #[cfg(all(target_os = "linux", feature = "pulse-src"))]
+    reg.register_source(SourceFactory::new(
+        "pulsesrc",
+        Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            channels: 2,
+            sample_rate: 48_000,
+        },
+        || Box::new(PulseSrc::new()),
+    ));
     // Android AAudio PCM render (M307); the gst analog is `aaudiosink`.
     #[cfg(all(target_os = "android", feature = "aaudio"))]
     reg.register_launch(LaunchFactory::of::<AAudioSink>("aaudiosink", || {

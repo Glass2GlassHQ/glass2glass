@@ -26,7 +26,7 @@ linux-full = [
     "http-src", "hls", "dash",
     "ffmpeg", "vaapi", "v4l2",
     "opus", "vorbis", "vpx", "av1-encode", "mjpeg", "mjpeg-encode",
-    "alsa-sink", "pulse-sink", "pipewire",
+    "alsa-sink", "alsa-src", "pulse-sink", "pulse-src", "pipewire",
     "wayland-sink", "kms-sink", "wgpu-sink", "vello-overlay", "analytics",
     "declarative-yaml", "script-rhai", "observe",
 ]
@@ -600,6 +600,11 @@ dash = ["http-src", "dep:roxmltree"]
 # crate (links system libasound: alsa-lib-devel / libasound2-dev). Linux-only,
 # implies std.
 alsa-sink = ["std", "dep:alsa"]
+# Linux ALSA capture source (AlsaSrc): reads interleaved PCM from an ALSA capture
+# device via libasound, the input mirror of AlsaSink and the non-PipeWire mic
+# path. Blocking reads run on a dedicated worker thread. Same `alsa` crate /
+# system libasound as `alsa-sink`. Linux-only, implies std.
+alsa-src = ["std", "dep:alsa"]
 # ST 2110 network elements (M597): AsyncElement sink / SourceLoop source wrapping
 # the sans-IO ST 2110-30 / -40 cores over UDP, RTP timestamps off the PTP media
 # clock. std (UdpSocket). The sans-IO cores themselves are always compiled.
@@ -620,6 +625,11 @@ ptp = ["std", "dep:libc"]
 # worker thread. Pulls libpulse-binding + libpulse-simple-binding (link libpulse).
 # Linux-only, implies std.
 pulse-sink = ["std", "dep:libpulse-binding", "dep:libpulse-simple-binding"]
+# Linux PulseAudio capture source (PulseSrc): records interleaved PCM from a
+# PulseAudio / PipeWire-pulse source via the blocking libpulse "simple" API on a
+# worker thread, the input mirror of PulseSink. Same bindings as `pulse-sink`.
+# Linux-only, implies std.
+pulse-src = ["std", "dep:libpulse-binding", "dep:libpulse-simple-binding"]
 # Linux PipeWire audio render sink + capture source (PipeWireSink / PipeWireSrc):
 # the modern Linux media layer. Drives a pw::stream on a pw::main_loop worker,
 # negotiating an SPA audio format pod. Pulls the `pipewire` crate (libpipewire-0.3
