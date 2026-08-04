@@ -630,10 +630,6 @@ _(No open parser items.)_
   `waylandsink` (kms / wgpu / vulkanhdr / metal / d3d11 / cuda / canvas), so
   their late-drop `Qos` reporting has a decision to report; `QosTracker` is the
   seam. Relay `waylandsink`'s drop upstream via `take_qos`.
-- Logging: wire the per-instance category override through the caller half: a
-  `SourceLoop` setter, the runner naming loop invoking `set_log_category` (and
-  naming muxer / demux / fan-out payloads at all), the dyn fan-in / fan-out
-  mirrors forwarding it, and a launch-line `log-category=`.
 
 ## Properties / introspection / DSL
 

@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M847: launch-line `log-category=`, log-category setters on sources and fan payloads, and the runner now names muxer / demux / fan-out elements too.
+
 - M846: live per-edge packet/byte/drop/blocked-time counters in the observer tap and dashboard, and observed entry points with per-element stats for the standalone fan-in / fan-out / session runners.
 
 - M845: structured log fields + timestamps, a ring-buffer flight-recorder sink, per-instance category override, and self-log names on the remaining logging elements.

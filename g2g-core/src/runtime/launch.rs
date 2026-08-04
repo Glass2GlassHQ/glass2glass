@@ -40,6 +40,11 @@
 //! `+`-joined set (`protocols=udp+tcp`), so a bad name names the valid ones.
 //! A pad-name suffix on a reference (`t.src_0`) is accepted but ignored (pads are
 //! positional).
+//!
+//! Two `key=value` pairs are launch keywords rather than properties: `name=` is
+//! the instance name (and the handle pad references resolve against), and
+//! `log-category=` (M847) replaces that instance's `G2G_DEBUG` category, leaving
+//! the auto `<type>N` naming alone.
 
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
@@ -232,11 +237,13 @@ impl core::fmt::Display for ParseError {
 
 /// One parsed element: factory name plus its `key=value` properties (all owned so
 /// errors can name them), and the optional `name=` handle that pad references
-/// resolve against. `name` is special-cased here, never applied as a property.
+/// resolve against. `name` and `log-category` are special-cased here (launch
+/// keywords, not properties), never applied as properties.
 struct ElementSpec {
     name: String,
     props: Vec<(String, String)>,
     instance: Option<String>,
+    log_category: Option<String>,
 }
 
 /// An item in a chain: an element to build, a `t.` reference to a named element
@@ -335,6 +342,7 @@ fn consume_element<'a, I: Iterator<Item = &'a str>>(
         name: name.to_string(),
         props: Vec::new(),
         instance: None,
+        log_category: None,
     };
     while let Some(&tok) = tokens.peek() {
         if tok == "!" || is_caps_token(tok) || as_ref_name(tok).is_some() {
@@ -350,6 +358,10 @@ fn consume_element<'a, I: Iterator<Item = &'a str>>(
         let value = unquote_value(value);
         if key == "name" {
             spec.instance = Some(value);
+        } else if key == "log-category" {
+            // M847: a launch keyword like `name=`, not a property: it renames this
+            // instance's `G2G_DEBUG` filter key rather than configuring it.
+            spec.log_category = Some(value);
         } else {
             spec.props.push((key.to_string(), value));
         }
@@ -510,6 +522,7 @@ fn parse_chains(pipeline: &str) -> Result<Vec<Chain>, ParseError> {
                         name: "capsfilter".to_string(),
                         props: alloc::vec![("caps".to_string(), tok.to_string())],
                         instance: None,
+                        log_category: None,
                     }));
                     st = St::AfterNode;
                 } else if let Some((name, pad)) = split_pad_ref(tok) {
@@ -701,6 +714,7 @@ fn expand_decodebin(registry: &Registry, chains: Vec<Chain>) -> Result<Vec<Chain
                                     name: primary.demux.to_string(),
                                     props: primary.props.clone(),
                                     instance: None,
+                                    log_category: None,
                                 }));
                                 upstream = Some((primary.demux.to_string(), primary.props));
                                 primary.caps
@@ -727,6 +741,7 @@ fn expand_decodebin(registry: &Registry, chains: Vec<Chain>) -> Result<Vec<Chain
                             name: name.to_string(),
                             props: Vec::new(),
                             instance: None,
+                            log_category: None,
                         }));
                         upstream = Some((name.to_string(), Vec::new()));
                     }
@@ -840,6 +855,7 @@ fn expand_uri_sources(registry: &Registry, chains: Vec<Chain>) -> Result<Vec<Cha
                     name: sink,
                     props: Vec::new(),
                     instance: None,
+                    log_category: None,
                 }));
             }
         }
@@ -898,6 +914,7 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
                         name: name.to_string(),
                         props: Vec::new(),
                         instance: None,
+                        log_category: None,
                     });
                     prebuilt.push(Some(node));
                     eps.push(Endpoint::Element(ei));
@@ -1276,6 +1293,11 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
         // the handle pad references resolve against.
         if let Some(inst) = &spec.instance {
             graph.set_node_name(node, inst.clone());
+        }
+        // M847: `log-category=` renames this instance's log category, which the
+        // runner hands to the element before naming it.
+        if let Some(cat) = &spec.log_category {
+            graph.set_node_log_category(node, cat.clone());
         }
         node_of.push(Some(node));
     }

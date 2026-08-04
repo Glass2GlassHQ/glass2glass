@@ -216,6 +216,13 @@ pub trait SourceLoop: ElementBound {
     /// Default: ignore.
     fn set_instance_name(&mut self, _name: alloc::string::String) {}
 
+    /// Override this instance's log category (M845), mirroring
+    /// [`AsyncElement::set_log_category`](crate::AsyncElement::set_log_category).
+    /// Default: ignore. A source that logs about itself stores it in a
+    /// [`LogName`](crate::log::LogName) and returns it from
+    /// `LogSource::log_category_override`.
+    fn set_log_category(&mut self, _category: alloc::string::String) {}
+
     /// Set a property by name (M104). Default: [`PropError::Unknown`].
     fn set_property(&mut self, _name: &str, _value: PropValue) -> Result<(), PropError> {
         Err(PropError::Unknown)

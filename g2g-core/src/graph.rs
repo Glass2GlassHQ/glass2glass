@@ -291,6 +291,9 @@ struct Node<E> {
     /// Explicit instance name (a launch line's `name=`); `None` leaves the
     /// runner's auto `<category>N` naming in charge.
     name: Option<String>,
+    /// Per-instance log category (a launch line's `log-category=`); `None` keeps
+    /// the element type as the category.
+    log_category: Option<String>,
 }
 
 /// Builder for a multimedia DAG. Add nodes, link their pads, then `finish()`
@@ -381,6 +384,7 @@ impl<E> Graph<E> {
             element,
             fanout: FanOutPolicy::FailLoud,
             name: None,
+            log_category: None,
         });
         id
     }
@@ -396,6 +400,20 @@ impl<E> Graph<E> {
         self.nodes
             .get(node.0 as usize)
             .and_then(|n| n.name.as_deref())
+    }
+
+    /// Override this node's log category, the element type otherwise. The launch
+    /// parser sets it from a `log-category=`; the runner hands it to the element
+    /// before naming, so `G2G_DEBUG` filtering keys off it for this instance.
+    pub fn set_node_log_category(&mut self, node: NodeId, category: String) {
+        self.nodes[node.0 as usize].log_category = Some(category);
+    }
+
+    /// A node's log-category override, if one was set.
+    pub fn node_log_category(&self, node: NodeId) -> Option<&str> {
+        self.nodes
+            .get(node.0 as usize)
+            .and_then(|n| n.log_category.as_deref())
     }
 
     /// Link an output pad to an input pad with the default `Block` policy.
@@ -791,6 +809,12 @@ impl<E> ValidatedGraph<E> {
     /// runner uses it instead of the auto `<category>N`.
     pub fn node_name(&self, node: NodeId) -> Option<&str> {
         self.nodes[node.0 as usize].name.as_deref()
+    }
+
+    /// This node's log-category override (a launch line's `log-category=`), if
+    /// any. The runner hands it to the element in place of the type category.
+    pub fn node_log_category(&self, node: NodeId) -> Option<&str> {
+        self.nodes[node.0 as usize].log_category.as_deref()
     }
 
     pub fn edge(&self, id: usize) -> &Edge {

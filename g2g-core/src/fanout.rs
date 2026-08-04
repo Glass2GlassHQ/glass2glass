@@ -185,6 +185,17 @@ pub trait MultiOutputSource: ElementBound {
     fn get_property(&self, _name: &str) -> Option<PropValue> {
         None
     }
+
+    /// Receive this instance's log name and a per-instance log category
+    /// override, mirroring
+    /// [`AsyncElement::set_instance_name`](crate::AsyncElement::set_instance_name)
+    /// / [`set_log_category`](crate::AsyncElement::set_log_category). Default:
+    /// ignore. A session source that logs about itself stores them in a
+    /// [`LogName`](crate::log::LogName).
+    fn set_instance_name(&mut self, _name: alloc::string::String) {}
+
+    /// See [`set_instance_name`](Self::set_instance_name).
+    fn set_log_category(&mut self, _category: alloc::string::String) {}
 }
 
 /// Dyn-safe mirror of [`MultiOutputSource`] (boxed-future `run`), so a terminal
@@ -206,6 +217,10 @@ pub trait DynMultiOutputSource: ElementBound {
     fn get_property(&self, _name: &str) -> Option<PropValue> {
         None
     }
+    /// Dyn-safe mirror of [`MultiOutputSource::set_instance_name`].
+    fn set_instance_name(&mut self, _name: alloc::string::String) {}
+    /// Dyn-safe mirror of [`MultiOutputSource::set_log_category`].
+    fn set_log_category(&mut self, _category: alloc::string::String) {}
 }
 
 impl<T: MultiOutputSource> DynMultiOutputSource for T {
@@ -230,6 +245,12 @@ impl<T: MultiOutputSource> DynMultiOutputSource for T {
     fn get_property(&self, name: &str) -> Option<PropValue> {
         MultiOutputSource::get_property(self, name)
     }
+    fn set_instance_name(&mut self, name: alloc::string::String) {
+        MultiOutputSource::set_instance_name(self, name)
+    }
+    fn set_log_category(&mut self, category: alloc::string::String) {
+        MultiOutputSource::set_log_category(self, category)
+    }
 }
 
 /// Forwarding impl so a borrowed `&mut dyn DynMultiOutputSource` can be boxed
@@ -246,6 +267,12 @@ impl<'b> DynMultiOutputSource for &'b mut (dyn DynMultiOutputSource + 'b) {
         out: &'a mut dyn MultiOutputSink,
     ) -> BoxFuture<'a, Result<u64, G2gError>> {
         (**self).run(out)
+    }
+    fn set_instance_name(&mut self, name: alloc::string::String) {
+        (**self).set_instance_name(name)
+    }
+    fn set_log_category(&mut self, category: alloc::string::String) {
+        (**self).set_log_category(category)
     }
 }
 

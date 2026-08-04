@@ -256,6 +256,13 @@ pub trait DynMultiOutputElement: ElementBound {
     fn properties(&self) -> &'static [PropertySpec];
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError>;
     fn get_property(&self, name: &str) -> Option<PropValue>;
+
+    /// Dyn-safe mirror of [`MultiOutputElement::set_instance_name`], so the
+    /// runner can name an erased demux instance for logging.
+    fn set_instance_name(&mut self, _name: alloc::string::String) {}
+
+    /// Dyn-safe mirror of [`MultiOutputElement::set_log_category`].
+    fn set_log_category(&mut self, _category: alloc::string::String) {}
 }
 
 impl<T: MultiOutputElement> DynMultiOutputElement for T {
@@ -289,6 +296,14 @@ impl<T: MultiOutputElement> DynMultiOutputElement for T {
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
         MultiOutputElement::get_property(self, name)
+    }
+
+    fn set_instance_name(&mut self, name: alloc::string::String) {
+        MultiOutputElement::set_instance_name(self, name)
+    }
+
+    fn set_log_category(&mut self, category: alloc::string::String) {
+        MultiOutputElement::set_log_category(self, category)
     }
 }
 
@@ -326,6 +341,14 @@ impl<'b> DynMultiOutputElement for &'b mut (dyn DynMultiOutputElement + 'b) {
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
         (**self).get_property(name)
+    }
+
+    fn set_instance_name(&mut self, name: alloc::string::String) {
+        (**self).set_instance_name(name)
+    }
+
+    fn set_log_category(&mut self, category: alloc::string::String) {
+        (**self).set_log_category(category)
     }
 }
 
@@ -871,9 +894,10 @@ async fn prepare_graph<'a>(
         sc.expect_prerolls(sinks);
     }
 
-    // M179: give each source / element instance a log name and log its addition,
-    // the launch line's `name=` when it set one (M842), else `<category>N` per
-    // category (the GStreamer `videotestsrc0` convention). Done before negotiation
+    // M179: give every payload instance (source, transform, sink, muxer, demux,
+    // session) a log name and log its addition: the launch line's `name=` when it
+    // set one (M842), else `<category>N` per category (the GStreamer
+    // `videotestsrc0` convention). Done before negotiation
     // so an element's own log lines (e.g. at `configure_pipeline`) already carry
     // the instance name. Naming runs whether or not a sink is installed (it is
     // cheap; the `g2g_info!` is threshold-gated).
@@ -904,12 +928,29 @@ async fn prepare_graph<'a>(
                     None => continue, // plain broadcast tee: no element to name
                 },
             };
+            // M847: a launch line's `log-category=` replaces the type category for
+            // this instance's own log lines and their filtering. Applied before
+            // naming so the element's first lines already carry it; naming still
+            // keys on the type category, so siblings keep counting `<type>N`.
+            if let Some(over) = vg.node_log_category(node).map(alloc::string::String::from) {
+                match vg.element_mut(node) {
+                    Some(GraphNodeRef::Source(src)) => src.set_log_category(over),
+                    Some(GraphNodeRef::Element(elem)) => elem.set_log_category(over),
+                    Some(GraphNodeRef::Muxer(mux)) => mux.set_log_category(over),
+                    Some(GraphNodeRef::FanoutSource(src)) => src.set_log_category(over),
+                    Some(GraphNodeRef::Demux(demux)) => demux.set_log_category(over),
+                    None => {}
+                }
+            }
             let name = namer.add(category, vg.node_name(node));
             names[node.0 as usize] = name.clone();
             match vg.element_mut(node) {
                 Some(GraphNodeRef::Source(src)) => src.set_instance_name(name.clone()),
                 Some(GraphNodeRef::Element(elem)) => elem.set_instance_name(name.clone()),
-                _ => {}
+                Some(GraphNodeRef::Muxer(mux)) => mux.set_instance_name(name.clone()),
+                Some(GraphNodeRef::FanoutSource(src)) => src.set_instance_name(name.clone()),
+                Some(GraphNodeRef::Demux(demux)) => demux.set_instance_name(name.clone()),
+                None => {}
             }
             // Mint a measured-latency probe for every node with a `process()`:
             // transforms, sinks, muxers, and demuxers (a demux is a `Tee`-kind

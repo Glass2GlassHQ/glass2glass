@@ -1470,8 +1470,10 @@ element *instance*, e.g. `"VideoFlip0"`), an optional `timestamp_ns` (from a
 host-installed `set_time_source`; core reads no clock), and typed structured
 `fields` a sink renders or ships without parsing the message
 (`g2g_log_fields!`). An element may override its category per instance
-(`set_log_category` / `LogSource::log_category_override`), and the override is
-what the filter matches. `LogLevel` runs `Error` (most severe)
+(`set_log_category` / `LogSource::log_category_override`, or `log-category=` on
+a launch line, the second launch keyword beside `name=`), and the override is
+what the filter matches; the auto instance name stays type-based, so a filter
+knob never renumbers probes or `t.` handles. `LogLevel` runs `Error` (most severe)
 through `Trace`, matching GStreamer's numeric levels; a per-category threshold
 table (a default plus overrides) decides what is emitted, mirrored into an atomic
 so a disabled `g2g_trace!` in a hot loop costs one atomic load. The macros
@@ -1481,7 +1483,8 @@ checked against the threshold before formatting. Records route to an installed
 `LogSink`; the `std` feature provides a stderr sink and `init_from_env`, which
 reads `G2G_DEBUG` (a `GST_DEBUG`-style `*:warning,VideoFlip:trace` spec; category
 names take `*` / `?` globs, e.g. `*sink*:5`, with an exact override winning). The
-runners (DAG, bespoke linear, fan-in) assign each element an instance name before
+runners (DAG, bespoke linear, fan-in) assign each element, including muxer /
+demux / fan-out payloads, an instance name before
 negotiation through a shared `InstanceNamer`: an explicit `gst-launch` `name=`
 (carried on the graph node, duplicates rejected at parse) or else `<category>N`
 (the `videotestsrc0` convention) via `set_instance_name`, logging each element's

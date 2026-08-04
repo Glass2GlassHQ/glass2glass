@@ -123,6 +123,9 @@ pub trait DynSourceLoop: ElementBound {
     /// Dyn-safe mirror of [`SourceLoop::set_instance_name`].
     fn set_instance_name(&mut self, _name: alloc::string::String) {}
 
+    /// Dyn-safe mirror of [`SourceLoop::set_log_category`].
+    fn set_log_category(&mut self, _category: alloc::string::String) {}
+
     /// Dyn-safe mirror of [`SourceLoop::set_property`]. Defaults to "no
     /// properties"; the blanket `impl<T: SourceLoop>` overrides it to forward.
     fn set_property(&mut self, _name: &str, _value: PropValue) -> Result<(), PropError> {
@@ -205,6 +208,10 @@ impl<T: SourceLoop> DynSourceLoop for T {
         SourceLoop::set_instance_name(self, name)
     }
 
+    fn set_log_category(&mut self, category: alloc::string::String) {
+        SourceLoop::set_log_category(self, category)
+    }
+
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
         SourceLoop::set_property(self, name, value)
     }
@@ -279,6 +286,10 @@ impl<'b> DynSourceLoop for &'b mut (dyn DynSourceLoop + 'b) {
         (**self).set_instance_name(name)
     }
 
+    fn set_log_category(&mut self, category: alloc::string::String) {
+        (**self).set_log_category(category)
+    }
+
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
         (**self).set_property(name, value)
     }
@@ -344,6 +355,13 @@ pub trait DynMultiInputElement: ElementBound {
     fn is_terminal(&self) -> bool {
         false
     }
+
+    /// Dyn-safe mirror of [`MultiInputElement::set_instance_name`], so the runner
+    /// can name an erased muxer instance for logging.
+    fn set_instance_name(&mut self, _name: alloc::string::String) {}
+
+    /// Dyn-safe mirror of [`MultiInputElement::set_log_category`].
+    fn set_log_category(&mut self, _category: alloc::string::String) {}
 }
 
 impl<T: MultiInputElement> DynMultiInputElement for T {
@@ -426,6 +444,14 @@ impl<T: MultiInputElement> DynMultiInputElement for T {
 
     fn is_terminal(&self) -> bool {
         MultiInputElement::is_terminal(self)
+    }
+
+    fn set_instance_name(&mut self, name: alloc::string::String) {
+        MultiInputElement::set_instance_name(self, name)
+    }
+
+    fn set_log_category(&mut self, category: alloc::string::String) {
+        MultiInputElement::set_log_category(self, category)
     }
 }
 
@@ -513,6 +539,14 @@ impl<'b> DynMultiInputElement for &'b mut (dyn DynMultiInputElement + 'b) {
 
     fn is_terminal(&self) -> bool {
         (**self).is_terminal()
+    }
+
+    fn set_instance_name(&mut self, name: alloc::string::String) {
+        (**self).set_instance_name(name)
+    }
+
+    fn set_log_category(&mut self, category: alloc::string::String) {
+        (**self).set_log_category(category)
     }
 }
 
