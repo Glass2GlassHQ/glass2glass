@@ -728,17 +728,8 @@ Outstanding developer-tooling tasks, highest leverage first.
     empty: their arms attach at runtime, so the observer needs incremental node
     registration rather than the one-shot `register`.
   - Validate the dashboard live against an RTSP source.
-- **Visual builder follow-ups.** For `tools/builder/` (React Flow):
-  - YAML export (the JSON export already covers the graph model; schema shared).
-- **Edge preview follow-ups.** Remaining: per-edge tap on the fan-in / muxer arms
-  (the slot is shared via `SenderSink`, so those arms already carry it, but they
-  are not exercised).
-- **Negotiation explainer follow-ups.** `validate` (MCP / `toolingjson`) returns
-  per-edge negotiated caps and, on a solve conflict, the structured failure
-  (kind + node indices). Remaining: carry the *both caps sets* at the point of
-  failure in the structured `NegotiationFailure` (the by-default log narration
-  already prints them, but the error type still hands programmatic consumers only
-  the node indices), which needs the solver to surface the candidate sets.
+- A CI job (or a feature added to an existing job) running the `observe`-gated
+  dashboard tests; they only run locally today.
 - **Per-frame latency waterfall.** The dashboard renders an aggregate stacked
   wait+work p50 per stage. The remaining piece is a single frame's path: a
   source-stamped sequence id carried through so one frame's queue-residency +

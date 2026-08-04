@@ -557,7 +557,10 @@ impl ProbeSlot {
         *self.inner.lock() = None;
     }
 
-    fn action(&self, packet: &PipelinePacket) -> ProbeAction {
+    /// The verdict for `packet`: `Pass` when no interceptor is installed. Also
+    /// consulted by the fan-in session adapter, which shares the tagged channel
+    /// and so carries its own per-input slot.
+    pub(crate) fn action(&self, packet: &PipelinePacket) -> ProbeAction {
         match self.inner.lock().as_ref() {
             Some(probe) => probe.on_packet(packet),
             None => ProbeAction::Pass,

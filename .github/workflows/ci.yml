@@ -189,6 +189,7 @@ jobs:
       - name: test g2g-plugins (scripting)
         run: |
           cargo test -p g2g-plugins --locked --features script-rhai,declarative-yaml --test m578_scripting
+          cargo test -p g2g-plugins --locked --features script-rhai,declarative-yaml --test m849_builder_yaml_export
           cargo test -p g2g-plugins --locked --features script-rhai,declarative-yaml --lib script::
       # Native WebRTC (str0m sans-IO stack): needs rustc 1.85 (the workspace MSRV),
       # so it stays out of the default suite. Compile the feature, then run the

@@ -1162,6 +1162,12 @@ required-features = ["vulkan-video", "wgpu-sink"]
 name = "m578_scripting"
 required-features = ["script-rhai", "declarative-yaml"]
 
+# M849: the visual builder's YAML export, inlined verbatim and loaded through the
+# declarative YAML front-end.
+[[test]]
+name = "m849_builder_yaml_export"
+required-features = ["declarative-yaml"]
+
 # M201: builds the out-of-tree example plugin cdylib and dlopens it. Needs the
 # loader, so it is gated on `plugin-loader` (skipped by a default `cargo test`).
 [[test]]

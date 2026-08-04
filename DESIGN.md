@@ -2673,8 +2673,8 @@ pipeline builder (`tools/builder/`), a React Flow app (Vite + pnpm) that loads a
 `registry.json` snapshot, offers a typed drag-drop canvas with pan / zoom and
 either-direction linking, imports and live-exports a `gst-launch` line (the `!`
 form for linear chains, named definitions + `elem.` references for branched
-graphs) and declarative JSON (`declarative.rs` schema), all of which load back
-into g2g; and the MCP server. Links are validated live: with `g2g-validate-wasm`
+graphs) and declarative JSON and YAML (`declarative.rs` schema), all of which
+load back into g2g; and the MCP server. Links are validated live: with `g2g-validate-wasm`
 built (g2g's real caps solver wrapping `toolingjson::validate_json`, compiled to
 wasm and loaded client-side) each edge shows its negotiated caps and a failing
 link is flagged; without the blob (the strict-CSP single-file artifact) it falls
@@ -2715,9 +2715,11 @@ from a solve conflict (`Solve(NegotiationFailure)`, the structured detail naming
 the offending link). `toolingjson::validate_json` reports, on success, the
 negotiated caps per edge with the edge's endpoint node indices, and on a solve
 conflict the failure kind (`empty-link`, `unfixable`, ...) plus those indices, so
-a caller can highlight the failing link. Carrying the two candidate caps sets at
-the point of failure (upstream produce vs downstream accept) is a follow-up
-needing the solver to surface its per-edge domains.
+a caller can highlight the failing link. On an `empty-link` the solver also
+captures both candidate sets at the failing intersection (`CapsConflict`,
+upstream produce vs downstream accept, `Option`al since some sites hold only
+one side), and `validate_json` renders them as gst caps strings
+(`upstream_caps` / `downstream_caps`).
 
 ### 4.20c Developer Tooling: Conformance and Derived Maturity
 

@@ -10,7 +10,7 @@ import {
   useEdgesState,
 } from "@xyflow/react";
 import { G2gNode } from "./nodes.jsx";
-import { toLaunch, toJSON, isSink, nodeData } from "./export.js";
+import { toLaunch, toJSON, toYAML, isSink, nodeData } from "./export.js";
 import { fromLaunch, fromJSON, seedCounters, decorateEdge, CAPS_WARN_TITLE } from "./import.js";
 import { applyValidation } from "./solve.js";
 import { loadSolver } from "./solver-load.js";
@@ -226,10 +226,10 @@ export default function App() {
     return g;
   }, [elements, filter]);
 
-  const exportText = useMemo(
-    () => (exportMode === "gst" ? toLaunch(nodes, edges) : toJSON(nodes, edges)),
-    [exportMode, nodes, edges],
-  );
+  const exportText = useMemo(() => {
+    if (exportMode === "gst") return toLaunch(nodes, edges);
+    return exportMode === "yaml" ? toYAML(nodes, edges) : toJSON(nodes, edges);
+  }, [exportMode, nodes, edges]);
 
   const hasDynamic = nodes.some((n) => n.data.doc?.dynamic);
 
@@ -350,6 +350,9 @@ export default function App() {
             <button className={exportMode === "json" ? "on" : ""} onClick={() => setExportMode("json")}>
               JSON
             </button>
+            <button className={exportMode === "yaml" ? "on" : ""} onClick={() => setExportMode("yaml")}>
+              YAML
+            </button>
             <button
               className="copy"
               onClick={() => navigator.clipboard && navigator.clipboard.writeText(exportText)}
@@ -357,7 +360,7 @@ export default function App() {
               copy
             </button>
           </div>
-          {hasDynamic && exportMode === "json" && (
+          {hasDynamic && exportMode !== "gst" && (
             <div className="err">
               uridecodebin/decodebin are parse-time macros; load via the gst-launch export, not --graph
             </div>

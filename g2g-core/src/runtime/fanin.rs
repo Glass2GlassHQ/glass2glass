@@ -38,7 +38,7 @@ use crate::memory::{DomainSet, MemoryDomainKind};
 use crate::property::{ElementMetadata, PropError, PropValue, PropertySpec};
 use crate::query::{AllocationParams, LatencyReport};
 use crate::runtime::channel::{
-    bounded, link, packet_bytes, Receiver, SendError, Sender, SenderSink,
+    bounded, link, packet_bytes, ProbeAction, ProbeSlot, Receiver, SendError, Sender, SenderSink,
 };
 use crate::runtime::graph_runner::{run_graph_inner, GraphNodeRef};
 use crate::runtime::instrument::{EdgeCounters, ElementProbe};
@@ -809,6 +809,11 @@ struct TaggingSink {
     /// shared by every input, so the per-edge count is kept here rather than on
     /// the channel. `None` unless an observer is attached.
     counters: Option<Arc<EdgeCounters>>,
+    /// Content-inspection slot for this input's edge (M849), the analog of the
+    /// one [`SenderSink`] shares with its link: the tagged channel is shared, so
+    /// each input carries its own slot here. `None` unless an observer is
+    /// attached, and empty (pass-through) until a tool installs an interceptor.
+    probe: Option<ProbeSlot>,
 }
 
 impl OutputSink for TaggingSink {
@@ -817,6 +822,13 @@ impl OutputSink for TaggingSink {
         packet: PipelinePacket,
     ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
         Box::pin(async move {
+            // A probe may drop the packet before it enters the channel, as on a
+            // `SenderSink` link.
+            if let Some(p) = &self.probe {
+                if p.action(&packet) == ProbeAction::Drop {
+                    return Ok(PushOutcome::Accepted);
+                }
+            }
             let bytes = packet_bytes(&packet);
             match self.tx.send((self.idx, packet)).await {
                 Ok(()) => {
@@ -928,10 +940,14 @@ where
     // One shared tagged channel: every source pushes `(its index, packet)`.
     let (tx, rx) = bounded::<(usize, PipelinePacket)>(link_capacity);
     let live_inputs = Arc::new(AtomicUsize::new(input_count));
-    // Per-input edge counters, kept on each `TaggingSink` (the tagged channel is
-    // shared, so it cannot count per edge itself).
+    // Per-input edge counters and content-inspection slots, kept on each
+    // `TaggingSink` (the tagged channel is shared, so it cannot carry per-edge
+    // state itself).
     let counters: Vec<Option<Arc<EdgeCounters>>> = (0..input_count)
         .map(|_| observer.map(|_| Arc::new(EdgeCounters::default())))
+        .collect();
+    let probes: Vec<Option<ProbeSlot>> = (0..input_count)
+        .map(|_| observer.map(|_| ProbeSlot::default()))
         .collect();
 
     if let Some(obs) = observer {
@@ -948,15 +964,16 @@ where
         let edges: Vec<TapEdge> = fixated_caps
             .iter()
             .zip(counters.iter())
+            .zip(probes.iter())
             .enumerate()
-            .map(|(i, (caps, c))| {
+            .map(|(i, ((caps, c), p))| {
                 (
                     i,
                     session_id,
                     caps.clone(),
                     EdgeTap {
+                        probe: p.clone().unwrap_or_default(),
                         counters: c.clone(),
-                        ..Default::default()
                     },
                 )
             })
@@ -976,12 +993,14 @@ where
         let tx_i = tx.clone();
         let reverse_i = reverse[i].clone();
         let counters_i = counters[i].clone();
+        let probe_i = probes[i].clone();
         source_arms.push(Box::pin(async move {
             let mut adapter = TaggingSink {
                 idx: i,
                 tx: tx_i,
                 reverse: reverse_i,
                 counters: counters_i,
+                probe: probe_i,
             };
             source.run(&mut adapter).await
         }));
@@ -1206,10 +1225,13 @@ where
 
     // Inbound: one shared tagged channel; every send source pushes (its index, packet).
     let (in_tx, in_rx) = bounded::<(usize, PipelinePacket)>(link_capacity);
-    // Per-input edge counters ride the `TaggingSink`s, the shared channel cannot
-    // count per edge itself.
+    // Per-input edge counters and content-inspection slots ride the
+    // `TaggingSink`s, the shared channel carries no per-edge state itself.
     let in_counters: Vec<Option<Arc<EdgeCounters>>> = (0..input_count)
         .map(|_| observer.map(|_| Arc::new(EdgeCounters::default())))
+        .collect();
+    let in_probes: Vec<Option<ProbeSlot>> = (0..input_count)
+        .map(|_| observer.map(|_| ProbeSlot::default()))
         .collect();
     // Outbound: one branch link per recv output.
     let tap = observer.is_some();
@@ -1238,14 +1260,19 @@ where
             ));
         }
         let mut edges: Vec<TapEdge> = Vec::with_capacity(input_count + output_count);
-        for (i, (caps, c)) in input_caps.iter().zip(in_counters.iter()).enumerate() {
+        for (i, ((caps, c), p)) in input_caps
+            .iter()
+            .zip(in_counters.iter())
+            .zip(in_probes.iter())
+            .enumerate()
+        {
             edges.push((
                 i,
                 session_id,
                 caps.clone(),
                 EdgeTap {
+                    probe: p.clone().unwrap_or_default(),
                     counters: c.clone(),
-                    ..Default::default()
                 },
             ));
         }
@@ -1273,12 +1300,14 @@ where
         let tx_i = in_tx.clone();
         let reverse_i = reverse[i].clone();
         let counters_i = in_counters[i].clone();
+        let probe_i = in_probes[i].clone();
         source_arms.push(Box::pin(async move {
             let mut adapter = TaggingSink {
                 idx: i,
                 tx: tx_i,
                 reverse: reverse_i,
                 counters: counters_i,
+                probe: probe_i,
             };
             source.run(&mut adapter).await
         }));
@@ -1867,6 +1896,7 @@ async fn attach_input<'a>(
             tx,
             reverse: None,
             counters: None,
+            probe: None,
         };
         let mut source = source;
         source.run(&mut sink).await.map(FaninArmOut::Source)

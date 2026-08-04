@@ -593,4 +593,87 @@ mod tests {
             }
         }
     }
+
+    /// A fan-in arm is tappable like any other edge (M849): subscribing to an
+    /// edge whose destination is the muxer streams previews of the frames that
+    /// input contributes, even when the muxer forwards a different input.
+    #[tokio::test]
+    async fn muxer_input_edge_subscribe_streams_a_preview() {
+        use crate::registry::default_registry;
+        use futures_util::StreamExt;
+        use g2g_core::runtime::{parse_launch, run_graph_observed};
+        use g2g_core::PipelineClock;
+
+        struct ZeroClock;
+        impl PipelineClock for ZeroClock {
+            fn now_ns(&self) -> u64 {
+                0
+            }
+        }
+
+        let reg = default_registry();
+        // input-selector forwards input 0 only, so the sink's sequence check
+        // stays happy while both arms keep pushing into the fan-in node.
+        let graph = parse_launch(
+            &reg,
+            "videotestsrc ! m.   videotestsrc ! m.   input-selector name=m ! fakesink",
+        )
+        .expect("parses");
+        let observer = Observer::new();
+        let (ev_tx, _) = broadcast::channel::<String>(16);
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(serve_on(listener, observer.clone(), ev_tx));
+
+        let clock = ZeroClock;
+        let client = async {
+            let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/"))
+                .await
+                .unwrap();
+            let mut target: Option<u64> = None;
+            loop {
+                let Some(Ok(Message::Text(t))) = ws.next().await else {
+                    continue;
+                };
+                let v: Value = serde_json::from_str(&t).unwrap();
+                // Pick the second arm into the fan-in node: the input the muxer
+                // does NOT forward, so only the edge tap can see its frames.
+                if target.is_none() && v["type"] == "telemetry" {
+                    let nodes = v["nodes"].as_array().unwrap();
+                    let mux = nodes.iter().find(|n| n["role"] == "muxer");
+                    let (Some(mux), edges) = (mux, v["edges"].as_array().unwrap()) else {
+                        continue;
+                    };
+                    let into_mux: Vec<u64> = edges
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, e)| e["to"] == mux["id"])
+                        .map(|(i, _)| i as u64)
+                        .collect();
+                    let Some(&edge) = into_mux.get(1) else {
+                        continue;
+                    };
+                    ws.send(Message::Text(
+                        json!({"type": "subscribe", "edge": edge}).to_string(),
+                    ))
+                    .await
+                    .unwrap();
+                    target = Some(edge);
+                }
+                if v["type"] == "preview" {
+                    return v;
+                }
+            }
+        };
+
+        let run = run_graph_observed(graph, &clock, 2, &observer, None);
+        tokio::select! {
+            _ = run => panic!("run ended before a preview arrived"),
+            preview = tokio::time::timeout(Duration::from_secs(15), client) => {
+                let preview = preview.expect("preview within deadline");
+                assert_eq!(preview["preview"]["kind"], "video");
+                assert!(preview["preview"]["rgba"].as_array().unwrap().len() >= 4);
+            }
+        }
+    }
 }
