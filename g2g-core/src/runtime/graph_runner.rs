@@ -56,6 +56,7 @@ use crate::caps::{Caps, CapsSet};
 use crate::clock::{
     elect_clock, ClockCandidate, ClockPriority, ClockSync, DynAsyncClock, PipelineClock,
 };
+use crate::controller::{ArmController, ControlTarget, CONTROL_CATEGORY};
 use crate::element::{
     AsyncElement, BoxFuture, ConfigureOutcome, DynAsyncElement, ElementBound, OutputSink,
     PushOutcome, Reconfigure,
@@ -213,6 +214,19 @@ impl<'a> GraphNodeRef<'a> {
             GraphNodeRef::Muxer(_) | GraphNodeRef::FanoutSource(_) | GraphNodeRef::Demux(_) => {
                 crate::memory::DomainSet::only(crate::memory::MemoryDomainKind::System)
             }
+        }
+    }
+
+    /// The runtime properties this node's element declares, whatever its shape.
+    /// The animated-property check (M882) reads it to validate a
+    /// [`ControlProgram`](crate::ControlProgram) against the element it targets.
+    pub fn properties(&self) -> &'static [PropertySpec] {
+        match self {
+            GraphNodeRef::Source(s) => s.properties(),
+            GraphNodeRef::Element(e) => e.properties(),
+            GraphNodeRef::Muxer(m) => m.properties(),
+            GraphNodeRef::FanoutSource(s) => s.properties(),
+            GraphNodeRef::Demux(d) => d.properties(),
         }
     }
 
@@ -573,6 +587,94 @@ fn report_runtime_caps_conflict(rejected: &Caps) {
         "runtime caps {} cannot be re-solved against the downstream chain (no converter bridges the refinement, and no upstream element renegotiates its output caps)",
         rejected.to_gst_string()
     );
+}
+
+/// Resolve every node's animated-property program (M882) against the element it
+/// targets, before negotiation and before any frame flows: an unknown property, a
+/// non-numeric one, an empty curve, or a node whose arm has no per-frame hook
+/// fails the run here rather than animating nothing. Returns the resolved
+/// controllers indexed by node id, for the arm loop to take.
+fn resolve_controllers(
+    vg: &mut ValidatedGraph<GraphNodeRef<'_>>,
+    topo: &[NodeId],
+) -> Result<Vec<Option<ArmController>>, G2gError> {
+    let mut resolved: Vec<Option<ArmController>> = (0..vg.node_count()).map(|_| None).collect();
+    for &node in topo {
+        let Some(program) = vg.take_node_control(node) else {
+            continue;
+        };
+        if program.is_empty() {
+            continue;
+        }
+        let name = vg.node_name(node).unwrap_or("<unnamed>");
+        let kind = vg.kind(node);
+        // Only an arm that hands packets to its element one at a time can sample
+        // between frames. A source drives itself (it has no per-frame runner
+        // hook), and a tee carries no element at all.
+        if !matches!(
+            kind,
+            NodeKind::Transform | NodeKind::Sink | NodeKind::Muxer(_)
+        ) {
+            crate::g2g_error!(
+                crate::log::Target::category(CONTROL_CATEGORY),
+                "node {} ({name}) is a {kind:?} and cannot carry animated properties (transform, sink, and fan-in nodes can)",
+                node.0
+            );
+            return Err(G2gError::ControlBinding);
+        }
+        let specs = vg.element(node).map(|e| e.properties()).unwrap_or(&[]);
+        match program.resolve(specs) {
+            Ok(controller) => resolved[node.0 as usize] = Some(controller),
+            Err(fault) => {
+                crate::g2g_error!(
+                    crate::log::Target::category(CONTROL_CATEGORY),
+                    "node {} ({name}): {fault}",
+                    node.0
+                );
+                return Err(G2gError::ControlBinding);
+            }
+        }
+    }
+    Ok(resolved)
+}
+
+/// Sample a controlled element's animated properties at `pts_ns` and set them,
+/// before the element sees the frame that carries that timestamp (M882). A
+/// rejected value fails the run loud, naming the element and the property.
+fn apply_control_at<T: ControlTarget + ?Sized>(
+    control: Option<&ArmController>,
+    target: &mut T,
+    pts_ns: u64,
+    probe: &Probe,
+) -> Result<(), G2gError> {
+    let Some(controller) = control else {
+        return Ok(());
+    };
+    controller.apply(target, pts_ns).map_err(|fault| {
+        let element = probe.as_deref().map(|p| p.name()).unwrap_or("element");
+        crate::g2g_error!(
+            crate::log::Target::category(CONTROL_CATEGORY),
+            "{element} at pts {pts_ns}: {fault}"
+        );
+        G2gError::ControlBinding
+    })
+}
+
+/// [`apply_control_at`] for a packet: a `DataFrame`'s PTS is the sampling time,
+/// and a control packet (caps / segment / flush / tick) carries none, so it
+/// samples nothing.
+fn apply_control<T: ControlTarget + ?Sized>(
+    control: Option<&ArmController>,
+    target: &mut T,
+    packet: &PipelinePacket,
+    probe: &Probe,
+) -> Result<(), G2gError> {
+    match packet {
+        PipelinePacket::DataFrame(frame) => {
+            apply_control_at(control, target, frame.timing.pts_ns, probe)
+        }
+        _ => Ok(()),
+    }
 }
 
 /// A reusable recipe for an owned graph: a builder closure that produces a fresh
@@ -1409,6 +1511,9 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
         return Err(G2gError::CapsMismatch);
     }
     let topo = vg.topo().to_vec();
+    // M882: animated properties are checked against their elements before
+    // negotiation, so a bad binding fails before configure opens any device.
+    let mut controllers = resolve_controllers(&mut vg, &topo)?;
 
     let (
         probes,
@@ -1515,6 +1620,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
             // merges its inputs by DataFrame PTS); the default drains round-robin
             // in arrival order.
             let mux_probe = probes[node.0 as usize].clone();
+            let mux_control = controllers[node.0 as usize].take();
             let arm: BoxFuture<'a, Result<u64, G2gError>> = if mux.input_pts_ordered() {
                 Box::pin(muxer_arm_pts(
                     mux,
@@ -1526,6 +1632,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                     mux_ctrl,
                     mux_probe,
                     ticker,
+                    mux_control,
                 ))
             } else {
                 Box::pin(muxer_arm(
@@ -1538,6 +1645,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                     mux_ctrl,
                     mux_probe,
                     ticker,
+                    mux_control,
                 ))
             };
             arms.push(arm);
@@ -1577,6 +1685,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                     branch_mode(&vg, node),
                     bus.cloned(),
                     probes[node.0 as usize].clone(),
+                    controllers[node.0 as usize].take(),
                 ))
             }
             NodeKind::Sink => {
@@ -1596,6 +1705,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                     state.clone(),
                     progress.cloned(),
                     probes[node.0 as usize].clone(),
+                    controllers[node.0 as usize].take(),
                 ))
             }
             NodeKind::Tee(_) => {
@@ -1784,6 +1894,10 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
         return Err(G2gError::CapsMismatch);
     }
     let topo = vg.topo().to_vec();
+    // M882: same pre-negotiation check as the cooperative runner; a resolved
+    // controller is owned data, so it rides each arm's builder closure onto its
+    // worker thread like the element itself.
+    let mut controllers = resolve_controllers(&mut vg, &topo)?;
 
     let (
         probes,
@@ -1858,6 +1972,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
             let pts_ordered = mux.input_pts_ordered();
             let mux_probe = probes[node.0 as usize].clone();
             let mux_ticker = ticker.clone();
+            let mux_control = controllers[node.0 as usize].take();
             let build: alloc::boxed::Box<dyn FnOnce() -> LocalArmFuture + Send> =
                 alloc::boxed::Box::new(move || -> LocalArmFuture {
                     Box::pin(muxer_arm_owned_tick(
@@ -1871,6 +1986,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                         mux_ctrl,
                         mux_probe,
                         mux_ticker,
+                        mux_control,
                     ))
                 });
             handles.push(spawner.spawn_arm(build));
@@ -1906,6 +2022,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                 let bus_c = bus.cloned();
                 let probe = probes[node.0 as usize].clone();
                 let ch = coord_handle.clone();
+                let control = controllers[node.0 as usize].take();
                 alloc::boxed::Box::new(move || -> LocalArmFuture {
                     Box::pin(transform_arm(
                         elem,
@@ -1919,6 +2036,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                         bm,
                         bus_c,
                         probe,
+                        control,
                     ))
                 })
             }
@@ -1934,9 +2052,10 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                 let probe = probes[node.0 as usize].clone();
                 let ch = coord_handle.clone();
                 let arm_rx = arm_ctrl_rx[node.0 as usize].take().expect("sink ctrl rx");
+                let control = controllers[node.0 as usize].take();
                 alloc::boxed::Box::new(move || -> LocalArmFuture {
                     Box::pin(sink_arm(
-                        elem, in_rx, arm_rx, ch, node, bm, bus_c, state_c, prog_c, probe,
+                        elem, in_rx, arm_rx, ch, node, bm, bus_c, state_c, prog_c, probe, control,
                     ))
                 })
             }
@@ -2570,6 +2689,7 @@ async fn transform_arm<'a>(
     mode: BranchMode,
     bus: Option<BusHandle>,
     probe: Probe,
+    control: Option<ArmController>,
 ) -> Result<u64, G2gError> {
     let mut adapter = SenderSink::new(out_tx);
     // M175: relay a downstream QoS report (seen on this transform's output link)
@@ -2737,6 +2857,10 @@ async fn transform_arm<'a>(
                         wait_ns = t;
                     }
                 }
+                // M882: animated properties are sampled at this frame's PTS, so
+                // the element processes it under the values that frame's time
+                // calls for.
+                apply_control(control.as_ref(), &mut *elem, &packet, &probe)?;
                 let t0 = ElementProbe::mark();
                 elem.process(packet, &mut adapter).await?;
                 if let (Some(p), Some(seq)) = (timed, seq) {
@@ -2769,6 +2893,7 @@ async fn sink_arm<'a>(
     state: Option<StateController>,
     progress: Option<PipelineProgress>,
     probe: Probe,
+    control: Option<ArmController>,
 ) -> Result<u64, G2gError> {
     let mut null = NullSink;
     let mut consumed = 0u64;
@@ -2925,6 +3050,8 @@ async fn sink_arm<'a>(
                         wait_ns = t;
                     }
                 }
+                // M882: sample the animated properties at this frame's PTS.
+                apply_control(control.as_ref(), &mut *elem, &packet, &probe)?;
                 let t0 = ElementProbe::mark();
                 elem.process(packet, &mut null).await?;
                 if let (Some(p), Some(seq)) = (timed, seq) {
@@ -3606,6 +3733,7 @@ async fn muxer_arm<'a>(
     arm_rx: Receiver<ArmDirective>,
     probe: Probe,
     ticker: Option<&'a dyn DynAsyncClock>,
+    control: Option<ArmController>,
 ) -> Result<u64, G2gError> {
     let mut adapter = SenderSink::new(out_tx);
     let mut open = alloc::vec![true; input_count];
@@ -3720,6 +3848,8 @@ async fn muxer_arm<'a>(
                 if let Some(p) = timed {
                     p.record_fill(pad_rxs[slot].1.fill_percent());
                 }
+                // M882: sample the animated properties at this frame's PTS.
+                apply_control(control.as_ref(), &mut *mux, &packet, &probe)?;
                 let t0 = ElementProbe::mark();
                 mux.process(pad, packet, &mut adapter).await?;
                 if let Some(p) = timed {
@@ -3756,6 +3886,7 @@ async fn muxer_arm_pts<'a>(
     arm_rx: Receiver<ArmDirective>,
     probe: Probe,
     ticker: Option<&'a dyn DynAsyncClock>,
+    control: Option<ArmController>,
 ) -> Result<u64, G2gError> {
     let mut adapter = SenderSink::new(out_tx);
     let mut open = alloc::vec![true; input_count];
@@ -3776,6 +3907,9 @@ async fn muxer_arm_pts<'a>(
             if let Some(p) = probe.as_deref() {
                 p.record_fill(pad_rxs[slot].1.fill_percent());
             }
+            // M882: sampled in release (PTS) order, so the animation follows the
+            // ordered stream rather than pad arrival.
+            apply_control_at(control.as_ref(), &mut *mux, frame.timing.pts_ns, &probe)?;
             let t0 = ElementProbe::mark();
             mux.process(pad, PipelinePacket::DataFrame(frame), &mut adapter)
                 .await?;
@@ -3872,6 +4006,7 @@ async fn muxer_arm_owned_tick(
     arm_rx: Receiver<ArmDirective>,
     probe: Probe,
     ticker: Option<alloc::sync::Arc<dyn DynAsyncClock + Send + Sync>>,
+    control: Option<ArmController>,
 ) -> Result<u64, G2gError> {
     let tick: Option<&dyn DynAsyncClock> = ticker.as_deref().map(|c| c as &dyn DynAsyncClock);
     if pts_ordered {
@@ -3885,6 +4020,7 @@ async fn muxer_arm_owned_tick(
             arm_rx,
             probe,
             tick,
+            control,
         )
         .await
     } else {
@@ -3898,6 +4034,7 @@ async fn muxer_arm_owned_tick(
             arm_rx,
             probe,
             tick,
+            control,
         )
         .await
     }

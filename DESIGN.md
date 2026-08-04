@@ -1621,6 +1621,29 @@ the last:
   fixed graph in Rust). `g2g-launch --script <file>` runs one. These are
   construction-time scripts (run once to emit a graph); the per-frame
   `scriptelement` (§4.16, below) is the runtime complement.
+- **Animated properties (`g2g-core::controller`, `runtime` feature, M882).** The
+  layers above set a property once, at build time; a controller makes it a
+  function of stream time, the `gst-controller` analog. A `ControlSource` is a
+  keyframed curve over `(pts_ns, value)` pairs, either `Step` (hold each keyframe)
+  or `Linear` (interpolate), clamped to its end values outside the keyframe range;
+  a `ControlProgram` binds curves to one node's property names and attaches with
+  `Graph::set_node_control(node, program)` (so a `parse_launch` line's `name=` node
+  can be animated, via `Graph::node_by_name`). When the run starts, before
+  negotiation and before any frame flows, each program is resolved against its
+  element's own `PropertySpec` table: an unknown name, a kind with no number to
+  animate (`Fraction` / `Str` / `Flags`), an empty curve, or a node whose arm has
+  no per-frame hook (a source drives itself; a tee carries no element) fails the
+  run with `G2gError::ControlBinding` rather than animating nothing. At runtime the
+  arm that owns the element samples every binding at each `DataFrame`'s PTS and
+  sets it before handing that frame over, so a frame is always processed under the
+  values its own timestamp calls for; the sample is rounded and clamped into the
+  property's kind (a negative sample cannot wrap a `Uint`), and a value the element
+  refuses fails the run loud. Transform, sink, and fan-in nodes carry controllers,
+  under both the cooperative and the thread-per-arm runner (a resolved controller
+  is owned data, so it rides the arm's builder closure onto its thread). Two
+  deliberate limits: a zero-order-hold `Tick` frame samples nothing (the held
+  frame's advanced timestamp lives inside the element, not in the runner), and
+  samples use the raw PTS, not segment-mapped running time.
 
 **Dynamic plugin loading.** Beyond build-time registration (a crate that
 calls `Registry::register_*`, the primary extension path), a third party can ship

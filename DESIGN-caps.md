@@ -223,6 +223,18 @@ and a pipeline whose clock only tells time runs untimed. Only the thread-per-arm
 runner keeps a separate entry, because its arms need an owned clock handle rather
 than the borrow `as_ticker` yields.
 
+**Animated properties ride the arms.** A node can carry a `ControlProgram`
+(§ properties, M882): keyframed curves bound to its property names, which the arm
+that owns the element samples at each `DataFrame`'s PTS and applies before handing
+that frame over, so a frame is processed under the values its own timestamp calls
+for. The program is resolved against the element's declared properties before
+negotiation, so a bad binding fails the run before any device opens. The arms that
+carry one are the ones the runner feeds packet by packet (transform, sink, both
+fan-in arms); a source drives itself and a tee holds no element, so attaching there
+is a startup error, not a no-op. Both runners take the same path: a resolved
+controller is owned data, so unlike the borrowed deadline ticker it crosses onto a
+worker thread with the element.
+
 **Element-level cooperative offload.** A separate, opt-in path lets the
 cooperative default runner overlap one heavy synchronous stage without a
 per-arm thread. `run_graph` polls every arm inside one `JoinAll` future on a

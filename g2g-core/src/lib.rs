@@ -120,6 +120,12 @@ pub mod qos;
 #[cfg(feature = "runtime")]
 pub mod fanout;
 
+// Animated properties (M882): keyframed control sources the runner samples per
+// frame, the gst-controller analog. Dynamic layer (heap + the dyn element
+// traits), so `runtime` like the graph runner that applies it.
+#[cfg(feature = "runtime")]
+pub mod controller;
+
 #[cfg(feature = "runtime")]
 pub mod runtime;
 
@@ -153,6 +159,10 @@ pub use clock::{
 #[cfg(feature = "alloc")]
 pub use conformance::{
     ConformanceDimension, ConformanceReport, Evidence, MaturityLevel, MaturityRecord,
+};
+#[cfg(feature = "runtime")]
+pub use controller::{
+    ArmController, ControlFault, ControlProgram, ControlReason, ControlSource, ControlTarget,
 };
 #[cfg(feature = "alloc")]
 pub use copyplan::{

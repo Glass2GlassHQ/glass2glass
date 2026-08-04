@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M882: a graph node's properties can be animated over stream time, from keyframed control sources the runner samples at each frame's PTS.
+
 - M880: the cooperative runner takes a fan-in element's deadline tick from the pipeline clock itself, so `compositor timed-output=true` ticks from a `parse_launch` line.
 
 - M879: `run_graph_threaded_ticked` gives every fan-in arm its deadline tick under the thread-per-arm runner.

@@ -500,8 +500,6 @@ _(No open parser items.)_
   text: a `Caps::SubPicture { codec }` variant + RLE image decoders, mirroring the
   `CompressedVideo` / `RawVideo` split rather than folding into `Text`. Niche;
   deferred until a concrete need.
-- **Controllers (animated properties):** a `gst-controller`-equivalent for
-  animating properties over time.
 - **Tensor substrate orientation descriptor (M181).** A deferred
   rotate/mirror descriptor the sink can absorb in hardware (DRM/KMS, Wayland
   `set_buffer_transform`, VAAPI VPP, D3D11 VideoProcessor), with eager strided /
