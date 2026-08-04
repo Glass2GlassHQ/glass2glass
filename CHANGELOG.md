@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M853: `wgpucompositor`, a one-dispatch wgpu compute compositor bit-exact with the CPU element, System or GPU-texture output.
+
 - M850: `g2g-mcp` gains a declarative `run_graph` tool, and both run tools stream live telemetry as MCP progress notifications.
 
 - M851: single-frame latency waterfall in the dashboard: per-stage wait/work joined on the frame's sequence id, with the measured total against the `2 * capacity * frame_period` floor.

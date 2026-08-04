@@ -6,7 +6,8 @@
 //! pixels into one frame).
 //!
 //! CPU, `no_std` baseline like the other raw-video transforms
-//! (videoconvert/videoscale/...); a wgpu GPU companion is a later follow-up.
+//! (videoconvert/videoscale/...); `WgpuCompositor` (the `wgpu-sink` feature) is
+//! the RGBA8 GPU companion for HD / many-input scale.
 //! The output format is chosen at construction ([`Compositor::with_format`]):
 //! RGBA8 (default, packed source-over with per-pixel alpha) or 8-bit
 //! NV12 / I420 / I422 / I444 (mixed plane-by-plane with the scalar per-pad alpha,
@@ -135,8 +136,17 @@ pub struct Compositor {
 }
 
 /// Max input-0 frames buffered during startup before output begins flowing
-/// overlay-less (bounds startup memory and latency).
-const PENDING_CAP: usize = 8;
+/// overlay-less (bounds startup memory and latency). Shared with the GPU
+/// sibling so both compositors buffer the same startup depth.
+pub(crate) const PENDING_CAP: usize = 8;
+
+/// Paint order: z-order ascending, ties by input index (input 0 backmost).
+/// Shared with the wgpu compositor, which uploads its pads in this order.
+pub(crate) fn paint_order(pads: &[CompositorPad]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..pads.len()).collect();
+    order.sort_by_key(|&i| (pads[i].zorder, i));
+    order
+}
 
 impl Compositor {
     /// A compositor producing an `out_w` x `out_h` RGBA8 canvas at 30 fps, with
@@ -235,10 +245,7 @@ impl Compositor {
         for px in canvas.chunks_exact_mut(4) {
             px.copy_from_slice(&self.background);
         }
-        // Paint order: z-order ascending, ties by input index (input 0 backmost).
-        let mut order: Vec<usize> = (0..self.pads.len()).collect();
-        order.sort_by_key(|&i| (self.pads[i].zorder, i));
-        for i in order {
+        for i in paint_order(&self.pads) {
             let Some((w, h)) = self.inputs[i] else {
                 continue;
             };
@@ -301,10 +308,7 @@ impl Compositor {
             fill_channel(&mut canvas, chan, val);
         }
 
-        // Paint order: z-order ascending, ties by input index (input 0 backmost).
-        let mut order: Vec<usize> = (0..self.pads.len()).collect();
-        order.sort_by_key(|&i| (self.pads[i].zorder, i));
-        for i in order {
+        for i in paint_order(&self.pads) {
             let Some((sw, sh)) = self.inputs[i] else {
                 continue;
             };
