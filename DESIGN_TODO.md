@@ -266,7 +266,6 @@ Phased plan:
   refcount).
 - H.265 in `VaapiH264Dec` (sibling element on `VideoCodec::H265`).
 - Upstream `Reconfigure` driven by `VaapiH264Dec` `FormatChanged`.
-- 10-bit pixel formats in `FfmpegH264Dec` (`YUV420P10` / `P010`).
 
 - **`VulkanVideoDec` residuals.** AMD (RADV) and Intel (ANV) validation runs of
   the `vulkanvideo` GPU tests (the element is vendor-neutral; hardware-gated,

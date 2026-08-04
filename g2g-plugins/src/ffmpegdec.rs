@@ -82,13 +82,18 @@
 //! chroma and emits the concrete output caps via `CapsChanged`. The GPU backends
 //! stay NV12-only.
 //! High bit depth: 10-/12-bit planar sources (`YUV4{2,4}0P1{0,2}LE`, e.g. HEVC
-//! Main10 / High 10) decode under `Auto` to the matching `RawVideoFormat`
-//! (`I420p10` .. `I444p12`) via a lossless 2-byte-per-sample plane copy. A fixed
-//! 8-bit output request from a high-depth source stays a loud `CapsMismatch`
-//! (no depth conversion here; put a converter upstream).
+//! Main10 / H.264 High 10) decode under `Auto` to the matching `RawVideoFormat`
+//! (`I420p10` .. `I444p12`) via a lossless 2-byte-per-sample plane copy.
+//! `OutputFormat::P010` is the semi-planar 10-bit layout (NV12's shape at 16-bit
+//! samples, value in the word's *top* 10 bits) GPU samplers and 10-bit overlay
+//! planes want: it packs from a planar 10-bit software decode (interleave plus a
+//! 6-bit left shift) or verbatim from a `P010LE` hardware frame, and a `P010LE`
+//! source also unpacks to `I420p10`. A fixed 8-bit output request from a
+//! high-depth source stays a loud `CapsMismatch` (no depth conversion here; put a
+//! `videoconvert` downstream, which handles the planar 10-bit family).
 //!
 //! Deferred:
-//! - Semi-planar 10-bit (`P010`) and packed formats.
+//! - Packed formats.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -151,6 +156,12 @@ pub enum OutputFormat {
     I422p12,
     I444p10,
     I444p12,
+    /// Semi-planar 4:2:0 10-bit (`P010_10LE`): NV12's Y-then-interleaved-UV shape
+    /// with 16-bit little-endian samples carrying the value in the *top* 10 bits.
+    /// The layout 10-bit GPU samplers and overlay planes take. Packed from a
+    /// planar 10-bit software decode or verbatim from a `P010LE` hardware frame;
+    /// a source of another depth is a loud `CapsMismatch`.
+    P010,
 }
 
 impl OutputFormat {
@@ -169,6 +180,7 @@ impl OutputFormat {
             OutputFormat::I422p12 => RawVideoFormat::I422p12,
             OutputFormat::I444p10 => RawVideoFormat::I444p10,
             OutputFormat::I444p12 => RawVideoFormat::I444p12,
+            OutputFormat::P010 => RawVideoFormat::P010,
         }
     }
 
@@ -180,7 +192,8 @@ impl OutputFormat {
             | OutputFormat::I422p10
             | OutputFormat::I422p12
             | OutputFormat::I444p10
-            | OutputFormat::I444p12 => 2,
+            | OutputFormat::I444p12
+            | OutputFormat::P010 => 2,
             _ => 1,
         }
     }
@@ -195,7 +208,8 @@ impl OutputFormat {
             | OutputFormat::Nv12
             | OutputFormat::Auto
             | OutputFormat::I420p10
-            | OutputFormat::I420p12 => (1, 1),
+            | OutputFormat::I420p12
+            | OutputFormat::P010 => (1, 1),
             OutputFormat::I422 | OutputFormat::I422p10 | OutputFormat::I422p12 => (1, 0),
             OutputFormat::I444 | OutputFormat::I444p10 | OutputFormat::I444p12 => (0, 0),
         }
@@ -219,6 +233,9 @@ fn resolve_output_format(requested: OutputFormat, src: Pixel) -> Result<OutputFo
             Pixel::YUV422P12LE => Ok(OutputFormat::I422p12),
             Pixel::YUV444P10LE => Ok(OutputFormat::I444p10),
             Pixel::YUV444P12LE => Ok(OutputFormat::I444p12),
+            // A hardware 10-bit frame (VAAPI download / cuvid) is already
+            // semi-planar; its native output is P010.
+            Pixel::P010LE => Ok(OutputFormat::P010),
             _ => Err(G2gError::CapsMismatch),
         },
         other => Ok(other),
@@ -226,7 +243,8 @@ fn resolve_output_format(requested: OutputFormat, src: Pixel) -> Result<OutputFo
 }
 
 /// Whether a decoder configured with `requested` can emit `format`: any of the
-/// three chromas under `Auto`, else the one configured format.
+/// three chromas (at any depth the sources carry) under `Auto`, else the one
+/// configured format.
 fn accepts_output(requested: OutputFormat, format: RawVideoFormat) -> bool {
     match requested {
         OutputFormat::Auto => matches!(
@@ -240,6 +258,7 @@ fn accepts_output(requested: OutputFormat, format: RawVideoFormat) -> bool {
                 | RawVideoFormat::I422p12
                 | RawVideoFormat::I444p10
                 | RawVideoFormat::I444p12
+                | RawVideoFormat::P010
         ),
         other => other.raw_format() == format,
     }
@@ -981,6 +1000,17 @@ impl PadTemplates for FfmpegH264Dec {
                 // it during negotiation.
                 any_geometry(RawVideoFormat::I422),
                 any_geometry(RawVideoFormat::I444),
+                // High bit depth (M887): a High 10 / Main10 stream's native
+                // planar output, plus the semi-planar P010 a 10-bit sampler pins.
+                // Listed after the 8-bit formats so an unconstrained target still
+                // settles on NV12.
+                any_geometry(RawVideoFormat::I420p10),
+                any_geometry(RawVideoFormat::I420p12),
+                any_geometry(RawVideoFormat::I422p10),
+                any_geometry(RawVideoFormat::I422p12),
+                any_geometry(RawVideoFormat::I444p10),
+                any_geometry(RawVideoFormat::I444p12),
+                any_geometry(RawVideoFormat::P010),
             ]))),
         ])
     }
@@ -1087,12 +1117,23 @@ impl AsyncElement for FfmpegH264Dec {
                 Ok(())
             }
             "output-format" => {
-                self.output_format = match value.as_str().ok_or(PropError::Type)? {
-                    "i420" | "I420" => OutputFormat::I420,
-                    "nv12" | "NV12" => OutputFormat::Nv12,
-                    "i422" | "I422" => OutputFormat::I422,
-                    "i444" | "I444" => OutputFormat::I444,
-                    "auto" | "AUTO" => OutputFormat::Auto,
+                // Case-insensitive, and the 10-/12-bit names come in both the
+                // internal spelling `get_property` reports and the GStreamer one
+                // (`I420_10LE` / `P010_10LE`) a gst-launch line would use.
+                let name = value.as_str().ok_or(PropError::Type)?.to_ascii_lowercase();
+                self.output_format = match name.as_str() {
+                    "i420" => OutputFormat::I420,
+                    "nv12" => OutputFormat::Nv12,
+                    "i422" => OutputFormat::I422,
+                    "i444" => OutputFormat::I444,
+                    "auto" => OutputFormat::Auto,
+                    "i420p10" | "i420_10le" => OutputFormat::I420p10,
+                    "i420p12" | "i420_12le" => OutputFormat::I420p12,
+                    "i422p10" | "i422_10le" => OutputFormat::I422p10,
+                    "i422p12" | "i422_12le" => OutputFormat::I422p12,
+                    "i444p10" | "y444_10le" => OutputFormat::I444p10,
+                    "i444p12" | "y444_12le" => OutputFormat::I444p12,
+                    "p010" | "p010_10le" => OutputFormat::P010,
                     _ => return Err(PropError::Value),
                 };
                 Ok(())
@@ -1144,6 +1185,7 @@ impl AsyncElement for FfmpegH264Dec {
                     OutputFormat::I422p12 => "i422p12",
                     OutputFormat::I444p10 => "i444p10",
                     OutputFormat::I444p12 => "i444p12",
+                    OutputFormat::P010 => "p010",
                 }
                 .into(),
             )),
@@ -1409,8 +1451,14 @@ static FFMPEGDEC_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "output-format",
         PropKind::Str,
-        "decoded pixel layout: i420 | nv12",
-    ),
+        "decoded pixel layout; auto matches the source chroma and depth",
+    )
+    .with_enum_values(
+        "i420 | nv12 | i422 | i444 | auto | i420p10 | i420_10le | i420p12 | i420_12le | \
+         i422p10 | i422_10le | i422p12 | i422_12le | i444p10 | y444_10le | i444p12 | \
+         y444_12le | p010 | p010_10le",
+    )
+    .with_default("i420"),
     PropertySpec::new(
         "backend",
         PropKind::Str,
@@ -1512,6 +1560,9 @@ fn derive_output_caps(input: &Caps, out: OutputFormat) -> CapsSet {
                     mk(RawVideoFormat::I422p12),
                     mk(RawVideoFormat::I444p10),
                     mk(RawVideoFormat::I444p12),
+                    // A hardware 10-bit frame arrives semi-planar, so `Auto`
+                    // resolves it to P010 (the Vaapi backend's 10-bit output).
+                    mk(RawVideoFormat::P010),
                 ]),
                 other => CapsSet::one(mk(other.raw_format())),
             }
@@ -1586,6 +1637,102 @@ fn pack_planar_16(frame: &FfVideo, (sx, sy): (u32, u32)) -> Box<[u8]> {
     out.into_boxed_slice()
 }
 
+/// A planar 10-bit LE sample (value in the low bits) as a P010 word: the value
+/// moved into the top 10 bits. The mask keeps a source word with junk above bit 9
+/// from bleeding into the neighbouring sample's bits.
+fn msb_align(sample: &[u8]) -> u16 {
+    (u16::from_le_bytes([sample[0], sample[1]]) & 0x03ff) << 6
+}
+
+/// Pack a planar 10-bit 4:2:0 frame into P010: Y as 16-bit MSB-aligned words,
+/// then U/V interleaved the same way. Honours libavcodec's per-plane row stride.
+fn pack_p010_from_planar10(frame: &FfVideo) -> Box<[u8]> {
+    let w = frame.width() as usize;
+    let h = frame.height() as usize;
+    let cw = w.div_ceil(2);
+    let ch = h.div_ceil(2);
+    let y_bytes = w * h * 2;
+    let mut out = alloc::vec![0u8; y_bytes + cw * ch * 4];
+    let y_src = frame.data(0);
+    let y_pitch = frame.stride(0);
+    for row in 0..h {
+        for col in 0..w {
+            let s = row * y_pitch + col * 2;
+            let d = (row * w + col) * 2;
+            out[d..d + 2].copy_from_slice(&msb_align(&y_src[s..]).to_le_bytes());
+        }
+    }
+    let u_src = frame.data(1);
+    let u_pitch = frame.stride(1);
+    let v_src = frame.data(2);
+    let v_pitch = frame.stride(2);
+    for row in 0..ch {
+        for col in 0..cw {
+            let d = y_bytes + (row * cw + col) * 4;
+            out[d..d + 2]
+                .copy_from_slice(&msb_align(&u_src[row * u_pitch + col * 2..]).to_le_bytes());
+            out[d + 2..d + 4]
+                .copy_from_slice(&msb_align(&v_src[row * v_pitch + col * 2..]).to_le_bytes());
+        }
+    }
+    out.into_boxed_slice()
+}
+
+/// Pack a `P010LE` source frame (hardware download) into a tightly-packed P010
+/// buffer: the layout already matches, so both planes are byte copies.
+fn pack_p010_verbatim(frame: &FfVideo) -> Box<[u8]> {
+    let w = frame.width() as usize;
+    let h = frame.height() as usize;
+    let cw = w.div_ceil(2);
+    let ch = h.div_ceil(2);
+    let y_bytes = w * h * 2;
+    let mut out = alloc::vec![0u8; y_bytes + cw * ch * 4];
+    copy_plane_16(&mut out, 0, frame.data(0), frame.stride(0), w * 2, h);
+    copy_plane_16(
+        &mut out,
+        y_bytes,
+        frame.data(1),
+        frame.stride(1),
+        cw * 4,
+        ch,
+    );
+    out.into_boxed_slice()
+}
+
+/// Unpack a `P010LE` source frame into planar 10-bit (`I420p10`): each word's
+/// value shifted back into the low bits, the interleaved chroma split into U then
+/// V planes.
+fn unpack_p010_to_planar10(frame: &FfVideo) -> Box<[u8]> {
+    let w = frame.width() as usize;
+    let h = frame.height() as usize;
+    let cw = w.div_ceil(2);
+    let ch = h.div_ceil(2);
+    let y_bytes = w * h * 2;
+    let c_bytes = cw * ch * 2;
+    let mut out = alloc::vec![0u8; y_bytes + 2 * c_bytes];
+    let low = |b: &[u8]| (u16::from_le_bytes([b[0], b[1]]) >> 6).to_le_bytes();
+    let y_src = frame.data(0);
+    let y_pitch = frame.stride(0);
+    for row in 0..h {
+        for col in 0..w {
+            let d = (row * w + col) * 2;
+            out[d..d + 2].copy_from_slice(&low(&y_src[row * y_pitch + col * 2..]));
+        }
+    }
+    let uv_src = frame.data(1);
+    let uv_pitch = frame.stride(1);
+    for row in 0..ch {
+        for col in 0..cw {
+            let s = row * uv_pitch + col * 4;
+            let u = y_bytes + (row * cw + col) * 2;
+            let v = y_bytes + c_bytes + (row * cw + col) * 2;
+            out[u..u + 2].copy_from_slice(&low(&uv_src[s..]));
+            out[v..v + 2].copy_from_slice(&low(&uv_src[s + 2..]));
+        }
+    }
+    out.into_boxed_slice()
+}
+
 /// Copy `rows` rows of `row_bytes` bytes from a strided source plane into `out`
 /// at `dst_off`, packing the rows contiguously. The LE sample bytes are copied
 /// verbatim, so the destination keeps the source's little-endian layout.
@@ -1605,6 +1752,38 @@ fn copy_plane_16(
 }
 
 fn copy_yuv(frame: &FfVideo, format: OutputFormat) -> Result<Box<[u8]>, G2gError> {
+    // Semi-planar 10-bit output: from a planar 10-bit software decode (interleave
+    // the chroma, shift each sample into the word's top bits) or verbatim from a
+    // hardware `P010LE` frame, which is already in this layout. Any other source
+    // depth / chroma would need a real conversion: reject loud.
+    if format == OutputFormat::P010 {
+        return match frame.format() {
+            Pixel::YUV420P10LE => {
+                if frame.planes() < 3 {
+                    return Err(G2gError::Hardware(HardwareError::Other));
+                }
+                Ok(pack_p010_from_planar10(frame))
+            }
+            Pixel::P010LE => {
+                if frame.planes() < 2 {
+                    return Err(G2gError::Hardware(HardwareError::Other));
+                }
+                Ok(pack_p010_verbatim(frame))
+            }
+            _ => Err(G2gError::CapsMismatch),
+        };
+    }
+    // A hardware `P010LE` source feeding the planar 10-bit output: de-interleave
+    // the chroma and shift each sample back into the word's low bits.
+    if frame.format() == Pixel::P010LE {
+        if format != OutputFormat::I420p10 {
+            return Err(G2gError::CapsMismatch);
+        }
+        if frame.planes() < 2 {
+            return Err(G2gError::Hardware(HardwareError::Other));
+        }
+        return Ok(unpack_p010_to_planar10(frame));
+    }
     // High-bit-depth planar source (10/12-bit): a lossless 2-byte-per-sample
     // plane copy that preserves depth and chroma. The resolved output must match
     // the source chroma at 2 bytes/sample (Auto guarantees it); the plane bytes
@@ -2107,6 +2286,143 @@ mod tests {
         // an 8-bit request from a 10-bit source is a loud mismatch, not a silent
         // truncation
         assert!(copy_yuv(&frame, I420).is_err());
+    }
+
+    /// Build a `P010LE` frame: Y plane of 16-bit words, then interleaved U/V words.
+    /// `fill(plane, x, y)` supplies the *word* (already MSB-aligned by the caller),
+    /// plane 1 = U, plane 2 = V of the shared chroma plane.
+    fn p010_frame(w: u32, h: u32, fill: impl Fn(usize, usize, usize) -> u16) -> FfVideo {
+        let mut frame = FfVideo::new(Pixel::P010LE, w, h);
+        let (cw, ch) = ((w / 2) as usize, (h / 2) as usize);
+        let y_stride = frame.stride(0);
+        let y_data = frame.data_mut(0);
+        for y in 0..h as usize {
+            for x in 0..w as usize {
+                let bytes = fill(0, x, y).to_le_bytes();
+                y_data[y * y_stride + 2 * x..y * y_stride + 2 * x + 2].copy_from_slice(&bytes);
+            }
+        }
+        let uv_stride = frame.stride(1);
+        let uv_data = frame.data_mut(1);
+        for y in 0..ch {
+            for x in 0..cw {
+                let o = y * uv_stride + 4 * x;
+                uv_data[o..o + 2].copy_from_slice(&fill(1, x, y).to_le_bytes());
+                uv_data[o + 2..o + 4].copy_from_slice(&fill(2, x, y).to_le_bytes());
+            }
+        }
+        frame
+    }
+
+    /// M887: the semi-planar 10-bit output. A planar 10-bit decode packs into P010
+    /// (chroma interleaved, samples moved into the word's top 10 bits), a hardware
+    /// `P010LE` frame copies through verbatim and unpacks to `I420p10`, and any
+    /// other source depth is a loud mismatch.
+    #[test]
+    fn p010_packs_from_planar10_and_from_p010_source() {
+        use OutputFormat::*;
+        let (w, h) = (4usize, 2usize);
+        let (cw, ch) = (w / 2, h / 2);
+        let ysz = w * h * 2;
+        // 10-bit values spread over the whole range, so a dropped high bit or a
+        // missing shift shows up.
+        let val = |p: usize, x: usize, y: usize| (300 * p + 41 * y + 7 * x + 1) as u16;
+
+        let planar = planar_frame_16(Pixel::YUV420P10LE, w as u32, h as u32, (1, 1), val);
+        let out = copy_yuv(&planar, P010).expect("planar 10-bit -> P010");
+        assert_eq!(
+            out.len(),
+            ysz + cw * ch * 4,
+            "P010 = Y + interleaved UV, 16-bit"
+        );
+        for y in 0..h {
+            for x in 0..w {
+                let o = 2 * (y * w + x);
+                assert_eq!(
+                    out[o..o + 2],
+                    (val(0, x, y) << 6).to_le_bytes(),
+                    "Y MSB-aligned"
+                );
+            }
+        }
+        for y in 0..ch {
+            for x in 0..cw {
+                let o = ysz + 4 * (y * cw + x);
+                assert_eq!(out[o..o + 2], (val(1, x, y) << 6).to_le_bytes(), "U");
+                assert_eq!(out[o + 2..o + 4], (val(2, x, y) << 6).to_le_bytes(), "V");
+            }
+        }
+        // 12-bit planar into P010 would silently relabel the depth: rejected.
+        let planar12 = planar_frame_16(Pixel::YUV420P12LE, w as u32, h as u32, (1, 1), val);
+        assert!(copy_yuv(&planar12, P010).is_err());
+
+        // A hardware P010 frame: verbatim into P010, shifted back down into I420p10.
+        let hw = p010_frame(w as u32, h as u32, |p, x, y| val(p, x, y) << 6);
+        let verbatim = copy_yuv(&hw, P010).expect("P010 source -> P010");
+        assert_eq!(verbatim.as_ref(), out.as_ref(), "same pixels, same layout");
+        let planar_out = copy_yuv(&hw, I420p10).expect("P010 source -> I420p10");
+        assert_eq!(planar_out.len(), ysz + 2 * cw * ch * 2);
+        for y in 0..h {
+            for x in 0..w {
+                let o = 2 * (y * w + x);
+                assert_eq!(
+                    planar_out[o..o + 2],
+                    val(0, x, y).to_le_bytes(),
+                    "Y low bits"
+                );
+            }
+        }
+        for y in 0..ch {
+            for x in 0..cw {
+                let u = ysz + 2 * (y * cw + x);
+                let v = ysz + cw * ch * 2 + 2 * (y * cw + x);
+                assert_eq!(
+                    planar_out[u..u + 2],
+                    val(1, x, y).to_le_bytes(),
+                    "U low bits"
+                );
+                assert_eq!(
+                    planar_out[v..v + 2],
+                    val(2, x, y).to_le_bytes(),
+                    "V low bits"
+                );
+            }
+        }
+        // A P010 source cannot serve an 8-bit or non-4:2:0 request.
+        assert!(copy_yuv(&hw, I420).is_err());
+        assert!(copy_yuv(&hw, I422p10).is_err());
+
+        // Negotiation: a hardware 10-bit frame's native format under `Auto`, and a
+        // format the decoder both advertises and accepts as a pre-fixed output.
+        assert_eq!(resolve_output_format(Auto, Pixel::P010LE).unwrap(), P010);
+        assert!(accepts_output(Auto, RawVideoFormat::P010));
+        assert!(accepts_output(P010, RawVideoFormat::P010));
+        assert!(!accepts_output(P010, RawVideoFormat::Nv12));
+    }
+
+    /// The 10-bit formats must be reachable from a launch line: `set_property`
+    /// takes every name `get_property` reports plus the GStreamer spelling.
+    #[test]
+    fn output_format_property_takes_the_10_bit_names() {
+        let mut dec = FfmpegH264Dec::new();
+        for (name, expected) in [
+            ("p010", OutputFormat::P010),
+            ("P010_10LE", OutputFormat::P010),
+            ("i420p10", OutputFormat::I420p10),
+            ("I420_10LE", OutputFormat::I420p10),
+            ("y444_12le", OutputFormat::I444p12),
+        ] {
+            dec.set_property("output-format", PropValue::Str(name.into()))
+                .unwrap_or_else(|e| panic!("output-format={name}: {e:?}"));
+            assert_eq!(dec.output_format(), expected);
+        }
+        assert_eq!(
+            dec.get_property("output-format"),
+            Some(PropValue::Str("i444p12".into()))
+        );
+        assert!(dec
+            .set_property("output-format", PropValue::Str("p016".into()))
+            .is_err());
     }
 
     #[test]

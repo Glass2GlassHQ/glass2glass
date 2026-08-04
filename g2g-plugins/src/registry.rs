@@ -793,27 +793,10 @@ fn register_uri_handlers(reg: &mut Registry) {
 /// decoder when its backend is compiled in.
 #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
 fn ffmpegdec_output_format(out: &Caps) -> crate::ffmpegdec::OutputFormat {
-    use crate::ffmpegdec::OutputFormat;
     // The source pad template lists NV12 before I420, so a `is_raw_video` target
     // settles on NV12 (the layout KMS / waylandsink want); an I420-only sink drives
     // I420. Anything that is not raw video falls back to I420.
-    match out {
-        Caps::RawVideo {
-            format: RawVideoFormat::Nv12,
-            ..
-        } => OutputFormat::Nv12,
-        // A downstream that pins 4:2:2 / 4:4:4 gets the source chroma preserved
-        // (software backend); otherwise default to I420.
-        Caps::RawVideo {
-            format: RawVideoFormat::I422,
-            ..
-        } => OutputFormat::I422,
-        Caps::RawVideo {
-            format: RawVideoFormat::I444,
-            ..
-        } => OutputFormat::I444,
-        _ => OutputFormat::I420,
-    }
+    ffmpegdec_pinned_output_format(out).unwrap_or(crate::ffmpegdec::OutputFormat::I420)
 }
 
 /// Autoplug output format for the **software** `ffmpegdec` (M685/M686): default
@@ -823,22 +806,32 @@ fn ffmpegdec_output_format(out: &Caps) -> crate::ffmpegdec::OutputFormat {
 /// which the fixed-format hwaccel path (`ffmpegvaapidec`) keeps using.
 #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
 fn ffmpegdec_sw_output_format(out: &Caps) -> crate::ffmpegdec::OutputFormat {
+    ffmpegdec_pinned_output_format(out).unwrap_or(crate::ffmpegdec::OutputFormat::Auto)
+}
+
+/// The decoder output layout a *pinned* raw-video target demands: a downstream
+/// that fixes NV12, a non-4:2:0 chroma, or a 10-/12-bit format (M887) must get a
+/// decoder built for exactly that, or its `CapsChanged` is rejected at startup.
+/// `None` for an I420 / non-raw target, whose fallback differs per backend.
+#[cfg(all(target_os = "linux", feature = "ffmpeg"))]
+fn ffmpegdec_pinned_output_format(out: &Caps) -> Option<crate::ffmpegdec::OutputFormat> {
     use crate::ffmpegdec::OutputFormat;
-    match out {
-        Caps::RawVideo {
-            format: RawVideoFormat::Nv12,
-            ..
-        } => OutputFormat::Nv12,
-        Caps::RawVideo {
-            format: RawVideoFormat::I422,
-            ..
-        } => OutputFormat::I422,
-        Caps::RawVideo {
-            format: RawVideoFormat::I444,
-            ..
-        } => OutputFormat::I444,
-        _ => OutputFormat::Auto,
-    }
+    let Caps::RawVideo { format, .. } = out else {
+        return None;
+    };
+    Some(match format {
+        RawVideoFormat::Nv12 => OutputFormat::Nv12,
+        RawVideoFormat::I422 => OutputFormat::I422,
+        RawVideoFormat::I444 => OutputFormat::I444,
+        RawVideoFormat::I420p10 => OutputFormat::I420p10,
+        RawVideoFormat::I420p12 => OutputFormat::I420p12,
+        RawVideoFormat::I422p10 => OutputFormat::I422p10,
+        RawVideoFormat::I422p12 => OutputFormat::I422p12,
+        RawVideoFormat::I444p10 => OutputFormat::I444p10,
+        RawVideoFormat::I444p12 => OutputFormat::I444p12,
+        RawVideoFormat::P010 => OutputFormat::P010,
+        _ => return None,
+    })
 }
 
 fn register_autoplug_candidates(reg: &mut Registry) {

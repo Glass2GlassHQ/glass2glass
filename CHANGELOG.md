@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M887: `ffmpegdec` emits the semi-planar 10-bit `P010` layout, and the 10-/12-bit formats are selectable by property and reachable by auto-plug.
+
 - M886: `alsasrc` / `pulsesrc` Linux audio capture elements, with the PCM format tables shared with the sinks.
 
 - M885: `timeoverlay` gains the standard time modes and `clockoverlay` a `time-format` wall-clock renderer, both on shared placement/styling properties.
