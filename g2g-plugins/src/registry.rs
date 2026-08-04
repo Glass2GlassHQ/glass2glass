@@ -120,6 +120,12 @@ use crate::nvdec::NvDec;
 use crate::nvenc::NvEnc;
 #[cfg(feature = "onvif")]
 use crate::onvif::OnvifSrc;
+#[cfg(all(target_os = "linux", feature = "pipewire"))]
+use crate::pipewiresink::PipeWireSink;
+#[cfg(all(target_os = "linux", feature = "pipewire"))]
+use crate::pipewiresrc::PipeWireSrc;
+#[cfg(all(target_os = "linux", feature = "pipewire"))]
+use crate::pipewirevideosrc::PipeWireVideoSrc;
 #[cfg(all(target_os = "linux", feature = "pulse-sink"))]
 use crate::pulsesink::PulseSink;
 #[cfg(all(target_os = "linux", feature = "pulse-src"))]
@@ -1638,6 +1644,35 @@ fn register_feature_gated(reg: &mut Registry) {
             sample_rate: 48_000,
         },
         || Box::new(PulseSrc::new()),
+    ));
+    // PipeWire: audio render / capture plus video capture (M890). The audio
+    // capture element opens S16LE stereo at 48 kHz.
+    #[cfg(all(target_os = "linux", feature = "pipewire"))]
+    reg.register_launch(LaunchFactory::of::<PipeWireSink>("pipewiresink", || {
+        Box::new(PipeWireSink::new())
+    }));
+    #[cfg(all(target_os = "linux", feature = "pipewire"))]
+    reg.register_source(SourceFactory::new(
+        "pipewiresrc",
+        Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            channels: 2,
+            sample_rate: 48_000,
+        },
+        || Box::new(PipeWireSrc::new()),
+    ));
+    // Geometry and format are negotiated with the node at startup, so the
+    // declared caps stay open (like v4l2src / libcamerasrc).
+    #[cfg(all(target_os = "linux", feature = "pipewire"))]
+    reg.register_source(SourceFactory::new(
+        "pipewirevideosrc",
+        Caps::RawVideo {
+            format: RawVideoFormat::I420,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        },
+        || Box::new(PipeWireVideoSrc::new()),
     ));
     // Android AAudio PCM render (M307); the gst analog is `aaudiosink`.
     #[cfg(all(target_os = "android", feature = "aaudio"))]

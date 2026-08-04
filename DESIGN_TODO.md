@@ -381,8 +381,12 @@ Phased plan:
 
 - `v4l2src`: MMAP DMABUF output (`MemoryDomain::DmaBuf`); format-flexible
   negotiation (MJPEG-mode UVC, other fourccs) vs fixed YUYV.
-- `pipewiresrc`: video + screen capture (SPA video pod + `param_changed`);
-  DMABUF output.
+- PipeWire capture: DMABUF output; an xdg-desktop-portal screen-capture
+  handshake (a portal-granted node id already reaches `pipewirevideosrc` via
+  `target-object`); runtime properties on the audio `pipewiresrc` /
+  `pipewiresink` (rate / channels / format are builder-only); a format-pin
+  property on `pipewirevideosrc` (the advertised caps are I420, the real
+  format arrives as `CapsChanged`).
 - `mfvideosrc`: first Windows build + camera smoke test; D3D11 zero-copy;
   size/rate request beyond device default.
 - Screen capture: Windows DXGI Desktop Duplication.

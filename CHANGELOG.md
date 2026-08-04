@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M890: `pipewirevideosrc` captures video from a PipeWire node, and the audio PipeWire elements are launch-registered.
+
 - M889: the Vulkan HDR swapchain present is a paced display-sink element (`VulkanHdrPresentSink`), holding and dropping frames by PTS like the other display sinks.
 
 - M888: `dashsrc low-latency=true` consumes a CMAF segment chunk by chunk as the packager writes it.

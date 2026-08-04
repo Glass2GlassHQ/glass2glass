@@ -1207,6 +1207,13 @@ required-features = ["vello-overlay", "wgpu-sink"]
 name = "gstwrap"
 required-features = ["gstreamer"]
 
+# M890: PipeWireVideoSrc captures from a node published by GStreamer's
+# pipewiresink. Needs a running PipeWire daemon + host GStreamer; run locally,
+# not in CI (the pipewire feature is not built there).
+[[test]]
+name = "m890_pipewire_video_capture"
+required-features = ["pipewire"]
+
 # M636: asserts a process-global allocation counter stays flat, so it must be
 # the only thread in its process (libtest's harness threads allocate mid-test).
 [[test]]

@@ -927,15 +927,20 @@ mod pulsepcm;
 pub mod pulsesink;
 #[cfg(all(target_os = "linux", feature = "pulse-src"))]
 pub mod pulsesrc;
-// PipeWire audio render sink + capture source (the modern Linux media layer).
-// Both elements share the `pipewire` feature, the pipewire-rs crate, and the
-// pwaudio SPA-format helper.
+// PipeWire audio render sink + capture source and the video capture source (the
+// modern Linux media layer). The elements share the `pipewire` feature and the
+// pipewire-rs crate; the SPA pod helpers split per media type (pwaudio /
+// pwvideo).
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
 pub mod pipewiresink;
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
 pub mod pipewiresrc;
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
+pub mod pipewirevideosrc;
+#[cfg(all(target_os = "linux", feature = "pipewire"))]
 mod pwaudio;
+#[cfg(all(target_os = "linux", feature = "pipewire"))]
+mod pwvideo;
 
 // CUDA device-memory consumers (C3 Phase 3). `CudaDownload` copies a
 // `MemoryDomain::Cuda` NV12 frame back to system memory so a `NvdecCuda`
