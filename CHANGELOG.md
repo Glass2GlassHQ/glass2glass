@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M855: `font-variations` axis selection on textoverlay, WebVTT `::cue(.class)` styling, and SSA / TTML placement mapped into cue settings.
+
 - M852: S24/S32/U8 through convert, resample, and all three Linux audio sinks, which now open >2-channel layouts with device-order channel mapping.
 
 - M853: `wgpucompositor`, a one-dispatch wgpu compute compositor bit-exact with the CPU element, System or GPU-texture output.

@@ -438,9 +438,8 @@ _(No open parser items.)_
 - **`textoverlay` font backend:** the `truetype-overlay` feature (M409, `ab_glyph`
   since M668) renders both glyf and CFF/CFF2 outlines (CJK / accented / mixed-case,
   horizontal + vertical) with an explicit Latin+CJK fallback chain, so OpenType-CFF
-  `.otf` fonts render, not only glyf `.ttf`s. Still open: variable-font axis
-  selection (a non-default instance of a variable Noto Sans CJK), real shaping +
-  bidi, and automatic system-font discovery / fallback, all of which point at the
+  `.otf` fonts render, not only glyf `.ttf`s. Still open: real shaping + bidi
+  and automatic system-font discovery / fallback, both of which point at the
   `cosmic-text` upgrade; plus a `vello` GPU backend and the `clockoverlay` /
   `timeoverlay` siblings.
 - **Text / subtitle pipeline depth.** The foundation is in: `Caps::Text` +
@@ -503,12 +502,12 @@ _(No open parser items.)_
     feature built in, else `autoaudiosink` falls back to `fakesink`. A carrier
     for non-default channel orders (a stream whose interleave order differs from
     the per-count `ChannelLayout` convention) once a real source needs one.
-  Parsing SSA / TTML placement into `CueSettings` (only
-  WebVTT populates it today, though all three now ride the frame-meta). Glyph
+  Glyph
   rendering (incl. `vertical:rl` / `lr` layout) is the `truetype-overlay` feature
-  above. WebVTT `::cue` / `::cue(#id)` `color` / `background-color` are applied
-  (M410); still open: `::cue(.class)` span selectors and other CSS (font-size,
-  text-shadow, etc.).
+  above. Still open in cue CSS: true span-scoped styling (a class rule colours
+  the whole cue today), compound `::cue(.a.b)` selectors, and other properties
+  (font-size, text-shadow, etc.); SSA pixel placement (`{\pos}`, margins) needs
+  `PlayResX/Y` mapping.
 - **Closed captions: remaining carriers + authoring.** The H.264 / H.265 SEI
   decode path (`cea` decoders + `CcExtract` + file- and HLS-`playbin` auto-plug)
   and the CEA-608 encode path (`Cc608Enc` + `CcInsert`) are done (DESIGN.md

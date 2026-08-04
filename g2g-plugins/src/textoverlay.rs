@@ -18,7 +18,9 @@
 //! `font=`), so CJK, accented Latin, and mixed-case text render, horizontal and
 //! vertical (`vertical:rl` / `lr`). `ab_glyph` does the parsing / rasterization on
 //! the CPU, covering both glyf and CFF/CFF2 outlines; full shaping + bidi
-//! (cosmic-text) is a later upgrade.
+//! (cosmic-text) is a later upgrade. A variable font renders at a chosen axis
+//! position ([`TextOverlay::with_font_axis`] / `font-variations=wght=700`)
+//! instead of its default instance.
 //!
 //! [`bitmapfont`]: crate::bitmapfont
 
@@ -69,8 +71,20 @@ struct LineMetrics {
     new_line_size: f32,
 }
 
+/// One variable-font axis coordinate: a 4-byte OpenType axis tag (`wght`,
+/// `wdth`, ...) and the position on it.
+#[cfg(feature = "truetype-overlay")]
+type FontAxis = ([u8; 4], f32);
+
 #[cfg(feature = "truetype-overlay")]
 impl FontFace {
+    /// Move this face to `value` on the `tag` axis. `false` if the face has no
+    /// such axis (not variable, or a different axis set).
+    fn set_axis(&mut self, (tag, value): FontAxis) -> bool {
+        use ab_glyph::VariableFont;
+        self.0.set_variation(&tag, value)
+    }
+
     /// Whether this face has a real (non-`.notdef`) glyph for `c`.
     fn has_glyph(&self, c: char) -> bool {
         use ab_glyph::Font;
@@ -179,6 +193,13 @@ pub struct TextOverlay {
     /// The primary `font=` path, retained for `get_property` round-trips.
     #[cfg(feature = "truetype-overlay")]
     font_path: Option<String>,
+    /// Variable-font axis positions applied to every face in the chain, including
+    /// ones added later (order of `font=` / `font-variations=` must not matter).
+    #[cfg(feature = "truetype-overlay")]
+    axes: Vec<FontAxis>,
+    /// The `font-variations=` spec, retained for `get_property` round-trips.
+    #[cfg(feature = "truetype-overlay")]
+    axes_spec: Option<String>,
     drawn: u64,
 }
 
@@ -204,6 +225,10 @@ impl TextOverlay {
             fonts: Vec::new(),
             #[cfg(feature = "truetype-overlay")]
             font_path: None,
+            #[cfg(feature = "truetype-overlay")]
+            axes: Vec::new(),
+            #[cfg(feature = "truetype-overlay")]
+            axes_spec: None,
             drawn: 0,
         }
     }
@@ -220,7 +245,11 @@ impl TextOverlay {
     pub fn add_font_bytes(&mut self, bytes: &[u8], collection_index: u32) -> Result<(), G2gError> {
         let font = ab_glyph::FontVec::try_from_vec_and_index(bytes.to_vec(), collection_index)
             .map_err(|_| G2gError::CapsMismatch)?;
-        self.fonts.push(FontFace(font));
+        let mut face = FontFace(font);
+        for axis in &self.axes {
+            face.set_axis(*axis);
+        }
+        self.fonts.push(face);
         Ok(())
     }
 
@@ -253,6 +282,27 @@ impl TextOverlay {
     pub fn with_font(mut self, path: impl AsRef<str>) -> Result<Self, G2gError> {
         self.add_font(path.as_ref())?;
         Ok(self)
+    }
+
+    /// Render a variable font at `value` on the `tag` axis (`*b"wght"` 700 for a
+    /// bold instance of a weight-variable face) instead of its default position.
+    /// Applies to every face in the chain, now and as fonts are added, so it can
+    /// be set before or after `font=`. A face without that axis is unaffected.
+    #[cfg(feature = "truetype-overlay")]
+    pub fn set_font_axis(&mut self, tag: [u8; 4], value: f32) {
+        // Last setting of an axis wins, so a re-set does not stack.
+        self.axes.retain(|(t, _)| *t != tag);
+        self.axes.push((tag, value));
+        for f in &mut self.fonts {
+            f.set_axis((tag, value));
+        }
+    }
+
+    /// Builder form of [`set_font_axis`](Self::set_font_axis).
+    #[cfg(feature = "truetype-overlay")]
+    pub fn with_font_axis(mut self, tag: [u8; 4], value: f32) -> Self {
+        self.set_font_axis(tag, value);
+        self
     }
 
     /// The first font in the chain that has a glyph for `c`, else the primary
@@ -716,6 +766,38 @@ impl TextOverlay {
     fn load_font(&mut self, _path: &str) -> Result<(), PropError> {
         Err(PropError::Value)
     }
+
+    /// Apply a `font-variations=` spec (`wght=700,wdth=87.5`). Replaces any
+    /// previous spec. A face lacking one of the axes just ignores it, so the
+    /// value is rejected only when it is not parseable.
+    #[cfg(feature = "truetype-overlay")]
+    fn set_font_axes(&mut self, spec: &str) -> Result<(), PropError> {
+        let axes = parse_font_axes(spec).ok_or(PropError::Value)?;
+        self.axes.clear();
+        self.axes_spec = Some(spec.into());
+        for (tag, value) in axes {
+            self.set_font_axis(tag, value);
+        }
+        Ok(())
+    }
+
+    #[cfg(not(feature = "truetype-overlay"))]
+    fn set_font_axes(&mut self, _spec: &str) -> Result<(), PropError> {
+        Err(PropError::Value)
+    }
+}
+
+/// Parse a `tag=value` comma list of variable-font axes (`wght=700,wdth=87.5`).
+/// `None` if any item is malformed: an axis tag is exactly four ASCII bytes.
+#[cfg(feature = "truetype-overlay")]
+fn parse_font_axes(spec: &str) -> Option<Vec<FontAxis>> {
+    let mut axes = Vec::new();
+    for item in spec.split(',').filter(|s| !s.trim().is_empty()) {
+        let (tag, value) = item.split_once('=')?;
+        let tag: [u8; 4] = tag.trim().as_bytes().try_into().ok()?;
+        axes.push((tag, value.trim().parse::<f32>().ok()?));
+    }
+    Some(axes)
 }
 
 /// Left edge of a `block_w`-wide box whose `align` anchor sits at `anchor`:
@@ -863,6 +945,10 @@ impl AsyncElement for TextOverlay {
                 let path = value.as_str().ok_or(PropError::Type)?;
                 self.load_font(path)
             }
+            "font-variations" => {
+                let spec = value.as_str().ok_or(PropError::Type)?;
+                self.set_font_axes(spec)
+            }
             // 0xAARRGGBB packed color, the gst textoverlay convention. The
             // element stores [R, G, B, A].
             "color" => {
@@ -886,6 +972,10 @@ impl AsyncElement for TextOverlay {
             "font" => Some(PropValue::Str(self.font_path.clone().unwrap_or_default())),
             #[cfg(not(feature = "truetype-overlay"))]
             "font" => Some(PropValue::Str(String::new())),
+            #[cfg(feature = "truetype-overlay")]
+            "font-variations" => Some(PropValue::Str(self.axes_spec.clone().unwrap_or_default())),
+            #[cfg(not(feature = "truetype-overlay"))]
+            "font-variations" => Some(PropValue::Str(String::new())),
             "color" => {
                 let [r, g, b, a] = self.text_color;
                 Some(PropValue::Uint(
@@ -1118,6 +1208,12 @@ static TEXTOVERLAY_PROPS: &[PropertySpec] = &[
         PropKind::Str,
         "path to a .ttf / .ttc font for glyph rendering (truetype-overlay); \
          needed for CJK / accented text. Without it the 8x8 ASCII bitmap is used",
+    ),
+    PropertySpec::new(
+        "font-variations",
+        PropKind::Str,
+        "variable-font axis positions as a tag=value list (e.g. wght=700,wdth=87.5); \
+         ignored by a font without those axes",
     ),
     PropertySpec::new(
         "color",
@@ -1412,6 +1508,62 @@ mod tests {
         );
     }
 
+    /// Size an overlay built by one of the document parsers and mark it
+    /// configured, ready to `render_active`.
+    fn sized(mut ov: TextOverlay, w: u32, h: u32) -> TextOverlay {
+        ov.width = w;
+        ov.height = h;
+        ov.configured = true;
+        ov
+    }
+
+    #[test]
+    fn ssa_alignment_places_the_cue_top_left() {
+        let (w, h) = (200usize, 96usize);
+        // `\an7` on the dialogue's style: top row, left column.
+        let doc = "[V4+ Styles]\n\
+            Format: Name, Fontname, Alignment\n\
+            Style: Top,Arial,7\n\
+            \n\
+            [Events]\n\
+            Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n\
+            Dialogue: 0,0:00:00.00,0:00:10.00,Top,,0,0,0,,HI\n";
+        let mut buf = black(w, h);
+        sized(TextOverlay::from_ssa(doc), w as u32, h as u32).render_active(&mut buf, 0);
+        let (min_x, _, max_x, max_y) = drawn_bounds(&buf, w, h).expect("drawn");
+        assert!(min_x < w / 4, "an7 hugs the left edge ({min_x})");
+        assert!(max_x < w / 2, "and stays in the left half ({max_x})");
+        assert!(max_y < h / 2, "and in the top half ({max_y})");
+    }
+
+    #[test]
+    fn ttml_region_places_the_cue_top_left() {
+        let (w, h) = (200usize, 96usize);
+        let doc = r#"<tt xmlns:tts="http://www.w3.org/ns/ttml#styling">
+            <head><layout>
+              <region xml:id="tl" tts:origin="0% 0%" tts:extent="50% 25%"
+                      tts:displayAlign="before" tts:textAlign="left"/>
+            </layout></head>
+            <body><div region="tl">
+              <p begin="0s" end="10s">HI</p>
+            </div></body></tt>"#;
+        let mut buf = black(w, h);
+        sized(TextOverlay::from_ttml(doc), w as u32, h as u32).render_active(&mut buf, 0);
+        let (min_x, _, max_x, max_y) = drawn_bounds(&buf, w, h).expect("drawn");
+        assert!(
+            min_x < w / 4,
+            "the region origin is the left edge ({min_x})"
+        );
+        assert!(
+            max_x < w / 2,
+            "and the cue stays in the left half ({max_x})"
+        );
+        assert!(
+            max_y < h / 2,
+            "displayAlign:before puts it in the top half ({max_y})"
+        );
+    }
+
     #[test]
     fn intercept_rejects_non_rgba() {
         let ov = TextOverlay::new();
@@ -1572,6 +1724,107 @@ mod tests {
             drawn_bounds(&buf, w, h).is_some(),
             "CFF outlines rasterize to visible glyphs"
         );
+    }
+
+    /// Read the first available `wght`-variable font, or `None` to skip.
+    /// Cantarell-VF is CFF2 and the Noto / Vazirmatn files glyf, so either
+    /// outline flavour exercises the axis path.
+    #[cfg(feature = "truetype-overlay")]
+    fn variable_font_bytes() -> Option<Vec<u8>> {
+        for p in [
+            "/usr/share/fonts/abattis-cantarell-vf-fonts/Cantarell-VF.otf",
+            "/usr/share/fonts/vazirmatn-vf-fonts/Vazirmatn[wght].ttf",
+            "/usr/share/fonts/google-noto-sans-cjk-vf-fonts/NotoSansCJK-VF.ttc",
+        ] {
+            if let Ok(b) = std::fs::read(p) {
+                return Some(b);
+            }
+        }
+        None
+    }
+
+    /// Count of painted (non-black) pixels, a proxy for how much ink a weight
+    /// puts on the canvas.
+    #[cfg(feature = "truetype-overlay")]
+    fn ink(buf: &[u8], w: usize, h: usize) -> usize {
+        (0..w * h)
+            .filter(|i| buf[i * 4] != 0 || buf[i * 4 + 1] != 0 || buf[i * 4 + 2] != 0)
+            .count()
+    }
+
+    #[test]
+    #[cfg(feature = "truetype-overlay")]
+    fn variable_font_axis_renders_a_non_default_instance() {
+        use crate::subparse::CueSettings;
+        let (w, h) = (320usize, 120usize);
+        let Some(bytes) = variable_font_bytes() else {
+            std::eprintln!("skip: no variable system font found");
+            return;
+        };
+        let render = |ov: TextOverlay| {
+            let ov = sized(
+                ov.with_cues(vec![Cue {
+                    start_ns: 0,
+                    end_ns: u64::MAX,
+                    text: "Hamburg".into(),
+                    settings: CueSettings::default(),
+                }]),
+                w as u32,
+                h as u32,
+            );
+            let mut buf = black(w, h);
+            ov.render_active_ttf(&mut buf, 0);
+            buf
+        };
+
+        // Default instance (wght 400 on all three candidates).
+        let default = render(
+            TextOverlay::new()
+                .with_font_bytes(&bytes, 0)
+                .expect("parses"),
+        );
+        // Bold instance of the same face: heavier stems, so strictly more ink.
+        let bold = render(
+            TextOverlay::new()
+                .with_font_axis(*b"wght", 700.0)
+                .with_font_bytes(&bytes, 0)
+                .expect("parses"),
+        );
+        assert!(ink(&default, w, h) > 0, "the default instance renders");
+        assert!(
+            ink(&bold, w, h) > ink(&default, w, h),
+            "wght=700 paints more ink than the default ({} vs {})",
+            ink(&bold, w, h),
+            ink(&default, w, h)
+        );
+        assert_ne!(bold, default, "the axis changes the rasterized glyphs");
+    }
+
+    #[test]
+    #[cfg(feature = "truetype-overlay")]
+    fn font_variations_property_round_trips_and_applies() {
+        use g2g_core::PropValue;
+        let Some(bytes) = variable_font_bytes() else {
+            std::eprintln!("skip: no variable system font found");
+            return;
+        };
+        let mut ov = TextOverlay::new();
+        // The spec may be set before the font loads; it still applies.
+        ov.set_property("font-variations", PropValue::Str("wght=700".into()))
+            .expect("valid axis spec");
+        ov.add_font_bytes(&bytes, 0).expect("parses");
+        assert_eq!(ov.axes, vec![(*b"wght", 700.0)]);
+        assert_eq!(
+            ov.get_property("font-variations"),
+            Some(PropValue::Str("wght=700".into()))
+        );
+        // A malformed spec is rejected (tag must be four bytes, value a number).
+        assert!(ov
+            .set_property("font-variations", PropValue::Str("bold".into()))
+            .is_err());
+        assert!(ov
+            .set_property("font-variations", PropValue::Str("wg=700".into()))
+            .is_err());
     }
 
     // -- TextOverlayN (M403): the two-input video + text-stream overlay. --------
