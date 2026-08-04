@@ -1370,6 +1370,16 @@ over `[start, stop]`, and `SyncSink` schedules each by `Segment::to_running_time
 (which measures reverse from `stop`) and clips via `contains`, so descending PTS
 maps to ascending running time and presents in the correct visual order, the
 `Segment` abstraction generalizing the sink to negative rate transparently.
+The producing half is GOP-batched, since a decoder only runs forward: on a
+`rate < 0` seek `Mp4Src` walks the container's sync samples backward from the
+segment `stop` (the `stss` index `parse_progressive` recovers, or the `trun`
+keyframe flags of a fragmented file) and emits one whole GOP at a time in decode
+order, newest GOP first, including the samples above `stop` that later frames
+reference (the sink clips them). `GopReverse` (`gopreverse`) closes the loop
+after the decoder: it buffers a decoded GOP, detects its end by the PTS jumping
+backward into the next (earlier) GOP, and re-emits each batch in descending PTS,
+so the sink receives reverse presentation order. A forward segment passes
+straight through it, so it can sit in any graph that may seek backward.
 **Trick-mode KEY_UNIT** frame selection (present only keyframes for fast scrub)
 is done: `FrameTiming::keyframe` carries a per-frame flag (set by
 `h264parse` from `h264_au_is_keyframe`, and by `mp4src` / `fmp4demux` from the

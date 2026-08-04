@@ -535,6 +535,11 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::new("identity", Vec::new(), || {
         Box::new(IdentityTransform::new())
     }));
+    // Reverse playback (M897): re-emits each decoded GOP in descending PTS, so a
+    // `rate < 0` seek plays backwards through a forward-only decoder.
+    reg.register_launch(LaunchFactory::new("gopreverse", Vec::new(), || {
+        Box::new(crate::gopreverse::GopReverse::new())
+    }));
     // Spill-to-storage buffer (M861): absorbs a pushed byte stream into a temp
     // file and serves it seekably, so `httpsrc bytestream-format=mp4 !
     // downloadbuffer ! qtdemux` plays a moov-at-end MP4 that the pushed stream

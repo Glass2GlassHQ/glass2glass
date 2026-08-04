@@ -53,6 +53,8 @@ pub mod concat;
 pub mod cutter;
 pub mod equalizer;
 pub mod fakesink;
+// Decoded-GOP reverser (M897): the presentation half of reverse playback.
+pub mod gopreverse;
 pub mod h264parse;
 pub mod h265parse;
 pub mod identity;

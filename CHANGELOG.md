@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M897: reverse playback (`rate < 0`) through `mp4src`: backward GOP walk plus a `gopreverse` element after the decoder, bit-exact against forward decode.
+
 - M896: `hlssink` HLS packager: segments a `tsmux`/`mp4mux` byte stream into files plus a rolling m3u8 playlist, validated against ffmpeg and `hlsdemux2`.
 
 - M895: `timeoverlay` renders stream times as dates (`show-times-as-dates` / `datetime-format` / `datetime-epoch`), on one strftime formatter shared with `clockoverlay`.
