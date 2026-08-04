@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M860: the mkv suites, mkv ffmpeg metadata oracles, dashboard/preview/MCP tooling tests now run in CI.
+
 - M859: CMAF low-latency chunking (`chunk-duration` sub-fragment `moof`+`mdat`s, `cmfl` brand) and per-fragment `prft` (`write-prft`) on both fMP4 muxers.
 
 - M858: oggmux writes chained streams, a new link per changed `Segment`, round-tripping oggdemux's chain boundary and validated against ffmpeg.

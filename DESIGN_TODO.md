@@ -399,8 +399,6 @@ Phased plan:
 
 ## Containers
 
-- **MKV / WebM:** wire the std-gated mkv test suites into CI (only the m828
-  conformance oracle runs there today).
 - **FLV:** Speex decode (carriage lands M831; no Speex encoder exists anywhere
   to build a validated decode vector, and gst's header-in-tag layout is
   rejected by libavcodec, so wiring a decoder would be an unvalidated claim).
@@ -715,9 +713,6 @@ Outstanding developer-tooling tasks, highest leverage first.
     empty: their arms attach at runtime, so the observer needs incremental node
     registration rather than the one-shot `register`.
   - Validate the dashboard live against an RTSP source.
-- A CI job (or a feature added to an existing job) running the `observe`-gated
-  dashboard tests and the `tooling-json` MCP tests (`m681_mcp`); both only run
-  locally today.
 - **gst-parity differ.** Same launch line through real GStreamer and g2g;
   diff the negotiated caps per edge, the element set after autoplug, and the
   output (checksum, PSNR for lossy). Calliope already does differential output

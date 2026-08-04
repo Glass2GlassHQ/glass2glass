@@ -191,6 +191,29 @@ jobs:
           cargo test -p g2g-plugins --locked --features script-rhai,declarative-yaml --test m578_scripting
           cargo test -p g2g-plugins --locked --features script-rhai,declarative-yaml --test m849_builder_yaml_export
           cargo test -p g2g-plugins --locked --features script-rhai,declarative-yaml --lib script::
+      # Matroska / WebM suites (std-gated, so a default `cargo test` skips them):
+      # the A/V muxer, the Cues / SeekHead seek paths, the multi-output demuxer +
+      # stream selection, the playbin subtitle route, and the AVCC -> Annex-B
+      # conversion. Deterministic, no reference peer needed; the ffmpeg-oracle
+      # mkv suites run in the conformance job instead (that is where ffmpeg is).
+      - name: test g2g-plugins (matroska suites)
+        run: >
+          cargo test -p g2g-plugins --locked --features observe,declarative-yaml
+          --test m294_matroskamux_av --test m364_mkvdemux_seek
+          --test m373_mkvdemux_cues_seek --test m374_mkvdemux_seekhead_prefetch
+          --test m375_mkvmux_cues --test m378_mkvdemuxn --test m381_mkvdemuxn_select
+          --test m415_playbin_mkv_subtitle --test m766_mkv_avcc_annexb
+          --test m770_mkv_seekhead
+      # Dev-tooling surface, sharing the feature set (and so the build) with the
+      # step above: the live dashboard transport + edge preview (`observe`), the
+      # live per-edge counters and fan-in preview taps, and the MCP server's
+      # JSON-RPC framing + tool logic (`tooling-json`, implied by `observe`).
+      # Pure host code: no GPU / adapter involved.
+      - name: test g2g-plugins (dashboard + MCP tooling)
+        run: |
+          cargo test -p g2g-plugins --locked --features observe,declarative-yaml --lib -- dashboard:: preview:: toolingjson::
+          cargo test -p g2g-plugins --locked --features observe,declarative-yaml --test m677_observe --test m846_live_edge_counters --test m849_fanin_edge_preview
+          cargo test -p g2g-plugins --locked --features observe,declarative-yaml --test m681_mcp
       # Native WebRTC (str0m sans-IO stack): needs rustc 1.85 (the workspace MSRV),
       # so it stays out of the default suite. Compile the feature, then run the
       # deterministic + localhost-only tests: the webrtc element/util/turn lib
@@ -383,6 +406,12 @@ jobs:
       # as the two-pass file.
       - name: Matroska live oracle (matroskamux streamable vs ffmpeg)
         run: cargo test -p g2g-plugins --locked --features std --test m828_mkv_streamable_clusters -- --nocapture
+      # Matroska metadata + timing (M787/M788/M792/M794): ffprobe reads the
+      # per-track `Tags` and the `TrackEntry` Name / Language g2g writes and g2g
+      # demuxes ffmpeg's own, the Opus pre-skip / end trim survives a remux, and
+      # the two-pass `Duration` matches ffprobe's.
+      - name: Matroska metadata oracles (matroskamux + matroskademux vs ffmpeg)
+        run: cargo test -p g2g-plugins --locked --features std --test m787_mkv_track_tags --test m788_mkv_trackentry_tags --test m792_mkv_opus_codecdelay --test m794_mkv_duration -- --nocapture
       # CMAF (M832): ffmpeg reads a g2g `cmaf=true` track file, and g2g demuxes
       # ffmpeg's own `-movflags cmaf` output sample-exact, timing included.
       - name: CMAF oracle (mp4mux cmaf + mp4demux vs ffmpeg)
