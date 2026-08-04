@@ -243,8 +243,9 @@ pub(crate) struct TrackHeader {
 /// Parse every forwardable (`vide` / `soun` / timed-text) track out of a `moov`
 /// into a [`TrackHeader`]. The single-track [`parse_header`] reads only the first
 /// `trak`; this walks them all (what an A/V `.mp4` carries). Tracks with an
-/// unrecognized handler (or a text handler whose sample entry is not one we
-/// de-frame: `tx3g` / `wvtt` / `stpp` are read, others decline) are skipped, not
+/// unrecognized handler, or whose sample entry names a codec we do not read
+/// (`tx3g` / `wvtt` / `stpp` text, `c608` / `c708` captions, and the video codecs
+/// [`parse_video_entry`] handles are read, others decline) are skipped, not
 /// errors; a malformed video / audio track fails the parse. Errors if no track is
 /// forwardable.
 pub(crate) fn parse_all_tracks(data: &[u8]) -> Result<Vec<TrackHeader>, G2gError> {
@@ -298,7 +299,12 @@ fn parse_trak(trak: &[u8]) -> Result<Option<TrackHeader>, G2gError> {
     let entries = stsd.get(8..).ok_or(G2gError::CapsMismatch)?;
 
     let (kind, cenc) = match handler {
-        b"vide" => parse_video_entry(entries, width, height)?,
+        // A video sample entry we have no reader for is skipped like an unknown
+        // handler: one unsupported track must not fail the whole file.
+        b"vide" => match parse_video_entry(entries, width, height)? {
+            Some(entry) => entry,
+            None => return Ok(None),
+        },
         b"soun" => parse_audio_entry(entries, timescale)?,
         // A subtitle / timed-text handler (`text` = 3GPP/QuickTime timed text,
         // `sbtl` / `subt` = MP4 / ISO subtitle). Forwarded only when its sample
@@ -345,12 +351,14 @@ fn parse_av1c_config(av01: &[u8]) -> Result<Vec<Vec<u8>>, G2gError> {
 /// into a [`TrackKind::Video`] plus the cbcs `cenc` defaults for an encrypted
 /// track. An `encv` carries the original codec config (`avcC` / `hvcC`) alongside
 /// a `sinf` (original format + `cbcs` scheme + `tenc`), the same shape
-/// [`parse_header`] reads.
+/// [`parse_header`] reads. Returns `None` for an entry that is well-formed but
+/// names a codec with no reader here (MJPEG in MP4, say), so that track is
+/// skipped; malformed entry data is still an error.
 fn parse_video_entry(
     entries: &[u8],
     width: u32,
     height: u32,
-) -> Result<(TrackKind, Option<CencDefaults>), G2gError> {
+) -> Result<Option<(TrackKind, Option<CencDefaults>)>, G2gError> {
     let (codec, param_sets, cenc) = if let Some(avc1) = find_box(entries, b"avc1") {
         let children = avc1.get(78..).ok_or(G2gError::CapsMismatch)?;
         let (sps, pps) = parse_avcc(find_box(children, b"avcC").ok_or(G2gError::CapsMismatch)?)?;
@@ -362,12 +370,14 @@ fn parse_video_entry(
     } else if let Some(mp4v) = find_box(entries, b"mp4v") {
         // MPEG-4 Part 2: the mp4v visual sample entry nests an esds carrying the
         // VOL header as its DecoderSpecificInfo. Confirm objectTypeIndication
-        // 0x20 (Visual ISO/IEC 14496-2) so another mp4v-boxed codec is rejected.
+        // 0x20 (Visual ISO/IEC 14496-2) so another mp4v-boxed codec is declined.
         let children = mp4v.get(78..).ok_or(G2gError::CapsMismatch)?;
         let esds = find_box(children, b"esds").ok_or(G2gError::CapsMismatch)?;
         let (oti, dsi) = parse_esds_video(esds)?;
         if oti != 0x20 {
-            return Err(G2gError::CapsMismatch);
+            // Another codec in an mp4v box (ffmpeg writes MJPEG-in-MP4 this way,
+            // objectTypeIndication 0x6C): a valid entry we have no reader for.
+            return Ok(None);
         }
         // The VOL header is the single config blob (empty if carried in-band).
         let sets = if dsi.is_empty() {
@@ -396,10 +406,14 @@ fn parse_video_entry(
             _ => return Err(G2gError::CapsMismatch),
         };
         (codec, param_sets, Some(cenc))
+    } else if visual_sample_entry(entries) {
+        // A well-formed VisualSampleEntry naming a codec we do not read: decline
+        // so the rest of the file still demuxes.
+        return Ok(None);
     } else {
         return Err(G2gError::CapsMismatch);
     };
-    Ok((
+    Ok(Some((
         TrackKind::Video {
             codec,
             width,
@@ -407,7 +421,15 @@ fn parse_video_entry(
             param_sets,
         },
         cenc,
-    ))
+    )))
+}
+
+/// Whether `entries` (an `stsd`'s sample-entry list) holds at least one entry
+/// well-formed enough to be a VisualSampleEntry: a parseable box carrying its 78
+/// fixed bytes. Truncated or garbage entry data is not, and fails the parse
+/// rather than being silently skipped.
+fn visual_sample_entry(entries: &[u8]) -> bool {
+    boxes(entries).any(|(_, payload)| payload.len() >= 78)
 }
 
 /// Read an audio sample entry into a [`TrackKind::Audio`] plus the cbcs `cenc`
