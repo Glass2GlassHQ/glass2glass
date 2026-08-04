@@ -205,7 +205,11 @@ per-stage thread handoff adds wakeup latency: cooperative single-thread is the
 lower-latency default, and it is the only path for the `no_std` / wasm / embassy
 executors, which the `run_graph_threaded` gate (`std + multi-thread`) excludes.
 `run_graph_threaded` requires an owning `Graph<GraphNode>` (`'static`) so each arm
-can move its element onto a worker thread.
+can move its element onto a worker thread. The same rule shapes the fan-in
+deadline tick (§3.1): the cooperative arms borrow their clock, but a builder
+closure owns everything it carries, so `run_graph_threaded_ticked` takes the clock
+as an `Arc<dyn DynAsyncClock + Send + Sync>` and each muxer arm is wrapped in a
+future that owns its handle and lends it to the shared arm code.
 
 **Element-level cooperative offload.** A separate, opt-in path lets the
 cooperative default runner overlap one heavy synchronous stage without a

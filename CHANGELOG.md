@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M879: `run_graph_threaded_ticked` gives every fan-in arm its deadline tick under the thread-per-arm runner.
+
 - M878: each program of a multi-program TS carries its own SDT service text, and `BusMessage::Tag` names the program it describes.
 
 - M877: the deadline tick also reaches fan-in elements through `run_graph_ticked` and the PTS-ordered muxer arm.

@@ -1777,6 +1777,9 @@ pub trait GraphSpawner {
 /// element onto a worker thread. All `vg`-borrowing / reference-typed inputs are
 /// resolved to owned values *before* each arm's builder closure, since the
 /// closure runs on another thread and may not borrow `vg`, `bus`, or `progress`.
+/// `ticker` follows that rule too: the fan-in arm's deadline clock is a shared
+/// [`Arc`](alloc::sync::Arc), not a borrow, so each muxer builder can carry it
+/// onto its thread.
 #[cfg(all(feature = "std", feature = "multi-thread"))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
@@ -1787,6 +1790,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
     state: Option<StateController>,
     progress: Option<&PipelineProgress>,
     observer: Option<&Observer>,
+    ticker: Option<alloc::sync::Arc<dyn DynAsyncClock + Send + Sync>>,
     spawner: &S,
 ) -> Result<RunStats, G2gError> {
     let link_capacity: usize = link_capacity.into().get();
@@ -1869,11 +1873,11 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
             }
             let pts_ordered = mux.input_pts_ordered();
             let mux_probe = probes[node.0 as usize].clone();
-            // The thread-per-arm runner does not tick, on either arm: an arm on its
-            // own OS thread has no shared clock reference to sleep on here.
-            let build: alloc::boxed::Box<dyn FnOnce() -> LocalArmFuture + Send> = if pts_ordered {
+            let mux_ticker = ticker.clone();
+            let build: alloc::boxed::Box<dyn FnOnce() -> LocalArmFuture + Send> =
                 alloc::boxed::Box::new(move || -> LocalArmFuture {
-                    Box::pin(muxer_arm_pts(
+                    Box::pin(muxer_arm_owned_tick(
+                        pts_ordered,
                         mux,
                         pad_rxs,
                         out_tx,
@@ -1882,24 +1886,9 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                         beta,
                         mux_ctrl,
                         mux_probe,
-                        None,
+                        mux_ticker,
                     ))
-                })
-            } else {
-                alloc::boxed::Box::new(move || -> LocalArmFuture {
-                    Box::pin(muxer_arm(
-                        mux,
-                        pad_rxs,
-                        out_tx,
-                        input_count,
-                        mux_out_caps,
-                        beta,
-                        mux_ctrl,
-                        mux_probe,
-                        None,
-                    ))
-                })
-            };
+                });
             handles.push(spawner.spawn_arm(build));
             arm_kinds.push(kind);
             continue;
@@ -2042,7 +2031,48 @@ pub async fn run_graph_threaded<Clk: PipelineClock, S: GraphSpawner>(
     link_capacity: impl Into<LinkCapacity>,
     spawner: &S,
 ) -> Result<RunStats, G2gError> {
-    run_graph_threaded_inner(graph, clock, link_capacity, None, None, None, None, spawner).await
+    run_graph_threaded_inner(
+        graph,
+        clock,
+        link_capacity,
+        None,
+        None,
+        None,
+        None,
+        None,
+        spawner,
+    )
+    .await
+}
+
+/// As [`run_graph_threaded`], but every fan-in arm also gets a **deadline tick**
+/// (M879), the thread-per-arm analog of [`run_graph_ticked`]: `clock` is both the
+/// pipeline clock and the timer the arms sleep on, so a fan-in element declaring a
+/// [`tick_interval_ns`](crate::MultiInputElement::tick_interval_ns) receives
+/// [`PipelinePacket::Tick`] on that period even while its inputs are silent.
+///
+/// The clock arrives as a shared handle rather than a borrow because each arm's
+/// builder closure moves onto its own OS thread: `Arc::new(my_clock)` (any
+/// [`AsyncClock`](crate::AsyncClock) that is `Send + Sync`) coerces to it.
+#[cfg(all(feature = "std", feature = "multi-thread"))]
+pub async fn run_graph_threaded_ticked<S: GraphSpawner>(
+    graph: Graph<GraphNode>,
+    clock: alloc::sync::Arc<dyn DynAsyncClock + Send + Sync>,
+    link_capacity: impl Into<LinkCapacity>,
+    spawner: &S,
+) -> Result<RunStats, G2gError> {
+    run_graph_threaded_inner(
+        graph,
+        &clock,
+        link_capacity,
+        None,
+        None,
+        None,
+        None,
+        Some(clock.clone()),
+        spawner,
+    )
+    .await
 }
 
 /// As [`run_graph_threaded`], but publishes playback progress (the thread-per-arm
@@ -2062,6 +2092,7 @@ pub async fn run_graph_threaded_with_progress<Clk: PipelineClock, S: GraphSpawne
         None,
         None,
         Some(progress),
+        None,
         None,
         spawner,
     )
@@ -2089,6 +2120,7 @@ pub async fn run_graph_threaded_observed<Clk: PipelineClock, S: GraphSpawner>(
         None,
         None,
         Some(observer),
+        None,
         spawner,
     )
     .await
@@ -3830,6 +3862,56 @@ async fn muxer_arm_pts<'a>(
             // Flush / Segment are not part of the muxer-input contract here.
             _ => {}
         }
+    }
+}
+
+/// Owning-ticker shim for the thread-per-arm runner (M879): both fan-in arms take
+/// their ticker as a borrow, but a builder closure that crosses onto a worker
+/// thread must own everything it carries. This future owns the shared clock for its
+/// whole life and lends it to the arm it drives, so the arms' signatures stay as
+/// the cooperative runner needs them. `pts_ordered` picks the arm, the same choice
+/// the cooperative path makes at the call site.
+#[cfg(all(feature = "std", feature = "multi-thread"))]
+#[allow(clippy::too_many_arguments)]
+async fn muxer_arm_owned_tick(
+    pts_ordered: bool,
+    mux: Box<dyn DynMultiInputElement>,
+    pad_rxs: Vec<(usize, Receiver<PipelinePacket>)>,
+    out_tx: LinkSender,
+    input_count: usize,
+    current_output: Caps,
+    beta: MuxBeta,
+    arm_rx: Receiver<ArmDirective>,
+    probe: Probe,
+    ticker: Option<alloc::sync::Arc<dyn DynAsyncClock + Send + Sync>>,
+) -> Result<u64, G2gError> {
+    let tick: Option<&dyn DynAsyncClock> = ticker.as_deref().map(|c| c as &dyn DynAsyncClock);
+    if pts_ordered {
+        muxer_arm_pts(
+            mux,
+            pad_rxs,
+            out_tx,
+            input_count,
+            current_output,
+            beta,
+            arm_rx,
+            probe,
+            tick,
+        )
+        .await
+    } else {
+        muxer_arm(
+            mux,
+            pad_rxs,
+            out_tx,
+            input_count,
+            current_output,
+            beta,
+            arm_rx,
+            probe,
+            tick,
+        )
+        .await
     }
 }
 

@@ -48,6 +48,16 @@ impl<T: AsyncClock> DynAsyncClock for T {
     }
 }
 
+/// A shared clock is a clock, so an `Arc<dyn DynAsyncClock + Send + Sync>` can also
+/// be handed to an API taking `&dyn PipelineClock` (the threaded runner's ticked
+/// entry does exactly that). Upcasting one trait object to its supertrait needs a
+/// newer compiler than the MSRV, so the shared handle carries the supertrait itself.
+impl<T: PipelineClock + ?Sized> PipelineClock for Arc<T> {
+    fn now_ns(&self) -> u64 {
+        (**self).now_ns()
+    }
+}
+
 /// The process-wide monotonic wall clock ([`monotonic_ns`](crate::metrics::monotonic_ns)),
 /// as a shareable [`PipelineClock`]. This is the natural reference clock a
 /// [`DriftClock`] projects and the fallback timeline a display sink paces to;

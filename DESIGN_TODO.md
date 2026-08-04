@@ -512,8 +512,6 @@ _(No open parser items.)_
 ## Compositor
 
 - `wgpucompositor`: planar YUV.
-- Deliver the arm's deadline tick under the threaded runner (its arm builders
-  are `Send + 'static`, so the ticker must be owned, not borrowed).
 
 ## Metadata (FrameMeta / AnalyticsMeta)
 

@@ -5,9 +5,10 @@
 //! its own cadence (zero-order-hold over the stalled pad) instead of freezing
 //! with the input. An element that declares no interval never sees one.
 //!
-//! Three entry points deliver it, over the same fixtures: `run_muxer_sink_ticked`
-//! (M875), `run_graph_ticked` on a hand-built graph, and the PTS-ordered muxer arm
-//! a fan-in opts into with `input_pts_ordered` (both M877).
+//! Several entry points deliver it, over the same fixtures: `run_muxer_sink_ticked`
+//! (M875), `run_graph_ticked` on a hand-built graph, the PTS-ordered muxer arm a
+//! fan-in opts into with `input_pts_ordered` (both M877), and
+//! `run_graph_threaded_ticked`, where each arm runs on its own OS thread (M879).
 //!
 //! Time is mocked, so the tests are deterministic and finish in microseconds
 //! instead of sleeping on real timers: one clock jumps virtual time to the sleep
@@ -32,6 +33,11 @@ use g2g_core::{
 };
 
 const TICK_NS: u64 = 33_000_000;
+
+/// Spin bound for the fixtures that wait on a tick count: a runner that never ticks
+/// ends the run and fails an assertion instead of hanging. Generous because the
+/// threaded run's waiting source races real thread startup, not just a sibling task.
+const MAX_SPINS: usize = 200_000;
 
 fn caps() -> Caps {
     Caps::RawVideo {
@@ -211,10 +217,8 @@ impl SourceLoop for StallSrc {
 
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
         Box::pin(async move {
-            // Bounded: a runner that never ticks then ends the run and fails the
-            // assertion instead of stalling the test forever.
             let mut spins = 0;
-            while self.ticks.load(Ordering::Acquire) < self.stall_until_ticks && spins < 10_000 {
+            while self.ticks.load(Ordering::Acquire) < self.stall_until_ticks && spins < MAX_SPINS {
                 yield_once().await;
                 spins += 1;
             }
@@ -258,9 +262,8 @@ impl SourceLoop for HoldSrc {
             for &seq in self.seqs {
                 out.push(frame(seq)).await?;
             }
-            // Bounded, as in `StallSrc`: a runner that never ticks ends the run.
             let mut spins = 0;
-            while self.ticks.load(Ordering::Acquire) < self.hold_until_ticks && spins < 10_000 {
+            while self.ticks.load(Ordering::Acquire) < self.hold_until_ticks && spins < MAX_SPINS {
                 yield_once().await;
                 spins += 1;
             }
@@ -611,4 +614,91 @@ fn the_pts_ordered_arm_ticks_while_it_holds_frames_back() {
         fired as u64 + 3,
         "one ZOH frame per tick plus the three input frames reached the sink"
     );
+}
+
+/// M879: the same fixtures under the thread-per-arm runner, which owns its elements
+/// (each arm moves onto its own OS thread), so the frame count comes from the run
+/// stats rather than from a borrowed sink. Reports the ticks the mux saw, the frames
+/// the sink consumed, and the virtual time the arm slept away.
+#[cfg(feature = "multi-thread")]
+fn threaded_stalled_run(
+    interval_ns: Option<u64>,
+    pts_ordered: bool,
+    stall_until_ticks: usize,
+) -> (usize, u64, u64) {
+    use g2g_core::runtime::{run_graph_threaded_ticked, GraphNode, ThreadSpawner};
+    use g2g_core::DynAsyncClock;
+
+    let clock: Arc<dyn DynAsyncClock + Send + Sync> = Arc::new(VirtualClock::default());
+    let ticks = Arc::new(AtomicUsize::new(0));
+    let mut mux = ZohMux::new(1, interval_ns, ticks.clone());
+    if pts_ordered {
+        mux = mux.pts_ordered();
+    }
+
+    let mut g: Graph<GraphNode> = Graph::new();
+    let mux_node = g.add_muxer(GraphNode::muxer(mux), 1);
+    let s = g.add_source(GraphNode::source(StallSrc {
+        ticks: ticks.clone(),
+        stall_until_ticks,
+    }));
+    let k = g.add_sink(GraphNode::element(CountSink::default()));
+    g.link(s, mux_node.input(0)).expect("link source to pad 0");
+    g.link(mux_node.output(), k)
+        .expect("link merged output to sink");
+    let stats = block_on(run_graph_threaded_ticked(
+        g,
+        clock.clone(),
+        2,
+        &ThreadSpawner,
+    ))
+    .expect("ticked threaded graph run");
+
+    (
+        ticks.load(Ordering::Acquire),
+        stats.frames_consumed,
+        clock.now_ns(),
+    )
+}
+
+#[cfg(feature = "multi-thread")]
+#[test]
+fn the_threaded_runner_ticks_both_fan_in_arms() {
+    for pts_ordered in [false, true] {
+        let (fired, frames, now_ns) = threaded_stalled_run(Some(TICK_NS), pts_ordered, 3);
+        assert!(
+            fired >= 3,
+            "the threaded runner must tick the fan-in while its only input stalls, \
+             got {fired} (pts_ordered={pts_ordered})"
+        );
+        assert_eq!(
+            frames,
+            fired as u64 + 1,
+            "the ZOH frames plus the input frame reached the sink (pts_ordered={pts_ordered})"
+        );
+        assert!(
+            now_ns >= 3 * TICK_NS,
+            "each tick advanced the deadline by one period (pts_ordered={pts_ordered})"
+        );
+    }
+}
+
+#[cfg(feature = "multi-thread")]
+#[test]
+fn the_threaded_runner_never_ticks_without_an_interval() {
+    for pts_ordered in [false, true] {
+        let (fired, frames, now_ns) = threaded_stalled_run(None, pts_ordered, 0);
+        assert_eq!(
+            fired, 0,
+            "no interval declared, so no Tick (pts_ordered={pts_ordered})"
+        );
+        assert_eq!(
+            frames, 1,
+            "only the input's own frame reached the sink (pts_ordered={pts_ordered})"
+        );
+        assert_eq!(
+            now_ns, 0,
+            "nothing slept on the clock (pts_ordered={pts_ordered})"
+        );
+    }
 }
