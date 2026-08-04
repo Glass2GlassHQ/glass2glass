@@ -186,6 +186,98 @@ fn textoverlay_color_packs_argb() {
     assert_eq!(e.get_property("color"), Some(PropValue::Uint(0xFFFF_0000)));
 }
 
+/// The shared placement / styling half of both timestamp overlays, plus
+/// `timeoverlay`'s own `time-mode`.
+#[test]
+fn timeoverlay_time_mode_and_placement() {
+    use g2g_plugins::timeoverlay::TimeOverlay;
+    let mut e = TimeOverlay::new();
+    for name in [
+        "time-mode",
+        "scale",
+        "halignment",
+        "valignment",
+        "xpad",
+        "ypad",
+        "color",
+        "shaded-background",
+    ] {
+        assert!(declares(e.properties(), name), "{name} is declared");
+    }
+
+    e.set_property("time-mode", PropValue::Str("elapsed-running-time".into()))
+        .unwrap();
+    assert_eq!(
+        e.get_property("time-mode"),
+        Some(PropValue::Str("elapsed-running-time".into()))
+    );
+    // `time-code` / `reference-timestamp` need frame-meta g2g has no producer
+    // for, so they are not accepted rather than silently drawing something else.
+    assert!(e
+        .set_property("time-mode", PropValue::Str("time-code".into()))
+        .is_err());
+
+    e.set_property("halignment", PropValue::Str("right".into()))
+        .unwrap();
+    e.set_property("valignment", PropValue::Str("bottom".into()))
+        .unwrap();
+    e.set_property("xpad", PropValue::Uint(12)).unwrap();
+    e.set_property("ypad", PropValue::Uint(4)).unwrap();
+    e.set_property("shaded-background", PropValue::Bool(false))
+        .unwrap();
+    // 0xAARRGGBB, the textoverlay `color` packing: opaque green.
+    e.set_property("color", PropValue::Uint(0xFF00_FF00))
+        .unwrap();
+    assert_eq!(
+        e.get_property("halignment"),
+        Some(PropValue::Str("right".into()))
+    );
+    assert_eq!(
+        e.get_property("valignment"),
+        Some(PropValue::Str("bottom".into()))
+    );
+    assert_eq!(e.get_property("xpad"), Some(PropValue::Uint(12)));
+    assert_eq!(e.get_property("ypad"), Some(PropValue::Uint(4)));
+    assert_eq!(
+        e.get_property("shaded-background"),
+        Some(PropValue::Bool(false))
+    );
+    assert_eq!(e.get_property("color"), Some(PropValue::Uint(0xFF00_FF00)));
+
+    // Alignments g2g does not implement, and a zero magnification, are rejected.
+    assert!(e
+        .set_property("valignment", PropValue::Str("baseline".into()))
+        .is_err());
+    assert!(e.set_property("scale", PropValue::Uint(0)).is_err());
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn clockoverlay_time_format() {
+    use g2g_plugins::clockoverlay::ClockOverlay;
+    let mut e = ClockOverlay::new();
+    assert!(declares(e.properties(), "time-format"));
+    assert_eq!(
+        e.get_property("time-format"),
+        Some(PropValue::Str("%H:%M:%S".into())),
+        "gst's default clock format"
+    );
+    e.set_property("time-format", PropValue::Str("%F %T".into()))
+        .unwrap();
+    assert_eq!(
+        e.get_property("time-format"),
+        Some(PropValue::Str("%F %T".into()))
+    );
+    // The styling half is shared with timeoverlay.
+    assert!(declares(e.properties(), "halignment"));
+    e.set_property("halignment", PropValue::Str("center".into()))
+        .unwrap();
+    assert_eq!(
+        e.get_property("halignment"),
+        Some(PropValue::Str("center".into()))
+    );
+}
+
 #[cfg(feature = "udp-ingress")]
 #[test]
 fn udpsrc_address_and_port() {

@@ -57,6 +57,22 @@ impl AsyncClock for WallClock {
     }
 }
 
+/// Time of day as a [`PipelineClock`]: `now_ns` is nanoseconds since the UNIX
+/// epoch, not a pipeline-relative timeline. Only for elements that display or
+/// stamp civil time (`clockoverlay`); never hand it to the runner as the
+/// pipeline clock, which needs a monotonic source ([`WallClock`]).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct UnixEpochClock;
+
+impl PipelineClock for UnixEpochClock {
+    fn now_ns(&self) -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos().try_into().unwrap_or(u64::MAX))
+            .unwrap_or(0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

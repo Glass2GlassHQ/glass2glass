@@ -23,8 +23,9 @@ pub(crate) fn xml_escape(s: &str) -> String {
 }
 
 /// civil_from_days (Howard Hinnant): days since 1970-01-01 -> (year, month,
-/// day), so no chrono dependency is needed.
-fn civil(secs: u64) -> (i64, i64, i64, u64, u64, u64) {
+/// day), so no chrono dependency is needed. Also the calendar half of
+/// `clockoverlay`'s strftime rendering.
+pub(crate) fn civil(secs: u64) -> (i64, i64, i64, u64, u64, u64) {
     let days = (secs / 86_400) as i64;
     let tod = secs % 86_400;
     let (hh, mm, ss) = (tod / 3_600, (tod % 3_600) / 60, tod % 60);
