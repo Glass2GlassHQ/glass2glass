@@ -333,8 +333,11 @@ fn gst_plays_playlist(playlist: &str) {
         .args(["video-sink=fakesink", "audio-sink=fakesink"])
         .output()
         .expect("run gst-launch-1.0");
-    let log =
-        String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
+    let log = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(
         out.status.success() && log.contains("Got EOS") && !log.contains("ERROR"),
         "gst-launch played {playlist}:\n{log}"
