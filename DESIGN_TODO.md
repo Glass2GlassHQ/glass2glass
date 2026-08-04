@@ -399,9 +399,8 @@ Phased plan:
 - **FLV:** Speex decode (carriage lands M831; no Speex encoder exists anywhere
   to build a validated decode vector, and gst's header-in-tag layout is
   rejected by libavcodec, so wiring a decoder would be an unvalidated claim).
-- **CMAF / fMP4:** a multi-pad chunked `Mp4MuxN` test (chunk state is per-track,
-  only single-pad is exercised); client-side `@availabilityTimeOffset` early
-  availability in `DashSrc`.
+- **CMAF / fMP4:** client-side `@availabilityTimeOffset` early availability in
+  `DashSrc`.
 
 ## Codecs
 
