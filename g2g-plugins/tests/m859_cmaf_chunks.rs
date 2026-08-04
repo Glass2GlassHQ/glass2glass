@@ -424,12 +424,12 @@ fn aac_pts_ns(i: usize) -> u64 {
     i as u64 * AAC_AU_SAMPLES * 1_000_000_000 / AUDIO_RATE as u64
 }
 
+/// One pad's feed: its caps and the access units (payload, timing) to deliver.
+type PadFeed = (Caps, Vec<(Vec<u8>, FrameTiming)>);
+
 /// Drive `m` with one access-unit list per pad, released in ascending PTS order
 /// across pads (what an upstream A/V graph delivers), then end every pad.
-async fn mux_n_interleaved(
-    m: Mp4MuxN,
-    pads: &[(Caps, Vec<(Vec<u8>, FrameTiming)>)],
-) -> (Vec<u8>, usize) {
+async fn mux_n_interleaved(m: Mp4MuxN, pads: &[PadFeed]) -> (Vec<u8>, usize) {
     let mut m = m;
     for (pad, (caps, _)) in pads.iter().enumerate() {
         m.configure_pipeline(pad, caps).expect("configure");
