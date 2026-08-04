@@ -2600,6 +2600,18 @@ guard the latency moat's hot paths: the caps algebra + linear / DAG solvers
 paces to PTS so it is unsuitable for a microbench). `cargo xtask bench` drives
 them by manifest path, passing criterion args through (e.g. `--save-baseline`).
 
+`tools/pushtax-bench.sh` (M870) prices the push model against GStreamer's pull
+on batch demux: the same `filesrc ! tsdemux ! h264parse ! fakesink` line through
+`g2g-launch` (release) and `gst-launch-1.0` over an ffmpeg-authored 60 s 1080p30
+TS, five interleaved timed runs each, results appended per iteration. Measured
+on the dev host: 176 vs 1175 MB/s (6.7x). The script prints the g2g per-element
+attribution under the ratio because the gap is element CPU, not transport:
+`TsDemux` (0.26 ms p50 x 1414 chunks) and `NalParse` (0.13 ms p50 x 1800 AUs)
+account for essentially the whole wall clock on the single-thread executor, so
+the per-chunk channel / wakeup / boxed-future residual is small and a pull mode
+would not close the gap; demux/parse throughput would. `benches/runner.rs`
+already prices the bare channel.
+
 A dedicated `bench` workflow (separate from the main CI, so criterion never
 slows the check / test / clippy jobs) runs on PRs that touch the benched crates:
 it benches the PR head and its base and fails if any benchmark's mean regressed

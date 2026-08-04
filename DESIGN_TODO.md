@@ -701,11 +701,6 @@ Outstanding developer-tooling tasks, highest leverage first.
   output (checksum, PSNR for lossy). Calliope already does differential output
   QA in its own repo, so decide first whether this lives there (adding the
   caps / topology diff) or in-repo; don't build both.
-- **Push-tax benchmark vs GStreamer pull.** Batch-demux throughput of
-  `filesrc ! tsdemux ! h264parse ! fakesink` against the same gst-launch line
-  (which runs it in pull mode), to put a number on the per-chunk channel /
-  wakeup / boxed-future cost. Decides whether a pull mode is ever worth its
-  second per-demuxer code path.
 - Longer tail: a live pipeline TUI (a ratatui consumer of the same telemetry
   tap); a codec golden-fixture / PSNR conformance harness.
 
