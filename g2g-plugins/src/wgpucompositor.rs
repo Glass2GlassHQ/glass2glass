@@ -4,10 +4,22 @@
 //! (position, z-order, per-pad alpha, optional bilinear resize) and the same
 //! latest-wins overlay cadence; only the pixel work moves to a compute shader.
 //!
-//! RGBA8 only (the planar YUV mixing stays on the CPU element). Input frames
-//! arrive in system memory and are uploaded into one packed storage buffer; an
-//! overlay is re-uploaded only when a new frame lands, so a slow overlay costs
-//! nothing per output frame.
+//! RGBA8 only (the planar YUV mixing stays on the CPU element). A system-memory
+//! frame is uploaded into one packed storage buffer, and re-uploaded only when a
+//! new frame lands, so a slow overlay costs nothing per output frame. A
+//! [`MemoryDomain::WgpuTexture`] frame (M874) is instead bound as a sampled
+//! texture and composited where it already is: no download, no upload, no copy.
+//! Pads mix freely, and texture inputs with
+//! [`with_gpu_output`](WgpuCompositor::with_gpu_output) keep the whole composite
+//! on the device. An input texture must be `Rgba8Unorm`, bindable, and created on
+//! the compositor's own device: a GPU producer shares that device through
+//! [`with_context`](WgpuCompositor::with_context), the same convention
+//! [`WgpuSink`](crate::wgpusink) uses, and a foreign-device texture is a loud
+//! wgpu validation failure rather than a silent copy back through memory.
+//!
+//! The compositing shader is generated per device build, since the number of
+//! texture pads decides its bindings; a pad switching between bytes and a texture
+//! rebuilds the device state.
 //!
 //! **One dispatch per output frame.** Every pad is bound at once and each
 //! invocation walks them in paint order for its own output pixel, so ordered
@@ -18,7 +30,9 @@
 //! (`paint::blend_px`) and the Q16 bilinear mapping in `u32`/`i32`, not float,
 //! so a GPU frame matches [`Compositor::compose`](crate::compositor::Compositor)
 //! byte for byte. The fixed-point mapping stays inside `u32` for dimensions up
-//! to [`MAX_DIM`], which `configure_pipeline` enforces.
+//! to [`MAX_DIM`], which `configure_pipeline` enforces. A bound texture enters
+//! that arithmetic through `textureLoad` (never a sampler), whose unorm texels
+//! round back to the same 8-bit integers a packed pad carries.
 //!
 //! Output is [`MemoryDomain::System`] by default (feeds any CPU sink); with
 //! [`with_gpu_output`](WgpuCompositor::with_gpu_output) the composite stays on
@@ -31,12 +45,14 @@ use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
+use alloc::format;
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::compositor::{paint_order, CompositorPad, CompositorState};
-use crate::gpu::{gpu_err, GpuContext, WgpuTextureKeepAlive};
+use crate::gpu::{gpu_err, texture_of, GpuContext, WgpuTextureKeepAlive};
 use g2g_core::frame::Frame;
 use g2g_core::memory::{OwnedWgpuTexture, SystemSlice};
 use g2g_core::{
@@ -50,10 +66,17 @@ pub const MAX_DIM: u32 = 16384;
 
 const WORKGROUP: u32 = 8;
 
-/// Compositing compute shader. `pads` arrives pre-sorted in paint order and
-/// carries each input's placement plus its offset into the packed `src` buffer;
-/// one invocation owns one output pixel and blends every pad covering it.
-const SHADER: &str = r#"
+/// `u32`s per `Pad` in the pads buffer, matching the WGSL struct.
+const PAD_WORDS: usize = 9;
+
+/// First bind-group slot for a texture pad; 0..=3 are the buffers.
+const TEX_BINDING_BASE: u32 = 4;
+
+/// Head of the compositing compute shader: the bindings every dispatch has and
+/// the integer arithmetic shared with the CPU compositor. `pads` arrives
+/// pre-sorted in paint order and carries each input's placement, its offset into
+/// the packed `src` buffer and which source it reads.
+const SHADER_HEAD: &str = r#"
 struct Params {
     out_w: u32,
     out_h: u32,
@@ -74,6 +97,8 @@ struct Pad {
     sh: u32,
     alpha: u32,
     off: u32,
+    // 0 reads the packed src buffer, else the (1-based) texture binding.
+    src_kind: u32,
 };
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -108,6 +133,19 @@ fn map_q16(d: u32, s: u32, dst: u32, hi: i32) -> i32 {
     let q = (n / dst) * 32768u + ((n % dst) * 32768u) / dst;
     return clamp(i32(q) - 32768, 0, hi);
 }
+"#;
+
+/// Tail of the compositing shader, after the generated texture bindings and
+/// their `load_tex`: one source fetch that both the 1:1 and the resized path go
+/// through, so a pad's pixels come from the packed buffer or its bound texture
+/// with identical arithmetic downstream.
+const SHADER_TAIL: &str = r#"
+fn fetch(p: Pad, x: u32, y: u32) -> vec4<u32> {
+    if (p.src_kind == 0u) {
+        return unpack(src[p.off + y * p.sw + x]);
+    }
+    return load_tex(p.src_kind, vec2<i32>(i32(x), i32(y)));
+}
 
 fn sample_scaled(p: Pad, dx: u32, dy: u32) -> vec4<u32> {
     let fx = map_q16(dx, p.sw, p.dw, i32((p.sw - 1u) << 16u));
@@ -118,10 +156,10 @@ fn sample_scaled(p: Pad, dx: u32, dy: u32) -> vec4<u32> {
     let y1 = min(y0 + 1u, p.sh - 1u);
     let tx = u32((fx >> 8) & 0xff);
     let ty = u32((fy >> 8) & 0xff);
-    let s00 = unpack(src[p.off + y0 * p.sw + x0]);
-    let s01 = unpack(src[p.off + y0 * p.sw + x1]);
-    let s10 = unpack(src[p.off + y1 * p.sw + x0]);
-    let s11 = unpack(src[p.off + y1 * p.sw + x1]);
+    let s00 = fetch(p, x0, y0);
+    let s01 = fetch(p, x1, y0);
+    let s10 = fetch(p, x0, y1);
+    let s11 = fetch(p, x1, y1);
     let top = s00 * (256u - tx) + s01 * tx;
     let bot = s10 * (256u - tx) + s11 * tx;
     return (top * (256u - ty) + bot * ty) >> vec4<u32>(16u);
@@ -142,7 +180,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
         var px: vec4<u32>;
         if (p.dw == p.sw && p.dh == p.sh) {
-            px = unpack(src[p.off + u32(dy) * p.sw + u32(dx)]);
+            px = fetch(p, u32(dx), u32(dy));
         } else {
             px = sample_scaled(p, u32(dx), u32(dy));
         }
@@ -152,8 +190,54 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
+/// The shader for `tex_count` texture pads: one `texture_2d<f32>` binding each,
+/// and a `load_tex` switch over them (a fixed binding per pad, no binding_array,
+/// so the base wgpu feature set is enough). `textureLoad` never samples: it
+/// returns the texel's unorm floats, and rounding them back to 0..=255 recovers
+/// the exact 8-bit integers the shared blend arithmetic works in, keeping a
+/// texture pad bit-exact with the CPU compositor.
+fn shader_source(tex_count: usize) -> String {
+    let mut s = String::from(SHADER_HEAD);
+    for slot in 0..tex_count {
+        let binding = TEX_BINDING_BASE + slot as u32;
+        s += &format!("@group(0) @binding({binding}) var tex{slot}: texture_2d<f32>;\n");
+    }
+    s += "\nfn load_tex(kind: u32, xy: vec2<i32>) -> vec4<u32> {\n";
+    s += "    var v = vec4<f32>(0.0);\n    switch kind {\n";
+    for slot in 0..tex_count {
+        let kind = slot + 1;
+        s += &format!("        case {kind}u: {{ v = textureLoad(tex{slot}, xy, 0); }}\n");
+    }
+    s += "        default: {}\n    }\n    return vec4<u32>(round(v * 255.0));\n}\n";
+    s += SHADER_TAIL;
+    s
+}
+
+/// One input's pixels as the compositor cached them: system-memory bytes to
+/// upload into the packed source buffer, or a producer's texture bound and
+/// sampled where it already is, never copied.
+#[derive(Debug)]
+enum Source {
+    Bytes(Box<[u8]>),
+    Texture(OwnedWgpuTexture),
+}
+
+impl Source {
+    fn is_texture(&self) -> bool {
+        matches!(self, Self::Texture(_))
+    }
+
+    fn texture(&self) -> Option<&wgpu::Texture> {
+        match self {
+            Self::Texture(owned) => texture_of(owned),
+            Self::Bytes(_) => None,
+        }
+    }
+}
+
 /// One pad as the shader reads it: placement on the canvas, source geometry, and
-/// where that input's pixels start in the packed source buffer.
+/// where its pixels come from (the packed buffer at `off`, or the texture
+/// binding `src_kind` selects).
 #[derive(Debug, Clone, Copy)]
 struct GpuPad {
     x0: i32,
@@ -164,26 +248,102 @@ struct GpuPad {
     sh: u32,
     alpha: u32,
     off: u32,
+    src_kind: u32,
 }
 
-/// Device resources sized to the current input geometry. Rebuilt when an input's
-/// geometry changes (the packed source layout is derived from it).
+impl GpuPad {
+    /// The pad as the shader's `Pad` struct, field order included.
+    fn words(&self) -> [u32; PAD_WORDS] {
+        [
+            self.x0 as u32,
+            self.y0 as u32,
+            self.dw,
+            self.dh,
+            self.sw,
+            self.sh,
+            self.alpha,
+            self.off,
+            self.src_kind,
+        ]
+    }
+}
+
+/// Device resources sized to the current input geometry and source kinds.
+/// Rebuilt when an input's geometry changes (the packed source layout is derived
+/// from it) or when a pad switches between bytes and a texture (so are the
+/// layout and the shader).
 #[derive(Debug)]
 struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
     pipeline: wgpu::ComputePipeline,
+    /// Kept to rebuild the bind group when a texture pad's handle changes.
+    layout: wgpu::BindGroupLayout,
+    /// The group as built with this device: usable as-is while no pad is a
+    /// texture, otherwise a starting point rebuilt per dispatch.
     bind_group: wgpu::BindGroup,
     src_buf: wgpu::Buffer,
     pads_buf: wgpu::Buffer,
     params_buf: wgpu::Buffer,
     out_buf: wgpu::Buffer,
     staging: wgpu::Buffer,
-    /// Byte offset of each input's pixels in `src_buf`.
+    /// Byte offset of each input's pixels in `src_buf`. A texture input gets a
+    /// zero-sized slot: its pixels are never packed there.
     offsets: Vec<usize>,
+    /// Inputs bound as textures, in binding order: a pad's position here + 1 is
+    /// its `src_kind`, and [`TEX_BINDING_BASE`] + position its binding.
+    tex_inputs: Vec<usize>,
+    /// Stands in for a texture pad with nothing cached yet (pre-first-frame or
+    /// post-flush), so every declared binding has a texture. Never sampled: such
+    /// a pad is left out of the paint list.
+    dummy_tex: wgpu::Texture,
     /// Row pitch of `out_buf`, padded to the 256-byte alignment a
     /// buffer -> texture copy requires.
     row_bytes: usize,
+}
+
+impl Gpu {
+    /// Views for each texture pad's binding, in `tex_inputs` order.
+    fn texture_views(&self, sources: &[Option<&Source>]) -> Vec<wgpu::TextureView> {
+        self.tex_inputs
+            .iter()
+            .map(|&i| {
+                let tex = sources[i]
+                    .and_then(Source::texture)
+                    .unwrap_or(&self.dummy_tex);
+                tex.create_view(&Default::default())
+            })
+            .collect()
+    }
+}
+
+/// Bind the four fixed buffers plus one texture view per texture pad. The pads
+/// buffer is bound whole; `pad_count` keeps the shader off any stale tail.
+fn build_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    bufs: [&wgpu::Buffer; 4],
+    views: &[wgpu::TextureView],
+) -> wgpu::BindGroup {
+    let mut entries: Vec<wgpu::BindGroupEntry> = bufs
+        .iter()
+        .enumerate()
+        .map(|(i, buf)| wgpu::BindGroupEntry {
+            binding: i as u32,
+            resource: buf.as_entire_binding(),
+        })
+        .collect();
+    for (slot, view) in views.iter().enumerate() {
+        entries.push(wgpu::BindGroupEntry {
+            binding: TEX_BINDING_BASE + slot as u32,
+            resource: wgpu::BindingResource::TextureView(view),
+        });
+    }
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("compositor-binding"),
+        layout,
+        entries: &entries,
+    })
 }
 
 /// GPU compositor: N RGBA8 inputs blended into one canvas by a compute shader.
@@ -195,10 +355,16 @@ pub struct WgpuCompositor {
     pads: Vec<CompositorPad>,
     /// Same latest-wins cadence as the CPU compositor: input 0 queues and
     /// releases one output frame each, every other input keeps only its newest.
-    state: CompositorState,
+    /// Caches either system-memory bytes or a texture, per input.
+    state: CompositorState<Source>,
     /// Inputs whose cached bytes are already in `src_buf`, so an overlay that
-    /// has not moved is not re-uploaded per output frame.
+    /// has not moved is not re-uploaded per output frame. Bytes pads only: a
+    /// texture pad is bound, never uploaded.
     uploaded: Vec<bool>,
+    /// Inputs delivering textures rather than bytes, as observed from their
+    /// frames. Both the generated shader and the packed source layout derive
+    /// from this, so a pad switching kind rebuilds the device state.
+    textures: Vec<bool>,
     background: [u8; 4],
     ctx: Option<GpuContext>,
     gpu: Option<Gpu>,
@@ -218,6 +384,7 @@ impl WgpuCompositor {
             pads,
             state: CompositorState::new(n),
             uploaded: vec![false; n],
+            textures: vec![false; n],
             background: [0, 0, 0, 255],
             ctx: None,
             gpu: None,
@@ -294,15 +461,20 @@ impl WgpuCompositor {
     }
 
     fn build_gpu(&self, device: wgpu::Device, queue: wgpu::Queue) -> Result<Gpu, G2gError> {
-        // Pack the inputs back to back; an unconfigured input still gets a slot
-        // (zero-sized), so offsets stay indexed by input number.
+        // Pack the inputs back to back; an unconfigured input, and one bound as
+        // a texture, still gets a (zero-sized) slot, so offsets stay indexed by
+        // input number.
         let mut offsets = Vec::with_capacity(self.pads.len());
         let mut total = 0usize;
         for i in 0..self.pads.len() {
             offsets.push(total);
-            let (w, h) = self.state.geometry(i).unwrap_or((0, 0));
+            let (w, h) = match self.textures[i] {
+                true => (0, 0),
+                false => self.state.geometry(i).unwrap_or((0, 0)),
+            };
             total += w as usize * h as usize * 4;
         }
+        let tex_inputs: Vec<usize> = (0..self.pads.len()).filter(|&i| self.textures[i]).collect();
         let row_bytes = (self.out_w as usize * 4).div_ceil(256) * 256;
         let out_bytes = row_bytes * self.out_h as usize;
 
@@ -315,7 +487,7 @@ impl WgpuCompositor {
         });
         let pads_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("compositor-pads"),
-            size: (self.pads.len() * core::mem::size_of::<GpuPad>()) as u64,
+            size: (self.pads.len() * PAD_WORDS * 4) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -338,9 +510,24 @@ impl WgpuCompositor {
             mapped_at_creation: false,
         });
 
+        let dummy_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("compositor-unbound-pad"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("compositor-blend"),
-            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(shader_source(tex_inputs.len()).into()),
         });
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("compositor-blend"),
@@ -351,32 +538,23 @@ impl WgpuCompositor {
             cache: None,
         });
         let layout = pipeline.get_bind_group_layout(0);
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("compositor-binding"),
-            layout: &layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: params_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: pads_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: src_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: out_buf.as_entire_binding(),
-                },
-            ],
-        });
+        // Every texture pad starts on the dummy; the first dispatch rebinds it to
+        // whatever frame it has cached by then.
+        let dummy_views: Vec<wgpu::TextureView> = tex_inputs
+            .iter()
+            .map(|_| dummy_tex.create_view(&Default::default()))
+            .collect();
+        let bind_group = build_bind_group(
+            &device,
+            &layout,
+            [&params_buf, &pads_buf, &src_buf, &out_buf],
+            &dummy_views,
+        );
         Ok(Gpu {
             device,
             queue,
             pipeline,
+            layout,
             bind_group,
             src_buf,
             pads_buf,
@@ -384,13 +562,15 @@ impl WgpuCompositor {
             out_buf,
             staging,
             offsets,
+            tex_inputs,
+            dummy_tex,
             row_bytes,
         })
     }
 
     /// The pads the shader should walk, in paint order: only inputs that are
     /// configured, non-degenerate, and have pixels available.
-    fn gpu_pads(&self, offsets: &[usize]) -> Vec<GpuPad> {
+    fn gpu_pads(&self, gpu: &Gpu) -> Vec<GpuPad> {
         let mut out = Vec::with_capacity(self.pads.len());
         for i in paint_order(&self.pads) {
             let Some((sw, sh)) = self.state.geometry(i) else {
@@ -416,7 +596,12 @@ impl WgpuCompositor {
                 sw,
                 sh,
                 alpha: pad.alpha as u32,
-                off: (offsets[i] / 4) as u32,
+                off: (gpu.offsets[i] / 4) as u32,
+                // A texture pad reads its own binding, the rest the packed buffer.
+                src_kind: match gpu.tex_inputs.iter().position(|&t| t == i) {
+                    Some(slot) => slot as u32 + 1,
+                    None => 0,
+                },
             });
         }
         out
@@ -424,53 +609,49 @@ impl WgpuCompositor {
 
     /// Upload whatever changed and run one compositing dispatch. `base0` is the
     /// input-0 frame currently driving output; overlays come from their cached
-    /// latest bytes and are uploaded only when newer than the device copy.
-    fn dispatch(&mut self, base0: &[u8]) -> Result<(), G2gError> {
+    /// latest pixels, bytes uploaded only when newer than the device copy and
+    /// textures bound where they are.
+    fn dispatch(&mut self, base0: &Source) -> Result<(), G2gError> {
         let gpu = self.gpu.as_ref().ok_or(G2gError::NotConfigured)?;
-        let pads = self.gpu_pads(&gpu.offsets);
+        let pads = self.gpu_pads(gpu);
+        // Each input's pixels for this output frame: input 0 drives it, the rest
+        // contribute their cached latest.
+        let sources: Vec<Option<&Source>> = (0..self.pads.len())
+            .map(|i| match i {
+                0 => Some(base0),
+                _ => self.state.latest(i).map(|(_, s)| s),
+            })
+            .collect();
 
         // Disjoint field borrows: the cached frames are read while `uploaded` is
         // updated.
-        let (state, uploaded) = (&self.state, &mut self.uploaded);
+        let uploaded = &mut self.uploaded;
         for (i, up) in uploaded.iter_mut().enumerate() {
-            let Some((w, h)) = state.geometry(i) else {
+            let Some((w, h)) = self.state.geometry(i) else {
                 continue;
             };
             let need = w as usize * h as usize * 4;
             if need == 0 {
                 continue;
             }
-            let src: &[u8] = if i == 0 {
-                base0
-            } else {
-                if *up {
-                    continue;
-                }
-                match state.latest(i) {
-                    Some((_, bytes)) => bytes,
-                    None => continue,
-                }
+            if i != 0 && *up {
+                continue;
+            }
+            // A texture pad is bound, not uploaded; there is nothing to pack.
+            let Some(Source::Bytes(bytes)) = sources[i] else {
+                continue;
             };
-            if src.len() < need {
+            if bytes.len() < need {
                 return Err(G2gError::CapsMismatch);
             }
             gpu.queue
-                .write_buffer(&gpu.src_buf, gpu.offsets[i] as u64, &src[..need]);
+                .write_buffer(&gpu.src_buf, gpu.offsets[i] as u64, &bytes[..need]);
             *up = true;
         }
 
-        let mut pad_bytes = Vec::with_capacity(self.pads.len() * 32);
+        let mut pad_bytes = Vec::with_capacity(pads.len() * PAD_WORDS * 4);
         for p in &pads {
-            for w in [
-                p.x0 as u32,
-                p.y0 as u32,
-                p.dw,
-                p.dh,
-                p.sw,
-                p.sh,
-                p.alpha,
-                p.off,
-            ] {
+            for w in p.words() {
                 pad_bytes.extend_from_slice(&w.to_le_bytes());
             }
         }
@@ -495,6 +676,19 @@ impl WgpuCompositor {
         }
         gpu.queue.write_buffer(&gpu.params_buf, 0, &params);
 
+        // A texture pad's handle changes with every frame it delivers, so the
+        // group is rebuilt around this frame's textures; with no texture pad the
+        // one built with the device stands.
+        let rebound = match gpu.tex_inputs.is_empty() {
+            true => None,
+            false => Some(build_bind_group(
+                &gpu.device,
+                &gpu.layout,
+                [&gpu.params_buf, &gpu.pads_buf, &gpu.src_buf, &gpu.out_buf],
+                &gpu.texture_views(&sources),
+            )),
+        };
+
         let mut encoder = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
@@ -504,7 +698,7 @@ impl WgpuCompositor {
                 timestamp_writes: None,
             });
             pass.set_pipeline(&gpu.pipeline);
-            pass.set_bind_group(0, &gpu.bind_group, &[]);
+            pass.set_bind_group(0, rebound.as_ref().unwrap_or(&gpu.bind_group), &[]);
             pass.dispatch_workgroups(
                 self.out_w.div_ceil(WORKGROUP),
                 self.out_h.div_ceil(WORKGROUP),
@@ -596,9 +790,40 @@ impl WgpuCompositor {
         Ok(texture)
     }
 
+    /// The pixels to cache for a delivered frame. A GPU texture is kept by
+    /// reference and composited where it lies (no copy, no upload); a
+    /// system-memory frame is copied out of its slice as before. Either way the
+    /// geometry must be the one negotiated for that input.
+    fn source_of(&self, domain: &MemoryDomain, w: u32, h: u32) -> Result<Source, G2gError> {
+        if let MemoryDomain::WgpuTexture(owned) = domain {
+            if (owned.width, owned.height) != (w, h) {
+                return Err(G2gError::CapsMismatch);
+            }
+            // A foreign producer's keep-alive holds a texture this element cannot
+            // reach, so it cannot be bound.
+            let tex = texture_of(owned).ok_or(G2gError::UnsupportedDomain)?;
+            // It is sampled in place: it must be bindable, and hold the RGBA8 the
+            // caps promise (the blend reads its texels as 8-bit integers).
+            if tex.format() != wgpu::TextureFormat::Rgba8Unorm
+                || !tex.usage().contains(wgpu::TextureUsages::TEXTURE_BINDING)
+            {
+                return Err(G2gError::CapsMismatch);
+            }
+            return Ok(Source::Texture(owned.clone()));
+        }
+        let Some(src) = domain.as_system_slice() else {
+            return Err(G2gError::UnsupportedDomain);
+        };
+        let need = w as usize * h as usize * 4;
+        if src.len() < need {
+            return Err(G2gError::CapsMismatch);
+        }
+        Ok(Source::Bytes(src[..need].into()))
+    }
+
     /// Composite `base0` and wrap the result as the next output frame, in
     /// whichever memory domain this compositor was built for.
-    fn compose_frame(&mut self, base0: &[u8], timing: FrameTiming) -> Result<Frame, G2gError> {
+    fn compose_frame(&mut self, base0: &Source, timing: FrameTiming) -> Result<Frame, G2gError> {
         self.dispatch(base0)?;
         let domain = if self.gpu_output {
             MemoryDomain::WgpuTexture(OwnedWgpuTexture::new(
@@ -673,18 +898,18 @@ impl MultiInputElement for WgpuCompositor {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
                     let (w, h) = self.state.geometry(input).ok_or(G2gError::NotConfigured)?;
-                    let Some(src) = frame.domain.as_system_slice() else {
-                        return Err(G2gError::UnsupportedDomain);
-                    };
-                    let need = w as usize * h as usize * 4;
-                    if src.len() < need {
-                        return Err(G2gError::CapsMismatch);
+                    let source = self.source_of(&frame.domain, w, h)?;
+                    // The shader text and the packed source layout both derive
+                    // from which pads are textures, so a switch rebuilds them.
+                    if self.textures[input] != source.is_texture() {
+                        self.textures[input] = source.is_texture();
+                        self.gpu = None;
                     }
-                    self.state.ingest(input, frame.timing, src[..need].into());
                     if input != 0 {
                         // The overlay's new bytes need re-uploading.
                         self.uploaded[input] = false;
                     }
+                    self.state.ingest(input, frame.timing, source);
 
                     while let Some((timing, base)) = self.state.take_due() {
                         self.ensure_gpu().await?;
@@ -728,7 +953,7 @@ impl MultiInputElement for WgpuCompositor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compositor::Compositor;
+    use crate::compositor::{Compositor, PENDING_CAP};
     use g2g_core::PushOutcome;
 
     /// One device for the whole test binary, built under a lock: opening several
@@ -876,6 +1101,115 @@ mod tests {
             .with_background(background)
             .with_context(ctx);
         let (_, frame) = run_gpu(gpu, geoms, frames).await;
+        let got = frame.domain.as_system_slice().unwrap().to_vec();
+        assert_eq!(got.len(), want.len(), "{what}: canvas size");
+        let bad = got
+            .iter()
+            .zip(want.iter())
+            .position(|(a, b)| a != b)
+            .map(|i| (i, got[i], want[i]));
+        assert!(bad.is_none(), "{what}: first mismatch {bad:?}");
+    }
+
+    /// An RGBA8 texture frame on `ctx`'s device: what a GPU producer sharing the
+    /// compositor's context hands over, composited without a copy.
+    fn texture_frame(ctx: &GpuContext, w: u32, h: u32, pixels: &[u8]) -> Frame {
+        let texture = ctx.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("test-input"),
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        ctx.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            pixels,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(w * 4),
+                rows_per_image: Some(h),
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+        );
+        Frame::new(
+            MemoryDomain::WgpuTexture(OwnedWgpuTexture::new(
+                w,
+                h,
+                Arc::new(WgpuTextureKeepAlive(texture)),
+            )),
+            FrameTiming::default(),
+            0,
+        )
+    }
+
+    /// Drive the GPU element to one composited frame, delivering input `i`'s
+    /// pixels as a texture when `tex[i]` and in system memory otherwise.
+    /// Overlays first, so priming completes before the input-0 frame.
+    async fn run_gpu_mixed(
+        mut comp: WgpuCompositor,
+        ctx: &GpuContext,
+        geoms: &[(u32, u32)],
+        frames: &[Vec<u8>],
+        tex: &[bool],
+    ) -> (WgpuCompositor, Frame) {
+        let mut sink = FrameSink::default();
+        for (i, (w, h)) in geoms.iter().enumerate() {
+            comp.configure_pipeline(i, &rgba_caps(*w, *h)).unwrap();
+        }
+        let frame_for = |i: usize| match tex[i] {
+            true => texture_frame(ctx, geoms[i].0, geoms[i].1, &frames[i]),
+            false => frame_of(&frames[i]),
+        };
+        for i in (1..geoms.len()).rev() {
+            comp.process(i, PipelinePacket::DataFrame(frame_for(i)), &mut sink)
+                .await
+                .unwrap();
+        }
+        comp.process(0, PipelinePacket::DataFrame(frame_for(0)), &mut sink)
+            .await
+            .unwrap();
+        let f = sink.frames.pop().expect("gpu frame");
+        (comp, f)
+    }
+
+    /// Composite the same scene on the CPU element and on the GPU one with the
+    /// `tex` inputs delivered as bound textures, then assert byte equality: a
+    /// texture pad must be as bit-exact as an uploaded one.
+    async fn assert_texture_parity(
+        pads: Vec<CompositorPad>,
+        out: (u32, u32),
+        background: [u8; 4],
+        geoms: &[(u32, u32)],
+        frames: &[Vec<u8>],
+        tex: &[bool],
+        what: &str,
+    ) {
+        let Some(ctx) = shared_ctx().await else {
+            std::eprintln!("no wgpu adapter; skipping GPU compositor {what} test");
+            return;
+        };
+        let cpu = Compositor::new(out.0, out.1, pads.clone()).with_background(background);
+        let want = run_cpu(cpu, geoms, frames).await;
+        let gpu = WgpuCompositor::new(out.0, out.1, pads)
+            .with_background(background)
+            .with_context(ctx.clone());
+        let (_, frame) = run_gpu_mixed(gpu, &ctx, geoms, frames, tex).await;
         let got = frame.domain.as_system_slice().unwrap().to_vec();
         assert_eq!(got.len(), want.len(), "{what}: canvas size");
         let bad = got
@@ -1048,6 +1382,228 @@ mod tests {
             "overlay still cached"
         );
         assert_eq!(px(&sink.frames[2]), [0, 0, 255, 255], "newer overlay wins");
+    }
+
+    #[tokio::test]
+    async fn texture_overlay_matches_cpu() {
+        // A system-memory base with a GPU overlay bound in place: the two source
+        // kinds mix on one canvas and still match the CPU element byte for byte.
+        assert_texture_parity(
+            Vec::from([
+                CompositorPad::at(0, 0),
+                CompositorPad::at(16, 16).with_zorder(1).with_alpha(200),
+            ]),
+            (64, 48),
+            [10, 20, 30, 255],
+            &[(64, 48), (32, 16)],
+            &[solid(64, 48, [200, 40, 10, 255]), ramp(32, 16)],
+            &[false, true],
+            "texture overlay",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn all_texture_inputs_match_cpu() {
+        // Every pad a texture, overlapping, painted out of index order, one
+        // clipped off the top-left.
+        assert_texture_parity(
+            Vec::from([
+                CompositorPad::at(0, 0).with_zorder(2),
+                CompositorPad::at(-8, -4).with_zorder(5),
+                CompositorPad::at(8, 8).with_zorder(1).with_alpha(77),
+            ]),
+            (40, 40),
+            [0, 0, 0, 255],
+            &[(40, 40), (24, 24), (24, 24)],
+            &[
+                solid(40, 40, [30, 30, 200, 255]),
+                ramp(24, 24),
+                solid(24, 24, [0, 255, 0, 255]),
+            ],
+            &[true, true, true],
+            "all-texture inputs",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn scaled_texture_pads_match_cpu() {
+        // Up- and downscaled texture pads: textureLoad plus the Q16 mapping must
+        // land on the same samples as the CPU bilinear.
+        assert_texture_parity(
+            Vec::from([
+                CompositorPad::at(0, 0),
+                CompositorPad::at(2, 2).with_zorder(1).with_size(24, 20),
+                CompositorPad::at(30, 8).with_zorder(2).with_size(9, 7),
+            ]),
+            (48, 40),
+            [0, 0, 0, 255],
+            &[(48, 40), (7, 5), (32, 32)],
+            &[solid(48, 40, [12, 200, 60, 255]), ramp(7, 5), ramp(32, 32)],
+            &[false, true, true],
+            "scaled texture pads",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn newer_texture_overlay_wins() {
+        let Some(ctx) = shared_ctx().await else {
+            std::eprintln!("no wgpu adapter; skipping GPU compositor texture cadence test");
+            return;
+        };
+        // Two outputs off one texture overlay (it stays bound), then a newer
+        // texture must take effect on the third.
+        let pads = Vec::from([
+            CompositorPad::at(0, 0),
+            CompositorPad::at(0, 0).with_zorder(1).with_size(4, 4),
+        ]);
+        let mut comp = WgpuCompositor::new(8, 8, pads).with_context(ctx.clone());
+        comp.configure_pipeline(0, &rgba_caps(8, 8)).unwrap();
+        comp.configure_pipeline(1, &rgba_caps(4, 4)).unwrap();
+        let mut sink = FrameSink::default();
+        let base = solid(8, 8, [255, 0, 0, 255]);
+
+        let green = texture_frame(&ctx, 4, 4, &solid(4, 4, [0, 255, 0, 255]));
+        comp.process(1, PipelinePacket::DataFrame(green), &mut sink)
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            comp.process(0, PipelinePacket::DataFrame(frame_of(&base)), &mut sink)
+                .await
+                .unwrap();
+        }
+        let blue = texture_frame(&ctx, 4, 4, &solid(4, 4, [0, 0, 255, 255]));
+        comp.process(1, PipelinePacket::DataFrame(blue), &mut sink)
+            .await
+            .unwrap();
+        comp.process(0, PipelinePacket::DataFrame(frame_of(&base)), &mut sink)
+            .await
+            .unwrap();
+
+        assert_eq!(sink.frames.len(), 3, "one output per input-0 frame");
+        let px = |f: &Frame| {
+            let b = f.domain.as_system_slice().unwrap();
+            [b[0], b[1], b[2], b[3]]
+        };
+        assert_eq!(px(&sink.frames[0]), [0, 255, 0, 255], "texture painted");
+        assert_eq!(
+            px(&sink.frames[1]),
+            [0, 255, 0, 255],
+            "same texture still bound"
+        );
+        assert_eq!(
+            px(&sink.frames[2]),
+            [0, 0, 255, 255],
+            "newer texture rebinds"
+        );
+    }
+
+    #[tokio::test]
+    async fn flushed_texture_pad_is_left_out() {
+        let Some(ctx) = shared_ctx().await else {
+            std::eprintln!("no wgpu adapter; skipping GPU compositor texture flush test");
+            return;
+        };
+        // A flushed texture pad has nothing to bind, so its declared binding falls
+        // back to the dummy and the pad drops out of the paint list: the startup
+        // overflow then emits the base overlay-less rather than sampling garbage.
+        let pads = Vec::from([
+            CompositorPad::at(0, 0),
+            CompositorPad::at(0, 0).with_zorder(1),
+        ]);
+        let mut comp = WgpuCompositor::new(4, 4, pads).with_context(ctx.clone());
+        comp.configure_pipeline(0, &rgba_caps(4, 4)).unwrap();
+        comp.configure_pipeline(1, &rgba_caps(4, 4)).unwrap();
+        let mut sink = FrameSink::default();
+
+        let overlay = texture_frame(&ctx, 4, 4, &solid(4, 4, [0, 255, 0, 255]));
+        comp.process(1, PipelinePacket::DataFrame(overlay), &mut sink)
+            .await
+            .unwrap();
+        comp.process(1, PipelinePacket::Flush, &mut sink)
+            .await
+            .unwrap();
+        let base = solid(4, 4, [255, 0, 0, 255]);
+        for _ in 0..=PENDING_CAP {
+            comp.process(0, PipelinePacket::DataFrame(frame_of(&base)), &mut sink)
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(
+            sink.frames.len(),
+            1,
+            "one overlay-less frame off the overflow"
+        );
+        let b = sink.frames[0].domain.as_system_slice().unwrap();
+        assert_eq!(
+            [b[0], b[1], b[2], b[3]],
+            [255, 0, 0, 255],
+            "base only, the flushed texture contributes nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn texture_geometry_mismatch_is_rejected() {
+        let Some(ctx) = shared_ctx().await else {
+            std::eprintln!("no wgpu adapter; skipping GPU compositor texture caps test");
+            return;
+        };
+        let mut comp = WgpuCompositor::new(8, 8, Vec::from([CompositorPad::at(0, 0)]))
+            .with_context(ctx.clone());
+        comp.configure_pipeline(0, &rgba_caps(8, 8)).unwrap();
+        let mut sink = FrameSink::default();
+        let small = texture_frame(&ctx, 4, 4, &solid(4, 4, [0, 255, 0, 255]));
+        assert!(matches!(
+            comp.process(0, PipelinePacket::DataFrame(small), &mut sink)
+                .await,
+            Err(G2gError::CapsMismatch)
+        ));
+        assert!(sink.frames.is_empty(), "nothing composited");
+    }
+
+    #[tokio::test]
+    async fn texture_input_to_gpu_output_stays_on_the_device() {
+        let Some(ctx) = shared_ctx().await else {
+            std::eprintln!("no wgpu adapter; skipping GPU compositor texture-to-texture test");
+            return;
+        };
+        // Texture in, texture out: nothing touches system memory between the
+        // producer and the consumer, and the canvas still matches the CPU element.
+        let pads = Vec::from([
+            CompositorPad::at(0, 0),
+            CompositorPad::at(6, 6).with_zorder(1).with_alpha(160),
+        ]);
+        let geoms = [(32, 32), (16, 16)];
+        let frames = [solid(32, 32, [10, 120, 240, 255]), ramp(16, 16)];
+
+        let want = run_cpu(Compositor::new(32, 32, pads.clone()), &geoms, &frames).await;
+
+        let gpu = WgpuCompositor::new(32, 32, pads)
+            .with_context(ctx.clone())
+            .with_gpu_output();
+        let (comp, frame) = run_gpu_mixed(gpu, &ctx, &geoms, &frames, &[true, true]).await;
+
+        // Both inputs are bound textures, so nothing was packed for upload: the
+        // source buffer is the one-word minimum a storage binding needs.
+        assert_eq!(
+            comp.gpu.as_ref().expect("device built").src_buf.size(),
+            4,
+            "texture inputs are sampled in place, never uploaded"
+        );
+
+        let MemoryDomain::WgpuTexture(owned) = &frame.domain else {
+            panic!("gpu-output mode emits a WgpuTexture frame");
+        };
+        assert_eq!((owned.width, owned.height), (32, 32));
+        let tex = crate::gpu::texture_of(owned).expect("texture keep-alive");
+        assert_eq!(
+            crate::gpu::read_rgba_texture(&ctx, tex),
+            want,
+            "GPU-resident canvas off texture inputs matches the CPU compositor"
+        );
     }
 
     #[test]

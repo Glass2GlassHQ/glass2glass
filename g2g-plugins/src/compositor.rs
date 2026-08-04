@@ -116,8 +116,8 @@ pub struct Compositor {
     /// Per-input placement; `pads.len()` is the input count.
     pads: Vec<CompositorPad>,
     /// Input geometry, cached frames and emit cadence, shared with the GPU
-    /// sibling.
-    state: CompositorState,
+    /// sibling. The CPU element caches each frame's bytes.
+    state: CompositorState<Box<[u8]>>,
     /// The canvas fill behind all inputs (RGBA8), default opaque black.
     background: [u8; 4],
 }
@@ -138,9 +138,11 @@ pub(crate) fn paint_order(pads: &[CompositorPad]) -> Vec<usize> {
 /// The latest-wins input bookkeeping and emit cadence both compositors run:
 /// per-input geometry, the cached frames, startup priming and the output
 /// sequence counter. Only the pixel work differs between the CPU and the GPU
-/// element.
+/// element. Generic over the cached payload `P`: the CPU element caches the
+/// frame's bytes, the GPU one caches either bytes or a texture it binds in
+/// place.
 #[derive(Debug)]
-pub(crate) struct CompositorState {
+pub(crate) struct CompositorState<P> {
     /// Per-input frames under the aggregator's latest-wins policy: input 0 (the
     /// timing driver) queues, and one output frame is released per queued item;
     /// every other input holds only its newest frame, read in place by the
@@ -148,7 +150,7 @@ pub(crate) struct CompositorState {
     /// primed, and is the startup buffer until then (bounded to
     /// [`PENDING_CAP`]: on overflow the oldest is emitted overlay-less, so
     /// output keeps flowing and no frame is dropped).
-    agg: InputAggregator<(FrameTiming, Box<[u8]>)>,
+    agg: InputAggregator<(FrameTiming, P)>,
     /// Per-input configured geometry `(width, height)`, set at negotiation.
     inputs: Vec<Option<(u32, u32)>>,
     /// True once every overlay input has delivered at least one frame (or there
@@ -159,7 +161,7 @@ pub(crate) struct CompositorState {
     emitted: u64,
 }
 
-impl CompositorState {
+impl<P> CompositorState<P> {
     pub(crate) fn new(n: usize) -> Self {
         Self {
             agg: InputAggregator::new(n),
@@ -173,13 +175,13 @@ impl CompositorState {
     /// Take a delivered frame: input 0 queues (each one releases an output),
     /// every other input caches it as its latest. Completes priming once every
     /// overlay has delivered.
-    pub(crate) fn ingest(&mut self, input: usize, timing: FrameTiming, bytes: Box<[u8]>) {
+    pub(crate) fn ingest(&mut self, input: usize, timing: FrameTiming, payload: P) {
         if input == 0 {
-            self.agg.push(0, (timing, bytes));
+            self.agg.push(0, (timing, payload));
         } else {
             // Overlay: cache the latest frame; it is picked up by the next
             // input-0 frame and updates live as more arrive.
-            self.agg.push_latest(input, (timing, bytes));
+            self.agg.push_latest(input, (timing, payload));
         }
         if !self.primed && self.agg.latest_ready(0) {
             self.primed = true;
@@ -192,7 +194,7 @@ impl CompositorState {
     /// frame once the buffer is over [`PENDING_CAP`], composited overlay-less
     /// rather than dropped so output keeps flowing behind a slow overlay. Call
     /// in a loop: while unprimed one take brings the buffer back to the cap.
-    pub(crate) fn take_due(&mut self) -> Option<(FrameTiming, Box<[u8]>)> {
+    pub(crate) fn take_due(&mut self) -> Option<(FrameTiming, P)> {
         if self.primed || self.agg.queued(0) > PENDING_CAP {
             self.agg.take_round_latest(0)
         } else {
@@ -201,7 +203,7 @@ impl CompositorState {
     }
 
     /// Newest frame cached for `input`, left in place for later output frames.
-    pub(crate) fn latest(&self, input: usize) -> Option<&(FrameTiming, Box<[u8]>)> {
+    pub(crate) fn latest(&self, input: usize) -> Option<&(FrameTiming, P)> {
         self.agg.latest(input)
     }
 

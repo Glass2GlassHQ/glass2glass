@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M874: `wgpucompositor` composites `WgpuTexture` input frames in place, binding each as a sampled texture instead of copying it through system memory.
+
 - M873: the CPU and GPU compositors share one `CompositorState` for their latest-wins input cadence.
 
 - M872: TS carries tags: the muxers write the SDT service name/provider and per-stream ISO-639 language descriptors, the demuxers post them as bus tags.
