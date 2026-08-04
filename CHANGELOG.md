@@ -6,6 +6,16 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M886: `alsasrc` / `pulsesrc` Linux audio capture elements, with the PCM format tables shared with the sinks.
+
+- M885: `timeoverlay` gains the standard time modes and `clockoverlay` a `time-format` wall-clock renderer, both on shared placement/styling properties.
+
+- M884: `pulsesink` provides the audio-master clock like `alsasink`, disciplined from the server latency query.
+
+- M883: MP4 `c608`/`c708` raw closed-caption tracks demux, decode, and mux via `Caps::ClosedCaption`.
+
+- M881: every display sink paces PTS through a shared `PresentationPacer` and reports late drops as `Qos`, on the bus and upstream.
+
 - M882: a graph node's properties can be animated over stream time, from keyframed control sources the runner samples at each frame's PTS.
 
 - M880: the cooperative runner takes a fan-in element's deadline tick from the pipeline clock itself, so `compositor timed-output=true` ticks from a `parse_launch` line.

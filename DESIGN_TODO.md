@@ -386,7 +386,6 @@ Phased plan:
   DMABUF output.
 - `mfvideosrc`: first Windows build + camera smoke test; D3D11 zero-copy;
   size/rate request beyond device default.
-- `alsasrc` / `pulsesrc` (Linux audio capture, non-PipeWire).
 - Screen capture: Windows DXGI Desktop Duplication.
 
 ## Sinks
@@ -422,8 +421,9 @@ _(No open parser items.)_
   horizontal + vertical) with an explicit Latin+CJK fallback chain, so OpenType-CFF
   `.otf` fonts render, not only glyf `.ttf`s. Still open: real shaping + bidi
   and automatic system-font discovery / fallback, both of which point at the
-  `cosmic-text` upgrade; plus a `vello` GPU backend and the `clockoverlay` /
-  `timeoverlay` siblings.
+  `cosmic-text` upgrade; plus a `vello` GPU backend. `clockoverlay` still lacks
+  the gst date properties (`show-times-as-dates` / `datetime-format` /
+  `datetime-epoch`: the 1900 epoch needs signed civil math).
 - **Text / subtitle pipeline depth.** The foundation is in: `Caps::Text` +
   `TextFormat` (M400), the `SubParse` element (`Text{Srt|WebVtt|Ssa|Ttml}` ->
   `Text{Utf8}`), the SRT / WebVTT / SSA-ASS / TTML parsers (M171 / M401 / M402),
@@ -493,9 +493,7 @@ _(No open parser items.)_
 - **Closed captions: remaining carriers + authoring.** The H.264 / H.265 SEI
   decode path (`cea` decoders + `CcExtract` + file- and HLS-`playbin` auto-plug)
   and the CEA-608 encode path (`Cc608Enc` + `CcInsert`) are done (DESIGN.md
-  §4.18). Still open: MPEG-2 user-data caption extraction; and the MP4 `c608` /
-  `c708` *raw-caption track* (the one case justifying a `Caps::ClosedCaption
-  { format }` variant).
+  §4.18). Still open: MPEG-2 user-data caption extraction.
 - **Bitmap / picture subtitles (DVD / PGS / DVB).** RLE-image subtitles, not
   text: a `Caps::SubPicture { codec }` variant + RLE image decoders, mirroring the
   `CompressedVideo` / `RawVideo` split rather than folding into `Text`. Niche;
@@ -531,8 +529,9 @@ _(No open parser items.)_
 - **A/V clock slaving** remaining pieces. The mechanism (audio-master
   `DriftClock` disciplined from `snd_pcm_delay`, elected at `AudioProvider`) and
   the lip-sync payoff are done and CI-validated (M590/M591/M592). Still owed:
-  extend the same clock discipline to `PulseSink` / `PipeWireSink` (only
-  `AlsaSink` provides a clock today); a headless display sink that adopts the
+  extend the same clock discipline to `PipeWireSink` (blocked on the pinned
+  `pipewire` 0.8 binding lacking `pw_stream_get_time`, plus playout accounting
+  in its leaky realtime callback); a headless display sink that adopts the
   elected `ClockSync` (today `SyncSink` uses its own clock and `WaylandSink`
   needs a display, so the M592 lip-sync test uses a harness sink); an on-display
   lip-sync soak on real hardware; and optionally a tighter drift model (outlier
@@ -587,10 +586,9 @@ _(No open parser items.)_
 - Remaining bus messages, each gated on a subsystem not present: `segment-done`
   (segment seeks), `stream-status` (thread pool), `clock-lost` (clock
   re-election).
-- PTS pacing (a `ClockSync` deadline) on the display sinks other than
-  `waylandsink` (kms / wgpu / vulkanhdr / metal / d3d11 / cuda / canvas), so
-  their late-drop `Qos` reporting has a decision to report; `QosTracker` is the
-  seam. Relay `waylandsink`'s drop upstream via `take_qos`.
+- Wrap `VulkanHdrSink` as an `AsyncElement` so the shared `PresentationPacer`
+  can pace it like the other display sinks (today it is a raw present call
+  driven by the example's winit loop, with no PTS or runner to pace against).
 
 ## Properties / introspection / DSL
 

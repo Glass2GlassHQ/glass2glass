@@ -85,7 +85,7 @@ jobs:
       - name: check g2g-plugins (linux feature set)
         run: >
           cargo check -p g2g-plugins --locked --all-targets --features
-          rtsp,onvif,srt,udp-egress,udp-ingress,rtmp,http-src,hls,dash,av1-encode,dav1d,rav1d,mjpeg,mjpeg-encode,opus,vorbis,alsa-sink,pulse-sink,wayland-sink,kms-sink,v4l2,analytics,vello-overlay,wgpu-sink,plugin-loader,declarative-yaml,script-rhai
+          rtsp,onvif,srt,udp-egress,udp-ingress,rtmp,http-src,hls,dash,av1-encode,dav1d,rav1d,mjpeg,mjpeg-encode,opus,vorbis,alsa-sink,pulse-sink,alsa-src,pulse-src,wayland-sink,kms-sink,v4l2,analytics,vello-overlay,wgpu-sink,plugin-loader,declarative-yaml,script-rhai
       # downloadbuffer acceptance (M861): a moov-at-end MP4 pushed over local
       # HTTP spills to disk and demuxes identically to a direct file read.
       - name: test g2g-plugins (downloadbuffer)
@@ -106,6 +106,17 @@ jobs:
       # property table and launch tests are adapter-free, so they run here.
       - name: test g2g-plugins (compositor launch + properties)
         run: cargo test -p g2g-plugins --locked --features wgpu-sink --test m454_element_properties --test m876_compositor_launch
+      # Linux audio capture (M886): the device tests self-skip headless; the
+      # property / launch / bad-device tests need no server.
+      - name: test g2g-plugins (audio capture)
+        run: cargo test -p g2g-plugins --locked --features alsa-src,pulse-src --test m886_linux_audio_capture
+      # Display-sink QoS (M881): the kmssink late-drop verdict precedes any DRM
+      # I/O, so this runs headless.
+      - name: test g2g-plugins (kmssink qos)
+        run: cargo test -p g2g-plugins --locked --features kms-sink --lib kmssink
+      # MP4 raw-caption tracks (M883): ffmpeg oracle legs self-skip if absent.
+      - name: test g2g-plugins (mp4 closed captions)
+        run: cargo test -p g2g-plugins --locked --features std,metadata --test m883_mp4_closed_caption
       - name: check g2g-ml (wgpu + burn)
         run: cargo check -p g2g-ml --locked --all-targets --features wgpu,burn
       # Embedded / no_std path: the embassy-sync stack channel, the no-alloc
