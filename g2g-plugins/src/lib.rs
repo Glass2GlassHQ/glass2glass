@@ -409,10 +409,15 @@ pub mod onvif;
 // Sans-IO RTSP 1.0 server responder (always compiled) and the tokio TCP serving
 // sink (egress: hosts a pipeline's H.264 as an RTSP endpoint).
 pub mod rtspserver;
+// Per-publisher ingest session machinery shared by the two ingest elements.
+#[cfg(feature = "rtsp-server")]
+mod rtspingest;
 #[cfg(feature = "rtsp-server")]
 pub mod rtspserversink;
 #[cfg(feature = "rtsp-server")]
 pub mod rtspserversrc;
+#[cfg(feature = "rtsp-server")]
+pub mod rtspserversrcn;
 
 // Sans-IO SRT (Secure Reliable Transport) wire layer + handshake + ARQ (always
 // compiled); the tokio caller sink / listener source sit behind the `srt` feature.

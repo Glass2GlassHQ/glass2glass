@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M863: `rtspserversrcn` ingests N concurrent RTSP publishers, one session per output pad, sharing the session machinery with the single-pad element.
+
 - M861: `downloadbuffer` spills a pushed byte stream to a temp file and serves it seekable, so a moov-at-end MP4 plays over HTTP.
 
 - M860: the mkv suites, mkv ffmpeg metadata oracles, dashboard/preview/MCP tooling tests now run in CI.

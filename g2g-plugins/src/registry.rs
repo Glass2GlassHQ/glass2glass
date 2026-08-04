@@ -1292,6 +1292,18 @@ fn register_feature_gated(reg: &mut Registry) {
         },
         || Box::new(RtspServerSrc::new("0.0.0.0:8554".parse().unwrap())),
     ));
+    // Concurrent multi-publisher ingest (M863): one endpoint, one recording
+    // publisher per linked pad (`rtspserversrcn name=s  s. ! ...  s. ! ...`).
+    #[cfg(feature = "rtsp-server")]
+    reg.register_fanout_src(g2g_core::runtime::FanoutSrcFactory::new(
+        "rtspserversrcn",
+        |n| {
+            Box::new(crate::rtspserversrcn::RtspServerSrcN::new(
+                "0.0.0.0:8554".parse().unwrap(),
+                n,
+            ))
+        },
+    ));
     #[cfg(feature = "srt")]
     reg.register_source(SourceFactory::new(
         "srtsrc",
