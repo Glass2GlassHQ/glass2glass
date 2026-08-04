@@ -757,17 +757,17 @@
             <div class="feature-card">
                 <span class="f-icon">&#127916;</span>
                 <h3>Compositor</h3>
-                <p class="f-lead">Overlays N RGBA8 inputs onto one canvas &mdash; position, z-order, per-pad alpha, bilinear scale &mdash; for picture-in-picture, camera grids, and sub-window UIs. CPU / <code>no_std</code> baseline.</p>
+                <p class="f-lead">Overlays N inputs onto one canvas &mdash; position, z-order, per-pad alpha, bilinear scale &mdash; for picture-in-picture, camera grids, and sub-window UIs. CPU / <code>no_std</code> baseline plus a bit-exact wgpu compute sibling that binds <code>WgpuTexture</code> frames in place (zero-copy in, GPU-resident out). Timed output holds the rate over a stalled input (zero-order-hold on a runner deadline tick), and both are <code>gst-launch</code> elements with per-pad placement properties.</p>
                 <div class="chip-group">
-                    <span class="chip-label">Element</span>
-                    <div class="chip-row"><span class="chip">Compositor</span></div>
+                    <span class="chip-label">Elements</span>
+                    <div class="chip-row"><span class="chip">compositor</span><span class="chip">wgpucompositor</span></div>
                 </div>
                 <span class="feature-tag tag-core">Core</span>
             </div>
             <div class="feature-card">
                 <span class="f-icon">&#128230;</span>
                 <h3>Containers</h3>
-                <p class="f-lead">Pure-Rust demux + mux on the typed <code>Caps::ByteStream</code> link, with <code>typefind</code> sniffing. KLV telemetry (STANAG 4609 / MISB ST 0601) rides the TS both ways.</p>
+                <p class="f-lead">Pure-Rust demux + mux on the typed <code>Caps::ByteStream</code> link, with <code>typefind</code> sniffing. KLV telemetry (STANAG 4609 / MISB ST 0601) and per-program SDT service text + ISO-639 language tags ride the TS both ways.</p>
                 <div class="chip-group">
                     <span class="chip-label">Demux</span>
                     <div class="chip-row"><span class="chip">mp4src</span><span class="chip">fmp4demux</span><span class="chip">tsdemux</span><span class="chip">matroskademux</span><span class="chip">flvdemux</span><span class="chip">oggdemux</span><span class="chip">klvdecode</span></div>

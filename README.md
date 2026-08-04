@@ -655,6 +655,9 @@ videotestsrc ! c.  v4l2src device=/dev/video0 ! videoconvert ! videoscale ! c. \
 
 Features: `v4l2 wayland-sink`. Full graph in
 [`g2g-plugins/tests/pip_smoke.rs`](g2g-plugins/tests/pip_smoke.rs).
+`WgpuCompositor` is the bit-exact GPU sibling (composites `WgpuTexture` frames
+in place, zero-copy); `with_timed_output()` holds the output rate over a
+stalled input under a ticked runner.
 
 ## Running smoke tests
 
