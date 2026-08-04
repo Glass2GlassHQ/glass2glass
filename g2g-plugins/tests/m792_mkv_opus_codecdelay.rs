@@ -432,10 +432,16 @@ async fn ogg_remuxed_into_mkv_keeps_the_sources_pre_skip_and_trim() {
         "ffmpeg derives the same encoder delay from both files"
     );
     assert_eq!(field(&ours, "initial_padding"), "312");
-    // The pre-roll stays on the timeline (CodecDelay discards it), so playback
-    // starts at zero in both files, unlike the MP4 edit-list spelling.
+    // The pre-roll stays on the timeline (CodecDelay discards it). ffprobe's
+    // reported start_time convention differs by version (0, or minus the codec
+    // delay); the oracle is that both files agree, plus a sanity check that the
+    // shared value is one of the two spellings.
     assert_eq!(field(&ours, "start_time"), field(&theirs, "start_time"));
-    assert_eq!(field(&ours, "start_time"), "0.000000");
+    let start = field(&ours, "start_time");
+    assert!(
+        start == "0.000000" || start == "-0.007000",
+        "unexpected start_time {start}"
+    );
 
     // A remux changes framing, never samples. Both remuxes decode to the same
     // thing, and the source's samples are a prefix: what is past them is the
