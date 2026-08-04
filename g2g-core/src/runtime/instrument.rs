@@ -14,13 +14,19 @@
 //! sampling still works, it needs no clock); [`RunStats::per_element`] is then
 //! whatever the arms recorded, typically empty.
 
+use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use portable_atomic::{AtomicU64, Ordering};
+use spin::Mutex;
 
 use crate::metrics::{LatencyHistogram, LatencySnapshot};
+
+/// How many recent frame visits a journey-recording probe keeps. Bounded and
+/// preallocated, so recording never allocates and a long run never grows.
+const JOURNEY_RING: usize = 64;
 
 /// Per-element measured telemetry collected over a run, shared between an arm
 /// (the writer) and the runner (which snapshots it once every arm has joined).
@@ -41,6 +47,11 @@ pub struct ElementProbe {
     /// backpressure pools: a consistently-full input means this element is the
     /// bottleneck; a consistently-empty one means it is starved.
     fill: FillGauge,
+    /// M851: a bounded ring of recent per-frame visits, keyed by the frame's
+    /// sequence id, so one frame's path across stages can be joined at snapshot
+    /// time. `None` unless an observer is attached (the aggregate histograms
+    /// above serve the end-of-run report on their own).
+    journeys: Option<Mutex<VecDeque<StageVisit>>>,
 }
 
 impl ElementProbe {
@@ -50,6 +61,20 @@ impl ElementProbe {
             proc_ns: LatencyHistogram::new(),
             transit_ns: LatencyHistogram::new(),
             fill: FillGauge::default(),
+            journeys: None,
+        })
+    }
+
+    /// As [`new`](Self::new), but also recording a bounded ring of per-frame
+    /// visits for the single-frame waterfall. Only the observed graph runner
+    /// mints these, so an untapped run keeps the cheaper probe.
+    pub fn with_journeys(name: String) -> Arc<Self> {
+        Arc::new(Self {
+            name,
+            proc_ns: LatencyHistogram::new(),
+            transit_ns: LatencyHistogram::new(),
+            fill: FillGauge::default(),
+            journeys: Some(Mutex::new(VecDeque::with_capacity(JOURNEY_RING))),
         })
     }
 
@@ -96,6 +121,53 @@ impl ElementProbe {
     #[inline]
     pub fn record_transit(&self, ns: u64) {
         self.transit_ns.record(ns);
+    }
+
+    /// Record this element's visit by one frame: its `sequence` id, the
+    /// `wait_ns` it spent queued on the input link, and the `enter` stamp from
+    /// [`mark`](Self::mark) taken just before `process()` (exit is stamped here).
+    /// A no-op when the probe records no journeys, under `no_std`, or when
+    /// `enter` is `None`.
+    #[inline]
+    pub fn record_visit(&self, sequence: u64, wait_ns: u64, enter: Option<u64>) {
+        #[cfg(feature = "std")]
+        if let (Some(ring), Some(enter_ns)) = (self.journeys.as_ref(), enter) {
+            let exit_ns = crate::metrics::monotonic_ns();
+            let mut ring = ring.lock();
+            if ring.len() == JOURNEY_RING {
+                ring.pop_front();
+            }
+            ring.push_back(StageVisit {
+                sequence,
+                wait_ns,
+                enter_ns,
+                exit_ns,
+            });
+        }
+        #[cfg(not(feature = "std"))]
+        let _ = (sequence, wait_ns, enter);
+    }
+
+    /// Push a fully-stamped visit, so a test can build a deterministic journey
+    /// instead of racing a real clock.
+    #[cfg(test)]
+    pub(crate) fn push_visit(&self, visit: StageVisit) {
+        if let Some(ring) = self.journeys.as_ref() {
+            let mut ring = ring.lock();
+            if ring.len() == JOURNEY_RING {
+                ring.pop_front();
+            }
+            ring.push_back(visit);
+        }
+    }
+
+    /// The recent frame visits this probe kept, oldest first. Empty unless the
+    /// probe was minted with [`with_journeys`](Self::with_journeys).
+    pub fn visits(&self) -> Vec<StageVisit> {
+        match &self.journeys {
+            Some(ring) => ring.lock().iter().copied().collect(),
+            None => Vec::new(),
+        }
     }
 
     pub fn snapshot(&self) -> ElementLatency {
@@ -145,6 +217,25 @@ impl FillGauge {
     fn max(&self) -> u8 {
         self.max.load(Ordering::Relaxed) as u8
     }
+}
+
+/// One frame's passage through one element: the wait it served on the input
+/// link plus the wall-clock window of the `process()` call that consumed it.
+/// The per-frame counterpart of the aggregated `transit` / `proc` histograms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StageVisit {
+    /// The frame's [`Frame::sequence`](crate::Frame). Sources stamp it and
+    /// 1-in-1-out transforms carry it through, which is what lets stages be
+    /// joined; an element that restamps (a decoder, a parser) breaks the join
+    /// rather than shifting it, and the assembled journey simply stops there.
+    pub sequence: u64,
+    /// Queue residency on this element's input link before the pull, `0` on an
+    /// uninstrumented edge.
+    pub wait_ns: u64,
+    /// Monotonic stamp taken immediately before `process()`.
+    pub enter_ns: u64,
+    /// Monotonic stamp taken immediately after `process()` returned.
+    pub exit_ns: u64,
 }
 
 /// A measured per-element summary, one row of [`RunStats::per_element`].
@@ -290,6 +381,33 @@ mod tests {
         assert!(s.proc.p50_ns >= 1_000_000, "p50 = {} ns", s.proc.p50_ns);
         assert_eq!(s.fill_max_pct, 100);
         assert!(s.fill_mean_pct > 0);
+    }
+
+    #[test]
+    fn plain_probe_records_no_visits() {
+        // The un-observed mint: recording is a no-op, so an untapped run keeps
+        // nothing per frame.
+        let p = ElementProbe::new(String::from("x0"));
+        for i in 0..4 {
+            p.record_visit(i, 10, Some(100 + i));
+        }
+        assert!(p.visits().is_empty());
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn journey_ring_keeps_the_newest_and_stays_bounded() {
+        let p = ElementProbe::with_journeys(String::from("x0"));
+        for i in 0..(JOURNEY_RING as u64 * 2) {
+            p.record_visit(i, i, Some(1_000 + i));
+        }
+        let v = p.visits();
+        assert_eq!(v.len(), JOURNEY_RING, "ring is bounded");
+        assert_eq!(v[0].sequence, JOURNEY_RING as u64, "oldest evicted");
+        assert_eq!(v[v.len() - 1].sequence, JOURNEY_RING as u64 * 2 - 1);
+        let last = v[v.len() - 1];
+        assert_eq!(last.enter_ns, 1_000 + last.sequence);
+        assert!(last.exit_ns >= last.enter_ns, "exit is stamped after enter");
     }
 
     #[test]

@@ -960,7 +960,13 @@ async fn prepare_graph<'a>(
                 NodeKind::Transform | NodeKind::Sink | NodeKind::Muxer(_) | NodeKind::FaninSink(_)
             ) || matches!(vg.element(node), Some(GraphNodeRef::Demux(_)));
             if has_process {
-                probes[node.0 as usize] = Some(ElementProbe::new(name));
+                // M851: only an observed run records per-frame journeys; the
+                // end-of-run report needs the histograms alone.
+                probes[node.0 as usize] = Some(if observer.is_some() {
+                    ElementProbe::with_journeys(name)
+                } else {
+                    ElementProbe::new(name)
+                });
             }
         }
     }
@@ -1336,7 +1342,13 @@ fn build_channels<'a>(
 /// Hand `obs` the per-edge taps that only exist once the channels are built: the
 /// content-inspection slot, the negotiated caps, and the live traffic counters.
 /// Aligned with the edge ids registered during `prepare_graph`.
-fn register_edge_taps(obs: &Observer, txs: &[Option<LinkSender>], solution: &[Caps]) {
+fn register_edge_taps(
+    obs: &Observer,
+    txs: &[Option<LinkSender>],
+    solution: &[Caps],
+    link_capacity: usize,
+) {
+    obs.set_link_capacity(link_capacity);
     let probes: Vec<crate::runtime::channel::ProbeSlot> = txs
         .iter()
         .map(|o| o.as_ref().map(|s| s.probe.clone()).unwrap_or_default())
@@ -1413,7 +1425,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
     // changes needed; the slot is empty (pass-through) until a subscriber
     // installs an interceptor.
     if let Some(obs) = observer {
-        register_edge_taps(obs, &txs, &solution);
+        register_edge_taps(obs, &txs, &solution, link_capacity);
     }
 
     let mut arms: Vec<BoxFuture<'a, Result<u64, G2gError>>> = Vec::with_capacity(n + 1);
@@ -1757,7 +1769,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
 
     // Dev-tooling edge tap: same as the cooperative path.
     if let Some(obs) = observer {
-        register_edge_taps(obs, &txs, &solution);
+        register_edge_taps(obs, &txs, &solution, link_capacity);
     }
 
     // One `spawn_arm` handle per arm (mirrors the cooperative `arms` vec). Each
@@ -2636,20 +2648,27 @@ async fn transform_arm<'a>(
                 // M399: time the data-frame `process()` and sample input fill;
                 // control packets (segment/flush) are excluded so the histogram
                 // reflects real per-frame work, not cheap signalling.
-                let timed = probe
-                    .as_deref()
-                    .filter(|_| matches!(&packet, PipelinePacket::DataFrame(_)));
+                let seq = match &packet {
+                    PipelinePacket::DataFrame(f) => Some(f.sequence),
+                    _ => None,
+                };
+                let timed = probe.as_deref().filter(|_| seq.is_some());
+                let mut wait_ns = 0;
                 if let Some(p) = timed {
                     p.record_fill(in_rx.fill_percent());
                     // Queue-residency of this frame on the input link (M684).
                     if let Some(t) = in_rx.pop_transit_ns() {
                         p.record_transit(t);
+                        wait_ns = t;
                     }
                 }
                 let t0 = ElementProbe::mark();
                 elem.process(packet, &mut adapter).await?;
-                if let Some(p) = timed {
+                if let (Some(p), Some(seq)) = (timed, seq) {
                     p.record_proc_since(t0);
+                    // M851: this frame's own wait + work, joined across stages
+                    // by sequence id at snapshot time.
+                    p.record_visit(seq, wait_ns, t0);
                 }
             }
             None => return Ok(0),
@@ -2812,23 +2831,31 @@ async fn sink_arm<'a>(
                     }
                     _ => {}
                 }
-                let is_buffer = matches!(packet, PipelinePacket::DataFrame(_));
+                let seq = match &packet {
+                    PipelinePacket::DataFrame(f) => Some(f.sequence),
+                    _ => None,
+                };
+                let is_buffer = seq.is_some();
                 if is_buffer {
                     consumed += 1;
                 }
                 // M399: time the data-frame `process()` and sample input fill.
                 let timed = probe.as_deref().filter(|_| is_buffer);
+                let mut wait_ns = 0;
                 if let Some(p) = timed {
                     p.record_fill(in_rx.fill_percent());
                     // Queue-residency of this frame on the input link (M684).
                     if let Some(t) = in_rx.pop_transit_ns() {
                         p.record_transit(t);
+                        wait_ns = t;
                     }
                 }
                 let t0 = ElementProbe::mark();
                 elem.process(packet, &mut null).await?;
-                if let Some(p) = timed {
+                if let (Some(p), Some(seq)) = (timed, seq) {
                     p.record_proc_since(t0);
+                    // M851: the last hop of a frame's journey.
+                    p.record_visit(seq, wait_ns, t0);
                 }
                 // M175 upstream QoS: a sink that dropped a late frame asks to
                 // shed load; store its report on this sink's input link, where

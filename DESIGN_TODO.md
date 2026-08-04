@@ -730,12 +730,6 @@ Outstanding developer-tooling tasks, highest leverage first.
   - Validate the dashboard live against an RTSP source.
 - A CI job (or a feature added to an existing job) running the `observe`-gated
   dashboard tests; they only run locally today.
-- **Per-frame latency waterfall.** The dashboard renders an aggregate stacked
-  wait+work p50 per stage. The remaining piece is a single frame's path: a
-  source-stamped sequence id carried through so one frame's queue-residency +
-  `process()` at each stage can be assembled end to end (the aggregate uses
-  per-stage distributions, not one frame's journey), plus the measured total
-  against the `2 * capacity * frame_period` floor.
 - **gst-parity differ.** Same launch line through real GStreamer and g2g;
   diff the negotiated caps per edge, the element set after autoplug, and the
   output (checksum, PSNR for lossy). Calliope already does differential output

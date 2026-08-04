@@ -16,6 +16,13 @@
 //!   negotiated caps, and the counters are that edge's live traffic (packets and
 //!   payload bytes that crossed, frames dropped by a leaky link, and nanoseconds
 //!   the producer spent blocked on a full link).
+//!   The same message carries `"journey"`: one frame's measured path, or `null`
+//!   when none assembles. Its shape is `{"sequence":N,"total_ns":N,
+//!   "frame_period_ns":N,"capacity":N,"floor_ns":N,"truncated":bool,
+//!   "stages":[{"node":i,"name":"...","wait_ns":N,"work_ns":N}]}`, where the
+//!   stages are upstream-first for that one sequence id, `total_ns` is the
+//!   measured end to end, and `floor_ns` is `2 * capacity * frame_period_ns`,
+//!   the queueing floor to compare it against.
 //! - `{"type":"event","kind":"eos"|"error"|...,...}` (see [`event_json`]).
 
 use std::collections::HashMap;
@@ -153,11 +160,37 @@ pub fn snapshot_json(snap: &TelemetrySnapshot) -> String {
             })
         })
         .collect();
+    // One frame's path across the linear stages (M851), beside the aggregate
+    // per-stage distributions above.
+    let journey = snap.journey.as_ref().map(|j| {
+        let stages: Vec<Value> = j
+            .stages
+            .iter()
+            .map(|s| {
+                json!({
+                    "node": s.node,
+                    "name": s.name,
+                    "wait_ns": s.wait_ns,
+                    "work_ns": s.work_ns,
+                })
+            })
+            .collect();
+        json!({
+            "sequence": j.sequence,
+            "total_ns": j.total_ns,
+            "frame_period_ns": j.frame_period_ns,
+            "capacity": j.capacity,
+            "floor_ns": j.floor_ns,
+            "truncated": j.truncated,
+            "stages": stages,
+        })
+    });
     json!({
         "type": "telemetry",
         "uptime_ns": snap.uptime_ns,
         "nodes": nodes,
         "edges": edges,
+        "journey": journey,
     })
     .to_string()
 }
@@ -385,7 +418,8 @@ mod tests {
     use super::*;
     use g2g_core::metrics::LatencySnapshot;
     use g2g_core::runtime::{
-        EdgeCounts, EdgeInfo, ElementLatency, NodeTelemetry, TelemetrySnapshot,
+        EdgeCounts, EdgeInfo, ElementLatency, FrameJourney, JourneyStage, NodeTelemetry,
+        TelemetrySnapshot,
     };
 
     #[test]
@@ -440,6 +474,7 @@ mod tests {
                     blocked_ns: 5_000,
                 },
             }],
+            journey: None,
         };
         let json = snapshot_json(&snap);
         let v: Value = serde_json::from_str(&json).unwrap();
@@ -459,6 +494,53 @@ mod tests {
         assert_eq!(v["edges"][0]["bytes"], 480);
         assert_eq!(v["edges"][0]["drops"], 2);
         assert_eq!(v["edges"][0]["blocked_ns"], 5_000);
+        // No frame journey assembled yet -> the field is present but null.
+        assert!(v["journey"].is_null());
+    }
+
+    #[test]
+    fn snapshot_json_carries_the_frame_journey() {
+        let snap = TelemetrySnapshot {
+            uptime_ns: 1_000,
+            nodes: vec![],
+            edges: vec![],
+            journey: Some(FrameJourney {
+                sequence: 42,
+                stages: vec![
+                    JourneyStage {
+                        node: 1,
+                        name: String::from("videoscale0"),
+                        wait_ns: 300,
+                        work_ns: 1_200,
+                    },
+                    JourneyStage {
+                        node: 2,
+                        name: String::from("fakesink0"),
+                        wait_ns: 100,
+                        work_ns: 400,
+                    },
+                ],
+                total_ns: 2_000,
+                frame_period_ns: 33_000_000,
+                capacity: 2,
+                floor_ns: 132_000_000,
+                truncated: false,
+            }),
+        };
+        let v: Value = serde_json::from_str(&snapshot_json(&snap)).unwrap();
+        let j = &v["journey"];
+        assert_eq!(j["sequence"], 42);
+        assert_eq!(j["total_ns"], 2_000);
+        assert_eq!(j["frame_period_ns"], 33_000_000);
+        assert_eq!(j["capacity"], 2);
+        assert_eq!(j["floor_ns"], 132_000_000);
+        assert_eq!(j["truncated"], false);
+        let stages = j["stages"].as_array().unwrap();
+        assert_eq!(stages.len(), 2);
+        assert_eq!(stages[0]["node"], 1);
+        assert_eq!(stages[0]["name"], "videoscale0");
+        assert_eq!(stages[0]["wait_ns"], 300);
+        assert_eq!(stages[1]["work_ns"], 400);
     }
 
     #[test]

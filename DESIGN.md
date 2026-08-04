@@ -2651,7 +2651,13 @@ negotiated caps (from the `Observer`'s per-edge solution) and live counters
 (packets, CPU-payload bytes, drops, and `blocked_ns`, the time producers spent
 awaiting link capacity, from a wait-free `EdgeCounters` block the data-plane
 sink writes), which the page labels on the link; the page pans / zooms so a
-large graph stays navigable. It binds loopback by default;
+large graph stays navigable. Beside the aggregate per-stage waterfall the page
+assembles a single frame's journey: observed probes keep a bounded ring of
+`{sequence, wait, enter, exit}` visits, joined at snapshot time along the
+linear prefix on the newest sequence id consistent with one frame moving
+downstream (restamping elements fail the join rather than fabricate one; fan
+nodes truncate it), shown as stacked wait/work bars with the end-to-end total
+against the `2 * capacity * frame_period` floor. It binds loopback by default;
 `--observe-host <addr>` (e.g. `0.0.0.0`) exposes it to other hosts, gated behind a
 no-auth warning since telemetry + edge previews carry frame content. The JSON is
 built in the transport, so `g2g-core` stays serde-free, consistent with the

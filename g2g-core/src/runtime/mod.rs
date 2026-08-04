@@ -50,7 +50,9 @@ pub use channel::{
     QosSlot, Receiver, ReconfigureSlot, RecvFuture, SendError, SendFuture, Sender, SenderSink,
 };
 pub use coordinator::{coordinator, Coordinator, CoordinatorEvent, CoordinatorHandle};
-pub use instrument::{snapshot_all, EdgeCounters, EdgeCounts, ElementLatency, ElementProbe, Probe};
+pub use instrument::{
+    snapshot_all, EdgeCounters, EdgeCounts, ElementLatency, ElementProbe, Probe, StageVisit,
+};
 pub use join::{join_all, select2, Either, Join2, JoinAll, Select2};
 pub use progress::PipelineProgress;
 pub use runner::{
@@ -93,7 +95,9 @@ pub use graph_runner::{
 };
 
 #[cfg(feature = "std")]
-pub use observe::{EdgeInfo, NodeRole, NodeTelemetry, Observer, TelemetrySnapshot};
+pub use observe::{
+    EdgeInfo, FrameJourney, JourneyStage, NodeRole, NodeTelemetry, Observer, TelemetrySnapshot,
+};
 
 // Thread-per-arm (opt-in multicore) runner. Needs `multi-thread` so the graph's
 // elements + channels are `Send` to cross onto worker threads (the `!Send` arm
