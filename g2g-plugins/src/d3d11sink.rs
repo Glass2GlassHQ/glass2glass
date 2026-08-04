@@ -76,13 +76,18 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::worker_ready::Handshake;
+use g2g_core::element::QosMessage;
 use g2g_core::frame::Frame;
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
-    AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority,
-    ConfigureOutcome, Dim, G2gError, HardwareError, MemoryDomain, OutputSink, OwnedD3D11Texture,
-    PadTemplate, PadTemplates, PipelineClock, PipelinePacket, Rate, RawVideoFormat,
+    AllocationParams, AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockCandidate,
+    ClockPriority, ClockSync, ConfigureOutcome, Dim, G2gError, HardwareError, MemoryDomain,
+    OutputSink, OwnedD3D11Texture, PadTemplate, PadTemplates, PipelineClock, PipelinePacket,
+    PresentationPacer, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
+    MAX_LATENESS_PROPERTY, QOS_INTERVAL_PROPERTY,
 };
+
+use crate::clock::wait_to_present;
 
 /// Texture-pool headroom the sink asks the decoder to keep resident: the frame
 /// in flight on the present thread plus the one the runner link holds, so the
@@ -115,6 +120,10 @@ pub struct D3D11Sink {
     height: u32,
     frames_presented: Arc<AtomicU64>,
     latency: Arc<LatencyHistogram>,
+    /// PTS pacing + QoS late-drop, on top of the worker's present-paced ack: idle
+    /// until the runner hands over a clock, and the default lateness bound never
+    /// drops.
+    pacer: PresentationPacer,
 }
 
 impl core::fmt::Debug for D3D11Sink {
@@ -147,12 +156,40 @@ impl D3D11Sink {
             height: 0,
             frames_presented: Arc::new(AtomicU64::new(0)),
             latency: Arc::new(LatencyHistogram::new()),
+            pacer: PresentationPacer::new(),
         }
     }
 
     pub fn with_title<S: Into<String>>(mut self, title: S) -> Self {
         self.title = title.into();
         self
+    }
+
+    /// QoS late-drop bound: once PTS pacing is engaged, a frame past its
+    /// deadline by more than `ns` is dropped instead of presented late, so the
+    /// sink catches up. The default (`u64::MAX`) never drops.
+    pub fn with_max_lateness_ns(mut self, ns: u64) -> Self {
+        self.pacer.set_max_lateness_ns(ns);
+        self
+    }
+
+    /// Post a running-stats `Qos` report every `ns` of clock time while frames
+    /// present, on top of the per-drop reports. `0` (the default) reports only
+    /// drops.
+    pub fn with_qos_interval_ns(mut self, ns: u64) -> Self {
+        self.pacer.set_report_interval_ns(ns);
+        self
+    }
+
+    /// Attach the pipeline bus so QoS reports reach the application.
+    pub fn with_bus(mut self, bus: BusHandle) -> Self {
+        self.pacer.set_bus(bus);
+        self
+    }
+
+    /// Frames dropped by QoS late-drop (past their deadline beyond the bound).
+    pub fn late_dropped(&self) -> u64 {
+        self.pacer.late_dropped()
     }
 
     pub fn frames_presented(&self) -> u64 {
@@ -199,6 +236,47 @@ impl AsyncElement for D3D11Sink {
             ClockPriority::Provider,
             alloc::sync::Arc::new(D3D11Clock),
         ))
+    }
+
+    /// Adopt the elected clock + base time so textures present at their PTS
+    /// deadline rather than as fast as the swapchain allows.
+    fn set_clock_sync(&mut self, sync: ClockSync) {
+        self.pacer.set_clock_sync(sync);
+    }
+
+    /// Relay a late drop upstream (M174): the runner forwards it onto the
+    /// incoming link, where the producer can shed load.
+    fn take_qos(&mut self) -> Option<QosMessage> {
+        self.pacer.take_qos()
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        const PROPS: &[PropertySpec] = &[
+            PropertySpec::new("title", PropKind::Str, "window title").with_default("glass2glass"),
+            MAX_LATENESS_PROPERTY,
+            QOS_INTERVAL_PROPERTY,
+        ];
+        PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "title" => {
+                self.title = value.as_str().ok_or(PropError::Type)?.into();
+                Ok(())
+            }
+            _ => self
+                .pacer
+                .set_property(name, &value)
+                .unwrap_or(Err(PropError::Unknown)),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "title" => Some(PropValue::Str(self.title.clone())),
+            _ => self.pacer.get_property(name),
+        }
     }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
@@ -299,6 +377,14 @@ impl AsyncElement for D3D11Sink {
                     let MemoryDomain::D3D11Texture(texture) = domain else {
                         return Err(G2gError::UnsupportedDomain);
                     };
+                    // PTS pacing: hold the frame until its deadline on the
+                    // elected clock, or drop it when it is already too late (the
+                    // QoS bound) or outside the segment. Unpaced without a clock:
+                    // present as fast as the swapchain allows.
+                    let presented = self.frames_presented.load(Ordering::Relaxed);
+                    if !wait_to_present(self.pacer.judge(timing.pts_ns, presented)).await {
+                        return Ok(());
+                    }
                     let tx = self.cmd_tx.as_ref().ok_or(G2gError::NotConfigured)?;
                     let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
                     tx.send(WorkerCmd::Frame {
@@ -312,9 +398,17 @@ impl AsyncElement for D3D11Sink {
                         .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
                     Ok(())
                 }
-                PipelinePacket::CapsChanged(_)
-                | PipelinePacket::Flush
-                | PipelinePacket::Segment(_) => Ok(()),
+                PipelinePacket::CapsChanged(_) => Ok(()),
+                // Track the playback segment so PTS maps to running time
+                // (correct across a seek), and re-anchor after a seek flush.
+                PipelinePacket::Segment(seg) => {
+                    self.pacer.set_segment(seg);
+                    Ok(())
+                }
+                PipelinePacket::Flush => {
+                    self.pacer.flush();
+                    Ok(())
+                }
                 PipelinePacket::Eos => {
                     self.shutdown();
                     Ok(())

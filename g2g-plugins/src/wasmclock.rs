@@ -10,7 +10,7 @@ use core::pin::Pin;
 
 use alloc::boxed::Box;
 
-use g2g_core::{AsyncClock, DynAsyncClock, PipelineClock};
+use g2g_core::{AsyncClock, DynAsyncClock, Pace, PipelineClock};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
@@ -58,6 +58,22 @@ impl AsyncClock for WasmClock {
                 sleep_ms(delay_ms).await;
             }
         })
+    }
+}
+
+/// Act on a sink's [`Pace`] verdict using `setTimeout`: hold the frame until its
+/// deadline and return `true` to present it, or `false` if it is not to be
+/// presented (too late, or clipped outside the segment). The browser sibling of
+/// `clock::wait_to_present`, which sleeps on tokio's timer (it does not tick on
+/// `wasm32-unknown-unknown`).
+pub async fn wait_to_present(pace: Pace) -> bool {
+    match pace {
+        Pace::Now => true,
+        Pace::Wait(ns) => {
+            sleep_ms((ns as f64) / 1.0e6).await;
+            true
+        }
+        Pace::Drop => false,
     }
 }
 

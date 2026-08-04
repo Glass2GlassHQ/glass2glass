@@ -117,6 +117,11 @@ pub mod bus;
 #[cfg(feature = "runtime")]
 pub mod qos;
 
+// Sink-side presentation pacing (M881): the PTS -> clock deadline, the anchor,
+// and the QoS late-drop verdict every display sink shares.
+#[cfg(feature = "runtime")]
+pub mod pacing;
+
 #[cfg(feature = "runtime")]
 pub mod fanout;
 
@@ -252,6 +257,11 @@ pub use bus::{Bus, BusHandle, BusMessage};
 
 #[cfg(feature = "runtime")]
 pub use qos::QosTracker;
+
+#[cfg(feature = "runtime")]
+pub use pacing::{
+    Pace, PresentationPacer, MAX_LATENESS_PROPERTY, PACING_PROPERTIES, QOS_INTERVAL_PROPERTY,
+};
 
 #[cfg(feature = "runtime")]
 pub use runtime::{CapsConflict, LinkInterceptor, NegotiationFailure, ProbeAction, ProbeSlot};

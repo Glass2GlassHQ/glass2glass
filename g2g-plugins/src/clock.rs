@@ -1,5 +1,7 @@
 //! Wall-clock implementation of [`PipelineClock`] / [`AsyncClock`] for std
-//! targets. Backed by `std::time::Instant` and `tokio::time::sleep`.
+//! targets. Backed by `std::time::Instant` and `tokio::time::sleep`, which is
+//! also the timer the display sinks hold a frame on until its PTS deadline
+//! ([`wait_to_present`]).
 
 use core::future::Future;
 use core::pin::Pin;
@@ -7,7 +9,22 @@ use std::time::{Duration, Instant};
 
 use alloc::boxed::Box;
 
-use g2g_core::{AsyncClock, DynAsyncClock, PipelineClock};
+use g2g_core::{AsyncClock, DynAsyncClock, Pace, PipelineClock};
+
+/// Act on a sink's [`Pace`] verdict using tokio's timer: hold the frame until
+/// its deadline and return `true` to present it, or `false` if it is not to be
+/// presented (too late, or clipped outside the segment). Every std display sink
+/// paces through this, and an out-of-tree one should too.
+pub async fn wait_to_present(pace: Pace) -> bool {
+    match pace {
+        Pace::Now => true,
+        Pace::Wait(ns) => {
+            tokio::time::sleep(Duration::from_nanos(ns)).await;
+            true
+        }
+        Pace::Drop => false,
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct WallClock {

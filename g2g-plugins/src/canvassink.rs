@@ -15,11 +15,15 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use g2g_core::element::QosMessage;
 use g2g_core::frame::Frame;
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, HardwareError,
-    OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate, RawVideoFormat,
+    AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockSync, ConfigureOutcome, Dim,
+    G2gError, HardwareError, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    PresentationPacer, PropError, PropValue, PropertySpec, Rate, RawVideoFormat, PACING_PROPERTIES,
 };
+
+use crate::wasmclock::wait_to_present;
 
 use wasm_bindgen::{Clamped, JsCast};
 use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, ImageData};
@@ -32,6 +36,9 @@ pub struct CanvasSink {
     height: u32,
     configured: bool,
     presented: u64,
+    /// PTS pacing + QoS late-drop: idle until the runner hands over a clock (a
+    /// `WasmClock` in the browser), and the default lateness bound never drops.
+    pacer: PresentationPacer,
 }
 
 impl CanvasSink {
@@ -45,12 +52,40 @@ impl CanvasSink {
             height: 0,
             configured: false,
             presented: 0,
+            pacer: PresentationPacer::new(),
         }
     }
 
     /// Count of frames drawn to the canvas. Useful in tests.
     pub fn presented(&self) -> u64 {
         self.presented
+    }
+
+    /// QoS late-drop bound: once PTS pacing is engaged, a frame past its
+    /// deadline by more than `ns` is dropped instead of drawn late, so the sink
+    /// catches up. The default (`u64::MAX`) never drops.
+    pub fn with_max_lateness_ns(mut self, ns: u64) -> Self {
+        self.pacer.set_max_lateness_ns(ns);
+        self
+    }
+
+    /// Post a running-stats `Qos` report every `ns` of clock time while frames
+    /// draw, on top of the per-drop reports. `0` (the default) reports only
+    /// drops.
+    pub fn with_qos_interval_ns(mut self, ns: u64) -> Self {
+        self.pacer.set_report_interval_ns(ns);
+        self
+    }
+
+    /// Attach the pipeline bus so QoS reports reach the application.
+    pub fn with_bus(mut self, bus: BusHandle) -> Self {
+        self.pacer.set_bus(bus);
+        self
+    }
+
+    /// Frames dropped by QoS late-drop (past their deadline beyond the bound).
+    pub fn late_dropped(&self) -> u64 {
+        self.pacer.late_dropped()
     }
 
     fn present(&mut self, frame: &Frame) -> Result<(), G2gError> {
@@ -86,6 +121,32 @@ impl AsyncElement for CanvasSink {
 
     fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
         CapsConstraint::Accepts(CapsSet::one(rgba_any()))
+    }
+
+    /// Adopt the elected clock + base time so frames draw at their PTS deadline
+    /// rather than as fast as the decoder delivers them.
+    fn set_clock_sync(&mut self, sync: ClockSync) {
+        self.pacer.set_clock_sync(sync);
+    }
+
+    /// Relay a late drop upstream (M174): the runner forwards it onto the
+    /// incoming link, where the producer can shed load.
+    fn take_qos(&mut self) -> Option<QosMessage> {
+        self.pacer.take_qos()
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        PACING_PROPERTIES
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        self.pacer
+            .set_property(name, &value)
+            .unwrap_or(Err(PropError::Unknown))
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        self.pacer.get_property(name)
     }
 
     fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -128,8 +189,22 @@ impl AsyncElement for CanvasSink {
                 }
                 // A non-RGBA caps change is a negotiation error for this sink.
                 PipelinePacket::CapsChanged(_) => return Err(G2gError::CapsMismatch),
-                PipelinePacket::DataFrame(frame) => self.present(&frame)?,
-                PipelinePacket::Flush | PipelinePacket::Eos | PipelinePacket::Segment(_) => {}
+                PipelinePacket::DataFrame(frame) => {
+                    // PTS pacing on `setTimeout`: hold the frame until its deadline
+                    // on the elected clock, or drop it when it is already too late
+                    // (the QoS bound) or outside the segment. Unpaced without a
+                    // clock: draw as fast as frames arrive.
+                    let paced = self.pacer.judge(frame.timing.pts_ns, self.presented);
+                    if !wait_to_present(paced).await {
+                        return Ok(());
+                    }
+                    self.present(&frame)?
+                }
+                // Track the playback segment so PTS maps to running time (correct
+                // across a seek), and re-anchor after a seek flush.
+                PipelinePacket::Segment(seg) => self.pacer.set_segment(seg),
+                PipelinePacket::Flush => self.pacer.flush(),
+                PipelinePacket::Eos => {}
                 // future PipelinePacket variants: no-op (terminal sink).
                 _ => {}
             }

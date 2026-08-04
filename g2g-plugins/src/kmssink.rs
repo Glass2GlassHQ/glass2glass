@@ -58,13 +58,17 @@ use drm::control::{
 };
 use drm::Device;
 
+use g2g_core::element::QosMessage;
 use g2g_core::frame::Frame;
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority, ConfigureOutcome,
-    Dim, ElementMetadata, G2gError, HardwareError, OutputSink, PipelineClock, PipelinePacket,
-    PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
+    AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority,
+    ClockSync, ConfigureOutcome, Dim, ElementMetadata, G2gError, HardwareError, OutputSink,
+    PipelineClock, PipelinePacket, PresentationPacer, PropError, PropKind, PropValue, PropertySpec,
+    Rate, RawVideoFormat, MAX_LATENESS_PROPERTY, QOS_INTERVAL_PROPERTY,
 };
+
+use crate::clock::wait_to_present;
 
 /// Thin wrapper over `/dev/dri/cardN` implementing the `drm` device traits
 /// via its owned file's borrowed fd. Same pattern the upstream `drm` crate
@@ -180,6 +184,10 @@ pub struct KmsSink {
     /// correlate per-frame `arrival_ns` with the PageFlip completion
     /// event to recover true present time.
     latency: LatencyHistogram,
+    /// PTS pacing + QoS late-drop, on top of the vblank pacing `present()`
+    /// already does: idle until the runner hands over a clock, and the default
+    /// lateness bound never drops.
+    pacer: PresentationPacer,
 }
 
 impl core::fmt::Debug for KmsSink {
@@ -218,6 +226,7 @@ impl KmsSink {
             height: 0,
             frames_presented: 0,
             latency: LatencyHistogram::new(),
+            pacer: PresentationPacer::new(),
         }
     }
 
@@ -232,6 +241,33 @@ impl KmsSink {
     pub fn with_device<P: Into<PathBuf>>(mut self, path: P) -> Self {
         self.device_path = path.into();
         self
+    }
+
+    /// QoS late-drop bound: once PTS pacing is engaged, a frame past its
+    /// deadline by more than `ns` is dropped instead of presented late, so the
+    /// sink catches up. The default (`u64::MAX`) never drops.
+    pub fn with_max_lateness_ns(mut self, ns: u64) -> Self {
+        self.pacer.set_max_lateness_ns(ns);
+        self
+    }
+
+    /// Post a running-stats `Qos` report every `ns` of clock time while frames
+    /// present, on top of the per-drop reports. `0` (the default) reports only
+    /// drops.
+    pub fn with_qos_interval_ns(mut self, ns: u64) -> Self {
+        self.pacer.set_report_interval_ns(ns);
+        self
+    }
+
+    /// Attach the pipeline bus so QoS reports reach the application.
+    pub fn with_bus(mut self, bus: BusHandle) -> Self {
+        self.pacer.set_bus(bus);
+        self
+    }
+
+    /// Frames dropped by QoS late-drop (past their deadline beyond the bound).
+    pub fn late_dropped(&self) -> u64 {
+        self.pacer.late_dropped()
     }
 
     pub fn frames_presented(&self) -> u64 {
@@ -454,6 +490,18 @@ impl AsyncElement for KmsSink {
         ))
     }
 
+    /// Adopt the elected clock + base time so frames scan out at their PTS
+    /// deadline rather than as fast as the flip cadence allows.
+    fn set_clock_sync(&mut self, sync: ClockSync) {
+        self.pacer.set_clock_sync(sync);
+    }
+
+    /// Relay a late drop upstream (M174): the runner forwards it onto the
+    /// incoming link, where the producer can shed load.
+    fn take_qos(&mut self) -> Option<QosMessage> {
+        self.pacer.take_qos()
+    }
+
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         // Pass-through at negotiation; NV12 is validated in
         // `configure_pipeline`. See WaylandSink for the rationale: with the
@@ -529,12 +577,16 @@ impl AsyncElement for KmsSink {
     }
 
     fn properties(&self) -> &'static [PropertySpec] {
-        const PROPS: &[PropertySpec] = &[PropertySpec::new(
-            "device",
-            PropKind::Str,
-            "DRM device node (e.g. /dev/dri/card0)",
-        )
-        .with_default("/dev/dri/card0")];
+        const PROPS: &[PropertySpec] = &[
+            PropertySpec::new(
+                "device",
+                PropKind::Str,
+                "DRM device node (e.g. /dev/dri/card0)",
+            )
+            .with_default("/dev/dri/card0"),
+            MAX_LATENESS_PROPERTY,
+            QOS_INTERVAL_PROPERTY,
+        ];
         PROPS
     }
 
@@ -544,7 +596,10 @@ impl AsyncElement for KmsSink {
                 self.device_path = PathBuf::from(value.as_str().ok_or(PropError::Type)?);
                 Ok(())
             }
-            _ => Err(PropError::Unknown),
+            _ => self
+                .pacer
+                .set_property(name, &value)
+                .unwrap_or(Err(PropError::Unknown)),
         }
     }
 
@@ -553,7 +608,7 @@ impl AsyncElement for KmsSink {
             "device" => Some(PropValue::Str(
                 self.device_path.to_string_lossy().into_owned(),
             )),
-            _ => None,
+            _ => self.pacer.get_property(name),
         }
     }
 
@@ -568,6 +623,14 @@ impl AsyncElement for KmsSink {
                     let Some(slice) = domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
+                    // PTS pacing: hold the frame until its deadline on the
+                    // elected clock, or drop it when it is already too late (the
+                    // QoS bound) or outside the segment. Unpaced without a
+                    // clock: scan out as fast as the flip cadence allows.
+                    let paced = self.pacer.judge(timing.pts_ns, self.frames_presented);
+                    if !wait_to_present(paced).await {
+                        return Ok(());
+                    }
                     self.present(slice)?;
                     // Record glass-to-glass latency after page-flip
                     // submission. Stamped frames only; unstamped
@@ -580,9 +643,17 @@ impl AsyncElement for KmsSink {
                     }
                     Ok(())
                 }
-                PipelinePacket::CapsChanged(_)
-                | PipelinePacket::Flush
-                | PipelinePacket::Segment(_) => Ok(()),
+                PipelinePacket::CapsChanged(_) => Ok(()),
+                // Track the playback segment so PTS maps to running time
+                // (correct across a seek), and re-anchor after a seek flush.
+                PipelinePacket::Segment(seg) => {
+                    self.pacer.set_segment(seg);
+                    Ok(())
+                }
+                PipelinePacket::Flush => {
+                    self.pacer.flush();
+                    Ok(())
+                }
                 PipelinePacket::Eos => {
                     // Drain any in-flight flip so the final frame is fully
                     // presented before the pipeline tears down.
@@ -752,6 +823,66 @@ mod tests {
         let src = vec![0u8; 10]; // Need 12 for 4x2 NV12.
         let mut dst = vec![0u8; 24];
         assert!(copy_nv12(&src, 4, 2, 8, &mut dst).is_err());
+    }
+
+    /// A clock whose `now_ns` the test drives by hand.
+    #[derive(Debug)]
+    struct ManualClock(alloc::sync::Arc<core::sync::atomic::AtomicU64>);
+    impl PipelineClock for ManualClock {
+        fn now_ns(&self) -> u64 {
+            self.0.load(core::sync::atomic::Ordering::Relaxed)
+        }
+    }
+
+    /// A no-op downstream (a sink has none, but `process` takes one).
+    struct NullOut;
+    impl OutputSink for NullOut {
+        fn push<'a>(
+            &'a mut self,
+            _p: PipelinePacket,
+        ) -> Pin<Box<dyn Future<Output = Result<g2g_core::PushOutcome, G2gError>> + 'a>> {
+            Box::pin(async { Ok(g2g_core::PushOutcome::Accepted) })
+        }
+    }
+
+    #[tokio::test]
+    async fn qos_drops_a_late_frame_before_any_drm_io() {
+        // The late-drop verdict is taken before `present`, so this runs headless
+        // (no DRM device). The play anchor is stamped at clock 0 and the clock is
+        // 1 ms past, so a PTS-0 frame is 1 ms late against a 0 bound.
+        use g2g_core::clock::PlayAnchor;
+        use g2g_core::memory::{MemoryDomain, SystemSlice};
+        let (bus, handle) = g2g_core::Bus::new(4);
+        let clock = alloc::sync::Arc::new(core::sync::atomic::AtomicU64::new(1_000_000));
+        let anchor = PlayAnchor::new();
+        anchor.stamp(0);
+        let mut sink = KmsSink::new().with_max_lateness_ns(0).with_bus(handle);
+        AsyncElement::set_clock_sync(
+            &mut sink,
+            g2g_core::ClockSync::with_play_anchor(
+                alloc::sync::Arc::new(ManualClock(clock)),
+                0,
+                anchor,
+            ),
+        );
+
+        let frame = Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(Box::new([0u8; 6]))),
+            g2g_core::FrameTiming::default(),
+            0,
+        );
+        sink.process(PipelinePacket::DataFrame(frame), &mut NullOut)
+            .await
+            .expect("a dropped frame is not an error");
+
+        assert_eq!(sink.late_dropped(), 1, "the late frame was dropped");
+        assert_eq!(sink.frames_presented(), 0, "nothing was scanned out");
+        let upstream = AsyncElement::take_qos(&mut sink).expect("upstream QoS report");
+        assert_eq!(upstream.jitter_ns, 1_000_000);
+        match bus.try_recv() {
+            Some(g2g_core::BusMessage::Qos { dropped, .. }) => assert_eq!(dropped, 1),
+            other => panic!("expected a Qos message, got {other:?}"),
+        }
     }
 
     fn fmt_unused(_: &dyn core::fmt::Debug) {}
