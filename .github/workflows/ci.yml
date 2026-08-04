@@ -102,6 +102,10 @@ jobs:
       # (needs nasm above) so the feature-gated C path cannot rot silently.
       - name: test g2g-plugins (mjpeg codecs)
         run: cargo test -p g2g-plugins --locked --features std,mozjpeg --test m152_mjpegdec --test m153_mjpegenc
+      # Compositor properties + launch registration (M876): the wgpu-gated
+      # property table and launch tests are adapter-free, so they run here.
+      - name: test g2g-plugins (compositor launch + properties)
+        run: cargo test -p g2g-plugins --locked --features wgpu-sink --test m454_element_properties --test m876_compositor_launch
       - name: check g2g-ml (wgpu + burn)
         run: cargo check -p g2g-ml --locked --all-targets --features wgpu,burn
       # Embedded / no_std path: the embassy-sync stack channel, the no-alloc

@@ -34,6 +34,7 @@ use crate::audioresample::AudioResample;
 use crate::audiotestsrc::AudioTestSrc;
 use crate::av1parse::Av1Parse;
 use crate::capsfilter::CapsFilter;
+use crate::compositor::{Compositor, CompositorPad};
 use crate::downloadbuffer::DownloadBuffer;
 use crate::fakesink::FakeSink;
 use crate::filesink::FileSink;
@@ -585,6 +586,30 @@ pub fn default_registry() -> Registry {
     // link exactly the video and text branches.
     reg.register_muxer(MuxerFactory::new("textoverlay", |_inputs| {
         Box::new(crate::textoverlay::TextOverlayN::new())
+    }));
+    // Picture-in-picture / grid video fan-in (M876): the gst `compositor` analog,
+    // built by link degree like the muxers above (one pad per branch linked in,
+    // input 0 the timing driver and backmost layer). The canvas is a nominal
+    // default matching `videotestsrc`; `width` / `height` / `framerate` /
+    // `background-color` / `format` retarget it, and gst's request-pad placement
+    // (`sink_1::xpos`) is flattened to `sinkN-xpos` and friends:
+    // `videotestsrc ! c.  videotestsrc ! c.  compositor name=c width=640
+    // height=480 sink1-xpos=320 sink1-zorder=1 ! videoconvert ! autovideosink`.
+    reg.register_muxer(MuxerFactory::new("compositor", |inputs| {
+        Box::new(Compositor::new(
+            320,
+            240,
+            (0..inputs).map(|_| CompositorPad::at(0, 0)).collect(),
+        ))
+    }));
+    // The GPU sibling, same property surface (RGBA8 only, no `format`).
+    #[cfg(feature = "wgpu-sink")]
+    reg.register_muxer(MuxerFactory::new("wgpucompositor", |inputs| {
+        Box::new(crate::wgpucompositor::WgpuCompositor::new(
+            320,
+            240,
+            (0..inputs).map(|_| CompositorPad::at(0, 0)).collect(),
+        ))
     }));
     // Summing audio fan-in (M130): sums N S16LE inputs on a PTS-aligned timeline
     // (M664). The output caps are a nominal default matching `audiotestsrc`; its

@@ -54,7 +54,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError, InputAggregator,
-    MemoryDomain, MultiInputElement, OutputSink, PipelinePacket, Rate, RawVideoFormat,
+    MemoryDomain, MultiInputElement, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec, Rate, RawVideoFormat,
 };
 
 /// Placement of one input stream on the output canvas.
@@ -106,6 +107,25 @@ impl CompositorPad {
         self.size = Some((width, height));
         self
     }
+
+    /// On-canvas size for an input whose native geometry is `sw` x `sh`: the
+    /// requested size, with an unset (zero) dimension falling back to native, the
+    /// way a `compositor` pad's `width` / `height` of 0 does.
+    pub(crate) fn dest_size(&self, sw: u32, sh: u32) -> (u32, u32) {
+        match self.size {
+            None => (sw, sh),
+            Some((w, h)) => (
+                match w {
+                    0 => sw,
+                    w => w,
+                },
+                match h {
+                    0 => sh,
+                    h => h,
+                },
+            ),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -130,6 +150,215 @@ pub struct Compositor {
 /// overlay-less (bounds startup memory and latency). Shared with the GPU
 /// sibling so both compositors buffer the same startup depth.
 pub(crate) const PENDING_CAP: usize = 8;
+
+/// The output pixel format, CPU element only (the GPU one is RGBA8).
+const FORMAT_PROP: PropertySpec = PropertySpec::new(
+    "format",
+    PropKind::Str,
+    "output (and required input) pixel format",
+)
+.with_enum_values("rgba | RGBA | rgba8 | nv12 | NV12 | i420 | I420 | i422 | I422 | i444 | I444")
+.with_default("rgba");
+
+/// Both compositors' property table: the canvas knobs, the per-pad placement
+/// flattened to `sinkN-*` for the pad indices given, and whatever the element
+/// adds. One macro, so the two tables cannot drift apart.
+///
+/// The pad indices are spelled out because
+/// [`properties`](MultiInputElement::properties) is a `&'static` table: gst's
+/// request-pad properties (`sink_1::xpos`) have no analog in this launch syntax.
+/// Both tables cover pads 0..=7; a graph with more pads places the rest through
+/// [`CompositorPad`] at construction.
+macro_rules! compositor_props {
+    ([$($i:literal)*] $(, $extra:expr)*) => {
+        &[
+            PropertySpec::new("width", PropKind::Uint, "output canvas width in pixels")
+                .with_default("320"),
+            PropertySpec::new("height", PropKind::Uint, "output canvas height in pixels")
+                .with_default("240"),
+            PropertySpec::new(
+                "framerate",
+                PropKind::Fraction,
+                "nominal output framerate, as labelled on the output caps",
+            )
+            .with_default("30/1"),
+            // gst's `compositor` has no element-level geometry (its output caps
+            // are negotiated) and spells its fill as a `background` enum
+            // (checker / black / white / transparent), so these are g2g names.
+            // The packing matches `textoverlay color`.
+            PropertySpec::new(
+                "background-color",
+                PropKind::Uint,
+                "canvas fill behind every input, 0xAARRGGBB (4278190080 = opaque black)",
+            )
+            .with_default("4278190080"),
+            PropertySpec::new(
+                "timed-output",
+                PropKind::Bool,
+                "keep emitting at the output framerate while input 0 stalls, holding its last frame",
+            )
+            .with_default("false"),
+            $($extra,)*
+            $(
+                PropertySpec::new(
+                    concat!("sink", $i, "-xpos"),
+                    PropKind::Int,
+                    concat!("pad ", $i, ": left edge on the canvas in pixels, may be negative"),
+                )
+                .with_default("0"),
+                PropertySpec::new(
+                    concat!("sink", $i, "-ypos"),
+                    PropKind::Int,
+                    concat!("pad ", $i, ": top edge on the canvas in pixels, may be negative"),
+                )
+                .with_default("0"),
+                PropertySpec::new(
+                    concat!("sink", $i, "-zorder"),
+                    PropKind::Uint,
+                    concat!("pad ", $i, ": paint order, lower is painted first"),
+                )
+                .with_default("0"),
+                // gst's compositor pad alpha is a 0.0-1.0 double; this is the
+                // 0..=255 byte the blend actually multiplies by.
+                PropertySpec::new(
+                    concat!("sink", $i, "-alpha"),
+                    PropKind::Uint,
+                    concat!("pad ", $i, ": per-pad alpha, 0 transparent to 255 opaque"),
+                )
+                .with_default("255")
+                .with_range("0", "255"),
+                PropertySpec::new(
+                    concat!("sink", $i, "-width"),
+                    PropKind::Uint,
+                    concat!("pad ", $i, ": on-canvas width to scale to, 0 for native"),
+                )
+                .with_default("0"),
+                PropertySpec::new(
+                    concat!("sink", $i, "-height"),
+                    PropKind::Uint,
+                    concat!("pad ", $i, ": on-canvas height to scale to, 0 for native"),
+                )
+                .with_default("0"),
+            )*
+        ]
+    };
+}
+
+static COMPOSITOR_PROPS: &[PropertySpec] = compositor_props!([0 1 2 3 4 5 6 7], FORMAT_PROP);
+
+/// The same table without the CPU-only `format` (this element is RGBA8).
+#[cfg(feature = "wgpu-sink")]
+pub(crate) static WGPU_COMPOSITOR_PROPS: &[PropertySpec] = compositor_props!([0 1 2 3 4 5 6 7]);
+
+/// Split a `sinkN-<knob>` property name into the pad index and the knob.
+fn split_pad_name(name: &str) -> Option<(usize, &str)> {
+    let (index, knob) = name.strip_prefix("sink")?.split_once('-')?;
+    Some((index.parse().ok()?, knob))
+}
+
+/// Apply a flattened per-pad property. `None` when `name` is not one; `Err` when
+/// it names a pad this element does not have (silently ignoring it would leave a
+/// launch line thinking its placement applied) or the value is out of range.
+pub(crate) fn set_pad_property(
+    pads: &mut [CompositorPad],
+    name: &str,
+    value: &PropValue,
+) -> Option<Result<(), PropError>> {
+    let (index, knob) = split_pad_name(name)?;
+    Some(set_pad_knob(pads, index, knob, value))
+}
+
+fn set_pad_knob(
+    pads: &mut [CompositorPad],
+    index: usize,
+    knob: &str,
+    value: &PropValue,
+) -> Result<(), PropError> {
+    let pad = pads.get_mut(index).ok_or(PropError::Value)?;
+    let as_pos =
+        || i32::try_from(value.as_int().ok_or(PropError::Type)?).map_err(|_| PropError::Value);
+    let as_dim =
+        || u32::try_from(value.as_uint().ok_or(PropError::Type)?).map_err(|_| PropError::Value);
+    match knob {
+        "xpos" => pad.xpos = as_pos()?,
+        "ypos" => pad.ypos = as_pos()?,
+        "zorder" => pad.zorder = as_dim()?,
+        "alpha" => {
+            pad.alpha = u8::try_from(value.as_uint().ok_or(PropError::Type)?)
+                .map_err(|_| PropError::Value)?
+        }
+        // A zero dimension is "native", so the pair carries whichever of the two
+        // the line set (see `CompositorPad::dest_size`).
+        "width" | "height" => {
+            let (w, h) = pad.size.unwrap_or((0, 0));
+            let v = as_dim()?;
+            pad.size = Some(match knob {
+                "width" => (v, h),
+                _ => (w, v),
+            });
+        }
+        _ => return Err(PropError::Unknown),
+    }
+    Ok(())
+}
+
+/// Read back a flattened per-pad property, `None` if `name` is not one (or names
+/// a pad this element does not have).
+pub(crate) fn pad_property(pads: &[CompositorPad], name: &str) -> Option<PropValue> {
+    let (index, knob) = split_pad_name(name)?;
+    let pad = pads.get(index)?;
+    let (w, h) = pad.size.unwrap_or((0, 0));
+    Some(match knob {
+        "xpos" => PropValue::Int(pad.xpos as i64),
+        "ypos" => PropValue::Int(pad.ypos as i64),
+        "zorder" => PropValue::Uint(pad.zorder as u64),
+        "alpha" => PropValue::Uint(pad.alpha as u64),
+        "width" => PropValue::Uint(w as u64),
+        "height" => PropValue::Uint(h as u64),
+        _ => return None,
+    })
+}
+
+/// A canvas dimension property value.
+pub(crate) fn dim_property(value: &PropValue) -> Result<u32, PropError> {
+    u32::try_from(value.as_uint().ok_or(PropError::Type)?).map_err(|_| PropError::Value)
+}
+
+/// A `framerate` property (`fps` or `num/den`) as the Q16 fps both elements store.
+pub(crate) fn framerate_property(value: &PropValue) -> Result<u32, PropError> {
+    let (num, den) = value.as_fraction().ok_or(PropError::Type)?;
+    if num <= 0 || den <= 0 {
+        return Err(PropError::Value);
+    }
+    u32::try_from(num as u64 * 65536 / den as u64).map_err(|_| PropError::Value)
+}
+
+/// A packed `0xAARRGGBB` colour property as the `[R, G, B, A]` the blend takes.
+pub(crate) fn color_property(value: &PropValue) -> Result<[u8; 4], PropError> {
+    let argb =
+        u32::try_from(value.as_uint().ok_or(PropError::Type)?).map_err(|_| PropError::Value)?;
+    Ok([
+        (argb >> 16) as u8,
+        (argb >> 8) as u8,
+        argb as u8,
+        (argb >> 24) as u8,
+    ])
+}
+
+/// The inverse of [`color_property`], for `get_property`.
+pub(crate) fn color_value(rgba: [u8; 4]) -> PropValue {
+    let [r, g, b, a] = rgba;
+    PropValue::Uint(((a as u64) << 24) | ((r as u64) << 16) | ((g as u64) << 8) | b as u64)
+}
+
+/// One output frame period in nanoseconds from a nominal framerate (Q16). Zero
+/// for a zero framerate (nothing to pace to).
+pub(crate) fn frame_period_ns(framerate_q16: u32) -> u64 {
+    match framerate_q16 {
+        0 => 0,
+        fps => 1_000_000_000u64 * 65536 / fps as u64,
+    }
+}
 
 /// Paint order: z-order ascending, ties by input index (input 0 backmost).
 /// Shared with the wgpu compositor, which uploads its pads in this order.
@@ -190,9 +419,12 @@ impl<P> CompositorState<P> {
     }
 
     /// Retain emitted input-0 frames so a deadline tick can re-composite the last
-    /// one (zero-order-hold).
-    pub(crate) fn enable_hold(&mut self) {
-        self.hold = true;
+    /// one (zero-order-hold). Turning it off drops what is retained.
+    pub(crate) fn set_hold(&mut self, on: bool) {
+        self.hold = on;
+        if !on {
+            self.held = None;
+        }
     }
 
     /// Whether zero-order-hold output was enabled.
@@ -384,22 +616,13 @@ impl Compositor {
     /// [`PipelinePacket::Tick`] it gets back. Under any other runner it behaves
     /// exactly as it does without this.
     pub fn with_timed_output(mut self) -> Self {
-        self.state.enable_hold();
+        self.state.set_hold(true);
         self
     }
 
     /// Number of composited frames emitted so far (one per input-0 frame).
     pub fn emitted(&self) -> u64 {
         self.state.emitted()
-    }
-
-    /// One output frame period in nanoseconds, from the nominal framerate (Q16).
-    /// Zero for a zero framerate (nothing to pace to).
-    fn frame_period_ns(&self) -> u64 {
-        match self.framerate_q16 {
-            0 => 0,
-            fps => 1_000_000_000u64 * 65536 / fps as u64,
-        }
     }
 
     fn output(&self) -> Caps {
@@ -453,10 +676,8 @@ impl Compositor {
             };
             let pad = self.pads[i];
             let (sw, sh) = (w as usize, h as usize);
-            let (dw, dh) = pad
-                .size
-                .map(|(dw, dh)| (dw as usize, dh as usize))
-                .unwrap_or((sw, sh));
+            let (dw, dh) = pad.dest_size(w, h);
+            let (dw, dh) = (dw as usize, dh as usize);
             if (dw, dh) == (sw, sh) {
                 blend_over(
                     &mut canvas,
@@ -519,9 +740,10 @@ impl Compositor {
             // even-align so a subsampled plane's placement stays on a chroma
             // sample (harmless for the full-res luma plane).
             let (x0, y0) = (pad.xpos & !1, pad.ypos & !1);
-            let scaled = pad
-                .size
-                .map(|(dw, dh)| ((dw & !1) as usize, (dh & !1) as usize));
+            let scaled = pad.size.map(|_| {
+                let (dw, dh) = pad.dest_size(sw, sh);
+                ((dw & !1) as usize, (dh & !1) as usize)
+            });
             for (dc, sc) in dst_chans.iter().zip(src_chans.iter()) {
                 let (cx, cy) = (x0 >> dc.hs, y0 >> dc.vs);
                 match scaled {
@@ -859,9 +1081,63 @@ impl MultiInputElement for Compositor {
     /// which is when a zero-order-hold frame may be due.
     fn tick_interval_ns(&self) -> Option<u64> {
         match self.state.hold_enabled() {
-            true => Some(self.frame_period_ns()).filter(|&ns| ns > 0),
+            true => Some(frame_period_ns(self.framerate_q16)).filter(|&ns| ns > 0),
             false => None,
         }
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        COMPOSITOR_PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        if let Some(applied) = set_pad_property(&mut self.pads, name, &value) {
+            return applied;
+        }
+        match name {
+            "width" => self.out_w = dim_property(&value)?,
+            "height" => self.out_h = dim_property(&value)?,
+            "framerate" => self.framerate_q16 = framerate_property(&value)?,
+            "background-color" => self.background = color_property(&value)?,
+            "timed-output" => self.state.set_hold(value.as_bool().ok_or(PropError::Type)?),
+            "format" => {
+                let format = match value.as_str().ok_or(PropError::Type)? {
+                    "rgba" | "RGBA" | "rgba8" => RawVideoFormat::Rgba8,
+                    "nv12" | "NV12" => RawVideoFormat::Nv12,
+                    "i420" | "I420" => RawVideoFormat::I420,
+                    "i422" | "I422" => RawVideoFormat::I422,
+                    "i444" | "I444" => RawVideoFormat::I444,
+                    _ => return Err(PropError::Value),
+                };
+                self.format = format;
+            }
+            _ => return Err(PropError::Unknown),
+        }
+        Ok(())
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        if let Some(value) = pad_property(&self.pads, name) {
+            return Some(value);
+        }
+        Some(match name {
+            "width" => PropValue::Uint(self.out_w as u64),
+            "height" => PropValue::Uint(self.out_h as u64),
+            "framerate" => PropValue::Fraction((self.framerate_q16 >> 16) as i32, 1),
+            "background-color" => color_value(self.background),
+            "timed-output" => PropValue::Bool(self.state.hold_enabled()),
+            "format" => PropValue::Str(
+                match self.format {
+                    RawVideoFormat::Nv12 => "nv12",
+                    RawVideoFormat::I420 => "i420",
+                    RawVideoFormat::I422 => "i422",
+                    RawVideoFormat::I444 => "i444",
+                    _ => "rgba",
+                }
+                .into(),
+            ),
+            _ => return None,
+        })
     }
 
     fn intercept_caps(&self, _input: usize, upstream_caps: &Caps) -> Result<Caps, G2gError> {
@@ -931,7 +1207,7 @@ impl MultiInputElement for Compositor {
                 // period, so re-composite the frame it last did with the overlays
                 // as they now stand, rather than letting output freeze with it.
                 PipelinePacket::Tick => {
-                    let period = self.frame_period_ns();
+                    let period = frame_period_ns(self.framerate_q16);
                     if let Some((timing, base)) = self.state.take_tick_due(period) {
                         let canvas = self.compose(&base);
                         let frame = self.output_frame(canvas, timing);

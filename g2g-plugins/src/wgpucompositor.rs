@@ -53,13 +53,17 @@ use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::compositor::{paint_order, CompositorPad, CompositorState};
+use crate::compositor::{
+    color_property, color_value, dim_property, frame_period_ns, framerate_property, pad_property,
+    paint_order, set_pad_property, CompositorPad, CompositorState, WGPU_COMPOSITOR_PROPS,
+};
 use crate::gpu::{gpu_err, texture_of, GpuContext, WgpuTextureKeepAlive};
 use g2g_core::frame::Frame;
 use g2g_core::memory::{OwnedWgpuTexture, SystemSlice};
 use g2g_core::{
     Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError, MemoryDomain,
-    MultiInputElement, OutputSink, PipelinePacket, Rate, RawVideoFormat,
+    MultiInputElement, OutputSink, PipelinePacket, PropError, PropValue, PropertySpec, Rate,
+    RawVideoFormat,
 };
 
 /// Largest input / canvas edge the shader's fixed-point resize stays exact for
@@ -412,7 +416,7 @@ impl WgpuCompositor {
     /// (zero-order-hold). Off by default. Needs a runner that ticks the fan-in arm
     /// (`run_muxer_sink_ticked`), as on the CPU element.
     pub fn with_timed_output(mut self) -> Self {
-        self.state.enable_hold();
+        self.state.set_hold(true);
         self
     }
 
@@ -435,15 +439,6 @@ impl WgpuCompositor {
     /// Number of composited frames emitted so far (one per input-0 frame).
     pub fn emitted(&self) -> u64 {
         self.state.emitted()
-    }
-
-    /// One output frame period in nanoseconds, from the nominal framerate (Q16).
-    /// Zero for a zero framerate (nothing to pace to).
-    fn frame_period_ns(&self) -> u64 {
-        match self.framerate_q16 {
-            0 => 0,
-            fps => 1_000_000_000u64 * 65536 / fps as u64,
-        }
     }
 
     fn output(&self) -> Caps {
@@ -604,7 +599,7 @@ impl WgpuCompositor {
                 continue;
             }
             let pad = self.pads[i];
-            let (dw, dh) = pad.size.unwrap_or((sw, sh));
+            let (dw, dh) = pad.dest_size(sw, sh);
             if dw == 0 || dh == 0 {
                 continue;
             }
@@ -872,9 +867,50 @@ impl MultiInputElement for WgpuCompositor {
     /// which is when a zero-order-hold frame may be due.
     fn tick_interval_ns(&self) -> Option<u64> {
         match self.state.hold_enabled() {
-            true => Some(self.frame_period_ns()).filter(|&ns| ns > 0),
+            true => Some(frame_period_ns(self.framerate_q16)).filter(|&ns| ns > 0),
             false => None,
         }
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        WGPU_COMPOSITOR_PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        if let Some(applied) = set_pad_property(&mut self.pads, name, &value) {
+            return applied;
+        }
+        match name {
+            // The canvas geometry sizes the device buffers, so a change rebuilds
+            // them on the next dispatch.
+            "width" => {
+                self.out_w = dim_property(&value)?;
+                self.gpu = None;
+            }
+            "height" => {
+                self.out_h = dim_property(&value)?;
+                self.gpu = None;
+            }
+            "framerate" => self.framerate_q16 = framerate_property(&value)?,
+            "background-color" => self.background = color_property(&value)?,
+            "timed-output" => self.state.set_hold(value.as_bool().ok_or(PropError::Type)?),
+            _ => return Err(PropError::Unknown),
+        }
+        Ok(())
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        if let Some(value) = pad_property(&self.pads, name) {
+            return Some(value);
+        }
+        Some(match name {
+            "width" => PropValue::Uint(self.out_w as u64),
+            "height" => PropValue::Uint(self.out_h as u64),
+            "framerate" => PropValue::Fraction((self.framerate_q16 >> 16) as i32, 1),
+            "background-color" => color_value(self.background),
+            "timed-output" => PropValue::Bool(self.state.hold_enabled()),
+            _ => return None,
+        })
     }
 
     fn intercept_caps(&self, _input: usize, upstream_caps: &Caps) -> Result<Caps, G2gError> {
@@ -957,7 +993,7 @@ impl MultiInputElement for WgpuCompositor {
                 // the packed buffer, or the texture still bound) with the overlays
                 // as they now stand.
                 PipelinePacket::Tick => {
-                    let period = self.frame_period_ns();
+                    let period = frame_period_ns(self.framerate_q16);
                     if let Some((timing, base)) = self.state.take_tick_due(period) {
                         self.ensure_gpu().await?;
                         let frame = self.compose_frame(&base, timing)?;

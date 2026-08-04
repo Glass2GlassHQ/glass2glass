@@ -530,3 +530,163 @@ fn oggmux_is_a_launch_element() {
         "oggmux is registered as a launch element"
     );
 }
+
+#[test]
+fn compositor_canvas_and_flattened_pad_placement() {
+    use g2g_core::{MultiInputElement, PropError};
+    use g2g_plugins::compositor::{Compositor, CompositorPad};
+    let mut e = Compositor::new(
+        320,
+        240,
+        Vec::from([CompositorPad::at(0, 0), CompositorPad::at(0, 0)]),
+    );
+    for name in [
+        "width",
+        "height",
+        "framerate",
+        "background-color",
+        "timed-output",
+        "format",
+        "sink0-xpos",
+        "sink1-ypos",
+        "sink7-height",
+    ] {
+        assert!(declares(e.properties(), name), "{name} is declared");
+    }
+    assert!(
+        !declares(e.properties(), "sink8-xpos"),
+        "the flattened pad names are bounded"
+    );
+
+    e.set_property("width", PropValue::Uint(640)).unwrap();
+    e.set_property("height", PropValue::Uint(480)).unwrap();
+    assert_eq!(e.get_property("width"), Some(PropValue::Uint(640)));
+    assert_eq!(e.get_property("height"), Some(PropValue::Uint(480)));
+    e.set_property("framerate", PropValue::Fraction(60, 1))
+        .unwrap();
+    assert_eq!(
+        e.get_property("framerate"),
+        Some(PropValue::Fraction(60, 1))
+    );
+    // 0xAARRGGBB, the textoverlay `color` packing: opaque green.
+    e.set_property("background-color", PropValue::Uint(0xFF00FF00))
+        .unwrap();
+    assert_eq!(
+        e.get_property("background-color"),
+        Some(PropValue::Uint(0xFF00FF00))
+    );
+    e.set_property("format", PropValue::Str("nv12".into()))
+        .unwrap();
+    assert_eq!(
+        e.get_property("format"),
+        Some(PropValue::Str("nv12".into()))
+    );
+    // Timed output drives the declared tick interval off the framerate above.
+    assert_eq!(e.tick_interval_ns(), None);
+    e.set_property("timed-output", PropValue::Bool(true))
+        .unwrap();
+    assert_eq!(e.get_property("timed-output"), Some(PropValue::Bool(true)));
+    assert_eq!(
+        e.tick_interval_ns(),
+        Some(1_000_000_000 * 65536 / (60 << 16))
+    );
+    e.set_property("timed-output", PropValue::Bool(false))
+        .unwrap();
+    assert_eq!(e.tick_interval_ns(), None);
+
+    // Per-pad placement, gst's `sink_1::xpos` request-pad properties flattened.
+    for (name, value) in [
+        ("sink1-xpos", PropValue::Int(-8)),
+        ("sink1-ypos", PropValue::Int(12)),
+        ("sink1-zorder", PropValue::Uint(3)),
+        ("sink1-alpha", PropValue::Uint(128)),
+        ("sink1-width", PropValue::Uint(64)),
+        ("sink1-height", PropValue::Uint(48)),
+    ] {
+        e.set_property(name, value.clone()).unwrap();
+        assert_eq!(e.get_property(name), Some(value), "{name} round-trips");
+    }
+
+    assert_eq!(
+        e.set_property("width", PropValue::Str("640".into())),
+        Err(PropError::Type),
+        "a canvas dimension is not a string"
+    );
+    assert_eq!(
+        e.set_property("sink1-xpos", PropValue::Uint(4)),
+        Err(PropError::Type),
+        "a pad position is signed"
+    );
+    assert_eq!(
+        e.set_property("sink1-alpha", PropValue::Uint(300)),
+        Err(PropError::Value),
+        "alpha is a byte"
+    );
+    assert_eq!(
+        e.set_property("format", PropValue::Str("bgrx".into())),
+        Err(PropError::Value),
+        "only the formats the element composites"
+    );
+    // Declared for eight pads, but this instance has two: a placement that would
+    // silently vanish is an error instead.
+    assert_eq!(
+        e.set_property("sink5-xpos", PropValue::Int(4)),
+        Err(PropError::Value)
+    );
+    assert_eq!(e.get_property("sink5-xpos"), None);
+    assert_eq!(
+        e.set_property("bogus", PropValue::Int(0)),
+        Err(PropError::Unknown)
+    );
+}
+
+#[cfg(feature = "wgpu-sink")]
+#[test]
+fn wgpucompositor_shares_the_compositor_properties() {
+    use g2g_core::{MultiInputElement, PropError};
+    use g2g_plugins::compositor::CompositorPad;
+    use g2g_plugins::wgpucompositor::WgpuCompositor;
+    let mut e = WgpuCompositor::new(
+        320,
+        240,
+        Vec::from([CompositorPad::at(0, 0), CompositorPad::at(0, 0)]),
+    );
+    for name in [
+        "width",
+        "height",
+        "framerate",
+        "background-color",
+        "timed-output",
+        "sink1-xpos",
+        "sink7-height",
+    ] {
+        assert!(declares(e.properties(), name), "{name} is declared");
+    }
+    // RGBA8 only, so it declares no output format at all rather than a knob it
+    // would have to reject every value of.
+    assert!(!declares(e.properties(), "format"));
+    assert_eq!(
+        e.set_property("format", PropValue::Str("nv12".into())),
+        Err(PropError::Unknown)
+    );
+
+    e.set_property("width", PropValue::Uint(1280)).unwrap();
+    e.set_property("height", PropValue::Uint(720)).unwrap();
+    assert_eq!(e.get_property("width"), Some(PropValue::Uint(1280)));
+    assert_eq!(e.get_property("height"), Some(PropValue::Uint(720)));
+    e.set_property("background-color", PropValue::Uint(0xFF102030))
+        .unwrap();
+    assert_eq!(
+        e.get_property("background-color"),
+        Some(PropValue::Uint(0xFF102030))
+    );
+    e.set_property("sink1-zorder", PropValue::Uint(2)).unwrap();
+    e.set_property("sink1-alpha", PropValue::Uint(64)).unwrap();
+    assert_eq!(e.get_property("sink1-zorder"), Some(PropValue::Uint(2)));
+    assert_eq!(e.get_property("sink1-alpha"), Some(PropValue::Uint(64)));
+    assert_eq!(
+        e.set_property("sink3-xpos", PropValue::Int(0)),
+        Err(PropError::Value),
+        "two pads, so pad 3 does not exist"
+    );
+}

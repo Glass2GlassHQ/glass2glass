@@ -646,6 +646,13 @@ let comp = Compositor::new(1280, 720, vec![
 // bg -> comp.input(0); cam -> rgba -> scale -> comp.input(1); comp -> sink (see tests).
 ```
 
+Or as a launch line (M876), placement via the flattened pad properties:
+
+```text
+videotestsrc ! c.  v4l2src device=/dev/video0 ! videoconvert ! videoscale ! c. \
+  compositor name=c width=1280 height=720 sink1-xpos=940 sink1-ypos=460 sink1-zorder=1 ! waylandsink
+```
+
 Features: `v4l2 wayland-sink`. Full graph in
 [`g2g-plugins/tests/pip_smoke.rs`](g2g-plugins/tests/pip_smoke.rs).
 
