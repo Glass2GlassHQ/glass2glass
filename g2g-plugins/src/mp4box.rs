@@ -61,9 +61,32 @@ pub(crate) fn ftyp_cmaf() -> Vec<u8> {
 /// file is separately addressable by an HLS `#EXT-X-BYTERANGE` or a DASH
 /// `SegmentBase` range. Each unit this muxer emits is one CMAF fragment which is
 /// also one CMAF segment, hence both `cmfs` and `cmff`; `msdh` marks it a generic
-/// DASH media segment.
-pub(crate) fn styp_cmaf() -> Vec<u8> {
-    brand_box(b"styp", b"cmfs", 0, &[b"cmfs", b"cmff", b"msdh"])
+/// DASH media segment. `chunked` adds the CMAF chunk brand `cmfl` (M859): the
+/// segment is then delivered as a sequence of `moof`+`mdat` chunks, each a
+/// separately addressable prefix of it.
+pub(crate) fn styp_cmaf(chunked: bool) -> Vec<u8> {
+    let compatible: &[&[u8; 4]] = if chunked {
+        &[b"cmfs", b"cmff", b"cmfl", b"msdh"]
+    } else {
+        &[b"cmfs", b"cmff", b"msdh"]
+    };
+    brand_box(b"styp", b"cmfs", 0, compatible)
+}
+
+/// The `prft` (ProducerReferenceTimeBox, ISO/IEC 14496-12 8.16.5) written ahead
+/// of a fragment's `moof` (M859): it maps `media_time`, the decode time of the
+/// fragment's first sample in the track's timescale, to the producer's wall clock
+/// as a 64-bit NTP timestamp, which is how a low-latency player measures its own
+/// end-to-end latency. Version 1 (64-bit `media_time`), matching what ffmpeg's
+/// `-write_prft wallclock` writes. Flags stay `0`, which DASH-IF maps to
+/// `ProducerReferenceTime@type = encoder`: the time is read where the samples are
+/// muxed, not carried from a capture device.
+pub(crate) fn prft(reference_track_id: u32, ntp: u64, media_time: u64) -> Vec<u8> {
+    let mut p = Vec::with_capacity(20);
+    p.extend_from_slice(&reference_track_id.to_be_bytes());
+    p.extend_from_slice(&ntp.to_be_bytes());
+    p.extend_from_slice(&media_time.to_be_bytes());
+    full_box(b"prft", 1, 0, &p)
 }
 
 // --- readers ---------------------------------------------------------------

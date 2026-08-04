@@ -52,6 +52,12 @@ pub struct Mp4Mux {
     fragment_duration_ms: u64,
     /// CMAF conformance mode; see [`with_cmaf`](Self::with_cmaf).
     cmaf: bool,
+    /// Target CMAF chunk duration in milliseconds (`0` = no chunking); see
+    /// [`with_chunk_duration_ms`](Self::with_chunk_duration_ms).
+    chunk_duration_ms: u64,
+    /// Whether each fragment is preceded by a `prft`; see
+    /// [`with_prft`](Self::with_prft).
+    write_prft: bool,
 }
 
 impl Default for Mp4Mux {
@@ -72,6 +78,8 @@ impl Mp4Mux {
             emitted: 0,
             fragment_duration_ms: 0,
             cmaf: false,
+            chunk_duration_ms: 0,
+            write_prft: false,
         }
     }
 
@@ -96,6 +104,25 @@ impl Mp4Mux {
     /// access unit; a longer target still closes at the first keyframe past it.
     pub fn with_cmaf(mut self, cmaf: bool) -> Self {
         self.cmaf = cmaf;
+        self
+    }
+
+    /// Split each fragment into CMAF chunks of at least `ms` milliseconds (M859),
+    /// each its own `moof`+`mdat` emitted the moment it fills, so a low-latency
+    /// player receives part of a fragment before the fragment is complete. `0`
+    /// (the default) writes one `moof`+`mdat` per fragment. Inert unless the
+    /// muxer batches (`fragment-duration` set, or `cmaf`), since per-AU mode has
+    /// no fragment to subdivide.
+    pub fn with_chunk_duration_ms(mut self, ms: u64) -> Self {
+        self.chunk_duration_ms = ms;
+        self
+    }
+
+    /// Write a `prft` ahead of each fragment (M859) mapping the fragment's first
+    /// decode time to the producer's wall clock (NTP), which is what lets a
+    /// player measure its end-to-end latency against a chunked live stream.
+    pub fn with_prft(mut self, write_prft: bool) -> Self {
+        self.write_prft = write_prft;
         self
     }
 
@@ -193,6 +220,18 @@ impl AsyncElement for Mp4Mux {
                 "write a CMAF track file: cmfc brands, a styp per segment, and fragments starting only at a sync sample",
             )
             .with_default("false"),
+            PropertySpec::new(
+                "chunk-duration",
+                PropKind::Uint,
+                "target CMAF chunk duration, milliseconds (0 = one moof+mdat per fragment); a chunk is emitted as soon as it fills",
+            )
+            .with_default("0"),
+            PropertySpec::new(
+                "write-prft",
+                PropKind::Bool,
+                "write a producer reference time box (prft) ahead of each fragment, mapping its decode time to the wall clock",
+            )
+            .with_default("false"),
         ];
         PROPS
     }
@@ -207,6 +246,14 @@ impl AsyncElement for Mp4Mux {
                 self.cmaf = value.as_bool().ok_or(PropError::Type)?;
                 Ok(())
             }
+            "chunk-duration" => {
+                self.chunk_duration_ms = value.as_uint().ok_or(PropError::Type)?;
+                Ok(())
+            }
+            "write-prft" => {
+                self.write_prft = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -215,6 +262,8 @@ impl AsyncElement for Mp4Mux {
         match name {
             "fragment-duration" => Some(PropValue::Uint(self.fragment_duration_ms)),
             "cmaf" => Some(PropValue::Bool(self.cmaf)),
+            "chunk-duration" => Some(PropValue::Uint(self.chunk_duration_ms)),
+            "write-prft" => Some(PropValue::Bool(self.write_prft)),
             _ => None,
         }
     }
@@ -236,11 +285,19 @@ impl AsyncElement for Mp4Mux {
                     // Build the box writer on the first AU (its moov needs the
                     // in-band parameter sets the first access unit carries).
                     let frag_ns = self.fragment_duration_ms.saturating_mul(1_000_000);
+                    let chunk_ns = self.chunk_duration_ms.saturating_mul(1_000_000);
                     let cmaf = self.cmaf;
+                    // the wall clock is read here, in the std element, not in the
+                    // no_std box writer.
+                    let clock = self
+                        .write_prft
+                        .then_some(crate::rtcp::ntp_now as fn() -> u64);
                     let mux = self.mux.get_or_insert_with(|| {
                         Fmp4Muxer::new(self.codec, self.width, self.height, self.tags.clone())
                             .with_fragment_duration_ns(frag_ns)
                             .with_cmaf(cmaf)
+                            .with_chunk_duration_ns(chunk_ns)
+                            .with_producer_clock(clock)
                     });
                     let bytes =
                         mux.push_au(slice, frame.timing.pts_ns, frame.timing.duration_ns)?;

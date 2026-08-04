@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M859: CMAF low-latency chunking (`chunk-duration` sub-fragment `moof`+`mdat`s, `cmfl` brand) and per-fragment `prft` (`write-prft`) on both fMP4 muxers.
+
 - M858: oggmux writes chained streams, a new link per changed `Segment`, round-tripping oggdemux's chain boundary and validated against ffmpeg.
 
 - M856: multi-head attention, matmul, layernorm, and softmax GPU ops in `WgpuInference`; a safetensors transformer block runs GPU-resident.

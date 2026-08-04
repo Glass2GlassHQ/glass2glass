@@ -387,6 +387,11 @@ jobs:
       # ffmpeg's own `-movflags cmaf` output sample-exact, timing included.
       - name: CMAF oracle (mp4mux cmaf + mp4demux vs ffmpeg)
         run: cargo test -p g2g-plugins --locked --features std --test m832_cmaf -- --nocapture
+      # CMAF low-latency chunking (M859): a chunked, prft-carrying file decodes
+      # to the unchunked mux's pictures, and its segments have the same box
+      # layout as ffmpeg's own low-latency DASH output.
+      - name: CMAF chunk oracle (mp4mux chunk-duration vs ffmpeg)
+        run: cargo test -p g2g-plugins --locked --features std --test m859_cmaf_chunks -- --nocapture
       # MP4 metadata atoms (M838): ffprobe reads the freeform `----` and the
       # integer `trkn` / `disk` / `cpil` atoms g2g writes, per file and per track,
       # and g2g reads the same atoms out of an ffmpeg-authored file.

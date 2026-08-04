@@ -46,10 +46,11 @@ use crate::fmp4mux::{
     visual_sample_entry, vp8_keyframe, vp9_keyframe,
 };
 use crate::mp4audiosink::esds;
-use crate::mp4box::{ftyp, ftyp_cmaf, full_box, mp4_box, styp_cmaf, udta_with_tags, MATRIX};
+use crate::mp4box::{ftyp, ftyp_cmaf, full_box, mp4_box, prft, styp_cmaf, udta_with_tags, MATRIX};
 use crate::opusparse::{
     dops_from_opus_head, is_opus_config, parse_opus_head, OPUS_ENCODER_PRE_SKIP,
 };
+use crate::rtcp;
 
 /// Video tracks use a 90 kHz media timescale; audio tracks use the sample rate.
 const VIDEO_TIMESCALE: u32 = 90_000;
@@ -134,6 +135,12 @@ pub struct Mp4MuxN {
     faststart: bool,
     /// CMAF conformance mode (M832); see [`with_cmaf`](Self::with_cmaf).
     cmaf: bool,
+    /// Target CMAF chunk duration in milliseconds (`0` = no chunking); see
+    /// [`with_chunk_duration_ms`](Self::with_chunk_duration_ms).
+    chunk_duration_ms: u64,
+    /// Whether each fragment is preceded by a `prft`; see
+    /// [`with_prft`](Self::with_prft).
+    write_prft: bool,
     /// Progressive mode's buffered samples, in the global PTS-merged order they
     /// were released (which is also the `mdat` byte order). Empty in the
     /// fragmented default.
@@ -173,6 +180,8 @@ struct PendingSample {
 /// A track's in-progress `moof`+`mdat` fragment: the samples buffered so far, the
 /// decode time at the fragment's first sample (its `tfdt`), and the accumulated
 /// media duration (track timescale) used to decide when the target is reached.
+/// With chunking on (M859) the buffered samples and the `tfdt` are the open
+/// chunk's, while `accum_ticks` still measures the whole fragment.
 #[derive(Debug, Clone, Default)]
 struct PendingFragment {
     samples: Vec<PendingSample>,
@@ -180,6 +189,14 @@ struct PendingFragment {
     /// PTS (ns) of the fragment's first sample, carried on the emitted byte frame.
     base_pts_ns: u64,
     accum_ticks: u64,
+    /// Media duration of the open chunk only (track timescale).
+    chunk_ticks: u64,
+    /// Whether a chunk of this fragment has already been emitted, i.e. its `styp`
+    /// and `prft` are written and the next chunk continues it.
+    started: bool,
+    /// Producer wall clock (NTP) sampled at the fragment's first sample, written
+    /// in its `prft`.
+    ntp: u64,
 }
 
 impl Mp4MuxN {
@@ -201,6 +218,8 @@ impl Mp4MuxN {
             fragmented: true,
             faststart: false,
             cmaf: false,
+            chunk_duration_ms: 0,
+            write_prft: false,
             samples: Vec::new(),
             tags: TagList::new(),
             track_tags: alloc::vec![TagList::new(); inputs],
@@ -241,6 +260,26 @@ impl Mp4MuxN {
     /// one fragment per AU); see [`fragment_duration_ms`](Self::fragment_duration_ms).
     pub fn with_fragment_duration_ms(mut self, ms: u64) -> Self {
         self.fragment_duration_ms = ms;
+        self
+    }
+
+    /// Split each fragment into CMAF chunks of at least `ms` milliseconds (M859),
+    /// each its own `moof`+`mdat` emitted the moment it fills, so a low-latency
+    /// player receives part of a fragment before the fragment is complete. `0`
+    /// (the default) writes one `moof`+`mdat` per fragment. Inert unless the
+    /// muxer batches (`fragment-duration` set, or `cmaf`), since per-AU mode has
+    /// no fragment to subdivide.
+    pub fn with_chunk_duration_ms(mut self, ms: u64) -> Self {
+        self.chunk_duration_ms = ms;
+        self
+    }
+
+    /// Write a `prft` ahead of each fragment (M859) mapping the fragment's first
+    /// decode time to the producer's wall clock (NTP), which is what lets a
+    /// player measure its end-to-end latency against a chunked live stream. The
+    /// box names the fragment's own track.
+    pub fn with_prft(mut self, write_prft: bool) -> Self {
+        self.write_prft = write_prft;
         self
     }
 
@@ -566,18 +605,26 @@ impl Mp4MuxN {
         // CMAF mode batches even with no target, because a fragment there may only
         // start at a sync sample.
         let target = self.frag_target_ticks(input, timescale);
-        if (target > 0 || self.cmaf)
-            && is_sync
-            && !self.pending[input].samples.is_empty()
-            && self.pending[input].accum_ticks >= target
+        // With chunking on the buffered samples are only the open chunk, so a
+        // fragment is open while any of its chunks has been emitted too.
+        let open = self.pending[input].started || !self.pending[input].samples.is_empty();
+        if (target > 0 || self.cmaf) && is_sync && open && self.pending[input].accum_ticks >= target
         {
             self.flush_track(input, out).await?;
+            self.close_fragment(input);
         }
 
+        let write_prft = self.write_prft;
+        let decode_time = self.decode_time[input];
         let pend = &mut self.pending[input];
         if pend.samples.is_empty() {
-            pend.base_decode_time = self.decode_time[input];
+            pend.base_decode_time = decode_time;
             pend.base_pts_ns = pts_ns;
+            if !pend.started {
+                // the producer's wall clock at the fragment's first sample is what
+                // its prft maps to that sample's decode time.
+                pend.ntp = if write_prft { rtcp::ntp_now() } else { 0 };
+            }
         }
         pend.samples.push(PendingSample {
             bytes: sample,
@@ -585,10 +632,19 @@ impl Mp4MuxN {
             is_sync,
         });
         pend.accum_ticks += duration as u64;
+        pend.chunk_ticks += duration as u64;
         self.decode_time[input] += duration as u64;
 
         // Per-AU mode (target 0): flush immediately, one fragment per access unit.
         if target == 0 && !self.cmaf {
+            self.flush_track(input, out).await?;
+            self.close_fragment(input);
+            return Ok(());
+        }
+        // Close the chunk as soon as it reaches its target: the point of chunking
+        // is that these bytes leave now rather than at the end of the fragment.
+        let chunk_target = self.chunk_target_ticks(timescale);
+        if chunk_target > 0 && self.pending[input].chunk_ticks >= chunk_target {
             self.flush_track(input, out).await?;
         }
         Ok(())
@@ -605,9 +661,27 @@ impl Mp4MuxN {
         )
     }
 
-    /// Write a track's pending fragment as one `moof`+`mdat` (a multi-sample
-    /// `trun`), prepending the `ftyp`+`moov` init segment on the first fragment. A
-    /// no-op when the track has no buffered samples.
+    /// The chunk-duration target in a track's timescale (`0` = no chunking).
+    fn chunk_target_ticks(&self, timescale: u32) -> u64 {
+        if self.chunk_duration_ms == 0 {
+            return 0;
+        }
+        ns_to_ts(self.chunk_duration_ms.saturating_mul(1_000_000), timescale)
+    }
+
+    /// End the open fragment on a track: the next chunk written there opens a new
+    /// one, with its own `styp` and `prft`.
+    fn close_fragment(&mut self, input: usize) {
+        let pend = &mut self.pending[input];
+        pend.accum_ticks = 0;
+        pend.started = false;
+    }
+
+    /// Write a track's buffered samples as one `moof`+`mdat` (a multi-sample
+    /// `trun`), prepending the `ftyp`+`moov` init segment on the first fragment.
+    /// That is the whole fragment unless chunking is on, in which case it is the
+    /// open chunk and only the one that opens a fragment carries its `styp` and
+    /// `prft`. A no-op when the track has no buffered samples.
     async fn flush_track(
         &mut self,
         input: usize,
@@ -616,33 +690,48 @@ impl Mp4MuxN {
         if self.pending[input].samples.is_empty() {
             return Ok(());
         }
-        let pend = core::mem::take(&mut self.pending[input]);
+        let samples = core::mem::take(&mut self.pending[input].samples);
+        let pend = &mut self.pending[input];
+        let (base_decode_time, base_pts_ns, opens_fragment, ntp) = (
+            pend.base_decode_time,
+            pend.base_pts_ns,
+            !pend.started,
+            pend.ntp,
+        );
+        pend.chunk_ticks = 0;
+        pend.started = true;
 
+        // track_ID is the 1-based pad index; PTS of the first buffered sample.
+        let track_id = (input + 1) as u32;
         let mut bytes = Vec::new();
         if !self.header_written {
             bytes.extend_from_slice(&if self.cmaf { ftyp_cmaf() } else { ftyp() });
             bytes.extend_from_slice(&av_moov(&self.inits, None, &self.moov_tags()));
             self.header_written = true;
         }
-        if self.cmaf {
-            bytes.extend_from_slice(&styp_cmaf()); // this fragment is a CMAF segment
+        if opens_fragment {
+            if self.cmaf {
+                // this fragment is a CMAF segment, of chunks when chunking is on
+                bytes.extend_from_slice(&styp_cmaf(self.chunk_duration_ms > 0));
+            }
+            if self.write_prft {
+                bytes.extend_from_slice(&prft(track_id, ntp, base_decode_time));
+            }
         }
 
-        // track_ID is the 1-based pad index; PTS of the first buffered sample.
-        let track_id = (input + 1) as u32;
         self.sequence += 1;
         bytes.extend_from_slice(&av_fragment(
             track_id,
             self.sequence,
-            pend.base_decode_time,
+            base_decode_time,
             self.cmaf,
-            &pend.samples,
+            &samples,
         ));
 
         let out_frame = Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
             FrameTiming {
-                pts_ns: pend.base_pts_ns,
+                pts_ns: base_pts_ns,
                 ..FrameTiming::default()
             },
             self.emitted,
@@ -656,6 +745,7 @@ impl Mp4MuxN {
     async fn flush_all(&mut self, out: &mut dyn OutputSink) -> Result<(), G2gError> {
         for input in 0..self.inputs {
             self.flush_track(input, out).await?;
+            self.close_fragment(input);
         }
         Ok(())
     }
@@ -858,6 +948,18 @@ impl MultiInputElement for Mp4MuxN {
                 "write a CMAF track file: cmfc brands, a styp per segment, and fragments starting only at a sync sample (one input pad, fragmented layout)",
             )
             .with_default("false"),
+            PropertySpec::new(
+                "chunk-duration",
+                PropKind::Uint,
+                "target CMAF chunk duration, milliseconds (0 = one moof+mdat per fragment); a chunk is emitted as soon as it fills",
+            )
+            .with_default("0"),
+            PropertySpec::new(
+                "write-prft",
+                PropKind::Bool,
+                "write a producer reference time box (prft) ahead of each fragment, mapping its decode time to the wall clock",
+            )
+            .with_default("false"),
         ];
         PROPS
     }
@@ -886,6 +988,14 @@ impl MultiInputElement for Mp4MuxN {
                 self.cmaf = on;
                 Ok(())
             }
+            "chunk-duration" => {
+                self.chunk_duration_ms = value.as_uint().ok_or(PropError::Type)?;
+                Ok(())
+            }
+            "write-prft" => {
+                self.write_prft = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -896,6 +1006,8 @@ impl MultiInputElement for Mp4MuxN {
             "fragmented" => Some(PropValue::Bool(self.fragmented)),
             "faststart" => Some(PropValue::Bool(self.faststart)),
             "cmaf" => Some(PropValue::Bool(self.cmaf)),
+            "chunk-duration" => Some(PropValue::Uint(self.chunk_duration_ms)),
+            "write-prft" => Some(PropValue::Bool(self.write_prft)),
             _ => None,
         }
     }

@@ -404,8 +404,9 @@ Phased plan:
 - **FLV:** Speex decode (carriage lands M831; no Speex encoder exists anywhere
   to build a validated decode vector, and gst's header-in-tag layout is
   rejected by libavcodec, so wiring a decoder would be an unvalidated claim).
-- **CMAF / fMP4:** low-latency chunking (sub-fragment chunks + `prft`; the
-  fragmented muxer has no sub-fragment model).
+- **CMAF / fMP4:** a multi-pad chunked `Mp4MuxN` test (chunk state is per-track,
+  only single-pad is exercised); client-side `@availabilityTimeOffset` early
+  availability in `DashSrc`.
 - **Spill-to-storage buffer (`downloadbuffer` analog).** An element that absorbs
   a pushed non-seekable byte stream (HTTP, pipe) into a temp file and exposes a
   seekable byte source, so a moov-at-end MP4 over a non-seekable transport

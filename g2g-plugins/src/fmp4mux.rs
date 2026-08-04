@@ -39,7 +39,9 @@ pub(crate) struct Fmp4Muxer {
     height: u32,
     tags: TagList,
     header_written: bool,
-    fragments: u64,
+    /// `mfhd` sequence number of the last `moof` written. A chunk is a `moof`,
+    /// so this counts chunks, not fragments, once chunking is on.
+    sequence: u64,
     /// Accumulated decode time in media-timescale units (`tfdt`).
     decode_time: u64,
     prev_pts_ns: Option<u64>,
@@ -55,12 +57,28 @@ pub(crate) struct Fmp4Muxer {
     /// `fragment_duration_ns` of 0 means one fragment per GOP, not per access
     /// unit). See [`with_cmaf`](Self::with_cmaf).
     cmaf: bool,
-    /// Samples buffered for the open fragment (batched mode).
+    /// Target CMAF chunk duration in nanoseconds (`0` = no chunking, the whole
+    /// fragment is one `moof`+`mdat`). See [`with_chunk_duration_ns`](Self::with_chunk_duration_ns).
+    chunk_duration_ns: u64,
+    /// Producer wall clock (64-bit NTP) for the `prft`, injected by the element
+    /// so this writer makes no syscall of its own. `None` writes no `prft`.
+    producer_clock: Option<fn() -> u64>,
+    /// Samples buffered for the open chunk (batched mode); the whole open
+    /// fragment when chunking is off.
     pending: Vec<PendingSample>,
-    /// `decode_time` at the start of the open fragment (its `tfdt`).
+    /// `decode_time` at the start of the open chunk (its `tfdt`).
     pending_decode_time: u64,
-    /// Accumulated wall duration of the open fragment, in nanoseconds.
+    /// Accumulated wall duration of the open chunk, in nanoseconds.
     pending_dur_ns: u64,
+    /// Accumulated wall duration of the open fragment (every chunk of it so far
+    /// plus `pending`), which is what the fragment target is measured against.
+    fragment_dur_ns: u64,
+    /// Whether a chunk of the current fragment has already been emitted, i.e. the
+    /// fragment's `styp` / `prft` are written and the next chunk continues it.
+    fragment_started: bool,
+    /// Producer wall clock sampled when the open fragment took its first sample,
+    /// written in that fragment's `prft`.
+    fragment_ntp: u64,
 }
 
 /// One buffered sample of an open multi-sample fragment (batched mode).
@@ -79,14 +97,19 @@ impl Fmp4Muxer {
             height,
             tags,
             header_written: false,
-            fragments: 0,
+            sequence: 0,
             decode_time: 0,
             prev_pts_ns: None,
             fragment_duration_ns: 0,
             cmaf: false,
+            chunk_duration_ns: 0,
+            producer_clock: None,
             pending: Vec::new(),
             pending_decode_time: 0,
             pending_dur_ns: 0,
+            fragment_dur_ns: 0,
+            fragment_started: false,
+            fragment_ntp: 0,
         }
     }
 
@@ -105,6 +128,27 @@ impl Fmp4Muxer {
     /// outside a fragment.
     pub(crate) fn with_cmaf(mut self, cmaf: bool) -> Self {
         self.cmaf = cmaf;
+        self
+    }
+
+    /// Split each fragment into CMAF chunks of at least `ns` (M859): a chunk is a
+    /// `moof`+`mdat` over the samples buffered so far, emitted as soon as it
+    /// reaches the target instead of at the end of the fragment, which is what
+    /// takes the muxer's latency contribution from a fragment to a chunk. `0`
+    /// (the default) keeps one `moof`+`mdat` per fragment. Only the batched modes
+    /// have a fragment to subdivide, so this is inert with
+    /// `fragment_duration_ns == 0` and CMAF off.
+    pub(crate) fn with_chunk_duration_ns(mut self, ns: u64) -> Self {
+        self.chunk_duration_ns = ns;
+        self
+    }
+
+    /// Write a `prft` ahead of each fragment mapping its first sample's decode
+    /// time to the producer's wall clock, so a player can measure end-to-end
+    /// latency (M859). The clock is injected (a 64-bit NTP timestamp) because
+    /// this writer is the `no_std` half.
+    pub(crate) fn with_producer_clock(mut self, clock: Option<fn() -> u64>) -> Self {
+        self.producer_clock = clock;
         self
     }
 
@@ -174,36 +218,54 @@ impl Fmp4Muxer {
         // because a fragment there may only start at a sync sample.
         if self.fragment_duration_ns == 0 && !self.cmaf {
             let frag = fragment(
-                self.fragments + 1,
+                self.sequence + 1,
                 self.decode_time,
                 false,
                 &[(duration, &sample, is_sync)],
             );
             out.extend_from_slice(&frag);
-            self.fragments += 1;
+            self.sequence += 1;
             self.decode_time += duration as u64;
             return Ok(out);
         }
 
         // Batched: close the open fragment at a sync sample once it has reached the
-        // target duration, so each fragment begins at a keyframe.
-        if is_sync && !self.pending.is_empty() && self.pending_dur_ns >= self.fragment_duration_ns {
+        // target duration, so each fragment begins at a keyframe. With chunking on,
+        // the open chunk is only part of it, so the target is measured against the
+        // whole fragment.
+        let open = self.fragment_started || !self.pending.is_empty();
+        if is_sync && open && self.fragment_dur_ns >= self.fragment_duration_ns {
             out.extend_from_slice(&self.flush_pending());
+            self.fragment_started = false;
+            self.fragment_dur_ns = 0;
         }
         if self.pending.is_empty() {
             self.pending_decode_time = self.decode_time;
+        }
+        if !self.fragment_started && self.pending.is_empty() {
+            // the producer's wall clock at the fragment's first sample is what its
+            // prft maps to that sample's decode time.
+            self.fragment_ntp = self.producer_clock.map_or(0, |now| now());
         }
         self.pending.push(PendingSample {
             data: sample,
             duration,
             is_sync,
         });
-        self.pending_dur_ns += duration_ns;
+        self.pending_dur_ns = self.pending_dur_ns.saturating_add(duration_ns);
+        self.fragment_dur_ns = self.fragment_dur_ns.saturating_add(duration_ns);
+        // Close the chunk as soon as it reaches its target: the point of chunking
+        // is that these bytes leave now rather than at the end of the fragment.
+        if self.chunk_duration_ns > 0 && self.pending_dur_ns >= self.chunk_duration_ns {
+            out.extend_from_slice(&self.flush_pending());
+        }
         Ok(out)
     }
 
-    /// Emit the open fragment (batched mode), advancing the decode clock. Empty
-    /// when nothing is buffered.
+    /// Emit the open chunk (the whole open fragment when chunking is off),
+    /// advancing the decode clock. The chunk that opens a fragment carries the
+    /// fragment's `styp` and `prft`; the rest continue it. Empty when nothing is
+    /// buffered.
     fn flush_pending(&mut self) -> Vec<u8> {
         if self.pending.is_empty() {
             return Vec::new();
@@ -214,27 +276,37 @@ impl Fmp4Muxer {
             .map(|s| (s.duration, s.data.as_slice(), s.is_sync))
             .collect();
         let mut frag = Vec::new();
-        if self.cmaf {
-            frag.extend_from_slice(&styp_cmaf()); // this fragment is a CMAF segment
+        if !self.fragment_started {
+            if self.cmaf {
+                // this fragment is a CMAF segment, of chunks when chunking is on
+                frag.extend_from_slice(&styp_cmaf(self.chunk_duration_ns > 0));
+            }
+            if self.producer_clock.is_some() {
+                frag.extend_from_slice(&prft(1, self.fragment_ntp, self.pending_decode_time));
+            }
         }
         frag.extend_from_slice(&fragment(
-            self.fragments + 1,
+            self.sequence + 1,
             self.pending_decode_time,
             self.cmaf,
             &samples,
         ));
         let total: u64 = self.pending.iter().map(|s| s.duration as u64).sum();
-        self.fragments += 1;
+        self.sequence += 1;
         self.decode_time += total;
         self.pending.clear();
         self.pending_dur_ns = 0;
+        self.fragment_started = true;
         frag
     }
 
     /// Flush the final partial fragment at end of stream (batched mode). A no-op
     /// in per-AU mode (nothing is ever buffered).
     pub(crate) fn flush(&mut self) -> Vec<u8> {
-        self.flush_pending()
+        let tail = self.flush_pending();
+        self.fragment_started = false;
+        self.fragment_dur_ns = 0;
+        tail
     }
 }
 
@@ -251,7 +323,7 @@ pub(crate) use crate::annexb::{
 };
 
 // box primitives (mp4_box/full_box/ftyp/MATRIX) shared across the MP4 elements.
-use crate::mp4box::{ftyp, ftyp_cmaf, full_box, mp4_box, styp_cmaf, udta_with_tags, MATRIX};
+use crate::mp4box::{ftyp, ftyp_cmaf, full_box, mp4_box, prft, styp_cmaf, udta_with_tags, MATRIX};
 
 // --- box writers ----------------------------------------------------------
 
@@ -631,6 +703,62 @@ mod tests {
         assert_eq!(&b[..4], &11u32.to_be_bytes());
         assert_eq!(&b[4..8], b"mdat");
         assert_eq!(&b[8..], &[1, 2, 3]);
+    }
+
+    /// Chunking splits one fragment into several `moof`+`mdat` pairs, and only
+    /// the chunk that opens the fragment carries its `styp` and the `prft` built
+    /// from the injected producer clock.
+    #[test]
+    fn chunks_carry_one_styp_and_one_prft_per_fragment() {
+        const NTP: u64 = 0x1122_3344_5566_7788;
+        let au = |nals: &[&[u8]]| {
+            let mut v = Vec::new();
+            for n in nals {
+                v.extend_from_slice(&[0, 0, 0, 1]);
+                v.extend_from_slice(n);
+            }
+            v
+        };
+        let key = au(&[
+            &[0x67, 0x42, 0x00, 0x1e, 0x88],
+            &[0x68, 0xce, 0x3c, 0x80],
+            &[0x65, 0x88, 0x84, 0x00],
+        ]);
+        let inter = au(&[&[0x41, 0x9a, 0x00]]);
+
+        // Four 40 ms samples chunked at 80 ms: two chunks of two, one fragment.
+        let mut m = Fmp4Muxer::new(VideoCodec::H264, 320, 240, TagList::new())
+            .with_cmaf(true)
+            .with_chunk_duration_ns(80_000_000)
+            .with_producer_clock(Some(|| NTP));
+        let mut out = Vec::new();
+        for i in 0..4u64 {
+            let data = if i == 0 { &key } else { &inter };
+            out.extend_from_slice(&m.push_au(data, i * 40_000_000, 40_000_000).unwrap());
+        }
+        out.extend_from_slice(&m.flush());
+
+        let count = |four: &[u8; 4]| out.windows(4).filter(|w| *w == four).count();
+        assert_eq!(count(b"moof"), 2, "one moof per chunk");
+        assert_eq!(count(b"styp"), 1, "one segment, not one per chunk");
+        assert_eq!(
+            count(b"prft"),
+            1,
+            "one producer reference time per fragment"
+        );
+
+        // styp, then prft, then the moof they introduce.
+        let at = |four: &[u8; 4]| out.windows(4).position(|w| w == four).unwrap();
+        assert!(at(b"styp") < at(b"prft") && at(b"prft") < at(b"moof"));
+
+        // prft payload: version 1, reference track 1, the injected clock, and the
+        // fragment's own base decode time (its first chunk starts the timeline).
+        let p = at(b"prft") + 4;
+        assert_eq!(out[p], 1, "version 1 (64-bit media_time)");
+        assert_eq!(&out[p + 1..p + 4], &[0, 0, 0], "flags 0: an encoder time");
+        assert_eq!(&out[p + 4..p + 8], &1u32.to_be_bytes(), "reference track");
+        assert_eq!(&out[p + 8..p + 16], &NTP.to_be_bytes());
+        assert_eq!(&out[p + 16..p + 24], &0u64.to_be_bytes(), "media time");
     }
 
     #[test]
