@@ -34,6 +34,7 @@ use crate::demuxseek::{Admit, DemuxSeek};
 use crate::fmp4::{
     parse_fragments, parse_header, prepend_param_sets, starts_with_param_set, Header, Sample,
 };
+use crate::mp4box::next_box_len;
 
 #[derive(Debug)]
 pub struct Fmp4Demux {
@@ -269,30 +270,6 @@ impl Fmp4Demux {
         }
         Ok(())
     }
-}
-
-/// Total length of the box at the start of `buf`. `Ok(None)` means the 8-byte
-/// header (or the 64-bit large-size header) isn't fully buffered yet. Once the
-/// size field is in hand, a value below 8 (including the size-0 "to end of
-/// stream" form) is malformed and fails loud rather than stalling the demuxer
-/// with an unconsumable box.
-fn next_box_len(buf: &[u8]) -> Result<Option<usize>, G2gError> {
-    if buf.len() < 8 {
-        return Ok(None);
-    }
-    let size = u32::from_be_bytes(buf[0..4].try_into().expect("4 bytes"));
-    let total = if size == 1 {
-        if buf.len() < 16 {
-            return Ok(None);
-        }
-        u64::from_be_bytes(buf[8..16].try_into().expect("8 bytes")) as usize
-    } else {
-        size as usize
-    };
-    if total < 8 {
-        return Err(G2gError::CapsMismatch);
-    }
-    Ok(Some(total))
 }
 
 impl AsyncElement for Fmp4Demux {

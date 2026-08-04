@@ -16,6 +16,8 @@ use crate::cea::{parse_cdp, write_cc_data, CcTriple};
 use crate::cenc::{
     fragment_sample_crypt, parse_movie_seig, parse_sinf, CencDefaults, CencTrack, SampleCrypt,
 };
+#[cfg(any(test, feature = "dash"))]
+use crate::mp4box::next_box_len;
 use crate::mp4box::{
     be32, be64, boxes, boxes_at, find_box, find_path, parse_esds, parse_esds_video, parse_ilst_tags,
 };
@@ -1354,10 +1356,144 @@ fn timescale_to_ns(t: u64, timescale: u32) -> u64 {
     t.saturating_mul(1_000_000_000) / timescale as u64
 }
 
+/// Incremental CMAF chunk splitter for a segment still being written (M888): fed
+/// a segment response as its bytes arrive, it yields each complete chunk (the run
+/// of boxes up to and including an `mdat`), so a low-latency packager's
+/// `styp`+`moof`+`mdat` chunks flow downstream while the rest of the segment is
+/// still on the wire. Every fed byte comes back out exactly once and in order
+/// ([`CmafChunker::next_chunk`], then the [`CmafChunker::finish`] remainder), so
+/// chunked and whole-response consumption hand a demuxer the same byte stream.
+///
+/// `max` bounds what may be held for one chunk: a box declaring more than that,
+/// or a pending run growing past it, fails loud instead of buffering on an
+/// attacker-chosen length.
+#[cfg(any(test, feature = "dash"))]
+#[derive(Debug)]
+pub(crate) struct CmafChunker {
+    /// Fed bytes not yet yielded.
+    buf: Vec<u8>,
+    /// How much of `buf`'s front is already framed as whole boxes (none of them
+    /// an `mdat`), so a rescan resumes at the box still arriving.
+    framed: usize,
+    max: usize,
+}
+
+#[cfg(any(test, feature = "dash"))]
+impl CmafChunker {
+    pub(crate) fn new(max: usize) -> Self {
+        Self {
+            buf: Vec::new(),
+            framed: 0,
+            max,
+        }
+    }
+
+    /// Take newly arrived body bytes.
+    pub(crate) fn feed(&mut self, bytes: &[u8]) -> Result<(), G2gError> {
+        if self.buf.len().saturating_add(bytes.len()) > self.max {
+            return Err(G2gError::CapsMismatch);
+        }
+        self.buf.extend_from_slice(bytes);
+        Ok(())
+    }
+
+    /// The next complete chunk, or `None` while it is still arriving. Call until
+    /// it yields `None` after every [`CmafChunker::feed`].
+    pub(crate) fn next_chunk(&mut self) -> Result<Option<Vec<u8>>, G2gError> {
+        loop {
+            let Some(total) = next_box_len(&self.buf[self.framed..])? else {
+                return Ok(None);
+            };
+            if total > self.max {
+                return Err(G2gError::CapsMismatch);
+            }
+            let end = self.framed.saturating_add(total);
+            if self.buf.len() < end {
+                return Ok(None); // the rest of this box is still in flight
+            }
+            let mdat = &self.buf[self.framed + 4..self.framed + 8] == b"mdat";
+            self.framed = end;
+            if mdat {
+                let chunk: Vec<u8> = self.buf.drain(..self.framed).collect();
+                self.framed = 0;
+                return Ok(Some(chunk));
+            }
+        }
+    }
+
+    /// Whatever is left when the body ends: a chunkless response (an init
+    /// segment's `ftyp`+`moov`), a trailing box after the last `mdat`, or the tail
+    /// of a truncated transfer. Verbatim, so what reaches the demuxer is the
+    /// response body either way.
+    pub(crate) fn finish(&mut self) -> Option<Vec<u8>> {
+        self.framed = 0;
+        (!self.buf.is_empty()).then(|| core::mem::take(&mut self.buf))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use alloc::vec;
+
+    /// The chunk splitter cuts a CMAF segment after every `mdat` whatever the
+    /// arrival boundaries (fed one byte at a time here, the worst case), hands
+    /// every fed byte back exactly once and in order, and leaves a trailing box
+    /// for `finish`.
+    #[test]
+    fn cmaf_chunker_splits_after_every_mdat() {
+        use crate::mp4box::mp4_box;
+        let styp = mp4_box(b"styp", b"cmfscmff");
+        let chunk = |n: u8| [mp4_box(b"moof", &[n; 12]), mp4_box(b"mdat", &[n; 20])].concat();
+        let mfra = mp4_box(b"mfra", &[0u8; 8]);
+        let segment = [styp.clone(), chunk(1), chunk(2), chunk(3), mfra.clone()].concat();
+
+        let mut chunker = CmafChunker::new(1024);
+        let mut got = Vec::new();
+        for byte in &segment {
+            chunker.feed(&[*byte]).expect("under the cap");
+            while let Some(c) = chunker.next_chunk().expect("well-formed boxes") {
+                got.push(c);
+            }
+        }
+        assert_eq!(
+            got,
+            vec![[styp, chunk(1)].concat(), chunk(2), chunk(3)],
+            "the leading styp rides the first chunk, then one chunk per moof+mdat"
+        );
+        assert_eq!(
+            chunker.finish(),
+            Some(mfra),
+            "the trailing box comes out last"
+        );
+        assert_eq!(chunker.finish(), None, "and only once");
+        assert_eq!(
+            got.concat().len() + 16,
+            segment.len(),
+            "no byte was dropped"
+        );
+    }
+
+    /// The cap is the splitter's DoS bound: a box declaring more than it fails
+    /// before the bytes are waited on, and so does a pending run growing past it.
+    #[test]
+    fn cmaf_chunker_bounds_declared_and_pending_sizes() {
+        let mut chunker = CmafChunker::new(64);
+        // An mdat claiming 1 MiB: rejected on the header, not buffered toward.
+        chunker
+            .feed(&[0x00, 0x10, 0x00, 0x00, b'm', b'd', b'a', b't'])
+            .expect("8 bytes fit");
+        assert!(
+            chunker.next_chunk().is_err(),
+            "over-cap box size fails loud"
+        );
+
+        let mut chunker = CmafChunker::new(64);
+        assert!(
+            chunker.feed(&[0u8; 65]).is_err(),
+            "over-cap pending run fails"
+        );
+    }
 
     #[test]
     fn avcc_to_annexb_round_trips_length_prefixes() {

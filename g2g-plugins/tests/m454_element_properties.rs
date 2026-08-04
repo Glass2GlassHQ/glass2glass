@@ -12,6 +12,19 @@ fn declares(specs: &[PropertySpec], name: &str) -> bool {
     specs.iter().any(|s| s.name == name)
 }
 
+/// M888: the CMAF chunked-consumption switch is settable from a launch line.
+#[cfg(feature = "dash")]
+#[test]
+fn dashsrc_low_latency() {
+    use g2g_core::runtime::SourceLoop;
+    use g2g_plugins::dashsrc::DashSrc;
+    let mut e = DashSrc::new("http://h/manifest.mpd");
+    assert!(declares(e.properties(), "low-latency"));
+    e.set_property("low-latency", PropValue::Bool(true))
+        .unwrap();
+    assert_eq!(e.get_property("low-latency"), Some(PropValue::Bool(true)));
+}
+
 #[cfg(feature = "av1-encode")]
 #[test]
 fn av1enc_bitrate_speed_and_quantizer() {

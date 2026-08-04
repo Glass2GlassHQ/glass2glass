@@ -2202,6 +2202,18 @@ estimate-derived cap drives both the per-reload pick and a per-segment
 re-selection (so a static VOD adapts within one pass), re-emitting the init on a
 switch.
 
+`low-latency=true` changes how such a segment is *consumed*, not when it is
+fetched: the response body is read as a stream and each complete CMAF chunk
+(`styp` / `moof`+`mdat`) is pushed downstream as it arrives, so a segment the
+packager is still writing flows at chunk latency instead of segment latency. The
+split is `fmp4::CmafChunker`, an incremental box framer over the arriving bytes
+(sharing `mp4box::next_box_len` with `fmp4demux`) that cuts after every `mdat` and
+bounds both a declared box size and its pending run by the segment cap, so a
+hostile length fails the fetch instead of buffering on it. Every byte comes out
+exactly once in order, so the demuxer sees the same byte stream a whole-response
+fetch delivers. Byte-range segments and a set `prebuffer-ms` (which owns emission
+order) stay on the whole-response path.
+
 ### 4.18 Subtitle Overlay (`textoverlay`)
 
 `textoverlay::TextOverlay` is the `textoverlay` / `subtitleoverlay`

@@ -356,7 +356,7 @@ OS-coupled elements live behind cargo features:
 | `LiveKitSink` (publish into a LiveKit room: JWT + protobuf signalling) | `webrtc-livekit` | + tokio-tungstenite |
 | `HttpSrc` (HTTP(S) byte-stream source) | `http-src` | reqwest |
 | `HlsSrc` (HLS: TS + fMP4/CMAF, live, AES-128 / SAMPLE-AES) | `hls` | reqwest + aes |
-| `DashSrc` (DASH: SegmentTemplate / SegmentTimeline, live) | `dash` | reqwest + roxmltree |
+| `DashSrc` (DASH: SegmentTemplate / SegmentTimeline, live, CMAF chunked low latency) | `dash` | reqwest + roxmltree |
 | `V4l2Src` | `v4l2` | Linux + V4L2 (`/dev/videoN`) |
 | `WasapiSink` / `WasapiSrc` | `wasapi-sink`, `wasapi-src` | Windows |
 | `AlsaSink` | `alsa-sink` | Linux + libasound |
@@ -571,9 +571,10 @@ run_linear_chain(src, vec![&mut demux, &mut parse, &mut dec], sink,
 
 Features: `hls ffmpeg wayland-sink` (`dash` for the DASH front end). `HlsSrc`
 follows live playlist reloads and decrypts AES-128 / SAMPLE-AES segments;
-`DashSrc` handles `SegmentTemplate` / `SegmentTimeline` and dynamic (live) MPDs.
-Both prebuffer ahead by duration (`prebuffer-ms`), posting `Buffering` bus
-levels while they fill, like `HttpSrc`'s byte window (`prebuffer-bytes`).
+`DashSrc` handles `SegmentTemplate` / `SegmentTimeline` and dynamic (live) MPDs,
+and with `low-latency=true` consumes a CMAF segment chunk by chunk as the packager
+writes it. Both prebuffer ahead by duration (`prebuffer-ms`), posting `Buffering`
+bus levels while they fill, like `HttpSrc`'s byte window (`prebuffer-bytes`).
 
 ### `gst-launch` text pipeline
 

@@ -399,8 +399,6 @@ Phased plan:
 - **FLV:** Speex decode (carriage lands M831; no Speex encoder exists anywhere
   to build a validated decode vector, and gst's header-in-tag layout is
   rejected by libavcodec, so wiring a decoder would be an unvalidated claim).
-- **CMAF / fMP4:** consume an early-available segment chunk by chunk as the
-  packager writes it (`DashSrc` fetches it as one complete response).
 
 ## Codecs
 

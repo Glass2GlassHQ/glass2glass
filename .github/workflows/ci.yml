@@ -117,6 +117,10 @@ jobs:
       # MP4 raw-caption tracks (M883): ffmpeg oracle legs self-skip if absent.
       - name: test g2g-plugins (mp4 closed captions)
         run: cargo test -p g2g-plugins --locked --features std,metadata --test m883_mp4_closed_caption
+      # CMAF chunked consumption (M888): the dash feature set above is only
+      # checked, so the DASH tests run here.
+      - name: test g2g-plugins (dash)
+        run: cargo test -p g2g-plugins --locked --features dash --test m888_dash_cmaf_chunked --test m160_dashsrc --test m836_dash_live_multiperiod
       - name: check g2g-ml (wgpu + burn)
         run: cargo check -p g2g-ml --locked --all-targets --features wgpu,burn
       # Embedded / no_std path: the embassy-sync stack channel, the no-alloc
