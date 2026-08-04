@@ -405,10 +405,6 @@ Phased plan:
 - **CMAF / fMP4:** a multi-pad chunked `Mp4MuxN` test (chunk state is per-track,
   only single-pad is exercised); client-side `@availabilityTimeOffset` early
   availability in `DashSrc`.
-- **Spill-to-storage buffer (`downloadbuffer` analog).** An element that absorbs
-  a pushed non-seekable byte stream (HTTP, pipe) into a temp file and exposes a
-  seekable byte source, so a moov-at-end MP4 over a non-seekable transport
-  plays. `faststart` (M824) only fixes files g2g authors.
 - **Ogg seek is O(file).** The demuxer's time seek rewinds the byte source and
   scans forward, so a seek near the end of a long file re-reads it. A
   granulepos-proportional first byte-offset guess through the existing paired

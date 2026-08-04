@@ -86,6 +86,10 @@ jobs:
         run: >
           cargo check -p g2g-plugins --locked --all-targets --features
           rtsp,onvif,srt,udp-egress,udp-ingress,rtmp,http-src,hls,dash,av1-encode,dav1d,rav1d,mjpeg,mjpeg-encode,opus,vorbis,alsa-sink,pulse-sink,wayland-sink,kms-sink,v4l2,analytics,vello-overlay,wgpu-sink,plugin-loader,declarative-yaml,script-rhai
+      # downloadbuffer acceptance (M861): a moov-at-end MP4 pushed over local
+      # HTTP spills to disk and demuxes identically to a direct file read.
+      - name: test g2g-plugins (downloadbuffer)
+        run: cargo test -p g2g-plugins --locked --features http-src --test m861_downloadbuffer
       - name: check g2g-ml (wgpu + burn)
         run: cargo check -p g2g-ml --locked --all-targets --features wgpu,burn
       # Embedded / no_std path: the embassy-sync stack channel, the no-alloc

@@ -356,6 +356,10 @@ pub mod clock;
 pub mod filesink;
 #[cfg(feature = "std")]
 pub mod filesrc;
+// Spill-to-storage byte buffer (M861): turns a pushed, non-seekable byte stream
+// into a seekable one by absorbing it into a temp file.
+#[cfg(feature = "std")]
+pub mod downloadbuffer;
 // Record / replay: dump the packet stream to a file and play it back, for
 // deterministic repro of bugs that need a live source.
 #[cfg(feature = "std")]
