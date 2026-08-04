@@ -242,7 +242,7 @@ pub use bus::{Bus, BusHandle, BusMessage};
 pub use qos::QosTracker;
 
 #[cfg(feature = "runtime")]
-pub use runtime::{LinkInterceptor, NegotiationFailure, ProbeAction, ProbeSlot};
+pub use runtime::{CapsConflict, LinkInterceptor, NegotiationFailure, ProbeAction, ProbeSlot};
 
 #[cfg(feature = "runtime")]
 pub use pad_template::{

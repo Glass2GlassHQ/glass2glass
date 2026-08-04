@@ -12,6 +12,7 @@
 //! convergence is guaranteed because every iteration either shrinks at
 //! least one link's candidate set or terminates.
 
+use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
@@ -30,12 +31,29 @@ use crate::runtime::passthrough::{project_passthrough, project_passthrough_deriv
 /// `None` on input; sinks receive `None` on output).
 pub type LinkSolution = Vec<Caps>;
 
+/// The two candidate sets an [`NegotiationFailure::EmptyLink`] failed on: what
+/// each end of the link still allowed when their intersection came out empty,
+/// so tooling can report *what* disagreed and not just which nodes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CapsConflict {
+    /// What the upstream end offered.
+    pub upstream: CapsSet,
+    /// What the downstream end demanded.
+    pub downstream: CapsSet,
+}
+
 /// Structured solver failure (DESIGN.md §4.13.2).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum NegotiationFailure {
     /// Adjacent elements have no overlap on the link between them, or a
     /// constraint update emptied that link.
-    EmptyLink { upstream: usize, downstream: usize },
+    EmptyLink {
+        upstream: usize,
+        downstream: usize,
+        /// The two sides' surviving sets, when the solver had both in hand
+        /// (boxed: only the cold failure path carries it).
+        conflict: Option<Box<CapsConflict>>,
+    },
     /// The constraint list has fewer than two elements; nothing to
     /// negotiate.
     Degenerate,
@@ -59,6 +77,43 @@ pub enum NegotiationFailure {
     /// `DerivedOutput` variants. Mixed handling is added once step 5
     /// starts migrating individual elements off the legacy bridge.
     MixedLegacyAndNative,
+}
+
+impl NegotiationFailure {
+    /// `EmptyLink` naming the two nodes only, for sites that never held both
+    /// sides' sets.
+    pub fn empty_link(upstream: usize, downstream: usize) -> Self {
+        NegotiationFailure::EmptyLink {
+            upstream,
+            downstream,
+            conflict: None,
+        }
+    }
+
+    /// `EmptyLink` carrying the sets each end still allowed.
+    pub fn empty_link_conflict(
+        upstream: usize,
+        downstream: usize,
+        up_set: CapsSet,
+        down_set: CapsSet,
+    ) -> Self {
+        NegotiationFailure::EmptyLink {
+            upstream,
+            downstream,
+            conflict: Some(Box::new(CapsConflict {
+                upstream: up_set,
+                downstream: down_set,
+            })),
+        }
+    }
+
+    /// The two sides' sets, when this failure captured them.
+    pub fn conflict(&self) -> Option<&CapsConflict> {
+        match self {
+            NegotiationFailure::EmptyLink { conflict, .. } => conflict.as_deref(),
+            _ => None,
+        }
+    }
 }
 
 /// Solve a linear chain of caps constraints. See module docs.
@@ -145,15 +200,11 @@ pub fn solve_linear<'a>(
     // Validate and fixate.
     let mut out = Vec::with_capacity(n_links);
     for (li, slot) in links.iter().enumerate() {
-        let set = slot.as_ref().ok_or(NegotiationFailure::EmptyLink {
-            upstream: li,
-            downstream: li + 1,
-        })?;
+        let set = slot
+            .as_ref()
+            .ok_or(NegotiationFailure::empty_link(li, li + 1))?;
         if set.is_empty() {
-            return Err(NegotiationFailure::EmptyLink {
-                upstream: li,
-                downstream: li + 1,
-            });
+            return Err(NegotiationFailure::empty_link(li, li + 1));
         }
         let fixed = set.fixate().ok_or(NegotiationFailure::Unfixable {
             upstream: li,
@@ -218,10 +269,8 @@ fn solve_legacy_cascade(
                 intercept,
                 propose_output: _,
             } => {
-                current = intercept(&current).map_err(|_| NegotiationFailure::EmptyLink {
-                    upstream: i - 1,
-                    downstream: i,
-                })?;
+                current =
+                    intercept(&current).map_err(|_| NegotiationFailure::empty_link(i - 1, i))?;
                 links.push(current.clone());
             }
             CapsConstraint::LegacySource(_) | CapsConstraint::LegacySink(_) => {
@@ -232,10 +281,7 @@ fn solve_legacy_cascade(
     }
     // Sink: cascade through its intercept, then fixate the result.
     if let CapsConstraint::LegacySink(intercept) = constraints[n - 1] {
-        current = intercept(&current).map_err(|_| NegotiationFailure::EmptyLink {
-            upstream: n - 2,
-            downstream: n - 1,
-        })?;
+        current = intercept(&current).map_err(|_| NegotiationFailure::empty_link(n - 2, n - 1))?;
         links.push(current);
     }
 
@@ -325,19 +371,13 @@ fn solve_mixed_cascade(
                 upstream: n - 2,
                 downstream: n - 1,
             })?;
-            let c = intercept(&fixed).map_err(|_| NegotiationFailure::EmptyLink {
-                upstream: n - 2,
-                downstream: n - 1,
-            })?;
+            let c = intercept(&fixed).map_err(|_| NegotiationFailure::empty_link(n - 2, n - 1))?;
             CapsSet::one(c)
         }
         _ => unreachable!("checked above"),
     };
     if narrowed.is_empty() {
-        return Err(NegotiationFailure::EmptyLink {
-            upstream: n - 2,
-            downstream: n - 1,
-        });
+        return Err(NegotiationFailure::empty_link(n - 2, n - 1));
     }
     link_sets[final_idx] = narrowed;
 
@@ -362,10 +402,7 @@ fn forward_propagate(
         CapsConstraint::Identity(s) => {
             let r = upstream.intersect(s);
             if r.is_empty() {
-                return Err(NegotiationFailure::EmptyLink {
-                    upstream: i - 1,
-                    downstream: i,
-                });
+                return Err(NegotiationFailure::empty_link(i - 1, i));
             }
             Ok(r)
         }
@@ -380,10 +417,7 @@ fn forward_propagate(
             if out.is_empty() {
                 // No input alternative matched any mapping row: the input link
                 // (between elements i-1 and i) is the conflict, same as Identity.
-                return Err(NegotiationFailure::EmptyLink {
-                    upstream: i - 1,
-                    downstream: i,
-                });
+                return Err(NegotiationFailure::empty_link(i - 1, i));
             }
             Ok(out)
         }
@@ -397,10 +431,7 @@ fn forward_propagate(
                 upstream: i - 1,
                 downstream: i,
             })?;
-            let input = intercept(&fixed).map_err(|_| NegotiationFailure::EmptyLink {
-                upstream: i - 1,
-                downstream: i,
-            })?;
+            let input = intercept(&fixed).map_err(|_| NegotiationFailure::empty_link(i - 1, i))?;
             Ok(CapsSet::one(propose_output(&input)))
         }
         CapsConstraint::IdentityAny => {
@@ -431,10 +462,7 @@ fn derived_forward(
     })?;
     let r = f(&fixed);
     if r.is_empty() {
-        return Err(NegotiationFailure::EmptyLink {
-            upstream: i,
-            downstream: i + 1,
-        });
+        return Err(NegotiationFailure::empty_link(i, i + 1));
     }
     Ok(r)
 }
@@ -611,10 +639,7 @@ pub(crate) fn resolve_forward_output(
     };
     let narrowed = candidates.intersect(d);
     if narrowed.is_empty() {
-        return ForwardResolve::Infeasible(NegotiationFailure::EmptyLink {
-            upstream: 0,
-            downstream: 1,
-        });
+        return ForwardResolve::Infeasible(NegotiationFailure::empty_link(0, 1));
     }
     match narrowed.fixate() {
         Some(c) => ForwardResolve::Fixed(c),
@@ -657,10 +682,7 @@ fn apply_constraint(
                 if let (Some(a), Some(b)) = (a, b) {
                     let coupled = a.intersect(&b);
                     if coupled.is_empty() {
-                        return Err(NegotiationFailure::EmptyLink {
-                            upstream: i - 1,
-                            downstream: i + 1,
-                        });
+                        return Err(NegotiationFailure::empty_link(i - 1, i + 1));
                     }
                     links[ii] = Some(coupled.clone());
                     links[oi] = Some(coupled);
@@ -689,10 +711,7 @@ fn apply_constraint(
                 }
             }
             if new_in.is_empty() || new_out.is_empty() {
-                return Err(NegotiationFailure::EmptyLink {
-                    upstream: i - 1,
-                    downstream: i + 1,
-                });
+                return Err(NegotiationFailure::empty_link(i - 1, i + 1));
             }
             links[ii] = Some(new_in);
             links[oi] = Some(new_out);
@@ -710,10 +729,7 @@ fn apply_constraint(
             if let Some(input_set) = &links[ii] {
                 let derived = forward_derived_union(f.as_ref(), input_set);
                 if derived.is_empty() {
-                    return Err(NegotiationFailure::EmptyLink {
-                        upstream: i,
-                        downstream: i + 1,
-                    });
+                    return Err(NegotiationFailure::empty_link(i, i + 1));
                 }
                 narrow(links, oi, &derived, i, i + 1)?;
             }
@@ -726,12 +742,7 @@ fn apply_constraint(
                 match derived_backward(f.as_ref(), &in_set, &out_set) {
                     Ok(Some(narrowed)) => links[ii] = Some(narrowed),
                     Ok(None) => {}
-                    Err(()) => {
-                        return Err(NegotiationFailure::EmptyLink {
-                            upstream: i - 1,
-                            downstream: i,
-                        })
-                    }
+                    Err(()) => return Err(NegotiationFailure::empty_link(i - 1, i)),
                 }
             }
         }
@@ -745,10 +756,7 @@ fn apply_constraint(
             if let Some(input_set) = &links[ii] {
                 let derived = forward_derived_union(&derive, input_set);
                 if derived.is_empty() {
-                    return Err(NegotiationFailure::EmptyLink {
-                        upstream: i,
-                        downstream: i + 1,
-                    });
+                    return Err(NegotiationFailure::empty_link(i, i + 1));
                 }
                 narrow(links, oi, &derived, i, i + 1)?;
             }
@@ -758,12 +766,7 @@ fn apply_constraint(
                 match backward_field_narrow(&derive, t.passthrough(), &in_set, &out_set) {
                     Ok(Some(narrowed)) => links[ii] = Some(narrowed),
                     Ok(None) => {}
-                    Err(()) => {
-                        return Err(NegotiationFailure::EmptyLink {
-                            upstream: i - 1,
-                            downstream: i,
-                        })
-                    }
+                    Err(()) => return Err(NegotiationFailure::empty_link(i - 1, i)),
                 }
             }
         }
@@ -783,10 +786,7 @@ fn apply_constraint(
                     (Some(a), Some(b)) => {
                         let coupled = a.intersect(&b);
                         if coupled.is_empty() {
-                            return Err(NegotiationFailure::EmptyLink {
-                                upstream: i - 1,
-                                downstream: i + 1,
-                            });
+                            return Err(NegotiationFailure::empty_link(i - 1, i + 1));
                         }
                         links[ii] = Some(coupled.clone());
                         links[oi] = Some(coupled);
@@ -821,10 +821,7 @@ fn narrow(
         None => contrib.clone(),
     };
     if next.is_empty() {
-        return Err(NegotiationFailure::EmptyLink {
-            upstream,
-            downstream,
-        });
+        return Err(NegotiationFailure::empty_link(upstream, downstream));
     }
     links[idx] = Some(next);
     Ok(())
@@ -925,6 +922,7 @@ pub fn solve_graph_labeled<E>(
         NegotiationFailure::EmptyLink {
             upstream,
             downstream,
+            ..
         } => {
             let (up, down) = (NodeId(*upstream as u32), NodeId(*downstream as u32));
             crate::g2g_error!(
@@ -991,10 +989,7 @@ pub fn solve_graph_labeled<E>(
         let set = match slot.as_ref() {
             Some(s) if !s.is_empty() => s,
             _ => {
-                let f = NegotiationFailure::EmptyLink {
-                    upstream: up,
-                    downstream: down,
-                };
+                let f = NegotiationFailure::empty_link(up, down);
                 report(&f, &edges);
                 return Err(f);
             }
@@ -1332,18 +1327,18 @@ fn apply_node<E>(
     match kind {
         NodeKind::Source => match nc {
             NodeConstraint::Element(CapsConstraint::Produces(s)) => {
-                narrow_edge(graph, edges, out_e[0], s)
+                narrow_edge(graph, edges, out_e[0], s, node)
             }
             // Legacy bridge: a `LegacySource` carries one fixated caps, the same
             // as `Produces(one(caps))`.
             NodeConstraint::Element(CapsConstraint::LegacySource(caps)) => {
-                narrow_edge(graph, edges, out_e[0], &CapsSet::one(caps.clone()))
+                narrow_edge(graph, edges, out_e[0], &CapsSet::one(caps.clone()), node)
             }
             _ => Err(shape_err),
         },
         NodeKind::Sink => match nc {
             NodeConstraint::Element(CapsConstraint::Accepts(s)) => {
-                narrow_edge(graph, edges, in_e[0], s)
+                narrow_edge(graph, edges, in_e[0], s, node)
             }
             // `AcceptsAny` and a `LegacySink` both leave the input edge to carry
             // whatever the upstream fixates: the legacy sink's `intercept` is the
@@ -1363,7 +1358,7 @@ fn apply_node<E>(
             // A demux decouples its ports (each its own elementary stream); a
             // plain (broadcast) tee couples in == every out.
             NodeConstraint::Demux { input, ports } => {
-                apply_demux_node(graph, in_e[0], out_e, input, ports, edges)
+                apply_demux_node(graph, node, in_e[0], out_e, input, ports, edges)
             }
             _ => apply_tee_node(graph, in_e[0], out_e, edges),
         },
@@ -1390,9 +1385,11 @@ fn apply_node<E>(
                 for &oe in out_e {
                     let port = graph.edge(oe).src.index as usize;
                     match ports.get(port) {
-                        Some(CapsConstraint::Produces(set)) => narrow_edge(graph, edges, oe, set)?,
+                        Some(CapsConstraint::Produces(set)) => {
+                            narrow_edge(graph, edges, oe, set, node)?
+                        }
                         Some(CapsConstraint::LegacySource(caps)) => {
-                            narrow_edge(graph, edges, oe, &CapsSet::one(caps.clone()))?
+                            narrow_edge(graph, edges, oe, &CapsSet::one(caps.clone()), node)?
                         }
                         _ => return Err(shape_err),
                     }
@@ -1404,11 +1401,15 @@ fn apply_node<E>(
     }
 }
 
+/// Narrow one edge by `contrib`, the set node `by` imposes on it. `by` is what
+/// orients an `EmptyLink`: the contribution belongs to that end of the link, and
+/// the set already on the edge stands for the other end.
 fn narrow_edge<E>(
     graph: &ValidatedGraph<E>,
     edges: &mut [Option<CapsSet>],
     edge_id: usize,
     contrib: &CapsSet,
+    by: NodeId,
 ) -> Result<(), NegotiationFailure> {
     let next = match &edges[edge_id] {
         Some(cur) => cur.intersect(contrib),
@@ -1416,13 +1417,19 @@ fn narrow_edge<E>(
     };
     if next.is_empty() {
         let (up, down) = edge_endpoints(graph, edge_id);
-        return Err(NegotiationFailure::EmptyLink {
-            upstream: up,
-            downstream: down,
+        let other = edges[edge_id].clone().unwrap_or_else(empty_set);
+        return Err(if graph.edge(edge_id).src.node == by {
+            NegotiationFailure::empty_link_conflict(up, down, contrib.clone(), other)
+        } else {
+            NegotiationFailure::empty_link_conflict(up, down, other, contrib.clone())
         });
     }
     edges[edge_id] = Some(next);
     Ok(())
+}
+
+fn empty_set() -> CapsSet {
+    CapsSet::from_alternatives(Vec::new())
 }
 
 /// Couple two edges to carry equal caps (each intersected with the other),
@@ -1439,10 +1446,7 @@ fn couple_edges<E>(
             if coupled.is_empty() {
                 let up = edge_endpoints(graph, a).0;
                 let down = edge_endpoints(graph, b).1;
-                return Err(NegotiationFailure::EmptyLink {
-                    upstream: up,
-                    downstream: down,
-                });
+                return Err(NegotiationFailure::empty_link_conflict(up, down, sa, sb));
             }
             edges[a] = Some(coupled.clone());
             edges[b] = Some(coupled);
@@ -1466,8 +1470,8 @@ fn apply_transform_node<E>(
 ) -> Result<(), NegotiationFailure> {
     match c {
         CapsConstraint::Identity(s) => {
-            narrow_edge(graph, edges, in_e, s)?;
-            narrow_edge(graph, edges, out_e, s)?;
+            narrow_edge(graph, edges, in_e, s, node)?;
+            narrow_edge(graph, edges, out_e, s, node)?;
             couple_edges(graph, edges, in_e, out_e)
         }
         CapsConstraint::IdentityAny => couple_edges(graph, edges, in_e, out_e),
@@ -1491,10 +1495,12 @@ fn apply_transform_node<E>(
             if new_in.is_empty() || new_out.is_empty() {
                 let up = edge_endpoints(graph, in_e).0;
                 let down = edge_endpoints(graph, out_e).1;
-                return Err(NegotiationFailure::EmptyLink {
-                    upstream: up,
-                    downstream: down,
-                });
+                return Err(NegotiationFailure::empty_link_conflict(
+                    up,
+                    down,
+                    edges[in_e].clone().unwrap_or_else(empty_set),
+                    edges[out_e].clone().unwrap_or_else(empty_set),
+                ));
             }
             edges[in_e] = Some(new_in);
             edges[out_e] = Some(new_out);
@@ -1510,12 +1516,9 @@ fn apply_transform_node<E>(
                 let derived = forward_derived_union(f.as_ref(), &in_set);
                 if derived.is_empty() {
                     let (up, down) = edge_endpoints(graph, out_e);
-                    return Err(NegotiationFailure::EmptyLink {
-                        upstream: up,
-                        downstream: down,
-                    });
+                    return Err(NegotiationFailure::empty_link(up, down));
                 }
-                narrow_edge(graph, edges, out_e, &derived)?;
+                narrow_edge(graph, edges, out_e, &derived, node)?;
             }
             // Backward (M188 + invertible-field coupling): field-level narrow on
             // the closure's probed passthrough fields, else alternative-drop.
@@ -1525,10 +1528,7 @@ fn apply_transform_node<E>(
                     Ok(None) => {}
                     Err(()) => {
                         let (up, down) = edge_endpoints(graph, in_e);
-                        return Err(NegotiationFailure::EmptyLink {
-                            upstream: up,
-                            downstream: down,
-                        });
+                        return Err(NegotiationFailure::empty_link(up, down));
                     }
                 }
             }
@@ -1542,12 +1542,9 @@ fn apply_transform_node<E>(
                 let derived = forward_derived_union(&derive, &in_set);
                 if derived.is_empty() {
                     let (up, down) = edge_endpoints(graph, out_e);
-                    return Err(NegotiationFailure::EmptyLink {
-                        upstream: up,
-                        downstream: down,
-                    });
+                    return Err(NegotiationFailure::empty_link(up, down));
                 }
-                narrow_edge(graph, edges, out_e, &derived)?;
+                narrow_edge(graph, edges, out_e, &derived, node)?;
             }
             if let (Some(in_set), Some(out_set)) = (edges[in_e].clone(), edges[out_e].clone()) {
                 match backward_field_narrow(&derive, t.passthrough(), &in_set, &out_set) {
@@ -1555,10 +1552,7 @@ fn apply_transform_node<E>(
                     Ok(None) => {}
                     Err(()) => {
                         let (up, down) = edge_endpoints(graph, in_e);
-                        return Err(NegotiationFailure::EmptyLink {
-                            upstream: up,
-                            downstream: down,
-                        });
+                        return Err(NegotiationFailure::empty_link(up, down));
                     }
                 }
             }
@@ -1571,12 +1565,9 @@ fn apply_transform_node<E>(
             if let Some(fixed_input) = edges[in_e].as_ref().and_then(fixed_single) {
                 let out = intercept(&fixed_input).map_err(|_| {
                     let (up, down) = edge_endpoints(graph, out_e);
-                    NegotiationFailure::EmptyLink {
-                        upstream: up,
-                        downstream: down,
-                    }
+                    NegotiationFailure::empty_link(up, down)
                 })?;
-                return narrow_edge(graph, edges, out_e, &CapsSet::one(out));
+                return narrow_edge(graph, edges, out_e, &CapsSet::one(out), node);
             }
             Ok(())
         }
@@ -1746,10 +1737,7 @@ fn apply_tee_node<E>(
     if let Some(coupled) = acc {
         if coupled.is_empty() {
             let (up, down) = edge_endpoints(graph, in_e);
-            return Err(NegotiationFailure::EmptyLink {
-                upstream: up,
-                downstream: down,
-            });
+            return Err(NegotiationFailure::empty_link(up, down));
         }
         edges[in_e] = Some(coupled.clone());
         for &oe in out_e {
@@ -1766,6 +1754,7 @@ fn apply_tee_node<E>(
 /// index, so the order of `out_e` does not matter.
 fn apply_demux_node<E>(
     graph: &ValidatedGraph<E>,
+    node: NodeId,
     in_e: usize,
     out_e: &[usize],
     input: &CapsConstraint<'_>,
@@ -1776,12 +1765,12 @@ fn apply_demux_node<E>(
     // leave it to whatever the source fixates (the common case, the demux's
     // `intercept` being the terminal accept).
     if let CapsConstraint::Accepts(s) = input {
-        narrow_edge(graph, edges, in_e, s)?;
+        narrow_edge(graph, edges, in_e, s, node)?;
     }
     for &oe in out_e {
         let port = graph.edge(oe).src.index as usize;
         if let Some(CapsConstraint::Produces(s)) = ports.get(port) {
-            narrow_edge(graph, edges, oe, s)?;
+            narrow_edge(graph, edges, oe, s, node)?;
         }
     }
     Ok(())
@@ -1804,7 +1793,7 @@ fn narrow_muxer_inputs<E>(
     for &eid in graph.in_edges(node) {
         let pad = graph.edge(eid).dst.index as usize;
         match inputs.get(pad) {
-            Some(CapsConstraint::Accepts(set)) => narrow_edge(graph, edges, eid, set)?,
+            Some(CapsConstraint::Accepts(set)) => narrow_edge(graph, edges, eid, set, node)?,
             Some(CapsConstraint::AcceptsAny) | Some(CapsConstraint::LegacySink(_)) => {}
             _ => return Err(shape_err),
         }
@@ -1841,10 +1830,10 @@ fn apply_muxer_node<E>(
         return couple_edges(graph, edges, in_edge, out_edge);
     }
     match output {
-        CapsConstraint::Produces(set) => narrow_edge(graph, edges, out_edge, set),
+        CapsConstraint::Produces(set) => narrow_edge(graph, edges, out_edge, set, node),
         // A legacy muxer output carries one fixated merged caps.
         CapsConstraint::LegacySource(caps) => {
-            narrow_edge(graph, edges, out_edge, &CapsSet::one(caps.clone()))
+            narrow_edge(graph, edges, out_edge, &CapsSet::one(caps.clone()), node)
         }
         _ => Err(shape_err),
     }
@@ -2027,10 +2016,7 @@ mod tests {
         )));
         assert_eq!(
             solve_linear(&[&src, &sink]),
-            Err(NegotiationFailure::EmptyLink {
-                upstream: 0,
-                downstream: 1
-            })
+            Err(NegotiationFailure::empty_link(0, 1))
         );
     }
 
@@ -2346,7 +2332,8 @@ mod tests {
             solve_linear(&[&src, &sink]),
             Err(NegotiationFailure::EmptyLink {
                 upstream: 0,
-                downstream: 1
+                downstream: 1,
+                ..
             })
         ));
     }
@@ -2717,6 +2704,36 @@ mod tests {
             "DAG solver matches the linear solver byte-for-byte"
         );
         assert_eq!(dag, vec![rgba, nv12]);
+    }
+
+    #[test]
+    fn solve_graph_empty_link_carries_both_sides_sets() {
+        // source produces RGBA only, sink accepts NV12 only: the failure must
+        // name the two nodes *and* what each of them still allowed.
+        let rgba = fixed_video(RawVideoFormat::Rgba8, 64, 48, 30);
+        let nv12 = fixed_video(RawVideoFormat::Nv12, 64, 48, 30);
+        let cs: Vec<NodeConstraint> = vec![
+            NodeConstraint::Element(CapsConstraint::Produces(CapsSet::one(rgba.clone()))),
+            NodeConstraint::Element(CapsConstraint::Accepts(CapsSet::one(nv12.clone()))),
+        ];
+        let mut g: Graph<()> = Graph::new();
+        let src = g.add_source(());
+        let sink = g.add_sink(());
+        g.link(src, sink).unwrap();
+        let v = g.finish().unwrap();
+
+        let err = solve_graph(&v, &cs).expect_err("RGBA source vs NV12 sink cannot solve");
+        assert!(matches!(
+            err,
+            NegotiationFailure::EmptyLink {
+                upstream: 0,
+                downstream: 1,
+                ..
+            }
+        ));
+        let c = err.conflict().expect("both candidate sets captured");
+        assert_eq!(c.upstream, CapsSet::one(rgba));
+        assert_eq!(c.downstream, CapsSet::one(nv12));
     }
 
     #[test]

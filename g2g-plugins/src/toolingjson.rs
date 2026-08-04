@@ -9,6 +9,7 @@ use alloc::vec::Vec;
 
 use serde_json::{json, Value};
 
+use g2g_core::caps::CapsSet;
 use g2g_core::runtime::{
     negotiate_graph_explained, parse_launch, run_graph, ElementDoc, NegotiateError,
     NegotiationFailure, Registry, RunStats,
@@ -100,14 +101,23 @@ pub async fn validate_json(reg: &Registry, line: &str) -> Value {
 
 /// Structured form of a [`NegotiationFailure`]: the conflict kind plus the node
 /// indices it names, so a caller (dashboard / MCP client) can highlight the
-/// offending link.
+/// offending link. An `EmptyLink` also carries what each end still allowed
+/// (`upstream_caps` / `downstream_caps`, one gst string per alternative) when
+/// the solver captured both sides.
 fn failure_json(nf: &NegotiationFailure) -> Value {
     match nf {
         NegotiationFailure::EmptyLink {
             upstream,
             downstream,
+            conflict,
         } => {
-            json!({ "kind": "empty-link", "upstream": upstream, "downstream": downstream })
+            let mut v =
+                json!({ "kind": "empty-link", "upstream": upstream, "downstream": downstream });
+            if let Some(c) = conflict {
+                v["upstream_caps"] = json!(set_strings(&c.upstream));
+                v["downstream_caps"] = json!(set_strings(&c.downstream));
+            }
+            v
         }
         NegotiationFailure::Unfixable {
             upstream,
@@ -123,6 +133,14 @@ fn failure_json(nf: &NegotiationFailure) -> Value {
         NegotiationFailure::NoConsistentFixation => json!({ "kind": "no-consistent-fixation" }),
         NegotiationFailure::MixedLegacyAndNative => json!({ "kind": "mixed-legacy-and-native" }),
     }
+}
+
+/// One gst caps string per alternative in the set.
+fn set_strings(set: &CapsSet) -> Vec<String> {
+    set.alternatives()
+        .iter()
+        .map(|c| c.to_gst_string())
+        .collect()
 }
 
 /// Run a launch line for up to `secs` seconds and report the resulting
@@ -226,6 +244,31 @@ mod tests {
         if bad["stage"] == "negotiate" {
             assert_eq!(bad["failure"]["kind"], "empty-link");
         }
+    }
+
+    #[tokio::test]
+    async fn validate_caps_conflict_reports_both_candidate_sets() {
+        let reg = default_registry();
+        let bad = validate_json(&reg, "videotestsrc ! audio/x-raw,format=S16LE ! fakesink").await;
+        assert_eq!(bad["stage"], "negotiate");
+        let f = &bad["failure"];
+        assert_eq!(f["kind"], "empty-link");
+        assert_eq!(f["upstream"], 0);
+        assert_eq!(f["downstream"], 1);
+        // Both sides' candidate sets, structurally: what the source offered and
+        // what the capsfilter demanded.
+        let up = f["upstream_caps"].as_array().expect("upstream set");
+        let down = f["downstream_caps"].as_array().expect("downstream set");
+        assert!(
+            up.iter()
+                .all(|c| c.as_str().unwrap().starts_with("video/x-raw")),
+            "source offers raw video, got {up:?}"
+        );
+        assert!(
+            down.iter()
+                .all(|c| c.as_str().unwrap().starts_with("audio/x-raw")),
+            "capsfilter demands raw audio, got {down:?}"
+        );
     }
 
     #[tokio::test]

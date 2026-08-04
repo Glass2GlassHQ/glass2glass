@@ -59,7 +59,7 @@ pub use runner::{
     RunStats, SourceLoop,
 };
 pub use seek::{SeekController, WaitEvent};
-pub use solver::NegotiationFailure;
+pub use solver::{CapsConflict, NegotiationFailure};
 pub use state::{Flow, FlowGate, PrerollGate, StateController};
 pub use stream_select::StreamSelectController;
 
