@@ -1,9 +1,13 @@
-//! M875: the muxer arm's deadline tick.
+//! M875 / M877: a fan-in arm's deadline tick.
 //!
 //! A fan-in element that declares a `tick_interval_ns` receives
 //! `PipelinePacket::Tick` while its inputs are stalled, so it can emit output on
 //! its own cadence (zero-order-hold over the stalled pad) instead of freezing
 //! with the input. An element that declares no interval never sees one.
+//!
+//! Three entry points deliver it, over the same fixtures: `run_muxer_sink_ticked`
+//! (M875), `run_graph_ticked` on a hand-built graph, and the PTS-ordered muxer arm
+//! a fan-in opts into with `input_pts_ordered` (both M877).
 //!
 //! Time is mocked, so the tests are deterministic and finish in microseconds
 //! instead of sleeping on real timers: one clock jumps virtual time to the sleep
@@ -19,9 +23,11 @@ use std::sync::Arc;
 
 use g2g_core::fanout::MultiInputElement;
 use g2g_core::memory::{MemoryDomain, SystemSlice};
-use g2g_core::runtime::{block_on, run_muxer_sink_ticked, DynSourceLoop, SourceLoop};
+use g2g_core::runtime::{
+    block_on, run_graph_ticked, run_muxer_sink_ticked, DynSourceLoop, GraphNodeRef, SourceLoop,
+};
 use g2g_core::{
-    AsyncClock, AsyncElement, Caps, ConfigureOutcome, Dim, Frame, FrameTiming, G2gError,
+    AsyncClock, AsyncElement, Caps, ConfigureOutcome, Dim, Frame, FrameTiming, G2gError, Graph,
     OutputSink, PipelineClock, PipelinePacket, Rate, RawVideoFormat,
 };
 
@@ -219,13 +225,80 @@ impl SourceLoop for StallSrc {
     }
 }
 
-/// Fan-in that emits a frame per deadline tick (the zero-order-hold shape) and
-/// counts the ticks it received.
+/// Pushes its frames back to back, then stays open (no `Eos`) until the muxer has
+/// ticked `hold_until_ticks` times. The PTS-ordered arm buffers those frames while
+/// another input is silent, so holding the pad open is what lets a later pad still
+/// deliver an earlier PTS.
+struct HoldSrc {
+    seqs: &'static [u64],
+    ticks: Arc<AtomicUsize>,
+    hold_until_ticks: usize,
+}
+
+impl SourceLoop for HoldSrc {
+    type RunFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
+    where
+        Self: 'a;
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
+    where
+        Self: 'a;
+
+    fn intercept_caps(&mut self) -> Self::CapsFuture<'_> {
+        core::future::ready(Ok(caps()))
+    }
+
+    fn configure_pipeline(&mut self, _caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
+        Box::pin(async move {
+            for &seq in self.seqs {
+                out.push(frame(seq)).await?;
+            }
+            // Bounded, as in `StallSrc`: a runner that never ticks ends the run.
+            let mut spins = 0;
+            while self.ticks.load(Ordering::Acquire) < self.hold_until_ticks && spins < 10_000 {
+                yield_once().await;
+                spins += 1;
+            }
+            out.push(PipelinePacket::Eos).await?;
+            Ok(self.seqs.len() as u64)
+        })
+    }
+}
+
+/// Fan-in that emits a frame per deadline tick (the zero-order-hold shape), counts
+/// the ticks it received, and records the PTS of every frame delivered to it (so a
+/// test can check the arm's delivery order).
 struct ZohMux {
     inputs: usize,
     interval_ns: Option<u64>,
+    pts_ordered: bool,
     ticks: Arc<AtomicUsize>,
     emitted: u64,
+    seen_pts: Vec<u64>,
+}
+
+impl ZohMux {
+    fn new(inputs: usize, interval_ns: Option<u64>, ticks: Arc<AtomicUsize>) -> Self {
+        Self {
+            inputs,
+            interval_ns,
+            pts_ordered: false,
+            ticks,
+            emitted: 0,
+            seen_pts: Vec::new(),
+        }
+    }
+
+    /// Opt into the runner's PTS-ordered fan-in arm.
+    fn pts_ordered(mut self) -> Self {
+        self.pts_ordered = true;
+        self
+    }
 }
 
 impl MultiInputElement for ZohMux {
@@ -240,6 +313,10 @@ impl MultiInputElement for ZohMux {
 
     fn tick_interval_ns(&self) -> Option<u64> {
         self.interval_ns
+    }
+
+    fn input_pts_ordered(&self) -> bool {
+        self.pts_ordered
     }
 
     fn intercept_caps(&self, _input: usize, upstream_caps: &Caps) -> Result<Caps, G2gError> {
@@ -272,7 +349,8 @@ impl MultiInputElement for ZohMux {
                     self.emitted += 1;
                     out.push(frame(seq)).await?;
                 }
-                PipelinePacket::DataFrame(_) => {
+                PipelinePacket::DataFrame(f) => {
+                    self.seen_pts.push(f.timing.pts_ns);
                     let seq = self.emitted;
                     self.emitted += 1;
                     out.push(frame(seq)).await?;
@@ -325,12 +403,7 @@ fn ticks_fire_while_the_input_stalls_and_the_frames_reach_the_sink() {
         ticks: ticks.clone(),
         stall_until_ticks: 3,
     };
-    let mut mux = ZohMux {
-        inputs: 1,
-        interval_ns: Some(TICK_NS),
-        ticks: ticks.clone(),
-        emitted: 0,
-    };
+    let mut mux = ZohMux::new(1, Some(TICK_NS), ticks.clone());
     let mut sink = CountSink::default();
 
     let sources: Vec<&mut dyn DynSourceLoop> = vec![&mut src];
@@ -366,12 +439,7 @@ fn an_element_that_declares_no_interval_never_ticks() {
         ticks: ticks.clone(),
         stall_until_ticks: 0,
     };
-    let mut mux = ZohMux {
-        inputs: 1,
-        interval_ns: None,
-        ticks: ticks.clone(),
-        emitted: 0,
-    };
+    let mut mux = ZohMux::new(1, None, ticks.clone());
     let mut sink = CountSink::default();
 
     let sources: Vec<&mut dyn DynSourceLoop> = vec![&mut src];
@@ -404,12 +472,7 @@ fn a_busy_arm_still_hits_its_deadline() {
         ticks: ticks.clone(),
         stall_until_ticks: 1,
     };
-    let mut mux = ZohMux {
-        inputs: 2,
-        interval_ns: Some(TICK_NS),
-        ticks: ticks.clone(),
-        emitted: 0,
-    };
+    let mut mux = ZohMux::new(2, Some(TICK_NS), ticks.clone());
     let mut sink = CountSink::default();
 
     let sources: Vec<&mut dyn DynSourceLoop> = vec![&mut flood, &mut stalled];
@@ -427,5 +490,125 @@ fn a_busy_arm_still_hits_its_deadline() {
         sink.frames,
         101 + fired as u64,
         "both inputs' frames plus one ZOH frame per tick reached the sink"
+    );
+}
+
+/// M877: runs `StallSrc -> mux -> CountSink` as a hand-built graph through
+/// `run_graph_ticked`, and reports the ticks the mux saw plus the frames that
+/// reached the sink. Covers both fan-in arms: `pts_ordered` picks the PTS-ordered
+/// one.
+fn stalled_graph_run(
+    interval_ns: Option<u64>,
+    pts_ordered: bool,
+    stall_until_ticks: usize,
+) -> (usize, u64) {
+    let clock = VirtualClock::default();
+    let ticks = Arc::new(AtomicUsize::new(0));
+    let mut src = StallSrc {
+        ticks: ticks.clone(),
+        stall_until_ticks,
+    };
+    let mut mux = ZohMux::new(1, interval_ns, ticks.clone());
+    if pts_ordered {
+        mux = mux.pts_ordered();
+    }
+    let mut sink = CountSink::default();
+
+    let mut g: Graph<GraphNodeRef<'_>> = Graph::new();
+    let mux_node = g.add_muxer(GraphNodeRef::muxer_ref(&mut mux), 1);
+    let s = g.add_source(GraphNodeRef::source_ref(&mut src));
+    let k = g.add_sink(GraphNodeRef::element_ref(&mut sink));
+    g.link(s, mux_node.input(0)).expect("link source to pad 0");
+    g.link(mux_node.output(), k)
+        .expect("link merged output to sink");
+    block_on(run_graph_ticked(g, &clock, 2)).expect("ticked graph run");
+
+    (ticks.load(Ordering::Acquire), sink.frames)
+}
+
+#[test]
+fn run_graph_ticked_delivers_the_tick_on_a_hand_built_graph() {
+    let (fired, frames) = stalled_graph_run(Some(TICK_NS), false, 3);
+    assert!(
+        fired >= 3,
+        "run_graph_ticked must tick the fan-in while its only input stalls, got {fired}"
+    );
+    assert_eq!(
+        frames,
+        fired as u64 + 1,
+        "the ZOH frames plus the input frame reached the sink"
+    );
+}
+
+#[test]
+fn the_pts_ordered_arm_delivers_the_tick_too() {
+    let (fired, frames) = stalled_graph_run(Some(TICK_NS), true, 3);
+    assert!(
+        fired >= 3,
+        "the PTS-ordered arm must tick while its only input stalls, got {fired}"
+    );
+    assert_eq!(frames, fired as u64 + 1);
+}
+
+#[test]
+fn no_interval_means_no_tick_on_either_arm() {
+    for pts_ordered in [false, true] {
+        let (fired, frames) = stalled_graph_run(None, pts_ordered, 0);
+        assert_eq!(
+            fired, 0,
+            "no interval declared, so no Tick (pts_ordered={pts_ordered})"
+        );
+        assert_eq!(
+            frames, 1,
+            "only the input's own frame reached the sink (pts_ordered={pts_ordered})"
+        );
+    }
+}
+
+#[test]
+fn the_pts_ordered_arm_ticks_while_it_holds_frames_back() {
+    // Pad 0 delivers two frames and stays open; pad 1 is silent. The PTS-ordered
+    // arm cannot release pad 0's frames while pad 1 might still deliver an earlier
+    // PTS, so it parks with frames buffered, which is exactly where the tick has to
+    // fire. Pad 1 then delivers PTS 0: it lands *before* the buffered frames, so
+    // the arrival-order arm would have failed this ordering assertion.
+    let ticks = Arc::new(AtomicUsize::new(0));
+    let clock = VirtualClock::default();
+    let mut held = HoldSrc {
+        seqs: &[2, 4],
+        ticks: ticks.clone(),
+        hold_until_ticks: 3,
+    };
+    let mut stalled = StallSrc {
+        ticks: ticks.clone(),
+        stall_until_ticks: 3,
+    };
+    let mut mux = ZohMux::new(2, Some(TICK_NS), ticks.clone()).pts_ordered();
+    let mut sink = CountSink::default();
+
+    let mut g: Graph<GraphNodeRef<'_>> = Graph::new();
+    let mux_node = g.add_muxer(GraphNodeRef::muxer_ref(&mut mux), 2);
+    let held_node = g.add_source(GraphNodeRef::source_ref(&mut held));
+    let stalled_node = g.add_source(GraphNodeRef::source_ref(&mut stalled));
+    let k = g.add_sink(GraphNodeRef::element_ref(&mut sink));
+    g.link(held_node, mux_node.input(0)).expect("link pad 0");
+    g.link(stalled_node, mux_node.input(1)).expect("link pad 1");
+    g.link(mux_node.output(), k).expect("link merged output");
+    block_on(run_graph_ticked(g, &clock, 2)).expect("ticked pts graph run");
+
+    let fired = ticks.load(Ordering::Acquire);
+    assert!(
+        fired >= 3,
+        "the PTS-ordered arm must tick while it parks on the silent pad, got {fired}"
+    );
+    assert_eq!(
+        mux.seen_pts,
+        vec![0, 2 * TICK_NS, 4 * TICK_NS],
+        "frames still arrived in global PTS order"
+    );
+    assert_eq!(
+        sink.frames,
+        fired as u64 + 3,
+        "one ZOH frame per tick plus the three input frames reached the sink"
     );
 }

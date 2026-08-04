@@ -641,6 +641,36 @@ pub async fn run_graph<'a, Clk: PipelineClock>(
     .await
 }
 
+/// As [`run_graph`], but every fan-in arm also gets a **deadline tick** (M877):
+/// `clock` is both the pipeline clock and the timer the arms sleep on, so a fan-in
+/// element declaring a
+/// [`tick_interval_ns`](crate::MultiInputElement::tick_interval_ns) receives
+/// [`PipelinePacket::Tick`] on that period even while its inputs are silent. A
+/// compositor uses it to hold its output rate over a stalled pad
+/// (zero-order-hold on that pad's last frame) instead of freezing with it.
+///
+/// Needs an [`AsyncClock`](crate::AsyncClock) (plain [`run_graph`] takes any
+/// [`PipelineClock`], which cannot sleep). Elements that declare no interval run
+/// exactly as they do there.
+pub async fn run_graph_ticked<'a, Clk: crate::clock::AsyncClock + 'a>(
+    graph: Graph<GraphNodeRef<'a>>,
+    clock: &'a Clk,
+    link_capacity: impl Into<LinkCapacity>,
+) -> Result<RunStats, G2gError> {
+    run_graph_inner(
+        graph,
+        clock,
+        link_capacity,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(clock as &dyn DynAsyncClock),
+    )
+    .await
+}
+
 /// As [`run_graph`], but enforces a memory-domain [`CopyPolicy`](crate::copyplan::CopyPolicy)
 /// as a graph-level contract (M617). After negotiation resolves every link's memory
 /// domain, the copy plan (`crate::copyplan`) is checked against `policy` *before any
@@ -1511,6 +1541,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                     beta,
                     mux_ctrl,
                     mux_probe,
+                    ticker,
                 ))
             } else {
                 Box::pin(muxer_arm(
@@ -1838,6 +1869,8 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
             }
             let pts_ordered = mux.input_pts_ordered();
             let mux_probe = probes[node.0 as usize].clone();
+            // The thread-per-arm runner does not tick, on either arm: an arm on its
+            // own OS thread has no shared clock reference to sleep on here.
             let build: alloc::boxed::Box<dyn FnOnce() -> LocalArmFuture + Send> = if pts_ordered {
                 alloc::boxed::Box::new(move || -> LocalArmFuture {
                     Box::pin(muxer_arm_pts(
@@ -1849,12 +1882,11 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                         beta,
                         mux_ctrl,
                         mux_probe,
+                        None,
                     ))
                 })
             } else {
                 alloc::boxed::Box::new(move || -> LocalArmFuture {
-                    // The thread-per-arm runner does not tick: an arm on its own
-                    // OS thread has no shared clock reference to sleep on here.
                     Box::pin(muxer_arm(
                         mux,
                         pad_rxs,
@@ -3451,6 +3483,84 @@ async fn apply_mux_directive<'m>(
     }
 }
 
+/// A fan-in arm's deadline tick (M875): the clock to sleep on, the period the
+/// element declared via
+/// [`tick_interval_ns`](DynMultiInputElement::tick_interval_ns), and the next
+/// deadline. Both [`muxer_arm`] and [`muxer_arm_pts`] drive it the same way, so
+/// they share it: [`fire_if_due`](Self::fire_if_due) once per loop iteration for
+/// the busy case, [`park_or_tick`] for the parked one.
+struct ArmTick<'a> {
+    clock: &'a dyn DynAsyncClock,
+    period_ns: u64,
+    next_ns: u64,
+}
+
+impl<'a> ArmTick<'a> {
+    /// Ticking needs both halves: a clock to sleep on and an element that asked.
+    fn new(
+        ticker: Option<&'a dyn DynAsyncClock>,
+        mux: &(dyn DynMultiInputElement + '_),
+    ) -> Option<Self> {
+        let (clock, period_ns) = ticker.zip(mux.tick_interval_ns())?;
+        Some(Self {
+            clock,
+            period_ns,
+            next_ns: clock.now_ns().saturating_add(period_ns),
+        })
+    }
+
+    /// Deliver one tick, then snap the next deadline forward from now rather than
+    /// adding a period to a deadline already in the past, so a slow element does
+    /// not build up a backlog of ticks to fire.
+    async fn fire(
+        &mut self,
+        mux: &mut (dyn DynMultiInputElement + '_),
+        out: &mut dyn OutputSink,
+    ) -> Result<(), G2gError> {
+        mux.process(0, PipelinePacket::Tick, out).await?;
+        self.next_ns = self.clock.now_ns().saturating_add(self.period_ns);
+        Ok(())
+    }
+
+    /// The busy path: a live pad can spin an arm's drain loop forever without
+    /// ever parking below, so the deadline is checked per iteration too.
+    async fn fire_if_due(
+        &mut self,
+        mux: &mut (dyn DynMultiInputElement + '_),
+        out: &mut dyn OutputSink,
+    ) -> Result<(), G2gError> {
+        if self.clock.now_ns() >= self.next_ns {
+            self.fire(mux, out).await?;
+        }
+        Ok(())
+    }
+}
+
+/// Race an arm's parked wait (data + β control) against its tick deadline, so a
+/// fan-in whose inputs have all gone quiet still gets its tick. `None` means the
+/// deadline won and a tick fired, so the caller loops. Data and control stay
+/// biased ahead of the tick: a packet already waiting is handled first.
+async fn park_or_tick<T>(
+    park: impl core::future::Future<Output = T>,
+    tick: Option<&mut ArmTick<'_>>,
+    mux: &mut (dyn DynMultiInputElement + '_),
+    out: &mut dyn OutputSink,
+) -> Result<Option<T>, G2gError> {
+    let Some(tick) = tick else {
+        return Ok(Some(park.await));
+    };
+    // The sleep rides the copied clock reference, not a borrow of `tick`, so
+    // `fire` can still take it mutably below.
+    let sleep = tick.clock.sleep_until_ns(tick.next_ns);
+    match select2(park, sleep).await {
+        Either::Left(v) => Ok(Some(v)),
+        Either::Right(()) => {
+            tick.fire(mux, out).await?;
+            Ok(None)
+        }
+    }
+}
+
 /// The muxer arm: drain the per-input channels round-robin, combine each input's
 /// packets via `process(pad, ..)`, and emit a single `Eos` once every input has
 /// ended. Round-robin draining keeps a fast input from starving a slow one (a
@@ -3483,9 +3593,7 @@ async fn muxer_arm<'a>(
     // Cursor for round-robin fairness across both the try-drain and block paths.
     let mut next = 0usize;
     let mut control_open = true;
-    // Ticking needs both halves: a clock to sleep on and an element that asked.
-    let tick = ticker.zip(mux.tick_interval_ns());
-    let mut next_tick = tick.map_or(0, |(clk, period)| clk.now_ns().saturating_add(period));
+    let mut tick = ArmTick::new(ticker, &*mux);
     beta.seed(&*mux, &current_output);
     loop {
         // M839: a consumer's demand on the merged output arrives here. Checked
@@ -3493,17 +3601,10 @@ async fn muxer_arm<'a>(
         while let Some(directive) = arm_rx.try_recv() {
             apply_mux_directive(&mut *mux, &mut beta, directive, &current_output).await?;
         }
-        // Deadline reached while packets keep this arm busy: a live overlay pad
-        // can spin the drain loop forever without ever parking below, so the tick
-        // has to be checked here too. Snap the next deadline forward from now
-        // rather than adding a period to a deadline already in the past, so a slow
-        // element does not build up a backlog of ticks to fire.
-        if let Some((clk, period)) = tick {
-            let now = clk.now_ns();
-            if now >= next_tick {
-                mux.process(0, PipelinePacket::Tick, &mut adapter).await?;
-                next_tick = clk.now_ns().saturating_add(period);
-            }
+        // Deadline reached while packets keep this arm busy (a live overlay pad
+        // spinning the drain loop below without ever parking).
+        if let Some(t) = tick.as_mut() {
+            t.fire_if_due(&mut *mux, &mut adapter).await?;
         }
         // Take one buffered packet, scanning round-robin from `next`, so no
         // single input can monopolize the muxer while others have data waiting.
@@ -3534,21 +3635,11 @@ async fn muxer_arm<'a>(
                         Either::Right(muxer_recv_any(&pad_rxs, &open, next).await)
                     }
                 };
-                // M875: the tick deadline joins the race, so a fan-in whose inputs
-                // have all gone quiet still gets its tick. Data and control stay
-                // biased ahead of it: a packet already waiting is handled first.
-                let parked = match tick {
-                    Some((clk, period)) => {
-                        match select2(park, clk.sleep_until_ns(next_tick)).await {
-                            Either::Left(v) => v,
-                            Either::Right(()) => {
-                                mux.process(0, PipelinePacket::Tick, &mut adapter).await?;
-                                next_tick = clk.now_ns().saturating_add(period);
-                                continue;
-                            }
-                        }
-                    }
-                    None => park.await,
+                // M875: the tick deadline joins the race; a fired tick loops.
+                let Some(parked) =
+                    park_or_tick(park, tick.as_mut(), &mut *mux, &mut adapter).await?
+                else {
+                    continue;
                 };
                 let (slot, maybe) = match parked {
                     Either::Left(Some(directive)) => {
@@ -3628,6 +3719,12 @@ async fn muxer_arm<'a>(
 /// would otherwise hand-roll. `Eos` (per-input flush + aggregation) and
 /// `CapsChanged` (MX-1 / MX-2) are handled as in [`muxer_arm`]; only `DataFrame`s
 /// are reordered.
+///
+/// The deadline tick works as in [`muxer_arm`] (busy check per iteration plus the
+/// parked race, via [`ArmTick`]), except that it comes after the merged-`Eos`
+/// exit and after the aggregator's release round: an arm on its way out ticks no
+/// more, and a tick never jumps ahead of a frame already safe to emit in PTS
+/// order.
 #[allow(clippy::too_many_arguments)]
 async fn muxer_arm_pts<'a>(
     mut mux: Box<dyn DynMultiInputElement + 'a>,
@@ -3638,6 +3735,7 @@ async fn muxer_arm_pts<'a>(
     mut beta: MuxBeta,
     arm_rx: Receiver<ArmDirective>,
     probe: Probe,
+    ticker: Option<&'a dyn DynAsyncClock>,
 ) -> Result<u64, G2gError> {
     let mut adapter = SenderSink::new(out_tx);
     let mut open = alloc::vec![true; input_count];
@@ -3645,6 +3743,7 @@ async fn muxer_arm_pts<'a>(
     // Round-robin wake cursor, so a fast input does not bias the block path.
     let mut next = 0usize;
     let mut control_open = true;
+    let mut tick = ArmTick::new(ticker, &*mux);
     beta.seed(&*mux, &current_output);
     loop {
         // Release every frame now safe to emit, in global PTS order: the
@@ -3670,23 +3769,35 @@ async fn muxer_arm_pts<'a>(
             adapter.push(PipelinePacket::Eos).await?;
             return Ok(0);
         }
+        // Deadline reached while frames keep arriving on one pad (the arm never
+        // parks below).
+        if let Some(t) = tick.as_mut() {
+            t.fire_if_due(&mut *mux, &mut adapter).await?;
+        }
         // Make progress: block for the next packet from any still-open input,
         // racing the β control channel (M839) so a consumer's demand on the
-        // merged output reaches this arm while it waits.
-        let (slot, maybe) = if control_open {
-            match select2(arm_rx.recv(), muxer_recv_any(&pad_rxs, &open, next)).await {
-                Either::Left(Some(directive)) => {
-                    apply_mux_directive(&mut *mux, &mut beta, directive, &current_output).await?;
-                    continue;
-                }
-                Either::Left(None) => {
-                    control_open = false;
-                    continue;
-                }
-                Either::Right(v) => v,
+        // merged output reaches this arm while it waits, and the tick deadline so
+        // a quiet fan-in still gets its tick.
+        let park = async {
+            if control_open {
+                select2(arm_rx.recv(), muxer_recv_any(&pad_rxs, &open, next)).await
+            } else {
+                Either::Right(muxer_recv_any(&pad_rxs, &open, next).await)
             }
-        } else {
-            muxer_recv_any(&pad_rxs, &open, next).await
+        };
+        let Some(parked) = park_or_tick(park, tick.as_mut(), &mut *mux, &mut adapter).await? else {
+            continue;
+        };
+        let (slot, maybe) = match parked {
+            Either::Left(Some(directive)) => {
+                apply_mux_directive(&mut *mux, &mut beta, directive, &current_output).await?;
+                continue;
+            }
+            Either::Left(None) => {
+                control_open = false;
+                continue;
+            }
+            Either::Right(v) => v,
         };
         next = (slot + 1) % input_count;
         let pad = pad_rxs[slot].0;
