@@ -1736,6 +1736,14 @@ single-input launch element and as a fan-in muxer, so the text parser
 picks `tsmux::TsMux` for one input and `tsmuxn::TsMux` for several by link degree
 (`v.! m.  a.! m.  mpegtsmux name=m`), mirroring gst's request sink pads.
 
+Tags ride TS through its standard carriers (M872): the muxers' `with_tags` /
+`with_track_tags` write the SDT `service_descriptor` (service name from
+`Tag::Title`, provider from the ffprobe-spelled `service_provider` key) and a
+per-stream ISO-639 language descriptor in the PMT; the demuxers CRC-check and
+parse both and post `BusMessage::Tag` / `StreamTag` on the `mpegts-pid-{pid}`
+ids, ffmpeg-validated both directions. Nothing else rides TS: it has no
+free-form tag element.
+
 The TS stack also carries KLV metadata (STANAG 4609, the airborne-ISR profile of
 MPEG-TS): `Caps::Klv` is the metadata elementary-stream caps (GStreamer
 `meta/x-klv`), each frame one SMPTE ST 336 key-length-value packet. On the mux

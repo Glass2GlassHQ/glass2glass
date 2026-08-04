@@ -34,17 +34,86 @@ use g2g_core::{
     AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps, CapsConstraint,
     CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError, MemoryDomain, MultiOutputElement,
     MultiOutputSink, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, Rate, Seek, Segment, Stream, StreamCollection, StreamType, VideoCodec,
+    PropValue, PropertySpec, Rate, Seek, Segment, Stream, StreamCollection, StreamType, Tag,
+    TagList, VideoCodec,
 };
 
 use crate::demuxseek::{Admit, DemuxSeek};
 use crate::mpegts::{
     unwrap_metadata_au_cells, EsUnit, TsDemuxer, STREAM_TYPE_AAC, STREAM_TYPE_AC3,
     STREAM_TYPE_H264, STREAM_TYPE_H265, STREAM_TYPE_METADATA_PES, STREAM_TYPE_MPEG1_AUDIO,
-    STREAM_TYPE_MPEG2_AUDIO, STREAM_TYPE_MPEG4P2, STREAM_TYPE_PRIVATE_PES, TS_PACKET_LEN,
+    STREAM_TYPE_MPEG2_AUDIO, STREAM_TYPE_MPEG4P2, STREAM_TYPE_PRIVATE_PES,
+    TAG_KEY_SERVICE_PROVIDER, TS_PACKET_LEN,
 };
 
 const TS_SYNC: u8 = 0x47;
+
+/// The published stream id of an elementary stream: the id it takes in the
+/// `StreamCollection` (M386), and the id its per-stream tags post on (M872).
+fn stream_id(pid: u16) -> alloc::string::String {
+    alloc::format!("mpegts-pid-{pid}")
+}
+
+/// Posts a transport stream's tags on the bus once each (M872): the active
+/// program's SDT service text as a [`BusMessage::Tag`] (the service name as
+/// [`Tag::Title`], the provider as a [`Tag::Other`] under ffprobe's
+/// `service_provider` key), and each PMT stream's ISO 639 language as a
+/// [`BusMessage::StreamTag`] on that stream's collection id. Shared by the single-
+/// and multi-output demuxers, the MPEG-TS sibling of the Matroska `TagPoster`.
+///
+/// TS carries nothing else: the SDT and the language descriptor are the only
+/// standard tag slots, and the service text is per-program, so with several
+/// programs only the selected one's service posts (the bus message has no program
+/// scope). State survives a seek's parser reset, so re-reading the tables of the
+/// same stream does not re-post.
+#[derive(Debug, Default)]
+struct TagPoster {
+    service_posted: bool,
+    languages_posted: bool,
+}
+
+impl TagPoster {
+    /// Post whatever the demuxer has parsed since the last call; a no-op until the
+    /// SDT / PMT parse, and once each thereafter.
+    fn post(&mut self, demux: &TsDemuxer, bus: Option<&BusHandle>) {
+        if !self.service_posted {
+            if let Some(service) = demux.service() {
+                let mut list = TagList::new();
+                if !service.name.is_empty() {
+                    list.push(Tag::Title(service.name.clone()));
+                }
+                if !service.provider.is_empty() {
+                    list.push(Tag::Other {
+                        key: TAG_KEY_SERVICE_PROVIDER.into(),
+                        value: service.provider.clone(),
+                    });
+                }
+                if !list.is_empty() {
+                    self.service_posted = true;
+                    if let Some(bus) = bus {
+                        bus.try_post(BusMessage::Tag(list));
+                    }
+                }
+            }
+        }
+        if self.languages_posted || demux.streams().is_empty() {
+            return;
+        }
+        self.languages_posted = true;
+        for es in demux.streams() {
+            let Some(code) = es.language_code() else {
+                continue;
+            };
+            let tags: TagList = [Tag::Language(code.into())].into_iter().collect();
+            if let Some(bus) = bus {
+                bus.try_post(BusMessage::StreamTag {
+                    stream_id: stream_id(es.pid),
+                    tags,
+                });
+            }
+        }
+    }
+}
 
 /// The bytes to forward for one access unit: a metadata-in-PES (0x15) payload
 /// has its ISO 13818-1 AU cells unwrapped when it carries them (a spec-strict
@@ -111,6 +180,8 @@ pub struct TsDemux {
     bus: Option<BusHandle>,
     /// Set once the `StreamCollection` has been announced, so it posts once.
     collection_posted: bool,
+    /// Posts the SDT service text and per-stream languages as tags (M872).
+    tags: TagPoster,
     /// Seek support (M362): app time seeks drive an upstream byte-seek and a
     /// re-sync. Inert unless `with_seek` wired the controllers.
     seek: DemuxSeek,
@@ -137,6 +208,7 @@ impl TsDemux {
             emitted: 0,
             bus: None,
             collection_posted: false,
+            tags: TagPoster::default(),
             seek: DemuxSeek::default(),
             opus_caps_emitted: false,
         }
@@ -158,7 +230,8 @@ impl TsDemux {
     }
 
     /// Attach the pipeline bus so the program's `StreamCollection` (M386) is
-    /// announced once the PMT is parsed, the MPEG-TS sibling of
+    /// announced once the PMT is parsed, and its SDT service text / per-stream
+    /// languages post as tags (M872), the MPEG-TS sibling of
     /// [`MkvDemux::with_bus`](crate::mkvdemux::MkvDemux::with_bus).
     pub fn with_bus(mut self, bus: BusHandle) -> Self {
         self.bus = Some(bus);
@@ -196,7 +269,7 @@ impl TsDemux {
     /// unknown from the PMT, so `Any`, refined later by `CapsChanged`). `None` for
     /// a `stream_type` g2g does not forward.
     fn es_to_stream(es: &crate::mpegts::ElementaryStream) -> Option<Stream> {
-        let id = alloc::format!("mpegts-pid-{}", es.pid);
+        let id = stream_id(es.pid);
         let video = |codec| Caps::CompressedVideo {
             codec,
             width: Dim::Any,
@@ -554,6 +627,7 @@ impl AsyncElement for TsDemux {
                     self.drain_packets();
                     if self.bus.is_some() {
                         self.post_stream_collection();
+                        self.tags.post(&self.demux, self.bus.as_ref());
                     }
                     let units = self.demux.take_units();
                     self.emit_units(units, out).await?;
@@ -776,6 +850,8 @@ pub struct TsDemuxN {
     bus: Option<BusHandle>,
     /// Set once the `StreamCollection` has been announced (M386), so it posts once.
     collection_posted: bool,
+    /// Posts the SDT service text and per-stream languages as tags (M872).
+    tags: TagPoster,
     /// App-driven stream selection (M475): the app names the stream id each port
     /// should carry (port `i` <- selection id `i`); the demuxer re-maps its ports.
     /// Inert unless `with_stream_select` wired it. The MPEG-TS sibling of
@@ -800,6 +876,7 @@ impl TsDemuxN {
             announced,
             bus: None,
             collection_posted: false,
+            tags: TagPoster::default(),
             stream_select: None,
             program_number: None,
             emitted: 0,
@@ -1039,6 +1116,7 @@ impl MultiOutputElement for TsDemuxN {
                     self.drain_packets();
                     if self.bus.is_some() {
                         self.post_stream_collection();
+                        self.tags.post(&self.demux, self.bus.as_ref());
                     }
                     // Honor an app selection before routing this batch, so a re-map
                     // (and its re-armed CapsChanged) takes effect for the frames now.
@@ -1123,6 +1201,7 @@ mod tests {
             opus_channels: None,
             ac3: false,
             klv: false,
+            language: None,
         };
         let stream = TsDemux::es_to_stream(&es).expect("0x10 is forwarded");
         assert_eq!(stream.stream_type, StreamType::Video);
@@ -1144,6 +1223,7 @@ mod tests {
                 opus_channels: None,
                 ac3: false,
                 klv: false,
+                language: None,
             }),
             Some(TsStream::Mpeg4Part2)
         );
@@ -1373,6 +1453,50 @@ mod tests {
             .await
             .unwrap();
         d.process(PipelinePacket::Eos, sink).await.unwrap();
+    }
+
+    /// The single-output demuxer posts the tags a transport stream carries (M872):
+    /// the SDT service text once as a `Tag`, each PMT language as a `StreamTag` on
+    /// its stream's collection id. Re-feeding the same stream posts nothing more.
+    #[tokio::test]
+    async fn posts_service_and_language_tags_on_the_bus() {
+        use g2g_core::Bus;
+        let mut m = crate::mpegts::TsMuxer::with_streams(&[STREAM_TYPE_H264]);
+        m.set_service("News One", "G2G Broadcasting");
+        m.set_stream_language(0, "eng");
+        let mut stream = m.push_au(&[0, 0, 0, 1, 0x65, 0x11], Some(900_000), None);
+        stream.extend(m.push_au(&[0, 0, 0, 1, 0x41, 0x22], Some(903_000), None));
+
+        let (bus, handle) = Bus::new(16);
+        let mut d = TsDemux::new().with_bus(handle);
+        d.configure_pipeline(&TsDemux::input_caps()).unwrap();
+        let mut sink = CaptureSink::default();
+        run_demux(&mut d, &stream, &mut sink).await;
+        run_demux(&mut d, &stream, &mut sink).await; // the tables repeat, the tags do not
+        assert_eq!(sink.frames.len(), 4, "both feeds' AUs still come out");
+
+        let (mut global, mut per_stream) = (Vec::new(), Vec::new());
+        while let Some(msg) = bus.try_recv() {
+            match msg {
+                BusMessage::Tag(t) => global.push(t),
+                BusMessage::StreamTag { stream_id, tags } => per_stream.push((stream_id, tags)),
+                _ => {}
+            }
+        }
+        assert_eq!(global.len(), 1, "the service text posts once");
+        assert_eq!(
+            global[0].tags(),
+            &[
+                Tag::Title("News One".into()),
+                Tag::Other {
+                    key: TAG_KEY_SERVICE_PROVIDER.into(),
+                    value: "G2G Broadcasting".into()
+                }
+            ]
+        );
+        assert_eq!(per_stream.len(), 1, "one language, posted once");
+        assert_eq!(per_stream[0].0, "mpegts-pid-256");
+        assert_eq!(per_stream[0].1.tags(), &[Tag::Language("eng".into())]);
     }
 
     #[tokio::test]

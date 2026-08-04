@@ -34,13 +34,13 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, FrameTiming, G2gError,
-    InputAggregator, MemoryDomain, MultiInputElement, OutputSink, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec,
+    resolve_tags, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, FrameTiming,
+    G2gError, InputAggregator, MemoryDomain, MultiInputElement, OutputSink, PipelinePacket,
+    PropError, PropKind, PropValue, PropertySpec, TagList,
 };
 
 use crate::mpegts::TsMuxer;
-use crate::tsmux::stream_type_for;
+use crate::tsmux::{language_from_tags, service_from_tags, stream_type_for};
 
 /// Muxes N elementary streams into one MPEG-TS byte stream, PTS-ordered.
 #[derive(Debug)]
@@ -68,6 +68,11 @@ pub struct TsMux {
     /// Carry a `Caps::Klv` input as synchronous KLV (metadata-in-PES 0x15)
     /// instead of the default asynchronous private PES (0x06 + 'KLVA').
     klv_sync: bool,
+    /// Whole-service metadata (M872), written to the SDT.
+    tags: TagList,
+    /// Per-input metadata: its `Tag::Language` becomes that stream's
+    /// `ISO_639_language_descriptor`. One (possibly empty) list per input pad.
+    track_tags: Vec<TagList>,
 }
 
 impl TsMux {
@@ -86,7 +91,33 @@ impl TsMux {
             pcr_interval_90khz: 3600,
             program_numbers: alloc::vec![1; inputs],
             klv_sync: false,
+            tags: TagList::new(),
+            track_tags: alloc::vec![TagList::new(); inputs],
         }
+    }
+
+    /// Attach whole-service metadata (M872): the service name ([`g2g_core::Tag::Title`]
+    /// or a `service_name` key) and provider (a `service_provider` key) written to
+    /// the SDT, which names every program this muxer declares with that text. TS
+    /// defines no free-form tag carrier, so any other tag here is dropped.
+    pub fn with_tags(mut self, tags: TagList) -> Self {
+        self.tags = tags;
+        self
+    }
+
+    /// Attach metadata scoped to one input pad's elementary stream: its
+    /// [`g2g_core::Tag::Language`] becomes an `ISO_639_language_descriptor` in that
+    /// stream's PMT entry, so a reader reports the language on that stream. Nothing
+    /// else rides a TS elementary stream, so the rest of the list is dropped.
+    /// Out-of-range inputs are ignored.
+    ///
+    /// A language set globally by [`with_tags`](Self::with_tags) applies to every
+    /// stream that does not name its own (`g2g_core::resolve_tags`).
+    pub fn with_track_tags(mut self, input: usize, tags: TagList) -> Self {
+        if input < self.inputs {
+            self.track_tags[input] = tags;
+        }
+        self
     }
 
     /// Assign a program number to each input pad, in pad order (M783): inputs
@@ -341,6 +372,15 @@ impl MultiInputElement for TsMux {
                 // 90 kHz clock: 90 ticks per millisecond (matches the single-input path).
                 mux.set_table_interval_90khz(self.table_interval_ms.saturating_mul(90));
                 mux.set_pcr_interval_90khz(self.pcr_interval_90khz);
+                if let Some((name, provider)) = service_from_tags(&self.tags) {
+                    mux.set_service(&name, &provider);
+                }
+                for (i, track) in self.track_tags.iter().enumerate() {
+                    let effective = resolve_tags(&self.tags, track);
+                    if let Some(language) = language_from_tags(&effective) {
+                        mux.set_stream_language(i, language);
+                    }
+                }
                 self.mux = Some(mux);
             }
 

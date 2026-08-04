@@ -15,6 +15,7 @@
 //! stream for H.264 / H.265 is already Annex-B, so a unit feeds `h264parse`
 //! directly.
 
+use alloc::string::String;
 use alloc::vec::Vec;
 
 /// MPEG-TS packet size in bytes (the standard 188; M2TS 192 with a 4-byte
@@ -23,6 +24,33 @@ pub const TS_PACKET_LEN: usize = 188;
 
 const SYNC_BYTE: u8 = 0x47;
 const PID_PAT: u16 = 0x0000;
+/// The DVB SI PID the SDT rides (ETSI EN 300 468); shared with the BAT and the
+/// other-TS SDT, which the `table_id` filter drops.
+const PID_SDT: u16 = 0x0011;
+/// SDT `table_id` for this transport stream (0x46 is the other-TS variant, which
+/// describes services carried elsewhere and is ignored).
+const TABLE_ID_SDT: u8 = 0x42;
+/// DVB `service_descriptor` tag: service_type, then the length-prefixed provider
+/// and service name.
+const DESC_TAG_SERVICE: u8 = 0x48;
+/// `ISO_639_language_descriptor` tag: 4 bytes per language (a 3-letter code plus
+/// an audio_type byte).
+const DESC_TAG_ISO639: u8 = 0x0A;
+/// SDT `service_type` for digital television, and for digital radio (a program
+/// with no video stream).
+const SERVICE_TYPE_TV: u8 = 0x01;
+const SERVICE_TYPE_RADIO: u8 = 0x02;
+
+/// The [`g2g_core::Tag::Other`] key the SDT `service_provider_name` rides under.
+/// `Tag` has no typed provider variant, so the key is ffprobe's own
+/// (`service_provider`, what it reports for this field): a tag list built from one
+/// tool's output means the same thing to the other. The service name has a typed
+/// home, [`g2g_core::Tag::Title`].
+pub const TAG_KEY_SERVICE_PROVIDER: &str = "service_provider";
+/// The alternative key for the service name, accepted on the mux side next to
+/// [`g2g_core::Tag::Title`] because it is what ffmpeg's `-metadata` takes and
+/// ffprobe reports.
+pub const TAG_KEY_SERVICE_NAME: &str = "service_name";
 
 /// Cap on a single reassembled PES payload. A video PES carries no declared
 /// length and is delimited only by the next payload-unit-start, so a stream that
@@ -96,6 +124,32 @@ pub struct ElementaryStream {
     /// (0x06) stream carrying a 'KLVA' registration descriptor (asynchronous
     /// KLV), or any metadata-in-PES (0x15) stream (synchronous KLV).
     pub klv: bool,
+    /// The 3-letter code of the ES-info `ISO_639_language_descriptor` (tag 0x0A),
+    /// if it carried one. Read it as text with
+    /// [`language_code`](Self::language_code).
+    pub language: Option<[u8; 3]>,
+}
+
+impl ElementaryStream {
+    /// The PMT-declared language of this stream, if it carried an
+    /// `ISO_639_language_descriptor`.
+    pub fn language_code(&self) -> Option<&str> {
+        self.language
+            .as_ref()
+            .and_then(|c| core::str::from_utf8(c).ok())
+    }
+}
+
+/// The DVB `service_descriptor` text of one service (SDT): the two names a
+/// transport stream carries for the program, which the demuxer surfaces as tags
+/// and the muxer writes. Empty when the stream declared the field empty, or when
+/// its DVB character table was one this parser will not decode (see `dvb_text`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ServiceInfo {
+    /// `service_name`, the program's own name.
+    pub name: String,
+    /// `service_provider_name`, the broadcaster.
+    pub provider: String,
 }
 
 /// A reassembled PES payload: one access unit of an elementary stream.
@@ -138,6 +192,10 @@ pub struct TsDemuxer {
     /// Program to route (`None` = the first in PAT order). A set number with no
     /// matching program routes nothing (strict, no fallback to the first).
     selected_program: Option<u16>,
+    /// SDT services as `(service_id, text)`, in section order (M872). Kept apart
+    /// from `programs` because the SDT may parse before the PAT; a service_id is a
+    /// `program_number`, so [`service`](Self::service) joins the two.
+    services: Vec<(u16, ServiceInfo)>,
     pending: Vec<PendingPes>,
     completed: Vec<EsUnit>,
 }
@@ -177,6 +235,17 @@ impl TsDemuxer {
         self.programs
             .iter()
             .map(|p| (p.number, p.streams.as_slice()))
+    }
+
+    /// The active program's SDT service text (M872), if an SDT named a service
+    /// whose `service_id` matches that program's number. `None` for a stream with
+    /// no SDT, or before both tables parse.
+    pub fn service(&self) -> Option<&ServiceInfo> {
+        let number = self.active_program()?.number;
+        self.services
+            .iter()
+            .find(|(id, _)| *id == number)
+            .map(|(_, s)| s)
     }
 
     /// Opus channel count for `pid`, if its PMT entry is a private (0x06) stream
@@ -239,6 +308,8 @@ impl TsDemuxer {
 
         if pid == PID_PAT {
             self.parse_pat(payload, pusi);
+        } else if pid == PID_SDT {
+            self.parse_sdt(payload, pusi);
         } else if let Some(idx) = self.programs.iter().position(|p| p.pmt_pid == pid) {
             self.parse_pmt(idx, payload, pusi);
         } else if let Some(stream_type) = self.stream_type_of(pid) {
@@ -295,6 +366,17 @@ impl TsDemuxer {
         section.get(..total - 4)
     }
 
+    /// The section body of a section whose trailing MPEG-2 CRC-32 checks out (the
+    /// CRC over a section including its own 4 CRC bytes is 0 when it matches),
+    /// else `None`. Used for the SDT: its PID carries several tables, a section can
+    /// start mid-stream, and unlike a PAT/PMT PID nothing later cross-checks the
+    /// text it carries, so a bad section must not become a tag.
+    fn checked_section_body(section: &[u8]) -> Option<&[u8]> {
+        let body = Self::section_body(section)?;
+        let whole = section.get(..body.len() + 4)?;
+        (mpeg_crc32(whole) == 0).then_some(body)
+    }
+
     fn parse_pat(&mut self, payload: &[u8], pusi: bool) {
         if !self.programs.is_empty() {
             return; // first PAT wins (no version / update handling)
@@ -326,6 +408,43 @@ impl TsDemuxer {
         }
     }
 
+    /// Parse an SDT section (PID 0x11, `table_id` 0x42) into the per-service
+    /// name / provider text (M872): the service loop follows the 8-byte PSI header,
+    /// `original_network_id` and a reserved byte, and each entry's descriptor loop
+    /// carries the DVB `service_descriptor`. First SDT wins, the PAT / PMT
+    /// discipline (no version handling). The CRC is verified
+    /// ([`checked_section_body`](Self::checked_section_body)) and every length is
+    /// bounds-checked, so a malformed or unrelated section on this PID is ignored
+    /// rather than yielding garbled text.
+    fn parse_sdt(&mut self, payload: &[u8], pusi: bool) {
+        if !self.services.is_empty() {
+            return;
+        }
+        let Some(section) = Self::section(payload, pusi) else {
+            return;
+        };
+        if section.first() != Some(&TABLE_ID_SDT) {
+            return; // an other-TS SDT (0x46), a BAT or an EIT sharing the PID
+        }
+        let Some(body) = Self::checked_section_body(section) else {
+            return;
+        };
+        let mut i = 11usize;
+        while i + 5 <= body.len() {
+            let service_id = ((body[i] as u16) << 8) | body[i + 1] as u16;
+            let loop_len = (((body[i + 3] & 0x0F) as usize) << 8) | body[i + 4] as usize;
+            // A descriptor loop declared past the section end abandons the walk:
+            // the count is attacker-controlled.
+            let Some(desc) = body.get(i + 5..i + 5 + loop_len) else {
+                return;
+            };
+            if let Some(info) = parse_service_descriptor(desc) {
+                self.services.push((service_id, info));
+            }
+            i = i.saturating_add(5).saturating_add(loop_len);
+        }
+    }
+
     fn parse_pmt(&mut self, prog_idx: usize, payload: &[u8], pusi: bool) {
         if !self.programs[prog_idx].streams.is_empty() {
             return; // first PMT per program wins
@@ -349,24 +468,25 @@ impl TsDemuxer {
             let pid = (((body[i + 1] & 0x1F) as u16) << 8) | body[i + 2] as u16;
             let es_info_length = (((body[i + 3] & 0x0F) as usize) << 8) | body[i + 4] as usize;
             // Bounds-check the descriptor slice: a bogus es_info_length must not
-            // read past the section body (the count is attacker-controlled). Only a
-            // private (0x06) stream needs its descriptors inspected to tell Opus /
-            // AC-3 / KLV apart from an unidentified private stream.
-            let descriptors = body
-                .get(i + 5..i + 5 + es_info_length)
-                .filter(|_| stream_type == STREAM_TYPE_PRIVATE_PES);
-            let opus_channels = descriptors.and_then(parse_opus_descriptors);
-            let ac3 = descriptors.is_some_and(has_ac3_descriptor);
+            // read past the section body (the count is attacker-controlled).
+            let descriptors = body.get(i + 5..i + 5 + es_info_length);
+            // Only a private (0x06) stream needs its descriptors inspected to tell
+            // Opus / AC-3 / KLV apart from an unidentified private stream; the
+            // language descriptor rides any stream type.
+            let private = descriptors.filter(|_| stream_type == STREAM_TYPE_PRIVATE_PES);
+            let opus_channels = private.and_then(parse_opus_descriptors);
+            let ac3 = private.is_some_and(has_ac3_descriptor);
             // A metadata-in-PES (0x15) stream is KLV without needing a descriptor
             // (the ffmpeg convention); a private 0x06 needs the 'KLVA' registration.
             let klv = stream_type == STREAM_TYPE_METADATA_PES
-                || descriptors.is_some_and(has_klv_registration);
+                || private.is_some_and(has_klv_registration);
             self.programs[prog_idx].streams.push(ElementaryStream {
                 pid,
                 stream_type,
                 opus_channels,
                 ac3,
                 klv,
+                language: descriptors.and_then(parse_iso639_language),
             });
             i = i.saturating_add(5).saturating_add(es_info_length);
         }
@@ -527,6 +647,70 @@ fn has_klv_registration(mut desc: &[u8]) -> bool {
     false
 }
 
+/// The first language of a PMT ES-info `ISO_639_language_descriptor` (tag 0x0A):
+/// 4 bytes per language, a 3-letter code then an audio_type byte. Only the first
+/// is kept, since a [`g2g_core::Tag::Language`] holds one. `None` when the
+/// descriptor is absent, truncated, or its code is not three ASCII letters. Every
+/// field is bounds-checked so a malformed loop returns `None`, never panics.
+fn parse_iso639_language(mut desc: &[u8]) -> Option<[u8; 3]> {
+    while desc.len() >= 2 {
+        let tag = desc[0];
+        let len = desc[1] as usize;
+        let body = desc.get(2..2 + len)?;
+        if tag == DESC_TAG_ISO639 && body.len() >= 3 {
+            let code = [body[0], body[1], body[2]];
+            if code.iter().all(u8::is_ascii_alphabetic) {
+                return Some(code);
+            }
+        }
+        desc = &desc[2 + len..];
+    }
+    None
+}
+
+/// The service text of an SDT service entry's descriptor loop: the DVB
+/// `service_descriptor` (tag 0x48), a service_type byte then two length-prefixed
+/// DVB text fields, provider first. `None` when the loop names no service
+/// descriptor or a field runs past it; a field this parser will not decode comes
+/// back empty rather than garbled (see [`dvb_text`]). Bounds-checked throughout.
+fn parse_service_descriptor(mut desc: &[u8]) -> Option<ServiceInfo> {
+    while desc.len() >= 2 {
+        let tag = desc[0];
+        let len = desc[1] as usize;
+        let body = desc.get(2..2 + len)?;
+        if tag == DESC_TAG_SERVICE {
+            let provider_len = *body.get(1)? as usize;
+            let provider = body.get(2..2 + provider_len)?;
+            let name_len = *body.get(2 + provider_len)? as usize;
+            let name = body.get(3 + provider_len..3 + provider_len + name_len)?;
+            return Some(ServiceInfo {
+                name: dvb_text(name).unwrap_or_default(),
+                provider: dvb_text(provider).unwrap_or_default(),
+            });
+        }
+        desc = &desc[2 + len..];
+    }
+    None
+}
+
+/// Decode one DVB text field (ETSI EN 300 468 annex A). A field opening with a
+/// character-table selection byte (0x01..=0x1F) is rejected with `None`: those
+/// tables are non-Latin or multi-byte, and reporting no name beats reporting a
+/// mis-decoded one. The default table (ISO 6937) is read as Latin-1, which agrees
+/// for the ASCII real service names use and leaves its accent escapes uncomposed;
+/// control codes inside the text are dropped.
+fn dvb_text(raw: &[u8]) -> Option<String> {
+    if raw.first().is_some_and(|&b| b < 0x20) {
+        return None;
+    }
+    Some(
+        raw.iter()
+            .filter(|&&b| b >= 0x20 && !(0x80..=0x9F).contains(&b))
+            .map(|&b| b as char)
+            .collect(),
+    )
+}
+
 /// Unwrap the ISO 13818-1 metadata access-unit cells of one metadata-in-PES
 /// (0x15) payload, returning the concatenated cell payloads, or `None` to say
 /// "forward the payload unchanged". A cell is a 5-byte header
@@ -650,8 +834,9 @@ struct MuxStream {
     meta_seq: u8,
     /// ES-info descriptor bytes for this stream's PMT entry (the 'KLVA'
     /// registration for asynchronous KLV, the metadata descriptor for
-    /// synchronous KLV; empty otherwise).
-    es_info: &'static [u8],
+    /// synchronous KLV, an `ISO_639_language_descriptor` when
+    /// [`TsMuxer::set_stream_language`] added one; empty otherwise).
+    es_info: Vec<u8>,
 }
 
 /// One program in a [`TsMuxer`]: its `program_number`, the PID its PMT rides on
@@ -687,6 +872,11 @@ pub struct TsMuxer {
     streams: Vec<MuxStream>,
     programs: Vec<MuxProgram>,
     pat_cc: u8,
+    /// Continuity counter of the SDT PID, used only with a `service` set.
+    sdt_cc: u8,
+    /// The service text an SDT announces for every program (M872); `None` writes
+    /// no SDT at all.
+    service: Option<ServiceInfo>,
     tables_written: bool,
     /// PAT/PMT re-emission cadence in 90 kHz ticks (`0` = emit once up front, the
     /// default). When set, the table pair is re-emitted before the first access
@@ -766,7 +956,7 @@ impl TsMuxer {
                 *video_n += 1;
                 id
             };
-            let es_info: &'static [u8] = match stream_type {
+            let es_info: &[u8] = match stream_type {
                 STREAM_TYPE_PRIVATE_PES => &[0x05, 4, b'K', b'L', b'V', b'A'], // registration
                 STREAM_TYPE_METADATA_PES => KLV_METADATA_DESCRIPTOR,
                 _ => &[],
@@ -778,17 +968,51 @@ impl TsMuxer {
                 es_cc: 0,
                 program,
                 meta_seq: 0,
-                es_info,
+                es_info: es_info.to_vec(),
             });
         }
         Self {
             streams: mux_streams,
             programs,
             pat_cc: 0,
+            sdt_cc: 0,
+            service: None,
             tables_written: false,
             table_interval_90khz: 0,
             last_tables_pts: None,
             pcr_interval_90khz: 3600,
+        }
+    }
+
+    /// Name the service the SDT announces (M872): the `service_name` and
+    /// `service_provider_name` of a DVB `service_descriptor`. With this set the mux
+    /// writes an SDT (PID 0x11, `table_id` 0x42) alongside the PAT/PMT, on the same
+    /// cadence, so a reader (ffprobe, [`TsDemuxer::service`]) reports the program's
+    /// text. Every program is named with this one text: there is no per-program
+    /// service API. A field longer than the single-byte DVB length allows is
+    /// truncated at a char boundary. Call before the first access unit, since that
+    /// is when the tables go out.
+    pub fn set_service(&mut self, name: &str, provider: &str) {
+        self.service = Some(ServiceInfo {
+            name: String::from(name),
+            provider: String::from(provider),
+        });
+    }
+
+    /// Declare elementary stream `index`'s language in its PMT entry, as an
+    /// `ISO_639_language_descriptor` (M872, what ffmpeg writes for
+    /// `-metadata:s:0 language=deu`). A code that is not three ASCII letters is
+    /// ignored, since the descriptor's field is exactly three bytes, as is an
+    /// out-of-range index. Call before the first access unit (the PMT goes out then).
+    pub fn set_stream_language(&mut self, index: usize, code: &str) {
+        let c = code.as_bytes();
+        if c.len() != 3 || !c.iter().all(u8::is_ascii_alphabetic) {
+            return;
+        }
+        if let Some(s) = self.streams.get_mut(index) {
+            // audio_type 0 = undefined, what ffmpeg writes.
+            s.es_info
+                .extend_from_slice(&[DESC_TAG_ISO639, 4, c[0], c[1], c[2], 0x00]);
         }
     }
 
@@ -815,8 +1039,8 @@ impl TsMuxer {
     }
 
     /// Mux one access unit of elementary stream `stream_index` into TS bytes,
-    /// preceded by the PAT + every program's PMT on the very first call (any
-    /// stream). `pts_90khz`,
+    /// preceded by the PAT + every program's PMT (+ the SDT, with a service set)
+    /// on the very first call (any stream). `pts_90khz`,
     /// when present, is written into the PES header; a `dts_90khz` that differs
     /// from it adds a second (DTS) timestamp for reordered (B-frame) video.
     pub fn push_au_on(
@@ -846,6 +1070,9 @@ impl TsMuxer {
             for p in 0..self.programs.len() {
                 self.pmt_packet(p, &mut out);
             }
+            // The SDT joins the pair on the same cadence, so a mid-stream joiner
+            // learns the service name as soon as it learns the program layout.
+            self.sdt_packet(&mut out);
             self.tables_written = true;
             if let Some(now) = pts_90khz {
                 self.last_tables_pts = Some(now);
@@ -967,11 +1194,92 @@ impl TsMuxer {
                 0xF0 | (s.es_info.len() >> 8) as u8 & 0x0F,
                 s.es_info.len() as u8,
             ]);
-            body.extend_from_slice(s.es_info);
+            body.extend_from_slice(&s.es_info);
         }
         self.programs[prog_idx].pmt_cc =
             psi_packet(pmt_pid, 0x02, &body, self.programs[prog_idx].pmt_cc, out);
     }
+
+    /// Emit the SDT (PID 0x11, `table_id` 0x42), one service entry per program
+    /// carrying this muxer's `service_descriptor` text. A no-op without a service.
+    fn sdt_packet(&mut self, out: &mut Vec<u8>) {
+        if self.service.is_none() {
+            return;
+        }
+        let body = self.sdt_body();
+        self.sdt_cc = psi_packet(PID_SDT, TABLE_ID_SDT, &body, self.sdt_cc, out);
+    }
+
+    /// The SDT section body (from section[3]): the PSI header tail,
+    /// `original_network_id` and a reserved byte, then one service entry per
+    /// program. `service_type` says digital television for a program carrying video
+    /// and digital radio for one that does not.
+    fn sdt_body(&self) -> Vec<u8> {
+        let Some(service) = self.service.as_ref() else {
+            return Vec::new();
+        };
+        let name = dvb_field(&service.name);
+        let provider = dvb_field(&service.provider);
+        let mut body = Vec::new();
+        body.extend_from_slice(&[
+            0x00, 0x01, // transport_stream_id (matches the PAT's)
+            0xC1, 0x00, 0x00, // version/current, section_number, last_section_number
+            0x00, 0x01, // original_network_id
+            0xFF, // reserved_future_use
+        ]);
+        // service_descriptor: tag, length, service_type, then the two fields.
+        let desc_len = 3 + provider.len() + name.len();
+        let loop_len = 2 + desc_len;
+        for (idx, p) in self.programs.iter().enumerate() {
+            let video = self
+                .streams
+                .iter()
+                .any(|s| s.program == idx && mux_stream_type_is_video(s.stream_type));
+            body.extend_from_slice(&[
+                (p.number >> 8) as u8,
+                p.number as u8,
+                0xFC, // reserved, EIT_schedule / EIT_present_following = 0
+                // running_status '100' (running), free_CA 0, loop length.
+                0x80 | ((loop_len >> 8) as u8 & 0x0F),
+                loop_len as u8,
+                DESC_TAG_SERVICE,
+                desc_len as u8,
+                if video {
+                    SERVICE_TYPE_TV
+                } else {
+                    SERVICE_TYPE_RADIO
+                },
+                provider.len() as u8,
+            ]);
+            body.extend_from_slice(provider);
+            body.push(name.len() as u8);
+            body.extend_from_slice(name);
+        }
+        body
+    }
+}
+
+/// Whether a `stream_type` the mux writes is video, for the SDT `service_type`.
+fn mux_stream_type_is_video(stream_type: u8) -> bool {
+    matches!(
+        stream_type,
+        STREAM_TYPE_H264 | STREAM_TYPE_H265 | STREAM_TYPE_MPEG4P2
+    )
+}
+
+/// The bytes of one DVB text field: the string truncated at a char boundary so
+/// both fields plus the `service_descriptor` header fit its single length byte.
+/// ASCII, which real service names are, rides unchanged.
+fn dvb_field(s: &str) -> &[u8] {
+    /// Room for two fields and the 3-byte descriptor header inside 255 bytes.
+    const MAX: usize = 124;
+    let end = s
+        .char_indices()
+        .map(|(i, c)| i + c.len_utf8())
+        .take_while(|&e| e <= MAX)
+        .last()
+        .unwrap_or(0);
+    &s.as_bytes()[..end]
 }
 
 /// Wrap one metadata access unit in a single ISO 13818-1 metadata AU cell
@@ -1278,7 +1586,8 @@ mod tests {
                 stream_type: STREAM_TYPE_H264,
                 opus_channels: None,
                 ac3: false,
-                klv: false
+                klv: false,
+                language: None
             }]
         );
         assert_eq!(d.video_pid(), Some(es_pid));
@@ -1436,6 +1745,181 @@ mod tests {
         assert_eq!(units[0].pts_90khz, Some(900_000));
         assert_eq!(units[1].data, au1);
         assert_eq!(units[1].pts_90khz, Some(903_000));
+    }
+
+    /// A DVB `service_descriptor` over the given raw provider / name field bytes.
+    fn service_desc(provider: &[u8], name: &[u8]) -> Vec<u8> {
+        let mut d = alloc::vec![
+            DESC_TAG_SERVICE,
+            (3 + provider.len() + name.len()) as u8,
+            SERVICE_TYPE_TV,
+            provider.len() as u8,
+        ];
+        d.extend_from_slice(provider);
+        d.push(name.len() as u8);
+        d.extend_from_slice(name);
+        d
+    }
+
+    /// A one-service SDT body (from section[3]) carrying `desc` as that service's
+    /// descriptor loop. `loop_fudge` perturbs the declared loop length, so a test
+    /// can declare it past the section end.
+    fn sdt_body(desc: &[u8], loop_fudge: i32) -> Vec<u8> {
+        let loop_len = (desc.len() as i32 + loop_fudge).max(0) as usize;
+        let mut b = alloc::vec![
+            0x00,
+            0x01, // transport_stream_id
+            0xC1,
+            0x00,
+            0x00, // version/current, section/last
+            0x00,
+            0x01, // original_network_id
+            0xFF, // reserved
+            0x00,
+            0x01, // service_id = program 1
+            0xFC, // reserved + EIT flags
+            0x80 | ((loop_len >> 8) as u8 & 0x0F),
+            loop_len as u8,
+        ];
+        b.extend_from_slice(desc);
+        b
+    }
+
+    /// The service a demuxer reports after a PAT naming program 1 and `sdt`, which
+    /// carries a real CRC (the mux's own section writer).
+    fn service_of(body: &[u8], table_id: u8, corrupt_crc: bool) -> Option<ServiceInfo> {
+        let mut sdt = Vec::new();
+        super::psi_packet(PID_SDT, table_id, body, 0, &mut sdt);
+        if corrupt_crc {
+            // A short PSI payload sits at the tail of its packet (stuffing first),
+            // so the section's last CRC byte is the packet's last byte.
+            let last = sdt.len() - 1;
+            sdt[last] ^= 0xFF;
+        }
+        let mut d = TsDemuxer::new();
+        d.push_packet(&psi_packet(PID_PAT, 0x00, &pat_body(1, 0x1000)));
+        for pkt in sdt.chunks(TS_PACKET_LEN) {
+            d.push_packet(pkt);
+        }
+        d.service().cloned()
+    }
+
+    /// The mux writes the SDT service text and per-stream language descriptors, and
+    /// the demux reads both back on the streams they belong to.
+    #[test]
+    fn sdt_service_and_language_descriptors_round_trip() {
+        let mut m = TsMuxer::with_streams(&[STREAM_TYPE_H264, STREAM_TYPE_AAC]);
+        m.set_service("News One", "G2G Broadcasting");
+        m.set_stream_language(1, "deu");
+        m.set_stream_language(0, "en"); // not three letters: no descriptor
+        m.set_stream_language(9, "eng"); // out of range: ignored
+        let mut ts = m.push_au_on(0, &[0, 0, 0, 1, 0x65, 0x11], Some(900_000), None);
+        ts.extend(m.push_au_on(1, &[0xFF, 0xF1, 0x22], Some(901_000), None));
+
+        let mut d = TsDemuxer::new();
+        for pkt in ts.chunks(TS_PACKET_LEN) {
+            d.push_packet(pkt);
+        }
+        let service = d.service().expect("the SDT named program 1");
+        assert_eq!(service.name, "News One");
+        assert_eq!(service.provider, "G2G Broadcasting");
+        assert_eq!(d.streams()[1].language_code(), Some("deu"));
+        assert_eq!(
+            d.streams()[0].language,
+            None,
+            "a two-letter code writes no descriptor"
+        );
+
+        // The extra descriptor bytes leave the PMT (and the PES flow) intact.
+        d.flush();
+        assert_eq!(d.take_units().len(), 2, "both AUs still demux");
+
+        // A program carrying video is a television service; audio-only is radio.
+        let sdt = psi_body_of(&ts, PID_SDT).expect("SDT emitted");
+        assert_eq!(sdt[15], SERVICE_TYPE_TV, "service_type at the descriptor");
+        let mut audio_only = TsMuxer::new(STREAM_TYPE_AAC);
+        audio_only.set_service("Radio Two", "");
+        let radio = audio_only.push_au(&[0xFF, 0xF1, 0x33], Some(0), None);
+        let sdt = psi_body_of(&radio, PID_SDT).expect("SDT emitted");
+        assert_eq!(sdt[15], SERVICE_TYPE_RADIO);
+    }
+
+    /// Without a service the mux writes no SDT at all (nothing to say).
+    #[test]
+    fn no_service_writes_no_sdt() {
+        let mut m = TsMuxer::new(STREAM_TYPE_H264);
+        let ts = m.push_au(&[0, 0, 0, 1, 0x65, 0x88], Some(0), None);
+        assert!(psi_body_of(&ts, PID_SDT).is_none());
+    }
+
+    /// Malformed or unrelated sections on the SDT PID stay quiet: a section whose
+    /// CRC fails, one whose descriptor loop is declared past the section end, one
+    /// whose text field runs past its descriptor, and the other-transport-stream
+    /// table that shares the PID all report no service rather than garbled text or
+    /// a panic. Each case carries a real CRC except the one that must not.
+    #[test]
+    fn malformed_sdt_sections_are_ignored() {
+        let good = sdt_body(&service_desc(b"Prov", b"Name"), 0);
+        assert_eq!(
+            service_of(&good, TABLE_ID_SDT, false),
+            Some(ServiceInfo {
+                name: "Name".into(),
+                provider: "Prov".into()
+            }),
+            "the well-formed section parses"
+        );
+
+        assert_eq!(
+            service_of(&good, TABLE_ID_SDT, true),
+            None,
+            "a section whose CRC fails is dropped"
+        );
+        assert_eq!(
+            service_of(&good, 0x46, false),
+            None,
+            "the other-TS SDT is not this stream's service"
+        );
+        assert_eq!(
+            service_of(
+                &sdt_body(&service_desc(b"Prov", b"Name"), 8),
+                TABLE_ID_SDT,
+                false
+            ),
+            None,
+            "a descriptor loop declared past the section end abandons the walk"
+        );
+
+        // A provider length running past the descriptor body.
+        let mut overrun = service_desc(b"Prov", b"Name");
+        overrun[3] = 200;
+        assert_eq!(
+            service_of(&sdt_body(&overrun, 0), TABLE_ID_SDT, false),
+            None
+        );
+
+        // A DVB character-table selection byte this parser will not decode: that
+        // field comes back empty rather than mis-decoded, the other still decodes.
+        let charset = service_of(
+            &sdt_body(&service_desc(b"Prov", &[0x05, b'X', b'Y']), 0),
+            TABLE_ID_SDT,
+            false,
+        )
+        .expect("the section itself is well formed");
+        assert_eq!(charset.provider, "Prov");
+        assert!(charset.name.is_empty(), "the non-default table is skipped");
+
+        // Degenerate descriptor loops return None rather than panicking.
+        assert_eq!(parse_service_descriptor(&[]), None);
+        assert_eq!(
+            parse_service_descriptor(&[DESC_TAG_SERVICE, 40, 0x01]),
+            None
+        );
+        assert_eq!(parse_iso639_language(&[DESC_TAG_ISO639, 40, b'e']), None);
+        assert_eq!(
+            parse_iso639_language(&[DESC_TAG_ISO639, 4, b'1', b'2', b'3', 0]),
+            None,
+            "a code that is not letters is not a language"
+        );
     }
 
     #[test]
