@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M894: runtime properties for the PipeWire audio elements (`target-object`, `format`, `samplerate`, `channels`, `num-buffers`) and a pinned capture `format` on `pipewirevideosrc`.
+
 - M893: `textoverlay` gains a `font-size` property (pixels, 0 = canvas-derived), honoured by all render paths.
 
 - M892: `textoverlay` shapes horizontal cues through cosmic-text (`text-shaping` feature): real shaping, bidi reordering, and automatic system-font discovery.

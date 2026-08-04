@@ -119,10 +119,14 @@ pub(crate) fn rate_q16(num: u32, denom: u32) -> u32 {
 /// the default of an open range so a node with its own fixed mode still
 /// negotiates (the result arrives via `param_changed`).
 ///
+/// With `pinned` the choice offers `preferred` alone, so a node that cannot
+/// produce it fails the negotiation instead of settling on another format.
+///
 /// The returned bytes back a `Pod::from_bytes` at the call site (kept there so
 /// the borrow lives as long as the `connect` call needs it).
 pub(crate) fn format_pod_bytes(
     preferred: RawVideoFormat,
+    pinned: bool,
     width: u32,
     height: u32,
     fps: u32,
@@ -133,7 +137,7 @@ pub(crate) fn format_pod_bytes(
         ParamType::EnumFormat,
         property!(FormatProperties::MediaType, Id, MediaType::Video),
         property!(FormatProperties::MediaSubtype, Id, MediaSubtype::Raw),
-        format_choice(preferred),
+        format_choice(preferred, pinned),
         property!(
             FormatProperties::VideoSize,
             Choice,
@@ -199,17 +203,20 @@ pub(crate) fn fixed_format_pod_bytes(
 }
 
 /// The `VideoFormat` enum choice, `preferred` first (it doubles as the choice
-/// default) then the rest of [`FORMATS`]. Built by hand rather than with
-/// `property!` because the alternatives come from the table.
-fn format_choice(preferred: VideoFormat) -> Property {
+/// default) then the rest of [`FORMATS`], or `preferred` alone when `pinned`.
+/// Built by hand rather than with `property!` because the alternatives come from
+/// the table.
+fn format_choice(preferred: VideoFormat, pinned: bool) -> Property {
     let mut alternatives = Vec::with_capacity(FORMATS.len());
     alternatives.push(Id(preferred.as_raw()));
-    alternatives.extend(
-        FORMATS
-            .iter()
-            .filter(|(_, spa)| *spa != preferred)
-            .map(|(_, spa)| Id(spa.as_raw())),
-    );
+    if !pinned {
+        alternatives.extend(
+            FORMATS
+                .iter()
+                .filter(|(_, spa)| *spa != preferred)
+                .map(|(_, spa)| Id(spa.as_raw())),
+        );
+    }
     Property::new(
         FormatProperties::VideoFormat.as_raw(),
         Value::Choice(ChoiceValue::Id(Choice(
@@ -301,10 +308,48 @@ mod tests {
     /// enum choice (a peer takes the first alternative it can do), the rest of
     /// the table follows, and the requested geometry / rate are the range
     /// defaults.
+    /// The format alternatives a serialized connect pod offers, in order.
+    fn pod_format_alternatives(bytes: &[u8]) -> (Id, Vec<Id>) {
+        let (_, value) =
+            PodDeserializer::deserialize_any_from(bytes).expect("our pod deserializes");
+        let Value::Object(obj) = value else {
+            panic!("expected an object pod");
+        };
+        let value = obj
+            .properties
+            .iter()
+            .find(|p| p.key == FormatProperties::VideoFormat.as_raw())
+            .map(|p| p.value.clone())
+            .expect("pod carries a format");
+        let Value::Choice(ChoiceValue::Id(Choice(
+            _,
+            ChoiceEnum::Enum {
+                default,
+                alternatives,
+            },
+        ))) = value
+        else {
+            panic!("format is an enum choice");
+        };
+        (default, alternatives)
+    }
+
+    /// A pinned format is the only alternative on offer, so a node that cannot
+    /// produce it fails negotiation instead of picking another entry.
+    #[test]
+    fn a_pinned_format_is_the_only_alternative() {
+        for (g2g, spa_fmt) in FORMATS {
+            let bytes = format_pod_bytes(g2g, true, 320, 240, 30).expect("supported format");
+            let (default, alternatives) = pod_format_alternatives(&bytes);
+            assert_eq!(default, Id(spa_fmt.as_raw()));
+            assert_eq!(alternatives, Vec::from([Id(spa_fmt.as_raw())]));
+        }
+    }
+
     #[test]
     fn enum_format_pod_round_trips() {
         for (g2g, spa_fmt) in FORMATS {
-            let bytes = format_pod_bytes(g2g, 320, 240, 30).expect("supported format");
+            let bytes = format_pod_bytes(g2g, false, 320, 240, 30).expect("supported format");
             let (_, value) =
                 PodDeserializer::deserialize_any_from(&bytes).expect("our pod deserializes");
             let Value::Object(obj) = value else {
@@ -336,16 +381,7 @@ mod tests {
                     .filter(|(_, s)| *s != spa_fmt)
                     .map(|(_, s)| Id(s.as_raw())),
             );
-            let Value::Choice(ChoiceValue::Id(Choice(
-                _,
-                ChoiceEnum::Enum {
-                    default,
-                    alternatives,
-                },
-            ))) = prop(FormatProperties::VideoFormat)
-            else {
-                panic!("format is an enum choice");
-            };
+            let (default, alternatives) = pod_format_alternatives(&bytes);
             assert_eq!(default, Id(spa_fmt.as_raw()));
             assert_eq!(alternatives, expected);
 
@@ -432,7 +468,7 @@ mod tests {
     #[test]
     fn a_format_the_element_cannot_carry_has_no_pod() {
         assert_eq!(
-            format_pod_bytes(RawVideoFormat::P010, 320, 240, 30),
+            format_pod_bytes(RawVideoFormat::P010, false, 320, 240, 30),
             Err(G2gError::CapsMismatch)
         );
     }

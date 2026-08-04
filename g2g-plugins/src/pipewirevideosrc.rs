@@ -45,8 +45,10 @@ use g2g_core::{
 use pipewire as pw;
 use pw::spa;
 
+use crate::videoconvert::{raw_format_from_str, raw_format_to_str};
+
 use crate::pwvideo::{
-    format_pod_bytes, rate_q16, supported_formats, PlaneLayout, VideoInfo, MAX_DIM,
+    format_pod_bytes, rate_q16, spa_format, supported_formats, PlaneLayout, VideoInfo, MAX_DIM,
 };
 
 /// Requested capture geometry / rate when the caller does not specify one.
@@ -67,8 +69,9 @@ enum FromWorker {
     Format(VideoInfo),
     /// One tightly packed frame.
     Frame(Vec<u8>),
-    /// The stream negotiated something we cannot carry, or handed us a buffer
-    /// that disagrees with the negotiated geometry.
+    /// The stream negotiated something we cannot carry, handed us a buffer that
+    /// disagrees with the negotiated geometry, or went to the error state (a
+    /// pinned format the node cannot produce lands here).
     Failed(G2gError),
 }
 
@@ -80,9 +83,13 @@ pub struct PipeWireVideoSrc {
     req_width: u32,
     req_height: u32,
     req_fps: u32,
-    /// 0 = run until error or downstream shutdown; else stop after N frames and
-    /// emit EOS. The bounded-capture / test path.
-    frame_limit: u64,
+    /// Pinned capture format: the connect pod then offers this one alone, so the
+    /// node either produces it or negotiation fails. `None` = offer the whole
+    /// table and take what the node settles on.
+    pin_format: Option<RawVideoFormat>,
+    /// `None` = run until error or downstream shutdown; else stop after N frames
+    /// and emit EOS. The bounded-capture / test path.
+    frame_limit: Option<u64>,
     configured: bool,
 }
 
@@ -100,7 +107,8 @@ impl PipeWireVideoSrc {
             req_width: DEFAULT_WIDTH,
             req_height: DEFAULT_HEIGHT,
             req_fps: DEFAULT_FPS,
-            frame_limit: 0,
+            pin_format: None,
+            frame_limit: None,
             configured: false,
         }
     }
@@ -125,11 +133,27 @@ impl PipeWireVideoSrc {
         self
     }
 
-    /// Stop after `n` frames and emit EOS. Without this the source runs until an
-    /// error or until downstream drops.
-    pub fn with_frame_limit(mut self, n: u64) -> Self {
-        self.frame_limit = n;
+    /// Pin the capture format. Unlike the size and rate this is not best effort:
+    /// the connect pod offers this format alone, so a node that cannot produce it
+    /// fails the capture and no mid-stream format change can arrive.
+    pub fn with_format(mut self, format: RawVideoFormat) -> Self {
+        self.pin_format = Some(format);
         self
+    }
+
+    /// Stop after `n` frames and emit EOS (`0` = no limit). Without this the
+    /// source runs until an error or until downstream drops.
+    pub fn with_frame_limit(mut self, n: u64) -> Self {
+        self.frame_limit = (n > 0).then_some(n);
+        self
+    }
+
+    /// The format the caps advertise and the connect pod leads with: the pinned
+    /// one, or the default preference. A pin the element cannot map fails here.
+    fn format(&self) -> Result<RawVideoFormat, G2gError> {
+        let format = self.pin_format.unwrap_or(PREFERRED_FORMAT);
+        spa_format(format).ok_or(G2gError::CapsMismatch)?;
+        Ok(format)
     }
 
     /// The caps the element advertises before the node has answered. Fixed, so
@@ -143,7 +167,7 @@ impl PipeWireVideoSrc {
             return Err(G2gError::CapsMismatch);
         }
         Ok(Caps::RawVideo {
-            format: PREFERRED_FORMAT,
+            format: self.format()?,
             width: Dim::Fixed(self.req_width),
             height: Dim::Fixed(self.req_height),
             framerate: Rate::Fixed(rate_q16(self.req_fps, 1)),
@@ -217,6 +241,18 @@ impl SourceLoop for PipeWireVideoSrc {
                 "requested capture rate, fps (best effort)",
             )
             .with_default("30"),
+            PropertySpec::new(
+                "format",
+                PropKind::Str,
+                "pin the capture format: I420 | NV12 | YUY2 | RGBA | BGRA (empty = whatever the node offers)",
+            )
+            .with_default(""),
+            PropertySpec::new(
+                "num-buffers",
+                PropKind::Int,
+                "frames to capture then EOS (-1 = forever)",
+            )
+            .with_default("-1"),
         ];
         PROPS
     }
@@ -239,6 +275,24 @@ impl SourceLoop for PipeWireVideoSrc {
                 self.req_fps = value.as_uint().ok_or(PropError::Type)? as u32;
                 Ok(())
             }
+            "format" => {
+                let s = value.as_str().ok_or(PropError::Type)?;
+                self.pin_format = if s.is_empty() {
+                    None
+                } else {
+                    // a name outside the SPA mapping table is an error, never a
+                    // silent fall back to the default format
+                    let format = raw_format_from_str(s).ok_or(PropError::Value)?;
+                    spa_format(format).ok_or(PropError::Value)?;
+                    Some(format)
+                };
+                Ok(())
+            }
+            "num-buffers" => {
+                let n = value.as_int().ok_or(PropError::Type)?;
+                self.frame_limit = (n >= 0).then_some(n as u64);
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -249,6 +303,10 @@ impl SourceLoop for PipeWireVideoSrc {
             "width" => Some(PropValue::Uint(self.req_width as u64)),
             "height" => Some(PropValue::Uint(self.req_height as u64)),
             "framerate" => Some(PropValue::Uint(self.req_fps as u64)),
+            "format" => Some(PropValue::Str(
+                self.pin_format.map_or("", raw_format_to_str).into(),
+            )),
+            "num-buffers" => Some(PropValue::Int(self.frame_limit.map_or(-1, |n| n as i64))),
             _ => None,
         }
     }
@@ -271,7 +329,8 @@ impl SourceLoop for PipeWireVideoSrc {
             }
             let mut advertised = self.caps()?;
             let pod = format_pod_bytes(
-                PREFERRED_FORMAT,
+                self.format()?,
+                self.pin_format.is_some(),
                 self.req_width,
                 self.req_height,
                 self.req_fps,
@@ -316,7 +375,7 @@ impl SourceLoop for PipeWireVideoSrc {
             let mut downstream_open = true;
             let mut failure = None;
 
-            while limit == 0 || seq < limit {
+            while limit.is_none_or(|n| seq < n) {
                 let Some(msg) = rx.recv().await else {
                     break; // worker ended
                 };
@@ -451,6 +510,18 @@ fn build_and_run(
 
     let _listener = stream
         .add_local_listener_with_user_data(user_data)
+        // A format the node cannot produce (a pinned one it does not offer) is
+        // reported as a stream error, not a failed connect: surface it so the
+        // capture fails instead of waiting for frames that never come.
+        .state_changed(|_, user_data, _old, new| {
+            if let pw::stream::StreamState::Error(_) = new {
+                let _ = user_data
+                    .tx
+                    .send(FromWorker::Failed(G2gError::Hardware(
+                        HardwareError::PipeWire(-1),
+                    )));
+            }
+        })
         .param_changed(|_, user_data, id, param| {
             if id != spa::param::ParamType::Format.as_raw() {
                 return;
@@ -581,13 +652,20 @@ mod tests {
             .with_target("g2g-node")
             .with_size(1280, 720)
             .with_fps(60)
+            .with_format(RawVideoFormat::Nv12)
             .with_frame_limit(7);
         assert_eq!(src.target, "g2g-node");
         assert_eq!(
             (src.req_width, src.req_height, src.req_fps),
             (1280, 720, 60)
         );
-        assert_eq!(src.frame_limit, 7);
+        assert_eq!(src.pin_format, Some(RawVideoFormat::Nv12));
+        assert_eq!(src.frame_limit, Some(7));
+        // no limit is the default and what a 0 limit means
+        assert_eq!(
+            PipeWireVideoSrc::new().with_frame_limit(0).frame_limit,
+            None
+        );
     }
 
     #[test]
@@ -621,6 +699,8 @@ mod tests {
             ("height", PropValue::Uint(1080)),
             ("framerate", PropValue::Uint(50)),
             ("target-object", PropValue::Str("cam0".to_string())),
+            ("format", PropValue::Str("YUY2".to_string())),
+            ("num-buffers", PropValue::Int(30)),
         ] {
             src.set_property(name, value.clone()).expect("known prop");
             assert_eq!(src.get_property(name), Some(value));
@@ -630,6 +710,13 @@ mod tests {
             (1920, 1080, 50)
         );
         assert_eq!(src.target, "cam0");
+        assert_eq!(src.pin_format, Some(RawVideoFormat::Yuyv));
+        assert_eq!(src.frame_limit, Some(30));
+        // -1 is no limit, in both directions
+        src.set_property("num-buffers", PropValue::Int(-1))
+            .expect("known prop");
+        assert_eq!(src.frame_limit, None);
+        assert_eq!(src.get_property("num-buffers"), Some(PropValue::Int(-1)));
         assert_eq!(
             src.set_property("nope", PropValue::Uint(1)),
             Err(PropError::Unknown)
@@ -642,6 +729,62 @@ mod tests {
                 spec.name
             );
         }
+    }
+
+    /// A pinned format is what the caps advertise and the only format the connect
+    /// pod offers, so the node cannot hand back something else mid-stream.
+    #[test]
+    fn a_pinned_format_drives_the_caps_and_the_connect_pod() {
+        use crate::pwvideo::spa_format;
+        use spa::pod::deserialize::PodDeserializer;
+        use spa::pod::{ChoiceValue, Value};
+        use spa::utils::{Choice, ChoiceEnum, Id};
+
+        let mut src = PipeWireVideoSrc::new().with_size(320, 240).with_fps(30);
+        src.set_property("format", PropValue::Str("yuy2".to_string()))
+            .expect("known prop");
+        assert_eq!(
+            src.caps(),
+            Ok(Caps::RawVideo {
+                format: RawVideoFormat::Yuyv,
+                width: Dim::Fixed(320),
+                height: Dim::Fixed(240),
+                framerate: Rate::Fixed(30 << 16),
+            })
+        );
+
+        let bytes = format_pod_bytes(src.format().unwrap(), true, 320, 240, 30).expect("pod");
+        let (_, value) = PodDeserializer::deserialize_any_from(&bytes).expect("pod deserializes");
+        let Value::Object(obj) = value else {
+            panic!("expected an object pod");
+        };
+        let format = obj
+            .properties
+            .iter()
+            .find(|p| p.key == spa::param::format::FormatProperties::VideoFormat.as_raw())
+            .map(|p| p.value.clone())
+            .expect("pod carries a format");
+        let Value::Choice(ChoiceValue::Id(Choice(_, ChoiceEnum::Enum { alternatives, .. }))) =
+            format
+        else {
+            panic!("format is an enum choice");
+        };
+        let pinned = spa_format(RawVideoFormat::Yuyv).unwrap();
+        assert_eq!(alternatives, Vec::from([Id(pinned.as_raw())]));
+
+        // an empty pin is the open negotiation the element defaults to
+        src.set_property("format", PropValue::Str(String::new()))
+            .expect("known prop");
+        assert_eq!(src.pin_format, None);
+        // and a name the SPA table has no entry for never silently defaults
+        for bad in ["y42b", "p010", "nonsense"] {
+            assert_eq!(
+                src.set_property("format", PropValue::Str(bad.to_string())),
+                Err(PropError::Value),
+                "{bad} is not a capture format"
+            );
+        }
+        assert_eq!(src.pin_format, None);
     }
 
     #[test]
