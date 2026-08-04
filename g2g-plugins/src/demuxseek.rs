@@ -120,6 +120,12 @@ impl DemuxSeek {
         }
     }
 
+    /// The upstream stream length in bytes, when the source published one, so a
+    /// caller guessing a byte offset can keep it below the end.
+    pub(crate) fn upstream_len(&self) -> Option<u64> {
+        self.upstream.as_ref().and_then(|c| c.stream_len())
+    }
+
     /// Whether the in-flight seek landed mid-stream via an index hit (so the
     /// caller keeps its parser's stream state) rather than re-scanning from `0`.
     pub(crate) fn keeps_state(&self) -> bool {

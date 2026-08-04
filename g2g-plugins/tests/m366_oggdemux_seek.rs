@@ -187,13 +187,19 @@ impl OutputSink for Capture {
 }
 
 /// Sits between the source and the demuxer: counts the bytes the source served
-/// (the evidence that a seek did not re-read the file) and arms the app seek
-/// once enough of the file has played for the demuxer to have anchors.
+/// (the evidence that a seek did not re-read the file), records every byte
+/// offset the demuxer asked the source to seek to, and arms the app seek once
+/// enough of the file has played for the demuxer to have anchors.
 struct Chain<'a> {
     demux: &'a mut OggDemux,
     capture: &'a mut Capture,
     bytes: u64,
     arm: Option<(u64, u64, SeekController)>,
+    /// The byte-seek channel, watched between pushes: the demuxer's request is
+    /// read and put back before the source (same task, polls at the top of its
+    /// loop) gets to it.
+    byte: SeekController,
+    requested: Vec<u64>,
 }
 impl OutputSink for Chain<'_> {
     fn push<'a>(
@@ -209,6 +215,10 @@ impl OutputSink for Chain<'_> {
                 self.bytes += s.as_slice().len() as u64;
             }
             self.demux.process(packet, self.capture).await?;
+            if let Some(seek) = self.byte.take_pending() {
+                self.requested.push(seek.start);
+                self.byte.seek(seek);
+            }
             if let Some((at, target_ns, ctl)) = &self.arm {
                 if self.bytes >= *at {
                     ctl.seek(Seek::flush_to(*target_ns));
@@ -222,8 +232,9 @@ impl OutputSink for Chain<'_> {
 
 /// Play `path` through `filesrc ! oggdemux`, optionally seeking to `target_ns`
 /// once `after_bytes` have been served. Returns what the demuxer emitted after
-/// the last flush and how many bytes the source read in total.
-async fn play(path: &PathBuf, seek: Option<(u64, u64)>, chunk: usize) -> (Capture, u64) {
+/// the last flush, how many bytes the source read in total, and every byte
+/// offset the demuxer asked the source to seek to.
+async fn play(path: &PathBuf, seek: Option<(u64, u64)>, chunk: usize) -> (Capture, u64, Vec<u64>) {
     play_stream(path, seek, chunk, "opus").await
 }
 
@@ -232,7 +243,7 @@ async fn play_stream(
     seek: Option<(u64, u64)>,
     chunk: usize,
     stream: &str,
-) -> (Capture, u64) {
+) -> (Capture, u64, Vec<u64>) {
     let byte = SeekController::new();
     let time = SeekController::new();
 
@@ -261,17 +272,19 @@ async fn play_stream(
         .expect("configure demux");
 
     let mut capture = Capture::default();
-    let bytes = {
+    let (bytes, requested) = {
         let mut chain = Chain {
             demux: &mut demux,
             capture: &mut capture,
             bytes: 0,
             arm: seek.map(|(target_ns, at)| (at, target_ns, time.clone())),
+            byte: byte.clone(),
+            requested: Vec::new(),
         };
         src.run(&mut chain).await.expect("filesrc runs");
-        chain.bytes
+        (chain.bytes, chain.requested)
     };
-    (capture, bytes)
+    (capture, bytes, requested)
 }
 
 /// What a seek to `target_ns` must deliver: the codec config, then every packet
@@ -333,6 +346,8 @@ async fn oggdemux_seeks_to_the_target_packet_over_filesrc() {
             capture: &mut capture,
             bytes: 0,
             arm: None,
+            byte: byte.clone(),
+            requested: Vec::new(),
         };
         src.run(&mut chain).await.expect("filesrc runs");
     }
@@ -366,7 +381,7 @@ async fn oggdemux_guessed_seek_matches_a_full_scan_without_rereading() {
     let file_len = std::fs::metadata(&path).unwrap().len();
 
     // Reference: the whole file, no seek.
-    let (reference, scanned) = play(&path, None, 8 * 1024).await;
+    let (reference, scanned, _) = play(&path, None, 8 * 1024).await;
     assert_eq!(
         reference.frames.len() as u32,
         count + 1,
@@ -376,7 +391,7 @@ async fn oggdemux_guessed_seek_matches_a_full_scan_without_rereading() {
 
     // Seek to 50 s, armed once ~96 kB has played (enough for two anchors).
     let target_ns = 50 * 1_000_000_000;
-    let (seeked, bytes) = play(&path, Some((target_ns, 96 * 1024)), 8 * 1024).await;
+    let (seeked, bytes, _) = play(&path, Some((target_ns, 96 * 1024)), 8 * 1024).await;
 
     assert_eq!(seeked.flushes, 1, "one byte-seek, no fallback re-scan");
     assert!(seeked.segments >= 1, "a resume segment was emitted");
@@ -401,9 +416,11 @@ async fn oggdemux_guessed_seek_matches_a_full_scan_without_rereading() {
 async fn oggdemux_recovers_when_the_guess_lands_past_the_target() {
     let path = temp_path("overshoot");
     // The first 10 s of the file are denser than the rest, so a proportion
-    // measured there runs long and the landing sits past the target.
+    // measured there runs long and the landing sits past the target. The sparse
+    // tail runs to 70 s, well past the target, so the overshoot is what the
+    // landing has to recover from rather than the end-of-file clamp.
     let serial = 0x0BAD_F00Du32;
-    let count = 1500u32;
+    let count = 3500u32;
     let mut data = page_g(0x02, serial, 0, 0, &[&opus_head(2)]);
     data.extend_from_slice(&page_g(0x00, serial, 1, 0, &[b"OpusTags\0\0\0\0"]));
     for i in 0..count {
@@ -420,10 +437,10 @@ async fn oggdemux_recovers_when_the_guess_lands_past_the_target() {
     }
     std::fs::write(&path, &data).unwrap();
 
-    let (reference, _) = play(&path, None, 8 * 1024).await;
-    // Seek to 25 s of 30 s, armed after ~80 kB (inside the dense stretch).
+    let (reference, _, _) = play(&path, None, 8 * 1024).await;
+    // Seek to 25 s of 70 s, armed after ~80 kB (inside the dense stretch).
     let target_ns = 25 * 1_000_000_000;
-    let (seeked, _) = play(&path, Some((target_ns, 80 * 1024)), 8 * 1024).await;
+    let (seeked, _, _) = play(&path, Some((target_ns, 80 * 1024)), 8 * 1024).await;
 
     assert!(
         seeked.flushes >= 2,
@@ -434,6 +451,54 @@ async fn oggdemux_recovers_when_the_guess_lands_past_the_target() {
         &expected_after(&reference.frames, target_ns),
         "recovered seek",
     );
+}
+
+/// M864: a front-dense file extrapolates a tail target past the end of the file.
+/// The source reports its byte length, so the guess clamps inside the stream
+/// instead of landing at EOF (where the source ends the stream and playback dead
+/// ends).
+#[tokio::test]
+async fn oggdemux_guess_clamps_to_the_reported_byte_length() {
+    let path = temp_path("eofclamp");
+    // 10 s at ~21 kB/s, then 20 s at ~3 kB/s: a proportion measured in the front
+    // puts a 28 s target roughly 250 kB past the ~283 kB file.
+    let serial = 0x0BAD_F00Du32;
+    let count = 1500u32;
+    let mut data = page_g(0x02, serial, 0, 0, &[&opus_head(2)]);
+    data.extend_from_slice(&page_g(0x00, serial, 1, 0, &[b"OpusTags\0\0\0\0"]));
+    for i in 0..count {
+        let payload = if i < 500 { 400 } else { 40 };
+        let granule = u64::from(i + 1) * PACKET_SAMPLES;
+        let last = i + 1 == count;
+        data.extend_from_slice(&page_g(
+            if last { 0x04 } else { 0x00 },
+            serial,
+            i + 2,
+            granule,
+            &[&audio_packet(i, payload)],
+        ));
+    }
+    std::fs::write(&path, &data).unwrap();
+    let file_len = std::fs::metadata(&path).unwrap().len();
+
+    let (reference, _, _) = play(&path, None, 8 * 1024).await;
+    // Seek to 28 s of 30 s, armed after ~80 kB (inside the dense stretch).
+    let target_ns = 28 * 1_000_000_000;
+    let (seeked, _, requested) = play(&path, Some((target_ns, 80 * 1024)), 8 * 1024).await;
+
+    assert!(!requested.is_empty(), "the seek reached the source");
+    for off in &requested {
+        assert!(
+            *off < file_len,
+            "byte-seek to {off} is past the {file_len} byte file: {requested:?}"
+        );
+    }
+    assert_same_frames(
+        &seeked.frames,
+        &expected_after(&reference.frames, target_ns),
+        "clamped landing",
+    );
+    let _ = std::fs::remove_file(&path);
 }
 
 /// M862: a chained file (two physical streams back to back) cannot be described
@@ -448,7 +513,7 @@ async fn oggdemux_chained_seek_falls_back_to_the_rescan() {
     std::fs::write(&path, &data).unwrap();
     let file_len = std::fs::metadata(&path).unwrap().len();
 
-    let (reference, _) = play(&path, None, 8 * 1024).await;
+    let (reference, _, _) = play(&path, None, 8 * 1024).await;
     assert_eq!(
         reference.frames.len() as u32,
         2 * per_chain + 2,
@@ -457,7 +522,7 @@ async fn oggdemux_chained_seek_falls_back_to_the_rescan() {
 
     // Seek into the second chain, armed while the first one is still playing.
     let target_ns = 45 * 1_000_000_000;
-    let (seeked, bytes) = play(&path, Some((target_ns, 96 * 1024)), 8 * 1024).await;
+    let (seeked, bytes, _) = play(&path, Some((target_ns, 96 * 1024)), 8 * 1024).await;
 
     assert_same_frames(
         &seeked.frames,
@@ -507,9 +572,9 @@ async fn oggdemux_guessed_seek_is_exact_on_an_encoded_vorbis_file() {
     }
     let file_len = std::fs::metadata(&path).unwrap().len();
 
-    let (reference, _) = play_stream(&path, None, 8 * 1024, "vorbis").await;
+    let (reference, _, _) = play_stream(&path, None, 8 * 1024, "vorbis").await;
     let target_ns = 50 * 1_000_000_000;
-    let (seeked, bytes) =
+    let (seeked, bytes, _) =
         play_stream(&path, Some((target_ns, 96 * 1024)), 8 * 1024, "vorbis").await;
 
     assert_eq!(seeked.flushes, 1, "one byte-seek, no fallback re-scan");

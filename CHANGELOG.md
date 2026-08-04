@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M864: ogg seek guesses clamp to the byte length the source reports, and an idle upstream flush resets the mkv demuxer's parser fully.
+
 - M862: ogg time seeks land near the target via anchored proportional byte guesses instead of re-reading the file.
 
 - M863: `rtspserversrcn` ingests N concurrent RTSP publishers, one session per output pad, sharing the session machinery with the single-pad element.

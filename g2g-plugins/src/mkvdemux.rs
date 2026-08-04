@@ -643,10 +643,12 @@ impl AsyncElement for MkvDemux {
                 }
                 // The upstream byte-seek's flush. The internal Cues-prefetch flush
                 // is consumed (not forwarded): downstream sees a flush only on the
-                // real seek. The real seek's flush resets the parser, keeping the
+                // real seek. Our own seek's flush resets the parser, keeping the
                 // Tracks / TimestampScale / Cues a mid-segment (indexed) landing
                 // does not re-send (a from-start re-scan fully resets, re-reading
-                // the EBML header), then forwards the flush.
+                // the EBML header), then forwards the flush. A flush we did not
+                // ask for is an upstream discontinuity: reset outright, since the
+                // new bytes may be anything.
                 PipelinePacket::Flush => {
                     if let CuePrefetch::Fetching {
                         target_ns,
@@ -660,8 +662,9 @@ impl AsyncElement for MkvDemux {
                         self.demux.reset_keeping_tracks();
                         return Ok(());
                     }
+                    let ours = self.seek.dropping_input();
                     self.seek.on_flush();
-                    if self.seek.keeps_state() {
+                    if ours && self.seek.keeps_state() {
                         self.demux.reset_keeping_tracks();
                     } else {
                         self.reset_parser();

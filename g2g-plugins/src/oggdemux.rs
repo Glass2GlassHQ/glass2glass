@@ -22,7 +22,8 @@
 //! **Seeking (M362, M862).** Ogg carries no index, so a time seek guesses the
 //! byte offset to land at: the page granules seen while playing give
 //! `(byte offset, stream time)` anchors, the target interpolates through them,
-//! and the landing is backed off so it sits before the target. The parser
+//! and the landing is backed off so it sits before the target and, when the
+//! source reports a byte length, short of the end of the stream. The parser
 //! re-syncs there keeping what it knows of the bitstream (codec, headers), and
 //! re-times from the granule of the first page it lands on, so the packets from
 //! the target on are exactly the ones a re-scan from the file start delivers.
@@ -88,6 +89,10 @@ const GUESS_SLACK_BYTES: u64 = 8 * 1024;
 /// Below this a re-scan from the start reads about as much, so it is not worth
 /// a guess.
 const MIN_GUESS_BYTES: u64 = 64 * 1024;
+/// Bytes a landing stays clear of the end of the stream: it must still have a
+/// granule-bearing page ahead of it (an Ogg page is at most ~64 kB), and landing
+/// early only costs a scan.
+const GUESS_EOF_MARGIN: u64 = 64 * 1024;
 /// Span the two interpolation anchors must cover before a guess extrapolates
 /// from them.
 const MIN_ANCHOR_NS: u64 = 1_000_000_000;
@@ -102,10 +107,17 @@ const MAX_GUESSES: u8 = 2;
 /// The byte offset to land at for `target_ns`, interpolated through two
 /// observed `(byte offset, stream time ns)` points and backed off so a denser
 /// stretch still lands before the target. Two points rather than a ratio
-/// against the origin, so the header pages' fixed cost cancels. `None` when the
-/// pair is too short to extrapolate from, the target is behind it, or the
-/// landing would not save a useful number of bytes.
-fn guess_offset(first: (u64, u64), last: (u64, u64), target_ns: u64) -> Option<u64> {
+/// against the origin, so the header pages' fixed cost cancels. `stream_len`,
+/// when the source published one, keeps the landing inside the stream: a guess
+/// past the end reaches EOF instead of the target. `None` when the pair is too
+/// short to extrapolate from, the target is behind it, or the landing would not
+/// save a useful number of bytes.
+fn guess_offset(
+    first: (u64, u64),
+    last: (u64, u64),
+    target_ns: u64,
+    stream_len: Option<u64>,
+) -> Option<u64> {
     let (b1, t1) = first;
     let (b2, t2) = last;
     let bytes = b2.checked_sub(b1)?;
@@ -116,9 +128,12 @@ fn guess_offset(first: (u64, u64), last: (u64, u64), target_ns: u64) -> Option<u
     // The anchors come from the file, so fold the extrapolation in u128.
     let ahead = u128::from(target_ns - t1) * u128::from(bytes) / u128::from(span);
     let raw = (u128::from(b1) + ahead).min(u128::from(u64::MAX)) as u64;
-    let off = raw
+    let mut off = raw
         .saturating_sub(raw / GUESS_BACKOFF_DIV)
         .saturating_sub(GUESS_SLACK_BYTES);
+    if let Some(len) = stream_len {
+        off = off.min(len.saturating_sub(GUESS_EOF_MARGIN));
+    }
     (off >= MIN_GUESS_BYTES).then_some(off)
 }
 
@@ -217,11 +232,12 @@ impl OggDemux {
         // Planned before the request is taken: `poll_request_indexed` borrows
         // the seek state, so its closure cannot look at the rest of the element.
         let anchors = self.guess_anchors();
+        let stream_len = self.seek.upstream_len();
         let chain = self.demux.chain();
         let mut chosen: Option<(u64, u64)> = None;
         let started = self.seek.poll_request_indexed(|target_ns| {
             let (first, last) = anchors?;
-            let offset = guess_offset(first, last, target_ns)?;
+            let offset = guess_offset(first, last, target_ns, stream_len)?;
             chosen = Some((target_ns, offset));
             Some(offset)
         });
@@ -301,7 +317,8 @@ impl OggDemux {
         let target_ns = self.guess.target_ns;
         let corrected = match (self.guess.landing, landed, self.anchor_first) {
             (Some(landing), Some(at), Some(first)) if self.guess.attempts < MAX_GUESSES => {
-                guess_offset(first, (landing, at), target_ns).filter(|off| *off < landing)
+                guess_offset(first, (landing, at), target_ns, self.seek.upstream_len())
+                    .filter(|off| *off < landing)
             }
             _ => None,
         };
@@ -1532,19 +1549,37 @@ mod tests {
         // guess lands short of it.
         let first = (24_000, 2_000_000_000);
         let last = (124_000, 12_000_000_000);
-        let off = guess_offset(first, last, 20_000_000_000).expect("a guess");
+        let off = guess_offset(first, last, 20_000_000_000, None).expect("a guess");
         assert!(off < 204_000, "the landing is early, got {off}");
         assert!(off > 170_000, "but not by much, got {off}");
         // Behind the pair, too short a span, and too small a saving: no guess.
-        assert_eq!(guess_offset(first, last, 1_000_000_000), None);
+        assert_eq!(guess_offset(first, last, 1_000_000_000, None), None);
         assert_eq!(
-            guess_offset(first, (24_500, 2_500_000_000), 20_000_000_000),
+            guess_offset(first, (24_500, 2_500_000_000), 20_000_000_000, None),
             None
         );
         assert_eq!(
-            guess_offset((0, 0), (40_000, 4_000_000_000), 5_000_000_000),
+            guess_offset((0, 0), (40_000, 4_000_000_000), 5_000_000_000, None),
             None,
             "a landing under 64 kB saves nothing worth a seek"
+        );
+    }
+
+    #[test]
+    fn guess_offset_clamps_to_the_stream_length() {
+        // The same front-measured proportion, but the file ends at 200 kB: the
+        // landing sits a page-max short of the end rather than past it.
+        let first = (24_000, 2_000_000_000);
+        let last = (124_000, 12_000_000_000);
+        assert_eq!(
+            guess_offset(first, last, 20_000_000_000, Some(200_000)),
+            Some(200_000 - GUESS_EOF_MARGIN)
+        );
+        // Clamped below the minimum saving: fall back to the plain re-scan.
+        assert_eq!(
+            guess_offset(first, last, 20_000_000_000, Some(100_000)),
+            None,
+            "no runway left between the clamp and the file start"
         );
     }
 

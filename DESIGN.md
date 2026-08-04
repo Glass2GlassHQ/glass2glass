@@ -1410,7 +1410,12 @@ index-derived offset a later optimization). All five carry it
 (`fmp4demux` / `tsdemux` / `mkvdemux` / `flvdemux` / `oggdemux`), each using its
 own keyframe signal (the container flag, or `annexb::au_is_keyframe` for TS whose
 units have none; every audio packet is a resync point, and `oggdemux` now
-accumulates an Opus PTS from the TOC byte). **Adaptive segment seek.** The
+accumulates an Opus PTS from the TOC byte). Where the container has no index at
+all, `oggdemux` guesses the landing byte offset by interpolating through observed
+`(byte offset, stream time)` anchors, clamped a page-max below the byte length
+the source publishes on the seek controller (`SeekController::set_stream_len`,
+`FileSrc` from the file size and `DownloadBuffer` once the spill is complete), so
+a guess through a front-dense file cannot land at EOF. **Adaptive segment seek.** The
 adaptive sources `HlsSrc` / `DashSrc` are TIME-seekable (`with_seek`): unlike the
 BYTES-format `FileSrc`, an app time seek resolves to the media segment containing
 the target (HLS walks cumulative `#EXTINF` durations; DASH maps the target onto
