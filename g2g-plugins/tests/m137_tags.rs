@@ -157,7 +157,7 @@ async fn oggdemux_surfaces_vorbis_comment_tags_on_the_bus() {
 
     let mut posted = None;
     while let Some(m) = bus.try_recv() {
-        if let BusMessage::Tag(t) = m {
+        if let BusMessage::Tag { tags: t, .. } = m {
             posted = Some(t);
         }
     }

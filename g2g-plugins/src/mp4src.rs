@@ -156,7 +156,10 @@ impl SourceLoop for Mp4Src {
                 if let Some(moov) = find_box(&data, b"moov") {
                     let tags = parse_ilst_tags(moov);
                     if !tags.is_empty() {
-                        bus.try_post(BusMessage::Tag(tags));
+                        bus.try_post(BusMessage::Tag {
+                            tags,
+                            program: None,
+                        });
                     }
                 }
                 // Announce the (single) video track as a StreamCollection (M386),

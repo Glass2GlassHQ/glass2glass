@@ -54,18 +54,19 @@ fn stream_id(pid: u16) -> alloc::string::String {
     alloc::format!("mpegts-pid-{pid}")
 }
 
-/// Posts a transport stream's tags on the bus once each (M872): the active
-/// program's SDT service text as a [`BusMessage::Tag`] (the service name as
+/// Posts a transport stream's tags on the bus once each (M872): each SDT service's
+/// text as a [`BusMessage::Tag`] scoped to its program (the service name as
 /// [`Tag::Title`], the provider as a [`Tag::Other`] under ffprobe's
 /// `service_provider` key), and each PMT stream's ISO 639 language as a
 /// [`BusMessage::StreamTag`] on that stream's collection id. Shared by the single-
 /// and multi-output demuxers, the MPEG-TS sibling of the Matroska `TagPoster`.
 ///
-/// TS carries nothing else: the SDT and the language descriptor are the only
-/// standard tag slots, and the service text is per-program, so with several
-/// programs only the selected one's service posts (the bus message has no program
-/// scope). State survives a seek's parser reset, so re-reading the tables of the
-/// same stream does not re-post.
+/// The SDT describes the whole multiplex, so every service it names posts under its
+/// own `program_number` (M878), not only the one this element routes: an
+/// application learns what the transport stream carries from one demuxer. TS
+/// carries nothing else, the SDT and the language descriptor being its only
+/// standard tag slots. State survives a seek's parser reset, so re-reading the
+/// tables of the same stream does not re-post.
 #[derive(Debug, Default)]
 struct TagPoster {
     service_posted: bool,
@@ -77,7 +78,7 @@ impl TagPoster {
     /// SDT / PMT parse, and once each thereafter.
     fn post(&mut self, demux: &TsDemuxer, bus: Option<&BusHandle>) {
         if !self.service_posted {
-            if let Some(service) = demux.service() {
+            for (program, service) in demux.services() {
                 let mut list = TagList::new();
                 if !service.name.is_empty() {
                     list.push(Tag::Title(service.name.clone()));
@@ -91,7 +92,10 @@ impl TagPoster {
                 if !list.is_empty() {
                     self.service_posted = true;
                     if let Some(bus) = bus {
-                        bus.try_post(BusMessage::Tag(list));
+                        bus.try_post(BusMessage::Tag {
+                            tags: list,
+                            program: Some(program),
+                        });
                     }
                 }
             }
@@ -1478,14 +1482,15 @@ mod tests {
         let (mut global, mut per_stream) = (Vec::new(), Vec::new());
         while let Some(msg) = bus.try_recv() {
             match msg {
-                BusMessage::Tag(t) => global.push(t),
+                BusMessage::Tag { tags, program } => global.push((program, tags)),
                 BusMessage::StreamTag { stream_id, tags } => per_stream.push((stream_id, tags)),
                 _ => {}
             }
         }
         assert_eq!(global.len(), 1, "the service text posts once");
+        assert_eq!(global[0].0, Some(1), "scoped to the program it names");
         assert_eq!(
-            global[0].tags(),
+            global[0].1.tags(),
             &[
                 Tag::Title("News One".into()),
                 Tag::Other {

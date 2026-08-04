@@ -451,7 +451,10 @@ impl Mp4DemuxN {
         if let Some(moov) = find_box(&self.buf, b"moov") {
             let global = parse_ilst_tags(moov);
             if !global.is_empty() {
-                bus.try_post(BusMessage::Tag(global));
+                bus.try_post(BusMessage::Tag {
+                    tags: global,
+                    program: None,
+                });
             }
         }
         for t in tracks {

@@ -404,6 +404,13 @@ jobs:
       # absent, so a green run here means real interop evidence was produced.
       - name: native-muxer oracles (mp4mux + mpegtsmux vs ffprobe)
         run: cargo test -p g2g-plugins --locked --features std --test m615_conformance_oracle --test m619_conformance_ts_oracle -- --nocapture
+      # MPEG-TS PSI metadata (M783/M872/M878): ffprobe reads the multi-program PAT
+      # / PMT layout, the SDT service text (one entry per program) and the
+      # per-stream ISO-639 languages g2g writes, and g2g demuxes an ffmpeg-authored
+      # transport stream back to the same tags. std-gated, so a default
+      # `cargo test` skips them.
+      - name: MPEG-TS metadata oracles (mpegtsmux + tsdemux vs ffmpeg)
+        run: cargo test -p g2g-plugins --locked --features std --test m783_ts_multiprogram --test m872_ts_tags --test m878_ts_program_tags -- --nocapture
       # FLV both ways (M662): flvdemux's extracted elementary streams decoded
       # standalone by ffmpeg; flvmux's native FLV probed + decoded by ffmpeg.
       - name: FLV oracles (flvmux + flvdemux vs ffmpeg)

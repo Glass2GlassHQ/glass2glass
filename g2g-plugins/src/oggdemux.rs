@@ -447,7 +447,10 @@ impl OggDemux {
                 self.tags_posted = Some(self.demux.chain());
                 if !tags.is_empty() {
                     if let Some(bus) = &self.bus {
-                        bus.try_post(BusMessage::Tag(tags));
+                        bus.try_post(BusMessage::Tag {
+                            tags,
+                            program: None,
+                        });
                     }
                 }
             }
@@ -1623,7 +1626,7 @@ mod tests {
 
         let mut posted = None;
         while let Some(m) = bus.try_recv() {
-            if let BusMessage::Tag(t) = m {
+            if let BusMessage::Tag { tags: t, .. } = m {
                 posted = Some(t);
             }
         }

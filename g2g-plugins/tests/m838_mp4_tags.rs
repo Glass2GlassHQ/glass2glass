@@ -266,7 +266,7 @@ async fn demux_bus_messages(file: &[u8]) -> (Vec<String>, Vec<TagList>, Vec<(Str
             BusMessage::StreamCollection(c) => {
                 ids = c.streams().iter().map(|s| s.id.to_string()).collect()
             }
-            BusMessage::Tag(t) => global.push(t),
+            BusMessage::Tag { tags, .. } => global.push(tags),
             BusMessage::StreamTag { stream_id, tags } => per_stream.push((stream_id, tags)),
             _ => {}
         }

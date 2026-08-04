@@ -248,6 +248,14 @@ impl TsDemuxer {
             .map(|(_, s)| s)
     }
 
+    /// Every service the SDT named, as `(program_number, text)` in section order
+    /// (M878): the SDT describes the whole transport stream, so a multi-program
+    /// multiplex reports one entry per program regardless of which one is selected.
+    /// Empty for a stream with no SDT.
+    pub fn services(&self) -> impl Iterator<Item = (u16, &ServiceInfo)> + '_ {
+        self.services.iter().map(|(id, s)| (*id, s))
+    }
+
     /// Opus channel count for `pid`, if its PMT entry is a private (0x06) stream
     /// carrying the 'Opus' registration descriptor; `None` for any other stream.
     pub fn opus_channels(&self, pid: u16) -> Option<u8> {
@@ -850,6 +858,9 @@ struct MuxProgram {
     /// Global stream index carrying this program's PCR (its first stream).
     pcr_stream: usize,
     last_pcr_90khz: Option<u64>,
+    /// This program's own SDT service text (M878), overriding the muxer-wide
+    /// default set by [`TsMuxer::set_service`].
+    service: Option<ServiceInfo>,
 }
 
 /// MPEG-TS multiplexer (M114, multi-stream since M207, multi-program since M783):
@@ -872,11 +883,12 @@ pub struct TsMuxer {
     streams: Vec<MuxStream>,
     programs: Vec<MuxProgram>,
     pat_cc: u8,
-    /// Continuity counter of the SDT PID, used only with a `service` set.
+    /// Continuity counter of the SDT PID, used only with a service set.
     sdt_cc: u8,
-    /// The service text an SDT announces for every program (M872); `None` writes
-    /// no SDT at all.
-    service: Option<ServiceInfo>,
+    /// The service text the SDT announces for every program that does not name
+    /// its own (M872). With this and every program's own service `None`, no SDT
+    /// is written at all.
+    default_service: Option<ServiceInfo>,
     tables_written: bool,
     /// PAT/PMT re-emission cadence in 90 kHz ticks (`0` = emit once up front, the
     /// default). When set, the table pair is re-emitted before the first access
@@ -932,6 +944,7 @@ impl TsMuxer {
                         pmt_cc: 0,
                         pcr_stream: i,
                         last_pcr_90khz: None,
+                        service: None,
                     });
                     ids.push((0, 0));
                     programs.len() - 1
@@ -976,7 +989,7 @@ impl TsMuxer {
             programs,
             pat_cc: 0,
             sdt_cc: 0,
-            service: None,
+            default_service: None,
             tables_written: false,
             table_interval_90khz: 0,
             last_tables_pts: None,
@@ -988,15 +1001,45 @@ impl TsMuxer {
     /// `service_provider_name` of a DVB `service_descriptor`. With this set the mux
     /// writes an SDT (PID 0x11, `table_id` 0x42) alongside the PAT/PMT, on the same
     /// cadence, so a reader (ffprobe, [`TsDemuxer::service`]) reports the program's
-    /// text. Every program is named with this one text: there is no per-program
-    /// service API. A field longer than the single-byte DVB length allows is
+    /// text. This text names every program that has no service of its own
+    /// ([`set_program_service`](Self::set_program_service)), whichever order the two
+    /// are called in. A field longer than the single-byte DVB length allows is
     /// truncated at a char boundary. Call before the first access unit, since that
     /// is when the tables go out.
     pub fn set_service(&mut self, name: &str, provider: &str) {
-        self.service = Some(ServiceInfo {
+        self.default_service = Some(ServiceInfo {
             name: String::from(name),
             provider: String::from(provider),
         });
+    }
+
+    /// Name one program's service (M878), overriding
+    /// [`set_service`](Self::set_service) for it: a multi-program multiplex gets
+    /// one SDT entry per program, each with its own name / provider. `false` when
+    /// no program carries `program_number` (nothing was recorded), so a caller
+    /// never sets a service the SDT then omits.
+    pub fn set_program_service(&mut self, program_number: u16, name: &str, provider: &str) -> bool {
+        let Some(program) = self
+            .programs
+            .iter_mut()
+            .find(|p| p.number == program_number)
+        else {
+            return false;
+        };
+        program.service = Some(ServiceInfo {
+            name: String::from(name),
+            provider: String::from(provider),
+        });
+        true
+    }
+
+    /// The service text of program `index` (into `programs`): its own, else the
+    /// muxer-wide default.
+    fn program_service(&self, index: usize) -> Option<&ServiceInfo> {
+        self.programs[index]
+            .service
+            .as_ref()
+            .or(self.default_service.as_ref())
     }
 
     /// Declare elementary stream `index`'s language in its PMT entry, as an
@@ -1201,36 +1244,40 @@ impl TsMuxer {
     }
 
     /// Emit the SDT (PID 0x11, `table_id` 0x42), one service entry per program
-    /// carrying this muxer's `service_descriptor` text. A no-op without a service.
+    /// that names a service. A no-op when none does.
     fn sdt_packet(&mut self, out: &mut Vec<u8>) {
-        if self.service.is_none() {
+        let body = self.sdt_body();
+        if body.is_empty() {
             return;
         }
-        let body = self.sdt_body();
         self.sdt_cc = psi_packet(PID_SDT, TABLE_ID_SDT, &body, self.sdt_cc, out);
     }
 
     /// The SDT section body (from section[3]): the PSI header tail,
     /// `original_network_id` and a reserved byte, then one service entry per
-    /// program. `service_type` says digital television for a program carrying video
-    /// and digital radio for one that does not.
+    /// program that names a service, carrying that program's own text (M878).
+    /// `service_type` says digital television for a program carrying video and
+    /// digital radio for one that does not. Empty when no program names a service,
+    /// which writes no SDT.
     fn sdt_body(&self) -> Vec<u8> {
-        let Some(service) = self.service.as_ref() else {
-            return Vec::new();
-        };
-        let name = dvb_field(&service.name);
-        let provider = dvb_field(&service.provider);
         let mut body = Vec::new();
-        body.extend_from_slice(&[
-            0x00, 0x01, // transport_stream_id (matches the PAT's)
-            0xC1, 0x00, 0x00, // version/current, section_number, last_section_number
-            0x00, 0x01, // original_network_id
-            0xFF, // reserved_future_use
-        ]);
-        // service_descriptor: tag, length, service_type, then the two fields.
-        let desc_len = 3 + provider.len() + name.len();
-        let loop_len = 2 + desc_len;
         for (idx, p) in self.programs.iter().enumerate() {
+            let Some(service) = self.program_service(idx) else {
+                continue;
+            };
+            if body.is_empty() {
+                body.extend_from_slice(&[
+                    0x00, 0x01, // transport_stream_id (matches the PAT's)
+                    0xC1, 0x00, 0x00, // version/current, section_number, last_section_number
+                    0x00, 0x01, // original_network_id
+                    0xFF, // reserved_future_use
+                ]);
+            }
+            let name = dvb_field(&service.name);
+            let provider = dvb_field(&service.provider);
+            // service_descriptor: tag, length, service_type, then the two fields.
+            let desc_len = 3 + provider.len() + name.len();
+            let loop_len = 2 + desc_len;
             let video = self
                 .streams
                 .iter()
@@ -1842,6 +1889,44 @@ mod tests {
         let radio = audio_only.push_au(&[0xFF, 0xF1, 0x33], Some(0), None);
         let sdt = psi_body_of(&radio, PID_SDT).expect("SDT emitted");
         assert_eq!(sdt[15], SERVICE_TYPE_RADIO);
+    }
+
+    /// Each program of a multi-program mux carries its own SDT entry (M878): the
+    /// per-program text where it is set, the muxer-wide default elsewhere, and the
+    /// demuxer reads every service the SDT names whichever program it routes.
+    #[test]
+    fn per_program_service_entries_round_trip() {
+        let mut m = TsMuxer::with_programs(&[(1, STREAM_TYPE_H264), (2, STREAM_TYPE_AAC)]);
+        m.set_service("Network", "G2G");
+        assert!(m.set_program_service(2, "Radio Two", "G2G Radio"));
+        assert!(
+            !m.set_program_service(7, "Nobody", ""),
+            "no program 7: the caller learns the service went nowhere"
+        );
+        let mut ts = m.push_au_on(0, &[0, 0, 0, 1, 0x65, 0x11], Some(900_000), None);
+        ts.extend(m.push_au_on(1, &[0xFF, 0xF1, 0x22], Some(901_000), None));
+
+        let mut d = TsDemuxer::new();
+        for pkt in ts.chunks(TS_PACKET_LEN) {
+            d.push_packet(pkt);
+        }
+        let services: Vec<(u16, String, String)> = d
+            .services()
+            .map(|(n, s)| (n, s.name.clone(), s.provider.clone()))
+            .collect();
+        assert_eq!(
+            services,
+            alloc::vec![
+                (1, String::from("Network"), String::from("G2G")),
+                (2, String::from("Radio Two"), String::from("G2G Radio")),
+            ],
+            "program 1 takes the default, program 2 its own"
+        );
+        // Selecting program 2 changes which service is "the" active one, not the
+        // set the SDT announced.
+        d.set_program_number(Some(2));
+        assert_eq!(d.service().map(|s| s.name.as_str()), Some("Radio Two"));
+        assert_eq!(d.services().count(), 2);
     }
 
     /// Without a service the mux writes no SDT at all (nothing to say).

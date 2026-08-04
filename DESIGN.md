@@ -1445,8 +1445,10 @@ application reacts to:
 - `DurationChanged { duration_ns }` — the total stream duration became known
   (§4.15's query handle is the pull side; this is the push notification), posted
   by the source arm from `SourceLoop::query_duration` (`GST_MESSAGE_DURATION_CHANGED`).
-- `Tag(TagList)` — container / stream metadata, posted out of band
-  (`GST_MESSAGE_TAG`).
+- `Tag { tags, program }` — container / stream metadata, posted out of band
+  (`GST_MESSAGE_TAG`). `program` scopes the tags to one MPEG-TS `program_number`
+  (an SDT service entry, so a multi-program multiplex reports each service
+  separately) and is `None` for a container with a single metadata scope.
 - `StreamTag { stream_id, tags }` — the same, scoped to one elementary stream
   (a Matroska `Tag` whose `Targets` names a `TagTrackUID`). `stream_id` is the
   id that stream has in the posted `StreamCollection`.
@@ -1748,6 +1750,13 @@ per-stream ISO-639 language descriptor in the PMT; the demuxers CRC-check and
 parse both and post `BusMessage::Tag` / `StreamTag` on the `mpegts-pid-{pid}`
 ids, ffmpeg-validated both directions. Nothing else rides TS: it has no
 free-form tag element.
+
+Service text is per program (M878): `with_program_tags(program, tags)` on the
+fan-in muxer gives a `prog-map` program its own SDT entry, `with_tags` names
+whichever programs do not, and a program's `Tag::Language` is the default for its
+streams (global, then program, then track). The SDT describes the whole
+multiplex, so a demuxer posts one `BusMessage::Tag` per service it names, each
+carrying that service's `program_number`, whichever program the element routes.
 
 The TS stack also carries KLV metadata (STANAG 4609, the airborne-ISR profile of
 MPEG-TS): `Caps::Klv` is the metadata elementary-stream caps (GStreamer

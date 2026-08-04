@@ -135,7 +135,7 @@ pub fn event_json(msg: &BusMessage) -> Option<String> {
         BusMessage::StreamsSelected { ids } => json!({"kind": "streams-selected", "ids": ids}),
         BusMessage::Custom(code) => json!({"kind": "custom", "code": code}),
         // Skip the large structured payloads the dashboard has no view for.
-        BusMessage::Tag(_) | BusMessage::StreamTag { .. } | BusMessage::StreamCollection(_) => {
+        BusMessage::Tag { .. } | BusMessage::StreamTag { .. } | BusMessage::StreamCollection(_) => {
             return None
         }
     };
@@ -466,7 +466,11 @@ mod tests {
         assert_eq!(v["element"], "videoconvert0");
 
         // Heavy payloads are skipped.
-        assert!(event_json(&BusMessage::Tag(Default::default())).is_none());
+        assert!(event_json(&BusMessage::Tag {
+            tags: Default::default(),
+            program: None,
+        })
+        .is_none());
     }
 
     #[tokio::test]

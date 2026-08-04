@@ -606,9 +606,7 @@ _(No open parser items.)_
 
 ## Tag system
 
-- Per-program service text on TS: the muxer takes one `with_tags` service and
-  `BusMessage::Tag` has no program scope, so a multi-program mux repeats the
-  same service name for every program.
+_(No open tag items.)_
 
 ## Python-element host (M198+)
 

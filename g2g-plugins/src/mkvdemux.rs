@@ -962,7 +962,10 @@ impl TagPoster {
             let fresh: TagList = demux.tags().tags()[self.posted..].iter().cloned().collect();
             self.posted = total;
             if let Some(bus) = bus {
-                bus.try_post(BusMessage::Tag(fresh));
+                bus.try_post(BusMessage::Tag {
+                    tags: fresh,
+                    program: None,
+                });
             }
         }
         // A track-scoped group needs `Tracks` to map its UID to a stream id; hold
@@ -1657,7 +1660,7 @@ mod tests {
 
         let mut posted = TagList::new();
         while let Some(m) = bus.try_recv() {
-            if let BusMessage::Tag(t) = m {
+            if let BusMessage::Tag { tags: t, .. } = m {
                 for tag in t.tags() {
                     posted.push(tag.clone());
                 }

@@ -264,7 +264,7 @@ async fn sink_written_tags_round_trip_to_the_source_bus() {
 
     let mut posted = None;
     while let Some(m) = bus.try_recv() {
-        if let BusMessage::Tag(t) = m {
+        if let BusMessage::Tag { tags: t, .. } = m {
             posted = Some(t);
         }
     }
@@ -324,7 +324,7 @@ async fn surfaces_ilst_tags_on_the_bus() {
 
     let mut posted = None;
     while let Some(m) = bus.try_recv() {
-        if let BusMessage::Tag(t) = m {
+        if let BusMessage::Tag { tags: t, .. } = m {
             posted = Some(t);
         }
     }

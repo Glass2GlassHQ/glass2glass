@@ -102,7 +102,16 @@ pub enum BusMessage {
     /// title / artist / encoder / etc. without intercepting the data path. A
     /// demuxer with a tag source (e.g. `oggdemux` parsing VorbisComment) posts
     /// it once the metadata header is parsed.
-    Tag(TagList),
+    Tag {
+        /// The metadata read from the container.
+        tags: TagList,
+        /// The program these tags describe, for a container whose metadata is
+        /// per program: an MPEG-TS `program_number`, one message per SDT service
+        /// entry, so a multi-program transport stream reports each service's own
+        /// name (M878). `None` for a container with a single metadata scope
+        /// (Matroska, MP4, Ogg, FLV), where the tags describe the whole stream.
+        program: Option<u16>,
+    },
     /// Metadata scoped to one elementary stream of a container, the stream-scoped
     /// sibling of [`Tag`](BusMessage::Tag) (which stays whole-container). Posted
     /// by a demuxer whose container tags name a track (a Matroska `Tag` whose

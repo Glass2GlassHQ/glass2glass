@@ -199,9 +199,15 @@ fn data_frame(bytes: &[u8]) -> PipelinePacket {
 }
 
 /// Demux `ts` with a two-port `TsDemuxN` (port 0 = H.264, port 1 = AAC) and return
-/// `(collection stream ids, whole-service tags, per-stream tags)`.
+/// `(collection stream ids, service tags with their program scope, per-stream tags)`.
 #[allow(clippy::type_complexity)]
-async fn demux_bus_messages(ts: &[u8]) -> (Vec<String>, Vec<TagList>, Vec<(String, TagList)>) {
+async fn demux_bus_messages(
+    ts: &[u8],
+) -> (
+    Vec<String>,
+    Vec<(Option<u16>, TagList)>,
+    Vec<(String, TagList)>,
+) {
     let (bus, handle) = Bus::new(64);
     let mut demux = TsDemuxN::new(vec![TsStream::H264, TsStream::Aac]).with_bus(handle);
     demux
@@ -224,7 +230,7 @@ async fn demux_bus_messages(ts: &[u8]) -> (Vec<String>, Vec<TagList>, Vec<(Strin
             BusMessage::StreamCollection(c) => {
                 ids = c.streams().iter().map(|s| s.id.to_string()).collect()
             }
-            BusMessage::Tag(t) => global.push(t),
+            BusMessage::Tag { tags, program } => global.push((program, tags)),
             BusMessage::StreamTag { stream_id, tags } => per_stream.push((stream_id, tags)),
             _ => {}
         }
@@ -247,14 +253,10 @@ async fn service_and_language_tags_round_trip_through_the_ts_elements() {
     let (ids, global, per_stream) = demux_bus_messages(&ts).await;
 
     assert_eq!(ids, vec![VIDEO_ID, AUDIO_ID]);
-    let flat: Vec<Tag> = global
-        .iter()
-        .flat_map(|t| t.tags().iter().cloned())
-        .collect();
     assert_eq!(
-        flat,
-        service_tags().tags(),
-        "the SDT service text posts once as a plain Tag"
+        global,
+        vec![(Some(1), service_tags())],
+        "the SDT service text posts once, scoped to the program it names"
     );
 
     assert_eq!(
@@ -307,7 +309,7 @@ async fn an_untagged_stream_posts_no_tags() {
     while let Some(msg) = bus.try_recv() {
         match msg {
             BusMessage::StreamCollection(_) => saw_collection = true,
-            BusMessage::Tag(t) => panic!("no service to report: {t:?}"),
+            BusMessage::Tag { tags, .. } => panic!("no service to report: {tags:?}"),
             BusMessage::StreamTag { stream_id, tags } => {
                 panic!("no language to report on {stream_id}: {tags:?}")
             }
@@ -446,20 +448,19 @@ async fn demuxes_service_and_language_tags_from_an_ffmpeg_authored_ts() {
 
     let (ids, global, per_stream) = demux_bus_messages(&ts).await;
     assert_eq!(ids, vec![VIDEO_ID, AUDIO_ID], "ffmpeg's PID layout");
-    let flat: Vec<Tag> = global
-        .iter()
-        .flat_map(|t| t.tags().iter().cloned())
-        .collect();
     assert_eq!(
-        flat,
-        vec![
-            Tag::Title("Peer News".into()),
-            Tag::Other {
-                key: "service_provider".into(),
-                value: "Peer Broadcasting".into(),
-            },
-        ],
-        "the peer's SDT service text maps to the same two tags g2g writes"
+        global,
+        vec![(
+            Some(1),
+            tags(&[
+                Tag::Title("Peer News".into()),
+                Tag::Other {
+                    key: "service_provider".into(),
+                    value: "Peer Broadcasting".into(),
+                },
+            ])
+        )],
+        "the peer's SDT service text maps to the same two tags g2g writes, on its program"
     );
 
     assert_eq!(
