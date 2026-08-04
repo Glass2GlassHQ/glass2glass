@@ -53,7 +53,9 @@ extern crate std;
 use crate::aggregator::InputAggregator;
 use crate::bus::{BusHandle, BusMessage};
 use crate::caps::{Caps, CapsSet};
-use crate::clock::{elect_clock, ClockCandidate, ClockPriority, ClockSync, PipelineClock};
+use crate::clock::{
+    elect_clock, ClockCandidate, ClockPriority, ClockSync, DynAsyncClock, PipelineClock,
+};
 use crate::element::{
     AsyncElement, BoxFuture, ConfigureOutcome, DynAsyncElement, ElementBound, OutputSink,
     PushOutcome, Reconfigure,
@@ -625,7 +627,18 @@ pub async fn run_graph<'a, Clk: PipelineClock>(
     clock: &Clk,
     link_capacity: impl Into<LinkCapacity>,
 ) -> Result<RunStats, G2gError> {
-    run_graph_inner(graph, clock, link_capacity, None, None, None, None, None).await
+    run_graph_inner(
+        graph,
+        clock,
+        link_capacity,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
 }
 
 /// As [`run_graph`], but enforces a memory-domain [`CopyPolicy`](crate::copyplan::CopyPolicy)
@@ -651,6 +664,7 @@ pub async fn run_graph_with_copy_policy<'a, Clk: PipelineClock>(
         None,
         None,
         Some(policy),
+        None,
         None,
     )
     .await
@@ -739,6 +753,7 @@ pub async fn run_graph_with_bus<'a, Clk: PipelineClock>(
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -766,6 +781,7 @@ pub async fn run_graph_observed<'a, Clk: PipelineClock>(
         None,
         None,
         Some(observer),
+        None,
     )
     .await
 }
@@ -790,6 +806,7 @@ pub async fn run_graph_with_progress<'a, Clk: PipelineClock>(
         None,
         None,
         Some(progress),
+        None,
         None,
         None,
     )
@@ -844,6 +861,7 @@ pub async fn run_graph_stateful<'a, Clk: PipelineClock>(
         link_capacity,
         None,
         Some(state.clone()),
+        None,
         None,
         None,
         None,
@@ -1368,6 +1386,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
     progress: Option<&PipelineProgress>,
     copy_policy: Option<crate::copyplan::CopyPolicy>,
     observer: Option<&Observer>,
+    ticker: Option<&'a dyn DynAsyncClock>,
 ) -> Result<RunStats, G2gError> {
     let link_capacity: usize = link_capacity.into().get();
     let mut vg = graph.finish().map_err(|_| G2gError::CapsMismatch)?;
@@ -1503,6 +1522,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                     beta,
                     mux_ctrl,
                     mux_probe,
+                    ticker,
                 ))
             };
             arms.push(arm);
@@ -1833,6 +1853,8 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                 })
             } else {
                 alloc::boxed::Box::new(move || -> LocalArmFuture {
+                    // The thread-per-arm runner does not tick: an arm on its own
+                    // OS thread has no shared clock reference to sleep on here.
                     Box::pin(muxer_arm(
                         mux,
                         pad_rxs,
@@ -1842,6 +1864,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                         beta,
                         mux_ctrl,
                         mux_probe,
+                        None,
                     ))
                 })
             };
@@ -3434,6 +3457,14 @@ async fn apply_mux_directive<'m>(
 /// frozen overlay and a hung EOS aggregation). The per-input `Eos` is delivered
 /// to the element first (so a stateful muxer can flush) but the element must not
 /// forward it; the runner owns the merged one.
+///
+/// M875: when `ticker` is set and the element declares a
+/// [`tick_interval_ns`](DynMultiInputElement::tick_interval_ns), the arm also
+/// delivers [`PipelinePacket::Tick`] on that period, so a fan-in element whose
+/// output cadence is its own (zero-order-hold over a stalled pad) emits without a
+/// packet arriving. The deadline is checked on both paths: once per loop iteration
+/// for the busy case (packets flowing on one pad while another is stalled never
+/// park the arm), and raced against the parked `recv` otherwise.
 #[allow(clippy::too_many_arguments)]
 async fn muxer_arm<'a>(
     mut mux: Box<dyn DynMultiInputElement + 'a>,
@@ -3444,6 +3475,7 @@ async fn muxer_arm<'a>(
     mut beta: MuxBeta,
     arm_rx: Receiver<ArmDirective>,
     probe: Probe,
+    ticker: Option<&'a dyn DynAsyncClock>,
 ) -> Result<u64, G2gError> {
     let mut adapter = SenderSink::new(out_tx);
     let mut open = alloc::vec![true; input_count];
@@ -3451,12 +3483,27 @@ async fn muxer_arm<'a>(
     // Cursor for round-robin fairness across both the try-drain and block paths.
     let mut next = 0usize;
     let mut control_open = true;
+    // Ticking needs both halves: a clock to sleep on and an element that asked.
+    let tick = ticker.zip(mux.tick_interval_ns());
+    let mut next_tick = tick.map_or(0, |(clk, period)| clk.now_ns().saturating_add(period));
     beta.seed(&*mux, &current_output);
     loop {
         // M839: a consumer's demand on the merged output arrives here. Checked
         // before the data drain so a busy muxer still applies it promptly.
         while let Some(directive) = arm_rx.try_recv() {
             apply_mux_directive(&mut *mux, &mut beta, directive, &current_output).await?;
+        }
+        // Deadline reached while packets keep this arm busy: a live overlay pad
+        // can spin the drain loop forever without ever parking below, so the tick
+        // has to be checked here too. Snap the next deadline forward from now
+        // rather than adding a period to a deadline already in the past, so a slow
+        // element does not build up a backlog of ticks to fire.
+        if let Some((clk, period)) = tick {
+            let now = clk.now_ns();
+            if now >= next_tick {
+                mux.process(0, PipelinePacket::Tick, &mut adapter).await?;
+                next_tick = clk.now_ns().saturating_add(period);
+            }
         }
         // Take one buffered packet, scanning round-robin from `next`, so no
         // single input can monopolize the muxer while others have data waiting.
@@ -3480,21 +3527,40 @@ async fn muxer_arm<'a>(
                 }
                 // Race the β control channel against the pads, so a directive
                 // reaches this arm while it is parked waiting for data.
-                let (slot, maybe) = if control_open {
-                    match select2(arm_rx.recv(), muxer_recv_any(&pad_rxs, &open, next)).await {
-                        Either::Left(Some(directive)) => {
-                            apply_mux_directive(&mut *mux, &mut beta, directive, &current_output)
-                                .await?;
-                            continue;
-                        }
-                        Either::Left(None) => {
-                            control_open = false;
-                            continue;
-                        }
-                        Either::Right(v) => v,
+                let park = async {
+                    if control_open {
+                        select2(arm_rx.recv(), muxer_recv_any(&pad_rxs, &open, next)).await
+                    } else {
+                        Either::Right(muxer_recv_any(&pad_rxs, &open, next).await)
                     }
-                } else {
-                    muxer_recv_any(&pad_rxs, &open, next).await
+                };
+                // M875: the tick deadline joins the race, so a fan-in whose inputs
+                // have all gone quiet still gets its tick. Data and control stay
+                // biased ahead of it: a packet already waiting is handled first.
+                let parked = match tick {
+                    Some((clk, period)) => {
+                        match select2(park, clk.sleep_until_ns(next_tick)).await {
+                            Either::Left(v) => v,
+                            Either::Right(()) => {
+                                mux.process(0, PipelinePacket::Tick, &mut adapter).await?;
+                                next_tick = clk.now_ns().saturating_add(period);
+                                continue;
+                            }
+                        }
+                    }
+                    None => park.await,
+                };
+                let (slot, maybe) = match parked {
+                    Either::Left(Some(directive)) => {
+                        apply_mux_directive(&mut *mux, &mut beta, directive, &current_output)
+                            .await?;
+                        continue;
+                    }
+                    Either::Left(None) => {
+                        control_open = false;
+                        continue;
+                    }
+                    Either::Right(v) => v,
                 };
                 next = (slot + 1) % input_count;
                 // A closed channel with no `Eos` is an upstream end; fold it into
@@ -3675,6 +3741,9 @@ pub(crate) fn try_clone_packet(packet: &PipelinePacket) -> Result<PipelinePacket
         // detector branch and a video branch carry the same AnalyticsMeta without
         // aliasing. The frame-level fan-out primitive.
         PipelinePacket::DataFrame(frame) => PipelinePacket::DataFrame(frame.share()),
+        // Runner-internal (a fan-in arm's deadline), so it is never on a link to
+        // begin with; trivially cloneable all the same.
+        PipelinePacket::Tick => PipelinePacket::Tick,
     })
 }
 

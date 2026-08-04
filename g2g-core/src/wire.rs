@@ -62,7 +62,8 @@ pub enum WireError {
     /// The buffer ended mid-field (a truncated or corrupt message).
     Truncated,
     /// An unknown version byte, packet tag, enum discriminant, or invalid UTF-8
-    /// in a string field.
+    /// in a string field. Also reported for a packet with no wire tag at all (a
+    /// runner-internal [`PipelinePacket::Tick`]).
     BadTag,
     /// A device-resident / foreign memory domain that cannot be serialized over
     /// a byte transport (only [`MemoryDomain::System`] / `SystemView` can).
@@ -820,6 +821,11 @@ pub fn encode_packet(packet: &PipelinePacket) -> Result<Vec<u8>, WireError> {
             w.u8(PKT_SEGMENT);
             put_segment(&mut w, seg);
         }
+        // A `Tick` is runner-internal (a fan-in arm's deadline, consumed at the
+        // arm), so it has no wire tag and cannot reach a transport. There is no
+        // skip convention here (every packet encodes to a body), so encoding one
+        // is a bug, reported rather than silently dropped.
+        PipelinePacket::Tick => return Err(WireError::BadTag),
     }
     Ok(w.buf)
 }

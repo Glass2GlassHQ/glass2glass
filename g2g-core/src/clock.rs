@@ -31,6 +31,23 @@ pub trait AsyncClock: PipelineClock {
     fn sleep_until_ns<'a>(&'a self, deadline_ns: u64) -> Self::SleepFuture<'a>;
 }
 
+/// Object-safe companion to [`AsyncClock`]: the same absolute-deadline sleep, but
+/// returning a [`BoxFuture`](crate::element::BoxFuture) instead of a GAT, so it
+/// can be held as `&dyn DynAsyncClock` (the same reason
+/// [`DynAsyncElement`](crate::element::DynAsyncElement) mirrors `AsyncElement`).
+/// The runner's fan-in arm needs an erased clock to sleep on its tick deadline.
+///
+/// Blanket-implemented for every `AsyncClock`, so no clock implements it directly.
+pub trait DynAsyncClock: PipelineClock {
+    fn sleep_until_ns<'a>(&'a self, deadline_ns: u64) -> crate::element::BoxFuture<'a, ()>;
+}
+
+impl<T: AsyncClock> DynAsyncClock for T {
+    fn sleep_until_ns<'a>(&'a self, deadline_ns: u64) -> crate::element::BoxFuture<'a, ()> {
+        alloc::boxed::Box::pin(AsyncClock::sleep_until_ns(self, deadline_ns))
+    }
+}
+
 /// The process-wide monotonic wall clock ([`monotonic_ns`](crate::metrics::monotonic_ns)),
 /// as a shareable [`PipelineClock`]. This is the natural reference clock a
 /// [`DriftClock`] projects and the fallback timeline a display sink paces to;

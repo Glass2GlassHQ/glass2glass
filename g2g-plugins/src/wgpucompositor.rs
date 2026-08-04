@@ -1,8 +1,10 @@
 //! wgpu compute compositor (M853): the GPU sibling of the CPU
 //! [`Compositor`](crate::compositor) for HD / many-input scale. Same
 //! N-in-1-out [`MultiInputElement`] surface, same [`CompositorPad`] semantics
-//! (position, z-order, per-pad alpha, optional bilinear resize) and the same
-//! latest-wins overlay cadence; only the pixel work moves to a compute shader.
+//! (position, z-order, per-pad alpha, optional bilinear resize), the same
+//! latest-wins overlay cadence and the same
+//! [`with_timed_output`](WgpuCompositor::with_timed_output) hold on a stalled
+//! input 0; only the pixel work moves to a compute shader.
 //!
 //! RGBA8 only (the planar YUV mixing stays on the CPU element). A system-memory
 //! frame is uploaded into one packed storage buffer, and re-uploaded only when a
@@ -405,6 +407,15 @@ impl WgpuCompositor {
         self
     }
 
+    /// Keep emitting at the output framerate while input 0 stalls, re-compositing
+    /// its last frame once per frame period with the overlays as they stand
+    /// (zero-order-hold). Off by default. Needs a runner that ticks the fan-in arm
+    /// (`run_muxer_sink_ticked`), as on the CPU element.
+    pub fn with_timed_output(mut self) -> Self {
+        self.state.enable_hold();
+        self
+    }
+
     /// Composite on a shared [`GpuContext`] instead of opening a private device.
     /// Pass the downstream [`WgpuSink`](crate::wgpusink)'s context so a
     /// GPU-output texture presents with no copy.
@@ -424,6 +435,15 @@ impl WgpuCompositor {
     /// Number of composited frames emitted so far (one per input-0 frame).
     pub fn emitted(&self) -> u64 {
         self.state.emitted()
+    }
+
+    /// One output frame period in nanoseconds, from the nominal framerate (Q16).
+    /// Zero for a zero framerate (nothing to pace to).
+    fn frame_period_ns(&self) -> u64 {
+        match self.framerate_q16 {
+            0 => 0,
+            fps => 1_000_000_000u64 * 65536 / fps as u64,
+        }
     }
 
     fn output(&self) -> Caps {
@@ -848,6 +868,15 @@ impl MultiInputElement for WgpuCompositor {
         self.pads.len()
     }
 
+    /// Only with timed output on: the arm then ticks once per output frame period,
+    /// which is when a zero-order-hold frame may be due.
+    fn tick_interval_ns(&self) -> Option<u64> {
+        match self.state.hold_enabled() {
+            true => Some(self.frame_period_ns()).filter(|&ns| ns > 0),
+            false => None,
+        }
+    }
+
     fn intercept_caps(&self, _input: usize, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         upstream_caps.intersect(&self.accepted())
     }
@@ -904,6 +933,11 @@ impl MultiInputElement for WgpuCompositor {
                     if self.textures[input] != source.is_texture() {
                         self.textures[input] = source.is_texture();
                         self.gpu = None;
+                        if input == 0 {
+                            // A retained frame of the other kind no longer fits
+                            // the layout it would be composited under.
+                            self.state.drop_held();
+                        }
                     }
                     if input != 0 {
                         // The overlay's new bytes need re-uploading.
@@ -914,6 +948,20 @@ impl MultiInputElement for WgpuCompositor {
                     while let Some((timing, base)) = self.state.take_due() {
                         self.ensure_gpu().await?;
                         let frame = self.compose_frame(&base, timing)?;
+                        self.state.record_emitted(timing, base);
+                        out.push(PipelinePacket::DataFrame(frame)).await?;
+                    }
+                }
+                // Zero-order-hold: input 0 has not delivered for a whole output
+                // period, so re-composite the frame it last did (bytes still in
+                // the packed buffer, or the texture still bound) with the overlays
+                // as they now stand.
+                PipelinePacket::Tick => {
+                    let period = self.frame_period_ns();
+                    if let Some((timing, base)) = self.state.take_tick_due(period) {
+                        self.ensure_gpu().await?;
+                        let frame = self.compose_frame(&base, timing)?;
+                        self.state.record_held(timing, base);
                         out.push(PipelinePacket::DataFrame(frame)).await?;
                     }
                 }
@@ -1603,6 +1651,139 @@ mod tests {
             crate::gpu::read_rgba_texture(&ctx, tex),
             want,
             "GPU-resident canvas off texture inputs matches the CPU compositor"
+        );
+    }
+
+    /// Drive a timed compositor through one held frame: overlay, base, then two
+    /// ticks. The first tick closes the period the real frame arrived in, the
+    /// second finds an empty period and emits the zero-order-hold frame.
+    async fn run_held<M: MultiInputElement>(
+        comp: &mut M,
+        geoms: &[(u32, u32)],
+        frames: &[Vec<u8>],
+    ) -> Vec<Frame> {
+        let mut sink = FrameSink::default();
+        for (i, (w, h)) in geoms.iter().enumerate() {
+            comp.configure_pipeline(i, &rgba_caps(*w, *h)).unwrap();
+        }
+        comp.process(
+            1,
+            PipelinePacket::DataFrame(frame_of(&frames[1])),
+            &mut sink,
+        )
+        .await
+        .unwrap();
+        comp.process(
+            0,
+            PipelinePacket::DataFrame(frame_of(&frames[0])),
+            &mut sink,
+        )
+        .await
+        .unwrap();
+        for _ in 0..2 {
+            comp.process(0, PipelinePacket::Tick, &mut sink)
+                .await
+                .unwrap();
+        }
+        sink.frames
+    }
+
+    #[tokio::test]
+    async fn held_frame_matches_the_cpu_compositor() {
+        let Some(ctx) = shared_ctx().await else {
+            std::eprintln!("no wgpu adapter; skipping GPU compositor hold test");
+            return;
+        };
+        let pads = Vec::from([
+            CompositorPad::at(0, 0),
+            CompositorPad::at(4, 4).with_zorder(1).with_alpha(180),
+        ]);
+        let geoms = [(32, 32), (16, 16)];
+        let frames = [solid(32, 32, [200, 40, 10, 255]), ramp(16, 16)];
+
+        let mut cpu = Compositor::new(32, 32, pads.clone()).with_timed_output();
+        let cpu_frames = run_held(&mut cpu, &geoms, &frames).await;
+        let mut gpu = WgpuCompositor::new(32, 32, pads)
+            .with_context(ctx)
+            .with_timed_output();
+        let gpu_frames = run_held(&mut gpu, &geoms, &frames).await;
+
+        assert_eq!(gpu_frames.len(), 2, "the real frame plus one held frame");
+        assert_eq!(
+            cpu_frames.len(),
+            gpu_frames.len(),
+            "same cadence as the CPU"
+        );
+        let bytes = |f: &Frame| f.domain.as_system_slice().unwrap().to_vec();
+        assert_eq!(
+            bytes(&gpu_frames[1]),
+            bytes(&cpu_frames[1]),
+            "the held composite is bit-exact with the CPU element"
+        );
+        assert_eq!(
+            gpu_frames[1].timing.pts_ns, cpu_frames[1].timing.pts_ns,
+            "and carries the same advanced timestamp"
+        );
+        assert_eq!(
+            gpu_frames[1].timing.pts_ns,
+            1_000_000_000 * 65536 / (30 << 16),
+            "one 30 fps period past the real frame"
+        );
+    }
+
+    #[tokio::test]
+    async fn held_texture_base_picks_up_a_newer_texture_overlay() {
+        let Some(ctx) = shared_ctx().await else {
+            std::eprintln!("no wgpu adapter; skipping GPU compositor texture hold test");
+            return;
+        };
+        // Both inputs GPU-resident: the retained base texture stays bound across
+        // ticks while the overlay it composites with moves on.
+        let pads = Vec::from([
+            CompositorPad::at(0, 0),
+            CompositorPad::at(0, 0).with_zorder(1),
+        ]);
+        let mut comp = WgpuCompositor::new(8, 8, pads)
+            .with_context(ctx.clone())
+            .with_timed_output();
+        comp.configure_pipeline(0, &rgba_caps(8, 8)).unwrap();
+        comp.configure_pipeline(1, &rgba_caps(4, 4)).unwrap();
+        let mut sink = FrameSink::default();
+
+        let green = texture_frame(&ctx, 4, 4, &solid(4, 4, [0, 255, 0, 255]));
+        comp.process(1, PipelinePacket::DataFrame(green), &mut sink)
+            .await
+            .unwrap();
+        let base = texture_frame(&ctx, 8, 8, &solid(8, 8, [255, 0, 0, 255]));
+        comp.process(0, PipelinePacket::DataFrame(base), &mut sink)
+            .await
+            .unwrap();
+        let blue = texture_frame(&ctx, 4, 4, &solid(4, 4, [0, 0, 255, 255]));
+        comp.process(1, PipelinePacket::DataFrame(blue), &mut sink)
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            comp.process(0, PipelinePacket::Tick, &mut sink)
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(sink.frames.len(), 2, "one held frame off the empty period");
+        let at = |f: &Frame, i: usize| {
+            let b = f.domain.as_system_slice().unwrap();
+            [b[i], b[i + 1], b[i + 2], b[i + 3]]
+        };
+        assert_eq!(at(&sink.frames[0], 0), [0, 255, 0, 255], "first overlay");
+        assert_eq!(
+            at(&sink.frames[1], 0),
+            [0, 0, 255, 255],
+            "the held frame composites the newer overlay texture"
+        );
+        // Outside the 4x4 overlay: the retained base texture is still what shows.
+        assert_eq!(
+            at(&sink.frames[1], (7 * 8 + 7) * 4),
+            [255, 0, 0, 255],
+            "the retained base texture stayed bound"
         );
     }
 

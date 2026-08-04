@@ -1605,6 +1605,9 @@ async fn route_packet(
             }
             Ok(true)
         }
+        // A fan-in arm's deadline tick is runner-internal and never crosses a
+        // link, so nothing to route.
+        Some(PipelinePacket::Tick) => Ok(false),
     }
 }
 
@@ -1931,7 +1934,7 @@ where
     let snk = g.add_sink(GraphNodeRef::element_ref(sink));
     g.link(prev, snk).map_err(|_| G2gError::CapsMismatch)?;
 
-    run_graph_inner(g, clock, link_capacity, bus, None, None, None, None).await
+    run_graph_inner(g, clock, link_capacity, bus, None, None, None, None, None).await
 }
 
 /// Sentinel sink for terminal elements (sinks proper): swallows pushes.

@@ -512,10 +512,8 @@ _(No open parser items.)_
 ## Compositor
 
 - `wgpucompositor`: planar YUV.
-- Timer-driven output (emit at the output rate even when inputs stall, a
-  zero-order-hold aggregator tick). Needs the runner to deadline-tick the
-  compositor without an input packet; constant-rate resampling of a flowing
-  output is already covered by a downstream `videorate`.
+- Deliver the arm's deadline tick from the remaining fan-in paths: the
+  PTS-ordered muxer arm, the threaded runner, and the plain `run_graph*` entries.
 
 ## Metadata (FrameMeta / AnalyticsMeta)
 

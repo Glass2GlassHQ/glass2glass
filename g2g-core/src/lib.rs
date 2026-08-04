@@ -147,7 +147,9 @@ pub use clock::DriftClock;
 #[cfg(feature = "std")]
 pub use clock::MonotonicClock;
 #[cfg(feature = "alloc")]
-pub use clock::{elect_clock, AsyncClock, ClockCandidate, ClockPriority, ClockSync, PipelineClock};
+pub use clock::{
+    elect_clock, AsyncClock, ClockCandidate, ClockPriority, ClockSync, DynAsyncClock, PipelineClock,
+};
 #[cfg(feature = "alloc")]
 pub use conformance::{
     ConformanceDimension, ConformanceReport, Evidence, MaturityLevel, MaturityRecord,

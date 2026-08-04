@@ -476,6 +476,18 @@ pub trait MultiInputElement: ElementBound {
         false
     }
 
+    /// Deadline tick period in nanoseconds, or `None` (the default) for no ticks.
+    ///
+    /// When set, and the runner was given a clock to sleep on, the fan-in arm
+    /// delivers [`PipelinePacket::Tick`] as `process(0, Tick, ..)` every period
+    /// even while the inputs are silent, so an element whose output cadence is its
+    /// own (a compositor holding the last frame of a stalled pad, zero-order-hold)
+    /// can emit without a packet arriving. The tick may fire spuriously: it says
+    /// the period elapsed, not that output is due, so the element decides.
+    fn tick_interval_ns(&self) -> Option<u64> {
+        None
+    }
+
     /// Phase 1 for one input pad: narrow that input's proposed caps.
     fn intercept_caps(&self, input: usize, upstream_caps: &Caps) -> Result<Caps, G2gError>;
 
@@ -755,8 +767,9 @@ impl AsyncElement for Gate {
                 PipelinePacket::Segment(s) => {
                     out.push(PipelinePacket::Segment(s)).await?;
                 }
-                // Runner forwards Eos after process() returns.
-                PipelinePacket::Eos => {}
+                // Runner forwards Eos after process() returns. A fan-in arm's
+                // deadline tick never reaches a 1->1 element.
+                PipelinePacket::Eos | PipelinePacket::Tick => {}
             }
             Ok(())
         })
@@ -871,8 +884,9 @@ impl MultiOutputElement for Router {
                         out.push_to(port, PipelinePacket::Segment(s)).await?;
                     }
                 }
-                // Runner broadcasts Eos to all ports after process() returns.
-                PipelinePacket::Eos => {}
+                // Runner broadcasts Eos to all ports after process() returns. A
+                // fan-in arm's deadline tick never reaches a 1->N element.
+                PipelinePacket::Eos | PipelinePacket::Tick => {}
             }
             Ok(())
         })
@@ -988,7 +1002,10 @@ mod tests {
             match packet {
                 PipelinePacket::DataFrame(f) => self.data_seqs[port].push(f.sequence),
                 PipelinePacket::CapsChanged(_) => self.caps_changes[port] += 1,
-                PipelinePacket::Eos | PipelinePacket::Flush | PipelinePacket::Segment(_) => {}
+                PipelinePacket::Eos
+                | PipelinePacket::Flush
+                | PipelinePacket::Segment(_)
+                | PipelinePacket::Tick => {}
             }
             Box::pin(async { Ok(PushOutcome::Accepted) })
         }
@@ -1013,7 +1030,10 @@ mod tests {
             match packet {
                 PipelinePacket::DataFrame(f) => self.data_seqs.push(f.sequence),
                 PipelinePacket::CapsChanged(_) => self.caps_changes += 1,
-                PipelinePacket::Eos | PipelinePacket::Flush | PipelinePacket::Segment(_) => {}
+                PipelinePacket::Eos
+                | PipelinePacket::Flush
+                | PipelinePacket::Segment(_)
+                | PipelinePacket::Tick => {}
             }
             Box::pin(async { Ok(PushOutcome::Accepted) })
         }

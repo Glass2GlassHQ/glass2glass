@@ -21,7 +21,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use super::autoplug::PadRequest;
 use crate::bus::BusHandle;
 use crate::caps::Caps;
-use crate::clock::PipelineClock;
+use crate::clock::{AsyncClock, DynAsyncClock, PipelineClock};
 use crate::clock::{ClockCandidate, ClockPriority};
 use crate::element::{
     AsyncElement, BoxFuture, ConfigureOutcome, DynAsyncElement, ElementBound, OutputSink,
@@ -313,6 +313,11 @@ pub trait DynMultiInputElement: ElementBound {
     /// Dyn-safe mirror of [`MultiInputElement::output_follows_input`]: the input
     /// pad whose caps the merged output follows (identity-passthrough mux), if any.
     fn output_follows_input(&self) -> Option<usize>;
+    /// Dyn-safe mirror of [`MultiInputElement::tick_interval_ns`]: the deadline
+    /// tick period this element wants, if any.
+    fn tick_interval_ns(&self) -> Option<u64> {
+        None
+    }
     /// Dyn-safe mirror of [`MultiInputElement::input_pad_index`] (M481): map a
     /// named request pad to the concrete input index, for the launch parser.
     fn input_pad_index(&self, req: &PadRequest, ordinal: usize) -> Option<usize>;
@@ -375,6 +380,10 @@ impl<T: MultiInputElement> DynMultiInputElement for T {
 
     fn output_follows_input(&self) -> Option<usize> {
         MultiInputElement::output_follows_input(self)
+    }
+
+    fn tick_interval_ns(&self) -> Option<u64> {
+        MultiInputElement::tick_interval_ns(self)
     }
 
     fn input_pad_index(&self, req: &PadRequest, ordinal: usize) -> Option<usize> {
@@ -470,6 +479,10 @@ impl<'b> DynMultiInputElement for &'b mut (dyn DynMultiInputElement + 'b) {
 
     fn output_follows_input(&self) -> Option<usize> {
         (**self).output_follows_input()
+    }
+
+    fn tick_interval_ns(&self) -> Option<u64> {
+        (**self).tick_interval_ns()
     }
 
     fn input_pad_index(&self, req: &PadRequest, ordinal: usize) -> Option<usize> {
@@ -1416,7 +1429,41 @@ where
     Snk: AsyncElement,
     Clk: PipelineClock,
 {
-    run_muxer_sink_inner(sources, mux, sink, clock, link_capacity, None).await
+    run_muxer_sink_inner(sources, mux, sink, clock, link_capacity, None, None).await
+}
+
+/// As [`run_muxer_sink`], but the muxer arm also gets a **deadline tick** (M875):
+/// `clock` is both the pipeline clock and the timer the arm sleeps on, so a muxer
+/// declaring a [`MultiInputElement::tick_interval_ns`] receives
+/// [`PipelinePacket::Tick`] on that period even while its inputs are silent. A
+/// compositor uses it to keep emitting at its output rate when a pad stalls
+/// (zero-order-hold on that pad's last frame) instead of freezing with it.
+///
+/// Needs an [`AsyncClock`] (the plain [`run_muxer_sink`] takes any
+/// [`PipelineClock`], which cannot sleep). A muxer that declares no interval runs
+/// exactly as it does there.
+pub async fn run_muxer_sink_ticked<Mux, Snk, Clk>(
+    sources: Vec<&mut dyn DynSourceLoop>,
+    mux: &mut Mux,
+    sink: &mut Snk,
+    clock: &Clk,
+    link_capacity: impl Into<LinkCapacity>,
+) -> Result<RunStats, G2gError>
+where
+    Mux: MultiInputElement,
+    Snk: AsyncElement,
+    Clk: AsyncClock,
+{
+    run_muxer_sink_inner(
+        sources,
+        mux,
+        sink,
+        clock,
+        link_capacity,
+        None,
+        Some(clock as &dyn DynAsyncClock),
+    )
+    .await
 }
 
 /// As [`run_muxer_sink`], but posts a structured
@@ -1435,9 +1482,10 @@ where
     Snk: AsyncElement,
     Clk: PipelineClock,
 {
-    run_muxer_sink_inner(sources, mux, sink, clock, link_capacity, Some(bus)).await
+    run_muxer_sink_inner(sources, mux, sink, clock, link_capacity, Some(bus), None).await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_muxer_sink_inner<Mux, Snk, Clk>(
     sources: Vec<&mut dyn DynSourceLoop>,
     mux: &mut Mux,
@@ -1445,6 +1493,7 @@ async fn run_muxer_sink_inner<Mux, Snk, Clk>(
     clock: &Clk,
     link_capacity: impl Into<LinkCapacity>,
     bus: Option<&BusHandle>,
+    ticker: Option<&dyn DynAsyncClock>,
 ) -> Result<RunStats, G2gError>
 where
     Mux: MultiInputElement,
@@ -1472,7 +1521,7 @@ where
     g.link(mux_node.output(), snk)
         .map_err(|_| G2gError::CapsMismatch)?;
 
-    run_graph_inner(g, clock, link_capacity, bus, None, None, None, None).await
+    run_graph_inner(g, clock, link_capacity, bus, None, None, None, None, ticker).await
 }
 
 /// Which arm of a dynamic fan-in ([`run_aggregator_dynamic`]) produced this

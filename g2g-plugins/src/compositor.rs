@@ -24,7 +24,11 @@
 //! To emit at a different constant output rate, put a `VideoRate` downstream
 //! (`compositor ! videorate`); the compositor stamps each output frame with
 //! input 0's PTS, so videorate resamples the cadence without any compositor-side
-//! frame-rate conversion.
+//! frame-rate conversion. With
+//! [`with_timed_output`](Compositor::with_timed_output) (M875) output no longer
+//! stops when input 0 does: on a runner deadline tick the last frame it delivered
+//! is re-composited with the current overlays (zero-order-hold), one per empty
+//! frame period, so a live overlay keeps animating over a frozen background.
 //!
 //! **Startup:** inputs start asynchronously and an overlay branch (camera warm-up,
 //! extra transforms) can lag the background, in the extreme starting only after a
@@ -158,6 +162,16 @@ pub(crate) struct CompositorState<P> {
     /// input-0 frames so a late-starting overlay still appears. Latches: an
     /// overlay whose cached frame is later invalidated does not re-open startup.
     primed: bool,
+    /// Zero-order-hold output is on: retain each emitted input-0 frame so a
+    /// deadline tick can re-composite it while that input stalls. Off by default,
+    /// and then nothing is retained at all.
+    hold: bool,
+    /// The last input-0 frame emitted, with the timestamp it went out on. Dropped
+    /// whenever input 0's pixels stop being valid to composite.
+    held: Option<(FrameTiming, P)>,
+    /// A real (input-driven) frame went out since the last tick, so the next tick
+    /// holds off rather than duplicating it.
+    emitted_since_tick: bool,
     emitted: u64,
 }
 
@@ -168,8 +182,22 @@ impl<P> CompositorState<P> {
             inputs: vec![None; n],
             // No overlays (single input) means nothing to wait for: start live.
             primed: n == 1,
+            hold: false,
+            held: None,
+            emitted_since_tick: false,
             emitted: 0,
         }
+    }
+
+    /// Retain emitted input-0 frames so a deadline tick can re-composite the last
+    /// one (zero-order-hold).
+    pub(crate) fn enable_hold(&mut self) {
+        self.hold = true;
+    }
+
+    /// Whether zero-order-hold output was enabled.
+    pub(crate) fn hold_enabled(&self) -> bool {
+        self.hold
     }
 
     /// Take a delivered frame: input 0 queues (each one releases an output),
@@ -207,6 +235,44 @@ impl<P> CompositorState<P> {
         self.agg.latest(input)
     }
 
+    /// Retain the input-0 frame just emitted, so a tick can re-composite it, and
+    /// note that real output went out (the next tick holds off). With
+    /// zero-order-hold off the payload is dropped here, as it always was.
+    pub(crate) fn record_emitted(&mut self, timing: FrameTiming, payload: P) {
+        self.retain(timing, payload);
+        self.emitted_since_tick = true;
+    }
+
+    /// Put back the frame a tick re-emitted, at the timestamp it went out on, so
+    /// consecutive ticks keep walking forward.
+    pub(crate) fn record_held(&mut self, timing: FrameTiming, payload: P) {
+        self.retain(timing, payload);
+    }
+
+    fn retain(&mut self, timing: FrameTiming, payload: P) {
+        if self.hold {
+            self.held = Some((timing, payload));
+        }
+    }
+
+    /// The zero-order-hold frame a deadline tick should emit: the retained
+    /// input-0 frame, its clock advanced one `period_ns`. `None` when nothing is
+    /// due, which is the whole decision: zero-order-hold off, nothing retained
+    /// yet, or real output already went out since the last tick (a tick only says
+    /// the period elapsed, so it may fire spuriously). The caller re-composites it
+    /// with the overlays as they now stand and hands it back through
+    /// [`record_held`](Self::record_held).
+    pub(crate) fn take_tick_due(&mut self, period_ns: u64) -> Option<(FrameTiming, P)> {
+        let emitted = core::mem::take(&mut self.emitted_since_tick);
+        if !self.hold || emitted {
+            return None;
+        }
+        let (mut timing, payload) = self.held.take()?;
+        timing.pts_ns = timing.pts_ns.saturating_add(period_ns);
+        timing.dts_ns = timing.dts_ns.saturating_add(period_ns);
+        Some((timing, payload))
+    }
+
     pub(crate) fn geometry(&self, input: usize) -> Option<(u32, u32)> {
         self.inputs[input]
     }
@@ -223,12 +289,21 @@ impl<P> CompositorState<P> {
     /// Drop `input`'s cached / buffered frames.
     pub(crate) fn clear(&mut self, input: usize) {
         self.agg.clear(input);
+        if input == 0 {
+            self.drop_held();
+        }
+    }
+
+    /// Forget the retained frame: input 0's pixels are no longer valid to
+    /// composite (a new geometry would read them at the wrong dimensions).
+    pub(crate) fn drop_held(&mut self) {
+        self.held = None;
     }
 
     /// A flush drops `input`'s frames, and on an overlay re-arms startup so that
     /// overlay is waited for again instead of missing from the next output.
     pub(crate) fn flush(&mut self, input: usize) {
-        self.agg.clear(input);
+        self.clear(input);
         if input != 0 {
             self.primed = false;
         }
@@ -298,9 +373,33 @@ impl Compositor {
         self
     }
 
+    /// Keep emitting at the output framerate while input 0 stalls: the last
+    /// composited input-0 frame is held and re-emitted once per frame period
+    /// (zero-order-hold), each time re-composited with the overlays as they stand,
+    /// so a live overlay keeps animating over a frozen background. Off by default.
+    ///
+    /// Needs a runner that ticks the fan-in arm (`run_muxer_sink_ticked`): the
+    /// element declares the period through
+    /// [`tick_interval_ns`](MultiInputElement::tick_interval_ns) and emits on the
+    /// [`PipelinePacket::Tick`] it gets back. Under any other runner it behaves
+    /// exactly as it does without this.
+    pub fn with_timed_output(mut self) -> Self {
+        self.state.enable_hold();
+        self
+    }
+
     /// Number of composited frames emitted so far (one per input-0 frame).
     pub fn emitted(&self) -> u64 {
         self.state.emitted()
+    }
+
+    /// One output frame period in nanoseconds, from the nominal framerate (Q16).
+    /// Zero for a zero framerate (nothing to pace to).
+    fn frame_period_ns(&self) -> u64 {
+        match self.framerate_q16 {
+            0 => 0,
+            fps => 1_000_000_000u64 * 65536 / fps as u64,
+        }
     }
 
     fn output(&self) -> Caps {
@@ -756,6 +855,15 @@ impl MultiInputElement for Compositor {
         self.pads.len()
     }
 
+    /// Only with timed output on: the arm then ticks once per output frame period,
+    /// which is when a zero-order-hold frame may be due.
+    fn tick_interval_ns(&self) -> Option<u64> {
+        match self.state.hold_enabled() {
+            true => Some(self.frame_period_ns()).filter(|&ns| ns > 0),
+            false => None,
+        }
+    }
+
     fn intercept_caps(&self, _input: usize, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         upstream_caps.intersect(&self.accepted())
     }
@@ -815,6 +923,19 @@ impl MultiInputElement for Compositor {
                     while let Some((timing, base)) = self.state.take_due() {
                         let canvas = self.compose(&base);
                         let frame = self.output_frame(canvas, timing);
+                        self.state.record_emitted(timing, base);
+                        out.push(PipelinePacket::DataFrame(frame)).await?;
+                    }
+                }
+                // Zero-order-hold: input 0 has not delivered for a whole output
+                // period, so re-composite the frame it last did with the overlays
+                // as they now stand, rather than letting output freeze with it.
+                PipelinePacket::Tick => {
+                    let period = self.frame_period_ns();
+                    if let Some((timing, base)) = self.state.take_tick_due(period) {
+                        let canvas = self.compose(&base);
+                        let frame = self.output_frame(canvas, timing);
+                        self.state.record_held(timing, base);
                         out.push(PipelinePacket::DataFrame(frame)).await?;
                     }
                 }
@@ -853,6 +974,69 @@ impl MultiInputElement for Compositor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use g2g_core::runtime::block_on;
+    use g2g_core::PushOutcome;
+
+    /// One output frame period at the default 30 fps.
+    const PERIOD_NS: u64 = 1_000_000_000 * 65536 / (30 << 16);
+
+    /// Captures what a compositor emits.
+    #[derive(Default)]
+    struct FrameSink {
+        frames: Vec<Frame>,
+    }
+
+    impl OutputSink for FrameSink {
+        fn push<'a>(
+            &'a mut self,
+            packet: PipelinePacket,
+        ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
+            Box::pin(async move {
+                if let PipelinePacket::DataFrame(frame) = packet {
+                    self.frames.push(frame);
+                }
+                Ok(PushOutcome::Accepted)
+            })
+        }
+    }
+
+    fn rgba_caps(w: u32, h: u32) -> Caps {
+        Caps::RawVideo {
+            format: RawVideoFormat::Rgba8,
+            width: Dim::Fixed(w),
+            height: Dim::Fixed(h),
+            framerate: Rate::Fixed(30 << 16),
+        }
+    }
+
+    fn data(bytes: Vec<u8>, pts_ns: u64) -> PipelinePacket {
+        PipelinePacket::DataFrame(Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
+            FrameTiming {
+                pts_ns,
+                dts_ns: pts_ns,
+                ..Default::default()
+            },
+            0,
+        ))
+    }
+
+    /// A timed-output 4x4 compositor with a 2x2 overlay pad on top, both inputs
+    /// configured.
+    fn timed_pair() -> Compositor {
+        let mut comp = Compositor::new(
+            4,
+            4,
+            Vec::from([
+                CompositorPad::at(0, 0),
+                CompositorPad::at(0, 0).with_zorder(1),
+            ]),
+        )
+        .with_timed_output();
+        comp.configure_pipeline(0, &rgba_caps(4, 4)).unwrap();
+        comp.configure_pipeline(1, &rgba_caps(2, 2)).unwrap();
+        comp
+    }
 
     fn solid(w: usize, h: usize, rgba: [u8; 4]) -> Vec<u8> {
         let mut v = Vec::with_capacity(w * h * 4);
@@ -1242,6 +1426,224 @@ mod tests {
             comp.configure_pipeline(0, &rgba),
             Err(G2gError::CapsMismatch)
         ));
+    }
+
+    #[test]
+    fn timed_output_declares_the_frame_period_only_when_enabled() {
+        let plain = Compositor::new(4, 4, Vec::from([CompositorPad::at(0, 0)]));
+        assert_eq!(plain.tick_interval_ns(), None, "off by default");
+        let timed = Compositor::new(4, 4, Vec::from([CompositorPad::at(0, 0)])).with_timed_output();
+        assert_eq!(timed.tick_interval_ns(), Some(PERIOD_NS), "30 fps period");
+        let fast = Compositor::new(4, 4, Vec::from([CompositorPad::at(0, 0)]))
+            .with_timed_output()
+            .with_framerate(60);
+        assert_eq!(
+            fast.tick_interval_ns(),
+            Some(1_000_000_000 * 65536 / (60 << 16)),
+            "the period follows the output framerate"
+        );
+    }
+
+    #[test]
+    fn a_tick_holds_the_last_frame_and_walks_its_clock() {
+        let mut comp = timed_pair();
+        let mut sink = FrameSink::default();
+        block_on(async {
+            comp.process(1, data(solid(2, 2, [0, 255, 0, 255]), 0), &mut sink)
+                .await
+                .unwrap();
+            comp.process(0, data(solid(4, 4, [255, 0, 0, 255]), 1_000), &mut sink)
+                .await
+                .unwrap();
+            assert_eq!(sink.frames.len(), 1, "the real frame composited");
+            // The first tick closes the period that frame arrived in.
+            comp.process(0, PipelinePacket::Tick, &mut sink)
+                .await
+                .unwrap();
+            assert_eq!(sink.frames.len(), 1, "a period with input needs no hold");
+            // Two empty periods: one held frame each, the clock walking forward.
+            comp.process(0, PipelinePacket::Tick, &mut sink)
+                .await
+                .unwrap();
+            comp.process(0, PipelinePacket::Tick, &mut sink)
+                .await
+                .unwrap();
+        });
+        assert_eq!(sink.frames.len(), 3, "one held frame per empty period");
+        let pts: Vec<u64> = sink.frames.iter().map(|f| f.timing.pts_ns).collect();
+        assert_eq!(pts, [1_000, 1_000 + PERIOD_NS, 1_000 + 2 * PERIOD_NS]);
+        assert_eq!(
+            sink.frames[1].timing.dts_ns,
+            1_000 + PERIOD_NS,
+            "dts walks with pts"
+        );
+        let px = |f: &Frame| f.domain.as_system_slice().unwrap().to_vec();
+        assert_eq!(
+            px(&sink.frames[1]),
+            px(&sink.frames[0]),
+            "the held frame is the same composite"
+        );
+        assert_eq!(
+            sink.frames[2].sequence, 2,
+            "held frames keep the output sequence flowing"
+        );
+    }
+
+    #[test]
+    fn a_held_frame_picks_up_the_current_overlay() {
+        // The payoff: the background is stalled, but a live overlay keeps moving.
+        let mut comp = timed_pair();
+        let mut sink = FrameSink::default();
+        block_on(async {
+            comp.process(1, data(solid(2, 2, [0, 255, 0, 255]), 0), &mut sink)
+                .await
+                .unwrap();
+            comp.process(0, data(solid(4, 4, [255, 0, 0, 255]), 0), &mut sink)
+                .await
+                .unwrap();
+            comp.process(1, data(solid(2, 2, [0, 0, 255, 255]), 0), &mut sink)
+                .await
+                .unwrap();
+            for _ in 0..2 {
+                comp.process(0, PipelinePacket::Tick, &mut sink)
+                    .await
+                    .unwrap();
+            }
+        });
+        assert_eq!(sink.frames.len(), 2, "an overlay alone emits nothing");
+        let at = |f: &Frame, x: usize, y: usize| {
+            let b = f.domain.as_system_slice().unwrap().to_vec();
+            px(&b, 4, x, y)
+        };
+        assert_eq!(at(&sink.frames[0], 0, 0), [0, 255, 0, 255], "first overlay");
+        assert_eq!(
+            at(&sink.frames[1], 0, 0),
+            [0, 0, 255, 255],
+            "the held frame composites the newer overlay"
+        );
+        assert_eq!(
+            at(&sink.frames[1], 3, 3),
+            [255, 0, 0, 255],
+            "over the same held background"
+        );
+    }
+
+    #[test]
+    fn ticks_emit_nothing_without_a_frame_to_hold() {
+        let mut comp = timed_pair();
+        let mut sink = FrameSink::default();
+        block_on(async {
+            for _ in 0..3 {
+                comp.process(0, PipelinePacket::Tick, &mut sink)
+                    .await
+                    .unwrap();
+            }
+            // An overlay is not a frame to hold: input 0 drives output.
+            comp.process(1, data(solid(2, 2, [0, 255, 0, 255]), 0), &mut sink)
+                .await
+                .unwrap();
+            comp.process(0, PipelinePacket::Tick, &mut sink)
+                .await
+                .unwrap();
+        });
+        assert!(sink.frames.is_empty(), "nothing emitted before input 0");
+    }
+
+    #[test]
+    fn a_flush_on_input_0_drops_the_held_frame() {
+        let mut comp = timed_pair();
+        let mut sink = FrameSink::default();
+        block_on(async {
+            comp.process(1, data(solid(2, 2, [0, 255, 0, 255]), 0), &mut sink)
+                .await
+                .unwrap();
+            comp.process(0, data(solid(4, 4, [255, 0, 0, 255]), 0), &mut sink)
+                .await
+                .unwrap();
+            comp.process(0, PipelinePacket::Flush, &mut sink)
+                .await
+                .unwrap();
+            for _ in 0..3 {
+                comp.process(0, PipelinePacket::Tick, &mut sink)
+                    .await
+                    .unwrap();
+            }
+        });
+        assert_eq!(
+            sink.frames.len(),
+            1,
+            "the flushed frame is not held across the discontinuity"
+        );
+    }
+
+    #[test]
+    fn a_geometry_change_drops_the_held_frame() {
+        // Holding across it would composite the old, smaller buffer at the new
+        // dimensions and read out of bounds.
+        let mut comp =
+            Compositor::new(4, 4, Vec::from([CompositorPad::at(0, 0)])).with_timed_output();
+        comp.configure_pipeline(0, &rgba_caps(2, 2)).unwrap();
+        let mut sink = FrameSink::default();
+        block_on(async {
+            comp.process(0, data(solid(2, 2, [255, 0, 0, 255]), 0), &mut sink)
+                .await
+                .unwrap();
+            comp.process(0, PipelinePacket::CapsChanged(rgba_caps(4, 4)), &mut sink)
+                .await
+                .unwrap();
+            for _ in 0..3 {
+                comp.process(0, PipelinePacket::Tick, &mut sink)
+                    .await
+                    .unwrap();
+            }
+        });
+        assert_eq!(sink.frames.len(), 1, "only the frame at the old geometry");
+    }
+
+    #[test]
+    fn input_every_period_never_holds() {
+        let mut comp = timed_pair();
+        let mut sink = FrameSink::default();
+        block_on(async {
+            comp.process(1, data(solid(2, 2, [0, 255, 0, 255]), 0), &mut sink)
+                .await
+                .unwrap();
+            for i in 0..4u64 {
+                comp.process(
+                    0,
+                    data(solid(4, 4, [255, 0, 0, 255]), i * PERIOD_NS),
+                    &mut sink,
+                )
+                .await
+                .unwrap();
+                comp.process(0, PipelinePacket::Tick, &mut sink)
+                    .await
+                    .unwrap();
+            }
+        });
+        assert_eq!(
+            sink.frames.len(),
+            4,
+            "a frame in every period leaves nothing to hold"
+        );
+    }
+
+    #[test]
+    fn a_tick_is_ignored_without_timed_output() {
+        let mut comp = Compositor::new(4, 4, Vec::from([CompositorPad::at(0, 0)]));
+        comp.configure_pipeline(0, &rgba_caps(2, 2)).unwrap();
+        let mut sink = FrameSink::default();
+        block_on(async {
+            comp.process(0, data(solid(2, 2, [255, 0, 0, 255]), 0), &mut sink)
+                .await
+                .unwrap();
+            for _ in 0..3 {
+                comp.process(0, PipelinePacket::Tick, &mut sink)
+                    .await
+                    .unwrap();
+            }
+        });
+        assert_eq!(sink.frames.len(), 1, "no hold without timed output");
     }
 
     #[test]

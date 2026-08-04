@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M875: a fan-in element can declare a deadline tick, and both compositors use it to hold their output rate (`with_timed_output`) when input 0 stalls.
+
 - M874: `wgpucompositor` composites `WgpuTexture` input frames in place, binding each as a sampled texture instead of copying it through system memory.
 
 - M873: the CPU and GPU compositors share one `CompositorState` for their latest-wins input cadence.

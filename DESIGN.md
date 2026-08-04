@@ -41,7 +41,7 @@ The handful of types you meet everywhere (all in `g2g-core`):
 | Type | Role |
 | :--- | :--- |
 | `Frame` | one media buffer: a `MemoryDomain` payload + `FrameTiming` + a sequence number + optional metadata. Caps live on the *link*, not the frame (§3.1). |
-| `PipelinePacket` | what actually crosses a link: `CapsChanged` / `DataFrame` / `Segment` / `Flush` / `Eos` (§3.1). |
+| `PipelinePacket` | what actually crosses a link: `CapsChanged` / `DataFrame` / `Segment` / `Flush` / `Eos`, plus the arm-local `Tick` (§3.1). |
 | `Caps` | the typed capability algebra (`RawVideo` / `CompressedVideo` / `Audio` / `Tensor` / `Text` / `ByteStream`), negotiated per link (§4.1). |
 | `AsyncElement` / `SourceLoop` | the two element traits (transform-or-sink vs source). Pads are implicit in the trait shape, not a runtime object (§4.3, §4.7). |
 | `MemoryDomain` | where a frame's bytes live: System, DMABUF, CUDA, Vulkan / WebGPU texture, … the basis for zero-copy (§3.2). |
@@ -102,6 +102,11 @@ pub enum PipelinePacket {
     /// Seek flush: discard in-flight and buffered data and reset position
     /// state. Unlike `Eos`, the stream resumes after a flush.
     Flush,
+    /// Deadline tick: a fan-in element declaring `tick_interval_ns` gets one
+    /// per period even while its inputs stall, so it can emit on its own
+    /// cadence (the compositors' zero-order-hold). May fire spuriously, and
+    /// never crosses a link: the runner's arm originates and consumes it.
+    Tick,
 }
 
 pub struct Frame {

@@ -81,8 +81,8 @@ pub use fanin::{
     run_aggregator_dynamic, run_aggregator_dynamic_observed, run_duplex_session,
     run_duplex_session_observed, run_fanin_session, run_fanin_session_observed, run_fanin_sink,
     run_fanin_sink_observed, run_muxer_sink, run_muxer_sink_dynamic,
-    run_muxer_sink_dynamic_observed, run_muxer_sink_with_bus, DynMultiInputElement, DynSourceLoop,
-    DynamicFaninHandle,
+    run_muxer_sink_dynamic_observed, run_muxer_sink_ticked, run_muxer_sink_with_bus,
+    DynMultiInputElement, DynSourceLoop, DynamicFaninHandle,
 };
 
 #[cfg(feature = "std")]
