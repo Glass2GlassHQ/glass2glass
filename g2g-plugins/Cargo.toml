@@ -1207,5 +1207,11 @@ required-features = ["vello-overlay", "wgpu-sink"]
 name = "gstwrap"
 required-features = ["gstreamer"]
 
+# M636: asserts a process-global allocation counter stays flat, so it must be
+# the only thread in its process (libtest's harness threads allocate mid-test).
+[[test]]
+name = "m636_fixed_rank_tensor_caps"
+harness = false
+
 [lints]
 workspace = true
