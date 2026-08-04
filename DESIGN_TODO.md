@@ -691,11 +691,7 @@ _(No open parser items.)_
 Outstanding developer-tooling tasks, highest leverage first.
 
 - **Per-element / per-link telemetry gaps.** Remaining `Observer` coverage:
-  - The dynamic runners (`run_aggregator_dynamic`, `run_muxer_sink_dynamic`,
-    `run_source_tee_dynamic`, `run_source_router_dynamic`) leave `per_element`
-    empty: their arms attach at runtime, so the observer needs incremental node
-    registration rather than the one-shot `register`.
-  - Validate the dashboard live against an RTSP source.
+  validate the dashboard live against an RTSP source.
 - **gst-parity differ.** Same launch line through real GStreamer and g2g;
   diff the negotiated caps per edge, the element set after autoplug, and the
   output (checksum, PSNR for lossy). Calliope already does differential output

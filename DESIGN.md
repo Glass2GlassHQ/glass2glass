@@ -2615,8 +2615,11 @@ report, and `report()` prints a per-element `proc p50 / p99 (n) + in-fill
 avg/max` table, the by-hand glass-to-glass analyses (the NVDEC-to-system-memory
 floor, `link_capacity` dominance) turned into a number the runner emits. The
 graph runner and the two linear runners (`run_simple_pipeline`,
-`run_source_transform_sink`) collect it; fan-in / fan-out / session / muxer
-runners leave it empty, like their declared latency. It is `std`-gated where it
+`run_source_transform_sink`) collect it, and the dynamic fan-out / fan-in /
+muxer-sink runners do too (M869: `_observed` entry points register each arm's
+node and edge on the observer incrementally as it attaches, so a late arm
+reports like an initial one); the static session runners leave it empty, like
+their declared latency. It is `std`-gated where it
 needs a clock: the histogram is `no_std`, but with no `monotonic_ns` the timing
 compiles out (the table is then empty) so the `no_std` baseline pays nothing.
 Sources have no `process()` and so do not appear, their cost surfaces as the

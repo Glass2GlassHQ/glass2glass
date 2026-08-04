@@ -18,7 +18,9 @@ use std::sync::Arc;
 use g2g_core::element::DynAsyncElement;
 use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::memory::SystemSlice;
-use g2g_core::runtime::{run_source_router_dynamic, SourceLoop};
+use g2g_core::runtime::{
+    run_source_router_dynamic, run_source_router_dynamic_observed, NodeRole, Observer, SourceLoop,
+};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, MemoryDomain,
     OutputSink, PipelinePacket, Rate, RawVideoFormat,
@@ -195,6 +197,126 @@ async fn runtime_branches_split_the_stream_and_get_sticky_caps() {
         c1.load(Ordering::Relaxed),
         1,
         "branch 1 saw the sticky caps once"
+    );
+}
+
+/// M869: a runtime-attached branch is real telemetry, not a hole in the report.
+/// The observed dynamic fan-out registers the source and its routing stage up
+/// front and appends each branch's node + link as it attaches, so a branch added
+/// while frames are flowing shows up in a mid-run snapshot and in the end-of-run
+/// `per_element` rows.
+#[tokio::test]
+async fn observed_dynamic_fanout_reports_late_branch_telemetry() {
+    const N: u64 = 200;
+    let mut source = CountingSource {
+        n: N,
+        configured: false,
+    };
+    let f0 = Arc::new(AtomicUsize::new(0));
+    let f1 = Arc::new(AtomicUsize::new(0));
+
+    let obs = Observer::new();
+    // Depth 2 so the source back-pressures and the run spans many polls, leaving
+    // the second branch a real mid-run window to attach in.
+    let (handle, run) = run_source_router_dynamic_observed(&mut source, 2, &obs);
+    handle
+        .add_branch(Box::new(RecordSink {
+            frames: f0.clone(),
+            caps_changes: Arc::new(AtomicUsize::new(0)),
+        }) as Box<dyn DynAsyncElement>)
+        .expect("add branch 0");
+
+    // Attach the second branch once the first one is visible in the topology,
+    // i.e. after the router has started routing.
+    let late = {
+        let obs = obs.clone();
+        let f1 = f1.clone();
+        async move {
+            let mut before = 0usize;
+            for _ in 0..1_000_000 {
+                before = obs.snapshot().nodes.len();
+                if before == 3 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            let added = handle
+                .add_branch(Box::new(RecordSink {
+                    frames: f1,
+                    caps_changes: Arc::new(AtomicUsize::new(0)),
+                }) as Box<dyn DynAsyncElement>)
+                .is_ok();
+            drop(handle);
+            (before, added)
+        }
+    };
+
+    let (stats, (nodes_before, added)) = tokio::join!(run, late);
+    let stats = stats.expect("observed dynamic fan-out run");
+    assert_eq!(
+        nodes_before, 3,
+        "source + routing stage + first branch were visible mid-run"
+    );
+    assert!(
+        added,
+        "the second branch attached while the run was in flight"
+    );
+
+    let snap = obs.snapshot();
+    assert_eq!(
+        snap.nodes
+            .iter()
+            .map(|n| (n.name.as_str(), n.role))
+            .collect::<Vec<_>>(),
+        vec![
+            ("CountingSource0", NodeRole::Source),
+            ("router0", NodeRole::Tee),
+            ("RecordSink0", NodeRole::Sink),
+            ("RecordSink1", NodeRole::Sink),
+        ],
+        "the late branch grew the node list, named like a built-in one"
+    );
+    // Each branch's link hangs off the routing stage and carries its caps + counts.
+    assert_eq!(
+        snap.edges
+            .iter()
+            .map(|e| (e.from, e.to))
+            .collect::<Vec<_>>(),
+        vec![(0, 1), (1, 2), (1, 3)],
+    );
+    assert!(
+        snap.edges.iter().all(|e| e.caps.is_some()),
+        "every edge, late one included, carries its negotiated caps"
+    );
+    assert!(
+        snap.edges[2].counts.packets > 0,
+        "the late branch's link counted traffic: {:?}",
+        snap.edges[2].counts
+    );
+
+    // Both branches report measured rows, no longer an empty `per_element`.
+    let rows = &stats.per_element;
+    assert_eq!(
+        rows.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
+        vec!["RecordSink0", "RecordSink1"],
+    );
+    for row in rows {
+        assert!(row.proc.count > 0, "{} timed its process() calls", row.name);
+        assert!(
+            row.fill_max_pct > 0,
+            "{} sampled its input fill, max={}",
+            row.name,
+            row.fill_max_pct
+        );
+    }
+    assert_eq!(
+        f0.load(Ordering::Relaxed) + f1.load(Ordering::Relaxed),
+        N as usize,
+        "every frame still reached exactly one branch"
+    );
+    assert!(
+        f1.load(Ordering::Relaxed) > 0,
+        "the late branch received frames"
     );
 }
 

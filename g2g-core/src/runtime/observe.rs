@@ -135,6 +135,35 @@ impl Observer {
         s.edge_counters = edge_counters;
     }
 
+    /// Append a node that appeared after [`register`](Self::register): a fan-out
+    /// branch or a fan-in input attached while the run was going (M869). Returns
+    /// its `NodeId`. The three per-node vectors are pushed under one lock hold,
+    /// so a concurrent [`snapshot`](Self::snapshot) sees the node whole or not at
+    /// all, never half of it.
+    pub(crate) fn add_node(&self, name: String, role: NodeRole, probe: Probe) -> usize {
+        let mut s = self.inner.state.lock();
+        let id = s.names.len();
+        s.names.push(name);
+        s.roles.push(role);
+        s.probes.push(probe);
+        id
+    }
+
+    /// Append the link of a node registered by [`add_node`](Self::add_node),
+    /// with its negotiated caps and taps. The incremental analog of
+    /// [`register_edges`](Self::register_edges), under the same single lock hold.
+    pub(crate) fn add_edge(&self, from: usize, to: usize, caps: Caps, tap: EdgeTap) {
+        let mut s = self.inner.state.lock();
+        s.edges.push(EdgeInfo {
+            from,
+            to,
+            ..Default::default()
+        });
+        s.edge_probes.push(tap.probe);
+        s.edge_caps.push(caps);
+        s.edge_counters.push(tap.counters);
+    }
+
     /// Record the graph-wide default link depth the run was built with, so the
     /// single-frame waterfall can state the `2 * capacity * frame_period`
     /// queueing floor its measured total is fighting.
@@ -550,6 +579,54 @@ mod tests {
                 ..Default::default()
             }]
         );
+    }
+
+    /// M869: a dynamic runner's arm attaches mid-run, so its node and link join
+    /// an already-registered topology. The append lands both, keyed by the
+    /// returned id, and the arm's live probe reads through the same snapshot.
+    #[test]
+    fn incremental_node_and_edge_join_a_registered_topology() {
+        let obs = Observer::new();
+        obs.register(
+            alloc::vec![String::from("src0")],
+            alloc::vec![NodeRole::Source],
+            alloc::vec![None],
+            Vec::new(),
+        );
+        assert_eq!(obs.snapshot().nodes.len(), 1);
+
+        let probe = ElementProbe::new(String::from("fakesink0"));
+        let counters = Arc::new(EdgeCounters::default());
+        let id = obs.add_node(
+            String::from("fakesink0"),
+            NodeRole::Sink,
+            Some(probe.clone()),
+        );
+        assert_eq!(id, 1, "appended after the registered source");
+        obs.add_edge(
+            0,
+            id,
+            Caps::Klv,
+            EdgeTap {
+                probe: ProbeSlot::default(),
+                counters: Some(counters.clone()),
+            },
+        );
+
+        probe.record_fill(60);
+        counters.record_packet(128, 0);
+
+        let snap = obs.snapshot();
+        assert_eq!(snap.nodes.len(), 2);
+        assert_eq!(snap.nodes[1].name, "fakesink0");
+        assert_eq!(snap.nodes[1].role, NodeRole::Sink);
+        assert_eq!(snap.nodes[1].latency.as_ref().unwrap().fill_max_pct, 60);
+        assert_eq!(snap.edges.len(), 1);
+        assert_eq!((snap.edges[0].from, snap.edges[0].to), (0, 1));
+        assert!(snap.edges[0].caps.is_some(), "late edge carries its caps");
+        assert_eq!(snap.edges[0].counts.packets, 1);
+        assert_eq!(snap.edges[0].counts.bytes, 128);
+        assert!(obs.edge_probe(0).is_some(), "late edge has an inspect slot");
     }
 
     /// A three-node chain (source -> transform -> sink) with hand-stamped

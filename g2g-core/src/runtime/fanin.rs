@@ -38,7 +38,7 @@ use crate::memory::{DomainSet, MemoryDomainKind};
 use crate::property::{ElementMetadata, PropError, PropValue, PropertySpec};
 use crate::query::{AllocationParams, LatencyReport};
 use crate::runtime::channel::{
-    bounded, link, packet_bytes, ProbeAction, ProbeSlot, Receiver, SendError, Sender, SenderSink,
+    bounded, packet_bytes, ProbeAction, ProbeSlot, Receiver, SendError, Sender, SenderSink,
 };
 use crate::runtime::graph_runner::{run_graph_inner, GraphNodeRef};
 use crate::runtime::instrument::{EdgeCounters, ElementProbe};
@@ -1489,6 +1489,27 @@ enum FaninArmOut {
     Sink(u64),
 }
 
+/// Node id of a dynamic fan-in's aggregator / muxer in its telemetry topology.
+/// Runtime-attached inputs append after the fixed stages.
+#[cfg(feature = "std")]
+const DYN_FANIN_NODE: usize = 0;
+
+/// Node id of the trailing sink in [`run_muxer_sink_dynamic`]'s topology.
+#[cfg(feature = "std")]
+const DYN_FANIN_SINK_NODE: usize = 1;
+
+/// Telemetry bookkeeping the aggregator / muxer arm of a dynamic fan-in carries,
+/// so an input attached mid-run gets named and put in the observer's topology
+/// before its first frame (M869). The runtime inputs are sources, so they carry
+/// no `process()` probe; their telemetry is the per-input edge counters the
+/// [`TaggingSink`] advances.
+#[cfg(feature = "std")]
+#[derive(Debug)]
+struct FaninTap {
+    obs: Option<Observer>,
+    namer: crate::log::InstanceNamer,
+}
+
 /// A handle to add inputs to a *running* dynamic aggregator (M320): the fan-in
 /// dual of [`DynamicFanoutHandle`](crate::runtime::DynamicFanoutHandle), the
 /// runtime equivalent of GStreamer's aggregator/muxer request **sink** pads. Each
@@ -1583,6 +1604,41 @@ pub fn run_aggregator_dynamic<'a, Agg>(
 where
     Agg: MultiInputElement + 'a,
 {
+    run_aggregator_dynamic_inner(aggregator, link_capacity, None)
+}
+
+/// As [`run_aggregator_dynamic`], but taps live telemetry into `observer` (M869).
+/// The topology starts as the aggregator alone; each input attached through the
+/// handle appends its own node and link before its first frame, so a dashboard
+/// polling [`Observer::snapshot`] sees runtime inputs appear with their per-input
+/// packet / byte counters beside the aggregator's measured `process()` latency.
+#[cfg(feature = "std")]
+pub fn run_aggregator_dynamic_observed<'a, Agg>(
+    aggregator: &'a mut Agg,
+    link_capacity: impl Into<LinkCapacity>,
+    observer: &Observer,
+) -> (
+    DynamicFaninHandle<'a>,
+    impl Future<Output = Result<RunStats, G2gError>> + 'a,
+)
+where
+    Agg: MultiInputElement + 'a,
+{
+    run_aggregator_dynamic_inner(aggregator, link_capacity, Some(observer.clone()))
+}
+
+#[cfg(feature = "std")]
+fn run_aggregator_dynamic_inner<'a, Agg>(
+    aggregator: &'a mut Agg,
+    link_capacity: impl Into<LinkCapacity>,
+    observer: Option<Observer>,
+) -> (
+    DynamicFaninHandle<'a>,
+    impl Future<Output = Result<RunStats, G2gError>> + 'a,
+)
+where
+    Agg: MultiInputElement + 'a,
+{
     let link_capacity: usize = link_capacity.into().get();
     let max_inputs = aggregator.input_count();
 
@@ -1603,6 +1659,27 @@ where
         // One shared tagged channel: every attached source pushes `(pad, packet)`.
         let (tagged_tx, tagged_rx) = bounded::<(usize, PipelinePacket)>(link_capacity);
 
+        // M869: instance naming + the aggregator's measured-latency probe, as in
+        // `run_fanin_session`. Attached inputs are named off the same namer.
+        let mut namer = crate::log::InstanceNamer::new();
+        let agg_probe = ElementProbe::new(namer.add(crate::log::short_type_name::<Agg>(), None));
+        if let Some(obs) = &observer {
+            register_runner_tap(
+                obs,
+                alloc::vec![(
+                    alloc::string::String::from(agg_probe.name()),
+                    NodeRole::Muxer,
+                    Some(agg_probe.clone()),
+                )],
+                Vec::new(),
+            );
+        }
+        let mut tap = FaninTap {
+            obs: observer,
+            namer,
+        };
+        let probe_for_agg = agg_probe.clone();
+
         let aggregator_arm: BoxFuture<'a, Result<FaninArmOut, G2gError>> = Box::pin(async move {
             // Coerce once so configure / process go through the boxed-future Dyn
             // surface; `Agg: MultiInputElement` implies `DynMultiInputElement`.
@@ -1621,7 +1698,7 @@ where
                 // fan-out drain-first gotcha).
                 while let Some((pad, source)) = new_input_rx.try_recv() {
                     let tx = keepalive.as_ref().expect("keepalive held while accepting");
-                    attach_input(pad, source, aggregator, tx, &new_arm_tx).await?;
+                    attach_input(pad, source, aggregator, tx, &new_arm_tx, &mut tap).await?;
                 }
 
                 if accepting {
@@ -1634,17 +1711,24 @@ where
                                 .await?;
                         }
                         Either::Left(Some((pad, packet))) => {
-                            if matches!(packet, PipelinePacket::DataFrame(_)) {
+                            let is_data = matches!(packet, PipelinePacket::DataFrame(_));
+                            if is_data {
                                 consumed += 1;
+                                probe_for_agg.record_fill(tagged_rx.fill_percent());
                             }
+                            let t0 = is_data.then(ElementProbe::mark).flatten();
                             aggregator.process(pad, packet, &mut null).await?;
+                            if is_data {
+                                probe_for_agg.record_proc_since(t0);
+                            }
                         }
                         // Unreachable while `keepalive` is held (a live sender keeps
                         // the channel open), but folded into the end path for safety.
                         Either::Left(None) => return Ok(FaninArmOut::Aggregator(consumed)),
                         Either::Right(Some((pad, source))) => {
                             let tx = keepalive.as_ref().expect("keepalive held while accepting");
-                            attach_input(pad, source, aggregator, tx, &new_arm_tx).await?;
+                            attach_input(pad, source, aggregator, tx, &new_arm_tx, &mut tap)
+                                .await?;
                         }
                         // Handle dropped: stop accepting and release the keepalive
                         // so the tagged channel can close once every attached input
@@ -1662,10 +1746,16 @@ where
                                 .await?;
                         }
                         Some((pad, packet)) => {
-                            if matches!(packet, PipelinePacket::DataFrame(_)) {
+                            let is_data = matches!(packet, PipelinePacket::DataFrame(_));
+                            if is_data {
                                 consumed += 1;
+                                probe_for_agg.record_fill(tagged_rx.fill_percent());
                             }
+                            let t0 = is_data.then(ElementProbe::mark).flatten();
                             aggregator.process(pad, packet, &mut null).await?;
+                            if is_data {
+                                probe_for_agg.record_proc_since(t0);
+                            }
                         }
                         None => return Ok(FaninArmOut::Aggregator(consumed)),
                     }
@@ -1697,7 +1787,7 @@ where
             clock_priority: ClockPriority::SystemFallback,
             base_time_ns: 0,
             coordinator_events: 0,
-            per_element: alloc::vec::Vec::new(),
+            per_element: alloc::vec![agg_probe.snapshot()],
         })
     };
 
@@ -1732,6 +1822,45 @@ where
     Mux: MultiInputElement + 'a,
     Snk: AsyncElement + 'a,
 {
+    run_muxer_sink_dynamic_inner(mux, sink, link_capacity, None)
+}
+
+/// As [`run_muxer_sink_dynamic`], but taps live telemetry into `observer` (M869).
+/// The muxer and the sink are registered up front with their measured-latency
+/// probes; each runtime input appends its node and link on attach, and the merged
+/// `muxer -> sink` link joins the topology once its caps firm up (they only exist
+/// after a pad is configured).
+#[cfg(feature = "std")]
+pub fn run_muxer_sink_dynamic_observed<'a, Mux, Snk>(
+    mux: &'a mut Mux,
+    sink: &'a mut Snk,
+    link_capacity: impl Into<LinkCapacity>,
+    observer: &Observer,
+) -> (
+    DynamicFaninHandle<'a>,
+    impl Future<Output = Result<RunStats, G2gError>> + 'a,
+)
+where
+    Mux: MultiInputElement + 'a,
+    Snk: AsyncElement + 'a,
+{
+    run_muxer_sink_dynamic_inner(mux, sink, link_capacity, Some(observer.clone()))
+}
+
+#[cfg(feature = "std")]
+fn run_muxer_sink_dynamic_inner<'a, Mux, Snk>(
+    mux: &'a mut Mux,
+    sink: &'a mut Snk,
+    link_capacity: impl Into<LinkCapacity>,
+    observer: Option<Observer>,
+) -> (
+    DynamicFaninHandle<'a>,
+    impl Future<Output = Result<RunStats, G2gError>> + 'a,
+)
+where
+    Mux: MultiInputElement + 'a,
+    Snk: AsyncElement + 'a,
+{
     let link_capacity: usize = link_capacity.into().get();
     let max_inputs = mux.input_count();
 
@@ -1749,7 +1878,37 @@ where
     let run = async move {
         let (tagged_tx, tagged_rx) = bounded::<(usize, PipelinePacket)>(link_capacity);
         // Merged-output link: muxer arm -> sink arm.
-        let (out_tx, out_rx) = link(link_capacity);
+        let (out_tx, out_rx, out_tap) = link_tapped(link_capacity, observer.is_some());
+
+        // M869: instance naming + a probe per stage with a `process()`, as in the
+        // static `run_muxer_sink`. Attached inputs are named off the same namer.
+        let mut namer = crate::log::InstanceNamer::new();
+        let mux_probe = ElementProbe::new(namer.add(crate::log::short_type_name::<Mux>(), None));
+        let sink_name = namer.add(crate::log::short_type_name::<Snk>(), None);
+        AsyncElement::set_instance_name(sink, sink_name.clone());
+        let sink_probe = ElementProbe::new(sink_name.clone());
+        if let Some(obs) = &observer {
+            // The merged link's caps do not exist until a pad is configured, so
+            // only the two nodes are registered here; the edge follows.
+            register_runner_tap(
+                obs,
+                alloc::vec![
+                    (
+                        alloc::string::String::from(mux_probe.name()),
+                        NodeRole::Muxer,
+                        Some(mux_probe.clone()),
+                    ),
+                    (sink_name, NodeRole::Sink, Some(sink_probe.clone())),
+                ],
+                Vec::new(),
+            );
+        }
+        let mut tap = FaninTap {
+            obs: observer,
+            namer,
+        };
+        let probe_for_mux = mux_probe.clone();
+        let probe_for_sink = sink_probe.clone();
 
         // Sink arm: configure on the muxer's output `CapsChanged`, then process
         // merged frames until the muxer arm closes the link (Eos / drop).
@@ -1766,10 +1925,16 @@ where
                     }
                     PipelinePacket::Eos => break,
                     other => {
-                        if matches!(other, PipelinePacket::DataFrame(_)) {
+                        let is_data = matches!(other, PipelinePacket::DataFrame(_));
+                        if is_data {
                             consumed += 1;
+                            probe_for_sink.record_fill(out_rx.fill_percent());
                         }
+                        let t0 = is_data.then(ElementProbe::mark).flatten();
                         sink.process(other, &mut null).await?;
+                        if is_data {
+                            probe_for_sink.record_proc_since(t0);
+                        }
                     }
                 }
             }
@@ -1779,6 +1944,7 @@ where
         let muxer_arm: BoxFuture<'a, Result<FaninArmOut, G2gError>> = Box::pin(async move {
             let mux: &mut dyn DynMultiInputElement = mux;
             let mut out = SenderSink::new(out_tx);
+            let mut merged_tap = Some(out_tap);
             let mut current_output: Option<Caps> = None;
             let mut consumed = 0u64;
             let mut accepting = true;
@@ -1786,7 +1952,7 @@ where
             loop {
                 while let Some((pad, source)) = new_input_rx.try_recv() {
                     let tx = keepalive.as_ref().expect("keepalive held while accepting");
-                    attach_input(pad, source, mux, tx, &new_arm_tx).await?;
+                    attach_input(pad, source, mux, tx, &new_arm_tx, &mut tap).await?;
                 }
 
                 let next = if accepting {
@@ -1794,7 +1960,7 @@ where
                         Either::Left(packet) => packet,
                         Either::Right(Some((pad, source))) => {
                             let tx = keepalive.as_ref().expect("keepalive held while accepting");
-                            attach_input(pad, source, mux, tx, &new_arm_tx).await?;
+                            attach_input(pad, source, mux, tx, &new_arm_tx, &mut tap).await?;
                             continue;
                         }
                         Either::Right(None) => {
@@ -1816,20 +1982,38 @@ where
                         mux.process(pad, PipelinePacket::Eos, &mut out).await?;
                     }
                     Some((pad, packet)) => {
-                        if matches!(packet, PipelinePacket::DataFrame(_)) {
+                        let is_data = matches!(packet, PipelinePacket::DataFrame(_));
+                        if is_data {
                             // Couple the merged output to the sink: emit one
                             // `CapsChanged` whenever the derived output firms up or
                             // shifts (a newly attached pad can change it), before
                             // the frame it qualifies.
                             if let Ok(oc) = mux.output_caps() {
                                 if current_output.as_ref() != Some(&oc) {
+                                    if let Some(obs) = &tap.obs {
+                                        // First solved output: the merged edge can
+                                        // now be registered with real caps.
+                                        if let Some(t) = merged_tap.take() {
+                                            obs.add_edge(
+                                                DYN_FANIN_NODE,
+                                                DYN_FANIN_SINK_NODE,
+                                                oc.clone(),
+                                                t,
+                                            );
+                                        }
+                                    }
                                     out.push(PipelinePacket::CapsChanged(oc.clone())).await?;
                                     current_output = Some(oc);
                                 }
                             }
                             consumed += 1;
+                            probe_for_mux.record_fill(tagged_rx.fill_percent());
                         }
+                        let t0 = is_data.then(ElementProbe::mark).flatten();
                         mux.process(pad, packet, &mut out).await?;
+                        if is_data {
+                            probe_for_mux.record_proc_since(t0);
+                        }
                     }
                     None => break,
                 }
@@ -1861,7 +2045,7 @@ where
             clock_priority: ClockPriority::SystemFallback,
             base_time_ns: 0,
             coordinator_events: 0,
-            per_element: alloc::vec::Vec::new(),
+            per_element: alloc::vec![mux_probe.snapshot(), sink_probe.snapshot()],
         })
     };
 
@@ -1880,6 +2064,7 @@ async fn attach_input<'a>(
     aggregator: &mut dyn DynMultiInputElement,
     tagged_tx: &Sender<(usize, PipelinePacket)>,
     new_arm_tx: &Sender<BoxFuture<'a, Result<FaninArmOut, G2gError>>>,
+    tap: &mut FaninTap,
 ) -> Result<(), G2gError> {
     // Each source self-fixates (no peer narrowing, like run_fanin_session); the
     // fixated caps configure both the source and its aggregator input pad.
@@ -1889,14 +2074,40 @@ async fn attach_input<'a>(
     aggregator
         .configure_pipeline(pad, &fixated)?
         .reject_refixate()?;
+
+    // Named like an input the static fan-in was built with, and registered before
+    // the arm runs, so the topology holds it before its first frame. The tagged
+    // channel is shared by every input, so this input's counters and inspect slot
+    // ride its `TaggingSink`.
+    let name = tap.namer.add(source.log_category(), None);
+    source.set_instance_name(name.clone());
+    let (counters, slot) = match &tap.obs {
+        Some(obs) => {
+            let counters = Arc::new(EdgeCounters::default());
+            let slot = ProbeSlot::default();
+            let id = obs.add_node(name, NodeRole::Source, None);
+            obs.add_edge(
+                id,
+                DYN_FANIN_NODE,
+                fixated,
+                EdgeTap {
+                    probe: slot.clone(),
+                    counters: Some(counters.clone()),
+                },
+            );
+            (Some(counters), Some(slot))
+        }
+        None => (None, None),
+    };
+
     let tx = tagged_tx.clone();
     let arm: BoxFuture<'a, Result<FaninArmOut, G2gError>> = Box::pin(async move {
         let mut sink = TaggingSink {
             idx: pad,
             tx,
             reverse: None,
-            counters: None,
-            probe: None,
+            counters,
+            probe: slot,
         };
         let mut source = source;
         source.run(&mut sink).await.map(FaninArmOut::Source)

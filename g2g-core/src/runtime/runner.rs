@@ -64,7 +64,11 @@ use crate::runtime::observe::{link_tapped, register_runner_tap, TapEdge, TapNode
 #[cfg(feature = "std")]
 use crate::runtime::{NodeRole, Observer, Probe};
 #[cfg(feature = "std")]
+use alloc::sync::Arc;
+#[cfg(feature = "std")]
 use alloc::vec::Vec;
+#[cfg(feature = "std")]
+use spin::Mutex;
 
 /// Source-side element trait. Sources have no input pad, so the packet-in /
 /// packet-out shape of [`AsyncElement`] does not fit them. A `SourceLoop`
@@ -1222,6 +1226,35 @@ enum FanOutMode {
     Broadcast,
 }
 
+#[cfg(feature = "std")]
+impl FanOutMode {
+    /// Naming category of the runner's own routing stage, so its telemetry node
+    /// reads `router0` / `tee0`.
+    fn category(self) -> &'static str {
+        match self {
+            FanOutMode::Route => "router",
+            FanOutMode::Broadcast => "tee",
+        }
+    }
+}
+
+/// Node id of the runner's routing stage in a dynamic fan-out's telemetry
+/// topology: the source is 0, and branches append from 2 as they attach.
+#[cfg(feature = "std")]
+const DYN_FANOUT_NODE: usize = 1;
+
+/// Telemetry bookkeeping the router arm of a dynamic fan-out carries, so a branch
+/// attached mid-run gets named, probed, and put in the observer's topology before
+/// its first packet (M869). `probes` is shared with the run future, which
+/// snapshots it into [`RunStats::per_element`] once the arms have joined.
+#[cfg(feature = "std")]
+#[derive(Debug)]
+struct FanoutTap {
+    obs: Option<Observer>,
+    namer: crate::log::InstanceNamer,
+    probes: Arc<Mutex<Vec<Probe>>>,
+}
+
 /// Drives `source -> dynamic router -> N branches`, where branches can be added
 /// at runtime through the returned [`DynamicFanoutHandle`] (M310 request pads).
 ///
@@ -1247,7 +1280,32 @@ pub fn run_source_router_dynamic<'a, Src>(
 where
     Src: SourceLoop + 'a,
 {
-    run_source_fanout_dynamic(source, link_capacity, FanOutMode::Route)
+    run_source_fanout_dynamic(source, link_capacity, FanOutMode::Route, None)
+}
+
+/// As [`run_source_router_dynamic`], but taps live telemetry into `observer`
+/// (M869). The topology starts as the source plus the runner's routing stage;
+/// each branch attached through the handle appends its own node and link before
+/// it sees a packet, so a dashboard polling [`Observer::snapshot`] sees runtime
+/// branches appear with their measured `process()` latency and link counters.
+#[cfg(feature = "std")]
+pub fn run_source_router_dynamic_observed<'a, Src>(
+    source: &'a mut Src,
+    link_capacity: impl Into<LinkCapacity>,
+    observer: &Observer,
+) -> (
+    DynamicFanoutHandle<'a>,
+    impl Future<Output = Result<RunStats, G2gError>> + 'a,
+)
+where
+    Src: SourceLoop + 'a,
+{
+    run_source_fanout_dynamic(
+        source,
+        link_capacity,
+        FanOutMode::Route,
+        Some(observer.clone()),
+    )
 }
 
 /// Drives `source -> dynamic tee -> N branches` (M319): the broadcast counterpart
@@ -1274,7 +1332,29 @@ pub fn run_source_tee_dynamic<'a, Src>(
 where
     Src: SourceLoop + 'a,
 {
-    run_source_fanout_dynamic(source, link_capacity, FanOutMode::Broadcast)
+    run_source_fanout_dynamic(source, link_capacity, FanOutMode::Broadcast, None)
+}
+
+/// As [`run_source_tee_dynamic`], but taps live telemetry into `observer`, the
+/// broadcast counterpart of [`run_source_router_dynamic_observed`].
+#[cfg(feature = "std")]
+pub fn run_source_tee_dynamic_observed<'a, Src>(
+    source: &'a mut Src,
+    link_capacity: impl Into<LinkCapacity>,
+    observer: &Observer,
+) -> (
+    DynamicFanoutHandle<'a>,
+    impl Future<Output = Result<RunStats, G2gError>> + 'a,
+)
+where
+    Src: SourceLoop + 'a,
+{
+    run_source_fanout_dynamic(
+        source,
+        link_capacity,
+        FanOutMode::Broadcast,
+        Some(observer.clone()),
+    )
 }
 
 /// Shared driver behind [`run_source_router_dynamic`] (route) and
@@ -1285,6 +1365,7 @@ fn run_source_fanout_dynamic<'a, Src>(
     source: &'a mut Src,
     link_capacity: impl Into<LinkCapacity>,
     mode: FanOutMode,
+    observer: Option<Observer>,
 ) -> (
     DynamicFanoutHandle<'a>,
     impl Future<Output = Result<RunStats, G2gError>> + 'a,
@@ -1303,12 +1384,43 @@ where
     let handle = DynamicFanoutHandle { new_branch_tx };
 
     let run = async move {
+        // M869: instance naming as in the static fan-out. The routing stage is the
+        // runner itself (there is no fan-out element), so it is named after the
+        // distribution mode; each branch is named and probed when it attaches.
+        let mut namer = crate::log::InstanceNamer::new();
+        let source_name = namer.add(crate::log::short_type_name::<Src>(), None);
+        SourceLoop::set_instance_name(source, source_name.clone());
+        let fanout_name = namer.add(mode.category(), None);
+
         // The source self-fixates its output caps; that becomes the sticky caps
         // replayed to every branch on attach.
         let sticky = source.intercept_caps().await?;
         source.configure_pipeline(&sticky)?.reject_refixate()?;
 
-        let (src_tx, src_rx) = link(link_capacity);
+        let (src_tx, src_rx, src_tap) = link_tapped(link_capacity, observer.is_some());
+
+        // Dev-tooling tap: source 0, the routing stage 1. The routing stage has no
+        // `process()` of its own (like a tee in `run_graph`), so it has no probe.
+        if let Some(obs) = &observer {
+            register_runner_tap(
+                obs,
+                alloc::vec![
+                    (source_name, NodeRole::Source, None),
+                    (fanout_name, NodeRole::Tee, None),
+                ],
+                alloc::vec![(0, DYN_FANOUT_NODE, sticky.clone(), src_tap)],
+            );
+        }
+
+        // Branch probes are minted in the router arm as branches attach, and read
+        // back here for the report once the arms have joined.
+        let branch_probes: Arc<Mutex<Vec<Probe>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut tap = FanoutTap {
+            obs: observer,
+            namer,
+            probes: branch_probes.clone(),
+        };
+
         let source_fut: BoxFuture<'a, Result<DynArmOut, G2gError>> = Box::pin(async move {
             let mut adapter = SenderSink::new(src_tx);
             source.run(&mut adapter).await.map(DynArmOut::Source)
@@ -1325,7 +1437,15 @@ where
                 // this drain a backlog of frames would be routed to an empty
                 // port set and dropped).
                 while let Some(sink) = new_branch_rx.try_recv() {
-                    attach_branch(sink, link_capacity, &sticky, &mut ports, &new_arm_tx).await?;
+                    attach_branch(
+                        sink,
+                        link_capacity,
+                        &sticky,
+                        &mut ports,
+                        &new_arm_tx,
+                        &mut tap,
+                    )
+                    .await?;
                 }
 
                 if accepting {
@@ -1336,8 +1456,15 @@ where
                             }
                         }
                         Either::Right(Some(sink)) => {
-                            attach_branch(sink, link_capacity, &sticky, &mut ports, &new_arm_tx)
-                                .await?;
+                            attach_branch(
+                                sink,
+                                link_capacity,
+                                &sticky,
+                                &mut ports,
+                                &new_arm_tx,
+                                &mut tap,
+                            )
+                            .await?;
                         }
                         // Handle dropped: stop watching for new branches.
                         Either::Right(None) => accepting = false,
@@ -1364,6 +1491,7 @@ where
                 DynArmOut::Router => {}
             }
         }
+        let per_element = crate::runtime::snapshot_all(&branch_probes.lock());
         Ok(RunStats {
             frames_emitted: emitted,
             frames_consumed: consumed,
@@ -1373,16 +1501,17 @@ where
             clock_priority: ClockPriority::SystemFallback,
             base_time_ns: 0,
             coordinator_events: 0,
-            per_element: alloc::vec::Vec::new(),
+            per_element,
         })
     };
 
     (handle, run)
 }
 
-/// Attach a runtime-requested branch: give it its own link, replay the sticky
-/// caps into it so it configures before any frame, add its sender to the port
-/// set, and hand its loop future to the dynamic join.
+/// Attach a runtime-requested branch: name and probe it, register it with the
+/// observer, give it its own link, replay the sticky caps into it so it
+/// configures before any frame, add its sender to the port set, and hand its loop
+/// future to the dynamic join.
 #[cfg(feature = "std")]
 async fn attach_branch<'a>(
     sink: alloc::boxed::Box<dyn DynAsyncElement + 'a>,
@@ -1390,15 +1519,30 @@ async fn attach_branch<'a>(
     sticky: &Caps,
     ports: &mut Vec<SenderSink>,
     new_arm_tx: &Sender<BoxFuture<'a, Result<DynArmOut, G2gError>>>,
+    tap: &mut FanoutTap,
 ) -> Result<(), G2gError> {
-    let (btx, brx) = link(link_capacity);
+    let mut sink = sink;
+    // Named and probed like a branch the static fan-out was built with, so its
+    // telemetry row is indistinguishable from one declared up front.
+    let name = tap.namer.add(sink.log_category(), None);
+    sink.set_instance_name(name.clone());
+    let probe = ElementProbe::new(name.clone());
+    tap.probes.lock().push(Some(probe.clone()));
+
+    let (btx, brx, edge) = link_tapped(link_capacity, tap.obs.is_some());
+    // Register before the sticky caps are queued, so the node is in the topology
+    // before the arm sees its first packet.
+    if let Some(obs) = &tap.obs {
+        let id = obs.add_node(name, NodeRole::Sink, Some(probe.clone()));
+        obs.add_edge(DYN_FANOUT_NODE, id, sticky.clone(), edge);
+    }
+
     let mut port = SenderSink::new(btx);
     port.push(PipelinePacket::CapsChanged(sticky.clone()))
         .await?;
     ports.push(port);
     let arm: BoxFuture<'a, Result<DynArmOut, G2gError>> = Box::pin(async move {
-        let mut sink = sink;
-        dyn_branch_loop(sink.as_mut(), brx)
+        dyn_branch_loop(sink.as_mut(), brx, &probe)
             .await
             .map(DynArmOut::Branch)
     });
@@ -1472,6 +1616,7 @@ async fn route_packet(
 async fn dyn_branch_loop(
     sink: &mut dyn DynAsyncElement,
     rx: crate::runtime::channel::LinkReceiver,
+    probe: &ElementProbe,
 ) -> Result<u64, G2gError> {
     let mut null = NullSink;
     let mut consumed = 0u64;
@@ -1495,10 +1640,16 @@ async fn dyn_branch_loop(
                 }
             }
             Some(packet) => {
-                if matches!(packet, PipelinePacket::DataFrame(_)) {
+                let is_data = matches!(packet, PipelinePacket::DataFrame(_));
+                if is_data {
                     consumed += 1;
+                    probe.record_fill(rx.fill_percent());
                 }
+                let t0 = is_data.then(ElementProbe::mark).flatten();
                 sink.process(packet, &mut null).await?;
+                if is_data {
+                    probe.record_proc_since(t0);
+                }
             }
             None => return Ok(consumed),
         }

@@ -10,7 +10,10 @@ use core::future::{ready, Future, Ready};
 use core::pin::Pin;
 use std::sync::{Arc, Mutex};
 
-use g2g_core::runtime::{run_muxer_sink_dynamic, DynSourceLoop, SourceLoop};
+use g2g_core::runtime::{
+    run_muxer_sink_dynamic, run_muxer_sink_dynamic_observed, DynSourceLoop, NodeRole, Observer,
+    SourceLoop,
+};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, ConfigureOutcome, Dim, G2gError, MultiInputElement,
     OutputSink, PipelinePacket, Rate, RawVideoFormat,
@@ -184,4 +187,114 @@ async fn dynamic_inputs_feed_a_trailing_sink_with_coupled_output_caps() {
         Some(caps()),
         "the muxer's merged output caps were coupled to the sink"
     );
+}
+
+/// M869: the observed variant. The muxer and its trailing sink are registered
+/// with probes up front, each runtime input appends its node and link, and the
+/// merged `muxer -> sink` edge joins the topology once its caps firm up.
+#[tokio::test]
+async fn observed_dynamic_muxer_sink_reports_every_stage() {
+    const N: u64 = 200;
+    let frames = Arc::new(Mutex::new(0u64));
+    let configured = Arc::new(Mutex::new(None));
+    let mut mux = PassthroughMux { inputs: 3 };
+    let mut sink = RecordingSink {
+        frames: Arc::clone(&frames),
+        configured_with: Arc::clone(&configured),
+    };
+
+    let obs = Observer::new();
+    let (handle, run) = run_muxer_sink_dynamic_observed(&mut mux, &mut sink, 2, &obs);
+    handle
+        .add_input(Box::new(CountedSource { n: N }) as Box<dyn DynSourceLoop>)
+        .expect("add input 0");
+
+    let late = {
+        let obs = obs.clone();
+        async move {
+            let mut before = 0usize;
+            for _ in 0..1_000_000 {
+                before = obs.snapshot().nodes.len();
+                if before == 3 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            let added = handle
+                .add_input(Box::new(CountedSource { n: N }) as Box<dyn DynSourceLoop>)
+                .is_ok();
+            drop(handle);
+            (before, added)
+        }
+    };
+
+    let (stats, (nodes_before, added)) = tokio::join!(run, late);
+    let stats = stats.expect("observed dynamic muxer->sink run");
+    assert_eq!(
+        nodes_before, 3,
+        "muxer + sink + first input were visible mid-run"
+    );
+    assert!(
+        added,
+        "the second input attached while the run was in flight"
+    );
+
+    let snap = obs.snapshot();
+    assert_eq!(
+        snap.nodes
+            .iter()
+            .map(|n| (n.name.as_str(), n.role))
+            .collect::<Vec<_>>(),
+        vec![
+            ("PassthroughMux0", NodeRole::Muxer),
+            ("RecordingSink0", NodeRole::Sink),
+            ("CountedSource0", NodeRole::Source),
+            ("CountedSource1", NodeRole::Source),
+        ],
+    );
+    // Both inputs feed the muxer, and the merged link reaches the sink. Order is
+    // registration order (an input on attach, the merged link once its caps
+    // solve), so compare the set.
+    let mut pairs = snap
+        .edges
+        .iter()
+        .map(|e| (e.from, e.to))
+        .collect::<Vec<_>>();
+    pairs.sort_unstable();
+    assert_eq!(pairs, vec![(0, 1), (2, 0), (3, 0)]);
+    assert!(
+        snap.edges.iter().all(|e| e.caps.is_some()),
+        "every edge carries its caps, the merged one included"
+    );
+    let merged = snap
+        .edges
+        .iter()
+        .find(|e| (e.from, e.to) == (0, 1))
+        .expect("the merged muxer -> sink link is registered");
+    assert!(
+        merged.counts.packets > 0,
+        "the merged link counted traffic: {:?}",
+        merged.counts
+    );
+
+    // Both stages with a `process()` report measured rows.
+    assert_eq!(
+        stats
+            .per_element
+            .iter()
+            .map(|r| r.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["PassthroughMux0", "RecordingSink0"],
+    );
+    assert_eq!(
+        stats.per_element[0].proc.count,
+        2 * N,
+        "the muxer timed every input frame"
+    );
+    assert_eq!(
+        stats.per_element[1].proc.count,
+        2 * N,
+        "the sink timed every merged frame"
+    );
+    assert_eq!(*frames.lock().unwrap(), 2 * N);
 }

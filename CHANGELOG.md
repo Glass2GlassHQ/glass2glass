@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M869: the dynamic fan-out / fan-in / muxer-sink runners report per-element telemetry, registering arms on the observer as they attach.
+
 - M868: `opusenc` gains the `audio-type` application-mode property and `wavsink` writes U8/S24/S32 PCM.
 
 - M866: DASH honours `@presentationTimeOffset` (media time mapped onto the Period timeline) and `@availabilityTimeOffset` (segments published before they complete).
