@@ -402,11 +402,11 @@ Phased plan:
 - **CMAF / fMP4:** a multi-pad chunked `Mp4MuxN` test (chunk state is per-track,
   only single-pad is exercised); client-side `@availabilityTimeOffset` early
   availability in `DashSrc`.
-- **Ogg seek is O(file).** The demuxer's time seek rewinds the byte source and
-  scans forward, so a seek near the end of a long file re-reads it. A
-  granulepos-proportional first byte-offset guess through the existing paired
-  `SeekController` (seek, then scan to sync) would approximate bisection with
-  one upstream seek.
+- **Ogg seek residuals:** a proportional guess can land past EOF when the target
+  sits in the tail of a front-dense file (the source then EOSes with no way to
+  re-seek); the fix is the byte source reporting its length to the demuxer.
+  `DemuxSeek::keeps_state` is latched and `mkvdemux` reads it unguarded on an
+  idle upstream flush (`oggdemux` checks `dropping_input()` first).
 
 ## Codecs
 

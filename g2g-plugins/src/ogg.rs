@@ -112,6 +112,16 @@ pub struct OggLogicalStream {
     /// Running count of audio (non-header) packets finalized.
     audio_finalized: u32,
     completed: Vec<Vec<u8>>,
+    /// Mid-file landing in progress (M862): set by `resume_mid_stream`, cleared
+    /// by the first page carrying a granule position. While set, completed
+    /// packets are dropped: a byte-seek can land inside a packet, and a page's
+    /// granule names the decode position at its *end*, so the packets after
+    /// that page are the first whose position is exactly known.
+    resuming: bool,
+    /// That page's granule position and its last completed packet, the anchor
+    /// the element restarts its timeline from (the packet only for its Vorbis
+    /// block size, the lapping predecessor of the first packet emitted).
+    resume_anchor: Option<(u64, Vec<u8>)>,
 }
 
 impl OggLogicalStream {
@@ -130,7 +140,22 @@ impl OggLogicalStream {
             first_data: None,
             audio_finalized: 0,
             completed: Vec::new(),
+            resuming: false,
+            resume_anchor: None,
         }
+    }
+
+    /// Restart this bitstream at a mid-file byte-seek landing (M862): the
+    /// position state goes (it is re-established from the landing's first page
+    /// granule) while the codec, headers and header-packet count stay, since the
+    /// landing has no beginning-of-stream page to re-read them from.
+    fn resume_mid_stream(&mut self) {
+        self.partial.clear();
+        self.completed.clear();
+        self.first_data = None;
+        self.audio_finalized = 0;
+        self.resuming = true;
+        self.resume_anchor = None;
     }
 
     /// The serial number identifying this bitstream in the file.
@@ -189,6 +214,14 @@ impl OggLogicalStream {
     pub fn first_data_granule(&self) -> Option<(u64, u32, bool)> {
         self.first_data
     }
+
+    /// The mid-file landing anchor (M862): the granule position the packets
+    /// drained since the landing start from, and the packet completing the
+    /// anchor page. `None` until the landing's first granule-bearing page is
+    /// parsed, and outside a landing.
+    pub fn resume_anchor(&self) -> Option<(u64, &[u8])> {
+        self.resume_anchor.as_ref().map(|(g, p)| (*g, p.as_slice()))
+    }
 }
 
 /// Incremental Ogg demuxer: feed bytes, drain elementary-stream packets. Tracks
@@ -204,6 +237,11 @@ pub struct OggDemuxer {
     grouping_done: bool,
     /// The physical stream (chain) being parsed, counting from `0`.
     chain: u32,
+    /// A page of a serial this chain never opened, or a chained
+    /// beginning-of-stream block, has been parsed since the last reset. After a
+    /// mid-file landing (M862) that means the landing left the physical stream
+    /// the caller resumed, so its byte-offset guess cannot serve the seek.
+    foreign_page: bool,
 }
 
 impl OggDemuxer {
@@ -291,6 +329,37 @@ impl OggDemuxer {
         self.streams.first()?.first_data_granule()
     }
 
+    /// Bytes fed but not yet parsed (the tail of an incomplete page). The
+    /// element subtracts it from the byte offset it has read to get the offset
+    /// the parse has reached.
+    pub fn buffered(&self) -> usize {
+        self.buf.len()
+    }
+
+    /// Restart parsing at a mid-file byte-seek landing (M862), keeping the
+    /// current chain's bitstreams (codec, headers) while dropping all position
+    /// state. Without them the packets after the landing would be typed by
+    /// [`detect`] from a random audio packet, and the decoder would never get
+    /// the codec headers the landing skipped past.
+    pub fn resume_mid_stream(&mut self) {
+        self.buf.clear();
+        let chain = self.chain;
+        self.streams.retain(|s| s.chain == chain);
+        for stream in &mut self.streams {
+            stream.resume_mid_stream();
+        }
+        // Mid-stream: the chain's beginning-of-stream block is long past, so a
+        // beginning-of-stream page from here opens a chained physical stream.
+        self.grouping_done = true;
+        self.foreign_page = false;
+    }
+
+    /// Whether a page outside the resumed physical stream has been parsed since
+    /// the last reset. See `foreign_page`.
+    pub fn foreign_page(&self) -> bool {
+        self.foreign_page
+    }
+
     /// Feed Ogg bytes. Complete pages are parsed as they arrive; a partial
     /// trailing page waits for the next call.
     pub fn push_data(&mut self, data: &[u8]) {
@@ -375,6 +444,7 @@ impl OggDemuxer {
                 let opens_group = bos && !self.grouping_done;
                 let slot = self.streams.iter().filter(|s| s.chain == chain).count();
                 if !(opens_group || self.streams.is_empty()) || slot >= MAX_STREAMS {
+                    self.foreign_page = true;
                     return;
                 }
                 self.streams
@@ -392,6 +462,7 @@ impl OggDemuxer {
     fn start_chain(&mut self) {
         self.chain = self.chain.saturating_add(1);
         self.grouping_done = false;
+        self.foreign_page = true;
         self.streams
             .retain(|s| !s.completed.is_empty() || !s.partial.is_empty());
         while self.streams.len() > MAX_RETAINED {
@@ -421,12 +492,22 @@ impl OggLogicalStream {
             Vec::new()
         };
         let mut pos = table_end;
+        // Packets completing on a landing page are dropped, the last one kept as
+        // the anchor's lapping predecessor (M862).
+        let mut dropped: Option<Vec<u8>> = None;
         for &seg in &page[HEADER_LEN..table_end] {
             let seg = seg as usize;
             acc.extend_from_slice(&page[pos..pos + seg]);
             pos += seg;
             if seg < 255 {
-                self.finalize(core::mem::take(&mut acc));
+                let packet = core::mem::take(&mut acc);
+                if self.resuming {
+                    if !packet.is_empty() {
+                        dropped = Some(packet);
+                    }
+                } else {
+                    self.finalize(packet);
+                }
             }
         }
         // A trailing 255-segment leaves an incomplete packet for the next page.
@@ -435,6 +516,12 @@ impl OggLogicalStream {
             acc.clear();
         }
         self.partial = acc;
+        // The landing's first page with a real granule position ends the drop:
+        // its granule is where the packets from the next page on start.
+        if self.resuming && gp != u64::MAX {
+            self.resuming = false;
+            self.resume_anchor = Some((gp, dropped.unwrap_or_default()));
+        }
         // The first page that completed audio packets anchors the timeline.
         if self.first_data.is_none() && self.audio_finalized > 0 && gp != u64::MAX {
             self.first_data = Some((gp, self.audio_finalized, header_type & 0x04 != 0));

@@ -138,10 +138,19 @@ impl DemuxSeek {
     /// Cluster). Issues the upstream byte-seek, marks the seek state-preserving,
     /// and awaits its flush (so `admit` then discards to the keyframe >= target).
     pub(crate) fn begin_indexed_seek(&mut self, target_ns: u64, offset: u64) {
+        self.begin_seek_at(target_ns, offset, true);
+    }
+
+    /// Begin (or restart) a byte-seek to `offset` for `target_ns` the caller
+    /// resolved itself. `keep_state` marks the landing mid-stream
+    /// ([`keeps_state`](Self::keeps_state)); `false` is a re-scan from the file
+    /// start, the fallback when a resolved offset turns out not to serve the
+    /// target (the Ogg proportional guess, M862).
+    pub(crate) fn begin_seek_at(&mut self, target_ns: u64, offset: u64, keep_state: bool) {
         if let Some(upstream) = &self.upstream {
             upstream.seek(Seek::flush_to(offset));
         }
-        self.keep_state = true;
+        self.keep_state = keep_state;
         self.phase = Phase::AwaitingFlush { target_ns };
     }
 
