@@ -371,8 +371,12 @@ Phased plan:
 
 ## Adaptive streaming (HLS / DASH)
 
-- **HLS / CENC:** the declined-fail-loud protection shapes: `cens` scheme,
-  `senc` v1/v2, movie-level and multi-key `seig` tables.
+- **HLS / CENC:** the multi-key shapes (`senc` v1/v2, multi-key `seig`
+  entries) stay declined fail-loud: the 23001-7:2023 syntax is paywalled and
+  the two available sources (the 2016 MPEG proposal, GPAC) contradict each
+  other on the flag position and field widths, so a decode would be an
+  unvalidated claim. Revisit with the published spec text or a second
+  independent implementation.
 
 ## Capture sources
 

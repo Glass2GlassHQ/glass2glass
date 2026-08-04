@@ -12,7 +12,9 @@ use alloc::vec::Vec;
 
 use g2g_core::{AudioFormat, G2gError, TagList, TextFormat, VideoCodec};
 
-use crate::cenc::{fragment_sample_crypt, parse_sinf, CencDefaults, SampleCrypt};
+use crate::cenc::{
+    fragment_sample_crypt, parse_movie_seig, parse_sinf, CencDefaults, CencTrack, SampleCrypt,
+};
 use crate::mp4box::{
     be32, be64, boxes, boxes_at, find_box, find_path, parse_esds, parse_esds_video, parse_ilst_tags,
 };
@@ -31,8 +33,9 @@ pub(crate) struct Header {
     /// Parameter-set NALUs in container order (SPS,PPS for H.264; VPS,SPS,PPS
     /// for H.265), prepended to the first sample if it carries none in-band.
     pub(crate) param_sets: Vec<Vec<u8>>,
-    /// Common-encryption defaults from the init's `tenc`, `None` for a clear track.
-    pub(crate) cenc: Option<CencDefaults>,
+    /// Common-encryption metadata from the init's `tenc` (plus any movie-level
+    /// `seig` table), `None` for a clear track.
+    pub(crate) cenc: Option<CencTrack>,
 }
 
 /// In-place sample decryptor: given the crypto resolved for a sample (scheme, IV,
@@ -88,7 +91,8 @@ pub(crate) fn parse_header(data: &[u8]) -> Result<Header, G2gError> {
 
     // stsd's first entry is the visual sample entry: avc1/avcC (H.264) or
     // hvc1/hev1 with hvcC (H.265). Its config record carries the parameter sets.
-    let stsd = find_path(mdia, &[b"minf", b"stbl", b"stsd"]).ok_or(G2gError::CapsMismatch)?;
+    let stbl = find_path(mdia, &[b"minf", b"stbl"]).ok_or(G2gError::CapsMismatch)?;
+    let stsd = find_box(stbl, b"stsd").ok_or(G2gError::CapsMismatch)?;
     // full box: version/flags + entry count, then the first sample entry.
     let entries = stsd.get(8..).ok_or(G2gError::CapsMismatch)?;
     // visual sample entry: 78 bytes of fixed fields before the nested boxes. An
@@ -150,8 +154,23 @@ pub(crate) fn parse_header(data: &[u8]) -> Result<Header, G2gError> {
         timescale,
         duration_ns,
         param_sets,
-        cenc,
+        cenc: cenc_track(cenc, stbl)?,
     })
+}
+
+/// Pair a track's `tenc` defaults with the movie-level `seig` table its `stbl`
+/// carries, which a fragment's `sbgp` can index instead of a `traf`-local one.
+fn cenc_track(defaults: Option<CencDefaults>, stbl: &[u8]) -> Result<Option<CencTrack>, G2gError> {
+    match defaults {
+        Some(defaults) => {
+            let movie_seig = parse_movie_seig(stbl, defaults.scheme)?;
+            Ok(Some(CencTrack {
+                defaults,
+                movie_seig,
+            }))
+        }
+        None => Ok(None),
+    }
 }
 
 /// What one track carries: a video elementary stream (codec + geometry +
@@ -203,7 +222,7 @@ pub(crate) enum TextSampleFormat {
 
 /// One track's init data parsed from a `moov/trak`: the `track_ID` (which keys
 /// the fragments in [`parse_fragments_multi`]), the media timescale, the
-/// elementary-stream kind, the cbcs `cenc` defaults for an encrypted track
+/// elementary-stream kind, the common-encryption metadata for an encrypted track
 /// (`None` for a clear one), and the track's own `udta/meta/ilst` metadata
 /// (empty when it carries none).
 #[derive(Debug, Clone)]
@@ -211,7 +230,7 @@ pub(crate) struct TrackHeader {
     pub(crate) track_id: u32,
     pub(crate) timescale: u32,
     pub(crate) kind: TrackKind,
-    pub(crate) cenc: Option<CencDefaults>,
+    pub(crate) cenc: Option<CencTrack>,
     pub(crate) tags: TagList,
 }
 
@@ -268,7 +287,8 @@ fn parse_trak(trak: &[u8]) -> Result<Option<TrackHeader>, G2gError> {
     let hdlr = find_box(mdia, b"hdlr").ok_or(G2gError::CapsMismatch)?;
     let handler = hdlr.get(8..12).ok_or(G2gError::CapsMismatch)?;
 
-    let stsd = find_path(mdia, &[b"minf", b"stbl", b"stsd"]).ok_or(G2gError::CapsMismatch)?;
+    let stbl = find_path(mdia, &[b"minf", b"stbl"]).ok_or(G2gError::CapsMismatch)?;
+    let stsd = find_box(stbl, b"stsd").ok_or(G2gError::CapsMismatch)?;
     let entries = stsd.get(8..).ok_or(G2gError::CapsMismatch)?;
 
     let (kind, cenc) = match handler {
@@ -287,7 +307,7 @@ fn parse_trak(trak: &[u8]) -> Result<Option<TrackHeader>, G2gError> {
         track_id,
         timescale,
         kind,
-        cenc,
+        cenc: cenc_track(cenc, stbl)?,
         tags: parse_ilst_tags(trak),
     }))
 }
@@ -693,7 +713,7 @@ pub(crate) fn parse_fragments(
     data: &[u8],
     timescale: u32,
     codec: VideoCodec,
-    cenc: Option<&CencDefaults>,
+    cenc: Option<&CencTrack>,
     base_offset: u64,
     mut decrypt: Option<SampleDecrypt<'_>>,
 ) -> Result<Vec<Sample>, G2gError> {

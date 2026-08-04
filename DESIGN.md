@@ -2115,7 +2115,15 @@ For fMP4/CMAF, SAMPLE-AES maps to the `cbcs` Common Encryption scheme
 `tenc` give the crypt:skip pattern (1:9 for video) and constant IV, each fragment's
 `senc` gives the per-sample clear/protected subsample ranges, and the protected
 ranges are AES-128-CBC decrypted (IV reset per subsample, chaining over the
-encrypted blocks only) using the same shared key handle `HlsSrc` fills. A clear
+encrypted blocks only) using the same shared key handle `HlsSrc` fills. The
+sibling schemes decrypt through the same machinery: `cenc` (whole-range AES-CTR),
+`cbc1`, and `cens` (M867: pattern AES-CTR, one IV per sample with the counter
+advancing only over encrypted blocks, pattern restarting per protected range).
+Sample groups can re-key mid-fragment: a `traf` `sbgp`/`sgpd` (`seig`) overrides
+the `tenc` defaults per sample run, and M867 added the movie-level `seig` table
+(indices below 0x10001 resolve against the track's `stbl` table, fragment-local
+ones above it, per 14496-12, strictly scoped). A subsample map that overruns its
+sample is an error, never a partial decrypt. A clear
 track stays a normal demux; an encrypted track with no key fails loud.
 `dashsrc::DashSrc` (`dash`)
 is the MPEG-DASH analog: it parses a static MPD (the `mpd` parser, via

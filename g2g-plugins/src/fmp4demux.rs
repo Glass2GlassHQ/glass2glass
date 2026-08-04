@@ -27,7 +27,7 @@ use g2g_core::{
     PipelinePacket, Rate, Seek, Segment, VideoCodec,
 };
 
-use crate::cenc::CencDefaults;
+use crate::cenc::CencTrack;
 #[cfg(feature = "hls")]
 use crate::cenc::SampleCrypt;
 use crate::demuxseek::{Admit, DemuxSeek};
@@ -134,7 +134,7 @@ impl Fmp4Demux {
         frag_at: u64,
         timescale: u32,
         codec: VideoCodec,
-        cenc: Option<&CencDefaults>,
+        cenc: Option<&CencTrack>,
     ) -> Result<Vec<Sample>, G2gError> {
         let Some(c) = cenc else {
             return parse_fragments(frag, timescale, codec, None, frag_at, None);
@@ -146,8 +146,7 @@ impl Fmp4Demux {
                 .expect("key handle poisoned")
                 .resolve(&sc.kid, at)
                 .ok_or(G2gError::CapsMismatch)?;
-            crate::cenc::decrypt_sample(buf, sc, &key);
-            Ok(())
+            crate::cenc::decrypt_sample(buf, sc, &key)
         };
         parse_fragments(frag, timescale, codec, Some(c), frag_at, Some(&mut decrypt))
     }
@@ -160,7 +159,7 @@ impl Fmp4Demux {
         frag_at: u64,
         timescale: u32,
         codec: VideoCodec,
-        cenc: Option<&CencDefaults>,
+        cenc: Option<&CencTrack>,
     ) -> Result<Vec<Sample>, G2gError> {
         parse_fragments(frag, timescale, codec, cenc, frag_at, None)
     }

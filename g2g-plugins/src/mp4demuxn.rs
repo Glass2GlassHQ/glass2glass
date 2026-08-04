@@ -484,8 +484,7 @@ impl Mp4DemuxN {
                     .expect("key handle poisoned")
                     .resolve(&sc.kid, at)
                     .ok_or(G2gError::CapsMismatch)?;
-                crate::cenc::decrypt_sample(buf, sc, &key);
-                Ok(())
+                crate::cenc::decrypt_sample(buf, sc, &key)
             };
             return parse_fragments_multi(data, tracks, base_offset, Some(&mut decrypt));
         }

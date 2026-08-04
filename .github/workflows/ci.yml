@@ -94,6 +94,10 @@ jobs:
       # feature set above is only checked, so the opus-gated tests run here.
       - name: test g2g-plugins (opus codec + properties)
         run: cargo test -p g2g-plugins --locked --features std,opus --test m454_element_properties --test m177_opus_codec
+      # CENC decrypt shapes (M164 / M835 / M867): hand-built fixtures run
+      # everywhere; the ffmpeg-authored oracle cases skip without ffmpeg.
+      - name: test g2g-plugins (cenc decrypt)
+        run: cargo test -p g2g-plugins --locked --features std,hls,mp4-cenc --test m835_hls_cenc --test m164_fmp4_cbcs
       - name: check g2g-ml (wgpu + burn)
         run: cargo check -p g2g-ml --locked --all-targets --features wgpu,burn
       # Embedded / no_std path: the embassy-sync stack channel, the no-alloc
