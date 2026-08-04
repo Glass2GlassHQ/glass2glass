@@ -18,7 +18,7 @@ use alloc::vec::Vec;
 use crate::pixel::{even_dims_required, frame_byte_size, planar_planes};
 use alloc::string::String;
 use g2g_core::frame::Frame;
-use g2g_core::log::{short_type_name, LogSource};
+use g2g_core::log::{short_type_name, LogName, LogSource};
 use g2g_core::memory::{SystemSlice, SystemView};
 use g2g_core::tensor::TensorView;
 use g2g_core::{g2g_info, g2g_trace};
@@ -72,7 +72,7 @@ pub struct VideoFlip {
     last_caps: Option<Caps>,
     emitted: u64,
     /// Instance name assigned by the runner (M179), for this element's log lines.
-    instance_name: Option<String>,
+    log_name: LogName,
 }
 
 impl VideoFlip {
@@ -83,7 +83,7 @@ impl VideoFlip {
             configured: false,
             last_caps: None,
             emitted: 0,
-            instance_name: None,
+            log_name: LogName::new(),
         }
     }
 
@@ -199,7 +199,11 @@ impl AsyncElement for VideoFlip {
     }
 
     fn set_instance_name(&mut self, name: String) {
-        self.instance_name = Some(name);
+        self.log_name.set_instance(name);
+    }
+
+    fn set_log_category(&mut self, category: String) {
+        self.log_name.set_category(category);
     }
 
     fn process<'a>(
@@ -421,7 +425,10 @@ impl LogSource for VideoFlip {
         short_type_name::<Self>()
     }
     fn log_instance(&self) -> Option<&str> {
-        self.instance_name.as_deref()
+        self.log_name.instance()
+    }
+    fn log_category_override(&self) -> Option<&str> {
+        self.log_name.category()
     }
 }
 

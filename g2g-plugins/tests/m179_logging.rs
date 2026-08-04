@@ -3,6 +3,8 @@
 //! `videotestsrc0` convention), logs each element's addition, and an element that
 //! logs about itself (here `VideoFlip`) carries its instance name in its lines.
 //! A capturing sink + a `*:trace` config lets the test assert all of this.
+//! M845 adds the last phase: a per-instance log category override, which
+//! replaces the type category for filtering as well as for the emitted line.
 
 #![cfg(feature = "std")]
 
@@ -11,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use g2g_core::graph::Graph;
 use g2g_core::log::{self, LogLevel, LogRecord, LogSink};
 use g2g_core::runtime::{run_graph, GraphNodeRef};
-use g2g_core::PipelineClock;
+use g2g_core::{AsyncElement, PipelineClock};
 
 use g2g_plugins::fakesink::FakeSink;
 use g2g_plugins::videoflip::{FlipMethod, VideoFlip};
@@ -25,7 +27,7 @@ impl PipelineClock for ZeroClock {
 }
 
 /// One captured record, flattened to owned data.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct Rec {
     level: LogLevel,
     category: String,
@@ -136,5 +138,41 @@ async fn run_graph_names_instances_and_elements_self_log() {
     assert!(
         recs.iter().all(|r| r.level != LogLevel::Trace),
         "per-frame TRACE is above the DEBUG threshold, so suppressed"
+    );
+
+    // --- Phase 3 (M845): a per-instance category override. This VideoFlip logs
+    // under `flip-a`, so the spec enables that instance alone: its sibling and
+    // the runner's own `VideoFlip` lines stay filtered out. ---
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    log::reset();
+    log::set_sink(Box::new(CaptureSink(captured.clone())));
+    log::configure("*:off,flip-a:debug");
+
+    let mut renamed = VideoFlip::new(FlipMethod::Rotate180);
+    AsyncElement::set_log_category(&mut renamed, "flip-a".to_string());
+    let mut g: Graph<GraphNodeRef<'static>> = Graph::new();
+    let src = g.add_source(GraphNodeRef::source(VideoTestSrc::new(16, 16, 30, 1)));
+    let plain = g.add_transform(GraphNodeRef::element(VideoFlip::new(FlipMethod::Identity)));
+    let flip = g.add_transform(GraphNodeRef::element(renamed));
+    let sink = g.add_sink(GraphNodeRef::element(FakeSink::new()));
+    g.link(src, plain).unwrap();
+    g.link(plain, flip).unwrap();
+    g.link(flip, sink).unwrap();
+    run_graph(g, &ZeroClock, 4).await.expect("graph runs");
+
+    let recs = captured.lock().unwrap().clone();
+    log::reset();
+
+    assert!(
+        !recs.is_empty() && recs.iter().all(|r| r.category == "flip-a"),
+        "only the overridden instance passed the filter: {:?}",
+        recs.iter().map(|r| &r.category).collect::<Vec<_>>()
+    );
+    // It keeps the runner-assigned instance name (naming still keys on the type).
+    assert!(
+        recs.iter()
+            .any(|r| r.instance.as_deref() == Some("VideoFlip1")
+                && r.message.starts_with("configured")),
+        "overridden instance still carries its runner-assigned name: {recs:?}"
     );
 }

@@ -24,14 +24,26 @@
 //! **Macros.** [`g2g_error!`] / [`g2g_warn!`] / [`g2g_fixme!`] / [`g2g_info!`] /
 //! [`g2g_debug!`] / [`g2g_log!`] / [`g2g_trace!`] take a [`LogSource`] then a
 //! `format_args!` message; they check the threshold *before* formatting.
+//! [`g2g_log_fields!`] adds structured [`LogField`]s a sink can render or ship
+//! without re-parsing the message.
+//!
+//! **Timestamps.** Core has no clock, so a record's `timestamp_ns` is filled
+//! from a host-installed [`set_time_source`] (on `std`, [`init_from_env`]
+//! installs the UNIX-epoch one) and is `None` otherwise.
+//!
+//! **Sinks.** [`StderrSink`] (`std`), [`TracingSink`] (`tracing` feature), and
+//! [`RingSink`], a bounded in-memory flight recorder for postmortem dumps.
 
 #[cfg(feature = "std")]
 extern crate std;
 
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
+use alloc::borrow::Cow;
 use alloc::boxed::Box;
+use alloc::collections::VecDeque;
 use alloc::string::{String, ToString};
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use spin::Mutex;
@@ -141,6 +153,50 @@ pub trait LogSource {
     fn log_instance(&self) -> Option<&str> {
         None
     }
+    /// A per-instance category override (M845), replacing the type category for
+    /// *both* filtering and output, so `G2G_DEBUG=my-cat:debug` (and globs) key
+    /// off the override. Default none: the type name is the category. An
+    /// element stores one in a [`LogName`] and returns it here.
+    fn log_category_override(&self) -> Option<&str> {
+        None
+    }
+}
+
+/// The per-instance log identity an element stores when it logs about itself:
+/// the runner-assigned instance name plus an optional category override.
+/// Elements hold one, feed it from `set_instance_name` / `set_log_category`, and
+/// return its two accessors from their [`LogSource`] impl.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct LogName {
+    instance: Option<String>,
+    category: Option<String>,
+}
+
+impl LogName {
+    pub const fn new() -> Self {
+        Self {
+            instance: None,
+            category: None,
+        }
+    }
+
+    /// Store the runner-assigned instance name.
+    pub fn set_instance(&mut self, name: String) {
+        self.instance = Some(name);
+    }
+
+    /// Override the log category for this instance.
+    pub fn set_category(&mut self, category: String) {
+        self.category = Some(category);
+    }
+
+    pub fn instance(&self) -> Option<&str> {
+        self.instance.as_deref()
+    }
+
+    pub fn category(&self) -> Option<&str> {
+        self.category.as_deref()
+    }
 }
 
 /// A standalone [`LogSource`] for logging about a named element from outside it
@@ -229,6 +285,9 @@ impl<T: LogSource + ?Sized> LogSource for &T {
     fn log_instance(&self) -> Option<&str> {
         (**self).log_instance()
     }
+    fn log_category_override(&self) -> Option<&str> {
+        (**self).log_category_override()
+    }
 }
 
 impl<T: LogSource + ?Sized> LogSource for &mut T {
@@ -238,16 +297,163 @@ impl<T: LogSource + ?Sized> LogSource for &mut T {
     fn log_instance(&self) -> Option<&str> {
         (**self).log_instance()
     }
+    fn log_category_override(&self) -> Option<&str> {
+        (**self).log_category_override()
+    }
+}
+
+/// A structured value on a log record (M845): the scalar kinds a sink can
+/// render or ship (JSON, a tracing field) without knowing the log site. `Str`
+/// borrows at the site, so a record a sink drops allocates nothing; the owned
+/// form comes from [`into_owned`](Self::into_owned).
+#[derive(Debug, Clone, PartialEq)]
+pub enum LogValue<'a> {
+    Str(Cow<'a, str>),
+    Int(i64),
+    Uint(u64),
+    Float(f64),
+    Bool(bool),
+}
+
+impl LogValue<'_> {
+    /// Detach from the log site so the value can outlive it (what [`RingSink`]
+    /// stores).
+    pub fn into_owned(self) -> LogValue<'static> {
+        match self {
+            LogValue::Str(s) => LogValue::Str(Cow::Owned(s.into_owned())),
+            LogValue::Int(v) => LogValue::Int(v),
+            LogValue::Uint(v) => LogValue::Uint(v),
+            LogValue::Float(v) => LogValue::Float(v),
+            LogValue::Bool(v) => LogValue::Bool(v),
+        }
+    }
+}
+
+impl core::fmt::Display for LogValue<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            LogValue::Str(s) => f.write_str(s),
+            LogValue::Int(v) => write!(f, "{v}"),
+            LogValue::Uint(v) => write!(f, "{v}"),
+            LogValue::Float(v) => write!(f, "{v}"),
+            LogValue::Bool(v) => write!(f, "{v}"),
+        }
+    }
+}
+
+impl<'a> From<&'a str> for LogValue<'a> {
+    fn from(v: &'a str) -> Self {
+        LogValue::Str(Cow::Borrowed(v))
+    }
+}
+
+impl From<String> for LogValue<'static> {
+    fn from(v: String) -> Self {
+        LogValue::Str(Cow::Owned(v))
+    }
+}
+
+impl From<bool> for LogValue<'_> {
+    fn from(v: bool) -> Self {
+        LogValue::Bool(v)
+    }
+}
+
+macro_rules! log_value_from {
+    ($variant:ident, $($ty:ty),+) => {$(
+        impl From<$ty> for LogValue<'_> {
+            fn from(v: $ty) -> Self {
+                LogValue::$variant(v.into())
+            }
+        }
+    )+};
+}
+log_value_from!(Int, i8, i16, i32, i64);
+log_value_from!(Uint, u8, u16, u32, u64);
+log_value_from!(Float, f32, f64);
+
+impl From<usize> for LogValue<'_> {
+    fn from(v: usize) -> Self {
+        LogValue::Uint(v as u64)
+    }
+}
+
+/// One structured key/value on a log record.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LogField<'a> {
+    pub key: Cow<'a, str>,
+    pub value: LogValue<'a>,
+}
+
+impl<'a> LogField<'a> {
+    pub fn new(key: impl Into<Cow<'a, str>>, value: impl Into<LogValue<'a>>) -> Self {
+        Self {
+            key: key.into(),
+            value: value.into(),
+        }
+    }
+
+    /// Detach from the log site (see [`LogValue::into_owned`]).
+    pub fn into_owned(self) -> LogField<'static> {
+        LogField {
+            key: Cow::Owned(self.key.into_owned()),
+            value: self.value.into_owned(),
+        }
+    }
 }
 
 /// One log record handed to a [`LogSink`]. The message is `format_args!` so a
-/// sink that drops the record (or buffers selectively) pays no formatting cost.
+/// sink that drops the record (or buffers selectively) pays no formatting cost;
+/// `fields` carries the same information structured, so a sink renders or ships
+/// it without re-parsing the message.
 #[derive(Debug)]
 pub struct LogRecord<'a> {
     pub level: LogLevel,
     pub category: &'a str,
     pub instance: Option<&'a str>,
+    /// Nanoseconds from the installed [`set_time_source`], `None` when the host
+    /// installed none (the `no_std` default: core reads no clock itself).
+    pub timestamp_ns: Option<u64>,
+    pub fields: &'a [LogField<'a>],
     pub message: core::fmt::Arguments<'a>,
+}
+
+impl LogRecord<'_> {
+    /// Copy the record (message formatted, fields and names owned) so it can be
+    /// buffered past the log site, as [`RingSink`] does.
+    pub fn to_owned_record(&self) -> OwnedLogRecord {
+        OwnedLogRecord {
+            level: self.level,
+            category: self.category.to_string(),
+            instance: self.instance.map(|s| s.to_string()),
+            timestamp_ns: self.timestamp_ns,
+            fields: self
+                .fields
+                .iter()
+                .cloned()
+                .map(LogField::into_owned)
+                .collect(),
+            message: alloc::format!("{}", self.message),
+        }
+    }
+}
+
+/// An owned [`LogRecord`], what a buffering sink stores and hands back.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OwnedLogRecord {
+    pub level: LogLevel,
+    pub category: String,
+    pub instance: Option<String>,
+    pub timestamp_ns: Option<u64>,
+    pub fields: Vec<LogField<'static>>,
+    pub message: String,
+}
+
+impl OwnedLogRecord {
+    /// The value of one structured field by key, `None` if absent.
+    pub fn field(&self, key: &str) -> Option<&LogValue<'static>> {
+        self.fields.iter().find(|f| f.key == key).map(|f| &f.value)
+    }
 }
 
 /// A destination for log records. The host installs one via [`set_sink`]; without
@@ -414,14 +620,60 @@ pub fn emit(
     level: LogLevel,
     message: core::fmt::Arguments<'_>,
 ) {
+    emit_fields(category, instance, level, &[], message);
+}
+
+/// [`emit`] with structured fields attached (M845).
+pub fn emit_fields(
+    category: &str,
+    instance: Option<&str>,
+    level: LogLevel,
+    fields: &[LogField<'_>],
+    message: core::fmt::Arguments<'_>,
+) {
     if let Some(sink) = SINK.lock().as_deref() {
         sink.emit(&LogRecord {
             level,
             category,
             instance,
+            timestamp_ns: timestamp_now(),
+            fields,
             message,
         });
     }
+}
+
+/// A nanosecond timestamp source the host installs (see [`set_time_source`]).
+/// Any epoch, as long as it is consistent: a sink reports it verbatim.
+pub type TimeSource = fn() -> u64;
+
+static TIME_SOURCE: Mutex<Option<TimeSource>> = Mutex::new(None);
+// Mirrors `TIME_SOURCE.is_some()` so the unset case skips the lock.
+static HAS_TIME_SOURCE: AtomicBool = AtomicBool::new(false);
+
+/// Install the clock that stamps records. Core reads no clock of its own (the
+/// `no_std` baseline has none), so without this every record's `timestamp_ns`
+/// is `None`. On `std`, [`init_from_env`] installs [`unix_time_source`].
+pub fn set_time_source(source: TimeSource) {
+    *TIME_SOURCE.lock() = Some(source);
+    HAS_TIME_SOURCE.store(true, Ordering::Relaxed);
+}
+
+/// The current timestamp from the installed source, `None` if none.
+pub fn timestamp_now() -> Option<u64> {
+    if !HAS_TIME_SOURCE.load(Ordering::Relaxed) {
+        return None;
+    }
+    let source = *TIME_SOURCE.lock();
+    source.map(|f| f())
+}
+
+/// Nanoseconds since the UNIX epoch, the `std` [`TimeSource`].
+#[cfg(feature = "std")]
+pub fn unix_time_source() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
 }
 
 /// Install (replace) the global log sink. Without one, records are dropped.
@@ -451,12 +703,101 @@ pub fn configure(spec: &str) {
     sync_caches(&cfg);
 }
 
-/// Reset the global config to defaults and remove the sink (for tests).
+/// Reset the global config to defaults and remove the sink and time source
+/// (for tests).
 pub fn reset() {
     let mut cfg = CONFIG.lock();
     *cfg = LogConfig::new();
     sync_caches(&cfg);
     *SINK.lock() = None;
+    *TIME_SOURCE.lock() = None;
+    HAS_TIME_SOURCE.store(false, Ordering::Relaxed);
+}
+
+/// A bounded in-memory [`LogSink`] (M845), the flight recorder: it keeps the
+/// most recent `capacity` records and overwrites the oldest, so a postmortem
+/// dump on a target with no live log stream (an RTOS board, a crashed field
+/// unit) still shows what led up to the fault. `no_std + alloc`: records are
+/// stored owned (see [`OwnedLogRecord`]), so the buffer's memory is bounded by
+/// capacity times record size, not by run length.
+///
+/// Cloning shares one buffer: install a clone as the sink and keep the original
+/// to [`snapshot`](Self::snapshot) or [`drain`](Self::drain) it.
+///
+/// ```
+/// # use g2g_core::log::{self, LogLevel, RingSink, Target};
+/// # use g2g_core::g2g_error;
+/// let ring = RingSink::new(64);
+/// log::set_sink(Box::new(ring.clone()));
+/// log::set_default_level(LogLevel::Warn);
+/// g2g_error!(Target::category("demo"), "boom");
+/// assert_eq!(ring.drain().len(), 1);
+/// ```
+#[derive(Debug, Clone)]
+pub struct RingSink {
+    inner: Arc<Mutex<Ring>>,
+}
+
+#[derive(Debug)]
+struct Ring {
+    capacity: usize,
+    records: VecDeque<OwnedLogRecord>,
+    dropped: u64,
+}
+
+impl RingSink {
+    /// A recorder holding at most `capacity` records (clamped to at least one).
+    pub fn new(capacity: usize) -> Self {
+        let capacity = capacity.max(1);
+        Self {
+            inner: Arc::new(Mutex::new(Ring {
+                capacity,
+                records: VecDeque::with_capacity(capacity),
+                dropped: 0,
+            })),
+        }
+    }
+
+    /// Copy the buffered records, oldest first, leaving them in place.
+    pub fn snapshot(&self) -> Vec<OwnedLogRecord> {
+        self.inner.lock().records.iter().cloned().collect()
+    }
+
+    /// Take the buffered records, oldest first, emptying the buffer.
+    pub fn drain(&self) -> Vec<OwnedLogRecord> {
+        self.inner.lock().records.drain(..).collect()
+    }
+
+    /// Records currently buffered.
+    pub fn len(&self) -> usize {
+        self.inner.lock().records.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The buffer's fixed capacity.
+    pub fn capacity(&self) -> usize {
+        self.inner.lock().capacity
+    }
+
+    /// How many records the recorder has overwritten since it was created: a
+    /// non-zero count means the dump is a tail, not the whole run.
+    pub fn overwritten(&self) -> u64 {
+        self.inner.lock().dropped
+    }
+}
+
+impl LogSink for RingSink {
+    fn emit(&self, record: &LogRecord<'_>) {
+        let mut ring = self.inner.lock();
+        if ring.records.len() == ring.capacity {
+            ring.records.pop_front();
+            ring.dropped += 1;
+        }
+        ring.records.push_back(record.to_owned_record());
+    }
 }
 
 /// The reserved log category the caps-negotiation explainer emits under
@@ -481,6 +822,7 @@ pub fn init_from_env() {
     // visible by default without opting in. The default threshold is Error
     // (LogConfig::new), so a normal run stays quiet; G2G_DEBUG only tunes it up.
     set_sink(Box::new(StderrSink));
+    set_time_source(unix_time_source);
     if let Ok(spec) = std::env::var("G2G_DEBUG") {
         configure(&spec);
     }
@@ -501,7 +843,8 @@ pub fn init_from_env() {
 }
 
 /// A [`LogSink`] that writes one line per record to stderr, in the shape
-/// `LEVEL category <instance> message` (the `<instance>` omitted when unnamed).
+/// `LEVEL category <instance> message [k=v ...]` (the `<instance>` omitted when
+/// unnamed, the `k=v` tail only when the record carries structured fields).
 #[cfg(feature = "std")]
 #[derive(Debug, Default)]
 pub struct StderrSink;
@@ -509,17 +852,29 @@ pub struct StderrSink;
 #[cfg(feature = "std")]
 impl LogSink for StderrSink {
     fn emit(&self, r: &LogRecord<'_>) {
+        use core::fmt::Write;
+        let mut tail = String::new();
+        for f in r.fields {
+            let _ = write!(tail, " {}={}", f.key, f.value);
+        }
         match r.instance {
             Some(i) => {
                 std::eprintln!(
-                    "{:<5} {:<16} <{}> {}",
+                    "{:<5} {:<16} <{}> {}{}",
                     r.level.as_str(),
                     r.category,
                     i,
-                    r.message
+                    r.message,
+                    tail
                 )
             }
-            None => std::eprintln!("{:<5} {:<16} {}", r.level.as_str(), r.category, r.message),
+            None => std::eprintln!(
+                "{:<5} {:<16} {}{}",
+                r.level.as_str(),
+                r.category,
+                r.message,
+                tail
+            ),
         }
     }
 }
@@ -599,9 +954,25 @@ pub fn init_tracing() {
 /// reference forwarding impls cover the extra indirection). Not called directly.
 #[doc(hidden)]
 pub fn __log<S: LogSource + ?Sized>(src: &S, level: LogLevel, args: core::fmt::Arguments<'_>) {
-    let category = src.log_category();
+    __log_fields(src, level, &[], args)
+}
+
+/// [`__log`] with structured fields. Not called directly.
+#[doc(hidden)]
+pub fn __log_fields<S: LogSource + ?Sized>(
+    src: &S,
+    level: LogLevel,
+    fields: &[LogField<'_>],
+    args: core::fmt::Arguments<'_>,
+) {
+    // A per-instance override replaces the type category for filtering too, so
+    // a G2G_DEBUG entry (or glob) written against the override matches.
+    let category = match src.log_category_override() {
+        Some(c) => c,
+        None => src.log_category(),
+    };
     if enabled(category, level) {
-        emit(category, src.log_instance(), level, args);
+        emit_fields(category, src.log_instance(), level, fields, args);
     }
 }
 
@@ -611,6 +982,23 @@ pub fn __log<S: LogSource + ?Sized>(src: &S, level: LogLevel, args: core::fmt::A
 macro_rules! g2g_log_at {
     ($level:expr, $src:expr, $($arg:tt)+) => {
         $crate::log::__log(&$src, $level, ::core::format_args!($($arg)+))
+    };
+}
+
+/// Log at `level` with structured fields plus the formatted message, so a sink
+/// can render or ship the values without re-parsing the line:
+/// `g2g_log_fields!(LogLevel::Info, self, ["width" => w, "height" => h],
+/// "configured {w}x{h}")`. Field values are anything convertible into a
+/// [`LogValue`] (strings, integers, floats, bools).
+#[macro_export]
+macro_rules! g2g_log_fields {
+    ($level:expr, $src:expr, [$($k:expr => $v:expr),* $(,)?], $($arg:tt)+) => {
+        $crate::log::__log_fields(
+            &$src,
+            $level,
+            &[$($crate::log::LogField::new($k, $v)),*],
+            ::core::format_args!($($arg)+),
+        )
     };
 }
 
@@ -784,6 +1172,138 @@ mod tests {
         assert_eq!(recs[1].0, LogLevel::Warn);
         assert_eq!(recs[1].1, "videoscale");
         drop(recs);
+        reset();
+    }
+
+    /// An element-shaped source: a fixed type category plus a settable
+    /// per-instance name and category override (what [`LogName`] gives an
+    /// element).
+    struct FakeElement {
+        name: LogName,
+    }
+    impl LogSource for FakeElement {
+        fn log_category(&self) -> &'static str {
+            "VideoFlip"
+        }
+        fn log_instance(&self) -> Option<&str> {
+            self.name.instance()
+        }
+        fn log_category_override(&self) -> Option<&str> {
+            self.name.category()
+        }
+    }
+
+    #[test]
+    fn category_override_replaces_the_type_category_for_filtering() {
+        let _g = GLOBAL_GUARD.lock();
+        reset();
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        set_sink(Box::new(CaptureSink(captured.clone())));
+        // The type category is off; only the override (and a glob covering it)
+        // is enabled.
+        configure("*:off,flip-a:debug,*-glob:info");
+
+        let mut plain = FakeElement {
+            name: LogName::new(),
+        };
+        plain.name.set_instance(String::from("VideoFlip0"));
+        let mut renamed = FakeElement {
+            name: LogName::new(),
+        };
+        renamed.name.set_instance(String::from("VideoFlip1"));
+        renamed.name.set_category(String::from("flip-a"));
+        let mut globbed = FakeElement {
+            name: LogName::new(),
+        };
+        globbed.name.set_category(String::from("via-glob"));
+
+        g2g_debug!(plain, "type category is off");
+        g2g_debug!(renamed, "override is at debug");
+        g2g_info!(globbed, "override matches the glob");
+
+        let recs = captured.lock();
+        assert_eq!(recs.len(), 2, "got: {recs:?}");
+        // The override is the category the sink sees, not just the filter key.
+        assert_eq!(recs[0].1, "flip-a");
+        assert_eq!(recs[0].2.as_deref(), Some("VideoFlip1"));
+        assert_eq!(recs[1].1, "via-glob");
+        drop(recs);
+        reset();
+    }
+
+    #[test]
+    fn structured_fields_and_timestamp_reach_the_sink() {
+        let _g = GLOBAL_GUARD.lock();
+        reset();
+        let owned: Arc<Mutex<Vec<OwnedLogRecord>>> = Arc::new(Mutex::new(Vec::new()));
+        struct OwningSink(Arc<Mutex<Vec<OwnedLogRecord>>>);
+        impl LogSink for OwningSink {
+            fn emit(&self, r: &LogRecord<'_>) {
+                self.0.lock().push(r.to_owned_record());
+            }
+        }
+        set_sink(Box::new(OwningSink(owned.clone())));
+        set_time_source(|| 42);
+        configure("*:debug");
+
+        let width = 1920u32;
+        g2g_log_fields!(
+            LogLevel::Info,
+            Target::named("videoscale", "videoscale0"),
+            ["width" => width, "height" => 1080u32, "format" => "NV12", "scaled" => true, "ratio" => 1.5f64],
+            "configured {width}"
+        );
+
+        let recs = owned.lock();
+        assert_eq!(recs.len(), 1);
+        let r = &recs[0];
+        // The fields survive as typed values, so a sink renders or ships them
+        // without re-parsing the message.
+        assert_eq!(r.field("width"), Some(&LogValue::Uint(1920)));
+        assert_eq!(r.field("height"), Some(&LogValue::Uint(1080)));
+        assert_eq!(
+            r.field("format"),
+            Some(&LogValue::Str(Cow::Borrowed("NV12")))
+        );
+        assert_eq!(r.field("scaled"), Some(&LogValue::Bool(true)));
+        assert_eq!(r.field("ratio"), Some(&LogValue::Float(1.5)));
+        assert_eq!(r.field("missing"), None);
+        assert_eq!(r.timestamp_ns, Some(42));
+        assert_eq!(r.message, "configured 1920");
+        assert_eq!(r.instance.as_deref(), Some("videoscale0"));
+        drop(recs);
+        reset();
+    }
+
+    #[test]
+    fn ring_sink_keeps_the_newest_records_and_drains() {
+        let _g = GLOBAL_GUARD.lock();
+        reset();
+        let ring = RingSink::new(3);
+        set_sink(Box::new(ring.clone()));
+        configure("*:debug");
+
+        for i in 0..5 {
+            g2g_info!(Target::category("demo"), "record {i}");
+        }
+
+        assert_eq!(ring.len(), 3, "bounded at capacity");
+        assert_eq!(ring.capacity(), 3);
+        assert_eq!(ring.overwritten(), 2, "two oldest were overwritten");
+        let snap = ring.snapshot();
+        let messages: Vec<&str> = snap.iter().map(|r| r.message.as_str()).collect();
+        assert_eq!(messages, ["record 2", "record 3", "record 4"]);
+        // A snapshot leaves the buffer intact; a drain empties it.
+        assert_eq!(ring.len(), 3);
+        let drained = ring.drain();
+        assert_eq!(drained.len(), 3);
+        assert!(ring.is_empty());
+        // Records carry no timestamp when the host installed no time source.
+        assert_eq!(drained[0].timestamp_ns, None);
+
+        // The recorder keeps working after a drain.
+        g2g_info!(Target::category("demo"), "after drain");
+        assert_eq!(ring.snapshot()[0].message, "after drain");
         reset();
     }
 

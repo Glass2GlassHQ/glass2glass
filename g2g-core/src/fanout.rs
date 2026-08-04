@@ -390,6 +390,17 @@ pub trait MultiOutputElement: ElementBound {
         None
     }
 
+    /// Receive this instance's log name and a per-instance log category
+    /// override, mirroring
+    /// [`AsyncElement::set_instance_name`](crate::AsyncElement::set_instance_name)
+    /// / [`set_log_category`](crate::AsyncElement::set_log_category). Default:
+    /// ignore. A demux that logs about itself stores them in a
+    /// [`LogName`](crate::log::LogName).
+    fn set_instance_name(&mut self, _name: alloc::string::String) {}
+
+    /// See [`set_instance_name`](Self::set_instance_name).
+    fn set_log_category(&mut self, _category: alloc::string::String) {}
+
     /// Runtime properties this demux exposes (M104), mirroring
     /// [`AsyncElement::properties`](crate::AsyncElement::properties). Default:
     /// none. A demux overrides this (with `set_property` / `get_property`) to be
@@ -599,6 +610,17 @@ pub trait MultiInputElement: ElementBound {
     /// carry the constraint and the runner re-cascades it up the pads whose demand
     /// actually moved.
     fn configure_allocation_for_output(&mut self, _params: &crate::query::AllocationParams) {}
+
+    /// Receive this instance's log name and a per-instance log category
+    /// override, mirroring
+    /// [`AsyncElement::set_instance_name`](crate::AsyncElement::set_instance_name)
+    /// / [`set_log_category`](crate::AsyncElement::set_log_category). Default:
+    /// ignore. A muxer that logs about itself stores them in a
+    /// [`LogName`](crate::log::LogName).
+    fn set_instance_name(&mut self, _name: alloc::string::String) {}
+
+    /// See [`set_instance_name`](Self::set_instance_name).
+    fn set_log_category(&mut self, _category: alloc::string::String) {}
 
     /// Runtime properties this muxer exposes (M104), mirroring
     /// [`AsyncElement::properties`](crate::AsyncElement::properties). Default:

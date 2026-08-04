@@ -1465,8 +1465,13 @@ path; a full bus drops the report rather than applying backpressure.
 **Element-granular logging (`g2g-core::log`)** is the complementary
 diagnostic channel, the `GST_DEBUG` analog, for developer tracing rather than
 application-facing events. A record carries a `category` (the element *type*,
-e.g. `"VideoFlip"`, the filtering key) and an optional `instance` name (the
-element *instance*, e.g. `"VideoFlip0"`). `LogLevel` runs `Error` (most severe)
+e.g. `"VideoFlip"`, the filtering key), an optional `instance` name (the
+element *instance*, e.g. `"VideoFlip0"`), an optional `timestamp_ns` (from a
+host-installed `set_time_source`; core reads no clock), and typed structured
+`fields` a sink renders or ships without parsing the message
+(`g2g_log_fields!`). An element may override its category per instance
+(`set_log_category` / `LogSource::log_category_override`), and the override is
+what the filter matches. `LogLevel` runs `Error` (most severe)
 through `Trace`, matching GStreamer's numeric levels; a per-category threshold
 table (a default plus overrides) decides what is emitted, mirrored into an atomic
 so a disabled `g2g_trace!` in a hot loop costs one atomic load. The macros
@@ -1484,7 +1489,8 @@ addition; the name also keys the element's latency probe. An element that logs
 about itself (it implements `LogSource` with a stored name) carries that name in
 its lines. Pulls no external logging crate, so
 it holds on the `no_std` baseline; the sink is the RTOS plug-in point (UART /
-RTT). The `tracing` feature adds a `LogSink` that forwards records to the
+RTT), and the built-in `RingSink` (bounded, overwrites oldest, drain/snapshot)
+is the flight-recorder variant for postmortem dumps there. The `tracing` feature adds a `LogSink` that forwards records to the
 `tracing` crate (the `g2g` target, `category` / `instance` as fields), so a host
 on `tracing-subscriber` / OTLP / tokio-console receives g2g's logs in its
 existing pipeline; `log::init_tracing()` installs it and defers filtering to the

@@ -13,7 +13,7 @@ use core::pin::Pin;
 use alloc::boxed::Box;
 use alloc::string::String;
 
-use g2g_core::log::{short_type_name, LogSource};
+use g2g_core::log::{short_type_name, LogName, LogSource};
 use g2g_core::{
     g2g_info, AsyncElement, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError,
     OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
@@ -26,7 +26,7 @@ pub struct ProgressReport {
     frames: u64,
     bytes: u64,
     next_report_ns: u64,
-    instance_name: Option<String>,
+    log_name: LogName,
 }
 
 impl Default for ProgressReport {
@@ -44,7 +44,7 @@ impl ProgressReport {
             frames: 0,
             bytes: 0,
             next_report_ns: 0,
-            instance_name: None,
+            log_name: LogName::new(),
         }
     }
 
@@ -131,7 +131,11 @@ impl AsyncElement for ProgressReport {
     }
 
     fn set_instance_name(&mut self, name: String) {
-        self.instance_name = Some(name);
+        self.log_name.set_instance(name);
+    }
+
+    fn set_log_category(&mut self, category: String) {
+        self.log_name.set_category(category);
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
@@ -170,7 +174,10 @@ impl LogSource for ProgressReport {
         short_type_name::<Self>()
     }
     fn log_instance(&self) -> Option<&str> {
-        self.instance_name.as_deref()
+        self.log_name.instance()
+    }
+    fn log_category_override(&self) -> Option<&str> {
+        self.log_name.category()
     }
 }
 

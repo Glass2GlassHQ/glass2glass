@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M845: structured log fields + timestamps, a ring-buffer flight-recorder sink, per-instance category override, and self-log names on the remaining logging elements.
+
 - M843: buffering posts on interior links (named per element), and a shared `QosTracker` gives synchronizing sinks periodic QoS stats plus the late-drop post.
 
 - M844: `batcher` and `compositor` migrated onto `InputAggregator`, which gains a latest-wins release path for the compositor's overlay inputs.

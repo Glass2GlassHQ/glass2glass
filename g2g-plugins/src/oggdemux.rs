@@ -43,7 +43,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
-use g2g_core::log::Target;
+use g2g_core::log::{short_type_name, LogName, LogSource};
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SeekController;
 use g2g_core::{
@@ -82,6 +82,8 @@ pub struct OggDemux {
     /// Seek support (M362): app time seeks drive an upstream byte-seek and a
     /// re-sync. Inert unless `with_seek` wired the controllers.
     seek: DemuxSeek,
+    /// Runner-assigned instance name plus any category override, for logging.
+    log_name: LogName,
 }
 
 impl Default for OggDemux {
@@ -101,6 +103,7 @@ impl OggDemux {
             stream: OggCodec::Opus,
             emitter: StreamEmitter::default(),
             seek: DemuxSeek::default(),
+            log_name: LogName::new(),
         }
     }
 
@@ -198,7 +201,7 @@ impl OggDemux {
             return Ok(());
         }
         g2g_error!(
-            &Target::category("oggdemux"),
+            self,
             "chained physical stream {chain} carries no {:?} bitstream: a chain that changes codec cannot ride one output pad",
             self.stream
         );
@@ -675,6 +678,14 @@ impl AsyncElement for OggDemux {
         OGGDEMUX_PROPS
     }
 
+    fn set_instance_name(&mut self, name: alloc::string::String) {
+        self.log_name.set_instance(name);
+    }
+
+    fn set_log_category(&mut self, category: alloc::string::String) {
+        self.log_name.set_category(category);
+    }
+
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
         match name {
             "stream" => {
@@ -702,6 +713,20 @@ impl AsyncElement for OggDemux {
             )),
             _ => None,
         }
+    }
+}
+
+/// M845: log identity. Category is the short type name (what the runner derives
+/// for the instance name, so one `G2G_DEBUG` entry filters both).
+impl LogSource for OggDemux {
+    fn log_category(&self) -> &'static str {
+        short_type_name::<Self>()
+    }
+    fn log_instance(&self) -> Option<&str> {
+        self.log_name.instance()
+    }
+    fn log_category_override(&self) -> Option<&str> {
+        self.log_name.category()
     }
 }
 
