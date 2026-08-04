@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M895: `timeoverlay` renders stream times as dates (`show-times-as-dates` / `datetime-format` / `datetime-epoch`), on one strftime formatter shared with `clockoverlay`.
+
 - M894: runtime properties for the PipeWire audio elements (`target-object`, `format`, `samplerate`, `channels`, `num-buffers`) and a pinned capture `format` on `pipewirevideosrc`.
 
 - M893: `textoverlay` gains a `font-size` property (pixels, 0 = canvas-derived), honoured by all render paths.

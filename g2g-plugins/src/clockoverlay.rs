@@ -18,7 +18,6 @@ use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
-use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -30,102 +29,15 @@ use g2g_core::{
 };
 
 use crate::clock::UnixEpochClock;
+// The strftime formatter lives with the other shared overlay machinery, since
+// `timeoverlay` renders dates with it too and is not std-gated.
+pub use crate::timeoverlay::strftime_utc;
 use crate::timeoverlay::{
     OverlayCore, OverlayStyle, COLOR_PROP, HALIGN_PROP, SCALE_PROP, SHADED_PROP, VALIGN_PROP,
     XPAD_PROP, YPAD_PROP,
 };
-use crate::xmlutil::civil;
 
 const DEFAULT_TIME_FORMAT: &str = "%H:%M:%S";
-
-const DAYS: [&str; 7] = [
-    "Sunday",
-    "Monday",
-    "Tuesday",
-    "Wednesday",
-    "Thursday",
-    "Friday",
-    "Saturday",
-];
-const MONTHS: [&str; 12] = [
-    "January",
-    "February",
-    "March",
-    "April",
-    "May",
-    "June",
-    "July",
-    "August",
-    "September",
-    "October",
-    "November",
-    "December",
-];
-/// Days elapsed before the 1st of each month in a non-leap year.
-const MONTH_START: [u64; 12] = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
-
-/// Format `unix_ns` (nanoseconds since the UNIX epoch) as UTC civil time per a
-/// strftime `fmt`. Supported fields: `%Y %y %C %m %d %e %j %H %I %M %S %p %P %a
-/// %A %b %B %F %T %R %D %s %n %t %%`. An unsupported field is emitted verbatim
-/// (`%Q` renders as `%Q`), so a typo shows up on the frame instead of vanishing.
-pub fn strftime_utc(unix_ns: u64, fmt: &str) -> String {
-    let secs = unix_ns / 1_000_000_000;
-    let (year, month, day, hh, mm, ss) = civil(secs);
-    // 1970-01-01 was a Thursday (index 4 with Sunday first).
-    let wday = ((secs / 86_400 + 4) % 7) as usize;
-    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
-    let yday = MONTH_START[(month - 1) as usize] + day as u64 + u64::from(leap && month > 2);
-    let hour12 = match hh % 12 {
-        0 => 12,
-        h => h,
-    };
-
-    let mut out = String::with_capacity(fmt.len() + 8);
-    let mut chars = fmt.chars();
-    while let Some(c) = chars.next() {
-        if c != '%' {
-            out.push(c);
-            continue;
-        }
-        let Some(spec) = chars.next() else {
-            // Trailing '%': nothing to substitute, draw it.
-            out.push('%');
-            break;
-        };
-        match spec {
-            'Y' => out.push_str(&format!("{year:04}")),
-            'y' => out.push_str(&format!("{:02}", year.rem_euclid(100))),
-            'C' => out.push_str(&format!("{:02}", year.div_euclid(100))),
-            'm' => out.push_str(&format!("{month:02}")),
-            'd' => out.push_str(&format!("{day:02}")),
-            'e' => out.push_str(&format!("{day:2}")),
-            'j' => out.push_str(&format!("{yday:03}")),
-            'H' => out.push_str(&format!("{hh:02}")),
-            'I' => out.push_str(&format!("{hour12:02}")),
-            'M' => out.push_str(&format!("{mm:02}")),
-            'S' => out.push_str(&format!("{ss:02}")),
-            'p' => out.push_str(if hh < 12 { "AM" } else { "PM" }),
-            'P' => out.push_str(if hh < 12 { "am" } else { "pm" }),
-            'a' => out.push_str(&DAYS[wday][..3]),
-            'A' => out.push_str(DAYS[wday]),
-            'b' | 'h' => out.push_str(&MONTHS[(month - 1) as usize][..3]),
-            'B' => out.push_str(MONTHS[(month - 1) as usize]),
-            'F' => out.push_str(&format!("{year:04}-{month:02}-{day:02}")),
-            'T' => out.push_str(&format!("{hh:02}:{mm:02}:{ss:02}")),
-            'R' => out.push_str(&format!("{hh:02}:{mm:02}")),
-            'D' => out.push_str(&format!("{month:02}/{day:02}/{:02}", year.rem_euclid(100))),
-            's' => out.push_str(&format!("{secs}")),
-            'n' => out.push(' '),
-            't' => out.push(' '),
-            '%' => out.push('%'),
-            other => {
-                out.push('%');
-                out.push(other);
-            }
-        }
-    }
-    out
-}
 
 pub struct ClockOverlay {
     core: OverlayCore,

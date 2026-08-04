@@ -10,14 +10,20 @@
 //! absent because neither timecode nor reference-timestamp frame-meta exists to
 //! read.
 //!
-//! This module also owns the text-box renderer and the placement / styling
-//! knobs (`halignment`, `valignment`, `xpad`, `ypad`, `color`,
-//! `shaded-background`) that the wall-clock sibling
-//! [`clockoverlay`](crate::clockoverlay) shares, since the two elements differ
-//! only in the string they draw. Unlike GStreamer's Pango-backed base class, the
-//! box is shaded by default (`shaded-background=true`) and hugs the aligned
-//! corner (`xpad`/`ypad` default `0`): the 8x8 font is far smaller than a Pango
-//! one, so gst's 25px inset would push it off a small frame.
+//! With `show-times-as-dates` the time is instead drawn as a civil date, that
+//! time counted from `datetime-epoch` and formatted per `datetime-format`. The
+//! epoch is a string (`YYYY-MM-DD` or `YYYY-MM-DD HH:MM:SS`, UTC) rather than
+//! GStreamer's `GDateTime`, and defaults the same way (1900-01-01).
+//!
+//! This module also owns the text-box renderer, the strftime formatter
+//! ([`strftime_utc`]) and the placement / styling knobs (`halignment`,
+//! `valignment`, `xpad`, `ypad`, `color`, `shaded-background`) that the
+//! wall-clock sibling [`clockoverlay`](crate::clockoverlay) shares, since the
+//! two elements differ only in the string they draw. Unlike GStreamer's
+//! Pango-backed base class, the box is shaded by default
+//! (`shaded-background=true`) and hugs the aligned corner (`xpad`/`ypad` default
+//! `0`): the 8x8 font is far smaller than a Pango one, so gst's 25px inset would
+//! push it off a small frame.
 //!
 //! [`bitmapfont`]: crate::bitmapfont
 
@@ -26,7 +32,7 @@ use core::pin::Pin;
 
 use alloc::boxed::Box;
 use alloc::format;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -40,8 +46,16 @@ use g2g_core::{
 
 use crate::bitmapfont::{glyph, GLYPH_ADVANCE, GLYPH_HEIGHT};
 use crate::paint::blend_px;
+use crate::xmlutil::{civil_signed, days_from_civil};
 
 const FORMATS: [RawVideoFormat; 2] = [RawVideoFormat::Rgba8, RawVideoFormat::Bgra8];
+
+const DEFAULT_DATETIME_FORMAT: &str = "%F %T";
+/// GStreamer's "prime epoch" default for `datetime-epoch`, and the same date in
+/// seconds from the UNIX epoch (negative: it predates 1970). `parse_epoch` of
+/// the string must equal the number, which `dates_count_from_the_epoch` checks.
+const DEFAULT_DATETIME_EPOCH: &str = "1900-01-01";
+const DEFAULT_EPOCH_SECS: i64 = -2_208_988_800;
 
 /// Format a nanosecond timestamp as `HH:MM:SS.mmm`.
 fn format_time(ns: u64) -> String {
@@ -51,6 +65,150 @@ fn format_time(ns: u64) -> String {
     let m = (total_ms / 60_000) % 60;
     let h = total_ms / 3_600_000;
     format!("{h:02}:{m:02}:{s:02}.{ms:03}")
+}
+
+const DAYS: [&str; 7] = [
+    "Sunday",
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+];
+const MONTHS: [&str; 12] = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+];
+/// Days elapsed before the 1st of each month in a non-leap year.
+const MONTH_START: [u64; 12] = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
+
+/// Gregorian leap year, `rem_euclid` so a year before 1 CE still answers
+/// correctly.
+fn is_leap(year: i64) -> bool {
+    year.rem_euclid(4) == 0 && (year.rem_euclid(100) != 0 || year.rem_euclid(400) == 0)
+}
+
+/// Format `unix_ns` (nanoseconds since the UNIX epoch) as UTC civil time per a
+/// strftime `fmt`. Supported fields: `%Y %y %C %m %d %e %j %H %I %M %S %p %P %a
+/// %A %b %B %F %T %R %D %s %n %t %%`. An unsupported field is emitted verbatim
+/// (`%Q` renders as `%Q`), so a typo shows up on the frame instead of vanishing.
+pub fn strftime_utc(unix_ns: u64, fmt: &str) -> String {
+    strftime_utc_secs((unix_ns / 1_000_000_000) as i64, fmt)
+}
+
+/// [`strftime_utc`] for signed seconds since the UNIX epoch, so a date before
+/// 1970 renders (`timeoverlay`'s date epoch defaults to 1900-01-01).
+pub fn strftime_utc_secs(secs: i64, fmt: &str) -> String {
+    let (year, month, day, hh, mm, ss) = civil_signed(secs);
+    // 1970-01-01 was a Thursday (index 4 with Sunday first).
+    let wday = (secs.div_euclid(86_400) + 4).rem_euclid(7) as usize;
+    let leap = is_leap(year);
+    let yday = MONTH_START[(month - 1) as usize] + day as u64 + u64::from(leap && month > 2);
+    let hour12 = match hh % 12 {
+        0 => 12,
+        h => h,
+    };
+
+    let mut out = String::with_capacity(fmt.len() + 8);
+    let mut chars = fmt.chars();
+    while let Some(c) = chars.next() {
+        if c != '%' {
+            out.push(c);
+            continue;
+        }
+        let Some(spec) = chars.next() else {
+            // Trailing '%': nothing to substitute, draw it.
+            out.push('%');
+            break;
+        };
+        match spec {
+            'Y' => out.push_str(&format!("{year:04}")),
+            'y' => out.push_str(&format!("{:02}", year.rem_euclid(100))),
+            'C' => out.push_str(&format!("{:02}", year.div_euclid(100))),
+            'm' => out.push_str(&format!("{month:02}")),
+            'd' => out.push_str(&format!("{day:02}")),
+            'e' => out.push_str(&format!("{day:2}")),
+            'j' => out.push_str(&format!("{yday:03}")),
+            'H' => out.push_str(&format!("{hh:02}")),
+            'I' => out.push_str(&format!("{hour12:02}")),
+            'M' => out.push_str(&format!("{mm:02}")),
+            'S' => out.push_str(&format!("{ss:02}")),
+            'p' => out.push_str(if hh < 12 { "AM" } else { "PM" }),
+            'P' => out.push_str(if hh < 12 { "am" } else { "pm" }),
+            'a' => out.push_str(&DAYS[wday][..3]),
+            'A' => out.push_str(DAYS[wday]),
+            'b' | 'h' => out.push_str(&MONTHS[(month - 1) as usize][..3]),
+            'B' => out.push_str(MONTHS[(month - 1) as usize]),
+            'F' => out.push_str(&format!("{year:04}-{month:02}-{day:02}")),
+            'T' => out.push_str(&format!("{hh:02}:{mm:02}:{ss:02}")),
+            'R' => out.push_str(&format!("{hh:02}:{mm:02}")),
+            'D' => out.push_str(&format!("{month:02}/{day:02}/{:02}", year.rem_euclid(100))),
+            's' => out.push_str(&format!("{secs}")),
+            'n' => out.push(' '),
+            't' => out.push(' '),
+            '%' => out.push('%'),
+            other => {
+                out.push('%');
+                out.push(other);
+            }
+        }
+    }
+    out
+}
+
+/// Days in `month` of `year`, for validating a `datetime-epoch`.
+fn days_in_month(year: i64, month: u32) -> u32 {
+    match month {
+        2 => 28 + u32::from(is_leap(year)),
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    }
+}
+
+/// Parse a `datetime-epoch`: an ISO-8601 UTC `YYYY-MM-DD` or
+/// `YYYY-MM-DD HH:MM:SS` (a `T` separator is accepted too) to signed seconds
+/// from the UNIX epoch. `None` for anything malformed or out of range, so a bad
+/// value is rejected rather than silently read as 1900.
+fn parse_epoch(s: &str) -> Option<i64> {
+    let s = s.trim();
+    let (date, time) = match s.split_once(['T', ' ']) {
+        Some((d, t)) => (d, Some(t)),
+        None => (s, None),
+    };
+    let mut ymd = date.split('-');
+    let year: i64 = ymd.next()?.parse().ok()?;
+    let month: u32 = ymd.next()?.parse().ok()?;
+    let day: u32 = ymd.next()?.parse().ok()?;
+    if ymd.next().is_some()
+        || !(1..=9999).contains(&year)
+        || !(1..=12).contains(&month)
+        || day < 1
+        || day > days_in_month(year, month)
+    {
+        return None;
+    }
+    let (mut hh, mut mi, mut ss) = (0u32, 0u32, 0u32);
+    if let Some(t) = time {
+        let mut hms = t.split(':');
+        hh = hms.next()?.parse().ok()?;
+        mi = hms.next()?.parse().ok()?;
+        ss = hms.next()?.parse().ok()?;
+        if hms.next().is_some() || hh > 23 || mi > 59 || ss > 59 {
+            return None;
+        }
+    }
+    Some(days_from_civil(year, month, day) * 86_400 + (hh * 3_600 + mi * 60 + ss) as i64)
 }
 
 /// Which time [`TimeOverlay`] draws (GStreamer's `time-mode`).
@@ -433,7 +591,7 @@ pub(crate) const SHADED_PROP: PropertySpec = PropertySpec::new(
 )
 .with_default("true");
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct TimeOverlay {
     core: OverlayCore,
     mode: TimeMode,
@@ -443,6 +601,19 @@ pub struct TimeOverlay {
     /// Running time of the first frame since the last segment / flush, for
     /// [`TimeMode::ElapsedRunningTime`].
     elapsed_base: Option<u64>,
+    /// Draw the time as a date counted from `epoch_secs` (`show-times-as-dates`).
+    show_dates: bool,
+    datetime_format: String,
+    /// The `datetime-epoch` string as set, so the property reads back verbatim,
+    /// alongside the seconds it parsed to (signed: the default predates 1970).
+    datetime_epoch: String,
+    epoch_secs: i64,
+}
+
+impl Default for TimeOverlay {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TimeOverlay {
@@ -452,6 +623,10 @@ impl TimeOverlay {
             mode: TimeMode::default(),
             segment: Segment::new(),
             elapsed_base: None,
+            show_dates: false,
+            datetime_format: DEFAULT_DATETIME_FORMAT.to_string(),
+            datetime_epoch: DEFAULT_DATETIME_EPOCH.to_string(),
+            epoch_secs: DEFAULT_EPOCH_SECS,
         }
     }
 
@@ -472,6 +647,27 @@ impl TimeOverlay {
         self
     }
 
+    /// Draw the time as a date counted from the epoch (`show-times-as-dates`).
+    pub fn with_show_times_as_dates(mut self, on: bool) -> Self {
+        self.show_dates = on;
+        self
+    }
+
+    /// The strftime format dates are drawn in (`datetime-format`).
+    pub fn with_datetime_format(mut self, format: &str) -> Self {
+        self.datetime_format = format.to_string();
+        self
+    }
+
+    /// The UTC date times are counted from (`datetime-epoch`): `YYYY-MM-DD` or
+    /// `YYYY-MM-DD HH:MM:SS`. Rejects anything else rather than falling back to
+    /// the default epoch.
+    pub fn with_datetime_epoch(mut self, epoch: &str) -> Result<Self, PropError> {
+        self.epoch_secs = parse_epoch(epoch).ok_or(PropError::Value)?;
+        self.datetime_epoch = epoch.to_string();
+        Ok(self)
+    }
+
     /// Running time of `pts` through the active segment. A frame outside the
     /// segment has none; fall back to the raw PTS rather than drawing a
     /// misleading zero.
@@ -482,19 +678,27 @@ impl TimeOverlay {
     /// The text drawn for `timing`, per the active [`TimeMode`].
     fn text_for(&mut self, timing: &FrameTiming) -> String {
         let pts = timing.pts_ns;
-        match self.mode {
-            TimeMode::BufferTime => format_time(pts),
-            TimeMode::StreamTime => format_time(self.segment.to_stream_time(pts).unwrap_or(pts)),
-            TimeMode::RunningTime => format_time(self.running_time(pts)),
+        let ns = match self.mode {
+            TimeMode::BufferTime => pts,
+            TimeMode::StreamTime => self.segment.to_stream_time(pts).unwrap_or(pts),
+            TimeMode::RunningTime => self.running_time(pts),
             TimeMode::ElapsedRunningTime => {
                 let rt = self.running_time(pts);
                 let base = *self.elapsed_base.get_or_insert(rt);
-                format_time(rt.saturating_sub(base))
+                rt.saturating_sub(base)
             }
-            TimeMode::BufferCount => format!("{}", self.core.emitted()),
+            // Counts are not times, so `show-times-as-dates` does not apply to
+            // them, as in gst.
+            TimeMode::BufferCount => return format!("{}", self.core.emitted()),
             TimeMode::BufferOffset => {
-                format!("{}", frame_number(self.running_time(pts), self.core.rate()))
+                return format!("{}", frame_number(self.running_time(pts), self.core.rate()))
             }
+        };
+        if self.show_dates {
+            let secs = self.epoch_secs.saturating_add((ns / 1_000_000_000) as i64);
+            strftime_utc_secs(secs, &self.datetime_format)
+        } else {
+            format_time(ns)
         }
     }
 
@@ -582,6 +786,20 @@ impl AsyncElement for TimeOverlay {
                 self.mode = TimeMode::from_nick(nick).ok_or(PropError::Value)?;
                 Ok(())
             }
+            "show-times-as-dates" => {
+                self.show_dates = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
+            "datetime-format" => {
+                self.datetime_format = value.as_str().ok_or(PropError::Type)?.to_string();
+                Ok(())
+            }
+            "datetime-epoch" => {
+                let epoch = value.as_str().ok_or(PropError::Type)?;
+                self.epoch_secs = parse_epoch(epoch).ok_or(PropError::Value)?;
+                self.datetime_epoch = epoch.to_string();
+                Ok(())
+            }
             _ => self.core.set_style_property(name, value),
         }
     }
@@ -589,6 +807,9 @@ impl AsyncElement for TimeOverlay {
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
             "time-mode" => Some(PropValue::Str(self.mode.nick().into())),
+            "show-times-as-dates" => Some(PropValue::Bool(self.show_dates)),
+            "datetime-format" => Some(PropValue::Str(self.datetime_format.clone())),
+            "datetime-epoch" => Some(PropValue::Str(self.datetime_epoch.clone())),
             _ => self.core.get_style_property(name),
         }
     }
@@ -601,6 +822,24 @@ static TIMEOVERLAY_PROPS: &[PropertySpec] = &[
              buffer-count | buffer-offset",
         )
         .with_default("buffer-time"),
+    PropertySpec::new(
+        "show-times-as-dates",
+        PropKind::Bool,
+        "draw the time, counted from datetime-epoch, as a date",
+    )
+    .with_default("false"),
+    PropertySpec::new(
+        "datetime-format",
+        PropKind::Str,
+        "strftime format for the date drawn when show-times-as-dates is set",
+    )
+    .with_default(DEFAULT_DATETIME_FORMAT),
+    PropertySpec::new(
+        "datetime-epoch",
+        PropKind::Str,
+        "UTC date times are counted from, \"YYYY-MM-DD\" or \"YYYY-MM-DD HH:MM:SS\"",
+    )
+    .with_default(DEFAULT_DATETIME_EPOCH),
     SCALE_PROP,
     HALIGN_PROP,
     VALIGN_PROP,
@@ -999,6 +1238,124 @@ mod tests {
         );
     }
 
+    /// Epoch + elapsed, rendered through the date path.
+    fn dated(epoch: &str, elapsed_secs: i64, fmt: &str) -> String {
+        let secs = parse_epoch(epoch).expect("epoch parses") + elapsed_secs;
+        strftime_utc_secs(secs, fmt)
+    }
+
+    #[test]
+    fn dates_count_from_the_epoch() {
+        // The 1900 default epoch is before 1970, so the seconds are negative.
+        assert_eq!(
+            parse_epoch(DEFAULT_DATETIME_EPOCH),
+            Some(DEFAULT_EPOCH_SECS)
+        );
+        assert_eq!(dated("1900-01-01", 0, "%F %T"), "1900-01-01 00:00:00");
+        assert_eq!(dated("1900-01-01", 3661, "%F %T"), "1900-01-01 01:01:01");
+        // Rollover past midnight moves to the next day.
+        assert_eq!(dated("1900-01-01", 86_399, "%F %T"), "1900-01-01 23:59:59");
+        assert_eq!(dated("1900-01-01", 86_400, "%F %T"), "1900-01-02 00:00:00");
+        // A time-of-day epoch is honoured, and a custom format renders date
+        // codes.
+        assert_eq!(
+            dated("2026-08-04 13:45:07", 0, "%Y/%m/%d %H:%M:%S %a %b %j"),
+            "2026/08/04 13:45:07 Tue Aug 216"
+        );
+    }
+
+    #[test]
+    fn leap_years_follow_the_gregorian_rule() {
+        // 1900 is divisible by 100 but not 400: no Feb 29.
+        assert_eq!(dated("1900-02-28", 86_400, "%F"), "1900-03-01");
+        // 2000 is divisible by 400: Feb 29 exists.
+        assert_eq!(dated("2000-02-28", 86_400, "%F"), "2000-02-29");
+        assert_eq!(dated("2000-02-28", 2 * 86_400, "%F"), "2000-03-01");
+        // A leap day mid-cycle, and the ordinal day it shifts.
+        assert_eq!(dated("1904-02-28", 86_400, "%F %j"), "1904-02-29 060");
+        assert_eq!(dated("1900-02-28", 86_400, "%F %j"), "1900-03-01 060");
+    }
+
+    #[test]
+    fn epoch_parsing_rejects_garbage() {
+        assert!(parse_epoch("not a date").is_none());
+        assert!(parse_epoch("1900-01").is_none());
+        assert!(parse_epoch("1900-13-01").is_none());
+        assert!(
+            parse_epoch("1900-02-29").is_none(),
+            "1900 is not a leap year"
+        );
+        assert!(parse_epoch("2000-02-30").is_none());
+        assert!(parse_epoch("1900-01-01 24:00:00").is_none());
+        assert!(parse_epoch("1900-01-01 00:00").is_none());
+        assert!(parse_epoch("").is_none());
+        // ISO 'T' separator is accepted, same instant as the space form.
+        assert_eq!(
+            parse_epoch("1900-01-01T06:00:00"),
+            parse_epoch("1900-01-01 06:00:00")
+        );
+    }
+
+    #[tokio::test]
+    async fn dates_are_burnt_in_when_enabled() {
+        let style = OverlayStyle {
+            scale: 1,
+            ..Default::default()
+        };
+        let mut ov = TimeOverlay::new()
+            .with_style(style.clone())
+            .with_show_times_as_dates(true);
+        ov.configure_pipeline(&rgba_caps(64, 24)).unwrap();
+        // The default epoch plus the frame's PTS of 1h01m01s.
+        let out = drawn(&mut ov, 3_661_000_000_000).await;
+        assert_eq!(out, reference(64, 24, "1900-01-01 01:01:01", &style));
+
+        // A count mode stays an integer: it is not a time to date.
+        let mut ov = TimeOverlay::new()
+            .with_style(style.clone())
+            .with_show_times_as_dates(true)
+            .with_time_mode(TimeMode::BufferCount);
+        ov.configure_pipeline(&rgba_caps(64, 24)).unwrap();
+        assert_eq!(drawn(&mut ov, 0).await, reference(64, 24, "0", &style));
+    }
+
+    /// Cross-check the formatter against GNU `date`, the reference for the same
+    /// civil arithmetic. Skipped (with a reason) where `date` is absent or not
+    /// GNU, since only GNU accepts the "<date> UTC + N seconds" form.
+    #[test]
+    fn matches_gnu_date() {
+        extern crate std;
+        use std::eprintln;
+        use std::process::Command;
+
+        let probe = Command::new("date").arg("--version").output();
+        let gnu = match &probe {
+            Ok(o) => String::from_utf8_lossy(&o.stdout).contains("GNU coreutils"),
+            Err(_) => false,
+        };
+        if !gnu {
+            eprintln!("skipping: no GNU `date` on this host");
+            return;
+        }
+
+        for (epoch, offset) in [
+            ("1900-01-01", 3661i64),
+            ("1900-01-01", 86_400),
+            ("1900-02-28", 86_400),
+            ("2000-02-28", 86_400),
+            ("1969-12-31 23:00:00", 7200),
+            ("2026-08-04 13:45:07", 0),
+        ] {
+            let spec = format!("{epoch} UTC + {offset} seconds");
+            let out = Command::new("date")
+                .args(["-u", "-d", &spec, "+%F %T"])
+                .output()
+                .expect("date runs");
+            let want = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            assert_eq!(dated(epoch, offset, "%F %T"), want, "for {spec}");
+        }
+    }
+
     #[test]
     fn properties_round_trip() {
         let mut ov = TimeOverlay::new();
@@ -1011,5 +1368,62 @@ mod tests {
         assert!(ov
             .set_property("time-mode", PropValue::Str("time-code".into()))
             .is_err());
+    }
+
+    #[test]
+    fn date_properties_round_trip() {
+        let mut ov = TimeOverlay::new();
+        for name in ["show-times-as-dates", "datetime-format", "datetime-epoch"] {
+            assert!(
+                TIMEOVERLAY_PROPS.iter().any(|p| p.name == name),
+                "{name} is declared"
+            );
+        }
+        // gst defaults.
+        assert_eq!(
+            ov.get_property("show-times-as-dates"),
+            Some(PropValue::Bool(false))
+        );
+        assert_eq!(
+            ov.get_property("datetime-format"),
+            Some(PropValue::Str("%F %T".into()))
+        );
+        assert_eq!(
+            ov.get_property("datetime-epoch"),
+            Some(PropValue::Str("1900-01-01".into()))
+        );
+
+        ov.set_property("show-times-as-dates", PropValue::Bool(true))
+            .unwrap();
+        ov.set_property("datetime-format", PropValue::Str("%H:%M".into()))
+            .unwrap();
+        ov.set_property(
+            "datetime-epoch",
+            PropValue::Str("2026-08-04 13:45:07".into()),
+        )
+        .unwrap();
+        assert_eq!(
+            ov.get_property("show-times-as-dates"),
+            Some(PropValue::Bool(true))
+        );
+        assert_eq!(
+            ov.get_property("datetime-format"),
+            Some(PropValue::Str("%H:%M".into()))
+        );
+        assert_eq!(
+            ov.get_property("datetime-epoch"),
+            Some(PropValue::Str("2026-08-04 13:45:07".into()))
+        );
+        assert_eq!(ov.text_for(&FrameTiming::default()), "13:45");
+
+        // A bad epoch is refused and leaves the accepted one in place.
+        assert!(ov
+            .set_property("datetime-epoch", PropValue::Str("yesterday".into()))
+            .is_err());
+        assert_eq!(
+            ov.get_property("datetime-epoch"),
+            Some(PropValue::Str("2026-08-04 13:45:07".into()))
+        );
+        assert!(TimeOverlay::new().with_datetime_epoch("yesterday").is_err());
     }
 }

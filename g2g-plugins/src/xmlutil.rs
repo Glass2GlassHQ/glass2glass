@@ -23,11 +23,18 @@ pub(crate) fn xml_escape(s: &str) -> String {
 }
 
 /// civil_from_days (Howard Hinnant): days since 1970-01-01 -> (year, month,
-/// day), so no chrono dependency is needed. Also the calendar half of
-/// `clockoverlay`'s strftime rendering.
+/// day), so no chrono dependency is needed. Also the calendar half of the
+/// overlays' strftime rendering.
 pub(crate) fn civil(secs: u64) -> (i64, i64, i64, u64, u64, u64) {
-    let days = (secs / 86_400) as i64;
-    let tod = secs % 86_400;
+    civil_signed(secs as i64)
+}
+
+/// `civil` for a timestamp that may predate 1970, as `timeoverlay`'s
+/// 1900-01-01 date epoch does. Euclidean division so a negative `secs` still
+/// yields a time of day in `[0, 86400)` and the day it belongs to.
+pub(crate) fn civil_signed(secs: i64) -> (i64, i64, i64, u64, u64, u64) {
+    let days = secs.div_euclid(86_400);
+    let tod = secs.rem_euclid(86_400) as u64;
     let (hh, mm, ss) = (tod / 3_600, (tod % 3_600) / 60, tod % 60);
 
     let z = days + 719_468;
@@ -41,6 +48,20 @@ pub(crate) fn civil(secs: u64) -> (i64, i64, i64, u64, u64, u64) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
     let year = if m <= 2 { y + 1 } else { y };
     (year, m, d, hh, mm, ss)
+}
+
+/// Inverse of the date half of `civil_signed` (Hinnant's `days_from_civil`):
+/// days from 1970-01-01 to a proleptic-Gregorian date, negative before it. The
+/// year is shifted to start in March so the leap day lands at the end of the
+/// era.
+pub(crate) fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400; // [0, 399]
+    let mp = if month > 2 { month - 3 } else { month + 9 } as i64; // March = 0
+    let doy = (153 * mp + 2) / 5 + day as i64 - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    era * 146_097 + doe - 719_468
 }
 
 /// Format a UNIX timestamp as an ISO-8601 UTC `xsd:dateTime` (no fractional

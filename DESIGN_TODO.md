@@ -423,9 +423,7 @@ _(No open parser items.)_
   font-variation axes beyond `wght` on the shaped horizontal path (cosmic-text
   0.17 exposes only weight, and 0.17.1+ needs rustc 1.89, above the 1.85 MSRV,
   so the upgrade waits on an MSRV bump); vertical-mode shaping if cosmic-text
-  ever grows writing modes. `clockoverlay` still lacks
-  the gst date properties (`show-times-as-dates` / `datetime-format` /
-  `datetime-epoch`: the 1900 epoch needs signed civil math).
+  ever grows writing modes.
 - **Text / subtitle pipeline depth.** The foundation is in: `Caps::Text` +
   `TextFormat` (M400), the `SubParse` element (`Text{Srt|WebVtt|Ssa|Ttml}` ->
   `Text{Utf8}`), the SRT / WebVTT / SSA-ASS / TTML parsers (M171 / M401 / M402),

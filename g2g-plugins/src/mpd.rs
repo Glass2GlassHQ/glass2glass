@@ -24,6 +24,8 @@ use alloc::vec::Vec;
 
 use roxmltree::{Document, Node};
 
+use crate::xmlutil::days_from_civil;
+
 /// One selectable Representation (a single quality rendition).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Representation {
@@ -992,19 +994,6 @@ fn parse_zone_offset(s: &str) -> Option<f64> {
         return None;
     }
     Some(sign * (h as f64 * 3600.0 + m as f64 * 60.0))
-}
-
-/// Days from the unix epoch to a proleptic-Gregorian civil date (Howard
-/// Hinnant's `days_from_civil`). Shifts the year to start in March so the leap
-/// day lands at the end of the era.
-fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
-    let y = if month <= 2 { year - 1 } else { year };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400; // [0, 399]
-    let mp = if month > 2 { month - 3 } else { month + 9 } as i64; // March = 0
-    let doy = (153 * mp + 2) / 5 + day as i64 - 1; // [0, 365]
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
-    era * 146_097 + doe - 719_468
 }
 
 #[cfg(test)]
