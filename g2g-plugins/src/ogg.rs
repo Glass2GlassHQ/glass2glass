@@ -830,6 +830,23 @@ impl OggPageWriter {
     }
 }
 
+/// Every page in `data` as `(serial, header_type)`, in file order: the page walk
+/// the muxer tests check beginning-of-stream / end-of-stream placement with.
+#[cfg(test)]
+pub(crate) fn page_flags(data: &[u8]) -> Vec<(u32, u8)> {
+    let mut out = Vec::new();
+    let mut at = 0usize;
+    while at + 27 <= data.len() {
+        assert_eq!(&data[at..at + 4], &CAPTURE_PATTERN, "page at {at}");
+        let n = data[at + 26] as usize;
+        let body: usize = data[at + 27..at + 27 + n].iter().map(|&s| s as usize).sum();
+        let serial = u32::from_le_bytes(data[at + 14..at + 18].try_into().unwrap());
+        out.push((serial, data[at + 5]));
+        at += 27 + n + body;
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M858: oggmux writes chained streams, a new link per changed `Segment`, round-tripping oggdemux's chain boundary and validated against ffmpeg.
+
 - M856: multi-head attention, matmul, layernorm, and softmax GPU ops in `WgpuInference`; a safetensors transformer block runs GPU-resident.
 
 - M857: opusdec decodes in-band FEC from the next packet across a loss (`use-inband-fec`), and opusenc gains `inband-fec` / `packet-loss-percentage`.

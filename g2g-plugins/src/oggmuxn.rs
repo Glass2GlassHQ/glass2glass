@@ -291,7 +291,7 @@ impl MultiInputElement for OggMuxN {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ogg::{OggCodec, OggDemuxer};
+    use crate::ogg::{page_flags, OggCodec, OggDemuxer};
     use alloc::vec;
     use g2g_core::{AudioFormat, PushOutcome};
 
@@ -356,21 +356,6 @@ mod tests {
         vec![0xFFu8, 0xF8, 0xC9, 0x18, 0x00, 0xC2]
     }
 
-    /// Every page in `data`, as `(serial, header_type)` in file order.
-    fn pages(data: &[u8]) -> Vec<(u32, u8)> {
-        let mut out = Vec::new();
-        let mut at = 0usize;
-        while at + 27 <= data.len() {
-            assert_eq!(&data[at..at + 4], b"OggS", "page at {at}");
-            let n = data[at + 26] as usize;
-            let body: usize = data[at + 27..at + 27 + n].iter().map(|&s| s as usize).sum();
-            let serial = u32::from_le_bytes(data[at + 14..at + 18].try_into().unwrap());
-            out.push((serial, data[at + 5]));
-            at += 27 + n + body;
-        }
-        out
-    }
-
     /// Mux an Opus stream on pad 0 and an Ogg-FLAC stream on pad 1.
     async fn mux_opus_and_flac() -> Vec<u8> {
         let mut mux = OggMuxN::new(2);
@@ -404,7 +389,7 @@ mod tests {
     #[tokio::test]
     async fn beginning_of_stream_pages_lead_and_serials_are_distinct() {
         let bytes = mux_opus_and_flac().await;
-        let pages = pages(&bytes);
+        let pages = page_flags(&bytes);
         let bos: Vec<u32> = pages
             .iter()
             .filter(|(_, ht)| ht & 0x02 != 0)

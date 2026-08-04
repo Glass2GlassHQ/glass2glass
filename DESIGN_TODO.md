@@ -401,8 +401,6 @@ Phased plan:
 
 - **MKV / WebM:** wire the std-gated mkv test suites into CI (only the m828
   conformance oracle runs there today).
-- **OGG:** chained-stream writing (`OggMux` has no chain-boundary trigger or
-  serial policy; demux-side chains are handled).
 - **FLV:** Speex decode (carriage lands M831; no Speex encoder exists anywhere
   to build a validated decode vector, and gst's header-in-tag layout is
   rejected by libavcodec, so wiring a decoder would be an unvalidated claim).

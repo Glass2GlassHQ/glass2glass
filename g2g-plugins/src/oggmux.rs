@@ -33,6 +33,15 @@
 //! `OggDemux`. The grouped multi-stream case is the fan-in sibling
 //! [`crate::oggmuxn::OggMuxN`], which reuses this module's [`OggStreamMux`] once
 //! per input pad.
+//!
+//! **Chained streams (M858).** A `Segment` arriving after audio has flowed ends
+//! the logical bitstream and opens the next link of a chained file: the current
+//! link's pages are flushed with the end-of-stream flag, then the next link
+//! writes its own beginning-of-stream page on a fresh serial. That is the write
+//! side of the chains [`crate::oggdemux::OggDemux`] reads, which announces each
+//! one with exactly that `Segment`, so a chained file survives a demux -> mux
+//! round trip; it is also what a track change on a concatenating pipeline
+//! (gapless playback, an icecast-style feed) looks like.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -45,7 +54,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
     FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-    PropError, PropKind, PropValue, PropertySpec,
+    PropError, PropKind, PropValue, PropertySpec, Segment,
 };
 
 use crate::ogg::{OggPageWriter, VorbisTiming};
@@ -232,6 +241,26 @@ impl OggStreamMux {
         self.writer.flush(eos)
     }
 
+    /// Close this logical bitstream and restart on `serial` as the next link of
+    /// a chained stream (M858), returning the closed link's remaining pages with
+    /// the last flagged end-of-stream. The codec mapping survives; everything
+    /// the link accumulated (headers, granule, Vorbis lapping) restarts, so the
+    /// new link writes its own header pages from granule 0.
+    pub(crate) fn begin_chain(&mut self, serial: u32) -> Vec<u8> {
+        let tail = if self.headers_written {
+            self.writer.flush(true)
+        } else {
+            Vec::new()
+        };
+        *self = Self {
+            format: self.format,
+            channels: self.channels,
+            sample_rate: self.sample_rate,
+            ..Self::new(serial)
+        };
+        tail
+    }
+
     /// Whether `packet` is codec config rather than audio, for the configured
     /// codec's in-band convention.
     pub(crate) fn is_header(&self, packet: &[u8]) -> bool {
@@ -352,11 +381,24 @@ impl OggStreamMux {
     }
 }
 
+/// How many link serials a chained stream remembers, so a derived serial never
+/// collides with one still in the file's recent history. A radio-style stream of
+/// unbounded chains cannot keep them all.
+const RECENT_SERIALS: usize = 16;
+
 /// Muxes one audio elementary stream into an Ogg byte stream.
 #[derive(Debug)]
 pub struct OggMux {
     stream: OggStreamMux,
+    /// Base serial (the `serial` property): the first link's, and what the later
+    /// links' serials are derived from.
     serial: u32,
+    /// Chain links written so far, `0` for the first.
+    link: u32,
+    /// Serials already handed out, most recent last.
+    recent_serials: Vec<u32>,
+    /// The segment in force, so a repeat of it is not a chain boundary.
+    last_segment: Option<Segment>,
     configured: bool,
     emitted: u64,
 }
@@ -372,6 +414,9 @@ impl OggMux {
         Self {
             stream: OggStreamMux::new(DEFAULT_SERIAL),
             serial: DEFAULT_SERIAL,
+            link: 0,
+            recent_serials: Vec::from([DEFAULT_SERIAL]),
+            last_segment: None,
             configured: false,
             emitted: 0,
         }
@@ -379,9 +424,37 @@ impl OggMux {
 
     /// Set the logical bitstream's serial number.
     pub fn with_serial(mut self, serial: u32) -> Self {
+        self.set_base_serial(serial);
+        self
+    }
+
+    /// Re-key the first link. Only meaningful before its first page, which
+    /// identifies the stream by the serial then in force.
+    fn set_base_serial(&mut self, serial: u32) {
         self.serial = serial;
         self.stream.set_serial(serial);
-        self
+        self.recent_serials = Vec::from([serial]);
+    }
+
+    /// The serial the next chain link takes: mixed from the base serial and the
+    /// link index, then stepped past the serials the recent links used, since a
+    /// serial must not repeat within one physical stream. Deterministic: the
+    /// `no_std` core has no entropy source, and the same input must mux to the
+    /// same file twice.
+    fn next_serial(&mut self) -> u32 {
+        self.link = self.link.saturating_add(1);
+        let mut serial = mix_serial(self.serial, self.link);
+        for salt in 1..8 {
+            if !self.recent_serials.contains(&serial) {
+                break;
+            }
+            serial = mix_serial(serial, salt);
+        }
+        if self.recent_serials.len() == RECENT_SERIALS {
+            self.recent_serials.remove(0);
+        }
+        self.recent_serials.push(serial);
+        serial
     }
 
     /// Count of Ogg byte frames forwarded.
@@ -410,6 +483,18 @@ impl OggMux {
         self.emitted += 1;
         Some(PipelinePacket::DataFrame(frame))
     }
+}
+
+/// A serial for chain link `link`, from the base serial through the SplitMix64
+/// finalizer: unrelated to the serials around it (what the format expects) but
+/// reproducible.
+fn mix_serial(base: u32, link: u32) -> u32 {
+    let mut h = u64::from(base) ^ u64::from(link).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    h ^= h >> 30;
+    h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    h ^= h >> 27;
+    h = h.wrapping_mul(0x94D0_49BB_1331_11EB);
+    (h >> 32) as u32
 }
 
 /// Samples a frame declares it decodes to, from its stamped duration (`None`
@@ -534,10 +619,9 @@ impl AsyncElement for OggMux {
             "serial" => {
                 let raw = value.as_uint().ok_or(PropError::Type)?;
                 let serial = u32::try_from(raw).map_err(|_| PropError::Value)?;
-                self.serial = serial;
                 // Only meaningful before the first page; afterwards the stream is
                 // already identified by the old serial.
-                self.stream.set_serial(serial);
+                self.set_base_serial(serial);
                 Ok(())
             }
             _ => Err(PropError::Unknown),
@@ -596,6 +680,22 @@ impl AsyncElement for OggMux {
                 // Channels / rate only feed the synthesized headers, which are
                 // written before any audio flows.
                 PipelinePacket::CapsChanged(caps) => self.stream.refine_caps(&caps),
+                // A segment after audio has flowed is a chain boundary (M858):
+                // the logical bitstream so far is complete, so close it and let
+                // the next link open on a fresh serial. The segment every stream
+                // opens with, and any repeat of the one in force, is not one.
+                PipelinePacket::Segment(seg) => {
+                    let boundary = self.stream.headers_written() && self.last_segment != Some(seg);
+                    self.last_segment = Some(seg);
+                    if boundary {
+                        let serial = self.next_serial();
+                        let bytes = self.stream.begin_chain(serial);
+                        if let Some(p) = self.byte_frame(bytes) {
+                            out.push(p).await?;
+                        }
+                    }
+                    out.push(PipelinePacket::Segment(seg)).await?;
+                }
                 other => {
                     out.push(other).await?;
                 }
@@ -617,7 +717,7 @@ impl PadTemplates for OggMux {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ogg::{OggCodec, OggDemuxer};
+    use crate::ogg::{page_flags, OggCodec, OggDemuxer};
     use alloc::vec;
     use g2g_core::PushOutcome;
 
@@ -773,6 +873,105 @@ mod tests {
         let mut d = OggDemuxer::new();
         d.push_data(&sink.bytes);
         assert_eq!(d.end_granule(), Some(3 * 960));
+    }
+
+    /// Mux `links` runs of Opus packets, a `Segment` between consecutive ones.
+    async fn mux_chained(links: &[Vec<Vec<u8>>]) -> Vec<u8> {
+        let mut mux = OggMux::new();
+        mux.configure_pipeline(&opus_caps()).unwrap();
+        let mut sink = CaptureSink::default();
+        for (i, packets) in links.iter().enumerate() {
+            if i > 0 {
+                let start = i as u64 * 1_000_000_000;
+                let seg = PipelinePacket::Segment(Segment {
+                    start,
+                    base: start,
+                    ..Segment::new()
+                });
+                mux.process(seg, &mut sink).await.unwrap();
+            }
+            for p in packets {
+                mux.process(frame(p.clone()), &mut sink).await.unwrap();
+            }
+        }
+        mux.process(PipelinePacket::Eos, &mut sink).await.unwrap();
+        sink.bytes
+    }
+
+    #[tokio::test]
+    async fn a_segment_after_audio_opens_the_next_chain() {
+        let first: Vec<Vec<u8>> = (0..3).map(opus_packet).collect();
+        let second: Vec<Vec<u8>> = (10..14).map(opus_packet).collect();
+        let bytes = mux_chained(&[first.clone(), second.clone()]).await;
+
+        let pages = page_flags(&bytes);
+        let bos: Vec<usize> = (0..pages.len())
+            .filter(|&i| pages[i].1 & 0x02 != 0)
+            .collect();
+        let eos: Vec<usize> = (0..pages.len())
+            .filter(|&i| pages[i].1 & 0x04 != 0)
+            .collect();
+        assert_eq!(bos.len(), 2, "one beginning-of-stream page per link");
+        assert_eq!(eos.len(), 2, "each link closes");
+        assert!(
+            eos[0] < bos[1],
+            "the first link ends before the second begins"
+        );
+        assert_ne!(
+            pages[bos[0]].0, pages[bos[1]].0,
+            "each link carries its own serial"
+        );
+
+        let mut d = OggDemuxer::new();
+        d.push_data(&bytes);
+        assert_eq!(d.chain(), 1, "the demuxer reads two physical streams");
+        assert_eq!(d.streams().len(), 2);
+        assert_eq!(d.streams()[1].chain(), 1);
+        assert_eq!(d.stream_mut(0).unwrap().take_packets(), first);
+        assert_eq!(d.stream_mut(1).unwrap().take_packets(), second);
+        // Each link times from its own zero.
+        assert_eq!(d.streams()[0].end_granule(), Some(3 * 960));
+        assert_eq!(d.streams()[1].end_granule(), Some(4 * 960));
+    }
+
+    /// The segment every stream opens with, and a repeat of the one in force,
+    /// leave the bitstream alone: only a change of segment is a boundary.
+    #[tokio::test]
+    async fn an_unchanged_segment_is_not_a_chain_boundary() {
+        let mut mux = OggMux::new();
+        mux.configure_pipeline(&opus_caps()).unwrap();
+        let mut sink = CaptureSink::default();
+        let seg = || PipelinePacket::Segment(Segment::new());
+        mux.process(seg(), &mut sink).await.unwrap();
+        mux.process(frame(opus_packet(0)), &mut sink).await.unwrap();
+        mux.process(seg(), &mut sink).await.unwrap();
+        mux.process(frame(opus_packet(1)), &mut sink).await.unwrap();
+        mux.process(PipelinePacket::Eos, &mut sink).await.unwrap();
+
+        let pages = page_flags(&sink.bytes);
+        assert_eq!(
+            pages.iter().filter(|(_, ht)| ht & 0x02 != 0).count(),
+            1,
+            "one logical bitstream"
+        );
+        let mut d = OggDemuxer::new();
+        d.push_data(&sink.bytes);
+        assert_eq!(d.chain(), 0);
+        assert_eq!(d.end_granule(), Some(2 * 960));
+    }
+
+    /// Link serials are derived, not counted: distinct, and the same every run.
+    #[test]
+    fn chain_serials_are_deterministic_and_distinct() {
+        let mut a = OggMux::new().with_serial(7);
+        let mut b = OggMux::new().with_serial(7);
+        let mut seen = vec![7u32];
+        for _ in 0..8 {
+            let s = a.next_serial();
+            assert_eq!(s, b.next_serial(), "same base, same serials");
+            assert!(!seen.contains(&s), "serial {s} repeats");
+            seen.push(s);
+        }
     }
 
     #[tokio::test]
