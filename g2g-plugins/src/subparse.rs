@@ -811,6 +811,44 @@ pub fn deframe_subtitle_block(payload: &str, format: TextFormat) -> String {
     }
 }
 
+/// The `CodecPrivate` an `S_TEXT/ASS` track carries: the script header up to and
+/// including the `[Events]` `Format:` line, which is what names the fields every
+/// block payload then holds (an ASS reader rejects the track without it). One
+/// `Default` style, since the cues framed by [`frame_subtitle_block`] are plain
+/// text and reference no other.
+pub const ASS_SCRIPT_HEADER: &str = "[Script Info]\r\n\
+ScriptType: v4.00+\r\n\
+\r\n\
+[V4+ Styles]\r\n\
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\r\n\
+Style: Default,Arial,16,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,1,0,2,10,10,10,1\r\n\
+\r\n\
+[Events]\r\n\
+Format: ReadOrder, Layer, Style, Name, MarginL, MarginR, MarginV, Effect, Text\r\n";
+
+/// Frame plain UTF-8 cue text as the block payload an `S_TEXT/*` Matroska track
+/// carries (M898), the inverse of [`deframe_subtitle_block`]. The cue's window is
+/// the block timestamp + `BlockDuration`, so only the text is framed:
+/// - [`TextFormat::Utf8`] / [`TextFormat::WebVtt`]: the text is the payload.
+/// - [`TextFormat::Ssa`]: the eight fields the de-frame skips are written ahead of
+///   the text, with the line breaks as `\N`. `read_order` is the event index, which
+///   a reader uses to order events and drop repeats, so it must rise per cue.
+pub fn frame_subtitle_block(text: &str, format: TextFormat, read_order: u64) -> String {
+    match format {
+        TextFormat::Ssa => {
+            let mut out = alloc::format!("{read_order},0,Default,,0,0,0,,");
+            for (i, line) in text.lines().enumerate() {
+                if i > 0 {
+                    out.push_str("\\N");
+                }
+                out.push_str(line);
+            }
+            out
+        }
+        _ => String::from(text),
+    }
+}
+
 /// Parse TTML / DFXP (W3C Timed Text, also SMPTE-TT / EBU-TT / IMSC) into cues.
 /// TTML is XML; rather than a full parser this scans for `<p>` paragraph elements
 /// (any namespace prefix), reading their `begin` / `end` time attributes and text
@@ -1758,6 +1796,26 @@ mod tests {
         assert_eq!(
             deframe_subtitle_block("<c.yellow>Hi</c> there", TextFormat::WebVtt),
             "Hi there"
+        );
+    }
+
+    /// The framing pairs with the de-framing: what a muxer writes for a cue is
+    /// what a demuxer reads back as that cue's text.
+    #[test]
+    fn frame_subtitle_block_is_the_inverse_of_the_de_frame() {
+        let ass = frame_subtitle_block("Hello\nworld", TextFormat::Ssa, 7);
+        assert_eq!(ass, "7,0,Default,,0,0,0,,Hello\\Nworld");
+        assert_eq!(
+            deframe_subtitle_block(&ass, TextFormat::Ssa),
+            "Hello\nworld"
+        );
+        // A cue whose text contains commas survives the field split.
+        let commas = frame_subtitle_block("one, two", TextFormat::Ssa, 0);
+        assert_eq!(deframe_subtitle_block(&commas, TextFormat::Ssa), "one, two");
+        // Plain UTF-8 is the payload as-is.
+        assert_eq!(
+            frame_subtitle_block("Hi", TextFormat::Utf8, 3),
+            String::from("Hi")
         );
     }
 

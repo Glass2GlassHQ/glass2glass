@@ -180,6 +180,11 @@ impl MkvCodec {
             MkvCodec::Ac3 => b"A_AC3",
             MkvCodec::Flac => b"A_FLAC",
             MkvCodec::Subtitle(TextFormat::Utf8) => b"S_TEXT/UTF8",
+            MkvCodec::Subtitle(TextFormat::Ssa) => b"S_TEXT/ASS",
+            // No `S_TEXT/WEBVTT`: it is a read-side mapping only. ffmpeg writes and
+            // reads the WebM `D_WEBVTT/*` ids instead, whose block payload leads
+            // with the cue identifier and settings, so writing WebVTT here would be
+            // a carriage no reference peer reads back.
             MkvCodec::Subtitle(_) | MkvCodec::Other => return None,
         })
     }
@@ -1572,6 +1577,20 @@ impl MatroskaMuxer {
                 group.extend_from_slice(&elem_vec(ID_DISCARD_PADDING, &int_bytes(discard_ns)));
                 out.extend_from_slice(&elem_vec(ID_BLOCK_GROUP, &group));
             }
+            // A subtitle cue lasts as long as its `BlockDuration` says, and a
+            // SimpleBlock has nowhere to put one, so a text block is always a
+            // BlockGroup (M898). The Block's flags stay 0: the keyframe bit is a
+            // SimpleBlock field.
+            None if self.is_subtitle_track(track) => {
+                let block = build_simple_block(track_number, rel, false, data);
+                let mut group = elem_vec(ID_BLOCK, &block);
+                if duration_ns > 0 {
+                    let ticks =
+                        (duration_ns + DEFAULT_TIMESTAMP_SCALE / 2) / DEFAULT_TIMESTAMP_SCALE;
+                    group.extend_from_slice(&elem_vec(ID_BLOCK_DURATION, &uint_bytes(ticks)));
+                }
+                out.extend_from_slice(&elem_vec(ID_BLOCK_GROUP, &group));
+            }
             None => {
                 let block = build_simple_block(track_number, rel, keyframe, data);
                 out.extend_from_slice(&elem_vec(ID_SIMPLE_BLOCK, &block));
@@ -1618,6 +1637,15 @@ impl MatroskaMuxer {
     pub fn duration_patch(&self) -> Option<(usize, [u8; 8])> {
         let offset = self.duration_patch_offset?;
         Some((offset, (self.max_end_ticks as f64).to_be_bytes()))
+    }
+
+    /// Whether track `track` carries timed text, whose blocks need the
+    /// `BlockDuration` only a `BlockGroup` can hold.
+    fn is_subtitle_track(&self, track: usize) -> bool {
+        matches!(
+            self.tracks.get(track).map(|t| t.spec.codec),
+            Some(MkvCodec::Subtitle(_))
+        )
     }
 
     /// The `(BlockDuration in TimestampScale ticks, DiscardPadding in ns)` a
@@ -1833,17 +1861,24 @@ fn tracks_element(tracks: &[MkvTrackConfig], track_tags: &[(usize, TagList)]) ->
                 &uint_bytes(OPUS_SEEK_PRE_ROLL_NS),
             ));
         }
-        if spec.codec.track_type() == 1 {
-            let mut v = elem_vec(ID_PIXEL_WIDTH, &uint_bytes(spec.width as u64));
-            v.extend_from_slice(&elem_vec(ID_PIXEL_HEIGHT, &uint_bytes(spec.height as u64)));
-            entry.extend_from_slice(&elem_vec(ID_VIDEO, &v));
-        } else {
-            let mut a = elem_vec(ID_CHANNELS, &uint_bytes(spec.channels.max(1) as u64));
-            a.extend_from_slice(&elem_vec(
-                ID_SAMPLING_FREQ,
-                &(spec.sample_rate as f64).to_be_bytes(),
-            ));
-            entry.extend_from_slice(&elem_vec(ID_AUDIO, &a));
+        // A subtitle TrackEntry has neither child: `Video` / `Audio` describe
+        // settings a text track has none of, and a reader rejects the ones it
+        // does not expect for the TrackType.
+        match spec.codec.track_type() {
+            1 => {
+                let mut v = elem_vec(ID_PIXEL_WIDTH, &uint_bytes(spec.width as u64));
+                v.extend_from_slice(&elem_vec(ID_PIXEL_HEIGHT, &uint_bytes(spec.height as u64)));
+                entry.extend_from_slice(&elem_vec(ID_VIDEO, &v));
+            }
+            2 => {
+                let mut a = elem_vec(ID_CHANNELS, &uint_bytes(spec.channels.max(1) as u64));
+                a.extend_from_slice(&elem_vec(
+                    ID_SAMPLING_FREQ,
+                    &(spec.sample_rate as f64).to_be_bytes(),
+                ));
+                entry.extend_from_slice(&elem_vec(ID_AUDIO, &a));
+            }
+            _ => {}
         }
         entries.extend_from_slice(&elem_vec(ID_TRACK_ENTRY, &entry));
     }

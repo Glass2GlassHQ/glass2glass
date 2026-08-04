@@ -2312,6 +2312,24 @@ travels as a `TextCueMeta` frame-meta (the `metadata` feature) that `SubParse`
 attaches and `TextOverlayN` reads, recovering WebVTT / SSA positioning; on the
 ZST baseline (no meta) streamed cues draw at the renderer default.
 
+Cue streams also go back into a container. A `Caps::Text{Utf8}` pad on `MkvMuxN`
+or `Mp4MuxN` adds a subtitle track beside the A/V ones, taking one cue per frame
+with the window on the frame's PTS + duration, and the track's init needs nothing
+from the stream, so it is fixed at configure rather than at the first cue (which
+may be many seconds in, and every other track waits on the header). The two
+containers time a cue differently. Matroska states the window per block, so a text
+block is always a `BlockGroup` carrying a `BlockDuration` (a `SimpleBlock` has
+nowhere to put one); the `subtitle-format` property picks the storage syntax,
+`S_TEXT/UTF8` (the default, `subrip` to ffmpeg) or `S_TEXT/ASS`, where each cue is
+framed as the mapping's `ReadOrder,Layer,Style,Name,MarginL,MarginR,MarginV,Effect,Text`
+event with `\N` line breaks, behind a script-header `CodecPrivate`. MP4 has no
+per-sample timestamp: a `tx3g` sample (2-byte big-endian text length + UTF-8, what
+ffmpeg calls `mov_text`) presents where the durations before it end, so the run
+before the first cue and each run between cues is filled with an empty sample,
+which is also what "no subtitle on screen" means in the format. Either muxer's
+per-track metadata reaches a text track unchanged, so a subtitle track's language
+and title ride the Matroska `TrackEntry` the way an audio track's do.
+
 Closed captions (CEA-608 / CEA-708) feed the same renderer, but their bytes ride
 *inside* the compressed video bitstream rather than in a container text track, so
 the path is a track, not a `SubParse`-style drop-in. The `cea` module (`no_std`)

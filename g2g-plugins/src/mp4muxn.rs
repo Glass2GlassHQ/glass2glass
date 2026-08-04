@@ -25,7 +25,10 @@
 //! input builds the single-track [`crate::mp4mux::Mp4Mux`]), the way gst's
 //! request sink pads do. Video is H.264/H.265 (avc1/hvc1), VP8/VP9
 //! (vp08/vp09 + vpcC) or AV1 (av01 + av1C from the sequence header, M773);
-//! audio is AAC (mp4a/esds) or Opus (Opus/dOps), sync-sample audio.
+//! audio is AAC (mp4a/esds) or Opus (Opus/dOps), sync-sample audio. A
+//! `Caps::Text{Utf8}` pad adds a `tx3g` timed-text track (M898, ffmpeg's
+//! `mov_text`): one cue per sample, with the runs between cues filled by empty
+//! samples, since a text sample presents where the durations before it end.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -39,7 +42,7 @@ use g2g_core::{
     split_tags, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet,
     ClosedCaptionFormat, ConfigureOutcome, Dim, FrameTiming, G2gError, InputAggregator,
     MemoryDomain, MultiInputElement, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec, TagList, VideoCodec,
+    PropertySpec, TagList, TextFormat, VideoCodec,
 };
 
 use crate::cea::{build_cdp, parse_cc_data, CcTriple};
@@ -56,6 +59,9 @@ use crate::rtcp;
 
 /// Video tracks use a 90 kHz media timescale; audio tracks use the sample rate.
 const VIDEO_TIMESCALE: u32 = 90_000;
+/// Timed-text tracks use a 1 kHz media timescale (ffmpeg's for `mov_text`), so a
+/// cue's millisecond timing lands on a tick exactly.
+const TEXT_TIMESCALE: u32 = 1_000;
 /// CEA-708 frame-rate code for 29.97 fps, the rate a muxed CDP declares (the
 /// North-American caption norm, and what `st2110ancrtp` defaults to).
 const CDP_FRAME_RATE_2997: u8 = 4;
@@ -75,6 +81,10 @@ enum PadKind {
     /// A raw closed-caption track (M883): the pad carries `cc_data` triples, which
     /// go into `c608` / `c708` samples.
     ClosedCaption(ClosedCaptionFormat),
+    /// A timed-text subtitle track (M898): the pad carries one plain-UTF-8 cue per
+    /// frame, which goes into a `tx3g` (3GPP timed text, ffmpeg's `mov_text`)
+    /// sample.
+    Text,
 }
 
 /// A track's `moov` init data, captured from its first access unit.
@@ -99,6 +109,8 @@ enum TrackInit {
     ClosedCaption {
         format: ClosedCaptionFormat,
     },
+    /// A subtitle track needs nothing from the stream, so it is ready at configure.
+    Text,
 }
 
 impl TrackInit {
@@ -106,6 +118,7 @@ impl TrackInit {
         match self {
             TrackInit::Video { .. } | TrackInit::ClosedCaption { .. } => VIDEO_TIMESCALE,
             TrackInit::Audio { rate, .. } => *rate,
+            TrackInit::Text => TEXT_TIMESCALE,
         }
     }
 }
@@ -128,6 +141,9 @@ pub struct Mp4MuxN {
     prev_pts_ns: Vec<Option<u64>>,
     /// Per-track CDP sequence counter, for a `c708` track's caption packets.
     cdp_seq: Vec<u16>,
+    /// Per-track end (ns) of the last text cue written, so the run before the next
+    /// one can be filled with an empty sample (see the gap note in `emit_au`).
+    text_end_ns: Vec<u64>,
     header_written: bool,
     /// Global moof sequence number (1-based, increasing across the movie).
     sequence: u64,
@@ -190,6 +206,18 @@ struct PendingSample {
     is_sync: bool,
 }
 
+/// One finished sample on its way into the file: its bytes and the timing the
+/// sample tables (or the fragment's `trun`) record for it. `duration` is in the
+/// track's media timescale.
+#[derive(Debug, Clone)]
+struct TimedSample {
+    bytes: Vec<u8>,
+    is_sync: bool,
+    pts_ns: u64,
+    dts_ns: u64,
+    duration: u32,
+}
+
 /// A track's in-progress `moof`+`mdat` fragment: the samples buffered so far, the
 /// decode time at the fragment's first sample (its `tfdt`), and the accumulated
 /// media duration (track timescale) used to decide when the target is reached.
@@ -224,6 +252,7 @@ impl Mp4MuxN {
             decode_time: alloc::vec![0; inputs],
             prev_pts_ns: alloc::vec![None; inputs],
             cdp_seq: alloc::vec![0; inputs],
+            text_end_ns: alloc::vec![0; inputs],
             header_written: false,
             sequence: 0,
             emitted: 0,
@@ -375,6 +404,11 @@ impl Mp4MuxN {
                 rate: *sample_rate,
             }),
             Caps::ClosedCaption { format } => Some(PadKind::ClosedCaption(*format)),
+            // Only the elementary cue form: a `Text` pad of a document format
+            // (`Srt` / `Ssa` / `Ttml`) carries whole-file bytes, not timed cues.
+            Caps::Text {
+                format: TextFormat::Utf8,
+            } => Some(PadKind::Text),
             _ => None,
         }
     }
@@ -521,7 +555,8 @@ impl Mp4MuxN {
             Some(PadKind::ClosedCaption(format)) => {
                 self.inits[input] = Some(TrackInit::ClosedCaption { format });
             }
-            None => {}
+            // A text track's init was fixed at configure; nothing rides the cues.
+            Some(PadKind::Text) | None => {}
         }
     }
 
@@ -558,6 +593,7 @@ impl Mp4MuxN {
                 self.cdp_seq[input] = seq.wrapping_add(1);
                 (cc_sample(au, format, seq), true)
             }
+            Some(PadKind::Text) => (tx3g_sample(au), true),
             _ => (au.to_vec(), true),
         }
     }
@@ -608,15 +644,64 @@ impl Mp4MuxN {
         self.prev_pts_ns[input] = Some(pts_ns);
         let duration = ns_to_ts(dur_ns, timescale) as u32;
 
+        // A text track has no per-sample timestamp on disk: a cue presents where
+        // the durations before it end, so the run between two cues (and any before
+        // the first) must be filled with an empty sample, or every cue after a gap
+        // shows early. This is what "no subtitle on screen" is in a tx3g track, and
+        // what ffmpeg writes.
+        if matches!(self.kinds[input], Some(PadKind::Text)) {
+            let end_ns = self.text_end_ns[input];
+            let gap = ns_to_ts(pts_ns.saturating_sub(end_ns), timescale) as u32;
+            if gap > 0 {
+                let filler = TimedSample {
+                    bytes: tx3g_sample(&[]),
+                    is_sync: true,
+                    pts_ns: end_ns,
+                    dts_ns: end_ns,
+                    duration: gap,
+                };
+                self.push_sample(input, filler, timescale, out).await?;
+            }
+            self.text_end_ns[input] = pts_ns.saturating_add(dur_ns);
+        }
+
+        let dts_ns = match frame.timing.dts_ns {
+            d if d > 0 && d <= pts_ns => d,
+            _ => pts_ns,
+        };
+        let timed = TimedSample {
+            bytes: sample,
+            is_sync,
+            pts_ns,
+            dts_ns,
+            duration,
+        };
+        self.push_sample(input, timed, timescale, out).await
+    }
+
+    /// Buffer one finished sample for its track: into the progressive file's
+    /// sample list, or into the fragmented layout's pending fragment (flushed
+    /// immediately in per-AU mode). Times are the sample's own, so a synthesised
+    /// one (a text gap) goes in the same way a real access unit does.
+    async fn push_sample(
+        &mut self,
+        input: usize,
+        sample: TimedSample,
+        timescale: u32,
+        out: &mut dyn OutputSink,
+    ) -> Result<(), G2gError> {
+        let TimedSample {
+            bytes: sample,
+            is_sync,
+            pts_ns,
+            dts_ns,
+            duration,
+        } = sample;
         // Progressive mode: hold every sample until EOS, where the `mdat` and the
         // sample tables are written together. A frame with no decode timestamp of
         // its own (or one past its PTS, which `ctts` version 0 cannot express)
         // decodes when it presents, the common no-reorder case.
         if !self.fragmented {
-            let dts_ns = match frame.timing.dts_ns {
-                d if d > 0 && d <= pts_ns => d,
-                _ => pts_ns,
-            };
             self.samples.push(ProgSample {
                 input,
                 bytes: sample,
@@ -938,6 +1023,12 @@ impl MultiInputElement for Mp4MuxN {
         } = absolute_caps
         {
             self.dims[input] = (*w, *h);
+        }
+        // A text track's `trak` needs nothing from the stream, so it is ready now:
+        // the first cue can be many seconds in, and the `moov` (which waits on
+        // every track) would hold the A/V until then.
+        if matches!(kind, PadKind::Text) {
+            self.inits[input] = Some(TrackInit::Text);
         }
         self.kinds[input] = Some(kind);
         Ok(ConfigureOutcome::Accepted)
@@ -1383,6 +1474,16 @@ fn trak_media(init: &TrackInit) -> TrakMedia {
             dims: (0, 0),
             is_video: false,
         },
+        // `sbtl` + `nmhd` is what ffmpeg writes for a `tx3g` track, and one of the
+        // handlers the g2g demuxer reads a text sample entry under.
+        TrackInit::Text => TrakMedia {
+            handler: b"sbtl",
+            media_header: full_box(b"nmhd", 0, 0, &[]),
+            sample_entry: tx3g_sample_entry(),
+            timescale: TEXT_TIMESCALE,
+            dims: (0, 0),
+            is_video: false,
+        },
         TrackInit::Audio {
             format,
             channels,
@@ -1454,6 +1555,48 @@ fn cc_sample_entry(format: ClosedCaptionFormat) -> Vec<u8> {
     p.extend_from_slice(&[0u8; 6]); // reserved
     p.extend_from_slice(&1u16.to_be_bytes()); // data reference index
     mp4_box(fourcc, &p)
+}
+
+/// One 3GPP timed-text (`tx3g`) sample: a 2-byte big-endian text length then that
+/// many UTF-8 bytes (TS 26.245), the inverse of the demuxer's de-framing. No
+/// style / modifier boxes follow, so the cue is drawn with the sample entry's
+/// default style. An empty text is the "no subtitle on screen" sample that spans
+/// the gap between cues. A cue past what the length field can count is truncated
+/// (a reader would mis-frame the sample otherwise).
+fn tx3g_sample(text: &[u8]) -> Vec<u8> {
+    let len = text.len().min(u16::MAX as usize);
+    let mut out = (len as u16).to_be_bytes().to_vec();
+    out.extend_from_slice(&text[..len]);
+    out
+}
+
+/// The 3GPP timed-text sample entry (`tx3g`, TS 26.245): the plain `SampleEntry`
+/// header, then the display flags, justification, background colour, the default
+/// text box and style record, and a font table naming the style's font. The
+/// values are the neutral defaults ffmpeg writes (centered at the bottom, opaque
+/// white, 18 point); the text box stays empty because a text pad carries no video
+/// geometry to size it against, which leaves the placement to the player.
+fn tx3g_sample_entry() -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(&[0u8; 6]); // reserved
+    p.extend_from_slice(&1u16.to_be_bytes()); // data reference index
+    p.extend_from_slice(&0u32.to_be_bytes()); // displayFlags
+    p.push(0x01); // horizontal justification: centered
+    p.push(0xFF); // vertical justification: bottom
+    p.extend_from_slice(&[0, 0, 0, 0]); // background colour rgba
+    p.extend_from_slice(&[0u8; 8]); // BoxRecord: top / left / bottom / right
+    p.extend_from_slice(&0u16.to_be_bytes()); // style start char
+    p.extend_from_slice(&0u16.to_be_bytes()); // style end char
+    p.extend_from_slice(&1u16.to_be_bytes()); // font ID
+    p.push(0); // face style flags
+    p.push(18); // font size
+    p.extend_from_slice(&[0xFF; 4]); // text colour rgba
+    let mut ftab = 1u16.to_be_bytes().to_vec(); // font entry count
+    ftab.extend_from_slice(&1u16.to_be_bytes()); // font ID
+    ftab.push(5);
+    ftab.extend_from_slice(b"Serif");
+    p.extend_from_slice(&mp4_box(b"ftab", &ftab));
+    mp4_box(b"tx3g", &p)
 }
 
 /// The `gmhd` base-media information a QuickTime caption track carries in place of
