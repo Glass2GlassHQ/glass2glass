@@ -512,8 +512,7 @@ _(No open parser items.)_
 ## Compositor
 
 - `wgpucompositor`: zero-copy `WgpuTexture` input (the latest-wins aggregator
-  caches byte payloads today); share the aggregator cadence with the CPU
-  element (a `CompositorState` holding agg/primed/inputs/emitted); planar YUV.
+  caches byte payloads today); planar YUV.
 - Timer-driven output (emit at the output rate even when inputs stall, a
   zero-order-hold aggregator tick). Needs the runner to deadline-tick the
   compositor without an input packet; constant-rate resampling of a flowing

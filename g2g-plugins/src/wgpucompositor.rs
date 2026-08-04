@@ -35,13 +35,13 @@ use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::compositor::{paint_order, CompositorPad, PENDING_CAP};
+use crate::compositor::{paint_order, CompositorPad, CompositorState};
 use crate::gpu::{gpu_err, GpuContext, WgpuTextureKeepAlive};
 use g2g_core::frame::Frame;
 use g2g_core::memory::{OwnedWgpuTexture, SystemSlice};
 use g2g_core::{
-    Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError, InputAggregator,
-    MemoryDomain, MultiInputElement, OutputSink, PipelinePacket, Rate, RawVideoFormat,
+    Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError, MemoryDomain,
+    MultiInputElement, OutputSink, PipelinePacket, Rate, RawVideoFormat,
 };
 
 /// Largest input / canvas edge the shader's fixed-point resize stays exact for
@@ -193,16 +193,13 @@ pub struct WgpuCompositor {
     out_h: u32,
     framerate_q16: u32,
     pads: Vec<CompositorPad>,
-    inputs: Vec<Option<(u32, u32)>>,
     /// Same latest-wins cadence as the CPU compositor: input 0 queues and
     /// releases one output frame each, every other input keeps only its newest.
-    agg: InputAggregator<(FrameTiming, Box<[u8]>)>,
+    state: CompositorState,
     /// Inputs whose cached bytes are already in `src_buf`, so an overlay that
     /// has not moved is not re-uploaded per output frame.
     uploaded: Vec<bool>,
-    primed: bool,
     background: [u8; 4],
-    emitted: u64,
     ctx: Option<GpuContext>,
     gpu: Option<Gpu>,
     gpu_output: bool,
@@ -219,12 +216,9 @@ impl WgpuCompositor {
             out_h,
             framerate_q16: 30 << 16,
             pads,
-            inputs: vec![None; n],
-            agg: InputAggregator::new(n),
+            state: CompositorState::new(n),
             uploaded: vec![false; n],
-            primed: n == 1,
             background: [0, 0, 0, 255],
-            emitted: 0,
             ctx: None,
             gpu: None,
             gpu_output: false,
@@ -262,7 +256,7 @@ impl WgpuCompositor {
 
     /// Number of composited frames emitted so far (one per input-0 frame).
     pub fn emitted(&self) -> u64 {
-        self.emitted
+        self.state.emitted()
     }
 
     fn output(&self) -> Caps {
@@ -304,9 +298,9 @@ impl WgpuCompositor {
         // (zero-sized), so offsets stay indexed by input number.
         let mut offsets = Vec::with_capacity(self.pads.len());
         let mut total = 0usize;
-        for geom in &self.inputs {
+        for i in 0..self.pads.len() {
             offsets.push(total);
-            let (w, h) = geom.unwrap_or((0, 0));
+            let (w, h) = self.state.geometry(i).unwrap_or((0, 0));
             total += w as usize * h as usize * 4;
         }
         let row_bytes = (self.out_w as usize * 4).div_ceil(256) * 256;
@@ -399,14 +393,14 @@ impl WgpuCompositor {
     fn gpu_pads(&self, offsets: &[usize]) -> Vec<GpuPad> {
         let mut out = Vec::with_capacity(self.pads.len());
         for i in paint_order(&self.pads) {
-            let Some((sw, sh)) = self.inputs[i] else {
+            let Some((sw, sh)) = self.state.geometry(i) else {
                 continue;
             };
             if sw == 0 || sh == 0 {
                 continue;
             }
             // Input 0 is the frame driving this output; the rest need a cached one.
-            if i != 0 && self.agg.latest(i).is_none() {
+            if i != 0 && self.state.latest(i).is_none() {
                 continue;
             }
             let pad = self.pads[i];
@@ -435,11 +429,11 @@ impl WgpuCompositor {
         let gpu = self.gpu.as_ref().ok_or(G2gError::NotConfigured)?;
         let pads = self.gpu_pads(&gpu.offsets);
 
-        // Disjoint field borrows: the aggregator is read while `uploaded` is
+        // Disjoint field borrows: the cached frames are read while `uploaded` is
         // updated.
-        let (agg, uploaded) = (&self.agg, &mut self.uploaded);
+        let (state, uploaded) = (&self.state, &mut self.uploaded);
         for (i, up) in uploaded.iter_mut().enumerate() {
-            let Some((w, h)) = self.inputs[i] else {
+            let Some((w, h)) = state.geometry(i) else {
                 continue;
             };
             let need = w as usize * h as usize * 4;
@@ -452,7 +446,7 @@ impl WgpuCompositor {
                 if *up {
                     continue;
                 }
-                match agg.latest(i) {
+                match state.latest(i) {
                     Some((_, bytes)) => bytes,
                     None => continue,
                 }
@@ -615,9 +609,7 @@ impl WgpuCompositor {
         } else {
             MemoryDomain::System(SystemSlice::from_boxed(self.read_canvas()?))
         };
-        let frame = Frame::new(domain, timing, self.emitted);
-        self.emitted += 1;
-        Ok(frame)
+        Ok(Frame::new(domain, timing, self.state.next_sequence()))
     }
 }
 
@@ -660,11 +652,10 @@ impl MultiInputElement for WgpuCompositor {
         if *w > MAX_DIM || *h > MAX_DIM || self.out_w > MAX_DIM || self.out_h > MAX_DIM {
             return Err(G2gError::CapsMismatch);
         }
-        if self.inputs[input] != Some((*w, *h)) {
+        if self.state.set_geometry(input, *w, *h) {
             // The packed source layout is derived from every input's geometry.
             self.gpu = None;
         }
-        self.inputs[input] = Some((*w, *h));
         Ok(ConfigureOutcome::Accepted)
     }
 
@@ -681,7 +672,7 @@ impl MultiInputElement for WgpuCompositor {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let (w, h) = self.inputs[input].ok_or(G2gError::NotConfigured)?;
+                    let (w, h) = self.state.geometry(input).ok_or(G2gError::NotConfigured)?;
                     let Some(src) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
@@ -689,32 +680,14 @@ impl MultiInputElement for WgpuCompositor {
                     if src.len() < need {
                         return Err(G2gError::CapsMismatch);
                     }
-                    let bytes: Box<[u8]> = src[..need].into();
-
-                    if input == 0 {
-                        self.agg.push(0, (frame.timing, bytes));
-                    } else {
-                        // Overlay: cache the latest frame and mark it for
-                        // re-upload; it is picked up by the next input-0 frame.
-                        self.agg.push_latest(input, (frame.timing, bytes));
+                    self.state.ingest(input, frame.timing, src[..need].into());
+                    if input != 0 {
+                        // The overlay's new bytes need re-uploading.
                         self.uploaded[input] = false;
                     }
 
-                    if !self.primed && self.agg.latest_ready(0) {
-                        self.primed = true;
-                    }
-
-                    if self.primed {
+                    while let Some((timing, base)) = self.state.take_due() {
                         self.ensure_gpu().await?;
-                        while let Some((timing, base)) = self.agg.take_round_latest(0) {
-                            let frame = self.compose_frame(&base, timing)?;
-                            out.push(PipelinePacket::DataFrame(frame)).await?;
-                        }
-                    } else if self.agg.queued(0) > PENDING_CAP {
-                        // Startup buffer full: emit the oldest overlay-less
-                        // rather than drop it, so output keeps flowing.
-                        self.ensure_gpu().await?;
-                        let (timing, base) = self.agg.take_round_latest(0).expect("over the cap");
                         let frame = self.compose_frame(&base, timing)?;
                         out.push(PipelinePacket::DataFrame(frame)).await?;
                     }
@@ -728,24 +701,21 @@ impl MultiInputElement for WgpuCompositor {
                     height: Dim::Fixed(h),
                     ..
                 }) => {
-                    if self.inputs[input] != Some((w, h)) {
+                    if self.state.geometry(input) != Some((w, h)) {
                         if w > MAX_DIM || h > MAX_DIM {
                             return Err(G2gError::CapsMismatch);
                         }
-                        self.agg.clear(input);
+                        self.state.set_geometry(input, w, h);
+                        self.state.clear(input);
                         self.uploaded[input] = false;
                         self.gpu = None;
-                        self.inputs[input] = Some((w, h));
                     }
                 }
                 // A flush on an overlay drops its cached frame so a stale overlay
                 // never lingers, and re-arms startup so it is waited for again.
                 PipelinePacket::Flush => {
-                    self.agg.clear(input);
+                    self.state.flush(input);
                     self.uploaded[input] = false;
-                    if input != 0 {
-                        self.primed = false;
-                    }
                 }
                 PipelinePacket::Eos | PipelinePacket::Segment(_) => {}
                 _ => {}

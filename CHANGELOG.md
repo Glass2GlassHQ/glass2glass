@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M873: the CPU and GPU compositors share one `CompositorState` for their latest-wins input cadence.
+
 - M872: TS carries tags: the muxers write the SDT service name/provider and per-stream ISO-639 language descriptors, the demuxers post them as bus tags.
 
 - M871: `mjpegdec` decodes straight to I420 without the RGBA intermediate, and a `mozjpeg` feature adds the libjpeg-turbo backend to both jpeg elements.

@@ -115,24 +115,11 @@ pub struct Compositor {
     framerate_q16: u32,
     /// Per-input placement; `pads.len()` is the input count.
     pads: Vec<CompositorPad>,
-    /// Per-input configured geometry `(width, height)`, set at negotiation.
-    inputs: Vec<Option<(u32, u32)>>,
-    /// Per-input frames under the aggregator's latest-wins policy: input 0 (the
-    /// timing driver) queues, and one output frame is released per queued item;
-    /// every other input holds only its newest frame, read in place by
-    /// [`compose`](Self::compose) until a newer one lands. Input 0's queue is
-    /// empty once primed, and is the startup buffer until then (bounded to
-    /// [`PENDING_CAP`]: on overflow the oldest is emitted overlay-less, so
-    /// output keeps flowing and no frame is dropped).
-    agg: InputAggregator<(FrameTiming, Box<[u8]>)>,
-    /// True once every overlay input has delivered at least one frame (or there
-    /// are no overlays). Until then the compositor is in startup, buffering
-    /// input-0 frames so a late-starting overlay still appears. Latches: an
-    /// overlay whose cached frame is later invalidated does not re-open startup.
-    primed: bool,
+    /// Input geometry, cached frames and emit cadence, shared with the GPU
+    /// sibling.
+    state: CompositorState,
     /// The canvas fill behind all inputs (RGBA8), default opaque black.
     background: [u8; 4],
-    emitted: u64,
 }
 
 /// Max input-0 frames buffered during startup before output begins flowing
@@ -148,6 +135,116 @@ pub(crate) fn paint_order(pads: &[CompositorPad]) -> Vec<usize> {
     order
 }
 
+/// The latest-wins input bookkeeping and emit cadence both compositors run:
+/// per-input geometry, the cached frames, startup priming and the output
+/// sequence counter. Only the pixel work differs between the CPU and the GPU
+/// element.
+#[derive(Debug)]
+pub(crate) struct CompositorState {
+    /// Per-input frames under the aggregator's latest-wins policy: input 0 (the
+    /// timing driver) queues, and one output frame is released per queued item;
+    /// every other input holds only its newest frame, read in place by the
+    /// compositing pass until a newer one lands. Input 0's queue is empty once
+    /// primed, and is the startup buffer until then (bounded to
+    /// [`PENDING_CAP`]: on overflow the oldest is emitted overlay-less, so
+    /// output keeps flowing and no frame is dropped).
+    agg: InputAggregator<(FrameTiming, Box<[u8]>)>,
+    /// Per-input configured geometry `(width, height)`, set at negotiation.
+    inputs: Vec<Option<(u32, u32)>>,
+    /// True once every overlay input has delivered at least one frame (or there
+    /// are no overlays). Until then the compositor is in startup, buffering
+    /// input-0 frames so a late-starting overlay still appears. Latches: an
+    /// overlay whose cached frame is later invalidated does not re-open startup.
+    primed: bool,
+    emitted: u64,
+}
+
+impl CompositorState {
+    pub(crate) fn new(n: usize) -> Self {
+        Self {
+            agg: InputAggregator::new(n),
+            inputs: vec![None; n],
+            // No overlays (single input) means nothing to wait for: start live.
+            primed: n == 1,
+            emitted: 0,
+        }
+    }
+
+    /// Take a delivered frame: input 0 queues (each one releases an output),
+    /// every other input caches it as its latest. Completes priming once every
+    /// overlay has delivered.
+    pub(crate) fn ingest(&mut self, input: usize, timing: FrameTiming, bytes: Box<[u8]>) {
+        if input == 0 {
+            self.agg.push(0, (timing, bytes));
+        } else {
+            // Overlay: cache the latest frame; it is picked up by the next
+            // input-0 frame and updates live as more arrive.
+            self.agg.push_latest(input, (timing, bytes));
+        }
+        if !self.primed && self.agg.latest_ready(0) {
+            self.primed = true;
+        }
+    }
+
+    /// The next input-0 frame to composite, or `None` while output waits. Once
+    /// primed that is every queued frame (at the moment of priming this flushes
+    /// the startup buffer, in arrival order); during startup it is the oldest
+    /// frame once the buffer is over [`PENDING_CAP`], composited overlay-less
+    /// rather than dropped so output keeps flowing behind a slow overlay. Call
+    /// in a loop: while unprimed one take brings the buffer back to the cap.
+    pub(crate) fn take_due(&mut self) -> Option<(FrameTiming, Box<[u8]>)> {
+        if self.primed || self.agg.queued(0) > PENDING_CAP {
+            self.agg.take_round_latest(0)
+        } else {
+            None
+        }
+    }
+
+    /// Newest frame cached for `input`, left in place for later output frames.
+    pub(crate) fn latest(&self, input: usize) -> Option<&(FrameTiming, Box<[u8]>)> {
+        self.agg.latest(input)
+    }
+
+    pub(crate) fn geometry(&self, input: usize) -> Option<(u32, u32)> {
+        self.inputs[input]
+    }
+
+    /// Record `input`'s negotiated geometry, reporting whether it changed. Keeps
+    /// the frames a change invalidates: the caller decides what else goes with
+    /// them (upload flags, device buffers) and calls [`clear`](Self::clear).
+    pub(crate) fn set_geometry(&mut self, input: usize, w: u32, h: u32) -> bool {
+        let changed = self.inputs[input] != Some((w, h));
+        self.inputs[input] = Some((w, h));
+        changed
+    }
+
+    /// Drop `input`'s cached / buffered frames.
+    pub(crate) fn clear(&mut self, input: usize) {
+        self.agg.clear(input);
+    }
+
+    /// A flush drops `input`'s frames, and on an overlay re-arms startup so that
+    /// overlay is waited for again instead of missing from the next output.
+    pub(crate) fn flush(&mut self, input: usize) {
+        self.agg.clear(input);
+        if input != 0 {
+            self.primed = false;
+        }
+    }
+
+    /// Composited frames emitted so far.
+    pub(crate) fn emitted(&self) -> u64 {
+        self.emitted
+    }
+
+    /// The sequence number for the frame being emitted, advancing the counter.
+    pub(crate) fn next_sequence(&mut self) -> u64 {
+        let seq = self.emitted;
+        self.emitted += 1;
+        seq
+    }
+}
+
 impl Compositor {
     /// A compositor producing an `out_w` x `out_h` RGBA8 canvas at 30 fps, with
     /// one `CompositorPad` per input (input 0 is the timing driver). Panics if
@@ -161,12 +258,8 @@ impl Compositor {
             format: RawVideoFormat::Rgba8,
             framerate_q16: 30 << 16,
             pads,
-            inputs: vec![None; n],
-            agg: InputAggregator::new(n),
-            // No overlays (single input) means nothing to wait for: start live.
-            primed: n == 1,
+            state: CompositorState::new(n),
             background: [0, 0, 0, 255],
-            emitted: 0,
         }
     }
 
@@ -205,7 +298,7 @@ impl Compositor {
 
     /// Number of composited frames emitted so far (one per input-0 frame).
     pub fn emitted(&self) -> u64 {
-        self.emitted
+        self.state.emitted()
     }
 
     fn output(&self) -> Caps {
@@ -246,13 +339,13 @@ impl Compositor {
             px.copy_from_slice(&self.background);
         }
         for i in paint_order(&self.pads) {
-            let Some((w, h)) = self.inputs[i] else {
+            let Some((w, h)) = self.state.geometry(i) else {
                 continue;
             };
             let src: &[u8] = if i == 0 {
                 base0
             } else {
-                match self.agg.latest(i) {
+                match self.state.latest(i) {
                     Some((_, s)) => s,
                     None => continue,
                 }
@@ -309,13 +402,13 @@ impl Compositor {
         }
 
         for i in paint_order(&self.pads) {
-            let Some((sw, sh)) = self.inputs[i] else {
+            let Some((sw, sh)) = self.state.geometry(i) else {
                 continue;
             };
             let src: &[u8] = if i == 0 {
                 base0
             } else {
-                match self.agg.latest(i) {
+                match self.state.latest(i) {
                     Some((_, s)) => s,
                     None => continue,
                 }
@@ -352,14 +445,12 @@ impl Compositor {
     /// Wrap composited `canvas` bytes as the next output frame, advancing the
     /// output sequence counter.
     fn output_frame(&mut self, canvas: Box<[u8]>, timing: FrameTiming) -> Frame {
-        let frame = Frame {
+        Frame {
             domain: MemoryDomain::System(SystemSlice::from_boxed(canvas)),
             timing,
-            sequence: self.emitted,
+            sequence: self.state.next_sequence(),
             meta: Default::default(),
-        };
-        self.emitted += 1;
-        frame
+        }
     }
 }
 
@@ -692,7 +783,7 @@ impl MultiInputElement for Compositor {
         if *format != self.format {
             return Err(G2gError::CapsMismatch);
         }
-        self.inputs[input] = Some((*w, *h));
+        self.state.set_geometry(input, *w, *h);
         Ok(ConfigureOutcome::Accepted)
     }
 
@@ -709,7 +800,7 @@ impl MultiInputElement for Compositor {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let (w, h) = self.inputs[input].ok_or(G2gError::NotConfigured)?;
+                    let (w, h) = self.state.geometry(input).ok_or(G2gError::NotConfigured)?;
                     let Some(src) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
@@ -717,35 +808,9 @@ impl MultiInputElement for Compositor {
                     if src.len() < need {
                         return Err(G2gError::CapsMismatch);
                     }
-                    let bytes: Box<[u8]> = src[..need].into();
+                    self.state.ingest(input, frame.timing, src[..need].into());
 
-                    if input == 0 {
-                        self.agg.push(0, (frame.timing, bytes));
-                    } else {
-                        // Overlay: cache the latest frame; it is picked up by the
-                        // next input-0 frame and updates live as more arrive.
-                        self.agg.push_latest(input, (frame.timing, bytes));
-                    }
-
-                    // Priming completes when every overlay has delivered a frame.
-                    if !self.primed && self.agg.latest_ready(0) {
-                        self.primed = true;
-                    }
-
-                    if self.primed {
-                        // Live: one output per queued input-0 frame, composited
-                        // with the latest overlays. At the moment of priming this
-                        // also flushes the startup buffer, in arrival order.
-                        while let Some((timing, base)) = self.agg.take_round_latest(0) {
-                            let canvas = self.compose(&base);
-                            let frame = self.output_frame(canvas, timing);
-                            out.push(PipelinePacket::DataFrame(frame)).await?;
-                        }
-                    } else if self.agg.queued(0) > PENDING_CAP {
-                        // Startup buffer full: emit the oldest overlay-less rather
-                        // than drop it, so output keeps flowing and no input-0
-                        // frame is lost while a slow overlay starts up.
-                        let (timing, base) = self.agg.take_round_latest(0).expect("over the cap");
+                    while let Some((timing, base)) = self.state.take_due() {
                         let canvas = self.compose(&base);
                         let frame = self.output_frame(canvas, timing);
                         out.push(PipelinePacket::DataFrame(frame)).await?;
@@ -764,21 +829,13 @@ impl MultiInputElement for Compositor {
                     // at the new dims and panic out of bounds. For an overlay
                     // the fresh frame repopulates the cache; for input 0 any
                     // startup-buffered frames are dropped too.
-                    if self.inputs[input] != Some((w, h)) {
-                        self.agg.clear(input);
-                    }
-                    self.inputs[input] = Some((w, h));
-                }
-                // A flush on an overlay input drops its cached frame so a stale
-                // overlay never lingers across a discontinuity, and re-arms
-                // startup so that overlay is waited for again. A flush on input 0
-                // clears any buffered startup frames (nothing else is cached).
-                PipelinePacket::Flush => {
-                    self.agg.clear(input);
-                    if input != 0 {
-                        self.primed = false;
+                    if self.state.set_geometry(input, w, h) {
+                        self.state.clear(input);
                     }
                 }
+                // A flush on input 0 clears any buffered startup frames (nothing
+                // else is cached); on an overlay it also re-arms startup.
+                PipelinePacket::Flush => self.state.flush(input),
                 // Per-input Eos is informational; the runner aggregates input
                 // ends and emits the single merged Eos. Segment is per-input
                 // control the compositor does not remap.
@@ -805,8 +862,8 @@ mod tests {
 
     /// Seed an overlay input's cached latest frame, as a delivered frame would.
     fn seed(comp: &mut Compositor, input: usize, bytes: Vec<u8>) {
-        comp.agg
-            .push_latest(input, (FrameTiming::default(), bytes.into()));
+        comp.state
+            .ingest(input, FrameTiming::default(), bytes.into());
     }
 
     fn px(buf: &[u8], cw: usize, x: usize, y: usize) -> [u8; 4] {
@@ -908,8 +965,8 @@ mod tests {
                 CompositorPad::at(2, 2).with_zorder(1).with_size(2, 2),
             ]),
         );
-        comp.inputs[0] = Some((8, 8));
-        comp.inputs[1] = Some((4, 4)); // native overlay geometry
+        comp.state.set_geometry(0, 8, 8);
+        comp.state.set_geometry(1, 4, 4); // native overlay geometry
         let red = solid(8, 8, [255, 0, 0, 255]);
         seed(&mut comp, 1, solid(4, 4, [0, 255, 0, 255]));
         let out = comp.compose(&red);
@@ -933,7 +990,7 @@ mod tests {
         // (0,0), so only the top-left quarter is green, the rest the background.
         let mut comp = Compositor::new(4, 4, Vec::from([CompositorPad::at(0, 0)]))
             .with_background([0, 0, 255, 255]);
-        comp.inputs[0] = Some((2, 2));
+        comp.state.set_geometry(0, 2, 2);
         let out = comp.compose(&solid(2, 2, [0, 255, 0, 255]));
         assert_eq!(
             px(&out, 4, 0, 0),
@@ -947,7 +1004,7 @@ mod tests {
         );
         // The default background stays opaque black.
         let mut def = Compositor::new(4, 4, Vec::from([CompositorPad::at(0, 0)]));
-        def.inputs[0] = Some((2, 2));
+        def.state.set_geometry(0, 2, 2);
         let out = def.compose(&solid(2, 2, [0, 255, 0, 255]));
         assert_eq!(
             px(&out, 4, 3, 3),
@@ -967,8 +1024,8 @@ mod tests {
                 CompositorPad::at(0, 0).with_zorder(5),
             ]),
         );
-        comp.inputs[0] = Some((2, 2));
-        comp.inputs[1] = Some((2, 2));
+        comp.state.set_geometry(0, 2, 2);
+        comp.state.set_geometry(1, 2, 2);
         let red = solid(2, 2, [255, 0, 0, 255]);
         seed(&mut comp, 1, solid(2, 2, [0, 0, 255, 255]));
         // input 0 (red) is passed as the base; input 1 (blue) has higher z-order.
@@ -1018,8 +1075,8 @@ mod tests {
             ]),
         )
         .with_format(RawVideoFormat::Nv12);
-        comp.inputs[0] = Some((8, 8));
-        comp.inputs[1] = Some((4, 4));
+        comp.state.set_geometry(0, 8, 8);
+        comp.state.set_geometry(1, 4, 4);
         seed(
             &mut comp,
             1,
@@ -1052,8 +1109,8 @@ mod tests {
             ]),
         )
         .with_format(RawVideoFormat::I420);
-        comp.inputs[0] = Some((8, 8));
-        comp.inputs[1] = Some((4, 4));
+        comp.state.set_geometry(0, 8, 8);
+        comp.state.set_geometry(1, 4, 4);
         seed(
             &mut comp,
             1,
@@ -1081,8 +1138,8 @@ mod tests {
             ]),
         )
         .with_format(RawVideoFormat::Nv12);
-        comp.inputs[0] = Some((4, 4));
-        comp.inputs[1] = Some((4, 4));
+        comp.state.set_geometry(0, 4, 4);
+        comp.state.set_geometry(1, 4, 4);
         seed(
             &mut comp,
             1,
@@ -1102,7 +1159,7 @@ mod tests {
         // default opaque-black background (Y0, U128, V128 full-range).
         let mut comp = Compositor::new(4, 4, Vec::from([CompositorPad::at(0, 0)]))
             .with_format(RawVideoFormat::Nv12);
-        comp.inputs[0] = Some((2, 2));
+        comp.state.set_geometry(0, 2, 2);
         let out = comp.compose(&solid_yuv(RawVideoFormat::Nv12, 2, 2, [90, 40, 200]));
         let f = RawVideoFormat::Nv12;
         assert_eq!(yuv_at(&out, f, 4, 4, 0, 0, 0), 90, "input paints its luma");
@@ -1124,8 +1181,8 @@ mod tests {
             ]),
         )
         .with_format(RawVideoFormat::Nv12);
-        comp.inputs[0] = Some((8, 8));
-        comp.inputs[1] = Some((4, 4));
+        comp.state.set_geometry(0, 8, 8);
+        comp.state.set_geometry(1, 4, 4);
         seed(
             &mut comp,
             1,
