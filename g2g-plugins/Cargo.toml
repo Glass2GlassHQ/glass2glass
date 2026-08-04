@@ -984,7 +984,7 @@ wayland-egl = { version = "0.32", optional = true }
 # Linux audio output / capture backends. All link system libraries via
 # pkg-config and are Linux-only.
 # ALSA render sink (alsa-sink): the `alsa` crate over libasound.
-alsa = { version = "0.9", optional = true }
+alsa = { version = "0.12", optional = true }
 # PulseAudio render sink (pulse-sink): the blocking "simple" API + the binding.
 libpulse-binding = { version = "2", optional = true, default-features = false }
 libpulse-simple-binding = { version = "2", optional = true, default-features = false }

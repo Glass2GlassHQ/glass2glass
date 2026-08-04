@@ -2,7 +2,8 @@
 //!
 //! These render sinks were unit-tested (caps mapping, pad templates) but never
 //! driven against a real audio device. This feeds each a short interleaved-PCM
-//! sine tone on the host's default output and asserts the full device path runs:
+//! sine tone on the host's default output, in every sample format and channel
+//! layout the sinks open a device with, and asserts the full device path runs:
 //! `configure_pipeline` opens the device, `process` writes PCM, `Eos` drains, and
 //! the sink's byte/frame counter advances. A host with no reachable device (CI,
 //! a headless box with no sound server) skips: `configure_pipeline` fails loud,
@@ -33,13 +34,21 @@ const SECONDS: f32 = 0.3;
 /// One pushed buffer's frame count (10 ms), so the sink sees several `DataFrame`s.
 const CHUNK_FRAMES: usize = (RATE as usize) / 100;
 
-/// Format / channel shapes exercised per sink, beyond the baseline S16 stereo:
-/// F32 samples and a mono layout, so the sink's format + channel handling is
-/// covered rather than just the one common shape.
+/// Format / channel shapes exercised per sink: every sample format the sinks
+/// open a device with, plus mono and the 5.1 / 7.1 layouts, so the format and
+/// channel-map handling is covered rather than just the one common shape. A
+/// host whose default device is stereo still exercises the > 2-channel open:
+/// the sound server accepts the surround layout and downmixes it.
 const SHAPES: &[(AudioFormat, u8)] = &[
     (AudioFormat::PcmS16Le, 2),
     (AudioFormat::PcmF32Le, 2),
+    (AudioFormat::PcmS24Le, 2),
+    (AudioFormat::PcmS32Le, 2),
+    (AudioFormat::PcmU8, 2),
     (AudioFormat::PcmS16Le, 1),
+    (AudioFormat::PcmS16Le, 6),
+    (AudioFormat::PcmS24Le, 6),
+    (AudioFormat::PcmS16Le, 8),
 ];
 
 /// A terminal sink swallows nothing downstream; this stand-in satisfies the
@@ -54,6 +63,24 @@ impl OutputSink for NullSink {
     }
 }
 
+/// Encode one sample. The test's own little-endian encoder, so what reaches the
+/// device is not produced by the same code the sinks lean on.
+fn push_sample(out: &mut Vec<u8>, s: f32, format: AudioFormat) {
+    match format {
+        AudioFormat::PcmU8 => out.push(((s * 127.0) as i32 + 128) as u8),
+        AudioFormat::PcmS16Le => out.extend_from_slice(&((s * 32767.0) as i16).to_le_bytes()),
+        // 3-byte packed, the low 3 bytes of the 32-bit value.
+        AudioFormat::PcmS24Le => {
+            out.extend_from_slice(&((s * 8_388_607.0) as i32).to_le_bytes()[..3])
+        }
+        AudioFormat::PcmS32Le => {
+            out.extend_from_slice(&((s * 2_147_483_647.0) as i32).to_le_bytes())
+        }
+        AudioFormat::PcmF32Le => out.extend_from_slice(&s.to_le_bytes()),
+        _ => panic!("no encoder for {format:?}"),
+    }
+}
+
 /// Interleaved sine tone, `frames` sample-frames across `channels`, in the given
 /// PCM format, quiet (amplitude ~0.2).
 fn tone(format: AudioFormat, channels: u8, frames: usize, phase0: usize) -> Vec<u8> {
@@ -62,10 +89,7 @@ fn tone(format: AudioFormat, channels: u8, frames: usize, phase0: usize) -> Vec<
         let t = (phase0 + i) as f32 / RATE as f32;
         let s = (2.0 * core::f32::consts::PI * FREQ * t).sin() * 0.2;
         for _ in 0..channels {
-            match format {
-                AudioFormat::PcmF32Le => out.extend_from_slice(&s.to_le_bytes()),
-                _ => out.extend_from_slice(&((s * i16::MAX as f32) as i16).to_le_bytes()),
-            }
+            push_sample(&mut out, s, format);
         }
     }
     out

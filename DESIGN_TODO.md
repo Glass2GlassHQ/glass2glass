@@ -392,12 +392,9 @@ Phased plan:
 
 ## Sinks
 
-- Linux audio sinks (`alsasink` / `pulsesink` / `pipewiresink`): host smoke test
-  done (M589, all three validated on Fedora / PipeWire playing a real tone across
-  S16 + F32, stereo + mono; `m589_audio_sink_smoke`, skips with no device). Still
-  open: more sample formats (S24 / S32 / U8); opening a > 2-channel device layout
-  from the sinks (the converter side of speaker positions is done); DMABUF /
-  zero-copy.
+- Linux audio sinks (`alsasink` / `pulsesink` / `pipewiresink`): DMABUF /
+  zero-copy. `wavsink` / `wasapisink` still accept only S16/F32 (WAV can carry
+  U8/S24/S32; WASAPI is Windows-gated).
 - Generic `GlSink` over EGL (vendor-neutral NV12 / RGBA present, no CUDA).
 
 ## Containers

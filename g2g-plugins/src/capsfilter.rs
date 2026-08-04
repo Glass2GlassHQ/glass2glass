@@ -182,7 +182,13 @@ const RAW_VIDEO_FORMATS: [RawVideoFormat; 5] = [
 ];
 
 /// The raw sample formats a format-less `audio/x-raw` expands to (M184).
-const RAW_AUDIO_FORMATS: [AudioFormat; 2] = [AudioFormat::PcmS16Le, AudioFormat::PcmF32Le];
+const RAW_AUDIO_FORMATS: [AudioFormat; 5] = [
+    AudioFormat::PcmS16Le,
+    AudioFormat::PcmF32Le,
+    AudioFormat::PcmS24Le,
+    AudioFormat::PcmS32Le,
+    AudioFormat::PcmU8,
+];
 
 /// A parsed caps field value: a fixed scalar (`width=640`), a `[min,max]` range
 /// (`width=[1,1920]`), or a `{a,b,...}` list (`format={I420,NV12}`). A range maps

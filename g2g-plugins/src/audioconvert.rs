@@ -1,5 +1,6 @@
 //! Software PCM converter (M34), the audio analog of `VideoConvert`. Converts
-//! interleaved PCM between sample formats (`PcmS16Le` <-> `PcmF32Le`) and
+//! interleaved PCM between sample formats (`PcmU8` / `PcmS16Le` / `PcmS24Le` /
+//! `PcmS32Le` / `PcmF32Le`, all via an f32 intermediate) and
 //! between channel counts (mono <-> multi-channel) at the same sample rate, so
 //! audio chains compose across format boundaries: `WasapiSrc (F32, 2ch) ->
 //! AudioConvert -> WavSink (S16)`, or feeding an encoder that wants a specific
@@ -33,8 +34,14 @@ use g2g_core::{
     PropValue, PropertySpec, ANY_CHANNELS,
 };
 
-/// The PCM sample formats this element reads and writes.
-const FORMATS: [AudioFormat; 2] = [AudioFormat::PcmS16Le, AudioFormat::PcmF32Le];
+/// The PCM sample formats `AudioConvert` / `AudioResample` read and write.
+pub(crate) const PCM_FORMATS: [AudioFormat; 5] = [
+    AudioFormat::PcmS16Le,
+    AudioFormat::PcmF32Le,
+    AudioFormat::PcmS24Le,
+    AudioFormat::PcmS32Le,
+    AudioFormat::PcmU8,
+];
 
 #[derive(Debug)]
 pub struct AudioConvert {
@@ -59,7 +66,7 @@ impl AudioConvert {
     pub fn new(target_format: AudioFormat, target_channels: u8) -> Self {
         assert!(target_channels > 0, "target channels must be non-zero");
         assert!(
-            FORMATS.contains(&target_format),
+            PCM_FORMATS.contains(&target_format),
             "AudioConvert is a raw-PCM converter; target must be a PCM format"
         );
         Self {
@@ -126,24 +133,25 @@ impl AudioConvert {
         else {
             return Err(G2gError::CapsMismatch);
         };
-        if !FORMATS.contains(format) {
+        if !PCM_FORMATS.contains(format) {
             return Err(G2gError::CapsMismatch);
         }
         Ok((*format, *channels, *sample_rate))
     }
 }
 
+/// Bytes per sample. `PcmS24Le` is 3-byte packed (no 32-bit container), the
+/// ST 2110-30 / AES67 L24 layout.
 pub(crate) fn sample_bytes(format: AudioFormat) -> usize {
     match format {
+        AudioFormat::PcmU8 => 1,
         AudioFormat::PcmS16Le => 2,
-        AudioFormat::PcmF32Le => 4,
-        // not reachable: only FORMATS pass negotiation.
+        AudioFormat::PcmS24Le => 3,
+        AudioFormat::PcmF32Le | AudioFormat::PcmS32Le => 4,
+        // not reachable: only PCM_FORMATS pass negotiation.
         _ => 0,
     }
 }
-
-/// The PCM sample formats `AudioConvert` / `AudioResample` read and write.
-pub(crate) const PCM_FORMATS: [AudioFormat; 2] = [AudioFormat::PcmS16Le, AudioFormat::PcmF32Le];
 
 impl AsyncElement for AudioConvert {
     type ProcessFuture<'a>
@@ -160,7 +168,7 @@ impl AsyncElement for AudioConvert {
     /// channel count at the same sample rate (rate is the one passthrough field).
     /// A fixed target emits that single output; a caps-driven (`auto`) target
     /// advertises the passthrough as the preferred alternative plus the retarget
-    /// options (the other PCM format, and an `ANY_CHANNELS` wildcard) so a
+    /// options (every other PCM format, and an `ANY_CHANNELS` wildcard) so a
     /// downstream capsfilter pins the real format / channel count.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         // Candidate output formats: the fixed target, or (auto) the input format
@@ -170,7 +178,7 @@ impl AsyncElement for AudioConvert {
             Some(f) => alloc::vec![FieldTransform::Fixed(f)],
             None => {
                 let mut v = alloc::vec![FieldTransform::Identity];
-                v.extend(FORMATS.iter().copied().map(FieldTransform::Fixed));
+                v.extend(PCM_FORMATS.iter().copied().map(FieldTransform::Fixed));
                 v
             }
         };
@@ -198,7 +206,7 @@ impl AsyncElement for AudioConvert {
             }
         }
         CapsConstraint::DerivedFields(CapsTransform::Audio {
-            accept: FORMATS.to_vec(),
+            accept: PCM_FORMATS.to_vec(),
             produce: Vec::new(),
             shapes,
         })
@@ -220,7 +228,7 @@ impl AsyncElement for AudioConvert {
         else {
             return Err(G2gError::CapsMismatch);
         };
-        if !FORMATS.contains(format) || *channels == ANY_CHANNELS {
+        if !PCM_FORMATS.contains(format) || *channels == ANY_CHANNELS {
             return Err(G2gError::CapsMismatch);
         }
         self.resolved = Some((*format, *channels));
@@ -346,7 +354,7 @@ static AUDIOCONVERT_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "format",
         PropKind::Str,
-        "output sample format: S16LE | F32LE",
+        "output sample format: S16LE | F32LE | S24LE | S32LE | U8",
     ),
     PropertySpec::new("channels", PropKind::Uint, "output channel count"),
 ];
@@ -360,6 +368,9 @@ pub(crate) fn audio_format_from_str(s: &str) -> Option<AudioFormat> {
     match s.to_ascii_lowercase().as_str() {
         "s16le" => Some(AudioFormat::PcmS16Le),
         "f32le" => Some(AudioFormat::PcmF32Le),
+        "s24le" => Some(AudioFormat::PcmS24Le),
+        "s32le" => Some(AudioFormat::PcmS32Le),
+        "u8" => Some(AudioFormat::PcmU8),
         _ => None,
     }
 }
@@ -369,6 +380,9 @@ pub(crate) fn audio_format_to_str(f: AudioFormat) -> &'static str {
     match f {
         AudioFormat::PcmS16Le => "S16LE",
         AudioFormat::PcmF32Le => "F32LE",
+        AudioFormat::PcmS24Le => "S24LE",
+        AudioFormat::PcmS32Le => "S32LE",
+        AudioFormat::PcmU8 => "U8",
         AudioFormat::Aac => "AAC",
         AudioFormat::Opus => "OPUS",
         // A format added since: no canonical string here, fail loud.
@@ -385,7 +399,7 @@ impl PadTemplates for AudioConvert {
             channels: 2,
             sample_rate: 48_000,
         };
-        let set = CapsSet::from_alternatives(FORMATS.map(pcm).to_vec());
+        let set = CapsSet::from_alternatives(PCM_FORMATS.map(pcm).to_vec());
         Vec::from([PadTemplate::sink(set.clone()), PadTemplate::source(set)])
     }
 }
@@ -556,12 +570,31 @@ fn map_channel(in_samples: &[f32], oc: usize, out_ch: usize) -> f32 {
     }
 }
 
+/// Round half away from zero without libm.
+fn round_away(v: f32) -> f32 {
+    if v >= 0.0 {
+        v + 0.5
+    } else {
+        v - 0.5
+    }
+}
+
 /// Decode one sample to f32 in [-1, 1). The slice starts at the sample.
 pub(crate) fn read_sample(at: &[u8], format: AudioFormat) -> f32 {
     match format {
+        AudioFormat::PcmU8 => (at[0] as f32 - 128.0) / 128.0,
         AudioFormat::PcmS16Le => {
             let s = i16::from_le_bytes([at[0], at[1]]);
             s as f32 / 32768.0
+        }
+        AudioFormat::PcmS24Le => {
+            // 3-byte packed, little-endian: sign-extend from the top byte.
+            let s = at[0] as i32 | (at[1] as i32) << 8 | (at[2] as i8 as i32) << 16;
+            s as f32 / 8_388_608.0
+        }
+        AudioFormat::PcmS32Le => {
+            let s = i32::from_le_bytes([at[0], at[1], at[2], at[3]]);
+            s as f32 / 2_147_483_648.0
         }
         AudioFormat::PcmF32Le => f32::from_le_bytes([at[0], at[1], at[2], at[3]]),
         _ => 0.0,
@@ -570,16 +603,21 @@ pub(crate) fn read_sample(at: &[u8], format: AudioFormat) -> f32 {
 
 /// Encode one f32 sample, appending its little-endian bytes.
 pub(crate) fn write_sample(dst: &mut Vec<u8>, v: f32, format: AudioFormat) {
+    let c = v.clamp(-1.0, 1.0);
     match format {
+        // u8 PCM is offset-binary: silence sits at 0x80.
+        AudioFormat::PcmU8 => dst.push((round_away(c * 127.0) as i32 + 128) as u8),
         AudioFormat::PcmS16Le => {
-            let scaled = v.clamp(-1.0, 1.0) * 32767.0;
-            // round half away from zero without libm.
-            let rounded = if scaled >= 0.0 {
-                scaled + 0.5
-            } else {
-                scaled - 0.5
-            };
-            dst.extend_from_slice(&(rounded as i16).to_le_bytes());
+            dst.extend_from_slice(&(round_away(c * 32767.0) as i16).to_le_bytes());
+        }
+        AudioFormat::PcmS24Le => {
+            let s = round_away(c * 8_388_607.0) as i32;
+            dst.extend_from_slice(&s.to_le_bytes()[..3]);
+        }
+        // the +0.5 is below the f32 quantum at this magnitude; `as i32`
+        // saturates rather than wrapping at full scale.
+        AudioFormat::PcmS32Le => {
+            dst.extend_from_slice(&(round_away(c * 2_147_483_647.0) as i32).to_le_bytes());
         }
         AudioFormat::PcmF32Le => dst.extend_from_slice(&v.to_le_bytes()),
         _ => {}
@@ -697,6 +735,59 @@ mod tests {
         let f32b = convert_pcm(&s16, AudioFormat::PcmS16Le, 1, AudioFormat::PcmF32Le, 1).unwrap();
         let v = f32::from_le_bytes(f32b[..4].try_into().unwrap());
         assert!((v - 1.0).abs() < 1e-3, "got {v}");
+    }
+
+    #[test]
+    fn s24_packs_three_bytes_little_endian() {
+        // one f32 sample -> 3 bytes, not a 32-bit container.
+        let src: Vec<u8> = 0.5f32.to_le_bytes().to_vec();
+        let s24 = convert_pcm(&src, AudioFormat::PcmF32Le, 1, AudioFormat::PcmS24Le, 1).unwrap();
+        assert_eq!(s24.len(), 3);
+        let v = s24[0] as i32 | (s24[1] as i32) << 8 | (s24[2] as i8 as i32) << 16;
+        assert!((v - 4_194_303).abs() <= 1, "got {v}");
+        // negative values sign-extend out of the top byte.
+        let src: Vec<u8> = (-0.5f32).to_le_bytes().to_vec();
+        let s24 = convert_pcm(&src, AudioFormat::PcmF32Le, 1, AudioFormat::PcmS24Le, 1).unwrap();
+        let v = s24[0] as i32 | (s24[1] as i32) << 8 | (s24[2] as i8 as i32) << 16;
+        assert!((v + 4_194_303).abs() <= 1, "got {v}");
+    }
+
+    #[test]
+    fn the_wide_formats_round_trip_within_their_quantum() {
+        let values = [0.0f32, 0.5, -0.5, 1.0, -1.0, 0.123];
+        let src: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+        // quantum per format: u8 is coarse, s24 / s32 are finer than f32's error.
+        for (format, tol) in [
+            (AudioFormat::PcmU8, 1.0 / 127.0),
+            (AudioFormat::PcmS24Le, 1e-6),
+            (AudioFormat::PcmS32Le, 1e-6),
+        ] {
+            let packed = convert_pcm(&src, AudioFormat::PcmF32Le, 1, format, 1).unwrap();
+            assert_eq!(
+                packed.len(),
+                values.len() * sample_bytes(format),
+                "{format:?}"
+            );
+            let back = convert_pcm(&packed, format, 1, AudioFormat::PcmF32Le, 1).unwrap();
+            for (i, chunk) in back.chunks_exact(4).enumerate() {
+                let got = f32::from_le_bytes(chunk.try_into().unwrap());
+                assert!(
+                    (got - values[i]).abs() <= tol,
+                    "{format:?} sample {i}: {got} vs {}",
+                    values[i]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn u8_silence_sits_at_the_offset_binary_midpoint() {
+        let src: Vec<u8> = 0.0f32.to_le_bytes().to_vec();
+        let u8s = convert_pcm(&src, AudioFormat::PcmF32Le, 1, AudioFormat::PcmU8, 1).unwrap();
+        assert_eq!(&u8s[..], [128]);
+        // and it reads back as silence.
+        let back = convert_pcm(&[128], AudioFormat::PcmU8, 1, AudioFormat::PcmF32Le, 1).unwrap();
+        assert_eq!(f32::from_le_bytes(back[..4].try_into().unwrap()), 0.0);
     }
 
     #[test]

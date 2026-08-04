@@ -472,6 +472,8 @@ fn audio_gst_media_type(f: AudioFormat) -> (&'static str, Option<&'static str>) 
         AudioFormat::PcmS16Le => ("audio/x-raw", Some("S16LE")),
         AudioFormat::PcmF32Le => ("audio/x-raw", Some("F32LE")),
         AudioFormat::PcmS24Le => ("audio/x-raw", Some("S24LE")),
+        AudioFormat::PcmS32Le => ("audio/x-raw", Some("S32LE")),
+        AudioFormat::PcmU8 => ("audio/x-raw", Some("U8")),
         AudioFormat::Mulaw => ("audio/x-mulaw", None),
         AudioFormat::Alaw => ("audio/x-alaw", None),
         AudioFormat::ImaAdpcm => ("audio/x-adpcm", None),
@@ -625,7 +627,11 @@ impl Rate {
 fn is_pcm(f: AudioFormat) -> bool {
     matches!(
         f,
-        AudioFormat::PcmS16Le | AudioFormat::PcmF32Le | AudioFormat::PcmS24Le
+        AudioFormat::PcmS16Le
+            | AudioFormat::PcmF32Le
+            | AudioFormat::PcmS24Le
+            | AudioFormat::PcmS32Le
+            | AudioFormat::PcmU8
     )
 }
 
@@ -1060,6 +1066,13 @@ pub enum AudioFormat {
     /// The integer sibling of `PcmF32Le` for the ST 2110-30 / AES67 L24 wire: a
     /// professional 24-bit source rides L24 without a detour through float.
     PcmS24Le,
+    /// 32-bit signed integer PCM, little-endian (GStreamer `S32LE`). The native
+    /// container width of most modern DACs, so a 24-bit source reaches the
+    /// device without the 3-byte packing.
+    PcmS32Le,
+    /// 8-bit unsigned integer PCM, one byte per sample, silence at 0x80
+    /// (GStreamer `U8`). The legacy WAV / telephony sample width.
+    PcmU8,
     /// G.711 mu-law companded audio, one byte per sample (GStreamer
     /// `audio/x-mulaw`, RTP payload type 0 / PCMU). Encoded, not raw PCM: like
     /// `Aac` / `Opus` it keeps a nominal rate/channels rather than the PCM

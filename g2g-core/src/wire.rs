@@ -269,6 +269,8 @@ fn audio_format_to_u8(f: AudioFormat) -> u8 {
         AudioFormat::Vorbis => 11,
         AudioFormat::Mp3 => 12,
         AudioFormat::Speex => 13,
+        AudioFormat::PcmS32Le => 14,
+        AudioFormat::PcmU8 => 15,
     }
 }
 fn audio_format_from_u8(v: u8) -> Result<AudioFormat, WireError> {
@@ -287,6 +289,8 @@ fn audio_format_from_u8(v: u8) -> Result<AudioFormat, WireError> {
         11 => AudioFormat::Vorbis,
         12 => AudioFormat::Mp3,
         13 => AudioFormat::Speex,
+        14 => AudioFormat::PcmS32Le,
+        15 => AudioFormat::PcmU8,
         _ => return Err(WireError::BadTag),
     })
 }
@@ -891,6 +895,8 @@ mod tests {
             AudioFormat::PcmS16Le,
             AudioFormat::PcmF32Le,
             AudioFormat::PcmS24Le,
+            AudioFormat::PcmS32Le,
+            AudioFormat::PcmU8,
             AudioFormat::Mulaw,
             AudioFormat::Alaw,
             AudioFormat::ImaAdpcm,
