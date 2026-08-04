@@ -507,6 +507,13 @@ metadata = ["g2g-core/metadata"]
 # so OpenType-CFF fonts render (the M668 gap fontdue could not). std (file
 # loading); the no_std baseline keeps the bitmap font.
 truetype-overlay = ["std", "dep:ab_glyph"]
+# Real text shaping + bidi + system-font discovery for the overlay (M892):
+# horizontal cues go through cosmic-text (harfrust shaping, unicode-bidi
+# reordering, per-codepoint fallback across the fontdb-discovered system fonts),
+# so Arabic joins, Hebrew runs read right-to-left, and text renders with no
+# `font=` set at all. Extends `truetype-overlay`, whose `ab_glyph` column
+# renderer stays for `vertical:rl` / `lr` cues (cosmic-text is horizontal-only).
+text-shaping = ["truetype-overlay", "dep:cosmic-text"]
 # Analytics overlay (M101): AnalyticsOverlay draws AnalyticsMeta detection boxes
 # onto a raw RGBA8 frame (the detector -> overlay visible end). Pulls in the
 # `metadata` container so frames carry the typed graph. CPU, no_std baseline; the
@@ -762,6 +769,15 @@ bytes = { version = "1", optional = true }
 # Pure-Rust (over ttf-parser); loads .ttf / .otf / .ttc and rasterizes both glyf
 # and CFF/CFF2 outlines to coverage, so OpenType-CFF fonts render (M668).
 ab_glyph = { version = "0.2", optional = true }
+# Shaping / bidi / font-fallback text layout (text-shaping feature, M892).
+# Pure-Rust (harfrust shaping, unicode-bidi, fontdb discovery, swash raster).
+# Pinned exactly: 0.17.1 and later raise rust-version to 1.89, above the
+# workspace MSRV. Default features minus `fontconfig`: fontdb's own directory
+# scan finds the system faces, so the fontconfig parser is dead weight.
+cosmic-text = { version = "=0.17.0", optional = true, default-features = false, features = [
+    "std",
+    "swash",
+] }
 # Vello GPU 2D renderer (vello-overlay feature, M102). Renders detection boxes
 # into a wgpu texture; re-exports wgpu 29 (matching g2g-ml) as `vello::wgpu`.
 vello = { version = "0.9", optional = true }

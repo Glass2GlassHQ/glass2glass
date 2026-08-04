@@ -419,9 +419,11 @@ _(No open parser items.)_
 - **`textoverlay` font backend:** the `truetype-overlay` feature (M409, `ab_glyph`
   since M668) renders both glyf and CFF/CFF2 outlines (CJK / accented / mixed-case,
   horizontal + vertical) with an explicit Latin+CJK fallback chain, so OpenType-CFF
-  `.otf` fonts render, not only glyf `.ttf`s. Still open: real shaping + bidi
-  and automatic system-font discovery / fallback, both of which point at the
-  `cosmic-text` upgrade; plus a `vello` GPU backend. `clockoverlay` still lacks
+  `.otf` fonts render, not only glyf `.ttf`s. Still open: a `vello` GPU backend;
+  font-variation axes beyond `wght` on the shaped horizontal path (cosmic-text
+  0.17 exposes only weight, and 0.17.1+ needs rustc 1.89, above the 1.85 MSRV,
+  so the upgrade waits on an MSRV bump); vertical-mode shaping if cosmic-text
+  ever grows writing modes. `clockoverlay` still lacks
   the gst date properties (`show-times-as-dates` / `datetime-format` /
   `datetime-epoch`: the 1900 epoch needs signed civil math).
 - **Text / subtitle pipeline depth.** The foundation is in: `Caps::Text` +

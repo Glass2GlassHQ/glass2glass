@@ -17,10 +17,18 @@
 //! glyphs from a loaded `.ttf` / `.otf` / `.ttc` ([`TextOverlay::with_font`] /
 //! `font=`), so CJK, accented Latin, and mixed-case text render, horizontal and
 //! vertical (`vertical:rl` / `lr`). `ab_glyph` does the parsing / rasterization on
-//! the CPU, covering both glyf and CFF/CFF2 outlines; full shaping + bidi
-//! (cosmic-text) is a later upgrade. A variable font renders at a chosen axis
-//! position ([`TextOverlay::with_font_axis`] / `font-variations=wght=700`)
-//! instead of its default instance.
+//! the CPU, covering both glyf and CFF/CFF2 outlines. A variable font renders at
+//! a chosen axis position ([`TextOverlay::with_font_axis`] /
+//! `font-variations=wght=700`) instead of its default instance.
+//!
+//! The `text-shaping` feature (M892) adds real shaping to that: horizontal cues
+//! are laid out by cosmic-text, so runs are shaped (Arabic joining, kerning,
+//! ligatures), reordered by the Unicode bidi algorithm, and filled in from the
+//! system fonts fontdb discovers, which means text renders with no `font=` set at
+//! all. cosmic-text has no vertical writing mode, so `vertical:rl` / `lr` cues
+//! stay on the `ab_glyph` column renderer (using an explicit `font=` if one was
+//! set, else the system face the shaper resolved). `font-variations=` axes other
+//! than `wght` reach only that column path.
 //!
 //! [`bitmapfont`]: crate::bitmapfont
 
@@ -200,6 +208,14 @@ pub struct TextOverlay {
     /// The `font-variations=` spec, retained for `get_property` round-trips.
     #[cfg(feature = "truetype-overlay")]
     axes_spec: Option<String>,
+    /// Raw bytes of every explicitly loaded font, kept so the shaper can register
+    /// them in its own font database (`ab_glyph` does not hand its bytes back).
+    #[cfg(feature = "text-shaping")]
+    font_data: Vec<Vec<u8>>,
+    /// Shaping + rasterization state, built on the first cue and reused. Cleared
+    /// whenever the font set changes so it picks the new faces up.
+    #[cfg(feature = "text-shaping")]
+    shaper: Option<crate::textshape::TextShaper>,
     drawn: u64,
 }
 
@@ -229,6 +245,10 @@ impl TextOverlay {
             axes: Vec::new(),
             #[cfg(feature = "truetype-overlay")]
             axes_spec: None,
+            #[cfg(feature = "text-shaping")]
+            font_data: Vec::new(),
+            #[cfg(feature = "text-shaping")]
+            shaper: None,
             drawn: 0,
         }
     }
@@ -250,6 +270,11 @@ impl TextOverlay {
             face.set_axis(*axis);
         }
         self.fonts.push(face);
+        #[cfg(feature = "text-shaping")]
+        {
+            self.font_data.push(bytes.to_vec());
+            self.shaper = None;
+        }
         Ok(())
     }
 
@@ -598,6 +623,15 @@ impl TextOverlay {
                 continue;
             }
             let s = cue.settings;
+            // With shaping on this path renders vertical cues only; horizontal
+            // ones go through `render_active_shaped`.
+            #[cfg(feature = "text-shaping")]
+            if !matches!(
+                s.vertical,
+                WritingMode::VerticalRl | WritingMode::VerticalLr
+            ) {
+                continue;
+            }
             // Per-cue WebVTT `::cue` colours, falling back to the element defaults.
             let fg = s.color.unwrap_or(self.text_color);
             let bg = s.background.unwrap_or(self.bg_color);
@@ -722,6 +756,185 @@ impl TextOverlay {
         }
     }
 
+    /// Build the shaper if it is not up (system-font discovery plus the
+    /// explicitly loaded faces). With no `font=` set, the face the generic
+    /// sans-serif query resolves to also seeds the `ab_glyph` chain, so vertical
+    /// cues get a face from the same discovery rather than nothing; it is not
+    /// recorded as an explicit font (`font=` keeps reading back empty).
+    #[cfg(feature = "text-shaping")]
+    fn ensure_shaper(&mut self) {
+        if self.shaper.is_some() {
+            return;
+        }
+        let shaper = crate::textshape::TextShaper::new(&self.font_data);
+        if self.fonts.is_empty() {
+            if let Some((bytes, index)) = shaper.default_face() {
+                if let Ok(font) = ab_glyph::FontVec::try_from_vec_and_index(bytes, index) {
+                    let mut face = FontFace(font);
+                    for axis in &self.axes {
+                        face.set_axis(*axis);
+                    }
+                    self.fonts.push(face);
+                }
+            }
+        }
+        self.shaper = Some(shaper);
+    }
+
+    /// The `wght` variable-font axis position, if `font-variations=` set one: the
+    /// one axis the shaped path can apply (it selects a weight, which swash turns
+    /// into a `wght` variation). Other axes reach only the `ab_glyph` path.
+    #[cfg(feature = "text-shaping")]
+    fn wght(&self) -> Option<f32> {
+        self.axes
+            .iter()
+            .find(|(tag, _)| tag == b"wght")
+            .map(|(_, v)| *v)
+    }
+
+    /// Shaped render path (the `text-shaping` feature): lay each horizontal cue
+    /// out through cosmic-text, so runs are shaped (joining, kerning, ligatures),
+    /// reordered by the bidi algorithm, and filled from the system fonts where
+    /// the primary lacks a codepoint. Placement (`position` / `line` / `align`,
+    /// auto-`line` stacking) and colours are the same as the `ab_glyph` path;
+    /// only the glyphs and their advances come from the shaper. Vertical cues are
+    /// left to [`render_active_ttf`](Self::render_active_ttf) (cosmic-text has no
+    /// vertical writing mode).
+    #[cfg(feature = "text-shaping")]
+    fn render_active_shaped(&mut self, buf: &mut [u8], t_ns: u64) {
+        self.ensure_shaper();
+        // Out of the field for the render: laying out needs `&mut` shaper while
+        // the cue list and the blitters are borrowed from `&self`.
+        let Some(mut shaper) = self.shaper.take() else {
+            return;
+        };
+        let w = self.width as f32;
+        let h = self.height as f32;
+        let px = self.ttf_px();
+        let line_h = px * 1.25;
+        let pad = (px * 0.25).max(2.0);
+        let margin = px * 0.5;
+        let wght = self.wght();
+        let mut auto_bottom = h - margin;
+
+        for cue in self.active(t_ns) {
+            if matches!(
+                cue.settings.vertical,
+                WritingMode::VerticalRl | WritingMode::VerticalLr
+            ) {
+                continue;
+            }
+            if cue.text.lines().next().is_none() {
+                continue;
+            }
+            let block = shaper.layout(&cue.text, px, line_h, wght);
+            if block.lines.is_empty() {
+                continue;
+            }
+            let s = cue.settings;
+            // Per-cue WebVTT `::cue` colours, falling back to the element defaults.
+            let fg = s.color.unwrap_or(self.text_color);
+            let bg = s.background.unwrap_or(self.bg_color);
+
+            let block_w = block.width;
+            let block_h = block.height;
+            let anchor_x = s.position.map(|p| p as f32 / 100.0 * w).unwrap_or(w / 2.0);
+            let block_left =
+                ttf_align_left(s.align, anchor_x, block_w).clamp(0.0, (w - block_w).max(0.0));
+            let block_top = match s.line {
+                Some(p) => (p as f32 / 100.0 * h).clamp(margin, (h - margin - block_h).max(margin)),
+                None => {
+                    let t = (auto_bottom - block_h).max(margin);
+                    auto_bottom = t - pad - line_h * 0.2;
+                    t
+                }
+            };
+            self.fill_rect(
+                buf,
+                (block_left - pad) as i32,
+                (block_top - pad) as i32,
+                (block_w + 2.0 * pad) as i32,
+                (block_h + 2.0 * pad) as i32,
+                bg,
+            );
+
+            for line in &block.lines {
+                let x0 = match s.align {
+                    TextAlign::Center => block_left + (block_w - line.width) / 2.0,
+                    TextAlign::Start => block_left,
+                    TextAlign::End => block_left + (block_w - line.width),
+                };
+                for g in &line.glyphs {
+                    let Some(img) = shaper.image(g.key) else {
+                        continue;
+                    };
+                    let gx = x0 as i32 + g.x + img.left;
+                    let gy = block_top as i32 + g.y - img.top;
+                    if img.color {
+                        self.blit_rgba(buf, gx, gy, (img.width, img.height), img.data);
+                    } else {
+                        self.blit_coverage(buf, gx, gy, (img.width, img.height), img.data, fg);
+                    }
+                }
+            }
+        }
+        self.shaper = Some(shaper);
+    }
+
+    /// Alpha-blend a colour (emoji) glyph bitmap, four bytes per pixel, at output
+    /// `(x0, y0)`, clipped to the canvas. The mask companion is
+    /// [`blit_coverage`](Self::blit_coverage), which recolours instead.
+    #[cfg(feature = "text-shaping")]
+    fn blit_rgba(&self, buf: &mut [u8], x0: i32, y0: i32, (gw, gh): (usize, usize), data: &[u8]) {
+        let w = self.width as i32;
+        let h = self.height as i32;
+        for ry in 0..gh as i32 {
+            let py = y0 + ry;
+            if py < 0 || py >= h {
+                continue;
+            }
+            for rx in 0..gw as i32 {
+                let px = x0 + rx;
+                if px < 0 || px >= w {
+                    continue;
+                }
+                let s = ((ry as usize) * gw + rx as usize) * 4;
+                let src = [data[s], data[s + 1], data[s + 2], data[s + 3]];
+                if src[3] != 0 {
+                    blend_px(buf, ((py * w + px) * 4) as usize, src, 255);
+                }
+            }
+        }
+    }
+
+    /// Paint the cues active at `t_ns` with whichever render path this build and
+    /// font configuration selects.
+    fn render_cues(&mut self, buf: &mut [u8], t_ns: u64) {
+        // Shaped horizontal cues plus `ab_glyph` vertical columns. A face is
+        // normally there without `font=` too (the shaper seeds one from system
+        // discovery); a host with no fonts at all still falls back to the 8x8
+        // bitmap.
+        #[cfg(feature = "text-shaping")]
+        {
+            self.ensure_shaper();
+            if self.fonts.is_empty() {
+                self.render_active(buf, t_ns);
+            } else {
+                self.render_active_shaped(buf, t_ns);
+                self.render_active_ttf(buf, t_ns);
+            }
+        }
+        // Rasterized font path when one is loaded; else the ASCII bitmap baseline.
+        #[cfg(all(feature = "truetype-overlay", not(feature = "text-shaping")))]
+        if self.fonts.is_empty() {
+            self.render_active(buf, t_ns);
+        } else {
+            self.render_active_ttf(buf, t_ns);
+        }
+        #[cfg(not(feature = "truetype-overlay"))]
+        self.render_active(buf, t_ns);
+    }
+
     /// Load and parse a subtitle file, replacing the cue list. The format is
     /// chosen by extension (`.vtt` / `.srt` / `.ass` / `.ssa`), else sniffed from
     /// the content. `std`-only: file I/O needs the OS.
@@ -759,6 +972,11 @@ impl TextOverlay {
         // The property sets a single primary font (replacing any chain).
         self.fonts.clear();
         self.font_path = None;
+        #[cfg(feature = "text-shaping")]
+        {
+            self.font_data.clear();
+            self.shaper = None;
+        }
         self.add_font(path).map_err(|_| PropError::Value)
     }
 
@@ -891,16 +1109,7 @@ impl AsyncElement for TextOverlay {
                         if buf.len() < need {
                             return Err(G2gError::CapsMismatch);
                         }
-                        // Rasterized font path when one is loaded; else the
-                        // ASCII bitmap baseline.
-                        #[cfg(feature = "truetype-overlay")]
-                        if self.fonts.is_empty() {
-                            self.render_active(&mut buf[..need], t_ns);
-                        } else {
-                            self.render_active_ttf(&mut buf[..need], t_ns);
-                        }
-                        #[cfg(not(feature = "truetype-overlay"))]
-                        self.render_active(&mut buf[..need], t_ns);
+                        self.render_cues(&mut buf[..need], t_ns);
                     }
                     self.drawn += 1;
                     out.push(PipelinePacket::DataFrame(frame)).await?;
@@ -1207,7 +1416,8 @@ static TEXTOVERLAY_PROPS: &[PropertySpec] = &[
         "font",
         PropKind::Str,
         "path to a .ttf / .ttc font for glyph rendering (truetype-overlay); \
-         needed for CJK / accented text. Without it the 8x8 ASCII bitmap is used",
+         needed for CJK / accented text. Without it the 8x8 ASCII bitmap is used, \
+         or a discovered system font when built with text-shaping",
     ),
     PropertySpec::new(
         "font-variations",
@@ -1643,12 +1853,15 @@ mod tests {
             "bitmap font has no CJK glyphs"
         );
 
-        let Some(ov) = cjk_overlay(w as u32, h as u32, "日本語", CueSettings::default()) else {
+        let Some(mut ov) = cjk_overlay(w as u32, h as u32, "日本語", CueSettings::default())
+        else {
             std::eprintln!("skip: no CJK system font found");
             return;
         };
         let mut buf = black(w, h);
-        ov.render_active_ttf(&mut buf, 0);
+        // Through the element's dispatch, so this holds on the ab_glyph path and
+        // on the shaped path (M892) that takes horizontal cues over from it.
+        ov.render_cues(&mut buf, 0);
         assert!(
             drawn_bounds(&buf, w, h).is_some(),
             "TTF font renders CJK glyphs"
@@ -1718,7 +1931,7 @@ mod tests {
         ov.height = h as u32;
         ov.configured = true;
         let mut buf = black(w, h);
-        ov.render_active_ttf(&mut buf, 0);
+        ov.render_cues(&mut buf, 0);
         // fontdue produced empty glyphs for CFF; ab_glyph rasterizes the outlines.
         assert!(
             drawn_bounds(&buf, w, h).is_some(),
@@ -1762,7 +1975,7 @@ mod tests {
             return;
         };
         let render = |ov: TextOverlay| {
-            let ov = sized(
+            let mut ov = sized(
                 ov.with_cues(vec![Cue {
                     start_ns: 0,
                     end_ns: u64::MAX,
@@ -1773,7 +1986,7 @@ mod tests {
                 h as u32,
             );
             let mut buf = black(w, h);
-            ov.render_active_ttf(&mut buf, 0);
+            ov.render_cues(&mut buf, 0);
             buf
         };
 
@@ -1825,6 +2038,258 @@ mod tests {
         assert!(ov
             .set_property("font-variations", PropValue::Str("wg=700".into()))
             .is_err());
+    }
+
+    // -- Shaping / bidi / system fonts (M892): the cosmic-text path. -----------
+
+    /// Read the first available Arabic-capable system font, or `None` to skip.
+    /// Arabic is the joining script the shaping assertions need.
+    #[cfg(feature = "text-shaping")]
+    fn arabic_font_bytes() -> Option<Vec<u8>> {
+        for p in [
+            "/usr/share/fonts/google-noto-vf/NotoSansArabic[wght].ttf",
+            "/usr/share/fonts/vazirmatn-vf-fonts/Vazirmatn[wght].ttf",
+            "/usr/share/fonts/google-noto-vf/NotoNaskhArabic[wght].ttf",
+            "/usr/share/fonts/paktype-naskh-basic-fonts/PakTypeNaskhBasic.ttf",
+        ] {
+            if let Ok(b) = std::fs::read(p) {
+                std::eprintln!("using arabic font {p}");
+                return Some(b);
+            }
+        }
+        None
+    }
+
+    /// Read the first available Hebrew-capable system font, or `None` to skip.
+    #[cfg(feature = "text-shaping")]
+    fn hebrew_font_bytes() -> Option<Vec<u8>> {
+        for p in [
+            "/usr/share/fonts/google-noto-vf/NotoSansHebrew[wght].ttf",
+            "/usr/share/fonts/google-droid-sans-fonts/DroidSansHebrew-Regular.ttf",
+            "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
+        ] {
+            if let Ok(b) = std::fs::read(p) {
+                std::eprintln!("using hebrew font {p}");
+                return Some(b);
+            }
+        }
+        None
+    }
+
+    /// A one-cue overlay of `text` at the given geometry with `bytes` as its font,
+    /// ready to render.
+    #[cfg(feature = "text-shaping")]
+    fn shaped_overlay(w: u32, h: u32, text: &str, bytes: &[u8]) -> TextOverlay {
+        use crate::subparse::CueSettings;
+        sized(
+            TextOverlay::new()
+                .with_font_bytes(bytes, 0)
+                .expect("font parses")
+                .with_cues(vec![Cue {
+                    start_ns: 0,
+                    end_ns: u64::MAX,
+                    text: text.into(),
+                    settings: CueSettings::default(),
+                }]),
+            w,
+            h,
+        )
+    }
+
+    #[test]
+    #[cfg(feature = "text-shaping")]
+    fn bidi_places_the_rtl_run_right_to_left() {
+        let Some(bytes) = hebrew_font_bytes() else {
+            std::eprintln!("skip: no Hebrew system font found");
+            return;
+        };
+        // Latin then Hebrew: an LTR paragraph with one RTL run. The RTL run must
+        // be reordered (x falls as the logical offset rises) and sit to the right
+        // of the Latin run.
+        let (w, h) = (480usize, 120usize);
+        let mut ov = shaped_overlay(w as u32, h as u32, "ab \u{5D0}\u{5D1}\u{5D2}", &bytes);
+        ov.ensure_shaper();
+        let mut shaper = ov.shaper.take().expect("shaper built");
+        let block = shaper.layout(
+            "ab \u{5D0}\u{5D1}\u{5D2}",
+            ov.ttf_px(),
+            ov.ttf_px() * 1.25,
+            None,
+        );
+        let line = &block.lines[0];
+        let rtl: Vec<_> = line.glyphs.iter().filter(|g| g.rtl).collect();
+        let ltr: Vec<_> = line.glyphs.iter().filter(|g| !g.rtl).collect();
+        assert!(rtl.len() >= 3, "three Hebrew letters shaped as an RTL run");
+        assert!(ltr.len() >= 2, "the Latin run stays LTR");
+        // Glyphs come out in visual order, so walking the RTL run left to right
+        // walks its characters backwards: that reordering is the bidi pass.
+        for pair in rtl.windows(2) {
+            assert!(
+                pair[0].x < pair[1].x && pair[0].start > pair[1].start,
+                "RTL glyphs run right to left: {:?} then {:?}",
+                (pair[0].start, pair[0].x),
+                (pair[1].start, pair[1].x)
+            );
+        }
+        let rtl_min_x = rtl.iter().map(|g| g.x).min().unwrap();
+        let ltr_max_x = ltr.iter().map(|g| g.x).max().unwrap();
+        assert!(
+            ltr_max_x < rtl_min_x,
+            "the RTL run sits right of the Latin one ({ltr_max_x} vs {rtl_min_x})"
+        );
+
+        // And the mixed line actually paints.
+        ov.shaper = Some(shaper);
+        let mut buf = black(w, h);
+        ov.render_cues(&mut buf, 0);
+        assert!(ink(&buf, w, h) > 0, "the mixed bidi line renders ink");
+    }
+
+    #[test]
+    #[cfg(feature = "text-shaping")]
+    fn arabic_joins_instead_of_isolated_glyphs() {
+        let Some(bytes) = arabic_font_bytes() else {
+            std::eprintln!("skip: no Arabic system font found");
+            return;
+        };
+        // "salaam": every letter but the last takes an initial / medial / final
+        // form, so shaping cannot yield the isolated per-char glyphs the ab_glyph
+        // path looks up.
+        let word = "\u{633}\u{644}\u{627}\u{645}";
+        let (w, h) = (320usize, 120usize);
+        let mut ov = shaped_overlay(w as u32, h as u32, word, &bytes);
+        ov.ensure_shaper();
+        let mut shaper = ov.shaper.take().expect("shaper built");
+        let block = shaper.layout(word, ov.ttf_px(), ov.ttf_px() * 1.25, None);
+        let shaped: Vec<u16> = block.lines[0].glyphs.iter().map(|g| g.glyph_id).collect();
+
+        // What the isolated first-font-with-glyph lookup would have produced.
+        let isolated: Vec<u16> = {
+            use ab_glyph::Font;
+            word.chars().map(|c| ov.fonts[0].0.glyph_id(c).0).collect()
+        };
+        std::eprintln!("shaped {shaped:?} vs isolated {isolated:?}");
+        assert!(!shaped.is_empty(), "the Arabic word shaped to glyphs");
+        assert!(
+            isolated.iter().all(|id| *id != 0),
+            "the font covers every letter, so the ids are comparable"
+        );
+        assert_ne!(
+            shaped, isolated,
+            "shaping picks contextual forms, not the isolated glyphs"
+        );
+        assert!(
+            shaped.iter().any(|id| !isolated.contains(id)),
+            "at least one glyph is a form the per-char lookup cannot reach"
+        );
+
+        ov.shaper = Some(shaper);
+        let mut buf = black(w, h);
+        ov.render_cues(&mut buf, 0);
+        assert!(ink(&buf, w, h) > 0, "the shaped Arabic word renders ink");
+    }
+
+    #[test]
+    #[cfg(feature = "text-shaping")]
+    fn system_font_discovery_renders_without_a_configured_font() {
+        use g2g_core::PropValue;
+        // No font= at all: fontdb discovery has to supply the face.
+        let (w, h) = (320usize, 120usize);
+        let mut ov = sized(
+            TextOverlay::from_srt("1\n00:00:00,000 --> 00:00:10,000\nHamburgefonstiv\n"),
+            w as u32,
+            h as u32,
+        );
+        assert_eq!(
+            ov.get_property("font"),
+            Some(PropValue::Str(String::new())),
+            "no font was configured"
+        );
+        let mut buf = black(w, h);
+        ov.render_cues(&mut buf, 1_000_000_000);
+        let Some((x0, y0, x1, y1)) = drawn_bounds(&buf, w, h) else {
+            std::panic!("no system font found by fontdb, nothing rendered");
+        };
+        std::eprintln!("system-font ink bounds ({x0},{y0})-({x1},{y1})");
+        // Bottom-centre default placement, same as every other path.
+        assert!(y0 > h / 2, "auto line stacks at the bottom ({y0})");
+        assert!(x1 - x0 > w / 8, "a full word's worth of ink");
+        assert!(x1 < w && y1 < h, "inside the canvas");
+    }
+
+    #[test]
+    #[cfg(feature = "text-shaping")]
+    fn shaped_latin_keeps_sane_ink_bounds() {
+        let Some(bytes) = variable_font_bytes() else {
+            std::eprintln!("skip: no variable system font found");
+            return;
+        };
+        let (w, h) = (400usize, 160usize);
+        let mut ov = shaped_overlay(w as u32, h as u32, "Hamburgefonstiv", &bytes);
+        let mut buf = black(w, h);
+        ov.render_cues(&mut buf, 0);
+        let (x0, y0, x1, y1) = drawn_bounds(&buf, w, h).expect("Latin text painted");
+        assert!(y0 > h / 2, "auto line stacks at the bottom ({y0})");
+        assert!(x0 > 0 && x1 < w - 1, "centred, not clipped ({x0}..{x1})");
+        // Roughly centred: the gaps either side are within a few pixels.
+        let (left, right) = (x0, w - 1 - x1);
+        assert!(
+            left.abs_diff(right) <= w / 20,
+            "the block is centred ({left} left, {right} right)"
+        );
+        assert!(y1 - y0 > 8, "cap height and descenders both present");
+    }
+
+    #[test]
+    #[cfg(feature = "text-shaping")]
+    fn shaped_path_survives_hostile_cue_text() {
+        // Cue text comes off the wire: emoji ZWJ sequences, combining marks with
+        // no base, tags, RTL overrides, astral planes and an over-long line on a
+        // small canvas must all render or clip, never panic.
+        let (w, h) = (96usize, 48usize);
+        for text in [
+            "",
+            "\n\n",
+            "\u{301}\u{301}\u{301}",
+            "\u{1F469}\u{200D}\u{1F469}\u{200D}\u{1F467}",
+            "\u{202E}abc\u{202C}\u{200F}\u{5D0}a\u{200E}",
+            "\u{10FFFF}\u{FFFD}\u{0}\t\u{AD}",
+            "\u{FDFD}\u{0928}\u{094D}\u{0928}",
+            &alloc::string::String::from_utf8(vec![b'W'; 4096]).unwrap(),
+        ] {
+            use crate::subparse::CueSettings;
+            let mut ov = sized(
+                TextOverlay::new().with_cues(vec![Cue {
+                    start_ns: 0,
+                    end_ns: u64::MAX,
+                    text: text.into(),
+                    settings: CueSettings::default(),
+                }]),
+                w as u32,
+                h as u32,
+            );
+            let mut buf = black(w, h);
+            ov.render_cues(&mut buf, 0);
+            // Whatever came out has to be inside the canvas.
+            if let Some((x0, y0, x1, y1)) = drawn_bounds(&buf, w, h) {
+                assert!(x1 < w && y1 < h && x0 <= x1 && y0 <= y1, "ink is clipped");
+            }
+        }
+        // The wide line does reach the canvas, so the loop above is not passing
+        // by drawing nothing.
+        let mut ov = sized(
+            TextOverlay::new().with_cues(vec![Cue {
+                start_ns: 0,
+                end_ns: u64::MAX,
+                text: alloc::string::String::from_utf8(vec![b'W'; 4096]).unwrap(),
+                settings: crate::subparse::CueSettings::default(),
+            }]),
+            w as u32,
+            h as u32,
+        );
+        let mut buf = black(w, h);
+        ov.render_cues(&mut buf, 0);
+        assert!(ink(&buf, w, h) > 0, "the over-long line still paints");
     }
 
     // -- TextOverlayN (M403): the two-input video + text-stream overlay. --------
