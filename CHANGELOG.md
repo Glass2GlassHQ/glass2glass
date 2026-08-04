@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M889: the Vulkan HDR swapchain present is a paced display-sink element (`VulkanHdrPresentSink`), holding and dropping frames by PTS like the other display sinks.
+
 - M888: `dashsrc low-latency=true` consumes a CMAF segment chunk by chunk as the packager writes it.
 
 - M887: `ffmpegdec` emits the semi-planar 10-bit `P010` layout, and the 10-/12-bit formats are selectable by property and reachable by auto-plug.

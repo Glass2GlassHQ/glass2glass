@@ -8,6 +8,11 @@
 //! `VK_EXT_hdr_metadata` when available), so a swapchain sink can be built on it -
 //! and that adding those extensions did not regress opening the device.
 //!
+//! The paced element wrapper (`VulkanHdrPresentSink`, M889) cannot be built from
+//! out here either, since it takes an already-constructed swapchain sink; its
+//! headless coverage (pacing verdicts, QoS reports, the pacing properties) is in
+//! the module's own tests, against a sink with no swapchain.
+//!
 //! Runs on the RTX 3060 (which supports both); skips with no Vulkan adapter.
 #![cfg(all(
     any(target_os = "linux", target_os = "windows"),

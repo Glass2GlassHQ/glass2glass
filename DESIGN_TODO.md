@@ -583,10 +583,6 @@ _(No open parser items.)_
 - Remaining bus messages, each gated on a subsystem not present: `segment-done`
   (segment seeks), `stream-status` (thread pool), `clock-lost` (clock
   re-election).
-- Wrap `VulkanHdrSink` as an `AsyncElement` so the shared `PresentationPacer`
-  can pace it like the other display sinks (today it is a raw present call
-  driven by the example's winit loop, with no PTS or runner to pace against).
-
 ## Properties / introspection / DSL
 
 - Properties on the platform capture sources (`aaudiosrc` / `camera2src` /

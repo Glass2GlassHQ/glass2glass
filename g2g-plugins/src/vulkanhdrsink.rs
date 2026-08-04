@@ -21,15 +21,34 @@
 //! correctness over throughput: the decode + ycbcr convert already completed
 //! synchronously before the texture reaches the sink, so the queue is idle.
 //!
+//! [`VulkanHdrPresentSink`] (M889) wraps the raw sink as an `AsyncElement` so the
+//! present is PTS-paced by the shared `PresentationPacer` (late frames dropped,
+//! QoS reported, `max-lateness` / `qos-interval` as properties) like every other
+//! display sink. The app still owns the window: it builds the raw sink, hands it
+//! to the element, and drives `process` from its event loop.
+//!
 //! On-screen HDR output is display + compositor dependent and is validated live
 //! by running `examples/vulkan_video_hdr_on_screen.rs` on an HDR display in HDR
 //! mode; the headless-testable parts (surface-format / colour-space selection,
 //! the `VkHdrMetadataEXT` construction) have unit tests, and the device opens with
 //! the present extensions on the RTX 3060.
 
+use alloc::boxed::Box;
+use core::future::Future;
+use core::pin::Pin;
+
 use ash::vk;
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 
+use g2g_core::element::QosMessage;
+use g2g_core::{
+    AsyncElement, BusHandle, Caps, CapsConstraint, ClockSync, ConfigureOutcome, G2gError,
+    HardwareError, MemoryDomain, OutputSink, PipelinePacket, PresentationPacer, PropError,
+    PropValue, PropertySpec, PACING_PROPERTIES,
+};
+
+use crate::clock::wait_to_present;
+use crate::gpu::texture_of;
 use crate::vulkanvideo::{PresentContext, VulkanVideoDevice, VulkanVideoError};
 
 /// The colour space negotiated for the swapchain, in preference order.
@@ -726,6 +745,198 @@ impl Drop for VulkanHdrSink {
     }
 }
 
+/// The [`VulkanHdrSink`] as a pipeline display sink (M889): consumes
+/// [`MemoryDomain::WgpuTexture`] frames (the Vulkan Video decoder's passthrough
+/// GPU output) and presents each at its PTS deadline on the elected clock through
+/// the shared [`PresentationPacer`], so the HDR present drops late frames and
+/// reports QoS like `WgpuSink` / `WaylandSink` / `MetalVideoSink` instead of
+/// running as fast as the app's redraw loop.
+///
+/// The raw swapchain is built from the app's window handles, so the application
+/// constructs [`VulkanHdrSink`] and hands it over; this element adds pacing, the
+/// QoS properties, and the packet handling. The app keeps driving it from its
+/// winit thread (`block_on(sink.process(..))`) and forwards resize events through
+/// [`resize`](Self::resize).
+#[derive(Debug)]
+pub struct VulkanHdrPresentSink {
+    sink: VulkanHdrSink,
+    configured: bool,
+    /// PTS pacing + QoS late-drop: idle until the runner hands over a clock, and
+    /// the default lateness bound never drops.
+    pacer: PresentationPacer,
+}
+
+impl VulkanHdrPresentSink {
+    /// Wrap an app-built [`VulkanHdrSink`] as a paced display sink.
+    ///
+    /// # Safety
+    /// This moves the [`VulkanHdrSink::present`] contract to construction, since
+    /// the element presents whatever the graph pushes at it: every frame reaching
+    /// this element must carry a live colour `wgpu::Texture` on the wrapped sink's
+    /// device in `SHADER_READ_ONLY_OPTIMAL` layout (the Vulkan Video decoder's
+    /// GPU-texture output on the same `VulkanVideoDevice`), with its decode
+    /// already completed and no other queue work touching that device
+    /// concurrently.
+    pub unsafe fn new(sink: VulkanHdrSink) -> Self {
+        Self {
+            sink,
+            configured: false,
+            pacer: PresentationPacer::new(),
+        }
+    }
+
+    /// QoS late-drop bound: once PTS pacing is engaged, a frame past its
+    /// deadline by more than `ns` is dropped instead of presented late, so the
+    /// sink catches up. The default (`u64::MAX`) never drops.
+    pub fn with_max_lateness_ns(mut self, ns: u64) -> Self {
+        self.pacer.set_max_lateness_ns(ns);
+        self
+    }
+
+    /// Post a running-stats `Qos` report every `ns` of clock time while frames
+    /// present, on top of the per-drop reports. `0` (the default) reports only
+    /// drops.
+    pub fn with_qos_interval_ns(mut self, ns: u64) -> Self {
+        self.pacer.set_report_interval_ns(ns);
+        self
+    }
+
+    /// Attach the pipeline bus so QoS reports reach the application.
+    pub fn with_bus(mut self, bus: BusHandle) -> Self {
+        self.pacer.set_bus(bus);
+        self
+    }
+
+    /// Frames dropped by QoS late-drop (past their deadline beyond the bound).
+    pub fn late_dropped(&self) -> u64 {
+        self.pacer.late_dropped()
+    }
+
+    /// Rebuild the swapchain for a new drawable size (the app's resize event).
+    pub fn resize(&mut self, width: u32, height: u32) -> Result<(), VulkanVideoError> {
+        self.sink.resize(width, height)
+    }
+
+    /// The colour space the swapchain was created with.
+    pub fn color_space(&self) -> HdrColorSpace {
+        self.sink.color_space()
+    }
+
+    /// The swapchain image format.
+    pub fn format(&self) -> vk::Format {
+        self.sink.format()
+    }
+
+    /// Frames presented so far.
+    pub fn presented_count(&self) -> u64 {
+        self.sink.presented_count()
+    }
+}
+
+/// A failed present as a pipeline error, keeping the `VkResult` where there is one.
+fn present_err(e: VulkanVideoError) -> G2gError {
+    match e {
+        VulkanVideoError::QueryFailed(r) => G2gError::Hardware(HardwareError::Vulkan(r.as_raw())),
+        _ => G2gError::Hardware(HardwareError::Other),
+    }
+}
+
+impl AsyncElement for VulkanHdrPresentSink {
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
+
+    fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
+        Ok(upstream_caps.clone())
+    }
+
+    fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
+        // The pixel caps are whatever the decoder advertised for its GPU-texture
+        // output (RGBA); what this sink really requires is the WgpuTexture memory
+        // domain, which caps do not describe, so it is checked at process() time.
+        CapsConstraint::AcceptsAny
+    }
+
+    fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        // Geometry needs no state here: the blit scales the decoded texture onto
+        // the swapchain extent, which the surface (not the caps) decides.
+        self.configured = true;
+        Ok(ConfigureOutcome::Accepted)
+    }
+
+    /// Adopt the elected clock + base time so textures are presented at their PTS
+    /// deadline rather than as fast as the producer pushes them.
+    fn set_clock_sync(&mut self, sync: ClockSync) {
+        self.pacer.set_clock_sync(sync);
+    }
+
+    /// Relay a late drop upstream: the runner forwards it onto the incoming link,
+    /// where the producer can shed load.
+    fn take_qos(&mut self) -> Option<QosMessage> {
+        self.pacer.take_qos()
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        PACING_PROPERTIES
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        self.pacer
+            .set_property(name, &value)
+            .unwrap_or(Err(PropError::Unknown))
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        self.pacer.get_property(name)
+    }
+
+    fn process<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+        _out: &'a mut dyn OutputSink,
+    ) -> Self::ProcessFuture<'a> {
+        Box::pin(async move {
+            if !self.configured {
+                return Err(G2gError::NotConfigured);
+            }
+            match packet {
+                PipelinePacket::DataFrame(frame) => {
+                    // PTS pacing: hold the texture until its deadline on the
+                    // elected clock, or drop it when it is already too late (the
+                    // QoS bound) or outside the segment. Unpaced without a clock:
+                    // present as fast as the producer pushes.
+                    let paced = self
+                        .pacer
+                        .judge(frame.timing.pts_ns, self.presented_count());
+                    if !wait_to_present(paced).await {
+                        return Ok(());
+                    }
+                    let MemoryDomain::WgpuTexture(owned) = &frame.domain else {
+                        return Err(G2gError::UnsupportedDomain);
+                    };
+                    // A frame from a different GPU producer (foreign keep-alive
+                    // type) is not presentable by this sink.
+                    let texture = texture_of(owned).ok_or(G2gError::UnsupportedDomain)?;
+                    // SAFETY: the `new` contract: the texture is live on this
+                    // sink's device in SHADER_READ_ONLY_OPTIMAL and its decode
+                    // completed before the frame was pushed.
+                    unsafe { self.sink.present(texture) }.map_err(present_err)?;
+                }
+                // Track the playback segment so PTS maps to running time (correct
+                // across a seek), and re-anchor after a seek flush.
+                PipelinePacket::Segment(seg) => self.pacer.set_segment(seg),
+                PipelinePacket::Flush => self.pacer.flush(),
+                // Terminal sink: other control packets (CapsChanged, Eos) are
+                // consumed, nothing is forwarded. A geometry change needs no
+                // rebuild, the blit scales.
+                _ => {}
+            }
+            Ok(())
+        })
+    }
+}
+
 /// Create a `VkSurfaceKHR` from raw window/display handles via the platform WSI
 /// extension (which wgpu-hal enabled on its instance for the running window
 /// system). Supports Wayland / Xlib / Xcb on Linux and Win32 on Windows.
@@ -844,6 +1055,249 @@ mod tests {
         assert!(select_format(&bad).is_none());
         // Empty / unrecognised -> None.
         assert!(select_format(&[]).is_none());
+    }
+
+    /// A sink whose swapchain handle is null, built on a real decode device: its
+    /// `present` early-returns (nothing reaches a screen, which is the example's
+    /// job) while everything the element adds around it - pacing, QoS, properties,
+    /// the domain check - runs for real. `Drop` only frees null handles, which
+    /// Vulkan ignores.
+    fn stub_sink(device: &VulkanVideoDevice) -> Option<VulkanHdrSink> {
+        let ctx = device.present_context()?;
+        let surface_fn = ash::khr::surface::Instance::new(&ctx.entry, &ctx.instance);
+        let swapchain_fn = ash::khr::swapchain::Device::new(&ctx.instance, &ctx.device);
+        Some(VulkanHdrSink {
+            ctx,
+            surface_fn,
+            swapchain_fn,
+            hdr_fn: None,
+            surface: vk::SurfaceKHR::null(),
+            swapchain: vk::SwapchainKHR::null(),
+            images: alloc::vec::Vec::new(),
+            surface_format: vk::SurfaceFormatKHR::default(),
+            color_space: HdrColorSpace::Sdr,
+            extent: vk::Extent2D {
+                width: 0,
+                height: 0,
+            },
+            cmd_pool: vk::CommandPool::null(),
+            cmd_buf: vk::CommandBuffer::null(),
+            image_available: vk::Semaphore::null(),
+            render_finished: alloc::vec::Vec::new(),
+            in_flight: vk::Fence::null(),
+            mastering: HdrMasteringDisplay::default(),
+            presented: 0,
+        })
+    }
+
+    /// The device to open the stub sink on, and the paced element around it. Bind
+    /// as `let (device, sink)` so the sink drops first (locals drop in reverse
+    /// declaration order), before the device whose raw handles it holds. `None` on
+    /// a host with no Vulkan video decode + present device, where the tests skip.
+    async fn stub_element() -> Option<(VulkanVideoDevice, VulkanHdrPresentSink)> {
+        let device = crate::vulkanvideo::open_h265_decode_device().await.ok()?;
+        let sink = stub_sink(&device)?;
+        // SAFETY: the stub sink presents nothing (null swapchain), so no texture
+        // is ever touched; the `new` contract is vacuous here.
+        Some((device, unsafe { VulkanHdrPresentSink::new(sink) }))
+    }
+
+    fn rgba_caps(w: u32, h: u32) -> Caps {
+        Caps::RawVideo {
+            format: g2g_core::RawVideoFormat::Rgba8,
+            width: g2g_core::Dim::Fixed(w),
+            height: g2g_core::Dim::Fixed(h),
+            framerate: g2g_core::Rate::Any,
+        }
+    }
+
+    /// A 4x4 `Rgba16Float` texture on the decode device (the shape the HDR
+    /// passthrough decode produces), wrapped as a `WgpuTexture` frame at `pts_ns`.
+    fn texture_frame(ctx: &crate::gpu::GpuContext, pts_ns: u64) -> g2g_core::frame::Frame {
+        let texture = ctx.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("hdr-present-test"),
+            size: wgpu::Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        g2g_core::frame::Frame::new(
+            MemoryDomain::WgpuTexture(g2g_core::memory::OwnedWgpuTexture::new(
+                4,
+                4,
+                alloc::sync::Arc::new(crate::gpu::WgpuTextureKeepAlive(texture)),
+            )),
+            g2g_core::FrameTiming {
+                pts_ns,
+                ..g2g_core::FrameTiming::default()
+            },
+            0,
+        )
+    }
+
+    struct NullSink;
+    impl OutputSink for NullSink {
+        fn push<'a>(
+            &'a mut self,
+            _packet: PipelinePacket,
+        ) -> Pin<Box<dyn Future<Output = Result<g2g_core::PushOutcome, G2gError>> + 'a>> {
+            Box::pin(async { Ok(g2g_core::PushOutcome::Accepted) })
+        }
+    }
+
+    /// A clock whose `now_ns` the test drives by hand.
+    #[derive(Debug)]
+    struct ManualClock(alloc::sync::Arc<core::sync::atomic::AtomicU64>);
+    impl g2g_core::PipelineClock for ManualClock {
+        fn now_ns(&self) -> u64 {
+            self.0.load(core::sync::atomic::Ordering::Relaxed)
+        }
+    }
+
+    /// The pacing knobs are runtime properties (so a launch line can tune the HDR
+    /// present like any other display sink) and reach the pacer.
+    #[tokio::test]
+    async fn pacing_properties_round_trip() {
+        let Some((_device, mut sink)) = stub_element().await else {
+            std::eprintln!("skip: no Vulkan H.265 decode + present device");
+            return;
+        };
+        let names: alloc::vec::Vec<&str> = AsyncElement::properties(&sink)
+            .iter()
+            .map(|p| p.name)
+            .collect();
+        assert!(
+            names.contains(&"max-lateness") && names.contains(&"qos-interval"),
+            "pacing properties advertised: {names:?}"
+        );
+        AsyncElement::set_property(&mut sink, "max-lateness", PropValue::Uint(20_000_000)).unwrap();
+        AsyncElement::set_property(&mut sink, "qos-interval", PropValue::Uint(1_000_000_000))
+            .unwrap();
+        assert_eq!(
+            AsyncElement::get_property(&sink, "max-lateness"),
+            Some(PropValue::Uint(20_000_000))
+        );
+        assert_eq!(
+            AsyncElement::get_property(&sink, "qos-interval"),
+            Some(PropValue::Uint(1_000_000_000))
+        );
+        assert_eq!(
+            AsyncElement::set_property(&mut sink, "nope", PropValue::Uint(1)),
+            Err(PropError::Unknown)
+        );
+    }
+
+    /// PTS pacing through the element: an on-time frame goes to the sink, one due
+    /// later is held until its deadline, and one past the lateness bound is dropped,
+    /// reported on the bus, and offered upstream via `take_qos`. A non-GPU frame is
+    /// rejected, and nothing is accepted before configure.
+    #[tokio::test]
+    async fn paces_holds_and_drops_by_pts() {
+        use core::sync::atomic::{AtomicU64, Ordering};
+        use g2g_core::clock::PlayAnchor;
+
+        let Some((device, mut sink)) = stub_element().await else {
+            std::eprintln!("skip: no Vulkan H.265 decode + present device");
+            return;
+        };
+        let ctx = device.gpu_context();
+
+        // Before configure, a frame is refused rather than presented.
+        assert_eq!(
+            sink.process(
+                PipelinePacket::DataFrame(texture_frame(&ctx, 0)),
+                &mut NullSink
+            )
+            .await,
+            Err(G2gError::NotConfigured)
+        );
+
+        let (bus, handle) = g2g_core::Bus::new(4);
+        sink = sink.with_max_lateness_ns(0).with_bus(handle);
+        sink.configure_pipeline(&rgba_caps(4, 4)).unwrap();
+        // The play anchor stamped at clock 0 makes each frame's deadline its PTS.
+        let clock = alloc::sync::Arc::new(AtomicU64::new(0));
+        let anchor = PlayAnchor::new();
+        anchor.stamp(0);
+        AsyncElement::set_clock_sync(
+            &mut sink,
+            g2g_core::ClockSync::with_play_anchor(
+                alloc::sync::Arc::new(ManualClock(clock.clone())),
+                0,
+                anchor,
+            ),
+        );
+        sink.process(
+            PipelinePacket::Segment(g2g_core::Segment::new()),
+            &mut NullSink,
+        )
+        .await
+        .unwrap();
+
+        // Due now: accepted, nothing reported.
+        sink.process(
+            PipelinePacket::DataFrame(texture_frame(&ctx, 0)),
+            &mut NullSink,
+        )
+        .await
+        .unwrap();
+        assert_eq!(sink.late_dropped(), 0);
+        assert!(AsyncElement::take_qos(&mut sink).is_none());
+        assert_eq!(bus.try_recv(), None, "no report for an on-time frame");
+
+        // Due in 5 ms: held that long before the present.
+        let started = std::time::Instant::now();
+        sink.process(
+            PipelinePacket::DataFrame(texture_frame(&ctx, 5_000_000)),
+            &mut NullSink,
+        )
+        .await
+        .unwrap();
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(5),
+            "held until its deadline, waited {:?}",
+            started.elapsed()
+        );
+
+        // Clock jumps to 100 ms: a frame due at 10 ms is 90 ms late, so it is
+        // dropped instead of presented late.
+        clock.store(100_000_000, Ordering::Relaxed);
+        sink.process(
+            PipelinePacket::DataFrame(texture_frame(&ctx, 10_000_000)),
+            &mut NullSink,
+        )
+        .await
+        .expect("a dropped frame is not an error");
+        assert_eq!(sink.late_dropped(), 1);
+        let upstream = AsyncElement::take_qos(&mut sink).expect("upstream QoS report");
+        assert_eq!(upstream.jitter_ns, 90_000_000);
+        assert_eq!(upstream.running_time_ns, 10_000_000);
+        match bus.try_recv() {
+            Some(g2g_core::BusMessage::Qos { dropped, .. }) => assert_eq!(dropped, 1),
+            other => panic!("expected a Qos message, got {other:?}"),
+        }
+
+        // A CPU frame is not presentable by an HDR swapchain sink.
+        let cpu = g2g_core::frame::Frame::new(
+            MemoryDomain::System(g2g_core::memory::SystemSlice::from_boxed(
+                alloc::vec![0u8; 64].into_boxed_slice(),
+            )),
+            g2g_core::FrameTiming::default(),
+            0,
+        );
+        clock.store(0, Ordering::Relaxed);
+        assert_eq!(
+            sink.process(PipelinePacket::DataFrame(cpu), &mut NullSink)
+                .await,
+            Err(G2gError::UnsupportedDomain)
+        );
     }
 
     #[test]
