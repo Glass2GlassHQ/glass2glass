@@ -458,11 +458,13 @@ fn cc_format_gst_media_type(f: ClosedCaptionFormat) -> &'static str {
 }
 
 /// GStreamer media-type string for a [`SubPictureFormat`]. `subpicture/x-dvd` is
-/// GStreamer's own type for the DVD SPU stream `dvdsubdec` consumes.
+/// GStreamer's own type for the DVD SPU stream `dvdsubdec` consumes, and
+/// `subpicture/x-dvb` the one its `dvbsuboverlay` takes.
 #[cfg(feature = "alloc")]
 fn subpicture_gst_media_type(f: SubPictureFormat) -> &'static str {
     match f {
         SubPictureFormat::VobSub => "subpicture/x-dvd",
+        SubPictureFormat::DvbSub => "subpicture/x-dvb",
     }
 }
 
@@ -1020,6 +1022,13 @@ pub enum SubPictureFormat {
     /// display geometry ride out of band, in the `.idx` text a Matroska track
     /// carries as its `CodecPrivate`.
     VobSub,
+    /// DVB subtitles (ETSI EN 300 743): a segment stream (page / region / CLUT /
+    /// object / display definition) rather than one packet per cue, with 2-, 4-
+    /// and 8-bit run-length coded objects placed into regions and regions placed
+    /// on the display. The palette is in band (CLUT definition segments); the
+    /// composition and ancillary page ids ride out of band, in the PMT
+    /// `subtitling_descriptor` or a Matroska track's `CodecPrivate`.
+    DvbSub,
 }
 
 /// Raw pixel layout carried in a [`Caps::RawVideo`] link. Split out of

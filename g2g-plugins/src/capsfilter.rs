@@ -432,6 +432,9 @@ pub fn parse_caps_set(desc: &str) -> Option<CapsSet> {
         "subpicture/x-dvd" => Some(CapsSet::one(Caps::SubPicture {
             format: SubPictureFormat::VobSub,
         })),
+        "subpicture/x-dvb" => Some(CapsSet::one(Caps::SubPicture {
+            format: SubPictureFormat::DvbSub,
+        })),
         _ => None,
     }
 }

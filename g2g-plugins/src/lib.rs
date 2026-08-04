@@ -153,6 +153,10 @@ pub mod vmti;
 // the `vobsubdec` element that renders cues to RGBA canvases.
 pub mod vobsub;
 pub mod vobsubdec;
+// DVB subtitles (ETSI EN 300 743): the segment-stream codec (no_std) plus the
+// `dvbsubdec` element that renders display sets to RGBA canvases.
+pub mod dvbsub;
+pub mod dvbsubdec;
 // Cursor-on-Target bridge (M811): the ST 0601 -> CoT XML event builder (no_std)
 // plus the `cotsink` TAK egress element, which needs `udp-egress`.
 pub mod cotsink;

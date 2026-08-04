@@ -281,6 +281,10 @@ Phased plan:
 
 ## Egress / transports
 
+- **RTP over QUIC (RoQ):** blocked on the spec. draft-ietf-avtcore-rtp-over-quic
+  expired at -14 (its ALPN is forbidden until an RFC exists) and the WG missed
+  its milestone; revisit only if the draft revives. Peers if it does:
+  mengelbart/roq (Go), meetecho/imquic.
 - **SRT:** real-peer interop with libsrt/ffmpeg is validated for the **full
   matrix** by `srt_ffmpeg_interop` (ignored, needs ffmpeg+libsrt): both
   directions (ffmpeg caller -> `SrtSrc` listener; `SrtSink` caller -> ffmpeg
@@ -458,11 +462,10 @@ _(No open parser items.)_
   de-frames its `vttc`/`payl` boxes to `Text{Utf8}`, `stpp` passes the TTML document
   as `Text{Ttml}` through `SubParse`), as are MKV `S_TEXT/ASS` / `S_TEXT/WEBVTT`
   (M417: the block is de-framed to plain `Text{Utf8}` cue text, the source syntax
-  only selecting the de-framing). Still open: the **MPEG-TS** subtitle path, which
-  is a separate, larger effort, not a sibling of the MP4 / MKV text wiring: TS
-  carries DVB subtitles (bitmap RLE, a `Caps::SubPicture` track, see below) and
-  teletext (a page/magazine decoder), neither a text format `TextOverlayN`
-  consumes, so there is no TS text stream to overlay until one of those lands.
+  only selecting the de-framing). Still open: **MPEG-TS teletext** (a
+  page/magazine decoder), the one TS subtitle form with no route to the
+  overlay: DVB subtitles are `Caps::SubPicture` canvases for the compositor,
+  not a text stream `TextOverlayN` consumes.
   HLS subtitle renditions: discovery + language selection landed (M418 -
   `variant_streams` surfaces `SUBTITLES` renditions as `Caps::Text`,
   `MasterPlaylist::pick_rendition` selects by `#audio-lang=` / `#subtitle-lang=`
@@ -507,11 +510,11 @@ _(No open parser items.)_
   decode path (`cea` decoders + `CcExtract` + file- and HLS-`playbin` auto-plug)
   and the CEA-608 encode path (`Cc608Enc` + `CcInsert`) are done (DESIGN.md
   §4.18). Still open: MPEG-2 user-data caption extraction.
-- **Bitmap / picture subtitles: DVB + PGS.** Decoders for DVB subtitles (ETSI
-  EN 300 743, the TS path above) and Blu-ray PGS as further `SubPictureFormat`
-  codings, with the `S_DVBSUB` / `S_HDMV/PGS` Matroska track mappings (both
-  land on `MkvCodec::Other` today). Also open: a `.idx`/`.sub` sidecar source
-  element, and a muxer write path for a `SubPicture` pad.
+- **Bitmap / picture subtitles: PGS + write paths.** A Blu-ray PGS decoder as a
+  further `SubPictureFormat` coding with the `S_HDMV/PGS` Matroska mapping
+  (lands on `MkvCodec::Other` today). Also open: a `.idx`/`.sub` sidecar source
+  element, and muxer write paths for a `SubPicture` pad (mkv `S_VOBSUB` /
+  `S_DVBSUB`, TS `subtitling_descriptor`).
 - **Tensor substrate orientation descriptor (M181).** A deferred
   rotate/mirror descriptor the sink can absorb in hardware (DRM/KMS, Wayland
   `set_buffer_transform`, VAAPI VPP, D3D11 VideoProcessor), with eager strided /

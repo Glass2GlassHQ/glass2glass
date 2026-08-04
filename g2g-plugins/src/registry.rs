@@ -407,6 +407,13 @@ pub fn default_registry() -> Registry {
         "vobsubdec",
         || Box::new(crate::vobsubdec::VobSubDec::new()),
     ));
+    // DVB subtitle decoder (M900): the broadcast bitmap-subtitle sibling of
+    // `vobsubdec`, e.g. `tsdemux stream=dvbsub ! dvbsubdec ! c.` . No gst alias:
+    // gst's `dvbsuboverlay` is a video-overlay element, not a bare decoder.
+    reg.register_launch(LaunchFactory::of::<crate::dvbsubdec::DvbSubDec>(
+        "dvbsubdec",
+        || Box::new(crate::dvbsubdec::DvbSubDec::new()),
+    ));
     // Detection-box overlay (M102): draws the frame's `AnalyticsMeta` bounding
     // boxes onto the RGBA frame, so a detector's output is visible downstream
     // (e.g. `... ! analyticsoverlay ! videoconvert ! autovideosink`). No pad

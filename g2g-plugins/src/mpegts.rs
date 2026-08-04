@@ -36,6 +36,10 @@ const DESC_TAG_SERVICE: u8 = 0x48;
 /// `ISO_639_language_descriptor` tag: 4 bytes per language (a 3-letter code plus
 /// an audio_type byte).
 const DESC_TAG_ISO639: u8 = 0x0A;
+/// DVB `subtitling_descriptor` tag (ETSI EN 300 468): 8 bytes per subtitle
+/// stream, a 3-letter language code, a subtitling_type, then the composition and
+/// ancillary page ids.
+const DESC_TAG_SUBTITLING: u8 = 0x59;
 /// SDT `service_type` for digital television, and for digital radio (a program
 /// with no video stream).
 const SERVICE_TYPE_TV: u8 = 0x01;
@@ -71,9 +75,10 @@ pub const STREAM_TYPE_AAC: u8 = 0x0F;
 pub const STREAM_TYPE_MPEG1_AUDIO: u8 = 0x03;
 /// PMT `stream_type` for MPEG-2 Audio (the low-sample-rate extension of the above).
 pub const STREAM_TYPE_MPEG2_AUDIO: u8 = 0x04;
-/// PMT `stream_type` for a private PES stream (0x06). Opus and DVB AC-3 both ride
-/// this, identified by their ES descriptors (an 'Opus' registration for Opus, an
-/// AC-3 descriptor (tag 0x6A) for AC-3).
+/// PMT `stream_type` for a private PES stream (0x06). Opus, DVB AC-3 and DVB
+/// subtitles all ride this, identified by their ES descriptors (an 'Opus'
+/// registration for Opus, an AC-3 descriptor (tag 0x6A) for AC-3, a
+/// subtitling_descriptor (tag 0x59) for subtitles).
 pub const STREAM_TYPE_PRIVATE_PES: u8 = 0x06;
 /// PMT `stream_type` for ATSC AC-3 audio (A/52). The ATSC carriage of Dolby
 /// Digital; DVB instead uses a private PES (0x06) with an AC-3 descriptor.
@@ -128,6 +133,11 @@ pub struct ElementaryStream {
     /// if it carried one. Read it as text with
     /// [`language_code`](Self::language_code).
     pub language: Option<[u8; 3]>,
+    /// The first entry of a private (0x06) stream's DVB `subtitling_descriptor`
+    /// (tag 0x59): `(subtitling_type, composition_page_id, ancillary_page_id)`.
+    /// `Some` marks the stream as DVB subtitles (disambiguating the generic
+    /// 0x06) and carries the page ids the decoder composes under.
+    pub subtitling: Option<(u8, u16, u16)>,
 }
 
 impl ElementaryStream {
@@ -281,6 +291,15 @@ impl TsDemuxer {
             .iter()
             .find(|s| s.pid == pid)
             .is_some_and(|s| s.klv)
+    }
+
+    /// The DVB `subtitling_descriptor` entry of `pid`, if its PMT entry is a
+    /// private (0x06) stream carrying one; `None` for any other stream.
+    pub fn subtitling(&self, pid: u16) -> Option<(u8, u16, u16)> {
+        self.streams()
+            .iter()
+            .find(|s| s.pid == pid)
+            .and_then(|s| s.subtitling)
     }
 
     /// The PID of the first video elementary stream (H.264 or H.265), if any.
@@ -494,6 +513,7 @@ impl TsDemuxer {
                 opus_channels,
                 ac3,
                 klv,
+                subtitling: private.and_then(parse_subtitling_descriptor),
                 language: descriptors.and_then(parse_iso639_language),
             });
             i = i.saturating_add(5).saturating_add(es_info_length);
@@ -653,6 +673,29 @@ fn has_klv_registration(mut desc: &[u8]) -> bool {
         desc = &desc[2 + len..];
     }
     false
+}
+
+/// The first entry of a PMT ES-info DVB `subtitling_descriptor` (tag 0x59), the
+/// marker for DVB subtitles on a private (0x06) stream: 8 bytes per subtitle
+/// stream, a 3-letter language code, a subtitling_type, then the composition and
+/// ancillary page ids. Only the first entry is kept, since one decoder composes
+/// one page. Every field is bounds-checked so a malformed loop returns `None`,
+/// never panics.
+fn parse_subtitling_descriptor(mut desc: &[u8]) -> Option<(u8, u16, u16)> {
+    while desc.len() >= 2 {
+        let tag = desc[0];
+        let len = desc[1] as usize;
+        let body = desc.get(2..2 + len)?;
+        if tag == DESC_TAG_SUBTITLING && body.len() >= 8 {
+            return Some((
+                body[3],
+                u16::from_be_bytes([body[4], body[5]]),
+                u16::from_be_bytes([body[6], body[7]]),
+            ));
+        }
+        desc = &desc[2 + len..];
+    }
+    None
 }
 
 /// The first language of a PMT ES-info `ISO_639_language_descriptor` (tag 0x0A):
@@ -1634,6 +1677,7 @@ mod tests {
                 opus_channels: None,
                 ac3: false,
                 klv: false,
+                subtitling: None,
                 language: None
             }]
         );

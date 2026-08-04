@@ -476,6 +476,13 @@ jobs:
       # `overlay` burn-in pixel for pixel.
       - name: VobSub oracle (mkvdemux + vobsubdec vs ffmpeg)
         run: cargo test -p g2g-plugins --locked --features std --test m899_vobsub -- --nocapture
+      # DVB subtitles (M900): ffmpeg transcodes the same authored cues to
+      # `dvbsub` in an MPEG-TS with a real subtitling descriptor and in an
+      # `S_DVBSUB` Matroska track, both of which g2g selects, decodes to their
+      # region rectangles, and composites pixel-identically to ffmpeg's own
+      # dvbsub `overlay` burn-in.
+      - name: DVB subtitle oracle (tsdemux + mkvdemux + dvbsubdec vs ffmpeg)
+        run: cargo test -p g2g-plugins --locked --features std --test m900_dvbsub -- --nocapture
       # Legacy FLV codecs (M831): the Sorenson / MP3 payloads g2g demuxes match
       # libavcodec's own FLV demuxer, and ffprobe reads each codec back out of a
       # g2g-muxed FLV (VP6 and Speex, which no ffmpeg build encodes).

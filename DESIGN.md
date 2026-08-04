@@ -2396,14 +2396,17 @@ in-graph.
 
 **Bitmap subtitles** are the one subtitle family that is not text, so they get
 their own coded media kind: `Caps::SubPicture { format: SubPictureFormat }`, a
-stream of coded bitmap cues (`VobSub` today, the DVD subpicture format; DVB and
-PGS are the same shape). It sits beside `Caps::Text` rather than inside it,
+stream of coded bitmap cues (`VobSub`, the DVD subpicture format, and `DvbSub`,
+ETSI EN 300 743; PGS is the same shape). It sits beside `Caps::Text` rather than
+inside it,
 because nothing downstream of a `Text` link can render a palette-indexed run-length
 bitmap, and `Caps::ClosedCaption` is the model: a coded carriage variant whose
 decoder produces something the rest of the graph already understands. Here that
-is raw pixels. `VobSubDec` (`vobsubdec`, gst's `dvdsubdec`) emits one full-frame
-transparent `Caps::RawVideo{Rgba8}` canvas per cue at the subpicture display
-geometry, stamped with the cue's PTS and duration, so the consumer is the ordinary
+is raw pixels. `VobSubDec` (`vobsubdec`, gst's `dvdsubdec`) and `DvbSubDec`
+(`dvbsubdec`; no gst alias, since gst's `dvbsuboverlay` is a video-overlay
+element rather than a bare decoder) both emit one full-frame transparent
+`Caps::RawVideo{Rgba8}` canvas per cue at the subpicture display geometry,
+stamped with the cue's PTS and duration, so the consumer is the ordinary
 `compositor` and there is no bitmap-cue overlay element to build. A cue ends with a
 second, fully transparent canvas at its hide time: the compositor holds an overlay
 pad's last frame between output frames, and a zero-alpha source-over is a no-op,
@@ -2426,6 +2429,29 @@ data is bounded by the control-sequence offset, so a truncated packet fails
 instead of decoding the control table as run lengths. A track that declares a
 Matroska `ContentCompression` is refused outright, since its blocks are not SPU
 packets and nothing here inflates them.
+
+DVB subtitles (`dvbsub.rs`, `no_std`) are the broadcast sibling, and a different
+shape: not one packet per cue but a *segment stream*, with decoder state carried
+across display sets. Each data field holds segments sharing a `page_id`: a
+display definition (the display geometry, 720x576 without one), a page
+composition (the `page_time_out`, the page state, and where each region sits), a
+region composition (a region's size, 2- / 4- / 8-bit depth, CLUT and background,
+and which objects are drawn into it where), CLUT definitions (Y / Cr / Cb plus a
+transparency, at full or packed precision, converted through the same BT.601
+fixed-point path a reference decoder uses so the rendered colours are identical),
+and object data (run-length coded pixels in two interlaced fields, with map
+tables lifting a shallower code into the region's depth). A page composition
+listing no region is how a cue ends; a page whose timeout expires before the next
+display set gets the same clear canvas at its deadline. The composition and
+ancillary page ids are the out-of-band part: a Matroska `S_DVBSUB` track's
+`CodecPrivate` carries them, and `TsDemux` synthesizes the identical five-byte
+blob from the PMT `subtitling_descriptor` (tag 0x59) that marks a private (0x06)
+stream as DVB subtitles, so both carriages reach the decoder the same way. The
+decoder takes a data field with or without its PES `data_identifier` header,
+since a Matroska block carries the bare segments. Every segment length, region
+dimension, CLUT entry id and object position is bounds-checked: a display set
+whose segment layer does not hold together is dropped whole, and a region past
+`MAX_REGION_PIXELS` is never allocated.
 
 ### 4.19 Native WebRTC (`str0m`)
 

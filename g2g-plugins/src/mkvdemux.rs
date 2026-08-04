@@ -77,6 +77,10 @@ pub enum MkvStream {
     /// text with the palette and display size) is forwarded in band before the
     /// first cue, the way the FLAC / Opus headers are.
     VobSub,
+    /// A DVB subtitle (bitmap) stream (`S_DVBSUB` -> `Caps::SubPicture
+    /// { DvbSub }`). Its `CodecPrivate` (the composition / ancillary page ids)
+    /// is forwarded in band the same way.
+    DvbSub,
 }
 
 /// A Matroska `Cues` prefetch in flight (M374): an end-of-file `Cues` index
@@ -287,6 +291,9 @@ impl MkvDemux {
             MkvStream::VobSub => Caps::SubPicture {
                 format: SubPictureFormat::VobSub,
             },
+            MkvStream::DvbSub => Caps::SubPicture {
+                format: SubPictureFormat::DvbSub,
+            },
         }
     }
 
@@ -322,6 +329,7 @@ impl MkvDemux {
             MkvStream::Flac => MkvCodec::Flac,
             MkvStream::Subtitle(format) => MkvCodec::Subtitle(format),
             MkvStream::VobSub => MkvCodec::VobSub,
+            MkvStream::DvbSub => MkvCodec::DvbSub,
         }
     }
 
@@ -465,6 +473,12 @@ impl MkvDemux {
                     format: SubPictureFormat::VobSub,
                 },
             ),
+            MkvCodec::DvbSub => (
+                StreamType::Text,
+                Caps::SubPicture {
+                    format: SubPictureFormat::DvbSub,
+                },
+            ),
             MkvCodec::Other => return None,
         };
         Some(Stream::new(id, stream_type, caps))
@@ -507,26 +521,28 @@ impl MkvDemux {
         resolve_stream_id(&self.demux, id)
     }
 
-    /// Refuse a `ContentEncoding`-compressed `S_VOBSUB` track: its blocks are
-    /// zlib (or header-stripped) bytes rather than SPU packets and nothing here
-    /// inflates them, so forwarding them would feed the decoder garbage. Only the
-    /// subpicture selection is checked; the other codecs' compressed-block
-    /// handling is unchanged.
-    fn reject_compressed_vobsub(&self) -> Result<(), G2gError> {
-        if self.stream != MkvStream::VobSub {
-            return Ok(());
-        }
+    /// Refuse a `ContentEncoding`-compressed bitmap-subtitle track: its blocks
+    /// are zlib (or header-stripped) bytes rather than SPU packets or DVB
+    /// segments and nothing here inflates them, so forwarding them would feed
+    /// the decoder garbage. Only the subpicture selections are checked; the
+    /// other codecs' compressed-block handling is unchanged.
+    fn reject_compressed_subpicture(&self) -> Result<(), G2gError> {
+        let codec = match self.stream {
+            MkvStream::VobSub => MkvCodec::VobSub,
+            MkvStream::DvbSub => MkvCodec::DvbSub,
+            _ => return Ok(()),
+        };
         if !self
             .demux
             .tracks()
             .iter()
-            .any(|t| t.codec == MkvCodec::VobSub && t.compressed)
+            .any(|t| t.codec == codec && t.compressed)
         {
             return Ok(());
         }
         g2g_error!(
             Target::category("mkvdemux"),
-            "S_VOBSUB track declares a ContentEncoding compression, which this demuxer does not inflate"
+            "bitmap subtitle track declares a ContentEncoding compression, which this demuxer does not inflate"
         );
         Err(G2gError::CapsMismatch)
     }
@@ -545,7 +561,7 @@ impl MkvDemux {
         // Fall back to the file's actual video track when the default (Vp9)
         // selection is absent, so autoplug of a VP8 / AV1 / H.264 WebM works.
         self.auto_select_video_track();
-        self.reject_compressed_vobsub()?;
+        self.reject_compressed_subpicture()?;
         if let Some(caps) = self.concrete_caps() {
             if self.last_caps.as_ref() != Some(&caps) {
                 out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
@@ -757,7 +773,7 @@ impl AsyncElement for MkvDemux {
 static MKVDEMUX_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "stream",
     PropKind::Str,
-    "elementary stream to emit: h264 | h265 | vp8 | vp9 | av1 | aac | opus | ac3 | flac | vobsub",
+    "elementary stream to emit: h264 | h265 | vp8 | vp9 | av1 | aac | opus | ac3 | flac | vobsub | dvbsub",
 )];
 
 /// The [`MkvStream`] a demuxer forwards for a parsed track's codec, or `None` for
@@ -775,6 +791,7 @@ fn codec_to_stream(codec: MkvCodec) -> Option<MkvStream> {
         MkvCodec::Flac => Some(MkvStream::Flac),
         MkvCodec::Subtitle(format) => Some(MkvStream::Subtitle(format)),
         MkvCodec::VobSub => Some(MkvStream::VobSub),
+        MkvCodec::DvbSub => Some(MkvStream::DvbSub),
         MkvCodec::Other => None,
     }
 }
@@ -968,6 +985,8 @@ fn config_header(demux: &MatroskaDemuxer, codec: MkvCodec, track: u64) -> Option
         MkvCodec::Opus => crate::opusparse::parse_opus_head(private).map(|_| private.to_vec()),
         // the `.idx` text carrying the palette and display size
         MkvCodec::VobSub => crate::vobsub::parse_idx(private).map(|_| private.to_vec()),
+        // the composition / ancillary page ids the display sets compose under
+        MkvCodec::DvbSub => crate::dvbsub::parse_page_ids(private).map(|_| private.to_vec()),
         _ => None,
     }
 }
@@ -1078,6 +1097,7 @@ fn mkv_stream_from_str(s: &str) -> Option<MkvStream> {
         "ac3" => Some(MkvStream::Ac3),
         "flac" => Some(MkvStream::Flac),
         "vobsub" | "dvdsub" => Some(MkvStream::VobSub),
+        "dvbsub" => Some(MkvStream::DvbSub),
         _ => None,
     }
 }
@@ -1100,6 +1120,7 @@ fn mkv_stream_to_str(stream: MkvStream) -> &'static str {
         MkvStream::Flac => "flac",
         MkvStream::Subtitle(_) => "text",
         MkvStream::VobSub => "vobsub",
+        MkvStream::DvbSub => "dvbsub",
     }
 }
 
@@ -1119,6 +1140,7 @@ impl PadTemplates for MkvDemux {
             Self::output_caps(MkvStream::Flac),
             Self::output_caps(MkvStream::Subtitle(TextFormat::Utf8)),
             Self::output_caps(MkvStream::VobSub),
+            Self::output_caps(MkvStream::DvbSub),
         ]));
         Vec::from([
             PadTemplate::sink(CapsSet::one(Self::input_caps())),
