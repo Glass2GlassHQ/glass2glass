@@ -10,7 +10,7 @@ use core::pin::Pin;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use g2g_core::element::AsyncElement;
@@ -194,11 +194,19 @@ fn serve(init: Vec<u8>, segs: Vec<Vec<u8>>) -> String {
     format!("http://127.0.0.1:{port}/manifest.mpd")
 }
 
-/// Serve a `SegmentTimeline` + `$Time$` manifest: one `<S>` with `r` repeats so
-/// the 1s segments map to start times 0, 1000, 2000 (`seg<time>.m4s`).
-fn serve_timeline(init: Vec<u8>, segs: Vec<Vec<u8>>) -> String {
+/// Serve a `SegmentTimeline` + `$Time$` manifest at 90kHz: one `<S>` with `r`
+/// repeats so the 1s segments start at `pto`, `pto + 90000`, ... on the media
+/// timeline (`seg<time>.m4s`), with `pto` as the `@presentationTimeOffset`.
+/// Returns the manifest URL and the paths the server was asked for.
+fn serve_timeline(
+    init: Vec<u8>,
+    segs: Vec<Vec<u8>>,
+    pto: u64,
+) -> (String, Arc<Mutex<Vec<String>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&requests);
     let repeats = segs.len() as u64 - 1;
     let mpd = format!(
         "<?xml version=\"1.0\"?>\n\
@@ -206,8 +214,8 @@ fn serve_timeline(init: Vec<u8>, segs: Vec<Vec<u8>>) -> String {
            <Period>\n\
              <AdaptationSet mimeType=\"video/mp4\" codecs=\"avc1.4d401f\">\n\
                <SegmentTemplate initialization=\"init.mp4\" media=\"seg$Time$.m4s\" \
-                  startNumber=\"1\" timescale=\"1000\">\n\
-                 <SegmentTimeline><S t=\"0\" d=\"1000\" r=\"{repeats}\"/></SegmentTimeline>\n\
+                  startNumber=\"1\" timescale=\"90000\" presentationTimeOffset=\"{pto}\">\n\
+                 <SegmentTimeline><S t=\"{pto}\" d=\"90000\" r=\"{repeats}\"/></SegmentTimeline>\n\
                </SegmentTemplate>\n\
                <Representation id=\"v0\" bandwidth=\"1000000\" width=\"64\" height=\"48\"/>\n\
              </AdaptationSet>\n\
@@ -230,16 +238,22 @@ fn serve_timeline(init: Vec<u8>, segs: Vec<Vec<u8>>) -> String {
             }
             let line = String::from_utf8_lossy(&req);
             let path = line.split_whitespace().nth(1).unwrap_or("");
+            seen.lock().unwrap().push(String::from(path));
             let body: Vec<u8> = if path == "/manifest.mpd" {
                 mpd.clone().into_bytes()
             } else if path == "/init.mp4" {
                 init.clone()
-            } else if let Some(time) = path
+            } else if let Some(idx) = path
                 .strip_prefix("/seg")
                 .and_then(|s| s.strip_suffix(".m4s"))
-                .and_then(|s| s.parse::<usize>().ok())
+                .and_then(|s| s.parse::<u64>().ok())
+                // $Time$ is a media time, so the offset comes off to index the
+                // segment list.
+                .and_then(|time| time.checked_sub(pto))
             {
-                segs.get(time / 1000).cloned().unwrap_or_default()
+                segs.get((idx / 90_000) as usize)
+                    .cloned()
+                    .unwrap_or_default()
             } else {
                 let _ = stream.write_all(
                     b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
@@ -254,7 +268,7 @@ fn serve_timeline(init: Vec<u8>, segs: Vec<Vec<u8>>) -> String {
             let _ = stream.write_all(&body);
         }
     });
-    format!("http://127.0.0.1:{port}/manifest.mpd")
+    (format!("http://127.0.0.1:{port}/manifest.mpd"), requests)
 }
 
 /// The dynamic MPD returned on the Nth reload: a 2-segment sliding window over
@@ -383,7 +397,7 @@ async fn dash_segment_timeline_time_addressing_demuxes() {
     let aus = access_units();
     let fmp4 = make_fmp4(&aus).await;
     let (init, segs) = split_fmp4(&fmp4);
-    let url = serve_timeline(init.clone(), segs.clone());
+    let (url, _) = serve_timeline(init.clone(), segs.clone(), 0);
 
     let mut src = DashSrc::new(url);
     src.configure_pipeline(&Caps::ByteStream {
@@ -484,6 +498,91 @@ async fn dash_time_seek_jumps_to_the_segment_containing_the_target() {
         dsink.aus[1], aus[2],
         "the last demuxed AU is byte-exact (no param-set prepend)"
     );
+}
+
+/// Play the `$Time$` SegmentTimeline manifest with `pto` as its
+/// `@presentationTimeOffset`, seeking to 1.5s of period-relative time first, and
+/// return the delivered sink plus the paths the server was asked for.
+async fn run_timeline_seek(
+    init: Vec<u8>,
+    segs: Vec<Vec<u8>>,
+    pto: u64,
+) -> (CaptureSink, Vec<String>) {
+    let (url, requests) = serve_timeline(init, segs, pto);
+    let seek = SeekController::new();
+    seek.seek(Seek::flush_to(1_500_000_000));
+    let mut src = DashSrc::new(url).with_seek(seek);
+    src.configure_pipeline(&Caps::ByteStream {
+        encoding: ByteStreamEncoding::IsoBmff,
+    })
+    .unwrap();
+    let mut sink = CaptureSink::default();
+    src.run(&mut sink).await.unwrap();
+    let paths = requests.lock().unwrap().clone();
+    (sink, paths)
+}
+
+#[tokio::test]
+async fn dash_presentation_time_offset_maps_media_time_to_the_period_timeline() {
+    let aus = access_units();
+    let fmp4 = make_fmp4(&aus).await;
+    let (init, segs) = split_fmp4(&fmp4);
+    assert_eq!(segs.len(), 3);
+
+    // The same three 1s segments twice: once on a media timeline starting at
+    // zero, once shifted a second by @presentationTimeOffset (timescale 90000).
+    let (plain, plain_paths) = run_timeline_seek(init.clone(), segs.clone(), 0).await;
+    let (shifted, shifted_paths) = run_timeline_seek(init.clone(), segs.clone(), 90_000).await;
+
+    // The 1.5s target is period-relative, so it lands in the second segment
+    // either way: the offset shifts media time, not the presentation timeline.
+    let mut expected = init.clone();
+    expected.extend_from_slice(&segs[1]);
+    expected.extend_from_slice(&segs[2]);
+    assert_eq!(plain.body, expected);
+    assert_eq!(
+        shifted.body, expected,
+        "the offset manifest seeks to the same segment index"
+    );
+    assert_eq!(
+        shifted.segment_starts,
+        vec![1_000_000_000],
+        "the post-flush Segment is on the period timeline, not the media one"
+    );
+    assert_eq!(plain.segment_starts, shifted.segment_starts);
+
+    // $Time$ still addresses the media timeline, so the fetched URLs carry the
+    // offset: the target segment is seg180000, its successor seg270000.
+    assert!(
+        shifted_paths.contains(&String::from("/seg180000.m4s"))
+            && shifted_paths.contains(&String::from("/seg270000.m4s")),
+        "media-time $Time$ URLs: {shifted_paths:?}"
+    );
+    assert!(
+        !shifted_paths.contains(&String::from("/seg90000.m4s")),
+        "the pre-target segment is skipped: {shifted_paths:?}"
+    );
+    // Without the offset the same indices are seg0 / seg90000.
+    assert!(
+        plain_paths.contains(&String::from("/seg90000.m4s")),
+        "{plain_paths:?}"
+    );
+
+    // End to end: the offset stream still demuxes to the post-target tail.
+    let mut dmx = Fmp4Demux::new();
+    dmx.configure_pipeline(&Caps::ByteStream {
+        encoding: ByteStreamEncoding::IsoBmff,
+    })
+    .unwrap();
+    let mut dsink = CaptureSink::default();
+    dmx.process(
+        PipelinePacket::DataFrame(au_frame(shifted.body.clone(), 0, 0)),
+        &mut dsink,
+    )
+    .await
+    .unwrap();
+    assert_eq!(dsink.aus.len(), 2);
+    assert_eq!(dsink.aus[1], aus[2]);
 }
 
 /// Parse a `Range: bytes=a-b` request header, returning the inclusive `(a, b)`.

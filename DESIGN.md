@@ -2131,9 +2131,17 @@ run time via `parse_sidx` + `Sidx::subsegments`, the index bytes never pushed
 downstream). All three resolve to one `ResolvedSegment { url, byte_range, time }`
 list, so a range-carrying entry fetches just its sub-range with an HTTP `Range`
 request, the DASH analog of HLS `#EXT-X-BYTERANGE`, letting a single-file CMAF
-DASH stream play. A dynamic (live) MPD is reloaded on its `minimumUpdatePeriod`,
+DASH stream play. A `SegmentTemplate`'s `@presentationTimeOffset` is the media
+instant that lines up with the start of the Period, so `$Time$` URLs keep the
+media value while every `ResolvedSegment.time` (and with it seek matching and the
+Period-boundary `Segment`) is period-relative presentation time. A dynamic (live)
+MPD is reloaded on its `minimumUpdatePeriod`,
 each new segment played once (tracked by start time), ending when the manifest
-turns static, the same shape as the HLS live reload. `with_abr()` makes it
+turns static, the same shape as the HLS live reload. Its wall-clock window comes
+from `availabilityStartTime` + `Period@start` bounded by `timeShiftBufferDepth`,
+with `@availabilityTimeOffset` publishing each segment that many seconds before
+its nominal completion (clamped to one segment duration, so a chunked packager's
+in-progress segment is reachable but nothing beyond it). `with_abr()` makes it
 throughput-adaptive on the same shared `abr::BandwidthEstimator` as `HlsSrc`: a
 `load_rep` helper resolves any Representation (Template / List / `sidx`-fetched
 SegmentBase) into the run loop's segment/timescale/init working set, and the

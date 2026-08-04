@@ -141,11 +141,15 @@ const INIT_BODY: &[u8] = b"init-stream0-payload";
 
 /// A dynamic `@duration` MPD in ffmpeg's `-use_template 1 -use_timeline 0`
 /// shape, with 2s segments and `availabilityStartTime` `age` seconds in the
-/// past. `spd` is the optional `suggestedPresentationDelay` in seconds.
-fn live_mpd(age_secs: f64, tsb_secs: f64, spd: Option<f64>) -> String {
+/// past. `spd` is the optional `suggestedPresentationDelay` in seconds, `ato` the
+/// template's `@availabilityTimeOffset` (seconds, or `"INF"`).
+fn live_mpd(age_secs: f64, tsb_secs: f64, spd: Option<f64>, ato: Option<&str>) -> String {
     let ast = xs_datetime(now_unix() - age_secs);
     let spd = spd.map_or(String::new(), |s| {
         format!(" suggestedPresentationDelay=\"PT{s}S\"")
+    });
+    let ato = ato.map_or(String::new(), |v| {
+        format!(" availabilityTimeOffset=\"{v}\"")
     });
     format!(
         "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
@@ -158,7 +162,7 @@ fn live_mpd(age_secs: f64, tsb_secs: f64, spd: Option<f64>) -> String {
              <AdaptationSet id=\"0\" contentType=\"video\">\n\
                <Representation id=\"0\" mimeType=\"video/mp4\" codecs=\"avc1.f4000a\" \
                   bandwidth=\"47600\" width=\"64\" height=\"48\">\n\
-                 <SegmentTemplate timescale=\"1000000\" duration=\"2000000\" \
+                 <SegmentTemplate timescale=\"1000000\" duration=\"2000000\"{ato} \
                     initialization=\"init-stream$RepresentationID$.m4s\" \
                     media=\"chunk-stream$RepresentationID$-$Number%05d$.m4s\" startNumber=\"1\"/>\n\
                </Representation>\n\
@@ -238,8 +242,8 @@ async fn dash_live_duration_profile_starts_at_the_live_edge_and_reloads() {
     // puts playback on the newest one, number 7. The reload advances the wall
     // clock by 4s (two more segments), which must deliver 8 and 9 exactly once.
     let (url, requests) = serve_live(vec![
-        live_mpd(15.0, 6.0, Some(2.0)),
-        live_mpd(19.0, 6.0, Some(2.0)),
+        live_mpd(15.0, 6.0, Some(2.0), None),
+        live_mpd(19.0, 6.0, Some(2.0), None),
         ended_mpd(18.0),
     ]);
 
@@ -264,7 +268,7 @@ async fn dash_live_start_clamps_to_the_time_shift_buffer_window() {
     // from the live edge is segment 3, which has long fallen out of the 6s
     // time-shift window. The start clamps to the window front (6) instead of
     // requesting media the server no longer has.
-    let (url, requests) = serve_live(vec![live_mpd(15.0, 6.0, None), ended_mpd(14.0)]);
+    let (url, requests) = serve_live(vec![live_mpd(15.0, 6.0, None, None), ended_mpd(14.0)]);
 
     let mut src = DashSrc::new(url).with_reload_interval_ms(20);
     let sink = run_dash(&mut src).await;
@@ -288,7 +292,7 @@ async fn dash_live_start_clamps_to_the_time_shift_buffer_window() {
 async fn dash_live_presentation_delay_property_overrides_the_manifest() {
     // The manifest suggests 2s (number 7 only); asking for 4s starts one
     // segment earlier, at 6.
-    let (url, _) = serve_live(vec![live_mpd(15.0, 6.0, Some(2.0)), ended_mpd(14.0)]);
+    let (url, _) = serve_live(vec![live_mpd(15.0, 6.0, Some(2.0), None), ended_mpd(14.0)]);
 
     // Driven through the runtime property, the way a launch line sets it.
     let mut src = DashSrc::new(url).with_reload_interval_ms(20);
@@ -305,6 +309,55 @@ async fn dash_live_presentation_delay_property_overrides_the_manifest() {
     let sink = run_dash(&mut src).await;
 
     assert_eq!(sink.body, expected_stream(&[6, 7]));
+}
+
+#[tokio::test]
+async fn dash_live_availability_time_offset_publishes_a_segment_before_it_completes() {
+    // 15.5s into a 2s-segment presentation: segment number 8 covers [14,16)s, so
+    // it is still being written, but a 1s availabilityTimeOffset publishes it
+    // from 15s. It is the live edge, and a 2s presentation delay starts there.
+    let (url, _) = serve_live(vec![
+        live_mpd(15.5, 6.0, Some(2.0), Some("1")),
+        ended_mpd(14.0),
+    ]);
+    let mut src = DashSrc::new(url).with_reload_interval_ms(20);
+    let sink = run_dash(&mut src).await;
+    assert_eq!(
+        sink.body,
+        expected_stream(&[8]),
+        "the early-available segment is the live edge"
+    );
+
+    // The same wall clock with no offset: only complete segments are available,
+    // so the edge is the previous one.
+    let (url, _) = serve_live(vec![live_mpd(15.5, 6.0, Some(2.0), None), ended_mpd(14.0)]);
+    let mut src = DashSrc::new(url).with_reload_interval_ms(20);
+    let sink = run_dash(&mut src).await;
+    assert_eq!(
+        sink.body,
+        expected_stream(&[7]),
+        "without the offset the in-progress segment is not fetched"
+    );
+}
+
+#[tokio::test]
+async fn dash_live_oversized_availability_time_offset_clamps_to_one_segment() {
+    // An offset far past the segment duration (or the literal INF) cannot publish
+    // media that does not exist: it clamps at the in-progress segment, number 8.
+    for ato in ["999", "INF"] {
+        let (url, requests) = serve_live(vec![
+            live_mpd(15.5, 6.0, Some(2.0), Some(ato)),
+            ended_mpd(14.0),
+        ]);
+        let mut src = DashSrc::new(url).with_reload_interval_ms(20);
+        let sink = run_dash(&mut src).await;
+        assert_eq!(sink.body, expected_stream(&[8]), "ato={ato}");
+        let fetched = requests.lock().unwrap().clone();
+        assert!(
+            !fetched.iter().any(|p| p.contains("chunk-stream0-00009")),
+            "nothing past the in-progress segment is requested: {fetched:?}"
+        );
+    }
 }
 
 /// A dynamic `SegmentTimeline` manifest: the timeline lists the available

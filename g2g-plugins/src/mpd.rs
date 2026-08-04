@@ -11,9 +11,13 @@
 //! `SegmentTemplate` itself declared on the `AdaptationSet` and shared by its
 //! `Representation`s) is resolved by walking ancestors.
 //!
-//! Not modelled: `@presentationTimeOffset` (segment `$Time$` is period-relative
-//! and starts at zero) and `@availabilityTimeOffset` (the low-latency chunked
-//! early-availability knob, which only makes the window more conservative here).
+//! The two `SegmentTemplate` timing offsets are modelled: `@presentationTimeOffset`
+//! is the media-timeline instant that lines up with the start of the Period, so
+//! `$Time$` addressing keeps the media value while a [`ResolvedSegment`] carries
+//! period-relative presentation time; `@availabilityTimeOffset` publishes a
+//! segment that many seconds before its nominal completion (the low-latency
+//! chunked knob), clamped to one segment duration so a manifest cannot claim
+//! media that does not exist yet.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -21,7 +25,7 @@ use alloc::vec::Vec;
 use roxmltree::{Document, Node};
 
 /// One selectable Representation (a single quality rendition).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Representation {
     pub id: String,
     pub bandwidth: u64,
@@ -43,7 +47,7 @@ pub struct ByteRange {
 }
 
 /// How a Representation addresses its segments.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum SegmentSource {
     /// `SegmentTemplate`: `$Number$` / `$Time$` URL synthesis.
     Template(SegmentTemplate),
@@ -121,11 +125,14 @@ pub struct SegmentUrl {
 pub struct ResolvedSegment {
     pub url: String,
     pub byte_range: Option<ByteRange>,
+    /// Period-relative presentation start time: the segment's media time less
+    /// the template's `@presentationTimeOffset`, so a Period always starts at 0
+    /// however its media timeline is numbered.
     pub time: u64,
 }
 
 /// `SegmentTemplate` with `$Number$` / `$Time$` addressing.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SegmentTemplate {
     /// Init-segment template (resolves `$RepresentationID$`).
     pub initialization: Option<String>,
@@ -136,6 +143,18 @@ pub struct SegmentTemplate {
     /// `SegmentTimeline` carries its own per-entry durations instead).
     pub duration: u64,
     pub timescale: u64,
+    /// `@presentationTimeOffset` in `timescale` units: the media-timeline instant
+    /// that lines up with the start of the Period. Segment times (`$Time$`,
+    /// `SegmentTimeline` `@t`) are media-timeline values, so this comes off them
+    /// to get presentation time.
+    pub presentation_time_offset: u64,
+    /// `@availabilityTimeOffset` in seconds: how much earlier than its nominal
+    /// completion a segment becomes available (chunked low-latency delivery).
+    /// `INF` parses as infinity; [`live_available`] clamps the effective value to
+    /// one segment duration.
+    ///
+    /// [`live_available`]: Self::live_available
+    pub availability_time_offset: Option<f64>,
     /// `SegmentTimeline` `<S>` entries when present; empty for the `@duration`
     /// profile.
     pub timeline: Vec<TimelineEntry>,
@@ -146,8 +165,8 @@ pub struct SegmentTemplate {
 /// `@r` repeat or a tiny `@duration` from forcing an unbounded allocation.
 const MAX_SEGMENTS: u64 = 1 << 20;
 
-/// One `SegmentTimeline` `<S>` entry: a start time `t` (absent = continue from
-/// the previous entry), a duration `d`, and `r` additional repeats.
+/// One `SegmentTimeline` `<S>` entry: a media-timeline start time `t` (absent =
+/// continue from the previous entry), a duration `d`, and `r` additional repeats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TimelineEntry {
     pub t: Option<u64>,
@@ -155,8 +174,8 @@ pub struct TimelineEntry {
     pub r: u64,
 }
 
-/// One resolved media segment: its `$Number$` and its `$Time$` (start time in
-/// `timescale` units).
+/// One resolved media segment: its `$Number$` and its `$Time$` (media-timeline
+/// start time in `timescale` units, so it includes `@presentationTimeOffset`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SegmentRef {
     pub number: u64,
@@ -252,6 +271,14 @@ impl SegmentTemplate {
         expand(&self.media, rep_id, Some(seg.number), Some(seg.time))
     }
 
+    /// Period-relative presentation time of a media-timeline `time`, in
+    /// `timescale` units: `@presentationTimeOffset` is the media instant that
+    /// lines up with the Period start, so it comes off. Saturates, so a manifest
+    /// listing times before its own offset clamps to the Period start.
+    pub fn presentation_time(&self, media_time: u64) -> u64 {
+        media_time.saturating_sub(self.presentation_time_offset)
+    }
+
     /// Nominal segment duration in seconds: `@duration` for that profile, else
     /// the first `SegmentTimeline` entry's `d`. `None` when neither is usable.
     pub fn nominal_segment_secs(&self) -> Option<f64> {
@@ -266,19 +293,24 @@ impl SegmentTemplate {
 
     /// The `@duration` live profile's currently available segment indices
     /// (0-based from `start_number`) at wall-clock `now_unix`: the earliest one
-    /// still inside `timeShiftBufferDepth` and the newest complete one. Segment
+    /// still inside `timeShiftBufferDepth` and the newest available one. Segment
     /// `i` covers presentation time `[i*d, (i+1)*d)` and is complete `(i+1)*d`
-    /// after the Period anchor. `None` before the first complete segment exists,
-    /// or for a `SegmentTimeline` (which lists its own window).
+    /// after the Period anchor, `@availabilityTimeOffset` seconds earlier when
+    /// the packager publishes it chunked. `None` before the first available
+    /// segment exists, or for a `SegmentTimeline` (which lists its own window).
     pub fn live_available(&self, edge: &LiveEdge, now_unix: f64) -> Option<(u64, u64)> {
         if !self.timeline.is_empty() {
             return None;
         }
         let d = self.nominal_segment_secs()?;
         let elapsed = now_unix - edge.anchor_unix;
+        // Early availability is capped at one segment duration: the in-progress
+        // segment can be published chunked, but nothing beyond it exists yet, and
+        // the cap also keeps the window from opening before the anchor.
+        let early = self.availability_time_offset.unwrap_or(0.0).clamp(0.0, d);
         // `as u64` saturates at 0 for a negative / NaN elapsed, and the checked
-        // decrement then reports "no complete segment yet" instead of wrapping.
-        let last = ((elapsed / d) as u64).checked_sub(1)?;
+        // decrement then reports "nothing available yet" instead of wrapping.
+        let last = (((elapsed + early) / d) as u64).checked_sub(1)?;
         let first = match edge.time_shift_secs {
             // Fully inside the window: the segment starts no earlier than the
             // depth allows, so round the boundary up.
@@ -289,9 +321,10 @@ impl SegmentTemplate {
     }
 
     /// The `@duration` live profile's available segments at `now_unix`, newest
-    /// window last, each carrying its `$Number$` and its period-relative
-    /// `$Time$`. Bounded by [`MAX_SEGMENTS`] so an ancient
-    /// `availabilityStartTime` cannot force an unbounded allocation.
+    /// window last, each carrying its `$Number$` and its media-timeline `$Time$`
+    /// (segment `i` starts at `@presentationTimeOffset + i*d`). Bounded by
+    /// [`MAX_SEGMENTS`] so an ancient `availabilityStartTime` cannot force an
+    /// unbounded allocation.
     pub fn live_segments(&self, edge: &LiveEdge, now_unix: f64) -> Vec<SegmentRef> {
         let Some((first, last)) = self.live_available(edge, now_unix) else {
             return Vec::new();
@@ -300,20 +333,24 @@ impl SegmentTemplate {
         (first..first.saturating_add(count))
             .map(|i| SegmentRef {
                 number: self.start_number.saturating_add(i),
-                time: i.saturating_mul(self.duration),
+                time: self
+                    .presentation_time_offset
+                    .saturating_add(i.saturating_mul(self.duration)),
             })
             .collect()
     }
 
     /// The ordered media segments for a VOD presentation of `total_secs`. Driven
     /// by the `SegmentTimeline` when present, else by `@duration`. Each carries
-    /// its `$Number$` (from `startNumber`) and `$Time$` (accumulated start time).
+    /// its `$Number$` (from `startNumber`) and `$Time$` (the media-timeline start
+    /// time, so the `@duration` profile counts from `@presentationTimeOffset` and
+    /// a `SegmentTimeline` uses its own `@t` values).
     pub fn segments(&self, total_secs: f64) -> Vec<SegmentRef> {
         let mut out = Vec::new();
         let mut number = self.start_number;
         if self.timeline.is_empty() {
             let count = self.segment_count(total_secs).min(MAX_SEGMENTS);
-            let mut time = 0u64;
+            let mut time = self.presentation_time_offset;
             for _ in 0..count {
                 out.push(SegmentRef { number, time });
                 number += 1;
@@ -392,10 +429,11 @@ impl Representation {
     }
 
     /// The ordered segments resolved for the source loop without I/O. Template
-    /// synthesizes URLs by `$Number$` / `$Time$`; List returns its explicit URLs
-    /// / ranges with cumulative `@duration` start times. `SegmentBase` returns
-    /// empty here: its subsegments need the fetched `sidx` (see [`segment_base`]
-    /// and [`Sidx::subsegments`]).
+    /// synthesizes URLs by `$Number$` / `$Time$` (media time) while the resolved
+    /// `time` is period-relative presentation time; List returns its explicit
+    /// URLs / ranges with cumulative `@duration` start times. `SegmentBase`
+    /// returns empty here: its subsegments need the fetched `sidx` (see
+    /// [`segment_base`] and [`Sidx::subsegments`]).
     ///
     /// [`segment_base`]: Self::segment_base
     pub fn resolved_segments(&self, total_secs: f64) -> Vec<ResolvedSegment> {
@@ -406,11 +444,14 @@ impl Representation {
                 .map(|s| ResolvedSegment {
                     url: t.media_url(&self.id, s),
                     byte_range: None,
-                    time: s.time,
+                    time: t.presentation_time(s.time),
                 })
                 .collect(),
             SegmentSource::List(l) => {
                 let mut out = Vec::new();
+                // A SegmentList carries no media-timeline values (the entries are
+                // URLs / byte ranges), so its synthesized times are already
+                // period-relative and no offset applies.
                 let mut time = 0u64;
                 for su in &l.segments {
                     out.push(ResolvedSegment {
@@ -438,7 +479,7 @@ impl Representation {
             .map(|s| ResolvedSegment {
                 url: t.media_url(&self.id, s),
                 byte_range: None,
-                time: s.time,
+                time: t.presentation_time(s.time),
             })
             .collect()
     }
@@ -755,8 +796,28 @@ fn segment_template(rep: Node) -> Option<SegmentTemplate> {
             .attribute("timescale")
             .and_then(|s| s.parse().ok())
             .unwrap_or(1),
+        presentation_time_offset: st
+            .attribute("presentationTimeOffset")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0),
+        availability_time_offset: st
+            .attribute("availabilityTimeOffset")
+            .and_then(parse_availability_time_offset),
         timeline,
     })
+}
+
+/// Parse `@availabilityTimeOffset`: non-negative decimal seconds, or the literal
+/// `INF` (available from the availability start time). Manifest input, so a
+/// negative / `NaN` / unparsable value is dropped rather than shifting the
+/// availability window.
+fn parse_availability_time_offset(s: &str) -> Option<f64> {
+    let s = s.trim();
+    if s.eq_ignore_ascii_case("INF") {
+        return Some(f64::INFINITY);
+    }
+    let secs: f64 = s.parse().ok()?;
+    (secs.is_finite() && secs >= 0.0).then_some(secs)
 }
 
 /// Parse a `SegmentList` element into its init + ordered `<SegmentURL>` entries.
@@ -1029,6 +1090,8 @@ mod tests {
             start_number: 1,
             duration: 0,
             timescale: 1000,
+            presentation_time_offset: 0,
+            availability_time_offset: None,
             timeline: Vec::from([TimelineEntry {
                 t: Some(0),
                 d: 1000,
@@ -1044,6 +1107,8 @@ mod tests {
             start_number: 1,
             duration: 1,
             timescale: u64::MAX,
+            presentation_time_offset: 0,
+            availability_time_offset: None,
             timeline: Vec::new(),
         };
         assert_eq!(tiny.segments(1.0e9).len() as u64, MAX_SEGMENTS);
@@ -1129,6 +1194,94 @@ mod tests {
                 },
             ]
         );
+    }
+
+    /// A `SegmentTimeline` on a media timeline that starts at the offset rather
+    /// than at zero (90kHz, 1s segments, the Period beginning at media time 1s).
+    const PTO_MPD: &str = r#"<?xml version="1.0"?>
+<MPD type="static">
+  <Period>
+    <AdaptationSet mimeType="video/mp4">
+      <SegmentTemplate initialization="init.mp4" media="seg-$Time$.m4s"
+                       startNumber="1" timescale="90000" presentationTimeOffset="90000">
+        <SegmentTimeline>
+          <S t="90000" d="90000" r="2"/>
+        </SegmentTimeline>
+      </SegmentTemplate>
+      <Representation id="v0" bandwidth="1000000"/>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+
+    #[test]
+    fn presentation_time_offset_maps_media_time_onto_the_period_timeline() {
+        let mpd = parse(PTO_MPD).unwrap();
+        let rep = &mpd.periods[0].representations[0];
+        let tmpl = rep.template().unwrap();
+        assert_eq!(tmpl.presentation_time_offset, 90_000);
+
+        // $Time$ addressing stays on the media timeline.
+        let segs = tmpl.segments(0.0);
+        assert_eq!(segs[0].time, 90_000);
+        assert_eq!(tmpl.media_url(&rep.id, segs[0]), "seg-90000.m4s");
+        assert_eq!(tmpl.media_url(&rep.id, segs[2]), "seg-270000.m4s");
+
+        // The resolved segments are period-relative: the Period starts at 0.
+        let resolved = rep.resolved_segments(0.0);
+        assert_eq!(resolved.len(), 3);
+        assert_eq!(resolved[0].time, 0);
+        assert_eq!(resolved[1].time, 90_000);
+        assert_eq!(resolved[2].time, 180_000);
+        assert_eq!(resolved[0].url, "seg-90000.m4s");
+
+        // A time listed before the offset clamps to the Period start.
+        assert_eq!(tmpl.presentation_time(1000), 0);
+    }
+
+    #[test]
+    fn duration_profile_counts_time_from_the_presentation_time_offset() {
+        let xml = r#"<MPD type="static" mediaPresentationDuration="PT3S"><Period><AdaptationSet>
+          <SegmentTemplate media="seg-$Time$.m4s" duration="1000" timescale="1000"
+                           presentationTimeOffset="5000"/>
+          <Representation id="r" bandwidth="1"/>
+        </AdaptationSet></Period></MPD>"#;
+        let mpd = parse(xml).unwrap();
+        let rep = &mpd.periods[0].representations[0];
+        let segs = rep.template().unwrap().segments(mpd.duration_secs);
+        assert_eq!(
+            segs.iter().map(|s| s.time).collect::<Vec<_>>(),
+            [5000, 6000, 7000],
+            "$Time$ counts from the offset"
+        );
+        assert_eq!(
+            rep.resolved_segments(mpd.duration_secs)
+                .iter()
+                .map(|s| s.time)
+                .collect::<Vec<_>>(),
+            [0, 1000, 2000],
+            "presentation time still starts at the Period"
+        );
+    }
+
+    #[test]
+    fn missing_timing_offsets_default_to_none() {
+        let tmpl = parse(TIMELINE_MPD).unwrap().periods[0].representations[0]
+            .template()
+            .unwrap()
+            .clone();
+        assert_eq!(tmpl.presentation_time_offset, 0);
+        assert_eq!(tmpl.availability_time_offset, None);
+        assert_eq!(tmpl.presentation_time(180_000), 180_000);
+    }
+
+    #[test]
+    fn availability_time_offset_forms() {
+        assert_eq!(parse_availability_time_offset("0.967"), Some(0.967));
+        assert_eq!(parse_availability_time_offset(" 2 "), Some(2.0));
+        assert_eq!(parse_availability_time_offset("INF"), Some(f64::INFINITY));
+        for bad in ["-1", "NaN", "inf inity", "", "1s"] {
+            assert_eq!(parse_availability_time_offset(bad), None, "{bad} rejected");
+        }
     }
 
     #[test]
@@ -1420,6 +1573,9 @@ mod tests {
         assert_eq!(mpd.suggested_presentation_delay_secs, Some(1.0));
         assert_eq!(mpd.periods.len(), 1);
         assert_eq!(mpd.periods[0].start_secs, 0.0);
+        let tmpl = mpd.periods[0].representations[0].template().unwrap();
+        assert_eq!(tmpl.availability_time_offset, Some(0.967));
+        assert_eq!(tmpl.presentation_time_offset, 0);
         let edge = mpd.live_edge(&mpd.periods[0], 1.0).unwrap();
         assert_eq!(edge.anchor_unix, AST_UNIX);
         assert_eq!(edge.time_shift_secs, Some(3.0));
@@ -1446,16 +1602,51 @@ mod tests {
             ],
             "$Number$ = startNumber + index, zero-padded"
         );
-        // $Time$ stays period-relative in timescale units.
+        // The segment start time, in timescale units (this manifest declares no
+        // presentationTimeOffset, so media time is presentation time).
         assert_eq!(segs[0].time, 4_000_000);
 
-        // Nothing is complete before one segment duration has passed.
-        assert_eq!(tmpl.live_available(&edge, AST_UNIX + 0.5), None);
-        assert!(rep.live_segments(&edge, AST_UNIX + 0.5).is_empty());
-        // Nor before the presentation starts at all.
+        // The boundaries of the nominal window, with the manifest's 0.967s
+        // availabilityTimeOffset cleared (its own test covers that): nothing
+        // before the first segment completes, exactly one segment at 1.5s in.
+        let mut nominal = tmpl.clone();
+        nominal.availability_time_offset = None;
+        assert_eq!(nominal.live_available(&edge, AST_UNIX + 0.5), None);
+        assert_eq!(nominal.live_available(&edge, AST_UNIX + 1.5), Some((0, 0)));
+        // Nothing at all before the presentation starts.
         assert_eq!(tmpl.live_available(&edge, AST_UNIX - 60.0), None);
-        // Exactly one segment complete at 1.5s in.
-        assert_eq!(tmpl.live_available(&edge, AST_UNIX + 1.5), Some((0, 0)));
+        assert!(rep.live_segments(&edge, AST_UNIX - 60.0).is_empty());
+    }
+
+    #[test]
+    fn availability_time_offset_publishes_the_in_progress_segment_early() {
+        let mpd = parse(FFMPEG_LIVE_MPD).unwrap();
+        let tmpl = mpd.periods[0].representations[0].template().unwrap();
+        let edge = mpd.live_edge(&mpd.periods[0], 1.0).unwrap();
+
+        // 6.98s in, 1s segments: segment 6 (0-based) completes at 7s, but the
+        // 0.967s availabilityTimeOffset publishes it from 6.033s.
+        assert_eq!(tmpl.live_available(&edge, AST_UNIX + 6.98), Some((4, 6)));
+        let mut nominal = tmpl.clone();
+        nominal.availability_time_offset = None;
+        assert_eq!(
+            nominal.live_available(&edge, AST_UNIX + 6.98),
+            Some((4, 5)),
+            "without the offset only complete segments are available"
+        );
+
+        // An offset past the segment duration (or INF) clamps to one segment: the
+        // in-progress one, never media that does not exist yet, and never a
+        // window before the anchor.
+        for early in [1e9, f64::INFINITY] {
+            let mut wide = tmpl.clone();
+            wide.availability_time_offset = Some(early);
+            assert_eq!(wide.live_available(&edge, AST_UNIX + 6.98), Some((4, 6)));
+            assert_eq!(wide.live_available(&edge, AST_UNIX + 0.5), Some((0, 0)));
+            // The clamp is exactly one segment, so nothing opens before the anchor.
+            assert_eq!(wide.live_available(&edge, AST_UNIX - 0.001), None);
+            assert_eq!(wide.live_available(&edge, AST_UNIX - 60.0), None);
+        }
     }
 
     #[test]

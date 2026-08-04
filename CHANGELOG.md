@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M866: DASH honours `@presentationTimeOffset` (media time mapped onto the Period timeline) and `@availabilityTimeOffset` (segments published before they complete).
+
 - M865: a two-pad chunked `Mp4MuxN` test pins per-track chunk state (CMAF output itself stays single-pad by design).
 
 - M864: ogg seek guesses clamp to the byte length the source reports, and an idle upstream flush resets the mkv demuxer's parser fully.

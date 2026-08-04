@@ -373,8 +373,6 @@ Phased plan:
 
 - **HLS / CENC:** the declined-fail-loud protection shapes: `cens` scheme,
   `senc` v1/v2, movie-level and multi-key `seig` tables.
-- **DASH:** `@availabilityTimeOffset` (low-latency chunked availability) and
-  `@presentationTimeOffset` are not modelled.
 
 ## Capture sources
 
@@ -399,8 +397,8 @@ Phased plan:
 - **FLV:** Speex decode (carriage lands M831; no Speex encoder exists anywhere
   to build a validated decode vector, and gst's header-in-tag layout is
   rejected by libavcodec, so wiring a decoder would be an unvalidated claim).
-- **CMAF / fMP4:** client-side `@availabilityTimeOffset` early availability in
-  `DashSrc`.
+- **CMAF / fMP4:** consume an early-available segment chunk by chunk as the
+  packager writes it (`DashSrc` fetches it as one complete response).
 
 ## Codecs
 

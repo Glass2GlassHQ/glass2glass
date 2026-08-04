@@ -17,7 +17,15 @@
 //! wall clock against `availabilityStartTime` + `Period@start`, bounded by
 //! `timeShiftBufferDepth`. Playback starts `suggestedPresentationDelay` behind
 //! the live edge (see [`presentation_delay_secs`]) rather than replaying the
-//! whole window, which a `SegmentTimeline` window gets too.
+//! whole window, which a `SegmentTimeline` window gets too. A template's
+//! `@availabilityTimeOffset` moves each segment's availability that many seconds
+//! ahead of its nominal completion, so a chunked low-latency packager's newest
+//! segment is fetched while it is still being written.
+//!
+//! Segment times are period-relative presentation times: a template's
+//! `@presentationTimeOffset` is already off them (`$Time$` URLs keep the media
+//! value), so seek targets and the boundary `Segment` are on the same timeline
+//! whatever media timestamps the Period uses.
 //!
 //! Multi-period (M836): the Periods play through back to back, each with its own
 //! `BaseURL` / template / Representation choice. Crossing a boundary emits a
