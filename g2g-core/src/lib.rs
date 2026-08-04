@@ -143,8 +143,9 @@ pub mod slot;
 #[cfg(feature = "alloc")]
 pub use aggregator::InputAggregator;
 pub use caps::{
-    AudioFormat, ByteStreamEncoding, Caps, Dim, PassthroughFields, Rate, RawVideoFormat,
-    TensorDType, TensorLayout, TensorShape, TextFormat, VideoCodec, ANY_CHANNELS, ANY_SAMPLE_RATE,
+    AudioFormat, ByteStreamEncoding, Caps, ClosedCaptionFormat, Dim, PassthroughFields, Rate,
+    RawVideoFormat, TensorDType, TensorLayout, TensorShape, TextFormat, VideoCodec, ANY_CHANNELS,
+    ANY_SAMPLE_RATE,
 };
 pub use channels::{ChannelLayout, ChannelPosition};
 // `CapsSet` (negotiation-time alternatives) needs alloc; `TensorShape` is

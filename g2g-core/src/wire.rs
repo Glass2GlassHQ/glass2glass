@@ -42,8 +42,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::caps::{
-    AudioFormat, ByteStreamEncoding, Caps, Dim, Rate, RawVideoFormat, TensorDType, TensorLayout,
-    TensorShape, TextFormat, VideoCodec,
+    AudioFormat, ByteStreamEncoding, Caps, ClosedCaptionFormat, Dim, Rate, RawVideoFormat,
+    TensorDType, TensorLayout, TensorShape, TextFormat, VideoCodec,
 };
 use crate::frame::{Frame, FrameTiming, PipelinePacket};
 use crate::memory::{MemoryDomain, SystemSlice};
@@ -344,6 +344,20 @@ fn text_format_from_u8(v: u8) -> Result<TextFormat, WireError> {
     })
 }
 
+fn cc_format_to_u8(f: ClosedCaptionFormat) -> u8 {
+    match f {
+        ClosedCaptionFormat::Cea608 => 0,
+        ClosedCaptionFormat::Cea708 => 1,
+    }
+}
+fn cc_format_from_u8(v: u8) -> Result<ClosedCaptionFormat, WireError> {
+    Ok(match v {
+        0 => ClosedCaptionFormat::Cea608,
+        1 => ClosedCaptionFormat::Cea708,
+        _ => return Err(WireError::BadTag),
+    })
+}
+
 fn dtype_to_u8(d: TensorDType) -> u8 {
     match d {
         TensorDType::F16 => 0,
@@ -490,6 +504,10 @@ fn put_caps(w: &mut Writer, c: &Caps) {
             w.u8(text_format_to_u8(*format));
         }
         Caps::Klv => w.u8(6),
+        Caps::ClosedCaption { format } => {
+            w.u8(7);
+            w.u8(cc_format_to_u8(*format));
+        }
     }
 }
 
@@ -538,6 +556,9 @@ fn get_caps(r: &mut Reader) -> Result<Caps, WireError> {
             format: text_format_from_u8(r.u8()?)?,
         },
         6 => Caps::Klv,
+        7 => Caps::ClosedCaption {
+            format: cc_format_from_u8(r.u8()?)?,
+        },
         _ => return Err(WireError::BadTag),
     })
 }
@@ -947,6 +968,9 @@ mod tests {
             },
             Caps::Text {
                 format: TextFormat::WebVtt,
+            },
+            Caps::ClosedCaption {
+                format: ClosedCaptionFormat::Cea708,
             },
         ];
         for caps in cases {

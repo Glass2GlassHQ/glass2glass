@@ -4,6 +4,11 @@
 //! `Caps::Text{Utf8}` cues, one frame per cue (the same shape `crate::subparse`
 //! emits, so a `TextOverlay` / text sink consumes either interchangeably).
 //!
+//! It also takes a `Caps::ClosedCaption` link (M883), where the caption data is
+//! already its own elementary stream (an MP4 `c608` / `c708` raw-caption track a
+//! demuxer split out): those frames carry the same `cc_data` triples, so only the
+//! mining step differs and the decode below it is identical.
+//!
 //! Closed captions ride *inside* the compressed bitstream rather than in a
 //! container text track (see [`crate::cea`]), so this element sits on the
 //! compressed-video link, in parallel with the decoder: tee the parser output,
@@ -19,13 +24,13 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, FrameTiming,
-    G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, TextFormat,
-    VideoCodec,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ClosedCaptionFormat, ConfigureOutcome,
+    ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
+    PipelinePacket, TextFormat, VideoCodec,
 };
 
 pub use crate::cea::CcSource;
-use crate::cea::{CaptionDecoder, Cea608Channel};
+use crate::cea::{parse_cc_data, CaptionDecoder, Cea608Channel};
 use crate::subparse::Cue;
 #[cfg(feature = "metadata")]
 use crate::subparse::TextCueMeta;
@@ -34,20 +39,32 @@ use core::future::Future;
 use core::pin::Pin;
 
 /// Closed-caption extraction element: a compressed `H.264` / `H.265` video stream
-/// in, timed `Caps::Text{Utf8}` cue frames out. See the module docs for the
-/// teed-branch topology. The service selection ([`CcSource`]) and decode are the
-/// shared [`CaptionDecoder`].
+/// (or a demuxed `Caps::ClosedCaption` raw-caption track) in, timed
+/// `Caps::Text{Utf8}` cue frames out. See the module docs for the teed-branch
+/// topology. The service selection ([`CcSource`]) and decode are the shared
+/// [`CaptionDecoder`].
 #[derive(Debug)]
 pub struct CcExtract {
     decoder: CaptionDecoder,
-    /// The input codec, fixed at `configure_pipeline`; selects the SEI framing.
-    codec: Option<VideoCodec>,
+    /// Where the caption triples come from, fixed at `configure_pipeline`.
+    input: Option<CcInput>,
     /// Whether the output `Caps::Text{Utf8}` has been announced downstream.
     caps_emitted: bool,
     /// The most recent access unit's PTS, the end time used to flush a still-shown
     /// caption at `Eos`.
     last_pts: u64,
     sequence: u64,
+}
+
+/// Where a frame's caption triples are mined from, decided by the caps the sink
+/// pad negotiated: the SEI of a coded video stream, or a raw-caption track whose
+/// frames are the `cc_data` triples themselves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CcInput {
+    /// Mine each access unit's SEI (`codec` selects the NAL / SEI framing).
+    Sei(VideoCodec),
+    /// The frame payload is already a packed `cc_data` triple stream.
+    CcData,
 }
 
 impl Default for CcExtract {
@@ -76,14 +93,15 @@ impl CcExtract {
     pub fn for_source(source: CcSource) -> Self {
         Self {
             decoder: CaptionDecoder::new(source),
-            codec: None,
+            input: None,
             caps_emitted: false,
             last_pts: 0,
             sequence: 0,
         }
     }
 
-    /// The compressed-video codecs whose SEI this element mines (its sink pad).
+    /// What this element's sink pad takes: the compressed-video codecs whose SEI it
+    /// mines, or a raw-caption track's `cc_data` stream.
     fn input_alternatives() -> CapsSet {
         CapsSet::from_alternatives(Vec::from([
             Caps::CompressedVideo {
@@ -97,6 +115,12 @@ impl CcExtract {
                 width: g2g_core::Dim::Any,
                 height: g2g_core::Dim::Any,
                 framerate: g2g_core::Rate::Any,
+            },
+            Caps::ClosedCaption {
+                format: ClosedCaptionFormat::Cea608,
+            },
+            Caps::ClosedCaption {
+                format: ClosedCaptionFormat::Cea708,
             },
         ]))
     }
@@ -161,20 +185,22 @@ impl AsyncElement for CcExtract {
             Caps::CompressedVideo {
                 codec: VideoCodec::H264 | VideoCodec::H265,
                 ..
-            } => Ok(upstream_caps.clone()),
+            }
+            | Caps::ClosedCaption { .. } => Ok(upstream_caps.clone()),
             _ => Err(G2gError::CapsMismatch),
         }
     }
 
-    /// Decoder-style: a compressed H.264 / H.265 stream in, plain UTF-8 text out,
-    /// so the solver negotiates `Text{Utf8}` onto the downstream link while the
-    /// sink pad takes the compressed video.
+    /// Decoder-style: a compressed H.264 / H.265 stream (or a raw-caption track)
+    /// in, plain UTF-8 text out, so the solver negotiates `Text{Utf8}` onto the
+    /// downstream link whichever caption source the sink pad took.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
             Caps::CompressedVideo {
                 codec: VideoCodec::H264 | VideoCodec::H265,
                 ..
-            } => CapsSet::one(Self::output_caps()),
+            }
+            | Caps::ClosedCaption { .. } => CapsSet::one(Self::output_caps()),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
     }
@@ -185,7 +211,11 @@ impl AsyncElement for CcExtract {
                 codec: codec @ (VideoCodec::H264 | VideoCodec::H265),
                 ..
             } => {
-                self.codec = Some(*codec);
+                self.input = Some(CcInput::Sei(*codec));
+                Ok(ConfigureOutcome::Accepted)
+            }
+            Caps::ClosedCaption { .. } => {
+                self.input = Some(CcInput::CcData);
                 Ok(ConfigureOutcome::Accepted)
             }
             _ => Err(G2gError::CapsMismatch),
@@ -196,7 +226,7 @@ impl AsyncElement for CcExtract {
         ElementMetadata::new(
             "Closed-caption extractor",
             "Codec/Parser/ClosedCaption",
-            "Extracts CEA-608 / CEA-708 captions from H.264 / H.265 SEI into timed UTF-8 text cues",
+            "Extracts CEA-608 / CEA-708 captions from H.264 / H.265 SEI or a raw-caption track into timed UTF-8 text cues",
             "g2g",
         )
     }
@@ -207,18 +237,24 @@ impl AsyncElement for CcExtract {
         out: &'a mut dyn OutputSink,
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
-            if self.codec.is_none() {
+            let Some(input) = self.input else {
                 return Err(G2gError::NotConfigured);
-            }
+            };
             let cues = match packet {
                 PipelinePacket::DataFrame(frame) => {
                     self.last_pts = frame.timing.pts_ns;
-                    if let (MemoryDomain::System(slice), Some(codec)) = (&frame.domain, self.codec)
-                    {
-                        // Drive the decoder from this access unit's bytes; any
-                        // newly finished cue is drained and emitted below.
-                        let au = slice.as_slice().to_vec();
-                        self.decoder.push_au(&au, codec, frame.timing.pts_ns);
+                    if let MemoryDomain::System(slice) = &frame.domain {
+                        // Drive the decoder from this frame's bytes; any newly
+                        // finished cue is drained and emitted below.
+                        let data = slice.as_slice().to_vec();
+                        match input {
+                            CcInput::Sei(codec) => {
+                                self.decoder.push_au(&data, codec, frame.timing.pts_ns)
+                            }
+                            CcInput::CcData => self
+                                .decoder
+                                .push_triples(&parse_cc_data(&data), frame.timing.pts_ns),
+                        }
                     }
                     self.decoder.take_cues()
                 }

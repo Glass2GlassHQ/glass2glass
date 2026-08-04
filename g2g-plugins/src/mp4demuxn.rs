@@ -112,6 +112,9 @@ fn nego_caps(kind: &TrackKind) -> (Caps, bool) {
         // A timed-text track plugs as its cue format directly (the container
         // carries the timing); not video, so the fan-out flag is false.
         TrackKind::Text { format, .. } => (Caps::Text { format: *format }, false),
+        // A raw-caption track plugs as the cc_data stream its sample entry
+        // declared (M883); a caption decoder turns it into text.
+        TrackKind::ClosedCaption { format } => (Caps::ClosedCaption { format: *format }, false),
     }
 }
 
@@ -120,7 +123,9 @@ fn nego_caps(kind: &TrackKind) -> (Caps, bool) {
 /// For video this equals [`nego_caps`] (geometry is already concrete).
 fn real_caps(kind: &TrackKind) -> Caps {
     match kind {
-        TrackKind::Video { .. } | TrackKind::Text { .. } => nego_caps(kind).0,
+        TrackKind::Video { .. } | TrackKind::Text { .. } | TrackKind::ClosedCaption { .. } => {
+            nego_caps(kind).0
+        }
         TrackKind::Audio {
             format,
             channels,
@@ -152,12 +157,19 @@ pub fn forwardable_streams(data: &[u8]) -> Vec<Mp4StreamInfo> {
                 // [`Mp4Port`], but `playbin` has no text-branch auto-plug yet, so
                 // omit them from the fan-out (an unplumbed `Caps::Text` branch
                 // would fail negotiation). Wired when the text auto-plug lands.
-                .filter(|t| !matches!(t.kind, TrackKind::Text { .. }))
+                .filter(|t| {
+                    !matches!(
+                        t.kind,
+                        TrackKind::Text { .. } | TrackKind::ClosedCaption { .. }
+                    )
+                })
                 .map(|t| {
                     let (caps, video) = nego_caps(&t.kind);
                     let config = match &t.kind {
                         TrackKind::Audio { config, .. } => config.clone(),
-                        TrackKind::Video { .. } | TrackKind::Text { .. } => Vec::new(),
+                        TrackKind::Video { .. }
+                        | TrackKind::Text { .. }
+                        | TrackKind::ClosedCaption { .. } => Vec::new(),
                     };
                     Mp4StreamInfo { track_id: t.track_id, caps, video, config }
                 })
@@ -186,6 +198,29 @@ pub fn subtitle_streams(data: &[u8]) -> Vec<Mp4StreamInfo> {
                         video,
                         config: Vec::new(),
                     }
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The raw closed-caption tracks an MP4 carries (M883): one [`Mp4StreamInfo`] per
+/// `c608` / `c708` `trak`, in `moov` order, carrying the
+/// [`Caps::ClosedCaption`] a port forwards. The caption analog of
+/// [`subtitle_streams`]: a caption track's samples are `cc_data` triples, not
+/// cues, so it plugs into a [`CcExtract`](crate::ccextract::CcExtract) rather than
+/// straight into an overlay. `video` is always `false` and `config` empty.
+pub fn caption_streams(data: &[u8]) -> Vec<Mp4StreamInfo> {
+    parse_all_tracks(data)
+        .map(|tracks| {
+            tracks
+                .iter()
+                .filter(|t| matches!(t.kind, TrackKind::ClosedCaption { .. }))
+                .map(|t| Mp4StreamInfo {
+                    track_id: t.track_id,
+                    caps: nego_caps(&t.kind).0,
+                    video: false,
+                    config: Vec::new(),
                 })
                 .collect()
         })
@@ -421,7 +456,9 @@ impl Mp4DemuxN {
                 let ty = match t.kind {
                     TrackKind::Video { .. } => StreamType::Video,
                     TrackKind::Audio { .. } => StreamType::Audio,
-                    TrackKind::Text { .. } => StreamType::Text,
+                    // A caption track is a text stream to a selector, even though
+                    // its samples are cc_data rather than cues.
+                    TrackKind::Text { .. } | TrackKind::ClosedCaption { .. } => StreamType::Text,
                 };
                 Stream::new(stream_id(t.track_id), ty, real_caps(&t.kind))
             })
@@ -662,9 +699,10 @@ impl Mp4DemuxN {
                         data = framed;
                     }
                 }
-                // Text cues arrive already de-framed (the tx3g length prefix is
-                // stripped in the sample parse); forward the UTF-8 payload as is.
-                Some(TrackKind::Text { .. }) | None => {}
+                // Text cues and caption cc_data arrive already de-framed by the
+                // sample parse (the tx3g length prefix stripped, the caption atoms
+                // unwrapped); forward the payload as is.
+                Some(TrackKind::Text { .. }) | Some(TrackKind::ClosedCaption { .. }) | None => {}
             }
             self.need_config[port] = false;
 

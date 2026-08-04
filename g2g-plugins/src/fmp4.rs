@@ -10,8 +10,9 @@
 
 use alloc::vec::Vec;
 
-use g2g_core::{AudioFormat, G2gError, TagList, TextFormat, VideoCodec};
+use g2g_core::{AudioFormat, ClosedCaptionFormat, G2gError, TagList, TextFormat, VideoCodec};
 
+use crate::cea::{parse_cdp, write_cc_data, CcTriple};
 use crate::cenc::{
     fragment_sample_crypt, parse_movie_seig, parse_sinf, CencDefaults, CencTrack, SampleCrypt,
 };
@@ -204,6 +205,11 @@ pub(crate) enum TrackKind {
         format: TextFormat,
         sample: TextSampleFormat,
     },
+    /// A raw closed-caption track (`c608` / `c708`): the caption data is its own
+    /// elementary stream rather than SEI inside the video. Samples de-frame from
+    /// their container atoms to the `cc_data` triple stream
+    /// [`Caps::ClosedCaption`](g2g_core::Caps::ClosedCaption) carries.
+    ClosedCaption { format: ClosedCaptionFormat },
 }
 
 /// The on-disk timed-text sample format an MP4 text `trak` stores. Distinct from
@@ -298,6 +304,12 @@ fn parse_trak(trak: &[u8]) -> Result<Option<TrackHeader>, G2gError> {
         // `sbtl` / `subt` = MP4 / ISO subtitle). Forwarded only when its sample
         // entry is one we de-frame (`tx3g`); an unrecognized text codec is skipped.
         b"text" | b"sbtl" | b"subt" => match parse_text_entry(entries) {
+            Some(kind) => (kind, None),
+            None => return Ok(None),
+        },
+        // A closed-caption handler (`clcp`), whose sample entry names the caption
+        // carriage: `c608` / `c708` are read, anything else is skipped.
+        b"clcp" => match parse_cc_entry(entries) {
             Some(kind) => (kind, None),
             None => return Ok(None),
         },
@@ -497,6 +509,99 @@ fn parse_text_entry(entries: &[u8]) -> Option<TrackKind> {
     }
 }
 
+/// Recognize a closed-caption sample entry (QuickTime `c608` / `c708`, under a
+/// `clcp` handler) and map it to the [`TrackKind::ClosedCaption`] carriage. An
+/// unrecognized caption codec declines (the track is skipped, not an error).
+fn parse_cc_entry(entries: &[u8]) -> Option<TrackKind> {
+    if find_box(entries, b"c608").is_some() {
+        Some(TrackKind::ClosedCaption {
+            format: ClosedCaptionFormat::Cea608,
+        })
+    } else if find_box(entries, b"c708").is_some() {
+        Some(TrackKind::ClosedCaption {
+            format: ClosedCaptionFormat::Cea708,
+        })
+    } else {
+        None
+    }
+}
+
+/// De-frame one raw-caption sample to the `cc_data` triple stream a
+/// [`Caps::ClosedCaption`](g2g_core::Caps::ClosedCaption) link carries, so a
+/// container caption track and an SEI caption block feed the same decoder.
+fn deframe_cc(raw: &[u8], format: ClosedCaptionFormat) -> Vec<u8> {
+    match format {
+        ClosedCaptionFormat::Cea608 => deframe_c608(raw),
+        ClosedCaptionFormat::Cea708 => deframe_c708(raw),
+        // Only the two carriages above are ever surfaced as a track, so a future
+        // third yields no caption data rather than a guessed framing.
+        _ => Vec::new(),
+    }
+}
+
+/// De-frame a `c608` sample: a sequence of `cdat` (line-21 field 1) / `cdt2`
+/// (field 2) atoms whose payloads are raw CEA-608 byte pairs, re-tagged as
+/// `cc_data` triples (`cc_type` 0 for field 1, 1 for field 2). Atom sizes are
+/// untrusted: a size below the 8-byte header, past the sample end, or an odd
+/// payload length stops the scan, and an atom that is neither `cdat` nor `cdt2` is
+/// skipped, so a malformed sample yields the pairs read so far rather than
+/// panicking.
+fn deframe_c608(raw: &[u8]) -> Vec<u8> {
+    let mut triples: Vec<CcTriple> = Vec::new();
+    let mut off = 0usize;
+    while off.saturating_add(8) <= raw.len() {
+        let size =
+            u32::from_be_bytes([raw[off], raw[off + 1], raw[off + 2], raw[off + 3]]) as usize;
+        if size < 8 || off.saturating_add(size) > raw.len() {
+            break;
+        }
+        let cc_type = match &raw[off + 4..off + 8] {
+            b"cdat" => Some(0u8),
+            b"cdt2" => Some(1u8),
+            _ => None,
+        };
+        let body = &raw[off + 8..off + size];
+        if let Some(cc_type) = cc_type {
+            if body.len() % 2 != 0 {
+                break;
+            }
+            for pair in body.chunks_exact(2) {
+                triples.push(CcTriple {
+                    cc_type,
+                    b0: pair[0],
+                    b1: pair[1],
+                });
+            }
+        }
+        off += size;
+    }
+    write_cc_data(&triples)
+}
+
+/// De-frame a `c708` sample: `ccdp` atoms each holding a SMPTE ST 334-2 caption
+/// distribution packet, unwrapped to the `cc_data` triples the CDP's ccdata
+/// section carries. A CDP that fails to parse (bad identifier, length, or
+/// checksum) contributes nothing; atom sizes are untrusted, so a bad one stops the
+/// scan.
+fn deframe_c708(raw: &[u8]) -> Vec<u8> {
+    let mut triples: Vec<CcTriple> = Vec::new();
+    let mut off = 0usize;
+    while off.saturating_add(8) <= raw.len() {
+        let size =
+            u32::from_be_bytes([raw[off], raw[off + 1], raw[off + 2], raw[off + 3]]) as usize;
+        if size < 8 || off.saturating_add(size) > raw.len() {
+            break;
+        }
+        if &raw[off + 4..off + 8] == b"ccdp" {
+            if let Some(mut got) = parse_cdp(&raw[off + 8..off + size]) {
+                triples.append(&mut got);
+            }
+        }
+        off += size;
+    }
+    write_cc_data(&triples)
+}
+
 /// Strip a 3GPP timed-text (`tx3g`) sample to its UTF-8 cue bytes: a 2-byte
 /// big-endian text length, that many UTF-8 bytes, then optional style / modifier
 /// boxes (ignored). A zero-length sample is the gap between cues and forwards as
@@ -662,6 +767,8 @@ pub(crate) fn parse_fragments_multi(
                         }
                         // Audio access units are stored verbatim; each is a sync point.
                         TrackKind::Audio { .. } => (bytes.to_vec(), true),
+                        // A caption sample de-frames to the cc_data triple stream.
+                        TrackKind::ClosedCaption { format } => (deframe_cc(bytes, *format), true),
                         // A timed-text cue is independent; strip its sample framing
                         // (tx3g / wvtt) or pass the whole TTML document (stpp).
                         TrackKind::Text { sample, .. } => {
@@ -849,6 +956,7 @@ enum SampleFraming {
     PassThrough,
     Tx3gText,
     WvttText,
+    ClosedCaption(ClosedCaptionFormat),
 }
 
 impl SampleFraming {
@@ -865,6 +973,7 @@ impl SampleFraming {
             TrackKind::Video { .. } => SampleFraming::Video,
             TrackKind::Audio { .. } => SampleFraming::PassThrough,
             TrackKind::Text { sample, .. } => Self::of_text(*sample),
+            TrackKind::ClosedCaption { format } => SampleFraming::ClosedCaption(*format),
         }
     }
 
@@ -1030,6 +1139,7 @@ fn parse_progressive_track(
             SampleFraming::PassThrough => raw.to_vec(),
             SampleFraming::Tx3gText => deframe_tx3g(raw),
             SampleFraming::WvttText => deframe_wvtt(raw),
+            SampleFraming::ClosedCaption(format) => deframe_cc(raw, format),
         };
         samples.push(Sample {
             annexb,
@@ -1879,8 +1989,109 @@ mod tests {
                 sample: TextSampleFormat::Stpp
             })
         ));
-        // An unrecognized text codec declines (the track is skipped).
+        // A caption codec is not a text codec (it goes through parse_cc_entry).
         assert!(parse_text_entry(&mp4_box(b"c608", &[0u8; 8])).is_none());
+    }
+
+    #[test]
+    fn parse_cc_entry_recognizes_c608_and_c708() {
+        use crate::mp4box::mp4_box;
+        assert!(matches!(
+            parse_cc_entry(&mp4_box(b"c608", &[0u8; 8])),
+            Some(TrackKind::ClosedCaption {
+                format: ClosedCaptionFormat::Cea608
+            })
+        ));
+        assert!(matches!(
+            parse_cc_entry(&mp4_box(b"c708", &[0u8; 8])),
+            Some(TrackKind::ClosedCaption {
+                format: ClosedCaptionFormat::Cea708
+            })
+        ));
+        // Another codec under the same handler declines (the track is skipped).
+        assert!(parse_cc_entry(&mp4_box(b"tx3g", &[0u8; 8])).is_none());
+    }
+
+    #[test]
+    fn deframe_c608_tags_cdat_and_cdt2_pairs() {
+        use crate::mp4box::mp4_box;
+        // cdat pairs are field 1 (cc_type 0), cdt2 pairs field 2 (cc_type 1); the
+        // pairs keep their order within each atom, atoms in sample order.
+        let mut sample = mp4_box(b"cdat", &[0x94, 0x20, b'H', b'I']);
+        sample.extend_from_slice(&mp4_box(b"cdt2", &[0x15, 0x2C]));
+        assert_eq!(
+            crate::cea::parse_cc_data(&deframe_c608(&sample)),
+            alloc::vec![
+                CcTriple {
+                    cc_type: 0,
+                    b0: 0x94,
+                    b1: 0x20
+                },
+                CcTriple {
+                    cc_type: 0,
+                    b0: b'H',
+                    b1: b'I'
+                },
+                CcTriple {
+                    cc_type: 1,
+                    b0: 0x15,
+                    b1: 0x2C
+                },
+            ]
+        );
+        // An unknown atom is skipped, not fatal.
+        let mut mixed = mp4_box(b"junk", &[1, 2, 3, 4]);
+        mixed.extend_from_slice(&mp4_box(b"cdat", b"OK"));
+        assert_eq!(deframe_c608(&mixed).len(), 3);
+    }
+
+    #[test]
+    fn deframe_c608_survives_a_lying_atom_size() {
+        // A size past the sample end, a size below the 8-byte header, an odd
+        // payload length, and a truncated header all yield no caption data.
+        let mut lying = Vec::from(0x7FFF_FFFFu32.to_be_bytes());
+        lying.extend_from_slice(b"cdat");
+        lying.extend_from_slice(&[0x94, 0x20]);
+        assert!(deframe_c608(&lying).is_empty());
+        let mut tiny = Vec::from(4u32.to_be_bytes());
+        tiny.extend_from_slice(b"cdat");
+        assert!(deframe_c608(&tiny).is_empty());
+        let mut odd = Vec::from(11u32.to_be_bytes());
+        odd.extend_from_slice(b"cdat");
+        odd.extend_from_slice(&[0x94, 0x20, 0x00]);
+        assert!(deframe_c608(&odd).is_empty());
+        assert!(deframe_c608(&[0, 0, 0]).is_empty());
+    }
+
+    #[test]
+    fn deframe_c708_unwraps_a_ccdp_packet() {
+        use crate::mp4box::mp4_box;
+        let triples = alloc::vec![
+            CcTriple {
+                cc_type: 3,
+                b0: 0x21,
+                b1: 0x40
+            },
+            CcTriple {
+                cc_type: 2,
+                b0: 0x41,
+                b1: 0x42
+            },
+        ];
+        let sample = mp4_box(b"ccdp", &crate::cea::build_cdp(&triples, 4, 7));
+        assert_eq!(
+            crate::cea::parse_cc_data(&deframe_c708(&sample)),
+            triples,
+            "the CDP's ccdata triples come back out"
+        );
+        // A CDP whose checksum is wrong contributes nothing, and a lying atom size
+        // stops the scan rather than reading past the sample.
+        let mut bad = mp4_box(b"ccdp", &crate::cea::build_cdp(&triples, 4, 7));
+        *bad.last_mut().expect("checksum byte") ^= 0xFF;
+        assert!(deframe_c708(&bad).is_empty());
+        let mut lying = Vec::from(0x7FFF_FFFFu32.to_be_bytes());
+        lying.extend_from_slice(b"ccdp");
+        assert!(deframe_c708(&lying).is_empty());
     }
 
     #[test]

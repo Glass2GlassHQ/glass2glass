@@ -36,11 +36,13 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    split_tags, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
-    Dim, FrameTiming, G2gError, InputAggregator, MemoryDomain, MultiInputElement, OutputSink,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, TagList, VideoCodec,
+    split_tags, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet,
+    ClosedCaptionFormat, ConfigureOutcome, Dim, FrameTiming, G2gError, InputAggregator,
+    MemoryDomain, MultiInputElement, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec, TagList, VideoCodec,
 };
 
+use crate::cea::{build_cdp, parse_cc_data, CcTriple};
 use crate::fmp4mux::{
     av1c_record, avcc_sample, is_keyframe_nal, parameter_sets, split_annexb, tfhd,
     visual_sample_entry, vp8_keyframe, vp9_keyframe,
@@ -54,6 +56,9 @@ use crate::rtcp;
 
 /// Video tracks use a 90 kHz media timescale; audio tracks use the sample rate.
 const VIDEO_TIMESCALE: u32 = 90_000;
+/// CEA-708 frame-rate code for 29.97 fps, the rate a muxed CDP declares (the
+/// North-American caption norm, and what `st2110ancrtp` defaults to).
+const CDP_FRAME_RATE_2997: u8 = 4;
 /// The `mvhd` timescale, so movie-level durations are milliseconds.
 const MOVIE_TIMESCALE: u32 = 1000;
 const DEFAULT_VIDEO_DURATION_NS: u64 = 33_333_333;
@@ -67,6 +72,9 @@ enum PadKind {
         channels: u8,
         rate: u32,
     },
+    /// A raw closed-caption track (M883): the pad carries `cc_data` triples, which
+    /// go into `c608` / `c708` samples.
+    ClosedCaption(ClosedCaptionFormat),
 }
 
 /// A track's `moov` init data, captured from its first access unit.
@@ -88,12 +96,15 @@ enum TrackInit {
         /// in which case the sample entry falls back to the caps.
         config: Vec<u8>,
     },
+    ClosedCaption {
+        format: ClosedCaptionFormat,
+    },
 }
 
 impl TrackInit {
     fn timescale(&self) -> u32 {
         match self {
-            TrackInit::Video { .. } => VIDEO_TIMESCALE,
+            TrackInit::Video { .. } | TrackInit::ClosedCaption { .. } => VIDEO_TIMESCALE,
             TrackInit::Audio { rate, .. } => *rate,
         }
     }
@@ -115,6 +126,8 @@ pub struct Mp4MuxN {
     decode_time: Vec<u64>,
     /// Per-track previous PTS (ns), for the sample-duration delta.
     prev_pts_ns: Vec<Option<u64>>,
+    /// Per-track CDP sequence counter, for a `c708` track's caption packets.
+    cdp_seq: Vec<u16>,
     header_written: bool,
     /// Global moof sequence number (1-based, increasing across the movie).
     sequence: u64,
@@ -210,6 +223,7 @@ impl Mp4MuxN {
             agg: InputAggregator::new(inputs),
             decode_time: alloc::vec![0; inputs],
             prev_pts_ns: alloc::vec![None; inputs],
+            cdp_seq: alloc::vec![0; inputs],
             header_written: false,
             sequence: 0,
             emitted: 0,
@@ -360,6 +374,7 @@ impl Mp4MuxN {
                 channels: *channels,
                 rate: *sample_rate,
             }),
+            Caps::ClosedCaption { format } => Some(PadKind::ClosedCaption(*format)),
             _ => None,
         }
     }
@@ -501,13 +516,20 @@ impl Mp4MuxN {
                     });
                 }
             },
+            // A caption track needs no out-of-band config: it is ready at its
+            // first sample.
+            Some(PadKind::ClosedCaption(format)) => {
+                self.inits[input] = Some(TrackInit::ClosedCaption { format });
+            }
             None => {}
         }
     }
 
     /// The mdat sample bytes for a track: AVCC length-prefixed NALUs for video,
-    /// the de-ADTS'd raw AAC for audio. Also returns whether it is a sync sample.
-    fn sample_for(&self, input: usize, au: &[u8]) -> (Vec<u8>, bool) {
+    /// the de-ADTS'd raw AAC for audio, and the caption atoms (`cdat` / `cdt2` for
+    /// 608, `ccdp` for 708) for a raw-caption track. Also returns whether it is a
+    /// sync sample.
+    fn sample_for(&mut self, input: usize, au: &[u8]) -> (Vec<u8>, bool) {
         match self.kinds[input] {
             Some(PadKind::Video(codec)) => match codec {
                 VideoCodec::H264 | VideoCodec::H265 => {
@@ -529,6 +551,13 @@ impl Mp4MuxN {
                 format: AudioFormat::Aac,
                 ..
             }) => (strip_adts(au).to_vec(), true),
+            // A caption frame is a cc_data triple stream; re-frame it into the
+            // sample atoms the QuickTime caption entry defines.
+            Some(PadKind::ClosedCaption(format)) => {
+                let seq = self.cdp_seq[input];
+                self.cdp_seq[input] = seq.wrapping_add(1);
+                (cc_sample(au, format, seq), true)
+            }
             _ => (au.to_vec(), true),
         }
     }
@@ -1346,6 +1375,14 @@ fn trak_media(init: &TrackInit) -> TrakMedia {
                 is_video: true,
             }
         }
+        TrackInit::ClosedCaption { format } => TrakMedia {
+            handler: b"clcp",
+            media_header: caption_media_header(),
+            sample_entry: cc_sample_entry(*format),
+            timescale: VIDEO_TIMESCALE,
+            dims: (0, 0),
+            is_video: false,
+        },
         TrackInit::Audio {
             format,
             channels,
@@ -1368,6 +1405,66 @@ fn trak_media(init: &TrackInit) -> TrakMedia {
             }
         }
     }
+}
+
+/// One raw-caption sample: the `cc_data` triples a
+/// [`Caps::ClosedCaption`](g2g_core::Caps::ClosedCaption) frame carries, re-framed
+/// into the atoms
+/// the QuickTime caption sample entry defines. `c608` splits the triples by
+/// line-21 field into a `cdat` (field 1) and a `cdt2` (field 2) atom, each holding
+/// raw byte pairs; `c708` wraps them in a SMPTE ST 334-2 caption distribution
+/// packet inside a `ccdp` atom. `seq` is the CDP sequence counter (608 ignores it).
+fn cc_sample(cc_data: &[u8], format: ClosedCaptionFormat, seq: u16) -> Vec<u8> {
+    let triples = parse_cc_data(cc_data);
+    match format {
+        ClosedCaptionFormat::Cea708 => {
+            let dtvcc: Vec<CcTriple> = triples.iter().copied().filter(|t| t.cc_type >= 2).collect();
+            if dtvcc.is_empty() {
+                return Vec::new();
+            }
+            mp4_box(b"ccdp", &build_cdp(&dtvcc, CDP_FRAME_RATE_2997, seq))
+        }
+        // 608 (and any carriage this writer does not know, which the caps solver
+        // never negotiates onto the pad).
+        _ => {
+            let mut out = Vec::new();
+            for (cc_type, fourcc) in [(0u8, b"cdat"), (1u8, b"cdt2")] {
+                let mut pairs = Vec::new();
+                for t in triples.iter().filter(|t| t.cc_type == cc_type) {
+                    pairs.push(t.b0);
+                    pairs.push(t.b1);
+                }
+                if !pairs.is_empty() {
+                    out.extend_from_slice(&mp4_box(fourcc, &pairs));
+                }
+            }
+            out
+        }
+    }
+}
+
+/// A closed-caption sample entry (`c608` / `c708`): the plain `SampleEntry` fields
+/// only (reserved + data reference index), no codec-configuration child.
+fn cc_sample_entry(format: ClosedCaptionFormat) -> Vec<u8> {
+    let fourcc: &[u8; 4] = match format {
+        ClosedCaptionFormat::Cea708 => b"c708",
+        _ => b"c608",
+    };
+    let mut p = Vec::new();
+    p.extend_from_slice(&[0u8; 6]); // reserved
+    p.extend_from_slice(&1u16.to_be_bytes()); // data reference index
+    mp4_box(fourcc, &p)
+}
+
+/// The `gmhd` base-media information a QuickTime caption track carries in place of
+/// a `vmhd` / `smhd`: a `gmin` with the caption graphics mode and opcolor.
+fn caption_media_header() -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(&0x0040u16.to_be_bytes()); // graphics mode
+    p.extend_from_slice(&[0x80, 0x00, 0x80, 0x00, 0x80, 0x00]); // opcolor
+    p.extend_from_slice(&0u16.to_be_bytes()); // balance
+    p.extend_from_slice(&0u16.to_be_bytes()); // reserved
+    mp4_box(b"gmhd", &full_box(b"gmin", 0, 0, &p))
 }
 
 /// The VP8/VP9 `VisualSampleEntry` (`vp08` / `vp09`) with its `vpcC`

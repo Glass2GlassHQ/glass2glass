@@ -100,6 +100,16 @@ pub enum Caps {
     /// elementary metadata stream a transport demuxer splits out alongside video,
     /// timed by the frame's PTS (GStreamer `meta/x-klv`).
     Klv,
+    /// A raw closed-caption stream: a container track carrying caption data as its
+    /// own elementary stream rather than inside a video bitstream's SEI (the MP4
+    /// `c608` / `c708` raw-caption tracks). Each frame is one sample's `cc_data`
+    /// byte triples, `(marker | cc_valid | cc_type, cc_data_1, cc_data_2)`, the
+    /// same ATSC A/53 layout an SEI caption block carries, so one caption decoder
+    /// serves both paths. `format` names which carriage the track declared, and
+    /// therefore which services its triples can hold: 608 line-21 fields, or 708
+    /// DTVCC packets. Captions embedded in a coded video stream stay
+    /// [`Caps::CompressedVideo`]; this is the separate-track case only.
+    ClosedCaption { format: ClosedCaptionFormat },
 }
 
 impl Caps {
@@ -118,7 +128,8 @@ impl Caps {
             Caps::CompressedVideo { .. }
             | Caps::ByteStream { .. }
             | Caps::Text { .. }
-            | Caps::Klv => false,
+            | Caps::Klv
+            | Caps::ClosedCaption { .. } => false,
         }
     }
 
@@ -223,6 +234,9 @@ impl Caps {
             }
             (Caps::Text { format: fa }, Caps::Text { format: fb }) if fa == fb => Ok(self.clone()),
             (Caps::Klv, Caps::Klv) => Ok(Caps::Klv),
+            (Caps::ClosedCaption { format: a }, Caps::ClosedCaption { format: b }) if a == b => {
+                Ok(Caps::ClosedCaption { format: *a })
+            }
             _ => Err(G2gError::CapsMismatch),
         }
     }
@@ -300,9 +314,11 @@ impl Caps {
                 channels: FIXATE_CHANNELS_PLACEHOLDER,
                 sample_rate: *sample_rate,
             }),
-            Caps::Audio { .. } | Caps::ByteStream { .. } | Caps::Text { .. } | Caps::Klv => {
-                Ok(self.clone())
-            }
+            Caps::Audio { .. }
+            | Caps::ByteStream { .. }
+            | Caps::Text { .. }
+            | Caps::Klv
+            | Caps::ClosedCaption { .. } => Ok(self.clone()),
             Caps::Tensor { .. } => Ok(self.clone()),
         }
     }
@@ -325,7 +341,11 @@ impl Caps {
                 framerate,
                 ..
             } => Some((width, height, framerate)),
-            Caps::Audio { .. } | Caps::ByteStream { .. } | Caps::Text { .. } | Caps::Klv => None,
+            Caps::Audio { .. }
+            | Caps::ByteStream { .. }
+            | Caps::Text { .. }
+            | Caps::Klv
+            | Caps::ClosedCaption { .. } => None,
             Caps::Tensor { .. } => None,
         }
     }
@@ -391,6 +411,7 @@ impl Caps {
             Caps::ByteStream { encoding } => String::from(bytestream_gst_media_type(*encoding)),
             Caps::Text { format } => String::from(text_format_gst_media_type(*format)),
             Caps::Klv => String::from("meta/x-klv"),
+            Caps::ClosedCaption { format } => String::from(cc_format_gst_media_type(*format)),
         }
     }
 }
@@ -407,6 +428,18 @@ fn text_format_gst_media_type(f: TextFormat) -> &'static str {
         TextFormat::WebVtt => "application/x-subtitle-vtt",
         TextFormat::Ssa => "application/x-ssa",
         TextFormat::Ttml => "application/ttml+xml",
+    }
+}
+
+/// GStreamer media-type string for a [`ClosedCaptionFormat`]. The media types are
+/// GStreamer's; `format=cc_data` (the ATSC triple layout) is GStreamer's own
+/// spelling for 708 and g2g's for 608, which GStreamer instead carries as
+/// `s334-1a` triplets (a different marker byte).
+#[cfg(feature = "alloc")]
+fn cc_format_gst_media_type(f: ClosedCaptionFormat) -> &'static str {
+    match f {
+        ClosedCaptionFormat::Cea608 => "closedcaption/x-cea-608,format=cc_data",
+        ClosedCaptionFormat::Cea708 => "closedcaption/x-cea-708,format=cc_data",
     }
 }
 
@@ -934,6 +967,23 @@ pub enum TextFormat {
     Ttml,
 }
 
+/// Which closed-caption carriage a [`Caps::ClosedCaption`] track declared. The
+/// payload layout is the same `cc_data` triple stream either way (see the variant
+/// docs); this names the service family, so a decoder knows whether to look for
+/// 608 line-21 fields or 708 DTVCC packets, and a muxer knows which sample entry
+/// to write.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ClosedCaptionFormat {
+    /// CEA-608 line-21 captions, `cc_type` 0/1 (the MP4 `c608` sample entry, whose
+    /// samples hold `cdat` / `cdt2` byte-pair atoms).
+    Cea608,
+    /// CEA-708 DTVCC captions, `cc_type` 2/3 (the MP4 `c708` sample entry, whose
+    /// samples hold a `ccdp` atom with a SMPTE ST 334-2 caption distribution
+    /// packet).
+    Cea708,
+}
+
 /// Raw pixel layout carried in a [`Caps::RawVideo`] link. Split out of
 /// the old `VideoFormat` enum so a raw sink (waylandsink/kmssink)
 /// rejects compressed input structurally rather than via runtime check.
@@ -1230,6 +1280,32 @@ mod tests {
             height,
             framerate,
         }
+    }
+
+    #[test]
+    fn closed_caption_caps_intersect_by_carriage() {
+        let cea608 = Caps::ClosedCaption {
+            format: ClosedCaptionFormat::Cea608,
+        };
+        let cea708 = Caps::ClosedCaption {
+            format: ClosedCaptionFormat::Cea708,
+        };
+        assert_eq!(cea608.intersect(&cea608), Ok(cea608.clone()));
+        assert!(cea608.intersect(&cea708).is_err());
+        // A caption stream is not text, and carries no geometry to fixate.
+        assert!(cea608
+            .intersect(&Caps::Text {
+                format: TextFormat::Utf8
+            })
+            .is_err());
+        assert_eq!(cea608.fixate(), Ok(cea608.clone()));
+        assert!(cea608.is_fixed());
+        assert!(cea608.dims().is_none());
+        assert!(!cea608.is_raw_media());
+        assert_eq!(
+            cea708.to_gst_string(),
+            "closedcaption/x-cea-708,format=cc_data"
+        );
     }
 
     #[test]
