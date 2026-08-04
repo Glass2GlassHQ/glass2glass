@@ -1,6 +1,9 @@
 //! M153 Motion-JPEG encode: `MjpegEnc` encodes packed RGBA to a baseline JPEG,
 //! round-tripped back through `MjpegDec` (M152) to prove the output is a valid
 //! JPEG carrying the source geometry and the dominant colour.
+//!
+//! M871 adds the `mozjpeg` backend: same round trip through `encoder=mozjpeg`,
+//! plus evidence that its `quality` property is applied.
 
 #![cfg(all(feature = "mjpeg-encode", feature = "mjpeg"))]
 
@@ -147,8 +150,8 @@ fn i420_solid(y: u8, u: u8, v: u8) -> Vec<u8> {
     let luma = (W * H) as usize;
     let chroma = luma / 4;
     let mut buf = vec![y; luma];
-    buf.extend(core::iter::repeat(u).take(chroma));
-    buf.extend(core::iter::repeat(v).take(chroma));
+    buf.extend(core::iter::repeat_n(u, chroma));
+    buf.extend(core::iter::repeat_n(v, chroma));
     buf
 }
 
@@ -208,5 +211,122 @@ async fn encodes_i420_to_mjpeg_that_roundtrips_to_blue() {
         "red/green low (got {},{})",
         px[0],
         px[1]
+    );
+}
+
+/// Encode one `w` x `h` RGBA frame with `enc` and return the JPEG.
+#[cfg(feature = "mozjpeg")]
+async fn encode_rgba(mut enc: MjpegEnc, pixels: Vec<u8>, w: u32, h: u32) -> Vec<u8> {
+    enc.configure_pipeline(&Caps::RawVideo {
+        format: RawVideoFormat::Rgba8,
+        width: Dim::Fixed(w),
+        height: Dim::Fixed(h),
+        framerate: Rate::Fixed(30 << 16),
+    })
+    .unwrap();
+    let mut sink = CaptureSink::default();
+    let frame = Frame::new(
+        MemoryDomain::System(SystemSlice::from_boxed(pixels.into_boxed_slice())),
+        FrameTiming::default(),
+        0,
+    );
+    enc.process(PipelinePacket::DataFrame(frame), &mut sink)
+        .await
+        .unwrap();
+    sink.frames.remove(0)
+}
+
+/// M871: `encoder=mozjpeg` produces a JPEG the decoder reads back with the source
+/// geometry and colour, and its `quality` property still moves the output size.
+#[cfg(feature = "mozjpeg")]
+#[tokio::test]
+async fn mozjpeg_backend_encodes_a_decodable_jpeg_honouring_quality() {
+    use g2g_core::PropValue;
+    use g2g_plugins::mjpegenc::JpegEncodeBackend;
+
+    let mut enc = MjpegEnc::new();
+    enc.set_property("encoder", PropValue::Str("mozjpeg".into()))
+        .unwrap();
+    assert_eq!(
+        enc.get_property("encoder")
+            .and_then(|v| v.as_str().map(str::to_string)),
+        Some("mozjpeg".into())
+    );
+    let jpeg = encode_rgba(enc, rgba_solid(20, 40, 210), W, H).await;
+    assert_eq!(&jpeg[0..2], &[0xFF, 0xD8], "JPEG SOI marker");
+
+    let mut dec = MjpegDec::new();
+    dec.configure_pipeline(&Caps::CompressedVideo {
+        codec: VideoCodec::Mjpeg,
+        width: Dim::Any,
+        height: Dim::Any,
+        framerate: Rate::Any,
+    })
+    .unwrap();
+    let mut dsink = CaptureSink::default();
+    let jframe = Frame::new(
+        MemoryDomain::System(SystemSlice::from_boxed(jpeg.clone().into_boxed_slice())),
+        FrameTiming::default(),
+        0,
+    );
+    dec.process(PipelinePacket::DataFrame(jframe), &mut dsink)
+        .await
+        .unwrap();
+    assert_eq!(
+        dsink.caps,
+        vec![Caps::RawVideo {
+            format: RawVideoFormat::Rgba8,
+            width: Dim::Fixed(W),
+            height: Dim::Fixed(H),
+            framerate: Rate::Any,
+        }],
+        "decoded geometry matches the mozjpeg-encoded source"
+    );
+    let px = &dsink.frames[0][0..4];
+    assert!(
+        px[2] > 150,
+        "blue dominant after round-trip (got {})",
+        px[2]
+    );
+    assert!(
+        px[0] < 100 && px[1] < 120,
+        "red/green low (got {},{})",
+        px[0],
+        px[1]
+    );
+
+    // Detailed content compresses to far more bytes at high quality: the
+    // property is applied, not accepted and dropped.
+    const N: u32 = 64;
+    let mut noise = Vec::with_capacity((N * N * 4) as usize);
+    let mut seed = 0x2545_f491u32;
+    for _ in 0..(N * N) {
+        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let b = seed.to_le_bytes();
+        noise.extend_from_slice(&[b[0], b[1], b[2], 255]);
+    }
+    let low = encode_rgba(
+        MjpegEnc::new()
+            .with_backend(JpegEncodeBackend::Mozjpeg)
+            .with_quality(20),
+        noise.clone(),
+        N,
+        N,
+    )
+    .await;
+    let high = encode_rgba(
+        MjpegEnc::new()
+            .with_backend(JpegEncodeBackend::Mozjpeg)
+            .with_quality(95),
+        noise,
+        N,
+        N,
+    )
+    .await;
+    assert!(
+        high.len() > low.len() * 2,
+        "quality 95 ({} bytes) should dwarf quality 20 ({} bytes)",
+        high.len(),
+        low.len()
     );
 }

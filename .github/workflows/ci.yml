@@ -81,7 +81,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             pkg-config libssl-dev libasound2-dev libpulse-dev \
-            libopus-dev libwayland-dev libxkbcommon-dev libdav1d-dev
+            libopus-dev libwayland-dev libxkbcommon-dev libdav1d-dev nasm
       - name: check g2g-plugins (linux feature set)
         run: >
           cargo check -p g2g-plugins --locked --all-targets --features
@@ -98,6 +98,10 @@ jobs:
       # everywhere; the ffmpeg-authored oracle cases skip without ffmpeg.
       - name: test g2g-plugins (cenc decrypt)
         run: cargo test -p g2g-plugins --locked --features std,hls,mp4-cenc --test m835_hls_cenc --test m164_fmp4_cbcs
+      # MJPEG codec paths (M152 / M153 / M871), incl. the mozjpeg FFI backend
+      # (needs nasm above) so the feature-gated C path cannot rot silently.
+      - name: test g2g-plugins (mjpeg codecs)
+        run: cargo test -p g2g-plugins --locked --features std,mozjpeg --test m152_mjpegdec --test m153_mjpegenc
       - name: check g2g-ml (wgpu + burn)
         run: cargo check -p g2g-ml --locked --all-targets --features wgpu,burn
       # Embedded / no_std path: the embassy-sync stack channel, the no-alloc
