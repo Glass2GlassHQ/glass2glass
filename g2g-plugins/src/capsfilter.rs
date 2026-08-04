@@ -470,6 +470,7 @@ pub(crate) fn parse_raw_format(s: &str) -> Option<RawVideoFormat> {
         "y444" => RawVideoFormat::I444,
         "y444_10le" => RawVideoFormat::I444p10,
         "y444_12le" => RawVideoFormat::I444p12,
+        "p010_10le" | "p010" => RawVideoFormat::P010,
         _ => return None,
     })
 }

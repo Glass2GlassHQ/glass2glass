@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M854: NvDec mid-stream reconfigure, AV1, P010 10-bit, and `max-display-delay`; NvEnc Main10 10-bit encode plus `gop-size` / `repeat-sequence-header`.
+
 - M855: `font-variations` axis selection on textoverlay, WebVTT `::cue(.class)` styling, and SSA / TTML placement mapped into cue settings.
 
 - M852: S24/S32/U8 through convert, resample, and all three Linux audio sinks, which now open >2-channel layouts with device-order channel mapping.

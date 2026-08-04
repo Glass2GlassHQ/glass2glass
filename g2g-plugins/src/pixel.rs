@@ -20,7 +20,7 @@ pub(crate) fn rgba_rb_offsets(format: RawVideoFormat) -> (usize, usize) {
 /// planar family follows its [`RawVideoFormat::chroma_shift`]; RGBA needs neither.
 pub(crate) fn even_dims_required(format: RawVideoFormat) -> (bool, bool) {
     match format {
-        RawVideoFormat::Nv12 => (true, true),
+        RawVideoFormat::Nv12 | RawVideoFormat::P010 => (true, true),
         RawVideoFormat::Yuyv => (true, false),
         _ => match format.chroma_shift() {
             Some((hs, vs)) => (hs > 0, vs > 0),
@@ -61,6 +61,8 @@ pub(crate) fn frame_byte_size(format: RawVideoFormat, w: u32, h: u32) -> usize {
     match format {
         RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 => w * h * 4,
         RawVideoFormat::Nv12 => w * h * 3 / 2,
+        // Semi-planar 10-bit: NV12's sample counts at 2 bytes each.
+        RawVideoFormat::P010 => w * h * 3,
         // Packed 4:2:2: two bytes per pixel (Y0 U Y1 V over each pixel pair).
         RawVideoFormat::Yuyv => w * h * 2,
         // The fully-planar formats are handled above via `chroma_shift`.

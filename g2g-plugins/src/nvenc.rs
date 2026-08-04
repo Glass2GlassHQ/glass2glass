@@ -25,12 +25,19 @@
 //! rate control / GOP). The session opens lazily on the first frame, on that
 //! frame's `CUcontext`, so it runs in the same context as the NVDEC source.
 //!
-//! Low latency, like `FfmpegH264Enc`: preset P4 + the LOW_LATENCY tuning info,
-//! CBR, no B-frames (`frameIntervalP = 1`), and an *infinite GOP* so IDRs are
-//! emitted only on demand (the first frame, and on a downstream PLI via
+//! Low latency by default, like `FfmpegH264Enc`: preset P4 + the LOW_LATENCY
+//! tuning info, CBR, no B-frames (`frameIntervalP = 1`), and an *infinite GOP* so
+//! IDRs are emitted only on demand (the first frame, and on a downstream PLI via
 //! [`Reconfigure::ForceKeyframe`]); each forced IDR carries in-band SPS/PPS
-//! (`OUTPUT_SPSPPS`), the Annex-B parameter sets a network sink expects. The
-//! NV12 nanosecond PTS round-trips through NVENC's `inputTimeStamp`.
+//! (`OUTPUT_SPSPPS`), the Annex-B parameter sets a network sink expects. A file /
+//! seekable target instead sets `gop-size` for periodic IDRs and
+//! `repeat-sequence-header` so each of them carries its own SPS/PPS. The NV12
+//! nanosecond PTS round-trips through NVENC's `inputTimeStamp`.
+//!
+//! 10-bit: a [`RawVideoFormat::P010`] input (NVDEC's 10-bit surface) encodes as
+//! HEVC Main 10 (`YUV420_10BIT` input format, the Main10 profile GUID and a
+//! 10-bit input/output depth in the codec config). NVENC has no 10-bit H.264, so
+//! P010 with `codec=h264` is rejected at configure.
 //!
 //! Threading: the encoder is a raw session handle plus a CUDA context, driven
 //! through `&mut self` only and never shared; `unsafe impl Send` rests on the
@@ -45,8 +52,7 @@
 //! M354 domain auto-plug splices ahead of this Cuda-only encoder (`input_domains`
 //! declares `{Cuda}`); the encoder itself stays device-resident.
 //!
-//! Deferred (v1): finite-GOP periodic IDRs with `repeatSPSPPS`, 10-bit
-//! (P010 / Main10), and mid-stream resolution reconfigure.
+//! Deferred (v1): mid-stream resolution reconfigure.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -66,6 +72,9 @@ use g2g_core::{
 /// Default constant target bitrate (bits/second). 4 Mbps, a 1080p30 default that
 /// matches [`crate::ffmpegenc`].
 const DEFAULT_BITRATE_BPS: u32 = 4_000_000;
+/// Default GOP: negative means infinite, so IDRs are emitted only on demand (the
+/// low-latency live model). gst-nvcodec spells the same knob `gop-size`.
+const DEFAULT_GOP_SIZE: i32 = -1;
 
 /// Native H.264 encoder over the NVIDIA Video Codec SDK. NV12 CUDA surfaces in,
 /// H.264 Annex-B out. See the module docs.
@@ -73,20 +82,25 @@ pub struct NvEnc {
     width: u32,
     height: u32,
     framerate: Rate,
-    /// Negotiated input pixel format: NV12 (the NVDEC hwframe domain) or a packed
-    /// 8-bit RGBA (the GPU-render domain, e.g. via `WgpuToCuda`). NVENC color
-    /// converts RGBA internally.
+    /// Negotiated input pixel format: NV12 (the NVDEC hwframe domain), P010 (its
+    /// 10-bit sibling) or a packed 8-bit RGBA (the GPU-render domain, e.g. via
+    /// `WgpuToCuda`). NVENC color converts RGBA internally.
     input_format: RawVideoFormat,
     /// Output codec: H.264 (default) or HEVC (H.265). Both are NVENC-encodable on
     /// Ampere/3060; AV1 needs RTX 40-series. The encode path is identical bar the
     /// codec GUID and the announced output caps.
     codec: VideoCodec,
     bitrate_bps: u32,
-    /// The bitrate currently programmed into the open session's rate control. The
-    /// target (`bitrate_bps`) is applied at session open and re-applied live via
-    /// `nvEncReconfigureEncoder` when it diverges (M277, runtime retarget for an
-    /// adaptive sink, e.g. a WebRTC BWE drop). `0` until a session is open.
-    applied_bitrate_bps: u32,
+    /// Frames between IDRs; negative means an infinite GOP (IDRs on demand only).
+    gop_size: i32,
+    /// Write SPS/PPS ahead of every IDR (`repeatSPSPPS`), so a periodic IDR is a
+    /// self-contained entry point.
+    repeat_sequence_header: bool,
+    /// The settings currently programmed into the open session. The targets are
+    /// applied at session open and re-applied live via `nvEncReconfigureEncoder`
+    /// when they diverge (M277, runtime retarget for an adaptive sink, e.g. a
+    /// WebRTC BWE drop). `None` until a session is open.
+    applied: Option<LiveConfig>,
     /// Open NVENC session (lazy): the SDK function table, the encoder handle, and
     /// the CUDA context it was opened on. `None` until the first frame.
     session: Option<Session>,
@@ -98,6 +112,15 @@ pub struct NvEnc {
     /// a downstream PLI re-latches it.
     force_keyframe: bool,
     configured: bool,
+}
+
+/// The rate-control / GOP settings programmed into a live session, so a change
+/// to any of them is spotted and re-applied before the next frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LiveConfig {
+    bitrate_bps: u32,
+    gop_size: i32,
+    repeat_sequence_header: bool,
 }
 
 /// A live NVENC session: the loaded API function table, the opaque encoder
@@ -153,7 +176,9 @@ impl NvEnc {
             input_format: RawVideoFormat::Nv12,
             codec: VideoCodec::H264,
             bitrate_bps: DEFAULT_BITRATE_BPS,
-            applied_bitrate_bps: 0,
+            gop_size: DEFAULT_GOP_SIZE,
+            repeat_sequence_header: false,
+            applied: None,
             session: None,
             frame_no: 0,
             emitted: 0,
@@ -176,9 +201,49 @@ impl NvEnc {
         self
     }
 
+    /// Frames between IDRs. Negative (the default) means an infinite GOP: IDRs
+    /// only on demand (the first frame and each downstream PLI). Also the
+    /// `gop-size` property, applied live.
+    pub fn with_gop_size(mut self, frames: i32) -> Self {
+        self.gop_size = frames;
+        self
+    }
+
+    /// Write SPS/PPS ahead of every IDR (NVENC's `repeatSPSPPS`), so a periodic
+    /// IDR is a self-contained entry point. Also the `repeat-sequence-header`
+    /// property, applied live.
+    pub fn with_repeat_sequence_header(mut self, repeat: bool) -> Self {
+        self.repeat_sequence_header = repeat;
+        self
+    }
+
     /// Force the next encoded picture to be an IDR with in-band SPS/PPS.
     pub fn force_keyframe(&mut self) {
         self.force_keyframe = true;
+    }
+
+    /// The settings this element wants programmed into the session.
+    fn live_config(&self) -> LiveConfig {
+        LiveConfig {
+            bitrate_bps: self.bitrate_bps,
+            gop_size: self.gop_size,
+            repeat_sequence_header: self.repeat_sequence_header,
+        }
+    }
+
+    /// `NV_ENC_CONFIG::gopLength` / the codec config's `idrPeriod` for the
+    /// configured GOP: a negative `gop-size` is NVENC's infinite GOP.
+    fn gop_length(&self) -> u32 {
+        if self.gop_size < 0 {
+            ffi::NVENC_INFINITE_GOPLENGTH
+        } else {
+            (self.gop_size as u32).max(1)
+        }
+    }
+
+    /// True when the negotiated input is the 10-bit semi-planar surface.
+    fn is_ten_bit(&self) -> bool {
+        self.input_format == RawVideoFormat::P010
     }
 
     /// The NVENC encode GUID for the selected codec.
@@ -201,13 +266,18 @@ impl NvEnc {
     ///
     /// [`with_bitrate`]: Self::with_bitrate
     pub fn applied_bitrate_bps(&self) -> u32 {
-        self.applied_bitrate_bps
+        self.applied.map(|a| a.bitrate_bps).unwrap_or(0)
     }
 
-    /// The accepted input formats: NV12 (the NVDEC hwframe domain) and packed
-    /// 8-bit RGBA (the GPU-render domain). NVENC color converts RGBA internally.
-    fn input_formats() -> [RawVideoFormat; 2] {
-        [RawVideoFormat::Nv12, RawVideoFormat::Rgba8]
+    /// The accepted input formats: NV12 (the NVDEC hwframe domain), its 10-bit
+    /// sibling P010, and packed 8-bit RGBA (the GPU-render domain). NVENC color
+    /// converts RGBA internally.
+    fn input_formats() -> [RawVideoFormat; 3] {
+        [
+            RawVideoFormat::Nv12,
+            RawVideoFormat::P010,
+            RawVideoFormat::Rgba8,
+        ]
     }
 
     /// Open-geometry input caps, one alternative per accepted format.
@@ -232,6 +302,7 @@ impl NvEnc {
         match self.input_format {
             RawVideoFormat::Rgba8 => ffi::NV_ENC_BUFFER_FORMAT_ABGR,
             RawVideoFormat::Bgra8 => ffi::NV_ENC_BUFFER_FORMAT_ARGB,
+            RawVideoFormat::P010 => ffi::NV_ENC_BUFFER_FORMAT_YUV420_10BIT,
             _ => ffi::NV_ENC_BUFFER_FORMAT_NV12,
         }
     }
@@ -334,7 +405,7 @@ impl NvEnc {
         // SAFETY: valid encoder handle; `init` and the `config` it points at are
         // fully initialized and live across this call (the driver copies them).
         nvchk(unsafe { init_fn(encoder, &mut init) })?;
-        self.applied_bitrate_bps = self.bitrate_bps;
+        self.applied = Some(self.live_config());
 
         // Create the reusable output bitstream buffer once (M277): sync-mode
         // encode locks + copies + unlocks one output per frame, so one buffer
@@ -358,14 +429,60 @@ impl NvEnc {
     fn fill_encode_config(&self, config: &mut ffi::Config) {
         config.version = ffi::NV_ENC_CONFIG_VER;
         config.rc_params.version = ffi::NV_ENC_RC_PARAMS_VER;
-        // Infinite GOP: IDRs only on demand (first frame + downstream PLI), the
-        // low-latency live-streaming model. No B-frames.
-        config.gop_length = ffi::NVENC_INFINITE_GOPLENGTH;
+        // Default is an infinite GOP: IDRs only on demand (first frame +
+        // downstream PLI), the low-latency live-streaming model. A finite
+        // `gop-size` inserts periodic IDRs instead. No B-frames.
+        let gop = self.gop_length();
+        config.gop_length = gop;
         config.frame_interval_p = 1;
         // Constant bitrate at the configured target.
         config.rc_params.rate_control_mode = ffi::NV_ENC_PARAMS_RC_CBR;
         config.rc_params.average_bit_rate = self.bitrate_bps;
         config.rc_params.max_bit_rate = self.bitrate_bps;
+
+        // The codec-specific arm of the config union: IDR period (NVENC leaves
+        // it at the preset's value otherwise, so a finite gopLength alone would
+        // not give periodic IDRs), the repeat-SPS/PPS bit, and the pixel depth.
+        let depth = if self.is_ten_bit() {
+            ffi::NV_ENC_BIT_DEPTH_10
+        } else {
+            ffi::NV_ENC_BIT_DEPTH_8
+        };
+        match self.codec {
+            VideoCodec::H265 => {
+                if self.is_ten_bit() {
+                    config.profile_guid = ffi::NV_ENC_HEVC_PROFILE_MAIN10_GUID;
+                }
+                // SAFETY: `encode_codec_config` is the `NV_ENC_CODEC_CONFIG`
+                // union; `ConfigHevc` is its HEVC member, no larger than the
+                // union, and the preset call left a valid HEVC config there.
+                let hevc = unsafe {
+                    &mut *(config.encode_codec_config.as_mut_ptr() as *mut ffi::ConfigHevc)
+                };
+                hevc.idr_period = gop;
+                set_flag(
+                    &mut hevc.bitfields,
+                    ffi::NV_ENC_HEVC_REPEAT_SPSPPS_BIT,
+                    self.repeat_sequence_header,
+                );
+                hevc.input_bit_depth = depth;
+                hevc.output_bit_depth = depth;
+            }
+            _ => {
+                // SAFETY: as above, for the union's H.264 member.
+                let h264 = unsafe {
+                    &mut *(config.encode_codec_config.as_mut_ptr() as *mut ffi::ConfigH264)
+                };
+                h264.idr_period = gop;
+                set_flag(
+                    &mut h264.bitfields,
+                    ffi::NV_ENC_H264_REPEAT_SPSPPS_BIT,
+                    self.repeat_sequence_header,
+                );
+                h264.input_bit_depth = depth;
+                h264.output_bit_depth = depth;
+            }
+        }
     }
 
     /// Fill an `NV_ENC_INITIALIZE_PARAMS` for this element's geometry / codec,
@@ -386,11 +503,11 @@ impl NvEnc {
         init.encode_config = config;
     }
 
-    /// Re-apply the target bitrate to a live session via `nvEncReconfigureEncoder`
-    /// (M277), so an adaptive sink (e.g. a WebRTC BWE drop routed through
-    /// `set_property("bitrate", ..)`) retargets the rate control without a session
-    /// re-open or a forced IDR. No-op if the applied bitrate already matches.
-    fn reconfigure_bitrate(&mut self) -> Result<(), G2gError> {
+    /// Re-apply the rate control / GOP settings to a live session via
+    /// `nvEncReconfigureEncoder` (M277), so an adaptive sink (e.g. a WebRTC BWE
+    /// drop routed through `set_property("bitrate", ..)`) retargets without a
+    /// session re-open or a forced IDR.
+    fn reconfigure_live(&mut self) -> Result<(), G2gError> {
         let session = self.session.as_ref().ok_or(G2gError::NotConfigured)?;
         let enc = session.encoder;
         let reconf_fn = session.funcs.nv_enc_reconfigure_encoder.ok_or(hw())?;
@@ -429,7 +546,7 @@ impl NvEnc {
         // SAFETY: valid encoder; `reconf` and the `config` it points at are fully
         // initialized and live across the call (the driver copies them).
         nvchk(unsafe { reconf_fn(enc, &mut reconf) })?;
-        self.applied_bitrate_bps = self.bitrate_bps;
+        self.applied = Some(self.live_config());
         Ok(())
     }
 
@@ -443,9 +560,9 @@ impl NvEnc {
         if self.session.is_none() {
             self.open_session(buf)?;
         }
-        // Apply a pending bitrate retarget to the live session before encoding.
-        if self.bitrate_bps != self.applied_bitrate_bps {
-            self.reconfigure_bitrate()?;
+        // Apply any pending rate-control / GOP change before encoding.
+        if self.applied != Some(self.live_config()) {
+            self.reconfigure_live()?;
         }
         let session = self.session.as_ref().ok_or(G2gError::NotConfigured)?;
         if session.context != buf.context {
@@ -685,6 +802,15 @@ impl Drop for NvEnc {
     }
 }
 
+/// Set or clear one bit of a C bitfield word.
+fn set_flag(word: &mut u32, bit: u32, on: bool) {
+    if on {
+        *word |= bit;
+    } else {
+        *word &= !bit;
+    }
+}
+
 /// Map an NVENC status to a `Result`.
 fn nvchk(status: ffi::NvEncStatus) -> Result<(), G2gError> {
     if status == ffi::NV_ENC_SUCCESS {
@@ -749,14 +875,23 @@ impl AsyncElement for NvEnc {
         Err(G2gError::CapsMismatch)
     }
 
-    /// Native `DerivedOutput`: NV12 or packed RGBA (any geometry) in, the selected
-    /// codec (H.264 or HEVC) at the same dims and framerate out. Any other input
-    /// yields an empty set, rejected at solve.
+    /// Native `DerivedOutput`: NV12, P010 or packed RGBA (any geometry) in, the
+    /// selected codec (H.264 or HEVC) at the same dims and framerate out. Any
+    /// other input yields an empty set, rejected at solve. P010 is HEVC-only, so
+    /// an H.264 encoder derives nothing from it.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         let codec = self.codec;
         CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| match input {
             Caps::RawVideo {
-                format: RawVideoFormat::Nv12 | RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8,
+                format: RawVideoFormat::P010,
+                ..
+            } if codec != VideoCodec::H265 => CapsSet::from_alternatives(Vec::new()),
+            Caps::RawVideo {
+                format:
+                    RawVideoFormat::Nv12
+                    | RawVideoFormat::P010
+                    | RawVideoFormat::Rgba8
+                    | RawVideoFormat::Bgra8,
                 width,
                 height,
                 framerate,
@@ -789,12 +924,19 @@ impl AsyncElement for NvEnc {
         };
         if !matches!(
             format,
-            RawVideoFormat::Nv12 | RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8
+            RawVideoFormat::Nv12
+                | RawVideoFormat::P010
+                | RawVideoFormat::Rgba8
+                | RawVideoFormat::Bgra8
         ) {
             return Err(G2gError::CapsMismatch);
         }
         // Only H.264 / HEVC are NVENC-encodable here (AV1 needs RTX 40-series).
         if !matches!(self.codec, VideoCodec::H264 | VideoCodec::H265) {
+            return Err(G2gError::CapsMismatch);
+        }
+        // 10-bit encode is HEVC Main 10; NVENC has no 10-bit H.264.
+        if *format == RawVideoFormat::P010 && self.codec != VideoCodec::H265 {
             return Err(G2gError::CapsMismatch);
         }
         let (Dim::Fixed(w), Dim::Fixed(h)) = (width, height) else {
@@ -838,6 +980,15 @@ impl AsyncElement for NvEnc {
                 };
                 Ok(())
             }
+            "gop-size" => {
+                let frames = value.as_int().ok_or(PropError::Type)?;
+                self.gop_size = frames.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+                Ok(())
+            }
+            "repeat-sequence-header" => {
+                self.repeat_sequence_header = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -852,6 +1003,8 @@ impl AsyncElement for NvEnc {
                 }
                 .into(),
             )),
+            "gop-size" => Some(PropValue::Int(self.gop_size as i64)),
+            "repeat-sequence-header" => Some(PropValue::Bool(self.repeat_sequence_header)),
             _ => None,
         }
     }
@@ -907,8 +1060,9 @@ impl PadTemplates for NvEnc {
     }
 }
 
-/// Settable properties: the target bitrate and the output codec (`h264` |
-/// `hevc`), so a `gst-launch` line can pick them without the builder.
+/// Settable properties: the target bitrate, the output codec (`h264` | `hevc`)
+/// and the GOP structure, so a `gst-launch` line can pick them without the
+/// builder. Named / scaled as gst-nvcodec's encoders name them.
 static NVENC_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "bitrate",
@@ -916,6 +1070,16 @@ static NVENC_PROPS: &[PropertySpec] = &[
         "constant target bitrate, bits/second",
     ),
     PropertySpec::new("codec", PropKind::Str, "output codec: h264 | hevc"),
+    PropertySpec::new(
+        "gop-size",
+        PropKind::Int,
+        "frames between IDRs (-1 = infinite, the default)",
+    ),
+    PropertySpec::new(
+        "repeat-sequence-header",
+        PropKind::Bool,
+        "write SPS/PPS ahead of every IDR",
+    ),
 ];
 
 /// Thin hand-rolled FFI for the NVIDIA Video Codec SDK (`nvEncodeAPI.h`, SDK
@@ -972,6 +1136,10 @@ mod ffi {
     pub const NV_ENC_BUFFER_FORMAT_ARGB: u32 = 0x0100_0000;
     /// Packed `A8B8G8R8` (word order), byte order R,G,B,A, i.e. wgpu `Rgba8`.
     pub const NV_ENC_BUFFER_FORMAT_ABGR: u32 = 0x1000_0000;
+    /// Semi-planar 4:2:0 with 16-bit samples in the top 10 bits, i.e. P010.
+    pub const NV_ENC_BUFFER_FORMAT_YUV420_10BIT: u32 = 0x0001_0000;
+    pub const NV_ENC_BIT_DEPTH_8: u32 = 8;
+    pub const NV_ENC_BIT_DEPTH_10: u32 = 10;
     pub const NV_ENC_PIC_STRUCT_FRAME: u32 = 0x1;
     pub const NV_ENC_PARAMS_RC_CBR: u32 = 0x2;
     pub const NV_ENC_TUNING_INFO_LOW_LATENCY: u32 = 0x2;
@@ -1017,6 +1185,13 @@ mod ffi {
         0xdf06,
         0x4862,
         [0xb9, 0xd2, 0xcd, 0x6d, 0x73, 0xa0, 0x86, 0x81],
+    );
+    /// HEVC Main 10, the 10-bit encode profile.
+    pub const NV_ENC_HEVC_PROFILE_MAIN10_GUID: Guid = guid(
+        0xfa4d2b6c,
+        0x3a5b,
+        0x411a,
+        [0x80, 0x18, 0x0a, 0x3f, 0x5e, 0x3c, 0x9b, 0xe5],
     );
 
     /// `NV_ENC_QP` (3 x u32).
@@ -1086,6 +1261,48 @@ mod ffi {
         pub reserved2: [*mut c_void; 64],
     }
     const _: () = assert!(core::mem::size_of::<Config>() == 3584);
+
+    /// The `repeatSPSPPS` bit inside `NV_ENC_CONFIG_H264`'s leading bitfield word
+    /// (bit 12) and `NV_ENC_CONFIG_HEVC`'s (bit 7, the word at offset 16).
+    pub const NV_ENC_H264_REPEAT_SPSPPS_BIT: u32 = 1 << 12;
+    pub const NV_ENC_HEVC_REPEAT_SPSPPS_BIT: u32 = 1 << 7;
+
+    /// `NV_ENC_CONFIG_H264` (1792 bytes), the H.264 arm of the `NV_ENC_CODEC_CONFIG`
+    /// union inside [`Config`]. Only the fields this element writes are named; the
+    /// runs between them are opaque so the preset's values survive untouched. The
+    /// leading C bitfield block is one `u32` (`bitfields`).
+    #[repr(C)]
+    pub struct ConfigH264 {
+        pub bitfields: u32,
+        pub level: u32,
+        pub idr_period: u32,
+        pub opaque1: [u8; 200],
+        pub output_bit_depth: u32,
+        pub input_bit_depth: u32,
+        pub opaque2: [u8; 1572],
+    }
+    const _: () = assert!(core::mem::size_of::<ConfigH264>() == 1792);
+    const _: () = assert!(core::mem::offset_of!(ConfigH264, idr_period) == 8);
+    const _: () = assert!(core::mem::offset_of!(ConfigH264, output_bit_depth) == 212);
+    const _: () = assert!(core::mem::offset_of!(ConfigH264, input_bit_depth) == 216);
+
+    /// `NV_ENC_CONFIG_HEVC` (1560 bytes), the HEVC arm of the same union. Its
+    /// bitfield block sits at offset 16, after `level` / `tier` / the two CU sizes.
+    #[repr(C)]
+    pub struct ConfigHevc {
+        pub opaque0: [u8; 16],
+        pub bitfields: u32,
+        pub idr_period: u32,
+        pub opaque1: [u8; 176],
+        pub output_bit_depth: u32,
+        pub input_bit_depth: u32,
+        pub opaque2: [u8; 1352],
+    }
+    const _: () = assert!(core::mem::size_of::<ConfigHevc>() == 1560);
+    const _: () = assert!(core::mem::offset_of!(ConfigHevc, bitfields) == 16);
+    const _: () = assert!(core::mem::offset_of!(ConfigHevc, idr_period) == 20);
+    const _: () = assert!(core::mem::offset_of!(ConfigHevc, output_bit_depth) == 200);
+    const _: () = assert!(core::mem::offset_of!(ConfigHevc, input_bit_depth) == 204);
 
     /// `NV_ENC_PRESET_CONFIG` (5128 bytes).
     #[repr(C)]
@@ -1361,7 +1578,7 @@ mod ffi {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn nv12(w: u32, h: u32) -> Caps {
@@ -1452,6 +1669,82 @@ mod tests {
     }
 
     #[test]
+    fn gop_properties_round_trip_onto_the_encode_config() {
+        let mut e = NvEnc::new();
+        // Default: an infinite GOP, IDRs only on demand.
+        assert_eq!(e.get_property("gop-size"), Some(PropValue::Int(-1)));
+        assert_eq!(e.gop_length(), ffi::NVENC_INFINITE_GOPLENGTH);
+        assert_eq!(
+            e.get_property("repeat-sequence-header"),
+            Some(PropValue::Bool(false))
+        );
+
+        e.set_property("gop-size", PropValue::Int(30)).unwrap();
+        e.set_property("repeat-sequence-header", PropValue::Bool(true))
+            .unwrap();
+        assert_eq!(e.get_property("gop-size"), Some(PropValue::Int(30)));
+        assert_eq!(
+            e.get_property("repeat-sequence-header"),
+            Some(PropValue::Bool(true))
+        );
+        assert_eq!(e.gop_length(), 30);
+        for name in ["gop-size", "repeat-sequence-header"] {
+            assert!(e.properties().iter().any(|s| s.name == name));
+        }
+
+        // Both land in the codec-specific arm of the config union: IDR period
+        // and the repeat-SPS/PPS bit.
+        // SAFETY: the config struct is plain old data; all-zero is the state the
+        // driver's preset call would otherwise fill.
+        let mut config: ffi::Config = unsafe { core::mem::zeroed() };
+        e.fill_encode_config(&mut config);
+        assert_eq!(config.gop_length, 30);
+        // SAFETY: reading back the H.264 arm this element just wrote.
+        let h264 = unsafe { &*(config.encode_codec_config.as_ptr() as *const ffi::ConfigH264) };
+        assert_eq!(h264.idr_period, 30);
+        assert_eq!(
+            h264.bitfields & ffi::NV_ENC_H264_REPEAT_SPSPPS_BIT,
+            ffi::NV_ENC_H264_REPEAT_SPSPPS_BIT
+        );
+        assert_eq!(h264.input_bit_depth, ffi::NV_ENC_BIT_DEPTH_8);
+    }
+
+    #[test]
+    fn ten_bit_input_selects_main10_and_the_10bit_buffer_format() {
+        let mut e = NvEnc::new().with_codec(VideoCodec::H265);
+        let p010 = Caps::RawVideo {
+            format: RawVideoFormat::P010,
+            width: Dim::Fixed(640),
+            height: Dim::Fixed(480),
+            framerate: Rate::Fixed(30 << 16),
+        };
+        e.configure_pipeline(&p010).unwrap();
+        assert_eq!(e.nv_buffer_format(), ffi::NV_ENC_BUFFER_FORMAT_YUV420_10BIT);
+        // SAFETY: plain-old-data config, as above.
+        let mut config: ffi::Config = unsafe { core::mem::zeroed() };
+        e.fill_encode_config(&mut config);
+        assert_eq!(
+            config.profile_guid.data1,
+            ffi::NV_ENC_HEVC_PROFILE_MAIN10_GUID.data1
+        );
+        // SAFETY: reading back the HEVC arm this element just wrote.
+        let hevc = unsafe { &*(config.encode_codec_config.as_ptr() as *const ffi::ConfigHevc) };
+        assert_eq!(hevc.input_bit_depth, ffi::NV_ENC_BIT_DEPTH_10);
+        assert_eq!(hevc.output_bit_depth, ffi::NV_ENC_BIT_DEPTH_10);
+
+        // P010 into an H.264 encoder derives nothing and is rejected at configure.
+        let mut avc = NvEnc::new();
+        assert_eq!(
+            avc.configure_pipeline(&p010).err(),
+            Some(G2gError::CapsMismatch)
+        );
+        let CapsConstraint::DerivedOutput(derive) = avc.caps_constraint_as_transform() else {
+            panic!("expected DerivedOutput");
+        };
+        assert!(derive(&p010).alternatives().is_empty());
+    }
+
+    #[test]
     fn configure_rejects_non_nv12() {
         let mut ok = NvEnc::new();
         assert!(ok.configure_pipeline(&nv12(1280, 720)).is_ok());
@@ -1506,6 +1799,160 @@ mod tests {
         assert_eq!(err.err(), Some(G2gError::UnsupportedDomain));
     }
 
+    /// Owns the CUDA context the test's source surfaces live in, destroyed after
+    /// every `DevAlloc` on it (so it is dropped last).
+    struct CtxGuard(u64);
+
+    impl Drop for CtxGuard {
+        fn drop(&mut self) {
+            // SAFETY: the context created in `test_context`, destroyed once.
+            unsafe {
+                let _ = cu::cu_ctx_destroy(self.0 as *mut core::ffi::c_void);
+            }
+        }
+    }
+
+    /// Collects the announced caps and every system-memory payload (an encoded
+    /// access unit, or a decoded frame on the decode-back leg).
+    #[derive(Default)]
+    struct CaptureSink {
+        caps: Vec<Caps>,
+        frames: Vec<Vec<u8>>,
+    }
+
+    impl OutputSink for CaptureSink {
+        fn push<'a>(
+            &'a mut self,
+            packet: PipelinePacket,
+        ) -> core::pin::Pin<
+            Box<dyn core::future::Future<Output = Result<g2g_core::PushOutcome, G2gError>> + 'a>,
+        > {
+            Box::pin(async move {
+                match packet {
+                    PipelinePacket::CapsChanged(c) => self.caps.push(c),
+                    PipelinePacket::DataFrame(f) => {
+                        if let Some(s) = f.domain.as_system_slice() {
+                            self.frames.push(s.to_vec());
+                        }
+                    }
+                    _ => {}
+                }
+                Ok(g2g_core::PushOutcome::Accepted)
+            })
+        }
+    }
+
+    /// Serializes the tests that open an NVENC session: several concurrent encode
+    /// sessions in one process have been seen to fault inside the driver.
+    pub(crate) async fn encode_session_lock() -> tokio::sync::MutexGuard<'static, ()> {
+        static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        LOCK.lock().await
+    }
+
+    /// A tight NV12 frame (pitch == width) holding a moving diagonal ramp over
+    /// neutral chroma, so the encoder has real content to compress.
+    fn nv12_pattern(w: u32, h: u32, seq: u64) -> Vec<u8> {
+        let (w, h) = (w as usize, h as usize);
+        let mut host = alloc::vec![128u8; w * h * 3 / 2];
+        for y in 0..h {
+            for x in 0..w {
+                host[y * w + x] = ((x + y + seq as usize * 7) & 0xff) as u8;
+            }
+        }
+        host
+    }
+
+    /// The same pattern as a tight P010 frame: 16-bit little-endian samples with
+    /// the value in the top 10 bits, chroma neutral at mid-scale.
+    #[cfg(feature = "nvdec")]
+    fn p010_pattern(w: u32, h: u32, seq: u64) -> Vec<u8> {
+        let (w, h) = (w as usize, h as usize);
+        let mut host = alloc::vec![0u8; w * h * 3];
+        let put = |host: &mut Vec<u8>, i: usize, sample: u16| {
+            host[2 * i..2 * i + 2].copy_from_slice(&(sample << 6).to_le_bytes());
+        };
+        for y in 0..h {
+            for x in 0..w {
+                put(
+                    &mut host,
+                    y * w + x,
+                    ((x + y + seq as usize * 7) & 0x3ff) as u16,
+                );
+            }
+        }
+        for i in w * h..w * h * 3 / 2 {
+            put(&mut host, i, 512);
+        }
+        host
+    }
+
+    /// Bring up a CUDA context for the source surfaces, or `None` when this host
+    /// has no NVIDIA GPU (the test then skips).
+    fn test_context() -> Option<CtxGuard> {
+        // SAFETY: standard CUDA driver bring-up; every result is checked and the
+        // path bails before using a handle on failure.
+        unsafe {
+            if cu::cu_init(0) != 0 {
+                std::eprintln!("skipping: cuInit failed (no NVIDIA GPU)");
+                return None;
+            }
+            let mut dev = 0i32;
+            if cu::cu_device_get(&mut dev, 0) != 0 {
+                std::eprintln!("skipping: no CUDA device");
+                return None;
+            }
+            let mut ctx: *mut core::ffi::c_void = core::ptr::null_mut();
+            if cu::cu_ctx_create(&mut ctx, 0, dev) != 0 || ctx.is_null() {
+                std::eprintln!("skipping: cuCtxCreate failed");
+                return None;
+            }
+            Some(CtxGuard(ctx as u64))
+        }
+    }
+
+    /// Upload one packed semi-planar surface (`host` holds `h` luma rows of
+    /// `pitch` bytes then the chroma plane) into `ctx` as a CUDA frame.
+    fn upload_frame(
+        ctx: u64,
+        host: &[u8],
+        w: u32,
+        h: u32,
+        pitch: u32,
+        seq: u64,
+    ) -> Option<g2g_core::frame::Frame> {
+        // SAFETY: allocate + upload one surface in the test context, pushed /
+        // popped around the calls; `host` outlives the copy.
+        unsafe {
+            let _ = ffi::cu_ctx_push_current(ctx as *mut core::ffi::c_void);
+            let mut dptr = 0u64;
+            let ok = cu::cu_mem_alloc(&mut dptr, host.len()) == 0
+                && cu::cu_memcpy_htod(dptr, host.as_ptr() as *const core::ffi::c_void, host.len())
+                    == 0;
+            let mut popped = core::ptr::null_mut();
+            let _ = ffi::cu_ctx_pop_current(&mut popped);
+            if !ok {
+                return None;
+            }
+            Some(g2g_core::frame::Frame::new(
+                MemoryDomain::Cuda(OwnedCudaBuffer::new(
+                    dptr,
+                    dptr + (pitch as u64) * (h as u64),
+                    pitch,
+                    pitch,
+                    w,
+                    h,
+                    ctx,
+                    alloc::sync::Arc::new(DevAlloc { dptr, ctx }),
+                )),
+                g2g_core::FrameTiming {
+                    pts_ns: seq * 33_000_000,
+                    ..Default::default()
+                },
+                seq,
+            ))
+        }
+    }
+
     // --- On-hardware round trip (RTX 3060 host): NV12 CUDA surface -> NvEnc ->
     // Annex-B, decoded back through FfmpegVideoDec. Skips cleanly with no NVIDIA
     // GPU / SDK. Needs the `ffmpeg` feature for the decode-back leg. ---
@@ -1516,9 +1963,8 @@ mod tests {
         gpu_round_trip().await;
     }
 
-    /// CUDA driver FFI used only to synthesize a device-resident NV12 frame for
-    /// the round-trip test (allocate, upload, free).
-    #[cfg(feature = "ffmpeg")]
+    /// CUDA driver FFI used only to synthesize a device-resident input surface
+    /// for the on-hardware tests (allocate, upload, free).
     #[allow(unreachable_pub)]
     mod cu {
         use core::ffi::c_void;
@@ -1542,15 +1988,12 @@ mod tests {
     }
 
     /// Frees one device allocation when the synthesized frame is dropped.
-    #[cfg(feature = "ffmpeg")]
     #[derive(Debug)]
     struct DevAlloc {
         dptr: u64,
         ctx: u64,
     }
-    #[cfg(feature = "ffmpeg")]
     impl g2g_core::memory::CudaKeepAlive for DevAlloc {}
-    #[cfg(feature = "ffmpeg")]
     impl Drop for DevAlloc {
         fn drop(&mut self) {
             // SAFETY: free on the allocating context; best-effort.
@@ -1565,118 +2008,22 @@ mod tests {
 
     #[cfg(feature = "ffmpeg")]
     async fn gpu_round_trip() {
-        use alloc::sync::Arc;
-        use core::future::Future;
-        use core::pin::Pin;
         use g2g_core::frame::Frame;
         use g2g_core::memory::SystemSlice;
-        use g2g_core::{FrameTiming, PushOutcome};
+        use g2g_core::FrameTiming;
 
+        let _lock = encode_session_lock().await;
         const W: u32 = 320;
         const H: u32 = 240;
-        let (w, h) = (W as usize, H as usize);
-        let size = w * h * 3 / 2; // tight NV12, pitch == width
 
-        // Bring up a CUDA context; skip if no NVIDIA GPU on this host.
-        // SAFETY: standard CUDA driver bring-up; every call's result is checked
-        // and the path bails before using a handle on failure.
-        let ctx = unsafe {
-            if cu::cu_init(0) != 0 {
-                std::eprintln!("skipping: cuInit failed (no NVIDIA GPU)");
-                return;
-            }
-            let mut dev = 0i32;
-            if cu::cu_device_get(&mut dev, 0) != 0 {
-                std::eprintln!("skipping: no CUDA device");
-                return;
-            }
-            let mut ctx: *mut core::ffi::c_void = core::ptr::null_mut();
-            if cu::cu_ctx_create(&mut ctx, 0, dev) != 0 || ctx.is_null() {
-                std::eprintln!("skipping: cuCtxCreate failed");
-                return;
-            }
-            ctx as u64
+        let Some(ctx_guard) = test_context() else {
+            return;
         };
-        // Tear the context down last (after all DevAlloc drops).
-        struct CtxGuard(u64);
-        impl Drop for CtxGuard {
-            fn drop(&mut self) {
-                // SAFETY: `self.0` is the context created above, destroyed once.
-                unsafe {
-                    let _ = cu::cu_ctx_destroy(self.0 as *mut core::ffi::c_void);
-                }
-            }
-        }
-        let _ctx_guard = CtxGuard(ctx);
-
-        // Build a moving NV12 pattern as a CUDA-resident frame.
+        let ctx = ctx_guard.0;
+        // A moving NV12 pattern as a CUDA-resident frame (tight, pitch == width).
         let make_frame = |seq: u64| -> Option<Frame> {
-            let mut host = alloc::vec![0u8; size];
-            for y in 0..h {
-                for x in 0..w {
-                    host[y * w + x] = ((x + y + seq as usize * 7) & 0xff) as u8;
-                }
-            }
-            for c in &mut host[w * h..] {
-                *c = 128; // neutral chroma
-            }
-            // SAFETY: allocate + upload one NV12 surface in the test context,
-            // pushed/popped around the calls; `host` outlives the copy.
-            unsafe {
-                let _ = ffi::cu_ctx_push_current(ctx as *mut core::ffi::c_void);
-                let mut dptr = 0u64;
-                let ok = cu::cu_mem_alloc(&mut dptr, size) == 0
-                    && cu::cu_memcpy_htod(dptr, host.as_ptr() as *const core::ffi::c_void, size)
-                        == 0;
-                let mut popped = core::ptr::null_mut();
-                let _ = ffi::cu_ctx_pop_current(&mut popped);
-                if !ok {
-                    return None;
-                }
-                Some(Frame::new(
-                    MemoryDomain::Cuda(OwnedCudaBuffer::new(
-                        dptr,
-                        dptr + (w * h) as u64,
-                        W,
-                        W,
-                        W,
-                        H,
-                        ctx,
-                        Arc::new(DevAlloc { dptr, ctx }),
-                    )),
-                    FrameTiming {
-                        pts_ns: seq * 33_000_000,
-                        ..FrameTiming::default()
-                    },
-                    seq,
-                ))
-            }
+            upload_frame(ctx, &nv12_pattern(W, H, seq), W, H, W, seq)
         };
-
-        #[derive(Default)]
-        struct CaptureSink {
-            caps: Vec<Caps>,
-            frames: Vec<Vec<u8>>,
-        }
-        impl OutputSink for CaptureSink {
-            fn push<'a>(
-                &'a mut self,
-                packet: PipelinePacket,
-            ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-                Box::pin(async move {
-                    match packet {
-                        PipelinePacket::CapsChanged(c) => self.caps.push(c),
-                        PipelinePacket::DataFrame(f) => {
-                            if let Some(s) = f.domain.as_system_slice() {
-                                self.frames.push(s.to_vec());
-                            }
-                        }
-                        _ => {}
-                    }
-                    Ok(PushOutcome::Accepted)
-                })
-            }
-        }
 
         const RETARGET_BPS: u32 = 1_000_000; // drop from the 4 Mbps default mid-stream
         let mut enc = NvEnc::new();
@@ -1771,6 +2118,210 @@ mod tests {
         assert!(
             !dsink.frames.is_empty(),
             "NVENC stream decoded to raw frames"
+        );
+    }
+
+    // --- On-hardware GOP / 10-bit encodes (RTX 3060 host). Each opens one NVENC
+    // session at a time (the session lock) and skips cleanly with no GPU. ---
+
+    /// Annex-B NAL payloads of a byte stream, in order (start codes stripped).
+    fn annex_b_nals(stream: &[u8]) -> Vec<&[u8]> {
+        let mut starts = Vec::new();
+        let mut i = 0;
+        while i + 3 <= stream.len() {
+            if stream[i] == 0 && stream[i + 1] == 0 {
+                if stream[i + 2] == 1 {
+                    starts.push(i + 3);
+                    i += 3;
+                    continue;
+                }
+                if i + 4 <= stream.len() && stream[i + 2] == 0 && stream[i + 3] == 1 {
+                    starts.push(i + 4);
+                    i += 4;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+        starts
+            .iter()
+            .enumerate()
+            .map(|(k, &b)| &stream[b..starts.get(k + 1).copied().unwrap_or(stream.len())])
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn finite_gop_repeats_parameter_sets_on_every_idr() {
+        let _lock = encode_session_lock().await;
+        const W: u32 = 320;
+        const H: u32 = 240;
+        const GOP: i32 = 4;
+        const FRAMES: u64 = 12;
+
+        let Some(ctx_guard) = test_context() else {
+            return;
+        };
+        let ctx = ctx_guard.0;
+        let mut enc = NvEnc::new()
+            .with_gop_size(GOP)
+            .with_repeat_sequence_header(true);
+        enc.configure_pipeline(&nv12(W, H)).unwrap();
+        let mut sink = CaptureSink::default();
+        for i in 0..FRAMES {
+            let Some(frame) = upload_frame(ctx, &nv12_pattern(W, H, i), W, H, W, i) else {
+                std::eprintln!("skipping: CUDA alloc/upload failed");
+                return;
+            };
+            if enc
+                .process(PipelinePacket::DataFrame(frame), &mut sink)
+                .await
+                .is_err()
+            {
+                std::eprintln!("skipping: NVENC unavailable on this host");
+                return;
+            }
+        }
+        assert_eq!(sink.frames.len(), FRAMES as usize, "one AU per input frame");
+
+        // Per AU: is it an IDR (NAL type 5), and does it carry SPS (7) + PPS (8)?
+        let mut idr_at = Vec::new();
+        let mut idrs_with_parameter_sets = 0;
+        for (i, au) in sink.frames.iter().enumerate() {
+            let types: Vec<u8> = annex_b_nals(au)
+                .iter()
+                .filter_map(|n| n.first().map(|b| b & 0x1F))
+                .collect();
+            if types.contains(&5) {
+                idr_at.push(i);
+                if types.contains(&7) && types.contains(&8) {
+                    idrs_with_parameter_sets += 1;
+                }
+            }
+        }
+        assert_eq!(
+            idr_at,
+            std::vec![0, 4, 8],
+            "a gop-size of {GOP} puts an IDR every {GOP} frames"
+        );
+        assert_eq!(
+            idrs_with_parameter_sets,
+            idr_at.len(),
+            "repeat-sequence-header writes SPS/PPS ahead of every IDR"
+        );
+    }
+
+    #[cfg(feature = "nvdec")]
+    #[tokio::test]
+    async fn p010_input_encodes_as_hevc_main10() {
+        let _lock = encode_session_lock().await;
+        use crate::nvdec::NvDec;
+        const W: u32 = 320;
+        const H: u32 = 240;
+
+        let Some(ctx_guard) = test_context() else {
+            return;
+        };
+        let ctx = ctx_guard.0;
+        let p010 = Caps::RawVideo {
+            format: RawVideoFormat::P010,
+            width: Dim::Fixed(W),
+            height: Dim::Fixed(H),
+            framerate: Rate::Fixed(30 << 16),
+        };
+        // 10-bit is HEVC-only on NVENC.
+        assert_eq!(
+            NvEnc::new().configure_pipeline(&p010).err(),
+            Some(G2gError::CapsMismatch),
+            "P010 into an H.264 encoder is rejected"
+        );
+
+        let mut enc = NvEnc::new().with_codec(VideoCodec::H265);
+        enc.configure_pipeline(&p010).unwrap();
+        let mut sink = CaptureSink::default();
+        for i in 0..8u64 {
+            // P010 rows are 2 bytes per sample, so the tight pitch is 2 * width.
+            let Some(frame) = upload_frame(ctx, &p010_pattern(W, H, i), W, H, W * 2, i) else {
+                std::eprintln!("skipping: CUDA alloc/upload failed");
+                return;
+            };
+            if enc
+                .process(PipelinePacket::DataFrame(frame), &mut sink)
+                .await
+                .is_err()
+            {
+                std::eprintln!("skipping: no 10-bit NVENC on this host");
+                return;
+            }
+        }
+        assert!(!sink.frames.is_empty(), "NVENC produced HEVC access units");
+
+        // Decode it back: a Main 10 stream comes out of NVDEC as P010, which is
+        // what proves the encode really was 10-bit and not silently truncated.
+        let mut dec = NvDec::new();
+        dec.configure_pipeline(&Caps::CompressedVideo {
+            codec: VideoCodec::H265,
+            width: Dim::Fixed(W),
+            height: Dim::Fixed(H),
+            framerate: Rate::Fixed(30 << 16),
+        })
+        .expect("open NVDEC");
+        let mut decoded = 0usize;
+        let mut out_caps = Vec::new();
+        {
+            struct DecSink<'a> {
+                caps: &'a mut Vec<Caps>,
+                count: &'a mut usize,
+            }
+            impl OutputSink for DecSink<'_> {
+                fn push<'a>(
+                    &'a mut self,
+                    packet: PipelinePacket,
+                ) -> core::pin::Pin<
+                    Box<
+                        dyn core::future::Future<Output = Result<g2g_core::PushOutcome, G2gError>>
+                            + 'a,
+                    >,
+                > {
+                    Box::pin(async move {
+                        match packet {
+                            PipelinePacket::CapsChanged(c) => self.caps.push(c),
+                            PipelinePacket::DataFrame(_) => *self.count += 1,
+                            _ => {}
+                        }
+                        Ok(g2g_core::PushOutcome::Accepted)
+                    })
+                }
+            }
+            let mut dsink = DecSink {
+                caps: &mut out_caps,
+                count: &mut decoded,
+            };
+            for au in &sink.frames {
+                let f = g2g_core::frame::Frame::new(
+                    MemoryDomain::System(g2g_core::memory::SystemSlice::from_boxed(
+                        au.clone().into_boxed_slice(),
+                    )),
+                    g2g_core::FrameTiming::default(),
+                    0,
+                );
+                dec.process(PipelinePacket::DataFrame(f), &mut dsink)
+                    .await
+                    .expect("decode AU");
+            }
+            dec.process(PipelinePacket::Eos, &mut dsink)
+                .await
+                .expect("flush decoder");
+        }
+        assert!(decoded > 0, "the Main 10 stream decoded back");
+        assert_eq!(
+            out_caps,
+            std::vec![Caps::RawVideo {
+                format: RawVideoFormat::P010,
+                width: Dim::Fixed(W),
+                height: Dim::Fixed(H),
+                framerate: Rate::Fixed(30 << 16),
+            }],
+            "the encoded stream is 10-bit end to end"
         );
     }
 }

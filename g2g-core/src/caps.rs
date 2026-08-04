@@ -428,6 +428,7 @@ fn raw_format_gst_name(f: RawVideoFormat) -> &'static str {
         RawVideoFormat::I444 => "Y444",
         RawVideoFormat::I444p10 => "Y444_10LE",
         RawVideoFormat::I444p12 => "Y444_12LE",
+        RawVideoFormat::P010 => "P010_10LE",
     }
 }
 
@@ -970,15 +971,24 @@ pub enum RawVideoFormat {
     I444p10,
     /// Planar 4:4:4, 12-bit (LE).
     I444p12,
+    /// Semi-planar 4:2:0, 10-bit: NV12's layout (Y plane then interleaved UV) with
+    /// 16-bit little-endian samples carrying the value in the *top* 10 bits (the
+    /// GStreamer `P010_10LE` format, NVDEC's `P016` surface). The hardware 10-bit
+    /// decode / encode surface format.
+    P010,
 }
 
 impl RawVideoFormat {
-    /// Bits per sample of a fully-planar YUV format: 8, 10, or 12. The 10- and
-    /// 12-bit formats store each sample little-endian in a 2-byte word. The
-    /// non-planar / RGBA formats report 8.
+    /// Bits per sample of a YUV format: 8, 10, or 12. The 10- and 12-bit formats
+    /// store each sample little-endian in a 2-byte word (P010 in the word's top
+    /// bits, the planar family in the low bits). The RGBA / packed formats
+    /// report 8.
     pub const fn bit_depth(self) -> u8 {
         match self {
-            RawVideoFormat::I420p10 | RawVideoFormat::I422p10 | RawVideoFormat::I444p10 => 10,
+            RawVideoFormat::I420p10
+            | RawVideoFormat::I422p10
+            | RawVideoFormat::I444p10
+            | RawVideoFormat::P010 => 10,
             RawVideoFormat::I420p12 | RawVideoFormat::I422p12 | RawVideoFormat::I444p12 => 12,
             _ => 8,
         }
@@ -1634,6 +1644,10 @@ mod tests {
             assert_eq!(f.chroma_shift(), None);
         }
         assert!(I444p10.is_planar_yuv());
+        // Semi-planar 10-bit: 2-byte samples, outside the fully-planar family.
+        assert_eq!(P010.bit_depth(), 10);
+        assert_eq!(P010.bytes_per_sample(), 2);
+        assert!(!P010.is_planar_yuv());
     }
 
     #[test]
@@ -1641,7 +1655,7 @@ mod tests {
         use RawVideoFormat::*;
         let all = [
             Nv12, I420, Rgba8, Bgra8, Yuyv, I420p10, I420p12, I422, I422p10, I422p12, I444,
-            I444p10, I444p12,
+            I444p10, I444p12, P010,
         ];
         let mut names: Vec<&str> = all.iter().map(|f| raw_format_gst_name(*f)).collect();
         let n = names.len();

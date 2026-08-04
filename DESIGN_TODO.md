@@ -544,20 +544,9 @@ _(No open parser items.)_
 - `pull`-based metadata propagation across transforms (push is auto-applied).
 - A turnkey windowed runner for `WgpuSink` (a winit/SCTK example that opens a
   window and drives the overlay -> sink graph; validate on a real display).
-- The native gst-`nvcodec`-style pair is done: `NvEnc` (zero-copy CUDA NV12 ->
-  H.264, M269) and `NvDec` (H.264 -> CUDA NV12 via NVCUVID, M270). Remaining
-  extensions on both:
-  - `NvEnc`: 10-bit (P010 / Main10) and finite-GOP periodic IDRs with
-    `repeatSPSPPS`. (RGBA input + the wgpu->CUDA `WgpuToCuda` bridge are done,
-    M271; HEVC is done, M273; the output-bitstream pool + runtime bitrate retarget
-    are done, M277; system-memory NV12 input is done via the `CudaUpload`
-    converter + domain auto-plug, M353/M354. NVENC AV1 needs RTX 40-series.)
-- `NvDec` depth: mid-stream resolution change (decoder reconfigure), AV1 / other
-  codecs via the codec enum, 10-bit output, and a configurable display delay
-  (fixed at a low-latency 1 today). (HEVC is done, M273; registry + domain-aware
-  auto-plug are done, M272 / M276: `decodebin_preferring(.., Cuda)` prefers
-  `NvDec`. The remaining piece is deriving that preference automatically from a
-  downstream consumer's accepted input memory.)
+- `NvEnc` AV1 encode (needs RTX 40-series hardware).
+- Derive the `decodebin_preferring(.., Cuda)` preference automatically from a
+  downstream consumer's accepted input memory.
 - A blob header registry (decode known `BlobMeta` headers into typed structures).
 
 ## Clock-synchronised presentation
