@@ -2706,9 +2706,14 @@ dropped on replay rather than failing.
 `g2g-mcp` (the `tooling-json` feature) is a Model Context Protocol server so an
 agent can drive g2g development. It speaks newline-delimited JSON-RPC 2.0 over
 stdio with no MCP framework dependency (the envelope is hand-rolled with
-serde_json), and exposes four tools: `list_elements`, `inspect(element)`,
-`validate(pipeline)` (parse + negotiate, no run), and `launch(pipeline,
-duration_secs)` (run with a deadline, report `RunStats`). The tool bodies live in
+serde_json), and exposes five tools: `list_elements`, `inspect(element)`,
+`validate(pipeline)` (parse + negotiate, no run), `launch(pipeline,
+duration_secs)` (run with a deadline, report `RunStats`), and `run_graph`
+(a declarative JSON / YAML document by path or inline, advertised only in
+`declarative` builds, same run conventions). Both run tools stream live
+telemetry while running when the client supplies a `progressToken`: periodic
+`notifications/progress` carrying the dashboard's snapshot shape
+(`toolingjson::telemetry_json`, the single serializer both consumers share). The tool bodies live in
 `g2g-plugins::toolingjson`, shared with `g2g-inspect --json` so the registry-dump
 and run shapes have one definition; the async tools drive a current-thread tokio
 runtime via `block_on` while the stdio loop stays synchronous.

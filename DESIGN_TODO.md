@@ -729,7 +729,8 @@ Outstanding developer-tooling tasks, highest leverage first.
     registration rather than the one-shot `register`.
   - Validate the dashboard live against an RTSP source.
 - A CI job (or a feature added to an existing job) running the `observe`-gated
-  dashboard tests; they only run locally today.
+  dashboard tests and the `tooling-json` MCP tests (`m681_mcp`); both only run
+  locally today.
 - **gst-parity differ.** Same launch line through real GStreamer and g2g;
   diff the negotiated caps per edge, the element set after autoplug, and the
   output (checksum, PSNR for lossy). Calliope already does differential output
@@ -740,9 +741,6 @@ Outstanding developer-tooling tasks, highest leverage first.
   (which runs it in pull mode), to put a number on the per-chunk channel /
   wakeup / boxed-future cost. Decides whether a pull mode is ever worth its
   second per-demuxer code path.
-- **MCP server follow-ups.** `g2g-mcp` exposes list_elements / inspect /
-  validate / launch. Add a tool to run a declarative graph file, and stream
-  `launch` telemetry (via the `Observer`) rather than only final stats.
 - Longer tail: a live pipeline TUI (a ratatui consumer of the same telemetry
   tap); a codec golden-fixture / PSNR conformance harness.
 

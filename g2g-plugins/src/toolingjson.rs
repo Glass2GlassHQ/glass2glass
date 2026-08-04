@@ -1,19 +1,23 @@
 //! JSON tooling shared by `g2g-inspect --json` and the `g2g-mcp` server: the
-//! registry dump, a launch-line negotiation check, and a bounded pipeline run.
-//! Kept in one place so the two front-ends serialize the same shapes. serde_json
-//! only (no `g2g-core` serde), matching the dashboard's split.
+//! registry dump, a launch-line negotiation check, and a bounded pipeline run
+//! (optionally streaming live telemetry while it runs). Kept in one place so the
+//! two front-ends serialize the same shapes. serde_json only (no `g2g-core`
+//! serde), matching the dashboard's split.
 
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::fmt;
+use core::time::Duration;
 
 use serde_json::{json, Value};
 
 use g2g_core::caps::CapsSet;
 use g2g_core::runtime::{
-    negotiate_graph_explained, parse_launch, run_graph, ElementDoc, NegotiateError,
-    NegotiationFailure, Registry, RunStats,
+    negotiate_graph_explained, parse_launch, run_graph, run_graph_observed, ElementDoc, GraphNode,
+    NegotiateError, NegotiationFailure, NodeRole, Observer, Registry, RunStats, TelemetrySnapshot,
 };
+use g2g_core::{G2gError, Graph};
 
 use crate::clock::WallClock;
 
@@ -143,22 +147,222 @@ fn set_strings(set: &CapsSet) -> Vec<String> {
         .collect()
 }
 
+/// Live telemetry hookup for a bounded run: how often to sample the running
+/// graph's [`Observer`], and where each sample's JSON goes (the caller wraps it
+/// in whatever envelope its transport uses, e.g. an MCP progress notification).
+pub struct TelemetryTap<'a> {
+    interval: Duration,
+    on_snapshot: &'a dyn Fn(Value),
+}
+
+impl<'a> TelemetryTap<'a> {
+    pub fn new(interval: Duration, on_snapshot: &'a dyn Fn(Value)) -> Self {
+        Self {
+            interval,
+            on_snapshot,
+        }
+    }
+}
+
+impl fmt::Debug for TelemetryTap<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TelemetryTap")
+            .field("interval", &self.interval)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Run a launch line for up to `secs` seconds and report the resulting
 /// [`RunStats`]. A pipeline that finishes early returns full telemetry; one that
 /// hits the deadline reports `timed_out` (a forever source has no final stats).
-pub async fn launch_json(reg: &Registry, line: &str, secs: u64) -> Value {
+/// With a `tap`, live snapshots stream out while the run is still going.
+pub async fn launch_json(
+    reg: &Registry,
+    line: &str,
+    secs: u64,
+    tap: Option<TelemetryTap<'_>>,
+) -> Value {
     let graph = match parse_launch(reg, line) {
         Ok(g) => g,
         Err(e) => return json!({ "ok": false, "stage": "parse", "error": format!("{e}") }),
     };
+    run_json(graph, secs, tap).await
+}
+
+/// Build a declarative document (JSON, or YAML with the `declarative-yaml`
+/// build) into a graph and run it exactly as [`launch_json`] runs a launch line:
+/// same deadline, stats, and optional live telemetry.
+#[cfg(feature = "declarative")]
+pub async fn document_json(
+    reg: &Registry,
+    doc: &str,
+    yaml: bool,
+    secs: u64,
+    tap: Option<TelemetryTap<'_>>,
+) -> Value {
+    let built = if yaml {
+        #[cfg(feature = "declarative-yaml")]
+        {
+            crate::declarative::from_yaml(reg, doc)
+        }
+        #[cfg(not(feature = "declarative-yaml"))]
+        {
+            return json!({
+                "ok": false,
+                "stage": "build",
+                "error": "YAML documents need the `declarative-yaml` build feature",
+            });
+        }
+    } else {
+        crate::declarative::from_json(reg, doc)
+    };
+    match built {
+        Ok(graph) => run_json(graph, secs, tap).await,
+        Err(e) => json!({ "ok": false, "stage": "build", "error": format!("{e}") }),
+    }
+}
+
+/// Run a built graph under a deadline, optionally sampling live telemetry into
+/// `tap`. Shared by the launch-line and declarative-document entry points so both
+/// report the same shape.
+async fn run_json(graph: Graph<GraphNode>, secs: u64, tap: Option<TelemetryTap<'_>>) -> Value {
     let clock = WallClock::new();
-    let run = run_graph(graph, &clock, LINK_CAPACITY);
-    match tokio::time::timeout(core::time::Duration::from_secs(secs.max(1)), run).await {
-        Ok(Ok(stats)) => json!({ "ok": true, "stats": stats_json(&stats) }),
-        Ok(Err(e)) => json!({ "ok": false, "stage": "run", "error": format!("{e:?}") }),
-        Err(_) => {
+    let deadline = Duration::from_secs(secs.max(1));
+    let outcome = match tap {
+        None => tokio::time::timeout(deadline, run_graph(graph, &clock, LINK_CAPACITY))
+            .await
+            .ok(),
+        Some(tap) => {
+            let observer = Observer::new();
+            let run = run_graph_observed(graph, &clock, LINK_CAPACITY, &observer, None);
+            let mut run = core::pin::pin!(run);
+            let start = tokio::time::Instant::now();
+            loop {
+                let left = deadline.saturating_sub(start.elapsed());
+                if left.is_zero() {
+                    break None;
+                }
+                // drive the run in interval-sized slices; each expiry is a
+                // sampling point, so no second timer task is needed
+                match tokio::time::timeout(tap.interval.min(left), run.as_mut()).await {
+                    Ok(r) => break Some(r),
+                    Err(_) => (tap.on_snapshot)(telemetry_json(&observer.snapshot())),
+                }
+            }
+        }
+    };
+    run_result_json(outcome)
+}
+
+/// `None` is the deadline, `Some` the run's own result.
+fn run_result_json(outcome: Option<Result<RunStats, G2gError>>) -> Value {
+    match outcome {
+        Some(Ok(stats)) => json!({ "ok": true, "stats": stats_json(&stats) }),
+        Some(Err(e)) => json!({ "ok": false, "stage": "run", "error": format!("{e:?}") }),
+        None => {
             json!({ "ok": true, "timed_out": true, "note": "deadline reached; forever source has no final stats" })
         }
+    }
+}
+
+/// A live [`TelemetrySnapshot`] as JSON: the same per-node latency / per-edge
+/// caps and traffic-counter fields the dashboard streams over its WebSocket.
+pub fn telemetry_json(snap: &TelemetrySnapshot) -> Value {
+    let nodes: Vec<Value> = snap
+        .nodes
+        .iter()
+        .map(|n| {
+            let proc = n.latency.as_ref().map(|l| {
+                json!({
+                    "count": l.proc.count,
+                    "mean_ns": l.proc.mean_ns,
+                    "p50_ns": l.proc.p50_ns,
+                    "p95_ns": l.proc.p95_ns,
+                    "p99_ns": l.proc.p99_ns,
+                    "max_ns": l.proc.max_ns,
+                })
+            });
+            // Input-link queue-residency (the "wait" half of the latency
+            // waterfall). Null when the node's input edge is not instrumented.
+            let transit = n.latency.as_ref().filter(|l| l.transit.count > 0).map(|l| {
+                json!({
+                    "count": l.transit.count,
+                    "p50_ns": l.transit.p50_ns,
+                    "p99_ns": l.transit.p99_ns,
+                    "max_ns": l.transit.max_ns,
+                })
+            });
+            let (fill_mean, fill_max) = n
+                .latency
+                .as_ref()
+                .map(|l| (l.fill_mean_pct, l.fill_max_pct))
+                .unwrap_or((0, 0));
+            json!({
+                "id": n.id,
+                "name": n.name,
+                "role": role_str(n.role),
+                "proc": proc,
+                "transit": transit,
+                "fill_mean_pct": fill_mean,
+                "fill_max_pct": fill_max,
+            })
+        })
+        .collect();
+    let edges: Vec<Value> = snap
+        .edges
+        .iter()
+        .map(|e| {
+            json!({
+                "from": e.from,
+                "to": e.to,
+                "caps": e.caps,
+                "packets": e.counts.packets,
+                "bytes": e.counts.bytes,
+                "drops": e.counts.drops,
+                "blocked_ns": e.counts.blocked_ns,
+            })
+        })
+        .collect();
+    // One frame's path across the linear stages (M851), beside the aggregate
+    // per-stage distributions above.
+    let journey = snap.journey.as_ref().map(|j| {
+        let stages: Vec<Value> = j
+            .stages
+            .iter()
+            .map(|s| {
+                json!({
+                    "node": s.node,
+                    "name": s.name,
+                    "wait_ns": s.wait_ns,
+                    "work_ns": s.work_ns,
+                })
+            })
+            .collect();
+        json!({
+            "sequence": j.sequence,
+            "total_ns": j.total_ns,
+            "frame_period_ns": j.frame_period_ns,
+            "capacity": j.capacity,
+            "floor_ns": j.floor_ns,
+            "truncated": j.truncated,
+            "stages": stages,
+        })
+    });
+    json!({
+        "uptime_ns": snap.uptime_ns,
+        "nodes": nodes,
+        "edges": edges,
+        "journey": journey,
+    })
+}
+
+fn role_str(role: NodeRole) -> &'static str {
+    match role {
+        NodeRole::Source => "source",
+        NodeRole::Transform => "transform",
+        NodeRole::Sink => "sink",
+        NodeRole::Tee => "tee",
+        NodeRole::Muxer => "muxer",
     }
 }
 
@@ -274,8 +478,63 @@ mod tests {
     #[tokio::test]
     async fn launch_finite_returns_stats() {
         let reg = default_registry();
-        let out = launch_json(&reg, "videotestsrc num-buffers=4 ! fakesink", 10).await;
+        let out = launch_json(&reg, "videotestsrc num-buffers=4 ! fakesink", 10, None).await;
         assert_eq!(out["ok"], true);
         assert_eq!(out["stats"]["frames_consumed"], 4);
+    }
+
+    #[cfg(feature = "declarative-yaml")]
+    #[tokio::test]
+    async fn document_yaml_runs_and_returns_stats() {
+        let reg = default_registry();
+        let doc = "
+nodes:
+  - { id: src,  element: videotestsrc, props: { num-buffers: 5 } }
+  - { id: sink, element: fakesink }
+edges:
+  - { from: src, to: sink }
+";
+        let out = document_json(&reg, doc, true, 10, None).await;
+        assert_eq!(out["ok"], true, "{out}");
+        assert_eq!(out["stats"]["frames_consumed"], 5);
+    }
+
+    #[cfg(feature = "declarative")]
+    #[tokio::test]
+    async fn document_build_error_is_reported() {
+        let reg = default_registry();
+        let bad = document_json(&reg, r#"{"nodes":[],"edges":[]}"#, false, 5, None).await;
+        assert_eq!(bad["ok"], false);
+        assert_eq!(bad["stage"], "build");
+    }
+
+    #[tokio::test]
+    async fn telemetry_tap_streams_mid_run_snapshots() {
+        use std::sync::Mutex;
+
+        let reg = default_registry();
+        let seen: Mutex<Vec<Value>> = Mutex::new(Vec::new());
+        let sink = |v: Value| seen.lock().unwrap().push(v);
+        // Unbounded source: the run only ends at the deadline, so the tap has to
+        // produce snapshots while frames are still flowing.
+        let out = launch_json(
+            &reg,
+            "videotestsrc ! fakesink",
+            1,
+            Some(TelemetryTap::new(Duration::from_millis(20), &sink)),
+        )
+        .await;
+        assert_eq!(out["timed_out"], true);
+
+        let seen = seen.into_inner().unwrap();
+        assert!(!seen.is_empty(), "tap saw no mid-run snapshot");
+        let last = seen.last().unwrap();
+        assert_eq!(last["nodes"].as_array().unwrap().len(), 2);
+        let edge = &last["edges"][0];
+        assert!(
+            edge["packets"].as_u64().unwrap() > 0,
+            "live edge counters should advance mid-run, got {edge}"
+        );
+        assert!(edge["caps"].as_str().unwrap().contains("video"));
     }
 }

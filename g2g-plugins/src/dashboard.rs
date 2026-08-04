@@ -33,7 +33,6 @@ use std::time::Duration;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;
-use alloc::vec::Vec;
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
@@ -42,9 +41,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
 use tokio_tungstenite::tungstenite::Message;
 
-use g2g_core::runtime::{
-    LinkInterceptor, NodeRole, Observer, ProbeAction, ProbeSlot, TelemetrySnapshot,
-};
+use g2g_core::runtime::{LinkInterceptor, Observer, ProbeAction, ProbeSlot, TelemetrySnapshot};
 use g2g_core::{BusMessage, Caps, PipelinePacket};
 
 use crate::preview::packet_preview;
@@ -93,106 +90,12 @@ pub const INDEX_HTML: &str = include_str!("../../tools/dashboard/index.html");
 /// Telemetry push cadence.
 const TICK: Duration = Duration::from_millis(250);
 
-fn role_str(role: NodeRole) -> &'static str {
-    match role {
-        NodeRole::Source => "source",
-        NodeRole::Transform => "transform",
-        NodeRole::Sink => "sink",
-        NodeRole::Tee => "tee",
-        NodeRole::Muxer => "muxer",
-    }
-}
-
-/// Serialize a telemetry snapshot to the wire JSON string.
+/// Serialize a telemetry snapshot to the wire JSON string: the shared
+/// [`toolingjson::telemetry_json`] shape plus the dashboard's `type` tag.
 pub fn snapshot_json(snap: &TelemetrySnapshot) -> String {
-    let nodes: Vec<Value> = snap
-        .nodes
-        .iter()
-        .map(|n| {
-            let proc = n.latency.as_ref().map(|l| {
-                json!({
-                    "count": l.proc.count,
-                    "mean_ns": l.proc.mean_ns,
-                    "p50_ns": l.proc.p50_ns,
-                    "p95_ns": l.proc.p95_ns,
-                    "p99_ns": l.proc.p99_ns,
-                    "max_ns": l.proc.max_ns,
-                })
-            });
-            // Input-link queue-residency (the "wait" half of the latency
-            // waterfall). Null when the node's input edge is not instrumented.
-            let transit = n.latency.as_ref().filter(|l| l.transit.count > 0).map(|l| {
-                json!({
-                    "count": l.transit.count,
-                    "p50_ns": l.transit.p50_ns,
-                    "p99_ns": l.transit.p99_ns,
-                    "max_ns": l.transit.max_ns,
-                })
-            });
-            let (fill_mean, fill_max) = n
-                .latency
-                .as_ref()
-                .map(|l| (l.fill_mean_pct, l.fill_max_pct))
-                .unwrap_or((0, 0));
-            json!({
-                "id": n.id,
-                "name": n.name,
-                "role": role_str(n.role),
-                "proc": proc,
-                "transit": transit,
-                "fill_mean_pct": fill_mean,
-                "fill_max_pct": fill_max,
-            })
-        })
-        .collect();
-    let edges: Vec<Value> = snap
-        .edges
-        .iter()
-        .map(|e| {
-            json!({
-                "from": e.from,
-                "to": e.to,
-                "caps": e.caps,
-                "packets": e.counts.packets,
-                "bytes": e.counts.bytes,
-                "drops": e.counts.drops,
-                "blocked_ns": e.counts.blocked_ns,
-            })
-        })
-        .collect();
-    // One frame's path across the linear stages (M851), beside the aggregate
-    // per-stage distributions above.
-    let journey = snap.journey.as_ref().map(|j| {
-        let stages: Vec<Value> = j
-            .stages
-            .iter()
-            .map(|s| {
-                json!({
-                    "node": s.node,
-                    "name": s.name,
-                    "wait_ns": s.wait_ns,
-                    "work_ns": s.work_ns,
-                })
-            })
-            .collect();
-        json!({
-            "sequence": j.sequence,
-            "total_ns": j.total_ns,
-            "frame_period_ns": j.frame_period_ns,
-            "capacity": j.capacity,
-            "floor_ns": j.floor_ns,
-            "truncated": j.truncated,
-            "stages": stages,
-        })
-    });
-    json!({
-        "type": "telemetry",
-        "uptime_ns": snap.uptime_ns,
-        "nodes": nodes,
-        "edges": edges,
-        "journey": journey,
-    })
-    .to_string()
+    let mut v = crate::toolingjson::telemetry_json(snap);
+    v["type"] = Value::from("telemetry");
+    v.to_string()
 }
 
 /// Serialize a bus message to the wire JSON string, or `None` for messages the
@@ -416,7 +319,9 @@ fn handle_client_msg(text: &str, observer: &Observer, subs: &mut EdgeSubs) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec::Vec;
     use g2g_core::metrics::LatencySnapshot;
+    use g2g_core::runtime::NodeRole;
     use g2g_core::runtime::{
         EdgeCounts, EdgeInfo, ElementLatency, FrameJourney, JourneyStage, NodeTelemetry,
         TelemetrySnapshot,

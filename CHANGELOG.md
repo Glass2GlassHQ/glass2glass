@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M850: `g2g-mcp` gains a declarative `run_graph` tool, and both run tools stream live telemetry as MCP progress notifications.
+
 - M851: single-frame latency waterfall in the dashboard: per-stage wait/work joined on the frame's sequence id, with the measured total against the `2 * capacity * frame_period` floor.
 
 - M849: builder YAML export round-tripping through the declarative loader, and edge preview taps on the fan-in session arms.
