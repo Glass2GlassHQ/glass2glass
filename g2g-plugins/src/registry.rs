@@ -1141,9 +1141,17 @@ fn register_aliases(reg: &mut Registry) {
     reg.register_alias("osxaudiosink", &["coreaudiosink", "fakesink"]);
     reg.register_alias("osxaudiosrc", &["coreaudiosrc"]);
     // Common desktop video-sink names map onto whatever display sink we have.
-    for name in ["xvimagesink", "ximagesink", "glimagesink"] {
+    for name in ["xvimagesink", "ximagesink"] {
         reg.register_alias(name, &["waylandsink", "kmssink", "fakesink"]);
     }
+    // `glimagesink` is the real EGL / GL ES `GlSink` when the `gl-sink` feature
+    // is built; without it the name falls back like the X names above.
+    #[cfg(not(all(target_os = "linux", feature = "gl-sink")))]
+    reg.register_alias("glimagesink", &["waylandsink", "kmssink", "fakesink"]);
+    reg.register_alias(
+        "glsink",
+        &["glimagesink", "waylandsink", "kmssink", "fakesink"],
+    );
     // Decoders: GStreamer's libav / VA-API names -> the g2g decoders. The VA-API
     // names prefer the ffmpeg VAAPI hwaccel (`ffmpegvaapidec`, works on Mesa
     // radeonsi) and fall back to the cros-codecs `vaapidec` when only that
@@ -1578,6 +1586,13 @@ fn register_feature_gated(reg: &mut Registry) {
     reg.register_launch(LaunchFactory::new("waylandsink", Vec::new(), || {
         Box::new(WaylandSink::new())
     }));
+    // Vendor-neutral EGL / GL ES display sink under its gst name; it declares
+    // NV12 + RGBA pad templates, so decodebin can auto-plug onto it.
+    #[cfg(all(target_os = "linux", feature = "gl-sink"))]
+    reg.register_launch(LaunchFactory::of::<crate::glsink::GlSink>(
+        "glimagesink",
+        || Box::new(crate::glsink::GlSink::new()),
+    ));
     // WebRTC WHIP egress; the `location` property targets the endpoint. The URL
     // defaults empty (set it via `webrtcsink location=...`); publishing starts
     // on the first frame.

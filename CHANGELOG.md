@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M891: `glimagesink` is a real vendor-neutral EGL / GL ES display sink (`GlSink`, NV12 + RGBA, no CUDA), with the GL conversion verified headlessly against a CPU reference.
+
 - M890: `pipewirevideosrc` captures video from a PipeWire node, and the audio PipeWire elements are launch-registered.
 
 - M889: the Vulkan HDR swapchain present is a paced display-sink element (`VulkanHdrPresentSink`), holding and dropping frames by PTS like the other display sinks.

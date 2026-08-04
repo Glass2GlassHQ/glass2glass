@@ -390,6 +390,12 @@ kms-sink = ["std", "dep:drm", "dep:drm-fourcc"]
 # This is the desktop-dev convenience sink; KmsSink is the production
 # low-latency path.
 wayland-sink = ["std", "dep:smithay-client-toolkit"]
+# Vendor-neutral OpenGL ES display sink (`GlSink`, M891): system-memory NV12 or
+# RGBA presented through EGL on a Wayland `xdg_toplevel`, with the NV12->RGB
+# convert on the GPU. No CUDA anywhere in its path, so it runs on any Mesa /
+# proprietary EGL driver. Same GL/EGL deps as cuda-gl minus the CUDA stack:
+# khronos-egl, glow, wayland-egl, SCTK. Linux-only, implies std.
+gl-sink = ["std", "dep:khronos-egl", "dep:glow", "dep:wayland-egl", "dep:smithay-client-toolkit"]
 # Browser / WebAssembly target (DESIGN.md §6.3). Wasm-gated elements: WasmClock
 # (performance.now + setTimeout sleep), WebSocketSrc ingest, and a spawn_local
 # browser entry. Pulls wasm-bindgen/js-sys/web-sys/wasm-bindgen-futures

@@ -80,7 +80,7 @@ use g2g_core::{
 
 use crate::clock::wait_to_present;
 use crate::cuda::nv12_byte_size;
-use crate::glnv12::GlState;
+use crate::glnv12::{GlMode, GlState};
 
 /// `EGL_PLATFORM_GBM_KHR` (khronos-egl 6 has no named constant for it).
 const EGL_PLATFORM_GBM_KHR: egl::Enum = 0x31D7;
@@ -654,7 +654,7 @@ impl WorkerState {
             })
         };
         // SAFETY: `gl` wraps the GL ES 3 context made current above.
-        let gl_state = unsafe { GlState::build(gl, width, height) }?;
+        let gl_state = unsafe { GlState::build(gl, width, height, GlMode::Nv12) }?;
 
         Ok(WorkerState {
             gl: gl_state,

@@ -63,33 +63,7 @@ use std::time::Duration;
 use alloc::boxed::Box;
 use alloc::string::String;
 
-use khronos_egl as egl;
-use smithay_client_toolkit::{
-    compositor::{CompositorHandler, CompositorState},
-    delegate_compositor, delegate_output, delegate_registry, delegate_xdg_shell,
-    delegate_xdg_window,
-    output::{OutputHandler, OutputState},
-    reexports::calloop::{
-        channel::{channel, Channel, Event as ChanEvent, Sender as CalloopSender},
-        EventLoop,
-    },
-    reexports::calloop_wayland_source::WaylandSource,
-    reexports::client::{
-        globals::registry_queue_init,
-        protocol::{wl_output, wl_surface},
-        Connection, Proxy, QueueHandle,
-    },
-    registry::{ProvidesRegistryState, RegistryState},
-    registry_handlers,
-    shell::{
-        xdg::{
-            window::{Window, WindowConfigure, WindowDecorations, WindowHandler},
-            XdgShell,
-        },
-        WaylandSurface,
-    },
-};
-use wayland_egl::WlEglSurface;
+use smithay_client_toolkit::reexports::calloop::channel::{channel, Sender as CalloopSender};
 
 use crate::worker_ready::Handshake;
 use g2g_core::element::QosMessage;
@@ -104,7 +78,8 @@ use g2g_core::{
 
 use crate::clock::wait_to_present;
 use crate::cuda::nv12_byte_size;
-use crate::glnv12::GlState;
+use crate::glnv12::{GlMode, GlState};
+use crate::glwindow::{run_gl_window, FramePresenter, WindowParams, WorkerChannels, WorkerCmd};
 
 /// Device-buffer pool headroom the sink asks the producer to keep resident:
 /// the frame in flight on the GL thread plus the one the runner link holds, so
@@ -115,24 +90,16 @@ const CUDA_POOL_HEADROOM: usize = 3;
 /// surface alignment).
 const CUDA_ALIGN: usize = 256;
 
-/// Worker-thread command. `Frame` carries the decoded CUDA buffer (still
-/// device-resident) plus the source-side `arrival_ns` for latency and a
-/// one-shot `ack` the worker signals once the frame is presented.
-enum WorkerCmd {
-    Frame {
-        buf: OwnedCudaBuffer,
-        arrival_ns: u64,
-        ack: tokio::sync::oneshot::Sender<()>,
-    },
-    Shutdown,
-}
+/// Worker thread name, also the prefix on the worker's error lines.
+const WORKER_NAME: &str = "g2g-cudaglsink";
 
 /// Sink-side handle set. Only `Send + Sync` state lives here so the
-/// multi-thread runner can move the sink between tasks.
+/// multi-thread runner can move the sink between tasks. The worker's frame
+/// payload is the decoded CUDA buffer, still device-resident.
 pub struct CudaGlSink {
     title: String,
     app_id: String,
-    cmd_tx: Option<CalloopSender<WorkerCmd>>,
+    cmd_tx: Option<CalloopSender<WorkerCmd<OwnedCudaBuffer>>>,
     worker: Option<JoinHandle<()>>,
     width: u32,
     height: u32,
@@ -361,29 +328,31 @@ impl AsyncElement for CudaGlSink {
             self.shutdown();
         }
 
-        let (tx, rx) = channel::<WorkerCmd>();
+        let (tx, rx) = channel::<WorkerCmd<OwnedCudaBuffer>>();
         let presented = Arc::clone(&self.frames_presented);
         let latency = Arc::clone(&self.latency);
-        let title = self.title.clone();
-        let app_id = self.app_id.clone();
+        let params = WindowParams {
+            width: w,
+            height: h,
+            title: self.title.clone(),
+            app_id: self.app_id.clone(),
+            log_tag: WORKER_NAME,
+        };
 
         let ready = Arc::new(Handshake::new());
         let ready_for_worker = Arc::clone(&ready);
 
         let join = thread::Builder::new()
-            .name(String::from("g2g-cudaglsink"))
+            .name(String::from(WORKER_NAME))
             .spawn(move || {
-                if let Err(e) = worker_main(
-                    w,
-                    h,
-                    title,
-                    app_id,
+                let channels = WorkerChannels {
                     rx,
                     presented,
                     latency,
-                    ready_for_worker,
-                ) {
-                    std::eprintln!("g2g-cudaglsink worker error: {e:?}");
+                    ready: ready_for_worker,
+                };
+                if let Err(e) = run_gl_window(CudaPresenter, params, channels) {
+                    std::eprintln!("{WORKER_NAME} worker error: {e:?}");
                 }
             })
             .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
@@ -425,7 +394,7 @@ impl AsyncElement for CudaGlSink {
                     let tx = self.cmd_tx.as_ref().ok_or(G2gError::NotConfigured)?;
                     let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
                     tx.send(WorkerCmd::Frame {
-                        buf,
+                        frame: buf,
                         arrival_ns: timing.arrival_ns,
                         ack: ack_tx,
                     })
@@ -460,314 +429,25 @@ impl AsyncElement for CudaGlSink {
 }
 
 // =================================================================
-// Worker thread: Wayland window + EGL/GL + CUDA-GL upload
+// Worker thread: the CUDA half of the shared Wayland + EGL worker
 // =================================================================
 
-struct WorkerState {
-    registry_state: RegistryState,
-    output_state: OutputState,
-    window: Window,
-    qh: QueueHandle<WorkerState>,
-    // EGL handles: kept alive for the worker's lifetime; the WlEglSurface must
-    // outlive the EGL surface, which must outlive the wl_surface.
-    egl: egl::Instance<egl::Static>,
-    egl_display: egl::Display,
-    egl_surface: egl::Surface,
-    // Kept current for the worker's life; held only as a keep-alive after setup.
-    _egl_context: egl::Context,
-    _wl_egl: WlEglSurface,
-    gl: GlState,
-    configured: bool,
-    exit: bool,
-    ready: Option<Arc<Handshake>>,
-    presented: Arc<AtomicU64>,
-    latency: Arc<LatencyHistogram>,
-    /// Frame that arrived before the surface was mappable.
-    pending: Option<(OwnedCudaBuffer, u64, tokio::sync::oneshot::Sender<()>)>,
-}
+/// The decoded planes are already in device memory, so this sink's "upload" is
+/// the CUDA-GL interop copy into the NV12 textures; the window, the EGL context
+/// and the present are the shared worker's ([`crate::glwindow`]).
+struct CudaPresenter;
 
-#[allow(clippy::too_many_arguments)]
-fn worker_main(
-    width: u32,
-    height: u32,
-    title: String,
-    app_id: String,
-    rx: Channel<WorkerCmd>,
-    presented: Arc<AtomicU64>,
-    latency: Arc<LatencyHistogram>,
-    ready: Arc<Handshake>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let conn = Connection::connect_to_env()?;
-    let (globals, event_queue) = registry_queue_init(&conn)?;
-    let qh = event_queue.handle();
+impl FramePresenter for CudaPresenter {
+    type Frame = OwnedCudaBuffer;
 
-    let mut event_loop: EventLoop<WorkerState> = EventLoop::try_new()?;
-    let loop_handle = event_loop.handle();
-    WaylandSource::new(conn.clone(), event_queue).insert(loop_handle.clone())?;
-
-    let compositor = CompositorState::bind(&globals, &qh)?;
-    let xdg_shell = XdgShell::bind(&globals, &qh)?;
-
-    let surface = compositor.create_surface(&qh);
-    let window = xdg_shell.create_window(surface, WindowDecorations::RequestServer, &qh);
-    window.set_title(&title);
-    window.set_app_id(&app_id);
-    window.set_min_size(Some((width, height)));
-    window.commit();
-
-    // --- EGL on the Wayland surface ---
-    let egl = egl::Instance::new(egl::Static);
-
-    // The wl_display raw pointer on wayland-client 0.31. The display is a
-    // special global; `backend().display_ptr()` returns the libwayland
-    // `*mut wl_display` EGL wants as its native display handle.
-    let display_ptr = conn.backend().display_ptr() as *mut core::ffi::c_void;
-    // SAFETY: `display_ptr` is the live connection's libwayland `*mut wl_display`,
-    // valid for the worker thread's lifetime (the `Connection` outlives the EGL
-    // display via `conn`); `get_display` only records the handle.
-    let egl_display = unsafe { egl.get_display(display_ptr) }.ok_or("eglGetDisplay failed")?;
-    egl.initialize(egl_display)?;
-    egl.bind_api(egl::OPENGL_ES_API)?;
-
-    let config_attribs = [
-        egl::SURFACE_TYPE,
-        egl::WINDOW_BIT,
-        egl::RENDERABLE_TYPE,
-        egl::OPENGL_ES3_BIT, // GLES 3 for R8/RG8 single/two-channel textures
-        egl::RED_SIZE,
-        8,
-        egl::GREEN_SIZE,
-        8,
-        egl::BLUE_SIZE,
-        8,
-        egl::NONE,
-    ];
-    let config = egl
-        .choose_first_config(egl_display, &config_attribs)?
-        .ok_or("no matching EGL config")?;
-
-    let context_attribs = [egl::CONTEXT_MAJOR_VERSION, 3, egl::NONE];
-    let egl_context = egl.create_context(egl_display, config, None, &context_attribs)?;
-
-    // wl_egl_window from the SCTK surface; EGL window surface on top of it.
-    let wl_egl = WlEglSurface::new(window.wl_surface().id(), width as i32, height as i32)?;
-    // SAFETY: `wl_egl.ptr()` is a live `wl_egl_window` for this display/config;
-    // `wl_egl` is moved into `WorkerState._wl_egl`, so it outlives the surface.
-    let egl_surface = unsafe {
-        egl.create_window_surface(
-            egl_display,
-            config,
-            wl_egl.ptr() as *mut core::ffi::c_void,
-            None,
-        )
-    }?;
-    egl.make_current(
-        egl_display,
-        Some(egl_surface),
-        Some(egl_surface),
-        Some(egl_context),
-    )?;
-
-    // glow loads GL ES entry points through eglGetProcAddress.
-    // SAFETY: `egl.get_proc_address` resolves GL ES symbols against the context
-    // just made current; glow only invokes the returned pointers as the GL
-    // entry points whose names it passed.
-    let gl = unsafe {
-        glow::Context::from_loader_function(|s| match egl.get_proc_address(s) {
-            Some(p) => p as *const core::ffi::c_void,
-            None => core::ptr::null(),
-        })
-    };
-
-    // SAFETY: `gl` wraps the GL ES 3 context made current on this thread above.
-    let gl_state = unsafe { GlState::build(gl, width, height) }?;
-
-    let mut state = WorkerState {
-        registry_state: RegistryState::new(&globals),
-        output_state: OutputState::new(&globals, &qh),
-        window,
-        qh: qh.clone(),
-        egl,
-        egl_display,
-        egl_surface,
-        _egl_context: egl_context,
-        _wl_egl: wl_egl,
-        gl: gl_state,
-        configured: false,
-        exit: false,
-        ready: Some(ready),
-        presented,
-        latency,
-        pending: None,
-    };
-
-    loop_handle.insert_source(rx, |event, _, state: &mut WorkerState| match event {
-        ChanEvent::Msg(WorkerCmd::Frame {
-            buf,
-            arrival_ns,
-            ack,
-        }) => {
-            if state.configured {
-                state.draw(buf, arrival_ns, ack);
-            } else {
-                state.pending = Some((buf, arrival_ns, ack));
-            }
-        }
-        ChanEvent::Msg(WorkerCmd::Shutdown) | ChanEvent::Closed => {
-            state.exit = true;
-        }
-    })?;
-
-    while !state.exit {
-        event_loop.dispatch(Some(Duration::from_millis(100)), &mut state)?;
+    fn mode(&self) -> GlMode {
+        GlMode::Nv12
     }
-    Ok(())
-}
 
-impl Drop for WorkerState {
-    fn drop(&mut self) {
-        // Tear down the EGL display / context / surface the worker created. A
-        // mid-stream resolution change respawns the worker (via `shutdown`), so
-        // without this each resize leaks an EGL context + surface. Best-effort;
-        // the worker is exiting. Releasing the current context first, then
-        // destroying the surface here (Drop runs before the `_wl_egl` field drops
-        // its backing `wl_egl_window`) keeps the required outlives ordering.
-        let _ = self.egl.make_current(self.egl_display, None, None, None);
-        let _ = self.egl.destroy_surface(self.egl_display, self.egl_surface);
-        let _ = self
-            .egl
-            .destroy_context(self.egl_display, self._egl_context);
-        let _ = self.egl.terminate(self.egl_display);
+    fn present(&mut self, gl: &mut GlState, frame: &OwnedCudaBuffer) -> Result<(), G2gError> {
+        gl.upload_and_draw(frame)
     }
 }
-
-impl WorkerState {
-    /// Upload the decoded NV12 planes into the GL textures via CUDA, draw the
-    /// fullscreen quad through the NV12->RGB shader, and present. Signals
-    /// `ack` after `eglSwapBuffers` returns (compositor-paced backpressure).
-    fn draw(
-        &mut self,
-        buf: OwnedCudaBuffer,
-        arrival_ns: u64,
-        ack: tokio::sync::oneshot::Sender<()>,
-    ) {
-        if let Err(e) = self.draw_inner(&buf) {
-            std::eprintln!("g2g-cudaglsink draw error: {e:?}");
-            // Release the producer so a transient GPU error doesn't deadlock
-            // the pipeline; the frame just didn't paint.
-            let _ = ack.send(());
-            return;
-        }
-        self.presented.fetch_add(1, Ordering::Relaxed);
-        if arrival_ns != 0 {
-            let now = monotonic_ns();
-            if now >= arrival_ns {
-                self.latency.record(now - arrival_ns);
-            }
-        }
-        let _ = ack.send(());
-    }
-
-    fn draw_inner(&mut self, buf: &OwnedCudaBuffer) -> Result<(), G2gError> {
-        // CUDA upload + NV12->RGB draw (shared with the KMS sink).
-        self.gl.upload_and_draw(buf)?;
-
-        // Subscribe to the next frame callback (compositor pacing) and present.
-        let surface = self.window.wl_surface().clone();
-        surface.frame(&self.qh, surface.clone());
-        self.egl
-            .swap_buffers(self.egl_display, self.egl_surface)
-            .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
-        Ok(())
-    }
-}
-
-impl CompositorHandler for WorkerState {
-    fn scale_factor_changed(
-        &mut self,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-        _: &wl_surface::WlSurface,
-        _: i32,
-    ) {
-    }
-    fn transform_changed(
-        &mut self,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-        _: &wl_surface::WlSurface,
-        _: wl_output::Transform,
-    ) {
-    }
-    fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: u32) {
-        // Compositor released the buffer; pacing is handled by the per-frame
-        // ack in `draw`, so nothing extra is needed here in v1.
-    }
-    fn surface_enter(
-        &mut self,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-        _: &wl_surface::WlSurface,
-        _: &wl_output::WlOutput,
-    ) {
-    }
-    fn surface_leave(
-        &mut self,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-        _: &wl_surface::WlSurface,
-        _: &wl_output::WlOutput,
-    ) {
-    }
-}
-
-impl WindowHandler for WorkerState {
-    fn request_close(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &Window) {
-        self.exit = true;
-    }
-
-    fn configure(
-        &mut self,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-        _: &Window,
-        _configure: WindowConfigure,
-        _serial: u32,
-    ) {
-        let was_first = !self.configured;
-        self.configured = true;
-        if was_first {
-            if let Some(ready) = self.ready.take() {
-                ready.notify();
-            }
-            if let Some((buf, arrival_ns, ack)) = self.pending.take() {
-                self.draw(buf, arrival_ns, ack);
-            }
-        }
-    }
-}
-
-impl OutputHandler for WorkerState {
-    fn output_state(&mut self) -> &mut OutputState {
-        &mut self.output_state
-    }
-    fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
-    fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
-    fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
-}
-
-impl ProvidesRegistryState for WorkerState {
-    fn registry(&mut self) -> &mut RegistryState {
-        &mut self.registry_state
-    }
-    registry_handlers![OutputState,];
-}
-
-delegate_compositor!(WorkerState);
-delegate_output!(WorkerState);
-delegate_xdg_shell!(WorkerState);
-delegate_xdg_window!(WorkerState);
-delegate_registry!(WorkerState);
 
 #[cfg(test)]
 mod tests {

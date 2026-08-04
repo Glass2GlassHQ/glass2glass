@@ -762,6 +762,7 @@ pub mod cenc;
     all(target_os = "windows", feature = "d3d11-sink"),
     all(target_os = "linux", feature = "wayland-sink"),
     all(target_os = "linux", feature = "cuda-gl"),
+    all(target_os = "linux", feature = "gl-sink"),
 ))]
 mod worker_ready;
 
@@ -998,10 +999,23 @@ pub mod nvdec;
 #[cfg(all(target_os = "linux", feature = "jpegxs"))]
 pub mod svtjpegxs;
 
-// Shared NV12 GL ES render state for the CUDA-GL sinks (program + textures +
-// per-frame CUDA upload + draw); the platform present stays in each sink.
-#[cfg(all(target_os = "linux", any(feature = "cuda-gl", feature = "cuda-kms")))]
+// Shared GL ES render state for the EGL display sinks (program + textures +
+// per-frame upload + draw); the platform present stays in each sink.
+#[cfg(all(
+    target_os = "linux",
+    any(feature = "cuda-gl", feature = "cuda-kms", feature = "gl-sink")
+))]
 pub(crate) mod glnv12;
+
+// Shared Wayland window + EGL context + present loop for the GL sinks that draw
+// on a compositor surface; each sink supplies only its per-frame upload.
+#[cfg(all(target_os = "linux", any(feature = "cuda-gl", feature = "gl-sink")))]
+pub(crate) mod glwindow;
+
+// Vendor-neutral GL ES display sink: system-memory NV12 / RGBA presented through
+// EGL on Wayland, NV12->RGB converted on the GPU. Linux-only, no CUDA.
+#[cfg(all(target_os = "linux", feature = "gl-sink"))]
+pub mod glsink;
 
 // CUDA-GL zero-copy-ish display sink: keeps decoded NV12 on the GPU and
 // presents it via CUDA-GL interop on a Wayland EGL surface. Linux + NVIDIA.

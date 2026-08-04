@@ -396,7 +396,6 @@ Phased plan:
 - Linux audio sinks (`alsasink` / `pulsesink` / `pipewiresink`): DMABUF /
   zero-copy. `wasapisink` U8/S24/S32 acceptance is driver-decided at configure;
   validate on a Windows host.
-- Generic `GlSink` over EGL (vendor-neutral NV12 / RGBA present, no CUDA).
 
 ## Containers
 
