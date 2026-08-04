@@ -149,8 +149,9 @@ impl ElementProbe {
     }
 
     /// Push a fully-stamped visit, so a test can build a deterministic journey
-    /// instead of racing a real clock.
-    #[cfg(test)]
+    /// instead of racing a real clock. Its only callers are `observe`'s tests,
+    /// and that module is std-gated.
+    #[cfg(all(test, feature = "std"))]
     pub(crate) fn push_visit(&self, visit: StageVisit) {
         if let Some(ring) = self.journeys.as_ref() {
             let mut ring = ring.lock();
