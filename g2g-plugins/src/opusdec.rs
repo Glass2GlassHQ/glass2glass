@@ -34,8 +34,17 @@
 //! missing duration. Runs longer than [`MAX_PLC_SAMPLES`] are a seek or a
 //! stream restart rather than loss, and re-anchor the timeline with no fill.
 //!
-//! Scope: 48 kHz mono/stereo, S16LE (default) or F32LE output. In-band FEC
-//! (decoding the redundant copy carried by the *next* packet) is a follow-up.
+//! In-band FEC (`use-inband-fec`): a stream encoded with FEC carries a
+//! low-bitrate redundant copy (LBRR) of each frame in the *next* packet, so a
+//! gap whose next packet did arrive can be reconstructed instead of concealed
+//! blind. The gap is filled from its end backwards: the last frame duration
+//! comes from the arriving packet decoded with `fec=1`, anything earlier (a
+//! multi-packet loss) stays PLC. A packet carrying no LBRR (CELT-only, or an
+//! encoder with FEC off) decodes as PLC inside libopus, so the fill is never
+//! worse than concealment. Either knob on fills the gap, with the same PTS span
+//! and sample accounting.
+//!
+//! Scope: 48 kHz mono/stereo, S16LE (default) or F32LE output.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -55,7 +64,7 @@ use audiopus::coder::Decoder;
 use audiopus::packet::Packet;
 use audiopus::{Channels, MutSignals, SampleRate};
 
-use crate::opusparse::{packet_samples, parse_opus_head, OPUS_RATE_HZ};
+use crate::opusparse::{packet_frame_samples, packet_samples, parse_opus_head, OPUS_RATE_HZ};
 
 /// Largest Opus frame is 120 ms; at 48 kHz that is 5760 samples per channel. The
 /// decode output buffer is sized for it so any single packet fits.
@@ -98,6 +107,9 @@ pub struct OpusDec {
     decoded_samples: u64,
     /// Packet-loss concealment, off by default (GStreamer opusdec's default).
     plc: bool,
+    /// Use the in-band FEC (LBRR) copy in the packet after a gap to rebuild the
+    /// last lost frame, off by default (GStreamer opusdec's default).
+    fec: bool,
     /// PTS the next packet is due at: the last packet's PTS plus its coded
     /// duration. A packet arriving later than this left a gap. `None` until a
     /// packet has been seen, and reset by a flush or a fresh `OpusHead`.
@@ -120,6 +132,7 @@ impl core::fmt::Debug for OpusDec {
             .field("sequence", &self.sequence)
             .field("configured", &self.configured)
             .field("plc", &self.plc)
+            .field("fec", &self.fec)
             .finish()
     }
 }
@@ -142,6 +155,7 @@ impl OpusDec {
             pre_skip: 0,
             decoded_samples: 0,
             plc: false,
+            fec: false,
             next_pts_ns: None,
             prev_samples: 0,
             new_segment: false,
@@ -158,6 +172,18 @@ impl OpusDec {
 
     pub fn plc(&self) -> bool {
         self.plc
+    }
+
+    /// Use the redundant copy carried by the packet after a gap to rebuild the
+    /// last lost frame, instead of concealing it blind. Off by default; on, it
+    /// fills a gap even with `plc` off.
+    pub fn with_inband_fec(mut self, fec: bool) -> Self {
+        self.fec = fec;
+        self
+    }
+
+    pub fn inband_fec(&self) -> bool {
+        self.fec
     }
 
     /// (Re)create the libopus decoder for a concrete channel count. Called from
@@ -199,11 +225,14 @@ impl OpusDec {
     /// Decode one Opus packet, returning interleaved i16 samples and the
     /// per-channel sample count. `opus = None` is a lost packet: libopus
     /// conceals it, and then `capacity` is not a bound but the exact duration to
-    /// synthesize, so it must be a whole number of 2.5 ms steps.
+    /// synthesize, so it must be a whole number of 2.5 ms steps. `fec` decodes
+    /// the redundant copy of the frame *before* `opus` under that same
+    /// exact-duration rule, rather than the packet's own audio.
     fn decode(
         &mut self,
         opus: Option<&[u8]>,
         capacity: usize,
+        fec: bool,
     ) -> Result<(Vec<i16>, usize), G2gError> {
         let channels = self.channels as usize;
         let dec = self.dec.as_mut().ok_or(G2gError::NotConfigured)?;
@@ -213,7 +242,7 @@ impl OpusDec {
         let mut pcm = alloc::vec![0i16; capacity * channels];
         let per_channel = {
             let signals = MutSignals::try_from(&mut pcm[..]).map_err(|_| G2gError::CapsMismatch)?;
-            dec.decode(packet, signals, false)
+            dec.decode(packet, signals, fec)
                 .map_err(|_| G2gError::CapsMismatch)?
         };
         pcm.truncate(per_channel * channels);
@@ -226,6 +255,7 @@ impl OpusDec {
         &mut self,
         opus: Option<&[u8]>,
         capacity: usize,
+        fec: bool,
     ) -> Result<(Vec<f32>, usize), G2gError> {
         let channels = self.channels as usize;
         let dec = self.dec.as_mut().ok_or(G2gError::NotConfigured)?;
@@ -235,7 +265,7 @@ impl OpusDec {
         let mut pcm = alloc::vec![0f32; capacity * channels];
         let per_channel = {
             let signals = MutSignals::try_from(&mut pcm[..]).map_err(|_| G2gError::CapsMismatch)?;
-            dec.decode_float(packet, signals, false)
+            dec.decode_float(packet, signals, fec)
                 .map_err(|_| G2gError::CapsMismatch)?
         };
         pcm.truncate(per_channel * channels);
@@ -270,9 +300,10 @@ impl OpusDec {
         opus: Option<&[u8]>,
         capacity: usize,
         keep: Option<u64>,
+        fec: bool,
     ) -> Result<Vec<u8>, G2gError> {
         if self.out_format == AudioFormat::PcmF32Le {
-            let (pcm, per_channel) = self.decode_f32(opus, capacity)?;
+            let (pcm, per_channel) = self.decode_f32(opus, capacity, fec)?;
             let (start_i, end_i) = self.valid_window(per_channel, keep);
             let mut bytes = Vec::with_capacity((end_i - start_i) * 4);
             for &s in &pcm[start_i..end_i] {
@@ -280,7 +311,7 @@ impl OpusDec {
             }
             return Ok(bytes);
         }
-        let (pcm, per_channel) = self.decode(opus, capacity)?;
+        let (pcm, per_channel) = self.decode(opus, capacity, fec)?;
         let (start_i, end_i) = self.valid_window(per_channel, keep);
         let mut bytes = Vec::with_capacity((end_i - start_i) * 2);
         for &s in &pcm[start_i..end_i] {
@@ -299,19 +330,21 @@ impl OpusDec {
             }
     }
 
-    /// Concealment PCM for the hole in front of a packet arriving at `pts_ns`,
-    /// and the PTS it starts at. `None` when there is nothing to conceal: no
-    /// timeline yet, `plc` off, the packet on time, or a jump past
-    /// [`MAX_PLC_SAMPLES`] (a seek, which re-anchors instead).
+    /// Fill PCM for the hole in front of the packet `next` arriving at `pts_ns`,
+    /// and the PTS it starts at. `None` when there is nothing to fill: no
+    /// timeline yet, both `plc` and `fec` off, the packet on time, or a jump
+    /// past [`MAX_PLC_SAMPLES`] (a seek, which re-anchors instead).
     ///
     /// The gap is rounded to the nearest whole 2.5 ms, which is what libopus
-    /// conceals in, then synthesized in steps of the last packet's own duration:
-    /// one `opus_decode` call cannot exceed the 120 ms decode buffer.
-    fn conceal_gap(&mut self, pts_ns: u64) -> Result<Option<(u64, Vec<u8>)>, G2gError> {
+    /// conceals in. With `fec`, its final frame duration is decoded from `next`'s
+    /// redundant copy of it; the rest is synthesized in steps of the last
+    /// packet's own duration, since one `opus_decode` call cannot exceed the
+    /// 120 ms decode buffer.
+    fn fill_gap(&mut self, pts_ns: u64, next: &[u8]) -> Result<Option<(u64, Vec<u8>)>, G2gError> {
         let Some(expected) = self.next_pts_ns else {
             return Ok(None);
         };
-        if !self.plc {
+        if !self.plc && !self.fec {
             return Ok(None);
         }
         let missing = ns_to_samples(pts_ns.saturating_sub(expected));
@@ -326,13 +359,30 @@ impl OpusDec {
             n => n.min(MAX_FRAME_SAMPLES as u64),
         };
         let chunk = (chunk / PLC_STEP_SAMPLES).max(1) * PLC_STEP_SAMPLES;
+        // `next` carries the redundant copy of the frame immediately before it,
+        // so FEC reaches back exactly one of its frames: everything earlier in a
+        // multi-packet gap is still blind concealment.
+        let recovered = if self.fec {
+            u64::from(packet_frame_samples(next)).min(gap)
+        } else {
+            0
+        };
+        let concealed = gap - recovered;
 
         let mut pcm = Vec::with_capacity(gap as usize * self.bytes_per_sample());
         let mut done = 0;
-        while done < gap {
-            let want = chunk.min(gap - done);
-            pcm.extend_from_slice(&self.decode_trimmed(None, want as usize, None)?);
+        while done < concealed {
+            let want = chunk.min(concealed - done);
+            pcm.extend_from_slice(&self.decode_trimmed(None, want as usize, None, false)?);
             done += want;
+        }
+        if recovered > 0 {
+            pcm.extend_from_slice(&self.decode_trimmed(
+                Some(next),
+                recovered as usize,
+                None,
+                true,
+            )?);
         }
         Ok(Some((expected, pcm)))
     }
@@ -472,12 +522,20 @@ impl AsyncElement for OpusDec {
     }
 
     fn properties(&self) -> &'static [PropertySpec] {
-        const PROPS: &[PropertySpec] = &[PropertySpec::new(
-            "plc",
-            PropKind::Bool,
-            "conceal lost packets with audio synthesized from the decoder state",
-        )
-        .with_default("false")];
+        const PROPS: &[PropertySpec] = &[
+            PropertySpec::new(
+                "plc",
+                PropKind::Bool,
+                "conceal lost packets with audio synthesized from the decoder state",
+            )
+            .with_default("false"),
+            PropertySpec::new(
+                "use-inband-fec",
+                PropKind::Bool,
+                "rebuild a lost frame from the redundant copy in the next packet",
+            )
+            .with_default("false"),
+        ];
         PROPS
     }
 
@@ -487,6 +545,10 @@ impl AsyncElement for OpusDec {
                 self.plc = value.as_bool().ok_or(PropError::Type)?;
                 Ok(())
             }
+            "use-inband-fec" => {
+                self.fec = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -494,6 +556,7 @@ impl AsyncElement for OpusDec {
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
             "plc" => Some(PropValue::Bool(self.plc)),
+            "use-inband-fec" => Some(PropValue::Bool(self.fec)),
             _ => None,
         }
     }
@@ -535,9 +598,10 @@ impl AsyncElement for OpusDec {
                     }
                     self.new_segment = false;
                     // Fill any hole this packet's PTS opens up before decoding
-                    // it, so the concealed audio keeps the output contiguous and
-                    // the real packet still lands at its own PTS.
-                    if let Some((pts_ns, pcm)) = self.conceal_gap(frame.timing.pts_ns)? {
+                    // it, so the filled audio keeps the output contiguous and
+                    // the real packet still lands at its own PTS. This packet is
+                    // also where the FEC copy of the lost frame lives.
+                    if let Some((pts_ns, pcm)) = self.fill_gap(frame.timing.pts_ns, slice)? {
                         if !pcm.is_empty() {
                             let samples = (pcm.len() / self.bytes_per_sample()) as u64;
                             self.emit(
@@ -564,7 +628,7 @@ impl AsyncElement for OpusDec {
                     );
 
                     let keep = duration_to_samples(frame.timing.duration_ns);
-                    let pcm = self.decode_trimmed(Some(slice), MAX_FRAME_SAMPLES, keep)?;
+                    let pcm = self.decode_trimmed(Some(slice), MAX_FRAME_SAMPLES, keep, false)?;
                     // A frame fully inside the pre-skip window trims to nothing;
                     // consume it without emitting an empty PCM frame.
                     if pcm.is_empty() {

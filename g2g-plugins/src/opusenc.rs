@@ -13,8 +13,10 @@
 //! Scope (v1): 48 kHz mono/stereo S16LE. 48 kHz because Opus always *decodes* at
 //! 48 kHz ([`crate::opusparse::OPUS_RATE_HZ`]), so the whole pipeline stays at
 //! that rate without a resample; other input rates need an upstream
-//! `AudioResample`. Bitrate, frame size and complexity are builder-set and
-//! runtime properties.
+//! `AudioResample`. Bitrate, frame size, complexity and the in-band FEC pair
+//! (`inband-fec` / `packet-loss-percentage`, which make each packet carry a
+//! redundant copy of the previous frame for [`crate::opusdec`] to recover a lost
+//! one from) are builder-set and runtime properties.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -39,6 +41,9 @@ const MAX_PACKET: usize = 4_000;
 
 /// Highest accepted value of the `complexity` property (libopus' maximum).
 const MAX_COMPLEXITY: u8 = 10;
+
+/// Highest accepted value of the `packet-loss-percentage` property.
+const MAX_PACKET_LOSS_PERC: u8 = 100;
 
 /// libopus' own default computational complexity, applied when nothing sets the
 /// `complexity` property.
@@ -139,6 +144,14 @@ pub struct OpusEnc {
     frame_size: OpusFrameSize,
     /// libopus computational complexity, 0..=10.
     complexity: u8,
+    /// Code a redundant (LBRR) copy of each frame into the next packet, so a
+    /// decoder that lost one packet can rebuild it (see [`crate::opusdec`]).
+    inband_fec: bool,
+    /// Expected packet loss, 0..=100 %. libopus needs it above 0 to spend bits
+    /// on the FEC copy at all, and it also steers the mode choice: FEC only
+    /// exists in the SILK layer, so a high enough loss keeps the encoder out of
+    /// CELT-only mode.
+    packet_loss_perc: u8,
     /// The bitrate actually applied to the live encoder, so a repeated BWE
     /// estimate is not re-applied every batch (`OPUS_SET_BITRATE` is cheap and
     /// glitch-free, but the ctl still need not run per packet).
@@ -166,6 +179,8 @@ impl core::fmt::Debug for OpusEnc {
             .field("channels", &self.channels)
             .field("frame_size", &self.frame_size)
             .field("complexity", &self.complexity)
+            .field("inband_fec", &self.inband_fec)
+            .field("packet_loss_perc", &self.packet_loss_perc)
             .field("buffered_samples", &self.buf.len())
             .field("emitted", &self.emitted)
             .field("configured", &self.configured)
@@ -186,6 +201,8 @@ impl OpusEnc {
             bitrate: Bitrate::Auto,
             frame_size: OpusFrameSize::default(),
             complexity: DEFAULT_COMPLEXITY,
+            inband_fec: false,
+            packet_loss_perc: 0,
             applied_bps: None,
             enc: None,
             in_f32: false,
@@ -232,6 +249,40 @@ impl OpusEnc {
             .as_ref()
             .and_then(|e| e.complexity().ok())
             .unwrap_or(self.complexity)
+    }
+
+    /// Carry a redundant copy of each frame in the next packet, so one lost
+    /// packet is recoverable downstream (`opusdec use-inband-fec=true`). Costs
+    /// bitrate and only takes effect together with a non-zero
+    /// [`with_packet_loss_percentage`](Self::with_packet_loss_percentage).
+    /// Off by default, as in GStreamer's opusenc.
+    pub fn with_inband_fec(mut self, enabled: bool) -> Self {
+        self.inband_fec = enabled;
+        self
+    }
+
+    /// The FEC setting the live encoder is running with, read back from libopus.
+    pub fn inband_fec(&self) -> bool {
+        self.enc
+            .as_ref()
+            .and_then(|e| e.inband_fec().ok())
+            .unwrap_or(self.inband_fec)
+    }
+
+    /// Tell libopus how much loss to encode for, 0..=100 %. Values above 100
+    /// clamp; the `packet-loss-percentage` property rejects them instead.
+    pub fn with_packet_loss_percentage(mut self, percent: u8) -> Self {
+        self.packet_loss_perc = percent.min(MAX_PACKET_LOSS_PERC);
+        self
+    }
+
+    /// The loss percentage the live encoder is running with, read back from
+    /// libopus.
+    pub fn packet_loss_percentage(&self) -> u8 {
+        self.enc
+            .as_ref()
+            .and_then(|e| e.packet_loss_perc().ok())
+            .unwrap_or(self.packet_loss_perc)
     }
 
     /// Count of Opus packets emitted.
@@ -437,6 +488,10 @@ impl AsyncElement for OpusEnc {
             .map_err(|_| G2gError::CapsMismatch)?;
         enc.set_complexity(self.complexity)
             .map_err(|_| G2gError::CapsMismatch)?;
+        enc.set_inband_fec(self.inband_fec)
+            .map_err(|_| G2gError::CapsMismatch)?;
+        enc.set_packet_loss_perc(self.packet_loss_perc)
+            .map_err(|_| G2gError::CapsMismatch)?;
         self.enc = Some(enc);
         self.channels = channels;
         self.buf.clear();
@@ -476,6 +531,19 @@ impl AsyncElement for OpusEnc {
             )
             .with_default("9")
             .with_range("0", "10"),
+            PropertySpec::new(
+                "inband-fec",
+                PropKind::Bool,
+                "carry a redundant copy of each frame in the next packet",
+            )
+            .with_default("false"),
+            PropertySpec::new(
+                "packet-loss-percentage",
+                PropKind::Uint,
+                "loss the encoder codes for, 0-100 % (0 spends no bits on FEC)",
+            )
+            .with_default("0")
+            .with_range("0", "100"),
         ];
         PROPS
     }
@@ -513,6 +581,28 @@ impl AsyncElement for OpusEnc {
                 }
                 Ok(())
             }
+            // Both FEC ctls are live, like complexity: a running encoder starts
+            // (or stops) coding the redundant copy without a rebuild.
+            "inband-fec" => {
+                self.inband_fec = value.as_bool().ok_or(PropError::Type)?;
+                if let Some(enc) = self.enc.as_mut() {
+                    enc.set_inband_fec(self.inband_fec)
+                        .map_err(|_| PropError::Value)?;
+                }
+                Ok(())
+            }
+            "packet-loss-percentage" => {
+                let value = value.as_uint().ok_or(PropError::Type)?;
+                if value > MAX_PACKET_LOSS_PERC as u64 {
+                    return Err(PropError::Value);
+                }
+                self.packet_loss_perc = value as u8;
+                if let Some(enc) = self.enc.as_mut() {
+                    enc.set_packet_loss_perc(self.packet_loss_perc)
+                        .map_err(|_| PropError::Value)?;
+                }
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -525,6 +615,8 @@ impl AsyncElement for OpusEnc {
             })),
             "frame-size" => Some(PropValue::Uint(self.frame_size.property_value())),
             "complexity" => Some(PropValue::Uint(self.complexity() as u64)),
+            "inband-fec" => Some(PropValue::Bool(self.inband_fec())),
+            "packet-loss-percentage" => Some(PropValue::Uint(self.packet_loss_percentage() as u64)),
             _ => None,
         }
     }

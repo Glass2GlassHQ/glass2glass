@@ -424,8 +424,8 @@ Phased plan:
 - **Pure-Rust / wasm decode** to drop the ffmpeg FFI: AV1 done (`Rav1dDec`, emits
   4:2:0 / 4:2:2 / 4:4:4 at 8/10/12-bit, round-trip tested end to end); still
   VP8 / VP9 decode and a pure-Rust Opus path.
-- **Opus:** in-band FEC use on decode (the RTP receive path can hand the next
-  packet's LBRR data to a lossy gap; the `plc` path conceals blind today).
+- **Opus:** an `audio-type` property on `opusenc` (libopus application mode,
+  voice vs audio; hardcoded to `Audio` today).
 - **MJPEG / JPEG:** a `mozjpeg` fast path under a feature flag; a direct
   YCbCr -> I420 path (skip the RGBA intermediate); a single-still image sink.
 

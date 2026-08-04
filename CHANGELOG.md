@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M857: opusdec decodes in-band FEC from the next packet across a loss (`use-inband-fec`), and opusenc gains `inband-fec` / `packet-loss-percentage`.
+
 - M854: NvDec mid-stream reconfigure, AV1, P010 10-bit, and `max-display-delay`; NvEnc Main10 10-bit encode plus `gop-size` / `repeat-sequence-header`.
 
 - M855: `font-variations` axis selection on textoverlay, WebVTT `::cue(.class)` styling, and SSA / TTML placement mapped into cue settings.
