@@ -86,6 +86,52 @@ fn opusenc_frame_size_and_complexity() {
     );
 }
 
+#[cfg(feature = "opus")]
+#[test]
+fn opusenc_audio_type() {
+    use g2g_plugins::opusenc::{OpusAudioType, OpusEnc};
+    let mut e = OpusEnc::new();
+    assert!(declares(e.properties(), "audio-type"));
+    assert_eq!(
+        e.get_property("audio-type"),
+        Some(PropValue::Str("generic".into())),
+        "gst opusenc's default"
+    );
+    e.set_property("audio-type", PropValue::Str("voice".into()))
+        .unwrap();
+    assert_eq!(
+        e.get_property("audio-type"),
+        Some(PropValue::Str("voice".into()))
+    );
+    assert!(
+        e.set_property("audio-type", PropValue::Str("music".into()))
+            .is_err(),
+        "rejects a mode libopus has no application for"
+    );
+    // the mode has to reach libopus: a voice encoder builds, and the low-delay
+    // one builds with a shorter lookahead than the default mode's.
+    let caps = g2g_core::Caps::Audio {
+        format: g2g_core::AudioFormat::PcmS16Le,
+        channels: 1,
+        sample_rate: 48_000,
+    };
+    e.configure_pipeline(&caps)
+        .expect("voice encoder initializes");
+    let voice_lookahead = e.lookahead().expect("live encoder built");
+
+    let mut low = OpusEnc::new().with_audio_type(OpusAudioType::RestrictedLowDelay);
+    assert_eq!(
+        low.get_property("audio-type"),
+        Some(PropValue::Str("restricted-lowdelay".into())),
+        "builder and property agree"
+    );
+    low.configure_pipeline(&caps).unwrap();
+    assert!(
+        low.lookahead().unwrap() < voice_lookahead,
+        "restricted-lowdelay drops the SILK lookahead"
+    );
+}
+
 #[cfg(feature = "mjpeg-encode")]
 #[test]
 fn mjpegenc_quality() {

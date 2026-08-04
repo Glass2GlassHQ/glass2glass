@@ -19,7 +19,11 @@ pub(crate) fn pcm_params(caps: &Caps) -> Result<(u16, u16, u16, u32), G2gError> 
         return Err(G2gError::CapsMismatch);
     };
     let (tag, bits) = match format {
+        AudioFormat::PcmU8 => (WAVE_FORMAT_PCM, 8u16),
         AudioFormat::PcmS16Le => (WAVE_FORMAT_PCM, 16u16),
+        // 24-bit is 3-byte packed, the WAV convention for wBitsPerSample = 24.
+        AudioFormat::PcmS24Le => (WAVE_FORMAT_PCM, 24u16),
+        AudioFormat::PcmS32Le => (WAVE_FORMAT_PCM, 32u16),
         AudioFormat::PcmF32Le => (WAVE_FORMAT_IEEE_FLOAT, 32u16),
         AudioFormat::Aac | AudioFormat::Opus => return Err(G2gError::CapsMismatch),
         // Any other (or future) format is not linear PCM WAV can carry.

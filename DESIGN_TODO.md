@@ -388,8 +388,8 @@ Phased plan:
 ## Sinks
 
 - Linux audio sinks (`alsasink` / `pulsesink` / `pipewiresink`): DMABUF /
-  zero-copy. `wavsink` / `wasapisink` still accept only S16/F32 (WAV can carry
-  U8/S24/S32; WASAPI is Windows-gated).
+  zero-copy. `wasapisink` U8/S24/S32 acceptance is driver-decided at configure;
+  validate on a Windows host.
 - Generic `GlSink` over EGL (vendor-neutral NV12 / RGBA present, no CUDA).
 
 ## Containers
@@ -406,8 +406,6 @@ Phased plan:
 - **Pure-Rust / wasm decode** to drop the ffmpeg FFI: AV1 done (`Rav1dDec`, emits
   4:2:0 / 4:2:2 / 4:4:4 at 8/10/12-bit, round-trip tested end to end); still
   VP8 / VP9 decode and a pure-Rust Opus path.
-- **Opus:** an `audio-type` property on `opusenc` (libopus application mode,
-  voice vs audio; hardcoded to `Audio` today).
 - **MJPEG / JPEG:** a `mozjpeg` fast path under a feature flag; a direct
   YCbCr -> I420 path (skip the RGBA intermediate); a single-still image sink.
 

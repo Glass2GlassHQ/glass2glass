@@ -90,6 +90,10 @@ jobs:
       # HTTP spills to disk and demuxes identically to a direct file read.
       - name: test g2g-plugins (downloadbuffer)
         run: cargo test -p g2g-plugins --locked --features http-src --test m861_downloadbuffer
+      # Opus encode properties + codec round-trip (M177 / M454 / M868): the
+      # feature set above is only checked, so the opus-gated tests run here.
+      - name: test g2g-plugins (opus codec + properties)
+        run: cargo test -p g2g-plugins --locked --features std,opus --test m454_element_properties --test m177_opus_codec
       - name: check g2g-ml (wgpu + burn)
         run: cargo check -p g2g-ml --locked --all-targets --features wgpu,burn
       # Embedded / no_std path: the embassy-sync stack channel, the no-alloc

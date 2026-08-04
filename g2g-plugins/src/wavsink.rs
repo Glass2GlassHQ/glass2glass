@@ -1,4 +1,5 @@
-//! WAV file sink (M25). Writes interleaved PCM (`PcmS16Le` or `PcmF32Le`)
+//! WAV file sink (M25). Writes interleaved PCM (`PcmU8`, `PcmS16Le`,
+//! `PcmS24Le`, `PcmS32Le` or `PcmF32Le`)
 //! to a standard RIFF/WAVE file, so an audio pipeline's output is playable
 //! anywhere. The header's running sizes are patched in place on `Eos`
 //! (WAV is not stream-friendly; the fragmented recording format for live
@@ -232,7 +233,10 @@ impl PadTemplates for WavSink {
             sample_rate: 48_000,
         };
         Vec::from([PadTemplate::sink(CapsSet::from_alternatives(Vec::from([
+            pcm(AudioFormat::PcmU8),
             pcm(AudioFormat::PcmS16Le),
+            pcm(AudioFormat::PcmS24Le),
+            pcm(AudioFormat::PcmS32Le),
             pcm(AudioFormat::PcmF32Le),
         ])))])
     }
@@ -241,6 +245,7 @@ impl PadTemplates for WavSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio::WAVE_FORMAT_PCM;
 
     #[test]
     fn header_is_canonical_44_bytes() {
@@ -253,6 +258,47 @@ mod tests {
         // block align 4 (stereo s16), byte rate 192000
         assert_eq!(u16::from_le_bytes(h[32..34].try_into().unwrap()), 4);
         assert_eq!(u32::from_le_bytes(h[28..32].try_into().unwrap()), 192_000);
+    }
+
+    #[test]
+    fn integer_pcm_widths_get_44_byte_headers() {
+        // (bits, channels, rate, block align, byte rate)
+        for (bits, channels, rate, align, byte_rate) in [
+            (8u16, 1u16, 8_000u32, 1u16, 8_000u32),
+            (24, 2, 48_000, 6, 288_000),
+            (32, 2, 96_000, 8, 768_000),
+        ] {
+            let h = wav_header(WAVE_FORMAT_PCM, bits, channels, rate);
+            assert_eq!(h.len(), 44, "{bits}-bit stays canonical PCM");
+            assert_eq!(&h[12..16], b"fmt ");
+            assert_eq!(u32::from_le_bytes(h[16..20].try_into().unwrap()), 16);
+            assert_eq!(u16::from_le_bytes(h[20..22].try_into().unwrap()), 1, "tag");
+            assert_eq!(u16::from_le_bytes(h[34..36].try_into().unwrap()), bits);
+            assert_eq!(u16::from_le_bytes(h[32..34].try_into().unwrap()), align);
+            assert_eq!(u32::from_le_bytes(h[28..32].try_into().unwrap()), byte_rate);
+            assert_eq!(&h[36..40], b"data");
+        }
+    }
+
+    #[test]
+    fn pcm_params_maps_every_wav_width() {
+        let caps = |format| Caps::Audio {
+            format,
+            channels: 2,
+            sample_rate: 48_000,
+        };
+        assert_eq!(
+            pcm_params(&caps(AudioFormat::PcmU8)),
+            Ok((WAVE_FORMAT_PCM, 8, 2, 48_000))
+        );
+        assert_eq!(
+            pcm_params(&caps(AudioFormat::PcmS24Le)),
+            Ok((WAVE_FORMAT_PCM, 24, 2, 48_000))
+        );
+        assert_eq!(
+            pcm_params(&caps(AudioFormat::PcmS32Le)),
+            Ok((WAVE_FORMAT_PCM, 32, 2, 48_000))
+        );
     }
 
     #[test]

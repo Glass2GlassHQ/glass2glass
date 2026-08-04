@@ -13,7 +13,7 @@
 //! Scope (v1): 48 kHz mono/stereo S16LE. 48 kHz because Opus always *decodes* at
 //! 48 kHz ([`crate::opusparse::OPUS_RATE_HZ`]), so the whole pipeline stays at
 //! that rate without a resample; other input rates need an upstream
-//! `AudioResample`. Bitrate, frame size, complexity and the in-band FEC pair
+//! `AudioResample`. Bitrate, frame size, complexity, audio type and the in-band FEC pair
 //! (`inband-fec` / `packet-loss-percentage`, which make each packet carry a
 //! redundant copy of the previous frame for [`crate::opusdec`] to recover a lost
 //! one from) are builder-set and runtime properties.
@@ -134,6 +134,50 @@ impl OpusFrameSize {
     }
 }
 
+/// What libopus optimizes the encode for (`OPUS_SET_APPLICATION`), carrying
+/// GStreamer `opusenc`'s `audio-type` nicks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OpusAudioType {
+    /// `generic`: high-fidelity, decoded audio as close as possible to the input.
+    #[default]
+    Generic,
+    /// `voice`: VoIP / conferencing, intelligibility over fidelity.
+    Voice,
+    /// `restricted-lowdelay`: lowest achievable latency, no SILK layer (so no
+    /// in-band FEC).
+    RestrictedLowDelay,
+}
+
+impl OpusAudioType {
+    /// The `audio-type` property value for this mode.
+    pub const fn property_value(self) -> &'static str {
+        match self {
+            OpusAudioType::Generic => "generic",
+            OpusAudioType::Voice => "voice",
+            OpusAudioType::RestrictedLowDelay => "restricted-lowdelay",
+        }
+    }
+
+    /// The mode an `audio-type` property value selects, or `None` for a value
+    /// libopus has no application for.
+    pub fn from_property_value(value: &str) -> Option<Self> {
+        Some(match value {
+            "generic" => OpusAudioType::Generic,
+            "voice" => OpusAudioType::Voice,
+            "restricted-lowdelay" => OpusAudioType::RestrictedLowDelay,
+            _ => return None,
+        })
+    }
+
+    fn application(self) -> Application {
+        match self {
+            OpusAudioType::Generic => Application::Audio,
+            OpusAudioType::Voice => Application::Voip,
+            OpusAudioType::RestrictedLowDelay => Application::LowDelay,
+        }
+    }
+}
+
 /// Encodes raw interleaved S16LE PCM into an Opus elementary stream.
 pub struct OpusEnc {
     channels: u8,
@@ -144,6 +188,9 @@ pub struct OpusEnc {
     frame_size: OpusFrameSize,
     /// libopus computational complexity, 0..=10.
     complexity: u8,
+    /// What libopus optimizes for, applied at encoder construction only
+    /// (`OPUS_SET_APPLICATION` is not a live ctl on a running encoder).
+    audio_type: OpusAudioType,
     /// Code a redundant (LBRR) copy of each frame into the next packet, so a
     /// decoder that lost one packet can rebuild it (see [`crate::opusdec`]).
     inband_fec: bool,
@@ -179,6 +226,7 @@ impl core::fmt::Debug for OpusEnc {
             .field("channels", &self.channels)
             .field("frame_size", &self.frame_size)
             .field("complexity", &self.complexity)
+            .field("audio_type", &self.audio_type)
             .field("inband_fec", &self.inband_fec)
             .field("packet_loss_perc", &self.packet_loss_perc)
             .field("buffered_samples", &self.buf.len())
@@ -201,6 +249,7 @@ impl OpusEnc {
             bitrate: Bitrate::Auto,
             frame_size: OpusFrameSize::default(),
             complexity: DEFAULT_COMPLEXITY,
+            audio_type: OpusAudioType::Generic,
             inband_fec: false,
             packet_loss_perc: 0,
             applied_bps: None,
@@ -249,6 +298,19 @@ impl OpusEnc {
             .as_ref()
             .and_then(|e| e.complexity().ok())
             .unwrap_or(self.complexity)
+    }
+
+    /// Set what libopus optimizes the encode for. Default `Generic`, as in
+    /// GStreamer's opusenc. Takes effect when the encoder is built, so set it
+    /// before `configure_pipeline`.
+    pub fn with_audio_type(mut self, audio_type: OpusAudioType) -> Self {
+        self.audio_type = audio_type;
+        self
+    }
+
+    /// The mode the encoder is (or will be) built with.
+    pub fn audio_type(&self) -> OpusAudioType {
+        self.audio_type
     }
 
     /// Carry a redundant copy of each frame in the next packet, so one lost
@@ -482,7 +544,7 @@ impl AsyncElement for OpusEnc {
             2 => Channels::Stereo,
             _ => return Err(G2gError::CapsMismatch),
         };
-        let mut enc = Encoder::new(SampleRate::Hz48000, ch, Application::Audio)
+        let mut enc = Encoder::new(SampleRate::Hz48000, ch, self.audio_type.application())
             .map_err(|_| G2gError::CapsMismatch)?;
         enc.set_bitrate(self.bitrate)
             .map_err(|_| G2gError::CapsMismatch)?;
@@ -531,6 +593,13 @@ impl AsyncElement for OpusEnc {
             )
             .with_default("9")
             .with_range("0", "10"),
+            PropertySpec::new(
+                "audio-type",
+                PropKind::Str,
+                "what libopus optimizes for: generic | voice | restricted-lowdelay",
+            )
+            .with_default("generic")
+            .with_enum_values("generic | voice | restricted-lowdelay"),
             PropertySpec::new(
                 "inband-fec",
                 PropKind::Bool,
@@ -581,6 +650,14 @@ impl AsyncElement for OpusEnc {
                 }
                 Ok(())
             }
+            // The application is fixed at encoder construction, so this only
+            // has an effect while the element is unconfigured.
+            "audio-type" => {
+                let value = value.as_str().ok_or(PropError::Type)?;
+                self.audio_type =
+                    OpusAudioType::from_property_value(value).ok_or(PropError::Value)?;
+                Ok(())
+            }
             // Both FEC ctls are live, like complexity: a running encoder starts
             // (or stops) coding the redundant copy without a rebuild.
             "inband-fec" => {
@@ -615,6 +692,7 @@ impl AsyncElement for OpusEnc {
             })),
             "frame-size" => Some(PropValue::Uint(self.frame_size.property_value())),
             "complexity" => Some(PropValue::Uint(self.complexity() as u64)),
+            "audio-type" => Some(PropValue::Str(self.audio_type.property_value().into())),
             "inband-fec" => Some(PropValue::Bool(self.inband_fec())),
             "packet-loss-percentage" => Some(PropValue::Uint(self.packet_loss_percentage() as u64)),
             _ => None,
