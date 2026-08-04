@@ -28,6 +28,26 @@
 //! (meta, input, out). Chaining them GPU-resident (conv -> relu -> pool -> ...)
 //! is a real CNN body with no GPU->CPU round-trip between layers. Trained weights
 //! load via `conv2d_from_safetensors` (M262).
+//!
+//! Transformer blocks run on the same machinery (M856): `matmul` (the `[S, K]`
+//! token-matrix generalization of `linear`, which is now the `S = 1` case of the
+//! same shader), `layer_norm`, `softmax`, and a fused multi-head `attention`.
+//! Those four ops read the running tensor as `[1, 1, S, D]`: `S` tokens of `D`
+//! features. `StackLayer::Attention { name, heads }` imports the projections
+//! under the torch attribute names `{name}.q_proj.weight`, `.k_proj.weight`,
+//! `.v_proj.weight`, `.o_proj.weight` (each `[D, D]`) plus the optional
+//! `.q_proj.bias` and friends (`[D]`, zeros when the checkpoint was exported
+//! `bias=False`), and expands into three passes: the packed QKV projection, the
+//! attention itself, and the output projection. So a pre-norm block (LayerNorm
+//! -> MHA -> residual -> LayerNorm -> MLP -> residual) is a `ResidualStack`
+//! built from one safetensors file. Attention is full and unmasked: this is
+//! vision / feature-stack inference, not autoregressive decoding, so there is no
+//! causal mask and no KV cache.
+//!
+//! One convention to watch when exporting weights: every weight matrix here is
+//! input-major `[K, N]` (element `(k, n)` at `k * N + n`), which is the transpose
+//! of torch's `nn.Linear.weight` (`[out, in]`). Transpose the 2D matrices when
+//! writing the safetensors file; the 4D conv weights match torch as-is.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -45,14 +65,17 @@ use crate::wgpupreprocess::WgpuBufferOwner;
 /// One invocation per output; the dispatch covers ceil(N / 64).
 const WORKGROUP: u32 = 64;
 
-/// `out = input . W + b`: input is the flat `K`-length f32 tensor, `W` the
-/// row-major `[K, N]` weight matrix (element `(k, n)` at `k * N + n`, matching
-/// burn's `[K, N]` layout), `b` the `[N]` bias. One invocation accumulates one
-/// output, reading the input buffer the producer left on the device.
-const SHADER: &str = r#"
-struct Dims { k: u32, n: u32, _pad0: u32, _pad1: u32 };
+/// `out = X . W + b` over `S` rows: `X` is the row-major `[S, K]` input matrix,
+/// `W` the row-major `[K, N]` weight matrix (element `(k, n)` at `k * N + n`,
+/// matching burn's `[K, N]` layout), `b` the `[N]` bias, output `[S, N]`. One
+/// invocation accumulates one output element, reading the input buffer the
+/// producer left on the device. `S = 1` is the classifier head
+/// ([`WgpuInference::linear`]); `S > 1` is the per-token projection a transformer
+/// block needs ([`WgpuInference::matmul`]).
+const MATMUL_SHADER: &str = r#"
+struct Mm { s: u32, k: u32, n: u32, _pad0: u32 };
 
-@group(0) @binding(0) var<uniform> dims: Dims;
+@group(0) @binding(0) var<uniform> m: Mm;
 @group(0) @binding(1) var<storage, read> input: array<f32>;
 @group(0) @binding(2) var<storage, read> weights: array<f32>;
 @group(0) @binding(3) var<storage, read> bias: array<f32>;
@@ -60,13 +83,16 @@ struct Dims { k: u32, n: u32, _pad0: u32, _pad1: u32 };
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let n = gid.x;
-    if (n >= dims.n) { return; }
-    var acc = bias[n];
-    for (var k = 0u; k < dims.k; k = k + 1u) {
-        acc = acc + input[k] * weights[k * dims.n + n];
+    let idx = gid.x;
+    let total = m.s * m.n;
+    if (idx >= total) { return; }
+    let row = idx / m.n;
+    let col = idx % m.n;
+    var acc = bias[col];
+    for (var k = 0u; k < m.k; k = k + 1u) {
+        acc = acc + input[row * m.k + k] * weights[k * m.n + col];
     }
-    out[n] = acc;
+    out[idx] = acc;
 }
 "#;
 
@@ -236,24 +262,253 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
+/// Layer normalization over the last dim of the `[rows, n]` token matrix:
+/// `out[r, i] = gamma[i] * (x[r, i] - mean_r) / sqrt(var_r + eps) + beta[i]`,
+/// where `mean_r` / `var_r` are that row's own statistics (unlike batch-norm,
+/// which uses frozen per-channel running stats). A weighted op reusing the
+/// (meta, input, weights=gamma, bias=beta, out) binding. One invocation per
+/// output element, each recomputing its row's mean / variance: redundant work,
+/// but it keeps the one-invocation-per-output convention every op here follows
+/// and the accumulation order the host reference uses.
+const LAYERNORM_SHADER: &str = r#"
+struct Ln { rows: u32, n: u32, eps: f32, _p0: u32 };
+
+@group(0) @binding(0) var<uniform> l: Ln;
+@group(0) @binding(1) var<storage, read> input: array<f32>;
+@group(0) @binding(2) var<storage, read> gamma: array<f32>;
+@group(0) @binding(3) var<storage, read> beta: array<f32>;
+@group(0) @binding(4) var<storage, read_write> out: array<f32>;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x;
+    let total = l.rows * l.n;
+    if (idx >= total) { return; }
+    let base = (idx / l.n) * l.n;
+    let col = idx % l.n;
+    var mean = 0.0;
+    for (var i = 0u; i < l.n; i = i + 1u) {
+        mean = mean + input[base + i];
+    }
+    mean = mean / f32(l.n);
+    var vacc = 0.0;
+    for (var i = 0u; i < l.n; i = i + 1u) {
+        let d = input[base + i] - mean;
+        vacc = vacc + d * d;
+    }
+    vacc = vacc / f32(l.n);
+    out[idx] = gamma[col] * (input[idx] - mean) / sqrt(vacc + l.eps) + beta[col];
+}
+"#;
+
+/// Softmax over the last dim of the `[rows, n]` tensor, max-subtracted for
+/// stability: `out[r, i] = exp(x[r, i] - max_r) / sum_j exp(x[r, j] - max_r)`.
+/// Weightless (meta, input, out), shape-preserving. The GPU form of the
+/// classification head `postprocess` runs on the CPU; the attention op inlines
+/// its own copy of this math rather than dispatching it, because a separate pass
+/// would have to materialize the `S x S` score matrix first.
+const SOFTMAX_SHADER: &str = r#"
+struct Sm { rows: u32, n: u32, _p0: u32, _p1: u32 };
+
+@group(0) @binding(0) var<uniform> s: Sm;
+@group(0) @binding(1) var<storage, read> input: array<f32>;
+@group(0) @binding(2) var<storage, read_write> out: array<f32>;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x;
+    let total = s.rows * s.n;
+    if (idx >= total) { return; }
+    let base = (idx / s.n) * s.n;
+    var mx = input[base];
+    for (var i = 1u; i < s.n; i = i + 1u) {
+        mx = max(mx, input[base + i]);
+    }
+    var sum = 0.0;
+    for (var i = 0u; i < s.n; i = i + 1u) {
+        sum = sum + exp(input[base + i] - mx);
+    }
+    out[idx] = exp(input[idx] - mx) / sum;
+}
+"#;
+
+/// Fused multi-head self-attention over the packed `[S, 3D]` QKV matrix the
+/// projection matmul produces (`Q | K | V` contiguous within each token's row,
+/// head `h` owning dims `[h*dh, (h+1)*dh)` of each of the three blocks):
+/// `out[t] = softmax(q_t . K^T * scale) . V` per head, output `[S, D]`.
+/// Weightless: the projections are separate matmul passes.
+///
+/// One invocation per output element, walking the keys twice (once for the row
+/// max, once for the exponentials and the weighted sum), so the `S x S` score
+/// matrix never reaches a buffer. Unmasked and fixed-length: a feature-stack
+/// block, not autoregressive decoding, so no causal mask and no KV cache.
+const ATTN_SHADER: &str = r#"
+struct Attn { s: u32, d: u32, heads: u32, dh: u32, scale: f32, _p0: u32, _p1: u32, _p2: u32 };
+
+@group(0) @binding(0) var<uniform> a: Attn;
+@group(0) @binding(1) var<storage, read> input: array<f32>;
+@group(0) @binding(2) var<storage, read_write> out: array<f32>;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x;
+    let total = a.s * a.d;
+    if (idx >= total) { return; }
+    let row = idx / a.d;         // query token
+    let col = idx % a.d;         // feature of the model dim
+    let head = col / a.dh;       // head owning that feature
+    let lane = col % a.dh;       // feature within the head
+    let stride = 3u * a.d;       // packed row stride: Q | K | V
+    let q_off = row * stride + head * a.dh;
+    let k_base = a.d + head * a.dh;
+    let v_base = 2u * a.d + head * a.dh;
+
+    var mx = -3.4028235e38;
+    for (var t = 0u; t < a.s; t = t + 1u) {
+        var score = 0.0;
+        for (var j = 0u; j < a.dh; j = j + 1u) {
+            score = score + input[q_off + j] * input[t * stride + k_base + j];
+        }
+        mx = max(mx, score * a.scale);
+    }
+    var sum = 0.0;
+    var acc = 0.0;
+    for (var t = 0u; t < a.s; t = t + 1u) {
+        var score = 0.0;
+        for (var j = 0u; j < a.dh; j = j + 1u) {
+            score = score + input[q_off + j] * input[t * stride + k_base + j];
+        }
+        let e = exp(score * a.scale - mx);
+        sum = sum + e;
+        acc = acc + e * input[t * stride + v_base + lane];
+    }
+    out[idx] = acc / sum;
+}
+"#;
+
 /// Host reference for [`ADD_SHADER`]: elementwise add of two equal-length
 /// tensors. Public so a residual block can be checked on the CPU without a GPU.
 pub fn add_reference(a: &[f32], b: &[f32]) -> Vec<f32> {
     a.iter().zip(b).map(|(x, y)| x + y).collect()
 }
 
-/// The host reference matching `SHADER`, kept public so the test (and a CPU
-/// caller) can compare against the GPU output. `input` is the flat `K`-length
-/// f32 tensor; returns the `[N]` logits.
-pub fn linear_reference(input: &[f32], weights: &[f32], bias: &[f32]) -> Vec<f32> {
-    let n = bias.len();
-    let mut out = vec![0f32; n];
-    for (col, o) in out.iter_mut().enumerate() {
-        let mut acc = bias[col];
-        for (row, &x) in input.iter().enumerate() {
-            acc += x * weights[row * n + col];
+/// The host reference matching [`MATMUL_SHADER`]: `[s, k] . [k, n] + [n]`,
+/// row-major throughout, returning `[s, n]`. Public so a transformer block can be
+/// folded into a CPU reference.
+pub fn matmul_reference(
+    input: &[f32],
+    s: usize,
+    k: usize,
+    n: usize,
+    weights: &[f32],
+    bias: &[f32],
+) -> Vec<f32> {
+    let mut out = vec![0f32; s * n];
+    for row in 0..s {
+        for col in 0..n {
+            let mut acc = bias[col];
+            for i in 0..k {
+                acc += input[row * k + i] * weights[i * n + col];
+            }
+            out[row * n + col] = acc;
         }
-        *o = acc;
+    }
+    out
+}
+
+/// The host reference for a single-vector linear layer, the `s = 1` case of
+/// [`matmul_reference`]. `input` is the flat `K`-length f32 tensor; returns the
+/// `[N]` logits.
+pub fn linear_reference(input: &[f32], weights: &[f32], bias: &[f32]) -> Vec<f32> {
+    matmul_reference(input, 1, input.len(), bias.len(), weights, bias)
+}
+
+/// Host reference matching [`LAYERNORM_SHADER`]: per row of the `[rows, n]`
+/// matrix, normalize by that row's own mean / variance then apply the `[n]`
+/// affine `gamma` / `beta`.
+pub fn layer_norm_reference(
+    input: &[f32],
+    rows: usize,
+    n: usize,
+    gamma: &[f32],
+    beta: &[f32],
+    eps: f32,
+) -> Vec<f32> {
+    let mut out = vec![0f32; rows * n];
+    for r in 0..rows {
+        let row = &input[r * n..(r + 1) * n];
+        let mut mean = 0f32;
+        for &x in row {
+            mean += x;
+        }
+        mean /= n as f32;
+        let mut var = 0f32;
+        for &x in row {
+            var += (x - mean) * (x - mean);
+        }
+        var /= n as f32;
+        for i in 0..n {
+            out[r * n + i] = gamma[i] * (row[i] - mean) / (var + eps).sqrt() + beta[i];
+        }
+    }
+    out
+}
+
+/// Host reference matching [`SOFTMAX_SHADER`]: max-subtracted softmax over the
+/// last dim of the `[rows, n]` matrix.
+pub fn softmax_reference(input: &[f32], rows: usize, n: usize) -> Vec<f32> {
+    let mut out = vec![0f32; rows * n];
+    for r in 0..rows {
+        let row = &input[r * n..(r + 1) * n];
+        let mut mx = row[0];
+        for &x in &row[1..] {
+            mx = mx.max(x);
+        }
+        let mut sum = 0f32;
+        for &x in row {
+            sum += (x - mx).exp();
+        }
+        for i in 0..n {
+            out[r * n + i] = (row[i] - mx).exp() / sum;
+        }
+    }
+    out
+}
+
+/// Host reference matching [`ATTN_SHADER`]: unmasked multi-head self-attention
+/// over the packed `[s, 3*d]` QKV matrix, returning the `[s, d]` context. Walks
+/// the keys in the same order as the shader (max pass, then a fused
+/// exponential / weighted-sum pass) so the two accumulate identically.
+pub fn attention_reference(qkv: &[f32], s: usize, d: usize, heads: usize) -> Vec<f32> {
+    let dh = d / heads;
+    let scale = 1.0 / (dh as f32).sqrt();
+    let stride = 3 * d;
+    let mut out = vec![0f32; s * d];
+    for row in 0..s {
+        for col in 0..d {
+            let (head, lane) = (col / dh, col % dh);
+            let q_off = row * stride + head * dh;
+            let k_base = d + head * dh;
+            let v_base = 2 * d + head * dh;
+            let score = |t: usize| -> f32 {
+                let mut acc = 0f32;
+                for j in 0..dh {
+                    acc += qkv[q_off + j] * qkv[t * stride + k_base + j];
+                }
+                acc * scale
+            };
+            let mut mx = f32::MIN;
+            for t in 0..s {
+                mx = mx.max(score(t));
+            }
+            let (mut sum, mut acc) = (0f32, 0f32);
+            for t in 0..s {
+                let e = (score(t) - mx).exp();
+                sum += e;
+                acc += e * qkv[t * stride + v_base + lane];
+            }
+            out[row * d + col] = acc / sum;
+        }
     }
     out
 }
@@ -408,6 +663,34 @@ pub fn batch_norm_reference(
     out
 }
 
+/// The transformer ops read the running tensor as `[1, 1, S, D]`: `S` tokens of
+/// `D` features. A `[1, C, H, W]` feature map therefore only qualifies with
+/// `C == 1`; reshaping one into tokens is the caller's job.
+fn token_dims(c: u32, h: u32, w: u32) -> Result<(u32, u32), G2gError> {
+    if c != 1 {
+        return Err(G2gError::CapsMismatch);
+    }
+    Ok((h, w))
+}
+
+/// `{name}.bias` from the checkpoint, or `[n]` zeros when the layer carries
+/// none: torch's `nn.Linear(bias=False)` (what most attention projections use)
+/// writes no bias tensor at all. A present-but-wrong-length bias still fails.
+fn optional_bias(
+    st: &crate::safetensors::SafeTensors<'_>,
+    key: &str,
+    n: u32,
+) -> Result<Vec<f32>, G2gError> {
+    let Ok(t) = st.get(key) else {
+        return Ok(vec![0f32; n as usize]);
+    };
+    let bias = t.to_f32().map_err(|_| G2gError::CapsMismatch)?;
+    if bias.len() != n as usize {
+        return Err(G2gError::CapsMismatch);
+    }
+    Ok(bias)
+}
+
 /// f32 slice as little-endian bytes, for `queue.write_buffer` (no bytemuck dep).
 fn f32_bytes(values: &[f32]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(values.len() * 4);
@@ -497,6 +780,26 @@ pub enum StackLayer {
     /// major to match the matmul shader) + `{name}.bias` `[N]`. `K` must equal the
     /// running `C*H*W`; the output shape becomes `[1, N]`.
     Linear { name: String },
+    /// Layer normalization over the last dim of the `[1, 1, S, D]` token matrix;
+    /// reads `{name}.weight` (gamma) + `{name}.bias` (beta), each `[D]`.
+    /// Shape-preserving.
+    LayerNorm { name: String, eps: f32 },
+    /// Softmax over the last dim (shape-preserving, weightless).
+    Softmax,
+    /// Per-token linear projection over the `[1, 1, S, K]` token matrix; reads
+    /// `{name}.weight` `[K, N]` (input-major) and, if the checkpoint carries one,
+    /// `{name}.bias` `[N]` (zeros otherwise, as `nn.Linear(bias=False)` exports).
+    /// The running `W` becomes `N`. Unlike [`Self::Linear`], which flattens the
+    /// whole tensor into one vector, this keeps the `S` rows.
+    Matmul { name: String },
+    /// Multi-head self-attention over the `[1, 1, S, D]` token matrix (`heads`
+    /// must divide `D`), unmasked and fixed-length. Reads the four projections
+    /// under the torch attribute names `{name}.q_proj.weight`, `.k_proj.weight`,
+    /// `.v_proj.weight`, `.o_proj.weight` (each `[D, D]`, input-major) plus their
+    /// optional `.bias` `[D]`, and expands into three GPU passes: the packed QKV
+    /// projection, the attention itself, and the output projection.
+    /// Shape-preserving.
+    Attention { name: String, heads: u32 },
     /// Save the running tensor into a named skip register (shape-preserving,
     /// no GPU op) so a later [`Self::AddSkip`] can add it back, expressing the
     /// `y = f(x) + x` residual topology a straight chain cannot. Only valid in a
@@ -624,33 +927,87 @@ impl WgpuInference {
         weights: Vec<f32>,
         bias: Vec<f32>,
     ) -> Result<Self, G2gError> {
-        let n = bias.len();
-        // The shape may come from a safetensors file: bound the rank (tensor
-        // caps carry at most MAX_TENSOR_RANK dims) and fold with checked
-        // arithmetic.
-        if TensorShape::from_slice(&in_shape).is_none() {
-            return Err(G2gError::CapsMismatch);
-        }
+        // The shape may come from a safetensors file: fold it with checked
+        // arithmetic (the rank bound is `matmul_op`'s job).
         let k = in_shape
             .iter()
             .try_fold(1u64, |acc, &d| acc.checked_mul(d as u64))
-            .and_then(|v| usize::try_from(v).ok())
+            .and_then(|v| u32::try_from(v).ok())
             .ok_or(G2gError::CapsMismatch)?;
-        if n == 0 || k == 0 || weights.len() != k.checked_mul(n).ok_or(G2gError::CapsMismatch)? {
-            return Err(G2gError::CapsMismatch);
-        }
-        let mut meta = vec![0u8; 16];
-        meta[0..4].copy_from_slice(&(k as u32).to_le_bytes());
-        meta[4..8].copy_from_slice(&(n as u32).to_le_bytes());
-        Ok(Self {
-            in_shape,
-            out_shape: vec![1, n as u32],
+        let n = u32::try_from(bias.len()).map_err(|_| G2gError::CapsMismatch)?;
+        Self::matmul_op(in_shape, vec![1, n], 1, k, n, weights, bias)
+    }
+
+    /// A per-token linear projection over the `[1, 1, S, K]` token matrix:
+    /// `out = X . W + b` with `X` `[S, K]`, `W` the input-major `[K, N]` matrix
+    /// and `b` `[N]`, leaving `[1, 1, S, N]` on the GPU. The transformer
+    /// building block: both MLP layers and every Q/K/V/O projection are this op,
+    /// which is [`linear`](Self::linear) with the batch dimension unpinned.
+    /// `matmul_reference` matches it. Fails loud on a dimension mismatch.
+    pub fn matmul(
+        rows: u32,
+        k: u32,
+        n: u32,
+        weights: Vec<f32>,
+        bias: Vec<f32>,
+    ) -> Result<Self, G2gError> {
+        Self::matmul_op(
+            vec![1, 1, rows, k],
+            vec![1, 1, rows, n],
+            rows,
+            k,
+            n,
             weights,
             bias,
-            in_bytes: k * 4,
-            out_bytes: n * 4,
-            dispatch_n: n as u32,
-            shader: SHADER,
+        )
+    }
+
+    /// Shared constructor for the [`MATMUL_SHADER`] ops: `[s, k] . [k, n] + [n]`,
+    /// with the caps shapes supplied by the caller (a flat `[1, N]` head for
+    /// `linear`, `[1, 1, S, N]` tokens for `matmul`). Every dim can come from an
+    /// untrusted safetensors shape, so the rank is bounded (tensor caps carry at
+    /// most `MAX_TENSOR_RANK` dims) and every element count folded with checked
+    /// arithmetic.
+    fn matmul_op(
+        in_shape: Vec<u32>,
+        out_shape: Vec<u32>,
+        s: u32,
+        k: u32,
+        n: u32,
+        weights: Vec<f32>,
+        bias: Vec<f32>,
+    ) -> Result<Self, G2gError> {
+        if s == 0 || k == 0 || n == 0 {
+            return Err(G2gError::CapsMismatch);
+        }
+        if TensorShape::from_slice(&in_shape).is_none()
+            || TensorShape::from_slice(&out_shape).is_none()
+        {
+            return Err(G2gError::CapsMismatch);
+        }
+        let elems = |a: u32, b: u32| -> Option<usize> {
+            (a as u64)
+                .checked_mul(b as u64)
+                .and_then(|v| usize::try_from(v).ok())
+        };
+        if weights.len() != elems(k, n).ok_or(G2gError::CapsMismatch)? || bias.len() != n as usize {
+            return Err(G2gError::CapsMismatch);
+        }
+        let in_elems = elems(s, k).ok_or(G2gError::CapsMismatch)?;
+        let out_elems = elems(s, n).ok_or(G2gError::CapsMismatch)?;
+        let mut meta = vec![0u8; 16];
+        for (i, d) in [s, k, n].iter().enumerate() {
+            meta[i * 4..i * 4 + 4].copy_from_slice(&d.to_le_bytes());
+        }
+        Ok(Self {
+            in_shape,
+            out_shape,
+            weights,
+            bias,
+            in_bytes: in_elems.checked_mul(4).ok_or(G2gError::CapsMismatch)?,
+            out_bytes: out_elems.checked_mul(4).ok_or(G2gError::CapsMismatch)?,
+            dispatch_n: u32::try_from(out_elems).map_err(|_| G2gError::CapsMismatch)?,
+            shader: MATMUL_SHADER,
             meta,
             configured: false,
             gpu: None,
@@ -659,6 +1016,109 @@ impl WgpuInference {
             gpu_output: false,
             binary: false,
         })
+    }
+
+    /// Layer normalization over the last dim of the `[1, 1, S, D]` token matrix:
+    /// each row is normalized by its own mean / variance, then scaled by the
+    /// `[D]` affine `gamma` / `beta`. The transformer norm, and the reason it is
+    /// not [`batch_norm`](Self::batch_norm): the statistics are computed from the
+    /// input here, not frozen at training time. `layer_norm_reference` matches
+    /// it. Fails loud on a dimension mismatch.
+    pub fn layer_norm(
+        rows: u32,
+        features: u32,
+        gamma: Vec<f32>,
+        beta: Vec<f32>,
+        eps: f32,
+    ) -> Result<Self, G2gError> {
+        if rows == 0 || features == 0 {
+            return Err(G2gError::CapsMismatch);
+        }
+        if gamma.len() != features as usize || beta.len() != features as usize {
+            return Err(G2gError::CapsMismatch);
+        }
+        let elems = (rows as u64)
+            .checked_mul(features as u64)
+            .and_then(|v| u32::try_from(v).ok())
+            .ok_or(G2gError::CapsMismatch)?;
+        let mut meta = vec![0u8; 16];
+        meta[0..4].copy_from_slice(&rows.to_le_bytes());
+        meta[4..8].copy_from_slice(&features.to_le_bytes());
+        meta[8..12].copy_from_slice(&eps.to_bits().to_le_bytes());
+        let shape = vec![1, 1, rows, features];
+        Ok(Self {
+            in_shape: shape.clone(),
+            out_shape: shape,
+            weights: gamma,
+            bias: beta,
+            in_bytes: elems as usize * 4,
+            out_bytes: elems as usize * 4,
+            dispatch_n: elems,
+            shader: LAYERNORM_SHADER,
+            meta,
+            configured: false,
+            gpu: None,
+            last_caps: None,
+            emitted: 0,
+            gpu_output: false,
+            binary: false,
+        })
+    }
+
+    /// Softmax over the last dim of the `[1, 1, rows, features]` tensor,
+    /// max-subtracted for stability and shape-preserving (weightless). The GPU
+    /// classification head; `softmax_reference` matches it.
+    pub fn softmax(rows: u32, features: u32) -> Result<Self, G2gError> {
+        if rows == 0 || features == 0 {
+            return Err(G2gError::CapsMismatch);
+        }
+        (rows as u64)
+            .checked_mul(features as u64)
+            .and_then(|v| u32::try_from(v).ok())
+            .ok_or(G2gError::CapsMismatch)?;
+        let mut meta = vec![0u8; 16];
+        meta[0..4].copy_from_slice(&rows.to_le_bytes());
+        meta[4..8].copy_from_slice(&features.to_le_bytes());
+        let shape = vec![1, 1, rows, features];
+        Ok(Self::new_weightless(
+            shape.clone(),
+            shape,
+            SOFTMAX_SHADER,
+            meta,
+        ))
+    }
+
+    /// Unmasked multi-head self-attention over the packed `[1, 1, S, 3*D]` QKV
+    /// matrix a projection [`matmul`](Self::matmul) produced (`Q | K | V`
+    /// contiguous within each token's row), leaving the `[1, 1, S, D]` context on
+    /// the GPU. `heads` must divide `D`; `heads = 1` is single-head attention.
+    /// Weightless: the four projections are their own matmul passes, which
+    /// [`StackLayer::Attention`] wires up. `attention_reference` matches it.
+    /// Fails loud on a zero dim or a head count that does not divide `D`.
+    pub fn attention(rows: u32, model_dim: u32, heads: u32) -> Result<Self, G2gError> {
+        if rows == 0 || model_dim == 0 || heads == 0 || model_dim % heads != 0 {
+            return Err(G2gError::CapsMismatch);
+        }
+        let dh = model_dim / heads;
+        let packed = model_dim.checked_mul(3).ok_or(G2gError::CapsMismatch)?;
+        // Both element counts must fold without overflow: the dims can come from
+        // a safetensors shape.
+        (rows as u64)
+            .checked_mul(packed as u64)
+            .and_then(|v| u32::try_from(v).ok())
+            .ok_or(G2gError::CapsMismatch)?;
+        let scale = 1.0f32 / (dh as f32).sqrt();
+        let mut meta = vec![0u8; 32];
+        for (i, d) in [rows, model_dim, heads, dh].iter().enumerate() {
+            meta[i * 4..i * 4 + 4].copy_from_slice(&d.to_le_bytes());
+        }
+        meta[16..20].copy_from_slice(&scale.to_bits().to_le_bytes());
+        Ok(Self::new_weightless(
+            vec![1, 1, rows, packed],
+            vec![1, 1, rows, model_dim],
+            ATTN_SHADER,
+            meta,
+        ))
     }
 
     /// Inference-mode batch normalization over the `[1, C, H, W]` tensor: per
@@ -841,7 +1301,7 @@ impl WgpuInference {
                 StackLayer::SaveSkip { .. } | StackLayer::AddSkip { .. } => {
                     return Err(G2gError::CapsMismatch);
                 }
-                _ => chain.push(Self::build_layer(spec, st, &mut c, &mut h, &mut w)?),
+                _ => chain.extend(Self::build_layer(spec, st, &mut c, &mut h, &mut w)?),
             }
         }
         // Keep every intermediate on the GPU; only the final layer reads back.
@@ -859,19 +1319,26 @@ impl WgpuInference {
     /// [`stack_from_safetensors`] and the [`ResidualStack`] builder so the two
     /// stay in lockstep. `SaveSkip` / `AddSkip` are not layers here (they carry
     /// no weights and are handled by the residual builder's control flow).
+    /// Returns a list because one spec can be several GPU passes: an `Attention`
+    /// expands into projection, attention, projection.
     fn build_layer(
         spec: &StackLayer,
         st: &crate::safetensors::SafeTensors<'_>,
         c: &mut u32,
         h: &mut u32,
         w: &mut u32,
-    ) -> Result<Self, G2gError> {
+    ) -> Result<Vec<Self>, G2gError> {
         let vec_by_name = |name: &str| -> Result<Vec<f32>, G2gError> {
             st.get(name)
                 .and_then(|t| t.to_f32())
                 .map_err(|_| G2gError::CapsMismatch)
         };
-        Ok(match spec {
+        // Attention is the one spec that is several passes, so it returns early
+        // rather than fitting the single-op arm below.
+        if let StackLayer::Attention { name, heads } = spec {
+            return Self::attention_layers(name, *heads, st, *c, *h, *w);
+        }
+        Ok(vec![match spec {
             StackLayer::Conv2d { name } => {
                 let layer = Self::conv2d_from_safetensors(
                     st,
@@ -929,10 +1396,106 @@ impl WgpuInference {
                 (*c, *h, *w) = (n, 1, 1);
                 layer
             }
+            StackLayer::LayerNorm { name, eps } => {
+                let (rows, d) = token_dims(*c, *h, *w)?;
+                Self::layer_norm(
+                    rows,
+                    d,
+                    vec_by_name(&format!("{name}.weight"))?,
+                    vec_by_name(&format!("{name}.bias"))?,
+                    *eps,
+                )?
+            }
+            StackLayer::Softmax => {
+                let (rows, d) = token_dims(*c, *h, *w)?;
+                Self::softmax(rows, d)?
+            }
+            StackLayer::Matmul { name } => {
+                let (rows, k_in) = token_dims(*c, *h, *w)?;
+                let wt = st
+                    .get(&format!("{name}.weight"))
+                    .map_err(|_| G2gError::CapsMismatch)?;
+                let [k, n] = match wt.shape {
+                    [a, b] => [
+                        u32::try_from(*a).map_err(|_| G2gError::CapsMismatch)?,
+                        u32::try_from(*b).map_err(|_| G2gError::CapsMismatch)?,
+                    ],
+                    _ => return Err(G2gError::CapsMismatch),
+                };
+                // K must equal the running feature count (input-major [K, N]).
+                if k != k_in {
+                    return Err(G2gError::CapsMismatch);
+                }
+                let weights = wt.to_f32().map_err(|_| G2gError::CapsMismatch)?;
+                let bias = optional_bias(st, &format!("{name}.bias"), n)?;
+                *w = n;
+                Self::matmul(rows, k, n, weights, bias)?
+            }
+            StackLayer::Attention { .. } => unreachable!("handled above"),
             StackLayer::SaveSkip { .. } | StackLayer::AddSkip { .. } => {
                 return Err(G2gError::CapsMismatch);
             }
-        })
+        }])
+    }
+
+    /// Expand a [`StackLayer::Attention`] into its three GPU passes: the QKV
+    /// projection (`Wq | Wk | Wv` concatenated on the host into one `[D, 3D]`
+    /// matrix, so a single matmul writes all three blocks contiguously per
+    /// token, the layout [`ATTN_SHADER`] indexes), the attention itself, and the
+    /// output projection. Shape-preserving overall, so the caller's running
+    /// `(c, h, w)` needs no update. Fails loud on a missing / mis-shaped
+    /// projection or a head count that does not divide `D`.
+    fn attention_layers(
+        name: &str,
+        heads: u32,
+        st: &crate::safetensors::SafeTensors<'_>,
+        c: u32,
+        h: u32,
+        w: u32,
+    ) -> Result<Vec<Self>, G2gError> {
+        let (rows, d) = token_dims(c, h, w)?;
+        if heads == 0 || d == 0 || d % heads != 0 {
+            return Err(G2gError::CapsMismatch);
+        }
+        // Each projection is the square [D, D] input-major matrix plus an
+        // optional [D] bias.
+        let proj = |part: &str| -> Result<(Vec<f32>, Vec<f32>), G2gError> {
+            let wt = st
+                .get(&format!("{name}.{part}.weight"))
+                .map_err(|_| G2gError::CapsMismatch)?;
+            if wt.shape != [d as usize, d as usize] {
+                return Err(G2gError::CapsMismatch);
+            }
+            let weights = wt.to_f32().map_err(|_| G2gError::CapsMismatch)?;
+            let bias = optional_bias(st, &format!("{name}.{part}.bias"), d)?;
+            Ok((weights, bias))
+        };
+        let (qw, qb) = proj("q_proj")?;
+        let (kw, kb) = proj("k_proj")?;
+        let (vw, vb) = proj("v_proj")?;
+        let (ow, ob) = proj("o_proj")?;
+
+        // D comes from the checkpoint, so fold the packed size with checked
+        // arithmetic before reserving.
+        let packed = d.checked_mul(3).ok_or(G2gError::CapsMismatch)?;
+        let dd = d as usize;
+        let mut qkv_w = Vec::with_capacity(
+            dd.checked_mul(packed as usize)
+                .ok_or(G2gError::CapsMismatch)?,
+        );
+        for row in 0..dd {
+            for m in [&qw, &kw, &vw] {
+                qkv_w.extend_from_slice(&m[row * dd..(row + 1) * dd]);
+            }
+        }
+        let mut qkv_b = qb;
+        qkv_b.extend_from_slice(&kb);
+        qkv_b.extend_from_slice(&vb);
+        Ok(vec![
+            Self::matmul(rows, d, packed, qkv_w, qkv_b)?,
+            Self::attention(rows, d, heads)?,
+            Self::matmul(rows, d, d, ow, ob)?,
+        ])
     }
 
     /// Import a whole model **with skip/residual connections** as a GPU-resident
@@ -972,9 +1535,11 @@ impl WgpuInference {
                     }
                     steps.push(ResidualStep::Add(Self::add(c, h, w)?, slot.clone()));
                 }
-                _ => steps.push(ResidualStep::Op(Self::build_layer(
-                    spec, st, &mut c, &mut h, &mut w,
-                )?)),
+                _ => steps.extend(
+                    Self::build_layer(spec, st, &mut c, &mut h, &mut w)?
+                        .into_iter()
+                        .map(ResidualStep::Op),
+                ),
             }
         }
         Ok(ResidualStack { steps })

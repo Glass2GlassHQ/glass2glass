@@ -695,8 +695,9 @@ _(No open parser items.)_
   elementwise-add GPU op (`WgpuInference::add`, `add_reference`), validated
   GPU-resident on a `y = conv(relu(conv(x))) + x` block bit-matching the CPU
   reference (3060). The safetensors loader dequantizes F16 / BF16 to f32 on the
-  fly (M531), so real half-precision checkpoints load. Remaining: attention (for
-  transformer stacks).
+  fly (M531), so real half-precision checkpoints load. Remaining: masked /
+  causal attention + KV cache, if an autoregressive use case ever appears
+  (unmasked full attention is in).
 - ONNX import via `burn-import` (build-time codegen) for the Burn backend, the
   graph-topology counterpart (safetensors carries weights, not the architecture).
 - A trained-weight `Module` path for `BurnInference` (conv, attention) once the
