@@ -189,6 +189,8 @@ pub struct TextOverlay {
     text_color: [u8; 4],
     /// Translucent RGBA backing-box colour (default ~62% black).
     bg_color: [u8; 4],
+    /// Text height in pixels, or 0 to derive it from the frame height.
+    font_px: u32,
     /// The `location=` path, retained for `get_property` round-trips.
     location: Option<String>,
     /// TrueType / OpenType face fallback chain (the `truetype-overlay` feature).
@@ -236,6 +238,7 @@ impl TextOverlay {
             cues: Vec::new(),
             text_color: [0xFF, 0xFF, 0xFF, 0xFF],
             bg_color: [0x00, 0x00, 0x00, 0xA0],
+            font_px: 0,
             location: None,
             #[cfg(feature = "truetype-overlay")]
             fonts: Vec::new(),
@@ -386,6 +389,12 @@ impl TextOverlay {
         self
     }
 
+    /// Set the text height in pixels; 0 restores the canvas-derived size.
+    pub fn with_font_size(mut self, px: u32) -> Self {
+        self.font_px = px;
+        self
+    }
+
     /// Number of loaded cues.
     pub fn cue_count(&self) -> usize {
         self.cues.len()
@@ -431,7 +440,12 @@ impl TextOverlay {
 
     /// Integer font scale: one source pixel per `scale` output pixels, derived
     /// from the frame height so text stays readable across resolutions (>= 1).
+    /// An explicit `font-size` sets it from the requested text height instead
+    /// (the bitmap glyph is 8 px tall).
     fn scale(&self) -> u32 {
+        if self.font_px > 0 {
+            return (self.font_px / GLYPH_HEIGHT).max(1);
+        }
         (self.height / 240).max(1)
     }
 
@@ -558,9 +572,13 @@ impl TextOverlay {
     }
 
     /// Subtitle glyph size in pixels for the TrueType path: ~1/20 of the frame
-    /// height, with a floor so small frames stay legible.
+    /// height, with a floor so small frames stay legible, or the explicit
+    /// `font-size` when one is set.
     #[cfg(feature = "truetype-overlay")]
     fn ttf_px(&self) -> f32 {
+        if self.font_px > 0 {
+            return self.font_px as f32;
+        }
         (self.height as f32 / 20.0).max(16.0)
     }
 
@@ -1170,6 +1188,10 @@ impl AsyncElement for TextOverlay {
                 ];
                 Ok(())
             }
+            "font-size" => {
+                self.font_px = value.as_uint().ok_or(PropError::Type)? as u32;
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -1191,6 +1213,7 @@ impl AsyncElement for TextOverlay {
                     ((a as u64) << 24) | ((r as u64) << 16) | ((g as u64) << 8) | b as u64,
                 ))
             }
+            "font-size" => Some(PropValue::Uint(self.font_px as u64)),
             _ => None,
         }
     }
@@ -1431,6 +1454,12 @@ static TEXTOVERLAY_PROPS: &[PropertySpec] = &[
         "text color as 0xAARRGGBB (e.g. 4294967295 = opaque white)",
     )
     .with_default("4294967295"),
+    PropertySpec::new(
+        "font-size",
+        PropKind::Uint,
+        "text height in pixels, 0 = auto (canvas-derived)",
+    )
+    .with_default("0"),
 ];
 
 #[cfg(test)]
@@ -2474,5 +2503,87 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(ov.cue_count(), 0, "flush clears pending cues");
+    }
+
+    // -- font-size (M893): explicit text height in pixels. ---------------------
+
+    /// Height of the painted ink, or 0 when the canvas is untouched.
+    fn ink_height(buf: &[u8], w: usize, h: usize) -> usize {
+        drawn_bounds(buf, w, h).map_or(0, |(_, y0, _, y1)| y1 - y0 + 1)
+    }
+
+    #[test]
+    #[cfg(feature = "truetype-overlay")]
+    fn font_size_sets_the_truetype_glyph_height() {
+        let Some(bytes) = variable_font_bytes() else {
+            std::eprintln!("skip: no variable system font found");
+            return;
+        };
+        let (w, h) = (400usize, 200usize);
+        let render = |px: u32| {
+            use crate::subparse::CueSettings;
+            let mut ov = sized(
+                TextOverlay::new()
+                    .with_font_bytes(&bytes, 0)
+                    .expect("font parses")
+                    .with_font_size(px)
+                    .with_cues(vec![Cue {
+                        start_ns: 0,
+                        end_ns: u64::MAX,
+                        text: "Hamburg".into(),
+                        settings: CueSettings::default(),
+                    }]),
+                w as u32,
+                h as u32,
+            );
+            let mut buf = black(w, h);
+            ov.render_cues(&mut buf, 0);
+            ink_height(&buf, w, h)
+        };
+        let small = render(16);
+        let large = render(48);
+        assert!(small > 0, "the 16 px text renders");
+        assert!(
+            large > small,
+            "font-size=48 paints taller ink than 16 ({large} vs {small})"
+        );
+    }
+
+    #[test]
+    fn font_size_property_round_trips() {
+        use g2g_core::PropValue;
+        let mut ov = TextOverlay::new();
+        assert_eq!(ov.get_property("font-size"), Some(PropValue::Uint(0)));
+        ov.set_property("font-size", PropValue::Uint(28))
+            .expect("font-size is settable");
+        assert_eq!(ov.get_property("font-size"), Some(PropValue::Uint(28)));
+        assert_eq!(ov.font_px, 28);
+        assert!(ov
+            .properties()
+            .iter()
+            .any(|p| p.name == "font-size" && p.kind == PropKind::Uint));
+    }
+
+    #[test]
+    fn font_size_scales_the_bitmap_fallback() {
+        use crate::subparse::CueSettings;
+        let (w, h) = (200usize, 96usize);
+
+        let mut auto_buf = black(w, h);
+        overlay_with(w as u32, h as u32, "HI", CueSettings::default())
+            .render_active(&mut auto_buf, 0);
+
+        let mut big_buf = black(w, h);
+        overlay_with(w as u32, h as u32, "HI", CueSettings::default())
+            .with_font_size(32)
+            .render_active(&mut big_buf, 0);
+
+        let auto_h = ink_height(&auto_buf, w, h);
+        let big_h = ink_height(&big_buf, w, h);
+        assert!(auto_h > 0, "the default size renders");
+        assert!(
+            big_h > auto_h,
+            "font-size=32 paints taller ink than the derived size ({big_h} vs {auto_h})"
+        );
     }
 }

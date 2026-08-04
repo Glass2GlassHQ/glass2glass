@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M893: `textoverlay` gains a `font-size` property (pixels, 0 = canvas-derived), honoured by all render paths.
+
 - M892: `textoverlay` shapes horizontal cues through cosmic-text (`text-shaping` feature): real shaping, bidi reordering, and automatic system-font discovery.
 
 - M891: `glimagesink` is a real vendor-neutral EGL / GL ES display sink (`GlSink`, NV12 + RGBA, no CUDA), with the GL conversion verified headlessly against a CPU reference.
