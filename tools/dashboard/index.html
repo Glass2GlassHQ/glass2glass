@@ -213,6 +213,20 @@ function render(msg) {
       lbl.appendChild(title);
       vp.appendChild(lbl);
     }
+    // Live traffic on this edge, under the caps label.
+    if (e.packets) {
+      const counts = document.createElementNS(SVG_NS, "text");
+      counts.setAttribute("class", "edge-lbl");
+      counts.setAttribute("x", mx);
+      counts.setAttribute("y", (y1 + y2) / 2 + 9);
+      counts.setAttribute("text-anchor", "middle");
+      const drops = e.drops ? `  ${e.drops} dropped` : "";
+      counts.textContent = `${e.packets} pkt  ${fmtBytes(e.bytes)}${drops}`;
+      const ctitle = document.createElementNS(SVG_NS, "title");
+      ctitle.textContent = `producer blocked ${fmtNs(e.blocked_ns)} on this link`;
+      counts.appendChild(ctitle);
+      vp.appendChild(counts);
+    }
   });
 
   nodes.forEach(n => {

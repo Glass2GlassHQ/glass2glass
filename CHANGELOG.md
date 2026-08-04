@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M846: live per-edge packet/byte/drop/blocked-time counters in the observer tap and dashboard, and observed entry points with per-element stats for the standalone fan-in / fan-out / session runners.
+
 - M845: structured log fields + timestamps, a ring-buffer flight-recorder sink, per-instance category override, and self-log names on the remaining logging elements.
 
 - M843: buffering posts on interior links (named per element), and a shared `QosTracker` gives synchronizing sinks periodic QoS stats plus the late-drop post.

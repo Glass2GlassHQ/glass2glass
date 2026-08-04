@@ -168,6 +168,72 @@ pub struct ElementLatency {
     pub fill_max_pct: u8,
 }
 
+/// Per-edge live traffic counters (M846), shared between a link's
+/// [`SenderSink`](crate::runtime::SenderSink) (the writer) and the observer tap
+/// (the reader). Writes are wait-free (three relaxed `fetch_add`s), so an
+/// instrumented link pays a few atomics per packet.
+///
+/// The end-of-run [`RunStats::frames_dropped`](crate::runtime::RunStats) folds
+/// every leaky link's drops into one number; these counters keep the same events
+/// per edge and readable while the run is still going.
+#[derive(Debug, Default)]
+pub struct EdgeCounters {
+    packets: AtomicU64,
+    bytes: AtomicU64,
+    drops: AtomicU64,
+    blocked_ns: AtomicU64,
+}
+
+impl EdgeCounters {
+    /// Record one packet that entered the link, carrying `bytes` of payload,
+    /// after `blocked_ns` awaiting capacity.
+    #[inline]
+    pub(crate) fn record_packet(&self, bytes: u64, blocked_ns: u64) {
+        self.packets.fetch_add(1, Ordering::Relaxed);
+        self.bytes.fetch_add(bytes, Ordering::Relaxed);
+        if blocked_ns > 0 {
+            self.blocked_ns.fetch_add(blocked_ns, Ordering::Relaxed);
+        }
+    }
+
+    /// Record one frame this link dropped (leaky policy, full channel).
+    #[inline]
+    pub(crate) fn record_drop(&self) {
+        self.drops.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn snapshot(&self) -> EdgeCounts {
+        EdgeCounts {
+            packets: self.packets.load(Ordering::Relaxed),
+            bytes: self.bytes.load(Ordering::Relaxed),
+            drops: self.drops.load(Ordering::Relaxed),
+            blocked_ns: self.blocked_ns.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// A read of one edge's [`EdgeCounters`], carried on
+/// [`EdgeInfo`](crate::runtime::EdgeInfo). All-zero on an uninstrumented edge
+/// (no observer attached).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EdgeCounts {
+    /// Packets (data + control) that entered the link.
+    pub packets: u64,
+    /// Payload bytes carried by those packets. Counts CPU-resident buffers only:
+    /// a device-domain frame (CUDA / texture handle) has no bytes crossing here,
+    /// so it adds `0`.
+    pub bytes: u64,
+    /// Frames this link dropped under a leaky
+    /// [`LinkPolicy`](crate::link::LinkPolicy).
+    pub drops: u64,
+    /// Nanoseconds the producer spent awaiting capacity on this link. On a
+    /// source's outgoing edge this is the one per-frame cost an outside observer
+    /// can attribute to the source honestly: how long downstream backpressure
+    /// held it up. A source's own pacing (waiting for the next captured frame)
+    /// happens inside its `run` loop and is indistinguishable from work there.
+    pub blocked_ns: u64,
+}
+
 /// A nullable probe handle threaded into an arm. Cloning shares the underlying
 /// [`ElementProbe`] (via `Arc`); `None` means the arm is not instrumented.
 pub type Probe = Option<Arc<ElementProbe>>;

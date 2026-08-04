@@ -203,6 +203,10 @@ async fn fanin_session_routes_each_input_and_ends_on_all_eos() {
     // The runner counted the union of frames consumed.
     assert_eq!(stats.frames_consumed, 8);
     assert_eq!(stats.frames_emitted, 8, "both sources' frames summed");
+    // M846: the session is the probed element, reported under its instance name.
+    assert_eq!(stats.per_element.len(), 1);
+    assert_eq!(stats.per_element[0].name, "RecordingSession0");
+    assert_eq!(stats.per_element[0].proc.count, 8, "every frame was timed");
 }
 
 /// A reverse signal (keyframe request) the session posts for input 0 reaches

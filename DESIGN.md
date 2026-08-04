@@ -2644,16 +2644,21 @@ answers a plain `GET /` with a self-contained dashboard page
 (`tools/dashboard/`) and a WebSocket upgrade with a JSON `telemetry` snapshot
 every 250 ms plus one `event` per `BusMessage` (fanned out to all clients via a
 broadcast channel drained off the `Bus`). Each telemetry edge carries its
-negotiated caps (from the `Observer`'s per-edge solution), which the page labels
-on the link; the page pans / zooms so a large graph stays navigable. It binds loopback by default;
+negotiated caps (from the `Observer`'s per-edge solution) and live counters
+(packets, CPU-payload bytes, drops, and `blocked_ns`, the time producers spent
+awaiting link capacity, from a wait-free `EdgeCounters` block the data-plane
+sink writes), which the page labels on the link; the page pans / zooms so a
+large graph stays navigable. It binds loopback by default;
 `--observe-host <addr>` (e.g. `0.0.0.0`) exposes it to other hosts, gated behind a
 no-auth warning since telemetry + edge previews carry frame content. The JSON is
 built in the transport, so `g2g-core` stays serde-free, consistent with the
 portability-core principle. The
 observer rides the cooperative graph runner and, via `run_graph_threaded_observed`,
 the threaded runner; both cover the muxer / demux fan nodes. The standalone
-hand-built fan-in / fan-out / session runners (`fanin.rs` / `runner.rs`, not
-reachable from `run_graph_observed`) are the remaining follow-up.
+hand-built fan-in / fan-out / session runners (`fanin.rs` / `runner.rs`) have
+their own `*_observed` entry points, name and probe their nodes like the graph
+runner, and fill `RunStats::per_element` even unobserved; the dynamic runners
+(arms attach at runtime) still report no per-element rows.
 
 `g2g-inspect --json [element]` (the `tooling-json` feature) emits the registry as
 JSON, the machine-readable sibling of the text dump: per element the identity,

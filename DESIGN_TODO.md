@@ -726,16 +726,11 @@ _(No open parser items.)_
 
 Outstanding developer-tooling tasks, highest leverage first.
 
-- **Per-element / per-link telemetry gaps.** Extend the `Observer` tap
-  (`g2g-core/src/runtime/observe.rs`) and the M399 `ElementProbe` coverage:
-  - Per-edge packet / byte counters + drops in the live tap (drops surface only
-    in end-of-run `RunStats`).
-  - The standalone fan-in / fan-out / session runners (`fanin.rs` / `runner.rs`
-    hand-built API, not reachable from `run_graph_observed`) leave `per_element`
-    empty: give them observed entry points and wire probes if that API needs to
-    be observable.
-  - Source-side timing: a source runs one long `run()` loop, so its cost only
-    shows as its downstream's input fill.
+- **Per-element / per-link telemetry gaps.** Remaining `Observer` coverage:
+  - The dynamic runners (`run_aggregator_dynamic`, `run_muxer_sink_dynamic`,
+    `run_source_tee_dynamic`, `run_source_router_dynamic`) leave `per_element`
+    empty: their arms attach at runtime, so the observer needs incremental node
+    registration rather than the one-shot `register`.
   - Validate the dashboard live against an RTSP source.
 - **Visual builder follow-ups.** For `tools/builder/` (React Flow):
   - YAML export (the JSON export already covers the graph model; schema shared).

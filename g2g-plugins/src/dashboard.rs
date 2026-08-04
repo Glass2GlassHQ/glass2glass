@@ -10,9 +10,12 @@
 //!
 //! Wire protocol (each WS frame is one JSON object, discriminated by `type`):
 //! - `{"type":"telemetry","uptime_ns":N,"nodes":[..],"edges":[{"from":i,"to":j,
-//!   "caps":"<gst-string>"|null}]}` where each node is `{"id","name","role",
-//!   "proc":{..}|null,"transit":{..}|null,"fill_mean_pct","fill_max_pct"}` and
-//!   `caps` is the edge's negotiated caps.
+//!   "caps":"<gst-string>"|null,"packets":N,"bytes":N,"drops":N,"blocked_ns":N}]}`
+//!   where each node is `{"id","name","role","proc":{..}|null,
+//!   "transit":{..}|null,"fill_mean_pct","fill_max_pct"}`, `caps` is the edge's
+//!   negotiated caps, and the counters are that edge's live traffic (packets and
+//!   payload bytes that crossed, frames dropped by a leaky link, and nanoseconds
+//!   the producer spent blocked on a full link).
 //! - `{"type":"event","kind":"eos"|"error"|...,...}` (see [`event_json`]).
 
 use std::collections::HashMap;
@@ -138,7 +141,17 @@ pub fn snapshot_json(snap: &TelemetrySnapshot) -> String {
     let edges: Vec<Value> = snap
         .edges
         .iter()
-        .map(|e| json!({ "from": e.from, "to": e.to, "caps": e.caps }))
+        .map(|e| {
+            json!({
+                "from": e.from,
+                "to": e.to,
+                "caps": e.caps,
+                "packets": e.counts.packets,
+                "bytes": e.counts.bytes,
+                "drops": e.counts.drops,
+                "blocked_ns": e.counts.blocked_ns,
+            })
+        })
         .collect();
     json!({
         "type": "telemetry",
@@ -371,7 +384,9 @@ fn handle_client_msg(text: &str, observer: &Observer, subs: &mut EdgeSubs) {
 mod tests {
     use super::*;
     use g2g_core::metrics::LatencySnapshot;
-    use g2g_core::runtime::{EdgeInfo, ElementLatency, NodeTelemetry, TelemetrySnapshot};
+    use g2g_core::runtime::{
+        EdgeCounts, EdgeInfo, ElementLatency, NodeTelemetry, TelemetrySnapshot,
+    };
 
     #[test]
     fn snapshot_json_shape() {
@@ -418,6 +433,12 @@ mod tests {
                 from: 0,
                 to: 1,
                 caps: None,
+                counts: EdgeCounts {
+                    packets: 12,
+                    bytes: 480,
+                    drops: 2,
+                    blocked_ns: 5_000,
+                },
             }],
         };
         let json = snapshot_json(&snap);
@@ -433,6 +454,11 @@ mod tests {
         assert_eq!(v["nodes"][1]["fill_max_pct"], 50);
         assert_eq!(v["edges"][0]["from"], 0);
         assert_eq!(v["edges"][0]["to"], 1);
+        // Live per-edge counters ride the same message.
+        assert_eq!(v["edges"][0]["packets"], 12);
+        assert_eq!(v["edges"][0]["bytes"], 480);
+        assert_eq!(v["edges"][0]["drops"], 2);
+        assert_eq!(v["edges"][0]["blocked_ns"], 5_000);
     }
 
     #[test]

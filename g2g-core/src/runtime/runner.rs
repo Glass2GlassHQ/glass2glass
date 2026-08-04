@@ -60,6 +60,10 @@ use crate::runtime::graph_runner::{broadcast, run_graph_inner, GraphNodeRef};
 #[cfg(feature = "std")]
 use crate::runtime::join::{dynamic_join, join_all};
 #[cfg(feature = "std")]
+use crate::runtime::observe::{link_tapped, register_runner_tap, TapEdge, TapNode};
+#[cfg(feature = "std")]
+use crate::runtime::{NodeRole, Observer, Probe};
+#[cfg(feature = "std")]
 use alloc::vec::Vec;
 
 /// Source-side element trait. Sources have no input pad, so the packet-in /
@@ -868,7 +872,38 @@ where
     Tx: MultiOutputElement,
     Clk: PipelineClock,
 {
-    run_source_fanout_inner(source, fanout, sinks, clock, link_capacity, None).await
+    run_source_fanout_inner(source, fanout, sinks, clock, link_capacity, None, None).await
+}
+
+/// As [`run_source_fanout`], but taps live telemetry into `observer` (M846), the
+/// hand-built analog of
+/// [`run_graph_observed`](crate::runtime::run_graph_observed): the topology is
+/// the source, the fan-out element, and the N branch sinks, each with its
+/// measured `process()` latency and per-link packet / byte / drop counters.
+#[cfg(feature = "std")]
+pub async fn run_source_fanout_observed<Src, Tx, Clk>(
+    source: &mut Src,
+    fanout: &mut Tx,
+    sinks: Vec<&mut dyn DynAsyncElement>,
+    clock: &Clk,
+    link_capacity: impl Into<LinkCapacity>,
+    observer: &Observer,
+) -> Result<RunStats, G2gError>
+where
+    Src: SourceLoop,
+    Tx: MultiOutputElement,
+    Clk: PipelineClock,
+{
+    run_source_fanout_inner(
+        source,
+        fanout,
+        sinks,
+        clock,
+        link_capacity,
+        None,
+        Some(observer),
+    )
+    .await
 }
 
 /// As [`run_source_fanout`], but posts a structured
@@ -888,10 +923,11 @@ where
     Tx: MultiOutputElement,
     Clk: PipelineClock,
 {
-    run_source_fanout_inner(source, fanout, sinks, clock, link_capacity, Some(bus)).await
+    run_source_fanout_inner(source, fanout, sinks, clock, link_capacity, Some(bus), None).await
 }
 
 #[cfg(feature = "std")]
+#[allow(clippy::too_many_arguments)]
 async fn run_source_fanout_inner<Src, Tx, Clk>(
     source: &mut Src,
     fanout: &mut Tx,
@@ -899,6 +935,7 @@ async fn run_source_fanout_inner<Src, Tx, Clk>(
     _clock: &Clk,
     link_capacity: impl Into<LinkCapacity>,
     bus: Option<&BusHandle>,
+    observer: Option<&Observer>,
 ) -> Result<RunStats, G2gError>
 where
     Src: SourceLoop,
@@ -908,6 +945,22 @@ where
     let link_capacity: usize = link_capacity.into().get();
     let branch_count = sinks.len();
     assert!(branch_count > 0, "fan-out needs at least one sink");
+
+    // M846: instance naming + a measured-latency probe for every node with a
+    // `process()` (the fan-out element and each branch sink), as in the linear
+    // runners. The fan-out element has no naming hook, so its probe is keyed by
+    // its type name.
+    let mut sinks = sinks;
+    let mut namer = crate::log::InstanceNamer::new();
+    let source_name = namer.add(crate::log::short_type_name::<Src>(), None);
+    SourceLoop::set_instance_name(source, source_name.clone());
+    let fanout_probe = ElementProbe::new(namer.add(crate::log::short_type_name::<Tx>(), None));
+    let mut sink_probes = Vec::with_capacity(branch_count);
+    for sink in sinks.iter_mut() {
+        let name = namer.add(sink.log_category(), None);
+        sink.set_instance_name(name.clone());
+        sink_probes.push(ElementProbe::new(name));
+    }
 
     // M18 step 1: solve source → fanout via the solver using the new
     // `MultiOutputElement::caps_constraint_as_input()` trait method
@@ -927,18 +980,46 @@ where
 
     source.configure_pipeline(&fixated)?.reject_refixate()?;
     MultiOutputElement::configure_pipeline(fanout, &fixated)?.reject_refixate()?;
-    let mut sinks = sinks;
     for sink in sinks.iter_mut() {
         sink.configure_pipeline(&fixated)?.reject_refixate()?;
     }
 
-    let (src_tx, src_rx) = link(link_capacity);
+    let tap = observer.is_some();
+    let (src_tx, src_rx, src_tap) = link_tapped(link_capacity, tap);
     let mut branch_senders = Vec::with_capacity(branch_count);
     let mut branch_receivers = Vec::with_capacity(branch_count);
+    let mut branch_taps = Vec::with_capacity(branch_count);
     for _ in 0..branch_count {
-        let (tx, rx) = link(link_capacity);
+        let (tx, rx, edge) = link_tapped(link_capacity, tap);
         branch_senders.push(SenderSink::new(tx));
         branch_receivers.push(rx);
+        branch_taps.push(edge);
+    }
+
+    // Dev-tooling tap: source 0, fan-out 1, then the branch sinks.
+    if let Some(obs) = observer {
+        let mut nodes: Vec<TapNode> = alloc::vec![
+            (source_name, NodeRole::Source, None),
+            (
+                alloc::string::String::from(fanout_probe.name()),
+                NodeRole::Tee,
+                Some(fanout_probe.clone()),
+            ),
+        ];
+        let mut edges: Vec<TapEdge> = alloc::vec![(0, 1, fixated.clone(), src_tap)];
+        for (i, (probe, edge)) in sink_probes
+            .iter()
+            .zip(core::mem::take(&mut branch_taps))
+            .enumerate()
+        {
+            nodes.push((
+                alloc::string::String::from(probe.name()),
+                NodeRole::Sink,
+                Some(probe.clone()),
+            ));
+            edges.push((1, 2 + i, fixated.clone(), edge));
+        }
+        register_runner_tap(obs, nodes, edges);
     }
 
     let source_fut: BoxFuture<'_, Result<u64, G2gError>> = Box::pin(async move {
@@ -946,6 +1027,7 @@ where
         source.run(&mut adapter).await
     });
 
+    let probe_for_fanout = fanout_probe.clone();
     let router_fut: BoxFuture<'_, Result<u64, G2gError>> = Box::pin(async move {
         let mut multi = MultiSenderSink::new(branch_senders);
         loop {
@@ -958,7 +1040,15 @@ where
                     return Ok::<u64, G2gError>(0);
                 }
                 Some(packet) => {
+                    let is_data = matches!(packet, PipelinePacket::DataFrame(_));
+                    if is_data {
+                        probe_for_fanout.record_fill(src_rx.fill_percent());
+                    }
+                    let t0 = is_data.then(ElementProbe::mark).flatten();
                     MultiOutputElement::process(fanout, packet, &mut multi).await?;
+                    if is_data {
+                        probe_for_fanout.record_proc_since(t0);
+                    }
                 }
                 None => return Ok(0),
             }
@@ -969,7 +1059,11 @@ where
     arms.push(source_fut);
     arms.push(router_fut);
 
-    for (sink, rx) in sinks.into_iter().zip(branch_receivers) {
+    for ((sink, rx), probe) in sinks
+        .into_iter()
+        .zip(branch_receivers)
+        .zip(sink_probes.iter().cloned())
+    {
         let bus_for_branch = bus.cloned();
         let sink_fut: BoxFuture<'_, Result<u64, G2gError>> = Box::pin(async move {
             let bus_for_branch = bus_for_branch;
@@ -1010,10 +1104,16 @@ where
                         }
                     }
                     Some(packet) => {
-                        if matches!(packet, PipelinePacket::DataFrame(_)) {
+                        let is_data = matches!(packet, PipelinePacket::DataFrame(_));
+                        if is_data {
                             consumed += 1;
+                            probe.record_fill(rx.fill_percent());
                         }
+                        let t0 = is_data.then(ElementProbe::mark).flatten();
                         sink.process(packet, &mut null).await?;
+                        if is_data {
+                            probe.record_proc_since(t0);
+                        }
                     }
                     None => return Ok(consumed),
                 }
@@ -1039,6 +1139,8 @@ where
     // Fan-out latency / allocation / clock election across N branches is
     // deferred (M12 covers the linear path); report neutral values rather than
     // a misleading partial one.
+    let mut probes: Vec<Probe> = alloc::vec![Some(fanout_probe)];
+    probes.extend(sink_probes.into_iter().map(Some));
     Ok(RunStats {
         frames_emitted: emitted,
         frames_consumed: consumed,
@@ -1048,7 +1150,7 @@ where
         clock_priority: ClockPriority::SystemFallback,
         base_time_ns: 0,
         coordinator_events: 0,
-        per_element: alloc::vec::Vec::new(),
+        per_element: crate::runtime::snapshot_all(&probes),
     })
 }
 
@@ -1408,8 +1510,42 @@ async fn dyn_branch_loop(
 pub async fn run_fanout_session<Sess, Clk>(
     session: &mut Sess,
     sinks: Vec<&mut dyn DynAsyncElement>,
+    clock: &Clk,
+    link_capacity: impl Into<LinkCapacity>,
+) -> Result<RunStats, G2gError>
+where
+    Sess: MultiOutputSource,
+    Clk: PipelineClock,
+{
+    run_fanout_session_inner(session, sinks, clock, link_capacity, None).await
+}
+
+/// As [`run_fanout_session`], but taps live telemetry into `observer` (M846):
+/// the session plus its N recv sinks, each sink's measured `process()` latency
+/// and every branch link's packet / byte / drop counters readable mid-run via
+/// [`Observer::snapshot`].
+#[cfg(feature = "std")]
+pub async fn run_fanout_session_observed<Sess, Clk>(
+    session: &mut Sess,
+    sinks: Vec<&mut dyn DynAsyncElement>,
+    clock: &Clk,
+    link_capacity: impl Into<LinkCapacity>,
+    observer: &Observer,
+) -> Result<RunStats, G2gError>
+where
+    Sess: MultiOutputSource,
+    Clk: PipelineClock,
+{
+    run_fanout_session_inner(session, sinks, clock, link_capacity, Some(observer)).await
+}
+
+#[cfg(feature = "std")]
+async fn run_fanout_session_inner<Sess, Clk>(
+    session: &mut Sess,
+    sinks: Vec<&mut dyn DynAsyncElement>,
     _clock: &Clk,
     link_capacity: impl Into<LinkCapacity>,
+    observer: Option<&Observer>,
 ) -> Result<RunStats, G2gError>
 where
     Sess: MultiOutputSource,
@@ -1423,20 +1559,56 @@ where
         "session output count must match the number of sinks"
     );
 
+    // M846: instance naming + one measured-latency probe per sink (the session
+    // drives itself through `run`, so it has no `process()` to time).
+    let mut sinks = sinks;
+    let mut namer = crate::log::InstanceNamer::new();
+    let session_name = namer.add(crate::log::short_type_name::<Sess>(), None);
+    let mut sink_probes = Vec::with_capacity(branch_count);
+    for sink in sinks.iter_mut() {
+        let name = namer.add(sink.log_category(), None);
+        sink.set_instance_name(name.clone());
+        sink_probes.push(ElementProbe::new(name));
+    }
+
     // Negotiate per output: the session self-fixates each output's caps and
     // configures the matching sink (no peer narrowing, like run_fanin_session).
-    let mut sinks = sinks;
+    let mut output_caps: Vec<Caps> = Vec::with_capacity(branch_count);
     for (i, sink) in sinks.iter_mut().enumerate() {
         let fixated = session.output_caps(i)?.fixate()?;
         sink.configure_pipeline(&fixated)?.reject_refixate()?;
+        output_caps.push(fixated);
     }
 
+    let tap = observer.is_some();
     let mut branch_senders = Vec::with_capacity(branch_count);
     let mut branch_receivers = Vec::with_capacity(branch_count);
+    let mut branch_taps = Vec::with_capacity(branch_count);
     for _ in 0..branch_count {
-        let (tx, rx) = link(link_capacity);
+        let (tx, rx, edge) = link_tapped(link_capacity, tap);
         branch_senders.push(SenderSink::new(tx));
         branch_receivers.push(rx);
+        branch_taps.push(edge);
+    }
+
+    // Dev-tooling tap: the session is node 0, its sinks follow.
+    if let Some(obs) = observer {
+        let mut nodes: Vec<TapNode> = alloc::vec![(session_name, NodeRole::Source, None)];
+        let mut edges: Vec<TapEdge> = Vec::with_capacity(branch_count);
+        for (i, ((probe, caps), edge)) in sink_probes
+            .iter()
+            .zip(output_caps.iter())
+            .zip(core::mem::take(&mut branch_taps))
+            .enumerate()
+        {
+            nodes.push((
+                alloc::string::String::from(probe.name()),
+                NodeRole::Sink,
+                Some(probe.clone()),
+            ));
+            edges.push((0, 1 + i, caps.clone(), edge));
+        }
+        register_runner_tap(obs, nodes, edges);
     }
 
     let session_fut: BoxFuture<'_, Result<u64, G2gError>> = Box::pin(async move {
@@ -1446,7 +1618,11 @@ where
 
     let mut arms: Vec<BoxFuture<'_, Result<u64, G2gError>>> = Vec::with_capacity(branch_count + 1);
     arms.push(session_fut);
-    for (sink, rx) in sinks.into_iter().zip(branch_receivers) {
+    for ((sink, rx), probe) in sinks
+        .into_iter()
+        .zip(branch_receivers)
+        .zip(sink_probes.iter().cloned())
+    {
         let sink_fut: BoxFuture<'_, Result<u64, G2gError>> = Box::pin(async move {
             let mut null = NullSink;
             let mut consumed: u64 = 0;
@@ -1468,10 +1644,16 @@ where
                         }
                     }
                     Some(packet) => {
-                        if matches!(packet, PipelinePacket::DataFrame(_)) {
+                        let is_data = matches!(packet, PipelinePacket::DataFrame(_));
+                        if is_data {
                             consumed += 1;
+                            probe.record_fill(rx.fill_percent());
                         }
+                        let t0 = is_data.then(ElementProbe::mark).flatten();
                         sink.process(packet, &mut null).await?;
+                        if is_data {
+                            probe.record_proc_since(t0);
+                        }
                     }
                     None => return Ok(consumed),
                 }
@@ -1497,7 +1679,9 @@ where
         clock_priority: ClockPriority::SystemFallback,
         base_time_ns: 0,
         coordinator_events: 0,
-        per_element: alloc::vec::Vec::new(),
+        per_element: crate::runtime::snapshot_all(
+            &sink_probes.into_iter().map(Some).collect::<Vec<_>>(),
+        ),
     })
 }
 

@@ -936,7 +936,7 @@ async fn prepare_graph<'a>(
             .map(|e| crate::runtime::EdgeInfo {
                 from: e.src.node.0 as usize,
                 to: e.dst.node.0 as usize,
-                caps: None,
+                ..Default::default()
             })
             .collect();
         obs.register(names, roles, probes.clone(), edges);
@@ -1229,6 +1229,13 @@ fn build_channels<'a>(
         if policy != crate::link::LinkPolicy::Block {
             tx.set_drop_counter(dropped.clone());
         }
+        // Live per-edge traffic counters, on every edge while an observer is
+        // attached (unlike transit, they cost nothing to keep aligned).
+        if instrument {
+            tx.set_counters(alloc::sync::Arc::new(
+                crate::runtime::instrument::EdgeCounters::default(),
+            ));
+        }
         txs.push(Some(tx));
         rxs.push(Some(rx));
     }
@@ -1283,6 +1290,19 @@ fn build_channels<'a>(
         coord_handle,
         coordinator,
     }
+}
+
+/// Hand `obs` the per-edge taps that only exist once the channels are built: the
+/// content-inspection slot, the negotiated caps, and the live traffic counters.
+/// Aligned with the edge ids registered during `prepare_graph`.
+fn register_edge_taps(obs: &Observer, txs: &[Option<LinkSender>], solution: &[Caps]) {
+    let probes: Vec<crate::runtime::channel::ProbeSlot> = txs
+        .iter()
+        .map(|o| o.as_ref().map(|s| s.probe.clone()).unwrap_or_default())
+        .collect();
+    let counters: Vec<Option<alloc::sync::Arc<crate::runtime::instrument::EdgeCounters>>> =
+        txs.iter().map(|o| o.as_ref()?.counters.clone()).collect();
+    obs.register_edges(probes, solution.to_vec(), counters);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1346,19 +1366,13 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
     } = build_channels(&vg, &topo, link_capacity, observer.is_some());
 
     // Dev-tooling edge tap: hand the observer each edge's content-inspection slot
-    // (shared with the arm's `SenderSink`) + its negotiated caps, so a preview
-    // subscriber can sample packets crossing any edge. No arm changes needed; the
-    // slot is empty (pass-through) until a subscriber installs an interceptor.
+    // (shared with the arm's `SenderSink`), its negotiated caps, and its live
+    // traffic counters, so a preview subscriber can sample packets crossing any
+    // edge and a dashboard can watch its packet / byte / drop totals. No arm
+    // changes needed; the slot is empty (pass-through) until a subscriber
+    // installs an interceptor.
     if let Some(obs) = observer {
-        let edge_probes: Vec<crate::runtime::channel::ProbeSlot> = (0..vg.edge_count())
-            .map(|e| {
-                txs.get(e)
-                    .and_then(|o| o.as_ref())
-                    .map(|s| s.probe.clone())
-                    .unwrap_or_default()
-            })
-            .collect();
-        obs.register_edges(edge_probes, solution.clone());
+        register_edge_taps(obs, &txs, &solution);
     }
 
     let mut arms: Vec<BoxFuture<'a, Result<u64, G2gError>>> = Vec::with_capacity(n + 1);
@@ -1700,18 +1714,9 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
         coordinator,
     } = build_channels(&vg, &topo, link_capacity, observer.is_some());
 
-    // Dev-tooling edge tap: same as the cooperative path, hand the observer each
-    // edge's content-inspection slot + negotiated caps. No arm changes needed.
+    // Dev-tooling edge tap: same as the cooperative path.
     if let Some(obs) = observer {
-        let edge_probes: Vec<crate::runtime::channel::ProbeSlot> = (0..vg.edge_count())
-            .map(|e| {
-                txs.get(e)
-                    .and_then(|o| o.as_ref())
-                    .map(|s| s.probe.clone())
-                    .unwrap_or_default()
-            })
-            .collect();
-        obs.register_edges(edge_probes, solution.clone());
+        register_edge_taps(obs, &txs, &solution);
     }
 
     // One `spawn_arm` handle per arm (mirrors the cooperative `arms` vec). Each

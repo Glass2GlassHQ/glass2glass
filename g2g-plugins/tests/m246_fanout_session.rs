@@ -147,4 +147,11 @@ async fn fanout_session_routes_each_output_and_ends_on_eos() {
     assert_eq!(ve.load(Ordering::SeqCst), 1, "video EOS once");
     assert_eq!(ae.load(Ordering::SeqCst), 1, "audio EOS once");
     assert_eq!(stats.frames_consumed, 8, "both sinks' frames summed");
+    // M846: both branch sinks are probed, reported under their instance names.
+    let rows: std::vec::Vec<(&str, u64)> = stats
+        .per_element
+        .iter()
+        .map(|e| (e.name.as_str(), e.proc.count))
+        .collect();
+    assert_eq!(rows, std::vec![("CountingSink0", 5), ("CountingSink1", 3)]);
 }

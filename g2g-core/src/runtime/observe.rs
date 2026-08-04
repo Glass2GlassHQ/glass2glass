@@ -24,7 +24,7 @@ use spin::Mutex;
 use crate::caps::Caps;
 use crate::graph::NodeKind;
 use crate::runtime::channel::ProbeSlot;
-use crate::runtime::instrument::Probe;
+use crate::runtime::instrument::{EdgeCounters, EdgeCounts, Probe};
 use crate::runtime::ElementLatency;
 
 /// The topology role of a node: the serialization-friendly projection of
@@ -82,6 +82,9 @@ struct State {
     /// runner registers them (after channels are built).
     edge_probes: Vec<ProbeSlot>,
     edge_caps: Vec<Caps>,
+    /// Per edge id: the link's live packet / byte / drop counters. `None` for an
+    /// edge the runner did not instrument.
+    edge_counters: Vec<Option<Arc<EdgeCounters>>>,
 }
 
 impl Observer {
@@ -112,14 +115,21 @@ impl Observer {
         s.edges = edges;
     }
 
-    /// Install the per-edge content-inspection slots + negotiated caps, aligned
-    /// with the edges registered above. Called by the runner after the channels
-    /// are built; separate from [`register`](Self::register) because the slots
-    /// live on the links, which are created after negotiation.
-    pub(crate) fn register_edges(&self, edge_probes: Vec<ProbeSlot>, edge_caps: Vec<Caps>) {
+    /// Install the per-edge content-inspection slots, negotiated caps, and live
+    /// traffic counters, aligned with the edges registered above. Called by the
+    /// runner after the channels are built; separate from
+    /// [`register`](Self::register) because all three live on the links, which
+    /// are created after negotiation.
+    pub(crate) fn register_edges(
+        &self,
+        edge_probes: Vec<ProbeSlot>,
+        edge_caps: Vec<Caps>,
+        edge_counters: Vec<Option<Arc<EdgeCounters>>>,
+    ) {
         let mut s = self.inner.state.lock();
         s.edge_probes = edge_probes;
         s.edge_caps = edge_caps;
+        s.edge_counters = edge_counters;
     }
 
     /// The content-inspection slot for edge `idx`, for installing a
@@ -158,8 +168,9 @@ impl Observer {
                 latency: probe.as_ref().map(|p| p.snapshot()),
             })
             .collect();
-        // Fill each edge's negotiated caps from the aligned `edge_caps` (present
-        // once the runner has registered them, after negotiation).
+        // Fill each edge's negotiated caps and live counters from the aligned
+        // `edge_caps` / `edge_counters` (present once the runner has registered
+        // them, after negotiation).
         let edges = s
             .edges
             .iter()
@@ -168,6 +179,12 @@ impl Observer {
                 from: e.from,
                 to: e.to,
                 caps: s.edge_caps.get(i).map(|c| c.to_gst_string()),
+                counts: s
+                    .edge_counters
+                    .get(i)
+                    .and_then(|c| c.as_ref())
+                    .map(|c| c.snapshot())
+                    .unwrap_or_default(),
             })
             .collect();
         TelemetrySnapshot {
@@ -182,6 +199,78 @@ impl Default for Observer {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// The observer-side handles of one link: its content-inspection slot and, when
+/// the runner instrumented it, its live traffic counters.
+#[derive(Debug, Default)]
+pub(crate) struct EdgeTap {
+    pub(crate) probe: ProbeSlot,
+    pub(crate) counters: Option<Arc<EdgeCounters>>,
+}
+
+/// Build a link plus the observer-side taps a hand-built runner registers.
+/// `tap` is false when no observer is attached, leaving the link exactly as
+/// cheap as a bare [`link`](crate::runtime::link).
+pub(crate) fn link_tapped(
+    capacity: usize,
+    tap: bool,
+) -> (
+    crate::runtime::LinkSender,
+    crate::runtime::LinkReceiver,
+    EdgeTap,
+) {
+    let (mut tx, rx) = crate::runtime::link(capacity);
+    let counters = tap.then(|| {
+        let c = Arc::new(EdgeCounters::default());
+        tx.set_counters(c.clone());
+        c
+    });
+    let edge = EdgeTap {
+        probe: tx.probe.clone(),
+        counters,
+    };
+    (tx, rx, edge)
+}
+
+/// One node of a hand-built runner's topology: instance name, role, and the
+/// measured-latency probe of the element behind it (`None` for a source or a
+/// structural node with no `process()`).
+pub(crate) type TapNode = (String, NodeRole, Probe);
+
+/// One link of a hand-built runner's topology: endpoints (indices into the node
+/// list), negotiated caps, and the link's taps.
+pub(crate) type TapEdge = (usize, usize, Caps, EdgeTap);
+
+/// Install a hand-built runner's topology into `obs`. The fan-in / fan-out /
+/// session runners have no `Graph` for the runner to walk, so they describe
+/// their nodes and links directly; the resulting snapshot is the same shape
+/// `run_graph_observed` produces.
+pub(crate) fn register_runner_tap(obs: &Observer, nodes: Vec<TapNode>, edges: Vec<TapEdge>) {
+    let mut names = Vec::with_capacity(nodes.len());
+    let mut roles = Vec::with_capacity(nodes.len());
+    let mut probes = Vec::with_capacity(nodes.len());
+    for (name, role, probe) in nodes {
+        names.push(name);
+        roles.push(role);
+        probes.push(probe);
+    }
+    let mut infos = Vec::with_capacity(edges.len());
+    let mut caps = Vec::with_capacity(edges.len());
+    let mut slots = Vec::with_capacity(edges.len());
+    let mut counters = Vec::with_capacity(edges.len());
+    for (from, to, edge_caps, tap) in edges {
+        infos.push(EdgeInfo {
+            from,
+            to,
+            ..Default::default()
+        });
+        caps.push(edge_caps);
+        slots.push(tap.probe);
+        counters.push(tap.counters);
+    }
+    obs.register(names, roles, probes, infos);
+    obs.register_edges(slots, caps, counters);
 }
 
 /// A point-in-time read of a running graph's telemetry.
@@ -210,13 +299,16 @@ pub struct NodeTelemetry {
 }
 
 /// A directed link, by node index, with its negotiated caps (the `to_gst_string`
-/// of the solved per-edge `Caps`). `caps` is `None` until the runner registers
-/// the negotiated solution, and in a topology-only `EdgeInfo`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// of the solved per-edge `Caps`) and its live traffic counters. `caps` is `None`
+/// until the runner registers the negotiated solution, and in a topology-only
+/// `EdgeInfo`; `counts` advances as packets cross and is all-zero on an
+/// uninstrumented edge.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EdgeInfo {
     pub from: usize,
     pub to: usize,
     pub caps: Option<alloc::string::String>,
+    pub counts: EdgeCounts,
 }
 
 #[cfg(test)]
@@ -243,7 +335,7 @@ mod tests {
             alloc::vec![EdgeInfo {
                 from: 0,
                 to: 1,
-                caps: None
+                ..Default::default()
             }],
         );
 
@@ -266,7 +358,7 @@ mod tests {
             alloc::vec![EdgeInfo {
                 from: 0,
                 to: 1,
-                caps: None
+                ..Default::default()
             }]
         );
     }
