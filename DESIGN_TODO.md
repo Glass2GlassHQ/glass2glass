@@ -412,6 +412,9 @@ Phased plan:
 - **WebVTT track writing** (mkv, mp4 `wvtt`): blocked on a reference peer.
   ffmpeg reads only the WebM `D_WEBVTT/*` carriage (different block payload)
   and cannot write WebVTT into MP4 at all; reading both stays supported.
+- **Matroska `ContentEncoding`:** inflate zlib / header-stripped blocks at
+  demux. Today a compressed track's blocks forward raw (`MkvTrack::compressed`
+  marks them; only a compressed subpicture selection refuses loudly).
 
 ## Codecs
 
@@ -504,10 +507,11 @@ _(No open parser items.)_
   decode path (`cea` decoders + `CcExtract` + file- and HLS-`playbin` auto-plug)
   and the CEA-608 encode path (`Cc608Enc` + `CcInsert`) are done (DESIGN.md
   §4.18). Still open: MPEG-2 user-data caption extraction.
-- **Bitmap / picture subtitles (DVD / PGS / DVB).** RLE-image subtitles, not
-  text: a `Caps::SubPicture { codec }` variant + RLE image decoders, mirroring the
-  `CompressedVideo` / `RawVideo` split rather than folding into `Text`. Niche;
-  deferred until a concrete need.
+- **Bitmap / picture subtitles: DVB + PGS.** Decoders for DVB subtitles (ETSI
+  EN 300 743, the TS path above) and Blu-ray PGS as further `SubPictureFormat`
+  codings, with the `S_DVBSUB` / `S_HDMV/PGS` Matroska track mappings (both
+  land on `MkvCodec::Other` today). Also open: a `.idx`/`.sub` sidecar source
+  element, and a muxer write path for a `SubPicture` pad.
 - **Tensor substrate orientation descriptor (M181).** A deferred
   rotate/mirror descriptor the sink can absorb in hardware (DRM/KMS, Wayland
   `set_buffer_transform`, VAAPI VPP, D3D11 VideoProcessor), with eager strided /

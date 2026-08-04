@@ -400,6 +400,13 @@ pub fn default_registry() -> Registry {
         "klvdecode",
         || Box::new(crate::klv::KlvDecode::new()),
     ));
+    // VobSub (DVD subpicture) decoder (M899): bitmap cues become full-frame
+    // transparent RGBA canvases a compositor paints over the video,
+    // e.g. `mkvdemux stream=vobsub ! vobsubdec ! c.` .
+    reg.register_launch(LaunchFactory::of::<crate::vobsubdec::VobSubDec>(
+        "vobsubdec",
+        || Box::new(crate::vobsubdec::VobSubDec::new()),
+    ));
     // Detection-box overlay (M102): draws the frame's `AnalyticsMeta` bounding
     // boxes onto the RGBA frame, so a detector's output is visible downstream
     // (e.g. `... ! analyticsoverlay ! videoconvert ! autovideosink`). No pad
@@ -1147,6 +1154,8 @@ fn register_aliases(reg: &mut Registry) {
         "autoaudiosink",
         &["alsasink", "pulsesink", "coreaudiosink", "fakesink"],
     );
+    // gst's name for the DVD subpicture decoder.
+    reg.register_alias("dvdsubdec", &["vobsubdec"]);
     // gst's macOS audio element names.
     reg.register_alias("osxaudiosink", &["coreaudiosink", "fakesink"]);
     reg.register_alias("osxaudiosrc", &["coreaudiosrc"]);

@@ -21,7 +21,7 @@ use alloc::vec::Vec;
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError,
     OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
-    VideoCodec,
+    SubPictureFormat, VideoCodec,
 };
 
 #[derive(Debug)]
@@ -429,6 +429,9 @@ pub fn parse_caps_set(desc: &str) -> Option<CapsSet> {
         // gst names AAC `audio/mpeg` (with mpegversion=4, which we don't require).
         "audio/mpeg" => audio_set(&[AudioFormat::Aac]),
         "meta/x-klv" => Some(CapsSet::one(Caps::Klv)),
+        "subpicture/x-dvd" => Some(CapsSet::one(Caps::SubPicture {
+            format: SubPictureFormat::VobSub,
+        })),
         _ => None,
     }
 }

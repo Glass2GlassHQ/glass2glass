@@ -468,6 +468,12 @@ jobs:
       # and g2g reads the same atoms out of an ffmpeg-authored file.
       - name: MP4 tag oracle (mp4mux + mp4demux vs ffmpeg)
         run: cargo test -p g2g-plugins --locked --features std --test m838_mp4_tags -- --nocapture
+      # VobSub bitmap subtitles (M899): ffmpeg muxes the authored cues into an
+      # `S_VOBSUB` Matroska track g2g demuxes and decodes to their rectangles and
+      # times, and compositing those canvases matches ffmpeg's own dvdsub
+      # `overlay` burn-in pixel for pixel.
+      - name: VobSub oracle (mkvdemux + vobsubdec vs ffmpeg)
+        run: cargo test -p g2g-plugins --locked --features std --test m899_vobsub -- --nocapture
       # Legacy FLV codecs (M831): the Sorenson / MP3 payloads g2g demuxes match
       # libavcodec's own FLV demuxer, and ffprobe reads each codec back out of a
       # g2g-muxed FLV (VP6 and Speex, which no ffmpeg build encodes).

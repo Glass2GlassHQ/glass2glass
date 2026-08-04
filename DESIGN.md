@@ -1890,7 +1890,10 @@ carried on the frame, the `BlockGroup`'s `BlockDuration` scaled onto
 `MkvFrame.duration_ns` (a `SimpleBlock` leaves it `0`); `S_TEXT/ASS` and
 `S_TEXT/WEBVTT` are likewise de-framed to plain `Text{Utf8}` cue text (via the
 `CodecPrivate` header), and `mkv_playbin` auto-plugs the subtitle overlay
-(§4.18). Unlike `TsDemux`,
+(§4.18). `S_VOBSUB` is the bitmap case: `MkvCodec::VobSub` ->
+`Caps::SubPicture { VobSub }` (`MkvStream::VobSub`), whose blocks are forwarded
+verbatim as subpicture units after the track's `.idx` `CodecPrivate` goes out in
+band ahead of them (§4.18). Unlike `TsDemux`,
 Matroska's Tracks element carries concrete geometry and audio parameters, so the
 demuxer refines the output caps itself via `CapsChanged` once Tracks is parsed,
 without a downstream bitstream parser. An H.264 / H.265 track's blocks are
@@ -2390,6 +2393,39 @@ is the head of the authoring pipeline, so `subtitlesrc -> subparse -> ccinsert -
 tsmux` (the `examples/cc_author.rs` flow) embeds captions from a subtitle file; the
 whole `subparse -> ccinsert -> ... -> ccextract -> textoverlay` round trip is pure
 in-graph.
+
+**Bitmap subtitles** are the one subtitle family that is not text, so they get
+their own coded media kind: `Caps::SubPicture { format: SubPictureFormat }`, a
+stream of coded bitmap cues (`VobSub` today, the DVD subpicture format; DVB and
+PGS are the same shape). It sits beside `Caps::Text` rather than inside it,
+because nothing downstream of a `Text` link can render a palette-indexed run-length
+bitmap, and `Caps::ClosedCaption` is the model: a coded carriage variant whose
+decoder produces something the rest of the graph already understands. Here that
+is raw pixels. `VobSubDec` (`vobsubdec`, gst's `dvdsubdec`) emits one full-frame
+transparent `Caps::RawVideo{Rgba8}` canvas per cue at the subpicture display
+geometry, stamped with the cue's PTS and duration, so the consumer is the ordinary
+`compositor` and there is no bitmap-cue overlay element to build. A cue ends with a
+second, fully transparent canvas at its hide time: the compositor holds an overlay
+pad's last frame between output frames, and a zero-alpha source-over is a no-op,
+so the clear canvas is exactly what makes a cue disappear on time. One more empty
+canvas opens the stream, so the compositor is not waiting on this input for
+however long it is until the first cue.
+
+The VobSub bitstream itself (`vobsub.rs`, `no_std`) is one subpicture unit per
+cue: a packet size and a control-sequence offset, 2-bits-per-pixel run-length data
+in two interlaced fields (even rows then odd, each row byte-aligned), then control
+sequences carrying the display rectangle, four palette indices and four alpha
+nibbles, the two field offsets, and the show / hide dates in 1024/90000 s units.
+The 16-entry RGB palette and the display size are *not* in the bitstream: they ride
+the `.idx` text a Matroska `S_VOBSUB` track carries as its `CodecPrivate`, which
+`MkvDemux` forwards in band ahead of the first cue the way it forwards the FLAC
+and Opus headers, and which the decoder tells apart from a cue by parsing it as
+`.idx` first. Every size, offset and coordinate off the wire is range-checked and
+the parse returns `None` rather than allocating on a bogus rectangle; the pixel
+data is bounded by the control-sequence offset, so a truncated packet fails
+instead of decoding the control table as run lengths. A track that declares a
+Matroska `ContentCompression` is refused outright, since its blocks are not SPU
+packets and nothing here inflates them.
 
 ### 4.19 Native WebRTC (`str0m`)
 

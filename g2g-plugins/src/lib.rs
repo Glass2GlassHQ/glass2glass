@@ -149,6 +149,10 @@ pub mod cea;
 pub mod klv;
 // MISB ST 0903 VMTI moving-target reports, nested in ST 0601 tag 74 (no_std).
 pub mod vmti;
+// VobSub (DVD subpicture) bitmap subtitles: the SPU / .idx codec (no_std) plus
+// the `vobsubdec` element that renders cues to RGBA canvases.
+pub mod vobsub;
+pub mod vobsubdec;
 // Cursor-on-Target bridge (M811): the ST 0601 -> CoT XML event builder (no_std)
 // plus the `cotsink` TAK egress element, which needs `udp-egress`.
 pub mod cotsink;

@@ -110,6 +110,13 @@ pub enum Caps {
     /// DTVCC packets. Captions embedded in a coded video stream stay
     /// [`Caps::CompressedVideo`]; this is the separate-track case only.
     ClosedCaption { format: ClosedCaptionFormat },
+    /// A coded bitmap-subtitle (subpicture) stream: each frame one cue's coded
+    /// bitmap, not pixels. The bitmap subtitle counterpart of [`Caps::Text`],
+    /// which stays the timed-text kind. `format` names the coding
+    /// ([`SubPictureFormat`]); a subpicture decoder turns it into full-frame
+    /// transparent [`Caps::RawVideo`] RGBA canvases a compositor can paint over
+    /// video, so nothing downstream needs a bitmap-cue concept.
+    SubPicture { format: SubPictureFormat },
 }
 
 impl Caps {
@@ -129,7 +136,8 @@ impl Caps {
             | Caps::ByteStream { .. }
             | Caps::Text { .. }
             | Caps::Klv
-            | Caps::ClosedCaption { .. } => false,
+            | Caps::ClosedCaption { .. }
+            | Caps::SubPicture { .. } => false,
         }
     }
 
@@ -237,6 +245,9 @@ impl Caps {
             (Caps::ClosedCaption { format: a }, Caps::ClosedCaption { format: b }) if a == b => {
                 Ok(Caps::ClosedCaption { format: *a })
             }
+            (Caps::SubPicture { format: a }, Caps::SubPicture { format: b }) if a == b => {
+                Ok(Caps::SubPicture { format: *a })
+            }
             _ => Err(G2gError::CapsMismatch),
         }
     }
@@ -318,7 +329,8 @@ impl Caps {
             | Caps::ByteStream { .. }
             | Caps::Text { .. }
             | Caps::Klv
-            | Caps::ClosedCaption { .. } => Ok(self.clone()),
+            | Caps::ClosedCaption { .. }
+            | Caps::SubPicture { .. } => Ok(self.clone()),
             Caps::Tensor { .. } => Ok(self.clone()),
         }
     }
@@ -345,7 +357,8 @@ impl Caps {
             | Caps::ByteStream { .. }
             | Caps::Text { .. }
             | Caps::Klv
-            | Caps::ClosedCaption { .. } => None,
+            | Caps::ClosedCaption { .. }
+            | Caps::SubPicture { .. } => None,
             Caps::Tensor { .. } => None,
         }
     }
@@ -412,6 +425,7 @@ impl Caps {
             Caps::Text { format } => String::from(text_format_gst_media_type(*format)),
             Caps::Klv => String::from("meta/x-klv"),
             Caps::ClosedCaption { format } => String::from(cc_format_gst_media_type(*format)),
+            Caps::SubPicture { format } => String::from(subpicture_gst_media_type(*format)),
         }
     }
 }
@@ -440,6 +454,15 @@ fn cc_format_gst_media_type(f: ClosedCaptionFormat) -> &'static str {
     match f {
         ClosedCaptionFormat::Cea608 => "closedcaption/x-cea-608,format=cc_data",
         ClosedCaptionFormat::Cea708 => "closedcaption/x-cea-708,format=cc_data",
+    }
+}
+
+/// GStreamer media-type string for a [`SubPictureFormat`]. `subpicture/x-dvd` is
+/// GStreamer's own type for the DVD SPU stream `dvdsubdec` consumes.
+#[cfg(feature = "alloc")]
+fn subpicture_gst_media_type(f: SubPictureFormat) -> &'static str {
+    match f {
+        SubPictureFormat::VobSub => "subpicture/x-dvd",
     }
 }
 
@@ -982,6 +1005,21 @@ pub enum ClosedCaptionFormat {
     /// samples hold a `ccdp` atom with a SMPTE ST 334-2 caption distribution
     /// packet).
     Cea708,
+}
+
+/// Which bitmap-subtitle coding a [`Caps::SubPicture`] stream carries. Each
+/// coding has its own cue framing, palette carriage, and bitmap compression, so
+/// a subpicture decoder declares the one it reads rather than sniffing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum SubPictureFormat {
+    /// DVD subpictures (VobSub): one MPEG-PS subpicture unit (SPU) per cue, a
+    /// 2-bits-per-pixel run-length bitmap in two interlaced fields plus a control
+    /// sequence carrying the display rectangle, the four palette indices and
+    /// alphas, and the show / hide times. The 16-entry RGB palette and the
+    /// display geometry ride out of band, in the `.idx` text a Matroska track
+    /// carries as its `CodecPrivate`.
+    VobSub,
 }
 
 /// Raw pixel layout carried in a [`Caps::RawVideo`] link. Split out of

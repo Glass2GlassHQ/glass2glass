@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M899: `vobsubdec` decodes DVD VobSub bitmap subtitles (`Caps::SubPicture`, mkv `S_VOBSUB`) into RGBA cue canvases for the compositor, pixel-validated against ffmpeg.
+
 - M898: subtitle track muxing: `mkvmuxn` writes `S_TEXT/UTF8`/`S_TEXT/ASS` and `mp4muxn` writes `tx3g` from a `Caps::Text` pad, ffmpeg-validated both directions.
 
 - M897: reverse playback (`rate < 0`) through `mp4src`: backward GOP walk plus a `gopreverse` element after the decoder, bit-exact against forward decode.

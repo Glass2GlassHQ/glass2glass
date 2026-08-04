@@ -61,6 +61,9 @@ const ID_VIDEO: u32 = 0x00E0;
 const ID_PIXEL_WIDTH: u32 = 0x00B0;
 const ID_PIXEL_HEIGHT: u32 = 0x00BA;
 const ID_AUDIO: u32 = 0x00E1;
+const ID_CONTENT_ENCODINGS: u32 = 0x6D80;
+const ID_CONTENT_ENCODING: u32 = 0x6240;
+const ID_CONTENT_COMPRESSION: u32 = 0x5034;
 const ID_CHANNELS: u32 = 0x009F;
 const ID_SAMPLING_FREQ: u32 = 0x00B5;
 const ID_CLUSTER: u32 = 0x1F43_B675;
@@ -126,9 +129,13 @@ pub enum MkvCodec {
     /// `S_TEXT/UTF8` -> [`TextFormat::Utf8`] (verbatim), `S_TEXT/ASS` / `S_TEXT/SSA`
     /// -> [`TextFormat::Ssa`] (the `Text` field of the comma-separated block, tags
     /// stripped), `S_TEXT/WEBVTT` -> [`TextFormat::WebVtt`] (cue text, inline tags
-    /// stripped). Bitmap subtitle codecs (`S_DVBSUB` / `S_HDMV/PGS`) stay
-    /// [`MkvCodec::Other`] (a `SubPicture` track, not text).
+    /// stripped). The bitmap subtitle codecs are not text: `S_VOBSUB` has its
+    /// own variant, and `S_DVBSUB` / `S_HDMV/PGS` stay [`MkvCodec::Other`].
     Subtitle(TextFormat),
+    /// A DVD subpicture (bitmap) subtitle track (`S_VOBSUB`). Each block is one
+    /// SPU packet; the track's `CodecPrivate` is the `.idx` text carrying the
+    /// palette and display size the decoder needs.
+    VobSub,
     /// A `CodecID` this demuxer does not map to a g2g caps type.
     Other,
 }
@@ -161,6 +168,8 @@ impl MkvCodec {
             MkvCodec::Subtitle(TextFormat::Ssa)
         } else if id == b"S_TEXT/WEBVTT" {
             MkvCodec::Subtitle(TextFormat::WebVtt)
+        } else if id == b"S_VOBSUB" {
+            MkvCodec::VobSub
         } else {
             MkvCodec::Other
         }
@@ -185,6 +194,7 @@ impl MkvCodec {
             // reads the WebM `D_WEBVTT/*` ids instead, whose block payload leads
             // with the cue identifier and settings, so writing WebVTT here would be
             // a carriage no reference peer reads back.
+            MkvCodec::VobSub => b"S_VOBSUB",
             MkvCodec::Subtitle(_) | MkvCodec::Other => return None,
         })
     }
@@ -201,7 +211,7 @@ impl MkvCodec {
     fn track_type(self) -> u8 {
         match self {
             MkvCodec::Aac | MkvCodec::Opus | MkvCodec::Ac3 | MkvCodec::Flac => 2,
-            MkvCodec::Subtitle(_) => 0x11,
+            MkvCodec::Subtitle(_) | MkvCodec::VobSub => 0x11,
             _ => 1,
         }
     }
@@ -225,6 +235,10 @@ pub struct MkvTrack {
     /// Spaces the frames of a laced block; an unscaled value, unlike block
     /// timestamps.
     pub default_duration_ns: u64,
+    /// Whether the track declares a `ContentCompression` (zlib, lzo, or header
+    /// stripping). None of those is applied here, so a consumer of a flagged
+    /// track's blocks would be reading compressed bytes as a bitstream.
+    pub compressed: bool,
 }
 
 /// One `CuePoint` from the Segment `Cues` index: a seekable time and the byte
@@ -843,6 +857,7 @@ fn parse_track_entry(body: &[u8]) -> Option<ParsedTrack> {
     let mut channels = 0u8;
     let mut sample_rate = 0u32;
     let mut default_duration_ns = 0u64;
+    let mut compressed = false;
     for (id, data) in children(body) {
         match id {
             ID_TRACK_NUMBER => number = read_uint(data),
@@ -875,6 +890,13 @@ fn parse_track_entry(body: &[u8]) -> Option<ParsedTrack> {
                     }
                 }
             }
+            // Only noted, never applied: a flagged track's blocks are not the
+            // bitstream they claim to be, so the demuxer refuses them.
+            ID_CONTENT_ENCODINGS => {
+                compressed = children(data)
+                    .filter(|(eid, _)| *eid == ID_CONTENT_ENCODING)
+                    .any(|(_, enc)| children(enc).any(|(cid, _)| cid == ID_CONTENT_COMPRESSION));
+            }
             _ => {} // TrackType is implied by the CodecID prefix; FlagLacing etc. ignored
         }
     }
@@ -900,6 +922,7 @@ fn parse_track_entry(body: &[u8]) -> Option<ParsedTrack> {
             channels,
             sample_rate,
             default_duration_ns,
+            compressed,
         },
         codec_private: codec_private.to_vec(),
         tags,
@@ -2280,7 +2303,8 @@ mod tests {
                     height: 480,
                     channels: 0,
                     sample_rate: 0,
-                    default_duration_ns: 0
+                    default_duration_ns: 0,
+                    compressed: false,
                 },
                 MkvTrack {
                     number: 2,
@@ -2290,7 +2314,8 @@ mod tests {
                     height: 0,
                     channels: 2,
                     sample_rate: 48_000,
-                    default_duration_ns: 0
+                    default_duration_ns: 0,
+                    compressed: false,
                 },
             ]
         );
@@ -2609,7 +2634,8 @@ mod tests {
                 height: 240,
                 channels: 0,
                 sample_rate: 0,
-                default_duration_ns: 0
+                default_duration_ns: 0,
+                compressed: false,
             }]
         );
         let frames = d.take_frames();
