@@ -16,6 +16,20 @@ use portable_atomic::AtomicU64;
 /// their hardware capture clock onto this domain at `configure_pipeline` time.
 pub trait PipelineClock {
     fn now_ns(&self) -> u64;
+
+    /// This clock as a deadline sleeper, when it is one. The cooperative runner
+    /// reads it to derive a fan-in element's tick timer
+    /// ([`PipelinePacket::Tick`](crate::PipelinePacket::Tick), M880) from the
+    /// pipeline clock itself, so a `parse_launch` line running against any
+    /// sleepable clock ticks without a separate entry point.
+    ///
+    /// Every [`AsyncClock`] implementor should override this with `Some(self)`;
+    /// a blanket impl cannot, since `AsyncClock: PipelineClock` means it would
+    /// collide with this default. `None` (the default) means the clock only
+    /// tells time, so fan-in arms run untimed.
+    fn as_ticker(&self) -> Option<&dyn DynAsyncClock> {
+        None
+    }
 }
 
 /// Pipeline clock with async sleep capability. Used by elements that
@@ -55,6 +69,10 @@ impl<T: AsyncClock> DynAsyncClock for T {
 impl<T: PipelineClock + ?Sized> PipelineClock for Arc<T> {
     fn now_ns(&self) -> u64 {
         (**self).now_ns()
+    }
+
+    fn as_ticker(&self) -> Option<&dyn DynAsyncClock> {
+        (**self).as_ticker()
     }
 }
 

@@ -10,7 +10,7 @@ use core::pin::Pin;
 
 use alloc::boxed::Box;
 
-use g2g_core::{AsyncClock, PipelineClock};
+use g2g_core::{AsyncClock, DynAsyncClock, PipelineClock};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
@@ -40,6 +40,10 @@ impl Default for WasmClock {
 impl PipelineClock for WasmClock {
     fn now_ns(&self) -> u64 {
         ms_to_ns(performance_now_ms() - self.epoch_ms)
+    }
+
+    fn as_ticker(&self) -> Option<&dyn DynAsyncClock> {
+        Some(self)
     }
 }
 

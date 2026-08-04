@@ -413,8 +413,8 @@ impl WgpuCompositor {
 
     /// Keep emitting at the output framerate while input 0 stalls, re-compositing
     /// its last frame once per frame period with the overlays as they stand
-    /// (zero-order-hold). Off by default. Needs a runner that ticks the fan-in arm
-    /// (`run_muxer_sink_ticked`), as on the CPU element.
+    /// (zero-order-hold). Off by default. Needs a pipeline clock that can sleep on
+    /// a deadline, as on the CPU element.
     pub fn with_timed_output(mut self) -> Self {
         self.state.set_hold(true);
         self

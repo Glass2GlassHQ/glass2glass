@@ -622,6 +622,16 @@ impl core::fmt::Debug for GraphTemplate {
 /// ([`GraphNode`]) or borrow them ([`GraphNodeRef<'a>`], what the convenience
 /// wrappers build). A non-`System` frame in a tee or a negotiation conflict
 /// fails loud.
+///
+/// When `clock` can sleep on a deadline
+/// ([`PipelineClock::as_ticker`](crate::PipelineClock::as_ticker), which every
+/// [`AsyncClock`](crate::AsyncClock) answers), each fan-in arm also gets a
+/// **deadline tick** (M880): a fan-in element declaring a
+/// [`tick_interval_ns`](crate::MultiInputElement::tick_interval_ns) receives
+/// [`PipelinePacket::Tick`] on that period even while its inputs are silent, so a
+/// compositor can hold its output rate over a stalled pad (zero-order-hold on
+/// that pad's last frame) instead of freezing with it. A clock that only tells
+/// time, or an element that declares no interval, runs untimed.
 pub async fn run_graph<'a, Clk: PipelineClock>(
     graph: Graph<GraphNodeRef<'a>>,
     clock: &Clk,
@@ -637,36 +647,6 @@ pub async fn run_graph<'a, Clk: PipelineClock>(
         None,
         None,
         None,
-    )
-    .await
-}
-
-/// As [`run_graph`], but every fan-in arm also gets a **deadline tick** (M877):
-/// `clock` is both the pipeline clock and the timer the arms sleep on, so a fan-in
-/// element declaring a
-/// [`tick_interval_ns`](crate::MultiInputElement::tick_interval_ns) receives
-/// [`PipelinePacket::Tick`] on that period even while its inputs are silent. A
-/// compositor uses it to hold its output rate over a stalled pad
-/// (zero-order-hold on that pad's last frame) instead of freezing with it.
-///
-/// Needs an [`AsyncClock`](crate::AsyncClock) (plain [`run_graph`] takes any
-/// [`PipelineClock`], which cannot sleep). Elements that declare no interval run
-/// exactly as they do there.
-pub async fn run_graph_ticked<'a, Clk: crate::clock::AsyncClock + 'a>(
-    graph: Graph<GraphNodeRef<'a>>,
-    clock: &'a Clk,
-    link_capacity: impl Into<LinkCapacity>,
-) -> Result<RunStats, G2gError> {
-    run_graph_inner(
-        graph,
-        clock,
-        link_capacity,
-        None,
-        None,
-        None,
-        None,
-        None,
-        Some(clock as &dyn DynAsyncClock),
     )
     .await
 }
@@ -1409,7 +1389,7 @@ fn register_edge_taps(
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
     graph: Graph<GraphNodeRef<'a>>,
-    clock: &Clk,
+    clock: &'a Clk,
     link_capacity: impl Into<LinkCapacity>,
     bus: Option<&BusHandle>,
     state: Option<StateController>,
@@ -1418,6 +1398,10 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
     observer: Option<&Observer>,
     ticker: Option<&'a dyn DynAsyncClock>,
 ) -> Result<RunStats, G2gError> {
+    // A pipeline clock that can sleep on a deadline is the fan-in tick timer
+    // (M880), so every entry point ticks without one of its own. An explicit
+    // `ticker` still wins.
+    let ticker = ticker.or_else(|| clock.as_ticker());
     let link_capacity: usize = link_capacity.into().get();
     let mut vg = graph.finish().map_err(|_| G2gError::CapsMismatch)?;
     let n = vg.node_count();
@@ -2046,14 +2030,18 @@ pub async fn run_graph_threaded<Clk: PipelineClock, S: GraphSpawner>(
 }
 
 /// As [`run_graph_threaded`], but every fan-in arm also gets a **deadline tick**
-/// (M879), the thread-per-arm analog of [`run_graph_ticked`]: `clock` is both the
-/// pipeline clock and the timer the arms sleep on, so a fan-in element declaring a
+/// (M879): `clock` is both the pipeline clock and the timer the arms sleep on, so a
+/// fan-in element declaring a
 /// [`tick_interval_ns`](crate::MultiInputElement::tick_interval_ns) receives
 /// [`PipelinePacket::Tick`] on that period even while its inputs are silent.
 ///
 /// The clock arrives as a shared handle rather than a borrow because each arm's
 /// builder closure moves onto its own OS thread: `Arc::new(my_clock)` (any
-/// [`AsyncClock`](crate::AsyncClock) that is `Send + Sync`) coerces to it.
+/// [`AsyncClock`](crate::AsyncClock) that is `Send + Sync`) coerces to it. That
+/// ownership is also why this entry exists at all: the cooperative runners derive
+/// the timer from the clock they already hold
+/// ([`PipelineClock::as_ticker`](crate::PipelineClock::as_ticker) yields a borrow,
+/// M880), and a borrow cannot cross onto the arm threads.
 #[cfg(all(feature = "std", feature = "multi-thread"))]
 pub async fn run_graph_threaded_ticked<S: GraphSpawner>(
     graph: Graph<GraphNode>,

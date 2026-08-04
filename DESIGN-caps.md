@@ -211,6 +211,18 @@ closure owns everything it carries, so `run_graph_threaded_ticked` takes the clo
 as an `Arc<dyn DynAsyncClock + Send + Sync>` and each muxer arm is wrapped in a
 future that owns its handle and lends it to the shared arm code.
 
+**The fan-in deadline tick comes from the pipeline clock.** A fan-in element that
+declares a `tick_interval_ns` receives `PipelinePacket::Tick` on that period even
+while its inputs are silent (§3.1), which is how a compositor holds its output rate
+over a stalled pad. The timer is not a separate runner input: `PipelineClock::as_ticker`
+returns the clock itself when it can sleep on a deadline (every `AsyncClock`
+overrides it; the default is `None`), and every cooperative entry point derives the
+arm's timer from the clock it was already given. So a `parse_launch` line with
+`compositor timed-output=true` ticks under `g2g-launch` with no ticked entry point,
+and a pipeline whose clock only tells time runs untimed. Only the thread-per-arm
+runner keeps a separate entry, because its arms need an owned clock handle rather
+than the borrow `as_ticker` yields.
+
 **Element-level cooperative offload.** A separate, opt-in path lets the
 cooperative default runner overlap one heavy synchronous stage without a
 per-arm thread. `run_graph` polls every arm inside one `JoinAll` future on a

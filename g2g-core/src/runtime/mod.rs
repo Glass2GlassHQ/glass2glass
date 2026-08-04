@@ -81,8 +81,8 @@ pub use fanin::{
     run_aggregator_dynamic, run_aggregator_dynamic_observed, run_duplex_session,
     run_duplex_session_observed, run_fanin_session, run_fanin_session_observed, run_fanin_sink,
     run_fanin_sink_observed, run_muxer_sink, run_muxer_sink_dynamic,
-    run_muxer_sink_dynamic_observed, run_muxer_sink_ticked, run_muxer_sink_with_bus,
-    DynMultiInputElement, DynSourceLoop, DynamicFaninHandle,
+    run_muxer_sink_dynamic_observed, run_muxer_sink_with_bus, DynMultiInputElement, DynSourceLoop,
+    DynamicFaninHandle,
 };
 
 #[cfg(feature = "std")]
@@ -91,9 +91,9 @@ pub use gapless::{GaplessController, GaplessInstantWait, GaplessWait};
 #[cfg(feature = "std")]
 pub use graph_runner::{
     auto_plug_domain_converters, copy_plan, negotiate_graph, negotiate_graph_explained, run_graph,
-    run_graph_observed, run_graph_stateful, run_graph_ticked, run_graph_with_bus,
-    run_graph_with_copy_policy, run_graph_with_progress, DynMultiOutputElement, GraphNode,
-    GraphNodeRef, GraphTemplate, NegotiateError,
+    run_graph_observed, run_graph_stateful, run_graph_with_bus, run_graph_with_copy_policy,
+    run_graph_with_progress, DynMultiOutputElement, GraphNode, GraphNodeRef, GraphTemplate,
+    NegotiateError,
 };
 
 #[cfg(feature = "std")]

@@ -21,8 +21,8 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use super::autoplug::PadRequest;
 use crate::bus::BusHandle;
 use crate::caps::Caps;
-use crate::clock::{AsyncClock, DynAsyncClock, PipelineClock};
 use crate::clock::{ClockCandidate, ClockPriority};
+use crate::clock::{DynAsyncClock, PipelineClock};
 use crate::element::{
     AsyncElement, BoxFuture, ConfigureOutcome, DynAsyncElement, ElementBound, OutputSink,
     PushOutcome, Reconfigure,
@@ -1417,6 +1417,13 @@ where
 /// Negotiation is per-input: each source ↔ its muxer pad fixate independently;
 /// the sink is configured against `mux.output_caps()`. A `ReFixate` anywhere
 /// fails with `FixationFailed`.
+///
+/// When `clock` can sleep on a deadline ([`PipelineClock::as_ticker`], which every
+/// [`AsyncClock`](crate::AsyncClock) answers), the muxer arm also gets a **deadline tick** (M880): a
+/// muxer declaring a [`MultiInputElement::tick_interval_ns`] receives
+/// [`PipelinePacket::Tick`] on that period even while its inputs are silent, so a
+/// compositor can keep emitting at its output rate when a pad stalls
+/// (zero-order-hold on that pad's last frame) instead of freezing with it.
 pub async fn run_muxer_sink<Mux, Snk, Clk>(
     sources: Vec<&mut dyn DynSourceLoop>,
     mux: &mut Mux,
@@ -1430,40 +1437,6 @@ where
     Clk: PipelineClock,
 {
     run_muxer_sink_inner(sources, mux, sink, clock, link_capacity, None, None).await
-}
-
-/// As [`run_muxer_sink`], but the muxer arm also gets a **deadline tick** (M875):
-/// `clock` is both the pipeline clock and the timer the arm sleeps on, so a muxer
-/// declaring a [`MultiInputElement::tick_interval_ns`] receives
-/// [`PipelinePacket::Tick`] on that period even while its inputs are silent. A
-/// compositor uses it to keep emitting at its output rate when a pad stalls
-/// (zero-order-hold on that pad's last frame) instead of freezing with it.
-///
-/// Needs an [`AsyncClock`] (the plain [`run_muxer_sink`] takes any
-/// [`PipelineClock`], which cannot sleep). A muxer that declares no interval runs
-/// exactly as it does there.
-pub async fn run_muxer_sink_ticked<Mux, Snk, Clk>(
-    sources: Vec<&mut dyn DynSourceLoop>,
-    mux: &mut Mux,
-    sink: &mut Snk,
-    clock: &Clk,
-    link_capacity: impl Into<LinkCapacity>,
-) -> Result<RunStats, G2gError>
-where
-    Mux: MultiInputElement,
-    Snk: AsyncElement,
-    Clk: AsyncClock,
-{
-    run_muxer_sink_inner(
-        sources,
-        mux,
-        sink,
-        clock,
-        link_capacity,
-        None,
-        Some(clock as &dyn DynAsyncClock),
-    )
-    .await
 }
 
 /// As [`run_muxer_sink`], but posts a structured

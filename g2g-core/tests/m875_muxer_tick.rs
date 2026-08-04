@@ -5,9 +5,11 @@
 //! its own cadence (zero-order-hold over the stalled pad) instead of freezing
 //! with the input. An element that declares no interval never sees one.
 //!
-//! Several entry points deliver it, over the same fixtures: `run_muxer_sink_ticked`
-//! (M875), `run_graph_ticked` on a hand-built graph, the PTS-ordered muxer arm a
-//! fan-in opts into with `input_pts_ordered` (both M877), and
+//! The cooperative entry points derive the timer from the pipeline clock itself
+//! (M880: any clock answering `as_ticker`), so the same fixtures run through plain
+//! `run_muxer_sink` (M875), plain `run_graph` on a hand-built graph, and the
+//! PTS-ordered muxer arm a fan-in opts into with `input_pts_ordered` (M877). The
+//! thread-per-arm runner needs an owned clock handle, so it keeps its own entry,
 //! `run_graph_threaded_ticked`, where each arm runs on its own OS thread (M879).
 //!
 //! Time is mocked, so the tests are deterministic and finish in microseconds
@@ -25,11 +27,11 @@ use std::sync::Arc;
 use g2g_core::fanout::MultiInputElement;
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{
-    block_on, run_graph_ticked, run_muxer_sink_ticked, DynSourceLoop, GraphNodeRef, SourceLoop,
+    block_on, run_graph, run_muxer_sink, DynSourceLoop, GraphNodeRef, SourceLoop,
 };
 use g2g_core::{
-    AsyncClock, AsyncElement, Caps, ConfigureOutcome, Dim, Frame, FrameTiming, G2gError, Graph,
-    OutputSink, PipelineClock, PipelinePacket, Rate, RawVideoFormat,
+    AsyncClock, AsyncElement, Caps, ConfigureOutcome, Dim, DynAsyncClock, Frame, FrameTiming,
+    G2gError, Graph, OutputSink, PipelineClock, PipelinePacket, Rate, RawVideoFormat,
 };
 
 const TICK_NS: u64 = 33_000_000;
@@ -92,6 +94,10 @@ impl PipelineClock for VirtualClock {
     fn now_ns(&self) -> u64 {
         self.now_ns.load(Ordering::Acquire)
     }
+
+    fn as_ticker(&self) -> Option<&dyn DynAsyncClock> {
+        Some(self)
+    }
 }
 
 impl AsyncClock for VirtualClock {
@@ -140,6 +146,10 @@ struct BusyClock {
 impl PipelineClock for BusyClock {
     fn now_ns(&self) -> u64 {
         self.now_ns.fetch_add(TICK_NS / 8, Ordering::AcqRel) + TICK_NS / 8
+    }
+
+    fn as_ticker(&self) -> Option<&dyn DynAsyncClock> {
+        Some(self)
     }
 }
 
@@ -410,10 +420,8 @@ fn ticks_fire_while_the_input_stalls_and_the_frames_reach_the_sink() {
     let mut sink = CountSink::default();
 
     let sources: Vec<&mut dyn DynSourceLoop> = vec![&mut src];
-    let stats = block_on(run_muxer_sink_ticked(
-        sources, &mut mux, &mut sink, &clock, 2,
-    ))
-    .expect("ticked muxer run");
+    let stats = block_on(run_muxer_sink(sources, &mut mux, &mut sink, &clock, 2))
+        .expect("ticked muxer run");
 
     let fired = ticks.load(Ordering::Acquire);
     assert!(
@@ -446,10 +454,7 @@ fn an_element_that_declares_no_interval_never_ticks() {
     let mut sink = CountSink::default();
 
     let sources: Vec<&mut dyn DynSourceLoop> = vec![&mut src];
-    block_on(run_muxer_sink_ticked(
-        sources, &mut mux, &mut sink, &clock, 2,
-    ))
-    .expect("un-ticked muxer run");
+    block_on(run_muxer_sink(sources, &mut mux, &mut sink, &clock, 2)).expect("un-ticked muxer run");
 
     assert_eq!(
         ticks.load(Ordering::Acquire),
@@ -479,10 +484,8 @@ fn a_busy_arm_still_hits_its_deadline() {
     let mut sink = CountSink::default();
 
     let sources: Vec<&mut dyn DynSourceLoop> = vec![&mut flood, &mut stalled];
-    block_on(run_muxer_sink_ticked(
-        sources, &mut mux, &mut sink, &clock, 2,
-    ))
-    .expect("busy ticked muxer run");
+    block_on(run_muxer_sink(sources, &mut mux, &mut sink, &clock, 2))
+        .expect("busy ticked muxer run");
 
     let fired = ticks.load(Ordering::Acquire);
     assert!(
@@ -497,7 +500,7 @@ fn a_busy_arm_still_hits_its_deadline() {
 }
 
 /// M877: runs `StallSrc -> mux -> CountSink` as a hand-built graph through
-/// `run_graph_ticked`, and reports the ticks the mux saw plus the frames that
+/// `run_graph`, and reports the ticks the mux saw plus the frames that
 /// reached the sink. Covers both fan-in arms: `pts_ordered` picks the PTS-ordered
 /// one.
 fn stalled_graph_run(
@@ -524,17 +527,17 @@ fn stalled_graph_run(
     g.link(s, mux_node.input(0)).expect("link source to pad 0");
     g.link(mux_node.output(), k)
         .expect("link merged output to sink");
-    block_on(run_graph_ticked(g, &clock, 2)).expect("ticked graph run");
+    block_on(run_graph(g, &clock, 2)).expect("ticked graph run");
 
     (ticks.load(Ordering::Acquire), sink.frames)
 }
 
 #[test]
-fn run_graph_ticked_delivers_the_tick_on_a_hand_built_graph() {
+fn run_graph_delivers_the_tick_on_a_hand_built_graph() {
     let (fired, frames) = stalled_graph_run(Some(TICK_NS), false, 3);
     assert!(
         fired >= 3,
-        "run_graph_ticked must tick the fan-in while its only input stalls, got {fired}"
+        "run_graph must tick the fan-in while its only input stalls, got {fired}"
     );
     assert_eq!(
         frames,
@@ -597,7 +600,7 @@ fn the_pts_ordered_arm_ticks_while_it_holds_frames_back() {
     g.link(held_node, mux_node.input(0)).expect("link pad 0");
     g.link(stalled_node, mux_node.input(1)).expect("link pad 1");
     g.link(mux_node.output(), k).expect("link merged output");
-    block_on(run_graph_ticked(g, &clock, 2)).expect("ticked pts graph run");
+    block_on(run_graph(g, &clock, 2)).expect("ticked pts graph run");
 
     let fired = ticks.load(Ordering::Acquire);
     assert!(

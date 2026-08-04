@@ -610,11 +610,12 @@ impl Compositor {
     /// (zero-order-hold), each time re-composited with the overlays as they stand,
     /// so a live overlay keeps animating over a frozen background. Off by default.
     ///
-    /// Needs a runner that ticks the fan-in arm (`run_muxer_sink_ticked`): the
-    /// element declares the period through
+    /// Needs a pipeline clock that can sleep on a deadline (any
+    /// [`AsyncClock`](g2g_core::AsyncClock), which is what the runner turns into the
+    /// arm's timer): the element declares the period through
     /// [`tick_interval_ns`](MultiInputElement::tick_interval_ns) and emits on the
-    /// [`PipelinePacket::Tick`] it gets back. Under any other runner it behaves
-    /// exactly as it does without this.
+    /// [`PipelinePacket::Tick`] it gets back. Against a clock that only tells time
+    /// it behaves exactly as it does without this.
     pub fn with_timed_output(mut self) -> Self {
         self.state.set_hold(true);
         self

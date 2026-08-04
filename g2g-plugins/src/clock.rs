@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use alloc::boxed::Box;
 
-use g2g_core::{AsyncClock, PipelineClock};
+use g2g_core::{AsyncClock, DynAsyncClock, PipelineClock};
 
 #[derive(Debug, Clone, Copy)]
 pub struct WallClock {
@@ -38,6 +38,10 @@ impl PipelineClock for WallClock {
             .try_into()
             .unwrap_or(u64::MAX)
     }
+
+    fn as_ticker(&self) -> Option<&dyn DynAsyncClock> {
+        Some(self)
+    }
 }
 
 impl AsyncClock for WallClock {
@@ -50,5 +54,20 @@ impl AsyncClock for WallClock {
                 tokio::time::sleep(Duration::from_nanos(deadline_ns - now)).await;
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The cooperative runner derives a fan-in element's deadline tick from the
+    /// pipeline clock (M880), so the clock every `g2g-launch` pipeline runs against
+    /// has to offer itself as that timer, on the same timeline it reports.
+    #[test]
+    fn the_wall_clock_offers_itself_as_a_ticker() {
+        let clock = WallClock::new();
+        let ticker = PipelineClock::as_ticker(&clock).expect("WallClock can sleep on a deadline");
+        assert!(ticker.now_ns() <= clock.now_ns(), "same timeline");
     }
 }
