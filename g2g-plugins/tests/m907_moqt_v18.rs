@@ -23,8 +23,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tokio::time::timeout;
-use web_transport_quinn::proto::ConnectResponse;
-use web_transport_quinn::{RecvStream, SendStream, Server, Session};
+use web_transport_quinn::Session;
 
 use g2g_core::element::AsyncElement;
 use g2g_core::frame::PipelinePacket;
@@ -32,230 +31,25 @@ use g2g_core::runtime::SourceLoop;
 use g2g_core::{ByteStreamEncoding, Caps, PropValue};
 
 use g2g_plugins::moqt::catalog;
-use g2g_plugins::moqt::coding::{Params, TrackName, TrackNamespace};
+use g2g_plugins::moqt::coding::{Params, TrackNamespace};
 use g2g_plugins::moqt::v18::coding::MessageParams;
-use g2g_plugins::moqt::v18::data::{
-    StreamItem, SubgroupHeader, SubgroupHeaderType, SubgroupObjectHeader, SubgroupStreamDecoder,
-};
+use g2g_plugins::moqt::v18::data::{SubgroupHeader, SubgroupHeaderType, SubgroupObjectHeader};
 use g2g_plugins::moqt::v18::datagram::DatagramObject;
 use g2g_plugins::moqt::v18::message::{msg_type, request_error_code, ControlMessage};
-use g2g_plugins::moqt::v18::session::{write_message, MessageReader, MOQT_PROTOCOL};
 use g2g_plugins::moqtsink::MoqtSink;
 use g2g_plugins::moqtsrc::MoqtSrc;
-use g2g_plugins::mp4mux::Mp4Mux;
 
 mod moqt_common;
-use moqt_common::{access_unit, bind_server, frame, h264_caps, CaptureSink, NullOut, TestCert};
-
-/// How long the dial from `configure_pipeline` gets to reach the peer.
-const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
-/// How long a message the element owes us gets to arrive.
-const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
-/// How long the data plane gets to deliver the objects that were written.
-const OBJECT_TIMEOUT: Duration = Duration::from_secs(10);
+use moqt_common::peer18::{accept_request, accept_v18, exchange_setup, record_data, subscribe};
+use moqt_common::{
+    bind_server, objects_when, publish_fragments, CaptureSink, NullOut, Objects, TestCert,
+    CONTROL_TIMEOUT, DIAL_TIMEOUT, OBJECT_TIMEOUT,
+};
 
 fn bmff_caps() -> Caps {
     Caps::ByteStream {
         encoding: ByteStreamEncoding::IsoBmff,
     }
-}
-
-// ------------------------------------------------------------------- the peer
-
-/// Every object that arrived on a subgroup stream: track alias, group, payload.
-type Objects = Arc<Mutex<Vec<(u64, u64, Vec<u8>)>>>;
-
-/// One request stream this peer opened toward the element (test 1), or accepted
-/// from it (test 2): the send half, the read half, and its buffered reader.
-struct RequestStream {
-    tx: SendStream,
-    rx: RecvStream,
-    reader: MessageReader,
-}
-
-impl RequestStream {
-    async fn send(&mut self, msg: ControlMessage) {
-        write_message(&mut self.tx, &msg)
-            .await
-            .expect("write request message");
-    }
-
-    async fn recv(&mut self) -> ControlMessage {
-        self.reader
-            .next(&mut self.rx)
-            .await
-            .expect("read request message")
-            .expect("the request stream ended")
-    }
-
-    async fn recv_within(&mut self, within: Duration) -> Option<ControlMessage> {
-        timeout(within, self.recv()).await.ok()
-    }
-
-    /// `Ok(None)` from the reader: the element finished the stream.
-    async fn ended(&mut self) -> bool {
-        matches!(self.reader.next(&mut self.rx).await, Ok(None))
-    }
-}
-
-/// Accept the element's session as a draft-18 server: select the `moqt-18`
-/// subprotocol, open our control stream with SETUP, and read the element's.
-async fn accept_v18(server: &mut Server) -> Session {
-    let request = server.accept().await.expect("a session");
-    assert!(
-        request
-            .connect()
-            .protocols
-            .iter()
-            .any(|p| p == MOQT_PROTOCOL),
-        "the element offered moqt-18: {:?}",
-        request.connect().protocols
-    );
-    request
-        .respond(ConnectResponse::OK.with_protocol(MOQT_PROTOCOL))
-        .await
-        .expect("CONNECT")
-}
-
-/// Exchange SETUPs: write ours on a fresh unidirectional stream, read the
-/// element's from the first one it opened. Both halves are returned so the
-/// caller keeps them alive: dropping a control stream mid-session is a
-/// violation the element acts on.
-async fn exchange_setup(session: &Session) -> (RecvStream, SendStream) {
-    let mut ours = session.open_uni().await.expect("our control stream");
-    write_message(
-        &mut ours,
-        &ControlMessage::Setup {
-            options: Params::new(),
-        },
-    )
-    .await
-    .expect("write SETUP");
-
-    let mut theirs = session.accept_uni().await.expect("their control stream");
-    let mut reader = MessageReader::new();
-    match reader.next(&mut theirs).await {
-        Ok(Some(ControlMessage::Setup { .. })) => (theirs, ours),
-        other => panic!("expected SETUP first, got {other:?}"),
-    }
-}
-
-/// Read one draft-18 subgroup stream to its end, recording each whole object
-/// under the alias and group its header named. `prefix` is whatever the caller
-/// already read while identifying the stream type.
-async fn read_subgroup(mut stream: RecvStream, prefix: Vec<u8>, objects: Objects) {
-    let mut decoder = SubgroupStreamDecoder::new(4 * 1024 * 1024);
-    if decoder.push(&prefix).is_err() {
-        return;
-    }
-    let mut route: Option<(u64, u64)> = None;
-    loop {
-        while let Ok(Some(item)) = decoder.next_item() {
-            match item {
-                StreamItem::Header(header) => route = Some((header.track_alias, header.group_id)),
-                StreamItem::Object(object) => {
-                    let Some((alias, group)) = route else {
-                        return;
-                    };
-                    objects
-                        .lock()
-                        .expect("object log")
-                        .push((alias, group, object.payload));
-                }
-            }
-        }
-        let mut chunk = vec![0u8; 16 * 1024];
-        match stream.read(&mut chunk).await {
-            Ok(Some(n)) if n > 0 => {
-                if decoder.push(&chunk[..n]).is_err() {
-                    return;
-                }
-            }
-            _ => return,
-        }
-    }
-}
-
-/// Accept the publisher's unidirectional data streams and record their objects.
-fn record_subgroups(session: Session) -> Objects {
-    let objects: Objects = Arc::new(Mutex::new(Vec::new()));
-    let log = Arc::clone(&objects);
-    tokio::spawn(async move {
-        while let Ok(stream) = session.accept_uni().await {
-            tokio::spawn(read_subgroup(stream, Vec::new(), Arc::clone(&log)));
-        }
-    });
-    objects
-}
-
-/// Wait until the recorded objects satisfy `done`, so an assertion never races
-/// the peer's read tasks, and return them.
-async fn objects_when(
-    objects: &Objects,
-    done: impl Fn(&[(u64, u64, Vec<u8>)]) -> bool,
-) -> Vec<(u64, u64, Vec<u8>)> {
-    let deadline = Instant::now() + OBJECT_TIMEOUT;
-    loop {
-        {
-            let log = objects.lock().expect("object log");
-            if done(&log) {
-                return log.clone();
-            }
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the objects the element wrote never arrived"
-        );
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-}
-
-/// Open a request stream toward the publisher with one SUBSCRIBE on it.
-async fn subscribe(session: &Session, id: u64, namespace: &str, track: &str) -> RequestStream {
-    let (mut tx, rx) = session.open_bi().await.expect("a request stream");
-    let msg = ControlMessage::Subscribe {
-        id,
-        namespace: TrackNamespace::from_path(namespace),
-        track_name: TrackName::new(track),
-        params: MessageParams::new(),
-    };
-    write_message(&mut tx, &msg).await.expect("write SUBSCRIBE");
-    RequestStream {
-        tx,
-        rx,
-        reader: MessageReader::new(),
-    }
-}
-
-// -------------------------------------------------------------- the publisher
-
-/// Mux `count` access units and publish every fragment they produce, returning
-/// the fMP4 byte stream that went into the sink.
-async fn publish_fragments(sink: &mut MoqtSink, count: u64) -> Vec<u8> {
-    let mut mux = Mp4Mux::new();
-    mux.configure_pipeline(&h264_caps(64, 48))
-        .expect("mp4mux caps");
-    let mut published = Vec::new();
-    for index in 0..count {
-        let mut captured = CaptureSink::default();
-        mux.process(
-            PipelinePacket::DataFrame(frame(access_unit(index, 0), index * 33_333_333, index)),
-            &mut captured,
-        )
-        .await
-        .expect("mux access unit");
-        for chunk in captured.frames {
-            published.extend_from_slice(&chunk);
-            sink.process(
-                PipelinePacket::DataFrame(frame(chunk, index * 33_333_333, index)),
-                &mut NullOut,
-            )
-            .await
-            .expect("publish fragment");
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    published
 }
 
 // ------------------------------------------------------------------ the tests
@@ -282,16 +76,10 @@ async fn the_sink_publishes_draft_18_when_the_server_selects_it() {
 
     // The namespace publish arrives on its own request stream and is answered
     // there.
-    let (ns_tx, ns_rx) = session.accept_bi().await.expect("a request stream");
-    let mut ns = RequestStream {
-        tx: ns_tx,
-        rx: ns_rx,
-        reader: MessageReader::new(),
-    };
-    match timeout(CONTROL_TIMEOUT, ns.recv())
+    let (mut ns, first) = timeout(CONTROL_TIMEOUT, accept_request(&session))
         .await
-        .expect("PUBLISH_NAMESPACE without a frame")
-    {
+        .expect("PUBLISH_NAMESPACE without a frame");
+    match first {
         ControlMessage::PublishNamespace {
             id, namespace: got, ..
         } => {
@@ -306,7 +94,7 @@ async fn the_sink_publishes_draft_18_when_the_server_selects_it() {
         other => panic!("expected PUBLISH_NAMESPACE, got {}", other.name()),
     }
 
-    let objects = record_subgroups(session.clone());
+    let (objects, _fetched) = record_data(session.clone());
 
     // Three subscriptions before any frame: the catalog (answerable), a media
     // track the `moov` has not named yet (held), and one that never exists.
@@ -407,16 +195,10 @@ async fn the_sink_carries_draft_18_objects_in_datagrams() {
         .expect("dial");
     let _their_control = exchange_setup(&session).await;
 
-    let (ns_tx, ns_rx) = session.accept_bi().await.expect("a request stream");
-    let mut ns = RequestStream {
-        tx: ns_tx,
-        rx: ns_rx,
-        reader: MessageReader::new(),
-    };
-    match timeout(CONTROL_TIMEOUT, ns.recv())
+    let (mut ns, first) = timeout(CONTROL_TIMEOUT, accept_request(&session))
         .await
-        .expect("namespace")
-    {
+        .expect("namespace");
+    match first {
         ControlMessage::PublishNamespace { .. } => {
             ns.send(ControlMessage::RequestOk {
                 params: MessageParams::new(),
@@ -569,13 +351,8 @@ async fn the_source_plays_a_draft_18_broadcast() {
             // the subscription under the subscriber.
             let mut kept = Vec::new();
             for _ in 0..3 {
-                let (tx, rx) = session.accept_bi().await.expect("a request stream");
-                let mut request = RequestStream {
-                    tx,
-                    rx,
-                    reader: MessageReader::new(),
-                };
-                let (id, name) = match request.recv().await {
+                let (mut request, first) = accept_request(&session).await;
+                let (id, name) = match first {
                     ControlMessage::Subscribe { id, track_name, .. } => {
                         (id, track_name.as_str_lossy())
                     }

@@ -471,6 +471,22 @@ fn decode_pair(r: &mut Reader<'_>, prev: u64) -> Result<(u64, ParamValue), MoqtE
     Ok((key, value))
 }
 
+/// Message parameter types (draft-16 §9.2.2).
+pub mod param {
+    pub const GROUP_ORDER: u64 = 0x22;
+    pub const SUBSCRIPTION_FILTER: u64 = 0x21;
+}
+
+/// The [`param::SUBSCRIPTION_FILTER`] value asking for objects after the
+/// largest one (draft-16 §5.1.2), which is the filter a joining FETCH requires
+/// its subscription to carry (§9.16.2). The parameter is a length-prefixed
+/// Subscription Filter, and this filter type has no fields of its own.
+pub fn subscription_filter_largest_object() -> Vec<u8> {
+    let mut out = Vec::new();
+    put_varint(&mut out, 0x2);
+    out
+}
+
 /// Setup parameter types (draft-16 §9.3, `setup/param_types.rs`).
 pub mod setup_param {
     pub const PATH: u64 = 0x1;

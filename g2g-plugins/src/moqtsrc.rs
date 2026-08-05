@@ -44,8 +44,10 @@ use g2g_core::{
 use web_transport_quinn::SendStream;
 
 use crate::moqt::catalog::{self, CatalogTrack};
-use crate::moqt::coding::{Params, TrackName, TrackNamespace};
-use crate::moqt::message::{request_error_code, ControlMessage};
+use crate::moqt::coding::{
+    param, subscription_filter_largest_object, Params, TrackName, TrackNamespace,
+};
+use crate::moqt::message::{request_error_code, ControlMessage, FetchType, JoiningFetch};
 use crate::moqt::reassembly::Reassembler;
 use crate::moqt::session::{implementation_name, DataEvent, MoqtSession};
 use crate::moqt::v18;
@@ -66,6 +68,18 @@ struct Subscription {
     /// The draft-18 request stream's send half. Draft-18 has no UNSUBSCRIBE:
     /// resetting this is how the subscription is cancelled at shutdown.
     request_tx: Option<SendStream>,
+    /// The request id of the catch-up FETCH joined to this subscription, and
+    /// the send half of its draft-18 request stream (dropping that half resets
+    /// the stream, which cancels the fetch).
+    fetch_request: Option<u64>,
+    fetch_tx: Option<SendStream>,
+    /// Whether the catch-up FETCH is still delivering. Live objects wait behind
+    /// it, because everything it carries is older.
+    catchup_pending: bool,
+    /// Fetched payloads in the order the publisher wrote them.
+    fetch_ready: VecDeque<Vec<u8>>,
+    /// Objects the catch-up FETCH delivered.
+    fetch_objects: u64,
     reassembler: Reassembler,
     /// Payloads in order, waiting to be emitted.
     ready: VecDeque<Vec<u8>>,
@@ -85,6 +99,11 @@ impl Subscription {
             request_id,
             track_alias: None,
             request_tx: None,
+            fetch_request: None,
+            fetch_tx: None,
+            catchup_pending: false,
+            fetch_ready: VecDeque::new(),
+            fetch_objects: 0,
             reassembler: Reassembler::new(max_groups, max_bytes),
             ready: VecDeque::new(),
             streams_closed: 0,
@@ -98,6 +117,23 @@ impl Subscription {
         let tail = self.reassembler.flush();
         self.ready.extend(tail);
         self.ended = true;
+    }
+
+    /// The next payload to emit. Everything the catch-up FETCH delivered comes
+    /// out first, and the live objects wait behind it until it has finished.
+    fn next_payload(&mut self) -> Option<Vec<u8>> {
+        if let Some(payload) = self.fetch_ready.pop_front() {
+            return Some(payload);
+        }
+        if self.catchup_pending {
+            return None;
+        }
+        self.ready.pop_front()
+    }
+
+    /// Whether this subscription has nothing more to deliver.
+    fn drained(&self) -> bool {
+        self.ended && !self.catchup_pending && self.fetch_ready.is_empty()
     }
 
     /// PUBLISH_DONE promised `stream_count` data streams: end now if they all
@@ -126,6 +162,7 @@ pub struct MoqtSrc {
     max_groups: u64,
     max_buffer_bytes: u64,
     max_object_bytes: u64,
+    catchup_groups: u64,
     num_buffers: u64,
     timeout_ms: u64,
 
@@ -133,6 +170,7 @@ pub struct MoqtSrc {
     /// Media track the catalog (or the fallback) selected, for tests and logs.
     selected_track: String,
     objects_received: u64,
+    catchup_objects: u64,
     groups_dropped: u64,
     objects_dropped: u64,
 }
@@ -160,11 +198,13 @@ impl MoqtSrc {
             max_groups: 8,
             max_buffer_bytes: 32 * 1024 * 1024,
             max_object_bytes: 16 * 1024 * 1024,
+            catchup_groups: 0,
             num_buffers: 0,
             timeout_ms: 15_000,
             configured: false,
             selected_track: String::new(),
             objects_received: 0,
+            catchup_objects: 0,
             groups_dropped: 0,
             objects_dropped: 0,
         }
@@ -181,6 +221,19 @@ impl MoqtSrc {
     pub fn with_track_name(mut self, name: impl Into<String>) -> Self {
         self.track_name = name.into();
         self
+    }
+
+    /// Ask the publisher for this many groups before the live edge with a
+    /// joining FETCH, and emit them before the live objects. Zero (the default)
+    /// starts at the live edge.
+    pub fn with_catchup_groups(mut self, groups: u64) -> Self {
+        self.catchup_groups = groups;
+        self
+    }
+
+    /// Objects a catch-up FETCH delivered on the last run.
+    pub fn catchup_objects(&self) -> u64 {
+        self.catchup_objects
     }
 
     /// Stop after `n` frames (the init segment counts as one).
@@ -255,11 +308,39 @@ impl SubsState {
         self.subs.iter_mut().find(|s| s.request_id == id)
     }
 
+    /// The subscription whose catch-up FETCH carries request id `id`.
+    fn by_fetch(&mut self, id: u64) -> Option<&mut Subscription> {
+        self.subs.iter_mut().find(|s| s.fetch_request == Some(id))
+    }
+
     fn handle_data(&mut self, event: DataEvent) {
+        // A fetch response names its request rather than a track, and arrives
+        // in order, so it goes straight to the subscription that asked for it.
+        match event {
+            DataEvent::FetchObject { request_id, object } => {
+                if let Some(sub) = self.by_fetch(request_id) {
+                    // A zero-length object is a status marker, not media.
+                    if !object.payload.is_empty() {
+                        sub.fetch_objects = sub.fetch_objects.saturating_add(1);
+                        sub.fetch_ready.push_back(object.payload);
+                    }
+                }
+                return;
+            }
+            DataEvent::FetchClosed { request_id } => {
+                if let Some(sub) = self.by_fetch(request_id) {
+                    sub.catchup_pending = false;
+                }
+                return;
+            }
+            _ => {}
+        }
         let alias = match &event {
             DataEvent::StreamOpened { track_alias, .. }
             | DataEvent::StreamClosed { track_alias, .. }
             | DataEvent::Object { track_alias, .. } => *track_alias,
+            // Handled above.
+            DataEvent::FetchObject { .. } | DataEvent::FetchClosed { .. } => return,
         };
         let Some(at) = self.subs.iter().position(|s| s.track_alias == Some(alias)) else {
             self.hold_orphan(event);
@@ -277,6 +358,8 @@ impl SubsState {
                 sub.streams_closed = sub.streams_closed.saturating_add(1);
             }
             DataEvent::Object { object, .. } => sub.reassembler.push(object),
+            // Routed by request id before this point.
+            DataEvent::FetchObject { .. } | DataEvent::FetchClosed { .. } => {}
         }
         sub.ready.extend(sub.reassembler.drain());
         if sub.done_after.is_some_and(|n| sub.streams_closed >= n) {
@@ -313,6 +396,8 @@ impl SubsState {
                 DataEvent::StreamOpened { track_alias, .. }
                 | DataEvent::StreamClosed { track_alias, .. }
                 | DataEvent::Object { track_alias, .. } => *track_alias == alias,
+                // A fetch response is never held: it is routed by request id.
+                DataEvent::FetchObject { .. } | DataEvent::FetchClosed { .. } => false,
             };
             if matches {
                 if let DataEvent::Object { object, .. } = &event {
@@ -366,19 +451,51 @@ enum Pumped {
 }
 
 impl Driver {
-    /// Send SUBSCRIBE for `name` and return its index in `subs`.
-    async fn subscribe(&mut self, name: &str) -> Result<usize, G2gError> {
+    /// Send SUBSCRIBE for `name` and return its index in `subs`. `catchup` asks
+    /// for the Largest Object filter, which draft-16 §9.16.2 requires of any
+    /// subscription a joining FETCH names.
+    async fn subscribe(&mut self, name: &str, catchup: bool) -> Result<usize, G2gError> {
         let id = self.session.allocate_request_id().ok_or_else(session_err)?;
+        let mut params = Params::new();
+        if catchup {
+            params.set_bytes(
+                param::SUBSCRIPTION_FILTER,
+                subscription_filter_largest_object(),
+            );
+        }
         self.session
             .send(&ControlMessage::Subscribe {
                 id,
                 namespace: self.namespace.clone(),
                 track_name: TrackName::new(name),
-                params: Params::new(),
+                params,
             })
             .await?;
         g2g_debug!(self, "SUBSCRIBE {name} as request {id}");
         Ok(self.state.add(id))
+    }
+
+    /// Ask for `groups` groups before the subscription's live edge with a
+    /// relative joining FETCH, so the two are contiguous.
+    async fn fetch_joining(&mut self, at: usize, groups: u64) -> Result<(), G2gError> {
+        let id = self.session.allocate_request_id().ok_or_else(session_err)?;
+        let joining_request_id = self.state.subs[at].request_id;
+        self.session
+            .send(&ControlMessage::Fetch {
+                id,
+                fetch_type: FetchType::RelativeJoining,
+                standalone: None,
+                joining: Some(JoiningFetch {
+                    joining_request_id,
+                    joining_start: groups,
+                }),
+                params: Params::new(),
+            })
+            .await?;
+        g2g_debug!(self, "FETCH {groups} groups back as request {id}");
+        self.state.subs[at].fetch_request = Some(id);
+        self.state.subs[at].catchup_pending = true;
+        Ok(())
     }
 
     /// Wait for one event and apply it.
@@ -432,6 +549,11 @@ impl Driver {
                 g2g_debug!(self, "request {id} refused, code {error_code}");
                 if let Some(sub) = self.state.by_request(id) {
                     sub.ended = true;
+                }
+                // A refused catch-up costs the buffer, not the stream: the live
+                // objects behind it are released.
+                if let Some(sub) = self.state.by_fetch(id) {
+                    sub.catchup_pending = false;
                 }
             }
             ControlMessage::PublishDone {
@@ -505,15 +627,29 @@ struct Driver18 {
 
 impl Driver18 {
     /// Open a request stream with SUBSCRIBE for `name` and return its index.
-    async fn subscribe(&mut self, name: &str) -> Result<usize, G2gError> {
+    /// `catchup` asks for the Largest Object filter, which is what makes the
+    /// subscription joinable by a FETCH (§10.12.2).
+    async fn subscribe(&mut self, name: &str, catchup: bool) -> Result<usize, G2gError> {
         let id = self.session.allocate_request_id();
+        let mut params = v18::coding::MessageParams::new();
+        if catchup {
+            let filter = v18::message::SubscriptionFilter::LargestObject
+                .to_bytes()
+                .map_err(|_| session_err())?;
+            params
+                .set(
+                    v18::coding::param::SUBSCRIPTION_FILTER,
+                    v18::coding::MsgParam::Bytes(filter),
+                )
+                .map_err(|_| session_err())?;
+        }
         let (tx, rx) = self
             .session
             .open_request(&v18::message::ControlMessage::Subscribe {
                 id,
                 namespace: self.namespace.clone(),
                 track_name: TrackName::new(name),
-                params: v18::coding::MessageParams::new(),
+                params,
             })
             .await?;
         g2g_debug!(self, "SUBSCRIBE {name} as request {id}");
@@ -521,6 +657,35 @@ impl Driver18 {
         let at = self.state.add(id);
         self.state.subs[at].request_tx = Some(tx);
         Ok(at)
+    }
+
+    /// Ask for `groups` groups before the subscription's live edge with a
+    /// relative joining FETCH on its own request stream.
+    async fn fetch_joining(&mut self, at: usize, groups: u64) -> Result<(), G2gError> {
+        let id = self.session.allocate_request_id();
+        let joining_request_id = self.state.subs[at].request_id;
+        let (tx, rx) = self
+            .session
+            .open_request(&v18::message::ControlMessage::Fetch {
+                id,
+                fetch_type: v18::message::FetchType::RelativeJoining,
+                standalone: None,
+                joining: Some(v18::message::JoiningFetch {
+                    joining_request_id,
+                    joining_start: groups,
+                }),
+                params: v18::coding::MessageParams::new(),
+            })
+            .await?;
+        g2g_debug!(self, "FETCH {groups} groups back as request {id}");
+        tokio::spawn(forward_responses(id, rx, self.response_tx.clone()));
+        let sub = &mut self.state.subs[at];
+        sub.fetch_request = Some(id);
+        // Holding the send half open keeps the fetch live: dropping it resets
+        // the stream, which is how draft-18 cancels one.
+        sub.fetch_tx = Some(tx);
+        sub.catchup_pending = true;
+        Ok(())
     }
 
     /// Wait for one event and apply it.
@@ -575,6 +740,15 @@ impl Driver18 {
                 if let Some(sub) = self.state.by_request(id) {
                     sub.ended = true;
                 }
+                // A refused catch-up costs the buffer, not the stream.
+                if let Some(sub) = self.state.by_fetch(id) {
+                    sub.catchup_pending = false;
+                }
+            }
+            // The publisher accepted the catch-up; its objects arrive on the
+            // response stream the data plane routes by request id.
+            Some(Msg::FetchOk { end, .. }) => {
+                g2g_debug!(self, "request {id}: FETCH_OK ending at {end:?}");
             }
             Some(Msg::PublishDone { stream_count, .. }) => {
                 if let Some(sub) = self.state.by_request(id) {
@@ -658,10 +832,31 @@ impl AnyDriver {
         }
     }
 
-    async fn subscribe(&mut self, name: &str) -> Result<usize, G2gError> {
+    async fn subscribe(&mut self, name: &str, catchup: bool) -> Result<usize, G2gError> {
         match self {
-            Self::V16(driver) => driver.subscribe(name).await,
-            Self::V18(driver) => driver.subscribe(name).await,
+            Self::V16(driver) => driver.subscribe(name, catchup).await,
+            Self::V18(driver) => driver.subscribe(name, catchup).await,
+        }
+    }
+
+    async fn fetch_joining(&mut self, at: usize, groups: u64) -> Result<(), G2gError> {
+        match self {
+            Self::V16(driver) => driver.fetch_joining(at, groups).await,
+            Self::V18(driver) => driver.fetch_joining(at, groups).await,
+        }
+    }
+
+    /// Pump until the subscription at `at` is established: a joining FETCH names
+    /// it, and the publisher can only resolve the name once it exists. `false`
+    /// when the subscription ended, or nothing arrived, before that.
+    async fn established(&mut self, at: usize) -> Result<bool, G2gError> {
+        loop {
+            if self.state().subs[at].track_alias.is_some() {
+                return Ok(true);
+            }
+            if self.state().subs[at].ended || self.pump().await? != Pumped::Applied {
+                return Ok(false);
+            }
         }
     }
 
@@ -683,11 +878,11 @@ impl AnyDriver {
     /// session ends, or nothing arrives within `timeout`.
     async fn first_object(&mut self, at: usize) -> Result<Option<Vec<u8>>, G2gError> {
         loop {
-            if let Some(payload) = self.state().subs[at].ready.pop_front() {
+            if let Some(payload) = self.state().subs[at].next_payload() {
                 return Ok(Some(payload));
             }
-            if self.state().subs[at].ended || self.pump().await? != Pumped::Applied {
-                return Ok(self.state().subs[at].ready.pop_front());
+            if self.state().subs[at].drained() || self.pump().await? != Pumped::Applied {
+                return Ok(self.state().subs[at].next_payload());
             }
         }
     }
@@ -809,7 +1004,7 @@ impl SourceLoop for MoqtSrc {
             // The catalog names the tracks. Without it, fall back to the
             // reference layout, which is also what `moq-sub` does.
             let listed = if self.use_catalog {
-                let at = driver.subscribe(&self.catalog_track).await?;
+                let at = driver.subscribe(&self.catalog_track, false).await?;
                 let bytes = driver.first_object(at).await?.unwrap_or_default();
                 catalog::parse(&bytes)
             } else {
@@ -825,12 +1020,18 @@ impl SourceLoop for MoqtSrc {
                 selected.init_track.clone()
             };
 
-            let at = driver.subscribe(&init_track).await?;
+            let at = driver.subscribe(&init_track, false).await?;
             let Some(init) = driver.first_object(at).await? else {
                 driver.shutdown().await;
                 return Err(session_err());
             };
-            let media = driver.subscribe(&selected.name).await?;
+            let catchup = self.catchup_groups;
+            let media = driver.subscribe(&selected.name, catchup > 0).await?;
+            // A joining FETCH names the subscription, so it can only be sent
+            // once the publisher has established it.
+            if catchup > 0 && driver.established(media).await? {
+                driver.fetch_joining(media, catchup).await?;
+            }
 
             out.push(PipelinePacket::CapsChanged(Self::output_caps()))
                 .await?;
@@ -840,7 +1041,7 @@ impl SourceLoop for MoqtSrc {
 
             let limit = self.num_buffers;
             loop {
-                while let Some(payload) = driver.state().subs[media].ready.pop_front() {
+                while let Some(payload) = driver.state().subs[media].next_payload() {
                     out.push(PipelinePacket::DataFrame(byte_frame(payload, emitted)))
                         .await?;
                     emitted += 1;
@@ -848,7 +1049,7 @@ impl SourceLoop for MoqtSrc {
                         break;
                     }
                 }
-                if (limit != 0 && emitted >= limit) || driver.state().subs[media].ended {
+                if (limit != 0 && emitted >= limit) || driver.state().subs[media].drained() {
                     break;
                 }
                 match driver.pump().await? {
@@ -861,6 +1062,7 @@ impl SourceLoop for MoqtSrc {
             }
 
             let stats = driver.state().subs[media].reassembler.stats();
+            self.catchup_objects = driver.state().subs[media].fetch_objects;
             driver.shutdown().await;
             self.selected_track = selected.name;
             self.objects_received = emitted;
@@ -904,6 +1106,7 @@ impl SourceLoop for MoqtSrc {
             "max-groups" => self.max_groups = uint(&value)?,
             "max-buffer-bytes" => self.max_buffer_bytes = uint(&value)?,
             "max-object-size" => self.max_object_bytes = uint(&value)?,
+            "catchup-groups" => self.catchup_groups = uint(&value)?,
             "num-buffers" => self.num_buffers = uint(&value)?,
             "timeout" => self.timeout_ms = uint(&value)?,
             _ => return Err(PropError::Unknown),
@@ -925,6 +1128,7 @@ impl SourceLoop for MoqtSrc {
             "max-groups" => Some(PropValue::Uint(self.max_groups)),
             "max-buffer-bytes" => Some(PropValue::Uint(self.max_buffer_bytes)),
             "max-object-size" => Some(PropValue::Uint(self.max_object_bytes)),
+            "catchup-groups" => Some(PropValue::Uint(self.catchup_groups)),
             "num-buffers" => Some(PropValue::Uint(self.num_buffers)),
             "timeout" => Some(PropValue::Uint(self.timeout_ms)),
             _ => None,
@@ -998,6 +1202,12 @@ static MOQTSRC_PROPS: &[PropertySpec] = &[
         "largest single object accepted from the relay, in bytes",
     )
     .with_default("16777216"),
+    PropertySpec::new(
+        "catchup-groups",
+        PropKind::Uint,
+        "groups before the live edge to FETCH on join and emit before the live objects (0 = start live)",
+    )
+    .with_default("0"),
     PropertySpec::new(
         "num-buffers",
         PropKind::Uint,

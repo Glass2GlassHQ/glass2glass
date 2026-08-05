@@ -35,8 +35,11 @@ use crate::remotewtio::wt_err;
 
 use super::super::reassembly::DATA_READ_CHUNK;
 // The data plane's shape is not version specific: a subscriber reorders objects
-// the same way whichever draft delivered them.
+// the same way whichever draft delivered them, and a FETCH response differs
+// only in its integer flavour.
 pub use super::super::session::DataEvent;
+use super::super::session::{open_fetch_stream, read_fetch};
+use super::super::{read_stream_type, MoqtVersion};
 use super::coding::{setup_option, MoqtError, Params};
 use super::data::{
     SubgroupHeader, SubgroupStreamDecoder, UniStreamType, PADDING_DATAGRAM_TYPE,
@@ -207,6 +210,16 @@ impl Session18 {
         Ok(stream)
     }
 
+    /// Open a unidirectional stream for a FETCH response and write its header.
+    /// The caller then writes the objects.
+    pub async fn open_fetch(
+        &mut self,
+        request_id: u64,
+        priority: u8,
+    ) -> Result<SendStream, G2gError> {
+        open_fetch_stream(&self.session, MoqtVersion::V18, request_id, priority).await
+    }
+
     /// Send one datagram object. Fails when the encoded object does not fit the
     /// path MTU, or when the peer accepts no datagrams at all: either way the
     /// caller has to carry the object on a stream instead.
@@ -335,7 +348,7 @@ async fn accept_uni(
 ) {
     let mut setup = Some(setup);
     while let Ok(mut stream) = session.accept_uni().await {
-        let Ok((code, prefix)) = read_stream_type(&mut stream).await else {
+        let Ok((code, prefix)) = read_stream_type(MoqtVersion::V18, &mut stream).await else {
             continue;
         };
         match UniStreamType::from_code(code) {
@@ -360,10 +373,18 @@ async fn accept_uni(
                     max_object_bytes,
                 ));
             }
-            // We never send a FETCH, so a FETCH response is unsolicited; a
-            // padding stream is data to throw away. Both are read to their end
-            // so they do not hold flow control.
-            Ok(UniStreamType::FetchHeader) | Ok(UniStreamType::Padding) => {
+            Ok(UniStreamType::FetchHeader) => {
+                tokio::spawn(read_fetch(
+                    MoqtVersion::V18,
+                    stream,
+                    prefix,
+                    data.clone(),
+                    max_object_bytes,
+                ));
+            }
+            // A padding stream is data to throw away, read to its end so it does
+            // not hold flow control.
+            Ok(UniStreamType::Padding) => {
                 tokio::spawn(drain(stream));
             }
             // §3.4: an unknown stream type closes the session.
@@ -375,26 +396,6 @@ async fn accept_uni(
     }
     session.close(session_error_code::PROTOCOL_VIOLATION, b"stream type");
     closed.store(true, Ordering::Relaxed);
-}
-
-/// Read just enough of a unidirectional stream to decode the type varint that
-/// opens it, returning it and every byte read (the type included, since a
-/// subgroup decoder needs it).
-async fn read_stream_type(stream: &mut RecvStream) -> Result<(u64, Vec<u8>), G2gError> {
-    // A vi64 is at most nine bytes, so this cannot grow on a peer's say-so.
-    let mut buf = Vec::with_capacity(9);
-    let mut chunk = [0u8; 9];
-    loop {
-        match super::coding::reader(&buf).varint() {
-            Ok(code) => return Ok((code, buf)),
-            Err(MoqtError::Incomplete) if buf.len() < 9 => {}
-            Err(_) => return Err(protocol_err()),
-        }
-        match stream.read(&mut chunk[..9 - buf.len()]).await {
-            Ok(Some(n)) if n > 0 => buf.extend_from_slice(&chunk[..n]),
-            _ => return Err(protocol_err()),
-        }
-    }
 }
 
 /// Read the peer's control stream: the SETUP that opens it, then whatever

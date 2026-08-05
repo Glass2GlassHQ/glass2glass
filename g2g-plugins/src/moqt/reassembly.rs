@@ -24,8 +24,10 @@ use super::coding::{MoqtError, Reader};
 use super::data::{ObjectStatus, SubgroupHeader, SubgroupObjectHeader};
 
 /// Headroom over `max_object_bytes` a stream decoder's buffer may hold: one
-/// object header plus the 64 KiB the codec allows an extension block.
-const DECODER_SLACK: usize = 128 * 1024;
+/// object header plus the 64 KiB the codec allows an extension block. The
+/// draft-18 subgroup decoder and the fetch decoder bound themselves the same
+/// way, so the headroom has one definition.
+pub(crate) const DECODER_SLACK: usize = 128 * 1024;
 
 /// Read size for a subgroup stream.
 pub const DATA_READ_CHUNK: usize = 16 * 1024;

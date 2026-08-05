@@ -63,6 +63,14 @@ pub mod request_error_code {
     pub const MALFORMED_TRACK: u64 = 0x12;
     pub const DUPLICATE_SUBSCRIPTION: u64 = 0x19;
     pub const UNINTERESTED: u64 = 0x20;
+    pub const INVALID_JOINING_REQUEST_ID: u64 = 0x32;
+}
+
+/// Data-stream reset codes (draft-16 §13.4.4). A data stream that ends before
+/// all of its objects have been written is reset with one of these rather than
+/// finished.
+pub mod stream_error_code {
+    pub const CANCELLED: u32 = 0x1;
 }
 
 /// PUBLISH_DONE status codes (draft-16 §13.4.3).

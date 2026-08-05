@@ -19,202 +19,24 @@
 //! is exactly what `moqtsink` wrote.
 #![cfg(feature = "moqt")]
 
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tokio::time::timeout;
-use web_transport_quinn::{RecvStream, SendStream, Server, Session};
 
 use g2g_core::element::AsyncElement;
 use g2g_core::frame::PipelinePacket;
 use g2g_core::{ByteStreamEncoding, Caps, G2gError};
 
-use g2g_plugins::moqt::coding::{setup_param, MoqtError, Params, TrackName, TrackNamespace};
+use g2g_plugins::moqt::coding::{Params, TrackNamespace};
 use g2g_plugins::moqt::message::{request_error_code, ControlMessage};
-use g2g_plugins::moqt::reassembly::{StreamItem, SubgroupStreamDecoder};
 use g2g_plugins::moqtsink::MoqtSink;
-use g2g_plugins::mp4mux::Mp4Mux;
 
 mod moqt_common;
-use moqt_common::{access_unit, bind_server, frame, h264_caps, CaptureSink, NullOut, TestCert};
-
-/// How long the dial from `configure_pipeline` gets to reach the peer.
-const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
-/// How long a control message the sink owes us gets to arrive.
-const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
-/// How long the data plane gets to deliver the objects that were written.
-const OBJECT_TIMEOUT: Duration = Duration::from_secs(10);
-
-// ------------------------------------------------------------------- the peer
-
-/// Every object that arrived on a subgroup stream: track alias, group, payload.
-type Objects = Arc<Mutex<Vec<(u64, u64, Vec<u8>)>>>;
-
-/// The publisher's peer: a WebTransport server that completes SETUP and then
-/// leaves the control stream to the test, while recording the subgroup objects
-/// the sink writes.
-struct Relay {
-    /// Held because dropping the session closes the QUIC connection under it.
-    _session: Session,
-    tx: SendStream,
-    rx: RecvStream,
-    buf: Vec<u8>,
-    objects: Objects,
-}
-
-impl Relay {
-    async fn send(&mut self, msg: ControlMessage) {
-        let mut out = Vec::new();
-        msg.encode(&mut out).expect("encode control message");
-        self.tx
-            .write_all(&out)
-            .await
-            .expect("write control message");
-    }
-
-    async fn recv(&mut self) -> ControlMessage {
-        loop {
-            match ControlMessage::decode(&self.buf) {
-                Ok((msg, used)) => {
-                    self.buf.drain(..used);
-                    return msg;
-                }
-                Err(MoqtError::Incomplete) => {
-                    let mut chunk = vec![0u8; 8192];
-                    match self.rx.read(&mut chunk).await {
-                        Ok(Some(n)) if n > 0 => self.buf.extend_from_slice(&chunk[..n]),
-                        _ => panic!("the control stream ended"),
-                    }
-                }
-                Err(e) => panic!("malformed control message: {e:?}"),
-            }
-        }
-    }
-
-    /// The next control message, or `None` when none arrives within `within`.
-    async fn recv_within(&mut self, within: Duration) -> Option<ControlMessage> {
-        timeout(within, self.recv()).await.ok()
-    }
-}
-
-/// Accept the publisher's session, answer its CLIENT_SETUP, and start reading
-/// whatever subgroup streams it opens.
-async fn accept_publisher(server: &mut Server) -> Relay {
-    let request = server.accept().await.expect("a session");
-    let session = request.ok().await.expect("CONNECT");
-    let (tx, rx) = session.accept_bi().await.expect("the control stream");
-    let objects: Objects = Arc::new(Mutex::new(Vec::new()));
-    let mut relay = Relay {
-        _session: session.clone(),
-        tx,
-        rx,
-        buf: Vec::new(),
-        objects: Arc::clone(&objects),
-    };
-    match relay.recv().await {
-        ControlMessage::ClientSetup { .. } => {}
-        other => panic!("expected CLIENT_SETUP, got {}", other.name()),
-    }
-    let mut params = Params::new();
-    params.set_int(setup_param::MAX_REQUEST_ID, 100);
-    relay.send(ControlMessage::ServerSetup { params }).await;
-
-    tokio::spawn(async move {
-        while let Ok(stream) = session.accept_uni().await {
-            tokio::spawn(read_subgroup(stream, Arc::clone(&objects)));
-        }
-    });
-    relay
-}
-
-/// Read one subgroup stream to its end, recording each whole object under the
-/// alias and group its header named.
-async fn read_subgroup(mut stream: RecvStream, objects: Objects) {
-    let mut decoder = SubgroupStreamDecoder::new(4 * 1024 * 1024);
-    let mut chunk = vec![0u8; 16 * 1024];
-    let mut route: Option<(u64, u64)> = None;
-    while let Ok(Some(n)) = stream.read(&mut chunk).await {
-        if n == 0 || decoder.push(&chunk[..n]).is_err() {
-            return;
-        }
-        while let Ok(Some(item)) = decoder.next_item() {
-            match item {
-                StreamItem::Header(header) => route = Some((header.track_alias, header.group_id)),
-                StreamItem::Object(object) => {
-                    let Some((alias, group)) = route else {
-                        return; // an object before the header is impossible
-                    };
-                    objects
-                        .lock()
-                        .expect("object log")
-                        .push((alias, group, object.payload));
-                }
-            }
-        }
-    }
-}
-
-/// Wait until the recorded objects satisfy `done`, so an assertion never races
-/// the peer's read tasks, and return them.
-async fn objects_when(
-    objects: &Objects,
-    done: impl Fn(&[(u64, u64, Vec<u8>)]) -> bool,
-) -> Vec<(u64, u64, Vec<u8>)> {
-    let deadline = Instant::now() + OBJECT_TIMEOUT;
-    loop {
-        {
-            let log = objects.lock().expect("object log");
-            if done(&log) {
-                return log.clone();
-            }
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the objects the sink wrote never arrived"
-        );
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-}
-
-fn subscribe(id: u64, namespace: &TrackNamespace, track: &str) -> ControlMessage {
-    ControlMessage::Subscribe {
-        id,
-        namespace: namespace.clone(),
-        track_name: TrackName::new(track),
-        params: Params::new(),
-    }
-}
-
-// -------------------------------------------------------------- the publisher
-
-/// Mux `count` access units and publish every fragment they produce, returning
-/// the fMP4 byte stream that went into the sink.
-async fn publish_fragments(sink: &mut MoqtSink, count: u64) -> Vec<u8> {
-    let mut mux = Mp4Mux::new();
-    mux.configure_pipeline(&h264_caps(64, 48))
-        .expect("mp4mux caps");
-    let mut published = Vec::new();
-    for index in 0..count {
-        let mut captured = CaptureSink::default();
-        mux.process(
-            PipelinePacket::DataFrame(frame(access_unit(index, 0), index * 33_333_333, index)),
-            &mut captured,
-        )
-        .await
-        .expect("mux access unit");
-        for chunk in captured.frames {
-            published.extend_from_slice(&chunk);
-            sink.process(
-                PipelinePacket::DataFrame(frame(chunk, index * 33_333_333, index)),
-                &mut NullOut,
-            )
-            .await
-            .expect("publish fragment");
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    published
-}
+use moqt_common::peer16::accept_publisher;
+use moqt_common::{
+    bind_server, frame, objects_when, publish_fragments, NullOut, TestCert, CONTROL_TIMEOUT,
+    DIAL_TIMEOUT,
+};
 
 // ------------------------------------------------------------------ the tests
 
@@ -262,9 +84,12 @@ async fn a_subscribe_is_answered_before_the_first_frame() {
     // Three subscriptions, none of which the sink has any media for yet: the
     // catalog track it can answer, the media track it cannot name until the
     // `moov`, and a track that will never exist.
-    relay.send(subscribe(1, &ns, ".catalog")).await;
-    relay.send(subscribe(3, &ns, "1.m4s")).await;
-    relay.send(subscribe(5, &ns, "9.m4s")).await;
+    let msg = relay.subscribe(1, namespace, ".catalog");
+    relay.send(msg).await;
+    let msg = relay.subscribe(3, namespace, "1.m4s");
+    relay.send(msg).await;
+    let msg = relay.subscribe(5, namespace, "9.m4s");
+    relay.send(msg).await;
 
     match timeout(CONTROL_TIMEOUT, relay.recv())
         .await

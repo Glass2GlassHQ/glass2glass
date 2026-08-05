@@ -43,9 +43,10 @@
 
 use core::future::Future;
 use core::pin::Pin;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use alloc::boxed::Box;
+use alloc::collections::VecDeque;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
@@ -70,7 +71,11 @@ use crate::moqt::catalog;
 use crate::moqt::coding::{MoqtError, Params, TrackName, TrackNamespace};
 use crate::moqt::data::{StreamHeaderType, SubgroupHeader, SubgroupObjectHeader};
 use crate::moqt::datagram::DatagramObject;
-use crate::moqt::message::{publish_done_code, request_error_code, ControlMessage};
+use crate::moqt::fetch::FetchWriter;
+use crate::moqt::message::{
+    publish_done_code, request_error_code, stream_error_code, ControlMessage, FetchType,
+    JoiningFetch, Location, StandaloneFetch,
+};
 use crate::moqt::session::{implementation_name, MoqtSession};
 use crate::moqt::v18;
 use crate::moqt::{negotiated_version, parse_versions, MoqtVersion};
@@ -85,6 +90,10 @@ const HEADER_TYPE: StreamHeaderType = StreamHeaderType::SubgroupIdExt;
 /// SUBSCRIBEs held for a track the `moov` has not named yet. A peer cannot make
 /// the queue grow without bound by subscribing to names that do not exist.
 const MAX_PENDING_SUBSCRIBES: usize = 64;
+
+/// FETCH responses written at once. A peer cannot make the publisher hold more
+/// response streams (and the objects queued on them) than this.
+const MAX_ACTIVE_FETCHES: usize = 16;
 
 /// A malformed message we built, or a peer message we could not decode: either
 /// way the session is unusable.
@@ -127,6 +136,10 @@ struct Subscription {
     /// Whether a group boundary has passed since this subscription was accepted.
     /// Until one has, the subscriber joined mid-group and gets nothing.
     serving_group: bool,
+    /// The largest location published when this subscription was accepted: what
+    /// a joining FETCH against it is contiguous with (draft-16 §9.16.2.1,
+    /// draft-18 §10.12.2.1).
+    joining: Option<Location>,
     /// Whether the one-object tracks have already delivered their object.
     delivered: bool,
     /// Data streams opened for this subscription, reported in PUBLISH_DONE.
@@ -146,6 +159,48 @@ struct MediaTrack {
     started: bool,
     /// Catalog `selectionParams` fragment, empty when the codec is unrecognized.
     selection_params: String,
+    /// The most recently published groups, oldest first, so a FETCH can be
+    /// served from memory. Bounded by `cache-groups`.
+    cache: VecDeque<CachedGroup>,
+}
+
+/// One published group held for FETCH. Object ids run from 0 with no gaps, so
+/// the index in `objects` is the object id.
+#[derive(Debug, Clone)]
+struct CachedGroup {
+    group_id: u64,
+    objects: Vec<Vec<u8>>,
+}
+
+impl MediaTrack {
+    /// The largest location published on this track, or `None` before the first
+    /// object.
+    fn largest(&self) -> Option<Location> {
+        self.started.then(|| Location {
+            group_id: self.group_id,
+            object_id: self.objects_in_group.saturating_sub(1),
+        })
+    }
+
+    /// Buffer one published object, dropping the oldest group past the bound.
+    fn cache_object(&mut self, group_id: u64, starts_group: bool, payload: &[u8], depth: usize) {
+        if depth == 0 {
+            self.cache.clear();
+            return;
+        }
+        if starts_group || self.cache.back().is_none_or(|g| g.group_id != group_id) {
+            self.cache.push_back(CachedGroup {
+                group_id,
+                objects: Vec::new(),
+            });
+            while self.cache.len() > depth {
+                self.cache.pop_front();
+            }
+        }
+        if let Some(group) = self.cache.back_mut() {
+            group.objects.push(payload.to_vec());
+        }
+    }
 }
 
 /// The properties the serving state reads, snapshotted when the session is
@@ -161,6 +216,7 @@ struct Config {
     priority: u64,
     datagrams: bool,
     subgroups: u64,
+    cache_groups: u64,
 }
 
 impl Config {
@@ -174,6 +230,7 @@ impl Config {
             priority: 127,
             datagrams: false,
             subgroups: 1,
+            cache_groups: 4,
         }
     }
 }
@@ -214,6 +271,8 @@ struct Stats {
     objects_published: AtomicU64,
     datagram_objects: AtomicU64,
     datagram_fallbacks: AtomicU64,
+    fetches_served: AtomicU64,
+    fetches_cancelled: AtomicU64,
 }
 
 impl Stats {
@@ -270,6 +329,8 @@ struct Core {
     /// withdraws the namespace, which is what EOS does.
     namespace_stream: Option<SendStream>,
     subscriptions: Vec<Subscription>,
+    /// FETCH responses still being written.
+    fetches: Vec<ActiveFetch>,
     /// SUBSCRIBEs for a track the `moov` has not named yet, answered once it
     /// does (or refused then, if it names nothing). The stream is the draft-18
     /// request stream the answer goes on.
@@ -371,6 +432,13 @@ impl MoqtSink {
         self
     }
 
+    /// Keep this many recently published groups per track, so a subscriber can
+    /// FETCH them. Zero caches nothing and refuses every FETCH.
+    pub fn with_cache_groups(mut self, groups: u64) -> Self {
+        self.cfg.cache_groups = groups;
+        self
+    }
+
     /// Objects written to at least one subscriber so far.
     pub fn objects_published(&self) -> u64 {
         self.stats.objects_published.load(Ordering::Relaxed)
@@ -386,6 +454,16 @@ impl MoqtSink {
     /// counted the same way.
     pub fn datagram_fallbacks(&self) -> u64 {
         self.stats.datagram_fallbacks.load(Ordering::Relaxed)
+    }
+
+    /// FETCH requests accepted and started so far.
+    pub fn fetches_served(&self) -> u64 {
+        self.stats.fetches_served.load(Ordering::Relaxed)
+    }
+
+    /// FETCH responses abandoned part way because the subscriber cancelled.
+    pub fn fetches_cancelled(&self) -> u64 {
+        self.stats.fetches_cancelled.load(Ordering::Relaxed)
     }
 
     /// The media track names the `moov` produced, in track order.
@@ -570,7 +648,10 @@ async fn watch_request(core: Arc<Mutex<Core>>, id: u64, mut rx: web_transport_qu
     while let Ok(Some(v18::message::ControlMessage::RequestUpdate { .. })) =
         reader.next(&mut rx).await
     {}
-    core.lock().await.drop_subscription(id);
+    let mut guard = core.lock().await;
+    guard.drop_subscription(id);
+    // Draft-18 cancels a FETCH the same way, by resetting its request stream.
+    guard.cancel_fetch(id);
 }
 
 /// Answer inbound control messages as they arrive, so a SUBSCRIBE that lands
@@ -598,6 +679,7 @@ impl Core {
             namespace_request: None,
             namespace_stream: None,
             subscriptions: Vec::new(),
+            fetches: Vec::new(),
             pending_subscribes: Vec::new(),
             init: Vec::new(),
             catalog: Vec::new(),
@@ -656,11 +738,20 @@ impl Core {
             ControlMessage::PublishNamespaceCancel { .. } | ControlMessage::GoAway { .. } => {
                 return Err(G2gError::Hardware(HardwareError::Other));
             }
+            ControlMessage::Fetch {
+                id,
+                fetch_type,
+                standalone,
+                joining,
+                ..
+            } => {
+                self.handle_fetch(id, fetch_type, standalone, joining, None)
+                    .await?;
+            }
+            ControlMessage::FetchCancel { id } => self.cancel_fetch(id),
             // A subscriber-side request we do not serve. Draft-16 §4 asks for an
             // explicit refusal rather than silence.
-            ControlMessage::Fetch { id, .. }
-            | ControlMessage::TrackStatus { id, .. }
-            | ControlMessage::RequestUpdate { id, .. } => {
+            ControlMessage::TrackStatus { id, .. } | ControlMessage::RequestUpdate { id, .. } => {
                 self.refuse(
                     id,
                     request_error_code::NOT_SUPPORTED,
@@ -697,6 +788,37 @@ impl Core {
                     .await?;
                 Ok(live.then_some((id, rx)))
             }
+            v18::message::ControlMessage::Fetch {
+                id,
+                fetch_type,
+                standalone,
+                joining,
+                ..
+            } => {
+                // The draft-18 bodies carry the same fields under their own
+                // types, so the serving side sees one shape.
+                let standalone = standalone.map(|body| StandaloneFetch {
+                    namespace: body.namespace,
+                    track_name: body.track_name,
+                    start: body.start,
+                    end: body.end,
+                });
+                let joining = joining.map(|body| JoiningFetch {
+                    joining_request_id: body.joining_request_id,
+                    joining_start: body.joining_start,
+                });
+                let fetch_type = match fetch_type {
+                    v18::message::FetchType::Standalone => FetchType::Standalone,
+                    v18::message::FetchType::RelativeJoining => FetchType::RelativeJoining,
+                    v18::message::FetchType::AbsoluteJoining => FetchType::AbsoluteJoining,
+                };
+                let live = self
+                    .handle_fetch(id, fetch_type, standalone, joining, Some(tx))
+                    .await?;
+                // A live fetch keeps its request stream, because draft-18
+                // cancels one by resetting it (§3.3.2).
+                Ok(live.then_some((id, rx)))
+            }
             // A request the publisher does not serve. §3.3.2: REQUEST_ERROR,
             // then FIN the stream.
             _ => {
@@ -726,18 +848,7 @@ impl Core {
     ) -> Result<bool, G2gError> {
         let name = track_name.as_str_lossy();
         let ours = namespace == self.namespace_tuple();
-        let target = if !ours {
-            None
-        } else if name == self.cfg.catalog_track && self.cfg.publish_catalog {
-            Some(Target::Catalog)
-        } else if name == self.cfg.init_track {
-            Some(Target::Init)
-        } else {
-            self.tracks
-                .iter()
-                .find(|t| t.name == name)
-                .map(|t| Target::Media(t.track_id))
-        };
+        let target = self.target_of(&namespace, &name);
         if self.subscriptions.iter().any(|s| s.request_id == id)
             || self.pending_subscribes.iter().any(|(held, ..)| *held == id)
         {
@@ -806,6 +917,9 @@ impl Core {
                 None
             }
         };
+        // What a joining FETCH against this subscription ends at: the largest
+        // object published when it was accepted.
+        let joining = self.largest(&target);
         self.subscriptions.push(Subscription {
             request_id: id,
             track_alias: id,
@@ -813,6 +927,7 @@ impl Core {
             reply,
             streams: Vec::new(),
             serving_group: false,
+            joining,
             delivered: false,
             streams_opened: 0,
         });
@@ -864,6 +979,293 @@ impl Core {
                 })
                 .await
             }
+        }
+    }
+
+    /// The track a namespace and name select, or `None` when this publisher does
+    /// not serve it.
+    fn target_of(&self, namespace: &TrackNamespace, name: &str) -> Option<Target> {
+        if *namespace != self.namespace_tuple() {
+            return None;
+        }
+        if name == self.cfg.catalog_track && self.cfg.publish_catalog {
+            return Some(Target::Catalog);
+        }
+        if name == self.cfg.init_track {
+            return Some(Target::Init);
+        }
+        self.tracks
+            .iter()
+            .find(|t| t.name == name)
+            .map(|t| Target::Media(t.track_id))
+    }
+
+    /// The largest location published on a track, or `None` before its first
+    /// object. The init and catalog tracks are one object in group 0.
+    fn largest(&self, target: &Target) -> Option<Location> {
+        match target {
+            Target::Catalog => (!self.catalog.is_empty()).then(Location::default),
+            Target::Init => (!self.init.is_empty()).then(Location::default),
+            Target::Media(track_id) => self
+                .tracks
+                .iter()
+                .find(|t| t.track_id == *track_id)
+                .and_then(MediaTrack::largest),
+        }
+    }
+
+    /// The oldest group still held for a track, or `None` when nothing is.
+    fn oldest_cached(&self, target: &Target) -> Option<u64> {
+        match target {
+            Target::Catalog => (!self.catalog.is_empty()).then_some(0),
+            Target::Init => (!self.init.is_empty()).then_some(0),
+            Target::Media(track_id) => self
+                .tracks
+                .iter()
+                .find(|t| t.track_id == *track_id)?
+                .cache
+                .front()
+                .map(|g| g.group_id),
+        }
+    }
+
+    /// Every cached object of `target` inside the range, in ascending
+    /// (group, object) order: the order a fetch response is written in.
+    fn cached_objects(
+        &self,
+        target: &Target,
+        start: Location,
+        end: Location,
+    ) -> Vec<(u64, u64, Vec<u8>)> {
+        let single = |payload: &Vec<u8>| {
+            if payload.is_empty() || !in_fetch_range(Location::default(), start, end) {
+                Vec::new()
+            } else {
+                Vec::from([(0, 0, payload.clone())])
+            }
+        };
+        match target {
+            Target::Catalog => single(&self.catalog),
+            Target::Init => single(&self.init),
+            Target::Media(track_id) => {
+                let Some(track) = self.tracks.iter().find(|t| t.track_id == *track_id) else {
+                    return Vec::new();
+                };
+                let mut out = Vec::new();
+                for group in &track.cache {
+                    for (object_id, payload) in group.objects.iter().enumerate() {
+                        let loc = Location {
+                            group_id: group.group_id,
+                            object_id: object_id as u64,
+                        };
+                        if in_fetch_range(loc, start, end) {
+                            out.push((loc.group_id, loc.object_id, payload.clone()));
+                        }
+                    }
+                }
+                out
+            }
+        }
+    }
+
+    /// What a FETCH asks for, once its track and range are resolved, or the
+    /// error code and reason it is refused with. Everything here comes off the
+    /// wire, so the range arithmetic is saturating and no allocation is sized
+    /// from it: the objects come from the cache, which the publisher bounds.
+    fn plan_fetch(
+        &self,
+        fetch_type: FetchType,
+        standalone: Option<StandaloneFetch>,
+        joining: Option<JoiningFetch>,
+    ) -> Result<(Target, Location, Location), (u64, String)> {
+        let missing_body = || {
+            (
+                request_error_code::INTERNAL_ERROR,
+                String::from("fetch body missing"),
+            )
+        };
+        let (target, start, end) = match fetch_type {
+            FetchType::Standalone => {
+                let body = standalone.ok_or_else(missing_body)?;
+                let name = body.track_name.as_str_lossy();
+                let target = self.target_of(&body.namespace, &name).ok_or((
+                    request_error_code::DOES_NOT_EXIST,
+                    format!("no track {name}"),
+                ))?;
+                (target, body.start, body.end)
+            }
+            FetchType::RelativeJoining | FetchType::AbsoluteJoining => {
+                let body = joining.ok_or_else(missing_body)?;
+                let sub = self
+                    .subscriptions
+                    .iter()
+                    .find(|s| s.request_id == body.joining_request_id)
+                    .ok_or((
+                        request_error_code::INVALID_JOINING_REQUEST_ID,
+                        String::from("no such subscription"),
+                    ))?;
+                let joined_at = sub.joining.ok_or((
+                    request_error_code::INVALID_RANGE,
+                    String::from("nothing published when the subscription started"),
+                ))?;
+                let start_group = match fetch_type {
+                    FetchType::AbsoluteJoining => body.joining_start,
+                    // A relative start before group 0 is the start of the track.
+                    _ => joined_at.group_id.saturating_sub(body.joining_start),
+                };
+                (
+                    sub.target.clone(),
+                    Location {
+                        group_id: start_group,
+                        object_id: 0,
+                    },
+                    // The response ends at the object the subscription starts
+                    // after, so the two are contiguous and do not overlap.
+                    Location {
+                        group_id: joined_at.group_id,
+                        object_id: joined_at.object_id.saturating_add(1),
+                    },
+                )
+            }
+        };
+        if !valid_fetch_range(start, end) {
+            return Err((
+                request_error_code::INVALID_RANGE,
+                String::from("end before start"),
+            ));
+        }
+        let largest = self.largest(&target).ok_or((
+            request_error_code::INVALID_RANGE,
+            String::from("nothing published yet"),
+        ))?;
+        if (start.group_id, start.object_id) > (largest.group_id, largest.object_id) {
+            return Err((
+                request_error_code::INVALID_RANGE,
+                String::from("start past the largest object"),
+            ));
+        }
+        let oldest = self.oldest_cached(&target).ok_or((
+            request_error_code::INVALID_RANGE,
+            String::from("nothing cached"),
+        ))?;
+        if start.group_id < oldest {
+            return Err((
+                request_error_code::INVALID_RANGE,
+                String::from("group no longer cached"),
+            ));
+        }
+        Ok((target, start, end))
+    }
+
+    /// Serve, or refuse, one FETCH. `reply` is the draft-18 request stream the
+    /// answer goes on (`None` on draft-16). `Ok(true)` means the response stream
+    /// is being written, so the request is live.
+    async fn handle_fetch(
+        &mut self,
+        id: u64,
+        fetch_type: FetchType,
+        standalone: Option<StandaloneFetch>,
+        joining: Option<JoiningFetch>,
+        reply: Option<SendStream>,
+    ) -> Result<bool, G2gError> {
+        self.fetches.retain(|f| !f.task.is_finished());
+        if self.fetches.len() >= MAX_ACTIVE_FETCHES {
+            self.refuse(
+                id,
+                request_error_code::INTERNAL_ERROR,
+                String::from("too many fetches in flight"),
+                reply,
+            )
+            .await?;
+            return Ok(false);
+        }
+        let (target, start, end) = match self.plan_fetch(fetch_type, standalone, joining) {
+            Ok(plan) => plan,
+            Err((code, reason)) => {
+                g2g_debug!(self, "FETCH {id} refused: {reason}");
+                self.refuse(id, code, reason, reply).await?;
+                return Ok(false);
+            }
+        };
+        let objects = self.cached_objects(&target, start, end);
+        // The response cannot reach past what has been published, and FETCH_OK
+        // is where the subscriber learns that.
+        let largest = self.largest(&target).unwrap_or_default();
+        let end = earlier_end(
+            end,
+            Location {
+                group_id: largest.group_id,
+                object_id: largest.object_id.saturating_add(1),
+            },
+        );
+        match reply {
+            Some(mut tx) => {
+                let msg = v18::message::ControlMessage::FetchOk {
+                    end_of_track: false,
+                    end,
+                    params: v18::coding::MessageParams::new(),
+                    properties: Params::new(),
+                };
+                v18::session::write_message(&mut tx, &msg).await?;
+                // Nothing else travels on a fetch's request stream: the objects
+                // go on their own stream and a fetch has no PUBLISH_DONE.
+                let _ = tx.finish();
+            }
+            None => {
+                self.send(ControlMessage::FetchOk {
+                    id,
+                    end_of_track: false,
+                    end,
+                    params: Params::new(),
+                    extensions: Params::new(),
+                })
+                .await?;
+            }
+        }
+        self.start_fetch_stream(id, objects).await?;
+        Ok(true)
+    }
+
+    /// Open the response stream and hand the objects to a task that writes them.
+    /// Writing in its own task is what lets a cancel land between two objects
+    /// rather than after the whole range.
+    async fn start_fetch_stream(
+        &mut self,
+        request_id: u64,
+        objects: Vec<(u64, u64, Vec<u8>)>,
+    ) -> Result<(), G2gError> {
+        let priority = self.priority_byte();
+        let version = self.wire_version();
+        let stream = match self.session.as_mut().ok_or(G2gError::NotConfigured)? {
+            Wire::V16(session) => session.open_fetch(request_id, priority).await?,
+            Wire::V18(session) => session.open_fetch(request_id, priority).await?,
+        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        let task = tokio::spawn(write_fetch_objects(
+            version,
+            stream,
+            objects,
+            priority,
+            Arc::clone(&cancel),
+            Arc::clone(&self.stats),
+        ));
+        self.fetches.push(ActiveFetch {
+            request_id,
+            cancel,
+            task,
+        });
+        Stats::bump(&self.stats.fetches_served);
+        Ok(())
+    }
+
+    /// Stop writing a FETCH response: draft-16 says so with FETCH_CANCEL,
+    /// draft-18 by resetting the request stream.
+    fn cancel_fetch(&mut self, id: u64) {
+        if let Some(fetch) = self.fetches.iter().find(|f| f.request_id == id) {
+            // The writer resets the response stream when it sees this, and
+            // counts the cancellation: a fetch that had already finished writing
+            // is not one that was stopped.
+            fetch.cancel.store(true, Ordering::Relaxed);
         }
     }
 
@@ -1045,6 +1447,8 @@ impl Core {
         let group_id = self.tracks[at].group_id;
         let object_id = self.tracks[at].objects_in_group;
         self.tracks[at].objects_in_group += 1;
+        let depth = self.cfg.cache_groups as usize;
+        self.tracks[at].cache_object(group_id, starts_group, payload, depth);
 
         let mut published = false;
         let mut reset = Vec::new();
@@ -1232,6 +1636,7 @@ impl Core {
                 objects_in_group: 0,
                 started: false,
                 selection_params: selection_params(entries),
+                cache: VecDeque::new(),
             });
         }
         if tracks.is_empty() {
@@ -1316,6 +1721,90 @@ impl Core {
         }
         Ok(())
     }
+}
+
+/// A FETCH response still being written. The writer runs in its own task, so
+/// the flag is how a cancel reaches it between two objects.
+#[derive(Debug)]
+struct ActiveFetch {
+    request_id: u64,
+    cancel: Arc<AtomicBool>,
+    task: JoinHandle<()>,
+}
+
+/// Whether `loc` falls in a fetch range. `end` is the draft's encoding: the last
+/// object plus one, with an object of 0 meaning the whole group.
+fn in_fetch_range(loc: Location, start: Location, end: Location) -> bool {
+    let after_start = (loc.group_id, loc.object_id) >= (start.group_id, start.object_id);
+    let before_end = loc.group_id < end.group_id
+        || (loc.group_id == end.group_id && (end.object_id == 0 || loc.object_id < end.object_id));
+    after_start && before_end
+}
+
+/// A range whose end is before its start asks for nothing, which the drafts make
+/// a refusal rather than an empty response.
+fn valid_fetch_range(start: Location, end: Location) -> bool {
+    end.group_id > start.group_id
+        || (end.group_id == start.group_id
+            && (end.object_id == 0 || end.object_id > start.object_id))
+}
+
+/// The earlier of two fetch end locations, under the same encoding.
+fn earlier_end(a: Location, b: Location) -> Location {
+    let key = |l: Location| {
+        (
+            l.group_id,
+            if l.object_id == 0 {
+                u64::MAX
+            } else {
+                l.object_id
+            },
+        )
+    };
+    if key(a) <= key(b) {
+        a
+    } else {
+        b
+    }
+}
+
+/// Write one FETCH response: the objects in ascending order, then a FIN. A
+/// cancelled response is reset instead, because a FIN would tell the subscriber
+/// the range ended where it did not.
+async fn write_fetch_objects(
+    version: MoqtVersion,
+    mut stream: SendStream,
+    objects: Vec<(u64, u64, Vec<u8>)>,
+    priority: u8,
+    cancel: Arc<AtomicBool>,
+    stats: Arc<Stats>,
+) {
+    let mut writer = FetchWriter::new(version);
+    let mut bytes = Vec::new();
+    for (group_id, object_id, payload) in objects {
+        if cancel.load(Ordering::Relaxed) {
+            let _ = stream.reset(stream_error_code::CANCELLED);
+            Stats::bump(&stats.fetches_cancelled);
+            return;
+        }
+        bytes.clear();
+        if writer
+            .object(group_id, object_id, priority, &payload, &mut bytes)
+            .is_err()
+        {
+            let _ = stream.reset(stream_error_code::CANCELLED);
+            return;
+        }
+        if stream.write_all(&bytes).await.is_err() {
+            return;
+        }
+    }
+    if cancel.load(Ordering::Relaxed) {
+        let _ = stream.reset(stream_error_code::CANCELLED);
+        Stats::bump(&stats.fetches_cancelled);
+        return;
+    }
+    let _ = stream.finish();
 }
 
 /// Write one object header plus its payload onto an open subgroup stream.
@@ -1527,6 +2016,7 @@ impl AsyncElement for MoqtSink {
             "catalog" => self.cfg.publish_catalog = value.as_bool().ok_or(PropError::Type)?,
             "datagrams" => self.cfg.datagrams = value.as_bool().ok_or(PropError::Type)?,
             "subgroups" => self.cfg.subgroups = value.as_uint().ok_or(PropError::Type)?,
+            "cache-groups" => self.cfg.cache_groups = value.as_uint().ok_or(PropError::Type)?,
             "priority" => self.cfg.priority = value.as_uint().ok_or(PropError::Type)?,
             "max-request-id" => self.max_request_id = value.as_uint().ok_or(PropError::Type)?,
             "versions" => {
@@ -1550,6 +2040,7 @@ impl AsyncElement for MoqtSink {
             "catalog" => Some(PropValue::Bool(self.cfg.publish_catalog)),
             "datagrams" => Some(PropValue::Bool(self.cfg.datagrams)),
             "subgroups" => Some(PropValue::Uint(self.cfg.subgroups)),
+            "cache-groups" => Some(PropValue::Uint(self.cfg.cache_groups)),
             "priority" => Some(PropValue::Uint(self.cfg.priority)),
             "max-request-id" => Some(PropValue::Uint(self.max_request_id)),
             "versions" => Some(PropValue::Str(self.versions.clone())),
@@ -1613,6 +2104,12 @@ static MOQTSINK_PROPS: &[PropertySpec] = &[
     )
     .with_default("127"),
     PropertySpec::new(
+        "cache-groups",
+        PropKind::Uint,
+        "recently published groups kept per track to answer a FETCH (0 = keep none, every FETCH is refused)",
+    )
+    .with_default("4"),
+    PropertySpec::new(
         "max-request-id",
         PropKind::Uint,
         "MAX_REQUEST_ID advertised to the relay in CLIENT_SETUP (draft-16 sessions only)",
@@ -1655,6 +2152,7 @@ mod tests {
             selection_params: String::from(
                 ",\"selectionParams\":{\"codec\":\"avc1.64000D\",\"width\":320,\"height\":240}",
             ),
+            cache: VecDeque::new(),
         }]);
         let catalog = core.build_catalog();
         assert!(catalog.contains("\"namespace\":\"/live/cam\""), "{catalog}");

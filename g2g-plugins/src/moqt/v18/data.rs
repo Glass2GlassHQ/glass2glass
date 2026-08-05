@@ -13,7 +13,7 @@
 
 use alloc::vec::Vec;
 
-use super::super::reassembly::{next_object_id, ReceivedObject};
+use super::super::reassembly::{next_object_id, ReceivedObject, DECODER_SLACK};
 use super::coding::{
     decode_kvps_length_prefixed, encode_kvps_length_prefixed, put_vi64, reader, MoqtError, Params,
     Reader,
@@ -296,10 +296,6 @@ pub enum StreamItem {
     Header(SubgroupHeader),
     Object(ReceivedObject),
 }
-
-/// Headroom over `max_object_bytes` a stream decoder's buffer may hold: one
-/// object header plus the 64 KiB the codec allows a properties block.
-const DECODER_SLACK: usize = 128 * 1024;
 
 /// Decodes one draft-18 subgroup stream incrementally: bytes in, whole objects
 /// out. Objects are delivered whole because a MOQT object here is one CMAF

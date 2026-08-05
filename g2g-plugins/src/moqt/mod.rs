@@ -20,6 +20,8 @@
 //!   one object.
 //! - [`reassembly`]: decoding a subgroup stream, and putting the objects from
 //!   many concurrent streams back into (group, object) order.
+//! - [`fetch`]: the FETCH response stream, which carries already-published
+//!   objects in order and is shared by both drafts.
 //! - [`catalog`]: the JSON track list, written by the publisher and read by the
 //!   subscriber.
 //! - [`session`]: the SETUP exchange and the live control / data streams.
@@ -31,6 +33,7 @@ pub mod catalog;
 pub mod coding;
 pub mod data;
 pub mod datagram;
+pub mod fetch;
 pub mod message;
 pub mod reassembly;
 pub mod session;
@@ -39,6 +42,9 @@ pub mod v18;
 use alloc::vec::Vec;
 
 use g2g_core::{G2gError, HardwareError};
+use web_transport_quinn::RecvStream;
+
+use coding::{MoqtError, Reader};
 
 /// The draft versions this crate speaks, negotiated per session: the client
 /// offers each as a WebTransport subprotocol in preference order and the
@@ -50,6 +56,23 @@ pub enum MoqtVersion {
 }
 
 impl MoqtVersion {
+    /// A cursor over this version's integer flavour: draft-16 reads QUIC
+    /// varints, draft-18 its own `vi64`.
+    pub fn reader(self, buf: &[u8]) -> Reader<'_> {
+        match self {
+            Self::V16 => Reader::new(buf),
+            Self::V18 => Reader::new_vi64(buf),
+        }
+    }
+
+    /// Append an integer in this version's flavour.
+    pub fn put_int(self, out: &mut Vec<u8>, v: u64) {
+        match self {
+            Self::V16 => coding::put_varint(out, v),
+            Self::V18 => v18::coding::put_vi64(out, v),
+        }
+    }
+
     /// The WebTransport subprotocol that names this version on CONNECT.
     pub fn protocol(self) -> &'static str {
         match self {
@@ -62,6 +85,32 @@ impl MoqtVersion {
         [Self::V16, Self::V18]
             .into_iter()
             .find(|v| v.protocol() == protocol)
+    }
+}
+
+/// Read just enough of a unidirectional stream to decode the type varint that
+/// opens it, returning it and every byte read (the type included, since the
+/// decoder that follows needs it).
+///
+/// Both drafts open every data stream this way, so one reader serves both: only
+/// the integer flavour differs.
+pub async fn read_stream_type(
+    version: MoqtVersion,
+    stream: &mut RecvStream,
+) -> Result<(u64, Vec<u8>), G2gError> {
+    // A varint is at most nine bytes, so this cannot grow on a peer's say-so.
+    let mut buf = Vec::with_capacity(9);
+    let mut chunk = [0u8; 9];
+    loop {
+        match version.reader(&buf).varint() {
+            Ok(code) => return Ok((code, buf)),
+            Err(MoqtError::Incomplete) if buf.len() < 9 => {}
+            Err(_) => return Err(G2gError::Hardware(HardwareError::Other)),
+        }
+        match stream.read(&mut chunk[..9 - buf.len()]).await {
+            Ok(Some(n)) if n > 0 => buf.extend_from_slice(&chunk[..n]),
+            _ => return Err(G2gError::Hardware(HardwareError::Other)),
+        }
     }
 }
 
