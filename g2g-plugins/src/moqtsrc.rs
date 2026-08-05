@@ -41,11 +41,15 @@ use g2g_core::{
     PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
+use web_transport_quinn::SendStream;
+
 use crate::moqt::catalog::{self, CatalogTrack};
 use crate::moqt::coding::{Params, TrackName, TrackNamespace};
 use crate::moqt::message::{request_error_code, ControlMessage};
 use crate::moqt::reassembly::Reassembler;
 use crate::moqt::session::{implementation_name, DataEvent, MoqtSession};
+use crate::moqt::v18;
+use crate::moqt::{negotiated_version, parse_versions, MoqtVersion};
 
 /// A relay we cannot talk to, or one that violates the protocol, is the same
 /// thing to the pipeline: no stream.
@@ -59,6 +63,9 @@ struct Subscription {
     request_id: u64,
     /// Set by SUBSCRIBE_OK; the alias is how data streams name this track.
     track_alias: Option<u64>,
+    /// The draft-18 request stream's send half. Draft-18 has no UNSUBSCRIBE:
+    /// resetting this is how the subscription is cancelled at shutdown.
+    request_tx: Option<SendStream>,
     reassembler: Reassembler,
     /// Payloads in order, waiting to be emitted.
     ready: VecDeque<Vec<u8>>,
@@ -71,6 +78,7 @@ impl Subscription {
         Self {
             request_id,
             track_alias: None,
+            request_tx: None,
             reassembler: Reassembler::new(max_groups, max_bytes),
             ready: VecDeque::new(),
             ended: false,
@@ -89,6 +97,7 @@ pub struct MoqtSrc {
     catalog_track: String,
     use_catalog: bool,
     max_request_id: u64,
+    versions: String,
     max_groups: u64,
     max_buffer_bytes: u64,
     max_object_bytes: u64,
@@ -122,6 +131,7 @@ impl MoqtSrc {
             catalog_track: String::from(".catalog"),
             use_catalog: true,
             max_request_id: 100,
+            versions: String::from("18,16"),
             max_groups: 8,
             max_buffer_bytes: 32 * 1024 * 1024,
             max_object_bytes: 16 * 1024 * 1024,
@@ -183,145 +193,41 @@ impl MoqtSrc {
     }
 }
 
-/// The live half of a run: the session plus every subscription on it.
-struct Driver {
-    namespace: TrackNamespace,
+/// The subscriptions and the reorder state they share, identical whichever
+/// draft delivers the events: ordering is not version-specific.
+struct SubsState {
     max_groups: usize,
     max_bytes: usize,
-    timeout_ms: u64,
-    session: MoqtSession,
-    data: tokio::sync::mpsc::UnboundedReceiver<DataEvent>,
     subs: Vec<Subscription>,
     /// Data events whose track alias no subscription claims yet. The control
-    /// stream and the data streams are different QUIC streams, so a subgroup
+    /// plane and the data streams are different QUIC streams, so a subgroup
     /// can arrive before the SUBSCRIBE_OK that names its alias.
     orphans: VecDeque<DataEvent>,
     orphan_bytes: usize,
-    /// The session ended (control stream closed, or the relay went away).
-    closed: bool,
 }
 
-impl LogSource for MoqtSrc {
-    fn log_category(&self) -> &'static str {
-        "moqtsrc"
-    }
-}
-
-impl LogSource for Driver {
-    fn log_category(&self) -> &'static str {
-        "moqtsrc"
-    }
-}
-
-/// What one [`Driver::pump`] achieved.
-#[derive(Debug, PartialEq, Eq)]
-enum Pumped {
-    Applied,
-    /// The session ended: the control stream closed or the relay went away.
-    Ended,
-    /// Nothing arrived within `timeout`.
-    TimedOut,
-}
-
-impl Driver {
-    /// Send SUBSCRIBE for `name` and return its index in `subs`.
-    async fn subscribe(&mut self, name: &str) -> Result<usize, G2gError> {
-        let id = self.session.allocate_request_id().ok_or_else(session_err)?;
-        self.session
-            .send(&ControlMessage::Subscribe {
-                id,
-                namespace: self.namespace.clone(),
-                track_name: TrackName::new(name),
-                params: Params::new(),
-            })
-            .await?;
-        g2g_debug!(self, "SUBSCRIBE {name} as request {id}");
-        self.subs
-            .push(Subscription::new(id, self.max_groups, self.max_bytes));
-        Ok(self.subs.len() - 1)
-    }
-
-    /// Wait for one event and apply it.
-    async fn pump(&mut self) -> Result<Pumped, G2gError> {
-        if self.closed {
-            return Ok(Pumped::Ended);
+impl SubsState {
+    fn new(max_groups: usize, max_bytes: usize) -> Self {
+        Self {
+            max_groups,
+            max_bytes,
+            subs: Vec::new(),
+            orphans: VecDeque::new(),
+            orphan_bytes: 0,
         }
-        let timeout = self.timeout_ms;
-        let step = {
-            let session = &mut self.session;
-            let data = &mut self.data;
-            let next = async move {
-                tokio::select! {
-                    control = session.next_control() => Some(Step::Control(control)),
-                    event = data.recv() => event.map(Step::Data),
-                }
-            };
-            if timeout == 0 {
-                next.await
-            } else {
-                match tokio::time::timeout(Duration::from_millis(timeout), next).await {
-                    Ok(step) => step,
-                    Err(_) => return Ok(Pumped::TimedOut),
-                }
-            }
-        };
-        match step {
-            Some(Step::Control(Some(msg))) => self.handle_control(msg).await?,
-            // The control stream ended: so has the session.
-            Some(Step::Control(None)) | None => {
-                self.closed = true;
-                return Ok(Pumped::Ended);
-            }
-            Some(Step::Data(event)) => self.handle_data(event),
-        }
-        Ok(Pumped::Applied)
     }
 
-    async fn handle_control(&mut self, msg: ControlMessage) -> Result<(), G2gError> {
-        g2g_debug!(self, "control: {}", msg.name());
-        match msg {
-            ControlMessage::SubscribeOk {
-                id, track_alias, ..
-            } => {
-                if let Some(sub) = self.subs.iter_mut().find(|s| s.request_id == id) {
-                    sub.track_alias = Some(track_alias);
-                }
-                self.claim_orphans(track_alias);
-            }
-            ControlMessage::RequestError { id, error_code, .. } => {
-                g2g_debug!(self, "request {id} refused, code {error_code}");
-                if let Some(sub) = self.subs.iter_mut().find(|s| s.request_id == id) {
-                    sub.ended = true;
-                }
-            }
-            ControlMessage::PublishDone { id, .. } => {
-                if let Some(sub) = self.subs.iter_mut().find(|s| s.request_id == id) {
-                    let tail = sub.reassembler.flush();
-                    sub.ready.extend(tail);
-                    sub.ended = true;
-                }
-            }
-            ControlMessage::MaxRequestId { request_id } => {
-                self.session.set_peer_max_request_id(request_id);
-            }
-            ControlMessage::GoAway { .. } => self.closed = true,
-            // A publisher-side request we do not serve. Draft-16 §4 asks for an
-            // explicit refusal rather than silence.
-            ControlMessage::Publish { id, .. } | ControlMessage::RequestUpdate { id, .. } => {
-                self.session
-                    .send(&ControlMessage::RequestError {
-                        id,
-                        error_code: request_error_code::NOT_SUPPORTED,
-                        retry_interval: 0,
-                        reason: String::from("not supported"),
-                    })
-                    .await?;
-            }
-            // Everything else is a response to a request we did not make, or a
-            // message only a publisher acts on: decoded, then ignored.
-            _ => {}
-        }
-        Ok(())
+    fn add(&mut self, request_id: u64) -> usize {
+        self.subs.push(Subscription::new(
+            request_id,
+            self.max_groups,
+            self.max_bytes,
+        ));
+        self.subs.len() - 1
+    }
+
+    fn by_request(&mut self, id: u64) -> Option<&mut Subscription> {
+        self.subs.iter_mut().find(|s| s.request_id == id)
     }
 
     fn handle_data(&mut self, event: DataEvent) {
@@ -387,23 +293,149 @@ impl Driver {
             }
         }
     }
+}
 
-    /// Pump until the subscription at `at` has a payload, or until it ends, the
-    /// session ends, or nothing arrives within `timeout`.
-    async fn first_object(&mut self, at: usize) -> Result<Option<Vec<u8>>, G2gError> {
-        loop {
-            if let Some(payload) = self.subs[at].ready.pop_front() {
-                return Ok(Some(payload));
-            }
-            if self.subs[at].ended || self.pump().await? != Pumped::Applied {
-                return Ok(self.subs[at].ready.pop_front());
-            }
+/// The live half of a draft-16 run: the session plus every subscription on it.
+struct Driver {
+    namespace: TrackNamespace,
+    timeout_ms: u64,
+    session: MoqtSession,
+    data: tokio::sync::mpsc::UnboundedReceiver<DataEvent>,
+    state: SubsState,
+    /// The session ended (control stream closed, or the relay went away).
+    closed: bool,
+}
+
+impl LogSource for MoqtSrc {
+    fn log_category(&self) -> &'static str {
+        "moqtsrc"
+    }
+}
+
+impl LogSource for Driver {
+    fn log_category(&self) -> &'static str {
+        "moqtsrc"
+    }
+}
+
+impl LogSource for Driver18 {
+    fn log_category(&self) -> &'static str {
+        "moqtsrc"
+    }
+}
+
+/// What one [`Driver::pump`] achieved.
+#[derive(Debug, PartialEq, Eq)]
+enum Pumped {
+    Applied,
+    /// The session ended: the control stream closed or the relay went away.
+    Ended,
+    /// Nothing arrived within `timeout`.
+    TimedOut,
+}
+
+impl Driver {
+    /// Send SUBSCRIBE for `name` and return its index in `subs`.
+    async fn subscribe(&mut self, name: &str) -> Result<usize, G2gError> {
+        let id = self.session.allocate_request_id().ok_or_else(session_err)?;
+        self.session
+            .send(&ControlMessage::Subscribe {
+                id,
+                namespace: self.namespace.clone(),
+                track_name: TrackName::new(name),
+                params: Params::new(),
+            })
+            .await?;
+        g2g_debug!(self, "SUBSCRIBE {name} as request {id}");
+        Ok(self.state.add(id))
+    }
+
+    /// Wait for one event and apply it.
+    async fn pump(&mut self) -> Result<Pumped, G2gError> {
+        if self.closed {
+            return Ok(Pumped::Ended);
         }
+        let timeout = self.timeout_ms;
+        let step = {
+            let session = &mut self.session;
+            let data = &mut self.data;
+            let next = async move {
+                tokio::select! {
+                    control = session.next_control() => Some(Step::Control(control)),
+                    event = data.recv() => event.map(Step::Data),
+                }
+            };
+            if timeout == 0 {
+                next.await
+            } else {
+                match tokio::time::timeout(Duration::from_millis(timeout), next).await {
+                    Ok(step) => step,
+                    Err(_) => return Ok(Pumped::TimedOut),
+                }
+            }
+        };
+        match step {
+            Some(Step::Control(Some(msg))) => self.handle_control(msg).await?,
+            // The control stream ended: so has the session.
+            Some(Step::Control(None)) | None => {
+                self.closed = true;
+                return Ok(Pumped::Ended);
+            }
+            Some(Step::Data(event)) => self.state.handle_data(event),
+        }
+        Ok(Pumped::Applied)
+    }
+
+    async fn handle_control(&mut self, msg: ControlMessage) -> Result<(), G2gError> {
+        g2g_debug!(self, "control: {}", msg.name());
+        match msg {
+            ControlMessage::SubscribeOk {
+                id, track_alias, ..
+            } => {
+                if let Some(sub) = self.state.by_request(id) {
+                    sub.track_alias = Some(track_alias);
+                }
+                self.state.claim_orphans(track_alias);
+            }
+            ControlMessage::RequestError { id, error_code, .. } => {
+                g2g_debug!(self, "request {id} refused, code {error_code}");
+                if let Some(sub) = self.state.by_request(id) {
+                    sub.ended = true;
+                }
+            }
+            ControlMessage::PublishDone { id, .. } => {
+                if let Some(sub) = self.state.by_request(id) {
+                    let tail = sub.reassembler.flush();
+                    sub.ready.extend(tail);
+                    sub.ended = true;
+                }
+            }
+            ControlMessage::MaxRequestId { request_id } => {
+                self.session.set_peer_max_request_id(request_id);
+            }
+            ControlMessage::GoAway { .. } => self.closed = true,
+            // A publisher-side request we do not serve. Draft-16 §4 asks for an
+            // explicit refusal rather than silence.
+            ControlMessage::Publish { id, .. } | ControlMessage::RequestUpdate { id, .. } => {
+                self.session
+                    .send(&ControlMessage::RequestError {
+                        id,
+                        error_code: request_error_code::NOT_SUPPORTED,
+                        retry_interval: 0,
+                        reason: String::from("not supported"),
+                    })
+                    .await?;
+            }
+            // Everything else is a response to a request we did not make, or a
+            // message only a publisher acts on: decoded, then ignored.
+            _ => {}
+        }
+        Ok(())
     }
 
     /// UNSUBSCRIBE every live subscription and close the session.
     async fn shutdown(&mut self) {
-        for sub in &self.subs {
+        for sub in &self.state.subs {
             if sub.ended {
                 continue;
             }
@@ -420,6 +452,208 @@ impl Driver {
 enum Step {
     Control(Option<ControlMessage>),
     Data(DataEvent),
+}
+
+/// One response-stream message, keyed by its request id; `None` when the stream
+/// ended, which terminates the request (§11.4.1).
+type Response = (u64, Option<v18::message::ControlMessage>);
+
+/// The live half of a draft-18 run. Each SUBSCRIBE opened its own bidirectional
+/// stream, and a task per stream forwards its responses into one channel, so
+/// the pump still waits in one place.
+struct Driver18 {
+    namespace: TrackNamespace,
+    timeout_ms: u64,
+    session: v18::session::Session18,
+    data: tokio::sync::mpsc::UnboundedReceiver<DataEvent>,
+    responses: tokio::sync::mpsc::UnboundedReceiver<Response>,
+    response_tx: tokio::sync::mpsc::UnboundedSender<Response>,
+    state: SubsState,
+    closed: bool,
+}
+
+impl Driver18 {
+    /// Open a request stream with SUBSCRIBE for `name` and return its index.
+    async fn subscribe(&mut self, name: &str) -> Result<usize, G2gError> {
+        let id = self.session.allocate_request_id();
+        let (tx, rx) = self
+            .session
+            .open_request(&v18::message::ControlMessage::Subscribe {
+                id,
+                namespace: self.namespace.clone(),
+                track_name: TrackName::new(name),
+                params: v18::coding::MessageParams::new(),
+            })
+            .await?;
+        g2g_debug!(self, "SUBSCRIBE {name} as request {id}");
+        tokio::spawn(forward_responses(id, rx, self.response_tx.clone()));
+        let at = self.state.add(id);
+        self.state.subs[at].request_tx = Some(tx);
+        Ok(at)
+    }
+
+    /// Wait for one event and apply it.
+    async fn pump(&mut self) -> Result<Pumped, G2gError> {
+        if self.closed || self.session.is_closed() {
+            self.closed = true;
+            return Ok(Pumped::Ended);
+        }
+        let timeout = self.timeout_ms;
+        let step = {
+            let responses = &mut self.responses;
+            let data = &mut self.data;
+            let next = async move {
+                tokio::select! {
+                    response = responses.recv() => response.map(Step18::Response),
+                    event = data.recv() => event.map(Step18::Data),
+                }
+            };
+            if timeout == 0 {
+                next.await
+            } else {
+                match tokio::time::timeout(Duration::from_millis(timeout), next).await {
+                    Ok(step) => step,
+                    Err(_) => return Ok(Pumped::TimedOut),
+                }
+            }
+        };
+        match step {
+            Some(Step18::Response((id, msg))) => self.handle_response(id, msg),
+            Some(Step18::Data(event)) => self.state.handle_data(event),
+            // Both channels ended: the session is gone.
+            None => {
+                self.closed = true;
+                return Ok(Pumped::Ended);
+            }
+        }
+        Ok(Pumped::Applied)
+    }
+
+    fn handle_response(&mut self, id: u64, msg: Option<v18::message::ControlMessage>) {
+        use v18::message::ControlMessage as Msg;
+        match msg {
+            Some(Msg::SubscribeOk { track_alias, .. }) => {
+                g2g_debug!(self, "request {id}: SUBSCRIBE_OK, alias {track_alias}");
+                if let Some(sub) = self.state.by_request(id) {
+                    sub.track_alias = Some(track_alias);
+                }
+                self.state.claim_orphans(track_alias);
+            }
+            Some(Msg::RequestError { error_code, .. }) => {
+                g2g_debug!(self, "request {id} refused, code {error_code}");
+                if let Some(sub) = self.state.by_request(id) {
+                    sub.ended = true;
+                }
+            }
+            // PUBLISH_DONE, or the stream ending: either way the subscription
+            // is over and what the reassembler still holds is the tail.
+            Some(Msg::PublishDone { .. }) | None => {
+                if let Some(sub) = self.state.by_request(id) {
+                    let tail = sub.reassembler.flush();
+                    sub.ready.extend(tail);
+                    sub.ended = true;
+                }
+            }
+            // Anything else on a response stream is a message this subscriber
+            // did not ask for: decoded, then ignored.
+            Some(_) => {}
+        }
+    }
+
+    /// Cancel every live subscription by resetting its request stream (§3.3.2)
+    /// and close the session.
+    async fn shutdown(&mut self) {
+        for sub in &mut self.state.subs {
+            if sub.ended {
+                continue;
+            }
+            if let Some(tx) = sub.request_tx.as_mut() {
+                let _ = tx.reset(v18::message::stream_error_code::CANCELLED);
+            }
+        }
+        self.session
+            .close(v18::message::session_error_code::NO_ERROR, "done")
+            .await;
+    }
+}
+
+/// Which half of the draft-18 session produced the next event.
+enum Step18 {
+    Response(Response),
+    Data(DataEvent),
+}
+
+/// Read one request stream's responses and forward them under its request id.
+/// The final `None` reports the stream ending, however it ended.
+async fn forward_responses(
+    id: u64,
+    mut rx: web_transport_quinn::RecvStream,
+    out: tokio::sync::mpsc::UnboundedSender<Response>,
+) {
+    let mut reader = v18::session::MessageReader::new();
+    loop {
+        match reader.next(&mut rx).await {
+            Ok(Some(msg)) => {
+                if out.send((id, Some(msg))).is_err() {
+                    return;
+                }
+            }
+            _ => {
+                let _ = out.send((id, None));
+                return;
+            }
+        }
+    }
+}
+
+/// The negotiated driver, so the run loop reads one shape whichever draft the
+/// server picked.
+enum AnyDriver {
+    V16(Driver),
+    V18(Driver18),
+}
+
+impl AnyDriver {
+    fn state(&mut self) -> &mut SubsState {
+        match self {
+            Self::V16(driver) => &mut driver.state,
+            Self::V18(driver) => &mut driver.state,
+        }
+    }
+
+    async fn subscribe(&mut self, name: &str) -> Result<usize, G2gError> {
+        match self {
+            Self::V16(driver) => driver.subscribe(name).await,
+            Self::V18(driver) => driver.subscribe(name).await,
+        }
+    }
+
+    async fn pump(&mut self) -> Result<Pumped, G2gError> {
+        match self {
+            Self::V16(driver) => driver.pump().await,
+            Self::V18(driver) => driver.pump().await,
+        }
+    }
+
+    async fn shutdown(&mut self) {
+        match self {
+            Self::V16(driver) => driver.shutdown().await,
+            Self::V18(driver) => driver.shutdown().await,
+        }
+    }
+
+    /// Pump until the subscription at `at` has a payload, or until it ends, the
+    /// session ends, or nothing arrives within `timeout`.
+    async fn first_object(&mut self, at: usize) -> Result<Option<Vec<u8>>, G2gError> {
+        loop {
+            if let Some(payload) = self.state().subs[at].ready.pop_front() {
+                return Ok(Some(payload));
+            }
+            if self.state().subs[at].ended || self.pump().await? != Pumped::Applied {
+                return Ok(self.state().subs[at].ready.pop_front());
+            }
+        }
+    }
 }
 
 /// Pick the media track: the `track-name` property when set, else the catalog's
@@ -488,25 +722,50 @@ impl SourceLoop for MoqtSrc {
             if !self.configured {
                 return Err(G2gError::NotConfigured);
             }
-            let session = MoqtSession::connect(
-                &self.location,
-                &self.cert_hashes,
-                self.max_request_id,
-                &implementation_name(),
-            )
-            .await?;
-            let data = session.start_data_reader(self.max_object_bytes as usize);
-            let mut driver = Driver {
-                namespace: TrackNamespace::from_path(&self.namespace),
-                max_groups: self.max_groups as usize,
-                max_bytes: self.max_buffer_bytes as usize,
-                timeout_ms: self.timeout_ms,
-                session,
-                data,
-                subs: Vec::new(),
-                orphans: VecDeque::new(),
-                orphan_bytes: 0,
-                closed: false,
+            let offered = parse_versions(&self.versions)?;
+            let protocols: Vec<&str> = offered.iter().map(|v| v.protocol()).collect();
+            let session =
+                crate::remotewtio::dial(&self.location, &self.cert_hashes, &protocols).await?;
+            let state = SubsState::new(self.max_groups as usize, self.max_buffer_bytes as usize);
+            let namespace = TrackNamespace::from_path(&self.namespace);
+            let mut driver = match negotiated_version(&session, &offered)? {
+                MoqtVersion::V16 => {
+                    let session = MoqtSession::connect_over(
+                        session,
+                        self.max_request_id,
+                        &implementation_name(),
+                    )
+                    .await?;
+                    let data = session.start_data_reader(self.max_object_bytes as usize);
+                    AnyDriver::V16(Driver {
+                        namespace,
+                        timeout_ms: self.timeout_ms,
+                        session,
+                        data,
+                        state,
+                        closed: false,
+                    })
+                }
+                MoqtVersion::V18 => {
+                    let mut session = v18::session::Session18::connect_over(
+                        session,
+                        &implementation_name(),
+                        self.max_object_bytes as usize,
+                    )
+                    .await?;
+                    let data = session.take_data().ok_or_else(session_err)?;
+                    let (response_tx, responses) = tokio::sync::mpsc::unbounded_channel();
+                    AnyDriver::V18(Driver18 {
+                        namespace,
+                        timeout_ms: self.timeout_ms,
+                        session,
+                        data,
+                        responses,
+                        response_tx,
+                        state,
+                        closed: false,
+                    })
+                }
             };
 
             // The catalog names the tracks. Without it, fall back to the
@@ -543,7 +802,7 @@ impl SourceLoop for MoqtSrc {
 
             let limit = self.num_buffers;
             loop {
-                while let Some(payload) = driver.subs[media].ready.pop_front() {
+                while let Some(payload) = driver.state().subs[media].ready.pop_front() {
                     out.push(PipelinePacket::DataFrame(byte_frame(payload, emitted)))
                         .await?;
                     emitted += 1;
@@ -551,7 +810,7 @@ impl SourceLoop for MoqtSrc {
                         break;
                     }
                 }
-                if (limit != 0 && emitted >= limit) || driver.subs[media].ended {
+                if (limit != 0 && emitted >= limit) || driver.state().subs[media].ended {
                     break;
                 }
                 match driver.pump().await? {
@@ -563,7 +822,7 @@ impl SourceLoop for MoqtSrc {
                 }
             }
 
-            let stats = driver.subs[media].reassembler.stats();
+            let stats = driver.state().subs[media].reassembler.stats();
             driver.shutdown().await;
             self.selected_track = selected.name;
             self.objects_received = emitted;
@@ -599,6 +858,11 @@ impl SourceLoop for MoqtSrc {
             "server-certificate-hashes" => self.cert_hashes = string(&value)?,
             "catalog" => self.use_catalog = value.as_bool().ok_or(PropError::Type)?,
             "max-request-id" => self.max_request_id = uint(&value)?,
+            "versions" => {
+                let list = string(&value)?;
+                parse_versions(&list).map_err(|_| PropError::Value)?;
+                self.versions = list;
+            }
             "max-groups" => self.max_groups = uint(&value)?,
             "max-buffer-bytes" => self.max_buffer_bytes = uint(&value)?,
             "max-object-size" => self.max_object_bytes = uint(&value)?,
@@ -619,6 +883,7 @@ impl SourceLoop for MoqtSrc {
             "server-certificate-hashes" => Some(PropValue::Str(self.cert_hashes.clone())),
             "catalog" => Some(PropValue::Bool(self.use_catalog)),
             "max-request-id" => Some(PropValue::Uint(self.max_request_id)),
+            "versions" => Some(PropValue::Str(self.versions.clone())),
             "max-groups" => Some(PropValue::Uint(self.max_groups)),
             "max-buffer-bytes" => Some(PropValue::Uint(self.max_buffer_bytes)),
             "max-object-size" => Some(PropValue::Uint(self.max_object_bytes)),
@@ -668,9 +933,15 @@ static MOQTSRC_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "max-request-id",
         PropKind::Uint,
-        "MAX_REQUEST_ID advertised to the relay in CLIENT_SETUP",
+        "MAX_REQUEST_ID advertised to the relay in CLIENT_SETUP (draft-16 sessions only)",
     )
     .with_default("100"),
+    PropertySpec::new(
+        "versions",
+        PropKind::Str,
+        "MoQ Transport draft versions offered on CONNECT, comma-separated in preference order; the server's pick decides",
+    )
+    .with_default("18,16"),
     PropertySpec::new(
         "max-groups",
         PropKind::Uint,

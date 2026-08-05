@@ -106,7 +106,19 @@ impl MoqtSession {
         max_request_id: u64,
         implementation: &str,
     ) -> Result<Self, G2gError> {
-        let session = dial(url, cert_hashes, Some(MOQT_PROTOCOL)).await?;
+        let session = dial(url, cert_hashes, &[MOQT_PROTOCOL]).await?;
+        Self::connect_over(session, max_request_id, implementation).await
+    }
+
+    /// Complete the draft-16 handshake over an already dialled WebTransport
+    /// session. The caller dials when the version is negotiated per session
+    /// (the `versions` property offers several subprotocols and the server's
+    /// pick decides which handshake runs).
+    pub async fn connect_over(
+        session: Session,
+        max_request_id: u64,
+        implementation: &str,
+    ) -> Result<Self, G2gError> {
         let (mut control_tx, control_rx) = session.open_bi().await.map_err(wt_err)?;
 
         let mut params = Params::new();

@@ -72,6 +72,8 @@ use crate::moqt::data::{StreamHeaderType, SubgroupHeader, SubgroupObjectHeader};
 use crate::moqt::datagram::DatagramObject;
 use crate::moqt::message::{publish_done_code, request_error_code, ControlMessage};
 use crate::moqt::session::{implementation_name, MoqtSession};
+use crate::moqt::v18;
+use crate::moqt::{negotiated_version, parse_versions, MoqtVersion};
 use crate::mp4box::{be32, boxes, find_box, find_path};
 use crate::remotewtio::wt_err;
 
@@ -116,6 +118,10 @@ struct Subscription {
     request_id: u64,
     track_alias: u64,
     target: Target,
+    /// The draft-18 request stream's send half: SUBSCRIBE_OK went on it, and
+    /// PUBLISH_DONE follows there. `None` on a draft-16 session, whose
+    /// responses ride the control stream instead.
+    reply: Option<SendStream>,
     /// The subgroup streams open for the group in progress.
     streams: Vec<SubgroupStream>,
     /// Whether a group boundary has passed since this subscription was accepted.
@@ -179,7 +185,26 @@ struct Dial {
     location: String,
     cert_hashes: String,
     max_request_id: u64,
+    versions: String,
     cfg: Config,
+}
+
+/// The negotiated session, either draft. What differs is the control plane:
+/// draft-16 answers requests on the one control stream, draft-18 on the
+/// bidirectional stream each request arrived on.
+#[derive(Debug)]
+enum Wire {
+    V16(MoqtSession),
+    V18(v18::session::Session18),
+}
+
+impl Wire {
+    fn is_closed(&self) -> bool {
+        match self {
+            Self::V16(session) => session.is_closed(),
+            Self::V18(session) => session.is_closed(),
+        }
+    }
 }
 
 /// Counters the sync accessors read. They are bumped from the pump task as well
@@ -238,13 +263,17 @@ enum Connect {
 #[derive(Debug)]
 struct Core {
     cfg: Config,
-    session: Option<MoqtSession>,
+    session: Option<Wire>,
     /// Request id of our PUBLISH_NAMESPACE, once sent.
     namespace_request: Option<u64>,
+    /// The draft-18 PUBLISH_NAMESPACE request stream's send half. Finishing it
+    /// withdraws the namespace, which is what EOS does.
+    namespace_stream: Option<SendStream>,
     subscriptions: Vec<Subscription>,
     /// SUBSCRIBEs for a track the `moov` has not named yet, answered once it
-    /// does (or refused then, if it names nothing).
-    pending_subscribes: Vec<(u64, String)>,
+    /// does (or refused then, if it names nothing). The stream is the draft-18
+    /// request stream the answer goes on.
+    pending_subscribes: Vec<(u64, String, Option<SendStream>)>,
 
     /// `ftyp`+`moov` as received, the init track's single object.
     init: Vec<u8>,
@@ -270,6 +299,7 @@ pub struct MoqtSink {
     location: String,
     cert_hashes: String,
     max_request_id: u64,
+    versions: String,
     cfg: Config,
 
     configured: bool,
@@ -300,6 +330,7 @@ impl MoqtSink {
             location: location.into(),
             cert_hashes: String::new(),
             max_request_id: 100,
+            versions: String::from("18,16"),
             core: Arc::new(Mutex::new(Core::new(cfg.clone(), Arc::clone(&stats)))),
             cfg,
             configured: false,
@@ -373,6 +404,7 @@ impl MoqtSink {
             location: self.location.clone(),
             cert_hashes: self.cert_hashes.clone(),
             max_request_id: self.max_request_id,
+            versions: self.versions.clone(),
             cfg: self.cfg.clone(),
         }
     }
@@ -427,32 +459,120 @@ async fn connect_session(
         return Ok(());
     }
     guard.cfg = dial.cfg;
-    let mut session = MoqtSession::connect(
-        &dial.location,
-        &dial.cert_hashes,
-        dial.max_request_id,
-        &implementation_name(),
-    )
-    .await?;
-    let id = session
-        .allocate_request_id()
-        .ok_or(G2gError::Hardware(HardwareError::Other))?;
-    session
-        .send(&ControlMessage::PublishNamespace {
-            id,
-            namespace: guard.namespace_tuple(),
-            params: Params::new(),
-        })
-        .await?;
-    // The pump owns the inbound half from here: nothing else reads it.
-    let inbound = session
-        .take_control_receiver()
-        .ok_or(G2gError::Hardware(HardwareError::Other))?;
-    guard.namespace_request = Some(id);
-    guard.session = Some(session);
-    drop(guard);
-    pump.install(tokio::spawn(pump_control(core, inbound)));
+    let offered = parse_versions(&dial.versions)?;
+    let protocols: Vec<&str> = offered.iter().map(|v| v.protocol()).collect();
+    let session = crate::remotewtio::dial(&dial.location, &dial.cert_hashes, &protocols).await?;
+    match negotiated_version(&session, &offered)? {
+        MoqtVersion::V16 => {
+            let mut session =
+                MoqtSession::connect_over(session, dial.max_request_id, &implementation_name())
+                    .await?;
+            let id = session
+                .allocate_request_id()
+                .ok_or(G2gError::Hardware(HardwareError::Other))?;
+            session
+                .send(&ControlMessage::PublishNamespace {
+                    id,
+                    namespace: guard.namespace_tuple(),
+                    params: Params::new(),
+                })
+                .await?;
+            // The pump owns the inbound half from here: nothing else reads it.
+            let inbound = session
+                .take_control_receiver()
+                .ok_or(G2gError::Hardware(HardwareError::Other))?;
+            guard.namespace_request = Some(id);
+            guard.session = Some(Wire::V16(session));
+            drop(guard);
+            pump.install(tokio::spawn(pump_control(core, inbound)));
+        }
+        MoqtVersion::V18 => {
+            // The publisher reads no objects, so the data-plane bound only caps
+            // what a misbehaving relay could make us buffer.
+            let mut session = v18::session::Session18::connect_over(
+                session,
+                &implementation_name(),
+                DATAGRAM_BOUND,
+            )
+            .await?;
+            let id = session.allocate_request_id();
+            let (ns_tx, ns_rx) = session
+                .open_request(&v18::message::ControlMessage::PublishNamespace {
+                    id,
+                    namespace: guard.namespace_tuple(),
+                    params: v18::coding::MessageParams::new(),
+                })
+                .await?;
+            let requests = session
+                .take_requests()
+                .ok_or(G2gError::Hardware(HardwareError::Other))?;
+            guard.namespace_request = Some(id);
+            guard.namespace_stream = Some(ns_tx);
+            guard.session = Some(Wire::V18(session));
+            drop(guard);
+            tokio::spawn(watch_namespace(Arc::clone(&core), ns_rx));
+            pump.install(tokio::spawn(pump_requests(core, requests)));
+        }
+    }
     Ok(())
+}
+
+/// The most a draft-18 relay can make the publisher buffer off the data plane
+/// it should never use.
+const DATAGRAM_BOUND: usize = 64 * 1024;
+
+/// Watch the draft-18 PUBLISH_NAMESPACE response stream: a REQUEST_ERROR (or a
+/// rejection before any answer) leaves nothing to serve.
+async fn watch_namespace(core: Arc<Mutex<Core>>, mut rx: web_transport_quinn::RecvStream) {
+    let mut reader = v18::session::MessageReader::new();
+    match reader.next(&mut rx).await {
+        Ok(Some(v18::message::ControlMessage::RequestOk { .. })) => {}
+        // An error, an unexpected message, or a stream that ended unanswered:
+        // the namespace is not published.
+        _ => core.lock().await.dead = true,
+    }
+}
+
+/// Answer draft-18 request streams as they arrive, so a SUBSCRIBE that lands
+/// before the first frame (or between two of them) is served when it lands.
+async fn pump_requests(
+    core: Arc<Mutex<Core>>,
+    mut requests: mpsc::UnboundedReceiver<v18::session::PeerRequest>,
+) {
+    while let Some(request) = requests.recv().await {
+        let mut guard = core.lock().await;
+        match guard.handle_request(request).await {
+            Ok(Some((id, rx))) => {
+                drop(guard);
+                tokio::spawn(watch_request(Arc::clone(&core), id, rx));
+            }
+            Ok(None) => {}
+            Err(_) => {
+                guard.dead = true;
+                return;
+            }
+        }
+    }
+    // The session ended: no more requests will arrive.
+    core.lock().await.dead = true;
+}
+
+/// Watch a live subscription's request stream. Draft-18 has no UNSUBSCRIBE: the
+/// subscriber cancels by ending the stream, which is when the subscription is
+/// dropped. A REQUEST_UPDATE is decoded and left unapplied: the subscription
+/// keeps its original shape, which the draft allows the publisher to do with an
+/// update it cannot satisfy.
+async fn watch_request(core: Arc<Mutex<Core>>, id: u64, mut rx: web_transport_quinn::RecvStream) {
+    let mut reader = v18::session::MessageReader::new();
+    loop {
+        match reader.next(&mut rx).await {
+            Ok(Some(v18::message::ControlMessage::RequestUpdate { .. })) => {}
+            // Anything else on an established request stream, or its end: the
+            // request is over either way.
+            _ => break,
+        }
+    }
+    core.lock().await.drop_subscription(id);
 }
 
 /// Answer inbound control messages as they arrive, so a SUBSCRIBE that lands
@@ -478,6 +598,7 @@ impl Core {
             cfg,
             session: None,
             namespace_request: None,
+            namespace_stream: None,
             subscriptions: Vec::new(),
             pending_subscribes: Vec::new(),
             init: Vec::new(),
@@ -503,7 +624,7 @@ impl Core {
     /// Whether the session is still usable. The pump reports what it saw here,
     /// since the pipeline only learns of it when it next has a frame.
     fn alive(&self) -> Result<(), G2gError> {
-        if self.dead || self.session.as_ref().is_some_and(MoqtSession::is_closed) {
+        if self.dead || self.session.as_ref().is_some_and(Wire::is_closed) {
             return Err(G2gError::Hardware(HardwareError::Other));
         }
         Ok(())
@@ -517,7 +638,10 @@ impl Core {
                 namespace,
                 track_name,
                 ..
-            } => self.handle_subscribe(id, namespace, track_name).await?,
+            } => {
+                self.handle_subscribe(id, namespace, track_name, None)
+                    .await?;
+            }
             ControlMessage::Unsubscribe { id } => self.drop_subscription(id),
             ControlMessage::RequestError { id, error_code, .. } => {
                 // Our namespace publish being refused leaves nothing to serve.
@@ -527,7 +651,7 @@ impl Core {
                 }
             }
             ControlMessage::MaxRequestId { request_id } => {
-                if let Some(session) = self.session.as_mut() {
+                if let Some(Wire::V16(session)) = self.session.as_mut() {
                     session.set_peer_max_request_id(request_id);
                 }
             }
@@ -543,6 +667,7 @@ impl Core {
                     id,
                     request_error_code::NOT_SUPPORTED,
                     String::from("not supported"),
+                    None,
                 )
                 .await?;
             }
@@ -553,16 +678,54 @@ impl Core {
         Ok(())
     }
 
+    /// Handle one draft-18 request stream. Returns the request id and read half
+    /// to watch when the request stays live (accepted or held), so the caller
+    /// can observe the subscriber cancelling it.
+    async fn handle_request(
+        &mut self,
+        request: v18::session::PeerRequest,
+    ) -> Result<Option<(u64, web_transport_quinn::RecvStream)>, G2gError> {
+        g2g_debug!(self, "request: {}", request.first.name());
+        let v18::session::PeerRequest { first, tx, rx } = request;
+        match first {
+            v18::message::ControlMessage::Subscribe {
+                id,
+                namespace,
+                track_name,
+                ..
+            } => {
+                let live = self
+                    .handle_subscribe(id, namespace, track_name, Some(tx))
+                    .await?;
+                Ok(live.then_some((id, rx)))
+            }
+            // A request the publisher does not serve. §3.3.2: REQUEST_ERROR,
+            // then FIN the stream.
+            _ => {
+                refuse_v18(
+                    tx,
+                    v18::message::request_error_code::NOT_SUPPORTED,
+                    String::from("not supported"),
+                )
+                .await?;
+                Ok(None)
+            }
+        }
+    }
+
     /// Accept, refuse, or hold one SUBSCRIBE. The media track names come from
     /// the `moov`, and the session is dialled before the encoder has produced
     /// anything, so a subscription can arrive for a media track that does not
-    /// exist yet: it is held until the `moov` resolves it.
+    /// exist yet: it is held until the `moov` resolves it. `reply` is the
+    /// draft-18 request stream the answer goes on (`None` on draft-16).
+    /// `Ok(true)` means the request is live: accepted or held.
     async fn handle_subscribe(
         &mut self,
         id: u64,
         namespace: TrackNamespace,
         track_name: TrackName,
-    ) -> Result<(), G2gError> {
+        reply: Option<SendStream>,
+    ) -> Result<bool, G2gError> {
         let name = track_name.as_str_lossy();
         let ours = namespace == self.namespace_tuple();
         let target = if !ours {
@@ -578,15 +741,16 @@ impl Core {
                 .map(|t| Target::Media(t.track_id))
         };
         if self.subscriptions.iter().any(|s| s.request_id == id)
-            || self.pending_subscribes.iter().any(|(held, _)| *held == id)
+            || self.pending_subscribes.iter().any(|(held, ..)| *held == id)
         {
-            return self
-                .refuse(
-                    id,
-                    request_error_code::DUPLICATE_SUBSCRIPTION,
-                    String::from("duplicate request id"),
-                )
-                .await;
+            self.refuse(
+                id,
+                request_error_code::DUPLICATE_SUBSCRIPTION,
+                String::from("duplicate request id"),
+                reply,
+            )
+            .await?;
+            return Ok(false);
         }
         let Some(target) = target else {
             // Without a `moov` nothing names a media track yet, so hold the
@@ -596,35 +760,59 @@ impl Core {
                 && self.pending_subscribes.len() < MAX_PENDING_SUBSCRIBES
             {
                 g2g_debug!(self, "holding SUBSCRIBE {id} for {name} until the moov");
-                self.pending_subscribes.push((id, name));
-                return Ok(());
+                self.pending_subscribes.push((id, name, reply));
+                return Ok(true);
             }
-            return self
-                .refuse(
-                    id,
-                    request_error_code::DOES_NOT_EXIST,
-                    format!("no track {name}"),
-                )
-                .await;
+            self.refuse(
+                id,
+                request_error_code::DOES_NOT_EXIST,
+                format!("no track {name}"),
+                reply,
+            )
+            .await?;
+            return Ok(false);
         };
-        self.accept_subscribe(id, target).await
+        self.accept_subscribe(id, target, reply).await?;
+        Ok(true)
     }
 
     /// SUBSCRIBE_OK, then whatever the new subscription can already be served.
-    async fn accept_subscribe(&mut self, id: u64, target: Target) -> Result<(), G2gError> {
+    async fn accept_subscribe(
+        &mut self,
+        id: u64,
+        target: Target,
+        reply: Option<SendStream>,
+    ) -> Result<(), G2gError> {
         // The reference publisher reuses the request id as the track alias: it
-        // is already unique within the session, which is all §10.1 asks.
-        self.send(ControlMessage::SubscribeOk {
-            id,
-            track_alias: id,
-            params: Params::new(),
-            extensions: Params::new(),
-        })
-        .await?;
+        // is already unique within the session, which is all the draft asks.
+        let reply = match reply {
+            // Draft-18: the answer goes on the request's own stream, which then
+            // stays open to carry PUBLISH_DONE.
+            Some(mut tx) => {
+                let msg = v18::message::ControlMessage::SubscribeOk {
+                    track_alias: id,
+                    params: v18::coding::MessageParams::new(),
+                    properties: Params::new(),
+                };
+                v18::session::write_message(&mut tx, &msg).await?;
+                Some(tx)
+            }
+            None => {
+                self.send(ControlMessage::SubscribeOk {
+                    id,
+                    track_alias: id,
+                    params: Params::new(),
+                    extensions: Params::new(),
+                })
+                .await?;
+                None
+            }
+        };
         self.subscriptions.push(Subscription {
             request_id: id,
             track_alias: id,
             target,
+            reply,
             streams: Vec::new(),
             serving_group: false,
             delivered: false,
@@ -635,19 +823,23 @@ impl Core {
 
     /// Answer the SUBSCRIBEs held for a track name the `moov` had not declared.
     async fn resolve_pending_subscribes(&mut self) -> Result<(), G2gError> {
-        for (id, name) in core::mem::take(&mut self.pending_subscribes) {
+        for (id, name, reply) in core::mem::take(&mut self.pending_subscribes) {
             let track_id = self
                 .tracks
                 .iter()
                 .find(|t| t.name == name)
                 .map(|t| t.track_id);
             match track_id {
-                Some(track_id) => self.accept_subscribe(id, Target::Media(track_id)).await?,
+                Some(track_id) => {
+                    self.accept_subscribe(id, Target::Media(track_id), reply)
+                        .await?
+                }
                 None => {
                     self.refuse(
                         id,
                         request_error_code::DOES_NOT_EXIST,
                         format!("no track {name}"),
+                        reply,
                     )
                     .await?
                 }
@@ -656,14 +848,25 @@ impl Core {
         Ok(())
     }
 
-    async fn refuse(&mut self, id: u64, error_code: u64, reason: String) -> Result<(), G2gError> {
-        self.send(ControlMessage::RequestError {
-            id,
-            error_code,
-            retry_interval: 0,
-            reason,
-        })
-        .await
+    async fn refuse(
+        &mut self,
+        id: u64,
+        error_code: u64,
+        reason: String,
+        reply: Option<SendStream>,
+    ) -> Result<(), G2gError> {
+        match reply {
+            Some(tx) => refuse_v18(tx, error_code, reason).await,
+            None => {
+                self.send(ControlMessage::RequestError {
+                    id,
+                    error_code,
+                    retry_interval: 0,
+                    reason,
+                })
+                .await
+            }
+        }
     }
 
     fn drop_subscription(&mut self, id: u64) {
@@ -671,12 +874,15 @@ impl Core {
             let sub = self.subscriptions.remove(at);
             finish_streams(sub.streams);
         }
-        self.pending_subscribes.retain(|(held, _)| *held != id);
+        self.pending_subscribes.retain(|(held, ..)| *held != id);
     }
 
+    /// Send on the draft-16 control stream. Draft-18 responses ride each
+    /// request's own stream, so nothing calls this on a draft-18 session.
     async fn send(&mut self, msg: ControlMessage) -> Result<(), G2gError> {
         match self.session.as_mut() {
-            Some(session) => session.send(&msg).await,
+            Some(Wire::V16(session)) => session.send(&msg).await,
+            Some(Wire::V18(_)) => Err(G2gError::Hardware(HardwareError::Other)),
             None => Err(G2gError::NotConfigured),
         }
     }
@@ -700,8 +906,9 @@ impl Core {
                 continue; // the moov has not arrived yet
             }
             let alias = self.subscriptions[i].track_alias;
+            let version = self.wire_version();
             let mut stream = self.open_group_stream(alias, 0, 0).await?;
-            write_object(&mut stream, 0, &payload).await?;
+            write_object(version, &mut stream, 0, &payload).await?;
             let _ = stream.finish();
             self.subscriptions[i].delivered = true;
             self.subscriptions[i].streams_opened += 1;
@@ -720,18 +927,37 @@ impl Core {
         group_id: u64,
         subgroup_id: u64,
     ) -> Result<SendStream, G2gError> {
-        let header = SubgroupHeader {
-            header_type: HEADER_TYPE,
-            track_alias,
-            group_id,
-            subgroup_id: Some(subgroup_id),
-            publisher_priority: self.priority_byte(),
-        };
-        self.session
-            .as_mut()
-            .ok_or(G2gError::NotConfigured)?
-            .open_subgroup(&header)
-            .await
+        let priority = self.priority_byte();
+        match self.session.as_mut().ok_or(G2gError::NotConfigured)? {
+            Wire::V16(session) => {
+                let header = SubgroupHeader {
+                    header_type: HEADER_TYPE,
+                    track_alias,
+                    group_id,
+                    subgroup_id: Some(subgroup_id),
+                    publisher_priority: priority,
+                };
+                session.open_subgroup(&header).await
+            }
+            Wire::V18(session) => {
+                let header = v18::data::SubgroupHeader {
+                    header_type: v18::data::SubgroupHeaderType::explicit(),
+                    track_alias,
+                    group_id,
+                    subgroup_id: Some(subgroup_id),
+                    publisher_priority: Some(priority),
+                };
+                session.open_subgroup(&header).await
+            }
+        }
+    }
+
+    /// Which draft the live session speaks, for the object encoders.
+    fn wire_version(&self) -> MoqtVersion {
+        match self.session {
+            Some(Wire::V18(_)) => MoqtVersion::V18,
+            _ => MoqtVersion::V16,
+        }
     }
 
     /// Walk one input frame's top-level boxes, turning them into objects.
@@ -871,15 +1097,25 @@ impl Core {
         object_id: u64,
         payload: &[u8],
     ) -> Result<bool, G2gError> {
-        let object = DatagramObject::media(
-            self.subscriptions[at].track_alias,
-            group_id,
-            object_id,
-            self.priority_byte(),
-            payload.to_vec(),
-        );
-        let session = self.session.as_ref().ok_or(G2gError::NotConfigured)?;
-        Ok(session.send_datagram(&object).is_ok())
+        let alias = self.subscriptions[at].track_alias;
+        let priority = self.priority_byte();
+        match self.session.as_ref().ok_or(G2gError::NotConfigured)? {
+            Wire::V16(session) => {
+                let object =
+                    DatagramObject::media(alias, group_id, object_id, priority, payload.to_vec());
+                Ok(session.send_datagram(&object).is_ok())
+            }
+            Wire::V18(session) => {
+                let object = v18::datagram::DatagramObject::media(
+                    alias,
+                    group_id,
+                    object_id,
+                    priority,
+                    payload.to_vec(),
+                );
+                Ok(session.send_datagram(&object).is_ok())
+            }
+        }
     }
 
     /// Write one object onto subscription `at`'s subgroup stream for it, opening
@@ -916,6 +1152,7 @@ impl Core {
                 sub.streams.len() - 1
             }
         };
+        let version = self.wire_version();
         let open = &mut self.subscriptions[at].streams[slot];
         // The delta counts the distance to the previous id on *this* stream less
         // one; the first object of a stream takes the delta as its absolute id.
@@ -924,7 +1161,9 @@ impl Core {
             None => object_id,
         };
         open.prev_object_id = Some(object_id);
-        Ok(write_object(&mut open.stream, delta, payload).await.is_ok())
+        Ok(write_object(version, &mut open.stream, delta, payload)
+            .await
+            .is_ok())
     }
 
     /// End the group in progress on `track_id`: finish the subgroup streams
@@ -944,14 +1183,24 @@ impl Core {
             if !self.cfg.datagrams || !self.subscriptions[i].serving_group {
                 continue;
             }
-            let marker = DatagramObject::end_of_group(
-                self.subscriptions[i].track_alias,
-                group_id,
-                objects_in_group,
-                self.priority_byte(),
-            );
-            if let Some(session) = self.session.as_ref() {
-                let _ = session.send_datagram(&marker);
+            let alias = self.subscriptions[i].track_alias;
+            let priority = self.priority_byte();
+            match self.session.as_ref() {
+                Some(Wire::V16(session)) => {
+                    let marker =
+                        DatagramObject::end_of_group(alias, group_id, objects_in_group, priority);
+                    let _ = session.send_datagram(&marker);
+                }
+                Some(Wire::V18(session)) => {
+                    let marker = v18::datagram::DatagramObject::end_of_group(
+                        alias,
+                        group_id,
+                        objects_in_group,
+                        priority,
+                    );
+                    let _ = session.send_datagram(&marker);
+                }
+                None => {}
             }
         }
     }
@@ -1025,20 +1274,47 @@ impl Core {
         let subs = core::mem::take(&mut self.subscriptions);
         for sub in subs {
             finish_streams(sub.streams);
-            self.send(ControlMessage::PublishDone {
-                id: sub.request_id,
-                status_code: publish_done_code::TRACK_ENDED,
-                stream_count: sub.streams_opened,
-                reason: String::from("end of stream"),
-            })
-            .await?;
+            match sub.reply {
+                // Draft-18: PUBLISH_DONE rides the subscription's own request
+                // stream, and finishing it is what ends the request.
+                Some(mut tx) => {
+                    let msg = v18::message::ControlMessage::PublishDone {
+                        status_code: v18::message::publish_done_code::TRACK_ENDED,
+                        stream_count: sub.streams_opened,
+                        reason: String::from("end of stream"),
+                    };
+                    v18::session::write_message(&mut tx, &msg).await?;
+                    let _ = tx.finish();
+                }
+                None => {
+                    self.send(ControlMessage::PublishDone {
+                        id: sub.request_id,
+                        status_code: publish_done_code::TRACK_ENDED,
+                        stream_count: sub.streams_opened,
+                        reason: String::from("end of stream"),
+                    })
+                    .await?;
+                }
+            }
+        }
+        // Draft-18 withdraws the namespace by finishing its request stream;
+        // draft-16 says so with PUBLISH_NAMESPACE_DONE on the control stream.
+        if let Some(mut ns) = self.namespace_stream.take() {
+            self.namespace_request = None;
+            let _ = ns.finish();
         }
         if let Some(id) = self.namespace_request.take() {
             self.send(ControlMessage::PublishNamespaceDone { id })
                 .await?;
         }
-        if let Some(session) = self.session.as_mut() {
-            session.close("eos").await;
+        match self.session.as_mut() {
+            Some(Wire::V16(session)) => session.close("eos").await,
+            Some(Wire::V18(session)) => {
+                session
+                    .close(v18::message::session_error_code::NO_ERROR, "eos")
+                    .await
+            }
+            None => {}
         }
         Ok(())
     }
@@ -1046,19 +1322,39 @@ impl Core {
 
 /// Write one object header plus its payload onto an open subgroup stream.
 /// `object_id_delta` is the distance to the previous object id on this stream
-/// less one, and the first object of a stream takes it as its absolute id
-/// (`session/subscriber.rs`).
+/// less one, and the first object of a stream takes it as its absolute id: both
+/// drafts resolve ids the same way, only the header bytes differ.
 async fn write_object(
+    version: MoqtVersion,
     stream: &mut SendStream,
     object_id_delta: u64,
     payload: &[u8],
 ) -> Result<(), G2gError> {
     let mut header = Vec::new();
-    SubgroupObjectHeader::normal(object_id_delta, payload.len())
-        .encode(HEADER_TYPE, &mut header)
-        .map_err(proto_err)?;
+    match version {
+        MoqtVersion::V16 => SubgroupObjectHeader::normal(object_id_delta, payload.len())
+            .encode(HEADER_TYPE, &mut header)
+            .map_err(proto_err)?,
+        MoqtVersion::V18 => v18::data::SubgroupObjectHeader::normal(object_id_delta, payload.len())
+            .encode(v18::data::SubgroupHeaderType::explicit(), &mut header)
+            .map_err(proto_err)?,
+    }
     stream.write_all(&header).await.map_err(wt_err)?;
     stream.write_all(payload).await.map_err(wt_err)
+}
+
+/// Refuse a draft-18 request on its own stream: REQUEST_ERROR, then FIN
+/// (§3.3.2).
+async fn refuse_v18(mut tx: SendStream, error_code: u64, reason: String) -> Result<(), G2gError> {
+    let msg = v18::message::ControlMessage::RequestError {
+        error_code,
+        retry_interval: 0,
+        reason,
+        redirect: None,
+    };
+    v18::session::write_message(&mut tx, &msg).await?;
+    let _ = tx.finish();
+    Ok(())
 }
 
 /// Finish every stream of a group that ended, so the subscriber learns nothing
@@ -1235,6 +1531,11 @@ impl AsyncElement for MoqtSink {
             "subgroups" => self.cfg.subgroups = value.as_uint().ok_or(PropError::Type)?,
             "priority" => self.cfg.priority = value.as_uint().ok_or(PropError::Type)?,
             "max-request-id" => self.max_request_id = value.as_uint().ok_or(PropError::Type)?,
+            "versions" => {
+                let list = string(&value)?;
+                parse_versions(&list).map_err(|_| PropError::Value)?;
+                self.versions = list;
+            }
             _ => return Err(PropError::Unknown),
         }
         Ok(())
@@ -1253,6 +1554,7 @@ impl AsyncElement for MoqtSink {
             "subgroups" => Some(PropValue::Uint(self.cfg.subgroups)),
             "priority" => Some(PropValue::Uint(self.cfg.priority)),
             "max-request-id" => Some(PropValue::Uint(self.max_request_id)),
+            "versions" => Some(PropValue::Str(self.versions.clone())),
             _ => None,
         }
     }
@@ -1315,9 +1617,15 @@ static MOQTSINK_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "max-request-id",
         PropKind::Uint,
-        "MAX_REQUEST_ID advertised to the relay in CLIENT_SETUP",
+        "MAX_REQUEST_ID advertised to the relay in CLIENT_SETUP (draft-16 sessions only)",
     )
     .with_default("100"),
+    PropertySpec::new(
+        "versions",
+        PropKind::Str,
+        "MoQ Transport draft versions offered on CONNECT, comma-separated in preference order; the server's pick decides",
+    )
+    .with_default("18,16"),
     PropertySpec::new(
         "server-certificate-hashes",
         PropKind::Str,

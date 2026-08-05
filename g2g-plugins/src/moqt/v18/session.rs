@@ -129,16 +129,8 @@ impl Session18 {
             Arc::clone(&closed),
             max_object_bytes,
         ));
-        tokio::spawn(accept_bi(
-            session.clone(),
-            request_tx,
-            Arc::clone(&closed),
-        ));
-        tokio::spawn(read_datagrams(
-            session.clone(),
-            data_tx,
-            max_object_bytes,
-        ));
+        tokio::spawn(accept_bi(session.clone(), request_tx, Arc::clone(&closed)));
+        tokio::spawn(read_datagrams(session.clone(), data_tx, max_object_bytes));
 
         // Our SETUP is already written, so waiting here cannot deadlock against
         // a peer that also waits to send first.
@@ -569,8 +561,8 @@ pub fn padding_stream_prefix() -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::coding::reader;
+    use super::*;
 
     #[test]
     fn the_padding_stream_type_encodes_as_five_bytes() {
