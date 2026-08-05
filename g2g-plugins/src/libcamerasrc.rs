@@ -56,9 +56,10 @@ use libcamera::stream::StreamRole;
 /// Default advisory frame rate when the caller does not specify one. Geometry
 /// is left at `0` (let libcamera pick its ViewFinder default) unless requested.
 const DEFAULT_FPS: u32 = 30;
-/// FrameBuffer ring depth requested from libcamera. Doubles as the async channel
-/// bound, so the capture thread blocks (backpressure) rather than outrunning the
-/// pipeline.
+/// FrameBuffer ring depth. Requested on the stream configuration before
+/// validation, which the pipeline handler may override (uvcvideo pins it to its
+/// own 4). Reused as the async channel bound, so the capture thread blocks
+/// (backpressure) rather than outrunning the pipeline.
 const BUFFER_COUNT: usize = 4;
 
 /// NV12 (planar 4:2:0), the preferred raw output: Y plane then interleaved UV.
@@ -772,6 +773,7 @@ fn capture_loop(
             width: w,
             height: h,
         });
+        cfg.set_buffer_count(BUFFER_COUNT as u32);
     }
     if matches!(cfgs.validate(), CameraConfigurationStatus::Invalid) {
         return Err(G2gError::CapsMismatch);
