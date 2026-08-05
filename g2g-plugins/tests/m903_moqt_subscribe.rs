@@ -18,22 +18,14 @@
 //!      binaries are absent.
 #![cfg(feature = "moqt")]
 
-use core::future::Future;
-use core::pin::Pin;
 use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use web_transport_quinn::quinn::rustls::pki_types::CertificateDer;
-
 use g2g_core::element::AsyncElement;
-use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
+use g2g_core::frame::PipelinePacket;
 use g2g_core::runtime::{parse_launch, SourceLoop};
-use g2g_core::{
-    ByteStreamEncoding, Caps, Dim, G2gError, OutputSink, PropValue, PushOutcome, Rate, VideoCodec,
-};
+use g2g_core::{ByteStreamEncoding, Caps, PropValue};
 
 use g2g_plugins::moqt::catalog;
 use g2g_plugins::moqt::coding::MoqtError;
@@ -47,6 +39,13 @@ use g2g_plugins::moqtsink::MoqtSink;
 use g2g_plugins::moqtsrc::MoqtSrc;
 use g2g_plugins::mp4mux::Mp4Mux;
 use g2g_plugins::registry::default_registry;
+
+mod moqt_common;
+use moqt_common::{
+    access_unit, assert_matches_published, box_boundaries, frame, free_udp_port, group_starts,
+    h264_caps, reference_binary, spawn_relay, CaptureSink, NullOut, Reaped, TestCert,
+    FRAMES_WANTED,
+};
 
 // ------------------------------------------------------------------ leg 1
 
@@ -434,197 +433,6 @@ fn properties_round_trip_and_moqtsrc_resolves_for_launch() {
 
 // ------------------------------------------------------------------ leg 4
 
-fn h264_caps(w: u32, h: u32) -> Caps {
-    Caps::CompressedVideo {
-        codec: VideoCodec::H264,
-        width: Dim::Fixed(w),
-        height: Dim::Fixed(h),
-        framerate: Rate::Fixed(30 << 16),
-    }
-}
-
-#[derive(Default)]
-struct CaptureSink {
-    frames: Vec<Vec<u8>>,
-}
-
-impl OutputSink for CaptureSink {
-    fn push<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-        Box::pin(async move {
-            if let PipelinePacket::DataFrame(f) = packet {
-                if let Some(s) = f.domain.as_system_slice() {
-                    self.frames.push(s.to_vec());
-                }
-            }
-            Ok(PushOutcome::Accepted)
-        })
-    }
-}
-
-struct NullOut;
-impl OutputSink for NullOut {
-    fn push<'a>(
-        &'a mut self,
-        _packet: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-        Box::pin(async { Ok(PushOutcome::Accepted) })
-    }
-}
-
-fn frame(bytes: Vec<u8>, pts_ns: u64, sequence: u64) -> Frame {
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming {
-            pts_ns,
-            dts_ns: pts_ns,
-            duration_ns: 33_333_333,
-            ..FrameTiming::default()
-        },
-        sequence,
-        meta: Default::default(),
-    }
-}
-
-/// The SPS every IDR access unit carries. A fragment holding it is a keyframe
-/// fragment, which is where the publisher starts a new group.
-const SPS: [u8; 6] = [0x67, 0x42, 0xC0, 0x1E, 0x11, 0x22];
-
-/// An IDR access unit carrying the parameter sets every tenth frame, then P
-/// slices, so the muxer marks a sync sample once per GOP and the publisher
-/// starts a new group there.
-fn access_unit(index: u64) -> Vec<u8> {
-    let sps = SPS;
-    let pps = [0x68u8, 0xCE, 0x3C, 0x80];
-    if index % 10 == 0 {
-        [
-            &[0, 0, 0, 1][..],
-            &sps,
-            &[0, 0, 0, 1],
-            &pps,
-            &[0, 0, 0, 1],
-            &[0x65, index as u8, 0xAA],
-        ]
-        .concat()
-    } else {
-        [&[0, 0, 0, 1][..], &[0x41, index as u8, 0xBB]].concat()
-    }
-}
-
-struct TestCert {
-    cert_path: PathBuf,
-    key_path: PathBuf,
-    hash_hex: String,
-}
-
-impl TestCert {
-    fn generate() -> Self {
-        let issued = rcgen::generate_simple_self_signed(vec![
-            "localhost".to_string(),
-            "127.0.0.1".to_string(),
-        ])
-        .expect("self-signed certificate");
-        let dir = std::env::temp_dir();
-        let unique = format!("{}-{:?}", std::process::id(), std::thread::current().id());
-        let cert_path = dir.join(format!("g2g-m903-{unique}.crt"));
-        let key_path = dir.join(format!("g2g-m903-{unique}.key"));
-        write_file(&cert_path, issued.cert.pem().as_bytes());
-        write_file(&key_path, issued.signing_key.serialize_pem().as_bytes());
-
-        let der = CertificateDer::from(issued.cert.der().to_vec());
-        let provider = web_transport_quinn::crypto::default_provider();
-        let digest = web_transport_quinn::crypto::sha256(&provider, &der);
-        let hash_hex = digest.as_ref().iter().map(|b| format!("{b:02x}")).collect();
-        Self {
-            cert_path,
-            key_path,
-            hash_hex,
-        }
-    }
-}
-
-impl Drop for TestCert {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.cert_path);
-        let _ = std::fs::remove_file(&self.key_path);
-    }
-}
-
-fn write_file(path: &Path, bytes: &[u8]) {
-    let mut f = std::fs::File::create(path).expect("create file");
-    f.write_all(bytes).expect("write file");
-}
-
-/// Kills its child on drop, so a failing assertion never leaves a relay or a
-/// publisher behind.
-struct Reaped(Child);
-
-impl Drop for Reaped {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
-/// Where the reference peers live: `$MOQ_RS_BIN`, else the release build of a
-/// `moq-rs` checkout beside this one, else `PATH`.
-fn reference_binary(name: &str) -> Option<PathBuf> {
-    if let Ok(dir) = std::env::var("MOQ_RS_BIN") {
-        let path = PathBuf::from(dir).join(name);
-        return path.is_file().then_some(path);
-    }
-    if let Some(home) = std::env::var_os("HOME") {
-        let path = PathBuf::from(home)
-            .join("src/moq-rs/target/release")
-            .join(name);
-        if path.is_file() {
-            return Some(path);
-        }
-    }
-    let probe = Command::new(name).arg("--help").output().ok()?;
-    probe.status.success().then(|| PathBuf::from(name))
-}
-
-fn free_udp_port() -> u16 {
-    let probe = std::net::UdpSocket::bind("127.0.0.1:0").expect("probe bind");
-    probe.local_addr().expect("probe addr").port()
-}
-
-/// Start `moq-relay-ietf` on an ephemeral port with a freshly issued
-/// certificate. `None` (with a printed reason) when the binary is absent.
-fn spawn_relay(tls: &TestCert, port: u16) -> Option<Reaped> {
-    let relay_bin = match reference_binary("moq-relay-ietf") {
-        Some(bin) => bin,
-        None => {
-            eprintln!(
-                "SKIP: moq-relay-ietf not found. Build it with `cargo +stable build \
-                 --release -p moq-relay-ietf -p moq-pub` in a cloudflare/moq-rs \
-                 checkout, or point $MOQ_RS_BIN at its directory."
-            );
-            return None;
-        }
-    };
-    match Command::new(&relay_bin)
-        .arg("--bind")
-        .arg(format!("127.0.0.1:{port}"))
-        .arg("--tls-cert")
-        .arg(&tls.cert_path)
-        .arg("--tls-key")
-        .arg(&tls.key_path)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-    {
-        Ok(child) => Some(Reaped(child)),
-        Err(e) => {
-            eprintln!("SKIP: could not start moq-relay-ietf: {e}");
-            None
-        }
-    }
-}
-
 /// Everything `mp4mux` produces for `count` access units, as one byte stream.
 async fn muxed_stream(count: u64) -> Vec<u8> {
     let mut mux = Mp4Mux::new();
@@ -633,104 +441,13 @@ async fn muxed_stream(count: u64) -> Vec<u8> {
     let mut captured = CaptureSink::default();
     for index in 0..count {
         mux.process(
-            PipelinePacket::DataFrame(frame(access_unit(index), index * 33_333_333, index)),
+            PipelinePacket::DataFrame(frame(access_unit(index, 0), index * 33_333_333, index)),
             &mut captured,
         )
         .await
         .expect("mux access unit");
     }
     captured.frames.concat()
-}
-
-/// The top-level box offsets of an fMP4 stream, so a comparison can insist a
-/// match starts and ends on a box boundary rather than anywhere.
-fn box_boundaries(stream: &[u8]) -> Vec<usize> {
-    let mut out = vec![0usize];
-    let mut at = 0usize;
-    while at + 8 <= stream.len() {
-        let size = u32::from_be_bytes(stream[at..at + 4].try_into().expect("4 bytes")) as usize;
-        if size < 8 || at + size > stream.len() {
-            break;
-        }
-        at += size;
-        out.push(at);
-    }
-    out
-}
-
-/// Keyframe fragments in a stream, counted by the SPS each IDR carries. The
-/// publisher starts a group at each one, so this is the number of groups the
-/// bytes cover.
-fn group_starts(stream: &[u8]) -> usize {
-    stream.windows(SPS.len()).filter(|w| *w == SPS).count()
-}
-
-fn moof_count(stream: &[u8]) -> usize {
-    let mut count = 0;
-    let mut at = 0usize;
-    while at + 8 <= stream.len() {
-        let size = u32::from_be_bytes(stream[at..at + 4].try_into().expect("4 bytes")) as usize;
-        if size < 8 || at + size > stream.len() {
-            break;
-        }
-        if &stream[at + 4..at + 8] == b"moof" {
-            count += 1;
-        }
-        at += size;
-    }
-    count
-}
-
-/// The length of the `ftyp`+`moov` prefix: the init segment a publisher makes
-/// out of it.
-fn init_len(stream: &[u8]) -> usize {
-    box_boundaries(stream)
-        .into_iter()
-        .find(|at| {
-            at + 8 <= stream.len()
-                && &stream[at + 4..at + 8] != b"ftyp"
-                && &stream[at + 4..at + 8] != b"moov"
-        })
-        .expect("a fragment follows the init segment")
-}
-
-/// Frames a subscription is asked for: one init segment plus enough fragments
-/// to span more than one group (a GOP is ten fragments here).
-const FRAMES_WANTED: u64 = 14;
-
-/// Assert `received` is the init segment followed by an unbroken run of
-/// `published`'s fragments.
-fn assert_matches_published(received: &[Vec<u8>], published: &[u8], min_fragments: usize) {
-    assert!(!received.is_empty(), "the subscriber emitted nothing");
-    let init = init_len(published);
-    assert_eq!(
-        received[0],
-        published[..init],
-        "the init segment came back byte for byte"
-    );
-    let tail: Vec<u8> = received[1..].concat();
-    assert!(
-        moof_count(&tail) >= min_fragments,
-        "expected at least {min_fragments} fragments, got {}",
-        moof_count(&tail)
-    );
-    let boundaries = box_boundaries(published);
-    let start = published
-        .windows(tail.len())
-        .position(|w| w == tail)
-        .expect("the received fragments are a contiguous run of the published ones");
-    assert!(
-        boundaries.contains(&start),
-        "the run starts at a box boundary"
-    );
-    assert!(
-        boundaries.contains(&(start + tail.len())),
-        "the run ends at a box boundary"
-    );
-    assert!(
-        start >= init,
-        "the fragments come from the fragment region, not the init segment"
-    );
 }
 
 /// `moq-pub` -> `moq-relay-ietf` -> `moqtsrc`: the reference publisher's
@@ -855,7 +572,7 @@ async fn moqtsink_round_trips_through_the_reference_relay_to_moqtsrc() {
         while !done.get() && Instant::now() < deadline {
             let mut captured = CaptureSink::default();
             mux.process(
-                PipelinePacket::DataFrame(frame(access_unit(index), index * 33_333_333, index)),
+                PipelinePacket::DataFrame(frame(access_unit(index, 0), index * 33_333_333, index)),
                 &mut captured,
             )
             .await

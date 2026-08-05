@@ -19,30 +19,24 @@
 //! is exactly what `moqtsink` wrote.
 #![cfg(feature = "moqt")]
 
-use core::future::Future;
-use core::pin::Pin;
-use std::io::Write;
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tokio::time::timeout;
-use web_transport_quinn::quinn::rustls::pki_types::pem::PemObject;
-use web_transport_quinn::quinn::rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use web_transport_quinn::{RecvStream, SendStream, Server, ServerBuilder, Session};
+use web_transport_quinn::{RecvStream, SendStream, Server, Session};
 
 use g2g_core::element::AsyncElement;
-use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
-use g2g_core::{
-    ByteStreamEncoding, Caps, Dim, G2gError, OutputSink, PushOutcome, Rate, VideoCodec,
-};
+use g2g_core::frame::PipelinePacket;
+use g2g_core::{ByteStreamEncoding, Caps, G2gError};
 
 use g2g_plugins::moqt::coding::{setup_param, MoqtError, Params, TrackName, TrackNamespace};
 use g2g_plugins::moqt::message::{request_error_code, ControlMessage};
 use g2g_plugins::moqt::reassembly::{StreamItem, SubgroupStreamDecoder};
 use g2g_plugins::moqtsink::MoqtSink;
 use g2g_plugins::mp4mux::Mp4Mux;
+
+mod moqt_common;
+use moqt_common::{access_unit, bind_server, frame, h264_caps, CaptureSink, NullOut, TestCert};
 
 /// How long the dial from `configure_pipeline` gets to reach the peer.
 const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
@@ -101,20 +95,6 @@ impl Relay {
     async fn recv_within(&mut self, within: Duration) -> Option<ControlMessage> {
         timeout(within, self.recv()).await.ok()
     }
-}
-
-fn bind_relay(tls: &TestCert) -> (Server, u16) {
-    let chain: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(&tls.cert_path)
-        .expect("read certificate")
-        .collect::<Result<_, _>>()
-        .expect("parse certificate");
-    let key = PrivateKeyDer::from_pem_file(&tls.key_path).expect("read key");
-    let server = ServerBuilder::new()
-        .with_addr("127.0.0.1:0".parse().expect("addr"))
-        .with_certificate(chain, key)
-        .expect("bind quic endpoint");
-    let port = server.local_addr().expect("local addr").port();
-    (server, port)
 }
 
 /// Accept the publisher's session, answer its CLIENT_SETUP, and start reading
@@ -207,80 +187,6 @@ fn subscribe(id: u64, namespace: &TrackNamespace, track: &str) -> ControlMessage
 
 // -------------------------------------------------------------- the publisher
 
-fn h264_caps(w: u32, h: u32) -> Caps {
-    Caps::CompressedVideo {
-        codec: VideoCodec::H264,
-        width: Dim::Fixed(w),
-        height: Dim::Fixed(h),
-        framerate: Rate::Fixed(30 << 16),
-    }
-}
-
-#[derive(Default)]
-struct CaptureSink {
-    frames: Vec<Vec<u8>>,
-}
-
-impl OutputSink for CaptureSink {
-    fn push<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-        Box::pin(async move {
-            if let PipelinePacket::DataFrame(f) = packet {
-                if let Some(s) = f.domain.as_system_slice() {
-                    self.frames.push(s.to_vec());
-                }
-            }
-            Ok(PushOutcome::Accepted)
-        })
-    }
-}
-
-struct NullOut;
-impl OutputSink for NullOut {
-    fn push<'a>(
-        &'a mut self,
-        _packet: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-        Box::pin(async { Ok(PushOutcome::Accepted) })
-    }
-}
-
-fn frame(bytes: Vec<u8>, pts_ns: u64, sequence: u64) -> Frame {
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming {
-            pts_ns,
-            dts_ns: pts_ns,
-            duration_ns: 33_333_333,
-            ..FrameTiming::default()
-        },
-        sequence,
-        meta: Default::default(),
-    }
-}
-
-/// An IDR access unit carrying the parameter sets, then P slices, so the muxer
-/// can build a `moov` and mark a sync sample every GOP.
-fn access_unit(index: u64) -> Vec<u8> {
-    let sps = [0x67u8, 0x42, 0xC0, 0x1E, 0x11, 0x22];
-    let pps = [0x68u8, 0xCE, 0x3C, 0x80];
-    if index % 10 == 0 {
-        [
-            &[0, 0, 0, 1][..],
-            &sps,
-            &[0, 0, 0, 1],
-            &pps,
-            &[0, 0, 0, 1],
-            &[0x65, index as u8, 0xAA],
-        ]
-        .concat()
-    } else {
-        [&[0, 0, 0, 1][..], &[0x41, index as u8, 0xBB]].concat()
-    }
-}
-
 /// Mux `count` access units and publish every fragment they produce, returning
 /// the fMP4 byte stream that went into the sink.
 async fn publish_fragments(sink: &mut MoqtSink, count: u64) -> Vec<u8> {
@@ -291,7 +197,7 @@ async fn publish_fragments(sink: &mut MoqtSink, count: u64) -> Vec<u8> {
     for index in 0..count {
         let mut captured = CaptureSink::default();
         mux.process(
-            PipelinePacket::DataFrame(frame(access_unit(index), index * 33_333_333, index)),
+            PipelinePacket::DataFrame(frame(access_unit(index, 0), index * 33_333_333, index)),
             &mut captured,
         )
         .await
@@ -310,50 +216,6 @@ async fn publish_fragments(sink: &mut MoqtSink, count: u64) -> Vec<u8> {
     published
 }
 
-struct TestCert {
-    cert_path: PathBuf,
-    key_path: PathBuf,
-    hash_hex: String,
-}
-
-impl TestCert {
-    fn generate() -> Self {
-        let issued = rcgen::generate_simple_self_signed(vec![
-            "localhost".to_string(),
-            "127.0.0.1".to_string(),
-        ])
-        .expect("self-signed certificate");
-        let dir = std::env::temp_dir();
-        let pid = std::process::id();
-        let cert_path = dir.join(format!("g2g-m906-{pid}.crt"));
-        let key_path = dir.join(format!("g2g-m906-{pid}.key"));
-        write_file(&cert_path, issued.cert.pem().as_bytes());
-        write_file(&key_path, issued.signing_key.serialize_pem().as_bytes());
-
-        let der = CertificateDer::from(issued.cert.der().to_vec());
-        let provider = web_transport_quinn::crypto::default_provider();
-        let digest = web_transport_quinn::crypto::sha256(&provider, &der);
-        let hash_hex = digest.as_ref().iter().map(|b| format!("{b:02x}")).collect();
-        Self {
-            cert_path,
-            key_path,
-            hash_hex,
-        }
-    }
-}
-
-impl Drop for TestCert {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.cert_path);
-        let _ = std::fs::remove_file(&self.key_path);
-    }
-}
-
-fn write_file(path: &Path, bytes: &[u8]) {
-    let mut f = std::fs::File::create(path).expect("create file");
-    f.write_all(bytes).expect("write file");
-}
-
 // ------------------------------------------------------------------ the tests
 
 /// The defect and its fix: configuring the pipeline publishes the namespace, a
@@ -362,7 +224,7 @@ fn write_file(path: &Path, bytes: &[u8]) {
 #[tokio::test]
 async fn a_subscribe_is_answered_before_the_first_frame() {
     let tls = TestCert::generate();
-    let (mut server, port) = bind_relay(&tls);
+    let (mut server, port) = bind_server(&tls);
     let url = format!("https://127.0.0.1:{port}/");
     let namespace = "g2gpump";
 
