@@ -8,6 +8,18 @@
 //! decoder renders the same cues to RGBA through `sub2video` (a subtitle stream
 //! feeding a video filter), which copies the decoded palette straight into a
 //! transparent frame, for a pixel-for-pixel comparison against g2g's canvases.
+//!
+//! Cropped composition objects are the one thing that comparison cannot reach:
+//! ffmpeg parses the crop rectangle and then never applies it (`pgssubdec.c`
+//! carries a "TODO: Implement cropping"), so mpv and VLC inherit that and there
+//! is no decoder here to compare against. The crop tests below stand on the
+//! uncropped path instead. Cropping is a pure selection, so the same object
+//! presented cropped must paint exactly the window of what it paints whole, and
+//! the whole case is what ffmpeg already pins pixel for pixel. Which placement
+//! that window lands at is the part no such test can settle, and it is taken
+//! from libbluray's `graphics_controller.c`, which does implement cropping and
+//! draws the cropped rectangle at the composition position with the crop offset
+//! indexing the object bitmap only.
 #![cfg(feature = "std")]
 
 use core::future::Future;
@@ -90,9 +102,41 @@ fn segment(kind: u8, pts_90k: u32, body: &[u8]) -> Vec<u8> {
     out
 }
 
+/// One composition object reference: which object, where it goes, and the crop
+/// rectangle inside the object bitmap when the composition crops it.
+struct CompRef {
+    id: u16,
+    x: u32,
+    y: u32,
+    crop: Option<(u16, u16, u16, u16)>,
+    forced: bool,
+}
+
+impl CompRef {
+    fn at(id: u16, x: u32, y: u32) -> Self {
+        Self {
+            id,
+            x,
+            y,
+            crop: None,
+            forced: false,
+        }
+    }
+
+    fn cropped(mut self, x: u16, y: u16, w: u16, h: u16) -> Self {
+        self.crop = Some((x, y, w, h));
+        self
+    }
+
+    fn forced(mut self) -> Self {
+        self.forced = true;
+        self
+    }
+}
+
 /// Presentation composition: the video descriptor, the composition descriptor,
-/// then one 8-byte reference per composition object.
-fn pcs(objects: &[(u16, u32, u32)], comp_number: u16, state: u8, pts_90k: u32) -> Vec<u8> {
+/// then one reference per composition object, 8 bytes or 16 when it crops.
+fn pcs(objects: &[CompRef], comp_number: u16, state: u8, pts_90k: u32) -> Vec<u8> {
     let mut b = Vec::new();
     b.extend_from_slice(&(W as u16).to_be_bytes());
     b.extend_from_slice(&(H as u16).to_be_bytes());
@@ -102,12 +146,25 @@ fn pcs(objects: &[(u16, u32, u32)], comp_number: u16, state: u8, pts_90k: u32) -
     b.push(0x00); // palette update flag
     b.push(0x00); // palette id
     b.push(objects.len() as u8);
-    for (id, x, y) in objects {
-        b.extend_from_slice(&id.to_be_bytes());
+    for o in objects {
+        // 0x80 cropped, 0x40 forced
+        let mut flags = 0u8;
+        if o.crop.is_some() {
+            flags |= 0x80;
+        }
+        if o.forced {
+            flags |= 0x40;
+        }
+        b.extend_from_slice(&o.id.to_be_bytes());
         b.push(0); // window id
-        b.push(0x00); // neither cropped nor forced
-        b.extend_from_slice(&(*x as u16).to_be_bytes());
-        b.extend_from_slice(&(*y as u16).to_be_bytes());
+        b.push(flags);
+        b.extend_from_slice(&(o.x as u16).to_be_bytes());
+        b.extend_from_slice(&(o.y as u16).to_be_bytes());
+        if let Some((cx, cy, cw, ch)) = o.crop {
+            for v in [cx, cy, cw, ch] {
+                b.extend_from_slice(&v.to_be_bytes());
+            }
+        }
     }
     segment(0x16, pts_90k, &b)
 }
@@ -121,9 +178,9 @@ fn wds(cue: &Cue, pts_90k: u32) -> Vec<u8> {
     segment(0x17, pts_90k, &b)
 }
 
-fn pds(pts_90k: u32) -> Vec<u8> {
+fn pds(entries: &[(u8, u8, u8, u8, u8)], pts_90k: u32) -> Vec<u8> {
     let mut b = Vec::from([0u8, 0u8]); // palette id, version
-    for (entry, y, cr, cb, a) in PALETTE {
+    for &(entry, y, cr, cb, a) in entries {
         b.extend_from_slice(&[entry, y, cr, cb, a]);
     }
     segment(0x14, pts_90k, &b)
@@ -185,9 +242,9 @@ fn author_sup() -> Vec<u8> {
     let mut out = Vec::new();
     for (i, cue) in cues().iter().enumerate() {
         let n = i as u16 * 2;
-        out.extend_from_slice(&pcs(&[(1, cue.x, cue.y)], n, 0x80, cue.pts_90k));
+        out.extend_from_slice(&pcs(&[CompRef::at(1, cue.x, cue.y)], n, 0x80, cue.pts_90k));
         out.extend_from_slice(&wds(cue, cue.pts_90k));
-        out.extend_from_slice(&pds(cue.pts_90k));
+        out.extend_from_slice(&pds(&PALETTE, cue.pts_90k));
         out.extend_from_slice(&ods(
             1,
             cue.w,
@@ -201,6 +258,64 @@ fn author_sup() -> Vec<u8> {
         out.extend_from_slice(&wds(cue, cue.hide_90k));
         out.extend_from_slice(&segment(0x80, cue.hide_90k, &[]));
     }
+    out
+}
+
+// ---- crop fixture ----
+
+/// The cropping fixture's object. Every pixel of it is a different palette
+/// entry, and every entry a different colour, so a crop that drops the offset,
+/// swaps the axes or is off by one lands on colours that do not match. 16 x 12
+/// keeps every code inside a byte.
+const CROP_W: u32 = 16;
+const CROP_H: u32 = 12;
+
+/// Palette entry for one object pixel: 1..=192, never 0, since a zero byte in
+/// the RLE escapes to a run code instead of standing for a pixel.
+fn crop_code(x: u32, y: u32) -> u8 {
+    (y * CROP_W + x + 1) as u8
+}
+
+/// One entry per code, each a different limited-range luma, so each decodes to
+/// its own RGB. Alpha is opaque throughout: every object pixel paints, which is
+/// what makes "nothing outside the crop rectangle" a real assertion.
+fn crop_palette() -> Vec<(u8, u8, u8, u8, u8)> {
+    (0..CROP_W * CROP_H)
+        .map(|i| {
+            let code = (i + 1) as u8;
+            (code, 20 + code, 128, 128, 255)
+        })
+        .collect()
+}
+
+/// The object's RLE: one literal byte per pixel, then the end-of-line code.
+fn crop_rle() -> Vec<u8> {
+    let mut out = Vec::new();
+    for y in 0..CROP_H {
+        for x in 0..CROP_W {
+            out.push(crop_code(x, y));
+        }
+        out.extend_from_slice(&[0x00, 0x00]);
+    }
+    out
+}
+
+/// One epoch-start display set placing the crop fixture's object however the
+/// references say, with an object definition per distinct id.
+fn crop_display_set(objects: &[CompRef]) -> Vec<u8> {
+    let pts = 90_000;
+    let mut out = pcs(objects, 0, 0x80, pts);
+    out.extend_from_slice(&pds(&crop_palette(), pts));
+    let rle = crop_rle();
+    let mut defined: Vec<u16> = Vec::new();
+    for o in objects {
+        if defined.contains(&o.id) {
+            continue;
+        }
+        defined.push(o.id);
+        out.extend_from_slice(&ods(o.id, CROP_W, CROP_H, &rle, pts));
+    }
+    out.extend_from_slice(&segment(0x80, pts, &[]));
     out
 }
 
@@ -373,6 +488,58 @@ fn px(rgba: &[u8], x: u32, y: u32) -> [u8; 4] {
     rgba[at..at + 4].try_into().expect("rgba pixel")
 }
 
+/// Where two canvases first disagree, as `(x, y)`. Canvases are megabytes, so a
+/// coordinate is what a failure can actually be read from.
+fn first_difference(got: &[u8], want: &[u8]) -> Option<(u32, u32)> {
+    assert_eq!(got.len(), want.len(), "canvas size");
+    got.chunks_exact(4)
+        .zip(want.chunks_exact(4))
+        .position(|(a, b)| a != b)
+        .map(|i| (i as u32 % W, i as u32 / W))
+}
+
+/// Copy a `size` window of one canvas into another at a new position.
+fn paste(dst: &mut [u8], src: &[u8], from: (u32, u32), to: (u32, u32), size: (u32, u32)) {
+    let n = (size.0 * 4) as usize;
+    for row in 0..size.1 {
+        let s = (((from.1 + row) * W + from.0) * 4) as usize;
+        let d = (((to.1 + row) * W + to.0) * 4) as usize;
+        dst[d..d + n].copy_from_slice(&src[s..s + n]);
+    }
+}
+
+/// Decode one `.sup`-framed display set through the real `pgsdec` element and
+/// return the canvas it paints, or `None` when it paints nothing. The element
+/// opens on an empty canvas before any display set, which is checked here rather
+/// than left for every caller.
+async fn crop_canvas(objects: &[CompRef]) -> Option<Vec<u8>> {
+    let mut dec = PgsDec::new();
+    dec.configure_pipeline(&Caps::SubPicture {
+        format: SubPictureFormat::Pgs,
+    })
+    .expect("pgsdec accepts a PGS stream");
+    let mut sink = CaptureSink::default();
+    dec.process(data(crop_display_set(objects), 0), &mut sink)
+        .await
+        .expect("decode");
+    let mut canvases: Vec<Vec<u8>> = sink
+        .packets
+        .into_iter()
+        .filter_map(|p| match p {
+            PipelinePacket::DataFrame(f) => {
+                Some(f.domain.as_system_slice().expect("system frame").to_vec())
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(
+        canvases[0].iter().all(|&b| b == 0),
+        "the element opens on an empty canvas"
+    );
+    assert!(canvases.len() <= 2, "one display set, at most one canvas");
+    (canvases.len() == 2).then(|| canvases.remove(1))
+}
+
 #[test]
 fn pgsdec_builds_from_a_launch_line() {
     let reg = default_registry();
@@ -484,4 +651,162 @@ async fn ffmpeg_muxed_pgs_display_sets_demux_and_decode_pixel_for_pixel() {
     for p in [sup, mkv, raw] {
         let _ = std::fs::remove_file(p);
     }
+}
+
+/// The anchor for everything below: cropping is a pure selection, so a cropped
+/// composition object must paint exactly the window of what the same object
+/// paints uncropped. The uncropped path is the one the ffmpeg comparison above
+/// pins pixel for pixel, so tying the cropped path to it carries that evidence
+/// across instead of asserting the crop is right on its own authority.
+#[tokio::test]
+async fn a_cropped_object_paints_the_uncropped_canvas_windowed() {
+    let (ox, oy) = (100u32, 50u32);
+    let whole = crop_canvas(&[CompRef::at(1, ox, oy)])
+        .await
+        .expect("the whole object paints");
+
+    // Without this the oracle would pass under a broken crop: a rectangle of one
+    // colour matches any other rectangle of it.
+    let mut seen = std::collections::HashSet::new();
+    for y in 0..CROP_H {
+        for x in 0..CROP_W {
+            assert!(
+                seen.insert(px(&whole, ox + x, oy + y)),
+                "object pixel ({x}, {y}) repeats a colour, so a misread crop could still match"
+            );
+        }
+    }
+
+    // Offset nonzero in both axes: a decoder that takes the top-left corner
+    // instead paints entirely different entries.
+    let (cx, cy, cw, ch) = (3u32, 2u32, 9u32, 7u32);
+    let cropped = crop_canvas(&[
+        CompRef::at(1, ox + cx, oy + cy).cropped(cx as u16, cy as u16, cw as u16, ch as u16)
+    ])
+    .await
+    .expect("the cropped object paints");
+
+    let mut want = vec![0u8; whole.len()];
+    paste(
+        &mut want,
+        &whole,
+        (ox + cx, oy + cy),
+        (ox + cx, oy + cy),
+        (cw, ch),
+    );
+    assert_eq!(
+        first_difference(&cropped, &want),
+        None,
+        "the crop paints the uncropped object's own pixels over that rectangle and nothing else"
+    );
+}
+
+/// Cropping to the whole object is the identity, which is what says the crop
+/// path and the plain path are the same code taking the same pixels.
+#[tokio::test]
+async fn a_crop_of_the_whole_object_equals_the_uncropped_composition() {
+    let (ox, oy) = (100u32, 50u32);
+    let whole = crop_canvas(&[CompRef::at(1, ox, oy)])
+        .await
+        .expect("the whole object paints");
+    let full = crop_canvas(&[CompRef::at(1, ox, oy).cropped(0, 0, CROP_W as u16, CROP_H as u16)])
+        .await
+        .expect("the fully cropped object paints");
+    assert_eq!(
+        first_difference(&full, &whole),
+        None,
+        "a crop covering the object paints what no crop paints"
+    );
+}
+
+/// The crop rectangle is four attacker-controlled u16s indexing a bitmap the
+/// stream sized separately, so every degenerate one has to fold through the
+/// clamp rather than read past the object. libbluray, reading a disc it trusts,
+/// takes the rectangle at its word and walks off the bitmap, so this is g2g
+/// being stricter than the reference rather than matching it.
+#[tokio::test]
+async fn a_degenerate_or_out_of_range_crop_is_clamped_and_reads_nothing_past_the_object() {
+    let (ox, oy) = (100u32, 50u32);
+    let whole = crop_canvas(&[CompRef::at(1, ox, oy)])
+        .await
+        .expect("the whole object paints");
+
+    // An empty rectangle selects no pixels, and an origin at or past the object
+    // edge selects none either, so neither display set paints.
+    for crop in [
+        (0, 0, 0, 4),
+        (0, 0, 4, 0),
+        (0, 0, 0, 0),
+        (CROP_W as u16, 0, 4, 4),
+        (0, CROP_H as u16, 4, 4),
+        (u16::MAX, u16::MAX, u16::MAX, u16::MAX),
+    ] {
+        assert!(
+            crop_canvas(&[CompRef::at(1, ox, oy).cropped(crop.0, crop.1, crop.2, crop.3)])
+                .await
+                .is_none(),
+            "crop {crop:?} selects no pixels, so nothing paints"
+        );
+    }
+
+    // A rectangle running off the object is clamped to what is there, keeping
+    // its offset: the last 6 x 4 corner and not the first.
+    let (cx, cy) = (10u32, 8u32);
+    let clamped = crop_canvas(&[CompRef::at(1, ox + cx, oy + cy).cropped(
+        cx as u16,
+        cy as u16,
+        u16::MAX,
+        u16::MAX,
+    )])
+    .await
+    .expect("the clamped crop still paints its corner");
+    let mut want = vec![0u8; whole.len()];
+    paste(
+        &mut want,
+        &whole,
+        (ox + cx, oy + cy),
+        (ox + cx, oy + cy),
+        (CROP_W - cx, CROP_H - cy),
+    );
+    assert_eq!(
+        first_difference(&clamped, &want),
+        None,
+        "an oversized crop paints the object's remaining corner, offset intact"
+    );
+}
+
+/// A composition object reference is 8 bytes or 16, so the loop that walks it
+/// has to read the flags right: 0x80 is cropped and 0x40 forced. Taking 0x40 for
+/// the crop bit (which a widely copied write-up does) eats eight bytes that are
+/// the next reference, and the composition falls apart from there.
+#[tokio::test]
+async fn a_forced_reference_behind_a_cropped_one_still_parses() {
+    let (ox, oy) = (100u32, 50u32);
+    let (sx, sy) = (600u32, 300u32);
+    let whole = crop_canvas(&[CompRef::at(1, ox, oy)])
+        .await
+        .expect("the whole object paints");
+
+    let (cx, cy, cw, ch) = (3u32, 2u32, 9u32, 7u32);
+    let both = crop_canvas(&[
+        CompRef::at(1, ox + cx, oy + cy).cropped(cx as u16, cy as u16, cw as u16, ch as u16),
+        CompRef::at(2, sx, sy).forced(),
+    ])
+    .await
+    .expect("both composition objects paint");
+
+    let mut want = vec![0u8; whole.len()];
+    paste(
+        &mut want,
+        &whole,
+        (ox + cx, oy + cy),
+        (ox + cx, oy + cy),
+        (cw, ch),
+    );
+    paste(&mut want, &whole, (ox, oy), (sx, sy), (CROP_W, CROP_H));
+    assert_eq!(
+        first_difference(&both, &want),
+        None,
+        "the cropped reference paints its window and the forced one behind it the whole object"
+    );
 }

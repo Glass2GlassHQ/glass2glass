@@ -2471,7 +2471,19 @@ which palette to read, and up to two objects with their positions), window
 definitions, palette definitions and object definitions, terminated by an
 end-of-display-set segment. Objects are 8-bit run-length coded and drawn straight
 onto the video, with no region layer and no interlaced fields, and a cropped
-composition object shows only a sub-rectangle of its bitmap. Palettes and objects
+composition object shows only a sub-rectangle of its bitmap, drawn at the
+composition position with the crop offset indexing the object bitmap alone.
+Cropping is the one part of the decoder with no reference peer to test against:
+ffmpeg parses the crop rectangle and never applies it (`pgssubdec.c` carries a
+"TODO: Implement cropping"), which every player built on it inherits. It is
+verified instead by anchoring it to the uncropped path that ffmpeg does pin pixel
+for pixel: cropping is a pure selection, so a fixture whose every object pixel is
+a different colour is presented both whole and cropped, and the cropped canvas
+has to equal the window of the whole one, with the crop of the entire object
+equal to no crop at all. The placement convention that oracle cannot settle comes
+from libbluray's `graphics_controller.c`, which does implement cropping. A crop
+rectangle running off the object is clamped to what is there rather than trusted
+the way libbluray trusts a disc. Palettes and objects
 persist across an epoch, keyed by id, so a later palette segment updates only the
 entries it names and an object too big for one segment arrives in fragments whose
 total is fixed by the first one's declared length. Nothing rides out of band: the
