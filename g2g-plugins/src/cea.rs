@@ -25,10 +25,7 @@ use alloc::vec::Vec;
 
 use g2g_core::VideoCodec;
 
-use crate::annexb::{
-    add_emulation_prevention, h264_nal_type, h265_nal_type, nal_units_any, read_ff_extended,
-    strip_emulation_prevention,
-};
+use crate::annexb::add_emulation_prevention;
 use crate::subparse::{Cue, CueSettings, TextAlign};
 
 /// One closed-caption byte triple extracted from a `cc_data` block: a two-bit
@@ -81,28 +78,7 @@ const USER_DATA_TYPE_CC: u8 = 0x03;
 /// `user_data_registered_itu_t_t35` (payload type 4) message tagged `GA94`.
 /// Returns triples in transmission order; a malformed message is skipped.
 pub fn extract_cc_data(au: &[u8], codec: VideoCodec) -> Vec<CcTriple> {
-    let mut out = Vec::new();
-    for nal in nal_units_any(au) {
-        // SEI NAL header + RBSP offset differs by codec: H.264 SEI is NAL type 6
-        // with a 1-byte header; H.265 prefix-SEI (39) / suffix-SEI (40) carry a
-        // 2-byte header.
-        let rbsp_off = match codec {
-            VideoCodec::H265 => match h265_nal_type(nal) {
-                Some(39) | Some(40) => 2,
-                _ => continue,
-            },
-            _ => match h264_nal_type(nal) {
-                Some(6) => 1,
-                _ => continue,
-            },
-        };
-        if nal.len() <= rbsp_off {
-            continue;
-        }
-        let rbsp = strip_emulation_prevention(&nal[rbsp_off..]);
-        parse_sei_messages(&rbsp, &mut out);
-    }
-    out
+    crate::sei::parse_au(au, codec).captions
 }
 
 /// Build an Annex-B SEI NAL carrying `triples` as an ATSC A/53 `GA94` `cc_data`
@@ -127,7 +103,8 @@ pub fn build_cc_sei(triples: &[CcTriple], codec: VideoCodec) -> Vec<u8> {
 
     // SEI message: payloadType 4 (0xFF-extended), payloadSize (0xFF-extended), payload.
     let mut rbsp = Vec::new();
-    write_ff_extended(&mut rbsp, 4); // user_data_registered_itu_t_t35
+    use crate::sei::write_ff_extended;
+    write_ff_extended(&mut rbsp, crate::sei::PAYLOAD_USER_DATA_REGISTERED);
     write_ff_extended(&mut rbsp, payload.len());
     rbsp.extend_from_slice(&payload);
     rbsp.push(0x80); // rbsp_trailing_bits
@@ -172,48 +149,12 @@ pub fn parse_cc_data(data: &[u8]) -> Vec<CcTriple> {
         .collect()
 }
 
-/// Write an SEI `0xFF`-extended value (the inverse of [`read_ff_extended`]): a run
-/// of `0xFF` bytes each worth 255, then the remainder.
-fn write_ff_extended(out: &mut Vec<u8>, mut value: usize) {
-    while value >= 0xFF {
-        out.push(0xFF);
-        value -= 0xFF;
-    }
-    out.push(value as u8);
-}
-
-/// Walk the SEI messages of one SEI RBSP, appending the `cc_data` triples of any
-/// ATSC1 caption message. Each message is `payloadType` then `payloadSize` (both
-/// little-endian-extended by `0xFF` run bytes) then `payloadSize` payload bytes.
-fn parse_sei_messages(rbsp: &[u8], out: &mut Vec<CcTriple>) {
-    let mut i = 0usize;
-    // Stop once only the rbsp_trailing_bits (a lone 0x80) remain.
-    while i + 1 < rbsp.len() {
-        let Some((payload_type, n)) = read_ff_extended(rbsp, i) else {
-            break;
-        };
-        i = n;
-        let Some((payload_size, n)) = read_ff_extended(rbsp, i) else {
-            break;
-        };
-        i = n;
-        let end = match i.checked_add(payload_size) {
-            Some(e) if e <= rbsp.len() => e,
-            _ => break,
-        };
-        if payload_type == 4 {
-            parse_user_data_registered(&rbsp[i..end], out);
-        }
-        i = end;
-    }
-}
-
 /// Parse a `user_data_registered_itu_t_t35` payload, appending `cc_data` triples
 /// when it is an ATSC1 `GA94` caption block. Layout: `itu_t_t35_country_code`
 /// (0xB5 USA, with a 0xFF escape), `provider_code` (16 bits), `user_identifier`
 /// (32 bits, `GA94`), `user_data_type_code` (8 bits, 0x03), a flags byte holding
 /// `cc_count`, an `em_data` byte, then `cc_count` triples.
-fn parse_user_data_registered(p: &[u8], out: &mut Vec<CcTriple>) {
+pub(crate) fn parse_caption_payload(p: &[u8], out: &mut Vec<CcTriple>) {
     let mut i = 0usize;
     let country = *p.first().unwrap_or(&0);
     i += 1;

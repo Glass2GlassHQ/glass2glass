@@ -199,6 +199,7 @@ impl CcInsert {
     /// `CaptionMeta` in meta-sourced mode (empty when it carries none), else the
     /// one triple the cue encoder has queued for this frame (null padding when
     /// idle). Pending-before-drain marks a real caption byte vs that padding.
+    #[cfg_attr(not(feature = "metadata"), allow(unused_variables))]
     fn au_triples(&mut self, frame: &Frame) -> Vec<CcTriple> {
         #[cfg(feature = "metadata")]
         if self.from_meta {

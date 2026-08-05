@@ -86,6 +86,8 @@ const META_ANALYTICS: u8 = 0;
 const META_BLOB: u8 = 1;
 #[cfg_attr(not(feature = "metadata"), allow(dead_code))]
 const META_CAPTION: u8 = 2;
+#[cfg_attr(not(feature = "metadata"), allow(dead_code))]
+const META_HDR_STATIC: u8 = 3;
 
 // ---- primitive writer ----
 
@@ -684,12 +686,16 @@ fn get_domain(r: &mut Reader) -> Result<MemoryDomain, WireError> {
 
 #[cfg(feature = "metadata")]
 fn put_meta(w: &mut Writer, meta: &FrameMetaSet) {
-    use crate::meta::{AnalyticsMeta, AnalyticsNode, BlobMeta, CaptionMeta};
+    use crate::meta::{AnalyticsMeta, AnalyticsNode, BlobMeta, CaptionMeta, HdrStaticMeta};
 
     let analytics = meta.get::<AnalyticsMeta>();
     let blob = meta.get::<BlobMeta>();
     let caption = meta.get::<CaptionMeta>();
-    let count = analytics.is_some() as u8 + blob.is_some() as u8 + caption.is_some() as u8;
+    let hdr = meta.get::<HdrStaticMeta>();
+    let count = analytics.is_some() as u8
+        + blob.is_some() as u8
+        + caption.is_some() as u8
+        + hdr.is_some() as u8;
     w.u8(count);
 
     if let Some(a) = analytics {
@@ -743,6 +749,41 @@ fn put_meta(w: &mut Writer, meta: &FrameMetaSet) {
             w.u8(t.b1);
         }
     }
+
+    if let Some(h) = hdr {
+        w.u8(META_HDR_STATIC);
+        match &h.mastering {
+            Some(m) => {
+                w.bool(true);
+                for p in &m.display_primaries {
+                    w.f32(p.x);
+                    w.f32(p.y);
+                }
+                w.f32(m.white_point.x);
+                w.f32(m.white_point.y);
+                w.f32(m.max_luminance);
+                w.f32(m.min_luminance);
+            }
+            None => w.bool(false),
+        }
+        put_opt_u16(w, h.max_content_light_level);
+        put_opt_u16(w, h.max_frame_average_light_level);
+    }
+}
+
+/// An optional `u16` as a presence flag then the value (only the HDR meta needs
+/// one, so it is not a `Writer` primitive).
+#[cfg(feature = "metadata")]
+fn put_opt_u16(w: &mut Writer, v: Option<u16>) {
+    w.bool(v.is_some());
+    w.u32(v.unwrap_or(0) as u32);
+}
+
+#[cfg(feature = "metadata")]
+fn get_opt_u16(r: &mut Reader) -> Result<Option<u16>, WireError> {
+    let present = r.bool()?;
+    let v = u16::try_from(r.u32()?).map_err(|_| WireError::BadTag)?;
+    Ok(present.then_some(v))
 }
 
 #[cfg(not(feature = "metadata"))]
@@ -776,7 +817,8 @@ fn relation_kind_from_u8(v: u8) -> Result<crate::meta::RelationKind, WireError> 
 fn get_meta(r: &mut Reader) -> Result<FrameMetaSet, WireError> {
     use crate::meta::{
         AnalyticsMeta, AnalyticsNode, BBox, Blob, BlobMeta, CaptionMeta, CaptionTriple,
-        Classification, ObjectDetection, Relation, Tracking,
+        Chromaticity, Classification, HdrStaticMeta, MasteringDisplay, ObjectDetection, Relation,
+        Tracking,
     };
 
     let count = r.u8()?;
@@ -841,6 +883,31 @@ fn get_meta(r: &mut Reader) -> Result<FrameMetaSet, WireError> {
                     });
                 }
                 set.attach(c);
+            }
+            META_HDR_STATIC => {
+                let mastering = if r.bool()? {
+                    let mut primaries = [Chromaticity { x: 0.0, y: 0.0 }; 3];
+                    for p in &mut primaries {
+                        p.x = r.f32()?;
+                        p.y = r.f32()?;
+                    }
+                    Some(MasteringDisplay {
+                        display_primaries: primaries,
+                        white_point: Chromaticity {
+                            x: r.f32()?,
+                            y: r.f32()?,
+                        },
+                        max_luminance: r.f32()?,
+                        min_luminance: r.f32()?,
+                    })
+                } else {
+                    None
+                };
+                set.attach(HdrStaticMeta {
+                    mastering,
+                    max_content_light_level: get_opt_u16(r)?,
+                    max_frame_average_light_level: get_opt_u16(r)?,
+                });
             }
             _ => return Err(WireError::BadTag),
         }
@@ -1255,6 +1322,66 @@ mod tests {
             PipelinePacket::DataFrame(got) => {
                 let c = got.meta.get::<CaptionMeta>().expect("captions survived");
                 assert_eq!(c, &captions);
+            }
+            other => panic!("expected DataFrame, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "metadata")]
+    #[test]
+    fn hdr_static_metadata_round_trips() {
+        use crate::meta::{Chromaticity, HdrStaticMeta, MasteringDisplay};
+        let xy = |x, y| Chromaticity { x, y };
+        let hdr = HdrStaticMeta {
+            mastering: Some(MasteringDisplay {
+                display_primaries: [xy(0.708, 0.292), xy(0.170, 0.797), xy(0.131, 0.046)],
+                white_point: xy(0.3127, 0.3290),
+                max_luminance: 1000.0,
+                min_luminance: 0.005,
+            }),
+            max_content_light_level: Some(1200),
+            max_frame_average_light_level: Some(300),
+        };
+
+        let mut meta = FrameMetaSet::new();
+        meta.attach(hdr);
+        let frame = Frame {
+            domain: MemoryDomain::System(SystemSlice::from_boxed(Box::new([0u8; 4]))),
+            timing: FrameTiming::default(),
+            sequence: 0,
+            meta,
+        };
+        match roundtrip(&PipelinePacket::DataFrame(frame)) {
+            PipelinePacket::DataFrame(got) => {
+                let h = got.meta.get::<HdrStaticMeta>().expect("hdr survived");
+                assert_eq!(h, &hdr);
+            }
+            other => panic!("expected DataFrame, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "metadata")]
+    #[test]
+    fn hdr_static_metadata_round_trips_without_a_mastering_display() {
+        // A stream carrying only content_light_level_info: the absent half must
+        // decode back as absent, not as zeroed primaries.
+        use crate::meta::HdrStaticMeta;
+        let hdr = HdrStaticMeta {
+            mastering: None,
+            max_content_light_level: Some(400),
+            max_frame_average_light_level: None,
+        };
+        let mut meta = FrameMetaSet::new();
+        meta.attach(hdr);
+        let frame = Frame {
+            domain: MemoryDomain::System(SystemSlice::from_boxed(Box::new([0u8; 4]))),
+            timing: FrameTiming::default(),
+            sequence: 0,
+            meta,
+        };
+        match roundtrip(&PipelinePacket::DataFrame(frame)) {
+            PipelinePacket::DataFrame(got) => {
+                assert_eq!(got.meta.get::<HdrStaticMeta>(), Some(&hdr));
             }
             other => panic!("expected DataFrame, got {other:?}"),
         }

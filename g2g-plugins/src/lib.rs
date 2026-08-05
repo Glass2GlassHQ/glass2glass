@@ -143,6 +143,8 @@ pub mod textoverlay;
 // Shaping / bidi / system-font discovery behind the overlay's horizontal path.
 #[cfg(feature = "text-shaping")]
 pub mod textshape;
+// Shared H.264/H.265 SEI message walk + the HDR10 static-metadata payloads.
+pub mod sei;
 // CEA-608/708 closed captions carried in-band in H.264/H.265 SEI (no_std).
 pub mod cea;
 // MISB ST 0601 KLV telemetry (STANAG 4609): codec + klvdecode element (no_std).

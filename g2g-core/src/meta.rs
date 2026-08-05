@@ -419,6 +419,71 @@ mod on {
             Propagation::Keep
         }
     }
+
+    /// A CIE 1931 xy chromaticity.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub struct Chromaticity {
+        pub x: f32,
+        pub y: f32,
+    }
+
+    /// The SMPTE ST 2086 mastering display colour volume: the primaries and white
+    /// point of the display the content was graded on, and its luminance range in
+    /// cd/m^2.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub struct MasteringDisplay {
+        /// Display primaries in **R, G, B** order (the SEI codes them G, B, R).
+        pub display_primaries: [Chromaticity; 3],
+        pub white_point: Chromaticity,
+        pub max_luminance: f32,
+        pub min_luminance: f32,
+    }
+
+    /// HDR10 static metadata as carried by the H.264 / H.265
+    /// `mastering_display_colour_volume` and `content_light_level_info` SEI
+    /// messages: how the content was graded, which a display sink hands to the
+    /// driver so the panel maps the highlights the way the colourist saw them.
+    ///
+    /// Each half is independent: a stream may carry either, both, or (then no meta
+    /// is attached at all) neither. The colour primaries / transfer function /
+    /// matrix themselves are *not* here: those are CICP codepoints in the SPS VUI
+    /// that the decode path already resolves for itself.
+    #[derive(Debug, Default, Clone, Copy, PartialEq)]
+    pub struct HdrStaticMeta {
+        pub mastering: Option<MasteringDisplay>,
+        /// MaxCLL: the brightest single pixel in the stream, cd/m^2.
+        pub max_content_light_level: Option<u16>,
+        /// MaxFALL: the brightest frame average in the stream, cd/m^2.
+        pub max_frame_average_light_level: Option<u16>,
+    }
+
+    impl HdrStaticMeta {
+        /// Whether anything was actually recovered (an all-empty meta is not
+        /// worth attaching).
+        pub fn is_empty(&self) -> bool {
+            self.mastering.is_none()
+                && self.max_content_light_level.is_none()
+                && self.max_frame_average_light_level.is_none()
+        }
+    }
+
+    impl FrameMeta for HdrStaticMeta {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+        fn clone_box(&self) -> Box<dyn FrameMeta> {
+            Box::new(*self)
+        }
+        /// A grading description of the content, not of the sample grid: it
+        /// survives every transform, including a re-encode (the new bitstream
+        /// describes the same graded picture).
+        fn propagate(&self, _transform: Transform) -> Propagation {
+            Propagation::Keep
+        }
+    }
 }
 
 #[cfg(all(test, feature = "metadata"))]

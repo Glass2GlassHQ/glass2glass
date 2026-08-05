@@ -116,6 +116,11 @@ pub struct NalParse<C: NalCodec> {
     /// PTS (ns) of the last AU the parameter sets were (re-)inserted before, for
     /// the `config_interval > 0` time-based cadence.
     last_config_pts_ns: Option<u64>,
+    /// Last HDR10 static metadata seen in the stream's SEI. It describes the
+    /// whole coded video sequence but is coded per IRAP, so it is latched and
+    /// re-attached to every frame.
+    #[cfg(feature = "metadata")]
+    hdr: Option<g2g_core::meta::HdrStaticMeta>,
     _codec: PhantomData<C>,
 }
 
@@ -133,6 +138,8 @@ impl<C: NalCodec> Default for NalParse<C> {
             config_interval: 0,
             cached: C::PARAM_SET_TYPES.iter().map(|_| Vec::new()).collect(),
             last_config_pts_ns: None,
+            #[cfg(feature = "metadata")]
+            hdr: None,
             _codec: PhantomData,
         }
     }
@@ -353,30 +360,39 @@ impl<C: NalCodec> NalParse<C> {
             self.seq,
         );
         #[cfg(feature = "metadata")]
-        Self::attach_captions(&mut frame);
+        self.attach_stream_meta(&mut frame);
         self.seq += 1;
         out.push(PipelinePacket::DataFrame(frame)).await?;
         Ok(())
     }
 
-    /// Attach the access unit's closed-caption bytes as a `CaptionMeta`, so they
-    /// outlive the bitstream: a decoder throws the SEI away, but the meta rides
-    /// the decoded frames (and a re-encode, see `CaptionMeta::propagate`) to a
-    /// downstream `CcInsert`. No meta when the AU carries no captions.
+    /// Attach what the access unit's SEI carried, so it outlives the bitstream:
+    /// a decoder throws the SEI away, but the meta rides the decoded frames (and
+    /// a re-encode, see the metas' `propagate`) to a downstream caption inserter
+    /// or HDR display sink.
+    ///
+    /// Captions are per-picture. HDR10 static metadata describes the whole coded
+    /// video sequence and is typically coded once per IRAP, so the last one seen
+    /// is latched and re-attached to every frame.
     #[cfg(feature = "metadata")]
-    fn attach_captions(frame: &mut Frame) {
+    fn attach_stream_meta(&mut self, frame: &mut Frame) {
         let Some(au) = frame.domain.as_system_slice() else {
             return;
         };
-        let triples = crate::cea::extract_cc_data(au, C::CODEC);
-        if triples.is_empty() {
-            return;
+        let info = crate::sei::parse_au(au, C::CODEC);
+        if let Some(hdr) = info.hdr {
+            self.hdr = Some(hdr);
         }
-        let mut meta = g2g_core::meta::CaptionMeta::new();
-        for t in triples {
-            meta.push(t.into());
+        if !info.captions.is_empty() {
+            let mut meta = g2g_core::meta::CaptionMeta::new();
+            for t in info.captions {
+                meta.push(t.into());
+            }
+            frame.meta.attach(meta);
         }
-        frame.meta.attach(meta);
+        if let Some(hdr) = self.hdr {
+            frame.meta.attach(hdr);
+        }
     }
 
     /// The `CompressedVideo` caps at any geometry that this parser accepts and
@@ -471,7 +487,7 @@ impl<C: NalCodec> AsyncElement for NalParse<C> {
                         self.refine_caps(slice, out).await?;
                         frame.timing.keyframe = is_keyframe;
                         #[cfg(feature = "metadata")]
-                        Self::attach_captions(&mut frame);
+                        self.attach_stream_meta(&mut frame);
                     }
                     out.push(PipelinePacket::DataFrame(frame)).await?;
                 }

@@ -84,11 +84,19 @@ impl HdrColorSpace {
     }
 }
 
-/// Mastering-display metadata for the HDR10 (`VkHdrMetadataEXT`) present. Streams
-/// here carry no mastering metadata, so this defaults to BT.2020 primaries + D65
-/// white and a 1000-nit peak (typical HDR10). Luminances are in nits (cd/m^2).
-#[derive(Debug, Clone, Copy)]
+/// Mastering-display metadata for the HDR10 (`VkHdrMetadataEXT`) present.
+/// Defaults to BT.2020 (Rec.2100) primaries + D65 white and a 1000-nit peak, the
+/// typical HDR10 grade, for a stream that carries none. When the frames arrive
+/// with an [`HdrStaticMeta`](g2g_core::meta::HdrStaticMeta) (the H.264 / H.265
+/// parser mines it from the mastering-display / content-light-level SEI), the
+/// sink folds it in with [`with_stream_meta`](Self::with_stream_meta) so the
+/// display gets the grade the content was actually mastered on. Chromaticities
+/// are CIE xy; luminances are nits (cd/m^2).
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HdrMasteringDisplay {
+    /// Display primaries as `(x, y)` in R, G, B order.
+    pub display_primaries: [(f32, f32); 3],
+    pub white_point: (f32, f32),
     pub max_luminance: f32,
     pub min_luminance: f32,
     pub max_content_light_level: f32,
@@ -98,11 +106,35 @@ pub struct HdrMasteringDisplay {
 impl Default for HdrMasteringDisplay {
     fn default() -> Self {
         Self {
+            display_primaries: [(0.708, 0.292), (0.170, 0.797), (0.131, 0.046)],
+            white_point: (0.3127, 0.3290),
             max_luminance: 1000.0,
             min_luminance: 0.005,
             max_content_light_level: 1000.0,
             max_frame_average_light_level: 400.0,
         }
+    }
+}
+
+impl HdrMasteringDisplay {
+    /// Fold a stream's HDR10 static metadata in: each half the stream carried
+    /// (the ST 2086 mastering display, the CTA-861.3 light levels) replaces these
+    /// values, and a half it omitted keeps the default.
+    #[cfg(feature = "metadata")]
+    pub fn with_stream_meta(mut self, meta: &g2g_core::meta::HdrStaticMeta) -> Self {
+        if let Some(m) = meta.mastering {
+            self.display_primaries = m.display_primaries.map(|c| (c.x, c.y));
+            self.white_point = (m.white_point.x, m.white_point.y);
+            self.max_luminance = m.max_luminance;
+            self.min_luminance = m.min_luminance;
+        }
+        if let Some(cll) = meta.max_content_light_level {
+            self.max_content_light_level = cll as f32;
+        }
+        if let Some(fall) = meta.max_frame_average_light_level {
+            self.max_frame_average_light_level = fall as f32;
+        }
+        self
     }
 }
 
@@ -150,14 +182,14 @@ fn xy(x: f32, y: f32) -> vk::XYColorEXT {
     vk::XYColorEXT { x, y }
 }
 
-/// Build `VkHdrMetadataEXT` for BT.2020 primaries + D65 white from a mastering
-/// display. Pure; the primaries are the fixed BT.2020 (Rec.2100) chromaticities.
+/// Build `VkHdrMetadataEXT` from a mastering display. Pure.
 fn hdr10_metadata(m: HdrMasteringDisplay) -> vk::HdrMetadataEXT<'static> {
+    let [r, g, b] = m.display_primaries;
     vk::HdrMetadataEXT::default()
-        .display_primary_red(xy(0.708, 0.292))
-        .display_primary_green(xy(0.170, 0.797))
-        .display_primary_blue(xy(0.131, 0.046))
-        .white_point(xy(0.3127, 0.3290))
+        .display_primary_red(xy(r.0, r.1))
+        .display_primary_green(xy(g.0, g.1))
+        .display_primary_blue(xy(b.0, b.1))
+        .white_point(xy(m.white_point.0, m.white_point.1))
         .max_luminance(m.max_luminance)
         .min_luminance(m.min_luminance)
         .max_content_light_level(m.max_content_light_level)
@@ -467,16 +499,35 @@ impl VulkanHdrSink {
             }
         }
 
-        // Attach HDR mastering metadata when the colour space is HDR and the
-        // device has VK_EXT_hdr_metadata (best-effort; not fatal if absent).
-        if color_space != HdrColorSpace::Sdr {
-            if let Some(hdr) = &self.hdr_fn {
-                let md = hdr10_metadata(self.mastering);
-                // SAFETY: one swapchain + one metadata, both live.
-                unsafe { hdr.set_hdr_metadata(&[self.swapchain], &[md]) };
-            }
-        }
+        self.push_hdr_metadata();
         Ok(())
+    }
+
+    /// Attach the current mastering metadata to the swapchain, when the colour
+    /// space is HDR and the device has `VK_EXT_hdr_metadata`. Best-effort: a
+    /// device without the extension simply presents without it.
+    fn push_hdr_metadata(&mut self) {
+        if self.color_space == HdrColorSpace::Sdr || self.swapchain == vk::SwapchainKHR::null() {
+            return;
+        }
+        if let Some(hdr) = &self.hdr_fn {
+            let md = hdr10_metadata(self.mastering);
+            // SAFETY: one swapchain + one metadata, both live.
+            unsafe { hdr.set_hdr_metadata(&[self.swapchain], &[md]) };
+        }
+    }
+
+    /// Replace the mastering display the swapchain advertises, re-issuing
+    /// `vkSetHdrMetadataEXT`. The paced element calls this when a frame arrives
+    /// carrying the stream's own HDR10 static metadata.
+    pub fn set_mastering(&mut self, mastering: HdrMasteringDisplay) {
+        self.mastering = mastering;
+        self.push_hdr_metadata();
+    }
+
+    /// The mastering display currently advertised on the swapchain.
+    pub fn mastering(&self) -> HdrMasteringDisplay {
+        self.mastering
     }
 
     /// Rebuild the swapchain for a new drawable size (window resize). Safe to call
@@ -761,6 +812,10 @@ impl Drop for VulkanHdrSink {
 pub struct VulkanHdrPresentSink {
     sink: VulkanHdrSink,
     configured: bool,
+    /// The stream's HDR10 static metadata as last pushed to the swapchain, so a
+    /// re-issue only happens when it actually changes (it rides every frame).
+    #[cfg(feature = "metadata")]
+    applied_hdr: Option<g2g_core::meta::HdrStaticMeta>,
     /// PTS pacing + QoS late-drop: idle until the runner hands over a clock, and
     /// the default lateness bound never drops.
     pacer: PresentationPacer,
@@ -781,8 +836,26 @@ impl VulkanHdrPresentSink {
         Self {
             sink,
             configured: false,
+            #[cfg(feature = "metadata")]
+            applied_hdr: None,
             pacer: PresentationPacer::new(),
         }
+    }
+
+    /// Adopt the stream's own HDR10 static metadata (from the parser's SEI mine)
+    /// for the swapchain, replacing the built-in default grade. A no-op when the
+    /// frame carries none, or when it repeats what is already applied.
+    #[cfg(feature = "metadata")]
+    fn adopt_stream_hdr(&mut self, frame: &g2g_core::frame::Frame) {
+        let Some(meta) = frame.meta.get::<g2g_core::meta::HdrStaticMeta>() else {
+            return;
+        };
+        if self.applied_hdr.as_ref() == Some(meta) {
+            return;
+        }
+        self.applied_hdr = Some(*meta);
+        self.sink
+            .set_mastering(HdrMasteringDisplay::default().with_stream_meta(meta));
     }
 
     /// QoS late-drop bound: once PTS pacing is engaged, a frame past its
@@ -902,6 +975,9 @@ impl AsyncElement for VulkanHdrPresentSink {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
+                    // The stream's own grade, when the parser mined one upstream.
+                    #[cfg(feature = "metadata")]
+                    self.adopt_stream_hdr(&frame);
                     // PTS pacing: hold the texture until its deadline on the
                     // elected clock, or drop it when it is already too late (the
                     // QoS bound) or outside the segment. Unpaced without a clock:
@@ -1311,5 +1387,79 @@ mod tests {
         assert!((md.display_primary_green.y - 0.797).abs() < 1e-6);
         assert!((md.white_point.x - 0.3127).abs() < 1e-6);
         assert!((md.max_luminance - 1200.0).abs() < 1e-3);
+    }
+
+    #[test]
+    #[cfg(feature = "metadata")]
+    fn stream_metadata_replaces_the_default_grade() {
+        use g2g_core::meta::{Chromaticity, HdrStaticMeta, MasteringDisplay};
+        let xy = |x, y| Chromaticity { x, y };
+        // A DCI-P3 grade at 4000 nits: every field must reach VkHdrMetadataEXT.
+        let meta = HdrStaticMeta {
+            mastering: Some(MasteringDisplay {
+                display_primaries: [xy(0.680, 0.320), xy(0.265, 0.690), xy(0.150, 0.060)],
+                white_point: xy(0.3127, 0.3290),
+                max_luminance: 4000.0,
+                min_luminance: 0.0001,
+            }),
+            max_content_light_level: Some(3800),
+            max_frame_average_light_level: Some(600),
+        };
+        let md = hdr10_metadata(HdrMasteringDisplay::default().with_stream_meta(&meta));
+        assert!((md.display_primary_red.x - 0.680).abs() < 1e-6, "P3 red");
+        assert!(
+            (md.display_primary_green.y - 0.690).abs() < 1e-6,
+            "P3 green"
+        );
+        assert!((md.display_primary_blue.x - 0.150).abs() < 1e-6, "P3 blue");
+        assert!((md.max_luminance - 4000.0).abs() < 1e-3);
+        assert!((md.max_content_light_level - 3800.0).abs() < 1e-3);
+        assert!((md.max_frame_average_light_level - 600.0).abs() < 1e-3);
+    }
+
+    #[test]
+    #[cfg(feature = "metadata")]
+    fn light_levels_alone_keep_the_default_primaries() {
+        use g2g_core::meta::HdrStaticMeta;
+        let meta = HdrStaticMeta {
+            mastering: None,
+            max_content_light_level: Some(500),
+            max_frame_average_light_level: None,
+        };
+        let m = HdrMasteringDisplay::default().with_stream_meta(&meta);
+        assert_eq!(
+            m.display_primaries,
+            HdrMasteringDisplay::default().display_primaries
+        );
+        assert!((m.max_content_light_level - 500.0).abs() < 1e-3);
+        assert!(
+            (m.max_frame_average_light_level - 400.0).abs() < 1e-3,
+            "the omitted half keeps the default"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "metadata")]
+    async fn a_frame_carrying_hdr_meta_updates_the_swapchain_grade() {
+        // Needs a real Vulkan video device (the stub sink is built on one); skips
+        // where there is none.
+        let Some((device, mut sink)) = stub_element().await else {
+            std::eprintln!("skip: no Vulkan H.265 decode + present device");
+            return;
+        };
+        let ctx = device.gpu_context();
+        sink.configure_pipeline(&rgba_caps(4, 4)).unwrap();
+        let mut frame = texture_frame(&ctx, 0);
+        frame.meta.attach(g2g_core::meta::HdrStaticMeta {
+            mastering: None,
+            max_content_light_level: Some(2500),
+            max_frame_average_light_level: Some(700),
+        });
+        sink.process(PipelinePacket::DataFrame(frame), &mut NullSink)
+            .await
+            .expect("present of a stub swapchain is a no-op");
+        let m = sink.sink.mastering();
+        assert!((m.max_content_light_level - 2500.0).abs() < 1e-3);
+        assert!((m.max_frame_average_light_level - 700.0).abs() < 1e-3);
     }
 }
