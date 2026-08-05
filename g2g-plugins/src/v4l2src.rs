@@ -52,6 +52,29 @@ fn v4l2_err(e: &std::io::Error) -> G2gError {
     G2gError::Hardware(HardwareError::V4l2(e.raw_os_error().unwrap_or(-1)))
 }
 
+/// One completed capture handed to the async loop: the payload bytes plus the
+/// driver's buffer timestamp in nanoseconds (`None` when the driver left it at
+/// zero, which is how an absent timestamp shows up).
+#[derive(Debug)]
+struct Captured {
+    bytes: Vec<u8>,
+    timestamp_ns: Option<u64>,
+}
+
+/// The driver's `timeval` capture time as nanoseconds. All-zero means the
+/// driver never stamped the buffer.
+fn buffer_timestamp_ns(ts: &v4l::timestamp::Timestamp) -> Option<u64> {
+    if ts.sec == 0 && ts.usec == 0 {
+        return None;
+    }
+    let sec = u64::try_from(ts.sec).ok()?;
+    let usec = u64::try_from(ts.usec).ok()?;
+    Some(
+        sec.saturating_mul(1_000_000_000)
+            .saturating_add(usec.saturating_mul(1_000)),
+    )
+}
+
 #[derive(Debug)]
 pub struct V4l2Src {
     device: String,
@@ -90,7 +113,10 @@ impl V4l2Src {
         self
     }
 
-    /// Request a frame rate in fps. Best-effort: the driver may pick another.
+    /// Request a frame rate in fps. Best-effort: the driver may pick another,
+    /// and many UVC cams free-run below the one they accepted. PTS comes from
+    /// the driver's buffer timestamps, so it holds either way; this rate only
+    /// feeds the advertised caps, the latency report, and the fallback period.
     pub fn with_fps(mut self, fps: u32) -> Self {
         self.req_fps = fps;
         self
@@ -259,7 +285,7 @@ impl SourceLoop for V4l2Src {
 
             // Bounded channel: the capture thread blocks once the pipeline is
             // BUFFER_COUNT frames behind, so we don't grow memory unboundedly.
-            let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(BUFFER_COUNT as usize);
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<Captured>(BUFFER_COUNT as usize);
 
             // Blocking V4L2 capture on its own thread. It owns the device and
             // the mmap stream (which borrows the device), copies each frame's
@@ -278,8 +304,12 @@ impl SourceLoop for V4l2Src {
                     let n = (meta.bytesused as usize).min(buf.len());
                     let mut payload = Vec::with_capacity(n);
                     payload.extend_from_slice(&buf[..n]);
+                    let captured = Captured {
+                        bytes: payload,
+                        timestamp_ns: buffer_timestamp_ns(&meta.timestamp),
+                    };
                     // Err means the receiver was dropped (pipeline shut down).
-                    if tx.blocking_send(payload).is_err() {
+                    if tx.blocking_send(captured).is_err() {
                         break;
                     }
                     count += 1;
@@ -292,23 +322,42 @@ impl SourceLoop for V4l2Src {
             } else {
                 0
             };
+            // The driver stamps every buffer with the time of capture, so the
+            // PTS tracks the rate the camera actually held rather than the one
+            // that was asked for. The two differ whenever the camera cannot
+            // hold the request (auto-exposure lengthens the frame duration in
+            // low light), and stamping the request there would compress the
+            // timeline: a recording would play back faster than it was shot.
+            let mut epoch_ns: Option<u64> = None;
+            let mut prev_pts = 0u64;
             let mut seq = 0u64;
-            while let Some(bytes) = rx.recv().await {
+            while let Some(captured) = rx.recv().await {
                 // A short frame (driver hiccup) can't be unpacked safely; skip
                 // it rather than push a malformed buffer downstream.
-                if bytes.len() < expected {
+                if captured.bytes.len() < expected {
                     continue;
                 }
                 // Source-side wall-clock stamp for glass-to-glass latency, same
                 // convention as VideoTestSrc / RtspSrc.
                 let arrival_ns = g2g_core::metrics::monotonic_ns();
-                let pts = seq * pts_step_ns;
+                let pts = match captured.timestamp_ns {
+                    Some(ts) => ts.saturating_sub(*epoch_ns.get_or_insert(ts)),
+                    None => seq * pts_step_ns,
+                };
+                // The gap the previous frame occupied. The nominal period
+                // covers the first frame and any repeated timestamp.
+                let duration_ns = match pts.checked_sub(prev_pts) {
+                    Some(d) if seq > 0 && d > 0 => d,
+                    _ => pts_step_ns,
+                };
                 let frame = Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
+                    domain: MemoryDomain::System(SystemSlice::from_boxed(
+                        captured.bytes.into_boxed_slice(),
+                    )),
                     timing: FrameTiming {
                         pts_ns: pts,
                         dts_ns: pts,
-                        duration_ns: pts_step_ns,
+                        duration_ns,
                         capture_ns: pts,
                         arrival_ns,
                         keyframe: true, // raw frames are each independently presentable
@@ -317,6 +366,7 @@ impl SourceLoop for V4l2Src {
                     meta: Default::default(),
                 };
                 out.push(PipelinePacket::DataFrame(frame)).await?;
+                prev_pts = pts;
                 seq += 1;
             }
 
@@ -366,6 +416,19 @@ mod tests {
             (1280, 720, 60)
         );
         assert_eq!(src.frame_limit, 10);
+    }
+
+    #[test]
+    fn buffer_timestamp_converts_and_detects_absence() {
+        use v4l::timestamp::Timestamp;
+        assert_eq!(
+            buffer_timestamp_ns(&Timestamp::new(12, 500_000)),
+            Some(12_500_000_000)
+        );
+        // An unstamped buffer must not be mistaken for the epoch.
+        assert_eq!(buffer_timestamp_ns(&Timestamp::new(0, 0)), None);
+        // Microseconds alone are a valid stamp right after the monotonic epoch.
+        assert_eq!(buffer_timestamp_ns(&Timestamp::new(0, 1)), Some(1_000));
     }
 
     #[test]
