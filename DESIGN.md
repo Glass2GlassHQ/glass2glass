@@ -3182,6 +3182,17 @@ filter field, so `priority` (the publisher-priority byte in every subgroup
 header) is the only delivery knob and there is no group-order property to
 expose.
 
+The control plane runs without frames (M906). `configure_pipeline` dials the
+relay and publishes the namespace in the background (a sync caller without a
+runtime falls back to dialling on the first frame, and a failed dial is retried
+per frame while the relay comes up), and a pump task owns the control stream's
+inbound half, answering each message as it lands; the pump and frame publishing
+take turns on one lock, so a subscription never changes hands inside a frame.
+A media SUBSCRIBE that arrives before the `moov` names any track is held (the
+queue is bounded, since request ids are peer-controlled) and resolved with
+`SUBSCRIBE_OK` or `DOES_NOT_EXIST` once the `moov` arrives; init and catalog
+subscriptions are served the moment their single object exists.
+
 **Datagram objects.** `datagrams=true` carries each media object in a QUIC
 datagram instead of on a subgroup stream: unreliable, bounded by the path MTU,
 and free of head-of-line blocking, which is what a live path wants for droppable

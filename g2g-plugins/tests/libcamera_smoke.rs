@@ -6,7 +6,8 @@
 //! Ignored by default: needs a real camera libcamera can open and that the
 //! running user can access (a local desktop session grants this via a device
 //! ACL on `/dev/videoN`; otherwise join the `video` group). Select a non-default
-//! camera with `G2G_LIBCAMERA_INDEX`.
+//! camera with `G2G_LIBCAMERA_INDEX`. Run with `--test-threads=1`: the tests
+//! share the camera, and a parallel open fails with EBUSY.
 //!
 //! ```sh
 //! cargo test -p g2g-plugins --features libcamera \

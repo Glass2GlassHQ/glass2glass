@@ -6,6 +6,8 @@
 //! Ignored by default: needs a real `/dev/videoN` UVC device the running user
 //! can open (a local desktop session grants this via a device ACL; otherwise
 //! join the `video` group). Override the device with `G2G_V4L2_DEVICE`.
+//! Run with `--test-threads=1`: the tests share the camera, and a parallel
+//! open fails with EBUSY.
 //!
 //! ```sh
 //! cargo test -p g2g-plugins --features "v4l2 ffmpeg" \

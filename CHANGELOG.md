@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M906: `moqtsink` dials the relay at configure time and answers control messages from a dedicated pump task, so a subscriber attaching before the first frame or between fragments is served instead of abandoned.
+
 - M905: `moqtsink` can carry media objects in QUIC datagrams (`datagrams=true`) and spread a group across several subgroup streams (`subgroups=N`), which `moqtsrc` reorders through the same bounded reassembly.
 
 - M904: a browser plays a g2g MoQ Transport broadcast through a relay (`tools/moqt-demo`), decoded by the third-party MOQtail client and asserted headlessly on the decoded frames.
