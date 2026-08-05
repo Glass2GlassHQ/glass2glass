@@ -16,7 +16,7 @@ import { spawn } from "node:child_process";
 import {
   CAMERA_PIPELINE, SMPTE_PIPELINE, chromeBinary, freeUdpPort, hasCamera,
   launchBinary, mintCertificate, pageUrl, publishPipeline, relayBinary,
-  spawnPublisher, spawnRelay, startHttp,
+  spawnPublisher, spawnRelay, startHttp, whenPublishing,
 } from "./local-relay.mjs";
 
 const HTTP_PORT = 8196;
@@ -75,15 +75,21 @@ async function main() {
 
   const pipeline = publishPipeline(prefix, relayPort, NAMESPACE, tls.hashHex);
   log("publishing:", pipeline);
-  children.push(spawnPublisher(launchBin, pipeline, (line) => {
-    if (!line.includes("libx264")) log(line);
-  }));
+  const publisher = spawnPublisher(launchBin, pipeline, (line) => {
+    if (!line.includes("libx264") && !line.includes("running...")) log(line);
+  });
+  children.push(publisher);
 
   http = await startHttp(HTTP_PORT);
   const url = pageUrl(HTTP_PORT, relayPort, NAMESPACE, tls.hashHex, { autostart: "1" });
   log("player:", url);
 
-  const chrome = chromeBinary();
+  log("waiting for the first frames (a camera takes a moment to start)...");
+  if (!(await whenPublishing(publisher))) {
+    log("no frames yet; opening the player anyway, reload it if it does not connect.");
+  }
+
+  const chrome = chromeBinary({ preferSystem: true });
   if (chrome) {
     viewer = spawn(chrome, [url], { stdio: "ignore" });
     log("opened a browser. Ctrl-C to stop.");

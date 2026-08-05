@@ -25,7 +25,8 @@ import { pathToFileURL } from "node:url";
 import { join } from "node:path";
 import {
   ROOT, chromeBinary, freeUdpPort, launchBinary, mintCertificate, pageUrl,
-  publishPipeline, relayBinary, spawnPublisher, spawnRelay, startHttp, SMPTE_PIPELINE,
+  publishPipeline, relayBinary, spawnPublisher, spawnRelay, startHttp, whenPublishing,
+  SMPTE_PIPELINE,
 } from "../local-relay.mjs";
 
 const HTTP_PORT = 8197;
@@ -99,11 +100,16 @@ async function main() {
 
   const pipeline = publishPipeline(SMPTE_PIPELINE, relayPort, NAMESPACE, tls.hashHex);
   log("publishing:", pipeline);
-  children.push(spawnPublisher(launchBin, pipeline, (line) => {
-    // libx264's end-of-run statistics say nothing about the broadcast.
-    if (!line.includes("libx264")) log(line);
-  }));
-  await sleep(1000);
+  const publisher = spawnPublisher(launchBin, pipeline, (line) => {
+    // libx264's end-of-run statistics and the progress line say nothing about
+    // the broadcast.
+    if (!line.includes("libx264") && !line.includes("running...")) log(line);
+  });
+  children.push(publisher);
+  // A subscriber that attaches before the first frame goes unacknowledged
+  // (`moqtsink` applies control messages as frames arrive) and the relay
+  // refuses the subscribe.
+  if (!(await whenPublishing(publisher))) fail("the publisher produced no frames");
 
   http = await startHttp(HTTP_PORT);
   const pw = await import(pathToFileURL(pwPath).href);

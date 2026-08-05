@@ -27,7 +27,11 @@ node watch-live.mjs
 
 One command: mints a certificate, starts the relay, publishes the camera
 (`libcamerasrc ! videoconvert ! x264enc ! mp4mux ! moqtsink`), serves the page and
-opens a browser on it. Ctrl-C stops everything. With no `/dev/video0` it
+opens your browser on it once frames are flowing. `moqtsink` applies control
+messages as frames arrive, so a subscriber that attaches before the first frame
+goes unacknowledged and the relay refuses the subscribe; the wait avoids that,
+and a camera takes a second or two to start. Ctrl-C stops everything. With no
+`/dev/video0` it
 publishes the SMPTE test pattern instead and says so; `G2G_MOQT_PATTERN=1` forces
 that, `G2G_CAMERA_SIZE=1280x720` changes the capture size.
 

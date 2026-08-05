@@ -72,10 +72,17 @@ export function launchBinary() {
 
 // A full (WebCodecs / MSE capable) Chromium. `headless_shell` will not do:
 // it ships no proprietary codecs and cannot decode H.264.
-export function chromeBinary() {
+//
+// `preferSystem` picks the browser a person already uses, profile and sign-in
+// intact, which is what the live demo wants; the headless run wants the
+// playwright build instead, because that is the one its driver was built for.
+export function chromeBinary({ preferSystem = false } = {}) {
   if (process.env.G2G_CHROME) {
     return existsSync(process.env.G2G_CHROME) ? process.env.G2G_CHROME : null;
   }
+  const system = ["/usr/bin/google-chrome", "/usr/bin/chromium-browser", "/usr/bin/chromium"]
+    .find((p) => existsSync(p));
+  if (preferSystem && system) return system;
   const cache = join(process.env.HOME || "", ".cache/ms-playwright");
   for (const entry of listDirs(cache).sort().reverse()) {
     // `chromium_headless_shell-*` sorts under the same prefix check, so match
@@ -86,10 +93,7 @@ export function chromeBinary() {
       if (existsSync(p)) return p;
     }
   }
-  for (const p of ["/usr/bin/google-chrome", "/usr/bin/chromium-browser", "/usr/bin/chromium"]) {
-    if (existsSync(p)) return p;
-  }
-  return null;
+  return system || null;
 }
 
 function listDirs(dir) {
@@ -160,11 +164,31 @@ function pipeLines(child, tag, onLine) {
   for (const s of [child.stdout, child.stderr]) {
     s?.setEncoding("utf8");
     s?.on("data", (d) => {
-      for (const line of d.split("\n")) {
+      // The launcher rewrites its progress line with a bare \r, so splitting on
+      // newlines alone would hold it back until something else printed.
+      for (const line of d.split(/[\r\n]/)) {
         if (line.trim()) onLine?.(`[${tag}] ${line}`);
       }
     });
   }
+}
+
+// Resolve once the publisher has pushed its first frames, which is the point
+// the broadcast exists: `moqtsink` applies control messages as frames arrive,
+// so a subscriber that attaches before then goes unacknowledged and the relay
+// gives up establishing the upstream subscription. Resolves false on timeout,
+// so a caller can carry on and let the failure surface where it happens.
+export function whenPublishing(reaped, timeoutMs = 20000) {
+  return new Promise((res) => {
+    const timer = setTimeout(() => res(false), timeoutMs);
+    const watch = (d) => {
+      if (!d.includes("running...")) return;
+      clearTimeout(timer);
+      for (const s of [reaped.child.stdout, reaped.child.stderr]) s?.off("data", watch);
+      res(true);
+    };
+    for (const s of [reaped.child.stdout, reaped.child.stderr]) s?.on("data", watch);
+  });
 }
 
 // Static file server rooted at tools/moqt-demo, so the page can import the
