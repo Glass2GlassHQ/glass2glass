@@ -46,13 +46,10 @@ use g2g_core::{
 };
 
 use crate::filesink::io_err;
-use crate::fmp4::{parse_trun, tfhd_defaults};
+use crate::fmp4::{parse_trun, tfhd_defaults, trun_first_sample_is_sync};
 use crate::hls::{write_media, MediaPlaylist, Segment};
 use crate::mp4box::{be32, boxes, find_box, find_path};
 use crate::multifilesink::expand;
-
-/// `sample_flags` bit 16: the sample is *not* a sync sample (ISO/IEC 14496-12).
-const NON_SYNC: u32 = 0x0001_0000;
 
 pub struct HlsSink {
     location: String,
@@ -356,33 +353,7 @@ fn fragment_info(moof: &[u8], frame_len: usize) -> Result<(u32, bool, u64), G2gE
     let (default_duration, default_size) = tfhd_defaults(tfhd)?;
     let (_, durations) = parse_trun(trun, default_duration, default_size, frame_len)?;
     let ticks = durations.iter().map(|d| *d as u64).sum();
-    Ok((track_id, first_sample_is_sync(trun)?, ticks))
-}
-
-/// Whether the first sample a `trun` describes is a sync sample. A `trun` that
-/// states no flags at all (neither the first-sample override nor per-sample
-/// flags) is taken to open at a random access point, which is what a fragment
-/// without sample dependency information implies.
-fn first_sample_is_sync(trun: &[u8]) -> Result<bool, G2gError> {
-    let flags = be32(trun, 0)? & 0x00FF_FFFF;
-    // version/flags + sample_count, then the optional fields in declaration order.
-    let mut at = 8usize;
-    if flags & 0x001 != 0 {
-        at += 4; // data_offset
-    }
-    if flags & 0x004 != 0 {
-        return Ok(be32(trun, at)? & NON_SYNC == 0); // first_sample_flags
-    }
-    if flags & 0x400 != 0 {
-        if flags & 0x100 != 0 {
-            at += 4; // sample_duration
-        }
-        if flags & 0x200 != 0 {
-            at += 4; // sample_size
-        }
-        return Ok(be32(trun, at)? & NON_SYNC == 0);
-    }
-    Ok(true)
+    Ok((track_id, trun_first_sample_is_sync(trun)?, ticks))
 }
 
 /// Each track's (track id, media timescale) from a `moov`. Only the two header

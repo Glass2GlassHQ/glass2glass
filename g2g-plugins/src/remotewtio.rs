@@ -12,6 +12,7 @@
 use alloc::vec::Vec;
 use core::time::Duration;
 
+use web_transport_quinn::proto::ConnectRequest;
 use web_transport_quinn::quinn::rustls::pki_types::pem::PemObject;
 use web_transport_quinn::quinn::rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use web_transport_quinn::{ClientBuilder, RecvStream, SendStream, Session};
@@ -72,6 +73,21 @@ impl WtStream {
 /// empty accepts any certificate a system root signs, otherwise only the listed
 /// certificates are accepted.
 pub(crate) async fn connect(url: &str, hashes: &str) -> Result<WtStream, G2gError> {
+    let session = dial(url, hashes, None).await?;
+    let (tx, rx) = session.open_bi().await.map_err(wt_err)?;
+    Ok(WtStream::new(session, tx, rx))
+}
+
+/// Dial `url` and complete the HTTP/3 CONNECT handshake, leaving stream opening
+/// to the caller. `hashes` is the `server-certificate-hashes` property (see
+/// [`connect`]); `protocol` names a WebTransport subprotocol to request, which
+/// is how a protocol layered on the carrier (MoQT's `moqt-16`) states its
+/// version, since the QUIC ALPN is always `h3`.
+pub(crate) async fn dial(
+    url: &str,
+    hashes: &str,
+    protocol: Option<&str>,
+) -> Result<Session, G2gError> {
     let url = url::Url::parse(url).map_err(wt_err)?;
     let hashes = parse_cert_hashes(hashes)?;
     let builder = ClientBuilder::new();
@@ -82,9 +98,11 @@ pub(crate) async fn connect(url: &str, hashes: &str) -> Result<WtStream, G2gErro
             .with_server_certificate_hashes(hashes)
             .map_err(wt_err)?
     };
-    let session = client.connect(url).await.map_err(wt_err)?;
-    let (tx, rx) = session.open_bi().await.map_err(wt_err)?;
-    Ok(WtStream::new(session, tx, rx))
+    let mut request = ConnectRequest::new(url);
+    if let Some(protocol) = protocol {
+        request = request.with_protocol(protocol);
+    }
+    client.connect(request).await.map_err(wt_err)
 }
 
 /// Load a PEM certificate chain and its private key from file paths (the

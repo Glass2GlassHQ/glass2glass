@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M902: `moqtsink` publishes an fMP4 stream as IETF MoQ Transport draft-16 groups and objects over WebTransport, validated through Cloudflare's `moq-relay-ietf` to `moq-sub`.
+
 - M901: `remotewtsink` / `remotewtsrc` / `remotewttransform` carry the distributed-graph wire stream over WebTransport (HTTP/3 over QUIC), validated both directions against an independent aioquic peer.
 
 - M900: `dvbsubdec` decodes DVB subtitles (EN 300 743) from TS `subtitling_descriptor` streams and mkv `S_DVBSUB` tracks, pixel-exact against ffmpeg.

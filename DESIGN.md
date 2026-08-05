@@ -3100,6 +3100,80 @@ the transform's request/response), a subgraph-as-a-unit wrapper (remoting a whol
 `Bin` rather than a single edge), and a WebTransport datagram carrier for the
 drop-tolerant case.
 
+### 4.20a MoQ Transport (`moqt` / `moqtsink`)
+
+The distributed-graph carriers above move g2g's *own* packet stream between g2g
+peers. **MoQ Transport** is the other use of the same WebTransport carrier: a
+published IETF media protocol, so the peer on the far side is a relay and a
+player that know nothing about g2g. `moqt` (M902) implements it in-tree.
+
+**Dialect and version.** The dialect is the IETF draft, not moq-lite: moq-lite
+is a single-vendor dialect with its own ALPN and cannot talk to IETF endpoints.
+The target version is **draft-16, `0xff000010`**, which is what Cloudflare's
+`moq-relay-ietf` runs in production. Nothing on crates.io implements the IETF
+draft within this workspace's MSRV (`moq-net` needs rustc 1.91; cloudflare's
+`moq-transport` fails to build on 1.85), so the wire layer is written here, the
+way the SRT and ST 2110 stacks were: read the draft, read the reference
+implementation (`cloudflare/moq-rs`), and validate against the reference peer.
+From draft-16 the version is *not* negotiated in the SETUP payload; the QUIC
+ALPN for WebTransport is always `h3`, so the version rides the HTTP/3 CONNECT
+request as the WebTransport subprotocol `moqt-16`, and CLIENT_SETUP /
+SERVER_SETUP carry parameters only.
+
+**Layering.** `moqt::coding` (varints, byte strings, track namespaces and names,
+the delta-coded Key-Value-Pair sequences), `moqt::message` (the control message
+set and its `type / 16-bit length / payload` framing) and `moqt::data` (the
+subgroup stream header and per-object header) are pure `alloc` with no I/O, so
+the wire layer is unit-testable on byte vectors; the layouts are asserted
+against the byte sequences the reference implementation asserts for itself,
+because a round trip alone cannot catch two fields swapped with each other.
+`moqt::session` adds the live session over the M901 carrier: it reuses that
+carrier's dial (`remotewtio::dial`, which grew a subprotocol argument rather
+than a second copy of the certificate-hash handling), opens the control stream
+as the session's first bidirectional stream, and runs the control stream's read
+half in its own task, so a SUBSCRIBE is decoded as it arrives instead of when
+the element next has a frame to push. Everything a peer sends is bounded before
+use: counts and lengths are checked against the draft's limits, the KVP running
+key is a checked add, nothing is preallocated from a peer-supplied count, and a
+message that does not consume exactly its declared length is a protocol
+violation.
+
+**`moqtsink`.** The publisher takes an ISO-BMFF byte stream
+(`... ! mp4mux ! moqtsink location=https://relay:4443/ namespace=live/cam`), so
+the muxer stays a separate element and the sink carries no second fragmenter; it
+walks the boxes with the same helpers the HLS segmenter uses
+(`fmp4::trun_first_sample_is_sync` is shared between them). The object mapping:
+
+- `ftyp`+`moov` is one object in group 0 on the init track (`0.mp4`), which is
+  what a subscriber fetches first.
+- each `moof`+`mdat` pair, with the `styp` / `prft` that open its segment, is one
+  object on the media track `{track_id}.m4s`. CMAF requires an object to hold at
+  least one whole chunk, and a `moof`+`mdat` pair is exactly that.
+- a fragment whose first sample is a sync sample starts a new **group**, so a
+  group is a GOP and each group is one subgroup on its own unidirectional
+  stream. A subscriber that joins mid-group is served from the next keyframe,
+  which is the only point it could start decoding anyway.
+- a `.catalog` track carries the JSON track list a player reads to learn the
+  track names and codec parameters.
+
+Subgroup streams carry the header type `0x15` (explicit subgroup id plus an
+extension-header block) and objects with a zero object-id delta, byte-identical
+to what the reference publisher emits, so a relay sees no path it does not
+already exercise. `SUBSCRIBE_OK` reuses the request id as the track alias
+(§10.1 only asks for uniqueness within the session), and a stream is opened only
+after that acknowledgement, so the subscriber can resolve the alias in the
+stream header. A subscriber-side request the publisher does not serve (FETCH,
+TRACK_STATUS, REQUEST_UPDATE) gets an explicit `REQUEST_ERROR NOT_SUPPORTED`
+rather than silence. Draft-16 SUBSCRIBE carries neither a group order nor a
+filter field, so `priority` (the publisher-priority byte in every subgroup
+header) is the only delivery knob and there is no group-order property to
+expose.
+
+Validation is against the reference peers rather than a loopback: `moqtsink`
+publishes through a locally spawned `moq-relay-ietf` and the bytes `moq-sub`
+writes on the far side are compared to the bytes that went in, over a run long
+enough to span a group boundary.
+
 ### 4.21 Local Zero-Copy IPC (CUDA)
 
 Everything above ships CPU bytes: the wire codec refuses device memory, so a GPU

@@ -113,6 +113,8 @@ use crate::mediacodecenc::MediaCodecEnc;
 use crate::mjpegdec::MjpegDec;
 #[cfg(feature = "mjpeg-encode")]
 use crate::mjpegenc::MjpegEnc;
+#[cfg(feature = "moqt")]
+use crate::moqtsink::MoqtSink;
 use crate::mp4demux::Mp4Demux;
 #[cfg(all(target_os = "linux", feature = "nvdec"))]
 use crate::nvdec::NvDec;
@@ -1455,6 +1457,12 @@ fn register_feature_gated(reg: &mut Registry) {
         "remotewttransform",
         || Box::new(RemoteWtTransform::new("https://127.0.0.1:9604")),
     ));
+    // MoQ Transport publisher (M902): fMP4 in, MOQT groups and objects out to an
+    // IETF relay over the same WebTransport carrier.
+    #[cfg(feature = "moqt")]
+    reg.register_launch(LaunchFactory::of::<MoqtSink>("moqtsink", || {
+        Box::new(MoqtSink::new("https://127.0.0.1:4443/", "g2g"))
+    }));
     // Local zero-copy transports (M556 / M557): same-machine GPU-resident (CUDA
     // IPC) and vendor-neutral (DMABUF over SCM_RIGHTS) sink/src pairs. Like the
     // remote pair, the source discovers its real caps from the peer on connect, so

@@ -23,7 +23,7 @@ default = []
 linux-full = [
     "multi-thread", "plugin-loader",
     "rtsp", "rtsp-server", "srt", "udp-egress", "udp-ingress", "rtmp", "webrtc",
-    "remote", "remote-ws", "webtransport",
+    "remote", "remote-ws", "webtransport", "moqt",
     "http-src", "hls", "dash",
     "ffmpeg", "vaapi", "v4l2",
     "opus", "vorbis", "vpx", "av1-encode", "mjpeg", "mjpeg-encode",
@@ -107,6 +107,14 @@ remote-ws = ["std", "tokio/net", "tokio/io-util", "dep:tokio-tungstenite", "futu
 # the server takes a certificate / private-key PEM pair. Pulls
 # web-transport-quinn; implies std + tokio net/io-util.
 webtransport = ["std", "tokio/net", "tokio/io-util", "tokio/time", "dep:web-transport-quinn", "dep:url"]
+# Native IETF MoQ Transport draft-16 (M902): the `moqt` protocol modules (wire
+# codec + session driver) and the `moqtsink` publisher, layered on the M901
+# WebTransport carrier. The dialect is the IETF draft (version 0xff000010, the
+# WebTransport subprotocol `moqt-16`), which is what Cloudflare's
+# `moq-relay-ietf` runs; no crate implements it on this workspace's MSRV, so the
+# wire layer is in-tree. Adds no dependency beyond the carrier's, plus tokio's
+# `rt` for the control-stream reader task. Implies std + `webtransport`.
+moqt = ["webtransport", "tokio/rt", "tokio/sync"]
 # Live pipeline dashboard: `g2g-launch --observe <port>` runs the pipeline while
 # streaming its `Observer` telemetry + bus events as JSON over a WebSocket, served
 # alongside the static dashboard page on one port. Reuses the remote-ws WS stack

@@ -1245,6 +1245,36 @@ pub(crate) fn tfhd_defaults(tfhd: &[u8]) -> Result<(u32, u32), G2gError> {
     Ok((duration, size))
 }
 
+/// `sample_flags` bit 16: the sample is *not* a sync sample (ISO/IEC 14496-12).
+const NON_SYNC: u32 = 0x0001_0000;
+
+/// Whether the first sample a `trun` describes is a sync sample, i.e. whether
+/// the fragment it belongs to opens at a random access point. A `trun` that
+/// states no flags at all (neither the first-sample override nor per-sample
+/// flags) is taken to open at one, which is what a fragment without sample
+/// dependency information implies.
+pub(crate) fn trun_first_sample_is_sync(trun: &[u8]) -> Result<bool, G2gError> {
+    let flags = be32(trun, 0)? & 0x00FF_FFFF;
+    // version/flags + sample_count, then the optional fields in declaration order.
+    let mut at = 8usize;
+    if flags & 0x001 != 0 {
+        at += 4; // data_offset
+    }
+    if flags & 0x004 != 0 {
+        return Ok(be32(trun, at)? & NON_SYNC == 0); // first_sample_flags
+    }
+    if flags & 0x400 != 0 {
+        if flags & 0x100 != 0 {
+            at += 4; // sample_duration
+        }
+        if flags & 0x200 != 0 {
+            at += 4; // sample_size
+        }
+        return Ok(be32(trun, at)? & NON_SYNC == 0);
+    }
+    Ok(true)
+}
+
 /// `trun` (v0 or v1); returns (sizes, durations). A `trun` that omits the
 /// per-sample duration or size takes `default_duration` / `default_size` from its
 /// `tfhd`; a duration neither carries is `0`, but a *size* neither carries is

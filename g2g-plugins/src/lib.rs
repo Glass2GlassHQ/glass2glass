@@ -601,6 +601,14 @@ pub mod remotewtsrc;
 #[cfg(feature = "webtransport")]
 pub mod remotewttransform;
 
+// Native IETF MoQ Transport draft-16 (M902): the wire codec plus the session
+// driver over the M901 carrier, and the `moqtsink` publisher that maps a
+// fragmented-MP4 stream onto MOQT groups and objects. Behind `moqt`.
+#[cfg(feature = "moqt")]
+pub mod moqt;
+#[cfg(feature = "moqt")]
+pub mod moqtsink;
+
 // Media Foundation decode is Windows-only. The `windows` dependency is
 // target-gated, so the module only exists when building for Windows with the
 // `mf-decode` feature; enabling the feature on other platforms is a no-op.
