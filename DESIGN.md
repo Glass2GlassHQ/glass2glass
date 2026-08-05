@@ -3110,8 +3110,9 @@ both directions.
 
 **Dialect and version.** The dialect is the IETF draft, not moq-lite: moq-lite
 is a single-vendor dialect with its own ALPN and cannot talk to IETF endpoints.
-The target version is **draft-16, `0xff000010`**, which is what Cloudflare's
-`moq-relay-ietf` runs in production. Nothing on crates.io implements the IETF
+The versions are **draft-16, `0xff000010`** (what Cloudflare's `moq-relay-ietf`
+runs in production) and **draft-18** (what moq-dev, imquic, moqxr and Meta's
+public moxygen relay speak). Nothing on crates.io implements the IETF
 draft within this workspace's MSRV (`moq-net` needs rustc 1.91; cloudflare's
 `moq-transport` fails to build on 1.85), so the wire layer is written here, the
 way the SRT and ST 2110 stacks were: read the draft, read the reference
@@ -3120,6 +3121,33 @@ From draft-16 the version is *not* negotiated in the SETUP payload; the QUIC
 ALPN for WebTransport is always `h3`, so the version rides the HTTP/3 CONNECT
 request as the WebTransport subprotocol `moqt-16`, and CLIENT_SETUP /
 SERVER_SETUP carry parameters only.
+
+**Version negotiation (M907).** The elements offer every version in their
+`versions` property (default `18,16`, preference order) as WebTransport
+subprotocols on one CONNECT, and the server's pick selects the codec for the
+session; `moq-relay-ietf` echoes `moqt-16` when offered it. A server that
+echoes no subprotocol predates multi-version offers and every such server is a
+draft-16 peer, so the fallback is draft-16 when it was offered; the SETUP
+handshake that follows validates the choice either way.
+
+**Draft-18 (`moqt::v18`, M907).** Between draft-16 and draft-18 the wire was
+restructured, so draft-18 is a sibling module rather than a flag on the
+draft-16 one: its own `vi64` integer (leading-ones length prefix, 1 to 9 bytes,
+a full `u64`, non-minimal encodings legal), a single SETUP message (`0x2F00`)
+on a *pair of unidirectional control streams*, one *bidirectional stream per
+request* whose response carries no request id (the stream is the correlation),
+typed control-message parameters in place of KVP parameters (an unknown type
+cannot be skipped and is a session error), bit-table SUBGROUP_HEADER and
+OBJECT_DATAGRAM types, PADDING streams and datagrams to discard, and
+cancellation by stream reset (UNSUBSCRIBE, FETCH_CANCEL and MAX_REQUEST_ID no
+longer exist). What is genuinely version-agnostic is shared, not copied: track
+namespaces, Key-Value-Pairs and the object-id delta rule live in the draft-16
+coding module with a varint flavour on the shared `Reader`, and the reorder
+policy, catalog and the M901 carrier are reused as they are. The publisher
+answers each request on its own stream and sends PUBLISH_DONE there at EOS;
+the subscriber drains PUBLISH_DONE's stream count before ending a
+subscription, because the message races the data streams it is counting.
+FETCH is refused (`NOT_SUPPORTED`) on both drafts.
 
 **Layering.** `moqt::coding` (varints, byte strings, track namespaces and names,
 the delta-coded Key-Value-Pair sequences), `moqt::message` (the control message
