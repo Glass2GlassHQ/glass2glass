@@ -41,11 +41,11 @@ use g2g_core::{
 
 use libcamera::camera::CameraConfigurationStatus;
 use libcamera::camera_manager::CameraManager;
-use libcamera::control::{Control, ControlInfoMap, ControlList};
+use libcamera::control::{Control, ControlEntry, ControlInfoMap, ControlList};
 use libcamera::controls::{
     AeEnable, AnalogueGain, Brightness, Contrast, ExposureTime, FrameDurationLimits, Saturation,
 };
-use libcamera::framebuffer::AsFrameBuffer;
+use libcamera::framebuffer::{AsFrameBuffer, FrameMetadataStatus};
 use libcamera::framebuffer_allocator::{FrameBuffer, FrameBufferAllocator};
 use libcamera::framebuffer_map::MemoryMappedFrameBuffer;
 use libcamera::geometry::Size;
@@ -97,6 +97,19 @@ impl OutKind {
             Some(OutKind::Mjpeg)
         } else {
             None
+        }
+    }
+
+    /// Packed byte size of one frame at this geometry, for the formats whose
+    /// size is fixed. `None` for MJPEG, whose length varies per frame. The
+    /// geometry comes from libcamera, so the arithmetic is checked.
+    fn frame_bytes(self, w: u32, h: u32) -> Option<usize> {
+        let px = (w as usize).checked_mul(h as usize)?;
+        match self {
+            // 4:2:0: a full Y plane plus a half-size interleaved UV plane.
+            OutKind::Nv12 => px.checked_add(px / 2),
+            OutKind::Yuyv => px.checked_mul(2),
+            OutKind::Mjpeg => None,
         }
     }
 
@@ -184,10 +197,12 @@ pub struct LibCameraSrc {
     /// Requested geometry; `0` means "let libcamera pick its default".
     req_width: u32,
     req_height: u32,
-    /// Capture frame rate. Enforced on the camera via a fixed
-    /// `FrameDurationLimits` (min == max) at `start`, and also used for PTS
-    /// stamping and the latency report. `0` lets the camera run at its default
-    /// cadence.
+    /// Requested capture frame rate, capped on the camera via
+    /// `FrameDurationLimits` at `start` where the camera supports that control
+    /// (no UVC webcam does, so on those it is advisory and the camera
+    /// free-runs). Also feeds the advertised caps and the latency report. PTS
+    /// comes from the sensor timestamps instead, so it holds even when the
+    /// camera misses this rate. `0` lets the camera run at its default cadence.
     req_fps: u32,
     /// Stop after this many frames; `0` = run until the pipeline shuts down.
     frame_limit: u64,
@@ -265,8 +280,10 @@ impl LibCameraSrc {
         self
     }
 
-    /// Set the capture frame rate. Enforced on the camera via
-    /// `FrameDurationLimits`; `0` keeps the camera's default cadence.
+    /// Set the capture frame rate. Capped on the camera via
+    /// `FrameDurationLimits` where the camera advertises it, advisory where it
+    /// does not (the UVC case: the camera free-runs and auto-exposure sets the
+    /// real rate). `0` keeps the camera's default cadence.
     pub fn with_fps(mut self, fps: u32) -> Self {
         self.req_fps = fps;
         self
@@ -350,6 +367,18 @@ impl LibCameraSrc {
         let cam = cameras.get(idx).ok_or_else(lc_other)?;
         let cam = cam.acquire().map_err(|e| lc_err(&e))?;
 
+        // Without FrameDurationLimits there is no way to hold a rate: the
+        // camera free-runs and auto-exposure lengthening the frame duration in
+        // low light is what actually sets it. libcamera's uvcvideo pipeline
+        // handler exposes no such control, so every UVC webcam lands here.
+        if self.req_fps > 0 && cam.controls().count(FrameDurationLimits::ID) == 0 {
+            g2g_core::g2g_warn!(
+                self,
+                "camera exposes no FrameDurationLimits control, so framerate={} cannot be enforced: the camera free-runs and auto-exposure caps the rate in low light (set exposure=<microseconds> to lift it)",
+                self.req_fps
+            );
+        }
+
         // MJPEG mode asks for MJPEG only; raw mode prefers NV12 then YUYV.
         // Accept whichever candidate survives validation unchanged.
         let candidates: &[OutKind] = if self.prefer_mjpeg {
@@ -421,6 +450,12 @@ impl LibCameraSrc {
 impl Default for LibCameraSrc {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl g2g_core::log::LogSource for LibCameraSrc {
+    fn log_category(&self) -> &'static str {
+        "libcamerasrc"
     }
 }
 
@@ -583,6 +618,7 @@ impl SourceLoop for LibCameraSrc {
                 pf: kind.pixel_format(),
                 w,
                 h,
+                frame_bytes: kind.frame_bytes(w, h),
                 limit: self.frame_limit,
             };
             let controls = CamControls {
@@ -597,7 +633,7 @@ impl SourceLoop for LibCameraSrc {
 
             // Bounded channel: the capture thread blocks once the pipeline is
             // BUFFER_COUNT frames behind, so memory stays bounded (backpressure).
-            let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(BUFFER_COUNT);
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<Captured>(BUFFER_COUNT);
 
             // All libcamera interaction lives on this thread: the objects are
             // thread-affine and completions arrive on a libcamera callback.
@@ -611,15 +647,34 @@ impl SourceLoop for LibCameraSrc {
                 0
             };
             let mut seq = 0u64;
-            while let Some(bytes) = rx.recv().await {
+            // libcamera stamps every buffer with the sensor's capture time, so
+            // the PTS tracks the rate the camera actually held rather than the
+            // one that was asked for. The two differ whenever the camera cannot
+            // hold the request (auto-exposure lengthens the frame duration in
+            // low light), and stamping the request there would compress the
+            // timeline: a recording would play back faster than it was shot.
+            let mut epoch_ns: Option<u64> = None;
+            let mut prev_pts = 0u64;
+            while let Some(captured) = rx.recv().await {
                 let arrival_ns = g2g_core::metrics::monotonic_ns();
-                let pts = seq * pts_step_ns;
+                let pts = match captured.timestamp_ns {
+                    Some(ts) => ts.saturating_sub(*epoch_ns.get_or_insert(ts)),
+                    None => seq * pts_step_ns,
+                };
+                // The gap the previous frame occupied. The nominal period
+                // covers the first frame and any repeated timestamp.
+                let duration_ns = match pts.checked_sub(prev_pts) {
+                    Some(d) if seq > 0 && d > 0 => d,
+                    _ => pts_step_ns,
+                };
                 let frame = Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
+                    domain: MemoryDomain::System(SystemSlice::from_boxed(
+                        captured.bytes.into_boxed_slice(),
+                    )),
                     timing: FrameTiming {
                         pts_ns: pts,
                         dts_ns: pts,
-                        duration_ns: pts_step_ns,
+                        duration_ns,
                         capture_ns: pts,
                         arrival_ns,
                         keyframe: true, // raw frames are each independently presentable
@@ -628,6 +683,7 @@ impl SourceLoop for LibCameraSrc {
                     meta: Default::default(),
                 };
                 out.push(PipelinePacket::DataFrame(frame)).await?;
+                prev_pts = pts;
                 seq += 1;
             }
 
@@ -658,7 +714,19 @@ struct CaptureSetup {
     pf: PixelFormat,
     w: u32,
     h: u32,
+    /// Packed size one frame must reach to be usable; `None` for MJPEG, whose
+    /// length varies per frame.
+    frame_bytes: Option<usize>,
     limit: u64,
+}
+
+/// One completed capture handed to the async loop: the packed bytes plus
+/// libcamera's sensor timestamp in monotonic nanoseconds (`None` when the
+/// buffer carried no metadata).
+#[derive(Debug)]
+struct Captured {
+    bytes: Vec<u8>,
+    timestamp_ns: Option<u64>,
 }
 
 /// Camera-side controls applied at `start`: the frame-rate cap plus the
@@ -677,7 +745,7 @@ struct CamControls {
 fn capture_loop(
     setup: CaptureSetup,
     controls: CamControls,
-    tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+    tx: tokio::sync::mpsc::Sender<Captured>,
 ) -> Result<(), G2gError> {
     let CaptureSetup {
         index,
@@ -685,6 +753,7 @@ fn capture_loop(
         pf,
         w,
         h,
+        frame_bytes,
         limit,
     } = setup;
     let mgr = CameraManager::new().map_err(|e| lc_err(&e))?;
@@ -802,29 +871,51 @@ fn capture_loop(
         // Pack every plane's used bytes contiguously: for NV12 this yields
         // Y followed by interleaved UV (tight NV12); for YUYV the single
         // packed plane.
-        let payload = {
+        let captured = {
             let fb: &MemoryMappedFrameBuffer<FrameBuffer> =
                 req.buffer(&stream).ok_or_else(lc_other)?;
-            let planes = fb.data();
             let meta = fb.metadata();
-            let mut payload = Vec::new();
-            for (i, plane) in planes.iter().enumerate() {
-                let used = meta
-                    .as_ref()
-                    .and_then(|m| m.planes().get(i))
-                    .map(|p| p.bytes_used as usize)
-                    .unwrap_or(plane.len())
-                    .min(plane.len());
-                payload.extend_from_slice(&plane[..used]);
+            // A capture libcamera did not complete cleanly (a partial USB
+            // transfer, a cancelled request) leaves undefined buffer contents,
+            // so it must not reach the pipeline.
+            let complete = meta
+                .as_ref()
+                .map(|m| matches!(m.status(), FrameMetadataStatus::Success))
+                .unwrap_or(true);
+            let timestamp_ns = meta.as_ref().map(|m| m.timestamp());
+            if complete {
+                let planes = fb.data();
+                let mut payload = Vec::new();
+                for (i, plane) in planes.iter().enumerate() {
+                    let used = meta
+                        .as_ref()
+                        .and_then(|m| m.planes().get(i))
+                        .map(|p| p.bytes_used as usize)
+                        .unwrap_or(plane.len())
+                        .min(plane.len());
+                    payload.extend_from_slice(&plane[..used]);
+                }
+                // A short frame cannot be unpacked at the negotiated geometry;
+                // downstream converters reject it and fail the whole run, so
+                // drop it here as V4l2Src does.
+                frame_bytes
+                    .is_none_or(|need| payload.len() >= need)
+                    .then_some(Captured {
+                        bytes: payload,
+                        timestamp_ns,
+                    })
+            } else {
+                None
             }
-            payload
         };
 
-        // Err means the pipeline shut down (receiver dropped).
-        if tx.blocking_send(payload).is_err() {
-            break;
+        if let Some(captured) = captured {
+            // Err means the pipeline shut down (receiver dropped).
+            if tx.blocking_send(captured).is_err() {
+                break;
+            }
+            count += 1;
         }
-        count += 1;
 
         // Recycle the request's buffers and re-queue it for the next frame.
         req.reuse(ReuseFlag::REUSE_BUFFERS);
@@ -857,7 +948,7 @@ static LIBCAMERA_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "framerate",
         PropKind::Uint,
-        "capture frame rate (enforced via FrameDurationLimits)",
+        "capture frame rate (FrameDurationLimits cap where supported)",
     ),
     PropertySpec::new(
         "format",

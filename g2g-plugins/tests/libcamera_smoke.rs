@@ -85,6 +85,20 @@ fn camera_index() -> usize {
         .unwrap_or(0)
 }
 
+/// Whether the camera advertises `FrameDurationLimits`, the only control that
+/// can hold a frame rate. Without it the requested rate is advisory and the
+/// camera free-runs, so a rate assertion would be testing the hardware's mood.
+fn camera_caps_framerate() -> bool {
+    use libcamera::control::ControlEntry;
+    let mgr = libcamera::camera_manager::CameraManager::new().expect("camera manager");
+    let cameras = mgr.cameras();
+    let cam = cameras.get(camera_index()).expect("camera present");
+    let cam = cam.acquire().expect("acquire");
+    cam.controls()
+        .count(libcamera::controls::FrameDurationLimits::ID)
+        > 0
+}
+
 #[tokio::test]
 #[ignore = "needs a real camera libcamera can open (set G2G_LIBCAMERA_INDEX)"]
 async fn libcamera_capture_to_fakesink_yields_frames() {
@@ -136,6 +150,11 @@ async fn libcamera_capture_to_fakesink_yields_frames() {
 /// libcamera held the interval. (Note: a cap *above* a mode's max fps cannot
 /// raise it, e.g. uncompressed YUYV at higher resolutions is USB-bandwidth
 /// limited; use MJPEG for high frame rates.)
+///
+/// A camera that does not advertise `FrameDurationLimits` (no UVC webcam does,
+/// libcamera's uvcvideo pipeline handler exposes no such control) has no rate
+/// to hold, so only the frame count is asserted there and the measured rate is
+/// reported.
 #[tokio::test]
 #[ignore = "needs a real camera libcamera can open (set G2G_LIBCAMERA_INDEX)"]
 async fn libcamera_fps_limit_is_enforced() {
@@ -204,6 +223,10 @@ async fn libcamera_fps_limit_is_enforced() {
     assert_eq!(stats.frames_emitted, target);
     // fps == 0 is a diagnostic free-run (no cap): just report, no bounds.
     if fps == 0 {
+        return;
+    }
+    if !camera_caps_framerate() {
+        eprintln!("camera exposes no FrameDurationLimits: the rate is uncapped, not asserting it");
         return;
     }
     // Ceiling: never faster than the requested cap (a frame or two of slack).
@@ -488,4 +511,75 @@ async fn libcamera_capture_displays_in_a_window() {
         sink.frames_presented()
     );
     assert!(stats.frames_emitted > 0, "no frames captured");
+}
+
+/// Sink that records the PTS of the first and last frame plus the wall-clock
+/// instants they arrived, so a capture's media timeline can be compared with
+/// the time it really took.
+#[derive(Default)]
+struct PtsSpanSink {
+    first: Option<(u64, std::time::Instant)>,
+    last: Option<(u64, std::time::Instant)>,
+    frames: u64,
+}
+
+impl g2g_core::element::OutputSink for PtsSpanSink {
+    fn push<'a>(
+        &'a mut self,
+        packet: g2g_core::frame::PipelinePacket,
+    ) -> g2g_core::element::BoxFuture<'a, Result<g2g_core::element::PushOutcome, g2g_core::G2gError>>
+    {
+        Box::pin(async move {
+            if let g2g_core::frame::PipelinePacket::DataFrame(f) = &packet {
+                let now = (f.timing.pts_ns, std::time::Instant::now());
+                self.first.get_or_insert(now);
+                self.last = Some(now);
+                self.frames += 1;
+            }
+            Ok(g2g_core::element::PushOutcome::Accepted)
+        })
+    }
+}
+
+/// The media timeline must track the wall clock: the PTS span of a capture has
+/// to match the time that capture actually took. The source stamps PTS from
+/// libcamera's sensor timestamps, so this holds whatever rate the camera ends
+/// up running at, including a rate it was never asked for. Requesting 5 fps
+/// from a camera that free-runs far faster (no FrameDurationLimits control, the
+/// case on every UVC webcam) is the sharpest version: a PTS synthesized from
+/// the *request* would stretch a two-second capture into a twelve-second
+/// timeline, and the recording would play back in slow motion.
+#[tokio::test]
+#[ignore = "needs a real camera libcamera can open (set G2G_LIBCAMERA_INDEX)"]
+async fn libcamera_pts_span_tracks_wall_clock() {
+    use g2g_core::runtime::SourceLoop as _;
+
+    let target: u64 = 60;
+    let mut src = LibCameraSrc::new()
+        .with_camera(camera_index())
+        .with_size(640, 480)
+        .with_fps(5)
+        .with_frame_limit(target);
+    let caps = src.intercept_caps().await.expect("negotiate");
+    src.configure_pipeline(&caps).expect("configure");
+    let mut sink = PtsSpanSink::default();
+    tokio::time::timeout(std::time::Duration::from_secs(60), src.run(&mut sink))
+        .await
+        .expect("capture finishes within 60s")
+        .expect("capture succeeds");
+
+    assert_eq!(sink.frames, target, "captured the requested frame count");
+    let (first_pts, first_at) = sink.first.expect("a first frame");
+    let (last_pts, last_at) = sink.last.expect("a last frame");
+    assert_eq!(first_pts, 0, "the timeline starts at zero");
+    let pts_span = (last_pts - first_pts) as f64 / 1e9;
+    let wall_span = (last_at - first_at).as_secs_f64();
+    eprintln!("pts span {pts_span:.2}s over {wall_span:.2}s of wall clock");
+    // Generous: the arrival instants trail the sensor timestamps by a variable
+    // amount, so only a timeline built from the wrong clock (off by the ratio
+    // of requested to actual rate) is caught.
+    assert!(
+        (pts_span - wall_span).abs() < wall_span * 0.25 + 0.1,
+        "media timeline ({pts_span:.2}s) does not track the wall clock ({wall_span:.2}s)"
+    );
 }
