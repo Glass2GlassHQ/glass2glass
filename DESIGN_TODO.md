@@ -463,10 +463,7 @@ _(No open parser items.)_
   de-frames its `vttc`/`payl` boxes to `Text{Utf8}`, `stpp` passes the TTML document
   as `Text{Ttml}` through `SubParse`), as are MKV `S_TEXT/ASS` / `S_TEXT/WEBVTT`
   (M417: the block is de-framed to plain `Text{Utf8}` cue text, the source syntax
-  only selecting the de-framing). Still open: **MPEG-TS teletext** (a
-  page/magazine decoder), the one TS subtitle form with no route to the
-  overlay: DVB subtitles are `Caps::SubPicture` canvases for the compositor,
-  not a text stream `TextOverlayN` consumes.
+  only selecting the de-framing).
   HLS subtitle renditions: discovery + language selection landed (M418 -
   `variant_streams` surfaces `SUBTITLES` renditions as `Caps::Text`,
   `MasterPlaylist::pick_rendition` selects by `#audio-lang=` / `#subtitle-lang=`

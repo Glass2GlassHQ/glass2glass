@@ -169,6 +169,12 @@ pub enum TsStream {
     /// descriptor's composition / ancillary page ids go out in band ahead of the
     /// first one so the decoder knows which page to compose.
     DvbSub,
+    /// The first EBU teletext elementary stream (ETSI EN 300 472): a private PES
+    /// (0x06) carrying a `teletext_descriptor` (tag 0x56 / 0x46). Each PES
+    /// payload is a run of teletext lines, forwarded whole, and the descriptor's
+    /// page selection goes out in band ahead of the first one so the decoder
+    /// knows which page to assemble.
+    Teletext,
 }
 
 /// Demuxes an MPEG-TS byte stream into one selected elementary stream.
@@ -199,9 +205,10 @@ pub struct TsDemux {
     /// count has been emitted (OpusDec needs a concrete count before it decodes,
     /// and there is no in-band `OpusHead` on this path). Re-armed on a flush.
     opus_caps_emitted: bool,
-    /// DVB subtitles only: whether the `subtitling_descriptor`'s page ids have
-    /// gone out in band ahead of the first display set. Re-armed on a flush.
-    dvbsub_config_sent: bool,
+    /// DVB subtitles / teletext only: whether the PMT descriptor's page selection
+    /// has gone out in band ahead of the first display set or teletext line.
+    /// Re-armed on a flush.
+    config_sent: bool,
 }
 
 impl Default for TsDemux {
@@ -224,7 +231,7 @@ impl TsDemux {
             tags: TagPoster::default(),
             seek: DemuxSeek::default(),
             opus_caps_emitted: false,
-            dvbsub_config_sent: false,
+            config_sent: false,
         }
     }
 
@@ -317,6 +324,12 @@ impl TsDemux {
                     format: SubPictureFormat::DvbSub,
                 },
             ),
+            STREAM_TYPE_PRIVATE_PES if es.teletext.is_some() => (
+                StreamType::Text,
+                Caps::Text {
+                    format: g2g_core::TextFormat::Teletext,
+                },
+            ),
             // KLV metadata: no dedicated StreamType kind, the caps classify it.
             _ if es.klv => (StreamType::Unknown, Caps::Klv),
             _ => return None,
@@ -341,7 +354,7 @@ impl TsDemux {
         self.demux = TsDemuxer::new();
         self.demux.set_program_number(self.program_number);
         self.opus_caps_emitted = false;
-        self.dvbsub_config_sent = false;
+        self.config_sent = false;
     }
 
     /// The elementary stream this instance forwards.
@@ -378,6 +391,9 @@ impl TsDemux {
             TsStream::Opus => Self::compressed_audio(AudioFormat::Opus),
             TsStream::Ac3 => Self::compressed_audio(AudioFormat::Ac3),
             TsStream::Klv => Caps::Klv,
+            TsStream::Teletext => Caps::Text {
+                format: g2g_core::TextFormat::Teletext,
+            },
             TsStream::DvbSub => Caps::SubPicture {
                 format: SubPictureFormat::DvbSub,
             },
@@ -424,6 +440,7 @@ impl TsDemux {
             TsStream::Ac3 => STREAM_TYPE_AC3,
             TsStream::Klv => STREAM_TYPE_PRIVATE_PES,
             TsStream::DvbSub => STREAM_TYPE_PRIVATE_PES,
+            TsStream::Teletext => STREAM_TYPE_PRIVATE_PES,
         }
     }
 
@@ -511,6 +528,11 @@ impl TsDemux {
             if self.stream == TsStream::DvbSub && self.demux.subtitling(u.pid).is_none() {
                 continue;
             }
+            // And for teletext: only a PID whose descriptors carried a
+            // teletext_descriptor is one.
+            if self.stream == TsStream::Teletext && self.demux.teletext(u.pid).is_none() {
+                continue;
+            }
             let pts_ns = u
                 .pts_90khz
                 .map(|p| (p as u128 * 1_000_000_000 / 90_000) as u64)
@@ -534,7 +556,8 @@ impl TsDemux {
                 | TsStream::Opus
                 | TsStream::Ac3
                 | TsStream::Klv
-                | TsStream::DvbSub => true,
+                | TsStream::DvbSub
+                | TsStream::Teletext => true,
             };
             match self.seek.admit(pts_ns, keyframe) {
                 Admit::Drop => continue,
@@ -548,8 +571,8 @@ impl TsDemux {
                 self.emit_opus(u, pts_ns, out).await?;
                 continue;
             }
-            if self.stream == TsStream::DvbSub {
-                self.emit_dvbsub_config(u.pid, pts_ns, out).await?;
+            if matches!(self.stream, TsStream::DvbSub | TsStream::Teletext) {
+                self.emit_stream_config(u.pid, pts_ns, out).await?;
             }
             let data = unwrap_sync_klv(u.stream_type, u.data);
             let frame = Frame::new(
@@ -567,22 +590,22 @@ impl TsDemux {
         Ok(())
     }
 
-    /// Forward the `subtitling_descriptor`'s page ids in band once, ahead of the
-    /// first display set.
-    async fn emit_dvbsub_config(
+    /// Forward the page selection the PMT descriptor carries in band once, ahead
+    /// of the first display set / teletext line.
+    async fn emit_stream_config(
         &mut self,
         pid: u16,
         pts_ns: u64,
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
-        if self.dvbsub_config_sent {
+        if self.config_sent {
             return Ok(());
         }
-        self.dvbsub_config_sent = true;
-        let Some(blob) = dvbsub_page_id_blob(&self.demux, pid) else {
+        self.config_sent = true;
+        let Some(blob) = page_config_blob(&self.demux, pid, self.stream) else {
             return Ok(());
         };
-        let frame = dvbsub_config_frame(blob, pts_ns, self.emitted);
+        let frame = config_frame(blob, pts_ns, self.emitted);
         self.emitted += 1;
         out.push(PipelinePacket::DataFrame(frame)).await?;
         Ok(())
@@ -749,7 +772,7 @@ static TSDEMUX_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "stream",
         PropKind::Str,
-        "elementary stream to emit: h264 | h265 | aac | mp2 | opus | ac3 | klv | dvbsub",
+        "elementary stream to emit: h264 | h265 | aac | mp2 | opus | ac3 | klv | dvbsub | teletext",
     ),
     PropertySpec::new(
         "program-number",
@@ -787,6 +810,7 @@ fn ts_stream_from_str(s: &str) -> Option<TsStream> {
         "ac3" => Some(TsStream::Ac3),
         "klv" => Some(TsStream::Klv),
         "dvbsub" => Some(TsStream::DvbSub),
+        "teletext" => Some(TsStream::Teletext),
         _ => None,
     }
 }
@@ -803,6 +827,7 @@ pub(crate) fn ts_stream_to_str(stream: TsStream) -> &'static str {
         TsStream::Ac3 => "ac3",
         TsStream::Klv => "klv",
         TsStream::DvbSub => "dvbsub",
+        TsStream::Teletext => "teletext",
     }
 }
 
@@ -876,6 +901,7 @@ impl PadTemplates for TsDemux {
             Self::output_caps(TsStream::Ac3),
             Self::output_caps(TsStream::Klv),
             Self::output_caps(TsStream::DvbSub),
+            Self::output_caps(TsStream::Teletext),
         ]));
         Vec::from([
             PadTemplate::sink(CapsSet::one(Self::input_caps())),
@@ -1092,6 +1118,10 @@ impl TsDemuxN {
             if self.ports[port] == TsStream::DvbSub && self.demux.subtitling(u.pid).is_none() {
                 continue;
             }
+            // Likewise a private PES routed to a teletext port.
+            if self.ports[port] == TsStream::Teletext && self.demux.teletext(u.pid).is_none() {
+                continue;
+            }
             let pts_ns = u
                 .pts_90khz
                 .map(|p| (p as u128 * 1_000_000_000 / 90_000) as u64)
@@ -1105,10 +1135,8 @@ impl TsDemuxN {
                 self.announced[port] = true;
                 // The page ids the display sets compose under go out in band
                 // ahead of the first one, as on the single-output demuxer.
-                if let Some(blob) = dvbsub_page_id_blob(&self.demux, u.pid)
-                    .filter(|_| self.ports[port] == TsStream::DvbSub)
-                {
-                    let frame = dvbsub_config_frame(blob, pts_ns, self.emitted);
+                if let Some(blob) = page_config_blob(&self.demux, u.pid, self.ports[port]) {
+                    let frame = config_frame(blob, pts_ns, self.emitted);
                     self.emitted += 1;
                     out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
                 }
@@ -1136,25 +1164,40 @@ impl TsDemuxN {
     }
 }
 
-/// The in-band page-id blob for a DVB subtitle PID's `subtitling_descriptor`, the
-/// same bytes a Matroska `S_DVBSUB` `CodecPrivate` carries. The PMT is the only
-/// place a transport stream states which page a subtitle decoder composes, so it
-/// has to reach the decoder some way, and this is the one a Matroska source
-/// already uses.
-fn dvbsub_page_id_blob(demux: &TsDemuxer, pid: u16) -> Option<[u8; 5]> {
-    let (subtitling_type, composition, ancillary) = demux.subtitling(pid)?;
-    Some(crate::dvbsub::page_id_blob(
-        crate::dvbsub::PageIds {
-            composition,
-            ancillary,
-        },
-        subtitling_type,
-    ))
+/// The in-band page-selection blob a subtitle stream's PMT descriptor implies:
+/// the DVB `subtitling_descriptor`'s page ids (the same bytes a Matroska
+/// `S_DVBSUB` `CodecPrivate` carries), or the `teletext_descriptor`'s page and
+/// language. The PMT is the only place a transport stream states which page a
+/// subtitle decoder follows, so it has to reach the decoder some way, and this
+/// is the one a Matroska source already uses.
+fn page_config_blob(demux: &TsDemuxer, pid: u16, stream: TsStream) -> Option<Vec<u8>> {
+    match stream {
+        TsStream::DvbSub => {
+            let (subtitling_type, composition, ancillary) = demux.subtitling(pid)?;
+            Some(
+                crate::dvbsub::page_id_blob(
+                    crate::dvbsub::PageIds {
+                        composition,
+                        ancillary,
+                    },
+                    subtitling_type,
+                )
+                .to_vec(),
+            )
+        }
+        TsStream::Teletext => {
+            let service = demux.teletext(pid)?;
+            Some(
+                crate::teletext::page_config_blob(service.page_number(), service.language).to_vec(),
+            )
+        }
+        _ => None,
+    }
 }
 
-fn dvbsub_config_frame(blob: [u8; 5], pts_ns: u64, seq: u64) -> Frame {
+fn config_frame(blob: Vec<u8>, pts_ns: u64, seq: u64) -> Frame {
     Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(blob.to_vec().into_boxed_slice())),
+        MemoryDomain::System(SystemSlice::from_boxed(blob.into_boxed_slice())),
         FrameTiming {
             pts_ns,
             dts_ns: pts_ns,
@@ -1305,6 +1348,7 @@ mod tests {
             ac3: false,
             klv: false,
             subtitling: None,
+            teletext: None,
             language: None,
         };
         let stream = TsDemux::es_to_stream(&es).expect("0x10 is forwarded");
@@ -1328,6 +1372,7 @@ mod tests {
                 ac3: false,
                 klv: false,
                 subtitling: None,
+                teletext: None,
                 language: None,
             }),
             Some(TsStream::Mpeg4Part2)

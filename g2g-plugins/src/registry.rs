@@ -424,6 +424,13 @@ pub fn default_registry() -> Registry {
         "dvbsubdec",
         || Box::new(crate::dvbsubdec::DvbSubDec::new()),
     ));
+    // EBU teletext subtitle decoder (M924): a demuxed teletext stream's subtitle
+    // page becomes plain-text cues,
+    // e.g. `tsdemux stream=teletext ! teletextdec page=888 ! textoverlay name=o`.
+    reg.register_launch(LaunchFactory::of::<crate::teletextdec::TeletextDec>(
+        "teletextdec",
+        || Box::new(crate::teletextdec::TeletextDec::new()),
+    ));
     // Detection-box overlay (M102): draws the frame's `AnalyticsMeta` bounding
     // boxes onto the RGBA frame, so a detector's output is visible downstream
     // (e.g. `... ! analyticsoverlay ! videoconvert ! autovideosink`). No pad

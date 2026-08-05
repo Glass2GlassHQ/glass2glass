@@ -442,6 +442,7 @@ fn text_format_gst_media_type(f: TextFormat) -> &'static str {
         TextFormat::WebVtt => "application/x-subtitle-vtt",
         TextFormat::Ssa => "application/x-ssa",
         TextFormat::Ttml => "application/ttml+xml",
+        TextFormat::Teletext => "private/teletext",
     }
 }
 
@@ -990,6 +991,13 @@ pub enum TextFormat {
     /// Timed Text Markup Language (W3C TTML / SMPTE-TT / EBU-TT, also `DFXP`): an
     /// XML timed-text document. The broadcast / DASH caption format.
     Ttml,
+    /// EBU teletext (ETSI EN 300 706) as a DVB private PES carries it (EN 300
+    /// 472): a data_identifier byte then fixed-size data units, each one
+    /// teletext line with a framing code, a hamming 8/4 magazine / packet
+    /// address, and 40 odd-parity bytes. Not readable text yet: a teletext
+    /// decoder assembles the addressed page's rows and emits [`Self::Utf8`]
+    /// cues, the way a subtitle parser converts [`Self::Srt`].
+    Teletext,
 }
 
 /// Which closed-caption carriage a [`Caps::ClosedCaption`] track declared. The

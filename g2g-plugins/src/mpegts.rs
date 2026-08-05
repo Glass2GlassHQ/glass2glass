@@ -40,6 +40,12 @@ const DESC_TAG_ISO639: u8 = 0x0A;
 /// stream, a 3-letter language code, a subtitling_type, then the composition and
 /// ancillary page ids.
 const DESC_TAG_SUBTITLING: u8 = 0x59;
+/// DVB `teletext_descriptor` tag (ETSI EN 300 468): 5 bytes per teletext
+/// service, a 3-letter language code then a packed teletext_type (5 bits) +
+/// magazine number (3 bits) and the BCD page number. `VBI_teletext_descriptor`
+/// (0x46) has the identical body and marks the same carriage, so both are read.
+const DESC_TAG_TELETEXT: u8 = 0x56;
+const DESC_TAG_VBI_TELETEXT: u8 = 0x46;
 /// SDT `service_type` for digital television, and for digital radio (a program
 /// with no video stream).
 const SERVICE_TYPE_TV: u8 = 0x01;
@@ -109,6 +115,10 @@ const KLV_METADATA_DESCRIPTOR: &[u8] = &[
     0x0F, // decoder_config_flags '000', DSM-CC_flag 0, reserved
 ];
 
+/// The MISB ST 1402 `registration_descriptor` marking a private PES (0x06) as
+/// asynchronous KLV, which is how this muxer writes an unqualified private stream.
+const KLVA_REGISTRATION: &[u8] = &[0x05, 4, b'K', b'L', b'V', b'A'];
+
 /// The first 4 bytes of every SMPTE ST 336 KLV key (the SMPTE UL designator).
 const KLV_UL_PREFIX: [u8; 4] = [0x06, 0x0E, 0x2B, 0x34];
 
@@ -138,6 +148,46 @@ pub struct ElementaryStream {
     /// `Some` marks the stream as DVB subtitles (disambiguating the generic
     /// 0x06) and carries the page ids the decoder composes under.
     pub subtitling: Option<(u8, u16, u16)>,
+    /// The teletext service a private (0x06) stream's DVB `teletext_descriptor`
+    /// (tag 0x56 / 0x46) names. `Some` marks the stream as EBU teletext
+    /// (disambiguating the generic 0x06) and carries the page a decoder should
+    /// follow. The subtitle entry wins when the descriptor lists several.
+    pub teletext: Option<TeletextService>,
+}
+
+/// One entry of a DVB `teletext_descriptor`: which teletext page a stream
+/// carries, in what language, and what it holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TeletextService {
+    /// 3-letter ISO 639 language code.
+    pub language: [u8; 3],
+    /// EN 300 468 `teletext_type`: 0x01 initial page, 0x02 subtitle page, 0x03
+    /// additional information, 0x04 programme schedule, 0x05 subtitle page for
+    /// the hearing impaired.
+    pub teletext_type: u8,
+    /// Magazine 1..8 (the wire's 0 means 8), the hundreds digit of the page.
+    pub magazine: u8,
+    /// The two BCD digits of the page within its magazine.
+    pub page: u8,
+}
+
+impl TeletextService {
+    /// The page as a viewer reads it: magazine hundreds plus the two BCD digits
+    /// (magazine 8, page 0x88 is page 888). A page byte whose nibbles are not
+    /// decimal digits still yields a number, since the wire field is nominally
+    /// BCD but nothing enforces it.
+    pub fn page_number(&self) -> u16 {
+        let mag = if self.magazine == 0 { 8 } else { self.magazine };
+        let tens = (self.page >> 4) as u16;
+        let units = (self.page & 0x0f) as u16;
+        mag as u16 * 100 + tens * 10 + units
+    }
+
+    /// Whether this entry is a subtitle page (the two subtitle `teletext_type`s),
+    /// the only kind a subtitle decoder composes.
+    pub fn is_subtitle(&self) -> bool {
+        matches!(self.teletext_type, 0x02 | 0x05)
+    }
 }
 
 impl ElementaryStream {
@@ -300,6 +350,15 @@ impl TsDemuxer {
             .iter()
             .find(|s| s.pid == pid)
             .and_then(|s| s.subtitling)
+    }
+
+    /// The teletext service of `pid`, if its PMT entry is a private (0x06) stream
+    /// carrying a `teletext_descriptor`; `None` for any other stream.
+    pub fn teletext(&self, pid: u16) -> Option<TeletextService> {
+        self.streams()
+            .iter()
+            .find(|s| s.pid == pid)
+            .and_then(|s| s.teletext)
     }
 
     /// The PID of the first video elementary stream (H.264 or H.265), if any.
@@ -514,6 +573,7 @@ impl TsDemuxer {
                 ac3,
                 klv,
                 subtitling: private.and_then(parse_subtitling_descriptor),
+                teletext: private.and_then(parse_teletext_descriptor),
                 language: descriptors.and_then(parse_iso639_language),
             });
             i = i.saturating_add(5).saturating_add(es_info_length);
@@ -692,6 +752,41 @@ fn parse_subtitling_descriptor(mut desc: &[u8]) -> Option<(u8, u16, u16)> {
                 u16::from_be_bytes([body[4], body[5]]),
                 u16::from_be_bytes([body[6], body[7]]),
             ));
+        }
+        desc = &desc[2 + len..];
+    }
+    None
+}
+
+/// The teletext service a PMT ES-info DVB `teletext_descriptor` (tag 0x56, or the
+/// identical `VBI_teletext_descriptor` 0x46) names, the marker for EBU teletext on
+/// a private (0x06) stream: 5 bytes per service, a 3-letter language code then a
+/// packed teletext_type / magazine byte and the BCD page number. A descriptor
+/// listing several services yields its first subtitle page, else its first entry,
+/// since one decoder composes one page. Every field is bounds-checked so a
+/// malformed loop returns `None`, never panics.
+fn parse_teletext_descriptor(mut desc: &[u8]) -> Option<TeletextService> {
+    while desc.len() >= 2 {
+        let tag = desc[0];
+        let len = desc[1] as usize;
+        let body = desc.get(2..2 + len)?;
+        if tag == DESC_TAG_TELETEXT || tag == DESC_TAG_VBI_TELETEXT {
+            let mut first = None;
+            for entry in body.chunks_exact(5) {
+                let service = TeletextService {
+                    language: [entry[0], entry[1], entry[2]],
+                    teletext_type: entry[3] >> 3,
+                    magazine: entry[3] & 0x07,
+                    page: entry[4],
+                };
+                if service.is_subtitle() {
+                    return Some(service);
+                }
+                first.get_or_insert(service);
+            }
+            if let Some(service) = first {
+                return Some(service);
+            }
         }
         desc = &desc[2 + len..];
     }
@@ -1013,7 +1108,7 @@ impl TsMuxer {
                 id
             };
             let es_info: &[u8] = match stream_type {
-                STREAM_TYPE_PRIVATE_PES => &[0x05, 4, b'K', b'L', b'V', b'A'], // registration
+                STREAM_TYPE_PRIVATE_PES => KLVA_REGISTRATION,
                 STREAM_TYPE_METADATA_PES => KLV_METADATA_DESCRIPTOR,
                 _ => &[],
             };
@@ -1100,6 +1195,45 @@ impl TsMuxer {
             s.es_info
                 .extend_from_slice(&[DESC_TAG_ISO639, 4, c[0], c[1], c[2], 0x00]);
         }
+    }
+
+    /// Declare elementary stream `index` as EBU teletext in its PMT entry, as a
+    /// DVB `teletext_descriptor` naming one service (M924). Without this the
+    /// stream is asynchronous KLV, the muxer's default reading of a private PES,
+    /// which no receiver routes to a teletext decoder. An out-of-range index or a
+    /// stream that is not a private PES is ignored. Call before the first access
+    /// unit (the PMT goes out then).
+    pub fn set_stream_teletext(&mut self, index: usize, service: TeletextService) {
+        self.set_private_identity(
+            index,
+            &[
+                DESC_TAG_TELETEXT,
+                5,
+                service.language[0],
+                service.language[1],
+                service.language[2],
+                (service.teletext_type << 3) | (service.magazine & 0x07),
+                service.page,
+            ],
+        );
+    }
+
+    /// Replace a private-PES stream's identifying descriptor. A bare 0x06 means
+    /// nothing on its own, so this muxer writes the 'KLVA' registration by
+    /// default; a stream that is teletext or DVB subtitles instead says so with
+    /// its own descriptor, which leads the ES-info loop. Descriptors added
+    /// separately (a language) are kept whichever order the calls come in.
+    fn set_private_identity(&mut self, index: usize, descriptor: &[u8]) {
+        let Some(s) = self.streams.get_mut(index) else {
+            return;
+        };
+        if s.stream_type != STREAM_TYPE_PRIVATE_PES {
+            return;
+        }
+        if s.es_info.starts_with(KLVA_REGISTRATION) {
+            s.es_info.drain(..KLVA_REGISTRATION.len());
+        }
+        s.es_info.splice(0..0, descriptor.iter().copied());
     }
 
     /// Set the PAT/PMT re-emission cadence in 90 kHz ticks (`0` = once up front).
@@ -1678,6 +1812,7 @@ mod tests {
                 ac3: false,
                 klv: false,
                 subtitling: None,
+                teletext: None,
                 language: None
             }]
         );

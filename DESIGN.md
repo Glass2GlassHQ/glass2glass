@@ -2453,6 +2453,34 @@ dimension, CLUT entry id and object position is bounds-checked: a display set
 whose segment layer does not hold together is dropped whole, and a region past
 `MAX_REGION_PIXELS` is never allocated.
 
+**EBU teletext** (`teletext.rs`, `no_std`) is the third TS subtitle carriage, and
+unlike the two above it is characters rather than pixels, so it lands on the plain
+text pad instead of a canvas: `Caps::Text { Teletext }` in, `Caps::Text { Utf8 }`
+cues out of `TeletextDec` (`teletextdec`), which is the same pad a `subparse`d SRT
+track produces and therefore the same `TextOverlayN` input. DVB carries teletext in
+a private PES (EN 300 472): a `data_identifier` byte then fixed 46-byte data units,
+each one broadcast line, holding a framing code, a hamming 8/4 magazine / packet
+address and 40 odd-parity bytes. Those address and data bytes are transmitted LSB
+first, so each is bit-reversed before any code word means anything, while the two
+bytes ahead of them are ordinary MSB-first fields. Packet X/0 is the page header
+(page number, the C6 subtitle bit, and the national option subset the G0 set is
+read under); X/1..X/23 are the display rows, and the decoder holds the rows of the
+addressed page until the next header for it replaces or erases the page, which is
+what fixes the cue's duration and puts each cue out one page late. Spacing control
+codes and parity failures render as spaces so a row keeps its columns, and a
+double-height row's blanked bottom half is dropped so the line appears once.
+Enhancement packets (X/26, X/28, M/29) are not read, so the national option comes
+from the header bits and the wider seven-bit G0 selection is out of reach. Which
+page to follow is out of band, as for DVB subtitles: `TsDemux` synthesizes an
+eight-byte selection blob from the PMT `teletext_descriptor` (tag 0x56, or the
+identical `VBI_teletext_descriptor` 0x46) and forwards it in band ahead of the
+first line, and the `page` property overrides it; with neither, the first subtitle
+page the stream carries is adopted. The blob leads with `0xFF`, which cannot begin
+a teletext payload, so the decoder tells the two apart on one pad. Every data unit
+length, hamming code, parity bit and page address is checked before use, so a
+corrupt line or a unit length past the payload drops that line or ends the walk
+rather than propagating a corrupt page.
+
 ### 4.19 Native WebRTC (`str0m`)
 
 The WebRTC elements are built on **[str0m](https://github.com/algesten/str0m)**, a

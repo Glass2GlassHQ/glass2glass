@@ -336,6 +336,7 @@ fn text_format_to_u8(f: TextFormat) -> u8 {
         TextFormat::WebVtt => 3,
         TextFormat::Ssa => 4,
         TextFormat::Ttml => 5,
+        TextFormat::Teletext => 6,
     }
 }
 fn text_format_from_u8(v: u8) -> Result<TextFormat, WireError> {
@@ -346,6 +347,7 @@ fn text_format_from_u8(v: u8) -> Result<TextFormat, WireError> {
         3 => TextFormat::WebVtt,
         4 => TextFormat::Ssa,
         5 => TextFormat::Ttml,
+        6 => TextFormat::Teletext,
         _ => return Err(WireError::BadTag),
     })
 }

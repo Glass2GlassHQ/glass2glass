@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M924: MPEG-TS teletext subtitles decode to a `Caps::Text{Utf8}` cue stream through the new `teletextdec` element.
 - M923: WebVTT `::cue(.class)` rules style only their own span, compound class selectors match, and SSA `{\pos}` / margins map through `PlayRes`.
 
 - M922: HLS subtitle renditions play fMP4 `wvtt` segments as well as raw `.vtt`, and WebVTT `X-TIMESTAMP-MAP` headers rebase each segment's cues.
