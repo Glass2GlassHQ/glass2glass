@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M910: `mkvdemux` inflates zlib and header-stripped `ContentEncoding` blocks.
+
 - M909: runner arms no longer emit a second `Eos` after a transform forwards one itself.
 
 - M908: `tsmuxn` carries the video pad's keyframe flag onto its output frames, so `hlssink` segments an A/V multiplex.

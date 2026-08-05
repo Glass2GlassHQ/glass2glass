@@ -423,9 +423,9 @@ Phased plan:
 - **WebVTT track writing** (mkv, mp4 `wvtt`): blocked on a reference peer.
   ffmpeg reads only the WebM `D_WEBVTT/*` carriage (different block payload)
   and cannot write WebVTT into MP4 at all; reading both stays supported.
-- **Matroska `ContentEncoding`:** inflate zlib / header-stripped blocks at
-  demux. Today a compressed track's blocks forward raw (`MkvTrack::compressed`
-  marks them; only a compressed subpicture selection refuses loudly).
+- **Matroska `ContentEncoding`:** chained encodings, bzip2 / lzo, and
+  `ContentEncryption` stay refused (blocks forward as stored, flagged
+  `unsupported_encoding`); zlib and header stripping are undone at demux.
 
 ## Codecs
 

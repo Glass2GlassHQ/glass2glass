@@ -521,11 +521,12 @@ impl MkvDemux {
         resolve_stream_id(&self.demux, id)
     }
 
-    /// Refuse a `ContentEncoding`-compressed bitmap-subtitle track: its blocks
-    /// are zlib (or header-stripped) bytes rather than SPU packets or DVB
-    /// segments and nothing here inflates them, so forwarding them would feed
-    /// the decoder garbage. Only the subpicture selections are checked; the
-    /// other codecs' compressed-block handling is unchanged.
+    /// Refuse a bitmap-subtitle track whose `ContentEncoding` the demuxer cannot
+    /// undo (bzip2 / lzo / encryption): its blocks are encoded bytes rather than
+    /// SPU packets or DVB segments, so forwarding them would feed the decoder
+    /// garbage. zlib and header-stripped tracks are decoded at demux and pass.
+    /// Only the subpicture selections are checked; the other codecs' handling of
+    /// an undecodable encoding is unchanged.
     fn reject_compressed_subpicture(&self) -> Result<(), G2gError> {
         let codec = match self.stream {
             MkvStream::VobSub => MkvCodec::VobSub,
@@ -536,13 +537,13 @@ impl MkvDemux {
             .demux
             .tracks()
             .iter()
-            .any(|t| t.codec == codec && t.compressed)
+            .any(|t| t.codec == codec && t.unsupported_encoding)
         {
             return Ok(());
         }
         g2g_error!(
             Target::category("mkvdemux"),
-            "bitmap subtitle track declares a ContentEncoding compression, which this demuxer does not inflate"
+            "bitmap subtitle track declares a ContentEncoding this demuxer cannot undo (bzip2 / lzo / encryption)"
         );
         Err(G2gError::CapsMismatch)
     }

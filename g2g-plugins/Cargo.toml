@@ -678,6 +678,10 @@ g2g-core = { path = "../g2g-core", features = ["runtime"] }
 # no_std mutex for the appsrc/appsink named-channel globals (the app<->element
 # bridge). Same crate the core's runtime channel uses.
 spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex"] }
+# zlib inflate for Matroska `ContentEncoding` blocks (M910). Pure Rust,
+# `forbid(unsafe_code)`, and no_std with `with-alloc` alone, so it fits the
+# baseline; default-features off keeps its `std` off.
+miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
 # CLOCK_TAI via clock_gettime for the `ptp` feature (PtpSystemClock). Top-level
 # optional (builds on all platforms); the module using it is Linux + `ptp` gated.
 libc = { version = "0.2", optional = true }

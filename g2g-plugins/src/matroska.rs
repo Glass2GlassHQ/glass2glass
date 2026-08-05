@@ -63,7 +63,12 @@ const ID_PIXEL_HEIGHT: u32 = 0x00BA;
 const ID_AUDIO: u32 = 0x00E1;
 const ID_CONTENT_ENCODINGS: u32 = 0x6D80;
 const ID_CONTENT_ENCODING: u32 = 0x6240;
+const ID_CONTENT_ENCODING_SCOPE: u32 = 0x5032;
+const ID_CONTENT_ENCODING_TYPE: u32 = 0x5033;
 const ID_CONTENT_COMPRESSION: u32 = 0x5034;
+const ID_CONTENT_COMP_ALGO: u32 = 0x4254;
+const ID_CONTENT_COMP_SETTINGS: u32 = 0x4255;
+const ID_CONTENT_ENCRYPTION: u32 = 0x5035;
 const ID_CHANNELS: u32 = 0x009F;
 const ID_SAMPLING_FREQ: u32 = 0x00B5;
 const ID_CLUSTER: u32 = 0x1F43_B675;
@@ -225,6 +230,129 @@ impl MkvCodec {
     }
 }
 
+/// Cap on one inflated block (M910). A Matroska zlib track is a subtitle or
+/// metadata carrier in practice, so a real block is kilobytes; the bound is what
+/// stops a crafted few-KiB block that inflates to gigabytes.
+const MAX_INFLATED_BLOCK_LEN: usize = 16 * 1024 * 1024;
+
+/// Cap on the `ContentCompSettings` bytes a header-stripped track prepends back
+/// onto every block. Real strippings are a handful of bytes (an MPEG-4 start
+/// code, an AAC ADTS header); a longer one is the file's claim, not a header.
+const MAX_HEADER_STRIP_LEN: usize = 256;
+
+/// The `ContentEncoding` a track declares over its block payloads, as far as
+/// this demuxer undoes it (`ContentCompAlgo`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MkvCompression {
+    /// Algo 0: each block is a zlib stream, inflated at demux.
+    Zlib,
+    /// Algo 3: these bytes were stripped from the head of every block and are
+    /// prepended back at demux.
+    HeaderStrip(Vec<u8>),
+    /// Declared but not undone here: bzip2 (1) / lzo (2), a `ContentEncryption`,
+    /// more than one encoding, or a scope other than "block data". Blocks
+    /// forward exactly as the file stored them.
+    Unsupported,
+}
+
+impl MkvCompression {
+    /// Undo this encoding on one block payload, in place. `false` drops the
+    /// block: the bytes did not decode, so there is nothing truthful to forward.
+    fn decode(&self, data: &mut Vec<u8>) -> bool {
+        match self {
+            MkvCompression::Zlib => match inflate_block(data) {
+                Some(v) => {
+                    *data = v;
+                    true
+                }
+                None => false,
+            },
+            MkvCompression::HeaderStrip(header) => {
+                let Some(total) = header.len().checked_add(data.len()) else {
+                    return false;
+                };
+                if total > MAX_INFLATED_BLOCK_LEN {
+                    return false;
+                }
+                let mut restored = Vec::with_capacity(total);
+                restored.extend_from_slice(header);
+                restored.append(data);
+                *data = restored;
+                true
+            }
+            MkvCompression::Unsupported => true,
+        }
+    }
+}
+
+/// Inflate one zlib-compressed block, bounded by [`MAX_INFLATED_BLOCK_LEN`].
+/// Malformed data (or an output over the bound) fails rather than allocating on
+/// what the stream claims.
+fn inflate_block(data: &[u8]) -> Option<Vec<u8>> {
+    miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(data, MAX_INFLATED_BLOCK_LEN).ok()
+}
+
+/// Read a `TrackEntry`'s `ContentEncodings` (M910). Only the single-encoding,
+/// block-scoped, compression case is undone; anything else is
+/// [`MkvCompression::Unsupported`] so the track is flagged rather than silently
+/// forwarded as if it were the bitstream.
+fn parse_content_encodings(data: &[u8]) -> Option<MkvCompression> {
+    let mut encodings = children(data).filter(|(id, _)| *id == ID_CONTENT_ENCODING);
+    let (_, enc) = encodings.next()?;
+    if encodings.next().is_some() {
+        return Some(MkvCompression::Unsupported); // chained encodings: not undone
+    }
+    // Defaults per the spec: scope 1 (block data), type 0 (compression). A scope
+    // naming anything else (bit 2 = CodecPrivate, bit 4 = next encoding) is an
+    // encoding this parser does not undo.
+    let mut scope = 1u64;
+    let mut enc_type = 0u64;
+    let mut compression: Option<&[u8]> = None;
+    let mut encrypted = false;
+    for (id, body) in children(enc) {
+        match id {
+            ID_CONTENT_ENCODING_SCOPE => scope = read_uint(body),
+            ID_CONTENT_ENCODING_TYPE => enc_type = read_uint(body),
+            ID_CONTENT_COMPRESSION => compression = Some(body),
+            ID_CONTENT_ENCRYPTION => encrypted = true,
+            _ => {}
+        }
+    }
+    if scope != 1 || enc_type != 0 || encrypted {
+        return Some(MkvCompression::Unsupported);
+    }
+    // A ContentEncoding of type compression with no ContentCompression element
+    // still means compression, with every default: algo 0, zlib.
+    let mut algo = 0u64;
+    let mut settings: &[u8] = &[];
+    for (id, body) in children(compression.unwrap_or(&[])) {
+        match id {
+            ID_CONTENT_COMP_ALGO => algo = read_uint(body),
+            ID_CONTENT_COMP_SETTINGS => settings = body,
+            _ => {}
+        }
+    }
+    Some(match algo {
+        0 => MkvCompression::Zlib,
+        3 if settings.len() <= MAX_HEADER_STRIP_LEN => {
+            MkvCompression::HeaderStrip(settings.to_vec())
+        }
+        _ => MkvCompression::Unsupported, // bzip2 (1), lzo (2), an absurd stripping
+    })
+}
+
+/// Undo each frame's track encoding in place, dropping a block whose payload
+/// does not decode (a malformed zlib stream), like a malformed lacing.
+fn decode_encodings(frames: &mut Vec<MkvFrame>, comps: &[(u64, MkvCompression)]) {
+    if comps.is_empty() {
+        return;
+    }
+    frames.retain_mut(|f| match comps.iter().find(|(n, _)| *n == f.track) {
+        Some((_, c)) => c.decode(&mut f.data),
+        None => true,
+    });
+}
+
 /// One elementary stream announced by a `TrackEntry`. Geometry (`width` /
 /// `height`) is set for video, `channels` / `sample_rate` for audio; the others
 /// stay zero.
@@ -243,10 +371,12 @@ pub struct MkvTrack {
     /// Spaces the frames of a laced block; an unscaled value, unlike block
     /// timestamps.
     pub default_duration_ns: u64,
-    /// Whether the track declares a `ContentCompression` (zlib, lzo, or header
-    /// stripping). None of those is applied here, so a consumer of a flagged
-    /// track's blocks would be reading compressed bytes as a bitstream.
-    pub compressed: bool,
+    /// Whether the track declares a `ContentEncoding` this demuxer cannot undo
+    /// (bzip2 / lzo compression, an encryption, a chained or non-block-scoped
+    /// encoding). Such blocks forward as the file stored them, so a consumer of
+    /// a flagged track would be reading encoded bytes as a bitstream. zlib and
+    /// header stripping are undone at demux and never set this.
+    pub unsupported_encoding: bool,
 }
 
 /// One `CuePoint` from the Segment `Cues` index: a seekable time and the byte
@@ -287,6 +417,10 @@ pub struct MatroskaDemuxer {
     /// Per-track `CodecPrivate` decoder-init bytes (track number, bytes), kept
     /// beside `tracks` so `MkvTrack` stays `Copy`. Empty entries are not stored.
     codec_privates: Vec<(u64, Vec<u8>)>,
+    /// Per-track `ContentEncoding` (track number, encoding), kept beside `tracks`
+    /// for the same reason as `codec_privates`. Only tracks that declare one are
+    /// stored; their blocks are decoded before they are queued.
+    compressions: Vec<(u64, MkvCompression)>,
     tags: TagList,
     /// Per-track tags from `Targets`-scoped `Tag` elements: the `TagTrackUID`
     /// each names and that element's tags. One entry per scoped `Tag` element,
@@ -331,6 +465,7 @@ impl MatroskaDemuxer {
             timestamp_scale: DEFAULT_TIMESTAMP_SCALE,
             tracks: Vec::new(),
             codec_privates: Vec::new(),
+            compressions: Vec::new(),
             tags: TagList::new(),
             track_tags: Vec::new(),
             track_entry_tags: Vec::new(),
@@ -497,13 +632,14 @@ impl MatroskaDemuxer {
                             self.open_cluster_ts = Some(read_uint(&self.buf[header..total]));
                         } else {
                             let ts = self.open_cluster_ts.unwrap_or(0);
-                            let frames = parse_block_element(
+                            let mut frames = parse_block_element(
                                 id,
                                 &self.buf[header..total],
                                 ts,
                                 self.timestamp_scale,
                                 &self.tracks,
                             );
+                            decode_encodings(&mut frames, &self.compressions);
                             self.completed.extend(frames);
                         }
                         self.consume(total);
@@ -563,6 +699,9 @@ impl MatroskaDemuxer {
                                 self.track_entry_tags
                                     .push((parsed.track.number, parsed.tags));
                             }
+                            if let Some(c) = parsed.compression {
+                                self.compressions.push((parsed.track.number, c));
+                            }
                         }
                     }
                     ID_TAGS => {
@@ -575,11 +714,12 @@ impl MatroskaDemuxer {
                         }
                     }
                     ID_CLUSTER => {
-                        let frames = parse_cluster(
+                        let mut frames = parse_cluster(
                             &self.buf[header..total],
                             &self.tracks,
                             self.timestamp_scale,
                         );
+                        decode_encodings(&mut frames, &self.compressions);
                         self.completed.extend(frames);
                     }
                     // The Cues index: time -> Cluster byte position, for indexed
@@ -825,6 +965,9 @@ struct ParsedTrack {
     track: MkvTrack,
     codec_private: Vec<u8>,
     tags: TagList,
+    /// The track's `ContentEncoding`, kept beside `track` so `MkvTrack` stays
+    /// `Copy` (the header-stripping settings are owned bytes).
+    compression: Option<MkvCompression>,
 }
 
 fn parse_tracks(body: &[u8]) -> Vec<ParsedTrack> {
@@ -865,7 +1008,7 @@ fn parse_track_entry(body: &[u8]) -> Option<ParsedTrack> {
     let mut channels = 0u8;
     let mut sample_rate = 0u32;
     let mut default_duration_ns = 0u64;
-    let mut compressed = false;
+    let mut compression = None;
     for (id, data) in children(body) {
         match id {
             ID_TRACK_NUMBER => number = read_uint(data),
@@ -898,13 +1041,7 @@ fn parse_track_entry(body: &[u8]) -> Option<ParsedTrack> {
                     }
                 }
             }
-            // Only noted, never applied: a flagged track's blocks are not the
-            // bitstream they claim to be, so the demuxer refuses them.
-            ID_CONTENT_ENCODINGS => {
-                compressed = children(data)
-                    .filter(|(eid, _)| *eid == ID_CONTENT_ENCODING)
-                    .any(|(_, enc)| children(enc).any(|(cid, _)| cid == ID_CONTENT_COMPRESSION));
-            }
+            ID_CONTENT_ENCODINGS => compression = parse_content_encodings(data),
             _ => {} // TrackType is implied by the CodecID prefix; FlagLacing etc. ignored
         }
     }
@@ -930,10 +1067,11 @@ fn parse_track_entry(body: &[u8]) -> Option<ParsedTrack> {
             channels,
             sample_rate,
             default_duration_ns,
-            compressed,
+            unsupported_encoding: compression == Some(MkvCompression::Unsupported),
         },
         codec_private: codec_private.to_vec(),
         tags,
+        compression,
     })
 }
 
@@ -2272,6 +2410,157 @@ mod tests {
         assert_eq!(f.duration_ns, 2000 * 1_000_000, "BlockDuration, scaled");
     }
 
+    /// A `ContentEncodings` element declaring one block-scoped compression with
+    /// `algo`, plus the `ContentCompSettings` header stripping needs.
+    fn content_encodings(algo: u64, settings: &[u8]) -> Vec<u8> {
+        let mut comp = elem(&[0x42, 0x54], &uint_body(algo));
+        if !settings.is_empty() {
+            comp.extend_from_slice(&elem(&[0x42, 0x55], settings));
+        }
+        elem(
+            &[0x6D, 0x80],
+            &elem(&[0x62, 0x40], &elem(&[0x50, 0x34], &comp)),
+        )
+    }
+
+    /// A single-track file whose `TrackEntry` carries `encodings` and whose one
+    /// Cluster holds `block` as that track's only block payload.
+    fn encoded_file(codec: &[u8], encodings: &[u8], block: &[u8]) -> Vec<u8> {
+        let mut entry = elem(&[0xD7], &uint_body(1));
+        entry.extend_from_slice(&elem(&[0x86], codec));
+        entry.extend_from_slice(encodings);
+        let tracks = elem(&[0x16, 0x54, 0xAE, 0x6B], &elem(&[0xAE], &entry));
+        let cluster = elem(
+            &[0x1F, 0x43, 0xB6, 0x75],
+            &[
+                elem(&[0xE7], &uint_body(0)),
+                elem(&[0xA3], &block_body(1, 0, true, block)),
+            ]
+            .concat(),
+        );
+        let segment = elem(&[0x18, 0x53, 0x80, 0x67], &[tracks, cluster].concat());
+        [elem(&[0x1A, 0x45, 0xDF, 0xA3], &[]), segment].concat()
+    }
+
+    /// zlib (`ContentCompAlgo` 0) blocks are inflated at demux (M910), so
+    /// downstream gets the real payload and the track is not flagged. A file of
+    /// this shape decodes to the same text under ffmpeg.
+    #[test]
+    fn inflates_zlib_compressed_blocks() {
+        let payload = b"a subtitle cue, zlib-compressed in the file. ".repeat(8);
+        let block = miniz_oxide::deflate::compress_to_vec_zlib(&payload, 6);
+        assert!(
+            block.len() < payload.len(),
+            "the fixture is really compressed"
+        );
+
+        let mut d = MatroskaDemuxer::new();
+        d.push_data(&encoded_file(
+            b"S_TEXT/UTF8",
+            &content_encodings(0, &[]),
+            &block,
+        ));
+        assert!(!d.tracks()[0].unsupported_encoding, "zlib is undone here");
+        let frames = d.take_frames();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, payload, "the block inflates to the payload");
+    }
+
+    /// Header stripping (`ContentCompAlgo` 3, mkvmerge's default for some
+    /// tracks): the `ContentCompSettings` bytes are prepended back onto every
+    /// block, so the frame is the original access unit again.
+    #[test]
+    fn restores_header_stripped_blocks() {
+        let header = [0xFF, 0xF1, 0x50, 0x80];
+        let stored = b"aac frame minus its ADTS header";
+
+        let mut d = MatroskaDemuxer::new();
+        d.push_data(&encoded_file(
+            b"A_AAC",
+            &content_encodings(3, &header),
+            stored,
+        ));
+        assert!(!d.tracks()[0].unsupported_encoding);
+        let frames = d.take_frames();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, [&header[..], stored].concat());
+    }
+
+    /// A block that is not a zlib stream drops instead of forwarding garbage,
+    /// and the demuxer keeps parsing the rest of the file.
+    #[test]
+    fn drops_a_malformed_zlib_block() {
+        let mut d = MatroskaDemuxer::new();
+        d.push_data(&encoded_file(
+            b"S_TEXT/UTF8",
+            &content_encodings(0, &[]),
+            b"\x78\x9c definitely not a deflate stream",
+        ));
+        assert_eq!(d.tracks().len(), 1, "the file still parses");
+        assert!(
+            d.take_frames().is_empty(),
+            "a block that does not inflate is dropped"
+        );
+    }
+
+    /// A crafted block whose output runs past the inflate bound fails rather
+    /// than allocating what the stream asks for.
+    #[test]
+    fn refuses_an_oversized_inflate() {
+        let bomb =
+            miniz_oxide::deflate::compress_to_vec_zlib(&vec![0u8; MAX_INFLATED_BLOCK_LEN + 1], 6);
+        assert!(bomb.len() < 64 * 1024, "a small block, a huge output");
+        assert_eq!(inflate_block(&bomb), None, "the bound refuses it");
+
+        let mut d = MatroskaDemuxer::new();
+        d.push_data(&encoded_file(
+            b"S_TEXT/UTF8",
+            &content_encodings(0, &[]),
+            &bomb,
+        ));
+        assert!(d.take_frames().is_empty());
+    }
+
+    /// bzip2 (1), lzo (2), a `ContentEncryption` and a scope other than block
+    /// data are not undone: the block forwards exactly as the file stored it and
+    /// the track says so, which is what the bitmap-subtitle path refuses on.
+    #[test]
+    fn flags_encodings_it_cannot_undo() {
+        for algo in [1u64, 2] {
+            let mut d = MatroskaDemuxer::new();
+            d.push_data(&encoded_file(
+                b"S_TEXT/UTF8",
+                &content_encodings(algo, &[]),
+                b"stored bytes",
+            ));
+            assert!(d.tracks()[0].unsupported_encoding, "algo {algo}");
+            assert_eq!(d.take_frames()[0].data, &b"stored bytes"[..], "algo {algo}");
+        }
+
+        // ContentEncodingType 1 with a ContentEncryption, no compression at all.
+        let encrypted = elem(
+            &[0x6D, 0x80],
+            &elem(
+                &[0x62, 0x40],
+                &[elem(&[0x50, 0x33], &uint_body(1)), elem(&[0x50, 0x35], &[])].concat(),
+            ),
+        );
+        let mut d = MatroskaDemuxer::new();
+        d.push_data(&encoded_file(b"S_TEXT/UTF8", &encrypted, b"stored bytes"));
+        assert!(d.tracks()[0].unsupported_encoding, "encryption");
+        assert_eq!(d.take_frames()[0].data, &b"stored bytes"[..]);
+
+        // Scope 2: the CodecPrivate is compressed, not the blocks. Nothing here
+        // inflates that, so the track is flagged and the blocks pass untouched.
+        let mut scoped = elem(&[0x50, 0x32], &uint_body(2));
+        scoped.extend_from_slice(&elem(&[0x50, 0x34], &elem(&[0x42, 0x54], &uint_body(0))));
+        let scoped = elem(&[0x6D, 0x80], &elem(&[0x62, 0x40], &scoped));
+        let mut d = MatroskaDemuxer::new();
+        d.push_data(&encoded_file(b"S_TEXT/UTF8", &scoped, b"stored bytes"));
+        assert!(d.tracks()[0].unsupported_encoding, "scope 2");
+        assert_eq!(d.take_frames()[0].data, &b"stored bytes"[..]);
+    }
+
     #[test]
     fn vint_round_trips_through_read_size() {
         for v in [0u64, 1, 100, 127, 128, 16_383, 16_384, 1_000_000] {
@@ -2312,7 +2601,7 @@ mod tests {
                     channels: 0,
                     sample_rate: 0,
                     default_duration_ns: 0,
-                    compressed: false,
+                    unsupported_encoding: false,
                 },
                 MkvTrack {
                     number: 2,
@@ -2323,7 +2612,7 @@ mod tests {
                     channels: 2,
                     sample_rate: 48_000,
                     default_duration_ns: 0,
-                    compressed: false,
+                    unsupported_encoding: false,
                 },
             ]
         );
@@ -2643,7 +2932,7 @@ mod tests {
                 channels: 0,
                 sample_rate: 0,
                 default_duration_ns: 0,
-                compressed: false,
+                unsupported_encoding: false,
             }]
         );
         let frames = d.take_frames();
