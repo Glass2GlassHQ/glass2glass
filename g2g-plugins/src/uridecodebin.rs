@@ -1507,8 +1507,9 @@ pub fn build_hls_separate_fanout(
 /// overlay's text pad (the cross-source join, vs the single-demuxer MP4 / MKV
 /// overlay). `streams` carries the variant's muxed streams (video required);
 /// `subtitle_url` is the resolved rendition playlist. `Ok(None)` (decline) when
-/// there is no routable muxed video. Raw `.vtt` segment renditions only; an fMP4
-/// `wvtt` subtitle rendition (the `IsoBmff` + `Mp4DemuxN` path) is a follow-up.
+/// there is no routable muxed video. The rendition's segments may be raw `.vtt`
+/// or fMP4 (`wvtt`): the source de-frames either into the same WebVTT stream, so
+/// the graph is the same shape for both.
 #[cfg(feature = "hls")]
 pub fn build_hls_subtitle_overlay(
     reg: &Registry,

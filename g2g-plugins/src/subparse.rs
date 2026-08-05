@@ -15,7 +15,8 @@
 //!   cue identifier before the timing line; everything before the `-->` line is
 //!   ignored, so both are handled without a format flag.
 //! - **WebVTT structure.** The `WEBVTT` header block and `NOTE` / `STYLE` /
-//!   `REGION` blocks are skipped (a `NOTE` may itself contain `-->`).
+//!   `REGION` blocks are skipped (a `NOTE` may itself contain `-->`). A header
+//!   block's `X-TIMESTAMP-MAP` rebases the cue times that follow it.
 //! - **Inline tags.** `<i>`, `<b>`, `<c.classname>`, and `<00:00:01.000>` cue
 //!   timestamps are stripped to plain text (the bitmap overlay has no styling).
 //! - **Cue settings.** Tokens after the end timestamp on the timing line
@@ -151,7 +152,9 @@ pub fn parse_srt(input: &str) -> Vec<Cue> {
 /// blocks are read for `::cue`, `::cue(#id)` and `::cue(.class)`
 /// `color` / `background-color` rules, which are resolved onto each cue's
 /// [`CueSettings`] (the subset the overlay can apply; other CSS properties are
-/// ignored).
+/// ignored). A header block's `X-TIMESTAMP-MAP` (RFC 8216 §3.5) rebases the cue
+/// times that follow it onto the MPEG-2 media timeline, so the concatenated
+/// segments of an HLS rendition land where the video does.
 pub fn parse_webvtt(input: &str) -> Vec<Cue> {
     let input = input.strip_prefix('\u{feff}').unwrap_or(input);
 
@@ -184,9 +187,16 @@ pub fn parse_webvtt(input: &str) -> Vec<Cue> {
     let sheet = parse_cue_styles(&css);
 
     // Pass 2: parse the cue blocks, resolving each cue's style by its identifier.
+    // A header block's `X-TIMESTAMP-MAP` rebases every cue after it (each HLS
+    // segment carries its own header, so the offset changes mid-document).
     let mut cues = Vec::new();
+    let mut offset_ns = 0i64;
     for b in &blocks {
+        if let Some(off) = block_timestamp_offset(b) {
+            offset_ns = off;
+        }
         if let Some(mut cue) = block_to_cue(b, true) {
+            rebase_cue(&mut cue, offset_ns);
             if !sheet.is_empty() {
                 apply_cue_style(
                     &sheet,
@@ -199,6 +209,52 @@ pub fn parse_webvtt(input: &str) -> Vec<Cue> {
         }
     }
     cues
+}
+
+/// The cue-time rebase a WebVTT header block's `X-TIMESTAMP-MAP` puts in effect
+/// (RFC 8216 §3.5), or `None` when the block is not a header or carries no
+/// usable map (a malformed one is skipped, leaving the previous offset).
+fn block_timestamp_offset(block: &[&str]) -> Option<i64> {
+    let first = block.first()?.trim_start();
+    if !(first == "WEBVTT" || first.starts_with("WEBVTT ") || first.starts_with("WEBVTT\t")) {
+        return None;
+    }
+    block.iter().find_map(|l| parse_timestamp_map(l.trim()))
+}
+
+/// Parse an `X-TIMESTAMP-MAP` line into the nanoseconds to add to every cue time
+/// of the segment carrying it: `MPEGTS/90000 - LOCAL`, i.e. where on the MPEG-2
+/// (90 kHz) media timeline the segment's cue-time origin sits. The two fields are
+/// named, so either order parses; the RFC's example writes `LOCAL` first. Both are
+/// required, and both are untrusted, so a missing / unparseable / out-of-range
+/// field yields `None` (the header is skipped, as it was before the map was read).
+fn parse_timestamp_map(line: &str) -> Option<i64> {
+    let attrs = line.strip_prefix("X-TIMESTAMP-MAP")?.trim_start();
+    let mut mpegts: Option<u64> = None;
+    let mut local: Option<u64> = None;
+    for field in attrs.strip_prefix('=')?.split(',') {
+        // LOCAL's value is itself colon-separated (`00:00:00.000`), so split on
+        // the first colon only.
+        let (key, value) = field.trim().split_once(':')?;
+        match key.trim() {
+            "MPEGTS" => mpegts = value.trim().parse().ok(),
+            "LOCAL" => local = parse_timestamp(value),
+            _ => {}
+        }
+    }
+    // 90 kHz ticks to ns, in i128 so an attacker-supplied MPEGTS cannot overflow.
+    let mpegts_ns = i128::from(mpegts?) * 1_000_000_000 / 90_000;
+    i64::try_from(mpegts_ns - i128::from(local?)).ok()
+}
+
+/// Shift a cue's window by an `X-TIMESTAMP-MAP` offset, clamping at zero (a
+/// segment whose map moves cues before the origin shows them at time 0).
+fn rebase_cue(cue: &mut Cue, offset_ns: i64) {
+    if offset_ns == 0 {
+        return;
+    }
+    cue.start_ns = cue.start_ns.saturating_add_signed(offset_ns);
+    cue.end_ns = cue.end_ns.saturating_add_signed(offset_ns);
 }
 
 /// The WebVTT cue identifier (the line just before the timing line), if any.
@@ -1288,22 +1344,36 @@ fn last_block_boundary(s: &str) -> Option<usize> {
 /// `webvtt` enables the WebVTT-only block skips. `str::lines` already strips a
 /// trailing `\r`, so CRLF input is handled without extra work.
 fn parse_blocks(input: &str, webvtt: bool) -> Vec<Cue> {
+    parse_blocks_rebased(input, webvtt, &mut 0)
+}
+
+/// [`parse_blocks`] with the `X-TIMESTAMP-MAP` offset held by the caller, so the
+/// streaming [`SubParse`] keeps a segment's rebase in effect across the chunk
+/// boundary that may fall between its header block and its cues.
+fn parse_blocks_rebased(input: &str, webvtt: bool, offset_ns: &mut i64) -> Vec<Cue> {
     let input = input.strip_prefix('\u{feff}').unwrap_or(input);
     let mut cues = Vec::new();
     let mut block: Vec<&str> = Vec::new();
+    let mut take = |block: &[&str], cues: &mut Vec<Cue>| {
+        if webvtt {
+            if let Some(off) = block_timestamp_offset(block) {
+                *offset_ns = off;
+            }
+        }
+        if let Some(mut cue) = block_to_cue(block, webvtt) {
+            rebase_cue(&mut cue, *offset_ns);
+            cues.push(cue);
+        }
+    };
     for line in input.lines() {
         if line.trim().is_empty() {
-            if let Some(cue) = block_to_cue(&block, webvtt) {
-                cues.push(cue);
-            }
+            take(&block, &mut cues);
             block.clear();
         } else {
             block.push(line);
         }
     }
-    if let Some(cue) = block_to_cue(&block, webvtt) {
-        cues.push(cue);
-    }
+    take(&block, &mut cues);
     cues
 }
 
@@ -1514,6 +1584,10 @@ pub struct SubParse {
     buf: Vec<u8>,
     /// SSA `[Events]` / column-order state, persisted across chunks.
     ssa: SsaState,
+    /// The `X-TIMESTAMP-MAP` rebase the last WebVTT header block put in effect,
+    /// held across chunks (and across the segments of an HLS rendition, each of
+    /// which may carry its own map).
+    map_offset_ns: i64,
     /// Whether a leading UTF-8 BOM has been resolved (consumed or ruled out).
     bom_stripped: bool,
     /// Whether the output `Caps::Text{Utf8}` has been announced downstream.
@@ -1593,7 +1667,7 @@ impl SubParse {
     fn drain_blocks(&mut self, webvtt: bool, final_flush: bool) -> Vec<Cue> {
         if final_flush {
             let doc = String::from_utf8_lossy(&self.buf);
-            let cues = parse_blocks(&doc, webvtt);
+            let cues = parse_blocks_rebased(&doc, webvtt, &mut self.map_offset_ns);
             self.buf.clear();
             return cues;
         }
@@ -1602,7 +1676,7 @@ impl SubParse {
         let Some(boundary) = last_block_boundary(s) else {
             return Vec::new();
         };
-        let cues = parse_blocks(&s[..boundary], webvtt);
+        let cues = parse_blocks_rebased(&s[..boundary], webvtt, &mut self.map_offset_ns);
         self.buf.drain(..boundary);
         cues
     }
@@ -1717,6 +1791,7 @@ impl AsyncElement for SubParse {
                 PipelinePacket::Flush => {
                     self.buf.clear();
                     self.ssa = SsaState::default();
+                    self.map_offset_ns = 0;
                     self.bom_stripped = false;
                     out.push(PipelinePacket::Flush).await?;
                     Vec::new()
@@ -1836,6 +1911,64 @@ mod tests {
         assert_eq!(cues[0].start_ns, 1_000_000_000);
         assert_eq!(cues[1].text, "World");
         assert_eq!(cues[1].start_ns, 3_000_000_000);
+    }
+
+    #[test]
+    fn segment_timestamp_maps_rebase_their_own_cues() {
+        // Two HLS WebVTT segments, each with its own X-TIMESTAMP-MAP, in the two
+        // field orders that occur in the wild (the RFC's example writes LOCAL
+        // first). Segment 1: MPEGTS 900000 (10s) maps cue time 0, so its cue
+        // shifts +10s. Segment 2: MPEGTS 1800000 (20s) maps cue time 5s, so the
+        // offset is +15s.
+        let segmented = "WEBVTT\n\
+            X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:900000\n\n\
+            00:00:01.000 --> 00:00:02.000\nHello\n\n\
+            WEBVTT\n\
+            X-TIMESTAMP-MAP=MPEGTS:1800000,LOCAL:00:00:05.000\n\n\
+            00:00:06.000 --> 00:00:07.000\nWorld\n";
+        let cues = parse_webvtt(segmented);
+        assert_eq!(cues.len(), 2);
+        assert_eq!(cues[0].text, "Hello");
+        assert_eq!(cues[0].start_ns, 11_000_000_000);
+        assert_eq!(cues[0].end_ns, 12_000_000_000);
+        assert_eq!(cues[1].text, "World");
+        assert_eq!(cues[1].start_ns, 21_000_000_000);
+        assert_eq!(cues[1].end_ns, 22_000_000_000);
+    }
+
+    #[test]
+    fn timestamp_map_negative_offset_clamps_at_zero() {
+        // LOCAL ahead of MPEGTS shifts cues earlier; a cue that would land before
+        // the origin clamps to 0 rather than wrapping.
+        let input = "WEBVTT\n\
+            X-TIMESTAMP-MAP=MPEGTS:90000,LOCAL:00:00:05.000\n\n\
+            00:00:06.000 --> 00:00:07.000\nlate\n\n\
+            00:00:01.000 --> 00:00:02.000\nearly\n";
+        let cues = parse_webvtt(input);
+        assert_eq!(cues[0].start_ns, 2_000_000_000, "6s - 4s offset");
+        assert_eq!(cues[1].start_ns, 0, "1s - 4s clamps at the origin");
+        assert_eq!(cues[1].end_ns, 0);
+    }
+
+    #[test]
+    fn malformed_timestamp_maps_leave_cues_untouched() {
+        // A map missing a field, with a non-numeric MPEGTS, with an unparseable
+        // LOCAL, or with an out-of-range MPEGTS is skipped: the cue keeps its own
+        // time and nothing panics.
+        for header in [
+            "X-TIMESTAMP-MAP=MPEGTS:900000",
+            "X-TIMESTAMP-MAP=LOCAL:00:00:00.000",
+            "X-TIMESTAMP-MAP=MPEGTS:nope,LOCAL:00:00:00.000",
+            "X-TIMESTAMP-MAP=MPEGTS:900000,LOCAL:99:99:99.999",
+            "X-TIMESTAMP-MAP=MPEGTS:18446744073709551615,LOCAL:00:00:00.000",
+            "X-TIMESTAMP-MAP=",
+            "X-TIMESTAMP-MAP",
+        ] {
+            let input = alloc::format!("WEBVTT\n{header}\n\n00:00:01.000 --> 00:00:02.000\ncue\n");
+            let cues = parse_webvtt(&input);
+            assert_eq!(cues.len(), 1, "{header}");
+            assert_eq!(cues[0].start_ns, 1_000_000_000, "{header}");
+        }
     }
 
     #[test]
