@@ -2423,8 +2423,19 @@ The 16-entry RGB palette and the display size are *not* in the bitstream: they r
 the `.idx` text a Matroska `S_VOBSUB` track carries as its `CodecPrivate`, which
 `MkvDemux` forwards in band ahead of the first cue the way it forwards the FLAC
 and Opus headers, and which the decoder tells apart from a cue by parsing it as
-`.idx` first. Every size, offset and coordinate off the wire is range-checked and
-the parse returns `None` rather than allocating on a bogus rectangle; the pixel
+`.idx` first. That same text is also the sidecar carriage: `VobSubSrc`
+(`vobsubsrc`) reads a `.idx` / `.sub` pair off disk, emits the `.idx` as that
+same in-band config frame, then reads each cue's subpicture unit out of the
+`.sub` at the byte offset its `timestamp:` line names, stamped with that
+timestamp and with the unit's own hide time as its duration, so
+`vobsubsrc location=movie.idx ! vobsubdec ! compositor.` plays a sidecar pair
+the way a muxed track plays. A `.sub` is an MPEG-2 program stream, so a unit is
+reassembled from the `private_stream_1` PES packets at that offset carrying the
+same subpicture substream id, bounded by its own 16-bit packet size; an `.idx`
+indexing several languages picks one by `id:` code (`language=`) or by the
+file's `langidx:`. An entry pointing outside the `.sub`, or a unit the file ends
+in the middle of, drops that cue and not the stream. Every size, offset and
+coordinate off the wire is range-checked and the parse returns `None` rather than allocating on a bogus rectangle; the pixel
 data is bounded by the control-sequence offset, so a truncated packet fails
 instead of decoding the control table as run lengths. A track that declares a
 Matroska `ContentCompression` is refused outright, since its blocks are not SPU

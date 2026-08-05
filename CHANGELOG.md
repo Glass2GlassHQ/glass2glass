@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M926: `vobsubsrc` plays a DVD subtitle `.idx` / `.sub` sidecar pair.
+
 - M924: MPEG-TS teletext subtitles decode to a `Caps::Text{Utf8}` cue stream through the new `teletextdec` element.
 - M923: WebVTT `::cue(.class)` rules style only their own span, compound class selectors match, and SSA `{\pos}` / margins map through `PlayRes`.
 

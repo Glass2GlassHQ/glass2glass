@@ -508,9 +508,8 @@ _(No open parser items.)_
   §4.18). Still open: MPEG-2 user-data caption extraction.
 - **Bitmap / picture subtitles: PGS + write paths.** A Blu-ray PGS decoder as a
   further `SubPictureFormat` coding with the `S_HDMV/PGS` Matroska mapping
-  (lands on `MkvCodec::Other` today). Also open: a `.idx`/`.sub` sidecar source
-  element, and muxer write paths for a `SubPicture` pad (mkv `S_VOBSUB` /
-  `S_DVBSUB`, TS `subtitling_descriptor`).
+  (lands on `MkvCodec::Other` today). Also open: muxer write paths for a
+  `SubPicture` pad (mkv `S_VOBSUB` / `S_DVBSUB`, TS `subtitling_descriptor`).
 - **Tensor substrate orientation descriptor (M181).** A deferred
   rotate/mirror descriptor the sink can absorb in hardware (DRM/KMS, Wayland
   `set_buffer_transform`, VAAPI VPP, D3D11 VideoProcessor), with eager strided /

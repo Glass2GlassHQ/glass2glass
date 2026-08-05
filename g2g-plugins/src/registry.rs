@@ -306,6 +306,17 @@ pub fn default_registry() -> Registry {
             ))
         },
     ));
+    // VobSub sidecar source (M926): a DVD subtitle `.idx` / `.sub` pair sitting
+    // next to a video, e.g. `vobsubsrc location=movie.idx ! vobsubdec ! c.` .
+    // `sub-location` overrides the derived `.sub` path, `language` picks one of
+    // an `.idx`'s indexed languages.
+    reg.register_source(SourceFactory::new(
+        "vobsubsrc",
+        Caps::SubPicture {
+            format: g2g_core::SubPictureFormat::VobSub,
+        },
+        || Box::new(crate::vobsubsrc::VobSubSrc::new("")),
+    ));
     // Image-sequence source (M-gap): reads img%05d.jpg style sequences, Motion-JPEG
     // by default so `multifilesrc location=img%05d.jpg ! mjpegdec ! ...` works.
     reg.register_source(SourceFactory::new(

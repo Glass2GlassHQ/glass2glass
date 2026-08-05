@@ -11,12 +11,16 @@
 //!
 //! The 16-entry RGB palette and the display geometry are *not* in the
 //! bitstream: they ride out of band in the `.idx` text, which a Matroska
-//! `S_VOBSUB` track carries as its `CodecPrivate` ([`parse_idx`]).
+//! `S_VOBSUB` track carries as its `CodecPrivate` ([`parse_idx`]). As a sidecar
+//! pair the same text also carries the cue index ([`parse_idx_index`]), whose
+//! byte offsets point into the companion `.sub`, an MPEG program stream the
+//! cues are read back out of ([`read_spu_packet`]).
 //!
 //! Every length, offset and coordinate here comes off the wire, so each is
 //! range-checked before use and the parse returns `None` rather than panicking
 //! or allocating on a bogus size.
 
+use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -40,13 +44,54 @@ pub struct VobSubConfig {
     pub palette: Option<[u32; 16]>,
 }
 
+/// One cue in a sidecar `.idx`: when it is shown, and where its subpicture unit
+/// starts in the companion `.sub`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IdxEntry {
+    /// `timestamp: HH:MM:SS:mmm` as nanoseconds.
+    pub time_ns: u64,
+    /// `filepos:`, a hex byte offset into the `.sub`.
+    pub filepos: u64,
+}
+
+/// One language's cues in a sidecar `.idx`: an `id:` line and the entries under
+/// it. An `.idx` with no `id:` line at all yields a single unnamed stream.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IdxStream {
+    /// The `id:` language code, e.g. `en`.
+    pub language: String,
+    /// The `index:` this stream declares, which `langidx` selects between.
+    pub index: u32,
+    pub entries: Vec<IdxEntry>,
+}
+
+/// The cue index a sidecar `.idx` carries, one entry list per language.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IdxIndex {
+    /// `langidx:`, the `index` of the stream the file declares as its default.
+    pub langidx: Option<u32>,
+    pub streams: Vec<IdxStream>,
+}
+
 /// Parse a `.idx` text (a Matroska `S_VOBSUB` track's `CodecPrivate`) into the
 /// display geometry and palette it declares. Returns `None` when the bytes are
 /// not `.idx` text at all, which is how the decoder tells a config blob from an
 /// SPU packet on the same pad.
 pub fn parse_idx(bytes: &[u8]) -> Option<VobSubConfig> {
+    parse_idx_text(bytes).map(|(cfg, _)| cfg)
+}
+
+/// Parse a sidecar `.idx` text into its cue index: the per-language timestamp /
+/// file-offset lists a source element reads the `.sub` with. Same `None` rule as
+/// [`parse_idx`].
+pub fn parse_idx_index(bytes: &[u8]) -> Option<IdxIndex> {
+    parse_idx_text(bytes).map(|(_, index)| index)
+}
+
+fn parse_idx_text(bytes: &[u8]) -> Option<(VobSubConfig, IdxIndex)> {
     let text = core::str::from_utf8(bytes).ok()?;
     let mut cfg = VobSubConfig::default();
+    let mut index = IdxIndex::default();
     // Recognising a key is what makes these bytes `.idx` text; a key whose value
     // does not parse still identifies the blob, it just contributes nothing.
     let mut keyed = false;
@@ -76,9 +121,148 @@ pub fn parse_idx(bytes: &[u8]) -> Option<VobSubConfig> {
             if n == 16 {
                 cfg.palette = Some(entries);
             }
+        } else if let Some(rest) = line.strip_prefix("langidx:") {
+            keyed = true;
+            index.langidx = rest.trim().parse().ok();
+        } else if let Some(rest) = line.strip_prefix("id:") {
+            keyed = true;
+            let (language, number) = match rest.split_once(',') {
+                Some((lang, rest)) => (
+                    lang.trim(),
+                    rest.trim()
+                        .strip_prefix("index:")
+                        .and_then(|n| n.trim().parse().ok())
+                        .unwrap_or(0),
+                ),
+                None => (rest.trim(), 0),
+            };
+            index.streams.push(IdxStream {
+                language: String::from(language),
+                index: number,
+                entries: Vec::new(),
+            });
+        } else if let Some(rest) = line.strip_prefix("timestamp:") {
+            keyed = true;
+            if let Some(entry) = parse_idx_entry(rest) {
+                // Entries ahead of any `id:` line belong to an unnamed stream.
+                if index.streams.is_empty() {
+                    index.streams.push(IdxStream::default());
+                }
+                if let Some(stream) = index.streams.last_mut() {
+                    stream.entries.push(entry);
+                }
+            }
         }
     }
-    keyed.then_some(cfg)
+    keyed.then_some((cfg, index))
+}
+
+/// Parse the body of a `timestamp: HH:MM:SS:mmm, filepos: 0000abcd` line. A
+/// field that is not a number, or a time that is not a real clock reading, drops
+/// the entry rather than placing a cue at a nonsense offset.
+fn parse_idx_entry(rest: &str) -> Option<IdxEntry> {
+    let (time, pos) = rest.split_once(',')?;
+    let pos = pos.trim().strip_prefix("filepos:")?.trim();
+    let filepos = u64::from_str_radix(pos, 16).ok()?;
+    let mut fields = time.trim().split(':');
+    let mut next = || -> Option<u64> { fields.next()?.trim().parse().ok() };
+    let (h, m, s, ms) = (next()?, next()?, next()?, next()?);
+    if fields.next().is_some() || m > 59 || s > 59 || ms > 999 {
+        return None;
+    }
+    let time_ms = h
+        .checked_mul(3_600_000)?
+        .checked_add(m * 60_000)?
+        .checked_add(s * 1000)?
+        .checked_add(ms)?;
+    Some(IdxEntry {
+        time_ns: time_ms.checked_mul(1_000_000)?,
+        filepos,
+    })
+}
+
+/// Largest subpicture unit accepted: the packet's own size field is 16 bits, so
+/// nothing longer can be declared, and a reassembly that overruns it is a `.sub`
+/// whose packets do not belong to one cue.
+const MAX_SPU_BYTES: usize = u16::MAX as usize;
+
+/// Pull the subpicture unit at `filepos` out of a `.sub`, an MPEG-2 program
+/// stream. The unit is spread over the `private_stream_1` PES packets from there
+/// on, all carrying the same subpicture substream id, and its first two bytes
+/// say how many bytes of it there are in total.
+///
+/// Returns `None` for an offset outside the file, a stream that is not a program
+/// stream at that point, or a unit the file ends in the middle of.
+pub fn read_spu_packet(sub: &[u8], filepos: u64) -> Option<Vec<u8>> {
+    let mut at = usize::try_from(filepos).ok()?;
+    let mut spu: Vec<u8> = Vec::new();
+    let mut substream: Option<u8> = None;
+    while at.checked_add(4)? <= sub.len() {
+        if sub[at..at + 3] != [0x00, 0x00, 0x01] {
+            return None;
+        }
+        let id = sub[at + 3];
+        at += 4;
+        match id {
+            // Pack header: a 10-byte bit field plus its stuffing, not length
+            // prefixed. Only the MPEG-2 layout (the leading `01` bits) occurs in
+            // a `.sub`, DVD subpictures being MPEG-2 program streams.
+            0xba => {
+                if *sub.get(at)? & 0xc0 != 0x40 {
+                    return None;
+                }
+                let stuffing = (*sub.get(at + 9)? & 0x07) as usize;
+                at = at.checked_add(10)?.checked_add(stuffing)?;
+            }
+            // program end
+            0xb9 => return None,
+            _ => {
+                let len = be16(sub, at)?;
+                let body_at = at + 2;
+                let body = sub.get(body_at..body_at.checked_add(len)?)?;
+                at = body_at + len;
+                if id != 0xbd {
+                    continue;
+                }
+                let payload = pes_payload(body)?;
+                let (&sub_id, data) = payload.split_first()?;
+                // Subpicture substreams are 0x20..=0x3f. The first one seen is
+                // this cue's; a packet of any other stream (private audio, a
+                // second subtitle language) is not part of it.
+                if !(0x20..=0x3f).contains(&sub_id) {
+                    continue;
+                }
+                match substream {
+                    None => substream = Some(sub_id),
+                    Some(want) if want == sub_id => {}
+                    Some(_) => continue,
+                }
+                if spu.len().checked_add(data.len())? > MAX_SPU_BYTES {
+                    return None;
+                }
+                spu.extend_from_slice(data);
+                if let Some(size) = be16(&spu, 0) {
+                    if size < 4 {
+                        return None;
+                    }
+                    if spu.len() >= size {
+                        spu.truncate(size);
+                        return Some(spu);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Strip an MPEG-2 PES packet's header, returning the payload after it.
+fn pes_payload(body: &[u8]) -> Option<&[u8]> {
+    if *body.first()? & 0xc0 != 0x80 {
+        return None;
+    }
+    let header_len = *body.get(2)? as usize;
+    body.get(3usize.checked_add(header_len)?..)
 }
 
 /// One decoded subpicture cue: when to show it, where, and its palette-indexed
@@ -156,6 +340,27 @@ fn be16(buf: &[u8], at: usize) -> Option<usize> {
     Some(u16::from_be_bytes([hi, lo]) as usize)
 }
 
+/// What a subpicture unit's control sequences declare: everything about the cue
+/// except its run-length pixel data.
+struct SpuControl {
+    packet_size: usize,
+    ctrl_start: usize,
+    start_ns: u64,
+    stop_ns: Option<u64>,
+    colormap: [u8; 4],
+    alpha: [u8; 4],
+    area: Option<(u32, u32, u32, u32)>,
+    field_offsets: Option<(usize, usize)>,
+}
+
+/// The show and hide times of a subpicture unit, nanoseconds after its PTS,
+/// without decoding the bitmap. This is what a source element needs to stamp a
+/// cue's duration.
+pub fn spu_timing(data: &[u8]) -> Option<(u64, Option<u64>)> {
+    let ctrl = parse_control(data)?;
+    Some((ctrl.start_ns, ctrl.stop_ns))
+}
+
 /// Parse one subpicture unit. Returns `None` for any packet whose sizes, offsets
 /// or coordinates do not hold together, so a malformed cue is dropped rather
 /// than mis-rendered.
@@ -165,6 +370,72 @@ fn be16(buf: &[u8], at: usize) -> Option<usize> {
 /// it must still carry the display area and the two field offsets, without which
 /// there is no bitmap to decode.
 pub fn parse_spu(data: &[u8]) -> Option<SpuCue> {
+    let ctrl = parse_control(data)?;
+    let SpuControl {
+        packet_size,
+        ctrl_start,
+        start_ns,
+        stop_ns,
+        colormap,
+        alpha,
+        area,
+        field_offsets,
+    } = ctrl;
+    let packet = &data[..packet_size];
+
+    let (x, y, width, height) = area?;
+    let (top_off, bottom_off) = field_offsets?;
+    if width == 0 || height == 0 || width > MAX_CUE_DIM || height > MAX_CUE_DIM {
+        return None;
+    }
+    let count = (width as usize).checked_mul(height as usize)?;
+    if count > MAX_CUE_PIXELS {
+        return None;
+    }
+    // The pixel data sits between the header and the control sequence, so that
+    // is the bound on both fields: a field reaching into the control table means
+    // the packet is truncated, not that the table is run lengths.
+    if top_off < 4 || top_off > ctrl_start || bottom_off < 4 || bottom_off > ctrl_start {
+        return None;
+    }
+
+    let mut pixels = vec![0u8; count];
+    let w = width as usize;
+    // Rows alternate between the two fields: even rows come from the top field's
+    // stream, odd rows from the bottom field's.
+    decode_field(
+        packet,
+        top_off,
+        ctrl_start,
+        w,
+        height as usize,
+        0,
+        &mut pixels,
+    )?;
+    decode_field(
+        packet,
+        bottom_off,
+        ctrl_start,
+        w,
+        height as usize,
+        1,
+        &mut pixels,
+    )?;
+
+    Some(SpuCue {
+        start_ns,
+        stop_ns,
+        x,
+        y,
+        width,
+        height,
+        colormap,
+        alpha,
+        pixels,
+    })
+}
+
+fn parse_control(data: &[u8]) -> Option<SpuControl> {
     let packet_size = be16(data, 0)?;
     let ctrl_start = be16(data, 2)?;
     // The packet's own size bounds the parse: a claim longer than the buffer is
@@ -249,55 +520,15 @@ pub fn parse_spu(data: &[u8]) -> Option<SpuCue> {
         seq = next;
     }
 
-    let (x, y, width, height) = area?;
-    let (top_off, bottom_off) = field_offsets?;
-    if width == 0 || height == 0 || width > MAX_CUE_DIM || height > MAX_CUE_DIM {
-        return None;
-    }
-    let count = (width as usize).checked_mul(height as usize)?;
-    if count > MAX_CUE_PIXELS {
-        return None;
-    }
-    // The pixel data sits between the header and the control sequence, so that
-    // is the bound on both fields: a field reaching into the control table means
-    // the packet is truncated, not that the table is run lengths.
-    if top_off < 4 || top_off > ctrl_start || bottom_off < 4 || bottom_off > ctrl_start {
-        return None;
-    }
-
-    let mut pixels = vec![0u8; count];
-    let w = width as usize;
-    // Rows alternate between the two fields: even rows come from the top field's
-    // stream, odd rows from the bottom field's.
-    decode_field(
-        packet,
-        top_off,
+    Some(SpuControl {
+        packet_size,
         ctrl_start,
-        w,
-        height as usize,
-        0,
-        &mut pixels,
-    )?;
-    decode_field(
-        packet,
-        bottom_off,
-        ctrl_start,
-        w,
-        height as usize,
-        1,
-        &mut pixels,
-    )?;
-
-    Some(SpuCue {
         start_ns: date_to_ns(start_date.unwrap_or(0)),
         stop_ns: stop_date.map(date_to_ns),
-        x,
-        y,
-        width,
-        height,
         colormap,
         alpha,
-        pixels,
+        area,
+        field_offsets,
     })
 }
 

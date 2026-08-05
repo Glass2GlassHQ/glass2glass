@@ -155,6 +155,9 @@ pub mod vmti;
 // the `vobsubdec` element that renders cues to RGBA canvases.
 pub mod vobsub;
 pub mod vobsubdec;
+// Sidecar `.idx` / `.sub` pair as a VobSub stream (needs the filesystem).
+#[cfg(feature = "std")]
+pub mod vobsubsrc;
 // DVB subtitles (ETSI EN 300 743): the segment-stream codec (no_std) plus the
 // `dvbsubdec` element that renders display sets to RGBA canvases.
 pub mod dvbsub;
