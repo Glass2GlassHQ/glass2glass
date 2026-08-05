@@ -286,12 +286,12 @@ Phased plan:
   low-latency on both builders; the elements take the default CUBIC). The
   `web-transport-quinn = "=0.11.12"` pin and the `idna_adapter` 1.1.0 hold in
   `Cargo.lock` can both drop once the workspace MSRV moves past 1.91.
-- **MoQ Transport:** a `moqtsrc` subscriber element (subgroup stream reassembly,
-  the catalog read, track selection) and a browser demo playing a g2g broadcast
-  through a relay. Datagram objects and FETCH are unimplemented on the publisher
-  side too: a FETCH is refused with `NOT_SUPPORTED`. Beyond that: draft-18 once a
-  relay runs it, `PUBLISH`-initiated (publisher-driven) subscriptions, and
-  interop against a non-Cloudflare IETF endpoint.
+- **MoQ Transport:** a browser demo playing a g2g broadcast through a relay.
+  Datagram objects and FETCH are unimplemented on both sides: a FETCH is refused
+  with `NOT_SUPPORTED`. Beyond that: draft-18 once a relay runs it,
+  `PUBLISH`-initiated (publisher-driven) subscriptions, multi-track playback (the
+  subscriber plays one media track), and interop against a non-Cloudflare IETF
+  endpoint.
 - **RTP over QUIC (RoQ):** blocked on the spec. draft-ietf-avtcore-rtp-over-quic
   expired at -14 (its ALPN is forbidden until an RFC exists) and the WG missed
   its milestone; revisit only if the draft revives. Peers if it does:

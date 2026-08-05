@@ -92,7 +92,9 @@ jobs:
       # reference implementation, malformed peer input, and the property surface.
       # The relay / moq-sub interop leg skips without the reference binaries.
       - name: test g2g-plugins (moqt)
-        run: cargo test -p g2g-plugins --locked --features moqt --test m902_moqt
+        run: >
+          cargo test -p g2g-plugins --locked --features moqt
+          --test m902_moqt --test m903_moqt_subscribe
       # WebTransport carrier (M901): loopback, reconnect, transform round trip and
       # the property/registry surface. The two aioquic legs skip without `uv`.
       - name: test g2g-plugins (webtransport)

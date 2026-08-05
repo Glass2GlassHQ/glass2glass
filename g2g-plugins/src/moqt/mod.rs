@@ -16,12 +16,18 @@
 //!   delta-coded Key-Value-Pair sequences.
 //! - [`message`]: the control-stream message set and its framing.
 //! - [`data`]: the subgroup stream header and per-object header.
+//! - [`reassembly`]: decoding a subgroup stream, and putting the objects from
+//!   many concurrent streams back into (group, object) order.
+//! - [`catalog`]: the JSON track list, written by the publisher and read by the
+//!   subscriber.
 //! - [`session`]: the SETUP exchange and the live control / data streams.
 //!
 //! Everything but [`session`] is pure `alloc` and decodes byte vectors, so the
 //! wire layer is unit-testable without a network.
 
+pub mod catalog;
 pub mod coding;
 pub mod data;
 pub mod message;
+pub mod reassembly;
 pub mod session;

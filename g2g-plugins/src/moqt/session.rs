@@ -11,6 +11,11 @@
 //! half runs in its own task so a SUBSCRIBE is decoded as it arrives rather
 //! than when the element next has a frame to push; the write half stays with
 //! the caller, which is the only thing that sends control messages.
+//!
+//! A subscriber also needs the data plane, which is many unidirectional streams
+//! at once: [`MoqtSession::start_data_reader`] accepts them and reads each in
+//! its own task, funnelling whole objects into one channel. Ordering is the
+//! receiver's problem, not the reader's (see [`super::reassembly`]).
 
 use alloc::string::String;
 use alloc::vec;
@@ -26,6 +31,7 @@ use crate::remotewtio::{dial, wt_err};
 use super::coding::{setup_param, MoqtError, Params};
 use super::data::SubgroupHeader;
 use super::message::ControlMessage;
+use super::reassembly::{ReceivedObject, StreamItem, SubgroupStreamDecoder, DATA_READ_CHUNK};
 
 /// The WebTransport subprotocol that names draft-16
 /// (`moq-transport/src/setup/mod.rs`).
@@ -42,6 +48,27 @@ const CONTROL_READ_CHUNK: usize = 8192;
 /// the same thing to the pipeline: the session is gone.
 fn protocol_err(_: MoqtError) -> G2gError {
     G2gError::Hardware(HardwareError::Other)
+}
+
+/// One event off the data plane. A stream's events arrive in order (`Opened`,
+/// its objects, `Closed`); events from different streams interleave freely,
+/// which is exactly what makes reassembly necessary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DataEvent {
+    StreamOpened {
+        track_alias: u64,
+        group_id: u64,
+    },
+    Object {
+        track_alias: u64,
+        object: ReceivedObject,
+    },
+    /// The stream ended, cleanly or by a reset or a framing violation: either
+    /// way it will deliver nothing more.
+    StreamClosed {
+        track_alias: u64,
+        group_id: u64,
+    },
 }
 
 /// A connected MoQ Transport session: the SETUP exchange has completed and the
@@ -137,6 +164,32 @@ impl MoqtSession {
         write_message(&mut self.control_tx, msg).await
     }
 
+    /// Await the next control message. `None` once the control stream ends.
+    pub async fn next_control(&mut self) -> Option<ControlMessage> {
+        let msg = self.inbound.recv().await;
+        if msg.is_none() {
+            self.closed = true;
+        }
+        msg
+    }
+
+    /// Start accepting the session's unidirectional streams and decoding the
+    /// subgroups on them. `max_object_bytes` bounds a single object, so a relay
+    /// cannot make one stream allocate without limit.
+    ///
+    /// Call once: a second reader would race the first for streams.
+    pub fn start_data_reader(&self, max_object_bytes: usize) -> mpsc::UnboundedReceiver<DataEvent> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let session = self.session.clone();
+        tokio::spawn(async move {
+            while let Ok(stream) = session.accept_uni().await {
+                let tx = tx.clone();
+                tokio::spawn(read_subgroup(stream, tx, max_object_bytes));
+            }
+        });
+        rx
+    }
+
     /// The next control message already decoded by the reader task, or `None`
     /// when none is waiting. Never blocks on the network.
     pub fn poll_control(&mut self) -> Option<ControlMessage> {
@@ -205,6 +258,69 @@ async fn read_control(mut stream: RecvStream, out: mpsc::UnboundedSender<Control
             // `Ok(None)` is a clean finish; a zero read or an error ends it too.
             _ => return,
         }
+    }
+}
+
+/// Read one subgroup stream to its end, reporting the header, each whole
+/// object, and the close. A malformed stream ends here with a `StreamClosed`
+/// rather than failing the session: draft-16 lets a publisher reset an
+/// individual data stream, so the subscription survives losing one.
+async fn read_subgroup(
+    mut stream: RecvStream,
+    out: mpsc::UnboundedSender<DataEvent>,
+    max_object_bytes: usize,
+) {
+    let mut decoder = SubgroupStreamDecoder::new(max_object_bytes);
+    let mut chunk = vec![0u8; DATA_READ_CHUNK];
+    let mut route: Option<(u64, u64)> = None;
+    'read: loop {
+        loop {
+            match decoder.next_item() {
+                Ok(Some(StreamItem::Header(header))) => {
+                    route = Some((header.track_alias, header.group_id));
+                    if out
+                        .send(DataEvent::StreamOpened {
+                            track_alias: header.track_alias,
+                            group_id: header.group_id,
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                Ok(Some(StreamItem::Object(object))) => {
+                    let Some((track_alias, _)) = route else {
+                        break 'read; // an object before the header is impossible
+                    };
+                    if out
+                        .send(DataEvent::Object {
+                            track_alias,
+                            object,
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => break 'read,
+            }
+        }
+        match stream.read(&mut chunk).await {
+            Ok(Some(n)) if n > 0 => {
+                if decoder.push(&chunk[..n]).is_err() {
+                    break;
+                }
+            }
+            // A clean finish, a zero read, or a reset: the stream is over.
+            _ => break,
+        }
+    }
+    if let Some((track_alias, group_id)) = route {
+        let _ = out.send(DataEvent::StreamClosed {
+            track_alias,
+            group_id,
+        });
     }
 }
 

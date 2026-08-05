@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M903: `moqtsrc` subscribes to a MoQ Transport broadcast, reordering concurrent subgroup streams into an fMP4 byte stream under a fixed memory bound, validated against `moq-pub` and against `moqtsink`.
+
 - M902: `moqtsink` publishes an fMP4 stream as IETF MoQ Transport draft-16 groups and objects over WebTransport, validated through Cloudflare's `moq-relay-ietf` to `moq-sub`.
 
 - M901: `remotewtsink` / `remotewtsrc` / `remotewttransform` carry the distributed-graph wire stream over WebTransport (HTTP/3 over QUIC), validated both directions against an independent aioquic peer.

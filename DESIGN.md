@@ -3100,12 +3100,13 @@ the transform's request/response), a subgraph-as-a-unit wrapper (remoting a whol
 `Bin` rather than a single edge), and a WebTransport datagram carrier for the
 drop-tolerant case.
 
-### 4.20a MoQ Transport (`moqt` / `moqtsink`)
+### 4.20a MoQ Transport (`moqt` / `moqtsink` / `moqtsrc`)
 
 The distributed-graph carriers above move g2g's *own* packet stream between g2g
 peers. **MoQ Transport** is the other use of the same WebTransport carrier: a
 published IETF media protocol, so the peer on the far side is a relay and a
-player that know nothing about g2g. `moqt` (M902) implements it in-tree.
+player that know nothing about g2g. `moqt` (M902 / M903) implements it in-tree,
+both directions.
 
 **Dialect and version.** The dialect is the IETF draft, not moq-lite: moq-lite
 is a single-vendor dialect with its own ALPN and cannot talk to IETF endpoints.
@@ -3122,21 +3123,26 @@ SERVER_SETUP carry parameters only.
 
 **Layering.** `moqt::coding` (varints, byte strings, track namespaces and names,
 the delta-coded Key-Value-Pair sequences), `moqt::message` (the control message
-set and its `type / 16-bit length / payload` framing) and `moqt::data` (the
-subgroup stream header and per-object header) are pure `alloc` with no I/O, so
-the wire layer is unit-testable on byte vectors; the layouts are asserted
-against the byte sequences the reference implementation asserts for itself,
-because a round trip alone cannot catch two fields swapped with each other.
-`moqt::session` adds the live session over the M901 carrier: it reuses that
-carrier's dial (`remotewtio::dial`, which grew a subprotocol argument rather
-than a second copy of the certificate-hash handling), opens the control stream
-as the session's first bidirectional stream, and runs the control stream's read
-half in its own task, so a SUBSCRIBE is decoded as it arrives instead of when
-the element next has a frame to push. Everything a peer sends is bounded before
-use: counts and lengths are checked against the draft's limits, the KVP running
-key is a checked add, nothing is preallocated from a peer-supplied count, and a
-message that does not consume exactly its declared length is a protocol
-violation.
+set and its `type / 16-bit length / payload` framing), `moqt::data` (the
+subgroup stream header and per-object header), `moqt::reassembly` (decoding a
+subgroup stream, and the ordering policy below) and `moqt::catalog` (the JSON
+track list, written and read in one place so the two cannot drift) are pure
+`alloc` with no I/O, so the wire layer is unit-testable on byte vectors; the
+layouts are asserted against the byte sequences the reference implementation
+asserts for itself, because a round trip alone cannot catch two fields swapped
+with each other. `moqt::session` adds the live session over the M901 carrier: it
+reuses that carrier's dial (`remotewtio::dial`, which grew a subprotocol
+argument rather than a second copy of the certificate-hash handling), opens the
+control stream as the session's first bidirectional stream, and runs the control
+stream's read half in its own task, so a SUBSCRIBE is decoded as it arrives
+instead of when the element next has a frame to push. A subscriber additionally
+starts a data reader: one task accepting unidirectional streams, one task per
+stream decoding it, all funnelling whole objects into a single channel.
+Everything a peer sends is bounded before use: counts and lengths are checked
+against the draft's limits, the KVP running key is a checked add, nothing is
+preallocated from a peer-supplied count, a single object is capped
+(`max-object-size`) so one stream cannot allocate without limit, and a message
+that does not consume exactly its declared length is a protocol violation.
 
 **`moqtsink`.** The publisher takes an ISO-BMFF byte stream
 (`... ! mp4mux ! moqtsink location=https://relay:4443/ namespace=live/cam`), so
@@ -3169,10 +3175,46 @@ filter field, so `priority` (the publisher-priority byte in every subgroup
 header) is the only delivery knob and there is no group-order property to
 expose.
 
-Validation is against the reference peers rather than a loopback: `moqtsink`
-publishes through a locally spawned `moq-relay-ietf` and the bytes `moq-sub`
-writes on the far side are compared to the bytes that went in, over a run long
-enough to span a group boundary.
+**`moqtsrc`.** The subscriber is the inverse and emits a
+`ByteStream{IsoBmff}` a demuxer takes unchanged
+(`moqtsrc location=... namespace=live/cam ! fmp4demux ! ...`). It reads the
+`.catalog` track to learn the media tracks and their init track (falling back to
+the reference defaults, `0.mp4` and `{track_id}.m4s`, when the publisher
+publishes none), emits the init object as the first frame, then each media
+object as it comes into order. `track-name` picks a track other than the
+catalog's first.
+
+**Reassembly** is the substance of the receive side. A subgroup is its own
+unidirectional QUIC stream, so a track's streams arrive concurrently and its
+objects are ordered by (group id, object id) *across* streams, not by arrival.
+Object ids are delta-coded per stream (the first object's delta is its absolute
+id, each later one is `previous + delta + 1`). `Reassembler` holds a cursor and
+a fixed memory budget:
+
+- playback starts at the first group whose object 0 arrives, so joining
+  mid-group skips to the next group rather than emitting a partial one;
+- objects are emitted strictly in cursor order, and anything below the cursor (a
+  late stream, a duplicate) is dropped and counted;
+- a group is done when every stream that carried it has finished, or an
+  `EndOfGroup` object closed it; then the cursor moves to the next group id;
+- a hole in a group that is already done can never be filled, so the cursor
+  jumps to the lowest object still buffered in it;
+- **a group that never completes is bounded**, not waited on: past `max-groups`
+  or `max-buffer-bytes` the oldest group is dropped whole and the cursor moves
+  past it, so buffering never grows and the stream resumes at the next group
+  boundary instead of stalling. Objects for a group already left behind are
+  refused rather than reordered backwards.
+
+Because a data stream can outrun the control stream that names its track alias,
+events for an alias no subscription claims yet are held (under the same byte
+budget) and replayed when SUBSCRIBE_OK arrives.
+
+Validation is against the reference peers rather than a loopback, in both
+directions: `moqtsink` publishes through a locally spawned `moq-relay-ietf` and
+the bytes `moq-sub` writes on the far side are compared to the bytes that went
+in; `moq-pub` publishes through the same relay into `moqtsrc`; and the g2g round
+trip `mp4mux ! moqtsink` -> relay -> `moqtsrc` is compared byte for byte, over a
+run long enough to span a group boundary.
 
 ### 4.21 Local Zero-Copy IPC (CUDA)
 

@@ -354,6 +354,7 @@ OS-coupled elements live behind cargo features:
 | `WebRtcSink` (WHIP egress, H.264 + Opus) / `WebRtcWhepSrc` (WHEP ingest, H.264), via str0m: ICE/DTLS/SRTP, trickle ICE + ICE restart, NACK/RTX | `webrtc` | str0m (rust-crypto) + reqwest |
 | `WebRtcDataSrc` / `WebRtcDataSink` (P2P data channels on SCTP) | `webrtc` | str0m |
 | `MoqtSink` (IETF MoQ Transport draft-16 publisher: fMP4 → groups / objects over WebTransport) | `moqt` | web-transport-quinn |
+| `MoqtSrc` (IETF MoQ Transport draft-16 subscriber: catalog read, subgroup reassembly → fMP4) | `moqt` | web-transport-quinn |
 | `LiveKitSink` (publish into a LiveKit room: JWT + protobuf signalling) | `webrtc-livekit` | + tokio-tungstenite |
 | `HttpSrc` (HTTP(S) byte-stream source) | `http-src` | reqwest |
 | `HlsSrc` (HLS: TS + fMP4/CMAF, live, AES-128 / SAMPLE-AES) | `hls` | reqwest + aes |

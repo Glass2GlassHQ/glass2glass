@@ -46,6 +46,7 @@ use g2g_core::{
 use g2g_core::log::LogSource;
 
 use crate::fmp4::trun_first_sample_is_sync;
+use crate::moqt::catalog;
 use crate::moqt::coding::{MoqtError, Params, TrackName, TrackNamespace};
 use crate::moqt::data::{StreamHeaderType, SubgroupHeader, SubgroupObjectHeader};
 use crate::moqt::message::{publish_done_code, request_error_code, ControlMessage};
@@ -574,30 +575,15 @@ impl MoqtSink {
         Ok(())
     }
 
-    /// The catalog document (`moq-catalog`'s `Root`), written by hand so the
-    /// sink needs no JSON dependency. `moq-sub --catalog` and the browser
-    /// player read `initTrack` and each track's `name` from it.
+    /// The catalog document `moq-sub --catalog`, `moqtsrc` and the browser
+    /// player read `initTrack` and each track's `name` from.
     fn build_catalog(&self) -> String {
-        let namespace = self.namespace_tuple().to_path();
-        let mut tracks = String::new();
-        for (i, track) in self.tracks.iter().enumerate() {
-            if i > 0 {
-                tracks.push(',');
-            }
-            tracks.push_str(&format!(
-                "{{\"name\":\"{}\",\"initTrack\":\"{}\"{}}}",
-                track.name, self.init_track, track.selection_params
-            ));
-        }
-        format!(
-            concat!(
-                "{{\"version\":1,\"streamingFormat\":1,\"streamingFormatVersion\":\"0.2\",",
-                "\"supportsDeltaUpdates\":true,",
-                "\"commonTrackFields\":{{\"namespace\":\"{}\",\"packaging\":\"cmaf\",\"renderGroup\":1}},",
-                "\"tracks\":[{}]}}"
-            ),
-            namespace, tracks
-        )
+        let tracks: Vec<(String, String)> = self
+            .tracks
+            .iter()
+            .map(|t| (t.name.clone(), t.selection_params.clone()))
+            .collect();
+        catalog::build(&self.namespace_tuple().to_path(), &self.init_track, &tracks)
     }
 
     /// Finish every open stream, tell each subscriber the track ended, and

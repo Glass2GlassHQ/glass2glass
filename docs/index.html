@@ -733,7 +733,7 @@
             <div class="feature-card">
                 <span class="f-icon">&#128226;</span>
                 <h3>Egress</h3>
-                <p class="f-lead">Sans-IO RTP with 90 kHz PTS and receive-side NACK; WHIP publish over <code>str0m</code> (ICE / DTLS / SRTP, pure-Rust crypto); IETF MoQ Transport draft-16 publish to a relay over WebTransport, implemented in-tree.</p>
+                <p class="f-lead">Sans-IO RTP with 90 kHz PTS and receive-side NACK; WHIP publish over <code>str0m</code> (ICE / DTLS / SRTP, pure-Rust crypto); IETF MoQ Transport draft-16 publish and subscribe over WebTransport, implemented in-tree.</p>
                 <div class="chip-group">
                     <span class="chip-label">RTP / UDP</span>
                     <div class="chip-row"><span class="chip">RtpH264Packetizer</span><span class="chip">UdpSink</span></div>
@@ -744,7 +744,7 @@
                 </div>
                 <div class="chip-group">
                     <span class="chip-label">MoQ Transport</span>
-                    <div class="chip-row"><span class="chip">MoqtSink</span></div>
+                    <div class="chip-row"><span class="chip">MoqtSink</span><span class="chip">MoqtSrc</span></div>
                 </div>
                 <span class="feature-tag tag-core">Core</span>
             </div>
