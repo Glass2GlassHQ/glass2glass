@@ -42,8 +42,8 @@ use crate::demuxseek::{Admit, DemuxSeek};
 use crate::mpegts::{
     unwrap_metadata_au_cells, EsUnit, TsDemuxer, STREAM_TYPE_AAC, STREAM_TYPE_AC3,
     STREAM_TYPE_H264, STREAM_TYPE_H265, STREAM_TYPE_METADATA_PES, STREAM_TYPE_MPEG1_AUDIO,
-    STREAM_TYPE_MPEG2_AUDIO, STREAM_TYPE_MPEG4P2, STREAM_TYPE_PRIVATE_PES,
-    TAG_KEY_SERVICE_PROVIDER, TS_PACKET_LEN,
+    STREAM_TYPE_MPEG1_VIDEO, STREAM_TYPE_MPEG2_AUDIO, STREAM_TYPE_MPEG2_VIDEO, STREAM_TYPE_MPEG4P2,
+    STREAM_TYPE_PRIVATE_PES, TAG_KEY_SERVICE_PROVIDER, TS_PACKET_LEN,
 };
 
 const TS_SYNC: u8 = 0x47;
@@ -144,6 +144,10 @@ pub enum TsStream {
     H265,
     /// The first MPEG-4 Part 2 (Visual) video elementary stream.
     Mpeg4Part2,
+    /// The first MPEG-1 / MPEG-2 video elementary stream (stream_type 0x01 /
+    /// 0x02). The broadcast and DVD video codec; access units are forwarded as
+    /// the PES payload carries them (start-code framed, no parse element).
+    Mpeg2,
     /// The first AAC (ADTS) audio elementary stream.
     Aac,
     /// The first MPEG-1/2 Audio (Layer II, `mp2`) elementary stream (stream_type
@@ -311,6 +315,9 @@ impl TsDemux {
             STREAM_TYPE_H264 => (StreamType::Video, video(VideoCodec::H264)),
             STREAM_TYPE_H265 => (StreamType::Video, video(VideoCodec::H265)),
             STREAM_TYPE_MPEG4P2 => (StreamType::Video, video(VideoCodec::Mpeg4Part2)),
+            STREAM_TYPE_MPEG1_VIDEO | STREAM_TYPE_MPEG2_VIDEO => {
+                (StreamType::Video, video(VideoCodec::Mpeg2))
+            }
             STREAM_TYPE_AAC => audio(AudioFormat::Aac),
             STREAM_TYPE_MPEG1_AUDIO | STREAM_TYPE_MPEG2_AUDIO => audio(AudioFormat::Mp2),
             // 0x06 is a generic private PES; only an 'Opus' registration marks it
@@ -386,6 +393,7 @@ impl TsDemux {
             TsStream::H264 => Self::compressed_video(VideoCodec::H264),
             TsStream::H265 => Self::compressed_video(VideoCodec::H265),
             TsStream::Mpeg4Part2 => Self::compressed_video(VideoCodec::Mpeg4Part2),
+            TsStream::Mpeg2 => Self::compressed_video(VideoCodec::Mpeg2),
             TsStream::Aac => Self::compressed_audio(AudioFormat::Aac),
             TsStream::Mp2 => Self::compressed_audio(AudioFormat::Mp2),
             TsStream::Opus => Self::compressed_audio(AudioFormat::Opus),
@@ -434,6 +442,7 @@ impl TsDemux {
             TsStream::H264 => STREAM_TYPE_H264,
             TsStream::H265 => STREAM_TYPE_H265,
             TsStream::Mpeg4Part2 => STREAM_TYPE_MPEG4P2,
+            TsStream::Mpeg2 => STREAM_TYPE_MPEG2_VIDEO,
             TsStream::Aac => STREAM_TYPE_AAC,
             TsStream::Mp2 => STREAM_TYPE_MPEG1_AUDIO,
             TsStream::Opus => STREAM_TYPE_PRIVATE_PES,
@@ -456,6 +465,9 @@ impl TsDemux {
             }
             TsStream::Klv => {
                 stream_type == STREAM_TYPE_PRIVATE_PES || stream_type == STREAM_TYPE_METADATA_PES
+            }
+            TsStream::Mpeg2 => {
+                stream_type == STREAM_TYPE_MPEG1_VIDEO || stream_type == STREAM_TYPE_MPEG2_VIDEO
             }
             other => Self::selected_stream_type(other) == stream_type,
         }
@@ -551,6 +563,7 @@ impl TsDemux {
                 TsStream::Mpeg4Part2 => {
                     crate::annexb::au_is_keyframe(VideoCodec::Mpeg4Part2, &u.data)
                 }
+                TsStream::Mpeg2 => crate::annexb::au_is_keyframe(VideoCodec::Mpeg2, &u.data),
                 TsStream::Aac
                 | TsStream::Mp2
                 | TsStream::Opus
@@ -772,7 +785,7 @@ static TSDEMUX_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "stream",
         PropKind::Str,
-        "elementary stream to emit: h264 | h265 | aac | mp2 | opus | ac3 | klv | dvbsub | teletext",
+        "elementary stream to emit: h264 | h265 | mpeg2 | mpeg4part2 | aac | mp2 | opus | ac3 | klv | dvbsub | teletext",
     ),
     PropertySpec::new(
         "program-number",
@@ -804,6 +817,7 @@ fn ts_stream_from_str(s: &str) -> Option<TsStream> {
         "h264" => Some(TsStream::H264),
         "h265" => Some(TsStream::H265),
         "mpeg4part2" => Some(TsStream::Mpeg4Part2),
+        "mpeg2" => Some(TsStream::Mpeg2),
         "aac" => Some(TsStream::Aac),
         "mp2" => Some(TsStream::Mp2),
         "opus" => Some(TsStream::Opus),
@@ -821,6 +835,7 @@ pub(crate) fn ts_stream_to_str(stream: TsStream) -> &'static str {
         TsStream::H264 => "h264",
         TsStream::H265 => "h265",
         TsStream::Mpeg4Part2 => "mpeg4part2",
+        TsStream::Mpeg2 => "mpeg2",
         TsStream::Aac => "aac",
         TsStream::Mp2 => "mp2",
         TsStream::Opus => "opus",
@@ -839,6 +854,7 @@ fn es_to_ts_stream(es: &crate::mpegts::ElementaryStream) -> Option<TsStream> {
         STREAM_TYPE_H264 => Some(TsStream::H264),
         STREAM_TYPE_H265 => Some(TsStream::H265),
         STREAM_TYPE_MPEG4P2 => Some(TsStream::Mpeg4Part2),
+        STREAM_TYPE_MPEG1_VIDEO | STREAM_TYPE_MPEG2_VIDEO => Some(TsStream::Mpeg2),
         STREAM_TYPE_AAC => Some(TsStream::Aac),
         STREAM_TYPE_MPEG1_AUDIO | STREAM_TYPE_MPEG2_AUDIO => Some(TsStream::Mp2),
         STREAM_TYPE_PRIVATE_PES if es.opus_channels.is_some() => Some(TsStream::Opus),
@@ -878,7 +894,7 @@ pub fn forwardable_streams(demux: &TsDemuxer) -> Vec<TsStreamInfo> {
         .iter()
         .filter_map(|es| {
             let stream = es_to_ts_stream(es)?;
-            let video = matches!(stream, TsStream::H264 | TsStream::H265);
+            let video = matches!(stream, TsStream::H264 | TsStream::H265 | TsStream::Mpeg2);
             Some(TsStreamInfo {
                 stream,
                 caps: TsDemux::output_caps(stream),
@@ -895,6 +911,7 @@ impl PadTemplates for TsDemux {
         let source = CapsSet::from_alternatives(Vec::from([
             Self::output_caps(TsStream::H264),
             Self::output_caps(TsStream::H265),
+            Self::output_caps(TsStream::Mpeg2),
             Self::output_caps(TsStream::Aac),
             Self::output_caps(TsStream::Mp2),
             Self::output_caps(TsStream::Opus),
@@ -1218,6 +1235,7 @@ fn resolve_ts_stream_id(demux: &TsDemuxer, id: &str) -> Option<TsStream> {
         STREAM_TYPE_H264 => Some(TsStream::H264),
         STREAM_TYPE_H265 => Some(TsStream::H265),
         STREAM_TYPE_MPEG4P2 => Some(TsStream::Mpeg4Part2),
+        STREAM_TYPE_MPEG1_VIDEO | STREAM_TYPE_MPEG2_VIDEO => Some(TsStream::Mpeg2),
         STREAM_TYPE_AAC => Some(TsStream::Aac),
         _ => None,
     }

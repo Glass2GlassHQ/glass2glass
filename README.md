@@ -311,7 +311,7 @@ catalogs, `tools/mcugen-check.sh`).
 | `g2g-mcu` | Heap-free MCU peripheral elements (SPI display incl. banded streaming, camera / PCM capture, I2C sensor, UART, G.711 / ADPCM codecs, hardware JPEG-decode / H.264-encode seams, RTP egress + ingress, jitter buffer, fault-recovery watchdog) over `embedded-hal` / C-callback seams. | `no_std`, no alloc |
 | `g2g-mcugen` | Host graph compiler: a declarative MCU graph (YAML/JSON, audio or video/display) → a monomorphized static pipeline (heap-free Rust). | `std` (host tool) |
 | `g2g-plugin` | SDK for dynamically loadable plugins (`declare_plugin!` + ABI tag). | `no_std + alloc` |
-| `g2g-plugins` | Sources/sinks/transforms (RTSP, RTP in/out, HTTP/HLS/DASH/RTMP ingest, V4L2 / PipeWire / MF capture, ffmpeg, VAAPI, MF, VideoToolbox (macOS), MediaCodec (Android), Wayland, KMS, WASAPI, ALSA / PulseAudio / PipeWire audio, compositor, Embassy, web), container mux/demux (MP4, MPEG-TS, Matroska/WebM, FLV, Ogg), codec parsers + encoders (AV1, VP8/9, MJPEG), the tag system, and the `gst-launch` text DSL. | mixed |
+| `g2g-plugins` | Sources/sinks/transforms (RTSP, RTP in/out, HTTP/HLS/DASH/RTMP ingest, V4L2 / PipeWire / MF capture, ffmpeg, VAAPI, MF, VideoToolbox (macOS), MediaCodec (Android), Wayland, KMS, WASAPI, ALSA / PulseAudio / PipeWire audio, compositor, Embassy, web), container mux/demux (MP4, MPEG-TS, MPEG-PS, Matroska/WebM, FLV, Ogg), codec parsers + encoders (AV1, VP8/9, MJPEG), the tag system, and the `gst-launch` text DSL. | mixed |
 | `g2g-ml` | ORT, Burn, WgpuPreprocess, TensorPostprocess, multi-stream tensor batcher. | `std` |
 | `g2g-bridge` | GStreamer C-FFI bridge. | `std` |
 | `g2g-python` | Hosts gst-python-ml elements in-process (embedded CPython via pyo3). | `std` |
@@ -377,7 +377,7 @@ OS-coupled elements live behind cargo features:
 
 The container parsers and muxers (`mp4src` / `mp4sink`, `tsdemux` / `mpegtsmux`,
 `matroskademux` / `matroskamux`, `flvdemux` / `flvmux`, `oggdemux` / `oggmux`,
-`fmp4demux`), the bitstream parsers (`h264parse`, `h265parse`, `aacparse`,
+`fmp4demux`, `mpegpsdemux`), the bitstream parsers (`h264parse`, `h265parse`, `aacparse`,
 `opusparse`, `vp8parse`, `vp9parse`, `av1parse`), the software video/audio
 transforms (`videoscale` / `videorate` / `videocrop` / `videoflip` /
 `videobalance` / `videobox` / `alpha` / `gamma` / `deinterlace` / `timeoverlay`,
@@ -517,7 +517,9 @@ run_source_transform_sink(src, parse, sink, &clock, LatencyProfile::Live).await?
 ### MPEG-TS file → demux → H.264 parse → decode → Wayland
 
 The container demuxers (`tsdemux`, `matroskademux`, `flvdemux`, `oggdemux`,
-`fmp4demux`) accept a `Caps::ByteStream` and split out elementary streams.
+`fmp4demux`, `mpegpsdemux`) accept a `Caps::ByteStream` and split out elementary
+streams. `mpegpsdemux` reads `.mpg` / `.vob` program streams, including their DVD
+subpicture tracks.
 
 ```rust
 let src   = FileSrc::new("clip.ts", Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs });
@@ -599,7 +601,7 @@ run_graph(graph, &clock, LatencyProfile::Live).await?;
 ```
 
 Registered launch elements include `videotestsrc` / `audiotestsrc`, the SW
-transforms, the demuxers (`tsdemux`, `matroskademux`, `flvdemux`, `oggdemux`)
+transforms, the demuxers (`tsdemux`, `matroskademux`, `flvdemux`, `oggdemux`, `mpegpsdemux`)
 and muxers (`mpegtsmux`, `matroskamux`, `flvmux`, `oggmux`, `funnel`, `audiomixer`),
 `filesrc` / `filesink`, and `fakesink`. Feature-gated capture / decode / display
 elements still need explicit Rust construction.

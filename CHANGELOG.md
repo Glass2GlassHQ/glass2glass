@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M929: `mpegpsdemux` plays MPEG program streams (`.mpg` / `.vob`), DVD subpicture track included, and MPEG-2 video demuxes and decodes.
+
 - M928: the single-track `matroskamux` takes a text or bitmap subtitle pad, so a sidecar subtitle file muxes over one link.
 
 - M927: bitmap subtitle pads mux to Matroska `S_VOBSUB` / `S_DVBSUB` tracks and to a DVB subtitle stream in MPEG-TS.

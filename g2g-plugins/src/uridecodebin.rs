@@ -308,6 +308,160 @@ pub fn ts_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>,
     .map(Some)
 }
 
+/// Probe an MPEG program stream prefix into a parsed [`PsDemuxer`]. A program
+/// stream announces nothing up front, so "what it carries" is whatever streams
+/// the probe window has shown a packet of.
+#[cfg(feature = "std")]
+fn probe_ps(prefix: &[u8]) -> crate::psdemux::PsDemuxer {
+    let mut demux = crate::psdemux::PsDemuxer::new();
+    demux.push_data(prefix);
+    demux
+}
+
+/// The `playbin uri=X` auto-fan-out hook for MPEG program streams (M929): probe a
+/// `file://` `.mpg` / `.vob`, then assemble `FileSrc -> PsDemuxN -> {decode -> auto
+/// sink}` with one branch per forwardable stream, the program stream sibling of
+/// [`ts_playbin`]. Declines (`Ok(None)`) for a non-`file://` URI, an unreadable
+/// file, or one whose probe window showed no program stream packet. Subpicture
+/// tracks are not auto-plugged (they are bitmap cues, not overlay text); they are
+/// reachable through an explicit `d.text_0` pad on [`ps_demux_select`].
+#[cfg(feature = "std")]
+pub fn ps_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>, ParseError> {
+    let (uri, cc) = cc_request(uri);
+    let Some((path, prefix)) = open_file_prefix(&uri) else {
+        return Ok(None);
+    };
+    let demux = probe_ps(&prefix);
+    let infos = crate::psdemux::forwardable_streams(&demux);
+    if infos.is_empty() {
+        return Ok(None); // not a program stream (or nothing seen yet): decline
+    }
+    let streams: Vec<_> = infos.iter().map(|i| i.stream).collect();
+    let av: Vec<(Caps, bool)> = infos.iter().map(|i| (i.caps.clone(), i.video)).collect();
+    let source = crate::filesrc::FileSrc::new(
+        &path,
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::MpegPs,
+        },
+    );
+    if let (Some(cc), Some(video_idx)) = (cc, infos.iter().position(|i| i.video)) {
+        return build_cc_overlay(
+            reg,
+            Box::new(source),
+            crate::psdemux::PsDemuxN::new(streams),
+            &av,
+            video_idx,
+            cc,
+        )
+        .map(Some);
+    }
+    build_av_fanout(
+        reg,
+        Box::new(source),
+        crate::psdemux::PsDemuxN::new(streams),
+        &av,
+    )
+    .map(Some)
+}
+
+/// Probe a program stream file and build a [`PsDemuxN`](crate::psdemux::PsDemuxN)
+/// with the requested streams + their caps (M929). Shared by `mpegpsdemux`
+/// demux-select and `decodebin` fan-out. Declines a non-program-stream file.
+///
+/// Unlike MPEG-TS, a program stream's subpicture tracks are selectable here: they
+/// follow the A/V streams as `Text` kinds, so `d.text_0` resolves to the first
+/// one (`resolve_pads`'s documented A/V-then-subtitle order).
+#[cfg(feature = "std")]
+fn ps_select(
+    location: &str,
+    pads: &[PadRequest],
+) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)> {
+    let prefix = read_prefix(location)?;
+    let demux = probe_ps(&prefix);
+    let infos = crate::psdemux::forwardable_streams(&demux);
+    if infos.is_empty() {
+        return None;
+    }
+    let mut kinds: Vec<PadKind> = infos
+        .iter()
+        .map(|i| {
+            if i.video {
+                PadKind::Video
+            } else {
+                PadKind::Audio
+            }
+        })
+        .collect();
+    let mut streams: Vec<crate::psdemux::PsStream> = infos.iter().map(|i| i.stream).collect();
+    let mut caps: Vec<Caps> = infos.iter().map(|i| i.caps.clone()).collect();
+    // One port serves every subpicture substream (they share a selection), so a
+    // single Text kind follows the A/V ones.
+    if !crate::psdemux::subpicture_streams(&demux).is_empty() {
+        kinds.push(PadKind::Text);
+        streams.push(crate::psdemux::PsStream::SubPicture);
+        caps.push(Caps::SubPicture {
+            format: g2g_core::SubPictureFormat::VobSub,
+        });
+    }
+    let sel = resolve_pads(&kinds, pads)?;
+    let ports: Vec<_> = sel.iter().map(|&i| streams[i]).collect();
+    let caps: Vec<Caps> = sel.iter().map(|&i| caps[i].clone()).collect();
+    Some((Box::new(crate::psdemux::PsDemuxN::new(ports)), caps))
+}
+
+/// `mpegpsdemux` explicit fan-out (M929).
+#[cfg(feature = "std")]
+pub fn ps_demux_select(
+    name: &str,
+    location: &str,
+    pads: &[PadRequest],
+) -> Option<Box<dyn DynMultiOutputElement>> {
+    (name == "mpegpsdemux")
+        .then(|| ps_select(location, pads).map(|(d, _)| d))
+        .flatten()
+}
+
+/// `decodebin` fan-out over a program stream file (M929): the demuxer + per-port
+/// caps.
+#[cfg(feature = "std")]
+pub fn ps_decodebin_select(
+    location: &str,
+    pads: &[PadRequest],
+) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)> {
+    ps_select(location, pads)
+}
+
+/// Bare-`decodebin` primary-stream hook for MPEG program streams (M929): the
+/// program stream sibling of [`ts_primary_stream`]. An audio-only `.mpg` through
+/// `filesrc ! decodebin` selects the demux's audio stream instead of failing on
+/// the default video port.
+#[cfg(feature = "std")]
+pub fn ps_primary_stream(location: &str, caps: &Caps) -> Option<PrimaryStream> {
+    if !matches!(
+        caps,
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::MpegPs
+        }
+    ) {
+        return None;
+    }
+    let prefix = read_prefix(location)?;
+    let infos = crate::psdemux::forwardable_streams(&probe_ps(&prefix));
+    // A video stream present: the demux's default video port is right, decline.
+    if infos.is_empty() || infos.iter().any(|i| i.video) {
+        return None;
+    }
+    let audio = infos.into_iter().find(|i| !i.video)?;
+    Some(PrimaryStream {
+        demux: "mpegpsdemux",
+        props: alloc::vec![(
+            "stream".to_string(),
+            crate::psdemux::ps_stream_to_str(audio.stream).to_string(),
+        )],
+        caps: audio.caps,
+    })
+}
+
 /// Map a per-branch decode-chain failure to the text-parser error (the
 /// [`decodebin`](Registry::decodebin) form): no chain quotes the unplugged input
 /// caps, a link error wraps the graph error.

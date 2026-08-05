@@ -207,7 +207,7 @@ fn parse_idx_entry(rest: &str) -> Option<IdxEntry> {
 /// Largest subpicture unit accepted: the packet's own size field is 16 bits, so
 /// nothing longer can be declared, and a reassembly that overruns it is a `.sub`
 /// whose packets do not belong to one cue.
-const MAX_SPU_BYTES: usize = u16::MAX as usize;
+pub(crate) const MAX_SPU_BYTES: usize = u16::MAX as usize;
 
 /// Pull the subpicture unit at `filepos` out of a `.sub`, an MPEG-2 program
 /// stream. The unit is spread over the `private_stream_1` PES packets from there

@@ -200,6 +200,7 @@ fn video_codec_to_u8(c: VideoCodec) -> u8 {
         VideoCodec::SorensonH263 => 8,
         VideoCodec::Vp6 { alpha: false } => 9,
         VideoCodec::Vp6 { alpha: true } => 10,
+        VideoCodec::Mpeg2 => 11,
     }
 }
 fn video_codec_from_u8(v: u8) -> Result<VideoCodec, WireError> {
@@ -215,6 +216,7 @@ fn video_codec_from_u8(v: u8) -> Result<VideoCodec, WireError> {
         8 => VideoCodec::SorensonH263,
         9 => VideoCodec::Vp6 { alpha: false },
         10 => VideoCodec::Vp6 { alpha: true },
+        11 => VideoCodec::Mpeg2,
         _ => return Err(WireError::BadTag),
     })
 }
@@ -313,6 +315,7 @@ fn bytestream_to_u8(e: ByteStreamEncoding) -> u8 {
         ByteStreamEncoding::IsoBmff => 4,
         ByteStreamEncoding::Mp4 => 5,
         ByteStreamEncoding::Ivf => 6,
+        ByteStreamEncoding::MpegPs => 7,
     }
 }
 fn bytestream_from_u8(v: u8) -> Result<ByteStreamEncoding, WireError> {
@@ -324,6 +327,7 @@ fn bytestream_from_u8(v: u8) -> Result<ByteStreamEncoding, WireError> {
         4 => ByteStreamEncoding::IsoBmff,
         5 => ByteStreamEncoding::Mp4,
         6 => ByteStreamEncoding::Ivf,
+        7 => ByteStreamEncoding::MpegPs,
         _ => return Err(WireError::BadTag),
     })
 }

@@ -2108,6 +2108,48 @@ output is a playable FLV (what `RtmpSink` publishes). With MP4
 (`Mp4Src`/`Mp4Sink`), MPEG-TS, Matroska/WebM, Ogg, and FLV, the demux/mux
 coverage spans the major containers.
 
+The MPEG program stream demuxer (`mpegpsdemux`, `Caps::ByteStream{MpegPs}`) is
+the `.mpg` / `.vob` read path: VCD-era MPEG-1 program streams and DVD MPEG-2 ones
+through one element (M929). `g2g-plugins::psdemux::PsDemuxer` syncs to pack
+headers (`00 00 01 BA`, both the MPEG-2 `01`-marker layout with its stuffing and
+the flat 8-byte MPEG-1 one) and reads the PES packets between them; `PsDemux` /
+`PsDemuxN` wrap it with a `PsStream` selection (`Mpeg2` video, `Mp2` audio, `Ac3`,
+`SubPicture`). Two things make it unlike `TsDemux` rather than a copy of it.
+
+There is no PAT/PMT: a stream is identified by its PES `stream_id`
+(0xE0..=0xEF video, 0xC0..=0xDF audio) and, for the `private_stream_1` (0xBD)
+that DVD carries AC-3 and subpictures on, by the substream id byte opening its
+payload (0x80..=0x87 AC-3 behind a 4-byte DVD substream header, 0x20..=0x3F
+subpicture). Streams are therefore *discovered* by observing packets, so the
+`playbin` / `decodebin` probe hooks report what the probe window has actually
+shown rather than reading a table, and geometry comes from the video's own
+sequence header (`00 00 01 B3`), which the demuxer parses to fix the video caps
+via `CapsChanged`.
+
+And a PES payload is not an access unit. A program stream cuts its packets on
+sector boundaries with no regard for picture boundaries, so one packet can hold
+the tail of a picture and the head of the next; feeding those to a decoder
+verbatim desynchronizes it. The demuxer therefore reframes the video on its own
+start codes (a unit runs from one picture header, with any sequence / GOP header
+opening it, to the next) and carries the timestamp of the PES packet each unit's
+first byte fell in. That is the job an elementary-stream parser does for the
+other codecs, kept here because it is program-stream-specific: MPEG-TS needs
+none of it. Audio and AC-3 are self-syncing and are grouped per timestamped
+packet instead, matching what `TsDemux` emits.
+
+Subpicture units span several PES packets and declare their own total size in
+their first two bytes, so they are reassembled by size (bounded by the 16-bit
+maximum that size field can state) and stamped with the opening packet's PTS and
+the unit's own hide time as duration. A program stream carries no palette, so
+the pad opens on a synthesized `.idx` holding only the video's `size:` line and
+`VobSubDec`'s default palette renders the cues (§4.18). Out of scope: LPCM and
+DTS substreams, the program stream map, a PS muxer, and seeking.
+
+`VideoCodec::Mpeg2` covers MPEG-1 and MPEG-2 video as one codec, libavcodec's
+`MPEG2VIDEO` decoder playing both; MPEG-TS stream types 0x01 and 0x02 map to it
+through `TsStream::Mpeg2`, and `au_is_keyframe` reads its sync points (an
+I-picture, or a sequence / GOP header).
+
 Adaptive streaming sits one layer above these demuxers: an HTTP byte source feeds
 a playlist/manifest-driven source that fetches media segments and hands them to
 the matching byte-stream demuxer. `g2g-plugins::httpsrc::HttpSrc` (the `http-src`

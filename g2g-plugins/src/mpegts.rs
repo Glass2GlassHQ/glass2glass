@@ -75,6 +75,11 @@ pub const STREAM_TYPE_H264: u8 = 0x1B;
 pub const STREAM_TYPE_H265: u8 = 0x24;
 /// PMT `stream_type` for MPEG-4 Part 2 (Visual) video.
 pub const STREAM_TYPE_MPEG4P2: u8 = 0x10;
+/// PMT `stream_type` for MPEG-1 Video (ISO/IEC 11172-2).
+pub const STREAM_TYPE_MPEG1_VIDEO: u8 = 0x01;
+/// PMT `stream_type` for MPEG-2 Video (ISO/IEC 13818-2). One `VideoCodec::Mpeg2`
+/// covers both this and 0x01, the MPEG2VIDEO decoder playing either.
+pub const STREAM_TYPE_MPEG2_VIDEO: u8 = 0x02;
 /// PMT `stream_type` for ADTS AAC audio.
 pub const STREAM_TYPE_AAC: u8 = 0x0F;
 /// PMT `stream_type` for MPEG-1 Audio (Layer I/II/III, e.g. `mp2`).
@@ -626,7 +631,7 @@ impl TsDemuxer {
 /// only rides a PES that also carries a PTS (`PTS_DTS_flags == '11'`). If the
 /// start code or optional header is malformed, returns the whole payload with no
 /// timestamps (so a best-effort stream still flows).
-fn parse_pes_header(payload: &[u8]) -> (Option<u64>, Option<u64>, &[u8]) {
+pub(crate) fn parse_pes_header(payload: &[u8]) -> (Option<u64>, Option<u64>, &[u8]) {
     // PES: 00 00 01, stream_id, PES_packet_length(2), then for media stream_ids
     // an optional header: flags(2) + PES_header_data_length(1) + that many bytes.
     if payload.len() < 9 || payload[0] != 0x00 || payload[1] != 0x00 || payload[2] != 0x01 {
@@ -658,7 +663,7 @@ fn parse_pes_header(payload: &[u8]) -> (Option<u64>, Option<u64>, &[u8]) {
 }
 
 /// Decode a 33-bit MPEG PTS/DTS from its 5-byte field (90 kHz units).
-fn decode_timestamp(b: &[u8]) -> u64 {
+pub(crate) fn decode_timestamp(b: &[u8]) -> u64 {
     (((b[0] >> 1) & 0x07) as u64) << 30
         | (b[1] as u64) << 22
         | (((b[2] >> 1) & 0x7F) as u64) << 15

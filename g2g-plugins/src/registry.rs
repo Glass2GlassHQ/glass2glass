@@ -511,6 +511,10 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::of::<TsDemux>("tsdemux", || {
         Box::new(TsDemux::new())
     }));
+    reg.register_launch(LaunchFactory::of::<crate::psdemux::PsDemux>(
+        "mpegpsdemux",
+        || Box::new(crate::psdemux::PsDemux::new()),
+    ));
     reg.register_launch(LaunchFactory::of::<MkvDemux>("matroskademux", || {
         Box::new(MkvDemux::new())
     }));
@@ -804,6 +808,7 @@ fn register_uri_handlers(reg: &mut Registry) {
     reg.register_playbin(crate::uridecodebin::mkv_playbin);
     reg.register_playbin(crate::uridecodebin::ts_playbin);
     reg.register_playbin(crate::uridecodebin::mp4_playbin);
+    reg.register_playbin(crate::uridecodebin::ps_playbin);
     // Lone-audio-stream files the container hooks decline: Ogg (Opus / FLAC)
     // and elementary audio (`.flac`), M775.
     reg.register_playbin(crate::uridecodebin::audio_playbin);
@@ -814,12 +819,14 @@ fn register_uri_handlers(reg: &mut Registry) {
     reg.register_demux_select(crate::uridecodebin::ts_demux_select);
     reg.register_demux_select(crate::uridecodebin::mp4_demux_select);
     reg.register_demux_select(crate::uridecodebin::ogg_demux_select);
+    reg.register_demux_select(crate::uridecodebin::ps_demux_select);
     // `decodebin` fan-out (M482): `filesrc location=x ! decodebin name=d  d.video_0
     // ! ...  d.audio_0 ! ...` probes the file, builds the multi-output demuxer, and
     // auto-plugs a decoder onto each port (the decode-per-port sibling of the above).
     reg.register_decodebin_select(crate::uridecodebin::mkv_decodebin_select);
     reg.register_decodebin_select(crate::uridecodebin::ts_decodebin_select);
     reg.register_decodebin_select(crate::uridecodebin::mp4_decodebin_select);
+    reg.register_decodebin_select(crate::uridecodebin::ps_decodebin_select);
     // Bare `filesrc location=X ! decodebin` primary-stream selection (M746): an
     // audio-only container's single-stream demux defaults to a video port; the hook
     // sniffs the file and selects the real (audio) stream instead.
@@ -827,6 +834,7 @@ fn register_uri_handlers(reg: &mut Registry) {
     reg.register_primary_stream(crate::uridecodebin::mp4_primary_stream);
     reg.register_primary_stream(crate::uridecodebin::mkv_primary_stream);
     reg.register_primary_stream(crate::uridecodebin::ogg_primary_stream);
+    reg.register_primary_stream(crate::uridecodebin::ps_primary_stream);
     // hls:// fan-out (M395): probe the master playlist, fan its variant's muxed TS
     // streams out; the hls_handler is the single-stream fallback it declines to.
     #[cfg(feature = "hls")]
@@ -935,6 +943,10 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     reg.register(ElementFactory::of::<TsDemux>("tsdemux", |_| {
         Box::new(TsDemux::new())
     }));
+    reg.register(ElementFactory::of::<crate::psdemux::PsDemux>(
+        "mpegpsdemux",
+        |_| Box::new(crate::psdemux::PsDemux::new()),
+    ));
     reg.register(ElementFactory::of::<MkvDemux>("matroskademux", |_| {
         Box::new(MkvDemux::new())
     }));

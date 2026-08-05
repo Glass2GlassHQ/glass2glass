@@ -325,6 +325,9 @@ pub mod tsdemux;
 // MPEG-TS muxer element (no_std): one elementary stream -> Caps::ByteStream{MpegTs},
 // the inverse of tsdemux.
 pub mod tsmux;
+// MPEG program stream demuxer (no_std): Caps::ByteStream{MpegPs} -> one
+// elementary stream, the `.mpg` / `.vob` sibling of tsdemux.
+pub mod psdemux;
 // Matroska / WebM demuxer parsing core (no_std): EBML -> Tracks + Cluster frames.
 pub mod matroska;
 // Matroska / WebM demuxer element (no_std): Caps::ByteStream{Matroska} -> one

@@ -25,6 +25,9 @@ const OGG_MAGIC: [u8; 4] = *b"OggS";
 const FLV_MAGIC: [u8; 3] = *b"FLV";
 /// IVF file signature (the first 4 bytes of the 32-byte `DKIF` header).
 const IVF_MAGIC: [u8; 4] = *b"DKIF";
+/// MPEG program stream: a pack header start code. Every PS (MPEG-1 `.mpg`,
+/// MPEG-2 `.vob`) opens on one, and packs recur throughout.
+const PS_PACK_MAGIC: [u8; 4] = [0x00, 0x00, 0x01, 0xBA];
 
 /// Guess a media type from a stream's leading bytes, or `None` if nothing matches
 /// (a `typefind` failure). Tries container magic first (binary signatures), then a
@@ -93,6 +96,9 @@ pub fn sniff(header: &[u8]) -> Option<ByteStreamEncoding> {
     }
     if header.starts_with(&IVF_MAGIC) {
         return Some(ByteStreamEncoding::Ivf);
+    }
+    if header.starts_with(&PS_PACK_MAGIC) {
+        return Some(ByteStreamEncoding::MpegPs);
     }
     // ISO-BMFF (MP4 / QuickTime): both progressive (`moov`-based) and fragmented
     // (CMAF) map to the one `IsoBmff` encoding; the demuxer handles either.

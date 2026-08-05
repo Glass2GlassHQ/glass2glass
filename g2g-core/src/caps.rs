@@ -504,9 +504,10 @@ fn codec_gst_media_type(c: VideoCodec) -> &'static str {
         VideoCodec::Vp9 => "video/x-vp9",
         VideoCodec::Mjpeg => "image/jpeg",
         // GStreamer distinguishes MPEG versions with a `mpegversion` field on
-        // `video/mpeg`; g2g's media-type string carries no fields and no other
-        // codec uses this type, so the bare string is unambiguous internally.
-        VideoCodec::Mpeg4Part2 => "video/mpeg",
+        // `video/mpeg`; g2g's media-type string carries no fields, so MPEG-1/2
+        // video and MPEG-4 Part 2 share it here the way mp2 and AAC share
+        // `audio/mpeg` below (the codec split lives in the caps).
+        VideoCodec::Mpeg4Part2 | VideoCodec::Mpeg2 => "video/mpeg",
         // JPEG XS codestream (GStreamer's `jpegxsdec` / `jpegxsenc` caps).
         VideoCodec::JpegXs => "image/x-jxsc",
         VideoCodec::SorensonH263 => "video/x-flash-video",
@@ -553,6 +554,7 @@ fn bytestream_gst_media_type(e: ByteStreamEncoding) -> &'static str {
         ByteStreamEncoding::IsoBmff => "video/quicktime",
         ByteStreamEncoding::Mp4 => "video/quicktime",
         ByteStreamEncoding::Ivf => "video/x-ivf",
+        ByteStreamEncoding::MpegPs => "video/mpeg",
     }
 }
 
@@ -903,6 +905,14 @@ pub enum VideoCodec {
     /// `FfmpegVideoDec`. Carried in MP4 as an `mp4v` sample entry (esds
     /// objectTypeIndication `0x20`) and in MPEG-TS as stream_type `0x10`.
     Mpeg4Part2,
+    /// MPEG-1 Video (ISO/IEC 11172-2) and MPEG-2 Video (ISO/IEC 13818-2, ITU-T
+    /// H.262) as one codec: MPEG-2 is a strict superset of MPEG-1, and the one
+    /// libavcodec `MPEG2VIDEO` decoder plays both, so a VCD `.mpg` and a DVD
+    /// `.vob` negotiate the same link. The DVD / broadcast video codec, carried
+    /// in an MPEG program stream under stream_id 0xE0..=0xEF and in MPEG-TS
+    /// under stream_type 0x01 (MPEG-1) / 0x02 (MPEG-2). Decoded in software via
+    /// `FfmpegVideoDec`.
+    Mpeg2,
     /// Sorenson Spark (Sorenson H.263), the original Flash video codec, carried
     /// as FLV video codec id 2 (GStreamer `video/x-flash-video`, libavcodec
     /// `flv1`). An H.263 derivative with Flash's own picture header, so it is a
@@ -962,6 +972,11 @@ pub enum ByteStreamEncoding {
     /// 12-byte size+timestamp header before each frame. The simple raw container
     /// libvpx / libaom conformance vectors ship in (VP8 / VP9 / AV1).
     Ivf,
+    /// MPEG-1 / MPEG-2 Program Stream (ISO/IEC 13818-1): packs, each a
+    /// `00 00 01 BA` header plus the PES packets that follow it, streams
+    /// identified by PES `stream_id` rather than a PID and a PMT. The `.mpg` /
+    /// `.vob` file carrier (VCD, SVCD, DVD), demuxed by `mpegpsdemux`.
+    MpegPs,
 }
 
 /// Format of a [`Caps::Text`] stream. Generalizes "subtitles": a `Text` link
