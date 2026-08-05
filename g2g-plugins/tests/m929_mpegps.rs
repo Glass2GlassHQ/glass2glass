@@ -766,6 +766,18 @@ fn malformed_input_never_panics() {
             "pack with an impossible marker",
             Vec::from([0x00u8, 0x00, 0x01, 0xBA, 0xFF, 0xFF, 0xFF, 0xFF]),
         ),
+        // An MPEG-2 pack whose stuffing count names bytes that never arrive:
+        // the header is complete but the pack it declares is not.
+        ("MPEG-2 pack truncated inside its stuffing", {
+            let mut v = Vec::from([0x00u8, 0x00, 0x01, 0xBA]);
+            v.extend_from_slice(&[0x44, 0x00, 0x04, 0x00, 0x04, 0x01, 0x00, 0x03, 0xF8]);
+            v.push(0x07); // pack_stuffing_length = 7, so the pack is 21 bytes
+            v
+        }),
+        (
+            "MPEG-1 pack truncated after its marker",
+            Vec::from([0x00u8, 0x00, 0x01, 0xBA, 0x21]),
+        ),
         (
             "zero packet length",
             Vec::from([0x00u8, 0x00, 0x01, 0xE0, 0x00, 0x00, 0x00, 0x00, 0x01, 0xE0]),
@@ -859,6 +871,424 @@ fn a_reserved_sequence_header_is_rejected() {
     assert!(parse_sequence_header(&[0x00, 0x00, 0x01, 0xB3, 0x16]).is_none());
 }
 
+/// A truncated pack must leave the parser waiting, not reading past its buffer.
+/// Both pack layouts declare a length from bytes inside the header itself, so a
+/// file cut short mid-pack once made the parser drain past the end and panic.
+#[test]
+fn a_truncated_pack_waits_for_the_rest_instead_of_overrunning() {
+    // MPEG-2: 14 header bytes present, stuffing_length 7 promising a 21-byte pack.
+    let mut head = Vec::from([0x00u8, 0x00, 0x01, 0xBA]);
+    head.extend_from_slice(&[0x44, 0x00, 0x04, 0x00, 0x04, 0x01, 0x00, 0x03, 0xF8, 0x07]);
+    assert_eq!(head.len(), 14);
+    let mut demux = PsDemuxer::new();
+    demux.push_data(&head);
+    assert!(demux.streams().is_empty(), "nothing decodable yet");
+
+    // The pack completes and a video packet follows: the parser picks up where
+    // it left off rather than having discarded the stream.
+    let mut rest = vec![0xFFu8; 7]; // the promised stuffing
+    rest.extend_from_slice(&pes(0xE0, Some(9_000), &video_unit(352, 288, 1)));
+    demux.push_data(&rest);
+    demux.flush();
+    assert_eq!(
+        demux.streams().len(),
+        1,
+        "the completed pack's packet is parsed"
+    );
+    assert_eq!(
+        demux.sequence().map(|s| (s.width, s.height)),
+        Some((352, 288))
+    );
+
+    // MPEG-1: the '0010' marker promises 12 bytes, only 5 are present.
+    let mut demux = PsDemuxer::new();
+    demux.push_data(&[0x00, 0x00, 0x01, 0xBA, 0x21]);
+    assert!(demux.take_units().is_empty());
+}
+
+/// A spliced program stream (concatenated titles) changes geometry mid-file, and
+/// the video caps have to follow it: the refinement is not a one-shot.
+#[tokio::test]
+async fn a_mid_stream_geometry_change_is_announced() {
+    let mut file = Vec::new();
+    for (i, (w, h)) in [(352u32, 288u32), (352, 288), (704, 576), (704, 576)]
+        .into_iter()
+        .enumerate()
+    {
+        file.extend_from_slice(&PACK);
+        let pts = 9_000 * (i as u64 + 1);
+        file.extend_from_slice(&pes(0xE0, Some(pts), &video_unit(w, h, 1)));
+    }
+    let caps = demux(&file, PsStream::Mpeg2).await.caps_changes();
+    let geometry: Vec<(Dim, Dim)> = caps
+        .iter()
+        .filter_map(|c| match c {
+            Caps::CompressedVideo { width, height, .. } => Some((width.clone(), height.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        geometry,
+        [
+            (Dim::Fixed(352), Dim::Fixed(288)),
+            (Dim::Fixed(704), Dim::Fixed(576)),
+        ],
+        "the new geometry is announced, and neither is repeated"
+    );
+}
+
+/// A long run with no start code at all must not make every fragment re-scan the
+/// whole buffer: a crafted file would otherwise cost quadratic work. Feeding a
+/// megabyte in small fragments finishes promptly if the scan is linear.
+#[test]
+fn a_stream_with_no_start_codes_does_not_rescan_quadratically() {
+    let mut file = Vec::new();
+    file.extend_from_slice(&PACK);
+    // One PES whose payload is 60 KiB of a byte that can never open a start code.
+    file.extend_from_slice(&pes(0xE0, Some(9_000), &vec![0x42u8; 60_000]));
+    let mut demux = PsDemuxer::new();
+    let start = std::time::Instant::now();
+    for _ in 0..64 {
+        demux.push_data(&file);
+    }
+    demux.flush();
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(5),
+        "the start-code scan stayed linear: {:?}",
+        start.elapsed()
+    );
+}
+
+/// A program stream cut mid-subpicture must yield only whole cues: the
+/// half-arrived unit can never reach its declared size, so it is dropped rather
+/// than decoded onto a short canvas. Every canvas downstream is a full frame.
+#[tokio::test]
+async fn a_stream_cut_mid_subpicture_yields_only_whole_frames() {
+    // One complete cue, then the opening half of a second one.
+    let cue = spu_unit(40, 60, 120, 40);
+    let mut file = Vec::new();
+    // Two pictures, so a video access unit completes (and its sequence header
+    // parses) before the first cue, the way a real title plays.
+    for i in 0..2 {
+        file.extend_from_slice(&PACK);
+        file.extend_from_slice(&pes(0xE0, Some(9_000 * (i + 1)), &video_unit(720, 480, 1)));
+    }
+    file.extend_from_slice(&PACK);
+    file.extend_from_slice(&pes_private(0x20, Some(27_000), &cue));
+    file.extend_from_slice(&PACK);
+    // Truncated: the unit declares its full size but only a third arrives.
+    file.extend_from_slice(&pes_private(0x20, Some(180_000), &cue[..cue.len() / 3]));
+
+    let demuxed = demux(&file, PsStream::SubPicture).await;
+    let frames = demuxed.frames();
+    assert_eq!(
+        frames.len(),
+        2,
+        "the synthesized .idx and the one complete cue, not the truncated one"
+    );
+    let config = parse_idx(&bytes(frames[0])).expect("the pad opens on .idx text");
+    assert_eq!(config.size, Some((720, 480)));
+    let spu = bytes(frames[1]);
+    assert_eq!(
+        u16::from_be_bytes([spu[0], spu[1]]) as usize,
+        spu.len(),
+        "the emitted cue is exactly its declared size"
+    );
+
+    let mut dec = VobSubDec::new();
+    dec.configure_pipeline(&Caps::SubPicture {
+        format: SubPictureFormat::VobSub,
+    })
+    .expect("vobsubdec accepts a subpicture pad");
+    let mut sink = Collect::default();
+    for packet in demuxed.packets {
+        if let PipelinePacket::DataFrame(f) = packet {
+            let timing = f.timing;
+            let data = bytes(&f);
+            dec.process(
+                PipelinePacket::DataFrame(Frame::new(
+                    MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
+                    timing,
+                    0,
+                )),
+                &mut sink,
+            )
+            .await
+            .expect("decode a cue");
+        }
+    }
+    let canvases = sink.frames();
+    assert!(!canvases.is_empty(), "the complete cue rendered");
+    let full = (720 * 480 * 4) as usize;
+    for (i, c) in canvases.iter().enumerate() {
+        assert_eq!(
+            bytes(c).len(),
+            full,
+            "canvas {i} is a whole 720x480 frame, never a partial one"
+        );
+    }
+}
+
+/// AC-3 frames straddle the sector-cut PES packets of a program stream, so the
+/// demuxer has to realign them: a decoder is handed whole syncframes, not the
+/// fragments the container happens to carry. Authored so no frame starts where a
+/// packet does after the first.
+#[tokio::test]
+async fn ac3_frames_split_across_packets_are_realigned() {
+    // Six 384-byte syncframes (frmsizecod 8, fscod 0 -> 128 words) back to back.
+    const FRAME: usize = 256;
+    let stream: Vec<u8> = (0..8).flat_map(|i| ac3_syncframe(FRAME, i as u8)).collect();
+    assert_eq!(stream.len(), FRAME * 8);
+
+    // Cut it into packets that deliberately do not fall on frame boundaries.
+    let cuts = [100usize, 300, 700, 1100, 1500, stream.len()];
+    let mut file = Vec::from(PACK);
+    let mut at = 0usize;
+    for cut in cuts {
+        let chunk = &stream[at..cut];
+        // The DVD pointer is 1-based from the byte after it, and 0 when no frame
+        // starts in this packet.
+        let first_in_chunk = (at..cut).find(|o| o % FRAME == 0).map(|o| o - at);
+        let ptr = first_in_chunk.map_or(0, |o| o + 1) as u16;
+        file.extend_from_slice(&PACK);
+        file.extend_from_slice(&pes_ac3(ptr, Some(9_000 + at as u64), chunk));
+        at = cut;
+    }
+
+    let frames = demux(&file, PsStream::Ac3).await;
+    let emitted: Vec<Vec<u8>> = frames.frames().iter().map(|f| bytes(f)).collect();
+    let total: usize = emitted.iter().map(|u| u.len()).sum();
+    assert_eq!(
+        total % FRAME,
+        0,
+        "every emitted byte belongs to a whole syncframe"
+    );
+    assert_eq!(total / FRAME, 8, "all eight frames survive realignment");
+    // Each emitted unit opens on a syncword and is a whole number of frames.
+    for (i, u) in emitted.iter().enumerate() {
+        assert_eq!(&u[..2], &[0x0B, 0x77], "unit {i} opens on a syncframe");
+        assert_eq!(u.len() % FRAME, 0, "unit {i} is whole frames");
+    }
+    // The payload survives byte for byte, in order.
+    let joined: Vec<u8> = emitted.concat();
+    assert_eq!(joined, stream, "the frames are the authored ones, in order");
+}
+
+/// A byte range cut from the middle of a VOB joins mid-GOP: the first pictures
+/// arrive with no sequence header ahead of them, so nothing downstream knows the
+/// geometry and libavcodec fails the whole stream on "invalid frame dimensions".
+/// The demuxer drops to the first sync point instead, the tune-in convention the
+/// rest of the tree follows.
+#[tokio::test]
+async fn a_mid_gop_tune_in_drops_to_the_first_sequence_header() {
+    let mut file = Vec::new();
+    // Two pictures that are not sync points, then the sequence, then one more.
+    for (i, unit) in [
+        picture_unit(2),
+        picture_unit(3),
+        video_unit(720, 480, 1),
+        picture_unit(2),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        file.extend_from_slice(&PACK);
+        file.extend_from_slice(&pes(0xE0, Some(9_000 * (i as u64 + 1)), &unit));
+    }
+
+    let out = demux(&file, PsStream::Mpeg2).await;
+    let frames = out.frames();
+    assert_eq!(
+        frames.len(),
+        2,
+        "only the sequence-header unit and what follows it"
+    );
+
+    let first = bytes(frames[0]);
+    assert!(
+        first.starts_with(&[0x00, 0x00, 0x01, 0xB3]),
+        "the stream opens on the sequence header"
+    );
+    assert!(
+        parse_sequence_header(&first).is_some(),
+        "so a decoder can size its frames"
+    );
+    assert!(
+        frames[0].timing.keyframe,
+        "the first unit is flagged an independently-decodable point"
+    );
+    assert!(!frames[1].timing.keyframe, "the P-picture after it is not");
+
+    // And the geometry is announced before any frame goes out.
+    assert_eq!(
+        out.caps_changes().first(),
+        Some(&Caps::CompressedVideo {
+            codec: VideoCodec::Mpeg2,
+            width: Dim::Fixed(720),
+            height: Dim::Fixed(480),
+            framerate: Rate::Fixed(25 << 16),
+        })
+    );
+    let first_caps = out
+        .packets
+        .iter()
+        .position(|p| matches!(p, PipelinePacket::CapsChanged(_)));
+    let first_frame = out
+        .packets
+        .iter()
+        .position(|p| matches!(p, PipelinePacket::DataFrame(_)));
+    assert!(first_caps < first_frame, "caps lead the first frame");
+}
+
+// --- synthetic program stream builders ---
+
+/// An MPEG-2 pack header with no stuffing.
+const PACK: [u8; 14] = [
+    0x00, 0x00, 0x01, 0xBA, 0x44, 0x00, 0x04, 0x00, 0x04, 0x01, 0x00, 0x03, 0xF8, 0x00,
+];
+
+/// A 33-bit timestamp in the five-byte PES field layout.
+fn pts_field(pts90: u64) -> [u8; 5] {
+    let p = pts90 & 0x1_ffff_ffff;
+    [
+        0x20 | ((p >> 29) as u8 & 0x0e) | 1,
+        (p >> 22) as u8,
+        (p >> 14) as u8 | 1,
+        (p >> 7) as u8,
+        ((p << 1) as u8) | 1,
+    ]
+}
+
+/// One MPEG-2 PES packet.
+fn pes(stream_id: u8, pts90: Option<u64>, payload: &[u8]) -> Vec<u8> {
+    let mut body = Vec::from([0x80u8, 0x00, 0x00]);
+    if let Some(p) = pts90 {
+        body[1] = 0x80;
+        body[2] = 0x05;
+        body.extend_from_slice(&pts_field(p));
+    }
+    body.extend_from_slice(payload);
+    let mut out = Vec::from([0x00u8, 0x00, 0x01, stream_id]);
+    out.extend_from_slice(&(body.len() as u16).to_be_bytes());
+    out.extend_from_slice(&body);
+    out
+}
+
+/// A video access unit with no sequence header: just a picture of
+/// `coding_type` (2 = P, 3 = B), the shape a mid-GOP tune-in starts on.
+fn picture_unit(coding_type: u8) -> Vec<u8> {
+    let mut out = Vec::from([
+        0x00,
+        0x00,
+        0x01,
+        0x00,
+        0x00,
+        (coding_type << 3) | 0x07,
+        0xFF,
+    ]);
+    out.extend_from_slice(&[0x42u8; 64]);
+    out
+}
+
+/// A video access unit: a sequence header at `w` x `h` and 25 fps, then one
+/// picture of `coding_type`, then filler standing in for coded data.
+fn video_unit(w: u32, h: u32, coding_type: u8) -> Vec<u8> {
+    let mut out = Vec::from([
+        0x00,
+        0x00,
+        0x01,
+        0xB3,
+        (w >> 4) as u8,
+        (((w & 0xF) << 4) | (h >> 8)) as u8,
+        h as u8,
+        0x13, // aspect_ratio 1, frame_rate_code 3 (25 fps)
+    ]);
+    out.extend_from_slice(&[
+        0x00,
+        0x00,
+        0x01,
+        0x00,
+        0x00,
+        (coding_type << 3) | 0x07,
+        0xFF,
+    ]);
+    out.extend_from_slice(&[0x42u8; 64]);
+    out
+}
+
+/// One `private_stream_1` PES packet on a subpicture substream.
+fn pes_private(substream: u8, pts90: Option<u64>, payload: &[u8]) -> Vec<u8> {
+    let mut body = Vec::from([substream]);
+    body.extend_from_slice(payload);
+    pes(0xBD, pts90, &body)
+}
+
+/// One `private_stream_1` PES packet on AC-3 substream 0x80, carrying the DVD
+/// substream header: a frame-header count and the 1-based pointer to the first
+/// access unit starting in this packet.
+fn pes_ac3(first_au_ptr: u16, pts90: Option<u64>, payload: &[u8]) -> Vec<u8> {
+    let mut body = Vec::from([0x80u8, 1]);
+    body.extend_from_slice(&first_au_ptr.to_be_bytes());
+    body.extend_from_slice(payload);
+    pes(0xBD, pts90, &body)
+}
+
+/// An AC-3 syncframe of exactly `len` bytes. `frmsizecod` 8 at `fscod` 0 is 128
+/// 16-bit words (256 bytes) at 48 kHz; `tag` marks the frame so a reordering or
+/// a dropped fragment is visible in the reassembled bytes.
+fn ac3_syncframe(len: usize, tag: u8) -> Vec<u8> {
+    assert_eq!(len, 256, "the authored frmsizecod is 256 bytes");
+    let mut f = Vec::from([0x0Bu8, 0x77, 0x00, 0x00, 0x08]);
+    f.resize(len, tag);
+    f
+}
+
+/// A minimal subpicture unit: a size field, a control-sequence offset, a scrap
+/// of pixel data, and one control sequence that shows then hides the cue.
+fn spu_unit(x: u32, y: u32, w: u32, h: u32) -> Vec<u8> {
+    let pixel_data = [0x00u8; 16];
+    let data_end = 4 + pixel_data.len();
+    let (x2, y2) = (x + w - 1, y + h - 1);
+    let show = Vec::from([
+        0x03,
+        0x10,
+        0x32, // colormap
+        0x04,
+        0xFF,
+        0xF0, // alpha
+        0x05,
+        (x >> 4) as u8,
+        (((x & 0xf) << 4) | (x2 >> 8)) as u8,
+        x2 as u8,
+        (y >> 4) as u8,
+        (((y & 0xf) << 4) | (y2 >> 8)) as u8,
+        y2 as u8,
+        0x06,
+        0x00,
+        0x04,
+        0x00,
+        0x04, // field offsets
+        0x01,
+        0xFF,
+    ]);
+    let hide = [0x02u8, 0xFF];
+    let seq1 = data_end;
+    let seq2 = seq1 + 4 + show.len();
+    let total = seq2 + 4 + hide.len();
+    let mut out = Vec::new();
+    out.extend_from_slice(&(total as u16).to_be_bytes());
+    out.extend_from_slice(&(seq1 as u16).to_be_bytes());
+    out.extend_from_slice(&pixel_data);
+    out.extend_from_slice(&0u16.to_be_bytes());
+    out.extend_from_slice(&(seq2 as u16).to_be_bytes());
+    out.extend_from_slice(&show);
+    out.extend_from_slice(&180u16.to_be_bytes());
+    out.extend_from_slice(&(seq2 as u16).to_be_bytes());
+    out.extend_from_slice(&hide);
+    assert_eq!(out.len(), total);
+    out
+}
+
 fn start_code_storm(n: usize) -> Vec<u8> {
     let mut out = Vec::new();
     let mut id = 0u8;
@@ -917,4 +1347,42 @@ fn the_source_pad_advertises_every_selection() {
     let mut probe = PsDemuxer::new();
     probe.push_data(&[]);
     assert!(forwardable_streams(&probe).is_empty(), "nothing seen yet");
+}
+
+/// A DVD title's PTS starts wherever the disc puts it (a mid-title slice can
+/// open at hundreds of seconds), so each stream must open with a `Segment`
+/// mapping its first PTS to running time 0: without one a paced sink holds
+/// every frame until that offset passes on the wall clock.
+#[tokio::test]
+async fn a_stream_start_segment_precedes_the_first_frame() {
+    if !have_ffmpeg() {
+        eprintln!("skipping: ffmpeg not on PATH");
+        return;
+    }
+    let path = temp_path("segment.mpg");
+    author_mpg(&path, "1");
+    let file = std::fs::read(&path).expect("read the fixture");
+
+    let video = demux(&file, PsStream::Mpeg2).await;
+    let seg_at = video
+        .packets
+        .iter()
+        .position(|p| matches!(p, PipelinePacket::Segment(_)))
+        .expect("a stream-start segment is emitted");
+    let frame_at = video
+        .packets
+        .iter()
+        .position(|p| matches!(p, PipelinePacket::DataFrame(_)))
+        .expect("frames follow");
+    assert!(seg_at < frame_at, "segment before the first frame");
+    let PipelinePacket::Segment(seg) = &video.packets[seg_at] else {
+        unreachable!();
+    };
+    let first_pts = video.frames()[0].timing.pts_ns;
+    assert_eq!(seg.start, first_pts, "segment start is the first PTS");
+    assert_eq!(
+        seg.to_running_time(first_pts),
+        Some(0),
+        "the first frame presents immediately"
+    );
 }

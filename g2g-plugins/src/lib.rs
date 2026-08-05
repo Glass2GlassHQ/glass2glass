@@ -328,6 +328,9 @@ pub mod tsmux;
 // MPEG program stream demuxer (no_std): Caps::ByteStream{MpegPs} -> one
 // elementary stream, the `.mpg` / `.vob` sibling of tsdemux.
 pub mod psdemux;
+// Frame lengths of the self-syncing audio bitstreams (AC-3, MPEG audio), shared
+// by the audio decoder's frame splitting and psdemux's frame realignment.
+mod audioframe;
 // Matroska / WebM demuxer parsing core (no_std): EBML -> Tracks + Cluster frames.
 pub mod matroska;
 // Matroska / WebM demuxer element (no_std): Caps::ByteStream{Matroska} -> one

@@ -12,7 +12,7 @@
 //! data before it knows what a file holds.
 //!
 //! ```text
-//! filesrc location=x.vob ! mpegpsdemux ! ffmpegvideodec ! <sink>
+//! filesrc location=x.vob ! mpegpsdemux ! ffmpegdec ! <sink>
 //! mpegpsdemux stream=subpicture ! vobsubdec ! compositor.
 //! ```
 //!
@@ -34,10 +34,10 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::StreamSelectController;
 use g2g_core::{
     AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps, CapsConstraint,
-    CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError, MemoryDomain, MultiOutputElement,
-    MultiOutputSink, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, Rate, Stream, StreamCollection, StreamType, SubPictureFormat,
-    VideoCodec,
+    CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError, MemoryDomain,
+    MultiOutputElement, MultiOutputSink, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    PropError, PropKind, PropValue, PropertySpec, Rate, Seek, Segment, Stream, StreamCollection,
+    StreamType, SubPictureFormat, VideoCodec,
 };
 
 use crate::mpegts::{decode_timestamp, parse_pes_header};
@@ -98,19 +98,12 @@ pub struct PsUnit {
     pub pts_90khz: Option<u64>,
     /// Decode timestamp in 90 kHz units, if the PES carried a separate one.
     pub dts_90khz: Option<u64>,
+    /// The video geometry in effect for this access unit: the sequence header it
+    /// opens with, or the last one seen before it. `None` for a non-video unit,
+    /// and for video before any sequence header has parsed. Per unit rather than
+    /// per file because a program stream can splice clips of different geometry.
+    pub sequence: Option<SequenceHeader>,
     pub data: Vec<u8>,
-}
-
-/// A PES-level unit under reassembly. A program stream splits an access unit
-/// over sector-sized PES packets, only the first of which carries a timestamp,
-/// so a unit runs from one timestamped packet up to the next.
-#[derive(Debug)]
-struct PendingEs {
-    stream_id: u8,
-    substream_id: Option<u8>,
-    pts_90khz: Option<u64>,
-    dts_90khz: Option<u64>,
-    data: Vec<u8>,
 }
 
 /// A subpicture unit under reassembly: its first two bytes declare the total
@@ -236,6 +229,178 @@ fn mpeg1_pes_payload(packet: &[u8]) -> (Option<u64>, Option<u64>, &[u8]) {
     (pts, dts, packet.get(next..).unwrap_or(&[]))
 }
 
+/// Cap on one audio stream's carry. An AC-3 syncframe is at most 3840 bytes and
+/// an MPEG audio frame about 2 KiB, so a carry this large means the stream has
+/// stopped parsing as frames at all: it is dropped and re-synced rather than
+/// grown.
+const MAX_AUDIO_CARRY: usize = 64 * 1024;
+
+/// Which self-syncing audio bitstream an aligner is framing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AudioKind {
+    Ac3,
+    Mpa,
+}
+
+impl AudioKind {
+    /// Length of the frame at the front of `buf`, or `None` when `buf` does not
+    /// open on a usable frame header.
+    fn frame_len(self, buf: &[u8]) -> Option<usize> {
+        match self {
+            Self::Ac3 => crate::audioframe::ac3_frame_len(buf),
+            Self::Mpa => crate::audioframe::mpa_frame_len(buf),
+        }
+    }
+
+    /// Bytes of header the length calculation needs, so "not a frame" can be
+    /// told from "not enough bytes yet".
+    fn header_len(self) -> usize {
+        match self {
+            Self::Ac3 => crate::audioframe::AC3_HEADER_LEN,
+            Self::Mpa => crate::audioframe::MPA_HEADER_LEN,
+        }
+    }
+
+    /// Offset of the next parseable frame header in `buf`, skipping `from`
+    /// bytes. Used to acquire sync and to re-acquire it after a break.
+    fn find_sync(self, buf: &[u8], from: usize) -> Option<usize> {
+        (from..buf.len()).find(|&at| self.frame_len(&buf[at..]).is_some())
+    }
+}
+
+/// Audio frame realignment for one elementary stream.
+///
+/// A program stream cuts its PES packets on 2 KiB sector boundaries with no
+/// regard for audio frame boundaries, so a payload routinely begins and ends
+/// mid-frame. Downstream decoding assumes the container delivers frame-aligned
+/// access units (MPEG-TS aligns syncframes to PES packets, so that holds there),
+/// and feeding it sector fragments drops all but the occasional frame that
+/// happens to start a packet. This restores the alignment: carry the partial
+/// tail across packets and emit only whole frames.
+#[derive(Debug)]
+struct AudioAligner {
+    stream_id: u8,
+    substream_id: Option<u8>,
+    kind: AudioKind,
+    /// Bytes of a frame that has not fully arrived, in front of the next ones.
+    carry: Vec<u8>,
+    /// Whether the front of `carry` is known to be a frame boundary.
+    synced: bool,
+    /// Timestamps for the unit being assembled: those of the packet whose first
+    /// access unit opened it.
+    pts_90khz: Option<u64>,
+    dts_90khz: Option<u64>,
+    /// Timestamps held for the unit after this one, when a packet arrived while
+    /// a frame was still straddling the boundary.
+    next_ts: Option<(Option<u64>, Option<u64>)>,
+}
+
+impl AudioAligner {
+    fn new(stream_id: u8, substream_id: Option<u8>, kind: AudioKind) -> Self {
+        Self {
+            stream_id,
+            substream_id,
+            kind,
+            carry: Vec::new(),
+            synced: false,
+            pts_90khz: None,
+            dts_90khz: None,
+            next_ts: None,
+        }
+    }
+
+    /// Append one PES payload. `first_au` is the offset the container says the
+    /// first frame starting in this packet lies at (the DVD substream header's
+    /// pointer); it is verified against the frame header there before being
+    /// trusted, and a scan takes over when it does not hold or is absent.
+    fn push(
+        &mut self,
+        pts: Option<u64>,
+        dts: Option<u64>,
+        mut data: &[u8],
+        first_au: Option<usize>,
+        out: &mut Vec<PsUnit>,
+    ) {
+        if !self.synced {
+            let at = first_au
+                .filter(|&at| data.len() > at && self.kind.frame_len(&data[at..]).is_some())
+                .or_else(|| self.kind.find_sync(data, 0));
+            let Some(at) = at else {
+                return; // no frame starts here: wait for one that does
+            };
+            self.carry.clear();
+            self.synced = true;
+            self.pts_90khz = pts;
+            self.dts_90khz = dts;
+            data = &data[at..];
+        } else if pts.is_some() {
+            if self.carry.is_empty() {
+                // This packet opens the next unit outright.
+                self.pts_90khz = pts;
+                self.dts_90khz = dts;
+            } else if self.next_ts.is_none() {
+                // A frame is still straddling: this stamp applies once it drains.
+                self.next_ts = Some((pts, dts));
+            }
+        }
+        if self.carry.len().saturating_add(data.len()) > MAX_AUDIO_CARRY {
+            self.carry.clear();
+            self.synced = false;
+            return;
+        }
+        self.carry.extend_from_slice(data);
+        self.drain_frames(out);
+    }
+
+    /// Emit every whole frame at the front of the carry, re-acquiring sync if the
+    /// front stops parsing as a frame header.
+    fn drain_frames(&mut self, out: &mut Vec<PsUnit>) {
+        loop {
+            let mut end = 0;
+            while let Some(len) = self.kind.frame_len(&self.carry[end..]) {
+                if end + len > self.carry.len() {
+                    break;
+                }
+                end += len;
+            }
+            if end > 0 {
+                let unit: Vec<u8> = self.carry.drain(..end).collect();
+                out.push(PsUnit {
+                    stream_id: self.stream_id,
+                    substream_id: self.substream_id,
+                    pts_90khz: self.pts_90khz,
+                    dts_90khz: self.dts_90khz,
+                    sequence: None,
+                    data: unit,
+                });
+                if let Some((pts, dts)) = self.next_ts.take() {
+                    self.pts_90khz = pts;
+                    self.dts_90khz = dts;
+                }
+            }
+            // The front is not a whole frame. Either the rest has yet to arrive,
+            // or the stream broke mid-frame and sync has to be re-acquired.
+            let header = self.kind.header_len();
+            if self.carry.len() < header || self.kind.frame_len(&self.carry).is_some() {
+                return; // waiting for more bytes of a frame we can already size
+            }
+            match self.kind.find_sync(&self.carry, 1) {
+                Some(at) => {
+                    self.carry.drain(..at);
+                }
+                None => {
+                    // Nothing parseable left: keep only what could still open a
+                    // header once more bytes land.
+                    let keep = self.carry.len().saturating_sub(header - 1);
+                    self.carry.drain(..keep);
+                    self.synced = false;
+                    return;
+                }
+            }
+        }
+    }
+}
+
 /// Cap on the timestamp marks kept for one video stream. Each mark costs at
 /// least one buffered byte, so the count is already bounded, but a stream of
 /// tiny timestamped fragments would still make the list large; far more than
@@ -317,6 +482,7 @@ impl VideoReframer {
                 substream_id: None,
                 pts_90khz: pts,
                 dts_90khz: dts,
+                sequence: None,
                 data: core::mem::take(&mut self.buf),
             });
         }
@@ -367,6 +533,7 @@ impl VideoReframer {
                             substream_id: None,
                             pts_90khz: pts,
                             dts_90khz: dts,
+                            sequence: None,
                             data: unit,
                         });
                     }
@@ -378,8 +545,11 @@ impl VideoReframer {
                 _ => {}
             }
         }
-        // The 4-byte window stops three bytes short of the end, so a start code
-        // straddling this fragment's tail is found on the next one.
+        // Everything up to the last three bytes has been examined: a start code
+        // needs a 3-byte prefix, so only those can still open one once the next
+        // fragment lands. Parking the scan there keeps a stream with no start
+        // codes at all from re-scanning the whole buffer on every fragment.
+        self.scanned = self.scanned.max(self.buf.len().saturating_sub(3));
     }
 }
 
@@ -400,10 +570,13 @@ pub struct PsDemuxer {
     seen: Vec<PsElementaryStream>,
     /// The video geometry, once a sequence header has been parsed.
     sequence: Option<SequenceHeader>,
-    /// Access units under reassembly, one per non-video, non-subpicture stream.
-    pending: Vec<PendingEs>,
     /// Video access-unit framing, one per video stream_id.
     video: Vec<(u8, VideoReframer)>,
+    /// Audio frame realignment, one per audio stream / substream.
+    audio: Vec<AudioAligner>,
+    /// How many entries of `completed` the sequence-header scan has examined, so
+    /// each unit is read once however often the scan runs.
+    seq_scanned: usize,
     /// Subpicture units under reassembly, one per substream.
     spu: Vec<PendingSpu>,
 }
@@ -421,8 +594,20 @@ impl PsDemuxer {
     }
 
     /// Take the access units reassembled so far.
+    ///
+    /// Video units seen before the first sequence header are dropped. A byte
+    /// range cut from the middle of a VOB joins mid-GOP, so the first pictures
+    /// arrive with no geometry ahead of them and no decoder can accept them
+    /// (libavcodec's MPEG-2 decoder fails the whole stream on "invalid frame
+    /// dimensions"). Dropping to the first sync point is the tune-in convention
+    /// the rest of the tree follows, `RtspSrc` dropping until the first IDR.
+    /// A unit's geometry stamp is exactly that test: it is set from the first
+    /// unit carrying a sequence header on.
     pub fn take_units(&mut self) -> Vec<PsUnit> {
-        core::mem::take(&mut self.completed)
+        self.seq_scanned = 0;
+        let mut units = core::mem::take(&mut self.completed);
+        units.retain(|u| !(0xE0..=0xEF).contains(&u.stream_id) || u.sequence.is_some());
+        units
     }
 
     /// The elementary streams seen so far, in discovery order.
@@ -437,14 +622,13 @@ impl PsDemuxer {
 
     /// End of stream: emit whatever access units are still being assembled, and
     /// drop any half-assembled subpicture unit (its declared size never arrived,
-    /// so it can never complete).
+    /// so it can never complete). An audio carry is dropped too: it is a partial
+    /// frame by definition, and downstream expects whole ones.
     pub fn flush(&mut self) {
         for (stream_id, r) in self.video.iter_mut() {
             r.flush(*stream_id, &mut self.completed);
         }
-        for p in core::mem::take(&mut self.pending) {
-            Self::complete(&mut self.completed, p);
-        }
+        self.audio.clear();
         self.spu.clear();
         self.sequence_from_completed();
     }
@@ -545,7 +729,12 @@ impl PsDemuxer {
                 self.sequence_from_completed();
                 return;
             }
-            self.push_es(stream_id, None, pts, dts, es);
+            // MPEG audio is sector-cut the same way video is, so it is realigned
+            // onto frame boundaries too. There is no first-access-unit pointer
+            // outside the DVD private stream, so sync comes from a header scan.
+            if (0xC0..=0xDF).contains(&stream_id) {
+                self.push_audio(stream_id, None, AudioKind::Mpa, pts, dts, es, None);
+            }
             return;
         }
         // DVD private_stream_1: a substream id byte opens the payload.
@@ -554,13 +743,29 @@ impl PsDemuxer {
         };
         match sub {
             // AC-3: a frame-header count byte and a 2-byte pointer to the first
-            // access unit follow the substream id, then the AC-3 frames.
+            // access unit follow the substream id, then the AC-3 frames. The
+            // pointer is 1-based from the byte after it (verified against a
+            // retail NTSC VOB), and 0 says no frame starts in this packet.
             0x80..=0x87 => {
+                let Some(head) = rest.get(..3) else {
+                    return;
+                };
+                let first_au = u16::from_be_bytes([head[1], head[2]])
+                    .checked_sub(1)
+                    .map(usize::from);
                 let Some(data) = rest.get(3..) else {
                     return;
                 };
                 self.record(stream_id, Some(sub));
-                self.push_es(stream_id, Some(sub), pts, dts, data);
+                self.push_audio(
+                    stream_id,
+                    Some(sub),
+                    AudioKind::Ac3,
+                    pts,
+                    dts,
+                    data,
+                    first_au,
+                );
             }
             0x20..=0x3F => {
                 self.record(stream_id, Some(sub));
@@ -572,78 +777,55 @@ impl PsDemuxer {
         }
     }
 
-    /// Append one PES fragment to its stream's access unit, completing the
-    /// previous one when this packet opens a new unit (only the packet that
-    /// starts a unit carries a timestamp). A unit that outgrows
-    /// [`MAX_UNIT_BYTES`] is dropped rather than grown: the stream is not
-    /// delimiting its units, so nothing useful can be reassembled from it.
-    fn push_es(
+    /// Feed one PES payload to its stream's frame aligner, creating one on first
+    /// sight of the stream.
+    #[allow(clippy::too_many_arguments)]
+    fn push_audio(
         &mut self,
         stream_id: u8,
         substream_id: Option<u8>,
-        pts_90khz: Option<u64>,
-        dts_90khz: Option<u64>,
+        kind: AudioKind,
+        pts: Option<u64>,
+        dts: Option<u64>,
         data: &[u8],
+        first_au: Option<usize>,
     ) {
-        let at = self
-            .pending
+        let at = match self
+            .audio
             .iter()
-            .position(|p| p.stream_id == stream_id && p.substream_id == substream_id);
-        let at = match at {
-            // A timestamped packet opens a new unit: the one in flight is done.
-            Some(i) if pts_90khz.is_some() => {
-                let done = self.pending.swap_remove(i);
-                Self::complete(&mut self.completed, done);
-                self.pending.len()
-            }
+            .position(|a| a.stream_id == stream_id && a.substream_id == substream_id)
+        {
             Some(i) => i,
-            None => self.pending.len(),
-        };
-        if at == self.pending.len() {
-            if self.pending.len() >= MAX_STREAMS {
-                return;
+            None if self.audio.len() < MAX_STREAMS => {
+                self.audio
+                    .push(AudioAligner::new(stream_id, substream_id, kind));
+                self.audio.len() - 1
             }
-            self.pending.push(PendingEs {
-                stream_id,
-                substream_id,
-                pts_90khz,
-                dts_90khz,
-                data: Vec::new(),
-            });
-        }
-        let p = &mut self.pending[at];
-        if p.data.len().saturating_add(data.len()) > MAX_UNIT_BYTES {
-            self.pending.swap_remove(at);
-            return;
-        }
-        p.data.extend_from_slice(data);
+            None => return,
+        };
+        self.audio[at].push(pts, dts, data, first_au, &mut self.completed);
     }
 
-    /// Read the video geometry off the first completed video unit that carries a
-    /// sequence header. A header can straddle two PES packets, so it is read
-    /// from the reframed unit rather than from a fragment.
+    /// Read the video geometry off each newly completed video unit that carries a
+    /// sequence header. A header can straddle two PES packets, so it is read from
+    /// the reframed unit rather than from a fragment.
+    ///
+    /// The latest header wins, not the first: a program stream can splice clips
+    /// of different geometry (concatenated DVD titles), and the caps have to
+    /// follow. Units are examined once each, so this stays linear however many
+    /// times the scan runs before `take_units` drains the list.
     fn sequence_from_completed(&mut self) {
-        if self.sequence.is_some() {
-            return;
+        while self.seq_scanned < self.completed.len() {
+            let at = self.seq_scanned;
+            self.seq_scanned += 1;
+            if !(0xE0..=0xEF).contains(&self.completed[at].stream_id) {
+                continue;
+            }
+            if let Some(seq) = parse_sequence_header(&self.completed[at].data) {
+                self.sequence = Some(seq);
+            }
+            self.completed[at].sequence = self.sequence;
         }
-        self.sequence = self
-            .completed
-            .iter()
-            .filter(|u| (0xE0..=0xEF).contains(&u.stream_id))
-            .find_map(|u| parse_sequence_header(&u.data));
-    }
-
-    fn complete(completed: &mut Vec<PsUnit>, p: PendingEs) {
-        if p.data.is_empty() {
-            return;
-        }
-        completed.push(PsUnit {
-            stream_id: p.stream_id,
-            substream_id: p.substream_id,
-            pts_90khz: p.pts_90khz,
-            dts_90khz: p.dts_90khz,
-            data: p.data,
-        });
     }
 
     /// Append one subpicture fragment, emitting the unit once its declared size
@@ -702,6 +884,7 @@ impl PsDemuxer {
             substream_id: Some(substream_id),
             pts_90khz: pending.pts_90khz,
             dts_90khz: None,
+            sequence: None,
             data: pending.data,
         });
     }
@@ -714,23 +897,28 @@ fn find_start_code(buf: &[u8]) -> Option<usize> {
 
 /// Total length of the pack header at the start of `buf` (start code included).
 /// `None` when the marker bits name neither pack layout; `Some(None)` when the
-/// header is there but not yet fully buffered. MPEG-2 packs open with the bits
-/// `01` and carry a 10-byte field plus stuffing; MPEG-1 packs open with `0010`
-/// and are a flat 8 bytes.
+/// pack is not yet fully buffered. MPEG-2 packs open with the bits `01` and
+/// carry a 10-byte field plus up to 7 stuffing bytes; MPEG-1 packs open with
+/// `0010` and are a flat 8 bytes.
+///
+/// The length is only reported once every byte it covers is present: the
+/// stuffing count is read from the header itself, so a truncated pack would
+/// otherwise name a length past the end of the buffer.
 fn pack_header_len(buf: &[u8]) -> Option<Option<usize>> {
     let Some(&b) = buf.get(4) else {
         return Some(None);
     };
-    if b & 0xC0 == 0x40 {
+    let len = if b & 0xC0 == 0x40 {
         let Some(&stuffing) = buf.get(13) else {
             return Some(None);
         };
-        return Some(Some(4 + 10 + (stuffing & 0x07) as usize));
-    }
-    if b & 0xF0 == 0x20 {
-        return Some(Some(4 + 8));
-    }
-    None
+        4 + 10 + (stuffing & 0x07) as usize
+    } else if b & 0xF0 == 0x20 {
+        4 + 8
+    } else {
+        return None;
+    };
+    Some((buf.len() >= len).then_some(len))
 }
 
 /// Which elementary stream a [`PsDemux`] instance forwards. A program stream
@@ -774,6 +962,11 @@ pub struct PsDemux {
     /// Subpicture only: whether the synthesized `.idx` config has gone out in
     /// band ahead of the first cue.
     config_sent: bool,
+    /// Set once the stream-start `Segment` has gone out. A DVD title's PTS
+    /// starts wherever the disc puts it (a mid-title slice can open at hundreds
+    /// of seconds), so the first frame's PTS must be mapped to running time 0
+    /// or a paced sink holds every frame until that wall-clock offset passes.
+    segment_sent: bool,
 }
 
 impl Default for PsDemux {
@@ -793,6 +986,7 @@ impl PsDemux {
             collection_posted: false,
             last_caps: None,
             config_sent: false,
+            segment_sent: false,
         }
     }
 
@@ -862,13 +1056,13 @@ impl PsDemux {
         }
     }
 
-    /// The video caps refined by the sequence header, or `None` before one has
-    /// parsed (or for a non-video selection).
-    fn refined_video_caps(&self) -> Option<Caps> {
-        if self.stream != PsStream::Mpeg2 {
+    /// The video caps a sequence header fixes, or `None` for a non-video
+    /// selection or a unit seen before any header parsed.
+    fn refined_video_caps(stream: PsStream, seq: Option<SequenceHeader>) -> Option<Caps> {
+        if stream != PsStream::Mpeg2 {
             return None;
         }
-        let seq = self.demux.sequence()?;
+        let seq = seq?;
         Some(Caps::CompressedVideo {
             codec: VideoCodec::Mpeg2,
             width: Dim::Fixed(seq.width),
@@ -934,29 +1128,42 @@ impl PsDemux {
             // Reordered video carries a separate DTS; fall back to the PTS when
             // the packet had none (the convention the TS / mkv demuxers share).
             let dts_ns = ns_from_90khz(u.dts_90khz).unwrap_or(pts_ns);
+            if !self.segment_sent {
+                self.segment_sent = true;
+                let seg = Segment::for_flush_seek(&Seek::flush_to(pts_ns), None);
+                out.push(PipelinePacket::Segment(seg)).await?;
+            }
             // The sequence header is only known once a video packet has been
-            // parsed, so the refinement rides ahead of the frame it describes.
-            if let Some(caps) = self.refined_video_caps() {
+            // parsed, so the refinement rides ahead of the frame it describes,
+            // and follows a mid-stream splice that changes it.
+            if let Some(caps) = Self::refined_video_caps(self.stream, u.sequence) {
                 if self.last_caps.as_ref() != Some(&caps) {
                     self.last_caps = Some(caps.clone());
                     out.push(PipelinePacket::CapsChanged(caps)).await?;
                 }
             }
+            // The `.idx` needs the video's geometry, which is only known once a
+            // video access unit has completed. A cue can arrive first (a stream
+            // joined mid-title), so the send is only marked done once it really
+            // went out: a later cue then still gets the geometry rather than the
+            // decoder keeping its default forever.
             if self.stream == PsStream::SubPicture && !self.config_sent {
-                self.config_sent = true;
                 if let Some(blob) = self.idx_config_blob() {
+                    self.config_sent = true;
                     let frame = config_frame(blob, pts_ns, self.emitted);
                     self.emitted += 1;
                     out.push(PipelinePacket::DataFrame(frame)).await?;
                 }
             }
             let duration_ns = cue_duration_ns(self.stream, &u.data);
+            let keyframe = unit_is_keyframe(self.stream, &u.data);
             let frame = Frame::new(
                 MemoryDomain::System(SystemSlice::from_boxed(u.data.into_boxed_slice())),
                 FrameTiming {
                     pts_ns,
                     dts_ns,
                     duration_ns,
+                    keyframe,
                     ..FrameTiming::default()
                 },
                 self.emitted,
@@ -998,6 +1205,16 @@ fn resolve_ps_stream_id(demux: &PsDemuxer, id: &str) -> Option<PsStream> {
         .iter()
         .find(|es| stream_id(es) == id)
         .and_then(|es| es.kind())
+}
+
+/// Whether a unit begins an independently-decodable point. An MPEG video access
+/// unit is one when it opens the sequence or a GOP, or carries an I-picture;
+/// every audio frame and every subpicture cue is one by construction.
+fn unit_is_keyframe(stream: PsStream, data: &[u8]) -> bool {
+    match stream {
+        PsStream::Mpeg2 => crate::annexb::au_is_keyframe(VideoCodec::Mpeg2, data),
+        PsStream::Mp2 | PsStream::Ac3 | PsStream::SubPicture => true,
+    }
 }
 
 /// A subpicture cue's own display duration: its control sequence carries the
@@ -1102,6 +1319,16 @@ impl AsyncElement for PsDemux {
             }
             Ok(())
         })
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "MPEG program stream demuxer",
+            "Codec/Demuxer",
+            "Demuxes an MPEG-1 / MPEG-2 program stream (.mpg / .vob): MPEG video, \
+             MPEG audio, AC-3, and DVD subpictures",
+            "g2g",
+        )
     }
 
     fn properties(&self) -> &'static [PropertySpec] {
@@ -1228,8 +1455,9 @@ pub struct PsDemuxN {
     ports: Vec<PsStream>,
     /// Whether port `i` has emitted its opening `CapsChanged` yet.
     announced: Vec<bool>,
-    /// Whether port `i` has had the sequence header's geometry announced.
-    refined: Vec<bool>,
+    /// The geometry port `i` last announced, so a mid-stream change re-announces
+    /// and an unchanged one does not.
+    refined: Vec<Option<SequenceHeader>>,
     bus: Option<BusHandle>,
     collection_posted: bool,
     /// App-driven stream selection: the app names the stream id each port should
@@ -1237,6 +1465,12 @@ pub struct PsDemuxN {
     /// wired it.
     stream_select: Option<StreamSelectController>,
     emitted: u64,
+    /// Stream-start PTS (ns) latched from the first routed unit; every port's
+    /// opening `Segment` maps it to running time 0 so A/V stay aligned and a
+    /// mid-title slice's large PTS does not stall a paced sink.
+    segment_base: Option<u64>,
+    /// Whether port `i` has emitted its opening `Segment` yet.
+    segment_sent: Vec<bool>,
 }
 
 impl PsDemuxN {
@@ -1245,7 +1479,8 @@ impl PsDemuxN {
     pub fn new(ports: Vec<PsStream>) -> Self {
         assert!(!ports.is_empty(), "PsDemuxN needs at least one output port");
         let announced = alloc::vec![false; ports.len()];
-        let refined = alloc::vec![false; ports.len()];
+        let refined = alloc::vec![None; ports.len()];
+        let segment_sent = alloc::vec![false; ports.len()];
         Self {
             demux: PsDemuxer::new(),
             ports,
@@ -1255,6 +1490,8 @@ impl PsDemuxN {
             collection_posted: false,
             stream_select: None,
             emitted: 0,
+            segment_base: None,
+            segment_sent,
         }
     }
 
@@ -1298,7 +1535,7 @@ impl PsDemuxN {
             if self.ports[port] != stream {
                 self.ports[port] = stream;
                 self.announced[port] = false; // re-emit caps for the new stream
-                self.refined[port] = false;
+                self.refined[port] = None;
             }
             active.push(id.clone());
         }
@@ -1334,7 +1571,6 @@ impl PsDemuxN {
     /// emitting that port's opening `CapsChanged` before its first frame and the
     /// sequence header's geometry once it is known.
     async fn route_units(&mut self, out: &mut dyn MultiOutputSink) -> Result<(), G2gError> {
-        let sequence = self.demux.sequence();
         for u in self.demux.take_units() {
             let es = PsElementaryStream {
                 stream_id: u.stream_id,
@@ -1356,28 +1592,38 @@ impl PsDemuxN {
                 .await?;
                 self.announced[port] = true;
             }
-            if kind == PsStream::Mpeg2 && !self.refined[port] {
-                if let Some(seq) = sequence {
-                    self.refined[port] = true;
-                    out.push_to(
-                        port,
-                        PipelinePacket::CapsChanged(Caps::CompressedVideo {
-                            codec: VideoCodec::Mpeg2,
-                            width: Dim::Fixed(seq.width),
-                            height: Dim::Fixed(seq.height),
-                            framerate: Rate::Fixed(seq.framerate_q16),
-                        }),
-                    )
-                    .await?;
+            if !self.segment_sent[port] {
+                self.segment_sent[port] = true;
+                let base = *self.segment_base.get_or_insert(pts_ns);
+                let seg = Segment::for_flush_seek(&Seek::flush_to(base), None);
+                out.push_to(port, PipelinePacket::Segment(seg)).await?;
+            }
+            if kind == PsStream::Mpeg2 {
+                if let Some(seq) = u.sequence {
+                    if self.refined[port] != Some(seq) {
+                        self.refined[port] = Some(seq);
+                        out.push_to(
+                            port,
+                            PipelinePacket::CapsChanged(Caps::CompressedVideo {
+                                codec: VideoCodec::Mpeg2,
+                                width: Dim::Fixed(seq.width),
+                                height: Dim::Fixed(seq.height),
+                                framerate: Rate::Fixed(seq.framerate_q16),
+                            }),
+                        )
+                        .await?;
+                    }
                 }
             }
             let duration_ns = cue_duration_ns(kind, &u.data);
+            let keyframe = unit_is_keyframe(kind, &u.data);
             let frame = Frame::new(
                 MemoryDomain::System(SystemSlice::from_boxed(u.data.into_boxed_slice())),
                 FrameTiming {
                     pts_ns,
                     dts_ns,
                     duration_ns,
+                    keyframe,
                     ..FrameTiming::default()
                 },
                 self.emitted,
