@@ -87,9 +87,10 @@ pub fn parse_versions(list: &str) -> Result<Vec<MoqtVersion>, G2gError> {
 }
 
 /// The version a dialled session negotiated. The server's subprotocol pick
-/// decides; a server that names none (Cloudflare's `moq-relay-ietf` does this)
-/// is unambiguous only when a single version was offered, so several offers
-/// with no pick fail the negotiation rather than guess.
+/// decides (`moq-relay-ietf` echoes `moqt-16` when it is offered). A server
+/// that names none predates multi-version offers, and every such server is a
+/// draft-16 peer, so the fallback is draft-16 when it was offered; the SETUP
+/// handshake that follows still validates the choice either way.
 pub fn negotiated_version(
     session: &web_transport_quinn::Session,
     offered: &[MoqtVersion],
@@ -98,7 +99,7 @@ pub fn negotiated_version(
         Some(protocol) => {
             MoqtVersion::from_protocol(protocol).ok_or(G2gError::Hardware(HardwareError::Other))
         }
-        None if offered.len() == 1 => Ok(offered[0]),
-        None => Err(G2gError::Hardware(HardwareError::Other)),
+        None if offered.contains(&MoqtVersion::V16) => Ok(MoqtVersion::V16),
+        None => Ok(offered[0]),
     }
 }

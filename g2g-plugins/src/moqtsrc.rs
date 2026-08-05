@@ -69,7 +69,13 @@ struct Subscription {
     reassembler: Reassembler,
     /// Payloads in order, waiting to be emitted.
     ready: VecDeque<Vec<u8>>,
-    /// PUBLISH_DONE arrived, or the relay refused the subscription.
+    /// Data streams that have closed, against PUBLISH_DONE's stream count.
+    streams_closed: u64,
+    /// PUBLISH_DONE's stream count, when it arrived before all of those
+    /// streams had: the message races the data plane, so the subscription
+    /// drains the streams it was told about before it ends.
+    done_after: Option<u64>,
+    /// PUBLISH_DONE resolved, or the relay refused the subscription.
     ended: bool,
 }
 
@@ -81,7 +87,26 @@ impl Subscription {
             request_tx: None,
             reassembler: Reassembler::new(max_groups, max_bytes),
             ready: VecDeque::new(),
+            streams_closed: 0,
+            done_after: None,
             ended: false,
+        }
+    }
+
+    /// Flush what the reassembler still holds and end the subscription.
+    fn finish(&mut self) {
+        let tail = self.reassembler.flush();
+        self.ready.extend(tail);
+        self.ended = true;
+    }
+
+    /// PUBLISH_DONE promised `stream_count` data streams: end now if they all
+    /// closed already, otherwise once the last one does.
+    fn publish_done(&mut self, stream_count: u64) {
+        if self.streams_closed >= stream_count {
+            self.finish();
+        } else {
+            self.done_after = Some(stream_count);
         }
     }
 }
@@ -247,10 +272,16 @@ impl SubsState {
         let sub = &mut self.subs[at];
         match event {
             DataEvent::StreamOpened { group_id, .. } => sub.reassembler.stream_opened(group_id),
-            DataEvent::StreamClosed { group_id, .. } => sub.reassembler.stream_closed(group_id),
+            DataEvent::StreamClosed { group_id, .. } => {
+                sub.reassembler.stream_closed(group_id);
+                sub.streams_closed = sub.streams_closed.saturating_add(1);
+            }
             DataEvent::Object { object, .. } => sub.reassembler.push(object),
         }
         sub.ready.extend(sub.reassembler.drain());
+        if sub.done_after.is_some_and(|n| sub.streams_closed >= n) {
+            sub.finish();
+        }
     }
 
     /// Hold a data event for an alias no subscription has yet, bounded by the
@@ -403,11 +434,11 @@ impl Driver {
                     sub.ended = true;
                 }
             }
-            ControlMessage::PublishDone { id, .. } => {
+            ControlMessage::PublishDone {
+                id, stream_count, ..
+            } => {
                 if let Some(sub) = self.state.by_request(id) {
-                    let tail = sub.reassembler.flush();
-                    sub.ready.extend(tail);
-                    sub.ended = true;
+                    sub.publish_done(stream_count);
                 }
             }
             ControlMessage::MaxRequestId { request_id } => {
@@ -545,13 +576,19 @@ impl Driver18 {
                     sub.ended = true;
                 }
             }
-            // PUBLISH_DONE, or the stream ending: either way the subscription
-            // is over and what the reassembler still holds is the tail.
-            Some(Msg::PublishDone { .. }) | None => {
+            Some(Msg::PublishDone { stream_count, .. }) => {
                 if let Some(sub) = self.state.by_request(id) {
-                    let tail = sub.reassembler.flush();
-                    sub.ready.extend(tail);
-                    sub.ended = true;
+                    sub.publish_done(stream_count);
+                }
+            }
+            // The request stream ended. After PUBLISH_DONE that is normal
+            // cleanup and the stream-count drain keeps running; without one it
+            // is a cancellation, and what the reassembler holds is the tail.
+            None => {
+                if let Some(sub) = self.state.by_request(id) {
+                    if sub.done_after.is_none() && !sub.ended {
+                        sub.finish();
+                    }
                 }
             }
             // Anything else on a response stream is a message this subscriber
