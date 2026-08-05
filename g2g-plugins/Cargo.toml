@@ -1084,9 +1084,6 @@ pkg-config = "0.3"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros", "time", "sync", "net"] }
-# Self-signed certificate for the m901 WebTransport tests: QUIC is always TLS, so
-# both the loopback server and the aioquic peer need a throwaway cert + key.
-rcgen = "0.14"
 # Enables the dynamic-slot path (ElementSlot/SwapHandle) for the m8_slot_swap
 # integration test only. Feature unification keeps the lib build at `runtime`.
 g2g-core = { path = "../g2g-core", features = ["dyn-slot"] }
@@ -1114,6 +1111,11 @@ embassy-executor = { version = "0.10", features = ["platform-std", "executor-thr
 # needs it is (its required-features gate it), so the default test build skips it.
 [target.'cfg(not(target_os = "android"))'.dev-dependencies]
 winit = "0.30"
+# Self-signed certificate for the m901 WebTransport tests: QUIC is always TLS, so
+# both the loopback server and the aioquic peer need a throwaway cert + key. Off
+# Android for the same reason as winit: it pulls `ring`, whose C build needs an
+# NDK cross-compiler the android CI check does not have.
+rcgen = "0.14"
 
 # gst-launch / gst-inspect analogs over the standard registry (M107). Both need
 # the std-only registry + wall clock, so they are gated on `std`; the no_std
