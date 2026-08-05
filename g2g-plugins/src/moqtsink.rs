@@ -461,7 +461,8 @@ async fn connect_session(
     guard.cfg = dial.cfg;
     let offered = parse_versions(&dial.versions)?;
     let protocols: Vec<&str> = offered.iter().map(|v| v.protocol()).collect();
-    let session = crate::remotewtio::dial(&dial.location, &dial.cert_hashes, &protocols).await?;
+    let session =
+        crate::remotewtio::dial(&dial.location, &dial.cert_hashes, &protocols, "default").await?;
     match negotiated_version(&session, &offered)? {
         MoqtVersion::V16 => {
             let mut session =

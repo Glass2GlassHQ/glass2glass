@@ -762,7 +762,8 @@ impl SourceLoop for MoqtSrc {
             let offered = parse_versions(&self.versions)?;
             let protocols: Vec<&str> = offered.iter().map(|v| v.protocol()).collect();
             let session =
-                crate::remotewtio::dial(&self.location, &self.cert_hashes, &protocols).await?;
+                crate::remotewtio::dial(&self.location, &self.cert_hashes, &protocols, "default")
+                    .await?;
             let state = SubsState::new(self.max_groups as usize, self.max_buffer_bytes as usize);
             let namespace = TrackNamespace::from_path(&self.namespace);
             let mut driver = match negotiated_version(&session, &offered)? {

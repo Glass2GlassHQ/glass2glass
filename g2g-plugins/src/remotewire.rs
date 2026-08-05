@@ -28,7 +28,7 @@ mod framed {
 
     use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-    use g2g_core::wire::{decode_packet, encode_packet};
+    use g2g_core::wire::{decode_packet, encode_packet, WireError};
     use g2g_core::{G2gError, PipelinePacket};
 
     use crate::filesink::io_err;
@@ -47,40 +47,74 @@ mod framed {
         Ok(())
     }
 
-    /// Read one length-framed wire body. `Ok(None)` on a clean close at a frame
-    /// boundary (the stream's natural end).
-    async fn read_framed<R: AsyncRead + Unpin>(src: &mut R) -> Result<Option<Vec<u8>>, G2gError> {
-        let mut len = [0u8; 4];
-        match src.read_exact(&mut len).await {
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-            Err(e) => return Err(io_err(e)),
-        }
-        // The length is peer-supplied, so a bogus one must not preallocate: read
-        // it back in bounded chunks and let a short stream fail as a truncation.
-        let n = u32::from_le_bytes(len) as usize;
-        let mut body = Vec::new();
-        let mut left = n;
-        while left > 0 {
-            let chunk = left.min(64 * 1024);
-            let base = body.len();
-            body.resize(base + chunk, 0u8);
-            src.read_exact(&mut body[base..]).await.map_err(io_err)?;
-            left -= chunk;
-        }
-        Ok(Some(body))
+    /// Reader for the length framing, holding the partly-read frame across calls.
+    /// That is what makes it cancel-safe: the WebTransport carrier polls it in a
+    /// `select!` against the session's datagram flow, so the read future is
+    /// dropped whenever a datagram wins the race, and the bytes already off the
+    /// stream must survive that.
+    #[derive(Debug, Default)]
+    pub(crate) struct FramedRead {
+        /// The current frame so far: the 4-byte length prefix, then its body.
+        buf: Vec<u8>,
     }
 
-    /// Read the next length-framed packet, decoded.
+    impl FramedRead {
+        /// Read until `buf` holds `target` bytes; `false` on a clean end. Never
+        /// reads past `target`, so nothing of a later frame is left behind, and
+        /// the buffer only grows by what actually arrived.
+        async fn fill_to<R: AsyncRead + Unpin>(
+            &mut self,
+            src: &mut R,
+            target: usize,
+        ) -> Result<bool, G2gError> {
+            let mut chunk = [0u8; 8 * 1024];
+            while self.buf.len() < target {
+                let want = (target - self.buf.len()).min(chunk.len());
+                // A single `read` is cancel-safe: dropped before it resolves, it
+                // has taken nothing off the stream.
+                let n = src.read(&mut chunk[..want]).await.map_err(io_err)?;
+                if n == 0 {
+                    return Ok(false);
+                }
+                self.buf.extend_from_slice(&chunk[..n]);
+            }
+            Ok(true)
+        }
+
+        /// Read the next length-framed packet, decoded. `Ok(None)` on a clean
+        /// close at a frame boundary (the stream's natural end).
+        pub(crate) async fn recv<R: AsyncRead + Unpin>(
+            &mut self,
+            src: &mut R,
+        ) -> Result<Option<PipelinePacket>, G2gError> {
+            if !self.fill_to(src, 4).await? {
+                return Ok(None);
+            }
+            // The length is peer-supplied: nothing is sized on it up front, and a
+            // stream that ends short of it fails as a truncation.
+            let n =
+                u32::from_le_bytes([self.buf[0], self.buf[1], self.buf[2], self.buf[3]]) as usize;
+            if !self.fill_to(src, n.saturating_add(4)).await? {
+                return Err(map_wire(WireError::Truncated));
+            }
+            let packet = decode_packet(&self.buf[4..]).map_err(map_wire)?;
+            self.buf.clear();
+            Ok(Some(packet))
+        }
+    }
+
+    /// Read the next length-framed packet from a stream nothing else reads.
+    #[cfg(feature = "remote")]
     pub(crate) async fn recv_framed<R: AsyncRead + Unpin>(
         src: &mut R,
     ) -> Result<Option<PipelinePacket>, G2gError> {
-        match read_framed(src).await? {
-            Some(body) => Ok(Some(decode_packet(&body).map_err(map_wire)?)),
-            None => Ok(None),
-        }
+        FramedRead::default().recv(src).await
     }
 }
 
+#[cfg(feature = "remote")]
+pub(crate) use framed::recv_framed;
 #[cfg(any(feature = "remote", feature = "webtransport"))]
-pub(crate) use framed::{recv_framed, send_framed};
+pub(crate) use framed::send_framed;
+#[cfg(feature = "webtransport")]
+pub(crate) use framed::FramedRead;

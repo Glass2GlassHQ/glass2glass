@@ -281,11 +281,9 @@ Phased plan:
 
 ## Egress / transports
 
-- **WebTransport carrier residuals:** a datagram carrier for the drop-tolerant
-  case, and a `congestion-control` property (`web-transport-quinn` offers BBR /
-  low-latency on both builders; the elements take the default CUBIC). The
-  `web-transport-quinn = "=0.11.12"` pin and the `idna_adapter` 1.1.0 hold in
-  `Cargo.lock` can both drop once the workspace MSRV moves past 1.91.
+- **WebTransport residuals:** the `web-transport-quinn = "=0.11.12"` pin and
+  the `idna_adapter` 1.1.0 hold in `Cargo.lock` can both drop once the
+  workspace MSRV moves past 1.91.
 - **MoQ Transport:** FETCH is unimplemented on both sides: a FETCH is refused
   with `NOT_SUPPORTED`. Beyond that: a validated draft-18 interop run against a
   non-Cloudflare implementation (Meta's public moxygen relay serves

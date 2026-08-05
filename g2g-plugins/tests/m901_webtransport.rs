@@ -393,6 +393,119 @@ async fn webtransport_sink_retries_connect_until_the_server_is_up() {
     );
 }
 
+// ------------------------------------------------- leg 1b: datagram carrier (M911)
+
+/// The drop-tolerant carrier: with `datagrams=true` each data frame is one QUIC
+/// datagram and the control packets stay on the session's stream, so the receiver
+/// still discovers the caps and still sees the end. The last frame is deliberately
+/// larger than any path MTU, which is the documented fallback: it goes on the
+/// stream rather than being truncated or dropped, and `datagrams-sent` says so.
+///
+/// Both ends also run `congestion-control=low-latency`, so the nick is proven to
+/// reach a builder that still produces a working endpoint, not just to round-trip
+/// through `set_property`.
+#[tokio::test]
+async fn webtransport_datagram_carrier_delivers_frames_and_falls_back_when_too_large() {
+    const N: u8 = 6;
+    const BIG_LEN: usize = 8 * 1024;
+
+    let tls = TestCert::generate("datagram");
+
+    let mut src = RemoteWtSrc::new("127.0.0.1:0".parse().unwrap())
+        .with_certificate(tls.cert(), tls.key())
+        .with_frame_limit(N as u64 + 1);
+    SourceLoop::set_property(
+        &mut src,
+        "congestion-control",
+        PropValue::Str("low-latency".into()),
+    )
+    .expect("congestion-control on the server");
+    let port = src.listen().await.expect("bind quic endpoint").port();
+    let mut sink = CollectSink::default();
+    let clock = ZeroClock;
+
+    let sender = async {
+        let mut remote = RemoteWtSink::new(format!("https://127.0.0.1:{port}"))
+            .with_server_certificate_hashes(tls.hash_hex.clone())
+            .with_datagrams(true);
+        AsyncElement::set_property(
+            &mut remote,
+            "congestion-control",
+            PropValue::Str("low-latency".into()),
+        )
+        .expect("congestion-control on the client");
+        remote.configure_pipeline(&test_caps()).expect("configure");
+        let mut null = NullOut;
+        for i in 0u8..N {
+            if remote
+                .process(
+                    PipelinePacket::DataFrame(test_frame(i, FRAME_LEN)),
+                    &mut null,
+                )
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+        // One frame no datagram can carry: the carrier must fall back.
+        let _ = remote
+            .process(PipelinePacket::DataFrame(test_frame(N, BIG_LEN)), &mut null)
+            .await;
+        let _ = remote.process(PipelinePacket::Eos, &mut null).await;
+        AsyncElement::get_property(&remote, "datagrams-sent")
+    };
+
+    let recv = tokio::time::timeout(
+        Duration::from_secs(20),
+        run_simple_pipeline(
+            &mut src,
+            &mut sink,
+            &clock,
+            LatencyProfile::Live.link_capacity(),
+        ),
+    );
+
+    let (recv_res, datagrams_sent) = tokio::join!(recv, sender);
+    let stats = recv_res
+        .expect("receiver finishes within 20s")
+        .expect("receive pipeline ok");
+
+    assert_eq!(
+        datagrams_sent,
+        Some(PropValue::Uint(N as u64)),
+        "every frame that fits went out as a datagram, the oversized one did not"
+    );
+    assert_eq!(
+        stats.frames_emitted,
+        N as u64 + 1,
+        "the datagram frames and the fallback frame all reached the graph"
+    );
+    assert_eq!(
+        sink.caps.first(),
+        Some(&test_caps()),
+        "caps still discovered from the stream half of the carrier"
+    );
+
+    // Datagrams are unordered against the stream, so match by sequence.
+    for i in 0..=N {
+        let (_, timing, bytes) = sink
+            .frames
+            .iter()
+            .find(|(seq, _, _)| *seq == i as u64)
+            .unwrap_or_else(|| panic!("frame {i} arrived"));
+        let want = if i == N { BIG_LEN } else { FRAME_LEN };
+        assert_eq!(bytes.len(), want, "frame {i} length preserved");
+        assert_eq!(bytes[0], i, "frame {i} payload tag preserved");
+        assert_eq!(bytes[1], 0xAB, "frame {i} second marker preserved");
+        assert_eq!(
+            timing.pts_ns,
+            i as u64 * 1_000_000,
+            "frame {i} pts preserved"
+        );
+    }
+}
+
 // ------------------------------------------------------------------- leg 2
 
 /// The remote stage: read the length-framed wire stream off the session's
@@ -845,7 +958,11 @@ fn webtransport_elements_expose_their_knobs() {
     );
 
     let mut xform = RemoteWtTransform::new("https://127.0.0.1:9604");
-    for name in ["location", "server-certificate-hashes"] {
+    for name in [
+        "location",
+        "server-certificate-hashes",
+        "congestion-control",
+    ] {
         assert!(declares(AsyncElement::properties(&xform), name), "{name}");
     }
     AsyncElement::set_property(
@@ -857,6 +974,107 @@ fn webtransport_elements_expose_their_knobs() {
     assert_eq!(
         AsyncElement::get_property(&xform, "location"),
         Some(PropValue::Str("https://peer.test:443".into()))
+    );
+}
+
+/// M911's knobs: the datagram carrier on the sink (the transform deliberately has
+/// none: a dropped request would strand its reply), and the congestion controller
+/// on every element that builds a QUIC endpoint.
+#[test]
+fn webtransport_elements_expose_the_datagram_and_congestion_knobs() {
+    fn spec<'a>(
+        specs: &'a [g2g_core::PropertySpec],
+        name: &str,
+    ) -> Option<&'a g2g_core::PropertySpec> {
+        specs.iter().find(|s| s.name == name)
+    }
+
+    let mut sink = RemoteWtSink::new("https://127.0.0.1:9603");
+    assert!(spec(AsyncElement::properties(&sink), "datagrams").is_some());
+    assert_eq!(
+        AsyncElement::get_property(&sink, "datagrams"),
+        Some(PropValue::Bool(false)),
+        "the reliable stream stays the default carrier"
+    );
+    AsyncElement::set_property(&mut sink, "datagrams", PropValue::Bool(true)).unwrap();
+    assert_eq!(
+        AsyncElement::get_property(&sink, "datagrams"),
+        Some(PropValue::Bool(true))
+    );
+    // Nothing sent yet, and the counter is readable but not settable.
+    assert_eq!(
+        AsyncElement::get_property(&sink, "datagrams-sent"),
+        Some(PropValue::Uint(0))
+    );
+    assert_eq!(
+        AsyncElement::set_property(&mut sink, "datagrams-sent", PropValue::Uint(7)),
+        Err(g2g_core::PropError::ReadOnly)
+    );
+    assert!(
+        !spec(AsyncElement::properties(&sink), "datagrams-sent")
+            .expect("declared")
+            .flags
+            .writable,
+        "datagrams-sent is a status readout"
+    );
+    // The FIFO round trip has no drop-tolerant mode to offer.
+    let xform = RemoteWtTransform::new("https://127.0.0.1:9604");
+    assert!(spec(AsyncElement::properties(&xform), "datagrams").is_none());
+
+    // congestion-control: the same closed nick set on client, server, transform.
+    let cc = spec(AsyncElement::properties(&sink), "congestion-control").expect("declared");
+    assert_eq!(cc.default, Some("default"));
+    assert_eq!(
+        cc.enum_values,
+        Some("default | throughput | low-latency"),
+        "the nicks web-transport-quinn's builders accept"
+    );
+    for nick in ["default", "throughput", "low-latency"] {
+        AsyncElement::set_property(&mut sink, "congestion-control", PropValue::Str(nick.into()))
+            .unwrap_or_else(|e| panic!("{nick}: {e:?}"));
+        assert_eq!(
+            AsyncElement::get_property(&sink, "congestion-control"),
+            Some(PropValue::Str(nick.into()))
+        );
+    }
+    assert_eq!(
+        AsyncElement::set_property(
+            &mut sink,
+            "congestion-control",
+            PropValue::Str("reno".into())
+        ),
+        Err(g2g_core::PropError::Value),
+        "an unknown controller is rejected, not silently ignored"
+    );
+    assert_eq!(
+        AsyncElement::get_property(&sink, "congestion-control"),
+        Some(PropValue::Str("low-latency".into())),
+        "the rejected value did not overwrite the last good one"
+    );
+
+    let mut src = RemoteWtSrc::new("0.0.0.0:9603".parse().unwrap());
+    assert!(spec(SourceLoop::properties(&src), "congestion-control").is_some());
+    SourceLoop::set_property(
+        &mut src,
+        "congestion-control",
+        PropValue::Str("low-latency".into()),
+    )
+    .unwrap();
+    assert_eq!(
+        SourceLoop::get_property(&src, "congestion-control"),
+        Some(PropValue::Str("low-latency".into()))
+    );
+
+    let mut xform = xform;
+    AsyncElement::set_property(
+        &mut xform,
+        "congestion-control",
+        PropValue::Str("throughput".into()),
+    )
+    .unwrap();
+    assert_eq!(
+        AsyncElement::get_property(&xform, "congestion-control"),
+        Some(PropValue::Str("throughput".into()))
     );
 }
 

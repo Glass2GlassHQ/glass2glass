@@ -9,6 +9,11 @@
 //! `AsyncElement` glue) lives in [`RemoteTransform`](crate::remotetransform); this
 //! file supplies only the WebTransport transport's transform role. The transport
 //! itself is the sink's [`WtClient`](crate::remotewtsink::WtClient).
+//!
+//! The sink's `datagrams` carrier is deliberately not offered here: the round
+//! trip pairs one reply with each request, so a dropped request would leave the
+//! stage waiting for a reply that is never sent. `congestion-control` is offered,
+//! it is a property of the connection rather than of the framing.
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -57,6 +62,7 @@ impl PacketDuplex for WtClient {
         )
         .with_default("https://127.0.0.1:9604"),
         CERT_HASHES_PROP,
+        crate::remotewtio::CONGESTION_PROP,
     ];
 
     fn recv(&mut self) -> TransportFuture<'_, Option<PipelinePacket>> {

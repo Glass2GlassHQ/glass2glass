@@ -26,6 +26,14 @@
 //! named by its SHA-256 digest in `server-certificate-hashes` (what a browser's
 //! `serverCertificateHashes` option does for a self-signed certificate).
 //!
+//! `datagrams=true` switches the drop-tolerant carrier on: each data frame goes
+//! out as one QUIC datagram, unacknowledged and unretransmitted, while the
+//! control packets stay on the stream. A frame larger than the path's datagram
+//! limit falls back to the stream, and `datagrams-sent` reports how many actually
+//! took the datagram path, so a stream of frames that never fit is visible rather
+//! than silent. `congestion-control` picks the QUIC controller (CUBIC by
+//! default, BBR under `low-latency`).
+//!
 //! The shared client machinery (caps-dedup, the reconnect/retry `deliver` loop,
 //! the `AsyncElement` glue) lives in [`RemoteClient`](crate::remoteclient); this
 //! file supplies only the WebTransport transport (`WtClient`).
@@ -66,6 +74,15 @@ impl RemoteWtSink {
         .expect("server-certificate-hashes is a string");
         self
     }
+
+    /// Carry data frames as QUIC datagrams (see the module docs). The same knob
+    /// as the `datagrams` property, set through the same path so a builder and a
+    /// launch line cannot drift.
+    pub fn with_datagrams(mut self, datagrams: bool) -> Self {
+        AsyncElement::set_property(&mut self, "datagrams", PropValue::Bool(datagrams))
+            .expect("datagrams is a boolean");
+        self
+    }
 }
 
 /// WebTransport transport for [`RemoteClient`] (and, read back, for the
@@ -77,6 +94,12 @@ pub struct WtClient {
     /// Comma-separated hex SHA-256 digests of the accepted server certificates;
     /// empty means "anything a system root signs".
     cert_hashes: String,
+    /// The `congestion-control` nick applied to the QUIC connection.
+    congestion: String,
+    /// Send data frames as QUIC datagrams (the `datagrams` property).
+    datagrams: bool,
+    /// Cumulative across reconnects, so it outlives any one session.
+    datagrams_sent: u64,
     /// Opened lazily on the first send (the QUIC / CONNECT handshake is async).
     stream: Option<WtStream>,
 }
@@ -87,6 +110,9 @@ impl WtClient {
         Self {
             url: url.into(),
             cert_hashes: String::new(),
+            congestion: "default".to_string(),
+            datagrams: false,
+            datagrams_sent: 0,
             stream: None,
         }
     }
@@ -96,12 +122,30 @@ impl WtClient {
         self.stream.as_mut()
     }
 
-    /// Shared by the sink and the transform: the two knobs a client has.
+    /// Shared by the sink and the transform: the knobs a client has. `datagrams`
+    /// is the sink's alone (see the transform's module docs), but it is stored
+    /// here because the transport is.
     pub(crate) fn set_client_prop(
         &mut self,
         name: &str,
         value: &PropValue,
     ) -> Option<Result<(), PropError>> {
+        match name {
+            "congestion-control" => {
+                return Some(remotewtio::set_congestion(&mut self.congestion, value))
+            }
+            "datagrams" => {
+                return Some(match value.as_bool() {
+                    Some(on) => {
+                        self.datagrams = on;
+                        Ok(())
+                    }
+                    None => Err(PropError::Type),
+                })
+            }
+            "datagrams-sent" => return Some(Err(PropError::ReadOnly)),
+            _ => {}
+        }
         let target = match name {
             "location" => &mut self.url,
             "server-certificate-hashes" => &mut self.cert_hashes,
@@ -120,6 +164,9 @@ impl WtClient {
         match name {
             "location" => Some(PropValue::Str(self.url.clone())),
             "server-certificate-hashes" => Some(PropValue::Str(self.cert_hashes.clone())),
+            "congestion-control" => Some(PropValue::Str(self.congestion.clone())),
+            "datagrams" => Some(PropValue::Bool(self.datagrams)),
+            "datagrams-sent" => Some(PropValue::Uint(self.datagrams_sent)),
             _ => None,
         }
     }
@@ -144,12 +191,25 @@ impl PacketClient for WtClient {
         )
         .with_default("https://127.0.0.1:9603"),
         CERT_HASHES_PROP,
+        remotewtio::CONGESTION_PROP,
         PropertySpec::new(
             "reconnect-attempts",
             PropKind::Uint,
             "retry a failed connect / send up to N times (0 = off)",
         )
         .with_default("0"),
+        PropertySpec::new(
+            "datagrams",
+            PropKind::Bool,
+            "carry data frames in QUIC datagrams instead of the session's stream: unreliable and MTU-bounded, with a frame too large for the path falling back to the stream",
+        )
+        .with_default("false"),
+        PropertySpec::new(
+            "datagrams-sent",
+            PropKind::Uint,
+            "frames sent as datagrams so far (the rest fell back to the stream)",
+        )
+        .read_only(),
     ];
 
     fn is_connected(&self) -> bool {
@@ -158,15 +218,29 @@ impl PacketClient for WtClient {
 
     fn connect(&mut self) -> TransportFuture<'_, ()> {
         Box::pin(async move {
-            self.stream = Some(remotewtio::connect(&self.url, &self.cert_hashes).await?);
+            self.stream = Some(
+                remotewtio::connect(
+                    &self.url,
+                    &self.cert_hashes,
+                    self.datagrams,
+                    &self.congestion,
+                )
+                .await?,
+            );
             Ok(())
         })
     }
 
     fn send<'a>(&'a mut self, packet: &'a PipelinePacket) -> TransportFuture<'a, ()> {
         Box::pin(async move {
-            let stream = self.stream.as_mut().ok_or(G2gError::NotConfigured)?;
-            stream.send(packet).await
+            let as_datagram = {
+                let stream = self.stream.as_mut().ok_or(G2gError::NotConfigured)?;
+                stream.send(packet).await?
+            };
+            if as_datagram {
+                self.datagrams_sent += 1;
+            }
+            Ok(())
         })
     }
 

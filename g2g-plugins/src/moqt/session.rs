@@ -106,7 +106,7 @@ impl MoqtSession {
         max_request_id: u64,
         implementation: &str,
     ) -> Result<Self, G2gError> {
-        let session = dial(url, cert_hashes, &[MOQT_PROTOCOL]).await?;
+        let session = dial(url, cert_hashes, &[MOQT_PROTOCOL], "default").await?;
         Self::connect_over(session, max_request_id, implementation).await
     }
 

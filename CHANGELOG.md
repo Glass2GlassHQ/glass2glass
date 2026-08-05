@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M911: `remotewtsink` can carry data frames as QUIC datagrams (`datagrams=true`, oversized frames fall back to the stream), and the WebTransport elements take a `congestion-control` property.
+
 - M910: `mkvdemux` inflates zlib and header-stripped `ContentEncoding` blocks.
 
 - M909: runner arms no longer emit a second `Eos` after a transform forwards one itself.
