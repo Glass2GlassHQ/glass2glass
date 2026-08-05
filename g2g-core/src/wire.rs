@@ -88,6 +88,8 @@ const META_BLOB: u8 = 1;
 const META_CAPTION: u8 = 2;
 #[cfg_attr(not(feature = "metadata"), allow(dead_code))]
 const META_HDR_STATIC: u8 = 3;
+#[cfg_attr(not(feature = "metadata"), allow(dead_code))]
+const META_TIMECODE: u8 = 4;
 
 // ---- primitive writer ----
 
@@ -686,16 +688,20 @@ fn get_domain(r: &mut Reader) -> Result<MemoryDomain, WireError> {
 
 #[cfg(feature = "metadata")]
 fn put_meta(w: &mut Writer, meta: &FrameMetaSet) {
-    use crate::meta::{AnalyticsMeta, AnalyticsNode, BlobMeta, CaptionMeta, HdrStaticMeta};
+    use crate::meta::{
+        AnalyticsMeta, AnalyticsNode, BlobMeta, CaptionMeta, HdrStaticMeta, TimecodeMeta,
+    };
 
     let analytics = meta.get::<AnalyticsMeta>();
     let blob = meta.get::<BlobMeta>();
     let caption = meta.get::<CaptionMeta>();
     let hdr = meta.get::<HdrStaticMeta>();
+    let timecode = meta.get::<TimecodeMeta>();
     let count = analytics.is_some() as u8
         + blob.is_some() as u8
         + caption.is_some() as u8
-        + hdr.is_some() as u8;
+        + hdr.is_some() as u8
+        + timecode.is_some() as u8;
     w.u8(count);
 
     if let Some(a) = analytics {
@@ -769,6 +775,17 @@ fn put_meta(w: &mut Writer, meta: &FrameMetaSet) {
         put_opt_u16(w, h.max_content_light_level);
         put_opt_u16(w, h.max_frame_average_light_level);
     }
+
+    if let Some(t) = timecode {
+        w.u8(META_TIMECODE);
+        w.u8(t.hours);
+        w.u8(t.minutes);
+        w.u8(t.seconds);
+        w.u8(t.frames);
+        w.bool(t.drop_frame);
+        w.bool(t.framerate_q16.is_some());
+        w.u32(t.framerate_q16.unwrap_or(0));
+    }
 }
 
 /// An optional `u16` as a presence flag then the value (only the HDR meta needs
@@ -818,7 +835,7 @@ fn get_meta(r: &mut Reader) -> Result<FrameMetaSet, WireError> {
     use crate::meta::{
         AnalyticsMeta, AnalyticsNode, BBox, Blob, BlobMeta, CaptionMeta, CaptionTriple,
         Chromaticity, Classification, HdrStaticMeta, MasteringDisplay, ObjectDetection, Relation,
-        Tracking,
+        TimecodeMeta, Tracking,
     };
 
     let count = r.u8()?;
@@ -908,6 +925,21 @@ fn get_meta(r: &mut Reader) -> Result<FrameMetaSet, WireError> {
                     max_content_light_level: get_opt_u16(r)?,
                     max_frame_average_light_level: get_opt_u16(r)?,
                 });
+            }
+            META_TIMECODE => {
+                let tc = TimecodeMeta {
+                    hours: r.u8()?,
+                    minutes: r.u8()?,
+                    seconds: r.u8()?,
+                    frames: r.u8()?,
+                    drop_frame: r.bool()?,
+                    framerate_q16: {
+                        let present = r.bool()?;
+                        let v = r.u32()?;
+                        present.then_some(v)
+                    },
+                };
+                set.attach(tc);
             }
             _ => return Err(WireError::BadTag),
         }
@@ -1382,6 +1414,34 @@ mod tests {
         match roundtrip(&PipelinePacket::DataFrame(frame)) {
             PipelinePacket::DataFrame(got) => {
                 assert_eq!(got.meta.get::<HdrStaticMeta>(), Some(&hdr));
+            }
+            other => panic!("expected DataFrame, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "metadata")]
+    #[test]
+    fn timecode_metadata_round_trips() {
+        use crate::meta::TimecodeMeta;
+        let tc = TimecodeMeta {
+            hours: 10,
+            minutes: 59,
+            seconds: 58,
+            frames: 29,
+            drop_frame: true,
+            framerate_q16: Some(1_965_691), // 29.97 fps
+        };
+        let mut meta = FrameMetaSet::new();
+        meta.attach(tc);
+        let frame = Frame {
+            domain: MemoryDomain::System(SystemSlice::from_boxed(Box::new([0u8; 4]))),
+            timing: FrameTiming::default(),
+            sequence: 0,
+            meta,
+        };
+        match roundtrip(&PipelinePacket::DataFrame(frame)) {
+            PipelinePacket::DataFrame(got) => {
+                assert_eq!(got.meta.get::<TimecodeMeta>(), Some(&tc));
             }
             other => panic!("expected DataFrame, got {other:?}"),
         }

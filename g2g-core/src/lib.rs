@@ -200,7 +200,7 @@ pub use meta::FrameMetaSet;
 pub use meta::{
     AnalyticsMeta, AnalyticsNode, BBox, Blob, BlobMeta, CaptionMeta, CaptionTriple, Chromaticity,
     Classification, FrameMeta, HdrStaticMeta, MasteringDisplay, ObjectDetection, Propagation,
-    Relation, RelationKind, Tracking, Transform,
+    Relation, RelationKind, TimecodeMeta, Tracking, Transform,
 };
 #[cfg(feature = "alloc")]
 pub use property::{

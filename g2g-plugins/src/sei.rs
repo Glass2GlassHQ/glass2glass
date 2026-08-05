@@ -17,10 +17,15 @@ use g2g_core::VideoCodec;
 
 use crate::annexb::{
     h264_nal_type, h265_nal_type, nal_units_any, read_ff_extended, strip_emulation_prevention,
+    BitReader,
 };
 
+/// `pic_timing`, which carries the H.264 SMPTE 12M clock timestamps.
+pub const PAYLOAD_PIC_TIMING: usize = 1;
 /// `user_data_registered_itu_t_t35`, the ATSC A/53 closed-caption carrier.
 pub const PAYLOAD_USER_DATA_REGISTERED: usize = 4;
+/// `time_code`, the H.265 SMPTE 12M clock timestamps.
+pub const PAYLOAD_TIME_CODE: usize = 136;
 /// `mastering_display_colour_volume` (SMPTE ST 2086).
 pub const PAYLOAD_MASTERING_DISPLAY: usize = 137;
 /// `content_light_level_info` (CTA-861.3 MaxCLL / MaxFALL).
@@ -120,6 +125,126 @@ pub fn parse_content_light_level(p: &[u8]) -> Option<(u16, u16)> {
     Some((be16(p, 0)?, be16(p, 2)?))
 }
 
+/// What an H.264 `pic_timing` SEI needs from the SPS VUI to be parseable at all:
+/// the message is not self-delimiting, its leading CPB/DPB delays are sized by
+/// the HRD parameters and the clock timestamps are only present when the VUI
+/// says so. H.265's `time_code` SEI carries all of this itself, so it needs no
+/// context.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PicTimingContext {
+    /// `CpbDpbDelaysPresentFlag`: either HRD block is present, so the message
+    /// opens with the two delays.
+    pub cpb_dpb_delays_present: bool,
+    /// Bit widths of `cpb_removal_delay` / `dpb_output_delay`.
+    pub cpb_removal_delay_length: u8,
+    pub dpb_output_delay_length: u8,
+    /// `pic_struct_present_flag`: without it the message carries no timestamps.
+    pub pic_struct_present: bool,
+    /// Bit width of each clock timestamp's `time_offset`.
+    pub time_offset_length: u8,
+}
+
+/// Read the `hours / minutes / seconds` of one clock timestamp, whose nesting is
+/// identical in H.264 and H.265: a full timestamp codes all three, otherwise
+/// each coarser field is present only if the finer one was.
+#[cfg(feature = "metadata")]
+fn read_hms(br: &mut BitReader, full_timestamp: bool) -> Option<(u8, u8, u8)> {
+    if full_timestamp {
+        let s = br.read_bits(6)?;
+        let m = br.read_bits(6)?;
+        let h = br.read_bits(5)?;
+        return Some((h as u8, m as u8, s as u8));
+    }
+    let (mut h, mut m, mut s) = (0u32, 0u32, 0u32);
+    if br.read_bit()? == 1 {
+        s = br.read_bits(6)?;
+        if br.read_bit()? == 1 {
+            m = br.read_bits(6)?;
+            if br.read_bit()? == 1 {
+                h = br.read_bits(5)?;
+            }
+        }
+    }
+    Some((h as u8, m as u8, s as u8))
+}
+
+/// Parse an H.265 `time_code` payload, returning the first clock timestamp it
+/// codes. `None` when it codes none or the payload is malformed.
+#[cfg(feature = "metadata")]
+pub fn parse_time_code(p: &[u8]) -> Option<g2g_core::meta::TimecodeMeta> {
+    let mut br = BitReader::new(p);
+    let num_clock_ts = br.read_bits(2)?;
+    for _ in 0..num_clock_ts {
+        if br.read_bit()? != 1 {
+            continue;
+        }
+        br.read_bit()?; // units_field_based_flag
+        br.read_bits(5)?; // counting_type
+        let full = br.read_bit()? == 1;
+        br.read_bit()?; // discontinuity_flag
+        let drop_frame = br.read_bit()? == 1;
+        // n_frames is 9 bits here; a count that does not fit a frame number is
+        // malformed, so the timestamp is dropped rather than truncated.
+        let n_frames = u8::try_from(br.read_bits(9)?).ok()?;
+        let (hours, minutes, seconds) = read_hms(&mut br, full)?;
+        let time_offset_length = br.read_bits(5)?;
+        br.skip_bits(time_offset_length as usize)?;
+        return Some(g2g_core::meta::TimecodeMeta {
+            hours,
+            minutes,
+            seconds,
+            frames: n_frames,
+            drop_frame,
+            framerate_q16: None,
+        });
+    }
+    None
+}
+
+/// Parse an H.264 `pic_timing` payload with the SPS VUI `ctx` it needs,
+/// returning the first clock timestamp it codes.
+#[cfg(feature = "metadata")]
+pub fn parse_pic_timing(p: &[u8], ctx: PicTimingContext) -> Option<g2g_core::meta::TimecodeMeta> {
+    if !ctx.pic_struct_present {
+        return None;
+    }
+    let mut br = BitReader::new(p);
+    if ctx.cpb_dpb_delays_present {
+        br.skip_bits(ctx.cpb_removal_delay_length as usize)?;
+        br.skip_bits(ctx.dpb_output_delay_length as usize)?;
+    }
+    // NumClockTS per pic_struct (H.264 table D-1).
+    let num_clock_ts = match br.read_bits(4)? {
+        0..=2 => 1,
+        3 | 4 | 7 => 2,
+        5 | 6 | 8 => 3,
+        _ => return None,
+    };
+    for _ in 0..num_clock_ts {
+        if br.read_bit()? != 1 {
+            continue;
+        }
+        br.read_bits(2)?; // ct_type
+        br.read_bit()?; // nuit_field_based_flag
+        br.read_bits(5)?; // counting_type
+        let full = br.read_bit()? == 1;
+        br.read_bit()?; // discontinuity_flag
+        let drop_frame = br.read_bit()? == 1;
+        let n_frames = br.read_bits(8)? as u8;
+        let (hours, minutes, seconds) = read_hms(&mut br, full)?;
+        br.skip_bits(ctx.time_offset_length as usize)?;
+        return Some(g2g_core::meta::TimecodeMeta {
+            hours,
+            minutes,
+            seconds,
+            frames: n_frames,
+            drop_frame,
+            framerate_q16: None,
+        });
+    }
+    None
+}
+
 /// Everything one access unit's SEI messages yield, from a single walk.
 #[derive(Debug, Default)]
 pub struct SeiInfo {
@@ -128,17 +253,36 @@ pub struct SeiInfo {
     /// HDR10 static metadata, `None` when the AU carries neither payload.
     #[cfg(feature = "metadata")]
     pub hdr: Option<g2g_core::meta::HdrStaticMeta>,
+    /// SMPTE 12M timecode, `None` when the AU codes none.
+    #[cfg(feature = "metadata")]
+    pub timecode: Option<g2g_core::meta::TimecodeMeta>,
 }
 
 /// Walk one access unit's SEI messages once, collecting everything the parser
-/// mines from them.
-pub fn parse_au(au: &[u8], codec: VideoCodec) -> SeiInfo {
+/// mines from them. `pic_timing` is the SPS VUI context an H.264 `pic_timing`
+/// message needs (default for H.265, or when the caller has no SPS yet: the
+/// timecode is then simply not recovered).
+pub fn parse_au(au: &[u8], codec: VideoCodec, pic_timing: PicTimingContext) -> SeiInfo {
     let mut info = SeiInfo::default();
     #[cfg(feature = "metadata")]
     let mut hdr = g2g_core::meta::HdrStaticMeta::default();
+    #[cfg(not(feature = "metadata"))]
+    let _ = pic_timing;
     for_each_message(au, codec, |ty, payload| match ty {
         PAYLOAD_USER_DATA_REGISTERED => {
             crate::cea::parse_caption_payload(payload, &mut info.captions)
+        }
+        #[cfg(feature = "metadata")]
+        PAYLOAD_PIC_TIMING => {
+            if codec != VideoCodec::H265 {
+                info.timecode = parse_pic_timing(payload, pic_timing);
+            }
+        }
+        #[cfg(feature = "metadata")]
+        PAYLOAD_TIME_CODE => {
+            if codec == VideoCodec::H265 {
+                info.timecode = parse_time_code(payload);
+            }
         }
         #[cfg(feature = "metadata")]
         PAYLOAD_MASTERING_DISPLAY => {
@@ -234,7 +378,7 @@ mod tests {
         ));
         stream.append(&mut au);
 
-        let hdr = parse_au(&stream, VideoCodec::H264)
+        let hdr = parse_au(&stream, VideoCodec::H264, PicTimingContext::default())
             .hdr
             .expect("HDR SEI parsed");
         let m = hdr.mastering.expect("mastering display present");
@@ -257,7 +401,9 @@ mod tests {
         for cut in [0usize, 1, 12, 23] {
             let nal = build_sei_nal(PAYLOAD_MASTERING_DISPLAY, &payload[..cut], VideoCodec::H264);
             assert!(
-                parse_au(&nal, VideoCodec::H264).hdr.is_none(),
+                parse_au(&nal, VideoCodec::H264, PicTimingContext::default())
+                    .hdr
+                    .is_none(),
                 "truncated to {cut} bytes must not parse"
             );
         }
@@ -267,7 +413,87 @@ mod tests {
     #[cfg(feature = "metadata")]
     fn a_stream_without_hdr_sei_has_no_metadata() {
         let au = alloc::vec![0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84, 0x00];
-        assert!(parse_au(&au, VideoCodec::H264).hdr.is_none());
+        assert!(parse_au(&au, VideoCodec::H264, PicTimingContext::default())
+            .hdr
+            .is_none());
+    }
+
+    #[test]
+    #[cfg(feature = "metadata")]
+    fn parses_an_h265_time_code() {
+        use crate::annexb::BitWriter;
+        let mut w = BitWriter::default();
+        w.write_bits(1, 2); // num_clock_ts
+        w.write_bit(1); // clock_timestamp_flag
+        w.write_bit(0); // units_field_based_flag
+        w.write_bits(0, 5); // counting_type
+        w.write_bit(1); // full_timestamp_flag
+        w.write_bit(0); // discontinuity_flag
+        w.write_bit(1); // cnt_dropped_flag (drop frame)
+        w.write_bits(29, 9); // n_frames
+        w.write_bits(58, 6); // seconds_value
+        w.write_bits(59, 6); // minutes_value
+        w.write_bits(10, 5); // hours_value
+        w.write_bits(0, 5); // time_offset_length
+        w.align_to_byte();
+
+        let tc = parse_time_code(&w.into_bytes()).expect("time_code parsed");
+        assert_eq!(
+            (tc.hours, tc.minutes, tc.seconds, tc.frames),
+            (10, 59, 58, 29)
+        );
+        assert!(tc.drop_frame);
+    }
+
+    #[test]
+    #[cfg(feature = "metadata")]
+    fn parses_an_h264_pic_timing_with_hrd_delays() {
+        use crate::annexb::BitWriter;
+        let ctx = PicTimingContext {
+            cpb_dpb_delays_present: true,
+            cpb_removal_delay_length: 24,
+            dpb_output_delay_length: 24,
+            pic_struct_present: true,
+            time_offset_length: 0,
+        };
+        let mut w = BitWriter::default();
+        w.write_bits(0, 24); // cpb_removal_delay
+        w.write_bits(0, 24); // dpb_output_delay
+        w.write_bits(0, 4); // pic_struct: one clock timestamp
+        w.write_bit(1); // clock_timestamp_flag
+        w.write_bits(0, 2); // ct_type
+        w.write_bit(0); // nuit_field_based_flag
+        w.write_bits(0, 5); // counting_type
+        w.write_bit(1); // full_timestamp_flag
+        w.write_bit(0); // discontinuity_flag
+        w.write_bit(0); // cnt_dropped_flag
+        w.write_bits(12, 8); // n_frames
+        w.write_bits(34, 6); // seconds_value
+        w.write_bits(56, 6); // minutes_value
+        w.write_bits(7, 5); // hours_value
+        w.align_to_byte();
+        let payload = w.into_bytes();
+
+        let tc = parse_pic_timing(&payload, ctx).expect("pic_timing parsed");
+        assert_eq!(
+            (tc.hours, tc.minutes, tc.seconds, tc.frames),
+            (7, 56, 34, 12)
+        );
+        assert!(!tc.drop_frame);
+
+        // Without the VUI flag the message carries no timestamps at all, so the
+        // same bytes must not be mined for one.
+        let no_pic_struct = PicTimingContext {
+            pic_struct_present: false,
+            ..ctx
+        };
+        assert!(parse_pic_timing(&payload, no_pic_struct).is_none());
+        // Mis-sized delays walk off the end rather than inventing a timecode.
+        let truncated = PicTimingContext {
+            cpb_removal_delay_length: 255,
+            ..ctx
+        };
+        assert!(parse_pic_timing(&payload, truncated).is_none());
     }
 
     #[test]

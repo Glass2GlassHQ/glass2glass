@@ -46,6 +46,9 @@ pub struct SpsGeometry {
     /// Framerate as Q16 fixed-point fps (e.g. from the H.264 VUI `timing_info`),
     /// `None` when the SPS carries none or the codec does not recover it.
     pub framerate: Option<u32>,
+    /// SPS VUI context an H.264 `pic_timing` SEI needs to be parseable. `None`
+    /// for H.265, whose `time_code` SEI is self-contained.
+    pub pic_timing: Option<crate::sei::PicTimingContext>,
 }
 
 /// Codec-specific hooks for [`NalParse`]. Implemented by zero-sized markers.
@@ -121,6 +124,14 @@ pub struct NalParse<C: NalCodec> {
     /// re-attached to every frame.
     #[cfg(feature = "metadata")]
     hdr: Option<g2g_core::meta::HdrStaticMeta>,
+    /// SPS VUI context the H.264 `pic_timing` SEI parse needs, latched from the
+    /// last SPS (the SEI may ride an access unit that carries no SPS).
+    #[cfg(feature = "metadata")]
+    pic_timing: crate::sei::PicTimingContext,
+    /// Framerate the last SPS declared, stamped onto a recovered timecode so a
+    /// consumer can convert the frame count to a duration.
+    #[cfg(feature = "metadata")]
+    sps_framerate: Option<u32>,
     _codec: PhantomData<C>,
 }
 
@@ -140,6 +151,10 @@ impl<C: NalCodec> Default for NalParse<C> {
             last_config_pts_ns: None,
             #[cfg(feature = "metadata")]
             hdr: None,
+            #[cfg(feature = "metadata")]
+            pic_timing: crate::sei::PicTimingContext::default(),
+            #[cfg(feature = "metadata")]
+            sps_framerate: None,
             _codec: PhantomData,
         }
     }
@@ -253,6 +268,15 @@ impl<C: NalCodec> NalParse<C> {
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
         if let Some(info) = C::extract_sps_info(bytes) {
+            #[cfg(feature = "metadata")]
+            {
+                // The SEI timecode parse and its frame-rate field both come from
+                // the SPS, which may sit in an earlier access unit than the SEI.
+                if let Some(ctx) = info.pic_timing {
+                    self.pic_timing = ctx;
+                }
+                self.sps_framerate = info.framerate;
+            }
             let new_caps = Caps::CompressedVideo {
                 codec: C::CODEC,
                 width: Dim::Fixed(info.width),
@@ -379,7 +403,7 @@ impl<C: NalCodec> NalParse<C> {
         let Some(au) = frame.domain.as_system_slice() else {
             return;
         };
-        let info = crate::sei::parse_au(au, C::CODEC);
+        let info = crate::sei::parse_au(au, C::CODEC, self.pic_timing);
         if let Some(hdr) = info.hdr {
             self.hdr = Some(hdr);
         }
@@ -392,6 +416,11 @@ impl<C: NalCodec> NalParse<C> {
         }
         if let Some(hdr) = self.hdr {
             frame.meta.attach(hdr);
+        }
+        if let Some(mut tc) = info.timecode {
+            // The SEI codes the count, not the rate it runs at; that is the SPS's.
+            tc.framerate_q16 = self.sps_framerate;
+            frame.meta.attach(tc);
         }
     }
 

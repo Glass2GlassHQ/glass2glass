@@ -6,9 +6,11 @@
 //! The g2g analog of GStreamer's `timeoverlay`. Which timestamp is drawn is the
 //! `time-mode` property ([`TimeMode`]): the raw PTS, its stream / running time
 //! through the active segment, running time relative to the first frame, the
-//! buffer count, or the frame number. `time-code` and `reference-timestamp` are
-//! absent because neither timecode nor reference-timestamp frame-meta exists to
-//! read.
+//! buffer count, or the frame number. A frame carrying the source's own SMPTE
+//! timecode (`TimecodeMeta`, mined from the bitstream by the H.264 / H.265
+//! parser) draws that instead of the PTS in the default mode, so gst's separate
+//! `time-code` mode has no counterpart here. `reference-timestamp` is absent:
+//! there is no reference-timestamp frame-meta to read.
 //!
 //! With `show-times-as-dates` the time is instead drawn as a civil date, that
 //! time counted from `datetime-epoch` and formatted per `datetime-format`. The
@@ -39,9 +41,9 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata,
-    FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-    PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, Segment,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
+    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec, Rate, RawVideoFormat, Segment,
 };
 
 use crate::bitmapfont::{glyph, GLYPH_ADVANCE, GLYPH_HEIGHT};
@@ -56,6 +58,17 @@ const DEFAULT_DATETIME_FORMAT: &str = "%F %T";
 /// the string must equal the number, which `dates_count_from_the_epoch` checks.
 const DEFAULT_DATETIME_EPOCH: &str = "1900-01-01";
 const DEFAULT_EPOCH_SECS: i64 = -2_208_988_800;
+
+/// Format a SMPTE 12M timecode as `HH:MM:SS:FF`, with the `;` frame separator
+/// that marks a drop-frame count.
+#[cfg(feature = "metadata")]
+fn format_timecode(tc: &g2g_core::meta::TimecodeMeta) -> String {
+    let sep = if tc.drop_frame { ';' } else { ':' };
+    format!(
+        "{:02}:{:02}:{:02}{sep}{:02}",
+        tc.hours, tc.minutes, tc.seconds, tc.frames
+    )
+}
 
 /// Format a nanosecond timestamp as `HH:MM:SS.mmm`.
 fn format_time(ns: u64) -> String {
@@ -675,8 +688,21 @@ impl TimeOverlay {
         self.segment.to_running_time(pts).unwrap_or(pts)
     }
 
-    /// The text drawn for `timing`, per the active [`TimeMode`].
-    fn text_for(&mut self, timing: &FrameTiming) -> String {
+    /// The text drawn for `frame`, per the active [`TimeMode`].
+    ///
+    /// A frame carrying the source's own SMPTE timecode draws that instead of the
+    /// PTS in the default [`TimeMode::BufferTime`]: it is the same instant, told
+    /// on the clock the source actually counted. The other modes ask for a
+    /// specific pipeline clock, so they are left alone, as is `show-times-as-dates`
+    /// (a timecode is not a date).
+    fn text_for(&mut self, frame: &Frame) -> String {
+        #[cfg(feature = "metadata")]
+        if self.mode == TimeMode::BufferTime && !self.show_dates {
+            if let Some(tc) = frame.meta.get::<g2g_core::meta::TimecodeMeta>() {
+                return format_timecode(tc);
+            }
+        }
+        let timing = &frame.timing;
         let pts = timing.pts_ns;
         let ns = match self.mode {
             TimeMode::BufferTime => pts,
@@ -746,7 +772,7 @@ impl AsyncElement for TimeOverlay {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let text = self.text_for(&frame.timing);
+                    let text = self.text_for(&frame);
                     self.core.render(frame, &text, out).await?;
                 }
                 // A new segment re-bases stream / running time, so the elapsed
@@ -944,6 +970,7 @@ fn blit_glyph(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use g2g_core::FrameTiming;
     use g2g_core::PushOutcome;
 
     #[test]
@@ -1100,6 +1127,11 @@ mod tests {
             height: Dim::Fixed(h),
             framerate: Rate::Fixed(30 << 16),
         }
+    }
+
+    /// A 1x1 frame at PTS 0 with no metadata, for the text-selection tests.
+    fn plain_frame() -> Frame {
+        white_frame(1, 1, 0)
     }
 
     fn white_frame(w: u32, h: u32, pts_ns: u64) -> Frame {
@@ -1414,7 +1446,7 @@ mod tests {
             ov.get_property("datetime-epoch"),
             Some(PropValue::Str("2026-08-04 13:45:07".into()))
         );
-        assert_eq!(ov.text_for(&FrameTiming::default()), "13:45");
+        assert_eq!(ov.text_for(&plain_frame()), "13:45");
 
         // A bad epoch is refused and leaves the accepted one in place.
         assert!(ov
@@ -1425,5 +1457,33 @@ mod tests {
             Some(PropValue::Str("2026-08-04 13:45:07".into()))
         );
         assert!(TimeOverlay::new().with_datetime_epoch("yesterday").is_err());
+    }
+
+    #[test]
+    #[cfg(feature = "metadata")]
+    fn a_carried_timecode_is_drawn_instead_of_the_pts() {
+        use g2g_core::meta::TimecodeMeta;
+        let mut ov = TimeOverlay::new();
+        // No meta: the PTS, as before.
+        assert_eq!(
+            ov.text_for(&white_frame(1, 1, 2_500_000_000)),
+            "00:00:02.500"
+        );
+
+        let mut f = white_frame(1, 1, 2_500_000_000);
+        f.meta.attach(TimecodeMeta {
+            hours: 10,
+            minutes: 59,
+            seconds: 58,
+            frames: 29,
+            drop_frame: true,
+            framerate_q16: None,
+        });
+        // The source's own count wins, with the drop-frame `;` separator.
+        assert_eq!(ov.text_for(&f), "10:59:58;29");
+
+        // An explicit clock mode still asks for that clock, not the timecode.
+        let mut ov = TimeOverlay::new().with_time_mode(TimeMode::BufferCount);
+        assert_eq!(ov.text_for(&f), "0");
     }
 }

@@ -78,7 +78,7 @@ const USER_DATA_TYPE_CC: u8 = 0x03;
 /// `user_data_registered_itu_t_t35` (payload type 4) message tagged `GA94`.
 /// Returns triples in transmission order; a malformed message is skipped.
 pub fn extract_cc_data(au: &[u8], codec: VideoCodec) -> Vec<CcTriple> {
-    crate::sei::parse_au(au, codec).captions
+    crate::sei::parse_au(au, codec, crate::sei::PicTimingContext::default()).captions
 }
 
 /// Build an Annex-B SEI NAL carrying `triples` as an ATSC A/53 `GA94` `cc_data`

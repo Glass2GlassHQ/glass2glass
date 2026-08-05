@@ -484,6 +484,42 @@ mod on {
             Propagation::Keep
         }
     }
+
+    /// The SMPTE ST 12M timecode a coded picture carries (H.264 `pic_timing` /
+    /// H.265 `time_code` SEI, or a container timecode track): where this frame
+    /// sits on the source's own clock, which is what an edit list, a broadcast
+    /// log, or a burnt-in overlay refers to.
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+    pub struct TimecodeMeta {
+        pub hours: u8,
+        pub minutes: u8,
+        pub seconds: u8,
+        pub frames: u8,
+        /// NTSC drop-frame counting (the 29.97 / 59.94 fps count that skips two
+        /// frame numbers a minute). Rendered with a `;` before the frame count.
+        pub drop_frame: bool,
+        /// Frames per second the count runs at, Q16 fixed point like
+        /// [`Rate::Fixed`](crate::Rate::Fixed). `None` when the source declared
+        /// none, so a consumer cannot convert the count to a duration.
+        pub framerate_q16: Option<u32>,
+    }
+
+    impl FrameMeta for TimecodeMeta {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+        fn clone_box(&self) -> Box<dyn FrameMeta> {
+            Box::new(*self)
+        }
+        /// A position on the source's clock: unchanged by any pixel work, and it
+        /// is exactly what a re-encode should carry into the new bitstream.
+        fn propagate(&self, _transform: Transform) -> Propagation {
+            Propagation::Keep
+        }
+    }
 }
 
 #[cfg(all(test, feature = "metadata"))]
