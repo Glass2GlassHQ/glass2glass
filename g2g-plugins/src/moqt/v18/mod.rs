@@ -14,8 +14,10 @@
 //! - [`message`]: the control and request stream message set (Table 5).
 //! - [`data`]: the bit-table SUBGROUP_HEADER and per-object fields.
 //! - [`datagram`]: the bit-table OBJECT_DATAGRAM.
+//! - [`session`]: the SETUP exchange, request streams, and the live data plane.
 
 pub mod coding;
 pub mod data;
 pub mod datagram;
 pub mod message;
+pub mod session;
