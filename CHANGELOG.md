@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M916: an `opus-rs` conformance gate (`tools/opus-rs-gate`) rejects the pure-Rust Opus decoder; the FFI path stays.
+
 - M911: `remotewtsink` can carry data frames as QUIC datagrams (`datagrams=true`, oversized frames fall back to the stream), and the WebTransport elements take a `congestion-control` property.
 
 - M910: `mkvdemux` inflates zlib and header-stripped `ContentEncoding` blocks.

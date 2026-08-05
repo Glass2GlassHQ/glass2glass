@@ -17,10 +17,12 @@ leverage first:
 2. **Egress / transports.** Real-peer FlexFEC interop when a peer
    implementation is available (GStreamer here lacks `rtpflexfecenc`).
 3. **Depth.** Pure-Rust codec paths to cut the remaining ffmpeg FFI reliance:
-   VP8 / VP9 decode (a dedicated libvpx `VpxDec` is deferred: no pure-Rust
-   decoder exists, and a libvpx-FFI element would only duplicate the ffmpeg
-   path) and a pure-Rust Opus path. `VulkanVideoDec` residuals: AMD / Intel
-   validation runs and runtime properties (see "Receive / decode").
+   blocked as of 2026-08. No credible pure-Rust VP8 / VP9 decoder exists (a
+   libvpx-FFI `VpxDec` stays deferred: it would only duplicate the ffmpeg
+   path), and the one complete pure-Rust Opus, `opus-rs` 0.1.26, fails the
+   RFC 8251 vectors (re-run `tools/opus-rs-gate` to revisit on a new release).
+   `VulkanVideoDec` residuals: AMD / Intel validation runs and runtime
+   properties (see "Receive / decode").
 4. **Browser demo (speculative product path).** A deployed reference app for the
    in-browser `ort-web` ONNX chain, plus a native sibling running the same graph.
    The GPU-resident in-browser chain is not achievable from idiomatic Rust (wgpu
