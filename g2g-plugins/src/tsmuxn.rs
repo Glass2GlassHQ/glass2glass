@@ -39,7 +39,7 @@ use g2g_core::{
     PropError, PropKind, PropValue, PropertySpec, TagList,
 };
 
-use crate::mpegts::TsMuxer;
+use crate::mpegts::{TsMuxer, STREAM_TYPE_H264, STREAM_TYPE_H265};
 use crate::tsmux::{language_from_tags, service_from_tags, stream_type_for};
 
 /// Muxes N elementary streams into one MPEG-TS byte stream, PTS-ordered.
@@ -463,6 +463,15 @@ impl MultiInputElement for TsMux {
                     MemoryDomain::System(SystemSlice::from_boxed(ts.into_boxed_slice())),
                     FrameTiming {
                         pts_ns: frame.timing.pts_ns,
+                        // one output frame is one access unit's packets, so the
+                        // AU's sync flag still describes it and a downstream
+                        // segmenter cuts on it. Only the video pads count: every
+                        // audio AU is a sync sample, which would cut everywhere.
+                        keyframe: frame.timing.keyframe
+                            && matches!(
+                                self.stream_types[stream],
+                                Some(STREAM_TYPE_H264) | Some(STREAM_TYPE_H265)
+                            ),
                         ..FrameTiming::default()
                     },
                     self.emitted,
@@ -478,11 +487,13 @@ impl MultiInputElement for TsMux {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use g2g_core::{Dim, PropValue, PushOutcome, Rate, VideoCodec};
+    use g2g_core::{AudioFormat, Dim, PropValue, PushOutcome, Rate, VideoCodec};
 
     #[derive(Default)]
     struct CaptureSink {
         bytes: Vec<u8>,
+        /// Per output frame, its PTS and sync flag.
+        timings: Vec<(u64, bool)>,
     }
     impl OutputSink for CaptureSink {
         fn push<'a>(
@@ -491,6 +502,7 @@ mod tests {
         ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
             Box::pin(async move {
                 if let PipelinePacket::DataFrame(f) = packet {
+                    self.timings.push((f.timing.pts_ns, f.timing.keyframe));
                     if let Some(s) = f.domain.as_system_slice() {
                         self.bytes.extend_from_slice(s);
                     }
@@ -509,15 +521,28 @@ mod tests {
         }
     }
 
-    fn h264_frame(au: Vec<u8>, pts_ns: u64) -> PipelinePacket {
+    fn aac_caps() -> Caps {
+        Caps::Audio {
+            format: AudioFormat::Aac,
+            channels: 2,
+            sample_rate: 48_000,
+        }
+    }
+
+    fn au_frame(au: Vec<u8>, pts_ns: u64, keyframe: bool) -> PipelinePacket {
         PipelinePacket::DataFrame(Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
             FrameTiming {
                 pts_ns,
+                keyframe,
                 ..FrameTiming::default()
             },
             0,
         ))
+    }
+
+    fn h264_frame(au: Vec<u8>, pts_ns: u64) -> PipelinePacket {
+        au_frame(au, pts_ns, false)
     }
 
     /// Count TS packets carrying PID 0 (the PAT) across all output bytes. A TS
@@ -576,6 +601,57 @@ mod tests {
             pat_packet_count(&sink0.bytes),
             1,
             "PAT emitted once by default"
+        );
+    }
+
+    /// M908: an output frame carries the sync flag of the video AU it packetizes,
+    /// so a downstream segmenter (`tsmuxn ! hlssink`) cuts on it. Audio never sets
+    /// it: every AAC AU is a sync sample, which would cut everywhere.
+    #[tokio::test]
+    async fn output_keyframe_flag_comes_from_the_video_pad_only() {
+        const FRAME_NS: u64 = 40_000_000;
+        let idr = alloc::vec![0u8, 0, 0, 1, 0x65, 0xAA];
+        let inter = alloc::vec![0u8, 0, 0, 1, 0x41, 0xBB];
+        let adts = alloc::vec![0xFFu8, 0xF1, 0x4C, 0x80, 0x01, 0x00, 0xFC, 0x00];
+
+        let mut mux = TsMux::new(2);
+        mux.configure_pipeline(0, &h264_caps()).unwrap();
+        mux.configure_pipeline(1, &aac_caps()).unwrap();
+        let mut sink = CaptureSink::default();
+        // Video AUs every 40 ms with an IDR every third; an audio AU 20 ms after
+        // each, flagged a sync sample the way an AAC parser flags them.
+        for i in 0..6u64 {
+            let key = i % 3 == 0;
+            let au = if key { idr.clone() } else { inter.clone() };
+            mux.process(0, au_frame(au, i * FRAME_NS, key), &mut sink)
+                .await
+                .unwrap();
+            mux.process(
+                1,
+                au_frame(adts.clone(), i * FRAME_NS + FRAME_NS / 2, true),
+                &mut sink,
+            )
+            .await
+            .unwrap();
+        }
+        mux.process(0, PipelinePacket::Eos, &mut sink)
+            .await
+            .unwrap();
+        mux.process(1, PipelinePacket::Eos, &mut sink)
+            .await
+            .unwrap();
+
+        assert_eq!(sink.timings.len(), 12, "one output frame per AU");
+        let flagged: Vec<u64> = sink
+            .timings
+            .iter()
+            .filter(|(_, key)| *key)
+            .map(|(pts, _)| *pts)
+            .collect();
+        assert_eq!(
+            flagged,
+            alloc::vec![0, 3 * FRAME_NS],
+            "only the video IDRs are flagged, never an audio AU"
         );
     }
 }

@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M908: `tsmuxn` carries the video pad's keyframe flag onto its output frames, so `hlssink` segments an A/V multiplex.
+
 - M907: `moqtsink` and `moqtsrc` speak MoQ Transport draft-18 alongside draft-16, negotiated per session by offering both as WebTransport subprotocols (`versions` property).
 
 - M906: `moqtsink` dials the relay at configure time and answers control messages from a dedicated pump task, so a subscriber attaching before the first frame or between fragments is served instead of abandoned.
