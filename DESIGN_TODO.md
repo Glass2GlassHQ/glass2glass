@@ -293,6 +293,12 @@ Phased plan:
   against a non-Cloudflare implementation; `PUBLISH`-initiated (publisher-driven)
   subscriptions; multi-track playback (the subscriber, and the browser demo, play
   one media track); and audio in the browser demo.
+- **`moqtsink` answers control only while frames flow.** Control messages are
+  pumped from `process`, so a publisher that has not produced its first frame
+  cannot answer a SUBSCRIBE: the subscriber goes unacknowledged and the relay
+  abandons establishing the upstream subscription. Any subscriber attaching
+  during startup hits it. Needs a control pump that runs independently of frame
+  arrival.
 - **RTP over QUIC (RoQ):** blocked on the spec. draft-ietf-avtcore-rtp-over-quic
   expired at -14 (its ALPN is forbidden until an RFC exists) and the WG missed
   its milestone; revisit only if the draft revives. Peers if it does:
@@ -400,7 +406,16 @@ Phased plan:
 ## Capture sources
 
 - `v4l2src`: MMAP DMABUF output (`MemoryDomain::DmaBuf`); format-flexible
-  negotiation (MJPEG-mode UVC, other fourccs) vs fixed YUYV.
+  negotiation (MJPEG-mode UVC, other fourccs) vs fixed YUYV. It also synthesizes
+  PTS from the requested frame rate, so a camera that does not hold that rate
+  produces a timeline shorter than the capture really took; stamp from the
+  driver's buffer timestamp instead.
+- `libcamerasrc`: `BUFFER_COUNT` is documented as the ring depth requested from
+  libcamera but is never applied to the stream config, only to the channel bound.
+  It happens to match libcamera's default of 4, so nothing is broken today.
+- `libcamera_mjpeg_capture_decodes` fails on an unmodified tree with `Shutdown`,
+  meaning `MjpegDec` or the sink died first and the runner swallowed the real
+  error. A bug in the MJPEG decode path, not in capture.
 - PipeWire capture: DMABUF output; an xdg-desktop-portal screen-capture
   handshake (a portal-granted node id already reaches `pipewirevideosrc` via
   `target-object`); runtime properties on the audio `pipewiresrc` /
