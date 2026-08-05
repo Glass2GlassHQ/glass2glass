@@ -51,18 +51,19 @@ use g2g_core::{
     TextFormat, VideoCodec,
 };
 
-use crate::dvbsub::{
-    page_id_blob, parse_page_ids, segment_span, PageIds, DEFAULT_PAGE_ID, DEFAULT_SUBTITLING_TYPE,
-};
+use crate::dvbsub::DEFAULT_PAGE_ID;
 use crate::fmp4mux::{
     avcc_record, avcc_sample, hvcc_record, is_keyframe_nal, parameter_sets, split_annexb,
     vp8_keyframe, vp9_keyframe,
 };
-use crate::matroska::{finalize_seekable, MatroskaMuxer, MkvCodec, MkvTrackConfig, MkvTrackSpec};
+use crate::matroska::{
+    default_page_blob, finalize_seekable, subpicture_block, subpicture_config,
+    subpicture_mkv_codec, subtitle_format_from_str, subtitle_format_str, text_codec_private,
+    MatroskaMuxer, MkvCodec, MkvTrackConfig, MkvTrackSpec,
+};
 use crate::mp4muxn::{asc_from_adts, strip_adts};
 use crate::opusparse::{is_opus_config, parse_opus_head, synth_opus_head};
-use crate::subparse::{frame_subtitle_block, ASS_SCRIPT_HEADER};
-use crate::vobsub::{idx_config_text, parse_idx};
+use crate::subparse::frame_subtitle_block;
 
 /// What an input pad carries, learned from its negotiated caps at configure.
 #[derive(Debug, Clone, Copy)]
@@ -283,23 +284,6 @@ impl MkvMuxN {
         }
     }
 
-    /// The `CodecPrivate` a bitmap subtitle pad's in-band config blob carries:
-    /// the `.idx` text a VobSub track needs, normalized to the size / palette
-    /// lines a container holds (the cue index is a sidecar's file offset table),
-    /// or the five-byte page-id blob a DVB track needs. `None` when the bytes are
-    /// a cue rather than a config, which is what tells the two apart on one pad.
-    fn subpicture_config(format: SubPictureFormat, data: &[u8]) -> Option<Vec<u8>> {
-        match format {
-            SubPictureFormat::VobSub => Some(idx_config_text(&parse_idx(data)?).into_bytes()),
-            SubPictureFormat::DvbSub => {
-                let ids = parse_page_ids(data)?;
-                let subtitling_type = data.get(4).copied().unwrap_or(DEFAULT_SUBTITLING_TYPE);
-                Some(Vec::from(page_id_blob(ids, subtitling_type)))
-            }
-            _ => None,
-        }
-    }
-
     /// Whether the pad carries Opus, whose in-band headers are config rather
     /// than audio and so are dropped instead of muxed.
     fn is_opus_pad(&self, input: usize) -> bool {
@@ -441,13 +425,7 @@ impl MkvMuxN {
                 let block = frame_subtitle_block(&text, self.subtitle_format, seq);
                 (block.into_bytes(), true)
             }
-            // An `S_DVBSUB` block is the display set's bare segments: the PES
-            // data-field header a transport stream wraps them in does not belong
-            // in a Matroska block, so a stream out of `tsdemux` is unwrapped
-            // here. A VobSub block is the subpicture unit verbatim.
-            Some(PadKind::SubPicture(SubPictureFormat::DvbSub)) => {
-                (segment_span(au).to_vec(), true)
-            }
+            Some(PadKind::SubPicture(format)) => (subpicture_block(format, au), true),
             _ => (au.to_vec(), true),
         }
     }
@@ -460,7 +438,7 @@ impl MkvMuxN {
         let Some(PadKind::SubPicture(format)) = self.kinds[input] else {
             return false;
         };
-        let Some(config) = Self::subpicture_config(format, data) else {
+        let Some(config) = subpicture_config(format, data) else {
             return false;
         };
         if self.mux.is_none() {
@@ -568,64 +546,17 @@ fn track_config(init: &TrackInit, subtitle_format: TextFormat) -> MkvTrackConfig
             }
         }
         TrackInit::Text => MkvTrackConfig {
-            spec: MkvTrackSpec {
-                codec: MkvCodec::Subtitle(subtitle_format),
-                width: 0,
-                height: 0,
-                channels: 0,
-                sample_rate: 0,
-            },
-            codec_private: match subtitle_format {
-                TextFormat::Ssa => Vec::from(ASS_SCRIPT_HEADER.as_bytes()),
-                _ => Vec::new(),
-            },
+            spec: MkvTrackSpec::subtitle(MkvCodec::Subtitle(subtitle_format)),
+            codec_private: text_codec_private(subtitle_format),
         },
         TrackInit::SubPicture {
             format,
             codec_private,
         } => MkvTrackConfig {
-            spec: MkvTrackSpec {
-                // Gated at `pad_kind_for`, so the mapping is always there.
-                codec: subpicture_mkv_codec(*format).unwrap_or(MkvCodec::Other),
-                width: 0,
-                height: 0,
-                channels: 0,
-                sample_rate: 0,
-            },
+            // Gated at `pad_kind_for`, so the mapping is always there.
+            spec: MkvTrackSpec::subtitle(subpicture_mkv_codec(*format).unwrap_or(MkvCodec::Other)),
             codec_private: codec_private.clone(),
         },
-    }
-}
-
-/// The `S_DVBSUB` `CodecPrivate` for a stream that names no pages of its own:
-/// the `dvbsub-page-id` page as both the composition and the ancillary one.
-fn default_page_blob(page_id: u16) -> Vec<u8> {
-    Vec::from(page_id_blob(
-        PageIds {
-            composition: page_id,
-            ancillary: page_id,
-        },
-        DEFAULT_SUBTITLING_TYPE,
-    ))
-}
-
-/// The Matroska codec a bitmap subtitle format is written as, or `None` for one
-/// with no mapping (`S_HDMV/PGS` has no [`MkvCodec`] of its own).
-fn subpicture_mkv_codec(format: SubPictureFormat) -> Option<MkvCodec> {
-    match format {
-        SubPictureFormat::VobSub => Some(MkvCodec::VobSub),
-        SubPictureFormat::DvbSub => Some(MkvCodec::DvbSub),
-        _ => None,
-    }
-}
-
-/// The `subtitle-format` property value naming a storage syntax, or `None` for a
-/// format no `S_TEXT/*` mapping covers.
-fn subtitle_format_str(format: TextFormat) -> Option<&'static str> {
-    match format {
-        TextFormat::Utf8 => Some("utf8"),
-        TextFormat::Ssa => Some("ass"),
-        _ => None,
     }
 }
 
@@ -761,11 +692,7 @@ impl MultiInputElement for MkvMuxN {
             }
             "subtitle-format" => {
                 let v = value.as_str().ok_or(PropError::Type)?;
-                self.subtitle_format = match v {
-                    "utf8" => TextFormat::Utf8,
-                    "ass" | "ssa" => TextFormat::Ssa,
-                    _ => return Err(PropError::Value),
-                };
+                self.subtitle_format = subtitle_format_from_str(v).ok_or(PropError::Value)?;
                 Ok(())
             }
             "dvbsub-page-id" => {

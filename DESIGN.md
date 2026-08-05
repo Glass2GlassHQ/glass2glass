@@ -2315,8 +2315,8 @@ travels as a `TextCueMeta` frame-meta (the `metadata` feature) that `SubParse`
 attaches and `TextOverlayN` reads, recovering WebVTT / SSA positioning; on the
 ZST baseline (no meta) streamed cues draw at the renderer default.
 
-Cue streams also go back into a container. A `Caps::Text{Utf8}` pad on `MkvMuxN`
-or `Mp4MuxN` adds a subtitle track beside the A/V ones, taking one cue per frame
+Cue streams also go back into a container. A `Caps::Text{Utf8}` pad on either
+Matroska muxer or on `Mp4MuxN` is a subtitle track, taking one cue per frame
 with the window on the frame's PTS + duration, and the track's init needs nothing
 from the stream, so it is fixed at configure rather than at the first cue (which
 may be many seconds in, and every other track waits on the header). The two
@@ -2505,7 +2505,7 @@ cover it drop the object, an object larger than the video or past
 with the display sets that did parse intact.
 
 The write paths mirror those two carriages (M927). A `Caps::SubPicture` input pad
-on `MkvMuxN` becomes an `S_VOBSUB` or `S_DVBSUB` track, and a
+on either Matroska muxer becomes an `S_VOBSUB` or `S_DVBSUB` track, and a
 `Caps::SubPicture{DvbSub}` pad on either TS muxer becomes a private (0x06) stream
 whose PMT entry carries the `subtitling_descriptor` naming its language, type and
 pages (that descriptor replaces the 'KLVA' registration a bare private stream
@@ -2523,7 +2523,13 @@ the EN 300 743 data field (`data_identifier` 0x20 and a subtitle stream id ahead
 the end marker behind), and both directions run through `segment_span`, which
 finds the segment run by walking its headers rather than trimming bytes. Subtitle
 blocks, bitmap as well as text, are written as a `BlockGroup` so a cue's display
-window rides its `BlockDuration`.
+window rides its `BlockDuration`. Both Matroska muxers take these pads, the
+fan-in `MkvMuxN` beside its A/V tracks and the single-track `MkvMux` on its one
+sink pad (M928), so a sidecar subtitle file muxes over one link
+(`vobsubsrc location=movie.idx ! matroskamux ! filesink`) rather than the `name=m`
+shape. The mapping they share (the codec each format writes, the config-blob
+recognition, the block framing, the `S_TEXT/ASS` script header) lives in
+`matroska.rs` beside `MkvTrackSpec`, so the two cannot drift.
 
 **EBU teletext** (`teletext.rs`, `no_std`) is the third TS subtitle carriage, and
 unlike the two above it is characters rather than pixels, so it lands on the plain

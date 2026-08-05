@@ -12,6 +12,19 @@
 //! ... ! mkvmux ! filesink location=out.webm
 //! ```
 //!
+//! A `Caps::Text{Utf8}` or `Caps::SubPicture` input is written as a subtitle
+//! track instead (M928): one cue per frame, as a `BlockGroup` whose
+//! `BlockDuration` is the cue's display window, in the `S_TEXT/*` syntax the
+//! `subtitle-format` property picks or the `S_VOBSUB` / `S_DVBSUB` mapping of the
+//! bitmap format. A bitmap pad's out-of-band configuration (the `.idx` text, the
+//! DVB page ids) comes from the config blob the stream carries ahead of its first
+//! cue, and becomes the track's `CodecPrivate`. So a sidecar subtitle file muxes
+//! with one link rather than the fan-in shape:
+//!
+//! ```text
+//! vobsubsrc location=movie.idx ! matroskamux ! filesink location=subs.mkv
+//! ```
+//!
 //! The muxer is built lazily on the first frame, so a `CapsChanged` that refines
 //! the geometry (e.g. from a parser) is reflected in the written Tracks. Scope
 //! (v1): one track, one frame per Cluster, every frame flagged a keyframe (no
@@ -28,10 +41,17 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
     Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, TagList, VideoCodec,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, SubPictureFormat, TagList,
+    TextFormat, VideoCodec,
 };
 
-use crate::matroska::{finalize_seekable, MatroskaMuxer, MkvCodec, MkvTrackSpec};
+use crate::dvbsub::DEFAULT_PAGE_ID;
+use crate::matroska::{
+    default_page_blob, finalize_seekable, subpicture_block, subpicture_config,
+    subpicture_mkv_codec, subtitle_format_from_str, subtitle_format_str, text_codec_private,
+    MatroskaMuxer, MkvCodec, MkvTrackConfig, MkvTrackSpec,
+};
+use crate::subparse::frame_subtitle_block;
 
 /// Muxes one elementary stream into a Matroska / WebM byte stream.
 #[derive(Debug)]
@@ -60,6 +80,19 @@ pub struct MkvMux {
     seekable: bool,
     /// The buffered file bytes in `seekable` mode.
     pending: Vec<u8>,
+    /// The on-disk syntax a `Caps::Text` pad's cues are written in (M928): the
+    /// `S_TEXT/*` CodecID and the block framing that goes with it. The pad always
+    /// carries plain cue text; this only picks how it is stored.
+    subtitle_format: TextFormat,
+    /// The ASS event counter: the `ReadOrder` field leading each text block.
+    text_seq: u64,
+    /// The `dvbsub-page-id` property: the composition and ancillary page an
+    /// `S_DVBSUB` track's `CodecPrivate` names when the stream carries no page-id
+    /// config blob of its own.
+    dvbsub_page_id: u16,
+    /// The `CodecPrivate` a bitmap subtitle pad's in-band config frame carried
+    /// (the `.idx` text, the page ids), or `None` before one arrives.
+    subpicture_private: Option<Vec<u8>>,
 }
 
 impl Default for MkvMux {
@@ -79,6 +112,10 @@ impl MkvMux {
             streamable: false,
             seekable: false,
             pending: Vec::new(),
+            subtitle_format: TextFormat::Utf8,
+            text_seq: 0,
+            dvbsub_page_id: DEFAULT_PAGE_ID,
+            subpicture_private: None,
         }
     }
 
@@ -101,6 +138,25 @@ impl MkvMux {
         self
     }
 
+    /// The `S_TEXT/*` syntax a text pad's cues are written in: [`TextFormat::Utf8`]
+    /// (the default, `S_TEXT/UTF8`, which ffmpeg reports as `subrip`) or
+    /// [`TextFormat::Ssa`] (`S_TEXT/ASS`, cues framed as `Dialogue` fields behind
+    /// an ASS script header `CodecPrivate`). Any other value leaves the default.
+    pub fn with_subtitle_format(mut self, format: TextFormat) -> Self {
+        if subtitle_format_str(format).is_some() {
+            self.subtitle_format = format;
+        }
+        self
+    }
+
+    /// The composition and ancillary page an `S_DVBSUB` track's `CodecPrivate`
+    /// names for a stream that carries no page-id config blob of its own. A blob
+    /// wins over this.
+    pub fn with_dvbsub_page_id(mut self, page_id: u16) -> Self {
+        self.dvbsub_page_id = page_id;
+        self
+    }
+
     /// Count of byte-stream frames forwarded.
     pub fn emitted(&self) -> u64 {
         self.emitted
@@ -113,7 +169,9 @@ impl MkvMux {
     }
 
     /// The Matroska track for an input caps, or `None` if the codec is unmappable.
-    fn track_spec(caps: &Caps) -> Option<MkvTrackSpec> {
+    /// A text pad's storage syntax is the muxer's `subtitle-format`, which the
+    /// caps does not name; a bitmap subtitle pad's codec is its format's mapping.
+    fn track_spec(caps: &Caps, subtitle_format: TextFormat) -> Option<MkvTrackSpec> {
         match caps {
             Caps::CompressedVideo {
                 codec,
@@ -138,8 +196,69 @@ impl MkvMux {
                 channels: *channels,
                 sample_rate: *sample_rate,
             }),
+            // Only the elementary cue form: a `Text` pad of a document format
+            // (`Srt` / `Ssa` / `Ttml`) carries whole-file bytes, not timed cues.
+            Caps::Text {
+                format: TextFormat::Utf8,
+            } => Some(MkvTrackSpec::subtitle(MkvCodec::Subtitle(subtitle_format))),
+            Caps::SubPicture { format } => {
+                Some(MkvTrackSpec::subtitle(subpicture_mkv_codec(*format)?))
+            }
             _ => None,
         }
+    }
+
+    /// The track's `CodecPrivate`: the ASS script header a text track needs to be
+    /// read, or the out-of-band configuration a bitmap subtitle track declares
+    /// (the config blob its stream carried, else what the muxer knows: nothing
+    /// for VobSub, the `dvbsub-page-id` pages for DVB). The A/V streams this
+    /// muxer writes carry their parameter sets in band, so they need none.
+    fn codec_private(&self) -> Vec<u8> {
+        match self.caps {
+            Some(Caps::Text { .. }) => text_codec_private(self.subtitle_format),
+            Some(Caps::SubPicture { format }) => {
+                self.subpicture_private
+                    .clone()
+                    .unwrap_or_else(|| match format {
+                        SubPictureFormat::DvbSub => default_page_blob(self.dvbsub_page_id),
+                        _ => Vec::new(),
+                    })
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// The block payload for one access unit: a text cue framed in the track's
+    /// `S_TEXT/*` syntax, a bitmap cue in the framing its Matroska mapping takes,
+    /// anything else verbatim.
+    fn sample_for(&mut self, au: &[u8]) -> Vec<u8> {
+        match self.caps {
+            Some(Caps::Text { .. }) => {
+                let seq = self.text_seq;
+                self.text_seq = seq.saturating_add(1);
+                let text = alloc::string::String::from_utf8_lossy(au);
+                frame_subtitle_block(&text, self.subtitle_format, seq).into_bytes()
+            }
+            Some(Caps::SubPicture { format }) => subpicture_block(format, au),
+            _ => au.to_vec(),
+        }
+    }
+
+    /// Take an in-band config blob as the pad's `CodecPrivate`. `true` when the
+    /// frame was one, so it is config rather than a cue and is never written as a
+    /// block. Bytes arriving after the Tracks element is written are still
+    /// dropped: the track already declared its configuration.
+    fn adopt_subpicture_config(&mut self, data: &[u8]) -> bool {
+        let Some(Caps::SubPicture { format }) = self.caps else {
+            return false;
+        };
+        let Some(config) = subpicture_config(format, data) else {
+            return false;
+        };
+        if self.mux.is_none() {
+            self.subpicture_private = Some(config);
+        }
+        true
     }
 
     /// The elementary streams this muxer accepts on its sink pad.
@@ -163,6 +282,15 @@ impl MkvMux {
             video(VideoCodec::Av1),
             audio(AudioFormat::Aac),
             audio(AudioFormat::Opus),
+            Caps::Text {
+                format: TextFormat::Utf8,
+            },
+            Caps::SubPicture {
+                format: SubPictureFormat::VobSub,
+            },
+            Caps::SubPicture {
+                format: SubPictureFormat::DvbSub,
+            },
         ])
     }
 }
@@ -174,7 +302,7 @@ impl AsyncElement for MkvMux {
         Self: 'a;
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        if Self::track_spec(upstream_caps).is_some() {
+        if Self::track_spec(upstream_caps, self.subtitle_format).is_some() {
             Ok(upstream_caps.clone())
         } else {
             Err(G2gError::CapsMismatch)
@@ -182,8 +310,9 @@ impl AsyncElement for MkvMux {
     }
 
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        CapsConstraint::DerivedOutput(Box::new(|input: &Caps| {
-            if Self::track_spec(input).is_some() {
+        let subtitle_format = self.subtitle_format;
+        CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| {
+            if Self::track_spec(input, subtitle_format).is_some() {
                 CapsSet::one(Self::output_caps())
             } else {
                 CapsSet::from_alternatives(Vec::new())
@@ -192,7 +321,7 @@ impl AsyncElement for MkvMux {
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        Self::track_spec(absolute_caps).ok_or(G2gError::CapsMismatch)?;
+        Self::track_spec(absolute_caps, self.subtitle_format).ok_or(G2gError::CapsMismatch)?;
         self.caps = Some(absolute_caps.clone());
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
@@ -212,6 +341,18 @@ impl AsyncElement for MkvMux {
                 "two-pass mode: buffer the file and finalize with a front SeekHead",
             )
             .with_default("false"),
+            PropertySpec::new(
+                "subtitle-format",
+                PropKind::Str,
+                "storage syntax for a text input: utf8 (S_TEXT/UTF8) | ass (S_TEXT/ASS)",
+            )
+            .with_default("utf8"),
+            PropertySpec::new(
+                "dvbsub-page-id",
+                PropKind::Uint,
+                "composition and ancillary page an S_DVBSUB track declares when the stream carries no page-id config",
+            )
+            .with_default("1"),
         ];
         PROPS
     }
@@ -236,6 +377,16 @@ impl AsyncElement for MkvMux {
                 self.seekable = v;
                 Ok(())
             }
+            "subtitle-format" => {
+                let v = value.as_str().ok_or(PropError::Type)?;
+                self.subtitle_format = subtitle_format_from_str(v).ok_or(PropError::Value)?;
+                Ok(())
+            }
+            "dvbsub-page-id" => {
+                self.dvbsub_page_id = u16::try_from(value.as_uint().ok_or(PropError::Type)?)
+                    .map_err(|_| PropError::Value)?;
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -244,6 +395,12 @@ impl AsyncElement for MkvMux {
         match name {
             "streamable" => Some(PropValue::Bool(self.streamable)),
             "seekable" => Some(PropValue::Bool(self.seekable)),
+            "subtitle-format" => Some(PropValue::Str(
+                subtitle_format_str(self.subtitle_format)
+                    .unwrap_or("utf8")
+                    .into(),
+            )),
+            "dvbsub-page-id" => Some(PropValue::Uint(self.dvbsub_page_id as u64)),
             _ => None,
         }
     }
@@ -262,10 +419,22 @@ impl AsyncElement for MkvMux {
                     let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
+                    // A bitmap subtitle pad opens on its config blob (the `.idx`
+                    // text, the page ids), which becomes the track's
+                    // `CodecPrivate` and is never a cue to write.
+                    if self.adopt_subpicture_config(slice) {
+                        return Ok(());
+                    }
+                    let sample = self.sample_for(slice);
                     if self.mux.is_none() {
                         let caps = self.caps.as_ref().ok_or(G2gError::NotConfigured)?;
-                        let spec = Self::track_spec(caps).ok_or(G2gError::CapsMismatch)?;
-                        let mut mux = MatroskaMuxer::new(spec).with_tags(self.tags.clone());
+                        let spec = Self::track_spec(caps, self.subtitle_format)
+                            .ok_or(G2gError::CapsMismatch)?;
+                        let mut mux = MatroskaMuxer::new_multi(alloc::vec![MkvTrackConfig {
+                            spec,
+                            codec_private: self.codec_private(),
+                        }])
+                        .with_tags(self.tags.clone());
                         if self.seekable {
                             mux = mux.with_two_pass();
                         }
@@ -278,7 +447,7 @@ impl AsyncElement for MkvMux {
                     // No upstream delta-frame signal yet: flag every frame a keyframe.
                     let bytes = mux.push_frame_on(
                         0,
-                        slice,
+                        &sample,
                         frame.timing.pts_ns,
                         true,
                         frame.timing.duration_ns,
@@ -301,7 +470,7 @@ impl AsyncElement for MkvMux {
                 }
                 PipelinePacket::CapsChanged(c) => {
                     // Refines the track until the first frame fixes the header.
-                    if self.mux.is_none() && Self::track_spec(&c).is_some() {
+                    if self.mux.is_none() && Self::track_spec(&c, self.subtitle_format).is_some() {
                         self.caps = Some(c);
                     }
                 }

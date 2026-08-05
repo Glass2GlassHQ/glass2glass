@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M928: the single-track `matroskamux` takes a text or bitmap subtitle pad, so a sidecar subtitle file muxes over one link.
+
 - M927: bitmap subtitle pads mux to Matroska `S_VOBSUB` / `S_DVBSUB` tracks and to a DVB subtitle stream in MPEG-TS.
 
 - M925: `pgsdec` decodes Blu-ray PGS bitmap subtitles (`Caps::SubPicture`, mkv `S_HDMV/PGS`) into RGBA cue canvases, pixel-exact against ffmpeg.

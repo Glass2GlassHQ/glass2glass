@@ -27,7 +27,11 @@ use alloc::borrow::Cow;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use g2g_core::{Tag, TagList, TextFormat};
+use g2g_core::{SubPictureFormat, Tag, TagList, TextFormat};
+
+use crate::dvbsub::{page_id_blob, parse_page_ids, segment_span, PageIds, DEFAULT_SUBTITLING_TYPE};
+use crate::subparse::ASS_SCRIPT_HEADER;
+use crate::vobsub::{idx_config_text, parse_idx};
 
 /// EBML / Matroska element IDs (kept whole, length marker included). The demuxer
 /// skips the EBML header by its size and ignores TrackType (the CodecID pins the
@@ -1428,6 +1432,104 @@ pub struct MkvTrackSpec {
 pub struct MkvTrackConfig {
     pub spec: MkvTrackSpec,
     pub codec_private: Vec<u8>,
+}
+
+impl MkvTrackSpec {
+    /// A subtitle track: the codec alone, since such a track has neither video
+    /// geometry nor audio parameters.
+    pub fn subtitle(codec: MkvCodec) -> Self {
+        Self {
+            codec,
+            width: 0,
+            height: 0,
+            channels: 0,
+            sample_rate: 0,
+        }
+    }
+}
+
+// --- Subtitle track mapping, shared by both muxer elements (M898 / M927 / M928).
+// The single-track `crate::mkvmux::MkvMux` and the fan-in `crate::mkvmuxn::MkvMuxN`
+// write subtitle pads identically, so the mapping lives here rather than in either.
+
+/// The Matroska codec a bitmap subtitle format is written as, or `None` for one
+/// these muxers do not write (a `S_HDMV/PGS` block needs the `.sup` framing
+/// stripped, which no write path does yet).
+pub fn subpicture_mkv_codec(format: SubPictureFormat) -> Option<MkvCodec> {
+    match format {
+        SubPictureFormat::VobSub => Some(MkvCodec::VobSub),
+        SubPictureFormat::DvbSub => Some(MkvCodec::DvbSub),
+        _ => None,
+    }
+}
+
+/// The `CodecPrivate` a bitmap subtitle pad's in-band config blob carries: the
+/// `.idx` text a VobSub track needs, normalized to the size / palette lines a
+/// container holds (the cue index is a sidecar's file offset table), or the
+/// five-byte page-id blob a DVB track needs. `None` when the bytes are a cue
+/// rather than a config, which is what tells the two apart on one pad.
+pub fn subpicture_config(format: SubPictureFormat, data: &[u8]) -> Option<Vec<u8>> {
+    match format {
+        SubPictureFormat::VobSub => Some(idx_config_text(&parse_idx(data)?).into_bytes()),
+        SubPictureFormat::DvbSub => {
+            let ids = parse_page_ids(data)?;
+            let subtitling_type = data.get(4).copied().unwrap_or(DEFAULT_SUBTITLING_TYPE);
+            Some(Vec::from(page_id_blob(ids, subtitling_type)))
+        }
+        _ => None,
+    }
+}
+
+/// The block payload for one bitmap subtitle cue. An `S_DVBSUB` block is the
+/// display set's bare segments: the PES data-field header a transport stream
+/// wraps them in does not belong in a Matroska block, so a stream out of
+/// `tsdemux` is unwrapped here. A VobSub block is the subpicture unit verbatim.
+pub fn subpicture_block(format: SubPictureFormat, data: &[u8]) -> Vec<u8> {
+    match format {
+        SubPictureFormat::DvbSub => segment_span(data).to_vec(),
+        _ => data.to_vec(),
+    }
+}
+
+/// The `S_DVBSUB` `CodecPrivate` for a stream that names no pages of its own:
+/// the `dvbsub-page-id` page as both the composition and the ancillary one.
+pub fn default_page_blob(page_id: u16) -> Vec<u8> {
+    Vec::from(page_id_blob(
+        PageIds {
+            composition: page_id,
+            ancillary: page_id,
+        },
+        DEFAULT_SUBTITLING_TYPE,
+    ))
+}
+
+/// The `CodecPrivate` a timed-text track carries in a storage syntax: the ASS
+/// script header naming the fields each block holds, and nothing for plain text.
+pub fn text_codec_private(format: TextFormat) -> Vec<u8> {
+    match format {
+        TextFormat::Ssa => Vec::from(ASS_SCRIPT_HEADER.as_bytes()),
+        _ => Vec::new(),
+    }
+}
+
+/// The `subtitle-format` property value naming a storage syntax, or `None` for a
+/// format no `S_TEXT/*` mapping covers.
+pub fn subtitle_format_str(format: TextFormat) -> Option<&'static str> {
+    match format {
+        TextFormat::Utf8 => Some("utf8"),
+        TextFormat::Ssa => Some("ass"),
+        _ => None,
+    }
+}
+
+/// The storage syntax a `subtitle-format` property value names, the inverse of
+/// [`subtitle_format_str`].
+pub fn subtitle_format_from_str(value: &str) -> Option<TextFormat> {
+    match value {
+        "utf8" => Some(TextFormat::Utf8),
+        "ass" | "ssa" => Some(TextFormat::Ssa),
+        _ => None,
+    }
 }
 
 /// Default cap on a Cluster's time span (ms): a new Cluster opens once a frame is
