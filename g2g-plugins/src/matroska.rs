@@ -134,9 +134,8 @@ pub enum MkvCodec {
     /// `S_TEXT/UTF8` -> [`TextFormat::Utf8`] (verbatim), `S_TEXT/ASS` / `S_TEXT/SSA`
     /// -> [`TextFormat::Ssa`] (the `Text` field of the comma-separated block, tags
     /// stripped), `S_TEXT/WEBVTT` -> [`TextFormat::WebVtt`] (cue text, inline tags
-    /// stripped). The bitmap subtitle codecs are not text: `S_VOBSUB` and
-    /// `S_DVBSUB` have their own variants, and `S_HDMV/PGS` stays
-    /// [`MkvCodec::Other`].
+    /// stripped). The bitmap subtitle codecs are not text: `S_VOBSUB`,
+    /// `S_DVBSUB` and `S_HDMV/PGS` have their own variants.
     Subtitle(TextFormat),
     /// A DVD subpicture (bitmap) subtitle track (`S_VOBSUB`). Each block is one
     /// SPU packet; the track's `CodecPrivate` is the `.idx` text carrying the
@@ -146,6 +145,10 @@ pub enum MkvCodec {
     /// set's segments, without the PES data-field header; the track's
     /// `CodecPrivate` carries the composition and ancillary page ids.
     DvbSub,
+    /// A Blu-ray PGS subtitle (bitmap) track (`S_HDMV/PGS`). Each block is one
+    /// display set's segments, without the `.sup` per-segment `PG` / PTS / DTS
+    /// header; the track carries no `CodecPrivate`.
+    Pgs,
     /// A `CodecID` this demuxer does not map to a g2g caps type.
     Other,
 }
@@ -182,6 +185,8 @@ impl MkvCodec {
             MkvCodec::VobSub
         } else if id == b"S_DVBSUB" {
             MkvCodec::DvbSub
+        } else if id == b"S_HDMV/PGS" {
+            MkvCodec::Pgs
         } else {
             MkvCodec::Other
         }
@@ -208,6 +213,7 @@ impl MkvCodec {
             // a carriage no reference peer reads back.
             MkvCodec::VobSub => b"S_VOBSUB",
             MkvCodec::DvbSub => b"S_DVBSUB",
+            MkvCodec::Pgs => b"S_HDMV/PGS",
             MkvCodec::Subtitle(_) | MkvCodec::Other => return None,
         })
     }
@@ -224,7 +230,7 @@ impl MkvCodec {
     fn track_type(self) -> u8 {
         match self {
             MkvCodec::Aac | MkvCodec::Opus | MkvCodec::Ac3 | MkvCodec::Flac => 2,
-            MkvCodec::Subtitle(_) | MkvCodec::VobSub | MkvCodec::DvbSub => 0x11,
+            MkvCodec::Subtitle(_) | MkvCodec::VobSub | MkvCodec::DvbSub | MkvCodec::Pgs => 0x11,
             _ => 1,
         }
     }

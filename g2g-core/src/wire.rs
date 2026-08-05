@@ -370,12 +370,14 @@ fn subpicture_format_to_u8(f: SubPictureFormat) -> u8 {
     match f {
         SubPictureFormat::VobSub => 0,
         SubPictureFormat::DvbSub => 1,
+        SubPictureFormat::Pgs => 2,
     }
 }
 fn subpicture_format_from_u8(v: u8) -> Result<SubPictureFormat, WireError> {
     Ok(match v {
         0 => SubPictureFormat::VobSub,
         1 => SubPictureFormat::DvbSub,
+        2 => SubPictureFormat::Pgs,
         _ => return Err(WireError::BadTag),
     })
 }

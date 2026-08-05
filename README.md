@@ -384,7 +384,8 @@ transforms (`videoscale` / `videorate` / `videocrop` / `videoflip` /
 `audioconvert` / `audioresample` / `audiomixer` / `volume` / `audiopanorama` /
 `audioamplify` / `audioecho` / `level` / `cutter` / `equalizer-3bands` /
 `spectrum`), the KLV telemetry codec (`klvdecode`, MISB ST 0601 / STANAG 4609),
-the bitmap-subtitle decoders (`vobsubdec`, alias `dvdsubdec`, and `dvbsubdec`)
+the bitmap-subtitle decoders (`vobsubdec`, alias `dvdsubdec`, `dvbsubdec` and
+`pgsdec`)
 and the EBU teletext subtitle decoder (`teletextdec`),
 the flow-control elements (`concat` / `input-selector` /
 `output-selector` / `progressreport`), the `compositor`, the tag system, and the

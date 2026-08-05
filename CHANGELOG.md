@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M925: `pgsdec` decodes Blu-ray PGS bitmap subtitles (`Caps::SubPicture`, mkv `S_HDMV/PGS`) into RGBA cue canvases, pixel-exact against ffmpeg.
+
 - M926: `vobsubsrc` plays a DVD subtitle `.idx` / `.sub` sidecar pair.
 
 - M924: MPEG-TS teletext subtitles decode to a `Caps::Text{Utf8}` cue stream through the new `teletextdec` element.

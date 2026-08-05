@@ -81,6 +81,10 @@ pub enum MkvStream {
     /// { DvbSub }`). Its `CodecPrivate` (the composition / ancillary page ids)
     /// is forwarded in band the same way.
     DvbSub,
+    /// A Blu-ray PGS subtitle (bitmap) stream (`S_HDMV/PGS` ->
+    /// `Caps::SubPicture { Pgs }`). Everything the decoder needs is in the
+    /// blocks, so there is no config frame to forward.
+    Pgs,
 }
 
 /// A Matroska `Cues` prefetch in flight (M374): an end-of-file `Cues` index
@@ -294,6 +298,9 @@ impl MkvDemux {
             MkvStream::DvbSub => Caps::SubPicture {
                 format: SubPictureFormat::DvbSub,
             },
+            MkvStream::Pgs => Caps::SubPicture {
+                format: SubPictureFormat::Pgs,
+            },
         }
     }
 
@@ -330,6 +337,7 @@ impl MkvDemux {
             MkvStream::Subtitle(format) => MkvCodec::Subtitle(format),
             MkvStream::VobSub => MkvCodec::VobSub,
             MkvStream::DvbSub => MkvCodec::DvbSub,
+            MkvStream::Pgs => MkvCodec::Pgs,
         }
     }
 
@@ -479,6 +487,12 @@ impl MkvDemux {
                     format: SubPictureFormat::DvbSub,
                 },
             ),
+            MkvCodec::Pgs => (
+                StreamType::Text,
+                Caps::SubPicture {
+                    format: SubPictureFormat::Pgs,
+                },
+            ),
             MkvCodec::Other => return None,
         };
         Some(Stream::new(id, stream_type, caps))
@@ -531,6 +545,7 @@ impl MkvDemux {
         let codec = match self.stream {
             MkvStream::VobSub => MkvCodec::VobSub,
             MkvStream::DvbSub => MkvCodec::DvbSub,
+            MkvStream::Pgs => MkvCodec::Pgs,
             _ => return Ok(()),
         };
         if !self
@@ -774,7 +789,7 @@ impl AsyncElement for MkvDemux {
 static MKVDEMUX_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "stream",
     PropKind::Str,
-    "elementary stream to emit: h264 | h265 | vp8 | vp9 | av1 | aac | opus | ac3 | flac | vobsub | dvbsub",
+    "elementary stream to emit: h264 | h265 | vp8 | vp9 | av1 | aac | opus | ac3 | flac | vobsub | dvbsub | pgs",
 )];
 
 /// The [`MkvStream`] a demuxer forwards for a parsed track's codec, or `None` for
@@ -793,6 +808,7 @@ fn codec_to_stream(codec: MkvCodec) -> Option<MkvStream> {
         MkvCodec::Subtitle(format) => Some(MkvStream::Subtitle(format)),
         MkvCodec::VobSub => Some(MkvStream::VobSub),
         MkvCodec::DvbSub => Some(MkvStream::DvbSub),
+        MkvCodec::Pgs => Some(MkvStream::Pgs),
         MkvCodec::Other => None,
     }
 }
@@ -1099,6 +1115,7 @@ fn mkv_stream_from_str(s: &str) -> Option<MkvStream> {
         "flac" => Some(MkvStream::Flac),
         "vobsub" | "dvdsub" => Some(MkvStream::VobSub),
         "dvbsub" => Some(MkvStream::DvbSub),
+        "pgs" | "hdmvpgs" => Some(MkvStream::Pgs),
         _ => None,
     }
 }
@@ -1122,6 +1139,7 @@ fn mkv_stream_to_str(stream: MkvStream) -> &'static str {
         MkvStream::Subtitle(_) => "text",
         MkvStream::VobSub => "vobsub",
         MkvStream::DvbSub => "dvbsub",
+        MkvStream::Pgs => "pgs",
     }
 }
 
@@ -1142,6 +1160,7 @@ impl PadTemplates for MkvDemux {
             Self::output_caps(MkvStream::Subtitle(TextFormat::Utf8)),
             Self::output_caps(MkvStream::VobSub),
             Self::output_caps(MkvStream::DvbSub),
+            Self::output_caps(MkvStream::Pgs),
         ]));
         Vec::from([
             PadTemplate::sink(CapsSet::one(Self::input_caps())),

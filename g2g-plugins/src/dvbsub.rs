@@ -225,28 +225,10 @@ fn rgba(r: u8, g: u8, b: u8, a: u8) -> u32 {
     ((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | b as u32
 }
 
-/// BT.601 limited-range Y'CbCr to RGB, in the fixed-point form a reference DVB
-/// subtitle decoder uses, so the rendered colours are bit-identical to one.
+/// BT.601 limited-range Y'CbCr to RGB. DVB subtitles carry no colorimetry and
+/// are an SD-era format, so the matrix is always BT.601.
 fn ycbcr_to_rgb(y: u8, cr: u8, cb: u8) -> (u8, u8, u8) {
-    const SCALE: i32 = 10;
-    const HALF: i32 = 1 << (SCALE - 1);
-    // FIX(x) = round(x * 2^10), the 8-bit-full-range coefficients scaled from the
-    // 219 / 224 studio excursions.
-    const CR_R: i32 = 1634; //  1.402  * 255/224
-    const CB_G: i32 = 401; //  0.34414 * 255/224
-    const CR_G: i32 = 832; //  0.71414 * 255/224
-    const CB_B: i32 = 2066; //  1.772  * 255/224
-    const Y_GAIN: i32 = 1192; //  255/219
-
-    let cb = cb as i32 - 128;
-    let cr = cr as i32 - 128;
-    let yy = (y as i32 - 16) * Y_GAIN;
-    let clip = |v: i32| v.clamp(0, 255) as u8;
-    (
-        clip((yy + CR_R * cr + HALF) >> SCALE),
-        clip((yy - CB_G * cb - CR_G * cr + HALF) >> SCALE),
-        clip((yy + CB_B * cb + HALF) >> SCALE),
-    )
+    crate::paint::ycbcr_to_rgb(y, cr, cb, crate::paint::YcbcrMatrix::Bt601)
 }
 
 /// One segment of a display set.

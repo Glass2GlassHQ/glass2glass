@@ -459,13 +459,15 @@ fn cc_format_gst_media_type(f: ClosedCaptionFormat) -> &'static str {
 }
 
 /// GStreamer media-type string for a [`SubPictureFormat`]. `subpicture/x-dvd` is
-/// GStreamer's own type for the DVD SPU stream `dvdsubdec` consumes, and
-/// `subpicture/x-dvb` the one its `dvbsuboverlay` takes.
+/// GStreamer's own type for the DVD SPU stream `dvdsubdec` consumes,
+/// `subpicture/x-dvb` the one its `dvbsuboverlay` takes, and `subpicture/x-pgs`
+/// the one its `matroskademux` puts on an `S_HDMV/PGS` track.
 #[cfg(feature = "alloc")]
 fn subpicture_gst_media_type(f: SubPictureFormat) -> &'static str {
     match f {
         SubPictureFormat::VobSub => "subpicture/x-dvd",
         SubPictureFormat::DvbSub => "subpicture/x-dvb",
+        SubPictureFormat::Pgs => "subpicture/x-pgs",
     }
 }
 
@@ -1037,6 +1039,12 @@ pub enum SubPictureFormat {
     /// composition and ancillary page ids ride out of band, in the PMT
     /// `subtitling_descriptor` or a Matroska track's `CodecPrivate`.
     DvbSub,
+    /// Blu-ray Presentation Graphic Stream subtitles (PGS / HDMV): like DVB a
+    /// segment stream (presentation composition / window / palette / object)
+    /// rather than one packet per cue, with 8-bit run-length coded objects
+    /// placed straight on the video. Everything rides in band, the palette and
+    /// the video geometry included, so there is no out-of-band configuration.
+    Pgs,
 }
 
 /// Raw pixel layout carried in a [`Caps::RawVideo`] link. Split out of

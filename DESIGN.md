@@ -2396,15 +2396,16 @@ in-graph.
 
 **Bitmap subtitles** are the one subtitle family that is not text, so they get
 their own coded media kind: `Caps::SubPicture { format: SubPictureFormat }`, a
-stream of coded bitmap cues (`VobSub`, the DVD subpicture format, and `DvbSub`,
-ETSI EN 300 743; PGS is the same shape). It sits beside `Caps::Text` rather than
-inside it,
+stream of coded bitmap cues (`VobSub`, the DVD subpicture format, `DvbSub`,
+ETSI EN 300 743, and `Pgs`, the Blu-ray HDMV Presentation Graphic Stream). It
+sits beside `Caps::Text` rather than inside it,
 because nothing downstream of a `Text` link can render a palette-indexed run-length
 bitmap, and `Caps::ClosedCaption` is the model: a coded carriage variant whose
 decoder produces something the rest of the graph already understands. Here that
-is raw pixels. `VobSubDec` (`vobsubdec`, gst's `dvdsubdec`) and `DvbSubDec`
+is raw pixels. `VobSubDec` (`vobsubdec`, gst's `dvdsubdec`), `DvbSubDec`
 (`dvbsubdec`; no gst alias, since gst's `dvbsuboverlay` is a video-overlay
-element rather than a bare decoder) both emit one full-frame transparent
+element rather than a bare decoder) and `PgsDec` (`pgsdec`; gst has no PGS
+decoder at all) all emit one full-frame transparent
 `Caps::RawVideo{Rgba8}` canvas per cue at the subpicture display geometry,
 stamped with the cue's PTS and duration, so the consumer is the ordinary
 `compositor` and there is no bitmap-cue overlay element to build. A cue ends with a
@@ -2463,6 +2464,33 @@ since a Matroska block carries the bare segments. Every segment length, region
 dimension, CLUT entry id and object position is bounds-checked: a display set
 whose segment layer does not hold together is dropped whole, and a region past
 `MAX_REGION_PIXELS` is never allocated.
+
+Blu-ray PGS (`pgs.rs`, `no_std`) is a segment stream too, but a flatter one: a
+display set is a presentation composition (the video geometry, the epoch state,
+which palette to read, and up to two objects with their positions), window
+definitions, palette definitions and object definitions, terminated by an
+end-of-display-set segment. Objects are 8-bit run-length coded and drawn straight
+onto the video, with no region layer and no interlaced fields, and a cropped
+composition object shows only a sub-rectangle of its bitmap. Palettes and objects
+persist across an epoch, keyed by id, so a later palette segment updates only the
+entries it names and an object too big for one segment arrives in fragments whose
+total is fixed by the first one's declared length. Nothing rides out of band: the
+palette is in the stream and the geometry is in the presentation composition, so
+unlike the other two codings there is no config frame ahead of the first cue.
+Palette entries are Y / Cr / Cb plus an alpha that passes through unscaled,
+converted through the shared limited-range fixed-point path in `paint.rs`, whose
+matrix a PGS stream picks by video height (BT.709 above 576 lines, BT.601 at or
+below) since the format states no colorimetry. PGS has no end-of-display time
+either: a cue stands until a later display set replaces it, and a presentation
+composition listing no object is how the stream ends one, so the clear canvas is
+the stream's own rather than synthesized from a hide time. Both the `.sup`
+per-segment `PG` / PTS / DTS framing and the bare Matroska `S_HDMV/PGS` block
+framing are accepted, told apart by the magic since no segment type is 0x50.
+Every segment length, object dimension, run length, palette index and composition
+count is checked before use: a run overflowing the bitmap or codes that do not
+cover it drop the object, an object larger than the video or past
+`MAX_OBJECT_PIXELS` is never allocated, and a truncated segment stops the walk
+with the display sets that did parse intact.
 
 **EBU teletext** (`teletext.rs`, `no_std`) is the third TS subtitle carriage, and
 unlike the two above it is characters rather than pixels, so it lands on the plain

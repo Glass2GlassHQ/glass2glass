@@ -17,6 +17,43 @@ pub(crate) fn blend_px(canvas: &mut [u8], d: usize, src: [u8; 4], galpha: u8) {
     canvas[d + 3] = (a + canvas[d + 3] as u32 * inv / 255) as u8;
 }
 
+/// Which matrix a limited-range Y'CrCb palette is converted through. The bitmap
+/// subtitle formats carry no colorimetry, so the decoder picks one: DVB is
+/// always BT.601, PGS switches on the video height.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum YcbcrMatrix {
+    Bt601,
+    Bt709,
+}
+
+/// Limited-range Y'CrCb to RGB, in the fixed-point form a reference subtitle
+/// decoder uses, so the rendered colours are bit-identical to one. The
+/// coefficients are `round(k * 2^10)` of the full-range gains, i.e. the studio
+/// 219 / 224 excursions scaled back out to 0..255.
+#[inline]
+pub(crate) fn ycbcr_to_rgb(y: u8, cr: u8, cb: u8, matrix: YcbcrMatrix) -> (u8, u8, u8) {
+    const SCALE: i32 = 10;
+    const HALF: i32 = 1 << (SCALE - 1);
+    const Y_GAIN: i32 = 1192; // 255/219
+
+    // (cr->r, cb->g, cr->g, cb->b)
+    let (cr_r, cb_g, cr_g, cb_b) = match matrix {
+        // 1.40200, 0.34414, 0.71414, 1.77200
+        YcbcrMatrix::Bt601 => (1634, 401, 832, 2066),
+        // 1.5747, 0.1873, 0.4682, 1.8556
+        YcbcrMatrix::Bt709 => (1836, 218, 546, 2163),
+    };
+    let cb = cb as i32 - 128;
+    let cr = cr as i32 - 128;
+    let yy = (y as i32 - 16) * Y_GAIN;
+    let clip = |v: i32| v.clamp(0, 255) as u8;
+    (
+        clip((yy + cr_r * cr + HALF) >> SCALE),
+        clip((yy - cb_g * cb - cr_g * cr + HALF) >> SCALE),
+        clip((yy + cb_b * cb + HALF) >> SCALE),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

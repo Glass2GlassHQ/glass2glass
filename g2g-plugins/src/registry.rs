@@ -435,6 +435,12 @@ pub fn default_registry() -> Registry {
         "dvbsubdec",
         || Box::new(crate::dvbsubdec::DvbSubDec::new()),
     ));
+    // Blu-ray PGS subtitle decoder (M925): the HDMV bitmap-subtitle sibling of
+    // `dvbsubdec`, e.g. `mkvdemux stream=pgs ! pgsdec ! c.` . No gst alias: gst
+    // has no PGS decoder element.
+    reg.register_launch(LaunchFactory::of::<crate::pgsdec::PgsDec>("pgsdec", || {
+        Box::new(crate::pgsdec::PgsDec::new())
+    }));
     // EBU teletext subtitle decoder (M924): a demuxed teletext stream's subtitle
     // page becomes plain-text cues,
     // e.g. `tsdemux stream=teletext ! teletextdec page=888 ! textoverlay name=o`.

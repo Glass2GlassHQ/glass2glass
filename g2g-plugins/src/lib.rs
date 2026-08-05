@@ -162,6 +162,10 @@ pub mod vobsubsrc;
 // `dvbsubdec` element that renders display sets to RGBA canvases.
 pub mod dvbsub;
 pub mod dvbsubdec;
+// Blu-ray PGS / HDMV subtitles: the segment-stream codec (no_std) plus the
+// `pgsdec` element that renders display sets to RGBA canvases.
+pub mod pgs;
+pub mod pgsdec;
 // EBU teletext (ETSI EN 300 706): the page-assembly codec (no_std) plus the
 // `teletextdec` element that turns a subtitle page into plain-text cues.
 pub mod teletext;
