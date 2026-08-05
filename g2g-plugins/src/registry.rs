@@ -1466,6 +1466,18 @@ fn register_feature_gated(reg: &mut Registry) {
     reg.register_launch(LaunchFactory::of::<MoqtSink>("moqtsink", || {
         Box::new(MoqtSink::new("https://127.0.0.1:4443/", "g2g"))
     }));
+    // The multi-track shape of the same subscriber: one session, one pad per
+    // track (`moqtsessionsrc name=s tracks=1.m4s,2.m4s  s. ! ...  s. ! ...`).
+    #[cfg(feature = "moqt")]
+    reg.register_fanout_src(g2g_core::runtime::FanoutSrcFactory::new(
+        "moqtsessionsrc",
+        |outputs| {
+            Box::new(
+                crate::moqtsessionsrc::MoqtSessionSrc::new("https://127.0.0.1:4443/", "g2g")
+                    .with_outputs(outputs),
+            )
+        },
+    ));
     #[cfg(feature = "moqt")]
     reg.register_source(SourceFactory::new(
         "moqtsrc",

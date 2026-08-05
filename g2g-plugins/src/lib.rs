@@ -610,6 +610,8 @@ pub mod remotewttransform;
 #[cfg(feature = "moqt")]
 pub mod moqt;
 #[cfg(feature = "moqt")]
+pub mod moqtsessionsrc;
+#[cfg(feature = "moqt")]
 pub mod moqtsink;
 #[cfg(feature = "moqt")]
 pub mod moqtsrc;

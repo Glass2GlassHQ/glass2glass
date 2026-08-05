@@ -106,6 +106,145 @@ pub(crate) async fn publish_padded_fragments(
     published
 }
 
+/// A two-track (H.264 + AAC) fragmented-MP4 muxer a test steps one access-unit
+/// pair at a time, so a live broadcast can keep running while a subscriber
+/// attaches.
+pub(crate) struct AvMuxer {
+    mux: g2g_plugins::mp4muxn::Mp4MuxN,
+    index: u64,
+}
+
+impl Default for AvMuxer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AvMuxer {
+    pub(crate) fn new() -> Self {
+        use g2g_core::{AudioFormat, MultiInputElement};
+
+        let mut mux = g2g_plugins::mp4muxn::Mp4MuxN::new(2);
+        mux.configure_pipeline(0, &h264_caps(64, 48))
+            .expect("video caps");
+        mux.configure_pipeline(
+            1,
+            &Caps::Audio {
+                format: AudioFormat::Aac,
+                channels: 2,
+                sample_rate: 48_000,
+            },
+        )
+        .expect("audio caps");
+        Self { mux, index: 0 }
+    }
+
+    /// Mux the next video frame and its audio frame, publish whatever fragments
+    /// they produced, and return those bytes.
+    pub(crate) async fn step(&mut self, sink: &mut MoqtSink) -> Vec<u8> {
+        use g2g_core::MultiInputElement;
+
+        let index = self.index;
+        self.index += 1;
+        let pts = index * 33_333_333;
+        let mut captured = CaptureSink::default();
+        self.mux
+            .process(
+                0,
+                PipelinePacket::DataFrame(frame(access_unit(index, 0), pts, index)),
+                &mut captured,
+            )
+            .await
+            .expect("mux video");
+        self.mux
+            .process(
+                1,
+                PipelinePacket::DataFrame(frame(adts_au(index), pts, index)),
+                &mut captured,
+            )
+            .await
+            .expect("mux audio");
+        let mut published = Vec::new();
+        for chunk in captured.frames {
+            published.extend_from_slice(&chunk);
+            sink.process(
+                PipelinePacket::DataFrame(frame(chunk, pts, index)),
+                &mut NullOut,
+            )
+            .await
+            .expect("publish fragment");
+        }
+        published
+    }
+}
+
+/// Mux `count` video access units alongside one AAC frame each into a
+/// fragmented two-track MP4 and publish every fragment, returning the byte
+/// stream that went into the sink.
+pub(crate) async fn publish_av_fragments(sink: &mut MoqtSink, count: u64) -> Vec<u8> {
+    let mut mux = AvMuxer::new();
+    let mut published = Vec::new();
+    for _ in 0..count {
+        published.extend(mux.step(sink).await);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    published
+}
+
+/// One ADTS AAC frame with a recognizable payload.
+pub(crate) fn adts_au(index: u64) -> Vec<u8> {
+    let payload = [0xA0u8, index as u8, 0x0A];
+    let frame_len = payload.len() + 7;
+    let mut au = vec![
+        0xFF,
+        0xF1,
+        (1 << 6) | (3 << 2),
+        ((2 & 3) << 6) | ((frame_len >> 11) & 3) as u8,
+        ((frame_len >> 3) & 0xFF) as u8,
+        (((frame_len & 7) << 5) as u8) | 0x1F,
+        0xFC,
+    ];
+    au.extend_from_slice(&payload);
+    au
+}
+
+/// Records what each output pad of a fan-out source received.
+#[derive(Default)]
+pub(crate) struct CaptureMultiSink {
+    pub(crate) ports: Vec<Vec<Vec<u8>>>,
+}
+
+impl CaptureMultiSink {
+    pub(crate) fn new(ports: usize) -> Self {
+        Self {
+            ports: vec![Vec::new(); ports],
+        }
+    }
+}
+
+impl g2g_core::MultiOutputSink for CaptureMultiSink {
+    fn push_to<'a>(
+        &'a mut self,
+        port: usize,
+        packet: PipelinePacket,
+    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
+        Box::pin(async move {
+            if let PipelinePacket::DataFrame(f) = packet {
+                if let Some(s) = f.domain.as_system_slice() {
+                    if let Some(log) = self.ports.get_mut(port) {
+                        log.push(s.to_vec());
+                    }
+                }
+            }
+            Ok(PushOutcome::Accepted)
+        })
+    }
+
+    fn port_count(&self) -> usize {
+        self.ports.len()
+    }
+}
+
 // ------------------------------------------------------------------- the peer
 
 pub(crate) struct TestCert {

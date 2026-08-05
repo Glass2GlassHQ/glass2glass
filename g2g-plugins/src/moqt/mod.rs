@@ -25,6 +25,8 @@
 //! - [`catalog`]: the JSON track list, written by the publisher and read by the
 //!   subscriber.
 //! - [`session`]: the SETUP exchange and the live control / data streams.
+//! - [`subscriber`]: the session driver and per-track subscription state the
+//!   subscribing elements share.
 //!
 //! Everything but [`session`] is pure `alloc` and decodes byte vectors, so the
 //! wire layer is unit-testable without a network.
@@ -37,6 +39,7 @@ pub mod fetch;
 pub mod message;
 pub mod reassembly;
 pub mod session;
+pub mod subscriber;
 pub mod v18;
 
 use alloc::vec::Vec;
