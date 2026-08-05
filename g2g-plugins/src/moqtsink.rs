@@ -564,14 +564,11 @@ async fn pump_requests(
 /// update it cannot satisfy.
 async fn watch_request(core: Arc<Mutex<Core>>, id: u64, mut rx: web_transport_quinn::RecvStream) {
     let mut reader = v18::session::MessageReader::new();
-    loop {
-        match reader.next(&mut rx).await {
-            Ok(Some(v18::message::ControlMessage::RequestUpdate { .. })) => {}
-            // Anything else on an established request stream, or its end: the
-            // request is over either way.
-            _ => break,
-        }
-    }
+    // Anything but a REQUEST_UPDATE on an established request stream, or its
+    // end, means the request is over.
+    while let Ok(Some(v18::message::ControlMessage::RequestUpdate { .. })) =
+        reader.next(&mut rx).await
+    {}
     core.lock().await.drop_subscription(id);
 }
 
