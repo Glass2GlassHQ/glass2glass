@@ -475,9 +475,11 @@ impl TextOverlay {
             let block_h = lines.len() as i32 * line_h - line_gap;
             let max_chars = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as i32;
             let block_w = max_chars * cell_w;
-            let s = cue.settings;
-            // Per-cue WebVTT `::cue` colours, falling back to the element defaults.
-            let fg = s.color.unwrap_or(self.text_color);
+            let s = &cue.settings;
+            // WebVTT `::cue` colours, falling back to the element defaults. The
+            // text colour is looked up per character, so a `::cue(.class)` run
+            // recolours only its own span.
+            let fg_at = |off: usize| s.color_at(off).unwrap_or(self.text_color);
             let bg = s.background.unwrap_or(self.bg_color);
 
             // Horizontal: `position` (% of width) is the anchor, default centre;
@@ -507,7 +509,7 @@ impl TextOverlay {
             );
 
             // Each line, aligned within the block per `align`, then glyphs.
-            for (row, line) in lines.iter().enumerate() {
+            for ((row, line), base) in lines.iter().enumerate().zip(line_offsets(&cue.text)) {
                 let line_w = line.chars().count() as i32 * cell_w;
                 let x0 = match s.align {
                     TextAlign::Center => block_left + (block_w - line_w) / 2,
@@ -516,8 +518,8 @@ impl TextOverlay {
                 };
                 let y0 = block_top + row as i32 * line_h;
                 let mut gx = x0;
-                for c in line.chars() {
-                    self.blit_glyph(buf, gx, y0, scale, glyph(c), fg);
+                for (i, c) in line.char_indices() {
+                    self.blit_glyph(buf, gx, y0, scale, glyph(c), fg_at(base + i));
                     gx += cell_w;
                 }
             }
@@ -640,7 +642,7 @@ impl TextOverlay {
             if lines.is_empty() {
                 continue;
             }
-            let s = cue.settings;
+            let s = &cue.settings;
             // With shaping on this path renders vertical cues only; horizontal
             // ones go through `render_active_shaped`.
             #[cfg(feature = "text-shaping")]
@@ -650,9 +652,12 @@ impl TextOverlay {
             ) {
                 continue;
             }
-            // Per-cue WebVTT `::cue` colours, falling back to the element defaults.
-            let fg = s.color.unwrap_or(self.text_color);
+            // WebVTT `::cue` colours, falling back to the element defaults; the
+            // text colour is per character so a `::cue(.class)` run recolours
+            // only its own span.
+            let fg_at = |off: usize| s.color_at(off).unwrap_or(self.text_color);
             let bg = s.background.unwrap_or(self.bg_color);
+            let bases = line_offsets(&cue.text);
 
             if matches!(
                 s.vertical,
@@ -691,7 +696,7 @@ impl TextOverlay {
                     // First logical line is the rightmost column when rl.
                     let col = if rl { n_cols - 1 - ci } else { ci };
                     let col_x = block_left + col as f32 * col_w;
-                    let chars: Vec<char> = line.chars().collect();
+                    let chars: Vec<(usize, char)> = line.char_indices().collect();
                     let col_h = chars.len() as f32 * cell_h;
                     let start_y = block_top
                         + match s.align {
@@ -699,7 +704,8 @@ impl TextOverlay {
                             TextAlign::Center => (block_h - col_h) / 2.0,
                             TextAlign::End => block_h - col_h,
                         };
-                    for (j, &c) in chars.iter().enumerate() {
+                    let base = bases.get(ci).copied().unwrap_or(0);
+                    for (j, &(off, c)) in chars.iter().enumerate() {
                         let (m, cov) = self.glyph_font(c).rasterize(c, px);
                         let gx = col_x + (col_w - m.advance_width) / 2.0 + m.xmin as f32;
                         let baseline = start_y + lm.ascent + j as f32 * cell_h;
@@ -710,7 +716,7 @@ impl TextOverlay {
                             gy as i32,
                             (m.width, m.height),
                             &cov,
-                            fg,
+                            fg_at(base + off),
                         );
                     }
                 }
@@ -754,8 +760,9 @@ impl TextOverlay {
                         TextAlign::End => block_left + (block_w - line_w),
                     };
                     let baseline = block_top + lm.ascent + row as f32 * line_h;
+                    let base = bases.get(row).copied().unwrap_or(0);
                     let mut pen = x0;
-                    for c in line.chars() {
+                    for (off, c) in line.char_indices() {
                         let (m, cov) = self.glyph_font(c).rasterize(c, px);
                         let gx = pen + m.xmin as f32;
                         let gy = baseline - m.ymin as f32 - m.height as f32;
@@ -765,7 +772,7 @@ impl TextOverlay {
                             gy as i32,
                             (m.width, m.height),
                             &cov,
-                            fg,
+                            fg_at(base + off),
                         );
                         pen += m.advance_width;
                     }
@@ -849,10 +856,14 @@ impl TextOverlay {
             if block.lines.is_empty() {
                 continue;
             }
-            let s = cue.settings;
-            // Per-cue WebVTT `::cue` colours, falling back to the element defaults.
-            let fg = s.color.unwrap_or(self.text_color);
+            let s = &cue.settings;
+            // WebVTT `::cue` colours, falling back to the element defaults; the
+            // text colour is per glyph so a `::cue(.class)` run recolours only
+            // its own span. The shaper lays out one visual line per logical line,
+            // so a glyph's `start` is an offset into its line.
+            let fg_at = |off: usize| s.color_at(off).unwrap_or(self.text_color);
             let bg = s.background.unwrap_or(self.bg_color);
+            let bases = line_offsets(&cue.text);
 
             let block_w = block.width;
             let block_h = block.height;
@@ -876,12 +887,13 @@ impl TextOverlay {
                 bg,
             );
 
-            for line in &block.lines {
+            for (row, line) in block.lines.iter().enumerate() {
                 let x0 = match s.align {
                     TextAlign::Center => block_left + (block_w - line.width) / 2.0,
                     TextAlign::Start => block_left,
                     TextAlign::End => block_left + (block_w - line.width),
                 };
+                let base = bases.get(row).copied().unwrap_or(0);
                 for g in &line.glyphs {
                     let Some(img) = shaper.image(g.key) else {
                         continue;
@@ -891,6 +903,7 @@ impl TextOverlay {
                     if img.color {
                         self.blit_rgba(buf, gx, gy, (img.width, img.height), img.data);
                     } else {
+                        let fg = fg_at(base + g.start);
                         self.blit_coverage(buf, gx, gy, (img.width, img.height), img.data, fg);
                     }
                 }
@@ -1034,6 +1047,21 @@ fn parse_font_axes(spec: &str) -> Option<Vec<FontAxis>> {
         axes.push((tag, value.trim().parse::<f32>().ok()?));
     }
     Some(axes)
+}
+
+/// Byte offset in `text` where each of its lines starts, so a glyph's position
+/// within its line maps back to the cue-wide offset a
+/// [`SpanStyle`](crate::subparse::SpanStyle) range is expressed in. Aligned with
+/// `str::lines` (which drops a trailing `\r`), and one entry longer when the text
+/// ends in a newline, so callers zip it against the lines.
+fn line_offsets(text: &str) -> Vec<usize> {
+    let mut out = Vec::from([0usize]);
+    for (i, b) in text.bytes().enumerate() {
+        if b == b'\n' {
+            out.push(i + 1);
+        }
+    }
+    out
 }
 
 /// Left edge of a `block_w`-wide box whose `align` anchor sits at `anchor`:
@@ -1404,7 +1432,7 @@ impl MultiInputElement for TextOverlayN {
                                 let settings = frame
                                     .meta
                                     .get::<crate::subparse::TextCueMeta>()
-                                    .map(|m| m.settings)
+                                    .map(|m| m.settings.clone())
                                     .unwrap_or_default();
                                 #[cfg(not(feature = "metadata"))]
                                 let settings = crate::subparse::CueSettings::default();
@@ -1801,6 +1829,93 @@ mod tests {
             max_y < h / 2,
             "displayAlign:before puts it in the top half ({max_y})"
         );
+    }
+
+    /// A pixel of the default (white) text: the channels stay equal as the glyph
+    /// edge fades toward the black backdrop.
+    fn is_grey(p: [u8; 3]) -> bool {
+        p[0] > 32 && p[0] == p[1] && p[1] == p[2]
+    }
+
+    /// A pixel of red text: only the red channel is lit, at any coverage.
+    fn is_red(p: [u8; 3]) -> bool {
+        p[0] > 32 && p[1] == 0 && p[2] == 0
+    }
+
+    /// The x range of the pixels whose colour satisfies `pred`, or `None` if none
+    /// do. Anti-aliased glyph edges blend toward the backdrop, so the callers
+    /// match on hue rather than an exact value.
+    fn color_span(
+        buf: &[u8],
+        w: usize,
+        h: usize,
+        pred: impl Fn([u8; 3]) -> bool,
+    ) -> Option<(usize, usize)> {
+        let mut span: Option<(usize, usize)> = None;
+        for y in 0..h {
+            for x in 0..w {
+                let i = (y * w + x) * 4;
+                if pred([buf[i], buf[i + 1], buf[i + 2]]) {
+                    span = Some(match span {
+                        None => (x, x),
+                        Some((lo, hi)) => (lo.min(x), hi.max(x)),
+                    });
+                }
+            }
+        }
+        span
+    }
+
+    #[test]
+    fn span_style_recolours_only_its_own_run() {
+        use crate::subparse::{CueSettings, SpanStyle};
+        // A `::cue(.class)` run over the last two characters: those glyphs paint
+        // red, the rest stay the element's default white, and the red pixels sit
+        // entirely to the right of the white ones.
+        let (w, h) = (200usize, 48usize);
+        let settings = CueSettings {
+            spans: alloc::vec![SpanStyle {
+                start: 3,
+                end: 5,
+                color: [255, 0, 0, 255],
+            }],
+            ..CueSettings::default()
+        };
+        let mut buf = black(w, h);
+        overlay_with(w as u32, h as u32, "AA BB", settings).render_active(&mut buf, 0);
+        let (white_lo, white_hi) = color_span(&buf, w, h, is_grey).expect("white glyphs");
+        let (red_lo, red_hi) = color_span(&buf, w, h, is_red).expect("red span glyphs");
+        assert!(
+            white_hi < red_lo,
+            "the run's glyphs are the trailing ones ({white_lo}..{white_hi} vs {red_lo}..{red_hi})"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "truetype-overlay")]
+    fn span_style_recolours_only_its_own_run_on_the_font_path() {
+        use crate::subparse::{CueSettings, SpanStyle};
+        // The same run, rendered through the element's own dispatch, so it holds
+        // on the ab_glyph path and on the shaped path that takes horizontal cues
+        // over from it.
+        let (w, h) = (320usize, 64usize);
+        let settings = CueSettings {
+            spans: alloc::vec![SpanStyle {
+                start: 3,
+                end: 5,
+                color: [255, 0, 0, 255],
+            }],
+            ..CueSettings::default()
+        };
+        let Some(mut ov) = cjk_overlay(w as u32, h as u32, "aa bb", settings) else {
+            std::eprintln!("skip: no system font found");
+            return;
+        };
+        let mut buf = black(w, h);
+        ov.render_cues(&mut buf, 0);
+        let (_, white_hi) = color_span(&buf, w, h, is_grey).expect("white glyphs");
+        let (red_lo, _) = color_span(&buf, w, h, is_red).expect("red span glyphs");
+        assert!(white_hi < red_lo, "only the run's glyphs are red");
     }
 
     #[test]

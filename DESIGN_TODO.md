@@ -480,9 +480,7 @@ _(No open parser items.)_
   variant + `SUBTITLES` rendition). The separate-audio + subtitle three-source
   combo landed too (M420: `build_hls_separate_subtitle_overlay` pairs the variant's
   video TS with a distinct audio rendition and a distinct WebVTT rendition, three
-  sources in one graph). Follow-ups: the fMP4 `wvtt` subtitle rendition (`IsoBmff` +
-  `Mp4DemuxN`, reuses M416) and the `X-TIMESTAMP-MAP` offset for live (non-absolute)
-  WebVTT timelines. The startup I420/NV12 gap on
+  sources in one graph). The startup I420/NV12 gap on
   `playbin` -> `waylandsink` is closed (M414: the auto-plugged ffmpeg decoder now
   honours the chosen output layout and emits NV12 straight to a strict-NV12 sink,
   no inserted `videoconvert`). MPEG-TS / HLS H.264 now decodes cleanly on screen
@@ -506,10 +504,10 @@ _(No open parser items.)_
     the per-count `ChannelLayout` convention) once a real source needs one.
   Glyph
   rendering (incl. `vertical:rl` / `lr` layout) is the `truetype-overlay` feature
-  above. Still open in cue CSS: true span-scoped styling (a class rule colours
-  the whole cue today), compound `::cue(.a.b)` selectors, and other properties
-  (font-size, text-shadow, etc.); SSA pixel placement (`{\pos}`, margins) needs
-  `PlayResX/Y` mapping.
+  above. Still open in cue CSS: per-span `font-size` (needs per-run sizing in
+  all three render paths and an `AttrsList` API in `textshape`), `text-shadow`
+  and further properties, and a span-scoped `background-color` (a cue has one
+  backing box today).
 - **Closed captions: remaining carriers + authoring.** The H.264 / H.265 SEI
   decode path (`cea` decoders + `CcExtract` + file- and HLS-`playbin` auto-plug)
   and the CEA-608 encode path (`Cc608Enc` + `CcInsert`) are done (DESIGN.md

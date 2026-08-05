@@ -6,6 +6,10 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M923: WebVTT `::cue(.class)` rules style only their own span, compound class selectors match, and SSA `{\pos}` / margins map through `PlayRes`.
+
+- M922: HLS subtitle renditions play fMP4 `wvtt` segments as well as raw `.vtt`, and WebVTT `X-TIMESTAMP-MAP` headers rebase each segment's cues.
+
 - M921: typed decoders for the known `BlobMeta` headers.
 
 - M920: segmentation-mask and region-of-interest analytics nodes.

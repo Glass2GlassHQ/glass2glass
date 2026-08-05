@@ -65,10 +65,24 @@ pub enum WritingMode {
     VerticalLr,
 }
 
+/// One styled run of a cue's text: the `[start, end)` byte range of
+/// [`Cue::text`] that a class-carrying WebVTT span (`<c.loud>...</c>`) covers,
+/// and the colour the `::cue(.loud)` rules resolved for it. Runs are in document
+/// order and may nest, so where two overlap the later one wins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpanStyle {
+    /// Byte offset of the span's first character in [`Cue::text`].
+    pub start: usize,
+    /// Byte offset just past the span's last character.
+    pub end: usize,
+    /// Text RGBA for this run, overriding the cue-wide colour.
+    pub color: [u8; 4],
+}
+
 /// WebVTT cue placement settings, the subset the bitmap overlay honours. `None`
 /// fields mean "auto": auto `line` stacks the cue from the bottom, auto
 /// `position` centres it. SRT cues always carry the default (no positioning).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CueSettings {
     /// Horizontal anchor as a percent `0..=100` of the frame width
     /// (WebVTT `position:`). `None` = auto (centre).
@@ -86,7 +100,25 @@ pub struct CueSettings {
     pub color: Option<[u8; 4]>,
     /// Backing-box RGBA from a `::cue` `background-color:` rule, if any. A zero
     /// alpha (e.g. `transparent`) draws no box. `None` = the overlay's default.
+    /// A cue has one backing box, so a span-scoped rule's `background-color`
+    /// lands here too rather than behind its span alone.
     pub background: Option<[u8; 4]>,
+    /// Per-span text colours from `::cue(.class)` rules, each covering only the
+    /// span it came from. Empty unless a span-scoped rule matched.
+    pub spans: Vec<SpanStyle>,
+}
+
+impl CueSettings {
+    /// The colour to draw the character at byte offset `at` in the cue text: the
+    /// innermost span run covering it, else the cue-wide `color`.
+    pub fn color_at(&self, at: usize) -> Option<[u8; 4]> {
+        self.spans
+            .iter()
+            .rev()
+            .find(|s| at >= s.start && at < s.end)
+            .map(|s| s.color)
+            .or(self.color)
+    }
 }
 
 /// One timed subtitle cue: a half-open `[start_ns, end_ns)` running-time span, its
@@ -119,7 +151,7 @@ impl Cue {
 ///
 /// [`FrameMeta`]: g2g_core::FrameMeta
 #[cfg(feature = "metadata")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextCueMeta {
     /// The cue's placement, as parsed from the subtitle format.
     pub settings: CueSettings,
@@ -134,7 +166,7 @@ impl g2g_core::FrameMeta for TextCueMeta {
         self
     }
     fn clone_box(&self) -> Box<dyn g2g_core::FrameMeta> {
-        Box::new(*self)
+        Box::new(self.clone())
     }
     // Placement is normalized (percent of frame width / height), so it survives
     // a downstream scale / crop unchanged; the default `Keep` is correct.
@@ -149,10 +181,11 @@ pub fn parse_srt(input: &str) -> Vec<Cue> {
 
 /// Parse WebVTT (`.vtt`) text into cues, in file order. The `WEBVTT` header and
 /// `NOTE` / `REGION` blocks are skipped and inline markup is removed; `STYLE`
-/// blocks are read for `::cue`, `::cue(#id)` and `::cue(.class)`
+/// blocks are read for `::cue`, `::cue(#id)` and `::cue(.a[.b...])`
 /// `color` / `background-color` rules, which are resolved onto each cue's
 /// [`CueSettings`] (the subset the overlay can apply; other CSS properties are
-/// ignored). A header block's `X-TIMESTAMP-MAP` (RFC 8216 §3.5) rebases the cue
+/// ignored). A span-scoped `::cue(.class)` colour covers only the `<c.class>`
+/// span it matched, as a [`SpanStyle`] run. A header block's `X-TIMESTAMP-MAP` (RFC 8216 §3.5) rebases the cue
 /// times that follow it onto the MPEG-2 media timeline, so the concatenated
 /// segments of an HLS rendition land where the video does.
 pub fn parse_webvtt(input: &str) -> Vec<Cue> {
@@ -195,15 +228,10 @@ pub fn parse_webvtt(input: &str) -> Vec<Cue> {
         if let Some(off) = block_timestamp_offset(b) {
             offset_ns = off;
         }
-        if let Some(mut cue) = block_to_cue(b, true) {
+        if let Some((mut cue, spans)) = block_to_cue(b, true) {
             rebase_cue(&mut cue, offset_ns);
             if !sheet.is_empty() {
-                apply_cue_style(
-                    &sheet,
-                    block_cue_id(b),
-                    &block_cue_classes(b),
-                    &mut cue.settings,
-                );
+                apply_cue_style(&sheet, block_cue_id(b), &spans, &mut cue.settings);
             }
             cues.push(cue);
         }
@@ -264,61 +292,42 @@ fn block_cue_id<'a>(block: &[&'a str]) -> Option<&'a str> {
     (timing_idx > 0).then(|| block[timing_idx - 1].trim())
 }
 
-/// The classes named on a cue's inline span tags (`<c.loud.narrator>text</c>`,
-/// `<v.loud Bob>`), in first-seen order. WebVTT `::cue(.class)` selects those
-/// spans; since the renderer styles a whole cue at a time, a matching rule
-/// applies to the whole cue.
-fn block_cue_classes(block: &[&str]) -> Vec<String> {
-    let Some(timing_idx) = block.iter().position(|l| l.contains("-->")) else {
-        return Vec::new();
-    };
-    let mut classes: Vec<String> = Vec::new();
-    for line in &block[timing_idx + 1..] {
-        for class in line_span_classes(line) {
-            if !classes.iter().any(|c| c == &class) {
-                classes.push(class);
-            }
-        }
-    }
-    classes
+/// One class-carrying span of a cue's text: where it lands in the stripped text
+/// and the classes its tag named (`<c.loud.narrator>`, `<v.loud Bob>`). What
+/// `::cue(.class)` selects.
+#[derive(Debug)]
+struct CueSpan {
+    start: usize,
+    end: usize,
+    classes: Vec<String>,
 }
 
-/// The `.class` parts of every open span tag on one cue-text line. A tag is
-/// `<name.class1.class2 annotation>`; close tags (`</c>`) and cue timestamps
-/// (`<00:00:01.000>`, no `.`-separated name) contribute nothing.
-fn line_span_classes(line: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut rest = line;
-    while let Some(lt) = rest.find('<') {
-        let after = &rest[lt + 1..];
-        let Some(gt) = after.find('>') else { break };
-        let tag = &after[..gt];
-        rest = &after[gt + 1..];
-        if tag.starts_with('/') {
-            continue;
-        }
-        // Only the part before the annotation (`<v.loud Bob>`) carries classes,
-        // and the first `.`-separated token is the tag name.
-        let head = tag.split_whitespace().next().unwrap_or("");
-        let mut parts = head.split('.');
-        let name = parts.next().unwrap_or("");
-        // A timestamp tag (`00:00:01.000`) is not a span; it has no tag name.
-        if name.is_empty() || name.contains(':') {
-            continue;
-        }
-        out.extend(parts.filter(|p| !p.is_empty()).map(String::from));
+/// The `.class` parts of an open span tag's name (`c.loud.narrator`), empty for
+/// a tag that carries none. A tag is `<name.class1.class2 annotation>`, so only
+/// the part before the annotation counts; a cue timestamp (`<00:00:01.000>`) has
+/// no tag name and is not a span.
+fn tag_classes(tag: &str) -> Vec<String> {
+    if !is_span_tag(tag) {
+        return Vec::new();
     }
-    out
+    tag.split_whitespace()
+        .next()
+        .unwrap_or("")
+        .split('.')
+        .skip(1)
+        .filter(|p| !p.is_empty())
+        .map(String::from)
+        .collect()
 }
 
 /// A `::cue` selector we apply: all cues (`::cue`), one identifier
-/// (`::cue(#id)`), or a span class (`::cue(.class)`). Element / compound
-/// selectors are not supported.
+/// (`::cue(#id)`), or a span class list (`::cue(.a)`, `::cue(.a.b)` requiring
+/// both). Element and descendant selectors are not supported.
 #[derive(Debug)]
 enum CueSelector {
     All,
     Id(String),
-    Class(String),
+    Classes(Vec<String>),
 }
 
 /// One parsed `::cue` rule: its selectors and the `color` / `background-color`
@@ -372,40 +381,77 @@ fn parse_cue_styles(css: &str) -> Vec<CueStyleRule> {
     rules
 }
 
-/// A `::cue`, `::cue(#id)` or `::cue(.class)` selector, or `None` for anything
-/// else.
+/// A `::cue`, `::cue(#id)` or `::cue(.a[.b...])` selector, or `None` for
+/// anything else.
 fn parse_cue_selector(sel: &str) -> Option<CueSelector> {
     if sel == "::cue" {
         return Some(CueSelector::All);
     }
     let inner = sel.strip_prefix("::cue(")?.strip_suffix(')')?.trim();
-    // Only a bare `#id` / `.class` is supported (no compound / descendant
+    // Only a bare `#id` / `.class` chain is supported (no element or descendant
     // selectors), so a name must be non-empty and unbroken.
     let named = |n: &str| !n.is_empty() && !n.contains(|c: char| c.is_whitespace());
     if let Some(id) = inner.strip_prefix('#') {
         return named(id).then(|| CueSelector::Id(id.into()));
     }
-    let class = inner.strip_prefix('.')?;
-    // A compound `.a.b` is a single selector requiring both; not supported.
-    (named(class) && !class.contains('.')).then(|| CueSelector::Class(class.into()))
+    let classes: Vec<String> = inner
+        .strip_prefix('.')?
+        .split('.')
+        .map(String::from)
+        .collect();
+    classes
+        .iter()
+        .all(|c| named(c))
+        .then_some(CueSelector::Classes(classes))
 }
 
-/// Resolve a cue's `color` / `background` from the sheet, in increasing
-/// specificity: global `::cue` rules, then `::cue(.class)` for each class the
-/// cue's spans carry, then `::cue(#id)`.
+/// Resolve a cue's style from the sheet. Whole-cue rules (`::cue`, then
+/// `::cue(#id)`, in increasing specificity) set the cue's `color` /
+/// `background`; a span-scoped `::cue(.class)` rule sets the colour of just the
+/// spans that carry its classes, as a [`SpanStyle`] run. A cue has one backing
+/// box, so a span rule's `background-color` still applies cue-wide.
 fn apply_cue_style(
     sheet: &[CueStyleRule],
     id: Option<&str>,
-    classes: &[String],
+    spans: &[CueSpan],
     settings: &mut CueSettings,
 ) {
     apply_matching(sheet, settings, |sel| matches!(sel, CueSelector::All));
-    for class in classes {
-        apply_matching(
-            sheet,
-            settings,
-            |sel| matches!(sel, CueSelector::Class(c) if c == class),
-        );
+    for span in spans {
+        // CSS specificity: a compound `::cue(.a.b)` beats a one-class rule
+        // whatever the sheet order; equal specificity falls back to that order.
+        let mut matched: Vec<(usize, &CueStyleRule)> = sheet
+            .iter()
+            .filter_map(|rule| {
+                rule.selectors
+                    .iter()
+                    .filter_map(|sel| match sel {
+                        CueSelector::Classes(want)
+                            if want.iter().all(|w| span.classes.contains(w)) =>
+                        {
+                            Some(want.len())
+                        }
+                        _ => None,
+                    })
+                    .max()
+                    .map(|specificity| (specificity, rule))
+            })
+            .collect();
+        matched.sort_by_key(|(specificity, _)| *specificity);
+        let mut run = CueSettings::default();
+        for (_, rule) in matched {
+            fold_rule(rule, &mut run);
+        }
+        if let Some(color) = run.color {
+            settings.spans.push(SpanStyle {
+                start: span.start,
+                end: span.end,
+                color,
+            });
+        }
+        if run.background.is_some() {
+            settings.background = run.background;
+        }
     }
     if let Some(id) = id {
         apply_matching(
@@ -425,13 +471,19 @@ fn apply_matching(
 ) {
     for rule in sheet {
         if rule.selectors.iter().any(&pred) {
-            if rule.color.is_some() {
-                settings.color = rule.color;
-            }
-            if rule.background.is_some() {
-                settings.background = rule.background;
-            }
+            fold_rule(rule, settings);
         }
+    }
+}
+
+/// Fold one rule's `color` / `background` onto `settings` (a property the rule
+/// does not set leaves the current value).
+fn fold_rule(rule: &CueStyleRule, settings: &mut CueSettings) {
+    if rule.color.is_some() {
+        settings.color = rule.color;
+    }
+    if rule.background.is_some() {
+        settings.background = rule.background;
     }
 }
 
@@ -550,8 +602,12 @@ pub fn parse_auto(input: &str) -> Vec<Cue> {
 /// Placement comes from the `Alignment` of the dialogue's style (read from the
 /// `[V4 Styles]` / `[V4+ Styles]` section), overridden by an inline `{\an8}` /
 /// legacy `{\a6}` tag, mapped onto the same [`CueSettings`] the WebVTT path
-/// fills. Pixel-space placement (`{\pos(x,y)}` and the margin columns) needs the
-/// script's `PlayResX` / `PlayResY` and is not mapped.
+/// fills. Pixel-space placement is mapped through the `[Script Info]`
+/// `PlayResX` / `PlayResY`: an inline `{\pos(x,y)}` places the cue at that point
+/// as a percentage of the script canvas, and otherwise the `MarginL` / `MarginR`
+/// / `MarginV` columns (the dialogue's own, falling back to its style's) inset
+/// it. Without a `PlayRes` the pixel values mean nothing, so only the alignment
+/// is used.
 pub fn parse_ssa(input: &str) -> Vec<Cue> {
     let input = input.strip_prefix('\u{feff}').unwrap_or(input);
     let mut state = SsaState::default();
@@ -564,29 +620,83 @@ pub fn parse_ssa(input: &str) -> Vec<Cue> {
     cues
 }
 
+/// One style's placement defaults: its `\an` alignment (1-9) and its
+/// `MarginL` / `MarginR` / `MarginV` insets in script pixels, which a dialogue
+/// line inherits wherever its own margin column is `0`.
+#[derive(Debug, Clone, Copy, Default)]
+struct SsaStyle {
+    align: Option<u8>,
+    margins: SsaMargins,
+}
+
+/// Margin insets in script (`PlayRes`) pixels: from the left and right edges and
+/// from the top or bottom (whichever the alignment anchors to). `0` means "not
+/// set" in both SSA and ASS, which is why a dialogue line's zero falls back to
+/// its style's value.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct SsaMargins {
+    left: u32,
+    right: u32,
+    vertical: u32,
+}
+
+impl SsaMargins {
+    /// This line's margins with each unset (`0`) component taken from `style`.
+    fn or(self, style: SsaMargins) -> SsaMargins {
+        SsaMargins {
+            left: if self.left != 0 {
+                self.left
+            } else {
+                style.left
+            },
+            right: if self.right != 0 {
+                self.right
+            } else {
+                style.right
+            },
+            vertical: if self.vertical != 0 {
+                self.vertical
+            } else {
+                style.vertical
+            },
+        }
+    }
+}
+
 /// Per-line SSA parse state, shared by the whole-document [`parse_ssa`] and the
 /// streaming `SubParse` element: which section the scan is in, the resolved
-/// `[Events]` column indices, and the style table (name -> alignment) collected
-/// from the styles section. Held across chunks so a `Dialogue:` line in a later
-/// chunk parses with the column order and styles declared by an earlier one.
+/// `[Events]` column indices, the script canvas (`PlayResX` / `PlayResY`), and
+/// the style table collected from the styles section. Held across chunks so a
+/// `Dialogue:` line in a later chunk parses with the column order, canvas and
+/// styles declared by an earlier one.
 #[derive(Debug, Clone)]
 struct SsaState {
     in_events: bool,
     /// Inside `[V4 Styles]` / `[V4+ Styles]`, whose `Style:` lines are read.
     in_styles: bool,
+    /// Inside `[Script Info]`, whose `PlayResX` / `PlayResY` give the canvas the
+    /// pixel placements are expressed in.
+    in_script_info: bool,
     /// The styles section is legacy `[V4 Styles]`, whose `Alignment` column uses
     /// the old `\a` numbering rather than the `\an` numpad one.
     styles_legacy: bool,
+    /// `PlayResX` / `PlayResY`, `0` until the script declares them (without both,
+    /// pixel placement cannot be made frame-relative and is ignored).
+    play_res: (u32, u32),
     i_start: usize,
     i_end: usize,
     i_text: usize,
     i_style: usize,
+    /// `MarginL` / `MarginR` / `MarginV` columns of the `[Events]` `Format:` line.
+    i_margins: (usize, usize, usize),
     /// `Name` / `Alignment` columns of the styles `Format:` line; alignment is
     /// read only once a `Format:` names it.
     i_style_name: usize,
     i_style_align: Option<usize>,
-    /// Style name -> `\an` alignment (1-9), in declaration order.
-    styles: Vec<(String, u8)>,
+    /// `MarginL` / `MarginR` / `MarginV` columns of the styles `Format:` line.
+    i_style_margins: (Option<usize>, Option<usize>, Option<usize>),
+    /// Style name -> its placement defaults, in declaration order.
+    styles: Vec<(String, SsaStyle)>,
 }
 
 impl Default for SsaState {
@@ -597,13 +707,17 @@ impl Default for SsaState {
         Self {
             in_events: false,
             in_styles: false,
+            in_script_info: false,
             styles_legacy: false,
+            play_res: (0, 0),
             i_start: 1,
             i_end: 2,
             i_text: 9,
             i_style: 3,
+            i_margins: (5, 6, 7),
             i_style_name: 0,
             i_style_align: None,
+            i_style_margins: (None, None, None),
             styles: Vec::new(),
         }
     }
@@ -618,10 +732,21 @@ impl SsaState {
         if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
             let name = name.trim();
             self.in_events = name.eq_ignore_ascii_case("Events");
+            self.in_script_info = name.eq_ignore_ascii_case("Script Info");
             // Both `[V4 Styles]` and `[V4+ Styles]` (and the `[V4+ Styles]`
             // localizations that keep the suffix) carry the style table.
             self.in_styles = name.to_ascii_lowercase().ends_with("styles");
             self.styles_legacy = self.in_styles && !name.contains('+');
+            return None;
+        }
+        if self.in_script_info {
+            // `PlayResX: 1920`. An unparseable or zero value leaves the canvas
+            // unset, so pixel placement stays unmapped rather than dividing by 0.
+            if let Some(v) = strip_prefix_ci(line, "PlayResX:").and_then(parse_ssa_u32) {
+                self.play_res.0 = v;
+            } else if let Some(v) = strip_prefix_ci(line, "PlayResY:").and_then(parse_ssa_u32) {
+                self.play_res.1 = v;
+            }
             return None;
         }
         if self.in_styles {
@@ -636,6 +761,11 @@ impl SsaState {
             self.i_start = col_index(&cols, "Start").unwrap_or(self.i_start);
             self.i_end = col_index(&cols, "End").unwrap_or(self.i_end);
             self.i_style = col_index(&cols, "Style").unwrap_or(self.i_style);
+            self.i_margins = (
+                col_index(&cols, "MarginL").unwrap_or(self.i_margins.0),
+                col_index(&cols, "MarginR").unwrap_or(self.i_margins.1),
+                col_index(&cols, "MarginV").unwrap_or(self.i_margins.2),
+            );
             // Text is the last column by spec; fall back to that if unnamed.
             self.i_text = col_index(&cols, "Text").unwrap_or(cols.len().saturating_sub(1));
             None
@@ -652,34 +782,50 @@ impl SsaState {
             let cols: Vec<&str> = rest.split(',').map(str::trim).collect();
             self.i_style_name = col_index(&cols, "Name").unwrap_or(0);
             self.i_style_align = col_index(&cols, "Alignment");
+            self.i_style_margins = (
+                col_index(&cols, "MarginL"),
+                col_index(&cols, "MarginR"),
+                col_index(&cols, "MarginV"),
+            );
             return;
         }
         let Some(rest) = strip_prefix_ci(line, "Style:") else {
             return;
         };
-        let Some(i_align) = self.i_style_align else {
-            return;
-        };
         let cols: Vec<&str> = rest.split(',').map(str::trim).collect();
-        let (Some(name), Some(align)) = (cols.get(self.i_style_name), cols.get(i_align)) else {
+        let Some(name) = cols.get(self.i_style_name) else {
             return;
         };
-        let Some(an) = align.parse::<u8>().ok().and_then(|a| {
-            if self.styles_legacy {
-                legacy_alignment(a)
-            } else {
-                (1..=9).contains(&a).then_some(a)
-            }
-        }) else {
-            return;
+        let align = self
+            .i_style_align
+            .and_then(|i| cols.get(i))
+            .and_then(|a| a.parse::<u8>().ok())
+            .and_then(|a| {
+                if self.styles_legacy {
+                    legacy_alignment(a)
+                } else {
+                    (1..=9).contains(&a).then_some(a)
+                }
+            });
+        let column = |i: Option<usize>| i.and_then(|i| cols.get(i)).and_then(|v| parse_ssa_u32(v));
+        let margins = SsaMargins {
+            left: column(self.i_style_margins.0).unwrap_or(0),
+            right: column(self.i_style_margins.1).unwrap_or(0),
+            vertical: column(self.i_style_margins.2).unwrap_or(0),
         };
-        self.styles.push((String::from(*name), an));
+        if align.is_none() && margins == SsaMargins::default() {
+            return; // nothing placeable in this style
+        }
+        self.styles
+            .push((String::from(*name), SsaStyle { align, margins }));
     }
 
     /// Parse one `Dialogue:` body into a cue using the resolved column indices.
     /// The `Text` column is last, so we split on only the leading commas and keep
-    /// its remainder (commas and all) intact. Placement is the inline `{\an}`
-    /// override if present, else the dialogue style's alignment.
+    /// its remainder (commas and all) intact. Alignment is the inline `{\an}`
+    /// override if present, else the dialogue style's; pixel placement is the
+    /// inline `{\pos(x,y)}` if present, else the margin columns, both scaled by
+    /// the script's `PlayRes`.
     fn parse_dialogue(&self, body: &str) -> Option<Cue> {
         // splitn keeps everything after the i_text-th comma as the final field.
         let fields: Vec<&str> = body.splitn(self.i_text + 1, ',').collect();
@@ -693,7 +839,7 @@ impl SsaState {
         if text.trim().is_empty() {
             return None;
         }
-        let style_align = fields
+        let style = fields
             .get(self.i_style)
             .map(|s| s.trim())
             .and_then(|name| {
@@ -701,11 +847,25 @@ impl SsaState {
                     .iter()
                     .find(|(n, _)| n.eq_ignore_ascii_case(name))
             })
-            .map(|(_, an)| *an);
-        let settings = ass_inline_alignment(raw)
-            .or(style_align)
-            .map(ass_alignment_settings)
+            .map(|(_, s)| *s)
             .unwrap_or_default();
+        let an = ass_inline_alignment(raw).or(style.align);
+        let mut settings = an.map(ass_alignment_settings).unwrap_or_default();
+
+        // Pixel placement, in the script's own canvas. `\pos` wins over margins,
+        // which are the dialogue's own falling back to its style's.
+        let column = |i: usize| fields.get(i).and_then(|v| parse_ssa_u32(v)).unwrap_or(0);
+        let margins = SsaMargins {
+            left: column(self.i_margins.0),
+            right: column(self.i_margins.1),
+            vertical: column(self.i_margins.2),
+        }
+        .or(style.margins);
+        match ass_inline_pos(raw) {
+            Some((x, y)) => ass_apply_pos(&mut settings, self.play_res, x, y),
+            None => ass_apply_margins(&mut settings, self.play_res, an.unwrap_or(2), margins),
+        }
+
         Some(Cue {
             start_ns,
             end_ns,
@@ -713,6 +873,92 @@ impl SsaState {
             settings,
         })
     }
+}
+
+/// Place a cue at an `{\pos(x,y)}` point, as a percentage of the script canvas.
+/// Without a `PlayRes` the pixels mean nothing and the placement is left alone.
+/// `y` sets the cue's line, which this model anchors at the block's top edge, so
+/// a bottom-anchored `\pos` lands the block a block-height low.
+fn ass_apply_pos(settings: &mut CueSettings, play_res: (u32, u32), x: u32, y: u32) {
+    let (res_x, res_y) = play_res;
+    if res_x != 0 {
+        settings.position = Some(pixel_percent(x, res_x));
+    }
+    if res_y != 0 {
+        settings.line = Some(pixel_percent(y, res_y));
+    }
+}
+
+/// Inset a cue by its `MarginL` / `MarginR` / `MarginV`, as a percentage of the
+/// script canvas: the horizontal margins move the anchor the alignment's column
+/// uses, and `MarginV` sets the line for a top-anchored alignment. A
+/// bottom-anchored one keeps the auto bottom stack (this model's `line` is the
+/// block's top, so a bottom inset has no exact expression) and a middle-anchored
+/// one stays centred. Without a `PlayRes`, nothing is mapped.
+fn ass_apply_margins(
+    settings: &mut CueSettings,
+    play_res: (u32, u32),
+    an: u8,
+    margins: SsaMargins,
+) {
+    let (res_x, res_y) = play_res;
+    if res_x != 0 {
+        let left = pixel_percent(margins.left, res_x);
+        let right = 100u8.saturating_sub(pixel_percent(margins.right, res_x));
+        settings.position = match an % 3 {
+            1 => Some(left),
+            0 => Some(right),
+            // A centred cue sits midway between the two insets; with neither set
+            // that is the frame centre, which is the auto position already.
+            _ if margins.left == 0 && margins.right == 0 => settings.position,
+            _ => Some(left.saturating_add(right) / 2),
+        };
+    }
+    if res_y != 0 && margins.vertical != 0 && (7..=9).contains(&an) {
+        settings.line = Some(pixel_percent(margins.vertical, res_y));
+    }
+}
+
+/// A script-pixel coordinate as a percentage `0..=100` of the canvas extent.
+/// `extent` is non-zero (the callers check), and a value past the canvas clamps.
+fn pixel_percent(value: u32, extent: u32) -> u8 {
+    ((value as u64 * 100 / extent as u64).min(100)) as u8
+}
+
+/// Parse an SSA integer field (a `PlayRes` or a margin). `0` reads as unset, and
+/// so does an empty, negative, or out-of-range value: untrusted numbers are
+/// dropped rather than wrapping.
+fn parse_ssa_u32(v: &str) -> Option<u32> {
+    v.trim().parse::<u32>().ok().filter(|n| *n != 0)
+}
+
+/// The `{\pos(x,y)}` override in an ASS text field, if any (the last one wins,
+/// like the alignment overrides). Fractional coordinates are truncated; a
+/// malformed or out-of-range pair is ignored.
+fn ass_inline_pos(raw: &str) -> Option<(u32, u32)> {
+    let mut out = None;
+    let mut rest = raw;
+    while let Some(open) = rest.find('{') {
+        let after = &rest[open + 1..];
+        let end = after.find('}').unwrap_or(after.len());
+        let mut block = &after[..end];
+        while let Some(at) = block.find("\\pos(") {
+            let tail = &block[at + 5..];
+            block = tail;
+            let Some(close) = tail.find(')') else { break };
+            let mut parts = tail[..close].split(',');
+            let mut coord = || {
+                let v = parts.next()?.trim();
+                let int = v.split_once('.').map_or(v, |(i, _)| i);
+                int.parse::<u32>().ok()
+            };
+            if let (Some(x), Some(y)) = (coord(), coord()) {
+                out = Some((x, y));
+            }
+        }
+        rest = &after[end..];
+    }
+    out
 }
 
 /// Map an ASS `\an` alignment (numpad 1-9) onto the cue placement model: the
@@ -1360,7 +1606,7 @@ fn parse_blocks_rebased(input: &str, webvtt: bool, offset_ns: &mut i64) -> Vec<C
                 *offset_ns = off;
             }
         }
-        if let Some(mut cue) = block_to_cue(block, webvtt) {
+        if let Some((mut cue, _spans)) = block_to_cue(block, webvtt) {
             rebase_cue(&mut cue, *offset_ns);
             cues.push(cue);
         }
@@ -1377,9 +1623,10 @@ fn parse_blocks_rebased(input: &str, webvtt: bool, offset_ns: &mut i64) -> Vec<C
     cues
 }
 
-/// Turn one non-empty block into a cue, or `None` if it is not a cue (a WebVTT
-/// header / NOTE / STYLE / REGION block, or a block with no timing line).
-fn block_to_cue(block: &[&str], webvtt: bool) -> Option<Cue> {
+/// Turn one non-empty block into a cue plus the class-carrying spans of its text
+/// (what `::cue(.class)` selects), or `None` if it is not a cue (a WebVTT header
+/// / NOTE / STYLE / REGION block, or a block with no timing line).
+fn block_to_cue(block: &[&str], webvtt: bool) -> Option<(Cue, Vec<CueSpan>)> {
     if block.is_empty() {
         return None;
     }
@@ -1402,23 +1649,85 @@ fn block_to_cue(block: &[&str], webvtt: bool) -> Option<Cue> {
     let timing_idx = block.iter().position(|l| l.contains("-->"))?;
     let (start_ns, end_ns, settings) = parse_timing(block[timing_idx])?;
 
-    let mut text = String::new();
-    for (i, raw) in block[timing_idx + 1..].iter().enumerate() {
-        if i > 0 {
-            text.push('\n');
-        }
-        push_stripped(raw, &mut text);
-    }
+    let (text, spans) = strip_cue_text(&block[timing_idx + 1..]);
     // Drop a fully empty payload (a timing line with no following text).
     if text.trim().is_empty() {
         return None;
     }
-    Some(Cue {
-        start_ns,
-        end_ns,
-        text,
-        settings,
-    })
+    Some((
+        Cue {
+            start_ns,
+            end_ns,
+            text,
+            settings,
+        },
+        spans,
+    ))
+}
+
+/// Join a cue's text lines with the `<...>` markup removed, recording the byte
+/// range each class-carrying span covers in the result. Spans nest, so the stack
+/// pairs each close tag with the innermost open one; a span left unclosed at the
+/// end of the cue runs to the end of the text (a stray `</c>` is ignored).
+fn strip_cue_text(lines: &[&str]) -> (String, Vec<CueSpan>) {
+    let mut text = String::new();
+    // Spans in document order (an enclosing span before the ones it contains),
+    // with `open` holding the indices of the ones still to be closed.
+    let mut spans: Vec<CueSpan> = Vec::new();
+    let mut open: Vec<usize> = Vec::new();
+    for (i, raw) in lines.iter().enumerate() {
+        if i > 0 {
+            text.push('\n');
+        }
+        let mut rest = *raw;
+        while let Some(lt) = rest.find('<') {
+            text.push_str(&rest[..lt]);
+            let after = &rest[lt + 1..];
+            let Some(gt) = after.find('>') else {
+                rest = "";
+                break;
+            };
+            let tag = &after[..gt];
+            rest = &after[gt + 1..];
+            if tag.starts_with('/') {
+                if let Some(idx) = open.pop() {
+                    spans[idx].end = text.len();
+                }
+            } else if is_span_tag(tag) {
+                open.push(spans.len());
+                spans.push(CueSpan {
+                    start: text.len(),
+                    end: text.len(),
+                    classes: tag_classes(tag),
+                });
+            }
+        }
+        text.push_str(rest);
+    }
+    // A span the cue never closes (the common unclosed `<v Speaker>`) runs to the end.
+    for idx in open {
+        spans[idx].end = text.len();
+    }
+    spans.retain(|s| !s.classes.is_empty());
+    (text, spans)
+}
+
+/// Whether an open tag is a span (`c`, `i`, `v.narrator`, ...) rather than an
+/// inline cue timestamp (`<00:00:01.000>`), which is a void element and must not
+/// be paired with a following close tag.
+fn is_span_tag(tag: &str) -> bool {
+    let name = tag_name(tag);
+    !name.is_empty() && !name.contains(':')
+}
+
+/// A tag's element name: the part before any `.class` chain or annotation.
+fn tag_name(tag: &str) -> &str {
+    tag.split_whitespace()
+        .next()
+        .unwrap_or("")
+        .split('.')
+        .next()
+        .unwrap_or("")
 }
 
 /// Parse a `start --> end [settings...]` timing line into a nanosecond span plus
@@ -2023,6 +2332,7 @@ mod tests {
                 vertical: WritingMode::Horizontal,
                 color: None,
                 background: None,
+                spans: Vec::new(),
             }
         );
         // Bare `align:right` maps to End; position / line stay auto.
@@ -2035,6 +2345,7 @@ mod tests {
                 vertical: WritingMode::Horizontal,
                 color: None,
                 background: None,
+                spans: Vec::new(),
             }
         );
     }
@@ -2066,33 +2377,98 @@ mod tests {
     }
 
     #[test]
-    fn webvtt_cue_class_selector_styles_the_cue() {
+    fn webvtt_cue_class_selector_styles_only_its_span() {
         // `::cue(.class)` matches the classes on the cue's span tags: `<c.loud>`
-        // and the voice form `<v.narrator Bob>`. Class beats the global rule, id
-        // beats class.
+        // and the voice form `<v.narrator Bob>`. The colour covers just that
+        // span's byte range; the rest of the cue keeps the global `::cue` colour.
         let input = "WEBVTT\n\n\
             STYLE\n\
             ::cue { color: white; }\n\
             ::cue(.loud) { color: red; background-color: black; }\n\
             ::cue(.narrator) { color: cyan; }\n\
             ::cue(#tagged) { color: lime; }\n\n\
-            00:00:00.000 --> 00:00:01.000\n<c.loud>SHOUT</c>\n\n\
+            00:00:00.000 --> 00:00:01.000\nsay <c.loud>SHOUT</c> now\n\n\
             00:00:01.000 --> 00:00:02.000\n<v.narrator Bob>calm\n\n\
-            tagged\n00:00:02.000 --> 00:00:03.000\n<c.loud>id wins</c>\n\n\
+            tagged\n00:00:02.000 --> 00:00:03.000\n<c.loud>span</c> plus id\n\n\
             00:00:03.000 --> 00:00:04.000\nplain\n";
         let cues = parse_webvtt(input);
         assert_eq!(cues.len(), 4);
-        // .loud: red on an opaque black box, text still stripped of the tags.
-        assert_eq!(cues[0].text, "SHOUT");
-        assert_eq!(cues[0].settings.color, Some([255, 0, 0, 255]));
+
+        // .loud recolours "SHOUT" only; the cue-wide colour stays the global one,
+        // and the box (one per cue) takes the rule's background.
+        assert_eq!(cues[0].text, "say SHOUT now");
+        assert_eq!(
+            cues[0].settings.spans,
+            alloc::vec![SpanStyle {
+                start: 4,
+                end: 9,
+                color: [255, 0, 0, 255],
+            }]
+        );
+        assert_eq!(cues[0].settings.color, Some([255, 255, 255, 255]));
         assert_eq!(cues[0].settings.background, Some([0, 0, 0, 255]));
-        // A voice span carries classes too.
-        assert_eq!(cues[1].settings.color, Some([0, 255, 255, 255]));
-        // The id rule is applied after the class rule.
+        assert_eq!(cues[0].settings.color_at(0), Some([255, 255, 255, 255]));
+        assert_eq!(cues[0].settings.color_at(4), Some([255, 0, 0, 255]));
+        assert_eq!(cues[0].settings.color_at(9), Some([255, 255, 255, 255]));
+
+        // An unclosed voice span runs to the end of the cue.
+        assert_eq!(
+            cues[1].settings.spans,
+            alloc::vec![SpanStyle {
+                start: 0,
+                end: 4,
+                color: [0, 255, 255, 255],
+            }]
+        );
+
+        // A span rule and an id rule coexist: the id sets the cue colour, the
+        // span keeps its own.
         assert_eq!(cues[2].settings.color, Some([0, 255, 0, 255]));
-        // No class on the cue -> only the global rule.
-        assert_eq!(cues[3].settings.color, Some([255, 255, 255, 255]));
+        assert_eq!(cues[2].settings.color_at(0), Some([255, 0, 0, 255]));
+        assert_eq!(cues[2].settings.color_at(5), Some([0, 255, 0, 255]));
+
+        // No span on the cue -> only the global rule, everywhere.
+        assert!(cues[3].settings.spans.is_empty());
+        assert_eq!(cues[3].settings.color_at(0), Some([255, 255, 255, 255]));
         assert_eq!(cues[3].settings.background, None);
+    }
+
+    #[test]
+    fn webvtt_compound_class_selector_needs_every_class() {
+        // `::cue(.a.b)` matches only a span carrying both classes, in any order;
+        // a span with one of them is left alone. Nested spans stack, the inner
+        // one winning where they overlap.
+        let input = "WEBVTT\n\n\
+            STYLE\n\
+            ::cue(.loud.angry) { color: red; }\n\
+            ::cue(.loud) { color: blue; }\n\n\
+            00:00:00.000 --> 00:00:01.000\n\
+            <c.loud>calm <c.angry.loud>MAD</c></c>\n\n\
+            00:00:01.000 --> 00:00:02.000\n<c.angry>only angry</c>\n";
+        let cues = parse_webvtt(input);
+        // The outer `.loud` span is blue over the whole line; the inner span
+        // carries both classes, so the compound rule recolours "MAD" red.
+        assert_eq!(cues[0].text, "calm MAD");
+        assert_eq!(
+            cues[0].settings.spans,
+            alloc::vec![
+                SpanStyle {
+                    start: 0,
+                    end: 8,
+                    color: [0, 0, 255, 255],
+                },
+                SpanStyle {
+                    start: 5,
+                    end: 8,
+                    color: [255, 0, 0, 255],
+                },
+            ]
+        );
+        assert_eq!(cues[0].settings.color_at(0), Some([0, 0, 255, 255]));
+        assert_eq!(cues[0].settings.color_at(5), Some([255, 0, 0, 255]));
+        // `.angry` alone matches neither rule (the compound needs `.loud` too).
+        assert!(cues[1].settings.spans.is_empty());
+        assert_eq!(cues[1].settings.color_at(0), None);
     }
 
     #[test]
@@ -2131,6 +2507,7 @@ mod tests {
                 vertical: WritingMode::VerticalRl,
                 color: None,
                 background: None,
+                spans: Vec::new(),
             }
         );
         assert_eq!(cues[1].settings.vertical, WritingMode::VerticalLr);
@@ -2289,6 +2666,94 @@ mod tests {
                 ..CueSettings::default()
             }
         );
+    }
+
+    #[test]
+    fn ssa_inline_pos_maps_through_playres() {
+        // `{\pos(x,y)}` is in script-canvas pixels: 480/1920 = 25% across,
+        // 810/1080 = 75% down. The last override on the line wins, and a cue
+        // without one keeps its alignment-derived placement.
+        let doc = "[Script Info]\n\
+            PlayResX: 1920\n\
+            PlayResY: 1080\n\
+            \n\
+            [Events]\n\
+            Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n\
+            Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,{\\pos(480,810)}placed\n\
+            Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,{\\an7}{\\pos(1920,0)}corner\n\
+            Dialogue: 0,0:00:02.00,0:00:03.00,Default,,0,0,0,,plain\n\
+            Dialogue: 0,0:00:03.00,0:00:04.00,Default,,0,0,0,,{\\pos(9999,9999)}off-canvas\n";
+        let cues = parse_ssa(doc);
+        assert_eq!(cues.len(), 4);
+        assert_eq!(cues[0].settings.position, Some(25));
+        assert_eq!(cues[0].settings.line, Some(75));
+        assert_eq!(cues[0].text, "placed", "the override tag is stripped");
+        // `\pos` places, `\an` still picks how the block hangs off the point.
+        assert_eq!(cues[1].settings.position, Some(100));
+        assert_eq!(cues[1].settings.line, Some(0));
+        assert_eq!(cues[1].settings.align, TextAlign::Start);
+        // No `\pos`, no margins: the default auto placement.
+        assert_eq!(cues[2].settings, CueSettings::default());
+        // A point outside the canvas clamps to the frame edge.
+        assert_eq!(cues[3].settings.position, Some(100));
+        assert_eq!(cues[3].settings.line, Some(100));
+    }
+
+    #[test]
+    fn ssa_margins_inset_the_cue() {
+        // MarginL/R inset the horizontal anchor of the alignment's column and
+        // MarginV the line of a top-anchored one, both as a percentage of the
+        // canvas. A dialogue's own 0 falls back to its style's margin.
+        let doc = "[Script Info]\n\
+            PlayResX: 1920\n\
+            PlayResY: 1080\n\
+            \n\
+            [V4+ Styles]\n\
+            Format: Name, Fontname, Alignment, MarginL, MarginR, MarginV\n\
+            Style: Left,Arial,1,192,0,0\n\
+            Style: Right,Arial,3,0,384,0\n\
+            Style: Top,Arial,8,0,0,108\n\
+            \n\
+            [Events]\n\
+            Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n\
+            Dialogue: 0,0:00:00.00,0:00:01.00,Left,,0,0,0,,style margin\n\
+            Dialogue: 0,0:00:01.00,0:00:02.00,Left,,960,0,0,,line margin wins\n\
+            Dialogue: 0,0:00:02.00,0:00:03.00,Right,,0,0,0,,from the right\n\
+            Dialogue: 0,0:00:03.00,0:00:04.00,Top,,0,0,0,,top inset\n\
+            Dialogue: 0,0:00:04.00,0:00:05.00,Top,,192,192,0,,centred between\n";
+        let cues = parse_ssa(doc);
+        assert_eq!(cues.len(), 5);
+        // \an1 (bottom left) + MarginL 192 = 10% in from the left.
+        assert_eq!(cues[0].settings.position, Some(10));
+        assert_eq!(cues[0].settings.align, TextAlign::Start);
+        assert_eq!(cues[0].settings.line, None, "bottom rows still auto-stack");
+        // The dialogue's own MarginL overrides the style's.
+        assert_eq!(cues[1].settings.position, Some(50));
+        // \an3 (bottom right) + MarginR 384 = 20% in from the right.
+        assert_eq!(cues[2].settings.position, Some(80));
+        assert_eq!(cues[2].settings.align, TextAlign::End);
+        // \an8 (top centre) + MarginV 108 = 10% down.
+        assert_eq!(cues[3].settings.line, Some(10));
+        assert_eq!(
+            cues[3].settings.position, None,
+            "centred: no inset either side"
+        );
+        // A centred cue with both insets sits midway between them.
+        assert_eq!(cues[4].settings.position, Some(50));
+    }
+
+    #[test]
+    fn ssa_pixel_placement_needs_a_playres() {
+        // Without `PlayResX` / `PlayResY` (or with a bogus one) the pixel values
+        // have no canvas to scale against, so only the alignment is mapped.
+        let doc = "[Script Info]\n\
+            PlayResX: nonsense\n\
+            \n\
+            [Events]\n\
+            Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n\
+            Dialogue: 0,0:00:00.00,0:00:01.00,Default,,300,0,0,,{\\pos(100,200)}unmapped\n";
+        let cues = parse_ssa(doc);
+        assert_eq!(cues[0].settings, CueSettings::default());
     }
 
     #[test]
@@ -2742,6 +3207,7 @@ mod tests {
                 vertical: WritingMode::Horizontal,
                 color: None,
                 background: None,
+                spans: Vec::new(),
             }
         );
     }

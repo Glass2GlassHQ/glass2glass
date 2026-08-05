@@ -397,7 +397,7 @@ impl MultiInputElement for CcInsert {
                             let settings = frame
                                 .meta
                                 .get::<crate::subparse::TextCueMeta>()
-                                .map(|m| m.settings)
+                                .map(|m| m.settings.clone())
                                 .unwrap_or_default();
                             #[cfg(not(feature = "metadata"))]
                             let settings = crate::subparse::CueSettings::default();
