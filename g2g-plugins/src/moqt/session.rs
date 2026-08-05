@@ -80,7 +80,9 @@ pub enum DataEvent {
 pub struct MoqtSession {
     session: Session,
     control_tx: SendStream,
-    inbound: mpsc::UnboundedReceiver<ControlMessage>,
+    /// `None` once a caller took the receiver to read it from its own task (see
+    /// [`MoqtSession::take_control_receiver`]).
+    inbound: Option<mpsc::UnboundedReceiver<ControlMessage>>,
     /// `MAX_REQUEST_ID` the peer advertised: request ids we may allocate stay
     /// below it.
     peer_max_request_id: u64,
@@ -134,7 +136,7 @@ impl MoqtSession {
         Ok(Self {
             session,
             control_tx,
-            inbound,
+            inbound: Some(inbound),
             peer_max_request_id,
             next_request_id: 0,
             closed: false,
@@ -167,13 +169,26 @@ impl MoqtSession {
         write_message(&mut self.control_tx, msg).await
     }
 
-    /// Await the next control message. `None` once the control stream ends.
+    /// Await the next control message. `None` once the control stream ends, or
+    /// straight away when the receiver was taken.
     pub async fn next_control(&mut self) -> Option<ControlMessage> {
-        let msg = self.inbound.recv().await;
+        let msg = match self.inbound.as_mut() {
+            Some(inbound) => inbound.recv().await,
+            None => None,
+        };
         if msg.is_none() {
             self.closed = true;
         }
         msg
+    }
+
+    /// Take the inbound control-message receiver, so a caller can answer control
+    /// messages from its own task rather than when it next has work to do (the
+    /// publisher's control pump). Afterwards [`next_control`](Self::next_control)
+    /// and [`poll_control`](Self::poll_control) yield nothing: whoever holds the
+    /// receiver is the only reader.
+    pub fn take_control_receiver(&mut self) -> Option<mpsc::UnboundedReceiver<ControlMessage>> {
+        self.inbound.take()
     }
 
     /// Start accepting the session's unidirectional streams and decoding the
@@ -232,7 +247,7 @@ impl MoqtSession {
     /// The next control message already decoded by the reader task, or `None`
     /// when none is waiting. Never blocks on the network.
     pub fn poll_control(&mut self) -> Option<ControlMessage> {
-        match self.inbound.try_recv() {
+        match self.inbound.as_mut()?.try_recv() {
             Ok(msg) => Some(msg),
             Err(mpsc::error::TryRecvError::Empty) => None,
             Err(mpsc::error::TryRecvError::Disconnected) => {

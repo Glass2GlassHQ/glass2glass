@@ -33,18 +33,28 @@
 //!
 //! Every group's stream is opened only after SUBSCRIBE_OK for that
 //! subscription, so the subscriber can resolve the track alias in the stream
-//! header. Inbound control messages are decoded by the session's reader task
-//! and applied when the next frame arrives, so a subscription that lands
-//! between frames is served on the following one.
+//! header. The session is dialled when the pipeline is configured, and inbound
+//! control messages are answered by a pump task on the session's control stream,
+//! so a SUBSCRIBE is served whether or not a frame is flowing: before the
+//! encoder's first fragment as well as between two of them. The pump and frame
+//! publishing take turns on the [`Core`] lock, so an object is never interleaved
+//! with the control message that changed what is being served. A media SUBSCRIBE
+//! that arrives before the `moov` names any track is held until one does.
 
 use core::future::Future;
 use core::pin::Pin;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
+use std::sync::Mutex as StdMutex;
+
+use tokio::sync::{mpsc, Mutex};
+use tokio::task::JoinHandle;
 use web_transport_quinn::SendStream;
 
 use g2g_core::{
@@ -69,6 +79,10 @@ use crate::remotewtio::wt_err;
 /// and an extension-header block (`session/subscribed.rs`), so a relay sees the
 /// same header type from us as from `moq-pub`.
 const HEADER_TYPE: StreamHeaderType = StreamHeaderType::SubgroupIdExt;
+
+/// SUBSCRIBEs held for a track the `moov` has not named yet. A peer cannot make
+/// the queue grow without bound by subscribing to names that do not exist.
+const MAX_PENDING_SUBSCRIBES: usize = 64;
 
 /// A malformed message we built, or a peer message we could not decode: either
 /// way the session is unusable.
@@ -128,26 +142,109 @@ struct MediaTrack {
     selection_params: String,
 }
 
-/// Publishes an fMP4 byte stream to an IETF MoQ Transport relay.
-#[derive(Debug)]
-pub struct MoqtSink {
-    location: String,
-    cert_hashes: String,
+/// The properties the serving state reads, snapshotted when the session is
+/// dialled: from then on the pump task answers control messages without the
+/// element.
+#[derive(Debug, Clone)]
+struct Config {
     namespace: String,
     init_track: String,
     catalog_track: String,
     track_name: String,
     publish_catalog: bool,
     priority: u64,
-    max_request_id: u64,
     datagrams: bool,
     subgroups: u64,
+}
 
-    configured: bool,
+impl Config {
+    fn new(namespace: impl Into<String>) -> Self {
+        Self {
+            namespace: namespace.into(),
+            init_track: String::from("0.mp4"),
+            catalog_track: String::from(".catalog"),
+            track_name: String::new(),
+            publish_catalog: true,
+            priority: 127,
+            datagrams: false,
+            subgroups: 1,
+        }
+    }
+}
+
+/// What one dial needs: the transport knobs, plus the serving config the session
+/// starts with.
+#[derive(Debug, Clone)]
+struct Dial {
+    location: String,
+    cert_hashes: String,
+    max_request_id: u64,
+    cfg: Config,
+}
+
+/// Counters the sync accessors read. They are bumped from the pump task as well
+/// as from `process`, so they live outside the locked core.
+#[derive(Debug, Default)]
+struct Stats {
+    objects_published: AtomicU64,
+    datagram_objects: AtomicU64,
+    datagram_fallbacks: AtomicU64,
+}
+
+impl Stats {
+    fn bump(counter: &AtomicU64) {
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Where the connect task leaves the control pump's handle, so the element can
+/// abort it on drop. A `std` mutex because `Drop` cannot await, and it is only
+/// ever held long enough to swap the handle out.
+#[derive(Debug, Default)]
+struct PumpSlot(StdMutex<Option<JoinHandle<()>>>);
+
+impl PumpSlot {
+    fn install(&self, handle: JoinHandle<()>) {
+        if let Ok(mut slot) = self.0.lock() {
+            if let Some(previous) = slot.replace(handle) {
+                previous.abort();
+            }
+        }
+    }
+
+    fn abort(&self) {
+        if let Ok(mut slot) = self.0.lock() {
+            if let Some(handle) = slot.take() {
+                handle.abort();
+            }
+        }
+    }
+}
+
+/// How far the session has got. The dial runs in the background from
+/// `configure_pipeline` when there is a runtime to spawn on; without one it
+/// happens on the first frame instead.
+#[derive(Debug)]
+enum Connect {
+    /// Nothing dialled yet: the next frame does it inline.
+    Deferred,
+    Dialing(JoinHandle<Result<(), G2gError>>),
+    Connected,
+}
+
+/// The serving state: the session and everything published over it. Held behind
+/// one lock that the control pump and `process` take turns on, so a subscription
+/// changes hands between frames and never inside one.
+#[derive(Debug)]
+struct Core {
+    cfg: Config,
     session: Option<MoqtSession>,
     /// Request id of our PUBLISH_NAMESPACE, once sent.
     namespace_request: Option<u64>,
     subscriptions: Vec<Subscription>,
+    /// SUBSCRIBEs for a track the `moov` has not named yet, answered once it
+    /// does (or refused then, if it names nothing).
+    pending_subscribes: Vec<(u64, String)>,
 
     /// `ftyp`+`moov` as received, the init track's single object.
     init: Vec<u8>,
@@ -160,10 +257,31 @@ pub struct MoqtSink {
     pending_object: Vec<u8>,
     pending_track: Option<u32>,
     pending_sync: bool,
+    /// The pump gave up: a control message it could not answer, or the control
+    /// stream ended. The next frame reports it.
+    dead: bool,
 
-    objects_published: u64,
-    datagram_objects: u64,
-    datagram_fallbacks: u64,
+    stats: Arc<Stats>,
+}
+
+/// Publishes an fMP4 byte stream to an IETF MoQ Transport relay.
+#[derive(Debug)]
+pub struct MoqtSink {
+    location: String,
+    cert_hashes: String,
+    max_request_id: u64,
+    cfg: Config,
+
+    configured: bool,
+    core: Arc<Mutex<Core>>,
+    stats: Arc<Stats>,
+    pump: Arc<PumpSlot>,
+    connect: Connect,
+
+    /// The core's track names and catalog as of the last frame, so the sync
+    /// accessors can read them without locking.
+    track_names: Vec<String>,
+    catalog: Vec<u8>,
 }
 
 impl Default for MoqtSink {
@@ -176,32 +294,20 @@ impl MoqtSink {
     /// Publish to the relay at `location` under `namespace` (a `/`-separated
     /// path, e.g. `live/cam1`).
     pub fn new(location: impl Into<String>, namespace: impl Into<String>) -> Self {
+        let cfg = Config::new(namespace);
+        let stats = Arc::new(Stats::default());
         Self {
             location: location.into(),
             cert_hashes: String::new(),
-            namespace: namespace.into(),
-            init_track: String::from("0.mp4"),
-            catalog_track: String::from(".catalog"),
-            track_name: String::new(),
-            publish_catalog: true,
-            priority: 127,
             max_request_id: 100,
-            datagrams: false,
-            subgroups: 1,
+            core: Arc::new(Mutex::new(Core::new(cfg.clone(), Arc::clone(&stats)))),
+            cfg,
             configured: false,
-            session: None,
-            namespace_request: None,
-            subscriptions: Vec::new(),
-            init: Vec::new(),
+            stats,
+            pump: Arc::new(PumpSlot::default()),
+            connect: Connect::Deferred,
+            track_names: Vec::new(),
             catalog: Vec::new(),
-            tracks: Vec::new(),
-            pending_header: Vec::new(),
-            pending_object: Vec::new(),
-            pending_track: None,
-            pending_sync: false,
-            objects_published: 0,
-            datagram_objects: 0,
-            datagram_fallbacks: 0,
         }
     }
 
@@ -216,44 +322,44 @@ impl MoqtSink {
     /// Publisher priority written into every subgroup header; smaller is sent
     /// first.
     pub fn with_priority(mut self, priority: u64) -> Self {
-        self.priority = priority;
+        self.cfg.priority = priority;
         self
     }
 
     /// Carry media objects in datagrams instead of subgroup streams. Off by
     /// default: it trades reliable delivery for no head-of-line blocking.
     pub fn with_datagrams(mut self, datagrams: bool) -> Self {
-        self.datagrams = datagrams;
+        self.cfg.datagrams = datagrams;
         self
     }
 
     /// Spread each group's objects across this many subgroup streams,
     /// round-robin. One (the default) is a stream per group.
     pub fn with_subgroups(mut self, subgroups: u64) -> Self {
-        self.subgroups = subgroups;
+        self.cfg.subgroups = subgroups;
         self
     }
 
     /// Objects written to at least one subscriber so far.
     pub fn objects_published(&self) -> u64 {
-        self.objects_published
+        self.stats.objects_published.load(Ordering::Relaxed)
     }
 
     /// Datagrams sent, counted once per subscriber served.
     pub fn datagram_objects(&self) -> u64 {
-        self.datagram_objects
+        self.stats.datagram_objects.load(Ordering::Relaxed)
     }
 
     /// Objects datagram mode could not send as datagrams (too large for the
     /// path, or a peer that takes none) and put on a subgroup stream instead,
     /// counted the same way.
     pub fn datagram_fallbacks(&self) -> u64 {
-        self.datagram_fallbacks
+        self.stats.datagram_fallbacks.load(Ordering::Relaxed)
     }
 
     /// The media track names the `moov` produced, in track order.
     pub fn track_names(&self) -> Vec<String> {
-        self.tracks.iter().map(|t| t.name.clone()).collect()
+        self.track_names.clone()
     }
 
     /// The catalog document as published, for tests and for a caller serving it
@@ -262,44 +368,142 @@ impl MoqtSink {
         &self.catalog
     }
 
-    fn namespace_tuple(&self) -> TrackNamespace {
-        TrackNamespace::from_path(&self.namespace)
+    fn dial_params(&self) -> Dial {
+        Dial {
+            location: self.location.clone(),
+            cert_hashes: self.cert_hashes.clone(),
+            max_request_id: self.max_request_id,
+            cfg: self.cfg.clone(),
+        }
     }
 
-    /// Dial the relay, complete SETUP, and publish the namespace. Deferred to
-    /// the first frame because the handshake is async.
-    async fn ensure_session(&mut self) -> Result<(), G2gError> {
-        if self.session.is_some() {
-            return Ok(());
+    /// Make sure the session is up: await the dial started at configure time, or
+    /// run it here when there was no runtime then. A dial that failed is
+    /// reported and retried on the next frame, since the relay may only be
+    /// coming up.
+    async fn ready(&mut self) -> Result<(), G2gError> {
+        let outcome = match core::mem::replace(&mut self.connect, Connect::Deferred) {
+            Connect::Connected => Ok(()),
+            Connect::Dialing(handle) => handle
+                .await
+                .unwrap_or(Err(G2gError::Hardware(HardwareError::Other))),
+            Connect::Deferred => {
+                connect_session(
+                    Arc::clone(&self.core),
+                    Arc::clone(&self.pump),
+                    self.dial_params(),
+                )
+                .await
+            }
+        };
+        if outcome.is_ok() {
+            self.connect = Connect::Connected;
         }
-        let mut session = MoqtSession::connect(
-            &self.location,
-            &self.cert_hashes,
-            self.max_request_id,
-            &implementation_name(),
-        )
+        outcome
+    }
+}
+
+impl Drop for MoqtSink {
+    fn drop(&mut self) {
+        // The pump task holds the core, and through it the session, so without
+        // this a dropped element leaves both running.
+        self.pump.abort();
+        if let Connect::Dialing(handle) = &self.connect {
+            handle.abort();
+        }
+    }
+}
+
+/// Dial the relay, complete SETUP, publish the namespace, and start the control
+/// pump. Spawned from `configure_pipeline` when there is a runtime, so the
+/// namespace is live before the encoder's first fragment.
+async fn connect_session(
+    core: Arc<Mutex<Core>>,
+    pump: Arc<PumpSlot>,
+    dial: Dial,
+) -> Result<(), G2gError> {
+    let mut guard = core.lock().await;
+    if guard.session.is_some() {
+        return Ok(());
+    }
+    guard.cfg = dial.cfg;
+    let mut session = MoqtSession::connect(
+        &dial.location,
+        &dial.cert_hashes,
+        dial.max_request_id,
+        &implementation_name(),
+    )
+    .await?;
+    let id = session
+        .allocate_request_id()
+        .ok_or(G2gError::Hardware(HardwareError::Other))?;
+    session
+        .send(&ControlMessage::PublishNamespace {
+            id,
+            namespace: guard.namespace_tuple(),
+            params: Params::new(),
+        })
         .await?;
-        let id = session
-            .allocate_request_id()
-            .ok_or(G2gError::Hardware(HardwareError::Other))?;
-        session
-            .send(&ControlMessage::PublishNamespace {
-                id,
-                namespace: self.namespace_tuple(),
-                params: Params::new(),
-            })
-            .await?;
-        self.namespace_request = Some(id);
-        self.session = Some(session);
-        Ok(())
+    // The pump owns the inbound half from here: nothing else reads it.
+    let inbound = session
+        .take_control_receiver()
+        .ok_or(G2gError::Hardware(HardwareError::Other))?;
+    guard.namespace_request = Some(id);
+    guard.session = Some(session);
+    drop(guard);
+    pump.install(tokio::spawn(pump_control(core, inbound)));
+    Ok(())
+}
+
+/// Answer inbound control messages as they arrive, so a SUBSCRIBE that lands
+/// before the first frame (or between two of them) is served when it lands.
+async fn pump_control(
+    core: Arc<Mutex<Core>>,
+    mut inbound: mpsc::UnboundedReceiver<ControlMessage>,
+) {
+    while let Some(msg) = inbound.recv().await {
+        let mut guard = core.lock().await;
+        if guard.handle_control(msg).await.is_err() {
+            guard.dead = true;
+            return;
+        }
+    }
+    // The control stream ended: so has the session.
+    core.lock().await.dead = true;
+}
+
+impl Core {
+    fn new(cfg: Config, stats: Arc<Stats>) -> Self {
+        Self {
+            cfg,
+            session: None,
+            namespace_request: None,
+            subscriptions: Vec::new(),
+            pending_subscribes: Vec::new(),
+            init: Vec::new(),
+            catalog: Vec::new(),
+            tracks: Vec::new(),
+            pending_header: Vec::new(),
+            pending_object: Vec::new(),
+            pending_track: None,
+            pending_sync: false,
+            dead: false,
+            stats,
+        }
     }
 
-    /// Apply every control message the reader task has decoded.
-    async fn pump_control(&mut self) -> Result<(), G2gError> {
-        while let Some(msg) = self.session.as_mut().and_then(MoqtSession::poll_control) {
-            self.handle_control(msg).await?;
-        }
-        if self.session.as_ref().is_some_and(MoqtSession::is_closed) {
+    fn namespace_tuple(&self) -> TrackNamespace {
+        TrackNamespace::from_path(&self.cfg.namespace)
+    }
+
+    fn track_names(&self) -> Vec<String> {
+        self.tracks.iter().map(|t| t.name.clone()).collect()
+    }
+
+    /// Whether the session is still usable. The pump reports what it saw here,
+    /// since the pipeline only learns of it when it next has a frame.
+    fn alive(&self) -> Result<(), G2gError> {
+        if self.dead || self.session.as_ref().is_some_and(MoqtSession::is_closed) {
             return Err(G2gError::Hardware(HardwareError::Other));
         }
         Ok(())
@@ -335,12 +539,11 @@ impl MoqtSink {
             ControlMessage::Fetch { id, .. }
             | ControlMessage::TrackStatus { id, .. }
             | ControlMessage::RequestUpdate { id, .. } => {
-                self.send(ControlMessage::RequestError {
+                self.refuse(
                     id,
-                    error_code: request_error_code::NOT_SUPPORTED,
-                    retry_interval: 0,
-                    reason: String::from("not supported"),
-                })
+                    request_error_code::NOT_SUPPORTED,
+                    String::from("not supported"),
+                )
                 .await?;
             }
             // Everything else is a response to a request we did not make, or a
@@ -350,10 +553,10 @@ impl MoqtSink {
         Ok(())
     }
 
-    /// Accept or refuse one SUBSCRIBE. The track names come from the `moov`,
-    /// which arrives in the same frame that opens the session, and control
-    /// messages are applied at the start of the *next* frame, so a media track
-    /// is always named by the time a subscription for it can be seen.
+    /// Accept, refuse, or hold one SUBSCRIBE. The media track names come from
+    /// the `moov`, and the session is dialled before the encoder has produced
+    /// anything, so a subscription can arrive for a media track that does not
+    /// exist yet: it is held until the `moov` resolves it.
     async fn handle_subscribe(
         &mut self,
         id: u64,
@@ -361,11 +564,12 @@ impl MoqtSink {
         track_name: TrackName,
     ) -> Result<(), G2gError> {
         let name = track_name.as_str_lossy();
-        let target = if namespace != self.namespace_tuple() {
+        let ours = namespace == self.namespace_tuple();
+        let target = if !ours {
             None
-        } else if name == self.catalog_track && self.publish_catalog {
+        } else if name == self.cfg.catalog_track && self.cfg.publish_catalog {
             Some(Target::Catalog)
-        } else if name == self.init_track {
+        } else if name == self.cfg.init_track {
             Some(Target::Init)
         } else {
             self.tracks
@@ -373,26 +577,41 @@ impl MoqtSink {
                 .find(|t| t.name == name)
                 .map(|t| Target::Media(t.track_id))
         };
-        let Some(target) = target else {
+        if self.subscriptions.iter().any(|s| s.request_id == id)
+            || self.pending_subscribes.iter().any(|(held, _)| *held == id)
+        {
             return self
-                .send(ControlMessage::RequestError {
+                .refuse(
                     id,
-                    error_code: request_error_code::DOES_NOT_EXIST,
-                    retry_interval: 0,
-                    reason: format!("no track {name}"),
-                })
-                .await;
-        };
-        if self.subscriptions.iter().any(|s| s.request_id == id) {
-            return self
-                .send(ControlMessage::RequestError {
-                    id,
-                    error_code: request_error_code::DUPLICATE_SUBSCRIPTION,
-                    retry_interval: 0,
-                    reason: String::from("duplicate request id"),
-                })
+                    request_error_code::DUPLICATE_SUBSCRIPTION,
+                    String::from("duplicate request id"),
+                )
                 .await;
         }
+        let Some(target) = target else {
+            // Without a `moov` nothing names a media track yet, so hold the
+            // request rather than refusing a track that is about to exist.
+            if ours
+                && self.tracks.is_empty()
+                && self.pending_subscribes.len() < MAX_PENDING_SUBSCRIBES
+            {
+                g2g_debug!(self, "holding SUBSCRIBE {id} for {name} until the moov");
+                self.pending_subscribes.push((id, name));
+                return Ok(());
+            }
+            return self
+                .refuse(
+                    id,
+                    request_error_code::DOES_NOT_EXIST,
+                    format!("no track {name}"),
+                )
+                .await;
+        };
+        self.accept_subscribe(id, target).await
+    }
+
+    /// SUBSCRIBE_OK, then whatever the new subscription can already be served.
+    async fn accept_subscribe(&mut self, id: u64, target: Target) -> Result<(), G2gError> {
         // The reference publisher reuses the request id as the track alias: it
         // is already unique within the session, which is all §10.1 asks.
         self.send(ControlMessage::SubscribeOk {
@@ -414,11 +633,45 @@ impl MoqtSink {
         self.serve_single_object_tracks().await
     }
 
+    /// Answer the SUBSCRIBEs held for a track name the `moov` had not declared.
+    async fn resolve_pending_subscribes(&mut self) -> Result<(), G2gError> {
+        for (id, name) in core::mem::take(&mut self.pending_subscribes) {
+            let track_id = self
+                .tracks
+                .iter()
+                .find(|t| t.name == name)
+                .map(|t| t.track_id);
+            match track_id {
+                Some(track_id) => self.accept_subscribe(id, Target::Media(track_id)).await?,
+                None => {
+                    self.refuse(
+                        id,
+                        request_error_code::DOES_NOT_EXIST,
+                        format!("no track {name}"),
+                    )
+                    .await?
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn refuse(&mut self, id: u64, error_code: u64, reason: String) -> Result<(), G2gError> {
+        self.send(ControlMessage::RequestError {
+            id,
+            error_code,
+            retry_interval: 0,
+            reason,
+        })
+        .await
+    }
+
     fn drop_subscription(&mut self, id: u64) {
         if let Some(at) = self.subscriptions.iter().position(|s| s.request_id == id) {
             let sub = self.subscriptions.remove(at);
             finish_streams(sub.streams);
         }
+        self.pending_subscribes.retain(|(held, _)| *held != id);
     }
 
     async fn send(&mut self, msg: ControlMessage) -> Result<(), G2gError> {
@@ -452,13 +705,13 @@ impl MoqtSink {
             let _ = stream.finish();
             self.subscriptions[i].delivered = true;
             self.subscriptions[i].streams_opened += 1;
-            self.objects_published += 1;
+            Stats::bump(&self.stats.objects_published);
         }
         Ok(())
     }
 
     fn priority_byte(&self) -> u8 {
-        self.priority.min(u64::from(u8::MAX)) as u8
+        self.cfg.priority.min(u64::from(u8::MAX)) as u8
     }
 
     async fn open_group_stream(
@@ -523,8 +776,12 @@ impl MoqtSink {
         if consumed != bytes.len() {
             return Err(G2gError::CapsMismatch);
         }
-        // The moov may have arrived in this very frame, so a subscription that
-        // was waiting on the init segment can be served now.
+        // The moov may have arrived in this very frame, so a subscription held
+        // for a track it names can be answered, and one that was waiting on the
+        // init segment or the catalog can be served now.
+        if !self.tracks.is_empty() {
+            self.resolve_pending_subscribes().await?;
+        }
         self.serve_single_object_tracks().await?;
         for (track_id, sync, payload) in objects {
             self.publish_object(track_id, sync, &payload).await?;
@@ -575,16 +832,16 @@ impl MoqtSink {
             {
                 continue;
             }
-            if self.datagrams && self.send_object_datagram(i, group_id, object_id, payload)? {
-                self.datagram_objects += 1;
+            if self.cfg.datagrams && self.send_object_datagram(i, group_id, object_id, payload)? {
+                Stats::bump(&self.stats.datagram_objects);
                 published = true;
                 continue;
             }
-            if self.datagrams {
+            if self.cfg.datagrams {
                 // Too large for the path MTU, or a peer that takes no
                 // datagrams: the object still has to arrive, so it goes on a
                 // subgroup stream.
-                self.datagram_fallbacks += 1;
+                Stats::bump(&self.stats.datagram_fallbacks);
             }
             if self
                 .write_on_subgroup(i, group_id, object_id, payload)
@@ -600,7 +857,7 @@ impl MoqtSink {
             finish_streams(sub.streams);
         }
         if published {
-            self.objects_published += 1;
+            Stats::bump(&self.stats.objects_published);
         }
         Ok(())
     }
@@ -637,7 +894,7 @@ impl MoqtSink {
         object_id: u64,
         payload: &[u8],
     ) -> Result<bool, G2gError> {
-        let subgroup_id = object_id % self.subgroups.max(1);
+        let subgroup_id = object_id % self.cfg.subgroups.max(1);
         let slot = match self.subscriptions[at]
             .streams
             .iter()
@@ -684,7 +941,7 @@ impl MoqtSink {
                 continue;
             }
             finish_streams(core::mem::take(&mut self.subscriptions[i].streams));
-            if !self.datagrams || !self.subscriptions[i].serving_group {
+            if !self.cfg.datagrams || !self.subscriptions[i].serving_group {
                 continue;
             }
             let marker = DatagramObject::end_of_group(
@@ -716,8 +973,8 @@ impl MoqtSink {
             let stsd = find_path(trak, &[b"mdia", b"minf", b"stbl", b"stsd"])
                 .ok_or(G2gError::CapsMismatch)?;
             let entries = stsd.get(8..).ok_or(G2gError::CapsMismatch)?;
-            let name = if tracks.is_empty() && !self.track_name.is_empty() {
-                self.track_name.clone()
+            let name = if tracks.is_empty() && !self.cfg.track_name.is_empty() {
+                self.cfg.track_name.clone()
             } else {
                 format!("{track_id}.m4s")
             };
@@ -746,7 +1003,11 @@ impl MoqtSink {
             .iter()
             .map(|t| (t.name.clone(), t.selection_params.clone()))
             .collect();
-        catalog::build(&self.namespace_tuple().to_path(), &self.init_track, &tracks)
+        catalog::build(
+            &self.namespace_tuple().to_path(),
+            &self.cfg.init_track,
+            &tracks,
+        )
     }
 
     /// Finish every open stream, tell each subscriber the track ended, and
@@ -870,6 +1131,12 @@ impl LogSource for MoqtSink {
     }
 }
 
+impl LogSource for Core {
+    fn log_category(&self) -> &'static str {
+        "moqtsink"
+    }
+}
+
 impl AsyncElement for MoqtSink {
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
@@ -888,6 +1155,20 @@ impl AsyncElement for MoqtSink {
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         check_caps(absolute_caps)?;
         self.configured = true;
+        // A sink gets no CapsChanged before its first frame, so this is the only
+        // chance to publish the namespace before the encoder has produced
+        // anything: a subscriber that attaches during startup is then answered
+        // by the pump instead of waiting for a fragment. Without a runtime to
+        // spawn on (a sync caller), the first frame dials instead.
+        if matches!(self.connect, Connect::Deferred)
+            && tokio::runtime::Handle::try_current().is_ok()
+        {
+            self.connect = Connect::Dialing(tokio::spawn(connect_session(
+                Arc::clone(&self.core),
+                Arc::clone(&self.pump),
+                self.dial_params(),
+            )));
+        }
         Ok(ConfigureOutcome::Accepted)
     }
 
@@ -905,12 +1186,22 @@ impl AsyncElement for MoqtSink {
                     let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    self.ensure_session().await?;
-                    self.pump_control().await?;
-                    self.push_bmff(slice).await?;
+                    self.ready().await?;
+                    let published = {
+                        let mut core = self.core.lock().await;
+                        core.alive()?;
+                        core.push_bmff(slice).await?;
+                        (core.track_names(), core.catalog.clone())
+                    };
+                    (self.track_names, self.catalog) = published;
                 }
                 PipelinePacket::CapsChanged(caps) => check_caps(&caps)?,
-                PipelinePacket::Eos => self.finish().await?,
+                PipelinePacket::Eos => {
+                    // A dial that never completed leaves nothing to tell the
+                    // relay, and its error already surfaced on the frame path.
+                    let _ = self.ready().await;
+                    self.core.lock().await.finish().await?;
+                }
                 _ => {}
             }
             Ok(())
@@ -934,15 +1225,15 @@ impl AsyncElement for MoqtSink {
         let string = |v: &PropValue| v.as_str().map(ToString::to_string).ok_or(PropError::Type);
         match name {
             "location" => self.location = string(&value)?,
-            "namespace" => self.namespace = string(&value)?,
-            "track-name" => self.track_name = string(&value)?,
-            "init-track-name" => self.init_track = string(&value)?,
-            "catalog-track-name" => self.catalog_track = string(&value)?,
+            "namespace" => self.cfg.namespace = string(&value)?,
+            "track-name" => self.cfg.track_name = string(&value)?,
+            "init-track-name" => self.cfg.init_track = string(&value)?,
+            "catalog-track-name" => self.cfg.catalog_track = string(&value)?,
             "server-certificate-hashes" => self.cert_hashes = string(&value)?,
-            "catalog" => self.publish_catalog = value.as_bool().ok_or(PropError::Type)?,
-            "datagrams" => self.datagrams = value.as_bool().ok_or(PropError::Type)?,
-            "subgroups" => self.subgroups = value.as_uint().ok_or(PropError::Type)?,
-            "priority" => self.priority = value.as_uint().ok_or(PropError::Type)?,
+            "catalog" => self.cfg.publish_catalog = value.as_bool().ok_or(PropError::Type)?,
+            "datagrams" => self.cfg.datagrams = value.as_bool().ok_or(PropError::Type)?,
+            "subgroups" => self.cfg.subgroups = value.as_uint().ok_or(PropError::Type)?,
+            "priority" => self.cfg.priority = value.as_uint().ok_or(PropError::Type)?,
             "max-request-id" => self.max_request_id = value.as_uint().ok_or(PropError::Type)?,
             _ => return Err(PropError::Unknown),
         }
@@ -952,15 +1243,15 @@ impl AsyncElement for MoqtSink {
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
             "location" => Some(PropValue::Str(self.location.clone())),
-            "namespace" => Some(PropValue::Str(self.namespace.clone())),
-            "track-name" => Some(PropValue::Str(self.track_name.clone())),
-            "init-track-name" => Some(PropValue::Str(self.init_track.clone())),
-            "catalog-track-name" => Some(PropValue::Str(self.catalog_track.clone())),
+            "namespace" => Some(PropValue::Str(self.cfg.namespace.clone())),
+            "track-name" => Some(PropValue::Str(self.cfg.track_name.clone())),
+            "init-track-name" => Some(PropValue::Str(self.cfg.init_track.clone())),
+            "catalog-track-name" => Some(PropValue::Str(self.cfg.catalog_track.clone())),
             "server-certificate-hashes" => Some(PropValue::Str(self.cert_hashes.clone())),
-            "catalog" => Some(PropValue::Bool(self.publish_catalog)),
-            "datagrams" => Some(PropValue::Bool(self.datagrams)),
-            "subgroups" => Some(PropValue::Uint(self.subgroups)),
-            "priority" => Some(PropValue::Uint(self.priority)),
+            "catalog" => Some(PropValue::Bool(self.cfg.publish_catalog)),
+            "datagrams" => Some(PropValue::Bool(self.cfg.datagrams)),
+            "subgroups" => Some(PropValue::Uint(self.cfg.subgroups)),
+            "priority" => Some(PropValue::Uint(self.cfg.priority)),
             "max-request-id" => Some(PropValue::Uint(self.max_request_id)),
             _ => None,
         }
@@ -1048,8 +1339,8 @@ mod tests {
 
     #[test]
     fn catalog_names_the_init_track_and_each_media_track() {
-        let mut sink = MoqtSink::new("https://relay:4443/", "live/cam");
-        sink.tracks = Vec::from([MediaTrack {
+        let mut core = Core::new(Config::new("live/cam"), Arc::new(Stats::default()));
+        core.tracks = Vec::from([MediaTrack {
             track_id: 1,
             name: String::from("1.m4s"),
             group_id: 0,
@@ -1059,7 +1350,7 @@ mod tests {
                 ",\"selectionParams\":{\"codec\":\"avc1.64000D\",\"width\":320,\"height\":240}",
             ),
         }]);
-        let catalog = sink.build_catalog();
+        let catalog = core.build_catalog();
         assert!(catalog.contains("\"namespace\":\"/live/cam\""), "{catalog}");
         assert!(catalog.contains("\"initTrack\":\"0.mp4\""), "{catalog}");
         assert!(catalog.contains("\"name\":\"1.m4s\""), "{catalog}");
