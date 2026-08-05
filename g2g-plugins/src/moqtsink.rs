@@ -217,6 +217,7 @@ struct Config {
     datagrams: bool,
     subgroups: u64,
     cache_groups: u64,
+    publish: bool,
 }
 
 impl Config {
@@ -231,6 +232,7 @@ impl Config {
             datagrams: false,
             subgroups: 1,
             cache_groups: 4,
+            publish: false,
         }
     }
 }
@@ -331,6 +333,14 @@ struct Core {
     subscriptions: Vec<Subscription>,
     /// FETCH responses still being written.
     fetches: Vec<ActiveFetch>,
+    /// PUBLISHes we sent in `publish` mode, waiting for the subscriber to
+    /// accept them.
+    pending_publishes: Vec<PendingPublish>,
+    /// Whether the tracks have been offered with PUBLISH already.
+    published: bool,
+    /// Draft-18 PUBLISH response streams the element still has to watch: a task
+    /// needs the shared core, which only the element holds.
+    publish_watch: Vec<(u64, web_transport_quinn::RecvStream)>,
     /// SUBSCRIBEs for a track the `moov` has not named yet, answered once it
     /// does (or refused then, if it names nothing). The stream is the draft-18
     /// request stream the answer goes on.
@@ -429,6 +439,13 @@ impl MoqtSink {
     /// round-robin. One (the default) is a stream per group.
     pub fn with_subgroups(mut self, subgroups: u64) -> Self {
         self.cfg.subgroups = subgroups;
+        self
+    }
+
+    /// Offer every track with PUBLISH once the `moov` names them, instead of
+    /// waiting for the peer to SUBSCRIBE.
+    pub fn with_publish(mut self, publish: bool) -> Self {
+        self.cfg.publish = publish;
         self
     }
 
@@ -680,6 +697,9 @@ impl Core {
             namespace_stream: None,
             subscriptions: Vec::new(),
             fetches: Vec::new(),
+            pending_publishes: Vec::new(),
+            published: false,
+            publish_watch: Vec::new(),
             pending_subscribes: Vec::new(),
             init: Vec::new(),
             catalog: Vec::new(),
@@ -723,12 +743,19 @@ impl Core {
                     .await?;
             }
             ControlMessage::Unsubscribe { id } => self.drop_subscription(id),
+            ControlMessage::PublishOk { id, .. } | ControlMessage::RequestOk { id, .. }
+                if self.pending_publishes.iter().any(|p| p.request_id == id) =>
+            {
+                self.accept_publish(id).await?;
+            }
             ControlMessage::RequestError { id, error_code, .. } => {
                 // Our namespace publish being refused leaves nothing to serve.
                 if Some(id) == self.namespace_request {
                     g2g_debug!(self, "PUBLISH_NAMESPACE rejected, code {error_code}");
                     return Err(G2gError::Hardware(HardwareError::Other));
                 }
+                // A refused PUBLISH costs that track, not the session.
+                self.reject_publish(id);
             }
             ControlMessage::MaxRequestId { request_id } => {
                 if let Some(Wire::V16(session)) = self.session.as_mut() {
@@ -932,6 +959,113 @@ impl Core {
             streams_opened: 0,
         });
         self.serve_single_object_tracks().await
+    }
+
+    /// Offer every track with PUBLISH, so a subscriber that sends no SUBSCRIBE
+    /// still receives the broadcast (`publish=true`). The tracks are only known
+    /// once the `moov` names them, so this runs from there.
+    async fn publish_tracks(&mut self) -> Result<(), G2gError> {
+        if !self.cfg.publish || self.published || self.tracks.is_empty() {
+            return Ok(());
+        }
+        self.published = true;
+        let mut targets = Vec::new();
+        if self.cfg.publish_catalog {
+            targets.push((self.cfg.catalog_track.clone(), Target::Catalog));
+        }
+        targets.push((self.cfg.init_track.clone(), Target::Init));
+        for track in &self.tracks {
+            targets.push((track.name.clone(), Target::Media(track.track_id)));
+        }
+        for (name, target) in targets {
+            self.publish_track(&name, target).await?;
+        }
+        Ok(())
+    }
+
+    /// One PUBLISH. The request id doubles as the track alias, as it does for a
+    /// subscription we accepted.
+    async fn publish_track(&mut self, name: &str, target: Target) -> Result<(), G2gError> {
+        let namespace = self.namespace_tuple();
+        let track_name = TrackName::new(name);
+        let (id, reply, watch) = match self.session.as_mut().ok_or(G2gError::NotConfigured)? {
+            Wire::V16(session) => {
+                let id = session
+                    .allocate_request_id()
+                    .ok_or(G2gError::Hardware(HardwareError::Other))?;
+                session
+                    .send(&ControlMessage::Publish {
+                        id,
+                        namespace,
+                        track_name,
+                        track_alias: id,
+                        params: Params::new(),
+                        extensions: Params::new(),
+                    })
+                    .await?;
+                (id, None, None)
+            }
+            Wire::V18(session) => {
+                let id = session.allocate_request_id();
+                let (tx, rx) = session
+                    .open_request(&v18::message::ControlMessage::Publish {
+                        id,
+                        namespace,
+                        track_name,
+                        track_alias: id,
+                        params: v18::coding::MessageParams::new(),
+                        properties: Params::new(),
+                    })
+                    .await?;
+                (id, Some(tx), Some(rx))
+            }
+        };
+        g2g_debug!(self, "PUBLISH {name} as request {id}");
+        self.pending_publishes.push(PendingPublish {
+            request_id: id,
+            target,
+            reply,
+        });
+        if let Some(rx) = watch {
+            self.publish_watch.push((id, rx));
+        }
+        Ok(())
+    }
+
+    /// The subscriber accepted a PUBLISH: it is a subscription from here on.
+    async fn accept_publish(&mut self, id: u64) -> Result<(), G2gError> {
+        let Some(at) = self
+            .pending_publishes
+            .iter()
+            .position(|p| p.request_id == id)
+        else {
+            return Ok(());
+        };
+        let publish = self.pending_publishes.remove(at);
+        g2g_debug!(self, "PUBLISH {id} accepted");
+        let joining = self.largest(&publish.target);
+        self.subscriptions.push(Subscription {
+            request_id: id,
+            track_alias: id,
+            target: publish.target,
+            reply: publish.reply,
+            streams: Vec::new(),
+            serving_group: false,
+            joining,
+            delivered: false,
+            streams_opened: 0,
+        });
+        self.serve_single_object_tracks().await
+    }
+
+    /// The subscriber refused a PUBLISH, or its stream ended before it answered.
+    fn reject_publish(&mut self, id: u64) {
+        self.pending_publishes.retain(|p| p.request_id != id);
+    }
+
+    /// Take the draft-18 PUBLISH response streams still to be watched.
+    fn take_publish_watch(&mut self) -> Vec<(u64, web_transport_quinn::RecvStream)> {
+        core::mem::take(&mut self.publish_watch)
     }
 
     /// Answer the SUBSCRIBEs held for a track name the `moov` had not declared.
@@ -1407,6 +1541,7 @@ impl Core {
         // init segment or the catalog can be served now.
         if !self.tracks.is_empty() {
             self.resolve_pending_subscribes().await?;
+            self.publish_tracks().await?;
         }
         self.serve_single_object_tracks().await?;
         for (track_id, sync, payload) in objects {
@@ -1723,6 +1858,46 @@ impl Core {
     }
 }
 
+/// A PUBLISH offered to the peer, waiting to be accepted.
+#[derive(Debug)]
+struct PendingPublish {
+    request_id: u64,
+    target: Target,
+    /// The draft-18 request stream the answer arrives on, which then carries
+    /// PUBLISH_DONE like a subscription's own stream.
+    reply: Option<SendStream>,
+}
+
+/// Watch one draft-18 PUBLISH response stream: the first message decides
+/// whether the track is being received, and the stream ending is how the
+/// subscriber says it is done with it.
+async fn watch_publish(core: Arc<Mutex<Core>>, id: u64, mut rx: web_transport_quinn::RecvStream) {
+    let mut reader = v18::session::MessageReader::new();
+    // §10.5 makes PUBLISH_OK shorthand for a REQUEST_OK answering a PUBLISH, so
+    // either code point establishes the subscription.
+    let accepted = matches!(
+        reader.next(&mut rx).await,
+        Ok(Some(
+            v18::message::ControlMessage::PublishOk { .. }
+                | v18::message::ControlMessage::RequestOk { .. }
+        ))
+    );
+    {
+        let mut guard = core.lock().await;
+        if !accepted {
+            guard.reject_publish(id);
+            return;
+        }
+        if guard.accept_publish(id).await.is_err() {
+            guard.dead = true;
+            return;
+        }
+    }
+    // Anything else on the stream, or its end, means the subscriber is done.
+    while let Ok(Some(_)) = reader.next(&mut rx).await {}
+    core.lock().await.drop_subscription(id);
+}
+
 /// A FETCH response still being written. The writer runs in its own task, so
 /// the flag is how a cancel reaches it between two objects.
 #[derive(Debug)]
@@ -1974,9 +2149,18 @@ impl AsyncElement for MoqtSink {
                         let mut core = self.core.lock().await;
                         core.alive()?;
                         core.push_bmff(slice).await?;
-                        (core.track_names(), core.catalog.clone())
+                        (
+                            core.track_names(),
+                            core.catalog.clone(),
+                            core.take_publish_watch(),
+                        )
                     };
-                    (self.track_names, self.catalog) = published;
+                    // A PUBLISH answered on its own request stream needs a task
+                    // holding the shared core, which only the element has.
+                    for (id, rx) in published.2 {
+                        tokio::spawn(watch_publish(Arc::clone(&self.core), id, rx));
+                    }
+                    (self.track_names, self.catalog) = (published.0, published.1);
                 }
                 PipelinePacket::CapsChanged(caps) => check_caps(&caps)?,
                 PipelinePacket::Eos => {
@@ -2017,6 +2201,7 @@ impl AsyncElement for MoqtSink {
             "datagrams" => self.cfg.datagrams = value.as_bool().ok_or(PropError::Type)?,
             "subgroups" => self.cfg.subgroups = value.as_uint().ok_or(PropError::Type)?,
             "cache-groups" => self.cfg.cache_groups = value.as_uint().ok_or(PropError::Type)?,
+            "publish" => self.cfg.publish = value.as_bool().ok_or(PropError::Type)?,
             "priority" => self.cfg.priority = value.as_uint().ok_or(PropError::Type)?,
             "max-request-id" => self.max_request_id = value.as_uint().ok_or(PropError::Type)?,
             "versions" => {
@@ -2041,6 +2226,7 @@ impl AsyncElement for MoqtSink {
             "datagrams" => Some(PropValue::Bool(self.cfg.datagrams)),
             "subgroups" => Some(PropValue::Uint(self.cfg.subgroups)),
             "cache-groups" => Some(PropValue::Uint(self.cfg.cache_groups)),
+            "publish" => Some(PropValue::Bool(self.cfg.publish)),
             "priority" => Some(PropValue::Uint(self.cfg.priority)),
             "max-request-id" => Some(PropValue::Uint(self.max_request_id)),
             "versions" => Some(PropValue::Str(self.versions.clone())),
@@ -2103,6 +2289,12 @@ static MOQTSINK_PROPS: &[PropertySpec] = &[
         "publisher priority in every subgroup header (0-255, smaller is sent first)",
     )
     .with_default("127"),
+    PropertySpec::new(
+        "publish",
+        PropKind::Bool,
+        "offer every track with PUBLISH once the moov names them, instead of waiting for a SUBSCRIBE",
+    )
+    .with_default("false"),
     PropertySpec::new(
         "cache-groups",
         PropKind::Uint,

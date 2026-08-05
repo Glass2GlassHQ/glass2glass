@@ -53,6 +53,10 @@ use crate::moqt::session::{implementation_name, DataEvent, MoqtSession};
 use crate::moqt::v18;
 use crate::moqt::{negotiated_version, parse_versions, MoqtVersion};
 
+/// Tracks a publisher may establish here with PUBLISH. A publisher cannot make
+/// the subscriber hold state for more tracks than this.
+const MAX_PUBLISHED_TRACKS: usize = 16;
+
 /// A relay we cannot talk to, or one that violates the protocol, is the same
 /// thing to the pipeline: no stream.
 fn session_err() -> G2gError {
@@ -63,6 +67,10 @@ fn session_err() -> G2gError {
 #[derive(Debug)]
 struct Subscription {
     request_id: u64,
+    /// The track this subscription carries. A publisher-initiated PUBLISH is
+    /// matched to it by name, so one track has one subscription however it was
+    /// established.
+    name: String,
     /// Set by SUBSCRIBE_OK; the alias is how data streams name this track.
     track_alias: Option<u64>,
     /// The draft-18 request stream's send half. Draft-18 has no UNSUBSCRIBE:
@@ -94,9 +102,10 @@ struct Subscription {
 }
 
 impl Subscription {
-    fn new(request_id: u64, max_groups: usize, max_bytes: usize) -> Self {
+    fn new(request_id: u64, name: String, max_groups: usize, max_bytes: usize) -> Self {
         Self {
             request_id,
+            name,
             track_alias: None,
             request_tx: None,
             fetch_request: None,
@@ -276,6 +285,13 @@ impl MoqtSrc {
 struct SubsState {
     max_groups: usize,
     max_bytes: usize,
+    /// The namespace this run subscribes to: a PUBLISH for another one is not
+    /// ours to accept.
+    namespace: TrackNamespace,
+    /// Track names an incoming PUBLISH may establish, and whether any name in
+    /// the namespace is acceptable (no `track-name` was set).
+    wanted: Vec<String>,
+    accept_any: bool,
     subs: Vec<Subscription>,
     /// Data events whose track alias no subscription claims yet. The control
     /// plane and the data streams are different QUIC streams, so a subgroup
@@ -285,23 +301,62 @@ struct SubsState {
 }
 
 impl SubsState {
-    fn new(max_groups: usize, max_bytes: usize) -> Self {
+    fn new(
+        max_groups: usize,
+        max_bytes: usize,
+        namespace: TrackNamespace,
+        wanted: Vec<String>,
+        accept_any: bool,
+    ) -> Self {
         Self {
             max_groups,
             max_bytes,
+            namespace,
+            wanted,
+            accept_any,
             subs: Vec::new(),
             orphans: VecDeque::new(),
             orphan_bytes: 0,
         }
     }
 
-    fn add(&mut self, request_id: u64) -> usize {
+    fn add(&mut self, request_id: u64, name: &str) -> usize {
         self.subs.push(Subscription::new(
             request_id,
+            String::from(name),
             self.max_groups,
             self.max_bytes,
         ));
         self.subs.len() - 1
+    }
+
+    fn by_name(&self, name: &str) -> Option<usize> {
+        self.subs.iter().position(|s| s.name == name)
+    }
+
+    /// Whether an incoming PUBLISH establishes a subscription here: it has to
+    /// be our namespace, and either a track we already asked for or, when no
+    /// track was named, any track the publisher offers.
+    fn accepts_publish(&self, namespace: &TrackNamespace, name: &str) -> bool {
+        if *namespace != self.namespace || self.subs.len() >= MAX_PUBLISHED_TRACKS {
+            return false;
+        }
+        self.by_name(name).is_some() || self.wanted.iter().any(|w| w == name) || self.accept_any
+    }
+
+    /// Attach an accepted PUBLISH to the subscription for its track, creating
+    /// one when nothing has asked for that track yet, and return its index.
+    fn establish_published(&mut self, request_id: u64, name: &str, track_alias: u64) -> usize {
+        let at = match self.by_name(name) {
+            Some(at) => at,
+            None => self.add(request_id, name),
+        };
+        // The publisher's request id identifies the subscription from here on:
+        // PUBLISH_DONE and UNSUBSCRIBE both name it.
+        self.subs[at].request_id = request_id;
+        self.subs[at].track_alias = Some(track_alias);
+        self.claim_orphans(track_alias);
+        at
     }
 
     fn by_request(&mut self, id: u64) -> Option<&mut Subscription> {
@@ -472,7 +527,7 @@ impl Driver {
             })
             .await?;
         g2g_debug!(self, "SUBSCRIBE {name} as request {id}");
-        Ok(self.state.add(id))
+        Ok(self.state.add(id, name))
     }
 
     /// Ask for `groups` groups before the subscription's live edge with a
@@ -567,9 +622,39 @@ impl Driver {
                 self.session.set_peer_max_request_id(request_id);
             }
             ControlMessage::GoAway { .. } => self.closed = true,
+            // A publisher that initiates the subscription itself: accepting it
+            // with PUBLISH_OK is the other way a track is established (§9.13).
+            ControlMessage::Publish {
+                id,
+                namespace,
+                track_name,
+                track_alias,
+                ..
+            } => {
+                let name = track_name.as_str_lossy();
+                if self.state.accepts_publish(&namespace, &name) {
+                    g2g_debug!(self, "PUBLISH {name} accepted as request {id}");
+                    self.state.establish_published(id, &name, track_alias);
+                    self.session
+                        .send(&ControlMessage::PublishOk {
+                            id,
+                            params: Params::new(),
+                        })
+                        .await?;
+                } else {
+                    self.session
+                        .send(&ControlMessage::RequestError {
+                            id,
+                            error_code: request_error_code::UNINTERESTED,
+                            retry_interval: 0,
+                            reason: String::from("not this track"),
+                        })
+                        .await?;
+                }
+            }
             // A publisher-side request we do not serve. Draft-16 §4 asks for an
             // explicit refusal rather than silence.
-            ControlMessage::Publish { id, .. } | ControlMessage::RequestUpdate { id, .. } => {
+            ControlMessage::RequestUpdate { id, .. } => {
                 self.session
                     .send(&ControlMessage::RequestError {
                         id,
@@ -621,6 +706,9 @@ struct Driver18 {
     data: tokio::sync::mpsc::UnboundedReceiver<DataEvent>,
     responses: tokio::sync::mpsc::UnboundedReceiver<Response>,
     response_tx: tokio::sync::mpsc::UnboundedSender<Response>,
+    /// Request streams the publisher opens: a PUBLISH here is the other way a
+    /// subscription is established.
+    requests: tokio::sync::mpsc::UnboundedReceiver<v18::session::PeerRequest>,
     state: SubsState,
     closed: bool,
 }
@@ -654,7 +742,7 @@ impl Driver18 {
             .await?;
         g2g_debug!(self, "SUBSCRIBE {name} as request {id}");
         tokio::spawn(forward_responses(id, rx, self.response_tx.clone()));
-        let at = self.state.add(id);
+        let at = self.state.add(id, name);
         self.state.subs[at].request_tx = Some(tx);
         Ok(at)
     }
@@ -698,10 +786,12 @@ impl Driver18 {
         let step = {
             let responses = &mut self.responses;
             let data = &mut self.data;
+            let requests = &mut self.requests;
             let next = async move {
                 tokio::select! {
                     response = responses.recv() => response.map(Step18::Response),
                     event = data.recv() => event.map(Step18::Data),
+                    request = requests.recv() => request.map(Step18::Request),
                 }
             };
             if timeout == 0 {
@@ -716,13 +806,66 @@ impl Driver18 {
         match step {
             Some(Step18::Response((id, msg))) => self.handle_response(id, msg),
             Some(Step18::Data(event)) => self.state.handle_data(event),
-            // Both channels ended: the session is gone.
+            Some(Step18::Request(request)) => self.handle_peer_request(request).await?,
+            // Every channel ended: the session is gone.
             None => {
                 self.closed = true;
                 return Ok(Pumped::Ended);
             }
         }
         Ok(Pumped::Applied)
+    }
+
+    /// A request stream the publisher opened. PUBLISH for a track this run wants
+    /// establishes the subscription (§10.5); anything else is refused on the
+    /// stream it arrived on.
+    async fn handle_peer_request(
+        &mut self,
+        request: v18::session::PeerRequest,
+    ) -> Result<(), G2gError> {
+        use v18::message::ControlMessage as Msg;
+        let v18::session::PeerRequest { first, mut tx, rx } = request;
+        let publish = match first {
+            Msg::Publish {
+                id,
+                namespace,
+                track_name,
+                track_alias,
+                ..
+            } => {
+                let name = track_name.as_str_lossy();
+                self.state
+                    .accepts_publish(&namespace, &name)
+                    .then_some((id, name, track_alias))
+            }
+            _ => None,
+        };
+        let Some((id, name, track_alias)) = publish else {
+            let msg = Msg::RequestError {
+                error_code: v18::message::request_error_code::UNINTERESTED,
+                retry_interval: 0,
+                reason: String::from("not this track"),
+                redirect: None,
+            };
+            v18::session::write_message(&mut tx, &msg).await?;
+            let _ = tx.finish();
+            return Ok(());
+        };
+        g2g_debug!(self, "PUBLISH {name} accepted as request {id}");
+        v18::session::write_message(
+            &mut tx,
+            &Msg::PublishOk {
+                params: v18::coding::MessageParams::new(),
+                properties: Params::new(),
+            },
+        )
+        .await?;
+        let at = self.state.establish_published(id, &name, track_alias);
+        // PUBLISH_DONE arrives on this stream, and resetting our half is how the
+        // subscription is cancelled at shutdown.
+        self.state.subs[at].request_tx = Some(tx);
+        tokio::spawn(forward_responses(id, rx, self.response_tx.clone()));
+        Ok(())
     }
 
     fn handle_response(&mut self, id: u64, msg: Option<v18::message::ControlMessage>) {
@@ -792,6 +935,7 @@ impl Driver18 {
 enum Step18 {
     Response(Response),
     Data(DataEvent),
+    Request(v18::session::PeerRequest),
 }
 
 /// Read one request stream's responses and forward them under its request id.
@@ -833,6 +977,13 @@ impl AnyDriver {
     }
 
     async fn subscribe(&mut self, name: &str, catchup: bool) -> Result<usize, G2gError> {
+        // A publisher that initiated this track with PUBLISH has established it
+        // already, so there is nothing to ask for.
+        if let Some(at) = self.state().by_name(name) {
+            if self.state().subs[at].track_alias.is_some() {
+                return Ok(at);
+            }
+        }
         match self {
             Self::V16(driver) => driver.subscribe(name, catchup).await,
             Self::V18(driver) => driver.subscribe(name, catchup).await,
@@ -959,8 +1110,20 @@ impl SourceLoop for MoqtSrc {
             let session =
                 crate::remotewtio::dial(&self.location, &self.cert_hashes, &protocols, "default")
                     .await?;
-            let state = SubsState::new(self.max_groups as usize, self.max_buffer_bytes as usize);
             let namespace = TrackNamespace::from_path(&self.namespace);
+            // A PUBLISH the publisher initiates establishes one of these tracks;
+            // with no `track-name` set, any track in the namespace will do.
+            let mut wanted = Vec::from([self.init_track.clone(), self.catalog_track.clone()]);
+            if !self.track_name.is_empty() {
+                wanted.push(self.track_name.clone());
+            }
+            let state = SubsState::new(
+                self.max_groups as usize,
+                self.max_buffer_bytes as usize,
+                namespace.clone(),
+                wanted,
+                self.track_name.is_empty(),
+            );
             let mut driver = match negotiated_version(&session, &offered)? {
                 MoqtVersion::V16 => {
                     let session = MoqtSession::connect_over(
@@ -987,6 +1150,7 @@ impl SourceLoop for MoqtSrc {
                     )
                     .await?;
                     let data = session.take_data().ok_or_else(session_err)?;
+                    let requests = session.take_requests().ok_or_else(session_err)?;
                     let (response_tx, responses) = tokio::sync::mpsc::unbounded_channel();
                     AnyDriver::V18(Driver18 {
                         namespace,
@@ -995,6 +1159,7 @@ impl SourceLoop for MoqtSrc {
                         data,
                         responses,
                         response_tx,
+                        requests,
                         state,
                         closed: false,
                     })
