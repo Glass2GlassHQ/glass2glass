@@ -106,6 +106,53 @@ pub fn page_id_blob(ids: PageIds, subtitling_type: u8) -> [u8; 5] {
     [c[0], c[1], a[0], a[1], subtitling_type]
 }
 
+/// The `subtitling_type` a muxer writes for a stream that names none: EN 300 468
+/// 0x10, "DVB subtitles (normal) with no monitor aspect ratio criticality", which
+/// is what ffmpeg writes.
+pub const DEFAULT_SUBTITLING_TYPE: u8 = 0x10;
+
+/// The composition / ancillary page id a muxer writes for a stream that names
+/// none, again ffmpeg's default.
+pub const DEFAULT_PAGE_ID: u16 = 1;
+
+/// The segments of a display set, without the PES data-field header ahead of
+/// them or the end marker and stuffing behind: the form a Matroska `S_DVBSUB`
+/// block carries. Accepts either carriage, so a display set read off a transport
+/// stream and one read off a Matroska block both reduce to the same bytes.
+///
+/// The span is found by walking the segment headers, so a truncated or corrupt
+/// display set yields the segments that do hold together rather than panicking.
+pub fn segment_span(data: &[u8]) -> &[u8] {
+    let start = match data.first() {
+        Some(&DATA_IDENTIFIER) if data.len() >= 2 => 2,
+        _ => 0,
+    };
+    let mut end = start;
+    while data.get(end) == Some(&SYNC_BYTE) {
+        let Some(header) = data.get(end..end + 6) else {
+            break;
+        };
+        let length = u16::from_be_bytes([header[4], header[5]]) as usize;
+        let next = end.saturating_add(6).saturating_add(length);
+        if next > data.len() {
+            break;
+        }
+        end = next;
+    }
+    &data[start..end]
+}
+
+/// A display set wrapped in the PES data field a transport stream carries it in
+/// (EN 300 743 clause 7.1): the data_identifier and subtitle_stream_id ahead of
+/// the segments, the end-of-data-field marker behind. Takes either carriage, so
+/// re-wrapping a data field that already has the header is a no-op.
+pub fn pes_data_field(data: &[u8]) -> Vec<u8> {
+    let mut out = vec![DATA_IDENTIFIER, 0x00];
+    out.extend_from_slice(segment_span(data));
+    out.push(0xFF);
+    out
+}
+
 /// One composed display set: the page as it should now look.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Page {

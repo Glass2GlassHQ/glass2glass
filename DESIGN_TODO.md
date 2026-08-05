@@ -506,8 +506,6 @@ _(No open parser items.)_
   decode path (`cea` decoders + `CcExtract` + file- and HLS-`playbin` auto-plug)
   and the CEA-608 encode path (`Cc608Enc` + `CcInsert`) are done (DESIGN.md
   §4.18). Still open: MPEG-2 user-data caption extraction.
-- **Bitmap / picture subtitles: write paths.** Muxer write paths for a
-  `SubPicture` pad (mkv `S_VOBSUB` / `S_DVBSUB`, TS `subtitling_descriptor`).
 - **Tensor substrate orientation descriptor (M181).** A deferred
   rotate/mirror descriptor the sink can absorb in hardware (DRM/KMS, Wayland
   `set_buffer_transform`, VAAPI VPP, D3D11 VideoProcessor), with eager strided /

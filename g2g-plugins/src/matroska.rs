@@ -1814,13 +1814,12 @@ impl MatroskaMuxer {
         Some((offset, (self.max_end_ticks as f64).to_be_bytes()))
     }
 
-    /// Whether track `track` carries timed text, whose blocks need the
-    /// `BlockDuration` only a `BlockGroup` can hold.
+    /// Whether track `track` is a subtitle track, text or bitmap: its cues last
+    /// as long as the `BlockDuration` only a `BlockGroup` can hold.
     fn is_subtitle_track(&self, track: usize) -> bool {
-        matches!(
-            self.tracks.get(track).map(|t| t.spec.codec),
-            Some(MkvCodec::Subtitle(_))
-        )
+        self.tracks
+            .get(track)
+            .is_some_and(|t| t.spec.codec.track_type() == 0x11)
     }
 
     /// The `(BlockDuration in TimestampScale ticks, DiscardPadding in ns)` a

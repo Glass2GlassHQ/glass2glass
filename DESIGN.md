@@ -2492,6 +2492,27 @@ cover it drop the object, an object larger than the video or past
 `MAX_OBJECT_PIXELS` is never allocated, and a truncated segment stops the walk
 with the display sets that did parse intact.
 
+The write paths mirror those two carriages (M927). A `Caps::SubPicture` input pad
+on `MkvMuxN` becomes an `S_VOBSUB` or `S_DVBSUB` track, and a
+`Caps::SubPicture{DvbSub}` pad on either TS muxer becomes a private (0x06) stream
+whose PMT entry carries the `subtitling_descriptor` naming its language, type and
+pages (that descriptor replaces the 'KLVA' registration a bare private stream
+would otherwise get, the same substitution the teletext descriptor makes). The
+out-of-band configuration each format needs is not a property but the in-band
+config blob the stream already leads with, so `mkvdemux`, `tsdemux` and
+`vobsubsrc` all feed a muxer without translation: a VobSub pad's `.idx` becomes
+the `CodecPrivate`, normalized to the `size:` / `palette:` lines a container holds
+(the cue index is a sidecar's file offset table), and a DVB pad's five-byte page
+ids become the `CodecPrivate` or the descriptor's page fields. A stream that
+sends no blob is declared on the `dvbsub-page-id` property's page, defaulting to
+1 like ffmpeg. The two carriages frame a display set differently, so the muxers
+convert: a Matroska block holds the bare segments, a TS PES payload wraps them in
+the EN 300 743 data field (`data_identifier` 0x20 and a subtitle stream id ahead,
+the end marker behind), and both directions run through `segment_span`, which
+finds the segment run by walking its headers rather than trimming bytes. Subtitle
+blocks, bitmap as well as text, are written as a `BlockGroup` so a cue's display
+window rides its `BlockDuration`.
+
 **EBU teletext** (`teletext.rs`, `no_std`) is the third TS subtitle carriage, and
 unlike the two above it is characters rather than pixels, so it lands on the plain
 text pad instead of a canvas: `Caps::Text { Teletext }` in, `Caps::Text { Utf8 }`

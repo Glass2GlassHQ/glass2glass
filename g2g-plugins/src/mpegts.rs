@@ -983,6 +983,10 @@ struct MuxStream {
     /// synchronous KLV, an `ISO_639_language_descriptor` when
     /// [`TsMuxer::set_stream_language`] added one; empty otherwise).
     es_info: Vec<u8>,
+    /// Set by [`TsMuxer::set_stream_subtitling`]: each access unit is a DVB
+    /// display set, so it goes out wrapped in the PES data field EN 300 743
+    /// carries it in rather than bare.
+    dvb_subtitle: bool,
 }
 
 /// One program in a [`TsMuxer`]: its `program_number`, the PID its PMT rides on
@@ -1120,6 +1124,7 @@ impl TsMuxer {
                 program,
                 meta_seq: 0,
                 es_info: es_info.to_vec(),
+                dvb_subtitle: false,
             });
         }
         Self {
@@ -1218,11 +1223,59 @@ impl TsMuxer {
         );
     }
 
+    /// Declare elementary stream `index` as DVB subtitles in its PMT entry, as a
+    /// `subtitling_descriptor` naming one subtitle stream (M927): the language,
+    /// the `subtitling_type`, and the composition / ancillary page ids a decoder
+    /// follows. This is also what marks the stream's access units as display
+    /// sets, so each goes out in the PES data field EN 300 743 wraps them in.
+    /// Without it the stream is asynchronous KLV, the muxer's default reading of
+    /// a private PES. An out-of-range index or a stream that is not a private PES
+    /// is ignored, as is a language code that is not three ASCII letters (the
+    /// descriptor's field is exactly three bytes). Call before the first access
+    /// unit (the PMT goes out then).
+    pub fn set_stream_subtitling(
+        &mut self,
+        index: usize,
+        language: &str,
+        subtitling_type: u8,
+        ids: crate::dvbsub::PageIds,
+    ) {
+        let l = language.as_bytes();
+        if l.len() != 3 || !l.iter().all(u8::is_ascii_alphabetic) {
+            return;
+        }
+        let c = ids.composition.to_be_bytes();
+        let a = ids.ancillary.to_be_bytes();
+        self.set_private_identity(
+            index,
+            &[
+                DESC_TAG_SUBTITLING,
+                8,
+                l[0],
+                l[1],
+                l[2],
+                subtitling_type,
+                c[0],
+                c[1],
+                a[0],
+                a[1],
+            ],
+        );
+        if let Some(s) = self
+            .streams
+            .get_mut(index)
+            .filter(|s| s.stream_type == STREAM_TYPE_PRIVATE_PES)
+        {
+            s.dvb_subtitle = true;
+        }
+    }
+
     /// Replace a private-PES stream's identifying descriptor. A bare 0x06 means
     /// nothing on its own, so this muxer writes the 'KLVA' registration by
     /// default; a stream that is teletext or DVB subtitles instead says so with
     /// its own descriptor, which leads the ES-info loop. Descriptors added
-    /// separately (a language) are kept whichever order the calls come in.
+    /// separately (a language) are kept whichever order the calls come in, and
+    /// setting the identity twice replaces it rather than writing both.
     fn set_private_identity(&mut self, index: usize, descriptor: &[u8]) {
         let Some(s) = self.streams.get_mut(index) else {
             return;
@@ -1232,6 +1285,11 @@ impl TsMuxer {
         }
         if s.es_info.starts_with(KLVA_REGISTRATION) {
             s.es_info.drain(..KLVA_REGISTRATION.len());
+        } else if s.es_info.first() == descriptor.first() && s.es_info.len() >= 2 {
+            let previous = 2 + s.es_info[1] as usize;
+            if previous <= s.es_info.len() {
+                s.es_info.drain(..previous);
+            }
         }
         s.es_info.splice(0..0, descriptor.iter().copied());
     }
@@ -1331,9 +1389,16 @@ impl TsMuxer {
             s.meta_seq = s.meta_seq.wrapping_add(1);
             c
         });
+        // A DVB subtitle access unit is a display set, which a transport stream
+        // carries in a data field: the data_identifier ahead of the segments and
+        // the end marker behind (EN 300 743 clause 7.1).
+        let field = s
+            .dvb_subtitle
+            .then(|| crate::dvbsub::pes_data_field(au))
+            .or(cell);
         let pes = build_pes(
             s.stream_id,
-            cell.as_deref().unwrap_or(au),
+            field.as_deref().unwrap_or(au),
             pts_90khz,
             dts_90khz,
         );

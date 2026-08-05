@@ -81,6 +81,29 @@ pub fn parse_idx(bytes: &[u8]) -> Option<VobSubConfig> {
     parse_idx_text(bytes).map(|(cfg, _)| cfg)
 }
 
+/// The `.idx` text a Matroska `S_VOBSUB` track carries as its `CodecPrivate`:
+/// the display size and the palette, one line each, in the exact form ffmpeg
+/// writes and [`parse_idx`] reads back. The cue index a sidecar `.idx` also
+/// holds is a file offset table, so it has no place inside a container; a half
+/// declared config writes only the line it has.
+pub fn idx_config_text(cfg: &VobSubConfig) -> String {
+    let mut out = String::new();
+    if let Some((w, h)) = cfg.size {
+        out.push_str(&alloc::format!("size: {w}x{h}\n"));
+    }
+    if let Some(palette) = cfg.palette {
+        out.push_str("palette: ");
+        for (i, entry) in palette.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            out.push_str(&alloc::format!("{entry:06x}"));
+        }
+        out.push('\n');
+    }
+    out
+}
+
 /// Parse a sidecar `.idx` text into its cue index: the per-language timestamp /
 /// file-offset lists a source element reads the `.sub` with. Same `None` rule as
 /// [`parse_idx`].
