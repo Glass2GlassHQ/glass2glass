@@ -27,7 +27,10 @@ use g2g_plugins::vobsubdec::VobSubDec;
 use g2g_plugins::vobsubsrc::VobSubSrc;
 
 mod vobsub_fixture;
-use vobsub_fixture::{author_vobsub, cues, have_ffmpeg, CUE_DURATION_NS, H, PALETTE, W};
+use vobsub_fixture::{
+    author_spanning_vobsub, author_vobsub, cues, have_ffmpeg, spanning_sample, CUE_DURATION_NS, H,
+    PALETTE, SPANNING_CUE, W,
+};
 
 #[derive(Default)]
 struct CaptureSink {
@@ -267,6 +270,94 @@ async fn the_cues_decode_to_the_authored_rectangles_and_colours() {
             "cue {i}'s border takes its palette colour"
         );
     }
+    for p in [idx, sub] {
+        let _ = std::fs::remove_file(p);
+    }
+}
+
+/// The reassembly path: a cue whose subpicture unit is longer than one DVD PES
+/// packet arrives as several, each in its own pack and only the first stamped
+/// with a PTS. Decoding it end to end is what proves the join: the bitmap is one
+/// run-length code per pixel, so a dropped, doubled or reordered fragment shifts
+/// every pixel after it.
+#[tokio::test]
+async fn a_cue_spanning_several_pes_packets_reassembles_and_decodes() {
+    let (idx, sub) = (temp_path("span.idx"), temp_path("span.sub"));
+    let packets = author_spanning_vobsub(&idx, &sub);
+    assert!(
+        packets >= 3,
+        "the fixture cue must really span packets, got {packets}"
+    );
+
+    let mut src = VobSubSrc::new(&idx);
+    let frames = read_sidecar(&mut src).await;
+    assert_eq!(frames.len(), 2, "the config, then the one spanning cue");
+
+    let cue = SPANNING_CUE;
+    let spu = bytes(&frames[1]);
+    assert_eq!(
+        u16::from_be_bytes([spu[0], spu[1]]) as usize,
+        spu.len(),
+        "the rejoined unit is exactly its declared size"
+    );
+    assert!(
+        spu.len() > 2048,
+        "the unit outgrew a sector, {} bytes",
+        spu.len()
+    );
+    assert_eq!(
+        frames[1].timing.pts_ns,
+        (cue.pts_s * 1_000_000_000.0) as u64,
+        "the cue keeps the PTS of the packet that opened it"
+    );
+    assert_eq!(frames[1].timing.duration_ns, CUE_DURATION_NS);
+
+    let mut dec = VobSubDec::new();
+    dec.configure_pipeline(&vobsub_caps())
+        .expect("vobsubdec accepts a VobSub stream");
+    let mut decoded = CaptureSink::default();
+    for frame in frames {
+        dec.process(PipelinePacket::DataFrame(frame), &mut decoded)
+            .await
+            .expect("decode");
+    }
+    let canvases: Vec<Vec<u8>> = decoded
+        .packets
+        .into_iter()
+        .filter_map(|p| match p {
+            PipelinePacket::DataFrame(f) => Some(bytes(&f)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(canvases.len(), 3, "the empty canvas, the cue, its clear");
+
+    let shown = &canvases[1];
+    assert_eq!(
+        opaque_bbox(shown),
+        Some((
+            cue.x,
+            cue.y,
+            cue.x + cue.w - 1,
+            cue.y + cue.h - 1,
+            (cue.w * cue.h) as usize
+        )),
+        "the rejoined cue covers its whole authored rectangle"
+    );
+    // Every pixel, not a sample of them: the reassembly is only right if the
+    // run-length stream reads back in the order it was written.
+    let wrong = (0..cue.h)
+        .flat_map(|row| (0..cue.w).map(move |col| (row, col)))
+        .find(|&(row, col)| {
+            let sample = spanning_sample(col, row);
+            rgba_at(shown, cue.x + col, cue.y + row)
+                != opaque(PALETTE[cue.colormap[sample as usize] as usize])
+        });
+    assert_eq!(wrong, None, "first pixel the reassembled cue got wrong");
+    assert!(
+        opaque_bbox(&canvases[2]).is_none(),
+        "the cue clears at its hide time"
+    );
+
     for p in [idx, sub] {
         let _ = std::fs::remove_file(p);
     }

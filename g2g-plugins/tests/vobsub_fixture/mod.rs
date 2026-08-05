@@ -63,6 +63,26 @@ pub(crate) fn cues() -> Vec<Cue> {
     ])
 }
 
+/// The one cue of the spanning fixture. Its bitmap is dense enough in run-length
+/// codes that the subpicture unit does not fit a single DVD PES packet, which is
+/// the only way the reassembly path runs against real spanning input.
+pub(crate) const SPANNING_CUE: Cue = Cue {
+    pts_s: 2.0,
+    x: 40,
+    y: 60,
+    w: 200,
+    h: 60,
+    colormap: [0, 1, 2, 3],
+};
+
+/// The sample value of [`SPANNING_CUE`]'s bitmap at (`x`, `y`) within its own
+/// rectangle. Never the transparent 0, and different at every step in x and y,
+/// so every run is one pixel: that both makes the unit large and makes a
+/// dropped or reordered fragment change the decoded pixels.
+pub(crate) fn spanning_sample(x: u32, y: u32) -> u8 {
+    1 + ((x + y) % 3) as u8
+}
+
 pub(crate) fn have_ffmpeg() -> bool {
     Command::new("ffmpeg").arg("-version").output().is_ok()
         && Command::new("ffprobe").arg("-version").output().is_ok()
@@ -147,10 +167,21 @@ fn bordered_box(w: usize, h: usize) -> Vec<Vec<u8>> {
         .collect()
 }
 
+/// [`SPANNING_CUE`]'s bitmap: no two neighbouring pixels alike, so it encodes to
+/// one run-length code per pixel.
+fn stripes(w: usize, h: usize) -> Vec<Vec<u8>> {
+    (0..h)
+        .map(|y| {
+            (0..w)
+                .map(|x| spanning_sample(x as u32, y as u32))
+                .collect()
+        })
+        .collect()
+}
+
 /// Build the subpicture unit for one cue: header, two interlaced RLE fields,
 /// then a show control sequence and a hide one.
-fn spu(cue: &Cue) -> Vec<u8> {
-    let bitmap = bordered_box(cue.w as usize, cue.h as usize);
+fn spu(cue: &Cue, bitmap: &[Vec<u8>]) -> Vec<u8> {
     let top: Vec<Vec<u8>> = bitmap.iter().step_by(2).cloned().collect();
     let bottom: Vec<Vec<u8>> = bitmap.iter().skip(1).step_by(2).cloned().collect();
     let top_data = encode_field(&top, cue.w as usize);
@@ -249,16 +280,49 @@ fn pack_header(scr90: u64) -> Vec<u8> {
     out
 }
 
-/// One `private_stream_1` PES packet carrying subpicture substream 0x20.
-fn pes(spu: &[u8], pts90: u64) -> Vec<u8> {
-    let mut body = Vec::from([0x81u8, 0x80, 0x05]);
-    body.extend_from_slice(&pts_field(pts90));
+/// One `private_stream_1` PES packet carrying subpicture substream 0x20. Only
+/// the packet that opens a unit carries a PTS, the way a DVD stamps the first
+/// packet of a cue and leaves its continuations unstamped.
+fn pes(data: &[u8], pts90: Option<u64>) -> Vec<u8> {
+    let mut body = Vec::from([0x81u8, 0x00, 0x00]);
+    if let Some(pts90) = pts90 {
+        body[1] = 0x80;
+        body[2] = 0x05;
+        body.extend_from_slice(&pts_field(pts90));
+    }
     body.push(0x20);
-    body.extend_from_slice(spu);
+    body.extend_from_slice(data);
     let mut out = Vec::from([0x00u8, 0x00, 0x01, 0xbd]);
     out.extend_from_slice(&(body.len() as u16).to_be_bytes());
     out.extend_from_slice(&body);
     out
+}
+
+/// Pack header plus PES header overhead inside one sector: the 14-byte pack, the
+/// 6-byte PES start code and length, three PES flag bytes and the substream id.
+const PACK_OVERHEAD: usize = 14 + 6 + 3 + 1;
+
+/// Split a subpicture unit over one pack per sector, the way a real `.sub`
+/// carries a cue too long for a single PES packet. Returns the bytes and how
+/// many PES packets the unit took.
+fn spanning_packs(unit: &[u8], pts90: u64) -> (Vec<u8>, usize) {
+    let first = SECTOR - PACK_OVERHEAD - 5; // the PTS field
+    let rest = SECTOR - PACK_OVERHEAD;
+    let mut out = Vec::new();
+    let mut at = 0usize;
+    let mut packets = 0usize;
+    while at < unit.len() {
+        let take = if packets == 0 { first } else { rest }.min(unit.len() - at);
+        out.extend_from_slice(&pack_header(pts90));
+        out.extend_from_slice(&pes(&unit[at..at + take], (packets == 0).then_some(pts90)));
+        at += take;
+        packets += 1;
+        assert!(
+            out.len() <= packets * SECTOR,
+            "a fragment overran its sector"
+        );
+    }
+    (out, packets)
 }
 
 /// MPEG padding stream of exactly `n` bytes, so each cue starts on a 2 KiB
@@ -270,6 +334,43 @@ fn padding(n: usize) -> Vec<u8> {
     out
 }
 
+/// Pad `block` out to the next sector boundary, so the cue after it starts on
+/// one the way it does in a real `.sub`.
+fn pad_to_sector(block: &mut Vec<u8>) {
+    let mut rem = (SECTOR - block.len() % SECTOR) % SECTOR;
+    if rem > 0 && rem < 6 {
+        rem += SECTOR;
+    }
+    if rem > 0 {
+        block.extend_from_slice(&padding(rem));
+    }
+}
+
+/// One `timestamp:` / `filepos:` line of the `.idx` index.
+fn index_line(pts_s: f64, filepos: usize) -> String {
+    let ms = (pts_s * 1000.0).round() as u64;
+    format!(
+        "timestamp: {:02}:{:02}:{:02}:{:03}, filepos: {filepos:09x}\n",
+        ms / 3_600_000,
+        (ms / 60_000) % 60,
+        (ms / 1000) % 60,
+        ms % 1000
+    )
+}
+
+/// The `.idx` text: the palette and geometry the cues decode with, then a single
+/// language stream over `index`.
+fn idx_text(index: &str) -> String {
+    let palette = PALETTE
+        .iter()
+        .map(|c| format!("{c:06x}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "# VobSub index file, v7 (do not modify this line!)\nsize: {W}x{H}\npalette: {palette}\nlangidx: 0\n\nid: en, index: 0\n{index}"
+    )
+}
+
 /// Author the `.idx` / `.sub` pair for [`cues`].
 pub(crate) fn author_vobsub(idx_path: &PathBuf, sub_path: &PathBuf) {
     let mut sub: Vec<u8> = Vec::new();
@@ -278,32 +379,27 @@ pub(crate) fn author_vobsub(idx_path: &PathBuf, sub_path: &PathBuf) {
         let filepos = sub.len();
         let pts90 = (cue.pts_s * 90_000.0) as u64;
         let mut block = pack_header(pts90);
-        block.extend_from_slice(&pes(&spu(&cue), pts90));
-        let mut rem = (SECTOR - block.len() % SECTOR) % SECTOR;
-        if rem > 0 && rem < 6 {
-            rem += SECTOR;
-        }
-        if rem > 0 {
-            block.extend_from_slice(&padding(rem));
-        }
+        let bitmap = bordered_box(cue.w as usize, cue.h as usize);
+        block.extend_from_slice(&pes(&spu(&cue, &bitmap), Some(pts90)));
+        pad_to_sector(&mut block);
         sub.extend_from_slice(&block);
-        let ms = (cue.pts_s * 1000.0).round() as u64;
-        index.push_str(&format!(
-            "timestamp: {:02}:{:02}:{:02}:{:03}, filepos: {filepos:09x}\n",
-            ms / 3_600_000,
-            (ms / 60_000) % 60,
-            (ms / 1000) % 60,
-            ms % 1000
-        ));
+        index.push_str(&index_line(cue.pts_s, filepos));
     }
-    let palette = PALETTE
-        .iter()
-        .map(|c| format!("{c:06x}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let idx = format!(
-        "# VobSub index file, v7 (do not modify this line!)\nsize: {W}x{H}\npalette: {palette}\nlangidx: 0\n\nid: en, index: 0\n{index}"
-    );
-    std::fs::write(idx_path, idx).expect("write .idx");
+    std::fs::write(idx_path, idx_text(&index)).expect("write .idx");
     std::fs::write(sub_path, sub).expect("write .sub");
+}
+
+/// Author an `.idx` / `.sub` pair holding [`SPANNING_CUE`] alone, its subpicture
+/// unit split over several packs. Returns how many PES packets carry the unit,
+/// so a caller can assert the fixture really does span.
+pub(crate) fn author_spanning_vobsub(idx_path: &PathBuf, sub_path: &PathBuf) -> usize {
+    let cue = SPANNING_CUE;
+    let bitmap = stripes(cue.w as usize, cue.h as usize);
+    let unit = spu(&cue, &bitmap);
+    let pts90 = (cue.pts_s * 90_000.0) as u64;
+    let (mut sub, packets) = spanning_packs(&unit, pts90);
+    pad_to_sector(&mut sub);
+    std::fs::write(idx_path, idx_text(&index_line(cue.pts_s, 0))).expect("write .idx");
+    std::fs::write(sub_path, sub).expect("write .sub");
+    packets
 }
