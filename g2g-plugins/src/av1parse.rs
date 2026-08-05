@@ -25,8 +25,8 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, OutputSink,
-    PadTemplate, PadTemplates, PipelinePacket, Rate, VideoCodec,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
+    OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate, VideoCodec,
 };
 
 use crate::annexb::BitReader;
@@ -54,6 +54,14 @@ impl Av1Parse {
 }
 
 impl AsyncElement for Av1Parse {
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "AV1 parser",
+            "Codec/Parser/Video",
+            "Frames an AV1 OBU stream and reads its sequence header",
+            "g2g",
+        )
+    }
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where

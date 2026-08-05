@@ -21,9 +21,9 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, MemoryDomain,
-    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec, Rate, RawVideoFormat,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
+    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec, Rate, RawVideoFormat,
 };
 
 const FORMATS: [RawVideoFormat; 2] = [RawVideoFormat::Rgba8, RawVideoFormat::Bgra8];
@@ -100,6 +100,14 @@ impl VideoBalance {
 }
 
 impl AsyncElement for VideoBalance {
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "Video balance",
+            "Filter/Effect/Video",
+            "Adjusts brightness, contrast, hue and saturation",
+            "g2g",
+        )
+    }
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where

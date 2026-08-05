@@ -53,9 +53,9 @@ use crate::pixel::{frame_byte_size, planar_planes};
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError, InputAggregator,
-    MemoryDomain, MultiInputElement, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec, Rate, RawVideoFormat,
+    Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError,
+    InputAggregator, MemoryDomain, MultiInputElement, OutputSink, PipelinePacket, PropError,
+    PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
 };
 
 /// Placement of one input stream on the output canvas.
@@ -1069,6 +1069,14 @@ fn blend_channel_scaled(
 }
 
 impl MultiInputElement for Compositor {
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "Video compositor",
+            "Filter/Editing/Video",
+            "Composites several video inputs onto one timed output canvas",
+            "g2g",
+        )
+    }
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where

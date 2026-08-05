@@ -32,10 +32,10 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{SeekController, StreamSelectController};
 use g2g_core::{
     AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps, CapsConstraint,
-    CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError, MemoryDomain, MultiOutputElement,
-    MultiOutputSink, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, Rate, Seek, Segment, Stream, StreamCollection, StreamType,
-    SubPictureFormat, Tag, TagList, VideoCodec,
+    CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError, MemoryDomain,
+    MultiOutputElement, MultiOutputSink, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    PropError, PropKind, PropValue, PropertySpec, Rate, Seek, Segment, Stream, StreamCollection,
+    StreamType, SubPictureFormat, Tag, TagList, VideoCodec,
 };
 
 use crate::demuxseek::{Admit, DemuxSeek};
@@ -213,6 +213,20 @@ pub struct TsDemux {
     /// has gone out in band ahead of the first display set or teletext line.
     /// Re-armed on a flush.
     config_sent: bool,
+    /// Set once a `Segment` has gone out, whether the stream-start one or a
+    /// seek's. A transport stream's PTS starts wherever the broadcaster's clock
+    /// was, so a capture or a mid-stream join opens at an arbitrary offset: the
+    /// first frame's PTS has to map to running time 0 or a paced sink holds
+    /// every frame until that wall-clock offset passes. Re-armed on a flush.
+    segment_sent: bool,
+    /// MPEG-1/2 video only: whether a sequence header has been seen. Those
+    /// pictures carry no geometry of their own, so a mid-GOP join hands
+    /// libavcodec a stream it cannot size and it fails the lot ("invalid frame
+    /// dimensions"). Dropping to the first sequence header is the tune-in
+    /// convention `RtspSrc` follows for the same reason. The other video codecs
+    /// keep their parameter sets in band and their decoders resynchronize on
+    /// their own, so they are never dropped. Re-armed on a flush.
+    mpeg2_tuned_in: bool,
 }
 
 impl Default for TsDemux {
@@ -236,6 +250,8 @@ impl TsDemux {
             seek: DemuxSeek::default(),
             opus_caps_emitted: false,
             config_sent: false,
+            segment_sent: false,
+            mpeg2_tuned_in: false,
         }
     }
 
@@ -362,6 +378,8 @@ impl TsDemux {
         self.demux.set_program_number(self.program_number);
         self.opus_caps_emitted = false;
         self.config_sent = false;
+        self.segment_sent = false;
+        self.mpeg2_tuned_in = false;
     }
 
     /// The elementary stream this instance forwards.
@@ -572,13 +590,29 @@ impl TsDemux {
                 | TsStream::DvbSub
                 | TsStream::Teletext => true,
             };
+            // MPEG-2 tune-in: nothing before the first sequence header can be
+            // sized, let alone decoded.
+            if self.stream == TsStream::Mpeg2 && !self.mpeg2_tuned_in {
+                if !mpeg2_can_open_here(&u.data) {
+                    continue;
+                }
+                self.mpeg2_tuned_in = true;
+            }
             match self.seek.admit(pts_ns, keyframe) {
                 Admit::Drop => continue,
                 Admit::Resume(start) => {
                     let seg = Segment::for_flush_seek(&Seek::flush_to(start), None);
                     out.push(PipelinePacket::Segment(seg)).await?;
+                    self.segment_sent = true;
                 }
                 Admit::Emit => {}
+            }
+            // Stream start: map the first emitted PTS to running time 0. A seek's
+            // resume above already did that for its own case.
+            if !self.segment_sent {
+                self.segment_sent = true;
+                let seg = Segment::for_flush_seek(&Seek::flush_to(pts_ns), None);
+                out.push(PipelinePacket::Segment(seg)).await?;
             }
             if self.stream == TsStream::Opus {
                 self.emit_opus(u, pts_ns, out).await?;
@@ -661,6 +695,14 @@ impl TsDemux {
 }
 
 impl AsyncElement for TsDemux {
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "MPEG-TS demuxer",
+            "Codec/Demuxer",
+            "Demuxes an MPEG transport stream into one selected elementary stream",
+            "g2g",
+        )
+    }
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
@@ -968,6 +1010,16 @@ pub struct TsDemuxN {
     /// preserved across a parser reset so a seek keeps the selection.
     program_number: Option<u16>,
     emitted: u64,
+    /// Stream-start PTS (ns) latched from the first routed unit; every port's
+    /// opening `Segment` maps it to running time 0, so the ports share one
+    /// running-time origin and a capture's arbitrary PTS base does not stall a
+    /// paced sink.
+    segment_base: Option<u64>,
+    /// Whether port `i` has emitted its opening `Segment` yet.
+    segment_sent: Vec<bool>,
+    /// Whether port `i` has seen a sequence header (MPEG-2 ports only, see
+    /// [`TsDemux`]'s `mpeg2_tuned_in`).
+    mpeg2_tuned_in: Vec<bool>,
 }
 
 impl TsDemuxN {
@@ -976,11 +1028,16 @@ impl TsDemuxN {
     pub fn new(ports: Vec<TsStream>) -> Self {
         assert!(!ports.is_empty(), "TsDemuxN needs at least one output port");
         let announced = alloc::vec![false; ports.len()];
+        let segment_sent = alloc::vec![false; ports.len()];
+        let mpeg2_tuned_in = alloc::vec![false; ports.len()];
         Self {
             demux: TsDemuxer::new(),
             buf: Vec::new(),
             ports,
             announced,
+            segment_base: None,
+            segment_sent,
+            mpeg2_tuned_in,
             bus: None,
             collection_posted: false,
             tags: TagPoster::default(),
@@ -1142,10 +1199,22 @@ impl TsDemuxN {
             if self.ports[port] == TsStream::Teletext && self.demux.teletext(u.pid).is_none() {
                 continue;
             }
+            if self.ports[port] == TsStream::Mpeg2 && !self.mpeg2_tuned_in[port] {
+                if !mpeg2_can_open_here(&u.data) {
+                    continue;
+                }
+                self.mpeg2_tuned_in[port] = true;
+            }
             let pts_ns = u
                 .pts_90khz
                 .map(|p| (p as u128 * 1_000_000_000 / 90_000) as u64)
                 .unwrap_or(0);
+            if !self.segment_sent[port] {
+                self.segment_sent[port] = true;
+                let base = *self.segment_base.get_or_insert(pts_ns);
+                let seg = Segment::for_flush_seek(&Seek::flush_to(base), None);
+                out.push_to(port, PipelinePacket::Segment(seg)).await?;
+            }
             if !self.announced[port] {
                 out.push_to(
                     port,
@@ -1182,6 +1251,13 @@ impl TsDemuxN {
         }
         Ok(())
     }
+}
+
+/// Whether an MPEG-1/2 video access unit can open a decode: it must carry the
+/// sequence header, the only thing that states the picture geometry. Shared with
+/// the program stream demuxer's tune-in, which drops on the same rule.
+fn mpeg2_can_open_here(au: &[u8]) -> bool {
+    crate::psdemux::parse_sequence_header(au).is_some()
 }
 
 /// The in-band page-selection blob a subtitle stream's PMT descriptor implies:

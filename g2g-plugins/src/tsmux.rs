@@ -32,9 +32,9 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
-    Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, SubPictureFormat, Tag,
-    TagList, VideoCodec,
+    Dim, ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate,
+    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate,
+    SubPictureFormat, Tag, TagList, VideoCodec,
 };
 
 use crate::dvbsub::{parse_page_ids, PageIds, DEFAULT_PAGE_ID, DEFAULT_SUBTITLING_TYPE};
@@ -319,6 +319,14 @@ impl TsMux {
 }
 
 impl AsyncElement for TsMux {
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "MPEG-TS muxer",
+            "Codec/Muxer",
+            "Muxes one elementary stream into an MPEG transport stream",
+            "g2g",
+        )
+    }
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where

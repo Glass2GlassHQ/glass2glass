@@ -159,3 +159,35 @@ fn make_by_name_then_set_property() {
         "videotestsrc is not a launch element"
     );
 }
+
+/// Every registerable element carries an `ElementMetadata` long name and
+/// description, so a bare `g2g-inspect` listing is a usable index rather than a
+/// column of names. Registering an element without metadata fails here instead
+/// of silently degrading the listing.
+#[test]
+fn every_registered_element_declares_metadata() {
+    let reg = g2g_plugins::registry::default_registry();
+    let bare: Vec<String> = reg
+        .element_listing()
+        .into_iter()
+        .filter(|line| !line.contains(": "))
+        .collect();
+    assert!(
+        bare.is_empty(),
+        "these elements declare no metadata long name: {bare:?}"
+    );
+
+    // A long name alone is not enough: `inspect` prints the description too.
+    let missing: Vec<&str> = reg
+        .element_names()
+        .into_iter()
+        .filter(|name| {
+            reg.inspect(name)
+                .is_none_or(|dump| !dump.contains("Description"))
+        })
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "these elements declare no description: {missing:?}"
+    );
+}

@@ -40,9 +40,9 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
-    Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, SubPictureFormat, TagList,
-    TextFormat, VideoCodec,
+    Dim, ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate,
+    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate,
+    SubPictureFormat, TagList, TextFormat, VideoCodec,
 };
 
 use crate::dvbsub::DEFAULT_PAGE_ID;
@@ -296,6 +296,14 @@ impl MkvMux {
 }
 
 impl AsyncElement for MkvMux {
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "Matroska muxer",
+            "Codec/Muxer",
+            "Muxes one elementary stream into a Matroska / WebM file",
+            "g2g",
+        )
+    }
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where

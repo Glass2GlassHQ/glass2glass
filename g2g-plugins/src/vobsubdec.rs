@@ -30,9 +30,9 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError,
-    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, Rate, RawVideoFormat, SubPictureFormat,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata,
+    FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, SubPictureFormat,
 };
 
 use crate::vobsub::{parse_idx, parse_spu};
@@ -214,6 +214,14 @@ impl VobSubDec {
 }
 
 impl AsyncElement for VobSubDec {
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "VobSub subpicture decoder",
+            "Codec/Decoder/Subtitle",
+            "Decodes DVD subpicture cues into RGBA overlay canvases",
+            "g2g",
+        )
+    }
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where

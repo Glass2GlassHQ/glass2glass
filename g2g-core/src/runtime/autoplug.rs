@@ -1348,6 +1348,20 @@ mod factory {
         /// The names of every element registerable by the parser: sources first,
         /// then transforms / sinks, each in registration order. The `gst-inspect`
         /// element list.
+        /// Whether `name` names something this registry can build: any factory
+        /// list, or an alias resolving into one. The launch parser asks this to
+        /// tell a new chain's head from a typo'd property, since both are bare
+        /// tokens with no `=`.
+        pub fn knows_element(&self, name: &str) -> bool {
+            let name = self.resolve_alias(name);
+            self.sources.iter().any(|s| s.name == name)
+                || self.launch.iter().any(|f| f.name == name)
+                || self.muxers.iter().any(|m| m.name == name)
+                || self.demuxes.iter().any(|d| d.name == name)
+                || self.fanout_srcs.iter().any(|f| f.name == name)
+                || self.factories.iter().any(|f| f.desc.name == name)
+        }
+
         pub fn element_names(&self) -> Vec<&'static str> {
             self.sources
                 .iter()
@@ -1390,9 +1404,11 @@ mod factory {
                 lines.push(line(f.name, (f.build)().metadata().long_name));
             }
             for m in &self.muxers {
-                // Skip a muxer already listed as a launch element above.
+                // Skip a muxer already listed as a launch element above. A
+                // one-input instance carries the metadata, the way `inspect`
+                // reads a muxer's.
                 if !self.launch.iter().any(|f| f.name == m.name) {
-                    lines.push(m.name.to_string());
+                    lines.push(line(m.name, (m.build)(1).metadata().long_name));
                 }
             }
             lines

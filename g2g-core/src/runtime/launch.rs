@@ -337,6 +337,7 @@ fn parse_pad_request(pad: &str, ordinal: usize) -> PadRequest {
 fn consume_element<'a, I: Iterator<Item = &'a str>>(
     name: &str,
     tokens: &mut core::iter::Peekable<I>,
+    knows_element: &dyn Fn(&str) -> bool,
 ) -> Result<ElementSpec, ParseError> {
     let mut spec = ElementSpec {
         name: name.to_string(),
@@ -346,6 +347,13 @@ fn consume_element<'a, I: Iterator<Item = &'a str>>(
     };
     while let Some(&tok) = tokens.peek() {
         if tok == "!" || is_caps_token(tok) || as_ref_name(tok).is_some() {
+            break;
+        }
+        // A bare token naming a registered element opens a new top-level chain
+        // rather than being this element's property, the way gst-launch parses
+        // `videotestsrc ! xvimagesink audiotestsrc ! pulsesink`. One that names
+        // nothing registered is the typo it looks like.
+        if !tok.contains('=') && knows_element(tok) {
             break;
         }
         let (key, value) = tok
@@ -483,7 +491,19 @@ fn tokenize(s: &str) -> Vec<String> {
 
 /// Split a `gst-launch` pipeline string into chains: runs of nodes linked by `!`,
 /// with branches expressed as separate chains joined through `name=` / `t.`.
+#[cfg(test)]
 fn parse_chains(pipeline: &str) -> Result<Vec<Chain>, ParseError> {
+    // The unit tests exercise the tokenizer alone, with nothing registered: every
+    // bare token is then a property, which is the pre-registry behaviour.
+    parse_chains_with(pipeline, &|_| false)
+}
+
+/// Split a `gst-launch` pipeline string into chains, asking `knows_element`
+/// whether a bare token opens a new chain (see [`consume_element`]).
+fn parse_chains_with(
+    pipeline: &str,
+    knows_element: &dyn Fn(&str) -> bool,
+) -> Result<Vec<Chain>, ParseError> {
     let trimmed = pipeline.trim();
     if trimmed.is_empty() {
         return Err(ParseError::Empty);
@@ -540,7 +560,11 @@ fn parse_chains(pipeline: &str) -> Result<Vec<Chain>, ParseError> {
                         st = St::AfterNode;
                     }
                 } else {
-                    cur.push(Item::Element(consume_element(tok, &mut tokens)?));
+                    cur.push(Item::Element(consume_element(
+                        tok,
+                        &mut tokens,
+                        knows_element,
+                    )?));
                     st = St::AfterNode;
                 }
             }
@@ -1430,7 +1454,16 @@ fn queue_capacity_of(spec: &ElementSpec) -> Option<usize> {
 /// videotestsrc num-buffers=3 ! tee name=t ! fakesink   t. ! videoflip ! fakesink
 /// ```
 pub fn parse_launch(registry: &Registry, pipeline: &str) -> Result<Graph<GraphNode>, ParseError> {
-    let chains = parse_chains(pipeline)?;
+    // The parser's own built-ins are not registry factories, but they are
+    // element names all the same, so a chain may start on one.
+    let knows = |name: &str| {
+        registry.knows_element(name)
+            || matches!(
+                name,
+                "queue" | "queue2" | "decodebin" | "uridecodebin" | "playbin"
+            )
+    };
+    let chains = parse_chains_with(pipeline, &knows)?;
     // playbin uri=X auto-fan-out (M382): a lone `playbin uri=` probes the
     // container via the registered hook and auto-builds source -> demux ->
     // per-stream decode -> auto sinks (multi-stream). Without a hook (or if it
@@ -1745,6 +1778,50 @@ mod tests {
             parse_chains("videotestsrc bogus ! fakesink"),
             Err(ParseError::MalformedProperty { .. })
         ));
+    }
+
+    /// gst-launch runs several top-level chains in one pipeline
+    /// (`videotestsrc ! xvimagesink audiotestsrc ! pulsesink`); a bare element
+    /// name after a completed chain opens the next one. Before, the sink ate it
+    /// as a property and reported it malformed.
+    #[test]
+    fn a_second_chain_may_follow_a_sink() {
+        let known = |n: &str| matches!(n, "videotestsrc" | "fakesink" | "filesink");
+        let chains = parse_chains_with("videotestsrc ! fakesink videotestsrc ! fakesink", &known)
+            .expect("two chains parse");
+        let shapes: Vec<Vec<&str>> = chains.iter().map(item_names).collect();
+        assert_eq!(
+            shapes,
+            [["videotestsrc", "fakesink"], ["videotestsrc", "fakesink"]],
+            "one chain per source"
+        );
+    }
+
+    /// The property case must not regress: a bare token naming nothing
+    /// registered is still the typo it looks like, not a new chain.
+    #[test]
+    fn a_bare_token_that_names_nothing_is_still_a_malformed_property() {
+        let known = |n: &str| matches!(n, "videotestsrc" | "fakesink" | "filesink");
+        assert!(matches!(
+            parse_chains_with("videotestsrc bogus ! fakesink", &known),
+            Err(ParseError::MalformedProperty { .. })
+        ));
+        // And after a sink, where the new-chain rule applies.
+        assert!(matches!(
+            parse_chains_with("videotestsrc ! fakesink bogus", &known),
+            Err(ParseError::MalformedProperty { .. })
+        ));
+    }
+
+    /// A property whose value happens to name an element is still a property:
+    /// the `=` decides.
+    #[test]
+    fn a_key_value_token_is_never_a_chain_head() {
+        let known = |n: &str| matches!(n, "videotestsrc" | "fakesink" | "filesink");
+        let chains =
+            parse_chains_with("videotestsrc ! filesink location=fakesink", &known).expect("parses");
+        let shapes: Vec<Vec<&str>> = chains.iter().map(item_names).collect();
+        assert_eq!(shapes, [["videotestsrc", "filesink"]], "one chain");
     }
 
     #[test]

@@ -1148,7 +1148,7 @@ impl PsDemux {
             // went out: a later cue then still gets the geometry rather than the
             // decoder keeping its default forever.
             if self.stream == PsStream::SubPicture && !self.config_sent {
-                if let Some(blob) = self.idx_config_blob() {
+                if let Some(blob) = idx_config_blob(&self.demux) {
                     self.config_sent = true;
                     let frame = config_frame(blob, pts_ns, self.emitted);
                     self.emitted += 1;
@@ -1173,20 +1173,21 @@ impl PsDemux {
         }
         Ok(())
     }
+}
 
-    /// The `.idx` text the subpicture pad opens with: just the display size, the
-    /// video's own geometry, so an NTSC disc's cues land on a 720x480 canvas
-    /// rather than the decoder's PAL default. A program stream carries no
-    /// palette, so none is written and the decoder's default one renders the
-    /// cues. `None` before any sequence header has parsed.
-    fn idx_config_blob(&self) -> Option<Vec<u8>> {
-        let seq = self.demux.sequence()?;
-        let cfg = crate::vobsub::VobSubConfig {
-            size: Some((seq.width, seq.height)),
-            palette: None,
-        };
-        Some(crate::vobsub::idx_config_text(&cfg).into_bytes())
-    }
+/// The `.idx` text a subpicture pad opens with: just the display size, the
+/// video's own geometry, so an NTSC disc's cues land on a 720x480 canvas rather
+/// than the decoder's PAL default. A program stream carries no palette, so none
+/// is written and the decoder's default one renders the cues. `None` before any
+/// sequence header has parsed. Shared by both demuxers so a subtitle branch
+/// renders the same whichever one built it.
+fn idx_config_blob(demux: &PsDemuxer) -> Option<Vec<u8>> {
+    let seq = demux.sequence()?;
+    let cfg = crate::vobsub::VobSubConfig {
+        size: Some((seq.width, seq.height)),
+        palette: None,
+    };
+    Some(crate::vobsub::idx_config_text(&cfg).into_bytes())
 }
 
 /// The published stream id of an elementary stream: the id it takes in the
@@ -1471,6 +1472,10 @@ pub struct PsDemuxN {
     segment_base: Option<u64>,
     /// Whether port `i` has emitted its opening `Segment` yet.
     segment_sent: Vec<bool>,
+    /// Whether port `i` has forwarded the synthesized `.idx` geometry in band
+    /// ahead of its first cue (subpicture ports only), the per-port form of
+    /// [`PsDemux`]'s `config_sent`.
+    config_sent: Vec<bool>,
 }
 
 impl PsDemuxN {
@@ -1481,6 +1486,7 @@ impl PsDemuxN {
         let announced = alloc::vec![false; ports.len()];
         let refined = alloc::vec![None; ports.len()];
         let segment_sent = alloc::vec![false; ports.len()];
+        let config_sent = alloc::vec![false; ports.len()];
         Self {
             demux: PsDemuxer::new(),
             ports,
@@ -1492,6 +1498,7 @@ impl PsDemuxN {
             emitted: 0,
             segment_base: None,
             segment_sent,
+            config_sent,
         }
     }
 
@@ -1598,6 +1605,17 @@ impl PsDemuxN {
                 let seg = Segment::for_flush_seek(&Seek::flush_to(base), None);
                 out.push_to(port, PipelinePacket::Segment(seg)).await?;
             }
+            // A subpicture port opens on the same synthesized `.idx` the single
+            // output demuxer sends, so a fan-out subtitle branch renders on the
+            // video's geometry rather than the decoder's default.
+            if kind == PsStream::SubPicture && !self.config_sent[port] {
+                if let Some(blob) = idx_config_blob(&self.demux) {
+                    self.config_sent[port] = true;
+                    let frame = config_frame(blob, pts_ns, self.emitted);
+                    self.emitted += 1;
+                    out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
+                }
+            }
             if kind == PsStream::Mpeg2 {
                 if let Some(seq) = u.sequence {
                     if self.refined[port] != Some(seq) {
@@ -1680,6 +1698,7 @@ impl MultiOutputElement for PsDemuxN {
                 PipelinePacket::Flush => {
                     self.demux = PsDemuxer::new();
                     for port in 0..self.ports.len() {
+                        self.config_sent[port] = false;
                         out.push_to(port, PipelinePacket::Flush).await?;
                     }
                 }

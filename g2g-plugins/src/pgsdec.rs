@@ -33,9 +33,9 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError,
-    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, Rate, RawVideoFormat, SubPictureFormat,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata,
+    FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, SubPictureFormat,
 };
 
 use crate::pgs::{PgsDecoder, DEFAULT_VIDEO_HEIGHT, DEFAULT_VIDEO_WIDTH, MAX_VIDEO_DIM};
@@ -201,6 +201,14 @@ impl PgsDec {
 }
 
 impl AsyncElement for PgsDec {
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "PGS subtitle decoder",
+            "Codec/Decoder/Subtitle",
+            "Decodes Blu-ray HDMV presentation graphics into RGBA overlay canvases",
+            "g2g",
+        )
+    }
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where

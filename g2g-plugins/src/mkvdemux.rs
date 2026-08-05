@@ -42,10 +42,10 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{SeekController, StreamSelectController};
 use g2g_core::{
     g2g_error, AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps,
-    CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError, MemoryDomain,
-    MultiOutputElement, MultiOutputSink, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-    PropError, PropKind, PropValue, PropertySpec, Rate, Seek, Segment, Stream, StreamCollection,
-    StreamType, SubPictureFormat, TagList, TextFormat, VideoCodec,
+    CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError,
+    MemoryDomain, MultiOutputElement, MultiOutputSink, OutputSink, PadTemplate, PadTemplates,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, Seek, Segment, Stream,
+    StreamCollection, StreamType, SubPictureFormat, TagList, TextFormat, VideoCodec,
 };
 
 use crate::demuxseek::{Admit, DemuxSeek};
@@ -125,6 +125,10 @@ pub struct MkvDemux {
     /// Whether the selected track's `CodecPrivate` has been forwarded in-band,
     /// once, before its first frame (see [`config_header`]). Re-armed on a flush.
     config_sent: bool,
+    /// Set once a `Segment` has gone out, whether the stream-start one or a
+    /// seek's, so the first frame's timestamp maps to running time 0 and a paced
+    /// sink is not left holding it. Re-armed on a flush.
+    segment_sent: bool,
     /// Clones of the seek controllers (M374): the `Cues` prefetch consumes the app
     /// seek and drives the two-hop upstream byte-seek directly, so it needs the
     /// same channels `seek` holds. `None` unless `with_seek` wired them.
@@ -154,6 +158,7 @@ impl MkvDemux {
             stream_select: None,
             seek: DemuxSeek::default(),
             config_sent: false,
+            segment_sent: false,
             app: None,
             upstream: None,
             prefetch: CuePrefetch::Idle,
@@ -596,8 +601,18 @@ impl MkvDemux {
                 Admit::Resume(start) => {
                     let seg = Segment::for_flush_seek(&Seek::flush_to(start), None);
                     out.push(PipelinePacket::Segment(seg)).await?;
+                    self.segment_sent = true;
                 }
                 Admit::Emit => {}
+            }
+            // Stream start: map the first emitted timestamp to running time 0.
+            // Matroska normally starts at 0, so this is usually the identity, but
+            // a file cut from a live recording need not, and every demuxer opens
+            // its stream the same way.
+            if !self.segment_sent {
+                self.segment_sent = true;
+                let seg = Segment::for_flush_seek(&Seek::flush_to(f.pts_ns), None);
+                out.push(PipelinePacket::Segment(seg)).await?;
             }
             // The track's decoder-init bytes go in band once, ahead of its first
             // frame (FLAC STREAMINFO, Opus `OpusHead`).
@@ -638,6 +653,14 @@ impl MkvDemux {
 }
 
 impl AsyncElement for MkvDemux {
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "Matroska demuxer",
+            "Codec/Demuxer",
+            "Demuxes Matroska / WebM into one selected elementary stream",
+            "g2g",
+        )
+    }
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
@@ -746,6 +769,7 @@ impl AsyncElement for MkvDemux {
                     }
                     // a fresh decoder after the flush needs the header again.
                     self.config_sent = false;
+                    self.segment_sent = false;
                     out.push(PipelinePacket::Flush).await?;
                 }
                 PipelinePacket::Eos => {
@@ -1209,6 +1233,12 @@ pub struct MkvDemuxN {
     /// Inert unless `with_stream_select` wired it.
     stream_select: Option<StreamSelectController>,
     emitted: u64,
+    /// Stream-start timestamp (ns) latched from the first routed frame; every
+    /// port's opening `Segment` maps it to running time 0, so the ports share
+    /// one running-time origin.
+    segment_base: Option<u64>,
+    /// Whether port `i` has emitted its opening `Segment` yet.
+    segment_sent: Vec<bool>,
 }
 
 impl MkvDemuxN {
@@ -1221,11 +1251,14 @@ impl MkvDemuxN {
         );
         let announced = alloc::vec![false; ports.len()];
         let config_sent = alloc::vec![false; ports.len()];
+        let segment_sent = alloc::vec![false; ports.len()];
         Self {
             demux: MatroskaDemuxer::new(),
             ports,
             announced,
             config_sent,
+            segment_base: None,
+            segment_sent,
             bus: None,
             tags: TagPoster::default(),
             collection_posted: false,
@@ -1385,6 +1418,12 @@ impl MultiOutputElement for MkvDemuxN {
                         let Some(port) = self.port_for_codec(f.codec) else {
                             continue; // a track no selected port carries
                         };
+                        if !self.segment_sent[port] {
+                            self.segment_sent[port] = true;
+                            let base = *self.segment_base.get_or_insert(f.pts_ns);
+                            let seg = Segment::for_flush_seek(&Seek::flush_to(base), None);
+                            out.push_to(port, PipelinePacket::Segment(seg)).await?;
+                        }
                         if !self.announced[port] {
                             let caps = MkvDemux::concrete_caps_of(&self.demux, self.ports[port])
                                 .unwrap_or_else(|| MkvDemux::output_caps(self.ports[port]));

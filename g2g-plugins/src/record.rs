@@ -208,6 +208,14 @@ impl ReplaySrc {
 }
 
 impl SourceLoop for ReplaySrc {
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "Replay source",
+            "Source/File",
+            "Replays a recorded byte stream at its captured pacing",
+            "g2g",
+        )
+    }
     type RunFuture<'a>
         = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
     where

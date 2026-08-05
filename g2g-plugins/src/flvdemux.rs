@@ -37,9 +37,9 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SeekController;
 use g2g_core::{
     AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps, CapsConstraint,
-    CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate,
-    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, Seek,
-    Segment, Tag, TagList, VideoCodec,
+    CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError, MemoryDomain,
+    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec, Rate, Seek, Segment, Tag, TagList, VideoCodec,
 };
 
 use crate::aacparse::{adts_from_asc, SAMPLE_RATES};
@@ -390,6 +390,14 @@ impl FlvDemux {
 }
 
 impl AsyncElement for FlvDemux {
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "FLV demuxer",
+            "Codec/Demuxer",
+            "Demuxes a Flash Video stream into one selected elementary stream",
+            "g2g",
+        )
+    }
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where

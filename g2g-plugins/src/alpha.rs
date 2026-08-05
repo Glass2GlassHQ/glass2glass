@@ -17,9 +17,9 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, MemoryDomain,
-    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec, Rate, RawVideoFormat,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
+    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec, Rate, RawVideoFormat,
 };
 
 use crate::pixel::rgba_rb_offsets;
@@ -99,6 +99,14 @@ impl Alpha {
 }
 
 impl AsyncElement for Alpha {
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "Alpha filter",
+            "Filter/Effect/Video",
+            "Adds or keys an alpha channel on raw video",
+            "g2g",
+        )
+    }
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where

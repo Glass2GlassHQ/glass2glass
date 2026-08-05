@@ -21,8 +21,8 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, OutputSink,
-    PadTemplate, PadTemplates, PipelinePacket, Rate, VideoCodec,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
+    OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate, VideoCodec,
 };
 
 /// VP8 key-frame start code following the 3-byte frame tag (RFC 6386 §9.1).
@@ -48,6 +48,14 @@ impl Vp8Parse {
 }
 
 impl AsyncElement for Vp8Parse {
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "VP8 parser",
+            "Codec/Parser/Video",
+            "Frames a VP8 stream and reads its keyframe geometry",
+            "g2g",
+        )
+    }
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where

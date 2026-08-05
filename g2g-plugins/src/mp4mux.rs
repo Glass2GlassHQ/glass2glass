@@ -28,8 +28,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
-    FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-    PropError, PropKind, PropValue, PropertySpec, Rate, TagList, VideoCodec,
+    ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, TagList, VideoCodec,
 };
 
 use crate::fmp4mux::Fmp4Muxer;
@@ -176,6 +176,14 @@ impl Mp4Mux {
 }
 
 impl AsyncElement for Mp4Mux {
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "MP4 muxer",
+            "Codec/Muxer",
+            "Muxes one elementary stream into an MP4 / ISO base media file",
+            "g2g",
+        )
+    }
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where

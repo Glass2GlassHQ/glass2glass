@@ -27,9 +27,9 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsTransform, ConfigureOutcome, Dim, FieldTransform,
-    FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, Rate, RawVideoFormat, RawVideoShape,
+    AsyncElement, Caps, CapsConstraint, CapsTransform, ConfigureOutcome, Dim, ElementMetadata,
+    FieldTransform, FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket, PropError,
+    PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, RawVideoShape,
 };
 
 #[derive(Debug)]
@@ -203,6 +203,14 @@ fn emit_slots(prev_pts: u64, cur_pts: u64, next_pts: u64, dt_ns: u64) -> (Vec<u6
 }
 
 impl AsyncElement for VideoRate {
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "Video rate adjuster",
+            "Filter/Effect/Video",
+            "Drops or repeats frames to reach the negotiated framerate",
+            "g2g",
+        )
+    }
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where

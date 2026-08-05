@@ -32,8 +32,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
-    Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, Rate, TagList, VideoCodec,
+    Dim, ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate,
+    PadTemplates, PipelinePacket, Rate, TagList, VideoCodec,
 };
 
 use crate::aacparse::{asc_from_adts, strip_adts};
@@ -136,6 +136,14 @@ impl FlvMux {
 }
 
 impl AsyncElement for FlvMux {
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "FLV muxer",
+            "Codec/Muxer",
+            "Muxes one elementary stream into a Flash Video stream",
+            "g2g",
+        )
+    }
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where

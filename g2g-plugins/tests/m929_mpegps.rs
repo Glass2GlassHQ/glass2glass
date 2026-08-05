@@ -23,11 +23,41 @@ use std::process::Command;
 use g2g_core::frame::{Frame, PipelinePacket};
 use g2g_core::{frame::FrameTiming, memory::SystemSlice};
 use g2g_core::{
-    AsyncElement, AudioFormat, ByteStreamEncoding, Caps, Dim, G2gError, MemoryDomain, OutputSink,
-    PadDirection, PadTemplates, PropValue, PushOutcome, Rate, SubPictureFormat, VideoCodec,
+    AsyncElement, AudioFormat, ByteStreamEncoding, Caps, Dim, G2gError, MemoryDomain,
+    MultiOutputElement, OutputSink, PadDirection, PadTemplates, PropValue, PushOutcome, Rate,
+    SubPictureFormat, VideoCodec,
 };
+/// A multi-output sink recording each port's packets in order.
+struct PortTap {
+    ports: Vec<Vec<PipelinePacket>>,
+}
+
+impl PortTap {
+    fn new(n: usize) -> Self {
+        Self {
+            ports: (0..n).map(|_| Vec::new()).collect(),
+        }
+    }
+}
+
+impl g2g_core::MultiOutputSink for PortTap {
+    fn port_count(&self) -> usize {
+        self.ports.len()
+    }
+
+    fn push_to<'a>(
+        &'a mut self,
+        port: usize,
+        packet: PipelinePacket,
+    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
+        self.ports[port].push(packet);
+        Box::pin(async { Ok(PushOutcome::Accepted) })
+    }
+}
+
 use g2g_plugins::psdemux::{
-    forwardable_streams, parse_sequence_header, subpicture_streams, PsDemux, PsDemuxer, PsStream,
+    forwardable_streams, parse_sequence_header, subpicture_streams, PsDemux, PsDemuxN, PsDemuxer,
+    PsStream,
 };
 use g2g_plugins::registry::default_registry;
 use g2g_plugins::tsdemux::{TsDemux, TsStream};
@@ -1138,6 +1168,54 @@ async fn a_mid_gop_tune_in_drops_to_the_first_sequence_header() {
         .iter()
         .position(|p| matches!(p, PipelinePacket::DataFrame(_)));
     assert!(first_caps < first_frame, "caps lead the first frame");
+}
+
+/// The fan-out subtitle route must open on the same synthesized `.idx` the
+/// single-output demuxer sends. Without it a `playbin` / named-pad subtitle
+/// branch renders on `vobsubdec`'s 720x576 default, so an NTSC disc's cues land
+/// on the wrong canvas.
+#[tokio::test]
+async fn the_fanout_subpicture_port_opens_on_the_idx_config() {
+    let cue = spu_unit(40, 60, 120, 40);
+    let mut file = Vec::new();
+    for i in 0..2 {
+        file.extend_from_slice(&PACK);
+        file.extend_from_slice(&pes(0xE0, Some(9_000 * (i + 1)), &video_unit(720, 480, 1)));
+    }
+    file.extend_from_slice(&PACK);
+    file.extend_from_slice(&pes_private(0x20, Some(27_000), &cue));
+
+    let mut el = PsDemuxN::new(Vec::from([PsStream::Mpeg2, PsStream::SubPicture]));
+    el.configure_pipeline(&ps_caps()).expect("configure");
+    let mut tap = PortTap::new(2);
+    for chunk in file.chunks(4096) {
+        el.process(data_frame(chunk.to_vec()), &mut tap)
+            .await
+            .expect("demux a chunk");
+    }
+    el.process(PipelinePacket::Eos, &mut tap)
+        .await
+        .expect("flush");
+
+    let frames: Vec<Vec<u8>> = tap.ports[1]
+        .iter()
+        .filter_map(|p| match p {
+            PipelinePacket::DataFrame(f) => Some(bytes(f)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(frames.len(), 2, "the .idx config, then the cue");
+    let config = parse_idx(&frames[0]).expect("the port opens on .idx text");
+    assert_eq!(
+        config.size,
+        Some((720, 480)),
+        "carrying the video's own geometry, not the decoder's default"
+    );
+    assert_eq!(
+        u16::from_be_bytes([frames[1][0], frames[1][1]]) as usize,
+        frames[1].len(),
+        "the cue follows it whole"
+    );
 }
 
 // --- synthetic program stream builders ---

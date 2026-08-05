@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M930: every demuxer opens with a stream-start segment, and launch lines accept gst-style parallel chains.
+
 - M929: `mpegpsdemux` plays MPEG program streams (`.mpg` / `.vob`), DVD subpicture track included, and MPEG-2 video demuxes and decodes.
 
 - M928: the single-track `matroskamux` takes a text or bitmap subtitle pad, so a sidecar subtitle file muxes over one link.
