@@ -55,7 +55,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::{
     Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError,
     InputAggregator, MemoryDomain, MultiInputElement, OutputSink, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
+    PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, Segment,
 };
 
 /// Placement of one input stream on the output canvas.
@@ -144,6 +144,14 @@ pub struct Compositor {
     state: CompositorState<Box<[u8]>>,
     /// The canvas fill behind all inputs (RGBA8), default opaque black.
     background: [u8; 4],
+    /// The last `Segment` forwarded downstream. Output frames carry input 0's
+    /// PTS, so input 0's segment is the one that maps them to running time and a
+    /// paced sink needs it: without it the sink paces against the raw PTS base (a
+    /// DVD title starting at 2267 s stalls for 37 minutes at zero CPU). A stream
+    /// gets more than one: the runner opens every link with a default segment and
+    /// the demuxer's real one follows, so a later segment supersedes an earlier
+    /// one and must go out. Kept to suppress re-emitting an unchanged one.
+    last_segment: Option<Segment>,
 }
 
 /// Max input-0 frames buffered during startup before output begins flowing
@@ -569,6 +577,7 @@ impl Compositor {
             pads,
             state: CompositorState::new(n),
             background: [0, 0, 0, 255],
+            last_segment: None,
         }
     }
 
@@ -1243,11 +1252,23 @@ impl MultiInputElement for Compositor {
                 }
                 // A flush on input 0 clears any buffered startup frames (nothing
                 // else is cached); on an overlay it also re-arms startup.
-                PipelinePacket::Flush => self.state.flush(input),
+                PipelinePacket::Flush => {
+                    if input == 0 {
+                        self.last_segment = None;
+                    }
+                    self.state.flush(input);
+                }
                 // Per-input Eos is informational; the runner aggregates input
-                // ends and emits the single merged Eos. Segment is per-input
-                // control the compositor does not remap.
-                PipelinePacket::Eos | PipelinePacket::Segment(_) => {}
+                // ends and emits the single merged Eos.
+                PipelinePacket::Eos => {}
+                // Only the timing input's segment describes the output, whose
+                // frames are stamped from input 0. An overlay's own segment would
+                // remap the video, so it is consumed here.
+                PipelinePacket::Segment(seg) if input == 0 && self.last_segment != Some(seg) => {
+                    self.last_segment = Some(seg);
+                    out.push(PipelinePacket::Segment(seg)).await?;
+                }
+                PipelinePacket::Segment(_) => {}
                 // future PipelinePacket variants: no-op.
                 _ => {}
             }

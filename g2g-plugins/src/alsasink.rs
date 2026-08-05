@@ -29,9 +29,9 @@ use core::future::Future;
 use core::pin::Pin;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
+use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::Arc;
-use std::thread::{self, JoinHandle};
+
 use std::time::Duration;
 
 use alloc::boxed::Box;
@@ -63,8 +63,10 @@ enum WorkerCmd {
 
 pub struct AlsaSink {
     device: String,
-    cmd_tx: Option<Sender<WorkerCmd>>,
-    worker: Option<JoinHandle<()>>,
+    /// Bounded, non-blocking link to the device thread. The executor is
+    /// cooperative, so neither the hand-off nor the end-of-stream drain may
+    /// block it (see [`crate::audioworker`]).
+    link: Option<crate::audioworker::WorkerLink<WorkerCmd>>,
     caps: Option<Caps>,
     frames_rendered: Arc<AtomicU64>,
     /// DAC-disciplined master clock (M590 A/V sync). The worker feeds it
@@ -105,8 +107,7 @@ impl AlsaSink {
     pub fn with_device(device: impl Into<String>) -> Self {
         Self {
             device: device.into(),
-            cmd_tx: None,
-            worker: None,
+            link: None,
             caps: None,
             frames_rendered: Arc::new(AtomicU64::new(0)),
             clock: Arc::new(DriftClock::new(Arc::new(MonotonicClock))),
@@ -126,13 +127,14 @@ impl AlsaSink {
         Arc::clone(&self.clock)
     }
 
+    /// Tear down without waiting for playout (reconfigure / drop). The
+    /// end-of-stream drain that *does* wait is `WorkerLink::finish`, awaited
+    /// from `process(Eos)` so it never blocks the executor.
     fn shutdown(&mut self) {
-        if let Some(tx) = self.cmd_tx.take() {
-            let _ = tx.send(WorkerCmd::Shutdown);
+        if let Some(link) = self.link.as_mut() {
+            link.abort();
         }
-        if let Some(join) = self.worker.take() {
-            let _ = join.join();
-        }
+        self.link = None;
     }
 }
 
@@ -165,14 +167,13 @@ impl AsyncElement for AlsaSink {
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         let cfg = alsa_params(absolute_caps)?;
 
-        if self.worker.is_some() {
+        if self.link.as_ref().is_some_and(|l| l.is_running()) {
             if self.caps.as_ref() == Some(absolute_caps) {
                 return Ok(ConfigureOutcome::Accepted);
             }
             self.shutdown();
         }
 
-        let (tx, rx) = mpsc::channel::<WorkerCmd>();
         let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<(), i32>>(1);
         let rendered = Arc::clone(&self.frames_rendered);
         let device = self.device.clone();
@@ -180,29 +181,20 @@ impl AsyncElement for AlsaSink {
         // per-buffer `delay()` probe is wasted work no one reads.
         let clock = self.provide_clock.then(|| Arc::clone(&self.clock));
 
-        let join = thread::Builder::new()
-            .name(String::from("g2g-alsasink"))
-            .spawn(move || {
-                worker_main(&device, cfg, rx, rendered, clock, ready_tx);
-            })
-            .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+        let link = crate::audioworker::WorkerLink::spawn("g2g-alsasink", move |rx| {
+            worker_main(&device, cfg, rx, rendered, clock, ready_tx);
+        })?;
 
         // The worker reports whether the device opened; a host with no ALSA
         // device fails loud here rather than silently dropping audio.
         match ready_rx.recv_timeout(Duration::from_secs(5)) {
             Ok(Ok(())) => {}
-            Ok(Err(code)) => {
-                let _ = join.join();
-                return Err(G2gError::Hardware(HardwareError::Alsa(code)));
-            }
-            Err(_) => {
-                let _ = join.join();
-                return Err(G2gError::Hardware(HardwareError::Alsa(-1)));
-            }
+            // `link`'s Drop reaps the worker, so a failed open needs no join.
+            Ok(Err(code)) => return Err(G2gError::Hardware(HardwareError::Alsa(code))),
+            Err(_) => return Err(G2gError::Hardware(HardwareError::Alsa(-1))),
         }
 
-        self.cmd_tx = Some(tx);
-        self.worker = Some(join);
+        self.link = Some(link);
         self.caps = Some(absolute_caps.clone());
         Ok(ConfigureOutcome::Accepted)
     }
@@ -278,9 +270,15 @@ impl AsyncElement for AlsaSink {
                     let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    let tx = self.cmd_tx.as_ref().ok_or(G2gError::NotConfigured)?;
-                    tx.send(WorkerCmd::Samples(slice.to_vec()))
-                        .map_err(|_| G2gError::Hardware(HardwareError::Alsa(-1)))?;
+                    let samples = slice.to_vec();
+                    let link = self.link.as_ref().ok_or(G2gError::NotConfigured)?;
+                    // Awaited, not blocking: a full queue is the device's
+                    // back-pressure and yields to the executor.
+                    link.send(
+                        WorkerCmd::Samples(samples),
+                        G2gError::Hardware(HardwareError::Alsa(-1)),
+                    )
+                    .await?;
                     Ok(())
                 }
                 // A mid-stream format change can't be honoured on an open
@@ -291,7 +289,17 @@ impl AsyncElement for AlsaSink {
                 }
                 PipelinePacket::Flush | PipelinePacket::Segment(_) => Ok(()),
                 PipelinePacket::Eos => {
-                    self.shutdown();
+                    // Wait for the queued audio to actually play out, yielding
+                    // throughout: a blocking join here stalled every other arm
+                    // in the pipeline for the length of the sound.
+                    if let Some(link) = self.link.as_mut() {
+                        link.finish(
+                            WorkerCmd::Shutdown,
+                            G2gError::Hardware(HardwareError::Alsa(-1)),
+                        )
+                        .await?;
+                    }
+                    self.link = None;
                     Ok(())
                 }
                 // future PipelinePacket variants: no-op (terminal sink).

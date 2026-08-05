@@ -478,6 +478,10 @@ impl MultiInputElement for TsMux {
                 // CapsChanged is consumed by the runner's muxer arm; geometry /
                 // params do not change the TS framing.
                 PipelinePacket::CapsChanged(_) => return Ok(()),
+                // A per-input `Segment` maps that stream to running time; a muxed
+                // container carries its own timestamps, so it is consumed rather
+                // than forwarded into the byte stream.
+                PipelinePacket::Segment(_) => return Ok(()),
                 other => {
                     out.push(other).await?;
                     return Ok(());

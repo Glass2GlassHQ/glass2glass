@@ -1,0 +1,428 @@
+//! M931 step 0: a `Segment` reaching a fan-in element.
+//!
+//! A paced sink maps a frame's PTS to running time through the `Segment` in
+//! effect. A fan-in sat in the middle of that path and swallowed the segment, so
+//! a graph like `demux ! decode ! convert ! compositor ! sink` left the sink with
+//! no mapping: a DVD title whose PTS starts at 2267 s stalled for 37 minutes at
+//! zero CPU. The compositor's output frames carry input 0's PTS, so input 0's
+//! segment is the one that has to reach the sink.
+#![cfg(feature = "std")]
+
+use core::future::Future;
+use core::pin::Pin;
+
+use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
+use g2g_core::memory::{MemoryDomain, SystemSlice};
+use g2g_core::{
+    Caps, Dim, G2gError, MultiInputElement, OutputSink, PushOutcome, Rate, RawVideoFormat, Seek,
+    Segment,
+};
+use g2g_plugins::compositor::{Compositor, CompositorPad};
+
+const W: u32 = 64;
+const H: u32 = 32;
+/// A DVD title's PTS base: far enough out that a sink pacing against it without
+/// a segment waits over half an hour.
+const BASE_NS: u64 = 2_267_767_267_000;
+
+#[derive(Default)]
+struct Collect {
+    packets: Vec<PipelinePacket>,
+}
+
+impl OutputSink for Collect {
+    fn push<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
+        self.packets.push(packet);
+        Box::pin(async { Ok(PushOutcome::Accepted) })
+    }
+}
+
+impl Collect {
+    fn segments(&self) -> Vec<Segment> {
+        self.packets
+            .iter()
+            .filter_map(|p| match p {
+                PipelinePacket::Segment(s) => Some(*s),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn frames(&self) -> Vec<&Frame> {
+        self.packets
+            .iter()
+            .filter_map(|p| match p {
+                PipelinePacket::DataFrame(f) => Some(f),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+fn rgba_caps() -> Caps {
+    Caps::RawVideo {
+        format: RawVideoFormat::Rgba8,
+        width: Dim::Fixed(W),
+        height: Dim::Fixed(H),
+        framerate: Rate::Fixed(25 << 16),
+    }
+}
+
+fn frame(pts_ns: u64) -> PipelinePacket {
+    let bytes = alloc_canvas();
+    PipelinePacket::DataFrame(Frame::new(
+        MemoryDomain::System(SystemSlice::from_boxed(bytes)),
+        FrameTiming {
+            pts_ns,
+            dts_ns: pts_ns,
+            ..FrameTiming::default()
+        },
+        0,
+    ))
+}
+
+fn alloc_canvas() -> Box<[u8]> {
+    vec![0u8; (W * H * 4) as usize].into_boxed_slice()
+}
+
+fn compositor() -> Compositor {
+    Compositor::new(W, H, vec![CompositorPad::at(0, 0), CompositorPad::at(0, 0)])
+}
+
+/// The step-0 contract: input 0's segment reaches the output, once, carrying the
+/// mapping that puts the first frame at running time 0.
+#[tokio::test]
+async fn a_fan_in_forwards_the_timing_inputs_segment() {
+    let mut c = compositor();
+    for pad in 0..2 {
+        c.configure_pipeline(pad, &rgba_caps()).expect("configure");
+    }
+    let mut sink = Collect::default();
+
+    let seg = Segment::for_flush_seek(&Seek::flush_to(BASE_NS), None);
+    c.process(0, PipelinePacket::Segment(seg), &mut sink)
+        .await
+        .expect("segment on the timing input");
+    // The overlay is primed first: the compositor holds input-0 frames at startup
+    // until each overlay has delivered, so a lone input-0 frame emits nothing.
+    c.process(1, frame(BASE_NS), &mut sink)
+        .await
+        .expect("overlay frame");
+    c.process(0, frame(BASE_NS), &mut sink)
+        .await
+        .expect("first frame");
+
+    let segments = sink.segments();
+    assert_eq!(segments.len(), 1, "input 0's segment reaches the output");
+    assert_eq!(segments[0].start, BASE_NS, "carrying its own mapping");
+    assert_eq!(
+        segments[0].to_running_time(BASE_NS),
+        Some(0),
+        "so the first frame presents immediately rather than 37 minutes late"
+    );
+
+    // And it leads the frame it describes: a sink that saw the frame first would
+    // already have computed a deadline from the raw PTS.
+    let seg_at = sink
+        .packets
+        .iter()
+        .position(|p| matches!(p, PipelinePacket::Segment(_)))
+        .expect("a segment");
+    let frame_at = sink
+        .packets
+        .iter()
+        .position(|p| matches!(p, PipelinePacket::DataFrame(_)))
+        .expect("a frame");
+    assert!(seg_at < frame_at, "the segment leads the first frame");
+}
+
+/// An overlay input's segment is not the output's: the output frames are stamped
+/// from input 0, so forwarding a subtitle track's segment would remap the video.
+#[tokio::test]
+async fn an_overlay_inputs_segment_is_not_forwarded() {
+    let mut c = compositor();
+    for pad in 0..2 {
+        c.configure_pipeline(pad, &rgba_caps()).expect("configure");
+    }
+    let mut sink = Collect::default();
+
+    let overlay_seg = Segment::for_flush_seek(&Seek::flush_to(999_000_000_000), None);
+    c.process(1, PipelinePacket::Segment(overlay_seg), &mut sink)
+        .await
+        .expect("segment on the overlay input");
+    assert!(
+        sink.segments().is_empty(),
+        "an overlay's segment does not remap the output"
+    );
+
+    // Input 0's still does, and is the one that goes out.
+    let seg = Segment::for_flush_seek(&Seek::flush_to(BASE_NS), None);
+    c.process(0, PipelinePacket::Segment(seg), &mut sink)
+        .await
+        .expect("segment on the timing input");
+    assert_eq!(sink.segments(), [seg], "only the timing input's");
+}
+
+/// The regression guard for the freeze this milestone chased. A link opens with
+/// the runner's default segment (`start = 0`) and the demuxer's real one arrives
+/// after it, so a fan-in that forwards only the FIRST segment pins the sink to
+/// the wrong mapping: frames stamped 2267 s against a `start = 0` segment are
+/// 2267 s of running time away, and a paced sink holds every one of them at zero
+/// CPU. A later segment supersedes an earlier one.
+#[tokio::test]
+async fn a_later_segment_supersedes_the_runners_default() {
+    let mut c = compositor();
+    for pad in 0..2 {
+        c.configure_pipeline(pad, &rgba_caps()).expect("configure");
+    }
+    let mut sink = Collect::default();
+
+    // Exactly the order a real graph delivers: the open segment, then the
+    // demuxer's stream-start one.
+    let opening = Segment::new();
+    let real = Segment::for_flush_seek(&Seek::flush_to(BASE_NS), None);
+    c.process(0, PipelinePacket::Segment(opening), &mut sink)
+        .await
+        .unwrap();
+    c.process(0, PipelinePacket::Segment(real), &mut sink)
+        .await
+        .unwrap();
+
+    let segments = sink.segments();
+    assert_eq!(
+        segments.last(),
+        Some(&real),
+        "the demuxer's segment is the one left in force, not the opening default"
+    );
+    assert_eq!(
+        segments.last().unwrap().to_running_time(BASE_NS),
+        Some(0),
+        "so the first frame presents immediately"
+    );
+
+    // An unchanged repeat is not re-emitted: a segment per frame would reset the
+    // sink's mapping continuously.
+    let before = sink.segments().len();
+    c.process(0, PipelinePacket::Segment(real), &mut sink)
+        .await
+        .unwrap();
+    assert_eq!(
+        sink.segments().len(),
+        before,
+        "re-sending the same segment changes nothing"
+    );
+}
+
+/// A flush re-arms it: the stream after a seek carries its own mapping.
+#[tokio::test]
+async fn a_flush_re_arms_the_segment() {
+    let mut c = compositor();
+    for pad in 0..2 {
+        c.configure_pipeline(pad, &rgba_caps()).expect("configure");
+    }
+    let mut sink = Collect::default();
+
+    let first = Segment::for_flush_seek(&Seek::flush_to(BASE_NS), None);
+    c.process(0, PipelinePacket::Segment(first), &mut sink)
+        .await
+        .unwrap();
+    c.process(0, PipelinePacket::Flush, &mut sink)
+        .await
+        .unwrap();
+    let after = Segment::for_flush_seek(&Seek::flush_to(BASE_NS + 60_000_000_000), None);
+    c.process(0, PipelinePacket::Segment(after), &mut sink)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        sink.segments(),
+        [first, after],
+        "the post-seek segment goes out too"
+    );
+}
+
+/// The compositing itself is unchanged by a segment passing through: it is
+/// control, not pixels.
+#[tokio::test]
+async fn a_segment_does_not_disturb_compositing() {
+    let mut with = compositor();
+    let mut without = compositor();
+    for c in [&mut with, &mut without] {
+        for pad in 0..2 {
+            c.configure_pipeline(pad, &rgba_caps()).expect("configure");
+        }
+    }
+    let (mut a, mut b) = (Collect::default(), Collect::default());
+
+    let seg = Segment::for_flush_seek(&Seek::flush_to(BASE_NS), None);
+    with.process(0, PipelinePacket::Segment(seg), &mut a)
+        .await
+        .unwrap();
+    for pts in [BASE_NS, BASE_NS + 40_000_000] {
+        with.process(0, frame(pts), &mut a).await.unwrap();
+        without.process(0, frame(pts), &mut b).await.unwrap();
+    }
+
+    let (fa, fb) = (a.frames(), b.frames());
+    assert_eq!(fa.len(), fb.len(), "the same number of composited frames");
+    for (x, y) in fa.iter().zip(fb.iter()) {
+        assert_eq!(x.timing.pts_ns, y.timing.pts_ns, "same timestamps");
+        assert_eq!(
+            x.domain.as_system_slice(),
+            y.domain.as_system_slice(),
+            "same pixels"
+        );
+    }
+}
+
+// ---- blast radius: a segment reaching a muxer must change nothing ----
+
+/// The step-0 contract now delivers `Segment` to every fan-in element, muxers
+/// included. A container's timestamps are already mapped by its own headers, so
+/// a segment arriving must be consumed, not written: the muxed bytes have to be
+/// identical to a run where none arrived.
+mod muxers {
+    use super::*;
+    use g2g_core::AudioFormat;
+
+    /// A byte sink recording exactly what a muxer wrote.
+    #[derive(Default)]
+    struct Bytes {
+        out: Vec<u8>,
+        segments: usize,
+    }
+
+    impl OutputSink for Bytes {
+        fn push<'a>(
+            &'a mut self,
+            packet: PipelinePacket,
+        ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
+            match &packet {
+                PipelinePacket::DataFrame(f) => {
+                    if let Some(s) = f.domain.as_system_slice() {
+                        self.out.extend_from_slice(s);
+                    }
+                }
+                PipelinePacket::Segment(_) => self.segments += 1,
+                _ => {}
+            }
+            Box::pin(async { Ok(PushOutcome::Accepted) })
+        }
+    }
+
+    fn aac_caps() -> Caps {
+        Caps::Audio {
+            format: AudioFormat::Aac,
+            channels: 2,
+            sample_rate: 48_000,
+        }
+    }
+
+    /// One ADTS AAC frame, enough for a muxer to write a track.
+    fn adts(pts_ns: u64, seq: u64) -> PipelinePacket {
+        let mut au = vec![0xFF, 0xF1, 0x50, 0x80, 0x03, 0x9F, 0xFC];
+        au.extend_from_slice(&[0x21, 0x1A, 0x8F, 0xE0]);
+        let len = au.len() as u16;
+        au[3] = (au[3] & 0xFC) | ((len >> 11) & 0x03) as u8;
+        au[4] = ((len >> 3) & 0xFF) as u8;
+        au[5] = (au[5] & 0x1F) | (((len & 0x07) << 5) as u8);
+        PipelinePacket::DataFrame(Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
+            FrameTiming {
+                pts_ns,
+                dts_ns: pts_ns,
+                keyframe: true,
+                ..FrameTiming::default()
+            },
+            seq,
+        ))
+    }
+
+    /// Drive `mux` over one audio input, optionally handing it a segment first,
+    /// and return the bytes it wrote plus how many segments it forwarded.
+    async fn run(mux: &mut dyn MuxUnderTest, with_segment: bool) -> (Vec<u8>, usize) {
+        let mut sink = Bytes::default();
+        mux.configure(0, &aac_caps());
+        if with_segment {
+            let seg = Segment::for_flush_seek(&Seek::flush_to(BASE_NS), None);
+            mux.feed(0, PipelinePacket::Segment(seg), &mut sink).await;
+        }
+        for i in 0..4u64 {
+            mux.feed(0, adts(BASE_NS + i * 21_333_333, i), &mut sink)
+                .await;
+        }
+        mux.feed(0, PipelinePacket::Eos, &mut sink).await;
+        (sink.out, sink.segments)
+    }
+
+    /// Object-safe shim so one runner drives each muxer type.
+    trait MuxUnderTest {
+        fn configure(&mut self, pad: usize, caps: &Caps);
+        fn feed<'a>(
+            &'a mut self,
+            pad: usize,
+            packet: PipelinePacket,
+            out: &'a mut Bytes,
+        ) -> Pin<Box<dyn Future<Output = ()> + 'a>>;
+    }
+
+    impl<T: MultiInputElement> MuxUnderTest for T {
+        fn configure(&mut self, pad: usize, caps: &Caps) {
+            let _ = self.configure_pipeline(pad, caps);
+        }
+        fn feed<'a>(
+            &'a mut self,
+            pad: usize,
+            packet: PipelinePacket,
+            out: &'a mut Bytes,
+        ) -> Pin<Box<dyn Future<Output = ()> + 'a>> {
+            Box::pin(async move {
+                let _ = self.process(pad, packet, out).await;
+            })
+        }
+    }
+
+    macro_rules! byte_identical {
+        ($name:ident, $ctor:expr, $label:literal) => {
+            #[tokio::test]
+            async fn $name() {
+                let (plain, plain_segs) = run(&mut $ctor, false).await;
+                let (with, with_segs) = run(&mut $ctor, true).await;
+                assert!(!plain.is_empty(), "{} wrote a container", $label);
+                assert_eq!(
+                    plain, with,
+                    "{} output is byte-identical with a segment delivered",
+                    $label
+                );
+                assert_eq!(
+                    (plain_segs, with_segs),
+                    (0, 0),
+                    "{} forwards no segment into its byte stream",
+                    $label
+                );
+            }
+        };
+    }
+
+    byte_identical!(
+        mkvmux_is_byte_identical,
+        g2g_plugins::mkvmuxn::MkvMuxN::new(1),
+        "matroskamux"
+    );
+    byte_identical!(
+        tsmux_is_byte_identical,
+        g2g_plugins::tsmuxn::TsMux::new(1),
+        "mpegtsmux"
+    );
+    // `oggmux` and `flvmux` take no AAC track, so this ADTS fixture cannot drive
+    // them; their ignore arm is the same code, and their own muxer suites (which
+    // compare against ffmpeg's read of the output) cover the bytes.
+    byte_identical!(
+        mp4mux_is_byte_identical,
+        g2g_plugins::mp4muxn::Mp4MuxN::new(1),
+        "mp4mux"
+    );
+}

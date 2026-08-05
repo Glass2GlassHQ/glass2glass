@@ -355,6 +355,15 @@ pub fn ps_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>,
         )
         .map(Some);
     }
+    // A disc with a subpicture track composites its cues over the video (M931).
+    // The canvas needs the video's geometry, which the sequence header gives once
+    // a video access unit has parsed; without it (or without a video track) the
+    // plain A/V fan-out below plays the disc unsubtitled.
+    if !crate::psdemux::subpicture_streams(&demux).is_empty() && infos.iter().any(|i| i.video) {
+        if let Some(geometry) = demux.sequence() {
+            return build_ps_subpicture_overlay(reg, &path, &infos, geometry).map(Some);
+        }
+    }
     build_av_fanout(
         reg,
         Box::new(source),
@@ -362,6 +371,134 @@ pub fn ps_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>,
         &av,
     )
     .map(Some)
+}
+
+/// Build the DVD subpicture overlay graph (M931): `FileSrc -> PsDemuxN ->
+/// {video decode -> RGBA8 -> compositor.0, subpicture -> vobsubdec ->
+/// compositor.1} -> NV12 -> auto video sink`, with the audio tracks fanning out
+/// to their own sinks.
+///
+/// A DVD subpicture is a bitmap cue, not text, so it composites rather than
+/// going through the `TextOverlayN` path an `S_TEXT` track uses: `vobsubdec`
+/// paints each cue onto a full-frame transparent RGBA canvas and the compositor
+/// blends it over the video. The canvas is the video's own geometry, read from
+/// the sequence header the probe already parsed, so an NTSC disc composites at
+/// 720x480 rather than the decoder's PAL default.
+#[cfg(feature = "std")]
+fn build_ps_subpicture_overlay(
+    reg: &Registry,
+    path: &str,
+    infos: &[crate::psdemux::PsStreamInfo],
+    geometry: crate::psdemux::SequenceHeader,
+) -> Result<Graph<GraphNode>, ParseError> {
+    use crate::compositor::{Compositor, CompositorPad};
+    use crate::psdemux::{PsDemuxN, PsStream};
+    use g2g_core::RawVideoFormat;
+
+    let video_idx = infos
+        .iter()
+        .position(|i| i.video)
+        .ok_or_else(|| ParseError::NoDecodeChain("subpicture overlay needs video".into()))?;
+
+    // Demux ports: every A/V stream in discovery order, then the subpicture one.
+    let mut ports: Vec<PsStream> = infos.iter().map(|i| i.stream).collect();
+    ports.push(PsStream::SubPicture);
+    let text_port = (ports.len() - 1) as u8;
+    let port_count = ports.len() as u8;
+
+    let mut graph: Graph<GraphNode> = Graph::new();
+    let source = crate::filesrc::FileSrc::new(
+        path,
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::MpegPs,
+        },
+    );
+    let src = graph.add_source(GraphNodeRef::Source(Box::new(source)));
+    let demux = graph.add_demux(
+        GraphNodeRef::demux(PsDemuxN::new(ports).with_video_geometry(geometry)),
+        port_count,
+    );
+    graph.link(src, demux.input()).map_err(ParseError::Graph)?;
+
+    // The compositor runs at the video's own geometry and nominal rate: the cue
+    // canvases `vobsubdec` paints are that size, so neither input is rescaled.
+    let fps = (geometry.framerate_q16 >> 16).max(1);
+    let overlay = graph.add_muxer(
+        GraphNodeRef::muxer(
+            Compositor::new(
+                geometry.width,
+                geometry.height,
+                Vec::from([CompositorPad::at(0, 0), CompositorPad::at(0, 0)]),
+            )
+            .with_framerate(fps),
+        ),
+        2,
+    );
+    let to_rgba = graph.add_transform(GraphNodeRef::element(
+        crate::videoconvert::VideoConvert::new(RawVideoFormat::Rgba8),
+    ));
+    let to_nv12 = graph.add_transform(GraphNodeRef::element(
+        crate::videoconvert::VideoConvert::new(RawVideoFormat::Nv12),
+    ));
+    graph
+        .link(to_rgba, overlay.input(0))
+        .map_err(ParseError::Graph)?;
+    graph
+        .link(overlay.output(), to_nv12)
+        .map_err(ParseError::Graph)?;
+    let vsink = reg
+        .make_element("autovideosink")
+        .ok_or_else(|| ParseError::UnknownElement("autovideosink".to_string()))?;
+    let vsnk = graph.add_sink(GraphNodeRef::Element(vsink));
+    graph.link(to_nv12, vsnk).map_err(ParseError::Graph)?;
+
+    // The subpicture port decodes to cue canvases, sized to the canvas the
+    // demuxer's synthesized `.idx` declares. It reaches the overlay pad through
+    // its own convert: the decoder's caps are only refined once that `.idx`
+    // arrives, so the link negotiates on the placeholder otherwise.
+    let dec = graph.add_transform(GraphNodeRef::element(
+        crate::vobsubdec::VobSubDec::new().with_size(geometry.width, geometry.height),
+    ));
+    let cue_rgba = graph.add_transform(GraphNodeRef::element(
+        crate::videoconvert::VideoConvert::new(RawVideoFormat::Rgba8),
+    ));
+    graph
+        .link(demux.out(text_port), dec)
+        .map_err(ParseError::Graph)?;
+    graph.link(dec, cue_rgba).map_err(ParseError::Graph)?;
+    graph
+        .link(cue_rgba, overlay.input(1))
+        .map_err(ParseError::Graph)?;
+
+    for (i, info) in infos.iter().enumerate() {
+        if i == video_idx {
+            // Seed the decode chain with the sequence header's real geometry.
+            // The demuxer's pad caps are a fixatable `Range` placeholder (it
+            // cannot know the size until a video unit parses), and the solver
+            // fixates a range at its minimum: the branch would negotiate 16x16
+            // while the subpicture pad arrives at the real canvas size, and the
+            // compositor rejects two inputs of different geometry. The probe has
+            // already read the sequence header, so the builder states it.
+            let video_caps = Caps::CompressedVideo {
+                codec: g2g_core::VideoCodec::Mpeg2,
+                width: g2g_core::Dim::Fixed(geometry.width),
+                height: g2g_core::Dim::Fixed(geometry.height),
+                framerate: g2g_core::Rate::Fixed(geometry.framerate_q16),
+            };
+            reg.decodebin(
+                &mut graph,
+                demux.out(i as u8),
+                to_rgba,
+                &video_caps,
+                &is_raw_video,
+                PLAYBIN_MAX_DEPTH,
+            )
+            .map_err(|e| map_decode_err(&video_caps, e))?;
+        } else {
+            wire_audio_branch(reg, &mut graph, demux.out(i as u8), &info.caps)?;
+        }
+    }
+    Ok(graph)
 }
 
 /// Probe a program stream file and build a [`PsDemuxN`](crate::psdemux::PsDemuxN)

@@ -1476,6 +1476,14 @@ pub struct PsDemuxN {
     /// ahead of its first cue (subpicture ports only), the per-port form of
     /// [`PsDemux`]'s `config_sent`.
     config_sent: Vec<bool>,
+    /// Video geometry known before the run, from a probe that already read the
+    /// sequence header. A video port otherwise advertises a fixatable `Range`
+    /// (the size is unknown until a unit parses) and the solver fixates a range
+    /// at its minimum, so the branch would negotiate 16x16 and only reach the
+    /// real size later by `CapsChanged`. That is fine on its own, but a fan-in
+    /// downstream configures its pads from the solved caps and cannot accept two
+    /// inputs of different geometry, so a builder that knows the size states it.
+    seed_geometry: Option<SequenceHeader>,
 }
 
 impl PsDemuxN {
@@ -1499,7 +1507,15 @@ impl PsDemuxN {
             segment_base: None,
             segment_sent,
             config_sent,
+            seed_geometry: None,
         }
+    }
+
+    /// Declare the video geometry a probe already read, so the video port
+    /// negotiates at the real size instead of a `Range` placeholder's minimum.
+    pub fn with_video_geometry(mut self, geometry: SequenceHeader) -> Self {
+        self.seed_geometry = Some(geometry);
+        self
     }
 
     /// Attach the pipeline bus so the file's `StreamCollection` posts once, the
@@ -1592,12 +1608,25 @@ impl PsDemuxN {
             let pts_ns = ns_from_90khz(u.pts_90khz).unwrap_or(0);
             let dts_ns = ns_from_90khz(u.dts_90khz).unwrap_or(pts_ns);
             if !self.announced[port] {
-                out.push_to(
-                    port,
-                    PipelinePacket::CapsChanged(PsDemux::output_caps(kind)),
-                )
-                .await?;
+                // Announce what `port_output_caps` declared: a seeded video
+                // port solved at its Fixed geometry, and the runner's
+                // mid-stream check rejects a Range placeholder on that link.
+                let caps = match (kind, self.seed_geometry) {
+                    (PsStream::Mpeg2, Some(seq)) => Caps::CompressedVideo {
+                        codec: VideoCodec::Mpeg2,
+                        width: Dim::Fixed(seq.width),
+                        height: Dim::Fixed(seq.height),
+                        framerate: Rate::Fixed(seq.framerate_q16),
+                    },
+                    _ => PsDemux::output_caps(kind),
+                };
+                out.push_to(port, PipelinePacket::CapsChanged(caps)).await?;
                 self.announced[port] = true;
+                // A seeded announce already names the geometry; the parsed
+                // sequence header then only re-announces a real change.
+                if let (PsStream::Mpeg2, Some(seq)) = (kind, self.seed_geometry) {
+                    self.refined[port] = Some(seq);
+                }
             }
             if !self.segment_sent[port] {
                 self.segment_sent[port] = true;
@@ -1666,9 +1695,16 @@ impl MultiOutputElement for PsDemuxN {
     /// Declare each port's elementary-stream caps, so the solver negotiates each
     /// branch against its codec at startup. `None` for an out-of-range port.
     fn port_output_caps(&self, port: usize) -> Option<Caps> {
-        self.ports
-            .get(port)
-            .map(|&stream| PsDemux::output_caps(stream))
+        let stream = *self.ports.get(port)?;
+        match (stream, self.seed_geometry) {
+            (PsStream::Mpeg2, Some(seq)) => Some(Caps::CompressedVideo {
+                codec: VideoCodec::Mpeg2,
+                width: Dim::Fixed(seq.width),
+                height: Dim::Fixed(seq.height),
+                framerate: Rate::Fixed(seq.framerate_q16),
+            }),
+            _ => Some(PsDemux::output_caps(stream)),
+        }
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {

@@ -24,8 +24,8 @@ use g2g_core::frame::{Frame, PipelinePacket};
 use g2g_core::{frame::FrameTiming, memory::SystemSlice};
 use g2g_core::{
     AsyncElement, AudioFormat, ByteStreamEncoding, Caps, Dim, G2gError, MemoryDomain,
-    MultiOutputElement, OutputSink, PadDirection, PadTemplates, PropValue, PushOutcome, Rate,
-    SubPictureFormat, VideoCodec,
+    MultiInputElement, MultiOutputElement, OutputSink, PadDirection, PadTemplates, PropValue,
+    PushOutcome, Rate, SubPictureFormat, VideoCodec,
 };
 /// A multi-output sink recording each port's packets in order.
 struct PortTap {
@@ -754,8 +754,9 @@ async fn a_vob_decodes_and_playbin_builds_its_graph() {
         "the decoder ran at the sequence header's geometry"
     );
 
-    // The A/V fan-out: `playbin uri=file://x.vob` builds video and audio
-    // branches, the subpicture track staying off the auto-plugged path.
+    // `playbin uri=file://x.vob` fans the disc out. This fixture carries a
+    // subpicture track, so since M931 the graph is the compositing overlay:
+    // video, audio and subpicture ports.
     let reg = default_registry();
     let line = format!("playbin uri=file://{}", vob.display());
     let graph = g2g_core::runtime::parse_launch(&reg, &line)
@@ -769,8 +770,8 @@ async fn a_vob_decodes_and_playbin_builds_its_graph() {
         .collect();
     assert_eq!(
         demuxes,
-        [g2g_core::graph::NodeKind::Tee(2)],
-        "video + audio branches"
+        [g2g_core::graph::NodeKind::Tee(3)],
+        "video + audio + subpicture branches"
     );
     for path in [vob, idx, sub] {
         let _ = std::fs::remove_file(path);
@@ -1216,6 +1217,218 @@ async fn the_fanout_subpicture_port_opens_on_the_idx_config() {
         frames[1].len(),
         "the cue follows it whole"
     );
+}
+
+/// M931: `playbin uri=file.vob` on a disc with a subpicture track builds the
+/// compositing overlay graph, and a disc without one builds the plain A/V
+/// fan-out. Needs a decoder for the video, so it runs under the `ffmpeg` feature.
+#[cfg(all(target_os = "linux", feature = "ffmpeg"))]
+#[test]
+fn playbin_builds_a_subpicture_overlay_only_when_the_disc_has_one() {
+    if !have_ffmpeg() {
+        eprintln!("skipping: ffmpeg not on PATH");
+        return;
+    }
+    let reg = default_registry();
+
+    // With subpictures: a 2-input compositor blends the cues and the demux fans
+    // video, audio and subpicture.
+    let (vob, idx, sub) = (
+        temp_path("pb.vob"),
+        temp_path("pb.idx"),
+        temp_path("pb.sub"),
+    );
+    author_vob(&vob, &idx, &sub);
+    let graph =
+        g2g_core::runtime::parse_launch(&reg, &format!("playbin uri=file://{}", vob.display()))
+            .unwrap_or_else(|e| panic!("playbin builds the subtitled disc: {e}"));
+    let vg = graph.finish().expect("valid graph");
+    let kinds: Vec<g2g_core::graph::NodeKind> = vg.topo().iter().map(|&n| vg.kind(n)).collect();
+    assert!(
+        kinds
+            .iter()
+            .any(|k| matches!(k, g2g_core::graph::NodeKind::Muxer(2))),
+        "a 2-input compositor blends the cues: {kinds:?}"
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|k| matches!(k, g2g_core::graph::NodeKind::Tee(3))),
+        "the demux fans video, audio and subpicture: {kinds:?}"
+    );
+
+    // Without a subpicture track: the plain A/V fan-out, no compositor.
+    let plain = temp_path("plain.mpg");
+    author_mpg(&plain, "3");
+    let graph =
+        g2g_core::runtime::parse_launch(&reg, &format!("playbin uri=file://{}", plain.display()))
+            .unwrap_or_else(|e| panic!("playbin builds the plain disc: {e}"));
+    let vg = graph.finish().expect("valid graph");
+    let kinds: Vec<g2g_core::graph::NodeKind> = vg.topo().iter().map(|&n| vg.kind(n)).collect();
+    assert!(
+        !kinds
+            .iter()
+            .any(|k| matches!(k, g2g_core::graph::NodeKind::Muxer(_))),
+        "no subpicture track, no overlay: {kinds:?}"
+    );
+    for p in [vob, idx, sub, plain] {
+        let _ = std::fs::remove_file(p);
+    }
+}
+
+/// The pixels the overlay exists for. A cue demuxed from the authored VOB and
+/// decoded is composited over a flat video frame: inside the cue's window the
+/// composite differs from the video, and only within the authored rectangle;
+/// a frame outside the window is the video untouched.
+#[tokio::test]
+async fn composited_frames_carry_the_cue_only_inside_its_window_and_rectangle() {
+    if !have_ffmpeg() {
+        eprintln!("skipping: ffmpeg not on PATH");
+        return;
+    }
+    let (vob, idx, sub) = (
+        temp_path("px.vob"),
+        temp_path("px.idx"),
+        temp_path("px.sub"),
+    );
+    author_vob(&vob, &idx, &sub);
+    let file = std::fs::read(&vob).expect("read the VOB");
+    let demuxed = demux(&file, PsStream::SubPicture).await;
+
+    // Decode the demuxed cues the way the overlay branch does.
+    let mut dec = VobSubDec::new();
+    dec.configure_pipeline(&Caps::SubPicture {
+        format: SubPictureFormat::VobSub,
+    })
+    .expect("vobsubdec configures");
+    let mut cues = Collect::default();
+    for packet in demuxed.packets {
+        if let PipelinePacket::DataFrame(f) = packet {
+            let timing = f.timing;
+            let data = bytes(&f);
+            dec.process(
+                PipelinePacket::DataFrame(Frame::new(
+                    MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
+                    timing,
+                    0,
+                )),
+                &mut cues,
+            )
+            .await
+            .expect("decode a cue");
+        }
+    }
+    let canvases = cues.frames();
+    assert!(canvases.len() >= 2, "painted canvases and clearing ones");
+    // The last painted canvas is the frame before the final clear.
+    let painted = canvases[canvases.len() - 2];
+    let cue = cues_last();
+
+    // Composite it over a flat video frame of a known colour.
+    const FLAT: [u8; 4] = [17, 34, 51, 255];
+    let mut comp = g2g_plugins::compositor::Compositor::new(
+        VOB_W,
+        VOB_H,
+        Vec::from([
+            g2g_plugins::compositor::CompositorPad::at(0, 0),
+            g2g_plugins::compositor::CompositorPad::at(0, 0),
+        ]),
+    );
+    let rgba = Caps::RawVideo {
+        format: g2g_core::RawVideoFormat::Rgba8,
+        width: Dim::Fixed(VOB_W),
+        height: Dim::Fixed(VOB_H),
+        framerate: Rate::Fixed(25 << 16),
+    };
+    for pad in 0..2 {
+        comp.configure_pipeline(pad, &rgba).expect("configure");
+    }
+    let flat = |pts: u64| {
+        let mut buf = Vec::with_capacity((VOB_W * VOB_H * 4) as usize);
+        for _ in 0..VOB_W * VOB_H {
+            buf.extend_from_slice(&FLAT);
+        }
+        PipelinePacket::DataFrame(Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(buf.into_boxed_slice())),
+            FrameTiming {
+                pts_ns: pts,
+                dts_ns: pts,
+                ..FrameTiming::default()
+            },
+            0,
+        ))
+    };
+    let mut out = Collect::default();
+    comp.process(
+        1,
+        PipelinePacket::DataFrame(Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(bytes(painted).into_boxed_slice())),
+            painted.timing,
+            0,
+        )),
+        &mut out,
+    )
+    .await
+    .expect("the cue canvas in");
+    comp.process(0, flat(painted.timing.pts_ns), &mut out)
+        .await
+        .expect("video in");
+
+    let composited = out.frames();
+    assert!(!composited.is_empty(), "the compositor emitted a frame");
+    let inside = bytes(composited[composited.len() - 1]);
+    assert_eq!(inside.len(), (VOB_W * VOB_H * 4) as usize);
+
+    let mut changed = 0usize;
+    for y in 0..VOB_H {
+        for x in 0..VOB_W {
+            let at = ((y * VOB_W + x) * 4) as usize;
+            if inside[at..at + 4] == FLAT {
+                continue;
+            }
+            changed += 1;
+            assert!(
+                (cue.x..cue.x + cue.w).contains(&x) && (cue.y..cue.y + cue.h).contains(&y),
+                "a changed pixel at ({x},{y}) is outside the authored cue rectangle"
+            );
+        }
+    }
+    assert!(changed > 100, "the cue painted its rectangle: {changed} px");
+
+    // Outside the window: the clearing canvas composites to the flat video.
+    let clear = canvases[canvases.len() - 1];
+    let mut out2 = Collect::default();
+    comp.process(
+        1,
+        PipelinePacket::DataFrame(Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(bytes(clear).into_boxed_slice())),
+            clear.timing,
+            0,
+        )),
+        &mut out2,
+    )
+    .await
+    .expect("the clear canvas in");
+    comp.process(0, flat(clear.timing.pts_ns), &mut out2)
+        .await
+        .expect("video in");
+    let after = out2.frames();
+    if let Some(f) = after.last() {
+        let px = bytes(f);
+        assert!(
+            px.chunks(4).all(|p| p == FLAT),
+            "after the cue's hide time the video is untouched"
+        );
+    }
+    for p in [vob, idx, sub] {
+        let _ = std::fs::remove_file(p);
+    }
+}
+
+/// The last cue the fixture authors, whose rectangle the composite must respect.
+fn cues_last() -> vobsub_fixture::Cue {
+    let mut all = cues();
+    all.pop().expect("the fixture authors cues")
 }
 
 // --- synthetic program stream builders ---

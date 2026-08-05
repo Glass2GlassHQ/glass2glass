@@ -300,6 +300,10 @@ impl MultiInputElement for FlvMuxN {
                 // CapsChanged is consumed by the runner's muxer arm; the sequence
                 // headers are fixed from the first AU's in-band init.
                 PipelinePacket::CapsChanged(_) => return Ok(()),
+                // A per-input `Segment` maps that stream to running time; a muxed
+                // container carries its own timestamps, so it is consumed rather
+                // than forwarded into the byte stream.
+                PipelinePacket::Segment(_) => return Ok(()),
                 other => {
                     out.push(other).await?;
                     return Ok(());

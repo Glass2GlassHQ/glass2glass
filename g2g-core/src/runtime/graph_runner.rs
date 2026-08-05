@@ -1718,7 +1718,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                     Some(GraphNodeRef::Demux(demux)) => Box::pin(demux_arm(
                         demux,
                         in_rx,
-                        out_txs,
+                        demux_out_txs_by_port(&vg, node, out_txs),
                         probes[node.0 as usize].clone(),
                     )),
                     _ => Box::pin(tee_arm(in_rx, out_txs, branch_drop)),
@@ -2065,6 +2065,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                 match element {
                     Some(GraphNodeRef::Demux(demux)) => {
                         let demux_probe = probes[node.0 as usize].clone();
+                        let out_txs = demux_out_txs_by_port(&vg, node, out_txs);
                         alloc::boxed::Box::new(move || -> LocalArmFuture {
                             Box::pin(demux_arm(demux, in_rx, out_txs, demux_probe))
                         })
@@ -3342,6 +3343,25 @@ fn relay_reverse(pad_rxs: &[(usize, LinkReceiver)], reverse: &[Option<ReverseCha
 /// Order a terminal fan-out source's output senders by PORT (out-edges arrive
 /// in edge order; the port is each edge's `src.index`), wrapped as the
 /// [`MultiOutputSink`] the source pushes into.
+/// Order a demux node's output senders by each out-edge's source pad index, so
+/// `push_to(port)` reaches the branch linked to that port. Out-edges arrive in
+/// insertion order, which only matches the port order when the graph happened
+/// to be linked port-first (launch lines do, builders need not).
+fn demux_out_txs_by_port<'a>(
+    vg: &ValidatedGraph<GraphNodeRef<'a>>,
+    node: NodeId,
+    out_txs: Vec<LinkSender>,
+) -> Vec<LinkSender> {
+    let mut indexed: Vec<(usize, LinkSender)> = vg
+        .out_edges(node)
+        .iter()
+        .map(|&oe| vg.edge(oe).src.index as usize)
+        .zip(out_txs)
+        .collect();
+    indexed.sort_by_key(|(port, _)| *port);
+    indexed.into_iter().map(|(_, tx)| tx).collect()
+}
+
 fn fanout_src_ports<'a>(
     vg: &ValidatedGraph<GraphNodeRef<'a>>,
     node: NodeId,
@@ -3985,8 +4005,15 @@ async fn muxer_arm_pts<'a>(
                 beta.pad_changed(&mut *mux, slot, input_caps, &current_output)
                     .await?;
             }
-            // Flush / Segment are not part of the muxer-input contract here.
-            _ => {}
+            // Every other packet reaches the element, as on the single-input
+            // path and in `muxer_arm`: `Segment` and `Flush` are per-input
+            // control a fan-in has to see. A fan-in that swallows the segment
+            // leaves a paced sink downstream with no running-time mapping (the
+            // compositor forwards its timing input's; a muxer whose timestamps
+            // are already container-mapped ignores it).
+            packet => {
+                mux.process(pad, packet, &mut adapter).await?;
+            }
         }
     }
 }
