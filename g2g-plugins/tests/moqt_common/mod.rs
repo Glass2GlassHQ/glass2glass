@@ -1,6 +1,7 @@
 //! Helpers shared by the MoQ Transport test binaries (`m902_moqt`,
 //! `m903_moqt_subscribe`, `m905_moqt_datagram`, `m906_moqt_control_pump`,
-//! `m907_moqt_v18`, `m912_moqt_fetch`): the throwaway certificate and QUIC
+//! `m907_moqt_v18`, `m912_moqt_fetch`, `m913_moqt_publish`,
+//! `m914_moqt_session`, `m915_moqt_public_relay`): the throwaway certificate and QUIC
 //! endpoint, the fMP4 the publisher is fed, the output sinks, the
 //! reference-peer lookup, the fragment comparisons, and the scripted peers of
 //! each draft. One definition, included per test binary via `mod moqt_common;`.
@@ -27,7 +28,6 @@ use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{Caps, Dim, G2gError, OutputSink, PushOutcome, Rate, VideoCodec};
 
 use g2g_plugins::moqtsink::MoqtSink;
-use g2g_plugins::mp4mux::Mp4Mux;
 
 /// How long the dial from `configure_pipeline` gets to reach the peer.
 pub(crate) const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
@@ -76,31 +76,10 @@ pub(crate) async fn publish_padded_fragments(
     count: u64,
     pad: usize,
 ) -> Vec<u8> {
-    let mut mux = Mp4Mux::new();
-    mux.configure_pipeline(&h264_caps(64, 48))
-        .expect("mp4mux caps");
+    let mut mux = VideoMuxer::new(pad);
     let mut published = Vec::new();
-    for index in 0..count {
-        let mut captured = CaptureSink::default();
-        mux.process(
-            PipelinePacket::DataFrame(frame(
-                padded_access_unit(index, pad),
-                index * 33_333_333,
-                index,
-            )),
-            &mut captured,
-        )
-        .await
-        .expect("mux access unit");
-        for chunk in captured.frames {
-            published.extend_from_slice(&chunk);
-            sink.process(
-                PipelinePacket::DataFrame(frame(chunk, index * 33_333_333, index)),
-                &mut NullOut,
-            )
-            .await
-            .expect("publish fragment");
-        }
+    for _ in 0..count {
+        published.extend(mux.step(sink).await);
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     published
@@ -189,6 +168,58 @@ pub(crate) async fn publish_av_fragments(sink: &mut MoqtSink, count: u64) -> Vec
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     published
+}
+
+/// The video-only muxer the single-track tests publish through, stepped one
+/// access unit at a time so a broadcast can stay live while a subscriber
+/// attaches.
+pub(crate) struct VideoMuxer {
+    mux: g2g_plugins::mp4mux::Mp4Mux,
+    index: u64,
+    pad: usize,
+}
+
+impl Default for VideoMuxer {
+    fn default() -> Self {
+        Self::new(0)
+    }
+}
+
+impl VideoMuxer {
+    /// `pad` bytes are added to every access unit, for a test that wants
+    /// objects large enough to fill a peer's flow-control window.
+    pub(crate) fn new(pad: usize) -> Self {
+        let mut mux = g2g_plugins::mp4mux::Mp4Mux::new();
+        mux.configure_pipeline(&h264_caps(64, 48))
+            .expect("mp4mux caps");
+        Self { mux, index: 0, pad }
+    }
+
+    /// Mux the next access unit and publish the fragments it produced.
+    pub(crate) async fn step(&mut self, sink: &mut MoqtSink) -> Vec<u8> {
+        let index = self.index;
+        self.index += 1;
+        let pts = index * 33_333_333;
+        let mut captured = CaptureSink::default();
+        self.mux
+            .process(
+                PipelinePacket::DataFrame(frame(padded_access_unit(index, self.pad), pts, index)),
+                &mut captured,
+            )
+            .await
+            .expect("mux access unit");
+        let mut published = Vec::new();
+        for chunk in captured.frames {
+            published.extend_from_slice(&chunk);
+            sink.process(
+                PipelinePacket::DataFrame(frame(chunk, pts, index)),
+                &mut NullOut,
+            )
+            .await
+            .expect("publish fragment");
+        }
+        published
+    }
 }
 
 /// One ADTS AAC frame with a recognizable payload.

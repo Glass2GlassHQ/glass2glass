@@ -19,6 +19,16 @@
 //!   object order (see [`reassembly`](crate::moqt::reassembly) for the ordering
 //!   policy and its bounds).
 //!
+//! `catchup-groups` asks for that many groups before the live edge with a
+//! joining FETCH and emits them ahead of the live objects, so playback starts
+//! with a buffer rather than at the edge. A track the publisher offers with
+//! PUBLISH, rather than waiting to be asked, establishes the same subscription
+//! (§9.13); one for a track this run does not want is refused.
+//!
+//! The session machinery is shared with the multi-track
+//! [`MoqtSessionSrc`](crate::moqtsessionsrc::MoqtSessionSrc); see
+//! [`subscriber`](crate::moqt::subscriber).
+//!
 //! The stream ends on the publisher's PUBLISH_DONE for the media subscription,
 //! on the session closing, or on `num-buffers` / `timeout`.
 

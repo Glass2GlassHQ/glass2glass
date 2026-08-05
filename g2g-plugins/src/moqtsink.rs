@@ -31,6 +31,14 @@
 //! losing either loses the whole broadcast. A group carried by datagrams is
 //! closed by an end-of-group status datagram, because no stream ends to say so.
 //!
+//! The last `cache-groups` groups of every track are kept in memory, so a
+//! subscriber can FETCH a range it has already missed (standalone, or joined to
+//! one of its subscriptions); a range that was never published or has fallen out
+//! of the cache is refused with INVALID_RANGE rather than left hanging.
+//! `publish=true` turns the offer round: each track is announced with PUBLISH as
+//! soon as the `moov` names it, and a subscriber that accepts one gets the same
+//! subscription it would have got by asking.
+//!
 //! Every group's stream is opened only after SUBSCRIBE_OK for that
 //! subscription, so the subscriber can resolve the track alias in the stream
 //! header. The session is dialled when the pipeline is configured, and inbound

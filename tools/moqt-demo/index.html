@@ -41,7 +41,7 @@ plays the fragmented MP4 through Media Source Extensions.</p>
 
   // The headless driver reads these off the page rather than the console, so a
   // count is never lost to log truncation.
-  window.g2gState = { started: false, error: null, fragments: 0 };
+  window.g2gState = { started: false, error: null, fragments: 0, audioFragments: 0 };
   window.g2gReport = () => playbackReport($("view"), $("frame"));
 
   async function start() {
@@ -57,7 +57,10 @@ plays the fragmented MP4 through Media Source Extensions.</p>
       });
       window.g2gState.started = true;
       $("status").textContent = "playing";
-      setInterval(() => { window.g2gState.fragments = state.fragments; }, 100);
+      setInterval(() => {
+        window.g2gState.fragments = state.fragments;
+        window.g2gState.audioFragments = state.audioFragments;
+      }, 100);
     } catch (e) {
       window.g2gState.error = String(e);
       $("status").textContent = "failed";

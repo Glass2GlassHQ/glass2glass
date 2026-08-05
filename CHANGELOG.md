@@ -22,6 +22,14 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 - M916: an `opus-rs` conformance gate (`tools/opus-rs-gate`) rejects the pure-Rust Opus decoder; the FFI path stays.
 
+- M915: the MoQ Transport browser demo publishes and plays audio alongside the video.
+
+- M914: `moqtsessionsrc` plays several tracks of one MoQ Transport session, a pad each.
+
+- M913: `moqtsink publish=true` offers its tracks with PUBLISH, and `moqtsrc` accepts one as a subscription.
+
+- M912: `moqtsink` serves FETCH from a bounded per-track object cache and `moqtsrc` can catch up with a joining FETCH, on both drafts.
+
 - M911: `remotewtsink` can carry data frames as QUIC datagrams (`datagrams=true`, oversized frames fall back to the stream), and the WebTransport elements take a `congestion-control` property.
 
 - M910: `mkvdemux` inflates zlib and header-stripped `ContentEncoding` blocks.

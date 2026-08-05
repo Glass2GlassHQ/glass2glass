@@ -283,12 +283,9 @@ Phased plan:
 - **WebTransport residuals:** the `web-transport-quinn = "=0.11.12"` pin and
   the `idna_adapter` 1.1.0 hold in `Cargo.lock` can both drop once the
   workspace MSRV moves past 1.91.
-- **MoQ Transport:** FETCH is unimplemented on both sides: a FETCH is refused
-  with `NOT_SUPPORTED`. Beyond that: a validated draft-18 interop run against a
-  non-Cloudflare implementation (Meta's public moxygen relay serves
-  `https://fb.mvfst.net:9448/moq-relay`, versions 14/16/18); `PUBLISH`-initiated
-  (publisher-driven) subscriptions; multi-track playback (the subscriber, and
-  the browser demo, play one media track); and audio in the browser demo.
+- **MoQ Transport:** a wall-clock pacing element for live-shaped demo
+  publishers (the unpaced demo needs half-second fragments to keep the
+  browser's append queue sane; a `clocksync`-style element is the fix).
 - **RTP over QUIC (RoQ):** blocked on the spec. draft-ietf-avtcore-rtp-over-quic
   expired at -14 (its ALPN is forbidden until an RFC exists) and the WG missed
   its milestone; revisit only if the draft revives. Peers if it does:
