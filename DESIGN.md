@@ -3053,14 +3053,40 @@ whole frame both ways (the honest cost of a generic packet-in / packet-out
 stage), fine on a LAN; a `metadata`-only return for the pixels-unchanged case is
 a future optimization.
 
-Reconnection (M558) makes the edge resilient across both transports.
-`RemoteSink` / `RemoteWsSink` gain `with_reconnect(attempts)` (and a
+**WebTransport transport (`webtransport`).** `RemoteWtSink` / `RemoteWtSrc` /
+`RemoteWtTransform` (M901) are the third carrier of the same wire codec, over one
+reliable bidirectional WebTransport stream per connection (HTTP/3 CONNECT over
+QUIC, via `web-transport-quinn`). A WebTransport stream is a QUIC stream, so it is
+a byte stream with no message boundaries: the framing is the TCP pair's `u32`
+length prefix, shared with it verbatim, not the WebSocket pair's
+one-message-per-packet. The protocol above that is identical (caps as the first
+message, discovered by the server in `intercept_caps`; the transform's FIFO
+frame-out / processed-frame-back round trip), and reconnection behaves as below.
+What it adds over the WebSocket carrier is the QUIC connection under it:
+head-of-line blocking is per stream, the handshake is 1-RTT, and a browser peer
+reaches it with `new WebTransport(url)` and no TLS-terminating proxy in front.
+QUIC is always TLS, so unlike the other two servers this one cannot start without
+a `certificate` / `private-key` PEM pair, and a client that will not trust a
+system root names the certificate by SHA-256 digest in
+`server-certificate-hashes` (the browser API's `serverCertificateHashes`).
+Datagram mode (unreliable, MTU-bounded) is a separate carrier and is not used:
+this milestone is reliable-stream only.
+
+The three carriers share their machinery rather than repeating it: `RemoteClient`
+(send side) and `RemoteSource` (receive side) are generic over a transport, and
+`RemoteTransform<T>` (the remote stage) is generic over a `PacketDuplex`
+transport, so each carrier file supplies only what is transport-specific (how a
+connection is dialed or a listener bound, how one packet is written and read) plus
+its element identity and properties.
+
+Reconnection (M558) makes the edge resilient across the transports.
+`RemoteSink` / `RemoteWsSink` / `RemoteWtSink` gain `with_reconnect(attempts)` (and a
 `reconnect-attempts` property): the initial connect is deferred and retried with a
 short backoff, and a mid-stream send failure drops the dead socket, reconnects,
 and re-sends the current caps (the far side's required first packet) before
 retrying, so a peer that starts late or restarts is transparently tolerated up to
-the attempt budget. Symmetrically, `RemoteSrc` / `RemoteWsSrc` gain
-`with_reconnect()` (a `keep-listening` property): a client that drops *without* a
+the attempt budget. Symmetrically, `RemoteSrc` / `RemoteWsSrc` / `RemoteWtSrc`
+gain `with_reconnect()` (a `keep-listening` property): a client that drops *without* a
 clean `Eos` is not the stream's end; the source keeps its listener open, accepts a
 replacement client (which re-sends its leading caps, forwarded downstream so it
 re-negotiates if changed), and continues. Only an explicit `Eos` (or a frame
@@ -3070,8 +3096,9 @@ stream across a sender that drops and is replaced).
 
 Remaining follow-ups: a native WebSocket server that *pushes* an unsolicited
 stream to a browser `WsWireSrc` client (a receive-only browser edge, as opposed to
-the transform's request/response), and a subgraph-as-a-unit wrapper (remoting a
-whole `Bin` rather than a single edge).
+the transform's request/response), a subgraph-as-a-unit wrapper (remoting a whole
+`Bin` rather than a single edge), and a WebTransport datagram carrier for the
+drop-tolerant case.
 
 ### 4.21 Local Zero-Copy IPC (CUDA)
 

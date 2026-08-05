@@ -43,13 +43,12 @@ use std::net::{SocketAddr, TcpStream as StdTcpStream};
 
 use tokio::io::AsyncWriteExt;
 
-use g2g_core::wire::encode_packet;
 use g2g_core::{G2gError, PipelinePacket, PropError, PropKind, PropValue, PropertySpec};
 
 use crate::filesink::io_err;
 use crate::remoteclient::{PacketClient, RemoteClient};
 use crate::remotesource::TransportFuture;
-use crate::remotewire::map_wire;
+use crate::remotewire::send_framed;
 
 /// TCP `RemoteSink`: a length-framed [`g2g_core::wire`] stream over a plain TCP
 /// connection, received by [`RemoteSrc`](crate::remotesrc).
@@ -75,17 +74,6 @@ pub struct TcpClient {
     /// reconnect is off; wrapped into the tokio stream lazily on first `connect`.
     std_stream: Option<StdTcpStream>,
     socket: Option<tokio::net::TcpStream>,
-}
-
-impl TcpClient {
-    /// Length-frame and write one already-encoded wire body.
-    async fn write_frame(sock: &mut tokio::net::TcpStream, body: &[u8]) -> Result<(), G2gError> {
-        sock.write_all(&(body.len() as u32).to_le_bytes())
-            .await
-            .map_err(io_err)?;
-        sock.write_all(body).await.map_err(io_err)?;
-        Ok(())
-    }
 }
 
 impl PacketClient for TcpClient {
@@ -129,9 +117,8 @@ impl PacketClient for TcpClient {
 
     fn send<'a>(&'a mut self, packet: &'a PipelinePacket) -> TransportFuture<'a, ()> {
         Box::pin(async move {
-            let body = encode_packet(packet).map_err(map_wire)?;
             let sock = self.socket.as_mut().ok_or(G2gError::NotConfigured)?;
-            Self::write_frame(sock, &body).await
+            send_framed(sock, packet).await
         })
     }
 

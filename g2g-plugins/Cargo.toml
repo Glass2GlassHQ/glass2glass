@@ -22,7 +22,8 @@ default = []
 # explicitly), and the no_std `embassy*` RTOS backends.
 linux-full = [
     "multi-thread", "plugin-loader",
-    "rtsp", "rtsp-server", "srt", "udp-egress", "udp-ingress", "rtmp", "webrtc", "remote", "remote-ws",
+    "rtsp", "rtsp-server", "srt", "udp-egress", "udp-ingress", "rtmp", "webrtc",
+    "remote", "remote-ws", "webtransport",
     "http-src", "hls", "dash",
     "ffmpeg", "vaapi", "v4l2",
     "opus", "vorbis", "vpx", "av1-encode", "mjpeg", "mjpeg-encode",
@@ -98,6 +99,14 @@ remote = ["std", "tokio/net", "tokio/io-util"]
 # tokio-tungstenite (0.24, the version the detect-server demo already uses) +
 # futures-util's Sink/Stream adapters; implies std + tokio net/io-util.
 remote-ws = ["std", "tokio/net", "tokio/io-util", "dep:tokio-tungstenite", "futures-util/sink"]
+# Distributed-graph transport over WebTransport (M901): the third carrier of the
+# same wire-codec stream, over one reliable bidirectional QUIC stream per
+# connection (HTTP/3 CONNECT). RemoteWtSink (client) + RemoteWtSrc (server) +
+# RemoteWtTransform mirror the WebSocket family; the stream is a byte stream, so
+# the framing is the `remote` pair's u32 length prefix. QUIC is always TLS, so
+# the server takes a certificate / private-key PEM pair. Pulls
+# web-transport-quinn; implies std + tokio net/io-util.
+webtransport = ["std", "tokio/net", "tokio/io-util", "tokio/time", "dep:web-transport-quinn", "dep:url"]
 # Live pipeline dashboard: `g2g-launch --observe <port>` runs the pipeline while
 # streaming its `Observer` telemetry + bus events as JSON over a WebSocket, served
 # alongside the static dashboard page on one port. Reuses the remote-ws WS stack
@@ -760,6 +769,11 @@ futures-util = { version = "0.3", optional = true, default-features = false, fea
 # tungstenite version. Default features (connect + handshake, no TLS) suffice: the
 # pair speaks plain ws:// (wrap in a TLS terminator for wss://).
 tokio-tungstenite = { version = "0.24", optional = true }
+# WebTransport (HTTP/3 over QUIC) transport for the distributed-graph primitive
+# (webtransport feature). Pinned exactly: 0.11.13 pulls `kio`, whose MSRV is 1.91,
+# above this workspace's 1.85. `ring` rather than the default aws-lc-rs backend:
+# rustls already resolves on ring here, and aws-lc-sys needs cmake at build time.
+web-transport-quinn = { version = "=0.11.12", optional = true, default-features = false, features = ["ring"] }
 # TLS for TURN-over-TLS (`turns:`) and the LiveKit `wss://` signalling: the same
 # native-tls stack reqwest's default-tls already links.
 tokio-native-tls = { version = "0.3", optional = true }
@@ -1070,6 +1084,9 @@ pkg-config = "0.3"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros", "time", "sync", "net"] }
+# Self-signed certificate for the m901 WebTransport tests: QUIC is always TLS, so
+# both the loopback server and the aioquic peer need a throwaway cert + key.
+rcgen = "0.14"
 # Enables the dynamic-slot path (ElementSlot/SwapHandle) for the m8_slot_swap
 # integration test only. Feature unification keeps the lib build at `runtime`.
 g2g-core = { path = "../g2g-core", features = ["dyn-slot"] }

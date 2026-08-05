@@ -23,13 +23,17 @@
 
 use alloc::boxed::Box;
 
+use std::net::{SocketAddr, TcpListener as StdTcpListener};
+
 use tokio::net::TcpStream;
 use tokio_tungstenite::{accept_async, WebSocketStream};
 
-use g2g_core::{Caps, G2gError, HardwareError, PipelinePacket, PropKind, PropertySpec};
+use g2g_core::{Caps, PipelinePacket, PropKind, PropertySpec};
 
 use crate::filesink::io_err;
-use crate::remotesource::{PacketTransport, RemoteSource, TransportFuture};
+use crate::remotesource::{
+    leading_caps, listen_tcp, PacketTransport, RemoteSource, TransportFuture,
+};
 use crate::remotewsio::recv_wire;
 
 /// WebSocket `RemoteWsSrc`: a [`g2g_core::wire`] stream carried one packet per
@@ -38,11 +42,12 @@ use crate::remotewsio::recv_wire;
 pub type RemoteWsSrc = RemoteSource<WsTransport>;
 
 /// WebSocket transport for [`RemoteSource`].
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct WsTransport;
 
 impl PacketTransport for WsTransport {
     type Conn = WebSocketStream<TcpStream>;
+    type Listener = tokio::net::TcpListener;
     const NAME: &'static str = "Remote WebSocket source";
     const DESCRIPTION: &'static str =
         "Receives a serialized PipelinePacket stream over a WebSocket from a remote RemoteWsSink";
@@ -67,18 +72,23 @@ impl PacketTransport for WsTransport {
         .with_default("false"),
     ];
 
-    fn accept(listener: &tokio::net::TcpListener) -> TransportFuture<'_, (Self::Conn, Caps)> {
+    fn listen(
+        &mut self,
+        bind: SocketAddr,
+        adopt: Option<StdTcpListener>,
+    ) -> TransportFuture<'_, Self::Listener> {
+        Box::pin(async move { listen_tcp(bind, adopt).await })
+    }
+
+    fn listen_addr(listener: &Self::Listener) -> Option<SocketAddr> {
+        listener.local_addr().ok()
+    }
+
+    fn accept(listener: &mut Self::Listener) -> TransportFuture<'_, (Self::Conn, Caps)> {
         Box::pin(async move {
             let (tcp, _peer) = listener.accept().await.map_err(io_err)?;
             let mut socket = accept_async(tcp).await.map_err(crate::remotewsio::ws_err)?;
-            let caps = match recv_wire(&mut socket)
-                .await?
-                .ok_or(G2gError::NotConfigured)?
-            {
-                PipelinePacket::CapsChanged(caps) => caps,
-                // Any other first packet violates the protocol.
-                _ => return Err(G2gError::Hardware(HardwareError::Other)),
-            };
+            let caps = leading_caps(recv_wire(&mut socket).await?)?;
             Ok((socket, caps))
         })
     }

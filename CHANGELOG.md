@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M901: `remotewtsink` / `remotewtsrc` / `remotewttransform` carry the distributed-graph wire stream over WebTransport (HTTP/3 over QUIC), validated both directions against an independent aioquic peer.
+
 - M900: `dvbsubdec` decodes DVB subtitles (EN 300 743) from TS `subtitling_descriptor` streams and mkv `S_DVBSUB` tracks, pixel-exact against ffmpeg.
 
 - M899: `vobsubdec` decodes DVD VobSub bitmap subtitles (`Caps::SubPicture`, mkv `S_VOBSUB`) into RGBA cue canvases for the compositor, pixel-validated against ffmpeg.

@@ -281,6 +281,11 @@ Phased plan:
 
 ## Egress / transports
 
+- **WebTransport carrier residuals:** a datagram carrier for the drop-tolerant
+  case, and a `congestion-control` property (`web-transport-quinn` offers BBR /
+  low-latency on both builders; the elements take the default CUBIC). The
+  `web-transport-quinn = "=0.11.12"` pin and the `idna_adapter` 1.1.0 hold in
+  `Cargo.lock` can both drop once the workspace MSRV moves past 1.91.
 - **RTP over QUIC (RoQ):** blocked on the spec. draft-ietf-avtcore-rtp-over-quic
   expired at -14 (its ALPN is forbidden until an RFC exists) and the WG missed
   its milestone; revisit only if the draft revives. Peers if it does:

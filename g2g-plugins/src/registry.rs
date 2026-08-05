@@ -142,6 +142,12 @@ use crate::remotewssink::RemoteWsSink;
 use crate::remotewssrc::RemoteWsSrc;
 #[cfg(feature = "remote-ws")]
 use crate::remotewstransform::RemoteWsTransform;
+#[cfg(feature = "webtransport")]
+use crate::remotewtsink::RemoteWtSink;
+#[cfg(feature = "webtransport")]
+use crate::remotewtsrc::RemoteWtSrc;
+#[cfg(feature = "webtransport")]
+use crate::remotewttransform::RemoteWtTransform;
 #[cfg(feature = "rtmp")]
 use crate::rtmpsink::RtmpSink;
 #[cfg(feature = "rtmp")]
@@ -1424,6 +1430,30 @@ fn register_feature_gated(reg: &mut Registry) {
     reg.register_launch(LaunchFactory::of::<RemoteWsTransform>(
         "remotewstransform",
         || Box::new(RemoteWsTransform::new("ws://127.0.0.1:9602")),
+    ));
+    // WebTransport sibling of the same family (M901): the same wire codec over one
+    // reliable bidirectional QUIC stream. `remotewtsrc` also discovers its caps
+    // from the wire on connect, so the declared caps here are a nominal catalog
+    // default; it needs `certificate` / `private-key` to start.
+    #[cfg(feature = "webtransport")]
+    reg.register_source(SourceFactory::new(
+        "remotewtsrc",
+        Caps::RawVideo {
+            format: RawVideoFormat::Rgba8,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        },
+        || Box::new(RemoteWtSrc::new("0.0.0.0:9603".parse().unwrap())),
+    ));
+    #[cfg(feature = "webtransport")]
+    reg.register_launch(LaunchFactory::of::<RemoteWtSink>("remotewtsink", || {
+        Box::new(RemoteWtSink::new("https://127.0.0.1:9603"))
+    }));
+    #[cfg(feature = "webtransport")]
+    reg.register_launch(LaunchFactory::of::<RemoteWtTransform>(
+        "remotewttransform",
+        || Box::new(RemoteWtTransform::new("https://127.0.0.1:9604")),
     ));
     // Local zero-copy transports (M556 / M557): same-machine GPU-resident (CUDA
     // IPC) and vendor-neutral (DMABUF over SCM_RIGHTS) sink/src pairs. Like the

@@ -531,19 +531,28 @@ pub mod remotesrc;
 #[cfg(any(
     feature = "remote",
     feature = "remote-ws",
+    feature = "webtransport",
     all(target_arch = "wasm32", feature = "web")
 ))]
 mod remotewire;
 
 // Shared receive-side core for the distributed-graph source elements (TCP
-// RemoteSrc + WebSocket RemoteWsSrc), parameterized over the transport.
-#[cfg(any(feature = "remote", feature = "remote-ws"))]
+// RemoteSrc + WebSocket RemoteWsSrc + WebTransport RemoteWtSrc), parameterized
+// over the transport.
+#[cfg(any(feature = "remote", feature = "remote-ws", feature = "webtransport"))]
 pub mod remotesource;
 
 // Shared send-side core for the distributed-graph sink elements (TCP RemoteSink
-// + WebSocket RemoteWsSink), parameterized over the transport.
-#[cfg(any(feature = "remote", feature = "remote-ws"))]
+// + WebSocket RemoteWsSink + WebTransport RemoteWtSink), parameterized over the
+// transport.
+#[cfg(any(feature = "remote", feature = "remote-ws", feature = "webtransport"))]
 pub mod remoteclient;
+
+// Shared core for the distributed-graph remote-transform elements (WebSocket
+// RemoteWsTransform + WebTransport RemoteWtTransform): the FIFO frame-out /
+// processed-frame-back round trip, parameterized over the transport.
+#[cfg(any(feature = "remote-ws", feature = "webtransport"))]
+pub mod remotetransform;
 
 // Shared `host`/`address` + `port` property get/set for the network source/sink
 // elements (SocketAddr-backed). Collapses the identical string->IpAddr and
@@ -552,6 +561,7 @@ pub mod remoteclient;
 #[cfg(any(
     feature = "remote",
     feature = "remote-ws",
+    feature = "webtransport",
     feature = "rtmp",
     feature = "rtsp-server",
     feature = "srt",
@@ -576,6 +586,20 @@ pub mod remotewssrc;
 // bidirectional, round-trip generalization of the browser WebRemoteDetect shim.
 #[cfg(feature = "remote-ws")]
 pub mod remotewstransform;
+
+// WebTransport sibling of the same family (M901): RemoteWtSink (client) +
+// RemoteWtSrc (server) + RemoteWtTransform carry the identical wire-codec stream
+// over one reliable bidirectional QUIC stream (HTTP/3 CONNECT), so a peer that
+// speaks WebTransport (a browser, or a native QUIC client) joins the same
+// distributed primitive. Behind `webtransport`.
+#[cfg(feature = "webtransport")]
+pub mod remotewtio;
+#[cfg(feature = "webtransport")]
+pub mod remotewtsink;
+#[cfg(feature = "webtransport")]
+pub mod remotewtsrc;
+#[cfg(feature = "webtransport")]
+pub mod remotewttransform;
 
 // Media Foundation decode is Windows-only. The `windows` dependency is
 // target-gated, so the module only exists when building for Windows with the

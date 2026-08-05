@@ -50,20 +50,33 @@ impl RemoteWsSink {
     /// Send the packet stream to `url` (the [`RemoteWsSrc`](crate::remotewssrc)
     /// server, e.g. `ws://127.0.0.1:9601`).
     pub fn new(url: impl Into<String>) -> Self {
-        RemoteClient::from_transport(WsClient {
-            url: url.into(),
-            socket: None,
-        })
+        RemoteClient::from_transport(WsClient::new(url))
     }
 }
 
-/// WebSocket transport for [`RemoteClient`].
+/// WebSocket transport for [`RemoteClient`] (and, read back, for the
+/// [`RemoteWsTransform`](crate::remotewstransform) round trip).
 #[derive(Debug)]
 pub struct WsClient {
     /// WebSocket URL of the `RemoteWsSrc` server (e.g. `ws://127.0.0.1:9601`).
     url: String,
     /// Opened lazily on the first send (the handshake is async).
     socket: Option<WebSocketStream<MaybeTlsStream<TcpStream>>>,
+}
+
+impl WsClient {
+    /// Dial `url` on first use.
+    pub(crate) fn new(url: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            socket: None,
+        }
+    }
+
+    /// The live socket, for the transform's reply read.
+    pub(crate) fn socket_mut(&mut self) -> Option<&mut WebSocketStream<MaybeTlsStream<TcpStream>>> {
+        self.socket.as_mut()
+    }
 }
 
 impl PacketClient for WsClient {
