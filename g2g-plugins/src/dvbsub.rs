@@ -415,7 +415,7 @@ impl DvbSubDecoder {
                         continue;
                     }
                     let at = (cy * self.width + cx) as usize * 4;
-                    crate::paint::blend_px(&mut canvas, at, src, 255);
+                    crate::paint::over_px(&mut canvas, at, src);
                 }
             }
         }
@@ -906,10 +906,16 @@ mod tests {
 
     /// A CLUT whose 4-bit entry 1 is opaque and entry 0 transparent.
     fn clut_segment(page_id: u16) -> Vec<u8> {
+        clut_segment_t(page_id, 0x00)
+    }
+
+    /// As [`clut_segment`], with entry 1 carrying transparency `t` (0 opaque,
+    /// 255 clear), so a test can paint a translucent cue.
+    fn clut_segment_t(page_id: u16, t: u8) -> Vec<u8> {
         let body = [
             0x00, 0x0f, // CLUT id 0, version 0
             0x00, 0x5f, 0x10, 0x80, 0x80, 0xff, // entry 0, 4-bit, full range, transparent
-            0x01, 0x5f, 0x51, 0xf0, 0x5a, 0x00, // entry 1, 4-bit, full range, opaque red
+            0x01, 0x5f, 0x51, 0xf0, 0x5a, t, // entry 1, 4-bit, full range, red
         ];
         seg(SEG_CLUT_DEFINITION, page_id, &body)
     }
@@ -982,6 +988,11 @@ mod tests {
 
     /// A whole display set placing a `w` x `h` red block at (`x`, `y`).
     fn display_set(page_id: u16, x: u16, y: u16, w: usize, h: usize) -> Vec<u8> {
+        display_set_t(page_id, x, y, w, h, 0x00)
+    }
+
+    /// As [`display_set`], with the block's CLUT entry at transparency `t`.
+    fn display_set_t(page_id: u16, x: u16, y: u16, w: usize, h: usize, t: u8) -> Vec<u8> {
         let mut out = Vec::from([DATA_IDENTIFIER, 0x00]);
         out.extend_from_slice(&seg(
             SEG_DISPLAY_DEFINITION,
@@ -989,7 +1000,7 @@ mod tests {
             &[0x00, 0x02, 0xcf, 0x02, 0x3f],
         ));
         out.extend_from_slice(&page_segment(page_id, &[(0, x, y)]));
-        out.extend_from_slice(&clut_segment(page_id));
+        out.extend_from_slice(&clut_segment_t(page_id, t));
         out.extend_from_slice(&region_segment(page_id, w as u16, h as u16));
         out.extend_from_slice(&object_segment(page_id, w, h));
         out.extend_from_slice(&seg(0x80, page_id, &[]));
@@ -1016,6 +1027,20 @@ mod tests {
         assert_eq!(pixel(&page, 99, 40), [0, 0, 0, 0]);
         assert_eq!(pixel(&page, 300, 99), [0, 0, 0, 0]);
         assert_eq!(pixel(&page, 100, 100), [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn a_translucent_cue_keeps_its_colour_against_the_cleared_canvas() {
+        let mut dec = DvbSubDecoder::new();
+        // transparency 0x80, so the entry is a half transparent red, not a dark one
+        let page = dec.feed(&display_set_t(1, 100, 40, 200, 60, 0x80)).unwrap();
+        let px = pixel(&page, 100, 40);
+        assert_eq!(px[3], 127, "alpha carries the transparency");
+        assert_eq!(
+            [px[0], px[1], px[2]],
+            [254, 0, 0],
+            "the colour is the opaque cue's, not premultiplied down by its alpha"
+        );
     }
 
     #[test]
