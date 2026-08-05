@@ -199,8 +199,8 @@ pub use meta::FrameMetaSet;
 #[cfg(feature = "metadata")]
 pub use meta::{
     AnalyticsMeta, AnalyticsNode, BBox, Blob, BlobMeta, CaptionMeta, CaptionTriple, Chromaticity,
-    Classification, FrameMeta, HdrStaticMeta, MasteringDisplay, ObjectDetection, Propagation,
-    Relation, RelationKind, TimecodeMeta, Tracking, Transform,
+    Classification, FrameMeta, HdrStaticMeta, Mask, MasteringDisplay, ObjectDetection, Propagation,
+    Relation, RelationKind, Roi, Segmentation, TimecodeMeta, Tracking, Transform,
 };
 #[cfg(feature = "alloc")]
 pub use property::{

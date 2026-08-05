@@ -205,12 +205,90 @@ mod on {
         pub object_id: u64,
     }
 
-    /// A node in the [`AnalyticsMeta`] relation graph.
+    /// A per-pixel coverage mask: `width` x `height` 8-bit samples with `stride`
+    /// bytes per row (0 = not covered, 255 = fully covered). Its own grid, not
+    /// the frame's, so it stays valid when the frame is scaled.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Mask {
+        width: u32,
+        height: u32,
+        stride: u32,
+        data: Vec<u8>,
+    }
+
+    impl Mask {
+        /// Build a mask over `data`, or `None` if the geometry does not fit it.
+        /// Dimensions reach this from a model output or a wire peer, so they are
+        /// checked here once and the accessors can then index without guessing.
+        pub fn new(width: u32, height: u32, stride: u32, data: Vec<u8>) -> Option<Self> {
+            if stride < width {
+                return None;
+            }
+            let needed = (stride as u64).checked_mul(height as u64)?;
+            if needed > data.len() as u64 {
+                return None;
+            }
+            Some(Mask {
+                width,
+                height,
+                stride,
+                data,
+            })
+        }
+
+        pub fn width(&self) -> u32 {
+            self.width
+        }
+        pub fn height(&self) -> u32 {
+            self.height
+        }
+        pub fn stride(&self) -> u32 {
+            self.stride
+        }
+        pub fn data(&self) -> &[u8] {
+            &self.data
+        }
+
+        /// Coverage at `(x, y)`, `None` outside the mask.
+        pub fn sample(&self, x: u32, y: u32) -> Option<u8> {
+            if x >= self.width || y >= self.height {
+                return None;
+            }
+            let idx = y as usize * self.stride as usize + x as usize;
+            self.data.get(idx).copied()
+        }
+    }
+
+    /// An instance segmentation: the object's normalized box, its class, and the
+    /// coverage mask over that box (the mask grid is the model's own resolution,
+    /// not the frame's).
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct Segmentation {
+        pub bbox: BBox,
+        pub label: u32,
+        pub confidence: f32,
+        pub mask: Mask,
+    }
+
+    /// A region of interest: a normalized rectangle an encoder, a tracker, or a
+    /// downstream analytic should treat specially (the
+    /// `GstVideoRegionOfInterestMeta` analog). `id` names this region across
+    /// frames; `label` is its class index, as on a detection.
     #[derive(Debug, Clone, Copy, PartialEq)]
+    pub struct Roi {
+        pub bbox: BBox,
+        pub id: u32,
+        pub label: u32,
+    }
+
+    /// A node in the [`AnalyticsMeta`] relation graph.
+    #[derive(Debug, Clone, PartialEq)]
     pub enum AnalyticsNode {
         Detection(ObjectDetection),
         Classification(Classification),
         Tracking(Tracking),
+        Segmentation(Segmentation),
+        Roi(Roi),
     }
 
     /// The kind of a directed edge between two analytics nodes.
@@ -267,6 +345,22 @@ mod on {
         pub fn detections(&self) -> impl Iterator<Item = &ObjectDetection> {
             self.nodes.iter().filter_map(|n| match n {
                 AnalyticsNode::Detection(d) => Some(d),
+                _ => None,
+            })
+        }
+
+        /// Iterate the instance-segmentation nodes.
+        pub fn segmentations(&self) -> impl Iterator<Item = &Segmentation> {
+            self.nodes.iter().filter_map(|n| match n {
+                AnalyticsNode::Segmentation(s) => Some(s),
+                _ => None,
+            })
+        }
+
+        /// Iterate the region-of-interest nodes.
+        pub fn rois(&self) -> impl Iterator<Item = &Roi> {
+            self.nodes.iter().filter_map(|n| match n {
+                AnalyticsNode::Roi(r) => Some(r),
                 _ => None,
             })
         }

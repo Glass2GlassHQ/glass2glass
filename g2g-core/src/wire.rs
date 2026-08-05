@@ -727,6 +727,28 @@ fn put_meta(w: &mut Writer, meta: &FrameMetaSet) {
                     w.u8(2);
                     w.u64(t.object_id);
                 }
+                AnalyticsNode::Segmentation(s) => {
+                    w.u8(3);
+                    w.f32(s.bbox.x);
+                    w.f32(s.bbox.y);
+                    w.f32(s.bbox.w);
+                    w.f32(s.bbox.h);
+                    w.u32(s.label);
+                    w.f32(s.confidence);
+                    w.u32(s.mask.width());
+                    w.u32(s.mask.height());
+                    w.u32(s.mask.stride());
+                    w.bytes(s.mask.data());
+                }
+                AnalyticsNode::Roi(r) => {
+                    w.u8(4);
+                    w.f32(r.bbox.x);
+                    w.f32(r.bbox.y);
+                    w.f32(r.bbox.w);
+                    w.f32(r.bbox.h);
+                    w.u32(r.id);
+                    w.u32(r.label);
+                }
             }
         }
         w.u32(a.relations.len() as u32);
@@ -834,8 +856,8 @@ fn relation_kind_from_u8(v: u8) -> Result<crate::meta::RelationKind, WireError> 
 fn get_meta(r: &mut Reader) -> Result<FrameMetaSet, WireError> {
     use crate::meta::{
         AnalyticsMeta, AnalyticsNode, BBox, Blob, BlobMeta, CaptionMeta, CaptionTriple,
-        Chromaticity, Classification, HdrStaticMeta, MasteringDisplay, ObjectDetection, Relation,
-        TimecodeMeta, Tracking,
+        Chromaticity, Classification, HdrStaticMeta, Mask, MasteringDisplay, ObjectDetection,
+        Relation, Roi, Segmentation, TimecodeMeta, Tracking,
     };
 
     let count = r.u8()?;
@@ -863,6 +885,39 @@ fn get_meta(r: &mut Reader) -> Result<FrameMetaSet, WireError> {
                         }),
                         2 => AnalyticsNode::Tracking(Tracking {
                             object_id: r.u64()?,
+                        }),
+                        3 => {
+                            let bbox = BBox {
+                                x: r.f32()?,
+                                y: r.f32()?,
+                                w: r.f32()?,
+                                h: r.f32()?,
+                            };
+                            let label = r.u32()?;
+                            let confidence = r.f32()?;
+                            let (width, height, stride) = (r.u32()?, r.u32()?, r.u32()?);
+                            // The mask bytes are length-prefixed and bounded by
+                            // the message, and `Mask::new` rejects geometry that
+                            // does not fit them: a peer cannot make us index out
+                            // of the buffer it sent.
+                            let mask = Mask::new(width, height, stride, r.bytes()?)
+                                .ok_or(WireError::BadTag)?;
+                            AnalyticsNode::Segmentation(Segmentation {
+                                bbox,
+                                label,
+                                confidence,
+                                mask,
+                            })
+                        }
+                        4 => AnalyticsNode::Roi(Roi {
+                            bbox: BBox {
+                                x: r.f32()?,
+                                y: r.f32()?,
+                                w: r.f32()?,
+                                h: r.f32()?,
+                            },
+                            id: r.u32()?,
+                            label: r.u32()?,
                         }),
                         _ => return Err(WireError::BadTag),
                     };
@@ -1324,6 +1379,71 @@ mod tests {
             }
             other => panic!("expected DataFrame, got {other:?}"),
         }
+    }
+
+    #[cfg(feature = "metadata")]
+    #[test]
+    fn segmentation_and_roi_nodes_round_trip() {
+        use crate::meta::{AnalyticsMeta, AnalyticsNode, BBox, Mask, Roi, Segmentation};
+        let bbox = BBox {
+            x: 0.25,
+            y: 0.5,
+            w: 0.1,
+            h: 0.2,
+        };
+        // A 3x2 mask with a 4-byte stride, so the padded layout has to survive.
+        let mask = Mask::new(3, 2, 4, alloc::vec![10, 20, 30, 0, 40, 50, 60, 0])
+            .expect("mask fits its data");
+        let mut analytics = AnalyticsMeta::new();
+        analytics.push(AnalyticsNode::Segmentation(Segmentation {
+            bbox,
+            label: 3,
+            confidence: 0.75,
+            mask,
+        }));
+        analytics.push(AnalyticsNode::Roi(Roi {
+            bbox,
+            id: 9,
+            label: 4,
+        }));
+
+        let mut meta = FrameMetaSet::new();
+        meta.attach(analytics.clone());
+        let frame = Frame {
+            domain: MemoryDomain::System(SystemSlice::from_boxed(Box::new([0u8; 4]))),
+            timing: FrameTiming::default(),
+            sequence: 0,
+            meta,
+        };
+        match roundtrip(&PipelinePacket::DataFrame(frame)) {
+            PipelinePacket::DataFrame(got) => {
+                let a = got.meta.get::<AnalyticsMeta>().expect("analytics survived");
+                assert_eq!(a.nodes, analytics.nodes);
+                let seg = a.segmentations().next().expect("segmentation node");
+                assert_eq!(seg.mask.sample(2, 1), Some(60));
+                assert_eq!(seg.mask.sample(3, 0), None, "outside the mask width");
+                assert_eq!(a.rois().next().expect("roi node").id, 9);
+            }
+            other => panic!("expected DataFrame, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "metadata")]
+    #[test]
+    fn a_mask_whose_geometry_overruns_its_bytes_is_rejected() {
+        use crate::meta::Mask;
+        assert!(
+            Mask::new(4, 4, 4, alloc::vec![0; 15]).is_none(),
+            "short data"
+        );
+        assert!(
+            Mask::new(8, 2, 4, alloc::vec![0; 64]).is_none(),
+            "stride < width"
+        );
+        assert!(
+            Mask::new(u32::MAX, u32::MAX, u32::MAX, alloc::vec![0; 8]).is_none(),
+            "the row product must not overflow into a valid-looking size"
+        );
     }
 
     #[cfg(feature = "metadata")]
