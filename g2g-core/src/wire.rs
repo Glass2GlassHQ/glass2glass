@@ -84,6 +84,8 @@ const DOMAIN_SYSTEM: u8 = 0;
 const META_ANALYTICS: u8 = 0;
 #[cfg_attr(not(feature = "metadata"), allow(dead_code))]
 const META_BLOB: u8 = 1;
+#[cfg_attr(not(feature = "metadata"), allow(dead_code))]
+const META_CAPTION: u8 = 2;
 
 // ---- primitive writer ----
 
@@ -682,11 +684,12 @@ fn get_domain(r: &mut Reader) -> Result<MemoryDomain, WireError> {
 
 #[cfg(feature = "metadata")]
 fn put_meta(w: &mut Writer, meta: &FrameMetaSet) {
-    use crate::meta::{AnalyticsMeta, AnalyticsNode, BlobMeta};
+    use crate::meta::{AnalyticsMeta, AnalyticsNode, BlobMeta, CaptionMeta};
 
     let analytics = meta.get::<AnalyticsMeta>();
     let blob = meta.get::<BlobMeta>();
-    let count = analytics.is_some() as u8 + blob.is_some() as u8;
+    let caption = meta.get::<CaptionMeta>();
+    let count = analytics.is_some() as u8 + blob.is_some() as u8 + caption.is_some() as u8;
     w.u8(count);
 
     if let Some(a) = analytics {
@@ -730,6 +733,16 @@ fn put_meta(w: &mut Writer, meta: &FrameMetaSet) {
             w.bytes(&blob.payload);
         }
     }
+
+    if let Some(c) = caption {
+        w.u8(META_CAPTION);
+        w.u32(c.triples.len() as u32);
+        for t in &c.triples {
+            w.u8(t.cc_type);
+            w.u8(t.b0);
+            w.u8(t.b1);
+        }
+    }
 }
 
 #[cfg(not(feature = "metadata"))]
@@ -762,8 +775,8 @@ fn relation_kind_from_u8(v: u8) -> Result<crate::meta::RelationKind, WireError> 
 #[cfg(feature = "metadata")]
 fn get_meta(r: &mut Reader) -> Result<FrameMetaSet, WireError> {
     use crate::meta::{
-        AnalyticsMeta, AnalyticsNode, BBox, Blob, BlobMeta, Classification, ObjectDetection,
-        Relation, Tracking,
+        AnalyticsMeta, AnalyticsNode, BBox, Blob, BlobMeta, CaptionMeta, CaptionTriple,
+        Classification, ObjectDetection, Relation, Tracking,
     };
 
     let count = r.u8()?;
@@ -816,6 +829,18 @@ fn get_meta(r: &mut Reader) -> Result<FrameMetaSet, WireError> {
                     });
                 }
                 set.attach(b);
+            }
+            META_CAPTION => {
+                let mut c = CaptionMeta::new();
+                let n = r.u32()? as usize;
+                for _ in 0..n {
+                    c.push(CaptionTriple {
+                        cc_type: r.u8()?,
+                        b0: r.u8()?,
+                        b1: r.u8()?,
+                    });
+                }
+                set.attach(c);
             }
             _ => return Err(WireError::BadTag),
         }
@@ -1197,6 +1222,39 @@ mod tests {
                 assert_eq!(a.relations, analytics.relations);
                 let b = got.meta.get::<BlobMeta>().expect("blob survived");
                 assert_eq!(b, &blob);
+            }
+            other => panic!("expected DataFrame, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "metadata")]
+    #[test]
+    fn caption_metadata_round_trips() {
+        use crate::meta::{CaptionMeta, CaptionTriple};
+        let mut captions = CaptionMeta::new();
+        captions.push(CaptionTriple {
+            cc_type: 0,
+            b0: 0x94,
+            b1: 0xAE,
+        });
+        captions.push(CaptionTriple {
+            cc_type: 3,
+            b0: 0x01,
+            b1: 0xFF,
+        });
+
+        let mut meta = FrameMetaSet::new();
+        meta.attach(captions.clone());
+        let frame = Frame {
+            domain: MemoryDomain::System(SystemSlice::from_boxed(Box::new([0u8; 4]))),
+            timing: FrameTiming::default(),
+            sequence: 3,
+            meta,
+        };
+        match roundtrip(&PipelinePacket::DataFrame(frame)) {
+            PipelinePacket::DataFrame(got) => {
+                let c = got.meta.get::<CaptionMeta>().expect("captions survived");
+                assert_eq!(c, &captions);
             }
             other => panic!("expected DataFrame, got {other:?}"),
         }

@@ -353,6 +353,72 @@ mod on {
             Propagation::Keep
         }
     }
+
+    /// One closed-caption byte triple: a two-bit `cc_type` and the two caption
+    /// data bytes, the ATSC A/53 `cc_data` element. `cc_type` 0/1 are the two
+    /// CEA-608 line-21 fields, 2/3 CEA-708 DTVCC packet bytes.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct CaptionTriple {
+        pub cc_type: u8,
+        pub b0: u8,
+        pub b1: u8,
+    }
+
+    /// The closed-caption bytes the coded picture this frame came from carried
+    /// (its A/53 `GA94` caption SEI, or a container caption track). Lets a
+    /// decode -> re-encode chain re-author captions the decoder would otherwise
+    /// have dropped with the bitstream.
+    ///
+    /// Only the triples are stored: the rest of the A/53 `cc_data` header is
+    /// either constant (`process_cc_data_flag`, `em_data`) or derived
+    /// (`cc_count` = the triple count), so a rebuilt SEI is byte-identical.
+    #[derive(Debug, Default, Clone, PartialEq, Eq)]
+    pub struct CaptionMeta {
+        pub triples: Vec<CaptionTriple>,
+    }
+
+    impl CaptionMeta {
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        /// Append one caption triple, in transmission order.
+        pub fn push(&mut self, triple: CaptionTriple) {
+            self.triples.push(triple);
+        }
+
+        /// Iterate the carried triples in transmission order.
+        pub fn iter(&self) -> impl Iterator<Item = &CaptionTriple> {
+            self.triples.iter()
+        }
+
+        pub fn is_empty(&self) -> bool {
+            self.triples.is_empty()
+        }
+
+        pub fn len(&self) -> usize {
+            self.triples.len()
+        }
+    }
+
+    impl FrameMeta for CaptionMeta {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+        fn clone_box(&self) -> Box<dyn FrameMeta> {
+            Box::new(self.clone())
+        }
+        /// Captions are text on a timeline, not pixel geometry, so they survive
+        /// a scale / crop / copy *and* a re-encode: the whole point is that a
+        /// caption inserter downstream of an encoder can re-author them into the
+        /// new bitstream.
+        fn propagate(&self, _transform: Transform) -> Propagation {
+            Propagation::Keep
+        }
+    }
 }
 
 #[cfg(all(test, feature = "metadata"))]

@@ -198,8 +198,8 @@ pub use mediaclock::MediaClock;
 pub use meta::FrameMetaSet;
 #[cfg(feature = "metadata")]
 pub use meta::{
-    AnalyticsMeta, AnalyticsNode, BBox, Blob, BlobMeta, Classification, FrameMeta, ObjectDetection,
-    Propagation, Relation, RelationKind, Tracking, Transform,
+    AnalyticsMeta, AnalyticsNode, BBox, Blob, BlobMeta, CaptionMeta, CaptionTriple, Classification,
+    FrameMeta, ObjectDetection, Propagation, Relation, RelationKind, Tracking, Transform,
 };
 #[cfg(feature = "alloc")]
 pub use property::{

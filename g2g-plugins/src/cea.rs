@@ -45,6 +45,31 @@ pub struct CcTriple {
     pub b1: u8,
 }
 
+/// The frame-metadata form of a triple is the same three fields; converting lets
+/// the parser attach what it extracted and an inserter re-author it, without
+/// `g2g-core` depending on this crate.
+#[cfg(feature = "metadata")]
+impl From<CcTriple> for g2g_core::meta::CaptionTriple {
+    fn from(t: CcTriple) -> Self {
+        g2g_core::meta::CaptionTriple {
+            cc_type: t.cc_type,
+            b0: t.b0,
+            b1: t.b1,
+        }
+    }
+}
+
+#[cfg(feature = "metadata")]
+impl From<g2g_core::meta::CaptionTriple> for CcTriple {
+    fn from(t: g2g_core::meta::CaptionTriple) -> Self {
+        CcTriple {
+            cc_type: t.cc_type,
+            b0: t.b0,
+            b1: t.b1,
+        }
+    }
+}
+
 /// ATSC A/53 user-identifier `GA94` marking a `cc_data` ATSC1 user-data SEI.
 const USER_IDENTIFIER_GA94: u32 = 0x4741_3934;
 /// `user_data_type_code` selecting `cc_data` within an ATSC1 user-data block.

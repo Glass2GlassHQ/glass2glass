@@ -346,14 +346,37 @@ impl<C: NalCodec> NalParse<C> {
         // Re-insert cached parameter sets before this AU when config-interval calls
         // for it (no-op at interval 0 or when the AU already carries them).
         let au = self.apply_config_interval(au, timing.pts_ns, timing.keyframe);
-        let frame = Frame::new(
+        #[allow(unused_mut)]
+        let mut frame = Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
             timing,
             self.seq,
         );
+        #[cfg(feature = "metadata")]
+        Self::attach_captions(&mut frame);
         self.seq += 1;
         out.push(PipelinePacket::DataFrame(frame)).await?;
         Ok(())
+    }
+
+    /// Attach the access unit's closed-caption bytes as a `CaptionMeta`, so they
+    /// outlive the bitstream: a decoder throws the SEI away, but the meta rides
+    /// the decoded frames (and a re-encode, see `CaptionMeta::propagate`) to a
+    /// downstream `CcInsert`. No meta when the AU carries no captions.
+    #[cfg(feature = "metadata")]
+    fn attach_captions(frame: &mut Frame) {
+        let Some(au) = frame.domain.as_system_slice() else {
+            return;
+        };
+        let triples = crate::cea::extract_cc_data(au, C::CODEC);
+        if triples.is_empty() {
+            return;
+        }
+        let mut meta = g2g_core::meta::CaptionMeta::new();
+        for t in triples {
+            meta.push(t.into());
+        }
+        frame.meta.attach(meta);
     }
 
     /// The `CompressedVideo` caps at any geometry that this parser accepts and
@@ -447,6 +470,8 @@ impl<C: NalCodec> AsyncElement for NalParse<C> {
                         let is_keyframe = C::au_is_keyframe(slice);
                         self.refine_caps(slice, out).await?;
                         frame.timing.keyframe = is_keyframe;
+                        #[cfg(feature = "metadata")]
+                        Self::attach_captions(&mut frame);
                     }
                     out.push(PipelinePacket::DataFrame(frame)).await?;
                 }
