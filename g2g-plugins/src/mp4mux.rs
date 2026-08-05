@@ -317,7 +317,12 @@ impl AsyncElement for Mp4Mux {
                     }
                 }
                 PipelinePacket::CapsChanged(c) => {
-                    self.accept_caps(&c)?;
+                    // The runner hands an element its own solved output caps as
+                    // an incoming CapsChanged, so a byte stream here is ours,
+                    // not an input refinement to accept.
+                    if !matches!(c, Caps::ByteStream { .. }) {
+                        self.accept_caps(&c)?;
+                    }
                 }
                 // Flush the final partial fragment (batched mode) before the runner
                 // forwards EOS; a no-op in the default per-AU mode.
@@ -467,6 +472,32 @@ mod tests {
         assert!(find(b"moov"), "init segment carries a moov");
         assert!(find(b"moof"), "fragments carry moof boxes");
         assert!(find(b"mdat"), "fragments carry mdat boxes");
+    }
+
+    /// The runner feeds an element its own solved output caps as an incoming
+    /// `CapsChanged`, which is a byte stream here, not a codec: taking it as an
+    /// input refinement broke every `... ! mp4mux ! ...` launch line.
+    #[tokio::test]
+    async fn own_output_caps_arriving_as_capschanged_are_not_an_input_refinement() {
+        let sps = [0x67u8, 0x42, 0x00, 0x1e, 0x88];
+        let pps = [0x68u8, 0xce, 0x3c, 0x80];
+        let idr = [0x65u8, 0x88, 0x84, 0x00];
+
+        let mut mux = Mp4Mux::new();
+        mux.configure_pipeline(&h264_caps(320, 240)).unwrap();
+        let mut sink = CaptureSink::default();
+        mux.process(
+            PipelinePacket::CapsChanged(Caps::ByteStream {
+                encoding: ByteStreamEncoding::IsoBmff,
+            }),
+            &mut sink,
+        )
+        .await
+        .expect("its own output caps are accepted");
+        mux.process(frame(annexb(&[&sps, &pps, &idr]), 0), &mut sink)
+            .await
+            .unwrap();
+        assert_eq!(mux.emitted(), 1, "muxing continues after the caps packet");
     }
 
     /// Count `moof` fragment boxes and sum every `trun`'s sample count.
