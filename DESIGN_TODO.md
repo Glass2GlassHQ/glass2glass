@@ -440,13 +440,6 @@ _(No open parser items.)_
 
 ## Transforms and effects
 
-- **Double-EOS audit.** A transform whose catch-all arm forwards `Eos` emits it
-  twice under `run_source_transform_sink` (the runner pushes its own after
-  `process(Eos)` returns), and the second push races the sink's exit for an
-  intermittent `Shutdown` (found in `mjpegdec`, same fix applied to `opusdec`).
-  Audit the remaining transforms with a catch-all forwarder and no explicit
-  `Eos` arm, and consider making the runner's transform arm skip its own push
-  when the element already forwarded one.
 - **`textoverlay` font backend:** the `truetype-overlay` feature (M409, `ab_glyph`
   since M668) renders both glyf and CFF/CFF2 outlines (CJK / accented / mixed-case,
   horizontal + vertical) with an explicit Latin+CJK fallback chain, so OpenType-CFF

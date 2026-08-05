@@ -2748,7 +2748,11 @@ async fn transform_arm<'a>(
         match packet {
             Some(PipelinePacket::Eos) => {
                 elem.process(PipelinePacket::Eos, &mut adapter).await?;
-                adapter.push(PipelinePacket::Eos).await?;
+                // M909: skip our push when the element's catch-all arm already
+                // forwarded the sentinel, so the sink sees exactly one `Eos`.
+                if !adapter.eos_forwarded() {
+                    adapter.push(PipelinePacket::Eos).await?;
+                }
                 // Drop our report handle so the coordinator can wind down once
                 // every arm exits, then drain any tail-end re-cascade directive
                 // still in flight (a β triggered by the final pre-EOS frames).
