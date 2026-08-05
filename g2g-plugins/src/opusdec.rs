@@ -674,6 +674,9 @@ impl AsyncElement for OpusDec {
                     self.new_segment = true;
                     out.push(PipelinePacket::Segment(seg)).await?;
                 }
+                // the runner forwards Eos after process(Eos) returns; re-emitting
+                // it here races the sink's exit on the first one.
+                PipelinePacket::Eos => {}
                 other => {
                     out.push(other).await?;
                 }
