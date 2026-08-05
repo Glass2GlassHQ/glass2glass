@@ -894,7 +894,10 @@ pub fn forwardable_streams(demux: &TsDemuxer) -> Vec<TsStreamInfo> {
         .iter()
         .filter_map(|es| {
             let stream = es_to_ts_stream(es)?;
-            let video = matches!(stream, TsStream::H264 | TsStream::H265 | TsStream::Mpeg2);
+            let video = matches!(
+                stream,
+                TsStream::H264 | TsStream::H265 | TsStream::Mpeg2 | TsStream::Mpeg4Part2
+            );
             Some(TsStreamInfo {
                 stream,
                 caps: TsDemux::output_caps(stream),
@@ -1401,6 +1404,27 @@ mod tests {
         );
         assert_eq!(ts_stream_from_str("mpeg4part2"), Some(TsStream::Mpeg4Part2));
         assert_eq!(ts_stream_to_str(TsStream::Mpeg4Part2), "mpeg4part2");
+    }
+
+    /// The playbin fan-out must put an MPEG-4 Part 2 stream in a video branch:
+    /// it once fell through the H.264/H.265-only `video` match and was routed
+    /// as audio.
+    #[test]
+    fn forwardable_streams_marks_mpeg4part2_video() {
+        let mut d = TsDemuxer::new();
+        d.push_packet(&pat(0x1000));
+        d.push_packet(&pmt2(0x100, STREAM_TYPE_MPEG4P2, 0x101, STREAM_TYPE_AAC));
+        let infos = forwardable_streams(&d);
+        let v = infos
+            .iter()
+            .find(|i| i.stream == TsStream::Mpeg4Part2)
+            .expect("mpeg4part2 is forwardable");
+        assert!(v.video, "mpeg4part2 routes to a video branch");
+        let a = infos
+            .iter()
+            .find(|i| i.stream == TsStream::Aac)
+            .expect("aac is forwardable");
+        assert!(!a.video);
     }
 
     // Re-use the synthetic TS builders by constructing equivalent packets here.
