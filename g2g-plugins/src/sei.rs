@@ -15,9 +15,10 @@ use alloc::vec::Vec;
 
 use g2g_core::VideoCodec;
 
+#[cfg(feature = "metadata")]
+use crate::annexb::BitReader;
 use crate::annexb::{
     h264_nal_type, h265_nal_type, nal_units_any, read_ff_extended, strip_emulation_prevention,
-    BitReader,
 };
 
 /// `pic_timing`, which carries the H.264 SMPTE 12M clock timestamps.

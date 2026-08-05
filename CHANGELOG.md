@@ -6,6 +6,16 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M921: typed decoders for the known `BlobMeta` headers.
+
+- M920: segmentation-mask and region-of-interest analytics nodes.
+
+- M919: SMPTE 12M timecode rides `FrameMeta` from H.264/H.265 SEI, burnt in by `timeoverlay`.
+
+- M918: HDR10 mastering-display and content-light-level metadata ride `FrameMeta` from SEI to the Vulkan HDR sink.
+
+- M917: closed captions ride a decode/re-encode as `FrameMeta`.
+
 - M916: an `opus-rs` conformance gate (`tools/opus-rs-gate`) rejects the pure-Rust Opus decoder; the FFI path stays.
 
 - M911: `remotewtsink` can carry data frames as QUIC datagrams (`datagrams=true`, oversized frames fall back to the stream), and the WebTransport elements take a `congestion-control` property.

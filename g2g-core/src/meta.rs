@@ -428,6 +428,75 @@ mod on {
         pub fn len(&self) -> usize {
             self.blobs.len()
         }
+
+        /// The first blob tagged `header`, if any.
+        pub fn get(&self, header: &str) -> Option<&Blob> {
+            self.blobs.iter().find(|b| b.header == header)
+        }
+    }
+
+    /// A [`Blob`] payload decoded by the [`BLOB_DECODERS`] registry.
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum DecodedBlob {
+        /// A little-endian `f32` vector (an ML embedding / feature vector).
+        Embedding(Vec<f32>),
+        /// UTF-8 text.
+        Text(String),
+    }
+
+    /// Turns one known header's payload into a [`DecodedBlob`], or `None` when
+    /// the bytes do not match the shape that header promises.
+    pub type BlobDecoder = fn(&[u8]) -> Option<DecodedBlob>;
+
+    fn decode_embedding(payload: &[u8]) -> Option<DecodedBlob> {
+        if payload.is_empty() || payload.len() % 4 != 0 {
+            return None;
+        }
+        Some(DecodedBlob::Embedding(
+            payload
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect(),
+        ))
+    }
+
+    fn decode_text(payload: &[u8]) -> Option<DecodedBlob> {
+        core::str::from_utf8(payload)
+            .ok()
+            .map(|s| DecodedBlob::Text(String::from(s)))
+    }
+
+    /// The blob headers this workspace knows how to decode, and their decoders.
+    ///
+    /// [`BlobMeta`] is deliberately opaque: a producer and its own consumer agree
+    /// on a header and nobody else has to care. This table is the escape hatch
+    /// for the headers that *are* a shared vocabulary, so a generic consumer (an
+    /// inspector, a bridge, a recorder) can render them without knowing which
+    /// element produced them. These three come from the Python element host,
+    /// where a `gst-python-ml` element tags its results with them.
+    ///
+    /// A plain `const` table, not a registry a plugin mutates: the decoders are
+    /// pure functions, and a global mutable map would need a lock the `no_std`
+    /// baseline does not have.
+    pub const BLOB_DECODERS: &[(&str, BlobDecoder)] = &[
+        ("embedding", decode_embedding as BlobDecoder),
+        ("model_name", decode_text as BlobDecoder),
+        ("device", decode_text as BlobDecoder),
+    ];
+
+    /// The decoder registered for `header`, if it is a known one.
+    pub fn blob_decoder(header: &str) -> Option<BlobDecoder> {
+        BLOB_DECODERS
+            .iter()
+            .find(|(h, _)| *h == header)
+            .map(|(_, d)| *d)
+    }
+
+    /// Decode `blob` if its header is known and its payload matches the shape
+    /// that header promises. `None` for an unknown header (the normal case for
+    /// an application's private side-data) and for a malformed payload.
+    pub fn decode_blob(blob: &Blob) -> Option<DecodedBlob> {
+        blob_decoder(&blob.header).and_then(|d| d(&blob.payload))
     }
 
     impl FrameMeta for BlobMeta {
@@ -709,6 +778,47 @@ mod tests {
             1,
             "original untouched after copy-on-write"
         );
+    }
+
+    #[test]
+    fn known_blob_headers_decode_to_typed_values() {
+        let mut m = BlobMeta::new();
+        m.push("embedding", alloc::vec![0, 0, 0x80, 0x3F, 0, 0, 0, 0x40]); // 1.0, 2.0
+        m.push("device", alloc::vec![b'c', b'u', b'd', b'a', b':', b'0']);
+        m.push("private/thing", alloc::vec![0xDE, 0xAD]);
+
+        assert_eq!(
+            decode_blob(m.get("embedding").unwrap()),
+            Some(DecodedBlob::Embedding(alloc::vec![1.0, 2.0]))
+        );
+        assert_eq!(
+            decode_blob(m.get("device").unwrap()),
+            Some(DecodedBlob::Text(alloc::string::String::from("cuda:0")))
+        );
+        // An unregistered header stays opaque, which is the point of BlobMeta.
+        assert!(blob_decoder("private/thing").is_none());
+        assert_eq!(decode_blob(m.get("private/thing").unwrap()), None);
+    }
+
+    #[test]
+    fn a_payload_that_does_not_match_its_header_does_not_decode() {
+        // A registered header is a promise about the bytes, not a guarantee: a
+        // producer that breaks it must fail the decode, not yield garbage.
+        let ragged = Blob {
+            header: alloc::string::String::from("embedding"),
+            payload: alloc::vec![1, 2, 3],
+        };
+        assert_eq!(decode_blob(&ragged), None, "not a whole number of f32s");
+        let empty = Blob {
+            header: alloc::string::String::from("embedding"),
+            payload: alloc::vec::Vec::new(),
+        };
+        assert_eq!(decode_blob(&empty), None, "an empty vector is not a vector");
+        let not_utf8 = Blob {
+            header: alloc::string::String::from("model_name"),
+            payload: alloc::vec![0xFF, 0xFE],
+        };
+        assert_eq!(decode_blob(&not_utf8), None);
     }
 
     #[test]

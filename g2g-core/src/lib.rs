@@ -198,9 +198,10 @@ pub use mediaclock::MediaClock;
 pub use meta::FrameMetaSet;
 #[cfg(feature = "metadata")]
 pub use meta::{
-    AnalyticsMeta, AnalyticsNode, BBox, Blob, BlobMeta, CaptionMeta, CaptionTriple, Chromaticity,
-    Classification, FrameMeta, HdrStaticMeta, Mask, MasteringDisplay, ObjectDetection, Propagation,
-    Relation, RelationKind, Roi, Segmentation, TimecodeMeta, Tracking, Transform,
+    blob_decoder, decode_blob, AnalyticsMeta, AnalyticsNode, BBox, Blob, BlobDecoder, BlobMeta,
+    CaptionMeta, CaptionTriple, Chromaticity, Classification, DecodedBlob, FrameMeta,
+    HdrStaticMeta, Mask, MasteringDisplay, ObjectDetection, Propagation, Relation, RelationKind,
+    Roi, Segmentation, TimecodeMeta, Tracking, Transform, BLOB_DECODERS,
 };
 #[cfg(feature = "alloc")]
 pub use property::{

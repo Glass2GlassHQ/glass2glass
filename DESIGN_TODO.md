@@ -69,9 +69,6 @@ Sequenced next:
   seam: `PtpServo` / `PtpClock` `sync_exchange` take `(TaiNs, RefNs, RefNs, TaiNs)`
   and `observe_master` takes `(RefNs, TaiNs)`, so master and reference can no longer
   be swapped where the meaningless-offset mixing bug lived. No remaining work.
-- **Metadata carriers.** Route captions / HDR / timecode through `FrameMeta` so
-  they ride the standard propagation path instead of the bespoke ones they take
-  today. See "## Metadata".
 
 ## Alloc-optional (heap-free) MCU core
 
@@ -535,15 +532,15 @@ _(No open parser items.)_
 
 ## Metadata (FrameMeta / AnalyticsMeta)
 
-- A `Segmentation` node (mask handle); more standard metas (`GstVideoMeta`-style
-  strides, ROI).
+- A `GstVideoMeta`-style stride / plane-layout meta.
+- A real ML producer for the `Segmentation` / `Roi` analytics nodes (no in-tree
+  model emits masks or ROIs yet).
 - `pull`-based metadata propagation across transforms (push is auto-applied).
 - A turnkey windowed runner for `WgpuSink` (a winit/SCTK example that opens a
   window and drives the overlay -> sink graph; validate on a real display).
 - `NvEnc` AV1 encode (needs RTX 40-series hardware).
 - Derive the `decodebin_preferring(.., Cuda)` preference automatically from a
   downstream consumer's accepted input memory.
-- A blob header registry (decode known `BlobMeta` headers into typed structures).
 
 ## Clock-synchronised presentation
 
