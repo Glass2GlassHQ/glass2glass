@@ -30,6 +30,21 @@ const DECODER_SLACK: usize = 128 * 1024;
 /// Read size for a subgroup stream.
 pub const DATA_READ_CHUNK: usize = 16 * 1024;
 
+/// Resolve a subgroup object's absolute id from the previous one on the same
+/// stream. The first object's delta *is* its id; every later one is
+/// `previous + delta + 1`, so a run of consecutive ids encodes as zeroes. An id
+/// past `u64` is a protocol violation. Shared with the draft-18 decoder, which
+/// resolves ids identically.
+pub fn next_object_id(prev: Option<u64>, delta: u64) -> Result<u64, MoqtError> {
+    match prev {
+        Some(prev) => prev
+            .checked_add(delta)
+            .and_then(|id| id.checked_add(1))
+            .ok_or(MoqtError::Malformed),
+        None => Ok(delta),
+    }
+}
+
 /// One whole object off a subgroup stream, with its absolute ids resolved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReceivedObject {
@@ -117,15 +132,7 @@ impl SubgroupStreamDecoder {
             Err(MoqtError::Incomplete) => return Ok(None),
             Err(e) => return Err(e),
         };
-        let object_id = match self.prev_object_id {
-            // The delta counts the distance to the previous id less one, so a
-            // run of consecutive objects encodes as zeroes.
-            Some(prev) => prev
-                .checked_add(object.object_id_delta)
-                .and_then(|id| id.checked_add(1))
-                .ok_or(MoqtError::Malformed)?,
-            None => object.object_id_delta,
-        };
+        let object_id = next_object_id(self.prev_object_id, object.object_id_delta)?;
         self.prev_object_id = Some(object_id);
         self.buf.drain(..r.position());
         Ok(Some(StreamItem::Object(ReceivedObject {
