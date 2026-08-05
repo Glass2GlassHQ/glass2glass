@@ -100,6 +100,7 @@ pub struct MoqtSrc {
     selected_track: String,
     objects_received: u64,
     groups_dropped: u64,
+    objects_dropped: u64,
 }
 
 impl Default for MoqtSrc {
@@ -130,6 +131,7 @@ impl MoqtSrc {
             selected_track: String::new(),
             objects_received: 0,
             groups_dropped: 0,
+            objects_dropped: 0,
         }
     }
 
@@ -166,6 +168,12 @@ impl MoqtSrc {
     /// group that never completed inside the buffering bounds.
     pub fn groups_dropped(&self) -> u64 {
         self.groups_dropped
+    }
+
+    /// Objects the last run threw away: lost (a hole in a group that ended,
+    /// which is what a dropped datagram leaves), late, or duplicated.
+    pub fn objects_dropped(&self) -> u64 {
+        self.objects_dropped
     }
 
     fn output_caps() -> Caps {
@@ -560,6 +568,7 @@ impl SourceLoop for MoqtSrc {
             self.selected_track = selected.name;
             self.objects_received = emitted;
             self.groups_dropped = stats.groups_dropped;
+            self.objects_dropped = stats.objects_dropped;
             out.push(PipelinePacket::Eos).await?;
             Ok(emitted)
         })

@@ -16,6 +16,8 @@
 //!   delta-coded Key-Value-Pair sequences.
 //! - [`message`]: the control-stream message set and its framing.
 //! - [`data`]: the subgroup stream header and per-object header.
+//! - [`datagram`]: the datagram object, the unreliable MTU-bounded carriage of
+//!   one object.
 //! - [`reassembly`]: decoding a subgroup stream, and putting the objects from
 //!   many concurrent streams back into (group, object) order.
 //! - [`catalog`]: the JSON track list, written by the publisher and read by the
@@ -28,6 +30,7 @@
 pub mod catalog;
 pub mod coding;
 pub mod data;
+pub mod datagram;
 pub mod message;
 pub mod reassembly;
 pub mod session;

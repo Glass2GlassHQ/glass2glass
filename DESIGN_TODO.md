@@ -286,9 +286,9 @@ Phased plan:
   low-latency on both builders; the elements take the default CUBIC). The
   `web-transport-quinn = "=0.11.12"` pin and the `idna_adapter` 1.1.0 hold in
   `Cargo.lock` can both drop once the workspace MSRV moves past 1.91.
-- **MoQ Transport:** datagram objects and FETCH are unimplemented on both sides:
-  a FETCH is refused with `NOT_SUPPORTED`. Beyond that: draft-18, which moq-dev,
-  imquic and moqxr already ship and which Meta's moxygen relay serves publicly
+- **MoQ Transport:** FETCH is unimplemented on both sides: a FETCH is refused
+  with `NOT_SUPPORTED`. Beyond that: draft-18, which moq-dev, imquic and moqxr
+  already ship and which Meta's moxygen relay serves publicly
   (`fb.mvfst.net:9448`, versions 14/16/18), so it doubles as the interop leg
   against a non-Cloudflare implementation; `PUBLISH`-initiated (publisher-driven)
   subscriptions; multi-track playback (the subscriber, and the browser demo, play

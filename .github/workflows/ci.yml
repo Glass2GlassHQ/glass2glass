@@ -88,13 +88,14 @@ jobs:
         run: >
           cargo check -p g2g-plugins --locked --all-targets --features
           rtsp,onvif,srt,udp-egress,udp-ingress,rtmp,http-src,hls,dash,av1-encode,dav1d,rav1d,mjpeg,mjpeg-encode,opus,vorbis,alsa-sink,pulse-sink,alsa-src,pulse-src,wayland-sink,kms-sink,v4l2,analytics,vello-overlay,wgpu-sink,plugin-loader,declarative-yaml,script-rhai,webtransport,moqt
-      # MoQ Transport draft-16 (M902): control-message layouts against the
-      # reference implementation, malformed peer input, and the property surface.
-      # The relay / moq-sub interop leg skips without the reference binaries.
+      # MoQ Transport draft-16 (M902 / M903 / M905): control-message and datagram
+      # layouts against the reference implementation, malformed peer input,
+      # subgroup reassembly, and the property surface. The legs that need the
+      # reference relay skip without its binaries.
       - name: test g2g-plugins (moqt)
         run: >
           cargo test -p g2g-plugins --locked --features moqt
-          --test m902_moqt --test m903_moqt_subscribe
+          --test m902_moqt --test m903_moqt_subscribe --test m905_moqt_datagram
       # WebTransport carrier (M901): loopback, reconnect, transform round trip and
       # the property/registry surface. The two aioquic legs skip without `uv`.
       - name: test g2g-plugins (webtransport)

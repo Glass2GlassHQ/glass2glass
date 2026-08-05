@@ -3124,8 +3124,9 @@ SERVER_SETUP carry parameters only.
 **Layering.** `moqt::coding` (varints, byte strings, track namespaces and names,
 the delta-coded Key-Value-Pair sequences), `moqt::message` (the control message
 set and its `type / 16-bit length / payload` framing), `moqt::data` (the
-subgroup stream header and per-object header), `moqt::reassembly` (decoding a
-subgroup stream, and the ordering policy below) and `moqt::catalog` (the JSON
+subgroup stream header and per-object header), `moqt::datagram` (the datagram
+object), `moqt::reassembly` (decoding a subgroup stream, and the ordering policy
+below) and `moqt::catalog` (the JSON
 track list, written and read in one place so the two cannot drift) are pure
 `alloc` with no I/O, so the wire layer is unit-testable on byte vectors; the
 layouts are asserted against the byte sequences the reference implementation
@@ -3163,9 +3164,15 @@ walks the boxes with the same helpers the HLS segmenter uses
   track names and codec parameters.
 
 Subgroup streams carry the header type `0x15` (explicit subgroup id plus an
-extension-header block) and objects with a zero object-id delta, byte-identical
-to what the reference publisher emits, so a relay sees no path it does not
-already exercise. `SUBSCRIBE_OK` reuses the request id as the track alias
+extension-header block) and objects whose id delta is measured per stream (the
+first object of a stream takes the delta as its absolute id), which is
+byte-identical to what the reference publisher emits when one stream carries the
+whole group. `subgroups` spreads a group's objects across that many concurrent
+subgroup streams round-robin, so one object's loss no longer holds up the next
+inside a GOP. The reference relay cannot carry that: it renumbers each subgroup's
+objects from zero, discarding the delta, so the subgroups collide on one set of
+ids and all but one are dropped as duplicates, so a publisher aimed at that relay
+leaves `subgroups` at 1. `SUBSCRIBE_OK` reuses the request id as the track alias
 (§10.1 only asks for uniqueness within the session), and a stream is opened only
 after that acknowledgement, so the subscriber can resolve the alias in the
 stream header. A subscriber-side request the publisher does not serve (FETCH,
@@ -3174,6 +3181,32 @@ rather than silence. Draft-16 SUBSCRIBE carries neither a group order nor a
 filter field, so `priority` (the publisher-priority byte in every subgroup
 header) is the only delivery knob and there is no group-order property to
 expose.
+
+**Datagram objects.** `datagrams=true` carries each media object in a QUIC
+datagram instead of on a subgroup stream: unreliable, bounded by the path MTU,
+and free of head-of-line blocking, which is what a live path wants for droppable
+media. It is off by default because it changes the delivery guarantee. The
+layout (`moqt::datagram`, from `moq-transport/src/data/datagram.rs`) is a type
+table like the stream header, saying which of the object id, the extension
+block and the object status are present, whether a payload follows, and whether
+the object ends its group; the payload has no length prefix, since the datagram
+boundary ends it. A datagram is a whole message that will never be continued, so
+a short one is a protocol violation rather than something to wait for, and a
+datagram that does not decode is dropped rather than failing the session: an
+unreliable carriage already loses objects, and killing the session over one bad
+datagram would lose the rest.
+
+Three consequences shape the publisher. An object larger than the path MTU
+cannot be a datagram, so it falls back to a subgroup stream rather than being
+dropped, which the delta coding above already handles (a stream opened mid-group
+starts from an absolute object id). The init and catalog tracks always ride
+streams: losing either loses the whole broadcast. And a group carried only by
+datagrams has no stream whose close says it is finished, so the publisher sends
+an end-of-group status datagram at each group boundary; without it the
+subscriber would hold the group until a buffering bound moved it on. The
+subscriber feeds datagram objects into the same `Reassembler` as stream objects,
+so ordering, the bounds and the never-stall policy are one implementation and
+not two.
 
 **`moqtsrc`.** The subscriber is the inverse and emits a
 `ByteStream{IsoBmff}` a demuxer takes unchanged
@@ -3234,6 +3267,17 @@ Two constraints shape it. A browser accepts a self-signed relay only through
 catalog and init tracks each hold one object published before any subscriber
 exists, so they must be subscribed with an absolute start at group 0: a
 latest-object filter delivers nothing.
+
+The datagram and multi-subgroup paths cannot be validated that way, because
+`moq-relay-ietf` has no datagram code at all and drops all but one subgroup of a
+group. They are validated `moqtsink` -> `moqtsrc` directly over a real QUIC
+connection, through a test peer that answers each side's CLIENT_SETUP and then
+copies control messages, streams and datagrams byte for byte with no track state
+of its own, so what the subscriber decodes is what the publisher encoded; the
+datagram byte layouts are asserted against vectors the reference implementation's
+own encoder produced. The relay is still exercised on those settings, for what it
+proves: that a subscriber keeps playing, in order and a whole fragment at a time,
+when a peer delivers only part of every group.
 
 ### 4.21 Local Zero-Copy IPC (CUDA)
 

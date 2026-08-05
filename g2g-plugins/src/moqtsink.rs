@@ -17,9 +17,19 @@
 //!   hold at least one whole chunk, which a `moof`+`mdat` pair is.
 //! - a fragment whose first sample is a sync sample starts a new **group**, so a
 //!   group is a GOP and a subscriber that joins mid-stream starts at the next
-//!   keyframe. Each group is one subgroup on its own unidirectional stream.
+//!   keyframe. A group rides one subgroup stream by default, or `subgroups`
+//!   of them round-robin, which stops one object's loss from holding up the
+//!   next.
 //! - a `.catalog` track carries the JSON track list a browser player reads
 //!   (`moq-sub --catalog` reads the same document).
+//!
+//! `datagrams=true` carries each media object in a QUIC datagram instead:
+//! unreliable and bounded by the path MTU, with no head-of-line blocking. An
+//! object the path will not take (larger than the MTU, or a peer that accepts no
+//! datagrams) falls back to a subgroup stream, since dropping it is not the
+//! publisher's call to make. The init and catalog tracks always ride streams:
+//! losing either loses the whole broadcast. A group carried by datagrams is
+//! closed by an end-of-group status datagram, because no stream ends to say so.
 //!
 //! Every group's stream is opened only after SUBSCRIBE_OK for that
 //! subscription, so the subscriber can resolve the track alias in the stream
@@ -49,6 +59,7 @@ use crate::fmp4::trun_first_sample_is_sync;
 use crate::moqt::catalog;
 use crate::moqt::coding::{MoqtError, Params, TrackName, TrackNamespace};
 use crate::moqt::data::{StreamHeaderType, SubgroupHeader, SubgroupObjectHeader};
+use crate::moqt::datagram::DatagramObject;
 use crate::moqt::message::{publish_done_code, request_error_code, ControlMessage};
 use crate::moqt::session::{implementation_name, MoqtSession};
 use crate::mp4box::{be32, boxes, find_box, find_path};
@@ -76,14 +87,26 @@ enum Target {
     Media(u32),
 }
 
+/// One open subgroup stream of the group in progress.
+#[derive(Debug)]
+struct SubgroupStream {
+    subgroup_id: u64,
+    stream: SendStream,
+    /// Last object id written here: the next object's delta is measured from it.
+    prev_object_id: Option<u64>,
+}
+
 /// One accepted SUBSCRIBE and the stream state serving it.
 #[derive(Debug)]
 struct Subscription {
     request_id: u64,
     track_alias: u64,
     target: Target,
-    /// The open subgroup stream, when a group is in progress.
-    stream: Option<SendStream>,
+    /// The subgroup streams open for the group in progress.
+    streams: Vec<SubgroupStream>,
+    /// Whether a group boundary has passed since this subscription was accepted.
+    /// Until one has, the subscriber joined mid-group and gets nothing.
+    serving_group: bool,
     /// Whether the one-object tracks have already delivered their object.
     delivered: bool,
     /// Data streams opened for this subscription, reported in PUBLISH_DONE.
@@ -117,6 +140,8 @@ pub struct MoqtSink {
     publish_catalog: bool,
     priority: u64,
     max_request_id: u64,
+    datagrams: bool,
+    subgroups: u64,
 
     configured: bool,
     session: Option<MoqtSession>,
@@ -137,6 +162,8 @@ pub struct MoqtSink {
     pending_sync: bool,
 
     objects_published: u64,
+    datagram_objects: u64,
+    datagram_fallbacks: u64,
 }
 
 impl Default for MoqtSink {
@@ -159,6 +186,8 @@ impl MoqtSink {
             publish_catalog: true,
             priority: 127,
             max_request_id: 100,
+            datagrams: false,
+            subgroups: 1,
             configured: false,
             session: None,
             namespace_request: None,
@@ -171,6 +200,8 @@ impl MoqtSink {
             pending_track: None,
             pending_sync: false,
             objects_published: 0,
+            datagram_objects: 0,
+            datagram_fallbacks: 0,
         }
     }
 
@@ -189,9 +220,35 @@ impl MoqtSink {
         self
     }
 
+    /// Carry media objects in datagrams instead of subgroup streams. Off by
+    /// default: it trades reliable delivery for no head-of-line blocking.
+    pub fn with_datagrams(mut self, datagrams: bool) -> Self {
+        self.datagrams = datagrams;
+        self
+    }
+
+    /// Spread each group's objects across this many subgroup streams,
+    /// round-robin. One (the default) is a stream per group.
+    pub fn with_subgroups(mut self, subgroups: u64) -> Self {
+        self.subgroups = subgroups;
+        self
+    }
+
     /// Objects written to at least one subscriber so far.
     pub fn objects_published(&self) -> u64 {
         self.objects_published
+    }
+
+    /// Datagrams sent, counted once per subscriber served.
+    pub fn datagram_objects(&self) -> u64 {
+        self.datagram_objects
+    }
+
+    /// Objects datagram mode could not send as datagrams (too large for the
+    /// path, or a peer that takes none) and put on a subgroup stream instead,
+    /// counted the same way.
+    pub fn datagram_fallbacks(&self) -> u64 {
+        self.datagram_fallbacks
     }
 
     /// The media track names the `moov` produced, in track order.
@@ -349,7 +406,8 @@ impl MoqtSink {
             request_id: id,
             track_alias: id,
             target,
-            stream: None,
+            streams: Vec::new(),
+            serving_group: false,
             delivered: false,
             streams_opened: 0,
         });
@@ -358,10 +416,8 @@ impl MoqtSink {
 
     fn drop_subscription(&mut self, id: u64) {
         if let Some(at) = self.subscriptions.iter().position(|s| s.request_id == id) {
-            let mut sub = self.subscriptions.remove(at);
-            if let Some(stream) = sub.stream.as_mut() {
-                let _ = stream.finish();
-            }
+            let sub = self.subscriptions.remove(at);
+            finish_streams(sub.streams);
         }
     }
 
@@ -391,8 +447,8 @@ impl MoqtSink {
                 continue; // the moov has not arrived yet
             }
             let alias = self.subscriptions[i].track_alias;
-            let mut stream = self.open_group_stream(alias, 0).await?;
-            write_object(&mut stream, &payload).await?;
+            let mut stream = self.open_group_stream(alias, 0, 0).await?;
+            write_object(&mut stream, 0, &payload).await?;
             let _ = stream.finish();
             self.subscriptions[i].delivered = true;
             self.subscriptions[i].streams_opened += 1;
@@ -401,17 +457,22 @@ impl MoqtSink {
         Ok(())
     }
 
+    fn priority_byte(&self) -> u8 {
+        self.priority.min(u64::from(u8::MAX)) as u8
+    }
+
     async fn open_group_stream(
         &mut self,
         track_alias: u64,
         group_id: u64,
+        subgroup_id: u64,
     ) -> Result<SendStream, G2gError> {
         let header = SubgroupHeader {
             header_type: HEADER_TYPE,
             track_alias,
             group_id,
-            subgroup_id: Some(0),
-            publisher_priority: self.priority.min(u64::from(u8::MAX)) as u8,
+            subgroup_id: Some(subgroup_id),
+            publisher_priority: self.priority_byte(),
         };
         self.session
             .as_mut()
@@ -485,55 +546,157 @@ impl MoqtSink {
         };
         if starts_group {
             if self.tracks[at].started {
+                self.close_group(track_id).await;
                 self.tracks[at].group_id += 1;
             }
             self.tracks[at].started = true;
             self.tracks[at].objects_in_group = 0;
+            for sub in &mut self.subscriptions {
+                if sub.target == Target::Media(track_id) {
+                    sub.serving_group = true;
+                }
+            }
         } else if !self.tracks[at].started {
             // Nothing has opened a group yet, so this fragment has no group to
             // belong to: drop it rather than start a GOP mid-way.
             return Ok(());
         }
         let group_id = self.tracks[at].group_id;
+        let object_id = self.tracks[at].objects_in_group;
         self.tracks[at].objects_in_group += 1;
 
         let mut published = false;
         let mut reset = Vec::new();
         for i in 0..self.subscriptions.len() {
-            if self.subscriptions[i].target != Target::Media(track_id) {
+            // A subscription that has not seen a group boundary joined
+            // mid-group: it waits for the next keyframe.
+            if self.subscriptions[i].target != Target::Media(track_id)
+                || !self.subscriptions[i].serving_group
+            {
                 continue;
             }
-            if starts_group {
-                if let Some(stream) = self.subscriptions[i].stream.as_mut() {
-                    let _ = stream.finish();
-                }
-                let alias = self.subscriptions[i].track_alias;
-                // Failing to open a stream is a dead session, not a dead
-                // subscription: every subscription rides the one connection.
-                let stream = self.open_group_stream(alias, group_id).await?;
-                self.subscriptions[i].stream = Some(stream);
-                self.subscriptions[i].streams_opened += 1;
+            if self.datagrams && self.send_object_datagram(i, group_id, object_id, payload)? {
+                self.datagram_objects += 1;
+                published = true;
+                continue;
             }
-            let Some(stream) = self.subscriptions[i].stream.as_mut() else {
-                continue; // joined mid-group: wait for the next keyframe
-            };
-            // A write that fails means this subscriber reset its stream (it
-            // stopped reading). Drop the subscription and keep serving the
-            // rest; a session that is actually gone surfaces on the control
-            // stream instead.
-            if write_object(stream, payload).await.is_err() {
+            if self.datagrams {
+                // Too large for the path MTU, or a peer that takes no
+                // datagrams: the object still has to arrive, so it goes on a
+                // subgroup stream.
+                self.datagram_fallbacks += 1;
+            }
+            if self
+                .write_on_subgroup(i, group_id, object_id, payload)
+                .await?
+            {
+                published = true;
+            } else {
                 reset.push(i);
-                continue;
             }
-            published = true;
         }
         for i in reset.into_iter().rev() {
-            self.subscriptions.remove(i);
+            let sub = self.subscriptions.remove(i);
+            finish_streams(sub.streams);
         }
         if published {
             self.objects_published += 1;
         }
         Ok(())
+    }
+
+    /// Send one object as a datagram to subscription `at`. `Ok(false)` when the
+    /// session refused it, which is the caller's cue to use a stream.
+    fn send_object_datagram(
+        &mut self,
+        at: usize,
+        group_id: u64,
+        object_id: u64,
+        payload: &[u8],
+    ) -> Result<bool, G2gError> {
+        let object = DatagramObject::media(
+            self.subscriptions[at].track_alias,
+            group_id,
+            object_id,
+            self.priority_byte(),
+            payload.to_vec(),
+        );
+        let session = self.session.as_ref().ok_or(G2gError::NotConfigured)?;
+        Ok(session.send_datagram(&object).is_ok())
+    }
+
+    /// Write one object onto subscription `at`'s subgroup stream for it, opening
+    /// the stream on first use. `Ok(false)` means this subscriber reset the
+    /// stream (it stopped reading), so the subscription is dropped and the rest
+    /// keep being served; a session that is actually gone surfaces on the
+    /// control stream instead.
+    async fn write_on_subgroup(
+        &mut self,
+        at: usize,
+        group_id: u64,
+        object_id: u64,
+        payload: &[u8],
+    ) -> Result<bool, G2gError> {
+        let subgroup_id = object_id % self.subgroups.max(1);
+        let slot = match self.subscriptions[at]
+            .streams
+            .iter()
+            .position(|s| s.subgroup_id == subgroup_id)
+        {
+            Some(slot) => slot,
+            None => {
+                let alias = self.subscriptions[at].track_alias;
+                // Failing to open a stream is a dead session, not a dead
+                // subscription: every subscription rides the one connection.
+                let stream = self.open_group_stream(alias, group_id, subgroup_id).await?;
+                let sub = &mut self.subscriptions[at];
+                sub.streams.push(SubgroupStream {
+                    subgroup_id,
+                    stream,
+                    prev_object_id: None,
+                });
+                sub.streams_opened += 1;
+                sub.streams.len() - 1
+            }
+        };
+        let open = &mut self.subscriptions[at].streams[slot];
+        // The delta counts the distance to the previous id on *this* stream less
+        // one; the first object of a stream takes the delta as its absolute id.
+        let delta = match open.prev_object_id {
+            Some(prev) => object_id.saturating_sub(prev).saturating_sub(1),
+            None => object_id,
+        };
+        open.prev_object_id = Some(object_id);
+        Ok(write_object(&mut open.stream, delta, payload).await.is_ok())
+    }
+
+    /// End the group in progress on `track_id`: finish the subgroup streams
+    /// that carried it and, in datagram mode, mark its end. A group carried only
+    /// by datagrams has no stream whose close says it is done, so without the
+    /// marker the subscriber would hold it until a buffering bound moved it on.
+    async fn close_group(&mut self, track_id: u32) {
+        let Some(track) = self.tracks.iter().find(|t| t.track_id == track_id) else {
+            return;
+        };
+        let (group_id, objects_in_group) = (track.group_id, track.objects_in_group);
+        for i in 0..self.subscriptions.len() {
+            if self.subscriptions[i].target != Target::Media(track_id) {
+                continue;
+            }
+            finish_streams(core::mem::take(&mut self.subscriptions[i].streams));
+            if !self.datagrams || !self.subscriptions[i].serving_group {
+                continue;
+            }
+            let marker = DatagramObject::end_of_group(
+                self.subscriptions[i].track_alias,
+                group_id,
+                objects_in_group,
+                self.priority_byte(),
+            );
+            if let Some(session) = self.session.as_ref() {
+                let _ = session.send_datagram(&marker);
+            }
+        }
     }
 
     /// Read the `moov`: the media tracks it declares and the catalog that
@@ -589,11 +752,18 @@ impl MoqtSink {
     /// Finish every open stream, tell each subscriber the track ended, and
     /// close the session.
     async fn finish(&mut self) -> Result<(), G2gError> {
+        let started: Vec<u32> = self
+            .tracks
+            .iter()
+            .filter(|t| t.started)
+            .map(|t| t.track_id)
+            .collect();
+        for track_id in started {
+            self.close_group(track_id).await;
+        }
         let subs = core::mem::take(&mut self.subscriptions);
-        for mut sub in subs {
-            if let Some(stream) = sub.stream.as_mut() {
-                let _ = stream.finish();
-            }
+        for sub in subs {
+            finish_streams(sub.streams);
             self.send(ControlMessage::PublishDone {
                 id: sub.request_id,
                 status_code: publish_done_code::TRACK_ENDED,
@@ -614,17 +784,28 @@ impl MoqtSink {
 }
 
 /// Write one object header plus its payload onto an open subgroup stream.
-///
-/// Object ids are consecutive from zero within a group, and the delta is
-/// measured from the previous id less one, so it is always zero: the first
-/// object's id is the delta itself (`session/subscriber.rs`).
-async fn write_object(stream: &mut SendStream, payload: &[u8]) -> Result<(), G2gError> {
+/// `object_id_delta` is the distance to the previous object id on this stream
+/// less one, and the first object of a stream takes it as its absolute id
+/// (`session/subscriber.rs`).
+async fn write_object(
+    stream: &mut SendStream,
+    object_id_delta: u64,
+    payload: &[u8],
+) -> Result<(), G2gError> {
     let mut header = Vec::new();
-    SubgroupObjectHeader::normal(0, payload.len())
+    SubgroupObjectHeader::normal(object_id_delta, payload.len())
         .encode(HEADER_TYPE, &mut header)
         .map_err(proto_err)?;
     stream.write_all(&header).await.map_err(wt_err)?;
     stream.write_all(payload).await.map_err(wt_err)
+}
+
+/// Finish every stream of a group that ended, so the subscriber learns nothing
+/// more is coming for it.
+fn finish_streams(streams: Vec<SubgroupStream>) {
+    for mut open in streams {
+        let _ = open.stream.finish();
+    }
 }
 
 /// The catalog `selectionParams` for a sample entry, as a JSON fragment that
@@ -759,6 +940,8 @@ impl AsyncElement for MoqtSink {
             "catalog-track-name" => self.catalog_track = string(&value)?,
             "server-certificate-hashes" => self.cert_hashes = string(&value)?,
             "catalog" => self.publish_catalog = value.as_bool().ok_or(PropError::Type)?,
+            "datagrams" => self.datagrams = value.as_bool().ok_or(PropError::Type)?,
+            "subgroups" => self.subgroups = value.as_uint().ok_or(PropError::Type)?,
             "priority" => self.priority = value.as_uint().ok_or(PropError::Type)?,
             "max-request-id" => self.max_request_id = value.as_uint().ok_or(PropError::Type)?,
             _ => return Err(PropError::Unknown),
@@ -775,6 +958,8 @@ impl AsyncElement for MoqtSink {
             "catalog-track-name" => Some(PropValue::Str(self.catalog_track.clone())),
             "server-certificate-hashes" => Some(PropValue::Str(self.cert_hashes.clone())),
             "catalog" => Some(PropValue::Bool(self.publish_catalog)),
+            "datagrams" => Some(PropValue::Bool(self.datagrams)),
+            "subgroups" => Some(PropValue::Uint(self.subgroups)),
             "priority" => Some(PropValue::Uint(self.priority)),
             "max-request-id" => Some(PropValue::Uint(self.max_request_id)),
             _ => None,
@@ -818,6 +1003,18 @@ static MOQTSINK_PROPS: &[PropertySpec] = &[
         "publish the JSON catalog track",
     )
     .with_default("true"),
+    PropertySpec::new(
+        "datagrams",
+        PropKind::Bool,
+        "carry media objects in QUIC datagrams instead of subgroup streams: unreliable and MTU-bounded, with an object too large for the path falling back to a stream",
+    )
+    .with_default("false"),
+    PropertySpec::new(
+        "subgroups",
+        PropKind::Uint,
+        "subgroup streams a group's objects are spread across, round-robin (1 = one stream per group)",
+    )
+    .with_default("1"),
     PropertySpec::new(
         "priority",
         PropKind::Uint,

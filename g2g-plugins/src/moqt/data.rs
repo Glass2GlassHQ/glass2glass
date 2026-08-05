@@ -85,7 +85,7 @@ pub enum ObjectStatus {
 }
 
 impl ObjectStatus {
-    fn from_code(code: u64) -> Result<Self, MoqtError> {
+    pub fn from_code(code: u64) -> Result<Self, MoqtError> {
         Ok(match code {
             0x0 => Self::Normal,
             0x3 => Self::EndOfGroup,

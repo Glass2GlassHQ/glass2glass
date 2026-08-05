@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M905: `moqtsink` can carry media objects in QUIC datagrams (`datagrams=true`) and spread a group across several subgroup streams (`subgroups=N`), which `moqtsrc` reorders through the same bounded reassembly.
+
 - M904: a browser plays a g2g MoQ Transport broadcast through a relay (`tools/moqt-demo`), decoded by the third-party MOQtail client and asserted headlessly on the decoded frames.
 
 - M903: `moqtsrc` subscribes to a MoQ Transport broadcast, reordering concurrent subgroup streams into an fMP4 byte stream under a fixed memory bound, validated against `moq-pub` and against `moqtsink`.

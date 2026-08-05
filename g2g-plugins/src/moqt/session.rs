@@ -14,8 +14,10 @@
 //!
 //! A subscriber also needs the data plane, which is many unidirectional streams
 //! at once: [`MoqtSession::start_data_reader`] accepts them and reads each in
-//! its own task, funnelling whole objects into one channel. Ordering is the
-//! receiver's problem, not the reader's (see [`super::reassembly`]).
+//! its own task, funnelling whole objects into one channel. The same call reads
+//! datagram objects onto that channel, so both carriages reorder together.
+//! Ordering is the receiver's problem, not the reader's (see
+//! [`super::reassembly`]).
 
 use alloc::string::String;
 use alloc::vec;
@@ -30,6 +32,7 @@ use crate::remotewtio::{dial, wt_err};
 
 use super::coding::{setup_param, MoqtError, Params};
 use super::data::SubgroupHeader;
+use super::datagram::DatagramObject;
 use super::message::ControlMessage;
 use super::reassembly::{ReceivedObject, StreamItem, SubgroupStreamDecoder, DATA_READ_CHUNK};
 
@@ -174,20 +177,56 @@ impl MoqtSession {
     }
 
     /// Start accepting the session's unidirectional streams and decoding the
-    /// subgroups on them. `max_object_bytes` bounds a single object, so a relay
-    /// cannot make one stream allocate without limit.
+    /// subgroups on them, and reading datagram objects off the same session.
+    /// `max_object_bytes` bounds a single object, so a peer cannot make one
+    /// stream or one datagram allocate without limit.
+    ///
+    /// Both carriages produce the same [`DataEvent::Object`], so the receiver
+    /// reorders them together: a datagram object is an object like any other,
+    /// it just arrives without a stream to open or close.
     ///
     /// Call once: a second reader would race the first for streams.
     pub fn start_data_reader(&self, max_object_bytes: usize) -> mpsc::UnboundedReceiver<DataEvent> {
         let (tx, rx) = mpsc::unbounded_channel();
-        let session = self.session.clone();
+        let streams = self.session.clone();
+        let stream_tx = tx.clone();
         tokio::spawn(async move {
-            while let Ok(stream) = session.accept_uni().await {
-                let tx = tx.clone();
+            while let Ok(stream) = streams.accept_uni().await {
+                let tx = stream_tx.clone();
                 tokio::spawn(read_subgroup(stream, tx, max_object_bytes));
             }
         });
+        let datagrams = self.session.clone();
+        tokio::spawn(async move {
+            while let Ok(bytes) = datagrams.read_datagram().await {
+                // A datagram that does not decode is one lost object on a
+                // carriage that already loses them: dropping it keeps the rest
+                // of the session, where killing it would lose everything.
+                let Ok(object) = DatagramObject::decode(&bytes, max_object_bytes) else {
+                    continue;
+                };
+                let event = DataEvent::Object {
+                    track_alias: object.track_alias,
+                    object: object.into_received(),
+                };
+                if tx.send(event).is_err() {
+                    return;
+                }
+            }
+        });
         rx
+    }
+
+    /// Send one datagram object. Fails when the encoded object does not fit the
+    /// path MTU, or when the peer accepts no datagrams at all: either way the
+    /// caller has to carry the object on a stream instead.
+    pub fn send_datagram(&self, object: &DatagramObject) -> Result<(), G2gError> {
+        let mut bytes = Vec::new();
+        object.encode(&mut bytes).map_err(protocol_err)?;
+        self.session
+            .send_datagram(bytes.into())
+            .map_err(wt_err)
+            .map(|_| ())
     }
 
     /// The next control message already decoded by the reader task, or `None`
