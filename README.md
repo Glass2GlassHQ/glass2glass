@@ -664,6 +664,21 @@ Features: `v4l2 wayland-sink`. Full graph in
 in place, zero-copy); `with_timed_output()` (`timed-output=true`) holds the output
 rate over a stalled input whenever the pipeline clock can sleep on a deadline.
 
+### Camera → MoQ Transport → a browser
+
+```text
+libcamerasrc width=640 height=480 framerate=30 ! videoconvert ! x264enc ! mp4mux \
+  ! moqtsink location=https://127.0.0.1:4443/ namespace=live
+```
+
+[`tools/moqt-demo/`](tools/moqt-demo/) runs that end to end: `node watch-live.mjs`
+starts a local `moq-relay-ietf`, publishes the camera into it and opens a browser
+that subscribes and plays. The page's MoQT client is the third-party
+[MOQtail](https://github.com/moqtail/moqtail) draft-16 implementation, so the
+browser decodes our bytes with nothing shared from the Rust side.
+`node headless/run-moqt-play.mjs` is the same path in headless Chromium with
+assertions on the decoded frames. Features: `libcamera moqt ffmpeg`.
+
 ## Running smoke tests
 
 Most integration tests are marked `#[ignore]` because they need a live RTSP

@@ -1,0 +1,70 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>g2g MoQ Transport player</title>
+<style>
+  body { font: 14px/1.5 system-ui, sans-serif; margin: 2rem; max-width: 46rem; }
+  label { display: block; margin: .4rem 0; }
+  input { width: 28rem; font-family: monospace; }
+  video { width: 100%; background: #111; margin-top: 1rem; }
+  #log { font-family: monospace; white-space: pre-wrap; font-size: 12px; color: #444; }
+  canvas { display: none; }
+</style>
+
+<h1>g2g MoQ Transport player</h1>
+<p>Subscribes to a broadcast <code>moqtsink</code> is publishing to a local
+<code>moq-relay-ietf</code>, using the third-party
+<a href="https://github.com/moqtail/moqtail">MOQtail</a> draft-16 client, and
+plays the fragmented MP4 through Media Source Extensions.</p>
+
+<label>relay <input id="url" value="https://127.0.0.1:4443/"></label>
+<label>namespace <input id="namespace" value="demo"></label>
+<label>leaf cert sha-256 (hex) <input id="cert" placeholder="empty if the relay has a publicly trusted certificate"></label>
+<button id="start">Play</button>
+<span id="status"></span>
+
+<video id="view" muted playsinline controls></video>
+<canvas id="frame"></canvas>
+<div id="log"></div>
+
+<script type="module">
+  import { play, playbackReport } from "./moqt-player.js";
+
+  const $ = (id) => document.getElementById(id);
+  const params = new URLSearchParams(location.search);
+  for (const key of ["url", "namespace", "cert"]) {
+    if (params.get(key)) $(key).value = params.get(key);
+  }
+
+  const logEl = $("log");
+  const origLog = console.log;
+  console.log = (...a) => { origLog(...a); logEl.textContent += a.join(" ") + "\n"; };
+
+  // The headless driver reads these off the page rather than the console, so a
+  // count is never lost to log truncation.
+  window.g2gState = { started: false, error: null, fragments: 0 };
+  window.g2gReport = () => playbackReport($("view"), $("frame"));
+
+  async function start() {
+    $("start").disabled = true;
+    $("status").textContent = "connecting...";
+    try {
+      const state = await play({
+        url: $("url").value,
+        namespace: $("namespace").value,
+        certHash: $("cert").value.trim(),
+        video: $("view"),
+        debug: params.has("debug"),
+      });
+      window.g2gState.started = true;
+      $("status").textContent = "playing";
+      setInterval(() => { window.g2gState.fragments = state.fragments; }, 100);
+    } catch (e) {
+      window.g2gState.error = String(e);
+      $("status").textContent = "failed";
+      console.log(`g2g[moqt] error: ${e}`);
+    }
+  }
+
+  $("start").addEventListener("click", start);
+  if (params.get("autostart")) start();
+</script>

@@ -3216,6 +3216,25 @@ in; `moq-pub` publishes through the same relay into `moqtsrc`; and the g2g round
 trip `mp4mux ! moqtsink` -> relay -> `moqtsrc` is compared byte for byte, over a
 run long enough to span a group boundary.
 
+**The browser leg** (M904, `tools/moqt-demo/`) is the independent one: everything
+above validates against Cloudflare's Rust or our own, and a JS client is neither.
+The page subscribes with [MOQtail](https://github.com/moqtail/moqtail), a
+third-party draft-16 implementation, reads the `.catalog`, fetches the init track
+and appends the `moof`+`mdat` objects to one MSE `SourceBuffer` unchanged, so the
+browser's own demuxer and H.264 decoder consume the exact bytes `moqtsink` wrote.
+`headless/run-moqt-play.mjs` drives it in headless Chromium against a locally
+spawned relay and asserts on what the decoder produced: frame count, decoded
+size, and the seven SMPTE bars sampled off a canvas. `watch-live.mjs` is the same
+plumbing with `libcamerasrc` as the source and a real browser window.
+
+Two constraints shape it. A browser accepts a self-signed relay only through
+`serverCertificateHashes`, which requires an ECDSA P-256 certificate valid at most
+14 days, and a certificate that signs itself cannot be the leaf
+(`CaUsedAsEndEntity`), so the harness mints a CA and a leaf under it. And the
+catalog and init tracks each hold one object published before any subscriber
+exists, so they must be subscribed with an absolute start at group 0: a
+latest-object filter delivers nothing.
+
 ### 4.21 Local Zero-Copy IPC (CUDA)
 
 Everything above ships CPU bytes: the wire codec refuses device memory, so a GPU
