@@ -201,6 +201,12 @@ impl DeviceSink {
     /// Post one event, blocking until the consumer has room. `false` once the
     /// monitor is gone (the watch should shut down), or when the event's
     /// device is filtered out (not an error; keep watching).
+    ///
+    /// A try-send retry loop rather than the async `send`: several watcher
+    /// threads may block here at once and the channel keeps a single send
+    /// waker, so a parked async send could miss its wake. The retry sees
+    /// `Closed` as soon as the monitor drops its receiver, which is what
+    /// unblocks shutdown.
     pub fn post(&self, event: DeviceEvent) -> bool {
         let passes = match &event {
             DeviceEvent::Added(d) | DeviceEvent::Changed(d) => matches_filters(&self.filters, d),
@@ -209,7 +215,17 @@ impl DeviceSink {
         if !passes {
             return true;
         }
-        super::blocking::block_on(self.tx.send(event)).is_ok()
+        let mut event = event;
+        loop {
+            match self.tx.try_send(event) {
+                Ok(()) => return true,
+                Err((_, super::SendError::Closed)) => return false,
+                Err((rejected, super::SendError::Full)) => {
+                    event = rejected;
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+        }
     }
 }
 
@@ -396,7 +412,7 @@ impl DeviceMonitor {
         }
 
         RunningMonitor {
-            rx,
+            rx: Some(rx),
             stop,
             threads,
             _guards: guards,
@@ -500,7 +516,10 @@ fn spawn_poll(
 /// [`stop`](Self::stop)) ends every watch and joins the poll threads.
 #[derive(Debug)]
 pub struct RunningMonitor {
-    rx: Receiver<DeviceEvent>,
+    /// `None` only once shut down; the receiver is dropped BEFORE the join so
+    /// a watcher blocked posting into a full queue sees `Closed` and exits
+    /// instead of deadlocking the join.
+    rx: Option<Receiver<DeviceEvent>>,
     stop: Arc<StopFlag>,
     threads: Vec<JoinHandle<()>>,
     _guards: Vec<WatchGuard>,
@@ -512,12 +531,15 @@ pub struct RunningMonitor {
 impl RunningMonitor {
     /// Non-blocking drain of one event; `None` when empty.
     pub fn try_recv(&self) -> Option<DeviceEvent> {
-        self.rx.try_recv()
+        self.rx.as_ref()?.try_recv()
     }
 
     /// Await the next event; `None` once every watch has ended.
     pub async fn recv(&self) -> Option<DeviceEvent> {
-        self.rx.recv().await
+        match &self.rx {
+            Some(rx) => rx.recv().await,
+            None => None,
+        }
     }
 
     /// Stop watching and join the watcher threads.
@@ -527,6 +549,7 @@ impl RunningMonitor {
 
     fn shutdown(&mut self) {
         self.stop.stop();
+        drop(self.rx.take());
         self._guards.clear();
         for handle in self.threads.drain(..) {
             let _ = handle.join();

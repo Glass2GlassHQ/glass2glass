@@ -351,6 +351,27 @@ fn native_watch_events_pass_the_monitor_filters() {
 }
 
 #[test]
+fn drop_with_full_event_queue_does_not_deadlock() {
+    // More initial devices than the event channel holds, so the poll watcher
+    // is mid-post (blocked on a full queue) when the monitor drops. Shutdown
+    // must close the channel before joining or this hangs forever.
+    let many: Vec<Device> = (0..200)
+        .map(|i| camera(&format!("video{i}"), "Cam"))
+        .collect();
+    let mut monitor = DeviceMonitor::new();
+    monitor
+        .register(Box::new(MockProvider {
+            devices: Arc::new(Mutex::new(many)),
+            fail: false,
+        }))
+        .set_poll_interval(None);
+    let running = monitor.start();
+    // Let the watcher fill the queue and block on it.
+    std::thread::sleep(Duration::from_millis(50));
+    drop(running);
+}
+
+#[test]
 fn recv_is_awaitable() {
     let devices = Arc::new(Mutex::new(vec![camera("video0", "Cam")]));
     let mut monitor = DeviceMonitor::new();

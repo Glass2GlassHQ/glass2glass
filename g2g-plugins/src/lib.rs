@@ -97,6 +97,9 @@ pub mod analyticsoverlay;
     feature = "mediacodec-wgpu"
 ))]
 pub mod gpu;
+// GPU / compute device discovery (M939): wgpu adapters, CUDA devices, VAAPI nodes.
+#[cfg(any(feature = "wgpu-sink", feature = "cuda", feature = "vaapi"))]
+pub mod gpudevice;
 // Re-export wgpu so a downstream consumer (a viewer wiring g2g's GPU-texture
 // decode into its renderer) can name `wgpu::Texture` / build on a shared device
 // with the EXACT wgpu version g2g's textures are bound to. A version mismatch
@@ -288,6 +291,10 @@ pub mod uridecodebin;
 // gst-inspect (M107). std (the Registry is std).
 #[cfg(feature = "std")]
 pub mod registry;
+// The device-provider analog of `registry` (M939): the standard
+// `DeviceMonitor` assembly.
+#[cfg(feature = "std")]
+pub mod devicemon;
 // GStreamer porting helpers: gst->g2g element map + launch linter (M200). std
 // (uses the Registry + parse_launch).
 #[cfg(feature = "std")]
@@ -927,6 +934,11 @@ pub mod ptpclient;
 #[cfg(all(target_os = "linux", feature = "v4l2"))]
 pub mod v4l2src;
 
+// V4L2 device discovery: enumerates /dev/videoN capture nodes with their
+// probed YUYV modes for the device monitor.
+#[cfg(all(target_os = "linux", feature = "v4l2"))]
+pub mod v4l2device;
+
 // libcamera capture source (NV12 / YUYV) via the system libcamera stack. The
 // modern Linux camera path: covers UVC webcams plus CSI/ISP cameras. Linux-only.
 #[cfg(all(target_os = "linux", feature = "libcamera"))]
@@ -996,6 +1008,9 @@ mod alsapcm;
 pub mod alsasink;
 #[cfg(all(target_os = "linux", feature = "alsa-src"))]
 pub mod alsasrc;
+// ALSA device discovery: the PCM hint list as capture / playback devices.
+#[cfg(all(target_os = "linux", any(feature = "alsa-sink", feature = "alsa-src")))]
+pub mod alsadevice;
 // PulseAudio / PipeWire-pulse via the blocking libpulse "simple" API.
 #[cfg(all(
     target_os = "linux",
@@ -1020,6 +1035,10 @@ pub mod pipewirevideosrc;
 mod pwaudio;
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
 mod pwvideo;
+// Device discovery over the PipeWire graph, the one Linux backend with native
+// hotplug events (M939).
+#[cfg(all(target_os = "linux", feature = "pipewire"))]
+pub mod pwdevice;
 
 // CUDA device-memory consumers (C3 Phase 3). `CudaDownload` copies a
 // `MemoryDomain::Cuda` NV12 frame back to system memory so a `NvdecCuda`

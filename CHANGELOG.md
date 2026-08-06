@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M939: standard device providers: v4l2 cameras (probed YUYV modes), ALSA PCM devices, PipeWire nodes with native hotplug watch and `target-object` selection, and GPU/compute devices (wgpu adapters, CUDA ordinals, VAAPI render nodes) under `default_device_monitor`.
+
 - M938: device discovery core: `Device` / `DeviceProvider` / `DeviceMonitor` (the `GstDeviceMonitor` analog) with class + caps filters, registry-backed element construction, and hotplug via native watch or poll-and-diff.
 
 - M937: the ffmpeg audio decoder converts float samples to s16 like swresample (round to nearest at 1<<15 scale), so AC-3 / AAC decode is bit-exact with ffmpeg's.
