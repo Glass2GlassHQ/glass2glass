@@ -46,6 +46,9 @@ pub struct SpsGeometry {
     /// Framerate as Q16 fixed-point fps (e.g. from the H.264 VUI `timing_info`),
     /// `None` when the SPS carries none or the codec does not recover it.
     pub framerate: Option<u32>,
+    /// SPS VUI context an H.264 `pic_timing` SEI needs to be parseable. `None`
+    /// for H.265, whose `time_code` SEI is self-contained.
+    pub pic_timing: Option<crate::sei::PicTimingContext>,
 }
 
 /// Codec-specific hooks for [`NalParse`]. Implemented by zero-sized markers.
@@ -116,6 +119,19 @@ pub struct NalParse<C: NalCodec> {
     /// PTS (ns) of the last AU the parameter sets were (re-)inserted before, for
     /// the `config_interval > 0` time-based cadence.
     last_config_pts_ns: Option<u64>,
+    /// Last HDR10 static metadata seen in the stream's SEI. It describes the
+    /// whole coded video sequence but is coded per IRAP, so it is latched and
+    /// re-attached to every frame.
+    #[cfg(feature = "metadata")]
+    hdr: Option<g2g_core::meta::HdrStaticMeta>,
+    /// SPS VUI context the H.264 `pic_timing` SEI parse needs, latched from the
+    /// last SPS (the SEI may ride an access unit that carries no SPS).
+    #[cfg(feature = "metadata")]
+    pic_timing: crate::sei::PicTimingContext,
+    /// Framerate the last SPS declared, stamped onto a recovered timecode so a
+    /// consumer can convert the frame count to a duration.
+    #[cfg(feature = "metadata")]
+    sps_framerate: Option<u32>,
     _codec: PhantomData<C>,
 }
 
@@ -133,6 +149,12 @@ impl<C: NalCodec> Default for NalParse<C> {
             config_interval: 0,
             cached: C::PARAM_SET_TYPES.iter().map(|_| Vec::new()).collect(),
             last_config_pts_ns: None,
+            #[cfg(feature = "metadata")]
+            hdr: None,
+            #[cfg(feature = "metadata")]
+            pic_timing: crate::sei::PicTimingContext::default(),
+            #[cfg(feature = "metadata")]
+            sps_framerate: None,
             _codec: PhantomData,
         }
     }
@@ -246,6 +268,15 @@ impl<C: NalCodec> NalParse<C> {
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
         if let Some(info) = C::extract_sps_info(bytes) {
+            #[cfg(feature = "metadata")]
+            {
+                // The SEI timecode parse and its frame-rate field both come from
+                // the SPS, which may sit in an earlier access unit than the SEI.
+                if let Some(ctx) = info.pic_timing {
+                    self.pic_timing = ctx;
+                }
+                self.sps_framerate = info.framerate;
+            }
             let new_caps = Caps::CompressedVideo {
                 codec: C::CODEC,
                 width: Dim::Fixed(info.width),
@@ -346,14 +377,51 @@ impl<C: NalCodec> NalParse<C> {
         // Re-insert cached parameter sets before this AU when config-interval calls
         // for it (no-op at interval 0 or when the AU already carries them).
         let au = self.apply_config_interval(au, timing.pts_ns, timing.keyframe);
-        let frame = Frame::new(
+        #[allow(unused_mut)]
+        let mut frame = Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
             timing,
             self.seq,
         );
+        #[cfg(feature = "metadata")]
+        self.attach_stream_meta(&mut frame);
         self.seq += 1;
         out.push(PipelinePacket::DataFrame(frame)).await?;
         Ok(())
+    }
+
+    /// Attach what the access unit's SEI carried, so it outlives the bitstream:
+    /// a decoder throws the SEI away, but the meta rides the decoded frames (and
+    /// a re-encode, see the metas' `propagate`) to a downstream caption inserter
+    /// or HDR display sink.
+    ///
+    /// Captions are per-picture. HDR10 static metadata describes the whole coded
+    /// video sequence and is typically coded once per IRAP, so the last one seen
+    /// is latched and re-attached to every frame.
+    #[cfg(feature = "metadata")]
+    fn attach_stream_meta(&mut self, frame: &mut Frame) {
+        let Some(au) = frame.domain.as_system_slice() else {
+            return;
+        };
+        let info = crate::sei::parse_au(au, C::CODEC, self.pic_timing);
+        if let Some(hdr) = info.hdr {
+            self.hdr = Some(hdr);
+        }
+        if !info.captions.is_empty() {
+            let mut meta = g2g_core::meta::CaptionMeta::new();
+            for t in info.captions {
+                meta.push(t.into());
+            }
+            frame.meta.attach(meta);
+        }
+        if let Some(hdr) = self.hdr {
+            frame.meta.attach(hdr);
+        }
+        if let Some(mut tc) = info.timecode {
+            // The SEI codes the count, not the rate it runs at; that is the SPS's.
+            tc.framerate_q16 = self.sps_framerate;
+            frame.meta.attach(tc);
+        }
     }
 
     /// The `CompressedVideo` caps at any geometry that this parser accepts and
@@ -447,6 +515,8 @@ impl<C: NalCodec> AsyncElement for NalParse<C> {
                         let is_keyframe = C::au_is_keyframe(slice);
                         self.refine_caps(slice, out).await?;
                         frame.timing.keyframe = is_keyframe;
+                        #[cfg(feature = "metadata")]
+                        self.attach_stream_meta(&mut frame);
                     }
                     out.push(PipelinePacket::DataFrame(frame)).await?;
                 }

@@ -84,6 +84,12 @@ const DOMAIN_SYSTEM: u8 = 0;
 const META_ANALYTICS: u8 = 0;
 #[cfg_attr(not(feature = "metadata"), allow(dead_code))]
 const META_BLOB: u8 = 1;
+#[cfg_attr(not(feature = "metadata"), allow(dead_code))]
+const META_CAPTION: u8 = 2;
+#[cfg_attr(not(feature = "metadata"), allow(dead_code))]
+const META_HDR_STATIC: u8 = 3;
+#[cfg_attr(not(feature = "metadata"), allow(dead_code))]
+const META_TIMECODE: u8 = 4;
 
 // ---- primitive writer ----
 
@@ -194,6 +200,7 @@ fn video_codec_to_u8(c: VideoCodec) -> u8 {
         VideoCodec::SorensonH263 => 8,
         VideoCodec::Vp6 { alpha: false } => 9,
         VideoCodec::Vp6 { alpha: true } => 10,
+        VideoCodec::Mpeg2 => 11,
     }
 }
 fn video_codec_from_u8(v: u8) -> Result<VideoCodec, WireError> {
@@ -209,6 +216,7 @@ fn video_codec_from_u8(v: u8) -> Result<VideoCodec, WireError> {
         8 => VideoCodec::SorensonH263,
         9 => VideoCodec::Vp6 { alpha: false },
         10 => VideoCodec::Vp6 { alpha: true },
+        11 => VideoCodec::Mpeg2,
         _ => return Err(WireError::BadTag),
     })
 }
@@ -307,6 +315,7 @@ fn bytestream_to_u8(e: ByteStreamEncoding) -> u8 {
         ByteStreamEncoding::IsoBmff => 4,
         ByteStreamEncoding::Mp4 => 5,
         ByteStreamEncoding::Ivf => 6,
+        ByteStreamEncoding::MpegPs => 7,
     }
 }
 fn bytestream_from_u8(v: u8) -> Result<ByteStreamEncoding, WireError> {
@@ -318,6 +327,7 @@ fn bytestream_from_u8(v: u8) -> Result<ByteStreamEncoding, WireError> {
         4 => ByteStreamEncoding::IsoBmff,
         5 => ByteStreamEncoding::Mp4,
         6 => ByteStreamEncoding::Ivf,
+        7 => ByteStreamEncoding::MpegPs,
         _ => return Err(WireError::BadTag),
     })
 }
@@ -330,6 +340,7 @@ fn text_format_to_u8(f: TextFormat) -> u8 {
         TextFormat::WebVtt => 3,
         TextFormat::Ssa => 4,
         TextFormat::Ttml => 5,
+        TextFormat::Teletext => 6,
     }
 }
 fn text_format_from_u8(v: u8) -> Result<TextFormat, WireError> {
@@ -340,6 +351,7 @@ fn text_format_from_u8(v: u8) -> Result<TextFormat, WireError> {
         3 => TextFormat::WebVtt,
         4 => TextFormat::Ssa,
         5 => TextFormat::Ttml,
+        6 => TextFormat::Teletext,
         _ => return Err(WireError::BadTag),
     })
 }
@@ -362,12 +374,14 @@ fn subpicture_format_to_u8(f: SubPictureFormat) -> u8 {
     match f {
         SubPictureFormat::VobSub => 0,
         SubPictureFormat::DvbSub => 1,
+        SubPictureFormat::Pgs => 2,
     }
 }
 fn subpicture_format_from_u8(v: u8) -> Result<SubPictureFormat, WireError> {
     Ok(match v {
         0 => SubPictureFormat::VobSub,
         1 => SubPictureFormat::DvbSub,
+        2 => SubPictureFormat::Pgs,
         _ => return Err(WireError::BadTag),
     })
 }
@@ -682,11 +696,20 @@ fn get_domain(r: &mut Reader) -> Result<MemoryDomain, WireError> {
 
 #[cfg(feature = "metadata")]
 fn put_meta(w: &mut Writer, meta: &FrameMetaSet) {
-    use crate::meta::{AnalyticsMeta, AnalyticsNode, BlobMeta};
+    use crate::meta::{
+        AnalyticsMeta, AnalyticsNode, BlobMeta, CaptionMeta, HdrStaticMeta, TimecodeMeta,
+    };
 
     let analytics = meta.get::<AnalyticsMeta>();
     let blob = meta.get::<BlobMeta>();
-    let count = analytics.is_some() as u8 + blob.is_some() as u8;
+    let caption = meta.get::<CaptionMeta>();
+    let hdr = meta.get::<HdrStaticMeta>();
+    let timecode = meta.get::<TimecodeMeta>();
+    let count = analytics.is_some() as u8
+        + blob.is_some() as u8
+        + caption.is_some() as u8
+        + hdr.is_some() as u8
+        + timecode.is_some() as u8;
     w.u8(count);
 
     if let Some(a) = analytics {
@@ -712,6 +735,28 @@ fn put_meta(w: &mut Writer, meta: &FrameMetaSet) {
                     w.u8(2);
                     w.u64(t.object_id);
                 }
+                AnalyticsNode::Segmentation(s) => {
+                    w.u8(3);
+                    w.f32(s.bbox.x);
+                    w.f32(s.bbox.y);
+                    w.f32(s.bbox.w);
+                    w.f32(s.bbox.h);
+                    w.u32(s.label);
+                    w.f32(s.confidence);
+                    w.u32(s.mask.width());
+                    w.u32(s.mask.height());
+                    w.u32(s.mask.stride());
+                    w.bytes(s.mask.data());
+                }
+                AnalyticsNode::Roi(r) => {
+                    w.u8(4);
+                    w.f32(r.bbox.x);
+                    w.f32(r.bbox.y);
+                    w.f32(r.bbox.w);
+                    w.f32(r.bbox.h);
+                    w.u32(r.id);
+                    w.u32(r.label);
+                }
             }
         }
         w.u32(a.relations.len() as u32);
@@ -730,6 +775,62 @@ fn put_meta(w: &mut Writer, meta: &FrameMetaSet) {
             w.bytes(&blob.payload);
         }
     }
+
+    if let Some(c) = caption {
+        w.u8(META_CAPTION);
+        w.u32(c.triples.len() as u32);
+        for t in &c.triples {
+            w.u8(t.cc_type);
+            w.u8(t.b0);
+            w.u8(t.b1);
+        }
+    }
+
+    if let Some(h) = hdr {
+        w.u8(META_HDR_STATIC);
+        match &h.mastering {
+            Some(m) => {
+                w.bool(true);
+                for p in &m.display_primaries {
+                    w.f32(p.x);
+                    w.f32(p.y);
+                }
+                w.f32(m.white_point.x);
+                w.f32(m.white_point.y);
+                w.f32(m.max_luminance);
+                w.f32(m.min_luminance);
+            }
+            None => w.bool(false),
+        }
+        put_opt_u16(w, h.max_content_light_level);
+        put_opt_u16(w, h.max_frame_average_light_level);
+    }
+
+    if let Some(t) = timecode {
+        w.u8(META_TIMECODE);
+        w.u8(t.hours);
+        w.u8(t.minutes);
+        w.u8(t.seconds);
+        w.u8(t.frames);
+        w.bool(t.drop_frame);
+        w.bool(t.framerate_q16.is_some());
+        w.u32(t.framerate_q16.unwrap_or(0));
+    }
+}
+
+/// An optional `u16` as a presence flag then the value (only the HDR meta needs
+/// one, so it is not a `Writer` primitive).
+#[cfg(feature = "metadata")]
+fn put_opt_u16(w: &mut Writer, v: Option<u16>) {
+    w.bool(v.is_some());
+    w.u32(v.unwrap_or(0) as u32);
+}
+
+#[cfg(feature = "metadata")]
+fn get_opt_u16(r: &mut Reader) -> Result<Option<u16>, WireError> {
+    let present = r.bool()?;
+    let v = u16::try_from(r.u32()?).map_err(|_| WireError::BadTag)?;
+    Ok(present.then_some(v))
 }
 
 #[cfg(not(feature = "metadata"))]
@@ -762,8 +863,9 @@ fn relation_kind_from_u8(v: u8) -> Result<crate::meta::RelationKind, WireError> 
 #[cfg(feature = "metadata")]
 fn get_meta(r: &mut Reader) -> Result<FrameMetaSet, WireError> {
     use crate::meta::{
-        AnalyticsMeta, AnalyticsNode, BBox, Blob, BlobMeta, Classification, ObjectDetection,
-        Relation, Tracking,
+        AnalyticsMeta, AnalyticsNode, BBox, Blob, BlobMeta, CaptionMeta, CaptionTriple,
+        Chromaticity, Classification, HdrStaticMeta, Mask, MasteringDisplay, ObjectDetection,
+        Relation, Roi, Segmentation, TimecodeMeta, Tracking,
     };
 
     let count = r.u8()?;
@@ -792,6 +894,39 @@ fn get_meta(r: &mut Reader) -> Result<FrameMetaSet, WireError> {
                         2 => AnalyticsNode::Tracking(Tracking {
                             object_id: r.u64()?,
                         }),
+                        3 => {
+                            let bbox = BBox {
+                                x: r.f32()?,
+                                y: r.f32()?,
+                                w: r.f32()?,
+                                h: r.f32()?,
+                            };
+                            let label = r.u32()?;
+                            let confidence = r.f32()?;
+                            let (width, height, stride) = (r.u32()?, r.u32()?, r.u32()?);
+                            // The mask bytes are length-prefixed and bounded by
+                            // the message, and `Mask::new` rejects geometry that
+                            // does not fit them: a peer cannot make us index out
+                            // of the buffer it sent.
+                            let mask = Mask::new(width, height, stride, r.bytes()?)
+                                .ok_or(WireError::BadTag)?;
+                            AnalyticsNode::Segmentation(Segmentation {
+                                bbox,
+                                label,
+                                confidence,
+                                mask,
+                            })
+                        }
+                        4 => AnalyticsNode::Roi(Roi {
+                            bbox: BBox {
+                                x: r.f32()?,
+                                y: r.f32()?,
+                                w: r.f32()?,
+                                h: r.f32()?,
+                            },
+                            id: r.u32()?,
+                            label: r.u32()?,
+                        }),
                         _ => return Err(WireError::BadTag),
                     };
                     a.nodes.push(node);
@@ -816,6 +951,58 @@ fn get_meta(r: &mut Reader) -> Result<FrameMetaSet, WireError> {
                     });
                 }
                 set.attach(b);
+            }
+            META_CAPTION => {
+                let mut c = CaptionMeta::new();
+                let n = r.u32()? as usize;
+                for _ in 0..n {
+                    c.push(CaptionTriple {
+                        cc_type: r.u8()?,
+                        b0: r.u8()?,
+                        b1: r.u8()?,
+                    });
+                }
+                set.attach(c);
+            }
+            META_HDR_STATIC => {
+                let mastering = if r.bool()? {
+                    let mut primaries = [Chromaticity { x: 0.0, y: 0.0 }; 3];
+                    for p in &mut primaries {
+                        p.x = r.f32()?;
+                        p.y = r.f32()?;
+                    }
+                    Some(MasteringDisplay {
+                        display_primaries: primaries,
+                        white_point: Chromaticity {
+                            x: r.f32()?,
+                            y: r.f32()?,
+                        },
+                        max_luminance: r.f32()?,
+                        min_luminance: r.f32()?,
+                    })
+                } else {
+                    None
+                };
+                set.attach(HdrStaticMeta {
+                    mastering,
+                    max_content_light_level: get_opt_u16(r)?,
+                    max_frame_average_light_level: get_opt_u16(r)?,
+                });
+            }
+            META_TIMECODE => {
+                let tc = TimecodeMeta {
+                    hours: r.u8()?,
+                    minutes: r.u8()?,
+                    seconds: r.u8()?,
+                    frames: r.u8()?,
+                    drop_frame: r.bool()?,
+                    framerate_q16: {
+                        let present = r.bool()?;
+                        let v = r.u32()?;
+                        present.then_some(v)
+                    },
+                };
+                set.attach(tc);
             }
             _ => return Err(WireError::BadTag),
         }
@@ -1197,6 +1384,192 @@ mod tests {
                 assert_eq!(a.relations, analytics.relations);
                 let b = got.meta.get::<BlobMeta>().expect("blob survived");
                 assert_eq!(b, &blob);
+            }
+            other => panic!("expected DataFrame, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "metadata")]
+    #[test]
+    fn segmentation_and_roi_nodes_round_trip() {
+        use crate::meta::{AnalyticsMeta, AnalyticsNode, BBox, Mask, Roi, Segmentation};
+        let bbox = BBox {
+            x: 0.25,
+            y: 0.5,
+            w: 0.1,
+            h: 0.2,
+        };
+        // A 3x2 mask with a 4-byte stride, so the padded layout has to survive.
+        let mask = Mask::new(3, 2, 4, alloc::vec![10, 20, 30, 0, 40, 50, 60, 0])
+            .expect("mask fits its data");
+        let mut analytics = AnalyticsMeta::new();
+        analytics.push(AnalyticsNode::Segmentation(Segmentation {
+            bbox,
+            label: 3,
+            confidence: 0.75,
+            mask,
+        }));
+        analytics.push(AnalyticsNode::Roi(Roi {
+            bbox,
+            id: 9,
+            label: 4,
+        }));
+
+        let mut meta = FrameMetaSet::new();
+        meta.attach(analytics.clone());
+        let frame = Frame {
+            domain: MemoryDomain::System(SystemSlice::from_boxed(Box::new([0u8; 4]))),
+            timing: FrameTiming::default(),
+            sequence: 0,
+            meta,
+        };
+        match roundtrip(&PipelinePacket::DataFrame(frame)) {
+            PipelinePacket::DataFrame(got) => {
+                let a = got.meta.get::<AnalyticsMeta>().expect("analytics survived");
+                assert_eq!(a.nodes, analytics.nodes);
+                let seg = a.segmentations().next().expect("segmentation node");
+                assert_eq!(seg.mask.sample(2, 1), Some(60));
+                assert_eq!(seg.mask.sample(3, 0), None, "outside the mask width");
+                assert_eq!(a.rois().next().expect("roi node").id, 9);
+            }
+            other => panic!("expected DataFrame, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "metadata")]
+    #[test]
+    fn a_mask_whose_geometry_overruns_its_bytes_is_rejected() {
+        use crate::meta::Mask;
+        assert!(
+            Mask::new(4, 4, 4, alloc::vec![0; 15]).is_none(),
+            "short data"
+        );
+        assert!(
+            Mask::new(8, 2, 4, alloc::vec![0; 64]).is_none(),
+            "stride < width"
+        );
+        assert!(
+            Mask::new(u32::MAX, u32::MAX, u32::MAX, alloc::vec![0; 8]).is_none(),
+            "the row product must not overflow into a valid-looking size"
+        );
+    }
+
+    #[cfg(feature = "metadata")]
+    #[test]
+    fn caption_metadata_round_trips() {
+        use crate::meta::{CaptionMeta, CaptionTriple};
+        let mut captions = CaptionMeta::new();
+        captions.push(CaptionTriple {
+            cc_type: 0,
+            b0: 0x94,
+            b1: 0xAE,
+        });
+        captions.push(CaptionTriple {
+            cc_type: 3,
+            b0: 0x01,
+            b1: 0xFF,
+        });
+
+        let mut meta = FrameMetaSet::new();
+        meta.attach(captions.clone());
+        let frame = Frame {
+            domain: MemoryDomain::System(SystemSlice::from_boxed(Box::new([0u8; 4]))),
+            timing: FrameTiming::default(),
+            sequence: 3,
+            meta,
+        };
+        match roundtrip(&PipelinePacket::DataFrame(frame)) {
+            PipelinePacket::DataFrame(got) => {
+                let c = got.meta.get::<CaptionMeta>().expect("captions survived");
+                assert_eq!(c, &captions);
+            }
+            other => panic!("expected DataFrame, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "metadata")]
+    #[test]
+    fn hdr_static_metadata_round_trips() {
+        use crate::meta::{Chromaticity, HdrStaticMeta, MasteringDisplay};
+        let xy = |x, y| Chromaticity { x, y };
+        let hdr = HdrStaticMeta {
+            mastering: Some(MasteringDisplay {
+                display_primaries: [xy(0.708, 0.292), xy(0.170, 0.797), xy(0.131, 0.046)],
+                white_point: xy(0.3127, 0.3290),
+                max_luminance: 1000.0,
+                min_luminance: 0.005,
+            }),
+            max_content_light_level: Some(1200),
+            max_frame_average_light_level: Some(300),
+        };
+
+        let mut meta = FrameMetaSet::new();
+        meta.attach(hdr);
+        let frame = Frame {
+            domain: MemoryDomain::System(SystemSlice::from_boxed(Box::new([0u8; 4]))),
+            timing: FrameTiming::default(),
+            sequence: 0,
+            meta,
+        };
+        match roundtrip(&PipelinePacket::DataFrame(frame)) {
+            PipelinePacket::DataFrame(got) => {
+                let h = got.meta.get::<HdrStaticMeta>().expect("hdr survived");
+                assert_eq!(h, &hdr);
+            }
+            other => panic!("expected DataFrame, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "metadata")]
+    #[test]
+    fn hdr_static_metadata_round_trips_without_a_mastering_display() {
+        // A stream carrying only content_light_level_info: the absent half must
+        // decode back as absent, not as zeroed primaries.
+        use crate::meta::HdrStaticMeta;
+        let hdr = HdrStaticMeta {
+            mastering: None,
+            max_content_light_level: Some(400),
+            max_frame_average_light_level: None,
+        };
+        let mut meta = FrameMetaSet::new();
+        meta.attach(hdr);
+        let frame = Frame {
+            domain: MemoryDomain::System(SystemSlice::from_boxed(Box::new([0u8; 4]))),
+            timing: FrameTiming::default(),
+            sequence: 0,
+            meta,
+        };
+        match roundtrip(&PipelinePacket::DataFrame(frame)) {
+            PipelinePacket::DataFrame(got) => {
+                assert_eq!(got.meta.get::<HdrStaticMeta>(), Some(&hdr));
+            }
+            other => panic!("expected DataFrame, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "metadata")]
+    #[test]
+    fn timecode_metadata_round_trips() {
+        use crate::meta::TimecodeMeta;
+        let tc = TimecodeMeta {
+            hours: 10,
+            minutes: 59,
+            seconds: 58,
+            frames: 29,
+            drop_frame: true,
+            framerate_q16: Some(1_965_691), // 29.97 fps
+        };
+        let mut meta = FrameMetaSet::new();
+        meta.attach(tc);
+        let frame = Frame {
+            domain: MemoryDomain::System(SystemSlice::from_boxed(Box::new([0u8; 4]))),
+            timing: FrameTiming::default(),
+            sequence: 0,
+            meta,
+        };
+        match roundtrip(&PipelinePacket::DataFrame(frame)) {
+            PipelinePacket::DataFrame(got) => {
+                assert_eq!(got.meta.get::<TimecodeMeta>(), Some(&tc));
             }
             other => panic!("expected DataFrame, got {other:?}"),
         }

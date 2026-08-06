@@ -3669,6 +3669,7 @@ dependencies = [
  "libpulse-binding",
  "libpulse-simple-binding",
  "md-5",
+ "miniz_oxide",
  "mozjpeg",
  "ndk",
  "ndk-sys",

@@ -61,6 +61,45 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets --locked
 
+  # Feature-union rot guard. The big `features-linux` union below turns nearly
+  # everything on at once, so a symmetric pair (`pulse-sink` + `pulse-src`) hides
+  # code that only one half reaches: `-D warnings` then fires for a real user who
+  # enables just the sink. These unions are deliberately ASYMMETRIC (a sink
+  # without its source, one display without the others) and deliberately small,
+  # which is what makes them catch that class. They install nothing beyond what
+  # `features-linux` already does. The `ffmpeg` union is not here for the same
+  # reason it is excluded below: it needs version-pinned libav* dev packages.
+  feature-unions:
+    name: feature unions (rot guard)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: install system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libasound2-dev libpulse-dev libopus-dev \
+            libwayland-dev libxkbcommon-dev libdav1d-dev nasm
+      # Audio sink without its capture sibling, plus one display: the shape that
+      # left `pulsepcm::opt_name` and `alsapcm::frame_bytes` dead.
+      - name: pulse sink + wayland display
+        run: cargo check -p g2g-plugins --locked --all-targets --features pulse-sink,wayland-sink
+      - name: alsa sink + kms display + overlay
+        run: >
+          cargo check -p g2g-plugins --locked --all-targets --features
+          alsa-sink,kms-sink,vello-overlay
+      # And the mirror image: capture with no sink compiled in.
+      - name: capture only (no sinks)
+        run: cargo check -p g2g-plugins --locked --all-targets --features alsa-src,pulse-src,v4l2
+      # The codec surface on its own, with no OS-coupled element to pull shared
+      # helpers in for it.
+      - name: codecs only
+        run: >
+          cargo check -p g2g-plugins --locked --all-targets --features
+          dav1d,rav1d,mjpeg,opus,vorbis
+
   # Linux platform / feature build. Compiles the OS-coupled and GPU/ML elements
   # that build with stable, apt-installable system libraries. Intentionally
   # omitted (need version-pinned or proprietary deps, add separately):

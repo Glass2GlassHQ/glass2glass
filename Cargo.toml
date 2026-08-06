@@ -89,6 +89,11 @@ exclude = [
     # feature selection, kept out of the no_std `--workspace` baseline resolution.
     "examples/portability-core",
     "examples/portability-native",
+    # Correctness gate for a pure-Rust Opus decode path (M916): compares
+    # `opus-rs` against libopus on the RFC 8251 vectors. Standalone so the
+    # candidate crate never enters the workspace lockfile. Run via
+    # tools/opus-rs-gate.sh.
+    "tools/opus-rs-gate",
 ]
 
 [workspace.package]

@@ -19,6 +19,12 @@
 //! (`serverCertificateHashes`) requires the certificate be ECDSA P-256 and valid
 //! for at most 14 days, a peer-side constraint this element does not police.
 //!
+//! There is no receive-side carrier switch: a sender running the `datagrams`
+//! carrier of [`RemoteWtSink`](crate::remotewtsink) puts its data frames in QUIC
+//! datagrams and its control packets on the stream, and this source takes packets
+//! from both, so the two sides cannot be configured out of step. Drops are the
+//! sender's chosen trade there and simply leave gaps.
+//!
 //! The shared server machinery lives in [`RemoteSource`](crate::remotesource);
 //! this file supplies only the WebTransport transport (`WtTransport`).
 
@@ -33,7 +39,9 @@ use g2g_core::runtime::SourceLoop;
 use g2g_core::{Caps, G2gError, PipelinePacket, PropError, PropKind, PropValue, PropertySpec};
 
 use crate::remotesource::{leading_caps, PacketTransport, RemoteSource, TransportFuture};
-use crate::remotewtio::{load_certificate, wt_err, WtStream};
+use crate::remotewtio::{
+    congestion_control, load_certificate, set_congestion, wt_err, WtStream, CONGESTION_PROP,
+};
 
 /// WebTransport `RemoteWtSrc`: a length-framed [`g2g_core::wire`] stream over one
 /// bidirectional WebTransport stream, from a [`RemoteWtSink`](crate::remotewtsink)
@@ -55,10 +63,22 @@ impl RemoteWtSrc {
 }
 
 /// WebTransport transport for [`RemoteSource`].
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct WtTransport {
     cert: String,
     key: String,
+    /// The `congestion-control` nick applied to accepted connections.
+    congestion: String,
+}
+
+impl Default for WtTransport {
+    fn default() -> Self {
+        Self {
+            cert: String::new(),
+            key: String::new(),
+            congestion: "default".to_string(),
+        }
+    }
 }
 
 impl PacketTransport for WtTransport {
@@ -96,6 +116,7 @@ impl PacketTransport for WtTransport {
             PropKind::Str,
             "path to the TLS private key (PEM) for `certificate`",
         ),
+        CONGESTION_PROP,
     ];
 
     fn listen(
@@ -110,6 +131,7 @@ impl PacketTransport for WtTransport {
             let (chain, key) = load_certificate(&self.cert, &self.key)?;
             ServerBuilder::new()
                 .with_addr(bind)
+                .with_congestion_control(congestion_control(&self.congestion))
                 .with_certificate(chain, key)
                 .map_err(wt_err)
         })
@@ -126,7 +148,9 @@ impl PacketTransport for WtTransport {
             // The sender opens exactly one bidirectional stream and writes the
             // wire codec into it.
             let (tx, rx) = session.accept_bi().await.map_err(wt_err)?;
-            let mut conn = WtStream::new(session, tx, rx);
+            // Receiving is mode-free: `WtStream::recv` takes packets off the
+            // stream or the datagram flow, whichever the sender used.
+            let mut conn = WtStream::new(session, tx, rx, false);
             let caps = leading_caps(conn.recv().await?)?;
             Ok((conn, caps))
         })
@@ -141,6 +165,9 @@ impl PacketTransport for WtTransport {
         name: &str,
         value: &PropValue,
     ) -> Option<Result<(), PropError>> {
+        if name == "congestion-control" {
+            return Some(set_congestion(&mut self.congestion, value));
+        }
         let target = match name {
             "certificate" => &mut self.cert,
             "private-key" => &mut self.key,
@@ -159,6 +186,7 @@ impl PacketTransport for WtTransport {
         match name {
             "certificate" => Some(PropValue::Str(self.cert.clone())),
             "private-key" => Some(PropValue::Str(self.key.clone())),
+            "congestion-control" => Some(PropValue::Str(self.congestion.clone())),
             _ => None,
         }
     }

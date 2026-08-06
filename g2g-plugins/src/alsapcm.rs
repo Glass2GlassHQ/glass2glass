@@ -19,6 +19,7 @@ use alsa::pcm::{ChmapPosition, Format, PCM};
 
 use g2g_core::{AudioFormat, Caps, ChannelLayout, ChannelPosition, G2gError};
 
+#[cfg(feature = "alsa-src")]
 use crate::audioconvert::sample_bytes;
 
 /// The PCM sample formats an ALSA device is opened with, and the ALSA format
@@ -44,6 +45,8 @@ pub(crate) struct PcmConfig {
     pub(crate) rate: u32,
 }
 
+/// Only `alsasrc` sizes its own reads; `alsasink` is handed whole frames.
+#[cfg(feature = "alsa-src")]
 impl PcmConfig {
     /// Bytes in one interleaved sample frame.
     pub(crate) fn frame_bytes(&self) -> usize {
@@ -118,6 +121,7 @@ pub(crate) fn device_permutation(pcm: &PCM, channels: u32) -> Option<Vec<usize>>
 
 /// The reverse of a [`device_permutation`]: `inv[s]` is the device channel that
 /// carries our channel `s`, the direction a capture path needs.
+#[cfg(feature = "alsa-src")]
 pub(crate) fn invert(perm: Vec<usize>) -> Vec<usize> {
     let mut inv = alloc::vec![0usize; perm.len()];
     for (d, &s) in perm.iter().enumerate() {
@@ -156,12 +160,14 @@ mod tests {
     fn alsa_params_maps_formats_and_rejects_compressed() {
         let p = alsa_params(&caps(AudioFormat::PcmS16Le, 2, 48_000)).unwrap();
         assert_eq!((p.fmt, p.channels, p.rate), (Format::S16LE, 2, 48_000));
+        #[cfg(feature = "alsa-src")]
         assert_eq!(p.frame_bytes(), 4);
         let p = alsa_params(&caps(AudioFormat::PcmF32Le, 1, 44_100)).unwrap();
         assert_eq!((p.fmt, p.channels, p.rate), (Format::FloatLE, 1, 44_100));
         // 24-bit is the 3-byte packed ALSA format, not the 32-bit container.
         let p = alsa_params(&caps(AudioFormat::PcmS24Le, 6, 48_000)).unwrap();
         assert_eq!(p.fmt, Format::S243LE);
+        #[cfg(feature = "alsa-src")]
         assert_eq!(p.frame_bytes(), 18);
         assert_eq!(
             alsa_params(&caps(AudioFormat::PcmS32Le, 2, 48_000))
@@ -209,6 +215,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "alsa-src")]
     fn invert_undoes_a_permutation() {
         let perm = alloc::vec![0usize, 1, 4, 5, 2, 3];
         let inv = invert(perm.clone());

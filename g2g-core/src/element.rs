@@ -61,6 +61,23 @@ pub struct QosMessage {
     pub running_time_ns: u64,
 }
 
+/// Cumulative presentation counters a paced sink kept over a run, read via
+/// [`AsyncElement::presentation_stats`] once the sink's arm ends. `consumed`
+/// alone can't say whether frames actually reached the display on time; these
+/// counters split it into shown vs shed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PresentationStats {
+    /// Frames the sink actually presented (e.g. committed and acknowledged by
+    /// the display server).
+    pub presented: u64,
+    /// Frames overwritten before they ever painted (a `DropOldest` pacing
+    /// policy under a slow consumer).
+    pub dropped: u64,
+    /// Frames discarded by QoS late-drop (past their deadline beyond the
+    /// configured bound).
+    pub late_dropped: u64,
+}
+
 /// Outcome of pushing a packet downstream. Sources and transforms must
 /// react to `Reconfigure` before pushing any further data; terminal sinks
 /// and intermediate adapters that can't renegotiate may ignore it. `Qos` is
@@ -222,6 +239,14 @@ pub trait AsyncElement: ElementBound {
     /// producer observes it as [`PushOutcome::Qos`]. Called by the runner after
     /// each `process`. Default: nothing to send.
     fn take_qos(&mut self) -> Option<QosMessage> {
+        None
+    }
+
+    /// Cumulative presentation counters a paced sink kept over the run, read by
+    /// the runner once its arm ends and surfaced in `RunStats::per_element`. A
+    /// display / audio sink that counts what it actually presented overrides
+    /// this. Default: not a presenting sink.
+    fn presentation_stats(&self) -> Option<PresentationStats> {
         None
     }
 
@@ -466,6 +491,12 @@ pub trait DynAsyncElement: ElementBound {
         None
     }
 
+    /// Dyn-safe mirror of [`AsyncElement::presentation_stats`], so the runner
+    /// can read an erased sink's presentation counters at end of run.
+    fn presentation_stats(&self) -> Option<PresentationStats> {
+        None
+    }
+
     /// Dyn-safe mirror of [`AsyncElement::take_reconfigure`], so an erased sink
     /// can request a keyframe / renegotiation upstream. Defaults to nothing.
     fn take_reconfigure(&mut self) -> Option<Reconfigure> {
@@ -604,6 +635,10 @@ impl<T: AsyncElement> DynAsyncElement for T {
         AsyncElement::take_qos(self)
     }
 
+    fn presentation_stats(&self) -> Option<PresentationStats> {
+        AsyncElement::presentation_stats(self)
+    }
+
     fn take_reconfigure(&mut self) -> Option<Reconfigure> {
         AsyncElement::take_reconfigure(self)
     }
@@ -723,6 +758,10 @@ impl<'b> DynAsyncElement for &'b mut (dyn DynAsyncElement + 'b) {
 
     fn take_qos(&mut self) -> Option<QosMessage> {
         (**self).take_qos()
+    }
+
+    fn presentation_stats(&self) -> Option<PresentationStats> {
+        (**self).presentation_stats()
     }
 
     fn take_reconfigure(&mut self) -> Option<Reconfigure> {

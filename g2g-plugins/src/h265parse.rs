@@ -198,6 +198,9 @@ fn parse_sps(rbsp: &[u8]) -> Option<SpsGeometry> {
         width,
         height,
         framerate,
+        // H.265 codes the `time_code` SEI self-contained, so nothing from the
+        // SPS is needed to read it.
+        pic_timing: None,
     })
 }
 

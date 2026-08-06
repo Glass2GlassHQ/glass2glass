@@ -18,21 +18,12 @@
 //!      printed reason when the reference binaries are absent.
 #![cfg(feature = "moqt")]
 
-use core::future::Future;
-use core::pin::Pin;
-use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use web_transport_quinn::quinn::rustls::pki_types::CertificateDer;
-
 use g2g_core::element::AsyncElement;
-use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
-use g2g_core::{
-    ByteStreamEncoding, Caps, Dim, G2gError, OutputSink, PropValue, PushOutcome, Rate, VideoCodec,
-};
+use g2g_core::frame::PipelinePacket;
+use g2g_core::{ByteStreamEncoding, Caps, PropValue};
 
 use g2g_core::runtime::parse_launch;
 use g2g_plugins::moqt::coding::{
@@ -50,6 +41,12 @@ use g2g_plugins::moqt::session::{MOQT_PROTOCOL, MOQT_VERSION};
 use g2g_plugins::moqtsink::MoqtSink;
 use g2g_plugins::mp4mux::Mp4Mux;
 use g2g_plugins::registry::default_registry;
+
+mod moqt_common;
+use moqt_common::{
+    access_unit, box_boundaries, frame, free_udp_port, h264_caps, init_len, moof_count,
+    reference_binary, spawn_relay, CaptureSink, NullOut, Reaped, TestCert,
+};
 
 // ------------------------------------------------------------------ leg 1
 
@@ -533,208 +530,20 @@ fn properties_round_trip_and_moqtsink_resolves_for_launch() {
 
 // ------------------------------------------------------------------ leg 4
 
-fn h264_caps(w: u32, h: u32) -> Caps {
-    Caps::CompressedVideo {
-        codec: VideoCodec::H264,
-        width: Dim::Fixed(w),
-        height: Dim::Fixed(h),
-        framerate: Rate::Fixed(30 << 16),
-    }
-}
-
-#[derive(Default)]
-struct CaptureSink {
-    frames: Vec<Vec<u8>>,
-}
-
-impl OutputSink for CaptureSink {
-    fn push<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-        Box::pin(async move {
-            if let PipelinePacket::DataFrame(f) = packet {
-                if let Some(s) = f.domain.as_system_slice() {
-                    self.frames.push(s.to_vec());
-                }
-            }
-            Ok(PushOutcome::Accepted)
-        })
-    }
-}
-
-struct NullOut;
-impl OutputSink for NullOut {
-    fn push<'a>(
-        &'a mut self,
-        _packet: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-        Box::pin(async { Ok(PushOutcome::Accepted) })
-    }
-}
-
-fn frame(bytes: Vec<u8>, pts_ns: u64, sequence: u64) -> Frame {
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming {
-            pts_ns,
-            dts_ns: pts_ns,
-            duration_ns: 33_333_333,
-            ..FrameTiming::default()
-        },
-        sequence,
-        meta: Default::default(),
-    }
-}
-
-/// An IDR access unit carrying the parameter sets, then P slices, so the muxer
-/// can build a `moov` and mark a sync sample every GOP.
-fn access_unit(index: u64) -> Vec<u8> {
-    let sps = [0x67u8, 0x42, 0xC0, 0x1E, 0x11, 0x22];
-    let pps = [0x68u8, 0xCE, 0x3C, 0x80];
-    if index % 10 == 0 {
-        [
-            &[0, 0, 0, 1][..],
-            &sps,
-            &[0, 0, 0, 1],
-            &pps,
-            &[0, 0, 0, 1],
-            &[0x65, index as u8, 0xAA],
-        ]
-        .concat()
-    } else {
-        [&[0, 0, 0, 1][..], &[0x41, index as u8, 0xBB]].concat()
-    }
-}
-
-struct TestCert {
-    cert_path: PathBuf,
-    key_path: PathBuf,
-    hash_hex: String,
-}
-
-impl TestCert {
-    fn generate() -> Self {
-        let issued = rcgen::generate_simple_self_signed(vec![
-            "localhost".to_string(),
-            "127.0.0.1".to_string(),
-        ])
-        .expect("self-signed certificate");
-        let dir = std::env::temp_dir();
-        let pid = std::process::id();
-        let cert_path = dir.join(format!("g2g-m902-{pid}.crt"));
-        let key_path = dir.join(format!("g2g-m902-{pid}.key"));
-        write_file(&cert_path, issued.cert.pem().as_bytes());
-        write_file(&key_path, issued.signing_key.serialize_pem().as_bytes());
-
-        let der = CertificateDer::from(issued.cert.der().to_vec());
-        let provider = web_transport_quinn::crypto::default_provider();
-        let digest = web_transport_quinn::crypto::sha256(&provider, &der);
-        let hash_hex = digest.as_ref().iter().map(|b| format!("{b:02x}")).collect();
-        Self {
-            cert_path,
-            key_path,
-            hash_hex,
-        }
-    }
-}
-
-impl Drop for TestCert {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.cert_path);
-        let _ = std::fs::remove_file(&self.key_path);
-    }
-}
-
-fn write_file(path: &Path, bytes: &[u8]) {
-    let mut f = std::fs::File::create(path).expect("create file");
-    f.write_all(bytes).expect("write file");
-}
-
-/// Kills its child on drop, so a failing assertion never leaves a relay or a
-/// subscriber behind.
-struct Reaped(Child);
-
-impl Drop for Reaped {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
-/// Where the reference peers live: `$MOQ_RS_BIN`, else the release build of a
-/// `moq-rs` checkout beside this one, else `PATH`.
-fn reference_binary(name: &str) -> Option<PathBuf> {
-    if let Ok(dir) = std::env::var("MOQ_RS_BIN") {
-        let path = PathBuf::from(dir).join(name);
-        return path.is_file().then_some(path);
-    }
-    if let Some(home) = std::env::var_os("HOME") {
-        let path = PathBuf::from(home)
-            .join("src/moq-rs/target/release")
-            .join(name);
-        if path.is_file() {
-            return Some(path);
-        }
-    }
-    let probe = Command::new(name).arg("--help").output().ok()?;
-    probe.status.success().then(|| PathBuf::from(name))
-}
-
 /// Fragments the subscriber must receive before the comparison runs. One GOP is
 /// ten fragments here, so this spans a group boundary.
 const FRAGMENTS_WANTED: usize = 12;
-
-fn free_udp_port() -> u16 {
-    let probe = std::net::UdpSocket::bind("127.0.0.1:0").expect("probe bind");
-    probe.local_addr().expect("probe addr").port()
-}
-
-/// Split an fMP4 byte stream into its top-level box offsets, so a comparison
-/// can insist a match starts and ends on a box boundary rather than anywhere.
-fn box_boundaries(stream: &[u8]) -> Vec<usize> {
-    let mut out = vec![0usize];
-    let mut at = 0usize;
-    while at + 8 <= stream.len() {
-        let size = u32::from_be_bytes(stream[at..at + 4].try_into().expect("4 bytes")) as usize;
-        if size < 8 || at + size > stream.len() {
-            break;
-        }
-        at += size;
-        out.push(at);
-    }
-    out
-}
-
-fn moof_count(stream: &[u8]) -> usize {
-    let mut count = 0;
-    let mut at = 0usize;
-    while at + 8 <= stream.len() {
-        let size = u32::from_be_bytes(stream[at..at + 4].try_into().expect("4 bytes")) as usize;
-        if size < 8 || at + size > stream.len() {
-            break;
-        }
-        if &stream[at + 4..at + 8] == b"moof" {
-            count += 1;
-        }
-        at += size;
-    }
-    count
-}
 
 /// `mp4mux ! moqtsink` -> `moq-relay-ietf` -> `moq-sub`: the bytes `moq-sub`
 /// writes must be the init segment we published followed by an unbroken run of
 /// the fragments we published, in order.
 #[tokio::test]
 async fn moqtsink_publishes_through_the_reference_relay_to_moq_sub() {
-    let (Some(relay_bin), Some(sub_bin)) = (
-        reference_binary("moq-relay-ietf"),
-        reference_binary("moq-sub"),
-    ) else {
+    let Some(sub_bin) = reference_binary("moq-sub") else {
         eprintln!(
-            "SKIP: moq-relay-ietf / moq-sub not found. Build them with \
-             `cargo +stable build --release -p moq-relay-ietf -p moq-sub` in a \
-             cloudflare/moq-rs checkout, or point $MOQ_RS_BIN at their directory."
+            "SKIP: moq-sub not found. Build it with `cargo +stable build --release \
+             -p moq-relay-ietf -p moq-sub` in a cloudflare/moq-rs checkout, or point \
+             $MOQ_RS_BIN at its directory."
         );
         return;
     };
@@ -743,25 +552,9 @@ async fn moqtsink_publishes_through_the_reference_relay_to_moq_sub() {
     let port = free_udp_port();
     let url = format!("https://127.0.0.1:{port}/");
     let namespace = "g2gtest";
-
-    let relay = match Command::new(&relay_bin)
-        .arg("--bind")
-        .arg(format!("127.0.0.1:{port}"))
-        .arg("--tls-cert")
-        .arg(&tls.cert_path)
-        .arg("--tls-key")
-        .arg(&tls.key_path)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-    {
-        Ok(child) => Reaped(child),
-        Err(e) => {
-            eprintln!("SKIP: could not start moq-relay-ietf: {e}");
-            return;
-        }
+    let Some(_relay) = spawn_relay(&tls, port) else {
+        return;
     };
-    let _relay = relay;
 
     // The relay binds asynchronously; the sink's first frame dials it, so give
     // it a moment rather than racing the handshake.
@@ -787,7 +580,7 @@ async fn moqtsink_publishes_through_the_reference_relay_to_moq_sub() {
     while Instant::now() < deadline {
         let mut captured = CaptureSink::default();
         mux.process(
-            PipelinePacket::DataFrame(frame(access_unit(index), index * 33_333_333, index)),
+            PipelinePacket::DataFrame(frame(access_unit(index, 0), index * 33_333_333, index)),
             &mut captured,
         )
         .await
@@ -863,11 +656,7 @@ async fn moqtsink_publishes_through_the_reference_relay_to_moq_sub() {
 
     // The init segment is the ftyp+moov prefix of what mp4mux produced.
     let boundaries = box_boundaries(&published);
-    let init_len = boundaries
-        .iter()
-        .copied()
-        .find(|at| published[at + 4..at + 8] != *b"ftyp" && published[at + 4..at + 8] != *b"moov")
-        .expect("a fragment follows the init segment");
+    let init_len = init_len(&published);
     assert_eq!(
         &received[..init_len],
         &published[..init_len],

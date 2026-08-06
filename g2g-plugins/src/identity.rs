@@ -12,7 +12,8 @@ use core::pin::Pin;
 use alloc::boxed::Box;
 
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, G2gError, OutputSink, PipelinePacket,
+    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError, OutputSink,
+    PipelinePacket,
 };
 
 #[derive(Debug, Default)]
@@ -32,6 +33,14 @@ impl IdentityTransform {
 }
 
 impl AsyncElement for IdentityTransform {
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "Identity",
+            "Generic",
+            "Passes buffers through unchanged, for probing and debugging",
+            "g2g",
+        )
+    }
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where

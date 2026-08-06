@@ -2108,6 +2108,74 @@ output is a playable FLV (what `RtmpSink` publishes). With MP4
 (`Mp4Src`/`Mp4Sink`), MPEG-TS, Matroska/WebM, Ogg, and FLV, the demux/mux
 coverage spans the major containers.
 
+The MPEG program stream demuxer (`mpegpsdemux`, `Caps::ByteStream{MpegPs}`) is
+the `.mpg` / `.vob` read path: VCD-era MPEG-1 program streams and DVD MPEG-2 ones
+through one element (M929). `g2g-plugins::psdemux::PsDemuxer` syncs to pack
+headers (`00 00 01 BA`, both the MPEG-2 `01`-marker layout with its stuffing and
+the flat 8-byte MPEG-1 one) and reads the PES packets between them; `PsDemux` /
+`PsDemuxN` wrap it with a `PsStream` selection (`Mpeg2` video, `Mp2` audio, `Ac3`,
+`SubPicture`). Two things make it unlike `TsDemux` rather than a copy of it.
+
+There is no PAT/PMT: a stream is identified by its PES `stream_id`
+(0xE0..=0xEF video, 0xC0..=0xDF audio) and, for the `private_stream_1` (0xBD)
+that DVD carries AC-3 and subpictures on, by the substream id byte opening its
+payload (0x80..=0x87 AC-3 behind a 4-byte DVD substream header, 0x20..=0x3F
+subpicture). Streams are therefore *discovered* by observing packets, so the
+`playbin` / `decodebin` probe hooks report what the probe window has actually
+shown rather than reading a table, and geometry comes from the video's own
+sequence header (`00 00 01 B3`), which the demuxer parses to fix the video caps
+via `CapsChanged`.
+
+And a PES payload is not an access unit. A program stream cuts its packets on
+sector boundaries with no regard for picture boundaries, so one packet can hold
+the tail of a picture and the head of the next; feeding those to a decoder
+verbatim desynchronizes it. The demuxer therefore reframes the video on its own
+start codes (a unit runs from one picture header, with any sequence / GOP header
+opening it, to the next); a PES timestamp names the first access unit commencing
+in its packet and stamps exactly that unit. That is the job an elementary-stream
+parser does for the other codecs, kept here because it is program-stream-specific:
+MPEG-TS needs none of it. Audio and AC-3 are self-syncing and are grouped per
+timestamped packet instead, matching what `TsDemux` emits.
+
+A DVD stamps roughly one PES packet per GOP, so most pictures arrive with no
+timestamp of their own; carrying the last stamp forward gave a dozen frames one
+shared PTS, which a pacing sink plays as a burst then a freeze (the M934 bug,
+found on a real disc as "stutters every half second"). The demuxer instead
+synthesizes each unstamped picture's PTS as `gop_base + temporal_reference *
+frame_period`: the picture header's `temporal_reference` is its display index
+within the GOP, so the arithmetic stays exact across B-frame reordering, a real
+PES PTS re-anchors the base (drift never outlives a GOP), and an unstamped GOP
+header advances it by the span of the GOP just closed. Unstamped DTS advances
+one frame period per picture in coded order.
+
+Subpicture units span several PES packets and declare their own total size in
+their first two bytes, so they are reassembled by size (bounded by the 16-bit
+maximum that size field can state) and stamped with the opening packet's PTS and
+the unit's own hide time as duration. A program stream carries no palette, so
+the pad opens on a synthesized `.idx` holding only the video's `size:` line and
+`VobSubDec`'s default palette renders the cues (§4.18). Out of scope: LPCM and
+DTS substreams, the program stream map, a PS muxer, and seeking.
+
+`VideoCodec::Mpeg2` covers MPEG-1 and MPEG-2 video as one codec, libavcodec's
+`MPEG2VIDEO` decoder playing both; MPEG-TS stream types 0x01 and 0x02 map to it
+through `TsStream::Mpeg2`, and `au_is_keyframe` reads its sync points (an
+I-picture, or a sequence / GOP header).
+
+Disc content is usually interlaced, and presenting its woven frames as-is combs
+on motion. `deinterlace` (M932) is the CPU filter that undoes it: a single-rate
+yadif port (an edge-directed spatial interpolation clamped to a temporal window
+built from the previous and next frames), plus the cheaper `linear` and `blend`
+methods, over I420 / NV12 / RGBA / BGRA at unchanged format and geometry, one
+frame out per frame in. It is bit-exact against ffmpeg's `yadif=0` on the same
+raw frames, including the 3-column border where ffmpeg drops the directional
+search. `ps_playbin` inserts it into the video branch (both the plain fan-out and
+the subpicture-overlay one) when `progressive_sequence` in the MPEG-2 sequence
+extension (`00 00 01 B5`, identifier `0001`) says the stream is interlaced;
+MPEG-1 carries no such extension and is treated as progressive, as is any stream
+whose extension is missing or malformed, so an unreadable header never costs a
+filter pass. Field order is assumed top-field-first: g2g's frames carry no
+interlace flag, which is also why the element has no `auto` mode.
+
 Adaptive streaming sits one layer above these demuxers: an HTTP byte source feeds
 a playlist/manifest-driven source that fetches media segments and hands them to
 the matching byte-stream demuxer. `g2g-plugins::httpsrc::HttpSrc` (the `http-src`
@@ -2315,8 +2383,8 @@ travels as a `TextCueMeta` frame-meta (the `metadata` feature) that `SubParse`
 attaches and `TextOverlayN` reads, recovering WebVTT / SSA positioning; on the
 ZST baseline (no meta) streamed cues draw at the renderer default.
 
-Cue streams also go back into a container. A `Caps::Text{Utf8}` pad on `MkvMuxN`
-or `Mp4MuxN` adds a subtitle track beside the A/V ones, taking one cue per frame
+Cue streams also go back into a container. A `Caps::Text{Utf8}` pad on either
+Matroska muxer or on `Mp4MuxN` is a subtitle track, taking one cue per frame
 with the window on the frame's PTS + duration, and the track's init needs nothing
 from the stream, so it is fixed at configure rather than at the first cue (which
 may be many seconds in, and every other track waits on the header). The two
@@ -2396,15 +2464,16 @@ in-graph.
 
 **Bitmap subtitles** are the one subtitle family that is not text, so they get
 their own coded media kind: `Caps::SubPicture { format: SubPictureFormat }`, a
-stream of coded bitmap cues (`VobSub`, the DVD subpicture format, and `DvbSub`,
-ETSI EN 300 743; PGS is the same shape). It sits beside `Caps::Text` rather than
-inside it,
+stream of coded bitmap cues (`VobSub`, the DVD subpicture format, `DvbSub`,
+ETSI EN 300 743, and `Pgs`, the Blu-ray HDMV Presentation Graphic Stream). It
+sits beside `Caps::Text` rather than inside it,
 because nothing downstream of a `Text` link can render a palette-indexed run-length
 bitmap, and `Caps::ClosedCaption` is the model: a coded carriage variant whose
 decoder produces something the rest of the graph already understands. Here that
-is raw pixels. `VobSubDec` (`vobsubdec`, gst's `dvdsubdec`) and `DvbSubDec`
+is raw pixels. `VobSubDec` (`vobsubdec`, gst's `dvdsubdec`), `DvbSubDec`
 (`dvbsubdec`; no gst alias, since gst's `dvbsuboverlay` is a video-overlay
-element rather than a bare decoder) both emit one full-frame transparent
+element rather than a bare decoder) and `PgsDec` (`pgsdec`; gst has no PGS
+decoder at all) all emit one full-frame transparent
 `Caps::RawVideo{Rgba8}` canvas per cue at the subpicture display geometry,
 stamped with the cue's PTS and duration, so the consumer is the ordinary
 `compositor` and there is no bitmap-cue overlay element to build. A cue ends with a
@@ -2423,8 +2492,19 @@ The 16-entry RGB palette and the display size are *not* in the bitstream: they r
 the `.idx` text a Matroska `S_VOBSUB` track carries as its `CodecPrivate`, which
 `MkvDemux` forwards in band ahead of the first cue the way it forwards the FLAC
 and Opus headers, and which the decoder tells apart from a cue by parsing it as
-`.idx` first. Every size, offset and coordinate off the wire is range-checked and
-the parse returns `None` rather than allocating on a bogus rectangle; the pixel
+`.idx` first. That same text is also the sidecar carriage: `VobSubSrc`
+(`vobsubsrc`) reads a `.idx` / `.sub` pair off disk, emits the `.idx` as that
+same in-band config frame, then reads each cue's subpicture unit out of the
+`.sub` at the byte offset its `timestamp:` line names, stamped with that
+timestamp and with the unit's own hide time as its duration, so
+`vobsubsrc location=movie.idx ! vobsubdec ! compositor.` plays a sidecar pair
+the way a muxed track plays. A `.sub` is an MPEG-2 program stream, so a unit is
+reassembled from the `private_stream_1` PES packets at that offset carrying the
+same subpicture substream id, bounded by its own 16-bit packet size; an `.idx`
+indexing several languages picks one by `id:` code (`language=`) or by the
+file's `langidx:`. An entry pointing outside the `.sub`, or a unit the file ends
+in the middle of, drops that cue and not the stream. Every size, offset and
+coordinate off the wire is range-checked and the parse returns `None` rather than allocating on a bogus rectangle; the pixel
 data is bounded by the control-sequence offset, so a truncated packet fails
 instead of decoding the control table as run lengths. A track that declares a
 Matroska `ContentCompression` is refused outright, since its blocks are not SPU
@@ -2452,6 +2532,100 @@ since a Matroska block carries the bare segments. Every segment length, region
 dimension, CLUT entry id and object position is bounds-checked: a display set
 whose segment layer does not hold together is dropped whole, and a region past
 `MAX_REGION_PIXELS` is never allocated.
+
+Blu-ray PGS (`pgs.rs`, `no_std`) is a segment stream too, but a flatter one: a
+display set is a presentation composition (the video geometry, the epoch state,
+which palette to read, and up to two objects with their positions), window
+definitions, palette definitions and object definitions, terminated by an
+end-of-display-set segment. Objects are 8-bit run-length coded and drawn straight
+onto the video, with no region layer and no interlaced fields, and a cropped
+composition object shows only a sub-rectangle of its bitmap, drawn at the
+composition position with the crop offset indexing the object bitmap alone.
+Cropping is the one part of the decoder with no reference peer to test against:
+ffmpeg parses the crop rectangle and never applies it (`pgssubdec.c` carries a
+"TODO: Implement cropping"), which every player built on it inherits. It is
+verified instead by anchoring it to the uncropped path that ffmpeg does pin pixel
+for pixel: cropping is a pure selection, so a fixture whose every object pixel is
+a different colour is presented both whole and cropped, and the cropped canvas
+has to equal the window of the whole one, with the crop of the entire object
+equal to no crop at all. The placement convention that oracle cannot settle comes
+from libbluray's `graphics_controller.c`, which does implement cropping. A crop
+rectangle running off the object is clamped to what is there rather than trusted
+the way libbluray trusts a disc. Palettes and objects
+persist across an epoch, keyed by id, so a later palette segment updates only the
+entries it names and an object too big for one segment arrives in fragments whose
+total is fixed by the first one's declared length. Nothing rides out of band: the
+palette is in the stream and the geometry is in the presentation composition, so
+unlike the other two codings there is no config frame ahead of the first cue.
+Palette entries are Y / Cr / Cb plus an alpha that passes through unscaled,
+converted through the shared limited-range fixed-point path in `paint.rs`, whose
+matrix a PGS stream picks by video height (BT.709 above 576 lines, BT.601 at or
+below) since the format states no colorimetry. PGS has no end-of-display time
+either: a cue stands until a later display set replaces it, and a presentation
+composition listing no object is how the stream ends one, so the clear canvas is
+the stream's own rather than synthesized from a hide time. Both the `.sup`
+per-segment `PG` / PTS / DTS framing and the bare Matroska `S_HDMV/PGS` block
+framing are accepted, told apart by the magic since no segment type is 0x50.
+Every segment length, object dimension, run length, palette index and composition
+count is checked before use: a run overflowing the bitmap or codes that do not
+cover it drop the object, an object larger than the video or past
+`MAX_OBJECT_PIXELS` is never allocated, and a truncated segment stops the walk
+with the display sets that did parse intact.
+
+The write paths mirror those two carriages (M927). A `Caps::SubPicture` input pad
+on either Matroska muxer becomes an `S_VOBSUB` or `S_DVBSUB` track, and a
+`Caps::SubPicture{DvbSub}` pad on either TS muxer becomes a private (0x06) stream
+whose PMT entry carries the `subtitling_descriptor` naming its language, type and
+pages (that descriptor replaces the 'KLVA' registration a bare private stream
+would otherwise get, the same substitution the teletext descriptor makes). The
+out-of-band configuration each format needs is not a property but the in-band
+config blob the stream already leads with, so `mkvdemux`, `tsdemux` and
+`vobsubsrc` all feed a muxer without translation: a VobSub pad's `.idx` becomes
+the `CodecPrivate`, normalized to the `size:` / `palette:` lines a container holds
+(the cue index is a sidecar's file offset table), and a DVB pad's five-byte page
+ids become the `CodecPrivate` or the descriptor's page fields. A stream that
+sends no blob is declared on the `dvbsub-page-id` property's page, defaulting to
+1 like ffmpeg. The two carriages frame a display set differently, so the muxers
+convert: a Matroska block holds the bare segments, a TS PES payload wraps them in
+the EN 300 743 data field (`data_identifier` 0x20 and a subtitle stream id ahead,
+the end marker behind), and both directions run through `segment_span`, which
+finds the segment run by walking its headers rather than trimming bytes. Subtitle
+blocks, bitmap as well as text, are written as a `BlockGroup` so a cue's display
+window rides its `BlockDuration`. Both Matroska muxers take these pads, the
+fan-in `MkvMuxN` beside its A/V tracks and the single-track `MkvMux` on its one
+sink pad (M928), so a sidecar subtitle file muxes over one link
+(`vobsubsrc location=movie.idx ! matroskamux ! filesink`) rather than the `name=m`
+shape. The mapping they share (the codec each format writes, the config-blob
+recognition, the block framing, the `S_TEXT/ASS` script header) lives in
+`matroska.rs` beside `MkvTrackSpec`, so the two cannot drift.
+
+**EBU teletext** (`teletext.rs`, `no_std`) is the third TS subtitle carriage, and
+unlike the two above it is characters rather than pixels, so it lands on the plain
+text pad instead of a canvas: `Caps::Text { Teletext }` in, `Caps::Text { Utf8 }`
+cues out of `TeletextDec` (`teletextdec`), which is the same pad a `subparse`d SRT
+track produces and therefore the same `TextOverlayN` input. DVB carries teletext in
+a private PES (EN 300 472): a `data_identifier` byte then fixed 46-byte data units,
+each one broadcast line, holding a framing code, a hamming 8/4 magazine / packet
+address and 40 odd-parity bytes. Those address and data bytes are transmitted LSB
+first, so each is bit-reversed before any code word means anything, while the two
+bytes ahead of them are ordinary MSB-first fields. Packet X/0 is the page header
+(page number, the C6 subtitle bit, and the national option subset the G0 set is
+read under); X/1..X/23 are the display rows, and the decoder holds the rows of the
+addressed page until the next header for it replaces or erases the page, which is
+what fixes the cue's duration and puts each cue out one page late. Spacing control
+codes and parity failures render as spaces so a row keeps its columns, and a
+double-height row's blanked bottom half is dropped so the line appears once.
+Enhancement packets (X/26, X/28, M/29) are not read, so the national option comes
+from the header bits and the wider seven-bit G0 selection is out of reach. Which
+page to follow is out of band, as for DVB subtitles: `TsDemux` synthesizes an
+eight-byte selection blob from the PMT `teletext_descriptor` (tag 0x56, or the
+identical `VBI_teletext_descriptor` 0x46) and forwards it in band ahead of the
+first line, and the `page` property overrides it; with neither, the first subtitle
+page the stream carries is adopted. The blob leads with `0xFF`, which cannot begin
+a teletext payload, so the decoder tells the two apart on one pad. Every data unit
+length, hamming code, parity bit and page address is checked before use, so a
+corrupt line or a unit length past the payload drops that line or ends the walk
+rather than propagating a corrupt page.
 
 ### 4.19 Native WebRTC (`str0m`)
 
@@ -2808,6 +2982,15 @@ compiles out (the table is then empty) so the `no_std` baseline pays nothing.
 Sources have no `process()` and so do not appear, their cost surfaces as the
 downstream element's input fill.
 
+A paced display sink also reports what it actually put on screen (M933): the
+element overrides `presentation_stats()` (frames presented, frames overwritten
+before paint under `DropOldest`, frames shed by QoS late-drop), the graph
+runner's sink arm stores it on the probe as the arm ends, and `report()` prints
+one `present:` line per presenting sink. `frames_consumed` alone cannot
+distinguish a healthy display from one silently shedding or stalling;
+`g2g-launch` divides the presented count by wall time into a presented-fps
+figure next to the pipeline throughput.
+
 The `process()` timing is the "work" half of a stage's latency; the "wait" half
 is queue residency, added as measured per-link transit. When an observer is
 attached, the graph runner builds `Block` edges into transform/sink arms with a
@@ -3110,8 +3293,9 @@ both directions.
 
 **Dialect and version.** The dialect is the IETF draft, not moq-lite: moq-lite
 is a single-vendor dialect with its own ALPN and cannot talk to IETF endpoints.
-The target version is **draft-16, `0xff000010`**, which is what Cloudflare's
-`moq-relay-ietf` runs in production. Nothing on crates.io implements the IETF
+The versions are **draft-16, `0xff000010`** (what Cloudflare's `moq-relay-ietf`
+runs in production) and **draft-18** (what moq-dev, imquic, moqxr and Meta's
+public moxygen relay speak). Nothing on crates.io implements the IETF
 draft within this workspace's MSRV (`moq-net` needs rustc 1.91; cloudflare's
 `moq-transport` fails to build on 1.85), so the wire layer is written here, the
 way the SRT and ST 2110 stacks were: read the draft, read the reference
@@ -3120,6 +3304,33 @@ From draft-16 the version is *not* negotiated in the SETUP payload; the QUIC
 ALPN for WebTransport is always `h3`, so the version rides the HTTP/3 CONNECT
 request as the WebTransport subprotocol `moqt-16`, and CLIENT_SETUP /
 SERVER_SETUP carry parameters only.
+
+**Version negotiation (M907).** The elements offer every version in their
+`versions` property (default `18,16`, preference order) as WebTransport
+subprotocols on one CONNECT, and the server's pick selects the codec for the
+session; `moq-relay-ietf` echoes `moqt-16` when offered it. A server that
+echoes no subprotocol predates multi-version offers and every such server is a
+draft-16 peer, so the fallback is draft-16 when it was offered; the SETUP
+handshake that follows validates the choice either way.
+
+**Draft-18 (`moqt::v18`, M907).** Between draft-16 and draft-18 the wire was
+restructured, so draft-18 is a sibling module rather than a flag on the
+draft-16 one: its own `vi64` integer (leading-ones length prefix, 1 to 9 bytes,
+a full `u64`, non-minimal encodings legal), a single SETUP message (`0x2F00`)
+on a *pair of unidirectional control streams*, one *bidirectional stream per
+request* whose response carries no request id (the stream is the correlation),
+typed control-message parameters in place of KVP parameters (an unknown type
+cannot be skipped and is a session error), bit-table SUBGROUP_HEADER and
+OBJECT_DATAGRAM types, PADDING streams and datagrams to discard, and
+cancellation by stream reset (UNSUBSCRIBE, FETCH_CANCEL and MAX_REQUEST_ID no
+longer exist). What is genuinely version-agnostic is shared, not copied: track
+namespaces, Key-Value-Pairs and the object-id delta rule live in the draft-16
+coding module with a varint flavour on the shared `Reader`, and the reorder
+policy, catalog and the M901 carrier are reused as they are. The publisher
+answers each request on its own stream and sends PUBLISH_DONE there at EOS;
+the subscriber drains PUBLISH_DONE's stream count before ending a
+subscription, because the message races the data streams it is counting.
+FETCH is refused (`NOT_SUPPORTED`) on both drafts.
 
 **Layering.** `moqt::coding` (varints, byte strings, track namespaces and names,
 the delta-coded Key-Value-Pair sequences), `moqt::message` (the control message
@@ -3181,6 +3392,17 @@ rather than silence. Draft-16 SUBSCRIBE carries neither a group order nor a
 filter field, so `priority` (the publisher-priority byte in every subgroup
 header) is the only delivery knob and there is no group-order property to
 expose.
+
+The control plane runs without frames (M906). `configure_pipeline` dials the
+relay and publishes the namespace in the background (a sync caller without a
+runtime falls back to dialling on the first frame, and a failed dial is retried
+per frame while the relay comes up), and a pump task owns the control stream's
+inbound half, answering each message as it lands; the pump and frame publishing
+take turns on one lock, so a subscription never changes hands inside a frame.
+A media SUBSCRIBE that arrives before the `moov` names any track is held (the
+queue is bounded, since request ids are peer-controlled) and resolved with
+`SUBSCRIBE_OK` or `DOES_NOT_EXIST` once the `moov` arrives; init and catalog
+subscriptions are served the moment their single object exists.
 
 **Datagram objects.** `datagrams=true` carries each media object in a QUIC
 datagram instead of on a subgroup stream: unreliable, bounded by the path MTU,

@@ -613,6 +613,11 @@ pub struct SenderSink {
     /// came out empty (a Drop verdict must not leak a stale set).
     #[cfg(feature = "metadata")]
     meta_stash: Option<crate::meta::FrameMetaSet>,
+    /// M909: set once an `Eos` has been enqueued through this adapter. A runner
+    /// arm that forwards its own `Eos` after `process(Eos)` returns checks this
+    /// so an element that already forwarded one (typically via a catch-all
+    /// `other => out.push(other)` arm) does not emit a second.
+    eos_forwarded: bool,
 }
 
 impl SenderSink {
@@ -629,7 +634,13 @@ impl SenderSink {
             upstream_bitrate: None,
             #[cfg(feature = "metadata")]
             meta_stash: None,
+            eos_forwarded: false,
         }
+    }
+
+    /// Whether an `Eos` has already been enqueued through this adapter (M909).
+    pub(crate) fn eos_forwarded(&self) -> bool {
+        self.eos_forwarded
     }
 
     /// Stash the propagated metadata set to attach to outgoing meta-empty
@@ -738,6 +749,11 @@ impl OutputSink for SenderSink {
             // ForceKeyframe hops upstream instead (M720).
             if let Some(r) = self.take_reconfigure_or_relay() {
                 return Ok(PushOutcome::Reconfigure(r));
+            }
+            // Past the pre-send checks the packet is committed to the link, so
+            // an Eos here is one the consumer will see (M909).
+            if matches!(packet, PipelinePacket::Eos) {
+                self.eos_forwarded = true;
             }
             // Leaky links drop *data frames* under a full channel rather than
             // applying backpressure; control packets (caps / segment / flush /

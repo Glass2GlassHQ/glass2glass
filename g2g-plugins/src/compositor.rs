@@ -53,9 +53,9 @@ use crate::pixel::{frame_byte_size, planar_planes};
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError, InputAggregator,
-    MemoryDomain, MultiInputElement, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec, Rate, RawVideoFormat,
+    Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError,
+    InputAggregator, MemoryDomain, MultiInputElement, OutputSink, PipelinePacket, PropError,
+    PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, Segment,
 };
 
 /// Placement of one input stream on the output canvas.
@@ -144,6 +144,14 @@ pub struct Compositor {
     state: CompositorState<Box<[u8]>>,
     /// The canvas fill behind all inputs (RGBA8), default opaque black.
     background: [u8; 4],
+    /// The last `Segment` forwarded downstream. Output frames carry input 0's
+    /// PTS, so input 0's segment is the one that maps them to running time and a
+    /// paced sink needs it: without it the sink paces against the raw PTS base (a
+    /// DVD title starting at 2267 s stalls for 37 minutes at zero CPU). A stream
+    /// gets more than one: the runner opens every link with a default segment and
+    /// the demuxer's real one follows, so a later segment supersedes an earlier
+    /// one and must go out. Kept to suppress re-emitting an unchanged one.
+    last_segment: Option<Segment>,
 }
 
 /// Max input-0 frames buffered during startup before output begins flowing
@@ -368,12 +376,77 @@ pub(crate) fn paint_order(pads: &[CompositorPad]) -> Vec<usize> {
     order
 }
 
+/// Cap on one overlay input's queued canvases. The overlay branch is unpaced
+/// (a subtitle track decodes far faster than the video it annotates), so it
+/// races ahead of input 0 and its canvases must be held until they are due.
+/// Backpressure alone cannot bound that: the element accepts every packet the
+/// runner delivers, so the link never fills and never pushes back. The queue is
+/// therefore bounded here. A subtitle stream delivers two canvases per cue (the
+/// picture and its clear), so 64 is ~32 cues of lookahead, far beyond any real
+/// interleave skew; past it the oldest is dropped, which loses a cue that was
+/// already overtaken rather than growing without limit.
+const OVERLAY_PENDING_CAP: usize = 64;
+
+/// One overlay input's canvases: those not yet due, and the one in force.
+///
+/// Overlay inputs advance by *timestamp*, not arrival. An overlay canvas applies
+/// from its own pts until a successor becomes due (zero-order hold), which is
+/// what makes a cue land on the video frames it belongs to. Taking the
+/// latest-arrived instead only looks right when nothing paces: live, the display
+/// sink paces input 0 to real time while the subtitle branch runs flat out, so
+/// every cue and its clear arrive within the first moments and the last one to
+/// land (a clear) is what every visible frame composites with. That is the
+/// no-subtitles-on-screen bug.
 /// The latest-wins input bookkeeping and emit cadence both compositors run:
 /// per-input geometry, the cached frames, startup priming and the output
 /// sequence counter. Only the pixel work differs between the CPU and the GPU
 /// element. Generic over the cached payload `P`: the CPU element caches the
 /// frame's bytes, the GPU one caches either bytes or a texture it binds in
 /// place.
+#[derive(Debug)]
+struct OverlaySlot<P> {
+    /// Canvases whose pts is still ahead of the frame being composited, oldest
+    /// first.
+    pending: alloc::collections::VecDeque<(FrameTiming, P)>,
+    /// The canvas in force, held until a successor comes due.
+    current: Option<(FrameTiming, P)>,
+}
+
+impl<P> Default for OverlaySlot<P> {
+    fn default() -> Self {
+        Self {
+            pending: alloc::collections::VecDeque::new(),
+            current: None,
+        }
+    }
+}
+
+impl<P> OverlaySlot<P> {
+    /// Whether this overlay has delivered anything yet (priming asks this).
+    fn ready(&self) -> bool {
+        self.current.is_some() || !self.pending.is_empty()
+    }
+
+    /// Promote every queued canvas due at or before `pts`, newest wins.
+    fn advance_to(&mut self, pts: u64) {
+        while self.pending.front().is_some_and(|(t, _)| t.pts_ns <= pts) {
+            self.current = self.pending.pop_front();
+        }
+    }
+
+    fn push(&mut self, timing: FrameTiming, payload: P) {
+        if self.pending.len() >= OVERLAY_PENDING_CAP {
+            self.pending.pop_front();
+        }
+        self.pending.push_back((timing, payload));
+    }
+
+    fn clear(&mut self) {
+        self.pending.clear();
+        self.current = None;
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct CompositorState<P> {
     /// Per-input frames under the aggregator's latest-wins policy: input 0 (the
@@ -386,6 +459,9 @@ pub(crate) struct CompositorState<P> {
     agg: InputAggregator<(FrameTiming, P)>,
     /// Per-input configured geometry `(width, height)`, set at negotiation.
     inputs: Vec<Option<(u32, u32)>>,
+    /// Overlay inputs (1..), each advancing by timestamp against the input-0
+    /// frame being composited. Index `i` is input `i + 1`.
+    overlays: Vec<OverlaySlot<P>>,
     /// True once every overlay input has delivered at least one frame (or there
     /// are no overlays). Until then the compositor is in startup, buffering
     /// input-0 frames so a late-starting overlay still appears. Latches: an
@@ -409,6 +485,7 @@ impl<P> CompositorState<P> {
         Self {
             agg: InputAggregator::new(n),
             inputs: vec![None; n],
+            overlays: (1..n).map(|_| OverlaySlot::default()).collect(),
             // No overlays (single input) means nothing to wait for: start live.
             primed: n == 1,
             hold: false,
@@ -439,11 +516,11 @@ impl<P> CompositorState<P> {
         if input == 0 {
             self.agg.push(0, (timing, payload));
         } else {
-            // Overlay: cache the latest frame; it is picked up by the next
-            // input-0 frame and updates live as more arrive.
-            self.agg.push_latest(input, (timing, payload));
+            // Overlay: queue by timestamp; it comes into force when an input-0
+            // frame at or past its pts is composited.
+            self.overlays[input - 1].push(timing, payload);
         }
-        if !self.primed && self.agg.latest_ready(0) {
+        if !self.primed && self.overlays.iter().all(OverlaySlot::ready) {
             self.primed = true;
         }
     }
@@ -455,16 +532,36 @@ impl<P> CompositorState<P> {
     /// rather than dropped so output keeps flowing behind a slow overlay. Call
     /// in a loop: while unprimed one take brings the buffer back to the cap.
     pub(crate) fn take_due(&mut self) -> Option<(FrameTiming, P)> {
-        if self.primed || self.agg.queued(0) > PENDING_CAP {
+        let due = if self.primed || self.agg.queued(0) > PENDING_CAP {
             self.agg.take_round_latest(0)
         } else {
             None
+        };
+        // Bring the overlays up to this frame's timestamp before it composites,
+        // so `latest` reads the canvas in force at that instant.
+        if let Some((timing, _)) = &due {
+            self.advance_overlays(timing.pts_ns);
+        }
+        due
+    }
+
+    /// Promote each overlay's canvases that are due at `pts`. `take_due` calls
+    /// this for the frame it releases; a caller that composites off that path
+    /// (a test driving `compose` directly) calls it itself.
+    pub(crate) fn advance_overlays(&mut self, pts: u64) {
+        for slot in self.overlays.iter_mut() {
+            slot.advance_to(pts);
         }
     }
 
-    /// Newest frame cached for `input`, left in place for later output frames.
+    /// The canvas in force for `input` at the frame being composited: the newest
+    /// one whose pts is at or before it, held until a successor comes due. Input
+    /// 0 has no such slot (it is the timing driver, taken by `take_due`).
     pub(crate) fn latest(&self, input: usize) -> Option<&(FrameTiming, P)> {
-        self.agg.latest(input)
+        match input {
+            0 => self.agg.latest(0),
+            i => self.overlays[i - 1].current.as_ref(),
+        }
     }
 
     /// Retain the input-0 frame just emitted, so a tick can re-composite it, and
@@ -502,6 +599,9 @@ impl<P> CompositorState<P> {
         let (mut timing, payload) = self.held.take()?;
         timing.pts_ns = timing.pts_ns.saturating_add(period_ns);
         timing.dts_ns = timing.dts_ns.saturating_add(period_ns);
+        // A held frame re-composites at its advanced timestamp, so the overlays
+        // move with it: a cue can appear or clear while input 0 stalls.
+        self.advance_overlays(timing.pts_ns);
         Some((timing, payload))
     }
 
@@ -523,6 +623,8 @@ impl<P> CompositorState<P> {
         self.agg.clear(input);
         if input == 0 {
             self.drop_held();
+        } else {
+            self.overlays[input - 1].clear();
         }
     }
 
@@ -569,6 +671,7 @@ impl Compositor {
             pads,
             state: CompositorState::new(n),
             background: [0, 0, 0, 255],
+            last_segment: None,
         }
     }
 
@@ -1069,6 +1172,14 @@ fn blend_channel_scaled(
 }
 
 impl MultiInputElement for Compositor {
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "Video compositor",
+            "Filter/Editing/Video",
+            "Composites several video inputs onto one timed output canvas",
+            "g2g",
+        )
+    }
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
@@ -1235,11 +1346,23 @@ impl MultiInputElement for Compositor {
                 }
                 // A flush on input 0 clears any buffered startup frames (nothing
                 // else is cached); on an overlay it also re-arms startup.
-                PipelinePacket::Flush => self.state.flush(input),
+                PipelinePacket::Flush => {
+                    if input == 0 {
+                        self.last_segment = None;
+                    }
+                    self.state.flush(input);
+                }
                 // Per-input Eos is informational; the runner aggregates input
-                // ends and emits the single merged Eos. Segment is per-input
-                // control the compositor does not remap.
-                PipelinePacket::Eos | PipelinePacket::Segment(_) => {}
+                // ends and emits the single merged Eos.
+                PipelinePacket::Eos => {}
+                // Only the timing input's segment describes the output, whose
+                // frames are stamped from input 0. An overlay's own segment would
+                // remap the video, so it is consumed here.
+                PipelinePacket::Segment(seg) if input == 0 && self.last_segment != Some(seg) => {
+                    self.last_segment = Some(seg);
+                    out.push(PipelinePacket::Segment(seg)).await?;
+                }
+                PipelinePacket::Segment(_) => {}
                 // future PipelinePacket variants: no-op.
                 _ => {}
             }
@@ -1324,9 +1447,13 @@ mod tests {
     }
 
     /// Seed an overlay input's cached latest frame, as a delivered frame would.
+    /// Deliver one frame on `input` and bring the overlays into force at pts 0,
+    /// which is what `take_due` does for the frame it releases. These tests call
+    /// `compose` directly, so they do that step themselves.
     fn seed(comp: &mut Compositor, input: usize, bytes: Vec<u8>) {
         comp.state
             .ingest(input, FrameTiming::default(), bytes.into());
+        comp.state.advance_overlays(0);
     }
 
     fn px(buf: &[u8], cw: usize, x: usize, y: usize) -> [u8; 4] {

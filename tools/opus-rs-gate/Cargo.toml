@@ -1,0 +1,19 @@
+[package]
+name = "opus-rs-gate"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+publish = false
+
+# Standalone: the candidate crate must never enter the workspace lockfile.
+[workspace]
+
+[dependencies]
+# The candidate: the only complete pure-Rust Opus implementation on crates.io,
+# a port of libopus 1.6. Pinned exactly so a re-run measures a known version.
+opus-rs = "=0.1.26"
+# The reference: the same libopus wrapper the `opus` feature of g2g-plugins uses.
+audiopus = "0.3.0-rc.0"
+
+[profile.release]
+opt-level = 2

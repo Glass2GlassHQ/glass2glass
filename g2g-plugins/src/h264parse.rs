@@ -232,64 +232,125 @@ fn parse_sps(rbsp: &[u8]) -> Option<SpsGeometry> {
 
     // vui_parameters_present_flag follows frame cropping. Read it without `?`
     // so a stream truncated right here still yields the dimensions.
-    let framerate = match br.read_bit() {
-        Some(1) => parse_vui_framerate(&mut br),
-        _ => None,
+    let vui = match br.read_bit() {
+        Some(1) => parse_vui(&mut br),
+        _ => Vui::default(),
     };
 
     Some(SpsGeometry {
         width,
         height,
-        framerate,
+        framerate: vui.framerate,
+        pic_timing: vui.pic_timing,
     })
 }
 
-/// Walk the VUI parameters up to `timing_info`, returning the framerate as Q16
-/// fixed-point (`time_scale / (2 * num_units_in_tick)`). `None` if the VUI
-/// omits timing or ends early; the caller already has the dimensions.
-fn parse_vui_framerate(br: &mut BitReader) -> Option<u32> {
-    // aspect_ratio_info_present_flag
-    if br.read_bit()? == 1 {
-        let aspect_ratio_idc = br.read_bits(8)?;
-        // 255 = Extended_SAR: explicit sar_width / sar_height follow.
-        if aspect_ratio_idc == 255 {
-            br.read_bits(16)?; // sar_width
-            br.read_bits(16)?; // sar_height
-        }
+/// What the SPS VUI yields: the framerate, and the context an H.264 `pic_timing`
+/// SEI needs to be parseable.
+#[derive(Default)]
+struct Vui {
+    framerate: Option<u32>,
+    pic_timing: Option<crate::sei::PicTimingContext>,
+}
+
+/// Walk `hrd_parameters()` (H.264 E.1.2), returning the three delay bit widths
+/// the `pic_timing` SEI is sized by: `(cpb_removal_delay_length,
+/// dpb_output_delay_length, time_offset_length)`. `cpb_cnt_minus1` is
+/// attacker-controlled exp-Golomb, so a count past the spec's 31 is rejected
+/// rather than looped over.
+fn parse_hrd_parameters(br: &mut BitReader) -> Option<(u8, u8, u8)> {
+    let cpb_cnt_minus1 = br.read_ue()?;
+    if cpb_cnt_minus1 > 31 {
+        return None;
     }
-    // overscan_info_present_flag
-    if br.read_bit()? == 1 {
-        br.read_bit()?; // overscan_appropriate_flag
+    br.read_bits(4)?; // bit_rate_scale
+    br.read_bits(4)?; // cpb_size_scale
+    for _ in 0..=cpb_cnt_minus1 {
+        br.read_ue()?; // bit_rate_value_minus1
+        br.read_ue()?; // cpb_size_value_minus1
+        br.read_bit()?; // cbr_flag
     }
-    // video_signal_type_present_flag
-    if br.read_bit()? == 1 {
-        br.read_bits(3)?; // video_format
-        br.read_bit()?; // video_full_range_flag
+    br.read_bits(5)?; // initial_cpb_removal_delay_length_minus1
+    let cpb_removal = br.read_bits(5)? as u8 + 1;
+    let dpb_output = br.read_bits(5)? as u8 + 1;
+    let time_offset = br.read_bits(5)? as u8;
+    Some((cpb_removal, dpb_output, time_offset))
+}
+
+/// Walk the VUI parameters, recovering the framerate from `timing_info`
+/// (`time_scale / (2 * num_units_in_tick)`, as Q16 fixed point) and the
+/// `pic_timing` SEI context from the HRD blocks and `pic_struct_present_flag`.
+/// A VUI that ends early yields whatever was read before the truncation.
+fn parse_vui(br: &mut BitReader) -> Vui {
+    let mut out = Vui::default();
+    let mut walk = || -> Option<()> {
+        // aspect_ratio_info_present_flag
         if br.read_bit()? == 1 {
-            // colour_description_present_flag
-            br.read_bits(8)?; // colour_primaries
-            br.read_bits(8)?; // transfer_characteristics
-            br.read_bits(8)?; // matrix_coefficients
+            let aspect_ratio_idc = br.read_bits(8)?;
+            // 255 = Extended_SAR: explicit sar_width / sar_height follow.
+            if aspect_ratio_idc == 255 {
+                br.read_bits(16)?; // sar_width
+                br.read_bits(16)?; // sar_height
+            }
         }
-    }
-    // chroma_loc_info_present_flag
-    if br.read_bit()? == 1 {
-        br.read_ue()?; // chroma_sample_loc_type_top_field
-        br.read_ue()?; // chroma_sample_loc_type_bottom_field
-    }
-    // timing_info_present_flag
-    if br.read_bit()? == 1 {
-        let num_units_in_tick = br.read_bits(32)?;
-        let time_scale = br.read_bits(32)?;
-        let _fixed_frame_rate_flag = br.read_bit()?;
-        if num_units_in_tick == 0 {
-            return None;
+        // overscan_info_present_flag
+        if br.read_bit()? == 1 {
+            br.read_bit()?; // overscan_appropriate_flag
         }
-        // fps = time_scale / (2 * num_units_in_tick); carry to Q16 in u64.
-        let q16 = ((time_scale as u64) << 16) / (2 * num_units_in_tick as u64);
-        return u32::try_from(q16).ok();
-    }
-    None
+        // video_signal_type_present_flag
+        if br.read_bit()? == 1 {
+            br.read_bits(3)?; // video_format
+            br.read_bit()?; // video_full_range_flag
+            if br.read_bit()? == 1 {
+                // colour_description_present_flag
+                br.read_bits(8)?; // colour_primaries
+                br.read_bits(8)?; // transfer_characteristics
+                br.read_bits(8)?; // matrix_coefficients
+            }
+        }
+        // chroma_loc_info_present_flag
+        if br.read_bit()? == 1 {
+            br.read_ue()?; // chroma_sample_loc_type_top_field
+            br.read_ue()?; // chroma_sample_loc_type_bottom_field
+        }
+        // timing_info_present_flag
+        if br.read_bit()? == 1 {
+            let num_units_in_tick = br.read_bits(32)?;
+            let time_scale = br.read_bits(32)?;
+            let _fixed_frame_rate_flag = br.read_bit()?;
+            if num_units_in_tick != 0 {
+                // fps = time_scale / (2 * num_units_in_tick); carry to Q16 in u64.
+                let q16 = ((time_scale as u64) << 16) / (2 * num_units_in_tick as u64);
+                out.framerate = u32::try_from(q16).ok();
+            }
+        }
+        // The HRD blocks size the pic_timing delays; either one present sets
+        // CpbDpbDelaysPresentFlag.
+        let mut ctx = crate::sei::PicTimingContext::default();
+        let nal_hrd = br.read_bit()? == 1;
+        if nal_hrd {
+            let (cpb, dpb, off) = parse_hrd_parameters(br)?;
+            ctx.cpb_removal_delay_length = cpb;
+            ctx.dpb_output_delay_length = dpb;
+            ctx.time_offset_length = off;
+        }
+        let vcl_hrd = br.read_bit()? == 1;
+        if vcl_hrd {
+            let (cpb, dpb, off) = parse_hrd_parameters(br)?;
+            ctx.cpb_removal_delay_length = cpb;
+            ctx.dpb_output_delay_length = dpb;
+            ctx.time_offset_length = off;
+        }
+        ctx.cpb_dpb_delays_present = nal_hrd || vcl_hrd;
+        if ctx.cpb_dpb_delays_present {
+            br.read_bit()?; // low_delay_hrd_flag
+        }
+        ctx.pic_struct_present = br.read_bit()? == 1;
+        out.pic_timing = Some(ctx);
+        Some(())
+    };
+    let _ = walk();
+    out
 }
 
 /// The output-reorder depth (`libavcodec` `has_b_frames`) a decoder must buffer
@@ -676,7 +737,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_vui_framerate_reads_timing_info() {
+    fn parse_vui_reads_timing_info() {
         // num_units_in_tick = 1001, time_scale = 60000 -> 29.97 fps, exercising
         // the Q16 conversion on a non-integer rate.
         let mut w = BitWriter::default();
@@ -691,14 +752,14 @@ mod tests {
         w.align_to_byte();
         let bytes = w.into_bytes();
         let mut br = BitReader::new(&bytes);
-        let fps = parse_vui_framerate(&mut br).expect("timing info present");
+        let fps = parse_vui(&mut br).framerate.expect("timing info present");
         let expected = ((60000u64 << 16) / (2 * 1001)) as u32;
         assert_eq!(fps, expected);
         assert_eq!(fps >> 16, 29, "~29.97 fps");
     }
 
     #[test]
-    fn parse_vui_framerate_absent_timing_is_none() {
+    fn parse_vui_absent_timing_is_none() {
         let mut w = BitWriter::default();
         w.write_bit(0); // aspect_ratio_info_present_flag
         w.write_bit(0); // overscan_info_present_flag
@@ -708,7 +769,7 @@ mod tests {
         w.align_to_byte();
         let bytes = w.into_bytes();
         let mut br = BitReader::new(&bytes);
-        assert_eq!(parse_vui_framerate(&mut br), None);
+        assert_eq!(parse_vui(&mut br).framerate, None);
     }
 
     // -- Element-level tests (drive H264Parse::process directly) -----------

@@ -143,6 +143,8 @@ pub mod textoverlay;
 // Shaping / bidi / system-font discovery behind the overlay's horizontal path.
 #[cfg(feature = "text-shaping")]
 pub mod textshape;
+// Shared H.264/H.265 SEI message walk + the HDR10 static-metadata payloads.
+pub mod sei;
 // CEA-608/708 closed captions carried in-band in H.264/H.265 SEI (no_std).
 pub mod cea;
 // MISB ST 0601 KLV telemetry (STANAG 4609): codec + klvdecode element (no_std).
@@ -153,10 +155,21 @@ pub mod vmti;
 // the `vobsubdec` element that renders cues to RGBA canvases.
 pub mod vobsub;
 pub mod vobsubdec;
+// Sidecar `.idx` / `.sub` pair as a VobSub stream (needs the filesystem).
+#[cfg(feature = "std")]
+pub mod vobsubsrc;
 // DVB subtitles (ETSI EN 300 743): the segment-stream codec (no_std) plus the
 // `dvbsubdec` element that renders display sets to RGBA canvases.
 pub mod dvbsub;
 pub mod dvbsubdec;
+// Blu-ray PGS / HDMV subtitles: the segment-stream codec (no_std) plus the
+// `pgsdec` element that renders display sets to RGBA canvases.
+pub mod pgs;
+pub mod pgsdec;
+// EBU teletext (ETSI EN 300 706): the page-assembly codec (no_std) plus the
+// `teletextdec` element that turns a subtitle page into plain-text cues.
+pub mod teletext;
+pub mod teletextdec;
 // Cursor-on-Target bridge (M811): the ST 0601 -> CoT XML event builder (no_std)
 // plus the `cotsink` TAK egress element, which needs `udp-egress`.
 pub mod cotsink;
@@ -167,7 +180,8 @@ pub mod ccinsert;
 // MISB ST 0604 MISP time stamps in H.264 / H.265 SEI (STANAG 4609): codec +
 // misptimeinsert / misptimeextract elements (no_std).
 pub mod misptime;
-// Shared pixel-format helpers for the packed-RGBA elements (videobalance, alpha).
+// Shared pixel-format helpers: packed-RGBA layout (videobalance, alpha) and the
+// planar plane / frame sizing the format-agnostic filters need (deinterlace).
 mod pixel;
 // Sans-IO RFC 4566 SDP: the shared media-section scanner plus the RTP/AVP
 // mapping from a media description to Caps (payload type, codec, clock rate,
@@ -312,6 +326,16 @@ pub mod tsdemux;
 // MPEG-TS muxer element (no_std): one elementary stream -> Caps::ByteStream{MpegTs},
 // the inverse of tsdemux.
 pub mod tsmux;
+// MPEG program stream demuxer (no_std): Caps::ByteStream{MpegPs} -> one
+// elementary stream, the `.mpg` / `.vob` sibling of tsdemux.
+pub mod psdemux;
+// Frame lengths of the self-syncing audio bitstreams (AC-3, MPEG audio), shared
+// by the audio decoder's frame splitting and psdemux's frame realignment.
+mod audioframe;
+// Non-blocking link to a blocking audio device worker thread, shared by the
+// ALSA and PulseAudio sinks.
+#[cfg(any(feature = "alsa-sink", feature = "pulse-sink"))]
+mod audioworker;
 // Matroska / WebM demuxer parsing core (no_std): EBML -> Tracks + Cluster frames.
 pub mod matroska;
 // Matroska / WebM demuxer element (no_std): Caps::ByteStream{Matroska} -> one
@@ -607,6 +631,8 @@ pub mod remotewttransform;
 // subscriber that puts the objects back in order. Behind `moqt`.
 #[cfg(feature = "moqt")]
 pub mod moqt;
+#[cfg(feature = "moqt")]
+pub mod moqtsessionsrc;
 #[cfg(feature = "moqt")]
 pub mod moqtsink;
 #[cfg(feature = "moqt")]

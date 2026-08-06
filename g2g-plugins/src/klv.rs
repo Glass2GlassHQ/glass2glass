@@ -28,9 +28,9 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, G2gError, MemoryDomain,
-    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec, TextFormat,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, G2gError,
+    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec, TextFormat,
 };
 
 use crate::vmti::VmtiLocalSet;
@@ -1025,6 +1025,14 @@ impl KlvDecode {
 }
 
 impl AsyncElement for KlvDecode {
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "KLV metadata decoder",
+            "Codec/Decoder/Metadata",
+            "Decodes SMPTE ST 336 KLV local sets into text key=value cues",
+            "g2g",
+        )
+    }
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where

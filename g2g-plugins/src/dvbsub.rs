@@ -106,6 +106,53 @@ pub fn page_id_blob(ids: PageIds, subtitling_type: u8) -> [u8; 5] {
     [c[0], c[1], a[0], a[1], subtitling_type]
 }
 
+/// The `subtitling_type` a muxer writes for a stream that names none: EN 300 468
+/// 0x10, "DVB subtitles (normal) with no monitor aspect ratio criticality", which
+/// is what ffmpeg writes.
+pub const DEFAULT_SUBTITLING_TYPE: u8 = 0x10;
+
+/// The composition / ancillary page id a muxer writes for a stream that names
+/// none, again ffmpeg's default.
+pub const DEFAULT_PAGE_ID: u16 = 1;
+
+/// The segments of a display set, without the PES data-field header ahead of
+/// them or the end marker and stuffing behind: the form a Matroska `S_DVBSUB`
+/// block carries. Accepts either carriage, so a display set read off a transport
+/// stream and one read off a Matroska block both reduce to the same bytes.
+///
+/// The span is found by walking the segment headers, so a truncated or corrupt
+/// display set yields the segments that do hold together rather than panicking.
+pub fn segment_span(data: &[u8]) -> &[u8] {
+    let start = match data.first() {
+        Some(&DATA_IDENTIFIER) if data.len() >= 2 => 2,
+        _ => 0,
+    };
+    let mut end = start;
+    while data.get(end) == Some(&SYNC_BYTE) {
+        let Some(header) = data.get(end..end + 6) else {
+            break;
+        };
+        let length = u16::from_be_bytes([header[4], header[5]]) as usize;
+        let next = end.saturating_add(6).saturating_add(length);
+        if next > data.len() {
+            break;
+        }
+        end = next;
+    }
+    &data[start..end]
+}
+
+/// A display set wrapped in the PES data field a transport stream carries it in
+/// (EN 300 743 clause 7.1): the data_identifier and subtitle_stream_id ahead of
+/// the segments, the end-of-data-field marker behind. Takes either carriage, so
+/// re-wrapping a data field that already has the header is a no-op.
+pub fn pes_data_field(data: &[u8]) -> Vec<u8> {
+    let mut out = vec![DATA_IDENTIFIER, 0x00];
+    out.extend_from_slice(segment_span(data));
+    out.push(0xFF);
+    out
+}
+
 /// One composed display set: the page as it should now look.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Page {
@@ -225,28 +272,10 @@ fn rgba(r: u8, g: u8, b: u8, a: u8) -> u32 {
     ((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | b as u32
 }
 
-/// BT.601 limited-range Y'CbCr to RGB, in the fixed-point form a reference DVB
-/// subtitle decoder uses, so the rendered colours are bit-identical to one.
+/// BT.601 limited-range Y'CbCr to RGB. DVB subtitles carry no colorimetry and
+/// are an SD-era format, so the matrix is always BT.601.
 fn ycbcr_to_rgb(y: u8, cr: u8, cb: u8) -> (u8, u8, u8) {
-    const SCALE: i32 = 10;
-    const HALF: i32 = 1 << (SCALE - 1);
-    // FIX(x) = round(x * 2^10), the 8-bit-full-range coefficients scaled from the
-    // 219 / 224 studio excursions.
-    const CR_R: i32 = 1634; //  1.402  * 255/224
-    const CB_G: i32 = 401; //  0.34414 * 255/224
-    const CR_G: i32 = 832; //  0.71414 * 255/224
-    const CB_B: i32 = 2066; //  1.772  * 255/224
-    const Y_GAIN: i32 = 1192; //  255/219
-
-    let cb = cb as i32 - 128;
-    let cr = cr as i32 - 128;
-    let yy = (y as i32 - 16) * Y_GAIN;
-    let clip = |v: i32| v.clamp(0, 255) as u8;
-    (
-        clip((yy + CR_R * cr + HALF) >> SCALE),
-        clip((yy - CB_G * cb - CR_G * cr + HALF) >> SCALE),
-        clip((yy + CB_B * cb + HALF) >> SCALE),
-    )
+    crate::paint::ycbcr_to_rgb(y, cr, cb, crate::paint::YcbcrMatrix::Bt601)
 }
 
 /// One segment of a display set.
@@ -433,7 +462,7 @@ impl DvbSubDecoder {
                         continue;
                     }
                     let at = (cy * self.width + cx) as usize * 4;
-                    crate::paint::blend_px(&mut canvas, at, src, 255);
+                    crate::paint::over_px(&mut canvas, at, src);
                 }
             }
         }
@@ -924,10 +953,16 @@ mod tests {
 
     /// A CLUT whose 4-bit entry 1 is opaque and entry 0 transparent.
     fn clut_segment(page_id: u16) -> Vec<u8> {
+        clut_segment_t(page_id, 0x00)
+    }
+
+    /// As [`clut_segment`], with entry 1 carrying transparency `t` (0 opaque,
+    /// 255 clear), so a test can paint a translucent cue.
+    fn clut_segment_t(page_id: u16, t: u8) -> Vec<u8> {
         let body = [
             0x00, 0x0f, // CLUT id 0, version 0
             0x00, 0x5f, 0x10, 0x80, 0x80, 0xff, // entry 0, 4-bit, full range, transparent
-            0x01, 0x5f, 0x51, 0xf0, 0x5a, 0x00, // entry 1, 4-bit, full range, opaque red
+            0x01, 0x5f, 0x51, 0xf0, 0x5a, t, // entry 1, 4-bit, full range, red
         ];
         seg(SEG_CLUT_DEFINITION, page_id, &body)
     }
@@ -1000,6 +1035,11 @@ mod tests {
 
     /// A whole display set placing a `w` x `h` red block at (`x`, `y`).
     fn display_set(page_id: u16, x: u16, y: u16, w: usize, h: usize) -> Vec<u8> {
+        display_set_t(page_id, x, y, w, h, 0x00)
+    }
+
+    /// As [`display_set`], with the block's CLUT entry at transparency `t`.
+    fn display_set_t(page_id: u16, x: u16, y: u16, w: usize, h: usize, t: u8) -> Vec<u8> {
         let mut out = Vec::from([DATA_IDENTIFIER, 0x00]);
         out.extend_from_slice(&seg(
             SEG_DISPLAY_DEFINITION,
@@ -1007,7 +1047,7 @@ mod tests {
             &[0x00, 0x02, 0xcf, 0x02, 0x3f],
         ));
         out.extend_from_slice(&page_segment(page_id, &[(0, x, y)]));
-        out.extend_from_slice(&clut_segment(page_id));
+        out.extend_from_slice(&clut_segment_t(page_id, t));
         out.extend_from_slice(&region_segment(page_id, w as u16, h as u16));
         out.extend_from_slice(&object_segment(page_id, w, h));
         out.extend_from_slice(&seg(0x80, page_id, &[]));
@@ -1034,6 +1074,20 @@ mod tests {
         assert_eq!(pixel(&page, 99, 40), [0, 0, 0, 0]);
         assert_eq!(pixel(&page, 300, 99), [0, 0, 0, 0]);
         assert_eq!(pixel(&page, 100, 100), [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn a_translucent_cue_keeps_its_colour_against_the_cleared_canvas() {
+        let mut dec = DvbSubDecoder::new();
+        // transparency 0x80, so the entry is a half transparent red, not a dark one
+        let page = dec.feed(&display_set_t(1, 100, 40, 200, 60, 0x80)).unwrap();
+        let px = pixel(&page, 100, 40);
+        assert_eq!(px[3], 127, "alpha carries the transparency");
+        assert_eq!(
+            [px[0], px[1], px[2]],
+            [254, 0, 0],
+            "the colour is the opaque cue's, not premultiplied down by its alpha"
+        );
     }
 
     #[test]

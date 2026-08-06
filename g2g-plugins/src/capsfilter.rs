@@ -19,9 +19,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError,
-    OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
-    SubPictureFormat, VideoCodec,
+    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
+    ElementMetadata, G2gError, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec, Rate, RawVideoFormat, SubPictureFormat, VideoCodec,
 };
 
 #[derive(Debug)]
@@ -64,6 +64,14 @@ impl CapsFilter {
 }
 
 impl AsyncElement for CapsFilter {
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "Caps filter",
+            "Generic",
+            "Restricts the caps that may negotiate across a link",
+            "g2g",
+        )
+    }
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
@@ -434,6 +442,9 @@ pub fn parse_caps_set(desc: &str) -> Option<CapsSet> {
         })),
         "subpicture/x-dvb" => Some(CapsSet::one(Caps::SubPicture {
             format: SubPictureFormat::DvbSub,
+        })),
+        "subpicture/x-pgs" => Some(CapsSet::one(Caps::SubPicture {
+            format: SubPictureFormat::Pgs,
         })),
         _ => None,
     }

@@ -390,6 +390,7 @@ fn caps_from_extension(path: &std::path::Path) -> Option<Caps> {
         "flv" => ByteStreamEncoding::Flv,
         "mp4" | "m4v" | "m4a" | "mov" | "qt" => ByteStreamEncoding::Mp4,
         "ivf" => ByteStreamEncoding::Ivf,
+        "mpg" | "mpeg" | "vob" => ByteStreamEncoding::MpegPs,
         "flac" => return Some(crate::typefind::elementary_flac_caps()),
         "h264" | "264" | "avc" => {
             return Some(crate::typefind::elementary_video_caps(VideoCodec::H264))
@@ -435,6 +436,7 @@ fn encoding_from_str(s: &str) -> Option<ByteStreamEncoding> {
         "mp4" | "mov" | "qt" | "m4v" => Some(ByteStreamEncoding::Mp4),
         "isobmff" | "cmaf" | "fmp4" => Some(ByteStreamEncoding::IsoBmff),
         "ivf" => Some(ByteStreamEncoding::Ivf),
+        "mpegps" | "ps" | "mpg" | "vob" => Some(ByteStreamEncoding::MpegPs),
         _ => None,
     }
 }
@@ -448,6 +450,8 @@ fn encoding_to_str(encoding: ByteStreamEncoding) -> &'static str {
         ByteStreamEncoding::Flv => "flv",
         ByteStreamEncoding::IsoBmff => "isobmff",
         ByteStreamEncoding::Mp4 => "mp4",
+        ByteStreamEncoding::Ivf => "ivf",
+        ByteStreamEncoding::MpegPs => "mpegps",
         // Only encodings produced by `encoding_from_str` / sniffing are stored,
         // so any future `ByteStreamEncoding` variant cannot reach here.
         _ => unreachable!("filesrc names only encodings it recognized"),

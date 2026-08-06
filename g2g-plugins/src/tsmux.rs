@@ -11,6 +11,12 @@
 //! ... ! h264parse ! mpegtsmux ! filesink location=out.ts
 //! ```
 //!
+//! A `Caps::SubPicture{DvbSub}` input is carried as DVB subtitles (M927): a
+//! private PES whose PMT entry gets the `subtitling_descriptor`, with each display
+//! set wrapped in the data field EN 300 743 carries it in. The pages the
+//! descriptor declares come from the page-id config blob the stream leads with,
+//! else from the `dvbsub-page-id` property.
+//!
 //! Scope (v1): one program / one stream (a single input pad), mirroring the
 //! single-stream `TsDemux`. A PCR rides the stream's PID on the `pcr-interval`
 //! cadence; multi-stream (A+V) muxing is the sibling `tsmuxn::TsMux`.
@@ -26,14 +32,68 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
-    Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, Tag, TagList, VideoCodec,
+    Dim, ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate,
+    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate,
+    SubPictureFormat, Tag, TagList, VideoCodec,
 };
 
+use crate::dvbsub::{parse_page_ids, PageIds, DEFAULT_PAGE_ID, DEFAULT_SUBTITLING_TYPE};
 use crate::mpegts::{
     TsMuxer, STREAM_TYPE_AAC, STREAM_TYPE_H264, STREAM_TYPE_H265, STREAM_TYPE_METADATA_PES,
     STREAM_TYPE_PRIVATE_PES, TAG_KEY_SERVICE_NAME, TAG_KEY_SERVICE_PROVIDER,
 };
+
+/// The language a `subtitling_descriptor` declares when the stream's tags name
+/// none, the ISO 639 code for "undetermined" (what ffmpeg writes).
+pub(crate) const UNDETERMINED_LANGUAGE: &str = "und";
+
+/// What a DVB subtitle pad's PMT `subtitling_descriptor` declares (M927): the
+/// page ids and subtitling type from the config blob the stream carries in band
+/// ahead of its first display set, falling back to the `dvbsub-page-id` property
+/// for a stream that sends none. Shared by the single-input [`TsMux`] and the
+/// multi-input `tsmuxn::TsMux`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DvbSubDecl {
+    /// The `dvbsub-page-id` property: the composition and ancillary page a
+    /// stream with no config blob is declared on.
+    pub(crate) page_id: u16,
+    /// The ids and `subtitling_type` a config blob named, once one has arrived.
+    from_stream: Option<(PageIds, u8)>,
+}
+
+impl DvbSubDecl {
+    /// A pad declared on `page_id` until its stream says otherwise.
+    pub(crate) fn on_page(page_id: u16) -> Self {
+        Self {
+            page_id,
+            from_stream: None,
+        }
+    }
+
+    /// Adopt a page-id config blob. `false` when the bytes are not one, so they
+    /// are a display set and belong in the multiplex.
+    pub(crate) fn adopt(&mut self, data: &[u8]) -> bool {
+        let Some(ids) = parse_page_ids(data) else {
+            return false;
+        };
+        let subtitling_type = data.get(4).copied().unwrap_or(DEFAULT_SUBTITLING_TYPE);
+        self.from_stream = Some((ids, subtitling_type));
+        true
+    }
+
+    pub(crate) fn ids(&self) -> PageIds {
+        self.from_stream.map(|(ids, _)| ids).unwrap_or(PageIds {
+            composition: self.page_id,
+            ancillary: self.page_id,
+        })
+    }
+
+    pub(crate) fn subtitling_type(&self) -> u8 {
+        self.from_stream
+            .map(|(_, t)| t)
+            .unwrap_or(DEFAULT_SUBTITLING_TYPE)
+    }
+}
 
 /// The PMT `stream_type` for an input caps, or `None` if unsupported. Shared by
 /// the single-input [`TsMux`] and the multi-input `tsmuxn::TsMux`. KLV metadata
@@ -59,8 +119,25 @@ pub(crate) fn stream_type_for(caps: &Caps, klv_sync: bool) -> Option<u8> {
         } else {
             STREAM_TYPE_PRIVATE_PES
         }),
+        // DVB subtitles ride a private PES too, told apart by the
+        // `subtitling_descriptor` the muxer writes for them. VobSub has no TS
+        // carriage (it is a DVD program-stream codec), so only DVB is muxable.
+        Caps::SubPicture {
+            format: SubPictureFormat::DvbSub,
+        } => Some(STREAM_TYPE_PRIVATE_PES),
         _ => None,
     }
+}
+
+/// Whether an input caps is the DVB subtitle pad, whose PMT entry needs the
+/// `subtitling_descriptor` and whose access units are display sets.
+pub(crate) fn is_dvbsub(caps: &Caps) -> bool {
+    matches!(
+        caps,
+        Caps::SubPicture {
+            format: SubPictureFormat::DvbSub
+        }
+    )
 }
 
 /// The SDT service text a tag list names (M872): the service name from
@@ -125,6 +202,10 @@ pub struct TsMux {
     /// Metadata for the one service this muxer writes (M872): the service name /
     /// provider go to the SDT, a `Tag::Language` to the single stream's PMT entry.
     tags: TagList,
+    /// The DVB subtitle declaration, when the input pad carries one (M927).
+    dvbsub: Option<DvbSubDecl>,
+    /// The `dvbsub-page-id` property, held until a DVB subtitle pad is configured.
+    dvbsub_page_id: u16,
 }
 
 impl Default for TsMux {
@@ -143,6 +224,8 @@ impl TsMux {
             pcr_interval_90khz: 3600,
             klv_sync: false,
             tags: TagList::new(),
+            dvbsub: None,
+            dvbsub_page_id: DEFAULT_PAGE_ID,
         }
     }
 
@@ -177,6 +260,14 @@ impl TsMux {
         self
     }
 
+    /// The composition and ancillary page a DVB subtitle input is declared on in
+    /// the PMT `subtitling_descriptor`, for a stream that carries no page-id
+    /// config blob of its own. A blob wins over this.
+    pub fn with_dvbsub_page_id(mut self, page_id: u16) -> Self {
+        self.dvbsub_page_id = page_id;
+        self
+    }
+
     /// Count of TS byte frames forwarded.
     pub fn emitted(&self) -> u64 {
         self.emitted
@@ -206,11 +297,36 @@ impl TsMux {
                 sample_rate: 0,
             },
             Caps::Klv,
+            Caps::SubPicture {
+                format: SubPictureFormat::DvbSub,
+            },
         ])
+    }
+
+    /// Write the DVB subtitle stream's `subtitling_descriptor`, from the pad's
+    /// declaration and the language its tags name. Called again when a config
+    /// blob refines the ids, which replaces the descriptor rather than adding one.
+    fn declare_subtitling(&mut self) {
+        let Some(decl) = self.dvbsub else {
+            return;
+        };
+        let language =
+            String::from(language_from_tags(&self.tags).unwrap_or(UNDETERMINED_LANGUAGE));
+        if let Some(mux) = self.mux.as_mut() {
+            mux.set_stream_subtitling(0, &language, decl.subtitling_type(), decl.ids());
+        }
     }
 }
 
 impl AsyncElement for TsMux {
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "MPEG-TS muxer",
+            "Codec/Muxer",
+            "Muxes one elementary stream into an MPEG transport stream",
+            "g2g",
+        )
+    }
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
@@ -246,10 +362,18 @@ impl AsyncElement for TsMux {
         if let Some((name, provider)) = service_from_tags(&self.tags) {
             mux.set_service(&name, &provider);
         }
-        if let Some(language) = language_from_tags(&self.tags) {
-            mux.set_stream_language(0, language);
+        // A DVB subtitle stream's language rides its `subtitling_descriptor`, the
+        // way ffmpeg writes it, so it gets no separate language descriptor.
+        if !is_dvbsub(absolute_caps) {
+            if let Some(language) = language_from_tags(&self.tags) {
+                mux.set_stream_language(0, language);
+            }
         }
         self.mux = Some(mux);
+        if is_dvbsub(absolute_caps) {
+            self.dvbsub = Some(DvbSubDecl::on_page(self.dvbsub_page_id));
+            self.declare_subtitling();
+        }
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
     }
@@ -281,6 +405,12 @@ impl AsyncElement for TsMux {
                 "carry KLV metadata as synchronous metadata-in-PES (stream_type 0x15) instead of asynchronous private PES",
             )
             .with_default("false"),
+            PropertySpec::new(
+                "dvbsub-page-id",
+                PropKind::Uint,
+                "composition and ancillary page a DVB subtitle input is declared on when the stream carries no page-id config",
+            )
+            .with_default("1"),
         ];
         PROPS
     }
@@ -292,6 +422,16 @@ impl AsyncElement for TsMux {
                 if let Some(mux) = self.mux.as_mut() {
                     mux.set_table_interval_90khz(self.table_interval_ms.saturating_mul(90));
                 }
+                Ok(())
+            }
+            "dvbsub-page-id" => {
+                let v = u16::try_from(value.as_uint().ok_or(PropError::Type)?)
+                    .map_err(|_| PropError::Value)?;
+                self.dvbsub_page_id = v;
+                if let Some(decl) = self.dvbsub.as_mut() {
+                    decl.page_id = v;
+                }
+                self.declare_subtitling();
                 Ok(())
             }
             "pcr-interval" => {
@@ -319,6 +459,7 @@ impl AsyncElement for TsMux {
             "pat-interval" | "pmt-interval" => Some(PropValue::Uint(self.table_interval_ms)),
             "pcr-interval" => Some(PropValue::Uint(self.pcr_interval_90khz)),
             "klv-sync" => Some(PropValue::Bool(self.klv_sync)),
+            "dvbsub-page-id" => Some(PropValue::Uint(self.dvbsub_page_id as u64)),
             _ => None,
         }
     }
@@ -337,6 +478,13 @@ impl AsyncElement for TsMux {
                     let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
+                    // A DVB subtitle pad opens on its page-id config blob, which
+                    // is what the `subtitling_descriptor` declares and never a
+                    // display set to multiplex.
+                    if self.dvbsub.as_mut().is_some_and(|d| d.adopt(slice)) {
+                        self.declare_subtitling();
+                        return Ok(());
+                    }
                     let mux = self.mux.as_mut().ok_or(G2gError::NotConfigured)?;
                     let pts_90khz = (frame.timing.pts_ns as u128 * 90_000 / 1_000_000_000) as u64;
                     // A DTS rides the PES only for reordered video (dts_ns set and

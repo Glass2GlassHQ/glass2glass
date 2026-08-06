@@ -308,6 +308,309 @@ pub fn ts_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>,
     .map(Some)
 }
 
+/// Probe an MPEG program stream prefix into a parsed [`PsDemuxer`]. A program
+/// stream announces nothing up front, so "what it carries" is whatever streams
+/// the probe window has shown a packet of.
+#[cfg(feature = "std")]
+fn probe_ps(prefix: &[u8]) -> crate::psdemux::PsDemuxer {
+    let mut demux = crate::psdemux::PsDemuxer::new();
+    demux.push_data(prefix);
+    demux
+}
+
+/// The `playbin uri=X` auto-fan-out hook for MPEG program streams (M929): probe a
+/// `file://` `.mpg` / `.vob`, then assemble `FileSrc -> PsDemuxN -> {decode -> auto
+/// sink}` with one branch per forwardable stream, the program stream sibling of
+/// [`ts_playbin`]. Declines (`Ok(None)`) for a non-`file://` URI, an unreadable
+/// file, or one whose probe window showed no program stream packet. Subpicture
+/// tracks are not auto-plugged (they are bitmap cues, not overlay text); they are
+/// reachable through an explicit `d.text_0` pad on [`ps_demux_select`].
+#[cfg(feature = "std")]
+pub fn ps_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>, ParseError> {
+    let (uri, cc) = cc_request(uri);
+    let Some((path, prefix)) = open_file_prefix(&uri) else {
+        return Ok(None);
+    };
+    let demux = probe_ps(&prefix);
+    let infos = crate::psdemux::forwardable_streams(&demux);
+    if infos.is_empty() {
+        return Ok(None); // not a program stream (or nothing seen yet): decline
+    }
+    let streams: Vec<_> = infos.iter().map(|i| i.stream).collect();
+    let av: Vec<(Caps, bool)> = infos.iter().map(|i| (i.caps.clone(), i.video)).collect();
+    let source = crate::filesrc::FileSrc::new(
+        &path,
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::MpegPs,
+        },
+    );
+    if let (Some(cc), Some(video_idx)) = (cc, infos.iter().position(|i| i.video)) {
+        return build_cc_overlay(
+            reg,
+            Box::new(source),
+            crate::psdemux::PsDemuxN::new(streams),
+            &av,
+            video_idx,
+            cc,
+        )
+        .map(Some);
+    }
+    // A disc with a subpicture track composites its cues over the video (M931).
+    // The canvas needs the video's geometry, which the sequence header gives once
+    // a video access unit has parsed; without it (or without a video track) the
+    // plain A/V fan-out below plays the disc unsubtitled.
+    if !crate::psdemux::subpicture_streams(&demux).is_empty() && infos.iter().any(|i| i.video) {
+        if let Some(geometry) = demux.sequence() {
+            return build_ps_subpicture_overlay(reg, &path, &infos, geometry).map(Some);
+        }
+    }
+    // An interlaced disc combs on motion unless the fields are woven back
+    // together, so the sequence extension's `progressive_sequence` decides
+    // whether the video branch pays for a `deinterlace` (M932).
+    let interlaced = demux.sequence().is_some_and(|s| !s.progressive);
+    build_av_fanout_with(
+        reg,
+        Box::new(source),
+        crate::psdemux::PsDemuxN::new(streams),
+        &av,
+        interlaced,
+    )
+    .map(Some)
+}
+
+/// Build the DVD subpicture overlay graph (M931): `FileSrc -> PsDemuxN ->
+/// {video decode -> RGBA8 -> compositor.0, subpicture -> vobsubdec ->
+/// compositor.1} -> NV12 -> auto video sink`, with the audio tracks fanning out
+/// to their own sinks.
+///
+/// A DVD subpicture is a bitmap cue, not text, so it composites rather than
+/// going through the `TextOverlayN` path an `S_TEXT` track uses: `vobsubdec`
+/// paints each cue onto a full-frame transparent RGBA canvas and the compositor
+/// blends it over the video. The canvas is the video's own geometry, read from
+/// the sequence header the probe already parsed, so an NTSC disc composites at
+/// 720x480 rather than the decoder's PAL default.
+#[cfg(feature = "std")]
+fn build_ps_subpicture_overlay(
+    reg: &Registry,
+    path: &str,
+    infos: &[crate::psdemux::PsStreamInfo],
+    geometry: crate::psdemux::SequenceHeader,
+) -> Result<Graph<GraphNode>, ParseError> {
+    use crate::compositor::{Compositor, CompositorPad};
+    use crate::psdemux::{PsDemuxN, PsStream};
+    use g2g_core::RawVideoFormat;
+
+    let video_idx = infos
+        .iter()
+        .position(|i| i.video)
+        .ok_or_else(|| ParseError::NoDecodeChain("subpicture overlay needs video".into()))?;
+
+    // Demux ports: every A/V stream in discovery order, then the subpicture one.
+    let mut ports: Vec<PsStream> = infos.iter().map(|i| i.stream).collect();
+    ports.push(PsStream::SubPicture);
+    let text_port = (ports.len() - 1) as u8;
+    let port_count = ports.len() as u8;
+
+    let mut graph: Graph<GraphNode> = Graph::new();
+    let source = crate::filesrc::FileSrc::new(
+        path,
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::MpegPs,
+        },
+    );
+    let src = graph.add_source(GraphNodeRef::Source(Box::new(source)));
+    let demux = graph.add_demux(
+        GraphNodeRef::demux(PsDemuxN::new(ports).with_video_geometry(geometry)),
+        port_count,
+    );
+    graph.link(src, demux.input()).map_err(ParseError::Graph)?;
+
+    // The compositor runs at the video's own geometry and nominal rate: the cue
+    // canvases `vobsubdec` paints are that size, so neither input is rescaled.
+    let fps = (geometry.framerate_q16 >> 16).max(1);
+    let overlay = graph.add_muxer(
+        GraphNodeRef::muxer(
+            Compositor::new(
+                geometry.width,
+                geometry.height,
+                Vec::from([CompositorPad::at(0, 0), CompositorPad::at(0, 0)]),
+            )
+            .with_framerate(fps),
+        ),
+        2,
+    );
+    let to_rgba = graph.add_transform(GraphNodeRef::element(
+        crate::videoconvert::VideoConvert::new(RawVideoFormat::Rgba8),
+    ));
+    let to_nv12 = graph.add_transform(GraphNodeRef::element(
+        crate::videoconvert::VideoConvert::new(RawVideoFormat::Nv12),
+    ));
+    graph
+        .link(to_rgba, overlay.input(0))
+        .map_err(ParseError::Graph)?;
+    graph
+        .link(overlay.output(), to_nv12)
+        .map_err(ParseError::Graph)?;
+    let vsink = reg
+        .make_element("autovideosink")
+        .ok_or_else(|| ParseError::UnknownElement("autovideosink".to_string()))?;
+    let vsnk = graph.add_sink(GraphNodeRef::Element(vsink));
+    graph.link(to_nv12, vsnk).map_err(ParseError::Graph)?;
+
+    // The subpicture port decodes to cue canvases, sized to the canvas the
+    // demuxer's synthesized `.idx` declares. It reaches the overlay pad through
+    // its own convert: the decoder's caps are only refined once that `.idx`
+    // arrives, so the link negotiates on the placeholder otherwise.
+    let dec = graph.add_transform(GraphNodeRef::element(
+        crate::vobsubdec::VobSubDec::new().with_size(geometry.width, geometry.height),
+    ));
+    let cue_rgba = graph.add_transform(GraphNodeRef::element(
+        crate::videoconvert::VideoConvert::new(RawVideoFormat::Rgba8),
+    ));
+    graph
+        .link(demux.out(text_port), dec)
+        .map_err(ParseError::Graph)?;
+    graph.link(dec, cue_rgba).map_err(ParseError::Graph)?;
+    graph
+        .link(cue_rgba, overlay.input(1))
+        .map_err(ParseError::Graph)?;
+
+    for (i, info) in infos.iter().enumerate() {
+        if i == video_idx {
+            // Seed the decode chain with the sequence header's real geometry.
+            // The demuxer's pad caps are a fixatable `Range` placeholder (it
+            // cannot know the size until a video unit parses), and the solver
+            // fixates a range at its minimum: the branch would negotiate 16x16
+            // while the subpicture pad arrives at the real canvas size, and the
+            // compositor rejects two inputs of different geometry. The probe has
+            // already read the sequence header, so the builder states it.
+            let video_caps = Caps::CompressedVideo {
+                codec: g2g_core::VideoCodec::Mpeg2,
+                width: g2g_core::Dim::Fixed(geometry.width),
+                height: g2g_core::Dim::Fixed(geometry.height),
+                framerate: g2g_core::Rate::Fixed(geometry.framerate_q16),
+            };
+            // Deinterlace on the decoder's own planar output, before the RGBA
+            // convert the compositor needs (M932).
+            let head = if geometry.progressive {
+                to_rgba
+            } else {
+                deinterlace_into(&mut graph, to_rgba)?
+            };
+            reg.decodebin(
+                &mut graph,
+                demux.out(i as u8),
+                head,
+                &video_caps,
+                &is_raw_video,
+                PLAYBIN_MAX_DEPTH,
+            )
+            .map_err(|e| map_decode_err(&video_caps, e))?;
+        } else {
+            wire_audio_branch(reg, &mut graph, demux.out(i as u8), &info.caps)?;
+        }
+    }
+    Ok(graph)
+}
+
+/// Probe a program stream file and build a [`PsDemuxN`](crate::psdemux::PsDemuxN)
+/// with the requested streams + their caps (M929). Shared by `mpegpsdemux`
+/// demux-select and `decodebin` fan-out. Declines a non-program-stream file.
+///
+/// Unlike MPEG-TS, a program stream's subpicture tracks are selectable here: they
+/// follow the A/V streams as `Text` kinds, so `d.text_0` resolves to the first
+/// one (`resolve_pads`'s documented A/V-then-subtitle order).
+#[cfg(feature = "std")]
+fn ps_select(
+    location: &str,
+    pads: &[PadRequest],
+) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)> {
+    let prefix = read_prefix(location)?;
+    let demux = probe_ps(&prefix);
+    let infos = crate::psdemux::forwardable_streams(&demux);
+    if infos.is_empty() {
+        return None;
+    }
+    let mut kinds: Vec<PadKind> = infos
+        .iter()
+        .map(|i| {
+            if i.video {
+                PadKind::Video
+            } else {
+                PadKind::Audio
+            }
+        })
+        .collect();
+    let mut streams: Vec<crate::psdemux::PsStream> = infos.iter().map(|i| i.stream).collect();
+    let mut caps: Vec<Caps> = infos.iter().map(|i| i.caps.clone()).collect();
+    // One port serves every subpicture substream (they share a selection), so a
+    // single Text kind follows the A/V ones.
+    if !crate::psdemux::subpicture_streams(&demux).is_empty() {
+        kinds.push(PadKind::Text);
+        streams.push(crate::psdemux::PsStream::SubPicture);
+        caps.push(Caps::SubPicture {
+            format: g2g_core::SubPictureFormat::VobSub,
+        });
+    }
+    let sel = resolve_pads(&kinds, pads)?;
+    let ports: Vec<_> = sel.iter().map(|&i| streams[i]).collect();
+    let caps: Vec<Caps> = sel.iter().map(|&i| caps[i].clone()).collect();
+    Some((Box::new(crate::psdemux::PsDemuxN::new(ports)), caps))
+}
+
+/// `mpegpsdemux` explicit fan-out (M929).
+#[cfg(feature = "std")]
+pub fn ps_demux_select(
+    name: &str,
+    location: &str,
+    pads: &[PadRequest],
+) -> Option<Box<dyn DynMultiOutputElement>> {
+    (name == "mpegpsdemux")
+        .then(|| ps_select(location, pads).map(|(d, _)| d))
+        .flatten()
+}
+
+/// `decodebin` fan-out over a program stream file (M929): the demuxer + per-port
+/// caps.
+#[cfg(feature = "std")]
+pub fn ps_decodebin_select(
+    location: &str,
+    pads: &[PadRequest],
+) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)> {
+    ps_select(location, pads)
+}
+
+/// Bare-`decodebin` primary-stream hook for MPEG program streams (M929): the
+/// program stream sibling of [`ts_primary_stream`]. An audio-only `.mpg` through
+/// `filesrc ! decodebin` selects the demux's audio stream instead of failing on
+/// the default video port.
+#[cfg(feature = "std")]
+pub fn ps_primary_stream(location: &str, caps: &Caps) -> Option<PrimaryStream> {
+    if !matches!(
+        caps,
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::MpegPs
+        }
+    ) {
+        return None;
+    }
+    let prefix = read_prefix(location)?;
+    let infos = crate::psdemux::forwardable_streams(&probe_ps(&prefix));
+    // A video stream present: the demux's default video port is right, decline.
+    if infos.is_empty() || infos.iter().any(|i| i.video) {
+        return None;
+    }
+    let audio = infos.into_iter().find(|i| !i.video)?;
+    Some(PrimaryStream {
+        demux: "mpegpsdemux",
+        props: alloc::vec![(
+            "stream".to_string(),
+            crate::psdemux::ps_stream_to_str(audio.stream).to_string(),
+        )],
+        caps: audio.caps,
+    })
+}
+
 /// Map a per-branch decode-chain failure to the text-parser error (the
 /// [`decodebin`](Registry::decodebin) form): no chain quotes the unplugged input
 /// caps, a link error wraps the graph error.
@@ -410,11 +713,27 @@ fn build_av_fanout<D>(
 where
     D: g2g_core::MultiOutputElement + 'static,
 {
+    build_av_fanout_with(reg, source, demux, av, false)
+}
+
+/// [`build_av_fanout`] with `deinterlace` optionally spliced into each video
+/// branch, for a container whose probe found the stream interlaced.
+#[cfg(feature = "std")]
+fn build_av_fanout_with<D>(
+    reg: &Registry,
+    source: Box<dyn DynSourceLoop>,
+    demux: D,
+    av: &[(Caps, bool)],
+    deinterlace: bool,
+) -> Result<Graph<GraphNode>, ParseError>
+where
+    D: g2g_core::MultiOutputElement + 'static,
+{
     let mut graph: Graph<GraphNode> = Graph::new();
     let src = graph.add_source(GraphNodeRef::Source(source));
     let demux = graph.add_demux(GraphNodeRef::demux(demux), av.len() as u8);
     graph.link(src, demux.input()).map_err(ParseError::Graph)?;
-    wire_av_fanout(reg, &mut graph, demux, av)?;
+    wire_av_fanout(reg, &mut graph, demux, av, deinterlace)?;
     Ok(graph)
 }
 
@@ -427,6 +746,7 @@ fn wire_av_fanout(
     graph: &mut Graph<GraphNode>,
     demux: g2g_core::graph::Demux,
     av: &[(Caps, bool)],
+    deinterlace: bool,
 ) -> Result<(), ParseError> {
     for (i, (caps, video)) in av.iter().enumerate() {
         if *video {
@@ -434,10 +754,15 @@ fn wire_av_fanout(
                 .make_element("autovideosink")
                 .ok_or_else(|| ParseError::UnknownElement("autovideosink".to_string()))?;
             let vsnk = graph.add_sink(GraphNodeRef::Element(sink));
+            let head = if deinterlace {
+                deinterlace_into(graph, vsnk)?
+            } else {
+                vsnk
+            };
             reg.decodebin(
                 graph,
                 demux.out(i as u8),
-                vsnk,
+                head,
                 caps,
                 &is_raw_video,
                 PLAYBIN_MAX_DEPTH,
@@ -448,6 +773,18 @@ fn wire_av_fanout(
         }
     }
     Ok(())
+}
+
+/// Add a `deinterlace` feeding `to` and return it, so the decode chain plugs into
+/// the deinterlacer instead of directly into what follows.
+#[cfg(feature = "std")]
+fn deinterlace_into(
+    graph: &mut Graph<GraphNode>,
+    to: g2g_core::graph::NodeId,
+) -> Result<g2g_core::graph::NodeId, ParseError> {
+    let node = graph.add_transform(GraphNodeRef::element(crate::deinterlace::Deinterlace::new()));
+    graph.link(node, to).map_err(ParseError::Graph)?;
+    Ok(node)
 }
 
 #[cfg(feature = "std")]
@@ -1507,8 +1844,9 @@ pub fn build_hls_separate_fanout(
 /// overlay's text pad (the cross-source join, vs the single-demuxer MP4 / MKV
 /// overlay). `streams` carries the variant's muxed streams (video required);
 /// `subtitle_url` is the resolved rendition playlist. `Ok(None)` (decline) when
-/// there is no routable muxed video. Raw `.vtt` segment renditions only; an fMP4
-/// `wvtt` subtitle rendition (the `IsoBmff` + `Mp4DemuxN` path) is a follow-up.
+/// there is no routable muxed video. The rendition's segments may be raw `.vtt`
+/// or fMP4 (`wvtt`): the source de-frames either into the same WebVTT stream, so
+/// the graph is the same shape for both.
 #[cfg(feature = "hls")]
 pub fn build_hls_subtitle_overlay(
     reg: &Registry,

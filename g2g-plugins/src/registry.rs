@@ -306,6 +306,17 @@ pub fn default_registry() -> Registry {
             ))
         },
     ));
+    // VobSub sidecar source (M926): a DVD subtitle `.idx` / `.sub` pair sitting
+    // next to a video, e.g. `vobsubsrc location=movie.idx ! vobsubdec ! c.` .
+    // `sub-location` overrides the derived `.sub` path, `language` picks one of
+    // an `.idx`'s indexed languages.
+    reg.register_source(SourceFactory::new(
+        "vobsubsrc",
+        Caps::SubPicture {
+            format: g2g_core::SubPictureFormat::VobSub,
+        },
+        || Box::new(crate::vobsubsrc::VobSubSrc::new("")),
+    ));
     // Image-sequence source (M-gap): reads img%05d.jpg style sequences, Motion-JPEG
     // by default so `multifilesrc location=img%05d.jpg ! mjpegdec ! ...` works.
     reg.register_source(SourceFactory::new(
@@ -424,6 +435,19 @@ pub fn default_registry() -> Registry {
         "dvbsubdec",
         || Box::new(crate::dvbsubdec::DvbSubDec::new()),
     ));
+    // Blu-ray PGS subtitle decoder (M925): the HDMV bitmap-subtitle sibling of
+    // `dvbsubdec`, e.g. `mkvdemux stream=pgs ! pgsdec ! c.` . No gst alias: gst
+    // has no PGS decoder element.
+    reg.register_launch(LaunchFactory::of::<crate::pgsdec::PgsDec>("pgsdec", || {
+        Box::new(crate::pgsdec::PgsDec::new())
+    }));
+    // EBU teletext subtitle decoder (M924): a demuxed teletext stream's subtitle
+    // page becomes plain-text cues,
+    // e.g. `tsdemux stream=teletext ! teletextdec page=888 ! textoverlay name=o`.
+    reg.register_launch(LaunchFactory::of::<crate::teletextdec::TeletextDec>(
+        "teletextdec",
+        || Box::new(crate::teletextdec::TeletextDec::new()),
+    ));
     // Detection-box overlay (M102): draws the frame's `AnalyticsMeta` bounding
     // boxes onto the RGBA frame, so a detector's output is visible downstream
     // (e.g. `... ! analyticsoverlay ! videoconvert ! autovideosink`). No pad
@@ -487,6 +511,10 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::of::<TsDemux>("tsdemux", || {
         Box::new(TsDemux::new())
     }));
+    reg.register_launch(LaunchFactory::of::<crate::psdemux::PsDemux>(
+        "mpegpsdemux",
+        || Box::new(crate::psdemux::PsDemux::new()),
+    ));
     reg.register_launch(LaunchFactory::of::<MkvDemux>("matroskademux", || {
         Box::new(MkvDemux::new())
     }));
@@ -780,6 +808,7 @@ fn register_uri_handlers(reg: &mut Registry) {
     reg.register_playbin(crate::uridecodebin::mkv_playbin);
     reg.register_playbin(crate::uridecodebin::ts_playbin);
     reg.register_playbin(crate::uridecodebin::mp4_playbin);
+    reg.register_playbin(crate::uridecodebin::ps_playbin);
     // Lone-audio-stream files the container hooks decline: Ogg (Opus / FLAC)
     // and elementary audio (`.flac`), M775.
     reg.register_playbin(crate::uridecodebin::audio_playbin);
@@ -790,12 +819,14 @@ fn register_uri_handlers(reg: &mut Registry) {
     reg.register_demux_select(crate::uridecodebin::ts_demux_select);
     reg.register_demux_select(crate::uridecodebin::mp4_demux_select);
     reg.register_demux_select(crate::uridecodebin::ogg_demux_select);
+    reg.register_demux_select(crate::uridecodebin::ps_demux_select);
     // `decodebin` fan-out (M482): `filesrc location=x ! decodebin name=d  d.video_0
     // ! ...  d.audio_0 ! ...` probes the file, builds the multi-output demuxer, and
     // auto-plugs a decoder onto each port (the decode-per-port sibling of the above).
     reg.register_decodebin_select(crate::uridecodebin::mkv_decodebin_select);
     reg.register_decodebin_select(crate::uridecodebin::ts_decodebin_select);
     reg.register_decodebin_select(crate::uridecodebin::mp4_decodebin_select);
+    reg.register_decodebin_select(crate::uridecodebin::ps_decodebin_select);
     // Bare `filesrc location=X ! decodebin` primary-stream selection (M746): an
     // audio-only container's single-stream demux defaults to a video port; the hook
     // sniffs the file and selects the real (audio) stream instead.
@@ -803,6 +834,7 @@ fn register_uri_handlers(reg: &mut Registry) {
     reg.register_primary_stream(crate::uridecodebin::mp4_primary_stream);
     reg.register_primary_stream(crate::uridecodebin::mkv_primary_stream);
     reg.register_primary_stream(crate::uridecodebin::ogg_primary_stream);
+    reg.register_primary_stream(crate::uridecodebin::ps_primary_stream);
     // hls:// fan-out (M395): probe the master playlist, fan its variant's muxed TS
     // streams out; the hls_handler is the single-stream fallback it declines to.
     #[cfg(feature = "hls")]
@@ -911,6 +943,10 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     reg.register(ElementFactory::of::<TsDemux>("tsdemux", |_| {
         Box::new(TsDemux::new())
     }));
+    reg.register(ElementFactory::of::<crate::psdemux::PsDemux>(
+        "mpegpsdemux",
+        |_| Box::new(crate::psdemux::PsDemux::new()),
+    ));
     reg.register(ElementFactory::of::<MkvDemux>("matroskademux", |_| {
         Box::new(MkvDemux::new())
     }));
@@ -1466,6 +1502,18 @@ fn register_feature_gated(reg: &mut Registry) {
     reg.register_launch(LaunchFactory::of::<MoqtSink>("moqtsink", || {
         Box::new(MoqtSink::new("https://127.0.0.1:4443/", "g2g"))
     }));
+    // The multi-track shape of the same subscriber: one session, one pad per
+    // track (`moqtsessionsrc name=s tracks=1.m4s,2.m4s  s. ! ...  s. ! ...`).
+    #[cfg(feature = "moqt")]
+    reg.register_fanout_src(g2g_core::runtime::FanoutSrcFactory::new(
+        "moqtsessionsrc",
+        |outputs| {
+            Box::new(
+                crate::moqtsessionsrc::MoqtSessionSrc::new("https://127.0.0.1:4443/", "g2g")
+                    .with_outputs(outputs),
+            )
+        },
+    ));
     #[cfg(feature = "moqt")]
     reg.register_source(SourceFactory::new(
         "moqtsrc",

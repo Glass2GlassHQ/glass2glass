@@ -99,7 +99,7 @@ use smithay_client_toolkit::{
 
 use crate::clock::wait_to_present;
 use crate::worker_ready::Handshake;
-use g2g_core::element::QosMessage;
+use g2g_core::element::{PresentationStats, QosMessage};
 use g2g_core::frame::Frame;
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
@@ -166,6 +166,15 @@ pub struct WaylandSink {
     /// over a clock; the default bound never drops, presenting every frame
     /// however late.
     pacer: PresentationPacer,
+    /// Monotonic stamp when the previous frame's present completed, for the
+    /// per-frame pacing log (the inter-present gap is what stutter looks like).
+    last_present_done_ns: u64,
+}
+
+impl g2g_core::log::LogSource for WaylandSink {
+    fn log_category(&self) -> &'static str {
+        g2g_core::log::short_type_name::<Self>()
+    }
 }
 
 impl core::fmt::Debug for WaylandSink {
@@ -203,6 +212,7 @@ impl WaylandSink {
             frames_dropped: Arc::new(AtomicU64::new(0)),
             pacing: PacingPolicy::default(),
             pacer: PresentationPacer::new(),
+            last_present_done_ns: 0,
         }
     }
 
@@ -328,6 +338,14 @@ impl AsyncElement for WaylandSink {
     /// can shed load so the sink stops running behind.
     fn take_qos(&mut self) -> Option<QosMessage> {
         self.pacer.take_qos()
+    }
+
+    fn presentation_stats(&self) -> Option<PresentationStats> {
+        Some(PresentationStats {
+            presented: self.frames_presented(),
+            dropped: self.frames_dropped(),
+            late_dropped: self.late_dropped(),
+        })
     }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
@@ -495,10 +513,19 @@ impl AsyncElement for WaylandSink {
                     // on the elected clock, or drop it if it is already too late
                     // (the QoS bound) or outside the segment. Unpaced without a
                     // clock: present immediately (pre-sync).
+                    let t_in = monotonic_ns();
                     let presented = self.frames_presented.load(Ordering::Relaxed);
-                    if !wait_to_present(self.pacer.judge(timing.pts_ns, presented)).await {
+                    let pace = self.pacer.judge(timing.pts_ns, presented);
+                    // Positive slack the pacer asked us to sleep; 0 = already due.
+                    let wait_ns = match pace {
+                        g2g_core::Pace::Wait(n) => n,
+                        _ => 0,
+                    };
+                    if !wait_to_present(pace).await {
+                        g2g_core::g2g_log!(self, "late-drop pts={}", timing.pts_ns);
                         return Ok(());
                     }
+                    let t_ready = monotonic_ns();
 
                     // M760: offload the NV12 -> XRGB8888 convert (pure CPU pixel
                     // math, not the Wayland calls) onto tokio's blocking pool so
@@ -538,6 +565,21 @@ impl AsyncElement for WaylandSink {
                             drop(ack_rx);
                         }
                     }
+                    // Per-frame pacing trace: where this frame's wall time went
+                    // (pacer sleep, convert+queue, compositor ack) and the gap
+                    // since the previous present, the number stutter shows up in.
+                    let t_done = monotonic_ns();
+                    let gap = t_done.saturating_sub(self.last_present_done_ns);
+                    self.last_present_done_ns = t_done;
+                    g2g_core::g2g_log!(
+                        self,
+                        "pts={} wait={}us slept={}us conv+ack={}us gap={}us",
+                        timing.pts_ns,
+                        wait_ns / 1_000,
+                        t_ready.saturating_sub(t_in) / 1_000,
+                        t_done.saturating_sub(t_ready) / 1_000,
+                        gap / 1_000
+                    );
                     Ok(())
                 }
                 PipelinePacket::Segment(seg) => {

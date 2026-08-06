@@ -59,6 +59,7 @@ use crate::fetch::{
     byte_frame, get_bytes, get_range_bytes, get_text, resolve_url, MAX_MANIFEST_BYTES,
     MAX_SEGMENT_BYTES,
 };
+use crate::fmp4::{TrackHeader, TrackKind};
 use crate::hls::{parse, KeyMethod, MasterPlaylist, MediaPlaylist, MediaType, Playlist, Variant};
 use crate::sampleaesdecrypt::{SampleAesKey, SampleAesKeyHandle};
 
@@ -239,7 +240,8 @@ pub struct HlsSrc {
     /// not an A/V variant. The source advertises `Caps::Text { WebVtt }` instead of
     /// a `ByteStream` container and forwards each `.vtt` segment's text (blank-line
     /// separated so a downstream `SubParse` sees each segment's `WEBVTT` /
-    /// `X-TIMESTAMP-MAP` header as its own non-cue block). Off by default.
+    /// `X-TIMESTAMP-MAP` header as its own non-cue block). An fMP4 (`wvtt`)
+    /// rendition is de-framed to the same WebVTT text (M922). Off by default.
     text: bool,
     /// Start a live playlist from the front of the window (full DVR replay)
     /// instead of near the live edge (M438). Off by default: live playback
@@ -300,8 +302,10 @@ impl HlsSrc {
     /// `Caps::Text { WebVtt }` and forward each `.vtt` segment's text (for a
     /// `SubParse` -> overlay branch), rather than a TS / fMP4 byte stream for a
     /// demuxer. Used by the `playbin` HLS subtitle fan-out for a separate
-    /// `#EXT-X-MEDIA:TYPE=SUBTITLES` rendition. Raw `.vtt` segments only; an fMP4
-    /// `wvtt` subtitle rendition uses the normal `IsoBmff` path + `Mp4DemuxN`.
+    /// `#EXT-X-MEDIA:TYPE=SUBTITLES` rendition. Either segment carriage works: a
+    /// raw `.vtt` segment forwards its own text, an fMP4 (`wvtt`) one is de-framed
+    /// through the fMP4 reader and rendered back to WebVTT (M922), so the branch
+    /// is the same graph for both.
     pub fn with_text(mut self) -> Self {
         self.text = true;
         self
@@ -432,6 +436,96 @@ async fn fetch_key(
         .map_err(|_| G2gError::CapsMismatch)?;
     cache.push((String::from(url), key));
     Ok(key)
+}
+
+/// One WebVTT subtitle segment as the text a downstream `SubParse` reads. A raw
+/// `.vtt` segment is its own text, with a blank line appended so the next
+/// segment's `WEBVTT` / `X-TIMESTAMP-MAP` header starts a fresh (non-cue) block.
+/// An fMP4 (`wvtt`) segment is de-framed through the shared fMP4 reader and
+/// written back as WebVTT, so both carriages of a `#EXT-X-MEDIA:TYPE=SUBTITLES`
+/// rendition reach the parser as one `Caps::Text{WebVtt}` stream. `tracks` is the
+/// `#EXT-X-MAP` init segment's track list; a self-contained segment (its own
+/// `moov`) is parsed on its own.
+fn webvtt_segment(bytes: Vec<u8>, tracks: Option<&[TrackHeader]>) -> Vec<u8> {
+    if !matches!(
+        crate::typefind::sniff(&bytes),
+        Some(ByteStreamEncoding::IsoBmff)
+    ) {
+        let mut b = bytes;
+        b.extend_from_slice(b"\n\n");
+        return b;
+    }
+    let own;
+    let tracks = match tracks {
+        Some(t) => t,
+        None => match crate::fmp4::parse_all_tracks(&bytes) {
+            Ok(t) => {
+                own = t;
+                &own
+            }
+            Err(_) => return Vec::new(),
+        },
+    };
+    webvtt_from_fmp4(&bytes, tracks)
+}
+
+/// Render an fMP4 subtitle segment's cues as WebVTT text. The samples de-frame
+/// through [`parse_fragments_multi`](crate::fmp4::parse_fragments_multi) (ISO
+/// 14496-30 `vttc` / `payl`, the same path the fMP4 demuxer uses), each becoming
+/// a cue on the container's own timeline. Empty (`vtte` gap) samples are dropped,
+/// blank lines inside a payload are too (they would split the cue block), and a
+/// fragment that does not parse yields nothing rather than leaking binary into
+/// the text stream.
+fn webvtt_from_fmp4(data: &[u8], tracks: &[TrackHeader]) -> Vec<u8> {
+    let Ok(samples) = crate::fmp4::parse_fragments_multi(data, tracks, 0, None) else {
+        return Vec::new();
+    };
+    let mut out = String::from("WEBVTT\n\n");
+    for (track_id, sample) in samples {
+        let is_text = tracks
+            .iter()
+            .any(|t| t.track_id == track_id && matches!(t.kind, TrackKind::Text { .. }));
+        if !is_text {
+            continue;
+        }
+        let text = String::from_utf8_lossy(&sample.annexb);
+        let mut lines = text.lines().filter(|l| !l.trim().is_empty()).peekable();
+        if lines.peek().is_none() {
+            continue;
+        }
+        let end = sample.pts_ns.saturating_add(sample.duration_ns);
+        let _ = core::fmt::Write::write_fmt(
+            &mut out,
+            format_args!(
+                "{} --> {}\n",
+                webvtt_timestamp(sample.pts_ns),
+                webvtt_timestamp(end)
+            ),
+        );
+        for line in lines {
+            out.push_str(line);
+            out.push('\n');
+        }
+        out.push('\n');
+    }
+    out.into_bytes()
+}
+
+/// Nanoseconds as the `HH:MM:SS.mmm` WebVTT cue time the parser reads back.
+fn webvtt_timestamp(ns: u64) -> String {
+    let ms = ns / 1_000_000;
+    let mut s = String::new();
+    let _ = core::fmt::Write::write_fmt(
+        &mut s,
+        format_args!(
+            "{:02}:{:02}:{:02}.{:03}",
+            ms / 3_600_000,
+            (ms / 60_000) % 60,
+            (ms / 1000) % 60,
+            ms % 1000
+        ),
+    );
+    s
 }
 
 /// The default HLS IV when `#EXT-X-KEY` carries none: the segment media-sequence
@@ -610,6 +704,10 @@ impl SourceLoop for HlsSrc {
             // fMP4: the EXT-X-MAP init segment (ftyp+moov) is emitted once, before
             // any media fragment, so a downstream fmp4demux sees the moov first.
             let mut init_emitted = false;
+            // Text mode: the init segment is not forwarded but parsed, since an
+            // fMP4 (`wvtt`) subtitle rendition needs its `moov` to de-frame the
+            // cues out of the fragments that follow.
+            let mut init_tracks: Option<Vec<TrackHeader>> = None;
             loop {
                 // Index into `media.segments`; a flushing seek repositions it. The
                 // matching HLS media-sequence number is `media.media_sequence + idx`.
@@ -664,7 +762,9 @@ impl SourceLoop for HlsSrc {
                                 }
                                 None => get_bytes(&client, &init_url, MAX_SEGMENT_BYTES).await?,
                             };
-                            if !bytes.is_empty() {
+                            if text_mode {
+                                init_tracks = crate::fmp4::parse_all_tracks(&bytes).ok();
+                            } else if !bytes.is_empty() {
                                 pending_keys.push_back(None);
                                 window.admit(bytes, 0);
                             }
@@ -740,14 +840,12 @@ impl SourceLoop for HlsSrc {
                                     }
                                 }
                             };
+                            let bytes = if text_mode {
+                                webvtt_segment(bytes, init_tracks.as_deref())
+                            } else {
+                                bytes
+                            };
                             if !bytes.is_empty() {
-                                let bytes = if text_mode {
-                                    let mut b = bytes;
-                                    b.extend_from_slice(b"\n\n");
-                                    b
-                                } else {
-                                    bytes
-                                };
                                 pending_keys.push_back(sample_key);
                                 window.admit(bytes, duration_ns);
                             }

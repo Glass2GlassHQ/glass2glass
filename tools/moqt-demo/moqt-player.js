@@ -5,9 +5,15 @@
 // successful play is an independent decode of our bytes.
 //
 // The shape it expects is what `moqtsink` publishes: a `.catalog` object naming
-// the tracks, an init track holding `ftyp`+`moov`, and a media track whose
-// objects are `moof`+`mdat` pairs. Both go to one MSE SourceBuffer unchanged,
-// so the browser's own demuxer and H.264 decoder do the work.
+// the tracks, an init track holding `ftyp`+`moov`, and one media track per
+// track of that `moov`, whose objects are `moof`+`mdat` pairs. Everything goes
+// to one MSE SourceBuffer unchanged, so the browser's own demuxer and decoders
+// do the work.
+//
+// One buffer rather than one per track, because the broadcast has a single init
+// segment: its `moov` names every track, which is exactly what a SourceBuffer
+// opened with both codecs expects. Two SourceBuffers would each need an init
+// segment describing only their own track, and no such thing is published.
 import { FilterType, FullTrackName, GroupOrder, Location, MOQtailClient, RequestError }
   from "./node_modules/moqtail/dist/index.js";
 
@@ -22,6 +28,12 @@ const FROM_NEXT_GROUP = { filterType: FilterType.NextGroupStart };
 
 const log = (msg) => console.log(`g2g[moqt] ${msg}`);
 const bigints = (_k, v) => (typeof v === "bigint" ? String(v) : v);
+
+// Which half of the broadcast a catalog entry is. `moqtsink` writes the MP4
+// sample entry's codec into `selectionParams`, so the codec string says it.
+function isAudioTrack(track) {
+  return /^(mp4a|opus|ac-3|ec-3|flac)/i.test(track.selectionParams?.codec || "");
+}
 
 function hexToBytes(hex) {
   const out = new Uint8Array(hex.length / 2);
@@ -162,11 +174,14 @@ export async function play({ url, namespace, certHash, video, timeoutMs = 15000,
   const catalogBytes = await firstObject(client, namespace, ".catalog", timeoutMs);
   const catalog = JSON.parse(new TextDecoder().decode(catalogBytes));
   log(`catalog: ${JSON.stringify(catalog.tracks)}`);
-  const track = catalog.tracks?.[0];
-  if (!track) throw new Error("catalog names no track");
+  const tracks = catalog.tracks || [];
+  const track = tracks.find((t) => !isAudioTrack(t));
+  if (!track) throw new Error("catalog names no video track");
+  const audio = tracks.find(isAudioTrack);
   const initTrack = track.initTrack || "0.mp4";
-  const codec = track.selectionParams?.codec || "avc1.64001e";
-  const mime = `video/mp4; codecs="${codec.toLowerCase()}"`;
+  const codecs = [track.selectionParams?.codec || "avc1.64001e"];
+  if (audio) codecs.push(audio.selectionParams?.codec || "mp4a.40.2");
+  const mime = `video/mp4; codecs="${codecs.join(", ").toLowerCase()}"`;
   if (!MediaSource.isTypeSupported(mime)) throw new Error(`browser cannot play ${mime}`);
 
   const initSegment = await firstObject(client, namespace, initTrack, timeoutMs);
@@ -184,14 +199,23 @@ export async function play({ url, namespace, certHash, video, timeoutMs = 15000,
     }, { once: true });
   });
 
-  const state = { fragments: 0 };
+  const state = { fragments: 0, audioFragments: 0 };
   const queue = new AppendQueue(sourceBuffer, video);
   queue.push(initSegment);
   await subscribeTrack(client, namespace, track.name, (payload) => {
     state.fragments += 1;
     queue.push(payload);
-    if (state.fragments === 1) log("first media fragment appended");
+    if (state.fragments === 1) log("first video fragment appended");
   }, FROM_NEXT_GROUP);
+  if (audio) {
+    await subscribeTrack(client, namespace, audio.name, (payload) => {
+      state.audioFragments += 1;
+      queue.push(payload);
+      if (state.audioFragments === 1) log("first audio fragment appended");
+    }, FROM_NEXT_GROUP);
+  } else {
+    log("catalog names no audio track: video only");
+  }
 
   // Not awaited: play() stays pending until the element has data, which is
   // after the first fragments land.
@@ -209,6 +233,13 @@ export function playbackReport(video, canvas) {
     currentTime: video.currentTime,
     totalVideoFrames: q.totalVideoFrames,
     droppedVideoFrames: q.droppedVideoFrames,
+    // Chromium's decoder-side byte counters: audio bytes past zero mean the
+    // browser decoded the audio track, not just buffered it. `null` on an
+    // engine that does not expose them.
+    audioDecodedBytes:
+      typeof video.webkitAudioDecodedByteCount === "number"
+        ? video.webkitAudioDecodedByteCount
+        : null,
     bars: null,
   };
   if (canvas && video.videoWidth) {

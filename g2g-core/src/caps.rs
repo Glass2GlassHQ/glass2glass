@@ -442,6 +442,7 @@ fn text_format_gst_media_type(f: TextFormat) -> &'static str {
         TextFormat::WebVtt => "application/x-subtitle-vtt",
         TextFormat::Ssa => "application/x-ssa",
         TextFormat::Ttml => "application/ttml+xml",
+        TextFormat::Teletext => "private/teletext",
     }
 }
 
@@ -458,13 +459,15 @@ fn cc_format_gst_media_type(f: ClosedCaptionFormat) -> &'static str {
 }
 
 /// GStreamer media-type string for a [`SubPictureFormat`]. `subpicture/x-dvd` is
-/// GStreamer's own type for the DVD SPU stream `dvdsubdec` consumes, and
-/// `subpicture/x-dvb` the one its `dvbsuboverlay` takes.
+/// GStreamer's own type for the DVD SPU stream `dvdsubdec` consumes,
+/// `subpicture/x-dvb` the one its `dvbsuboverlay` takes, and `subpicture/x-pgs`
+/// the one its `matroskademux` puts on an `S_HDMV/PGS` track.
 #[cfg(feature = "alloc")]
 fn subpicture_gst_media_type(f: SubPictureFormat) -> &'static str {
     match f {
         SubPictureFormat::VobSub => "subpicture/x-dvd",
         SubPictureFormat::DvbSub => "subpicture/x-dvb",
+        SubPictureFormat::Pgs => "subpicture/x-pgs",
     }
 }
 
@@ -501,9 +504,10 @@ fn codec_gst_media_type(c: VideoCodec) -> &'static str {
         VideoCodec::Vp9 => "video/x-vp9",
         VideoCodec::Mjpeg => "image/jpeg",
         // GStreamer distinguishes MPEG versions with a `mpegversion` field on
-        // `video/mpeg`; g2g's media-type string carries no fields and no other
-        // codec uses this type, so the bare string is unambiguous internally.
-        VideoCodec::Mpeg4Part2 => "video/mpeg",
+        // `video/mpeg`; g2g's media-type string carries no fields, so MPEG-1/2
+        // video and MPEG-4 Part 2 share it here the way mp2 and AAC share
+        // `audio/mpeg` below (the codec split lives in the caps).
+        VideoCodec::Mpeg4Part2 | VideoCodec::Mpeg2 => "video/mpeg",
         // JPEG XS codestream (GStreamer's `jpegxsdec` / `jpegxsenc` caps).
         VideoCodec::JpegXs => "image/x-jxsc",
         VideoCodec::SorensonH263 => "video/x-flash-video",
@@ -550,6 +554,7 @@ fn bytestream_gst_media_type(e: ByteStreamEncoding) -> &'static str {
         ByteStreamEncoding::IsoBmff => "video/quicktime",
         ByteStreamEncoding::Mp4 => "video/quicktime",
         ByteStreamEncoding::Ivf => "video/x-ivf",
+        ByteStreamEncoding::MpegPs => "video/mpeg",
     }
 }
 
@@ -900,6 +905,14 @@ pub enum VideoCodec {
     /// `FfmpegVideoDec`. Carried in MP4 as an `mp4v` sample entry (esds
     /// objectTypeIndication `0x20`) and in MPEG-TS as stream_type `0x10`.
     Mpeg4Part2,
+    /// MPEG-1 Video (ISO/IEC 11172-2) and MPEG-2 Video (ISO/IEC 13818-2, ITU-T
+    /// H.262) as one codec: MPEG-2 is a strict superset of MPEG-1, and the one
+    /// libavcodec `MPEG2VIDEO` decoder plays both, so a VCD `.mpg` and a DVD
+    /// `.vob` negotiate the same link. The DVD / broadcast video codec, carried
+    /// in an MPEG program stream under stream_id 0xE0..=0xEF and in MPEG-TS
+    /// under stream_type 0x01 (MPEG-1) / 0x02 (MPEG-2). Decoded in software via
+    /// `FfmpegVideoDec`.
+    Mpeg2,
     /// Sorenson Spark (Sorenson H.263), the original Flash video codec, carried
     /// as FLV video codec id 2 (GStreamer `video/x-flash-video`, libavcodec
     /// `flv1`). An H.263 derivative with Flash's own picture header, so it is a
@@ -959,6 +972,11 @@ pub enum ByteStreamEncoding {
     /// 12-byte size+timestamp header before each frame. The simple raw container
     /// libvpx / libaom conformance vectors ship in (VP8 / VP9 / AV1).
     Ivf,
+    /// MPEG-1 / MPEG-2 Program Stream (ISO/IEC 13818-1): packs, each a
+    /// `00 00 01 BA` header plus the PES packets that follow it, streams
+    /// identified by PES `stream_id` rather than a PID and a PMT. The `.mpg` /
+    /// `.vob` file carrier (VCD, SVCD, DVD), demuxed by `mpegpsdemux`.
+    MpegPs,
 }
 
 /// Format of a [`Caps::Text`] stream. Generalizes "subtitles": a `Text` link
@@ -990,6 +1008,13 @@ pub enum TextFormat {
     /// Timed Text Markup Language (W3C TTML / SMPTE-TT / EBU-TT, also `DFXP`): an
     /// XML timed-text document. The broadcast / DASH caption format.
     Ttml,
+    /// EBU teletext (ETSI EN 300 706) as a DVB private PES carries it (EN 300
+    /// 472): a data_identifier byte then fixed-size data units, each one
+    /// teletext line with a framing code, a hamming 8/4 magazine / packet
+    /// address, and 40 odd-parity bytes. Not readable text yet: a teletext
+    /// decoder assembles the addressed page's rows and emits [`Self::Utf8`]
+    /// cues, the way a subtitle parser converts [`Self::Srt`].
+    Teletext,
 }
 
 /// Which closed-caption carriage a [`Caps::ClosedCaption`] track declared. The
@@ -1029,6 +1054,12 @@ pub enum SubPictureFormat {
     /// composition and ancillary page ids ride out of band, in the PMT
     /// `subtitling_descriptor` or a Matroska track's `CodecPrivate`.
     DvbSub,
+    /// Blu-ray Presentation Graphic Stream subtitles (PGS / HDMV): like DVB a
+    /// segment stream (presentation composition / window / palette / object)
+    /// rather than one packet per cue, with 8-bit run-length coded objects
+    /// placed straight on the video. Everything rides in band, the palette and
+    /// the video geometry included, so there is no out-of-band configuration.
+    Pgs,
 }
 
 /// Raw pixel layout carried in a [`Caps::RawVideo`] link. Split out of

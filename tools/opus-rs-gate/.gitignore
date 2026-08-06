@@ -1,0 +1,4 @@
+/target
+# Fetched by tools/opus-rs-gate.sh, ~75 MB.
+/vectors
+/opus_testvectors-rfc8251.tar.gz

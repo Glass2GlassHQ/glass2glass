@@ -82,6 +82,9 @@ pub(crate) fn pulse_map(channels: u8) -> Option<Map> {
 
 /// An empty property string means "let the server choose" (the default server /
 /// default device), which the libpulse API spells as `None`.
+/// Only `pulsesrc` exposes server/device properties; `pulsesink` always opens
+/// the defaults.
+#[cfg(feature = "pulse-src")]
 pub(crate) fn opt_name(s: &str) -> Option<&str> {
     (!s.is_empty()).then_some(s)
 }
@@ -162,6 +165,7 @@ mod tests {
         assert!(pulse_map(9).is_none());
     }
 
+    #[cfg(feature = "pulse-src")]
     #[test]
     fn empty_names_mean_server_default() {
         assert_eq!(opt_name(""), None);

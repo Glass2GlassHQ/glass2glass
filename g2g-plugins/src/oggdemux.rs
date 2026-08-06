@@ -60,10 +60,10 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SeekController;
 use g2g_core::{
     g2g_debug, g2g_error, AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding,
-    Caps, CapsConstraint, CapsSet, ConfigureOutcome, FrameTiming, G2gError, MemoryDomain,
-    MultiOutputElement, MultiOutputSink, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-    PropError, PropKind, PropValue, PropertySpec, Seek, Segment, Stream, StreamCollection,
-    StreamType, Tag, TagList,
+    Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, FrameTiming, G2gError,
+    MemoryDomain, MultiOutputElement, MultiOutputSink, OutputSink, PadTemplate, PadTemplates,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Seek, Segment, Stream,
+    StreamCollection, StreamType, Tag, TagList,
 };
 
 use crate::demuxseek::{Admit, DemuxSeek};
@@ -904,6 +904,14 @@ fn in_band_headers(codec: OggCodec, stream: &OggLogicalStream) -> Vec<Vec<u8>> {
 }
 
 impl AsyncElement for OggDemux {
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "Ogg demuxer",
+            "Codec/Demuxer",
+            "Demuxes an Ogg bitstream into its logical streams",
+            "g2g",
+        )
+    }
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where

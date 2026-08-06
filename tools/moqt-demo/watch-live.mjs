@@ -9,9 +9,13 @@
 // `cargo build --release -p g2g-plugins --features libcamera,moqt,ffmpeg --bin g2g-launch`.
 // Without a camera it falls back to the SMPTE test pattern and says so.
 //
+// The broadcast carries a 440 Hz AAC tone alongside the video, so the page has
+// two tracks to play; `G2G_MOQT_NO_AUDIO=1` publishes video only. The player
+// starts muted (browsers block unmuted autoplay), so unmute it to hear the tone.
+//
 // Run from tools/moqt-demo:  node watch-live.mjs
 // Env: MOQ_RS_BIN, G2G_LAUNCH, G2G_CHROME, G2G_MOQT_PATTERN=1 (force the
-// test pattern), G2G_CAMERA_SIZE=1280x720.
+// test pattern), G2G_MOQT_NO_AUDIO=1, G2G_CAMERA_SIZE=1280x720.
 import { spawn } from "node:child_process";
 import {
   CAMERA_PIPELINE, SMPTE_PIPELINE, chromeBinary, freeUdpPort, hasCamera,
@@ -73,7 +77,8 @@ async function main() {
   children.push(spawnRelay(relayBin, tls, relayPort, log));
   await sleep(1000);
 
-  const pipeline = publishPipeline(prefix, relayPort, NAMESPACE, tls.hashHex);
+  const audio = !process.env.G2G_MOQT_NO_AUDIO;
+  const pipeline = publishPipeline(prefix, relayPort, NAMESPACE, tls.hashHex, { audio });
   log("publishing:", pipeline);
   const publisher = spawnPublisher(launchBin, pipeline, (line) => {
     if (!line.includes("libx264") && !line.includes("running...")) log(line);

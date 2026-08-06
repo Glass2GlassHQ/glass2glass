@@ -434,6 +434,16 @@ impl RunStats {
                 }
             }
         }
+        // What a paced sink actually put on the display, vs what it shed: a
+        // stalling presentation shows up here even when `consumed` looks healthy.
+        for e in &self.per_element {
+            if let Some(p) = e.presentation {
+                s.push_str(&format!(
+                    "  present: {:<16} {} presented, {} dropped, {} late-dropped\n",
+                    e.name, p.presented, p.dropped, p.late_dropped
+                ));
+            }
+        }
         s
     }
 }
@@ -1955,8 +1965,9 @@ impl OutputSink for NullSink {
 /// Drives a `source → transform → sink` pipeline over two bounded links.
 ///
 /// Transform contract: `process(Eos)` may flush buffered state as
-/// `DataFrame` packets but MUST NOT emit `Eos` itself — the runner forwards
-/// the EOS sentinel downstream after `process(Eos)` returns.
+/// `DataFrame` packets; the runner forwards the EOS sentinel downstream after
+/// `process(Eos)` returns, and skips its own push when the element already
+/// forwarded one (M909), so exactly one `Eos` reaches the sink either way.
 ///
 /// `link_capacity` is the primary glass-to-glass latency knob. Under
 /// steady-state backpressure each link sits full, so the latency floor is
@@ -2155,7 +2166,12 @@ where
             match packet {
                 Some(PipelinePacket::Eos) => {
                     transform.process(PipelinePacket::Eos, &mut adapter).await?;
-                    adapter.push(PipelinePacket::Eos).await?;
+                    // M909: an element whose catch-all arm forwards the packet
+                    // has already sent the sentinel; a second push races the
+                    // sink's exit on the first one and surfaces as `Shutdown`.
+                    if !adapter.eos_forwarded() {
+                        adapter.push(PipelinePacket::Eos).await?;
+                    }
                     // β: the EOS we just forwarded will, once the sink applies
                     // its final `CapsChanged` and the coordinator forwards the
                     // matching re-cascade, close this control channel. Drain it

@@ -25,8 +25,8 @@ use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
-    ByteStreamEncoding, Caps, Dim, G2gError, MultiOutputElement, OutputSink, PropValue,
-    PropertySpec, PushOutcome, Rate, VideoCodec,
+    AudioFormat, ByteStreamEncoding, Caps, Dim, G2gError, MultiInputElement, MultiOutputElement,
+    OutputSink, PropValue, PropertySpec, PushOutcome, Rate, VideoCodec,
 };
 use g2g_plugins::conformance::persist;
 use g2g_plugins::hls::{parse, Playlist};
@@ -35,6 +35,7 @@ use g2g_plugins::mp4demuxn::{forwardable_streams, Mp4DemuxN, Mp4Port};
 use g2g_plugins::mp4mux::Mp4Mux;
 use g2g_plugins::registry::default_registry;
 use g2g_plugins::tsmux::TsMux;
+use g2g_plugins::tsmuxn::TsMux as TsMuxN;
 
 const WIDTH: u32 = 320;
 const HEIGHT: u32 = 240;
@@ -126,6 +127,14 @@ fn h264_caps() -> Caps {
     }
 }
 
+fn aac_caps() -> Caps {
+    Caps::Audio {
+        format: AudioFormat::Aac,
+        channels: 2,
+        sample_rate: 48_000,
+    }
+}
+
 fn bytestream(encoding: ByteStreamEncoding) -> Caps {
     Caps::ByteStream { encoding }
 }
@@ -143,6 +152,37 @@ async fn mux_ts(aus: &[(Vec<u8>, FrameTiming)]) -> Vec<(Vec<u8>, FrameTiming)> {
     mux.process(PipelinePacket::Eos, &mut sink)
         .await
         .expect("mux eos");
+    sink.frames
+}
+
+/// The same access units through the multi-track `tsmuxn`, with an AAC AU
+/// interleaved mid-frame on a second pad (flagged a sync sample, as every AAC AU
+/// is).
+async fn mux_ts_av(aus: &[(Vec<u8>, FrameTiming)]) -> Vec<(Vec<u8>, FrameTiming)> {
+    let adts: Vec<u8> = vec![0xFF, 0xF1, 0x4C, 0x80, 0x01, 0x00, 0xFC, 0x00];
+    let mut mux = TsMuxN::new(2);
+    mux.configure_pipeline(0, &h264_caps())
+        .expect("configure v");
+    mux.configure_pipeline(1, &aac_caps()).expect("configure a");
+    let mut sink = CaptureSink::default();
+    for (au, timing) in aus {
+        mux.process(0, frame(au.clone(), *timing), &mut sink)
+            .await
+            .expect("mux video");
+        let audio = FrameTiming {
+            pts_ns: timing.pts_ns + FRAME_25FPS_NS / 2,
+            keyframe: true,
+            ..FrameTiming::default()
+        };
+        mux.process(1, frame(adts.clone(), audio), &mut sink)
+            .await
+            .expect("mux audio");
+    }
+    for input in 0..2 {
+        mux.process(input, PipelinePacket::Eos, &mut sink)
+            .await
+            .expect("mux eos");
+    }
     sink.frames
 }
 
@@ -460,6 +500,35 @@ async fn ts_segments_cut_at_keyframes_and_concatenate_to_the_mux_output() {
     assert_eq!(
         concat_segments(&dir, &playlist),
         whole,
+        "segmenting adds and drops nothing"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// M908: an A/V multiplex from `tsmuxn` segments the same as the single-track
+/// one, because the muxer carries the video pad's sync flag onto its output.
+#[tokio::test]
+async fn av_multiplex_segments_on_the_video_keyframes() {
+    let dir = work_dir("ts-av");
+    let playlist_path = at(&dir, "av.m3u8");
+    let muxed = mux_ts_av(&synthetic_aus(2)).await;
+
+    let mut sink = HlsSink::new(at(&dir, "av%05d.ts"))
+        .with_playlist_location(&playlist_path)
+        .with_target_duration(1)
+        .with_playlist_length(0)
+        .with_max_files(0);
+    package(&mut sink, ByteStreamEncoding::MpegTs, &muxed).await;
+
+    assert_eq!(sink.segments_written(), 2, "two 1 s segments, not one blob");
+    let playlist = read_playlist(&playlist_path);
+    assert_eq!(playlist.segments.len(), 2);
+    assert_eq!(
+        concat_segments(&dir, &playlist),
+        muxed
+            .iter()
+            .flat_map(|(b, _)| b.clone())
+            .collect::<Vec<_>>(),
         "segmenting adds and drops nothing"
     );
     let _ = std::fs::remove_dir_all(&dir);

@@ -19,86 +19,53 @@
 //!   object order (see [`reassembly`](crate::moqt::reassembly) for the ordering
 //!   policy and its bounds).
 //!
+//! `catchup-groups` asks for that many groups before the live edge with a
+//! joining FETCH and emits them ahead of the live objects, so playback starts
+//! with a buffer rather than at the edge. A track the publisher offers with
+//! PUBLISH, rather than waiting to be asked, establishes the same subscription
+//! (§9.13); one for a track this run does not want is refused.
+//!
+//! The session machinery is shared with the multi-track
+//! [`MoqtSessionSrc`](crate::moqtsessionsrc::MoqtSessionSrc); see
+//! [`subscriber`](crate::moqt::subscriber).
+//!
 //! The stream ends on the publisher's PUBLISH_DONE for the media subscription,
 //! on the session closing, or on `num-buffers` / `timeout`.
 
 use core::future::Future;
 use core::pin::Pin;
-use core::time::Duration;
 
 use alloc::boxed::Box;
-use alloc::collections::VecDeque;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use g2g_core::frame::Frame;
 use g2g_core::log::LogSource;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    g2g_debug, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
-    ElementMetadata, FrameTiming, G2gError, HardwareError, MemoryDomain, OutputSink, PadTemplate,
-    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, G2gError,
+    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec,
 };
 
-use crate::moqt::catalog::{self, CatalogTrack};
-use crate::moqt::coding::{Params, TrackName, TrackNamespace};
-use crate::moqt::message::{request_error_code, ControlMessage};
-use crate::moqt::reassembly::Reassembler;
-use crate::moqt::session::{implementation_name, DataEvent, MoqtSession};
-
-/// A relay we cannot talk to, or one that violates the protocol, is the same
-/// thing to the pipeline: no stream.
-fn session_err() -> G2gError {
-    G2gError::Hardware(HardwareError::Other)
-}
-
-/// One track we asked the relay for.
-#[derive(Debug)]
-struct Subscription {
-    request_id: u64,
-    /// Set by SUBSCRIBE_OK; the alias is how data streams name this track.
-    track_alias: Option<u64>,
-    reassembler: Reassembler,
-    /// Payloads in order, waiting to be emitted.
-    ready: VecDeque<Vec<u8>>,
-    /// PUBLISH_DONE arrived, or the relay refused the subscription.
-    ended: bool,
-}
-
-impl Subscription {
-    fn new(request_id: u64, max_groups: usize, max_bytes: usize) -> Self {
-        Self {
-            request_id,
-            track_alias: None,
-            reassembler: Reassembler::new(max_groups, max_bytes),
-            ready: VecDeque::new(),
-            ended: false,
-        }
-    }
-}
+use crate::moqt::catalog::CatalogTrack;
+use crate::moqt::parse_versions;
+use crate::moqt::subscriber::{
+    byte_frame, connect, select_track, session_err, Pumped, SubscriberConfig,
+};
 
 /// Subscribes to a MoQ Transport broadcast and emits its fMP4 byte stream.
 #[derive(Debug)]
 pub struct MoqtSrc {
-    location: String,
-    cert_hashes: String,
-    namespace: String,
+    cfg: SubscriberConfig,
+    /// The media track to play; empty takes the catalog's first.
     track_name: String,
-    init_track: String,
-    catalog_track: String,
-    use_catalog: bool,
-    max_request_id: u64,
-    max_groups: u64,
-    max_buffer_bytes: u64,
-    max_object_bytes: u64,
     num_buffers: u64,
-    timeout_ms: u64,
 
     configured: bool,
     /// Media track the catalog (or the fallback) selected, for tests and logs.
     selected_track: String,
     objects_received: u64,
+    catchup_objects: u64,
     groups_dropped: u64,
     objects_dropped: u64,
 }
@@ -114,22 +81,17 @@ impl MoqtSrc {
     /// `location`.
     pub fn new(location: impl Into<String>, namespace: impl Into<String>) -> Self {
         Self {
-            location: location.into(),
-            cert_hashes: String::new(),
-            namespace: namespace.into(),
+            cfg: SubscriberConfig {
+                location: location.into(),
+                namespace: namespace.into(),
+                ..SubscriberConfig::default()
+            },
             track_name: String::new(),
-            init_track: String::from("0.mp4"),
-            catalog_track: String::from(".catalog"),
-            use_catalog: true,
-            max_request_id: 100,
-            max_groups: 8,
-            max_buffer_bytes: 32 * 1024 * 1024,
-            max_object_bytes: 16 * 1024 * 1024,
             num_buffers: 0,
-            timeout_ms: 15_000,
             configured: false,
             selected_track: String::new(),
             objects_received: 0,
+            catchup_objects: 0,
             groups_dropped: 0,
             objects_dropped: 0,
         }
@@ -138,14 +100,28 @@ impl MoqtSrc {
     /// Accept only relay certificates whose SHA-256 digest is listed (hex,
     /// comma-separated) instead of requiring a system root.
     pub fn with_server_certificate_hashes(mut self, hashes: impl Into<String>) -> Self {
-        self.cert_hashes = hashes.into();
+        self.cfg.cert_hashes = hashes.into();
         self
     }
 
     /// Subscribe to this media track by name instead of the catalog's first.
     pub fn with_track_name(mut self, name: impl Into<String>) -> Self {
         self.track_name = name.into();
+        self.cfg.wanted_tracks = Vec::from([self.track_name.clone()]);
         self
+    }
+
+    /// Ask the publisher for this many groups before the live edge with a
+    /// joining FETCH, and emit them before the live objects. Zero (the default)
+    /// starts at the live edge.
+    pub fn with_catchup_groups(mut self, groups: u64) -> Self {
+        self.cfg.catchup_groups = groups;
+        self
+    }
+
+    /// Objects a catch-up FETCH delivered on the last run.
+    pub fn catchup_objects(&self) -> u64 {
+        self.catchup_objects
     }
 
     /// Stop after `n` frames (the init segment counts as one).
@@ -183,272 +159,9 @@ impl MoqtSrc {
     }
 }
 
-/// The live half of a run: the session plus every subscription on it.
-struct Driver {
-    namespace: TrackNamespace,
-    max_groups: usize,
-    max_bytes: usize,
-    timeout_ms: u64,
-    session: MoqtSession,
-    data: tokio::sync::mpsc::UnboundedReceiver<DataEvent>,
-    subs: Vec<Subscription>,
-    /// Data events whose track alias no subscription claims yet. The control
-    /// stream and the data streams are different QUIC streams, so a subgroup
-    /// can arrive before the SUBSCRIBE_OK that names its alias.
-    orphans: VecDeque<DataEvent>,
-    orphan_bytes: usize,
-    /// The session ended (control stream closed, or the relay went away).
-    closed: bool,
-}
-
 impl LogSource for MoqtSrc {
     fn log_category(&self) -> &'static str {
         "moqtsrc"
-    }
-}
-
-impl LogSource for Driver {
-    fn log_category(&self) -> &'static str {
-        "moqtsrc"
-    }
-}
-
-/// What one [`Driver::pump`] achieved.
-#[derive(Debug, PartialEq, Eq)]
-enum Pumped {
-    Applied,
-    /// The session ended: the control stream closed or the relay went away.
-    Ended,
-    /// Nothing arrived within `timeout`.
-    TimedOut,
-}
-
-impl Driver {
-    /// Send SUBSCRIBE for `name` and return its index in `subs`.
-    async fn subscribe(&mut self, name: &str) -> Result<usize, G2gError> {
-        let id = self.session.allocate_request_id().ok_or_else(session_err)?;
-        self.session
-            .send(&ControlMessage::Subscribe {
-                id,
-                namespace: self.namespace.clone(),
-                track_name: TrackName::new(name),
-                params: Params::new(),
-            })
-            .await?;
-        g2g_debug!(self, "SUBSCRIBE {name} as request {id}");
-        self.subs
-            .push(Subscription::new(id, self.max_groups, self.max_bytes));
-        Ok(self.subs.len() - 1)
-    }
-
-    /// Wait for one event and apply it.
-    async fn pump(&mut self) -> Result<Pumped, G2gError> {
-        if self.closed {
-            return Ok(Pumped::Ended);
-        }
-        let timeout = self.timeout_ms;
-        let step = {
-            let session = &mut self.session;
-            let data = &mut self.data;
-            let next = async move {
-                tokio::select! {
-                    control = session.next_control() => Some(Step::Control(control)),
-                    event = data.recv() => event.map(Step::Data),
-                }
-            };
-            if timeout == 0 {
-                next.await
-            } else {
-                match tokio::time::timeout(Duration::from_millis(timeout), next).await {
-                    Ok(step) => step,
-                    Err(_) => return Ok(Pumped::TimedOut),
-                }
-            }
-        };
-        match step {
-            Some(Step::Control(Some(msg))) => self.handle_control(msg).await?,
-            // The control stream ended: so has the session.
-            Some(Step::Control(None)) | None => {
-                self.closed = true;
-                return Ok(Pumped::Ended);
-            }
-            Some(Step::Data(event)) => self.handle_data(event),
-        }
-        Ok(Pumped::Applied)
-    }
-
-    async fn handle_control(&mut self, msg: ControlMessage) -> Result<(), G2gError> {
-        g2g_debug!(self, "control: {}", msg.name());
-        match msg {
-            ControlMessage::SubscribeOk {
-                id, track_alias, ..
-            } => {
-                if let Some(sub) = self.subs.iter_mut().find(|s| s.request_id == id) {
-                    sub.track_alias = Some(track_alias);
-                }
-                self.claim_orphans(track_alias);
-            }
-            ControlMessage::RequestError { id, error_code, .. } => {
-                g2g_debug!(self, "request {id} refused, code {error_code}");
-                if let Some(sub) = self.subs.iter_mut().find(|s| s.request_id == id) {
-                    sub.ended = true;
-                }
-            }
-            ControlMessage::PublishDone { id, .. } => {
-                if let Some(sub) = self.subs.iter_mut().find(|s| s.request_id == id) {
-                    let tail = sub.reassembler.flush();
-                    sub.ready.extend(tail);
-                    sub.ended = true;
-                }
-            }
-            ControlMessage::MaxRequestId { request_id } => {
-                self.session.set_peer_max_request_id(request_id);
-            }
-            ControlMessage::GoAway { .. } => self.closed = true,
-            // A publisher-side request we do not serve. Draft-16 §4 asks for an
-            // explicit refusal rather than silence.
-            ControlMessage::Publish { id, .. } | ControlMessage::RequestUpdate { id, .. } => {
-                self.session
-                    .send(&ControlMessage::RequestError {
-                        id,
-                        error_code: request_error_code::NOT_SUPPORTED,
-                        retry_interval: 0,
-                        reason: String::from("not supported"),
-                    })
-                    .await?;
-            }
-            // Everything else is a response to a request we did not make, or a
-            // message only a publisher acts on: decoded, then ignored.
-            _ => {}
-        }
-        Ok(())
-    }
-
-    fn handle_data(&mut self, event: DataEvent) {
-        let alias = match &event {
-            DataEvent::StreamOpened { track_alias, .. }
-            | DataEvent::StreamClosed { track_alias, .. }
-            | DataEvent::Object { track_alias, .. } => *track_alias,
-        };
-        let Some(at) = self.subs.iter().position(|s| s.track_alias == Some(alias)) else {
-            self.hold_orphan(event);
-            return;
-        };
-        self.apply(at, event);
-    }
-
-    fn apply(&mut self, at: usize, event: DataEvent) {
-        let sub = &mut self.subs[at];
-        match event {
-            DataEvent::StreamOpened { group_id, .. } => sub.reassembler.stream_opened(group_id),
-            DataEvent::StreamClosed { group_id, .. } => sub.reassembler.stream_closed(group_id),
-            DataEvent::Object { object, .. } => sub.reassembler.push(object),
-        }
-        sub.ready.extend(sub.reassembler.drain());
-    }
-
-    /// Hold a data event for an alias no subscription has yet, bounded by the
-    /// same byte budget the reassembler uses.
-    fn hold_orphan(&mut self, event: DataEvent) {
-        if let DataEvent::Object { object, .. } = &event {
-            self.orphan_bytes = self.orphan_bytes.saturating_add(object.payload.len());
-        }
-        self.orphans.push_back(event);
-        while self.orphan_bytes > self.max_bytes {
-            match self.orphans.pop_front() {
-                Some(DataEvent::Object { object, .. }) => {
-                    self.orphan_bytes = self.orphan_bytes.saturating_sub(object.payload.len());
-                }
-                Some(_) => {}
-                None => break,
-            }
-        }
-    }
-
-    /// Replay the held events for an alias that just became known, in order.
-    fn claim_orphans(&mut self, alias: u64) {
-        let Some(at) = self.subs.iter().position(|s| s.track_alias == Some(alias)) else {
-            return;
-        };
-        let held = core::mem::take(&mut self.orphans);
-        for event in held {
-            let matches = match &event {
-                DataEvent::StreamOpened { track_alias, .. }
-                | DataEvent::StreamClosed { track_alias, .. }
-                | DataEvent::Object { track_alias, .. } => *track_alias == alias,
-            };
-            if matches {
-                if let DataEvent::Object { object, .. } = &event {
-                    self.orphan_bytes = self.orphan_bytes.saturating_sub(object.payload.len());
-                }
-                self.apply(at, event);
-            } else {
-                self.orphans.push_back(event);
-            }
-        }
-    }
-
-    /// Pump until the subscription at `at` has a payload, or until it ends, the
-    /// session ends, or nothing arrives within `timeout`.
-    async fn first_object(&mut self, at: usize) -> Result<Option<Vec<u8>>, G2gError> {
-        loop {
-            if let Some(payload) = self.subs[at].ready.pop_front() {
-                return Ok(Some(payload));
-            }
-            if self.subs[at].ended || self.pump().await? != Pumped::Applied {
-                return Ok(self.subs[at].ready.pop_front());
-            }
-        }
-    }
-
-    /// UNSUBSCRIBE every live subscription and close the session.
-    async fn shutdown(&mut self) {
-        for sub in &self.subs {
-            if sub.ended {
-                continue;
-            }
-            let _ = self
-                .session
-                .send(&ControlMessage::Unsubscribe { id: sub.request_id })
-                .await;
-        }
-        self.session.close("done").await;
-    }
-}
-
-/// Which half of the session produced the next event.
-enum Step {
-    Control(Option<ControlMessage>),
-    Data(DataEvent),
-}
-
-/// Pick the media track: the `track-name` property when set, else the catalog's
-/// first entry, else the reference default for a single-track broadcast.
-fn select_track(wanted: &str, tracks: &[CatalogTrack]) -> Option<CatalogTrack> {
-    if !wanted.is_empty() {
-        return Some(
-            tracks
-                .iter()
-                .find(|t| t.name == wanted)
-                .cloned()
-                .unwrap_or(CatalogTrack {
-                    name: wanted.to_string(),
-                    init_track: String::new(),
-                }),
-        );
-    }
-    tracks.first().cloned()
-}
-
-fn byte_frame(bytes: Vec<u8>, sequence: u64) -> Frame {
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming {
-            arrival_ns: g2g_core::metrics::monotonic_ns(),
-            ..FrameTiming::default()
-        },
-        sequence,
-        meta: Default::default(),
     }
 }
 
@@ -488,52 +201,28 @@ impl SourceLoop for MoqtSrc {
             if !self.configured {
                 return Err(G2gError::NotConfigured);
             }
-            let session = MoqtSession::connect(
-                &self.location,
-                &self.cert_hashes,
-                self.max_request_id,
-                &implementation_name(),
-            )
-            .await?;
-            let data = session.start_data_reader(self.max_object_bytes as usize);
-            let mut driver = Driver {
-                namespace: TrackNamespace::from_path(&self.namespace),
-                max_groups: self.max_groups as usize,
-                max_bytes: self.max_buffer_bytes as usize,
-                timeout_ms: self.timeout_ms,
-                session,
-                data,
-                subs: Vec::new(),
-                orphans: VecDeque::new(),
-                orphan_bytes: 0,
-                closed: false,
-            };
+            let mut driver = connect(&self.cfg).await?;
 
             // The catalog names the tracks. Without it, fall back to the
             // reference layout, which is also what `moq-sub` does.
-            let listed = if self.use_catalog {
-                let at = driver.subscribe(&self.catalog_track).await?;
-                let bytes = driver.first_object(at).await?.unwrap_or_default();
-                catalog::parse(&bytes)
-            } else {
-                Vec::new()
-            };
+            let listed = driver.read_catalog(&self.cfg).await?;
             let selected = select_track(&self.track_name, &listed).unwrap_or(CatalogTrack {
                 name: String::from("1.m4s"),
                 init_track: String::new(),
             });
             let init_track = if selected.init_track.is_empty() {
-                self.init_track.clone()
+                self.cfg.init_track.clone()
             } else {
                 selected.init_track.clone()
             };
 
-            let at = driver.subscribe(&init_track).await?;
-            let Some(init) = driver.first_object(at).await? else {
+            let Some(init) = driver.read_init(&init_track).await? else {
                 driver.shutdown().await;
                 return Err(session_err());
             };
-            let media = driver.subscribe(&selected.name).await?;
+            let media = driver
+                .subscribe_media(&selected.name, self.cfg.catchup_groups)
+                .await?;
 
             out.push(PipelinePacket::CapsChanged(Self::output_caps()))
                 .await?;
@@ -543,7 +232,7 @@ impl SourceLoop for MoqtSrc {
 
             let limit = self.num_buffers;
             loop {
-                while let Some(payload) = driver.subs[media].ready.pop_front() {
+                while let Some(payload) = driver.state().subs[media].next_payload() {
                     out.push(PipelinePacket::DataFrame(byte_frame(payload, emitted)))
                         .await?;
                     emitted += 1;
@@ -551,7 +240,7 @@ impl SourceLoop for MoqtSrc {
                         break;
                     }
                 }
-                if (limit != 0 && emitted >= limit) || driver.subs[media].ended {
+                if (limit != 0 && emitted >= limit) || driver.state().subs[media].drained() {
                     break;
                 }
                 match driver.pump().await? {
@@ -563,7 +252,8 @@ impl SourceLoop for MoqtSrc {
                 }
             }
 
-            let stats = driver.subs[media].reassembler.stats();
+            let stats = driver.state().subs[media].reassembler.stats();
+            self.catchup_objects = driver.state().subs[media].fetch_objects;
             driver.shutdown().await;
             self.selected_track = selected.name;
             self.objects_received = emitted;
@@ -591,19 +281,34 @@ impl SourceLoop for MoqtSrc {
         let string = |v: &PropValue| v.as_str().map(ToString::to_string).ok_or(PropError::Type);
         let uint = |v: &PropValue| v.as_uint().ok_or(PropError::Type);
         match name {
-            "location" => self.location = string(&value)?,
-            "namespace" => self.namespace = string(&value)?,
-            "track-name" => self.track_name = string(&value)?,
-            "init-track-name" => self.init_track = string(&value)?,
-            "catalog-track-name" => self.catalog_track = string(&value)?,
-            "server-certificate-hashes" => self.cert_hashes = string(&value)?,
-            "catalog" => self.use_catalog = value.as_bool().ok_or(PropError::Type)?,
-            "max-request-id" => self.max_request_id = uint(&value)?,
-            "max-groups" => self.max_groups = uint(&value)?,
-            "max-buffer-bytes" => self.max_buffer_bytes = uint(&value)?,
-            "max-object-size" => self.max_object_bytes = uint(&value)?,
+            "location" => self.cfg.location = string(&value)?,
+            "namespace" => self.cfg.namespace = string(&value)?,
+            "track-name" => {
+                self.track_name = string(&value)?;
+                // The named track is also the only one a publisher-initiated
+                // PUBLISH may establish here.
+                self.cfg.wanted_tracks = if self.track_name.is_empty() {
+                    Vec::new()
+                } else {
+                    Vec::from([self.track_name.clone()])
+                };
+            }
+            "init-track-name" => self.cfg.init_track = string(&value)?,
+            "catalog-track-name" => self.cfg.catalog_track = string(&value)?,
+            "server-certificate-hashes" => self.cfg.cert_hashes = string(&value)?,
+            "catalog" => self.cfg.use_catalog = value.as_bool().ok_or(PropError::Type)?,
+            "max-request-id" => self.cfg.max_request_id = uint(&value)?,
+            "versions" => {
+                let list = string(&value)?;
+                parse_versions(&list).map_err(|_| PropError::Value)?;
+                self.cfg.versions = list;
+            }
+            "max-groups" => self.cfg.max_groups = uint(&value)?,
+            "max-buffer-bytes" => self.cfg.max_buffer_bytes = uint(&value)?,
+            "max-object-size" => self.cfg.max_object_bytes = uint(&value)?,
+            "catchup-groups" => self.cfg.catchup_groups = uint(&value)?,
             "num-buffers" => self.num_buffers = uint(&value)?,
-            "timeout" => self.timeout_ms = uint(&value)?,
+            "timeout" => self.cfg.timeout_ms = uint(&value)?,
             _ => return Err(PropError::Unknown),
         }
         Ok(())
@@ -611,19 +316,21 @@ impl SourceLoop for MoqtSrc {
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
-            "location" => Some(PropValue::Str(self.location.clone())),
-            "namespace" => Some(PropValue::Str(self.namespace.clone())),
+            "location" => Some(PropValue::Str(self.cfg.location.clone())),
+            "namespace" => Some(PropValue::Str(self.cfg.namespace.clone())),
             "track-name" => Some(PropValue::Str(self.track_name.clone())),
-            "init-track-name" => Some(PropValue::Str(self.init_track.clone())),
-            "catalog-track-name" => Some(PropValue::Str(self.catalog_track.clone())),
-            "server-certificate-hashes" => Some(PropValue::Str(self.cert_hashes.clone())),
-            "catalog" => Some(PropValue::Bool(self.use_catalog)),
-            "max-request-id" => Some(PropValue::Uint(self.max_request_id)),
-            "max-groups" => Some(PropValue::Uint(self.max_groups)),
-            "max-buffer-bytes" => Some(PropValue::Uint(self.max_buffer_bytes)),
-            "max-object-size" => Some(PropValue::Uint(self.max_object_bytes)),
+            "init-track-name" => Some(PropValue::Str(self.cfg.init_track.clone())),
+            "catalog-track-name" => Some(PropValue::Str(self.cfg.catalog_track.clone())),
+            "server-certificate-hashes" => Some(PropValue::Str(self.cfg.cert_hashes.clone())),
+            "catalog" => Some(PropValue::Bool(self.cfg.use_catalog)),
+            "max-request-id" => Some(PropValue::Uint(self.cfg.max_request_id)),
+            "versions" => Some(PropValue::Str(self.cfg.versions.clone())),
+            "max-groups" => Some(PropValue::Uint(self.cfg.max_groups)),
+            "max-buffer-bytes" => Some(PropValue::Uint(self.cfg.max_buffer_bytes)),
+            "max-object-size" => Some(PropValue::Uint(self.cfg.max_object_bytes)),
+            "catchup-groups" => Some(PropValue::Uint(self.cfg.catchup_groups)),
             "num-buffers" => Some(PropValue::Uint(self.num_buffers)),
-            "timeout" => Some(PropValue::Uint(self.timeout_ms)),
+            "timeout" => Some(PropValue::Uint(self.cfg.timeout_ms)),
             _ => None,
         }
     }
@@ -668,9 +375,15 @@ static MOQTSRC_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "max-request-id",
         PropKind::Uint,
-        "MAX_REQUEST_ID advertised to the relay in CLIENT_SETUP",
+        "MAX_REQUEST_ID advertised to the relay in CLIENT_SETUP (draft-16 sessions only)",
     )
     .with_default("100"),
+    PropertySpec::new(
+        "versions",
+        PropKind::Str,
+        "MoQ Transport draft versions offered on CONNECT, comma-separated in preference order; the server's pick decides",
+    )
+    .with_default("18,16"),
     PropertySpec::new(
         "max-groups",
         PropKind::Uint,
@@ -689,6 +402,12 @@ static MOQTSRC_PROPS: &[PropertySpec] = &[
         "largest single object accepted from the relay, in bytes",
     )
     .with_default("16777216"),
+    PropertySpec::new(
+        "catchup-groups",
+        PropKind::Uint,
+        "groups before the live edge to FETCH on join and emit before the live objects (0 = start live)",
+    )
+    .with_default("0"),
     PropertySpec::new(
         "num-buffers",
         PropKind::Uint,

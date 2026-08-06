@@ -733,7 +733,7 @@
             <div class="feature-card">
                 <span class="f-icon">&#128226;</span>
                 <h3>Egress</h3>
-                <p class="f-lead">Sans-IO RTP with 90 kHz PTS and receive-side NACK; WHIP publish over <code>str0m</code> (ICE / DTLS / SRTP, pure-Rust crypto); IETF MoQ Transport draft-16 publish and subscribe over WebTransport, implemented in-tree, on reliable subgroup streams or unreliable datagram objects, and played back in a browser by a third-party draft-16 client.</p>
+                <p class="f-lead">Sans-IO RTP with 90 kHz PTS and receive-side NACK; WHIP publish over <code>str0m</code> (ICE / DTLS / SRTP, pure-Rust crypto); IETF MoQ Transport draft-16 and draft-18 publish and subscribe over WebTransport, implemented in-tree and negotiated per session, on reliable subgroup streams or unreliable datagram objects, and played back in a browser by a third-party draft-16 client.</p>
                 <div class="chip-group">
                     <span class="chip-label">RTP / UDP</span>
                     <div class="chip-row"><span class="chip">RtpH264Packetizer</span><span class="chip">UdpSink</span></div>
@@ -774,7 +774,7 @@
                 <p class="f-lead">Pure-Rust demux + mux on the typed <code>Caps::ByteStream</code> link, with <code>typefind</code> sniffing. KLV telemetry (STANAG 4609 / MISB ST 0601) and per-program SDT service text + ISO-639 language tags ride the TS both ways.</p>
                 <div class="chip-group">
                     <span class="chip-label">Demux</span>
-                    <div class="chip-row"><span class="chip">mp4src</span><span class="chip">fmp4demux</span><span class="chip">tsdemux</span><span class="chip">matroskademux</span><span class="chip">flvdemux</span><span class="chip">oggdemux</span><span class="chip">klvdecode</span></div>
+                    <div class="chip-row"><span class="chip">mp4src</span><span class="chip">fmp4demux</span><span class="chip">tsdemux</span><span class="chip">matroskademux</span><span class="chip">flvdemux</span><span class="chip">oggdemux</span><span class="chip">mpegpsdemux</span><span class="chip">klvdecode</span></div>
                 </div>
                 <div class="chip-group">
                     <span class="chip-label">Mux</span>

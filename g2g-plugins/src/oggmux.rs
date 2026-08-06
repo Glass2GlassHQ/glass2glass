@@ -53,8 +53,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
-    FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-    PropError, PropKind, PropValue, PropertySpec, Segment,
+    ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Segment,
 };
 
 use crate::ogg::{OggPageWriter, VorbisTiming};
@@ -576,6 +576,14 @@ fn comment_block(native: &[u8]) -> Option<Vec<u8>> {
 }
 
 impl AsyncElement for OggMux {
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "Ogg muxer",
+            "Codec/Muxer",
+            "Muxes one elementary stream into an Ogg bitstream",
+            "g2g",
+        )
+    }
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where

@@ -205,12 +205,90 @@ mod on {
         pub object_id: u64,
     }
 
-    /// A node in the [`AnalyticsMeta`] relation graph.
+    /// A per-pixel coverage mask: `width` x `height` 8-bit samples with `stride`
+    /// bytes per row (0 = not covered, 255 = fully covered). Its own grid, not
+    /// the frame's, so it stays valid when the frame is scaled.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Mask {
+        width: u32,
+        height: u32,
+        stride: u32,
+        data: Vec<u8>,
+    }
+
+    impl Mask {
+        /// Build a mask over `data`, or `None` if the geometry does not fit it.
+        /// Dimensions reach this from a model output or a wire peer, so they are
+        /// checked here once and the accessors can then index without guessing.
+        pub fn new(width: u32, height: u32, stride: u32, data: Vec<u8>) -> Option<Self> {
+            if stride < width {
+                return None;
+            }
+            let needed = (stride as u64).checked_mul(height as u64)?;
+            if needed > data.len() as u64 {
+                return None;
+            }
+            Some(Mask {
+                width,
+                height,
+                stride,
+                data,
+            })
+        }
+
+        pub fn width(&self) -> u32 {
+            self.width
+        }
+        pub fn height(&self) -> u32 {
+            self.height
+        }
+        pub fn stride(&self) -> u32 {
+            self.stride
+        }
+        pub fn data(&self) -> &[u8] {
+            &self.data
+        }
+
+        /// Coverage at `(x, y)`, `None` outside the mask.
+        pub fn sample(&self, x: u32, y: u32) -> Option<u8> {
+            if x >= self.width || y >= self.height {
+                return None;
+            }
+            let idx = y as usize * self.stride as usize + x as usize;
+            self.data.get(idx).copied()
+        }
+    }
+
+    /// An instance segmentation: the object's normalized box, its class, and the
+    /// coverage mask over that box (the mask grid is the model's own resolution,
+    /// not the frame's).
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct Segmentation {
+        pub bbox: BBox,
+        pub label: u32,
+        pub confidence: f32,
+        pub mask: Mask,
+    }
+
+    /// A region of interest: a normalized rectangle an encoder, a tracker, or a
+    /// downstream analytic should treat specially (the
+    /// `GstVideoRegionOfInterestMeta` analog). `id` names this region across
+    /// frames; `label` is its class index, as on a detection.
     #[derive(Debug, Clone, Copy, PartialEq)]
+    pub struct Roi {
+        pub bbox: BBox,
+        pub id: u32,
+        pub label: u32,
+    }
+
+    /// A node in the [`AnalyticsMeta`] relation graph.
+    #[derive(Debug, Clone, PartialEq)]
     pub enum AnalyticsNode {
         Detection(ObjectDetection),
         Classification(Classification),
         Tracking(Tracking),
+        Segmentation(Segmentation),
+        Roi(Roi),
     }
 
     /// The kind of a directed edge between two analytics nodes.
@@ -267,6 +345,22 @@ mod on {
         pub fn detections(&self) -> impl Iterator<Item = &ObjectDetection> {
             self.nodes.iter().filter_map(|n| match n {
                 AnalyticsNode::Detection(d) => Some(d),
+                _ => None,
+            })
+        }
+
+        /// Iterate the instance-segmentation nodes.
+        pub fn segmentations(&self) -> impl Iterator<Item = &Segmentation> {
+            self.nodes.iter().filter_map(|n| match n {
+                AnalyticsNode::Segmentation(s) => Some(s),
+                _ => None,
+            })
+        }
+
+        /// Iterate the region-of-interest nodes.
+        pub fn rois(&self) -> impl Iterator<Item = &Roi> {
+            self.nodes.iter().filter_map(|n| match n {
+                AnalyticsNode::Roi(r) => Some(r),
                 _ => None,
             })
         }
@@ -334,6 +428,75 @@ mod on {
         pub fn len(&self) -> usize {
             self.blobs.len()
         }
+
+        /// The first blob tagged `header`, if any.
+        pub fn get(&self, header: &str) -> Option<&Blob> {
+            self.blobs.iter().find(|b| b.header == header)
+        }
+    }
+
+    /// A [`Blob`] payload decoded by the [`BLOB_DECODERS`] registry.
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum DecodedBlob {
+        /// A little-endian `f32` vector (an ML embedding / feature vector).
+        Embedding(Vec<f32>),
+        /// UTF-8 text.
+        Text(String),
+    }
+
+    /// Turns one known header's payload into a [`DecodedBlob`], or `None` when
+    /// the bytes do not match the shape that header promises.
+    pub type BlobDecoder = fn(&[u8]) -> Option<DecodedBlob>;
+
+    fn decode_embedding(payload: &[u8]) -> Option<DecodedBlob> {
+        if payload.is_empty() || payload.len() % 4 != 0 {
+            return None;
+        }
+        Some(DecodedBlob::Embedding(
+            payload
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect(),
+        ))
+    }
+
+    fn decode_text(payload: &[u8]) -> Option<DecodedBlob> {
+        core::str::from_utf8(payload)
+            .ok()
+            .map(|s| DecodedBlob::Text(String::from(s)))
+    }
+
+    /// The blob headers this workspace knows how to decode, and their decoders.
+    ///
+    /// [`BlobMeta`] is deliberately opaque: a producer and its own consumer agree
+    /// on a header and nobody else has to care. This table is the escape hatch
+    /// for the headers that *are* a shared vocabulary, so a generic consumer (an
+    /// inspector, a bridge, a recorder) can render them without knowing which
+    /// element produced them. These three come from the Python element host,
+    /// where a `gst-python-ml` element tags its results with them.
+    ///
+    /// A plain `const` table, not a registry a plugin mutates: the decoders are
+    /// pure functions, and a global mutable map would need a lock the `no_std`
+    /// baseline does not have.
+    pub const BLOB_DECODERS: &[(&str, BlobDecoder)] = &[
+        ("embedding", decode_embedding as BlobDecoder),
+        ("model_name", decode_text as BlobDecoder),
+        ("device", decode_text as BlobDecoder),
+    ];
+
+    /// The decoder registered for `header`, if it is a known one.
+    pub fn blob_decoder(header: &str) -> Option<BlobDecoder> {
+        BLOB_DECODERS
+            .iter()
+            .find(|(h, _)| *h == header)
+            .map(|(_, d)| *d)
+    }
+
+    /// Decode `blob` if its header is known and its payload matches the shape
+    /// that header promises. `None` for an unknown header (the normal case for
+    /// an application's private side-data) and for a malformed payload.
+    pub fn decode_blob(blob: &Blob) -> Option<DecodedBlob> {
+        blob_decoder(&blob.header).and_then(|d| d(&blob.payload))
     }
 
     impl FrameMeta for BlobMeta {
@@ -349,6 +512,173 @@ mod on {
         // Opaque serialized results are not pixel-coordinate bound, so they
         // survive every transform (including a re-encode); the default `Keep`
         // is correct, stated here for intent.
+        fn propagate(&self, _transform: Transform) -> Propagation {
+            Propagation::Keep
+        }
+    }
+
+    /// One closed-caption byte triple: a two-bit `cc_type` and the two caption
+    /// data bytes, the ATSC A/53 `cc_data` element. `cc_type` 0/1 are the two
+    /// CEA-608 line-21 fields, 2/3 CEA-708 DTVCC packet bytes.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct CaptionTriple {
+        pub cc_type: u8,
+        pub b0: u8,
+        pub b1: u8,
+    }
+
+    /// The closed-caption bytes the coded picture this frame came from carried
+    /// (its A/53 `GA94` caption SEI, or a container caption track). Lets a
+    /// decode -> re-encode chain re-author captions the decoder would otherwise
+    /// have dropped with the bitstream.
+    ///
+    /// Only the triples are stored: the rest of the A/53 `cc_data` header is
+    /// either constant (`process_cc_data_flag`, `em_data`) or derived
+    /// (`cc_count` = the triple count), so a rebuilt SEI is byte-identical.
+    #[derive(Debug, Default, Clone, PartialEq, Eq)]
+    pub struct CaptionMeta {
+        pub triples: Vec<CaptionTriple>,
+    }
+
+    impl CaptionMeta {
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        /// Append one caption triple, in transmission order.
+        pub fn push(&mut self, triple: CaptionTriple) {
+            self.triples.push(triple);
+        }
+
+        /// Iterate the carried triples in transmission order.
+        pub fn iter(&self) -> impl Iterator<Item = &CaptionTriple> {
+            self.triples.iter()
+        }
+
+        pub fn is_empty(&self) -> bool {
+            self.triples.is_empty()
+        }
+
+        pub fn len(&self) -> usize {
+            self.triples.len()
+        }
+    }
+
+    impl FrameMeta for CaptionMeta {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+        fn clone_box(&self) -> Box<dyn FrameMeta> {
+            Box::new(self.clone())
+        }
+        /// Captions are text on a timeline, not pixel geometry, so they survive
+        /// a scale / crop / copy *and* a re-encode: the whole point is that a
+        /// caption inserter downstream of an encoder can re-author them into the
+        /// new bitstream.
+        fn propagate(&self, _transform: Transform) -> Propagation {
+            Propagation::Keep
+        }
+    }
+
+    /// A CIE 1931 xy chromaticity.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub struct Chromaticity {
+        pub x: f32,
+        pub y: f32,
+    }
+
+    /// The SMPTE ST 2086 mastering display colour volume: the primaries and white
+    /// point of the display the content was graded on, and its luminance range in
+    /// cd/m^2.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub struct MasteringDisplay {
+        /// Display primaries in **R, G, B** order (the SEI codes them G, B, R).
+        pub display_primaries: [Chromaticity; 3],
+        pub white_point: Chromaticity,
+        pub max_luminance: f32,
+        pub min_luminance: f32,
+    }
+
+    /// HDR10 static metadata as carried by the H.264 / H.265
+    /// `mastering_display_colour_volume` and `content_light_level_info` SEI
+    /// messages: how the content was graded, which a display sink hands to the
+    /// driver so the panel maps the highlights the way the colourist saw them.
+    ///
+    /// Each half is independent: a stream may carry either, both, or (then no meta
+    /// is attached at all) neither. The colour primaries / transfer function /
+    /// matrix themselves are *not* here: those are CICP codepoints in the SPS VUI
+    /// that the decode path already resolves for itself.
+    #[derive(Debug, Default, Clone, Copy, PartialEq)]
+    pub struct HdrStaticMeta {
+        pub mastering: Option<MasteringDisplay>,
+        /// MaxCLL: the brightest single pixel in the stream, cd/m^2.
+        pub max_content_light_level: Option<u16>,
+        /// MaxFALL: the brightest frame average in the stream, cd/m^2.
+        pub max_frame_average_light_level: Option<u16>,
+    }
+
+    impl HdrStaticMeta {
+        /// Whether anything was actually recovered (an all-empty meta is not
+        /// worth attaching).
+        pub fn is_empty(&self) -> bool {
+            self.mastering.is_none()
+                && self.max_content_light_level.is_none()
+                && self.max_frame_average_light_level.is_none()
+        }
+    }
+
+    impl FrameMeta for HdrStaticMeta {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+        fn clone_box(&self) -> Box<dyn FrameMeta> {
+            Box::new(*self)
+        }
+        /// A grading description of the content, not of the sample grid: it
+        /// survives every transform, including a re-encode (the new bitstream
+        /// describes the same graded picture).
+        fn propagate(&self, _transform: Transform) -> Propagation {
+            Propagation::Keep
+        }
+    }
+
+    /// The SMPTE ST 12M timecode a coded picture carries (H.264 `pic_timing` /
+    /// H.265 `time_code` SEI, or a container timecode track): where this frame
+    /// sits on the source's own clock, which is what an edit list, a broadcast
+    /// log, or a burnt-in overlay refers to.
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+    pub struct TimecodeMeta {
+        pub hours: u8,
+        pub minutes: u8,
+        pub seconds: u8,
+        pub frames: u8,
+        /// NTSC drop-frame counting (the 29.97 / 59.94 fps count that skips two
+        /// frame numbers a minute). Rendered with a `;` before the frame count.
+        pub drop_frame: bool,
+        /// Frames per second the count runs at, Q16 fixed point like
+        /// [`Rate::Fixed`](crate::Rate::Fixed). `None` when the source declared
+        /// none, so a consumer cannot convert the count to a duration.
+        pub framerate_q16: Option<u32>,
+    }
+
+    impl FrameMeta for TimecodeMeta {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+        fn clone_box(&self) -> Box<dyn FrameMeta> {
+            Box::new(*self)
+        }
+        /// A position on the source's clock: unchanged by any pixel work, and it
+        /// is exactly what a re-encode should carry into the new bitstream.
         fn propagate(&self, _transform: Transform) -> Propagation {
             Propagation::Keep
         }
@@ -448,6 +778,47 @@ mod tests {
             1,
             "original untouched after copy-on-write"
         );
+    }
+
+    #[test]
+    fn known_blob_headers_decode_to_typed_values() {
+        let mut m = BlobMeta::new();
+        m.push("embedding", alloc::vec![0, 0, 0x80, 0x3F, 0, 0, 0, 0x40]); // 1.0, 2.0
+        m.push("device", alloc::vec![b'c', b'u', b'd', b'a', b':', b'0']);
+        m.push("private/thing", alloc::vec![0xDE, 0xAD]);
+
+        assert_eq!(
+            decode_blob(m.get("embedding").unwrap()),
+            Some(DecodedBlob::Embedding(alloc::vec![1.0, 2.0]))
+        );
+        assert_eq!(
+            decode_blob(m.get("device").unwrap()),
+            Some(DecodedBlob::Text(alloc::string::String::from("cuda:0")))
+        );
+        // An unregistered header stays opaque, which is the point of BlobMeta.
+        assert!(blob_decoder("private/thing").is_none());
+        assert_eq!(decode_blob(m.get("private/thing").unwrap()), None);
+    }
+
+    #[test]
+    fn a_payload_that_does_not_match_its_header_does_not_decode() {
+        // A registered header is a promise about the bytes, not a guarantee: a
+        // producer that breaks it must fail the decode, not yield garbage.
+        let ragged = Blob {
+            header: alloc::string::String::from("embedding"),
+            payload: alloc::vec![1, 2, 3],
+        };
+        assert_eq!(decode_blob(&ragged), None, "not a whole number of f32s");
+        let empty = Blob {
+            header: alloc::string::String::from("embedding"),
+            payload: alloc::vec::Vec::new(),
+        };
+        assert_eq!(decode_blob(&empty), None, "an empty vector is not a vector");
+        let not_utf8 = Blob {
+            header: alloc::string::String::from("model_name"),
+            payload: alloc::vec![0xFF, 0xFE],
+        };
+        assert_eq!(decode_blob(&not_utf8), None);
     }
 
     #[test]

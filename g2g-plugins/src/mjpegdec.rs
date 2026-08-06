@@ -412,6 +412,9 @@ impl AsyncElement for MjpegDec {
                     out.push(PipelinePacket::DataFrame(decoded)).await?;
                 }
                 PipelinePacket::CapsChanged(_) => {}
+                // the runner forwards Eos after process(Eos) returns; re-emitting
+                // it here races the sink's exit on the first one.
+                PipelinePacket::Eos => {}
                 other => {
                     out.push(other).await?;
                 }

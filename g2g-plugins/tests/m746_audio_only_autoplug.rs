@@ -150,7 +150,7 @@ fn audio_only_ts_bare_decodebin_plugs_audio_decoder() {
         "an audio decoder was plugged for the audio-only stream: {names:?}"
     );
     assert!(
-        !names.iter().any(|n| n == "FfmpegH264Dec"),
+        !names.iter().any(|n| n == "FfmpegVideoDec"),
         "no video decoder was plugged (the audio stream was selected): {names:?}"
     );
 }
@@ -172,7 +172,7 @@ fn av_ts_bare_decodebin_still_plugs_video_decoder() {
     std::fs::remove_file(&path).ok();
 
     assert!(
-        names.iter().any(|n| n == "FfmpegH264Dec"),
+        names.iter().any(|n| n == "FfmpegVideoDec"),
         "a video decoder is still plugged for the A/V container: {names:?}"
     );
     assert!(

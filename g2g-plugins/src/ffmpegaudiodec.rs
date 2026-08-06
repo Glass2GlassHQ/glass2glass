@@ -440,66 +440,20 @@ fn adts_frames(buf: &[u8]) -> Vec<&[u8]> {
     frames
 }
 
-/// Bitrates (kbit/s) indexed by the header's 4-bit field, per version and layer:
-/// MPEG-1 Layer II, MPEG-1 Layer III, and MPEG-2 / 2.5 Layer III (whose low-rate
-/// extension has its own table). Index 0 ("free format") and 15 are invalid here
-/// and fail the parse.
-const MP2_BITRATES_KBPS: [u32; 16] = [
-    0, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 0,
-];
-const MP3_V1_BITRATES_KBPS: [u32; 16] = [
-    0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0,
-];
-const MP3_V2_BITRATES_KBPS: [u32; 16] = [
-    0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0,
-];
-/// Sample rates for MPEG-1 (index 3 is reserved). MPEG-2 halves these, MPEG-2.5
-/// quarters them.
-const MPA_RATES_HZ: [u32; 4] = [44_100, 48_000, 32_000, 0];
-
 /// Split a buffer of back-to-back MPEG audio (Layer II `mp2` or Layer III `mp3`)
-/// frames into individual frames, the MPEG-audio sibling of [`adts_frames`]. Each
-/// frame's 4-byte header carries an 11-bit sync (`0xFFE`), version, layer,
-/// bitrate and sample-rate indices, and a padding bit; the frame length is
-/// `samples_per_frame / 8 * bitrate / rate + padding`, where a frame is 1152
-/// samples except MPEG-2 / 2.5 Layer III's 576. Walking stops at the first
-/// invalid header or a length overrunning the buffer, so a truncated tail is
-/// dropped rather than mis-fed.
+/// frames into individual frames, the MPEG-audio sibling of [`adts_frames`]. The
+/// per-frame length comes from [`crate::audioframe::mpa_frame_len`], shared with
+/// the MPEG program stream demuxer's frame realignment so the two cannot drift.
+/// Walking stops at the first invalid header or a length overrunning the buffer,
+/// so a truncated tail is dropped rather than mis-fed.
 fn mpa_frames(buf: &[u8]) -> Vec<&[u8]> {
     let mut frames = Vec::new();
     let mut pos = 0;
-    while pos + 4 <= buf.len() {
-        let h = &buf[pos..pos + 4];
-        // Sync: 11 set bits. Version: bits 4..3 of byte1 (3 = MPEG-1, 2 = MPEG-2,
-        // 0 = MPEG-2.5, 1 reserved). Layer: bits 2..1 (2 = Layer II, 1 = III).
-        if h[0] != 0xFF || (h[1] & 0xE0) != 0xE0 {
+    while pos < buf.len() {
+        let Some(len) = crate::audioframe::mpa_frame_len(&buf[pos..]) else {
             break;
-        }
-        let version = (h[1] >> 3) & 0x03;
-        let layer = (h[1] >> 1) & 0x03;
-        let bitrate_index = ((h[2] >> 4) & 0x0F) as usize;
-        let (bitrates, bytes_per_frame_num) = match (version, layer) {
-            (1, _) => break,                        // reserved version
-            (3, 2) => (&MP2_BITRATES_KBPS, 144),    // MPEG-1 Layer II
-            (_, 2) => (&MP2_BITRATES_KBPS, 144),    // MPEG-2 / 2.5 Layer II
-            (3, 1) => (&MP3_V1_BITRATES_KBPS, 144), // MPEG-1 Layer III
-            (_, 1) => (&MP3_V2_BITRATES_KBPS, 72),  // MPEG-2 / 2.5 Layer III
-            _ => break,                             // Layer I or reserved
         };
-        let bitrate = bitrates[bitrate_index].saturating_mul(1_000);
-        let mut rate = MPA_RATES_HZ[((h[2] >> 2) & 0x03) as usize];
-        // The low-sample-rate extensions: MPEG-2 halves, MPEG-2.5 quarters.
-        rate >>= match version {
-            3 => 0,
-            2 => 1,
-            _ => 2,
-        };
-        if bitrate == 0 || rate == 0 {
-            break; // free-format / reserved: cannot compute a frame length
-        }
-        let padding = ((h[2] >> 1) & 1) as usize;
-        let len = (bytes_per_frame_num * bitrate / rate) as usize + padding;
-        if len < 4 || pos + len > buf.len() {
+        if pos + len > buf.len() {
             break;
         }
         frames.push(&buf[pos..pos + len]);
@@ -508,71 +462,20 @@ fn mpa_frames(buf: &[u8]) -> Vec<&[u8]> {
     frames
 }
 
-/// AC-3 syncframe size in 16-bit words, indexed `[frmsizecod][fscod]`, where
-/// `fscod` selects 48 / 44.1 / 32 kHz (ATSC A/52 Table 5.18). The 44.1 kHz column
-/// carries the +1-word padding some rates need. `frmsizecod` above 37 is invalid.
-const AC3_FRAME_SIZE_WORDS: [[u16; 3]; 38] = [
-    [64, 69, 96],
-    [64, 70, 96],
-    [80, 87, 120],
-    [80, 88, 120],
-    [96, 104, 144],
-    [96, 105, 144],
-    [112, 121, 168],
-    [112, 122, 168],
-    [128, 139, 192],
-    [128, 140, 192],
-    [160, 174, 240],
-    [160, 175, 240],
-    [192, 208, 288],
-    [192, 209, 288],
-    [224, 243, 336],
-    [224, 244, 336],
-    [256, 278, 384],
-    [256, 279, 384],
-    [320, 348, 480],
-    [320, 349, 480],
-    [384, 417, 576],
-    [384, 418, 576],
-    [448, 487, 672],
-    [448, 488, 672],
-    [512, 557, 768],
-    [512, 558, 768],
-    [640, 696, 960],
-    [640, 697, 960],
-    [768, 835, 1152],
-    [768, 836, 1152],
-    [896, 975, 1344],
-    [896, 976, 1344],
-    [1024, 1114, 1536],
-    [1024, 1115, 1536],
-    [1152, 1253, 1728],
-    [1152, 1254, 1728],
-    [1280, 1393, 1920],
-    [1280, 1394, 1920],
-];
-
 /// Split a buffer of back-to-back AC-3 syncframes into individual frames, the AC-3
-/// sibling of [`adts_frames`]. Each frame starts with the `0x0B77` syncword; byte 4
-/// holds `fscod` (top 2 bits) and `frmsizecod` (low 6 bits), whose pair gives the
-/// frame length in 16-bit words via [`AC3_FRAME_SIZE_WORDS`] (bytes = words * 2).
-/// Walking stops at the first bad sync, a reserved `fscod` (3) / `frmsizecod`
-/// (>= 38), or a length overrunning the buffer, so a truncated tail is dropped
-/// rather than mis-fed.
+/// sibling of [`adts_frames`]. The per-frame length comes from
+/// [`crate::audioframe::ac3_frame_len`], shared with the MPEG program stream
+/// demuxer's frame realignment so the two cannot drift. Walking stops at the
+/// first header that is not a usable syncframe or a length overrunning the
+/// buffer, so a truncated tail is dropped rather than mis-fed.
 fn ac3_frames(buf: &[u8]) -> Vec<&[u8]> {
     let mut frames = Vec::new();
     let mut pos = 0;
-    while pos + 5 <= buf.len() {
-        if buf[pos] != 0x0B || buf[pos + 1] != 0x77 {
+    while pos < buf.len() {
+        let Some(len) = crate::audioframe::ac3_frame_len(&buf[pos..]) else {
             break;
-        }
-        let fscod = (buf[pos + 4] >> 6) as usize;
-        let frmsizecod = (buf[pos + 4] & 0x3F) as usize;
-        if fscod >= 3 || frmsizecod >= AC3_FRAME_SIZE_WORDS.len() {
-            break; // reserved sample rate or frame-size code
-        }
-        let len = (AC3_FRAME_SIZE_WORDS[frmsizecod][fscod] as usize).saturating_mul(2);
-        if len < 5 || pos + len > buf.len() {
+        };
+        if pos + len > buf.len() {
             break;
         }
         frames.push(&buf[pos..pos + len]);
@@ -774,12 +677,16 @@ mod tests {
 
     /// A minimal AC-3 frame: `0x0B77` sync, `fscod`/`frmsizecod` in byte 4, padded
     /// to its computed length. `frmsizecod` 20 at 48 kHz = 384 words = 768 bytes.
+    /// The length comes from the shared header parser rather than a second copy
+    /// of its size table.
     fn ac3(fscod: u8, frmsizecod: u8) -> Vec<u8> {
-        let words = super::AC3_FRAME_SIZE_WORDS[frmsizecod as usize][fscod as usize] as usize;
-        let mut f = vec![0u8; words * 2];
-        f[0] = 0x0B;
-        f[1] = 0x77;
-        f[4] = (fscod << 6) | (frmsizecod & 0x3F);
+        let mut head = [0u8; crate::audioframe::AC3_HEADER_LEN];
+        head[0] = 0x0B;
+        head[1] = 0x77;
+        head[4] = (fscod << 6) | (frmsizecod & 0x3F);
+        let len = crate::audioframe::ac3_frame_len(&head).expect("a valid header has a length");
+        let mut f = vec![0u8; len];
+        f[..head.len()].copy_from_slice(&head);
         f
     }
 

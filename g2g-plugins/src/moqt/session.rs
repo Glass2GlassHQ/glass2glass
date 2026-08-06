@@ -33,8 +33,10 @@ use crate::remotewtio::{dial, wt_err};
 use super::coding::{setup_param, MoqtError, Params};
 use super::data::SubgroupHeader;
 use super::datagram::DatagramObject;
+use super::fetch::{FetchItem, FetchStreamDecoder, FetchWriter, FETCH_HEADER_TYPE};
 use super::message::ControlMessage;
 use super::reassembly::{ReceivedObject, StreamItem, SubgroupStreamDecoder, DATA_READ_CHUNK};
+use super::{read_stream_type, MoqtVersion};
 
 /// The WebTransport subprotocol that names draft-16
 /// (`moq-transport/src/setup/mod.rs`).
@@ -72,6 +74,17 @@ pub enum DataEvent {
         track_alias: u64,
         group_id: u64,
     },
+    /// One object off a FETCH response stream. A fetch response is ordered on
+    /// the wire and names its request rather than a track, so it needs neither
+    /// reassembly nor a track alias.
+    FetchObject {
+        request_id: u64,
+        object: ReceivedObject,
+    },
+    /// The FETCH response stream ended, cleanly or by a reset.
+    FetchClosed {
+        request_id: u64,
+    },
 }
 
 /// A connected MoQ Transport session: the SETUP exchange has completed and the
@@ -80,7 +93,9 @@ pub enum DataEvent {
 pub struct MoqtSession {
     session: Session,
     control_tx: SendStream,
-    inbound: mpsc::UnboundedReceiver<ControlMessage>,
+    /// `None` once a caller took the receiver to read it from its own task (see
+    /// [`MoqtSession::take_control_receiver`]).
+    inbound: Option<mpsc::UnboundedReceiver<ControlMessage>>,
     /// `MAX_REQUEST_ID` the peer advertised: request ids we may allocate stay
     /// below it.
     peer_max_request_id: u64,
@@ -104,7 +119,19 @@ impl MoqtSession {
         max_request_id: u64,
         implementation: &str,
     ) -> Result<Self, G2gError> {
-        let session = dial(url, cert_hashes, Some(MOQT_PROTOCOL)).await?;
+        let session = dial(url, cert_hashes, &[MOQT_PROTOCOL], "default").await?;
+        Self::connect_over(session, max_request_id, implementation).await
+    }
+
+    /// Complete the draft-16 handshake over an already dialled WebTransport
+    /// session. The caller dials when the version is negotiated per session
+    /// (the `versions` property offers several subprotocols and the server's
+    /// pick decides which handshake runs).
+    pub async fn connect_over(
+        session: Session,
+        max_request_id: u64,
+        implementation: &str,
+    ) -> Result<Self, G2gError> {
         let (mut control_tx, control_rx) = session.open_bi().await.map_err(wt_err)?;
 
         let mut params = Params::new();
@@ -134,7 +161,7 @@ impl MoqtSession {
         Ok(Self {
             session,
             control_tx,
-            inbound,
+            inbound: Some(inbound),
             peer_max_request_id,
             next_request_id: 0,
             closed: false,
@@ -167,13 +194,26 @@ impl MoqtSession {
         write_message(&mut self.control_tx, msg).await
     }
 
-    /// Await the next control message. `None` once the control stream ends.
+    /// Await the next control message. `None` once the control stream ends, or
+    /// straight away when the receiver was taken.
     pub async fn next_control(&mut self) -> Option<ControlMessage> {
-        let msg = self.inbound.recv().await;
+        let msg = match self.inbound.as_mut() {
+            Some(inbound) => inbound.recv().await,
+            None => None,
+        };
         if msg.is_none() {
             self.closed = true;
         }
         msg
+    }
+
+    /// Take the inbound control-message receiver, so a caller can answer control
+    /// messages from its own task rather than when it next has work to do (the
+    /// publisher's control pump). Afterwards [`next_control`](Self::next_control)
+    /// and [`poll_control`](Self::poll_control) yield nothing: whoever holds the
+    /// receiver is the only reader.
+    pub fn take_control_receiver(&mut self) -> Option<mpsc::UnboundedReceiver<ControlMessage>> {
+        self.inbound.take()
     }
 
     /// Start accepting the session's unidirectional streams and decoding the
@@ -191,9 +231,25 @@ impl MoqtSession {
         let streams = self.session.clone();
         let stream_tx = tx.clone();
         tokio::spawn(async move {
-            while let Ok(stream) = streams.accept_uni().await {
+            while let Ok(mut stream) = streams.accept_uni().await {
+                // The type varint says whether this is a subgroup of a
+                // subscription or the response to a FETCH (§10.4).
+                let Ok((code, prefix)) = read_stream_type(MoqtVersion::V16, &mut stream).await
+                else {
+                    continue;
+                };
                 let tx = stream_tx.clone();
-                tokio::spawn(read_subgroup(stream, tx, max_object_bytes));
+                if code == FETCH_HEADER_TYPE {
+                    tokio::spawn(read_fetch(
+                        MoqtVersion::V16,
+                        stream,
+                        prefix,
+                        tx,
+                        max_object_bytes,
+                    ));
+                } else {
+                    tokio::spawn(read_subgroup(stream, prefix, tx, max_object_bytes));
+                }
             }
         });
         let datagrams = self.session.clone();
@@ -232,7 +288,7 @@ impl MoqtSession {
     /// The next control message already decoded by the reader task, or `None`
     /// when none is waiting. Never blocks on the network.
     pub fn poll_control(&mut self) -> Option<ControlMessage> {
-        match self.inbound.try_recv() {
+        match self.inbound.as_mut()?.try_recv() {
             Ok(msg) => Some(msg),
             Err(mpsc::error::TryRecvError::Empty) => None,
             Err(mpsc::error::TryRecvError::Disconnected) => {
@@ -253,6 +309,16 @@ impl MoqtSession {
         let _ = stream.set_priority(-i32::from(header.publisher_priority));
         stream.write_all(&bytes).await.map_err(wt_err)?;
         Ok(stream)
+    }
+
+    /// Open a unidirectional stream for a FETCH response and write its header.
+    /// The caller then writes the objects.
+    pub async fn open_fetch(
+        &mut self,
+        request_id: u64,
+        priority: u8,
+    ) -> Result<SendStream, G2gError> {
+        open_fetch_stream(&self.session, MoqtVersion::V16, request_id, priority).await
     }
 
     /// Finish the control stream and close the QUIC connection.
@@ -306,10 +372,14 @@ async fn read_control(mut stream: RecvStream, out: mpsc::UnboundedSender<Control
 /// individual data stream, so the subscription survives losing one.
 async fn read_subgroup(
     mut stream: RecvStream,
+    prefix: Vec<u8>,
     out: mpsc::UnboundedSender<DataEvent>,
     max_object_bytes: usize,
 ) {
     let mut decoder = SubgroupStreamDecoder::new(max_object_bytes);
+    if decoder.push(&prefix).is_err() {
+        return;
+    }
     let mut chunk = vec![0u8; DATA_READ_CHUNK];
     let mut route: Option<(u64, u64)> = None;
     'read: loop {
@@ -361,6 +431,79 @@ async fn read_subgroup(
             group_id,
         });
     }
+}
+
+/// Read one FETCH response stream to its end, reporting each object in the
+/// order the publisher wrote it and then the close. Shared by both drafts: only
+/// the integer flavour differs, and [`MoqtVersion`] carries that.
+///
+/// A malformed stream ends here rather than failing the session, the way a
+/// malformed subgroup does: the fetch is one request among many.
+pub(crate) async fn read_fetch(
+    version: MoqtVersion,
+    mut stream: RecvStream,
+    prefix: Vec<u8>,
+    out: mpsc::UnboundedSender<DataEvent>,
+    max_object_bytes: usize,
+) {
+    let mut decoder = FetchStreamDecoder::new(version, max_object_bytes);
+    if decoder.push(&prefix).is_err() {
+        return;
+    }
+    let mut chunk = vec![0u8; DATA_READ_CHUNK];
+    let mut request_id = None;
+    'read: loop {
+        loop {
+            match decoder.next_item() {
+                Ok(Some(FetchItem::Header { request_id: id })) => request_id = Some(id),
+                Ok(Some(FetchItem::Object(object))) => {
+                    let Some(request_id) = request_id else {
+                        break 'read; // an object before the header is impossible
+                    };
+                    if out
+                        .send(DataEvent::FetchObject { request_id, object })
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                // A range the publisher will not serialize: nothing to emit.
+                Ok(Some(FetchItem::Gap { .. })) => {}
+                Ok(None) => break,
+                Err(_) => break 'read,
+            }
+        }
+        match stream.read(&mut chunk).await {
+            Ok(Some(n)) if n > 0 => {
+                if decoder.push(&chunk[..n]).is_err() {
+                    break;
+                }
+            }
+            // A clean finish, a zero read, or a reset: the response is over.
+            _ => break,
+        }
+    }
+    if let Some(request_id) = request_id {
+        let _ = out.send(DataEvent::FetchClosed { request_id });
+    }
+}
+
+/// Open a unidirectional stream for a FETCH response and write its header. The
+/// caller then writes the objects. Shared by both drafts, like [`read_fetch`].
+pub(crate) async fn open_fetch_stream(
+    session: &Session,
+    version: MoqtVersion,
+    request_id: u64,
+    priority: u8,
+) -> Result<SendStream, G2gError> {
+    let mut bytes = Vec::new();
+    FetchWriter::new(version).header(request_id, &mut bytes);
+    let mut stream = session.open_uni().await.map_err(wt_err)?;
+    // Smaller publisher priority is sent first, and QUIC send priority runs the
+    // other way, so the stream priority is the negated byte.
+    let _ = stream.set_priority(-i32::from(priority));
+    stream.write_all(&bytes).await.map_err(wt_err)?;
+    Ok(stream)
 }
 
 /// The MOQT_IMPLEMENTATION string this build advertises.

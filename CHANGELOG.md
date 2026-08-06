@@ -6,6 +6,63 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M934: the PS demuxer synthesizes per-picture video PTS between PES stamps, fixing DVD playback stuttering in half-second bursts.
+
+- M933: the run summary reports each display sink's presented / dropped frame counters, and `g2g-launch` prints a presented-fps figure.
+
+- M932: `deinterlace` gains a yadif method and planar YUV support, and `playbin uri=file.vob` inserts it when the MPEG-2 sequence extension says the stream is interlaced.
+
+- M931: `playbin uri=file.vob` composites a DVD's subpicture cues over the video, and a fan-in element now sees the `Segment` that maps its output to running time.
+
+- M930: every demuxer opens with a stream-start segment, and launch lines accept gst-style parallel chains.
+
+- M929: `mpegpsdemux` plays MPEG program streams (`.mpg` / `.vob`), DVD subpicture track included, and MPEG-2 video demuxes and decodes.
+
+- M928: the single-track `matroskamux` takes a text or bitmap subtitle pad, so a sidecar subtitle file muxes over one link.
+
+- M927: bitmap subtitle pads mux to Matroska `S_VOBSUB` / `S_DVBSUB` tracks and to a DVB subtitle stream in MPEG-TS.
+
+- M925: `pgsdec` decodes Blu-ray PGS bitmap subtitles (`Caps::SubPicture`, mkv `S_HDMV/PGS`) into RGBA cue canvases, pixel-exact against ffmpeg.
+
+- M926: `vobsubsrc` plays a DVD subtitle `.idx` / `.sub` sidecar pair.
+
+- M924: MPEG-TS teletext subtitles decode to a `Caps::Text{Utf8}` cue stream through the new `teletextdec` element.
+- M923: WebVTT `::cue(.class)` rules style only their own span, compound class selectors match, and SSA `{\pos}` / margins map through `PlayRes`.
+
+- M922: HLS subtitle renditions play fMP4 `wvtt` segments as well as raw `.vtt`, and WebVTT `X-TIMESTAMP-MAP` headers rebase each segment's cues.
+
+- M921: typed decoders for the known `BlobMeta` headers.
+
+- M920: segmentation-mask and region-of-interest analytics nodes.
+
+- M919: SMPTE 12M timecode rides `FrameMeta` from H.264/H.265 SEI, burnt in by `timeoverlay`.
+
+- M918: HDR10 mastering-display and content-light-level metadata ride `FrameMeta` from SEI to the Vulkan HDR sink.
+
+- M917: closed captions ride a decode/re-encode as `FrameMeta`.
+
+- M916: an `opus-rs` conformance gate (`tools/opus-rs-gate`) rejects the pure-Rust Opus decoder; the FFI path stays.
+
+- M915: the MoQ Transport browser demo publishes and plays audio alongside the video.
+
+- M914: `moqtsessionsrc` plays several tracks of one MoQ Transport session, a pad each.
+
+- M913: `moqtsink publish=true` offers its tracks with PUBLISH, and `moqtsrc` accepts one as a subscription.
+
+- M912: `moqtsink` serves FETCH from a bounded per-track object cache and `moqtsrc` can catch up with a joining FETCH, on both drafts.
+
+- M911: `remotewtsink` can carry data frames as QUIC datagrams (`datagrams=true`, oversized frames fall back to the stream), and the WebTransport elements take a `congestion-control` property.
+
+- M910: `mkvdemux` inflates zlib and header-stripped `ContentEncoding` blocks.
+
+- M909: runner arms no longer emit a second `Eos` after a transform forwards one itself.
+
+- M908: `tsmuxn` carries the video pad's keyframe flag onto its output frames, so `hlssink` segments an A/V multiplex.
+
+- M907: `moqtsink` and `moqtsrc` speak MoQ Transport draft-18 alongside draft-16, negotiated per session by offering both as WebTransport subprotocols (`versions` property).
+
+- M906: `moqtsink` dials the relay at configure time and answers control messages from a dedicated pump task, so a subscriber attaching before the first frame or between fragments is served instead of abandoned.
+
 - M905: `moqtsink` can carry media objects in QUIC datagrams (`datagrams=true`) and spread a group across several subgroup streams (`subgroups=N`), which `moqtsrc` reorders through the same bounded reassembly.
 
 - M904: a browser plays a g2g MoQ Transport broadcast through a relay (`tools/moqt-demo`), decoded by the third-party MOQtail client and asserted headlessly on the decoded frames.

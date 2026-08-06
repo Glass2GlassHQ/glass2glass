@@ -586,22 +586,35 @@ fn main() {
     match result {
         Ok(stats) => {
             if !opts.quiet {
-                // End-of-run report (M287): the RunStats telemetry plus the
-                // measured wall-clock throughput this run achieved.
-                let elapsed = started.elapsed().as_secs_f64();
-                print!("{}", stats.report());
-                if elapsed > 0.0 {
-                    println!(
-                        "  run:     {:.2} s wall, {:.1} fps",
-                        elapsed,
-                        stats.frames_consumed as f64 / elapsed
-                    );
-                }
+                print_run_summary(&stats, started.elapsed().as_secs_f64());
             }
         }
         Err(err) => {
             eprintln!("pipeline error: {err:?}");
             process::exit(1);
+        }
+    }
+}
+
+/// End-of-run report (M287): the RunStats telemetry plus the measured
+/// wall-clock throughput this run achieved, and for each presenting sink the
+/// rate frames actually reached the display.
+fn print_run_summary(stats: &g2g_core::runtime::RunStats, elapsed: f64) {
+    print!("{}", stats.report());
+    if elapsed > 0.0 {
+        println!(
+            "  run:     {:.2} s wall, {:.1} fps",
+            elapsed,
+            stats.frames_consumed as f64 / elapsed
+        );
+        for e in &stats.per_element {
+            if let Some(p) = e.presentation {
+                println!(
+                    "  display: {:<16} {:.1} fps presented",
+                    e.name,
+                    p.presented as f64 / elapsed
+                );
+            }
         }
     }
 }
@@ -672,15 +685,7 @@ fn run_dashboard(
     match result {
         Ok(stats) => {
             if !quiet {
-                let elapsed = started.elapsed().as_secs_f64();
-                print!("{}", stats.report());
-                if elapsed > 0.0 {
-                    println!(
-                        "  run:     {:.2} s wall, {:.1} fps",
-                        elapsed,
-                        stats.frames_consumed as f64 / elapsed
-                    );
-                }
+                print_run_summary(&stats, started.elapsed().as_secs_f64());
             }
         }
         Err(err) => {

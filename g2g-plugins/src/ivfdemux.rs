@@ -14,8 +14,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
-    FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-    Rate, VideoCodec,
+    ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
+    PipelinePacket, Rate, VideoCodec,
 };
 
 const FILE_HEADER_LEN: usize = 32;
@@ -172,6 +172,14 @@ impl IvfDemux {
 }
 
 impl AsyncElement for IvfDemux {
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "IVF demuxer",
+            "Codec/Demuxer",
+            "Demuxes an IVF file into its VP8 / VP9 / AV1 frames",
+            "g2g",
+        )
+    }
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where

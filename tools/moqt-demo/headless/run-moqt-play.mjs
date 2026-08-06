@@ -1,20 +1,22 @@
 // Headless validation that a browser plays a g2g MoQ Transport broadcast (M904).
 //
-// Starts a local `moq-relay-ietf`, publishes into it with
-// `videotestsrc pattern=smpte ! videoconvert ! x264enc ! mp4mux ! moqtsink`,
-// and drives a real Chromium through tools/moqt-demo/index.html, whose MoQT
-// client is the third-party MOQtail draft-16 implementation. Nothing in the
-// browser shares code with g2g's Rust wire layer, so a successful play is an
-// independent decode of our bytes.
+// Starts a local `moq-relay-ietf`, publishes video and audio into it with
+// `videotestsrc ! x264enc ! mux.  audiotestsrc ! avenc_aac ! mux.  mp4mux
+// name=mux ! moqtsink`, and drives a real Chromium through
+// tools/moqt-demo/index.html, whose MoQT client is the third-party MOQtail
+// draft-16 implementation. Nothing in the browser shares code with g2g's Rust
+// wire layer, so a successful play is an independent decode of our bytes.
 //
-// Asserts, on the frames the browser's own H.264 decoder produced:
+// Asserts, on what the browser's own decoders produced:
 //   - the decoded size is 320x240 (what the publisher encoded);
 //   - the video pipeline reports at least NEED_FRAMES decoded frames;
 //   - the seven SMPTE bars are on screen in the right order, sampled off the
-//     canvas the <video> was drawn into.
+//     canvas the <video> was drawn into;
+//   - the audio track was subscribed, appended and decoded (Chromium's
+//     `webkitAudioDecodedByteCount` past zero).
 //
-// Prereqs: `npm install` in tools/moqt-demo (playwright + moqtail), a full
-// Chromium (headless_shell has no H.264), a `moq-relay-ietf` build, and
+// Prereqs: `pnpm install` in tools/moqt-demo (playwright + moqtail), a full
+// Chromium (headless_shell has no H.264 or AAC), a `moq-relay-ietf` build, and
 // `cargo build --release -p g2g-plugins --features moqt,ffmpeg --bin g2g-launch`.
 // Prints SKIP and exits 0 when any of those is missing.
 //
@@ -84,11 +86,11 @@ async function main() {
       "Run `npx playwright install chromium`, or set $G2G_CHROME.");
   }
   if (!existsSync(join(ROOT, "node_modules/moqtail/dist/index.js"))) {
-    skip("moqtail not installed. Run `npm install` in tools/moqt-demo.");
+    skip("moqtail not installed. Run `pnpm install` in tools/moqt-demo.");
   }
   const pwPath = process.env.G2G_PLAYWRIGHT || join(ROOT, "node_modules/playwright/index.js");
   if (!existsSync(pwPath)) {
-    skip("playwright not installed. Run `npm install` in tools/moqt-demo, or set $G2G_PLAYWRIGHT.");
+    skip("playwright not installed. Run `pnpm install` in tools/moqt-demo, or set $G2G_PLAYWRIGHT.");
   }
 
   tls = await mintCertificate();
@@ -141,7 +143,9 @@ async function main() {
     if (state.error) fail(`player failed: ${state.error}`);
     if (state.started) {
       report = await page.evaluate(() => window.g2gReport());
-      if (report.totalVideoFrames >= NEED_FRAMES && report.bars) break;
+      report.audioFragments = state.audioFragments;
+      const audioReady = state.audioFragments > 0 && (report.audioDecodedBytes ?? 1) > 0;
+      if (report.totalVideoFrames >= NEED_FRAMES && report.bars && audioReady) break;
     }
     await page.waitForTimeout(250);
   }
@@ -155,6 +159,13 @@ async function main() {
   if (report.width !== 320 || report.height !== 240) {
     fail(`decoded ${report.width}x${report.height}, expected 320x240`);
   }
+  if (!report.audioFragments) {
+    fail("no audio fragments reached the page: the broadcast published no audio track");
+  }
+  if (report.audioDecodedBytes === 0) {
+    fail("the audio track was appended but the browser decoded none of it");
+  }
+
   const wrong = BARS.map(([name, ...want], i) => {
     const px = report.bars[i];
     const ok = want.every((lit, c) => (lit ? px[c] >= LIT : px[c] <= DARK));
@@ -163,7 +174,8 @@ async function main() {
   if (wrong.length) fail(`SMPTE bars wrong: ${wrong.join("; ")}`);
 
   log(`PASS: ${report.totalVideoFrames} frames decoded at ${report.width}x${report.height}, ` +
-    `all seven SMPTE bars correct, ${report.droppedVideoFrames} dropped`);
+    `all seven SMPTE bars correct, ${report.droppedVideoFrames} dropped, ` +
+    `${report.audioFragments} audio fragments and ${report.audioDecodedBytes} audio bytes decoded`);
   shutdown(0);
 }
 

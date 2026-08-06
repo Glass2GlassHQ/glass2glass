@@ -42,10 +42,10 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{SeekController, StreamSelectController};
 use g2g_core::{
     g2g_error, AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps,
-    CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError, MemoryDomain,
-    MultiOutputElement, MultiOutputSink, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-    PropError, PropKind, PropValue, PropertySpec, Rate, Seek, Segment, Stream, StreamCollection,
-    StreamType, SubPictureFormat, TagList, TextFormat, VideoCodec,
+    CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError,
+    MemoryDomain, MultiOutputElement, MultiOutputSink, OutputSink, PadTemplate, PadTemplates,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, Seek, Segment, Stream,
+    StreamCollection, StreamType, SubPictureFormat, TagList, TextFormat, VideoCodec,
 };
 
 use crate::demuxseek::{Admit, DemuxSeek};
@@ -81,6 +81,10 @@ pub enum MkvStream {
     /// { DvbSub }`). Its `CodecPrivate` (the composition / ancillary page ids)
     /// is forwarded in band the same way.
     DvbSub,
+    /// A Blu-ray PGS subtitle (bitmap) stream (`S_HDMV/PGS` ->
+    /// `Caps::SubPicture { Pgs }`). Everything the decoder needs is in the
+    /// blocks, so there is no config frame to forward.
+    Pgs,
 }
 
 /// A Matroska `Cues` prefetch in flight (M374): an end-of-file `Cues` index
@@ -121,6 +125,10 @@ pub struct MkvDemux {
     /// Whether the selected track's `CodecPrivate` has been forwarded in-band,
     /// once, before its first frame (see [`config_header`]). Re-armed on a flush.
     config_sent: bool,
+    /// Set once a `Segment` has gone out, whether the stream-start one or a
+    /// seek's, so the first frame's timestamp maps to running time 0 and a paced
+    /// sink is not left holding it. Re-armed on a flush.
+    segment_sent: bool,
     /// Clones of the seek controllers (M374): the `Cues` prefetch consumes the app
     /// seek and drives the two-hop upstream byte-seek directly, so it needs the
     /// same channels `seek` holds. `None` unless `with_seek` wired them.
@@ -150,6 +158,7 @@ impl MkvDemux {
             stream_select: None,
             seek: DemuxSeek::default(),
             config_sent: false,
+            segment_sent: false,
             app: None,
             upstream: None,
             prefetch: CuePrefetch::Idle,
@@ -294,6 +303,9 @@ impl MkvDemux {
             MkvStream::DvbSub => Caps::SubPicture {
                 format: SubPictureFormat::DvbSub,
             },
+            MkvStream::Pgs => Caps::SubPicture {
+                format: SubPictureFormat::Pgs,
+            },
         }
     }
 
@@ -330,6 +342,7 @@ impl MkvDemux {
             MkvStream::Subtitle(format) => MkvCodec::Subtitle(format),
             MkvStream::VobSub => MkvCodec::VobSub,
             MkvStream::DvbSub => MkvCodec::DvbSub,
+            MkvStream::Pgs => MkvCodec::Pgs,
         }
     }
 
@@ -479,6 +492,12 @@ impl MkvDemux {
                     format: SubPictureFormat::DvbSub,
                 },
             ),
+            MkvCodec::Pgs => (
+                StreamType::Text,
+                Caps::SubPicture {
+                    format: SubPictureFormat::Pgs,
+                },
+            ),
             MkvCodec::Other => return None,
         };
         Some(Stream::new(id, stream_type, caps))
@@ -521,28 +540,30 @@ impl MkvDemux {
         resolve_stream_id(&self.demux, id)
     }
 
-    /// Refuse a `ContentEncoding`-compressed bitmap-subtitle track: its blocks
-    /// are zlib (or header-stripped) bytes rather than SPU packets or DVB
-    /// segments and nothing here inflates them, so forwarding them would feed
-    /// the decoder garbage. Only the subpicture selections are checked; the
-    /// other codecs' compressed-block handling is unchanged.
+    /// Refuse a bitmap-subtitle track whose `ContentEncoding` the demuxer cannot
+    /// undo (bzip2 / lzo / encryption): its blocks are encoded bytes rather than
+    /// SPU packets or DVB segments, so forwarding them would feed the decoder
+    /// garbage. zlib and header-stripped tracks are decoded at demux and pass.
+    /// Only the subpicture selections are checked; the other codecs' handling of
+    /// an undecodable encoding is unchanged.
     fn reject_compressed_subpicture(&self) -> Result<(), G2gError> {
         let codec = match self.stream {
             MkvStream::VobSub => MkvCodec::VobSub,
             MkvStream::DvbSub => MkvCodec::DvbSub,
+            MkvStream::Pgs => MkvCodec::Pgs,
             _ => return Ok(()),
         };
         if !self
             .demux
             .tracks()
             .iter()
-            .any(|t| t.codec == codec && t.compressed)
+            .any(|t| t.codec == codec && t.unsupported_encoding)
         {
             return Ok(());
         }
         g2g_error!(
             Target::category("mkvdemux"),
-            "bitmap subtitle track declares a ContentEncoding compression, which this demuxer does not inflate"
+            "bitmap subtitle track declares a ContentEncoding this demuxer cannot undo (bzip2 / lzo / encryption)"
         );
         Err(G2gError::CapsMismatch)
     }
@@ -580,8 +601,18 @@ impl MkvDemux {
                 Admit::Resume(start) => {
                     let seg = Segment::for_flush_seek(&Seek::flush_to(start), None);
                     out.push(PipelinePacket::Segment(seg)).await?;
+                    self.segment_sent = true;
                 }
                 Admit::Emit => {}
+            }
+            // Stream start: map the first emitted timestamp to running time 0.
+            // Matroska normally starts at 0, so this is usually the identity, but
+            // a file cut from a live recording need not, and every demuxer opens
+            // its stream the same way.
+            if !self.segment_sent {
+                self.segment_sent = true;
+                let seg = Segment::for_flush_seek(&Seek::flush_to(f.pts_ns), None);
+                out.push(PipelinePacket::Segment(seg)).await?;
             }
             // The track's decoder-init bytes go in band once, ahead of its first
             // frame (FLAC STREAMINFO, Opus `OpusHead`).
@@ -622,6 +653,14 @@ impl MkvDemux {
 }
 
 impl AsyncElement for MkvDemux {
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "Matroska demuxer",
+            "Codec/Demuxer",
+            "Demuxes Matroska / WebM into one selected elementary stream",
+            "g2g",
+        )
+    }
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
@@ -730,6 +769,7 @@ impl AsyncElement for MkvDemux {
                     }
                     // a fresh decoder after the flush needs the header again.
                     self.config_sent = false;
+                    self.segment_sent = false;
                     out.push(PipelinePacket::Flush).await?;
                 }
                 PipelinePacket::Eos => {
@@ -773,7 +813,7 @@ impl AsyncElement for MkvDemux {
 static MKVDEMUX_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "stream",
     PropKind::Str,
-    "elementary stream to emit: h264 | h265 | vp8 | vp9 | av1 | aac | opus | ac3 | flac | vobsub | dvbsub",
+    "elementary stream to emit: h264 | h265 | vp8 | vp9 | av1 | aac | opus | ac3 | flac | vobsub | dvbsub | pgs",
 )];
 
 /// The [`MkvStream`] a demuxer forwards for a parsed track's codec, or `None` for
@@ -792,6 +832,7 @@ fn codec_to_stream(codec: MkvCodec) -> Option<MkvStream> {
         MkvCodec::Subtitle(format) => Some(MkvStream::Subtitle(format)),
         MkvCodec::VobSub => Some(MkvStream::VobSub),
         MkvCodec::DvbSub => Some(MkvStream::DvbSub),
+        MkvCodec::Pgs => Some(MkvStream::Pgs),
         MkvCodec::Other => None,
     }
 }
@@ -1098,6 +1139,7 @@ fn mkv_stream_from_str(s: &str) -> Option<MkvStream> {
         "flac" => Some(MkvStream::Flac),
         "vobsub" | "dvdsub" => Some(MkvStream::VobSub),
         "dvbsub" => Some(MkvStream::DvbSub),
+        "pgs" | "hdmvpgs" => Some(MkvStream::Pgs),
         _ => None,
     }
 }
@@ -1121,6 +1163,7 @@ fn mkv_stream_to_str(stream: MkvStream) -> &'static str {
         MkvStream::Subtitle(_) => "text",
         MkvStream::VobSub => "vobsub",
         MkvStream::DvbSub => "dvbsub",
+        MkvStream::Pgs => "pgs",
     }
 }
 
@@ -1141,6 +1184,7 @@ impl PadTemplates for MkvDemux {
             Self::output_caps(MkvStream::Subtitle(TextFormat::Utf8)),
             Self::output_caps(MkvStream::VobSub),
             Self::output_caps(MkvStream::DvbSub),
+            Self::output_caps(MkvStream::Pgs),
         ]));
         Vec::from([
             PadTemplate::sink(CapsSet::one(Self::input_caps())),
@@ -1189,6 +1233,12 @@ pub struct MkvDemuxN {
     /// Inert unless `with_stream_select` wired it.
     stream_select: Option<StreamSelectController>,
     emitted: u64,
+    /// Stream-start timestamp (ns) latched from the first routed frame; every
+    /// port's opening `Segment` maps it to running time 0, so the ports share
+    /// one running-time origin.
+    segment_base: Option<u64>,
+    /// Whether port `i` has emitted its opening `Segment` yet.
+    segment_sent: Vec<bool>,
 }
 
 impl MkvDemuxN {
@@ -1201,11 +1251,14 @@ impl MkvDemuxN {
         );
         let announced = alloc::vec![false; ports.len()];
         let config_sent = alloc::vec![false; ports.len()];
+        let segment_sent = alloc::vec![false; ports.len()];
         Self {
             demux: MatroskaDemuxer::new(),
             ports,
             announced,
             config_sent,
+            segment_base: None,
+            segment_sent,
             bus: None,
             tags: TagPoster::default(),
             collection_posted: false,
@@ -1365,6 +1418,12 @@ impl MultiOutputElement for MkvDemuxN {
                         let Some(port) = self.port_for_codec(f.codec) else {
                             continue; // a track no selected port carries
                         };
+                        if !self.segment_sent[port] {
+                            self.segment_sent[port] = true;
+                            let base = *self.segment_base.get_or_insert(f.pts_ns);
+                            let seg = Segment::for_flush_seek(&Seek::flush_to(base), None);
+                            out.push_to(port, PipelinePacket::Segment(seg)).await?;
+                        }
                         if !self.announced[port] {
                             let caps = MkvDemux::concrete_caps_of(&self.demux, self.ports[port])
                                 .unwrap_or_else(|| MkvDemux::output_caps(self.ports[port]));

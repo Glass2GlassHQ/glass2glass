@@ -99,6 +99,11 @@ pub struct CcInsert {
     cues_received: u64,
     caption_emitted: bool,
     warned: bool,
+    /// Meta-sourced mode ([`from_meta`](CcInsert::from_meta)): one input pad, and
+    /// each access unit's caption bytes come from the video frame's `CaptionMeta`
+    /// rather than from an encoded cue stream.
+    #[cfg(feature = "metadata")]
+    from_meta: bool,
     /// Runner-assigned instance name plus any category override, for logging.
     log_name: LogName,
 }
@@ -124,6 +129,23 @@ impl CcInsert {
         Self::with_encoder(CcEncoder::Cea708(Cc708Enc::for_service(service)))
     }
 
+    /// A caption inserter with **no cue pad**: each access unit's caption bytes
+    /// are taken from the video frame's
+    /// [`CaptionMeta`](g2g_core::meta::CaptionMeta), which the H.264 / H.265
+    /// parser attached upstream and which survives a decode + re-encode. This is
+    /// the transcode passthrough: `h264parse ! decode ! encode ! ccinsert` keeps
+    /// the source's captions with no cue stream to author or merge.
+    ///
+    /// Frames without caption meta pass through unchanged (no SEI is written),
+    /// so a stream that never carried captions is byte-identical.
+    #[cfg(feature = "metadata")]
+    pub fn from_meta() -> Self {
+        Self {
+            from_meta: true,
+            ..Self::default()
+        }
+    }
+
     fn with_encoder(enc: CcEncoder) -> Self {
         Self {
             enc,
@@ -133,6 +155,8 @@ impl CcInsert {
             cues_received: 0,
             caption_emitted: false,
             warned: false,
+            #[cfg(feature = "metadata")]
+            from_meta: false,
             log_name: LogName::new(),
         }
     }
@@ -171,6 +195,28 @@ impl CcInsert {
         ]))
     }
 
+    /// The caption triples to carry in this access unit: the frame's own
+    /// `CaptionMeta` in meta-sourced mode (empty when it carries none), else the
+    /// one triple the cue encoder has queued for this frame (null padding when
+    /// idle). Pending-before-drain marks a real caption byte vs that padding.
+    #[cfg_attr(not(feature = "metadata"), allow(unused_variables))]
+    fn au_triples(&mut self, frame: &Frame) -> Vec<CcTriple> {
+        #[cfg(feature = "metadata")]
+        if self.from_meta {
+            let Some(meta) = frame.meta.get::<g2g_core::meta::CaptionMeta>() else {
+                return Vec::new();
+            };
+            self.caption_emitted = true;
+            return meta.iter().map(|t| CcTriple::from(*t)).collect();
+        }
+        let real = self.enc.pending();
+        let triple = self.enc.next_triple();
+        if real {
+            self.caption_emitted = true;
+        }
+        Vec::from([triple])
+    }
+
     /// Rewrite one access unit's bytes with the caption SEI inserted before the
     /// first VCL slice NAL (spec position: after any AUD / parameter sets), and
     /// emit it preserving the frame's timing / keyframe flag.
@@ -178,18 +224,20 @@ impl CcInsert {
         let Some(codec) = self.codec else {
             return Err(G2gError::NotConfigured);
         };
-        let Some(au) = frame.domain.as_system_slice() else {
+        if frame.domain.as_system_slice().is_none() {
             // A non-system buffer carries no walkable bitstream; pass it through.
             return out.push(PipelinePacket::DataFrame(frame)).await.map(|_| ());
-        };
-        // Drain this frame's caption triple (one per frame) and wrap it in a SEI.
-        // Pending-before-drain marks a real caption byte (vs idle padding).
-        let real = self.enc.pending();
-        let triple = self.enc.next_triple();
-        if real {
-            self.caption_emitted = true;
         }
-        let sei = build_cc_sei(&[triple], codec);
+        let triples = self.au_triples(&frame);
+        if triples.is_empty() {
+            // Meta-sourced mode with no captions on this frame: leave it alone.
+            return out.push(PipelinePacket::DataFrame(frame)).await.map(|_| ());
+        }
+        let au = frame
+            .domain
+            .as_system_slice()
+            .expect("system slice checked above");
+        let sei = build_cc_sei(&triples, codec);
 
         let mut bytes = Vec::with_capacity(au.len() + sei.len());
         match vcl_start(au, codec) {
@@ -217,6 +265,11 @@ impl MultiInputElement for CcInsert {
         Self: 'a;
 
     fn input_count(&self) -> usize {
+        // Meta-sourced mode has no cue pad: the captions ride the video frames.
+        #[cfg(feature = "metadata")]
+        if self.from_meta {
+            return 1;
+        }
         2
     }
 
@@ -344,7 +397,7 @@ impl MultiInputElement for CcInsert {
                             let settings = frame
                                 .meta
                                 .get::<crate::subparse::TextCueMeta>()
-                                .map(|m| m.settings)
+                                .map(|m| m.settings.clone())
                                 .unwrap_or_default();
                             #[cfg(not(feature = "metadata"))]
                             let settings = crate::subparse::CueSettings::default();

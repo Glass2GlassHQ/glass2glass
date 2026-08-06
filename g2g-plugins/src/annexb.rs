@@ -142,19 +142,35 @@ pub(crate) fn h264_nal_type(nal: &[u8]) -> Option<u8> {
 
 /// Whether an access unit (either framing) begins a keyframe for `codec`: an
 /// H.264 IDR (NAL type 5), an H.265 IRAP picture (types 16..=23, covering
-/// BLA / IDR / CRA), or an MPEG-4 Part 2 I-VOP (VOP start code 0xB6 whose
-/// vop_coding_type, the top 2 bits of the next byte, is 0). Used by the demuxer
-/// seek path (M362) to snap to a decodable resume point in a stream whose units
-/// carry no keyframe flag of their own.
+/// BLA / IDR / CRA), an MPEG-4 Part 2 I-VOP (VOP start code 0xB6 whose
+/// vop_coding_type, the top 2 bits of the next byte, is 0), or an MPEG-1/2
+/// sync point (see [`mpeg2_start_is_sync`]). Used by the demuxer seek path
+/// (M362) to snap to a decodable resume point in a stream whose units carry no
+/// keyframe flag of their own.
 pub(crate) fn au_is_keyframe(codec: g2g_core::VideoCodec, au: &[u8]) -> bool {
     use g2g_core::VideoCodec;
     nal_units_any(au).any(|n| match (codec, n.first()) {
         (VideoCodec::H265, Some(b)) => (16..=23).contains(&((b >> 1) & 0x3F)),
         (VideoCodec::Mpeg4Part2, Some(&0xB6)) => n.get(1).is_some_and(|c| c >> 6 == 0),
         (VideoCodec::Mpeg4Part2, _) => false,
+        (VideoCodec::Mpeg2, _) => mpeg2_start_is_sync(n),
         (_, Some(b)) => (b & 0x1F) == 5,
         (_, None) => false,
     })
+}
+
+/// Whether one MPEG-1/2 video start-code unit (`n[0]` is the start code value,
+/// the start code prefix already stripped) marks a decodable resume point: a
+/// sequence header (0xB3) or a GOP header (0xB8), both of which only ever
+/// precede an I-picture, or a picture header (0x00) whose picture_coding_type
+/// is 1 (intra). The coding type is bits 5..3 of the third picture-header byte,
+/// the 10-bit temporal_reference occupying the two before it.
+fn mpeg2_start_is_sync(n: &[u8]) -> bool {
+    match n.first() {
+        Some(&0xB3 | &0xB8) => true,
+        Some(&0x00) => n.get(2).is_some_and(|b| (b >> 3) & 0x07 == 1),
+        _ => false,
+    }
 }
 
 /// Collect the H.264 SPS (type 7) and PPS (type 8) NAL units from an access unit
@@ -893,5 +909,40 @@ mod tests {
             vec![sei, idr],
             "parameter sets dropped, order preserved"
         );
+    }
+
+    /// MPEG-1/2 sync points: an I-picture, and the sequence / GOP headers that
+    /// only ever open one. A P- or B-picture is not a resume point.
+    #[test]
+    fn mpeg2_keyframes_are_intra_pictures_and_sequence_starts() {
+        use g2g_core::VideoCodec::Mpeg2;
+        // picture header: temporal_reference then picture_coding_type in bits 5..3.
+        let picture = |coding_type: u8| {
+            vec![
+                0x00,
+                0x00,
+                0x01,
+                0x00,
+                0x00,
+                (coding_type << 3) | 0x07,
+                0xFF,
+            ]
+        };
+        assert!(au_is_keyframe(Mpeg2, &picture(1)), "an I-picture");
+        assert!(!au_is_keyframe(Mpeg2, &picture(2)), "a P-picture");
+        assert!(!au_is_keyframe(Mpeg2, &picture(3)), "a B-picture");
+
+        let mut with_sequence = vec![0x00, 0x00, 0x01, 0xB3, 0x16, 0x01, 0x20, 0x13];
+        with_sequence.extend_from_slice(&picture(1));
+        assert!(au_is_keyframe(Mpeg2, &with_sequence));
+
+        let mut gop_then_p = vec![0x00, 0x00, 0x01, 0xB8, 0x00, 0x00, 0x00, 0x00];
+        gop_then_p.extend_from_slice(&picture(2));
+        assert!(au_is_keyframe(Mpeg2, &gop_then_p), "a GOP header opens one");
+
+        // A slice, and a truncated picture header, are neither.
+        assert!(!au_is_keyframe(Mpeg2, &[0x00, 0x00, 0x01, 0x01, 0xFF]));
+        assert!(!au_is_keyframe(Mpeg2, &[0x00, 0x00, 0x01, 0x00, 0x00]));
+        assert!(!au_is_keyframe(Mpeg2, &[]));
     }
 }

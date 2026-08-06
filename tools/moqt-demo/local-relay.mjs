@@ -235,8 +235,24 @@ export const SMPTE_PIPELINE =
 export const CAMERA_PIPELINE =
   "libcamerasrc width=640 height=480 framerate=30 ! videoconvert ! x264enc";
 
-// Complete a source+encoder prefix into a publishing pipeline.
-export function publishPipeline(prefix, relayPort, namespace, hashHex) {
-  return `${prefix} ! mp4mux ! moqtsink location=https://127.0.0.1:${relayPort}/ ` +
+// One MOQT object per this many milliseconds of each track.
+const FRAGMENT_MS = 500;
+
+// The audio half of the broadcast: a 440 Hz tone encoded as AAC-LC, which is
+// what MSE plays as `mp4a.40.2`.
+export const AUDIO_PIPELINE = "audiotestsrc ! avenc_aac";
+
+// Complete a source+encoder prefix into a publishing pipeline. With audio the
+// two branches meet in the fan-in `mp4mux`, so one `moov` names both tracks and
+// `moqtsink` publishes a track each.
+export function publishPipeline(prefix, relayPort, namespace, hashHex, { audio = true } = {}) {
+  const sink =
+    `moqtsink location=https://127.0.0.1:${relayPort}/ ` +
     `namespace=${namespace} server-certificate-hashes=${hashHex}`;
+  // Half-second fragments: one MOQT object per half second of each track
+  // rather than one per access unit, which is what a CMAF broadcast looks like
+  // and what keeps a browser's append queue ahead of an unpaced publisher.
+  const mux = `mp4mux name=mux fragment-duration=${FRAGMENT_MS}`;
+  if (!audio) return `${prefix} ! mp4mux fragment-duration=${FRAGMENT_MS} ! ${sink}`;
+  return `${prefix} ! mux.   ${AUDIO_PIPELINE} ! mux.   ${mux} ! ${sink}`;
 }

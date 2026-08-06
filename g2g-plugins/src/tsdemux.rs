@@ -32,18 +32,18 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{SeekController, StreamSelectController};
 use g2g_core::{
     AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps, CapsConstraint,
-    CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError, MemoryDomain, MultiOutputElement,
-    MultiOutputSink, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, Rate, Seek, Segment, Stream, StreamCollection, StreamType,
-    SubPictureFormat, Tag, TagList, VideoCodec,
+    CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError, MemoryDomain,
+    MultiOutputElement, MultiOutputSink, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    PropError, PropKind, PropValue, PropertySpec, Rate, Seek, Segment, Stream, StreamCollection,
+    StreamType, SubPictureFormat, Tag, TagList, VideoCodec,
 };
 
 use crate::demuxseek::{Admit, DemuxSeek};
 use crate::mpegts::{
     unwrap_metadata_au_cells, EsUnit, TsDemuxer, STREAM_TYPE_AAC, STREAM_TYPE_AC3,
     STREAM_TYPE_H264, STREAM_TYPE_H265, STREAM_TYPE_METADATA_PES, STREAM_TYPE_MPEG1_AUDIO,
-    STREAM_TYPE_MPEG2_AUDIO, STREAM_TYPE_MPEG4P2, STREAM_TYPE_PRIVATE_PES,
-    TAG_KEY_SERVICE_PROVIDER, TS_PACKET_LEN,
+    STREAM_TYPE_MPEG1_VIDEO, STREAM_TYPE_MPEG2_AUDIO, STREAM_TYPE_MPEG2_VIDEO, STREAM_TYPE_MPEG4P2,
+    STREAM_TYPE_PRIVATE_PES, TAG_KEY_SERVICE_PROVIDER, TS_PACKET_LEN,
 };
 
 const TS_SYNC: u8 = 0x47;
@@ -144,6 +144,10 @@ pub enum TsStream {
     H265,
     /// The first MPEG-4 Part 2 (Visual) video elementary stream.
     Mpeg4Part2,
+    /// The first MPEG-1 / MPEG-2 video elementary stream (stream_type 0x01 /
+    /// 0x02). The broadcast and DVD video codec; access units are forwarded as
+    /// the PES payload carries them (start-code framed, no parse element).
+    Mpeg2,
     /// The first AAC (ADTS) audio elementary stream.
     Aac,
     /// The first MPEG-1/2 Audio (Layer II, `mp2`) elementary stream (stream_type
@@ -169,6 +173,12 @@ pub enum TsStream {
     /// descriptor's composition / ancillary page ids go out in band ahead of the
     /// first one so the decoder knows which page to compose.
     DvbSub,
+    /// The first EBU teletext elementary stream (ETSI EN 300 472): a private PES
+    /// (0x06) carrying a `teletext_descriptor` (tag 0x56 / 0x46). Each PES
+    /// payload is a run of teletext lines, forwarded whole, and the descriptor's
+    /// page selection goes out in band ahead of the first one so the decoder
+    /// knows which page to assemble.
+    Teletext,
 }
 
 /// Demuxes an MPEG-TS byte stream into one selected elementary stream.
@@ -199,9 +209,24 @@ pub struct TsDemux {
     /// count has been emitted (OpusDec needs a concrete count before it decodes,
     /// and there is no in-band `OpusHead` on this path). Re-armed on a flush.
     opus_caps_emitted: bool,
-    /// DVB subtitles only: whether the `subtitling_descriptor`'s page ids have
-    /// gone out in band ahead of the first display set. Re-armed on a flush.
-    dvbsub_config_sent: bool,
+    /// DVB subtitles / teletext only: whether the PMT descriptor's page selection
+    /// has gone out in band ahead of the first display set or teletext line.
+    /// Re-armed on a flush.
+    config_sent: bool,
+    /// Set once a `Segment` has gone out, whether the stream-start one or a
+    /// seek's. A transport stream's PTS starts wherever the broadcaster's clock
+    /// was, so a capture or a mid-stream join opens at an arbitrary offset: the
+    /// first frame's PTS has to map to running time 0 or a paced sink holds
+    /// every frame until that wall-clock offset passes. Re-armed on a flush.
+    segment_sent: bool,
+    /// MPEG-1/2 video only: whether a sequence header has been seen. Those
+    /// pictures carry no geometry of their own, so a mid-GOP join hands
+    /// libavcodec a stream it cannot size and it fails the lot ("invalid frame
+    /// dimensions"). Dropping to the first sequence header is the tune-in
+    /// convention `RtspSrc` follows for the same reason. The other video codecs
+    /// keep their parameter sets in band and their decoders resynchronize on
+    /// their own, so they are never dropped. Re-armed on a flush.
+    mpeg2_tuned_in: bool,
 }
 
 impl Default for TsDemux {
@@ -224,7 +249,9 @@ impl TsDemux {
             tags: TagPoster::default(),
             seek: DemuxSeek::default(),
             opus_caps_emitted: false,
-            dvbsub_config_sent: false,
+            config_sent: false,
+            segment_sent: false,
+            mpeg2_tuned_in: false,
         }
     }
 
@@ -304,6 +331,9 @@ impl TsDemux {
             STREAM_TYPE_H264 => (StreamType::Video, video(VideoCodec::H264)),
             STREAM_TYPE_H265 => (StreamType::Video, video(VideoCodec::H265)),
             STREAM_TYPE_MPEG4P2 => (StreamType::Video, video(VideoCodec::Mpeg4Part2)),
+            STREAM_TYPE_MPEG1_VIDEO | STREAM_TYPE_MPEG2_VIDEO => {
+                (StreamType::Video, video(VideoCodec::Mpeg2))
+            }
             STREAM_TYPE_AAC => audio(AudioFormat::Aac),
             STREAM_TYPE_MPEG1_AUDIO | STREAM_TYPE_MPEG2_AUDIO => audio(AudioFormat::Mp2),
             // 0x06 is a generic private PES; only an 'Opus' registration marks it
@@ -315,6 +345,12 @@ impl TsDemux {
                 StreamType::Text,
                 Caps::SubPicture {
                     format: SubPictureFormat::DvbSub,
+                },
+            ),
+            STREAM_TYPE_PRIVATE_PES if es.teletext.is_some() => (
+                StreamType::Text,
+                Caps::Text {
+                    format: g2g_core::TextFormat::Teletext,
                 },
             ),
             // KLV metadata: no dedicated StreamType kind, the caps classify it.
@@ -341,7 +377,9 @@ impl TsDemux {
         self.demux = TsDemuxer::new();
         self.demux.set_program_number(self.program_number);
         self.opus_caps_emitted = false;
-        self.dvbsub_config_sent = false;
+        self.config_sent = false;
+        self.segment_sent = false;
+        self.mpeg2_tuned_in = false;
     }
 
     /// The elementary stream this instance forwards.
@@ -373,11 +411,15 @@ impl TsDemux {
             TsStream::H264 => Self::compressed_video(VideoCodec::H264),
             TsStream::H265 => Self::compressed_video(VideoCodec::H265),
             TsStream::Mpeg4Part2 => Self::compressed_video(VideoCodec::Mpeg4Part2),
+            TsStream::Mpeg2 => Self::compressed_video(VideoCodec::Mpeg2),
             TsStream::Aac => Self::compressed_audio(AudioFormat::Aac),
             TsStream::Mp2 => Self::compressed_audio(AudioFormat::Mp2),
             TsStream::Opus => Self::compressed_audio(AudioFormat::Opus),
             TsStream::Ac3 => Self::compressed_audio(AudioFormat::Ac3),
             TsStream::Klv => Caps::Klv,
+            TsStream::Teletext => Caps::Text {
+                format: g2g_core::TextFormat::Teletext,
+            },
             TsStream::DvbSub => Caps::SubPicture {
                 format: SubPictureFormat::DvbSub,
             },
@@ -418,12 +460,14 @@ impl TsDemux {
             TsStream::H264 => STREAM_TYPE_H264,
             TsStream::H265 => STREAM_TYPE_H265,
             TsStream::Mpeg4Part2 => STREAM_TYPE_MPEG4P2,
+            TsStream::Mpeg2 => STREAM_TYPE_MPEG2_VIDEO,
             TsStream::Aac => STREAM_TYPE_AAC,
             TsStream::Mp2 => STREAM_TYPE_MPEG1_AUDIO,
             TsStream::Opus => STREAM_TYPE_PRIVATE_PES,
             TsStream::Ac3 => STREAM_TYPE_AC3,
             TsStream::Klv => STREAM_TYPE_PRIVATE_PES,
             TsStream::DvbSub => STREAM_TYPE_PRIVATE_PES,
+            TsStream::Teletext => STREAM_TYPE_PRIVATE_PES,
         }
     }
 
@@ -439,6 +483,9 @@ impl TsDemux {
             }
             TsStream::Klv => {
                 stream_type == STREAM_TYPE_PRIVATE_PES || stream_type == STREAM_TYPE_METADATA_PES
+            }
+            TsStream::Mpeg2 => {
+                stream_type == STREAM_TYPE_MPEG1_VIDEO || stream_type == STREAM_TYPE_MPEG2_VIDEO
             }
             other => Self::selected_stream_type(other) == stream_type,
         }
@@ -511,6 +558,11 @@ impl TsDemux {
             if self.stream == TsStream::DvbSub && self.demux.subtitling(u.pid).is_none() {
                 continue;
             }
+            // And for teletext: only a PID whose descriptors carried a
+            // teletext_descriptor is one.
+            if self.stream == TsStream::Teletext && self.demux.teletext(u.pid).is_none() {
+                continue;
+            }
             let pts_ns = u
                 .pts_90khz
                 .map(|p| (p as u128 * 1_000_000_000 / 90_000) as u64)
@@ -529,27 +581,45 @@ impl TsDemux {
                 TsStream::Mpeg4Part2 => {
                     crate::annexb::au_is_keyframe(VideoCodec::Mpeg4Part2, &u.data)
                 }
+                TsStream::Mpeg2 => crate::annexb::au_is_keyframe(VideoCodec::Mpeg2, &u.data),
                 TsStream::Aac
                 | TsStream::Mp2
                 | TsStream::Opus
                 | TsStream::Ac3
                 | TsStream::Klv
-                | TsStream::DvbSub => true,
+                | TsStream::DvbSub
+                | TsStream::Teletext => true,
             };
+            // MPEG-2 tune-in: nothing before the first sequence header can be
+            // sized, let alone decoded.
+            if self.stream == TsStream::Mpeg2 && !self.mpeg2_tuned_in {
+                if !mpeg2_can_open_here(&u.data) {
+                    continue;
+                }
+                self.mpeg2_tuned_in = true;
+            }
             match self.seek.admit(pts_ns, keyframe) {
                 Admit::Drop => continue,
                 Admit::Resume(start) => {
                     let seg = Segment::for_flush_seek(&Seek::flush_to(start), None);
                     out.push(PipelinePacket::Segment(seg)).await?;
+                    self.segment_sent = true;
                 }
                 Admit::Emit => {}
+            }
+            // Stream start: map the first emitted PTS to running time 0. A seek's
+            // resume above already did that for its own case.
+            if !self.segment_sent {
+                self.segment_sent = true;
+                let seg = Segment::for_flush_seek(&Seek::flush_to(pts_ns), None);
+                out.push(PipelinePacket::Segment(seg)).await?;
             }
             if self.stream == TsStream::Opus {
                 self.emit_opus(u, pts_ns, out).await?;
                 continue;
             }
-            if self.stream == TsStream::DvbSub {
-                self.emit_dvbsub_config(u.pid, pts_ns, out).await?;
+            if matches!(self.stream, TsStream::DvbSub | TsStream::Teletext) {
+                self.emit_stream_config(u.pid, pts_ns, out).await?;
             }
             let data = unwrap_sync_klv(u.stream_type, u.data);
             let frame = Frame::new(
@@ -567,22 +637,22 @@ impl TsDemux {
         Ok(())
     }
 
-    /// Forward the `subtitling_descriptor`'s page ids in band once, ahead of the
-    /// first display set.
-    async fn emit_dvbsub_config(
+    /// Forward the page selection the PMT descriptor carries in band once, ahead
+    /// of the first display set / teletext line.
+    async fn emit_stream_config(
         &mut self,
         pid: u16,
         pts_ns: u64,
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
-        if self.dvbsub_config_sent {
+        if self.config_sent {
             return Ok(());
         }
-        self.dvbsub_config_sent = true;
-        let Some(blob) = dvbsub_page_id_blob(&self.demux, pid) else {
+        self.config_sent = true;
+        let Some(blob) = page_config_blob(&self.demux, pid, self.stream) else {
             return Ok(());
         };
-        let frame = dvbsub_config_frame(blob, pts_ns, self.emitted);
+        let frame = config_frame(blob, pts_ns, self.emitted);
         self.emitted += 1;
         out.push(PipelinePacket::DataFrame(frame)).await?;
         Ok(())
@@ -625,6 +695,14 @@ impl TsDemux {
 }
 
 impl AsyncElement for TsDemux {
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "MPEG-TS demuxer",
+            "Codec/Demuxer",
+            "Demuxes an MPEG transport stream into one selected elementary stream",
+            "g2g",
+        )
+    }
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
@@ -749,7 +827,7 @@ static TSDEMUX_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "stream",
         PropKind::Str,
-        "elementary stream to emit: h264 | h265 | aac | mp2 | opus | ac3 | klv | dvbsub",
+        "elementary stream to emit: h264 | h265 | mpeg2 | mpeg4part2 | aac | mp2 | opus | ac3 | klv | dvbsub | teletext",
     ),
     PropertySpec::new(
         "program-number",
@@ -781,12 +859,14 @@ fn ts_stream_from_str(s: &str) -> Option<TsStream> {
         "h264" => Some(TsStream::H264),
         "h265" => Some(TsStream::H265),
         "mpeg4part2" => Some(TsStream::Mpeg4Part2),
+        "mpeg2" => Some(TsStream::Mpeg2),
         "aac" => Some(TsStream::Aac),
         "mp2" => Some(TsStream::Mp2),
         "opus" => Some(TsStream::Opus),
         "ac3" => Some(TsStream::Ac3),
         "klv" => Some(TsStream::Klv),
         "dvbsub" => Some(TsStream::DvbSub),
+        "teletext" => Some(TsStream::Teletext),
         _ => None,
     }
 }
@@ -797,12 +877,14 @@ pub(crate) fn ts_stream_to_str(stream: TsStream) -> &'static str {
         TsStream::H264 => "h264",
         TsStream::H265 => "h265",
         TsStream::Mpeg4Part2 => "mpeg4part2",
+        TsStream::Mpeg2 => "mpeg2",
         TsStream::Aac => "aac",
         TsStream::Mp2 => "mp2",
         TsStream::Opus => "opus",
         TsStream::Ac3 => "ac3",
         TsStream::Klv => "klv",
         TsStream::DvbSub => "dvbsub",
+        TsStream::Teletext => "teletext",
     }
 }
 
@@ -814,6 +896,7 @@ fn es_to_ts_stream(es: &crate::mpegts::ElementaryStream) -> Option<TsStream> {
         STREAM_TYPE_H264 => Some(TsStream::H264),
         STREAM_TYPE_H265 => Some(TsStream::H265),
         STREAM_TYPE_MPEG4P2 => Some(TsStream::Mpeg4Part2),
+        STREAM_TYPE_MPEG1_VIDEO | STREAM_TYPE_MPEG2_VIDEO => Some(TsStream::Mpeg2),
         STREAM_TYPE_AAC => Some(TsStream::Aac),
         STREAM_TYPE_MPEG1_AUDIO | STREAM_TYPE_MPEG2_AUDIO => Some(TsStream::Mp2),
         STREAM_TYPE_PRIVATE_PES if es.opus_channels.is_some() => Some(TsStream::Opus),
@@ -853,7 +936,10 @@ pub fn forwardable_streams(demux: &TsDemuxer) -> Vec<TsStreamInfo> {
         .iter()
         .filter_map(|es| {
             let stream = es_to_ts_stream(es)?;
-            let video = matches!(stream, TsStream::H264 | TsStream::H265);
+            let video = matches!(
+                stream,
+                TsStream::H264 | TsStream::H265 | TsStream::Mpeg2 | TsStream::Mpeg4Part2
+            );
             Some(TsStreamInfo {
                 stream,
                 caps: TsDemux::output_caps(stream),
@@ -870,12 +956,14 @@ impl PadTemplates for TsDemux {
         let source = CapsSet::from_alternatives(Vec::from([
             Self::output_caps(TsStream::H264),
             Self::output_caps(TsStream::H265),
+            Self::output_caps(TsStream::Mpeg2),
             Self::output_caps(TsStream::Aac),
             Self::output_caps(TsStream::Mp2),
             Self::output_caps(TsStream::Opus),
             Self::output_caps(TsStream::Ac3),
             Self::output_caps(TsStream::Klv),
             Self::output_caps(TsStream::DvbSub),
+            Self::output_caps(TsStream::Teletext),
         ]));
         Vec::from([
             PadTemplate::sink(CapsSet::one(Self::input_caps())),
@@ -922,6 +1010,16 @@ pub struct TsDemuxN {
     /// preserved across a parser reset so a seek keeps the selection.
     program_number: Option<u16>,
     emitted: u64,
+    /// Stream-start PTS (ns) latched from the first routed unit; every port's
+    /// opening `Segment` maps it to running time 0, so the ports share one
+    /// running-time origin and a capture's arbitrary PTS base does not stall a
+    /// paced sink.
+    segment_base: Option<u64>,
+    /// Whether port `i` has emitted its opening `Segment` yet.
+    segment_sent: Vec<bool>,
+    /// Whether port `i` has seen a sequence header (MPEG-2 ports only, see
+    /// [`TsDemux`]'s `mpeg2_tuned_in`).
+    mpeg2_tuned_in: Vec<bool>,
 }
 
 impl TsDemuxN {
@@ -930,11 +1028,16 @@ impl TsDemuxN {
     pub fn new(ports: Vec<TsStream>) -> Self {
         assert!(!ports.is_empty(), "TsDemuxN needs at least one output port");
         let announced = alloc::vec![false; ports.len()];
+        let segment_sent = alloc::vec![false; ports.len()];
+        let mpeg2_tuned_in = alloc::vec![false; ports.len()];
         Self {
             demux: TsDemuxer::new(),
             buf: Vec::new(),
             ports,
             announced,
+            segment_base: None,
+            segment_sent,
+            mpeg2_tuned_in,
             bus: None,
             collection_posted: false,
             tags: TagPoster::default(),
@@ -1092,10 +1195,26 @@ impl TsDemuxN {
             if self.ports[port] == TsStream::DvbSub && self.demux.subtitling(u.pid).is_none() {
                 continue;
             }
+            // Likewise a private PES routed to a teletext port.
+            if self.ports[port] == TsStream::Teletext && self.demux.teletext(u.pid).is_none() {
+                continue;
+            }
+            if self.ports[port] == TsStream::Mpeg2 && !self.mpeg2_tuned_in[port] {
+                if !mpeg2_can_open_here(&u.data) {
+                    continue;
+                }
+                self.mpeg2_tuned_in[port] = true;
+            }
             let pts_ns = u
                 .pts_90khz
                 .map(|p| (p as u128 * 1_000_000_000 / 90_000) as u64)
                 .unwrap_or(0);
+            if !self.segment_sent[port] {
+                self.segment_sent[port] = true;
+                let base = *self.segment_base.get_or_insert(pts_ns);
+                let seg = Segment::for_flush_seek(&Seek::flush_to(base), None);
+                out.push_to(port, PipelinePacket::Segment(seg)).await?;
+            }
             if !self.announced[port] {
                 out.push_to(
                     port,
@@ -1105,10 +1224,8 @@ impl TsDemuxN {
                 self.announced[port] = true;
                 // The page ids the display sets compose under go out in band
                 // ahead of the first one, as on the single-output demuxer.
-                if let Some(blob) = dvbsub_page_id_blob(&self.demux, u.pid)
-                    .filter(|_| self.ports[port] == TsStream::DvbSub)
-                {
-                    let frame = dvbsub_config_frame(blob, pts_ns, self.emitted);
+                if let Some(blob) = page_config_blob(&self.demux, u.pid, self.ports[port]) {
+                    let frame = config_frame(blob, pts_ns, self.emitted);
                     self.emitted += 1;
                     out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
                 }
@@ -1136,25 +1253,47 @@ impl TsDemuxN {
     }
 }
 
-/// The in-band page-id blob for a DVB subtitle PID's `subtitling_descriptor`, the
-/// same bytes a Matroska `S_DVBSUB` `CodecPrivate` carries. The PMT is the only
-/// place a transport stream states which page a subtitle decoder composes, so it
-/// has to reach the decoder some way, and this is the one a Matroska source
-/// already uses.
-fn dvbsub_page_id_blob(demux: &TsDemuxer, pid: u16) -> Option<[u8; 5]> {
-    let (subtitling_type, composition, ancillary) = demux.subtitling(pid)?;
-    Some(crate::dvbsub::page_id_blob(
-        crate::dvbsub::PageIds {
-            composition,
-            ancillary,
-        },
-        subtitling_type,
-    ))
+/// Whether an MPEG-1/2 video access unit can open a decode: it must carry the
+/// sequence header, the only thing that states the picture geometry. Shared with
+/// the program stream demuxer's tune-in, which drops on the same rule.
+fn mpeg2_can_open_here(au: &[u8]) -> bool {
+    crate::psdemux::parse_sequence_header(au).is_some()
 }
 
-fn dvbsub_config_frame(blob: [u8; 5], pts_ns: u64, seq: u64) -> Frame {
+/// The in-band page-selection blob a subtitle stream's PMT descriptor implies:
+/// the DVB `subtitling_descriptor`'s page ids (the same bytes a Matroska
+/// `S_DVBSUB` `CodecPrivate` carries), or the `teletext_descriptor`'s page and
+/// language. The PMT is the only place a transport stream states which page a
+/// subtitle decoder follows, so it has to reach the decoder some way, and this
+/// is the one a Matroska source already uses.
+fn page_config_blob(demux: &TsDemuxer, pid: u16, stream: TsStream) -> Option<Vec<u8>> {
+    match stream {
+        TsStream::DvbSub => {
+            let (subtitling_type, composition, ancillary) = demux.subtitling(pid)?;
+            Some(
+                crate::dvbsub::page_id_blob(
+                    crate::dvbsub::PageIds {
+                        composition,
+                        ancillary,
+                    },
+                    subtitling_type,
+                )
+                .to_vec(),
+            )
+        }
+        TsStream::Teletext => {
+            let service = demux.teletext(pid)?;
+            Some(
+                crate::teletext::page_config_blob(service.page_number(), service.language).to_vec(),
+            )
+        }
+        _ => None,
+    }
+}
+
+fn config_frame(blob: Vec<u8>, pts_ns: u64, seq: u64) -> Frame {
     Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(blob.to_vec().into_boxed_slice())),
+        MemoryDomain::System(SystemSlice::from_boxed(blob.into_boxed_slice())),
         FrameTiming {
             pts_ns,
             dts_ns: pts_ns,
@@ -1175,6 +1314,7 @@ fn resolve_ts_stream_id(demux: &TsDemuxer, id: &str) -> Option<TsStream> {
         STREAM_TYPE_H264 => Some(TsStream::H264),
         STREAM_TYPE_H265 => Some(TsStream::H265),
         STREAM_TYPE_MPEG4P2 => Some(TsStream::Mpeg4Part2),
+        STREAM_TYPE_MPEG1_VIDEO | STREAM_TYPE_MPEG2_VIDEO => Some(TsStream::Mpeg2),
         STREAM_TYPE_AAC => Some(TsStream::Aac),
         _ => None,
     }
@@ -1305,6 +1445,7 @@ mod tests {
             ac3: false,
             klv: false,
             subtitling: None,
+            teletext: None,
             language: None,
         };
         let stream = TsDemux::es_to_stream(&es).expect("0x10 is forwarded");
@@ -1328,6 +1469,7 @@ mod tests {
                 ac3: false,
                 klv: false,
                 subtitling: None,
+                teletext: None,
                 language: None,
             }),
             Some(TsStream::Mpeg4Part2)
@@ -1338,6 +1480,27 @@ mod tests {
         );
         assert_eq!(ts_stream_from_str("mpeg4part2"), Some(TsStream::Mpeg4Part2));
         assert_eq!(ts_stream_to_str(TsStream::Mpeg4Part2), "mpeg4part2");
+    }
+
+    /// The playbin fan-out must put an MPEG-4 Part 2 stream in a video branch:
+    /// it once fell through the H.264/H.265-only `video` match and was routed
+    /// as audio.
+    #[test]
+    fn forwardable_streams_marks_mpeg4part2_video() {
+        let mut d = TsDemuxer::new();
+        d.push_packet(&pat(0x1000));
+        d.push_packet(&pmt2(0x100, STREAM_TYPE_MPEG4P2, 0x101, STREAM_TYPE_AAC));
+        let infos = forwardable_streams(&d);
+        let v = infos
+            .iter()
+            .find(|i| i.stream == TsStream::Mpeg4Part2)
+            .expect("mpeg4part2 is forwardable");
+        assert!(v.video, "mpeg4part2 routes to a video branch");
+        let a = infos
+            .iter()
+            .find(|i| i.stream == TsStream::Aac)
+            .expect("aac is forwardable");
+        assert!(!a.video);
     }
 
     // Re-use the synthetic TS builders by constructing equivalent packets here.

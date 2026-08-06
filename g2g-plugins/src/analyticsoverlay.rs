@@ -22,9 +22,9 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use g2g_core::{
-    AnalyticsMeta, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError,
-    MemoryDomain, ObjectDetection, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec, RawVideoFormat,
+    AnalyticsMeta, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
+    ElementMetadata, G2gError, MemoryDomain, ObjectDetection, OutputSink, PipelinePacket,
+    PropError, PropKind, PropValue, PropertySpec, RawVideoFormat,
 };
 
 use crate::paint::blend_px;
@@ -175,6 +175,14 @@ fn class_color(label: u32) -> [u8; 4] {
 }
 
 impl AsyncElement for AnalyticsOverlay {
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "Analytics overlay",
+            "Filter/Editing/Video",
+            "Draws detection boxes, masks and tracks onto raw video",
+            "g2g",
+        )
+    }
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where

@@ -32,7 +32,7 @@ pub const MAX_FULL_TRACK_NAME_LEN: usize = 4096;
 pub const MAX_NAMESPACE_FIELDS: usize = 32;
 
 /// A KVP bytes value is length-prefixed by a varint but bounded to 16 bits.
-const MAX_KVP_BYTES_LEN: usize = u16::MAX as usize;
+pub const MAX_KVP_BYTES_LEN: usize = u16::MAX as usize;
 
 /// A reason phrase is bounded to 1024 bytes, a session URI to 8192.
 pub const MAX_REASON_PHRASE_LEN: usize = 1024;
@@ -65,16 +65,41 @@ pub fn put_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
 
 // ---------------------------------------------------------------- decoding
 
-/// A cursor over a byte slice that decodes draft-16 primitives.
+/// Which variable-length integer encoding a [`Reader`] decodes. Draft-16 uses
+/// the QUIC varint; draft-18 defines its own leading-ones form (§1.4.1) that
+/// reaches a full `u64`. Everything else a reader decodes is identical, so the
+/// flavour is a field rather than a second cursor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VarintKind {
+    Quic,
+    Vi64,
+}
+
+/// A cursor over a byte slice that decodes MOQT primitives.
 #[derive(Debug)]
 pub struct Reader<'a> {
     buf: &'a [u8],
     at: usize,
+    kind: VarintKind,
 }
 
 impl<'a> Reader<'a> {
+    /// A reader over draft-16 bytes (QUIC varints).
     pub fn new(buf: &'a [u8]) -> Self {
-        Self { buf, at: 0 }
+        Self {
+            buf,
+            at: 0,
+            kind: VarintKind::Quic,
+        }
+    }
+
+    /// A reader over draft-18 bytes (the leading-ones `vi64`).
+    pub fn new_vi64(buf: &'a [u8]) -> Self {
+        Self {
+            buf,
+            at: 0,
+            kind: VarintKind::Vi64,
+        }
     }
 
     /// Bytes consumed so far.
@@ -91,10 +116,38 @@ impl<'a> Reader<'a> {
     }
 
     pub fn varint(&mut self) -> Result<u64, MoqtError> {
+        match self.kind {
+            VarintKind::Quic => self.quic_varint(),
+            VarintKind::Vi64 => self.vi64(),
+        }
+    }
+
+    fn quic_varint(&mut self) -> Result<u64, MoqtError> {
         let first = *self.buf.get(self.at).ok_or(MoqtError::Incomplete)?;
         let len = 1usize << (first >> 6);
         let raw = self.bytes(len)?;
         let mut v = u64::from(raw[0] & 0x3F);
+        for b in &raw[1..] {
+            v = (v << 8) | u64::from(*b);
+        }
+        Ok(v)
+    }
+
+    /// Draft-18 §1.4.1: the leading 1 bits of the first byte give the length in
+    /// bytes (1 to 9), the bits after the terminating 0 and the following bytes
+    /// carry the value. A nine-byte encoding has no value bits in the first
+    /// byte and carries a full `u64`. Non-minimal encodings are legal.
+    fn vi64(&mut self) -> Result<u64, MoqtError> {
+        let first = *self.buf.get(self.at).ok_or(MoqtError::Incomplete)?;
+        let len = first.leading_ones() as usize + 1;
+        let raw = self.bytes(len)?;
+        // Eight- and nine-byte encodings have no value bits in the first byte
+        // (and `0xff >> 8` would overflow the shift).
+        let mut v = if len >= 8 {
+            0
+        } else {
+            u64::from(raw[0] & (0xffu8 >> len))
+        };
         for b in &raw[1..] {
             v = (v << 8) | u64::from(*b);
         }
@@ -416,6 +469,22 @@ fn decode_pair(r: &mut Reader<'_>, prev: u64) -> Result<(u64, ParamValue), MoqtE
         ParamValue::Bytes(r.length_bytes(MAX_KVP_BYTES_LEN)?.to_vec())
     };
     Ok((key, value))
+}
+
+/// Message parameter types (draft-16 §9.2.2).
+pub mod param {
+    pub const GROUP_ORDER: u64 = 0x22;
+    pub const SUBSCRIPTION_FILTER: u64 = 0x21;
+}
+
+/// The [`param::SUBSCRIPTION_FILTER`] value asking for objects after the
+/// largest one (draft-16 §5.1.2), which is the filter a joining FETCH requires
+/// its subscription to carry (§9.16.2). The parameter is a length-prefixed
+/// Subscription Filter, and this filter type has no fields of its own.
+pub fn subscription_filter_largest_object() -> Vec<u8> {
+    let mut out = Vec::new();
+    put_varint(&mut out, 0x2);
+    out
 }
 
 /// Setup parameter types (draft-16 §9.3, `setup/param_types.rs`).

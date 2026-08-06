@@ -17,10 +17,12 @@ leverage first:
 2. **Egress / transports.** Real-peer FlexFEC interop when a peer
    implementation is available (GStreamer here lacks `rtpflexfecenc`).
 3. **Depth.** Pure-Rust codec paths to cut the remaining ffmpeg FFI reliance:
-   VP8 / VP9 decode (a dedicated libvpx `VpxDec` is deferred: no pure-Rust
-   decoder exists, and a libvpx-FFI element would only duplicate the ffmpeg
-   path) and a pure-Rust Opus path. `VulkanVideoDec` residuals: AMD / Intel
-   validation runs and runtime properties (see "Receive / decode").
+   blocked as of 2026-08. No credible pure-Rust VP8 / VP9 decoder exists (a
+   libvpx-FFI `VpxDec` stays deferred: it would only duplicate the ffmpeg
+   path), and the one complete pure-Rust Opus, `opus-rs` 0.1.26, fails the
+   RFC 8251 vectors (re-run `tools/opus-rs-gate` to revisit on a new release).
+   `VulkanVideoDec` residuals: AMD / Intel validation runs and runtime
+   properties (see "Receive / decode").
 4. **Browser demo (speculative product path).** A deployed reference app for the
    in-browser `ort-web` ONNX chain, plus a native sibling running the same graph.
    The GPU-resident in-browser chain is not achievable from idiomatic Rust (wgpu
@@ -67,9 +69,6 @@ Sequenced next:
   seam: `PtpServo` / `PtpClock` `sync_exchange` take `(TaiNs, RefNs, RefNs, TaiNs)`
   and `observe_master` takes `(RefNs, TaiNs)`, so master and reference can no longer
   be swapped where the meaningless-offset mixing bug lived. No remaining work.
-- **Metadata carriers.** Route captions / HDR / timecode through `FrameMeta` so
-  they ride the standard propagation path instead of the bespoke ones they take
-  today. See "## Metadata".
 
 ## Alloc-optional (heap-free) MCU core
 
@@ -248,6 +247,14 @@ Phased plan:
 - Richer auto-plug factory construction params (geometry / device / file path).
 - A hardware-backed end-to-end decode-through-`decodebin` run (current tests
   read templates / assert splicing, decode no real media).
+- **Interlace signaling + universal playbin deinterlace** (gst parity: playbin's
+  default flags include `deinterlace`, its element no-ops on progressive input
+  via `mode=auto`). Two steps: an interlace field on `Caps::RawVideo` set by
+  parsers / decoders (libavcodec reports it per frame; `mpegvideoparse`-style
+  from the MPEG-2 sequence extension), then every playbin video branch inserts
+  `deinterlace` with an `auto` mode that passes progressive frames through
+  untouched. Covers interlaced MPEG-2 over TS / mkv and interlaced H.264,
+  which play combed today (only the PS path decides, from the container).
 
 ## Platform: macOS
 
@@ -281,24 +288,12 @@ Phased plan:
 
 ## Egress / transports
 
-- **WebTransport carrier residuals:** a datagram carrier for the drop-tolerant
-  case, and a `congestion-control` property (`web-transport-quinn` offers BBR /
-  low-latency on both builders; the elements take the default CUBIC). The
-  `web-transport-quinn = "=0.11.12"` pin and the `idna_adapter` 1.1.0 hold in
-  `Cargo.lock` can both drop once the workspace MSRV moves past 1.91.
-- **MoQ Transport:** FETCH is unimplemented on both sides: a FETCH is refused
-  with `NOT_SUPPORTED`. Beyond that: draft-18, which moq-dev, imquic and moqxr
-  already ship and which Meta's moxygen relay serves publicly
-  (`fb.mvfst.net:9448`, versions 14/16/18), so it doubles as the interop leg
-  against a non-Cloudflare implementation; `PUBLISH`-initiated (publisher-driven)
-  subscriptions; multi-track playback (the subscriber, and the browser demo, play
-  one media track); and audio in the browser demo.
-- **`moqtsink` answers control only while frames flow.** Control messages are
-  pumped from `process`, so a publisher that has not produced its first frame
-  cannot answer a SUBSCRIBE: the subscriber goes unacknowledged and the relay
-  abandons establishing the upstream subscription. Any subscriber attaching
-  during startup hits it. Needs a control pump that runs independently of frame
-  arrival.
+- **WebTransport residuals:** the `web-transport-quinn = "=0.11.12"` pin and
+  the `idna_adapter` 1.1.0 hold in `Cargo.lock` can both drop once the
+  workspace MSRV moves past 1.91.
+- **MoQ Transport:** a wall-clock pacing element for live-shaped demo
+  publishers (the unpaced demo needs half-second fragments to keep the
+  browser's append queue sane; a `clocksync`-style element is the fix).
 - **RTP over QUIC (RoQ):** blocked on the spec. draft-ietf-avtcore-rtp-over-quic
   expired at -14 (its ALPN is forbidden until an RFC exists) and the WG missed
   its milestone; revisit only if the draft revives. Peers if it does:
@@ -398,24 +393,11 @@ Phased plan:
   other on the flag position and field widths, so a decode would be an
   unvalidated claim. Revisit with the published spec text or a second
   independent implementation.
-- **`tsmuxn` keyframe flag for segmenting:** the multi-track A/V TS muxer
-  drops `FrameTiming::keyframe` on its output frames, so `tsmuxn ! hlssink`
-  writes one giant segment. The output flag should carry the sync flag of the
-  video pad only.
 
 ## Capture sources
 
 - `v4l2src`: MMAP DMABUF output (`MemoryDomain::DmaBuf`); format-flexible
-  negotiation (MJPEG-mode UVC, other fourccs) vs fixed YUYV. It also synthesizes
-  PTS from the requested frame rate, so a camera that does not hold that rate
-  produces a timeline shorter than the capture really took; stamp from the
-  driver's buffer timestamp instead.
-- `libcamerasrc`: `BUFFER_COUNT` is documented as the ring depth requested from
-  libcamera but is never applied to the stream config, only to the channel bound.
-  It happens to match libcamera's default of 4, so nothing is broken today.
-- `libcamera_mjpeg_capture_decodes` fails on an unmodified tree with `Shutdown`,
-  meaning `MjpegDec` or the sink died first and the runner swallowed the real
-  error. A bug in the MJPEG decode path, not in capture.
+  negotiation (MJPEG-mode UVC, other fourccs) vs fixed YUYV.
 - PipeWire capture: DMABUF output; an xdg-desktop-portal screen-capture
   handshake (a portal-granted node id already reaches `pipewirevideosrc` via
   `target-object`); runtime properties on the audio `pipewiresrc` /
@@ -443,9 +425,14 @@ Phased plan:
 - **WebVTT track writing** (mkv, mp4 `wvtt`): blocked on a reference peer.
   ffmpeg reads only the WebM `D_WEBVTT/*` carriage (different block payload)
   and cannot write WebVTT into MP4 at all; reading both stays supported.
-- **Matroska `ContentEncoding`:** inflate zlib / header-stripped blocks at
-  demux. Today a compressed track's blocks forward raw (`MkvTrack::compressed`
-  marks them; only a compressed subpicture selection refuses loudly).
+- **Matroska `ContentEncoding`:** chained encodings, bzip2 / lzo, and
+  `ContentEncryption` stay refused (blocks forward as stored, flagged
+  `unsupported_encoding`); zlib and header stripping are undone at demux.
+- **TS video PTS synthesis:** a TS video access unit whose PES carries no PTS
+  falls back to `pts = 0` in `tsdemux` (the spec only mandates a stamp every
+  700 ms; broadcast muxers stamp every AU, so it rarely shows). Synthesize from
+  picture timing: MPEG-2 via `temporal_reference`, H.264/H.265 need POC or
+  frame-duration interpolation.
 
 ## Codecs
 
@@ -489,10 +476,7 @@ _(No open parser items.)_
   de-frames its `vttc`/`payl` boxes to `Text{Utf8}`, `stpp` passes the TTML document
   as `Text{Ttml}` through `SubParse`), as are MKV `S_TEXT/ASS` / `S_TEXT/WEBVTT`
   (M417: the block is de-framed to plain `Text{Utf8}` cue text, the source syntax
-  only selecting the de-framing). Still open: **MPEG-TS teletext** (a
-  page/magazine decoder), the one TS subtitle form with no route to the
-  overlay: DVB subtitles are `Caps::SubPicture` canvases for the compositor,
-  not a text stream `TextOverlayN` consumes.
+  only selecting the de-framing).
   HLS subtitle renditions: discovery + language selection landed (M418 -
   `variant_streams` surfaces `SUBTITLES` renditions as `Caps::Text`,
   `MasterPlaylist::pick_rendition` selects by `#audio-lang=` / `#subtitle-lang=`
@@ -503,9 +487,7 @@ _(No open parser items.)_
   variant + `SUBTITLES` rendition). The separate-audio + subtitle three-source
   combo landed too (M420: `build_hls_separate_subtitle_overlay` pairs the variant's
   video TS with a distinct audio rendition and a distinct WebVTT rendition, three
-  sources in one graph). Follow-ups: the fMP4 `wvtt` subtitle rendition (`IsoBmff` +
-  `Mp4DemuxN`, reuses M416) and the `X-TIMESTAMP-MAP` offset for live (non-absolute)
-  WebVTT timelines. The startup I420/NV12 gap on
+  sources in one graph). The startup I420/NV12 gap on
   `playbin` -> `waylandsink` is closed (M414: the auto-plugged ffmpeg decoder now
   honours the chosen output layout and emits NV12 straight to a strict-NV12 sink,
   no inserted `videoconvert`). MPEG-TS / HLS H.264 now decodes cleanly on screen
@@ -529,19 +511,14 @@ _(No open parser items.)_
     the per-count `ChannelLayout` convention) once a real source needs one.
   Glyph
   rendering (incl. `vertical:rl` / `lr` layout) is the `truetype-overlay` feature
-  above. Still open in cue CSS: true span-scoped styling (a class rule colours
-  the whole cue today), compound `::cue(.a.b)` selectors, and other properties
-  (font-size, text-shadow, etc.); SSA pixel placement (`{\pos}`, margins) needs
-  `PlayResX/Y` mapping.
+  above. Still open in cue CSS: per-span `font-size` (needs per-run sizing in
+  all three render paths and an `AttrsList` API in `textshape`), `text-shadow`
+  and further properties, and a span-scoped `background-color` (a cue has one
+  backing box today).
 - **Closed captions: remaining carriers + authoring.** The H.264 / H.265 SEI
   decode path (`cea` decoders + `CcExtract` + file- and HLS-`playbin` auto-plug)
   and the CEA-608 encode path (`Cc608Enc` + `CcInsert`) are done (DESIGN.md
   §4.18). Still open: MPEG-2 user-data caption extraction.
-- **Bitmap / picture subtitles: PGS + write paths.** A Blu-ray PGS decoder as a
-  further `SubPictureFormat` coding with the `S_HDMV/PGS` Matroska mapping
-  (lands on `MkvCodec::Other` today). Also open: a `.idx`/`.sub` sidecar source
-  element, and muxer write paths for a `SubPicture` pad (mkv `S_VOBSUB` /
-  `S_DVBSUB`, TS `subtitling_descriptor`).
 - **Tensor substrate orientation descriptor (M181).** A deferred
   rotate/mirror descriptor the sink can absorb in hardware (DRM/KMS, Wayland
   `set_buffer_transform`, VAAPI VPP, D3D11 VideoProcessor), with eager strided /
@@ -555,15 +532,15 @@ _(No open parser items.)_
 
 ## Metadata (FrameMeta / AnalyticsMeta)
 
-- A `Segmentation` node (mask handle); more standard metas (`GstVideoMeta`-style
-  strides, ROI).
+- A `GstVideoMeta`-style stride / plane-layout meta.
+- A real ML producer for the `Segmentation` / `Roi` analytics nodes (no in-tree
+  model emits masks or ROIs yet).
 - `pull`-based metadata propagation across transforms (push is auto-applied).
 - A turnkey windowed runner for `WgpuSink` (a winit/SCTK example that opens a
   window and drives the overlay -> sink graph; validate on a real display).
 - `NvEnc` AV1 encode (needs RTX 40-series hardware).
 - Derive the `decodebin_preferring(.., Cuda)` preference automatically from a
   downstream consumer's accepted input memory.
-- A blob header registry (decode known `BlobMeta` headers into typed structures).
 
 ## Clock-synchronised presentation
 

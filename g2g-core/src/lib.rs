@@ -179,7 +179,8 @@ pub use copyplan::{
 pub use dot::DotAnnotations;
 #[cfg(feature = "alloc")]
 pub use element::{
-    AsyncElement, ConfigureOutcome, ElementBound, OutputSink, PushOutcome, QosMessage, Reconfigure,
+    AsyncElement, ConfigureOutcome, ElementBound, OutputSink, PresentationStats, PushOutcome,
+    QosMessage, Reconfigure,
 };
 pub use error::{G2gError, HardwareError};
 #[cfg(feature = "alloc")]
@@ -198,8 +199,10 @@ pub use mediaclock::MediaClock;
 pub use meta::FrameMetaSet;
 #[cfg(feature = "metadata")]
 pub use meta::{
-    AnalyticsMeta, AnalyticsNode, BBox, Blob, BlobMeta, Classification, FrameMeta, ObjectDetection,
-    Propagation, Relation, RelationKind, Tracking, Transform,
+    blob_decoder, decode_blob, AnalyticsMeta, AnalyticsNode, BBox, Blob, BlobDecoder, BlobMeta,
+    CaptionMeta, CaptionTriple, Chromaticity, Classification, DecodedBlob, FrameMeta,
+    HdrStaticMeta, Mask, MasteringDisplay, ObjectDetection, Propagation, Relation, RelationKind,
+    Roi, Segmentation, TimecodeMeta, Tracking, Transform, BLOB_DECODERS,
 };
 #[cfg(feature = "alloc")]
 pub use property::{

@@ -140,3 +140,38 @@ async fn auto_tee_respects_per_branch_queue_policy() {
     let stats = run_graph(graph, &ZeroClock, 4).await.expect("runs");
     assert_eq!(stats.frames_emitted, 2);
 }
+
+/// Several top-level chains in one pipeline, the way gst-launch runs
+/// `videotestsrc ! xvimagesink audiotestsrc ! pulsesink`. A bare element name
+/// after a completed chain opens the next one; before, the sink consumed it as
+/// a property and the line was rejected as malformed. Both chains share the
+/// pipeline's clock, which is the point of writing them as one line.
+#[tokio::test]
+async fn a_second_top_level_chain_runs_beside_the_first() {
+    let reg = default_registry();
+    let graph = parse_launch(
+        &reg,
+        "videotestsrc num-buffers=3 ! fakesink videotestsrc num-buffers=2 ! fakesink",
+    )
+    .expect("two parallel chains parse");
+    let stats = run_graph(graph, &ZeroClock, 4)
+        .await
+        .expect("both chains run");
+    assert_eq!(
+        stats.frames_emitted, 5,
+        "3 from one source, 2 from the other"
+    );
+    assert_eq!(stats.frames_consumed, 5, "each sink drained its own chain");
+}
+
+/// The error path the new rule must not swallow: a bare token that names no
+/// registered element after a sink is still the typo it looks like.
+#[test]
+fn a_typo_after_a_sink_is_still_a_malformed_property() {
+    let reg = default_registry();
+    let err = parse_launch(&reg, "videotestsrc ! fakesink notanelement").unwrap_err();
+    assert!(
+        matches!(err, g2g_core::runtime::ParseError::MalformedProperty { .. }),
+        "a bare non-element is a malformed property, got {err:?}"
+    );
+}
