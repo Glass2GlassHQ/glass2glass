@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M934: the PS demuxer synthesizes per-picture video PTS between PES stamps, fixing DVD playback stuttering in half-second bursts.
+
 - M933: the run summary reports each display sink's presented / dropped frame counters, and `g2g-launch` prints a presented-fps figure.
 
 - M932: `deinterlace` gains a yadif method and planar YUV support, and `playbin uri=file.vob` inserts it when the MPEG-2 sequence extension says the stream is interlaced.

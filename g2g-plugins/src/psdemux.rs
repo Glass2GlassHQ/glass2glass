@@ -212,6 +212,33 @@ fn parse_progressive_sequence(au: &[u8], body: usize) -> bool {
     }
 }
 
+/// The picture header's `temporal_reference` (the picture's display index
+/// within its GOP, ISO 13818-2 6.3.9) and whether a GOP header precedes it in
+/// this access unit. Headers come before slice data in an access unit, so the
+/// scan ends at the first picture start code; `None` for a unit with no whole
+/// picture header (truncation).
+fn picture_temporal_reference(au: &[u8]) -> Option<(bool, u16)> {
+    let mut has_gop = false;
+    let mut i = 0;
+    while i + 4 <= au.len() {
+        if au[i..i + 3] == [0x00, 0x00, 0x01] {
+            match au[i + 3] {
+                0xB8 => has_gop = true,
+                0x00 => {
+                    let hi = u16::from(*au.get(i + 4)?);
+                    let lo = u16::from(*au.get(i + 5)?);
+                    return Some((has_gop, (hi << 2) | (lo >> 6)));
+                }
+                _ => {}
+            }
+            i += 4;
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
 /// Split a PES packet into its timestamps and elementary-stream bytes, for
 /// either PES flavour. MPEG-2 packets (the `10` marker bits at byte 6) go
 /// through the shared [`parse_pes_header`]; an MPEG-1 program stream instead
@@ -501,9 +528,14 @@ impl VideoReframer {
             self.marks.push((0, pts, dts));
         } else if pts.is_some() && self.marks.len() < MAX_MARKS {
             let at = self.buf.len();
-            match self.marks.last() {
-                // A second timestamp for the same offset cannot refine the first.
-                Some(&(last, _, _)) if last == at => {}
+            match self.marks.last_mut() {
+                // A real stamp may fill the placeholder a cut left at this
+                // offset; a second real one cannot refine the first.
+                Some(m) if m.0 == at => {
+                    if m.1.is_none() {
+                        (m.1, m.2) = (pts, dts);
+                    }
+                }
                 _ => self.marks.push((at, pts, dts)),
             }
         }
@@ -557,20 +589,26 @@ impl VideoReframer {
                     let (_, pts, dts) = self.marks.first().copied().unwrap_or((0, None, None));
                     let rest = self.buf.split_off(cut_at);
                     let unit = core::mem::replace(&mut self.buf, rest);
-                    // The next unit's timestamp is the last one whose packet
-                    // began at or before its first byte.
+                    // A PES timestamp names the first access unit commencing in
+                    // its packet, so a stamp whose packet began inside the
+                    // emitted unit's bytes belongs to the next unit; the one at
+                    // offset 0 was the emitted unit's own and is consumed with
+                    // it. Units between stamps stay unstamped (`None`), and the
+                    // demuxer synthesizes their PTS from temporal_reference:
+                    // carrying the old stamp forward here made a whole GOP share
+                    // one PTS, which a pacing sink plays as burst-and-freeze.
                     let carried = self
                         .marks
                         .iter()
                         .rev()
-                        .find(|&&(off, _, _)| off <= cut_at)
+                        .find(|&&(off, _, _)| off > 0 && off <= cut_at)
                         .copied()
-                        .unwrap_or((0, None, None));
+                        .map_or((0, None, None), |(_, p, d)| (0, p, d));
                     self.marks.retain(|&(off, _, _)| off > cut_at);
                     for m in self.marks.iter_mut() {
                         m.0 -= cut_at;
                     }
-                    self.marks.insert(0, (0, carried.1, carried.2));
+                    self.marks.insert(0, carried);
                     self.scanned -= cut_at;
                     self.have_picture = true;
                     if !unit.is_empty() {
@@ -625,6 +663,69 @@ pub struct PsDemuxer {
     seq_scanned: usize,
     /// Subpicture units under reassembly, one per substream.
     spu: Vec<PendingSpu>,
+    /// Video timestamp synthesis state, one per video stream_id.
+    video_ts: Vec<(u8, VideoTsSynth)>,
+}
+
+/// Per-frame video PTS synthesis between PES stamps (M934). A DVD stamps
+/// roughly one PES packet per GOP, so most pictures arrive unstamped; left as
+/// duplicates of the last stamp, a pacing sink plays each GOP as a burst then a
+/// freeze. The picture header's `temporal_reference` is the picture's display
+/// index within its GOP, so with the sequence header's frame period every
+/// picture has an exact display time: `pts = base + temporal_reference *
+/// period`. A real PES PTS re-anchors `base` exactly (self-correcting, drift
+/// never outlives a GOP); an unstamped GOP header advances it by the span of
+/// the GOP just closed. Display-order indexing keeps B-frame reordering exact,
+/// and degenerates to last-stamp-plus-period for I/P-only streams.
+#[derive(Debug, Default)]
+struct VideoTsSynth {
+    /// Display-time base (90 kHz) of the current GOP.
+    base_90: Option<u64>,
+    /// Pictures seen in the current GOP so far (max temporal_reference + 1).
+    span: u64,
+    /// Last decode timestamp (90 kHz), synthesized or real: DTS advances one
+    /// frame period per picture in coded order.
+    dts_90: Option<u64>,
+}
+
+impl VideoTsSynth {
+    /// Stamp one video unit, updating the anchor state. `period_90` is the
+    /// frame period in 90 kHz units from the unit's sequence header.
+    fn stamp(&mut self, unit: &mut PsUnit, period_90: u64) {
+        let Some((has_gop, tref)) = picture_temporal_reference(&unit.data) else {
+            return;
+        };
+        let tref = u64::from(tref);
+        if has_gop {
+            // A new GOP with no stamp of its own: its base is the previous
+            // GOP's base advanced past every picture that GOP displayed.
+            if unit.pts_90khz.is_none() {
+                if let Some(b) = self.base_90 {
+                    self.base_90 = Some(b + self.span.max(1) * period_90);
+                }
+            }
+            self.span = 0;
+        }
+        match unit.pts_90khz {
+            Some(pts) => self.base_90 = Some(pts.saturating_sub(tref * period_90)),
+            None => {
+                if let Some(b) = self.base_90 {
+                    unit.pts_90khz = Some(b + tref * period_90);
+                }
+            }
+        }
+        self.span = self.span.max(tref + 1);
+        match unit.dts_90khz {
+            Some(d) => self.dts_90 = Some(d),
+            None => {
+                if let Some(prev) = self.dts_90 {
+                    let d = prev + period_90;
+                    unit.dts_90khz = Some(d);
+                    self.dts_90 = Some(d);
+                }
+            }
+        }
+    }
 }
 
 impl PsDemuxer {
@@ -864,13 +965,31 @@ impl PsDemuxer {
         while self.seq_scanned < self.completed.len() {
             let at = self.seq_scanned;
             self.seq_scanned += 1;
-            if !(0xE0..=0xEF).contains(&self.completed[at].stream_id) {
+            let stream_id = self.completed[at].stream_id;
+            if !(0xE0..=0xEF).contains(&stream_id) {
                 continue;
             }
             if let Some(seq) = parse_sequence_header(&self.completed[at].data) {
                 self.sequence = Some(seq);
             }
             self.completed[at].sequence = self.sequence;
+            // Synthesize the unstamped pictures' timestamps (M934). Needs the
+            // frame period, so units before the first sequence header stay
+            // untouched; `take_units` drops those anyway (mid-GOP tune-in).
+            let Some(q) = self.completed[at].sequence.map(|s| s.framerate_q16) else {
+                continue;
+            };
+            let period_90 = ((90_000u64 << 16) + u64::from(q) / 2) / u64::from(q);
+            let ts = match self.video_ts.iter().position(|(id, _)| *id == stream_id) {
+                Some(i) => i,
+                None => {
+                    self.video_ts.push((stream_id, VideoTsSynth::default()));
+                    self.video_ts.len() - 1
+                }
+            };
+            self.video_ts[ts]
+                .1
+                .stamp(&mut self.completed[at], period_90);
         }
     }
 

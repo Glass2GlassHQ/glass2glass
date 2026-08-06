@@ -2131,11 +2131,22 @@ sector boundaries with no regard for picture boundaries, so one packet can hold
 the tail of a picture and the head of the next; feeding those to a decoder
 verbatim desynchronizes it. The demuxer therefore reframes the video on its own
 start codes (a unit runs from one picture header, with any sequence / GOP header
-opening it, to the next) and carries the timestamp of the PES packet each unit's
-first byte fell in. That is the job an elementary-stream parser does for the
-other codecs, kept here because it is program-stream-specific: MPEG-TS needs
-none of it. Audio and AC-3 are self-syncing and are grouped per timestamped
-packet instead, matching what `TsDemux` emits.
+opening it, to the next); a PES timestamp names the first access unit commencing
+in its packet and stamps exactly that unit. That is the job an elementary-stream
+parser does for the other codecs, kept here because it is program-stream-specific:
+MPEG-TS needs none of it. Audio and AC-3 are self-syncing and are grouped per
+timestamped packet instead, matching what `TsDemux` emits.
+
+A DVD stamps roughly one PES packet per GOP, so most pictures arrive with no
+timestamp of their own; carrying the last stamp forward gave a dozen frames one
+shared PTS, which a pacing sink plays as a burst then a freeze (the M934 bug,
+found on a real disc as "stutters every half second"). The demuxer instead
+synthesizes each unstamped picture's PTS as `gop_base + temporal_reference *
+frame_period`: the picture header's `temporal_reference` is its display index
+within the GOP, so the arithmetic stays exact across B-frame reordering, a real
+PES PTS re-anchors the base (drift never outlives a GOP), and an unstamped GOP
+header advances it by the span of the GOP just closed. Unstamped DTS advances
+one frame period per picture in coded order.
 
 Subpicture units span several PES packets and declare their own total size in
 their first two bytes, so they are reassembled by size (bounded by the 16-bit

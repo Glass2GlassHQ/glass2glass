@@ -420,6 +420,11 @@ Phased plan:
 - **Matroska `ContentEncoding`:** chained encodings, bzip2 / lzo, and
   `ContentEncryption` stay refused (blocks forward as stored, flagged
   `unsupported_encoding`); zlib and header stripping are undone at demux.
+- **TS video PTS synthesis:** a TS video access unit whose PES carries no PTS
+  falls back to `pts = 0` in `tsdemux` (the spec only mandates a stamp every
+  700 ms; broadcast muxers stamp every AU, so it rarely shows). Synthesize from
+  picture timing: MPEG-2 via `temporal_reference`, H.264/H.265 need POC or
+  frame-duration interpolation.
 
 ## Codecs
 
